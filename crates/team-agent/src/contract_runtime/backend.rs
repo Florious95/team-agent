@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use team_agent_contract::contract::{
+    descriptor::AuthMode,
     hooks::*,
     plan::*,
     session::{CwdIdentity, ResumeBinding},

@@ -1,7 +1,7 @@
 //! Bounded native discovery. Nothing here creates a runtime or claims T2/T3.
 use std::path::{Path, PathBuf};
 
-use team_agent_contract::contract::{hooks::*, types::*};
+use team_agent_contract::contract::{hooks::*, plan::CatalogObservation, types::*};
 use team_agent_contract::host::{command::RealCommandRunner, process::resolve_cwd};
 use team_agent_contract::kiro::{native::*, KiroAdapter, McpStdio, KIRO_DESCRIPTOR};
 use thiserror::Error;
