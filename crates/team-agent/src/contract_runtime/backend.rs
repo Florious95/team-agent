@@ -505,10 +505,13 @@ pub(super) fn policy_evidence(
         .flat_map(|profile| {
             // Bind this observed executable and candidate to the stable recipe.
             // This is not the historical R0 receipt, nor a business/MCP PASS.
-            let binding_sha256 = digest(format!(
-                "kiro-runtime-policy-v1\n{native:?}\n{}\n{:?}\n{candidate_sha256:?}",
-                profile.id, profile.policy_sha256,
-            ).as_bytes());
+            let binding_sha256 = digest(
+                format!(
+                    "kiro-runtime-policy-v1\n{native:?}\n{}\n{:?}\n{candidate_sha256:?}",
+                    profile.id, profile.policy_sha256,
+                )
+                .as_bytes(),
+            );
             profile
                 .operations
                 .iter()

@@ -164,9 +164,11 @@ pub fn probe_engine<R: CommandRunner>(
         return Err(HostError::new("Kiro version deadline", HostErrorKind::Deadline).into());
     }
     if fingerprint_file(engine, 1024 * 1024 * 1024, remaining)? != hash {
-        return Err(
-            HostError::new("Kiro engine changed during version probe", HostErrorKind::Conflict).into(),
-        );
+        return Err(HostError::new(
+            "Kiro engine changed during version probe",
+            HostErrorKind::Conflict,
+        )
+        .into());
     }
     let platform = if cfg!(target_os = "macos") {
         Platform::MacOs

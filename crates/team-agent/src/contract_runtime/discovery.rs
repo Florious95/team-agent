@@ -210,7 +210,10 @@ mod tests {
             panic!("JSON text projection");
         };
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert!(json["error"].as_str().unwrap().contains("kiro-cli-chat 2.29.invalid"));
+        assert!(json["error"]
+            .as_str()
+            .unwrap()
+            .contains("kiro-cli-chat 2.29.invalid"));
         assert_eq!(json["models"], serde_json::json!([]));
     }
 

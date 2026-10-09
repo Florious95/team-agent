@@ -105,7 +105,9 @@ fn launcher_and_engine_banners_parse_release_versions_without_an_update_allowlis
 }
 #[test]
 fn malformed_version_diagnostics_preserve_the_banner_but_escape_and_bound_output() {
-    let error = parse_version(b"kiro-cli-chat 2.29.invalid\n\x1b[2J").unwrap_err().to_string();
+    let error = parse_version(b"kiro-cli-chat 2.29.invalid\n\x1b[2J")
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("kiro-cli-chat 2.29.invalid"));
     assert!(!error.contains('\n'));
     assert!(!error.contains('\x1b'));
@@ -123,7 +125,10 @@ fn engine_probe_binds_the_observed_release_to_unchanged_binary_bytes() {
     impl CommandRunner for VersionRunner {
         fn run(&mut self, request: &CommandRequest) -> CommandReceipt {
             self.calls += 1;
-            assert_eq!(request.arguments, vec![std::ffi::OsString::from("--version")]);
+            assert_eq!(
+                request.arguments,
+                vec![std::ffi::OsString::from("--version")]
+            );
             assert!(request.stdin.is_none());
             assert_eq!(request.reject_stdout, Some(AUTH_PORTAL_MARKER));
             if self.replace {
@@ -142,7 +147,11 @@ fn engine_probe_binds_the_observed_release_to_unchanged_binary_bytes() {
         let sandbox = Sandbox::new();
         let engine = sandbox.parent.join("kiro-cli-chat");
         executable(&engine);
-        let mut runner = VersionRunner { stdout, replace, calls: 0 };
+        let mut runner = VersionRunner {
+            stdout,
+            replace,
+            calls: 0,
+        };
         let result = probe_engine(&engine, &mut runner, discovery_bounds());
         assert_eq!(runner.calls, 1);
         if replace {
@@ -153,8 +162,10 @@ fn engine_probe_binds_the_observed_release_to_unchanged_binary_bytes() {
         } else {
             let native = result.unwrap();
             assert_eq!(native.version, "2.29.0");
-            assert_eq!(native.executable_sha256,
-                team_agent_contract::host::digest(b"test executable bytes; never run"));
+            assert_eq!(
+                native.executable_sha256,
+                team_agent_contract::host::digest(b"test executable bytes; never run")
+            );
         }
     }
 }

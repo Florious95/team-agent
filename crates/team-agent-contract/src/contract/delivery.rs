@@ -176,7 +176,10 @@ impl SubmitPolicy {
 /// running generation to adopt a different executable after an update.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProfileIdentity {
-    Exact { version: &'static str, executable_sha256: Digest },
+    Exact {
+        version: &'static str,
+        executable_sha256: Digest,
+    },
     RuntimeCaptured,
 }
 
@@ -196,9 +199,10 @@ pub struct InputProfile {
 impl InputProfile {
     pub fn matches_native(&self, native: &NativeIdentity) -> bool {
         let identity_matches = match self.identity {
-            ProfileIdentity::Exact { version, executable_sha256 } => {
-                version == native.version && executable_sha256 == native.executable_sha256
-            }
+            ProfileIdentity::Exact {
+                version,
+                executable_sha256,
+            } => version == native.version && executable_sha256 == native.executable_sha256,
             ProfileIdentity::RuntimeCaptured => native.validate().is_ok(),
         };
         identity_matches

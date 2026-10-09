@@ -33,7 +33,10 @@ static QUEUE_ACTIONS: [QueueAction; 1] = [QueueAction {
 }];
 static PROFILES: [InputProfile; 1] = [InputProfile {
     id: "fixture-tui",
-    identity: ProfileIdentity::Exact { version: "1.0", executable_sha256: HASH },
+    identity: ProfileIdentity::Exact {
+        version: "1.0",
+        executable_sha256: HASH,
+    },
     harness: "fixture-engine",
     ui: "fixture-ui",
     platform: Platform::Linux,
