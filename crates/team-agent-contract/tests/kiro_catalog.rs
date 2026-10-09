@@ -161,7 +161,10 @@ fn real_owned_command_guard_aborts_spinner_before_timeout_without_another_comman
         },
         reject_stdout: Some(AUTH_PORTAL_MARKER),
     };
-    assert!(request.arguments.iter().all(|arg| !arg.as_encoded_bytes().contains(&0)));
+    assert!(request
+        .arguments
+        .iter()
+        .all(|arg| !arg.as_encoded_bytes().contains(&0)));
     let mut runner = RealCommandRunner::default();
     let began = Instant::now();
     let result = runner.run(&request);
