@@ -1,0 +1,10 @@
+Unit=gb-12ef1aaf-contract-validation-a1
+State=terminal
+LoadState=loaded
+ActiveState=inactive
+Result=exit-code
+ExecMainStatus=101
+CommandExit=101
+MainPID=590242
+Wiped=no
+Process=
