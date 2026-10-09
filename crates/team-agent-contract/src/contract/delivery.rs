@@ -319,6 +319,7 @@ pub struct InteractionObservation {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum DeliveryEffect {
     NoEffect,
     MayHavePasted,

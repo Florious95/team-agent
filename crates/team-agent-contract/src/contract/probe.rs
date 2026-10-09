@@ -43,6 +43,7 @@ pub struct Probe<E> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ProcessIdentity {
     pub pid: u32,
     pub birth_identity: String,

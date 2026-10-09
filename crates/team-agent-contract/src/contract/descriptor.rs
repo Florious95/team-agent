@@ -288,6 +288,7 @@ pub struct WorkspaceFacet {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum ResourceKind {
     Prompt,
     AgentConfig,
@@ -299,6 +300,7 @@ pub enum ResourceKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum ResourceDisposition {
     OwnedRemovable,
     OwnedPreserved,
