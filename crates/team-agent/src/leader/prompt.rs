@@ -361,6 +361,17 @@ fn inline_slot(
     let mut i = 1;
     while i < end {
         let token = &argv[i];
+        // Claude's core prompt fields own the following literal token. It is
+        // not a sibling flag even when the text begins with our append flag.
+        if matches!(provider, Provider::Claude | Provider::ClaudeCode)
+            && matches!(token.as_str(), "--system-prompt" | "--system-prompt-file")
+        {
+            if i + 1 >= end {
+                return Err(conflict(provider, path));
+            }
+            i += 2;
+            continue;
+        }
         let candidate = if token == flag {
             if i + 1 >= end || argv[i + 1].starts_with(flag) {
                 return Err(conflict(provider, path));
@@ -750,6 +761,28 @@ mod tests {
                     .reason,
                 "leader_prompt_conflict"
             );
+        }
+    }
+    #[test]
+    fn leader_prompt_claude_core_prompt_values_are_not_supplemental_sibling_flags() {
+        let path = Path::new("/home/example/.team-agent/leader-prompt.txt");
+        for provider in [Provider::Claude, Provider::ClaudeCode] {
+            for flag in ["--system-prompt", "--system-prompt-file"] {
+                for literal in [
+                    "--append-system-prompt",
+                    "--append-system-prompt=literal",
+                    "--append-system-prompt-file",
+                ] {
+                    let original = args(&["claude", flag, literal, "Initial task"]);
+                    let mut argv = original.clone();
+                    inject(provider, &mut argv, "GLOBAL_309", path).unwrap();
+                    assert_eq!(
+                        &argv[..3],
+                        args(&["claude", "--append-system-prompt", "GLOBAL_309"])
+                    );
+                    assert_eq!(&argv[3..], &original[1..]);
+                }
+            }
         }
     }
     #[test]

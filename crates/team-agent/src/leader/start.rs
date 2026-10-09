@@ -2477,6 +2477,11 @@ fn run_leader_argv(
             diagnostics_path.display()
         ))
     })?;
+    // Captured transport diagnostics can echo the shell argv carrying the
+    // prompt. Do not tee those bytes before redaction. Native ExecProvider
+    // business streams and inherited TTY stdout keep their existing behavior.
+    let withhold_transport_output = plan.leader_prompt.is_some()
+        && plan.mode != LeaderStartMode::ExecProvider;
     let stdout_reader = child.stdout.take().map(|mut child_stdout| {
         std::thread::spawn(move || {
             let mut captured = Vec::new();
@@ -2488,7 +2493,9 @@ fn run_leader_argv(
                 if read == 0 {
                     break;
                 }
-                let _ = std::io::stdout().write_all(&buf[..read]);
+                if !withhold_transport_output {
+                    let _ = std::io::stdout().write_all(&buf[..read]);
+                }
                 captured.extend_from_slice(&buf[..read]);
             }
             captured
@@ -2505,7 +2512,9 @@ fn run_leader_argv(
                 if read == 0 {
                     break;
                 }
-                let _ = std::io::stderr().write_all(&buf[..read]);
+                if !withhold_transport_output {
+                    let _ = std::io::stderr().write_all(&buf[..read]);
+                }
                 captured.extend_from_slice(&buf[..read]);
             }
             captured
@@ -4017,6 +4026,43 @@ mod tests {
             leader_env: BTreeMap::new(),
             identity: Some(persist_test_identity(workspace)),
             detached: false,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn leader_prompt_transport_capture_hides_argv_echo_without_muting_native_exec() {
+        const TEST: &str = "leader::start::tests::leader_prompt_transport_capture_hides_argv_echo_without_muting_native_exec";
+        const KEY: &str = "TEAM_AGENT_TEST_PROMPT_CAPTURE_CASE";
+        const BODY: &str = "SENSITIVE_PROMPT_309_CAPTURE";
+        if let Ok(case) = std::env::var(KEY) {
+            let root = std::env::temp_dir().join(format!("ta-prompt-capture-{}-{case}", std::process::id()));
+            std::fs::create_dir_all(&root).unwrap();
+            let mut plan = persist_test_plan(&root);
+            plan.mode = if case == "exec_configured" { LeaderStartMode::ExecProvider } else { LeaderStartMode::NewTmuxSession };
+            if case != "transport_absent" {
+                plan.leader_prompt = Some(crate::leader::prompt::PromptMetadata {
+                    config_path: root.join("leader-prompt.txt"), carrier: "--append-system-prompt", bytes: BODY.len(),
+                });
+            }
+            // Controlled launcher echoes its received argv and fails; no native Agent/Team.
+            let argv = vec!["/bin/sh".to_string(), "-c".to_string(),
+                "printf '%s\\n' \"$1\"; printf '%s\\n' \"$1\" >&2; exit 23".to_string(), "launcher".to_string(), BODY.to_string()];
+            let outcome = super::run_leader_argv(&argv, &BTreeMap::new(), &plan, &root, None).unwrap();
+            assert_eq!(outcome.status.code(), Some(23));
+            if plan.leader_prompt.is_some() { assert!(!outcome.stderr.contains(BODY)); }
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        for case in ["transport_configured", "transport_absent", "exec_configured"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+                .env(KEY, case).env_remove("TMUX").env_remove("TMUX_PANE")
+                .output().unwrap();
+            assert!(output.status.success(), "controlled child failed: {:?} {}", output.status, String::from_utf8_lossy(&output.stderr));
+            for bytes in [&output.stdout, &output.stderr] {
+                assert_eq!(String::from_utf8_lossy(bytes).contains(BODY), case != "transport_configured", "capture policy differs for {case}");
+            }
         }
     }
 
