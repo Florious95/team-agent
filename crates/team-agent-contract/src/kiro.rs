@@ -227,7 +227,10 @@ impl PlanHook for KiroAdapter {
         // Native 2.28.0 help confirms that a failed enabled MCP server must
         // stop startup with exit 3, rather than silently dropping the tools.
         let mut arguments: Vec<OsString> = vec![
-            "chat".into(), "--v3".into(), "--agent".into(), name.into(),
+            "chat".into(),
+            "--v3".into(),
+            "--agent".into(),
+            name.into(),
             "--require-mcp-startup".into(),
         ];
         let model = flag(

@@ -136,10 +136,19 @@ fn call(
             };
             let mut ids = vec![];
             for recipient in recipients {
-                ids.push(write_message(&tx, &scope, MessageWrite {
-                    id: None, task: Some(&context.task_id), sender: context.identity.seat.as_str(),
-                    recipient: &recipient, content, presentation: MESSAGE_PRESENTATION, mailbox,
-                })?);
+                ids.push(write_message(
+                    &tx,
+                    &scope,
+                    MessageWrite {
+                        id: None,
+                        task: Some(&context.task_id),
+                        sender: context.identity.seat.as_str(),
+                        recipient: &recipient,
+                        content,
+                        presentation: MESSAGE_PRESENTATION,
+                        mailbox,
+                    },
+                )?);
             }
             json!({"ok":true,"status":if mailbox {"stored_only"} else {"queued"},"message_ids":ids})
         }
@@ -174,11 +183,19 @@ fn call(
                     .and_then(Value::as_str)
                     == Some("leader")
                 {
-                    write_message(&tx, &scope, MessageWrite {
-                        id: None, task: Some(&context.task_id), sender: context.identity.seat.as_str(),
-                        recipient: "leader", content: &encoded,
-                        presentation: &envelope["presentation"].to_string(), mailbox: false,
-                    })?;
+                    write_message(
+                        &tx,
+                        &scope,
+                        MessageWrite {
+                            id: None,
+                            task: Some(&context.task_id),
+                            sender: context.identity.seat.as_str(),
+                            recipient: "leader",
+                            content: &encoded,
+                            presentation: &envelope["presentation"].to_string(),
+                            mailbox: false,
+                        },
+                    )?;
                 }
                 json!({"ok":true,"status":"persisted","result_id":id,"leader_notified":false})
             }
@@ -378,7 +395,9 @@ pub fn serve_with_context<R: BufRead, W: Write, F>(
     mut reader: R,
     mut writer: W,
 ) -> Result<(), Error>
-where F: FnMut(&mut ContractStore, &Value) -> Result<CallContext, Error> {
+where
+    F: FnMut(&mut ContractStore, &Value) -> Result<CallContext, Error>,
+{
     loop {
         let mut frame = vec![];
         let read = std::io::Read::take(&mut reader, (MAX_FRAME_BYTES + 1) as u64)

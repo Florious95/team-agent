@@ -104,20 +104,34 @@ fn lifecycle_captures_descriptor_workspace_classes_and_teardown_uses_the_same_gr
 #[test]
 fn captured_validator_uses_required_path_option_without_shell_splitting() {
     use std::time::Duration;
-    struct Validator { executable: PathBuf, cwd: PathBuf, path: PathBuf, calls: usize }
+    struct Validator {
+        executable: PathBuf,
+        cwd: PathBuf,
+        path: PathBuf,
+        calls: usize,
+    }
     impl CommandRunner for Validator {
         fn run(&mut self, command: &CommandRequest) -> CommandReceipt {
             self.calls += 1;
             assert_eq!(command.executable, self.executable);
             assert_eq!(command.cwd.as_ref(), Some(&self.cwd));
-            assert_eq!(command.arguments, vec![
-                std::ffi::OsString::from("agent"), "validate".into(), "--path".into(),
-                self.path.clone().into_os_string(),
-            ]);
+            assert_eq!(
+                command.arguments,
+                vec![
+                    std::ffi::OsString::from("agent"),
+                    "validate".into(),
+                    "--path".into(),
+                    self.path.clone().into_os_string(),
+                ]
+            );
             assert!(command.stdin.is_none());
             CommandReceipt {
-                end: CommandEnd::Exited, exit_code: Some(0), child_pid: Some(42),
-                child_reaped: true, stdout: vec![], stderr: vec![],
+                end: CommandEnd::Exited,
+                exit_code: Some(0),
+                child_pid: Some(42),
+                child_reaped: true,
+                stdout: vec![],
+                stderr: vec![],
                 elapsed: Duration::from_millis(1),
             }
         }
@@ -127,20 +141,41 @@ fn captured_validator_uses_required_path_option_without_shell_splitting() {
     std::fs::create_dir(&cwd).unwrap();
     request.paths.cwd = resolve_cwd(&cwd).unwrap();
     request.paths.executable = sandbox.parent.join("kiro-cli-chat");
-    std::fs::write(&request.paths.executable, b"controlled validator; never executed").unwrap();
-    request.native.executable_sha256 = team_agent_contract::host::digest(b"controlled validator; never executed");
+    std::fs::write(
+        &request.paths.executable,
+        b"controlled validator; never executed",
+    )
+    .unwrap();
+    request.native.executable_sha256 =
+        team_agent_contract::host::digest(b"controlled validator; never executed");
     let mut h = hooks();
     h.plan = HookBinding::Bound(&CwdPlan);
     let resolved = resolve_launch(&d, &h, &request, None).unwrap();
     let plan = CwdPlan.plan(&resolved).unwrap();
-    let mut io = ScopedMaterializer::new(&d, &resolved, &plan, OperationId::new("validate").unwrap(), Validator {
-        executable: request.paths.executable, cwd, path: plan.materialization[0].path.path(), calls: 0,
-    }).unwrap();
+    let mut io = ScopedMaterializer::new(
+        &d,
+        &resolved,
+        &plan,
+        OperationId::new("validate").unwrap(),
+        Validator {
+            executable: request.paths.executable,
+            cwd,
+            path: plan.materialization[0].path.path(),
+            calls: 0,
+        },
+    )
+    .unwrap();
     let receipt = io.create_exclusive(&plan.materialization[0]).unwrap();
-    let output = io.validate_configuration(&OwnedValidationRequest {
-        resource: receipt, validator_id: "kiro-agent-validate",
-        bounds: ReadBounds { deadline: Duration::from_secs(2), max_output_bytes: 4096 },
-    }).unwrap();
+    let output = io
+        .validate_configuration(&OwnedValidationRequest {
+            resource: receipt,
+            validator_id: "kiro-agent-validate",
+            bounds: ReadBounds {
+                deadline: Duration::from_secs(2),
+                max_output_bytes: 4096,
+            },
+        })
+        .unwrap();
     assert_eq!(output.exit_code, 0);
     assert_eq!(io.runner().calls, 1);
 }

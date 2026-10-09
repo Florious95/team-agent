@@ -187,7 +187,13 @@ fn effort_and_bypass_are_explicit_and_not_inferred_from_native_banner() {
             .count(),
         1
     );
-    assert_eq!(plan.arguments.iter().filter(|v| *v == "--require-mcp-startup").count(), 1); // syntax/exit intent, not proof of client binding
+    assert_eq!(
+        plan.arguments
+            .iter()
+            .filter(|v| *v == "--require-mcp-startup")
+            .count(),
+        1
+    ); // syntax/exit intent, not proof of client binding
 }
 
 #[test]
