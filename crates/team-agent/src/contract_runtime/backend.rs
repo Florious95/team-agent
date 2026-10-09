@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use team_agent_contract::contract::{hooks::*, plan::*, session::{CwdIdentity, ResumeBinding}, types::*};
+use team_agent_contract::contract::{descriptor::AuthMode, hooks::*, plan::*, session::{CwdIdentity, ResumeBinding}, types::*};
 use team_agent_contract::host::{clock::RealClock, command::*, digest, digest_hex,
     materialize::ScopedMaterializer, process::{fingerprint_file, resolve_cwd}, tmux::HostLimits};
 use team_agent_contract::kiro::{KiroAdapter, McpStdio, KIRO_DESCRIPTOR};
