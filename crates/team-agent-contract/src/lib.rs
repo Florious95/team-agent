@@ -5,5 +5,5 @@
 //! No native provider, legacy runtime or executable is included.
 
 pub mod contract;
-pub mod orchestration;
 pub mod kiro;
+pub mod orchestration;
