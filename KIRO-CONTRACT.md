@@ -22,6 +22,8 @@ Perform the assigned task. Report completion through the bound Team Agent tools.
 
 Use the normal public `quick-start`, `status`, `send`, and scoped `shutdown` commands. Run `team-agent models --provider kiro --json` to inspect exact native IDs. Catalog visibility does not prove subscription access; explicit native effort flags do not assert per-model reasoning quality.
 
+`doctor` includes Kiro in its provider inventory on the contract-runtime platform. `installed` only means an executable `kiro-cli` was found on PATH; auth/version/readiness remain unprobed. `team-agent kiro --help` documents the separate leader entry. `team-agent kiro [--json]` currently returns exit 1 with `reason: kiro_leader_not_admitted` (`leader_launch.v1`), without starting a process or binding a leader. This is an explicit capability refusal, not a working leader launcher.
+
 The current transport profile is macOS, Kiro 2.28.0, **V2/TUI**, pinned to the observed engine hash. The launcher is resolved to `kiro-cli-chat`, including the official application-bundle location when the Homebrew dispatcher cannot locate its helper. A mismatched version/hash/profile is rejected, not silently downgraded. `--v3` is not used.
 
 ## Instruction fidelity

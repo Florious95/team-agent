@@ -23,6 +23,7 @@ pub const HUMAN_COMMANDS: &[&str] = &[
     "grok",
     "cursor",
     "pi",
+    "kiro",
     "leaders",
     "doctor",
     "remove-agent",

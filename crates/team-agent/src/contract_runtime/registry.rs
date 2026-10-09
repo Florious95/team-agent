@@ -5,6 +5,10 @@ use team_agent_contract::kiro::KIRO_DESCRIPTOR;
 
 const DESCRIPTORS: &[&ProviderDescriptor] = &[&KIRO_DESCRIPTOR];
 
+pub(crate) fn descriptors() -> &'static [&'static ProviderDescriptor] {
+    DESCRIPTORS
+}
+
 pub fn descriptor(key: &str) -> Option<&'static ProviderDescriptor> {
     DESCRIPTORS.iter().copied().find(|descriptor| {
         descriptor.identity.id == key || descriptor.identity.aliases.contains(&key)

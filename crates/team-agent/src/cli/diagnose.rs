@@ -1574,6 +1574,22 @@ pub(crate) fn provider_doctor_checks() -> Value {
             }),
         );
     }
+    #[cfg(unix)]
+    for descriptor in crate::contract_runtime::registry::descriptors() {
+        let identity = &descriptor.identity;
+        // Inventory only: finding the launcher is not an engine, auth or readiness probe.
+        providers.insert(
+            identity.id.to_string(),
+            json!({
+                "auth": crate::provider::AuthHintStatus::Unknown,
+                "command": identity.binary,
+                "installed": crate::contract_runtime::discovery::executable(identity.binary).is_ok(),
+                "version": "unknown",
+                "probe_status": "not_run",
+                "provider_probe_status": "not_run",
+            }),
+        );
+    }
     Value::Object(providers)
 }
 

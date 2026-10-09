@@ -42,6 +42,7 @@ const HUMAN: &[&str] = &[
     "grok",
     "cursor",
     "pi",
+    "kiro",
     "leaders",
     "doctor",
     "remove-agent",
@@ -104,6 +105,7 @@ fn canary_path(env: &HermeticTestEnv) -> String {
     let log = env.root().join("native-called");
     for tool in [
         "pi", "codex", "claude", "copilot", "grok", "agent", "cursor", "gh", "tmux",
+        "kiro-cli", "kiro-cli-chat",
     ] {
         let path = bin.join(tool);
         fs::write(
@@ -354,21 +356,21 @@ fn examples_property(command: &str) {
 }
 
 #[test]
-fn h1_public_catalog_is_exactly_twenty_nine_human_records_and_no_machine_record() {
+fn h1_public_catalog_is_exactly_thirty_human_records_and_no_machine_record() {
     let actual = catalog::COMMAND_SPECS
         .iter()
         .map(|s| s.name)
         .collect::<BTreeSet<_>>();
     assert_eq!(
         catalog::COMMAND_SPECS.len(),
-        29,
+        30,
         "H1 physically remove Machine records, not only change visibility/tier"
     );
     assert_eq!(actual, HUMAN.iter().copied().collect());
 }
 #[test]
 #[serial(env)]
-fn h1_root_discovers_all_twenty_nine_once_in_catalog_and_zero_private_names() {
+fn h1_root_discovers_all_thirty_once_in_catalog_and_zero_private_names() {
     let env = HermeticTestEnv::enter("root-human");
     let cwd = env.workspace("empty");
     let out = env.run_cli(&cwd, &["--help"]);
@@ -384,7 +386,7 @@ fn h1_root_discovers_all_twenty_nine_once_in_catalog_and_zero_private_names() {
         .collect::<Vec<_>>();
     assert_eq!(
         visible.len(),
-        29,
+        30,
         "H1 root command list: {visible:?}\n{help}"
     );
     assert_eq!(
@@ -530,7 +532,7 @@ human_properties! {
     remove_agent => "remove-agent", doctor => "doctor", approvals => "approvals", leaders => "leaders",
     route => "route", profile => "profile", install_skill => "install-skill",
     claim_leader => "claim-leader", takeover => "takeover", attach_leader => "attach-leader",
-    pi => "pi", codex => "codex", claude => "claude", copilot => "copilot", grok => "grok", cursor => "cursor", inbox => "inbox",
+    pi => "pi", codex => "codex", claude => "claude", copilot => "copilot", grok => "grok", cursor => "cursor", kiro => "kiro", inbox => "inbox",
 }
 macro_rules! hidden_properties {
     ($($id:ident => $command:literal),+ $(,)?) => {$ (

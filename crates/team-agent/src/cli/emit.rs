@@ -290,6 +290,7 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         // delivery path — no separate route authority.
         "leaders" => cmd_leaders(&leaders_args(args, cwd)?).map(emit_result),
         "models" => cmd_models(&models_args(args)?).map(emit_result),
+        "kiro" => Ok(emit_result(cmd_kiro_leader(args))),
 
         "install-skill" => cmd_install_skill(&install_skill_args(args)?).map(emit_result),
         "profile" => cmd_profile(&profile_args(args, cwd)?).map(emit_result),
@@ -374,7 +375,7 @@ pub(crate) fn default_help() -> String {
     append_help_section(
         &mut out,
         "Leader launch",
-        &["pi", "codex", "claude", "copilot", "grok", "cursor"],
+        &["pi", "codex", "claude", "copilot", "grok", "cursor", "kiro"],
     );
     out.push_str("\nCommand arguments and examples: team-agent <command> --help");
     out
@@ -473,6 +474,8 @@ pub(super) fn command_help(command: Option<&str>) -> String {
             "team-agent takeover --workspace . --team help-demo --confirm\nteam-agent takeover --workspace . --team help-demo --confirm --json", "Verify leader/team ownership before confirmation. Check status/doctor afterwards; do not take over someone else's team."),
         "attach-leader" => ("PANE must be a verified leader terminal, not a guessed pane id.\n--provider selects the actual provider; --confirm authorizes attachment to an existing leader. Use only when doctor recommends it.",
             "team-agent attach-leader --pane \"$PANE\" --provider pi --workspace .\nteam-agent attach-leader --pane \"$PANE\" --provider pi --workspace . --team help-demo --confirm --json", "Set PANE to the verified terminal. Confirm attachment with doctor before sending a task."),
+        "kiro" => ("Kiro leader launching is not admitted by this candidate. This entry returns the stable capability refusal kiro_leader_not_admitted (exit 1).\nNo native process, leader binding, attach or provider fallback is attempted. --help/-h is read-only and exits 0.",
+            "team-agent kiro\nteam-agent kiro --json", "Use provider: kiro in a worker role with team-agent quick-start; worker support does not grant leader capability."),
         _ => ("Install the provider and complete native sign-in first. The current directory is the workspace.\nUse --attach-existing/--confirm only after verifying leader ownership and receiving authorization; --attach-session selects a verified session.\n--external-leader selects an external leader; --allow-nested-attach requires explicit authorization for nested terminals.\nArguments after -- pass through unchanged. Bare --help/-h displays this help without starting the provider.",
             "", "Run team-agent quick-start in the opened leader's tool context, not in an ordinary worker conversation."),
     };
@@ -486,7 +489,9 @@ pub(super) fn command_help(command: Option<&str>) -> String {
     } else {
         examples.to_string()
     };
-    let scope = if matches!(spec.kind, CommandKind::LeaderPassthrough { .. }) {
+    let scope = if name == "kiro" {
+        "Use --json for the structured capability refusal. Native arguments and attach options cannot enable this capability."
+    } else if matches!(spec.kind, CommandKind::LeaderPassthrough { .. }) {
         "Use --json for structured output. --workspace/--team are not launcher options here; they pass to the native provider."
     } else {
         "Use --json for structured output. --workspace selects the project; supported commands use --team to select the team."
@@ -2074,7 +2079,11 @@ mod tests {
             .filter(|spec| spec.default_help)
             .map(|spec| spec.name)
             .collect();
-        assert_eq!(expected.len(), 29, "the public catalog is Human29");
+        assert_eq!(
+            expected.len(),
+            30,
+            "the public catalog includes the Kiro capability gate"
+        );
         for spec_name in &expected {
             assert!(
                 visible.iter().any(|command| command == spec_name),
@@ -2088,7 +2097,7 @@ mod tests {
         expected_sorted.sort();
         assert_eq!(
             actual, expected_sorted,
-            "default help must match the exact Human29 public spec set, not a slack threshold; got {visible:?}"
+            "default help must match the exact public spec set, not a slack threshold; got {visible:?}"
         );
         assert!(
             top_help.contains("copilot"),
