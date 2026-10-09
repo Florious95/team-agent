@@ -42,10 +42,16 @@ pub struct IgnoredTeamField {
 pub fn read_front_matter(path: &Path) -> Result<(Value, String), ModelError> {
     let text = fs::read_to_string(path)
         .map_err(|e| ModelError::Runtime(format!("{}: {e}", path.display())))?;
+    Ok(split_front_matter(&text))
+}
+
+/// Parse the same captured bytes that a prompt receipt hashes; the existing
+/// path-based compiler keeps its original normalization/plain-text fallback.
+pub(crate) fn split_front_matter(text: &str) -> (Value, String) {
     let text = text.replace("\r\n", "\n").replace('\r', "\n");
     let empty_meta = || Value::Map(Vec::new());
     let Some(rest) = text.strip_prefix("---\n") else {
-        return Ok((empty_meta(), text));
+        return (empty_meta(), text);
     };
 
     let mut offset = 0;
@@ -58,7 +64,7 @@ pub fn read_front_matter(path: &Path) -> Result<(Value, String), ModelError> {
         offset += line.len();
     }
     let Some(close) = close else {
-        return Ok((empty_meta(), text));
+        return (empty_meta(), text);
     };
     let raw_meta = &rest[..close];
     let meta = if raw_meta.trim().is_empty() {
@@ -66,11 +72,11 @@ pub fn read_front_matter(path: &Path) -> Result<(Value, String), ModelError> {
     } else {
         match yaml::loads(raw_meta) {
             Ok(meta) if meta.is_map() => meta,
-            _ => return Ok((empty_meta(), text)),
+            _ => return (empty_meta(), text),
         }
     };
     let after_marker = &rest[close + 3..];
-    Ok((meta, after_marker.trim_start_matches('\n').to_string()))
+    (meta, after_marker.trim_start_matches('\n').to_string())
 }
 
 pub fn ignored_owner_team_id_from_team_md(

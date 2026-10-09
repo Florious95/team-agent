@@ -235,7 +235,7 @@ fn mcp_tool_name(provider: Provider, server: &str, tool: &str) -> String {
     }
 }
 
-fn runtime_contract_section(
+pub(crate) fn runtime_contract_section(
     send_message: &str,
     report_result: &str,
     get_team_status: &str,
@@ -255,10 +255,15 @@ fn communication_mode(value: Option<&str>) -> Result<CommunicationMode, Lifecycl
 }
 
 fn identity_section(agent: &WorkerCommandAgent) -> String {
-    format!(
-        "You are Team Agent worker `{}` with role `{}`. When asked about your role or identity, answer with this Team Agent worker identity first, not only the generic provider product identity.",
+    worker_identity_section(
         agent.id.as_deref().unwrap_or("unknown"),
-        agent.role.as_deref().unwrap_or("developer")
+        agent.role.as_deref().unwrap_or("developer"),
+    )
+}
+
+pub(crate) fn worker_identity_section(id: &str, role: &str) -> String {
+    format!(
+        "You are Team Agent worker `{id}` with role `{role}`. When asked about your role or identity, answer with this Team Agent worker identity first, not only the generic provider product identity."
     )
 }
 
