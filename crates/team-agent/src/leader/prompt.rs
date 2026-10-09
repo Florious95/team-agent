@@ -38,6 +38,9 @@ impl PromptError {
         result
     }
     pub(crate) fn at_config(mut self, path: &Path) -> Self {
+        if self.io_path.is_none() && self.config_path.as_deref() != Some(path) {
+            self.io_path = self.config_path.clone();
+        }
         self.config_path = Some(path.to_path_buf());
         self
     }
@@ -245,8 +248,9 @@ fn acquire_lock(path: &Path) -> Result<Lock, PromptError> {
         return Err(PromptError::new(
             "leader_prompt_write_failed",
             "Expected a regular lock file",
-            Some(path),
-        ));
+            Some(&lock_path),
+        )
+        .at_config(path));
     }
     let started = Instant::now();
     loop {
@@ -687,7 +691,9 @@ mod tests {
         let lock = path.parent().unwrap().join("leader-prompt.lock");
         fs::remove_file(&lock).unwrap();
         symlink(&target, &lock).unwrap();
-        assert!(mutate(&path, Mutation::Set("new".into())).is_err());
+        let error = mutate(&path, Mutation::Set("new".into())).unwrap_err();
+        assert_eq!(error.config_path.as_deref(), Some(path.as_path()));
+        assert_eq!(error.io_path.as_deref(), Some(lock.as_path()));
         assert_eq!(fs::read_to_string(&target).unwrap(), "unchanged");
         fs::remove_file(&lock).unwrap();
         fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o755)).unwrap();
