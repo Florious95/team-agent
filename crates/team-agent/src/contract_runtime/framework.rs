@@ -59,7 +59,8 @@ pub fn project_seat(workspace: &Path, team: &str, id: &str) -> Result<Value, Bac
     let seat = backend.store.seat(&SeatId::new(id)?)?.ok_or(BackendError::Metadata)?;
     let role = backend::read_role(&backend.binding, &seat.identity.seat)?;
     let alive = seat.physical.as_ref().is_some_and(|target| sample_process(&target.process) == ProcessState::Alive);
-    let status = if seat.status == SeatStatus::Stopped { "stopped" } else if alive { "running" } else { "unknown" };
+    let status = if seat.status == SeatStatus::Stopped { "stopped" }
+        else if seat.status != SeatStatus::Unknown && alive { "running" } else { "unknown" };
     Ok(json!({"agent_id":id,"provider":seat.provider,"status":status,"model":role.model,"effort":role.effort,
         "contract_prompt_sha256":team_agent_contract::host::digest_hex(role.prompt.sha256),
         "runtime_family":"contract","contract_scope":seat.identity.scope,"contract_instance":seat.identity.instance,

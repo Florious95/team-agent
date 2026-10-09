@@ -33,3 +33,36 @@ fn identity_proposals_do_not_register_a_generation_or_reuse_an_instance() {
     assert_eq!(store.propose_identity(&id).unwrap().generation, Generation(2));
     assert_eq!(store.seats().unwrap().len(), 1);
 }
+
+#[test]
+fn returned_uncertain_registry_probe_blocks_input_but_permits_owned_teardown() {
+    use team_agent_contract::orchestration::{lifecycle::Lifecycle, operator::OperatorSend, store::{Outcome, SeatStatus}};
+    let sandbox = Sandbox::new();
+    let mut store = sandbox.store();
+    let mut host = FakeHost::default();
+    let mut io = FakeIo::new("unused");
+    let seat = start(&mut store, &mut host, &mut io, "worker").target;
+    let operation = OperationId::new("inspect").unwrap();
+    store.begin_observation(&seat.identity, &operation).unwrap();
+    assert!(store.begin_observation(&seat.identity, &OperationId::new("other").unwrap()).is_err());
+    assert!(store.fail_observation(&seat.identity, &OperationId::new("other").unwrap()).is_err());
+    store.fail_observation(&seat.identity, &operation).unwrap();
+    assert_eq!(store.seat(&seat.identity.seat).unwrap().unwrap().status, SeatStatus::Unknown);
+    assert!(store.send_from_operator(&OperatorSend { recipient:seat.identity.seat.clone(), content:"do not replay".into(), task:None, message:None, mailbox:false }).is_err());
+    let stopped = Lifecycle { store:&mut store, host:&mut host, io:&mut io }.teardown(&seat.identity, OperationId::new("stop").unwrap()).unwrap();
+    assert_eq!(stopped.outcome, Outcome::Committed);
+    assert_eq!(stopped.target.status, SeatStatus::Stopped);
+}
+
+#[test]
+fn readonly_status_connection_cannot_enqueue_or_change_a_seat() {
+    use team_agent_contract::orchestration::{operator::OperatorSend, store::ContractStore};
+    let sandbox = Sandbox::new();
+    let mut store = sandbox.store();
+    let seat = start(&mut store, &mut FakeHost::default(), &mut FakeIo::new("unused"), "worker").target;
+    let mut view = ContractStore::open_readonly(store.root(), store.scope().clone(), store.endpoint()).unwrap();
+    assert_eq!(view.seat(&seat.identity.seat).unwrap(), Some(seat.clone()));
+    assert!(view.send_from_operator(&OperatorSend { recipient:seat.identity.seat.clone(), content:"must not write".into(), task:None, message:None, mailbox:false }).is_err());
+    assert!(store.deliveries().unwrap().is_empty());
+    assert_eq!(store.seat(&seat.identity.seat).unwrap(), Some(seat));
+}

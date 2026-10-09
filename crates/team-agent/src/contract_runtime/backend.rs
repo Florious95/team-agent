@@ -158,7 +158,8 @@ fn request(binding: &Binding, role: &RoleConfig, identity: InstanceIdentity, dis
 }
 
 /// Team-wide native discovery/admission before the shared launcher creates any
-/// seats (including legacy peers). No store, config, socket or process is made.
+/// seats (including legacy peers). Bounded read-only native commands run; no
+/// runtime store, worker config, private socket, or worker process is created.
 pub fn preflight(team: &super::config::TeamConfig) -> Result<(), BackendError> {
     let discovered = discovery::discover(&team.workspace.path)?;
     let candidate = std::env::current_exe()?.canonicalize()?;

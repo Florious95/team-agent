@@ -50,9 +50,16 @@ fn deliver_one(backend: &mut Backend, seat: &SeatRecord) -> Result<(), BackendEr
         return Ok(());
     }
     backend.store.begin_observation(&seat.identity, &operation)?;
-    // An uncertain panel operation retains its exact seat lease. No retry and
-    // no blind Escape to clear an unrelated approval/composer are permitted.
-    let binding = physical.client_binding(seat, &interaction::TOOL_PANEL)?;
+    // A completed-but-uncertain inspector quarantines the seat, without an
+    // orphan lease that would prevent explicit scoped shutdown. No replay or
+    // blind Escape to clear an unrelated approval/composer is permitted.
+    let binding = match physical.client_binding(seat, &interaction::TOOL_PANEL) {
+        Ok(binding) => binding,
+        Err(error) => {
+            backend.store.fail_observation(&seat.identity, &operation)?;
+            return Err(error.into());
+        }
+    };
     backend.store.finish_observation(&seat.identity, &operation)?;
     if !matches!(binding.outcome, ProbeOutcome::Observed(_)) { return Ok(()); }
     let mut current_protocol = protocol(backend, seat, &clock)?;
