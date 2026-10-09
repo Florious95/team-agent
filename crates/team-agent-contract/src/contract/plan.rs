@@ -465,13 +465,13 @@ pub struct OwnedResourceRequest {
 
 /// A write/hash observation failure may follow a real filesystem effect.
 /// Unknown bytes must not be represented by a fabricated digest or an empty receipt.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ResourceWriteEffect {
     Written { bytes_sha256: Digest },
     MayHaveWritten,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OwnedResourceReceipt {
     pub path: OwnedPath,
     /// Operation attribution, not fresh proof of deletion authority.

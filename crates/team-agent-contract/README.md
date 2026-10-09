@@ -1,14 +1,14 @@
-# Team Agent Contract — K1
+# Team Agent Contract — K1 + K3
 
-独立的、仅依赖 Rust 标准库的契约 library。此包是自己的 nested Cargo workspace；不加入旧 workspace，不依赖旧 `team-agent` crate，不注册任何 provider，也不提供 executable。
+独立的契约与编排 library。此包是自己的 nested Cargo workspace；不加入旧 workspace，不依赖旧 `team-agent` crate，不注册任何 provider，也不提供 executable。K3 使用 SQLite/serde 持久化共享生命周期与 MCP 事务。
 
-**当前不是 Kiro 适配器或可运行 Team。** 没有 Kiro profile、默认 provider、Host executor、store、MCP server、CLI、真实 Fork 事务或原生验收。测试中的 `fixture` 不是 Kiro。
+**当前不是 Kiro 适配器或可运行 Team。** 本分支包含 store、三个 MCP handlers/有界 stdio loop、共享 supervisor 和 F0–F5 事务；真实 Host/executor 属于独立 K2，组合验证另行进行。没有 Kiro profile、CLI 或原生验收；`fixture`/`fake` 不是 Kiro。
 
 设计输入：黄金 [`provider-contract-spec.md`](../../docs/reference/provider-contract-spec.md)，以及 Kiro 独立框架任务书的 K1 边界。旧六家、根 manifest/lockfile 与所有既有 tracked 文件必须保持不变。
 
 ## 公共边界
 
-所有 API 在 `team_agent_contract::contract`，不重新包装成巨型 Provider trait。
+纯契约 API 在 `team_agent_contract::contract`，共享事务 API 在 `team_agent_contract::orchestration`；不重新包装成巨型 Provider trait。
 
 | 模块 | 职责 |
 |---|---|
@@ -51,7 +51,7 @@ Full snapshot 的目标 SID/path 由框架预分配。`ExpectedSession::Snapshot
 
 ### 后续 owner 的硬边界
 
-K2 实现真正有界的 Host/IO/唯一 executor、采样和 journal；K3 实现 store/lifecycle/MCP/Fork 事务；K4 才能添加经 R0 验证的 Kiro descriptor/hooks/profile。K1 的 port/receipt 类型不是这些实现的替代品。
+K2 实现真正有界的 Host/IO/唯一 executor、采样和 journal；本分支 K3 的 store/lifecycle/MCP/Fork 实现与接线边界见 [生命周期与 MCP 设计报告](docs/lifecycle-mcp.md)。K4 才能添加经 R0 验证的 Kiro descriptor/hooks/profile。框架 Host ports 的 fake 实现不是原生验收，也不是 K2 组合的替代品。
 
 资源写入收据区分 `ResourceWriteEffect::Written { bytes_sha256 }` 与 `MayHaveWritten`。写入可能发生但观测/hash 失败时，PartialFailure 必须保留该路径与可能 effects，不填虚构 hash 或返回空收据。Fork stage validator 拒绝任何不确定写入（包括 backing 以外的辅助文件），不把它升级成完整 snapshot；已有收据也不是后续删除授权。
 
@@ -67,4 +67,4 @@ cargo clippy --manifest-path crates/team-agent-contract/Cargo.toml --locked --al
 cargo fmt --manifest-path crates/team-agent-contract/Cargo.toml --check
 ```
 
-`tests/contracts.rs` 是开发自有的公开纯行为测试，不是隐藏红测。新 crate 在黄金基线上不存在：baseline 标 N/A，不能把找不到 crate/符号的编译失败写成行为 RED。真实运行数、退出码、source/tree 和 byte-freeze 证明随 PR 构建收据记录；本文不预宣称通过。
+`tests/contracts.rs` 是开发自有的公开纯行为测试；`tests/lifecycle_mcp.rs` / `tests/transaction_faults.rs` 是真实 SQLite + 受控 fake-provider 的集成/故障注入测试，均不是隐藏红测。新 crate 在黄金基线上不存在：baseline 标 N/A，不能把找不到 crate/符号的编译失败写成行为 RED。真实运行数、退出码、source/tree 和 byte-freeze 证明随 PR 构建收据记录；本文不预宣称通过。

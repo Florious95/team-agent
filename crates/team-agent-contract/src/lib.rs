@@ -1,7 +1,8 @@
 //! Provider-neutral adaptation contracts, isolated from the legacy Team Agent runtime.
 //!
-//! This library performs no I/O and contains no native provider implementation.
-//! Descriptors declare policies; hooks supply behavior through restricted ports;
-//! observations and acceptance evidence remain separate from either declaration.
+//! `contract` is pure. `orchestration` persists provider-neutral lifecycle and
+//! messaging transactions; physical effects are delegated to scoped host ports.
+//! No native provider, legacy runtime or executable is included.
 
 pub mod contract;
+pub mod orchestration;

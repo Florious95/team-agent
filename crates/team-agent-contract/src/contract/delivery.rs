@@ -318,7 +318,9 @@ pub struct InteractionObservation {
     pub paste_latch: PasteLatch,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum DeliveryEffect {
     NoEffect,
     MayHavePasted,
