@@ -215,10 +215,18 @@ pub struct ResolvedSubmitPolicy<'a> {
 }
 
 impl<'a> ResolvedSubmitPolicy<'a> {
-    pub fn provider(&self) -> &str { self.provider }
-    pub fn operation(&self) -> Operation { self.operation }
-    pub fn evidence_kind(&self) -> EvidenceKind { self.evidence_kind }
-    pub fn candidate_sha256(&self) -> Digest { self.candidate_sha256 }
+    pub fn provider(&self) -> &str {
+        self.provider
+    }
+    pub fn operation(&self) -> Operation {
+        self.operation
+    }
+    pub fn evidence_kind(&self) -> EvidenceKind {
+        self.evidence_kind
+    }
+    pub fn candidate_sha256(&self) -> Digest {
+        self.candidate_sha256
+    }
     pub fn profile(&self) -> &InputProfile {
         self.profile
     }

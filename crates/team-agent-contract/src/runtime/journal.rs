@@ -2,14 +2,20 @@ use std::fs::File;
 use std::io::Write;
 use std::time::Duration;
 
-use serde_json::{json, Value};
 use crate::contract::delivery::{DeliveryEffect, InputSurface, StepKind, StepOutcome};
-use crate::contract::types::{AttemptId, Digest, InstanceIdentity, MessageId, Operation, OperationId};
+use crate::contract::types::{
+    AttemptId, Digest, InstanceIdentity, MessageId, Operation, OperationId,
+};
 use crate::host::files::{FileReceipt, ScopedDirectory};
 use crate::host::{digest, digest_hex, HostError, HostErrorKind};
+use serde_json::{json, Value};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Correlation { Business(MessageId), NativeControl(OperationId), Startup(OperationId) }
+pub enum Correlation {
+    Business(MessageId),
+    NativeControl(OperationId),
+    Startup(OperationId),
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttemptMetadata {
@@ -23,7 +29,14 @@ pub struct AttemptMetadata {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum JournalKind { ActionIntent, ActionResult, Surface, Accepted, Failure, Complete }
+pub enum JournalKind {
+    ActionIntent,
+    ActionResult,
+    Surface,
+    Accepted,
+    Failure,
+    Complete,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JournalRecord {
@@ -67,8 +80,14 @@ fn record_json(record: &JournalRecord) -> Value {
 }
 
 pub fn journal_name(metadata: &AttemptMetadata) -> String {
-    let key = format!("{}\0{}\0{}\0{}\0{}", metadata.owner.scope.as_str(), metadata.owner.seat.as_str(),
-        metadata.owner.instance.as_str(), metadata.owner.generation.0, metadata.attempt.as_str());
+    let key = format!(
+        "{}\0{}\0{}\0{}\0{}",
+        metadata.owner.scope.as_str(),
+        metadata.owner.seat.as_str(),
+        metadata.owner.instance.as_str(),
+        metadata.owner.generation.0,
+        metadata.attempt.as_str()
+    );
     format!("attempt-{}.jsonl", digest_hex(digest(key.as_bytes())))
 }
 
@@ -85,17 +104,35 @@ pub struct FileJournal {
 
 impl FileJournal {
     pub fn new(directory: ScopedDirectory, max_bytes: usize) -> Result<Self, HostError> {
-        if max_bytes == 0 { return Err(HostError::new("journal limit", HostErrorKind::Invalid)); }
-        Ok(Self { directory, file: None, created: None, bytes: 0, max_bytes, last_ordinal: None })
+        if max_bytes == 0 {
+            return Err(HostError::new("journal limit", HostErrorKind::Invalid));
+        }
+        Ok(Self {
+            directory,
+            file: None,
+            created: None,
+            bytes: 0,
+            max_bytes,
+            last_ordinal: None,
+        })
     }
     /// Initial creation receipt only; an appended journal has changed bytes and cannot be
     /// deleted using this original hash. Its owner must retain/re-observe it explicitly.
-    pub fn creation_receipt(&self) -> Option<&FileReceipt> { self.created.as_ref() }
+    pub fn creation_receipt(&self) -> Option<&FileReceipt> {
+        self.created.as_ref()
+    }
     pub fn recover(&self, metadata: &AttemptMetadata) -> RecoveryState {
-        match self.directory.read_file(&journal_name(metadata), self.max_bytes) {
+        match self
+            .directory
+            .read_file(&journal_name(metadata), self.max_bytes)
+        {
             Ok(bytes) => recover_bytes(metadata, &bytes),
-            Err(error) if error.kind == HostErrorKind::Io(std::io::ErrorKind::NotFound) => RecoveryState::Absent,
-            Err(_) => RecoveryState::UnknownMayHaveEffect { floor: DeliveryEffect::MayHaveSubmitted },
+            Err(error) if error.kind == HostErrorKind::Io(std::io::ErrorKind::NotFound) => {
+                RecoveryState::Absent
+            }
+            Err(_) => RecoveryState::UnknownMayHaveEffect {
+                floor: DeliveryEffect::MayHaveSubmitted,
+            },
         }
     }
 }
@@ -103,15 +140,24 @@ impl FileJournal {
 impl AttemptJournal for FileJournal {
     fn begin(&mut self, metadata: &AttemptMetadata) -> Result<(), HostError> {
         if self.file.is_some() || metadata.owner != self.directory.receipt().owner {
-            return Err(HostError::new("journal owner/attempt", HostErrorKind::Ownership));
+            return Err(HostError::new(
+                "journal owner/attempt",
+                HostErrorKind::Ownership,
+            ));
         }
-        let mut bytes = serde_json::to_vec(&metadata_json(metadata)).map_err(|_| HostError::new("journal header", HostErrorKind::Invalid))?;
+        let mut bytes = serde_json::to_vec(&metadata_json(metadata))
+            .map_err(|_| HostError::new("journal header", HostErrorKind::Invalid))?;
         bytes.push(b'\n');
-        if bytes.len() > self.max_bytes { return Err(HostError::new("journal limit", HostErrorKind::Invalid)); }
+        if bytes.len() > self.max_bytes {
+            return Err(HostError::new("journal limit", HostErrorKind::Invalid));
+        }
         let name = journal_name(metadata);
         match self.directory.create_file(&name, &bytes) {
             Ok(receipt) => self.created = Some(receipt),
-            Err(failure) => { self.created = failure.possible; return Err(failure.error); },
+            Err(failure) => {
+                self.created = failure.possible;
+                return Err(failure.error);
+            }
         }
         self.bytes = bytes.len();
         self.file = Some(self.directory.open_append(&name)?);
@@ -119,30 +165,52 @@ impl AttemptJournal for FileJournal {
     }
     fn append(&mut self, record: &JournalRecord) -> Result<(), HostError> {
         self.directory.check_live()?;
-        if self.last_ordinal.is_some_and(|last| record.ordinal <= last) { return Err(HostError::new("journal ordering", HostErrorKind::Invalid)); }
-        let mut bytes = serde_json::to_vec(&record_json(record)).map_err(|_| HostError::new("journal record", HostErrorKind::Invalid))?;
+        if self.last_ordinal.is_some_and(|last| record.ordinal <= last) {
+            return Err(HostError::new("journal ordering", HostErrorKind::Invalid));
+        }
+        let mut bytes = serde_json::to_vec(&record_json(record))
+            .map_err(|_| HostError::new("journal record", HostErrorKind::Invalid))?;
         bytes.push(b'\n');
-        if self.bytes.checked_add(bytes.len()).is_none_or(|size| size > self.max_bytes) {
+        if self
+            .bytes
+            .checked_add(bytes.len())
+            .is_none_or(|size| size > self.max_bytes)
+        {
             return Err(HostError::new("journal limit", HostErrorKind::Invalid));
         }
-        let file = self.file.as_mut().ok_or_else(|| HostError::new("journal not begun", HostErrorKind::Invalid))?;
-        if let Some(receipt) = &mut self.created { receipt.effect = crate::contract::plan::ResourceWriteEffect::MayHaveWritten; }
-        file.write_all(&bytes).and_then(|_| file.sync_data()).map_err(|error| HostError::io("journal append", error))?;
-        self.bytes += bytes.len(); self.last_ordinal = Some(record.ordinal);
+        let file = self
+            .file
+            .as_mut()
+            .ok_or_else(|| HostError::new("journal not begun", HostErrorKind::Invalid))?;
+        if let Some(receipt) = &mut self.created {
+            receipt.effect = crate::contract::plan::ResourceWriteEffect::MayHaveWritten;
+        }
+        file.write_all(&bytes)
+            .and_then(|_| file.sync_data())
+            .map_err(|error| HostError::io("journal append", error))?;
+        self.bytes += bytes.len();
+        self.last_ordinal = Some(record.ordinal);
         Ok(())
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecoveryState {
-    Absent, NoInputIntent, MayHaveEffect(DeliveryEffect), Complete(DeliveryEffect), UnknownMayHaveEffect { floor: DeliveryEffect },
+    Absent,
+    NoInputIntent,
+    MayHaveEffect(DeliveryEffect),
+    Complete(DeliveryEffect),
+    UnknownMayHaveEffect { floor: DeliveryEffect },
 }
 
 fn parse_effect(value: &Value) -> Option<DeliveryEffect> {
     match value.as_str()? {
-        "NoEffect" => Some(DeliveryEffect::NoEffect), "MayHavePasted" => Some(DeliveryEffect::MayHavePasted),
-        "PastedUnsubmitted" => Some(DeliveryEffect::PastedUnsubmitted), "MayHaveSubmitted" => Some(DeliveryEffect::MayHaveSubmitted),
-        "Submitted" => Some(DeliveryEffect::Submitted), _ => None,
+        "NoEffect" => Some(DeliveryEffect::NoEffect),
+        "MayHavePasted" => Some(DeliveryEffect::MayHavePasted),
+        "PastedUnsubmitted" => Some(DeliveryEffect::PastedUnsubmitted),
+        "MayHaveSubmitted" => Some(DeliveryEffect::MayHaveSubmitted),
+        "Submitted" => Some(DeliveryEffect::Submitted),
+        _ => None,
     }
 }
 
@@ -150,47 +218,107 @@ fn parse_effect(value: &Value) -> Option<DeliveryEffect> {
 /// A torn/malformed/mismatched journal is not repaired into a successful receipt.
 pub fn recover_bytes(metadata: &AttemptMetadata, bytes: &[u8]) -> RecoveryState {
     fn unknown(floor: DeliveryEffect) -> RecoveryState {
-        RecoveryState::UnknownMayHaveEffect { floor: floor.retain_floor(DeliveryEffect::MayHaveSubmitted) }
+        RecoveryState::UnknownMayHaveEffect {
+            floor: floor.retain_floor(DeliveryEffect::MayHaveSubmitted),
+        }
     }
-    let mut lines = bytes.split(|byte| *byte == b'\n').filter(|line| !line.is_empty());
-    let Some(header) = lines.next().and_then(|line| serde_json::from_slice::<Value>(line).ok()) else { return unknown(DeliveryEffect::NoEffect); };
-    if header != metadata_json(metadata) { return unknown(DeliveryEffect::NoEffect); }
+    let mut lines = bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty());
+    let Some(header) = lines
+        .next()
+        .and_then(|line| serde_json::from_slice::<Value>(line).ok())
+    else {
+        return unknown(DeliveryEffect::NoEffect);
+    };
+    if header != metadata_json(metadata) {
+        return unknown(DeliveryEffect::NoEffect);
+    }
     let mut floor = DeliveryEffect::NoEffect;
     let mut ordinal = None;
     let mut complete = false;
     let mut pending: Option<String> = None;
     for line in lines {
-        let Ok(value) = serde_json::from_slice::<Value>(line) else { return unknown(floor); };
-        let Some(next) = value["ordinal"].as_u64() else { return unknown(floor); };
-        let Some(effect) = parse_effect(&value["effect"]) else { return unknown(floor); };
-        if value["schema"] != 1 || ordinal.is_some_and(|prior| next <= prior) || complete { return unknown(floor); }
-        ordinal = Some(next); floor = floor.retain_floor(effect);
+        let Ok(value) = serde_json::from_slice::<Value>(line) else {
+            return unknown(floor);
+        };
+        let Some(next) = value["ordinal"].as_u64() else {
+            return unknown(floor);
+        };
+        let Some(effect) = parse_effect(&value["effect"]) else {
+            return unknown(floor);
+        };
+        if value["schema"] != 1 || ordinal.is_some_and(|prior| next <= prior) || complete {
+            return unknown(floor);
+        }
+        ordinal = Some(next);
+        floor = floor.retain_floor(effect);
         match value["kind"].as_str() {
             Some("ActionIntent") => {
-                if pending.is_some() { return unknown(floor); }
-                let Some(step) = value["step"].as_str() else { return unknown(floor); };
-                if !matches!(step, "Paste" | "InitialSubmit" | "Confirmation" | "Retry" | "WrapGap" | "QueueFlush" | "StartupAck") { return unknown(floor); }
+                if pending.is_some() {
+                    return unknown(floor);
+                }
+                let Some(step) = value["step"].as_str() else {
+                    return unknown(floor);
+                };
+                if !matches!(
+                    step,
+                    "Paste"
+                        | "InitialSubmit"
+                        | "Confirmation"
+                        | "Retry"
+                        | "WrapGap"
+                        | "QueueFlush"
+                        | "StartupAck"
+                ) {
+                    return unknown(floor);
+                }
                 pending = Some(step.to_string());
             }
             Some("ActionResult") => {
-                if pending.is_none() || pending.as_deref() != value["step"].as_str()
-                    || !matches!(value["outcome"].as_str(), Some("Confirmed" | "NoEffect" | "MayHaveOccurred"))
-                { return unknown(floor); }
+                if pending.is_none()
+                    || pending.as_deref() != value["step"].as_str()
+                    || !matches!(
+                        value["outcome"].as_str(),
+                        Some("Confirmed" | "NoEffect" | "MayHaveOccurred")
+                    )
+                {
+                    return unknown(floor);
+                }
                 if value["outcome"] != "NoEffect" {
-                    floor = floor.retain_floor(if pending.as_deref() == Some("Paste") { DeliveryEffect::MayHavePasted } else { DeliveryEffect::MayHaveSubmitted });
+                    floor = floor.retain_floor(if pending.as_deref() == Some("Paste") {
+                        DeliveryEffect::MayHavePasted
+                    } else {
+                        DeliveryEffect::MayHaveSubmitted
+                    });
                 }
                 pending = None;
             }
-            Some("Complete") => { if pending.is_some() { return unknown(floor); } complete = true; },
-            Some("Surface" | "Accepted" | "Failure") => {},
+            Some("Complete") => {
+                if pending.is_some() {
+                    return unknown(floor);
+                }
+                complete = true;
+            }
+            Some("Surface" | "Accepted" | "Failure") => {}
             _ => return unknown(floor),
         }
     }
-    if !bytes.ends_with(b"\n") { return unknown(floor); }
-    if let Some(step) = pending {
-        return RecoveryState::MayHaveEffect(floor.retain_floor(if step == "Paste" { DeliveryEffect::MayHavePasted } else { DeliveryEffect::MayHaveSubmitted }));
+    if !bytes.ends_with(b"\n") {
+        return unknown(floor);
     }
-    if complete { RecoveryState::Complete(floor) }
-    else if floor != DeliveryEffect::NoEffect { RecoveryState::MayHaveEffect(floor) }
-    else { RecoveryState::NoInputIntent }
+    if let Some(step) = pending {
+        return RecoveryState::MayHaveEffect(floor.retain_floor(if step == "Paste" {
+            DeliveryEffect::MayHavePasted
+        } else {
+            DeliveryEffect::MayHaveSubmitted
+        }));
+    }
+    if complete {
+        RecoveryState::Complete(floor)
+    } else if floor != DeliveryEffect::NoEffect {
+        RecoveryState::MayHaveEffect(floor)
+    } else {
+        RecoveryState::NoInputIntent
+    }
 }

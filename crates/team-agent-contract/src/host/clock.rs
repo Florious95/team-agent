@@ -6,19 +6,35 @@ pub trait Clock {
     fn sleep(&self, duration: Duration);
 }
 
-pub struct RealClock { origin: Instant }
-
-impl RealClock {
-    pub fn new() -> Self { Self { origin: Instant::now() } }
+pub struct RealClock {
+    origin: Instant,
 }
 
-impl Default for RealClock { fn default() -> Self { Self::new() } }
+impl RealClock {
+    pub fn new() -> Self {
+        Self {
+            origin: Instant::now(),
+        }
+    }
+}
+
+impl Default for RealClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Clock for RealClock {
-    fn now(&self) -> Duration { self.origin.elapsed() }
-    fn sleep(&self, duration: Duration) { std::thread::sleep(duration); }
+    fn now(&self) -> Duration {
+        self.origin.elapsed()
+    }
+    fn sleep(&self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
 }
 
 pub fn remaining(clock: &dyn Clock, deadline: Duration) -> Option<Duration> {
-    deadline.checked_sub(clock.now()).filter(|remaining| !remaining.is_zero())
+    deadline
+        .checked_sub(clock.now())
+        .filter(|remaining| !remaining.is_zero())
 }

@@ -241,7 +241,12 @@ impl Lifecycle<'_> {
         Ok(operation)
     }
 
-    fn target(&self, descriptor: &ProviderDescriptor, request: &LaunchRequest, routing: Routing) -> Result<SeatRecord, Error> {
+    fn target(
+        &self,
+        descriptor: &ProviderDescriptor,
+        request: &LaunchRequest,
+        routing: Routing,
+    ) -> Result<SeatRecord, Error> {
         if request.identity.scope != *self.store.scope()
             || request.paths.runtime_root != self.store.root()
             || [&routing.pane, &routing.binding_key, &routing.server_key]
@@ -265,10 +270,21 @@ impl Lifecycle<'_> {
             process: None,
             session: None,
             resources: vec![],
-            workspace_resources: descriptor.teardown.resources.iter()
-                .filter(|policy| materialization_scope(descriptor, policy.kind) == crate::contract::descriptor::ResourceScope::WorkingDirectory
-                    && matches!(policy.disposition, ResourceDisposition::OwnedRemovable | ResourceDisposition::OwnedPreserved))
-                .map(|policy| policy.kind).collect(),
+            workspace_resources: descriptor
+                .teardown
+                .resources
+                .iter()
+                .filter(|policy| {
+                    materialization_scope(descriptor, policy.kind)
+                        == crate::contract::descriptor::ResourceScope::WorkingDirectory
+                        && matches!(
+                            policy.disposition,
+                            ResourceDisposition::OwnedRemovable
+                                | ResourceDisposition::OwnedPreserved
+                        )
+                })
+                .map(|policy| policy.kind)
+                .collect(),
             bootstrap_used: false,
         })
     }
@@ -456,7 +472,8 @@ impl Lifecycle<'_> {
     fn cleanup(&mut self, operation: &mut OperationRecord) -> Result<(), Error> {
         for resource in operation.resources.clone() {
             let removable = resource.owner == operation.target.identity
-                && resource.path.root() == granted_root(&operation.target, resource.kind, self.store.root())
+                && resource.path.root()
+                    == granted_root(&operation.target, resource.kind, self.store.root())
                 && resource.exclusive
                 && matches!(resource.write_effect, ResourceWriteEffect::Written { .. })
                 && resource.disposition == ResourceDisposition::OwnedRemovable
@@ -508,8 +525,16 @@ fn new_operation(
     }
 }
 
-fn granted_root<'a>(seat: &'a SeatRecord, kind: ResourceKind, runtime: &'a std::path::Path) -> &'a std::path::Path {
-    if seat.workspace_resources.contains(&kind) { &seat.cwd.path } else { runtime }
+fn granted_root<'a>(
+    seat: &'a SeatRecord,
+    kind: ResourceKind,
+    runtime: &'a std::path::Path,
+) -> &'a std::path::Path {
+    if seat.workspace_resources.contains(&kind) {
+        &seat.cwd.path
+    } else {
+        runtime
+    }
 }
 
 /// Interposes at the *actual* owned-I/O boundary. Even an H3/H7 error with an
@@ -538,9 +563,15 @@ impl OwnedIo for JournaledIo<'_> {
             .find(|p| p.kind == request.kind)
             .map(|p| p.disposition);
         if request.owner != self.operation.target.identity
-            || request.path.root() != granted_root(&self.operation.target, request.kind, self.store.root())
-            || (self.operation.target.workspace_resources.contains(&request.kind)
-                != (materialization_scope(self.descriptor, request.kind) == crate::contract::descriptor::ResourceScope::WorkingDirectory))
+            || request.path.root()
+                != granted_root(&self.operation.target, request.kind, self.store.root())
+            || (self
+                .operation
+                .target
+                .workspace_resources
+                .contains(&request.kind)
+                != (materialization_scope(self.descriptor, request.kind)
+                    == crate::contract::descriptor::ResourceScope::WorkingDirectory))
             || !matches!(
                 disposition,
                 Some(ResourceDisposition::OwnedRemovable | ResourceDisposition::OwnedPreserved)
