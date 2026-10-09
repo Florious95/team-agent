@@ -1,0 +1,91 @@
+CgroupReceiptBegin
+Schema=gb-cgroup-receipt-v1
+Unit=gb-kiro-k4-gated-a1
+Policy=optional_degraded
+Outcome=applied
+CgroupPath=/sys/fs/cgroup/gb-offload/gb-kiro-k4-gated-a1
+AvailableControllers=cpuset cpu io memory hugetlb pids
+DelegatedControllers=cpu memory pids
+EffectiveWriterUid=0
+EffectiveWriterName=root
+Resource.memory.max.Requested=15032385536
+Resource.memory.max.Applied=true
+Resource.memory.max.Readback=15032385536
+Resource.memory.max.Reason=none
+Resource.memory.high.Requested=12884901888
+Resource.memory.high.Applied=true
+Resource.memory.high.Readback=12884901888
+Resource.memory.high.Reason=none
+Resource.memory.oom.group.Requested=1
+Resource.memory.oom.group.Applied=true
+Resource.memory.oom.group.Readback=1
+Resource.memory.oom.group.Reason=none
+Resource.cpu.max.Requested=800000 100000
+Resource.cpu.max.Applied=true
+Resource.cpu.max.Readback=800000 100000
+Resource.cpu.max.Reason=none
+CgroupReceiptEnd
+ToolchainReceiptBegin
+Toolchain.Schema=gb-rust-toolchain-receipt-v1
+Toolchain.Requested=1.95.0
+Toolchain.RustupHome=/home/box/.rustup
+Toolchain.CargoHome=/home/box/.cargo
+Toolchain.RustcPath=/home/box/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/rustc
+Toolchain.RustcIdentity=rustc 1.95.0 (59807616e 2026-04-14)
+Toolchain.CargoPath=/home/box/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/cargo
+Toolchain.CargoIdentity=cargo 1.95.0 (f2d3ce0bd 2026-03-21)
+Toolchain.CargoFmtPath=/home/box/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/cargo-fmt
+Toolchain.CargoFmtIdentity=rustfmt 1.9.0-stable (59807616e1 2026-04-14)
+Toolchain.RustfmtPath=/home/box/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/rustfmt
+Toolchain.RustfmtIdentity=rustfmt 1.9.0-stable (59807616e1 2026-04-14)
+Toolchain.Verified=true
+ToolchainReceiptEnd
+[gb-source d14ab6f6] Format gated Kiro adapter
+ 3 files changed, 573 insertions(+), 159 deletions(-)
+TestedSource=d14ab6f6cae3147097075c2b1c455161fc1da3e4
+TestedTree=e3e0f5a8232fbb007a93c37bc68faff231324a7f
+   Compiling proc-macro2 v1.0.107
+   Compiling version_check v0.9.5
+   Compiling zerocopy v0.8.62
+   Compiling find-msvc-tools v0.1.14
+   Compiling shlex v2.0.1
+   Compiling unicode-ident v1.0.26
+   Compiling quote v1.0.47
+   Compiling pkg-config v0.3.34
+   Compiling once_cell v1.21.4
+   Compiling cc v1.6.0
+   Compiling cfg-if v1.0.5
+   Compiling vcpkg v0.2.15
+   Compiling serde_core v1.0.228
+   Compiling zmij v1.0.23
+   Compiling ahash v0.8.12
+   Compiling serde_json v1.0.149
+   Compiling serde v1.0.228
+   Compiling itoa v1.0.18
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling fallible-iterator v0.3.0
+   Compiling memchr v2.8.3
+   Compiling syn v2.0.119
+   Compiling smallvec v1.16.2
+   Compiling bitflags v2.13.2
+   Compiling libsqlite3-sys v0.30.1
+   Compiling serde_derive v1.0.228
+   Compiling hashbrown v0.14.5
+   Compiling hashlink v0.9.1
+   Compiling rusqlite v0.32.1
+   Compiling team-agent-contract v0.1.0 (/workspace/grok-bot-offload/jobs/gb-kiro-k4-gated-a1/work/crates/team-agent-contract)
+error[E0599]: no variant or associated item named `Off` found for enum `descriptor::Effort` in the current scope
+   --> src/kiro.rs:213:44
+    |
+213 |             EffortResolution::Pass(Effort::Off) => {
+    |                                            ^^^ variant or associated item not found in `descriptor::Effort`
+    |
+   ::: src/contract/descriptor.rs:40:1
+    |
+ 40 | pub enum Effort {
+    | --------------- variant or associated item `Off` not found for this enum
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `team-agent-contract` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `team-agent-contract` (lib test) due to 1 previous error

@@ -1,0 +1,3 @@
+bash
+-c
+set -e; export CARGO_TARGET_DIR=/workspace/grok-bot-offload/jobs/gb-kiro-k4-gated-a1/work/crates/team-agent-contract/target; cargo fmt --manifest-path crates/team-agent-contract/Cargo.toml --check; printf "TestedSource="; git rev-parse HEAD; printf "TestedTree="; git rev-parse HEAD^{tree}; git diff --exit-code ae6ee58d HEAD -- . ":(exclude)crates/team-agent-contract"; cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets; cargo clippy --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets -- -D warnings

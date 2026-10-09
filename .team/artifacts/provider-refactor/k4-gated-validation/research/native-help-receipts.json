@@ -1,0 +1,51 @@
+{
+  "observed_at": "2026-10-08T09:08:56.294380+00:00",
+  "binary": "/opt/homebrew/bin/kiro-cli",
+  "resolved_binary": "/Applications/Kiro CLI.app/Contents/MacOS/kiro-cli",
+  "binary_sha256": "dee3f382fc8f6734fe505b815d786ed634ba67a258ba34986eca50f4f0b5fc22",
+  "commands": [
+    {
+      "argv": [
+        "/opt/homebrew/bin/kiro-cli",
+        "--version"
+      ],
+      "status": "TIMEOUT",
+      "elapsed_s": 15.005
+    },
+    {
+      "argv": [
+        "/opt/homebrew/bin/kiro-cli",
+        "--help"
+      ],
+      "status": "TIMEOUT",
+      "elapsed_s": 15.004
+    },
+    {
+      "argv": [
+        "/opt/homebrew/bin/kiro-cli",
+        "chat",
+        "--help"
+      ],
+      "status": "TIMEOUT",
+      "elapsed_s": 15.003
+    },
+    {
+      "argv": [
+        "/opt/homebrew/bin/kiro-cli",
+        "agent",
+        "--help"
+      ],
+      "status": "TIMEOUT",
+      "elapsed_s": 15.004
+    },
+    {
+      "argv": [
+        "/opt/homebrew/bin/kiro-cli",
+        "mcp",
+        "--help"
+      ],
+      "status": "TIMEOUT",
+      "elapsed_s": 15.004
+    }
+  ]
+}
