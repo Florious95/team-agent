@@ -154,11 +154,11 @@ enum MatchResult<'a> {
 /// The CLI's concise JSON projection. `agent` filters the registered list but
 /// never synthesizes an unregistered node.
 pub(crate) fn status_brief_scoped(
-    _workspace: &Path,
+    workspace: &Path,
     state: &Value,
     agent: Option<&str>,
 ) -> Value {
-    let nodes = project_status_nodes(state, agent);
+    let nodes = project_status_nodes(workspace, state, agent);
     json!({
         "nodes": nodes
             .into_iter()
@@ -170,11 +170,11 @@ pub(crate) fn status_brief_scoped(
 /// Human output keeps the legacy single-node form and groups shared attach
 /// context only when multiple nodes make that repetition useful.
 pub(crate) fn format_status_brief(
-    _workspace: &Path,
+    workspace: &Path,
     state: &Value,
     agent: Option<&str>,
 ) -> String {
-    let nodes = project_status_nodes(state, agent);
+    let nodes = project_status_nodes(workspace, state, agent);
     if nodes.len() <= 1 {
         return nodes
             .into_iter()
@@ -186,14 +186,35 @@ pub(crate) fn format_status_brief(
 }
 
 fn project_status_nodes(
+    _workspace: &Path,
     state: &Value,
     agent: Option<&str>,
 ) -> Vec<(BriefNode, Option<AttachContext>)> {
     let registered = registered_nodes(state, agent);
-    let probes = probe_registered_endpoints(&registered);
+    let legacy:Vec<_> = registered.iter().filter(|_node| {
+        #[cfg(unix)]
+        if crate::contract_runtime::registry::descriptor(&_node.provider).is_some() { return false; }
+        true
+    }).cloned().collect();
+    let probes = probe_registered_endpoints(&legacy);
     registered
         .iter()
         .map(|node| {
+            #[cfg(unix)]
+            if crate::contract_runtime::registry::descriptor(&node.provider).is_some() {
+                let mut brief = BriefNode::unknown(node);
+                if let Ok(native) = crate::contract_runtime::framework::project_seat(_workspace, &crate::state::projection::team_state_key(state), &node.name) {
+                    brief.runtime_status = native["status"].as_str().unwrap_or("unknown").into();
+                    brief.model = native["model"].as_str().map(str::to_owned);
+                    brief.effort = native["effort"].as_str().map(str::to_owned);
+                    if brief.runtime_status == "running" {
+                        brief.tmux_command = native["native_endpoint"].as_str().map(|endpoint| format!("tmux -S {} attach-session", shell_quote(endpoint)));
+                    }
+                }
+                // Process alive is T1 only: activity/health remain unknown until
+                // independently observed. Never probe a private %0 on old tmux.
+                return (brief, None);
+            }
             project_node_with_attach(node, probes.get(node.endpoint.as_deref().unwrap_or("")))
         })
         .collect()

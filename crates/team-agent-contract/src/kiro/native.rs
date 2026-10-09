@@ -141,7 +141,7 @@ pub fn probe_engine<R: CommandRunner>(
     };
     Ok(NativeIdentity {
         version,
-        harness: "v3".into(),
+        harness: "v2".into(),
         ui: "tui".into(),
         platform,
         executable_sha256: hash,

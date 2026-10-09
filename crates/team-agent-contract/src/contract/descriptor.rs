@@ -451,6 +451,7 @@ pub fn validate_descriptor(
                             | Operation::OrdinarySend
                             | Operation::StartupBypassAck
                             | Operation::SessionInspect
+                            | Operation::ToolInspect
                             | Operation::InWindowBranch
                             | Operation::Stop
                             | Operation::Shutdown
@@ -544,6 +545,7 @@ pub fn validate_descriptor(
             | Operation::OrdinarySend
             | Operation::StartupBypassAck
             | Operation::SessionInspect
+            | Operation::ToolInspect
             | Operation::InWindowBranch
     ) || (matches!(
         operation,

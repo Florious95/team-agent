@@ -2,4 +2,5 @@
 
 pub mod delivery;
 pub mod journal;
+pub mod native_panel;
 pub mod probes;

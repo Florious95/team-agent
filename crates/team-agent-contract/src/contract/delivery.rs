@@ -13,6 +13,7 @@ pub enum PhysicalKey {
     Up,
     Down,
     Tab,
+    Escape,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

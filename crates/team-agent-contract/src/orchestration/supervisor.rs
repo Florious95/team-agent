@@ -304,6 +304,30 @@ pub struct StoredDelivery {
     pub effect: DeliveryEffect,
 }
 impl ContractStore {
+    pub fn has_queued_for(&self, identity: &InstanceIdentity) -> Result<bool, Error> {
+        self.assert_current(identity)?;
+        Ok(self.connection.query_row("SELECT EXISTS(SELECT 1 FROM contract_outbox WHERE state='queued' AND target=?1)",
+            [serde_json::to_string(identity)?], |row| row.get(0))?)
+    }
+    /// Registry inspection shares the same seat lease as business delivery and
+    /// lifecycle. An interrupted inspection is fenced, never silently replayed.
+    pub fn begin_observation(&mut self, identity: &InstanceIdentity, operation: &OperationId) -> Result<(), Error> {
+        let scope = self.scope().clone();
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        current(&tx, &scope, identity)?;
+        unleased(&tx, &identity.seat)?;
+        tx.execute("INSERT INTO contract_leases VALUES(?1,?2)", params![identity.seat.as_str(), operation.as_str()])?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn finish_observation(&mut self, identity: &InstanceIdentity, operation: &OperationId) -> Result<(), Error> {
+        let scope = self.scope().clone();
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        current(&tx, &scope, identity)?;
+        if tx.execute("DELETE FROM contract_leases WHERE seat=?1 AND operation=?2", params![identity.seat.as_str(), operation.as_str()])? != 1 { return Err(Error::Fence); }
+        tx.commit()?;
+        Ok(())
+    }
     pub fn deliveries(&self) -> Result<Vec<StoredDelivery>, Error> {
         let mut stmt = self.connection.prepare(
             "SELECT message_id,state,attempt,effect FROM contract_outbox ORDER BY rowid",

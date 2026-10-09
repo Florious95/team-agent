@@ -330,6 +330,7 @@ pub fn control_surface_allowed(operation: Operation, surface: InputSurface) -> b
     match operation {
         Operation::StartupBypassAck => surface == InputSurface::StartupRiskWarning,
         Operation::SessionInspect
+        | Operation::ToolInspect
         | Operation::InWindowBranch
         | Operation::Stop
         | Operation::Shutdown => surface == InputSurface::ComposerReady,

@@ -134,12 +134,11 @@ fn exact_selection_does_not_alias_display_name_case_default_or_unknown_effort_me
     );
     launch.role_effort = Some("high".into());
     assert!(matches!(
-        resolve_launch(&descriptor, &hooks, &launch, Some(&catalog)),
-        Err(ContractError::Unverified {
-            field: "model efforts",
-            ..
-        })
+        resolve_launch(&descriptor, &hooks, &launch, Some(&catalog)).unwrap().effort(),
+        EffortResolution::Pass(team_agent_contract::contract::descriptor::Effort::High)
     ));
+    // Native flag pass-through is distinct from a per-model capability claim.
+    assert!(matches!(catalog.models[0].efforts, Support::Unverified(_)));
 }
 #[test]
 fn malformed_records_or_defaults_reject_the_whole_catalog_without_partial_results() {

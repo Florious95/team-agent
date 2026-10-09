@@ -5,6 +5,12 @@ fn main() -> anyhow::Result<()> {
         .skip(1)
         .map(|arg| arg.to_string_lossy().into_owned());
     let command = args.next();
+    #[cfg(unix)]
+    if matches!(command.as_deref(), Some("contract-mcp")) {
+        team_agent::contract_runtime::mcp::run(&args.collect::<Vec<_>>())
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        return Ok(());
+    }
     if matches!(command.as_deref(), Some("fake-worker")) {
         let mut workspace = None;
         let mut agent_id = None;

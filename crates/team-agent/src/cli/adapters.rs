@@ -7,6 +7,8 @@ use super::*;
 
 /// `cmd_quick_start`(`commands.py:18`)。`--json` 或 `!ok` → 整 dict;否则 `result["summary"]`。
 pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
+    #[cfg(unix)]
+    crate::contract_runtime::config::read_team(args).map_err(|error| CliError::Runtime(error.to_string()))?;
     let mut value = lifecycle_port::quick_start(
         &args.workspace,
         &args.agents_dir,

@@ -81,6 +81,14 @@ pub(super) fn spawn_agents(
         if agent_is_paused(agent) {
             continue;
         }
+        #[cfg(unix)]
+        if agent.get("provider").and_then(Value::as_str).is_some_and(|provider| crate::contract_runtime::registry::descriptor(provider).is_some()) {
+            let team = runtime_team_key_for_spec(spec_path, spec, session_name);
+            crate::contract_runtime::framework::start_role(workspace, team_dir, &team, agent_id_raw)?;
+            // No legacy target is manufactured for the private native socket.
+            // persist_spawn_agent_state projects the actual K3 seat separately.
+            continue;
+        }
         let agent_id = AgentId::new(agent_id_raw);
         let provider = agent
             .get("provider")

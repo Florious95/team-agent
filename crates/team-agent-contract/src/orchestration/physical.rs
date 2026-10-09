@@ -74,6 +74,42 @@ impl<'a> PhysicalRuntime<'a> {
             bootstrap: None,
         })
     }
+    /// Fresh T1/T2 plus independently supplied protocol facts. Capturing a pane
+    /// never upgrades server writes into a native client binding.
+    pub fn readiness(&self, seat: &SeatRecord) -> Result<ReadinessSample, Error> {
+        let target = self.target(seat)?;
+        let deadline = self.deadline()?;
+        let mut host = self.reopen(target, deadline)?;
+        let capture = host.capture(target, self.clock, deadline, self.settings.freshness).map_err(host_error)?;
+        let frame = CaptureFrame { scope:capture.scope, text:if capture.mode == crate::host::transport::PaneMode::Normal { capture.text } else { String::new() },
+            baseline:None, profile_id:seat.profile.clone(), operation:Operation::OrdinarySend,
+            message:None, attempt:None, after_step:None, paste_latch:PasteLatch::NeverSeen };
+        let interaction = self.registration.hooks.interaction.require("H6 Interaction")?;
+        let protocol = self.protocol.clone().unwrap_or_else(|| collect_protocol(
+            target, &seat.identity.instance, &seat.server_key, &[], self.clock.now(), self.settings.freshness,
+        ));
+        Ok(ReadinessSample { process:collect_process(target, self.clock, self.settings.freshness),
+            pane:collect_pane(&frame, *interaction), binding:protocol.binding, server:protocol.server,
+            minimum_sequence:0, now:self.clock.now() })
+    }
+    /// Current registry capture, not a server-side tools/list inference. The
+    /// caller serializes this with its seat lifecycle/outbox owner.
+    pub fn client_binding(&mut self, seat: &SeatRecord, panel: &crate::runtime::native_panel::NativePanelPolicy)
+        -> Result<crate::contract::probe::Probe<crate::contract::probe::ClientBindingEvidence>, Error> {
+        let target = self.target(seat)?.clone();
+        let policy = self.policy(&target, &seat.profile, Operation::ToolInspect)?;
+        if panel.profile_id != seat.profile || panel.server_key != seat.server_key || panel.policy_sha256 != policy.profile().policy_sha256 {
+            return Err(Error::Fence);
+        }
+        if self.control(seat, &NativeControl::InspectTools)? != DeliveryEffect::Submitted { return Err(Error::Host("native registry control unconfirmed")); }
+        let deadline = self.deadline()?;
+        let mut host = self.reopen(&target, deadline)?;
+        let mut journal = FileJournal::new(ScopedDirectory::reopen(target.directory.clone()).map_err(host_error)?, self.settings.journal_bytes).map_err(host_error)?;
+        crate::runtime::native_panel::capture_and_close(&mut host, crate::runtime::native_panel::PanelRequest {
+            target:&target, interaction:*self.registration.hooks.interaction.require("H6 Interaction")?, policy:panel,
+            operation:&self.operation, clock:self.clock, deadline, freshness:self.settings.freshness,
+        }, &mut journal).map_err(host_error)
+    }
     fn deadline(&self) -> Result<Duration, Error> {
         self.clock
             .now()
@@ -237,6 +273,7 @@ impl LifecycleHost for PhysicalRuntime<'_> {
         let target = self.target(seat)?.clone();
         let kind = match control {
             NativeControl::InspectSession => ControlKind::InspectSession,
+            NativeControl::InspectTools => ControlKind::InspectTools,
             NativeControl::BranchCurrent => ControlKind::BranchCurrent,
             NativeControl::BranchToTurn(_) => ControlKind::BranchToTurn,
             NativeControl::Exit => ControlKind::Exit,
@@ -298,6 +335,20 @@ impl LifecycleHost for PhysicalRuntime<'_> {
         Ok(report.effect_floor)
     }
     fn session_evidence(&mut self, seat: &SeatRecord) -> Result<ScopedSessionEvidence, Error> {
+        // A provider must explicitly register this control. Passive-only adapters
+        // retain their existing capture path. Never query newest/global sessions.
+        if self.registration.controls.iter().any(|control| control.profile_id == seat.profile && control.kind == ControlKind::InspectSession) {
+            let deadline = self.deadline()?;
+            loop {
+                let ready = self.readiness(seat)?;
+                if matches!(ready.pane.outcome, crate::contract::probe::ProbeOutcome::Observed(ref pane) if pane.surface == InputSurface::ComposerReady) { break; }
+                if self.clock.now() >= deadline { return Err(Error::Host("native composer startup timed out")); }
+                self.clock.sleep(self.settings.limits.poll_interval);
+            }
+            if self.control(seat, &NativeControl::InspectSession)? != DeliveryEffect::Submitted {
+                return Err(Error::Host("native session control unconfirmed"));
+            }
+        }
         let target = self.target(seat)?.clone();
         let deadline = self.deadline()?;
         let mut host = self.reopen(&target, deadline)?;

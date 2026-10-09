@@ -265,6 +265,10 @@ pub fn send_message(
             }
         }
     }
+    #[cfg(unix)]
+    if state.get("agents").and_then(|agents| agents.get(recipient)).is_some_and(crate::contract_runtime::framework::is_contract) {
+        return crate::contract_runtime::framework::enqueue(workspace, &state, recipient, content, opts);
+    }
     let stale_worker_target_missing =
         stale_worker_target_missing_preflight(workspace, &state, recipient)?;
     let coordinator_unavailable = if stale_worker_target_missing {

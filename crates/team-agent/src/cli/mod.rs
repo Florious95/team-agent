@@ -1297,6 +1297,11 @@ pub mod lifecycle_port {
             Some(state) => state,
             None => shutdown_state_for_team(&run_workspace, team)?,
         };
+        #[cfg(unix)]
+        if crate::contract_runtime::framework::has_contract(&state) {
+            crate::contract_runtime::framework::stop_selected(&run_workspace, &state)
+                .map_err(|error| CliError::Runtime(format!("native shutdown failed; owned resources preserved: {error}")))?;
+        }
         deadline.check("refresh_provider_sessions")?;
         let captured_missing_sessions =
             crate::lifecycle::restart::refresh_missing_provider_sessions(&mut state)

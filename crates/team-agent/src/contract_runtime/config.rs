@@ -183,6 +183,7 @@ pub fn read_team_with_user_source(
             return Err(ConfigError::Unsupported("Kiro uses an existing native subscription; API/profile mappings are unavailable"));
         }
         let bypass = match meta.get("dangerously_skip_permissions") {
+            None => false,
             Some(Value::Bool(value)) => *value,
             _ => return Err(invalid(&source, "dangerously_skip_permissions")),
         };

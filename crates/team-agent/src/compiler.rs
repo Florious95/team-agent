@@ -495,6 +495,16 @@ fn compile_role_agent_with_mode(
         .filter(|provider| !provider.trim().is_empty())
         .unwrap_or_else(|| "pi".to_string());
     let is_pi = parse_canonical_provider(&provider) == Some(Provider::Pi);
+    #[cfg(unix)]
+    let contract = crate::contract_runtime::registry::descriptor(&provider);
+    #[cfg(unix)]
+    let contract_role = contract.is_some();
+    #[cfg(not(unix))]
+    let contract_role = false;
+    #[cfg(unix)]
+    let skip_team_effort = contract.is_some_and(|descriptor| !descriptor.effort.inherit_team_default);
+    #[cfg(not(unix))]
+    let skip_team_effort = false;
     validate_pi_role_fields(&meta, role_path, &provider)?;
     let model = string_field(&meta, "model")
         .filter(|value| !value.trim().is_empty())
@@ -573,7 +583,7 @@ fn compile_role_agent_with_mode(
         Some(raw) if !raw.trim().is_empty() => ProviderEffort::parse(raw.trim()),
         _ => None,
     };
-    let resolved_effort = if is_pi {
+    let resolved_effort = if is_pi || skip_team_effort {
         role_effort
     } else {
         role_effort.or(team_effort)
@@ -588,13 +598,22 @@ fn compile_role_agent_with_mode(
                 _ => None,
             })
             .unwrap_or("");
-        let provider_enum = parse_canonical_provider(provider_str).unwrap_or(Provider::Codex);
-        if let Err(reason) = effort.resolve_for_provider(provider_enum) {
-            return Err(ModelError::Validation(format!(
-                "{}: {reason} (effort: {}; provider: {provider_str})",
-                role_path.display(),
-                effort.as_str()
-            )));
+        #[cfg(unix)]
+        if let Some(descriptor) = contract {
+            use team_agent_contract::contract::descriptor::{Effort, EffortAdmission};
+            let native_effort = Effort::parse(effort.as_str()).map_err(|error| ModelError::Validation(error.to_string()))?;
+            if let EffortAdmission::Reject(reason) = descriptor.effort.admission[native_effort.index()] {
+                return Err(ModelError::Validation(format!("{}: {}", role_path.display(), reason.message)));
+            }
+        }
+        if !contract_role {
+            let provider_enum = parse_canonical_provider(provider_str).unwrap_or(Provider::Codex);
+            if let Err(reason) = effort.resolve_for_provider(provider_enum) {
+                return Err(ModelError::Validation(format!(
+                    "{}: {reason} (effort: {}; provider: {provider_str})",
+                    role_path.display(), effort.as_str()
+                )));
+            }
         }
         agent_items.push(("effort", Value::Str(effort.as_str().to_string())));
     }

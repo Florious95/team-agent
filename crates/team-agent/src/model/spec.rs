@@ -735,7 +735,11 @@ fn semantic_errors(spec: &Yaml, base_dir: &Path) -> Vec<String> {
         let provider = agent.get("provider");
         if !provider
             .and_then(Yaml::as_str)
-            .is_some_and(|p| parse_canonical_provider(p).is_some())
+            .is_some_and(|p| {
+                #[cfg(unix)]
+                if crate::contract_runtime::registry::descriptor(p).is_some() { return true; }
+                parse_canonical_provider(p).is_some()
+            })
         {
             e.push(format!(
                 "/agents/{idx}/provider: unknown provider {}",

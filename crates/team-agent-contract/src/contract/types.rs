@@ -228,6 +228,7 @@ pub enum Operation {
     OrdinarySend,
     StartupBypassAck,
     SessionInspect,
+    ToolInspect,
     InWindowBranch,
     NewSeatFullSnapshot,
     NativeNewSeat,

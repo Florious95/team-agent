@@ -1029,6 +1029,7 @@ impl<R: CommandRunner> PhysicalTransport for TmuxHost<R> {
             PhysicalKey::Up => "Up",
             PhysicalKey::Down => "Down",
             PhysicalKey::Tab => "Tab",
+            PhysicalKey::Escape => "Escape",
         };
         match self.command(
             vec![

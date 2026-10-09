@@ -14,11 +14,12 @@ use crate::contract::types::*;
 const APPLICATION_ID: i64 = 0x54414333;
 const SCHEMA: &str = "
 PRAGMA application_id=1413563187;
-PRAGMA user_version=3;
+PRAGMA user_version=4;
 CREATE TABLE contract_meta(scope TEXT NOT NULL, endpoint TEXT NOT NULL, root TEXT NOT NULL,
  incarnation TEXT NOT NULL, result_route TEXT);
 CREATE TABLE contract_framework_peers(recipient TEXT PRIMARY KEY, record TEXT NOT NULL);
 CREATE TABLE contract_forwards(id TEXT PRIMARY KEY, state TEXT NOT NULL, record TEXT NOT NULL);
+CREATE TABLE contract_connections(connection TEXT PRIMARY KEY, identity TEXT NOT NULL, record TEXT NOT NULL);
 CREATE TABLE contract_seats(seat TEXT PRIMARY KEY, record TEXT NOT NULL);
 CREATE TABLE contract_generations(seat TEXT PRIMARY KEY, generation INTEGER NOT NULL);
 CREATE TABLE contract_instances(instance TEXT PRIMARY KEY, seat TEXT NOT NULL, generation INTEGER NOT NULL);
@@ -168,6 +169,12 @@ impl ContractStore {
     }
 
     pub fn open(root: &Path, scope: ScopeId, endpoint: &str) -> Result<Self, Error> {
+        Self::open_mode(root, scope, endpoint, false)
+    }
+    pub fn open_readonly(root: &Path, scope: ScopeId, endpoint: &str) -> Result<Self, Error> {
+        Self::open_mode(root, scope, endpoint, true)
+    }
+    fn open_mode(root: &Path, scope: ScopeId, endpoint: &str, readonly: bool) -> Result<Self, Error> {
         require_absolute(root, "store root")?;
         validate_ancestors(root)?;
         #[cfg(unix)]
@@ -184,12 +191,12 @@ impl ContractStore {
         }
         let connection = Connection::open_with_flags(
             path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            (if readonly { OpenFlags::SQLITE_OPEN_READ_ONLY } else { OpenFlags::SQLITE_OPEN_READ_WRITE }) | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
         // Verify identity before pragmas, migrations, or writes.
         let app: i64 = connection.query_row("PRAGMA application_id", [], |r| r.get(0))?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if app != APPLICATION_ID || version != 3 {
+        if app != APPLICATION_ID || version != 4 {
             return Err(Error::Fence);
         }
         let stored: (String, String, String) =
@@ -205,7 +212,7 @@ impl ContractStore {
         {
             return Err(Error::Fence);
         }
-        configure(&connection)?;
+        if !readonly { configure(&connection)?; }
         Ok(Self {
             connection,
             scope,
@@ -225,6 +232,16 @@ impl ContractStore {
     }
     pub fn seat(&self, seat: &SeatId) -> Result<Option<SeatRecord>, Error> {
         load_seat(&self.connection, seat)
+    }
+    /// Read-only allocation proposal. Lifecycle::begin still atomically fences
+    /// the generation and unique instance; concurrent proposals cannot both win.
+    pub fn propose_identity(&self, seat: &SeatId) -> Result<InstanceIdentity, Error> {
+        let previous: Option<u64> = self.connection.query_row(
+            "SELECT generation FROM contract_generations WHERE seat=?1", [seat.as_str()], |row| row.get(0),
+        ).optional()?;
+        let generation = previous.unwrap_or(0).checked_add(1).ok_or(Error::Invalid("generation overflow"))?;
+        let instance: String = self.connection.query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+        Ok(InstanceIdentity { scope:self.scope.clone(), seat:seat.clone(), instance:InstanceId::new(format!("instance-{instance}"))?, generation:Generation(generation) })
     }
     pub fn seats(&self) -> Result<Vec<SeatRecord>, Error> {
         let mut statement = self

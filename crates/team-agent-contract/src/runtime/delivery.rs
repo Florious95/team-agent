@@ -75,6 +75,7 @@ impl PreparedEnvelope {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ControlKind {
     InspectSession,
+    InspectTools,
     BranchCurrent,
     BranchToTurn,
     Exit,
@@ -146,12 +147,14 @@ impl PreparedInput {
     ) -> Result<Self, ContractError> {
         let kind = match intent {
             NativeControl::InspectSession => ControlKind::InspectSession,
+            NativeControl::InspectTools => ControlKind::InspectTools,
             NativeControl::BranchCurrent => ControlKind::BranchCurrent,
             NativeControl::BranchToTurn(_) => ControlKind::BranchToTurn,
             NativeControl::Exit => ControlKind::Exit,
         };
         let operation_matches = match kind {
             ControlKind::InspectSession => definition.operation == Operation::SessionInspect,
+            ControlKind::InspectTools => definition.operation == Operation::ToolInspect,
             ControlKind::BranchCurrent | ControlKind::BranchToTurn => {
                 definition.operation == Operation::InWindowBranch
             }

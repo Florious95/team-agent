@@ -78,10 +78,9 @@ fn mixed_team_routes_each_role_and_malformed_kiro_still_refuses() {
 }
 
 #[test]
-fn model_bypass_and_identity_are_explicit_and_api_profiles_are_not_guessed() {
+fn safe_bypass_default_and_model_identity_api_profile_admission() {
     let (_sandbox, args) = fixture();
     for header in [
-        "provider: kiro\nmodel: claude-sonnet-4.5", // no bypass decision
         "provider: kiro\ndangerously_skip_permissions: true", // no native model ID
         "provider: kiro\nmodel: claude-sonnet-4.5\ndangerously_skip_permissions: yes",
         "provider: kiro\nmodel: claude-sonnet-4.5\ndangerously_skip_permissions: true\nprofile: inherited",
@@ -90,6 +89,8 @@ fn model_bypass_and_identity_are_explicit_and_api_profiles_are_not_guessed() {
         std::fs::write(args.agents_dir.join("agents/worker.md"), format!("---\n{header}\n---\nRole body\n")).unwrap();
         assert!(read_team(&args).is_err());
     }
+    std::fs::write(args.agents_dir.join("agents/worker.md"), "---\nprovider: kiro\nmodel: claude-sonnet-4.5\n---\nSafe default role\n").unwrap();
+    assert!(!read_team(&args).unwrap().unwrap().roles[0].bypass);
     role(&args, "worker", "kiro");
     role(&args, "another", "kiro");
     std::fs::write(args.agents_dir.join("agents/another.md"), "---\nprovider: kiro\nagent_id: worker\nmodel: claude-sonnet-4.5\ndangerously_skip_permissions: true\n---\nRole\n").unwrap();
