@@ -208,9 +208,17 @@ pub struct ResolvedSubmitPolicy<'a> {
     profile: &'a InputProfile,
     policy: &'a SubmitPolicy,
     interaction: &'a dyn InteractionHook,
+    provider: &'static str,
+    operation: Operation,
+    evidence_kind: EvidenceKind,
+    candidate_sha256: Digest,
 }
 
 impl<'a> ResolvedSubmitPolicy<'a> {
+    pub fn provider(&self) -> &str { self.provider }
+    pub fn operation(&self) -> Operation { self.operation }
+    pub fn evidence_kind(&self) -> EvidenceKind { self.evidence_kind }
+    pub fn candidate_sha256(&self) -> Digest { self.candidate_sha256 }
     pub fn profile(&self) -> &InputProfile {
         self.profile
     }
@@ -255,6 +263,10 @@ pub fn resolve_submit_policy<'a>(
         profile,
         policy,
         interaction: *hooks.interaction.require("H6 InteractionHook")?,
+        provider: descriptor.identity.id,
+        operation: request.operation,
+        evidence_kind: request.required_evidence_kind,
+        candidate_sha256: request.candidate_sha256,
     })
 }
 

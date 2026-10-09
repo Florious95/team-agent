@@ -1,10 +1,8 @@
-# Team Agent Contract — K1 + K3 + gated K4 draft
+# Team Agent Contract — integrated K1–K4
 
-独立的契约与编排 library。此包是自己的 nested Cargo workspace；不加入旧 workspace，不依赖旧 `team-agent` crate，不注册任何 provider，也不提供 executable。K3 使用 SQLite/serde 持久化共享生命周期与 MCP 事务。
+独立 nested Cargo workspace，不加入旧 workspace、不依赖旧 `team-agent` crate。`contract` 保持纯函数；`host` / `runtime` 提供 scoped OS/tmux、唯一物理 executor、journal 和探针；`orchestration` 提供 SQLite 共享生命周期/MCP/supervisor。保持 `unsafe_code=forbid`。
 
-**当前不是 Kiro 适配器或可运行 Team。** 本分支包含 store、三个 MCP handlers/有界 stdio loop、共享 supervisor 和 F0–F5 事务；真实 Host/executor 属于独立 K2，组合验证另行进行。没有 Kiro profile、CLI 或原生验收；`fixture`/`fake` 不是 Kiro。
-
-K4 文档候选 adapter 位于 `kiro` 模块，真实 native admission 保持关闭；H2/H3 已实现，另外五个 Hook slot 明确 Unverified。详见 [Kiro adapter 的部分交付与 R0 阻塞](docs/kiro-adapter.md)。
+统一分支正在进行真实 Host 接线与 Kiro 原生证据闭环；不能把组合源码或 fixture 通过当作原生验收。历史 K4 门禁见 [Kiro adapter 报告](docs/kiro-adapter.md)，物理层见 [执行器指南](docs/physical-executor.md)。
 
 设计输入：黄金 [`provider-contract-spec.md`](../../docs/reference/provider-contract-spec.md)，以及 Kiro 独立框架任务书的 K1 边界。旧六家、根 manifest/lockfile 与所有既有 tracked 文件必须保持不变。
 
@@ -53,7 +51,7 @@ Full snapshot 的目标 SID/path 由框架预分配。`ExpectedSession::Snapshot
 
 ### 后续 owner 的硬边界
 
-K2 实现真正有界的 Host/IO/唯一 executor、采样和 journal；本分支 K3 的 store/lifecycle/MCP/Fork 实现与接线边界见 [生命周期与 MCP 设计报告](docs/lifecycle-mcp.md)。K4 才能添加经 R0 验证的 Kiro descriptor/hooks/profile。框架 Host ports 的 fake 实现不是原生验收，也不是 K2 组合的替代品。
+K2 Host/IO/executor 与 K3 store/lifecycle/MCP 已合入本分支；接线及原生验证状态以本轮收据为准。共享事务边界见 [生命周期与 MCP 设计报告](docs/lifecycle-mcp.md)。框架 Host ports 的 fake 实现不能替代原生验收。
 
 资源写入收据区分 `ResourceWriteEffect::Written { bytes_sha256 }` 与 `MayHaveWritten`。写入可能发生但观测/hash 失败时，PartialFailure 必须保留该路径与可能 effects，不填虚构 hash 或返回空收据。Fork stage validator 拒绝任何不确定写入（包括 backing 以外的辅助文件），不把它升级成完整 snapshot；已有收据也不是后续删除授权。
 
@@ -64,6 +62,11 @@ K2 实现真正有界的 Host/IO/唯一 executor、采样和 journal；本分支
 Cargo/rustc/rustfmt/clippy 仅在 Grok Bot 或授权 CI 执行（Rust 1.95）。首次在该环境生成并提交本包 lockfile；后续使用 `--locked`：
 
 ```sh
+# 准备者只在 Grok / 授权 CI 核定这些绝对路径；受控 fixture 不是 Kiro。
+export CONTRACT_TMUX="$(command -v tmux)"
+export CONTRACT_PYTHON="$(python3 -c 'import os,sys; print(os.path.realpath(sys.executable))')"
+export CONTRACT_OLD_SCOPE=fixture-old-scope
+export TEAM_AGENT_K2_FOREIGN_PROBE=fixture-foreign-team
 cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets
 cargo clippy --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets -- -D warnings
 cargo fmt --manifest-path crates/team-agent-contract/Cargo.toml --check
