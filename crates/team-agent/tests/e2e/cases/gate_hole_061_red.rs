@@ -98,11 +98,20 @@ fn tooth_1_existing_launch_smoke_runs_documented_quick_start_verbatim() {
     assert_eq!(report["reason"], "caller_pane_missing");
     assert_eq!(report["worker_readiness"]["all_workers_spawned"], true);
     assert_eq!(report["worker_readiness"]["all_attached_receiver"], false);
-    assert!(report["next_actions"].as_array().is_some_and(|actions| !actions.is_empty()));
+    let next_actions = report["next_actions"].as_array().expect("typed next actions");
+    assert!(!next_actions.is_empty());
+    assert!(next_actions.iter().all(|action| action.as_str()
+        .is_some_and(|action| !action.contains("claim-leader"))),
+        "TOOTH-1: next actions must not suggest claiming leadership: {next_actions:?}");
+    // Full diagnostics explicitly prohibit claiming; that warning is not an unsafe suggestion.
+    for key in ["readiness", "worker_readiness"] {
+        assert_eq!(report[key]["next_action"],
+            "run from the intended leader tmux pane; do not run claim-leader",
+            "TOOTH-1: {key} must retain safe binding guidance");
+    }
     assert!(
         out.stdout.contains("quick-start degraded:")
             && out.stdout.contains("status")
-            && !out.stdout.contains("claim-leader")
             && out.stderr.is_empty(),
         "TOOTH-1: incomplete launch must give safe English guidance and typed cause; stdout={} stderr={}",
         out.stdout,
