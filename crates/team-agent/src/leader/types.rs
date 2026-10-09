@@ -343,6 +343,8 @@ pub struct LeaderStartPlan {
     pub argv: Vec<String>,
     /// For managed launches, the provider command argv spawned inside the leader pane.
     pub provider_argv: Vec<String>,
+    /// Payload-free launch snapshot; prompt-bearing diagnostics must withhold argv/output.
+    pub leader_prompt: Option<super::prompt::PromptMetadata>,
     /// For managed launches, the window that hosts the leader provider pane.
     pub leader_window: Option<WindowName>,
     /// True for external/current-pane leader compatibility paths.
@@ -456,6 +458,8 @@ pub enum LeaderError {
     /// provider 命令未安装 / leader 启动前置失败(`leader_start_plan` raise RuntimeError)。
     #[error("leader start error: {0}")]
     Start(String),
+    #[error(transparent)]
+    Prompt(#[from] super::prompt::PromptError),
     /// tmux target scan / set-environment / send 失败(transport 层冒泡)。
     #[error("tmux error: {0}")]
     Tmux(String),

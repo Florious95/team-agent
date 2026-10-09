@@ -68,6 +68,9 @@ pub fn run(argv: &[String], cwd: &Path) -> ExitCode {
     if command == "route" {
         return super::route::run(&argv[1..]);
     }
+    if command == "leader-prompt" {
+        return super::leader_prompt::run(&argv[1..]);
+    }
     if is_leader_passthrough_command(command) {
         return match cmd_leader_passthrough(command, &argv[1..], cwd) {
             Ok(result) => emit_result(result),
@@ -211,6 +214,9 @@ pub(crate) fn __test_dispatch(
 fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliError> {
     if command == "route" {
         return Ok(super::route::run(args));
+    }
+    if command == "leader-prompt" {
+        return Ok(super::leader_prompt::run(args));
     }
     // Keep the removed flag harmless for older scripts and persisted command
     // lines; the default tmux backend is already the only runtime path.
@@ -365,7 +371,11 @@ pub(crate) fn default_help() -> String {
         "Observation and collaboration",
         &["leaders", "doctor", "approvals"],
     );
-    append_help_section(&mut out, "Configuration", &["route", "profile", "install-skill"]);
+    append_help_section(
+        &mut out,
+        "Configuration",
+        &["route", "leader-prompt", "profile", "install-skill"],
+    );
     append_help_section(
         &mut out,
         "Guided recovery",
@@ -424,6 +434,9 @@ pub(super) fn command_help(command: Option<&str>) -> String {
     };
     if name == "route" {
         return super::route::HELP.to_string();
+    }
+    if name == "leader-prompt" {
+        return super::leader_prompt::HELP.to_string();
     }
     let (details, examples, next) = match name {
         "quick-start" => (
@@ -2074,7 +2087,7 @@ mod tests {
             .filter(|spec| spec.default_help)
             .map(|spec| spec.name)
             .collect();
-        assert_eq!(expected.len(), 29, "the public catalog is Human29");
+        assert_eq!(expected.len(), 30, "the public catalog includes Leader prompt management");
         for spec_name in &expected {
             assert!(
                 visible.iter().any(|command| command == spec_name),
@@ -2088,7 +2101,7 @@ mod tests {
         expected_sorted.sort();
         assert_eq!(
             actual, expected_sorted,
-            "default help must match the exact Human29 public spec set, not a slack threshold; got {visible:?}"
+            "default help must match the exact Human30 public spec set, not a slack threshold; got {visible:?}"
         );
         assert!(
             top_help.contains("copilot"),

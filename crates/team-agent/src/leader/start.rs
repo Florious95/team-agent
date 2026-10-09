@@ -23,7 +23,7 @@ use crate::provider::{get_adapter, Provider};
 use crate::tmux_backend::TmuxBackend;
 use crate::transport::{
     CaptureRange, PaneId, PaneInfo, PaneLiveness, SessionName, SpawnResult, Target, Transport,
-    WindowName,
+    TransportError, WindowName,
 };
 
 use super::helpers::{
@@ -291,6 +291,12 @@ fn leader_start_plan_with_ambient_authority(
         ),
         _ => None,
     };
+    let configured_prompt = if mode == LeaderStartMode::AttachExisting {
+        None
+    } else {
+        super::prompt::load().map_err(|error| error.for_provider(provider))?
+    };
+    let mut pi_routed_argv = None;
     let mut provider_argv = if provider == Provider::Pi && mode != LeaderStartMode::AttachExisting {
         let parsed = crate::lifecycle::launch::pi_mcp::parse_pi_leader_args(provider_args)
             .map_err(|error| LeaderError::Start(error.to_string()))?;
@@ -303,7 +309,20 @@ fn leader_start_plan_with_ambient_authority(
             "leader",
             identity.team_id.as_str(),
         );
-        let prompt = crate::lifecycle::worker_command_context::compile_pi_leader_system_prompt();
+        let contract = crate::lifecycle::worker_command_context::compile_pi_leader_system_prompt();
+        let prompt = if let Some(stored) = configured_prompt.as_ref() {
+            // Read route once and validate conflicts before creating any Pi MCP artifacts.
+            let mut routed = vec!["pi".to_string()];
+            crate::provider::argv_route::apply(provider, &mut routed)
+                .map_err(|error| LeaderError::Start(error.to_string()))?;
+            let combined = super::prompt::compose_pi_contract(
+                &contract, &routed, &stored.text, &stored.path,
+            )?;
+            pi_routed_argv = Some(routed);
+            combined
+        } else {
+            contract
+        };
         let team_mcp_tools = ["send_message", "report_result", "get_team_status"];
         crate::lifecycle::launch::pi_mcp::materialize_pi_plan(
             crate::lifecycle::launch::pi_mcp::PiMaterializeRequest {
@@ -330,8 +349,15 @@ fn leader_start_plan_with_ambient_authority(
         provider_command_argv(provider, provider_args)
     };
     if mode != LeaderStartMode::AttachExisting {
-        crate::provider::argv_route::apply(provider, &mut provider_argv)
-            .map_err(|error| LeaderError::Start(error.to_string()))?;
+        if let Some(routed) = pi_routed_argv {
+            provider_argv.splice(1..1, routed.into_iter().skip(1));
+        } else {
+            crate::provider::argv_route::apply(provider, &mut provider_argv)
+                .map_err(|error| LeaderError::Start(error.to_string()))?;
+            if let Some(stored) = configured_prompt.as_ref() {
+                super::prompt::inject(provider, &mut provider_argv, &stored.text, &stored.path)?;
+            }
+        }
     }
     let argv = start_argv(
         mode,
@@ -361,6 +387,9 @@ fn leader_start_plan_with_ambient_authority(
         session_name: plan_session_name,
         argv,
         provider_argv,
+        leader_prompt: configured_prompt
+            .as_ref()
+            .map(|stored| stored.metadata(provider)),
         // 0.3.28 Step 2: leader window inside the dedicated leader session is
         // named after the provider wire (e.g. `claude_code`), never the
         // literal string `leader`. Occupied names get a per-launch suffix.
@@ -1345,7 +1374,7 @@ fn ensure_managed_leader_pane(
                 &env_unset,
                 provider_label,
             )
-            .map_err(|error| LeaderError::Start(error.to_string()))
+            .map_err(|error| prompt_aware_spawn_error(plan, error))
     } else {
         let env_unset = leader_env_unset_for_provider(plan.provider);
         let provider_label = provider_command_name(plan.provider);
@@ -1359,8 +1388,35 @@ fn ensure_managed_leader_pane(
                 &env_unset,
                 provider_label,
             )
-            .map_err(|error| LeaderError::Start(error.to_string()))
+            .map_err(|error| prompt_aware_spawn_error(plan, error))
     }
+}
+
+fn prompt_aware_spawn_error(plan: &LeaderStartPlan, error: TransportError) -> LeaderError {
+    let Some(metadata) = plan.leader_prompt.as_ref() else {
+        return LeaderError::Start(error.to_string());
+    };
+    // Transport subprocess errors contain the full tmux shell argv. Preserve
+    // real exit/I/O evidence without exposing the process-level prompt payload.
+    let mut safe = super::prompt::PromptError::new(
+        "leader_prompt_carrier_failed",
+        "Leader prompt-bearing transport spawn failed; argv and stderr withheld",
+        Some(&metadata.config_path),
+    )
+    .for_provider(plan.provider);
+    match error {
+        TransportError::Subprocess { code, .. } => safe.exit_code = code,
+        TransportError::Spawn { source, .. } | TransportError::Inject { source, .. }
+            | TransportError::Capture { source } | TransportError::Io(source) => {
+            safe.io_kind = Some(format!("{:?}", source.kind()));
+        }
+        oversized @ TransportError::CommandTooLong { .. } => {
+            safe.error = oversized.to_string();
+        }
+        _ => {}
+    }
+    safe.action = "Inspect the owned launcher and transport metadata; do not repeat or change carriers to bypass the failure";
+    LeaderError::Prompt(safe)
 }
 
 struct ManagedAttachWatch<'a> {
@@ -2487,8 +2543,8 @@ fn run_leader_argv(
                 .code()
                 .map(|code| code.to_string())
                 .unwrap_or_else(|| "signal".to_string()),
-            crate::redaction::redact_external_text(&stdout),
-            crate::redaction::redact_external_text(&stderr),
+            prompt_aware_diagnostic_text(plan, &stdout),
+            prompt_aware_diagnostic_text(plan, &stderr),
         ),
     )
     .map_err(|error| {
@@ -2497,6 +2553,11 @@ fn run_leader_argv(
             diagnostics_path.display()
         ))
     })?;
+    let stderr = if plan.leader_prompt.is_some() {
+        prompt_aware_diagnostic_text(plan, &stderr)
+    } else {
+        stderr
+    };
     Ok(LeaderProcessExit {
         status,
         stderr,
@@ -2591,6 +2652,14 @@ fn launcher_diagnostics_path(workspace: &Path) -> PathBuf {
     ))
 }
 
+fn prompt_aware_diagnostic_text(plan: &LeaderStartPlan, text: &str) -> String {
+    if plan.leader_prompt.is_some() {
+        "[withheld: Leader prompt-bearing launch]".to_string()
+    } else {
+        crate::redaction::redact_external_text(text)
+    }
+}
+
 fn write_launcher_diagnostics_header(
     path: &Path,
     plan: &LeaderStartPlan,
@@ -2599,13 +2668,22 @@ fn write_launcher_diagnostics_header(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let metadata = plan
+        .leader_prompt
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
+        .map(|metadata| format!("leader_prompt={metadata}\n"))
+        .unwrap_or_default();
     std::fs::write(
         path,
         format!(
-            "startup_stage=prepare\nmode={:?}\nprovider={}\nargv={}\n",
+            "startup_stage=prepare\nmode={:?}\nprovider={}\nargv={}\n{}",
             plan.mode,
             provider_wire(plan.provider),
-            crate::redaction::redact_external_text(&argv.join(" ")),
+            prompt_aware_diagnostic_text(plan, &argv.join(" ")),
+            metadata,
         ),
     )
 }
@@ -3345,6 +3423,7 @@ mod tests {
             session_name: None,
             argv: vec!["sh".to_string(), "-c".to_string(), command],
             provider_argv: vec!["codex".to_string()],
+            leader_prompt: None,
             leader_window: None,
             is_external_leader: true,
             leader_env: BTreeMap::new(),
@@ -3402,6 +3481,7 @@ mod tests {
             session_name: None,
             argv: vec!["sh".to_string(), "-c".to_string(), command],
             provider_argv: vec!["fake".to_string()],
+            leader_prompt: None,
             leader_window: None,
             is_external_leader: false,
             leader_env: BTreeMap::new(),
@@ -3931,12 +4011,44 @@ mod tests {
             session_name: Some(SessionName::new("team-agent-leader-claude_code-demo")),
             argv: vec!["tmux".to_string(), "attach-session".to_string()],
             provider_argv: vec!["claude".to_string()],
+            leader_prompt: None,
             leader_window: Some(WindowName::new("claude_code")),
             is_external_leader: false,
             leader_env: BTreeMap::new(),
             identity: Some(persist_test_identity(workspace)),
             detached: false,
         }
+    }
+
+    #[test]
+    fn leader_prompt_diagnostics_hide_payload_but_keep_unconfigured_baseline_and_native_cause() {
+        let root = std::env::temp_dir().join(format!("ta-prompt-diagnostics-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("launcher.log");
+        let mut plan = persist_test_plan(&root);
+        let plain = vec!["tmux".to_string(), "attach-session".to_string()];
+        super::write_launcher_diagnostics_header(&path, &plan, &plain).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(),
+            "startup_stage=prepare\nmode=ManagedTmuxClient\nprovider=claude_code\nargv=tmux attach-session\n");
+        const BODY: &str = "LEADER_ONLY_SENSITIVE_309";
+        plan.leader_prompt = Some(crate::leader::prompt::PromptMetadata {
+            config_path: root.join("leader-prompt.txt"), carrier: "--append-system-prompt", bytes: BODY.len(),
+        });
+        let shell = vec!["tmux".to_string(), "new-session".to_string(),
+            format!("claude --append-system-prompt '{BODY}'")];
+        super::write_launcher_diagnostics_header(&path, &plan, &shell).unwrap();
+        let header = std::fs::read_to_string(&path).unwrap();
+        assert!(!header.contains(BODY));
+        assert!(header.contains("leader_prompt={") && header.contains("--append-system-prompt"));
+        assert!(!super::prompt_aware_diagnostic_text(&plan, BODY).contains(BODY));
+        let error = super::prompt_aware_spawn_error(&plan, TransportError::Subprocess {
+            argv: shell, code: Some(7), stderr: BODY.to_string(),
+        });
+        let crate::leader::LeaderError::Prompt(error) = error else { panic!("typed carrier failure required") };
+        assert_eq!(error.reason, "leader_prompt_carrier_failed");
+        assert_eq!(error.exit_code, Some(7));
+        assert!(!error.report().to_string().contains(BODY));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

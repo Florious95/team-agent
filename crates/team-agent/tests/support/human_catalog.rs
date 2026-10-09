@@ -30,6 +30,7 @@ pub const HUMAN_COMMANDS: &[&str] = &[
     "clone-agent",
     "approvals",
     "route",
+    "leader-prompt",
     "profile",
     "install-skill",
     "inbox",

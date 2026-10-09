@@ -1,6 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use super::*;
 
+mod prompt_contract;
+
 // ── helpers ────────────────────────────────────────────────────────────
 /// derive 一个真 LeaderSessionUuid(骨架无公开裸构造器,仅 `derive`)。
 fn uuid(fp: &str, ws: &str, user: &str, team: &str) -> LeaderSessionUuid {
