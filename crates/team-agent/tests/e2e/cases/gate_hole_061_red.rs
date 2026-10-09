@@ -88,13 +88,23 @@ fn tooth_1_existing_launch_smoke_runs_documented_quick_start_verbatim() {
         out.exit_code, 1,
         "an incomplete leader bind is not launch success"
     );
+    let report: Value = serde_json::from_str(
+        out.stdout.strip_prefix("quick-start report:\n")
+            .expect("incomplete launch must expose its full English report"),
+    ).expect("complete quick-start diagnostic JSON");
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["ready"], false);
+    assert_eq!(report["status"], "leader_binding_incomplete");
+    assert_eq!(report["reason"], "caller_pane_missing");
+    assert_eq!(report["worker_readiness"]["all_workers_spawned"], true);
+    assert_eq!(report["worker_readiness"]["all_attached_receiver"], false);
+    assert!(report["next_actions"].as_array().is_some_and(|actions| !actions.is_empty()));
     assert!(
-        out.stdout.contains("启动未完成")
-            && out.stdout.contains("team-agent doctor --workspace")
+        out.stdout.contains("quick-start degraded:")
             && out.stdout.contains("status")
             && !out.stdout.contains("claim-leader")
             && out.stderr.is_empty(),
-        "TOOTH-1: incomplete launch must give safe Human guidance; stdout={} stderr={}",
+        "TOOTH-1: incomplete launch must give safe English guidance and typed cause; stdout={} stderr={}",
         out.stdout,
         out.stderr
     );

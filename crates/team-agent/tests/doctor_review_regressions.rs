@@ -63,6 +63,28 @@ fn report(output: &Output) -> Value {
     ))
 }
 
+fn bounded_triage_with_full_details<'a>(text: &'a str, expected: &Value) -> Vec<&'a str> {
+    let mut triage = Vec::new();
+    let mut details = None;
+    for line in text.lines() {
+        assert!(!line.chars().any(char::is_control), "control leaked: {line:?}");
+        if let Some(json) = line.strip_prefix("details: ") {
+            let parsed: Value = serde_json::from_str(json).expect("complete diagnostic JSON");
+            assert!(details.replace(parsed).is_none(), "duplicate details line");
+        } else {
+            assert!(line.len() <= 160, "unbounded triage: {line}");
+            triage.push(line);
+        }
+    }
+    let details = details.expect("full diagnostic details missing");
+    for key in ["error", "status", "issues", "suggested_repairs"] {
+        if expected.get(key).is_some() {
+            assert_eq!(details.get(key), expected.get(key), "lost full {key}");
+        }
+    }
+    triage
+}
+
 fn issue_id(issue: &Value) -> Option<&str> {
     issue.as_str().or_else(|| issue.get("id").and_then(Value::as_str))
 }
@@ -191,7 +213,7 @@ fn r3_each_finding_keeps_its_target_in_json_repairs_and_human_lines() {
             assert!(text.lines().any(|line| line.starts_with("repair:") && line.contains(target)), "{text}");
         }
         assert!(!text.contains("synthetic-test-only"));
-        assert!(text.lines().all(|line| line.len() <= 160));
+        bounded_triage_with_full_details(&text, &value);
     }
 }
 
@@ -203,9 +225,9 @@ fn r4_comms_human_has_only_summary_issue_and_repair_lines() {
         let output = f.run(command, &f.workspace, &["--comms"]);
         let text = String::from_utf8(output.stdout).unwrap();
         assert!(text.starts_with("doctor:"), "{text}");
-        assert_eq!(text.lines().count(), 1 + value["issues"].as_array().unwrap().len()
+        let triage = bounded_triage_with_full_details(&text, &value);
+        assert_eq!(triage.len(), 1 + value["issues"].as_array().unwrap().len()
             + value["suggested_repairs"].as_array().unwrap().len(), "{text}");
-        assert!(text.lines().all(|line| line.len() <= 160));
     }
 }
 

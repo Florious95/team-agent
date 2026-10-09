@@ -90,11 +90,11 @@ fn unknown_subcommand_uses_d_o_error_exit1_with_argparse_diagnostic() {
         String::from_utf8_lossy(&out.stdout)
     );
     assert!(
-        err.starts_with("用法：team-agent"),
+        err.starts_with("Usage: team-agent"),
         "golden prints an argparse usage block to stderr; Rust is SILENT. got {err:?}"
     );
     assert!(
-        err.contains("错误：") && err.contains("没有这个操作") && err.contains("'bogus'"),
+        err.contains("Error: Unknown command: 'bogus'"),
         "golden: `team-agent: error: argument {{...}}: invalid choice: 'bogus' (choose from ...)`; \
          got {err:?}"
     );
