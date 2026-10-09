@@ -45,7 +45,7 @@ use super::*;
 /// params:
 ///   spec_path: spec 路径，team 目录优先取 state 里的 team_dir
 ///   session_name: 目标 tmux session
-/// returns: 已起席位清单，含目标 pane、启动模式、布局与显示信息；spawn 后 pane 已死的席位被跳过
+/// returns: legacy 启动收据与独立 contract 已提交席位 ID；不为私有 socket 伪造 legacy pane
 /// errors: 命令拼装或 transport spawn 失败时返回 LifecycleError
 /// ---
 pub(super) fn spawn_agents(
@@ -54,7 +54,7 @@ pub(super) fn spawn_agents(
     spec: &Value,
     session_name: &SessionName,
     transport: &dyn Transport,
-) -> Result<Vec<StartedAgent>, LifecycleError> {
+) -> Result<(Vec<StartedAgent>, Vec<AgentId>), LifecycleError> {
     // E5 解耦:team_dir(角色定义 + profiles 所在)≠ spec_path.parent()(spec 已迁出到 .team/runtime)。
     // 优先取 state.team_dir(角色目录),回落 spec_path.parent()(legacy 同目录布局)。
     let team_dir_buf = crate::state::persist::load_runtime_state(workspace)
@@ -74,6 +74,10 @@ pub(super) fn spawn_agents(
         Some(Value::Bool(true))
     );
     let mut started = Vec::new();
+    #[cfg(unix)]
+    let mut contract_started = Vec::new();
+    #[cfg(not(unix))]
+    let contract_started = Vec::new();
     for agent in spec_agent_values(spec) {
         let Some(agent_id_raw) = agent.get("id").and_then(Value::as_str) else {
             continue;
@@ -96,6 +100,7 @@ pub(super) fn spawn_agents(
                 &team,
                 agent_id_raw,
             )?;
+            contract_started.push(AgentId::new(agent_id_raw));
             // No legacy target is manufactured for the private native socket.
             // persist_spawn_agent_state projects the actual K3 seat separately.
             continue;
@@ -451,7 +456,7 @@ pub(super) fn spawn_agents(
             managed_mcp_config: plan.managed_mcp_config || profile_launch.managed_mcp_config,
         });
     }
-    Ok(started)
+    Ok((started, contract_started))
 }
 
 /// ---

@@ -146,15 +146,16 @@ pub fn launch_with_transport_in_workspace(
         )));
     }
     let routes = spec_routes(&spec);
-    let started = if dry_run {
-        Vec::new()
+    let (started, contract_started) = if dry_run {
+        (Vec::new(), Vec::new())
     } else {
         phase_timer.emit(
             workspace,
             "launch.phase",
             super::restart::LifecyclePhase::SpawnAll,
         );
-        let started = spawn_agents(workspace, spec_path, &spec, &session_name, transport)?;
+        let (started, contract_started) =
+            spawn_agents(workspace, spec_path, &spec, &session_name, transport)?;
         persist_spawn_agent_state(
             workspace,
             spec_path,
@@ -218,7 +219,7 @@ pub fn launch_with_transport_in_workspace(
                 "launch",
             );
         }
-        started
+        (started, contract_started)
     };
     // 0.3.28 Step 1: topology invariant guard (warn-only during migration).
     // Logs each violation to stderr; never panics. Promoted to hard error at
@@ -233,6 +234,7 @@ pub fn launch_with_transport_in_workspace(
     Ok(LaunchReport {
         session_name,
         started,
+        contract_started,
         dry_run,
         tmux_endpoint: transport.tmux_endpoint(),
         routes,

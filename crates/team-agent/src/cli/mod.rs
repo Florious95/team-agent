@@ -3787,7 +3787,13 @@ pub mod lifecycle_port {
                 // tool-set load has not been confirmed yet (PendingToolLoad).
                 let incomplete_session_capture_agents =
                     launch.session_capture_incomplete_agents.clone();
-                let all_spawned = !launch.started.is_empty();
+                let agent_ids: Vec<_> = launch
+                    .started
+                    .iter()
+                    .map(|agent| agent.agent_id.as_str())
+                    .chain(launch.contract_started.iter().map(|id| id.as_str()))
+                    .collect();
+                let all_spawned = !agent_ids.is_empty();
                 let leader_receiver_attached = launch.leader_receiver_attached;
                 let all_resumable_have_session = incomplete_session_capture_agents.is_empty();
                 let all_workers_spawned = all_spawned;
@@ -3915,7 +3921,7 @@ pub mod lifecycle_port {
                     "ready": readiness_json.get("ready").cloned().unwrap_or(Value::Bool(false)),
                     "session_name": session_name.as_str(),
                     "team": team,
-                    "agent_ids": launch.started.iter().map(|agent| agent.agent_id.as_str()).collect::<Vec<_>>(),
+                    "agent_ids": agent_ids,
                     "dry_run": launch.dry_run,
                     "next_actions": next_actions,
                     "attach_commands": attach_commands,
@@ -4036,9 +4042,8 @@ pub mod lifecycle_port {
                 .is_some());
         }
 
-        #[test]
-        fn pending_tool_load_success_output_explains_bound_send_without_doctor() {
-            let value = quick_start_value(crate::lifecycle::QuickStartReport::Ready {
+        fn pending_tool_load_report() -> crate::lifecycle::QuickStartReport {
+            crate::lifecycle::QuickStartReport::Ready {
                 session_name: crate::transport::SessionName::new("team-demo"),
                 launch: Box::new(crate::lifecycle::LaunchReport {
                     session_name: crate::transport::SessionName::new("team-demo"),
@@ -4054,6 +4059,7 @@ pub mod lifecycle_port {
                         provider_projects_root: None,
                         managed_mcp_config: false,
                     }],
+                    contract_started: Vec::new(),
                     dry_run: false,
                     tmux_endpoint: None,
                     routes: Vec::new(),
@@ -4066,7 +4072,63 @@ pub mod lifecycle_port {
                 attach_commands: Vec::new(),
                 worker_readiness: crate::lifecycle::QuickStartReadiness::PendingToolLoad,
                 team: "team-demo".to_string(),
-            });
+            }
+        }
+
+        #[test]
+        fn contract_start_receipts_join_summary_without_bypassing_leader_binding() {
+            for (legacy, contract) in [(false, true), (true, true), (true, false), (false, false)] {
+                for bound in [false, true] {
+                    let mut report = pending_tool_load_report();
+                    let crate::lifecycle::QuickStartReport::Ready { launch, .. } = &mut report else {
+                        panic!("ready fixture required");
+                    };
+                    if !legacy {
+                        launch.started.clear();
+                    }
+                    if contract {
+                        launch
+                            .contract_started
+                            .push(crate::model::ids::AgentId::new("kiro-worker"));
+                    }
+                    launch.leader_receiver_attached = bound;
+                    launch.leader_bind_stage = (!bound).then(|| "caller_pane".into());
+                    launch.leader_bind_reason = (!bound).then(|| "caller_pane_missing".into());
+                    assert_eq!(launch.started.len(), usize::from(legacy));
+                    let expected: Vec<_> = [(legacy, "worker"), (contract, "kiro-worker")]
+                        .into_iter()
+                        .filter_map(|(started, id)| started.then_some(id))
+                        .collect();
+                    let value = quick_start_value(report);
+                    assert_eq!(value["agent_ids"], json!(expected));
+                    assert_eq!(
+                        value["readiness"]["all_workers_spawned"],
+                        json!(legacy || contract)
+                    );
+                    assert_eq!(value["readiness"]["all_spawned"], json!(legacy || contract));
+                    assert_eq!(value["readiness"]["leader_receiver_attached"], json!(bound));
+                    assert_eq!(value["ok"], json!((legacy || contract) && bound));
+                    assert_eq!(value["ready"], json!((legacy || contract) && bound));
+                    if !bound {
+                        assert_eq!(value["status"], "leader_binding_incomplete");
+                        assert_eq!(value["reason"], "caller_pane_missing");
+                    } else {
+                        assert_eq!(value["status"], "pending_tool_load");
+                    }
+                    let mut compact = value.clone();
+                    compact_quick_start_value(&mut compact);
+                    assert_eq!(
+                        compact["worker_readiness"]["all_workers_spawned"],
+                        json!(legacy || contract)
+                    );
+                    assert_eq!(compact["ready"], value["ready"]);
+                }
+            }
+        }
+
+        #[test]
+        fn pending_tool_load_success_output_explains_bound_send_without_doctor() {
+            let value = quick_start_value(pending_tool_load_report());
             assert_eq!(
                 value.get("summary").and_then(Value::as_str),
                 Some("team started; leader bound; send a task next (worker tool load unverified): team-demo")
