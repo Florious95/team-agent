@@ -81,10 +81,7 @@ pub fn registry_tools(text: &str, server: &str) -> Option<Vec<LogicalTool>> {
             line.split_whitespace().collect::<Vec<_>>()
                 == ["Name", "Source", "Status", "Description"]
         })
-        || text
-            .lines()
-            .map(str::trim)
-            .rfind(|line| !line.is_empty())
+        || text.lines().map(str::trim).rfind(|line| !line.is_empty())
             != Some("esc to close · ↑↓ to scroll")
     {
         return None;
