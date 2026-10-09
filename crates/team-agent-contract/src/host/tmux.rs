@@ -56,6 +56,37 @@ pub struct PaneState {
     pub rows: u16,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneMetadataStage {
+    NewSession,
+    Query,
+}
+
+/// Only the fixed metadata FORMAT response, never a pane capture or command/env.
+/// At most 256 original bytes are retained, escaped to at most 1024 ASCII bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneMetadataDiagnostic {
+    pub stage: PaneMetadataStage,
+    pub actual_fields: usize,
+    pub output_bytes: usize,
+    pub sample: String,
+    pub truncated: bool,
+}
+
+impl std::fmt::Display for PaneMetadataDiagnostic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let stage = match self.stage {
+            PaneMetadataStage::NewSession => "new-session",
+            PaneMetadataStage::Query => "query",
+        };
+        write!(
+            f,
+            "stage={stage}; fields={}; bytes={}; sample=\"{}\"; truncated={}",
+            self.actual_fields, self.output_bytes, self.sample, self.truncated
+        )
+    }
+}
+
 fn directory_signature(owner: &DirectoryReceipt) -> String {
     let key = format!(
         "{}:{}:{}:{}:{}:{}",
@@ -75,10 +106,37 @@ fn numbered(value: &str, prefix: char) -> bool {
         .is_some_and(|tail| !tail.is_empty() && tail.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
-pub fn parse_pane(bytes: &[u8]) -> Result<PaneState, HostError> {
-    let text = std::str::from_utf8(bytes)
-        .map_err(|_| HostError::new("tmux metadata encoding", HostErrorKind::Unknown))?;
+pub fn parse_pane(bytes: &[u8], stage: PaneMetadataStage) -> Result<PaneState, HostError> {
+    let invalid = |operation| {
+        let line = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+        let actual_fields = if line.is_empty() {
+            0
+        } else if line.contains(&b'\t') {
+            line.split(|byte| *byte == b'\t').count()
+        } else {
+            line.windows(2).filter(|pair| *pair == b"\\t").count() + 1
+        };
+        HostError {
+            operation,
+            kind: HostErrorKind::Unknown,
+            metadata: Some(PaneMetadataDiagnostic {
+                stage,
+                actual_fields,
+                output_bytes: bytes.len(),
+                sample: bytes[..bytes.len().min(256)]
+                    .iter()
+                    .flat_map(|byte| std::ascii::escape_default(*byte))
+                    .map(char::from)
+                    .collect(),
+                truncated: bytes.len() > 256,
+            }),
+        }
+    };
+    let text = std::str::from_utf8(bytes).map_err(|_| invalid("tmux metadata encoding"))?;
     let line = text.strip_suffix('\n').unwrap_or(text);
+    if line.is_empty() {
+        return Err(invalid("tmux metadata empty output"));
+    }
     // Preserve native field contents: prefer real TABs, otherwise accept the
     // escaped separator spelling. Never globally unescape or merge mixed frames.
     let fields: Vec<_> = if line.contains('\t') {
@@ -86,34 +144,32 @@ pub fn parse_pane(bytes: &[u8]) -> Result<PaneState, HostError> {
     } else {
         line.split(r"\t").collect()
     };
-    if fields.len() != 13
-        || !numbered(fields[0], '$')
-        || !numbered(fields[1], '@')
-        || !numbered(fields[2], '%')
-    {
-        return Err(HostError::new(
-            "tmux metadata shape",
-            HostErrorKind::Unknown,
-        ));
+    if fields.len() != 13 {
+        return Err(invalid("tmux metadata field count (expected 13)"));
+    }
+    for (index, prefix, operation) in [
+        (0, '$', "tmux metadata invalid session ID"),
+        (1, '@', "tmux metadata invalid window ID"),
+        (2, '%', "tmux metadata invalid pane ID"),
+    ] {
+        if !numbered(fields[index], prefix) {
+            return Err(invalid(operation));
+        }
     }
     let pid = fields[3]
         .parse::<u32>()
         .ok()
         .filter(|pid| *pid > 1)
-        .ok_or_else(|| HostError::new("tmux pane pid", HostErrorKind::Unknown))?;
+        .ok_or_else(|| invalid("tmux pane pid"))?;
     let dead = match fields[6] {
         "0" => false,
         "1" => true,
-        _ => return Err(HostError::new("tmux pane state", HostErrorKind::Unknown)),
+        _ => return Err(invalid("tmux pane state")),
     };
     let exit_code = if fields[7].is_empty() {
         None
     } else {
-        Some(
-            fields[7]
-                .parse()
-                .map_err(|_| HostError::new("tmux exit receipt", HostErrorKind::Unknown))?,
-        )
+        Some(fields[7].parse().map_err(|_| invalid("tmux exit receipt"))?)
     };
     let mode = match (fields[8], fields[9]) {
         ("0", "") => PaneMode::Normal,
@@ -125,12 +181,12 @@ pub fn parse_pane(bytes: &[u8]) -> Result<PaneState, HostError> {
         .parse::<u16>()
         .ok()
         .filter(|n| *n > 0)
-        .ok_or_else(|| HostError::new("pane columns", HostErrorKind::Unknown))?;
+        .ok_or_else(|| invalid("pane columns"))?;
     let rows = fields[12]
         .parse::<u16>()
         .ok()
         .filter(|n| *n > 0)
-        .ok_or_else(|| HostError::new("pane rows", HostErrorKind::Unknown))?;
+        .ok_or_else(|| invalid("pane rows"))?;
     Ok(PaneState {
         address: PaneAddress {
             session: fields[0].into(),
@@ -317,7 +373,7 @@ impl<R: CommandRunner> TmuxHost<R> {
         if !result.success() {
             return Err(command_error(&result, "tmux pane query"));
         }
-        parse_pane(&result.stdout)
+        parse_pane(&result.stdout, PaneMetadataStage::Query)
     }
 
     fn socket_identity(&self) -> Result<(u64, u64), HostError> {
@@ -583,7 +639,7 @@ impl<R: CommandRunner> TmuxHost<R> {
         if !result.success() {
             return Err(command_error(&result, "tmux spawn"));
         }
-        let initial = parse_pane(&result.stdout)?;
+        let initial = parse_pane(&result.stdout, PaneMetadataStage::NewSession)?;
         receipt.pane = Some(initial.address.clone());
         if initial.address.session_name != session_name
             || initial.address.window_name != "worker"

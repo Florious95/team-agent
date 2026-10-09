@@ -11,7 +11,8 @@ pub mod supervisor;
 
 use crate::contract::types::ContractError;
 
-/// Stable errors intentionally exclude SQL values, prompt/config bytes and native captures.
+/// Errors exclude SQL values, prompt/config bytes and native screen captures.
+/// HostDiagnostic preserves only bounded, escaped tmux metadata diagnostics.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     Contract(ContractError),
@@ -22,11 +23,15 @@ pub enum Error {
     Corrupt,
     Io(std::io::ErrorKind),
     Host(&'static str),
+    HostDiagnostic(crate::host::HostError),
     NeedsRecovery,
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::HostDiagnostic(error) => std::fmt::Display::fmt(error, f),
+            _ => write!(f, "{self:?}"),
+        }
     }
 }
 impl std::error::Error for Error {}

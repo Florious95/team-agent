@@ -13,6 +13,12 @@
 - native controls 也调用 `inject_with_contract`；只有注册的 profile/hash/operation/control kind 编码允许执行，无直接 `send-keys` fallback。
 - stop 只关闭已证的 owned pane 并等待捕获的 native process 退出；不 `kill-server`，不 unlink socket，不递归清理。只有本上下文确认 quiescence 后，才允许 descriptor-granted owned receipt 的精确清场。
 
+## Tmux 元数据失败诊断
+
+固定 `FORMAT` 的解析错误区分 `new-session` 首次返回与后续 `query`；空输出、字段数不等于 13（保留空字段并输出实际数量）、session/window/pane ID 非法分别报错。其他 PID、状态和尺寸校验仍严格拒绝，不因诊断而放宽身份围栏。
+
+错误只附本次元数据响应的前 256 原始字节，按字节 ASCII 转义（最多 1024 字符），并标注总字节数及是否截断；不读取/打印 pane 屏幕、prompt、argv、环境、stderr 或认证配置。桥接保留这些详情到 lifecycle 的 `operation.failure`，而非只剩静态 `Host("tmux metadata shape")`。诊断不重试 spawn、不接管旧 pane、不清除 pending/lease。
+
 ## Bootstrap 原子边界
 
 Store schema **2** 在原库增加 `contract_bootstrap`（owner、唯一 attempt、confirmed），不是队列。旧未发布 schema 1 runtime root 不自动迁移/接管；重新开隔离 root，历史证据保留。

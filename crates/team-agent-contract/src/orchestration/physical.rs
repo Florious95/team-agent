@@ -47,7 +47,11 @@ pub struct PhysicalRuntime<'a> {
     pub bootstrap: Option<&'a mut dyn BootstrapCommit>,
 }
 fn host_error(error: HostError) -> Error {
-    Error::Host(error.operation)
+    if error.metadata.is_some() {
+        Error::HostDiagnostic(error)
+    } else {
+        Error::Host(error.operation)
+    }
 }
 impl<'a> PhysicalRuntime<'a> {
     pub fn new(
@@ -500,5 +504,40 @@ impl DeliveryHost for PhysicalRuntime<'_> {
         report
             .business_receipt()
             .ok_or(Error::Invalid("business receipt missing"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{host_error, Error};
+    use crate::host::{
+        tmux::{parse_pane, PaneMetadataStage},
+        HostError, HostErrorKind,
+    };
+
+    #[test]
+    fn pane_metadata_diagnostics_survive_the_lifecycle_error_boundary() {
+        for (stage, label) in [
+            (PaneMetadataStage::NewSession, "new-session"),
+            (PaneMetadataStage::Query, "query"),
+        ] {
+            let error = parse_pane(b"$0\t@0\n", stage).unwrap_err();
+            let shown = error.to_string();
+            let mapped = host_error(error);
+            assert!(matches!(&mapped, Error::HostDiagnostic(_)));
+            // Lifecycle::finish persists this Display string in operation.failure.
+            assert_eq!(mapped.to_string(), shown);
+            assert!(shown.contains("field count (expected 13)"));
+            assert!(shown.contains(&format!("stage={label}; fields=2;")));
+            assert!(shown.contains(r"$0\t@0\n"));
+        }
+    }
+
+    #[test]
+    fn other_host_errors_keep_the_existing_opaque_contract() {
+        assert_eq!(
+            host_error(HostError::new("tmux spawn", HostErrorKind::Command)),
+            Error::Host("tmux spawn")
+        );
     }
 }

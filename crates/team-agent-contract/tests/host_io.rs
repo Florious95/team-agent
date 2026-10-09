@@ -12,7 +12,8 @@ use team_agent_contract::host::command::*;
 use team_agent_contract::host::files::*;
 use team_agent_contract::host::process::*;
 use team_agent_contract::host::shell::quote;
-use team_agent_contract::host::tmux::parse_pane;
+use team_agent_contract::host::tmux::{parse_pane, PaneMetadataStage};
+use team_agent_contract::host::transport::PaneMode;
 use team_agent_contract::runtime::journal::*;
 
 struct TestScope(ScopedDirectory);
@@ -353,26 +354,38 @@ fn posix_quote_preserves_spaces_quotes_unicode_and_newlines() {
 
 #[test]
 fn pane_metadata_requires_exact_native_ids_state_and_geometry() {
-    let pane =
-        parse_pane(b"$1\t@2\t%3\t123\tsession\tworker\t0\t\t0\t\tbinding\t120\t40\n").unwrap();
+    let stage = PaneMetadataStage::NewSession;
+    let pane = parse_pane(
+        b"$1\t@2\t%3\t123\tsession\tworker\t0\t\t0\t\tbinding\t120\t40\n",
+        stage,
+    )
+    .unwrap();
     assert_eq!(pane.address.pid, 123);
     assert!(!pane.dead);
     assert_eq!(pane.columns, 120);
-    assert!(parse_pane(b"looks like a pane").is_err());
-    assert!(parse_pane(b"$1\t@2\t%3\t0\tsession\tworker\t0\t\t0\t\tbinding\t120\t40\n").is_err());
+    assert!(parse_pane(b"looks like a pane", stage).is_err());
+    assert!(parse_pane(
+        b"$1\t@2\t%3\t0\tsession\tworker\t0\t\t0\t\tbinding\t120\t40\n",
+        stage,
+    )
+    .is_err());
 }
 
 #[test]
 fn pane_metadata_accepts_literal_backslash_t_without_unescaping_native_field_contents() {
+    let stage = PaneMetadataStage::NewSession;
     let tabs = "$1\t@2\t%3\t123\tsession\tworker\t0\t\t0\t\tbinding\t120\t40\n";
     let escaped = tabs.replace('\t', r"\t");
     assert_eq!(
-        parse_pane(tabs.as_bytes()).unwrap(),
-        parse_pane(escaped.as_bytes()).unwrap()
+        parse_pane(tabs.as_bytes(), stage).unwrap(),
+        parse_pane(escaped.as_bytes(), stage).unwrap()
     );
     let named = tabs.replace("session", r"session\ttitle");
     assert_eq!(
-        parse_pane(named.as_bytes()).unwrap().address.session_name,
+        parse_pane(named.as_bytes(), stage)
+            .unwrap()
+            .address
+            .session_name,
         r"session\ttitle"
     );
     // Dual-format support does not accept a mixed frame, extra/missing fields,
@@ -387,8 +400,110 @@ fn pane_metadata_accepts_literal_backslash_t_without_unescaping_native_field_con
         escaped.replace(r"\t120\t40", r"\textra\t120\t40"),
         format!("{escaped}{escaped}"),
     ] {
-        assert!(parse_pane(invalid.as_bytes()).is_err());
+        assert!(parse_pane(invalid.as_bytes(), stage).is_err());
     }
+}
+
+#[test]
+fn pane_metadata_native_receipts_preserve_empty_fields() {
+    // R3 exact-format and isolated sleep receipts: parser regression only.
+    for bytes in [
+        b"$0\t@0\t%0\t77438\ttac-a294d53615c4b59461190e6c\tworker\t0\t\t0\t\t\t120\t40\n".as_slice(),
+        b"$0\t@0\t%0\t72797\tsleep_test\tworker\t0\t\t0\t\t\t120\t40\n".as_slice(),
+    ] {
+        for stage in [PaneMetadataStage::NewSession, PaneMetadataStage::Query] {
+            let pane = parse_pane(bytes, stage).unwrap();
+            assert_eq!(pane.address.session, "$0");
+            assert_eq!(pane.address.window, "@0");
+            assert_eq!(pane.address.pane, "%0");
+            assert_eq!(pane.address.window_name, "worker");
+            assert!(!pane.dead);
+            assert_eq!(pane.exit_code, None);
+            assert_eq!(pane.mode, PaneMode::Normal);
+            assert!(pane.binding.is_empty());
+            assert_eq!((pane.columns, pane.rows), (120, 40));
+        }
+    }
+}
+
+#[test]
+fn pane_metadata_failures_identify_stage_reason_and_actual_field_count() {
+    let valid = "$0\t@0\t%0\t123\tsession\tworker\t0\t\t0\t\t\t120\t40\n";
+    for (stage, label) in [
+        (PaneMetadataStage::NewSession, "new-session"),
+        (PaneMetadataStage::Query, "query"),
+    ] {
+        for (input, reason, count) in [
+            (String::new(), "tmux metadata empty output", 0),
+            ("\n".into(), "tmux metadata empty output", 0),
+            (
+                "$0\t@0\n".into(),
+                "tmux metadata field count (expected 13)",
+                2,
+            ),
+            (
+                "$0\\t@0\n".into(),
+                "tmux metadata field count (expected 13)",
+                2,
+            ),
+            (
+                valid.replace("120\t40", "extra\t120\t40"),
+                "tmux metadata field count (expected 13)",
+                14,
+            ),
+            (
+                valid.replace("$0", "/bin/bash"),
+                "tmux metadata invalid session ID",
+                13,
+            ),
+            (
+                valid.replace("@0", "0"),
+                "tmux metadata invalid window ID",
+                13,
+            ),
+            (
+                valid.replace("%0", "%"),
+                "tmux metadata invalid pane ID",
+                13,
+            ),
+        ] {
+            let error = parse_pane(input.as_bytes(), stage).unwrap_err();
+            assert_eq!(error.operation, reason);
+            let metadata = error.metadata.as_ref().unwrap();
+            assert_eq!(metadata.stage, stage);
+            assert_eq!(metadata.actual_fields, count);
+            assert_eq!(metadata.output_bytes, input.len());
+            assert!(!metadata.truncated);
+            let shown = error.to_string();
+            assert!(shown.contains(reason));
+            assert!(shown.contains(&format!("stage={label}; fields={count};")));
+            assert!(shown.contains("sample=\""));
+            assert!(shown.bytes().all(|byte| !byte.is_ascii_control()));
+        }
+    }
+}
+
+#[test]
+fn pane_metadata_sample_escapes_raw_bytes_and_stops_at_256_bytes() {
+    let mut bytes = b"\x1b[31m\t\n\r\"\\\0\xff".to_vec();
+    bytes.resize(256, 0xff);
+    bytes.extend_from_slice(b"outside-sample-limit");
+    let error = parse_pane(&bytes, PaneMetadataStage::NewSession).unwrap_err();
+    assert_eq!(error.operation, "tmux metadata encoding");
+    let metadata = error.metadata.as_ref().unwrap();
+    assert!(metadata.truncated);
+    assert_eq!(metadata.output_bytes, bytes.len());
+    assert!(metadata.sample.len() <= 1024);
+    for escaped in [
+        r"\x1b", r"\t", r"\n", r"\r", r#"\""#, r"\\", r"\x00", r"\xff",
+    ] {
+        assert!(metadata.sample.contains(escaped));
+    }
+    assert!(!error.to_string().contains("outside-sample-limit"));
+    assert!(error
+        .to_string()
+        .bytes()
+        .all(|byte| (b' '..=b'~').contains(&byte)));
 }
 
 #[test]
