@@ -63,16 +63,16 @@ pub(crate) struct WorkerCommandAgent {
 }
 
 impl WorkerCommandAgent {
-/// ---
-/// purpose: 从 spec 的 YAML agent 节点读出命令上下文
-/// params:
-///   agent: 单个 agent 的 YAML 节点
-///   fallback_id: agent 节点没写 id 时的兜底 id
-///   provider: 已解析的 provider
-/// returns: 填好的 WorkerCommandAgent
-/// errors: communication_mode 取值非法时返回 LifecycleError
-/// contract_id: lifecycle.worker_command_agent.from_source
-/// ---
+    /// ---
+    /// purpose: 从 spec 的 YAML agent 节点读出命令上下文
+    /// params:
+    ///   agent: 单个 agent 的 YAML 节点
+    ///   fallback_id: agent 节点没写 id 时的兜底 id
+    ///   provider: 已解析的 provider
+    /// returns: 填好的 WorkerCommandAgent
+    /// errors: communication_mode 取值非法时返回 LifecycleError
+    /// contract_id: lifecycle.worker_command_agent.from_source
+    /// ---
     pub(crate) fn from_yaml(
         agent: &crate::model::yaml::Value,
         fallback_id: Option<&str>,
@@ -117,16 +117,16 @@ impl WorkerCommandAgent {
         })
     }
 
-/// ---
-/// purpose: 从 runtime state 的 JSON agent 节点读出命令上下文
-/// params:
-///   agent: 单个 agent 的 JSON 节点
-///   fallback_id: agent 节点没写 id 时的兜底 id
-///   provider: 已解析的 provider
-/// returns: 填好的 WorkerCommandAgent
-/// errors: communication_mode 取值非法时返回 LifecycleError
-/// contract_id: lifecycle.worker_command_agent.from_source
-/// ---
+    /// ---
+    /// purpose: 从 runtime state 的 JSON agent 节点读出命令上下文
+    /// params:
+    ///   agent: 单个 agent 的 JSON 节点
+    ///   fallback_id: agent 节点没写 id 时的兜底 id
+    ///   provider: 已解析的 provider
+    /// returns: 填好的 WorkerCommandAgent
+    /// errors: communication_mode 取值非法时返回 LifecycleError
+    /// contract_id: lifecycle.worker_command_agent.from_source
+    /// ---
     pub(crate) fn from_json(
         agent: &serde_json::Value,
         fallback_id: Option<&str>,
@@ -190,7 +190,8 @@ pub(crate) fn compile_worker_system_prompt(
         mcp_tool_name(agent.provider, "team_orchestrator", "get_team_status")
     );
     let report_result = mcp_tool_name(agent.provider, "team_orchestrator", "report_result");
-    let runtime_contract = runtime_contract_section(&send_message, &report_result, &get_team_status);
+    let runtime_contract =
+        runtime_contract_section(&send_message, &report_result, &get_team_status);
     let communication_contract = agent.communication_mode.runtime_contract(&send_message);
     let mut chunks = vec![
         identity_section(agent),
@@ -349,7 +350,9 @@ mod tests {
                     "Do not reply to pure ACKs, greetings, or unchanged status notices (such as \"paused\" or \"waiting\"); after reporting a blocker once or completing a task, remain silent until a new actionable instruction arrives."
                 ));
                 assert!(!prompt.contains("Silence and resumption (mandatory)"));
-                assert!(!prompt.contains("When you receive a message from the leader or a teammate, you MUST respond"));
+                assert!(!prompt.contains(
+                    "When you receive a message from the leader or a teammate, you MUST respond"
+                ));
                 match mode {
                     CommunicationMode::LeaderCentric => {
                         assert!(prompt.contains(
@@ -357,7 +360,9 @@ mod tests {
                         ));
                     }
                     CommunicationMode::Orchestrated => {
-                        assert!(prompt.contains("Respond to task-related messages through Team Agent MCP tools."));
+                        assert!(prompt.contains(
+                            "Respond to task-related messages through Team Agent MCP tools."
+                        ));
                         assert!(prompt.contains("A pure ACK, unrelated status, or non-task message does not require a response."));
                     }
                 }

@@ -16,8 +16,8 @@ use crate::model::enums::TaskStatus;
 use crate::model::errors::ModelError;
 use crate::model::ids::TaskId;
 use crate::model::task_graph::{find_dependency_cycle, TaskNode};
-use crate::model::yaml::Value as Yaml;
 use crate::model::yaml;
+use crate::model::yaml::Value as Yaml;
 use crate::provider::wire::parse_canonical_provider;
 
 const LEGACY_DISPLAY_KEY: &str = concat!("display", "_backend");
@@ -733,14 +733,13 @@ fn semantic_errors(spec: &Yaml, base_dir: &Path) -> Vec<String> {
 
     for (idx, agent) in agents.iter().enumerate() {
         let provider = agent.get("provider");
-        if !provider
-            .and_then(Yaml::as_str)
-            .is_some_and(|p| {
-                #[cfg(unix)]
-                if crate::contract_runtime::registry::descriptor(p).is_some() { return true; }
-                parse_canonical_provider(p).is_some()
-            })
-        {
+        if !provider.and_then(Yaml::as_str).is_some_and(|p| {
+            #[cfg(unix)]
+            if crate::contract_runtime::registry::descriptor(p).is_some() {
+                return true;
+            }
+            parse_canonical_provider(p).is_some()
+        }) {
             e.push(format!(
                 "/agents/{idx}/provider: unknown provider {}",
                 py_repr(provider)
@@ -1070,7 +1069,11 @@ mod tests {
             .iter()
             .filter(|m| m.starts_with("/agents/dangerously_skip_permissions: missing"))
             .collect();
-        assert_eq!(missing.len(), 1, "exactly one missing-field error, got: {errors:#?}");
+        assert_eq!(
+            missing.len(),
+            1,
+            "exactly one missing-field error, got: {errors:#?}"
+        );
         assert!(
             missing[0].contains("`codex_implementer`"),
             "must name the role id, got: {}",
@@ -1087,7 +1090,11 @@ mod tests {
     #[test]
     fn test_invalid_dangerously_type_rejected() {
         let text = include_str!("testdata/team.spec.yaml");
-        let bad = text.replacen("    dangerously_skip_permissions: false\n", "    dangerously_skip_permissions: \"yes\"\n", 1);
+        let bad = text.replacen(
+            "    dangerously_skip_permissions: false\n",
+            "    dangerously_skip_permissions: \"yes\"\n",
+            1,
+        );
         assert_ne!(text, bad, "fixture must contain the field");
         let spec = yaml::loads(&bad).unwrap();
         let errors = all_spec_errors(&spec);
@@ -1095,7 +1102,11 @@ mod tests {
             .iter()
             .filter(|m| m.starts_with("/agents/dangerously_skip_permissions: must be a boolean"))
             .collect();
-        assert_eq!(type_errs.len(), 1, "exactly one type error, got: {errors:#?}");
+        assert_eq!(
+            type_errs.len(),
+            1,
+            "exactly one type error, got: {errors:#?}"
+        );
         assert!(
             type_errs[0].contains("`codex_implementer`"),
             "must name the role id, got: {}",
@@ -1143,10 +1154,7 @@ mod tests {
     // 缺失 role frontmatter 值时编译为安全默认 false；此处锁定公共编译入口的结果。
     #[test]
     fn test_all_7_triggers_use_compiled_default_bypass() {
-        let team = std::env::temp_dir().join(format!(
-            "ta-spec-7trigger-{}",
-            std::process::id()
-        ));
+        let team = std::env::temp_dir().join(format!("ta-spec-7trigger-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&team);
         std::fs::create_dir_all(team.join("agents")).unwrap();
         std::fs::write(

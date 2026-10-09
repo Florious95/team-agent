@@ -83,7 +83,10 @@ fn kiro_r0_hooks_are_bound_but_fork_and_unobserved_resume_stay_closed() {
     }
     assert!(matches!(hooks.catalog, HookBinding::Bound(_)));
     assert!(validate_descriptor(&KIRO_DESCRIPTOR, &hooks, Operation::Fresh).is_ok());
-    assert!(matches!(KIRO_DESCRIPTOR.session.resume, Support::Unverified(_)));
+    assert!(matches!(
+        KIRO_DESCRIPTOR.session.resume,
+        Support::Unverified(_)
+    ));
     assert!(matches!(hooks.session, HookBinding::Bound(_)));
     assert!(matches!(hooks.semantic, HookBinding::Bound(_)));
     assert!(matches!(hooks.interaction, HookBinding::Bound(_)));
@@ -118,11 +121,20 @@ fn documentation_plan_keeps_argument_boundaries_and_encodes_owned_agent_json() {
     assert_eq!(json["prompt"], request.prompt.unwrap());
     assert_eq!(json["includeMcpJson"], false);
     assert_eq!(json["includePowers"], false);
-    assert_eq!(json["allowedTools"], serde_json::json!([
-        "@team/send_message", "@team/report_result", "@team/get_team_status"
-    ]));
+    assert_eq!(
+        json["allowedTools"],
+        serde_json::json!([
+            "@team/send_message",
+            "@team/report_result",
+            "@team/get_team_status"
+        ])
+    );
     // This asserts declared config/argv intent, not actual native permission.
-    assert!(!json["allowedTools"].as_array().unwrap().iter().any(|tool| tool == "@builtin" || tool == "*"));
+    assert!(!json["allowedTools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool == "@builtin" || tool == "*"));
     assert_eq!(json["mcpServers"]["team"]["args"][1], "argument with space");
     assert!(json.get("hooks").is_none());
     assert_eq!(plan.environment.set.len(), 1);

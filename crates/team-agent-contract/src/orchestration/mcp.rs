@@ -181,13 +181,25 @@ fn call(
                             .unwrap_or("completed")
                     ],
                 )?;
-                let result_route: Option<String> = tx.query_row("SELECT result_route FROM contract_meta", [], |row| row.get(0))?;
-                if let Some(route) = result_route {
-                    super::forward::insert(&tx, &super::forward::ForwardIntent {
-                        id: id.clone(), source: context.identity.clone(), route,
-                        payload: super::forward::ForwardPayload::Result { result_id: id.clone(), envelope: envelope.clone() },
-                        state: super::forward::ForwardState::Pending, receipt: None,
+                let result_route: Option<String> =
+                    tx.query_row("SELECT result_route FROM contract_meta", [], |row| {
+                        row.get(0)
                     })?;
+                if let Some(route) = result_route {
+                    super::forward::insert(
+                        &tx,
+                        &super::forward::ForwardIntent {
+                            id: id.clone(),
+                            source: context.identity.clone(),
+                            route,
+                            payload: super::forward::ForwardPayload::Result {
+                                result_id: id.clone(),
+                                envelope: envelope.clone(),
+                            },
+                            state: super::forward::ForwardState::Pending,
+                            receipt: None,
+                        },
+                    )?;
                 } else if envelope
                     .pointer("/presentation/sink")
                     .and_then(Value::as_str)
@@ -219,7 +231,8 @@ fn call(
                 let record: super::store::SeatRecord = serde_json::from_str(&row?)?;
                 seats.push(json!({"identity":record.identity,"provider":record.provider,"status":record.status}));
             }
-            let mut statement = tx.prepare("SELECT record FROM contract_framework_peers ORDER BY recipient")?;
+            let mut statement =
+                tx.prepare("SELECT record FROM contract_framework_peers ORDER BY recipient")?;
             let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
             for row in rows {
                 let peer: super::forward::FrameworkPeer = serde_json::from_str(&row?)?;

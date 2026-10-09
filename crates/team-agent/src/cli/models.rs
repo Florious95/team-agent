@@ -40,7 +40,12 @@ pub fn cmd_models(args: &ModelsArgs) -> Result<CmdResult, CliError> {
 fn render_catalog(args: &ModelsArgs, all: Vec<ModelRecord>) -> Result<CmdResult, CliError> {
     let visible = args.search.as_deref().map_or_else(
         || all.clone(),
-        |search| all.iter().filter(|model| crate::provider::model_catalog::model_matches(model, search)).cloned().collect(),
+        |search| {
+            all.iter()
+                .filter(|model| crate::provider::model_catalog::model_matches(model, search))
+                .cloned()
+                .collect()
+        },
     );
     let current = if args.provider == "pi" {
         current_role_model(&all.iter().map(|model| model.id.clone()).collect::<Vec<_>>())
@@ -70,14 +75,31 @@ fn render_catalog(args: &ModelsArgs, all: Vec<ModelRecord>) -> Result<CmdResult,
             preserve_json_order: true,
         })
     } else {
-        let mut lines = vec![format!("models.v1 | {provider} models (copyable model_id):")];
+        let mut lines = vec![format!(
+            "models.v1 | {provider} models (copyable model_id):"
+        )];
         lines.push("PROVIDER VENDOR MODEL_ID DISPLAY_NAME CURRENT DEFAULT".to_string());
-        lines.extend(visible.iter().map(|model| format!(
-            "{} {} {} {} {} {}", model.provider, model.vendor, model.id, model.display_name,
-            if args.provider == "pi" { (current.as_deref() == Some(model.id.as_str())).to_string() } else { "—".to_string() },
-            model.default.map_or_else(|| "—".to_string(), |value| value.to_string()),
-        )));
-        lines.push(format!("auth: ok (catalog_visibility); {} model(s)", visible.len()));
+        lines.extend(visible.iter().map(|model| {
+            format!(
+                "{} {} {} {} {} {}",
+                model.provider,
+                model.vendor,
+                model.id,
+                model.display_name,
+                if args.provider == "pi" {
+                    (current.as_deref() == Some(model.id.as_str())).to_string()
+                } else {
+                    "—".to_string()
+                },
+                model
+                    .default
+                    .map_or_else(|| "—".to_string(), |value| value.to_string()),
+            )
+        }));
+        lines.push(format!(
+            "auth: ok (catalog_visibility); {} model(s)",
+            visible.len()
+        ));
         if visible.is_empty() {
             lines.push("No models matched --search/query; rerun without a search to list the full catalog.".to_string());
         }
@@ -87,12 +109,23 @@ fn render_catalog(args: &ModelsArgs, all: Vec<ModelRecord>) -> Result<CmdResult,
 
 /// Existing injectable Pi boundary retained for deterministic command/timeout tests.
 #[cfg(test)]
-fn cmd_models_with(args: &ModelsArgs, program: &Path, timeout: Duration, max_bytes: u64) -> Result<CmdResult, CliError> {
+fn cmd_models_with(
+    args: &ModelsArgs,
+    program: &Path,
+    timeout: Duration,
+    max_bytes: u64,
+) -> Result<CmdResult, CliError> {
     cmd_models_with_format(args, program, CatalogFormat::Pi, timeout, max_bytes)
 }
 
 #[cfg(test)]
-fn cmd_models_with_format(args: &ModelsArgs, program: &Path, format: CatalogFormat, timeout: Duration, max_bytes: u64) -> Result<CmdResult, CliError> {
+fn cmd_models_with_format(
+    args: &ModelsArgs,
+    program: &Path,
+    format: CatalogFormat,
+    timeout: Duration,
+    max_bytes: u64,
+) -> Result<CmdResult, CliError> {
     let bytes = match run_catalog(program, timeout, max_bytes) {
         Ok(bytes) => bytes,
         Err(message) => return Ok(failure(args, &message)),
@@ -106,7 +139,10 @@ fn cmd_models_with_format(args: &ModelsArgs, program: &Path, format: CatalogForm
 
 #[cfg(test)]
 fn parse_catalog(bytes: &[u8], format: CatalogFormat) -> Result<Vec<ModelRecord>, String> {
-    let provider = match format { CatalogFormat::Pi => "pi", CatalogFormat::CursorAgent => "cursor_agent" };
+    let provider = match format {
+        CatalogFormat::Pi => "pi",
+        CatalogFormat::CursorAgent => "cursor_agent",
+    };
     let result = match format {
         CatalogFormat::Pi => crate::provider::model_catalog::parse_pi_catalog(bytes),
         CatalogFormat::CursorAgent => crate::provider::model_catalog::parse_cursor_catalog(bytes),
@@ -128,7 +164,12 @@ fn model_matches(model: &ModelRecord, search: &str) -> bool {
 #[cfg(test)]
 fn current_model_for(format: CatalogFormat, models: &[ModelRecord]) -> Option<String> {
     match format {
-        CatalogFormat::Pi => current_role_model(&models.iter().map(|model| model.id.clone()).collect::<Vec<_>>()),
+        CatalogFormat::Pi => current_role_model(
+            &models
+                .iter()
+                .map(|model| model.id.clone())
+                .collect::<Vec<_>>(),
+        ),
         CatalogFormat::CursorAgent => None,
     }
 }
@@ -152,8 +193,14 @@ fn failure(args: &ModelsArgs, message: &str) -> CmdResult {
 fn failure_with_action(args: &ModelsArgs, message: &str, action: &str) -> CmdResult {
     let value = json!({ "schema_version": "models.v1", "ok": false, "provider": args.provider, "auth": "not_ready", "auth_basis": "catalog_visibility", "models": Value::Array(Vec::new()), "current_role_model": Value::Null, "error": message, "action": action });
     if args.json {
-        let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{\"schema_version\":\"models.v1\",\"ok\":false}".to_string());
-        CmdResult { output: CmdOutput::Human(text), exit: ExitCode::Error, as_json: false, preserve_json_order: true }
+        let text = serde_json::to_string_pretty(&value)
+            .unwrap_or_else(|_| "{\"schema_version\":\"models.v1\",\"ok\":false}".to_string());
+        CmdResult {
+            output: CmdOutput::Human(text),
+            exit: ExitCode::Error,
+            as_json: false,
+            preserve_json_order: true,
+        }
     } else {
         CmdResult { output: CmdOutput::Human(format!("models.v1 | error: {message}\naction: {action}\nauth: not_ready (catalog_visibility)")), exit: ExitCode::Error, as_json: false, preserve_json_order: false }
     }

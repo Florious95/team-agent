@@ -133,7 +133,11 @@ pub fn launch_with_transport_in_workspace(
     // 所有角色都未声明 dangerously_skip_permissions=true → 写 warning 事件不阻塞。
     // TODO(0.6.0): remove(0.6.0 彻底删源头 A 后此警示无意义)。
     emit_dangerous_flag_no_role_declared_warning(workspace, &spec);
-    phase_timer.emit(workspace, "launch.phase", super::restart::LifecyclePhase::CompileSpec);
+    phase_timer.emit(
+        workspace,
+        "launch.phase",
+        super::restart::LifecyclePhase::CompileSpec,
+    );
     let session_name = spec_session_name(&spec);
     if !dry_run && transport_has_session(transport, &session_name) {
         return Err(LifecycleError::SessionConflict(format!(
@@ -145,7 +149,11 @@ pub fn launch_with_transport_in_workspace(
     let started = if dry_run {
         Vec::new()
     } else {
-        phase_timer.emit(workspace, "launch.phase", super::restart::LifecyclePhase::SpawnAll);
+        phase_timer.emit(
+            workspace,
+            "launch.phase",
+            super::restart::LifecyclePhase::SpawnAll,
+        );
         let started = spawn_agents(workspace, spec_path, &spec, &session_name, transport)?;
         persist_spawn_agent_state(
             workspace,
@@ -165,14 +173,14 @@ pub fn launch_with_transport_in_workspace(
             .map(|agent| agent.spawned_at.as_str())
             .unwrap_or(session_name.as_str());
         if !started.is_empty() {
-        transport
-            .set_session_owner_with_generation(
-                &session_name,
-                workspace,
-                &owner_team,
-                generation,
-            )
-            .map_err(|error| LifecycleError::Transport(error.to_string()))?;
+            transport
+                .set_session_owner_with_generation(
+                    &session_name,
+                    workspace,
+                    &owner_team,
+                    generation,
+                )
+                .map_err(|error| LifecycleError::Transport(error.to_string()))?;
         }
         // 0.5.38: per-worker timing tags (source="launch") so operators can
         // trace which worker's spawn dominates wall time. Zeros for now on
@@ -350,13 +358,13 @@ pub use cursor_mcp_iso::{
     materialize_cursor_mcp_project,
 };
 mod cursor_mcp;
+pub(crate) use cursor_mcp::apply_cursor_mcp_enable_profile_env;
 pub use cursor_mcp::{
     apply_cursor_mcp_overlay, apply_cursor_spawn_workspace_pointers,
     apply_cursor_workspace_physical_path, cursor_mcp_enable_argv, cursor_mcp_enable_working_dir,
     enable_cursor_workspace_mcp, enable_cursor_workspace_mcp_with_profile, physical_workspace_path,
     prepare_cursor_seat_mcp, refuse_second_cursor_occupant,
 };
-pub(crate) use cursor_mcp::apply_cursor_mcp_enable_profile_env;
 
 mod cursor_create_chat;
 
@@ -365,9 +373,9 @@ pub(super) use worker_env::*;
 pub(crate) use worker_env::{
     apply_copilot_instructions_overlay, apply_cursor_agent_rules_overlay,
     apply_cursor_subscription_proxy_env_with_profile, apply_mcp_auto_approval_env,
-    apply_profile_launch_env, auth_mode_env_value,
-    fill_spawn_placeholders, fill_spawn_placeholders_full, inherited_env_with_team_overrides,
-    persist_command_plan_state, spawn_timestamp,
+    apply_profile_launch_env, auth_mode_env_value, fill_spawn_placeholders,
+    fill_spawn_placeholders_full, inherited_env_with_team_overrides, persist_command_plan_state,
+    spawn_timestamp,
 };
 pub use worker_env::{apply_cursor_subscription_proxy_env, CursorProxyPresence};
 
@@ -395,18 +403,18 @@ pub(crate) use quick_start_transport::{
 };
 
 pub mod readiness;
+pub(super) use readiness::*;
 pub use readiness::{
     classify_leader_binding, launched_team_receiver_is_attached, selected_team_leader_receiver,
     LeaderBindingClass,
 };
-pub(super) use readiness::*;
 
 mod add_agent;
 pub(super) use add_agent::*;
 pub use add_agent::{add_agent, add_agent_force};
 pub(crate) use add_agent::{
-    add_agent_with_transport, add_agent_with_transport_force,
-    add_agent_with_transport_at_paths_locked, force_recreate_with_transport_locked,
+    add_agent_with_transport, add_agent_with_transport_at_paths_locked,
+    add_agent_with_transport_force, force_recreate_with_transport_locked,
 };
 
 pub(crate) mod add_agent_state;
@@ -430,20 +438,19 @@ pub(super) use ownership::*;
 pub(crate) use ownership::{ensure_owner_allowed, ensure_owner_allowed_for_state, state_path};
 
 pub mod spec_state;
-pub use spec_state::{
-    seed_launched_owner_from_caller_with_provider_lookup, worker_session_name_pub,
-};
 pub(crate) use spec_state::{
     effective_runtime_config_for_worker_spawn, effective_runtime_config_for_worker_spawn_json,
 };
 use spec_state::{
-    env_nonempty, has_positive_caller_leader_env, initial_runtime_state,
-    override_spec_runtime_str, seed_launched_owner_from_env,
-    spec_agent_values, spec_agents, spec_default_assignee, spec_routes, spec_session_name,
-    spec_tasks_json, team_workspace, yaml_value_to_json,
+    env_nonempty, has_positive_caller_leader_env, initial_runtime_state, override_spec_runtime_str,
+    seed_launched_owner_from_env, spec_agent_values, spec_agents, spec_default_assignee,
+    spec_routes, spec_session_name, spec_tasks_json, team_workspace, yaml_value_to_json,
 };
 pub(crate) use spec_state::{
     override_spec_session_name, override_spec_workspace, spec_agent_id_set, write_spec_atomic,
+};
+pub use spec_state::{
+    seed_launched_owner_from_caller_with_provider_lookup, worker_session_name_pub,
 };
 
 #[cfg(test)]

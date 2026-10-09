@@ -153,11 +153,7 @@ enum MatchResult<'a> {
 
 /// The CLI's concise JSON projection. `agent` filters the registered list but
 /// never synthesizes an unregistered node.
-pub(crate) fn status_brief_scoped(
-    workspace: &Path,
-    state: &Value,
-    agent: Option<&str>,
-) -> Value {
+pub(crate) fn status_brief_scoped(workspace: &Path, state: &Value, agent: Option<&str>) -> Value {
     let nodes = project_status_nodes(workspace, state, agent);
     json!({
         "nodes": nodes
@@ -169,11 +165,7 @@ pub(crate) fn status_brief_scoped(
 
 /// Human output keeps the legacy single-node form and groups shared attach
 /// context only when multiple nodes make that repetition useful.
-pub(crate) fn format_status_brief(
-    workspace: &Path,
-    state: &Value,
-    agent: Option<&str>,
-) -> String {
+pub(crate) fn format_status_brief(workspace: &Path, state: &Value, agent: Option<&str>) -> String {
     let nodes = project_status_nodes(workspace, state, agent);
     if nodes.len() <= 1 {
         return nodes
@@ -191,11 +183,17 @@ fn project_status_nodes(
     agent: Option<&str>,
 ) -> Vec<(BriefNode, Option<AttachContext>)> {
     let registered = registered_nodes(state, agent);
-    let legacy:Vec<_> = registered.iter().filter(|_node| {
-        #[cfg(unix)]
-        if crate::contract_runtime::registry::descriptor(&_node.provider).is_some() { return false; }
-        true
-    }).cloned().collect();
+    let legacy: Vec<_> = registered
+        .iter()
+        .filter(|_node| {
+            #[cfg(unix)]
+            if crate::contract_runtime::registry::descriptor(&_node.provider).is_some() {
+                return false;
+            }
+            true
+        })
+        .cloned()
+        .collect();
     let probes = probe_registered_endpoints(&legacy);
     registered
         .iter()
@@ -203,12 +201,18 @@ fn project_status_nodes(
             #[cfg(unix)]
             if crate::contract_runtime::registry::descriptor(&node.provider).is_some() {
                 let mut brief = BriefNode::unknown(node);
-                if let Ok(native) = crate::contract_runtime::framework::project_seat(_workspace, &crate::state::projection::team_state_key(state), &node.name) {
+                if let Ok(native) = crate::contract_runtime::framework::project_seat(
+                    _workspace,
+                    &crate::state::projection::team_state_key(state),
+                    &node.name,
+                ) {
                     brief.runtime_status = native["status"].as_str().unwrap_or("unknown").into();
                     brief.model = native["model"].as_str().map(str::to_owned);
                     brief.effort = native["effort"].as_str().map(str::to_owned);
                     if brief.runtime_status == "running" {
-                        brief.tmux_command = native["native_endpoint"].as_str().map(|endpoint| format!("tmux -S {} attach-session", shell_quote(endpoint)));
+                        brief.tmux_command = native["native_endpoint"].as_str().map(|endpoint| {
+                            format!("tmux -S {} attach-session", shell_quote(endpoint))
+                        });
                     }
                 }
                 // Process alive is T1 only: activity/health remain unknown until
@@ -297,10 +301,7 @@ pub(crate) fn with_test_nodeprobe_resolver_delay<R>(
 }
 
 #[cfg(test)]
-fn with_test_nodeprobe_candidate<R>(
-    paths: Vec<PathBuf>,
-    func: impl FnOnce() -> R,
-) -> R {
+fn with_test_nodeprobe_candidate<R>(paths: Vec<PathBuf>, func: impl FnOnce() -> R) -> R {
     struct Guard(Option<Vec<PathBuf>>);
     impl Drop for Guard {
         fn drop(&mut self) {
@@ -343,8 +344,11 @@ fn write_test_capability_receipt(path: &Path) {
         "capabilities": NODEPROBE_CAPABILITIES,
         "forbidden": NODEPROBE_FORBIDDEN,
     });
-    std::fs::write(nodeprobe_receipt_path(path), serde_json::to_vec(&receipt).unwrap())
-        .expect("write test nodeprobe capability receipt");
+    std::fs::write(
+        nodeprobe_receipt_path(path),
+        serde_json::to_vec(&receipt).unwrap(),
+    )
+    .expect("write test nodeprobe capability receipt");
 }
 
 fn format_brief_node(value: &Value) -> Option<String> {
@@ -366,9 +370,10 @@ fn format_multi_node_brief(nodes: Vec<(BriefNode, Option<AttachContext>)>) -> St
     let mut groups = Vec::<(String, String)>::new();
     for (_, context) in &nodes {
         let Some(context) = context else { continue };
-        if !groups.iter().any(|(endpoint, session)| {
-            endpoint == &context.endpoint && session == &context.session
-        }) {
+        if !groups
+            .iter()
+            .any(|(endpoint, session)| endpoint == &context.endpoint && session == &context.session)
+        {
             groups.push((context.endpoint.clone(), context.session.clone()));
         }
     }
@@ -376,9 +381,7 @@ fn format_multi_node_brief(nodes: Vec<(BriefNode, Option<AttachContext>)>) -> St
     let mut lines = groups
         .iter()
         .enumerate()
-        .map(|(index, (endpoint, session))| {
-            format_attach_template(index + 1, endpoint, session)
-        })
+        .map(|(index, (endpoint, session))| format_attach_template(index + 1, endpoint, session))
         .collect::<Vec<_>>();
     if !groups.is_empty() {
         lines.push(
@@ -564,12 +567,14 @@ fn probe_registered_endpoints(nodes: &[RegisteredNode]) -> BTreeMap<String, Opti
     endpoints
 }
 
-fn sample_native_endpoint(
-    endpoint: &str,
-    registered: &[RegisteredNode],
-) -> Option<ProbeResult> {
+fn sample_native_endpoint(endpoint: &str, registered: &[RegisteredNode]) -> Option<ProbeResult> {
     let output = run_native_tmux_list_panes(endpoint)?;
-    Some(sample_native_panes(&output, endpoint, registered, process_snapshots))
+    Some(sample_native_panes(
+        &output,
+        endpoint,
+        registered,
+        process_snapshots,
+    ))
 }
 
 fn sample_native_panes(
@@ -578,10 +583,21 @@ fn sample_native_panes(
     registered: &[RegisteredNode],
     snapshots: impl FnOnce(&BTreeSet<u32>) -> BTreeMap<u32, ProcessSnapshot>,
 ) -> ProbeResult {
-    let panes = output.lines().filter_map(native_pane_fields).collect::<Vec<_>>();
-    let pids = panes.iter().filter_map(|fields| native_pane_pid(fields[3])).collect::<BTreeSet<_>>();
-    let processes = if pids.is_empty() { BTreeMap::new() } else { snapshots(&pids) };
-    let nodes = panes.into_iter()
+    let panes = output
+        .lines()
+        .filter_map(native_pane_fields)
+        .collect::<Vec<_>>();
+    let pids = panes
+        .iter()
+        .filter_map(|fields| native_pane_pid(fields[3]))
+        .collect::<BTreeSet<_>>();
+    let processes = if pids.is_empty() {
+        BTreeMap::new()
+    } else {
+        snapshots(&pids)
+    };
+    let nodes = panes
+        .into_iter()
         .filter_map(|fields| parse_native_pane(fields, endpoint, registered, &processes))
         .collect();
     ProbeResult { nodes }
@@ -594,24 +610,36 @@ fn native_pane_fields(line: &str) -> Option<[&str; 5]> {
     let pane = fields.next()?;
     let pid = fields.next().unwrap_or_default();
     let command = fields.next().unwrap_or_default();
-    if session.is_empty() || window.is_empty() || pane.is_empty() { return None; }
+    if session.is_empty() || window.is_empty() || pane.is_empty() {
+        return None;
+    }
     Some([session, window, pane, pid, command])
 }
 
 fn native_pane_pid(pid: &str) -> Option<u32> {
-    pid.parse::<u32>().ok().filter(|pid| *pid > 0 && *pid <= i32::MAX as u32)
+    pid.parse::<u32>()
+        .ok()
+        .filter(|pid| *pid > 0 && *pid <= i32::MAX as u32)
 }
 
 fn run_native_tmux_list_panes(endpoint: &str) -> Option<String> {
-    const FORMAT: &str = "#{session_name}\t#{window_name}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}";
-    let flag = if Path::new(endpoint).is_absolute() { "-S" } else { "-L" };
+    const FORMAT: &str =
+        "#{session_name}\t#{window_name}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}";
+    let flag = if Path::new(endpoint).is_absolute() {
+        "-S"
+    } else {
+        "-L"
+    };
     let output = Command::new("tmux")
         .arg(flag)
         .arg(endpoint)
         .args(["list-panes", "-a", "-F", FORMAT])
         .output()
         .ok()?;
-    output.status.success().then(|| String::from_utf8(output.stdout).ok())?
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8(output.stdout).ok())?
 }
 
 fn parse_native_pane(
@@ -664,30 +692,52 @@ struct ProcessSnapshot {
 }
 
 fn process_snapshot_command(pids: &BTreeSet<u32>) -> Command {
-    let pids = pids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+    let pids = pids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
     let mut command = Command::new("ps");
     command.args(["-o", "pid=,ppid=,stat=,comm=", "-p", &pids]);
     command
 }
 
 fn process_snapshots(pids: &BTreeSet<u32>) -> BTreeMap<u32, ProcessSnapshot> {
-    if pids.is_empty() { return BTreeMap::new(); }
-    let Ok(output) = process_snapshot_command(pids).output() else { return BTreeMap::new(); };
-    if !output.status.success() { return BTreeMap::new(); }
+    if pids.is_empty() {
+        return BTreeMap::new();
+    }
+    let Ok(output) = process_snapshot_command(pids).output() else {
+        return BTreeMap::new();
+    };
+    if !output.status.success() {
+        return BTreeMap::new();
+    }
     parse_process_snapshots(&output.stdout, pids)
 }
 
-fn parse_process_snapshots(bytes: &[u8], requested: &BTreeSet<u32>) -> BTreeMap<u32, ProcessSnapshot> {
+fn parse_process_snapshots(
+    bytes: &[u8],
+    requested: &BTreeSet<u32>,
+) -> BTreeMap<u32, ProcessSnapshot> {
     let mut snapshots = BTreeMap::<u32, ProcessSnapshot>::new();
     let output = String::from_utf8_lossy(bytes);
     for line in output.lines() {
         let mut fields = line.split_whitespace();
-        let Some(pid) = fields.next().and_then(native_pane_pid) else { continue; };
-        if !requested.contains(&pid) { continue; }
-        let Some(_ppid) = fields.next() else { continue; };
-        let Some(stat) = fields.next() else { continue; };
+        let Some(pid) = fields.next().and_then(native_pane_pid) else {
+            continue;
+        };
+        if !requested.contains(&pid) {
+            continue;
+        }
+        let Some(_ppid) = fields.next() else {
+            continue;
+        };
+        let Some(stat) = fields.next() else {
+            continue;
+        };
         let zombie = stat.contains('Z');
-        snapshots.entry(pid)
+        snapshots
+            .entry(pid)
             .and_modify(|snapshot| snapshot.zombie |= zombie)
             .or_insert(ProcessSnapshot { zombie });
     }
@@ -709,11 +759,8 @@ fn probe_registered_endpoints_with_test_nodeprobe(
             continue;
         }
         if !resolved {
-            selected_binary = resolve_nodeprobe_binary(
-                candidates.clone(),
-                deadline,
-                resolver_options.clone(),
-            );
+            selected_binary =
+                resolve_nodeprobe_binary(candidates.clone(), deadline, resolver_options.clone());
             resolved = true;
         }
         let sampled = selected_binary.as_deref().and_then(|binary| {
@@ -889,9 +936,7 @@ fn resolve_nodeprobe_binary(
 ) -> Option<PathBuf> {
     #[cfg(not(test))]
     let _ = options;
-    if Instant::now() >= deadline
-        || NODEPROBE_RESOLVER_ACTIVE.swap(true, Ordering::AcqRel)
-    {
+    if Instant::now() >= deadline || NODEPROBE_RESOLVER_ACTIVE.swap(true, Ordering::AcqRel) {
         return None;
     }
     let (tx, rx) = mpsc::sync_channel(1);
@@ -931,10 +976,7 @@ fn resolve_nodeprobe_binary(
 }
 
 #[cfg(test)]
-fn select_nodeprobe_binary(
-    candidates: Vec<PathBuf>,
-    deadline: Instant,
-) -> Option<PathBuf> {
+fn select_nodeprobe_binary(candidates: Vec<PathBuf>, deadline: Instant) -> Option<PathBuf> {
     for candidate in candidates {
         if Instant::now() >= deadline {
             return None;
@@ -982,13 +1024,12 @@ fn validate_nodeprobe_candidate(path: &Path, deadline: Instant) -> Option<PathBu
     if !receipt_metadata.is_file() || receipt_metadata.len() > NODEPROBE_RECEIPT_LIMIT {
         return None;
     }
-    let receipt: NodeprobeCapabilityReceipt =
-        serde_json::from_slice(&read_bounded_file(
-            &receipt_path,
-            NODEPROBE_RECEIPT_LIMIT,
-            deadline,
-        )?)
-        .ok()?;
+    let receipt: NodeprobeCapabilityReceipt = serde_json::from_slice(&read_bounded_file(
+        &receipt_path,
+        NODEPROBE_RECEIPT_LIMIT,
+        deadline,
+    )?)
+    .ok()?;
     if !valid_nodeprobe_receipt(&receipt, path) || Instant::now() >= deadline {
         return None;
     }
@@ -1248,10 +1289,7 @@ fn project_node_with_attach(
     let pi_channel = observed.provider.eq_ignore_ascii_case("pi")
         && observed.evidence_method.as_deref() == Some("pi_activity_channel");
     let native_tmux = observed.evidence_method.as_deref() == Some("native_tmux");
-    let activity = if observed.provider.eq_ignore_ascii_case("pi")
-        && !pi_channel
-        && !native_tmux
-    {
+    let activity = if observed.provider.eq_ignore_ascii_case("pi") && !pi_channel && !native_tmux {
         "unknown"
     } else {
         valid_activity(&observed.activity)
@@ -1412,9 +1450,15 @@ mod native_ps_batch_regressions {
 
     #[test]
     fn eight_panes_use_one_endpoint_query() {
-        let registered = (0..8).map(|i| registered("e1", &format!("%{i}"))).collect::<Vec<_>>();
-        let panes = (0..8).map(|i| format!("hp\tw\t%{i}\t{}\tpi\n", 100 + i)).collect::<String>();
-        let rows = (0..8).map(|i| format!("{} 1 S pi\n", 100 + i)).collect::<String>();
+        let registered = (0..8)
+            .map(|i| registered("e1", &format!("%{i}")))
+            .collect::<Vec<_>>();
+        let panes = (0..8)
+            .map(|i| format!("hp\tw\t%{i}\t{}\tpi\n", 100 + i))
+            .collect::<String>();
+        let rows = (0..8)
+            .map(|i| format!("{} 1 S pi\n", 100 + i))
+            .collect::<String>();
         let mut calls = Vec::new();
         let result = sample_native_panes(&panes, "e1", &registered, |pids| {
             calls.push(pids.iter().copied().collect::<Vec<_>>());
@@ -1422,23 +1466,33 @@ mod native_ps_batch_regressions {
         });
         assert_eq!(calls, vec![(100..108).collect::<Vec<_>>()]);
         assert_eq!(result.nodes.len(), 8);
-        assert!(result.nodes.iter().all(|node| node.provider == "pi" && node.activity == "working" && node.health == "normal"));
+        assert!(result.nodes.iter().all(|node| node.provider == "pi"
+            && node.activity == "working"
+            && node.health == "normal"));
     }
 
     #[test]
     fn pid_deduplication_and_command_preserve_the_privacy_whitelist() {
         let mut calls = Vec::new();
-        let result = sample_native_panes("hp\tw\t%1\t11\tsh\nhp\tw\t%2\t011\tsh\n", "e1", &[], |pids| {
-            calls.push(pids.iter().copied().collect::<Vec<_>>());
-            parse_process_snapshots(b"11 1 S sh\n", pids)
-        });
+        let result = sample_native_panes(
+            "hp\tw\t%1\t11\tsh\nhp\tw\t%2\t011\tsh\n",
+            "e1",
+            &[],
+            |pids| {
+                calls.push(pids.iter().copied().collect::<Vec<_>>());
+                parse_process_snapshots(b"11 1 S sh\n", pids)
+            },
+        );
         assert_eq!(calls, vec![vec![11]]);
         assert_eq!(result.nodes.len(), 2);
         let pids = BTreeSet::from([22, 11]);
         let command = process_snapshot_command(&pids);
         assert_eq!(command.get_program(), "ps");
         assert_eq!(
-            command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
             vec!["-o", "pid=,ppid=,stat=,comm=", "-p", "11,22"]
         );
         let command = process_snapshot_command(&BTreeSet::from([11]));
@@ -1452,8 +1506,14 @@ mod native_ps_batch_regressions {
         let requested = BTreeSet::from([pid, i32::MAX as u32]);
         let command = process_snapshot_command(&requested);
         // Absolute ps avoids unrelated PATH-fixture mutation in parallel unit tests.
-        let output = Command::new("/bin/ps").args(command.get_args()).output().unwrap();
-        assert!(output.status.success(), "partial PID selection must not poison the live row");
+        let output = Command::new("/bin/ps")
+            .args(command.get_args())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "partial PID selection must not poison the live row"
+        );
         let snapshots = parse_process_snapshots(&output.stdout, &requested);
         assert!(!snapshots.get(&pid).unwrap().zombie);
         assert!(!snapshots.contains_key(&(i32::MAX as u32)));
@@ -1478,14 +1538,26 @@ mod native_ps_batch_regressions {
         let result = sample_native_panes(panes, "e1", &[], |pids| {
             parse_process_snapshots(b"22 1 Z+ dead\n11 1 S sh\n999 1 S unrelated\n33 1\n", pids)
         });
-        assert_eq!(result.nodes.iter().map(|node| node.pane.as_str()).collect::<Vec<_>>(), vec!["%1", "%4"]);
-        assert!(result.nodes.iter().all(|node| node.activity == "idle" && node.health == "normal"));
+        assert_eq!(
+            result
+                .nodes
+                .iter()
+                .map(|node| node.pane.as_str())
+                .collect::<Vec<_>>(),
+            vec!["%1", "%4"]
+        );
+        assert!(result
+            .nodes
+            .iter()
+            .all(|node| node.activity == "idle" && node.health == "normal"));
     }
 
     #[test]
     fn empty_or_invalid_pid_sets_do_not_run_ps() {
         let panes = "hp\tw\t%1\t\tsh\nhp\tw\t%2\t0\tsh\nhp\tw\t%3\t1,2\tsh\nhp\tw\t%4\t4294967295\tsh\n\tw\t%5\t99\tsh\n";
-        let result = sample_native_panes(panes, "e1", &[], |_| panic!("no valid PID means no ps query"));
+        let result = sample_native_panes(panes, "e1", &[], |_| {
+            panic!("no valid PID means no ps query")
+        });
         assert_eq!(result.nodes.len(), 1);
         assert_eq!(result.nodes[0].pane, "%1");
         assert_eq!(result.nodes[0].health, "normal");
@@ -1507,16 +1579,34 @@ mod native_ps_batch_regressions {
         assert!(first.nodes.is_empty());
         assert_eq!(second.nodes.len(), 1);
         let failed = Some(first);
-        assert_eq!(project_node_with_attach(&registered[0], Some(&failed)).0.health, "unknown");
+        assert_eq!(
+            project_node_with_attach(&registered[0], Some(&failed))
+                .0
+                .health,
+            "unknown"
+        );
         let live = Some(second);
-        assert_eq!(project_node_with_attach(&registered[1], Some(&live)).0.health, "normal");
+        assert_eq!(
+            project_node_with_attach(&registered[1], Some(&live))
+                .0
+                .health,
+            "normal"
+        );
     }
 
     #[test]
     fn duplicate_process_rows_cannot_hide_a_zombie() {
         let requested = BTreeSet::from([11]);
-        for rows in [b"11 1 Z dead\n11 1 S sh\n".as_slice(), b"11 1 S sh\n11 1 Z dead\n".as_slice()] {
-            assert!(parse_process_snapshots(rows, &requested).get(&11).unwrap().zombie);
+        for rows in [
+            b"11 1 Z dead\n11 1 S sh\n".as_slice(),
+            b"11 1 S sh\n11 1 Z dead\n".as_slice(),
+        ] {
+            assert!(
+                parse_process_snapshots(rows, &requested)
+                    .get(&11)
+                    .unwrap()
+                    .zombie
+            );
         }
         assert!(parse_process_snapshots(b"not a process row\n", &requested).is_empty());
     }
@@ -1525,14 +1615,41 @@ mod native_ps_batch_regressions {
     fn json_and_human_keep_nine_fields_without_ps_details() {
         let registered = vec![registered("e1", "%1"), registered("e1", "%2")];
         let probe = Some(sample_native_panes(
-            "hp\tw\t%1\t11\tsh\nhp\tw\t%2\t22\tpi\n", "e1", &registered,
-            |pids| parse_process_snapshots(b"22 1 R PRIVATE_COMMAND_DETAIL\n11 1 S PRIVATE_COMMAND_DETAIL\n", pids),
+            "hp\tw\t%1\t11\tsh\nhp\tw\t%2\t22\tpi\n",
+            "e1",
+            &registered,
+            |pids| {
+                parse_process_snapshots(
+                    b"22 1 R PRIVATE_COMMAND_DETAIL\n11 1 S PRIVATE_COMMAND_DETAIL\n",
+                    pids,
+                )
+            },
         ));
-        let projected = registered.iter().map(|node| project_node_with_attach(node, Some(&probe))).collect::<Vec<_>>();
-        let keys = BTreeSet::from(["name", "provider", "model", "effort", "runtime_status", "activity", "health", "session_name", "tmux_command"]);
+        let projected = registered
+            .iter()
+            .map(|node| project_node_with_attach(node, Some(&probe)))
+            .collect::<Vec<_>>();
+        let keys = BTreeSet::from([
+            "name",
+            "provider",
+            "model",
+            "effort",
+            "runtime_status",
+            "activity",
+            "health",
+            "session_name",
+            "tmux_command",
+        ]);
         for (node, _) in &projected {
             let json = node.clone().into_json();
-            assert_eq!(json.as_object().unwrap().keys().map(String::as_str).collect::<BTreeSet<_>>(), keys);
+            assert_eq!(
+                json.as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>(),
+                keys
+            );
             assert_eq!(json["model"], "fixture-model");
             assert_eq!(json["effort"], "high");
             assert_eq!(json["runtime_status"], "running");
@@ -1592,12 +1709,21 @@ mod tests {
             node.effort = settings.1.map(str::to_string);
             for lifecycle in [None, Some("stopped")] {
                 node.lifecycle = lifecycle.map(str::to_string);
-                for sample in [None, Some(ProbeResult { nodes: vec![probe("pi_activity_channel")] })] {
+                for sample in [
+                    None,
+                    Some(ProbeResult {
+                        nodes: vec![probe("pi_activity_channel")],
+                    }),
+                ] {
                     let value = project_node(&node, Some(&sample)).into_json();
                     assert_eq!(value["model"], json!(settings.0));
                     assert_eq!(value["effort"], json!(settings.1));
                     let human = format_brief_node(&value).unwrap();
-                    assert!(human.contains(&format!("model: {} effort: {}", settings.0.unwrap_or("null"), settings.1.unwrap_or("null"))));
+                    assert!(human.contains(&format!(
+                        "model: {} effort: {}",
+                        settings.0.unwrap_or("null"),
+                        settings.1.unwrap_or("null")
+                    )));
                     assert_eq!(value.as_object().unwrap().len(), 9);
                 }
             }
@@ -1627,7 +1753,12 @@ mod tests {
     fn pi_pane_title_is_unknown_not_idle() {
         let node = registered();
         let observed = probe("pane_title");
-        let projected = project_node(&node, Some(&Some(ProbeResult { nodes: vec![observed] })));
+        let projected = project_node(
+            &node,
+            Some(&Some(ProbeResult {
+                nodes: vec![observed],
+            })),
+        );
         assert_eq!(projected.runtime_status, "running");
         assert_eq!(projected.activity, "unknown");
         assert_eq!(projected.health, "unknown");
@@ -1637,7 +1768,12 @@ mod tests {
     fn exact_probe_generates_quoted_window_pane_command() {
         let node = registered();
         let observed = probe("pi_activity_channel");
-        let projected = project_node(&node, Some(&Some(ProbeResult { nodes: vec![observed] })));
+        let projected = project_node(
+            &node,
+            Some(&Some(ProbeResult {
+                nodes: vec![observed],
+            })),
+        );
         assert_eq!(projected.activity, "idle");
         assert_eq!(
             projected.tmux_command.as_deref(),
@@ -1660,7 +1796,12 @@ mod tests {
         let mut node = registered();
         node.lifecycle = Some("stopped".to_string());
         let observed = probe("pi_activity_channel");
-        let projected = project_node(&node, Some(&Some(ProbeResult { nodes: vec![observed] })));
+        let projected = project_node(
+            &node,
+            Some(&Some(ProbeResult {
+                nodes: vec![observed],
+            })),
+        );
         assert_eq!(projected.runtime_status, "unknown");
         assert!(projected.tmux_command.is_none());
     }
@@ -1684,7 +1825,12 @@ mod tests {
         let node = registered();
         let mut observed = probe("pi_activity_channel");
         observed.pane = "%9".to_string();
-        let projected = project_node(&node, Some(&Some(ProbeResult { nodes: vec![observed] })));
+        let projected = project_node(
+            &node,
+            Some(&Some(ProbeResult {
+                nodes: vec![observed],
+            })),
+        );
         assert_eq!(projected.runtime_status, "unknown");
     }
 

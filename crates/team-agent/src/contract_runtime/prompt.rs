@@ -24,13 +24,28 @@ impl Source {
     pub fn read(path: &Path) -> Result<Self, ConfigError> {
         let resolved = path.canonicalize()?;
         let mut bytes = Vec::new();
-        std::fs::File::open(&resolved)?.take(MAX_PROMPT_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+        std::fs::File::open(&resolved)?
+            .take(MAX_PROMPT_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
         if bytes.len() > MAX_PROMPT_BYTES {
-            return Err(ConfigError::Unsupported("instruction source exceeds the bounded prompt limit; no truncation is performed"));
+            return Err(ConfigError::Unsupported(
+                "instruction source exceeds the bounded prompt limit; no truncation is performed",
+            ));
         }
-        let contents = String::from_utf8(bytes).map_err(|_| ConfigError::Invalid { path: path.into(), field: "UTF-8 instructions" })?;
-        if contents.contains('\0') { return Err(ConfigError::Invalid { path: path.into(), field: "NUL in instructions" }); }
-        Ok(Self { path: resolved, contents })
+        let contents = String::from_utf8(bytes).map_err(|_| ConfigError::Invalid {
+            path: path.into(),
+            field: "UTF-8 instructions",
+        })?;
+        if contents.contains('\0') {
+            return Err(ConfigError::Invalid {
+                path: path.into(),
+                field: "NUL in instructions",
+            });
+        }
+        Ok(Self {
+            path: resolved,
+            contents,
+        })
     }
     fn optional(path: &Path) -> Result<Option<Self>, ConfigError> {
         match std::fs::symlink_metadata(path) {
@@ -42,7 +57,12 @@ impl Source {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Layer { UserGlobal, Project, Role, TeamExplicit }
+pub enum Layer {
+    UserGlobal,
+    Project,
+    Role,
+    TeamExplicit,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstructionReceipt {
@@ -67,7 +87,11 @@ pub struct Prompt {
 /// to exist. Without an override the authorized user-level AGENTS is optional.
 pub fn user_source() -> Result<Option<Source>, ConfigError> {
     if let Some(path) = std::env::var_os("TEAM_AGENT_USER_INSTRUCTIONS") {
-        if path.is_empty() { return Err(ConfigError::Unsupported("TEAM_AGENT_USER_INSTRUCTIONS must name a file")); }
+        if path.is_empty() {
+            return Err(ConfigError::Unsupported(
+                "TEAM_AGENT_USER_INSTRUCTIONS must name a file",
+            ));
+        }
         return Source::read(Path::new(&path)).map(Some);
     }
     match std::env::var_os("HOME") {
@@ -89,22 +113,47 @@ pub fn team_sources(team: &Source, meta: &Value) -> Result<Vec<Source>, ConfigEr
     let mut paths = Vec::new();
     for field in ["instruction_files", "instructions"] {
         match meta.get(field) {
-            None | Some(Value::Null) => {},
-            Some(Value::Str(_)) if field == "instructions" => {},
+            None | Some(Value::Null) => {}
+            Some(Value::Str(_)) if field == "instructions" => {}
             Some(Value::Str(path)) => paths.push(path),
             Some(Value::List(values)) => {
                 for value in values {
-                    match value { Value::Str(path) => paths.push(path), _ => return Err(ConfigError::Invalid { path: team.path.clone(), field }) }
+                    match value {
+                        Value::Str(path) => paths.push(path),
+                        _ => {
+                            return Err(ConfigError::Invalid {
+                                path: team.path.clone(),
+                                field,
+                            })
+                        }
+                    }
                 }
-            },
-            _ => return Err(ConfigError::Invalid { path: team.path.clone(), field }),
+            }
+            _ => {
+                return Err(ConfigError::Invalid {
+                    path: team.path.clone(),
+                    field,
+                })
+            }
         }
     }
     let mut sources = vec![team.clone()];
     for path in paths {
-        if path.trim().is_empty() || path.contains('\0') { return Err(ConfigError::Invalid { path: team.path.clone(), field: "instruction file path" }); }
+        if path.trim().is_empty() || path.contains('\0') {
+            return Err(ConfigError::Invalid {
+                path: team.path.clone(),
+                field: "instruction file path",
+            });
+        }
         let path = Path::new(path);
-        let path = if path.is_absolute() { path.to_owned() } else { team.path.parent().ok_or(ConfigError::Unsupported("TEAM.md has no parent"))?.join(path) };
+        let path = if path.is_absolute() {
+            path.to_owned()
+        } else {
+            team.path
+                .parent()
+                .ok_or(ConfigError::Unsupported("TEAM.md has no parent"))?
+                .join(path)
+        };
         sources.push(Source::read(&path)?);
     }
     Ok(sources)
@@ -115,8 +164,13 @@ pub fn team_sources(team: &Source, meta: &Value) -> Result<Vec<Source>, ConfigEr
 /// only section separators are new bytes. Dynamic tasks are NOT repeated here:
 /// they enter the same native context later through the one durable outbox.
 pub fn assemble(
-    id: &str, role_name: &str, mode: CommunicationMode,
-    user: Option<&Source>, project: Option<&Source>, role: &Source, team: &[Source],
+    id: &str,
+    role_name: &str,
+    mode: CommunicationMode,
+    user: Option<&Source>,
+    project: Option<&Source>,
+    role: &Source,
+    team: &[Source],
 ) -> Result<Prompt, ConfigError> {
     let mut text = [
         worker_identity_section(id, role_name),
@@ -125,17 +179,38 @@ pub fn assemble(
         "The operations above are logical names. Use the bound MCP client's advertised tool names, not guessed prefixes. Original role-template metadata below does not change your bound worker identity or selected native launch parameters.\nFinal completion calls report_result exactly once. Durable storage and actual leader presentation are separate facts; do not claim delivery from registration or persistence alone.".into(),
     ].join("\n\n");
     let mut ordered = Vec::new();
-    if let Some(source) = user { ordered.push((Layer::UserGlobal, source)); }
-    if let Some(source) = project { ordered.push((Layer::Project, source)); }
+    if let Some(source) = user {
+        ordered.push((Layer::UserGlobal, source));
+    }
+    if let Some(source) = project {
+        ordered.push((Layer::Project, source));
+    }
     ordered.push((Layer::Role, role));
     ordered.extend(team.iter().map(|source| (Layer::TeamExplicit, source)));
     let mut sources = Vec::new();
     for (layer, source) in ordered {
-        text.push_str(&format!("\n\n# Team Agent instruction layer: {layer:?}\n\n"));
+        text.push_str(&format!(
+            "\n\n# Team Agent instruction layer: {layer:?}\n\n"
+        ));
         let start = text.len();
         text.push_str(&source.contents);
-        if text.len() > MAX_PROMPT_BYTES { return Err(ConfigError::Unsupported("assembled prompt exceeds the bounded limit; no truncation is performed")); }
-        sources.push(InstructionReceipt { layer, path: source.path.clone(), sha256: digest(source.contents.as_bytes()), bytes: source.contents.len(), start, end: text.len() });
+        if text.len() > MAX_PROMPT_BYTES {
+            return Err(ConfigError::Unsupported(
+                "assembled prompt exceeds the bounded limit; no truncation is performed",
+            ));
+        }
+        sources.push(InstructionReceipt {
+            layer,
+            path: source.path.clone(),
+            sha256: digest(source.contents.as_bytes()),
+            bytes: source.contents.len(),
+            start,
+            end: text.len(),
+        });
     }
-    Ok(Prompt { sha256: digest(text.as_bytes()), text, sources })
+    Ok(Prompt {
+        sha256: digest(text.as_bytes()),
+        text,
+        sources,
+    })
 }

@@ -32,7 +32,11 @@ pub(crate) fn write_message(
     message: MessageWrite<'_>,
 ) -> Result<String, Error> {
     let external = super::forward::peer(tx, message.recipient)?;
-    let target = if external.is_none() { load_seat(tx, &SeatId::new(message.recipient)?)? } else { None };
+    let target = if external.is_none() {
+        load_seat(tx, &SeatId::new(message.recipient)?)?
+    } else {
+        None
+    };
     if target.is_none() && external.is_none() && message.recipient != "leader" {
         return Err(Error::Invalid("unknown recipient"));
     }
@@ -54,17 +58,30 @@ pub(crate) fn write_message(
         params![id,scope.as_str(),message.task,message.sender,message.recipient,
             if external.is_some() {"forward_pending"} else if message.mailbox {"stored_only"} else {"accepted"},message.content,message.presentation])?;
     if let Some(external) = external {
-        let source = message.source.ok_or(Error::Invalid("framework forwarding source"))?;
-        if source.scope != *scope || source.seat.as_str() != message.sender { return Err(Error::Fence); }
-        super::forward::insert(tx, &super::forward::ForwardIntent {
-            id: id.clone(), source: source.clone(), route: external.route,
-            payload: super::forward::ForwardPayload::Message {
-                message: MessageId::new(&id)?, task: message.task.map(str::to_owned),
-                sender: message.sender.into(), recipient: message.recipient.into(),
-                content: message.content.into(), mailbox: message.mailbox,
+        let source = message
+            .source
+            .ok_or(Error::Invalid("framework forwarding source"))?;
+        if source.scope != *scope || source.seat.as_str() != message.sender {
+            return Err(Error::Fence);
+        }
+        super::forward::insert(
+            tx,
+            &super::forward::ForwardIntent {
+                id: id.clone(),
+                source: source.clone(),
+                route: external.route,
+                payload: super::forward::ForwardPayload::Message {
+                    message: MessageId::new(&id)?,
+                    task: message.task.map(str::to_owned),
+                    sender: message.sender.into(),
+                    recipient: message.recipient.into(),
+                    content: message.content.into(),
+                    mailbox: message.mailbox,
+                },
+                state: super::forward::ForwardState::Pending,
+                receipt: None,
             },
-            state: super::forward::ForwardState::Pending, receipt: None,
-        })?;
+        )?;
     } else if !message.mailbox {
         let identity = target
             .map(|s| serde_json::to_string(&s.identity))
@@ -105,7 +122,11 @@ impl ContractStore {
     /// A shared framework dispatcher supplies the captured sender. This is not
     /// exposed as a native tool argument and never routes through a legacy
     /// fallback. Destination generation and native queue are still atomic.
-    pub fn send_from_framework(&mut self, request: &OperatorSend, sender: &SeatId) -> Result<SendReceipt, Error> {
+    pub fn send_from_framework(
+        &mut self,
+        request: &OperatorSend,
+        sender: &SeatId,
+    ) -> Result<SendReceipt, Error> {
         if !nonblank(&request.content)
             || request.content.len() > super::mcp::MAX_FRAME_BYTES
             || request

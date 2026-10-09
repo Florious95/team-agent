@@ -120,7 +120,13 @@ pub(super) fn persist_spawn_agent_state(
             continue;
         };
         #[cfg(unix)]
-        if agent.get("provider").and_then(Value::as_str).is_some_and(|provider| crate::contract_runtime::registry::descriptor(provider).is_some()) {
+        if agent
+            .get("provider")
+            .and_then(Value::as_str)
+            .is_some_and(|provider| {
+                crate::contract_runtime::registry::descriptor(provider).is_some()
+            })
+        {
             let projected = if agent_is_paused(agent) {
                 serde_json::json!({"agent_id":id,"provider":"kiro","runtime_family":"contract","status":"paused","pane_id":null})
             } else {

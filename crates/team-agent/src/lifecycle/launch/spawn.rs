@@ -82,9 +82,20 @@ pub(super) fn spawn_agents(
             continue;
         }
         #[cfg(unix)]
-        if agent.get("provider").and_then(Value::as_str).is_some_and(|provider| crate::contract_runtime::registry::descriptor(provider).is_some()) {
+        if agent
+            .get("provider")
+            .and_then(Value::as_str)
+            .is_some_and(|provider| {
+                crate::contract_runtime::registry::descriptor(provider).is_some()
+            })
+        {
             let team = runtime_team_key_for_spec(spec_path, spec, session_name);
-            crate::contract_runtime::framework::start_role(workspace, team_dir, &team, agent_id_raw)?;
+            crate::contract_runtime::framework::start_role(
+                workspace,
+                team_dir,
+                &team,
+                agent_id_raw,
+            )?;
             // No legacy target is manufactured for the private native socket.
             // persist_spawn_agent_state projects the actual K3 seat separately.
             continue;
@@ -107,11 +118,12 @@ pub(super) fn spawn_agents(
         // has both the role instruction AND the callable Team Agent MCP capability.
         // probe5 RED proved that `build_command(.., None, None, ..)` left the worker
         // without `report_result`; placeholders are substituted at spawn time.
-        let command_agent = crate::lifecycle::worker_command_context::WorkerCommandAgent::from_yaml(
-            agent,
-            Some(agent_id_raw),
-            provider,
-        )?;
+        let command_agent =
+            crate::lifecycle::worker_command_context::WorkerCommandAgent::from_yaml(
+                agent,
+                Some(agent_id_raw),
+                provider,
+            )?;
         let system_prompt =
             crate::lifecycle::worker_command_context::compile_worker_system_prompt(&command_agent)?;
         // 0.5.66 bypass 单源:per-agent safety 只服务 env 注入与审计,不参与 argv 决策。
@@ -459,7 +471,11 @@ pub(crate) fn agent_id_spec_source_path(workspace: &Path, agent_id: &str) -> Str
         });
     team_dir
         .map(|dir| dir.join("agents").join(format!("{agent_id}.md")))
-        .unwrap_or_else(|| workspace.join(".team/current/agents").join(format!("{agent_id}.md")))
+        .unwrap_or_else(|| {
+            workspace
+                .join(".team/current/agents")
+                .join(format!("{agent_id}.md"))
+        })
         .display()
         .to_string()
 }

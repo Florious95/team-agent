@@ -502,7 +502,8 @@ fn compile_role_agent_with_mode(
     #[cfg(not(unix))]
     let contract_role = false;
     #[cfg(unix)]
-    let skip_team_effort = contract.is_some_and(|descriptor| !descriptor.effort.inherit_team_default);
+    let skip_team_effort =
+        contract.is_some_and(|descriptor| !descriptor.effort.inherit_team_default);
     #[cfg(not(unix))]
     let skip_team_effort = false;
     validate_pi_role_fields(&meta, role_path, &provider)?;
@@ -601,9 +602,16 @@ fn compile_role_agent_with_mode(
         #[cfg(unix)]
         if let Some(descriptor) = contract {
             use team_agent_contract::contract::descriptor::{Effort, EffortAdmission};
-            let native_effort = Effort::parse(effort.as_str()).map_err(|error| ModelError::Validation(error.to_string()))?;
-            if let EffortAdmission::Reject(reason) = descriptor.effort.admission[native_effort.index()] {
-                return Err(ModelError::Validation(format!("{}: {}", role_path.display(), reason.message)));
+            let native_effort = Effort::parse(effort.as_str())
+                .map_err(|error| ModelError::Validation(error.to_string()))?;
+            if let EffortAdmission::Reject(reason) =
+                descriptor.effort.admission[native_effort.index()]
+            {
+                return Err(ModelError::Validation(format!(
+                    "{}: {}",
+                    role_path.display(),
+                    reason.message
+                )));
             }
         }
         if !contract_role {
@@ -611,7 +619,8 @@ fn compile_role_agent_with_mode(
             if let Err(reason) = effort.resolve_for_provider(provider_enum) {
                 return Err(ModelError::Validation(format!(
                     "{}: {reason} (effort: {}; provider: {provider_str})",
-                    role_path.display(), effort.as_str()
+                    role_path.display(),
+                    effort.as_str()
                 )));
             }
         }
@@ -737,12 +746,17 @@ mod pi_preflight_tests {
 
     #[test]
     fn omitted_qualified_and_non_pi_do_not_discover() {
-        for meta in [role("pi", None), role("pi", Some("openai/gpt-5")), role("codex", Some("gpt-5"))] {
+        for meta in [
+            role("pi", None),
+            role("pi", Some("openai/gpt-5")),
+            role("codex", Some("gpt-5")),
+        ] {
             let calls = Cell::new(0);
             assert!(preflight_pi_role_model_with(&meta, |_| {
                 calls.set(calls.get() + 1);
                 Ok(vec![])
-            }).is_ok());
+            })
+            .is_ok());
             assert_eq!(calls.get(), 0);
         }
     }
@@ -753,12 +767,21 @@ mod pi_preflight_tests {
         let error = preflight_pi_role_model_with(&role("pi", Some("gpt-5.6-sol")), |requested| {
             calls.set(calls.get() + 1);
             assert_eq!(requested, "gpt-5.6-sol");
-            Ok(vec!["openai-codex/gpt-5.6-sol".into(), "azure/gpt-5.6-sol".into()])
-        }).expect_err("unqualified model must fail closed");
+            Ok(vec![
+                "openai-codex/gpt-5.6-sol".into(),
+                "azure/gpt-5.6-sol".into(),
+            ])
+        })
+        .expect_err("unqualified model must fail closed");
         assert_eq!(calls.get(), 1);
-        assert_eq!(error.candidates, vec!["openai-codex/gpt-5.6-sol", "azure/gpt-5.6-sol"]);
+        assert_eq!(
+            error.candidates,
+            vec!["openai-codex/gpt-5.6-sol", "azure/gpt-5.6-sol"]
+        );
         assert!(!error.not_ready);
-        assert!(error.action.contains("team-agent models --provider pi --search gpt-5.6-sol"));
+        assert!(error
+            .action
+            .contains("team-agent models --provider pi --search gpt-5.6-sol"));
     }
 
     #[test]

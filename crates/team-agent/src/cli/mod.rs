@@ -1299,8 +1299,13 @@ pub mod lifecycle_port {
         };
         #[cfg(unix)]
         if crate::contract_runtime::framework::has_contract(&state) {
-            crate::contract_runtime::framework::stop_selected(&run_workspace, &state)
-                .map_err(|error| CliError::Runtime(format!("native shutdown failed; owned resources preserved: {error}")))?;
+            crate::contract_runtime::framework::stop_selected(&run_workspace, &state).map_err(
+                |error| {
+                    CliError::Runtime(format!(
+                        "native shutdown failed; owned resources preserved: {error}"
+                    ))
+                },
+            )?;
         }
         deadline.check("refresh_provider_sessions")?;
         let captured_missing_sessions =
@@ -3114,7 +3119,9 @@ pub mod lifecycle_port {
         session_converge_deadline_ms: Option<u64>,
     ) -> Result<Value, CliError> {
         #[cfg(unix)]
-        crate::contract_runtime::framework::require_legacy_lifecycle(workspace, team, None, "restart")?;
+        crate::contract_runtime::framework::require_legacy_lifecycle(
+            workspace, team, None, "restart",
+        )?;
         match crate::lifecycle::restart_with_session_convergence_deadline(
             workspace,
             allow_fresh,
@@ -3137,8 +3144,16 @@ pub mod lifecycle_port {
     ) -> Result<Value, CliError> {
         #[cfg(unix)]
         {
-            crate::contract_runtime::framework::require_legacy_lifecycle(workspace, team, Some(agent), "start-agent")?;
-            crate::contract_runtime::framework::require_legacy_role(None, role_config.provider.as_deref())?;
+            crate::contract_runtime::framework::require_legacy_lifecycle(
+                workspace,
+                team,
+                Some(agent),
+                "start-agent",
+            )?;
+            crate::contract_runtime::framework::require_legacy_role(
+                None,
+                role_config.provider.as_deref(),
+            )?;
         }
         let _ = force; // Never grants authority to stop an already-running seat.
         let agent_id = crate::model::ids::AgentId::new(agent);
@@ -3208,7 +3223,12 @@ pub mod lifecycle_port {
     ) -> Result<Value, CliError> {
         let agent_id = crate::model::ids::AgentId::new(agent);
         #[cfg(unix)]
-        crate::contract_runtime::framework::require_legacy_lifecycle(workspace, team, Some(agent), "stop-agent")?;
+        crate::contract_runtime::framework::require_legacy_lifecycle(
+            workspace,
+            team,
+            Some(agent),
+            "stop-agent",
+        )?;
         match crate::lifecycle::stop_agent(workspace, &agent_id, team) {
             Ok(report) => Ok(json!({"ok": true, "agent_id": agent, "stopped": report.stopped})),
             Err(e) => Ok(error_value(e)),
@@ -3224,7 +3244,12 @@ pub mod lifecycle_port {
     ) -> Result<Value, CliError> {
         let agent_id = crate::model::ids::AgentId::new(agent);
         #[cfg(unix)]
-        crate::contract_runtime::framework::require_legacy_lifecycle(workspace, team, Some(agent), "reset-agent")?;
+        crate::contract_runtime::framework::require_legacy_lifecycle(
+            workspace,
+            team,
+            Some(agent),
+            "reset-agent",
+        )?;
         match crate::lifecycle::reset_agent(workspace, &agent_id, discard_session, true, team) {
             Ok(crate::lifecycle::ResetAgentOutcome::Reset {
                 env,
@@ -3274,8 +3299,16 @@ pub mod lifecycle_port {
         let source = (!role_file.is_empty()).then(|| Path::new(role_file));
         #[cfg(unix)]
         {
-            crate::contract_runtime::framework::require_legacy_lifecycle(workspace, team, Some(agent), "add-agent")?;
-            crate::contract_runtime::framework::require_legacy_role(source, role_config.provider.as_deref())?;
+            crate::contract_runtime::framework::require_legacy_lifecycle(
+                workspace,
+                team,
+                Some(agent),
+                "add-agent",
+            )?;
+            crate::contract_runtime::framework::require_legacy_role(
+                source,
+                role_config.provider.as_deref(),
+            )?;
         }
         match crate::lifecycle::role_config::add_agent_from_role(
             workspace,
@@ -3330,7 +3363,12 @@ pub mod lifecycle_port {
         let source = crate::model::ids::AgentId::new(source_agent);
         let dest = crate::model::ids::AgentId::new(as_agent_id);
         #[cfg(unix)]
-        crate::contract_runtime::framework::require_legacy_lifecycle(workspace, team, Some(source_agent), "fork-agent")?;
+        crate::contract_runtime::framework::require_legacy_lifecycle(
+            workspace,
+            team,
+            Some(source_agent),
+            "fork-agent",
+        )?;
         match crate::lifecycle::fork_agent(workspace, &source, &dest, label, true, team) {
             Ok(report) => {
                 let mut value = json!({
@@ -3369,7 +3407,12 @@ pub mod lifecycle_port {
         let source = crate::model::ids::AgentId::new(source_agent);
         let dest = crate::model::ids::AgentId::new(as_agent_id);
         #[cfg(unix)]
-        crate::contract_runtime::framework::require_legacy_lifecycle(workspace, team, Some(source_agent), "clone-agent")?;
+        crate::contract_runtime::framework::require_legacy_lifecycle(
+            workspace,
+            team,
+            Some(source_agent),
+            "clone-agent",
+        )?;
         match crate::lifecycle::clone_agent(workspace, &source, &dest, label, true, team) {
             Ok(report) => Ok(json!({
                 "ok": true,
@@ -3396,7 +3439,12 @@ pub mod lifecycle_port {
     ) -> Result<Value, CliError> {
         let agent_id = crate::model::ids::AgentId::new(agent);
         #[cfg(unix)]
-        crate::contract_runtime::framework::require_legacy_lifecycle(workspace, team, Some(agent), "remove-agent")?;
+        crate::contract_runtime::framework::require_legacy_lifecycle(
+            workspace,
+            team,
+            Some(agent),
+            "remove-agent",
+        )?;
         match crate::lifecycle::remove_agent_flag_requirements(workspace, &agent_id, team) {
             Ok(requirements) => {
                 if !remove_agent_missing_flags(from_spec, confirm, force, &requirements).is_empty()

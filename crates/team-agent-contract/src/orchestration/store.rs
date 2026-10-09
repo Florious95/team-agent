@@ -174,7 +174,12 @@ impl ContractStore {
     pub fn open_readonly(root: &Path, scope: ScopeId, endpoint: &str) -> Result<Self, Error> {
         Self::open_mode(root, scope, endpoint, true)
     }
-    fn open_mode(root: &Path, scope: ScopeId, endpoint: &str, readonly: bool) -> Result<Self, Error> {
+    fn open_mode(
+        root: &Path,
+        scope: ScopeId,
+        endpoint: &str,
+        readonly: bool,
+    ) -> Result<Self, Error> {
         require_absolute(root, "store root")?;
         validate_ancestors(root)?;
         #[cfg(unix)]
@@ -191,7 +196,11 @@ impl ContractStore {
         }
         let connection = Connection::open_with_flags(
             path,
-            (if readonly { OpenFlags::SQLITE_OPEN_READ_ONLY } else { OpenFlags::SQLITE_OPEN_READ_WRITE }) | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            (if readonly {
+                OpenFlags::SQLITE_OPEN_READ_ONLY
+            } else {
+                OpenFlags::SQLITE_OPEN_READ_WRITE
+            }) | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
         // Verify identity before pragmas, migrations, or writes.
         let app: i64 = connection.query_row("PRAGMA application_id", [], |r| r.get(0))?;
@@ -212,7 +221,9 @@ impl ContractStore {
         {
             return Err(Error::Fence);
         }
-        if !readonly { configure(&connection)?; }
+        if !readonly {
+            configure(&connection)?;
+        }
         Ok(Self {
             connection,
             scope,
@@ -236,12 +247,27 @@ impl ContractStore {
     /// Read-only allocation proposal. Lifecycle::begin still atomically fences
     /// the generation and unique instance; concurrent proposals cannot both win.
     pub fn propose_identity(&self, seat: &SeatId) -> Result<InstanceIdentity, Error> {
-        let previous: Option<u64> = self.connection.query_row(
-            "SELECT generation FROM contract_generations WHERE seat=?1", [seat.as_str()], |row| row.get(0),
-        ).optional()?;
-        let generation = previous.unwrap_or(0).checked_add(1).ok_or(Error::Invalid("generation overflow"))?;
-        let instance: String = self.connection.query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
-        Ok(InstanceIdentity { scope:self.scope.clone(), seat:seat.clone(), instance:InstanceId::new(format!("instance-{instance}"))?, generation:Generation(generation) })
+        let previous: Option<u64> = self
+            .connection
+            .query_row(
+                "SELECT generation FROM contract_generations WHERE seat=?1",
+                [seat.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let generation = previous
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(Error::Invalid("generation overflow"))?;
+        let instance: String =
+            self.connection
+                .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+        Ok(InstanceIdentity {
+            scope: self.scope.clone(),
+            seat: seat.clone(),
+            instance: InstanceId::new(format!("instance-{instance}"))?,
+            generation: Generation(generation),
+        })
     }
     pub fn seats(&self) -> Result<Vec<SeatRecord>, Error> {
         let mut statement = self
@@ -514,7 +540,8 @@ pub(crate) fn next_id(connection: &Connection, prefix: &str) -> Result<String, E
     )?;
     // Shared-framework forwarding may cross native stores or reopen a logical
     // scope after teardown. A local counter alone is not a global message key.
-    let incarnation: String = connection.query_row("SELECT incarnation FROM contract_meta", [], |r| r.get(0))?;
+    let incarnation: String =
+        connection.query_row("SELECT incarnation FROM contract_meta", [], |r| r.get(0))?;
     if incarnation.len() != 32 || !incarnation.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(Error::Corrupt);
     }

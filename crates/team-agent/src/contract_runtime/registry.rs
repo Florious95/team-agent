@@ -17,6 +17,10 @@ pub fn recognizes(key: &str) -> bool {
     let key = key.trim();
     DESCRIPTORS.iter().any(|descriptor| {
         descriptor.identity.id.eq_ignore_ascii_case(key)
-            || descriptor.identity.aliases.iter().any(|alias| alias.eq_ignore_ascii_case(key))
+            || descriptor
+                .identity
+                .aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(key))
     })
 }

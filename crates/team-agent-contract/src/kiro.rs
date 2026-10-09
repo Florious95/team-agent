@@ -187,7 +187,8 @@ impl PlanHook for KiroAdapter {
             return Err(ContractError::UnknownProvider);
         }
         if request.evidence_kind == EvidenceKind::Native
-            && (!interaction::PROFILES[0].matches_native(&request.native) || request.bypass) {
+            && (!interaction::PROFILES[0].matches_native(&request.native) || request.bypass)
+        {
             return Err(ContractError::Unverified {
                 field: "Kiro native identity or startup consent",
                 reason: NATIVE_UNVERIFIED,
@@ -365,9 +366,12 @@ impl MaterializeHook for KiroAdapter {
                     "@team/report_result",
                     "@team/get_team_status"
                 ])
-            || config["allowedTools"] != serde_json::json!([
-                "@team/send_message", "@team/report_result", "@team/get_team_status"
-            ])
+            || config["allowedTools"]
+                != serde_json::json!([
+                    "@team/send_message",
+                    "@team/report_result",
+                    "@team/get_team_status"
+                ])
             || config["mcpServers"]
                 != serde_json::json!({"team":{"command":self.mcp.executable.to_str(),"args":self.mcp.arguments,"env":self.mcp.environment}})
         {
