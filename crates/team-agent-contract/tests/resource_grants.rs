@@ -12,6 +12,10 @@ struct CwdPlan;
 impl PlanHook for CwdPlan {
     fn plan(&self, resolved: &ResolvedLaunch) -> Result<LaunchPlan, ContractError> {
         let mut plan = Fake.plan(resolved)?;
+        if resolved.request().mode == LaunchMode::LaunchOnly {
+            plan.arguments.truncate(2); // no FullWorker MCP arguments in this mode
+            plan.carriers.mcp = CarrierUse::NotRequested;
+        }
         plan.materialization[0].path = OwnedPath::new(
             resolved.request().paths.cwd.path.clone(),
             PathBuf::from(".kiro/agents/owned.json"),
@@ -155,6 +159,7 @@ fn captured_validator_uses_required_path_option_without_shell_splitting() {
     h.plan = HookBinding::Bound(&CwdPlan);
     let resolved = resolve_launch(&d, &h, &request, None).unwrap();
     let plan = CwdPlan.plan(&resolved).unwrap();
+    validate_launch_plan(&d, &resolved, &plan).unwrap();
     let mut io = ScopedMaterializer::new(
         &d,
         &resolved,
