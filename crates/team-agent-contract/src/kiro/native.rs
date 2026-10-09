@@ -224,10 +224,10 @@ impl<R: CommandRunner> CatalogReader<R> {
         if grant.provider.as_str() != "kiro"
             || grant.native.version != super::BUNDLE_VERSION
             || grant.source != CHAT_CATALOG_SOURCE
-            || !grant
+            || grant
                 .executable
                 .file_name()
-                .is_some_and(|name| name == "kiro-cli-chat")
+                .is_none_or(|name| name != "kiro-cli-chat")
         {
             return Err(ContractError::Mismatch("Kiro catalog grant"));
         }
