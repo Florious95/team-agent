@@ -210,9 +210,9 @@ impl PlanHook for KiroAdapter {
                 .ok_or(ContractError::Invalid("explicit Kiro native model"))?,
         );
         let effort = match resolved.effort() {
-            EffortResolution::Pass(Effort::Off) => {
+            EffortResolution::Pass(Effort::Ultra) => {
                 return Err(ContractError::Unverified {
-                    field: "Kiro off effort mapping",
+                    field: "Kiro ultra effort mapping",
                     reason: NATIVE_UNVERIFIED,
                 })
             }

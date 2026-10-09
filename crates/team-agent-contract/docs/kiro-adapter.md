@@ -32,7 +32,7 @@
 ### 参数/配置实现
 
 - `OsString` argv 保留模型 ID 与空格/Unicode/引号路径边界；不拼 shell、不向 positional INPUT 塞首条业务消息。
-- model/effort 显式携带；`off` 映射无证据则拒绝，不映射成 `none` 或改为 `high`。`--trust-all-tools` 只在显式 bypass 请求时产生，启动风险确认仍未验证。
+- model/effort 显式携带；`ultra` 映射无证据则拒绝，不映射成 `max` 或改为 `high`；`off`/`none` 本就不属于 K1 的统一 effort 语法。`--trust-all-tools` 只在显式 bypass 请求时产生，启动风险确认仍未验证。
 - `McpStdio` 由 framework 配置真正的 executable/args/env；adapter 不猜尚未存在的 public CLI 参数，也不读取 ambient secrets。
 - owned agent name 用长度前缀编码 scope/seat/instance/generation，防 component 拼接歧义。JSON 在 cwd `.kiro/agents/<owned-name>.json`，prompt 用 JSON 正确转义。
 - 只列固定三工具 `@team/send_message` / `report_result` / `get_team_status` 和 native builtins；不从其他 Provider 拼 `mcp__...` 名称。

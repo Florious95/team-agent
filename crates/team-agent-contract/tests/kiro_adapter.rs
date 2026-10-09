@@ -23,6 +23,9 @@ fn fixture_descriptor() -> ProviderDescriptor {
     d.identity.binary = "kiro-cli";
     d.workspace = KIRO_DESCRIPTOR.workspace.clone();
     d.teardown = KIRO_DESCRIPTOR.teardown.clone();
+    d.prompt = KIRO_DESCRIPTOR.prompt.clone();
+    d.mcp.carrier = Support::Supported(McpCarrier::ScopedConfig);
+    d.mcp.scope = ResourceScope::WorkingDirectory;
     d.effort.admission = [const { EffortAdmission::Pass }; 6];
     d.effort.carrier = Support::Supported(ValueCarrier::Flag("--effort"));
     d.bypass.intent = Support::Supported(BypassPolicy {
@@ -143,9 +146,9 @@ fn effort_and_bypass_are_explicit_and_not_inferred_from_native_banner() {
 }
 
 #[test]
-fn off_effort_is_not_guessed_as_a_native_flag_or_silently_downgraded() {
+fn ultra_effort_is_not_guessed_as_a_native_flag_or_silently_downgraded() {
     let mut request = fixture_request();
-    request.role_effort = Some("off".into());
+    request.role_effort = Some("ultra".into());
     assert!(matches!(
         adapter().plan(&fixture_resolved(request)),
         Err(ContractError::Unverified { .. })
