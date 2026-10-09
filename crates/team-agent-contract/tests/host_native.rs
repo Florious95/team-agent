@@ -168,12 +168,7 @@ fn native_case(mode: &str, content: &str, expected_keys: usize) {
         let frame = host
             .capture(&target, &clock, ready_until, Duration::from_millis(500))
             .unwrap();
-        if frame
-            .text
-            .lines()
-            .rfind(|line| !line.trim().is_empty())
-            == Some("READY|-")
-        {
+        if frame.text.lines().rfind(|line| !line.trim().is_empty()) == Some("READY|-") {
             break;
         }
         assert!(
