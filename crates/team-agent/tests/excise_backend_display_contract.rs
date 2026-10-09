@@ -103,11 +103,16 @@ fn R2_team_md_display_backend_is_ignored_and_tmux_stays_silent() {
             state_text.contains("tmux_socket") || state_text.contains("tmux_endpoint"),
             "R2 state must expose the owned tmux transport: {state_text}"
         );
-        if value == "ghostty" || value == "terminal" {
-            assert!(
-                !state_text.contains(value) && !stdout(&output).contains(value),
-                "legacy value {value} must be ignored, not projected as an active renderer"
-            );
+        // English guidance may legitimately mention a "terminal"; assert on
+        // renderer projection and actual transport, not words in all stdout.
+        let state: Value = serde_json::from_str(&state_text).expect("R2 persisted JSON");
+        assert_eq!(state["transport"]["kind"], "tmux", "legacy value {value}: {state}");
+        for node in std::iter::once(&state)
+            .chain(state["teams"].as_object().expect("R2 canonical teams").values())
+            .chain(std::iter::once(&body))
+        {
+            assert!(node.get("display_backend").is_none(),
+                "legacy value {value} must not be projected as an active renderer: {node}");
         }
         if let Some(socket) = body.get("tmux_socket").and_then(Value::as_str) {
             let _ = Command::new("tmux")

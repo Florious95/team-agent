@@ -69,7 +69,7 @@ fn assert_unknown_compile(output: &Output) {
         "unknown command must not write stdout"
     );
     assert!(
-        err.contains("没有这个操作") && err.contains("'compile'"),
+        err.contains("Unknown command: 'compile'"),
         "not generic unknown: {err:?}"
     );
     assert!(

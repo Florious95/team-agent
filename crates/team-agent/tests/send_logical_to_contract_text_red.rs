@@ -12,7 +12,7 @@ fn cli_help_names_and_examples_short_recipient_and_explicit_scope() {
     let help = team_agent::cli::emit::__test_command_help(Some("send"));
     for text in [
         "team-agent send <agent>",
-        "队友名",
+        "agent name",
         "--workspace",
         "--team",
         "--mailbox",
