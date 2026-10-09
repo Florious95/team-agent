@@ -6,3 +6,4 @@
 
 pub mod contract;
 pub mod orchestration;
+pub mod kiro;

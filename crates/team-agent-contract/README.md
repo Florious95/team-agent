@@ -1,8 +1,10 @@
-# Team Agent Contract — K1 + K3
+# Team Agent Contract — K1 + K3 + gated K4 draft
 
 独立的契约与编排 library。此包是自己的 nested Cargo workspace；不加入旧 workspace，不依赖旧 `team-agent` crate，不注册任何 provider，也不提供 executable。K3 使用 SQLite/serde 持久化共享生命周期与 MCP 事务。
 
 **当前不是 Kiro 适配器或可运行 Team。** 本分支包含 store、三个 MCP handlers/有界 stdio loop、共享 supervisor 和 F0–F5 事务；真实 Host/executor 属于独立 K2，组合验证另行进行。没有 Kiro profile、CLI 或原生验收；`fixture`/`fake` 不是 Kiro。
+
+K4 文档候选 adapter 位于 `kiro` 模块，真实 native admission 保持关闭；H2/H3 已实现，另外五个 Hook slot 明确 Unverified。详见 [Kiro adapter 的部分交付与 R0 阻塞](docs/kiro-adapter.md)。
 
 设计输入：黄金 [`provider-contract-spec.md`](../../docs/reference/provider-contract-spec.md)，以及 Kiro 独立框架任务书的 K1 边界。旧六家、根 manifest/lockfile 与所有既有 tracked 文件必须保持不变。
 
