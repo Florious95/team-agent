@@ -428,6 +428,24 @@ fn pane_metadata_native_receipts_preserve_empty_fields() {
 }
 
 #[test]
+fn pane_metadata_does_not_guess_underscores_after_tmux_sanitization() {
+    let sanitized = b"$0_@0_%0_59311_tac-5d82f16579c34d0adc357b03_worker_0__0___120_40\n";
+    for stage in [PaneMetadataStage::NewSession, PaneMetadataStage::Query] {
+        let error = parse_pane(sanitized, stage).unwrap_err();
+        assert_eq!(error.operation, "tmux metadata field count (expected 13)");
+        let diagnostic = error.metadata.unwrap();
+        assert_eq!(diagnostic.actual_fields, 1);
+        assert_eq!(diagnostic.output_bytes, 65);
+        let pane = parse_pane(
+            b"$0\t@0\t%0\t123\tsession_with_underscores\tworker\t0\t\t0\t\t\t120\t40\n",
+            stage,
+        )
+        .unwrap();
+        assert_eq!(pane.address.session_name, "session_with_underscores");
+    }
+}
+
+#[test]
 fn pane_metadata_failures_identify_stage_reason_and_actual_field_count() {
     let valid = "$0\t@0\t%0\t123\tsession\tworker\t0\t\t0\t\t\t120\t40\n";
     for (stage, label) in [

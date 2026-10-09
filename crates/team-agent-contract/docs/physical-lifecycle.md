@@ -15,6 +15,10 @@
 
 ## Tmux 元数据失败诊断
 
+唯一 `TmuxHost::command` 入口固定使用 `tmux -u -S <owned socket>`：`-u` 明确选择 UTF-8 机器协议，不依赖 caller 的 `LANG`/`LC_*`，也不修改 native 子进程的 locale。tmux 3.7c 在缺少 UTF-8 client 标记时，会把 TAB 经 `utf8_sanitize` 转成 `_`；不能把 `_` 当作兼容分隔符，因为合法名称也可含下划线。
+
+源码依据（官方 tag 3.7c，commit `e476c1230b958df0cb12977517d24b3dc931375b`）：[client UTF-8 选择](https://github.com/tmux/tmux/blob/e476c1230b958df0cb12977517d24b3dc931375b/tmux.c#L460-L503) → [输出卫生化](https://github.com/tmux/tmux/blob/e476c1230b958df0cb12977517d24b3dc931375b/server-client.c#L2828-L2840) → [控制字符替换](https://github.com/tmux/tmux/blob/e476c1230b958df0cb12977517d24b3dc931375b/utf8.c#L784-L814)。这是固定的因果证据引用，不是 tmux 版本或二进制 admission 门禁。
+
 固定 `FORMAT` 的解析错误区分 `new-session` 首次返回与后续 `query`；空输出、字段数不等于 13（保留空字段并输出实际数量）、session/window/pane ID 非法分别报错。其他 PID、状态和尺寸校验仍严格拒绝，不因诊断而放宽身份围栏。
 
 错误只附本次元数据响应的前 256 原始字节，按字节 ASCII 转义（最多 1024 字符），并标注总字节数及是否截断；不读取/打印 pane 屏幕、prompt、argv、环境、stderr 或认证配置。桥接保留这些详情到 lifecycle 的 `operation.failure`，而非只剩静态 `Host("tmux metadata shape")`。诊断不重试 spawn、不接管旧 pane、不清除 pending/lease。
@@ -38,5 +42,7 @@ K3 claim 中的目标 lease、outbox in-flight、bootstrap-used 和 FirstBusines
 ## 受控验证
 
 `tests/physical_lifecycle.rs` 覆盖动态路由持久化、endpoint-local pane、旧 binding 拒绝、实际路由冲突、同库 bootstrap 一次性确认、shared renderer 以及真实 tmux+Python 的 startup→reopen→fence→shared outbox delivery→teardown。Python 不包含 native Kiro/MCP client；T3 输入明确标为 Fixture，不能据此宣传 Kiro 端到端通过。测试 root/退出/保留日志写入受控 receipt，构建者负责归档和 scoped 清理。
+
+`tests/host_native.rs` 的真实 tmux+Python 用例逐请求移除 `LC_ALL`/`LC_CTYPE`/`LANG`，覆盖无 locale 下 startup/query/Unicode capture/delivery/close；不修改并行测试进程的全局环境。`tests/host_io.rs` 保留 R4 下划线损坏帧的拒绝回归，确保修复发生在 tmux 客户端输出边界，而不是猜测式放宽解析。
 
 所有 Cargo/fmt/clippy 仅在 Grok/正式授权 CI；新增用例在取得具体运行收据前保持 NOT-RUN。

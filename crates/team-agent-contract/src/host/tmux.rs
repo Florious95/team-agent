@@ -335,7 +335,13 @@ impl<R: CommandRunner> TmuxHost<R> {
         self.directory.check_live()?;
         let budget = remaining(clock, deadline)
             .ok_or_else(|| HostError::new("tmux deadline", HostErrorKind::Deadline))?;
-        let mut argv = vec![OsString::from("-S"), self.endpoint.as_os_str().to_owned()];
+        // This is a UTF-8 machine protocol, independent of the caller's locale.
+        // Without -u, tmux sanitizes TABs to '_' when TMUX/UTF-8 locale are absent.
+        let mut argv = vec![
+            OsString::from("-u"),
+            OsString::from("-S"),
+            self.endpoint.as_os_str().to_owned(),
+        ];
         argv.extend(arguments);
         let result = self.runner.run(&CommandRequest {
             executable: self.executable.clone(),
