@@ -270,8 +270,7 @@ impl InteractionHook for FixtureHooks {
         let line = frame
             .text
             .lines()
-            .filter(|line| !line.trim().is_empty())
-            .next_back()
+            .rfind(|line| !line.trim().is_empty())
             .unwrap_or("");
         let fields: Vec<_> = line.trim().split('|').collect();
         let tag = fields.first().copied().unwrap_or("");

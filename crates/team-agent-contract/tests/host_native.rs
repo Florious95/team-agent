@@ -171,8 +171,7 @@ fn native_case(mode: &str, content: &str, expected_keys: usize) {
         if frame
             .text
             .lines()
-            .filter(|line| !line.trim().is_empty())
-            .next_back()
+            .rfind(|line| !line.trim().is_empty())
             == Some("READY|-")
         {
             break;
