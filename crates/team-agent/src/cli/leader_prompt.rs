@@ -57,6 +57,13 @@ fn parse(args: &[String]) -> Result<Request, PromptError> {
         match args[i].as_str() {
             "--json" if !json => json = true,
             "--help" | "-h" if !help => help = true,
+            "--stdin" => {
+                return Err(PromptError::new(
+                    "leader_prompt_invalid_input",
+                    "--stdin is not supported for leader-prompt; use -- TEXT or --file PATH instead",
+                    None,
+                ));
+            }
             "--file" if file.is_none() && i + 1 < end => {
                 i += 1;
                 if matches!(args[i].as_str(), "--json" | "--help" | "-h" | "--file") {
@@ -188,7 +195,7 @@ mod tests {
     }
     #[test]
     fn leader_prompt_controls_stop_at_delimiter() {
-        for text in ["--json", "--help", "--file", "multi\nline🙂", ""] {
+        for text in ["--json", "--help", "--file", "--stdin", "multi\nline🙂", ""] {
             let request = parse(&args(&["set", "--", text])).unwrap();
             assert!(!request.json && !request.help);
             assert_eq!(request.input, Some(Input::Text(text.into())));
@@ -200,6 +207,34 @@ mod tests {
             Some(Input::File(PathBuf::from("path with 中文")))
         );
         assert!(request.json);
+    }
+    #[test]
+    fn leader_prompt_stdin_control_reports_unsupported_input_with_usage_exit() {
+        for tokens in [
+            vec!["set", "--stdin"],
+            vec!["set", "--json", "--stdin"],
+            vec!["append", "--json", "--stdin"],
+        ] {
+            let tokens = args(&tokens);
+            let error = parse(&tokens).unwrap_err();
+            assert_eq!(error.reason, "leader_prompt_invalid_input");
+            assert_eq!(
+                error.error,
+                "--stdin is not supported for leader-prompt; use -- TEXT or --file PATH instead"
+            );
+            assert!(error.config_path.is_none());
+            assert_eq!(error.report()["reason"], "leader_prompt_invalid_input");
+            assert_eq!(error.report()["error"], error.error);
+            assert!(error.to_string().contains("--stdin is not supported"));
+            assert_eq!(run(&tokens).code(), 2);
+        }
+    }
+    #[test]
+    fn leader_prompt_stdin_file_value_is_not_reclassified_as_a_control() {
+        for operation in ["set", "append"] {
+            let request = parse(&args(&[operation, "--file", "--stdin"])).unwrap();
+            assert_eq!(request.input, Some(Input::File(PathBuf::from("--stdin"))));
+        }
     }
     #[test]
     fn leader_prompt_rejects_duplicate_missing_unknown_or_extra_controls() {
