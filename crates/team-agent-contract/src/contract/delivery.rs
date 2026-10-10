@@ -354,6 +354,20 @@ pub struct CaptureFrame {
     pub paste_latch: PasteLatch,
 }
 
+/// Fixed-control matching facts only. No command, token, input or screen bytes.
+/// Optional diagnostics never grant input authority or change guard evaluation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ControlPasteDiagnostic {
+    pub after_step: Option<StepKind>,
+    pub baseline_has_expected: Option<bool>,
+    pub baseline_composer_empty: Option<bool>,
+    pub current_composer_has_expected: bool,
+    pub fresh: bool,
+    pub latch_seen: bool,
+    pub latch_gone: bool,
+    pub correlated: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InteractionObservation {
     pub scope: EvidenceScope,
@@ -362,6 +376,7 @@ pub struct InteractionObservation {
     pub current_message: Option<MessageId>,
     pub current_attempt: Option<AttemptId>,
     pub paste_latch: PasteLatch,
+    pub control_paste: Option<ControlPasteDiagnostic>,
 }
 
 #[derive(

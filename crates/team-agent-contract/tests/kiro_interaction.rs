@@ -234,7 +234,7 @@ fn historical_matching_token_cannot_become_a_new_paste_receipt() {
     let mut capture = frame("› hello [team-agent-token:msg-1]");
     capture.baseline = Some(CaptureBaseline {
         scope: scope(),
-        text: "old [team-agent-token:msg-1]".into(),
+        text: format!("old [team-agent-token:msg-1]\n{READY}"),
     });
     capture.message = Some(MessageId::new("msg-1").unwrap());
     capture.attempt = Some(AttemptId::new("attempt-1").unwrap());
@@ -244,6 +244,105 @@ fn historical_matching_token_cannot_become_a_new_paste_receipt() {
         PasteLatch::NeverSeen
     );
 }
+// Synthetic contaminated baselines; the R15 failure did not retain screen bytes.
+#[test]
+fn fixed_controls_ignore_history_but_require_a_fresh_exact_current_composer() {
+    let adapter = adapter();
+    for (operation, command) in [
+        (Operation::SessionInspect, "/session-id"),
+        (Operation::ToolInspect, "/tools"),
+    ] {
+        let mut capture = frame(&format!("› {command}"));
+        capture.operation = operation;
+        capture.attempt = Some(AttemptId::new("fresh-control").unwrap());
+        capture.after_step = Some(StepKind::Paste);
+        capture.baseline = Some(CaptureBaseline {
+            scope: scope(),
+            text: format!("Tip: use {command}\nold › {command}\n{READY}"),
+        });
+        let observed = adapter.interpret(&capture);
+        assert!(matches!(observed.paste_latch, PasteLatch::Seen { .. }));
+        assert_eq!(observed.current_attempt, capture.attempt);
+        assert_eq!(observed.control_paste, Some(ControlPasteDiagnostic {
+            after_step: Some(StepKind::Paste),
+            baseline_has_expected: Some(true),
+            baseline_composer_empty: Some(true),
+            current_composer_has_expected: true,
+            fresh: true,
+            latch_seen: true,
+            latch_gone: false,
+            correlated: true,
+        }));
+        for wrong_current in [
+            format!("› {command}-other"),
+            format!("› {command} extra"),
+            format!("{READY}\nhint: {command}"),
+        ] {
+            capture.text = wrong_current;
+            let observed = adapter.interpret(&capture);
+            assert_eq!(observed.paste_latch, PasteLatch::NeverSeen);
+            let diagnostic = observed.control_paste.unwrap();
+            assert!(!diagnostic.current_composer_has_expected);
+            assert!(!diagnostic.latch_seen);
+            assert!(!diagnostic.correlated);
+        }
+    }
+}
+
+#[test]
+fn controls_without_an_empty_baseline_never_gain_a_paste_receipt() {
+    for (operation, command) in [
+        (Operation::SessionInspect, "/session-id"),
+        (Operation::ToolInspect, "/tools"),
+    ] {
+        let mut capture = frame(&format!("› {command}"));
+        capture.operation = operation;
+        capture.attempt = Some(AttemptId::new("unproven-control").unwrap());
+        capture.after_step = Some(StepKind::Paste);
+        for baseline in [
+            None,
+            Some("no composer".to_string()),
+            Some("› draft".into()),
+            Some(format!("› {command}")),
+        ] {
+            capture.baseline = baseline.map(|text| CaptureBaseline {
+                scope: scope(),
+                text,
+            });
+            let observed = adapter().interpret(&capture);
+            assert_eq!(observed.paste_latch, PasteLatch::NeverSeen);
+            let diagnostic = observed.control_paste.unwrap();
+            assert!(diagnostic.current_composer_has_expected);
+            assert!(!diagnostic.fresh);
+            assert!(!diagnostic.latch_seen);
+            assert!(!diagnostic.correlated);
+        }
+    }
+}
+
+#[test]
+fn business_tokens_keep_the_whole_baseline_anti_replay_gate() {
+    for operation in [Operation::FirstBusiness, Operation::OrdinarySend] {
+        let mut capture = frame("› hello [team-agent-token:business]");
+        capture.operation = operation;
+        capture.message = Some(MessageId::new("business").unwrap());
+        capture.attempt = Some(AttemptId::new("business-attempt").unwrap());
+        capture.after_step = Some(StepKind::Paste);
+        for (baseline, seen) in [
+            (READY.to_string(), true),
+            (format!("old [team-agent-token:business]\n{READY}"), false),
+        ] {
+            capture.baseline = Some(CaptureBaseline {
+                scope: scope(),
+                text: baseline,
+            });
+            let observed = adapter().interpret(&capture);
+            assert_eq!(matches!(observed.paste_latch, PasteLatch::Seen { .. }), seen);
+            assert!(observed.control_paste.is_none());
+        }
+    }
+}
+
 #[test]
 fn session_parser_requires_label_matching_hint_and_one_uuid() {
     assert_eq!(
@@ -262,7 +361,7 @@ fn r0_session_response_is_accepted_only_after_the_current_control_and_enter() {
     capture.attempt = Some(AttemptId::new("session-control").unwrap());
     capture.baseline = Some(CaptureBaseline {
         scope: scope(),
-        text: READY.into(),
+        text: format!("Tip: use /session-id\n{READY}"),
     });
     capture.after_step = Some(StepKind::Paste);
     let typed = adapter.interpret(&capture);
@@ -386,7 +485,7 @@ fn tool_panel_acceptance_requires_current_typed_control_and_enter_for_both_foote
         capture.attempt = Some(AttemptId::new("tools-control").unwrap());
         capture.baseline = Some(CaptureBaseline {
             scope: scope(),
-            text: READY.into(),
+            text: format!("Tip: use /tools\n{READY}"),
         });
         capture.after_step = Some(StepKind::Paste);
         let typed = adapter.interpret(&capture);

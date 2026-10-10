@@ -35,13 +35,14 @@ impl std::fmt::Display for Error {
             Self::HostDiagnostic(error) => std::fmt::Display::fmt(error, f),
             Self::NativeControl(report) => write!(
                 f,
-                "native control {:?}: disposition={:?}; persistence={:?}; effect_floor={:?}; counts={:?}; problems={:?}",
+                "native control {:?}: disposition={:?}; persistence={:?}; effect_floor={:?}; counts={:?}; problems={:?}; control_paste={:?}",
                 report.metadata.operation,
                 report.disposition,
                 report.persistence,
                 report.effect_floor,
                 report.counts,
-                report.problems
+                report.problems,
+                report.control_paste
             ),
             Self::NativeClose(receipt) => write!(
                 f,

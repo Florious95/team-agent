@@ -204,6 +204,7 @@ impl InteractionHook for Fake {
             current_message: f.message.clone(),
             current_attempt: f.attempt.clone(),
             paste_latch: f.paste_latch.clone(),
+            control_paste: None,
         }
     }
 }

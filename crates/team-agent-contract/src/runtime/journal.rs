@@ -2,7 +2,9 @@ use std::fs::File;
 use std::io::Write;
 use std::time::Duration;
 
-use crate::contract::delivery::{DeliveryEffect, InputSurface, StepKind, StepOutcome};
+use crate::contract::delivery::{
+    ControlPasteDiagnostic, DeliveryEffect, InputSurface, StepKind, StepOutcome,
+};
 use crate::contract::types::{
     AttemptId, Digest, InstanceIdentity, MessageId, Operation, OperationId,
 };
@@ -49,6 +51,7 @@ pub struct JournalRecord {
     pub sequence: Option<u64>,
     pub surface: Option<InputSurface>,
     pub code: Option<&'static str>,
+    pub control_paste: Option<ControlPasteDiagnostic>,
 }
 
 pub trait AttemptJournal {
@@ -73,10 +76,23 @@ fn metadata_json(metadata: &AttemptMetadata) -> Value {
 }
 
 fn record_json(record: &JournalRecord) -> Value {
-    json!({"schema":1,"kind":format!("{:?}",record.kind),"ordinal":record.ordinal,"at_ns":record.at.as_nanos().to_string(),
+    let mut value = json!({"schema":1,"kind":format!("{:?}",record.kind),"ordinal":record.ordinal,"at_ns":record.at.as_nanos().to_string(),
         "effect":format!("{:?}",record.effect),"step":record.step.map(|v|format!("{v:?}")),
         "outcome":record.outcome.map(|v|format!("{v:?}")),"sequence":record.sequence,
-        "surface":record.surface.map(|v|format!("{v:?}")),"code":record.code})
+        "surface":record.surface.map(|v|format!("{v:?}")),"code":record.code});
+    if let Some(diagnostic) = record.control_paste {
+        value["control_paste"] = json!({
+            "after_step": diagnostic.after_step.map(|step| format!("{step:?}")),
+            "baseline_has_expected": diagnostic.baseline_has_expected,
+            "baseline_composer_empty": diagnostic.baseline_composer_empty,
+            "current_composer_has_expected": diagnostic.current_composer_has_expected,
+            "fresh": diagnostic.fresh,
+            "latch_seen": diagnostic.latch_seen,
+            "latch_gone": diagnostic.latch_gone,
+            "correlated": diagnostic.correlated,
+        });
+    }
+    value
 }
 
 pub fn journal_name(metadata: &AttemptMetadata) -> String {

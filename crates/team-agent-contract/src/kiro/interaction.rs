@@ -167,6 +167,7 @@ impl InteractionHook for KiroAdapter {
             current_message: None,
             current_attempt: None,
             paste_latch: frame.paste_latch.clone(),
+            control_paste: None,
         };
         if frame.profile_id != PROFILE {
             return observation;
@@ -199,16 +200,33 @@ impl InteractionHook for KiroAdapter {
                 .collect::<Vec<_>>()
                 .join("\n")
         });
-        let new_token = frame
+        let control = matches!(
+            frame.operation,
+            Operation::SessionInspect | Operation::ToolInspect
+        );
+        let baseline_has_expected = frame
             .baseline
             .as_ref()
-            .is_some_and(|baseline| !baseline.text.contains(&expected));
-        if frame.after_step == Some(StepKind::Paste)
-            && new_token
-            && current
-                .as_ref()
-                .is_some_and(|text| text.contains(&expected))
-        {
+            .map(|baseline| baseline.text.contains(&expected));
+        let baseline_composer_empty = frame
+            .baseline
+            .as_ref()
+            .and_then(|baseline| composer(&baseline.text))
+            .map(|(_, value)| empty(value));
+        // Fixed commands may already occur in native tips/history. Only an
+        // explicitly empty baseline composer establishes a fresh control input.
+        // Business tokens retain the original whole-baseline anti-replay gate.
+        let fresh = if control {
+            baseline_composer_empty == Some(true)
+        } else {
+            baseline_has_expected == Some(false)
+        };
+        let current_has_expected = if control {
+            composer(&frame.text).is_some_and(|(_, value)| value == expected)
+        } else {
+            current.as_ref().is_some_and(|text| text.contains(&expected))
+        };
+        if frame.after_step == Some(StepKind::Paste) && fresh && current_has_expected {
             observation.surface = InputSurface::ComposerContainsPaste;
             observation.paste_latch = PasteLatch::Seen {
                 native_identity: expected.clone(),
@@ -218,9 +236,7 @@ impl InteractionHook for KiroAdapter {
         }
         if frame.after_step == Some(StepKind::InitialSubmit)
             && matches!(&frame.paste_latch, PasteLatch::Seen { native_identity } if native_identity == &expected)
-            && !current
-                .as_ref()
-                .is_some_and(|text| text.contains(&expected))
+            && !current_has_expected
         {
             let accepted = if frame.operation == Operation::SessionInspect {
                 session_id(&frame.text).is_ok()
@@ -243,6 +259,20 @@ impl InteractionHook for KiroAdapter {
                 observation.current_message = frame.message.clone();
                 observation.current_attempt = frame.attempt.clone();
             }
+        }
+        if control {
+            observation.control_paste = Some(ControlPasteDiagnostic {
+                after_step: frame.after_step,
+                baseline_has_expected,
+                baseline_composer_empty,
+                current_composer_has_expected: current_has_expected,
+                fresh,
+                latch_seen: matches!(observation.paste_latch, PasteLatch::Seen { .. }),
+                latch_gone: matches!(observation.paste_latch, PasteLatch::Gone { .. }),
+                correlated: frame.attempt.is_some()
+                    && observation.current_attempt == frame.attempt
+                    && observation.current_message == frame.message,
+            });
         }
         observation
     }

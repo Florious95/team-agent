@@ -85,6 +85,7 @@ pub fn capture_and_close(
         sequence: Some(frame.scope.sequence),
         surface: Some(observation.surface),
         code: Some("registry-panel-escape-once"),
+        control_paste: None,
     };
     journal.append(&record(JournalKind::ActionIntent, 0, None))?;
     let action = host.key(target, PhysicalKey::Escape, clock, deadline);

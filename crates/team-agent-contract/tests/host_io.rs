@@ -5,7 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use team_agent_contract::contract::delivery::{DeliveryEffect, StepKind, StepOutcome};
+use team_agent_contract::contract::delivery::{
+    ControlPasteDiagnostic, DeliveryEffect, StepKind, StepOutcome,
+};
 use team_agent_contract::contract::plan::{EnvironmentDelta, ResourceWriteEffect};
 use team_agent_contract::contract::types::*;
 use team_agent_contract::host::command::*;
@@ -223,7 +225,51 @@ fn record(
         sequence: Some(ordinal),
         surface: None,
         code: None,
+        control_paste: None,
     }
+}
+
+#[test]
+fn control_paste_journal_records_only_matching_facts_and_keeps_recovery_compatible() {
+    let directory = scope();
+    let mut metadata = metadata(&directory);
+    metadata.operation = Operation::ToolInspect;
+    metadata.correlation = Correlation::NativeControl(OperationId::new("inspect-tools").unwrap());
+    let mut journal = FileJournal::new(
+        ScopedDirectory::reopen(directory.receipt().clone()).unwrap(),
+        65536,
+    )
+    .unwrap();
+    journal.begin(&metadata).unwrap();
+    let mut observed = record(JournalKind::Surface, 1, DeliveryEffect::NoEffect, None, None);
+    observed.control_paste = Some(ControlPasteDiagnostic {
+        after_step: Some(StepKind::Paste),
+        baseline_has_expected: Some(true),
+        baseline_composer_empty: Some(true),
+        current_composer_has_expected: false,
+        fresh: true,
+        latch_seen: false,
+        latch_gone: false,
+        correlated: false,
+    });
+    journal.append(&observed).unwrap();
+    let bytes = directory.read_file(&journal_name(&metadata), 65536).unwrap();
+    let rows: Vec<serde_json::Value> = std::str::from_utf8(&bytes)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(rows[1]["control_paste"], serde_json::json!({
+        "after_step": "Paste",
+        "baseline_has_expected": true,
+        "baseline_composer_empty": true,
+        "current_composer_has_expected": false,
+        "fresh": true,
+        "latch_seen": false,
+        "latch_gone": false,
+        "correlated": false,
+    }));
+    assert_eq!(journal.recover(&metadata), RecoveryState::NoInputIntent);
 }
 
 #[test]

@@ -301,6 +301,7 @@ impl InteractionHook for Fixture {
             current_message: frame.message.clone(),
             current_attempt: frame.attempt.clone(),
             paste_latch: frame.paste_latch.clone(),
+            control_paste: None,
         }
     }
 }

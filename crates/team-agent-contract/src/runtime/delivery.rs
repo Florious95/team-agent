@@ -357,6 +357,7 @@ pub struct InjectionReport {
     pub persistence: PersistenceState,
     pub bootstrap_consumed: bool,
     pub unreleased_buffer: Option<String>,
+    pub control_paste: Option<ControlPasteDiagnostic>,
 }
 
 impl InjectionReport {
@@ -446,6 +447,7 @@ pub fn inject_with_contract<'a, 'bootstrap: 'a>(
         persistence: PersistenceState::Pending,
         bootstrap_consumed: false,
         unreleased_buffer: None,
+        control_paste: None,
     };
     let mut run = Run {
         transport,
@@ -530,6 +532,14 @@ impl Run<'_, '_> {
             sequence: self.last_scope.as_ref().map(|scope| scope.sequence),
             surface,
             code,
+            control_paste: if matches!(
+                kind,
+                JournalKind::Surface | JournalKind::Failure | JournalKind::Complete
+            ) {
+                self.report.control_paste
+            } else {
+                None
+            },
         };
         if let Err(error) = self.journal.append(&record) {
             self.report.persistence = PersistenceState::Failed;
@@ -613,6 +623,7 @@ impl Run<'_, '_> {
         if observation.scope != frame.scope {
             return Err(ExecutionProblem::code("interaction-scope-mismatch"));
         }
+        self.report.control_paste = observation.control_paste;
         match (&self.latch, &observation.paste_latch) {
             (_, PasteLatch::Seen { native_identity } | PasteLatch::Gone { native_identity })
                 if native_identity.is_empty() =>

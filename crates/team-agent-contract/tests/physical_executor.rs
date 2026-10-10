@@ -63,6 +63,8 @@ fn one_paste_one_enter_preserves_payload_and_authoritative_token() {
     let (report, transport, journal, _) = execute("single", |_, _, _| {});
     assert_eq!(report.disposition, InjectionDisposition::NativeAccepted);
     assert_eq!(report.effect_floor, DeliveryEffect::Submitted);
+    assert!(report.control_paste.is_none());
+    assert!(journal.records.iter().all(|record| record.control_paste.is_none()));
     assert_eq!(report.counts.paste.confirmed, 1);
     assert_eq!(transport.staged_modes, vec![PasteMode::Bracketed]);
     assert_eq!(report.counts.initial.confirmed, 1);
@@ -550,6 +552,11 @@ fn native_control_failures_preserve_codes_counts_and_host_details_without_resubm
             .unwrap();
         assert_eq!(failure.code, Some(code));
         assert_eq!(failure.effect, DeliveryEffect::MayHaveSubmitted);
+        let diagnostic = report.control_paste.expect("last control observation");
+        assert_eq!(failure.control_paste, Some(diagnostic));
+        assert!(journal.records.iter().any(|record| {
+            record.kind == JournalKind::Surface && record.control_paste == Some(diagnostic)
+        }));
         assert_eq!(transport.pasted.len(), 1);
         assert_eq!(transport.keys.len(), 1);
         assert_eq!(report.counts.initial.confirmed, 1);
@@ -565,6 +572,7 @@ fn native_control_failures_preserve_codes_counts_and_host_details_without_resubm
             assert!(shown.contains(value));
         }
         assert!(shown.contains(&format!("counts={:?}", report.counts)));
+        assert!(shown.contains(&format!("control_paste={:?}", report.control_paste)));
         assert!(!shown.contains("/fixture-session"));
         if capture_failure {
             let host = report.problems[0].host.as_ref().unwrap();

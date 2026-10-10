@@ -324,6 +324,22 @@ impl InteractionHook for FixtureHooks {
         } else {
             frame.paste_latch.clone()
         };
+        // Exercise diagnostic propagation using this fixture's READY/PASTED
+        // grammar, not a claim about any native provider's screen.
+        let control_paste = matches!(
+            frame.operation,
+            Operation::SessionInspect | Operation::ToolInspect
+        )
+        .then(|| ControlPasteDiagnostic {
+            after_step: frame.after_step,
+            baseline_has_expected: frame.baseline.as_ref().map(|_| false),
+            baseline_composer_empty: frame.baseline.as_ref().map(|b| b.text.starts_with("READY|")),
+            current_composer_has_expected: current && tag == "PASTED",
+            fresh: frame.baseline.as_ref().is_some_and(|b| b.text.starts_with("READY|")),
+            latch_seen: matches!(latch, PasteLatch::Seen { .. }),
+            latch_gone: matches!(latch, PasteLatch::Gone { .. }),
+            correlated: current && frame.attempt.is_some(),
+        });
         InteractionObservation {
             scope: frame.scope.clone(),
             surface,
@@ -331,6 +347,7 @@ impl InteractionHook for FixtureHooks {
             current_message: message,
             current_attempt: if current { frame.attempt.clone() } else { None },
             paste_latch: latch,
+            control_paste,
         }
     }
 }
