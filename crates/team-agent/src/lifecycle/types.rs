@@ -433,8 +433,11 @@ pub enum LifecycleError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchReport {
     pub session_name: SessionName,
-    /// 实际起的 worker(冷启;dry-run 时空)。
+    /// Legacy transport starts; their targets belong to the team transport.
     pub started: Vec<StartedAgent>,
+    /// Committed contract starts, without fabricating legacy pane/window targets.
+    /// Empty on dry-run; populated only after the contract startup returns success.
+    pub contract_started: Vec<AgentId>,
     /// 是否 dry-run(只解析路由/权限,不起进程)。
     pub dry_run: bool,
     /// Selected tmux endpoint for the team transport when known.

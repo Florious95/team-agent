@@ -1,7 +1,8 @@
 //! Kiro 2.28.0 adapter boundary. Helper version and chat parameter syntax are
-//! observed, including an authenticated model catalog. Native input/session and
-//! MCP bindings remain closed until current scoped evidence exists.
+//! observed, including an authenticated model catalog and the V2 R0 surface.
+//! Configuration intent and server replies never imply native MCP consumption.
 mod catalog;
+pub mod interaction;
 pub mod native;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -10,13 +11,9 @@ use std::time::Duration;
 
 use crate::contract::{descriptor::*, hooks::*, plan::*, types::*};
 
-pub const BUNDLE_VERSION: &str = "2.28.0";
-/// Observed dispatcher identity, deliberately not the engine identity used by K2.
-pub const OBSERVED_LAUNCHER_SHA256: &str =
-    "dee3f382fc8f6734fe505b815d786ed634ba67a258ba34986eca50f4f0b5fc22";
 pub const NATIVE_UNVERIFIED: Reason = Reason {
     code: "kiro-r0-missing",
-    message: "Catalog/helper syntax is verified; terminal/session grammar and MCP binding remain unverified",
+    message: "The requested Kiro capability has no scoped native admission; no fallback is allowed",
 };
 const SNAPSHOT_UNSUPPORTED: Reason = Reason {
     code: "kiro-no-safe-snapshot",
@@ -56,7 +53,9 @@ pub static KIRO_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         ],
         carrier: Support::Supported(ValueCarrier::Flag("--effort")),
         inherit_team_default: false,
-        model_dependent: true,
+        // Pass the explicitly requested native flag; the catalog has no model
+        // effort schema. This is argv fidelity, not a reasoning-quality claim.
+        model_dependent: false,
     },
     auth: AuthFacet {
         subscription: Support::Supported(AuthMechanism::NativeExistingSession),
@@ -66,20 +65,20 @@ pub static KIRO_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     bypass: BypassFacet {
         intent: Support::Supported(BypassPolicy {
             enabled_arguments: &["--trust-all-tools"],
-            requires_startup_consent: false,
+            requires_startup_consent: true,
         }),
     },
     prompt: PromptFacet {
         carrier: Support::Supported(PromptCarrier::ConfigField),
     },
     mcp: McpFacet {
-        carrier: Support::Unverified(NATIVE_UNVERIFIED),
+        carrier: Support::Supported(McpCarrier::ScopedConfig),
         scope: ResourceScope::WorkingDirectory,
         tools: &TEAM_TOOLS,
-        excludes_ambient_configuration: false,
+        excludes_ambient_configuration: true,
     },
     tool_names: ToolNameFacet {
-        naming: Support::Unverified(NATIVE_UNVERIFIED),
+        naming: Support::Supported(ToolNaming::StaticServer { key: "team" }),
     },
     session: SessionFacet {
         fresh: FreshSession::CaptureAfterLaunch,
@@ -92,7 +91,7 @@ pub static KIRO_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         allowed_auth: &[AuthMode::NativeSubscription],
     },
     input: InputFacet {
-        profiles: Support::Unverified(NATIVE_UNVERIFIED),
+        profiles: Support::Supported(interaction::PROFILES),
     },
     startup: StartupFacet {
         interactive: true,
@@ -100,11 +99,11 @@ pub static KIRO_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     },
     probe_sources: ProbeSourcesFacet {
         process: Support::Supported(ProbeSource::Host),
-        pane: Support::Unverified(NATIVE_UNVERIFIED),
+        pane: Support::Supported(ProbeSource::NativeSurface),
         server: Support::Supported(ProbeSource::ServerLifecycle),
         client_binding: Support::Unverified(NATIVE_UNVERIFIED),
         round_trip: Support::Unverified(NATIVE_UNVERIFIED),
-        semantic: Support::Unverified(NATIVE_UNVERIFIED),
+        semantic: Support::Supported(ProbeSource::NativeSurface),
     },
     workspace: WorkspaceFacet {
         config_scope: ResourceScope::WorkingDirectory,
@@ -169,9 +168,9 @@ impl KiroAdapter {
             catalog: HookBinding::Bound(self),
             plan: HookBinding::Bound(self),
             materialize: HookBinding::Bound(self),
-            session: HookBinding::Unverified(NATIVE_UNVERIFIED),
-            semantic: HookBinding::Unverified(NATIVE_UNVERIFIED),
-            interaction: HookBinding::Unverified(NATIVE_UNVERIFIED),
+            session: HookBinding::Bound(self),
+            semantic: HookBinding::Bound(self),
+            interaction: HookBinding::Bound(self),
             fork: HookBinding::Unverified(NATIVE_UNVERIFIED),
         }
     }
@@ -183,23 +182,23 @@ impl PlanHook for KiroAdapter {
         if resolved.provider().as_str() != "kiro" {
             return Err(ContractError::UnknownProvider);
         }
-        // This explicit barrier also prevents a caller from promoting a cloned
-        // descriptor and accidentally executing documentation-only launch bytes.
-        if request.evidence_kind != EvidenceKind::Fixture {
+        if request.evidence_kind == EvidenceKind::Native
+            && (!interaction::PROFILES[0].matches_native(&request.native) || request.bypass)
+        {
             return Err(ContractError::Unverified {
-                field: "Kiro native launch",
+                field: "Kiro native identity or startup consent",
                 reason: NATIVE_UNVERIFIED,
             });
         }
-        if request.native.version != BUNDLE_VERSION
-            || request.native.harness != "v3"
+        if !native::is_release_version(&request.native.version)
+            || request.native.harness != "v2"
             || request.native.ui != "tui"
             || request.channel != Channel::Tmux
             || !matches!(request.operation, Operation::Fresh | Operation::Resume)
             || request.mode != LaunchMode::FullWorker
             || request.auth != AuthMode::NativeSubscription
         {
-            return Err(ContractError::Invalid("Kiro documentation fixture scope"));
+            return Err(ContractError::Invalid("Kiro V2/TUI launch scope"));
         }
         if request
             .paths
@@ -221,6 +220,10 @@ impl PlanHook for KiroAdapter {
             "name":name,"description":"Team Agent owned worker",
             "prompt":request.prompt.as_ref().ok_or(ContractError::Invalid("worker prompt"))?,
             "tools":["@builtin","@team/send_message","@team/report_result","@team/get_team_status"],
+            // Only the three scoped collaboration tools request unattended use.
+            // Built-in shell/files stay under native approval unless the caller
+            // explicitly requested a separately admitted bypass policy.
+            "allowedTools":["@team/send_message","@team/report_result","@team/get_team_status"],
             "includeMcpJson":false,"includePowers":false,
             "mcpServers":{"team":{"command":self.mcp.executable.to_str().ok_or(ContractError::Invalid("MCP path utf8"))?,"args":self.mcp.arguments,"env":self.mcp.environment}}
         })).map_err(|_|ContractError::Invalid("Kiro agent JSON"))?;
@@ -228,7 +231,6 @@ impl PlanHook for KiroAdapter {
         // stop startup with exit 3, rather than silently dropping the tools.
         let mut arguments: Vec<OsString> = vec![
             "chat".into(),
-            "--v3".into(),
             "--agent".into(),
             name.into(),
             "--require-mcp-startup".into(),
@@ -346,6 +348,7 @@ impl MaterializeHook for KiroAdapter {
                             | "description"
                             | "prompt"
                             | "tools"
+                            | "allowedTools"
                             | "includeMcpJson"
                             | "includePowers"
                             | "mcpServers"
@@ -355,6 +358,12 @@ impl MaterializeHook for KiroAdapter {
             || config["tools"]
                 != serde_json::json!([
                     "@builtin",
+                    "@team/send_message",
+                    "@team/report_result",
+                    "@team/get_team_status"
+                ])
+            || config["allowedTools"]
+                != serde_json::json!([
                     "@team/send_message",
                     "@team/report_result",
                     "@team/get_team_status"

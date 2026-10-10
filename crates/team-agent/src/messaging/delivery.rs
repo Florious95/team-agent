@@ -2523,6 +2523,51 @@ pub(crate) fn recipient_is_busy(state: &serde_json::Value, recipient: &str) -> b
 }
 
 fn leader_rollout_path(state: &serde_json::Value) -> Option<std::path::PathBuf> {
+    if let Some(receiver) = leader_receiver_value(state).filter(|receiver| {
+        receiver.get("provider").and_then(serde_json::Value::as_str) == Some("pi")
+            && receiver.get("native_session").is_some()
+    }) {
+        let native = receiver.get("native_session")?;
+        for key in ["pane_id", "tmux_socket", "leader_session_uuid", "owner_epoch"] {
+            let bound = native.get(key)?;
+            if bound.is_null() || receiver.get(key) != Some(bound) {
+                return None;
+            }
+        }
+        // Managed Pi's native ID is distinct from leader_session_uuid.
+        // The JSONL appears asynchronously. Resolve only inside the recorded
+        // root, by exact id/cwd/spawn time; ambiguity or an unknown
+        // NativeDefault root stays unavailable (no HOME scan).
+        let context = crate::provider::CaptureSessionContext {
+            agent_id: "leader".into(),
+            spawn_cwd: native.get("spawn_cwd")?.as_str()?.into(),
+            pane_id: None,
+            pane_pid: None,
+            spawned_at: Some(native.get("spawned_at")?.as_str()?.into()),
+            expected_session_id: Some(crate::provider::SessionId::new(
+                native.get("expected_session_id")?.as_str()?,
+            )),
+            provider_projects_root: Some(native.get("provider_projects_root")?.as_str()?.into()),
+        };
+        if !context.spawn_cwd.is_absolute()
+            || !context.provider_projects_root.as_ref()?.is_absolute()
+        {
+            return None;
+        }
+        let candidates = crate::provider::session_scan::scan_session_candidates_once(
+            Provider::Pi,
+            &context,
+        )
+        .ok()?;
+        return match candidates.as_slice() {
+            [candidate] => candidate
+                .captured
+                .rollout_path
+                .as_ref()
+                .map(|path| path.as_path().to_path_buf()),
+            _ => None,
+        };
+    }
     state
         .get("leader")
         .and_then(|leader| leader.get("rollout_path"))

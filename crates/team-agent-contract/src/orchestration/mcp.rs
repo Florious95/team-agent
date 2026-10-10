@@ -108,7 +108,7 @@ fn call(
         )
         .optional()?;
     if let Some((original, response)) = previous {
-        if request != original {
+        if serde_json::from_str::<Value>(&request)? != serde_json::from_str::<Value>(&original)? {
             return Err(Error::Conflict);
         }
         return Ok(serde_json::from_str(&response)?);
@@ -127,7 +127,7 @@ fn call(
                 .unwrap_or(false);
             let recipients = if to == "*" {
                 let mut stmt =
-                    tx.prepare("SELECT seat FROM contract_seats WHERE seat<>?1 ORDER BY seat")?;
+                    tx.prepare("SELECT seat FROM contract_seats WHERE seat<>?1 UNION SELECT recipient FROM contract_framework_peers WHERE recipient<>?1 ORDER BY 1")?;
                 let rows =
                     stmt.query_map([context.identity.seat.as_str()], |r| r.get::<_, String>(0))?;
                 rows.collect::<Result<Vec<_>, _>>()?
@@ -135,12 +135,15 @@ fn call(
                 vec![to.to_string()]
             };
             let mut ids = vec![];
+            let mut forwarded = false;
             for recipient in recipients {
+                forwarded |= super::forward::peer(&tx, &recipient)?.is_some();
                 ids.push(write_message(
                     &tx,
                     &scope,
                     MessageWrite {
                         id: None,
+                        source: Some(&context.identity),
                         task: Some(&context.task_id),
                         sender: context.identity.seat.as_str(),
                         recipient: &recipient,
@@ -150,7 +153,7 @@ fn call(
                     },
                 )?);
             }
-            json!({"ok":true,"status":if mailbox {"stored_only"} else {"queued"},"message_ids":ids})
+            json!({"ok":true,"status":if forwarded {"forward_pending"} else if mailbox {"stored_only"} else {"queued"},"message_ids":ids})
         }
         "report_result" => {
             let envelope = normalize_result(context, args)?;
@@ -158,7 +161,7 @@ fn call(
             let previous: Option<(String,String)> = tx.query_row("SELECT result_id,envelope FROM results WHERE owner_team_id=?1 AND task_id=?2 AND agent_id=?3",
                 params![scope.as_str(),context.task_id,context.identity.seat.as_str()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
             if let Some((id, original)) = previous {
-                if original != encoded {
+                if serde_json::from_str::<Value>(&original)? != envelope {
                     return Err(Error::Conflict);
                 }
                 json!({"ok":true,"status":"persisted","result_id":id,"leader_notified":false})
@@ -178,7 +181,26 @@ fn call(
                             .unwrap_or("completed")
                     ],
                 )?;
-                if envelope
+                let result_route: Option<String> =
+                    tx.query_row("SELECT result_route FROM contract_meta", [], |row| {
+                        row.get(0)
+                    })?;
+                if let Some(route) = result_route {
+                    super::forward::insert(
+                        &tx,
+                        &super::forward::ForwardIntent {
+                            id: id.clone(),
+                            source: context.identity.clone(),
+                            route,
+                            payload: super::forward::ForwardPayload::Result {
+                                result_id: id.clone(),
+                                envelope: envelope.clone(),
+                            },
+                            state: super::forward::ForwardState::Pending,
+                            receipt: None,
+                        },
+                    )?;
+                } else if envelope
                     .pointer("/presentation/sink")
                     .and_then(Value::as_str)
                     == Some("leader")
@@ -188,6 +210,7 @@ fn call(
                         &scope,
                         MessageWrite {
                             id: None,
+                            source: Some(&context.identity),
                             task: Some(&context.task_id),
                             sender: context.identity.seat.as_str(),
                             recipient: "leader",
@@ -207,6 +230,13 @@ fn call(
             for row in rows {
                 let record: super::store::SeatRecord = serde_json::from_str(&row?)?;
                 seats.push(json!({"identity":record.identity,"provider":record.provider,"status":record.status}));
+            }
+            let mut statement =
+                tx.prepare("SELECT record FROM contract_framework_peers ORDER BY recipient")?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            for row in rows {
+                let peer: super::forward::FrameworkPeer = serde_json::from_str(&row?)?;
+                seats.push(json!({"id":peer.recipient,"provider":peer.provider,"status":"delegated_to_framework"}));
             }
             json!({"ok":true,"scope":scope,"agents":seats})
         }
@@ -386,17 +416,41 @@ pub fn serve<R: BufRead, W: Write>(
     serve_with_context(store, |_, _| Ok(context.clone()), reader, writer)
 }
 
+/// The diagnostic observer receives only the rejection boundary and typed error,
+/// never request, tool-argument, or response bytes. It cannot authorize a call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestRejectionStage {
+    Context,
+    Handler,
+}
+
 /// A persistent native transport resolves its fenced identity/task for each
 /// frame. The resolver is framework-owned; tool arguments never confer identity.
 /// This shares the same bounded framing, handlers and response-written boundary.
 pub fn serve_with_context<R: BufRead, W: Write, F>(
     store: &mut ContractStore,
-    mut resolve_context: F,
-    mut reader: R,
-    mut writer: W,
+    resolve_context: F,
+    reader: R,
+    writer: W,
 ) -> Result<(), Error>
 where
     F: FnMut(&mut ContractStore, &Value) -> Result<CallContext, Error>,
+{
+    serve_with_diagnostics(store, resolve_context, reader, writer, |_, _| {})
+}
+
+/// Preserve the wire result and durable boundaries while exposing a rejected
+/// request's real error to the host's bounded diagnostic sink.
+pub fn serve_with_diagnostics<R: BufRead, W: Write, F, D>(
+    store: &mut ContractStore,
+    mut resolve_context: F,
+    mut reader: R,
+    mut writer: W,
+    mut rejected: D,
+) -> Result<(), Error>
+where
+    F: FnMut(&mut ContractStore, &Value) -> Result<CallContext, Error>,
+    D: FnMut(RequestRejectionStage, &Error),
 {
     loop {
         let mut frame = vec![];
@@ -410,19 +464,22 @@ where
         }
         let request: Value = serde_json::from_slice(&frame)?;
         let context = resolve_context(store, &request);
-        let handled = match &context {
-            Ok(context) => handle(store, context, &request),
-            Err(error) => Err(error.clone()),
+        let (handled, stage) = match &context {
+            Ok(context) => (handle(store, context, &request), RequestRejectionStage::Handler),
+            Err(error) => (Err(error.clone()), RequestRejectionStage::Context),
         };
         let (response, success) = match handled {
             Ok(response) => (response, true),
-            Err(_) => (
-                Some(
-                    json!({"jsonrpc":"2.0","id":request.get("id").cloned().unwrap_or(Value::Null),
-                "error":{"code":-32602,"message":"request rejected"}}),
-                ),
-                false,
-            ),
+            Err(error) => {
+                rejected(stage, &error);
+                (
+                    Some(
+                        json!({"jsonrpc":"2.0","id":request.get("id").cloned().unwrap_or(Value::Null),
+                    "error":{"code":-32602,"message":"request rejected"}}),
+                    ),
+                    false,
+                )
+            }
         };
         if let Some(response) = response {
             serde_json::to_writer(&mut writer, &response)?;

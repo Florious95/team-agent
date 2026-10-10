@@ -75,9 +75,16 @@ impl PreparedEnvelope {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ControlKind {
     InspectSession,
+    InspectTools,
     BranchCurrent,
     BranchToTurn,
     Exit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ControlInputMode {
+    ProfilePaste,
+    DirectTyping,
 }
 
 /// Native encoding is reviewable profile data, not an eighth executable provider hook.
@@ -88,6 +95,7 @@ pub struct ControlDefinition {
     pub operation: Operation,
     pub kind: ControlKind,
     pub command: &'static str,
+    pub input_mode: ControlInputMode,
 }
 
 pub struct StartupDefinition {
@@ -116,6 +124,7 @@ enum InputPurpose {
         profile: String,
         hash: Digest,
         operation: Operation,
+        input_mode: ControlInputMode,
     },
     Startup {
         owner: InstanceIdentity,
@@ -146,12 +155,14 @@ impl PreparedInput {
     ) -> Result<Self, ContractError> {
         let kind = match intent {
             NativeControl::InspectSession => ControlKind::InspectSession,
+            NativeControl::InspectTools => ControlKind::InspectTools,
             NativeControl::BranchCurrent => ControlKind::BranchCurrent,
             NativeControl::BranchToTurn(_) => ControlKind::BranchToTurn,
             NativeControl::Exit => ControlKind::Exit,
         };
         let operation_matches = match kind {
             ControlKind::InspectSession => definition.operation == Operation::SessionInspect,
+            ControlKind::InspectTools => definition.operation == Operation::ToolInspect,
             ControlKind::BranchCurrent | ControlKind::BranchToTurn => {
                 definition.operation == Operation::InWindowBranch
             }
@@ -182,6 +193,7 @@ impl PreparedInput {
                 profile: definition.profile_id.into(),
                 hash: definition.policy_sha256,
                 operation: definition.operation,
+                input_mode: definition.input_mode,
             },
         })
     }
@@ -345,6 +357,7 @@ pub struct InjectionReport {
     pub persistence: PersistenceState,
     pub bootstrap_consumed: bool,
     pub unreleased_buffer: Option<String>,
+    pub control_paste: Option<ControlPasteDiagnostic>,
 }
 
 impl InjectionReport {
@@ -434,6 +447,7 @@ pub fn inject_with_contract<'a, 'bootstrap: 'a>(
         persistence: PersistenceState::Pending,
         bootstrap_consumed: false,
         unreleased_buffer: None,
+        control_paste: None,
     };
     let mut run = Run {
         transport,
@@ -469,14 +483,9 @@ pub fn inject_with_contract<'a, 'bootstrap: 'a>(
                 InjectionDisposition::Refused
             };
         }
+        let code = problem.code;
         run.report.problems.push(problem);
-        let _ = run.record(
-            JournalKind::Failure,
-            None,
-            None,
-            None,
-            Some("execution-stopped"),
-        );
+        let _ = run.record(JournalKind::Failure, None, None, None, Some(code));
     }
     run.release_buffer();
     if run.journal_started && run.report.persistence != PersistenceState::Failed {
@@ -523,6 +532,14 @@ impl Run<'_, '_> {
             sequence: self.last_scope.as_ref().map(|scope| scope.sequence),
             surface,
             code,
+            control_paste: if matches!(
+                kind,
+                JournalKind::Surface | JournalKind::Failure | JournalKind::Complete
+            ) {
+                self.report.control_paste
+            } else {
+                None
+            },
         };
         if let Err(error) = self.journal.append(&record) {
             self.report.persistence = PersistenceState::Failed;
@@ -606,6 +623,7 @@ impl Run<'_, '_> {
         if observation.scope != frame.scope {
             return Err(ExecutionProblem::code("interaction-scope-mismatch"));
         }
+        self.report.control_paste = observation.control_paste;
         match (&self.latch, &observation.paste_latch) {
             (_, PasteLatch::Seen { native_identity } | PasteLatch::Gone { native_identity })
                 if native_identity.is_empty() =>
@@ -980,8 +998,26 @@ impl Run<'_, '_> {
         policy
             .validate()
             .map_err(|_| ExecutionProblem::code("invalid-submit-policy"))?;
+        // Control intent comes from the sealed registered definition, never a
+        // '/' prefix in arbitrary business text. Keep the same lane and guards.
+        let direct_control = matches!(
+            self.request.input.purpose,
+            InputPurpose::Control {
+                input_mode: ControlInputMode::DirectTyping,
+                ..
+            }
+        );
+        let paste_mode = if direct_control {
+            if policy.payload_trailer != PayloadTrailer::None {
+                return Err(ExecutionProblem::code("direct-control-trailer-unsupported"));
+            }
+            PasteMode::DirectTyping
+        } else {
+            policy.paste_mode
+        };
         if !matches!(self.request.input.purpose, InputPurpose::Startup { .. })
-            && policy.paste_mode != PasteMode::Bracketed
+            && paste_mode != PasteMode::Bracketed
+            && !direct_control
         {
             return Err(ExecutionProblem::code(
                 "unframed-terminal-paste-unsupported",
@@ -1001,6 +1037,7 @@ impl Run<'_, '_> {
             || self.request.policy.provider() != self.request.target.provider.as_str()
             || self.request.policy.evidence_kind() != self.request.target.evidence_kind
             || self.request.policy.candidate_sha256() != self.request.target.candidate_sha256
+            || self.request.policy.native() != &self.request.target.native
             || !profile.matches_native(&self.request.target.native)
             || self.request.freshness.is_zero()
             || self.request.target.endpoint.to_str().is_none()
@@ -1020,6 +1057,7 @@ impl Run<'_, '_> {
                 profile: id,
                 hash,
                 operation,
+                ..
             } if id != profile.id
                 || *hash != profile.policy_sha256
                 || *operation != self.request.operation =>
@@ -1112,7 +1150,7 @@ impl Run<'_, '_> {
             self.request.target,
             &name,
             &bytes,
-            policy.paste_mode,
+            paste_mode,
             self.clock,
             self.request.deadline,
         );
@@ -1160,7 +1198,7 @@ impl Run<'_, '_> {
         let pasted = self.transport.paste_buffer(
             self.request.target,
             &name,
-            policy.paste_mode,
+            paste_mode,
             self.clock,
             self.request.deadline,
         );

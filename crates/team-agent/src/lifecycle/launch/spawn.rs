@@ -45,7 +45,7 @@ use super::*;
 /// params:
 ///   spec_path: spec 路径，team 目录优先取 state 里的 team_dir
 ///   session_name: 目标 tmux session
-/// returns: 已起席位清单，含目标 pane、启动模式、布局与显示信息；spawn 后 pane 已死的席位被跳过
+/// returns: legacy 启动收据与独立 contract 已提交席位 ID；不为私有 socket 伪造 legacy pane
 /// errors: 命令拼装或 transport spawn 失败时返回 LifecycleError
 /// ---
 pub(super) fn spawn_agents(
@@ -54,7 +54,7 @@ pub(super) fn spawn_agents(
     spec: &Value,
     session_name: &SessionName,
     transport: &dyn Transport,
-) -> Result<Vec<StartedAgent>, LifecycleError> {
+) -> Result<(Vec<StartedAgent>, Vec<AgentId>), LifecycleError> {
     // E5 解耦:team_dir(角色定义 + profiles 所在)≠ spec_path.parent()(spec 已迁出到 .team/runtime)。
     // 优先取 state.team_dir(角色目录),回落 spec_path.parent()(legacy 同目录布局)。
     let team_dir_buf = crate::state::persist::load_runtime_state(workspace)
@@ -74,11 +74,35 @@ pub(super) fn spawn_agents(
         Some(Value::Bool(true))
     );
     let mut started = Vec::new();
+    #[cfg(unix)]
+    let mut contract_started = Vec::new();
+    #[cfg(not(unix))]
+    let contract_started = Vec::new();
     for agent in spec_agent_values(spec) {
         let Some(agent_id_raw) = agent.get("id").and_then(Value::as_str) else {
             continue;
         };
         if agent_is_paused(agent) {
+            continue;
+        }
+        #[cfg(unix)]
+        if agent
+            .get("provider")
+            .and_then(Value::as_str)
+            .is_some_and(|provider| {
+                crate::contract_runtime::registry::descriptor(provider).is_some()
+            })
+        {
+            let team = runtime_team_key_for_spec(spec_path, spec, session_name);
+            crate::contract_runtime::framework::start_role(
+                workspace,
+                team_dir,
+                &team,
+                agent_id_raw,
+            )?;
+            contract_started.push(AgentId::new(agent_id_raw));
+            // No legacy target is manufactured for the private native socket.
+            // persist_spawn_agent_state projects the actual K3 seat separately.
             continue;
         }
         let agent_id = AgentId::new(agent_id_raw);
@@ -99,11 +123,12 @@ pub(super) fn spawn_agents(
         // has both the role instruction AND the callable Team Agent MCP capability.
         // probe5 RED proved that `build_command(.., None, None, ..)` left the worker
         // without `report_result`; placeholders are substituted at spawn time.
-        let command_agent = crate::lifecycle::worker_command_context::WorkerCommandAgent::from_yaml(
-            agent,
-            Some(agent_id_raw),
-            provider,
-        )?;
+        let command_agent =
+            crate::lifecycle::worker_command_context::WorkerCommandAgent::from_yaml(
+                agent,
+                Some(agent_id_raw),
+                provider,
+            )?;
         let system_prompt =
             crate::lifecycle::worker_command_context::compile_worker_system_prompt(&command_agent)?;
         // 0.5.66 bypass 单源:per-agent safety 只服务 env 注入与审计,不参与 argv 决策。
@@ -431,7 +456,7 @@ pub(super) fn spawn_agents(
             managed_mcp_config: plan.managed_mcp_config || profile_launch.managed_mcp_config,
         });
     }
-    Ok(started)
+    Ok((started, contract_started))
 }
 
 /// ---
@@ -451,7 +476,11 @@ pub(crate) fn agent_id_spec_source_path(workspace: &Path, agent_id: &str) -> Str
         });
     team_dir
         .map(|dir| dir.join("agents").join(format!("{agent_id}.md")))
-        .unwrap_or_else(|| workspace.join(".team/current/agents").join(format!("{agent_id}.md")))
+        .unwrap_or_else(|| {
+            workspace
+                .join(".team/current/agents")
+                .join(format!("{agent_id}.md"))
+        })
         .display()
         .to_string()
 }

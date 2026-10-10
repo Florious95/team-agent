@@ -134,12 +134,13 @@ fn exact_selection_does_not_alias_display_name_case_default_or_unknown_effort_me
     );
     launch.role_effort = Some("high".into());
     assert!(matches!(
-        resolve_launch(&descriptor, &hooks, &launch, Some(&catalog)),
-        Err(ContractError::Unverified {
-            field: "model efforts",
-            ..
-        })
+        resolve_launch(&descriptor, &hooks, &launch, Some(&catalog))
+            .unwrap()
+            .effort(),
+        EffortResolution::Pass(team_agent_contract::contract::descriptor::Effort::High)
     ));
+    // Native flag pass-through is distinct from a per-model capability claim.
+    assert!(matches!(catalog.models[0].efforts, Support::Unverified(_)));
 }
 #[test]
 fn malformed_records_or_defaults_reject_the_whole_catalog_without_partial_results() {
@@ -231,6 +232,19 @@ fn duplicate_ids_duplicate_authority_keys_and_trailing_json_are_not_last_wins() 
         .is_err());
 }
 #[test]
+fn catalog_schema_validation_is_not_a_release_allowlist() {
+    for version in ["2.29.0", "3.0.0"] {
+        let mut request = request();
+        request.native.version = version.into();
+        request.native.executable_sha256 = team_agent_contract::host::digest(version.as_bytes());
+        let mut host = host(NATIVE_CATALOG);
+        let observed = adapter().discover(&request, &mut host).unwrap();
+        assert_eq!(observed.native, request.native);
+        assert_eq!(observed.models.len(), 9);
+        assert_eq!(host.calls, 1);
+    }
+}
+#[test]
 fn invalid_read_grants_are_rejected_before_the_host_is_invoked() {
     let base = request();
     let mut cases = vec![];
@@ -238,7 +252,7 @@ fn invalid_read_grants_are_rejected_before_the_host_is_invoked() {
     wrong.provider = ProviderId::new("other").unwrap();
     cases.push(wrong);
     let mut wrong = base.clone();
-    wrong.native.version = "2.29.0".into();
+    wrong.native.version = "2.invalid.0".into();
     cases.push(wrong);
     let mut wrong = base.clone();
     wrong.executable = "/fixture/kiro-cli".into();

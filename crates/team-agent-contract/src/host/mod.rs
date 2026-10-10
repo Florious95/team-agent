@@ -27,16 +27,24 @@ pub enum HostErrorKind {
     Command,
 }
 
-/// Errors intentionally omit argv/env/native capture contents.
+/// Errors omit argv/env and native screen captures. The only capture exception
+/// is a bounded, escaped response to the fixed tmux pane-metadata format.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostError {
     pub operation: &'static str,
     pub kind: HostErrorKind,
+    pub metadata: Option<tmux::PaneMetadataDiagnostic>,
+    pub process: Option<Box<tmux::BoundProcessDiagnostic>>,
 }
 
 impl HostError {
     pub fn new(operation: &'static str, kind: HostErrorKind) -> Self {
-        Self { operation, kind }
+        Self {
+            operation,
+            kind,
+            metadata: None,
+            process: None,
+        }
     }
     pub fn io(operation: &'static str, error: io::Error) -> Self {
         Self::new(operation, HostErrorKind::Io(error.kind()))
@@ -44,7 +52,14 @@ impl HostError {
 }
 impl fmt::Display for HostError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}: {:?}", self.operation, self.kind)
+        write!(formatter, "{}: {:?}", self.operation, self.kind)?;
+        if let Some(metadata) = &self.metadata {
+            write!(formatter, "; {metadata}")?;
+        }
+        if let Some(process) = &self.process {
+            write!(formatter, "; {process}")?;
+        }
+        Ok(())
     }
 }
 impl std::error::Error for HostError {}

@@ -16,7 +16,7 @@ use crate::host::{
     files::ScopedDirectory,
     materialize::remove_quiescent,
     process::{resolve_cwd, ProcessState},
-    tmux::{HostLimits, TmuxHost},
+    tmux::{CloseReceipt, HostLimits, TmuxHost},
     transport::*,
     HostError,
 };
@@ -47,7 +47,20 @@ pub struct PhysicalRuntime<'a> {
     pub bootstrap: Option<&'a mut dyn BootstrapCommit>,
 }
 fn host_error(error: HostError) -> Error {
-    Error::Host(error.operation)
+    if error.metadata.is_some() || error.process.is_some() {
+        Error::HostDiagnostic(error)
+    } else {
+        Error::Host(error.operation)
+    }
+}
+fn confirm_close(receipt: CloseReceipt) -> Result<(), Error> {
+    if receipt.pane_close.outcome == StepOutcome::Confirmed
+        && receipt.native == ProcessState::Exited
+    {
+        Ok(())
+    } else {
+        Err(Error::NativeClose(Box::new(receipt)))
+    }
 }
 impl<'a> PhysicalRuntime<'a> {
     pub fn new(
@@ -73,6 +86,99 @@ impl<'a> PhysicalRuntime<'a> {
             protocol: None,
             bootstrap: None,
         })
+    }
+    /// Fresh T1/T2 plus independently supplied protocol facts. Capturing a pane
+    /// never upgrades server writes into a native client binding.
+    pub fn readiness(&self, seat: &SeatRecord) -> Result<ReadinessSample, Error> {
+        let target = self.target(seat)?;
+        let deadline = self.deadline()?;
+        let mut host = self.reopen(target, deadline)?;
+        let capture = host
+            .capture(target, self.clock, deadline, self.settings.freshness)
+            .map_err(host_error)?;
+        let frame = CaptureFrame {
+            scope: capture.scope,
+            text: if capture.mode == crate::host::transport::PaneMode::Normal {
+                capture.text
+            } else {
+                String::new()
+            },
+            baseline: None,
+            profile_id: seat.profile.clone(),
+            operation: Operation::OrdinarySend,
+            message: None,
+            attempt: None,
+            after_step: None,
+            paste_latch: PasteLatch::NeverSeen,
+        };
+        let interaction = self
+            .registration
+            .hooks
+            .interaction
+            .require("H6 Interaction")?;
+        let protocol = self.protocol.clone().unwrap_or_else(|| {
+            collect_protocol(
+                target,
+                &seat.identity.instance,
+                &seat.server_key,
+                &[],
+                self.clock.now(),
+                self.settings.freshness,
+            )
+        });
+        Ok(ReadinessSample {
+            process: collect_process(target, self.clock, self.settings.freshness),
+            pane: collect_pane(&frame, *interaction),
+            binding: protocol.binding,
+            server: protocol.server,
+            minimum_sequence: 0,
+            now: self.clock.now(),
+        })
+    }
+    /// Current registry capture, not a server-side tools/list inference. The
+    /// caller serializes this with its seat lifecycle/outbox owner.
+    pub fn client_binding(
+        &mut self,
+        seat: &SeatRecord,
+        panel: &crate::runtime::native_panel::NativePanelPolicy,
+    ) -> Result<crate::contract::probe::Probe<crate::contract::probe::ClientBindingEvidence>, Error>
+    {
+        let target = self.target(seat)?.clone();
+        let policy = self.policy(&target, &seat.profile, Operation::ToolInspect)?;
+        if panel.profile_id != seat.profile
+            || panel.server_key != seat.server_key
+            || panel.policy_sha256 != policy.profile().policy_sha256
+        {
+            return Err(Error::Fence);
+        }
+        if self.control(seat, &NativeControl::InspectTools)? != DeliveryEffect::Submitted {
+            return Err(Error::Host("native registry control unconfirmed"));
+        }
+        let deadline = self.deadline()?;
+        let mut host = self.reopen(&target, deadline)?;
+        let mut journal = FileJournal::new(
+            ScopedDirectory::reopen(target.directory.clone()).map_err(host_error)?,
+            self.settings.journal_bytes,
+        )
+        .map_err(host_error)?;
+        crate::runtime::native_panel::capture_and_close(
+            &mut host,
+            crate::runtime::native_panel::PanelRequest {
+                target: &target,
+                interaction: *self
+                    .registration
+                    .hooks
+                    .interaction
+                    .require("H6 Interaction")?,
+                policy: panel,
+                operation: &self.operation,
+                clock: self.clock,
+                deadline,
+                freshness: self.settings.freshness,
+            },
+            &mut journal,
+        )
+        .map_err(host_error)
     }
     fn deadline(&self) -> Result<Duration, Error> {
         self.clock
@@ -219,11 +325,7 @@ impl LifecycleHost for PhysicalRuntime<'_> {
         let deadline = self.deadline()?;
         let mut host = self.reopen(&target, deadline)?;
         let receipt = host.close_owned_pane(&target, self.clock, deadline);
-        if receipt.pane_close.outcome != StepOutcome::Confirmed
-            || receipt.native != ProcessState::Exited
-        {
-            return Err(Error::Host("owned native exit not observed"));
-        }
+        confirm_close(receipt)?;
         self.quiescent = Some(seat.clone());
         // Preserve endpoint, attempt journals and host diagnostics. Never kill-server,
         // unlink a socket, remove a shared cwd, or recurse over another instance.
@@ -237,6 +339,7 @@ impl LifecycleHost for PhysicalRuntime<'_> {
         let target = self.target(seat)?.clone();
         let kind = match control {
             NativeControl::InspectSession => ControlKind::InspectSession,
+            NativeControl::InspectTools => ControlKind::InspectTools,
             NativeControl::BranchCurrent => ControlKind::BranchCurrent,
             NativeControl::BranchToTurn(_) => ControlKind::BranchToTurn,
             NativeControl::Exit => ControlKind::Exit,
@@ -293,11 +396,32 @@ impl LifecycleHost for PhysicalRuntime<'_> {
             self.clock,
         );
         if report.persistence != PersistenceState::Durable || !report.problems.is_empty() {
-            return Err(Error::Host("native control outcome uncertain"));
+            return Err(Error::NativeControl(Box::new(report)));
         }
         Ok(report.effect_floor)
     }
     fn session_evidence(&mut self, seat: &SeatRecord) -> Result<ScopedSessionEvidence, Error> {
+        // A provider must explicitly register this control. Passive-only adapters
+        // retain their existing capture path. Never query newest/global sessions.
+        if self.registration.controls.iter().any(|control| {
+            control.profile_id == seat.profile && control.kind == ControlKind::InspectSession
+        }) {
+            let deadline = self.deadline()?;
+            loop {
+                let ready = self.readiness(seat)?;
+                if matches!(ready.pane.outcome, crate::contract::probe::ProbeOutcome::Observed(ref pane) if pane.surface == InputSurface::ComposerReady)
+                {
+                    break;
+                }
+                if self.clock.now() >= deadline {
+                    return Err(Error::Host("native composer startup timed out"));
+                }
+                self.clock.sleep(self.settings.limits.poll_interval);
+            }
+            if self.control(seat, &NativeControl::InspectSession)? != DeliveryEffect::Submitted {
+                return Err(Error::Host("native session control unconfirmed"));
+            }
+        }
         let target = self.target(seat)?.clone();
         let deadline = self.deadline()?;
         let mut host = self.reopen(&target, deadline)?;
@@ -385,5 +509,105 @@ impl DeliveryHost for PhysicalRuntime<'_> {
         report
             .business_receipt()
             .ok_or(Error::Invalid("business receipt missing"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{confirm_close, host_error, CloseReceipt, Error, ProcessState, StepOutcome};
+    use crate::host::{
+        tmux::{parse_pane, PaneMetadataStage},
+        HostError, HostErrorKind,
+    };
+
+    #[test]
+    fn close_requires_both_confirmed_action_and_exit_and_preserves_failure_facts() {
+        for outcome in [
+            StepOutcome::Confirmed,
+            StepOutcome::NoEffect,
+            StepOutcome::MayHaveOccurred,
+        ] {
+            for native in [
+                ProcessState::Alive,
+                ProcessState::Exited,
+                ProcessState::Replaced,
+                ProcessState::Unknown(HostError::new("process birth", HostErrorKind::Unknown)),
+            ] {
+                let receipt = CloseReceipt {
+                    pane_close: crate::host::transport::ActionResult {
+                        outcome,
+                        error: (outcome != StepOutcome::Confirmed)
+                            .then(|| HostError::new("owned pane close", HostErrorKind::Command)),
+                    },
+                    native: native.clone(),
+                    socket_preserved: true,
+                };
+                let result = confirm_close(receipt.clone());
+                if outcome == StepOutcome::Confirmed && native == ProcessState::Exited {
+                    assert_eq!(result, Ok(()));
+                } else {
+                    let error = result.unwrap_err();
+                    assert_eq!(error, Error::NativeClose(Box::new(receipt)));
+                    let shown = error.to_string();
+                    assert!(shown.contains(&format!("pane_outcome={outcome:?}")));
+                    assert!(shown.contains(&format!("native={native:?}")));
+                    assert!(shown.contains("socket_preserved=true"));
+                    if outcome != StepOutcome::Confirmed {
+                        assert!(shown.contains("owned pane close"));
+                        assert!(shown.contains("Command"));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pane_metadata_diagnostics_survive_the_lifecycle_error_boundary() {
+        for (stage, label) in [
+            (PaneMetadataStage::NewSession, "new-session"),
+            (PaneMetadataStage::Query, "query"),
+        ] {
+            let error = parse_pane(b"$0\t@0\n", stage).unwrap_err();
+            let shown = error.to_string();
+            let mapped = host_error(error);
+            assert!(matches!(&mapped, Error::HostDiagnostic(_)));
+            // Lifecycle::finish persists this Display string in operation.failure.
+            assert_eq!(mapped.to_string(), shown);
+            assert!(shown.contains("field count (expected 13)"));
+            assert!(shown.contains(&format!("stage={label}; fields=2;")));
+            assert!(shown.contains(r"$0\t@0\n"));
+        }
+    }
+
+    #[test]
+    fn bound_process_diagnostics_survive_the_lifecycle_error_boundary() {
+        let mut error = HostError::new(
+            "native instance not alive or replaced",
+            HostErrorKind::Unknown,
+        );
+        error.process = Some(Box::new(crate::host::tmux::BoundProcessDiagnostic {
+            expected_pid: 44123,
+            pane_dead: false,
+            require_alive: false,
+            sampled: Some(crate::host::process::ProcessState::Unknown(HostError::new(
+                "process birth",
+                HostErrorKind::Io(std::io::ErrorKind::PermissionDenied),
+            ))),
+        }));
+        let shown = error.to_string();
+        let mapped = host_error(error);
+        assert!(matches!(&mapped, Error::HostDiagnostic(_)));
+        assert_eq!(mapped.to_string(), shown);
+        assert!(shown.contains("expected_pid=44123"));
+        assert!(shown.contains("process birth"));
+        assert!(shown.contains("PermissionDenied"));
+    }
+
+    #[test]
+    fn other_host_errors_keep_the_existing_opaque_contract() {
+        assert_eq!(
+            host_error(HostError::new("tmux spawn", HostErrorKind::Command)),
+            Error::Host("tmux spawn")
+        );
     }
 }

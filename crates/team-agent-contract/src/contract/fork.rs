@@ -167,6 +167,7 @@ pub fn resolve_fork(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NativeControl {
     InspectSession,
+    InspectTools,
     BranchCurrent,
     BranchToTurn(u64),
     Exit,

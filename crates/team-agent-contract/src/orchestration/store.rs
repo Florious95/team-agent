@@ -14,8 +14,12 @@ use crate::contract::types::*;
 const APPLICATION_ID: i64 = 0x54414333;
 const SCHEMA: &str = "
 PRAGMA application_id=1413563187;
-PRAGMA user_version=2;
-CREATE TABLE contract_meta(scope TEXT NOT NULL, endpoint TEXT NOT NULL, root TEXT NOT NULL);
+PRAGMA user_version=4;
+CREATE TABLE contract_meta(scope TEXT NOT NULL, endpoint TEXT NOT NULL, root TEXT NOT NULL,
+ incarnation TEXT NOT NULL, result_route TEXT);
+CREATE TABLE contract_framework_peers(recipient TEXT PRIMARY KEY, record TEXT NOT NULL);
+CREATE TABLE contract_forwards(id TEXT PRIMARY KEY, state TEXT NOT NULL, record TEXT NOT NULL);
+CREATE TABLE contract_connections(connection TEXT PRIMARY KEY, identity TEXT NOT NULL, record TEXT NOT NULL);
 CREATE TABLE contract_seats(seat TEXT PRIMARY KEY, record TEXT NOT NULL);
 CREATE TABLE contract_generations(seat TEXT PRIMARY KEY, generation INTEGER NOT NULL);
 CREATE TABLE contract_instances(instance TEXT PRIMARY KEY, seat TEXT NOT NULL, generation INTEGER NOT NULL);
@@ -149,7 +153,7 @@ impl ContractStore {
         configure(&connection)?;
         connection.execute_batch(SCHEMA)?;
         connection.execute(
-            "INSERT INTO contract_meta VALUES(?1,?2,?3)",
+            "INSERT INTO contract_meta VALUES(?1,?2,?3,lower(hex(randomblob(16))),NULL)",
             params![
                 scope.as_str(),
                 endpoint,
@@ -165,6 +169,17 @@ impl ContractStore {
     }
 
     pub fn open(root: &Path, scope: ScopeId, endpoint: &str) -> Result<Self, Error> {
+        Self::open_mode(root, scope, endpoint, false)
+    }
+    pub fn open_readonly(root: &Path, scope: ScopeId, endpoint: &str) -> Result<Self, Error> {
+        Self::open_mode(root, scope, endpoint, true)
+    }
+    fn open_mode(
+        root: &Path,
+        scope: ScopeId,
+        endpoint: &str,
+        readonly: bool,
+    ) -> Result<Self, Error> {
         require_absolute(root, "store root")?;
         validate_ancestors(root)?;
         #[cfg(unix)]
@@ -181,12 +196,16 @@ impl ContractStore {
         }
         let connection = Connection::open_with_flags(
             path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            (if readonly {
+                OpenFlags::SQLITE_OPEN_READ_ONLY
+            } else {
+                OpenFlags::SQLITE_OPEN_READ_WRITE
+            }) | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
         // Verify identity before pragmas, migrations, or writes.
         let app: i64 = connection.query_row("PRAGMA application_id", [], |r| r.get(0))?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if app != APPLICATION_ID || version != 2 {
+        if app != APPLICATION_ID || version != 4 {
             return Err(Error::Fence);
         }
         let stored: (String, String, String) =
@@ -202,7 +221,9 @@ impl ContractStore {
         {
             return Err(Error::Fence);
         }
-        configure(&connection)?;
+        if !readonly {
+            configure(&connection)?;
+        }
         Ok(Self {
             connection,
             scope,
@@ -222,6 +243,31 @@ impl ContractStore {
     }
     pub fn seat(&self, seat: &SeatId) -> Result<Option<SeatRecord>, Error> {
         load_seat(&self.connection, seat)
+    }
+    /// Read-only allocation proposal. Lifecycle::begin still atomically fences
+    /// the generation and unique instance; concurrent proposals cannot both win.
+    pub fn propose_identity(&self, seat: &SeatId) -> Result<InstanceIdentity, Error> {
+        let previous: Option<u64> = self
+            .connection
+            .query_row(
+                "SELECT generation FROM contract_generations WHERE seat=?1",
+                [seat.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let generation = previous
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(Error::Invalid("generation overflow"))?;
+        let instance: String =
+            self.connection
+                .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+        Ok(InstanceIdentity {
+            scope: self.scope.clone(),
+            seat: seat.clone(),
+            instance: InstanceId::new(format!("instance-{instance}"))?,
+            generation: Generation(generation),
+        })
     }
     pub fn seats(&self) -> Result<Vec<SeatRecord>, Error> {
         let mut statement = self
@@ -294,9 +340,13 @@ impl ContractStore {
                 }
             }
         }
+        lifecycle_unleased(&tx, &target.seat)?;
         if let Some(parent) = &operation.parent {
             if current(&tx, &self.scope, &parent.identity)? != *parent {
                 return Err(Error::Fence);
+            }
+            if parent.identity.seat != target.seat {
+                lifecycle_unleased(&tx, &parent.identity.seat)?;
             }
         }
         if !matches!(
@@ -474,6 +524,33 @@ fn route_available(connection: &Connection, target: &SeatRecord) -> Result<(), E
     }
 }
 
+/// A retained lifecycle lease is authority, not a broken database connection.
+/// Check it inside begin's write transaction before allocating a new operation;
+/// never overwrite an uncertain spawn/control lease to make teardown succeed.
+fn lifecycle_unleased(connection: &Connection, seat: &SeatId) -> Result<(), Error> {
+    let held: Option<String> = connection
+        .query_row(
+            "SELECT operation FROM contract_leases WHERE seat=?1",
+            [seat.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(held) = held else {
+        return Ok(());
+    };
+    let raw: String = connection.query_row(
+        "SELECT record FROM contract_operations WHERE id=?1",
+        [held],
+        |row| row.get(0),
+    )?;
+    let operation: OperationRecord = serde_json::from_str(&raw)?;
+    Err(if operation.outcome == Outcome::NeedsRecovery {
+        Error::NeedsRecovery
+    } else {
+        Error::Conflict
+    })
+}
+
 pub(crate) fn unleased(connection: &Connection, seat: &SeatId) -> Result<(), Error> {
     let exists: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM contract_leases WHERE seat=?1)",
@@ -492,5 +569,12 @@ pub(crate) fn next_id(connection: &Connection, prefix: &str) -> Result<String, E
         [],
         |r| r.get(0),
     )?;
-    Ok(format!("{prefix}_{n}"))
+    // Shared-framework forwarding may cross native stores or reopen a logical
+    // scope after teardown. A local counter alone is not a global message key.
+    let incarnation: String =
+        connection.query_row("SELECT incarnation FROM contract_meta", [], |r| r.get(0))?;
+    if incarnation.len() != 32 || !incarnation.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(Error::Corrupt);
+    }
+    Ok(format!("{prefix}_{incarnation}_{n}"))
 }

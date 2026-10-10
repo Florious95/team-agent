@@ -56,6 +56,82 @@ pub struct PaneState {
     pub rows: u16,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneMetadataStage {
+    NewSession,
+    Query,
+}
+
+/// Only the fixed metadata FORMAT response, never a pane capture or command/env.
+/// At most 256 original bytes are retained, escaped to at most 1024 ASCII bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneMetadataDiagnostic {
+    pub stage: PaneMetadataStage,
+    pub actual_fields: usize,
+    pub output_bytes: usize,
+    pub sample: String,
+    pub truncated: bool,
+}
+
+impl std::fmt::Display for PaneMetadataDiagnostic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let stage = match self.stage {
+            PaneMetadataStage::NewSession => "new-session",
+            PaneMetadataStage::Query => "query",
+        };
+        write!(
+            f,
+            "stage={stage}; fields={}; bytes={}; sample=\"{}\"; truncated={}",
+            self.actual_fields, self.output_bytes, self.sample, self.truncated
+        )
+    }
+}
+
+/// Identity-only diagnostics: no process argv, environment or pane contents.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundProcessDiagnostic {
+    pub expected_pid: u32,
+    pub pane_dead: bool,
+    pub require_alive: bool,
+    /// None when tmux already reports a dead pane (the original short circuit).
+    pub sampled: Option<ProcessState>,
+}
+
+impl std::fmt::Display for BoundProcessDiagnostic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "stage=check-bound; expected_pid={}; pane_dead={}; require_alive={}; process_state={:?}",
+            self.expected_pid, self.pane_dead, self.require_alive, self.sampled
+        )
+    }
+}
+
+fn check_bound_process(
+    expected_pid: u32,
+    pane_dead: bool,
+    require_alive: bool,
+    sample: impl FnOnce() -> ProcessState,
+) -> Result<(), HostError> {
+    let sampled = (!pane_dead).then(sample);
+    if (require_alive && pane_dead)
+        || sampled.as_ref().is_some_and(|state| *state != ProcessState::Alive)
+    {
+        let mut error = HostError::new(
+            "native instance not alive or replaced",
+            HostErrorKind::Unknown,
+        );
+        error.process = Some(Box::new(BoundProcessDiagnostic {
+            expected_pid,
+            pane_dead,
+            require_alive,
+            sampled,
+        }));
+        return Err(error);
+    }
+    Ok(())
+}
+
 fn directory_signature(owner: &DirectoryReceipt) -> String {
     let key = format!(
         "{}:{}:{}:{}:{}:{}",
@@ -75,33 +151,66 @@ fn numbered(value: &str, prefix: char) -> bool {
         .is_some_and(|tail| !tail.is_empty() && tail.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
-pub fn parse_pane(bytes: &[u8]) -> Result<PaneState, HostError> {
-    let text = std::str::from_utf8(bytes)
-        .map_err(|_| HostError::new("tmux metadata encoding", HostErrorKind::Unknown))?;
-    let fields: Vec<_> = text
-        .strip_suffix('\n')
-        .unwrap_or(text)
-        .split('\t')
-        .collect();
-    if fields.len() != 13
-        || !numbered(fields[0], '$')
-        || !numbered(fields[1], '@')
-        || !numbered(fields[2], '%')
-    {
-        return Err(HostError::new(
-            "tmux metadata shape",
-            HostErrorKind::Unknown,
-        ));
+pub fn parse_pane(bytes: &[u8], stage: PaneMetadataStage) -> Result<PaneState, HostError> {
+    let invalid = |operation| {
+        let line = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+        let actual_fields = if line.is_empty() {
+            0
+        } else if line.contains(&b'\t') {
+            line.split(|byte| *byte == b'\t').count()
+        } else {
+            line.windows(2).filter(|pair| *pair == b"\\t").count() + 1
+        };
+        HostError {
+            operation,
+            kind: HostErrorKind::Unknown,
+            metadata: Some(PaneMetadataDiagnostic {
+                stage,
+                actual_fields,
+                output_bytes: bytes.len(),
+                sample: bytes[..bytes.len().min(256)]
+                    .iter()
+                    .flat_map(|byte| std::ascii::escape_default(*byte))
+                    .map(char::from)
+                    .collect(),
+                truncated: bytes.len() > 256,
+            }),
+            process: None,
+        }
+    };
+    let text = std::str::from_utf8(bytes).map_err(|_| invalid("tmux metadata encoding"))?;
+    let line = text.strip_suffix('\n').unwrap_or(text);
+    if line.is_empty() {
+        return Err(invalid("tmux metadata empty output"));
+    }
+    // Preserve native field contents: prefer real TABs, otherwise accept the
+    // escaped separator spelling. Never globally unescape or merge mixed frames.
+    let fields: Vec<_> = if line.contains('\t') {
+        line.split('\t').collect()
+    } else {
+        line.split(r"\t").collect()
+    };
+    if fields.len() != 13 {
+        return Err(invalid("tmux metadata field count (expected 13)"));
+    }
+    for (index, prefix, operation) in [
+        (0, '$', "tmux metadata invalid session ID"),
+        (1, '@', "tmux metadata invalid window ID"),
+        (2, '%', "tmux metadata invalid pane ID"),
+    ] {
+        if !numbered(fields[index], prefix) {
+            return Err(invalid(operation));
+        }
     }
     let pid = fields[3]
         .parse::<u32>()
         .ok()
         .filter(|pid| *pid > 1)
-        .ok_or_else(|| HostError::new("tmux pane pid", HostErrorKind::Unknown))?;
+        .ok_or_else(|| invalid("tmux pane pid"))?;
     let dead = match fields[6] {
         "0" => false,
         "1" => true,
-        _ => return Err(HostError::new("tmux pane state", HostErrorKind::Unknown)),
+        _ => return Err(invalid("tmux pane state")),
     };
     let exit_code = if fields[7].is_empty() {
         None
@@ -109,7 +218,7 @@ pub fn parse_pane(bytes: &[u8]) -> Result<PaneState, HostError> {
         Some(
             fields[7]
                 .parse()
-                .map_err(|_| HostError::new("tmux exit receipt", HostErrorKind::Unknown))?,
+                .map_err(|_| invalid("tmux exit receipt"))?,
         )
     };
     let mode = match (fields[8], fields[9]) {
@@ -122,12 +231,12 @@ pub fn parse_pane(bytes: &[u8]) -> Result<PaneState, HostError> {
         .parse::<u16>()
         .ok()
         .filter(|n| *n > 0)
-        .ok_or_else(|| HostError::new("pane columns", HostErrorKind::Unknown))?;
+        .ok_or_else(|| invalid("pane columns"))?;
     let rows = fields[12]
         .parse::<u16>()
         .ok()
         .filter(|n| *n > 0)
-        .ok_or_else(|| HostError::new("pane rows", HostErrorKind::Unknown))?;
+        .ok_or_else(|| invalid("pane rows"))?;
     Ok(PaneState {
         address: PaneAddress {
             session: fields[0].into(),
@@ -161,6 +270,26 @@ pub struct CloseReceipt {
     pub pane_close: ActionResult,
     pub native: ProcessState,
     pub socket_preserved: bool,
+}
+
+/// After a close may have executed, observe only: reparenting/exit races do not
+/// grant authority for another action, nor prove exit. Keep the original budget.
+fn observe_native_exit(
+    close_outcome: StepOutcome,
+    clock: &dyn Clock,
+    deadline: Duration,
+    poll_interval: Duration,
+    mut sample: impl FnMut() -> ProcessState,
+) -> ProcessState {
+    let mut native = sample();
+    while close_outcome != StepOutcome::NoEffect && native != ProcessState::Exited {
+        let Some(left) = remaining(clock, deadline) else {
+            break;
+        };
+        clock.sleep(poll_interval.min(left));
+        native = sample();
+    }
+    native
 }
 
 /// One host instance owns one private endpoint/generation. No default server or adoption.
@@ -272,7 +401,13 @@ impl<R: CommandRunner> TmuxHost<R> {
         self.directory.check_live()?;
         let budget = remaining(clock, deadline)
             .ok_or_else(|| HostError::new("tmux deadline", HostErrorKind::Deadline))?;
-        let mut argv = vec![OsString::from("-S"), self.endpoint.as_os_str().to_owned()];
+        // This is a UTF-8 machine protocol, independent of the caller's locale.
+        // Without -u, tmux sanitizes TABs to '_' when TMUX/UTF-8 locale are absent.
+        let mut argv = vec![
+            OsString::from("-u"),
+            OsString::from("-S"),
+            self.endpoint.as_os_str().to_owned(),
+        ];
         argv.extend(arguments);
         let result = self.runner.run(&CommandRequest {
             executable: self.executable.clone(),
@@ -314,7 +449,7 @@ impl<R: CommandRunner> TmuxHost<R> {
         if !result.success() {
             return Err(command_error(&result, "tmux pane query"));
         }
-        parse_pane(&result.stdout)
+        parse_pane(&result.stdout, PaneMetadataStage::Query)
     }
 
     fn socket_identity(&self) -> Result<(u64, u64), HostError> {
@@ -370,14 +505,12 @@ impl<R: CommandRunner> TmuxHost<R> {
                 HostErrorKind::Ownership,
             ));
         }
-        if (require_alive && pane.dead)
-            || (!pane.dead && sample_process(&target.process) != ProcessState::Alive)
-        {
-            return Err(HostError::new(
-                "native instance not alive or replaced",
-                HostErrorKind::Unknown,
-            ));
-        }
+        check_bound_process(
+            target.process.identity.pid,
+            pane.dead,
+            require_alive,
+            || sample_process(&target.process),
+        )?;
         Ok(pane)
     }
 
@@ -580,7 +713,7 @@ impl<R: CommandRunner> TmuxHost<R> {
         if !result.success() {
             return Err(command_error(&result, "tmux spawn"));
         }
-        let initial = parse_pane(&result.stdout)?;
+        let initial = parse_pane(&result.stdout, PaneMetadataStage::NewSession)?;
         receipt.pane = Some(initial.address.clone());
         if initial.address.session_name != session_name
             || initial.address.window_name != "worker"
@@ -725,16 +858,13 @@ impl<R: CommandRunner> TmuxHost<R> {
                 },
             },
         };
-        let mut native = sample_process(&target.process);
-        if action.outcome != StepOutcome::NoEffect {
-            while native == ProcessState::Alive {
-                let Some(left) = remaining(clock, deadline) else {
-                    break;
-                };
-                clock.sleep(self.limits.poll_interval.min(left));
-                native = sample_process(&target.process);
-            }
-        }
+        let native = observe_native_exit(
+            action.outcome,
+            clock,
+            deadline,
+            self.limits.poll_interval,
+            || sample_process(&target.process),
+        );
         CloseReceipt {
             pane_close: action,
             native,
@@ -969,17 +1099,63 @@ impl<R: CommandRunner> PhysicalTransport for TmuxHost<R> {
         if let Err(error) = self.check_bound(target, clock, deadline, true) {
             return ActionResult::refused(error);
         }
-        // -r preserves LF; tmux otherwise silently substitutes CR for each LF.
-        let args = vec![
-            "paste-buffer".into(),
-            "-r".into(),
-            "-b".into(),
-            name.into(),
-            "-t".into(),
-            target.pane.clone().into(),
-        ];
+        let args = if mode == PasteMode::DirectTyping {
+            // Read only this attempt's staged buffer. Literal typing contains no
+            // terminal control bytes and does NOT include the submit key.
+            let result = match self.command(
+                vec!["save-buffer".into(), "-b".into(), name.into(), "-".into()],
+                None,
+                clock,
+                deadline,
+            ) {
+                Ok(result) if result.success() => result,
+                Ok(result) => {
+                    return ActionResult::refused(command_error(
+                        &result,
+                        "read owned control buffer",
+                    ))
+                }
+                Err(error) => return ActionResult::refused(error),
+            };
+            let text = match std::str::from_utf8(&result.stdout) {
+                Ok(text)
+                    if !text.is_empty()
+                        && text.len() <= self.limits.max_payload_bytes
+                        && text.bytes().all(|byte| (b' '..=b'~').contains(&byte)) =>
+                {
+                    text
+                }
+                _ => {
+                    return ActionResult::refused(HostError::new(
+                        "literal control bytes",
+                        HostErrorKind::Invalid,
+                    ))
+                }
+            };
+            if let Err(error) = self.check_bound(target, clock, deadline, true) {
+                return ActionResult::refused(error);
+            }
+            vec![
+                "send-keys".into(),
+                "-l".into(),
+                "-t".into(),
+                target.pane.clone().into(),
+                "--".into(),
+                text.into(),
+            ]
+        } else {
+            // -r preserves LF; tmux otherwise silently substitutes CR for each LF.
+            vec![
+                "paste-buffer".into(),
+                "-r".into(),
+                "-b".into(),
+                name.into(),
+                "-t".into(),
+                target.pane.clone().into(),
+            ]
+        };
         match self.command(args, None, clock, deadline) {
-            Ok(result) => action_result(result, "paste owned buffer"),
+            Ok(result) => action_result(result, "insert owned input"),
             Err(error) => ActionResult::refused(error),
         }
     }
@@ -1029,6 +1205,7 @@ impl<R: CommandRunner> PhysicalTransport for TmuxHost<R> {
             PhysicalKey::Up => "Up",
             PhysicalKey::Down => "Down",
             PhysicalKey::Tab => "Tab",
+            PhysicalKey::Escape => "Escape",
         };
         match self.command(
             vec![
@@ -1043,6 +1220,143 @@ impl<R: CommandRunner> PhysicalTransport for TmuxHost<R> {
         ) {
             Ok(result) => action_result(result, "native key"),
             Err(error) => ActionResult::refused(error),
+        }
+    }
+}
+
+#[cfg(test)]
+mod bound_process_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct TestClock(std::cell::Cell<Duration>);
+    impl Clock for TestClock {
+        fn now(&self) -> Duration {
+            self.0.get()
+        }
+        fn sleep(&self, duration: Duration) {
+            self.0.set(self.0.get() + duration);
+        }
+    }
+
+    #[test]
+    fn close_observation_waits_through_transient_states_for_actual_exit() {
+        let clock = TestClock::default();
+        let mut sequence = [
+            ProcessState::Alive,
+            ProcessState::Replaced,
+            ProcessState::Unknown(HostError::new("process birth", HostErrorKind::Unknown)),
+            ProcessState::Exited,
+        ]
+        .into_iter();
+        let result = observe_native_exit(
+            StepOutcome::Confirmed,
+            &clock,
+            Duration::from_secs(30),
+            Duration::from_millis(100),
+            || sequence.next().expect("no sample after Exited"),
+        );
+        assert_eq!(result, ProcessState::Exited);
+        assert_eq!(clock.now(), Duration::from_millis(300));
+        assert!(sequence.next().is_none());
+    }
+
+    #[test]
+    fn close_observation_is_bounded_and_never_turns_nonexit_into_success() {
+        for state in [
+            ProcessState::Alive,
+            ProcessState::Replaced,
+            ProcessState::Unknown(HostError::new("process birth", HostErrorKind::Unknown)),
+        ] {
+            let clock = TestClock::default();
+            let mut samples = 0;
+            let result = observe_native_exit(
+                StepOutcome::Confirmed,
+                &clock,
+                Duration::from_millis(250),
+                Duration::from_millis(100),
+                || {
+                    samples += 1;
+                    state.clone()
+                },
+            );
+            assert_eq!(result, state);
+            assert_eq!(clock.now(), Duration::from_millis(250));
+            assert_eq!(samples, 4);
+        }
+    }
+
+    #[test]
+    fn refused_close_and_already_exited_do_not_start_a_wait_loop() {
+        for (outcome, state) in [
+            (StepOutcome::NoEffect, ProcessState::Alive),
+            (StepOutcome::Confirmed, ProcessState::Exited),
+        ] {
+            let clock = TestClock::default();
+            let mut samples = 0;
+            let result = observe_native_exit(
+                outcome,
+                &clock,
+                Duration::from_secs(30),
+                Duration::from_millis(100),
+                || {
+                    samples += 1;
+                    state.clone()
+                },
+            );
+            assert_eq!(result, state);
+            assert_eq!(clock.now(), Duration::ZERO);
+            assert_eq!(samples, 1);
+        }
+    }
+
+    #[test]
+    fn process_gate_preserves_each_state_and_probe_error_without_weakening_checks() {
+        for require_alive in [false, true] {
+            for state in [
+                ProcessState::Alive,
+                ProcessState::Exited,
+                ProcessState::Replaced,
+                ProcessState::Unknown(HostError::new(
+                    "process birth",
+                    HostErrorKind::Io(std::io::ErrorKind::PermissionDenied),
+                )),
+            ] {
+                let mut samples = 0;
+                let result = check_bound_process(44123, false, require_alive, || {
+                    samples += 1;
+                    state.clone()
+                });
+                assert_eq!(samples, 1);
+                if state == ProcessState::Alive {
+                    assert!(result.is_ok());
+                } else {
+                    let error = result.unwrap_err();
+                    let diagnostic = error.process.as_ref().unwrap();
+                    assert_eq!(diagnostic.expected_pid, 44123);
+                    assert_eq!(diagnostic.sampled.as_ref(), Some(&state));
+                    assert_eq!(diagnostic.require_alive, require_alive);
+                    let shown = error.to_string();
+                    assert!(shown.contains("stage=check-bound; expected_pid=44123"));
+                    assert!(shown.contains(&format!("process_state=Some({state:?})")));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dead_pane_keeps_the_existing_shutdown_and_live_action_short_circuit() {
+        for require_alive in [false, true] {
+            let result = check_bound_process(44123, true, require_alive, || {
+                panic!("a dead pane must not sample a possibly recycled PID")
+            });
+            if require_alive {
+                let error = result.unwrap_err();
+                assert_eq!(error.process.as_ref().unwrap().sampled, None);
+                assert!(error.to_string().contains("pane_dead=true; require_alive=true"));
+            } else {
+                assert!(result.is_ok());
+            }
         }
     }
 }

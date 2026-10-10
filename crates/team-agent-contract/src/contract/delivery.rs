@@ -13,12 +13,15 @@ pub enum PhysicalKey {
     Up,
     Down,
     Tab,
+    Escape,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PasteMode {
     Bracketed,
     Plain,
+    /// Literal text insertion, admitted only for a registered native control.
+    DirectTyping,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -169,14 +172,26 @@ impl SubmitPolicy {
     }
 }
 
+/// A grammar profile is not an executable attestation. RuntimeCaptured selects
+/// a stable UI recipe; exact native identity remains in the generation, policy
+/// evidence, process receipt and every physical fence. It does not authorize a
+/// running generation to adopt a different executable after an update.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProfileIdentity {
+    Exact {
+        version: &'static str,
+        executable_sha256: Digest,
+    },
+    RuntimeCaptured,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InputProfile {
     pub id: &'static str,
-    pub version: &'static str,
+    pub identity: ProfileIdentity,
     pub harness: &'static str,
     pub ui: &'static str,
     pub platform: Platform,
-    pub executable_sha256: Digest,
     pub policy_sha256: Digest,
     pub operations: &'static [Operation],
     pub channel: Channel,
@@ -185,11 +200,17 @@ pub struct InputProfile {
 
 impl InputProfile {
     pub fn matches_native(&self, native: &NativeIdentity) -> bool {
-        self.version == native.version
+        let identity_matches = match self.identity {
+            ProfileIdentity::Exact {
+                version,
+                executable_sha256,
+            } => version == native.version && executable_sha256 == native.executable_sha256,
+            ProfileIdentity::RuntimeCaptured => native.validate().is_ok(),
+        };
+        identity_matches
             && self.harness == native.harness
             && self.ui == native.ui
             && self.platform == native.platform
-            && self.executable_sha256 == native.executable_sha256
     }
 }
 
@@ -212,6 +233,7 @@ pub struct ResolvedSubmitPolicy<'a> {
     operation: Operation,
     evidence_kind: EvidenceKind,
     candidate_sha256: Digest,
+    native: NativeIdentity,
 }
 
 impl<'a> ResolvedSubmitPolicy<'a> {
@@ -226,6 +248,9 @@ impl<'a> ResolvedSubmitPolicy<'a> {
     }
     pub fn candidate_sha256(&self) -> Digest {
         self.candidate_sha256
+    }
+    pub fn native(&self) -> &NativeIdentity {
+        &self.native
     }
     pub fn profile(&self) -> &InputProfile {
         self.profile
@@ -275,6 +300,7 @@ pub fn resolve_submit_policy<'a>(
         operation: request.operation,
         evidence_kind: request.required_evidence_kind,
         candidate_sha256: request.candidate_sha256,
+        native: request.native.clone(),
     })
 }
 
@@ -328,6 +354,20 @@ pub struct CaptureFrame {
     pub paste_latch: PasteLatch,
 }
 
+/// Fixed-control matching facts only. No command, token, input or screen bytes.
+/// Optional diagnostics never grant input authority or change guard evaluation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ControlPasteDiagnostic {
+    pub after_step: Option<StepKind>,
+    pub baseline_has_expected: Option<bool>,
+    pub baseline_composer_empty: Option<bool>,
+    pub current_composer_has_expected: bool,
+    pub fresh: bool,
+    pub latch_seen: bool,
+    pub latch_gone: bool,
+    pub correlated: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InteractionObservation {
     pub scope: EvidenceScope,
@@ -336,6 +376,7 @@ pub struct InteractionObservation {
     pub current_message: Option<MessageId>,
     pub current_attempt: Option<AttemptId>,
     pub paste_latch: PasteLatch,
+    pub control_paste: Option<ControlPasteDiagnostic>,
 }
 
 #[derive(

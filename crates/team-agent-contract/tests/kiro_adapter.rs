@@ -37,8 +37,8 @@ fn fixture_descriptor() -> ProviderDescriptor {
 fn fixture_request() -> LaunchRequest {
     let mut r = request(std::path::Path::new("/owned runtime"), "worker");
     r.provider = "kiro".into();
-    r.native.version = BUNDLE_VERSION.into();
-    r.native.harness = "v3".into();
+    r.native.version = "2.28.0".into();
+    r.native.harness = "v2".into();
     r.native.ui = "tui".into();
     r.paths.executable = "/Applications/Kiro CLI.app/Contents/MacOS/kiro-cli-chat".into();
     r.paths.cwd.path = "/work/code 中 'quoted'".into();
@@ -54,7 +54,10 @@ fn fixture_resolved(mut r: LaunchRequest) -> ResolvedLaunch {
     // Reuse the existing generic fake profile, explicitly scoped to this synthetic
     // identity, rather than pretend it is a captured Kiro terminal fixture.
     let mut profile = d.input.profiles.require("fake profiles").unwrap()[0].clone();
-    profile.version = Box::leak(r.native.version.clone().into_boxed_str());
+    profile.identity = ProfileIdentity::Exact {
+        version: Box::leak(r.native.version.clone().into_boxed_str()),
+        executable_sha256: r.native.executable_sha256,
+    };
     profile.harness = Box::leak(r.native.harness.clone().into_boxed_str());
     profile.ui = Box::leak(r.native.ui.clone().into_boxed_str());
     let profiles = Box::leak(vec![profile].into_boxed_slice());
@@ -64,7 +67,7 @@ fn fixture_resolved(mut r: LaunchRequest) -> ResolvedLaunch {
 }
 
 #[test]
-fn kiro_catalog_is_bound_but_native_worker_admission_still_requires_terminal_evidence() {
+fn kiro_r0_hooks_are_bound_but_fork_and_unobserved_resume_stay_closed() {
     let adapter = adapter();
     let hooks = adapter.hooks();
     assert_eq!(KIRO_DESCRIPTOR.identity.id, "kiro");
@@ -72,8 +75,6 @@ fn kiro_catalog_is_bound_but_native_worker_admission_still_requires_terminal_evi
     assert!(KIRO_DESCRIPTOR.identity.aliases.is_empty());
     assert!(validate_descriptor(&KIRO_DESCRIPTOR, &hooks, Operation::Catalog).is_ok());
     for operation in [
-        Operation::Fresh,
-        Operation::Resume,
         Operation::InWindowBranch,
         Operation::NewSeatFullSnapshot,
         Operation::NativeNewSeat,
@@ -84,9 +85,14 @@ fn kiro_catalog_is_bound_but_native_worker_admission_still_requires_terminal_evi
         );
     }
     assert!(matches!(hooks.catalog, HookBinding::Bound(_)));
-    assert!(matches!(hooks.session, HookBinding::Unverified(_)));
-    assert!(matches!(hooks.semantic, HookBinding::Unverified(_)));
-    assert!(matches!(hooks.interaction, HookBinding::Unverified(_)));
+    assert!(validate_descriptor(&KIRO_DESCRIPTOR, &hooks, Operation::Fresh).is_ok());
+    assert!(matches!(
+        KIRO_DESCRIPTOR.session.resume,
+        Support::Unverified(_)
+    ));
+    assert!(matches!(hooks.session, HookBinding::Bound(_)));
+    assert!(matches!(hooks.semantic, HookBinding::Bound(_)));
+    assert!(matches!(hooks.interaction, HookBinding::Bound(_)));
     assert!(matches!(hooks.fork, HookBinding::Unverified(_)));
 }
 
@@ -100,7 +106,8 @@ fn documentation_plan_keeps_argument_boundaries_and_encodes_owned_agent_json() {
     assert_eq!(plan.executable, request.paths.executable);
     assert_eq!(plan.cwd, request.paths.cwd.path);
     let args: Vec<_> = plan.arguments.iter().map(|v| v.to_str().unwrap()).collect();
-    assert_eq!(&args[..3], &["chat", "--v3", "--agent"]);
+    assert_eq!(&args[..2], &["chat", "--agent"]);
+    assert!(!args.contains(&"--v3"));
     assert!(args.contains(&"exact-provider-model/KeepCase"));
     assert!(!args.contains(&"--trust-all-tools"));
     assert!(args.contains(&"--require-mcp-startup"));
@@ -117,6 +124,20 @@ fn documentation_plan_keeps_argument_boundaries_and_encodes_owned_agent_json() {
     assert_eq!(json["prompt"], request.prompt.unwrap());
     assert_eq!(json["includeMcpJson"], false);
     assert_eq!(json["includePowers"], false);
+    assert_eq!(
+        json["allowedTools"],
+        serde_json::json!([
+            "@team/send_message",
+            "@team/report_result",
+            "@team/get_team_status"
+        ])
+    );
+    // This asserts declared config/argv intent, not actual native permission.
+    assert!(!json["allowedTools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool == "@builtin" || tool == "*"));
     assert_eq!(json["mcpServers"]["team"]["args"][1], "argument with space");
     assert!(json.get("hooks").is_none());
     assert_eq!(plan.environment.set.len(), 1);
@@ -126,7 +147,7 @@ fn documentation_plan_keeps_argument_boundaries_and_encodes_owned_agent_json() {
 }
 
 #[test]
-fn confirmed_help_and_catalog_do_not_imply_terminal_admission() {
+fn native_effort_syntax_does_not_imply_model_catalog_authorization() {
     for effort in [
         Effort::Low,
         Effort::Medium,
@@ -160,7 +181,7 @@ fn confirmed_help_and_catalog_do_not_imply_terminal_admission() {
     ));
     assert!(matches!(
         KIRO_DESCRIPTOR.input.profiles,
-        Support::Unverified(_)
+        Support::Supported(_)
     ));
     let mut request = fixture_request();
     request.paths.executable = "/opt/homebrew/bin/kiro-cli".into();
@@ -250,12 +271,12 @@ fn promoting_a_descriptor_does_not_open_native_plan_gate() {
 }
 
 #[test]
-fn unknown_version_harness_or_ui_is_not_a_default_fallback() {
+fn malformed_version_or_unknown_harness_or_ui_is_not_a_default_fallback() {
     for field in ["version", "harness", "ui"] {
         let mut resolved = fixture_request();
         match field {
-            "version" => resolved.native.version = "2.29.0".into(),
-            "harness" => resolved.native.harness = "v2".into(),
+            "version" => resolved.native.version = "2.invalid.0".into(),
+            "harness" => resolved.native.harness = "v3".into(),
             _ => resolved.native.ui = "classic".into(),
         }
         // Synthetic admission follows the test identity; Kiro itself must reject it.
@@ -264,16 +285,50 @@ fn unknown_version_harness_or_ui_is_not_a_default_fallback() {
 }
 
 #[test]
-fn no_prompt_matcher_or_enter_timing_is_claimed_from_documentation() {
+fn runtime_bound_native_plan_fixture_accepts_new_releases_but_fences_catalog_identity() {
+    // Controlled planning only: these are not live probes of these releases.
+    for version in ["2.28.0", "2.29.0", "3.0.0"] {
+        let mut request = fixture_request();
+        request.native.version = version.into();
+        request.native.platform = Platform::MacOs;
+        request.native.executable_sha256 = team_agent_contract::host::digest(version.as_bytes());
+        request.mode = LaunchMode::FullWorker;
+        request.evidence_kind = EvidenceKind::Native;
+        request.input_profile = Some(interaction::PROFILE.into());
+        let adapter = adapter();
+        let hooks = adapter.hooks();
+        let mut catalog = CatalogObservation {
+            provider: ProviderId::new("kiro").unwrap(),
+            native: request.native.clone(),
+            schema: native::CHAT_CATALOG_SOURCE.schema.into(),
+            models: vec![ModelRecord {
+                id: request.model.clone().unwrap(),
+                efforts: Support::Unverified(NATIVE_UNVERIFIED),
+            }],
+        };
+        let resolved = resolve_launch(&KIRO_DESCRIPTOR, &hooks, &request, Some(&catalog)).unwrap();
+        let plan = adapter.plan(&resolved).unwrap();
+        validate_launch_plan(&KIRO_DESCRIPTOR, &resolved, &plan).unwrap();
+        assert_eq!(resolved.request().native, request.native);
+        catalog.native.executable_sha256 = Digest([99; 32]);
+        assert!(matches!(
+            resolve_launch(&KIRO_DESCRIPTOR, &hooks, &request, Some(&catalog)),
+            Err(ContractError::Mismatch("catalog identity"))
+        ));
+    }
+}
+
+#[test]
+fn r0_profiles_do_not_admit_a_fixture_identity_or_generic_prompt() {
     let adapter = adapter();
     let hooks = adapter.hooks();
     assert!(matches!(
         KIRO_DESCRIPTOR.input.profiles,
-        Support::Unverified(_)
+        Support::Supported(_)
     ));
-    assert!(hooks.interaction.require("H6").is_err());
-    // Generic '>', startup warnings, pasted tokens and native queue text cannot
-    // reach an executable Kiro policy. There are no synthetic native timing constants.
+    assert!(hooks.interaction.require("H6").is_ok());
+    // Runtime binding removes the release allowlist, not platform/profile selection.
+    // A generic fixture cannot borrow the V2/TUI recipe or its one-key budget.
     assert!(KIRO_DESCRIPTOR
         .input
         .resolve(

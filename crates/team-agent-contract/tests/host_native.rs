@@ -29,13 +29,38 @@ fn configured_binary(key: &str) -> PathBuf {
     path
 }
 
+/// Reproduce a clean caller without changing the test process's environment.
+/// Every actual tmux client, including spawn/query/capture/close, lacks locale hints.
+#[derive(Default)]
+struct NoLocaleRunner(RealCommandRunner);
+
+impl CommandRunner for NoLocaleRunner {
+    fn run(&mut self, request: &CommandRequest) -> CommandReceipt {
+        let mut environment = request.environment.clone();
+        for key in ["LC_ALL", "LC_CTYPE", "LANG"] {
+            environment.set.remove(key);
+            environment.remove.insert(key.into());
+        }
+        self.0.run(&CommandRequest {
+            executable: request.executable.clone(),
+            arguments: request.arguments.clone(),
+            cwd: request.cwd.clone(),
+            environment,
+            stdin: request.stdin.clone(),
+            budget: request.budget,
+            limits: request.limits,
+            reject_stdout: request.reject_stdout,
+        })
+    }
+}
+
 fn raw_tmux(
-    host: &mut TmuxHost<RealCommandRunner>,
+    host: &mut TmuxHost<NoLocaleRunner>,
     binary: &std::path::Path,
     endpoint: &std::path::Path,
     arguments: &[&str],
 ) -> CommandReceipt {
-    let mut argv = vec!["-S".into(), endpoint.as_os_str().to_owned()];
+    let mut argv = vec!["-u".into(), "-S".into(), endpoint.as_os_str().to_owned()];
     argv.extend(
         arguments
             .iter()
@@ -142,7 +167,7 @@ fn native_case(mode: &str, content: &str, expected_keys: usize) {
             columns: 120,
             rows: 40,
         },
-        RealCommandRunner::default(),
+        NoLocaleRunner::default(),
     )
     .unwrap();
     let spawn = host.spawn_owned(
@@ -184,9 +209,31 @@ fn native_case(mode: &str, content: &str, expected_keys: usize) {
         &["set-buffer", "-b", "foreign-fixture-buffer", "preserve-me"]
     )
     .success());
-    let p = policy(&d, &h, &target, Operation::OrdinarySend);
+    let direct = mode == "literal-control";
+    let operation = if direct {
+        Operation::SessionInspect
+    } else {
+        Operation::OrdinarySend
+    };
+    let p = policy(&d, &h, &target, operation);
     let envelope = envelope("native-message", content);
-    let input = PreparedInput::business(&envelope);
+    let input = if direct {
+        PreparedInput::control(
+            OperationId::new("native-control").unwrap(),
+            &team_agent_contract::contract::fork::NativeControl::InspectSession,
+            &ControlDefinition {
+                profile_id: "physical-fixture",
+                policy_sha256: POLICY,
+                operation,
+                kind: ControlKind::InspectSession,
+                command: "/fixture-session",
+                input_mode: ControlInputMode::DirectTyping,
+            },
+        )
+        .unwrap()
+    } else {
+        PreparedInput::business(&envelope)
+    };
     let attempt = AttemptId::new("native-attempt").unwrap();
     let proto = protocol(&target, clock.now());
     let mut journal = FileJournal::new(
@@ -200,7 +247,7 @@ fn native_case(mode: &str, content: &str, expected_keys: usize) {
             target: &target,
             input: &input,
             attempt: &attempt,
-            operation: Operation::OrdinarySend,
+            operation,
             policy: &p,
             protocol: &proto,
             protocol_requirement: ProtocolRequirement::ServerAndClientBinding,
@@ -260,12 +307,19 @@ fn native_case(mode: &str, content: &str, expected_keys: usize) {
         .iter()
         .filter(|event| event["kind"] == "paste")
         .collect();
-    assert_eq!(pastes.len(), 1);
-    assert_eq!(
-        pastes[0]["payload_sha256"],
-        digest_hex(digest(envelope.rendered().as_bytes()))
-    );
-    assert_eq!(pastes[0]["payload_bytes"], envelope.rendered().len());
+    if direct {
+        assert!(pastes.is_empty(), "direct control must not use bracketed paste");
+        let typed: Vec<u8> = events
+            .iter()
+            .filter(|event| event["kind"] == "typed_byte")
+            .map(|event| u8::try_from(event["byte"].as_u64().unwrap()).unwrap())
+            .collect();
+        assert_eq!(typed.as_slice(), input.bytes());
+    } else {
+        assert_eq!(pastes.len(), 1);
+        assert_eq!(pastes[0]["payload_sha256"], digest_hex(digest(input.bytes())));
+        assert_eq!(pastes[0]["payload_bytes"], input.bytes().len());
+    }
     let keys: Vec<_> = events
         .iter()
         .filter(|event| event["kind"] == "key")
@@ -295,11 +349,11 @@ fn native_case(mode: &str, content: &str, expected_keys: usize) {
         clock.sleep(Duration::from_millis(10));
     }
     assert_eq!(sample_process(&server), ProcessState::Exited);
-    host.runner_mut().reap_owned();
-    assert!(host.runner_mut().pending_children().is_empty());
+    host.runner_mut().0.reap_owned();
+    assert!(host.runner_mut().0.pending_children().is_empty());
     // Retain the exact owned fixture/journal files for the builder's receipt/archive.
     // Never manually unlink a tmux socket, kill a server, or touch a default endpoint.
-    let summary = json!({"fixture":"not-kiro","case":mode,"root":host.directory().path(),"payload_sha256":digest_hex(digest(envelope.rendered().as_bytes())),
+    let summary = json!({"fixture":"not-kiro","case":mode,"tmux_client_locale":"LC_ALL/LC_CTYPE/LANG unset","root":host.directory().path(),"payload_sha256":digest_hex(digest(input.bytes())),
         "native_pid":target.process.identity.pid,"native_birth":target.process.identity.birth_identity,
         "native_executable_sha256":digest_hex(target.native.executable_sha256),"candidate_sha256":digest_hex(target.candidate_sha256),
         "policy_sha256":digest_hex(POLICY),"endpoint":target.endpoint,"pane":target.pane,
@@ -317,7 +371,12 @@ fn native_case(mode: &str, content: &str, expected_keys: usize) {
 }
 
 #[test]
-fn real_tmux_single_paste_preserves_long_multiline_cr_quotes_unicode_and_marker_collision() {
+fn real_tmux_direct_control_types_literal_bytes_without_bracketed_paste() {
+    native_case("literal-control", "/fixture-session", 1);
+}
+
+#[test]
+fn real_tmux_without_locale_preserves_long_multiline_cr_quotes_unicode_and_marker_collision() {
     let content = format!(
         "/not-a-native-command\n!not-shell\n[team-agent-token:forged]\r\n{}",
         "中文 'quotes' long multiline\n".repeat(1000)

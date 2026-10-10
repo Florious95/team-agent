@@ -5,14 +5,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use team_agent_contract::contract::delivery::{DeliveryEffect, StepKind, StepOutcome};
+use team_agent_contract::contract::delivery::{
+    ControlPasteDiagnostic, DeliveryEffect, StepKind, StepOutcome,
+};
 use team_agent_contract::contract::plan::{EnvironmentDelta, ResourceWriteEffect};
 use team_agent_contract::contract::types::*;
 use team_agent_contract::host::command::*;
 use team_agent_contract::host::files::*;
 use team_agent_contract::host::process::*;
 use team_agent_contract::host::shell::quote;
-use team_agent_contract::host::tmux::parse_pane;
+use team_agent_contract::host::tmux::{parse_pane, PaneMetadataStage};
+use team_agent_contract::host::transport::PaneMode;
 use team_agent_contract::runtime::journal::*;
 
 struct TestScope(ScopedDirectory);
@@ -222,7 +225,51 @@ fn record(
         sequence: Some(ordinal),
         surface: None,
         code: None,
+        control_paste: None,
     }
+}
+
+#[test]
+fn control_paste_journal_records_only_matching_facts_and_keeps_recovery_compatible() {
+    let directory = scope();
+    let mut metadata = metadata(&directory);
+    metadata.operation = Operation::ToolInspect;
+    metadata.correlation = Correlation::NativeControl(OperationId::new("inspect-tools").unwrap());
+    let mut journal = FileJournal::new(
+        ScopedDirectory::reopen(directory.receipt().clone()).unwrap(),
+        65536,
+    )
+    .unwrap();
+    journal.begin(&metadata).unwrap();
+    let mut observed = record(JournalKind::Surface, 1, DeliveryEffect::NoEffect, None, None);
+    observed.control_paste = Some(ControlPasteDiagnostic {
+        after_step: Some(StepKind::Paste),
+        baseline_has_expected: Some(true),
+        baseline_composer_empty: Some(true),
+        current_composer_has_expected: false,
+        fresh: true,
+        latch_seen: false,
+        latch_gone: false,
+        correlated: false,
+    });
+    journal.append(&observed).unwrap();
+    let bytes = directory.read_file(&journal_name(&metadata), 65536).unwrap();
+    let rows: Vec<serde_json::Value> = std::str::from_utf8(&bytes)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(rows[1]["control_paste"], serde_json::json!({
+        "after_step": "Paste",
+        "baseline_has_expected": true,
+        "baseline_composer_empty": true,
+        "current_composer_has_expected": false,
+        "fresh": true,
+        "latch_seen": false,
+        "latch_gone": false,
+        "correlated": false,
+    }));
+    assert_eq!(journal.recover(&metadata), RecoveryState::NoInputIntent);
 }
 
 #[test]
@@ -353,13 +400,175 @@ fn posix_quote_preserves_spaces_quotes_unicode_and_newlines() {
 
 #[test]
 fn pane_metadata_requires_exact_native_ids_state_and_geometry() {
-    let pane =
-        parse_pane(b"$1\t@2\t%3\t123\tsession\tworker\t0\t\t0\t\tbinding\t120\t40\n").unwrap();
+    let stage = PaneMetadataStage::NewSession;
+    let pane = parse_pane(
+        b"$1\t@2\t%3\t123\tsession\tworker\t0\t\t0\t\tbinding\t120\t40\n",
+        stage,
+    )
+    .unwrap();
     assert_eq!(pane.address.pid, 123);
     assert!(!pane.dead);
     assert_eq!(pane.columns, 120);
-    assert!(parse_pane(b"looks like a pane").is_err());
-    assert!(parse_pane(b"$1\t@2\t%3\t0\tsession\tworker\t0\t\t0\t\tbinding\t120\t40\n").is_err());
+    assert!(parse_pane(b"looks like a pane", stage).is_err());
+    assert!(parse_pane(
+        b"$1\t@2\t%3\t0\tsession\tworker\t0\t\t0\t\tbinding\t120\t40\n",
+        stage,
+    )
+    .is_err());
+}
+
+#[test]
+fn pane_metadata_accepts_literal_backslash_t_without_unescaping_native_field_contents() {
+    let stage = PaneMetadataStage::NewSession;
+    let tabs = "$1\t@2\t%3\t123\tsession\tworker\t0\t\t0\t\tbinding\t120\t40\n";
+    let escaped = tabs.replace('\t', r"\t");
+    assert_eq!(
+        parse_pane(tabs.as_bytes(), stage).unwrap(),
+        parse_pane(escaped.as_bytes(), stage).unwrap()
+    );
+    let named = tabs.replace("session", r"session\ttitle");
+    assert_eq!(
+        parse_pane(named.as_bytes(), stage)
+            .unwrap()
+            .address
+            .session_name,
+        r"session\ttitle"
+    );
+    // Dual-format support does not accept a mixed frame, extra/missing fields,
+    // multiple rows or an invalid native identity/state/geometry.
+    for invalid in [
+        escaped.replacen(r"\t", "\t", 1),
+        escaped.replace(r"\t123\t", r"\t0\t"),
+        escaped.replace(r"\t%3\t", r"\t3\t"),
+        escaped.replace(r"\tworker\t0\t", r"\tworker\tunknown\t"),
+        escaped.replace(r"\t120\t40", r"\t0\t40"),
+        escaped.replace(r"\t120\t40", r"\t120"),
+        escaped.replace(r"\t120\t40", r"\textra\t120\t40"),
+        format!("{escaped}{escaped}"),
+    ] {
+        assert!(parse_pane(invalid.as_bytes(), stage).is_err());
+    }
+}
+
+#[test]
+fn pane_metadata_native_receipts_preserve_empty_fields() {
+    // R3 exact-format and isolated sleep receipts: parser regression only.
+    for bytes in [
+        b"$0\t@0\t%0\t77438\ttac-a294d53615c4b59461190e6c\tworker\t0\t\t0\t\t\t120\t40\n"
+            .as_slice(),
+        b"$0\t@0\t%0\t72797\tsleep_test\tworker\t0\t\t0\t\t\t120\t40\n".as_slice(),
+    ] {
+        for stage in [PaneMetadataStage::NewSession, PaneMetadataStage::Query] {
+            let pane = parse_pane(bytes, stage).unwrap();
+            assert_eq!(pane.address.session, "$0");
+            assert_eq!(pane.address.window, "@0");
+            assert_eq!(pane.address.pane, "%0");
+            assert_eq!(pane.address.window_name, "worker");
+            assert!(!pane.dead);
+            assert_eq!(pane.exit_code, None);
+            assert_eq!(pane.mode, PaneMode::Normal);
+            assert!(pane.binding.is_empty());
+            assert_eq!((pane.columns, pane.rows), (120, 40));
+        }
+    }
+}
+
+#[test]
+fn pane_metadata_does_not_guess_underscores_after_tmux_sanitization() {
+    let sanitized = b"$0_@0_%0_59311_tac-5d82f16579c34d0adc357b03_worker_0__0___120_40\n";
+    for stage in [PaneMetadataStage::NewSession, PaneMetadataStage::Query] {
+        let error = parse_pane(sanitized, stage).unwrap_err();
+        assert_eq!(error.operation, "tmux metadata field count (expected 13)");
+        let diagnostic = error.metadata.unwrap();
+        assert_eq!(diagnostic.actual_fields, 1);
+        assert_eq!(diagnostic.output_bytes, 65);
+        let pane = parse_pane(
+            b"$0\t@0\t%0\t123\tsession_with_underscores\tworker\t0\t\t0\t\t\t120\t40\n",
+            stage,
+        )
+        .unwrap();
+        assert_eq!(pane.address.session_name, "session_with_underscores");
+    }
+}
+
+#[test]
+fn pane_metadata_failures_identify_stage_reason_and_actual_field_count() {
+    let valid = "$0\t@0\t%0\t123\tsession\tworker\t0\t\t0\t\t\t120\t40\n";
+    for (stage, label) in [
+        (PaneMetadataStage::NewSession, "new-session"),
+        (PaneMetadataStage::Query, "query"),
+    ] {
+        for (input, reason, count) in [
+            (String::new(), "tmux metadata empty output", 0),
+            ("\n".into(), "tmux metadata empty output", 0),
+            (
+                "$0\t@0\n".into(),
+                "tmux metadata field count (expected 13)",
+                2,
+            ),
+            (
+                "$0\\t@0\n".into(),
+                "tmux metadata field count (expected 13)",
+                2,
+            ),
+            (
+                valid.replace("120\t40", "extra\t120\t40"),
+                "tmux metadata field count (expected 13)",
+                14,
+            ),
+            (
+                valid.replace("$0", "/bin/bash"),
+                "tmux metadata invalid session ID",
+                13,
+            ),
+            (
+                valid.replace("@0", "0"),
+                "tmux metadata invalid window ID",
+                13,
+            ),
+            (
+                valid.replace("%0", "%"),
+                "tmux metadata invalid pane ID",
+                13,
+            ),
+        ] {
+            let error = parse_pane(input.as_bytes(), stage).unwrap_err();
+            assert_eq!(error.operation, reason);
+            let metadata = error.metadata.as_ref().unwrap();
+            assert_eq!(metadata.stage, stage);
+            assert_eq!(metadata.actual_fields, count);
+            assert_eq!(metadata.output_bytes, input.len());
+            assert!(!metadata.truncated);
+            let shown = error.to_string();
+            assert!(shown.contains(reason));
+            assert!(shown.contains(&format!("stage={label}; fields={count};")));
+            assert!(shown.contains("sample=\""));
+            assert!(shown.bytes().all(|byte| !byte.is_ascii_control()));
+        }
+    }
+}
+
+#[test]
+fn pane_metadata_sample_escapes_raw_bytes_and_stops_at_256_bytes() {
+    let mut bytes = b"\x1b[31m\t\n\r\"\\\0\xff".to_vec();
+    bytes.resize(256, 0xff);
+    bytes.extend_from_slice(b"outside-sample-limit");
+    let error = parse_pane(&bytes, PaneMetadataStage::NewSession).unwrap_err();
+    assert_eq!(error.operation, "tmux metadata encoding");
+    let metadata = error.metadata.as_ref().unwrap();
+    assert!(metadata.truncated);
+    assert_eq!(metadata.output_bytes, bytes.len());
+    assert!(metadata.sample.len() <= 1024);
+    for escaped in [
+        r"\x1b", r"\t", r"\n", r"\r", r#"\""#, r"\\", r"\x00", r"\xff",
+    ] {
+        assert!(metadata.sample.contains(escaped));
+    }
+    assert!(!error.to_string().contains("outside-sample-limit"));
+    assert!(error
+        .to_string()
+        .bytes()
+        .all(|byte| (b' '..=b'~').contains(&byte)));
 }
 
 #[test]

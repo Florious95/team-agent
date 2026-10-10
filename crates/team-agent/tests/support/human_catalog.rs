@@ -23,6 +23,7 @@ pub const HUMAN_COMMANDS: &[&str] = &[
     "grok",
     "cursor",
     "pi",
+    "kiro",
     "leaders",
     "doctor",
     "remove-agent",
@@ -34,11 +35,7 @@ pub const HUMAN_COMMANDS: &[&str] = &[
     "install-skill",
     "inbox",
 ];
-pub const MACHINE_COMMANDS: &[&str] = &[
-    "wait",
-    "attach-app-server-leader",
-    "coordinator",
-];
+pub const MACHINE_COMMANDS: &[&str] = &["wait", "attach-app-server-leader", "coordinator"];
 
 /// Physically removed commands, not hidden Machine commands.
 pub const RETIRED_COMMANDS: &[&str] = &[

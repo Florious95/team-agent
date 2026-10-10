@@ -1,4 +1,4 @@
-use super::delivery::InputProfile;
+use super::delivery::{InputProfile, ProfileIdentity};
 use super::hooks::ProviderHooks;
 use super::types::*;
 
@@ -439,9 +439,10 @@ pub fn validate_descriptor(
         }
         let mut ids = Vec::new();
         for profile in *profiles {
-            if [&profile.id, &profile.version, &profile.harness, &profile.ui]
+            if [&profile.id, &profile.harness, &profile.ui]
                 .into_iter()
                 .any(|s| !nonblank(s))
+                || matches!(profile.identity, ProfileIdentity::Exact { version, .. } if !nonblank(version))
                 || profile.operations.is_empty()
                 || ids.contains(&profile.id)
                 || profile.operations.iter().any(|operation| {
@@ -451,6 +452,7 @@ pub fn validate_descriptor(
                             | Operation::OrdinarySend
                             | Operation::StartupBypassAck
                             | Operation::SessionInspect
+                            | Operation::ToolInspect
                             | Operation::InWindowBranch
                             | Operation::Stop
                             | Operation::Shutdown
@@ -544,6 +546,7 @@ pub fn validate_descriptor(
             | Operation::OrdinarySend
             | Operation::StartupBypassAck
             | Operation::SessionInspect
+            | Operation::ToolInspect
             | Operation::InWindowBranch
     ) || (matches!(
         operation,

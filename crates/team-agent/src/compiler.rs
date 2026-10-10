@@ -42,10 +42,16 @@ pub struct IgnoredTeamField {
 pub fn read_front_matter(path: &Path) -> Result<(Value, String), ModelError> {
     let text = fs::read_to_string(path)
         .map_err(|e| ModelError::Runtime(format!("{}: {e}", path.display())))?;
+    Ok(split_front_matter(&text))
+}
+
+/// Parse the same captured bytes that a prompt receipt hashes; the existing
+/// path-based compiler keeps its original normalization/plain-text fallback.
+pub(crate) fn split_front_matter(text: &str) -> (Value, String) {
     let text = text.replace("\r\n", "\n").replace('\r', "\n");
     let empty_meta = || Value::Map(Vec::new());
     let Some(rest) = text.strip_prefix("---\n") else {
-        return Ok((empty_meta(), text));
+        return (empty_meta(), text);
     };
 
     let mut offset = 0;
@@ -58,7 +64,7 @@ pub fn read_front_matter(path: &Path) -> Result<(Value, String), ModelError> {
         offset += line.len();
     }
     let Some(close) = close else {
-        return Ok((empty_meta(), text));
+        return (empty_meta(), text);
     };
     let raw_meta = &rest[..close];
     let meta = if raw_meta.trim().is_empty() {
@@ -66,11 +72,11 @@ pub fn read_front_matter(path: &Path) -> Result<(Value, String), ModelError> {
     } else {
         match yaml::loads(raw_meta) {
             Ok(meta) if meta.is_map() => meta,
-            _ => return Ok((empty_meta(), text)),
+            _ => return (empty_meta(), text),
         }
     };
     let after_marker = &rest[close + 3..];
-    Ok((meta, after_marker.trim_start_matches('\n').to_string()))
+    (meta, after_marker.trim_start_matches('\n').to_string())
 }
 
 pub fn ignored_owner_team_id_from_team_md(
@@ -489,6 +495,17 @@ fn compile_role_agent_with_mode(
         .filter(|provider| !provider.trim().is_empty())
         .unwrap_or_else(|| "pi".to_string());
     let is_pi = parse_canonical_provider(&provider) == Some(Provider::Pi);
+    #[cfg(unix)]
+    let contract = crate::contract_runtime::registry::descriptor(&provider);
+    #[cfg(unix)]
+    let contract_role = contract.is_some();
+    #[cfg(not(unix))]
+    let contract_role = false;
+    #[cfg(unix)]
+    let skip_team_effort =
+        contract.is_some_and(|descriptor| !descriptor.effort.inherit_team_default);
+    #[cfg(not(unix))]
+    let skip_team_effort = false;
     validate_pi_role_fields(&meta, role_path, &provider)?;
     let model = string_field(&meta, "model")
         .filter(|value| !value.trim().is_empty())
@@ -567,7 +584,7 @@ fn compile_role_agent_with_mode(
         Some(raw) if !raw.trim().is_empty() => ProviderEffort::parse(raw.trim()),
         _ => None,
     };
-    let resolved_effort = if is_pi {
+    let resolved_effort = if is_pi || skip_team_effort {
         role_effort
     } else {
         role_effort.or(team_effort)
@@ -582,13 +599,30 @@ fn compile_role_agent_with_mode(
                 _ => None,
             })
             .unwrap_or("");
-        let provider_enum = parse_canonical_provider(provider_str).unwrap_or(Provider::Codex);
-        if let Err(reason) = effort.resolve_for_provider(provider_enum) {
-            return Err(ModelError::Validation(format!(
-                "{}: {reason} (effort: {}; provider: {provider_str})",
-                role_path.display(),
-                effort.as_str()
-            )));
+        #[cfg(unix)]
+        if let Some(descriptor) = contract {
+            use team_agent_contract::contract::descriptor::{Effort, EffortAdmission};
+            let native_effort = Effort::parse(effort.as_str())
+                .map_err(|error| ModelError::Validation(error.to_string()))?;
+            if let EffortAdmission::Reject(reason) =
+                descriptor.effort.admission[native_effort.index()]
+            {
+                return Err(ModelError::Validation(format!(
+                    "{}: {}",
+                    role_path.display(),
+                    reason.message
+                )));
+            }
+        }
+        if !contract_role {
+            let provider_enum = parse_canonical_provider(provider_str).unwrap_or(Provider::Codex);
+            if let Err(reason) = effort.resolve_for_provider(provider_enum) {
+                return Err(ModelError::Validation(format!(
+                    "{}: {reason} (effort: {}; provider: {provider_str})",
+                    role_path.display(),
+                    effort.as_str()
+                )));
+            }
         }
         agent_items.push(("effort", Value::Str(effort.as_str().to_string())));
     }
@@ -712,12 +746,17 @@ mod pi_preflight_tests {
 
     #[test]
     fn omitted_qualified_and_non_pi_do_not_discover() {
-        for meta in [role("pi", None), role("pi", Some("openai/gpt-5")), role("codex", Some("gpt-5"))] {
+        for meta in [
+            role("pi", None),
+            role("pi", Some("openai/gpt-5")),
+            role("codex", Some("gpt-5")),
+        ] {
             let calls = Cell::new(0);
             assert!(preflight_pi_role_model_with(&meta, |_| {
                 calls.set(calls.get() + 1);
                 Ok(vec![])
-            }).is_ok());
+            })
+            .is_ok());
             assert_eq!(calls.get(), 0);
         }
     }
@@ -728,12 +767,21 @@ mod pi_preflight_tests {
         let error = preflight_pi_role_model_with(&role("pi", Some("gpt-5.6-sol")), |requested| {
             calls.set(calls.get() + 1);
             assert_eq!(requested, "gpt-5.6-sol");
-            Ok(vec!["openai-codex/gpt-5.6-sol".into(), "azure/gpt-5.6-sol".into()])
-        }).expect_err("unqualified model must fail closed");
+            Ok(vec![
+                "openai-codex/gpt-5.6-sol".into(),
+                "azure/gpt-5.6-sol".into(),
+            ])
+        })
+        .expect_err("unqualified model must fail closed");
         assert_eq!(calls.get(), 1);
-        assert_eq!(error.candidates, vec!["openai-codex/gpt-5.6-sol", "azure/gpt-5.6-sol"]);
+        assert_eq!(
+            error.candidates,
+            vec!["openai-codex/gpt-5.6-sol", "azure/gpt-5.6-sol"]
+        );
         assert!(!error.not_ready);
-        assert!(error.action.contains("team-agent models --provider pi --search gpt-5.6-sol"));
+        assert!(error
+            .action
+            .contains("team-agent models --provider pi --search gpt-5.6-sol"));
     }
 
     #[test]

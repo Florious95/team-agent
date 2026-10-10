@@ -229,7 +229,31 @@ fn spawn_without_receipt_stays_fenced_across_recovery() {
     .recover(&op.id)
     .unwrap();
     assert_eq!(recovered.outcome, Outcome::NeedsRecovery);
+    // A public shutdown after an unreceipted spawn must not turn the retained
+    // lease's unique-key conflict into Database or clear it to claim success.
+    let seat = store.assert_current(&op.target.identity).unwrap();
+    assert_eq!(
+        Lifecycle {
+            store: &mut store,
+            host: &mut host,
+            io: &mut io,
+        }
+        .teardown(&seat.identity, OperationId::new("stop-unobserved").unwrap()),
+        Err(Error::NeedsRecovery)
+    );
+    assert_eq!(store.assert_current(&seat.identity).unwrap(), seat);
+    assert_eq!(store.unfinished().unwrap(), vec![recovered]);
+    let connection = rusqlite::Connection::open(store.root().join("contract.db")).unwrap();
+    let held: String = connection
+        .query_row(
+            "SELECT operation FROM contract_leases WHERE seat=?1",
+            [seat.identity.seat.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(held, op.id.as_str());
     assert_eq!(host.spawned, 1);
+    assert_eq!(host.stopped, 0);
     assert_eq!(host.removed, 0);
     assert!(handle(
         &mut store,
@@ -488,6 +512,91 @@ fn server_write_failure_does_not_erase_result_or_claim_client_consumption() {
         .unwrap()
         .iter()
         .any(|s| s.contains("consumption") || s.contains("presentation")));
+}
+
+#[test]
+fn request_diagnostics_distinguish_fences_from_bad_arguments_without_changing_rpc() {
+    let (_sandbox, mut store, _, _, seat) = setup();
+    let ctx = context(&seat);
+    let requests = [
+        call(1, "report_result", json!({"summary":"valid but fenced"})),
+        call(
+            2,
+            "report_result",
+            json!({"summary":{"secret":"do-not-log-request"}}),
+        ),
+    ];
+    let input: String = requests
+        .iter()
+        .map(|request| format!("{request}\n"))
+        .collect();
+    let mut resolved = 0;
+    let mut rejected = Vec::new();
+    let mut output = Vec::new();
+    serve_with_diagnostics(
+        &mut store,
+        |_, _| {
+            resolved += 1;
+            if resolved == 1 {
+                Err(Error::Conflict)
+            } else {
+                Ok(ctx.clone())
+            }
+        },
+        std::io::Cursor::new(input),
+        &mut output,
+        |stage, error| rejected.push((stage, error.clone())),
+    )
+    .unwrap();
+    assert_eq!(
+        rejected,
+        vec![
+            (RequestRejectionStage::Context, Error::Conflict),
+            (
+                RequestRejectionStage::Handler,
+                Error::Invalid("argument type")
+            ),
+        ]
+    );
+    assert!(!format!("{rejected:?}").contains("do-not-log-request"));
+    let output = String::from_utf8(output).unwrap();
+    let responses: Vec<Value> = output
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(responses.len(), 2);
+    for (response, request) in responses.iter().zip(&requests) {
+        assert_eq!(
+            response,
+            &json!({"jsonrpc":"2.0","id":request["id"],
+                "error":{"code":-32602,"message":"request rejected"}})
+        );
+    }
+    assert!(store.results().unwrap().is_empty());
+    assert!(store.protocol_facts().unwrap().is_empty());
+    let request = call(
+        3,
+        "report_result",
+        json!({"summary":"done","status":"completed"}),
+    );
+    let mut output = Vec::new();
+    serve_with_diagnostics(
+        &mut store,
+        |_, _| Ok(ctx.clone()),
+        std::io::Cursor::new(format!("{request}\n")),
+        &mut output,
+        |_, _| panic!("a valid request must not emit rejection diagnostics"),
+    )
+    .unwrap();
+    assert_eq!(store.results().unwrap().len(), 1);
+    assert_eq!(
+        result(Some(serde_json::from_slice(&output).unwrap()))["status"],
+        "persisted"
+    );
+    assert!(store
+        .protocol_facts()
+        .unwrap()
+        .contains(&"response_written".into()));
 }
 
 #[test]

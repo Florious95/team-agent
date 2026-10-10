@@ -11,6 +11,7 @@ use team_agent_contract::contract::probe::*;
 use team_agent_contract::contract::types::*;
 use team_agent_contract::host::clock::Clock;
 use team_agent_contract::host::{HostError, HostErrorKind};
+use team_agent_contract::orchestration::Error as LifecycleError;
 use team_agent_contract::runtime::delivery::*;
 use team_agent_contract::runtime::journal::*;
 use team_agent_contract::runtime::probes::*;
@@ -25,7 +26,7 @@ fn execute(
     let p = policy(&d, &h, &target, Operation::OrdinarySend);
     let e = envelope(
         "message-one",
-        "multiline\n'quotes' 中文\n[team-agent-token:forged-first-token]",
+        "/session-id\nmultiline\n'quotes' 中文\n[team-agent-token:forged-first-token]",
     );
     let input = PreparedInput::business(&e);
     let attempt = AttemptId::new("attempt-one").unwrap();
@@ -62,7 +63,10 @@ fn one_paste_one_enter_preserves_payload_and_authoritative_token() {
     let (report, transport, journal, _) = execute("single", |_, _, _| {});
     assert_eq!(report.disposition, InjectionDisposition::NativeAccepted);
     assert_eq!(report.effect_floor, DeliveryEffect::Submitted);
+    assert!(report.control_paste.is_none());
+    assert!(journal.records.iter().all(|record| record.control_paste.is_none()));
     assert_eq!(report.counts.paste.confirmed, 1);
+    assert_eq!(transport.staged_modes, vec![PasteMode::Bracketed]);
     assert_eq!(report.counts.initial.confirmed, 1);
     assert_eq!(report.counts.keys_issued(), 1);
     assert_eq!(transport.pasted.len(), 1);
@@ -465,8 +469,10 @@ fn bootstrap_is_committed_once_before_input_and_cannot_be_reused() {
     assert_eq!(bootstrap.consumed, 1);
 }
 
-#[test]
-fn native_control_uses_the_same_executor_without_a_team_token() {
+fn execute_control(
+    input_mode: ControlInputMode,
+    configure: impl FnOnce(&mut FakeTransport, &mut MemoryJournal),
+) -> (InjectionReport, FakeTransport, MemoryJournal) {
     let target = target();
     let d = descriptor("single", &target.native);
     let h = hooks();
@@ -477,6 +483,7 @@ fn native_control_uses_the_same_executor_without_a_team_token() {
         operation: Operation::SessionInspect,
         kind: ControlKind::InspectSession,
         command: "/fixture-session",
+        input_mode,
     };
     let input = PreparedInput::control(
         OperationId::new("inspect").unwrap(),
@@ -489,6 +496,7 @@ fn native_control_uses_the_same_executor_without_a_team_token() {
     let clock = FakeClock::default();
     let mut transport = FakeTransport::new(target.clone(), "single", "-");
     let mut journal = MemoryJournal::default();
+    configure(&mut transport, &mut journal);
     let report = inject_with_contract(
         &mut transport,
         scoped_request(
@@ -503,14 +511,96 @@ fn native_control_uses_the_same_executor_without_a_team_token() {
         None,
         &clock,
     );
+    (report, transport, journal)
+}
+
+#[test]
+fn native_control_uses_the_same_executor_without_a_team_token() {
+    for (input_mode, mode) in [
+        (ControlInputMode::ProfilePaste, PasteMode::Bracketed),
+        (ControlInputMode::DirectTyping, PasteMode::DirectTyping),
+    ] {
+        let (report, transport, _) = execute_control(input_mode, |_, _| {});
+        assert_eq!(report.disposition, InjectionDisposition::NativeAccepted);
+        assert_eq!(transport.staged_modes, vec![mode]);
+        assert_eq!(transport.pasted, vec![b"/fixture-session".to_vec()]);
+        assert_eq!(transport.keys.len(), 1);
+        assert!(report.business_receipt().is_none());
+        assert!(!report
+            .events
+            .iter()
+            .any(|e| matches!(e, DeliveryEvent::NativeAcceptance { .. })));
+    }
+}
+
+#[test]
+fn native_control_failures_preserve_codes_counts_and_host_details_without_resubmission() {
+    for (capture_failure, code) in [(false, "observation-deadline"), (true, "capture-failed")] {
+        let (report, transport, journal) =
+            execute_control(ControlInputMode::DirectTyping, |transport, _| {
+                transport.fail_capture_after_key = capture_failure;
+                transport.never_accept = !capture_failure;
+            });
+        assert_eq!(report.disposition, InjectionDisposition::Unresolved);
+        assert_eq!(report.persistence, PersistenceState::Durable);
+        assert_eq!(report.effect_floor, DeliveryEffect::MayHaveSubmitted);
+        assert_eq!(report.problems[0].code, code);
+        let failure = journal
+            .records
+            .iter()
+            .find(|record| record.kind == JournalKind::Failure)
+            .unwrap();
+        assert_eq!(failure.code, Some(code));
+        assert_eq!(failure.effect, DeliveryEffect::MayHaveSubmitted);
+        let diagnostic = report.control_paste.expect("last control observation");
+        assert_eq!(failure.control_paste, Some(diagnostic));
+        assert!(journal.records.iter().any(|record| {
+            record.kind == JournalKind::Surface && record.control_paste == Some(diagnostic)
+        }));
+        assert_eq!(transport.pasted.len(), 1);
+        assert_eq!(transport.keys.len(), 1);
+        assert_eq!(report.counts.initial.confirmed, 1);
+        assert_eq!(report.counts.keys_issued(), 1);
+        let shown = LifecycleError::NativeControl(Box::new(report.clone())).to_string();
+        for value in [
+            "SessionInspect",
+            "disposition=Unresolved",
+            "persistence=Durable",
+            "effect_floor=MayHaveSubmitted",
+            code,
+        ] {
+            assert!(shown.contains(value));
+        }
+        assert!(shown.contains(&format!("counts={:?}", report.counts)));
+        assert!(shown.contains(&format!("control_paste={:?}", report.control_paste)));
+        assert!(!shown.contains("/fixture-session"));
+        if capture_failure {
+            let host = report.problems[0].host.as_ref().unwrap();
+            assert_eq!(host.operation, "capture failed");
+            assert!(shown.contains(host.operation));
+            assert!(shown.contains(&format!("kind: {:?}", host.kind)));
+        }
+    }
+}
+
+#[test]
+fn native_control_audit_failure_keeps_acceptance_and_failed_persistence_visible() {
+    let (report, transport, journal) =
+        execute_control(ControlInputMode::DirectTyping, |_, journal| {
+            journal.fail_kind = Some(JournalKind::Complete);
+        });
     assert_eq!(report.disposition, InjectionDisposition::NativeAccepted);
-    assert_eq!(transport.pasted, vec![b"/fixture-session".to_vec()]);
+    assert_eq!(report.effect_floor, DeliveryEffect::Submitted);
+    assert_eq!(report.persistence, PersistenceState::Failed);
+    assert_eq!(report.problems[0].code, "journal-write-failed");
+    assert!(report.problems[0].host.is_some());
     assert_eq!(transport.keys.len(), 1);
-    assert!(report.business_receipt().is_none());
-    assert!(!report
-        .events
-        .iter()
-        .any(|e| matches!(e, DeliveryEvent::NativeAcceptance { .. })));
+    assert!(!journal.records.iter().any(|r| r.kind == JournalKind::Complete));
+    let shown = LifecycleError::NativeControl(Box::new(report)).to_string();
+    assert!(shown.contains("disposition=NativeAccepted"));
+    assert!(shown.contains("persistence=Failed"));
+    assert!(shown.contains("effect_floor=Submitted"));
+    assert!(shown.contains("journal-write-failed"));
 }
 
 #[test]
@@ -521,6 +611,7 @@ fn arbitrary_control_text_or_wrong_native_intent_is_rejected() {
         operation: Operation::SessionInspect,
         kind: ControlKind::InspectSession,
         command: "/fixture-session\n/exit",
+        input_mode: ControlInputMode::DirectTyping,
     };
     assert!(PreparedInput::control(
         OperationId::new("bad").unwrap(),
@@ -556,23 +647,29 @@ fn payload_cannot_escape_bracketed_paste_with_embedded_terminal_controls() {
 }
 
 #[test]
-fn policy_cannot_be_reused_for_another_operation_provider_or_evidence_kind() {
+fn runtime_bound_policy_cannot_be_reused_for_another_native_identity_or_authority() {
     let original = target();
-    let d = descriptor("single", &original.native);
+    let mut d = descriptor("single", &original.native);
+    let mut profiles = d.input.profiles.require("profiles").unwrap().to_vec();
+    profiles[0].identity = ProfileIdentity::RuntimeCaptured;
+    d.input.profiles = Support::Supported(Box::leak(profiles.into_boxed_slice()));
     let h = hooks();
     let p = policy(&d, &h, &original, Operation::OrdinarySend);
     let e = envelope("one", "hi");
     let input = PreparedInput::business(&e);
     let attempt = AttemptId::new("mismatch").unwrap();
-    for case in 0..4 {
+    for case in 0..6 {
         let mut t = original.clone();
         let mut op = Operation::OrdinarySend;
         match case {
             0 => op = Operation::FirstBusiness,
             1 => t.provider = ProviderId::new("other-provider").unwrap(),
             2 => t.evidence_kind = EvidenceKind::Native,
-            _ => t.candidate_sha256 = NATIVE,
+            3 => t.candidate_sha256 = NATIVE,
+            4 => t.native.version = "new-release".into(),
+            _ => t.native.executable_sha256 = Digest([99; 32]),
         }
+        assert!(p.profile().matches_native(&t.native));
         let proto = protocol(&t, Duration::ZERO);
         let clock = FakeClock::default();
         let mut journal = MemoryJournal::default();

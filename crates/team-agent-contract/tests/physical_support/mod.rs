@@ -165,11 +165,13 @@ pub fn descriptor(mode: &str, native: &NativeIdentity) -> ProviderDescriptor {
     let profiles = Box::leak(
         vec![InputProfile {
             id: "physical-fixture",
-            version: "fixture-1",
+            identity: ProfileIdentity::Exact {
+                version: "fixture-1",
+                executable_sha256: native.executable_sha256,
+            },
             harness: "fixture",
             ui: "controlled-tui",
             platform: native.platform,
-            executable_sha256: native.executable_sha256,
             policy_sha256: POLICY,
             operations: &[
                 Operation::FirstBusiness,
@@ -322,6 +324,22 @@ impl InteractionHook for FixtureHooks {
         } else {
             frame.paste_latch.clone()
         };
+        // Exercise diagnostic propagation using this fixture's READY/PASTED
+        // grammar, not a claim about any native provider's screen.
+        let control_paste = matches!(
+            frame.operation,
+            Operation::SessionInspect | Operation::ToolInspect
+        )
+        .then(|| ControlPasteDiagnostic {
+            after_step: frame.after_step,
+            baseline_has_expected: frame.baseline.as_ref().map(|_| false),
+            baseline_composer_empty: frame.baseline.as_ref().map(|b| b.text.starts_with("READY|")),
+            current_composer_has_expected: current && tag == "PASTED",
+            fresh: frame.baseline.as_ref().is_some_and(|b| b.text.starts_with("READY|")),
+            latch_seen: matches!(latch, PasteLatch::Seen { .. }),
+            latch_gone: matches!(latch, PasteLatch::Gone { .. }),
+            correlated: current && frame.attempt.is_some(),
+        });
         InteractionObservation {
             scope: frame.scope.clone(),
             surface,
@@ -329,6 +347,7 @@ impl InteractionHook for FixtureHooks {
             current_message: message,
             current_attempt: if current { frame.attempt.clone() } else { None },
             paste_latch: latch,
+            control_paste,
         }
     }
 }
@@ -564,6 +583,7 @@ pub struct FakeTransport {
     pub message: String,
     pub sequence: u64,
     pub buffer: Option<Vec<u8>>,
+    pub staged_modes: Vec<PasteMode>,
     pub pasted: Vec<Vec<u8>>,
     pub keys: Vec<PhysicalKey>,
     pub key_times: Vec<Duration>,
@@ -593,6 +613,7 @@ impl FakeTransport {
             message: message.into(),
             sequence: 0,
             buffer: None,
+            staged_modes: Vec::new(),
             pasted: Vec::new(),
             keys: Vec::new(),
             key_times: Vec::new(),
@@ -707,10 +728,11 @@ impl PhysicalTransport for FakeTransport {
         _: &TargetReceipt,
         _: &str,
         bytes: &[u8],
-        _: PasteMode,
+        mode: PasteMode,
         _: &dyn Clock,
         _: Duration,
     ) -> ActionResult {
+        self.staged_modes.push(mode);
         self.buffer = Some(bytes.to_vec());
         ActionResult::confirmed()
     }

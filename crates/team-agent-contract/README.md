@@ -47,7 +47,8 @@ Full snapshot 的目标 SID/path 由框架预分配。`ExpectedSession::Snapshot
 - Probe 的 Observed/Pending/Negative/Unknown/Unsupported/TimedOut/Error 保留区别；没有由一个层级隐式转换成另一层的 API。
 - 业务 gate 要求当前 T1、确切 composer、当前 tool binding；K2 的组合 startup gate 还须应用 profile 所需 server/startup 门与当前反证，不能丢弃未传给此函数的分层事实。显式的一次 FirstBusiness bootstrap 只豁免 Pending/Unknown binding；不能绕过 process/composer/freshness 失败。返回 `consume_bootstrap` 是状态持久化方的责任，不会在纯函数里消费或自动续发。
 - T3c 不参与首条消息输入 gate，避免等待自己的回复。server invocation、response write、client consumption、caller presentation 是不同 facts，不能以排序自动推导。
-- `CapabilityEvidence` 是外部证据的 scoped reference，不是这个 library 签发的真实性证明。policy resolver 检查版本/engine/UI/OS/binary/profile/candidate/operation/channel/evidence kind 的一致性；它不读取证据文件，也不能把 fixture 变成 native 验收。
+- `InputProfile.identity` 区分 `Exact`（固定受控 fixture）和 `RuntimeCaptured`（常青客户端的稳定 UI recipe）。Kiro 采用后者，不以历史发行版版本/SHA 作为准入白名单；每代捕获真实 native version/hash。`ResolvedSubmitPolicy` 保留该完整身份，executor 在任何输入前与当前 target 精确比较，不能借通用 recipe 复用旧二进制的 policy。
+- `CapabilityEvidence` 是外部证据的 scoped reference，不是这个 library 签发的真实性证明。policy resolver 检查版本/engine/UI/OS/binary/profile/candidate/operation/channel/evidence kind 的一致性；它不读取证据文件，也不能把 fixture 变成 native 验收。运行时 recipe 绑定记录不是历史 R0 收据，也不是原生业务/MCP PASS。
 
 ### 后续 owner 的硬边界
 

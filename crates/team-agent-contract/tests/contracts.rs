@@ -33,11 +33,13 @@ static QUEUE_ACTIONS: [QueueAction; 1] = [QueueAction {
 }];
 static PROFILES: [InputProfile; 1] = [InputProfile {
     id: "fixture-tui",
-    version: "1.0",
+    identity: ProfileIdentity::Exact {
+        version: "1.0",
+        executable_sha256: HASH,
+    },
     harness: "fixture-engine",
     ui: "fixture-ui",
     platform: Platform::Linux,
-    executable_sha256: HASH,
     policy_sha256: POLICY_HASH,
     operations: &[
         Operation::FirstBusiness,
@@ -299,6 +301,7 @@ impl InteractionHook for Fixture {
             current_message: frame.message.clone(),
             current_attempt: frame.attempt.clone(),
             paste_latch: frame.paste_latch.clone(),
+            control_paste: None,
         }
     }
 }
