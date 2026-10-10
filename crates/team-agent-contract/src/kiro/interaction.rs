@@ -73,14 +73,17 @@ pub static TOOL_PANEL: crate::runtime::native_panel::NativePanelPolicy =
 /// The R0 native table has Name / Source / Status / Description columns. Only
 /// tools in the exact bound server column count; descriptions and builtin names
 /// cannot establish registry membership. Missing/scrolled-off rows stay unknown.
+/// R10's non-scrolling panel omits the scroll hint from its footer.
 pub fn registry_tools(text: &str, server: &str) -> Option<Vec<LogicalTool>> {
     if composer(text).is_some()
         || !text.lines().any(|line| {
             line.split_whitespace().collect::<Vec<_>>()
                 == ["Name", "Source", "Status", "Description"]
         })
-        || text.lines().map(str::trim).rfind(|line| !line.is_empty())
-            != Some("esc to close · ↑↓ to scroll")
+        || !matches!(
+            text.lines().map(str::trim).rfind(|line| !line.is_empty()),
+            Some("esc to close" | "esc to close · ↑↓ to scroll")
+        )
     {
         return None;
     }

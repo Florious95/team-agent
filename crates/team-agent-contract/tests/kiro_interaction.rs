@@ -1,4 +1,4 @@
-//! Grammar/recipe regression fixtures derived from R0 shapes. These tests do
+//! Grammar/recipe regression fixtures derived from R0/R10 shapes. These tests do
 //! not launch Kiro, consume credits, or claim candidate/native MCP acceptance.
 use std::time::Duration;
 use team_agent_contract::contract::{delivery::*, hooks::*, probe::*, session::*, types::*};
@@ -226,4 +226,100 @@ fn mock_two_tool_registration_does_not_claim_three_tool_team_binding() {
     )
     .is_none());
     assert!(registry_tools(&format!("{team}\n{READY}"), "team").is_none());
+}
+
+// Relevant rows from R10's 120x40 /tools panel; unrelated builtin rows omitted.
+const R10_TEAM_TABLE: &str = concat!(
+    " Name             Source      Status                Description\n",
+    " get_team_status  mcp:team    ● allowed             Return machine-readable team status.\n",
+    " report_result    mcp:team    ● allowed             Report task completion.\n",
+    " send_message     mcp:team    ● allowed             Send a message.\n",
+);
+
+#[test]
+fn both_observed_footers_preserve_header_source_and_complete_tool_requirements() {
+    for footer in ["esc to close", "esc to close · ↑↓ to scroll"] {
+        let panel = format!("{R10_TEAM_TABLE} {footer}\n\n");
+        let tools = registry_tools(&panel, "team").unwrap();
+        assert_eq!(tools.len(), TEAM_TOOLS.len());
+        assert!(TEAM_TOOLS.iter().all(|tool| tools.contains(tool)));
+        assert_eq!(
+            adapter().interpret(&frame(&panel)).predicate.as_deref(),
+            Some("kiro-team-tools-bound")
+        );
+        for invalid in [
+            panel.replace("Name", "Other"),
+            panel.replace(footer, "esc to close · unverified hint"),
+            panel.replace(footer, "prefix esc to close"),
+            panel.replace(footer, ""),
+            format!("{panel}{READY}"),
+            format!("{panel}unrelated last line"),
+        ] {
+            assert!(registry_tools(&invalid, "team").is_none());
+        }
+        for incomplete in [
+            panel.replace("mcp:team", "mcp:team-other"),
+            panel.replace("mcp:team", "built-in"),
+            panel.replace("get_team_status", "send_message"),
+        ] {
+            let tools = registry_tools(&incomplete, "team").unwrap();
+            assert!(!TEAM_TOOLS.iter().all(|tool| tools.contains(tool)));
+            assert_eq!(
+                adapter().interpret(&frame(&incomplete)).predicate.as_deref(),
+                Some("kiro-tools-panel")
+            );
+        }
+    }
+}
+
+#[test]
+fn tool_panel_acceptance_requires_current_typed_control_and_enter_for_both_footers() {
+    let adapter = adapter();
+    for footer in ["esc to close", "esc to close · ↑↓ to scroll"] {
+        let mut capture = frame("› /tools");
+        capture.operation = Operation::ToolInspect;
+        capture.attempt = Some(AttemptId::new("tools-control").unwrap());
+        capture.baseline = Some(CaptureBaseline {
+            scope: scope(),
+            text: READY.into(),
+        });
+        capture.after_step = Some(StepKind::Paste);
+        let typed = adapter.interpret(&capture);
+        assert_eq!(typed.surface, InputSurface::ComposerContainsPaste);
+        assert_eq!(
+            typed.paste_latch,
+            PasteLatch::Seen {
+                native_identity: "/tools".into()
+            }
+        );
+        capture.paste_latch = typed.paste_latch;
+        capture.text = format!("{R10_TEAM_TABLE} {footer}\n\n");
+        assert_ne!(
+            adapter.interpret(&capture).surface,
+            InputSurface::NativeAccepted
+        );
+        capture.after_step = Some(StepKind::InitialSubmit);
+        let accepted = adapter.interpret(&capture);
+        assert_eq!(accepted.surface, InputSurface::NativeAccepted);
+        assert_eq!(accepted.current_attempt, capture.attempt);
+        assert_eq!(accepted.predicate.as_deref(), Some("kiro-team-tools-bound"));
+        assert_eq!(
+            accepted.paste_latch,
+            PasteLatch::Gone {
+                native_identity: "/tools".into()
+            }
+        );
+        for unrelated in [
+            PasteLatch::NeverSeen,
+            PasteLatch::Seen {
+                native_identity: "/session-id".into(),
+            },
+        ] {
+            capture.paste_latch = unrelated;
+            assert_ne!(
+                adapter.interpret(&capture).surface,
+                InputSurface::NativeAccepted
+            );
+        }
+    }
 }
