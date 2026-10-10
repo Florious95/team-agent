@@ -4,7 +4,14 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use team_agent_contract::host::process::{capture_process, fingerprint_file, verify_native_ancestry};
+use team_agent_contract::host::process::{
+    capture_process, fingerprint_file, sample_process, verify_native_ancestry, ImageStamp,
+    ProcessStamp, ProcessState,
+};
+
+// Both tests capture this executable. Hard-link creation can change macOS's
+// reported vnode pathname, so do not race it with the other test's capture.
+static PROCESS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct ShellTree(Child);
 impl Drop for ShellTree {
@@ -18,7 +25,66 @@ impl Drop for ShellTree {
 }
 
 #[test]
+fn live_process_hard_link_alias_is_not_replacement_but_changed_identity_is() {
+    use std::os::unix::fs::MetadataExt;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let _serial = PROCESS_TEST_LOCK.lock().unwrap();
+    let budget = Duration::from_secs(10);
+    let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
+    let hash = fingerprint_file(&executable, 1024 * 1024 * 1024, budget).unwrap();
+    let original = capture_process(std::process::id(), &executable, hash, budget).unwrap();
+    // Sibling of the test executable: hard links must be on the same filesystem.
+    // Exclusive creation grants cleanup only of this test's directory.
+    let root = executable.parent().unwrap().join(format!(
+        ".tac-process-alias-{}-{}",
+        std::process::id(),
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let alias = root.join("captured-alias");
+    std::fs::hard_link(&executable, &alias).unwrap();
+    let mut aliased = original.clone();
+    aliased.identity.executable = alias;
+    // The kernel may choose either spelling; both name the same captured inode.
+    assert_eq!(sample_process(&original), ProcessState::Alive);
+    assert_eq!(sample_process(&aliased), ProcessState::Alive);
+
+    let copy = root.join("same-bytes-different-inode");
+    std::fs::copy(&executable, &copy).unwrap();
+    assert_eq!(fingerprint_file(&copy, 1024 * 1024 * 1024, budget).unwrap(), hash);
+    let metadata = std::fs::metadata(&copy).unwrap();
+    let mut copied = original.clone();
+    copied.identity.executable = copy;
+    copied.image = ImageStamp {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        length: metadata.len(),
+        modified_ns: i128::from(metadata.mtime()) * 1_000_000_000
+            + i128::from(metadata.mtime_nsec()),
+    };
+    assert_ne!(copied.image.inode, original.image.inode);
+    assert_eq!(sample_process(&copied), ProcessState::Replaced);
+
+    let changes: [fn(&mut ProcessStamp); 6] = [
+        |stamp| stamp.parent ^= 1,
+        |stamp| stamp.identity.birth_identity.push_str("-reused"),
+        |stamp| stamp.image.device ^= 1,
+        |stamp| stamp.image.inode ^= 1,
+        |stamp| stamp.image.length ^= 1,
+        |stamp| stamp.image.modified_ns += 1,
+    ];
+    for change in changes {
+        let mut changed = aliased.clone();
+        change(&mut changed);
+        assert_eq!(sample_process(&changed), ProcessState::Replaced);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn live_direct_and_two_helper_children_pass_but_deeper_or_replaced_subjects_do_not() {
+    let _serial = PROCESS_TEST_LOCK.lock().unwrap();
     let budget = Duration::from_secs(10);
     let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
     let hash = fingerprint_file(&executable, 1024 * 1024 * 1024, budget).unwrap();

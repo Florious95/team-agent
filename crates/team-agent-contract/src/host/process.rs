@@ -438,16 +438,16 @@ pub fn sample_process(expected: &ProcessStamp) -> ProcessState {
         }
         Err(error) => return ProcessState::Unknown(error),
     };
-    let (parent, birth, path, image_path, exited) = parts;
+    let (parent, birth, _path, image_path, exited) = parts;
     if exited {
         return ProcessState::Exited;
     }
-    if parent != expected.parent
-        || birth != expected.identity.birth_identity
-        || path != expected.identity.executable
-    {
+    if parent != expected.parent || birth != expected.identity.birth_identity {
         return ProcessState::Replaced;
     }
+    // proc_pidpath may report another hard link to the same live executable.
+    // Path spelling is not image identity: the sampled image must still match
+    // every recorded stamp field below (device/inode/length/modified_ns).
     #[cfg(not(unix))]
     {
         let _ = image_path;
