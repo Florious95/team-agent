@@ -10,7 +10,7 @@ use std::time::Duration;
 use team_agent_contract::contract::{delivery::InputSurface, probe::*, types::*};
 use team_agent_contract::host::{
     clock::{Clock, RealClock},
-    process::{sample_process, ProcessState},
+    process::verify_native_ancestry,
 };
 use team_agent_contract::kiro::{interaction, KIRO_DESCRIPTOR};
 use team_agent_contract::orchestration::{physical::*, store::*, supervisor::*};
@@ -29,8 +29,7 @@ fn protocol(
         .filter(|record| {
             !record.closed
                 && record.native_process == target.process
-                && sample_process(&record.process) == ProcessState::Alive
-                && sample_process(&record.native_process) == ProcessState::Alive
+                && verify_native_ancestry(&record.process, &record.native_process).is_ok()
         })
         .collect();
     if active.len() != 1 {

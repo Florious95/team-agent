@@ -1,5 +1,6 @@
 //! Captured native stdio connections. A row is not liveness or discovery:
-//! producers/consumers must freshly sample both process stamps before use.
+//! producers/consumers must freshly verify the captured processes and bounded
+//! native ancestry before use; a previously accepted chain is not cached authority.
 use rusqlite::{params, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
@@ -8,7 +9,7 @@ use super::{
     Error,
 };
 use crate::contract::types::*;
-use crate::host::process::ProcessStamp;
+use crate::host::process::{verify_native_ancestry, ProcessStamp};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectionRecord {
@@ -39,9 +40,9 @@ impl ContractStore {
             || record.server_key != seat.server_key
             || record.binding_key != seat.binding_key
             || record.native_process != target.process
-            || record.process.parent != target.process.identity.pid
             || record.process.identity.pid == target.process.identity.pid
             || record.process.identity.executable_sha256 != target.candidate_sha256
+            || verify_native_ancestry(&record.process, &target.process).is_err()
         {
             return Err(Error::Fence);
         }

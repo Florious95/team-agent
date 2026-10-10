@@ -54,7 +54,11 @@ Each native instance receives an exclusively created `.kiro/agents/<owned-name>.
 
 ## MCP evidence and return path
 
-The stdio child must match the captured candidate binary, process birth, native parent, scope, instance, and generation. Tool arguments cannot set sender, task, owner team, or transport identity.
+The stdio child must match the captured candidate binary, process birth, native ancestry, scope, instance, and generation. Tool arguments cannot set sender, task, owner team, or transport identity.
+
+Native ancestry permits at most **three parent edges** (two intermediary helpers). Both captured endpoint processes must remain alive with the same birth/image/parent; intermediary birth, parent and executable path are sampled during the bounded walk and rechecked in reverse. Missing, exited, replaced, cyclic, deeper or unreadable chains fail closed. This is not an executable-name allowlist or permission to adopt an arbitrary Kiro process.
+
+Entry, connection registration, every MCP call context, and coordinator protocol sampling use the same live verifier; a persisted connection is never a cached ancestry grant. No store-schema migration or rewrite of native/candidate identity is needed. `contract.mcp` diagnostics distinguish `direct_parent_matches` from the verified `ancestor_chain` / `max_parent_hops`; diagnostics are not T3 protocol facts.
 
 T1 (native process), T2 (current composer), and T3 remain distinct:
 

@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use team_agent_contract::contract::types::*;
-use team_agent_contract::host::process::{capture_process, sample_process, ProcessState};
+use team_agent_contract::host::process::{
+    capture_process, verify_native_ancestry, MAX_NATIVE_PARENT_HOPS,
+};
 use team_agent_contract::orchestration::{
     mcp::*,
     protocol::ConnectionRecord,
@@ -200,28 +202,21 @@ fn run_observed(args: &[String], diagnostics: &mut Diagnostics) -> Result<(), Ba
         )
     })?;
     diagnostics.fields["captured_ppid"] = json!(process.parent);
-    // Preserve the existing short-circuit and direct-parent fence. Diagnostic
-    // PPID fields do not confer authority or trigger an ancestor scan.
-    let parent_matches = process.parent == target.process.identity.pid;
-    diagnostics.fields["parent_matches"] = json!(parent_matches);
-    let native = parent_matches.then(|| sample_process(&target.process));
-    diagnostics.fields["native_process_state"] = json!(match native.as_ref() {
-        None => "not_sampled_parent_mismatch",
-        Some(ProcessState::Alive) => "alive",
-        Some(ProcessState::Exited) => "exited",
-        Some(ProcessState::Replaced) => "replaced",
-        Some(ProcessState::Unknown(_)) => "unknown",
-    });
-    if let Some(ProcessState::Unknown(error)) = &native {
-        diagnostics.emit("native_process_sample", "error", Some(error));
+    diagnostics.fields["direct_parent_matches"] =
+        json!(process.parent == target.process.identity.pid);
+    diagnostics.fields["max_parent_hops"] = json!(MAX_NATIVE_PARENT_HOPS);
+    diagnostics.emit("parent_fence", "started", None);
+    let ancestry = verify_native_ancestry(&process, &target.process);
+    diagnostics.fields["parent_matches"] = json!(ancestry.is_ok());
+    if let Ok(chain) = &ancestry {
+        diagnostics.fields["ancestor_chain"] = json!(chain);
     }
-    diagnostics.step("parent_fence", || {
-        if !parent_matches || native != Some(ProcessState::Alive) {
-            Err(Error::Fence)
-        } else {
-            Ok(())
-        }
-    })?;
+    diagnostics.emit(
+        "parent_fence",
+        if ancestry.is_ok() { "ok" } else { "error" },
+        ancestry.as_ref().err().map(|error| error as &dyn Display),
+    );
+    ancestry?;
     let connection = diagnostics
         .step("connection_identity", || {
             backend.store.propose_identity(&identity.seat)
@@ -245,9 +240,7 @@ fn run_observed(args: &[String], diagnostics: &mut Diagnostics) -> Result<(), Ba
         serve_with_context(
             &mut backend.store,
             |store, request| {
-                if sample_process(&record.process) != ProcessState::Alive
-                    || sample_process(&record.native_process) != ProcessState::Alive
-                {
+                if verify_native_ancestry(&record.process, &record.native_process).is_err() {
                     return Err(Error::Fence);
                 }
                 let current = store.assert_current(&identity)?;
@@ -281,9 +274,7 @@ fn run_observed(args: &[String], diagnostics: &mut Diagnostics) -> Result<(), Ba
                         }
                     }
                 }
-                if sample_process(&record.process) != ProcessState::Alive
-                    || sample_process(&record.native_process) != ProcessState::Alive
-                {
+                if verify_native_ancestry(&record.process, &record.native_process).is_err() {
                     return Err(Error::Fence);
                 }
                 Ok(CallContext {
