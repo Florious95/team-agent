@@ -272,6 +272,26 @@ pub struct CloseReceipt {
     pub socket_preserved: bool,
 }
 
+/// After a close may have executed, observe only: reparenting/exit races do not
+/// grant authority for another action, nor prove exit. Keep the original budget.
+fn observe_native_exit(
+    close_outcome: StepOutcome,
+    clock: &dyn Clock,
+    deadline: Duration,
+    poll_interval: Duration,
+    mut sample: impl FnMut() -> ProcessState,
+) -> ProcessState {
+    let mut native = sample();
+    while close_outcome != StepOutcome::NoEffect && native != ProcessState::Exited {
+        let Some(left) = remaining(clock, deadline) else {
+            break;
+        };
+        clock.sleep(poll_interval.min(left));
+        native = sample();
+    }
+    native
+}
+
 /// One host instance owns one private endpoint/generation. No default server or adoption.
 pub struct TmuxHost<R: CommandRunner> {
     directory: ScopedDirectory,
@@ -838,16 +858,13 @@ impl<R: CommandRunner> TmuxHost<R> {
                 },
             },
         };
-        let mut native = sample_process(&target.process);
-        if action.outcome != StepOutcome::NoEffect {
-            while native == ProcessState::Alive {
-                let Some(left) = remaining(clock, deadline) else {
-                    break;
-                };
-                clock.sleep(self.limits.poll_interval.min(left));
-                native = sample_process(&target.process);
-            }
-        }
+        let native = observe_native_exit(
+            action.outcome,
+            clock,
+            deadline,
+            self.limits.poll_interval,
+            || sample_process(&target.process),
+        );
         CloseReceipt {
             pane_close: action,
             native,
@@ -1210,6 +1227,88 @@ impl<R: CommandRunner> PhysicalTransport for TmuxHost<R> {
 #[cfg(test)]
 mod bound_process_tests {
     use super::*;
+
+    #[derive(Default)]
+    struct TestClock(std::cell::Cell<Duration>);
+    impl Clock for TestClock {
+        fn now(&self) -> Duration {
+            self.0.get()
+        }
+        fn sleep(&self, duration: Duration) {
+            self.0.set(self.0.get() + duration);
+        }
+    }
+
+    #[test]
+    fn close_observation_waits_through_transient_states_for_actual_exit() {
+        let clock = TestClock::default();
+        let mut sequence = [
+            ProcessState::Alive,
+            ProcessState::Replaced,
+            ProcessState::Unknown(HostError::new("process birth", HostErrorKind::Unknown)),
+            ProcessState::Exited,
+        ]
+        .into_iter();
+        let result = observe_native_exit(
+            StepOutcome::Confirmed,
+            &clock,
+            Duration::from_secs(30),
+            Duration::from_millis(100),
+            || sequence.next().expect("no sample after Exited"),
+        );
+        assert_eq!(result, ProcessState::Exited);
+        assert_eq!(clock.now(), Duration::from_millis(300));
+        assert!(sequence.next().is_none());
+    }
+
+    #[test]
+    fn close_observation_is_bounded_and_never_turns_nonexit_into_success() {
+        for state in [
+            ProcessState::Alive,
+            ProcessState::Replaced,
+            ProcessState::Unknown(HostError::new("process birth", HostErrorKind::Unknown)),
+        ] {
+            let clock = TestClock::default();
+            let mut samples = 0;
+            let result = observe_native_exit(
+                StepOutcome::Confirmed,
+                &clock,
+                Duration::from_millis(250),
+                Duration::from_millis(100),
+                || {
+                    samples += 1;
+                    state.clone()
+                },
+            );
+            assert_eq!(result, state);
+            assert_eq!(clock.now(), Duration::from_millis(250));
+            assert_eq!(samples, 4);
+        }
+    }
+
+    #[test]
+    fn refused_close_and_already_exited_do_not_start_a_wait_loop() {
+        for (outcome, state) in [
+            (StepOutcome::NoEffect, ProcessState::Alive),
+            (StepOutcome::Confirmed, ProcessState::Exited),
+        ] {
+            let clock = TestClock::default();
+            let mut samples = 0;
+            let result = observe_native_exit(
+                outcome,
+                &clock,
+                Duration::from_secs(30),
+                Duration::from_millis(100),
+                || {
+                    samples += 1;
+                    state.clone()
+                },
+            );
+            assert_eq!(result, state);
+            assert_eq!(clock.now(), Duration::ZERO);
+            assert_eq!(samples, 1);
+        }
+    }
 
     #[test]
     fn process_gate_preserves_each_state_and_probe_error_without_weakening_checks() {

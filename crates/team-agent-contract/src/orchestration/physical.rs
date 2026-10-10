@@ -16,7 +16,7 @@ use crate::host::{
     files::ScopedDirectory,
     materialize::remove_quiescent,
     process::{resolve_cwd, ProcessState},
-    tmux::{HostLimits, TmuxHost},
+    tmux::{CloseReceipt, HostLimits, TmuxHost},
     transport::*,
     HostError,
 };
@@ -51,6 +51,15 @@ fn host_error(error: HostError) -> Error {
         Error::HostDiagnostic(error)
     } else {
         Error::Host(error.operation)
+    }
+}
+fn confirm_close(receipt: CloseReceipt) -> Result<(), Error> {
+    if receipt.pane_close.outcome == StepOutcome::Confirmed
+        && receipt.native == ProcessState::Exited
+    {
+        Ok(())
+    } else {
+        Err(Error::NativeClose(Box::new(receipt)))
     }
 }
 impl<'a> PhysicalRuntime<'a> {
@@ -316,11 +325,7 @@ impl LifecycleHost for PhysicalRuntime<'_> {
         let deadline = self.deadline()?;
         let mut host = self.reopen(&target, deadline)?;
         let receipt = host.close_owned_pane(&target, self.clock, deadline);
-        if receipt.pane_close.outcome != StepOutcome::Confirmed
-            || receipt.native != ProcessState::Exited
-        {
-            return Err(Error::Host("owned native exit not observed"));
-        }
+        confirm_close(receipt)?;
         self.quiescent = Some(seat.clone());
         // Preserve endpoint, attempt journals and host diagnostics. Never kill-server,
         // unlink a socket, remove a shared cwd, or recurse over another instance.
@@ -509,11 +514,52 @@ impl DeliveryHost for PhysicalRuntime<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{host_error, Error};
+    use super::{confirm_close, host_error, CloseReceipt, Error, ProcessState, StepOutcome};
     use crate::host::{
         tmux::{parse_pane, PaneMetadataStage},
         HostError, HostErrorKind,
     };
+
+    #[test]
+    fn close_requires_both_confirmed_action_and_exit_and_preserves_failure_facts() {
+        for outcome in [
+            StepOutcome::Confirmed,
+            StepOutcome::NoEffect,
+            StepOutcome::MayHaveOccurred,
+        ] {
+            for native in [
+                ProcessState::Alive,
+                ProcessState::Exited,
+                ProcessState::Replaced,
+                ProcessState::Unknown(HostError::new("process birth", HostErrorKind::Unknown)),
+            ] {
+                let receipt = CloseReceipt {
+                    pane_close: crate::host::transport::ActionResult {
+                        outcome,
+                        error: (outcome != StepOutcome::Confirmed)
+                            .then(|| HostError::new("owned pane close", HostErrorKind::Command)),
+                    },
+                    native: native.clone(),
+                    socket_preserved: true,
+                };
+                let result = confirm_close(receipt.clone());
+                if outcome == StepOutcome::Confirmed && native == ProcessState::Exited {
+                    assert_eq!(result, Ok(()));
+                } else {
+                    let error = result.unwrap_err();
+                    assert_eq!(error, Error::NativeClose(Box::new(receipt)));
+                    let shown = error.to_string();
+                    assert!(shown.contains(&format!("pane_outcome={outcome:?}")));
+                    assert!(shown.contains(&format!("native={native:?}")));
+                    assert!(shown.contains("socket_preserved=true"));
+                    if outcome != StepOutcome::Confirmed {
+                        assert!(shown.contains("owned pane close"));
+                        assert!(shown.contains("Command"));
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn pane_metadata_diagnostics_survive_the_lifecycle_error_boundary() {

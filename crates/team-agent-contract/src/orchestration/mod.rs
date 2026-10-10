@@ -12,8 +12,8 @@ pub mod supervisor;
 use crate::contract::types::ContractError;
 
 /// Errors exclude SQL values, prompt/config bytes and native screen captures.
-/// HostDiagnostic preserves only bounded, escaped tmux metadata diagnostics.
-/// NativeControl renders execution facts and problem codes, never input/capture bytes.
+/// HostDiagnostic preserves bounded metadata and identity-only probe diagnostics.
+/// NativeControl/NativeClose render execution facts, never input/capture bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     Contract(ContractError),
@@ -26,6 +26,7 @@ pub enum Error {
     Host(&'static str),
     HostDiagnostic(crate::host::HostError),
     NativeControl(Box<crate::runtime::delivery::InjectionReport>),
+    NativeClose(Box<crate::host::tmux::CloseReceipt>),
     NeedsRecovery,
 }
 impl std::fmt::Display for Error {
@@ -41,6 +42,14 @@ impl std::fmt::Display for Error {
                 report.effect_floor,
                 report.counts,
                 report.problems
+            ),
+            Self::NativeClose(receipt) => write!(
+                f,
+                "owned native exit not observed: pane_outcome={:?}; pane_problem={:?}; native={:?}; socket_preserved={}",
+                receipt.pane_close.outcome,
+                receipt.pane_close.error,
+                receipt.native,
+                receipt.socket_preserved
             ),
             _ => write!(f, "{self:?}"),
         }
