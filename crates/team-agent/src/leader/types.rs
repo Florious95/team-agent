@@ -343,6 +343,8 @@ pub struct LeaderStartPlan {
     pub argv: Vec<String>,
     /// For managed launches, the provider command argv spawned inside the leader pane.
     pub provider_argv: Vec<String>,
+    /// Native identity allocated before launch, not the Team Agent owner UUID.
+    pub session_capture: Option<crate::provider::CaptureSessionContext>,
     /// For managed launches, the window that hosts the leader provider pane.
     pub leader_window: Option<WindowName>,
     /// True for external/current-pane leader compatibility paths.

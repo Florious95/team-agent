@@ -77,6 +77,113 @@ fn tmux_leader_submit_without_provider_receipt_stays_pending_then_accepts_same_r
     assert!(case.delivery_consumed_at(&message_id).is_some());
 }
 
+fn pi_receipt_case(tag: &str) -> (Case, serde_json::Value) {
+    let mut case = Case::new_without_rollout(tag);
+    let root = case.workspace.join("pi-sessions");
+    std::fs::create_dir_all(&root).unwrap();
+    case.rollout = root.join("not-derived-from-the-session-id.jsonl");
+    let receiver = &mut case.state["leader_receiver"];
+    receiver["provider"] = serde_json::json!("pi");
+    receiver["tmux_socket"] =
+        serde_json::json!(crate::tmux_backend::socket_name_for_workspace(&case.workspace));
+    receiver["leader_session_uuid"] = serde_json::json!("team-owner-not-native-id");
+    receiver["owner_epoch"] = serde_json::json!(1);
+    receiver["native_session"] = serde_json::json!({
+        "expected_session_id": "native-pi-session",
+        "provider_projects_root": root,
+        "spawn_cwd": case.workspace,
+        "spawned_at": "2026-10-10T03:59:07Z",
+        "pane_id": "%leader",
+        "tmux_socket": receiver["tmux_socket"],
+        "leader_session_uuid": "team-owner-not-native-id",
+        "owner_epoch": 1,
+    });
+    crate::state::persist::save_runtime_state(&case.workspace, &case.state).unwrap();
+    let header = serde_json::json!({
+        "type": "session", "version": 3, "id": "native-pi-session",
+        "cwd": case.workspace, "timestamp": "2026-10-10T03:59:08Z",
+    });
+    (case, header)
+}
+
+#[test]
+fn pi_leader_receipt_binds_exact_header_and_consumes_without_reinjection() {
+    let (case, header) = pi_receipt_case("pi-native-receipt");
+    let transport = RecordingTransport::new("");
+    let message_id = case.seed_message("Pi receipt canary");
+    std::fs::write(&case.rollout, format!("{header}\n")).unwrap();
+    let first = deliver_pending_message(
+        &case.workspace,
+        &case.store,
+        &transport,
+        &message_id,
+        &case.event_log,
+        &case.state,
+    )
+    .unwrap();
+    assert!(first.ok, "{first:?}");
+    assert_eq!(
+        case.message_status(&message_id),
+        "submitted_pending_acceptance"
+    );
+    assert_eq!(transport.inject_count(), 1);
+
+    let received = serde_json::json!({
+        "type": "message", "message": {"role": "user", "content": [
+            {"type": "text", "text": format!("5535 [team-agent-token:{message_id}]")}
+        ]}
+    });
+    std::fs::write(&case.rollout, format!("{header}\n{received}\n")).unwrap();
+    let second = deliver_pending_message(
+        &case.workspace,
+        &case.store,
+        &transport,
+        &message_id,
+        &case.event_log,
+        &case.state,
+    )
+    .unwrap();
+    assert!(second.ok, "{second:?}");
+    assert_eq!(case.message_status(&message_id), "delivered");
+    assert!(case.delivery_consumed_at(&message_id).is_some());
+    assert_eq!(transport.inject_count(), 1);
+}
+
+#[test]
+fn pi_leader_receipt_refuses_missing_ambiguous_stale_and_other_owner_backing() {
+    use crate::messaging::delivery::{observe_leader_receipt, LeaderReceiptObservation::*};
+    let (mut case, header) = pi_receipt_case("pi-native-receipt-fences");
+    let old = case.workspace.join("old-leader.jsonl");
+    std::fs::write(&old, "[team-agent-token:canary]").unwrap();
+    case.state["leader"] = serde_json::json!({"rollout_path": old});
+    // An old root leader receipt cannot substitute for this native session.
+    assert_eq!(observe_leader_receipt(&case.state, "canary"), SourceUnavailable);
+    for (field, value) in [
+        ("id", serde_json::json!("another-session")),
+        ("cwd", serde_json::json!(case.workspace.join("other"))),
+        ("timestamp", serde_json::json!("2026-10-10T03:59:06Z")),
+    ] {
+        let mut wrong = header.clone();
+        wrong[field] = value;
+        std::fs::write(&case.rollout, format!("{wrong}\n[team-agent-token:canary]\n")).unwrap();
+        assert_eq!(observe_leader_receipt(&case.state, "canary"), SourceUnavailable);
+    }
+    std::fs::write(&case.rollout, format!("{header}\n")).unwrap();
+    assert_eq!(observe_leader_receipt(&case.state, "canary"), TokenAbsent);
+    let duplicate = case.rollout.with_file_name("duplicate.jsonl");
+    std::fs::write(&duplicate, format!("{header}\n[team-agent-token:canary]\n")).unwrap();
+    assert_eq!(observe_leader_receipt(&case.state, "canary"), SourceUnavailable);
+    std::fs::remove_file(duplicate).unwrap();
+    for key in ["pane_id", "tmux_socket", "leader_session_uuid", "owner_epoch"] {
+        let mut moved = case.state.clone();
+        moved["leader_receiver"][key] = serde_json::json!("changed");
+        assert_eq!(observe_leader_receipt(&moved, "canary"), SourceUnavailable);
+    }
+    case.state["leader_receiver"]["native_session"]["provider_projects_root"] =
+        serde_json::Value::Null;
+    assert_eq!(observe_leader_receipt(&case.state, "canary"), SourceUnavailable);
+}
+
 #[test]
 fn attached_leader_mailbox_is_rechecked_by_the_normal_delivery_tick() {
     let case = Case::new("mailbox");

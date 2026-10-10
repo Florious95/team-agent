@@ -87,6 +87,51 @@ impl std::fmt::Display for PaneMetadataDiagnostic {
     }
 }
 
+/// Identity-only diagnostics: no process argv, environment or pane contents.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundProcessDiagnostic {
+    pub expected_pid: u32,
+    pub pane_dead: bool,
+    pub require_alive: bool,
+    /// None when tmux already reports a dead pane (the original short circuit).
+    pub sampled: Option<ProcessState>,
+}
+
+impl std::fmt::Display for BoundProcessDiagnostic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "stage=check-bound; expected_pid={}; pane_dead={}; require_alive={}; process_state={:?}",
+            self.expected_pid, self.pane_dead, self.require_alive, self.sampled
+        )
+    }
+}
+
+fn check_bound_process(
+    expected_pid: u32,
+    pane_dead: bool,
+    require_alive: bool,
+    sample: impl FnOnce() -> ProcessState,
+) -> Result<(), HostError> {
+    let sampled = (!pane_dead).then(sample);
+    if (require_alive && pane_dead)
+        || sampled.as_ref().is_some_and(|state| *state != ProcessState::Alive)
+    {
+        let mut error = HostError::new(
+            "native instance not alive or replaced",
+            HostErrorKind::Unknown,
+        );
+        error.process = Some(Box::new(BoundProcessDiagnostic {
+            expected_pid,
+            pane_dead,
+            require_alive,
+            sampled,
+        }));
+        return Err(error);
+    }
+    Ok(())
+}
+
 fn directory_signature(owner: &DirectoryReceipt) -> String {
     let key = format!(
         "{}:{}:{}:{}:{}:{}",
@@ -130,6 +175,7 @@ pub fn parse_pane(bytes: &[u8], stage: PaneMetadataStage) -> Result<PaneState, H
                     .collect(),
                 truncated: bytes.len() > 256,
             }),
+            process: None,
         }
     };
     let text = std::str::from_utf8(bytes).map_err(|_| invalid("tmux metadata encoding"))?;
@@ -439,14 +485,12 @@ impl<R: CommandRunner> TmuxHost<R> {
                 HostErrorKind::Ownership,
             ));
         }
-        if (require_alive && pane.dead)
-            || (!pane.dead && sample_process(&target.process) != ProcessState::Alive)
-        {
-            return Err(HostError::new(
-                "native instance not alive or replaced",
-                HostErrorKind::Unknown,
-            ));
-        }
+        check_bound_process(
+            target.process.identity.pid,
+            pane.dead,
+            require_alive,
+            || sample_process(&target.process),
+        )?;
         Ok(pane)
     }
 
@@ -1159,6 +1203,61 @@ impl<R: CommandRunner> PhysicalTransport for TmuxHost<R> {
         ) {
             Ok(result) => action_result(result, "native key"),
             Err(error) => ActionResult::refused(error),
+        }
+    }
+}
+
+#[cfg(test)]
+mod bound_process_tests {
+    use super::*;
+
+    #[test]
+    fn process_gate_preserves_each_state_and_probe_error_without_weakening_checks() {
+        for require_alive in [false, true] {
+            for state in [
+                ProcessState::Alive,
+                ProcessState::Exited,
+                ProcessState::Replaced,
+                ProcessState::Unknown(HostError::new(
+                    "process birth",
+                    HostErrorKind::Io(std::io::ErrorKind::PermissionDenied),
+                )),
+            ] {
+                let mut samples = 0;
+                let result = check_bound_process(44123, false, require_alive, || {
+                    samples += 1;
+                    state.clone()
+                });
+                assert_eq!(samples, 1);
+                if state == ProcessState::Alive {
+                    assert!(result.is_ok());
+                } else {
+                    let error = result.unwrap_err();
+                    let diagnostic = error.process.as_ref().unwrap();
+                    assert_eq!(diagnostic.expected_pid, 44123);
+                    assert_eq!(diagnostic.sampled.as_ref(), Some(&state));
+                    assert_eq!(diagnostic.require_alive, require_alive);
+                    let shown = error.to_string();
+                    assert!(shown.contains("stage=check-bound; expected_pid=44123"));
+                    assert!(shown.contains(&format!("process_state=Some({state:?})")));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dead_pane_keeps_the_existing_shutdown_and_live_action_short_circuit() {
+        for require_alive in [false, true] {
+            let result = check_bound_process(44123, true, require_alive, || {
+                panic!("a dead pane must not sample a possibly recycled PID")
+            });
+            if require_alive {
+                let error = result.unwrap_err();
+                assert_eq!(error.process.as_ref().unwrap().sampled, None);
+                assert!(error.to_string().contains("pane_dead=true; require_alive=true"));
+            } else {
+                assert!(result.is_ok());
+            }
         }
     }
 }

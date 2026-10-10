@@ -45,6 +45,13 @@ pub enum BackendError {
     Io(#[from] std::io::Error),
     #[error("native runtime metadata is invalid")]
     Metadata,
+    #[error("native shutdown operation={operation:?} phase={phase:?} outcome={outcome:?} failure={failure:?}")]
+    Shutdown {
+        operation: OperationId,
+        phase: Phase,
+        outcome: Outcome,
+        failure: Option<String>,
+    },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -594,6 +601,22 @@ pub fn stop(workspace: &Path, team: &str, seat: &SeatId) -> Result<OperationReco
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shutdown_error_exposes_the_durable_operation_failure_not_metadata() {
+        let failure = "native instance not alive or replaced: Unknown; stage=check-bound; expected_pid=44123; process_state=Some(Replaced)";
+        let error = BackendError::Shutdown {
+            operation: OperationId::new("stop-instance-test").unwrap(),
+            phase: Phase::F0Preflight,
+            outcome: Outcome::NeedsRecovery,
+            failure: Some(failure.into()),
+        };
+        let shown = error.to_string();
+        for expected in ["stop-instance-test", "F0Preflight", "NeedsRecovery", failure] {
+            assert!(shown.contains(expected), "{shown}");
+        }
+        assert!(!shown.contains("metadata is invalid"));
+    }
 
     #[test]
     fn policy_bindings_track_runtime_native_identity_not_a_release_receipt() {

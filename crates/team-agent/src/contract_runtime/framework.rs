@@ -247,7 +247,12 @@ pub fn stop_selected(workspace: &Path, state: &Value) -> Result<Vec<Value>, Back
             let _ = agent;
             let receipt = backend::stop(workspace, &team, &SeatId::new(id)?)?;
             if receipt.outcome != Outcome::Committed {
-                return Err(BackendError::Metadata);
+                return Err(BackendError::Shutdown {
+                    operation: receipt.id,
+                    phase: receipt.phase,
+                    outcome: receipt.outcome,
+                    failure: receipt.failure,
+                });
             }
             receipts.push(json!({"agent_id":id,"status":"stopped","operation":receipt.id}));
         }

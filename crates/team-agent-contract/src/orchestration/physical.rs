@@ -47,7 +47,7 @@ pub struct PhysicalRuntime<'a> {
     pub bootstrap: Option<&'a mut dyn BootstrapCommit>,
 }
 fn host_error(error: HostError) -> Error {
-    if error.metadata.is_some() {
+    if error.metadata.is_some() || error.process.is_some() {
         Error::HostDiagnostic(error)
     } else {
         Error::Host(error.operation)
@@ -531,6 +531,30 @@ mod tests {
             assert!(shown.contains(&format!("stage={label}; fields=2;")));
             assert!(shown.contains(r"$0\t@0\n"));
         }
+    }
+
+    #[test]
+    fn bound_process_diagnostics_survive_the_lifecycle_error_boundary() {
+        let mut error = HostError::new(
+            "native instance not alive or replaced",
+            HostErrorKind::Unknown,
+        );
+        error.process = Some(Box::new(crate::host::tmux::BoundProcessDiagnostic {
+            expected_pid: 44123,
+            pane_dead: false,
+            require_alive: false,
+            sampled: Some(crate::host::process::ProcessState::Unknown(HostError::new(
+                "process birth",
+                HostErrorKind::Io(std::io::ErrorKind::PermissionDenied),
+            ))),
+        }));
+        let shown = error.to_string();
+        let mapped = host_error(error);
+        assert!(matches!(&mapped, Error::HostDiagnostic(_)));
+        assert_eq!(mapped.to_string(), shown);
+        assert!(shown.contains("expected_pid=44123"));
+        assert!(shown.contains("process birth"));
+        assert!(shown.contains("PermissionDenied"));
     }
 
     #[test]

@@ -436,6 +436,7 @@ fn leader_attach_command_for_plan_uses_plan_leader_window() {
         )),
         argv: Vec::new(),
         provider_argv: Vec::new(),
+        session_capture: None,
         leader_window: Some(crate::transport::WindowName::new("claude_code")),
         is_external_leader: false,
         leader_env: std::collections::BTreeMap::new(),

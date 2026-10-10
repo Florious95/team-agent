@@ -34,6 +34,7 @@ pub struct HostError {
     pub operation: &'static str,
     pub kind: HostErrorKind,
     pub metadata: Option<tmux::PaneMetadataDiagnostic>,
+    pub process: Option<Box<tmux::BoundProcessDiagnostic>>,
 }
 
 impl HostError {
@@ -42,6 +43,7 @@ impl HostError {
             operation,
             kind,
             metadata: None,
+            process: None,
         }
     }
     pub fn io(operation: &'static str, error: io::Error) -> Self {
@@ -53,6 +55,9 @@ impl fmt::Display for HostError {
         write!(formatter, "{}: {:?}", self.operation, self.kind)?;
         if let Some(metadata) = &self.metadata {
             write!(formatter, "; {metadata}")?;
+        }
+        if let Some(process) = &self.process {
+            write!(formatter, "; {process}")?;
         }
         Ok(())
     }
