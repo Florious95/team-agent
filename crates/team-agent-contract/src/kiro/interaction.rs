@@ -121,6 +121,16 @@ fn composer(text: &str) -> Option<(usize, &str)> {
 fn empty(value: &str) -> bool {
     value.is_empty() || value == "ask a question or describe a task ↵"
 }
+// R0 frames expose this status INSIDE the current composer, not as a transcript
+// line starting with "Kiro". Only the observed whole footer and seconds grammar
+// count; arbitrary message text mentioning work must not establish acceptance.
+fn working_composer(value: &str) -> bool {
+    value
+        .strip_prefix("Kiro is working · ")
+        .and_then(|tail| tail.strip_suffix(" · Type to steer · Ctrl+S to queue"))
+        .and_then(|elapsed| elapsed.strip_suffix('s'))
+        .is_some_and(|seconds| !seconds.is_empty() && seconds.bytes().all(|b| b.is_ascii_digit()))
+}
 fn surface(text: &str) -> InputSurface {
     let input = composer(text);
     let busy = text
@@ -128,7 +138,12 @@ fn surface(text: &str) -> InputSurface {
         .enumerate()
         .filter(|(_, line)| {
             let line = line.trim();
-            line.starts_with("Thinking") || line.starts_with("Kiro is working")
+            line.starts_with("Thinking")
+                || line.starts_with("Kiro is working")
+                || line.split_once(' ').is_some_and(|(spinner, body)| {
+                    matches!(spinner, "ᗢ" | "ᗣ" | "ᗤ" | "ᗥ" | "ᗦ" | "ᗧ")
+                        && body == "Thinking... (esc to cancel)"
+                })
         })
         .map(|(index, _)| index)
         .last();
@@ -136,6 +151,7 @@ fn surface(text: &str) -> InputSurface {
         return InputSurface::Busy;
     }
     match input {
+        Some((_, value)) if working_composer(value) => InputSurface::Busy,
         Some((_, value)) if empty(value) => InputSurface::ComposerReady,
         Some(_) => InputSurface::ComposerContainsPaste,
         None => InputSurface::ShellOrUnknown,

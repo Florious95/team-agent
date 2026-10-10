@@ -416,17 +416,41 @@ pub fn serve<R: BufRead, W: Write>(
     serve_with_context(store, |_, _| Ok(context.clone()), reader, writer)
 }
 
+/// The diagnostic observer receives only the rejection boundary and typed error,
+/// never request, tool-argument, or response bytes. It cannot authorize a call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestRejectionStage {
+    Context,
+    Handler,
+}
+
 /// A persistent native transport resolves its fenced identity/task for each
 /// frame. The resolver is framework-owned; tool arguments never confer identity.
 /// This shares the same bounded framing, handlers and response-written boundary.
 pub fn serve_with_context<R: BufRead, W: Write, F>(
     store: &mut ContractStore,
-    mut resolve_context: F,
-    mut reader: R,
-    mut writer: W,
+    resolve_context: F,
+    reader: R,
+    writer: W,
 ) -> Result<(), Error>
 where
     F: FnMut(&mut ContractStore, &Value) -> Result<CallContext, Error>,
+{
+    serve_with_diagnostics(store, resolve_context, reader, writer, |_, _| {})
+}
+
+/// Preserve the wire result and durable boundaries while exposing a rejected
+/// request's real error to the host's bounded diagnostic sink.
+pub fn serve_with_diagnostics<R: BufRead, W: Write, F, D>(
+    store: &mut ContractStore,
+    mut resolve_context: F,
+    mut reader: R,
+    mut writer: W,
+    mut rejected: D,
+) -> Result<(), Error>
+where
+    F: FnMut(&mut ContractStore, &Value) -> Result<CallContext, Error>,
+    D: FnMut(RequestRejectionStage, &Error),
 {
     loop {
         let mut frame = vec![];
@@ -440,19 +464,22 @@ where
         }
         let request: Value = serde_json::from_slice(&frame)?;
         let context = resolve_context(store, &request);
-        let handled = match &context {
-            Ok(context) => handle(store, context, &request),
-            Err(error) => Err(error.clone()),
+        let (handled, stage) = match &context {
+            Ok(context) => (handle(store, context, &request), RequestRejectionStage::Handler),
+            Err(error) => (Err(error.clone()), RequestRejectionStage::Context),
         };
         let (response, success) = match handled {
             Ok(response) => (response, true),
-            Err(_) => (
-                Some(
-                    json!({"jsonrpc":"2.0","id":request.get("id").cloned().unwrap_or(Value::Null),
-                "error":{"code":-32602,"message":"request rejected"}}),
-                ),
-                false,
-            ),
+            Err(error) => {
+                rejected(stage, &error);
+                (
+                    Some(
+                        json!({"jsonrpc":"2.0","id":request.get("id").cloned().unwrap_or(Value::Null),
+                    "error":{"code":-32602,"message":"request rejected"}}),
+                    ),
+                    false,
+                )
+            }
         };
         if let Some(response) = response {
             serde_json::to_writer(&mut writer, &response)?;

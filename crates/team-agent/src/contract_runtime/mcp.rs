@@ -237,7 +237,7 @@ fn run_observed(args: &[String], diagnostics: &mut Diagnostics) -> Result<(), Ba
     // Registration is not an initialize/tools-list/client-consumption fact.
     // Those continue to be recorded only at the existing protocol boundaries.
     let result = diagnostics.step("serve", || {
-        serve_with_context(
+        serve_with_diagnostics(
             &mut backend.store,
             |store, request| {
                 if verify_native_ancestry(&record.process, &record.native_process).is_err() {
@@ -286,6 +286,16 @@ fn run_observed(args: &[String], diagnostics: &mut Diagnostics) -> Result<(), Ba
             },
             std::io::stdin().lock(),
             std::io::stdout().lock(),
+            |stage, error| {
+                diagnostics.emit(
+                    match stage {
+                        RequestRejectionStage::Context => "request_context",
+                        RequestRejectionStage::Handler => "request_handler",
+                    },
+                    "rejected",
+                    Some(error),
+                );
+            },
         )
     });
     let closed = diagnostics.step("close_connection", || {
@@ -314,6 +324,28 @@ mod tests {
         assert_eq!(event["parent_matches"], false);
         assert_eq!(event["error"], Error::Fence.to_string());
         assert!(event["entry_ppid"].is_number());
+    }
+
+    #[test]
+    fn rejected_requests_keep_the_actual_error_category_and_stage() {
+        let diagnostics = Diagnostics::new();
+        for (stage, error) in [
+            ("request_context", Error::Conflict),
+            ("request_context", Error::Fence),
+            ("request_context", Error::Database),
+            ("request_handler", Error::Invalid("argument type")),
+        ] {
+            let event = diagnostics.record(stage, "rejected", Some(&error));
+            assert_eq!(event["stage"], stage);
+            assert_eq!(event["outcome"], "rejected");
+            assert_eq!(event["error"], error.to_string());
+            assert!(event.get("request").is_none());
+            assert!(event.get("arguments").is_none());
+            let mut stderr = Vec::new();
+            write_diagnostic(None, &event, &mut stderr);
+            assert!(stderr.len() <= 8192);
+            assert_eq!(serde_json::from_slice::<Value>(&stderr).unwrap(), event);
+        }
     }
 
     #[test]

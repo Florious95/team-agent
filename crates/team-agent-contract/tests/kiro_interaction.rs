@@ -79,6 +79,111 @@ fn exact_unicode_composer_and_current_busy_surface_are_distinct() {
         InputSurface::ShellOrUnknown
     );
 }
+// R0 frame-01..19 contain these six spinner cells and this current status bar.
+const WORKING: &str = "›  Kiro is working · 1s · Type to steer · Ctrl+S to queue";
+const SPINNERS: [&str; 6] = ["ᗢ", "ᗣ", "ᗤ", "ᗥ", "ᗦ", "ᗧ"];
+
+#[test]
+fn native_spinner_and_working_composer_are_busy_but_old_or_inexact_shapes_are_not() {
+    let adapter = adapter();
+    for spinner in SPINNERS {
+        let thinking = format!("{spinner} Thinking... (esc to cancel)");
+        for current in [thinking.clone(), format!("{thinking}\n{WORKING}")] {
+            assert_eq!(
+                adapter.interpret(&frame(&current)).surface,
+                InputSurface::Busy
+            );
+        }
+        assert_eq!(
+            adapter
+                .interpret(&frame(&format!("{thinking}\n{READY}")))
+                .surface,
+            InputSurface::ComposerReady
+        );
+        assert_eq!(
+            adapter
+                .interpret(&frame(&format!("{thinking}\n› draft")))
+                .surface,
+            InputSurface::ComposerContainsPaste
+        );
+    }
+    for seconds in ["0", "3", "38"] {
+        assert_eq!(
+            adapter
+                .interpret(&frame(&WORKING.replace("1s", &format!("{seconds}s"))))
+                .surface,
+            InputSurface::Busy
+        );
+    }
+    for inexact in [
+        WORKING.replace("1s", "1m"),
+        WORKING.replace("1s", "xs"),
+        WORKING.replace("1s", "s"),
+        WORKING.replace(" · Ctrl+S to queue", ""),
+        format!("{WORKING} quoted text"),
+        "› ᗦ Thinking... (esc to cancel)".into(),
+    ] {
+        assert_eq!(
+            adapter.interpret(&frame(&inexact)).surface,
+            InputSurface::ComposerContainsPaste
+        );
+    }
+    assert_eq!(
+        adapter
+            .interpret(&frame("X Thinking... (esc to cancel)"))
+            .surface,
+        InputSurface::ShellOrUnknown
+    );
+}
+
+#[test]
+fn business_acceptance_uses_current_busy_footer_without_waiting_for_model_completion() {
+    let adapter = adapter();
+    let token = "[team-agent-token:msg-busy]";
+    for operation in [Operation::FirstBusiness, Operation::OrdinarySend] {
+        let mut capture = frame(&format!("› hello\n{token}"));
+        capture.operation = operation;
+        capture.message = Some(MessageId::new("msg-busy").unwrap());
+        capture.attempt = Some(AttemptId::new("attempt-busy").unwrap());
+        capture.baseline = Some(CaptureBaseline {
+            scope: scope(),
+            text: READY.into(),
+        });
+        capture.after_step = Some(StepKind::Paste);
+        capture.paste_latch = adapter.interpret(&capture).paste_latch;
+        assert!(matches!(capture.paste_latch, PasteLatch::Seen { .. }));
+        let native = format!("  hello\n  {token}\nᗦ Thinking... (esc to cancel)\n{WORKING}");
+        capture.text = native.clone();
+        assert_ne!(
+            adapter.interpret(&capture).surface,
+            InputSurface::NativeAccepted
+        );
+        capture.after_step = Some(StepKind::InitialSubmit);
+        let accepted = adapter.interpret(&capture);
+        assert_eq!(accepted.surface, InputSurface::NativeAccepted);
+        assert_eq!(accepted.current_message, capture.message);
+        assert_eq!(accepted.current_attempt, capture.attempt);
+        assert!(matches!(accepted.paste_latch, PasteLatch::Gone { .. }));
+        for unproven in [
+            native.replace(token, "unrelated token"),
+            format!("{native}\n{token}"), // still inside the current composer
+            format!("  {token}\nᗦ Thinking... (esc to cancel)\n› draft"),
+        ] {
+            capture.text = unproven;
+            assert_ne!(
+                adapter.interpret(&capture).surface,
+                InputSurface::NativeAccepted
+            );
+        }
+        capture.text = native;
+        capture.paste_latch = PasteLatch::NeverSeen;
+        assert_ne!(
+            adapter.interpret(&capture).surface,
+            InputSurface::NativeAccepted
+        );
+    }
+}
+
 #[test]
 fn recipe_has_one_enter_no_payload_trailer_retry_or_queue_keys() {
     let policy = PROFILES[0].policy.require("policy").unwrap();
