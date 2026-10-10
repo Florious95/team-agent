@@ -206,7 +206,8 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
                         crate::leader::LeaderError::Io(_)
                         | crate::leader::LeaderError::Json(_)
                         | crate::leader::LeaderError::MessageStore(_)
-                        | crate::leader::LeaderError::Start(_) => "attach_failed",
+                        | crate::leader::LeaderError::Start(_)
+                        | crate::leader::LeaderError::Prompt(_) => "attach_failed",
                         crate::leader::LeaderError::EventLog(_) => "attach_event_log_failed",
                         crate::leader::LeaderError::Messaging(_) => "attach_watcher_failed",
                     }

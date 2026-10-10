@@ -66,6 +66,7 @@ pub mod leaders;
 pub mod models;
 pub mod named_address;
 pub mod profile;
+pub(crate) mod leader_prompt;
 pub(crate) mod route;
 pub mod send;
 pub(crate) mod spec;
@@ -172,12 +173,18 @@ pub mod lifecycle_port {
             Err(crate::leader::start::PrepareLeaderStartError::PaneAuthorityRefused(refusal)) => {
                 return Ok(pane_authority_refusal_value(provider, attach, &refusal));
             }
+            Err(crate::leader::start::PrepareLeaderStartError::Leader(
+                crate::leader::LeaderError::Prompt(error),
+            )) => return Ok(error.report()),
             Err(crate::leader::start::PrepareLeaderStartError::Leader(error)) => {
                 return Err(CliError::Runtime(error.to_string()));
             }
         };
-        let outcome = crate::leader::start::execute_prepared_leader_start(&prepared, cwd)
-            .map_err(|e| CliError::Runtime(e.to_string()))?;
+        let outcome = match crate::leader::start::execute_prepared_leader_start(&prepared, cwd) {
+            Ok(outcome) => outcome,
+            Err(crate::leader::LeaderError::Prompt(error)) => return Ok(error.report()),
+            Err(error) => return Err(CliError::Runtime(error.to_string())),
+        };
         let plan = prepared.plan();
         let ok = match outcome.status {
             crate::leader::LeaderLaunchStatus::Exited => outcome.exit_code == Some(0),
