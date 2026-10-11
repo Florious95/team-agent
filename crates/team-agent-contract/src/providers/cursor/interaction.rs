@@ -1,5 +1,5 @@
-//! Cursor TUI grammar and shared token-correlated paste acceptance. No guessed
-//! /session-id, /tools panel, DirectTyping business fallback or retry loop.
+//! Cursor TUI grammar, token correlation and receipt-bound folded-paste Seen.
+//! No guessed /session-id, /tools panel, DirectTyping business or retry loop.
 use super::{native::parse_version, CursorAdapter, UNVERIFIED};
 use crate::contract::{delivery::*, hooks::*, probe::*, types::*};
 use crate::runtime::delivery::ControlDefinition;
@@ -8,10 +8,10 @@ use std::time::Duration;
 pub const PROFILE: &str = "cursor-tui-v1";
 // Recipe identity, NOT an installed release hash. Framework timing bounds are
 // deliberate budgets, not a claim that one recon run proved production latency.
-// SHA256 cursor-tui-v1|bracketed|enter=1|trailer=none|retry=never|capture=100ms|stable=200ms|floor=100ms|deadline=30s|correlation=baseline-seen-token-gone-transcript
+// SHA256 cursor-tui-v1|bracketed|enter=1|trailer=none|retry=never|capture=100ms|stable=200ms|floor=100ms|deadline=30s|correlation=baseline-seen-token-gone-transcript|folded-seen=empty-current-owned-paste-v1|folded-accepted=visible-token-only
 pub const POLICY: Digest = Digest([
-    0x2d, 0x8c, 0xe5, 0x4a, 0x54, 0x6a, 0xdd, 0x04, 0xfc, 0xc0, 0x94, 0xd5, 0x5e, 0x2a, 0xf3, 0xcf,
-    0x0c, 0x8e, 0xdf, 0x3c, 0x29, 0xec, 0x20, 0xc5, 0x90, 0xf7, 0x0c, 0xf3, 0xdb, 0x25, 0x70, 0x92,
+    0x0b, 0xbe, 0xf0, 0x86, 0x4b, 0x17, 0x27, 0xdd, 0x98, 0x88, 0x35, 0x0b, 0x46, 0xb2, 0x82, 0xb7,
+    0xc3, 0xc0, 0xea, 0x8b, 0x28, 0x7d, 0x97, 0x58, 0x14, 0x5e, 0xfb, 0x34, 0x88, 0x4e, 0x12, 0x4e,
 ]);
 const SUBMIT: SubmitPolicy = SubmitPolicy {
     paste_mode: PasteMode::Bracketed, payload_trailer: PayloadTrailer::None,
@@ -72,6 +72,103 @@ fn surface(text: &str) -> InputSurface {
     if status.is_some_and(|line| line.starts_with("Tip: ")) { status = preceding.next().copied(); }
     if status.is_some_and(working) { InputSurface::Busy } else { InputSurface::ComposerReady }
 }
+// A folded block is native UI identity, NOT a claim that its hidden token was
+// read. Keep the latch bound to this attempt/subject; never reuse a screen label
+// across generations, sessions, panes, messages or attempts.
+const FOLDED_RECEIPT: &str = "cursor-owned-folded-paste-v1:";
+fn folded_prefix(frame: &CaptureFrame) -> Option<String> {
+    if !matches!(frame.operation, Operation::FirstBusiness | Operation::OrdinarySend) {
+        return None;
+    }
+    let context = serde_json::to_string(&(
+        &frame.scope.identity, &frame.scope.endpoint, &frame.scope.pane,
+        &frame.scope.binding, frame.scope.session.as_ref()?,
+        frame.message.as_ref()?, frame.attempt.as_ref()?,
+        frame.operation == Operation::FirstBusiness,
+    )).ok()?;
+    Some(format!("{FOLDED_RECEIPT}{context}:"))
+}
+fn composer_lines(text: &str) -> Option<Vec<&str>> {
+    let lines: Vec<_> = text.lines().map(str::trim).collect();
+    let index = lines.iter().rposition(|line| line.starts_with("→ "))?;
+    Some(lines[index..].to_vec())
+}
+fn folded_marker(value: &str) -> Option<&str> {
+    // R6 capture includes the visible `^[` prefix before the native block.
+    // Normalizing this UI spelling never changes the actual pasted bytes.
+    let marker = value.strip_prefix("^[").unwrap_or(value);
+    let body = marker.strip_prefix("[Pasted text #")?.strip_suffix(" lines]")?;
+    let (number, lines) = body.split_once(" +")?;
+    if [number, lines].iter().any(|value| {
+        value.starts_with('0') || !value.bytes().all(|byte| byte.is_ascii_digit())
+            || !value.parse::<u64>().is_ok_and(|number| number > 0)
+    }) { return None; }
+    Some(marker)
+}
+fn correlate_folded_input(frame: &CaptureFrame, observation: &mut InteractionObservation) -> bool {
+    let latched = match &frame.paste_latch {
+        PasteLatch::Seen { native_identity } | PasteLatch::Gone { native_identity }
+            if native_identity.starts_with(FOLDED_RECEIPT) => Some(native_identity),
+        _ => None,
+    };
+    // An invalid/stale folded receipt must not fall through to another strategy.
+    let refuse = latched.is_some();
+    let Some(prefix) = folded_prefix(frame) else { return refuse; };
+    let Some(baseline) = &frame.baseline else { return refuse; };
+    let expected = format!("[team-agent-token:{}]", frame.message.as_ref().unwrap().as_str());
+    let same_subject = baseline.scope.identity == frame.scope.identity
+        && baseline.scope.endpoint == frame.scope.endpoint && baseline.scope.pane == frame.scope.pane
+        && baseline.scope.binding == frame.scope.binding && baseline.scope.session == frame.scope.session;
+    if !same_subject || baseline.scope.sequence >= frame.scope.sequence
+        || baseline.scope.observed_at > frame.scope.observed_at
+        || surface(&baseline.text) != InputSurface::ComposerReady
+        || baseline.text.contains(&expected)
+    { return refuse; }
+    let Some(current) = composer_lines(&frame.text) else { return refuse; };
+    let Some(before) = composer_lines(&baseline.text) else { return refuse; };
+    // The single arrow line may change into one folded block. Extra editable
+    // lines or a different footer are not evidence of that conversion.
+    let same_tail = before.iter().skip(1).any(|line| !line.is_empty())
+        && current.iter().skip(1).filter(|line| !line.is_empty())
+            .eq(before.iter().skip(1).filter(|line| !line.is_empty()));
+    let marker = current[0].strip_prefix("→ ").and_then(folded_marker);
+    let identity = if let Some(identity) = latched {
+        let Some(original) = identity.strip_prefix(&prefix).and_then(folded_marker) else { return true; };
+        if !matches!(frame.paste_latch, PasteLatch::Seen { .. }) { return true; }
+        if frame.after_step == Some(StepKind::InitialSubmit) {
+            // Retain the existing strong post-submit proof. A disappearing
+            // block/Busy alone is NOT native acceptance. A still-hidden token
+            // remains unresolved until an independently measured recipe exists.
+            let current_has_token = current.iter().any(|line| line.contains(&expected));
+            if !current_has_token && frame.text.contains(&expected)
+                && matches!(observation.surface, InputSurface::Busy | InputSurface::ComposerReady)
+            {
+                observation.surface = InputSurface::NativeAccepted;
+                observation.paste_latch = PasteLatch::Gone { native_identity: identity.clone() };
+                observation.current_message = frame.message.clone();
+                observation.current_attempt = frame.attempt.clone();
+            }
+            return true;
+        }
+        if marker != Some(original) { return true; }
+        identity.clone()
+    } else {
+        if !matches!(frame.paste_latch, PasteLatch::NeverSeen) { return false; }
+        let Some(marker) = marker else { return false; };
+        format!("{prefix}{marker}")
+    };
+    // The shared executor reaches this capture only after Confirmed Paste (an
+    // unconfirmed physical action terminates before wait_guard). No hook issues
+    // keys or substitutes a marker for the host's owned-buffer/hash receipt.
+    if frame.after_step == Some(StepKind::Paste) && same_tail
+        && observation.surface == InputSurface::ComposerContainsPaste
+    {
+        observation.paste_latch = PasteLatch::Seen { native_identity: identity };
+        observation.current_message = frame.message.clone();
+        observation.current_attempt = frame.attempt.clone();
+    }
+    true
+}
 impl InteractionHook for CursorAdapter {
     fn interpret(&self, frame: &CaptureFrame) -> InteractionObservation {
         let mut observation = InteractionObservation {
@@ -84,7 +181,9 @@ impl InteractionHook for CursorAdapter {
         let lines: Vec<_> = frame.text.lines().collect();
         let composer = lines.iter().rposition(|line| line.trim().starts_with("→ "))
             .map(|index| lines[index..].join("\n"));
-        correlate_business_input(frame, &mut observation, composer.as_deref());
+        if !correlate_folded_input(frame, &mut observation) {
+            correlate_business_input(frame, &mut observation, composer.as_deref());
+        }
         observation
     }
 }
