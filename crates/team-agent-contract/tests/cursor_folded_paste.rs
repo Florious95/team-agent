@@ -1,6 +1,6 @@
-//! Controlled H6 fixtures based on the R6 folded composer. These do not execute
-//! Cursor or prove native post-submit rendering/consumption. Shared guards,
-//! one-Enter execution and Kiro correlation are intentionally unchanged.
+//! Controlled H6 fixtures based on R6/R7 folded composer/transcript captures.
+//! These do not execute Cursor or prove live acceptance timing/tool consumption.
+//! Shared guards, one-Enter execution and Kiro correlation remain unchanged.
 use std::time::Duration;
 use team_agent_contract::contract::{delivery::*, hooks::InteractionHook, probe::*, session::NativeSessionId, types::*};
 use team_agent_contract::providers::cursor::{interaction::{PROFILE, PROFILES}, CursorAdapter, McpStdio};
@@ -190,4 +190,161 @@ fn disappearance_busy_or_token_still_in_composer_is_not_post_submit_acceptance()
     frame.after_step = Some(StepKind::Paste);
     frame.text = screen(&format!("{}\n⠘⠣ Working", token(&frame)), "Add a follow-up");
     assert_ne!(adapter().interpret(&frame).surface, InputSurface::NativeAccepted);
+}
+
+fn assert_latched_unaccepted(frame: &CaptureFrame) {
+    let observed = adapter().interpret(frame);
+    assert_ne!(observed.surface, InputSurface::NativeAccepted);
+    assert_eq!(observed.paste_latch, frame.paste_latch);
+    assert!(observed.current_message.is_none() && observed.current_attempt.is_none());
+}
+
+#[test]
+fn submitted_folded_block_moves_to_new_transcript_with_hidden_token() {
+    for operation in [Operation::FirstBusiness, Operation::OrdinarySend] {
+        for prefix in ["", "^["] {
+            for (status, input) in [
+                ("", "Add a follow-up"),
+                ("⠘⠣ Working", "Add a follow-up"),
+                ("", "Add a follow-up  ctrl+c to stop"),
+            ] {
+                let mut frame = frame();
+                frame.operation = operation;
+                frame.paste_latch = adapter().interpret(&frame).paste_latch;
+                frame.scope = scope(3);
+                frame.after_step = Some(StepKind::InitialSubmit);
+                frame.text = screen(&format!("{prefix}{BLOCK}\n{status}"), input)
+                    .replace("Extra High  Run", "Extra High · 10.1%  Run");
+                assert!(!frame.text.contains(&token(&frame)));
+                let observed = adapter().interpret(&frame);
+                assert_eq!(observed.surface, InputSurface::NativeAccepted);
+                let PasteLatch::Seen { native_identity } = &frame.paste_latch else { panic!("owned paste required") };
+                assert_eq!(observed.paste_latch, PasteLatch::Gone { native_identity: native_identity.clone() });
+                assert_eq!(observed.current_message, frame.message);
+                assert_eq!(observed.current_attempt, frame.attempt);
+            }
+        }
+    }
+}
+
+#[test]
+fn transferred_block_cannot_reuse_history_or_ambiguous_transcript_rows() {
+    for history in [
+        String::new(), "[Pasted text #2 +145 lines]".into(), "[Pasted text #1 +146 lines]".into(),
+        format!("{BLOCK}\n^[{BLOCK}"), format!("{BLOCK}\n[Pasted text #2 +9 lines]"),
+        format!("> {BLOCK}"), format!("quoted {BLOCK}"), format!("{BLOCK} trailing text"),
+    ] {
+        let mut frame = seen_frame();
+        frame.after_step = Some(StepKind::InitialSubmit);
+        frame.text = screen(&history, "Add a follow-up");
+        assert_latched_unaccepted(&frame);
+    }
+    for old in [BLOCK.to_string(), format!("^[{BLOCK}"), format!("old inline {BLOCK}")] {
+        let mut frame = seen_frame();
+        frame.baseline.as_mut().unwrap().text = screen(&old, "Plan, search, build anything");
+        frame.after_step = Some(StepKind::InitialSubmit);
+        frame.text = screen(BLOCK, "Add a follow-up");
+        assert_latched_unaccepted(&frame);
+    }
+}
+
+#[test]
+fn transferred_block_requires_empty_composer_and_preserved_footer_tail() {
+    let mut frame = seen_frame();
+    frame.after_step = Some(StepKind::InitialSubmit);
+    for input in [
+        BLOCK.to_string(), format!("^[{BLOCK}"), token(&frame), "unsent text".into(),
+        "Add a follow-up\nextra editable line".into(),
+        "Add a follow-up\n\nextra editable line".into(),
+        format!("Add a follow-up\n\n{BLOCK}"),
+    ] {
+        frame.text = screen(BLOCK, &input);
+        assert_latched_unaccepted(&frame);
+    }
+    for text in [
+        screen(BLOCK, "Add a follow-up").replace("/owned/cwd", "/other/cwd"),
+        screen(BLOCK, "Add a follow-up").replace("GPT-5.6", "extra row\nGPT-5.6"),
+        format!("Cursor Agent\nv2026.10.01-e373342\n{BLOCK}\n→ Add a follow-up\n"),
+    ] {
+        frame.text = text;
+        assert_latched_unaccepted(&frame);
+    }
+}
+
+#[test]
+fn transcript_transfer_requires_submit_phase_and_same_folded_receipt() {
+    for step in [None, Some(StepKind::Paste), Some(StepKind::Confirmation), Some(StepKind::Retry)] {
+        let mut frame = seen_frame();
+        frame.after_step = step;
+        frame.text = screen(BLOCK, "Add a follow-up");
+        assert_latched_unaccepted(&frame);
+    }
+    let mut original = seen_frame();
+    original.after_step = Some(StepKind::InitialSubmit);
+    original.text = screen(BLOCK, "Add a follow-up");
+    let mut cases = vec![];
+    let mut changed = original.clone(); changed.attempt = Some(AttemptId::new("other-attempt").unwrap()); cases.push(changed);
+    let mut changed = original.clone(); changed.message = Some(MessageId::new("other-message").unwrap()); cases.push(changed);
+    let mut changed = original.clone(); changed.operation = Operation::OrdinarySend; cases.push(changed);
+    let mut changed = original.clone(); changed.scope.identity.generation = Generation(2); cases.push(changed);
+    let mut changed = original.clone(); changed.scope.endpoint = "/other.sock".into(); cases.push(changed);
+    let mut changed = original.clone(); changed.scope.pane = "%9".into(); cases.push(changed);
+    let mut changed = original.clone(); changed.scope.binding = "other".into(); cases.push(changed);
+    let mut changed = original; changed.scope.session = Some(NativeSessionId::new("other").unwrap()); cases.push(changed);
+    for mut frame in cases {
+        let mut baseline_scope = frame.scope.clone(); baseline_scope.sequence = 1;
+        frame.baseline.as_mut().unwrap().scope = baseline_scope;
+        assert_latched_unaccepted(&frame);
+    }
+}
+
+#[test]
+fn ordinary_send_transfers_only_its_new_block_and_does_not_reuse_gone_receipts() {
+    let next = "[Pasted text #2 +9 lines]";
+    let mut frame = frame();
+    frame.operation = Operation::OrdinarySend;
+    frame.baseline.as_mut().unwrap().text = screen(BLOCK, "Add a follow-up");
+    frame.text = screen(BLOCK, next);
+    frame.paste_latch = adapter().interpret(&frame).paste_latch;
+    assert!(matches!(frame.paste_latch, PasteLatch::Seen { .. }));
+    frame.scope = scope(3);
+    frame.after_step = Some(StepKind::InitialSubmit);
+    frame.text = screen(&format!("{BLOCK}\n{next}"), "Add a follow-up");
+    let observed = adapter().interpret(&frame);
+    assert_eq!(observed.surface, InputSurface::NativeAccepted);
+    assert!(matches!(observed.paste_latch, PasteLatch::Gone { .. }));
+    frame.paste_latch = observed.paste_latch;
+    frame.scope = scope(4);
+    assert_latched_unaccepted(&frame);
+    frame.paste_latch = PasteLatch::NeverSeen;
+    assert_latched_unaccepted(&frame);
+}
+
+#[test]
+fn model_answer_or_tool_activity_without_block_transfer_is_not_acceptance() {
+    for history in [
+        "123 × 45 = 5,535.",
+        "team report_result\nError: Tool execution error",
+        "Explored available MCP tools team · report_result\n⠘⠣ Working",
+    ] {
+        let mut frame = seen_frame();
+        frame.after_step = Some(StepKind::InitialSubmit);
+        frame.text = screen(history, "Add a follow-up");
+        assert_latched_unaccepted(&frame);
+    }
+}
+
+#[test]
+fn transcript_transfer_requires_current_baseline_and_profile() {
+    let mut original = seen_frame();
+    original.after_step = Some(StepKind::InitialSubmit);
+    original.text = screen(BLOCK, "Add a follow-up");
+    let mut cases = vec![];
+    let mut changed = original.clone(); changed.baseline = None; cases.push(changed);
+    let mut changed = original.clone(); changed.profile_id = "other-profile".into(); cases.push(changed);
+    let mut changed = original.clone(); changed.baseline.as_mut().unwrap().scope.sequence = 3; cases.push(changed);
+    let mut changed = original.clone(); changed.baseline.as_mut().unwrap().scope.observed_at = Duration::from_secs(10); cases.push(changed);
+    let mut changed = original.clone(); changed.baseline.as_mut().unwrap().scope.pane = "%9".into(); cases.push(changed);
+    let mut changed = original; changed.baseline.as_mut().unwrap().text = screen("", "unsent baseline"); cases.push(changed);
+    for frame in cases { assert_latched_unaccepted(&frame); }
 }

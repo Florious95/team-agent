@@ -1,4 +1,4 @@
-//! Cursor TUI grammar, token correlation and receipt-bound folded-paste Seen.
+//! Cursor TUI grammar, token correlation and receipt-bound folded-paste transfer.
 //! No guessed /session-id, /tools panel, DirectTyping business or retry loop.
 use super::{native::parse_version, CursorAdapter, UNVERIFIED};
 use crate::contract::{delivery::*, hooks::*, probe::*, types::*};
@@ -8,10 +8,10 @@ use std::time::Duration;
 pub const PROFILE: &str = "cursor-tui-v1";
 // Recipe identity, NOT an installed release hash. Framework timing bounds are
 // deliberate budgets, not a claim that one recon run proved production latency.
-// SHA256 cursor-tui-v1|bracketed|enter=1|trailer=none|retry=never|capture=100ms|stable=200ms|floor=100ms|deadline=30s|correlation=baseline-seen-token-gone-transcript|folded-seen=empty-current-owned-paste-v1|folded-accepted=visible-token-only
+// SHA256 cursor-tui-v1|bracketed|enter=1|trailer=none|retry=never|capture=100ms|stable=200ms|floor=100ms|deadline=30s|correlation=baseline-seen-token-gone-transcript|folded-seen=empty-current-owned-paste-v1|folded-accepted=new-transcript-block-v1-or-visible-token
 pub const POLICY: Digest = Digest([
-    0x0b, 0xbe, 0xf0, 0x86, 0x4b, 0x17, 0x27, 0xdd, 0x98, 0x88, 0x35, 0x0b, 0x46, 0xb2, 0x82, 0xb7,
-    0xc3, 0xc0, 0xea, 0x8b, 0x28, 0x7d, 0x97, 0x58, 0x14, 0x5e, 0xfb, 0x34, 0x88, 0x4e, 0x12, 0x4e,
+    0x68, 0x83, 0x0f, 0x7a, 0x67, 0x1d, 0xd8, 0x0a, 0x81, 0xec, 0x92, 0xb6, 0xa2, 0xe4, 0x05, 0xfd,
+    0xf3, 0x64, 0xa1, 0xfa, 0x0a, 0x70, 0xbe, 0x42, 0x7b, 0xcb, 0xff, 0xd0, 0x8d, 0x16, 0xdd, 0x73,
 ]);
 const SUBMIT: SubmitPolicy = SubmitPolicy {
     paste_mode: PasteMode::Bracketed, payload_trailer: PayloadTrailer::None,
@@ -136,11 +136,29 @@ fn correlate_folded_input(frame: &CaptureFrame, observation: &mut InteractionObs
         let Some(original) = identity.strip_prefix(&prefix).and_then(folded_marker) else { return true; };
         if !matches!(frame.paste_latch, PasteLatch::Seen { .. }) { return true; }
         if frame.after_step == Some(StepKind::InitialSubmit) {
-            // Retain the existing strong post-submit proof. A disappearing
-            // block/Busy alone is NOT native acceptance. A still-hidden token
-            // remains unresolved until an independently measured recipe exists.
+            // The executor only captures here after Confirmed InitialSubmit.
+            // R7 keeps the token hidden but moves the owned capsule to history.
+            // Its exact row must be new, unique and outside the empty composer;
+            // Busy or disappearance alone still cannot prove acceptance.
+            let current_footer: Vec<_> = current.iter().skip(1).filter(|line| !line.is_empty()).collect();
+            let before_footer: Vec<_> = before.iter().skip(1).filter(|line| !line.is_empty()).collect();
+            let empty_composer = current[0].strip_prefix("→ ")
+                .map(|text| text.strip_suffix("ctrl+c to stop").unwrap_or(text).trim())
+                .is_some_and(placeholder)
+                && current.get(1) == Some(&"")
+                // The leading native footer row gains usage statistics. Keep
+                // its remaining rows (owned cwd) fixed; reject extra input.
+                && before_footer.len() > 1 && current_footer.len() == before_footer.len()
+                && current_footer[1..] == before_footer[1..]
+                && current.iter().skip(1).all(|line| folded_marker(line).is_none());
+            let transcript_end = frame.text.lines().count() - current.len();
+            let mut new_blocks = frame.text.lines().take(transcript_end)
+                .map(str::trim).filter_map(folded_marker)
+                .filter(|marker| !baseline.text.contains(*marker));
+            let folded_transferred = empty_composer
+                && new_blocks.next() == Some(original) && new_blocks.next().is_none();
             let current_has_token = current.iter().any(|line| line.contains(&expected));
-            if !current_has_token && frame.text.contains(&expected)
+            if !current_has_token && (frame.text.contains(&expected) || folded_transferred)
                 && matches!(observation.surface, InputSurface::Busy | InputSurface::ComposerReady)
             {
                 observation.surface = InputSurface::NativeAccepted;
