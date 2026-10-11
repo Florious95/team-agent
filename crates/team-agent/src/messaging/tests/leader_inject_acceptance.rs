@@ -109,7 +109,20 @@ fn pi_receipt_case(tag: &str) -> (Case, serde_json::Value) {
 #[test]
 fn pi_leader_receipt_binds_exact_header_and_consumes_without_reinjection() {
     let (case, header) = pi_receipt_case("pi-native-receipt");
-    let transport = RecordingTransport::new("");
+    assert!(matches!(
+        crate::messaging::resolve_live_leader_channel(
+            &case.workspace,
+            &case.state["leader_receiver"],
+            &RecordingTransport::new(""),
+        ),
+        crate::messaging::LeaderChannelResolution::Unbound(
+            crate::messaging::LeaderChannelUnbound::EndpointMismatch
+        )
+    ));
+    let transport = RecordingTransport {
+        endpoint: Some(crate::tmux_backend::socket_name_for_workspace(&case.workspace)),
+        ..RecordingTransport::new("")
+    };
     let message_id = case.seed_message("Pi receipt canary");
     std::fs::write(&case.rollout, format!("{header}\n")).unwrap();
     let first = deliver_pending_message(
@@ -535,6 +548,7 @@ impl Case {
 struct RecordingTransport {
     injects: Arc<AtomicUsize>,
     capture: Arc<Mutex<String>>,
+    endpoint: Option<String>,
 }
 
 impl RecordingTransport {
@@ -542,6 +556,7 @@ impl RecordingTransport {
         Self {
             injects: Arc::new(AtomicUsize::new(0)),
             capture: Arc::new(Mutex::new(capture.to_string())),
+            endpoint: None,
         }
     }
 
@@ -551,6 +566,10 @@ impl RecordingTransport {
 }
 
 impl Transport for RecordingTransport {
+    fn tmux_endpoint(&self) -> Option<String> {
+        self.endpoint.clone()
+    }
+
     fn kind(&self) -> BackendKind {
         BackendKind::Tmux
     }
