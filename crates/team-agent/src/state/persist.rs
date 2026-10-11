@@ -2688,6 +2688,7 @@ mod tests {
             "spawn_epoch": 1,
             "_pending_session_id": "session-f1"
         });
+        normalize_agent_session_state(&mut started);
         save_runtime_state_with_lifecycle_topology_authority(&ws, &started, "team-a", &["f1"])
             .unwrap();
         let latest = read_state(&ws);
