@@ -83,6 +83,8 @@ fn descriptor_and_seven_hooks_keep_unknown_lifecycle_and_legacy_aliases_closed()
     assert_eq!(CURSOR_DESCRIPTOR.tool_names.naming, Support::Supported(ToolNaming::StaticServer { key: "team" }));
     assert_eq!(CURSOR_DESCRIPTOR.session.fresh, FreshSession::Preassigned);
     assert_eq!(CURSOR_DESCRIPTOR.session.resume, Support::Supported(ResumeMode::ExactId));
+    assert_eq!(CURSOR_DESCRIPTOR.probe_sources.client_binding, Support::Supported(ProbeSource::NativeRuntime));
+    assert_eq!(CURSOR_DESCRIPTOR.probe_sources.round_trip, Support::Supported(ProbeSource::NativeRuntime));
     assert_eq!(CURSOR_DESCRIPTOR.model.omitted, OmittedModel::Reject);
     assert!(!CURSOR_DESCRIPTOR.effort.inherit_team_default);
     for admission in &CURSOR_DESCRIPTOR.effort.admission { assert!(matches!(admission, EffortAdmission::Reject(_))); }

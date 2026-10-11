@@ -972,6 +972,38 @@ fn binding_probe() -> Probe<ClientBindingEvidence> {
 }
 
 #[test]
+fn per_tool_roundtrip_admits_worker_results_without_claiming_a_whole_registry() {
+    let owner = identity();
+    let process = process_identity();
+    let e = expected(&owner, &process);
+    let mut binding = binding_probe();
+    for (source, tools, ready) in [
+        (ClientBindingSource::NativeToolRoundtrip, vec![LogicalTool::ReportResult], true),
+        (ClientBindingSource::NativeToolRoundtrip, vec![LogicalTool::SendMessage], false),
+        (ClientBindingSource::NativeToolRoundtrip, vec![LogicalTool::GetTeamStatus], false),
+        (ClientBindingSource::NativeToolRoundtrip, vec![], false),
+        (ClientBindingSource::NativeToolRoundtrip, vec![LogicalTool::ReportResult; 2], false),
+        (ClientBindingSource::NativeRegistry, vec![LogicalTool::ReportResult], false),
+        (ClientBindingSource::NativeClientDiscovery, vec![LogicalTool::ReportResult], false),
+    ] {
+        binding.outcome = ProbeOutcome::Observed(ClientBindingEvidence {
+            server_key: e.server_key.into(), tools: tools.clone(), source,
+        });
+        let outcome = evaluate_send_gate(&process_probe(), &pane_probe(), &binding, &e,
+            Operation::OrdinarySend, BootstrapAllowance::Disabled);
+        assert_eq!(matches!(outcome, SendGate::ReadyForInput { consume_bootstrap: false }), ready);
+        assert!(matches!(&binding.outcome, ProbeOutcome::Observed(evidence) if evidence.tools == tools));
+    }
+    binding.outcome = ProbeOutcome::Observed(ClientBindingEvidence {
+        server_key: e.server_key.into(), tools: vec![LogicalTool::ReportResult],
+        source: ClientBindingSource::NativeToolRoundtrip,
+    });
+    binding.scope.identity.generation = Generation(99);
+    assert!(matches!(evaluate_send_gate(&process_probe(), &pane_probe(), &binding, &e,
+        Operation::OrdinarySend, BootstrapAllowance::Disabled), SendGate::Blocked(_)));
+}
+
+#[test]
 fn first_input_needs_current_composer_but_not_its_own_t3c_reply() {
     let owner = identity();
     let process = process_identity();

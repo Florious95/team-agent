@@ -20,10 +20,6 @@ const EFFORT: Reason = Reason {
     code: "cursor-effort-is-native-model-id",
     message: "Select an exact catalog model ID; a separate effort flag or suffix rewrite is not verified",
 };
-const MCP: Reason = Reason {
-    code: "cursor-team-mcp-unverified",
-    message: "Owned stdio handshake alone does not prove the full native Team-tool registry or round-trip consumption",
-};
 
 pub static CURSOR_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     identity: IdentityFacet {
@@ -85,8 +81,10 @@ pub static CURSOR_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         process: Support::Supported(ProbeSource::Host),
         pane: Support::Supported(ProbeSource::NativeSurface),
         server: Support::Supported(ProbeSource::ServerLifecycle),
-        client_binding: Support::Unverified(MCP),
-        round_trip: Support::Unverified(MCP),
+        // Per-tool NativeToolRoundtrip facts from a current owned connection,
+        // not a modal registry or an initialize/tools/list inference.
+        client_binding: Support::Supported(ProbeSource::NativeRuntime),
+        round_trip: Support::Supported(ProbeSource::NativeRuntime),
         semantic: Support::Supported(ProbeSource::NativeSurface),
     },
     workspace: WorkspaceFacet {
