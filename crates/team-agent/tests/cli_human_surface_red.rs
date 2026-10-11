@@ -50,6 +50,7 @@ const HUMAN: &[&str] = &[
     "clone-agent",
     "approvals",
     "route",
+    "leader-prompt",
     "profile",
     "install-skill",
     "inbox",
@@ -375,7 +376,7 @@ fn h1_public_catalog_is_exactly_thirty_human_records_and_no_machine_record() {
         .collect::<BTreeSet<_>>();
     assert_eq!(
         catalog::COMMAND_SPECS.len(),
-        30,
+        31,
         "H1 physically remove Machine records, not only change visibility/tier"
     );
     assert_eq!(actual, HUMAN.iter().copied().collect());
@@ -398,7 +399,7 @@ fn h1_root_discovers_all_thirty_once_in_catalog_and_zero_private_names() {
         .collect::<Vec<_>>();
     assert_eq!(
         visible.len(),
-        30,
+        31,
         "H1 root command list: {visible:?}\n{help}"
     );
     assert_eq!(
@@ -545,7 +546,7 @@ human_properties! {
     restart => "restart", shutdown => "shutdown", add_agent => "add-agent", start_agent => "start-agent",
     stop_agent => "stop-agent", reset_agent => "reset-agent", clone_agent => "clone-agent", fork_agent => "fork-agent",
     remove_agent => "remove-agent", doctor => "doctor", approvals => "approvals", leaders => "leaders",
-    route => "route", profile => "profile", install_skill => "install-skill",
+    route => "route", leader_prompt => "leader-prompt", profile => "profile", install_skill => "install-skill",
     claim_leader => "claim-leader", takeover => "takeover", attach_leader => "attach-leader",
     pi => "pi", codex => "codex", claude => "claude", copilot => "copilot", grok => "grok", cursor => "cursor", kiro => "kiro", inbox => "inbox",
 }
