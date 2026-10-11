@@ -2140,10 +2140,8 @@ fn persist_exec_provider_leader_binding(
             "active_team_key".to_string(),
             serde_json::json!(identity.team_id.as_str()),
         );
-        obj.insert(
-            "session_name".to_string(),
-            serde_json::json!(target.session.as_str()),
-        );
+        // The ambient session identifies the leader receiver, not workers.
+        // Leave any existing worker session untouched, including unknown state.
         obj.insert("tmux_endpoint".to_string(), serde_json::json!(socket));
         obj.insert("tmux_socket".to_string(), serde_json::json!(socket));
         obj.insert(
@@ -3062,7 +3060,8 @@ mod tests {
         execute_leader_plan_after_ambient_authority, format_launcher_failure,
         handle_exec_provider_startup_prompts, is_interactive_shell_basename,
         lock_down_window_rename, managed_client_argv, managed_leader_window_from_occupied,
-        persist_managed_leader_binding, push_bounded_stderr, shlex_quote,
+        persist_exec_provider_leader_binding, persist_managed_leader_binding,
+        push_bounded_stderr, shlex_quote,
         write_window_rename_lockdown_event, ManagedClientAttachMode, VerifiedAmbientPaneAuthority,
         LEADER_STDERR_LIMIT,
     };
@@ -3493,6 +3492,89 @@ mod tests {
             serde_json::json!(true)
         );
         let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    fn exec_binding_fixture(workspace: &Path) -> (LeaderStartPlan, VerifiedAmbientPaneAuthority) {
+        let identity = LeaderIdentity {
+            leader_session_uuid: LeaderSessionUuid::derive(
+                "fp", &workspace.to_string_lossy(), "tester", "current",
+            ).unwrap(),
+            leader_session_uuid_source: LeaderSessionUuidSource::Derived,
+            machine_fingerprint: "fp".into(), workspace_abspath: workspace.into(),
+            os_user: "tester".into(), team_id: TeamKey::new("current"),
+        };
+        let plan = LeaderStartPlan {
+            mode: LeaderStartMode::ExecProvider, provider: Provider::Pi,
+            workspace: workspace.into(), socket: LeaderLaunchSocket::Workspace,
+            session_name: None, argv: vec![], provider_argv: vec!["pi".into()],
+            leader_prompt: None, session_capture: None, leader_window: None,
+            is_external_leader: false, leader_env: BTreeMap::new(),
+            identity: Some(identity), detached: false,
+        };
+        let authority = VerifiedAmbientPaneAuthority {
+            pane_id: PaneId::new("%77"),
+            observed: PaneInfo {
+                pane_id: PaneId::new("%77"), session: SessionName::new("cursor-gate-leader"),
+                window_index: Some(0), window_name: Some(WindowName::new("pi")),
+                pane_index: Some(0), tty: Some("/dev/ttys077".into()),
+                current_command: Some("pi".into()), current_path: Some(workspace.into()),
+                active: true, pane_pid: None, leader_env: BTreeMap::new(),
+            },
+            endpoint: "/private/tmp/fixture-exec-leader.sock".into(),
+            tmux: "/private/tmp/fixture-exec-leader.sock,123,0".into(),
+        };
+        (plan, authority)
+    }
+
+    fn exec_binding_workspace() -> std::path::PathBuf {
+        let workspace = std::env::temp_dir().join(format!("ta-exec-bootstrap-{}-{}",
+            std::process::id(), std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&workspace).unwrap();
+        workspace
+    }
+
+    #[test]
+    fn exec_provider_non_prefixed_receiver_produces_fresh_quick_start_bootstrap() {
+        let workspace = exec_binding_workspace();
+        let (plan, authority) = exec_binding_fixture(&workspace);
+        persist_exec_provider_leader_binding(&plan, &workspace, &authority, false).unwrap();
+        let state = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        let before = state.clone();
+        assert!(state["session_name"].is_null());
+        assert!(state["teams"]["current"]["session_name"].is_null());
+        assert_eq!(state["teams"]["current"]["leader_receiver"]["session_name"], "cursor-gate-leader");
+        assert!(!crate::lifecycle::launch::quick_start_has_runtime_for_test(&state, "current"));
+        assert_eq!(state, before);
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn exec_provider_preserves_existing_workers_and_never_clears_runtime_markers() {
+        for status in ["running", "stopped", "unknown"] {
+            let workspace = exec_binding_workspace();
+            let (plan, authority) = exec_binding_fixture(&workspace);
+            let path = crate::state::persist::runtime_state_path(&workspace);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, serde_json::json!({
+                "active_team_key":"current", "session_name":"team-existing-workers",
+                "spec_path":"/fixture/spec.yml", "team_dir":"/fixture/roles",
+                "agents":{"worker":{"agent_id":"worker","provider":"pi","status":status}},
+                "tasks":[{"task_id":"existing-task"}],
+            }).to_string()).unwrap();
+            persist_exec_provider_leader_binding(&plan, &workspace, &authority, false).unwrap();
+            let state = crate::state::persist::load_runtime_state(&workspace).unwrap();
+            for row in [&state, &state["teams"]["current"]] {
+                assert_eq!(row["session_name"], "team-existing-workers");
+                assert_eq!(row["agents"]["worker"]["status"], status);
+                assert_eq!(row["spec_path"], "/fixture/spec.yml");
+                assert_eq!(row["team_dir"], "/fixture/roles");
+                assert_eq!(row["tasks"][0]["task_id"], "existing-task");
+                assert_eq!(row["leader_receiver"]["session_name"], "cursor-gate-leader");
+            }
+            assert!(crate::lifecycle::launch::quick_start_has_runtime_for_test(&state, "current"));
+            std::fs::remove_dir_all(workspace).unwrap();
+        }
     }
 
     #[test]
