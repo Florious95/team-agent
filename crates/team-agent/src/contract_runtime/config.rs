@@ -94,8 +94,8 @@ fn mode(meta: &Value, path: &Path) -> Result<Option<CommunicationMode>, ConfigEr
         .transpose()
 }
 
-/// A malformed explicit Kiro header cannot fall back to the default Pi worker.
-fn malformed_kiro_header(body: &str) -> bool {
+/// A malformed explicit contract header cannot fall back to the default Pi worker.
+fn malformed_contract_header(body: &str) -> bool {
     body.strip_prefix("---\n").is_some_and(|header| {
         header
             .lines()
@@ -116,7 +116,7 @@ fn malformed_kiro_header(body: &str) -> bool {
     })
 }
 
-/// None delegates exactly to the existing no-Kiro/leader-only path. No native
+/// None delegates exactly to the existing legacy/leader-only path. No native
 /// command, model probe, config write or process is created by this selection.
 pub fn read_team(args: &QuickStartArgs) -> Result<Option<TeamConfig>, ConfigError> {
     read_team_with_user_source(args, prompt::user_source)
@@ -152,7 +152,7 @@ pub fn read_team_with_user_source(
         };
         let (meta, body) = split_front_matter(&raw);
         let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
-        if meta.get("provider").is_none() && malformed_kiro_header(&normalized) {
+        if meta.get("provider").is_none() && malformed_contract_header(&normalized) {
             return Err(invalid(&path, "front matter"));
         }
         if meta
@@ -173,7 +173,7 @@ pub fn read_team_with_user_source(
         .is_some_and(|backend| backend != "tmux")
     {
         return Err(ConfigError::Unsupported(
-            "Kiro contract transport requires tmux",
+            "contract native transport requires tmux",
         ));
     }
     let team_dir = args.agents_dir.canonicalize()?;
@@ -234,7 +234,7 @@ pub fn read_team_with_user_source(
         };
         members.push(MemberRoute {
             id: id.clone(),
-            provider,
+            provider: registration.map_or(provider, |descriptor| descriptor.identity.id.into()),
             source: source.canonicalize()?,
             runtime,
         });
@@ -251,7 +251,7 @@ pub fn read_team_with_user_source(
             || text(&meta, "profile", &source)?.is_some()
         {
             return Err(ConfigError::Unsupported(
-                "Kiro uses an existing native subscription; API/profile mappings are unavailable",
+                "contract native providers use an existing subscription; API/profile mappings are unavailable",
             ));
         }
         let bypass = match meta.get("dangerously_skip_permissions") {

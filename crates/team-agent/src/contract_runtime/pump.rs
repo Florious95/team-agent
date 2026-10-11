@@ -2,7 +2,7 @@
 //! implicit business retry, queue flush, or replay of uncertain messages.
 use super::{
     backend::{self, Backend, BackendError},
-    forward, framework,
+    forward, framework, registry,
 };
 use serde_json::Value;
 use std::path::Path;
@@ -12,7 +12,6 @@ use team_agent_contract::host::{
     clock::{Clock, RealClock},
     process::verify_native_ancestry,
 };
-use team_agent_contract::kiro::{interaction, KIRO_DESCRIPTOR};
 use team_agent_contract::orchestration::{physical::*, store::*, supervisor::*};
 use team_agent_contract::runtime::probes::*;
 
@@ -91,8 +90,17 @@ fn deliver_one(backend: &mut Backend, seat: &SeatRecord) -> Result<(), BackendEr
     {
         return Ok(());
     }
+    let selected = registry::provider(seat.provider.as_str())?;
+    let panel = selected.tool_panel()?;
+    if panel.profile_id != seat.profile || panel.server_key != seat.server_key {
+        return Err(ContractError::Mismatch("native inspector seat binding").into());
+    }
+    let role = backend::read_role(&backend.binding, &seat.identity.seat)?;
+    if role.provider != seat.provider {
+        return Err(BackendError::Metadata);
+    }
     let clock = RealClock::new();
-    let adapter = backend::adapter(&backend.binding, &seat.identity)?;
+    let adapter = backend::adapter(&backend.binding, &seat.identity, &seat.provider)?;
     let hooks = adapter.hooks();
     let operation = OperationId::new(format!(
         "deliver-{}",
@@ -104,15 +112,17 @@ fn deliver_one(backend: &mut Backend, seat: &SeatRecord) -> Result<(), BackendEr
     ))?;
     let mut physical = PhysicalRuntime::new(
         Registration {
-            descriptor: &KIRO_DESCRIPTOR,
+            descriptor: selected.descriptor(),
             hooks: &hooks,
-            controls: interaction::CONTROLS,
+            controls: selected.controls(),
         },
         backend::settings(&backend.binding),
         operation.clone(),
         &clock,
     )?;
-    physical.evidence = backend::policy_evidence(&seat.native, backend.binding.candidate_sha256);
+    physical.evidence = backend::policy_evidence(
+        &seat.provider, &seat.native, backend.binding.candidate_sha256,
+    )?;
     physical.protocol = Some(protocol(backend, seat, &clock)?);
     let sample = physical.readiness(seat)?;
     if !matches!(sample.pane.outcome, ProbeOutcome::Observed(ref pane) if pane.surface == InputSurface::ComposerReady)
@@ -126,7 +136,7 @@ fn deliver_one(backend: &mut Backend, seat: &SeatRecord) -> Result<(), BackendEr
     // A completed-but-uncertain inspector quarantines the seat, without an
     // orphan lease that would prevent explicit scoped shutdown. No replay or
     // blind Escape to clear an unrelated approval/composer is permitted.
-    let binding = match physical.client_binding(seat, &interaction::TOOL_PANEL) {
+    let binding = match physical.client_binding(seat, panel) {
         Ok(binding) => binding,
         Err(error) => {
             backend.store.fail_observation(&seat.identity, &operation)?;
@@ -153,7 +163,7 @@ fn deliver_one(backend: &mut Backend, seat: &SeatRecord) -> Result<(), BackendEr
         allow_first_business_bootstrap: false,
         require_server_handshake: true,
         channel: Channel::Tmux,
-        policy_sha256: interaction::POLICY,
+        policy_sha256: panel.policy_sha256,
     };
     let _ = team_agent_contract::orchestration::supervisor::tick(
         &mut backend.store,

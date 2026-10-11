@@ -72,7 +72,7 @@ pub fn require_legacy_lifecycle(
             None => !config.roles.is_empty(),
         });
     if selected_native || configured_native {
-        return Err(crate::cli::CliError::Runtime(format!("contract_capability_unverified: {operation} is not admitted for Kiro; no legacy fallback or fresh replacement was performed")));
+        return Err(crate::cli::CliError::Runtime(format!("contract_capability_unverified: {operation} is not admitted for contract-native seats; no legacy fallback or fresh replacement was performed")));
     }
     Ok(())
 }
@@ -93,7 +93,7 @@ pub fn require_legacy_role(
         .or(declared.as_deref())
         .is_some_and(super::registry::recognizes)
     {
-        return Err(crate::cli::CliError::Runtime("contract_capability_unverified: mutable Kiro role lifecycle is not admitted; use initial quick-start; no role file was changed".into()));
+        return Err(crate::cli::CliError::Runtime("contract_capability_unverified: mutable contract-native role lifecycle is not admitted; use initial quick-start; no role file was changed".into()));
     }
     Ok(())
 }
@@ -147,6 +147,9 @@ pub fn project_seat(workspace: &Path, team: &str, id: &str) -> Result<Value, Bac
         .seat(&SeatId::new(id)?)?
         .ok_or(BackendError::Metadata)?;
     let role = backend::read_role(&backend.binding, &seat.identity.seat)?;
+    if role.provider != seat.provider {
+        return Err(BackendError::Metadata);
+    }
     let alive = seat
         .physical
         .as_ref()

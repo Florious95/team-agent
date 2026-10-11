@@ -21,7 +21,6 @@ use team_agent_contract::host::{
     process::{fingerprint_file, resolve_cwd},
     tmux::HostLimits,
 };
-use team_agent_contract::kiro::{KiroAdapter, McpStdio, KIRO_DESCRIPTOR};
 use team_agent_contract::orchestration::{lifecycle::*, physical::*, store::*, Error};
 use thiserror::Error as ThisError;
 
@@ -29,6 +28,7 @@ use super::{
     config::{MemberRoute, RoleConfig, RuntimeFamily},
     discovery::{self, Discovery, DiscoveryError},
     forward::FrameworkContext,
+    registry::{self, NativeAdapter},
 };
 
 #[derive(Debug, ThisError)]
@@ -228,10 +228,11 @@ pub(super) fn settings(binding: &Binding) -> PhysicalSettings {
 pub(super) fn adapter(
     binding: &Binding,
     identity: &InstanceIdentity,
-) -> Result<KiroAdapter, BackendError> {
-    Ok(KiroAdapter::new(McpStdio {
-        executable: binding.candidate.clone(),
-        arguments: vec![
+    provider: &ProviderId,
+) -> Result<NativeAdapter, BackendError> {
+    Ok(registry::provider(provider.as_str())?.adapter(
+        binding.candidate.clone(),
+        vec![
             "contract-mcp".into(),
             "--workspace".into(),
             binding
@@ -249,8 +250,8 @@ pub(super) fn adapter(
             "--generation".into(),
             identity.generation.0.to_string(),
         ],
-        environment: BTreeMap::new(),
-    })?)
+        BTreeMap::new(),
+    )?)
 }
 fn request(
     binding: &Binding,
@@ -258,10 +259,15 @@ fn request(
     identity: InstanceIdentity,
     discovered: &Discovery,
 ) -> Result<LaunchRequest, BackendError> {
-    let profiles = KIRO_DESCRIPTOR
-        .input
-        .profiles
-        .require("Kiro input profiles")?;
+    let descriptor = registry::provider(role.provider.as_str())?.descriptor();
+    if discovered.catalog.provider != role.provider
+        || discovered.catalog.native != discovered.native
+    {
+        return Err(ContractError::Mismatch("role native catalog").into());
+    }
+    // Metadata-only discovery cannot authorize a native-subscription worker.
+    descriptor.auth.subscription.require("native subscription launch")?;
+    let profiles = descriptor.input.profiles.require("native input profiles")?;
     let mut matches = profiles.iter().filter(|profile| {
         profile.matches_native(&discovered.native)
             && profile.channel == Channel::Tmux
@@ -271,6 +277,7 @@ fn request(
     if matches.next().is_some() {
         return Err(ContractError::AmbiguousProfile.into());
     }
+    profile.policy.require("native submit policy")?;
     Ok(LaunchRequest {
         provider: role.provider.as_str().into(),
         operation: Operation::Fresh,
@@ -302,7 +309,7 @@ fn request(
 /// seats (including legacy peers). Bounded read-only native commands run; no
 /// runtime store, worker config, private socket, or worker process is created.
 pub fn preflight(team: &super::config::TeamConfig) -> Result<(), BackendError> {
-    let discovered = discovery::discover(&team.workspace.path)?;
+    let mut discoveries = BTreeMap::new();
     let candidate = std::env::current_exe()?.canonicalize()?;
     let candidate_sha256 =
         fingerprint_file(&candidate, 1024 * 1024 * 1024, Duration::from_secs(10))?;
@@ -318,22 +325,30 @@ pub fn preflight(team: &super::config::TeamConfig) -> Result<(), BackendError> {
         transport_root: "/tmp/preflight-no-write".into(),
     };
     for role in &team.roles {
+        let selected = registry::provider(role.provider.as_str())?;
+        if !discoveries.contains_key(&role.provider) {
+            discoveries.insert(
+                role.provider.clone(),
+                discovery::discover(&role.provider, &team.workspace.path)?,
+            );
+        }
+        let discovered = discoveries.get(&role.provider).ok_or(BackendError::Metadata)?;
         let identity = InstanceIdentity {
             scope: team.scope.clone(),
             seat: role.id.clone(),
             instance: InstanceId::new("preflight")?,
             generation: Generation(1),
         };
-        let adapter = adapter(&binding, &identity)?;
+        let adapter = adapter(&binding, &identity, &role.provider)?;
         let hooks = adapter.hooks();
-        let request = request(&binding, role, identity, &discovered)?;
+        let request = request(&binding, role, identity, discovered)?;
         let resolved = resolve_launch(
-            &KIRO_DESCRIPTOR,
+            selected.descriptor(),
             &hooks,
             &request,
             Some(&discovered.catalog),
         )?;
-        validate_launch_plan(&KIRO_DESCRIPTOR, &resolved, &adapter.plan(&resolved)?)?;
+        validate_launch_plan(selected.descriptor(), &resolved, &adapter.plan(&resolved)?)?;
     }
     Ok(())
 }
@@ -346,7 +361,9 @@ pub fn start(
     role: &RoleConfig,
     members: &[MemberRoute],
 ) -> Result<(Binding, OperationRecord), BackendError> {
-    let discovered = discovery::discover(workspace)?;
+    let selected = registry::provider(role.provider.as_str())?;
+    let descriptor = selected.descriptor();
+    let discovered = discovery::discover(&role.provider, workspace)?;
     let cwd = resolve_cwd(workspace)?;
     let scope = scope_for(&cwd, team)?;
     let candidate = std::env::current_exe()?.canonicalize()?;
@@ -370,16 +387,18 @@ pub fn start(
         instance: InstanceId::new("preflight")?,
         generation: Generation(1),
     };
-    let probe_adapter = adapter(&provisional, &provisional_identity)?;
+    let probe_adapter = adapter(&provisional, &provisional_identity, &role.provider)?;
     let probe_hooks = probe_adapter.hooks();
     let preflight = request(&provisional, role, provisional_identity, &discovered)?;
     let preflight = resolve_launch(
-        &KIRO_DESCRIPTOR,
+        descriptor,
         &probe_hooks,
         &preflight,
         Some(&discovered.catalog),
     )?;
-    probe_adapter.plan(&preflight)?;
+    let preflight_plan = probe_adapter.plan(&preflight)?;
+    validate_launch_plan(descriptor, &preflight, &preflight_plan)?;
+    let server_key = selected.server_key()?;
     let mut backend = if root_for(&cwd.path, &scope).exists() {
         Backend::open(&cwd.path, team)?
     } else {
@@ -426,11 +445,11 @@ pub fn start(
     });
     backend.store.set_framework_routes(&peers, Some(&route))?;
     let identity = backend.store.propose_identity(&role.id)?;
-    let adapter = adapter(&backend.binding, &identity)?;
+    let adapter = adapter(&backend.binding, &identity, &role.provider)?;
     let hooks = adapter.hooks();
     let request = request(&backend.binding, role, identity, &discovered)?;
     let resolved = resolve_launch(
-        &KIRO_DESCRIPTOR,
+        descriptor,
         &hooks,
         &request,
         Some(&discovered.catalog),
@@ -438,7 +457,7 @@ pub fn start(
     let plan = adapter.plan(&resolved)?;
     let operation = OperationId::new(format!("start-{}", request.identity.instance.as_str()))?;
     let mut io = ScopedMaterializer::new(
-        &KIRO_DESCRIPTOR,
+        descriptor,
         &resolved,
         &plan,
         operation.clone(),
@@ -447,15 +466,15 @@ pub fn start(
     let clock = RealClock::new();
     let mut physical = PhysicalRuntime::new(
         Registration {
-            descriptor: &KIRO_DESCRIPTOR,
+            descriptor,
             hooks: &hooks,
-            controls: team_agent_contract::kiro::interaction::CONTROLS,
+            controls: selected.controls(),
         },
         settings(&backend.binding),
         operation.clone(),
         &clock,
     )?;
-    physical.evidence = policy_evidence(&request.native, candidate_sha256);
+    physical.evidence = policy_evidence(&role.provider, &request.native, candidate_sha256)?;
     let record = Lifecycle {
         store: &mut backend.store,
         host: &mut physical,
@@ -463,7 +482,7 @@ pub fn start(
     }
     .startup(
         &Adapter {
-            descriptor: &KIRO_DESCRIPTOR,
+            descriptor,
             hooks: &hooks,
             catalog: Some(&discovered.catalog),
         },
@@ -471,7 +490,7 @@ pub fn start(
         Routing {
             pane: "unpublished".into(),
             binding_key: format!("binding-{}", request.identity.instance.as_str()),
-            server_key: "team".into(),
+            server_key: server_key.into(),
         },
         operation,
     )?;
@@ -494,7 +513,8 @@ pub(super) fn read_role(binding: &Binding, id: &SeatId) -> Result<RoleConfig, Ba
     }
     let role: RoleConfig = serde_json::from_slice(&bytes).map_err(|_| BackendError::Metadata)?;
     if &role.id != id
-        || role.provider.as_str() != "kiro"
+        || registry::descriptor(role.provider.as_str())
+            .is_none_or(|descriptor| descriptor.identity.id != role.provider.as_str())
         || digest(role.prompt.text.as_bytes()) != role.prompt.sha256
     {
         return Err(BackendError::Metadata);
@@ -503,38 +523,36 @@ pub(super) fn read_role(binding: &Binding, id: &SeatId) -> Result<RoleConfig, Ba
 }
 
 pub(super) fn policy_evidence(
+    provider: &ProviderId,
     native: &NativeIdentity,
     candidate_sha256: Digest,
-) -> Vec<CapabilityEvidence> {
-    team_agent_contract::kiro::interaction::PROFILES
-        .iter()
-        .filter(|profile| profile.matches_native(native))
-        .flat_map(|profile| {
-            // Bind this observed executable and candidate to the stable recipe.
-            // This is not the historical R0 receipt, nor a business/MCP PASS.
-            let binding_sha256 = digest(
-                format!(
-                    "kiro-runtime-policy-v1\n{native:?}\n{}\n{:?}\n{candidate_sha256:?}",
-                    profile.id, profile.policy_sha256,
-                )
-                .as_bytes(),
-            );
-            profile
-                .operations
-                .iter()
-                .map(move |operation| CapabilityEvidence {
-                    provider: ProviderId::new("kiro").expect("static provider"),
-                    native: native.clone(),
-                    profile_id: profile.id.into(),
-                    policy_sha256: profile.policy_sha256,
-                    channel: profile.channel,
-                    operation: *operation,
-                    kind: EvidenceKind::Native,
-                    candidate_sha256,
-                    evidence_sha256: binding_sha256,
-                })
-        })
-        .collect()
+) -> Result<Vec<CapabilityEvidence>, ContractError> {
+    let descriptor = registry::provider(provider.as_str())?.descriptor();
+    let profiles = descriptor.input.profiles.require("native input profiles")?;
+    let mut evidence = Vec::new();
+    for profile in profiles.iter().filter(|profile| profile.matches_native(native)) {
+        // Unknown submit recipes never produce Native evidence, even when the
+        // provider has a readable catalog or a recognizable TUI surface.
+        profile.policy.require("native submit policy")?;
+        let binding_sha256 = digest(
+            format!(
+                "{}-runtime-policy-v1\n{native:?}\n{}\n{:?}\n{candidate_sha256:?}",
+                descriptor.identity.id, profile.id, profile.policy_sha256,
+            ).as_bytes(),
+        );
+        evidence.extend(profile.operations.iter().map(|operation| CapabilityEvidence {
+            provider: provider.clone(),
+            native: native.clone(),
+            profile_id: profile.id.into(),
+            policy_sha256: profile.policy_sha256,
+            channel: profile.channel,
+            operation: *operation,
+            kind: EvidenceKind::Native,
+            candidate_sha256,
+            evidence_sha256: binding_sha256,
+        }));
+    }
+    Ok(evidence)
 }
 
 struct NoNewIo;
@@ -577,12 +595,13 @@ pub fn stop(workspace: &Path, team: &str, seat: &SeatId) -> Result<OperationReco
         .ok_or(Error::Invalid("unknown native seat"))?;
     let nonce = backend.store.propose_identity(seat)?.instance;
     let operation = OperationId::new(format!("stop-{}", nonce.as_str()))?;
-    let adapter = adapter(&backend.binding, &target.identity)?;
+    let selected = registry::provider(target.provider.as_str())?;
+    let adapter = adapter(&backend.binding, &target.identity, &target.provider)?;
     let hooks = adapter.hooks();
     let clock = RealClock::new();
     let mut physical = PhysicalRuntime::new(
         Registration {
-            descriptor: &KIRO_DESCRIPTOR,
+            descriptor: selected.descriptor(),
             hooks: &hooks,
             controls: &[],
         },
@@ -619,6 +638,63 @@ mod tests {
     }
 
     #[test]
+    fn cursor_metadata_and_unverified_recipe_never_mint_native_evidence() {
+        let provider = ProviderId::new("cursor").unwrap();
+        let mut native = NativeIdentity {
+            version: "2026.09.29-a1b2c3".into(),
+            harness: "cursor-launcher".into(),
+            ui: "metadata".into(),
+            platform: Platform::MacOs,
+            executable_sha256: digest(b"launcher only"),
+        };
+        let candidate = digest(b"candidate");
+        assert!(policy_evidence(&provider, &native, candidate).unwrap().is_empty());
+        native.harness = "cursor-agent".into();
+        native.ui = "tui".into();
+        assert!(matches!(policy_evidence(&provider, &native, candidate),
+            Err(ContractError::Unverified { field: "native submit policy", .. })));
+        // Even a Kiro-looking image cannot reuse its evidence under Cursor.
+        native.harness = "v2".into();
+        native.version = "2.29.0".into();
+        assert!(policy_evidence(&provider, &native, candidate).unwrap().is_empty());
+    }
+
+    #[test]
+    fn cursor_request_refuses_metadata_launch_and_wrong_provider_catalog() {
+        let provider = ProviderId::new("cursor").unwrap();
+        let scope = ScopeId::new("controlled").unwrap();
+        let seat = SeatId::new("worker").unwrap();
+        let binding = Binding {
+            version: 1,
+            workspace: CwdIdentity { path: "/controlled".into(), identity: digest(b"cwd") },
+            team: "demo".into(), scope: scope.clone(), endpoint: "/controlled/socket".into(),
+            candidate: "/controlled/candidate".into(), candidate_sha256: digest(b"candidate"),
+            tmux: "/controlled/tmux".into(), transport_root: "/controlled/runtime".into(),
+        };
+        let role = RoleConfig {
+            id: seat.clone(), provider: provider.clone(), source: "/controlled/role.md".into(),
+            role: "worker".into(), model: "gpt-5.6-luna-xhigh".into(), effort: None,
+            bypass: true, body: "role".into(),
+            prompt: super::super::prompt::Prompt { text: "prompt".into(), sha256: digest(b"prompt"), sources: vec![] },
+        };
+        let identity = InstanceIdentity { scope, seat, instance: InstanceId::new("preflight").unwrap(), generation: Generation(1) };
+        let native = NativeIdentity {
+            version: "2026.09.29-a1b2c3".into(), harness: "cursor-launcher".into(),
+            ui: "metadata".into(), platform: Platform::MacOs, executable_sha256: digest(b"launcher"),
+        };
+        let mut discovery = Discovery {
+            engine: "/controlled/cursor-agent".into(), native: native.clone(),
+            catalog: CatalogObservation { provider, native,
+                schema: team_agent_contract::providers::cursor::native::CATALOG_SOURCE.schema.into(), models: vec![] },
+        };
+        assert!(matches!(request(&binding, &role, identity.clone(), &discovery),
+            Err(BackendError::Contract(ContractError::Unverified { field: "native subscription launch", .. }))));
+        discovery.catalog.provider = ProviderId::new("kiro").unwrap();
+        assert!(matches!(request(&binding, &role, identity, &discovery),
+            Err(BackendError::Contract(ContractError::Mismatch("role native catalog")))));
+    }
+
+    #[test]
     fn policy_bindings_track_runtime_native_identity_not_a_release_receipt() {
         let mut native = NativeIdentity {
             version: "2.28.0".into(),
@@ -628,11 +704,12 @@ mod tests {
             executable_sha256: digest(b"old image"),
         };
         let candidate = digest(b"candidate");
-        let old = policy_evidence(&native, candidate);
+        let provider = ProviderId::new("kiro").unwrap();
+        let old = policy_evidence(&provider, &native, candidate).unwrap();
         assert!(!old.is_empty());
         native.version = "2.29.0".into();
         native.executable_sha256 = digest(b"updated image");
-        let new = policy_evidence(&native, candidate);
+        let new = policy_evidence(&provider, &native, candidate).unwrap();
         assert_eq!(new.len(), old.len());
         for (old, new) in old.iter().zip(&new) {
             assert_eq!(new.native, native);
@@ -641,6 +718,6 @@ mod tests {
             assert_ne!(new.evidence_sha256, old.evidence_sha256);
         }
         native.harness = "v3".into();
-        assert!(policy_evidence(&native, candidate).is_empty());
+        assert!(policy_evidence(&provider, &native, candidate).unwrap().is_empty());
     }
 }
