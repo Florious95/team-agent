@@ -1926,7 +1926,11 @@ fn delivery_transport_for_recipient<'a>(
         }
         return DeliveryTransport::Borrowed(product_transport);
     };
-    if socket == crate::tmux_backend::socket_name_for_workspace(workspace) {
+    // An exact endpoint match can reuse the supplied channel; do not select
+    // another server merely because it has a pane with the same numeric id.
+    if product_transport.tmux_endpoint().as_deref() == Some(socket)
+        || socket == crate::tmux_backend::socket_name_for_workspace(workspace)
+    {
         DeliveryTransport::Borrowed(product_transport)
     } else {
         // 0.5.4 gate054 cross-team leak fix: when `leader_receiver.tmux_socket`
