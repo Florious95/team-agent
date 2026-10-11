@@ -138,7 +138,8 @@ pub fn start_agent(
         Ok(json!({"ok":coordinator.ok,"agent_id":agent,"status":"running","runtime":"contract",
             "start_mode":if unstarted {"fresh"} else {"resumed"}, "operation":receipt.id,
             "session_id":projection.get("session_id"),"generation":projection.get("generation"),
-            "coordinator":coordinator}))
+            "coordinator":crate::lifecycle::coordinator_start_summary_value(
+                &crate::lifecycle::CoordinatorStartSummary::from_start_report(&coordinator))}))
     })
 }
 
@@ -199,7 +200,9 @@ pub fn restart(workspace: &Path, team: Option<&str>) -> Result<Option<Value>, Cl
     ).map_err(error)?;
     Ok(Some(json!({"ok":failed.is_empty() && coordinator.ok,"runtime":"contract",
         "status":if failed.is_empty() {"restarted"} else if succeeded.is_empty() {"failed"} else {"partial"},
-        "team_id":latest.team_key,"agents":succeeded,"failed_agents":failed,"coordinator":coordinator})))
+        "team_id":latest.team_key,"agents":succeeded,"failed_agents":failed,
+        "coordinator":crate::lifecycle::coordinator_start_summary_value(
+            &crate::lifecycle::CoordinatorStartSummary::from_start_report(&coordinator))})))
 }
 
 pub fn stop_agent(

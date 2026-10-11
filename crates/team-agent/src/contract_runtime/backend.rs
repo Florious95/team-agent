@@ -10,7 +10,7 @@ use team_agent_contract::contract::{
     descriptor::AuthMode,
     hooks::*,
     plan::*,
-    session::CwdIdentity,
+    session::{CwdIdentity, ResumeBinding},
     types::*,
 };
 use team_agent_contract::host::{
@@ -537,7 +537,7 @@ pub(crate) fn prepare_restart(
     let config = super::framework::team_config(workspace, directory, team)?.ok_or(BackendError::Metadata)?;
     let mut prepared = Vec::new();
     let agents = state.get("agents").and_then(serde_json::Value::as_object).ok_or(BackendError::Metadata)?;
-    for (id, row) in agents.iter().filter(|(_, row)| super::framework::is_contract(row)) {
+    for (id, _) in agents.iter().filter(|(_, row)| super::framework::is_contract(row)) {
         let Some(role) = config.roles.iter().find(|role| role.id.as_str() == id) else {
             // Removed roles are not silently re-created from an old snapshot.
             continue;
