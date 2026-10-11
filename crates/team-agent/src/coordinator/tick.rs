@@ -359,6 +359,19 @@ impl Coordinator {
         let event_log = EventLog::new(self.workspace.as_path());
         increment_coordinator_tick_iteration_count(&self.workspace);
 
+        #[cfg(unix)]
+        if let Err(error) =
+            crate::contract_runtime::pump::tick(self.workspace.as_path(), &mut state)
+        {
+            let _ = event_log.write(
+                "contract.tick.failed",
+                serde_json::json!({"error":error.to_string()}),
+            );
+        }
+        #[cfg(unix)]
+        let contract_only = crate::contract_runtime::framework::only_contract(&state);
+        #[cfg(not(unix))]
+        let contract_only = false;
         self.record_step(TickStepGroup::SessionGate, "tmux_session_gate");
         if let Some(session_name) = state
             .get("session_name")
@@ -367,7 +380,7 @@ impl Coordinator {
             .map(str::to_owned)
         {
             let session = crate::transport::SessionName::new(&session_name);
-            if !self.transport.has_session(&session)? {
+            if !contract_only && !self.transport.has_session(&session)? {
                 event_log.write(
                     "coordinator.session_missing",
                     serde_json::json!({"session": session_name}),
@@ -564,13 +577,14 @@ impl Coordinator {
                 // Keep the sampled topology guard, but commit only this tick's
                 // observations onto latest so task/note writers cannot be lost.
                 let team_key = crate::state::projection::team_state_key(&state);
-                crate::state::repository::StateRepository::new(self.workspace.as_path()).commit_observations(
-                    crate::state::repository::StateWriteIntent::CoordinatorTick {
-                        team_key: team_key.as_str(),
-                    },
-                    &before_observation,
-                    &state,
-                )
+                crate::state::repository::StateRepository::new(self.workspace.as_path())
+                    .commit_observations(
+                        crate::state::repository::StateWriteIntent::CoordinatorTick {
+                            team_key: team_key.as_str(),
+                        },
+                        &before_observation,
+                        &state,
+                    )
             }
         };
         if saved.is_err() {
@@ -1876,6 +1890,10 @@ fn tick_has_work_obligation(store: &crate::message_store::MessageStore) -> bool 
 }
 
 fn agent_probe_base_eligible(agent: &Value) -> bool {
+    #[cfg(unix)]
+    if crate::contract_runtime::framework::is_contract(agent) {
+        return false;
+    }
     let status = agent.get("status").and_then(Value::as_str);
     !matches!(
         status,

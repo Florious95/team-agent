@@ -1,0 +1,10 @@
+Unit=gb-kiro-k3-prepare-a1
+State=terminal
+LoadState=loaded
+ActiveState=inactive
+Result=exit-code
+ExecMainStatus=101
+CommandExit=101
+MainPID=160257
+Wiped=no
+Process=

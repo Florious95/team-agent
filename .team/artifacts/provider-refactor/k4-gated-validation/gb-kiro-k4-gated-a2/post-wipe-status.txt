@@ -1,0 +1,10 @@
+Unit=gb-kiro-k4-gated-a2
+State=terminal
+LoadState=loaded
+ActiveState=inactive
+Result=exit-code
+ExecMainStatus=101
+CommandExit=101
+MainPID=
+Wiped=yes
+Process=

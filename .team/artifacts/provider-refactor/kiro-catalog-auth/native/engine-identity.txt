@@ -1,0 +1,1 @@
+430aae1a4f5ae252e785114d45d61ec465796ad6ca96383fb7ca383dd96b1712  /Applications/Kiro CLI.app/Contents/MacOS/kiro-cli-chat

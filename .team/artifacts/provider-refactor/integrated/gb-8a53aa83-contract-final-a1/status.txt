@@ -1,0 +1,10 @@
+Unit=gb-8a53aa83-contract-final-a1
+State=terminal
+LoadState=loaded
+ActiveState=inactive
+Result=exit-code
+ExecMainStatus=101
+CommandExit=101
+MainPID=563894
+Wiped=no
+Process=

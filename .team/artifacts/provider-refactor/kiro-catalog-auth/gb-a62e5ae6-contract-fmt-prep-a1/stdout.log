@@ -1,0 +1,59 @@
+CgroupReceiptBegin
+Schema=gb-cgroup-receipt-v1
+Unit=gb-a62e5ae6-contract-fmt-prep-a1
+Policy=optional_degraded
+Outcome=applied
+CgroupPath=/sys/fs/cgroup/gb-offload/gb-a62e5ae6-contract-fmt-prep-a1
+AvailableControllers=cpuset cpu io memory hugetlb pids
+DelegatedControllers=cpu memory pids
+EffectiveWriterUid=0
+EffectiveWriterName=root
+Resource.memory.max.Requested=15032385536
+Resource.memory.max.Applied=true
+Resource.memory.max.Readback=15032385536
+Resource.memory.max.Reason=none
+Resource.memory.high.Requested=12884901888
+Resource.memory.high.Applied=true
+Resource.memory.high.Readback=12884901888
+Resource.memory.high.Reason=none
+Resource.memory.oom.group.Requested=1
+Resource.memory.oom.group.Applied=true
+Resource.memory.oom.group.Readback=1
+Resource.memory.oom.group.Reason=none
+Resource.cpu.max.Requested=800000 100000
+Resource.cpu.max.Applied=true
+Resource.cpu.max.Readback=800000 100000
+Resource.cpu.max.Reason=none
+CgroupReceiptEnd
+ToolchainReceiptBegin
+Toolchain.Schema=gb-rust-toolchain-receipt-v1
+Toolchain.Requested=1.95.0
+Toolchain.RustupHome=/home/box/.rustup
+Toolchain.CargoHome=/home/box/.cargo
+Toolchain.RustcPath=/home/box/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/rustc
+Toolchain.RustcIdentity=rustc 1.95.0 (59807616e 2026-04-14)
+Toolchain.CargoPath=/home/box/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/cargo
+Toolchain.CargoIdentity=cargo 1.95.0 (f2d3ce0bd 2026-03-21)
+Toolchain.CargoFmtPath=/home/box/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/cargo-fmt
+Toolchain.CargoFmtIdentity=rustfmt 1.9.0-stable (59807616e1 2026-04-14)
+Toolchain.RustfmtPath=/home/box/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/rustfmt
+Toolchain.RustfmtIdentity=rustfmt 1.9.0-stable (59807616e1 2026-04-14)
+Toolchain.Verified=true
+ToolchainReceiptEnd
+SourceHEAD=a62e5ae6502a9a421f3e74168501d603bab48592
+SourceTree=81cd1acab02c5732088f0699b05c44250806645a
+Branch=builder/kiro-contract-integrated-29c43fd-a1
+FMT_BEGIN=cargo fmt --manifest-path crates/team-agent-contract/Cargo.toml
+FMT_EXIT=0
+STATUS_BEGIN
+## builder/kiro-contract-integrated-29c43fd-a1
+ M crates/team-agent-contract/src/kiro/catalog.rs
+ M crates/team-agent-contract/src/kiro/native.rs
+ M crates/team-agent-contract/tests/kiro_catalog.rs
+ M crates/team-agent-contract/tests/kiro_model_catalog.rs
+DIFF_NAMES_BEGIN
+crates/team-agent-contract/src/kiro/catalog.rs
+crates/team-agent-contract/src/kiro/native.rs
+crates/team-agent-contract/tests/kiro_catalog.rs
+crates/team-agent-contract/tests/kiro_model_catalog.rs
+UNTRACKED_BEGIN

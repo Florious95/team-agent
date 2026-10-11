@@ -1,0 +1,33 @@
+[package]
+name = "team-agent-contract"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "AGPL-3.0"
+description = "Isolated, provider-neutral Team Agent adaptation contracts"
+publish = false
+
+# Deliberately independent of the legacy workspace and its lockfile.
+[workspace]
+resolver = "2"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+rusqlite = { version = "=0.32.1", features = ["bundled"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.149"
+sha2 = "=0.10.9"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "=0.30.1", default-features = false, features = ["fs", "process", "signal", "user"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libproc = "=0.14.10"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"

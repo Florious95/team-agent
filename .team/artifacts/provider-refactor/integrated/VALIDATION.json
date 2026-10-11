@@ -1,0 +1,21 @@
+{
+  "SourceHEAD": "be67a0128dc06e6692e095d92bb19252c642145e",
+  "SourceTree": "5015793824f894594c169ec13cd21e3c1f02f3fc",
+  "TEST_EXIT": "0",
+  "CLIPPY_EXIT": "0",
+  "FMT_CHECK_EXIT": "0",
+  "passed": 152,
+  "failed": 0,
+  "ignored": 0,
+  "completed_targets_including_zero_test_lib": 13,
+  "wiped_units_rechecked_read_only": [
+    "gb-be67a012-contract-final-a1",
+    "gb-91533932-contract-fmt-prep-a1"
+  ],
+  "native_kiro_acceptance": "NOT-RUN",
+  "pr": 307,
+  "isDraft": false,
+  "legacy_byte_freeze": "diff=0 vs 2e43ad02 for crates/team-agent/root manifests/AGENTS/CLAUDE",
+  "product_byte_bridge": "diff=0 vs 12ef1aaf for src and package manifests",
+  "remaining": "See REPORT.md; Ready for Review is not native/K5 readiness."
+}

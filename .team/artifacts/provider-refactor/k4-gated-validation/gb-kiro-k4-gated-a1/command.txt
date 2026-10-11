@@ -1,0 +1,3 @@
+bash
+-c
+set -e; cargo fmt --manifest-path crates/team-agent-contract/Cargo.toml; if ! git diff --quiet; then git add crates/team-agent-contract; git -c user.name="K4 Builder" -c user.email="k4-builder@localhost" commit -m "Format gated Kiro adapter"; fi; printf "TestedSource="; git rev-parse HEAD; printf "TestedTree="; git rev-parse HEAD^{tree}; git diff --exit-code ae6ee58d HEAD -- . ":(exclude)crates/team-agent-contract"; cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets; cargo clippy --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets -- -D warnings; cargo fmt --manifest-path crates/team-agent-contract/Cargo.toml --check

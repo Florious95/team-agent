@@ -1,0 +1,10 @@
+Unit=gb-kiro-k3-check-a2
+State=terminal
+LoadState=loaded
+ActiveState=inactive
+Result=success
+ExecMainStatus=0
+CommandExit=0
+MainPID=200091
+Wiped=no
+Process=
