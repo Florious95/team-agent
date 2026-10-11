@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.114]
+
+- **Official Kiro CLI integration (PR #308):** route Kiro Workers through the independent contract runtime and public `quick-start`, `status`, `send`, and scoped `shutdown` commands. Preserve complete instruction snapshots, per-instance native agent/MCP configuration, executable/session identity fences, durable message/result forwarding, and existing provider adapters. Unadmitted Leader, resume/Fork, mutable worker lifecycle, and blanket-trust requests remain explicit refusals; this is not a claim of unrestricted native scenario coverage.
+- **Host-global supplemental Leader system prompt (Issue #309, PR #310):** add `team-agent leader-prompt show|set|append|clear` with strict literal/UTF-8 file inputs and private, locked atomic storage in `~/.team-agent/leader-prompt.txt`. Apply the configuration once to new Leaders only, never attached Leaders or Workers, while retaining provider core prompts. Pi, Claude, Grok, and Codex use their native prompt carriers; configured Cursor/Copilot refuse unsupported injection. Framework launch diagnostics withhold prompt-bearing payloads without claiming redaction of arbitrary native business output.
+- **Release metadata:** align the Rust workspace/lockfile, installer, three platform packages and official publishing workflow at 0.5.114. The formal tag workflow retains workspace verification and three-platform build/publish gates; this version-preparation change does not itself establish new runtime acceptance or publish the packages.
+
 ## [0.5.113]
 
 - **English-only CLI guidance and technical diagnostics (PR #302):** remove all remaining hardcoded Chinese runtime guidance from public help, templates, reminders, errors, addressing instructions and CSV status labels. Restore consistent English without altering Unicode user input, UTF-8 regression fixtures or source comments; the minimal public team template now uses the default `current` identity.
