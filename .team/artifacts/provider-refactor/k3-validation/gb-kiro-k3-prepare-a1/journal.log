@@ -1,0 +1,154 @@
+CgroupReceiptBegin
+Schema=gb-cgroup-receipt-v1
+Unit=gb-kiro-k3-prepare-a1
+Policy=optional_degraded
+Outcome=applied
+CgroupPath=/sys/fs/cgroup/gb-offload/gb-kiro-k3-prepare-a1
+AvailableControllers=cpuset cpu io memory hugetlb pids
+DelegatedControllers=cpu memory pids
+EffectiveWriterUid=0
+EffectiveWriterName=root
+Resource.memory.max.Requested=15032385536
+Resource.memory.max.Applied=true
+Resource.memory.max.Readback=15032385536
+Resource.memory.max.Reason=none
+Resource.memory.high.Requested=12884901888
+Resource.memory.high.Applied=true
+Resource.memory.high.Readback=12884901888
+Resource.memory.high.Reason=none
+Resource.memory.oom.group.Requested=1
+Resource.memory.oom.group.Applied=true
+Resource.memory.oom.group.Readback=1
+Resource.memory.oom.group.Reason=none
+Resource.cpu.max.Requested=800000 100000
+Resource.cpu.max.Applied=true
+Resource.cpu.max.Readback=800000 100000
+Resource.cpu.max.Reason=none
+CgroupReceiptEnd
+ToolchainReceiptBegin
+Toolchain.Schema=gb-rust-toolchain-receipt-v1
+Toolchain.Requested=1.95.0
+Toolchain.RustupHome=/home/box/.rustup
+Toolchain.CargoHome=/home/box/.cargo
+Toolchain.RustcPath=/home/box/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/rustc
+Toolchain.RustcIdentity=rustc 1.95.0 (59807616e 2026-04-14)
+Toolchain.CargoPath=/home/box/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/cargo
+Toolchain.CargoIdentity=cargo 1.95.0 (f2d3ce0bd 2026-03-21)
+Toolchain.CargoFmtPath=/home/box/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/cargo-fmt
+Toolchain.CargoFmtIdentity=rustfmt 1.9.0-stable (59807616e1 2026-04-14)
+Toolchain.RustfmtPath=/home/box/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/rustfmt
+Toolchain.RustfmtIdentity=rustfmt 1.9.0-stable (59807616e1 2026-04-14)
+Toolchain.Verified=true
+ToolchainReceiptEnd
+    Updating crates.io index
+     Locking 30 packages to latest compatible versions
+      Adding rusqlite v0.32.1 (available: v0.40.2)
+      Adding serde v1.0.228 (available: v1.0.229)
+      Adding serde_core v1.0.228 (available: v1.0.229)
+      Adding serde_derive v1.0.228 (available: v1.0.229)
+      Adding serde_json v1.0.149 (available: v1.0.151)
+[gb-source 32ca4d60] Format and lock K3 orchestration dependencies
+ 14 files changed, 2556 insertions(+), 627 deletions(-)
+ Downloading crates ...
+  Downloaded cc v1.6.0
+  Downloaded find-msvc-tools v0.1.14
+  Downloaded zmij v1.0.23
+  Downloaded cfg-if v1.0.5
+  Downloaded unicode-ident v1.0.26
+  Downloaded proc-macro2 v1.0.107
+  Downloaded bitflags v2.13.2
+  Downloaded smallvec v1.16.2
+  Downloaded quote v1.0.47
+  Downloaded pkg-config v0.3.34
+  Downloaded syn v2.0.119
+  Downloaded memchr v2.8.3
+  Downloaded zerocopy v0.8.62
+   Compiling version_check v0.9.5
+   Compiling zerocopy v0.8.62
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.26
+   Compiling find-msvc-tools v0.1.14
+   Compiling shlex v2.0.1
+   Compiling quote v1.0.47
+   Compiling once_cell v1.21.4
+   Compiling vcpkg v0.2.15
+   Compiling cc v1.6.0
+   Compiling pkg-config v0.3.34
+   Compiling serde_core v1.0.228
+   Compiling cfg-if v1.0.5
+   Compiling zmij v1.0.23
+   Compiling ahash v0.8.12
+   Compiling serde_json v1.0.149
+   Compiling serde v1.0.228
+   Compiling memchr v2.8.3
+   Compiling smallvec v1.16.2
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling itoa v1.0.18
+   Compiling bitflags v2.13.2
+   Compiling fallible-iterator v0.3.0
+   Compiling syn v2.0.119
+   Compiling libsqlite3-sys v0.30.1
+   Compiling serde_derive v1.0.228
+   Compiling hashbrown v0.14.5
+   Compiling hashlink v0.9.1
+   Compiling rusqlite v0.32.1
+   Compiling team-agent-contract v0.1.0 (/workspace/grok-bot-offload/jobs/gb-kiro-k3-prepare-a1/work/crates/team-agent-contract)
+error[E0597]: `stmt` does not live long enough
+   --> src/orchestration/mcp.rs:129:17
+    |
+127 |                 let mut stmt =
+    |                     -------- binding `stmt` declared here
+128 |                     tx.prepare("SELECT seat FROM contract_seats WHERE seat<>?1 ORDER BY seat")?;
+129 |                 stmt.query_map([context.identity.seat.as_str()], |r| r.get::<_, String>(0))?
+    |                 ^^^^------------------------------------------------------------------------
+    |                 |
+    |                 borrowed value does not live long enough
+    |                 a temporary with access to the borrow is created here ...
+130 |                     .collect::<Result<Vec<_>, _>>()?
+131 |             } else {
+    |             -
+    |             |
+    |             `stmt` dropped here while still borrowed
+    |             ... and the borrow might be used here, when that temporary is dropped and runs the destructor for type `ControlFlow<Result<Infallible, rusqlite::Error>, MappedRows<'_, {closure@src/orchestration/mcp.rs:129:66: 129:69}>>`
+    |
+    = note: the temporary is part of an expression at the end of a block;
+            consider forcing this temporary to be dropped sooner, before the block's local variables are dropped
+help: for example, you could save the expression's value in a new local variable `x` and then make `x` be the expression at the end of the block
+    |
+129 ~                 let x = stmt.query_map([context.identity.seat.as_str()], |r| r.get::<_, String>(0))?
+130 ~                     .collect::<Result<Vec<_>, _>>()?; x
+    |
+
+error[E0597]: `stmt` does not live long enough
+   --> src/orchestration/supervisor.rs:269:12
+    |
+266 |           let mut stmt = self
+    |               -------- binding `stmt` declared here
+...
+269 |           Ok(stmt
+    |              -^^^
+    |              |
+    |  ____________borrowed value does not live long enough
+    | |
+270 | |             .query_map([], |r| r.get(0))?
+    | |_________________________________________- a temporary with access to the borrow is created here ...
+271 |               .collect::<Result<Vec<_>, _>>()?)
+272 |       }
+    |       -
+    |       |
+    |       `stmt` dropped here while still borrowed
+    |       ... and the borrow might be used here, when that temporary is dropped and runs the destructor for type `ControlFlow<Result<Infallible, rusqlite::Error>, MappedRows<'_, {closure@src/orchestration/supervisor.rs:270:28: 270:31}>>`
+    |
+    = note: the temporary is part of an expression at the end of a block;
+            consider forcing this temporary to be dropped sooner, before the block's local variables are dropped
+help: for example, you could save the expression's value in a new local variable `x` and then make `x` be the expression at the end of the block
+    |
+269 ~         let x = Ok(stmt
+270 |             .query_map([], |r| r.get(0))?
+271 ~             .collect::<Result<Vec<_>, _>>()?); x
+    |
+
+For more information about this error, try `rustc --explain E0597`.
+error: could not compile `team-agent-contract` (lib) due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `team-agent-contract` (lib test) due to 2 previous errors

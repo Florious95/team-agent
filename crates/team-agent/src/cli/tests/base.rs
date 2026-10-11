@@ -797,3 +797,91 @@ fn cmd_leader_passthrough_maps_grok_and_cursor_not_claude() {
     assert_eq!(leader_passthrough_provider("cursor_agent"), None);
     assert_eq!(leader_passthrough_provider("not-a-passthrough"), None);
 }
+
+#[cfg(unix)]
+#[test]
+#[serial_test::serial(env)]
+fn kiro_doctor_inventory_is_read_only_and_does_not_claim_native_readiness() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = crate::cli::hermetic_test_support::HermeticTestEnv::enter("kiro-inventory");
+    let bin = env.workspace("bin");
+    let _path = env.with_env("PATH", &bin.to_string_lossy());
+    let inventory = provider_doctor_checks();
+    assert_eq!(inventory["kiro"]["installed"], false);
+    assert_eq!(inventory["codex"]["command"], "codex");
+    let launcher = bin.join("kiro-cli");
+    std::fs::write(
+        &launcher,
+        "#!/bin/sh\nprintf called > \"$0.called\"\nexit 0\n",
+    )
+    .unwrap();
+    for (mode, installed) in [(0o600, false), (0o700, true)] {
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(mode)).unwrap();
+        assert_eq!(
+            provider_doctor_checks()["kiro"],
+            json!({
+                "auth": "unknown",
+                "command": "kiro-cli",
+                "installed": installed,
+                "version": "unknown",
+                "probe_status": "not_run",
+                "provider_probe_status": "not_run",
+            })
+        );
+    }
+    assert!(!bin.join("kiro-cli.called").exists());
+    assert!(env.registry_entries().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+#[serial_test::serial(env)]
+fn kiro_leader_entry_has_help_and_typed_refusal_without_native_or_fallback_effects() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = crate::cli::hermetic_test_support::HermeticTestEnv::enter("kiro-leader-gate");
+    let cwd = env.workspace("empty");
+    let bin = env.workspace("bin");
+    for tool in ["kiro-cli", "kiro-cli-chat", "codex", "pi", "tmux"] {
+        let path = bin.join(tool);
+        std::fs::write(&path, "#!/bin/sh\nprintf called > \"$0.called\"\nexit 0\n").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let _path = env.with_env("PATH", &bin.to_string_lossy());
+    assert!(!crate::cli::emit::is_leader_passthrough_command("kiro"));
+    assert_eq!(leader_passthrough_provider("kiro"), None);
+    let help = crate::cli::emit::command_help(Some("kiro"));
+    assert!(help.contains("team-agent kiro [--json]"));
+    assert!(help.contains("kiro_leader_not_admitted"));
+    assert!(crate::cli::emit::default_help().contains("Check Kiro leader launch admission"));
+    for alias in ["-h", "--help"] {
+        assert_eq!(
+            crate::cli::run(&["kiro".into(), alias.into()], &cwd),
+            ExitCode::Ok
+        );
+    }
+    let cases: &[&[&str]] = &[&[], &["--json"], &["--attach-existing", "--confirm"]];
+    for values in cases {
+        let args: Vec<String> = values.iter().map(|arg| (*arg).into()).collect();
+        let result = cmd_kiro_leader(&args);
+        assert_eq!(result.exit, ExitCode::Error);
+        assert_eq!(result.as_json, values.contains(&"--json"));
+        let CmdOutput::Json(value) = result.output else {
+            panic!("expected structured capability refusal");
+        };
+        assert_eq!(value["schema_version"], "leader_launch.v1");
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["provider"], "kiro");
+        assert_eq!(value["capability"], "leader_launch");
+        assert_eq!(value["reason"], "kiro_leader_not_admitted");
+        let mut argv = vec!["kiro".into()];
+        argv.extend(args);
+        assert_eq!(crate::cli::run(&argv, &cwd), ExitCode::Error);
+    }
+    assert_eq!(std::fs::read_dir(&cwd).unwrap().count(), 0);
+    assert_eq!(
+        std::fs::read_dir(&bin).unwrap().count(),
+        5,
+        "no tool invoked"
+    );
+    assert!(env.registry_entries().is_empty());
+}

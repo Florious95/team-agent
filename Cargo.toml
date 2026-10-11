@@ -6,6 +6,8 @@
 [workspace]
 resolver = "2"
 members = ["crates/team-agent", "crates/win-conpty-phase0", "crates/conpty-transport"]
+# The new runtime retains its independent contract/test workspace and lockfile.
+exclude = ["crates/team-agent-contract"]
 
 [workspace.package]
 edition = "2021"

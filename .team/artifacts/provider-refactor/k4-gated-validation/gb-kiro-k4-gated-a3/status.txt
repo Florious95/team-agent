@@ -1,0 +1,10 @@
+Unit=gb-kiro-k4-gated-a3
+State=terminal
+LoadState=loaded
+ActiveState=inactive
+Result=success
+ExecMainStatus=0
+CommandExit=0
+MainPID=397808
+Wiped=no
+Process=

@@ -1,0 +1,51 @@
+[
+  {
+    "name": "send_message",
+    "description": "Send a message to a teammate, the leader, or '*' for all other team members. mailbox=true stores durably without live injection; the default is live delivery.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "to": {"type":"string","description":"Target agent id, 'leader', or '*' for broadcast."},
+        "content": {"type":"string","description":"Message body."},
+        "mailbox": {"type":"boolean","description":"Set true to store durably without live injection; omit for default live delivery."}
+      },
+      "required": ["to","content"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "report_result",
+    "description": "Report task completion with a durable result envelope. Optional presentation routing controls live leader display, not persistence.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "envelope": {"type":"object","description":"Optional full result envelope.","additionalProperties":true},
+        "summary": {"type":"string","description":"Short result summary."},
+        "status": {"type":"string","description":"Result status."},
+        "changes": {"type":"array","description":"Changed files or artifacts.","items":{"type":"object","additionalProperties":true}},
+        "tests": {"type":"array","description":"Tests or checks performed.","items":{"type":"object","additionalProperties":true}},
+        "risks": {"type":"array","description":"Risks or blockers.","items":{"type":"object","additionalProperties":true}},
+        "artifacts": {"type":"array","description":"Artifact references.","items":{"type":"object","additionalProperties":true}},
+        "next_actions": {"type":"array","description":"Suggested next actions.","items":{"type":"object","additionalProperties":true}},
+        "task_id": {"type":"string","description":"Optional task id override."},
+        "agent_id": {"type":"string","description":"Optional reporting agent id; must match framework-injected TEAM_AGENT_ID."},
+        "presentation": {
+          "type":"object","description":"Optional durable presentation routing.",
+          "properties": {
+            "sink":{"type":"string","enum":["leader","casefile","silent"]},
+            "class":{"type":"string","enum":["message","progress","stage_result","stage_pass","bounce","blocking","final_review","timeout"]},
+            "case_id":{"type":"string"}
+          },
+          "required":["sink","class"],"additionalProperties":false
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name":"get_team_status",
+    "description":"Return machine-readable team status.",
+    "inputSchema":{"type":"object","properties":{},"required":[],"additionalProperties":false}
+  }
+]

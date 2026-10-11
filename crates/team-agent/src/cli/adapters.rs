@@ -7,6 +7,9 @@ use super::*;
 
 /// `cmd_quick_start`(`commands.py:18`)。`--json` 或 `!ok` → 整 dict;否则 `result["summary"]`。
 pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
+    #[cfg(unix)]
+    crate::contract_runtime::config::read_team(args)
+        .map_err(|error| CliError::Runtime(error.to_string()))?;
     let mut value = lifecycle_port::quick_start(
         &args.workspace,
         &args.agents_dir,
@@ -158,7 +161,10 @@ fn quick_start_config_guidance(value: &mut Value, args: &QuickStartArgs) -> Opti
 /// E13:quick-start "team 起了" 人类输出 = summary + attach 块。所有成功出口共用(别每分支手拷)。
 /// attach_commands 缺/空 → 只 summary(向后兼容)。
 fn quickstart_human(value: &Value) -> String {
-    let summary = value.get("summary").and_then(Value::as_str).unwrap_or("Team started.");
+    let summary = value
+        .get("summary")
+        .and_then(Value::as_str)
+        .unwrap_or("Team started.");
     let attach: Vec<&str> = value
         .get("attach_commands")
         .and_then(Value::as_array)
@@ -1088,19 +1094,13 @@ mod tests {
         let value = json!({"summary": "quick-start complete"});
         assert_eq!(
             quickstart_human(&value),
-            format!(
-                "quick-start complete\n{}",
-                crate::cli::QUICK_START_REMINDER
-            )
+            format!("quick-start complete\n{}", crate::cli::QUICK_START_REMINDER)
         );
         // 空数组也只显示人类摘要与下一步，不凭空编造连接方式。
         let value2 = json!({"summary": "s", "attach_commands": []});
         assert_eq!(
             quickstart_human(&value2),
-            format!(
-                "s\n{}",
-                crate::cli::QUICK_START_REMINDER
-            )
+            format!("s\n{}", crate::cli::QUICK_START_REMINDER)
         );
     }
 
@@ -1219,7 +1219,11 @@ mod tests {
 
     #[test]
     fn quick_start_human_preserves_typed_refusals_without_error_field() {
-        for status in ["existing_runtime", "preflight_blocked", "leader_binding_refused"] {
+        for status in [
+            "existing_runtime",
+            "preflight_blocked",
+            "leader_binding_refused",
+        ] {
             let value = json!({
                 "ok": false,
                 "status": status,
@@ -1232,10 +1236,16 @@ mod tests {
             });
             let result = finish_quick_start(value.clone(), &quick_start_args(false)).unwrap();
             assert_eq!(result.exit, ExitCode::Error);
-            let CmdOutput::Human(text) = result.output else { panic!("expected human report") };
-            let rendered: Value = serde_json::from_str(text.strip_prefix("quick-start report:\n").unwrap()).unwrap();
+            let CmdOutput::Human(text) = result.output else {
+                panic!("expected human report")
+            };
+            let rendered: Value =
+                serde_json::from_str(text.strip_prefix("quick-start report:\n").unwrap()).unwrap();
             assert_eq!(rendered, value, "human projection lost fields for {status}");
-            assert!(!text.contains("team-agent doctor"), "must not replace actual actions");
+            assert!(
+                !text.contains("team-agent doctor"),
+                "must not replace actual actions"
+            );
             let json_result = finish_quick_start(value.clone(), &quick_start_args(true)).unwrap();
             assert_eq!(json_result.exit, ExitCode::Error);
             assert_eq!(json_result.output, CmdOutput::Json(value));
@@ -1252,8 +1262,11 @@ mod tests {
         });
         let result = finish_quick_start(value.clone(), &quick_start_args(false)).unwrap();
         assert_eq!(result.exit, ExitCode::Error);
-        let CmdOutput::Human(text) = result.output else { panic!("expected human report") };
-        let rendered: Value = serde_json::from_str(text.strip_prefix("quick-start report:\n").unwrap()).unwrap();
+        let CmdOutput::Human(text) = result.output else {
+            panic!("expected human report")
+        };
+        let rendered: Value =
+            serde_json::from_str(text.strip_prefix("quick-start report:\n").unwrap()).unwrap();
         assert_eq!(rendered, value);
     }
 

@@ -116,6 +116,22 @@ pub fn cmd_leader_passthrough(
     Ok(CmdResult::from_json(value, as_json))
 }
 
+/// Public capability gate, not a legacy passthrough or a native launch attempt.
+pub(crate) fn cmd_kiro_leader(args: &[String]) -> CmdResult {
+    CmdResult::from_json(
+        json!({
+            "schema_version": "leader_launch.v1",
+            "ok": false,
+            "provider": "kiro",
+            "capability": "leader_launch",
+            "reason": "kiro_leader_not_admitted",
+            "error": "Kiro leader launching is not admitted by this candidate; no native process was started.",
+            "action": "Use provider: kiro in a worker role with team-agent quick-start. Worker support does not grant leader capability.",
+        }),
+        leader_launcher_json(args),
+    )
+}
+
 /// Closed-set verb → Provider. `None` = not a passthrough verb (must not become ClaudeCode).
 pub(crate) fn leader_passthrough_provider(command: &str) -> Option<crate::model::enums::Provider> {
     use crate::model::enums::Provider;

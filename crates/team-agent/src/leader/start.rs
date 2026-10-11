@@ -291,6 +291,7 @@ fn leader_start_plan_with_ambient_authority(
         ),
         _ => None,
     };
+    let mut session_capture = None;
     let mut provider_argv = if provider == Provider::Pi && mode != LeaderStartMode::AttachExisting {
         let parsed = crate::lifecycle::launch::pi_mcp::parse_pi_leader_args(provider_args)
             .map_err(|error| LeaderError::Start(error.to_string()))?;
@@ -305,7 +306,8 @@ fn leader_start_plan_with_ambient_authority(
         );
         let prompt = crate::lifecycle::worker_command_context::compile_pi_leader_system_prompt();
         let team_mcp_tools = ["send_message", "report_result", "get_team_status"];
-        crate::lifecycle::launch::pi_mcp::materialize_pi_plan(
+        let spawned_at = chrono::Utc::now().to_rfc3339();
+        let command = crate::lifecycle::launch::pi_mcp::materialize_pi_plan(
             crate::lifecycle::launch::pi_mcp::PiMaterializeRequest {
                 workspace,
                 team_id: identity.team_id.as_str(),
@@ -322,8 +324,17 @@ fn leader_start_plan_with_ambient_authority(
                 ),
             },
         )
-        .map_err(|error| LeaderError::Start(error.to_string()))?
-        .argv
+        .map_err(|error| LeaderError::Start(error.to_string()))?;
+        session_capture = Some(crate::provider::CaptureSessionContext {
+            agent_id: "leader".into(),
+            spawn_cwd: resolve_workspace_for_hash(workspace),
+            pane_id: None,
+            pane_pid: None,
+            spawned_at: Some(spawned_at),
+            expected_session_id: command.expected_session_id,
+            provider_projects_root: command.provider_projects_root,
+        });
+        command.argv
     } else if provider == Provider::Pi {
         Vec::new()
     } else {
@@ -361,6 +372,7 @@ fn leader_start_plan_with_ambient_authority(
         session_name: plan_session_name,
         argv,
         provider_argv,
+        session_capture,
         // 0.3.28 Step 2: leader window inside the dedicated leader session is
         // named after the provider wire (e.g. `claude_code`), never the
         // literal string `leader`. Occupied names get a per-launch suffix.
@@ -1740,6 +1752,25 @@ fn managed_spawned_pane_in_targets(transport: &dyn Transport, spawned: &SpawnRes
         })
 }
 
+/// Keep the launcher's native identity with the canonical pane. The backing
+/// JSONL may not exist until Pi's first turn; receipt observation resolves it by
+/// exact header, never by filename/mtime or the Team Agent owner UUID.
+fn bind_plan_session(receiver: &mut serde_json::Value, plan: &LeaderStartPlan) {
+    if let Some(capture) = &plan.session_capture {
+        let native = serde_json::json!({
+            "expected_session_id": capture.expected_session_id,
+            "provider_projects_root": capture.provider_projects_root,
+            "spawn_cwd": capture.spawn_cwd,
+            "spawned_at": capture.spawned_at,
+            "pane_id": receiver.get("pane_id"),
+            "tmux_socket": receiver.get("tmux_socket"),
+            "leader_session_uuid": receiver.get("leader_session_uuid"),
+            "owner_epoch": receiver.get("owner_epoch"),
+        });
+        receiver["native_session"] = native;
+    }
+}
+
 fn persist_managed_leader_binding(
     plan: &LeaderStartPlan,
     workspace: &Path,
@@ -1855,7 +1886,7 @@ fn persist_managed_leader_binding(
     } else {
         serde_json::json!("managed_launcher")
     };
-    let receiver = serde_json::json!({
+    let mut receiver = serde_json::json!({
         "mode": "direct_tmux",
         "status": "attached",
         "provider": provider.clone(),
@@ -1870,6 +1901,15 @@ fn persist_managed_leader_binding(
         "discovery": discovery,
         "bound_panes": bound_panes,
     });
+    if keep_existing_scalar {
+        for key in ["native_session", "rollout_path"] {
+            if let Some(value) = existing_recv.as_ref().and_then(|old| old.get(key)) {
+                receiver[key] = value.clone();
+            }
+        }
+    } else {
+        bind_plan_session(&mut receiver, plan);
+    }
     let owner_uuid = if keep_existing_scalar {
         keep_field(
             existing_owner.as_ref(),
@@ -2028,6 +2068,7 @@ fn persist_exec_provider_leader_binding(
         }
         obj.insert("tmux_socket".to_string(), serde_json::json!(socket));
     }
+    bind_plan_session(&mut receiver, plan);
     let owner = serde_json::json!({
         "pane_id": pane,
         "provider": provider.clone(),
@@ -3345,6 +3386,7 @@ mod tests {
             session_name: None,
             argv: vec!["sh".to_string(), "-c".to_string(), command],
             provider_argv: vec!["codex".to_string()],
+            session_capture: None,
             leader_window: None,
             is_external_leader: true,
             leader_env: BTreeMap::new(),
@@ -3402,6 +3444,7 @@ mod tests {
             session_name: None,
             argv: vec!["sh".to_string(), "-c".to_string(), command],
             provider_argv: vec!["fake".to_string()],
+            session_capture: None,
             leader_window: None,
             is_external_leader: false,
             leader_env: BTreeMap::new(),
@@ -3931,6 +3974,7 @@ mod tests {
             session_name: Some(SessionName::new("team-agent-leader-claude_code-demo")),
             argv: vec!["tmux".to_string(), "attach-session".to_string()],
             provider_argv: vec!["claude".to_string()],
+            session_capture: None,
             leader_window: Some(WindowName::new("claude_code")),
             is_external_leader: false,
             leader_env: BTreeMap::new(),
@@ -4018,6 +4062,48 @@ mod tests {
         assert!(ids.contains(&"%0"), "bound_panes missing first: {recv}");
         assert!(ids.contains(&"%1"), "bound_panes missing second: {recv}");
         let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn pi_managed_leader_persists_native_identity_with_the_canonical_pane() {
+        let workspace = std::env::temp_dir().join(format!(
+            "ta-pi-leader-native-binding-{}", std::process::id()
+        ));
+        std::fs::create_dir_all(workspace.join(".team/runtime")).unwrap();
+        let mut plan = persist_test_plan(&workspace);
+        plan.provider = Provider::Pi;
+        plan.session_capture = Some(crate::provider::CaptureSessionContext {
+            agent_id: "leader".into(),
+            spawn_cwd: workspace.clone(),
+            pane_id: None,
+            pane_pid: None,
+            spawned_at: Some("2026-10-10T03:59:07Z".into()),
+            expected_session_id: Some(crate::provider::SessionId::new("native-first")),
+            provider_projects_root: Some(workspace.join("pi-sessions")),
+        });
+        let mut pane = SpawnResult {
+            pane_id: PaneId::new("%0"),
+            session: SessionName::new("team-agent-leader-pi-demo"),
+            window: WindowName::new("pi"),
+            child_pid: Some(1),
+        };
+        persist_managed_leader_binding(&plan, &workspace, &pane).unwrap();
+        let first = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        let receiver = &first["teams"]["current"]["leader_receiver"];
+        let native = &receiver["native_session"];
+        assert_eq!(native["expected_session_id"], "native-first");
+        assert_ne!(native["expected_session_id"], receiver["leader_session_uuid"]);
+        assert_eq!(native["provider_projects_root"], serde_json::json!(workspace.join("pi-sessions")));
+        for key in ["pane_id", "tmux_socket", "leader_session_uuid", "owner_epoch"] {
+            assert_eq!(native[key], receiver[key]);
+        }
+        pane.pane_id = PaneId::new("%1");
+        plan.session_capture.as_mut().unwrap().expected_session_id =
+            Some(crate::provider::SessionId::new("native-second"));
+        persist_managed_leader_binding(&plan, &workspace, &pane).unwrap();
+        let second = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        assert_eq!(second["teams"]["current"]["leader_receiver"]["native_session"], *native);
+        let _ = std::fs::remove_dir_all(workspace);
     }
 
     #[test]

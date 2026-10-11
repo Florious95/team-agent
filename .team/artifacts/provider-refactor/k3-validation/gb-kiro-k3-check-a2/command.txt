@@ -1,0 +1,3 @@
+bash
+-c
+export CARGO_TARGET_DIR=/workspace/grok-bot-offload/jobs/gb-kiro-k3-prepare-a1/work/crates/team-agent-contract/target; cargo fmt --manifest-path crates/team-agent-contract/Cargo.toml && git add crates/team-agent-contract && git -c user.name="K3 Builder" -c user.email="k3-builder@localhost" commit -m "Format K3 recovery fixes" && cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets && cargo clippy --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets -- -D warnings

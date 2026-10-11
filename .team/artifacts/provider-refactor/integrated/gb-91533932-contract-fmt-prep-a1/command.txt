@@ -1,0 +1,3 @@
+bash
+-c
+set -u; cd /workspace/grok-bot-offload/jobs/gb-91533932-contract-fmt-prep-a1/work; printf "SourceHEAD=9153393265ebfbd26464ec84eb484ab4d7982a14\\nSourceTree=47f1ea779cddfe7ccf0fc01c44d70162ca3949df\\nBranch=builder/kiro-contract-integrated-29c43fd-a1\\n"; printf "FMT_BEGIN=cargo fmt --manifest-path crates/team-agent-contract/Cargo.toml\\n"; cargo fmt --manifest-path crates/team-agent-contract/Cargo.toml; rc=$?; printf "FMT_EXIT=%s\\n" "$rc"; if [ "$rc" -ne 0 ]; then exit "$rc"; fi; printf "STATUS_BEGIN\\n"; git status --short --branch; printf "DIFF_NAMES_BEGIN\\n"; git diff --name-only; printf "UNTRACKED_BEGIN\\n"; git ls-files --others --exclude-standard

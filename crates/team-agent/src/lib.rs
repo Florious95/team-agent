@@ -53,6 +53,10 @@ pub mod state;
 // step 6 (compiler) — TEAM.md + agents/*.md → 规范 team.spec dict(doc→spec 纯变换)。
 pub mod compiler;
 
+// Isolated new-provider runtime; legacy provider dispatch/state are not migrated.
+#[cfg(unix)]
+pub mod contract_runtime;
+
 // Official communication-mode catalog. Configuration compilation and every
 // future projection consumer must use this typed single source of truth.
 pub mod communication_mode;

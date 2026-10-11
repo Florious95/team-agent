@@ -28,6 +28,9 @@ chrono.workspace = true
 libc.workspace = true
 rusqlite.workspace = true       # step 3 db(bundled SQLite,静态链接)
 
+[target.'cfg(unix)'.dependencies]
+team-agent-contract = { path = "../team-agent-contract" }
+
 # 0.5.x Windows portability Batch 2/3: uses the same `windows = "0.61"`
 # crate as `win-conpty-phase0` so the workspace shares a single
 # Windows-API crate + already-locked Cargo.lock version.
