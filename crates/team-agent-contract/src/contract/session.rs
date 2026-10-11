@@ -49,6 +49,9 @@ pub enum CaptureOrigin {
     CurrentNativeSession,
     OwnedExitHint,
     ExactBacking,
+    /// A native-allocated ID passed through an exact resume argv and a live,
+    /// ready, image-fenced launch. Not a transcript echo or newest-session scan.
+    ExplicitResumeLaunch,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

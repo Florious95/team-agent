@@ -78,9 +78,11 @@ fn descriptor_and_seven_hooks_keep_unknown_lifecycle_and_legacy_aliases_closed()
     assert!(hooks.semantic.require("H5").is_ok());
     assert!(hooks.interaction.require("H6").is_ok());
     assert!(hooks.fork.require("H7").is_ok());
-    assert!(!CURSOR_DESCRIPTOR.mcp.excludes_ambient_configuration);
-    assert!(matches!(CURSOR_DESCRIPTOR.prompt.carrier, Support::Unverified(_)));
-    assert!(matches!(CURSOR_DESCRIPTOR.tool_names.naming, Support::Unverified(_)));
+    assert!(CURSOR_DESCRIPTOR.mcp.excludes_ambient_configuration);
+    assert_eq!(CURSOR_DESCRIPTOR.prompt.carrier, Support::Supported(PromptCarrier::RuntimeBridge));
+    assert_eq!(CURSOR_DESCRIPTOR.tool_names.naming, Support::Supported(ToolNaming::StaticServer { key: "team" }));
+    assert_eq!(CURSOR_DESCRIPTOR.session.fresh, FreshSession::Preassigned);
+    assert_eq!(CURSOR_DESCRIPTOR.session.resume, Support::Supported(ResumeMode::ExactId));
     assert_eq!(CURSOR_DESCRIPTOR.model.omitted, OmittedModel::Reject);
     assert!(!CURSOR_DESCRIPTOR.effort.inherit_team_default);
     for admission in &CURSOR_DESCRIPTOR.effort.admission { assert!(matches!(admission, EffortAdmission::Reject(_))); }
@@ -269,7 +271,7 @@ fn recipe_is_single_enter_but_metadata_or_echo_cannot_admit_business_acceptance(
     assert_eq!(policy.retry_budget, RetryBudget::Never);
     assert!(policy.queue_flush.is_empty());
     assert!(CONTROLS.is_empty());
-    assert!(matches!(PROFILES[0].policy, Support::Unverified(_)));
+    assert_eq!(PROFILES[0].policy.require("policy").unwrap(), &policy);
     let mut capture = frame("  [team-agent-token:msg-1]\n  → Add a follow-up");
     capture.message = Some(MessageId::new("msg-1").unwrap());
     capture.attempt = Some(AttemptId::new("attempt-1").unwrap());
@@ -291,7 +293,7 @@ fn session_exit_hint_protocol_echo_and_exit_zero_are_not_lifecycle_proof() {
         origin: CaptureOrigin::OwnedExitHint, evidence_kind: EvidenceKind::Fixture,
         evidence_sha256: digest(b"resume hint"), record: b"Resume with cursor-agent --resume 12345678-1234-1234-1234-123456789012".to_vec(),
     };
-    assert!(matches!(adapter.bind(&capture), Err(ContractError::Unverified { .. })));
+    assert!(matches!(adapter.bind(&capture), Err(ContractError::Mismatch(_))));
     let record = NativeRecord { scope: scope(), kind: NativeRecordKind::Protocol, bytes: frame("  → Add a follow-up").text.into_bytes() };
     assert!(matches!(adapter.read(&record).outcome, ProbeOutcome::Unknown(_)));
     let semantic = adapter.read(&NativeRecord { kind: NativeRecordKind::Surface, ..record });

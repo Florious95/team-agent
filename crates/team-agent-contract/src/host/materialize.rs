@@ -31,6 +31,9 @@ impl<R: CommandRunner> ScopedMaterializer<R> {
     ) -> Result<Self, HostError> {
         validate_launch_plan(descriptor, resolved, plan)
             .map_err(|_| HostError::new("materialization plan", HostErrorKind::Ownership))?;
+        if matches!(plan.expected_session, ExpectedSession::PendingAllocation) {
+            return Err(HostError::new("native session allocation required", HostErrorKind::Ownership));
+        }
         let mut roots = BTreeMap::new();
         for request in &plan.materialization {
             let captured = resolve_cwd(request.path.root())?;

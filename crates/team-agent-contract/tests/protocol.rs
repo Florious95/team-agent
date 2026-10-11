@@ -17,6 +17,7 @@ fn unpublished_native_target_cannot_be_upgraded_by_a_server_claim() {
     )
     .target;
     let process = ProcessStamp {
+        inputs: vec![],
         identity: ProcessIdentity {
             pid: 100,
             birth_identity: "controlled".into(),

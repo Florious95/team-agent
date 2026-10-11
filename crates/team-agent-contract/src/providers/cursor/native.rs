@@ -1,5 +1,6 @@
-//! Read-only public-launcher discovery. Its digest is NOT the bundled Node image
-//! or full package identity and must never become a ProcessStamp for a worker.
+//! Separate public-launcher metadata from runtime Node/entry identity. The
+//! bounded native allocator is side-effecting and never part of H1 or preflight;
+//! neither launcher nor Node+entry fingerprints attest the full vendor package.
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -103,6 +104,141 @@ pub fn probe_launcher<R: CommandRunner>(
         executable_sha256: hash,
     })
 }
+/// Runtime executable and explicit program operand from one versioned public
+/// installation. Metadata discovery stays a separate identity until this bridge.
+#[derive(Clone)]
+pub struct RuntimeInstallation {
+    pub engine: PathBuf,
+    pub native: NativeIdentity,
+    launcher_native: NativeIdentity,
+    entry: PathBuf,
+    entry_sha256: Digest,
+    home: PathBuf,
+}
+impl RuntimeInstallation {
+    pub fn executable_input(&self, argument: usize) -> ExecutableInput {
+        ExecutableInput { argument, path: self.entry.clone(), sha256: self.entry_sha256 }
+    }
+    pub fn entry(&self) -> &Path { &self.entry }
+    pub fn home(&self) -> &Path { &self.home }
+    pub fn bind_catalog(&self, catalog: &CatalogObservation) -> Result<CatalogObservation, ContractError> {
+        if catalog.provider.as_str() != "cursor" || catalog.native != self.launcher_native
+            || catalog.schema != CATALOG_SOURCE.schema
+        { return Err(ContractError::Mismatch("Cursor runtime/catalog installation")); }
+        let mut bound = catalog.clone();
+        bound.native = self.native.clone();
+        Ok(bound)
+    }
+}
+
+/// Does not launch a model or inspect a credential store. The direct installed
+/// wrapper was observed to exec its sibling Node and index.js. The versioned
+/// directory and bounded metadata probe must agree; no PATH/proxy fallback.
+pub fn probe_runtime<R: CommandRunner>(
+    launcher: &Path, home: &Path, runner: &mut R, bounds: ReadBounds,
+) -> Result<RuntimeInstallation, ProbeError> {
+    let started = Instant::now();
+    let home = resolve_cwd(home)?.path;
+    require_no_global_mcp(&home)?;
+    let launcher = resolve_launcher(launcher)?;
+    let launcher_native = probe_launcher(&launcher, runner, bounds)?;
+    let directory = launcher.parent().ok_or_else(|| HostError::new("Cursor install root", HostErrorKind::Invalid))?;
+    if directory.file_name().and_then(|name| name.to_str()) != Some(launcher_native.version.as_str()) {
+        return Err(HostError::new("Cursor versioned installation", HostErrorKind::Ownership).into());
+    }
+    let engine = directory.join("node");
+    let entry = directory.join("index.js");
+    for path in [&engine, &entry] {
+        if path.canonicalize().ok().as_ref() != Some(path) {
+            return Err(HostError::new("Cursor runtime installation alias", HostErrorKind::Ownership).into());
+        }
+    }
+    let hash = fingerprint_file(&engine, 1024 * 1024 * 1024, bounds.deadline.saturating_sub(started.elapsed()))?;
+    let entry_sha256 = fingerprint_file(&entry, 1024 * 1024 * 1024, bounds.deadline.saturating_sub(started.elapsed()))?;
+    let remaining = bounds.deadline.saturating_sub(started.elapsed());
+    if remaining.is_zero() { return Err(HostError::new("Cursor runtime probe deadline", HostErrorKind::Deadline).into()); }
+    let output = runner.run(&command(&engine, &["--use-system-ca", "--version"], None, ReadBounds { deadline: remaining, ..bounds }));
+    if !output.success() || output.elapsed > remaining || output.stdout.len() > bounds.max_output_bytes {
+        return Err(HostError::new("Cursor bundled Node flags", HostErrorKind::Command).into());
+    }
+    for (path, expected) in [(&launcher, launcher_native.executable_sha256), (&engine, hash), (&entry, entry_sha256)] {
+        if fingerprint_file(path, 1024 * 1024 * 1024, bounds.deadline.saturating_sub(started.elapsed()))? != expected {
+            return Err(HostError::new("Cursor installation changed", HostErrorKind::Conflict).into());
+        }
+    }
+    Ok(RuntimeInstallation {
+        engine, entry, entry_sha256, home,
+        native: NativeIdentity { harness: "cursor-agent".into(), ui: "tui".into(), executable_sha256: hash, ..launcher_native.clone() },
+        launcher_native,
+    })
+}
+
+/// Explicitly refuse an ambient MCP file rather than reading/merging its possibly
+/// secret values. A private primary cwd supplies the sole managed project file.
+pub fn require_no_global_mcp(home: &Path) -> Result<(), HostError> {
+    require_absolute(home, "Cursor auth home").map_err(|_| HostError::new("Cursor auth home", HostErrorKind::Invalid))?;
+    match std::fs::symlink_metadata(home.join(".cursor/mcp.json")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(HostError::new("Cursor ambient MCP configuration present", HostErrorKind::Ownership)),
+        Err(error) => Err(HostError::io("Cursor ambient MCP metadata", error)),
+    }
+}
+
+pub fn parse_chat_id(stdout: &[u8]) -> Result<crate::contract::session::NativeSessionId, ContractError> {
+    let id = std::str::from_utf8(stdout).map_err(|_| ContractError::Invalid("Cursor chat ID UTF-8"))?.trim();
+    if id.len() != 36 || !id.bytes().enumerate().all(|(index, byte)| {
+        if [8, 13, 18, 23].contains(&index) { byte == b'-' } else { byte.is_ascii_hexdigit() }
+    }) { return Err(ContractError::Invalid("Cursor native chat ID")); }
+    crate::contract::session::NativeSessionId::new(id)
+}
+
+/// Side-effecting native allocation, separate from catalog/preflight and called
+/// only after the framework has a durable owned startup scope. Never invent a
+/// UUID, select --continue/latest, retry, or call a partial timeout success.
+pub fn allocate_chat<R: CommandRunner>(
+    runtime: &RuntimeInstallation,
+    cwd: &crate::contract::session::CwdIdentity,
+    runner: &mut R,
+    bounds: ReadBounds,
+) -> Result<crate::contract::session::NativeSessionId, ReadFailure> {
+    bounds.validate().map_err(ReadFailure::Error)?;
+    let started = Instant::now();
+    let verify = || -> Result<(), ReadFailure> {
+        if resolve_cwd(&cwd.path).map_err(|_| ReadFailure::Error(ContractError::Mismatch("Cursor allocation cwd")))? != *cwd {
+            return Err(ReadFailure::Error(ContractError::Mismatch("Cursor allocation cwd")));
+        }
+        for (path, expected) in [(&runtime.engine, runtime.native.executable_sha256), (&runtime.entry, runtime.entry_sha256)] {
+            if fingerprint_file(path, 1024 * 1024 * 1024, bounds.deadline.saturating_sub(started.elapsed()))
+                .map_err(|_| ReadFailure::Error(ContractError::Mismatch("Cursor allocation executable")))? != expected
+            { return Err(ReadFailure::Error(ContractError::Mismatch("Cursor allocation executable"))); }
+        }
+        Ok(())
+    };
+    verify()?;
+    let remaining = bounds.deadline.saturating_sub(started.elapsed());
+    if remaining.is_zero() { return Err(ReadFailure::TimedOut { elapsed: started.elapsed() }); }
+    let mut request = command(&runtime.engine, &["--use-system-ca"], Some(cwd.path.clone()), ReadBounds { deadline: remaining, ..bounds });
+    request.arguments.extend([runtime.entry.as_os_str().to_owned(), "create-chat".into()]);
+    request.environment.remove.extend(["CURSOR_API_KEY".into(), "CURSOR_API_ENDPOINT".into()]);
+    request.environment.set.insert("HOME".into(), runtime.home.as_os_str().to_owned());
+    request.environment.set.insert("CURSOR_INVOKED_AS".into(), "cursor-agent".into());
+    let output = runner.run(&request);
+    if output.end == CommandEnd::TimedOut || output.elapsed > remaining {
+        return Err(ReadFailure::TimedOut { elapsed: started.elapsed().max(output.elapsed) });
+    }
+    if output.end == CommandEnd::OutputLimit || output.stdout.len() > bounds.max_output_bytes {
+        return Err(ReadFailure::OutputLimit { limit: bounds.max_output_bytes });
+    }
+    if !output.success() {
+        return match (output.end, output.exit_code) {
+            (CommandEnd::Exited, Some(code)) => Err(ReadFailure::Exit { code }),
+            _ => Err(ReadFailure::Unknown(super::UNVERIFIED)),
+        };
+    }
+    verify()?;
+    parse_chat_id(&output.stdout).map_err(ReadFailure::Error)
+}
+
 pub(super) fn validate_catalog_request(request: &CatalogRequest) -> Result<(), ContractError> {
     request.bounds.validate()?;
     request.native.validate()?;

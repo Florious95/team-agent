@@ -145,6 +145,7 @@ impl PlanHook for Fake {
     fn plan(&self, resolved: &ResolvedLaunch) -> Result<LaunchPlan, ContractError> {
         let r = resolved.request();
         Ok(LaunchPlan {
+            executable_inputs: vec![],
             executable: r.paths.executable.clone(),
             arguments: vec![
                 "chat".into(),

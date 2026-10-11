@@ -96,6 +96,7 @@ pub fn target() -> TargetReceipt {
         rows: 40,
         binding: "binding-one".into(),
         process: ProcessStamp {
+            inputs: vec![],
             identity: ProcessIdentity {
                 pid: 10000,
                 birth_identity: "fixture-birth".into(),
@@ -372,6 +373,7 @@ impl PlanHook for FixtureHooks {
             "fixture-server".into(),
         ];
         Ok(LaunchPlan {
+            executable_inputs: vec![],
             executable: r.paths.executable.clone(),
             cwd: r.paths.cwd.path.clone(),
             arguments,

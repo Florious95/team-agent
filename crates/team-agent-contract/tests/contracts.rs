@@ -234,6 +234,7 @@ impl PlanHook for Fixture {
             _ => {}
         }
         Ok(LaunchPlan {
+            executable_inputs: vec![],
             executable: request.paths.executable.clone(),
             arguments,
             cwd: request.paths.cwd.path.clone(),

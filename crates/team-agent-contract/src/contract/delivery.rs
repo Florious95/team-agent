@@ -379,6 +379,39 @@ pub struct InteractionObservation {
     pub control_paste: Option<ControlPasteDiagnostic>,
 }
 
+/// Provider grammars supply only the current composer region and surface. The
+/// shared business correlation keeps the whole-baseline anti-replay rule, Seen
+/// latch, one-submit boundary and transcript token requirement identical.
+pub fn correlate_business_input(
+    frame: &CaptureFrame,
+    observation: &mut InteractionObservation,
+    composer: Option<&str>,
+) {
+    if !matches!(frame.operation, Operation::FirstBusiness | Operation::OrdinarySend) {
+        return;
+    }
+    let Some(message) = &frame.message else { return; };
+    let expected = format!("[team-agent-token:{}]", message.as_str());
+    let fresh = frame.baseline.as_ref().is_some_and(|baseline| !baseline.text.contains(&expected));
+    let current_has_expected = composer.is_some_and(|text| text.contains(&expected));
+    if frame.after_step == Some(StepKind::Paste) && fresh && current_has_expected {
+        observation.surface = InputSurface::ComposerContainsPaste;
+        observation.paste_latch = PasteLatch::Seen { native_identity: expected.clone() };
+        observation.current_message = frame.message.clone();
+        observation.current_attempt = frame.attempt.clone();
+    }
+    if frame.after_step == Some(StepKind::InitialSubmit)
+        && matches!(&frame.paste_latch, PasteLatch::Seen { native_identity } if native_identity == &expected)
+        && !current_has_expected && frame.text.contains(&expected)
+        && matches!(observation.surface, InputSurface::Busy | InputSurface::ComposerReady)
+    {
+        observation.surface = InputSurface::NativeAccepted;
+        observation.paste_latch = PasteLatch::Gone { native_identity: expected };
+        observation.current_message = frame.message.clone();
+        observation.current_attempt = frame.attempt.clone();
+    }
+}
+
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]

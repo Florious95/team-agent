@@ -1,35 +1,40 @@
-//! Finite Cursor TUI grammar, not a Team business-acceptance detector. No guessed
+//! Cursor TUI grammar and shared token-correlated paste acceptance. No guessed
 //! /session-id, /tools panel, DirectTyping business fallback or retry loop.
 use super::{native::parse_version, CursorAdapter, UNVERIFIED};
 use crate::contract::{delivery::*, hooks::*, probe::*, types::*};
 use crate::runtime::delivery::ControlDefinition;
+use std::time::Duration;
 
-pub const PROFILE: &str = "cursor-tui-recon-v1";
-// SHA256 of cursor-tui-recon-v1|bracketed|enter=1|no-trailer|no-retry|no-controls|acceptance=unverified
-const POLICY: Digest = Digest([
-    0xaa, 0x51, 0x45, 0x39, 0x1c, 0xff, 0x15, 0x0c, 0xbf, 0x7b, 0x6f, 0xa1, 0x0a, 0x26, 0xf0, 0xf2,
-    0xa4, 0x43, 0x5b, 0xc9, 0x82, 0x4e, 0xcd, 0xa8, 0x97, 0xb5, 0x0f, 0xbe, 0x61, 0x3a, 0xd9, 0x38,
+pub const PROFILE: &str = "cursor-tui-v1";
+// Recipe identity, NOT an installed release hash. Framework timing bounds are
+// deliberate budgets, not a claim that one recon run proved production latency.
+// SHA256 cursor-tui-v1|bracketed|enter=1|trailer=none|retry=never|capture=100ms|stable=200ms|floor=100ms|deadline=30s|correlation=baseline-seen-token-gone-transcript
+pub const POLICY: Digest = Digest([
+    0x2d, 0x8c, 0xe5, 0x4a, 0x54, 0x6a, 0xdd, 0x04, 0xfc, 0xc0, 0x94, 0xd5, 0x5e, 0x2a, 0xf3, 0xcf,
+    0x0c, 0x8e, 0xdf, 0x3c, 0x29, 0xec, 0x20, 0xc5, 0x90, 0xf7, 0x0c, 0xf3, 0xdb, 0x25, 0x70, 0x92,
 ]);
+const SUBMIT: SubmitPolicy = SubmitPolicy {
+    paste_mode: PasteMode::Bracketed, payload_trailer: PayloadTrailer::None,
+    initial_submit: PhysicalKey::Enter, confirmation_steps: &[], retry_budget: RetryBudget::Never,
+    queue_flush: &[], max_submit_keys: 1,
+    timing: InputTiming {
+        capture_interval: Duration::from_millis(100), stable_window: Duration::from_millis(200),
+        paste_to_submit_floor: Duration::from_millis(100), deadline: Duration::from_secs(30),
+    },
+};
 pub static PROFILES: [InputProfile; 1] = [InputProfile {
     id: PROFILE, identity: ProfileIdentity::RuntimeCaptured,
     harness: "cursor-agent", ui: "tui", platform: Platform::MacOs,
     policy_sha256: POLICY,
     operations: &[Operation::FirstBusiness, Operation::OrdinarySend],
     channel: Channel::Tmux,
-    policy: Support::Unverified(UNVERIFIED),
+    policy: Support::Supported(SUBMIT),
 }];
 pub const CONTROLS: &[ControlDefinition] = &[];
 
-/// Assemble only the measured keyboard recipe using caller-owned timing limits.
-/// This does not admit PROFILES or prove token freshness/physical acceptance.
+/// Assemble the measured keyboard recipe using explicit caller-owned bounds.
 pub fn submit_policy(timing: InputTiming) -> Result<SubmitPolicy, ContractError> {
-    let policy = SubmitPolicy {
-        paste_mode: PasteMode::Bracketed,
-        payload_trailer: PayloadTrailer::None,
-        initial_submit: PhysicalKey::Enter,
-        confirmation_steps: &[], retry_budget: RetryBudget::Never, queue_flush: &[],
-        timing, max_submit_keys: 1,
-    };
+    let policy = SubmitPolicy { timing, ..SUBMIT };
     policy.validate()?;
     Ok(policy)
 }
@@ -69,14 +74,18 @@ fn surface(text: &str) -> InputSurface {
 }
 impl InteractionHook for CursorAdapter {
     fn interpret(&self, frame: &CaptureFrame) -> InteractionObservation {
-        InteractionObservation {
-            scope: frame.scope.clone(),
-            surface: if frame.profile_id == PROFILE { surface(&frame.text) } else { InputSurface::ShellOrUnknown },
+        let mut observation = InteractionObservation {
+            scope: frame.scope.clone(), surface: InputSurface::ShellOrUnknown,
             predicate: None, current_message: None, current_attempt: None,
-            // No genuine Team-token capture exists: do not fabricate Seen/Gone,
-            // NativeAccepted or a ToolInspect registry witness from echo traffic.
             paste_latch: frame.paste_latch.clone(), control_paste: None,
-        }
+        };
+        if frame.profile_id != PROFILE { return observation; }
+        observation.surface = surface(&frame.text);
+        let lines: Vec<_> = frame.text.lines().collect();
+        let composer = lines.iter().rposition(|line| line.trim().starts_with("→ "))
+            .map(|index| lines[index..].join("\n"));
+        correlate_business_input(frame, &mut observation, composer.as_deref());
+        observation
     }
 }
 impl SemanticReader for CursorAdapter {

@@ -1,14 +1,15 @@
-//! Cursor native recon: 40 observed, 3 unknown and 12 unrun cards, not a launch
-//! admission. Catalog/stdio configuration/surface grammar are independent of
-//! prompt, session, authentication and genuine Team-tool binding evidence.
+//! Cursor native worker: explicit Node/entry identity, native chat allocation,
+//! private project MCP, and first-business terminal prompt delivery. Declared
+//! recipes are not substitutes for candidate-bound live acceptance evidence.
 pub mod interaction;
 pub mod native;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use crate::contract::{
-    descriptor::*, fork::*, hooks::*, plan::*, session::ResumeBinding, types::*,
+    descriptor::*, fork::*, hooks::*, plan::*, session::{CaptureOrigin, ResumeBinding, SessionStorage}, types::*,
 };
 
 pub const UNVERIFIED: Reason = Reason {
@@ -21,7 +22,7 @@ const EFFORT: Reason = Reason {
 };
 const MCP: Reason = Reason {
     code: "cursor-team-mcp-unverified",
-    message: "Local mcpServers and echo calls are observed; ambient exclusion and genuine Team tool binding are not",
+    message: "Owned stdio handshake alone does not prove the full native Team-tool registry or round-trip consumption",
 };
 
 pub static CURSOR_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
@@ -45,23 +46,29 @@ pub static CURSOR_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         model_dependent: true,
     },
     auth: AuthFacet {
-        subscription: Support::Unverified(UNVERIFIED),
+        subscription: Support::Supported(AuthMechanism::NativeExistingSession),
         official_api: Support::Unverified(UNVERIFIED),
         compatible_api: Support::Unverified(UNVERIFIED),
     },
-    // The measured --force/--trust run does not prove bypass=false semantics.
-    bypass: BypassFacet { intent: Support::Unverified(UNVERIFIED) },
-    prompt: PromptFacet { carrier: Support::Unverified(UNVERIFIED) },
+    bypass: BypassFacet { intent: Support::Supported(BypassPolicy {
+        enabled_arguments: &["--force"], requires_startup_consent: false,
+    }) },
+    prompt: PromptFacet { carrier: Support::Supported(PromptCarrier::RuntimeBridge) },
     mcp: McpFacet {
-        carrier: Support::Unverified(MCP),
+        carrier: Support::Supported(McpCarrier::ScopedConfig),
         scope: ResourceScope::WorkingDirectory,
         tools: &TEAM_TOOLS,
-        excludes_ambient_configuration: false,
+        // Runtime admission refuses an existing global MCP file; actual launch
+        // requires a private cwd. This is not inference from --approve-mcps alone.
+        excludes_ambient_configuration: true,
     },
-    tool_names: ToolNameFacet { naming: Support::Unverified(MCP) },
+    tool_names: ToolNameFacet { naming: Support::Supported(ToolNaming::StaticServer { key: "team" }) },
     session: SessionFacet {
-        fresh: FreshSession::CaptureAfterLaunch,
-        resume: Support::Unverified(UNVERIFIED),
+        fresh: FreshSession::Preassigned,
+        // Native allocation and populated print-process exit → exact-ID recall
+        // are measured. Team TTY recovery remains a live gate; the binding origin
+        // ExplicitResumeLaunch is deliberately not current-session TUI echo.
+        resume: Support::Supported(ResumeMode::ExactId),
     },
     fork: ForkFacet {
         in_window: Support::Unverified(UNVERIFIED),
@@ -90,6 +97,7 @@ pub static CURSOR_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     teardown: TeardownFacet {
         resources: &[
             ResourcePolicy { kind: ResourceKind::McpConfig, disposition: ResourceDisposition::OwnedRemovable },
+            ResourcePolicy { kind: ResourceKind::Prompt, disposition: ResourceDisposition::OwnedRemovable },
             ResourcePolicy { kind: ResourceKind::SessionBacking, disposition: ResourceDisposition::OwnedPreserved },
             ResourcePolicy { kind: ResourceKind::GlobalSettings, disposition: ResourceDisposition::Forbidden },
             ResourcePolicy { kind: ResourceKind::NativeDatabase, disposition: ResourceDisposition::Forbidden },
@@ -105,6 +113,8 @@ pub struct McpStdio {
 }
 pub struct CursorAdapter {
     mcp: McpStdio,
+    runtime: Option<native::RuntimeInstallation>,
+    project: Option<PathBuf>,
 }
 impl CursorAdapter {
     pub fn new(mcp: McpStdio) -> Result<Self, ContractError> {
@@ -116,7 +126,16 @@ impl CursorAdapter {
             remove: BTreeSet::new(),
             set: mcp.environment.iter().map(|(key, value)| (key.clone(), value.into())).collect(),
         }.validate()?;
-        Ok(Self { mcp })
+        Ok(Self { mcp, runtime: None, project: None })
+    }
+    pub fn with_runtime(mut self, runtime: native::RuntimeInstallation) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
+    pub fn with_project(mut self, project: PathBuf) -> Result<Self, ContractError> {
+        require_absolute(&project, "Cursor project directory")?;
+        self.project = Some(project);
+        Ok(self)
     }
     pub fn hooks(&self) -> ProviderHooks<'_> {
         ProviderHooks {
@@ -154,10 +173,74 @@ fn partial(error: ContractError, resources: Vec<OwnedResourceReceipt>) -> Partia
     PartialFailure { error, receipt: MaterializeReceipt { resources } }
 }
 impl PlanHook for CursorAdapter {
-    fn plan(&self, _request: &ResolvedLaunch) -> Result<LaunchPlan, ContractError> {
-        // Launcher != Node image. An ancestor/inode check cannot establish the
-        // missing prompt/session/auth/carrier contract or native package identity.
-        Err(refusal("Cursor launch: prompt/session/native-image admission"))
+    fn plan(&self, resolved: &ResolvedLaunch) -> Result<LaunchPlan, ContractError> {
+        let r = resolved.request();
+        let runtime = self.runtime.as_ref().ok_or_else(|| refusal("Cursor runtime installation"))?;
+        let project = self.project.as_ref().ok_or(ContractError::Invalid("Cursor project directory"))?;
+        if resolved.provider().as_str() != "cursor" || r.native != runtime.native
+            || r.paths.executable != runtime.engine || !interaction::PROFILES[0].matches_native(&r.native)
+            || r.channel != Channel::Tmux || r.mode != LaunchMode::FullWorker
+            || r.auth != AuthMode::NativeSubscription || self.mcp.executable != r.paths.candidate
+            || !matches!(r.operation, Operation::Fresh | Operation::Resume)
+        { return Err(ContractError::Mismatch("Cursor native launch identity")); }
+        if !matches!(resolved.expected_session(), ExpectedSession::PendingAllocation)
+            && r.paths.cwd.path == *project
+        { return Err(ContractError::Invalid("Cursor private primary workspace required")); }
+        let prompt = r.prompt.as_ref().ok_or(ContractError::Invalid("Cursor worker prompt"))?;
+        let mcp = self.mcp_resource(r.identity.clone(), r.paths.cwd.path.clone())?;
+        let prompt = OwnedResourceRequest {
+            owner: r.identity.clone(),
+            path: OwnedPath::new(r.paths.cwd.path.clone(), ".cursor/team-agent-prompt.txt".into())?,
+            kind: ResourceKind::Prompt, contents: prompt.as_bytes().to_vec(),
+        };
+        let mut arguments: Vec<OsString> = vec!["--use-system-ca".into(), runtime.entry().as_os_str().to_owned()];
+        let model_index = arguments.len();
+        arguments.extend(["--model".into(), resolved.model().ok_or(ContractError::Invalid("Cursor exact model"))?.into()]);
+        arguments.extend(["--workspace".into(), r.paths.cwd.path.as_os_str().to_owned(),
+            "--add-dir".into(), project.as_os_str().to_owned(), "--approve-mcps".into(), "--trust".into()]);
+        // --trust concerns our private primary directory. Native tool bypass is
+        // independently explicit; false never adds --force or --sandbox disabled.
+        let bypass = if r.bypass {
+            let index = arguments.len(); arguments.push("--force".into());
+            CarrierUse::Specified(CarrierRef::Arguments(vec![index]))
+        } else { CarrierUse::NotRequested };
+        let id = match resolved.expected_session() {
+            ExpectedSession::Preassigned(id) => Some(id),
+            ExpectedSession::Resume(binding) => Some(&binding.native_session),
+            ExpectedSession::PendingAllocation => None, // pure preflight; host refuses to spawn
+            _ => return Err(ContractError::Invalid("Cursor explicit native session required")),
+        };
+        if let Some(id) = id {
+            native::parse_chat_id(id.as_str().as_bytes())?;
+            arguments.extend(["--resume".into(), id.as_str().into()]);
+        }
+        if !matches!(resolved.effort(), EffortResolution::Unspecified) {
+            return Err(ContractError::EffortRejected(EFFORT));
+        }
+        let cache = if r.native.platform == Platform::MacOs {
+            runtime.home().join("Library/Caches/cursor-compile-cache")
+        } else { runtime.home().join(".cache/cursor-compile-cache") };
+        Ok(LaunchPlan {
+            executable: runtime.engine.clone(), arguments,
+            executable_inputs: vec![runtime.executable_input(1)],
+            cwd: r.paths.cwd.path.clone(),
+            environment: EnvironmentDelta {
+                remove: BTreeSet::from(["CURSOR_API_KEY".into(), "CURSOR_API_ENDPOINT".into()]),
+                set: BTreeMap::from([
+                    ("HOME".into(), runtime.home().as_os_str().to_owned()),
+                    ("CURSOR_INVOKED_AS".into(), "cursor-agent".into()),
+                    ("NODE_COMPILE_CACHE".into(), cache.into_os_string()),
+                ]),
+            },
+            expected_session: resolved.expected_session().clone(),
+            carriers: CarrierReport {
+                model: CarrierUse::Specified(CarrierRef::Arguments(vec![model_index, model_index + 1])),
+                prompt: CarrierUse::Specified(CarrierRef::Resource(prompt.path.clone())),
+                mcp: CarrierUse::Specified(CarrierRef::Resource(mcp.path.clone())),
+                bypass, effort: CarrierUse::NotRequested,
+            },
+            materialization: vec![mcp, prompt],
+        })
     }
 }
 impl MaterializeHook for CursorAdapter {
@@ -167,31 +250,51 @@ impl MaterializeHook for CursorAdapter {
         io: &mut dyn OwnedIo,
     ) -> Result<MaterializeReceipt, PartialFailure> {
         let expected = self.mcp_contents().map_err(|error| partial(error, vec![]))?;
-        if requests.len() != 1
-            || requests[0].kind != ResourceKind::McpConfig
-            || requests[0].path.relative() != std::path::Path::new(".cursor/mcp.json")
-            || requests[0].contents != expected
-        {
-            return Err(partial(ContractError::Invalid("one exact owned Cursor MCP config required"), vec![]));
+        let valid = (1..=2).contains(&requests.len()) && requests[0].kind == ResourceKind::McpConfig
+            && requests[0].path.relative() == std::path::Path::new(".cursor/mcp.json")
+            && requests[0].contents == expected
+            && requests.get(1).is_none_or(|prompt| {
+                prompt.kind == ResourceKind::Prompt && prompt.owner == requests[0].owner
+                    && prompt.path.root() == requests[0].path.root()
+                    && prompt.path.relative() == std::path::Path::new(".cursor/team-agent-prompt.txt")
+                    && std::str::from_utf8(&prompt.contents).is_ok_and(nonblank)
+            });
+        if !valid {
+            return Err(partial(ContractError::Invalid("exact owned Cursor MCP/prompt config required"), vec![]));
         }
-        let request = &requests[0];
-        // OwnedIo enforces lease, root identity, no-follow and exclusive create.
-        let receipt = io.create_exclusive(request)?;
-        if receipt.path != request.path || receipt.owner != request.owner
-            || receipt.kind != request.kind || !receipt.exclusive
-            || receipt.disposition != ResourceDisposition::OwnedRemovable
-            || !matches!(receipt.write_effect, ResourceWriteEffect::Written { bytes_sha256 }
-                if bytes_sha256 == crate::host::digest(&request.contents))
-        {
-            return Err(partial(ContractError::Mismatch("Cursor MCP receipt"), vec![receipt]));
+        let mut resources = Vec::new();
+        for request in requests {
+            // OwnedIo owns all lease/no-follow/exclusive effects; keep partial receipts.
+            let receipt = match io.create_exclusive(request) {
+                Ok(receipt) => receipt,
+                Err(failure) => {
+                    resources.extend(failure.receipt.resources);
+                    return Err(partial(failure.error, resources));
+                }
+            };
+            let valid = receipt.path == request.path && receipt.owner == request.owner
+                && receipt.kind == request.kind && receipt.exclusive
+                && receipt.disposition == ResourceDisposition::OwnedRemovable
+                && matches!(receipt.write_effect, ResourceWriteEffect::Written { bytes_sha256 }
+                    if bytes_sha256 == crate::host::digest(&request.contents));
+            resources.push(receipt);
+            if !valid { return Err(partial(ContractError::Mismatch("Cursor config receipt"), resources)); }
         }
-        Ok(MaterializeReceipt { resources: vec![receipt] })
+        Ok(MaterializeReceipt { resources })
     }
 }
 impl SessionHook for CursorAdapter {
-    fn bind(&self, _evidence: &ScopedSessionEvidence) -> Result<ResumeBinding, ContractError> {
-        // A UUID in the exit hint is not a running native session/backing tuple.
-        Err(refusal("Cursor current-session binding"))
+    fn bind(&self, evidence: &ScopedSessionEvidence) -> Result<ResumeBinding, ContractError> {
+        if evidence.provider.as_str() != "cursor" || !interaction::PROFILES[0].matches_native(&evidence.native)
+            || evidence.origin != CaptureOrigin::ExplicitResumeLaunch
+            || evidence.evidence_sha256 != crate::host::digest(&evidence.record)
+        { return Err(ContractError::Mismatch("Cursor explicit session provenance")); }
+        Ok(ResumeBinding {
+            provider: evidence.provider.clone(), native_session: native::parse_chat_id(&evidence.record)?,
+            storage: SessionStorage::Local, cwd: evidence.cwd.clone(), native: evidence.native.clone(),
+            source: evidence.scope.identity.clone(), origin: evidence.origin,
+            evidence_kind: evidence.evidence_kind, evidence_sha256: evidence.evidence_sha256, backing: None,
+        })
     }
 }
 impl ForkHook for CursorAdapter {
