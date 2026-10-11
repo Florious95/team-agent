@@ -3126,9 +3126,9 @@ pub mod lifecycle_port {
         session_converge_deadline_ms: Option<u64>,
     ) -> Result<Value, CliError> {
         #[cfg(unix)]
-        crate::contract_runtime::framework::require_legacy_lifecycle(
-            workspace, team, None, "restart",
-        )?;
+        if let Some(receipt) = crate::contract_runtime::commands::restart(workspace, team)? {
+            return Ok(receipt);
+        }
         match crate::lifecycle::restart_with_session_convergence_deadline(
             workspace,
             allow_fresh,
@@ -3149,6 +3149,10 @@ pub mod lifecycle_port {
         team: Option<&str>,
         role_config: &crate::lifecycle::role_config::RoleConfigPatch,
     ) -> Result<Value, CliError> {
+        #[cfg(unix)]
+        if let Some(receipt) = crate::contract_runtime::commands::start_agent(workspace, team, agent, role_config)? {
+            return Ok(receipt);
+        }
         #[cfg(unix)]
         {
             crate::contract_runtime::framework::require_legacy_lifecycle(
@@ -3228,13 +3232,14 @@ pub mod lifecycle_port {
         agent: &str,
         team: Option<&str>,
     ) -> Result<Value, CliError> {
+        #[cfg(unix)]
+        if let Some(receipt) = crate::contract_runtime::commands::stop_agent(workspace, team, agent)? {
+            return Ok(receipt);
+        }
         let agent_id = crate::model::ids::AgentId::new(agent);
         #[cfg(unix)]
         crate::contract_runtime::framework::require_legacy_lifecycle(
-            workspace,
-            team,
-            Some(agent),
-            "stop-agent",
+            workspace, team, Some(agent), "stop-agent",
         )?;
         match crate::lifecycle::stop_agent(workspace, &agent_id, team) {
             Ok(report) => Ok(json!({"ok": true, "agent_id": agent, "stopped": report.stopped})),

@@ -31,6 +31,7 @@ pub struct Discovery {
     pub engine: PathBuf,
     pub native: NativeIdentity,
     pub catalog: CatalogObservation,
+    pub runtime: Option<cursor::RuntimeInstallation>,
 }
 
 pub fn executable(name: &'static str) -> Result<PathBuf, DiscoveryError> {
@@ -100,9 +101,26 @@ pub fn discover(provider: &ProviderId, workspace: &Path) -> Result<Discovery, Di
             catalog_hook.discover(&request, &mut host)
         }
     }.map_err(DiscoveryError::Catalog)?;
-    let result = Discovery { engine, native, catalog };
+    let result = Discovery { engine, native, catalog, runtime: None };
     validate_catalog(provider, &result).map_err(DiscoveryError::Contract)?;
     Ok(result)
+}
+
+/// Runtime discovery is separate from public catalog metadata. Cursor explicitly
+/// bridges the same installation's catalog to its proven Node/entry identity.
+pub(super) fn discover_runtime(provider: &ProviderId, workspace: &Path) -> Result<Discovery, DiscoveryError> {
+    let mut discovery = discover(provider, workspace)?;
+    if registry::provider(provider.as_str()).map_err(DiscoveryError::Contract)? == NativeProvider::Cursor {
+        let home = std::env::var_os("HOME").map(PathBuf::from)
+            .ok_or(DiscoveryError::Executable("HOME for native subscription"))?;
+        let runtime = cursor::probe_runtime(&discovery.engine, &home, &mut RealCommandRunner::default(),
+            ReadBounds { deadline: std::time::Duration::from_secs(30), max_output_bytes: 1024 * 1024 })?;
+        discovery.catalog = runtime.bind_catalog(&discovery.catalog).map_err(DiscoveryError::Contract)?;
+        discovery.engine = runtime.engine.clone();
+        discovery.native = runtime.native.clone();
+        discovery.runtime = Some(runtime);
+    }
+    Ok(discovery)
 }
 
 fn validate_catalog(provider: &ProviderId, discovery: &Discovery) -> Result<(), ContractError> {
@@ -205,6 +223,7 @@ mod tests {
             executable_sha256: Digest([1; 32]),
         };
         let discovery = Discovery {
+            runtime: None,
             engine: "/controlled/kiro-cli-chat".into(),
             native: native.clone(),
             catalog: CatalogObservation {
@@ -268,6 +287,7 @@ mod tests {
             executable_sha256: Digest([2; 32]),
         };
         Discovery {
+            runtime: None,
             engine: "/controlled/cursor-agent".into(),
             native: native.clone(),
             catalog: CatalogObservation {

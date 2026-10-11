@@ -10,7 +10,7 @@ use team_agent_contract::contract::{
     descriptor::AuthMode,
     hooks::*,
     plan::*,
-    session::{CwdIdentity, ResumeBinding},
+    session::CwdIdentity,
     types::*,
 };
 use team_agent_contract::host::{
@@ -33,6 +33,8 @@ use super::{
 
 #[derive(Debug, ThisError)]
 pub enum BackendError {
+    #[error("native configuration: {0}")]
+    Configuration(#[from] super::config::ConfigError),
     #[error("native discovery: {0}")]
     Discovery(#[from] DiscoveryError),
     #[error("contract runtime: {0}")]
@@ -203,7 +205,7 @@ impl Backend {
     }
 }
 
-pub(super) fn settings(binding: &Binding) -> PhysicalSettings {
+pub(super) fn settings(binding: &Binding, provider: registry::NativeProvider) -> PhysicalSettings {
     PhysicalSettings {
         tmux: binding.tmux.clone(),
         limits: HostLimits {
@@ -220,7 +222,7 @@ pub(super) fn settings(binding: &Binding) -> PhysicalSettings {
             columns: 120,
             rows: 40,
         },
-        action_budget: Duration::from_secs(30),
+        action_budget: provider.action_budget(),
         freshness: Duration::from_secs(2),
         journal_bytes: 2 * 1024 * 1024,
     }
@@ -251,6 +253,16 @@ pub(super) fn adapter(
             identity.generation.0.to_string(),
         ],
         BTreeMap::new(),
+    )?.with_launch_context(binding.workspace.path.clone(), None)?)
+}
+fn launch_adapter(
+    binding: &Binding,
+    identity: &InstanceIdentity,
+    provider: &ProviderId,
+    discovered: &Discovery,
+) -> Result<NativeAdapter, BackendError> {
+    Ok(adapter(binding, identity, provider)?.with_launch_context(
+        binding.workspace.path.clone(), discovered.runtime.clone(),
     )?)
 }
 fn request(
@@ -309,6 +321,9 @@ fn request(
 /// seats (including legacy peers). Bounded read-only native commands run; no
 /// runtime store, worker config, private socket, or worker process is created.
 pub fn preflight(team: &super::config::TeamConfig) -> Result<(), BackendError> {
+    if team.roles.iter().all(|role| role.paused) {
+        return Ok(());
+    }
     let mut discoveries = BTreeMap::new();
     let candidate = std::env::current_exe()?.canonicalize()?;
     let candidate_sha256 =
@@ -324,12 +339,12 @@ pub fn preflight(team: &super::config::TeamConfig) -> Result<(), BackendError> {
         tmux: discovery::executable("tmux")?,
         transport_root: "/tmp/preflight-no-write".into(),
     };
-    for role in &team.roles {
+    for role in team.roles.iter().filter(|role| !role.paused) {
         let selected = registry::provider(role.provider.as_str())?;
         if !discoveries.contains_key(&role.provider) {
             discoveries.insert(
                 role.provider.clone(),
-                discovery::discover(&role.provider, &team.workspace.path)?,
+                discovery::discover_runtime(&role.provider, &team.workspace.path)?,
             );
         }
         let discovered = discoveries.get(&role.provider).ok_or(BackendError::Metadata)?;
@@ -339,10 +354,10 @@ pub fn preflight(team: &super::config::TeamConfig) -> Result<(), BackendError> {
             instance: InstanceId::new("preflight")?,
             generation: Generation(1),
         };
-        let adapter = adapter(&binding, &identity, &role.provider)?;
+        let adapter = launch_adapter(&binding, &identity, &role.provider, discovered)?;
         let hooks = adapter.hooks();
         let request = request(&binding, role, identity, discovered)?;
-        let resolved = resolve_launch(
+        let resolved = resolve_launch_preflight(
             selected.descriptor(),
             &hooks,
             &request,
@@ -353,8 +368,8 @@ pub fn preflight(team: &super::config::TeamConfig) -> Result<(), BackendError> {
     Ok(())
 }
 
-/// This first wiring is fresh-only. Resume/fork must use their typed contracts;
-/// missing evidence cannot be bypassed by silently launching another fresh seat.
+/// Fresh startup is distinct from resume. An existing generation is never
+/// silently replaced with a new native session.
 pub fn start(
     workspace: &Path,
     team: &str,
@@ -363,7 +378,7 @@ pub fn start(
 ) -> Result<(Binding, OperationRecord), BackendError> {
     let selected = registry::provider(role.provider.as_str())?;
     let descriptor = selected.descriptor();
-    let discovered = discovery::discover(&role.provider, workspace)?;
+    let discovered = discovery::discover_runtime(&role.provider, workspace)?;
     let cwd = resolve_cwd(workspace)?;
     let scope = scope_for(&cwd, team)?;
     let candidate = std::env::current_exe()?.canonicalize()?;
@@ -387,10 +402,10 @@ pub fn start(
         instance: InstanceId::new("preflight")?,
         generation: Generation(1),
     };
-    let probe_adapter = adapter(&provisional, &provisional_identity, &role.provider)?;
+    let probe_adapter = launch_adapter(&provisional, &provisional_identity, &role.provider, &discovered)?;
     let probe_hooks = probe_adapter.hooks();
     let preflight = request(&provisional, role, provisional_identity, &discovered)?;
-    let preflight = resolve_launch(
+    let preflight = resolve_launch_preflight(
         descriptor,
         &probe_hooks,
         &preflight,
@@ -412,20 +427,6 @@ pub fn start(
     if backend.store.seat(&role.id)?.is_some() {
         return Err(Error::Conflict.into());
     }
-    // A private immutable source snapshot binds model/effort and all four exact
-    // instruction layers to this startup. Never print its prompt body.
-    use std::os::unix::fs::OpenOptionsExt;
-    let snapshot = serde_json::to_vec(role).map_err(|_| BackendError::Metadata)?;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(
-            root_for(&backend.binding.workspace.path, &backend.binding.scope)
-                .join(format!("role-{}.json", role.id.as_str())),
-        )?;
-    file.write_all(&snapshot)?;
-    file.sync_all()?;
     let route = backend.binding.framework().route()?;
     let mut peers: Vec<_> = members
         .iter()
@@ -445,9 +446,23 @@ pub fn start(
     });
     backend.store.set_framework_routes(&peers, Some(&route))?;
     let identity = backend.store.propose_identity(&role.id)?;
-    let adapter = adapter(&backend.binding, &identity, &role.provider)?;
+    write_role(&backend.binding, &identity, role)?;
+    let adapter = launch_adapter(&backend.binding, &identity, &role.provider, &discovered)?;
     let hooks = adapter.hooks();
-    let request = request(&backend.binding, role, identity, &discovered)?;
+    let mut request = request(&backend.binding, role, identity, &discovered)?;
+    if !descriptor.workspace.shared_cwd {
+        request.paths.cwd = super::workspace::prepare(&backend.binding, &role.id)?;
+    }
+    if let Some(runtime) = &discovered.runtime {
+        request.preassigned_session = Some(
+            team_agent_contract::providers::cursor::native::allocate_chat(
+                runtime, &request.paths.cwd, &mut RealCommandRunner::default(),
+                team_agent_contract::contract::hooks::ReadBounds {
+                    deadline: Duration::from_secs(90), max_output_bytes: 1024 * 1024,
+                },
+            ).map_err(|error| BackendError::Discovery(DiscoveryError::Catalog(error)))?,
+        );
+    }
     let resolved = resolve_launch(
         descriptor,
         &hooks,
@@ -470,7 +485,7 @@ pub fn start(
             hooks: &hooks,
             controls: selected.controls(),
         },
-        settings(&backend.binding),
+        settings(&backend.binding, selected),
         operation.clone(),
         &clock,
     )?;
@@ -497,22 +512,178 @@ pub fn start(
     Ok((backend.binding, record))
 }
 
-pub(super) fn read_role(binding: &Binding, id: &SeatId) -> Result<RoleConfig, BackendError> {
-    let path = root_for(&binding.workspace.path, &binding.scope)
-        .join(format!("role-{}.json", id.as_str()));
+/// A fully admitted resume proposal. It is still effect-free: no parent stop,
+/// session allocation, snapshot write or config replacement has occurred.
+pub struct PreparedResume {
+    binding: Binding,
+    role: RoleConfig,
+    discovered: Discovery,
+    request: LaunchRequest,
+}
+
+impl PreparedResume {
+    pub(crate) fn seat(&self) -> &SeatId { &self.request.identity.seat }
+    pub(crate) fn session(&self) -> Option<&str> {
+        self.request.resume.as_ref().map(|resume| resume.binding.native_session.as_str())
+    }
+}
+
+pub(crate) fn prepare_restart(
+    workspace: &Path,
+    team: &str,
+    directory: &Path,
+    state: &serde_json::Value,
+) -> Result<Vec<PreparedResume>, BackendError> {
+    let config = super::framework::team_config(workspace, directory, team)?.ok_or(BackendError::Metadata)?;
+    let mut prepared = Vec::new();
+    let agents = state.get("agents").and_then(serde_json::Value::as_object).ok_or(BackendError::Metadata)?;
+    for (id, row) in agents.iter().filter(|(_, row)| super::framework::is_contract(row)) {
+        let Some(role) = config.roles.iter().find(|role| role.id.as_str() == id) else {
+            // Removed roles are not silently re-created from an old snapshot.
+            continue;
+        };
+        if role.paused { continue; }
+        prepared.push(prepare_resume(workspace, team, &role.id, Some(role))?);
+    }
+    Ok(prepared)
+}
+
+pub fn prepare_resume(
+    workspace: &Path,
+    team: &str,
+    seat: &SeatId,
+    role: Option<&RoleConfig>,
+) -> Result<PreparedResume, BackendError> {
+    let backend = Backend::open_readonly(workspace, team)?;
+    let parent = backend.store.seat(seat)?.ok_or(BackendError::Metadata)?;
+    if parent.status == SeatStatus::Unknown {
+        return Err(Error::Fence.into());
+    }
+    let role = match role {
+        Some(role) => role.clone(),
+        None => read_role(&backend.binding, &parent.identity)?,
+    };
+    if role.id != parent.identity.seat || role.provider != parent.provider {
+        return Err(ContractError::Mismatch("resume role provider").into());
+    }
+    let source = parent.session.clone().ok_or(ContractError::Invalid("native resume binding required"))?;
+    if resolve_cwd(&source.cwd.path)? != source.cwd {
+        return Err(ContractError::Mismatch("resume cwd incarnation").into());
+    }
+    let candidate = std::env::current_exe()?.canonicalize()?;
+    let candidate_sha256 = fingerprint_file(&candidate, 1024 * 1024 * 1024, Duration::from_secs(10))?;
+    if backend.binding.candidate != candidate || backend.binding.candidate_sha256 != candidate_sha256 {
+        return Err(Error::Fence.into());
+    }
+    let discovered = discovery::discover_runtime(&role.provider, workspace)?;
+    let identity = backend.store.propose_identity(seat)?;
+    let adapter = launch_adapter(&backend.binding, &identity, &role.provider, &discovered)?;
+    let hooks = adapter.hooks();
+    let mut request = request(&backend.binding, &role, identity, &discovered)?;
+    request.operation = Operation::Resume;
+    request.paths.cwd = source.cwd.clone();
+    request.resume = Some(ResumeRequest {
+        binding: source, expected_source: parent.identity,
+    });
+    let selected = registry::provider(role.provider.as_str())?;
+    let resolved = resolve_launch(selected.descriptor(), &hooks, &request, Some(&discovered.catalog))?;
+    validate_launch_plan(selected.descriptor(), &resolved, &adapter.plan(&resolved)?)?;
+    Ok(PreparedResume { binding: backend.binding, role, discovered, request })
+}
+
+pub fn resume(prepared: PreparedResume) -> Result<OperationRecord, BackendError> {
+    let mut backend = Backend::open(&prepared.binding.workspace.path, &prepared.binding.team)?;
+    if serde_json::to_vec(&backend.binding).map_err(|_| BackendError::Metadata)?
+        != serde_json::to_vec(&prepared.binding).map_err(|_| BackendError::Metadata)?
+    {
+        return Err(Error::Fence.into());
+    }
+    let source = prepared.request.resume.as_ref().ok_or(BackendError::Metadata)?;
+    let parent = backend.store.assert_current(&source.expected_source)?;
+    if parent.session.as_ref() != Some(&source.binding) {
+        return Err(Error::Fence.into());
+    }
+    let selected = registry::provider(prepared.role.provider.as_str())?;
+    let descriptor = selected.descriptor();
+    let adapter = launch_adapter(&backend.binding, &prepared.request.identity, &prepared.role.provider, &prepared.discovered)?;
+    let hooks = adapter.hooks();
+    // Revalidate the exact plan before publishing the generation snapshot.
+    let resolved = resolve_launch(descriptor, &hooks, &prepared.request, Some(&prepared.discovered.catalog))?;
+    let plan = adapter.plan(&resolved)?;
+    validate_launch_plan(descriptor, &resolved, &plan)?;
+    write_role(&backend.binding, &prepared.request.identity, &prepared.role)?;
+    let operation = OperationId::new(format!("resume-{}", prepared.request.identity.instance.as_str()))?;
+    let mut io = ScopedMaterializer::new(descriptor, &resolved, &plan, operation.clone(), RealCommandRunner::default())?;
+    let clock = RealClock::new();
+    let mut physical = PhysicalRuntime::new(
+        Registration { descriptor, hooks: &hooks, controls: selected.controls() },
+        settings(&backend.binding, selected), operation.clone(), &clock,
+    )?;
+    physical.evidence = policy_evidence(&prepared.role.provider, &prepared.request.native, backend.binding.candidate_sha256)?;
+    let record = Lifecycle { store: &mut backend.store, host: &mut physical, io: &mut io }.startup(
+        &Adapter { descriptor, hooks: &hooks, catalog: Some(&prepared.discovered.catalog) },
+        &prepared.request,
+        Routing {
+            pane: "unpublished".into(),
+            binding_key: format!("binding-{}", prepared.request.identity.instance.as_str()),
+            server_key: selected.server_key()?.into(),
+        },
+        operation,
+    )?;
+    Ok(record)
+}
+
+fn role_path(binding: &Binding, identity: &InstanceIdentity) -> PathBuf {
+    root_for(&binding.workspace.path, &binding.scope).join(format!(
+        "role-{}-{}.json", identity.seat.as_str(), identity.instance.as_str(),
+    ))
+}
+fn write_role(binding: &Binding, identity: &InstanceIdentity, role: &RoleConfig) -> Result<(), BackendError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    if identity.scope != binding.scope || identity.seat != role.id {
+        return Err(BackendError::Metadata);
+    }
+    // Each generation has an immutable source; an old stopped generation's
+    // model/instructions never change when a new role is admitted.
+    let snapshot = serde_json::to_vec(role).map_err(|_| BackendError::Metadata)?;
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
+        .mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(role_path(binding, identity))?;
+    file.write_all(&snapshot)?;
+    file.sync_all()?;
+    Ok(())
+}
+pub(super) fn read_role(binding: &Binding, identity: &InstanceIdentity) -> Result<RoleConfig, BackendError> {
+    let mut path = role_path(binding, identity);
+    // Existing generation-one deployments retain their immutable source.
+    if identity.generation == Generation(1) {
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                path = root_for(&binding.workspace.path, &binding.scope)
+                    .join(format!("role-{}.json", identity.seat.as_str()));
+            }
+            Err(error) => return Err(error.into()),
+            Ok(_) => {},
+        }
+    }
     let metadata = std::fs::symlink_metadata(&path)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(BackendError::Metadata);
     }
     let mut bytes = Vec::new();
-    std::fs::File::open(path)?
-        .take(4 * 1024 * 1024 + 1)
-        .read_to_end(&mut bytes)?;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let file = std::fs::OpenOptions::new().read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path)?;
+    let opened = file.metadata()?;
+    if metadata.dev() != opened.dev() || metadata.ino() != opened.ino() {
+        return Err(BackendError::Metadata);
+    }
+    file.take(4 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
     if bytes.len() > 4 * 1024 * 1024 {
         return Err(BackendError::Metadata);
     }
     let role: RoleConfig = serde_json::from_slice(&bytes).map_err(|_| BackendError::Metadata)?;
-    if &role.id != id
+    if role.id != identity.seat || identity.scope != binding.scope
         || registry::descriptor(role.provider.as_str())
             .is_none_or(|descriptor| descriptor.identity.id != role.provider.as_str())
         || digest(role.prompt.text.as_bytes()) != role.prompt.sha256
@@ -605,7 +776,7 @@ pub fn stop(workspace: &Path, team: &str, seat: &SeatId) -> Result<OperationReco
             hooks: &hooks,
             controls: &[],
         },
-        settings(&backend.binding),
+        settings(&backend.binding, selected),
         operation.clone(),
         &clock,
     )?;
@@ -620,6 +791,69 @@ pub fn stop(workspace: &Path, team: &str, seat: &SeatId) -> Result<OperationReco
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct RoleFixture { root: PathBuf, binding: Binding, role: RoleConfig, identity: InstanceIdentity }
+    impl RoleFixture {
+        fn new() -> Self {
+            use std::os::unix::fs::DirBuilderExt;
+            let root = std::env::temp_dir().join(format!("contract-role-{}-{}", std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            std::fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+            let cwd = resolve_cwd(&root).unwrap();
+            let scope = scope_for(&cwd, "test").unwrap();
+            std::fs::create_dir_all(root_for(&cwd.path, &scope)).unwrap();
+            let seat = SeatId::new("worker").unwrap();
+            let identity = InstanceIdentity { scope: scope.clone(), seat: seat.clone(), instance: InstanceId::new("first").unwrap(), generation: Generation(1) };
+            let binding = Binding { version: 1, workspace: cwd, team: "test".into(), scope,
+                endpoint: "controlled".into(), candidate: "/controlled/candidate".into(), candidate_sha256: digest(b"candidate"),
+                tmux: "/controlled/tmux".into(), transport_root: "/controlled/transport".into() };
+            let role = RoleConfig { id: seat, provider: ProviderId::new("cursor").unwrap(), source: root.join("role.md"),
+                role: "worker".into(), model: "first-model".into(), effort: None, bypass: false, paused: false,
+                body: "bounded fixture".into(), prompt: super::super::prompt::Prompt {
+                    text: "bounded fixture".into(), sha256: digest(b"bounded fixture"), sources: vec![],
+                } };
+            Self { root, binding, role, identity }
+        }
+    }
+    impl Drop for RoleFixture { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.root); } }
+
+    #[test]
+    fn role_snapshots_are_instance_scoped_and_exclusive() {
+        let fixture = RoleFixture::new();
+        write_role(&fixture.binding, &fixture.identity, &fixture.role).unwrap();
+        let mut second = fixture.identity.clone();
+        second.instance = InstanceId::new("second").unwrap();
+        second.generation = Generation(2);
+        let mut role = fixture.role.clone();
+        role.model = "second-model".into();
+        write_role(&fixture.binding, &second, &role).unwrap();
+        assert_eq!(read_role(&fixture.binding, &fixture.identity).unwrap().model, "first-model");
+        assert_eq!(read_role(&fixture.binding, &second).unwrap().model, "second-model");
+        assert!(write_role(&fixture.binding, &fixture.identity, &role).is_err());
+        assert_eq!(read_role(&fixture.binding, &fixture.identity).unwrap().model, "first-model");
+    }
+
+    #[test]
+    fn legacy_role_fallback_is_only_for_missing_generation_one_not_symlinks() {
+        let fixture = RoleFixture::new();
+        let old = root_for(&fixture.binding.workspace.path, &fixture.binding.scope).join("role-worker.json");
+        std::fs::write(&old, serde_json::to_vec(&fixture.role).unwrap()).unwrap();
+        assert_eq!(read_role(&fixture.binding, &fixture.identity).unwrap().model, "first-model");
+        let mut later = fixture.identity.clone();
+        later.generation = Generation(2);
+        assert!(read_role(&fixture.binding, &later).is_err());
+        std::os::unix::fs::symlink(fixture.root.join("missing"), role_path(&fixture.binding, &fixture.identity)).unwrap();
+        assert!(matches!(read_role(&fixture.binding, &fixture.identity), Err(BackendError::Metadata)));
+    }
+
+    #[test]
+    fn mismatched_role_owner_cannot_write_a_snapshot() {
+        let fixture = RoleFixture::new();
+        let mut identity = fixture.identity.clone();
+        identity.seat = SeatId::new("other").unwrap();
+        assert!(matches!(write_role(&fixture.binding, &identity, &fixture.role), Err(BackendError::Metadata)));
+        assert!(!role_path(&fixture.binding, &identity).exists());
+    }
 
     #[test]
     fn shutdown_error_exposes_the_durable_operation_failure_not_metadata() {
@@ -638,7 +872,7 @@ mod tests {
     }
 
     #[test]
-    fn cursor_metadata_and_unverified_recipe_never_mint_native_evidence() {
+    fn cursor_metadata_never_mints_runtime_policy_evidence() {
         let provider = ProviderId::new("cursor").unwrap();
         let mut native = NativeIdentity {
             version: "2026.09.29-a1b2c3".into(),
@@ -651,8 +885,9 @@ mod tests {
         assert!(policy_evidence(&provider, &native, candidate).unwrap().is_empty());
         native.harness = "cursor-agent".into();
         native.ui = "tui".into();
-        assert!(matches!(policy_evidence(&provider, &native, candidate),
-            Err(ContractError::Unverified { field: "native submit policy", .. })));
+        // Admission supplies a separately image-fenced runtime identity. The
+        // recipe still cannot be borrowed from metadata or another provider.
+        assert!(!policy_evidence(&provider, &native, candidate).unwrap().is_empty());
         // Even a Kiro-looking image cannot reuse its evidence under Cursor.
         native.harness = "v2".into();
         native.version = "2.29.0".into();
@@ -674,7 +909,7 @@ mod tests {
         let role = RoleConfig {
             id: seat.clone(), provider: provider.clone(), source: "/controlled/role.md".into(),
             role: "worker".into(), model: "gpt-5.6-luna-xhigh".into(), effort: None,
-            bypass: true, body: "role".into(),
+            bypass: true, paused: false, body: "role".into(),
             prompt: super::super::prompt::Prompt { text: "prompt".into(), sha256: digest(b"prompt"), sources: vec![] },
         };
         let identity = InstanceIdentity { scope, seat, instance: InstanceId::new("preflight").unwrap(), generation: Generation(1) };
@@ -683,12 +918,13 @@ mod tests {
             ui: "metadata".into(), platform: Platform::MacOs, executable_sha256: digest(b"launcher"),
         };
         let mut discovery = Discovery {
+            runtime: None,
             engine: "/controlled/cursor-agent".into(), native: native.clone(),
             catalog: CatalogObservation { provider, native,
                 schema: team_agent_contract::providers::cursor::native::CATALOG_SOURCE.schema.into(), models: vec![] },
         };
         assert!(matches!(request(&binding, &role, identity.clone(), &discovery),
-            Err(BackendError::Contract(ContractError::Unverified { field: "native subscription launch", .. }))));
+            Err(BackendError::Contract(ContractError::ProfileUnavailable))));
         discovery.catalog.provider = ProviderId::new("kiro").unwrap();
         assert!(matches!(request(&binding, &role, identity, &discovery),
             Err(BackendError::Contract(ContractError::Mismatch("role native catalog")))));

@@ -1,5 +1,8 @@
 //! Read-only per-agent routing/preflight. Contract roles opt in independently;
 //! other roles keep the legacy engine, including in the same logical team.
+#[cfg(test)]
+#[path = "config_tests.rs"]
+mod tests;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -37,6 +40,8 @@ pub struct RoleConfig {
     pub model: String,
     pub effort: Option<String>,
     pub bypass: bool,
+    #[serde(default)]
+    pub paused: bool,
     pub body: String,
     pub prompt: Prompt,
 }
@@ -128,6 +133,23 @@ pub fn read_team_with_user_source(
     args: &QuickStartArgs,
     user_source: impl FnOnce() -> Result<Option<Source>, ConfigError>,
 ) -> Result<Option<TeamConfig>, ConfigError> {
+    read_team_inner(args, user_source, None)
+}
+
+/// Compile an admitted role-document change without first writing any file.
+pub(crate) fn read_team_with_role_override(
+    args: &QuickStartArgs,
+    path: &Path,
+    contents: &str,
+) -> Result<Option<TeamConfig>, ConfigError> {
+    read_team_inner(args, prompt::user_source, Some((path, contents)))
+}
+
+fn read_team_inner(
+    args: &QuickStartArgs,
+    user_source: impl FnOnce() -> Result<Option<Source>, ConfigError>,
+    role_override: Option<(&Path, &str)>,
+) -> Result<Option<TeamConfig>, ConfigError> {
     let agents = args.agents_dir.join("agents");
     let entries = match std::fs::read_dir(&agents) {
         Ok(entries) => entries,
@@ -145,10 +167,13 @@ pub fn read_team_with_user_source(
     let mut roles = Vec::new();
     let mut selected = false;
     for path in paths {
-        let raw = match std::fs::read_to_string(&path) {
+        let raw = match role_override.filter(|(source, _)| path.canonicalize().ok().as_deref() == Some(*source)) {
+            Some((_, contents)) => contents.to_owned(),
+            None => match std::fs::read_to_string(&path) {
             Ok(raw) => raw,
             Err(error) if selected => return Err(error.into()),
             Err(_) => return Ok(None), // let the legacy compiler report its existing I/O error
+            },
         };
         let (meta, body) = split_front_matter(&raw);
         let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
@@ -259,6 +284,11 @@ pub fn read_team_with_user_source(
             Some(Value::Bool(value)) => *value,
             _ => return Err(invalid(&source, "dangerously_skip_permissions")),
         };
+        let paused = match meta.get("paused") {
+            None => false,
+            Some(Value::Bool(value)) => *value,
+            _ => return Err(invalid(&source, "paused")),
+        };
         if body.trim().is_empty() || body.contains('\0') {
             return Err(invalid(&source, "role body"));
         }
@@ -292,6 +322,7 @@ pub fn read_team_with_user_source(
             model: required(&meta, "model", &source)?,
             effort: text(&meta, "effort", &source)?,
             bypass,
+            paused,
             body,
             prompt,
         });

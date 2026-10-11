@@ -259,6 +259,25 @@ fn cursor_mutation_malformed_declarations_and_api_profiles_refuse_without_writes
 }
 
 #[test]
+fn paused_contract_roles_do_not_probe_or_materialize_runtime() {
+    let (_sandbox, args) = fixture();
+    for provider in ["cursor", "kiro"] {
+        role(&args, "worker", provider);
+        let path = args.agents_dir.join("agents/worker.md");
+        let text = std::fs::read_to_string(&path).unwrap().replace(
+            "dangerously_skip_permissions: true", "dangerously_skip_permissions: true\npaused: true",
+        );
+        std::fs::write(&path, text).unwrap();
+        let config = read_team(&args).unwrap().unwrap();
+        assert!(config.roles[0].paused);
+        team_agent::contract_runtime::backend::preflight(&config).unwrap();
+        for path in [".team", ".cursor", ".kiro"] {
+            assert!(!args.workspace.join(path).exists());
+        }
+    }
+}
+
+#[test]
 fn worker_named_leader_is_not_a_leader_launcher_and_non_tmux_refuses() {
     let (_sandbox, mut args) = fixture();
     role(&args, "worker", "kiro");

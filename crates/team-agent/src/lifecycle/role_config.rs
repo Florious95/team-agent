@@ -486,7 +486,7 @@ fn raw_line_end(text: &str, start: usize) -> (usize, usize) {
     }
 }
 
-fn patched_role(
+pub(crate) fn patched_role(
     text: &str,
     agent_id: &AgentId,
     patch: &RoleConfigPatch,
@@ -773,6 +773,22 @@ impl RoleSnapshot {
             ))
         }
     }
+}
+
+/// Compare-and-replace a role only after its complete native plan is admitted.
+/// No rollback of a live/uncertain native generation is implied by this write.
+pub(crate) fn commit_contract_role(
+    path: &Path,
+    expected: &str,
+    replacement: &str,
+) -> Result<(), LifecycleError> {
+    if read_text(path)? != expected {
+        return Err(LifecycleError::RequirementUnmet("role source changed during admission".into()));
+    }
+    if expected != replacement {
+        atomic_write(path, replacement.as_bytes())?;
+    }
+    Ok(())
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), LifecycleError> {

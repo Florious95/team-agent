@@ -3,10 +3,10 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use team_agent_contract::contract::{
-    descriptor::{ProviderDescriptor, ToolNaming},
+    descriptor::{PromptCarrier, ProviderDescriptor, ToolNaming},
     hooks::{PlanHook, ProviderHooks},
     plan::{LaunchPlan, ResolvedLaunch},
-    types::ContractError,
+    types::{ContractError, Support},
 };
 use team_agent_contract::kiro::{self, KiroAdapter, KIRO_DESCRIPTOR};
 use team_agent_contract::providers::cursor::{self, CursorAdapter, CURSOR_DESCRIPTOR};
@@ -29,11 +29,29 @@ impl NativeProvider {
         }
     }
 
+    pub fn action_budget(self) -> std::time::Duration {
+        // Kiro's existing budget is unchanged; Cursor's measured cold-ready
+        // path needs a larger finite bound, not an unbounded readiness wait.
+        std::time::Duration::from_secs(match self { Self::Kiro => 30, Self::Cursor => 90 })
+    }
+
     pub fn controls(self) -> &'static [ControlDefinition] {
         match self {
             Self::Kiro => kiro::interaction::CONTROLS,
             Self::Cursor => cursor::interaction::CONTROLS,
         }
+    }
+
+    /// A terminal instruction bridge needs one durable, authorized first packet
+    /// before the native client can demonstrate its Team-tool registry.
+    pub fn first_business_bootstrap(self) -> bool {
+        matches!(self.descriptor().prompt.carrier, Support::Supported(PromptCarrier::RuntimeBridge))
+    }
+
+    /// Cursor has no measured neutral TUI tools panel. Its protocol binding
+    /// must come from the separately fenced native tool-roundtrip ledger.
+    pub fn uses_tool_roundtrips(self) -> bool {
+        matches!(self, Self::Cursor)
     }
 
     pub fn tool_panel(self) -> Result<&'static NativePanelPolicy, ContractError> {
@@ -76,6 +94,24 @@ pub(super) enum NativeAdapter {
 }
 
 impl NativeAdapter {
+    pub fn with_launch_context(
+        self,
+        project: PathBuf,
+        runtime: Option<cursor::native::RuntimeInstallation>,
+    ) -> Result<Self, ContractError> {
+        match self {
+            Self::Kiro(adapter) if runtime.is_none() => Ok(Self::Kiro(adapter)),
+            Self::Kiro(_) => Err(ContractError::Mismatch("native runtime provider")),
+            Self::Cursor(adapter) => {
+                let adapter = adapter.with_project(project)?;
+                Ok(Self::Cursor(match runtime {
+                    Some(runtime) => adapter.with_runtime(runtime),
+                    None => adapter,
+                }))
+            }
+        }
+    }
+
     pub fn hooks(&self) -> ProviderHooks<'_> {
         match self {
             Self::Kiro(adapter) => adapter.hooks(),
@@ -148,7 +184,11 @@ mod tests {
     fn cursor_has_no_kiro_control_or_tool_inspector_fallback() {
         assert!(NativeProvider::Cursor.controls().is_empty());
         assert!(matches!(NativeProvider::Cursor.tool_panel(), Err(ContractError::Unverified { .. })));
-        assert!(matches!(NativeProvider::Cursor.server_key(), Err(ContractError::Unverified { .. })));
+        assert_eq!(NativeProvider::Cursor.server_key().unwrap(), "team");
+        assert!(NativeProvider::Cursor.first_business_bootstrap());
+        assert!(NativeProvider::Cursor.uses_tool_roundtrips());
+        assert!(!NativeProvider::Kiro.first_business_bootstrap());
+        assert!(!NativeProvider::Kiro.uses_tool_roundtrips());
         let kiro_panel = NativeProvider::Kiro.tool_panel().unwrap();
         assert_eq!(kiro_panel.server_key, NativeProvider::Kiro.server_key().unwrap());
         assert_eq!(kiro_panel.policy_sha256, kiro::interaction::POLICY);

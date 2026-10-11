@@ -19,6 +19,14 @@ pub fn is_contract(agent: &Value) -> bool {
         .and_then(Value::as_str)
         .is_some_and(|provider| super::registry::descriptor(provider).is_some())
 }
+/// Published paused roles without an instance never crossed native startup.
+/// A bound instance is never skipped, even if a stale row says paused.
+pub(crate) fn is_paused_unstarted(agent: &Value) -> bool {
+    is_contract(agent)
+        && agent.get("status").and_then(Value::as_str) == Some("paused")
+        && agent.get("contract_instance").is_none_or(Value::is_null)
+}
+
 pub fn has_contract(state: &Value) -> bool {
     state
         .get("agents")
@@ -141,12 +149,12 @@ pub fn start_role(
 }
 
 pub fn project_seat(workspace: &Path, team: &str, id: &str) -> Result<Value, BackendError> {
-    let backend = Backend::open_readonly(workspace, team)?;
+    let mut backend = Backend::open_readonly(workspace, team)?;
     let seat = backend
         .store
         .seat(&SeatId::new(id)?)?
         .ok_or(BackendError::Metadata)?;
-    let role = backend::read_role(&backend.binding, &seat.identity.seat)?;
+    let role = backend::read_role(&backend.binding, &seat.identity)?;
     if role.provider != seat.provider {
         return Err(BackendError::Metadata);
     }
@@ -154,6 +162,23 @@ pub fn project_seat(workspace: &Path, team: &str, id: &str) -> Result<Value, Bac
         .physical
         .as_ref()
         .is_some_and(|target| sample_process(&target.process) == ProcessState::Alive);
+    // Present only individually proven tools. A successful report_result
+    // never turns send_message/get_team_status into invented discoveries.
+    let mut observed = Vec::new();
+    let mut binding_source = None;
+    if super::registry::provider(seat.provider.as_str())?.uses_tool_roundtrips() {
+        let protocol = super::pump::protocol(&mut backend, &seat, &team_agent_contract::host::clock::RealClock::new())?;
+        if let team_agent_contract::contract::probe::ProbeOutcome::Observed(binding) = protocol.binding.outcome {
+            binding_source = Some(format!("{:?}", binding.source));
+            observed = binding.tools;
+        }
+    }
+    let tools: serde_json::Map<String, Value> = [
+        (team_agent_contract::contract::types::LogicalTool::SendMessage, "send_message"),
+        (team_agent_contract::contract::types::LogicalTool::ReportResult, "report_result"),
+        (team_agent_contract::contract::types::LogicalTool::GetTeamStatus, "get_team_status"),
+    ].into_iter().map(|(tool, name)| (name.into(), json!(if observed.contains(&tool) { "observed" } else { "unknown" }))).collect();
+    let binding_status = if observed.len() == 3 { "observed" } else if observed.is_empty() { "unverified" } else { "partial" };
     let status = if seat.status == SeatStatus::Stopped {
         "stopped"
     } else if seat.status != SeatStatus::Unknown && alive {
@@ -169,7 +194,8 @@ pub fn project_seat(workspace: &Path, team: &str, id: &str) -> Result<Value, Bac
         "session_id":seat.session.map(|session| session.native_session),
         "native_endpoint":seat.endpoint,"native_pane":seat.pane,
         "pane_id":null,"window":null,"session_name":null,
-        "mcp_binding":"unverified","bootstrap_used":seat.bootstrap_used}),
+        "mcp_binding":binding_status,"mcp_binding_source":binding_source,"mcp_tools":tools,
+        "bootstrap_used":seat.bootstrap_used}),
     )
 }
 
@@ -238,6 +264,10 @@ pub fn stop_selected(workspace: &Path, state: &Value) -> Result<Vec<Value>, Back
     let mut receipts = Vec::new();
     if let Some(agents) = state.get("agents").and_then(Value::as_object) {
         for (id, agent) in agents.iter().filter(|(_, agent)| is_contract(agent)) {
+            if is_paused_unstarted(agent) {
+                receipts.push(json!({"agent_id":id,"status":"paused","stopped":false}));
+                continue;
+            }
             let backend = Backend::open(workspace, &team)?;
             let seat = backend
                 .store

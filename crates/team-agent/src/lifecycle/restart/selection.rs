@@ -24,6 +24,36 @@ use super::common::*;
 use super::*;
 use crate::provider::wire::{parse_canonical_provider, requires_resume_backing};
 
+#[cfg(all(test, unix))]
+mod contract_route_tests {
+    use super::*;
+
+    #[test]
+    fn contract_seats_never_enter_legacy_resume_or_fresh_classification() {
+        let state = serde_json::json!({"agents": {
+            "cursor": {"provider":"cursor","status":"running","session_id":"native-cursor"},
+            "kiro": {"provider":"kiro","status":"running","session_id":"native-kiro"},
+        }});
+        for allow_fresh in [false, true] {
+            let plan = classify_restart_plan(&state, allow_fresh).unwrap();
+            assert!(plan.decisions.is_empty());
+            assert!(plan.unresumable.is_empty());
+        }
+    }
+
+    #[test]
+    fn mixed_team_retains_legacy_classification_without_native_codex_fallback() {
+        let state = serde_json::json!({"agents": {
+            "native": {"provider":"cursor","status":"running","session_id":"native-id"},
+            "legacy": {"provider":"pi","status":"stopped"},
+        }});
+        let plan = classify_restart_plan(&state, false).unwrap();
+        assert_eq!(plan.decisions.len(), 1);
+        assert_eq!(plan.decisions[0].agent_id.as_str(), "legacy");
+        assert_eq!(plan.decisions[0].restart_mode, StartMode::Fresh);
+    }
+}
+
 /// ---
 /// purpose: 定出该席位这次的启动模式
 /// params:
@@ -283,6 +313,10 @@ pub(crate) fn classify_restart_plan_with_resume_validation(
     };
 
     for (worker_id, agent) in agents {
+        // Contract resumes are admitted against their canonical native store,
+        // not this legacy enum's unknown-provider Codex default.
+        #[cfg(unix)]
+        if crate::contract_runtime::framework::is_contract(agent) { continue; }
         if agent
             .get("status")
             .and_then(|v| v.as_str())
