@@ -1333,6 +1333,15 @@ fn lifecycle_placeholder(agent: &Value) -> bool {
 }
 
 fn lifecycle_peer_snapshot_is_stale(incoming: &Value, latest: &Value) -> bool {
+    // A save that omitted a not-yet-spawned peer can carry roster_stub's
+    // metadata-only row into a later save. It has neither status nor epoch;
+    // it must not conflict with the peer that has since started.
+    if incoming.get("status").is_none_or(Value::is_null)
+        && live_topology_fields(incoming).is_empty()
+        && latest.get("status").and_then(Value::as_str) == Some("running")
+    {
+        return true;
+    }
     // A concurrent clone/restart can have promoted its peer to `running`
     // while its capture tuple is still pending.  That row is still a
     // lifecycle snapshot, not a completed topology observation; preserving
@@ -2641,6 +2650,70 @@ mod tests {
         let saved = read_state(&ws);
         assert!(saved["agents"].get("f1").is_none());
         assert!(saved["agents"].get("f2").is_some());
+    }
+
+    #[test]
+    fn lifecycle_authority_preserves_peer_that_started_after_roster_stub_snapshot() {
+        let ws = temp_ws();
+        write_state(
+            &ws,
+            &json!({
+                "session_name": "team-a",
+                "active_team_key": "team-a",
+                "agents": {"f1": {"provider": "claude", "status": "starting"}}
+            }),
+        );
+        // f2 loaded before f1's reservation. Persist carries the still-unspawned
+        // f1 forward as an actual roster stub, not a fabricated test shape.
+        let incoming = json!({
+            "session_name": "team-a",
+            "active_team_key": "team-a",
+            "agents": {"f2": {"provider": "claude", "status": "starting"}}
+        });
+        save_runtime_state_with_lifecycle_topology_authority(&ws, &incoming, "team-a", &["f2"])
+            .unwrap();
+        let mut stale = read_state(&ws);
+        assert!(stale["agents"]["f1"].get("status").is_none());
+        assert!(live_topology_fields(&stale["agents"]["f1"]).is_empty());
+
+        // f1 starts after f2 takes its snapshot; capture is not complete yet.
+        let mut started = stale.clone();
+        started["agents"]["f1"] = json!({
+            "provider": "claude",
+            "status": "running",
+            "pane_id": "%1",
+            "pane_pid": 101,
+            "window": "f1",
+            "spawned_at": "2026-10-11T05:55:20Z",
+            "spawn_epoch": 1,
+            "_pending_session_id": "session-f1"
+        });
+        normalize_agent_session_state(&mut started);
+        save_runtime_state_with_lifecycle_topology_authority(&ws, &started, "team-a", &["f1"])
+            .unwrap();
+        let latest = read_state(&ws);
+        stale["agents"]["f2"] = json!({
+            "provider": "claude",
+            "status": "running",
+            "pane_id": "%2",
+            "pane_pid": 102,
+            "window": "f2",
+            "spawned_at": "2026-10-11T05:55:21Z",
+            "spawn_epoch": 1,
+            "_pending_session_id": "session-f2"
+        });
+
+        // Ordinary writers still cannot overwrite the live peer from a stub.
+        assert!(matches!(
+            save_runtime_state(&ws, &stale),
+            Err(StateError::SaveConflict(_))
+        ));
+        assert_eq!(read_state(&ws), latest);
+        save_runtime_state_with_lifecycle_topology_authority(&ws, &stale, "team-a", &["f2"])
+            .unwrap();
+        let saved = read_state(&ws);
+        assert_eq!(saved["agents"]["f1"], latest["agents"]["f1"]);
+        assert_eq!(saved["agents"]["f2"], stale["agents"]["f2"]);
     }
 
     #[test]
