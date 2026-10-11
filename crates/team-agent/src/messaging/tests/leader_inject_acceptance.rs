@@ -84,8 +84,7 @@ fn pi_receipt_case(tag: &str) -> (Case, serde_json::Value) {
     case.rollout = root.join("not-derived-from-the-session-id.jsonl");
     let receiver = &mut case.state["leader_receiver"];
     receiver["provider"] = serde_json::json!("pi");
-    receiver["tmux_socket"] =
-        serde_json::json!(crate::tmux_backend::socket_name_for_workspace(&case.workspace));
+    receiver["tmux_socket"] = serde_json::json!(case.workspace.join("fixture-tmux.sock"));
     receiver["leader_session_uuid"] = serde_json::json!("team-owner-not-native-id");
     receiver["owner_epoch"] = serde_json::json!(1);
     receiver["native_session"] = serde_json::json!({
@@ -109,18 +108,24 @@ fn pi_receipt_case(tag: &str) -> (Case, serde_json::Value) {
 #[test]
 fn pi_leader_receipt_binds_exact_header_and_consumes_without_reinjection() {
     let (case, header) = pi_receipt_case("pi-native-receipt");
-    assert!(matches!(
-        crate::messaging::resolve_live_leader_channel(
-            &case.workspace,
-            &case.state["leader_receiver"],
-            &RecordingTransport::new(""),
+    let endpoint = case.state["leader_receiver"]["tmux_socket"].as_str().unwrap();
+    assert!(Path::new(endpoint).is_absolute());
+    let unbound = crate::messaging::resolve_live_leader_channel(
+        &case.workspace,
+        &case.state["leader_receiver"],
+        &RecordingTransport::new(""),
+    );
+    assert!(
+        matches!(
+            unbound,
+            crate::messaging::LeaderChannelResolution::Unbound(
+                crate::messaging::LeaderChannelUnbound::EndpointMismatch
+            )
         ),
-        crate::messaging::LeaderChannelResolution::Unbound(
-            crate::messaging::LeaderChannelUnbound::EndpointMismatch
-        )
-    ));
+        "{unbound:?}"
+    );
     let transport = RecordingTransport {
-        endpoint: Some(crate::tmux_backend::socket_name_for_workspace(&case.workspace)),
+        endpoint: Some(endpoint.to_string()),
         ..RecordingTransport::new("")
     };
     let message_id = case.seed_message("Pi receipt canary");

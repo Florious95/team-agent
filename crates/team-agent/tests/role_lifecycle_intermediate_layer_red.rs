@@ -314,6 +314,9 @@ fn add_file_cli_arbitration_accepts_equal_and_rejects_conflicting_values_atomica
 #[test]
 fn duplicate_add_running_or_stopped_is_fail_closed_with_zero_session_side_effects() {
     let (ws, shims) = ws_seed("rolelife-duplicate", "pi", "gpt-6-luna", None);
+    // Attribute all snapshot changes to the rejected command, not a daemon
+    // tick racing the stop that removes the worker's pane binding.
+    quiesce_owned_coordinator_before_rejection_snapshot(&ws);
     let source = ws.path().join("other.md"); fs::write(&source, role("seed", "pi", "gpt-5.6-luna", None, false, "Other." )).unwrap();
     for stopped in [false, true] {
         if stopped { stop(&ws, &shims, "seed"); }
