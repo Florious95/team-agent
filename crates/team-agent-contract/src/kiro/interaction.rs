@@ -191,7 +191,7 @@ impl InteractionHook for KiroAdapter {
             correlate_business_input(frame, &mut observation, current.as_deref());
             return observation;
         }
-        let expected = match (&frame.message, frame.operation) {
+        let expected: String = match (&frame.message, frame.operation) {
             (None, Operation::SessionInspect) => "/session-id".into(),
             (None, Operation::ToolInspect) => "/tools".into(),
             _ => return observation,
