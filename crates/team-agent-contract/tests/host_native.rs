@@ -34,7 +34,20 @@ fn configured_binary(key: &str) -> PathBuf {
 /// Reproduce a clean caller without changing the test process's environment.
 /// Every actual tmux client, including spawn/query/capture/close, lacks locale hints.
 #[derive(Default)]
-struct NoLocaleRunner(RealCommandRunner);
+struct NoLocaleRunner(RealCommandRunner, Vec<Value>);
+
+// Only controlled fixture bytes, never real provider output. Keep bounded ends
+// and explicit truncation so a partial helper event cannot masquerade as complete.
+fn fixture_bytes(bytes: &[u8]) -> Value {
+    let head = bytes.len().min(2048);
+    let tail = bytes.len().saturating_sub(2048).max(head);
+    json!({
+        "bytes": bytes.len(), "sha256": digest_hex(digest(bytes)),
+        "ends_lf": bytes.ends_with(b"\n"), "truncated": tail > head,
+        "head": String::from_utf8_lossy(&bytes[..head]),
+        "tail": String::from_utf8_lossy(&bytes[tail..])
+    })
+}
 
 impl CommandRunner for NoLocaleRunner {
     fn run(&mut self, request: &CommandRequest) -> CommandReceipt {
@@ -43,7 +56,7 @@ impl CommandRunner for NoLocaleRunner {
             environment.set.remove(key);
             environment.remove.insert(key.into());
         }
-        self.0.run(&CommandRequest {
+        let receipt = self.0.run(&CommandRequest {
             executable: request.executable.clone(),
             arguments: request.arguments.clone(),
             cwd: request.cwd.clone(),
@@ -52,7 +65,17 @@ impl CommandRunner for NoLocaleRunner {
             budget: request.budget,
             limits: request.limits,
             reject_stdout: request.reject_stdout,
-        })
+        });
+        if request.arguments.iter().any(|arg| arg == "capture-pane") {
+            if self.1.len() == 3 {
+                self.1.remove(0);
+            }
+            self.1.push(json!({
+                "end": format!("{:?}", receipt.end), "exit_code": receipt.exit_code,
+                "elapsed_ms": receipt.elapsed.as_millis(), "stdout": fixture_bytes(&receipt.stdout)
+            }));
+        }
+        receipt
     }
 }
 
@@ -474,6 +497,17 @@ fn native_case(mode: &str, content: &str, expected_keys: usize) {
         None,
         &clock,
     );
+    if report.disposition != InjectionDisposition::NativeAccepted {
+        let events = match host.directory().read_file("native-events.jsonl", 2 * 1024 * 1024) {
+            Ok(bytes) => fixture_bytes(&bytes),
+            Err(error) => json!({"read_error": error.to_string()}),
+        };
+        // Preserve the actual captures used during injection, not a new capture
+        // after the deadline. No corrective input, retry, or extra native action.
+        println!("CONTROLLED_NATIVE_FAILURE={}", json!({
+            "case": mode, "last_captures": host.runner_mut().1, "helper_events": events
+        }));
+    }
     assert_eq!(
         report.disposition,
         InjectionDisposition::NativeAccepted,
