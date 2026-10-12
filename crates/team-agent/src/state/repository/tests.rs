@@ -158,8 +158,18 @@ fn stopped_start_commit_updates_exact_target_and_both_mirrors()
         assert_eq!(team["agents"]["peer"], before["teams"][target]["agents"]["peer"]);
         assert_eq!(team["agents"]["control"], before["teams"][target]["agents"]["control"]);
         assert_eq!(saved["teams"][other], before["teams"][other]);
-        let expected_root = if target == "team-a" { &team["agents"] } else { &before["agents"] };
-        assert_eq!(&saved["agents"], expected_root);
+        // Root normalization retains null session fields that compact team
+        // rows omit. Build an independent root oracle, not the compact schema.
+        let mut expected_root = before["agents"].clone();
+        if target == "team-a" {
+            let row = &mut expected_root["worker"];
+            row["status"] = json!("running");
+            row["explicit_stop"] = json!(false);
+            row["generation"] = json!(2);
+            row["contract_instance"] = json!("instance-two");
+            row["native_endpoint"] = json!("new-endpoint");
+        }
+        assert_eq!(saved["agents"], expected_root);
         // An ordinary bounded delta still cannot wake a held peer.
         repository.commit(StateWriteIntent::ResultCollection { owner_team_id: Some(target) }, |selected| {
             selected["agents"]["peer"]["status"] = json!("running");
