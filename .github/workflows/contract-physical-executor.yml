@@ -17,6 +17,14 @@ on:
         required: false
         default: ""
         type: string
+      regression_scope:
+        description: Fixed finite suite or owned host ancestry target
+        required: false
+        default: full
+        type: choice
+        options:
+          - full
+          - host-ancestry
 
 permissions:
   contents: read
@@ -112,6 +120,7 @@ jobs:
     env:
       SOURCE_SHA: ${{ inputs.source_sha }}
       EXPECTED_TREE: ${{ inputs.expected_tree }}
+      REGRESSION_SCOPE: ${{ inputs.regression_scope }}
       RUSTUP_TOOLCHAIN: "1.95.0"
       CONTRACT_OLD_SCOPE: fixture-old-scope
       TEAM_AGENT_K2_FOREIGN_PROBE: fixture-foreign-team
@@ -159,11 +168,19 @@ jobs:
             test "${statuses[1]}" -eq 0 || return 125
             return "${statuses[0]}"
           }
-          run_case root-stopped cargo test -p team-agent --lib --locked stop -- --test-threads=1
-          run_case root-restart cargo test -p team-agent --lib --locked lifecycle::restart -- --test-threads=1
-          run_case root-contract cargo test -p team-agent --lib --locked contract_runtime -- --test-threads=1
-          run_case public-lifecycle cargo test -p team-agent --test add_agent_restart_saveconflict_contract --locked -- --test-threads=1
-          run_case contract-all cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets -- --test-threads=1
+          case "$REGRESSION_SCOPE" in
+            host-ancestry)
+              run_case host-ancestry cargo test --manifest-path crates/team-agent-contract/Cargo.toml --test host_ancestry --locked -- --test-threads=1
+              ;;
+            full)
+              run_case root-stopped cargo test -p team-agent --lib --locked stop -- --test-threads=1
+              run_case root-restart cargo test -p team-agent --lib --locked lifecycle::restart -- --test-threads=1
+              run_case root-contract cargo test -p team-agent --lib --locked contract_runtime -- --test-threads=1
+              run_case public-lifecycle cargo test -p team-agent --test add_agent_restart_saveconflict_contract --locked -- --test-threads=1
+              run_case contract-all cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets -- --test-threads=1
+              ;;
+            *) exit 64 ;;
+          esac
       - name: Bind retained evidence hashes
         if: always()
         shell: bash
