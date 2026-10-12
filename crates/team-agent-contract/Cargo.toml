@@ -26,6 +26,10 @@ nix = { version = "=0.30.1", default-features = false, features = ["fs", "proces
 [target.'cfg(target_os = "macos")'.dependencies]
 libproc = "=0.14.10"
 
+[target.'cfg(unix)'.dev-dependencies]
+# Controlled test-binary TTY fixture only; no interpreter or unsafe termios calls.
+nix = { version = "=0.30.1", default-features = false, features = ["term"] }
+
 [lints.rust]
 unsafe_code = "forbid"
 
