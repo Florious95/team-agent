@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.115]
+
+- **Evidence-bounded Cursor integration (PR #314):** add the canonical `cursor` provider to the contract runtime and public model catalog without reclassifying legacy provider names. Bind the genuine launcher, bundled Node engine and program input, allocate native chat IDs, and materialize owned per-seat workspace/MCP configuration while retaining executable, cwd/inode, session and generation fences.
+- **Cursor lifecycle and natural tool return:** route supported start, stop, exact-session resume/restart and scoped shutdown through the contract store and coordinator. Preserve immutable first-business prompts and prove individual Team tools from real invocation/response-write roundtrips, not a guessed terminal panel or a fabricated complete tool set. Unadmitted reset/Fork and unknown native capabilities remain explicit refusals.
+- **Folded-input and Leader bootstrap correctness:** correlate Cursor's collapsed paste capsule to the owned immutable attempt and its baseline-new transcript transfer after confirmed Enter; bare Busy, disappearance or unrelated tool activity do not establish acceptance. Keep ambient Leader session names out of worker runtime state, and compare the receiver endpoint against the same caller-read transport used for pane observations without redirecting worker sockets.
+- **Release metadata:** align the Rust workspace/lockfile, installer, three platform packages and official publishing workflow at 0.5.115. The formal tag workflow retains workspace verification and three-platform build/publish gates; candidate compilation and this version change do not alone establish unrestricted native scenario coverage.
+
 ## [0.5.114]
 
 - **Official Kiro CLI integration (PR #308):** route Kiro Workers through the independent contract runtime and public `quick-start`, `status`, `send`, and scoped `shutdown` commands. Preserve complete instruction snapshots, per-instance native agent/MCP configuration, executable/session identity fences, durable message/result forwarding, and existing provider adapters. Unadmitted Leader, resume/Fork, mutable worker lifecycle, and blanket-trust requests remain explicit refusals; this is not a claim of unrestricted native scenario coverage.
