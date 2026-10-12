@@ -910,6 +910,42 @@ fn action_result(receipt: CommandReceipt, operation: &'static str) -> ActionResu
     }
 }
 
+// Discover syntax rather than pinning a tmux version. New tmux sanitizes paste
+// bytes with vis(3) unless -S is present; old tmux has no -S and no sanitization.
+// Only an affirmative, unambiguous command grammar can select either path.
+fn paste_buffer_arguments(
+    capability: &CommandReceipt,
+    name: &str,
+    pane: &str,
+) -> Result<Vec<OsString>, HostError> {
+    if !capability.success() {
+        return Err(command_error(capability, "tmux paste capability"));
+    }
+    let invalid = || HostError::new("tmux paste capability syntax", HostErrorKind::Unknown);
+    let syntax = std::str::from_utf8(&capability.stdout).map_err(|_| invalid())?;
+    let mut commands = syntax
+        .lines()
+        .filter(|line| line.split_whitespace().next() == Some("paste-buffer"));
+    let command = commands.next().ok_or_else(invalid)?;
+    if commands.next().is_some() {
+        return Err(invalid());
+    }
+    let flags: Vec<_> = command
+        .split_whitespace()
+        .filter_map(|word| word.strip_prefix("[-")?.strip_suffix(']'))
+        .filter(|flags| !flags.is_empty() && flags.bytes().all(|b| b.is_ascii_alphabetic()))
+        .collect();
+    if !flags.iter().any(|flags| flags.contains('r')) {
+        return Err(invalid());
+    }
+    let mut arguments: Vec<OsString> = vec!["paste-buffer".into(), "-r".into()];
+    if flags.iter().any(|flags| flags.contains('S')) {
+        arguments.push("-S".into());
+    }
+    arguments.extend(["-b".into(), name.into(), "-t".into(), pane.into()]);
+    Ok(arguments)
+}
+
 impl<R: CommandRunner> PhysicalTransport for TmuxHost<R> {
     fn acquire_lane(&mut self, target: &TargetReceipt) -> Result<Box<dyn InputLease>, HostError> {
         if self.target.as_ref() != Some(target) {
@@ -1161,15 +1197,23 @@ impl<R: CommandRunner> PhysicalTransport for TmuxHost<R> {
                 text.into(),
             ]
         } else {
-            // -r preserves LF; tmux otherwise silently substitutes CR for each LF.
-            vec![
-                "paste-buffer".into(),
-                "-r".into(),
-                "-b".into(),
-                name.into(),
-                "-t".into(),
-                target.pane.clone().into(),
-            ]
+            // Query all syntax for compatibility with tmux versions whose
+            // list-commands does not accept a single command argument. This is
+            // read-only and shares the action deadline; errors never cause a
+            // trial paste or a second paste without -S.
+            let capability =
+                match self.command(vec!["list-commands".into()], None, clock, deadline) {
+                    Ok(receipt) => receipt,
+                    Err(error) => return ActionResult::refused(error),
+                };
+            let arguments = match paste_buffer_arguments(&capability, name, &target.pane) {
+                Ok(arguments) => arguments,
+                Err(error) => return ActionResult::refused(error),
+            };
+            if let Err(error) = self.check_bound(target, clock, deadline, true) {
+                return ActionResult::refused(error);
+            }
+            arguments
         };
         match self.command(args, None, clock, deadline) {
             Ok(result) => action_result(result, "insert owned input"),
@@ -1254,6 +1298,81 @@ mod bound_process_tests {
         }
         fn sleep(&self, duration: Duration) {
             self.0.set(self.0.get() + duration);
+        }
+    }
+
+    fn syntax_receipt(stdout: &[u8]) -> CommandReceipt {
+        CommandReceipt {
+            end: CommandEnd::Exited,
+            exit_code: Some(0),
+            child_pid: Some(12345),
+            child_reaped: true,
+            stdout: stdout.to_vec(),
+            stderr: vec![],
+            elapsed: Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn paste_syntax_selects_unsanitized_bytes_without_breaking_legacy_tmux() {
+        for (syntax, unsanitized) in [
+            ("paste-buffer (pasteb) [-dprS] [-b buffer-name] [-s separator] [-t target-pane]\n", true),
+            ("paste-buffer [-dprS] [-b buffer-name] [-t target-pane]\n", true),
+            ("paste-buffer (pasteb) [-dpr] [-b buffer-name] [-t target-pane]\n", false),
+            // -S on an unrelated command is not a paste capability.
+            ("display-message [-S]\npaste-buffer (pasteb) [-dpr] [-b buffer-name]\n", false),
+        ] {
+            let arguments =
+                paste_buffer_arguments(&syntax_receipt(syntax.as_bytes()), "tac-owned", "%7")
+                    .unwrap();
+            let mut expected: Vec<OsString> = vec!["paste-buffer".into(), "-r".into()];
+            if unsanitized {
+                expected.push("-S".into());
+            }
+            expected.extend(["-b".into(), "tac-owned".into(), "-t".into(), "%7".into()]);
+            assert_eq!(arguments, expected);
+        }
+    }
+
+    #[test]
+    fn missing_malformed_or_ambiguous_paste_syntax_never_selects_legacy_fallback() {
+        for syntax in [
+            "",
+            "not-paste-buffer [-dprS]\n",
+            "paste-buffer\n",
+            "paste-buffer [-dpS] [-b buffer-name]\n",
+            "paste-buffer [-dprS\n",
+            "paste-buffer [-dpr]\npaste-buffer [-dprS]\n",
+        ] {
+            assert!(
+                paste_buffer_arguments(&syntax_receipt(syntax.as_bytes()), "tac-owned", "%7")
+                    .is_err(),
+                "{syntax:?}"
+            );
+        }
+        assert!(paste_buffer_arguments(
+            &syntax_receipt(b"paste-buffer [-dpr]\xff"), "tac-owned", "%7"
+        ).is_err());
+    }
+
+    #[test]
+    fn failed_or_incomplete_capability_receipts_cannot_authorize_a_paste() {
+        for end in [
+            CommandEnd::NotStarted,
+            CommandEnd::TimedOut,
+            CommandEnd::OutputLimit,
+            CommandEnd::OutputRejected,
+            CommandEnd::IoError,
+            CommandEnd::Unsupported,
+        ] {
+            let mut receipt = syntax_receipt(b"paste-buffer [-dprS]\n");
+            receipt.end = end;
+            assert!(paste_buffer_arguments(&receipt, "tac-owned", "%7").is_err());
+        }
+        for exit_code in [None, Some(1)] {
+            let mut receipt = syntax_receipt(b"paste-buffer [-dprS]\n");
+            receipt.exit_code = exit_code;
+            assert!(paste_buffer_arguments(&receipt, "tac-owned", "%7").is_err());
         }
     }
 
