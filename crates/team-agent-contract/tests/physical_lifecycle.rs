@@ -1,4 +1,4 @@
-//! The K3/K2 combination uses a controlled Python terminal, never Kiro or a
+//! The K3/K2 combination uses an owned native test terminal, never Kiro or a
 //! subscription. Protocol events below are explicitly fixture evidence.
 #![cfg(unix)]
 mod physical_support;
@@ -251,10 +251,14 @@ fn settings(tmux: &std::path::Path) -> PhysicalSettings {
     }
 }
 #[test]
+#[ignore = "internal owned TTY fixture; invoked only by the lifecycle test"]
+fn native_terminal_fixture() {
+    physical_support::native_terminal::run();
+}
+
+#[test]
 fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared_lifecycle() {
     let tmux = PathBuf::from(std::env::var_os("CONTRACT_TMUX").expect("prepared absolute tmux"));
-    let python =
-        PathBuf::from(std::env::var_os("CONTRACT_PYTHON").expect("prepared real Python path"));
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -271,12 +275,11 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
     println!("CONTROLLED_PHYSICAL_LIFECYCLE_ROOT={}", root.display());
     let cwd_path = root.join("cwd");
     std::fs::create_dir(&cwd_path).unwrap();
-    let native = physical_support::native(
-        fingerprint_file(&python, 512 * 1024 * 1024, Duration::from_secs(5)).unwrap(),
-    );
+    let (executable, native_hash) = physical_support::native_terminal::copy_executable(&root);
+    let native = physical_support::native(native_hash);
     let mut d = physical_support::descriptor("single", &native);
     d.session.fresh = FreshSession::NotApplicable;
-    let h = physical_support::hooks();
+    let h = physical_support::native_terminal::hooks();
     let clock = RealClock::new();
     let op = OperationId::new("actual-start").unwrap();
     let mut runtime = PhysicalRuntime::new(
@@ -309,7 +312,7 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
         },
         native,
         paths: LaunchPaths {
-            executable: python,
+            executable,
             candidate: std::env::current_exe().unwrap(),
             cwd: resolve_cwd(&cwd_path).unwrap(),
             runtime_root: root.clone(),
@@ -414,7 +417,7 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
         clock.sleep(Duration::from_millis(10));
     };
     drop(transport);
-    // T3 is controlled harness evidence, not a claim that Python contains an MCP client.
+    // T3 is controlled harness evidence, not a claim that the fixture is an MCP client.
     let protocol = physical_support::protocol(&target, clock.now());
     runtime.protocol = Some(protocol.clone());
     runtime.evidence.push(physical_support::capability(

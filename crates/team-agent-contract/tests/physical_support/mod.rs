@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 // Developer-owned controlled fixtures, never a Kiro profile or native acceptance claim.
+#[cfg(unix)]
+pub mod native_terminal;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
