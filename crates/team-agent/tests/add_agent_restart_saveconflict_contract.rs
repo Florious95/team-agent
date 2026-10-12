@@ -43,11 +43,16 @@ fn explicit_stop_survives_whole_team_restart_until_explicit_start() {
     let restart_events = events_text(&case);
     let events: Vec<Value> = restart_events.lines().skip(events_before)
         .map(|line| serde_json::from_str(line).unwrap()).collect();
-    assert!(events.iter().any(|event| event["event"] == "restart.resume_decision" && event["agent_id"] == "control"),
-        "running control must enter restart; events={events:?}");
-    assert!(!events.iter().any(|event| event["agent_id"] == "held" && event["event"].as_str().is_some_and(|kind|
-        kind == "restart.resume_decision" || kind == "restart.agent_failed" || kind == "worker.launched")),
-        "held seat must have no restart decision or launch attempt; events={events:?}");
+    let worker = |event: &Value| event.get("agent_id").or_else(|| event.get("worker_id")).and_then(Value::as_str).map(str::to_owned);
+    let metadata: Vec<_> = events.iter().map(|event| json!({"event":event.get("event"),"worker":worker(event),"source":event.get("source")})).collect();
+    assert!(events.iter().any(|event| event["event"] == "restart.resume_decision" && worker(event).as_deref() == Some("control")),
+        "running control must enter restart; events={metadata:?}");
+    assert!(events.iter().any(|event| event["event"] == "provider.worker.spawn_argv" && event["source"] == "restart" && worker(event).as_deref() == Some("control")),
+        "running control must actually reach the spawn boundary; events={metadata:?}");
+    assert!(!events.iter().any(|event| worker(event).as_deref() == Some("held") && event["event"].as_str().is_some_and(|kind|
+        matches!(kind, "restart.resume_decision" | "restart.agent_failed")
+        || (event["source"] == "restart" && matches!(kind, "provider.worker.spawn_argv" | "worker.spawn_timing" | "worker.launched")))),
+        "held seat must have no restart decision or launch attempt; events={metadata:?}");
 
     let start = case.run(["start-agent", "held", "--workspace", case.ws(), "--team", case.team(), "--json"]);
     assert_success_json(&start, "only explicit start reopens the stopped seat");
