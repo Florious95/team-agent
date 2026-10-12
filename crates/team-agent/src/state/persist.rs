@@ -2483,14 +2483,16 @@ mod tests {
         normalize_agent_session_state(&mut latest);
         for omit in [false, true] {
             write_state(&ws, &latest);
-            let held = read_state(&ws).pointer("/agents/held").unwrap().clone();
+            let before = read_state(&ws);
+            let held_root = before.pointer("/agents/held").unwrap().clone();
+            let held_team = before.pointer("/teams/team-a/agents/held").unwrap().clone();
             let rows = if omit { json!({}) } else { json!({"held":{"agent_id":"held","provider":"codex","status":"running","explicit_stop":false,"session_id":"stale"}}) };
             let stale = json!({"session_name":"team-a","active_team_key":"team-a","agents":rows,
                 "teams":{"team-a":{"session_name":"team-a","agents":rows}},"delivery":{"message":"observed"}});
             save_runtime_state(&ws, &stale).unwrap();
             let saved = read_state(&ws);
-            assert_eq!(saved.pointer("/agents/held"), Some(&held));
-            assert_eq!(saved.pointer("/teams/team-a/agents/held"), Some(&held));
+            assert_eq!(saved.pointer("/agents/held"), Some(&held_root));
+            assert_eq!(saved.pointer("/teams/team-a/agents/held"), Some(&held_team));
             assert_eq!(saved.pointer("/delivery/message"), Some(&json!("observed")));
         }
         let mut started = latest;
