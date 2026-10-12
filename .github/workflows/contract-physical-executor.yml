@@ -31,7 +31,6 @@ jobs:
       CONTRACT_OLD_SCOPE: "fixture-old-scope"
       TEAM_AGENT_K2_FOREIGN_PROBE: "fixture-foreign-team"
       SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      CARGO_TARGET_DIR: ${{ runner.temp }}/contract-physical-target
     steps:
       - uses: actions/checkout@v5
         with:
@@ -47,6 +46,7 @@ jobs:
           if ! command -v tmux >/dev/null; then brew install tmux; fi
           printf 'CONTRACT_TMUX=%s\n' "$(command -v tmux)" >> "$GITHUB_ENV"
           printf 'CONTRACT_PYTHON=%s\n' "$(python3 -c 'import os,sys; print(os.path.realpath(sys.executable))')" >> "$GITHUB_ENV"
+          printf 'CARGO_TARGET_DIR=%s\n' "$RUNNER_TEMP/contract-physical-target" >> "$GITHUB_ENV"
           mkdir contract-evidence
           git rev-parse HEAD 'HEAD^{tree}' > contract-evidence/source.txt
           rustc -vV > contract-evidence/toolchain.txt
