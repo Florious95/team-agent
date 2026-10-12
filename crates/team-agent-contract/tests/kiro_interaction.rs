@@ -35,6 +35,7 @@ fn frame(text: &str) -> CaptureFrame {
     CaptureFrame {
         scope: scope(),
         text: text.into(),
+        cwd: None, input: None,
         baseline: None,
         profile_id: PROFILE.into(),
         operation: Operation::OrdinarySend,

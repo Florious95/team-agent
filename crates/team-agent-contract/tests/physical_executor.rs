@@ -722,36 +722,25 @@ fn startup_ack_requires_resolved_permission_and_reobserves_modal_clear() {
     launch_request.bypass = true;
     let launch = resolve_launch(&d, &h, &launch_request, None).unwrap();
     let consent = StartupConsent::from_launch(&launch).unwrap();
-    let definition = StartupDefinition {
-        profile_id: "physical-fixture",
-        policy_sha256: POLICY,
-        predicate: "consent",
-    };
-    let input = PreparedInput::startup(OperationId::new("startup").unwrap(), &consent, &definition)
-        .unwrap();
-    let attempt = AttemptId::new("startup-attempt").unwrap();
-    let p = policy(&d, &h, &target, Operation::StartupBypassAck);
-    let proto = protocol(&target, Duration::ZERO);
-    let clock = FakeClock::default();
-    let mut journal = MemoryJournal::default();
-    let mut transport = FakeTransport::new(target.clone(), "startup", "-");
-    let report = inject_with_contract(
-        &mut transport,
-        scoped_request(
-            &target,
-            &input,
-            &attempt,
-            &p,
-            &proto,
-            Operation::StartupBypassAck,
-        ),
-        &mut journal,
-        None,
-        &clock,
-    );
-    assert_eq!(report.disposition, InjectionDisposition::StartupCleared);
-    assert_eq!(report.counts.startup.confirmed, 1);
-    assert_eq!(report.counts.initial.issued, 0);
-    assert!(transport.pasted.is_empty());
-    assert!(report.business_receipt().is_none());
+    for key in [PhysicalKey::Enter, PhysicalKey::ConfirmYes] {
+        let definition = StartupDefinition {
+            profile_id: "physical-fixture", policy_sha256: POLICY, predicate: "consent", key,
+        };
+        let input = PreparedInput::startup(OperationId::new("startup").unwrap(), &consent, &definition).unwrap();
+        let attempt = AttemptId::new("startup-attempt").unwrap();
+        let p = policy(&d, &h, &target, Operation::StartupBypassAck);
+        let proto = protocol(&target, Duration::ZERO);
+        let clock = FakeClock::default();
+        let mut journal = MemoryJournal::default();
+        let mut transport = FakeTransport::new(target.clone(), "startup", "-");
+        let report = inject_with_contract(&mut transport,
+            scoped_request(&target, &input, &attempt, &p, &proto, Operation::StartupBypassAck),
+            &mut journal, None, &clock);
+        assert_eq!(report.disposition, InjectionDisposition::StartupCleared);
+        assert_eq!(report.counts.startup.confirmed, 1);
+        assert_eq!(report.counts.initial.issued, 0);
+        assert_eq!(transport.keys, vec![key]);
+        assert!(transport.pasted.is_empty());
+        assert!(report.business_receipt().is_none());
+    }
 }

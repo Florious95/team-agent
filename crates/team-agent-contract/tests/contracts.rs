@@ -112,7 +112,7 @@ fn descriptor() -> ProviderDescriptor {
             carrier: Support::Supported(McpCarrier::Argv),
             scope: ResourceScope::RuntimeRoot,
             tools: &TEAM_TOOLS,
-            excludes_ambient_configuration: true,
+            isolation: McpIsolation::AmbientExcluded,
         },
         tool_names: ToolNameFacet {
             naming: Support::Supported(ToolNaming::StaticServer { key: "owned-team" }),
@@ -234,6 +234,7 @@ impl PlanHook for Fixture {
             _ => {}
         }
         Ok(LaunchPlan {
+            launcher: None,
             executable_inputs: vec![],
             executable: request.paths.executable.clone(),
             arguments,
@@ -595,7 +596,7 @@ fn worker_launch_rejects_unsupported_auth_missing_prompt_unverified_profile_and_
 #[test]
 fn worker_launch_rejects_ambient_mcp_and_global_mutation() {
     let mut d = descriptor();
-    d.mcp.excludes_ambient_configuration = false;
+    d.mcp.isolation = McpIsolation::Unverified;
     assert!(resolve_launch(&d, &hooks(), &request(), Some(&catalog())).is_err());
     d = descriptor();
     d.workspace.config_scope = ResourceScope::Global;

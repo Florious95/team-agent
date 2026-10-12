@@ -225,7 +225,7 @@ pub fn descriptor(mode: &str, native: &NativeIdentity) -> ProviderDescriptor {
             carrier: Support::Supported(McpCarrier::Argv),
             scope: ResourceScope::RuntimeRoot,
             tools: &TEAM_TOOLS,
-            excludes_ambient_configuration: true,
+            isolation: McpIsolation::AmbientExcluded,
         },
         tool_names: ToolNameFacet {
             naming: Support::Supported(ToolNaming::StaticServer {
@@ -373,6 +373,7 @@ impl PlanHook for FixtureHooks {
             "fixture-server".into(),
         ];
         Ok(LaunchPlan {
+            launcher: None,
             executable_inputs: vec![],
             executable: r.paths.executable.clone(),
             cwd: r.paths.cwd.path.clone(),

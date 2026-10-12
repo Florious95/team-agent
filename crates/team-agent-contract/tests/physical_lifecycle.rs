@@ -284,6 +284,7 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
             descriptor: &d,
             hooks: &h,
             controls: &[],
+            startup: None, session_panel: None,
         },
         settings(&tmux),
         op.clone(),
@@ -394,6 +395,7 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
             &CaptureFrame {
                 scope: captured.scope,
                 text: captured.text,
+                cwd: None, input: None,
                 baseline: None,
                 profile_id: seat.profile.clone(),
                 operation: Operation::FirstBusiness,

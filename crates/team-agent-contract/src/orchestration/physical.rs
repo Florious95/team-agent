@@ -26,6 +26,8 @@ pub struct Registration<'a> {
     pub descriptor: &'a ProviderDescriptor,
     pub hooks: &'a ProviderHooks<'a>,
     pub controls: &'a [ControlDefinition],
+    pub startup: Option<&'a StartupDefinition>,
+    pub session_panel: Option<&'a crate::runtime::native_panel::SessionPanelPolicy>,
 }
 pub struct PhysicalSettings {
     pub tmux: PathBuf,
@@ -43,6 +45,7 @@ pub struct PhysicalRuntime<'a> {
     clock: &'a dyn Clock,
     quiescent: Option<SeatRecord>,
     explicit_session: Option<crate::contract::session::NativeSessionId>,
+    startup_consent: Option<StartupConsent>,
     pub evidence: Vec<CapabilityEvidence>,
     pub protocol: Option<ProtocolSnapshot>,
     pub bootstrap: Option<&'a mut dyn BootstrapCommit>,
@@ -87,6 +90,7 @@ impl<'a> PhysicalRuntime<'a> {
             clock,
             quiescent: None,
             explicit_session: None,
+            startup_consent: None,
             evidence: vec![],
             protocol: None,
             bootstrap: None,
@@ -109,6 +113,7 @@ impl<'a> PhysicalRuntime<'a> {
             } else {
                 String::new()
             },
+            cwd: Some(target.cwd.path.clone()), input: None,
             baseline: None,
             profile_id: seat.profile.clone(),
             operation: Operation::OrdinarySend,
@@ -185,6 +190,37 @@ impl<'a> PhysicalRuntime<'a> {
             &mut journal,
         )
         .map_err(host_error)
+    }
+    fn startup_if_present(&mut self, seat: &SeatRecord) -> Result<(), Error> {
+        let Some(definition) = self.registration.startup else { return Ok(()); };
+        let target = self.target(seat)?.clone();
+        let deadline = self.deadline()?;
+        let mut host = self.reopen(&target, deadline)?;
+        let capture = host.capture(&target, self.clock, deadline, self.settings.freshness).map_err(host_error)?;
+        if capture.mode != PaneMode::Normal { return Ok(()); }
+        let frame = CaptureFrame { scope: capture.scope, text: capture.text,
+            cwd: Some(target.cwd.path.clone()), input: None, baseline: None,
+            profile_id: definition.profile_id.into(), operation: Operation::StartupBypassAck,
+            message: None, attempt: None, after_step: None, paste_latch: PasteLatch::NeverSeen };
+        let observed = self.registration.hooks.interaction.require("H6 startup")?.interpret(&frame);
+        if observed.scope != frame.scope { return Err(Error::Fence); }
+        if observed.surface != InputSurface::StartupRiskWarning || observed.predicate.as_deref() != Some(definition.predicate) { return Ok(()); }
+        // Take once, before any physical action. No repeated consent on timeout.
+        let consent = self.startup_consent.take().ok_or(Error::Invalid("startup consent not authorized or already consumed"))?;
+        let input = PreparedInput::startup(self.operation.clone(), &consent, definition)?;
+        let policy = self.policy(&target, definition.profile_id, Operation::StartupBypassAck)?;
+        let attempt = AttemptId::new(format!("startup-{}", self.operation.as_str()))?;
+        let protocol = collect_protocol(&target, &seat.identity.instance, &seat.server_key, &[], self.clock.now(), self.settings.freshness);
+        let mut journal = FileJournal::new(ScopedDirectory::reopen(target.directory.clone()).map_err(host_error)?, self.settings.journal_bytes).map_err(host_error)?;
+        let report = inject_with_contract(&mut host, InjectionRequest {
+            target: &target, input: &input, attempt: &attempt, operation: Operation::StartupBypassAck,
+            policy: &policy, protocol: &protocol, protocol_requirement: ProtocolRequirement::ServerAndClientBinding,
+            server_key: &seat.server_key, deadline, freshness: self.settings.freshness, bootstrap: None, lane: None,
+        }, &mut journal, None, self.clock);
+        if report.persistence != PersistenceState::Durable || !report.problems.is_empty()
+            || report.disposition != InjectionDisposition::StartupCleared
+        { return Err(Error::NativeControl(Box::new(report))); }
+        Ok(())
     }
     fn deadline(&self) -> Result<Duration, Error> {
         self.clock
@@ -283,6 +319,9 @@ impl LifecycleHost for PhysicalRuntime<'_> {
         }
         // All descriptor/plan admission precedes even the private directory create.
         validate_launch_plan(descriptor, resolved, plan)?;
+        if self.registration.startup.is_some() && resolved.request().bypass {
+            self.startup_consent = Some(StartupConsent::from_launch(resolved)?);
+        }
         if matches!(plan.expected_session, ExpectedSession::PendingAllocation) {
             return Err(Error::Invalid("native session allocation required"));
         }
@@ -339,6 +378,35 @@ impl LifecycleHost for PhysicalRuntime<'_> {
     fn stop(&mut self, seat: &SeatRecord) -> Result<(), Error> {
         let target = self.target(seat)?.clone();
         let deadline = self.deadline()?;
+        if self.registration.controls.iter().any(|definition| definition.profile_id == seat.profile && definition.kind == ControlKind::Exit) {
+            // A just-written tool result may precede the last native render.
+            // Wait read-only for the registered control surface; never type an
+            // exit command into a busy/queued composer or add an interrupt key.
+            while crate::host::process::sample_process(&target.process) != ProcessState::Exited {
+                let ready = self.readiness(seat)?;
+                if matches!(ready.pane.outcome, crate::contract::probe::ProbeOutcome::Observed(ref pane) if pane.surface == InputSurface::ComposerReady) { break; }
+                if self.clock.now() >= deadline { return Err(Error::Host("graceful exit composer not ready")); }
+                self.clock.sleep(self.settings.limits.poll_interval);
+            }
+            let result = if crate::host::process::sample_process(&target.process) == ProcessState::Exited {
+                Ok(DeliveryEffect::NoEffect)
+            } else { self.control(seat, &NativeControl::Exit) };
+            // A graceful native exit ends terminal observation. Do not confuse
+            // its capture failure with business acceptance, or fall back to kill
+            // on a still-live/unknown/replaced process. Close only the dead pane.
+            let action = match &result {
+                Ok(DeliveryEffect::Submitted) => StepOutcome::Confirmed,
+                Err(Error::NativeControl(report)) if report.counts.initial.confirmed == 1 => StepOutcome::Confirmed,
+                Err(Error::NativeControl(report)) if report.counts.initial.uncertain == 1 => StepOutcome::MayHaveOccurred,
+                _ => StepOutcome::NoEffect,
+            };
+            let native = crate::host::tmux::observe_native_exit(action, self.clock, deadline,
+                self.settings.limits.poll_interval, || crate::host::process::sample_process(&target.process));
+            if native != ProcessState::Exited {
+                result?;
+                return Err(Error::Host("graceful native exit not observed"));
+            }
+        }
         let mut host = self.reopen(&target, deadline)?;
         let receipt = host.close_owned_pane(&target, self.clock, deadline);
         confirm_close(receipt)?;
@@ -429,6 +497,7 @@ impl LifecycleHost for PhysicalRuntime<'_> {
                 {
                     break;
                 }
+                self.startup_if_present(seat)?;
                 if self.clock.now() >= deadline {
                     return Err(Error::Host("native composer startup timed out"));
                 }
@@ -441,7 +510,7 @@ impl LifecycleHost for PhysicalRuntime<'_> {
         let target = self.target(seat)?.clone();
         let deadline = self.deadline()?;
         let mut host = self.reopen(&target, deadline)?;
-        let _lane = host.acquire_lane(&target).map_err(host_error)?;
+        let lane = host.acquire_lane(&target).map_err(host_error)?;
         let frame = host
             .capture(&target, self.clock, deadline, self.settings.freshness)
             .map_err(host_error)?;
@@ -464,7 +533,7 @@ impl LifecycleHost for PhysicalRuntime<'_> {
         } else {
             (frame.text.into_bytes(), CaptureOrigin::CurrentNativeSession, frame.scope)
         };
-        Ok(ScopedSessionEvidence {
+        let evidence = ScopedSessionEvidence {
             scope,
             provider: seat.provider.clone(),
             native: seat.native.clone(),
@@ -473,7 +542,19 @@ impl LifecycleHost for PhysicalRuntime<'_> {
             evidence_kind: seat.evidence_kind,
             evidence_sha256: digest(&record),
             record,
-        })
+        };
+        if let Some(panel) = self.registration.session_panel {
+            let policy = self.policy(&target, &seat.profile, Operation::SessionInspect)?;
+            if panel.profile_id != seat.profile || panel.policy_sha256 != policy.profile().policy_sha256 { return Err(Error::Fence); }
+            self.registration.hooks.session.require("H4 current session")?.bind(&evidence)?;
+            drop(lane);
+            let mut journal = FileJournal::new(ScopedDirectory::reopen(target.directory.clone()).map_err(host_error)?, self.settings.journal_bytes).map_err(host_error)?;
+            crate::runtime::native_panel::close_session_panel(&mut host, crate::runtime::native_panel::SessionPanelRequest {
+                target: &target, interaction: *self.registration.hooks.interaction.require("H6 session panel")?,
+                policy: panel, operation: &self.operation, clock: self.clock, deadline, freshness: self.settings.freshness,
+            }, &mut journal).map_err(host_error)?;
+        }
+        Ok(evidence)
     }
     fn remove_owned(&mut self, resource: &OwnedResourceReceipt) -> Result<bool, Error> {
         let Some(seat) = &self.quiescent else {

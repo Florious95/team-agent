@@ -7,7 +7,7 @@ use super::clock::{remaining, Clock};
 use super::command::{CommandEnd, CommandReceipt, CommandRequest, CommandRunner, OutputLimits};
 use super::files::{fingerprint_materialized, DirectoryReceipt, FileReceipt, ScopedDirectory};
 use super::process::{
-    capture_executable_inputs, capture_process, fingerprint_file, resolve_cwd, sample_process,
+    capture_executable_inputs, capture_launch_file, capture_process, fingerprint_file, resolve_cwd, sample_process,
     verify_executable_inputs, ProcessState,
 };
 use super::shell::{launch_script, quote};
@@ -275,7 +275,7 @@ pub struct CloseReceipt {
 
 /// After a close may have executed, observe only: reparenting/exit races do not
 /// grant authority for another action, nor prove exit. Keep the original budget.
-fn observe_native_exit(
+pub(crate) fn observe_native_exit(
     close_outcome: StepOutcome,
     clock: &dyn Clock,
     deadline: Duration,
@@ -567,11 +567,17 @@ impl<R: CommandRunner> TmuxHost<R> {
             return Err(HostError::new("native session allocation required", HostErrorKind::Ownership));
         }
         self.directory.check_live()?;
-        let inputs = capture_executable_inputs(
+        let mut inputs = capture_executable_inputs(
             &plan.executable_inputs,
             self.limits.max_executable_bytes,
             remaining(clock, deadline).ok_or_else(|| HostError::new("interpreter input deadline", HostErrorKind::Deadline))?,
         )?;
+        if let Some(entry) = &plan.launcher {
+            inputs.push(capture_launch_file(&entry.executable, entry.sha256,
+                self.limits.max_executable_bytes,
+                remaining(clock, deadline).ok_or_else(|| HostError::new("launch entry deadline", HostErrorKind::Deadline))?,
+            )?);
+        }
         if self.target.is_some()
             || self.directory.receipt().owner != resolved.request().identity
             || !self
@@ -1217,6 +1223,7 @@ impl<R: CommandRunner> PhysicalTransport for TmuxHost<R> {
             PhysicalKey::Down => "Down",
             PhysicalKey::Tab => "Tab",
             PhysicalKey::Escape => "Escape",
+            PhysicalKey::ConfirmYes => "y",
         };
         match self.command(
             vec![

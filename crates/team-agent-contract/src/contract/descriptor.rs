@@ -169,12 +169,22 @@ pub enum ResourceScope {
     Global,
 }
 
+/// Configuration isolation and tool discovery are separate contracts. The owned
+/// server policy explicitly discloses coexistence of unrelated native/account
+/// tools; it never grants them Team identity or counts their protocol facts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum McpIsolation {
+    AmbientExcluded,
+    OwnedServerIsolated,
+    Unverified,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct McpFacet {
     pub carrier: Support<McpCarrier>,
     pub scope: ResourceScope,
     pub tools: &'static [LogicalTool],
-    pub excludes_ambient_configuration: bool,
+    pub isolation: McpIsolation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
