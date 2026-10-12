@@ -398,6 +398,7 @@ fn hand_edited_stopped_role_is_recompiled_and_used_by_start() {
 #[test]
 fn failed_parameterized_start_restores_existing_role_and_spec_bytes() {
     let (ws, shims) = ws_seed("rolelife-rollback-existing", "pi", "gpt-6-luna", None); stop(&ws, &shims, "seed");
+    quiesce_owned_coordinator_before_rejection_snapshot(&ws);
     let spec = spec_path(&ws); let before = snapshot(&ws, &shims, "seed");
     fs::write(ws.path().join(".role-lifecycle-fail-launch"), b"injected tmux spawn failure").unwrap();
     let r = run(&ws, &shims, &start(&ws, "seed", &["--model", "openai-codex/gpt-5.6-luna", "--effort", "high"]));

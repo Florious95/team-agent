@@ -3570,8 +3570,14 @@ mod tests {
                 assert_eq!(row["spec_path"], "/fixture/spec.yml");
                 assert_eq!(row["team_dir"], "/fixture/roles");
                 assert_eq!(row["tasks"][0]["task_id"], "existing-task");
-                assert_eq!(row["leader_receiver"]["session_name"], "cursor-gate-leader");
             }
+            // Ownership writers update only the canonical team record, not the
+            // legacy root view that retains the existing worker runtime.
+            assert_eq!(
+                state["teams"]["current"]["leader_receiver"]["session_name"],
+                "cursor-gate-leader"
+            );
+            assert!(state["leader_receiver"].is_null());
             assert!(crate::lifecycle::launch::quick_start_has_runtime_for_test(&state, "current"));
             std::fs::remove_dir_all(workspace).unwrap();
         }
