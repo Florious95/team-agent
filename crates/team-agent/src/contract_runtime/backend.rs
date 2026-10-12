@@ -870,7 +870,7 @@ mod tests {
             // stopped mirror must not even attempt to open the native store.
             assert!(prepare_restart(&fixture.root, "test", &directory, &stopped).unwrap().is_empty());
 
-            fixture.binding.transport_root = fixture.root.join("native-store");
+            fixture.binding.transport_root = fixture.binding.workspace.path.join("native-store");
             fixture.binding.endpoint = endpoint(&fixture.binding.scope);
             let store = ContractStore::create(&fixture.binding.transport_root, fixture.binding.scope.clone(), &fixture.binding.endpoint).unwrap();
             let native = NativeIdentity { version: "fixture".into(), harness: "unavailable".into(), ui: "tui".into(),

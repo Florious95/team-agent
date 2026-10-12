@@ -2478,10 +2478,12 @@ mod tests {
         let held = json!({"agent_id":"held","provider":"codex","status":"stopped","explicit_stop":true,
             "session_id":"same-session","rollout_path":"/controlled/rollout","captured_at":"2026-10-12T00:00:00Z",
             "captured_via":"native","generation":7});
-        let latest = json!({"session_name":"team-a","active_team_key":"team-a","agents":{"held":held},
+        let mut latest = json!({"session_name":"team-a","active_team_key":"team-a","agents":{"held":held},
             "teams":{"team-a":{"session_name":"team-a","agents":{"held":held}}}});
+        normalize_agent_session_state(&mut latest);
         for omit in [false, true] {
             write_state(&ws, &latest);
+            let held = read_state(&ws).pointer("/agents/held").unwrap().clone();
             let rows = if omit { json!({}) } else { json!({"held":{"agent_id":"held","provider":"codex","status":"running","explicit_stop":false,"session_id":"stale"}}) };
             let stale = json!({"session_name":"team-a","active_team_key":"team-a","agents":rows,
                 "teams":{"team-a":{"session_name":"team-a","agents":rows}},"delivery":{"message":"observed"}});
