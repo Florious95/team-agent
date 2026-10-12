@@ -18,13 +18,14 @@ on:
         default: ""
         type: string
       regression_scope:
-        description: Fixed finite suite or owned host ancestry target
+        description: Fixed finite suite or owned host ancestry/native target
         required: false
         default: full
         type: choice
         options:
           - full
           - host-ancestry
+          - host-native
 
 permissions:
   contents: read
@@ -171,6 +172,9 @@ jobs:
           case "$REGRESSION_SCOPE" in
             host-ancestry)
               run_case host-ancestry cargo test --manifest-path crates/team-agent-contract/Cargo.toml --test host_ancestry --locked -- --test-threads=1
+              ;;
+            host-native)
+              run_case host-native cargo test --manifest-path crates/team-agent-contract/Cargo.toml --test host_native --locked -- --test-threads=1
               ;;
             full)
               run_case root-stopped cargo test -p team-agent --lib --locked stop -- --test-threads=1
