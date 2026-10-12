@@ -72,6 +72,10 @@ pub struct ServerHandshakeEvidence {
 pub enum ClientBindingSource {
     NativeRegistry,
     NativeClientDiscovery,
+    /// Only individually observed native-origin calls with successful response
+    /// writes on one currently live, fenced connection. Not a whole registry,
+    /// client-consumption receipt, or promotion of initialize/tools/list.
+    NativeToolRoundtrip,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -246,11 +250,19 @@ pub fn evaluate_send_gate(
         });
     }
     let binding_result = current(binding, expected).and_then(|e| {
-        if e.server_key == expected.server_key
-            && nonblank(&e.server_key)
-            && e.tools.len() == TEAM_TOOLS.len()
-            && TEAM_TOOLS.iter().all(|t| e.tools.contains(t))
-        {
+        let tools_ready = match e.source {
+            ClientBindingSource::NativeRegistry | ClientBindingSource::NativeClientDiscovery => {
+                e.tools.len() == TEAM_TOOLS.len() && TEAM_TOOLS.iter().all(|tool| e.tools.contains(tool))
+            }
+            // This source proves only the listed tools. The worker-result path
+            // needs report_result; send_message/status remain unproven until
+            // individually called. No client consumption is inferred here.
+            ClientBindingSource::NativeToolRoundtrip => {
+                e.tools.contains(&LogicalTool::ReportResult)
+                    && e.tools.iter().enumerate().all(|(index, tool)| !e.tools[..index].contains(tool))
+            }
+        };
+        if e.server_key == expected.server_key && nonblank(&e.server_key) && tools_ready {
             Ok(())
         } else {
             Err(GateFailure::WrongTools)

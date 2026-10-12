@@ -3,8 +3,11 @@ use std::path::{Path, PathBuf};
 
 use team_agent_contract::contract::{hooks::*, plan::CatalogObservation, types::*};
 use team_agent_contract::host::{command::RealCommandRunner, process::resolve_cwd};
-use team_agent_contract::kiro::{native::*, KiroAdapter, McpStdio, KIRO_DESCRIPTOR};
+use team_agent_contract::kiro::native as kiro;
+use team_agent_contract::providers::cursor::native as cursor;
 use thiserror::Error;
+
+use super::registry::{self, NativeProvider};
 
 #[derive(Debug, Error)]
 pub enum DiscoveryError {
@@ -13,7 +16,9 @@ pub enum DiscoveryError {
     #[error("native discovery failed: {0}")]
     Host(#[from] team_agent_contract::host::HostError),
     #[error("native engine probe failed: {0}")]
-    Probe(#[from] EngineProbeError),
+    Probe(#[from] kiro::EngineProbeError),
+    #[error("native Cursor launcher probe failed: {0}")]
+    CursorProbe(#[from] cursor::ProbeError),
     #[error("native discovery contract: {0:?}")]
     Contract(ContractError),
     #[error("native model discovery: {0:?}")]
@@ -26,6 +31,7 @@ pub struct Discovery {
     pub engine: PathBuf,
     pub native: NativeIdentity,
     pub catalog: CatalogObservation,
+    pub runtime: Option<cursor::RuntimeInstallation>,
 }
 
 pub fn executable(name: &'static str) -> Result<PathBuf, DiscoveryError> {
@@ -43,44 +49,89 @@ pub fn executable(name: &'static str) -> Result<PathBuf, DiscoveryError> {
     Err(DiscoveryError::Executable(name))
 }
 
-pub fn discover(workspace: &Path) -> Result<Discovery, DiscoveryError> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or(DiscoveryError::Executable(
-            "HOME for native installation lookup",
-        ))?;
-    let engine = resolve_helper(&executable(KIRO_DESCRIPTOR.identity.binary)?, &home)?;
-    let native = probe_engine(
-        &engine,
-        &mut RealCommandRunner::default(),
-        discovery_bounds(),
-    )?;
+pub fn discover(provider: &ProviderId, workspace: &Path) -> Result<Discovery, DiscoveryError> {
+    let selected = registry::provider(provider.as_str()).map_err(DiscoveryError::Contract)?;
+    let descriptor = selected.descriptor();
+    let bounds = ReadBounds {
+        deadline: std::time::Duration::from_secs(30),
+        max_output_bytes: 1024 * 1024,
+    };
+    let launcher = executable(descriptor.identity.binary)?;
+    let (engine, native) = match selected {
+        NativeProvider::Kiro => {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .ok_or(DiscoveryError::Executable("HOME for native installation lookup"))?;
+            let engine = kiro::resolve_helper(&launcher, &home)?;
+            let native = kiro::probe_engine(&engine, &mut RealCommandRunner::default(), bounds)?;
+            (engine, native)
+        }
+        NativeProvider::Cursor => {
+            let engine = cursor::resolve_launcher(&launcher)?;
+            let native = cursor::probe_launcher(&engine, &mut RealCommandRunner::default(), bounds)?;
+            (engine, native)
+        }
+    };
     let request = CatalogRequest {
-        provider: ProviderId::new(KIRO_DESCRIPTOR.identity.id).map_err(DiscoveryError::Contract)?,
+        provider: ProviderId::new(descriptor.identity.id).map_err(DiscoveryError::Contract)?,
         native: native.clone(),
         executable: engine.clone(),
         cwd: resolve_cwd(workspace)?,
-        source: CHAT_CATALOG_SOURCE,
-        bounds: discovery_bounds(),
+        source: descriptor.model.catalog.require("native catalog source").map_err(DiscoveryError::Contract)?.clone(),
+        bounds,
     };
-    let mut host = CatalogReader::new(request.clone(), RealCommandRunner::default())
-        .map_err(DiscoveryError::Contract)?;
-    // H1 does not use these pointers; keep the actual current executable and do
-    // not manufacture an alternate CLI or execute an MCP server for discovery.
-    let adapter = KiroAdapter::new(McpStdio {
-        executable: std::env::current_exe()?.canonicalize()?,
-        arguments: Vec::new(),
-        environment: Default::default(),
-    })
-    .map_err(DiscoveryError::Contract)?;
-    let catalog = adapter
-        .discover(&request, &mut host)
-        .map_err(DiscoveryError::Catalog)?;
-    Ok(Discovery {
-        engine,
-        native,
-        catalog,
-    })
+    // H1 does not use these pointers or execute an MCP server. Cursor's
+    // launcher fingerprint authorizes only metadata reads, never worker launch.
+    let adapter = selected.adapter(
+        std::env::current_exe()?.canonicalize()?,
+        Vec::new(),
+        Default::default(),
+    ).map_err(DiscoveryError::Contract)?;
+    let hooks = adapter.hooks();
+    let catalog_hook = hooks.catalog.require("H1 catalog").map_err(DiscoveryError::Contract)?;
+    let catalog = match selected {
+        NativeProvider::Kiro => {
+            let mut host = kiro::CatalogReader::new(request.clone(), RealCommandRunner::default())
+                .map_err(DiscoveryError::Contract)?;
+            catalog_hook.discover(&request, &mut host)
+        }
+        NativeProvider::Cursor => {
+            let mut host = cursor::NativeCatalog::new(request.clone(), RealCommandRunner::default())
+                .map_err(DiscoveryError::Contract)?;
+            catalog_hook.discover(&request, &mut host)
+        }
+    }.map_err(DiscoveryError::Catalog)?;
+    let result = Discovery { engine, native, catalog, runtime: None };
+    validate_catalog(provider, &result).map_err(DiscoveryError::Contract)?;
+    Ok(result)
+}
+
+/// Runtime discovery is separate from public catalog metadata. Cursor explicitly
+/// bridges the same installation's catalog to its proven Node/entry identity.
+pub(super) fn discover_runtime(provider: &ProviderId, workspace: &Path) -> Result<Discovery, DiscoveryError> {
+    let mut discovery = discover(provider, workspace)?;
+    if registry::provider(provider.as_str()).map_err(DiscoveryError::Contract)? == NativeProvider::Cursor {
+        let home = std::env::var_os("HOME").map(PathBuf::from)
+            .ok_or(DiscoveryError::Executable("HOME for native subscription"))?;
+        let runtime = cursor::probe_runtime(&discovery.engine, &home, &mut RealCommandRunner::default(),
+            ReadBounds { deadline: std::time::Duration::from_secs(30), max_output_bytes: 1024 * 1024 })?;
+        discovery.catalog = runtime.bind_catalog(&discovery.catalog).map_err(DiscoveryError::Contract)?;
+        discovery.engine = runtime.engine.clone();
+        discovery.native = runtime.native.clone();
+        discovery.runtime = Some(runtime);
+    }
+    Ok(discovery)
+}
+
+fn validate_catalog(provider: &ProviderId, discovery: &Discovery) -> Result<(), ContractError> {
+    let descriptor = registry::provider(provider.as_str())?.descriptor();
+    if discovery.catalog.provider != *provider
+        || discovery.catalog.native != discovery.native
+        || discovery.catalog.schema != descriptor.model.catalog.require("native catalog source")?.schema
+    {
+        return Err(ContractError::Mismatch("native catalog provider/identity/schema"));
+    }
+    Ok(())
 }
 
 pub fn models(
@@ -88,7 +139,10 @@ pub fn models(
 ) -> Result<crate::cli::CmdResult, crate::cli::CliError> {
     let result = std::env::current_dir()
         .map_err(DiscoveryError::Io)
-        .and_then(|cwd| discover(&cwd));
+        .and_then(|cwd| {
+            let provider = ProviderId::new(&args.provider).map_err(DiscoveryError::Contract)?;
+            discover(&provider, &cwd)
+        });
     render_models(args, result)
 }
 
@@ -98,6 +152,11 @@ fn render_models(
 ) -> Result<crate::cli::CmdResult, crate::cli::CliError> {
     use crate::cli::{CmdOutput, CmdResult, ExitCode};
     use serde_json::json;
+    let result = result.and_then(|discovery| {
+        let provider = ProviderId::new(&args.provider).map_err(DiscoveryError::Contract)?;
+        validate_catalog(&provider, &discovery).map_err(DiscoveryError::Contract)?;
+        Ok(discovery)
+    });
     let (value, human, exit) = match result {
         Ok(discovery) => {
             let query = args.search.as_deref().map(str::to_lowercase);
@@ -114,7 +173,8 @@ fn render_models(
             let value = json!({"schema_version":"models.v1","ok":true,"provider":args.provider,
                 "models":rows,"auth":"unknown","auth_basis":"native_catalog_visibility_is_not_authorization",
                 "source":{"schema":discovery.catalog.schema,"executable":discovery.engine,
-                    "version":discovery.native.version,"executable_sha256":team_agent_contract::host::digest_hex(discovery.native.executable_sha256)},
+                    "version":discovery.native.version,"executable_sha256":team_agent_contract::host::digest_hex(discovery.native.executable_sha256),
+                    "identity_scope":"catalog_only"},
                 "current_role_model":null,"search":args.search});
             let mut lines = vec![format!("models.v1 | {} native model IDs:", args.provider)];
             lines.extend(
@@ -163,12 +223,13 @@ mod tests {
             executable_sha256: Digest([1; 32]),
         };
         let discovery = Discovery {
+            runtime: None,
             engine: "/controlled/kiro-cli-chat".into(),
             native: native.clone(),
             catalog: CatalogObservation {
                 provider: ProviderId::new("kiro").unwrap(),
                 native,
-                schema: "controlled-json".into(),
+                schema: kiro::CHAT_CATALOG_SOURCE.schema.into(),
                 models: vec![ModelRecord {
                     id: "Exact-Case-ID".into(),
                     efforts: Support::Unverified(Reason {
@@ -192,7 +253,7 @@ mod tests {
         assert_eq!(json["auth"], "unknown");
         assert_eq!(json["models"][0]["model_id"], "Exact-Case-ID");
         assert_eq!(json["models"][0]["efforts"]["state"], "unverified");
-        assert_eq!(json["source"]["schema"], "controlled-json");
+        assert_eq!(json["source"]["schema"], kiro::CHAT_CATALOG_SOURCE.schema);
         assert!(json["current_role_model"].is_null());
     }
 
@@ -203,7 +264,7 @@ mod tests {
             search: None,
             json: true,
         };
-        let error = parse_version(b"kiro-cli-chat 2.29.invalid\n").unwrap_err();
+        let error = kiro::parse_version(b"kiro-cli-chat 2.29.invalid\n").unwrap_err();
         let result = render_models(&args, Err(DiscoveryError::Probe(error))).unwrap();
         assert_eq!(result.exit, ExitCode::Error);
         let CmdOutput::Human(text) = result.output else {
@@ -215,6 +276,91 @@ mod tests {
             .unwrap()
             .contains("kiro-cli-chat 2.29.invalid"));
         assert_eq!(json["models"], serde_json::json!([]));
+    }
+
+    fn cursor_catalog() -> Discovery {
+        let native = NativeIdentity {
+            version: "2026.09.29-a1b2c3".into(),
+            harness: cursor::METADATA_HARNESS.into(),
+            ui: cursor::METADATA_UI.into(),
+            platform: Platform::MacOs,
+            executable_sha256: Digest([2; 32]),
+        };
+        Discovery {
+            runtime: None,
+            engine: "/controlled/cursor-agent".into(),
+            native: native.clone(),
+            catalog: CatalogObservation {
+                provider: ProviderId::new("cursor").unwrap(),
+                native,
+                schema: cursor::CATALOG_SOURCE.schema.into(),
+                models: ["gpt-5.6-luna-xhigh", "gpt-5.6-luna-xhigh-fast", "Other-Exact-ID"]
+                    .into_iter().map(|id| ModelRecord {
+                        id: id.into(),
+                        efforts: Support::Unverified(Reason {
+                            code: "not-observed", message: "Native IDs are not separate effort flags",
+                        }),
+                    }).collect(),
+            },
+        }
+    }
+
+    #[test]
+    fn cursor_catalog_filters_exact_native_family_without_runtime_claims() {
+        let args = ModelsArgs {
+            provider: "cursor".into(), search: Some("GPT-5.6-LUNA-XHIGH".into()), json: true,
+        };
+        let result = render_models(&args, Ok(cursor_catalog())).unwrap();
+        assert_eq!(result.exit, ExitCode::Ok);
+        let CmdOutput::Human(text) = result.output else { panic!("JSON text projection"); };
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let ids: Vec<_> = json["models"].as_array().unwrap().iter()
+            .map(|row| row["model_id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["gpt-5.6-luna-xhigh", "gpt-5.6-luna-xhigh-fast"]);
+        assert_eq!(json["provider"], "cursor");
+        assert_eq!(json["auth"], "unknown");
+        assert_eq!(json["source"]["identity_scope"], "catalog_only");
+        assert_eq!(json["source"]["version"], "2026.09.29-a1b2c3");
+        assert!(json["models"].as_array().unwrap().iter().all(|row|
+            row["efforts"]["state"] == "unverified" && row["aliases"] == serde_json::json!([])));
+        assert!(json["current_role_model"].is_null());
+    }
+
+    #[test]
+    fn mismatched_catalog_provider_native_or_schema_is_not_projected() {
+        let args = ModelsArgs { provider: "cursor".into(), search: None, json: true };
+        for field in ["provider", "native", "schema"] {
+            let mut discovery = cursor_catalog();
+            match field {
+                "provider" => discovery.catalog.provider = ProviderId::new("kiro").unwrap(),
+                "native" => discovery.catalog.native.executable_sha256 = Digest([9; 32]),
+                "schema" => discovery.catalog.schema = kiro::CHAT_CATALOG_SOURCE.schema.into(),
+                _ => unreachable!(),
+            }
+            let result = render_models(&args, Ok(discovery)).unwrap();
+            assert_eq!(result.exit, ExitCode::Error, "{field}");
+            let CmdOutput::Human(text) = result.output else { panic!("JSON text projection"); };
+            let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(json["ok"], false);
+            assert_eq!(json["models"], serde_json::json!([]));
+        }
+    }
+
+    #[test]
+    fn cursor_probe_failure_has_no_legacy_or_fixed_model_fallback() {
+        let args = ModelsArgs { provider: "cursor".into(), search: None, json: true };
+        for error in [
+            DiscoveryError::Executable("cursor-agent"),
+            DiscoveryError::CursorProbe(cursor::parse_version(b"Cursor release unknown").unwrap_err()),
+        ] {
+            let result = render_models(&args, Err(error)).unwrap();
+            assert_eq!(result.exit, ExitCode::Error);
+            let CmdOutput::Human(text) = result.output else { panic!("JSON text projection"); };
+            let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(json["provider"], "cursor");
+            assert_eq!(json["models"], serde_json::json!([]));
+            assert_eq!(json["ok"], false);
+        }
     }
 
     #[test]

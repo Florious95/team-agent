@@ -1,5 +1,8 @@
 //! Read-only per-agent routing/preflight. Contract roles opt in independently;
 //! other roles keep the legacy engine, including in the same logical team.
+#[cfg(test)]
+#[path = "config_tests.rs"]
+mod tests;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -37,6 +40,8 @@ pub struct RoleConfig {
     pub model: String,
     pub effort: Option<String>,
     pub bypass: bool,
+    #[serde(default)]
+    pub paused: bool,
     pub body: String,
     pub prompt: Prompt,
 }
@@ -94,8 +99,8 @@ fn mode(meta: &Value, path: &Path) -> Result<Option<CommunicationMode>, ConfigEr
         .transpose()
 }
 
-/// A malformed explicit Kiro header cannot fall back to the default Pi worker.
-fn malformed_kiro_header(body: &str) -> bool {
+/// A malformed explicit contract header cannot fall back to the default Pi worker.
+fn malformed_contract_header(body: &str) -> bool {
     body.strip_prefix("---\n").is_some_and(|header| {
         header
             .lines()
@@ -116,7 +121,7 @@ fn malformed_kiro_header(body: &str) -> bool {
     })
 }
 
-/// None delegates exactly to the existing no-Kiro/leader-only path. No native
+/// None delegates exactly to the existing legacy/leader-only path. No native
 /// command, model probe, config write or process is created by this selection.
 pub fn read_team(args: &QuickStartArgs) -> Result<Option<TeamConfig>, ConfigError> {
     read_team_with_user_source(args, prompt::user_source)
@@ -127,6 +132,23 @@ pub fn read_team(args: &QuickStartArgs) -> Result<Option<TeamConfig>, ConfigErro
 pub fn read_team_with_user_source(
     args: &QuickStartArgs,
     user_source: impl FnOnce() -> Result<Option<Source>, ConfigError>,
+) -> Result<Option<TeamConfig>, ConfigError> {
+    read_team_inner(args, user_source, None)
+}
+
+/// Compile an admitted role-document change without first writing any file.
+pub(crate) fn read_team_with_role_override(
+    args: &QuickStartArgs,
+    path: &Path,
+    contents: &str,
+) -> Result<Option<TeamConfig>, ConfigError> {
+    read_team_inner(args, prompt::user_source, Some((path, contents)))
+}
+
+fn read_team_inner(
+    args: &QuickStartArgs,
+    user_source: impl FnOnce() -> Result<Option<Source>, ConfigError>,
+    role_override: Option<(&Path, &str)>,
 ) -> Result<Option<TeamConfig>, ConfigError> {
     let agents = args.agents_dir.join("agents");
     let entries = match std::fs::read_dir(&agents) {
@@ -145,14 +167,17 @@ pub fn read_team_with_user_source(
     let mut roles = Vec::new();
     let mut selected = false;
     for path in paths {
-        let raw = match std::fs::read_to_string(&path) {
+        let raw = match role_override.filter(|(source, _)| path.canonicalize().ok().as_deref() == Some(*source)) {
+            Some((_, contents)) => contents.to_owned(),
+            None => match std::fs::read_to_string(&path) {
             Ok(raw) => raw,
             Err(error) if selected => return Err(error.into()),
             Err(_) => return Ok(None), // let the legacy compiler report its existing I/O error
+            },
         };
         let (meta, body) = split_front_matter(&raw);
         let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
-        if meta.get("provider").is_none() && malformed_kiro_header(&normalized) {
+        if meta.get("provider").is_none() && malformed_contract_header(&normalized) {
             return Err(invalid(&path, "front matter"));
         }
         if meta
@@ -173,7 +198,7 @@ pub fn read_team_with_user_source(
         .is_some_and(|backend| backend != "tmux")
     {
         return Err(ConfigError::Unsupported(
-            "Kiro contract transport requires tmux",
+            "contract native transport requires tmux",
         ));
     }
     let team_dir = args.agents_dir.canonicalize()?;
@@ -234,7 +259,7 @@ pub fn read_team_with_user_source(
         };
         members.push(MemberRoute {
             id: id.clone(),
-            provider,
+            provider: registration.map_or(provider, |descriptor| descriptor.identity.id.into()),
             source: source.canonicalize()?,
             runtime,
         });
@@ -251,13 +276,18 @@ pub fn read_team_with_user_source(
             || text(&meta, "profile", &source)?.is_some()
         {
             return Err(ConfigError::Unsupported(
-                "Kiro uses an existing native subscription; API/profile mappings are unavailable",
+                "contract native providers use an existing subscription; API/profile mappings are unavailable",
             ));
         }
         let bypass = match meta.get("dangerously_skip_permissions") {
             None => false,
             Some(Value::Bool(value)) => *value,
             _ => return Err(invalid(&source, "dangerously_skip_permissions")),
+        };
+        let paused = match meta.get("paused") {
+            None => false,
+            Some(Value::Bool(value)) => *value,
+            _ => return Err(invalid(&source, "paused")),
         };
         if body.trim().is_empty() || body.contains('\0') {
             return Err(invalid(&source, "role body"));
@@ -292,6 +322,7 @@ pub fn read_team_with_user_source(
             model: required(&meta, "model", &source)?,
             effort: text(&meta, "effort", &source)?,
             bypass,
+            paused,
             body,
             prompt,
         });

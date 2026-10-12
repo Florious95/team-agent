@@ -120,7 +120,12 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
     }
 
     fn tmux_endpoint(&mut self) -> Option<String> {
-        self.transport.tmux_endpoint()
+        // Bind the endpoint we use to observe the caller, not the worker server.
+        let caller_transport = caller_read_transport();
+        caller_transport
+            .as_deref()
+            .unwrap_or(self.transport)
+            .tmux_endpoint()
     }
 
     fn observe_command(&mut self, pane: &PaneId) -> Option<String> {
@@ -3126,6 +3131,99 @@ mod fresh_quick_start_leader_binding_tests {
             "team_owner": complete_owner("%0", "pi", uuid, 1),
             "leader_receiver": complete_receiver("%0", "pi", uuid, 1, socket)
         })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial(env)]
+    fn runtime_binding_endpoint_matches_caller_socket_without_redirecting_workers() {
+        let hermetic = HermeticTestEnv::enter("runtime-caller-endpoint");
+        let workspace = hermetic.root();
+        let caller_socket = workspace.join("leader.sock");
+        // Select the real caller-read backend without depending on a host tmux
+        // server. This marker is not evidence of pane liveness.
+        std::fs::write(&caller_socket, "fixture endpoint; no tmux server").unwrap();
+        let caller_endpoint = caller_socket.to_str().unwrap();
+        let tmux = hermetic.with_env("TMUX", &format!("{caller_endpoint},1,0"));
+        let _pane = hermetic.with_env("TMUX_PANE", "%0");
+        let worker_endpoint = "ta-fixture-workers";
+        let transport = OfflineTransport::new()
+            .with_tmux_endpoint(worker_endpoint)
+            .with_pane_current_command("%0", "pi");
+        let mut ops = RuntimeFreshQuickStartLeaderBindingOps {
+            transport: &transport,
+            last_failure_reason: None,
+            cas_conflict: false,
+            applied_grant: None,
+            registry_receipt: None,
+            frozen_owner: None,
+            frozen_receiver: None,
+            nonce_writer: None,
+        };
+        let endpoint = ops.tmux_endpoint().unwrap();
+        assert_eq!(endpoint, caller_endpoint);
+        assert_eq!(
+            caller_read_transport().unwrap().tmux_endpoint().as_deref(),
+            Some(endpoint.as_str())
+        );
+        assert_eq!(transport.tmux_endpoint().as_deref(), Some(worker_endpoint));
+        let state = native_persisted_binding(workspace, caller_endpoint);
+        let before = state.clone();
+        assert!(persisted_binding_matches_verified_pane(
+            &state,
+            workspace,
+            &PaneId::new("%0"),
+            Provider::Pi,
+            Some(&endpoint),
+        ));
+        assert_eq!(state, before);
+        drop(tmux);
+        assert!(caller_read_transport().is_none());
+        assert_eq!(ops.tmux_endpoint().as_deref(), Some(worker_endpoint));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial(env)]
+    fn runtime_binding_endpoint_rejects_foreign_socket_with_same_pane_identity() {
+        let hermetic = HermeticTestEnv::enter("runtime-foreign-endpoint");
+        let workspace = hermetic.root();
+        let caller_socket = workspace.join("leader.sock");
+        std::fs::write(&caller_socket, "fixture endpoint; no tmux server").unwrap();
+        let caller_endpoint = caller_socket.to_str().unwrap();
+        let _tmux = hermetic.with_env("TMUX", &format!("{caller_endpoint},1,0"));
+        let _pane = hermetic.with_env("TMUX_PANE", "%0");
+        let worker_endpoint = "ta-fixture-workers";
+        let transport = OfflineTransport::new()
+            .with_tmux_endpoint(worker_endpoint)
+            .with_pane_current_command("%0", "pi");
+        let mut ops = RuntimeFreshQuickStartLeaderBindingOps {
+            transport: &transport,
+            last_failure_reason: None,
+            cas_conflict: false,
+            applied_grant: None,
+            registry_receipt: None,
+            frozen_owner: None,
+            frozen_receiver: None,
+            nonce_writer: None,
+        };
+        let endpoint = ops.tmux_endpoint().unwrap();
+        assert_eq!(endpoint, caller_endpoint);
+        let foreign_socket = workspace.join("foreign").join("leader.sock");
+        for socket in [worker_endpoint, foreign_socket.to_str().unwrap()] {
+            let state = native_persisted_binding(workspace, socket);
+            let before = state.clone();
+            // Both servers may have %0; the shared owner/provider/UUID/epoch
+            // cannot make a foreign endpoint authoritative.
+            assert!(!persisted_binding_matches_verified_pane(
+                &state,
+                workspace,
+                &PaneId::new("%0"),
+                Provider::Pi,
+                Some(&endpoint),
+            ));
+            assert_eq!(state, before);
+        }
     }
 
     #[cfg(unix)]

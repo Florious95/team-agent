@@ -17,10 +17,20 @@ pub struct ImageStamp {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ExecutableInputStamp {
+    pub path: PathBuf,
+    pub sha256: Digest,
+    pub image: ImageStamp,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProcessStamp {
     pub identity: ProcessIdentity,
     pub parent: u32,
     pub image: ImageStamp,
+    /// Captured interpreter entry operands, not process argv/environment reads.
+    #[serde(default)]
+    pub inputs: Vec<ExecutableInputStamp>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -211,6 +221,60 @@ pub(crate) fn fingerprint_open_file(
     Ok(Digest(hash.finalize().into()))
 }
 
+/// Snapshot declared interpreter operands before spawn. The same generic file
+/// fingerprint/stamp checks used for images apply; no provider-specific paths.
+pub fn capture_executable_inputs(
+    inputs: &[crate::contract::plan::ExecutableInput],
+    max_bytes: u64,
+    budget: Duration,
+) -> Result<Vec<ExecutableInputStamp>, HostError> {
+    #[cfg(not(unix))]
+    {
+        let _ = (inputs, max_bytes, budget);
+        Err(HostError::new("interpreter inputs", HostErrorKind::Unsupported))
+    }
+    #[cfg(unix)]
+    {
+        let started = Instant::now();
+        let mut stamps = Vec::new();
+        for input in inputs {
+            let before = std::fs::symlink_metadata(&input.path)
+                .map_err(|error| HostError::io("interpreter input metadata", error))?;
+            if !before.is_file() || input.path.canonicalize().ok().as_ref() != Some(&input.path) {
+                return Err(HostError::new("interpreter input identity", HostErrorKind::Ownership));
+            }
+            let sha256 = fingerprint_file(&input.path, max_bytes, budget.saturating_sub(started.elapsed()))?;
+            let after = std::fs::symlink_metadata(&input.path)
+                .map_err(|error| HostError::io("interpreter input metadata", error))?;
+            if sha256 != input.sha256 || image_stamp(&before) != image_stamp(&after) {
+                return Err(HostError::new("interpreter input changed", HostErrorKind::Conflict));
+            }
+            stamps.push(ExecutableInputStamp { path: input.path.clone(), sha256, image: image_stamp(&after) });
+        }
+        Ok(stamps)
+    }
+}
+
+/// Recheck the captured inode/size/mtime, not a hash of large code on every poll.
+pub fn verify_executable_inputs(inputs: &[ExecutableInputStamp]) -> Result<(), HostError> {
+    #[cfg(not(unix))]
+    {
+        let _ = inputs;
+        Err(HostError::new("interpreter inputs", HostErrorKind::Unsupported))
+    }
+    #[cfg(unix)]
+    {
+        for input in inputs {
+            let metadata = std::fs::symlink_metadata(&input.path)
+                .map_err(|error| HostError::io("interpreter input metadata", error))?;
+            if !metadata.is_file() || image_stamp(&metadata) != input.image {
+                return Err(HostError::new("interpreter input changed", HostErrorKind::Conflict));
+            }
+        }
+        Ok(())
+    }
+}
+
 pub fn resolve_cwd(path: &Path) -> Result<crate::contract::session::CwdIdentity, HostError> {
     let path = path
         .canonicalize()
@@ -312,6 +376,7 @@ pub fn capture_process(
             },
             parent,
             image: after,
+            inputs: Vec::new(),
         })
     }
 }
@@ -456,7 +521,13 @@ pub fn sample_process(expected: &ProcessStamp) -> ProcessState {
     #[cfg(unix)]
     {
         match std::fs::metadata(image_path) {
-            Ok(metadata) if image_stamp(&metadata) == expected.image => ProcessState::Alive,
+            Ok(metadata) if image_stamp(&metadata) == expected.image => {
+                match verify_executable_inputs(&expected.inputs) {
+                    Ok(()) => ProcessState::Alive,
+                    Err(error) if matches!(error.kind, HostErrorKind::Conflict | HostErrorKind::Io(std::io::ErrorKind::NotFound)) => ProcessState::Replaced,
+                    Err(error) => ProcessState::Unknown(error),
+                }
+            }
             Ok(_) => ProcessState::Replaced,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => ProcessState::Exited,
             Err(error) => ProcessState::Unknown(HostError::io("process image metadata", error)),
@@ -471,6 +542,7 @@ mod ancestry_tests {
 
     fn stamp(pid: u32, parent: u32) -> ProcessStamp {
         ProcessStamp {
+            inputs: vec![],
             identity: ProcessIdentity {
                 pid,
                 birth_identity: format!("birth-{pid}"),

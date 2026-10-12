@@ -2,10 +2,11 @@
 //!
 //! `contract` is pure; `host` owns scoped OS/tmux effects; `runtime` owns physical
 //! delivery and probes; `orchestration` owns durable lifecycle/MCP transactions.
-//! Kiro-specific behavior is confined to `kiro`.
+//! Native behavior is confined to `kiro` and the leaves under `providers`.
 
 pub mod contract;
 pub mod host;
 pub mod kiro;
 pub mod orchestration;
+pub mod providers;
 pub mod runtime;

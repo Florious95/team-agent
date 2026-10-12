@@ -2,7 +2,7 @@
 //! implicit business retry, queue flush, or replay of uncertain messages.
 use super::{
     backend::{self, Backend, BackendError},
-    forward, framework,
+    forward, framework, registry,
 };
 use serde_json::Value;
 use std::path::Path;
@@ -12,11 +12,10 @@ use team_agent_contract::host::{
     clock::{Clock, RealClock},
     process::verify_native_ancestry,
 };
-use team_agent_contract::kiro::{interaction, KIRO_DESCRIPTOR};
 use team_agent_contract::orchestration::{physical::*, store::*, supervisor::*};
 use team_agent_contract::runtime::probes::*;
 
-fn protocol(
+pub(super) fn protocol(
     backend: &mut Backend,
     seat: &SeatRecord,
     clock: &RealClock,
@@ -28,6 +27,9 @@ fn protocol(
         .into_iter()
         .filter(|record| {
             !record.closed
+                && record.identity == seat.identity
+                && record.server_key == seat.server_key
+                && record.binding_key == seat.binding_key
                 && record.native_process == target.process
                 && verify_native_ancestry(&record.process, &record.native_process).is_ok()
         })
@@ -75,6 +77,35 @@ fn protocol(
             });
         }
     }
+    if registry::provider(seat.provider.as_str())?.uses_tool_roundtrips() {
+        let session = seat.session.as_ref().ok_or(BackendError::Metadata)?;
+        if target.identity() != &seat.identity || target.binding != seat.binding_key
+            || target.provider != seat.provider || target.native != seat.native
+            || target.native_session.as_ref() != Some(&session.native_session)
+            || session.source != seat.identity || session.provider != seat.provider
+            || session.native != seat.native || session.cwd != target.cwd
+            || target.candidate_sha256 != backend.binding.candidate_sha256
+        {
+            return Err(ContractError::Mismatch("native roundtrip current binding").into());
+        }
+        // The core returns only per-tool invocation + actual successful
+        // write/flush pairs for THIS captured connection and generation.
+        // Server list writes or another connection's facts cannot qualify.
+        let tools = backend.store.completed_connection_tools(&seat.identity, &connection.connection)?;
+        if !tools.is_empty() {
+            events.push(ProtocolEvent {
+                scope: target.scope(events.len() as u64, clock.now(), Duration::from_secs(2),
+                    "live-native-tool-roundtrip-ledger"),
+                fact: ProtocolFact::ClientBound {
+                    server_instance: connection.connection.clone(),
+                    evidence: ClientBindingEvidence {
+                        server_key: seat.server_key.clone(), tools,
+                        source: ClientBindingSource::NativeToolRoundtrip,
+                    },
+                },
+            });
+        }
+    }
     Ok(collect_protocol(
         target,
         &connection.connection,
@@ -91,8 +122,18 @@ fn deliver_one(backend: &mut Backend, seat: &SeatRecord) -> Result<(), BackendEr
     {
         return Ok(());
     }
+    let selected = registry::provider(seat.provider.as_str())?;
+    let bootstrap_allowed = selected.first_business_bootstrap() && !seat.bootstrap_used;
+    let profiles = selected.descriptor().input.profiles.require("native input profiles")?;
+    let profile = profiles.iter().find(|profile| profile.id == seat.profile && profile.matches_native(&seat.native))
+        .ok_or(ContractError::ProfileUnavailable)?;
+    profile.policy.require("native submit policy")?;
+    let role = backend::read_role(&backend.binding, &seat.identity)?;
+    if role.provider != seat.provider {
+        return Err(BackendError::Metadata);
+    }
     let clock = RealClock::new();
-    let adapter = backend::adapter(&backend.binding, &seat.identity)?;
+    let adapter = backend::adapter(&backend.binding, &seat.identity, &seat.provider)?;
     let hooks = adapter.hooks();
     let operation = OperationId::new(format!(
         "deliver-{}",
@@ -104,15 +145,17 @@ fn deliver_one(backend: &mut Backend, seat: &SeatRecord) -> Result<(), BackendEr
     ))?;
     let mut physical = PhysicalRuntime::new(
         Registration {
-            descriptor: &KIRO_DESCRIPTOR,
+            descriptor: selected.descriptor(),
             hooks: &hooks,
-            controls: interaction::CONTROLS,
+            controls: selected.controls(),
         },
-        backend::settings(&backend.binding),
+        backend::settings(&backend.binding, selected),
         operation.clone(),
         &clock,
     )?;
-    physical.evidence = backend::policy_evidence(&seat.native, backend.binding.candidate_sha256);
+    physical.evidence = backend::policy_evidence(
+        &seat.provider, &seat.native, backend.binding.candidate_sha256,
+    )?;
     physical.protocol = Some(protocol(backend, seat, &clock)?);
     let sample = physical.readiness(seat)?;
     if !matches!(sample.pane.outcome, ProbeOutcome::Observed(ref pane) if pane.surface == InputSurface::ComposerReady)
@@ -120,28 +163,39 @@ fn deliver_one(backend: &mut Backend, seat: &SeatRecord) -> Result<(), BackendEr
     {
         return Ok(());
     }
-    backend
-        .store
-        .begin_observation(&seat.identity, &operation)?;
-    // A completed-but-uncertain inspector quarantines the seat, without an
-    // orphan lease that would prevent explicit scoped shutdown. No replay or
-    // blind Escape to clear an unrelated approval/composer is permitted.
-    let binding = match physical.client_binding(seat, &interaction::TOOL_PANEL) {
-        Ok(binding) => binding,
-        Err(error) => {
-            backend.store.fail_observation(&seat.identity, &operation)?;
-            return Err(error.into());
+    // A roundtrip provider consumes only its captured protocol evidence. An
+    // Unknown/partial binding is left to the typed readiness gate; it never
+    // triggers a guessed TUI /tools command or a Kiro inspector fallback.
+    if !bootstrap_allowed && !selected.uses_tool_roundtrips() {
+        let panel = selected.tool_panel()?;
+        if panel.profile_id != seat.profile || panel.server_key != seat.server_key
+            || panel.policy_sha256 != profile.policy_sha256
+        {
+            return Err(ContractError::Mismatch("native inspector seat binding").into());
         }
-    };
-    backend
-        .store
-        .finish_observation(&seat.identity, &operation)?;
-    if !matches!(binding.outcome, ProbeOutcome::Observed(_)) {
-        return Ok(());
+        backend.store.begin_observation(&seat.identity, &operation)?;
+        // Uncertain inspection quarantines the seat without an orphan lease.
+        // No replay or blind Escape clears an unrelated composer/approval.
+        let binding = match physical.client_binding(seat, panel) {
+            Ok(binding) => binding,
+            Err(error) => {
+                backend.store.fail_observation(&seat.identity, &operation)?;
+                return Err(error.into());
+            }
+        };
+        backend.store.finish_observation(&seat.identity, &operation)?;
+        if !matches!(binding.outcome, ProbeOutcome::Observed(_)) {
+            return Ok(());
+        }
+        let mut current_protocol = protocol(backend, seat, &clock)?;
+        current_protocol.binding = binding;
+        physical.protocol = Some(current_protocol);
     }
-    let mut current_protocol = protocol(backend, seat, &clock)?;
-    current_protocol.binding = binding;
-    physical.protocol = Some(current_protocol);
+    // H3's owned prompt receipt is independently checked by PhysicalRuntime;
+    // only the one durable first-business claim can carry this instruction.
+    if bootstrap_allowed {
+        physical.initial_prompt = Some(role.prompt.text.clone());
+    }
     let mut bootstrap = OutboxBootstrap::new(ContractStore::open(
         &backend.binding.transport_root,
         backend.binding.scope.clone(),
@@ -150,10 +204,10 @@ fn deliver_one(backend: &mut Backend, seat: &SeatRecord) -> Result<(), BackendEr
     physical.bootstrap = Some(&mut bootstrap);
     let sample = physical.readiness(seat)?;
     let authorization = DeliveryAuthorization {
-        allow_first_business_bootstrap: false,
+        allow_first_business_bootstrap: bootstrap_allowed,
         require_server_handshake: true,
         channel: Channel::Tmux,
-        policy_sha256: interaction::POLICY,
+        policy_sha256: profile.policy_sha256,
     };
     let _ = team_agent_contract::orchestration::supervisor::tick(
         &mut backend.store,
@@ -170,15 +224,18 @@ pub fn tick(workspace: &Path, state: &mut Value) -> Result<(), BackendError> {
         return Ok(());
     }
     let team = crate::state::projection::team_state_key(state);
-    let mut backend = Backend::open(workspace, &team)?;
     let ids: Vec<_> = state
         .get("agents")
         .and_then(Value::as_object)
         .into_iter()
         .flat_map(|agents| agents.iter())
-        .filter(|(_, agent)| framework::is_contract(agent))
+        .filter(|(_, agent)| framework::is_contract(agent) && !framework::is_paused_unstarted(agent))
         .map(|(id, _)| id.clone())
         .collect();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut backend = Backend::open(workspace, &team)?;
     let mut failure = None;
     for id in ids {
         let Some(seat) = backend.store.seat(&SeatId::new(&id)?)? else {
@@ -192,7 +249,12 @@ pub fn tick(workspace: &Path, state: &mut Value) -> Result<(), BackendError> {
             .and_then(|agents| agents.get_mut(&id))
         {
             match framework::project_seat(workspace, &team, &id) {
-                Ok(projected) => *agent = projected,
+                Ok(projected) => {
+                    let row = agent.as_object_mut().ok_or(BackendError::Metadata)?;
+                    for (key, value) in projected.as_object().ok_or(BackendError::Metadata)? {
+                        row.insert(key.clone(), value.clone());
+                    }
+                },
                 Err(error) => failure = Some(error),
             }
         }

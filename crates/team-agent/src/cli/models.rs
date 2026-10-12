@@ -440,6 +440,57 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn cursor_contract_catalog_uses_public_launcher_metadata_then_exact_ids() {
+        let program = fixture_program("cursor-agent", r#"
+test "$#" = 1 || exit 9
+case "$1" in
+  --version) printf '%s\n' '2026.10.01-a1b2c3' ;;
+  --list-models) exec /bin/cat "$TEAM_AGENT_MODELS_FIXTURE" ;;
+  *) exit 9 ;;
+esac"#);
+        let mut cursor = CliFixture::new(program);
+        let response = cursor.program.with_extension("stdout");
+        std::fs::write(&response, include_bytes!("../provider/testdata/cursor-list-models-native.stdout")).unwrap();
+        cursor.response = Some(response);
+        let output = run_public_models_cli(&cursor.program, cursor.response.as_deref(),
+            &["models", "--provider", "cursor", "--search", "gpt-5.6-luna-xhigh", "--json"]);
+        let text = public_cli_text(&output);
+        let calls = std::fs::read_to_string(cursor.program.with_extension("count")).unwrap();
+        assert!(output.status.success(), "{text}");
+        assert_eq!(calls, "1:--version\n1:--list-models\n");
+        let value: Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(value["provider"], "cursor");
+        assert_eq!(value["auth"], "unknown");
+        assert_eq!(value["source"]["schema"], "cursor-list-models-text-v1");
+        assert_eq!(value["source"]["identity_scope"], "catalog_only");
+        assert!(value["models"].as_array().unwrap().iter().any(|row| row["model_id"] == "gpt-5.6-luna-xhigh"));
+        assert!(value["models"].as_array().unwrap().iter().all(|row| row["role_model"] == row["model_id"]));
+        assert!(value["current_role_model"].is_null());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cursor_contract_bad_version_has_no_legacy_entrypoint_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+        let cursor = CliFixture::new(fixture_program("cursor-agent", "printf '%s\\n' 'Cursor release unknown'"));
+        let legacy = cursor.program.parent().unwrap().join("agent");
+        std::fs::write(&legacy, "#!/bin/sh\nprintf 'called' > \"$0.called\"\nexit 9\n").unwrap();
+        std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let output = run_public_models_cli(&cursor.program, None,
+            &["models", "--provider", "cursor", "--json"]);
+        let text = public_cli_text(&output);
+        assert!(!output.status.success(), "{text}");
+        assert_eq!(std::fs::read_to_string(cursor.program.with_extension("count")).unwrap(), "1:--version\n");
+        assert!(!legacy.with_extension("called").exists());
+        let value: Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(value["provider"], "cursor");
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["models"], json!([]));
+        assert!(value["error"].as_str().unwrap().contains("Cursor release unknown"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn grok_public_cli_uses_native_catalog_and_keeps_shared_projection() {
         let grok = native_cli_fixture(
             "grok",
@@ -1322,7 +1373,7 @@ mod tests {
             ),
             ExitCode::Error
         );
-        let usage = "team-agent models [--provider pi|cursor_agent|codex|claude|claude_code|grok|kiro] [QUERY|--search TEXT] [--json]";
+        let usage = "team-agent models [--provider pi|cursor|cursor_agent|codex|claude|claude_code|grok|kiro] [QUERY|--search TEXT] [--json]";
         assert_eq!(crate::cli::spec::command_spec("models").unwrap().usage, usage);
         assert!(crate::cli::emit::command_help(Some("models")).contains(usage));
     }

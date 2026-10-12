@@ -120,15 +120,13 @@ pub(super) fn persist_spawn_agent_state(
             continue;
         };
         #[cfg(unix)]
-        if agent
+        if let Some(descriptor) = agent
             .get("provider")
             .and_then(Value::as_str)
-            .is_some_and(|provider| {
-                crate::contract_runtime::registry::descriptor(provider).is_some()
-            })
+            .and_then(crate::contract_runtime::registry::descriptor)
         {
             let projected = if agent_is_paused(agent) {
-                serde_json::json!({"agent_id":id,"provider":"kiro","runtime_family":"contract","status":"paused","pane_id":null})
+                serde_json::json!({"agent_id":id,"provider":descriptor.identity.id,"runtime_family":"contract","status":"paused","paused":true,"contract_instance":null,"pane_id":null})
             } else {
                 crate::contract_runtime::framework::project_seat(workspace, &team_id, id)
                     .map_err(|error| LifecycleError::StatePersist(error.to_string()))?

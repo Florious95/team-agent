@@ -102,6 +102,29 @@ impl Lifecycle<'_> {
                     operation.parent.as_mut().ok_or(Error::Fence)?.status = SeatStatus::Stopped;
                     operation.pending = None;
                     self.store.save(&operation, false)?;
+                    // Fixed-name per-seat configuration cannot be adopted by a
+                    // new generation. Only positively stopped parent resources
+                    // colliding with this validated plan are retired, by receipt.
+                    let parent = operation.parent.as_ref().ok_or(Error::Fence)?.clone();
+                    for resource in parent.resources.iter().filter(|resource| {
+                        plan.materialization.iter().any(|request| request.path == resource.path)
+                    }) {
+                        if resource.owner != parent.identity
+                            || resource.path.root() != granted_root(&parent, resource.kind, self.store.root())
+                            || resource.disposition != ResourceDisposition::OwnedRemovable
+                            || !resource.exclusive
+                            || !matches!(resource.write_effect, ResourceWriteEffect::Written { .. })
+                            || matches!(resource.kind, ResourceKind::SessionBacking | ResourceKind::GlobalSettings | ResourceKind::NativeDatabase)
+                        { return Err(Error::Fence); }
+                        operation.pending = Some("cleanup-parent".into());
+                        self.store.save(&operation, false)?;
+                        if !self.host.remove_owned(resource)? {
+                            return Err(Error::Host("parent config cleanup not confirmed"));
+                        }
+                        operation.preserved.retain(|path| path != &resource.path);
+                        operation.pending = None;
+                        self.store.save(&operation, false)?;
+                    }
                 }
             }
             self.launch(adapter, &resolved, &plan, &mut operation)
@@ -489,7 +512,7 @@ impl Lifecycle<'_> {
         self.store.save(operation, false)?;
         if matches!(
             operation.pending.as_deref(),
-            Some("spawn" | "native-control" | "stop-parent")
+            Some("spawn" | "native-control" | "stop-parent" | "cleanup-parent")
         ) {
             // Cannot infer absence of process/input effects from a missing receipt.
             return Ok(());

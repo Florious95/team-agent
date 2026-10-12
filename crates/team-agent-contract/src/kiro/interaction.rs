@@ -184,22 +184,18 @@ impl InteractionHook for KiroAdapter {
                 .into(),
             );
         }
-        let expected = match (&frame.message, frame.operation) {
-            (Some(message), Operation::FirstBusiness | Operation::OrdinarySend) => {
-                format!("[team-agent-token:{}]", message.as_str())
-            }
+        let current = composer(&frame.text).map(|(index, _)| {
+            frame.text.lines().skip(index).collect::<Vec<_>>().join("\n")
+        });
+        if matches!(frame.operation, Operation::FirstBusiness | Operation::OrdinarySend) {
+            correlate_business_input(frame, &mut observation, current.as_deref());
+            return observation;
+        }
+        let expected: String = match (&frame.message, frame.operation) {
             (None, Operation::SessionInspect) => "/session-id".into(),
             (None, Operation::ToolInspect) => "/tools".into(),
             _ => return observation,
         };
-        let current = composer(&frame.text).map(|(index, _)| {
-            frame
-                .text
-                .lines()
-                .skip(index)
-                .collect::<Vec<_>>()
-                .join("\n")
-        });
         let control = matches!(
             frame.operation,
             Operation::SessionInspect | Operation::ToolInspect

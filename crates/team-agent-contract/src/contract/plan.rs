@@ -106,6 +106,26 @@ pub fn resolve_launch(
     request: &LaunchRequest,
     catalog: Option<&CatalogObservation>,
 ) -> Result<ResolvedLaunch, ContractError> {
+    resolve_launch_inner(descriptor, hooks, request, catalog, false)
+}
+
+/// Pure team-wide admission before a native allocator creates a real session.
+/// No invented ID is needed; PendingAllocation plans cannot enter spawn.
+pub fn resolve_launch_preflight(
+    descriptor: &ProviderDescriptor,
+    hooks: &ProviderHooks<'_>,
+    request: &LaunchRequest,
+    catalog: Option<&CatalogObservation>,
+) -> Result<ResolvedLaunch, ContractError> {
+    resolve_launch_inner(descriptor, hooks, request, catalog, true)
+}
+fn resolve_launch_inner(
+    descriptor: &ProviderDescriptor,
+    hooks: &ProviderHooks<'_>,
+    request: &LaunchRequest,
+    catalog: Option<&CatalogObservation>,
+    preflight: bool,
+) -> Result<ResolvedLaunch, ContractError> {
     if request.provider != descriptor.identity.id {
         return Err(ContractError::UnknownProvider);
     }
@@ -262,16 +282,16 @@ pub fn resolve_launch(
             }
             if (descriptor.session.fresh == FreshSession::Preassigned)
                 != request.preassigned_session.is_some()
+                && !(preflight && descriptor.session.fresh == FreshSession::Preassigned)
             {
                 return Err(ContractError::Invalid("preassigned session"));
             }
             match descriptor.session.fresh {
-                FreshSession::Preassigned => ExpectedSession::Preassigned(
-                    request
-                        .preassigned_session
-                        .clone()
-                        .ok_or(ContractError::Invalid("preassigned session"))?,
-                ),
+                FreshSession::Preassigned => match request.preassigned_session.clone() {
+                    Some(id) => ExpectedSession::Preassigned(id),
+                    None if preflight => ExpectedSession::PendingAllocation,
+                    None => return Err(ContractError::Invalid("preassigned session")),
+                },
                 FreshSession::CaptureAfterLaunch => ExpectedSession::CaptureAfterLaunch,
                 FreshSession::NotApplicable => ExpectedSession::NotApplicable,
             }
@@ -440,6 +460,8 @@ pub struct CarrierReport {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExpectedSession {
+    /// Pure preflight only. No launch or materialization authority is granted.
+    PendingAllocation,
     Preassigned(NativeSessionId),
     CaptureAfterLaunch,
     Resume(Box<ResumeBinding>),
@@ -497,11 +519,21 @@ pub struct PartialFailure {
     pub receipt: MaterializeReceipt,
 }
 
+/// A byte-bound program operand loaded by a native interpreter (for example
+/// Node's entry script). It is not an arbitrary file-read or argv-inspection grant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutableInput {
+    pub argument: usize,
+    pub path: PathBuf,
+    pub sha256: Digest,
+}
+
 /// Structured executable/argv/environment, never a shell fragment. No Debug payload dump.
 #[derive(Clone, PartialEq, Eq)]
 pub struct LaunchPlan {
     pub executable: PathBuf,
     pub arguments: Vec<OsString>,
+    pub executable_inputs: Vec<ExecutableInput>,
     pub cwd: PathBuf,
     pub environment: EnvironmentDelta,
     pub expected_session: ExpectedSession,
@@ -571,6 +603,16 @@ pub fn validate_launch_plan(
         return Err(ContractError::Invalid("argv contains NUL"));
     }
     plan.environment.validate()?;
+    let mut inputs = Vec::new();
+    for input in &plan.executable_inputs {
+        require_absolute(&input.path, "interpreter program input")?;
+        if plan.arguments.get(input.argument).map(OsString::as_os_str) != Some(input.path.as_os_str())
+            || inputs.contains(&input.argument)
+        {
+            return Err(ContractError::Invalid("interpreter program operand"));
+        }
+        inputs.push(input.argument);
+    }
     if &plan.expected_session != resolved.expected_session() {
         return Err(ContractError::Mismatch("expected session"));
     }

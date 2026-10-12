@@ -405,6 +405,14 @@ fn restart_with_selected_team_and_transport(
     let spec =
         rebuild_runtime_spec_from_roles(&selected.run_workspace, &selected.team_key, &state)?;
     phase_timer.emit(&selected.run_workspace, "restart.phase", LifecyclePhase::CompileSpec);
+    // All native H2/model/session/cwd gates run before any legacy teardown.
+    // Their private sockets and Node images must not enter legacy selection.
+    #[cfg(unix)]
+    let native_restart = if crate::contract_runtime::framework::has_contract(&state) {
+        crate::contract_runtime::backend::prepare_restart(
+            &selected.run_workspace, &selected.team_key, &selected.team_dir, &state,
+        ).map_err(|error| LifecycleError::Provider(error.to_string()))?
+    } else { Vec::new() };
     // 重建后 spec_workspace 恒为 runtime spec 的父目录(.team/runtime/<team_key>/)。
     let runtime_spec =
         crate::model::paths::runtime_spec_path(&selected.run_workspace, &selected.team_key);
@@ -1354,6 +1362,20 @@ fn restart_with_selected_team_and_transport(
             attach_commands,
         });
     }
+    let legacy_successful_agents = successful_agents.clone();
+    #[cfg(unix)]
+    for result in crate::contract_runtime::commands::restart_prepared(
+        &selected.run_workspace, &selected.team_key, &mut state, native_restart,
+    ) {
+        let decision = RestartedAgent {
+            agent_id: AgentId::new(result.agent_id), restart_mode: StartMode::Resumed,
+            decision: ResumeDecision::Resume, session_id: result.session_id.map(SessionId::new),
+        };
+        match result.outcome {
+            Ok(()) => successful_agents.push(decision),
+            Err(error) => failed_agents.push(restart_failed_agent(&decision, "native_resume", error)),
+        }
+    }
     drop(lifecycle_lock);
     let coordinator =
         start_coordinator_for_workspace(&selected.run_workspace, Some(&selected.team_key))?;
@@ -1368,7 +1390,7 @@ fn restart_with_selected_team_and_transport(
         &selected.run_workspace,
         &state,
         &session_name,
-        &successful_agents,
+        &legacy_successful_agents,
         transport,
         restart_readiness_deadline(readiness_deadline_ms),
         restart_readiness_poll_interval(),

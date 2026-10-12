@@ -383,6 +383,12 @@ pub use worker_env::{apply_cursor_subscription_proxy_env, CursorProxyPresence};
 
 mod identity;
 pub(super) use identity::*;
+
+// Test-only seam for the real leader producer -> unchanged bootstrap classifier.
+#[cfg(test)]
+pub(crate) fn quick_start_has_runtime_for_test(state: &serde_json::Value, team: &str) -> bool {
+    identity::runtime_state_has_quick_start_team(state, team)
+}
 pub(crate) use identity::{
     extend_worker_env_unset_for_effort, provider_effort_event_if_dropped,
     provider_effort_event_if_dropped_json, provider_effort_event_payload,

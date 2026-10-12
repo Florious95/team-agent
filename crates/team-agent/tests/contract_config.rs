@@ -36,8 +36,9 @@ fn fixture() -> (support::Sandbox, QuickStartArgs) {
     (sandbox, args)
 }
 fn role(args: &QuickStartArgs, name: &str, provider: &str) {
+    let model = if provider == "cursor" { "gpt-5.6-luna-xhigh" } else { "claude-sonnet-4.5" };
     std::fs::write(args.agents_dir.join("agents").join(format!("{name}.md")), format!(
-        "---\nprovider: {provider}\nmodel: claude-sonnet-4.5\ndangerously_skip_permissions: true\n---\nFirst line\nSecond line 中文 'quotes'\n"
+        "---\nprovider: {provider}\nmodel: {model}\ndangerously_skip_permissions: true\n---\nFirst line\nSecond line 中文 'quotes'\n"
     )).unwrap();
 }
 
@@ -168,6 +169,112 @@ fn safe_bypass_default_and_model_identity_api_profile_admission() {
             ..
         })
     ));
+}
+
+#[test]
+fn cursor_compiler_preserves_native_id_and_does_not_inherit_team_effort() {
+    use team_agent::model::yaml::Value;
+    let (_sandbox, args) = fixture();
+    std::fs::write(args.agents_dir.join("TEAM.md"),
+        "---\nname: demo\nprovider_effort: ultra\n---\nA bounded task.\n").unwrap();
+    role(&args, "worker", "cursor");
+    let before = std::fs::read(args.agents_dir.join("agents/worker.md")).unwrap();
+    let spec = team_agent::compiler::compile_team(&args.agents_dir).unwrap();
+    let worker = &spec.get("agents").and_then(Value::as_list).unwrap()[0];
+    assert_eq!(worker.get("provider").and_then(Value::as_str), Some("cursor"));
+    assert_eq!(worker.get("model").and_then(Value::as_str), Some("gpt-5.6-luna-xhigh"));
+    assert!(worker.get("effort").is_none());
+    let config = read_team(&args).unwrap().unwrap();
+    assert_eq!(config.roles[0].provider.as_str(), "cursor");
+    assert_eq!(config.roles[0].effort, None);
+    assert_eq!(std::fs::read(args.agents_dir.join("agents/worker.md")).unwrap(), before);
+    for path in [".team", ".cursor", ".kiro"] {
+        assert!(!args.workspace.join(path).exists());
+    }
+}
+
+#[test]
+fn mixed_contract_providers_do_not_migrate_legacy_cursor_names_or_state() {
+    let (_sandbox, args) = fixture();
+    for (name, provider) in [
+        ("a-cursor", "cursor"), ("b-kiro", "kiro"), ("c-pi", "pi"),
+        ("d-legacy-cursor", "cursor_agent"), ("e-legacy-agent", "agent"),
+    ] {
+        role(&args, name, provider);
+    }
+    let config = read_team(&args).unwrap().unwrap();
+    assert_eq!(config.roles.len(), 2);
+    assert_eq!(config.members.len(), 5);
+    for member in &config.members {
+        let expected = if ["cursor", "kiro"].contains(&member.provider.as_str()) {
+            RuntimeFamily::Contract
+        } else {
+            RuntimeFamily::Legacy
+        };
+        assert_eq!(member.runtime, expected, "{}", member.provider);
+    }
+    for provider in ["cursor_agent", "agent"] {
+        let state = serde_json::json!({"provider":provider,"pane_id":"%0","runtime_family":"legacy"});
+        assert!(!team_agent::contract_runtime::framework::is_contract(&state));
+        assert!(team_agent::contract_runtime::framework::require_legacy_role(None, Some(provider)).is_ok());
+    }
+    let current = serde_json::json!({"provider":"cursor","runtime_family":"contract"});
+    assert!(team_agent::contract_runtime::framework::is_contract(&current));
+    assert!(!args.workspace.join(".team").exists());
+}
+
+#[test]
+fn legacy_cursor_only_config_stays_on_legacy_track() {
+    let (_sandbox, args) = fixture();
+    for provider in ["cursor_agent", "agent"] {
+        role(&args, "worker", provider);
+        assert!(read_team(&args).unwrap().is_none());
+    }
+    assert!(!args.workspace.join(".team").exists());
+}
+
+#[test]
+fn cursor_mutation_malformed_declarations_and_api_profiles_refuse_without_writes() {
+    let (_sandbox, args) = fixture();
+    role(&args, "worker", "cursor");
+    let path = args.agents_dir.join("agents/worker.md");
+    let before = std::fs::read(&path).unwrap();
+    assert!(team_agent::contract_runtime::framework::require_legacy_role(Some(&path), None).is_err());
+    assert!(team_agent::contract_runtime::framework::require_legacy_role(None, Some("cursor")).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    for header in [
+        "provider: Cursor\nmodel: gpt-5.6-luna-xhigh",
+        "provider: cursor\ndangerously_skip_permissions: true",
+        "provider: cursor\nmodel: gpt-5.6-luna-xhigh\nauth_mode: compatible_api",
+        "provider: cursor\nmodel: gpt-5.6-luna-xhigh\nprofile: inherited",
+    ] {
+        std::fs::write(&path, format!("---\n{header}\n---\nRole\n")).unwrap();
+        assert!(read_team(&args).is_err(), "{header}");
+    }
+    std::fs::write(&path, "---\nprovider: cursor\nmodel: gpt-5.6-luna-xhigh\nmissing closing delimiter").unwrap();
+    assert!(matches!(read_team(&args), Err(ConfigError::Invalid { field: "front matter", .. })));
+    for path in [".team", ".cursor", ".kiro"] {
+        assert!(!args.workspace.join(path).exists());
+    }
+}
+
+#[test]
+fn paused_contract_roles_do_not_probe_or_materialize_runtime() {
+    let (_sandbox, args) = fixture();
+    for provider in ["cursor", "kiro"] {
+        role(&args, "worker", provider);
+        let path = args.agents_dir.join("agents/worker.md");
+        let text = std::fs::read_to_string(&path).unwrap().replace(
+            "dangerously_skip_permissions: true", "dangerously_skip_permissions: true\npaused: true",
+        );
+        std::fs::write(&path, text).unwrap();
+        let config = read_team(&args).unwrap().unwrap();
+        assert!(config.roles[0].paused);
+        team_agent::contract_runtime::backend::preflight(&config).unwrap();
+        for path in [".team", ".cursor", ".kiro"] {
+            assert!(!args.workspace.join(path).exists());
+        }
+    }
 }
 
 #[test]

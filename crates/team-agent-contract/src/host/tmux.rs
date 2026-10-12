@@ -7,7 +7,8 @@ use super::clock::{remaining, Clock};
 use super::command::{CommandEnd, CommandReceipt, CommandRequest, CommandRunner, OutputLimits};
 use super::files::{fingerprint_materialized, DirectoryReceipt, FileReceipt, ScopedDirectory};
 use super::process::{
-    capture_process, fingerprint_file, resolve_cwd, sample_process, ProcessState,
+    capture_executable_inputs, capture_process, fingerprint_file, resolve_cwd, sample_process,
+    verify_executable_inputs, ProcessState,
 };
 use super::shell::{launch_script, quote};
 use super::transport::*;
@@ -562,7 +563,15 @@ impl<R: CommandRunner> TmuxHost<R> {
     ) -> Result<TargetReceipt, HostError> {
         validate_launch_plan(descriptor, resolved, plan)
             .map_err(|_| HostError::new("launch contract", HostErrorKind::Invalid))?;
+        if matches!(plan.expected_session, crate::contract::plan::ExpectedSession::PendingAllocation) {
+            return Err(HostError::new("native session allocation required", HostErrorKind::Ownership));
+        }
         self.directory.check_live()?;
+        let inputs = capture_executable_inputs(
+            &plan.executable_inputs,
+            self.limits.max_executable_bytes,
+            remaining(clock, deadline).ok_or_else(|| HostError::new("interpreter input deadline", HostErrorKind::Deadline))?,
+        )?;
         if self.target.is_some()
             || self.directory.receipt().owner != resolved.request().identity
             || !self
@@ -761,7 +770,7 @@ impl<R: CommandRunner> TmuxHost<R> {
             let budget = remaining(clock, deadline).ok_or_else(|| {
                 HostError::new("native identity deadline", HostErrorKind::Deadline)
             })?;
-            if let Ok(process) = capture_process(
+            if let Ok(mut process) = capture_process(
                 pane.address.pid,
                 &plan.executable,
                 resolved.request().native.executable_sha256,
@@ -773,6 +782,8 @@ impl<R: CommandRunner> TmuxHost<R> {
                         HostErrorKind::Deadline,
                     ));
                 }
+                verify_executable_inputs(&inputs)?;
+                process.inputs = inputs;
                 return Ok(TargetReceipt {
                     directory: self.directory.receipt().clone(),
                     endpoint: self.endpoint.clone(),

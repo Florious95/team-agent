@@ -42,9 +42,13 @@ pub struct PhysicalRuntime<'a> {
     operation: OperationId,
     clock: &'a dyn Clock,
     quiescent: Option<SeatRecord>,
+    explicit_session: Option<crate::contract::session::NativeSessionId>,
     pub evidence: Vec<CapabilityEvidence>,
     pub protocol: Option<ProtocolSnapshot>,
     pub bootstrap: Option<&'a mut dyn BootstrapCommit>,
+    /// Framework-supplied exact prompt, checked against the owned H3 receipt.
+    /// RuntimeBridge carries it in the first business packet, not as a system role.
+    pub initial_prompt: Option<String>,
 }
 fn host_error(error: HostError) -> Error {
     if error.metadata.is_some() || error.process.is_some() {
@@ -82,9 +86,11 @@ impl<'a> PhysicalRuntime<'a> {
             operation,
             clock,
             quiescent: None,
+            explicit_session: None,
             evidence: vec![],
             protocol: None,
             bootstrap: None,
+            initial_prompt: None,
         })
     }
     /// Fresh T1/T2 plus independently supplied protocol facts. Capturing a pane
@@ -277,6 +283,9 @@ impl LifecycleHost for PhysicalRuntime<'_> {
         }
         // All descriptor/plan admission precedes even the private directory create.
         validate_launch_plan(descriptor, resolved, plan)?;
+        if matches!(plan.expected_session, ExpectedSession::PendingAllocation) {
+            return Err(Error::Invalid("native session allocation required"));
+        }
         let key = serde_json::to_vec(&seat.identity)?;
         let name = format!("native-{}", &digest_hex(digest(&key))[..24]);
         let directory = ScopedDirectory::create(
@@ -308,6 +317,13 @@ impl LifecycleHost for PhysicalRuntime<'_> {
         let target = spawned
             .target
             .ok_or(Error::Host("spawn target not observed"))?;
+        if descriptor.session.fresh == FreshSession::Preassigned {
+            self.explicit_session = match &plan.expected_session {
+                ExpectedSession::Preassigned(id) => Some(id.clone()),
+                ExpectedSession::Resume(binding) => Some(binding.native_session.clone()),
+                _ => return Err(Error::Invalid("explicit session launch receipt")),
+            };
+        }
         Ok(SpawnedProcess {
             process: target.process.identity.clone(),
             endpoint: target
@@ -429,13 +445,31 @@ impl LifecycleHost for PhysicalRuntime<'_> {
         let frame = host
             .capture(&target, self.clock, deadline, self.settings.freshness)
             .map_err(host_error)?;
-        let record = frame.text.into_bytes();
+        let (record, origin, scope) = if self.registration.descriptor.session.fresh == FreshSession::Preassigned {
+            let id = self.explicit_session.as_ref().ok_or(Error::Invalid("native session allocation receipt missing"))?;
+            // The allocated exact-ID argv is paired with a live image-fenced
+            // ready launch, not labelled as a native transcript echo.
+            let deadline = self.deadline()?;
+            let scope = loop {
+                let ready = self.readiness(seat)?;
+                if matches!(ready.process.outcome, crate::contract::probe::ProbeOutcome::Observed(ref process) if process.process == target.process.identity)
+                    && matches!(ready.pane.outcome, crate::contract::probe::ProbeOutcome::Observed(ref pane) if pane.surface == InputSurface::ComposerReady)
+                {
+                    break ready.pane.scope;
+                }
+                if self.clock.now() >= deadline { return Err(Error::Host("explicit session startup not ready")); }
+                self.clock.sleep(self.settings.limits.poll_interval);
+            };
+            (id.as_str().as_bytes().to_vec(), CaptureOrigin::ExplicitResumeLaunch, scope)
+        } else {
+            (frame.text.into_bytes(), CaptureOrigin::CurrentNativeSession, frame.scope)
+        };
         Ok(ScopedSessionEvidence {
-            scope: frame.scope,
+            scope,
             provider: seat.provider.clone(),
             native: seat.native.clone(),
             cwd: seat.cwd.clone(),
-            origin: CaptureOrigin::CurrentNativeSession,
+            origin,
             evidence_kind: seat.evidence_kind,
             evidence_sha256: digest(&record),
             record,
@@ -461,6 +495,27 @@ impl LifecycleHost for PhysicalRuntime<'_> {
         remove_quiescent(&root, &seat.identity, resource).map_err(host_error)
     }
 }
+/// Pure first-business preparation. This grants no transport authority; the
+/// executor still owns current T1/T2/T3, durable bootstrap and one-key delivery.
+pub fn prepare_business_envelope(
+    descriptor: &ProviderDescriptor,
+    job: &DeliveryJob,
+    initial_prompt: Option<&str>,
+) -> Result<PreparedEnvelope, Error> {
+    let logical = if job.operation == Operation::FirstBusiness
+        && descriptor.prompt.carrier == Support::Supported(PromptCarrier::RuntimeBridge)
+    {
+        let prompt = initial_prompt.ok_or(Error::Invalid("first-business prompt missing"))?;
+        let hash = digest(prompt.as_bytes());
+        if prompt.is_empty() || !job.target.resources.iter().any(|resource| {
+            resource.kind == ResourceKind::Prompt && resource.owner == job.target.identity
+                && resource.exclusive
+                && matches!(resource.write_effect, ResourceWriteEffect::Written { bytes_sha256 } if bytes_sha256 == hash)
+        }) { return Err(Error::Fence); }
+        LogicalEnvelope { content: format!("{prompt}\n\n{}", job.envelope.content), ..job.envelope.clone() }
+    } else { job.envelope.clone() };
+    Ok(PreparedEnvelope::from_logical(&logical)?)
+}
 impl DeliveryHost for PhysicalRuntime<'_> {
     fn deliver(&mut self, job: &DeliveryJob) -> Result<DeliveryReceipt, Error> {
         if job.channel != Channel::Tmux {
@@ -477,7 +532,11 @@ impl DeliveryHost for PhysicalRuntime<'_> {
             .protocol
             .as_ref()
             .ok_or(Error::Invalid("protocol evidence missing"))?;
-        let envelope = PreparedEnvelope::from_logical(&job.envelope)?;
+        // One immutable final-token envelope enters the existing journal/paste
+        // executor. No separate prompt submit, shell typing or replay loop.
+        let envelope = prepare_business_envelope(
+            self.registration.descriptor, job, self.initial_prompt.as_deref(),
+        )?;
         let input = PreparedInput::business(&envelope);
         let deadline = self.deadline()?;
         let mut host = self.reopen(&target, deadline)?;
