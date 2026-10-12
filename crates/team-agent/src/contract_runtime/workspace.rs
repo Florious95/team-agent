@@ -1,5 +1,6 @@
-//! Stable per-seat primary cwd. The project stays an additional directory;
-//! private MCP files never overwrite a shared project or another seat's config.
+//! Stable per-seat primary cwd outside project Git ancestry. Provider-specific
+//! project access remains explicit; private MCP files never overwrite a shared
+//! project or another seat's config, and old cwd incarnations are not migrated.
 use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::Path;
@@ -23,7 +24,7 @@ struct CwdRecord {
 pub(super) fn prepare(binding: &Binding, seat: &SeatId) -> Result<CwdIdentity, BackendError> {
     let root = root_for(&binding.workspace.path, &binding.scope);
     validate_directory(&root)?;
-    let parent = root.join("workspaces");
+    let parent = binding.transport_root.join("workspaces");
     let path = parent.join(seat.as_str());
     let record_path = root.join(format!("cwd-{}.json", seat.as_str()));
     match std::fs::symlink_metadata(&record_path) {
@@ -43,12 +44,23 @@ pub(super) fn prepare(binding: &Binding, seat: &SeatId) -> Result<CwdIdentity, B
                 return Err(BackendError::Metadata);
             }
             let record: CwdRecord = serde_json::from_slice(&bytes).map_err(|_| BackendError::Metadata)?;
-            if record.version != 1 || record.seat != *seat || record.cwd.path != path {
+            // Old sessions stay pinned to their original project-local cwd.
+            // Only new allocations move outside Git; never relocate a resume.
+            let expected = match record.version {
+                1 => root.join("workspaces").join(seat.as_str()),
+                2 => {
+                    validate_directory(&binding.transport_root)?;
+                    reject_git_ancestors(&binding.transport_root)?;
+                    path.clone()
+                }
+                _ => return Err(BackendError::Metadata),
+            };
+            if record.seat != *seat || record.cwd.path != expected {
                 return Err(BackendError::Metadata);
             }
-            validate_directory(&parent)?;
-            validate_directory(&path)?;
-            if resolve_cwd(&path)? != record.cwd {
+            validate_directory(expected.parent().ok_or(BackendError::Metadata)?)?;
+            validate_directory(&expected)?;
+            if resolve_cwd(&expected)? != record.cwd {
                 return Err(BackendError::Metadata);
             }
             return Ok(record.cwd);
@@ -56,6 +68,8 @@ pub(super) fn prepare(binding: &Binding, seat: &SeatId) -> Result<CwdIdentity, B
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
+    validate_directory(&binding.transport_root)?;
+    reject_git_ancestors(&binding.transport_root)?;
     match std::fs::symlink_metadata(&parent) {
         Ok(_) => validate_directory(&parent)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -68,13 +82,26 @@ pub(super) fn prepare(binding: &Binding, seat: &SeatId) -> Result<CwdIdentity, B
     std::fs::DirBuilder::new().mode(0o700).create(&path)?;
     validate_directory(&path)?;
     let cwd = resolve_cwd(&path)?;
-    let record = CwdRecord { version: 1, seat: seat.clone(), cwd: cwd.clone() };
+    let record = CwdRecord { version: 2, seat: seat.clone(), cwd: cwd.clone() };
     let bytes = serde_json::to_vec(&record).map_err(|_| BackendError::Metadata)?;
     let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
         .mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(record_path)?;
     file.write_all(&bytes)?;
     file.sync_all()?;
     Ok(cwd)
+}
+
+// Metadata only: handle both ordinary .git directories and worktree .git files;
+// never read Git config, credentials, execute hooks, or assume /tmp is non-Git.
+fn reject_git_ancestors(path: &Path) -> Result<(), BackendError> {
+    for ancestor in path.ancestors() {
+        match std::fs::symlink_metadata(ancestor.join(".git")) {
+            Ok(_) => return Err(BackendError::Metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 fn validate_directory(path: &Path) -> Result<(), BackendError> {
@@ -108,8 +135,9 @@ mod tests {
                 version: 1, workspace: resolve_cwd(&path).unwrap(), team: "test".into(),
                 scope: ScopeId::new("cwd-test").unwrap(), endpoint: "framework:cwd-test".into(),
                 candidate: "/controlled/candidate".into(), candidate_sha256: Digest([1; 32]),
-                tmux: "/controlled/tmux".into(), transport_root: path.join("transport"),
+                tmux: "/controlled/tmux".into(), transport_root: path.with_extension("transport"),
             };
+            std::fs::DirBuilder::new().mode(0o700).create(&binding.transport_root).unwrap();
             let root = root_for(&path, &binding.scope);
             std::fs::create_dir_all(root.parent().unwrap()).unwrap();
             std::fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
@@ -117,7 +145,10 @@ mod tests {
         }
     }
     impl Drop for Fixture {
-        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.path); }
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+            let _ = std::fs::remove_dir_all(&self.binding.transport_root);
+        }
     }
 
     #[test]
@@ -151,10 +182,47 @@ mod tests {
     fn unrecorded_existing_directory_is_not_claimed() {
         let f = Fixture::new();
         let root = root_for(&f.path, &f.binding.scope);
-        let parent = root.join("workspaces");
+        let parent = f.binding.transport_root.join("workspaces");
         std::fs::DirBuilder::new().mode(0o700).create(&parent).unwrap();
         std::fs::DirBuilder::new().mode(0o700).create(parent.join("worker")).unwrap();
         assert!(prepare(&f.binding, &SeatId::new("worker").unwrap()).is_err());
         assert!(!root.join("cwd-worker.json").exists());
+    }
+
+    #[test]
+    fn new_primary_is_outside_project_git_ancestors() {
+        let f = Fixture::new();
+        std::fs::create_dir(f.path.join(".git")).unwrap();
+        let cwd = prepare(&f.binding, &SeatId::new("worker").unwrap()).unwrap();
+        assert!(cwd.path.starts_with(&f.binding.transport_root));
+        assert!(!cwd.path.starts_with(&f.path));
+        reject_git_ancestors(&cwd.path).unwrap();
+    }
+
+    #[test]
+    fn existing_version_one_cwd_is_not_migrated() {
+        let f = Fixture::new();
+        let seat = SeatId::new("worker").unwrap();
+        let root = root_for(&f.path, &f.binding.scope);
+        let parent = root.join("workspaces");
+        let path = parent.join(seat.as_str());
+        std::fs::DirBuilder::new().mode(0o700).create(&parent).unwrap();
+        std::fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+        let cwd = resolve_cwd(&path).unwrap();
+        let record = CwdRecord { version: 1, seat: seat.clone(), cwd: cwd.clone() };
+        std::fs::write(root.join("cwd-worker.json"), serde_json::to_vec(&record).unwrap()).unwrap();
+        assert_eq!(prepare(&f.binding, &seat).unwrap(), cwd);
+        assert!(!f.binding.transport_root.join("workspaces").exists());
+    }
+
+    #[test]
+    fn git_directory_or_worktree_file_on_transport_ancestor_is_refused() {
+        let f = Fixture::new();
+        let marker = f.binding.transport_root.join(".git");
+        std::fs::write(&marker, b"gitdir: controlled-marker").unwrap();
+        assert!(prepare(&f.binding, &SeatId::new("worker").unwrap()).is_err());
+        std::fs::remove_file(&marker).unwrap();
+        std::fs::create_dir(&marker).unwrap();
+        assert!(prepare(&f.binding, &SeatId::new("worker").unwrap()).is_err());
     }
 }

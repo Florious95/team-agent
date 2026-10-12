@@ -20,6 +20,45 @@ static CASE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 #[serial(env)]
+fn explicit_stop_survives_whole_team_restart_until_explicit_start() {
+    // Hermetic fake seats exercise the public lifecycle, not native G1–G5.
+    let case = CliCase::new("317-stop-restart-start");
+    case.write_fake_team(&["held", "control"]);
+    let quick = case.quick_start();
+    assert!(launched_ok(&quick_json(&quick)), "{}", output_text(&quick));
+    let stop = case.run(["stop-agent", "held", "--workspace", case.ws(), "--team", case.team(), "--json"]);
+    assert_success_json(&stop, "explicit stop must commit");
+    let before = load_runtime_state(&case.workspace).unwrap();
+    let held = before.pointer("/agents/held").unwrap().clone();
+    assert_eq!(held["status"], "stopped");
+    assert_eq!(held["explicit_stop"], true);
+    let events_before = events_text(&case).lines().count();
+
+    let restart = case.restart();
+    assert!(restart_rebuild_completed(&quick_json(&restart)), "{}", output_text(&restart));
+    let after = load_runtime_state(&case.workspace).unwrap();
+    assert_eq!(after.pointer("/agents/held"), Some(&held), "stopped row/session metadata must remain unchanged");
+    assert_eq!(after.pointer(&format!("/teams/{}/agents/held", case.team())), Some(&held));
+    assert_eq!(after.pointer("/agents/control/status").and_then(Value::as_str), Some("running"));
+    let restart_events = events_text(&case);
+    let events: Vec<Value> = restart_events.lines().skip(events_before)
+        .map(|line| serde_json::from_str(line).unwrap()).collect();
+    assert!(events.iter().any(|event| event["event"] == "restart.resume_decision" && event["agent_id"] == "control"),
+        "running control must enter restart; events={events:?}");
+    assert!(!events.iter().any(|event| event["agent_id"] == "held" && event["event"].as_str().is_some_and(|kind|
+        kind == "restart.resume_decision" || kind == "restart.agent_failed" || kind == "worker.launched")),
+        "held seat must have no restart decision or launch attempt; events={events:?}");
+
+    let start = case.run(["start-agent", "held", "--workspace", case.ws(), "--team", case.team(), "--json"]);
+    assert_success_json(&start, "only explicit start reopens the stopped seat");
+    let started = load_runtime_state(&case.workspace).unwrap();
+    assert_eq!(started.pointer("/agents/held/status").and_then(Value::as_str), Some("running"));
+    assert_eq!(started.pointer("/agents/held/explicit_stop"), Some(&json!(false)));
+    assert_eq!(started.pointer(&format!("/teams/{}/agents/held/explicit_stop", case.team())), Some(&json!(false)));
+}
+
+#[test]
+#[serial(env)]
 fn canonical_add_agent_then_restart_keeps_dynamic_helper_alive() {
     let case = CliCase::new("canonical-add-restart");
     case.write_fake_team(&["worker"]);

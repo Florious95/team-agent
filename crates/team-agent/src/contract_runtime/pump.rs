@@ -148,6 +148,8 @@ fn deliver_one(backend: &mut Backend, seat: &SeatRecord) -> Result<(), BackendEr
             descriptor: selected.descriptor(),
             hooks: &hooks,
             controls: selected.controls(),
+            startup: selected.startup(),
+            session_panel: selected.session_panel(),
         },
         backend::settings(&backend.binding, selected),
         operation.clone(),

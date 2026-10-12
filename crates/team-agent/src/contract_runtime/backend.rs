@@ -317,6 +317,23 @@ fn request(
     })
 }
 
+fn preflight_request(
+    binding: &Binding,
+    role: &RoleConfig,
+    identity: InstanceIdentity,
+    discovered: &Discovery,
+) -> Result<LaunchRequest, BackendError> {
+    let mut request = request(binding, role, identity, discovered)?;
+    if registry::provider(role.provider.as_str())? == registry::NativeProvider::GrokBuild {
+        // Pure H2 only: this is a proposed private path, not a filesystem receipt.
+        request.paths.cwd = team_agent_contract::contract::session::CwdIdentity {
+            path: binding.transport_root.join("workspaces").join(role.id.as_str()),
+            identity: digest(b"effect-free-planned-private-cwd"),
+        };
+    }
+    Ok(request)
+}
+
 /// Team-wide native discovery/admission before the shared launcher creates any
 /// seats (including legacy peers). Bounded read-only native commands run; no
 /// runtime store, worker config, private socket, or worker process is created.
@@ -356,7 +373,7 @@ pub fn preflight(team: &super::config::TeamConfig) -> Result<(), BackendError> {
         };
         let adapter = launch_adapter(&binding, &identity, &role.provider, discovered)?;
         let hooks = adapter.hooks();
-        let request = request(&binding, role, identity, discovered)?;
+        let request = preflight_request(&binding, role, identity, discovered)?;
         let resolved = resolve_launch_preflight(
             selected.descriptor(),
             &hooks,
@@ -404,7 +421,7 @@ pub fn start(
     };
     let probe_adapter = launch_adapter(&provisional, &provisional_identity, &role.provider, &discovered)?;
     let probe_hooks = probe_adapter.hooks();
-    let preflight = request(&provisional, role, provisional_identity, &discovered)?;
+    let preflight = preflight_request(&provisional, role, provisional_identity, &discovered)?;
     let preflight = resolve_launch_preflight(
         descriptor,
         &probe_hooks,
@@ -413,7 +430,6 @@ pub fn start(
     )?;
     let preflight_plan = probe_adapter.plan(&preflight)?;
     validate_launch_plan(descriptor, &preflight, &preflight_plan)?;
-    let server_key = selected.server_key()?;
     let mut backend = if root_for(&cwd.path, &scope).exists() {
         Backend::open(&cwd.path, team)?
     } else {
@@ -446,6 +462,7 @@ pub fn start(
     });
     backend.store.set_framework_routes(&peers, Some(&route))?;
     let identity = backend.store.propose_identity(&role.id)?;
+    let server_key = selected.server_key_for(&identity)?;
     write_role(&backend.binding, &identity, role)?;
     let adapter = launch_adapter(&backend.binding, &identity, &role.provider, &discovered)?;
     let hooks = adapter.hooks();
@@ -453,7 +470,10 @@ pub fn start(
     if !descriptor.workspace.shared_cwd {
         request.paths.cwd = super::workspace::prepare(&backend.binding, &role.id)?;
     }
-    if let Some(runtime) = &discovered.runtime {
+    if selected == registry::NativeProvider::GrokBuild {
+        team_agent_contract::providers::grok_build::native::require_private_primary(&request.paths.cwd)?;
+    }
+    if let Some(registry::NativeRuntime::Cursor(runtime)) = &discovered.runtime {
         request.preassigned_session = Some(
             team_agent_contract::providers::cursor::native::allocate_chat(
                 runtime, &request.paths.cwd, &mut RealCommandRunner::default(),
@@ -484,6 +504,8 @@ pub fn start(
             descriptor,
             hooks: &hooks,
             controls: selected.controls(),
+            startup: selected.startup(),
+            session_panel: selected.session_panel(),
         },
         settings(&backend.binding, selected),
         operation.clone(),
@@ -537,12 +559,20 @@ pub(crate) fn prepare_restart(
     let config = super::framework::team_config(workspace, directory, team)?.ok_or(BackendError::Metadata)?;
     let mut prepared = Vec::new();
     let agents = state.get("agents").and_then(serde_json::Value::as_object).ok_or(BackendError::Metadata)?;
-    for (id, _) in agents.iter().filter(|(_, row)| super::framework::is_contract(row)) {
+    for (id, _) in agents.iter().filter(|(_, row)| {
+        super::framework::is_contract(row)
+            && !crate::state::projection::agent_stopped_for_restart(row)
+    }) {
         let Some(role) = config.roles.iter().find(|role| role.id.as_str() == id) else {
             // Removed roles are not silently re-created from an old snapshot.
             continue;
         };
         if role.paused { continue; }
+        // The native store is authoritative even if its framework mirror is
+        // stale. Only explicit start-agent may resume a stopped generation.
+        let backend = Backend::open_readonly(workspace, team)?;
+        let seat = backend.store.seat(&role.id)?.ok_or(BackendError::Metadata)?;
+        if seat.status == SeatStatus::Stopped { continue; }
         prepared.push(prepare_resume(workspace, team, &role.id, Some(role))?);
     }
     Ok(prepared)
@@ -586,6 +616,9 @@ pub fn prepare_resume(
         binding: source, expected_source: parent.identity,
     });
     let selected = registry::provider(role.provider.as_str())?;
+    if selected == registry::NativeProvider::GrokBuild {
+        team_agent_contract::providers::grok_build::native::require_private_primary(&request.paths.cwd)?;
+    }
     let resolved = resolve_launch(selected.descriptor(), &hooks, &request, Some(&discovered.catalog))?;
     validate_launch_plan(selected.descriptor(), &resolved, &adapter.plan(&resolved)?)?;
     Ok(PreparedResume { binding: backend.binding, role, discovered, request })
@@ -616,7 +649,10 @@ pub fn resume(prepared: PreparedResume) -> Result<OperationRecord, BackendError>
     let mut io = ScopedMaterializer::new(descriptor, &resolved, &plan, operation.clone(), RealCommandRunner::default())?;
     let clock = RealClock::new();
     let mut physical = PhysicalRuntime::new(
-        Registration { descriptor, hooks: &hooks, controls: selected.controls() },
+        Registration {
+            descriptor, hooks: &hooks, controls: selected.controls(),
+            startup: selected.startup(), session_panel: selected.session_panel(),
+        },
         settings(&backend.binding, selected), operation.clone(), &clock,
     )?;
     physical.evidence = policy_evidence(&prepared.role.provider, &prepared.request.native, backend.binding.candidate_sha256)?;
@@ -626,7 +662,7 @@ pub fn resume(prepared: PreparedResume) -> Result<OperationRecord, BackendError>
         Routing {
             pane: "unpublished".into(),
             binding_key: format!("binding-{}", prepared.request.identity.instance.as_str()),
-            server_key: selected.server_key()?.into(),
+            server_key: selected.server_key_for(&prepared.request.identity)?,
         },
         operation,
     )?;
@@ -774,12 +810,15 @@ pub fn stop(workspace: &Path, team: &str, seat: &SeatId) -> Result<OperationReco
         Registration {
             descriptor: selected.descriptor(),
             hooks: &hooks,
-            controls: &[],
+            controls: selected.controls(),
+            startup: selected.startup(),
+            session_panel: selected.session_panel(),
         },
         settings(&backend.binding, selected),
         operation.clone(),
         &clock,
     )?;
+    physical.evidence = policy_evidence(&target.provider, &target.native, backend.binding.candidate_sha256)?;
     Ok(Lifecycle {
         store: &mut backend.store,
         host: &mut physical,
@@ -816,6 +855,47 @@ mod tests {
         }
     }
     impl Drop for RoleFixture { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.root); } }
+
+    #[test]
+    fn restart_skips_stopped_mirror_and_stopped_native_store_before_resume_discovery() {
+        for provider in ["cursor", "grok_build"] {
+            let mut fixture = RoleFixture::new();
+            let directory = fixture.root.join("roles");
+            std::fs::create_dir_all(directory.join("agents")).unwrap();
+            std::fs::write(directory.join("TEAM.md"), "---\nname: test\n---\nFixture\n").unwrap();
+            std::fs::write(directory.join("agents/worker.md"),
+                format!("---\nprovider: {provider}\nmodel: unavailable-fixture-model\n---\nFixture\n")).unwrap();
+            let stopped = serde_json::json!({"agents":{"worker":{"provider":provider,"status":"stopped","session_id":"preserved","generation":1}}});
+            // No framework binding/store/native installation exists yet. A
+            // stopped mirror must not even attempt to open the native store.
+            assert!(prepare_restart(&fixture.root, "test", &directory, &stopped).unwrap().is_empty());
+
+            fixture.binding.transport_root = fixture.root.join("native-store");
+            fixture.binding.endpoint = endpoint(&fixture.binding.scope);
+            let store = ContractStore::create(&fixture.binding.transport_root, fixture.binding.scope.clone(), &fixture.binding.endpoint).unwrap();
+            let native = NativeIdentity { version: "fixture".into(), harness: "unavailable".into(), ui: "tui".into(),
+                platform: Platform::MacOs, executable_sha256: digest(b"fixture") };
+            let seat = SeatRecord {
+                identity: fixture.identity.clone(), provider: ProviderId::new(provider).unwrap(), native,
+                cwd: fixture.binding.workspace.clone(), endpoint: fixture.binding.endpoint.clone(),
+                pane: "unpublished".into(), binding_key: "fixture".into(), profile: "unavailable".into(), server_key: "fixture".into(),
+                evidence_kind: EvidenceKind::Native, status: SeatStatus::Stopped, process: None, physical: None,
+                session: None, resources: vec![], workspace_resources: vec![], bootstrap_used: false,
+            };
+            // Test-only canonical fixture, never a live-store recovery shortcut.
+            let db = rusqlite::Connection::open(fixture.binding.transport_root.join("contract.db")).unwrap();
+            db.execute("INSERT INTO contract_seats(seat,record) VALUES(?1,?2)",
+                rusqlite::params![fixture.identity.seat.as_str(), serde_json::to_string(&seat).unwrap()]).unwrap();
+            db.execute("INSERT INTO contract_generations(seat,generation) VALUES(?1,1)", [fixture.identity.seat.as_str()]).unwrap();
+            drop(db);
+            std::fs::write(root_for(&fixture.binding.workspace.path, &fixture.binding.scope).join("framework-binding.json"),
+                serde_json::to_vec(&fixture.binding).unwrap()).unwrap();
+            let stale_running = serde_json::json!({"agents":{"worker":{"provider":provider,"status":"running"}}});
+            assert!(prepare_restart(&fixture.root, "test", &directory, &stale_running).unwrap().is_empty());
+            assert_eq!(store.seat(&fixture.identity.seat).unwrap(), Some(seat));
+            assert_eq!(store.propose_identity(&fixture.identity.seat).unwrap().generation, Generation(2));
+        }
+    }
 
     #[test]
     fn role_snapshots_are_instance_scoped_and_exclusive() {

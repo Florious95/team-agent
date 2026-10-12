@@ -51,10 +51,10 @@ fn with_agent(
     apply(&latest, &SeatId::new(agent).map_err(error)?).map(Some)
 }
 
-fn publish(selected: &SelectedTeam, id: &SeatId) -> Result<Value, CliError> {
-    publish_at(&selected.run_workspace, &selected.team_key, id)
+fn publish(selected: &SelectedTeam, id: &SeatId, clear_stop: bool) -> Result<Value, CliError> {
+    publish_at(&selected.run_workspace, &selected.team_key, id, clear_stop)
 }
-fn publish_at(workspace: &Path, team: &str, id: &SeatId) -> Result<Value, CliError> {
+fn publish_at(workspace: &Path, team: &str, id: &SeatId, clear_stop: bool) -> Result<Value, CliError> {
     let projected = framework::project_seat(workspace, team, id.as_str()).map_err(error)?;
     StateRepository::new(workspace).commit(
         StateWriteIntent::StartAgent { team_key: team, agent_id: id.as_str() },
@@ -64,6 +64,9 @@ fn publish_at(workspace: &Path, team: &str, id: &SeatId) -> Result<Value, CliErr
                     row.insert(key.clone(), value.clone());
                 }
                 row.insert("paused".into(), Value::Bool(false));
+                if clear_stop {
+                    row.insert("explicit_stop".into(), Value::Bool(false));
+                }
             }
         },
     ).map_err(error)?;
@@ -130,7 +133,7 @@ pub fn start_agent(
         };
         // An uncertain operation never rolls the authoritative native store back
         // to the old generation. The receipt remains available for recovery.
-        let projection = publish(selected, id)?;
+        let projection = publish(selected, id, receipt.outcome == Outcome::Committed)?;
         check_record(&receipt)?;
         let coordinator = crate::coordinator::start_coordinator_with_team(
             &crate::coordinator::WorkspacePath::new(selected.run_workspace.clone()), Some(&selected.team_key),
@@ -162,7 +165,7 @@ pub(crate) fn restart_prepared(
         let session_id = prepared.session().map(str::to_owned);
         let outcome = (|| {
             let receipt = backend::resume(prepared).map_err(error)?;
-            let projection = publish_at(workspace, team, &id)?;
+            let projection = publish_at(workspace, team, &id, false)?;
             if let Some(row) = state.get_mut("agents").and_then(|agents| agents.get_mut(id.as_str())).and_then(Value::as_object_mut) {
                 for (key, value) in projection.as_object().expect("native projection object") {
                     row.insert(key.clone(), value.clone());
@@ -235,6 +238,7 @@ pub fn stop_agent(
         for (key, value) in projected.as_object().expect("native projection object") {
             row.insert(key.clone(), value.clone());
         }
+        row.insert("explicit_stop".into(), Value::Bool(true));
         StateRepository::new(&selected.run_workspace).save(
             StateWriteIntent::StopAgent { team_key: &selected.team_key, agent_id: agent }, &state,
         ).map_err(error)?;

@@ -371,7 +371,15 @@ fn restart_with_selected_team_and_transport(
         team: Some(selected.team_key.as_str()),
         agent_id: None,
     })?;
-    let mut state = selected.state;
+    // Selection happened before the lifecycle lock. A stop-agent that won the
+    // lock must not be undone by the old running snapshot used by restart.
+    let mut state = crate::state::selector::resolve_active_team(
+        &selected.run_workspace,
+        Some(selected.team_key.as_str()),
+        crate::state::selector::SelectorMode::RequireSpec,
+    )
+    .map_err(|error| LifecycleError::TeamSelect(error.to_string()))?
+    .state;
     crate::lifecycle::launch::ensure_owner_allowed_for_state(&state, None)?;
     let topology_issue_ids = crate::topology::restart_dirty_topology_issue_ids(&state);
     if !topology_issue_ids.is_empty() {
@@ -1092,50 +1100,23 @@ fn restart_with_selected_team_and_transport(
     )?;
     phase_timer.emit(&selected.run_workspace, "restart.phase", LifecyclePhase::SaveState);
     if fatal_resume_failure {
-        let attach_commands = Vec::new();
-        let next_actions = restart_failure_next_actions(&failed_agents);
-        write_restart_completed_event(
-            &selected.run_workspace,
-            &successful_agents,
-            &failed_agents,
-            "fail",
-            None,
-        )?;
-        return Ok(RestartReport::Failed {
-            session_name,
-            failed_agents,
-            next_actions,
-            attach_commands,
-        });
+        // The legacy cohort did not commit; its snapshot was restored above.
+        // Do not promote tentative survivors, but still attempt the separately
+        // admitted contract cohort before reporting the combined outcome.
+        successful_agents.clear();
     }
-    if successful_agents.is_empty() && !failed_agents.is_empty() {
-        let attach_commands = Vec::new();
-        let next_actions = restart_failure_next_actions(&failed_agents);
-        write_restart_completed_event(
-            &selected.run_workspace,
-            &successful_agents,
-            &failed_agents,
-            "fail",
-            None,
-        )?;
-        return Ok(RestartReport::Failed {
-            session_name,
-            failed_agents,
-            next_actions,
-            attach_commands,
-        });
-    }
-    // Stamp the physical session birth after durable state. Replacing workers
-    // in a retained session does not create a new session generation.
-    if let Some(generation) = crate::state::projection::session_generation(&state) {
-        transport
-            .set_session_owner_with_generation(
-                &session_name,
-                &selected.run_workspace,
-                &selected.team_key,
-                generation,
-            )
-            .map_err(|error| LifecycleError::Transport(error.to_string()))?;
+    // A native-only active cohort has no legacy replacement session to stamp.
+    if !successful_agents.is_empty() {
+        if let Some(generation) = crate::state::projection::session_generation(&state) {
+            transport
+                .set_session_owner_with_generation(
+                    &session_name,
+                    &selected.run_workspace,
+                    &selected.team_key,
+                    generation,
+                )
+                .map_err(|error| LifecycleError::Transport(error.to_string()))?;
+        }
     }
     // RM-039-SESS-001 step 2 (architect verdict 2026-06-22): post-respawn
     // resume backing validation.
@@ -1344,8 +1325,16 @@ fn restart_with_selected_team_and_transport(
             )?;
         }
     }
+    // Only legacy survivors enter legacy readiness; contract results are
+    // aggregated afterwards and must never enter backing scans/Codex fallback.
+    let legacy_successful_agents = successful_agents.clone();
+    #[cfg(unix)]
+    append_native_restart_results(&mut successful_agents, &mut failed_agents, || {
+        crate::contract_runtime::commands::restart_prepared(
+            &selected.run_workspace, &selected.team_key, &mut state, native_restart,
+        )
+    });
     if successful_agents.is_empty() && !failed_agents.is_empty() {
-        // Postflight demoted every survivor — emit Failed before coordinator start.
         let attach_commands = Vec::new();
         let next_actions = restart_failure_next_actions(&failed_agents);
         write_restart_completed_event(
@@ -1362,20 +1351,6 @@ fn restart_with_selected_team_and_transport(
             attach_commands,
         });
     }
-    let legacy_successful_agents = successful_agents.clone();
-    #[cfg(unix)]
-    for result in crate::contract_runtime::commands::restart_prepared(
-        &selected.run_workspace, &selected.team_key, &mut state, native_restart,
-    ) {
-        let decision = RestartedAgent {
-            agent_id: AgentId::new(result.agent_id), restart_mode: StartMode::Resumed,
-            decision: ResumeDecision::Resume, session_id: result.session_id.map(SessionId::new),
-        };
-        match result.outcome {
-            Ok(()) => successful_agents.push(decision),
-            Err(error) => failed_agents.push(restart_failed_agent(&decision, "native_resume", error)),
-        }
-    }
     drop(lifecycle_lock);
     let coordinator =
         start_coordinator_for_workspace(&selected.run_workspace, Some(&selected.team_key))?;
@@ -1386,15 +1361,17 @@ fn restart_with_selected_team_and_transport(
     );
     let coordinator_started = coordinator.ok;
     phase_timer.emit(&selected.run_workspace, "restart.phase", LifecyclePhase::ReadinessWait);
-    wait_restart_readiness_or_timeout(
-        &selected.run_workspace,
-        &state,
-        &session_name,
-        &legacy_successful_agents,
-        transport,
-        restart_readiness_deadline(readiness_deadline_ms),
-        restart_readiness_poll_interval(),
-    )?;
+    if !legacy_successful_agents.is_empty() {
+        wait_restart_readiness_or_timeout(
+            &selected.run_workspace,
+            &state,
+            &session_name,
+            &legacy_successful_agents,
+            transport,
+            restart_readiness_deadline(readiness_deadline_ms),
+            restart_readiness_poll_interval(),
+        )?;
+    }
     let attach_commands =
         crate::tmux_backend::attach_command_for_transport_session(transport, &session_name)
             .or_else(|| {
@@ -1491,10 +1468,9 @@ fn repair_resume_sessions_from_event_log(
             .and_then(|agents| agents.get(&agent_id))
             .cloned()
             .unwrap_or(serde_json::Value::Null);
-        if previous
-            .get("session_id")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|session| !session.is_empty())
+        if crate::state::projection::agent_stopped_for_restart(&previous)
+            || previous.get("session_id").and_then(serde_json::Value::as_str)
+                .is_some_and(|session| !session.is_empty())
         {
             continue;
         }
@@ -1724,10 +1700,63 @@ fn parse_duration_value_seconds_ms(value: &str) -> Option<u64> {
     }
 }
 
+/// Run the admitted native cohort before classifying any legacy failure. Keeping
+/// the execution inside this seam makes the mixed-failure ordering testable.
+#[cfg(unix)]
+fn append_native_restart_results(
+    successful: &mut Vec<RestartedAgent>,
+    failed: &mut Vec<RestartFailedAgent>,
+    restart: impl FnOnce() -> Vec<crate::contract_runtime::commands::NativeRestartResult>,
+) {
+    for result in restart() {
+        let decision = RestartedAgent {
+            agent_id: AgentId::new(result.agent_id), restart_mode: StartMode::Resumed,
+            decision: ResumeDecision::Resume, session_id: result.session_id.map(SessionId::new),
+        };
+        match result.outcome {
+            Ok(()) => successful.push(decision),
+            Err(error) => failed.push(restart_failed_agent(&decision, "native_resume", error)),
+        }
+    }
+}
+
 fn restart_readiness_deadline(requested_ms: Option<u64>) -> std::time::Duration {
     requested_ms
         .map(std::time::Duration::from_millis)
         .unwrap_or_else(|| env_duration_ms(&["TEAM_AGENT_RESTART_READINESS_DEADLINE_MS"], 30_000))
+}
+
+#[cfg(all(test, unix))]
+mod mixed_native_restart_tests {
+    use super::*;
+    use crate::contract_runtime::commands::NativeRestartResult;
+
+    #[test]
+    fn failed_legacy_cohort_does_not_skip_native_resume_or_hide_its_result() {
+        for legacy_failed in [false, true] {
+            for native_failed in [false, true] {
+                let mut successful = Vec::new();
+                let legacy = RestartedAgent { agent_id: AgentId::new("legacy"),
+                    restart_mode: StartMode::Fresh, decision: ResumeDecision::FreshStart, session_id: None };
+                let mut failed = if legacy_failed { vec![restart_failed_agent(&legacy, "spawn", "failed".into())] } else { vec![] };
+                let mut attempts = 0;
+                append_native_restart_results(&mut successful, &mut failed, || {
+                    attempts += 1;
+                    vec![NativeRestartResult { agent_id: "native".into(), session_id: Some("same-session".into()),
+                        outcome: if native_failed { Err("native failed".into()) } else { Ok(()) } }]
+                });
+                assert_eq!(attempts, 1, "no legacy survivor must not short-circuit native execution");
+                assert_eq!(successful.len(), usize::from(!native_failed));
+                assert_eq!(failed.len(), usize::from(legacy_failed) + usize::from(native_failed));
+                if !native_failed {
+                    assert_eq!(successful[0].agent_id.as_str(), "native");
+                    assert_eq!(successful[0].session_id.as_ref().unwrap().as_str(), "same-session");
+                } else {
+                    assert_eq!(failed.last().unwrap().phase, "native_resume");
+                }
+            }
+        }
+    }
 }
 
 fn restart_readiness_poll_interval() -> std::time::Duration {

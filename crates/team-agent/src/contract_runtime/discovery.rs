@@ -5,9 +5,10 @@ use team_agent_contract::contract::{hooks::*, plan::CatalogObservation, types::*
 use team_agent_contract::host::{command::RealCommandRunner, process::resolve_cwd};
 use team_agent_contract::kiro::native as kiro;
 use team_agent_contract::providers::cursor::native as cursor;
+use team_agent_contract::providers::grok_build::native as grok;
 use thiserror::Error;
 
-use super::registry::{self, NativeProvider};
+use super::registry::{self, NativeProvider, NativeRuntime};
 
 #[derive(Debug, Error)]
 pub enum DiscoveryError {
@@ -19,6 +20,8 @@ pub enum DiscoveryError {
     Probe(#[from] kiro::EngineProbeError),
     #[error("native Cursor launcher probe failed: {0}")]
     CursorProbe(#[from] cursor::ProbeError),
+    #[error("native Grok launcher probe failed: {0}")]
+    GrokProbe(#[from] grok::ProbeError),
     #[error("native discovery contract: {0:?}")]
     Contract(ContractError),
     #[error("native model discovery: {0:?}")]
@@ -31,7 +34,7 @@ pub struct Discovery {
     pub engine: PathBuf,
     pub native: NativeIdentity,
     pub catalog: CatalogObservation,
-    pub runtime: Option<cursor::RuntimeInstallation>,
+    pub runtime: Option<NativeRuntime>,
 }
 
 pub fn executable(name: &'static str) -> Result<PathBuf, DiscoveryError> {
@@ -56,7 +59,13 @@ pub fn discover(provider: &ProviderId, workspace: &Path) -> Result<Discovery, Di
         deadline: std::time::Duration::from_secs(30),
         max_output_bytes: 1024 * 1024,
     };
-    let launcher = executable(descriptor.identity.binary)?;
+    let launcher = if selected == NativeProvider::GrokBuild {
+        // This macOS admission preserves the explicitly approved proxy entry.
+        // PATH may put the inner image first; it must never bypass the wrapper.
+        grok::resolve_launcher(Path::new("/usr/local/bin/grok"))?
+    } else {
+        executable(descriptor.identity.binary)?
+    };
     let (engine, native) = match selected {
         NativeProvider::Kiro => {
             let home = std::env::var_os("HOME")
@@ -69,6 +78,11 @@ pub fn discover(provider: &ProviderId, workspace: &Path) -> Result<Discovery, Di
         NativeProvider::Cursor => {
             let engine = cursor::resolve_launcher(&launcher)?;
             let native = cursor::probe_launcher(&engine, &mut RealCommandRunner::default(), bounds)?;
+            (engine, native)
+        }
+        NativeProvider::GrokBuild => {
+            let engine = grok::resolve_launcher(&launcher)?;
+            let native = grok::probe_launcher(&engine, &mut RealCommandRunner::default(), bounds)?;
             (engine, native)
         }
     };
@@ -100,6 +114,11 @@ pub fn discover(provider: &ProviderId, workspace: &Path) -> Result<Discovery, Di
                 .map_err(DiscoveryError::Contract)?;
             catalog_hook.discover(&request, &mut host)
         }
+        NativeProvider::GrokBuild => {
+            let mut host = grok::NativeCatalog::new(request.clone(), RealCommandRunner::default())
+                .map_err(DiscoveryError::Contract)?;
+            catalog_hook.discover(&request, &mut host)
+        }
     }.map_err(DiscoveryError::Catalog)?;
     let result = Discovery { engine, native, catalog, runtime: None };
     validate_catalog(provider, &result).map_err(DiscoveryError::Contract)?;
@@ -110,15 +129,28 @@ pub fn discover(provider: &ProviderId, workspace: &Path) -> Result<Discovery, Di
 /// bridges the same installation's catalog to its proven Node/entry identity.
 pub(super) fn discover_runtime(provider: &ProviderId, workspace: &Path) -> Result<Discovery, DiscoveryError> {
     let mut discovery = discover(provider, workspace)?;
-    if registry::provider(provider.as_str()).map_err(DiscoveryError::Contract)? == NativeProvider::Cursor {
+    let selected = registry::provider(provider.as_str()).map_err(DiscoveryError::Contract)?;
+    if selected != NativeProvider::Kiro {
         let home = std::env::var_os("HOME").map(PathBuf::from)
             .ok_or(DiscoveryError::Executable("HOME for native subscription"))?;
-        let runtime = cursor::probe_runtime(&discovery.engine, &home, &mut RealCommandRunner::default(),
-            ReadBounds { deadline: std::time::Duration::from_secs(30), max_output_bytes: 1024 * 1024 })?;
-        discovery.catalog = runtime.bind_catalog(&discovery.catalog).map_err(DiscoveryError::Contract)?;
-        discovery.engine = runtime.engine.clone();
-        discovery.native = runtime.native.clone();
-        discovery.runtime = Some(runtime);
+        let bounds = ReadBounds { deadline: std::time::Duration::from_secs(30), max_output_bytes: 1024 * 1024 };
+        match selected {
+            NativeProvider::Cursor => {
+                let runtime = cursor::probe_runtime(&discovery.engine, &home, &mut RealCommandRunner::default(), bounds)?;
+                discovery.catalog = runtime.bind_catalog(&discovery.catalog).map_err(DiscoveryError::Contract)?;
+                discovery.engine = runtime.engine.clone();
+                discovery.native = runtime.native.clone();
+                discovery.runtime = Some(NativeRuntime::Cursor(runtime));
+            }
+            NativeProvider::GrokBuild => {
+                let runtime = grok::probe_runtime(&discovery.engine, &home, &mut RealCommandRunner::default(), bounds)?;
+                discovery.catalog = runtime.bind_catalog(&discovery.catalog).map_err(DiscoveryError::Contract)?;
+                discovery.engine = runtime.engine.clone();
+                discovery.native = runtime.native.clone();
+                discovery.runtime = Some(NativeRuntime::GrokBuild(runtime));
+            }
+            NativeProvider::Kiro => unreachable!(),
+        }
     }
     Ok(discovery)
 }

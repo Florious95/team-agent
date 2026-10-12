@@ -48,7 +48,7 @@ const SESSION_STATE_FIELDS: [&str; 6] = [
 ];
 const LIVE_TOPOLOGY_FIELDS: [&str; 5] =
     ["pane_id", "pane_pid", "window", "spawned_at", "spawn_epoch"];
-const ROSTER_STUB_ALLOWLIST: [&str; 16] = [
+const ROSTER_STUB_ALLOWLIST: [&str; 17] = [
     "agent_id",
     "provider",
     "auth_mode",
@@ -65,6 +65,7 @@ const ROSTER_STUB_ALLOWLIST: [&str; 16] = [
     "claude_config_dir",
     "claude_projects_root",
     "profile_launch",
+    "explicit_stop",
 ];
 
 /// `state.py:_RUNTIME_STATE_CACHE`:进程级 path→state 缓存(deep-equal 早返回)。
@@ -1264,6 +1265,13 @@ fn merge_agent_projection(
                 .is_some_and(|source| !source.is_empty());
         match incoming_map.entry(agent_id.clone()) {
             serde_json::map::Entry::Vacant(slot) => {
+                // Omission by an ordinary/stale writer cannot retire a stopped
+                // seat or discard its resume metadata. Explicit RemoveAgent
+                // has already been admitted through deleted_agent_ids above.
+                if crate::state::projection::agent_explicit_stop(latest_agent) {
+                    slot.insert(latest_agent.clone());
+                    continue;
+                }
                 if fork_target {
                     slot.insert(latest_agent.clone());
                     continue;
@@ -1295,6 +1303,17 @@ fn merge_agent_projection(
                 }
             }
             serde_json::map::Entry::Occupied(mut existing) => {
+                if !topology_update_agent_ids.contains(agent_id) {
+                    if crate::state::projection::agent_explicit_stop(latest_agent) {
+                        *existing.get_mut() = latest_agent.clone();
+                        continue;
+                    }
+                    if let Some(marker) = latest_agent.get("explicit_stop") {
+                        if let Some(row) = existing.get_mut().as_object_mut() {
+                            row.insert("explicit_stop".into(), marker.clone());
+                        }
+                    }
+                }
                 if !tombstoned_for_projection && !topology_update_agent_ids.contains(agent_id) {
                     let fields = topology_conflict_fields(existing.get(), latest_agent, team_alive);
                     if !fields.is_empty() {
@@ -2451,6 +2470,38 @@ mod tests {
             saved.pointer("/agents/gone").is_none(),
             "deleted_agent_ids 豁免:被 remove 的 `gone` 不得被 preserve 复活;saved={saved}"
         );
+    }
+
+    #[test]
+    fn stopped_intent_and_resume_metadata_survive_stale_writers_until_targeted_start() {
+        let ws = temp_ws();
+        let held = json!({"agent_id":"held","provider":"codex","status":"stopped","explicit_stop":true,
+            "session_id":"same-session","rollout_path":"/controlled/rollout","captured_at":"2026-10-12T00:00:00Z",
+            "captured_via":"native","generation":7});
+        let latest = json!({"session_name":"team-a","active_team_key":"team-a","agents":{"held":held},
+            "teams":{"team-a":{"session_name":"team-a","agents":{"held":held}}}});
+        for omit in [false, true] {
+            write_state(&ws, &latest);
+            let rows = if omit { json!({}) } else { json!({"held":{"agent_id":"held","provider":"codex","status":"running","explicit_stop":false,"session_id":"stale"}}) };
+            let stale = json!({"session_name":"team-a","active_team_key":"team-a","agents":rows,
+                "teams":{"team-a":{"session_name":"team-a","agents":rows}},"delivery":{"message":"observed"}});
+            save_runtime_state(&ws, &stale).unwrap();
+            let saved = read_state(&ws);
+            assert_eq!(saved.pointer("/agents/held"), Some(&held));
+            assert_eq!(saved.pointer("/teams/team-a/agents/held"), Some(&held));
+            assert_eq!(saved.pointer("/delivery/message"), Some(&json!("observed")));
+        }
+        let mut started = latest;
+        for pointer in ["/agents/held", "/teams/team-a/agents/held"] {
+            let row = started.pointer_mut(pointer).unwrap();
+            row["status"] = json!("running");
+            row["explicit_stop"] = json!(false);
+        }
+        save_runtime_state_with_lifecycle_topology_authority(&ws, &started, "team-a", &["held"]).unwrap();
+        let saved = read_state(&ws);
+        assert_eq!(saved.pointer("/agents/held/explicit_stop"), Some(&json!(false)));
+        assert_eq!(saved.pointer("/agents/held/session_id"), Some(&json!("same-session")));
+        assert_eq!(saved.pointer("/teams/team-a/agents/held/explicit_stop"), Some(&json!(false)));
     }
 
     #[test]
