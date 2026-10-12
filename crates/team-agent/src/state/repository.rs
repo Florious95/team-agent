@@ -160,6 +160,10 @@ impl<'a> StateRepository<'a> {
     {
         #[cfg(test)]
         test_support::before_commit();
+        let lifecycle_target = match &intent {
+            StateWriteIntent::StartAgent { team_key, agent_id } => Some((*team_key, *agent_id)),
+            _ => None,
+        };
         let team_key = match intent {
             StateWriteIntent::ResultCollection { owner_team_id } => owner_team_id,
             StateWriteIntent::ForkAgent { team_key, .. }
@@ -170,7 +174,7 @@ impl<'a> StateRepository<'a> {
                 ))
             }
         };
-        let committed = super::persist::update_runtime_state(self.workspace, |latest| {
+        let committed = super::persist::update_runtime_state_with_lifecycle_target(self.workspace, lifecycle_target, |latest| {
             let mut selected = bounded_team_view(latest, team_key)?;
             update(&mut selected);
             Ok(match team_key {
