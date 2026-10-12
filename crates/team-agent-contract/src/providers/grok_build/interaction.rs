@@ -7,8 +7,8 @@ use std::{path::Path, time::Duration};
 
 pub const PROFILE: &str = "grok-build-tui-v1";
 pub const STARTUP_PROFILE: &str = "grok-build-trust-v1";
-pub const POLICY_RECIPE: &str = "grok-build-tui-v1/r1:runtime-native-image+wrapper;owned-server-ambient-coexistence;120x40;paste-bracketed;enter-once;retry-never;queue-owned-visible-token+Queued · Enter to send now:Enter-once:150ms;capture100ms;stable200ms;paste-floor100ms;deadline30s;trust-v1:exact-cwd+bypass:y-once;session-info:direct+current-modal-uuid+cwd+version:Escape-once;exit:direct+native-exited+dead-pane-close;folded-v1:empty-baseline+confirmed-paste+payload-shape+attempt->confirmed-enter+new-unboxed-transcript-prefix+empty-composer+busy-or-ready";
-pub const POLICY: Digest = Digest([194, 58, 37, 108, 16, 84, 162, 127, 166, 162, 53, 64, 156, 206, 218, 167, 7, 15, 3, 44, 94, 173, 21, 91, 99, 39, 241, 170, 73, 165, 243, 13]);
+pub const POLICY_RECIPE: &str = "grok-build-tui-v1/r2:runtime-native-image+wrapper;owned-server-ambient-coexistence;120x40;paste-bracketed;enter-once;retry-never;queue-owned-visible-token+Queued · Enter to send now:Enter-once:150ms;capture100ms;stable200ms;paste-floor100ms;deadline30s;trust-v1:exact-cwd+bypass:y-once;session-info:direct+unique-closed-modal-own-width+current-uuid+cwd+version:Escape-once;exit:direct+native-exited+dead-pane-close;folded-v1:empty-baseline+confirmed-paste+payload-shape+attempt->confirmed-enter+new-unboxed-transcript-prefix+empty-composer+busy-or-ready";
+pub const POLICY: Digest = Digest([73, 163, 75, 14, 158, 22, 64, 129, 208, 201, 103, 129, 52, 15, 248, 53, 39, 24, 217, 55, 4, 195, 219, 16, 147, 137, 189, 147, 55, 105, 13, 54]);
 const QUEUE: &str = "grok-owned-queue-send-now";
 pub static PROFILES: &[InputProfile] = &[InputProfile {
     id: PROFILE, identity: ProfileIdentity::RuntimeCaptured, harness: "grok-build", ui: "tui",
@@ -82,6 +82,47 @@ fn trust(frame: &CaptureFrame) -> bool {
         && lines.iter().any(|line| line.split_whitespace().collect::<Vec<_>>() == ["No,", "quit", "n"])
         && lines.iter().any(|line| *line == "Grok Build may run or modify contents in this directory,")
 }
+// The modal floats above restored transcript text. Its left byte/character
+// offset is NOT a terminal column (the background may contain wide glyphs).
+// Match the measured single-cell panel's own width instead, and refuse ambiguous
+// edges. Do not change `boxed`: the composer still requires its original bounds.
+fn session_rows(text: &str) -> Result<Vec<&str>, ContractError> {
+    let invalid = || ContractError::Invalid("Grok session info panel rectangle");
+    let horizontal = |text: &str| !text.is_empty() && text.chars().all(|ch| ch == '─');
+    let lines: Vec<_> = text.lines().collect();
+    let mut tops = Vec::new();
+    for (row, line) in lines.iter().enumerate() {
+        for (start, _) in line.match_indices('┌') {
+            let rest = &line[start + '┌'.len_utf8()..];
+            let Some((inside, _)) = rest.split_once('┐') else { continue; };
+            if horizontal(inside) || inside.split_once(" [✗] ")
+                .is_some_and(|(before, after)| horizontal(before) && horizontal(after))
+            {
+                tops.push((row, inside.chars().count()));
+            }
+        }
+    }
+    let [(top, width)] = tops.as_slice() else { return Err(invalid()); };
+    let mut rows = Vec::new();
+    for line in &lines[*top + 1..] {
+        let bottoms = line.match_indices('└').filter(|(start, _)| {
+            line[*start + '└'.len_utf8()..].split_once('┘')
+                .is_some_and(|(inside, _)| horizontal(inside) && inside.chars().count() == *width)
+        }).count();
+        if bottoms != 0 {
+            return if bottoms == 1 { Ok(rows) } else { Err(invalid()) };
+        }
+        let mut candidates = line.match_indices('│').filter_map(|(start, _)| {
+            let rest = &line[start + '│'.len_utf8()..];
+            let (end, edge) = rest.char_indices().nth(*width)?;
+            (edge == '│').then_some(rest[..end].trim())
+        });
+        let row = candidates.next().ok_or_else(invalid)?;
+        if candidates.next().is_some() { return Err(invalid()); }
+        if !row.is_empty() { rows.push(row); }
+    }
+    Err(invalid()) // No closed bottom edge: never bind a clipped/partial panel.
+}
 fn uuid(text: &str) -> bool {
     text.len() == 36 && text.bytes().enumerate().all(|(i, byte)| if [8,13,18,23].contains(&i) { byte == b'-' } else { byte.is_ascii_hexdigit() })
 }
@@ -89,7 +130,7 @@ fn uuid(text: &str) -> bool {
 /// a native ID. A UUID in chat output or a requested --resume argument cannot.
 pub fn session_id(text: &str, cwd: &Path) -> Result<NativeSessionId, ContractError> {
     let invalid = || ContractError::Invalid("Grok session info panel");
-    let lines: Vec<_> = text.lines().filter_map(boxed).filter(|line| !line.is_empty()).collect();
+    let lines = session_rows(text)?;
     if !lines.iter().any(|line| line.starts_with("Session info   click or drag to copy"))
         || !lines.contains(&"Esc close") || !lines.iter().any(|line| line.starts_with("Tab switch  |"))
         || !lines.iter().any(|line| line.starts_with("Model: "))
@@ -220,7 +261,7 @@ impl SessionHook for GrokAdapter {
             || evidence.origin != CaptureOrigin::CurrentNativeSession || evidence.evidence_sha256 != crate::host::digest(&evidence.record)
         { return Err(ContractError::Mismatch("Grok session provenance")); }
         let text = std::str::from_utf8(&evidence.record).map_err(|_| ContractError::Invalid("Grok session UTF-8"))?;
-        let rows: Vec<_> = text.lines().filter_map(boxed).filter(|line| !line.is_empty()).collect();
+        let rows = session_rows(text)?;
         let expected = evidence.native.version.split_once(" (").map(|(version, _)| version);
         let versions: Vec<_> = rows.windows(2).filter(|pair| pair[0] == "Shell version:").map(|pair| pair[1]).collect();
         if versions.len() != 1 || versions.first().copied() != expected {

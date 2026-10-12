@@ -23,8 +23,34 @@ fn frame() -> CaptureFrame {
         baseline: Some(CaptureBaseline { scope: scope(1), text: screen("", "") }), profile_id: PROFILE.into(), operation: Operation::FirstBusiness,
         message: Some(MessageId::new("message-1").unwrap()), attempt: Some(AttemptId::new("attempt-1").unwrap()), after_step: Some(StepKind::Paste), paste_latch: PasteLatch::NeverSeen }
 }
+fn modal(rows: &[&str]) -> String {
+    // R6 captured native modal: 76 inner cells, square corners, close button.
+    let mut text = format!("┌{} [✗] ─┐\n", "─".repeat(70));
+    for row in rows {
+        assert!(row.chars().count() <= 74);
+        text.push_str(&format!("│ {row:<74} │\n"));
+    }
+    text.push_str(&format!("└{}┘\n", "─".repeat(76)));
+    text
+}
 fn session(cwd: &str, id: &str) -> String {
-    format!("│ Session info   click or drag to copy │\n│ Shell version: │\n│ 1.0.52 │\n│ Session ID: │\n│ {id} │\n│ Working directory: │\n│ {cwd} │\n│ Model: Grok 4.7 │\n│ Tab switch  |  ↑/↓ scroll  |  c copy session ID  |  y copy all │\n│ Esc close │\n")
+    modal(&["Context usage  Usage limit  Session info", "Session info   click or drag to copy", "",
+        "Shell version:", "1.0.52", "Session ID:", id, "Working directory:", cwd,
+        "Model: Grok 4.7", "Tab switch  |  ↑/↓ scroll  |  c copy session ID  |  y copy all", "Esc close"])
+}
+fn over_history(panel: &str) -> String {
+    // Background character/byte offsets deliberately differ. They are not the
+    // modal's width, nor session evidence. Include distracting border glyphs.
+    panel.lines().enumerate().map(|(i, row)| {
+        let left = if i % 2 == 0 { "旧的中文对话🦀│ " } else { "prior turn: │ " };
+        format!("{left}{row} resumed history │ 第三轮\n")
+    }).collect()
+}
+fn session_evidence(text: String) -> ScopedSessionEvidence {
+    ScopedSessionEvidence { scope: scope(1), provider: ProviderId::new("grok_build").unwrap(),
+        native: NativeIdentity { version: "1.0.52 (0920c8169e27)".into(), harness: "grok-build".into(), ui: "tui".into(), platform: Platform::MacOs, executable_sha256: digest(b"native") },
+        cwd: CwdIdentity { path: "/owned/cwd".into(), identity: digest(b"cwd") }, origin: CaptureOrigin::CurrentNativeSession,
+        evidence_kind: EvidenceKind::Fixture, evidence_sha256: digest(text.as_bytes()), record: text.into_bytes() }
 }
 #[test]
 fn all_facets_and_hooks_disclose_owned_server_coexistence_without_legacy_migration() {
@@ -163,14 +189,76 @@ fn trust_requires_exact_owned_cwd_and_never_uses_history_mentions() {
 fn current_session_is_native_modal_uuid_with_matching_cwd_not_launch_origin() {
     let text = session("/owned/cwd", SID);
     assert_eq!(session_id(&text, Path::new("/owned/cwd")).unwrap().as_str(), SID);
-    for bad in [text.replace("Esc close", ""), text.replace("/owned/cwd", "/other"), text.replace(SID, "latest"), format!("Here is your Session ID: {SID}"), format!("{text}\n│ Session ID: │\n│ {SID} │")] { assert!(session_id(&bad, Path::new("/owned/cwd")).is_err()); }
-    let mut evidence = ScopedSessionEvidence { scope: scope(1), provider: ProviderId::new("grok_build").unwrap(),
-        native: NativeIdentity { version: "1.0.52 (0920c8169e27)".into(), harness: "grok-build".into(), ui: "tui".into(), platform: Platform::MacOs, executable_sha256: digest(b"native") },
-        cwd: CwdIdentity { path: "/owned/cwd".into(), identity: digest(b"cwd") }, origin: CaptureOrigin::CurrentNativeSession,
-        evidence_kind: EvidenceKind::Fixture, evidence_sha256: digest(text.as_bytes()), record: text.into_bytes() };
+    let duplicate = text.replace("└", &format!("│ {:<74} │\n│ {SID:<74} │\n└", "Session ID:"));
+    for bad in [text.replace("Esc close", "         "), session("/other", SID), session("/owned/cwd", "latest"), format!("Here is your Session ID: {SID}"), duplicate] { assert!(session_id(&bad, Path::new("/owned/cwd")).is_err()); }
+    let mut evidence = session_evidence(text);
     assert_eq!(adapter().bind(&evidence).unwrap().native_session.as_str(), SID);
     evidence.origin = CaptureOrigin::ExplicitResumeLaunch; assert!(adapter().bind(&evidence).is_err());
     evidence.origin = CaptureOrigin::CurrentNativeSession; evidence.native.version = "1.0.53 (aaaa)".into(); assert!(adapter().bind(&evidence).is_err());
+}
+#[test]
+fn restored_history_modal_binds_and_accepts_only_after_owned_control_submit() {
+    let mut f = frame();
+    f.operation = Operation::SessionInspect; f.message = None; f.input = None;
+    f.baseline.as_mut().unwrap().text = screen("prior turn mentions /session-info", "");
+    f.text = screen("prior turn mentions /session-info", "/session-info");
+    let seen = adapter().interpret(&f);
+    assert_eq!(seen.paste_latch, PasteLatch::Seen { native_identity: "/session-info".into() });
+    f.paste_latch = seen.paste_latch; f.scope = scope(3); f.after_step = Some(StepKind::InitialSubmit);
+    f.text = screen(&over_history(&session("/owned/cwd", SID)), "");
+    let accepted = adapter().interpret(&f);
+    assert_eq!(accepted.surface, InputSurface::NativeAccepted);
+    assert_eq!(accepted.paste_latch, PasteLatch::Gone { native_identity: "/session-info".into() });
+    assert_eq!(accepted.current_attempt, f.attempt);
+    assert_eq!(accepted.predicate.as_deref(), Some(SESSION_PANEL.predicate));
+    assert_eq!(adapter().bind(&session_evidence(f.text.clone())).unwrap().native_session.as_str(), SID);
+    for kind in 0..4 {
+        let mut bad = f.clone();
+        match kind {
+            0 => bad.paste_latch = PasteLatch::NeverSeen,
+            1 => bad.paste_latch = PasteLatch::Seen { native_identity: "/exit".into() },
+            2 => bad.after_step = Some(StepKind::Paste),
+            _ => bad.cwd = Some("/other/cwd".into()),
+        }
+        assert_ne!(adapter().interpret(&bad).surface, InputSurface::NativeAccepted);
+    }
+    // The existing journaled Esc-close operator asks H6 without a business latch.
+    f.after_step = None; f.attempt = None; f.baseline = None; f.paste_latch = PasteLatch::NeverSeen;
+    assert_eq!(adapter().interpret(&f).surface, InputSurface::Starting);
+    assert_eq!(adapter().interpret(&f).predicate.as_deref(), Some(SESSION_PANEL.predicate));
+    f.text = screen("restored history after Esc", "");
+    assert_eq!(adapter().interpret(&f).surface, InputSurface::ComposerReady);
+    assert_eq!(adapter().interpret(&f).predicate, None);
+}
+#[test]
+fn session_modal_rejects_open_wrong_width_duplicate_and_ambiguous_rectangles() {
+    let text = session("/owned/cwd", SID);
+    let malformed_row = text.replace("│ Shell version:", "  Shell version:");
+    let short_row = text.replace("│ Shell version:", "│Shell version:");
+    let ambiguous_row = text.lines().map(|row| {
+        if row.starts_with('│') { format!("{row} {row}\n") } else { format!("{row}\n") }
+    }).collect::<String>();
+    let missing_top = text.lines().skip(1).collect::<Vec<_>>().join("\n");
+    let missing_bottom = text.lines().filter(|line| !line.starts_with('└')).collect::<Vec<_>>().join("\n");
+    let wrong_bottom = text.replace(&format!("└{}┘", "─".repeat(76)), &format!("└{}┘", "─".repeat(75)));
+    for bad in [malformed_row, short_row, ambiguous_row, missing_top, missing_bottom, wrong_bottom, format!("{text}{text}")] {
+        assert!(session_id(&bad, Path::new("/owned/cwd")).is_err());
+    }
+}
+#[test]
+fn session_binding_uses_only_modal_fields_not_matching_background_metadata() {
+    let background = "│ Shell version: │\n│ 1.0.52 │\n│ Session ID: │\n│ 11111111-1111-1111-1111-111111111111 │\n│ Working directory: │\n│ /owned/cwd │\n│ Esc close │";
+    let wrap = |panel: String| format!("{background}\n{}{background}", over_history(&panel));
+    let text = wrap(session("/owned/cwd", SID));
+    assert_eq!(adapter().bind(&session_evidence(text)).unwrap().native_session.as_str(), SID);
+    for bad in [session("/wrong/cwd", SID), session("/owned/cwd", "bad-id"),
+        session("/owned/cwd", SID).replace("Esc close", "         "),
+        session("/owned/cwd", SID).replace("1.0.52", "1.0.53")]
+    {
+        assert!(adapter().bind(&session_evidence(wrap(bad))).is_err());
+    }
+    let duplicate_version = session("/owned/cwd", SID).replace("└", &format!("│ {:<74} │\n│ {:<74} │\n└", "Shell version:", "1.0.52"));
+    assert!(adapter().bind(&session_evidence(wrap(duplicate_version))).is_err());
 }
 struct Runner;
 impl CommandRunner for Runner {
