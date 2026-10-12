@@ -82,6 +82,16 @@ fn check_record(receipt: &team_agent_contract::orchestration::store::OperationRe
     Ok(())
 }
 
+// A partial native operation may not have a session for projection yet. Its
+// original receipt must win over any secondary projection/metadata error.
+fn checked_projection(
+    receipt: &team_agent_contract::orchestration::store::OperationRecord,
+    project: impl FnOnce() -> Result<Value, CliError>,
+) -> Result<Value, CliError> {
+    check_record(receipt)?;
+    project()
+}
+
 pub fn start_agent(
     workspace: &Path,
     team: Option<&str>,
@@ -133,8 +143,7 @@ pub fn start_agent(
         };
         // An uncertain operation never rolls the authoritative native store back
         // to the old generation. The receipt remains available for recovery.
-        let projection = publish(selected, id, receipt.outcome == Outcome::Committed)?;
-        check_record(&receipt)?;
+        let projection = checked_projection(&receipt, || publish(selected, id, true))?;
         let coordinator = crate::coordinator::start_coordinator_with_team(
             &crate::coordinator::WorkspacePath::new(selected.run_workspace.clone()), Some(&selected.team_key),
         ).map_err(error)?;
@@ -165,13 +174,13 @@ pub(crate) fn restart_prepared(
         let session_id = prepared.session().map(str::to_owned);
         let outcome = (|| {
             let receipt = backend::resume(prepared).map_err(error)?;
-            let projection = publish_at(workspace, team, &id, false)?;
+            let projection = checked_projection(&receipt, || publish_at(workspace, team, &id, false))?;
             if let Some(row) = state.get_mut("agents").and_then(|agents| agents.get_mut(id.as_str())).and_then(Value::as_object_mut) {
                 for (key, value) in projection.as_object().expect("native projection object") {
                     row.insert(key.clone(), value.clone());
                 }
             }
-            check_record(&receipt)
+            Ok::<(), CliError>(())
         })().map_err(|error| error.to_string());
         NativeRestartResult { agent_id: id.as_str().into(), session_id, outcome }
     }).collect()
@@ -246,4 +255,72 @@ pub fn stop_agent(
             "status":if already_stopped {"already_stopped"} else {"stopped"},
             "runtime":"contract","operation":operation}))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use team_agent_contract::contract::{delivery::DeliveryEffect, session::CwdIdentity, types::*};
+    use team_agent_contract::orchestration::store::{OperationRecord, Phase, SeatRecord, TransactionKind};
+
+    fn receipt(outcome: Outcome) -> OperationRecord {
+        let identity = InstanceIdentity {
+            scope: ScopeId::new("scope").unwrap(), seat: SeatId::new("grok-worker").unwrap(),
+            instance: InstanceId::new("instance-two").unwrap(), generation: Generation(2),
+        };
+        OperationRecord {
+            id: OperationId::new("resume-instance-two").unwrap(), kind: TransactionKind::Restart,
+            target: SeatRecord {
+                identity, provider: ProviderId::new("grok_build").unwrap(),
+                native: NativeIdentity { version: "fixture".into(), harness: "fixture".into(), ui: "tui".into(),
+                    platform: Platform::MacOs, executable_sha256: Digest([0; 32]) },
+                cwd: CwdIdentity { path: "/controlled/native-cwd".into(), identity: Digest([0; 32]) },
+                endpoint: "fixture".into(), pane: "%0".into(), binding_key: "fixture".into(),
+                profile: "fixture".into(), server_key: "fixture".into(), evidence_kind: EvidenceKind::Fixture,
+                status: SeatStatus::Starting, process: None, physical: None, session: None,
+                resources: vec![], workspace_resources: vec![], bootstrap_used: false,
+            },
+            parent: None, phase: Phase::F3Spawn, pending: Some("compensating-stop".into()),
+            resources: vec![], effect: DeliveryEffect::NoEffect, outcome, preserved: vec![],
+            failure: Some("native control SessionInspect guard-deadline".into()),
+        }
+    }
+
+    #[test]
+    fn uncommitted_receipt_precedes_projection_and_preserves_original_failure() {
+        for outcome in [Outcome::Running, Outcome::Compensated, Outcome::NeedsRecovery] {
+            let record = receipt(outcome);
+            let before = record.clone();
+            let mut projected = false;
+            let mut state = json!({"status":"stopped","explicit_stop":true,"generation":1});
+            let original = state.clone();
+            let error = checked_projection(&record, || {
+                projected = true;
+                state["explicit_stop"] = Value::Bool(false);
+                Err(super::error(BackendError::Metadata))
+            }).unwrap_err().to_string();
+            assert!(!projected);
+            assert_eq!(state, original);
+            assert_eq!(record, before);
+            for value in ["resume-instance-two", "F3Spawn", "SessionInspect", "guard-deadline"] {
+                assert!(error.contains(value), "{error}");
+            }
+            assert!(!error.contains("metadata is invalid"), "{error}");
+        }
+    }
+
+    #[test]
+    fn committed_receipt_retains_projection_success_and_error() {
+        let record = receipt(Outcome::Committed);
+        let mut calls = 0;
+        let projected = checked_projection(&record, || {
+            calls += 1;
+            Ok(json!({"status":"running","explicit_stop":false,"generation":2}))
+        }).unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(projected["explicit_stop"], false);
+        let error = checked_projection(&record, || Err(super::error(BackendError::Metadata)))
+            .unwrap_err().to_string();
+        assert!(error.contains("metadata is invalid"));
+    }
 }
