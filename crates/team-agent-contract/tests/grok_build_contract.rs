@@ -17,8 +17,18 @@ fn scope(sequence: u64) -> EvidenceScope {
 fn screen(history: &str, input: &str) -> String {
     format!(" /owned/cwd   1.3K / 256K │ [Dashboard]\n{history}\n ╭──────────────────────────────────────────────────────────────────────────╮\n │ ❯ {input} │\n ╰────────────────────────────── Grok 4.7 (xhigh) · always-approve ─╯\n\n Ctrl+x:shortcuts\n")
 }
+fn paste_preview(rows: &[&str]) -> String {
+    let mut text = format!("╭{}╮\n", "─".repeat(86));
+    for row in rows {
+        assert!(row.chars().count() <= 84);
+        text.push_str(&format!("│ {row:<84} │\n"));
+    }
+    let caption = " paste again or double-click to expand ";
+    text.push_str(&format!("╰─{caption}{}╯\n", "─".repeat(85 - caption.chars().count())));
+    text
+}
 fn frame() -> CaptureFrame {
-    CaptureFrame { scope: scope(2), text: screen(&format!("│{HEADER}│"), "[Pasted: 161 lines]"),
+    CaptureFrame { scope: scope(2), text: screen(&paste_preview(&[HEADER, "…", "[team-agent-token:message-1]"]), "[Pasted: 161 lines]"),
         cwd: Some("/owned/cwd".into()), input: Some(InputShape { sha256: digest(b"immutable input"), lines: 161, first_line: HEADER.into() }),
         baseline: Some(CaptureBaseline { scope: scope(1), text: screen("", "") }), profile_id: PROFILE.into(), operation: Operation::FirstBusiness,
         message: Some(MessageId::new("message-1").unwrap()), attempt: Some(AttemptId::new("attempt-1").unwrap()), after_step: Some(StepKind::Paste), paste_latch: PasteLatch::NeverSeen }
@@ -112,7 +122,7 @@ fn folded_seen_is_bound_to_confirmed_paste_payload_and_empty_composer() {
             2 => f.input.as_mut().unwrap().lines = 160,
             3 => f.baseline.as_mut().unwrap().text = screen("", "unsent text"),
             4 => f.baseline.as_mut().unwrap().scope.identity.generation = Generation(9),
-            5 => f.text = screen("unrelated preview", "[Pasted: 161 lines]"),
+            5 => f.text = screen(&paste_preview(&["unrelated preview", "[team-agent-token:message-1]"]), "[Pasted: 161 lines]"),
             _ => f.attempt = None,
         }
         assert!(matches!(adapter().interpret(&f).paste_latch, PasteLatch::NeverSeen), "case {kind}");
@@ -138,6 +148,68 @@ fn folded_enter_requires_new_matching_transcript_not_disappearance_or_busy_alone
         }
         assert_ne!(adapter().interpret(&bad).surface, InputSurface::NativeAccepted, "case {kind}");
     }
+}
+#[test]
+fn folded_preview_above_restored_history_and_scrollbar_proves_current_header_and_token() {
+    let mut f = frame(); f.input.as_mut().unwrap().lines = 140;
+    f.baseline.as_mut().unwrap().text = screen("previous generation transcript", "");
+    let preview = paste_preview(&[HEADER, "…", "[team-agent-token:message-1]"]);
+    for history in [over_history(&preview), preview.lines().map(|row| format!("{row}               █\n")).collect()] {
+        f.text = screen(&history, "[Pasted: 140 lines]");
+        let seen = adapter().interpret(&f);
+        assert!(matches!(&seen.paste_latch, PasteLatch::Seen { native_identity } if native_identity.starts_with("grok-owned-folded-v2:")));
+        assert_eq!(seen.current_attempt, f.attempt);
+        assert_eq!(seen.current_message, f.message);
+        assert_eq!(seen.surface, InputSurface::ComposerContainsPaste);
+    }
+}
+#[test]
+fn folded_preview_rejects_foreign_hidden_duplicate_tokens_and_unclosed_or_history_only_proofs() {
+    let valid = paste_preview(&[HEADER, "…", "[team-agent-token:message-1]"]);
+    for kind in 0..11 {
+        let mut f = frame();
+        let history = match kind {
+            0 => paste_preview(&[HEADER, "[team-agent-token:other]"]),
+            1 => paste_preview(&[HEADER, "…"]),
+            2 => paste_preview(&[HEADER, "[team-agent-token:message-1]", "[team-agent-token:message-1]"]),
+            3 => format!("{HEADER}\n{}", paste_preview(&["unrelated preview", "[team-agent-token:message-1]"])),
+            4 => format!("[team-agent-token:message-1]\n{}", paste_preview(&[HEADER, "…"])),
+            5 => valid.replace("paste again or double-click to expand", "not a native preview footer"),
+            6 => valid.lines().filter(|row| !row.starts_with('╰')).collect::<Vec<_>>().join("\n"),
+            7 => valid.replace("│ Team", "│Team"),
+            8 => format!("{valid}{valid}"),
+            9 => { f.baseline.as_mut().unwrap().text = screen("[Pasted: 161 lines]", ""); valid.clone() },
+            _ => { f.baseline.as_mut().unwrap().text = screen("[team-agent-token:message-1]", ""); valid.clone() },
+        };
+        f.text = screen(&history, "[Pasted: 161 lines]");
+        assert_eq!(adapter().interpret(&f).paste_latch, PasteLatch::NeverSeen, "case {kind}");
+    }
+}
+#[test]
+fn submitted_transcript_scrollbar_never_requires_cropping_or_accepts_preview_as_history() {
+    let mut f = frame();
+    let header = "Team Agent message from leader for msg_a942d285204881a258b2e48dba84bec4_7:";
+    f.input.as_mut().unwrap().first_line = header.into();
+    let preview = paste_preview(&[header, "…", "[team-agent-token:message-1]"]);
+    f.text = screen(&format!("{}               █", preview.trim_end()), "[Pasted: 161 lines]");
+    f.paste_latch = adapter().interpret(&f).paste_latch;
+    assert!(matches!(f.paste_latch, PasteLatch::Seen { .. }));
+    f.scope = scope(3); f.after_step = Some(StepKind::InitialSubmit);
+    for row in [format!("    {header}             4:14 PM █"), format!("    {header}█"), format!("    {}…          █", &header[..40])] {
+        f.text = screen(&row, "");
+        assert_eq!(adapter().interpret(&f).surface, InputSurface::NativeAccepted);
+        assert!(matches!(adapter().interpret(&f).paste_latch, PasteLatch::Gone { .. }));
+    }
+    f.text = screen(&preview, "");
+    assert_ne!(adapter().interpret(&f).surface, InputSurface::NativeAccepted);
+    f.text = screen(&format!("    {header}            █"), "");
+    f.baseline.as_mut().unwrap().text = f.text.clone();
+    assert_ne!(adapter().interpret(&f).surface, InputSurface::NativeAccepted);
+    f.baseline.as_mut().unwrap().text = screen("", "");
+    if let PasteLatch::Seen { native_identity } = &mut f.paste_latch {
+        *native_identity = native_identity.replace("grok-owned-folded-v2:", "grok-owned-folded-v1:");
+    }
+    assert_ne!(adapter().interpret(&f).surface, InputSurface::NativeAccepted);
 }
 #[test]
 fn idle_single_enter_has_no_unconditional_confirmation_and_trust_has_separate_key() {

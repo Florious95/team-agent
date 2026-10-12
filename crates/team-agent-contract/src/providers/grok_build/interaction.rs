@@ -7,8 +7,8 @@ use std::{path::Path, time::Duration};
 
 pub const PROFILE: &str = "grok-build-tui-v1";
 pub const STARTUP_PROFILE: &str = "grok-build-trust-v1";
-pub const POLICY_RECIPE: &str = "grok-build-tui-v1/r2:runtime-native-image+wrapper;owned-server-ambient-coexistence;120x40;paste-bracketed;enter-once;retry-never;queue-owned-visible-token+Queued · Enter to send now:Enter-once:150ms;capture100ms;stable200ms;paste-floor100ms;deadline30s;trust-v1:exact-cwd+bypass:y-once;session-info:direct+unique-closed-modal-own-width+current-uuid+cwd+version:Escape-once;exit:direct+native-exited+dead-pane-close;folded-v1:empty-baseline+confirmed-paste+payload-shape+attempt->confirmed-enter+new-unboxed-transcript-prefix+empty-composer+busy-or-ready";
-pub const POLICY: Digest = Digest([73, 163, 75, 14, 158, 22, 64, 129, 208, 201, 103, 129, 52, 15, 248, 53, 39, 24, 217, 55, 4, 195, 219, 16, 147, 137, 189, 147, 55, 105, 13, 54]);
+pub const POLICY_RECIPE: &str = "grok-build-tui-v1/r3:runtime-native-image+wrapper;owned-server-ambient-coexistence;120x40;paste-bracketed;enter-once;retry-never;queue-owned-visible-token+Queued · Enter to send now:Enter-once:150ms;capture100ms;stable200ms;paste-floor100ms;deadline30s;trust-v1:exact-cwd+bypass:y-once;session-info:direct+unique-closed-modal-own-width+current-uuid+cwd+version:Escape-once;exit:direct+native-exited+dead-pane-close;folded-v2:empty-baseline+confirmed-paste+payload-shape+attempt+closed-preview-header-and-token->confirmed-enter+new-unboxed-transcript-prefix+empty-composer+busy-or-ready";
+pub const POLICY: Digest = Digest([12, 94, 109, 155, 52, 187, 119, 245, 16, 43, 51, 217, 166, 79, 178, 193, 110, 80, 160, 216, 148, 171, 184, 51, 78, 193, 154, 126, 21, 140, 5, 224]);
 const QUEUE: &str = "grok-owned-queue-send-now";
 pub static PROFILES: &[InputProfile] = &[InputProfile {
     id: PROFILE, identity: ProfileIdentity::RuntimeCaptured, harness: "grok-build", ui: "tui",
@@ -82,22 +82,27 @@ fn trust(frame: &CaptureFrame) -> bool {
         && lines.iter().any(|line| line.split_whitespace().collect::<Vec<_>>() == ["No,", "quit", "n"])
         && lines.iter().any(|line| *line == "Grok Build may run or modify contents in this directory,")
 }
-// The modal floats above restored transcript text. Its left byte/character
-// offset is NOT a terminal column (the background may contain wide glyphs).
-// Match the measured single-cell panel's own width instead, and refuse ambiguous
-// edges. Do not change `boxed`: the composer still requires its original bounds.
-fn session_rows(text: &str) -> Result<Vec<&str>, ContractError> {
-    let invalid = || ContractError::Invalid("Grok session info panel rectangle");
+#[derive(Clone, Copy)]
+enum NativeRectangle { Session, PastePreview }
+// Native overlays float above restored transcript text and the scrollbar. Their
+// byte/character offsets are NOT terminal columns (background may be wide).
+// Match each measured single-cell rectangle's own width; never change `boxed`
+// for the composer or broaden the unboxed post-submit transcript matcher.
+fn rectangle_rows<'a>(lines: &[&'a str], kind: NativeRectangle) -> Result<Vec<&'a str>, ContractError> {
+    let invalid = || ContractError::Invalid("Grok native rectangle");
     let horizontal = |text: &str| !text.is_empty() && text.chars().all(|ch| ch == '─');
-    let lines: Vec<_> = text.lines().collect();
+    let captioned = |text: &str, caption: &str| text.split_once(caption)
+        .is_some_and(|(before, after)| horizontal(before) && horizontal(after));
+    let (top_left, top_right, bottom_left, bottom_right) = match kind {
+        NativeRectangle::Session => ('┌', '┐', '└', '┘'),
+        NativeRectangle::PastePreview => ('╭', '╮', '╰', '╯'),
+    };
     let mut tops = Vec::new();
     for (row, line) in lines.iter().enumerate() {
-        for (start, _) in line.match_indices('┌') {
-            let rest = &line[start + '┌'.len_utf8()..];
-            let Some((inside, _)) = rest.split_once('┐') else { continue; };
-            if horizontal(inside) || inside.split_once(" [✗] ")
-                .is_some_and(|(before, after)| horizontal(before) && horizontal(after))
-            {
+        for (start, _) in line.match_indices(top_left) {
+            let rest = &line[start + top_left.len_utf8()..];
+            let Some((inside, _)) = rest.split_once(top_right) else { continue; };
+            if horizontal(inside) || (matches!(kind, NativeRectangle::Session) && captioned(inside, " [✗] ")) {
                 tops.push((row, inside.chars().count()));
             }
         }
@@ -105,9 +110,13 @@ fn session_rows(text: &str) -> Result<Vec<&str>, ContractError> {
     let [(top, width)] = tops.as_slice() else { return Err(invalid()); };
     let mut rows = Vec::new();
     for line in &lines[*top + 1..] {
-        let bottoms = line.match_indices('└').filter(|(start, _)| {
-            line[*start + '└'.len_utf8()..].split_once('┘')
-                .is_some_and(|(inside, _)| horizontal(inside) && inside.chars().count() == *width)
+        let bottoms = line.match_indices(bottom_left).filter(|(start, _)| {
+            line[*start + bottom_left.len_utf8()..].split_once(bottom_right).is_some_and(|(inside, _)| {
+                inside.chars().count() == *width && match kind {
+                    NativeRectangle::Session => horizontal(inside),
+                    NativeRectangle::PastePreview => captioned(inside, " paste again or double-click to expand "),
+                }
+            })
         }).count();
         if bottoms != 0 {
             return if bottoms == 1 { Ok(rows) } else { Err(invalid()) };
@@ -122,6 +131,9 @@ fn session_rows(text: &str) -> Result<Vec<&str>, ContractError> {
         if !row.is_empty() { rows.push(row); }
     }
     Err(invalid()) // No closed bottom edge: never bind a clipped/partial panel.
+}
+fn session_rows(text: &str) -> Result<Vec<&str>, ContractError> {
+    rectangle_rows(&text.lines().collect::<Vec<_>>(), NativeRectangle::Session)
 }
 fn uuid(text: &str) -> bool {
     text.len() == 36 && text.bytes().enumerate().all(|(i, byte)| if [8,13,18,23].contains(&i) { byte == b'-' } else { byte.is_ascii_hexdigit() })
@@ -157,7 +169,7 @@ fn folded_identity(frame: &CaptureFrame) -> Option<String> {
     let context = serde_json::to_string(&(&frame.scope.identity, &frame.scope.endpoint, &frame.scope.pane,
         &frame.scope.binding, frame.scope.session.as_ref()?, frame.message.as_ref()?, frame.attempt.as_ref()?,
         frame.operation == Operation::FirstBusiness, input.sha256, input.lines, &input.first_line)).ok()?;
-    Some(format!("grok-owned-folded-v1:{context}"))
+    Some(format!("grok-owned-folded-v2:{context}"))
 }
 fn visible_prefix(line: &str, first: &str) -> bool {
     let line = boxed(line).unwrap_or(line.trim());
@@ -167,7 +179,7 @@ fn visible_prefix(line: &str, first: &str) -> bool {
     visible.len() >= 24 && (visible.starts_with(first) || first.starts_with(visible))
 }
 fn folded(frame: &CaptureFrame, observation: &mut InteractionObservation) -> bool {
-    let owned = matches!(&frame.paste_latch, PasteLatch::Seen { native_identity } | PasteLatch::Gone { native_identity } if native_identity.starts_with("grok-owned-folded-v1:"));
+    let owned = matches!(&frame.paste_latch, PasteLatch::Seen { native_identity } | PasteLatch::Gone { native_identity } if native_identity.starts_with("grok-owned-folded-v2:"));
     let Some(identity) = folded_identity(frame) else { return owned; };
     let Some(input) = &frame.input else { return owned; };
     let Some(before) = &frame.baseline else { return owned; };
@@ -180,7 +192,9 @@ fn folded(frame: &CaptureFrame, observation: &mut InteractionObservation) -> boo
     };
     if frame.after_step == Some(StepKind::Paste) && current == marker
         && input.lines > 1 && !before.text.contains(&marker)
-        && frame.text.lines().take(index).any(|line| visible_prefix(line, &input.first_line))
+        && rectangle_rows(&frame.text.lines().take(index - 1).collect::<Vec<_>>(), NativeRectangle::PastePreview)
+            .is_ok_and(|rows| rows.iter().any(|row| visible_prefix(row, &input.first_line))
+                && rows.iter().filter(|row| **row == token.as_str()).count() == 1)
         && (matches!(frame.paste_latch, PasteLatch::NeverSeen)
             || matches!(&frame.paste_latch, PasteLatch::Seen { native_identity } if native_identity == &identity))
     {
