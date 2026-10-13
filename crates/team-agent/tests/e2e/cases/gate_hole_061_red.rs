@@ -52,6 +52,10 @@ const TOOTH_3B_VERDICT_ARTIFACT: &str = "gate-hole-061-tooth-3b-verdict.json";
 const TWIN_OBSERVATION_NONCE_ENV: &str = "TEAM_AGENT_TWIN_OBSERVATION_NONCE";
 const TWIN_OBSERVATION_PREFIX: &str = "TEAM_AGENT_TWIN-OBSERVATION-V1";
 const TWIN_OBSERVATION_SCENARIO_ENV: &str = "TEAM_AGENT_TWIN_OBSERVATION_SCENARIO";
+// macOS's five-second coordinator cadence plus physical/state-write observation
+// can outlast ten seconds; still require the same durable delivered row.
+const DELIVERY_OBSERVATION_TIMEOUT: Duration =
+    Duration::from_secs(if cfg!(target_os = "macos") { 20 } else { 10 });
 
 #[test]
 fn tooth_1_existing_launch_smoke_runs_documented_quick_start_verbatim() {
@@ -199,7 +203,7 @@ fn tooth_1_existing_launch_smoke_runs_documented_quick_start_verbatim() {
             message_truth(ws.path(), &message_id)
                 .is_some_and(|truth| truth.recipient == "coder" && truth.delivered())
         },
-        Duration::from_secs(10),
+        DELIVERY_OBSERVATION_TIMEOUT,
     );
 
     shutdown(&ws);
@@ -281,7 +285,7 @@ fn tooth_2_existing_send_smoke_proves_worker_receive_report_and_collect() {
             message_truth(ws.path(), &message_id)
                 .is_some_and(|truth| truth.recipient == "a" && truth.delivered())
         },
-        Duration::from_secs(10),
+        DELIVERY_OBSERVATION_TIMEOUT,
     );
     wait_for_delivery_or_panic(
         &ws,
