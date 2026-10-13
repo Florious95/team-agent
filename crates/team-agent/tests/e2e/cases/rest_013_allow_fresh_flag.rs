@@ -15,12 +15,13 @@ fn rest_013_restart_allow_fresh_succeeds_for_fake_team() {
     assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
 
     let ws_path = ws.path().to_str().unwrap();
-    // First, shut it down so restart actually re-launches.
+    // Tear down the live fixture before explicitly seeding crash recovery.
     let _ = run_ta(
         &ws,
         &["shutdown", "--workspace", ws_path, "--keep-logs", "--json"],
     );
 
+    ws.seed_crashed_workers_for_restart(team_id, &["a"]);
     let out = run_ta(&ws, &["restart", ws_path, "--allow-fresh", "--json"]);
     let j = out.json();
     assert!(

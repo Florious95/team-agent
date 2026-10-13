@@ -46,6 +46,8 @@ fn rest_002_restart_auto_fresh_never_captured_fake_team_partial_resume() {
         ],
     );
 
+    ws.seed_crashed_workers_for_restart(team_id, &["a"]);
+
     // Top-level injection (historical pattern); kept here so the file diff
     // documents that this is the same state shape that previously refused
     // pre-0.4.7. The runtime overwrites it via projection.

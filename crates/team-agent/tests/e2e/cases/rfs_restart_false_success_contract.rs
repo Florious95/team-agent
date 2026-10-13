@@ -273,6 +273,7 @@ fn rfs_never_captured_no_session_worker_auto_freshes_without_allow_fresh() {
         &ws,
         &["shutdown", "--workspace", ws_path, "--keep-logs", "--json"],
     );
+    ws.seed_crashed_workers_for_restart(team_id, &["a"]);
     seed_never_captured_no_session(&ws, "a");
     assert_never_captured_four_subconditions(&ws, "a");
 
@@ -316,6 +317,7 @@ fn rfs_no_session_with_any_context_marker_still_refuses_without_allow_fresh() {
             &ws,
             &["shutdown", "--workspace", ws_path, "--keep-logs", "--json"],
         );
+        ws.seed_crashed_workers_for_restart(&team_id, &["a"]);
         seed_never_captured_no_session(&ws, "a");
         ws.mutate_agent_everywhere("a", |agent| {
             agent.insert(marker.to_string(), value.clone());

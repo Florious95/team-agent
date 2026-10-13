@@ -320,6 +320,38 @@ impl TestWorkspace {
         self.write_state_value(state);
     }
 
+    /// Test-only crash-recovery input: shutdown is teardown, not permission for
+    /// restart to wake stopped seats. Preserve every other worker fact.
+    pub fn seed_crashed_workers_for_restart(&self, team_id: &str, agent_ids: &[&str]) {
+        let mut state = self.read_state();
+        let session = worker_session_name(team_id);
+        let keys: Vec<String> = state["teams"]
+            .as_object()
+            .expect("crash fixture needs canonical teams")
+            .iter()
+            .filter(|(_, team)| team["session_name"].as_str() == Some(session.as_str()))
+            .map(|(key, _)| key.clone())
+            .collect();
+        assert_eq!(keys.len(), 1, "crash fixture needs one exact selected team");
+        let key = &keys[0];
+        let is_active = state["active_team_key"].as_str() == Some(key.as_str());
+        for agent_id in agent_ids {
+            let mut agent = state["teams"][key]["agents"][*agent_id].clone();
+            assert_eq!(agent["status"].as_str(), Some("stopped"));
+            agent["status"] = serde_json::json!("dead");
+            agent["explicit_stop"] = serde_json::json!(false);
+            state["teams"][key]["agents"][*agent_id] = agent.clone();
+            if is_active {
+                state["agents"][*agent_id] = agent;
+                assert_eq!(
+                    state["agents"][*agent_id],
+                    state["teams"][key]["agents"][*agent_id]
+                );
+            }
+        }
+        self.write_state_value(state);
+    }
+
     pub fn mutate_agent_everywhere<F>(&self, agent_id: &str, mut f: F)
     where
         F: FnMut(&mut serde_json::Map<String, Value>),
