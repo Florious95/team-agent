@@ -13,6 +13,9 @@ enum Mode {
     UnknownAfterEnter,
     DelayedReady,
     Swallow,
+    NonceRace,
+    NonceSetFailed,
+    NonceBindingChanged,
 }
 struct State {
     mode: Mode,
@@ -21,6 +24,7 @@ struct State {
     entered: usize,
     calls: Vec<Vec<String>>,
     nonce: String,
+    nonce_sets: usize,
     busy: bool,
     provider: Provider,
 }
@@ -35,11 +39,42 @@ impl CommandRunner for Runner {
         state.calls.push(argv.to_vec());
         let marker = "[team-agent-token:msg_one]";
         let stdout = if argv.iter().any(|arg| arg == "display-message") {
+            let window = if matches!(state.mode, Mode::NonceBindingChanged) && state.nonce_sets > 0 {
+                "replaced"
+            } else {
+                "worker"
+            };
             format!(
-                "/tmp/owned-test.sock|%1|{}|session|worker|{}|0|120\n",
+                "/tmp/owned-test.sock|%1|{}|session|{window}|{}|0|120\n",
                 std::process::id(),
                 state.nonce
             )
+        } else if argv.iter().any(|arg| arg == "set-option") {
+            assert!(argv.iter().any(|arg| arg == "-p"));
+            assert!(argv.iter().any(|arg| arg == "-o"));
+            state.nonce_sets += 1;
+            if matches!(state.mode, Mode::NonceSetFailed | Mode::NonceRace) {
+                let stderr = if matches!(state.mode, Mode::NonceRace) {
+                    state.nonce = "atomic-winner".into();
+                    "already set"
+                } else {
+                    "fixture nonce write failed"
+                };
+                return Ok(CommandOutput {
+                    success: false,
+                    code: Some(1),
+                    stdout: String::new(),
+                    stderr: stderr.into(),
+                });
+            }
+            assert!(
+                state.nonce.is_empty(),
+                "existing worker nonce must never be overwritten"
+            );
+            state.nonce = argv.last().unwrap().clone();
+            String::new()
+        } else if argv.iter().any(|arg| arg == "show-options") {
+            format!("{}\n", state.nonce)
         } else if argv.iter().any(|arg| arg == "capture-pane") {
             state.captures += 1;
             if matches!(state.mode, Mode::UnknownBefore)
@@ -113,6 +148,7 @@ impl Fixture {
             entered: 0,
             calls: vec![],
             nonce: "owned-nonce".into(),
+            nonce_sets: 0,
             busy: false,
             provider: Provider::Pi,
         }));
@@ -193,6 +229,77 @@ fn native_input_runtime_endpoint_factory_preserves_workspace_and_native_capabili
         assert!(observed.calls.iter().all(|argv| argv
             .windows(2)
             .any(|pair| pair == ["-S", "/tmp/owned-test.sock"])));
+    }
+}
+
+#[test]
+fn native_input_installs_missing_worker_nonce_once_and_preserves_atomic_winner() {
+    let existing = Fixture::new(Mode::Normal);
+    assert!(existing.inject().0.is_ok());
+    assert_eq!(existing.state.lock().unwrap().nonce_sets, 0);
+    assert_eq!(existing.state.lock().unwrap().nonce, "owned-nonce");
+    for mode in [Mode::Normal, Mode::NonceRace] {
+        let f = Fixture::new(mode);
+        f.state.lock().unwrap().nonce.clear();
+        let (report, evidence) = f.inject();
+        assert!(report.is_ok());
+        let evidence = evidence.unwrap();
+        assert_eq!(evidence.phase, NativeInputPhase::Accepted);
+        let observed = f.state.lock().unwrap();
+        assert_eq!(observed.nonce_sets, 1);
+        assert_eq!(evidence.binding.binding_nonce, observed.nonce);
+        assert!(!observed.nonce.is_empty());
+        if matches!(mode, Mode::NonceRace) {
+            assert_eq!(observed.nonce, "atomic-winner");
+        }
+        assert_eq!((observed.pasted, observed.entered), (1, 1));
+    }
+}
+
+#[test]
+fn native_input_nonce_setup_requires_exact_selected_worker_before_any_write() {
+    for field in ["pane", "pid", "session", "window"] {
+        let f = Fixture::new(Mode::Normal);
+        f.state.lock().unwrap().nonce.clear();
+        let mut request = f.request();
+        match field {
+            "pane" => request.pane_id = "%2".into(),
+            "pid" => request.pane_pid += 1,
+            "session" => request.session = "other".into(),
+            "window" => request.window = "other".into(),
+            _ => unreachable!(),
+        }
+        let (report, evidence) = with_native_input(Some(request), || {
+            f.backend.inject(
+                &Target::Pane(PaneId::new("%1")),
+                &InjectPayload::Text("line\n[team-agent-token:msg_one]".into()),
+                Key::Enter,
+                true,
+            )
+        });
+        assert!(report.is_err());
+        assert!(evidence.is_none());
+        let observed = f.state.lock().unwrap();
+        assert_eq!(
+            (observed.nonce_sets, observed.pasted, observed.entered),
+            (0, 0, 0)
+        );
+    }
+}
+
+#[test]
+fn native_input_nonce_write_failure_or_replacement_never_pastes_or_enters() {
+    for mode in [Mode::NonceSetFailed, Mode::NonceBindingChanged] {
+        let f = Fixture::new(mode);
+        f.state.lock().unwrap().nonce.clear();
+        let (report, evidence) = f.inject();
+        assert!(report.is_err());
+        assert!(evidence.is_none());
+        let observed = f.state.lock().unwrap();
+        assert_eq!(
+            (observed.nonce_sets, observed.pasted, observed.entered),
+            (1, 0, 0)
+        );
     }
 }
 

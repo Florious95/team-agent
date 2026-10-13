@@ -31,6 +31,14 @@ pub(crate) fn digest(text: &str) -> String {
 
 impl TmuxBackend {
     fn native_binding(&self, target: &Target) -> Result<NativeInputBinding, TransportError> {
+        self.query_native_binding(target, false)
+    }
+
+    fn query_native_binding(
+        &self,
+        target: &Target,
+        allow_unset_nonce: bool,
+    ) -> Result<NativeInputBinding, TransportError> {
         let pane = pane_from_target(target);
         let argv = self.tmux_argv(&[
             "tmux".into(), "display-message".into(), "-p".into(), "-t".into(), pane.as_str().into(),
@@ -49,7 +57,7 @@ impl TmuxBackend {
             (fields[1] != pane.as_str(), "pane"),
             (fields[3].is_empty(), "session_empty"),
             (fields[4].is_empty(), "window_empty"),
-            (fields[5].is_empty(), "nonce_empty"),
+            (fields[5].is_empty() && !allow_unset_nonce, "nonce_empty"),
             (fields[6] != "0", "pane_in_mode"),
         ] {
             if invalid {
@@ -79,6 +87,40 @@ impl TmuxBackend {
             window: fields[4].into(),
             binding_nonce: fields[5].into(),
         })
+    }
+
+    // Called only under the required input lock. A newly launched legacy worker
+    // has no Leader lease nonce producer: initialize its exact current carrier,
+    // never overwrite an existing nonce or waive the subsequent strict reads.
+    fn prepare_native_binding(
+        &self,
+        target: &Target,
+        request: &NativeInputRequest,
+    ) -> Result<NativeInputBinding, TransportError> {
+        let initial = self.query_native_binding(target, true)?;
+        if initial.pane_id != request.pane_id
+            || initial.pane_pid != request.pane_pid
+            || initial.session != request.session
+            || initial.window != request.window
+        {
+            return Err(refused("selected_binding_changed"));
+        }
+        if !initial.binding_nonce.is_empty() {
+            return Ok(initial);
+        }
+        let nonce = self.set_pane_binding_nonce_if_unset(
+            &PaneId::new(&initial.pane_id),
+            &uuid::Uuid::new_v4().to_string(),
+        )?;
+        let expected = NativeInputBinding {
+            binding_nonce: nonce,
+            ..initial
+        };
+        let observed = self.native_binding(target)?;
+        if observed != expected {
+            return Err(refused("binding_changed_after_nonce"));
+        }
+        Ok(observed)
     }
 
     fn native_frame(&self, evidence: &NativeInputEvidence) -> Result<InputFrame, TransportError> {
@@ -195,9 +237,10 @@ impl TmuxBackend {
         if !request.supported() {
             return Err(refused("unsupported_profile"));
         }
+        let binding = self.prepare_native_binding(target, &request)?;
         let mut evidence = NativeInputEvidence {
             request,
-            binding: self.native_binding(target)?,
+            binding,
             payload_sha256: digest(text),
             ui_identity: String::new(),
             footer_sha256: String::new(),
