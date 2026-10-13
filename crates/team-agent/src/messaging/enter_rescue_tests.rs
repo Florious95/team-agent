@@ -114,13 +114,21 @@ fn enter_rescue_first_successful_key_arms_original_turn_before_acceptance_poll()
     let f = Fixture::new();
     f.park(95);
     super::super::delivery::with_rescue_submit_observer(
-        &f.workspace, &f.store, &f.evidence, &f.log, |observer| {
+        &f.workspace,
+        &f.store,
+        &f.evidence,
+        &f.log,
+        |observer| {
             observer.after_physical_submit();
             let state = crate::state::persist::load_runtime_state(&f.workspace).unwrap();
-            assert_eq!(state["agents"]["worker"]["current_turn_message_id"], "msg_one");
+            assert_eq!(
+                state["agents"]["worker"]["current_turn_message_id"],
+                "msg_one"
+            );
             Ok(EnterRescueOutcome::Entered { accepted: false })
         },
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(f.message_status(), "submitted_unverified");
 }
 
@@ -397,9 +405,7 @@ fn enter_rescue_revalidates_at_effect_and_keeps_unknown_errors_terminal() {
         id,
         &payload,
         &|_, _| {
-            Err(crate::transport::TransportError::Io(std::io::Error::other(
-                "may have sent",
-            )).into())
+            Err(crate::transport::TransportError::Io(std::io::Error::other("may have sent")).into())
         },
     )
     .unwrap();

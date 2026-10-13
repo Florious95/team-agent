@@ -237,11 +237,15 @@ fn native_input_swallowed_enter_only_delayed_rescue_can_press_once_no_repaste() 
     assert_eq!(evidence.phase, NativeInputPhase::Submitted);
     struct ObservedSubmit(AtomicUsize);
     impl SubmitObserver for ObservedSubmit {
-        fn after_physical_submit(&self) { self.0.fetch_add(1, Ordering::SeqCst); }
+        fn after_physical_submit(&self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
     }
     let observer = ObservedSubmit(AtomicUsize::new(0));
     assert_eq!(
-        f.backend.rescue_enter(&evidence, &|| true, Some(&observer)).unwrap(),
+        f.backend
+            .rescue_enter(&evidence, &|| true, Some(&observer))
+            .unwrap(),
         EnterRescueOutcome::Entered { accepted: true }
     );
     let state = f.state.lock().unwrap();
@@ -250,7 +254,9 @@ fn native_input_swallowed_enter_only_delayed_rescue_can_press_once_no_repaste() 
     drop(state);
     assert_eq!(observer.0.load(Ordering::SeqCst), 1);
     assert_eq!(
-        f.backend.rescue_enter(&evidence, &|| true, Some(&observer)).unwrap(),
+        f.backend
+            .rescue_enter(&evidence, &|| true, Some(&observer))
+            .unwrap(),
         EnterRescueOutcome::Consumed
     );
     assert_eq!(f.state.lock().unwrap().entered, 2);
@@ -301,7 +307,10 @@ fn native_input_rescue_binding_busy_and_canonical_changes_never_send_a_key() {
             "window" => wrong.binding.window.push_str("-wrong"),
             _ => unreachable!(),
         }
-        assert!(f.backend.rescue_enter(&wrong, &|| true, None).is_err(), "{field}");
+        assert!(
+            f.backend.rescue_enter(&wrong, &|| true, None).is_err(),
+            "{field}"
+        );
     }
     evidence.phase = NativeInputPhase::MayHavePasted;
     assert_eq!(

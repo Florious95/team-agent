@@ -219,9 +219,17 @@ pub(super) fn fire(
         id,
         payload,
         &|evidence, authorize| {
-            super::delivery::with_rescue_submit_observer(workspace, store, evidence, log, |observer| {
-                transport.rescue_enter(evidence, authorize, Some(observer)).map_err(Into::into)
-            })
+            super::delivery::with_rescue_submit_observer(
+                workspace,
+                store,
+                evidence,
+                log,
+                |observer| {
+                    transport
+                        .rescue_enter(evidence, authorize, Some(observer))
+                        .map_err(Into::into)
+                },
+            )
         },
     )
 }
