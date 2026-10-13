@@ -1227,7 +1227,10 @@ pub fn tmux_send_keys_argv(pane: &PaneId, keys: &[Key]) -> Vec<String> {
 /// boundary: 只管拼写,不管何时提交、提交是否成功;不发送、不验证
 /// ---
 pub fn tmux_submit_key_name(key: Key) -> &'static str {
-    tmux_key_name(key)
+    match key {
+        Key::Enter => "C-m",
+        other => tmux_key_name(other),
+    }
 }
 
 /// 投递提交：`send-keys -t <pane> <submit-spelling>`。
