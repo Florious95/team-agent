@@ -2945,6 +2945,8 @@ fn record_rescue_turn_after_submit(
                 agent.get("status").and_then(serde_json::Value::as_str) == Some("running")
                     && agent.get("explicit_stop").and_then(serde_json::Value::as_bool) != Some(true)
                     && agent.get("pane_id").and_then(serde_json::Value::as_str) == Some(request.pane_id.as_str())
+                    && agent.get("pane_pid").and_then(serde_json::Value::as_u64) == Some(u64::from(request.pane_pid))
+                    && request.pane_pid == evidence.binding.pane_pid
                     && agent.get("window").and_then(serde_json::Value::as_str).unwrap_or(&request.recipient) == request.window
                     && agent.get("provider").cloned().and_then(|value| serde_json::from_value::<Provider>(value).ok()) == Some(request.provider)
                     && selected.get("session_name").and_then(serde_json::Value::as_str) == Some(request.session.as_str())

@@ -66,7 +66,7 @@ impl Fixture {
         crate::db::schema::open_db(self.store.db_path()).unwrap()
     }
     fn state(&self, status: &str, stopped: bool) {
-        let state = serde_json::json!({"team_key":"team","session_name":"session","agents":{"worker":{"status":status,"explicit_stop":stopped,"provider":"pi","pane_id":"%1","window":"worker"}}});
+        let state = serde_json::json!({"team_key":"team","session_name":"session","agents":{"worker":{"status":status,"explicit_stop":stopped,"provider":"pi","pane_id":"%1","pane_pid":2,"window":"worker"}}});
         std::fs::write(
             crate::model::paths::runtime_dir(&self.workspace).join("state.json"),
             state.to_string(),
@@ -134,7 +134,15 @@ fn enter_rescue_first_successful_key_arms_original_turn_before_acceptance_poll()
 
 #[test]
 fn enter_rescue_post_key_owner_or_receiver_loss_is_unknown_without_cross_team_write() {
-    for change in ["owner", "receiver", "pane", "session", "stopped"] {
+    for change in [
+        "owner",
+        "receiver",
+        "pane",
+        "pane_pid",
+        "missing_pane_pid",
+        "session",
+        "stopped",
+    ] {
         let f = Fixture::new();
         f.park(95);
         let (id, payload, _) = f.job();
@@ -142,34 +150,71 @@ fn enter_rescue_post_key_owner_or_receiver_loss_is_unknown_without_cross_team_wr
         let path = crate::model::paths::runtime_dir(&f.workspace).join("state.json");
         let replacement = std::cell::RefCell::new(String::new());
         // Controlled post-key mutation; this is not a native TUI reproduction.
-        fire_with(&f.workspace, &f.store, &f.log, id, &payload, &|evidence, _| {
-            super::super::delivery::with_rescue_submit_observer(
-                &f.workspace, &f.store, evidence, &f.log, |observer| {
-                    effects.fetch_add(1, Ordering::SeqCst);
-                    let mut state = crate::state::persist::load_runtime_state(&f.workspace).unwrap();
-                    match change {
-                        "owner" => { state["team_key"] = "other".into(); state["active_team_key"] = "other".into(); state.as_object_mut().unwrap().remove("teams"); }
-                        "receiver" => { state["agents"].as_object_mut().unwrap().remove("worker"); }
-                        "pane" => state["agents"]["worker"]["pane_id"] = "%2".into(),
-                        "session" => state["session_name"] = "other-session".into(),
-                        "stopped" => state["agents"]["worker"]["explicit_stop"] = true.into(),
-                        _ => unreachable!(),
-                    }
-                    *replacement.borrow_mut() = state.to_string();
-                    std::fs::write(&path, replacement.borrow().as_bytes()).unwrap();
-                    observer.after_physical_submit();
-                    Ok(EnterRescueOutcome::Entered { accepted: true })
-                },
-            )
-        }).unwrap();
+        fire_with(
+            &f.workspace,
+            &f.store,
+            &f.log,
+            id,
+            &payload,
+            &|evidence, _| {
+                super::super::delivery::with_rescue_submit_observer(
+                    &f.workspace,
+                    &f.store,
+                    evidence,
+                    &f.log,
+                    |observer| {
+                        effects.fetch_add(1, Ordering::SeqCst);
+                        let mut state =
+                            crate::state::persist::load_runtime_state(&f.workspace).unwrap();
+                        match change {
+                            "owner" => {
+                                state["team_key"] = "other".into();
+                                state["active_team_key"] = "other".into();
+                                state.as_object_mut().unwrap().remove("teams");
+                            }
+                            "receiver" => {
+                                state["agents"].as_object_mut().unwrap().remove("worker");
+                            }
+                            "pane" => state["agents"]["worker"]["pane_id"] = "%2".into(),
+                            "pane_pid" => state["agents"]["worker"]["pane_pid"] = 3.into(),
+                            "missing_pane_pid" => {
+                                state["agents"]["worker"]
+                                    .as_object_mut()
+                                    .unwrap()
+                                    .remove("pane_pid");
+                            }
+                            "session" => state["session_name"] = "other-session".into(),
+                            "stopped" => state["agents"]["worker"]["explicit_stop"] = true.into(),
+                            _ => unreachable!(),
+                        }
+                        *replacement.borrow_mut() = state.to_string();
+                        std::fs::write(&path, replacement.borrow().as_bytes()).unwrap();
+                        observer.after_physical_submit();
+                        Ok(EnterRescueOutcome::Entered { accepted: true })
+                    },
+                )
+            },
+        )
+        .unwrap();
         // The rejected commit must not change even one byte of the replacement state.
         let expected = replacement.borrow().clone();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
         assert_eq!(f.job().2, "unknown", "{change}");
         assert_eq!(f.message_status(), "submitted_unverified");
         let state: serde_json::Value = serde_json::from_str(&expected).unwrap();
-        assert!(state["agents"]["worker"]["current_turn_message_id"].is_null(), "{change}");
-        assert!(!fire_with(&f.workspace, &f.store, &f.log, id, &payload, &|_, _| panic!("post-key error replay")).unwrap());
+        assert!(
+            state["agents"]["worker"]["current_turn_message_id"].is_null(),
+            "{change}"
+        );
+        assert!(!fire_with(
+            &f.workspace,
+            &f.store,
+            &f.log,
+            id,
+            &payload,
+            &|_, _| panic!("post-key error replay")
+        )
+        .unwrap());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
         assert_eq!(effects.load(Ordering::SeqCst), 1);
     }
@@ -180,18 +225,23 @@ fn enter_rescue_owner_loss_at_state_save_hook_refuses_without_default_fallback()
     let f = Fixture::new();
     f.park(95);
     let path = crate::model::paths::runtime_dir(&f.workspace).join("state.json");
-    let replacement = serde_json::json!({"team_key":"other","active_team_key":"other","session_name":"session","agents":{"worker":{"provider":"pi","status":"running","pane_id":"%1","window":"worker"}}}).to_string();
+    let replacement = serde_json::json!({"team_key":"other","active_team_key":"other","session_name":"session","agents":{"worker":{"provider":"pi","status":"running","pane_id":"%1","pane_pid":2,"window":"worker"}}}).to_string();
     let hook_path = path.clone();
     let hook_state = replacement.clone();
     crate::state::repository::test_support::set_before_commit(move || {
         std::fs::write(hook_path, hook_state).unwrap();
     });
     assert!(super::super::delivery::with_rescue_submit_observer(
-        &f.workspace, &f.store, &f.evidence, &f.log, |observer| {
+        &f.workspace,
+        &f.store,
+        &f.evidence,
+        &f.log,
+        |observer| {
             observer.after_physical_submit();
             Ok(EnterRescueOutcome::Entered { accepted: true })
         },
-    ).is_err());
+    )
+    .is_err());
     assert_eq!(std::fs::read_to_string(path).unwrap(), replacement);
     assert_eq!(f.message_status(), "submitted_unverified");
 }
@@ -208,6 +258,7 @@ fn enter_rescue_switched_top_projection_updates_only_retained_original_owner() {
             other["active_team_key"] = "other".into();
             other["session_name"] = "other-session".into();
             other["agents"]["worker"]["pane_id"] = "%2".into();
+            other["agents"]["worker"]["pane_pid"] = 3.into();
             let mut state = other.clone();
             state["teams"] = serde_json::json!({"team": crate::state::projection::compact_team_state(&original), "other": crate::state::projection::compact_team_state(&other)});
             std::fs::write(crate::model::paths::runtime_dir(&f.workspace).join("state.json"), state.to_string()).unwrap();
@@ -216,7 +267,10 @@ fn enter_rescue_switched_top_projection_updates_only_retained_original_owner() {
         },
     ).unwrap();
     let state = crate::state::persist::load_runtime_state(&f.workspace).unwrap();
-    assert_eq!(state["teams"]["team"]["agents"]["worker"]["current_turn_message_id"], "msg_one");
+    assert_eq!(
+        state["teams"]["team"]["agents"]["worker"]["current_turn_message_id"],
+        "msg_one"
+    );
     assert!(state["teams"]["other"]["agents"]["worker"]["current_turn_message_id"].is_null());
     assert!(state["agents"]["worker"]["current_turn_message_id"].is_null());
     assert_eq!(state["agents"]["worker"]["pane_id"], "%2");

@@ -187,6 +187,9 @@ fn canonical_valid(
                 != Some(true)
             && agent.get("pane_id").and_then(serde_json::Value::as_str)
                 == Some(request.pane_id.as_str())
+            && agent.get("pane_pid").and_then(serde_json::Value::as_u64)
+                == Some(u64::from(request.pane_pid))
+            && request.pane_pid == evidence.binding.pane_pid
             && state
                 .get("session_name")
                 .and_then(serde_json::Value::as_str)
