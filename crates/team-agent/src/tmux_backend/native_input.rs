@@ -108,10 +108,13 @@ impl TmuxBackend {
         if !initial.binding_nonce.is_empty() {
             return Ok(initial);
         }
-        let nonce = self.set_pane_binding_nonce_if_unset(
-            &PaneId::new(&initial.pane_id),
-            &uuid::Uuid::new_v4().to_string(),
-        )?;
+        let pane = PaneId::new(&initial.pane_id);
+        let workspace = self
+            .event_workspace
+            .as_deref()
+            .ok_or_else(|| refused("workspace_missing"))?;
+        let proposed = next_pane_binding_nonce(workspace, &initial.endpoint, &pane);
+        let nonce = self.set_pane_binding_nonce_if_unset(&pane, &proposed)?;
         let expected = NativeInputBinding {
             binding_nonce: nonce,
             ..initial

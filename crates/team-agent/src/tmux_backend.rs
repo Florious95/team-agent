@@ -82,6 +82,29 @@ const TMUX_SESSION_OWNER_WORKSPACE_OPTION: &str = "@team_agent_owner_workspace";
 const TMUX_SESSION_OWNER_TEAM_OPTION: &str = "@team_agent_owner_team";
 const TMUX_SESSION_OWNER_GENERATION_OPTION: &str = "@team_agent_owner_generation";
 
+/// Shared existing pane nonce generator; transport owns the physical nonce.
+/// Same material/algorithm as the original Leader claim producer, no new dependency.
+pub(crate) fn next_pane_binding_nonce(workspace: &Path, endpoint: &str, pane: &PaneId) -> String {
+    use sha2::{Digest, Sha256};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let canonical = workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf());
+    let material = format!(
+        "{}\0{endpoint}\0{}\0{}\0{nanos}\0{counter}",
+        canonical.display(),
+        pane.as_str(),
+        std::process::id(),
+    );
+    let digest = Sha256::digest(material.as_bytes());
+    digest[..16].iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// Result of running an external command — the typed output of the OS edge.
 #[derive(Debug, Clone)]
 pub struct CommandOutput {

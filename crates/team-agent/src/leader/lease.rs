@@ -4,8 +4,6 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -1837,22 +1835,7 @@ fn canonical_workspace(workspace: &Path) -> PathBuf {
 }
 
 fn next_pane_binding_nonce(workspace: &Path, endpoint: &str, pane: &PaneId) -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let material = format!(
-        "{}\0{endpoint}\0{}\0{}\0{nanos}\0{counter}",
-        canonical_workspace(workspace).display(),
-        pane.as_str(),
-        std::process::id(),
-    );
-    let digest = Sha256::digest(material.as_bytes());
-    digest[..16]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    crate::tmux_backend::next_pane_binding_nonce(workspace, endpoint, pane)
 }
 
 fn pane_binding_nonce_for_claim(

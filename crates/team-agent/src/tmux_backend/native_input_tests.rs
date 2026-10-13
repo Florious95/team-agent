@@ -39,7 +39,8 @@ impl CommandRunner for Runner {
         state.calls.push(argv.to_vec());
         let marker = "[team-agent-token:msg_one]";
         let stdout = if argv.iter().any(|arg| arg == "display-message") {
-            let window = if matches!(state.mode, Mode::NonceBindingChanged) && state.nonce_sets > 0 {
+            let window = if matches!(state.mode, Mode::NonceBindingChanged) && state.nonce_sets > 0
+            {
                 "replaced"
             } else {
                 "worker"
