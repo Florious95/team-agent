@@ -41,13 +41,22 @@ impl TmuxBackend {
             return Err(refused("binding_query"));
         }
         let fields: Vec<_> = output.stdout.trim_end().split('|').collect();
-        if fields.len() != 8
-            || !std::path::Path::new(fields[0]).is_absolute()
-            || fields[1] != pane.as_str()
-            || fields[3..6].iter().any(|field| field.is_empty())
-            || fields[6] != "0"
-        {
-            return Err(refused("binding_invalid"));
+        if fields.len() != 8 {
+            return Err(refused("binding_invalid:field_count"));
+        }
+        for (invalid, field) in [
+            (!std::path::Path::new(fields[0]).is_absolute(), "endpoint"),
+            (fields[1] != pane.as_str(), "pane"),
+            (fields[3].is_empty(), "session_empty"),
+            (fields[4].is_empty(), "window_empty"),
+            (fields[5].is_empty(), "nonce_empty"),
+            (fields[6] != "0", "pane_in_mode"),
+        ] {
+            if invalid {
+                // Field class only: no argv, environment, business text or raw
+                // native metadata is copied into the existing refusal event.
+                return Err(refused(&format!("binding_invalid:{field}")));
+            }
         }
         let pane_height = fields[7]
             .parse::<u32>()

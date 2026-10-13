@@ -28,6 +28,7 @@ on:
           - host-native
           - issue321
           - issue321-full
+          - issue321-f1
 
 permissions:
   contents: read
@@ -117,7 +118,7 @@ jobs:
           retention-days: 14
 
   grok-root-regression:
-    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != ''
+    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && inputs.regression_scope != 'issue321-f1'
     runs-on: macos-14
     timeout-minutes: 45
     env:
@@ -245,7 +246,7 @@ jobs:
           retention-days: 14
 
   workspace-all-linux:
-    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && inputs.regression_scope == 'issue321-full'
+    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && (inputs.regression_scope == 'issue321-full' || inputs.regression_scope == 'issue321-f1')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -277,12 +278,16 @@ jobs:
           rustc -vV > workspace-evidence/toolchain.txt
           cargo --version >> workspace-evidence/toolchain.txt
           tmux -V >> workspace-evidence/toolchain.txt
-      - name: Run full workspace with the formal Publish npm test command
+      - name: Run fixed workspace or controlled role-fixture target
         shell: bash
         run: |
           set -uo pipefail
           set +e
-          cargo test --workspace --locked --no-fail-fast 2>&1 | tee workspace-evidence/test.log
+          command=(cargo test --workspace --locked --no-fail-fast)
+          if test "${{ inputs.regression_scope }}" = issue321-f1; then
+            command=(cargo test -p team-agent --test role_config_minimal_diff_red --locked -- --test-threads=1)
+          fi
+          "${command[@]}" 2>&1 | tee workspace-evidence/test.log
           statuses=("${PIPESTATUS[@]}")
           printf '%s\n' "${statuses[0]}" > workspace-evidence/test.exit
           test "${statuses[1]}" -eq 0 || exit 125
