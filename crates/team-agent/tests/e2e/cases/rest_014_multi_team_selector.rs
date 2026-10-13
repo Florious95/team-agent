@@ -24,7 +24,7 @@ fn rest_014_restart_team_selector_targets_named_team() {
     let qs_b = quick_start_fake(&ws, team_b);
     assert!(quick_start_workers_available(&qs_b), "qs b: {}", qs_b.stdout);
 
-    // Shut both down so restart picks fresh launches.
+    // Tear down both, then make only the selected team eligible for recovery.
     let _ = run_ta(
         &ws,
         &[
@@ -49,6 +49,10 @@ fn rest_014_restart_team_selector_targets_named_team() {
             "--json",
         ],
     );
+
+    let other_team_before = ws.read_state()["teams"][team_b].clone();
+    ws.seed_crashed_workers_for_restart(team_a, &["a"]);
+    assert_eq!(ws.read_state()["teams"][team_b], other_team_before);
 
     let out = run_ta(
         &ws,

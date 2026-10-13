@@ -182,6 +182,11 @@ jobs:
               run_case root-restart cargo test -p team-agent --lib --locked lifecycle::restart -- --test-threads=1
               run_case root-contract cargo test -p team-agent --lib --locked contract_runtime -- --test-threads=1
               run_case public-lifecycle cargo test -p team-agent --test add_agent_restart_saveconflict_contract --locked -- --test-threads=1
+              run_case claim-endpoint cargo test -p team-agent --test claim_endpoint_convergence_contract --locked -- --test-threads=1
+              run_case reboot-recovery cargo test -p team-agent --test reboot_recovery_followup_0531_contract --locked -- --test-threads=1
+              run_case restart-precision cargo test -p team-agent --test restart_recovery_precision_0532_contract --locked -- --test-threads=1
+              run_case shutdown-annotation cargo test -p team-agent --test shutdown_and_annotation_batch5_6 --locked -- --test-threads=1
+              run_case e2e cargo test -p team-agent --test e2e --locked -- --test-threads=1
               run_case contract-all cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets -- --test-threads=1
               ;;
             *) exit 64 ;;

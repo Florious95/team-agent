@@ -341,7 +341,9 @@ impl Recovery0531Case {
             "provider": provider,
             "model": if provider == "fake" { "fake" } else { "gpt-5" },
             "window": WORKER,
-            "status": "stopped",
+            // Converged positive recovery is crashed; R3 stays terminal stopped.
+            "status": if convergence.is_some() { "dead" } else { "stopped" },
+            "explicit_stop": false,
             "worker_state": "DEAD",
             "pane_id": "",
             "process_started": false

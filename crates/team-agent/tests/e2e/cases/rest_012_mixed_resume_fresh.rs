@@ -26,6 +26,7 @@ fn rest_012_restart_mixed_never_captured_auto_fresh_partial_resume() {
         &["shutdown", "--workspace", ws_path, "--keep-logs", "--json"],
     );
 
+    ws.seed_crashed_workers_for_restart(team_id, &["a", "b"]);
     let out = run_ta(&ws, &["restart", ws_path, "--json"]);
     let j = out.json();
     assert!(

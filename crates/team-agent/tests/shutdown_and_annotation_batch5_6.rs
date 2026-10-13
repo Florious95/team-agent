@@ -91,8 +91,8 @@ fn batch5_endpoint_helper_stays_tmux_channel_helper() {
 
 #[test]
 fn batch5_kill_decision_stays_local_and_endpoint_cleanup_is_fail_closed() {
-    // Kill policy stays in lifecycle code, but an endpoint may be shared after
-    // launch. Only positively owned sessions, never the server, may be killed.
+    // Kill policy stays local. Dead socket unlink needs independent ownership
+    // and listener-death fences; shared/live/unknown endpoints must be preserved.
     let body = read("cli/mod.rs");
     assert!(
         body.contains("enum KillDecision") || body.contains("KillDecision {"),
@@ -107,10 +107,16 @@ fn batch5_kill_decision_stays_local_and_endpoint_cleanup_is_fail_closed() {
         .next()
         .unwrap();
     assert!(
-        cleanup.contains("server_and_socket_cleanup_disabled_fail_closed")
+        cleanup.contains("remove_dead_socket(path)")
+            && cleanup.contains("SocketCleanup::Removed")
+            && cleanup.contains("SocketCleanup::Absent")
+            && cleanup.contains("SocketCleanup::Preserved")
+            && cleanup.contains("cleanup.remaining_sessions.is_empty()")
+            && cleanup.contains("cleanup.residual_files.push")
+            && cleanup.contains("owned socket cleanup refused")
             && !cleanup.contains("kill_server(")
             && !cleanup.contains("remove_file("),
-        "endpoint ownership must not authorize server or socket deletion"
+        "endpoint cleanup must delegate death/ownership fences and preserve uncertainty"
     );
 }
 

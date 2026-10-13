@@ -305,6 +305,13 @@ fn converged_dead_old_endpoint_case(tag: &str) -> EndpointCase {
         &case.read_state(),
         "restart context setup: claim-leader must converge state before restart REDs run",
     );
+    // Positive recovery input is crashed, never an explicitly stopped seat.
+    let mut state = case.read_state();
+    state["agents"][WORKER]["status"] = json!("dead");
+    state["agents"][WORKER]["explicit_stop"] = json!(false);
+    state["teams"][TEAM]["agents"][WORKER] = state["agents"][WORKER].clone();
+    team_agent::state::persist::save_runtime_state(&case.workspace, &state)
+        .expect("seed eligible crash after convergence");
     case.clear_tmux_log();
     case
 }

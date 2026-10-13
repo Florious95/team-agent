@@ -15,7 +15,7 @@
 //! Real-machine R1 shape:
 //! - A fake team starts with stale `working` / `BUSY` / `agent_health.WORKING`
 //!   and an old current task id.
-//! - `shutdown --keep-logs` followed by `restart` creates a fresh worker cohort.
+//! - Teardown then an eligible crash fixture lets `restart` create a fresh cohort.
 //! - `status --json --detail` and human status must not re-surface the old task,
 //!   must not classify the fake worker startup READY line as busy or idle, and
 //!   must not write `activity.rationale="recent_provider_output"` solely from
@@ -91,6 +91,12 @@ fn restart_clears_stale_working_activity_and_health_after_shutdown_keep_logs() {
         case.tmux_log()
     );
 
+    // Keep every stale activity/health/task fact until the actual spawn boundary.
+    let mut crashed = case.read_state();
+    crashed["agents"][WORKER]["status"] = json!("dead");
+    crashed["agents"][WORKER]["explicit_stop"] = json!(false);
+    crashed["teams"][TEAM]["agents"][WORKER] = crashed["agents"][WORKER].clone();
+    save_runtime_state(&case.workspace, &crashed).expect("seed eligible crash with stale facts");
     case.seed_healthy_coordinator();
     let restart = case.run_ta(&["restart", case.workspace_str(), "--team", TEAM, "--json"]);
     let restart_json = json_output(&restart, "R1 restart");

@@ -20,6 +20,7 @@ fn dirty_004_stale_session_id_missing_backing_refuses_restart() {
             "--json",
         ],
     );
+    ws.seed_crashed_workers_for_restart(team_id, &["a"]);
     ws.mutate_agent_everywhere("a", |agent| {
         agent.insert("provider".to_string(), json!("codex"));
         agent.insert("session_id".to_string(), json!("sess-dirty-004"));
