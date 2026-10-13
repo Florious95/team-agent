@@ -196,6 +196,7 @@ fn native_case(mode: &str, content: &str, expected_keys: usize) {
     .unwrap();
     let plan = team_agent_contract::contract::hooks::PlanHook::plan(&native_terminal::PLAN, &launch)
         .unwrap();
+    let events_name = native_terminal::event_log_name(&launch.request().identity);
     let clock = RealClock::new();
     let mut host = TmuxHost::new(
         directory,
@@ -322,7 +323,7 @@ fn native_case(mode: &str, content: &str, expected_keys: usize) {
         &clock,
     );
     if report.disposition != InjectionDisposition::NativeAccepted {
-        let events = match host.directory().read_file("native-events.jsonl", 2 * 1024 * 1024) {
+        let events = match host.directory().read_file(&events_name, 2 * 1024 * 1024) {
             Ok(bytes) => fixture_bytes(&bytes),
             Err(error) => json!({"read_error": error.to_string()}),
         };
@@ -367,7 +368,7 @@ fn native_case(mode: &str, content: &str, expected_keys: usize) {
         .any(|name| name.starts_with("tac-")));
     let raw = host
         .directory()
-        .read_file("native-events.jsonl", 2 * 1024 * 1024)
+        .read_file(&events_name, 2 * 1024 * 1024)
         .unwrap();
     let events: Vec<Value> = std::str::from_utf8(&raw)
         .unwrap()

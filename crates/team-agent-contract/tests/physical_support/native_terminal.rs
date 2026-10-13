@@ -8,7 +8,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use team_agent_contract::contract::hooks::{PlanHook, ProviderHooks};
 use team_agent_contract::contract::plan::{CarrierRef, CarrierUse, LaunchPlan, ResolvedLaunch};
-use team_agent_contract::contract::types::{ContractError, Digest, HookBinding};
+use team_agent_contract::contract::types::{ContractError, Digest, HookBinding, InstanceIdentity};
 use team_agent_contract::host::process::fingerprint_file;
 use team_agent_contract::host::{digest, digest_hex};
 
@@ -29,6 +29,16 @@ pub fn copy_executable(root: &Path) -> (PathBuf, Digest) {
     (executable, native_hash)
 }
 
+// Logs survive teardown, so distinct native instances/generations must never
+// compete for the helper's exclusive-create event file.
+pub fn event_log_name(identity: &InstanceIdentity) -> String {
+    format!(
+        "native-events-{}-{}.jsonl",
+        identity.instance.as_str(),
+        identity.generation.0
+    )
+}
+
 pub struct NativeTerminal;
 pub static PLAN: NativeTerminal = NativeTerminal;
 impl PlanHook for NativeTerminal {
@@ -45,7 +55,12 @@ impl PlanHook for NativeTerminal {
             "--test-threads=1".into(),
             "--".into(),
             launch.model().unwrap_or("single").into(),
-            launch.request().paths.runtime_root.join("native-events.jsonl").into_os_string(),
+            launch
+                .request()
+                .paths
+                .runtime_root
+                .join(event_log_name(&launch.request().identity))
+                .into_os_string(),
             launch.request().prompt.clone().unwrap_or_default().into(),
             "fixture-server".into(),
         ];

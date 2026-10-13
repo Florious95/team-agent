@@ -458,7 +458,9 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
     ));
     let delivery = store.deliveries().unwrap().remove(0);
     assert_eq!(delivery.state, "submitted");
-    let events = std::fs::read_to_string(root.join("native-events.jsonl")).unwrap();
+    let events_path =
+        root.join(physical_support::native_terminal::event_log_name(&request.identity));
+    let events = std::fs::read_to_string(&events_path).unwrap();
     assert_eq!(
         events
             .lines()
@@ -507,6 +509,21 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
     let mut failed_request = request.clone();
     failed_request.identity.seat = SeatId::new("compensated-worker").unwrap();
     failed_request.identity.instance = InstanceId::new("compensated-native-1").unwrap();
+    let failed_events_path = root.join(physical_support::native_terminal::event_log_name(
+        &failed_request.identity,
+    ));
+    assert_ne!(failed_events_path, events_path);
+    assert_eq!(
+        std::fs::symlink_metadata(&failed_events_path).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    let preserved_events = std::fs::read(&events_path).unwrap();
+    let mut next_generation = request.identity.clone();
+    next_generation.generation = Generation(2);
+    assert_ne!(
+        root.join(physical_support::native_terminal::event_log_name(&next_generation)),
+        events_path
+    );
     let failed_op = OperationId::new("actual-compensated-start").unwrap();
     let mut failed_runtime = PhysicalRuntime::new(Registration {
         descriptor: &failed_descriptor, hooks: &h, controls: &[], startup: None, session_panel: None,
@@ -521,4 +538,5 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
     let target = failed.target.physical.as_ref().expect("compensation happened after physical spawn");
     assert_eq!(sample_process(&target.process), ProcessState::Exited);
     assert_eq!(std::fs::symlink_metadata(&target.endpoint).unwrap_err().kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(std::fs::read(&events_path).unwrap(), preserved_events);
 }
