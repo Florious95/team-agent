@@ -56,7 +56,7 @@ pub static CURSOR_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         tools: &TEAM_TOOLS,
         // Runtime admission refuses an existing global MCP file; actual launch
         // requires a private cwd. This is not inference from --approve-mcps alone.
-        excludes_ambient_configuration: true,
+        isolation: McpIsolation::AmbientExcluded,
     },
     tool_names: ToolNameFacet { naming: Support::Supported(ToolNaming::StaticServer { key: "team" }) },
     session: SessionFacet {
@@ -219,6 +219,7 @@ impl PlanHook for CursorAdapter {
             runtime.home().join("Library/Caches/cursor-compile-cache")
         } else { runtime.home().join(".cache/cursor-compile-cache") };
         Ok(LaunchPlan {
+            launcher: None,
             executable: runtime.engine.clone(), arguments,
             executable_inputs: vec![runtime.executable_input(1)],
             cwd: r.paths.cwd.path.clone(),

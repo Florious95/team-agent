@@ -74,8 +74,14 @@ fn failed_flush_is_not_a_completed_tool_roundtrip() {
 #[test]
 fn tool_pairs_are_not_combined_across_connections_prefixes_or_generations() {
     let (_sandbox, mut store, seat) = setup();
+    assert_eq!(
+        InstanceId::new("connection:child"),
+        Err(ContractError::Invalid("InstanceId"))
+    );
     let first = context(&seat, "connection");
-    let other = context(&seat, "connection:child");
+    let other = context(&seat, "connection-child");
+    assert_ne!(first.connection_id, other.connection_id);
+    assert!(other.connection_id.as_str().starts_with(first.connection_id.as_str()));
     assert!(exchange(&mut store, &first, &report(1)).get("result").is_some());
     assert!(exchange(&mut store, &other, &call(1, "get_team_status", json!({}))).get("result").is_some());
     assert_eq!(tools(&mut store, &first), vec![LogicalTool::ReportResult]);

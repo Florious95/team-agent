@@ -60,7 +60,8 @@ pub fn launch_script(
         script.push(b'\n');
     }
     script.extend_from_slice(b"exec ");
-    script.extend(quote(plan.executable.as_os_str())?);
+    let entry = plan.launcher.as_ref().map_or(&plan.executable, |entry| &entry.executable);
+    script.extend(quote(entry.as_os_str())?);
     for argument in &plan.arguments {
         script.push(b' ');
         script.extend(quote(argument)?);

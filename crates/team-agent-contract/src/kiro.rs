@@ -75,7 +75,7 @@ pub static KIRO_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         carrier: Support::Supported(McpCarrier::ScopedConfig),
         scope: ResourceScope::WorkingDirectory,
         tools: &TEAM_TOOLS,
-        excludes_ambient_configuration: true,
+        isolation: McpIsolation::AmbientExcluded,
     },
     tool_names: ToolNameFacet {
         naming: Support::Supported(ToolNaming::StaticServer { key: "team" }),
@@ -273,6 +273,7 @@ impl PlanHook for KiroAdapter {
             set: BTreeMap::from([("KIRO_CHAT_UI".into(), "tui".into())]),
         };
         Ok(LaunchPlan {
+            launcher: None,
             executable_inputs: vec![],
             executable: request.paths.executable.clone(),
             arguments,

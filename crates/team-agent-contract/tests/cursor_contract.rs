@@ -78,7 +78,7 @@ fn descriptor_and_seven_hooks_keep_unknown_lifecycle_and_legacy_aliases_closed()
     assert!(hooks.semantic.require("H5").is_ok());
     assert!(hooks.interaction.require("H6").is_ok());
     assert!(hooks.fork.require("H7").is_ok());
-    assert!(CURSOR_DESCRIPTOR.mcp.excludes_ambient_configuration);
+    assert_eq!(CURSOR_DESCRIPTOR.mcp.isolation, McpIsolation::AmbientExcluded);
     assert_eq!(CURSOR_DESCRIPTOR.prompt.carrier, Support::Supported(PromptCarrier::RuntimeBridge));
     assert_eq!(CURSOR_DESCRIPTOR.tool_names.naming, Support::Supported(ToolNaming::StaticServer { key: "team" }));
     assert_eq!(CURSOR_DESCRIPTOR.session.fresh, FreshSession::Preassigned);
@@ -234,6 +234,7 @@ fn scope() -> EvidenceScope {
 fn frame(body: &str) -> CaptureFrame {
     CaptureFrame {
         scope: scope(), text: format!("  Cursor Agent\n  v2026.10.01-e373342\n\n{body}\n\n  GPT-5.6 Luna 1M Extra High   Run Everything\n  /owned workspace\n"),
+        cwd: None, input: None,
         baseline: None, profile_id: PROFILE.into(), operation: Operation::OrdinarySend,
         message: None, attempt: None, after_step: None, paste_latch: PasteLatch::NeverSeen,
     }

@@ -45,12 +45,37 @@ mod contract_route_tests {
     fn mixed_team_retains_legacy_classification_without_native_codex_fallback() {
         let state = serde_json::json!({"agents": {
             "native": {"provider":"cursor","status":"running","session_id":"native-id"},
-            "legacy": {"provider":"pi","status":"stopped"},
+            "legacy": {"provider":"pi","status":"running"},
         }});
         let plan = classify_restart_plan(&state, false).unwrap();
         assert_eq!(plan.decisions.len(), 1);
         assert_eq!(plan.decisions[0].agent_id.as_str(), "legacy");
         assert_eq!(plan.decisions[0].restart_mode, StartMode::Fresh);
+    }
+}
+
+#[cfg(test)]
+mod stopped_restart_tests {
+    use super::*;
+
+    #[test]
+    fn stopped_rows_never_enter_validation_or_fresh_spawn_even_with_allow_fresh() {
+        let state = serde_json::json!({"agents": {
+            "stopped": {"provider":"pi","status":"stopped","explicit_stop":true,
+                "session_id":"preserved","generation":7,"first_send_at":false},
+            "legacy_stopped": {"provider":"pi","status":"stopped"},
+            "marker": {"provider":"pi","status":"running","explicit_stop":true},
+            "active": {"provider":"pi","status":"running"}
+        }});
+        let before = state.clone();
+        for allow_fresh in [false, true] {
+            let plan = classify_restart_plan(&state, allow_fresh).unwrap();
+            assert_eq!(plan.decisions.len(), 1);
+            assert_eq!(plan.decisions[0].agent_id.as_str(), "active");
+            assert!(plan.corrupt_entries.is_empty());
+            assert!(plan.unresumable.is_empty());
+            assert_eq!(state, before);
+        }
     }
 }
 
@@ -266,13 +291,13 @@ pub(crate) fn python_type_name(value: &serde_json::Value) -> &'static str {
 /// purpose: 纯计算出整队的 restart 计划
 /// params:
 ///   allow_fresh: 允许无会话席位改跑全新会话
-/// returns: 每个非 paused 席位的 resume 决策、损坏的 first_send_at 条目与不可 resume 名单
+/// returns: 每个非 paused/非 stopped 席位的 resume 决策、损坏的 first_send_at 条目与不可 resume 名单
 /// errors: 计算过程中的错误以 LifecycleError 返回
 /// contract_id: lifecycle.selection.classify_restart_plan
 /// ---
 /// Route B 全量验证(纯计算,**无破坏性副作用**;`_emit_resume_decisions` +
 /// `_collect_corrupt_first_send_at`,`orchestration.py:430/467`)。读 fixture state 的
-/// `agents.<id>`,对每非 paused worker:
+/// `agents.<id>`,对每非 paused/非 stopped worker（explicit_stop 也跳过）:
 /// (1) corrupt first_send_at → 收进 `corrupt_entries`(carry python type-name);
 /// (2) 算 resume 决策(`session_id→Resume` / `null session && allow_fresh→FreshStart` /
 ///     否则 `Refuse`;E6 层2:null session 不再因 first_send_at=null 静默 fresh);
@@ -317,11 +342,8 @@ pub(crate) fn classify_restart_plan_with_resume_validation(
         // not this legacy enum's unknown-provider Codex default.
         #[cfg(unix)]
         if crate::contract_runtime::framework::is_contract(agent) { continue; }
-        if agent
-            .get("status")
-            .and_then(|v| v.as_str())
-            .map(|s| s == "paused")
-            .unwrap_or(false)
+        if crate::state::projection::agent_stopped_for_restart(agent)
+            || agent.get("status").and_then(|v| v.as_str()) == Some("paused")
         {
             continue;
         }

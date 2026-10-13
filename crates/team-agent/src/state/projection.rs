@@ -363,6 +363,20 @@ fn all_present_agents_terminal(team: &Value) -> bool {
     })
 }
 
+/// Team restart never consumes an explicit stop or legacy stopped row.
+/// A malformed persisted marker is held closed, not coerced to false.
+pub(crate) fn agent_stopped_for_restart(agent: &Value) -> bool {
+    agent.get("status").and_then(Value::as_str)
+        .is_some_and(|status| status.eq_ignore_ascii_case("stopped"))
+        || agent_explicit_stop(agent)
+}
+
+/// Only an explicit persisted stop freezes metadata against ordinary writers.
+/// Historical stopped rows still follow existing roster-pruning semantics.
+pub(crate) fn agent_explicit_stop(agent: &Value) -> bool {
+    !matches!(agent.get("explicit_stop"), None | Some(Value::Bool(false)))
+}
+
 pub(crate) fn agent_status_is_terminal(status: &str) -> bool {
     matches!(
         status.to_ascii_lowercase().as_str(),
@@ -1147,6 +1161,21 @@ mod tests {
         std::fs::create_dir_all(&rt).unwrap();
         std::fs::write(rt.join("state.json"), serde_json::to_string(state).unwrap()).unwrap();
         ws
+    }
+
+    #[test]
+    fn restart_stop_marker_is_conservative_without_blocking_crash_states() {
+        for row in [
+            json!({"status":"stopped"}),
+            json!({"status":"stopped","explicit_stop":false}),
+            json!({"status":"running","explicit_stop":true}),
+            json!({"status":"running","explicit_stop":"false"}),
+        ] {
+            assert!(agent_stopped_for_restart(&row));
+        }
+        for status in ["running", "dead", "restart_failed"] {
+            assert!(!agent_stopped_for_restart(&json!({"status":status,"explicit_stop":false})));
+        }
     }
 
     #[test]

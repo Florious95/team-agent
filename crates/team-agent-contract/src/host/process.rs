@@ -28,7 +28,7 @@ pub struct ProcessStamp {
     pub identity: ProcessIdentity,
     pub parent: u32,
     pub image: ImageStamp,
-    /// Captured interpreter entry operands, not process argv/environment reads.
+    /// Captured interpreter operands / approved launch entry, never process argv/environment reads.
     #[serde(default)]
     pub inputs: Vec<ExecutableInputStamp>,
 }
@@ -238,20 +238,34 @@ pub fn capture_executable_inputs(
         let started = Instant::now();
         let mut stamps = Vec::new();
         for input in inputs {
-            let before = std::fs::symlink_metadata(&input.path)
-                .map_err(|error| HostError::io("interpreter input metadata", error))?;
-            if !before.is_file() || input.path.canonicalize().ok().as_ref() != Some(&input.path) {
-                return Err(HostError::new("interpreter input identity", HostErrorKind::Ownership));
-            }
-            let sha256 = fingerprint_file(&input.path, max_bytes, budget.saturating_sub(started.elapsed()))?;
-            let after = std::fs::symlink_metadata(&input.path)
-                .map_err(|error| HostError::io("interpreter input metadata", error))?;
-            if sha256 != input.sha256 || image_stamp(&before) != image_stamp(&after) {
-                return Err(HostError::new("interpreter input changed", HostErrorKind::Conflict));
-            }
-            stamps.push(ExecutableInputStamp { path: input.path.clone(), sha256, image: image_stamp(&after) });
+            stamps.push(capture_launch_file(&input.path, input.sha256, max_bytes,
+                budget.saturating_sub(started.elapsed()))?);
         }
         Ok(stamps)
+    }
+}
+
+/// Byte/stamp fence for an explicitly declared executable operand or exec-through
+/// launcher. No interpreter argv or wrapper authentication configuration is read.
+pub fn capture_launch_file(
+    path: &Path, expected: Digest, max_bytes: u64, budget: Duration,
+) -> Result<ExecutableInputStamp, HostError> {
+    #[cfg(not(unix))]
+    { let _ = (path, expected, max_bytes, budget); Err(HostError::new("launch file", HostErrorKind::Unsupported)) }
+    #[cfg(unix)]
+    {
+        let before = std::fs::symlink_metadata(path)
+            .map_err(|error| HostError::io("launch file metadata", error))?;
+        if !before.is_file() || path.canonicalize().ok().as_deref() != Some(path) {
+            return Err(HostError::new("launch file identity", HostErrorKind::Ownership));
+        }
+        let sha256 = fingerprint_file(path, max_bytes, budget)?;
+        let after = std::fs::symlink_metadata(path)
+            .map_err(|error| HostError::io("launch file metadata", error))?;
+        if sha256 != expected || image_stamp(&before) != image_stamp(&after) {
+            return Err(HostError::new("launch file changed", HostErrorKind::Conflict));
+        }
+        Ok(ExecutableInputStamp { path: path.into(), sha256, image: image_stamp(&after) })
     }
 }
 

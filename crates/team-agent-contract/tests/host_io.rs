@@ -197,6 +197,83 @@ fn directory_replacement_invalidates_the_old_receipt() {
     std::fs::remove_dir_all(directory.path()).unwrap();
 }
 
+fn socket_fixture(directory: &ScopedDirectory) -> (std::os::unix::net::UnixListener, u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    let path = directory.path().join("tmux.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    let metadata = std::fs::symlink_metadata(path).unwrap();
+    (listener, metadata.dev(), metadata.ino())
+}
+
+#[test]
+fn exact_quiescent_socket_unlink_preserves_diagnostics_and_is_absent_afterward() {
+    let directory = scope();
+    let (listener, dev, ino) = socket_fixture(&directory);
+    drop(listener); // This helper is only the file operator; no live listener is deleted.
+    directory.create_file("diagnostic.txt", b"preserved").unwrap();
+    let lane = directory.try_lane().unwrap();
+    let result = directory.remove_quiescent_socket("tmux.sock", dev, ino, &lane);
+    assert_eq!(result.outcome, StepOutcome::Confirmed, "{result:?}");
+    assert!(result.error.is_none());
+    assert!(!directory.path().join("tmux.sock").exists());
+    assert_eq!(directory.read_file("diagnostic.txt", 100).unwrap(), b"preserved");
+    assert_eq!(directory.remove_quiescent_socket("tmux.sock", dev, ino, &lane).outcome, StepOutcome::Confirmed);
+}
+
+#[test]
+fn socket_cleanup_refuses_wrong_stamp_lane_name_and_nonprivate_parent() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = scope(); let peer = scope();
+    let (listener, dev, ino) = socket_fixture(&directory); drop(listener);
+    let lane = directory.try_lane().unwrap(); let foreign = peer.try_lane().unwrap();
+    for (name, device, inode, owner) in [("tmux.sock", dev + 1, ino, &lane),
+        ("tmux.sock", dev, ino + 1, &lane), ("tmux.sock", dev, ino, &foreign),
+        ("../tmux.sock", dev, ino, &lane)]
+    {
+        assert_eq!(directory.remove_quiescent_socket(name, device, inode, owner).outcome, StepOutcome::NoEffect);
+        assert!(directory.path().join("tmux.sock").exists());
+    }
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(directory.remove_quiescent_socket("tmux.sock", dev, ino, &lane).outcome, StepOutcome::NoEffect);
+    assert!(directory.path().join("tmux.sock").exists());
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[test]
+fn socket_cleanup_never_unlinks_a_replacement_inode_file_directory_or_symlink() {
+    for kind in 0..4 {
+        let directory = scope();
+        let (listener, dev, ino) = socket_fixture(&directory); drop(listener);
+        let path = directory.path().join("tmux.sock");
+        // Keep the original inode allocated so replacement cannot accidentally
+        // reuse it; the product never renames or adopts either test artifact.
+        std::fs::rename(&path, directory.path().join("old-socket")).unwrap();
+        match kind {
+            0 => { drop(std::os::unix::net::UnixListener::bind(&path).unwrap()); },
+            1 => std::fs::write(&path, b"unrelated file").unwrap(),
+            2 => std::fs::create_dir(&path).unwrap(),
+            _ => std::os::unix::fs::symlink("old-socket", &path).unwrap(),
+        }
+        let lane = directory.try_lane().unwrap();
+        let result = directory.remove_quiescent_socket("tmux.sock", dev, ino, &lane);
+        assert_eq!(result.outcome, StepOutcome::NoEffect, "kind {kind}: {result:?}");
+        assert!(std::fs::symlink_metadata(&path).is_ok());
+    }
+}
+
+#[test]
+fn socket_cleanup_rejects_replaced_directory_even_with_the_original_open_lane() {
+    let directory = scope(); let (listener, dev, ino) = socket_fixture(&directory); drop(listener);
+    let lane = directory.try_lane().unwrap(); let moved = directory.path().with_extension("preserved");
+    std::fs::rename(directory.path(), &moved).unwrap();
+    std::fs::create_dir(directory.path()).unwrap();
+    let result = directory.remove_quiescent_socket("tmux.sock", dev, ino, &lane);
+    assert_eq!(result.outcome, StepOutcome::NoEffect);
+    assert!(moved.join("tmux.sock").exists());
+    // Fixture-only cleanup of exactly the two directories created above.
+    std::fs::remove_dir_all(&moved).unwrap(); std::fs::remove_dir(directory.path()).unwrap();
+}
+
 fn metadata(directory: &ScopedDirectory) -> AttemptMetadata {
     AttemptMetadata {
         owner: directory.receipt().owner.clone(),

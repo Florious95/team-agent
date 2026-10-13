@@ -247,8 +247,18 @@ fn resolve_launch_inner(
             return Err(ContractError::Invalid("worker prompt required"));
         }
         descriptor.mcp.carrier.require("worker MCP")?;
-        if !descriptor.mcp.excludes_ambient_configuration {
-            return Err(ContractError::Invalid("worker MCP isolation"));
+        match descriptor.mcp.isolation {
+            McpIsolation::AmbientExcluded => {},
+            McpIsolation::OwnedServerIsolated
+                if descriptor.mcp.carrier == Support::Supported(McpCarrier::ScopedConfig)
+                    && descriptor.mcp.scope == ResourceScope::WorkingDirectory
+                    && !descriptor.workspace.shared_cwd
+                    && descriptor.workspace.requires_materialization_lease
+                    && descriptor.tool_names.naming == Support::Supported(ToolNaming::RuntimeBound)
+                    && descriptor.probe_sources.server == Support::Supported(ProbeSource::ServerLifecycle)
+                    && descriptor.probe_sources.client_binding == Support::Supported(ProbeSource::NativeRuntime)
+                    && descriptor.probe_sources.round_trip == Support::Supported(ProbeSource::NativeRuntime) => {},
+            _ => return Err(ContractError::Invalid("worker MCP isolation")),
         }
         let profile_id = request
             .input_profile
@@ -528,10 +538,20 @@ pub struct ExecutableInput {
     pub sha256: Digest,
 }
 
+/// Approved exec-through entry. Its bytes are fenced separately from the final
+/// kernel image; it never authorizes an arbitrary shell fragment or PID adoption.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaunchEntrypoint {
+    pub executable: PathBuf,
+    pub sha256: Digest,
+}
+
 /// Structured executable/argv/environment, never a shell fragment. No Debug payload dump.
 #[derive(Clone, PartialEq, Eq)]
 pub struct LaunchPlan {
+    /// Final kernel image, including when an approved wrapper execs it in-place.
     pub executable: PathBuf,
+    pub launcher: Option<LaunchEntrypoint>,
     pub arguments: Vec<OsString>,
     pub executable_inputs: Vec<ExecutableInput>,
     pub cwd: PathBuf,
@@ -603,6 +623,12 @@ pub fn validate_launch_plan(
         return Err(ContractError::Invalid("argv contains NUL"));
     }
     plan.environment.validate()?;
+    if let Some(launcher) = &plan.launcher {
+        require_absolute(&launcher.executable, "launch entry")?;
+        if launcher.executable == plan.executable {
+            return Err(ContractError::Invalid("redundant launch entry"));
+        }
+    }
     let mut inputs = Vec::new();
     for input in &plan.executable_inputs {
         require_absolute(&input.path, "interpreter program input")?;

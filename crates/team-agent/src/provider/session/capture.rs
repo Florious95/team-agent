@@ -868,7 +868,8 @@ fn incomplete_resumable_provider<F>(agent: &Value, adapter_for: &mut F) -> Optio
 where
     F: FnMut(Provider) -> Box<dyn ProviderAdapter>,
 {
-    if agent
+    if crate::state::projection::agent_explicit_stop(agent)
+        || agent
         .get("status")
         .and_then(Value::as_str)
         .is_some_and(|status| status != "running")
@@ -890,6 +891,28 @@ where
         return None;
     }
     Some(provider)
+}
+
+#[cfg(test)]
+mod stopped_capture_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_stop_is_checked_before_adapter_or_backing_probes() {
+        for row in [
+            serde_json::json!({"status":"stopped","provider":"pi","spawn_cwd":"/controlled"}),
+            serde_json::json!({"status":"running","explicit_stop":true,"provider":"pi","spawn_cwd":"/controlled"}),
+            serde_json::json!({"status":"running","explicit_stop":"false","provider":"pi","spawn_cwd":"/controlled"}),
+        ] {
+            assert!(incomplete_resumable_provider(&row, &mut |_| panic!("held seat reached adapter lookup")).is_none());
+        }
+        let mut calls = 0;
+        let _ = incomplete_resumable_provider(
+            &serde_json::json!({"status":"running","explicit_stop":false,"provider":"pi","spawn_cwd":"/controlled"}),
+            &mut |provider| { calls += 1; crate::provider::get_adapter(provider) },
+        );
+        assert_eq!(calls, 1, "active control must still be eligible for capture");
+    }
 }
 
 fn agent_session_complete(agent: &Value) -> bool {

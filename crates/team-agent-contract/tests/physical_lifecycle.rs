@@ -1,4 +1,4 @@
-//! The K3/K2 combination uses a controlled Python terminal, never Kiro or a
+//! The K3/K2 combination uses an owned native test terminal, never Kiro or a
 //! subscription. Protocol events below are explicitly fixture evidence.
 #![cfg(unix)]
 mod physical_support;
@@ -251,10 +251,14 @@ fn settings(tmux: &std::path::Path) -> PhysicalSettings {
     }
 }
 #[test]
+#[ignore = "internal owned TTY fixture; invoked only by the lifecycle test"]
+fn native_terminal_fixture() {
+    physical_support::native_terminal::run();
+}
+
+#[test]
 fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared_lifecycle() {
     let tmux = PathBuf::from(std::env::var_os("CONTRACT_TMUX").expect("prepared absolute tmux"));
-    let python =
-        PathBuf::from(std::env::var_os("CONTRACT_PYTHON").expect("prepared real Python path"));
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -271,12 +275,11 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
     println!("CONTROLLED_PHYSICAL_LIFECYCLE_ROOT={}", root.display());
     let cwd_path = root.join("cwd");
     std::fs::create_dir(&cwd_path).unwrap();
-    let native = physical_support::native(
-        fingerprint_file(&python, 512 * 1024 * 1024, Duration::from_secs(5)).unwrap(),
-    );
+    let (executable, native_hash) = physical_support::native_terminal::copy_executable(&root);
+    let native = physical_support::native(native_hash);
     let mut d = physical_support::descriptor("single", &native);
     d.session.fresh = FreshSession::NotApplicable;
-    let h = physical_support::hooks();
+    let h = physical_support::native_terminal::hooks();
     let clock = RealClock::new();
     let op = OperationId::new("actual-start").unwrap();
     let mut runtime = PhysicalRuntime::new(
@@ -284,6 +287,7 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
             descriptor: &d,
             hooks: &h,
             controls: &[],
+            startup: None, session_panel: None,
         },
         settings(&tmux),
         op.clone(),
@@ -308,7 +312,7 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
         },
         native,
         paths: LaunchPaths {
-            executable: python,
+            executable,
             candidate: std::env::current_exe().unwrap(),
             cwd: resolve_cwd(&cwd_path).unwrap(),
             runtime_root: root.clone(),
@@ -394,6 +398,7 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
             &CaptureFrame {
                 scope: captured.scope,
                 text: captured.text,
+                cwd: None, input: None,
                 baseline: None,
                 profile_id: seat.profile.clone(),
                 operation: Operation::FirstBusiness,
@@ -412,7 +417,7 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
         clock.sleep(Duration::from_millis(10));
     };
     drop(transport);
-    // T3 is controlled harness evidence, not a claim that Python contains an MCP client.
+    // T3 is controlled harness evidence, not a claim that the fixture is an MCP client.
     let protocol = physical_support::protocol(&target, clock.now());
     runtime.protocol = Some(protocol.clone());
     runtime.evidence.push(physical_support::capability(
@@ -453,7 +458,9 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
     ));
     let delivery = store.deliveries().unwrap().remove(0);
     assert_eq!(delivery.state, "submitted");
-    let events = std::fs::read_to_string(root.join("native-events.jsonl")).unwrap();
+    let events_path =
+        root.join(physical_support::native_terminal::event_log_name(&request.identity));
+    let events = std::fs::read_to_string(&events_path).unwrap();
     assert_eq!(
         events
             .lines()
@@ -472,6 +479,7 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
     .unwrap();
     assert_eq!(stopped.outcome, Outcome::Committed);
     assert_eq!(sample_process(&target.process), ProcessState::Exited);
+    assert_eq!(std::fs::symlink_metadata(&target.endpoint).unwrap_err().kind(), std::io::ErrorKind::NotFound);
     let deadline = clock.now() + Duration::from_secs(5);
     while sample_process(&server) == ProcessState::Alive && clock.now() < deadline {
         clock.sleep(Duration::from_millis(10));
@@ -487,9 +495,48 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
         root.join("physical-lifecycle-receipt.json"),
         serde_json::to_vec_pretty(
             &json!({"fixture":"not-kiro","root":root,"target":target,"delivery":delivery.state,
-        "native_exited":true,"private_tmux_exited":true,"journals_preserved":true}),
+        "native_exited":true,"private_tmux_exited":true,"socket_absent":true,"journals_preserved":true}),
         )
         .unwrap(),
     )
     .unwrap();
+
+    // A post-spawn session admission failure uses the SAME compensated stop and
+    // socket cleanup, not a separate unlink shortcut. This fixture's H4 hook
+    // deliberately refuses session binding; no model/subscription is involved.
+    let mut failed_descriptor = d.clone();
+    failed_descriptor.session.fresh = FreshSession::CaptureAfterLaunch;
+    let mut failed_request = request.clone();
+    failed_request.identity.seat = SeatId::new("compensated-worker").unwrap();
+    failed_request.identity.instance = InstanceId::new("compensated-native-1").unwrap();
+    let failed_events_path = root.join(physical_support::native_terminal::event_log_name(
+        &failed_request.identity,
+    ));
+    assert_ne!(failed_events_path, events_path);
+    assert_eq!(
+        std::fs::symlink_metadata(&failed_events_path).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    let preserved_events = std::fs::read(&events_path).unwrap();
+    let mut next_generation = request.identity.clone();
+    next_generation.generation = Generation(2);
+    assert_ne!(
+        root.join(physical_support::native_terminal::event_log_name(&next_generation)),
+        events_path
+    );
+    let failed_op = OperationId::new("actual-compensated-start").unwrap();
+    let mut failed_runtime = PhysicalRuntime::new(Registration {
+        descriptor: &failed_descriptor, hooks: &h, controls: &[], startup: None, session_panel: None,
+    }, settings(&tmux), failed_op.clone(), &clock).unwrap();
+    let failed = Lifecycle { store: &mut store, host: &mut failed_runtime, io: &mut io }.startup(
+        &Adapter { descriptor: &failed_descriptor, hooks: &h, catalog: None }, &failed_request,
+        Routing { pane: "unpublished".into(), binding_key: "unbound-compensation".into(), server_key: "fixture-server".into() },
+        failed_op,
+    ).unwrap();
+    assert_eq!(failed.outcome, Outcome::Compensated, "{failed:?}");
+    assert!(failed.failure.as_deref().is_some_and(|error| error.contains("fixture session binding")));
+    let target = failed.target.physical.as_ref().expect("compensation happened after physical spawn");
+    assert_eq!(sample_process(&target.process), ProcessState::Exited);
+    assert_eq!(std::fs::symlink_metadata(&target.endpoint).unwrap_err().kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(std::fs::read(&events_path).unwrap(), preserved_events);
 }

@@ -314,6 +314,54 @@ impl ScopedDirectory {
         }
     }
 
+    /// Remove only a receipt-matched socket in this pinned private directory.
+    /// The host must first prove native exit and no listener while holding `lane`.
+    /// As with file cleanup, the lane excludes cooperative writers; this is not a
+    /// filesystem CAS against an arbitrary same-UID external writer.
+    pub fn remove_quiescent_socket(
+        &self, name: &str, device: u64, inode: u64, lane: &NativeLane,
+    ) -> super::transport::ActionResult {
+        use super::transport::ActionResult;
+        if lane.directory() != &self.receipt || !name_valid(name) {
+            return ActionResult::refused(HostError::new("socket cleanup owner/name", HostErrorKind::Ownership));
+        }
+        if let Err(error) = self.check_live() { return ActionResult::refused(error); }
+        #[cfg(not(unix))]
+        {
+            let _ = (device, inode);
+            ActionResult::refused(HostError::new("socket cleanup", HostErrorKind::Unsupported))
+        }
+        #[cfg(unix)]
+        {
+            use nix::{fcntl::AtFlags, sys::stat::{fstatat, SFlag}, unistd::{unlinkat, UnlinkatFlags}};
+            let inspect = || fstatat(&self.directory, name, AtFlags::AT_SYMLINK_NOFOLLOW);
+            let metadata = match inspect() {
+                Ok(metadata) => metadata,
+                Err(nix::errno::Errno::ENOENT) => return ActionResult::confirmed(),
+                Err(error) => return ActionResult::refused(HostError::io("owned socket lstat", error.into())),
+            };
+            if metadata.st_mode & SFlag::S_IFMT.bits() != SFlag::S_IFSOCK.bits()
+                || metadata.st_uid != nix::unistd::geteuid().as_raw() || metadata.st_nlink != 1
+                || (metadata.st_dev as u128, metadata.st_ino as u128) != (u128::from(device), u128::from(inode))
+            {
+                return ActionResult::refused(HostError::new("owned socket identity", HostErrorKind::Ownership));
+            }
+            if let Err(error) = self.check_live() { return ActionResult::refused(error); }
+            if let Err(error) = unlinkat(&self.directory, name, UnlinkatFlags::NoRemoveDir) {
+                return ActionResult::refused(HostError::io("unlink owned socket", error.into()));
+            }
+            if let Err(error) = self.directory.sync_all() {
+                return ActionResult::uncertain(HostError::io("sync socket cleanup", error));
+            }
+            if let Err(error) = self.check_live() { return ActionResult::uncertain(error); }
+            match inspect() {
+                Err(nix::errno::Errno::ENOENT) => ActionResult::confirmed(),
+                Ok(_) => ActionResult::uncertain(HostError::new("socket reappeared after unlink", HostErrorKind::Conflict)),
+                Err(error) => ActionResult::uncertain(HostError::io("verify socket absence", error.into())),
+            }
+        }
+    }
+
     /// Compare-own-bytes cleanup for quiescent host artifacts only. The lifecycle must
     /// exclude writers; this is not an atomic CAS against arbitrary external writers.
     /// Never accepts sockets/directories or an uncertain write receipt.

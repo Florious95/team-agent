@@ -6,12 +6,33 @@ on:
       - "crates/team-agent-contract/**"
       - ".github/workflows/contract-physical-executor.yml"
   workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Optional exact product SHA for finite Grok/root regression
+        required: false
+        default: ""
+        type: string
+      expected_tree:
+        description: Exact product tree when source_sha is supplied
+        required: false
+        default: ""
+        type: string
+      regression_scope:
+        description: Fixed finite suite or owned host ancestry/native target
+        required: false
+        default: full
+        type: choice
+        options:
+          - full
+          - host-ancestry
+          - host-native
 
 permissions:
   contents: read
 
 jobs:
   macos-fixtures:
+    if: github.event_name != 'workflow_dispatch' || inputs.source_sha == ''
     runs-on: macos-14
     timeout-minutes: 25
     env:
@@ -19,7 +40,6 @@ jobs:
       CONTRACT_OLD_SCOPE: "fixture-old-scope"
       TEAM_AGENT_K2_FOREIGN_PROBE: "fixture-foreign-team"
       SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      CARGO_TARGET_DIR: ${{ runner.temp }}/contract-physical-target
     steps:
       - uses: actions/checkout@v5
         with:
@@ -35,6 +55,7 @@ jobs:
           if ! command -v tmux >/dev/null; then brew install tmux; fi
           printf 'CONTRACT_TMUX=%s\n' "$(command -v tmux)" >> "$GITHUB_ENV"
           printf 'CONTRACT_PYTHON=%s\n' "$(python3 -c 'import os,sys; print(os.path.realpath(sys.executable))')" >> "$GITHUB_ENV"
+          printf 'CARGO_TARGET_DIR=%s\n' "$RUNNER_TEMP/contract-physical-target" >> "$GITHUB_ENV"
           mkdir contract-evidence
           git rev-parse HEAD 'HEAD^{tree}' > contract-evidence/source.txt
           rustc -vV > contract-evidence/toolchain.txt
@@ -90,5 +111,93 @@ jobs:
         with:
           name: contract-physical-${{ github.run_id }}-${{ github.run_attempt }}
           path: contract-evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  grok-root-regression:
+    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != ''
+    runs-on: macos-14
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      EXPECTED_TREE: ${{ inputs.expected_tree }}
+      REGRESSION_SCOPE: ${{ inputs.regression_scope }}
+      RUSTUP_TOOLCHAIN: "1.95.0"
+      CONTRACT_OLD_SCOPE: fixture-old-scope
+      TEAM_AGENT_K2_FOREIGN_PROBE: fixture-foreign-team
+    steps:
+      - name: Validate fixed inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_TREE" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify product source and prepare controlled fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_TREE"
+          test -z "$(git status --porcelain=v1)"
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt
+          if ! command -v tmux >/dev/null; then brew install tmux; fi
+          printf 'CONTRACT_TMUX=%s\n' "$(command -v tmux)" >> "$GITHUB_ENV"
+          printf 'CONTRACT_PYTHON=%s\n' "$(python3 -c 'import os,sys; print(os.path.realpath(sys.executable))')" >> "$GITHUB_ENV"
+          mkdir regression-evidence
+          git rev-parse HEAD 'HEAD^{tree}' > regression-evidence/source.txt
+          rustc -vV > regression-evidence/toolchain.txt
+          cargo --version >> regression-evidence/toolchain.txt
+          tmux -V >> regression-evidence/toolchain.txt
+          python3 --version >> regression-evidence/toolchain.txt
+      - name: Execute finite root and contract regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_case() {
+            local name="$1"
+            shift
+            set +e
+            "$@" 2>&1 | tee "regression-evidence/${name}.log"
+            local statuses=("${PIPESTATUS[@]}")
+            set -e
+            printf '%s\n' "${statuses[0]}" > "regression-evidence/${name}.exit"
+            test "${statuses[1]}" -eq 0 || return 125
+            return "${statuses[0]}"
+          }
+          case "$REGRESSION_SCOPE" in
+            host-ancestry)
+              run_case host-ancestry cargo test --manifest-path crates/team-agent-contract/Cargo.toml --test host_ancestry --locked -- --test-threads=1
+              ;;
+            host-native)
+              run_case host-native cargo test --manifest-path crates/team-agent-contract/Cargo.toml --test host_native --locked -- --test-threads=1
+              ;;
+            full)
+              run_case root-stopped cargo test -p team-agent --lib --locked stop -- --test-threads=1
+              run_case root-shutdown cargo test -p team-agent --lib --locked shutdown -- --test-threads=1
+              run_case root-restart cargo test -p team-agent --lib --locked lifecycle::restart -- --test-threads=1
+              run_case root-contract cargo test -p team-agent --lib --locked contract_runtime -- --test-threads=1
+              run_case public-lifecycle cargo test -p team-agent --test add_agent_restart_saveconflict_contract --locked -- --test-threads=1
+              run_case contract-all cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets -- --test-threads=1
+              ;;
+            *) exit 64 ;;
+          esac
+      - name: Bind retained evidence hashes
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -d regression-evidence; then
+            (cd regression-evidence && shasum -a 256 ./* > SHA256SUMS)
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: grok-root-regression-${{ github.run_id }}
+          path: regression-evidence/
           if-no-files-found: error
           retention-days: 14

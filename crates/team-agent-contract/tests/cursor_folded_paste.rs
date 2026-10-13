@@ -29,6 +29,7 @@ fn scope(sequence: u64) -> EvidenceScope {
 fn frame() -> CaptureFrame {
     CaptureFrame {
         scope: scope(2), text: screen("", &format!("^[{BLOCK}")),
+        cwd: None, input: None,
         baseline: Some(CaptureBaseline { scope: scope(1), text: screen("", "Plan, search, build anything") }),
         profile_id: PROFILE.into(), operation: Operation::FirstBusiness,
         message: Some(MessageId::new("message-1").unwrap()), attempt: Some(AttemptId::new("attempt-1").unwrap()),

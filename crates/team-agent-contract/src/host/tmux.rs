@@ -7,7 +7,7 @@ use super::clock::{remaining, Clock};
 use super::command::{CommandEnd, CommandReceipt, CommandRequest, CommandRunner, OutputLimits};
 use super::files::{fingerprint_materialized, DirectoryReceipt, FileReceipt, ScopedDirectory};
 use super::process::{
-    capture_executable_inputs, capture_process, fingerprint_file, resolve_cwd, sample_process,
+    capture_executable_inputs, capture_launch_file, capture_process, fingerprint_file, resolve_cwd, sample_process,
     verify_executable_inputs, ProcessState,
 };
 use super::shell::{launch_script, quote};
@@ -270,12 +270,22 @@ pub struct SpawnReceipt {
 pub struct CloseReceipt {
     pub pane_close: ActionResult,
     pub native: ProcessState,
+    pub socket_cleanup: ActionResult,
     pub socket_preserved: bool,
+}
+
+// A failed query or zero sessions is not a no-listener witness. This exact,
+// endpoint-bound diagnostic comes from the no-autostart (-N) native client.
+// No generic error/timeout is accepted.
+fn confirms_no_server(receipt: &CommandReceipt, endpoint: &std::path::Path) -> bool {
+    receipt.end == CommandEnd::Exited && receipt.exit_code == Some(1)
+        && receipt.child_reaped && receipt.stdout.is_empty()
+        && endpoint.to_str().is_some_and(|path| receipt.stderr == format!("no server running on {path}\n").as_bytes())
 }
 
 /// After a close may have executed, observe only: reparenting/exit races do not
 /// grant authority for another action, nor prove exit. Keep the original budget.
-fn observe_native_exit(
+pub(crate) fn observe_native_exit(
     close_outcome: StepOutcome,
     clock: &dyn Clock,
     deadline: Duration,
@@ -567,11 +577,17 @@ impl<R: CommandRunner> TmuxHost<R> {
             return Err(HostError::new("native session allocation required", HostErrorKind::Ownership));
         }
         self.directory.check_live()?;
-        let inputs = capture_executable_inputs(
+        let mut inputs = capture_executable_inputs(
             &plan.executable_inputs,
             self.limits.max_executable_bytes,
             remaining(clock, deadline).ok_or_else(|| HostError::new("interpreter input deadline", HostErrorKind::Deadline))?,
         )?;
+        if let Some(entry) = &plan.launcher {
+            inputs.push(capture_launch_file(&entry.executable, entry.sha256,
+                self.limits.max_executable_bytes,
+                remaining(clock, deadline).ok_or_else(|| HostError::new("launch entry deadline", HostErrorKind::Deadline))?,
+            )?);
+        }
         if self.target.is_some()
             || self.directory.receipt().owner != resolved.request().identity
             || !self
@@ -846,17 +862,63 @@ impl<R: CommandRunner> TmuxHost<R> {
         Ok(target)
     }
 
-    /// Closes only the still-bound owned pane. It does not claim whole-tree cleanup,
-    /// kill a server, unlink a socket, delete native sessions or remove other resources.
+    fn cleanup_dead_socket(
+        &mut self, target: &TargetReceipt, lane: &super::files::NativeLane,
+        clock: &dyn Clock, deadline: Duration,
+    ) -> ActionResult {
+        loop {
+            if self.target.as_ref() != Some(target) || target.directory != *self.directory.receipt()
+                || target.endpoint != self.endpoint || lane.directory() != &target.directory
+            {
+                return ActionResult::refused(HostError::new("socket cleanup target", HostErrorKind::Ownership));
+            }
+            if let Err(error) = self.directory.check_live() { return ActionResult::refused(error); }
+            match self.socket_identity() {
+                Ok(identity) if identity == (target.socket_device, target.socket_inode) => {},
+                Err(error) if error.kind == HostErrorKind::Io(std::io::ErrorKind::NotFound) => return ActionResult::confirmed(),
+                Ok(_) => return ActionResult::refused(HostError::new("socket cleanup replacement", HostErrorKind::Ownership)),
+                Err(error) => return ActionResult::refused(error),
+            }
+            if sample_process(&target.process) != ProcessState::Exited {
+                return ActionResult::refused(HostError::new("socket cleanup native not exited", HostErrorKind::Unknown));
+            }
+            // -N forbids server creation. Keep the original close budget and
+            // never kill-server, reinterpret an error as absence, or retry a key.
+            let receipt = match self.command(vec!["-N".into(), "list-sessions".into()], None, clock, deadline) {
+                Ok(receipt) => receipt,
+                Err(error) => return ActionResult::refused(error),
+            };
+            if confirms_no_server(&receipt, &self.endpoint) {
+                return self.directory.remove_quiescent_socket("tmux.sock", target.socket_device, target.socket_inode, lane);
+            }
+            if receipt.end != CommandEnd::Exited || !receipt.child_reaped {
+                return ActionResult::refused(command_error(&receipt, "tmux socket death unverified"));
+            }
+            // The last-pane server can still be winding down (including an
+            // exited client with a transient error). Neither that error nor
+            // successful empty output grants unlink; observe until positive
+            // absence or the original deadline, without repeating kill-pane.
+            let Some(left) = remaining(clock, deadline) else {
+                return ActionResult::refused(HostError::new("tmux socket exit deadline", HostErrorKind::Deadline));
+            };
+            clock.sleep(self.limits.poll_interval.min(left));
+        }
+    }
+
+    /// Close only the bound pane, then remove its exact private socket after
+    /// native exit and a positive no-server witness. Preserve journals, native
+    /// sessions and all unrelated resources; never kill-server or recurse.
     pub fn close_owned_pane(
         &mut self,
         target: &TargetReceipt,
         clock: &dyn Clock,
         deadline: Duration,
     ) -> CloseReceipt {
-        let action = match self.directory.try_lane() {
-            Err(error) => ActionResult::refused(error),
-            Ok(_lane) => match self.check_bound(target, clock, deadline, false) {
+        // Retain the same lane through exit observation and inode-fenced unlink.
+        let lane = self.directory.try_lane();
+        let action = match &lane {
+            Err(error) => ActionResult::refused(error.clone()),
+            Ok(_) => match self.check_bound(target, clock, deadline, false) {
                 Err(error) => ActionResult::refused(error),
                 Ok(_) => match self.command(
                     vec!["kill-pane".into(), "-t".into(), target.pane.clone().into()],
@@ -876,9 +938,16 @@ impl<R: CommandRunner> TmuxHost<R> {
             self.limits.poll_interval,
             || sample_process(&target.process),
         );
+        let socket_cleanup = if action.outcome == StepOutcome::Confirmed && native == ProcessState::Exited {
+            match &lane {
+                Ok(lane) => self.cleanup_dead_socket(target, lane, clock, deadline),
+                Err(error) => ActionResult::refused(error.clone()),
+            }
+        } else { ActionResult { outcome: StepOutcome::NoEffect, error: None } };
         CloseReceipt {
             pane_close: action,
             native,
+            socket_cleanup,
             socket_preserved: std::fs::symlink_metadata(&self.endpoint).is_ok(),
         }
     }
@@ -902,6 +971,42 @@ fn action_result(receipt: CommandReceipt, operation: &'static str) -> ActionResu
     } else {
         ActionResult::refused(command_error(&receipt, operation))
     }
+}
+
+// Discover syntax rather than pinning a tmux version. New tmux sanitizes paste
+// bytes with vis(3) unless -S is present; old tmux has no -S and no sanitization.
+// Only an affirmative, unambiguous command grammar can select either path.
+fn paste_buffer_arguments(
+    capability: &CommandReceipt,
+    name: &str,
+    pane: &str,
+) -> Result<Vec<OsString>, HostError> {
+    if !capability.success() {
+        return Err(command_error(capability, "tmux paste capability"));
+    }
+    let invalid = || HostError::new("tmux paste capability syntax", HostErrorKind::Unknown);
+    let syntax = std::str::from_utf8(&capability.stdout).map_err(|_| invalid())?;
+    let mut commands = syntax
+        .lines()
+        .filter(|line| line.split_whitespace().next() == Some("paste-buffer"));
+    let command = commands.next().ok_or_else(invalid)?;
+    if commands.next().is_some() {
+        return Err(invalid());
+    }
+    let flags: Vec<_> = command
+        .split_whitespace()
+        .filter_map(|word| word.strip_prefix("[-")?.strip_suffix(']'))
+        .filter(|flags| !flags.is_empty() && flags.bytes().all(|b| b.is_ascii_alphabetic()))
+        .collect();
+    if !flags.iter().any(|flags| flags.contains('r')) {
+        return Err(invalid());
+    }
+    let mut arguments: Vec<OsString> = vec!["paste-buffer".into(), "-r".into()];
+    if flags.iter().any(|flags| flags.contains('S')) {
+        arguments.push("-S".into());
+    }
+    arguments.extend(["-b".into(), name.into(), "-t".into(), pane.into()]);
+    Ok(arguments)
 }
 
 impl<R: CommandRunner> PhysicalTransport for TmuxHost<R> {
@@ -1155,15 +1260,23 @@ impl<R: CommandRunner> PhysicalTransport for TmuxHost<R> {
                 text.into(),
             ]
         } else {
-            // -r preserves LF; tmux otherwise silently substitutes CR for each LF.
-            vec![
-                "paste-buffer".into(),
-                "-r".into(),
-                "-b".into(),
-                name.into(),
-                "-t".into(),
-                target.pane.clone().into(),
-            ]
+            // Query all syntax for compatibility with tmux versions whose
+            // list-commands does not accept a single command argument. This is
+            // read-only and shares the action deadline; errors never cause a
+            // trial paste or a second paste without -S.
+            let capability =
+                match self.command(vec!["list-commands".into()], None, clock, deadline) {
+                    Ok(receipt) => receipt,
+                    Err(error) => return ActionResult::refused(error),
+                };
+            let arguments = match paste_buffer_arguments(&capability, name, &target.pane) {
+                Ok(arguments) => arguments,
+                Err(error) => return ActionResult::refused(error),
+            };
+            if let Err(error) = self.check_bound(target, clock, deadline, true) {
+                return ActionResult::refused(error);
+            }
+            arguments
         };
         match self.command(args, None, clock, deadline) {
             Ok(result) => action_result(result, "insert owned input"),
@@ -1217,6 +1330,7 @@ impl<R: CommandRunner> PhysicalTransport for TmuxHost<R> {
             PhysicalKey::Down => "Down",
             PhysicalKey::Tab => "Tab",
             PhysicalKey::Escape => "Escape",
+            PhysicalKey::ConfirmYes => "y",
         };
         match self.command(
             vec![
@@ -1247,6 +1361,115 @@ mod bound_process_tests {
         }
         fn sleep(&self, duration: Duration) {
             self.0.set(self.0.get() + duration);
+        }
+    }
+
+    fn syntax_receipt(stdout: &[u8]) -> CommandReceipt {
+        CommandReceipt {
+            end: CommandEnd::Exited,
+            exit_code: Some(0),
+            child_pid: Some(12345),
+            child_reaped: true,
+            stdout: stdout.to_vec(),
+            stderr: vec![],
+            elapsed: Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn only_exact_reaped_endpoint_bound_no_server_diagnostic_authorizes_cleanup() {
+        let endpoint = std::path::Path::new("/owned/private/tmux.sock");
+        let dead = || {
+            let mut receipt = syntax_receipt(b"");
+            receipt.exit_code = Some(1);
+            receipt.stderr = b"no server running on /owned/private/tmux.sock\n".to_vec();
+            receipt
+        };
+        assert!(confirms_no_server(&dead(), endpoint));
+        for case in 0..8 {
+            let mut bad = dead();
+            match case {
+                0 => bad.exit_code = Some(0),
+                1 => bad.exit_code = Some(2),
+                2 => bad.child_reaped = false,
+                3 => bad.stdout = b"$0\n".to_vec(),
+                4 => bad.stderr = b"no server running on /another/tmux.sock\n".to_vec(),
+                5 => bad.stderr = b"no sessions\n".to_vec(),
+                6 => bad.stderr = b"error connecting to /owned/private/tmux.sock (Permission denied)\n".to_vec(),
+                _ => bad.stderr.extend_from_slice(b"additional error\n"),
+            }
+            assert!(!confirms_no_server(&bad, endpoint), "case {case}");
+        }
+        // A successful query with no sessions still does not prove a dead server.
+        assert!(!confirms_no_server(&syntax_receipt(b""), endpoint));
+        for end in [CommandEnd::NotStarted, CommandEnd::TimedOut, CommandEnd::OutputLimit,
+            CommandEnd::OutputRejected, CommandEnd::IoError, CommandEnd::Unsupported]
+        {
+            let mut bad = dead(); bad.end = end;
+            assert!(!confirms_no_server(&bad, endpoint));
+        }
+    }
+
+    #[test]
+    fn paste_syntax_selects_unsanitized_bytes_without_breaking_legacy_tmux() {
+        for (syntax, unsanitized) in [
+            ("paste-buffer (pasteb) [-dprS] [-b buffer-name] [-s separator] [-t target-pane]\n", true),
+            ("paste-buffer [-dprS] [-b buffer-name] [-t target-pane]\n", true),
+            ("paste-buffer (pasteb) [-dpr] [-b buffer-name] [-t target-pane]\n", false),
+            // -S on an unrelated command is not a paste capability.
+            ("display-message [-S]\npaste-buffer (pasteb) [-dpr] [-b buffer-name]\n", false),
+        ] {
+            let arguments =
+                paste_buffer_arguments(&syntax_receipt(syntax.as_bytes()), "tac-owned", "%7")
+                    .unwrap();
+            let mut expected: Vec<OsString> = vec!["paste-buffer".into(), "-r".into()];
+            if unsanitized {
+                expected.push("-S".into());
+            }
+            expected.extend(["-b".into(), "tac-owned".into(), "-t".into(), "%7".into()]);
+            assert_eq!(arguments, expected);
+        }
+    }
+
+    #[test]
+    fn missing_malformed_or_ambiguous_paste_syntax_never_selects_legacy_fallback() {
+        for syntax in [
+            "",
+            "not-paste-buffer [-dprS]\n",
+            "paste-buffer\n",
+            "paste-buffer [-dpS] [-b buffer-name]\n",
+            "paste-buffer [-dprS\n",
+            "paste-buffer [-dpr]\npaste-buffer [-dprS]\n",
+        ] {
+            assert!(
+                paste_buffer_arguments(&syntax_receipt(syntax.as_bytes()), "tac-owned", "%7")
+                    .is_err(),
+                "{syntax:?}"
+            );
+        }
+        assert!(paste_buffer_arguments(
+            &syntax_receipt(b"paste-buffer [-dpr]\xff"), "tac-owned", "%7"
+        ).is_err());
+    }
+
+    #[test]
+    fn failed_or_incomplete_capability_receipts_cannot_authorize_a_paste() {
+        for end in [
+            CommandEnd::NotStarted,
+            CommandEnd::TimedOut,
+            CommandEnd::OutputLimit,
+            CommandEnd::OutputRejected,
+            CommandEnd::IoError,
+            CommandEnd::Unsupported,
+        ] {
+            let mut receipt = syntax_receipt(b"paste-buffer [-dprS]\n");
+            receipt.end = end;
+            assert!(paste_buffer_arguments(&receipt, "tac-owned", "%7").is_err());
+        }
+        for exit_code in [None, Some(1)] {
+            let mut receipt = syntax_receipt(b"paste-buffer [-dprS]\n");
+            receipt.exit_code = exit_code;
+            assert!(paste_buffer_arguments(&receipt, "tac-owned", "%7").is_err());
         }
     }
 

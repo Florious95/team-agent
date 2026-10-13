@@ -80,7 +80,7 @@ pub fn descriptor() -> ProviderDescriptor {
             carrier: Support::Supported(McpCarrier::Argv),
             scope: ResourceScope::RuntimeRoot,
             tools: &TEAM_TOOLS,
-            excludes_ambient_configuration: true,
+            isolation: McpIsolation::AmbientExcluded,
         },
         tool_names: ToolNameFacet {
             naming: Support::Supported(ToolNaming::StaticServer { key: "team" }),
@@ -145,6 +145,7 @@ impl PlanHook for Fake {
     fn plan(&self, resolved: &ResolvedLaunch) -> Result<LaunchPlan, ContractError> {
         let r = resolved.request();
         Ok(LaunchPlan {
+            launcher: None,
             executable_inputs: vec![],
             executable: r.paths.executable.clone(),
             arguments: vec![

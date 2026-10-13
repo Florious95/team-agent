@@ -221,6 +221,7 @@ fn business_acceptance_reuses_seen_then_submit_and_transcript_anti_replay_fence(
     let token = "[team-agent-token:msg-current]";
     let mut frame = CaptureFrame {
         scope: scope(), text: text(&format!("→ payload\n  {token}")),
+        cwd: None, input: None,
         baseline: Some(CaptureBaseline { scope: scope(), text: text("→ Add a follow-up") }),
         profile_id: PROFILE.into(), operation: Operation::FirstBusiness,
         message: Some(MessageId::new("msg-current").unwrap()), attempt: Some(AttemptId::new("attempt-current").unwrap()),

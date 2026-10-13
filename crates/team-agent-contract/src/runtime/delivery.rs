@@ -102,6 +102,7 @@ pub struct StartupDefinition {
     pub profile_id: &'static str,
     pub policy_sha256: Digest,
     pub predicate: &'static str,
+    pub key: PhysicalKey,
 }
 
 pub struct StartupConsent {
@@ -131,6 +132,7 @@ enum InputPurpose {
         profile: String,
         hash: Digest,
         predicate: String,
+        key: PhysicalKey,
     },
 }
 
@@ -202,7 +204,9 @@ impl PreparedInput {
         consent: &StartupConsent,
         definition: &StartupDefinition,
     ) -> Result<Self, ContractError> {
-        if definition.predicate.trim().is_empty() || definition.profile_id.is_empty() {
+        if definition.predicate.trim().is_empty() || definition.profile_id.is_empty()
+            || !matches!(definition.key, PhysicalKey::Enter | PhysicalKey::ConfirmYes)
+        {
             return Err(ContractError::Invalid("startup acknowledgement definition"));
         }
         Ok(Self {
@@ -213,6 +217,7 @@ impl PreparedInput {
                 profile: definition.profile_id.into(),
                 hash: definition.policy_sha256,
                 predicate: definition.predicate.into(),
+                key: definition.key,
             },
         })
     }
@@ -608,6 +613,11 @@ impl Run<'_, '_> {
         let frame = CaptureFrame {
             scope: sample.scope.clone(),
             text: sample.text,
+            cwd: Some(self.request.target.cwd.path.clone()),
+            input: std::str::from_utf8(&self.request.input.bytes).ok().map(|text| InputShape {
+                sha256: digest(&self.request.input.bytes), lines: text.lines().count(),
+                first_line: text.lines().next().unwrap_or_default().into(),
+            }),
             baseline: self.baseline.clone(),
             profile_id: self.request.policy.profile().id.into(),
             operation: self.request.operation,
@@ -1121,12 +1131,13 @@ impl Run<'_, '_> {
         self.journal_started = true;
         self.report.persistence = PersistenceState::Durable;
         self.input_gate()?;
-        if let InputPurpose::Startup { predicate, .. } = &self.request.input.purpose {
+        if let InputPurpose::Startup { predicate, key, .. } = &self.request.input.purpose {
             let guard = Guard::Startup(predicate.clone());
+            let key = *key;
             self.wait_guard(&guard, self.request.deadline, false, self.clock.now())?;
             self.press(
                 StepKind::StartupAck,
-                policy.initial_submit,
+                key,
                 &guard,
                 self.request.deadline,
             )?;

@@ -57,6 +57,8 @@ pub(crate) const STATUS_REMINDER: &str =
     "Next: use team-agent inbox leader -n 3 for replies. Status is not proof of task completion; do not inspect worker terminal content.";
 
 pub mod adapters;
+#[cfg(unix)]
+mod shutdown_socket;
 pub mod attach_app_server_leader;
 pub mod diagnose;
 pub mod emit;
@@ -1193,13 +1195,17 @@ pub mod lifecycle_port {
         }
         let workspace_socket = crate::tmux_backend::socket_name_for_workspace(workspace);
         let source = state.get("tmux_socket_source").and_then(Value::as_str);
-        let owned = source == Some("workspace")
-            || source.is_none()
-                && endpoint_matches_workspace_socket(&endpoint, workspace, &workspace_socket);
+        let owned = (source == Some("workspace") || source.is_none())
+            && endpoint_matches_workspace_socket(&endpoint, workspace, &workspace_socket);
         if !owned {
             return None;
         }
         let socket_file = socket_file_for_endpoint(&endpoint);
+        if socket_file.as_ref().and_then(|path| path.file_name())
+            != Some(std::ffi::OsStr::new(&workspace_socket))
+        {
+            return None;
+        }
         Some(OwnedShutdownEndpoint {
             endpoint,
             socket_file,
@@ -1234,9 +1240,18 @@ pub mod lifecycle_port {
         event_log: &crate::event_log::EventLog,
     ) -> OwnedEndpointCleanup {
         let mut cleanup = OwnedEndpointCleanup::default();
-        cleanup.remaining_sessions = transport
-            .list_targets()
-            .unwrap_or_default()
+        let targets = match transport.list_targets() {
+            Ok(targets) => targets,
+            Err(error) => {
+                cleanup.error = Some(format!("owned endpoint session probe failed: {error}"));
+                if let Some(path) = endpoint.socket_file.as_ref() {
+                    cleanup.skipped_files.push(path.display().to_string());
+                    cleanup.residual_files.push(path.display().to_string());
+                }
+                return cleanup;
+            }
+        };
+        cleanup.remaining_sessions = targets
             .into_iter()
             .map(|pane| pane.session.as_str().to_string())
             .collect::<std::collections::BTreeSet<_>>()
@@ -1257,18 +1272,134 @@ pub mod lifecycle_port {
             );
             return cleanup;
         }
-        // Endpoint ownership is not sufficient authority to tear down a tmux
-        // server: an endpoint can be shared after launch.  Leave both the
-        // server and its socket file intact; only explicitly owned sessions
-        // are removed above.
+        // Empty enumeration is not server-death proof. Never kill-server:
+        // remove only the exact workspace socket after an independent refused
+        // nonblocking connection and fresh owned parent/socket inode fences.
+        #[cfg(unix)]
+        if let Some(path) = endpoint.socket_file.as_ref() {
+            use super::shutdown_socket::{remove_dead_socket, SocketCleanup};
+            match remove_dead_socket(path) {
+                Ok(SocketCleanup::Removed) => {
+                    cleanup.removed_files.push(path.display().to_string());
+                }
+                Ok(SocketCleanup::Absent) => {}
+                Ok(SocketCleanup::Preserved) => {
+                    cleanup.skipped_files.push(path.display().to_string());
+                    cleanup.residual_files.push(path.display().to_string());
+                }
+                Err(error) => {
+                    cleanup.skipped_files.push(path.display().to_string());
+                    cleanup.residual_files.push(path.display().to_string());
+                    cleanup.error = Some(format!("owned socket cleanup refused: {error}"));
+                }
+            }
+        }
         let _ = event_log.write(
-            "shutdown.owned_endpoint_cleanup_skipped",
+            "shutdown.owned_endpoint_cleanup",
             json!({
                 "endpoint": endpoint.endpoint,
-                "reason": "server_and_socket_cleanup_disabled_fail_closed",
+                "removed_files": cleanup.removed_files,
+                "skipped_files": cleanup.skipped_files,
+                "residual_files": cleanup.residual_files,
+                "error": cleanup.error,
             }),
         );
         cleanup
+    }
+
+    #[cfg(all(test, unix))]
+    #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    mod shutdown_socket_tests {
+        use super::*;
+        use crate::transport::test_support::OfflineTransport;
+        use crate::transport::{PaneId, PaneInfo};
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+
+        #[test]
+        fn shutdown_socket_selection_rejects_shared_external_and_false_workspace_sources() {
+            let workspace = Path::new("/tmp").join(format!("ta-shutdown-select-{}-{}",
+                std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+            std::fs::create_dir(&workspace).unwrap();
+            let workspace = workspace.canonicalize().unwrap();
+            let name = crate::tmux_backend::socket_name_for_workspace(&workspace);
+            let transport = OfflineTransport::new();
+            let selected = json!({"tmux_socket": name, "tmux_socket_source": "workspace"});
+            assert!(owned_shutdown_endpoint(&workspace, &selected, &transport).is_some());
+            for delta in [
+                json!({"is_external_leader": true}),
+                json!({"tmux_socket_source": "leader_env"}),
+                json!({"tmux_socket": "default"}),
+                json!({"tmux_socket": "/foreign/ta-not-this-workspace"}),
+                json!({"tmux_socket_source": "shared"}),
+            ] {
+                let mut state = selected.clone();
+                state.as_object_mut().unwrap().extend(delta.as_object().unwrap().clone());
+                assert!(owned_shutdown_endpoint(&workspace, &state, &transport).is_none());
+            }
+            std::fs::remove_dir(workspace).unwrap();
+        }
+
+        #[test]
+        fn shutdown_socket_cleanup_removes_only_dead_socket_and_reports_live_residual() {
+            let root = Path::new("/tmp").join(format!("ta-root-shutdown-{}-{}",
+                std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+            std::fs::create_dir(&root).unwrap();
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let root = root.canonicalize().unwrap();
+            let path = root.join("owned.sock");
+            let endpoint = OwnedShutdownEndpoint {
+                endpoint: path.display().to_string(), socket_file: Some(path.clone()),
+            };
+            let log = crate::event_log::EventLog::new(&root);
+            let transport = OfflineTransport::new();
+            let listener = UnixListener::bind(&path).unwrap();
+            let live = cleanup_owned_empty_endpoint(&transport, &endpoint, &log);
+            assert_eq!(live.residual_files, vec![path.display().to_string()]);
+            assert!(live.removed_files.is_empty());
+            assert!(path.exists());
+            drop(listener);
+            let dead = cleanup_owned_empty_endpoint(&transport, &endpoint, &log);
+            assert_eq!(dead.removed_files, vec![path.display().to_string()]);
+            assert!(dead.residual_files.is_empty());
+            assert!(dead.error.is_none());
+            assert!(!path.exists());
+            assert!(!transport.calls().contains(&"kill_server"));
+            std::fs::remove_dir_all(root).unwrap();
+        }
+
+        #[test]
+        fn shutdown_socket_cleanup_preserves_sibling_and_unknown_session_probe() {
+            let root = Path::new("/tmp").join(format!("ta-shutdown-sibling-{}-{}",
+                std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+            std::fs::create_dir(&root).unwrap();
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let root = root.canonicalize().unwrap();
+            let path = root.join("owned.sock");
+            drop(UnixListener::bind(&path).unwrap());
+            let endpoint = OwnedShutdownEndpoint {
+                endpoint: path.display().to_string(), socket_file: Some(path.clone()),
+            };
+            let log = crate::event_log::EventLog::new(&root);
+            let sibling = OfflineTransport::new().with_targets(vec![PaneInfo {
+                pane_id: PaneId::new("%1"), session: crate::transport::SessionName::new("foreign"),
+                window_index: None, window_name: None, pane_index: None, tty: None,
+                current_command: None, current_path: None, active: true, pane_pid: None,
+                leader_env: std::collections::BTreeMap::new(),
+            }]);
+            let kept = cleanup_owned_empty_endpoint(&sibling, &endpoint, &log);
+            assert_eq!(kept.remaining_sessions, vec!["foreign".to_string()]);
+            assert!(kept.removed_files.is_empty());
+            assert!(path.exists());
+            let failed = OfflineTransport::new().with_list_targets_error("unknown");
+            let refused = cleanup_owned_empty_endpoint(&failed, &endpoint, &log);
+            assert!(refused.error.is_some());
+            assert_eq!(refused.residual_files, vec![path.display().to_string()]);
+            assert!(path.exists());
+            assert!(!sibling.calls().contains(&"kill_server"));
+            assert!(!failed.calls().contains(&"kill_server"));
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     pub fn shutdown_with_transport(

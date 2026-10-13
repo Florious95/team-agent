@@ -307,6 +307,7 @@ pub(crate) fn start_agent_at_paths(
             &window,
             noop_pane.as_ref(),
         )?;
+        state["agents"][agent_id.as_str()]["explicit_stop"] = serde_json::Value::Bool(false);
         let team_key = restart_projection_team_key(&state, team);
         save_restart_projected_state(workspace, &mut state, &team_key, &[agent_id.as_str()])?;
         if let Ok(spec) = load_team_spec(spec_workspace) {
@@ -1258,6 +1259,7 @@ pub(super) fn stop_agent_at_paths(
         let _ = write_stop_drain_event(workspace, agent_id, &target_str, &drain_evidence);
     }
     mark_agent_stopped(&mut state, agent_id, agent, &window)?;
+    state["agents"][agent_id.as_str()]["explicit_stop"] = serde_json::Value::Bool(true);
     let team_key = restart_projection_team_key(&state, team);
     // golden operations.py:95: save_team_scoped_state (team projection) — NOT a raw save, so a
     // multi-team workspace keeps the other teams' persisted runtime state instead of being clobbered.
@@ -1380,6 +1382,7 @@ pub(super) fn mark_agent_started(
         }
     }
     agent.insert("status".to_string(), serde_json::json!("running"));
+    agent.insert("explicit_stop".to_string(), serde_json::Value::Bool(false));
     agent.insert("agent_id".to_string(), serde_json::json!(agent_id.as_str()));
     agent.insert("window".to_string(), serde_json::json!(window));
     agent.insert(
@@ -1741,6 +1744,7 @@ fn reset_agent_at_paths(
         .and_then(serde_json::Value::as_object_mut)
     {
         obj.insert("spawn_epoch".to_string(), serde_json::json!(new_epoch));
+        obj.insert("explicit_stop".to_string(), serde_json::Value::Bool(false));
     }
     let team_key = restart_projection_team_key(&state, team);
     sync_restart_team_projections(&mut state, &team_key);

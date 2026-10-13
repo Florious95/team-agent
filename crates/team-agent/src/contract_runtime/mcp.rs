@@ -187,6 +187,9 @@ fn run_observed(args: &[String], diagnostics: &mut Diagnostics) -> Result<(), Ba
     };
     diagnostics.fields["scope"] = json!(identity.scope.as_str());
     let seat = diagnostics.step("target_wait", || wait_target(&backend.store, &identity))?;
+    if seat.server_key != super::registry::provider(seat.provider.as_str())?.server_key_for(&identity)? {
+        return Err(Error::Fence.into());
+    }
     let target = seat
         .physical
         .as_ref()

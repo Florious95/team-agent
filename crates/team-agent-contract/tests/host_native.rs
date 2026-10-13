@@ -2,7 +2,7 @@
 mod physical_support;
 use physical_support::*;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
@@ -32,7 +32,20 @@ fn configured_binary(key: &str) -> PathBuf {
 /// Reproduce a clean caller without changing the test process's environment.
 /// Every actual tmux client, including spawn/query/capture/close, lacks locale hints.
 #[derive(Default)]
-struct NoLocaleRunner(RealCommandRunner);
+struct NoLocaleRunner(RealCommandRunner, Vec<Value>);
+
+// Only controlled fixture bytes, never real provider output. Keep bounded ends
+// and explicit truncation so a partial helper event cannot masquerade as complete.
+fn fixture_bytes(bytes: &[u8]) -> Value {
+    let head = bytes.len().min(2048);
+    let tail = bytes.len().saturating_sub(2048).max(head);
+    json!({
+        "bytes": bytes.len(), "sha256": digest_hex(digest(bytes)),
+        "ends_lf": bytes.ends_with(b"\n"), "truncated": tail > head,
+        "head": String::from_utf8_lossy(&bytes[..head]),
+        "tail": String::from_utf8_lossy(&bytes[tail..])
+    })
+}
 
 impl CommandRunner for NoLocaleRunner {
     fn run(&mut self, request: &CommandRequest) -> CommandReceipt {
@@ -41,7 +54,7 @@ impl CommandRunner for NoLocaleRunner {
             environment.set.remove(key);
             environment.remove.insert(key.into());
         }
-        self.0.run(&CommandRequest {
+        let receipt = self.0.run(&CommandRequest {
             executable: request.executable.clone(),
             arguments: request.arguments.clone(),
             cwd: request.cwd.clone(),
@@ -50,7 +63,17 @@ impl CommandRunner for NoLocaleRunner {
             budget: request.budget,
             limits: request.limits,
             reject_stdout: request.reject_stdout,
-        })
+        });
+        if request.arguments.iter().any(|arg| arg == "capture-pane") {
+            if self.1.len() == 3 {
+                self.1.remove(0);
+            }
+            self.1.push(json!({
+                "end": format!("{:?}", receipt.end), "exit_code": receipt.exit_code,
+                "elapsed_ms": receipt.elapsed.as_millis(), "stdout": fixture_bytes(&receipt.stdout)
+            }));
+        }
+        receipt
     }
 }
 
@@ -85,9 +108,31 @@ fn raw_tmux(
     })
 }
 
+// An ignored helper in this very test executable is the native image. Libtest
+// accepts multiple positional filters: only the fixed helper is an ignored
+// test; the remaining filters carry controlled model/path/prompt/server argv.
+// The `--` boundary preserves literal operands (including quotes and newlines).
+#[test]
+#[ignore = "internal owned TTY fixture; invoked only by host_native cases"]
+fn native_terminal_fixture() {
+    native_terminal::run();
+}
+
+// Failure-only, metadata-only sampling of this test's owned child. A fresh
+// capture is diagnostic, never a replacement stamp adopted by the host.
+fn owned_process_diagnostic(pid: u32, executable: &Path, hash: Digest) -> String {
+    #[cfg(target_os = "macos")]
+    let image = i32::try_from(pid)
+        .ok()
+        .and_then(|pid| libproc::libproc::proc_pid::pidpath(pid).ok());
+    #[cfg(target_os = "linux")]
+    let image = std::fs::read_link(format!("/proc/{pid}/exe")).ok();
+    let observed = capture_process(pid, executable, hash, Duration::from_secs(2));
+    format!("pid={pid}; kernel_image={image:?}; fixed_image_capture={observed:?}")
+}
+
 fn native_case(mode: &str, content: &str, expected_keys: usize) {
     let tmux = configured_binary("CONTRACT_TMUX");
-    let python = configured_binary("CONTRACT_PYTHON");
     assert_eq!(
         std::env::var("CONTRACT_OLD_SCOPE").as_deref(),
         Ok("fixture-old-scope"),
@@ -113,10 +158,11 @@ fn native_case(mode: &str, content: &str, expected_keys: usize) {
     let cwd_path = directory.path().join("work '中文'");
     std::fs::create_dir(&cwd_path).unwrap();
     let cwd = resolve_cwd(&cwd_path).unwrap();
-    let native_hash = fingerprint_file(&python, 512 * 1024 * 1024, Duration::from_secs(5)).unwrap();
+    let candidate = std::env::current_exe().unwrap().canonicalize().unwrap();
+    let (executable, native_hash) = native_terminal::copy_executable(directory.path());
     let n = native(native_hash);
     let d = descriptor(mode, &n);
-    let h = hooks();
+    let h = native_terminal::hooks();
     let launch = resolve_launch(
         &d,
         &h,
@@ -133,8 +179,8 @@ fn native_case(mode: &str, content: &str, expected_keys: usize) {
             identity,
             native: n,
             paths: LaunchPaths {
-                executable: python,
-                candidate: std::env::current_exe().unwrap(),
+                executable: executable.clone(),
+                candidate,
                 cwd: cwd.clone(),
                 runtime_root: directory.path().to_path_buf(),
             },
@@ -148,7 +194,9 @@ fn native_case(mode: &str, content: &str, expected_keys: usize) {
         None,
     )
     .unwrap();
-    let plan = team_agent_contract::contract::hooks::PlanHook::plan(&HOOK, &launch).unwrap();
+    let plan = team_agent_contract::contract::hooks::PlanHook::plan(&native_terminal::PLAN, &launch)
+        .unwrap();
+    let events_name = native_terminal::event_log_name(&launch.request().identity);
     let clock = RealClock::new();
     let mut host = TmuxHost::new(
         directory,
@@ -178,7 +226,14 @@ fn native_case(mode: &str, content: &str, expected_keys: usize) {
         &clock,
         clock.now() + Duration::from_secs(20),
     );
-    assert!(spawn.problem.is_none(), "spawn receipt: {spawn:?}");
+    assert!(
+        spawn.problem.is_none(),
+        "spawn receipt: {spawn:?}; owned process: {:?}",
+        spawn
+            .pane
+            .as_ref()
+            .map(|pane| owned_process_diagnostic(pane.pid, &executable, native_hash))
+    );
     let target = spawn.target.unwrap();
     let tmux_hash = fingerprint_file(&tmux, 512 * 1024 * 1024, Duration::from_secs(5)).unwrap();
     let server = capture_process(
@@ -192,7 +247,13 @@ fn native_case(mode: &str, content: &str, expected_keys: usize) {
     loop {
         let frame = host
             .capture(&target, &clock, ready_until, Duration::from_millis(500))
-            .unwrap();
+            .unwrap_or_else(|error| {
+                panic!(
+                    "controlled fixture capture: {error}; expected={:?}; {}",
+                    target.process,
+                    owned_process_diagnostic(target.process.identity.pid, &executable, native_hash)
+                )
+            });
         if frame.text.lines().rfind(|line| !line.trim().is_empty()) == Some("READY|-") {
             break;
         }
@@ -261,6 +322,17 @@ fn native_case(mode: &str, content: &str, expected_keys: usize) {
         None,
         &clock,
     );
+    if report.disposition != InjectionDisposition::NativeAccepted {
+        let events = match host.directory().read_file(&events_name, 2 * 1024 * 1024) {
+            Ok(bytes) => fixture_bytes(&bytes),
+            Err(error) => json!({"read_error": error.to_string()}),
+        };
+        // Preserve the actual captures used during injection, not a new capture
+        // after the deadline. No corrective input, retry, or extra native action.
+        println!("CONTROLLED_NATIVE_FAILURE={}", json!({
+            "case": mode, "last_captures": host.runner_mut().1, "helper_events": events
+        }));
+    }
     assert_eq!(
         report.disposition,
         InjectionDisposition::NativeAccepted,
@@ -296,7 +368,7 @@ fn native_case(mode: &str, content: &str, expected_keys: usize) {
         .any(|name| name.starts_with("tac-")));
     let raw = host
         .directory()
-        .read_file("native-events.jsonl", 2 * 1024 * 1024)
+        .read_file(&events_name, 2 * 1024 * 1024)
         .unwrap();
     let events: Vec<Value> = std::str::from_utf8(&raw)
         .unwrap()
@@ -319,6 +391,7 @@ fn native_case(mode: &str, content: &str, expected_keys: usize) {
         assert_eq!(pastes.len(), 1);
         assert_eq!(pastes[0]["payload_sha256"], digest_hex(digest(input.bytes())));
         assert_eq!(pastes[0]["payload_bytes"], input.bytes().len());
+        assert_eq!(pastes[0]["payload"], json!(input.bytes()));
     }
     let keys: Vec<_> = events
         .iter()
@@ -329,6 +402,10 @@ fn native_case(mode: &str, content: &str, expected_keys: usize) {
     assert!(!events
         .iter()
         .any(|event| event["kind"] == "unexpected_byte"));
+    assert_eq!(events[0]["pid"], target.process.identity.pid);
+    assert_eq!(events[0]["mode"], mode);
+    assert_eq!(events[0]["prompt"], launch.request().prompt.as_deref().unwrap());
+    assert_eq!(events[0]["server"], "fixture-server");
     assert_eq!(events[0]["cwd"], cwd.path.to_str().unwrap());
     assert_eq!(events[0]["fixture_env"], "quotes ' 中文\nnew line");
     assert_eq!(events[0]["old_scope_present"], false);
@@ -344,6 +421,10 @@ fn native_case(mode: &str, content: &str, expected_keys: usize) {
         ProcessState::Exited,
         "close receipt: {close:?}"
     );
+    assert_eq!(close.socket_cleanup.outcome, StepOutcome::Confirmed, "{close:?}");
+    assert!(close.socket_cleanup.error.is_none());
+    assert!(!close.socket_preserved);
+    assert_eq!(std::fs::symlink_metadata(&target.endpoint).unwrap_err().kind(), std::io::ErrorKind::NotFound);
     let wait_until = clock.now() + Duration::from_secs(3);
     while sample_process(&server) == ProcessState::Alive && clock.now() < wait_until {
         clock.sleep(Duration::from_millis(10));

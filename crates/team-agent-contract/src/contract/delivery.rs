@@ -14,6 +14,8 @@ pub enum PhysicalKey {
     Down,
     Tab,
     Escape,
+    /// Registered, explicitly authorized startup consent only; never a submit key.
+    ConfirmYes,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,6 +158,7 @@ impl SubmitPolicy {
         }
         for action in self.queue_flush {
             if !nonblank(action.predicate)
+                || action.key == PhysicalKey::ConfirmYes
                 || predicates.contains(&action.predicate)
                 || action.max_presses == 0
                 || action.interval.is_zero()
@@ -340,11 +343,22 @@ pub struct CaptureBaseline {
     pub text: String,
 }
 
+/// Immutable payload shape supplied by the executor, not inferred from terminal
+/// text. Used to correlate native folded/truncated UI with this exact input.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputShape {
+    pub sha256: Digest,
+    pub lines: usize,
+    pub first_line: String,
+}
+
 /// All context comes from this serialized attempt; H6 needs no mutable global state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CaptureFrame {
     pub scope: EvidenceScope,
     pub text: String,
+    pub cwd: Option<std::path::PathBuf>,
+    pub input: Option<InputShape>,
     pub baseline: Option<CaptureBaseline>,
     pub profile_id: String,
     pub operation: Operation,
