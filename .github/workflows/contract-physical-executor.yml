@@ -178,6 +178,7 @@ jobs:
               ;;
             full)
               run_case root-stopped cargo test -p team-agent --lib --locked stop -- --test-threads=1
+              run_case root-shutdown cargo test -p team-agent --lib --locked shutdown -- --test-threads=1
               run_case root-restart cargo test -p team-agent --lib --locked lifecycle::restart -- --test-threads=1
               run_case root-contract cargo test -p team-agent --lib --locked contract_runtime -- --test-threads=1
               run_case public-lifecycle cargo test -p team-agent --test add_agent_restart_saveconflict_contract --locked -- --test-threads=1
