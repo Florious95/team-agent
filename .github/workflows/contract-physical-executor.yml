@@ -26,6 +26,7 @@ on:
           - full
           - host-ancestry
           - host-native
+          - issue321
 
 permissions:
   contents: read
@@ -176,6 +177,15 @@ jobs:
             host-native)
               run_case host-native cargo test --manifest-path crates/team-agent-contract/Cargo.toml --test host_native --locked -- --test-threads=1
               ;;
+            issue321)
+              run_case root-tmux cargo test -p team-agent --lib --locked tmux_backend -- --test-threads=1
+              run_case root-transport cargo test -p team-agent --lib --locked transport:: -- --test-threads=1
+              run_case root-messaging cargo test -p team-agent --lib --locked messaging:: -- --test-threads=1
+              run_case root-input-lock cargo test -p team-agent --lib --locked pane_input_lock -- --test-threads=1
+              run_case input-channel-lock cargo test -p team-agent --test pane_input_channel_lock --locked -- --test-threads=1
+              run_case contract-birth-port cargo test --manifest-path crates/team-agent-contract/Cargo.toml --lib --locked process_birth_identity -- --test-threads=1
+              run_case contract-composer-port cargo test --manifest-path crates/team-agent-contract/Cargo.toml --lib --locked composer_observation_tests -- --test-threads=1
+              ;;
             full)
               run_case root-stopped cargo test -p team-agent --lib --locked stop -- --test-threads=1
               run_case root-shutdown cargo test -p team-agent --lib --locked shutdown -- --test-threads=1
@@ -191,6 +201,38 @@ jobs:
               ;;
             *) exit 64 ;;
           esac
+      - name: Check scoped formatting and retain a remote formatting patch
+        if: always() && inputs.regression_scope == 'issue321'
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=(
+            crates/team-agent-contract/src/host/process.rs
+            crates/team-agent-contract/src/providers/cursor/interaction.rs
+            crates/team-agent/src/lifecycle/pane_input_lock.rs
+            crates/team-agent/src/messaging/delivery.rs
+            crates/team-agent/src/messaging/enter_rescue.rs
+            crates/team-agent/src/messaging/enter_rescue_tests.rs
+            crates/team-agent/src/messaging/helpers.rs
+            crates/team-agent/src/messaging/mod.rs
+            crates/team-agent/src/messaging/scheduler.rs
+            crates/team-agent/src/messaging/tests/basic.rs
+            crates/team-agent/src/messaging/types.rs
+            crates/team-agent/src/tmux_backend.rs
+            crates/team-agent/src/tmux_backend/native_input.rs
+            crates/team-agent/src/tmux_backend/native_input_tests.rs
+            crates/team-agent/src/transport.rs
+            crates/team-agent/src/transport/native_input.rs
+          )
+          set +e
+          rustfmt --edition 2021 --config skip_children=true --check "${files[@]}" > regression-evidence/format.log 2>&1
+          rc=$?
+          set -e
+          printf '%s\n' "$rc" > regression-evidence/format.exit
+          rustfmt --edition 2021 --config skip_children=true "${files[@]}"
+          git diff --binary -- "${files[@]}" > regression-evidence/format.patch
+          git restore --worktree -- "${files[@]}"
+          exit "$rc"
       - name: Bind retained evidence hashes
         if: always()
         shell: bash

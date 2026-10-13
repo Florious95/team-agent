@@ -105,6 +105,59 @@ fn folded_marker(value: &str) -> Option<&str> {
     }) { return None; }
     Some(marker)
 }
+#[cfg(test)]
+mod composer_observation_tests {
+    use super::*;
+
+    fn frame(composer: &str, history: &str) -> String {
+        format!("Cursor Agent\nv2026.10.01-e373342\n{history}\n→ {composer}\nGrok 4.7 High Run Everything\n")
+    }
+
+    #[test]
+    fn inspect_composer_observes_only_current_label_without_granting_seen() {
+        let label = "[Pasted text #1 +25 lines]";
+        let draft = frame(label, "old history");
+        let (surface, _, current, _) = inspect_composer(&draft).unwrap();
+        assert_eq!(surface, InputSurface::ComposerContainsPaste);
+        assert_eq!(current, Some(label));
+        let ready = frame("Plan, search, build anything", label);
+        let (surface, _, current, _) = inspect_composer(&ready).unwrap();
+        assert_eq!(surface, InputSurface::ComposerReady);
+        assert_eq!(current, None);
+        let busy = frame("Add a follow-up ctrl+c to stop", label);
+        assert_eq!(inspect_composer(&busy).unwrap().0, InputSurface::Busy);
+        assert!(inspect_composer(&frame(label, "⠘⠆ Working")).unwrap().3);
+        assert!(inspect_composer("→ [Pasted text #1 +25 lines]").is_none());
+        for marker in ["[Pasted text #0 +25 lines]", "[Pasted text #01 +25 lines]", "[Pasted text #1 +0 lines]", "[Pasted text #1 +25 lines] suffix"] {
+            assert_eq!(inspect_composer(&frame(marker, "")).unwrap().2, None);
+        }
+        // The port deliberately returns these rows: the root must reject extra
+        // editable content, not treat first-line ComposerReady as whole-editor empty.
+        let extra = frame("Plan, search, build anything\nother editable line", "");
+        assert!(inspect_composer(&extra).unwrap().1.contains(&"other editable line"));
+    }
+}
+
+/// Read-only native composer view; ownership/correlation remains the caller's job.
+/// Reuses the contract grammar without granting acceptance or authorizing a key.
+pub fn inspect_composer(text: &str) -> Option<(InputSurface, Vec<&str>, Option<&str>, bool)> {
+    let observed = surface(text);
+    if matches!(observed, InputSurface::ShellOrUnknown) {
+        return None;
+    }
+    let composer = composer_lines(text)?;
+    let marker = composer.first()
+        .and_then(|line| line.strip_prefix("→ "))
+        .and_then(|value| folded_marker(value.trim()));
+    let lines: Vec<_> = text.lines().map(str::trim).collect();
+    let index = lines.iter().rposition(|line| line.starts_with("→ "))?;
+    let mut preceding = lines[..index].iter().rev().filter(|line| !line.is_empty());
+    let mut status = preceding.next().copied();
+    if status.is_some_and(|line| line.starts_with("Tip: ")) { status = preceding.next().copied(); }
+    let busy = matches!(observed, InputSurface::Busy) || status.is_some_and(working);
+    Some((observed, composer, marker, busy))
+}
+
 fn correlate_folded_input(frame: &CaptureFrame, observation: &mut InteractionObservation) -> bool {
     let latched = match &frame.paste_latch {
         PasteLatch::Seen { native_identity } | PasteLatch::Gone { native_identity }

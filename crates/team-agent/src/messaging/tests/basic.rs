@@ -117,6 +117,8 @@ fn scheduled_kind_serde_byte_locked() {
         serde_json::to_string(&ScheduledKind::TrustRetry).unwrap(),
         "\"trust_retry\""
     );
+    assert_eq!(serde_json::to_string(&ScheduledKind::EnterRescue).unwrap(), "\"enter_rescue\"");
+    assert_eq!(super::super::helpers::parse_scheduled_kind("enter_rescue").unwrap(), ScheduledKind::EnterRescue);
 }
 
 #[test]

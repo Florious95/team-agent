@@ -73,6 +73,8 @@ use crate::transport::{
     SubmitVerification, Target, Transport, TransportError, TurnVerification, WindowName,
 };
 
+mod native_input;
+
 pub const PANE_BINDING_NONCE_METADATA_KEY: &str = "TEAM_AGENT_PANE_BINDING_NONCE";
 pub(crate) const KEEPALIVE_WINDOW_NAME: &str = "[team-agent keepalive]";
 const TMUX_PANE_BINDING_NONCE_OPTION: &str = "@team_agent_pane_binding_nonce";
@@ -3249,14 +3251,19 @@ impl Transport for TmuxBackend {
         bracketed: bool,
         observer: Option<&dyn SubmitObserver>,
     ) -> Result<InjectReport, TransportError> {
+        if let (Some(request), InjectPayload::Text(text), Key::Enter) =
+            (crate::transport::native_input::current_request(), payload, submit)
+        {
+            return self.inject_native_input(target, text, bracketed, request, observer);
+        }
         let pane = pane_from_target(target);
-        let _pane_input = crate::lifecycle::pane_input_lock::acquire_or_proceed(
+        let _pane_input = crate::lifecycle::pane_input_lock::acquire_for_write(
             crate::lifecycle::pane_input_lock::PaneInputLockRequest {
                 workspace: self.event_workspace.as_deref(),
                 target_key: pane.as_str(),
                 operation: "inject",
             },
-        );
+        ).map_err(|_| TransportError::NativeInputNotReady { reason: "required_guard_active".into() })?;
         // U1 #7: pane readback signal for the non-pasted-prompt text path.
         let mut token_visible_for_report: Option<bool> = None;
         match payload {
@@ -3811,15 +3818,21 @@ impl Transport for TmuxBackend {
         })
     }
 
+    fn rescue_enter(&self, evidence: &crate::transport::native_input::NativeInputEvidence, authorize: &dyn Fn() -> bool)
+        -> Result<crate::transport::native_input::EnterRescueOutcome, TransportError>
+    {
+        self.rescue_native_input(evidence, authorize)
+    }
+
     fn send_keys(&self, target: &Target, keys: &[Key]) -> Result<(), TransportError> {
         let pane = pane_from_target(target);
-        let _pane_input = crate::lifecycle::pane_input_lock::acquire_or_proceed(
+        let _pane_input = crate::lifecycle::pane_input_lock::acquire_for_write(
             crate::lifecycle::pane_input_lock::PaneInputLockRequest {
                 workspace: self.event_workspace.as_deref(),
                 target_key: pane.as_str(),
                 operation: "send_keys",
             },
-        );
+        ).map_err(|_| TransportError::NativeInputNotReady { reason: "required_guard_active".into() })?;
         if keys.contains(&Key::CancelMode) {
             if let Some(mode) = pane_mode_from_raw(self.query(target, PaneField::PaneMode)?) {
                 let argv = crate::transport::tmux_cancel_mode_argv(&pane, mode);

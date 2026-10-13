@@ -107,6 +107,7 @@ pub(crate) fn parse_scheduled_kind(kind: &str) -> Result<ScheduledKind, Messagin
         "send" => Ok(ScheduledKind::Send),
         "health_ping" => Ok(ScheduledKind::HealthPing),
         "trust_retry" => Ok(ScheduledKind::TrustRetry),
+        "enter_rescue" => Ok(ScheduledKind::EnterRescue),
         other => Err(MessagingError::Validation(format!(
             "unknown scheduled event kind: {other}"
         ))),

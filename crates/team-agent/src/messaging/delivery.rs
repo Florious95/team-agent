@@ -683,26 +683,33 @@ fn deliver_prepared_message(
         resolved.metadata.as_ref(),
     );
     let recipient_cursor = recipient_is_cursor_agent(state, &message.recipient);
-    let inject_attempt = crate::tmux_backend::with_paste_to_submit_floor(
-        paste_to_submit_floor_for_recipient(state, &message.recipient),
-        || {
-            crate::tmux_backend::with_cursor_single_enter(recipient_cursor, || {
-                transport.inject_with_submit_observer(
-                    &target,
-                    &payload,
-                    Key::Enter,
-                    true,
-                    Some(&submit_observer),
-                )
-            })
-        },
-    );
+    let native_request = recipient_provider(state, &message.recipient)
+        .filter(|provider| matches!(provider, Provider::Pi | Provider::CursorAgent))
+        .filter(|_| message.recipient != "leader" && transport.probes_real_tmux_socket_roots())
+        .map(|provider| crate::transport::native_input::NativeInputRequest {
+            message_id: message_id.to_string(),
+            owner_team_id: canonical_owner_team_id.clone().unwrap_or_default(),
+            recipient: message.recipient.clone(), provider,
+            pane_id: resolved.metadata.as_ref().map(|meta| meta.target_pane_id.clone()).unwrap_or_default(),
+            pane_pid: resolved.metadata.as_ref().and_then(|meta| meta.target_pane_pid).unwrap_or_default(),
+            session: resolved.metadata.as_ref().map(|meta| meta.target_session.clone()).unwrap_or_default(),
+            window: resolved.metadata.as_ref().map(|meta| meta.target_window.clone()).unwrap_or_default(),
+        });
+    let guarded_native = native_request.is_some();
+    let (inject_attempt, native_evidence) = crate::transport::native_input::with_native_input(native_request, || {
+        crate::tmux_backend::with_paste_to_submit_floor(
+            paste_to_submit_floor_for_recipient(state, &message.recipient),
+            || crate::tmux_backend::with_cursor_single_enter(recipient_cursor, || {
+                transport.inject_with_submit_observer(&target, &payload, Key::Enter, true, Some(&submit_observer))
+            }),
+        )
+    });
     let inject_report = match inject_attempt {
         Ok(report) => {
             // grok 忙时第一次回车只入显式队列。默认 send-now：只重按回车顶出去。
             // 无 `Enter:send now` 时零次额外按键，claude/codex 行为不变。
             // cursor：第二下 Enter 打断进行中回合，不走 flush。
-            if !crate::provider::submit_now::keep_provider_queue_requested() && !recipient_cursor {
+            if !guarded_native && !crate::provider::submit_now::keep_provider_queue_requested() && !recipient_cursor {
                 match crate::provider::submit_now::flush_explicit_queue(transport, &target) {
                     Ok(flush) if flush.extra_enters > 0 => {
                         let _ = event_log.write(
@@ -732,6 +739,28 @@ fn deliver_prepared_message(
         }
         Err(error) => {
             let reason = format!("inject_failed:{error}");
+            if guarded_native {
+                let pasted = native_evidence.as_ref().filter(|evidence|
+                    evidence.phase >= crate::transport::native_input::NativeInputPhase::MayHavePasted);
+                let status = if let Some(evidence) = pasted {
+                    super::enter_rescue::park(store, evidence, attempt, &reason, event_log)?;
+                    "submitted_unverified"
+                } else {
+                    super::enter_rescue::release_no_effect(store, message_id, attempt)?;
+                    "target_resolved"
+                };
+                event_log.write("native_input.deferred", serde_json::json!({
+                    "message_id": message_id, "reason": reason, "status": status,
+                    "may_have_pasted": pasted.is_some(),
+                }))?;
+                return Ok(DeliveryOutcome {
+                    ok: false, status: DeliveryStatus::Queued,
+                    message_status: MessageStatusShadow(status.to_string()),
+                    message_id: Some(message_id.to_string()), verification: Some(reason),
+                    stage: Some(DeliveryStage::Inject), reason: None, channel: None,
+                    ack_forced_off: false, turn_verification: None,
+                });
+            }
             if message.recipient == "leader" {
                 store.mark(message_id, "failed", Some("leader_not_attached"))?;
                 event_log.write(
@@ -897,7 +926,11 @@ fn deliver_prepared_message(
                 turn_verification: Some(turn_verification),
             });
         }
-        store.mark(message_id, "submitted_unverified", Some(&reason))?;
+        if let Some(evidence) = native_evidence.as_ref() {
+            super::enter_rescue::park(store, evidence, attempt, &reason, event_log)?;
+        } else {
+            store.mark(message_id, "submitted_unverified", Some(&reason))?;
+        }
         return Ok(DeliveryOutcome {
             ok: false,
             status: DeliveryStatus::Failed,

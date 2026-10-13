@@ -153,6 +153,19 @@ fn identity_parts(_: u32) -> Result<(u32, String, PathBuf, PathBuf, bool), HostE
     ))
 }
 
+/// Observe the kernel birth of one live PID without authorizing its executable.
+/// Callers must separately bind ownership/image; this is only a PID-reuse fence.
+pub fn process_birth_identity(pid: u32) -> Result<String, HostError> {
+    if pid <= 1 {
+        return Err(HostError::new("process pid", HostErrorKind::Invalid));
+    }
+    let (_, birth, _, _, exited) = identity_parts(pid)?;
+    if exited {
+        return Err(HostError::new("process birth", HostErrorKind::Unknown));
+    }
+    Ok(birth)
+}
+
 /// Hash an already selected regular file with a finite byte/application-time budget.
 /// Callers canonicalize executable aliases deliberately; config/journal paths use no-follow ports.
 pub fn fingerprint_file(
@@ -552,6 +565,25 @@ pub fn sample_process(expected: &ProcessStamp) -> ProcessState {
 #[cfg(test)]
 mod ancestry_tests {
     use super::*;
+
+    #[test]
+    fn process_birth_identity_is_readonly_and_rejects_invalid_or_dead_pid() {
+        assert!(process_birth_identity(0).is_err());
+        assert!(process_birth_identity(1).is_err());
+        assert!(process_birth_identity(u32::MAX).is_err());
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            let current = process_birth_identity(std::process::id()).unwrap();
+            assert!(!current.is_empty());
+            assert_eq!(current, process_birth_identity(std::process::id()).unwrap());
+            let mut child = std::process::Command::new("/bin/sleep").arg("2").spawn().unwrap();
+            let pid = child.id();
+            let born = process_birth_identity(pid).unwrap();
+            assert_ne!(born, current);
+            assert!(child.wait().unwrap().success());
+            assert!(process_birth_identity(pid).is_err());
+        }
+    }
     use std::collections::BTreeMap;
 
     fn stamp(pid: u32, parent: u32) -> ProcessStamp {

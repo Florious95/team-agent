@@ -67,6 +67,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod native_input;
+
 #[cfg(test)]
 pub mod test_support;
 
@@ -727,6 +729,9 @@ pub enum AttachOutcome {
 /// transport 的 I/O / 子进程错误。能力性拒绝**不**走这里(用上面的 typed outcome)。
 #[derive(Debug, Error)]
 pub enum TransportError {
+    /// Guard refused before a paste/key; the owned evidence carries any later effect floor.
+    #[error("native input not ready: {reason}")]
+    NativeInputNotReady { reason: String },
     #[error("spawn failed on {backend:?}: {source}")]
     Spawn {
         backend: BackendKind,
@@ -975,6 +980,13 @@ pub trait Transport: Send + Sync {
             observer.after_physical_submit();
         }
         Ok(report)
+    }
+
+    /// Enter-only recovery; unsupported backends have an explicit zero-effect refusal.
+    fn rescue_enter(&self, _evidence: &native_input::NativeInputEvidence, _authorize: &dyn Fn() -> bool)
+        -> Result<native_input::EnterRescueOutcome, TransportError>
+    {
+        Ok(native_input::EnterRescueOutcome::NoEffect { reason: "unsupported_backend", reobserve: false })
     }
 
     fn send_keys(&self, target: &Target, keys: &[Key]) -> Result<(), TransportError>;
@@ -1227,10 +1239,7 @@ pub fn tmux_send_keys_argv(pane: &PaneId, keys: &[Key]) -> Vec<String> {
 /// boundary: 只管拼写,不管何时提交、提交是否成功;不发送、不验证
 /// ---
 pub fn tmux_submit_key_name(key: Key) -> &'static str {
-    match key {
-        Key::Enter => "C-m",
-        other => tmux_key_name(other),
-    }
+    tmux_key_name(key)
 }
 
 /// 投递提交：`send-keys -t <pane> <submit-spelling>`。

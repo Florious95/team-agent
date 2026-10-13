@@ -1,0 +1,185 @@
+#![allow(clippy::unwrap_used, clippy::panic)]
+use super::*;
+use crate::model::enums::Provider;
+use crate::transport::native_input::with_native_input;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[derive(Clone, Copy)]
+enum Mode { Normal, UnknownBefore, UnknownAfterPaste, UnknownAfterEnter, DelayedReady, Swallow }
+struct State { mode: Mode, captures: usize, pasted: usize, entered: usize, calls: Vec<Vec<String>>, nonce: String, busy: bool, provider: Provider }
+struct Runner(Arc<Mutex<State>>);
+fn pi(composer: &str, history: &str, busy: bool) -> String {
+    format!("{history}\n{}\n{composer}\n────────────────────────\ngpt-6-luna · max · 0%/272k · 0% · $0.00\n",
+        if busy {"── ⠋ Working ──────────────────"} else {"────────────────────"})
+}
+impl CommandRunner for Runner {
+    fn run(&self, argv: &[String]) -> Result<CommandOutput, std::io::Error> {
+        let mut state=self.0.lock().unwrap(); state.calls.push(argv.to_vec());
+        let marker="[team-agent-token:msg_one]";
+        let stdout=if argv.iter().any(|arg|arg=="display-message") {
+            format!("/tmp/owned-test.sock|%1|{}|session|worker|{}|0|120\n",std::process::id(),state.nonce)
+        } else if argv.iter().any(|arg|arg=="capture-pane") {
+            state.captures+=1;
+            if matches!(state.mode,Mode::UnknownBefore)
+                || (state.pasted>0 && state.entered==0 && matches!(state.mode,Mode::UnknownAfterPaste))
+                || (state.entered>0 && matches!(state.mode,Mode::UnknownAfterEnter))
+            { "startup warning/raw echo".into() }
+            else if state.entered>0 && (!matches!(state.mode,Mode::Swallow)||state.entered>=2) {pi("",marker,false)}
+            else if state.pasted>0 {pi(&format!("line\n{marker}"),"old",state.busy)}
+            else if matches!(state.mode,Mode::DelayedReady)&&state.captures<=2 {pi("existing draft","old",false)}
+            else {pi("","old",false)}
+        } else {
+            if argv.iter().any(|arg|arg=="paste-buffer") {state.pasted+=1;}
+            if argv.iter().any(|arg|arg=="send-keys") {
+                assert_eq!(argv.last().unwrap(),"Enter"); state.entered+=1;
+            }
+            String::new()
+        };
+        let stdout = if state.provider == Provider::CursorAgent && argv.iter().any(|arg|arg=="capture-pane") {
+            let (composer,history) = if state.entered>0 { ("Plan, search, build anything", "[Pasted text #2 +25 lines]") }
+                else if state.pasted>0 { ("[Pasted text #2 +25 lines]", "[Pasted text #1 +25 lines]") }
+                else { ("Plan, search, build anything", "[Pasted text #1 +25 lines]") };
+            format!("Cursor Agent\nv2026.10.01-e373342\n{history}\n→ {composer}\nGrok 4.7 High Run Everything\n/owned/project\n")
+        } else { stdout };
+        Ok(CommandOutput {success:true,code:Some(0),stdout,stderr:String::new()})
+    }
+}
+struct Fixture { path: std::path::PathBuf, backend: TmuxBackend, state: Arc<Mutex<State>> }
+impl Fixture {
+    fn new(mode: Mode) -> Self {
+        static NEXT: AtomicUsize=AtomicUsize::new(0);
+        let path=std::env::temp_dir().join(format!("ta-native-input-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::SeqCst)));
+        std::fs::create_dir(&path).unwrap();
+        let state=Arc::new(Mutex::new(State {mode,captures:0,pasted:0,entered:0,calls:vec![],nonce:"owned-nonce".into(),busy:false,provider:Provider::Pi}));
+        let backend=TmuxBackend::with_runner_for_workspace(Box::new(Runner(state.clone())),&path);
+        Self {path,backend,state}
+    }
+    fn request(&self) -> NativeInputRequest {
+        NativeInputRequest {message_id:"msg_one".into(),owner_team_id:"team".into(),recipient:"worker".into(),provider:self.state.lock().unwrap().provider,
+            pane_id:"%1".into(),pane_pid:std::process::id(),session:"session".into(),window:"worker".into()}
+    }
+    fn inject(&self) -> (Result<InjectReport,TransportError>,Option<NativeInputEvidence>) {
+        with_native_input(Some(self.request()),|| self.backend.inject(&Target::Pane(PaneId::new("%1")),
+            &InjectPayload::Text("line\n[team-agent-token:msg_one]".into()),Key::Enter,true))
+    }
+}
+impl Drop for Fixture {fn drop(&mut self) {let _=std::fs::remove_dir_all(&self.path);}}
+
+#[test]
+fn native_input_delayed_ready_then_owned_paste_then_exactly_one_enter() {
+    let f=Fixture::new(Mode::DelayedReady);
+    let (report,evidence)=f.inject();
+    assert_eq!(report.unwrap().submit_verification,SubmitVerification::EnterSentWithoutPlaceholderCheck);
+    assert_eq!(evidence.unwrap().phase,NativeInputPhase::Accepted);
+    let state=f.state.lock().unwrap(); assert_eq!(state.pasted,1); assert_eq!(state.entered,1);
+    let paste=state.calls.iter().position(|argv|argv.iter().any(|arg|arg=="paste-buffer")).unwrap();
+    assert!(state.calls[..paste].iter().filter(|argv|argv.iter().any(|arg|arg=="capture-pane")).count()>=4);
+    let submit=state.calls.iter().position(|argv|argv.iter().any(|arg|arg=="send-keys")).unwrap();
+    assert!(state.calls[paste+1..submit].iter().filter(|argv|argv.iter().any(|arg|arg=="capture-pane")).count()>=2);
+}
+
+#[test]
+fn native_input_unknown_before_paste_is_zero_effect_after_paste_never_enters() {
+    for mode in [Mode::UnknownBefore,Mode::UnknownAfterPaste] {
+        let f=Fixture::new(mode); let (result,evidence)=f.inject(); assert!(result.is_err());
+        let state=f.state.lock().unwrap(); assert_eq!(state.entered,0);
+        if matches!(mode,Mode::UnknownBefore) {assert_eq!(state.pasted,0);assert!(evidence.is_none());}
+        else {assert_eq!(state.pasted,1);assert_eq!(evidence.unwrap().phase,NativeInputPhase::Pasted);}
+    }
+}
+
+#[test]
+fn native_input_post_enter_unknown_retains_effect_floor_without_another_key() {
+    let f=Fixture::new(Mode::UnknownAfterEnter); let (result,evidence)=f.inject(); assert!(result.is_err());
+    assert_eq!(evidence.unwrap().phase,NativeInputPhase::Submitted);
+    let state=f.state.lock().unwrap(); assert_eq!(state.pasted,1); assert_eq!(state.entered,1);
+}
+
+#[test]
+fn native_input_swallowed_enter_only_delayed_rescue_can_press_once_no_repaste() {
+    let f=Fixture::new(Mode::Swallow); let (report,evidence)=f.inject();
+    assert_eq!(report.unwrap().submit_verification,SubmitVerification::SubmitConsumptionUnverified);
+    let evidence=evidence.unwrap(); assert_eq!(evidence.phase,NativeInputPhase::Submitted);
+    assert_eq!(f.backend.rescue_enter(&evidence,&||true).unwrap(),EnterRescueOutcome::Entered {accepted:true});
+    let state=f.state.lock().unwrap(); assert_eq!(state.pasted,1); assert_eq!(state.entered,2); drop(state);
+    assert_eq!(f.backend.rescue_enter(&evidence,&||true).unwrap(),EnterRescueOutcome::Consumed);
+    assert_eq!(f.state.lock().unwrap().entered,2);
+}
+
+#[test]
+fn native_input_rescue_binding_busy_and_canonical_changes_never_send_a_key() {
+    let f=Fixture::new(Mode::Normal); let (_,evidence)=f.inject(); let mut evidence=evidence.unwrap();
+    // Controlled fixture represents the same pending draft, not a new injection.
+    {let mut state=f.state.lock().unwrap();state.entered=0;state.busy=true;}
+    let before=f.state.lock().unwrap().calls.len();
+    assert_eq!(f.backend.rescue_enter(&evidence,&||true).unwrap(),EnterRescueOutcome::NoEffect {reason:"busy",reobserve:true});
+    assert!(!f.state.lock().unwrap().calls[before..].iter().any(|argv|argv.iter().any(|arg|arg=="send-keys")));
+    f.state.lock().unwrap().busy=false;
+    assert_eq!(f.backend.rescue_enter(&evidence,&||false).unwrap(),EnterRescueOutcome::NoEffect {reason:"canonical_changed",reobserve:false});
+    for field in ["birth","nonce","endpoint","pid","pane","session","window"] {
+        let mut wrong = evidence.clone();
+        match field {
+            "birth" => wrong.binding.carrier_birth.push_str("-wrong"),
+            "nonce" => wrong.binding.binding_nonce.push_str("-wrong"),
+            "endpoint" => wrong.binding.endpoint.push_str("-wrong"),
+            "pid" => wrong.binding.pane_pid += 1,
+            "pane" => wrong.binding.pane_id = "%2".into(),
+            "session" => wrong.binding.session.push_str("-wrong"),
+            "window" => wrong.binding.window.push_str("-wrong"),
+            _ => unreachable!(),
+        }
+        assert!(f.backend.rescue_enter(&wrong,&||true).is_err(), "{field}");
+    }
+    evidence.phase = NativeInputPhase::MayHavePasted;
+    assert_eq!(f.backend.rescue_enter(&evidence,&||true).unwrap(), EnterRescueOutcome::NoEffect {reason:"proof_missing",reobserve:false});
+    assert_eq!(f.state.lock().unwrap().entered,0);
+}
+
+#[test]
+fn native_input_cursor_owned_new_capsule_transfers_to_transcript_without_token_claim() {
+    let f = Fixture::new(Mode::Normal); f.state.lock().unwrap().provider = Provider::CursorAgent;
+    let (report, evidence) = f.inject();
+    let report = report.unwrap(); let evidence = evidence.unwrap();
+    assert_eq!(report.inject_verification, InjectVerification::CaptureContainsNewPastedContentPrompt);
+    assert_eq!(report.submit_verification, SubmitVerification::EnterSentWithoutPlaceholderCheck);
+    assert_eq!(evidence.capsule.as_deref(), Some("[Pasted text #2 +25 lines]"));
+    assert_eq!(evidence.baseline_capsules, ["[Pasted text #1 +25 lines]"]);
+    let state = f.state.lock().unwrap(); assert_eq!(state.pasted, 1); assert_eq!(state.entered, 1);
+}
+
+#[test]
+fn native_input_buffer_uses_authoritative_message_not_first_quoted_marker() {
+    let f = Fixture::new(Mode::Normal);
+    let quoted = "[team-agent-token:msg_old]\nline\n[team-agent-token:msg_one]";
+    let (_, evidence) = with_native_input(Some(f.request()), || f.backend.inject(
+        &Target::Pane(PaneId::new("%1")), &InjectPayload::Text(quoted.into()), Key::Enter, true));
+    let evidence = evidence.unwrap();
+    let buffer = owned_buffer(&evidence);
+    assert!(buffer.contains("msg_one")); assert!(!buffer.contains("msg_old"));
+    let state = f.state.lock().unwrap();
+    for argv in state.calls.iter().filter(|argv| argv.iter().any(|arg| arg == "set-buffer" || arg == "paste-buffer")) {
+        let index = argv.iter().position(|arg| arg == "-b").unwrap(); assert_eq!(argv[index + 1], buffer);
+    }
+    let mut other = evidence.clone(); other.request.message_id = "msg_two".into();
+    assert_ne!(buffer, owned_buffer(&other));
+}
+
+#[test]
+fn native_input_required_lock_contention_or_missing_workspace_is_zero_effect() {
+    let f=Fixture::new(Mode::Normal);
+    let lock=acquire_required(PaneInputLockRequest {workspace:Some(&f.path),target_key:"%1",operation:"fixture"}).unwrap();
+    let (result,evidence)=f.inject();assert!(result.is_err());assert!(evidence.is_none());
+    assert!(f.state.lock().unwrap().calls.is_empty());
+    std::thread::scope(|scope| {
+        scope.spawn(|| assert!(f.backend.send_keys(&Target::Pane(PaneId::new("%1")), &[Key::Enter]).is_err()));
+        scope.spawn(|| assert!(f.backend.inject(&Target::Pane(PaneId::new("%1")),
+            &InjectPayload::TextSkipConsumptionPoll("foreign command".into()), Key::Enter, true).is_err()));
+    });
+    assert!(f.state.lock().unwrap().calls.is_empty());
+    drop(lock);
+    let other=TmuxBackend::with_runner(Box::new(Runner(f.state.clone())));
+    let (result,evidence)=with_native_input(Some(f.request()),||other.inject(&Target::Pane(PaneId::new("%1")),
+        &InjectPayload::Text("body".into()),Key::Enter,true));
+    assert!(result.is_err());assert!(evidence.is_none());assert!(f.state.lock().unwrap().calls.is_empty());
+}
