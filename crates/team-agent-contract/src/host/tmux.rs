@@ -1379,12 +1379,15 @@ mod bound_process_tests {
     #[test]
     fn only_exact_reaped_endpoint_bound_no_server_diagnostic_authorizes_cleanup() {
         let endpoint = std::path::Path::new("/owned/private/tmux.sock");
-        let mut dead = syntax_receipt(b"");
-        dead.exit_code = Some(1);
-        dead.stderr = b"no server running on /owned/private/tmux.sock\n".to_vec();
-        assert!(confirms_no_server(&dead, endpoint));
+        let dead = || {
+            let mut receipt = syntax_receipt(b"");
+            receipt.exit_code = Some(1);
+            receipt.stderr = b"no server running on /owned/private/tmux.sock\n".to_vec();
+            receipt
+        };
+        assert!(confirms_no_server(&dead(), endpoint));
         for case in 0..8 {
-            let mut bad = dead.clone();
+            let mut bad = dead();
             match case {
                 0 => bad.exit_code = Some(0),
                 1 => bad.exit_code = Some(2),
@@ -1402,7 +1405,7 @@ mod bound_process_tests {
         for end in [CommandEnd::NotStarted, CommandEnd::TimedOut, CommandEnd::OutputLimit,
             CommandEnd::OutputRejected, CommandEnd::IoError, CommandEnd::Unsupported]
         {
-            let mut bad = dead.clone(); bad.end = end;
+            let mut bad = dead(); bad.end = end;
             assert!(!confirms_no_server(&bad, endpoint));
         }
     }
