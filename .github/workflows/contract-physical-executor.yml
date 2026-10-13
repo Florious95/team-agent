@@ -206,22 +206,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Do not reformat the pre-existing byte-frozen contract grammar or
+          # unrelated legacy bodies. These are the five wholly new Rust files.
           files=(
-            crates/team-agent-contract/src/host/process.rs
-            crates/team-agent-contract/src/providers/cursor/interaction.rs
-            crates/team-agent/src/lifecycle/pane_input_lock.rs
-            crates/team-agent/src/messaging/delivery.rs
             crates/team-agent/src/messaging/enter_rescue.rs
             crates/team-agent/src/messaging/enter_rescue_tests.rs
-            crates/team-agent/src/messaging/helpers.rs
-            crates/team-agent/src/messaging/mod.rs
-            crates/team-agent/src/messaging/scheduler.rs
-            crates/team-agent/src/messaging/tests/basic.rs
-            crates/team-agent/src/messaging/types.rs
-            crates/team-agent/src/tmux_backend.rs
             crates/team-agent/src/tmux_backend/native_input.rs
             crates/team-agent/src/tmux_backend/native_input_tests.rs
-            crates/team-agent/src/transport.rs
             crates/team-agent/src/transport/native_input.rs
           )
           set +e

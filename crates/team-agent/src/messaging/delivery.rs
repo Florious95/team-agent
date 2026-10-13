@@ -2833,6 +2833,39 @@ pub(crate) fn record_turn_open_if_leader_to_worker(
     )
 }
 
+/// A rescue that supplies the first successful Enter must arm the same turn
+/// linkage as normal delivery, immediately after the key (not after UI polling).
+pub(super) fn with_rescue_submit_observer<R>(
+    workspace: &Path,
+    store: &MessageStore,
+    evidence: &crate::transport::native_input::NativeInputEvidence,
+    event_log: &EventLog,
+    execute: impl FnOnce(&dyn SubmitObserver) -> Result<R, MessagingError>,
+) -> Result<R, MessagingError> {
+    let request = &evidence.request;
+    let conn = crate::db::schema::open_db(store.db_path())?;
+    let sender: String = conn.query_row(
+        "select sender from messages where message_id=?1 and owner_team_id=?2 and recipient=?3 and status='submitted_unverified'",
+        params![request.message_id, request.owner_team_id, request.recipient],
+        |row| row.get(0),
+    )?;
+    let metadata = TargetMetadata {
+        tmux_endpoint: Some(evidence.binding.endpoint.clone()),
+        target_session: evidence.binding.session.clone(),
+        target_window: evidence.binding.window.clone(),
+        target_pane_id: evidence.binding.pane_id.clone(),
+        target_pane_pid: Some(evidence.binding.pane_pid),
+        resolved_from: "enter_rescue_owned_binding",
+    };
+    let observer = CurrentTurnSubmitObserver::new(
+        workspace, &sender, &request.recipient, &request.message_id, event_log,
+        Some(&request.owner_team_id), Some(&metadata),
+    );
+    let result = execute(&observer)?;
+    if let Some(error) = observer.take_error() { return Err(error); }
+    Ok(result)
+}
+
 struct CurrentTurnSubmitObserver<'a> {
     workspace: &'a Path,
     sender: &'a str,

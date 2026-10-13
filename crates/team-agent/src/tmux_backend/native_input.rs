@@ -20,7 +20,9 @@ const OBSERVE: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(50);
 
 fn refused(reason: &str) -> TransportError {
-    TransportError::NativeInputNotReady { reason: reason.to_string() }
+    TransportError::NativeInputNotReady {
+        reason: reason.to_string(),
+    }
 }
 
 pub(crate) fn digest(text: &str) -> String {
@@ -35,96 +37,177 @@ impl TmuxBackend {
             "#{socket_path}|#{pane_id}|#{pane_pid}|#{session_name}|#{window_name}|#{@team_agent_pane_binding_nonce}|#{pane_in_mode}|#{pane_height}".into(),
         ]);
         let output = self.runner.run(&argv)?;
-        if !output.success || output.stdout.lines().count() != 1 { return Err(refused("binding_query")); }
+        if !output.success || output.stdout.lines().count() != 1 {
+            return Err(refused("binding_query"));
+        }
         let fields: Vec<_> = output.stdout.trim_end().split('|').collect();
-        if fields.len() != 8 || !std::path::Path::new(fields[0]).is_absolute()
-            || fields[1] != pane.as_str() || fields[3..6].iter().any(|field| field.is_empty())
+        if fields.len() != 8
+            || !std::path::Path::new(fields[0]).is_absolute()
+            || fields[1] != pane.as_str()
+            || fields[3..6].iter().any(|field| field.is_empty())
             || fields[6] != "0"
-        { return Err(refused("binding_invalid")); }
-        let pane_height = fields[7].parse::<u32>().map_err(|_| refused("binding_height"))?;
-        if pane_height < 10 { return Err(refused("binding_height")); }
-        let pid = fields[2].parse::<u32>().map_err(|_| refused("binding_pid"))?;
+        {
+            return Err(refused("binding_invalid"));
+        }
+        let pane_height = fields[7]
+            .parse::<u32>()
+            .map_err(|_| refused("binding_height"))?;
+        if pane_height < 10 {
+            return Err(refused("binding_height"));
+        }
+        let pid = fields[2]
+            .parse::<u32>()
+            .map_err(|_| refused("binding_pid"))?;
         let birth = team_agent_contract::host::process::process_birth_identity(pid)
             .map_err(|_| refused("carrier_birth"))?;
         Ok(NativeInputBinding {
-            endpoint: fields[0].into(), pane_id: fields[1].into(), pane_pid: pid, pane_height,
-            carrier_birth: birth, session: fields[3].into(), window: fields[4].into(),
+            endpoint: fields[0].into(),
+            pane_id: fields[1].into(),
+            pane_pid: pid,
+            pane_height,
+            carrier_birth: birth,
+            session: fields[3].into(),
+            window: fields[4].into(),
             binding_nonce: fields[5].into(),
         })
     }
 
     fn native_frame(&self, evidence: &NativeInputEvidence) -> Result<InputFrame, TransportError> {
         let target = Target::Pane(PaneId::new(&evidence.binding.pane_id));
-        if self.native_binding(&target)? != evidence.binding { return Err(refused("binding_changed")); }
+        if self.native_binding(&target)? != evidence.binding {
+            return Err(refused("binding_changed"));
+        }
         let capture = self.capture(&target, CaptureRange::Tail(200))?;
-        let frame = inspect_input(evidence.request.provider, &capture.text, evidence.binding.pane_height)
-            .ok_or_else(|| refused("native_surface_unknown"))?;
-        if self.native_binding(&target)? != evidence.binding { return Err(refused("binding_changed")); }
+        let frame = inspect_input(
+            evidence.request.provider,
+            &capture.text,
+            evidence.binding.pane_height,
+        )
+        .ok_or_else(|| refused("native_surface_unknown"))?;
+        if self.native_binding(&target)? != evidence.binding {
+            return Err(refused("binding_changed"));
+        }
         Ok(frame)
     }
 
     fn native_record(&self, evidence: &NativeInputEvidence) -> Result<(), TransportError> {
         record_evidence(evidence);
-        let workspace = self.event_workspace.as_deref().ok_or_else(|| refused("workspace_missing"))?;
+        let workspace = self
+            .event_workspace
+            .as_deref()
+            .ok_or_else(|| refused("workspace_missing"))?;
         crate::event_log::EventLog::new(workspace)
-            .write("native_input.evidence", serde_json::to_value(evidence).map_err(std::io::Error::other)?)
+            .write(
+                "native_input.evidence",
+                serde_json::to_value(evidence).map_err(std::io::Error::other)?,
+            )
+            .map(|_| ())
             .map_err(|error| TransportError::Io(std::io::Error::other(error)))
     }
 
     fn stable_frame(
-        &self, evidence: &NativeInputEvidence, empty: bool,
+        &self,
+        evidence: &NativeInputEvidence,
+        empty: bool,
     ) -> Result<InputFrame, TransportError> {
         let start = Instant::now();
-        let stable_window = if empty { STABLE } else { STABLE.max(current_paste_to_submit_floor()) };
+        let stable_window = if empty {
+            STABLE
+        } else {
+            STABLE.max(current_paste_to_submit_floor())
+        };
         let mut eligible: Option<(InputFrame, Instant)> = None;
         while start.elapsed() < OBSERVE {
             let frame = self.native_frame(evidence)?;
-            let valid = if empty { frame.empty() && !frame.busy } else { frame.pending(evidence) };
+            let valid = if empty {
+                frame.empty() && !frame.busy
+            } else {
+                frame.pending(evidence)
+            };
             if valid {
                 if let Some((previous, since)) = &eligible {
-                    if previous.composer == frame.composer && previous.identity == frame.identity
-                        && previous.capsule == frame.capsule && since.elapsed() >= stable_window
-                    { return Ok(frame); }
-                    if previous.composer != frame.composer || previous.identity != frame.identity
+                    if previous.composer == frame.composer
+                        && previous.identity == frame.identity
+                        && previous.capsule == frame.capsule
+                        && since.elapsed() >= stable_window
+                    {
+                        return Ok(frame);
+                    }
+                    if previous.composer != frame.composer
+                        || previous.identity != frame.identity
                         || previous.capsule != frame.capsule
-                    { eligible = Some((frame, Instant::now())); }
-                } else { eligible = Some((frame, Instant::now())); }
-            } else { eligible = None; }
+                    {
+                        eligible = Some((frame, Instant::now()));
+                    }
+                } else {
+                    eligible = Some((frame, Instant::now()));
+                }
+            } else {
+                eligible = None;
+            }
             std::thread::sleep(POLL);
         }
-        Err(refused(if empty { "composer_not_ready" } else { "owned_paste_not_stable" }))
+        Err(refused(if empty {
+            "composer_not_ready"
+        } else {
+            "owned_paste_not_stable"
+        }))
     }
 
-    fn observe_native_acceptance(&self, evidence: &NativeInputEvidence) -> Result<bool, TransportError> {
+    fn observe_native_acceptance(
+        &self,
+        evidence: &NativeInputEvidence,
+    ) -> Result<bool, TransportError> {
         let start = Instant::now();
         while start.elapsed() < OBSERVE {
-            if self.native_frame(evidence)?.accepted(evidence) { return Ok(true); }
+            if self.native_frame(evidence)?.accepted(evidence) {
+                return Ok(true);
+            }
             std::thread::sleep(POLL);
         }
         Ok(false)
     }
 
     pub(super) fn inject_native_input(
-        &self, target: &Target, text: &str, bracketed: bool,
-        request: NativeInputRequest, observer: Option<&dyn SubmitObserver>,
+        &self,
+        target: &Target,
+        text: &str,
+        bracketed: bool,
+        request: NativeInputRequest,
+        observer: Option<&dyn SubmitObserver>,
     ) -> Result<InjectReport, TransportError> {
         let pane = pane_from_target(target);
         let _lock = acquire_required(PaneInputLockRequest {
-            workspace: self.event_workspace.as_deref(), target_key: pane.as_str(), operation: "native_inject",
-        }).ok_or_else(|| refused("input_lock"))?;
-        if !request.supported() { return Err(refused("unsupported_profile")); }
+            workspace: self.event_workspace.as_deref(),
+            target_key: pane.as_str(),
+            operation: "native_inject",
+        })
+        .ok_or_else(|| refused("input_lock"))?;
+        if !request.supported() {
+            return Err(refused("unsupported_profile"));
+        }
         let mut evidence = NativeInputEvidence {
-            request, binding: self.native_binding(target)?, payload_sha256: digest(text),
-            ui_identity: String::new(), footer_sha256: String::new(), baseline_sha256: String::new(), baseline_capsules: Vec::new(),
-            phase: NativeInputPhase::Ready, capsule: None,
+            request,
+            binding: self.native_binding(target)?,
+            payload_sha256: digest(text),
+            ui_identity: String::new(),
+            footer_sha256: String::new(),
+            baseline_sha256: String::new(),
+            baseline_capsules: Vec::new(),
+            phase: NativeInputPhase::Ready,
+            capsule: None,
         };
         if evidence.binding.pane_id != evidence.request.pane_id
             || evidence.binding.pane_pid != evidence.request.pane_pid
             || evidence.binding.session != evidence.request.session
             || evidence.binding.window != evidence.request.window
-        { return Err(refused("selected_binding_changed")); }
+        {
+            return Err(refused("selected_binding_changed"));
+        }
         let baseline = self.stable_frame(&evidence, true)?;
-        if baseline.transcript.contains(&evidence.request.marker()) { return Err(refused("marker_in_baseline")); }
+        if baseline.transcript.contains(&evidence.request.marker()) {
+            return Err(refused("marker_in_baseline"));
+        }
         evidence.ui_identity = baseline.identity;
         evidence.footer_sha256 = digest(&baseline.footer);
         evidence.baseline_sha256 = digest(&baseline.transcript);
@@ -135,14 +218,21 @@ impl TmuxBackend {
             let stage = inject_stage_for_argv(&argv);
             if stage == InjectStage::PasteBuffer {
                 let frame = self.native_frame(&evidence)?;
-                if !frame.empty() || frame.busy || frame.identity != evidence.ui_identity || digest(&frame.footer) != evidence.footer_sha256 {
+                if !frame.empty()
+                    || frame.busy
+                    || frame.identity != evidence.ui_identity
+                    || digest(&frame.footer) != evidence.footer_sha256
+                {
                     return Err(refused("composer_changed_before_paste"));
                 }
                 evidence.phase = NativeInputPhase::MayHavePasted;
                 self.native_record(&evidence)?;
             }
-            if stage == InjectStage::LoadBuffer { self.run_inject_stage_with_stdin(&argv, stage, text)?; }
-            else { self.run_inject_stage(&argv, stage)?; }
+            if stage == InjectStage::LoadBuffer {
+                self.run_inject_stage_with_stdin(&argv, stage, text)?;
+            } else {
+                self.run_inject_stage(&argv, stage)?;
+            }
             if stage == InjectStage::PasteBuffer {
                 evidence.phase = NativeInputPhase::Pasted;
                 self.native_record(&evidence)?;
@@ -154,9 +244,13 @@ impl TmuxBackend {
             let frame = self.native_frame(&evidence)?;
             if frame.identity == evidence.ui_identity && !frame.busy {
                 if let Some(capsule) = &frame.capsule {
-                    if !evidence.baseline_capsules.contains(capsule) { evidence.capsule = Some(capsule.clone()); }
+                    if !evidence.baseline_capsules.contains(capsule) {
+                        evidence.capsule = Some(capsule.clone());
+                    }
                 }
-                if frame.pending(&evidence) { break; }
+                if frame.pending(&evidence) {
+                    break;
+                }
             }
             std::thread::sleep(POLL);
         }
@@ -165,66 +259,127 @@ impl TmuxBackend {
         self.native_record(&evidence)?;
         self.native_submit(&mut evidence, observer)?;
         let accepted = self.observe_native_acceptance(&evidence)?;
-        if accepted { evidence.phase = NativeInputPhase::Accepted; self.native_record(&evidence)?; }
+        if accepted {
+            evidence.phase = NativeInputPhase::Accepted;
+            self.native_record(&evidence)?;
+        }
         Ok(InjectReport {
             stage_reached: InjectStage::Submit,
-            inject_verification: if evidence.capsule.is_some() { InjectVerification::CaptureContainsNewPastedContentPrompt }
-                else { InjectVerification::CaptureContainsToken },
-            submit_verification: if accepted { SubmitVerification::EnterSentWithoutPlaceholderCheck }
-                else { SubmitVerification::SubmitConsumptionUnverified },
-            turn_verification: TurnVerification::NotRequired, attempts: 1, submit_diagnostics: None,
+            inject_verification: if evidence.capsule.is_some() {
+                InjectVerification::CaptureContainsNewPastedContentPrompt
+            } else {
+                InjectVerification::CaptureContainsToken
+            },
+            submit_verification: if accepted {
+                SubmitVerification::EnterSentWithoutPlaceholderCheck
+            } else {
+                SubmitVerification::SubmitConsumptionUnverified
+            },
+            turn_verification: TurnVerification::NotRequired,
+            attempts: 1,
+            submit_diagnostics: None,
         })
     }
 
-    fn native_submit(&self, evidence: &mut NativeInputEvidence, observer: Option<&dyn SubmitObserver>)
-        -> Result<(), TransportError>
-    {
+    fn native_submit(
+        &self,
+        evidence: &mut NativeInputEvidence,
+        observer: Option<&dyn SubmitObserver>,
+    ) -> Result<(), TransportError> {
         let frame = self.native_frame(evidence)?;
-        if !frame.pending(evidence) { return Err(refused("composer_changed_before_enter")); }
+        if !frame.pending(evidence) {
+            return Err(refused("composer_changed_before_enter"));
+        }
         evidence.phase = NativeInputPhase::MayHaveSubmitted;
         self.native_record(evidence)?;
-        self.run_inject_stage(&tmux_send_submit_argv(&PaneId::new(&evidence.binding.pane_id), Key::Enter), InjectStage::Submit)?;
+        self.run_inject_stage(
+            &tmux_send_submit_argv(&PaneId::new(&evidence.binding.pane_id), Key::Enter),
+            InjectStage::Submit,
+        )?;
         notify_submit_observer(observer);
         evidence.phase = NativeInputPhase::Submitted;
         self.native_record(evidence)
     }
 
-    pub(super) fn rescue_native_input(&self, evidence: &NativeInputEvidence, authorize: &dyn Fn() -> bool) -> Result<EnterRescueOutcome, TransportError> {
+    pub(super) fn rescue_native_input(
+        &self,
+        evidence: &NativeInputEvidence,
+        authorize: &dyn Fn() -> bool,
+        observer: Option<&dyn SubmitObserver>,
+    ) -> Result<EnterRescueOutcome, TransportError> {
         let _lock = match acquire_required(PaneInputLockRequest {
-            workspace: self.event_workspace.as_deref(), target_key: &evidence.binding.pane_id, operation: "enter_rescue",
+            workspace: self.event_workspace.as_deref(),
+            target_key: &evidence.binding.pane_id,
+            operation: "enter_rescue",
         }) {
             Some(lock) => lock,
-            None => return Ok(EnterRescueOutcome::NoEffect { reason: "input_lock", reobserve: true }),
+            None => {
+                return Ok(EnterRescueOutcome::NoEffect {
+                    reason: "input_lock",
+                    reobserve: true,
+                })
+            }
         };
         if !evidence.request.supported() || evidence.phase < NativeInputPhase::Pasted {
-            return Ok(EnterRescueOutcome::NoEffect { reason: "proof_missing", reobserve: false });
+            return Ok(EnterRescueOutcome::NoEffect {
+                reason: "proof_missing",
+                reobserve: false,
+            });
         }
         let frame = self.native_frame(evidence)?;
-        if frame.accepted(evidence) { return Ok(EnterRescueOutcome::Consumed); }
-        if frame.busy { return Ok(EnterRescueOutcome::NoEffect { reason: "busy", reobserve: true }); }
-        if !frame.pending(evidence) { return Ok(EnterRescueOutcome::NoEffect { reason: "residue_mismatch", reobserve: false }); }
+        if frame.accepted(evidence) {
+            return Ok(EnterRescueOutcome::Consumed);
+        }
+        if frame.busy {
+            return Ok(EnterRescueOutcome::NoEffect {
+                reason: "busy",
+                reobserve: true,
+            });
+        }
+        if !frame.pending(evidence) {
+            return Ok(EnterRescueOutcome::NoEffect {
+                reason: "residue_mismatch",
+                reobserve: false,
+            });
+        }
         self.stable_frame(evidence, false)?;
-        if !authorize() { return Ok(EnterRescueOutcome::NoEffect { reason: "canonical_changed", reobserve: false }); }
+        if !authorize() {
+            return Ok(EnterRescueOutcome::NoEffect {
+                reason: "canonical_changed",
+                reobserve: false,
+            });
+        }
         let mut current = evidence.clone();
         current.phase = NativeInputPhase::Seen;
         self.native_record(&current)?;
-        self.native_submit(&mut current, None)?;
+        self.native_submit(&mut current, observer)?;
         let accepted = self.observe_native_acceptance(&current)?;
-        if accepted { current.phase = NativeInputPhase::Accepted; self.native_record(&current)?; }
+        if accepted {
+            current.phase = NativeInputPhase::Accepted;
+            self.native_record(&current)?;
+        }
         Ok(EnterRescueOutcome::Entered { accepted })
     }
 }
 
 fn owned_buffer(evidence: &NativeInputEvidence) -> String {
-    format!("ta-owned-{}-{}", evidence.request.message_id,
-        digest(&format!("{}:{}:{}", evidence.binding.binding_nonce, evidence.binding.pane_id, evidence.payload_sha256)))
+    format!(
+        "ta-owned-{}-{}",
+        evidence.request.message_id,
+        digest(&format!(
+            "{}:{}:{}",
+            evidence.binding.binding_nonce, evidence.binding.pane_id, evidence.payload_sha256
+        ))
+    )
 }
 
 fn capsule_labels(text: &str) -> Vec<String> {
-    text.lines().filter_map(|line| {
-        let start = line.find("[Pasted text #")?;
-        let end = line[start..].find(']')? + start;
-        let label = &line[start..=end];
-        (label.len() <= 80).then(|| label.to_string())
-    }).collect()
+    text.lines()
+        .filter_map(|line| {
+            let start = line.find("[Pasted text #")?;
+            let end = line[start..].find(']')? + start;
+            let label = &line[start..=end];
+            (label.len() <= 80).then(|| label.to_string())
+        })
+        .collect()
 }

@@ -3818,10 +3818,10 @@ impl Transport for TmuxBackend {
         })
     }
 
-    fn rescue_enter(&self, evidence: &crate::transport::native_input::NativeInputEvidence, authorize: &dyn Fn() -> bool)
+    fn rescue_enter(&self, evidence: &crate::transport::native_input::NativeInputEvidence, authorize: &dyn Fn() -> bool, observer: Option<&dyn SubmitObserver>)
         -> Result<crate::transport::native_input::EnterRescueOutcome, TransportError>
     {
-        self.rescue_native_input(evidence, authorize)
+        self.rescue_native_input(evidence, authorize, observer)
     }
 
     fn send_keys(&self, target: &Target, keys: &[Key]) -> Result<(), TransportError> {

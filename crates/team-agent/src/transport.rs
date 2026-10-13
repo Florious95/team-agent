@@ -983,7 +983,7 @@ pub trait Transport: Send + Sync {
     }
 
     /// Enter-only recovery; unsupported backends have an explicit zero-effect refusal.
-    fn rescue_enter(&self, _evidence: &native_input::NativeInputEvidence, _authorize: &dyn Fn() -> bool)
+    fn rescue_enter(&self, _evidence: &native_input::NativeInputEvidence, _authorize: &dyn Fn() -> bool, _observer: Option<&dyn SubmitObserver>)
         -> Result<native_input::EnterRescueOutcome, TransportError>
     {
         Ok(native_input::EnterRescueOutcome::NoEffect { reason: "unsupported_backend", reobserve: false })

@@ -26,12 +26,17 @@ impl NativeInputRequest {
     pub fn supported(&self) -> bool {
         matches!(self.provider, Provider::Pi | Provider::CursorAgent)
             && self.message_id.starts_with("msg_")
-            && self.message_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            && self
+                .message_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
             && !self.owner_team_id.is_empty()
             && !self.recipient.is_empty()
             && self.recipient != "leader"
-            && self.pane_id.starts_with('%') && self.pane_pid > 1
-            && !self.session.is_empty() && !self.window.is_empty()
+            && self.pane_id.starts_with('%')
+            && self.pane_pid > 1
+            && !self.session.is_empty()
+            && !self.window.is_empty()
     }
 }
 
@@ -76,8 +81,13 @@ pub struct NativeInputEvidence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnterRescueOutcome {
     Consumed,
-    NoEffect { reason: &'static str, reobserve: bool },
-    Entered { accepted: bool },
+    NoEffect {
+        reason: &'static str,
+        reobserve: bool,
+    },
+    Entered {
+        accepted: bool,
+    },
 }
 
 type Scope = (Option<NativeInputRequest>, Option<NativeInputEvidence>);
@@ -95,9 +105,10 @@ impl Drop for Restore {
 }
 
 /// Existing synchronous delivery owns this scope; no borrowed observer escapes a thread.
-pub fn with_native_input<R>(request: Option<NativeInputRequest>, f: impl FnOnce() -> R)
-    -> (R, Option<NativeInputEvidence>)
-{
+pub fn with_native_input<R>(
+    request: Option<NativeInputRequest>,
+    f: impl FnOnce() -> R,
+) -> (R, Option<NativeInputEvidence>) {
     let previous = INPUT_SCOPE.with(|slot| slot.replace((request, None)));
     let restore = Restore(Some(previous));
     let result = f();
@@ -113,7 +124,9 @@ pub(crate) fn current_request() -> Option<NativeInputRequest> {
 pub(crate) fn record_evidence(evidence: &NativeInputEvidence) {
     INPUT_SCOPE.with(|slot| {
         let mut scope = slot.borrow_mut();
-        if scope.0.as_ref() == Some(&evidence.request) { scope.1 = Some(evidence.clone()); }
+        if scope.0.as_ref() == Some(&evidence.request) {
+            scope.1 = Some(evidence.clone());
+        }
     });
 }
 
@@ -133,22 +146,33 @@ impl InputFrame {
     }
 
     pub fn has_marker(&self, marker: &str) -> bool {
-        self.composer.lines().map(str::trim).collect::<String>().matches(marker).count() == 1
+        self.composer
+            .lines()
+            .map(str::trim)
+            .collect::<String>()
+            .matches(marker)
+            .count()
+            == 1
     }
 
     pub fn pending(&self, evidence: &NativeInputEvidence) -> bool {
-        !self.busy && self.identity == evidence.ui_identity
+        !self.busy
+            && self.identity == evidence.ui_identity
             && input_digest(&self.footer) == evidence.footer_sha256
             && (self.has_marker(&evidence.request.marker())
-                || evidence.capsule.as_ref().is_some_and(|capsule| self.capsule.as_ref() == Some(capsule)
-                    && !evidence.baseline_capsules.contains(capsule)))
+                || evidence.capsule.as_ref().is_some_and(|capsule| {
+                    self.capsule.as_ref() == Some(capsule)
+                        && !evidence.baseline_capsules.contains(capsule)
+                }))
     }
 
     pub fn accepted(&self, evidence: &NativeInputEvidence) -> bool {
         if !self.empty() || self.identity != evidence.ui_identity {
             return false;
         }
-        if evidence.phase < NativeInputPhase::Seen { return false; }
+        if evidence.phase < NativeInputPhase::Seen {
+            return false;
+        }
         let marker = evidence.request.marker();
         let joined: String = self.transcript.lines().map(str::trim).collect();
         if joined.matches(&marker).count() == 1 {
@@ -156,7 +180,12 @@ impl InputFrame {
         }
         evidence.capsule.as_ref().is_some_and(|capsule| {
             !evidence.baseline_capsules.contains(capsule)
-                && self.transcript.lines().filter(|line| line.trim() == capsule).count() == 1
+                && self
+                    .transcript
+                    .lines()
+                    .filter(|line| line.trim() == capsule)
+                    .count()
+                    == 1
         })
     }
 }
@@ -166,7 +195,11 @@ fn input_digest(text: &str) -> String {
     format!("{:x}", Sha256::digest(text.as_bytes()))
 }
 
-pub(crate) fn inspect_input(provider: Provider, text: &str, pane_height: u32) -> Option<InputFrame> {
+pub(crate) fn inspect_input(
+    provider: Provider,
+    text: &str,
+    pane_height: u32,
+) -> Option<InputFrame> {
     match provider {
         Provider::Pi => pi_input(text, pane_height),
         Provider::CursorAgent => cursor_input(text),
@@ -179,28 +212,50 @@ fn cursor_input(text: &str) -> Option<InputFrame> {
     let (surface, rows, capsule, busy) =
         team_agent_contract::providers::cursor::interaction::inspect_composer(text)?;
     let first = rows.first()?.strip_prefix("→ ")?;
-    let footer = rows.iter().rposition(|row| row.strip_suffix("Run Everything")
-        .is_some_and(|prefix| !prefix.trim().is_empty() && !prefix.trim_start().starts_with("→ ")))?;
-    if footer == 0 { return None; }
-    let tail: Vec<_> = rows[footer + 1..].iter().filter(|row| !row.is_empty()).copied().collect();
-    if tail.is_empty() { return None; }
+    let footer = rows.iter().rposition(|row| {
+        row.strip_suffix("Run Everything").is_some_and(|prefix| {
+            !prefix.trim().is_empty() && !prefix.trim_start().starts_with("→ ")
+        })
+    })?;
+    if footer == 0 {
+        return None;
+    }
+    let tail: Vec<_> = rows[footer + 1..]
+        .iter()
+        .filter(|row| !row.is_empty())
+        .copied()
+        .collect();
+    if tail.is_empty() {
+        return None;
+    }
     let header: Vec<_> = text.lines().map(str::trim).collect();
     let version = header.windows(2).find(|pair| pair[0] == "Cursor Agent")?[1];
     let identity = format!("{version}:{}", input_digest(&tail.join("\n")));
-    let footer_row = rows[footer].split_whitespace().collect::<Vec<_>>().join(" ");
+    let footer_row = rows[footer]
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     let ready = matches!(surface, InputSurface::ComposerReady | InputSurface::Busy);
     if (ready || capsule.is_some()) && rows[1..footer].iter().any(|row| !row.trim().is_empty()) {
         return None;
     }
-    let composer = if ready { String::new() } else {
-        std::iter::once(first).chain(rows[1..footer].iter().copied()).collect::<Vec<_>>().join("\n")
+    let composer = if ready {
+        String::new()
+    } else {
+        std::iter::once(first)
+            .chain(rows[1..footer].iter().copied())
+            .collect::<Vec<_>>()
+            .join("\n")
     };
     let text_rows: Vec<_> = text.lines().collect();
-    let arrow = text_rows.iter().rposition(|line| line.trim().starts_with("→ "))?;
+    let arrow = text_rows
+        .iter()
+        .rposition(|line| line.trim().starts_with("→ "))?;
     Some(InputFrame {
         composer,
         transcript: text.lines().take(arrow).collect::<Vec<_>>().join("\n"),
-        identity, footer: footer_row,
+        identity,
+        footer: footer_row,
         busy,
         capsule: capsule.map(str::to_owned),
     })
@@ -212,36 +267,61 @@ fn border(line: &str) -> bool {
 }
 
 fn pi_input(text: &str, pane_height: u32) -> Option<InputFrame> {
-    if pane_height < 10 { return None; }
+    if pane_height < 10 {
+        return None;
+    }
     let rows: Vec<_> = text.lines().collect();
-    let footer = rows.iter().rposition(|row| row.contains(" · ") && row.contains("%/"))?;
+    let footer = rows
+        .iter()
+        .rposition(|row| row.contains(" · ") && row.contains("%/"))?;
     if rows[footer + 1..].iter().any(|row| !row.trim().is_empty()) {
         return None;
     }
-    let bottom = (0..footer).rev().find(|index| !rows[*index].trim().is_empty())?;
-    if !border(rows[bottom]) { return None; }
+    let bottom = (0..footer)
+        .rev()
+        .find(|index| !rows[*index].trim().is_empty())?;
+    if !border(rows[bottom]) {
+        return None;
+    }
     // Current Pi renderer shows at most max(5, floor(pane_rows * .3))
     // editor lines. A task's Unicode ruler is not a native top boundary:
     // ambiguous borders inside that whole possible editor extent refuse.
     let extent = (pane_height as usize * 3 / 10).max(5) + 1;
     let candidates: Vec<_> = (bottom.saturating_sub(extent)..bottom)
-        .filter(|index| border(rows[*index])).collect();
-    if candidates.len() != 1 { return None; }
+        .filter(|index| border(rows[*index]))
+        .collect();
+    if candidates.len() != 1 {
+        return None;
+    }
     let top = candidates[0];
     let composer = rows[top + 1..bottom].join("\n");
     let transcript = rows[..top].join("\n");
     // Inspect native status adjacent to the editor, never the task body.
-    let status = rows[..top].iter().rev().filter(|row| !row.trim().is_empty()).take(3)
-        .copied().collect::<Vec<_>>().join("\n");
+    let status = rows[..top]
+        .iter()
+        .rev()
+        .filter(|row| !row.trim().is_empty())
+        .take(3)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
     // Pi embeds its live status/spinner after a 1–3-cell border prefix. Idle
     // (including the observed overflow/title border) has a solid leading run.
-    let busy = rows[top].trim_start().chars().take_while(|character| *character == '─').count() < 8
+    let busy = rows[top]
+        .trim_start()
+        .chars()
+        .take_while(|character| *character == '─')
+        .count()
+        < 8
         || status.to_ascii_lowercase().contains("esc to interrupt")
         || status.to_ascii_lowercase().contains("ctrl+c to stop");
     Some(InputFrame {
-        composer, transcript,
+        composer,
+        transcript,
         identity: rows[footer].split(" · ").next()?.trim().to_string(),
-        footer: String::new(), busy, capsule: None,
+        footer: String::new(),
+        busy,
+        capsule: None,
     })
 }
 
@@ -264,7 +344,16 @@ mod tests {
 
     #[test]
     fn native_input_scope_restores_nested_and_panicking_calls() {
-        let request = NativeInputRequest { message_id: "msg_one".into(), owner_team_id: "team".into(), recipient: "worker".into(), provider: Provider::Pi, pane_id: "%1".into(), pane_pid: 2, session: "team".into(), window: "worker".into() };
+        let request = NativeInputRequest {
+            message_id: "msg_one".into(),
+            owner_team_id: "team".into(),
+            recipient: "worker".into(),
+            provider: Provider::Pi,
+            pane_id: "%1".into(),
+            pane_pid: 2,
+            session: "team".into(),
+            window: "worker".into(),
+        };
         with_native_input(Some(request.clone()), || {
             assert_eq!(current_request(), Some(request.clone()));
             with_native_input(None, || assert!(current_request().is_none()));
@@ -278,16 +367,28 @@ mod tests {
     #[test]
     fn native_input_pi_requires_editor_and_footer_not_startup_echo() {
         let marker = "[team-agent-token:msg_one]";
-        let draft = pi(&format!("{}\n{marker}", "line\n".repeat(26)), "Warning: startup");
+        let draft = pi(
+            &format!("{}\n{marker}", "line\n".repeat(26)),
+            "Warning: startup",
+        );
         let frame = inspect_input(Provider::Pi, &draft).unwrap();
         assert!(!frame.empty());
         assert!(frame.has_marker(marker));
         assert!(!frame.busy);
         assert!(inspect_input(Provider::Pi, &format!("Warning: startup\n{marker}")).is_none());
-        assert!(inspect_input(Provider::Pi, &pi("", "old history")).unwrap().empty());
-        let busy = pi("draft", "history").replace("──────────────── ↑ 20 more ─ runner-luna ─", "── ⠋ Working ─────────────────────");
+        assert!(inspect_input(Provider::Pi, &pi("", "old history"))
+            .unwrap()
+            .empty());
+        let busy = pi("draft", "history").replace(
+            "──────────────── ↑ 20 more ─ runner-luna ─",
+            "── ⠋ Working ─────────────────────",
+        );
         assert!(inspect_input(Provider::Pi, &busy).unwrap().busy);
-        assert!(inspect_input(Provider::Pi, &pi("foreign draft\n────────\n", "old history")).is_none());
+        assert!(inspect_input(
+            Provider::Pi,
+            &pi("foreign draft\n────────\n", "old history")
+        )
+        .is_none());
     }
 
     #[test]
@@ -296,17 +397,45 @@ mod tests {
         let draft = inspect_input(Provider::CursorAgent, &cursor(capsule, "")).unwrap();
         assert!(!draft.empty());
         assert_eq!(draft.capsule.as_deref(), Some(capsule));
-        let ready = inspect_input(Provider::CursorAgent, &cursor("Plan, search, build anything", capsule)).unwrap();
+        let ready = inspect_input(
+            Provider::CursorAgent,
+            &cursor("Plan, search, build anything", capsule),
+        )
+        .unwrap();
         assert!(ready.empty());
         assert!(ready.capsule.is_none());
-        let busy = inspect_input(Provider::CursorAgent, &cursor("Add a follow-up ctrl+c to stop", capsule)).unwrap();
+        let busy = inspect_input(
+            Provider::CursorAgent,
+            &cursor("Add a follow-up ctrl+c to stop", capsule),
+        )
+        .unwrap();
         assert!(busy.busy);
-        assert!(inspect_input(Provider::CursorAgent, &cursor(capsule, "⠘⠆ Working")).unwrap().busy);
+        assert!(
+            inspect_input(Provider::CursorAgent, &cursor(capsule, "⠘⠆ Working"))
+                .unwrap()
+                .busy
+        );
         assert!(inspect_input(Provider::CursorAgent, "→ [Pasted text #1 +25 lines]").is_none());
-        assert!(inspect_input(Provider::CursorAgent, &cursor("Plan, search, build anything\nextra editable text", "")).is_none());
-        assert!(inspect_input(Provider::CursorAgent, &cursor("[Pasted text #1 +25 lines]\nsecond block", "")).is_none());
-        assert!(inspect_input(Provider::CursorAgent, "Cursor Agent\nv2026.10.01-e373342\n→ Run Everything\n").is_none());
-        let malformed = inspect_input(Provider::CursorAgent, &cursor("[Pasted text #0 +25 lines]", "")).unwrap();
+        assert!(inspect_input(
+            Provider::CursorAgent,
+            &cursor("Plan, search, build anything\nextra editable text", "")
+        )
+        .is_none());
+        assert!(inspect_input(
+            Provider::CursorAgent,
+            &cursor("[Pasted text #1 +25 lines]\nsecond block", "")
+        )
+        .is_none());
+        assert!(inspect_input(
+            Provider::CursorAgent,
+            "Cursor Agent\nv2026.10.01-e373342\n→ Run Everything\n"
+        )
+        .is_none());
+        let malformed = inspect_input(
+            Provider::CursorAgent,
+            &cursor("[Pasted text #0 +25 lines]", ""),
+        )
+        .unwrap();
         assert!(malformed.capsule.is_none());
     }
 }
