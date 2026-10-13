@@ -720,11 +720,18 @@ fn shutdown_invocation_diagnostic(
         );
     }
     let terminal = &appended[terminals[0]];
-    let expected_socket = socket.to_string_lossy();
-    if terminal["owned_endpoint"].as_str() != Some(expected_socket.as_ref()) {
+    // These diagnostics use deliberately unverified fixture paths, not the
+    // computed workspace endpoint. A source label cannot grant ownership.
+    let workspace_socket = crate::tmux_backend::socket_name_for_workspace(ws);
+    assert_ne!(
+        socket.file_name(),
+        Some(std::ffi::OsStr::new(&workspace_socket)),
+        "diagnostic fixture unexpectedly uses the owned workspace socket"
+    );
+    if !terminal["owned_endpoint"].is_null() {
         panic!(
-            "shutdown diagnostic endpoint mismatch: iteration={iteration} socket={} \
-             {result_summary}; terminal={terminal}",
+            "shutdown diagnostic falsely claimed fixture endpoint ownership: \
+             iteration={iteration} socket={} {result_summary}; terminal={terminal}",
             socket.display()
         );
     }
