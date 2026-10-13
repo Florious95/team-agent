@@ -689,7 +689,7 @@ pub(crate) fn tmux_backend_for_runtime_state_or_workspace(
     workspace: &Path,
     state: Option<&serde_json::Value>,
 ) -> RuntimeTmuxBackendSelection {
-    let (backend, source) =
+    let (mut backend, source) =
         if let Some((endpoint, source)) = runtime_tmux_endpoint_from_state(state) {
             (TmuxBackend::for_tmux_endpoint(endpoint), source)
         } else {
@@ -698,6 +698,8 @@ pub(crate) fn tmux_backend_for_runtime_state_or_workspace(
                 RuntimeTmuxEndpointSource::WorkspaceFallback,
             )
         };
+    // A persisted endpoint changes addressing, not the owning input-lock scope.
+    backend.event_workspace = Some(workspace.to_path_buf());
     RuntimeTmuxBackendSelection {
         tmux_endpoint_used: backend.tmux_endpoint(),
         backend,
@@ -721,7 +723,7 @@ pub(crate) fn tmux_backend_with_runner_for_runtime_state_or_workspace(
     workspace: &Path,
     state: Option<&serde_json::Value>,
 ) -> RuntimeTmuxBackendSelection {
-    let (backend, source) =
+    let (mut backend, source) =
         if let Some((endpoint, source)) = runtime_tmux_endpoint_from_state(state) {
             (
                 TmuxBackend::with_runner_for_tmux_endpoint(runner, endpoint),
@@ -733,6 +735,7 @@ pub(crate) fn tmux_backend_with_runner_for_runtime_state_or_workspace(
                 RuntimeTmuxEndpointSource::WorkspaceFallback,
             )
         };
+    backend.event_workspace = Some(workspace.to_path_buf());
     RuntimeTmuxBackendSelection {
         tmux_endpoint_used: backend.tmux_endpoint(),
         backend,
@@ -3068,6 +3071,10 @@ impl Transport for TmuxBackend {
     }
 
     fn probes_real_tmux_socket_roots(&self) -> bool {
+        true
+    }
+
+    fn supports_owned_native_input(&self) -> bool {
         true
     }
 

@@ -281,6 +281,7 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
+          set +e
           cargo test --workspace --locked --no-fail-fast 2>&1 | tee workspace-evidence/test.log
           statuses=("${PIPESTATUS[@]}")
           printf '%s\n' "${statuses[0]}" > workspace-evidence/test.exit

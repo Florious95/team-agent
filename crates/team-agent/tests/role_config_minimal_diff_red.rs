@@ -28,8 +28,12 @@ impl ProviderShims {
             .expect("create launch capture directory");
         let binary = shell_quote(&framework::ta_binary().to_string_lossy());
         let pi_target = dir.join("pi-test-target");
+        let pi_tty = dir.join("pi-tty-shim.py");
+        fs::write(&pi_tty, include_str!("support/pi_tty_shim.py"))
+            .expect("install controlled Pi TTY fixture");
         let pi_script = format!(
-            "#!/bin/sh\nset -eu\ncase \"${{1:-}}\" in\n  --version) echo 'pi-test-target 1.0.0'; exit 0 ;;\n  --list-models) printf 'provider model\\nopenai-codex gpt-6-luna\\n'; exit 0 ;;\n  list) exit 64 ;;\nesac\nif [ -z \"${{TEAM_AGENT_AGENT_ID:-}}\" ] || [ -z \"${{TEAM_AGENT_WORKSPACE:-}}\" ]; then exit 0; fi\nprintf '%s\\0' 'pi' \"$@\" > \"${{TEAM_AGENT_WORKSPACE}}/.role-config-launch/${{TEAM_AGENT_AGENT_ID}}.argv\"\nexec {} fake-worker --workspace \"${{TEAM_AGENT_WORKSPACE}}\" --agent-id \"${{TEAM_AGENT_AGENT_ID}}\"\n",
+            "#!/bin/sh\nset -eu\ncase \"${{1:-}}\" in\n  --version) echo 'pi-test-target 1.0.0'; exit 0 ;;\n  --list-models) printf 'provider model\\nopenai-codex gpt-6-luna\\n'; exit 0 ;;\n  list) exit 64 ;;\nesac\nif [ -z \"${{TEAM_AGENT_AGENT_ID:-}}\" ] || [ -z \"${{TEAM_AGENT_WORKSPACE:-}}\" ]; then exit 0; fi\nprintf '%s\\0' 'pi' \"$@\" > \"${{TEAM_AGENT_WORKSPACE}}/.role-config-launch/${{TEAM_AGENT_AGENT_ID}}.argv\"\nexec python3 {} {} \"${{TEAM_AGENT_WORKSPACE}}\" \"${{TEAM_AGENT_AGENT_ID}}\"\n",
+            shell_quote(&pi_tty.to_string_lossy()),
             binary,
         );
         write_executable(&pi_target, &pi_script);
@@ -47,6 +51,36 @@ impl ProviderShims {
 
     fn env(&self) -> [(&str, &str); 1] {
         [("PATH", &self.path)]
+    }
+
+    fn assert_pi_submit_receipt(&self, ws: &TestWorkspace, agent_id: &str, message_id: &str) {
+        let path = ws.path().join(".role-config-launch").join(format!("{agent_id}.tty.jsonl"));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let events = loop {
+            let raw = fs::read_to_string(&path).expect("read controlled Pi TTY receipt");
+            let events: Vec<JsonValue> = raw.lines()
+                .map(|line| serde_json::from_str(line).expect("Pi TTY receipt is JSON"))
+                .collect();
+            if events.iter().any(|event| event["event"] == "fake_result") {
+                break events;
+            }
+            assert!(Instant::now() < deadline, "fake result receipt missing: {events:?}");
+            thread::sleep(Duration::from_millis(20));
+        };
+        let submit: Vec<_> = events.iter().filter(|event| event["event"] != "ready").collect();
+        assert_eq!(submit.len(), 4, "exactly one paste/Enter/turn/result: {events:?}");
+        for (event, kind) in submit.iter().zip([
+            "paste_received", "enter_received", "turn_observed", "fake_result",
+        ]) {
+            assert_eq!(event["event"], kind, "physical submit ordering: {events:?}");
+        }
+        assert!(submit[0]["input_bytes"].as_u64().is_some_and(|bytes| bytes > 0));
+        assert_eq!(submit[0]["input_sha256"], submit[1]["input_sha256"]);
+        assert_eq!(submit[1]["key"], 13, "one logical Enter, not a paste newline");
+        for event in &submit[1..] {
+            assert_eq!(event["message_id"], message_id);
+        }
+        assert_eq!(submit[3]["exit_code"], 0, "existing fake-worker must report normally");
     }
 
     fn capture(&self, ws: &TestWorkspace, agent_id: &str) -> Vec<String> {
@@ -385,6 +419,7 @@ fn f1_legacy_fields_are_silently_tolerated_by_public_add_and_worker_replies() {
         correlated_reply_exists(&db, &message_id),
         "started worker must naturally reply to message {message_id}"
     );
+    shims.assert_pi_submit_receipt(&ws, "legacy", &message_id);
     assert!(matches!(
         legacy.get("dangerously_skip_permissions"),
         Some(YamlValue::Bool(false))

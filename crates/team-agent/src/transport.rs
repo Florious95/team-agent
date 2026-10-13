@@ -801,6 +801,13 @@ pub trait Transport: Send + Sync {
         false
     }
 
+    /// This backend implements the owned native composer/submit handshake.
+    /// Capability only: no socket discovery, reads, or effects. Unknown/test
+    /// backends do not claim a native input protocol by default.
+    fn supports_owned_native_input(&self) -> bool {
+        false
+    }
+
     /// Physical tmux endpoint used by this transport when known. For tmux this is
     /// either a full `-S` socket path or a `-L` socket name; non-tmux/test
     /// transports can leave it unknown.

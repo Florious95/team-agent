@@ -685,7 +685,7 @@ fn deliver_prepared_message(
     let recipient_cursor = recipient_is_cursor_agent(state, &message.recipient);
     let native_request = recipient_provider(state, &message.recipient)
         .filter(|provider| matches!(provider, Provider::Pi | Provider::CursorAgent))
-        .filter(|_| message.recipient != "leader" && transport.probes_real_tmux_socket_roots())
+        .filter(|_| message.recipient != "leader" && transport.supports_owned_native_input())
         .map(|provider| crate::transport::native_input::NativeInputRequest {
             message_id: message_id.to_string(),
             owner_team_id: canonical_owner_team_id.clone().unwrap_or_default(),

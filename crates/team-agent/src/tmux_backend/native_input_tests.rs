@@ -159,6 +159,42 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn native_input_runtime_endpoint_factory_preserves_workspace_and_native_capability() {
+    assert!(!crate::transport::test_support::OfflineTransport::new().supports_owned_native_input());
+    for field in ["tmux_endpoint", "tmux_socket"] {
+        let mut f = Fixture::new(Mode::Normal);
+        let mut state = serde_json::json!({});
+        state[field] = "/tmp/owned-test.sock".into();
+        let selection =
+            crate::tmux_backend::tmux_backend_with_runner_for_runtime_state_or_workspace(
+                Box::new(Runner(f.state.clone())),
+                &f.path,
+                Some(&state),
+            );
+        assert_eq!(selection.backend.event_workspace.as_deref(), Some(f.path.as_path()));
+        assert_eq!(
+            selection.tmux_endpoint_used.as_deref(),
+            Some("/tmp/owned-test.sock")
+        );
+        assert!(selection.backend.supports_owned_native_input());
+        f.backend = selection.backend;
+        let (report, evidence) = f.inject();
+        assert_eq!(
+            report.unwrap().submit_verification,
+            SubmitVerification::EnterSentWithoutPlaceholderCheck
+        );
+        assert_eq!(evidence.unwrap().phase, NativeInputPhase::Accepted);
+        let observed = f.state.lock().unwrap();
+        assert_eq!(observed.pasted, 1);
+        assert_eq!(observed.entered, 1);
+        assert!(observed
+            .calls
+            .iter()
+            .all(|argv| argv.windows(2).any(|pair| pair == ["-S", "/tmp/owned-test.sock"])));
+    }
+}
+
+#[test]
 fn native_input_delayed_ready_then_owned_paste_then_exactly_one_enter() {
     let f = Fixture::new(Mode::DelayedReady);
     let (report, evidence) = f.inject();
