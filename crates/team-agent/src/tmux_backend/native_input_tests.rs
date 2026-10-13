@@ -171,7 +171,10 @@ fn native_input_runtime_endpoint_factory_preserves_workspace_and_native_capabili
                 &f.path,
                 Some(&state),
             );
-        assert_eq!(selection.backend.event_workspace.as_deref(), Some(f.path.as_path()));
+        assert_eq!(
+            selection.backend.event_workspace.as_deref(),
+            Some(f.path.as_path())
+        );
         assert_eq!(
             selection.tmux_endpoint_used.as_deref(),
             Some("/tmp/owned-test.sock")
@@ -187,10 +190,9 @@ fn native_input_runtime_endpoint_factory_preserves_workspace_and_native_capabili
         let observed = f.state.lock().unwrap();
         assert_eq!(observed.pasted, 1);
         assert_eq!(observed.entered, 1);
-        assert!(observed
-            .calls
-            .iter()
-            .all(|argv| argv.windows(2).any(|pair| pair == ["-S", "/tmp/owned-test.sock"])));
+        assert!(observed.calls.iter().all(|argv| argv
+            .windows(2)
+            .any(|pair| pair == ["-S", "/tmp/owned-test.sock"])));
     }
 }
 
