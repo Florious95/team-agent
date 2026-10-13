@@ -27,6 +27,7 @@ on:
           - host-ancestry
           - host-native
           - issue321
+          - issue321-full
 
 permissions:
   contents: read
@@ -186,6 +187,10 @@ jobs:
               run_case contract-birth-port cargo test --manifest-path crates/team-agent-contract/Cargo.toml --lib --locked process_birth_identity -- --test-threads=1
               run_case contract-composer-port cargo test --manifest-path crates/team-agent-contract/Cargo.toml --lib --locked composer_observation_tests -- --test-threads=1
               ;;
+            issue321-full)
+              run_case workspace-all cargo test --workspace --locked --no-fail-fast -- --test-threads=1
+              run_case contract-all cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets -- --test-threads=1
+              ;;
             full)
               run_case root-stopped cargo test -p team-agent --lib --locked stop -- --test-threads=1
               run_case root-shutdown cargo test -p team-agent --lib --locked shutdown -- --test-threads=1
@@ -202,7 +207,7 @@ jobs:
             *) exit 64 ;;
           esac
       - name: Check scoped formatting and retain a remote formatting patch
-        if: always() && inputs.regression_scope == 'issue321'
+        if: always() && (inputs.regression_scope == 'issue321' || inputs.regression_scope == 'issue321-full')
         shell: bash
         run: |
           set -euo pipefail
