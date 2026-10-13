@@ -178,7 +178,7 @@ jobs:
             host-native)
               run_case host-native cargo test --manifest-path crates/team-agent-contract/Cargo.toml --test host_native --locked -- --test-threads=1
               ;;
-            issue321)
+            issue321|issue321-full)
               run_case root-tmux cargo test -p team-agent --lib --locked tmux_backend -- --test-threads=1
               run_case root-transport cargo test -p team-agent --lib --locked transport:: -- --test-threads=1
               run_case root-messaging cargo test -p team-agent --lib --locked messaging:: -- --test-threads=1
@@ -186,10 +186,9 @@ jobs:
               run_case input-channel-lock cargo test -p team-agent --test pane_input_channel_lock --locked -- --test-threads=1
               run_case contract-birth-port cargo test --manifest-path crates/team-agent-contract/Cargo.toml --lib --locked process_birth_identity -- --test-threads=1
               run_case contract-composer-port cargo test --manifest-path crates/team-agent-contract/Cargo.toml --lib --locked composer_observation_tests -- --test-threads=1
-              ;;
-            issue321-full)
-              run_case workspace-all cargo test --workspace --locked --no-fail-fast -- --test-threads=1
-              run_case contract-all cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets -- --test-threads=1
+              if test "$REGRESSION_SCOPE" = issue321-full; then
+                run_case contract-all cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets -- --test-threads=1
+              fi
               ;;
             full)
               run_case root-stopped cargo test -p team-agent --lib --locked stop -- --test-threads=1
@@ -242,5 +241,63 @@ jobs:
         with:
           name: grok-root-regression-${{ github.run_id }}
           path: regression-evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  workspace-all-linux:
+    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && inputs.regression_scope == 'issue321-full'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      EXPECTED_TREE: ${{ inputs.expected_tree }}
+      RUSTUP_TOOLCHAIN: "1.95.0"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify exact workspace source and prepare published-platform toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_TREE" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_TREE"
+          test -z "$(git status --porcelain=v1)"
+          rustup toolchain install 1.95.0 --profile minimal
+          if ! command -v tmux >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y tmux
+          fi
+          mkdir workspace-evidence
+          git rev-parse HEAD 'HEAD^{tree}' > workspace-evidence/source.txt
+          rustc -vV > workspace-evidence/toolchain.txt
+          cargo --version >> workspace-evidence/toolchain.txt
+          tmux -V >> workspace-evidence/toolchain.txt
+      - name: Run full workspace with the formal Publish npm test command
+        shell: bash
+        run: |
+          set -uo pipefail
+          cargo test --workspace --locked --no-fail-fast 2>&1 | tee workspace-evidence/test.log
+          statuses=("${PIPESTATUS[@]}")
+          printf '%s\n' "${statuses[0]}" > workspace-evidence/test.exit
+          test "${statuses[1]}" -eq 0 || exit 125
+          exit "${statuses[0]}"
+      - name: Bind full-workspace receipt hashes
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -d workspace-evidence; then
+            (cd workspace-evidence && sha256sum ./* > SHA256SUMS)
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: workspace-issue321-${{ github.run_id }}
+          path: workspace-evidence/
           if-no-files-found: error
           retention-days: 14
