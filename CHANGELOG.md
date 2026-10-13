@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.116]
+
+- **Stopped-seat restart invariant (Issue #317, PR #318):** preserve explicitly stopped seats across team-wide restart in both legacy and contract paths. Explicit `start-agent` resumes the seat and authoritatively updates both state mirrors while clearing the stop fence; unrelated stale writers cannot revive it. Unexpectedly dead seats remain recoverable, and existing explicit reset semantics are unchanged.
+- **Evidence-bounded Grok Build integration:** add isolated canonical `grok_build` without absorbing legacy `grok`. Bind the approved public wrapper and actual native image, genuine session inspection/exact resume, owned startup trust consent and generation-unique Team MCP server, while honestly allowing ambient account tools. Fresh Grok/Cursor transport cwd is outside Git ancestry; project instruction routing does not claim unavailable Grok `--add-dir` or relative-cwd equivalence.
+- **Lifecycle and physical delivery correctness:** restore prepared contract seats before reporting legacy restart failures; preserve actual failed-operation receipts before projection. Correlate resumed session modals and folded paste previews within their closed native frames, and condition raw tmux paste on measured command capability without weakening payload/attempt/baseline identity fences.
+- **Owned shutdown closure:** remove only receipt/death-proven private or exact workspace socket nodes with fresh ownership/type/inode fences. Live, shared, replaced and unknown resources remain intact; cleanup uncertainty cannot become a successful contract close. No broad server-kill fallback.
+- **Finite verification and release metadata:** the independently signed macOS Grok 1.0.52/Pi-Luna Round 12 exercises G1–G5 and Issue #317, including natural 5535 delivery to the correct Leader, three-generation session recovery, stopped-restart zero revival and two final zero-socket inventories. Formal finite CI covers root lifecycle filters plus the excluded contract crate (288 passed, zero failed); this is not unrestricted provider/platform/model coverage. Align eight standard release files at 0.5.116 and retain the official workspace verification and three-platform build/publish gates.
+
 ## [0.5.115]
 
 - **Evidence-bounded Cursor integration (PR #314):** add the canonical `cursor` provider to the contract runtime and public model catalog without reclassifying legacy provider names. Bind the genuine launcher, bundled Node engine and program input, allocate native chat IDs, and materialize owned per-seat workspace/MCP configuration while retaining executable, cwd/inode, session and generation fences.
