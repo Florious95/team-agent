@@ -75,6 +75,7 @@ impl ProviderShims {
             assert_eq!(event["event"], kind, "physical submit ordering: {events:?}");
         }
         assert!(submit[0]["input_bytes"].as_u64().is_some_and(|bytes| bytes > 0));
+        assert_eq!(submit[0]["editor_lines"], 5, "full rendered message keeps native newline semantics");
         assert_eq!(submit[0]["input_sha256"], submit[1]["input_sha256"]);
         assert_eq!(submit[1]["key"], 13, "one logical Enter, not a paste newline");
         for event in &submit[1..] {
@@ -417,7 +418,9 @@ fn f1_legacy_fields_are_silently_tolerated_by_public_add_and_worker_replies() {
     }
     assert!(
         correlated_reply_exists(&db, &message_id),
-        "started worker must naturally reply to message {message_id}"
+        "started worker must naturally reply to message {message_id}; controlled Pi TTY receipt: {}",
+        fs::read_to_string(ws.path().join(".role-config-launch/legacy.tty.jsonl"))
+            .unwrap_or_else(|error| format!("receipt unavailable: {error}"))
     );
     shims.assert_pi_submit_receipt(&ws, "legacy", &message_id);
     assert!(matches!(

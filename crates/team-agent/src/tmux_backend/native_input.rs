@@ -25,6 +25,13 @@ fn refused(reason: &str) -> TransportError {
     }
 }
 
+fn surface_unknown(error: &TransportError) -> bool {
+    matches!(
+        error,
+        TransportError::NativeInputNotReady { reason } if reason == "native_surface_unknown"
+    )
+}
+
 pub(crate) fn digest(text: &str) -> String {
     format!("{:x}", Sha256::digest(text.as_bytes()))
 }
@@ -172,7 +179,17 @@ impl TmuxBackend {
         };
         let mut eligible: Option<(InputFrame, Instant)> = None;
         while start.elapsed() < OBSERVE {
-            let frame = self.native_frame(evidence)?;
+            let frame = match self.native_frame(evidence) {
+                Ok(frame) => frame,
+                Err(error) if surface_unknown(&error) => {
+                    // A partial redraw grants nothing and resets stability.
+                    // Binding/process/capture failures still refuse immediately.
+                    eligible = None;
+                    std::thread::sleep(POLL);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let valid = if empty {
                 frame.empty() && !frame.busy
             } else {
@@ -213,13 +230,25 @@ impl TmuxBackend {
         evidence: &NativeInputEvidence,
     ) -> Result<bool, TransportError> {
         let start = Instant::now();
+        let mut last_unknown = false;
         while start.elapsed() < OBSERVE {
-            if self.native_frame(evidence)?.accepted(evidence) {
-                return Ok(true);
+            match self.native_frame(evidence) {
+                Ok(frame) => {
+                    last_unknown = false;
+                    if frame.accepted(evidence) {
+                        return Ok(true);
+                    }
+                }
+                Err(error) if surface_unknown(&error) => last_unknown = true,
+                Err(error) => return Err(error),
             }
             std::thread::sleep(POLL);
         }
-        Ok(false)
+        if last_unknown {
+            Err(refused("native_surface_unknown"))
+        } else {
+            Ok(false)
+        }
     }
 
     pub(super) fn inject_native_input(
@@ -296,7 +325,14 @@ impl TmuxBackend {
         // A capsule becomes owned only after this empty-baseline, single-paste transition.
         let start = Instant::now();
         while start.elapsed() < OBSERVE {
-            let frame = self.native_frame(&evidence)?;
+            let frame = match self.native_frame(&evidence) {
+                Ok(frame) => frame,
+                Err(error) if surface_unknown(&error) => {
+                    std::thread::sleep(POLL);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if frame.identity == evidence.ui_identity && !frame.busy {
                 if let Some(capsule) = &frame.capsule {
                     if !evidence.baseline_capsules.contains(capsule) {

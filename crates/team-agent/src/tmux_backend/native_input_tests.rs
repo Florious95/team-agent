@@ -16,10 +16,12 @@ enum Mode {
     NonceRace,
     NonceSetFailed,
     NonceBindingChanged,
+    TransientUnknown,
 }
 struct State {
     mode: Mode,
     captures: usize,
+    stage_captures: [usize; 3],
     pasted: usize,
     entered: usize,
     calls: Vec<Vec<String>>,
@@ -78,7 +80,16 @@ impl CommandRunner for Runner {
             format!("{}\n", state.nonce)
         } else if argv.iter().any(|arg| arg == "capture-pane") {
             state.captures += 1;
-            if matches!(state.mode, Mode::UnknownBefore)
+            let stage = if state.pasted == 0 {
+                0
+            } else if state.entered == 0 {
+                1
+            } else {
+                2
+            };
+            state.stage_captures[stage] += 1;
+            if (matches!(state.mode, Mode::TransientUnknown) && state.stage_captures[stage] <= 2)
+                || matches!(state.mode, Mode::UnknownBefore)
                 || (state.pasted > 0
                     && state.entered == 0
                     && matches!(state.mode, Mode::UnknownAfterPaste))
@@ -145,6 +156,7 @@ impl Fixture {
         let state = Arc::new(Mutex::new(State {
             mode,
             captures: 0,
+            stage_captures: [0; 3],
             pasted: 0,
             entered: 0,
             calls: vec![],
@@ -340,6 +352,20 @@ fn native_input_delayed_ready_then_owned_paste_then_exactly_one_enter() {
             .count()
             >= 2
     );
+}
+
+#[test]
+fn native_input_partial_redraws_only_reobserve_until_known_stable_single_submit() {
+    let f = Fixture::new(Mode::TransientUnknown);
+    let (report, evidence) = f.inject();
+    assert_eq!(
+        report.unwrap().submit_verification,
+        SubmitVerification::EnterSentWithoutPlaceholderCheck
+    );
+    assert_eq!(evidence.unwrap().phase, NativeInputPhase::Accepted);
+    let observed = f.state.lock().unwrap();
+    assert!(observed.stage_captures.iter().all(|count| *count >= 3));
+    assert_eq!((observed.pasted, observed.entered), (1, 1));
 }
 
 #[test]
