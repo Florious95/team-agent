@@ -477,6 +477,7 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
     .unwrap();
     assert_eq!(stopped.outcome, Outcome::Committed);
     assert_eq!(sample_process(&target.process), ProcessState::Exited);
+    assert_eq!(std::fs::symlink_metadata(&target.endpoint).unwrap_err().kind(), std::io::ErrorKind::NotFound);
     let deadline = clock.now() + Duration::from_secs(5);
     while sample_process(&server) == ProcessState::Alive && clock.now() < deadline {
         clock.sleep(Duration::from_millis(10));
@@ -492,9 +493,32 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
         root.join("physical-lifecycle-receipt.json"),
         serde_json::to_vec_pretty(
             &json!({"fixture":"not-kiro","root":root,"target":target,"delivery":delivery.state,
-        "native_exited":true,"private_tmux_exited":true,"journals_preserved":true}),
+        "native_exited":true,"private_tmux_exited":true,"socket_absent":true,"journals_preserved":true}),
         )
         .unwrap(),
     )
     .unwrap();
+
+    // A post-spawn session admission failure uses the SAME compensated stop and
+    // socket cleanup, not a separate unlink shortcut. This fixture's H4 hook
+    // deliberately refuses session binding; no model/subscription is involved.
+    let mut failed_descriptor = d.clone();
+    failed_descriptor.session.fresh = FreshSession::CaptureAfterLaunch;
+    let mut failed_request = request.clone();
+    failed_request.identity.seat = SeatId::new("compensated-worker").unwrap();
+    failed_request.identity.instance = InstanceId::new("compensated-native-1").unwrap();
+    let failed_op = OperationId::new("actual-compensated-start").unwrap();
+    let mut failed_runtime = PhysicalRuntime::new(Registration {
+        descriptor: &failed_descriptor, hooks: &h, controls: &[], startup: None, session_panel: None,
+    }, settings(&tmux), failed_op.clone(), &clock).unwrap();
+    let failed = Lifecycle { store: &mut store, host: &mut failed_runtime, io: &mut io }.startup(
+        &Adapter { descriptor: &failed_descriptor, hooks: &h, catalog: None }, &failed_request,
+        Routing { pane: "unpublished".into(), binding_key: "unbound-compensation".into(), server_key: "fixture-server".into() },
+        failed_op,
+    ).unwrap();
+    assert_eq!(failed.outcome, Outcome::Compensated, "{failed:?}");
+    assert!(failed.failure.as_deref().is_some_and(|error| error.contains("fixture session binding")));
+    let target = failed.target.physical.as_ref().expect("compensation happened after physical spawn");
+    assert_eq!(sample_process(&target.process), ProcessState::Exited);
+    assert_eq!(std::fs::symlink_metadata(&target.endpoint).unwrap_err().kind(), std::io::ErrorKind::NotFound);
 }

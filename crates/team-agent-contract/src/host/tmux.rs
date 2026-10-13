@@ -270,7 +270,17 @@ pub struct SpawnReceipt {
 pub struct CloseReceipt {
     pub pane_close: ActionResult,
     pub native: ProcessState,
+    pub socket_cleanup: ActionResult,
     pub socket_preserved: bool,
+}
+
+// A failed query or zero sessions is not a no-listener witness. This exact,
+// endpoint-bound diagnostic comes from the no-autostart (-N) native client.
+// No generic error/timeout is accepted.
+fn confirms_no_server(receipt: &CommandReceipt, endpoint: &std::path::Path) -> bool {
+    receipt.end == CommandEnd::Exited && receipt.exit_code == Some(1)
+        && receipt.child_reaped && receipt.stdout.is_empty()
+        && endpoint.to_str().is_some_and(|path| receipt.stderr == format!("no server running on {path}\n").as_bytes())
 }
 
 /// After a close may have executed, observe only: reparenting/exit races do not
@@ -852,17 +862,63 @@ impl<R: CommandRunner> TmuxHost<R> {
         Ok(target)
     }
 
-    /// Closes only the still-bound owned pane. It does not claim whole-tree cleanup,
-    /// kill a server, unlink a socket, delete native sessions or remove other resources.
+    fn cleanup_dead_socket(
+        &mut self, target: &TargetReceipt, lane: &super::files::NativeLane,
+        clock: &dyn Clock, deadline: Duration,
+    ) -> ActionResult {
+        loop {
+            if self.target.as_ref() != Some(target) || target.directory != *self.directory.receipt()
+                || target.endpoint != self.endpoint || lane.directory() != &target.directory
+            {
+                return ActionResult::refused(HostError::new("socket cleanup target", HostErrorKind::Ownership));
+            }
+            if let Err(error) = self.directory.check_live() { return ActionResult::refused(error); }
+            match self.socket_identity() {
+                Ok(identity) if identity == (target.socket_device, target.socket_inode) => {},
+                Err(error) if error.kind == HostErrorKind::Io(std::io::ErrorKind::NotFound) => return ActionResult::confirmed(),
+                Ok(_) => return ActionResult::refused(HostError::new("socket cleanup replacement", HostErrorKind::Ownership)),
+                Err(error) => return ActionResult::refused(error),
+            }
+            if sample_process(&target.process) != ProcessState::Exited {
+                return ActionResult::refused(HostError::new("socket cleanup native not exited", HostErrorKind::Unknown));
+            }
+            // -N forbids server creation. Keep the original close budget and
+            // never kill-server, reinterpret an error as absence, or retry a key.
+            let receipt = match self.command(vec!["-N".into(), "list-sessions".into()], None, clock, deadline) {
+                Ok(receipt) => receipt,
+                Err(error) => return ActionResult::refused(error),
+            };
+            if confirms_no_server(&receipt, &self.endpoint) {
+                return self.directory.remove_quiescent_socket("tmux.sock", target.socket_device, target.socket_inode, lane);
+            }
+            if receipt.end != CommandEnd::Exited || !receipt.child_reaped {
+                return ActionResult::refused(command_error(&receipt, "tmux socket death unverified"));
+            }
+            // The last-pane server can still be winding down (including an
+            // exited client with a transient error). Neither that error nor
+            // successful empty output grants unlink; observe until positive
+            // absence or the original deadline, without repeating kill-pane.
+            let Some(left) = remaining(clock, deadline) else {
+                return ActionResult::refused(HostError::new("tmux socket exit deadline", HostErrorKind::Deadline));
+            };
+            clock.sleep(self.limits.poll_interval.min(left));
+        }
+    }
+
+    /// Close only the bound pane, then remove its exact private socket after
+    /// native exit and a positive no-server witness. Preserve journals, native
+    /// sessions and all unrelated resources; never kill-server or recurse.
     pub fn close_owned_pane(
         &mut self,
         target: &TargetReceipt,
         clock: &dyn Clock,
         deadline: Duration,
     ) -> CloseReceipt {
-        let action = match self.directory.try_lane() {
-            Err(error) => ActionResult::refused(error),
-            Ok(_lane) => match self.check_bound(target, clock, deadline, false) {
+        // Retain the same lane through exit observation and inode-fenced unlink.
+        let lane = self.directory.try_lane();
+        let action = match &lane {
+            Err(error) => ActionResult::refused(error.clone()),
+            Ok(_) => match self.check_bound(target, clock, deadline, false) {
                 Err(error) => ActionResult::refused(error),
                 Ok(_) => match self.command(
                     vec!["kill-pane".into(), "-t".into(), target.pane.clone().into()],
@@ -882,9 +938,16 @@ impl<R: CommandRunner> TmuxHost<R> {
             self.limits.poll_interval,
             || sample_process(&target.process),
         );
+        let socket_cleanup = if action.outcome == StepOutcome::Confirmed && native == ProcessState::Exited {
+            match &lane {
+                Ok(lane) => self.cleanup_dead_socket(target, lane, clock, deadline),
+                Err(error) => ActionResult::refused(error.clone()),
+            }
+        } else { ActionResult { outcome: StepOutcome::NoEffect, error: None } };
         CloseReceipt {
             pane_close: action,
             native,
+            socket_cleanup,
             socket_preserved: std::fs::symlink_metadata(&self.endpoint).is_ok(),
         }
     }
@@ -1310,6 +1373,37 @@ mod bound_process_tests {
             stdout: stdout.to_vec(),
             stderr: vec![],
             elapsed: Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn only_exact_reaped_endpoint_bound_no_server_diagnostic_authorizes_cleanup() {
+        let endpoint = std::path::Path::new("/owned/private/tmux.sock");
+        let mut dead = syntax_receipt(b"");
+        dead.exit_code = Some(1);
+        dead.stderr = b"no server running on /owned/private/tmux.sock\n".to_vec();
+        assert!(confirms_no_server(&dead, endpoint));
+        for case in 0..8 {
+            let mut bad = dead.clone();
+            match case {
+                0 => bad.exit_code = Some(0),
+                1 => bad.exit_code = Some(2),
+                2 => bad.child_reaped = false,
+                3 => bad.stdout = b"$0\n".to_vec(),
+                4 => bad.stderr = b"no server running on /another/tmux.sock\n".to_vec(),
+                5 => bad.stderr = b"no sessions\n".to_vec(),
+                6 => bad.stderr = b"error connecting to /owned/private/tmux.sock (Permission denied)\n".to_vec(),
+                _ => bad.stderr.extend_from_slice(b"additional error\n"),
+            }
+            assert!(!confirms_no_server(&bad, endpoint), "case {case}");
+        }
+        // A successful query with no sessions still does not prove a dead server.
+        assert!(!confirms_no_server(&syntax_receipt(b""), endpoint));
+        for end in [CommandEnd::NotStarted, CommandEnd::TimedOut, CommandEnd::OutputLimit,
+            CommandEnd::OutputRejected, CommandEnd::IoError, CommandEnd::Unsupported]
+        {
+            let mut bad = dead.clone(); bad.end = end;
+            assert!(!confirms_no_server(&bad, endpoint));
         }
     }
 

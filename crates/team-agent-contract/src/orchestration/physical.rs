@@ -63,6 +63,9 @@ fn host_error(error: HostError) -> Error {
 fn confirm_close(receipt: CloseReceipt) -> Result<(), Error> {
     if receipt.pane_close.outcome == StepOutcome::Confirmed
         && receipt.native == ProcessState::Exited
+        && receipt.socket_cleanup.outcome == StepOutcome::Confirmed
+        && receipt.socket_cleanup.error.is_none()
+        && !receipt.socket_preserved
     {
         Ok(())
     } else {
@@ -411,8 +414,8 @@ impl LifecycleHost for PhysicalRuntime<'_> {
         let receipt = host.close_owned_pane(&target, self.clock, deadline);
         confirm_close(receipt)?;
         self.quiescent = Some(seat.clone());
-        // Preserve endpoint, attempt journals and host diagnostics. Never kill-server,
-        // unlink a socket, remove a shared cwd, or recurse over another instance.
+        // The host removed only its receipt-matched dead socket. Preserve attempt
+        // journals/diagnostics; never kill-server, remove a shared cwd, or recurse.
         Ok(())
     }
     fn control(
@@ -680,7 +683,8 @@ mod tests {
                             .then(|| HostError::new("owned pane close", HostErrorKind::Command)),
                     },
                     native: native.clone(),
-                    socket_preserved: true,
+                    socket_cleanup: crate::host::transport::ActionResult::confirmed(),
+                    socket_preserved: false,
                 };
                 let result = confirm_close(receipt.clone());
                 if outcome == StepOutcome::Confirmed && native == ProcessState::Exited {
@@ -691,11 +695,34 @@ mod tests {
                     let shown = error.to_string();
                     assert!(shown.contains(&format!("pane_outcome={outcome:?}")));
                     assert!(shown.contains(&format!("native={native:?}")));
-                    assert!(shown.contains("socket_preserved=true"));
+                    assert!(shown.contains("socket_preserved=false"));
                     if outcome != StepOutcome::Confirmed {
                         assert!(shown.contains("owned pane close"));
                         assert!(shown.contains("Command"));
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn close_requires_confirmed_socket_absence_and_exposes_cleanup_errors() {
+        use crate::host::transport::ActionResult;
+        for socket_cleanup in [ActionResult::confirmed(),
+            ActionResult::refused(HostError::new("socket replacement", HostErrorKind::Ownership)),
+            ActionResult::uncertain(HostError::new("socket sync", HostErrorKind::Unknown))]
+        {
+            for socket_preserved in [false, true] {
+                let receipt = CloseReceipt { pane_close: ActionResult::confirmed(), native: ProcessState::Exited,
+                    socket_cleanup: socket_cleanup.clone(), socket_preserved };
+                let result = confirm_close(receipt.clone());
+                if socket_cleanup.outcome == StepOutcome::Confirmed && !socket_preserved {
+                    assert_eq!(result, Ok(()));
+                } else {
+                    let shown = result.unwrap_err().to_string();
+                    assert!(shown.contains(&format!("socket_outcome={:?}", socket_cleanup.outcome)));
+                    assert!(shown.contains(&format!("socket_preserved={socket_preserved}")));
+                    if let Some(error) = &socket_cleanup.error { assert!(shown.contains(error.operation)); }
                 }
             }
         }

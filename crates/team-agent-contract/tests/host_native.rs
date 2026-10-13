@@ -420,6 +420,10 @@ fn native_case(mode: &str, content: &str, expected_keys: usize) {
         ProcessState::Exited,
         "close receipt: {close:?}"
     );
+    assert_eq!(close.socket_cleanup.outcome, StepOutcome::Confirmed, "{close:?}");
+    assert!(close.socket_cleanup.error.is_none());
+    assert!(!close.socket_preserved);
+    assert_eq!(std::fs::symlink_metadata(&target.endpoint).unwrap_err().kind(), std::io::ErrorKind::NotFound);
     let wait_until = clock.now() + Duration::from_secs(3);
     while sample_process(&server) == ProcessState::Alive && clock.now() < wait_until {
         clock.sleep(Duration::from_millis(10));
