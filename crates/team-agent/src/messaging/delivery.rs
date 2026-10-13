@@ -2857,10 +2857,11 @@ pub(super) fn with_rescue_submit_observer<R>(
         target_pane_pid: Some(evidence.binding.pane_pid),
         resolved_from: "enter_rescue_owned_binding",
     };
-    let observer = CurrentTurnSubmitObserver::new(
+    let mut observer = CurrentTurnSubmitObserver::new(
         workspace, &sender, &request.recipient, &request.message_id, event_log,
         Some(&request.owner_team_id), Some(&metadata),
     );
+    observer.rescue_evidence = Some(evidence);
     let result = execute(&observer)?;
     if let Some(error) = observer.take_error() { return Err(error); }
     Ok(result)
@@ -2874,6 +2875,7 @@ struct CurrentTurnSubmitObserver<'a> {
     event_log: &'a EventLog,
     owner_team_id: Option<&'a str>,
     metadata: Option<&'a TargetMetadata>,
+    rescue_evidence: Option<&'a crate::transport::native_input::NativeInputEvidence>,
     fired: Cell<bool>,
     error: RefCell<Option<MessagingError>>,
 }
@@ -2896,6 +2898,7 @@ impl<'a> CurrentTurnSubmitObserver<'a> {
             event_log,
             owner_team_id,
             metadata,
+            rescue_evidence: None,
             fired: Cell::new(false),
             error: RefCell::new(None),
         }
@@ -2911,18 +2914,52 @@ impl SubmitObserver for CurrentTurnSubmitObserver<'_> {
         if self.fired.replace(true) {
             return;
         }
-        if let Err(error) = record_current_turn_after_inject_if_leader_to_worker_scoped(
-            self.workspace,
-            self.sender,
-            self.recipient,
-            self.message_id,
-            self.event_log,
-            self.owner_team_id,
-            self.metadata,
-        ) {
-            *self.error.borrow_mut() = Some(error);
-        }
+        let result = if let Some(evidence) = self.rescue_evidence {
+            record_rescue_turn_after_submit(self.workspace, self.sender, evidence, self.event_log, self.metadata)
+        } else {
+            record_current_turn_after_inject_if_leader_to_worker_scoped(
+                self.workspace, self.sender, self.recipient, self.message_id,
+                self.event_log, self.owner_team_id, self.metadata,
+            )
+        };
+        if let Err(error) = result { *self.error.borrow_mut() = Some(error); }
     }
+}
+
+fn record_rescue_turn_after_submit(
+    workspace: &Path,
+    sender: &str,
+    evidence: &crate::transport::native_input::NativeInputEvidence,
+    event_log: &EventLog,
+    metadata: Option<&TargetMetadata>,
+) -> Result<(), MessagingError> {
+    let request = &evidence.request;
+    if !matches!(sender, "leader" | "Leader") { return Ok(()); }
+    crate::state::repository::StateRepository::new(workspace).commit_messaging_checked(
+        crate::state::repository::StateWriteIntent::MessagingDeliveryState {
+            owner_team_id: Some(&request.owner_team_id),
+        },
+        |selected| {
+            let agent = selected.get("agents").and_then(|agents| agents.get(&request.recipient));
+            let matches = agent.is_some_and(|agent| {
+                agent.get("status").and_then(serde_json::Value::as_str) == Some("running")
+                    && agent.get("explicit_stop").and_then(serde_json::Value::as_bool) != Some(true)
+                    && agent.get("pane_id").and_then(serde_json::Value::as_str) == Some(request.pane_id.as_str())
+                    && agent.get("window").and_then(serde_json::Value::as_str).unwrap_or(&request.recipient) == request.window
+                    && agent.get("provider").cloned().and_then(|value| serde_json::from_value::<Provider>(value).ok()) == Some(request.provider)
+                    && selected.get("session_name").and_then(serde_json::Value::as_str) == Some(request.session.as_str())
+            });
+            if !matches {
+                return Err(crate::state::StateError::SaveConflict("rescue receiver changed before turn commit".into()));
+            }
+            arm_turn_open(selected, &request.recipient, &Some(request.message_id.clone()));
+            Ok(())
+        },
+    )?;
+    let mut event = serde_json::json!({"agent_id": request.recipient, "message_id": request.message_id});
+    if let Some(metadata) = metadata { append_target_metadata(&mut event, metadata); }
+    event_log.write("turn_open.armed_after_inject", event)?;
+    Ok(())
 }
 
 fn record_current_turn_after_inject_if_leader_to_worker_scoped(
