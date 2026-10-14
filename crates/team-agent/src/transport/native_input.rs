@@ -231,7 +231,10 @@ fn cursor_input(text: &str) -> Option<InputFrame> {
     // Startup history can leave Tail(200) between Ready/Pasted/Accepted. The
     // immutable carrier birth/nonce remains in NativeInputBinding; this UI
     // context is the current native cwd/footer tail, not a version attestation.
-    let identity = format!("cursor-current-composer-v1:{}", input_digest(&tail.join("\n")));
+    let identity = format!(
+        "cursor-current-composer-v1:{}",
+        input_digest(&tail.join("\n"))
+    );
     let footer_row = rows[footer]
         .split_whitespace()
         .collect::<Vec<_>>()
