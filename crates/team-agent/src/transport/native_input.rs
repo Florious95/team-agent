@@ -601,6 +601,19 @@ mod tests {
     }
 
     #[test]
+    fn native_input_cursor_requires_composer_in_current_viewport_not_old_history() {
+        for header in ["", "Cursor Agent\nv2026.10.14-0f9edde\n"] {
+            let hidden = format!("{header}{CURSOR_FOLLOWUP}{}", "unknown current row\n".repeat(24));
+            assert!(super::inspect_input(Provider::CursorAgent, &hidden, 24).is_none());
+        }
+        assert!(super::inspect_input(Provider::CursorAgent, CURSOR_FOLLOWUP, 0).is_none());
+        let current = super::inspect_input(Provider::CursorAgent, CURSOR_FOLLOWUP, 24).unwrap();
+        let changed = CURSOR_FOLLOWUP.replace("/owned/project", "/different/project");
+        let changed = super::inspect_input(Provider::CursorAgent, &changed, 24).unwrap();
+        assert_ne!(current.identity, changed.identity);
+    }
+
+    #[test]
     fn native_input_cursor_separates_folded_draft_from_history_and_busy() {
         let capsule = "[Pasted text #1 +25 lines]";
         let draft = inspect_input(Provider::CursorAgent, &cursor(capsule, "")).unwrap();

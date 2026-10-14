@@ -22,6 +22,8 @@ enum Mode {
     PiFoldedUnstable,
     CursorFollowup,
     CursorHeaderEvicted,
+    CursorHistoryOnly,
+    CursorLongHistory,
 }
 struct State {
     mode: Mode,
@@ -56,6 +58,7 @@ impl CommandRunner for Runner {
             let height = if matches!(
                 state.mode,
                 Mode::R6IdleNotice | Mode::PiFolded | Mode::PiFoldedUnstable
+                    | Mode::CursorHistoryOnly | Mode::CursorLongHistory
             ) {
                 24
             } else {
@@ -170,7 +173,8 @@ impl CommandRunner for Runner {
         let stdout = if state.provider == Provider::CursorAgent
             && argv.iter().any(|arg| arg == "capture-pane")
         {
-            let followup = matches!(state.mode, Mode::CursorFollowup | Mode::CursorHeaderEvicted);
+            let followup = matches!(state.mode, Mode::CursorFollowup | Mode::CursorHeaderEvicted
+                | Mode::CursorHistoryOnly | Mode::CursorLongHistory);
             let placeholder = if followup {
                 "Add a follow-up"
             } else {
@@ -190,9 +194,19 @@ impl CommandRunner for Runner {
             } else {
                 (placeholder, "[Pasted text #1 +25 lines]")
             };
-            format!(
-                "{header}{history}\n→ {composer}\nGrok 4.7 High Run Everything\n/owned/project\n"
-            )
+            let padding = if matches!(state.mode, Mode::CursorLongHistory) {
+                "historical transcript row\n".repeat(70)
+            } else {
+                String::new()
+            };
+            let frame = format!(
+                "{header}{history}\n{padding}→ {composer}\nGrok 4.7 High Run Everything\n/owned/project\n"
+            );
+            if matches!(state.mode, Mode::CursorHistoryOnly) {
+                format!("{frame}{}", "unknown current row\n".repeat(24))
+            } else {
+                frame
+            }
         } else {
             stdout
         };
@@ -722,7 +736,7 @@ fn native_input_cursor_owned_new_capsule_transfers_to_transcript_without_token_c
 
 #[test]
 fn native_input_cursor_clean_followup_uses_one_paste_one_enter_across_banner_eviction() {
-    for mode in [Mode::CursorFollowup, Mode::CursorHeaderEvicted] {
+    for mode in [Mode::CursorFollowup, Mode::CursorHeaderEvicted, Mode::CursorLongHistory] {
         let f = Fixture::new(mode);
         f.state.lock().unwrap().provider = Provider::CursorAgent;
         let (report, evidence) = f.inject();
@@ -740,6 +754,16 @@ fn native_input_cursor_clean_followup_uses_one_paste_one_enter_across_banner_evi
         let state = f.state.lock().unwrap();
         assert_eq!((state.pasted, state.entered), (1, 1));
     }
+}
+
+#[test]
+fn native_input_cursor_history_only_composer_cannot_authorize_paste_or_enter() {
+    let f = Fixture::new(Mode::CursorHistoryOnly);
+    f.state.lock().unwrap().provider = Provider::CursorAgent;
+    let (result, _) = f.inject();
+    let state = f.state.lock().unwrap();
+    assert_eq!((state.pasted, state.entered), (0, 0), "old history is not current composer authority");
+    assert!(result.is_err());
 }
 
 #[test]
