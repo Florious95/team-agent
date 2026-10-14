@@ -570,8 +570,11 @@ fn issue326_plain_pi_stale_pane_offers_explicit_clean_environment_retry() {
         "env -u must affect only the new process, not its parent shell"
     );
     let state: Value = serde_json::from_slice(&fs::read(case.state_path()).unwrap()).unwrap();
-    assert_eq!(state["leader_receiver"]["pane_id"], json!("%managed"));
-    assert_ne!(state["leader_receiver"]["pane_id"], json!(AMBIENT_PANE));
+    let team_key = state["active_team_key"].as_str().expect("launched canonical team");
+    let receiver = &state["teams"][team_key]["leader_receiver"];
+    assert_eq!(receiver["pane_id"], json!("%managed"));
+    assert_ne!(receiver["pane_id"], json!(AMBIENT_PANE));
+    assert_ne!(receiver["tmux_socket"], json!(case.endpoint.to_str().unwrap()));
 }
 
 #[test]

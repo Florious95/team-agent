@@ -427,7 +427,10 @@ pub mod lifecycle_port {
             // Only a plain Pi entry can be retried verbatim with this command.
             // Never drop explicit attach/external intent or provider arguments,
             // clear the caller's environment, or adopt the unverified pane.
-            if provider == Provider::Pi && attach == &LeaderLauncherArgs::default() {
+            if cfg!(unix)
+                && provider == Provider::Pi
+                && attach == &LeaderLauncherArgs::default()
+            {
                 let command = "env -u TMUX -u TMUX_PANE team-agent pi";
                 object.insert("recovery_command".to_string(), json!(command));
                 object.insert(
