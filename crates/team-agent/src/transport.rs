@@ -67,6 +67,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod native_input;
+
 #[cfg(test)]
 pub mod test_support;
 
@@ -727,6 +729,9 @@ pub enum AttachOutcome {
 /// transport 的 I/O / 子进程错误。能力性拒绝**不**走这里(用上面的 typed outcome)。
 #[derive(Debug, Error)]
 pub enum TransportError {
+    /// Guard refused before a paste/key; the owned evidence carries any later effect floor.
+    #[error("native input not ready: {reason}")]
+    NativeInputNotReady { reason: String },
     #[error("spawn failed on {backend:?}: {source}")]
     Spawn {
         backend: BackendKind,
@@ -793,6 +798,13 @@ pub trait Transport: Send + Sync {
     /// Only the concrete tmux backend should scan real tmux socket roots.
     /// Test doubles stay hermetic and use their injected probe results.
     fn probes_real_tmux_socket_roots(&self) -> bool {
+        false
+    }
+
+    /// This backend implements the owned native composer/submit handshake.
+    /// Capability only: no socket discovery, reads, or effects. Unknown/test
+    /// backends do not claim a native input protocol by default.
+    fn supports_owned_native_input(&self) -> bool {
         false
     }
 
@@ -975,6 +987,13 @@ pub trait Transport: Send + Sync {
             observer.after_physical_submit();
         }
         Ok(report)
+    }
+
+    /// Enter-only recovery; unsupported backends have an explicit zero-effect refusal.
+    fn rescue_enter(&self, _evidence: &native_input::NativeInputEvidence, _authorize: &dyn Fn() -> bool, _observer: Option<&dyn SubmitObserver>)
+        -> Result<native_input::EnterRescueOutcome, TransportError>
+    {
+        Ok(native_input::EnterRescueOutcome::NoEffect { reason: "unsupported_backend", reobserve: false })
     }
 
     fn send_keys(&self, target: &Target, keys: &[Key]) -> Result<(), TransportError>;

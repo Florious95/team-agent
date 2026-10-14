@@ -40,6 +40,13 @@ pub fn fire_due_scheduled_events(
     };
     let mut fired = Vec::new();
     for (id, kind, target, payload_json) in due_events {
+        if matches!(parse_scheduled_kind(&kind), Ok(ScheduledKind::EnterRescue)) {
+            // This kind owns its pre-effect CAS and terminal/no-effect transitions.
+            if super::enter_rescue::fire(workspace, store, transport, event_log, id, &payload_json)? {
+                fired.push(id);
+            }
+            continue;
+        }
         // U1 #5: per-event isolation — one poison event (bad payload / fire error) must not
         // halt the whole pass. The fire body is confined to a closure; on Err we emit
         // `scheduler.event_failed`, mark the row terminal 'failed' (no re-fire), and continue.
@@ -80,6 +87,7 @@ pub fn fire_due_scheduled_events(
                         "message_id": outcome.message_id,
                     })
                 }
+                ScheduledKind::EnterRescue => return Err(MessagingError::Validation("enter rescue requires atomic dispatcher".into())),
                 ScheduledKind::HealthPing => {
                     event_log.write(
                         "scheduled.health_ping",

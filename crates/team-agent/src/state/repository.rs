@@ -185,6 +185,53 @@ impl<'a> StateRepository<'a> {
         bounded_team_view(&committed, team_key)
     }
 
+    /// Commit a messaging delta against its exact canonical owner under state-save.
+    /// Unlike ordinary compatibility writes, owner loss cannot select raw/default
+    /// state, and a failed receiver check cannot be reapplied to another team.
+    pub(crate) fn commit_messaging_checked<F>(
+        &self,
+        intent: StateWriteIntent<'_>,
+        update: F,
+    ) -> Result<(), StateError>
+    where
+        F: FnOnce(&mut Value) -> Result<(), StateError>,
+    {
+        let StateWriteIntent::MessagingDeliveryState { owner_team_id: Some(team) } = intent else {
+            return Err(StateError::SaveFailed("checked messaging requires an owner".into()));
+        };
+        #[cfg(test)]
+        test_support::before_commit();
+        super::persist::update_runtime_state(self.workspace, |latest| {
+            if team.is_empty() || !matches!(
+                super::projection::resolve_owner_team_id(latest, team),
+                super::projection::OwnerTeamResolution::Canonical(key) if key == team
+            ) {
+                return Err(StateError::SaveConflict("messaging owner changed before commit".into()));
+            }
+            let nested = latest.get("teams").and_then(Value::as_object)
+                .is_some_and(|teams| teams.contains_key(team));
+            let mut selected = if nested {
+                super::projection::project_top_level_view(latest, team)
+            } else if legacy_single_team_state(latest)
+                && (latest.get("active_team_key").and_then(Value::as_str) == Some(team)
+                    || super::projection::team_state_key(latest) == team
+                    || latest.get("session_name").and_then(Value::as_str)
+                        .and_then(|session| session.strip_prefix("team-")) == Some(team))
+            {
+                latest.clone()
+            } else {
+                return Err(StateError::SaveConflict("messaging owner no longer exists".into()));
+            };
+            update(&mut selected)?;
+            Ok(if nested {
+                super::projection::merge_committed_team(latest, &selected, team)
+            } else {
+                selected
+            })
+        })?;
+        Ok(())
+    }
+
     /// Atomically replace only the fork target row in the selected team.
     pub(crate) fn commit_fork_agent(
         &self,

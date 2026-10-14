@@ -108,6 +108,7 @@ pub enum ScheduledKind {
     Send,
     HealthPing,
     TrustRetry,
+    EnterRescue,
 }
 
 /// classifier 产物 status (card §48;消费 step 8 classifier)。

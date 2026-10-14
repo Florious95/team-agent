@@ -73,12 +73,37 @@ use crate::transport::{
     SubmitVerification, Target, Transport, TransportError, TurnVerification, WindowName,
 };
 
+mod native_input;
+
 pub const PANE_BINDING_NONCE_METADATA_KEY: &str = "TEAM_AGENT_PANE_BINDING_NONCE";
 pub(crate) const KEEPALIVE_WINDOW_NAME: &str = "[team-agent keepalive]";
 const TMUX_PANE_BINDING_NONCE_OPTION: &str = "@team_agent_pane_binding_nonce";
 const TMUX_SESSION_OWNER_WORKSPACE_OPTION: &str = "@team_agent_owner_workspace";
 const TMUX_SESSION_OWNER_TEAM_OPTION: &str = "@team_agent_owner_team";
 const TMUX_SESSION_OWNER_GENERATION_OPTION: &str = "@team_agent_owner_generation";
+
+/// Shared existing pane nonce generator; transport owns the physical nonce.
+/// Same material/algorithm as the original Leader claim producer, no new dependency.
+pub(crate) fn next_pane_binding_nonce(workspace: &Path, endpoint: &str, pane: &PaneId) -> String {
+    use sha2::{Digest, Sha256};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let canonical = workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf());
+    let material = format!(
+        "{}\0{endpoint}\0{}\0{}\0{nanos}\0{counter}",
+        canonical.display(),
+        pane.as_str(),
+        std::process::id(),
+    );
+    let digest = Sha256::digest(material.as_bytes());
+    digest[..16].iter().map(|byte| format!("{byte:02x}")).collect()
+}
 
 /// Result of running an external command — the typed output of the OS edge.
 #[derive(Debug, Clone)]
@@ -687,7 +712,7 @@ pub(crate) fn tmux_backend_for_runtime_state_or_workspace(
     workspace: &Path,
     state: Option<&serde_json::Value>,
 ) -> RuntimeTmuxBackendSelection {
-    let (backend, source) =
+    let (mut backend, source) =
         if let Some((endpoint, source)) = runtime_tmux_endpoint_from_state(state) {
             (TmuxBackend::for_tmux_endpoint(endpoint), source)
         } else {
@@ -696,6 +721,8 @@ pub(crate) fn tmux_backend_for_runtime_state_or_workspace(
                 RuntimeTmuxEndpointSource::WorkspaceFallback,
             )
         };
+    // A persisted endpoint changes addressing, not the owning input-lock scope.
+    backend.event_workspace = Some(workspace.to_path_buf());
     RuntimeTmuxBackendSelection {
         tmux_endpoint_used: backend.tmux_endpoint(),
         backend,
@@ -719,7 +746,7 @@ pub(crate) fn tmux_backend_with_runner_for_runtime_state_or_workspace(
     workspace: &Path,
     state: Option<&serde_json::Value>,
 ) -> RuntimeTmuxBackendSelection {
-    let (backend, source) =
+    let (mut backend, source) =
         if let Some((endpoint, source)) = runtime_tmux_endpoint_from_state(state) {
             (
                 TmuxBackend::with_runner_for_tmux_endpoint(runner, endpoint),
@@ -731,6 +758,7 @@ pub(crate) fn tmux_backend_with_runner_for_runtime_state_or_workspace(
                 RuntimeTmuxEndpointSource::WorkspaceFallback,
             )
         };
+    backend.event_workspace = Some(workspace.to_path_buf());
     RuntimeTmuxBackendSelection {
         tmux_endpoint_used: backend.tmux_endpoint(),
         backend,
@@ -3069,6 +3097,10 @@ impl Transport for TmuxBackend {
         true
     }
 
+    fn supports_owned_native_input(&self) -> bool {
+        true
+    }
+
     fn tmux_endpoint(&self) -> Option<String> {
         self.socket
             .as_ref()
@@ -3249,14 +3281,19 @@ impl Transport for TmuxBackend {
         bracketed: bool,
         observer: Option<&dyn SubmitObserver>,
     ) -> Result<InjectReport, TransportError> {
+        if let (Some(request), InjectPayload::Text(text), Key::Enter) =
+            (crate::transport::native_input::current_request(), payload, submit)
+        {
+            return self.inject_native_input(target, text, bracketed, request, observer);
+        }
         let pane = pane_from_target(target);
-        let _pane_input = crate::lifecycle::pane_input_lock::acquire_or_proceed(
+        let _pane_input = crate::lifecycle::pane_input_lock::acquire_for_write(
             crate::lifecycle::pane_input_lock::PaneInputLockRequest {
                 workspace: self.event_workspace.as_deref(),
                 target_key: pane.as_str(),
                 operation: "inject",
             },
-        );
+        ).map_err(|_| TransportError::NativeInputNotReady { reason: "required_guard_active".into() })?;
         // U1 #7: pane readback signal for the non-pasted-prompt text path.
         let mut token_visible_for_report: Option<bool> = None;
         match payload {
@@ -3811,15 +3848,21 @@ impl Transport for TmuxBackend {
         })
     }
 
+    fn rescue_enter(&self, evidence: &crate::transport::native_input::NativeInputEvidence, authorize: &dyn Fn() -> bool, observer: Option<&dyn SubmitObserver>)
+        -> Result<crate::transport::native_input::EnterRescueOutcome, TransportError>
+    {
+        self.rescue_native_input(evidence, authorize, observer)
+    }
+
     fn send_keys(&self, target: &Target, keys: &[Key]) -> Result<(), TransportError> {
         let pane = pane_from_target(target);
-        let _pane_input = crate::lifecycle::pane_input_lock::acquire_or_proceed(
+        let _pane_input = crate::lifecycle::pane_input_lock::acquire_for_write(
             crate::lifecycle::pane_input_lock::PaneInputLockRequest {
                 workspace: self.event_workspace.as_deref(),
                 target_key: pane.as_str(),
                 operation: "send_keys",
             },
-        );
+        ).map_err(|_| TransportError::NativeInputNotReady { reason: "required_guard_active".into() })?;
         if keys.contains(&Key::CancelMode) {
             if let Some(mode) = pane_mode_from_raw(self.query(target, PaneField::PaneMode)?) {
                 let argv = crate::transport::tmux_cancel_mode_argv(&pane, mode);
