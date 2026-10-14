@@ -7,7 +7,7 @@ use team_agent_contract::contract::{
     types::InstanceIdentity,
     hooks::{PlanHook, ProviderHooks},
     plan::{LaunchPlan, ResolvedLaunch},
-    types::{ContractError, Support},
+    types::{ContractError, Reason, Support},
 };
 use team_agent_contract::kiro::{self, KiroAdapter, KIRO_DESCRIPTOR};
 use team_agent_contract::providers::codex::{
@@ -81,7 +81,7 @@ impl NativeProvider {
     /// These providers use the separately fenced native tool-roundtrip ledger,
     /// never a guessed neutral tools panel or another provider's inspector.
     pub fn uses_tool_roundtrips(self) -> bool {
-        matches!(self, Self::Cursor | Self::GrokBuild)
+        matches!(self, Self::Cursor | Self::GrokBuild | Self::Codex)
     }
 
     pub fn startup(self) -> Option<&'static StartupDefinition> {
@@ -109,12 +109,13 @@ impl NativeProvider {
                 field: "Grok Build native Team-tool inspector",
                 reason: grok_build::UNVERIFIED,
             }),
-            Self::Codex => Err(self
-                .descriptor()
-                .tool_names
-                .naming
-                .require("codex tool names")
-                .expect_err("phase 3 keeps Codex tool names unverified")),
+            Self::Codex => Err(ContractError::Unverified {
+                field: "codex tool panel",
+                reason: Reason {
+                    code: "codex-tool-panel-not-admitted",
+                    message: "Codex tool panel was not admitted",
+                },
+            }),
         }
     }
 
@@ -159,17 +160,24 @@ fn codex_owned_adapter(
     arguments: Vec<String>,
     environment: BTreeMap<String, String>,
 ) -> Result<CodexAdapter, ContractError> {
-    if !arguments.is_empty() || !environment.is_empty() {
+    if !environment.is_empty() {
         return Err(codex_h3_refusal());
     }
     if executable.as_os_str().is_empty() {
-        return Ok(CodexAdapter::new());
+        return if arguments.is_empty() {
+            Ok(CodexAdapter::new())
+        } else {
+            Err(codex_h3_refusal())
+        };
     }
     let Some(command) = executable.to_str() else {
         return Err(codex_h3_refusal());
     };
-    owned_mcp_toml(CODEX_OWNED_MCP_KEY, command)?;
-    Ok(CodexAdapter::new().with_owned_mcp(CODEX_OWNED_MCP_KEY, command))
+    if arguments.is_empty() {
+        owned_mcp_toml(CODEX_OWNED_MCP_KEY, command)?;
+        return Ok(CodexAdapter::new().with_owned_mcp(CODEX_OWNED_MCP_KEY, command));
+    }
+    CodexAdapter::new().with_owned_mcp_args(CODEX_OWNED_MCP_KEY, command, arguments)
 }
 
 fn codex_h3_refusal() -> ContractError {
@@ -327,25 +335,38 @@ mod tests {
         assert!(codex.controls().is_empty());
         assert!(codex.startup().is_none());
         assert!(codex.session_panel().is_none());
-        assert!(!codex.uses_tool_roundtrips());
-        assert!(!codex.first_business_bootstrap());
+        assert!(codex.uses_tool_roundtrips());
+        assert!(codex.first_business_bootstrap());
         assert_eq!(codex.action_budget(), std::time::Duration::from_secs(30));
         match codex.tool_panel() {
-            Err(ContractError::Unverified { reason, .. }) => {
-                assert_eq!(reason.code, "codex-tool-names-not-observed");
+            Err(ContractError::Unverified { field, reason }) => {
+                assert_eq!(field, "codex tool panel");
+                assert_eq!(reason.code, "codex-tool-panel-not-admitted");
             }
-            _ => panic!("codex tool panel is not the unverified tool-name gate"),
+            other => panic!("codex tool panel: {other:?}"),
         }
-        match codex.server_key() {
-            Err(ContractError::Unverified { reason, .. }) => {
-                assert_eq!(reason.code, "codex-tool-names-not-observed");
-            }
-            other => panic!("codex server key: {other:?}"),
-        }
+        assert_eq!(codex.server_key().expect("static server key"), "team_orchestrator");
         assert!(matches!(
             codex.adapter(PathBuf::from("codex"), Vec::new(), BTreeMap::new()),
             Err(ContractError::Unverified { reason, .. }) if reason.code == "codex-h3-no-owned-mount"
         ));
+        assert!(matches!(
+            codex.adapter(PathBuf::from("/usr/bin/true"), vec!["mcp".into()], BTreeMap::new()),
+            Err(ContractError::Unverified { reason, .. }) if reason.code == "codex-h3-no-owned-mount"
+        ));
+        match codex.adapter(
+            PathBuf::from("/usr/bin/true"),
+            vec!["contract-mcp".into(), "/tmp/codex-workspace".into()],
+            BTreeMap::new(),
+        ) {
+            Ok(NativeAdapter::Codex(adapter)) => {
+                assert_eq!(
+                    adapter.owned_args(),
+                    ["contract-mcp".to_string(), "/tmp/codex-workspace".to_string()]
+                );
+            }
+            other => panic!("contract-mcp args: {other:?}"),
+        }
         assert!(matches!(
             codex.adapter(PathBuf::new(), vec!["mcp".into()], BTreeMap::new()),
             Err(ContractError::Unverified { reason, .. }) if reason.code == "codex-h3-no-owned-mount"

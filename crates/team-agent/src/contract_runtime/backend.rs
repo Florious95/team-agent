@@ -351,7 +351,11 @@ fn request(
         operation: Operation::Fresh,
         mode: LaunchMode::FullWorker,
         auth: AuthMode::NativeSubscription,
-        model: Some(role.model.clone()),
+        model: if role.provider.as_str() == "codex" {
+            None
+        } else {
+            Some(role.model.clone())
+        },
         role_effort: role.effort.clone(),
         team_effort: None,
         bypass: role.bypass,

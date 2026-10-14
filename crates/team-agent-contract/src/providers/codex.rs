@@ -1,24 +1,28 @@
 //! ---
 //! purpose: Codex CLI contract leaf for the fifteen facets and seven hooks.
-//! contract: H1 catalog reads `debug models --bundled` from the seat wrapper. An empty adapter still refuses launch. LaunchOnly Fresh with seat images returns the two-flag plan. H3 writes only an owned `codex/mcp.toml` for one absolute stdio command. H6 modal intercept stays a refusal.
+//! contract: 带映像的 LaunchOnly Fresh 仍返回两面旗且物化为空；带映像且持有自有 MCP 的 FullWorker Fresh 返回同一 argv，并把运行时根上的 `codex/mcp.toml` 与 `codex/prompt.txt` 放进物化。空适配器仍然拒绝启动。
 //! boundary: No process signals, no global config writes, no credential or rollout-body reads, no static model list.
 //! ---
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
-use crate::contract::delivery::{CaptureFrame, InputSurface, InteractionObservation};
+use crate::contract::delivery::{
+    CaptureFrame, InputProfile, InputSurface, InputTiming, InteractionObservation, PasteMode,
+    PayloadTrailer, PhysicalKey, ProfileIdentity, RetryBudget, SubmitPolicy,
+};
 use crate::contract::descriptor::*;
 use crate::contract::hooks::{
     BoundedReadHost, CatalogHook, CatalogRequest, InteractionHook, MaterializeHook, OwnedIo, PlanHook,
     ProviderHooks, ReadBounds, ReadFailure, ReadOutput, ScopedSessionEvidence, SessionHook,
 };
 use crate::contract::plan::{
-    CarrierReport, CarrierUse, CatalogObservation, EffortResolution, EnvironmentDelta, ExpectedSession,
+    CarrierRef, CarrierReport, CarrierUse, CatalogObservation, EffortResolution, EnvironmentDelta,
+    ExpectedSession,
     LaunchEntrypoint, LaunchMode, LaunchPlan, MaterializeReceipt, ModelRecord, OwnedResourceReceipt,
     OwnedResourceRequest, PartialFailure, ResolvedLaunch, ResourceWriteEffect,
 };
@@ -57,14 +61,6 @@ const PROMPT: Reason = Reason {
     code: "codex-prompt-bytes-not-observed",
     message: "Codex prompt bytes were not observed",
 };
-const MCP: Reason = Reason {
-    code: "codex-mcp-scoped-mount-not-proven",
-    message: "A scoped Codex MCP mount was not proven",
-};
-const TOOL_NAMES: Reason = Reason {
-    code: "codex-tool-names-not-observed",
-    message: "Codex native tool names were not observed",
-};
 const RESUME: Reason = Reason {
     code: "codex-live-resume-not-run",
     message: "Live Codex resume was not run",
@@ -72,10 +68,6 @@ const RESUME: Reason = Reason {
 const FORK: Reason = Reason {
     code: "codex-fork-not-run",
     message: "Codex fork was not run",
-};
-const INPUT: Reason = Reason {
-    code: "codex-submit-not-run",
-    message: "Codex submit was not run",
 };
 const CONSENT: Reason = Reason {
     code: "codex-startup-consent-not-accepted",
@@ -162,6 +154,37 @@ const MAX_WRAPPER_BYTES: u64 = 1024 * 1024;
 pub const MAX_ENGINE_BYTES: u64 = 512 * 1024 * 1024;
 
 const PHASE1_INTERACTIVE_ARGUMENTS: &[&str] = &["--no-alt-screen", "--no-daemon"];
+/// UTF-8 recipe `codex-tui-v1/r1:runtime-captured+seat-wrapper+bundled-catalog;macos;paste-bracketed;enter-once;confirm-none;retry-never;queue-none;max-submit-keys-1;capture100ms;stable200ms;paste-floor100ms;deadline30s;modal-refusal-no-key`.
+const CODEX_SUBMIT_POLICY_SHA256: Digest = Digest([
+    168, 118, 138, 11, 125, 142, 62, 19, 118, 180, 255, 52, 216, 236, 157, 192, 28, 208, 80, 4, 35,
+    107, 173, 193, 213, 5, 148, 61, 47, 121, 240, 186,
+]);
+const CODEX_SUBMIT: SubmitPolicy = SubmitPolicy {
+    paste_mode: PasteMode::Bracketed,
+    payload_trailer: PayloadTrailer::None,
+    initial_submit: PhysicalKey::Enter,
+    confirmation_steps: &[],
+    retry_budget: RetryBudget::Never,
+    queue_flush: &[],
+    max_submit_keys: 1,
+    timing: InputTiming {
+        capture_interval: Duration::from_millis(100),
+        stable_window: Duration::from_millis(200),
+        paste_to_submit_floor: Duration::from_millis(100),
+        deadline: Duration::from_secs(30),
+    },
+};
+pub static CODEX_SUBMIT_PROFILES: [InputProfile; 1] = [InputProfile {
+    id: "codex-tui-single-enter-v1",
+    identity: ProfileIdentity::RuntimeCaptured,
+    harness: CATALOG_HARNESS,
+    ui: CATALOG_UI,
+    platform: Platform::MacOs,
+    policy_sha256: CODEX_SUBMIT_POLICY_SHA256,
+    operations: &[Operation::FirstBusiness, Operation::OrdinarySend],
+    channel: Channel::Tmux,
+    policy: Support::Supported(CODEX_SUBMIT),
+}];
 const FORBIDDEN_INTERACTIVE_ARGUMENTS: &[&str] = &[
     "--last",
     "npm",
@@ -206,16 +229,18 @@ pub static CODEX_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         intent: Support::Unverified(BYPASS),
     },
     prompt: PromptFacet {
-        carrier: Support::Unverified(PROMPT),
+        carrier: Support::Supported(PromptCarrier::RuntimeBridge),
     },
     mcp: McpFacet {
-        carrier: Support::Unverified(MCP),
+        carrier: Support::Supported(McpCarrier::ScopedConfig),
         scope: ResourceScope::RuntimeRoot,
-        tools: &[],
-        isolation: McpIsolation::Unverified,
+        tools: &TEAM_TOOLS,
+        isolation: McpIsolation::AmbientExcluded,
     },
     tool_names: ToolNameFacet {
-        naming: Support::Unverified(TOOL_NAMES),
+        naming: Support::Supported(ToolNaming::StaticServer {
+            key: "team_orchestrator",
+        }),
     },
     session: SessionFacet {
         fresh: FreshSession::CaptureAfterLaunch,
@@ -228,7 +253,7 @@ pub static CODEX_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         allowed_auth: &[],
     },
     input: InputFacet {
-        profiles: Support::Unverified(INPUT),
+        profiles: Support::Supported(&CODEX_SUBMIT_PROFILES),
     },
     startup: StartupFacet {
         interactive: true,
@@ -258,6 +283,10 @@ pub static CODEX_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
                 disposition: ResourceDisposition::OwnedRemovable,
             },
             ResourcePolicy {
+                kind: ResourceKind::Prompt,
+                disposition: ResourceDisposition::OwnedRemovable,
+            },
+            ResourcePolicy {
                 kind: ResourceKind::GlobalSettings,
                 disposition: ResourceDisposition::Forbidden,
             },
@@ -269,9 +298,15 @@ pub static CODEX_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     },
 };
 
+struct OwnedMcp {
+    server_key: String,
+    command: String,
+    args: Vec<String>,
+}
+
 pub struct CodexAdapter {
     images: Option<CodexLaunchImages>,
-    owned_mcp: Option<(String, String)>,
+    owned_mcp: Option<OwnedMcp>,
 }
 
 impl Default for CodexAdapter {
@@ -299,14 +334,43 @@ impl CodexAdapter {
         server_key: impl Into<String>,
         command: impl Into<String>,
     ) -> Self {
-        self.owned_mcp = Some((server_key.into(), command.into()));
+        self.owned_mcp = Some(OwnedMcp {
+            server_key: server_key.into(),
+            command: command.into(),
+            args: Vec::new(),
+        });
         self
+    }
+
+    /// Stores args only after `owned_mcp_document` accepts them.
+    pub fn with_owned_mcp_args(
+        mut self,
+        server_key: impl Into<String>,
+        command: impl Into<String>,
+        args: Vec<String>,
+    ) -> Result<Self, ContractError> {
+        let server_key = server_key.into();
+        let command = command.into();
+        owned_mcp_document(&server_key, &command, &args)?;
+        self.owned_mcp = Some(OwnedMcp {
+            server_key,
+            command,
+            args,
+        });
+        Ok(self)
     }
 
     pub fn owned_stdio(&self) -> Option<(&str, &str)> {
         self.owned_mcp
             .as_ref()
-            .map(|(server_key, command)| (server_key.as_str(), command.as_str()))
+            .map(|owned| (owned.server_key.as_str(), owned.command.as_str()))
+    }
+
+    pub fn owned_args(&self) -> &[String] {
+        self.owned_mcp
+            .as_ref()
+            .map(|owned| owned.args.as_slice())
+            .unwrap_or(&[])
     }
 
     pub fn hooks(&self) -> ProviderHooks<'_> {
@@ -338,30 +402,116 @@ impl PlanHook for CodexAdapter {
         let Some(images) = &self.images else {
             return self.plan_phase1();
         };
-        let request = resolved.request();
-        if request.mode != LaunchMode::LaunchOnly
-            || request.operation != Operation::Fresh
-            || *resolved.expected_session() != ExpectedSession::CaptureAfterLaunch
-        {
-            return Err(launch_not_admitted());
+        match resolved.request().mode {
+            LaunchMode::LaunchOnly => launch_only_plan(images, resolved),
+            LaunchMode::FullWorker => full_worker_plan(self, images, resolved),
         }
-        if request.bypass {
-            return match CODEX_DESCRIPTOR.bypass.intent.require("bypass") {
-                Err(error) => Err(error),
-                Ok(_) => Err(unverified("bypass", BYPASS)),
-            };
-        }
-        if resolved.model().is_some() {
-            return Err(unverified("model selection", SELECTION));
-        }
-        if !matches!(resolved.effort(), EffortResolution::Unspecified) {
-            return Err(ContractError::EffortRejected(EFFORT));
-        }
-        if request.prompt.is_some() {
-            return Err(unverified("prompt", PROMPT));
-        }
-        interactive_launch_plan(images, &request.paths.cwd.path, resolved.expected_session())
     }
+}
+
+fn launch_only_plan(
+    images: &CodexLaunchImages,
+    resolved: &ResolvedLaunch,
+) -> Result<LaunchPlan, ContractError> {
+    let request = resolved.request();
+    if request.operation != Operation::Fresh
+        || *resolved.expected_session() != ExpectedSession::CaptureAfterLaunch
+    {
+        return Err(launch_not_admitted());
+    }
+    if request.bypass {
+        return match CODEX_DESCRIPTOR.bypass.intent.require("bypass") {
+            Err(error) => Err(error),
+            Ok(_) => Err(unverified("bypass", BYPASS)),
+        };
+    }
+    if resolved.model().is_some() {
+        return Err(unverified("model selection", SELECTION));
+    }
+    if !matches!(resolved.effort(), EffortResolution::Unspecified) {
+        return Err(ContractError::EffortRejected(EFFORT));
+    }
+    if request.prompt.is_some() {
+        return Err(unverified("prompt", PROMPT));
+    }
+    interactive_launch_plan(images, &request.paths.cwd.path, resolved.expected_session())
+}
+
+fn full_worker_plan(
+    adapter: &CodexAdapter,
+    images: &CodexLaunchImages,
+    resolved: &ResolvedLaunch,
+) -> Result<LaunchPlan, ContractError> {
+    let request = resolved.request();
+    if request.operation != Operation::Fresh
+        || *resolved.expected_session() != ExpectedSession::CaptureAfterLaunch
+        || request.channel != Channel::Tmux
+        || request.auth != AuthMode::NativeSubscription
+    {
+        return Err(launch_not_admitted());
+    }
+    if request.bypass {
+        return match CODEX_DESCRIPTOR.bypass.intent.require("bypass") {
+            Err(error) => Err(error),
+            Ok(_) => Err(unverified("bypass", BYPASS)),
+        };
+    }
+    if resolved.model().is_some() {
+        return Err(unverified("model selection", SELECTION));
+    }
+    if !matches!(resolved.effort(), EffortResolution::Unspecified) {
+        return Err(ContractError::EffortRejected(EFFORT));
+    }
+    let Some(prompt) = request.prompt.as_deref().filter(|text| nonblank(text)) else {
+        return Err(ContractError::Invalid("worker prompt required"));
+    };
+    let Some((server_key, command)) = adapter.owned_stdio() else {
+        return Err(no_owned_mount());
+    };
+    if server_key != "team_orchestrator" {
+        return Err(no_owned_mount());
+    }
+    let document = owned_mcp_document(server_key, command, adapter.owned_args())?;
+    let root = &request.paths.runtime_root;
+    if !root.is_absolute() || codex_home_root(root) {
+        return Err(no_owned_mount());
+    }
+    let profile = &CODEX_SUBMIT_PROFILES[0];
+    if request.input_profile.as_deref() != Some(profile.id)
+        || !profile.matches_native(&request.native)
+    {
+        return Err(ContractError::ProfileUnavailable);
+    }
+    if images.engine != request.paths.executable {
+        return Err(ContractError::Invalid("codex interactive launch"));
+    }
+    let mut plan =
+        interactive_launch_plan(images, &request.paths.cwd.path, resolved.expected_session())?;
+    let owner = request.identity.clone();
+    let mcp_path = OwnedPath::new(root.clone(), PathBuf::from("codex/mcp.toml"))?;
+    let prompt_path = OwnedPath::new(root.clone(), PathBuf::from("codex/prompt.txt"))?;
+    plan.materialization = vec![
+        OwnedResourceRequest {
+            path: mcp_path.clone(),
+            owner: owner.clone(),
+            kind: ResourceKind::McpConfig,
+            contents: document,
+        },
+        OwnedResourceRequest {
+            path: prompt_path.clone(),
+            owner,
+            kind: ResourceKind::Prompt,
+            contents: prompt.as_bytes().to_vec(),
+        },
+    ];
+    plan.carriers = CarrierReport {
+        model: CarrierUse::NotRequested,
+        prompt: CarrierUse::Specified(CarrierRef::Resource(prompt_path)),
+        mcp: CarrierUse::Specified(CarrierRef::Resource(mcp_path)),
+        bypass: CarrierUse::NotRequested,
+        effort: CarrierUse::NotRequested,
+    };
+    Ok(plan)
 }
 
 impl MaterializeHook for CodexAdapter {
@@ -370,10 +520,10 @@ impl MaterializeHook for CodexAdapter {
         requests: &[OwnedResourceRequest],
         io: &mut dyn OwnedIo,
     ) -> Result<MaterializeReceipt, PartialFailure> {
-        let Some((server_key, command)) = &self.owned_mcp else {
+        let Some(owned) = &self.owned_mcp else {
             return Err(no_owned_mount_failure());
         };
-        let contents = match owned_mcp_toml(server_key, command) {
+        let contents = match owned_mcp_document(&owned.server_key, &owned.command, &owned.args) {
             Ok(contents) => contents,
             Err(error) => {
                 return Err(PartialFailure {
@@ -382,6 +532,28 @@ impl MaterializeHook for CodexAdapter {
                 })
             }
         };
+        if let Some((mcp, prompt)) = exact_owned_prompt_pair(requests, &contents) {
+            let mut resources = Vec::new();
+            for request in [mcp, prompt] {
+                let receipt = match io.create_exclusive(request) {
+                    Ok(receipt) => receipt,
+                    Err(mut failure) => {
+                        resources.append(&mut failure.receipt.resources);
+                        failure.receipt.resources = resources;
+                        return Err(failure);
+                    }
+                };
+                let matched = owned_receipt_matches(request, &receipt);
+                resources.push(receipt);
+                if !matched {
+                    return Err(PartialFailure {
+                        error: no_owned_mount(),
+                        receipt: MaterializeReceipt { resources },
+                    });
+                }
+            }
+            return Ok(MaterializeReceipt { resources });
+        }
         let Some(request) = exact_owned_mcp_request(requests, &contents) else {
             return Err(no_owned_mount_failure());
         };
@@ -623,10 +795,41 @@ pub fn argv_mutates_global_config(argv: &[&str]) -> bool {
 
 /// Body of the owned Codex MCP file. Only the measured `[mcp_servers.<key>]` command table.
 pub fn owned_mcp_toml(server_key: &str, command: &str) -> Result<Vec<u8>, ContractError> {
+    owned_mcp_document(server_key, command, &[])
+}
+
+/// Owned stdio table. Empty `args` matches `owned_mcp_toml`. A non-empty list
+/// must start with `contract-mcp` and is quoted into the same file, never argv.
+pub fn owned_mcp_document(
+    server_key: &str,
+    command: &str,
+    args: &[String],
+) -> Result<Vec<u8>, ContractError> {
     if !valid_id(server_key) || !absolute_stdio_command(command) {
         return Err(no_owned_mount());
     }
-    Ok(format!("[mcp_servers.{server_key}]\ncommand = \"{command}\"\n").into_bytes())
+    if args.is_empty() {
+        return Ok(format!("[mcp_servers.{server_key}]\ncommand = \"{command}\"\n").into_bytes());
+    }
+    if args.first().map(String::as_str) != Some("contract-mcp")
+        || args.iter().any(|arg| !owned_mcp_arg(arg))
+    {
+        return Err(no_owned_mount());
+    }
+    let mut quoted = Vec::with_capacity(args.len());
+    for arg in args {
+        quoted.push(serde_json::to_string(arg).map_err(|_| no_owned_mount())?);
+    }
+    Ok(format!(
+        "[mcp_servers.{server_key}]\ncommand = \"{command}\"\nargs = [{}]\n",
+        quoted.join(", ")
+    )
+    .into_bytes())
+}
+
+fn owned_mcp_arg(arg: &str) -> bool {
+    !arg.is_empty()
+        && !arg.chars().any(|ch| ch == '"' || ch == '\\' || ch == '\n' || ch.is_control())
 }
 
 fn absolute_stdio_command(command: &str) -> bool {
@@ -648,6 +851,35 @@ fn no_owned_mount_failure() -> PartialFailure {
     }
 }
 
+fn exact_owned_prompt_pair<'a>(
+    requests: &'a [OwnedResourceRequest],
+    contents: &[u8],
+) -> Option<(&'a OwnedResourceRequest, &'a OwnedResourceRequest)> {
+    let [mcp, prompt] = requests else {
+        return None;
+    };
+    if !owned_mcp_request_matches(mcp, contents) {
+        return None;
+    }
+    let prompt_text = std::str::from_utf8(&prompt.contents).ok()?;
+    if prompt.kind != ResourceKind::Prompt
+        || prompt.owner != mcp.owner
+        || prompt.path.root() != mcp.path.root()
+        || prompt.path.relative() != Path::new("codex/prompt.txt")
+        || prompt_text.is_empty()
+    {
+        return None;
+    }
+    Some((mcp, prompt))
+}
+
+fn owned_mcp_request_matches(request: &OwnedResourceRequest, contents: &[u8]) -> bool {
+    request.kind == ResourceKind::McpConfig
+        && request.path.relative() == Path::new("codex/mcp.toml")
+        && request.contents == contents
+        && !codex_home_root(request.path.root())
+}
+
 fn exact_owned_mcp_request<'a>(
     requests: &'a [OwnedResourceRequest],
     contents: &[u8],
@@ -655,14 +887,7 @@ fn exact_owned_mcp_request<'a>(
     let [request] = requests else {
         return None;
     };
-    if request.kind != ResourceKind::McpConfig
-        || request.path.relative() != Path::new("codex/mcp.toml")
-        || request.contents != contents
-        || codex_home_root(request.path.root())
-    {
-        return None;
-    }
-    Some(request)
+    owned_mcp_request_matches(request, contents).then_some(request)
 }
 
 fn codex_home_root(root: &Path) -> bool {

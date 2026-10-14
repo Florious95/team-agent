@@ -16,7 +16,7 @@ use team_agent_contract::contract::session::*;
 use team_agent_contract::contract::types::*;
 use team_agent_contract::providers::codex::{
     admit_rollout_name, argv_mutates_global_config, classify_image_role, forbidden_interactive_argument,
-    interactive_launch_plan, may_signal, owned_mcp_toml, parse_bundled_catalog,
+    interactive_launch_plan, may_signal, owned_mcp_document, owned_mcp_toml, parse_bundled_catalog,
     phase1_interactive_arguments, seat_pair_ok, startup_modal_intercept, validate_catalog_request,
     CodexAdapter, CodexImageRole,
     CodexLaunchImages, CATALOG_HARNESS, CATALOG_SOURCE, CATALOG_UI, CODEX_DESCRIPTOR,
@@ -158,20 +158,25 @@ fn fifteen_facets_match_phase1_admission() {
         "codex-bypass-modal-interaction-not-run"
     );
     assert_eq!(
-        unverified_code(d.prompt.carrier.require("prompt")),
-        "codex-prompt-bytes-not-observed"
+        d.prompt.carrier.require("prompt").expect("runtime bridge"),
+        &PromptCarrier::RuntimeBridge
     );
 
     assert_eq!(
-        unverified_code(d.mcp.carrier.require("mcp")),
-        "codex-mcp-scoped-mount-not-proven"
+        d.mcp.carrier.require("mcp").expect("scoped config"),
+        &McpCarrier::ScopedConfig
     );
     assert_eq!(d.mcp.scope, ResourceScope::RuntimeRoot);
-    assert!(d.mcp.tools.is_empty());
-    assert_eq!(d.mcp.isolation, McpIsolation::Unverified);
+    assert_eq!(d.mcp.tools, &TEAM_TOOLS);
+    assert!(d.mcp.tools.contains(&LogicalTool::SendMessage));
+    assert!(d.mcp.tools.contains(&LogicalTool::ReportResult));
+    assert!(d.mcp.tools.contains(&LogicalTool::GetTeamStatus));
+    assert_eq!(d.mcp.isolation, McpIsolation::AmbientExcluded);
     assert_eq!(
-        unverified_code(d.tool_names.naming.require("tool naming")),
-        "codex-tool-names-not-observed"
+        d.tool_names.naming.require("tool naming").expect("static server"),
+        &ToolNaming::StaticServer {
+            key: "team_orchestrator",
+        }
     );
 
     assert_eq!(d.session.fresh, FreshSession::CaptureAfterLaunch);
@@ -193,10 +198,38 @@ fn fifteen_facets_match_phase1_admission() {
     );
     assert!(d.fork.allowed_auth.is_empty());
 
+    let profiles = d.input.profiles.require("input profiles").expect("submit profile");
+    assert_eq!(profiles.len(), 1);
+    let profile = &profiles[0];
+    assert_eq!(profile.id, "codex-tui-single-enter-v1");
+    assert_eq!(profile.identity, ProfileIdentity::RuntimeCaptured);
+    assert_eq!(profile.harness, CATALOG_HARNESS);
+    assert_eq!(profile.ui, CATALOG_UI);
+    assert_eq!(profile.platform, Platform::MacOs);
+    assert_eq!(profile.channel, Channel::Tmux);
     assert_eq!(
-        unverified_code(d.input.profiles.require("input profiles")),
-        "codex-submit-not-run"
+        profile.operations,
+        &[Operation::FirstBusiness, Operation::OrdinarySend]
     );
+    assert_eq!(
+        profile.policy_sha256,
+        Digest([
+            168, 118, 138, 11, 125, 142, 62, 19, 118, 180, 255, 52, 216, 236, 157, 192, 28, 208,
+            80, 4, 35, 107, 173, 193, 213, 5, 148, 61, 47, 121, 240, 186,
+        ])
+    );
+    let policy = profile.policy.require("submit").expect("single enter");
+    assert_eq!(policy.paste_mode, PasteMode::Bracketed);
+    assert!(matches!(policy.payload_trailer, PayloadTrailer::None));
+    assert_eq!(policy.initial_submit, PhysicalKey::Enter);
+    assert!(policy.confirmation_steps.is_empty());
+    assert_eq!(policy.retry_budget, RetryBudget::Never);
+    assert!(policy.queue_flush.is_empty());
+    assert_eq!(policy.max_submit_keys, 1);
+    assert_eq!(policy.timing.capture_interval, Duration::from_millis(100));
+    assert_eq!(policy.timing.stable_window, Duration::from_millis(200));
+    assert_eq!(policy.timing.paste_to_submit_floor, Duration::from_millis(100));
+    assert_eq!(policy.timing.deadline, Duration::from_secs(30));
     assert!(d.startup.interactive);
     assert_eq!(
         unverified_code(d.startup.authorized_consent.require("startup consent")),
@@ -239,6 +272,10 @@ fn fifteen_facets_match_phase1_admission() {
         disposition: ResourceDisposition::OwnedRemovable,
     }));
     assert!(teardown.contains(&ResourcePolicy {
+        kind: ResourceKind::Prompt,
+        disposition: ResourceDisposition::OwnedRemovable,
+    }));
+    assert!(teardown.contains(&ResourcePolicy {
         kind: ResourceKind::GlobalSettings,
         disposition: ResourceDisposition::Forbidden,
     }));
@@ -246,7 +283,7 @@ fn fifteen_facets_match_phase1_admission() {
         kind: ResourceKind::NativeDatabase,
         disposition: ResourceDisposition::Forbidden,
     }));
-    assert_eq!(teardown.len(), 4);
+    assert_eq!(teardown.len(), 5);
 }
 
 #[test]
@@ -495,23 +532,25 @@ fn launch_only_fresh_with_images_returns_the_two_flag_plan() {
         "codex-model-selection-not-admitted"
     );
 
-    let worker = match resolve_launch(
+    let prompted = resolve_launch(
         &CODEX_DESCRIPTOR,
         &hooks,
         &phase1_request(
             Operation::Fresh,
-            LaunchMode::FullWorker,
+            LaunchMode::LaunchOnly,
             None,
             false,
-            Some("worker"),
+            Some("stay-out-of-argv"),
         ),
         None,
-    ) {
+    )
+    .expect("launch-only prompt reaches plan");
+    let prompt_err = match adapter.plan(&prompted) {
         Err(error) => error,
-        Ok(_) => panic!("full worker must not plan"),
+        Ok(_) => panic!("launch-only prompt must stay out of argv"),
     };
     assert_eq!(
-        unverified_code::<LaunchPlan>(Err(worker)),
+        unverified_code::<LaunchPlan>(Err(prompt_err)),
         "codex-prompt-bytes-not-observed"
     );
 
@@ -917,6 +956,15 @@ impl OwnedIo for CountingIo {
     }
 }
 
+fn prompt_request(root: &str, contents: &[u8]) -> OwnedResourceRequest {
+    OwnedResourceRequest {
+        path: OwnedPath::new(PathBuf::from(root), PathBuf::from("codex/prompt.txt")).unwrap(),
+        owner: instance(),
+        kind: ResourceKind::Prompt,
+        contents: contents.to_vec(),
+    }
+}
+
 fn mcp_request(root: &str, contents: Vec<u8>) -> OwnedResourceRequest {
     OwnedResourceRequest {
         path: OwnedPath::new(PathBuf::from(root), PathBuf::from("codex/mcp.toml")).unwrap(),
@@ -1028,24 +1076,141 @@ fn owned_mcp_file_is_one_exclusive_stdio_table() {
     assert_eq!(arguments, phase1_interactive_arguments());
     assert!(plan.materialization.is_empty());
     assert_eq!(plan.carriers.mcp, CarrierUse::NotRequested);
-    let worker = match resolve_launch(
+
+    let workspace_args = vec!["contract-mcp".to_string(), "/tmp/codex-phase1".to_string()];
+    let with_args = owned_mcp_document("team_orchestrator", "/usr/bin/true", &workspace_args).unwrap();
+    let rendered = std::str::from_utf8(&with_args).unwrap();
+    assert!(rendered.contains("args = "));
+    assert_eq!(
+        owned_mcp_document("team_a", "/usr/bin/true", &[]).unwrap(),
+        owned_mcp_toml("team_a", "/usr/bin/true").unwrap()
+    );
+    let arg_adapter = seated()
+        .with_launch_images(measured_images(WRAPPER, ENGINE))
+        .with_owned_mcp_args("team_orchestrator", "/usr/bin/true", workspace_args)
+        .expect("contract-mcp args");
+    let arg_plan = arg_adapter.plan(&resolved).expect("args stay out of argv");
+    let arg_argv: Vec<_> = arg_plan.arguments.iter().map(|arg| arg.to_str().unwrap()).collect();
+    assert_eq!(arg_argv, phase1_interactive_arguments());
+    assert_eq!(arg_argv.len(), 2);
+
+    assert_h3_unwritten(&adapter, &[prompt_request("/tmp/codex-runtime", b"worker")]);
+    assert_h3_unwritten(
+        &adapter,
+        &[
+            prompt_request("/tmp/codex-runtime", b"worker"),
+            mcp_request("/tmp/codex-runtime", contents.clone()),
+        ],
+    );
+    assert_h3_unwritten(
+        &adapter,
+        &[
+            mcp_request("/Users/alauda/.codex", contents.clone()),
+            prompt_request("/Users/alauda/.codex", b"worker"),
+        ],
+    );
+    let mut pair_io = CountingIo::new();
+    let pair = adapter
+        .materialize(
+            &[
+                mcp_request("/tmp/codex-runtime", contents.clone()),
+                prompt_request("/tmp/codex-runtime", b"worker"),
+            ],
+            &mut pair_io,
+        )
+        .unwrap();
+    assert_eq!(pair_io.writes, 2);
+    assert_eq!(pair.resources.len(), 2);
+    assert_eq!(pair.resources[1].kind, ResourceKind::Prompt);
+    assert_eq!(pair.resources[1].path.relative(), Path::new("codex/prompt.txt"));
+}
+
+fn full_worker_request(model: Option<&str>, bypass: bool, prompt: Option<&str>) -> LaunchRequest {
+    let mut request = phase1_request(Operation::Fresh, LaunchMode::FullWorker, model, bypass, prompt);
+    request.input_profile = Some("codex-tui-single-enter-v1".into());
+    request.native.harness = CATALOG_HARNESS.into();
+    request.native.ui = CATALOG_UI.into();
+    request
+}
+
+fn full_worker_adapter() -> CodexAdapter {
+    seated()
+        .with_launch_images(measured_images(WRAPPER, ENGINE))
+        .with_owned_mcp("team_orchestrator", "/usr/bin/true")
+}
+
+#[test]
+fn full_worker_fresh_plans_two_owned_files_and_the_same_argv() {
+    let prompt = "worker-bytes";
+    let adapter = full_worker_adapter();
+    let hooks = adapter.hooks();
+    let resolved = resolve_launch(
         &CODEX_DESCRIPTOR,
         &hooks,
-        &phase1_request(
-            Operation::Fresh,
-            LaunchMode::FullWorker,
-            None,
-            false,
-            Some("worker"),
-        ),
+        &full_worker_request(None, false, Some(prompt)),
         None,
-    ) {
-        Err(error) => error,
-        Ok(_) => panic!("full worker must not plan"),
-    };
+    )
+    .expect("full worker fresh resolves");
+    let plan = adapter.plan(&resolved).expect("full worker fresh plan");
+    validate_launch_plan(&CODEX_DESCRIPTOR, &resolved, &plan).expect("plan shape");
+    let arguments: Vec<_> = plan.arguments.iter().map(|arg| arg.to_str().unwrap()).collect();
+    assert_eq!(arguments, phase1_interactive_arguments());
+    assert!(plan.executable_inputs.is_empty());
+    assert!(plan.environment.remove.is_empty());
+    assert!(plan.environment.set.is_empty());
+    assert_eq!(plan.expected_session, ExpectedSession::CaptureAfterLaunch);
+    assert_eq!(plan.executable, PathBuf::from(ENGINE));
     assert_eq!(
-        unverified_code::<LaunchPlan>(Err(worker)),
-        "codex-prompt-bytes-not-observed"
+        plan.launcher.expect("wrapper").executable,
+        PathBuf::from(WRAPPER)
+    );
+    assert_eq!(plan.materialization.len(), 2);
+    assert_eq!(plan.materialization[0].path.relative(), Path::new("codex/mcp.toml"));
+    assert_eq!(plan.materialization[1].path.relative(), Path::new("codex/prompt.txt"));
+    assert_eq!(plan.materialization[0].path.root(), Path::new("/tmp/codex-phase1-runtime"));
+    assert_eq!(plan.materialization[1].path.root(), plan.materialization[0].path.root());
+    assert_eq!(plan.materialization[1].contents, prompt.as_bytes());
+    assert_eq!(
+        plan.materialization[0].contents,
+        owned_mcp_toml("team_orchestrator", "/usr/bin/true").unwrap()
+    );
+    assert!(matches!(plan.carriers.model, CarrierUse::NotRequested));
+    assert!(matches!(plan.carriers.bypass, CarrierUse::NotRequested));
+    assert!(matches!(plan.carriers.effort, CarrierUse::NotRequested));
+    assert!(matches!(
+        &plan.carriers.mcp,
+        CarrierUse::Specified(CarrierRef::Resource(path)) if path == &plan.materialization[0].path
+    ));
+    assert!(matches!(
+        &plan.carriers.prompt,
+        CarrierUse::Specified(CarrierRef::Resource(path)) if path == &plan.materialization[1].path
+    ));
+
+    let model = "opaque-seat-model";
+    let resolved_model = resolve_launch(
+        &CODEX_DESCRIPTOR,
+        &hooks,
+        &full_worker_request(Some(model), false, Some(prompt)),
+        None,
+    )
+    .expect("opaque id reaches plan");
+    let model_err = adapter.plan(&resolved_model).expect_err("model stays off argv");
+    assert!(!format!("{model_err:?}").contains(model));
+    assert_eq!(
+        unverified_code::<LaunchPlan>(Err(model_err)),
+        "codex-model-selection-not-admitted"
+    );
+
+    let bypass = resolve_launch(
+        &CODEX_DESCRIPTOR,
+        &hooks,
+        &full_worker_request(None, true, Some(prompt)),
+        None,
+    )
+    .expect_err("bypass stays closed");
+    assert_eq!(
+        unverified_code::<LaunchPlan>(Err(bypass)),
+        "codex-bypass-modal-interaction-not-run"
     );
 }
 
