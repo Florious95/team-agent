@@ -6,9 +6,10 @@ use sha2::{Digest, Sha256};
 
 use super::*;
 use crate::lifecycle::pane_input_lock::{acquire_required, PaneInputLockRequest};
+use crate::model::enums::Provider;
 use crate::transport::native_input::{
-    inspect_input, record_evidence, EnterRescueOutcome, InputFrame, NativeInputBinding,
-    NativeInputEvidence, NativeInputPhase, NativeInputRequest,
+    inspect_input, pi_paste_capsule, record_evidence, EnterRescueOutcome, InputFrame,
+    NativeInputBinding, NativeInputEvidence, NativeInputPhase, NativeInputRequest,
 };
 
 #[cfg(test)]
@@ -295,7 +296,8 @@ impl TmuxBackend {
         evidence.ui_identity = baseline.identity;
         evidence.footer_sha256 = digest(&baseline.footer);
         evidence.baseline_sha256 = digest(&baseline.transcript);
-        evidence.baseline_capsules = capsule_labels(&baseline.transcript);
+        evidence.baseline_capsules =
+            capsule_labels(evidence.request.provider, &baseline.transcript);
         self.native_record(&evidence)?;
         let buffer = owned_buffer(&evidence);
         for argv in tmux_inject_text_argv(&pane, &buffer, text, bracketed) {
@@ -333,10 +335,17 @@ impl TmuxBackend {
                 }
                 Err(error) => return Err(error),
             };
-            if frame.identity == evidence.ui_identity && !frame.busy {
+            if frame.identity == evidence.ui_identity
+                && digest(&frame.footer) == evidence.footer_sha256
+                && !frame.busy
+            {
                 if let Some(capsule) = &frame.capsule {
-                    if !evidence.baseline_capsules.contains(capsule) {
+                    if evidence.capsule.is_none() && !evidence.baseline_capsules.contains(capsule) {
                         evidence.capsule = Some(capsule.clone());
+                        // Bind the empty-baseline, single-owned-paste transition
+                        // before stability waiting can fail. This is still
+                        // Pasted, not Seen or permission to submit a key.
+                        self.native_record(&evidence)?;
                     }
                 }
                 if frame.pending(&evidence) {
@@ -464,7 +473,16 @@ fn owned_buffer(evidence: &NativeInputEvidence) -> String {
     )
 }
 
-fn capsule_labels(text: &str) -> Vec<String> {
+fn capsule_labels(provider: Provider, text: &str) -> Vec<String> {
+    if provider == Provider::Pi {
+        return text
+            .match_indices("[paste #")
+            .filter_map(|(start, _)| {
+                let end = text[start..].find(']')? + start;
+                pi_paste_capsule(&text[start..=end]).map(str::to_owned)
+            })
+            .collect();
+    }
     text.lines()
         .filter_map(|line| {
             let start = line.find("[Pasted text #")?;

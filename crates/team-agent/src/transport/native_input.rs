@@ -296,6 +296,23 @@ fn pi_closed_update_notice(rows: &[&str], closing: usize, editor_start: usize, t
         })
 }
 
+pub(crate) fn pi_paste_capsule(text: &str) -> Option<&str> {
+    fn positive(value: &str) -> bool {
+        !value.starts_with('0')
+            && value.bytes().all(|byte| byte.is_ascii_digit())
+            && value.parse::<u64>().is_ok()
+    }
+    let label = text.trim();
+    let body = label.strip_prefix("[paste #")?.strip_suffix(']')?;
+    let (id, size) = body.split_once(' ')?;
+    let count = if let Some(lines) = size.strip_prefix('+') {
+        lines.strip_suffix(" lines")?
+    } else {
+        size.strip_suffix(" chars")?
+    };
+    (positive(id) && positive(count)).then_some(label)
+}
+
 fn pi_input(text: &str, pane_height: u32) -> Option<InputFrame> {
     if pane_height < 10 {
         return None;
@@ -349,13 +366,14 @@ fn pi_input(text: &str, pane_height: u32) -> Option<InputFrame> {
         < 8
         || status.to_ascii_lowercase().contains("esc to interrupt")
         || status.to_ascii_lowercase().contains("ctrl+c to stop");
+    let capsule = pi_paste_capsule(&composer).map(str::to_owned);
     Some(InputFrame {
         composer,
         transcript,
         identity: rows[footer].split(" · ").next()?.trim().to_string(),
         footer: String::new(),
         busy,
-        capsule: None,
+        capsule,
     })
 }
 
@@ -475,6 +493,55 @@ mod tests {
         // If the complete box itself could be editor content, geometry cannot
         // distinguish it from a pasted imitation: keep the old refusal.
         assert!(super::inspect_input(Provider::Pi, PI_R6_IDLE, 120).is_none());
+    }
+
+    const PI_R7_FOLDED: &str = include_str!("../../tests/fixtures/pi-r7-folded-24.txt");
+
+    #[test]
+    fn native_input_pi_r7_capsule_is_current_composer_not_history() {
+        assert_eq!(
+            input_digest(PI_R7_FOLDED),
+            "b7ea6992c3303743b50714fb55ffc8b91ac5ad168e0acd015428ca5af538ed0e"
+        );
+        let frame = super::inspect_input(Provider::Pi, PI_R7_FOLDED, 24).unwrap();
+        assert!(!frame.empty());
+        assert!(!frame.busy);
+        assert_eq!(frame.capsule.as_deref(), Some("[paste #1 +30 lines]"));
+        assert!(!frame.has_marker("[team-agent-token:msg_one]"));
+        let history = format!("[paste #1 +30 lines]\n{PI_R6_IDLE}");
+        let frame = super::inspect_input(Provider::Pi, &history, 24).unwrap();
+        assert!(frame.empty());
+        assert!(frame.capsule.is_none());
+        let extra = PI_R7_FOLDED.replace(
+            "[paste #1 +30 lines]",
+            "[paste #1 +30 lines]\nforeign draft",
+        );
+        let frame = super::inspect_input(Provider::Pi, &extra, 24).unwrap();
+        assert!(!frame.empty());
+        assert!(frame.capsule.is_none());
+    }
+
+    #[test]
+    fn native_input_pi_capsule_grammar_is_canonical_and_provider_specific() {
+        for label in ["[paste #1 +30 lines]", "[paste #2 1234 chars]"] {
+            assert_eq!(pi_paste_capsule(label), Some(label));
+        }
+        for label in [
+            "[paste #0 +30 lines]",
+            "[paste #01 +30 lines]",
+            "[paste #1 +0 lines]",
+            "[paste #1 +030 lines]",
+            "[paste #18446744073709551616 +30 lines]",
+            "[paste #1 +18446744073709551616 lines]",
+            "[paste #1 -30 lines]",
+            "[paste #1 +30 line]",
+            "[paste #1 +30 lines]suffix",
+            "prefix[paste #1 +30 lines]",
+            "[paste #1 +30 lines]\n[paste #2 +40 lines]",
+            "[Pasted text #1 +30 lines]",
+        ] {
+            assert_eq!(pi_paste_capsule(label), None, "{label}");
+        }
     }
 
     #[test]

@@ -18,6 +18,8 @@ enum Mode {
     NonceBindingChanged,
     TransientUnknown,
     R6IdleNotice,
+    PiFolded,
+    PiFoldedUnstable,
 }
 struct State {
     mode: Mode,
@@ -30,6 +32,7 @@ struct State {
     nonce_sets: usize,
     busy: bool,
     provider: Provider,
+    folded_label: String,
 }
 struct Runner(Arc<Mutex<State>>);
 fn pi(composer: &str, history: &str, busy: bool) -> String {
@@ -48,7 +51,10 @@ impl CommandRunner for Runner {
             } else {
                 "worker"
             };
-            let height = if matches!(state.mode, Mode::R6IdleNotice) {
+            let height = if matches!(
+                state.mode,
+                Mode::R6IdleNotice | Mode::PiFolded | Mode::PiFoldedUnstable
+            ) {
                 24
             } else {
                 120
@@ -100,8 +106,32 @@ impl CommandRunner for Runner {
                     && state.entered == 0
                     && matches!(state.mode, Mode::UnknownAfterPaste))
                 || (state.entered > 0 && matches!(state.mode, Mode::UnknownAfterEnter))
+                || (matches!(state.mode, Mode::PiFoldedUnstable)
+                    && stage == 1
+                    && state.stage_captures[stage] > 1)
             {
                 "startup warning/raw echo".into()
+            } else if matches!(state.mode, Mode::PiFolded | Mode::PiFoldedUnstable) {
+                let folded = include_str!("../../tests/fixtures/pi-r7-folded-24.txt");
+                let composer = if stage == 1 {
+                    state.folded_label.as_str()
+                } else {
+                    ""
+                };
+                let frame = folded.replace("[paste #1 +30 lines]", composer);
+                let frame = if state.busy {
+                    frame.replace(
+                        "──────────────────────────────────────────────────────────────────── pi-target ─",
+                        "── ⠋ Working ──────────────────────────────────────────────────────────────────",
+                    )
+                } else {
+                    frame
+                };
+                if stage == 2 {
+                    format!("{marker}\n{frame}")
+                } else {
+                    frame
+                }
             } else if matches!(state.mode, Mode::R6IdleNotice) {
                 let idle = include_str!("../../tests/fixtures/pi-r6-idle-24.txt");
                 if state.entered > 0 {
@@ -182,6 +212,7 @@ impl Fixture {
             nonce_sets: 0,
             busy: false,
             provider: Provider::Pi,
+            folded_label: "[paste #1 +30 lines]".into(),
         }));
         let backend =
             TmuxBackend::with_runner_for_workspace(Box::new(Runner(state.clone())), &path);
@@ -387,6 +418,107 @@ fn native_input_r6_idle_notice_reaches_owned_paste_and_one_submit() {
     assert_eq!((state.pasted, state.entered), (1, 1));
     assert!(state.stage_captures[0] >= 2);
     assert!(state.stage_captures[1] >= 2);
+}
+
+#[test]
+fn native_input_capsule_baseline_exclusion_is_provider_aware() {
+    let history = "old [paste #1 +30 lines] tail\n[paste #2 1234 chars]\n[Pasted text #3 +25 lines]\n";
+    assert_eq!(
+        capsule_labels(Provider::Pi, history),
+        vec!["[paste #1 +30 lines]", "[paste #2 1234 chars]"]
+    );
+    assert_eq!(
+        capsule_labels(Provider::CursorAgent, history),
+        vec!["[Pasted text #3 +25 lines]"]
+    );
+}
+
+#[test]
+fn native_input_pi_folded_paste_persists_owned_latch_before_single_submit() {
+    let f = Fixture::new(Mode::PiFolded);
+    let (result, evidence) = f.inject();
+    assert!(result.is_ok());
+    let evidence = evidence.unwrap();
+    assert_eq!(evidence.phase, NativeInputPhase::Accepted);
+    assert_eq!(evidence.capsule.as_deref(), Some("[paste #1 +30 lines]"));
+    assert_eq!(evidence.binding.pane_height, 24);
+    let events: Vec<serde_json::Value> =
+        std::fs::read_to_string(f.path.join(".team/logs/events.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+    let latch = events.iter().position(|event| {
+        event["event"] == "native_input.evidence"
+            && event["phase"] == "pasted"
+            && event["capsule"] == "[paste #1 +30 lines]"
+    });
+    let seen = events.iter().position(|event| event["phase"] == "seen");
+    assert!(latch.unwrap() < seen.unwrap());
+    let state = f.state.lock().unwrap();
+    assert_eq!((state.pasted, state.entered), (1, 1));
+}
+
+#[test]
+fn native_input_pi_rescue_retains_latch_but_never_adopts_unowned_residue() {
+    let f = Fixture::new(Mode::PiFoldedUnstable);
+    let (result, evidence) = f.inject();
+    assert!(matches!(
+        result,
+        Err(TransportError::NativeInputNotReady { reason }) if reason == "owned_paste_not_stable"
+    ));
+    let evidence = evidence.unwrap();
+    assert_eq!(evidence.phase, NativeInputPhase::Pasted);
+    assert_eq!(evidence.capsule.as_deref(), Some("[paste #1 +30 lines]"));
+    assert_eq!(f.state.lock().unwrap().entered, 0);
+    f.state.lock().unwrap().mode = Mode::PiFolded;
+    for mutation in ["missing_latch", "wrong_latch", "baseline_label"] {
+        let mut invalid = evidence.clone();
+        match mutation {
+            "missing_latch" => invalid.capsule = None,
+            "wrong_latch" => invalid.capsule = Some("[paste #2 +30 lines]".into()),
+            "baseline_label" => invalid.baseline_capsules.push("[paste #1 +30 lines]".into()),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            f.backend.rescue_native_input(&invalid, &|| true, None).unwrap(),
+            EnterRescueOutcome::NoEffect {
+                reason: "residue_mismatch",
+                reobserve: false,
+            }
+        );
+    }
+    for label in ["[paste #2 +30 lines]", "[paste #1 +30 lines]\nforeign draft"] {
+        f.state.lock().unwrap().folded_label = label.into();
+        assert_eq!(
+            f.backend.rescue_native_input(&evidence, &|| true, None).unwrap(),
+            EnterRescueOutcome::NoEffect {
+                reason: "residue_mismatch",
+                reobserve: false,
+            }
+        );
+    }
+    f.state.lock().unwrap().folded_label = "[paste #1 +30 lines]".into();
+    f.state.lock().unwrap().busy = true;
+    assert_eq!(
+        f.backend.rescue_native_input(&evidence, &|| true, None).unwrap(),
+        EnterRescueOutcome::NoEffect {
+            reason: "busy",
+            reobserve: true,
+        }
+    );
+    f.state.lock().unwrap().busy = false;
+    assert_eq!(f.state.lock().unwrap().entered, 0);
+    assert_eq!(
+        f.backend.rescue_native_input(&evidence, &|| true, None).unwrap(),
+        EnterRescueOutcome::Entered { accepted: true }
+    );
+    assert!(matches!(
+        f.backend.rescue_native_input(&evidence, &|| true, None).unwrap(),
+        EnterRescueOutcome::NoEffect { .. }
+    ));
+    let state = f.state.lock().unwrap();
+    assert_eq!((state.pasted, state.entered), (1, 1));
 }
 
 #[test]
