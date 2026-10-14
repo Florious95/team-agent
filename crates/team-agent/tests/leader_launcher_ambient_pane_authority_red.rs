@@ -482,7 +482,10 @@ fn a3_pane_not_found_keeps_its_catalog_reason_and_cause() {
 fn issue326_plain_pi_stale_pane_offers_explicit_clean_environment_retry() {
     let case = Case::new("issue326-stale-pi");
     case.set_mode("pane-not-found");
-    write_executable(&case.fake_bin.join("pi"), PROVIDER_SHIM);
+    let pi_real = case.fake_bin.join("pi-discovery-fixture");
+    write_executable(&pi_real, PI_DISCOVERY_SHIM);
+    std::os::unix::fs::symlink(&pi_real, case.fake_bin.join("pi"))
+        .expect("independently resolved Pi fixture entry");
     std::os::unix::fs::symlink(
         env!("CARGO_BIN_EXE_team-agent"),
         case.fake_bin.join("team-agent"),
@@ -2941,6 +2944,15 @@ fn value_names_attach_window_debt(value: &Value, expected_count: u64) -> bool {
         _ => false,
     }
 }
+
+// Discovery only: a managed tmux recorder must never execute a real provider.
+const PI_DISCOVERY_SHIM: &str = r#"#!/bin/sh
+case "${1-}" in
+  --version) printf 'pi 1.2.0\n' ;;
+  --list-models) printf 'provider model\nopenai-codex gpt-6-luna\n' ;;
+  *) printf 'unexpected native Pi launch in controlled fixture\n' >&2; exit 125 ;;
+esac
+"#;
 
 const PROVIDER_SHIM: &str = r#"#!/bin/sh
 if [ "${1-}" = "--version" ]; then
