@@ -57,8 +57,11 @@ impl CommandRunner for Runner {
             };
             let height = if matches!(
                 state.mode,
-                Mode::R6IdleNotice | Mode::PiFolded | Mode::PiFoldedUnstable
-                    | Mode::CursorHistoryOnly | Mode::CursorLongHistory
+                Mode::R6IdleNotice
+                    | Mode::PiFolded
+                    | Mode::PiFoldedUnstable
+                    | Mode::CursorHistoryOnly
+                    | Mode::CursorLongHistory
             ) {
                 24
             } else {
@@ -173,8 +176,13 @@ impl CommandRunner for Runner {
         let stdout = if state.provider == Provider::CursorAgent
             && argv.iter().any(|arg| arg == "capture-pane")
         {
-            let followup = matches!(state.mode, Mode::CursorFollowup | Mode::CursorHeaderEvicted
-                | Mode::CursorHistoryOnly | Mode::CursorLongHistory);
+            let followup = matches!(
+                state.mode,
+                Mode::CursorFollowup
+                    | Mode::CursorHeaderEvicted
+                    | Mode::CursorHistoryOnly
+                    | Mode::CursorLongHistory
+            );
             let placeholder = if followup {
                 "Add a follow-up"
             } else {
@@ -736,7 +744,11 @@ fn native_input_cursor_owned_new_capsule_transfers_to_transcript_without_token_c
 
 #[test]
 fn native_input_cursor_clean_followup_uses_one_paste_one_enter_across_banner_eviction() {
-    for mode in [Mode::CursorFollowup, Mode::CursorHeaderEvicted, Mode::CursorLongHistory] {
+    for mode in [
+        Mode::CursorFollowup,
+        Mode::CursorHeaderEvicted,
+        Mode::CursorLongHistory,
+    ] {
         let f = Fixture::new(mode);
         f.state.lock().unwrap().provider = Provider::CursorAgent;
         let (report, evidence) = f.inject();
@@ -762,7 +774,11 @@ fn native_input_cursor_history_only_composer_cannot_authorize_paste_or_enter() {
     f.state.lock().unwrap().provider = Provider::CursorAgent;
     let (result, _) = f.inject();
     let state = f.state.lock().unwrap();
-    assert_eq!((state.pasted, state.entered), (0, 0), "old history is not current composer authority");
+    assert_eq!(
+        (state.pasted, state.entered),
+        (0, 0),
+        "old history is not current composer authority"
+    );
     assert!(result.is_err());
 }
 

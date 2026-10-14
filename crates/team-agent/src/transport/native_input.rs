@@ -202,15 +202,23 @@ pub(crate) fn inspect_input(
 ) -> Option<InputFrame> {
     match provider {
         Provider::Pi => pi_input(text, pane_height),
-        Provider::CursorAgent => cursor_input(text),
+        Provider::CursorAgent => cursor_input(text, pane_height),
         _ => None,
     }
 }
 
-fn cursor_input(text: &str) -> Option<InputFrame> {
+fn cursor_input(text: &str, pane_height: u32) -> Option<InputFrame> {
     use team_agent_contract::contract::delivery::InputSurface;
+    if pane_height == 0 {
+        return None;
+    }
+    let text_rows: Vec<_> = text.lines().collect();
+    // Only the current viewport authorizes input; retain full history below
+    // solely for same-message transcript correlation.
+    let viewport_start = text_rows.len().saturating_sub(pane_height as usize);
+    let viewport = text_rows[viewport_start..].join("\n");
     let (surface, rows, capsule, busy) =
-        team_agent_contract::providers::cursor::interaction::inspect_legacy_composer(text)?;
+        team_agent_contract::providers::cursor::interaction::inspect_legacy_composer(&viewport)?;
     let first = rows.first()?.strip_prefix("→ ")?;
     let footer = rows.iter().rposition(|row| {
         row.strip_suffix("Run Everything").is_some_and(|prefix| {
@@ -251,7 +259,6 @@ fn cursor_input(text: &str) -> Option<InputFrame> {
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let text_rows: Vec<_> = text.lines().collect();
     let arrow = text_rows
         .iter()
         .rposition(|line| line.trim().starts_with("→ "))?;
@@ -603,7 +610,10 @@ mod tests {
     #[test]
     fn native_input_cursor_requires_composer_in_current_viewport_not_old_history() {
         for header in ["", "Cursor Agent\nv2026.10.14-0f9edde\n"] {
-            let hidden = format!("{header}{CURSOR_FOLLOWUP}{}", "unknown current row\n".repeat(24));
+            let hidden = format!(
+                "{header}{CURSOR_FOLLOWUP}{}",
+                "unknown current row\n".repeat(24)
+            );
             assert!(super::inspect_input(Provider::CursorAgent, &hidden, 24).is_none());
         }
         assert!(super::inspect_input(Provider::CursorAgent, CURSOR_FOLLOWUP, 0).is_none());
