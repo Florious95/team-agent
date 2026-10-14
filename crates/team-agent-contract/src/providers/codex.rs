@@ -1,9 +1,10 @@
 //! ---
 //! purpose: Codex CLI contract leaf for the fifteen facets and seven hooks.
-//! contract: H1 catalog reads `debug models --bundled` from the seat wrapper. PlanHook stays refused. H2 is a pure argv plan plus a modal refusal.
+//! contract: H1 catalog reads `debug models --bundled` from the seat wrapper. An empty adapter still refuses launch. LaunchOnly Fresh with seat images returns the two-flag plan. H2 modal intercept stays a refusal.
 //! boundary: No process signals, no global config writes, no credential or rollout-body reads, no static model list.
 //! ---
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -17,8 +18,8 @@ use crate::contract::hooks::{
     ReadBounds, ReadFailure, ReadOutput, ScopedSessionEvidence, SessionHook,
 };
 use crate::contract::plan::{
-    CarrierReport, CarrierUse, CatalogObservation, EnvironmentDelta, ExpectedSession, LaunchEntrypoint,
-    LaunchPlan, ModelRecord, ResolvedLaunch,
+    CarrierReport, CarrierUse, CatalogObservation, EffortResolution, EnvironmentDelta, ExpectedSession,
+    LaunchEntrypoint, LaunchMode, LaunchPlan, ModelRecord, ResolvedLaunch,
 };
 use crate::contract::session::{CaptureOrigin, NativeSessionId, ResumeBinding, SessionStorage};
 use crate::contract::types::*;
@@ -156,6 +157,7 @@ pub const CATALOG_UI: &str = "bundled-catalog";
 /// Symlink fact only. Catalog execution uses the canonical seat wrapper.
 pub const SEAT_WRAPPER_LINK: &str = "/opt/homebrew/bin/codex";
 const MAX_WRAPPER_BYTES: u64 = 1024 * 1024;
+pub const MAX_ENGINE_BYTES: u64 = 512 * 1024 * 1024;
 
 const PHASE1_INTERACTIVE_ARGUMENTS: &[&str] = &["--no-alt-screen", "--no-daemon"];
 const FORBIDDEN_INTERACTIVE_ARGUMENTS: &[&str] = &[
@@ -183,8 +185,8 @@ pub static CODEX_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         leader: Support::Unverified(LEADER),
     },
     model: ModelFacet {
-        selection: Support::Unverified(SELECTION),
-        omitted: OmittedModel::Reject,
+        selection: Support::Supported(ModelSelection::NativeDefaultOrOpaqueId),
+        omitted: OmittedModel::NativeDefault,
         catalog: Support::Supported(CATALOG_SOURCE),
     },
     effort: EffortFacet {
@@ -261,9 +263,26 @@ pub static CODEX_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     },
 };
 
-pub struct CodexAdapter;
+pub struct CodexAdapter {
+    images: Option<CodexLaunchImages>,
+}
+
+impl Default for CodexAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl CodexAdapter {
+    pub fn new() -> Self {
+        Self { images: None }
+    }
+
+    pub fn with_launch_images(mut self, images: CodexLaunchImages) -> Self {
+        self.images = Some(images);
+        self
+    }
+
     pub fn hooks(&self) -> ProviderHooks<'_> {
         ProviderHooks {
             catalog: HookBinding::Bound(self),
@@ -289,8 +308,33 @@ pub fn launch_not_admitted() -> ContractError {
 }
 
 impl PlanHook for CodexAdapter {
-    fn plan(&self, _resolved: &ResolvedLaunch) -> Result<LaunchPlan, ContractError> {
-        self.plan_phase1()
+    fn plan(&self, resolved: &ResolvedLaunch) -> Result<LaunchPlan, ContractError> {
+        let Some(images) = &self.images else {
+            return self.plan_phase1();
+        };
+        let request = resolved.request();
+        if request.mode != LaunchMode::LaunchOnly
+            || request.operation != Operation::Fresh
+            || *resolved.expected_session() != ExpectedSession::CaptureAfterLaunch
+        {
+            return Err(launch_not_admitted());
+        }
+        if request.bypass {
+            return match CODEX_DESCRIPTOR.bypass.intent.require("bypass") {
+                Err(error) => Err(error),
+                Ok(_) => Err(unverified("bypass", BYPASS)),
+            };
+        }
+        if resolved.model().is_some() {
+            return Err(unverified("model selection", SELECTION));
+        }
+        if !matches!(resolved.effort(), EffortResolution::Unspecified) {
+            return Err(ContractError::EffortRejected(EFFORT));
+        }
+        if request.prompt.is_some() {
+            return Err(unverified("prompt", PROMPT));
+        }
+        interactive_launch_plan(images, &request.paths.cwd.path, resolved.expected_session())
     }
 }
 
@@ -386,6 +430,7 @@ impl InteractionHook for CodexAdapter {
     }
 }
 
+#[derive(Clone)]
 pub struct CodexLaunchImages {
     pub wrapper: PathBuf,
     pub wrapper_sha256: Digest,
@@ -635,6 +680,130 @@ pub fn resolve_seat_wrapper(path: &Path) -> Result<PathBuf, ContractError> {
         return Err(ContractError::Invalid("codex catalog executable"));
     }
     Ok(canonical)
+}
+
+pub struct PreparedSeatEngine {
+    pub engine: PathBuf,
+    pub version: String,
+}
+
+/// The package root is the parent of `bin/codex.js`. Exactly one canonical
+/// SeatEngine may exist there. Zero or several fail before any engine process.
+pub fn resolve_unique_seat_engine(wrapper: &Path) -> Result<PathBuf, ContractError> {
+    let wrapper = resolve_seat_wrapper(wrapper)?;
+    let bin = wrapper
+        .parent()
+        .ok_or(ContractError::Invalid("codex seat engine"))?;
+    if bin.file_name().and_then(|name| name.to_str()) != Some("bin") {
+        return Err(ContractError::Invalid("codex seat engine"));
+    }
+    let package = bin
+        .parent()
+        .ok_or(ContractError::Invalid("codex seat engine"))?
+        .canonicalize()
+        .map_err(|_| ContractError::Invalid("codex seat engine"))?;
+    let engines = collect_seat_engines(&package)?;
+    if engines.len() != 1 {
+        return Err(ContractError::Invalid("codex seat engine"));
+    }
+    Ok(engines.into_iter().next().expect("one seat engine"))
+}
+
+pub fn prepare_seat_engine<R: CommandRunner>(
+    wrapper: &Path,
+    runner: &mut R,
+    bounds: ReadBounds,
+) -> Result<PreparedSeatEngine, HostError> {
+    let engine = resolve_unique_seat_engine(wrapper)
+        .map_err(|_| HostError::new("Codex seat engine", HostErrorKind::Invalid))?;
+    let version = probe_engine_version(&engine, runner, bounds)?;
+    Ok(PreparedSeatEngine { engine, version })
+}
+
+pub fn probe_engine_version<R: CommandRunner>(
+    engine: &Path,
+    runner: &mut R,
+    bounds: ReadBounds,
+) -> Result<String, HostError> {
+    bounds
+        .validate()
+        .map_err(|_| HostError::new("Codex probe bounds", HostErrorKind::Invalid))?;
+    require_absolute(engine, "codex seat engine")
+        .map_err(|_| HostError::new("Codex seat engine", HostErrorKind::Invalid))?;
+    let text = engine
+        .to_str()
+        .ok_or_else(|| HostError::new("Codex seat engine", HostErrorKind::Invalid))?;
+    if classify_image_role(text) != CodexImageRole::SeatEngine {
+        return Err(HostError::new("Codex seat engine", HostErrorKind::Invalid));
+    }
+    let output = runner.run(&catalog_command(engine, &["--version"], None, bounds));
+    if output.end == CommandEnd::TimedOut || output.elapsed > bounds.deadline {
+        return Err(HostError::new("Codex version deadline", HostErrorKind::Deadline));
+    }
+    if output.end == CommandEnd::OutputLimit || output.stdout.len() > bounds.max_output_bytes {
+        return Err(HostError::new("Codex version output", HostErrorKind::Invalid));
+    }
+    if !output.success() {
+        return Err(HostError::new("Codex version command", HostErrorKind::Command));
+    }
+    let version = std::str::from_utf8(&output.stdout)
+        .map_err(|_| HostError::new("Codex version", HostErrorKind::Invalid))?
+        .trim();
+    if version.is_empty() {
+        return Err(HostError::new("Codex version", HostErrorKind::Invalid));
+    }
+    Ok(version.to_string())
+}
+
+fn collect_seat_engines(package: &Path) -> Result<Vec<PathBuf>, ContractError> {
+    let invalid = || ContractError::Invalid("codex seat engine");
+    let mut engines = Vec::new();
+    let mut stack = vec![package.to_path_buf()];
+    let mut seen_dirs = BTreeSet::new();
+    while let Some(dir) = stack.pop() {
+        let dir = dir.canonicalize().map_err(|_| invalid())?;
+        if !dir.starts_with(package) || !seen_dirs.insert(dir.clone()) {
+            continue;
+        }
+        let entries = std::fs::read_dir(&dir).map_err(|_| invalid())?;
+        for entry in entries {
+            let path = entry.map_err(|_| invalid())?.path();
+            let meta = std::fs::symlink_metadata(&path).map_err(|_| invalid())?;
+            if meta.file_type().is_symlink() {
+                let Ok(canonical) = path.canonicalize() else {
+                    continue;
+                };
+                let Ok(canon_meta) = std::fs::metadata(&canonical) else {
+                    continue;
+                };
+                if canon_meta.is_file() {
+                    record_seat_engine(&canonical, &mut engines)?;
+                }
+                continue;
+            }
+            if meta.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if meta.is_file() {
+                let canonical = path.canonicalize().map_err(|_| invalid())?;
+                if canonical.starts_with(package) {
+                    record_seat_engine(&canonical, &mut engines)?;
+                }
+            }
+        }
+    }
+    Ok(engines)
+}
+
+fn record_seat_engine(canonical: &Path, engines: &mut Vec<PathBuf>) -> Result<(), ContractError> {
+    let text = canonical
+        .to_str()
+        .ok_or(ContractError::Invalid("codex seat engine"))?;
+    if classify_image_role(text) == CodexImageRole::SeatEngine {
+        engines.push(canonical.to_path_buf());
+    }
+    Ok(())
 }
 
 pub fn validate_catalog_request(request: &CatalogRequest) -> Result<PathBuf, ContractError> {

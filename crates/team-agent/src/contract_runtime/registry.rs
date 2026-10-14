@@ -10,7 +10,7 @@ use team_agent_contract::contract::{
     types::{ContractError, Support},
 };
 use team_agent_contract::kiro::{self, KiroAdapter, KIRO_DESCRIPTOR};
-use team_agent_contract::providers::codex::{CodexAdapter, CODEX_DESCRIPTOR};
+use team_agent_contract::providers::codex::{CodexAdapter, CodexLaunchImages, CODEX_DESCRIPTOR};
 use team_agent_contract::providers::cursor::{self, CursorAdapter, CURSOR_DESCRIPTOR};
 use team_agent_contract::providers::grok_build::{self, GrokAdapter, GROK_BUILD_DESCRIPTOR};
 use team_agent_contract::runtime::{
@@ -29,6 +29,7 @@ const DESCRIPTORS: &[&ProviderDescriptor] = &[
 pub enum NativeRuntime {
     Cursor(cursor::native::RuntimeInstallation),
     GrokBuild(grok_build::native::RuntimeInstallation),
+    Codex(CodexLaunchImages),
 }
 
 /// Leaf selection stays here; the framework, lifecycle and outbox remain shared.
@@ -147,9 +148,9 @@ impl NativeProvider {
             }).map(NativeAdapter::GrokBuild),
             Self::Codex => {
                 if executable.as_os_str().is_empty() && arguments.is_empty() && environment.is_empty() {
-                    Ok(NativeAdapter::Codex(CodexAdapter))
+                    Ok(NativeAdapter::Codex(CodexAdapter::new()))
                 } else {
-                    Err(match CodexAdapter.hooks().materialize.require("codex mcp stdio") {
+                    Err(match CodexAdapter::new().hooks().materialize.require("codex mcp stdio") {
                         Err(err) => err,
                         Ok(_) => panic!("phase 3 keeps Codex H3 unverified"),
                     })
@@ -193,6 +194,7 @@ impl NativeAdapter {
             }
             Self::Codex(adapter) => match runtime {
                 None => Ok(Self::Codex(adapter)),
+                Some(NativeRuntime::Codex(images)) => Ok(Self::Codex(adapter.with_launch_images(images))),
                 Some(_) => Err(ContractError::Mismatch("native runtime provider")),
             },
         }
@@ -311,7 +313,7 @@ mod tests {
             Err(ContractError::Unverified { reason, .. }) => {
                 assert_eq!(reason.code, "codex-tool-names-not-observed");
             }
-            other => panic!("codex tool panel: {other:?}"),
+            _ => panic!("codex tool panel is not the unverified tool-name gate"),
         }
         match codex.server_key() {
             Err(ContractError::Unverified { reason, .. }) => {
@@ -339,7 +341,10 @@ mod tests {
             .adapter(PathBuf::new(), Vec::new(), BTreeMap::new())
             .expect("empty codex adapter");
         let err = match native {
-            NativeAdapter::Codex(adapter) => adapter.plan_phase1().expect_err("launch stays closed"),
+            NativeAdapter::Codex(adapter) => match adapter.plan_phase1() {
+                Err(error) => error,
+                Ok(_) => panic!("launch stays closed"),
+            },
             _ => panic!("expected the codex unit adapter"),
         };
         match err {

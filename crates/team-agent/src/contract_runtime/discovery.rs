@@ -2,7 +2,10 @@
 use std::path::{Path, PathBuf};
 
 use team_agent_contract::contract::{hooks::*, plan::CatalogObservation, types::*};
-use team_agent_contract::host::{command::RealCommandRunner, process::resolve_cwd};
+use team_agent_contract::host::{
+    command::RealCommandRunner,
+    process::{fingerprint_file, resolve_cwd},
+};
 use team_agent_contract::kiro::native as kiro;
 use team_agent_contract::providers::codex as codex;
 use team_agent_contract::providers::cursor::native as cursor;
@@ -53,10 +56,6 @@ pub fn executable(name: &'static str) -> Result<PathBuf, DiscoveryError> {
     Err(DiscoveryError::Executable(name))
 }
 
-fn codex_launch_closed() -> DiscoveryError {
-    DiscoveryError::Contract(codex::launch_not_admitted())
-}
-
 fn discover_codex(workspace: &Path) -> Result<Discovery, DiscoveryError> {
     let bounds = ReadBounds {
         deadline: std::time::Duration::from_secs(30),
@@ -80,7 +79,7 @@ fn discover_codex(workspace: &Path) -> Result<Discovery, DiscoveryError> {
         source,
         bounds,
     };
-    let adapter = codex::CodexAdapter;
+    let adapter = codex::CodexAdapter::new();
     let hooks = adapter.hooks();
     let catalog_hook = hooks
         .catalog
@@ -103,6 +102,40 @@ fn discover_codex(workspace: &Path) -> Result<Discovery, DiscoveryError> {
     )
     .map_err(DiscoveryError::Contract)?;
     Ok(result)
+}
+
+fn discover_codex_runtime(workspace: &Path) -> Result<Discovery, DiscoveryError> {
+    let mut discovery = discover_codex(workspace)?;
+    let wrapper = discovery.engine.clone();
+    let wrapper_version = discovery.native.version.clone();
+    let wrapper_sha256 = discovery.native.executable_sha256;
+    let bounds = ReadBounds {
+        deadline: std::time::Duration::from_secs(30),
+        max_output_bytes: 1_048_576,
+    };
+    let prepared = codex::prepare_seat_engine(&wrapper, &mut RealCommandRunner::default(), bounds)?;
+    if wrapper_version.trim().is_empty() || !codex::seat_pair_ok(&wrapper_version, &prepared.version) {
+        return Err(DiscoveryError::Contract(ContractError::Invalid("codex seat engine")));
+    }
+    let engine_sha256 = fingerprint_file(&prepared.engine, codex::MAX_ENGINE_BYTES, bounds.deadline)?;
+    let zero = Digest([0; 32]);
+    if wrapper_sha256 == zero || engine_sha256 == zero || wrapper_sha256 == engine_sha256 {
+        return Err(DiscoveryError::Contract(ContractError::Invalid("codex seat engine")));
+    }
+    let images = codex::CodexLaunchImages {
+        wrapper,
+        wrapper_sha256,
+        engine: prepared.engine.clone(),
+        engine_sha256,
+        wrapper_version,
+        engine_version: prepared.version,
+    };
+    discovery.native.executable_sha256 = engine_sha256;
+    discovery.native.version = images.engine_version.clone();
+    discovery.catalog.native = discovery.native.clone();
+    discovery.engine = prepared.engine;
+    discovery.runtime = Some(NativeRuntime::Codex(images));
+    Ok(discovery)
 }
 
 pub fn discover(provider: &ProviderId, workspace: &Path) -> Result<Discovery, DiscoveryError> {
@@ -187,34 +220,36 @@ pub fn discover(provider: &ProviderId, workspace: &Path) -> Result<Discovery, Di
 /// bridges the same installation's catalog to its proven Node/entry identity.
 pub(super) fn discover_runtime(provider: &ProviderId, workspace: &Path) -> Result<Discovery, DiscoveryError> {
     let selected = registry::provider(provider.as_str()).map_err(DiscoveryError::Contract)?;
-    if selected == NativeProvider::Codex {
-        return Err(codex_launch_closed());
-    }
-    let mut discovery = discover(provider, workspace)?;
-    if selected != NativeProvider::Kiro {
-        let home = std::env::var_os("HOME").map(PathBuf::from)
-            .ok_or(DiscoveryError::Executable("HOME for native subscription"))?;
-        let bounds = ReadBounds { deadline: std::time::Duration::from_secs(30), max_output_bytes: 1024 * 1024 };
-        match selected {
-            NativeProvider::Cursor => {
-                let runtime = cursor::probe_runtime(&discovery.engine, &home, &mut RealCommandRunner::default(), bounds)?;
-                discovery.catalog = runtime.bind_catalog(&discovery.catalog).map_err(DiscoveryError::Contract)?;
-                discovery.engine = runtime.engine.clone();
-                discovery.native = runtime.native.clone();
-                discovery.runtime = Some(NativeRuntime::Cursor(runtime));
+    match selected {
+        NativeProvider::Codex => discover_codex_runtime(workspace),
+        NativeProvider::Kiro => discover(provider, workspace),
+        NativeProvider::Cursor | NativeProvider::GrokBuild => {
+            let mut discovery = discover(provider, workspace)?;
+            let home = std::env::var_os("HOME").map(PathBuf::from)
+                .ok_or(DiscoveryError::Executable("HOME for native subscription"))?;
+            let bounds = ReadBounds { deadline: std::time::Duration::from_secs(30), max_output_bytes: 1024 * 1024 };
+            match selected {
+                NativeProvider::Cursor => {
+                    let runtime = cursor::probe_runtime(&discovery.engine, &home, &mut RealCommandRunner::default(), bounds)?;
+                    discovery.catalog = runtime.bind_catalog(&discovery.catalog).map_err(DiscoveryError::Contract)?;
+                    discovery.engine = runtime.engine.clone();
+                    discovery.native = runtime.native.clone();
+                    discovery.runtime = Some(NativeRuntime::Cursor(runtime));
+                }
+                NativeProvider::GrokBuild => {
+                    let runtime = grok::probe_runtime(&discovery.engine, &home, &mut RealCommandRunner::default(), bounds)?;
+                    discovery.catalog = runtime.bind_catalog(&discovery.catalog).map_err(DiscoveryError::Contract)?;
+                    discovery.engine = runtime.engine.clone();
+                    discovery.native = runtime.native.clone();
+                    discovery.runtime = Some(NativeRuntime::GrokBuild(runtime));
+                }
+                NativeProvider::Kiro | NativeProvider::Codex => {
+                    unreachable!("codex and kiro return before subscription lookup")
+                }
             }
-            NativeProvider::GrokBuild => {
-                let runtime = grok::probe_runtime(&discovery.engine, &home, &mut RealCommandRunner::default(), bounds)?;
-                discovery.catalog = runtime.bind_catalog(&discovery.catalog).map_err(DiscoveryError::Contract)?;
-                discovery.engine = runtime.engine.clone();
-                discovery.native = runtime.native.clone();
-                discovery.runtime = Some(NativeRuntime::GrokBuild(runtime));
-            }
-            NativeProvider::Kiro => unreachable!(),
-            NativeProvider::Codex => return Err(codex_launch_closed()),
+            Ok(discovery)
         }
     }
-    Ok(discovery)
 }
 
 fn validate_catalog(provider: &ProviderId, discovery: &Discovery) -> Result<(), ContractError> {
@@ -476,14 +511,66 @@ mod tests {
     }
 
     #[test]
-    fn codex_runtime_discovery_stays_launch_closed() {
-        let error = discover_runtime(&ProviderId::new("codex").unwrap(), Path::new("/tmp")).unwrap_err();
-        match error {
-            DiscoveryError::Contract(ContractError::Unverified { field, reason }) => {
-                assert_eq!(field, "codex launch");
-                assert_eq!(reason.code, "codex-launch-not-admitted");
-            }
-            other => panic!("codex runtime discovery: {other}"),
+    fn codex_runtime_engine_must_be_unique_before_any_spawn() {
+        use std::time::Duration;
+        use team_agent_contract::host::command::{
+            CommandEnd, CommandReceipt, CommandRequest, CommandRunner,
+        };
+        use team_agent_contract::providers::codex::prepare_seat_engine;
+
+        struct CountingRunner {
+            calls: usize,
         }
+        impl CommandRunner for CountingRunner {
+            fn run(&mut self, request: &CommandRequest) -> CommandReceipt {
+                self.calls += 1;
+                assert_eq!(request.arguments, vec![std::ffi::OsString::from("--version")]);
+                CommandReceipt {
+                    end: CommandEnd::Exited,
+                    exit_code: Some(0),
+                    child_pid: None,
+                    child_reaped: true,
+                    stdout: b"0.160.1\n".to_vec(),
+                    stderr: Vec::new(),
+                    elapsed: Duration::from_millis(1),
+                }
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "codex-seat-engine-{}-{}",
+            std::process::id(),
+            "unique"
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let package = root.join("node_modules/@openai/codex");
+        let wrapper = package.join("bin/codex.js");
+        std::fs::create_dir_all(wrapper.parent().unwrap()).unwrap();
+        std::fs::write(&wrapper, b"fixture\n").unwrap();
+        let bounds = ReadBounds {
+            deadline: Duration::from_secs(30),
+            max_output_bytes: 1024,
+        };
+        let mut runner = CountingRunner { calls: 0 };
+        assert!(prepare_seat_engine(&wrapper, &mut runner, bounds).is_err());
+        assert_eq!(runner.calls, 0, "missing engine must not spawn");
+
+        for name in ["one", "two"] {
+            let engine = package.join(format!(
+                "vendor/codex-darwin-arm64/{name}/bin/codex"
+            ));
+            std::fs::create_dir_all(engine.parent().unwrap()).unwrap();
+            std::fs::write(&engine, b"fixture\n").unwrap();
+        }
+        let mut runner = CountingRunner { calls: 0 };
+        assert!(prepare_seat_engine(&wrapper, &mut runner, bounds).is_err());
+        assert_eq!(runner.calls, 0, "two engines must not spawn");
+        let _ = std::fs::remove_dir_all(&root);
+        let source = include_str!("discovery.rs");
+        let needle = concat!(
+            "/opt/homebrew/lib/node_modules/@openai/codex/",
+            "node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex"
+        );
+        assert!(!source.contains(needle));
     }
 }

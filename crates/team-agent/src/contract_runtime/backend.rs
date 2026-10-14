@@ -265,6 +265,62 @@ fn launch_adapter(
         binding.workspace.path.clone(), discovered.runtime.clone(),
     )?)
 }
+
+/// Codex LaunchOnly Fresh plan. This does not start a seat, preflight a worker,
+/// allocate a server key, materialize files, or attach tmux.
+pub fn plan_launch_only_fresh(workspace: &Path) -> Result<LaunchPlan, BackendError> {
+    let provider = ProviderId::new("codex")?;
+    let selected = registry::provider(provider.as_str())?;
+    let discovered = discovery::discover_runtime(&provider, workspace)?;
+    if !matches!(&discovered.runtime, Some(registry::NativeRuntime::Codex(_))) {
+        return Err(ContractError::Invalid("codex seat engine").into());
+    }
+    let cwd = resolve_cwd(workspace)?;
+    let adapter = selected
+        .adapter(PathBuf::new(), Vec::new(), BTreeMap::new())?
+        .with_launch_context(cwd.path.clone(), discovered.runtime.clone())?;
+    let hooks = adapter.hooks();
+    let request = LaunchRequest {
+        provider: provider.as_str().into(),
+        operation: Operation::Fresh,
+        mode: LaunchMode::LaunchOnly,
+        auth: AuthMode::NativeSubscription,
+        model: None,
+        role_effort: None,
+        team_effort: None,
+        bypass: false,
+        prompt: None,
+        identity: InstanceIdentity {
+            scope: ScopeId::new("launch-only")?,
+            seat: SeatId::new("codex")?,
+            instance: InstanceId::new("fresh")?,
+            generation: Generation(1),
+        },
+        native: discovered.native.clone(),
+        paths: LaunchPaths {
+            executable: discovered.engine.clone(),
+            candidate: discovered.engine.clone(),
+            cwd: cwd.clone(),
+            runtime_root: cwd.path.clone(),
+        },
+        channel: Channel::Tmux,
+        input_profile: None,
+        evidence_kind: EvidenceKind::Native,
+        preassigned_session: None,
+        resume: None,
+        fork: None,
+    };
+    let resolved = resolve_launch(
+        selected.descriptor(),
+        &hooks,
+        &request,
+        Some(&discovered.catalog),
+    )?;
+    let plan = adapter.plan(&resolved)?;
+    validate_launch_plan(selected.descriptor(), &resolved, &plan)?;
+    Ok(plan)
+}
+
 fn request(
     binding: &Binding,
     role: &RoleConfig,

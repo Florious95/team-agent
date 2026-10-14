@@ -29,16 +29,6 @@ const ENGINE: &str = "/opt/homebrew/lib/node_modules/@openai/codex/node_modules/
 const DAEMON: &str = "/Users/alauda/.codex/packages/app-server-daemon/releases/0.162.1-aarch64-apple-darwin/bin/codex";
 const SHADOW: &str = "/Users/alauda/.local/bin/codex";
 
-fn code_of(result: Result<&Reason, ContractError>) -> &'static str {
-    match result {
-        Ok(_) => panic!("expected Unverified or Reject"),
-        Err(ContractError::Unverified { reason, .. } | ContractError::EffortRejected(reason)) => {
-            reason.code
-        }
-        Err(other) => panic!("unexpected {other:?}"),
-    }
-}
-
 fn unverified_code<T>(result: Result<T, ContractError>) -> &'static str {
     match result {
         Err(ContractError::Unverified { reason, .. }) => reason.code,
@@ -101,7 +91,7 @@ fn frame(text: &str) -> CaptureFrame {
 }
 
 fn seated() -> CodexAdapter {
-    CodexAdapter
+    CodexAdapter::new()
 }
 
 #[test]
@@ -117,10 +107,13 @@ fn fifteen_facets_match_phase1_admission() {
     );
 
     assert_eq!(
-        unverified_code(d.model.selection.require("model selection")),
-        "codex-model-selection-not-admitted"
+        d.model
+            .selection
+            .require("model selection")
+            .expect("omitted model uses the native default"),
+        &ModelSelection::NativeDefaultOrOpaqueId
     );
-    assert_eq!(d.model.omitted, OmittedModel::Reject);
+    assert_eq!(d.model.omitted, OmittedModel::NativeDefault);
     assert_eq!(
         d.model.catalog.require("catalog").expect("catalog supported"),
         &CATALOG_SOURCE
@@ -278,7 +271,7 @@ fn seven_hooks_bind_only_plan_session_and_interaction() {
 }
 
 #[test]
-fn fresh_descriptor_validates_and_launch_stays_closed() {
+fn fresh_descriptor_validates() {
     let adapter = seated();
     let hooks = adapter.hooks();
     validate_descriptor(&CODEX_DESCRIPTOR, &hooks, Operation::Fresh).unwrap();
@@ -292,47 +285,6 @@ fn fresh_descriptor_validates_and_launch_stays_closed() {
     ] {
         let err = validate_descriptor(&CODEX_DESCRIPTOR, &hooks, operation).unwrap_err();
         assert_eq!(unverified_code::<()>(Err(err)), "codex-fork-not-run");
-    }
-
-    for operation in [Operation::Fresh, Operation::Resume] {
-        let res = resolve_launch(
-            &CODEX_DESCRIPTOR,
-            &hooks,
-            &LaunchRequest {
-                provider: "codex".into(),
-                operation,
-                mode: LaunchMode::LaunchOnly,
-                auth: AuthMode::NativeSubscription,
-                model: None,
-                role_effort: None,
-                team_effort: None,
-                bypass: false,
-                prompt: None,
-                identity: instance(),
-                native: native(),
-                paths: LaunchPaths {
-                    executable: PathBuf::from(ENGINE),
-                    candidate: PathBuf::from(WRAPPER),
-                    cwd: CwdIdentity {
-                        path: PathBuf::from("/tmp/codex-phase1"),
-                        identity: Digest([4; 32]),
-                    },
-                    runtime_root: PathBuf::from("/tmp/codex-phase1-runtime"),
-                },
-                channel: Channel::Tmux,
-                input_profile: None,
-                evidence_kind: EvidenceKind::Native,
-                preassigned_session: None,
-                resume: None,
-                fork: None,
-            },
-            None,
-        );
-        let err = match res {
-            Err(err) => err,
-            Ok(_) => panic!("expected Err, got Ok"),
-        };
-        assert_eq!(code_of(Err(err)), "codex-model-selection-not-admitted");
     }
 }
 
@@ -390,8 +342,10 @@ fn measured_images(wrapper: &str, engine: &str) -> CodexLaunchImages {
 }
 
 fn assert_launch_refused(images: &CodexLaunchImages, cwd: &str, expected: &ExpectedSession) {
-    let error = interactive_launch_plan(images, &PathBuf::from(cwd), expected).unwrap_err();
-    assert_eq!(error, ContractError::Invalid("codex interactive launch"));
+    match interactive_launch_plan(images, &PathBuf::from(cwd), expected) {
+        Err(error) => assert_eq!(error, ContractError::Invalid("codex interactive launch")),
+        Ok(_) => panic!("expected the interactive launch to fail"),
+    }
 }
 
 #[test]
@@ -429,6 +383,154 @@ fn interactive_launch_plan_keeps_the_two_measured_flags() {
     ] {
         assert_eq!(*carrier, CarrierUse::NotRequested);
     }
+}
+
+fn phase1_request(
+    operation: Operation,
+    mode: LaunchMode,
+    model: Option<&str>,
+    bypass: bool,
+    prompt: Option<&str>,
+) -> LaunchRequest {
+    LaunchRequest {
+        provider: "codex".into(),
+        operation,
+        mode,
+        auth: AuthMode::NativeSubscription,
+        model: model.map(str::to_owned),
+        role_effort: None,
+        team_effort: None,
+        bypass,
+        prompt: prompt.map(str::to_owned),
+        identity: instance(),
+        native: native(),
+        paths: LaunchPaths {
+            executable: PathBuf::from(ENGINE),
+            candidate: PathBuf::from(WRAPPER),
+            cwd: CwdIdentity {
+                path: PathBuf::from("/tmp/codex-phase1"),
+                identity: Digest([4; 32]),
+            },
+            runtime_root: PathBuf::from("/tmp/codex-phase1-runtime"),
+        },
+        channel: Channel::Tmux,
+        input_profile: None,
+        evidence_kind: EvidenceKind::Native,
+        preassigned_session: None,
+        resume: None,
+        fork: None,
+    }
+}
+
+#[test]
+fn launch_only_fresh_with_images_returns_the_two_flag_plan() {
+    let adapter = seated().with_launch_images(measured_images(WRAPPER, ENGINE));
+    let hooks = adapter.hooks();
+    let resolved = resolve_launch(
+        &CODEX_DESCRIPTOR,
+        &hooks,
+        &phase1_request(Operation::Fresh, LaunchMode::LaunchOnly, None, false, None),
+        None,
+    )
+    .expect("omitted model is the native default");
+    let plan = adapter.plan(&resolved).expect("launch only fresh plan");
+    let arguments: Vec<_> = plan
+        .arguments
+        .iter()
+        .map(|arg| arg.to_str().unwrap())
+        .collect();
+    assert_eq!(arguments, phase1_interactive_arguments());
+    let launcher = plan.launcher.expect("wrapper");
+    assert_eq!(launcher.executable, PathBuf::from(WRAPPER));
+    assert_eq!(plan.executable, PathBuf::from(ENGINE));
+    for carrier in [
+        &plan.carriers.model,
+        &plan.carriers.prompt,
+        &plan.carriers.mcp,
+        &plan.carriers.bypass,
+        &plan.carriers.effort,
+    ] {
+        assert_eq!(*carrier, CarrierUse::NotRequested);
+    }
+
+    let bypass = match resolve_launch(
+        &CODEX_DESCRIPTOR,
+        &hooks,
+        &phase1_request(Operation::Fresh, LaunchMode::LaunchOnly, None, true, None),
+        None,
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("bypass must not resolve"),
+    };
+    assert_eq!(
+        unverified_code::<LaunchPlan>(Err(bypass)),
+        "codex-bypass-modal-interaction-not-run"
+    );
+
+    let model = "opaque-seat-model";
+    let resolved_model = resolve_launch(
+        &CODEX_DESCRIPTOR,
+        &hooks,
+        &phase1_request(
+            Operation::Fresh,
+            LaunchMode::LaunchOnly,
+            Some(model),
+            false,
+            None,
+        ),
+        None,
+    )
+    .expect("opaque id reaches plan");
+    let model_err = match adapter.plan(&resolved_model) {
+        Err(error) => error,
+        Ok(_) => panic!("model string must not enter argv"),
+    };
+    assert!(!format!("{model_err:?}").contains(model));
+    assert_eq!(
+        unverified_code::<LaunchPlan>(Err(model_err)),
+        "codex-model-selection-not-admitted"
+    );
+
+    let worker = match resolve_launch(
+        &CODEX_DESCRIPTOR,
+        &hooks,
+        &phase1_request(
+            Operation::Fresh,
+            LaunchMode::FullWorker,
+            None,
+            false,
+            Some("worker"),
+        ),
+        None,
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("full worker must not plan"),
+    };
+    assert_eq!(
+        unverified_code::<LaunchPlan>(Err(worker)),
+        "codex-prompt-bytes-not-observed"
+    );
+
+    let empty = seated();
+    assert_eq!(
+        unverified_code(empty.plan_phase1()),
+        "codex-launch-not-admitted"
+    );
+    assert_eq!(
+        unverified_code(empty.plan(&resolved)),
+        "codex-launch-not-admitted"
+    );
+    assert_eq!(
+        unverified_code(adapter.plan_phase1()),
+        "codex-launch-not-admitted"
+    );
+    assert!(resolve_launch(
+        &CODEX_DESCRIPTOR,
+        &hooks,
+        &phase1_request(Operation::Resume, LaunchMode::LaunchOnly, None, false, None),
+        None,
+    )
+    .is_err());
 }
 
 #[test]
@@ -777,4 +879,5 @@ fn bundled_slugs_are_not_hardcoded() {
         assert!(!source.contains(slug), "{slug}");
     }
     assert!(!source.contains("/opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js"));
+    assert!(!source.contains(ENGINE));
 }
