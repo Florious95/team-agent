@@ -266,6 +266,34 @@ fn border(line: &str) -> bool {
         && line.trim_start().starts_with('─')
 }
 
+// A complete native update notice can end inside the editor search window,
+// but its opening must precede every possible editor row. Never discard a
+// ruler belonging to the editable region or an incomplete/unknown notice.
+fn pi_closed_update_notice(rows: &[&str], closing: usize, editor_start: usize, top: usize) -> bool {
+    let rule = rows[closing].trim();
+    if !rule.chars().all(|character| character == '─')
+        || !rows[closing + 1..top].iter().all(|row| row.trim().is_empty())
+    {
+        return false;
+    }
+    let Some(opening) = rows[..editor_start]
+        .iter()
+        .rposition(|row| row.trim() == rule)
+    else {
+        return false;
+    };
+    let body = &rows[opening + 1..closing];
+    body.len() >= 4
+        && body[0].trim() == "Package Updates Available"
+        && body[1].trim() == "Package updates are available. Run pi update --extensions"
+        && body[2].trim() == "Packages:"
+        && body[3..].iter().all(|row| {
+            row.trim()
+                .strip_prefix("- ")
+                .is_some_and(|package| !package.trim().is_empty())
+        })
+}
+
 fn pi_input(text: &str, pane_height: u32) -> Option<InputFrame> {
     if pane_height < 10 {
         return None;
@@ -287,13 +315,17 @@ fn pi_input(text: &str, pane_height: u32) -> Option<InputFrame> {
     // editor lines. A task's Unicode ruler is not a native top boundary:
     // ambiguous borders inside that whole possible editor extent refuse.
     let extent = (pane_height as usize * 3 / 10).max(5) + 1;
-    let candidates: Vec<_> = (bottom.saturating_sub(extent)..bottom)
+    let editor_start = bottom.saturating_sub(extent);
+    let candidates: Vec<_> = (editor_start..bottom)
         .filter(|index| border(rows[*index]))
         .collect();
-    if candidates.len() != 1 {
+    let top = *candidates.last()?;
+    if candidates[..candidates.len() - 1]
+        .iter()
+        .any(|index| !pi_closed_update_notice(&rows, *index, editor_start, top))
+    {
         return None;
     }
-    let top = candidates[0];
     let composer = rows[top + 1..bottom].join("\n");
     let transcript = rows[..top].join("\n");
     // Inspect native status adjacent to the editor, never the task body.
@@ -389,6 +421,57 @@ mod tests {
             &pi("foreign draft\n────────\n", "old history")
         )
         .is_none());
+    }
+
+    const PI_R6_IDLE: &str = include_str!("../../tests/fixtures/pi-r6-idle-24.txt");
+
+    #[test]
+    fn native_input_pi_r6_idle_update_notice_preserves_empty_editor() {
+        assert_eq!(
+            input_digest(PI_R6_IDLE),
+            "40f31e7476f628a471113c89b76a1ace0246e69f53fb7238999205f62b5d20fa"
+        );
+        let frame = super::inspect_input(Provider::Pi, PI_R6_IDLE, 24).unwrap();
+        assert!(frame.empty());
+        assert!(!frame.busy);
+        assert_eq!(frame.identity, "gpt-6-luna");
+        assert!(frame.transcript.contains("Package Updates Available"));
+        assert!(!frame.composer.contains("Package Updates Available"));
+    }
+
+    #[test]
+    fn native_input_pi_r6_notice_does_not_hide_drafts_or_busy_state() {
+        let top = " pi-target ─\n\n";
+        let marker = "[team-agent-token:msg_one]";
+        let draft = PI_R6_IDLE.replace(top, &format!(" pi-target ─\nforeign draft\n{marker}\n"));
+        let frame = super::inspect_input(Provider::Pi, &draft, 24).unwrap();
+        assert!(!frame.empty());
+        assert!(frame.has_marker(marker));
+        let busy = PI_R6_IDLE.replace(
+            "──────────────────────────────────────────────────────────────────── pi-target ─",
+            "── ⠋ Working ──────────────────────────────────────────────────────────────────",
+        );
+        let frame = super::inspect_input(Provider::Pi, &busy, 24).unwrap();
+        assert!(frame.empty());
+        assert!(frame.busy);
+        for composer in ["foreign draft\n────────\n", "\n────────\n"] {
+            let foreign = PI_R6_IDLE.replace(top, &format!(" pi-target ─\n{composer}\n"));
+            assert!(super::inspect_input(Provider::Pi, &foreign, 24).is_none());
+        }
+    }
+
+    #[test]
+    fn native_input_pi_r6_incomplete_or_ambiguous_notice_refuses() {
+        for frame in [
+            PI_R6_IDLE.replace("Package Updates Available", "Unknown notification"),
+            PI_R6_IDLE.replace(" - pi-mcp-adapter", "not a native package row"),
+            PI_R6_IDLE.replace("\n\n──────────────────────────────────────────────────────────────────── pi-target", "\nforeign draft\n──────────────────────────────────────────────────────────────────── pi-target"),
+        ] {
+            assert!(super::inspect_input(Provider::Pi, &frame, 24).is_none());
+        }
+        // If the complete box itself could be editor content, geometry cannot
+        // distinguish it from a pasted imitation: keep the old refusal.
+        assert!(super::inspect_input(Provider::Pi, PI_R6_IDLE, 120).is_none());
     }
 
     #[test]

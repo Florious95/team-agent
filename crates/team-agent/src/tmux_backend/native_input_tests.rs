@@ -17,6 +17,7 @@ enum Mode {
     NonceSetFailed,
     NonceBindingChanged,
     TransientUnknown,
+    R6IdleNotice,
 }
 struct State {
     mode: Mode,
@@ -47,8 +48,13 @@ impl CommandRunner for Runner {
             } else {
                 "worker"
             };
+            let height = if matches!(state.mode, Mode::R6IdleNotice) {
+                24
+            } else {
+                120
+            };
             format!(
-                "/tmp/owned-test.sock|%1|{}|session|{window}|{}|0|120\n",
+                "/tmp/owned-test.sock|%1|{}|session|{window}|{}|0|{height}\n",
                 std::process::id(),
                 state.nonce
             )
@@ -96,6 +102,18 @@ impl CommandRunner for Runner {
                 || (state.entered > 0 && matches!(state.mode, Mode::UnknownAfterEnter))
             {
                 "startup warning/raw echo".into()
+            } else if matches!(state.mode, Mode::R6IdleNotice) {
+                let idle = include_str!("../../tests/fixtures/pi-r6-idle-24.txt");
+                if state.entered > 0 {
+                    format!("{marker}\n{idle}")
+                } else if state.pasted > 0 {
+                    idle.replace(
+                        " pi-target ─\n\n",
+                        &format!(" pi-target ─\nline\n{marker}\n"),
+                    )
+                } else {
+                    idle.into()
+                }
             } else if state.entered > 0
                 && (!matches!(state.mode, Mode::Swallow) || state.entered >= 2)
             {
@@ -352,6 +370,23 @@ fn native_input_delayed_ready_then_owned_paste_then_exactly_one_enter() {
             .count()
             >= 2
     );
+}
+
+#[test]
+fn native_input_r6_idle_notice_reaches_owned_paste_and_one_submit() {
+    let f = Fixture::new(Mode::R6IdleNotice);
+    let (report, evidence) = f.inject();
+    assert_eq!(
+        report.unwrap().submit_verification,
+        SubmitVerification::EnterSentWithoutPlaceholderCheck
+    );
+    let evidence = evidence.unwrap();
+    assert_eq!(evidence.binding.pane_height, 24);
+    assert_eq!(evidence.phase, NativeInputPhase::Accepted);
+    let state = f.state.lock().unwrap();
+    assert_eq!((state.pasted, state.entered), (1, 1));
+    assert!(state.stage_captures[0] >= 2);
+    assert!(state.stage_captures[1] >= 2);
 }
 
 #[test]
