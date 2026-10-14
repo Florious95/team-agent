@@ -495,8 +495,11 @@ fn compile_role_agent_with_mode(
         .filter(|provider| !provider.trim().is_empty())
         .unwrap_or_else(|| "pi".to_string());
     let is_pi = parse_canonical_provider(&provider) == Some(Provider::Pi);
+    let contract_opt_in = matches!(meta.get("contract_runtime"), Some(Value::Bool(true)));
     #[cfg(unix)]
-    let contract = crate::contract_runtime::registry::descriptor(&provider);
+    let contract = crate::contract_runtime::registry::contract_dispatch(&provider, contract_opt_in)
+        .then(|| crate::contract_runtime::registry::descriptor(&provider))
+        .flatten();
     #[cfg(unix)]
     let contract_role = contract.is_some();
     #[cfg(not(unix))]
@@ -562,6 +565,9 @@ fn compile_role_agent_with_mode(
             ]),
         ),
     ];
+    if contract_opt_in {
+        agent_items.push(("contract_runtime", Value::Bool(true)));
+    }
     if let Some(profile) = string_field(&meta, "profile") {
         agent_items.push(("profile", Value::Str(profile)));
     }

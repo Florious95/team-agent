@@ -52,8 +52,22 @@ pub fn executable(name: &'static str) -> Result<PathBuf, DiscoveryError> {
     Err(DiscoveryError::Executable(name))
 }
 
+fn codex_h1_closed() -> DiscoveryError {
+    let adapter = team_agent_contract::providers::codex::CodexAdapter;
+    DiscoveryError::Contract(
+        adapter
+            .hooks()
+            .catalog
+            .require("codex catalog")
+            .expect_err("phase 3 keeps Codex H1 unverified"),
+    )
+}
+
 pub fn discover(provider: &ProviderId, workspace: &Path) -> Result<Discovery, DiscoveryError> {
     let selected = registry::provider(provider.as_str()).map_err(DiscoveryError::Contract)?;
+    if selected == NativeProvider::Codex {
+        return Err(codex_h1_closed());
+    }
     let descriptor = selected.descriptor();
     let bounds = ReadBounds {
         deadline: std::time::Duration::from_secs(30),
@@ -85,6 +99,7 @@ pub fn discover(provider: &ProviderId, workspace: &Path) -> Result<Discovery, Di
             let native = grok::probe_launcher(&engine, &mut RealCommandRunner::default(), bounds)?;
             (engine, native)
         }
+        NativeProvider::Codex => return Err(codex_h1_closed()),
     };
     let request = CatalogRequest {
         provider: ProviderId::new(descriptor.identity.id).map_err(DiscoveryError::Contract)?,
@@ -119,6 +134,7 @@ pub fn discover(provider: &ProviderId, workspace: &Path) -> Result<Discovery, Di
                 .map_err(DiscoveryError::Contract)?;
             catalog_hook.discover(&request, &mut host)
         }
+        NativeProvider::Codex => return Err(codex_h1_closed()),
     }.map_err(DiscoveryError::Catalog)?;
     let result = Discovery { engine, native, catalog, runtime: None };
     validate_catalog(provider, &result).map_err(DiscoveryError::Contract)?;
@@ -128,8 +144,11 @@ pub fn discover(provider: &ProviderId, workspace: &Path) -> Result<Discovery, Di
 /// Runtime discovery is separate from public catalog metadata. Cursor explicitly
 /// bridges the same installation's catalog to its proven Node/entry identity.
 pub(super) fn discover_runtime(provider: &ProviderId, workspace: &Path) -> Result<Discovery, DiscoveryError> {
-    let mut discovery = discover(provider, workspace)?;
     let selected = registry::provider(provider.as_str()).map_err(DiscoveryError::Contract)?;
+    if selected == NativeProvider::Codex {
+        return Err(codex_h1_closed());
+    }
+    let mut discovery = discover(provider, workspace)?;
     if selected != NativeProvider::Kiro {
         let home = std::env::var_os("HOME").map(PathBuf::from)
             .ok_or(DiscoveryError::Executable("HOME for native subscription"))?;
@@ -150,6 +169,7 @@ pub(super) fn discover_runtime(provider: &ProviderId, workspace: &Path) -> Resul
                 discovery.runtime = Some(NativeRuntime::GrokBuild(runtime));
             }
             NativeProvider::Kiro => unreachable!(),
+            NativeProvider::Codex => return Err(codex_h1_closed()),
         }
     }
     Ok(discovery)

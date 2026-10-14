@@ -23,7 +23,7 @@ enum CatalogFormat {
 
 pub fn cmd_models(args: &ModelsArgs) -> Result<CmdResult, CliError> {
     #[cfg(unix)]
-    if crate::contract_runtime::registry::descriptor(&args.provider).is_some() {
+    if crate::contract_runtime::registry::contract_dispatch(&args.provider, false) {
         return crate::contract_runtime::discovery::models(args);
     }
     let records = match crate::provider::model_catalog::discover_model_catalog(&args.provider) {

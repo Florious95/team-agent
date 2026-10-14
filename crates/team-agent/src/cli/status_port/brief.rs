@@ -89,6 +89,7 @@ struct RegisteredNode {
     window: Option<String>,
     pane: Option<String>,
     lifecycle: Option<String>,
+    contract_opt_in: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -187,7 +188,10 @@ fn project_status_nodes(
         .iter()
         .filter(|_node| {
             #[cfg(unix)]
-            if crate::contract_runtime::registry::descriptor(&_node.provider).is_some() {
+            if crate::contract_runtime::registry::contract_dispatch(
+                &_node.provider,
+                _node.contract_opt_in,
+            ) {
                 return false;
             }
             true
@@ -199,7 +203,10 @@ fn project_status_nodes(
         .iter()
         .map(|node| {
             #[cfg(unix)]
-            if crate::contract_runtime::registry::descriptor(&node.provider).is_some() {
+            if crate::contract_runtime::registry::contract_dispatch(
+                &node.provider,
+                node.contract_opt_in,
+            ) {
                 let mut brief = BriefNode::unknown(node);
                 if let Ok(native) = crate::contract_runtime::framework::project_seat(
                     _workspace,
@@ -519,6 +526,8 @@ fn registered_node(name: &str, value: &Value, state: &Value) -> RegisteredNode {
             .or_else(|| first_string(display, &["pane_id"]))
             .or_else(|| first_string(target, &["pane_id"])),
         lifecycle: string_at(value, &["status"]).map(|status| status.to_ascii_lowercase()),
+        contract_opt_in: value.get("contract_runtime") == Some(&Value::Bool(true))
+            || value.get("runtime_family").and_then(Value::as_str) == Some("contract"),
     }
 }
 
@@ -1445,6 +1454,7 @@ mod native_ps_batch_regressions {
             window: Some("w".into()),
             pane: Some(pane.into()),
             lifecycle: None,
+            contract_opt_in: false,
         }
     }
 
@@ -1680,6 +1690,7 @@ mod tests {
             window: Some("win".to_string()),
             pane: Some("%7".to_string()),
             lifecycle: None,
+            contract_opt_in: false,
         }
     }
 

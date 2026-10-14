@@ -90,7 +90,8 @@ pub(super) fn spawn_agents(
             .get("provider")
             .and_then(Value::as_str)
             .is_some_and(|provider| {
-                crate::contract_runtime::registry::descriptor(provider).is_some()
+                let opt_in = agent.get("contract_runtime") == Some(&Value::Bool(true));
+                crate::contract_runtime::registry::contract_dispatch(provider, opt_in)
             })
         {
             let team = runtime_team_key_for_spec(spec_path, spec, session_name);

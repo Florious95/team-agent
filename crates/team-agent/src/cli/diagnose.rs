@@ -1584,6 +1584,9 @@ pub(crate) fn provider_doctor_checks() -> Value {
     #[cfg(unix)]
     for descriptor in crate::contract_runtime::registry::descriptors() {
         let identity = &descriptor.identity;
+        if !crate::contract_runtime::registry::contract_dispatch(identity.id, false) {
+            continue;
+        }
         // Inventory only: finding the launcher is not an engine, auth or readiness probe.
         providers.insert(
             identity.id.to_string(),

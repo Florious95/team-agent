@@ -99,25 +99,37 @@ fn mode(meta: &Value, path: &Path) -> Result<Option<CommunicationMode>, ConfigEr
         .transpose()
 }
 
+fn yaml_contract_opt_in(meta: &Value) -> bool {
+    matches!(meta.get("contract_runtime"), Some(Value::Bool(true)))
+}
+
+fn header_contract_opt_in(raw: &str) -> bool {
+    matches!(raw, "true" | "True" | "TRUE")
+}
+
 /// A malformed explicit contract header cannot fall back to the default Pi worker.
+/// Exact `codex` without `contract_runtime: true` stays on the legacy parser.
 fn malformed_contract_header(body: &str) -> bool {
-    body.strip_prefix("---\n").is_some_and(|header| {
-        header
-            .lines()
-            .take_while(|line| *line != "---")
-            .any(|line| {
-                line.split_once(':').is_some_and(|(key, value)| {
-                    key.trim() == "provider"
-                        && super::registry::recognizes(
-                            value
-                                .split('#')
-                                .next()
-                                .unwrap_or("")
-                                .trim()
-                                .trim_matches(['\'', '"']),
-                        )
-                })
-            })
+    let Some(header) = body.strip_prefix("---\n") else {
+        return false;
+    };
+    let mut providers = Vec::new();
+    let mut opt_in = false;
+    for line in header.lines().take_while(|line| *line != "---") {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let raw = value.split('#').next().unwrap_or("").trim();
+        match key.trim() {
+            "provider" => providers.push(raw.trim_matches(['\'', '"']).to_string()),
+            "contract_runtime" if header_contract_opt_in(raw) => opt_in = true,
+            _ => {}
+        }
+    }
+    providers.into_iter().any(|provider| {
+        super::registry::contract_dispatch(&provider, opt_in)
+            || (super::registry::descriptor(&provider).is_none()
+                && super::registry::recognizes(&provider))
     })
 }
 
@@ -183,7 +195,9 @@ fn read_team_inner(
         if meta
             .get("provider")
             .and_then(Value::as_str)
-            .is_some_and(super::registry::recognizes)
+            .is_some_and(|provider| {
+                super::registry::contract_dispatch(provider, yaml_contract_opt_in(&meta))
+            })
         {
             selected = true;
         }
@@ -252,18 +266,24 @@ fn read_team_inner(
         if registration.is_none() && super::registry::recognizes(&provider) {
             return Err(invalid(&source, "provider"));
         }
-        let runtime = if registration.is_some() {
+        let dispatch =
+            super::registry::contract_dispatch(&provider, yaml_contract_opt_in(&meta));
+        let runtime = if dispatch {
             RuntimeFamily::Contract
         } else {
             RuntimeFamily::Legacy
         };
         members.push(MemberRoute {
             id: id.clone(),
-            provider: registration.map_or(provider, |descriptor| descriptor.identity.id.into()),
+            provider: if dispatch {
+                registration.map_or(provider.clone(), |descriptor| descriptor.identity.id.into())
+            } else {
+                provider.clone()
+            },
             source: source.canonicalize()?,
             runtime,
         });
-        let Some(registration) = registration else {
+        let Some(registration) = registration.filter(|_| dispatch) else {
             continue;
         };
         let provider =

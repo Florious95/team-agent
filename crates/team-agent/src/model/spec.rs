@@ -429,10 +429,18 @@ fn check_agent(agent: &Yaml, path: &str, errors: &mut Vec<String>) {
         "permission_mode",
         // 0.4.x provider effort MVP step 3: per-agent effort override (resolved at compile).
         "effort",
+        // Exact boolean opt-in for a registered provider that stays legacy without it.
+        "contract_runtime",
     ];
     check_keys_y(Some(agent), path, req, allowed, errors);
     if !agent.is_map() {
         return;
+    }
+    if agent
+        .get("contract_runtime")
+        .is_some_and(|value| !matches!(value, Yaml::Bool(_)))
+    {
+        errors.push(format!("{path}/contract_runtime: must be a boolean"));
     }
     if let Some(value) = agent.get("communication_mode") {
         match value.as_str() {

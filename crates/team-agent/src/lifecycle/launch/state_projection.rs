@@ -123,6 +123,10 @@ pub(super) fn persist_spawn_agent_state(
         if let Some(descriptor) = agent
             .get("provider")
             .and_then(Value::as_str)
+            .filter(|provider| {
+                let opt_in = agent.get("contract_runtime") == Some(&Value::Bool(true));
+                crate::contract_runtime::registry::contract_dispatch(provider, opt_in)
+            })
             .and_then(crate::contract_runtime::registry::descriptor)
         {
             let projected = if agent_is_paused(agent) {

@@ -14,10 +14,12 @@ use team_agent_contract::orchestration::{
 };
 
 pub fn is_contract(agent: &Value) -> bool {
-    agent
-        .get("provider")
-        .and_then(Value::as_str)
-        .is_some_and(|provider| super::registry::descriptor(provider).is_some())
+    let Some(provider) = agent.get("provider").and_then(Value::as_str) else {
+        return false;
+    };
+    let opt_in = agent.get("contract_runtime") == Some(&Value::Bool(true))
+        || agent.get("runtime_family").and_then(Value::as_str) == Some("contract");
+    super::registry::contract_dispatch(provider, opt_in)
 }
 /// Published paused roles without an instance never crossed native startup.
 /// A bound instance is never skipped, even if a stale row says paused.
@@ -88,19 +90,31 @@ pub fn require_legacy_role(
     path: Option<&Path>,
     provider: Option<&str>,
 ) -> Result<(), crate::cli::CliError> {
-    let declared = path
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|raw| {
-            crate::compiler::split_front_matter(&raw)
-                .0
-                .get("provider")
-                .and_then(crate::model::yaml::Value::as_str)
-                .map(str::to_owned)
-        });
-    if provider
-        .or(declared.as_deref())
-        .is_some_and(super::registry::recognizes)
-    {
+    let file = path.and_then(|path| std::fs::read_to_string(path).ok());
+    let (declared, file_opt_in) = match file.as_deref() {
+        Some(raw) => {
+            let meta = crate::compiler::split_front_matter(raw).0;
+            (
+                meta.get("provider")
+                    .and_then(crate::model::yaml::Value::as_str)
+                    .map(str::to_owned),
+                matches!(
+                    meta.get("contract_runtime"),
+                    Some(crate::model::yaml::Value::Bool(true))
+                ),
+            )
+        }
+        None => (None, false),
+    };
+    let selected = provider.or(declared.as_deref());
+    let opt_in = file_opt_in
+        && provider
+            .map(|name| declared.as_deref() == Some(name))
+            .unwrap_or(true);
+    if selected.is_some_and(|name| {
+        super::registry::contract_dispatch(name, opt_in)
+            || (super::registry::descriptor(name).is_none() && super::registry::recognizes(name))
+    }) {
         return Err(crate::cli::CliError::Runtime("contract_capability_unverified: mutable contract-native role lifecycle is not admitted; use initial quick-start; no role file was changed".into()));
     }
     Ok(())
