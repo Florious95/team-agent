@@ -149,11 +149,10 @@ impl NativeProvider {
                 if executable.as_os_str().is_empty() && arguments.is_empty() && environment.is_empty() {
                     Ok(NativeAdapter::Codex(CodexAdapter))
                 } else {
-                    Err(CodexAdapter
-                        .hooks()
-                        .materialize
-                        .require("codex mcp stdio")
-                        .expect_err("phase 3 keeps Codex H3 unverified"))
+                    Err(match CodexAdapter.hooks().materialize.require("codex mcp stdio") {
+                        Err(err) => err,
+                        Ok(_) => panic!("phase 3 keeps Codex H3 unverified"),
+                    })
                 }
             }
         }

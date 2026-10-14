@@ -54,13 +54,10 @@ pub fn executable(name: &'static str) -> Result<PathBuf, DiscoveryError> {
 
 fn codex_h1_closed() -> DiscoveryError {
     let adapter = team_agent_contract::providers::codex::CodexAdapter;
-    DiscoveryError::Contract(
-        adapter
-            .hooks()
-            .catalog
-            .require("codex catalog")
-            .expect_err("phase 3 keeps Codex H1 unverified"),
-    )
+    DiscoveryError::Contract(match adapter.hooks().catalog.require("codex catalog") {
+        Err(err) => err,
+        Ok(_) => panic!("phase 3 keeps Codex H1 unverified"),
+    })
 }
 
 pub fn discover(provider: &ProviderId, workspace: &Path) -> Result<Discovery, DiscoveryError> {
