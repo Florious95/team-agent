@@ -479,6 +479,102 @@ fn a3_pane_not_found_keeps_its_catalog_reason_and_cause() {
 
 #[test]
 #[serial(env)]
+fn issue326_plain_pi_stale_pane_offers_explicit_clean_environment_retry() {
+    let case = Case::new("issue326-stale-pi");
+    case.set_mode("pane-not-found");
+    write_executable(&case.fake_bin.join("pi"), PROVIDER_SHIM);
+    std::os::unix::fs::symlink(
+        env!("CARGO_BIN_EXE_team-agent"),
+        case.fake_bin.join("team-agent"),
+    )
+    .expect("test-owned public command entry");
+    let durable_before = case.durable_snapshot();
+
+    let output = case.run(&["pi", "--json"], Some(AMBIENT_PANE));
+    let value = json_stdout_even_on_error("issue326 stale Pi", &output);
+    assert_typed_prelaunch_refusal(
+        &output,
+        &value,
+        refusal_catalog::PaneAuthorityRefusalReason::AmbientPaneWorkspaceUnavailable,
+        Some((
+            refusal_catalog::PaneAuthorityRefusalField::ObservedPaneWorkspace,
+            "pane_not_found",
+        )),
+        "issue326 stale Pi",
+    );
+    assert_no_provider_or_managed_spawn(&case, "issue326 stale Pi");
+    case.assert_durable_unchanged(&durable_before, "refusal must not mutate the workspace");
+    assert_eq!(
+        value["recovery_command"],
+        json!("env -u TMUX -u TMUX_PANE team-agent pi"),
+        "plain Pi must offer an explicit fresh-process retry, not only attach guidance"
+    );
+    let action = value["action"].as_str().expect("recovery explanation");
+    assert!(action.contains("inherited") && action.contains("requested_workspace"));
+    assert!(action.contains("does not detach") && action.contains("only for the new process"));
+
+    let command = value["recovery_command"].as_str().unwrap();
+    let parent_env_after = case.env.root().join("outer-tmux-after");
+    let script = format!(
+        "{command}; result=$?; printf '%s\\n%s\\n' \"$TMUX\" \"$TMUX_PANE\" > \"$TEAM_AGENT_TEST_OUTER_ENV_AFTER\"; exit \"$result\""
+    );
+    let log_before_retry = case.tmux_log();
+    let mut retry = case.command_for_program(
+        Path::new("/bin/sh"),
+        &["-c", &script],
+        Some(AMBIENT_PANE),
+    );
+    retry.env("TEAM_AGENT_TEST_OUTER_ENV_AFTER", &parent_env_after);
+    let retried = retry.output().expect("run advertised recovery command");
+    let recovered = json_stdout("issue326 explicit clean retry", &retried);
+    assert_eq!(recovered["ok"], json!(true), "{recovered}");
+    assert_eq!(recovered["mode"], json!("managed_tmux_client"));
+    let log_after_retry = case.tmux_log();
+    let new_operations = log_after_retry
+        .strip_prefix(&log_before_retry)
+        .expect("append-only fixture operation trace");
+    assert!(contains_tmux_operation(new_operations, "new-session"));
+    assert!(contains_tmux_operation(new_operations, "attach-session"));
+    assert!(!contains_tmux_operation(new_operations, "switch-client"));
+    assert!(
+        !new_operations.contains(case.endpoint.to_str().unwrap()),
+        "retry must use the workspace endpoint, not the inherited unrelated endpoint"
+    );
+    assert_eq!(
+        fs::read_to_string(parent_env_after).unwrap(),
+        format!("{},4242,0\n{AMBIENT_PANE}\n", case.endpoint.display()),
+        "env -u must affect only the new process, not its parent shell"
+    );
+    let state: Value = serde_json::from_slice(&fs::read(case.state_path()).unwrap()).unwrap();
+    assert_eq!(state["leader_receiver"]["pane_id"], json!("%managed"));
+    assert_ne!(state["leader_receiver"]["pane_id"], json!(AMBIENT_PANE));
+}
+
+#[test]
+#[serial(env)]
+fn issue326_external_pi_intent_is_not_rewritten_as_a_plain_launch() {
+    let case = Case::new("issue326-external-pi");
+    case.set_mode("pane-not-found");
+    let durable_before = case.durable_snapshot();
+    let output = case.run(&["pi", "--external-leader", "--json"], Some(AMBIENT_PANE));
+    let value = json_stdout_even_on_error("issue326 explicit external Pi", &output);
+    assert_typed_prelaunch_refusal(
+        &output,
+        &value,
+        refusal_catalog::PaneAuthorityRefusalReason::AmbientPaneWorkspaceUnavailable,
+        Some((
+            refusal_catalog::PaneAuthorityRefusalField::ObservedPaneWorkspace,
+            "pane_not_found",
+        )),
+        "issue326 explicit external Pi",
+    );
+    assert!(value.get("recovery_command").is_none());
+    assert_no_provider_or_managed_spawn(&case, "issue326 explicit external Pi");
+    case.assert_durable_unchanged(&durable_before, "external refusal stays effect-free");
+}
+
+#[test]
+#[serial(env)]
 fn a3_missing_pane_current_path_keeps_its_catalog_reason_and_cause() {
     let current_path_missing = Case::new("a3-current-path-missing");
     current_path_missing.set_mode("current-path-missing");
