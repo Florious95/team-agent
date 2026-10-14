@@ -578,10 +578,25 @@ fn issue326_stale_managed_reentry_is_not_ambient_authority() {
         }}
     })).expect("seed stale managed receiver");
     let output = case.run(&["codex", "--json", "--", "--contract-canary"], Some(AMBIENT_PANE));
-    assert_owned_managed_isolation(&case, &output, "stale managed reentry");
+    let receiver = assert_owned_managed_route(&case, &output, "stale managed reentry");
+    // Existing parallel-Leader registration deliberately preserves its first
+    // scalar binding. Isolation adds the new exact binding, not authority to
+    // delete or rewrite the previous receiver's history.
+    assert_eq!(receiver["pane_id"], json!(AMBIENT_PANE));
+    let bindings = receiver["bound_panes"].as_array().expect("parallel bindings");
+    assert_eq!(bindings.len(), 2);
+    assert!(bindings.iter().any(|binding| {
+        binding["pane_id"] == json!(AMBIENT_PANE)
+            && binding["tmux_socket"] == json!(case.endpoint.to_str().unwrap())
+    }));
 }
 
 fn assert_owned_managed_isolation(case: &Case, output: &Output, label: &str) {
+    let receiver = assert_owned_managed_route(case, output, label);
+    assert_eq!(receiver["pane_id"], json!("%managed"), "{label}: {receiver}");
+}
+
+fn assert_owned_managed_route(case: &Case, output: &Output, label: &str) -> Value {
     let value = json_stdout(label, output);
     assert_eq!(value["mode"], json!("managed_tmux_client"), "{label}: {value}");
     let log = case.tmux_log();
@@ -595,8 +610,13 @@ fn assert_owned_managed_isolation(case: &Case, output: &Output, label: &str) {
     let state: Value = serde_json::from_slice(&fs::read(case.state_path()).unwrap()).unwrap();
     let team_key = state["active_team_key"].as_str().expect("launched canonical team");
     let receiver = &state["teams"][team_key]["leader_receiver"];
-    assert_eq!(receiver["pane_id"], json!("%managed"), "{label}: {receiver}");
     assert_ne!(receiver["tmux_socket"], json!(case.endpoint.to_str().unwrap()), "{label}: {receiver}");
+    let bindings = receiver["bound_panes"].as_array().expect("owned receiver bindings");
+    assert_eq!(bindings.iter().filter(|binding| {
+        binding["pane_id"] == json!("%managed")
+            && binding["tmux_socket"] == receiver["tmux_socket"]
+    }).count(), 1, "{label}: must bind the one new owned pane exactly");
+    receiver.clone()
 }
 
 #[test]
