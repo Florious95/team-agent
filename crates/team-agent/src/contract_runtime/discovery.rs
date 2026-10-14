@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use team_agent_contract::contract::{hooks::*, plan::CatalogObservation, types::*};
 use team_agent_contract::host::{command::RealCommandRunner, process::resolve_cwd};
 use team_agent_contract::kiro::native as kiro;
+use team_agent_contract::providers::codex as codex;
 use team_agent_contract::providers::cursor::native as cursor;
 use team_agent_contract::providers::grok_build::native as grok;
 use thiserror::Error;
@@ -52,18 +53,62 @@ pub fn executable(name: &'static str) -> Result<PathBuf, DiscoveryError> {
     Err(DiscoveryError::Executable(name))
 }
 
-fn codex_h1_closed() -> DiscoveryError {
-    let adapter = team_agent_contract::providers::codex::CodexAdapter;
-    DiscoveryError::Contract(match adapter.hooks().catalog.require("codex catalog") {
-        Err(err) => err,
-        Ok(_) => panic!("phase 3 keeps Codex H1 unverified"),
-    })
+fn codex_launch_closed() -> DiscoveryError {
+    DiscoveryError::Contract(codex::launch_not_admitted())
+}
+
+fn discover_codex(workspace: &Path) -> Result<Discovery, DiscoveryError> {
+    let bounds = ReadBounds {
+        deadline: std::time::Duration::from_secs(30),
+        max_output_bytes: 1_048_576,
+    };
+    let engine = codex::resolve_seat_wrapper(Path::new(codex::SEAT_WRAPPER_LINK))
+        .map_err(DiscoveryError::Contract)?;
+    let native = codex::probe_seat_version(&engine, &mut RealCommandRunner::default(), bounds)?;
+    let source = NativeProvider::Codex
+        .descriptor()
+        .model
+        .catalog
+        .require("native catalog source")
+        .map_err(DiscoveryError::Contract)?
+        .clone();
+    let request = CatalogRequest {
+        provider: ProviderId::new("codex").map_err(DiscoveryError::Contract)?,
+        native: native.clone(),
+        executable: engine.clone(),
+        cwd: resolve_cwd(workspace)?,
+        source,
+        bounds,
+    };
+    let adapter = codex::CodexAdapter;
+    let hooks = adapter.hooks();
+    let catalog_hook = hooks
+        .catalog
+        .require("H1 catalog")
+        .map_err(DiscoveryError::Contract)?;
+    let mut host = codex::NativeCatalog::new(request.clone(), RealCommandRunner::default())
+        .map_err(DiscoveryError::Contract)?;
+    let catalog = catalog_hook
+        .discover(&request, &mut host)
+        .map_err(DiscoveryError::Catalog)?;
+    let result = Discovery {
+        engine,
+        native,
+        catalog,
+        runtime: None,
+    };
+    validate_catalog(
+        &ProviderId::new("codex").map_err(DiscoveryError::Contract)?,
+        &result,
+    )
+    .map_err(DiscoveryError::Contract)?;
+    Ok(result)
 }
 
 pub fn discover(provider: &ProviderId, workspace: &Path) -> Result<Discovery, DiscoveryError> {
     let selected = registry::provider(provider.as_str()).map_err(DiscoveryError::Contract)?;
     if selected == NativeProvider::Codex {
-        return Err(codex_h1_closed());
+        return discover_codex(workspace);
     }
     let descriptor = selected.descriptor();
     let bounds = ReadBounds {
@@ -96,7 +141,7 @@ pub fn discover(provider: &ProviderId, workspace: &Path) -> Result<Discovery, Di
             let native = grok::probe_launcher(&engine, &mut RealCommandRunner::default(), bounds)?;
             (engine, native)
         }
-        NativeProvider::Codex => return Err(codex_h1_closed()),
+        NativeProvider::Codex => return discover_codex(workspace),
     };
     let request = CatalogRequest {
         provider: ProviderId::new(descriptor.identity.id).map_err(DiscoveryError::Contract)?,
@@ -131,7 +176,7 @@ pub fn discover(provider: &ProviderId, workspace: &Path) -> Result<Discovery, Di
                 .map_err(DiscoveryError::Contract)?;
             catalog_hook.discover(&request, &mut host)
         }
-        NativeProvider::Codex => return Err(codex_h1_closed()),
+        NativeProvider::Codex => return discover_codex(workspace),
     }.map_err(DiscoveryError::Catalog)?;
     let result = Discovery { engine, native, catalog, runtime: None };
     validate_catalog(provider, &result).map_err(DiscoveryError::Contract)?;
@@ -143,7 +188,7 @@ pub fn discover(provider: &ProviderId, workspace: &Path) -> Result<Discovery, Di
 pub(super) fn discover_runtime(provider: &ProviderId, workspace: &Path) -> Result<Discovery, DiscoveryError> {
     let selected = registry::provider(provider.as_str()).map_err(DiscoveryError::Contract)?;
     if selected == NativeProvider::Codex {
-        return Err(codex_h1_closed());
+        return Err(codex_launch_closed());
     }
     let mut discovery = discover(provider, workspace)?;
     if selected != NativeProvider::Kiro {
@@ -166,7 +211,7 @@ pub(super) fn discover_runtime(provider: &ProviderId, workspace: &Path) -> Resul
                 discovery.runtime = Some(NativeRuntime::GrokBuild(runtime));
             }
             NativeProvider::Kiro => unreachable!(),
-            NativeProvider::Codex => return Err(codex_h1_closed()),
+            NativeProvider::Codex => return Err(codex_launch_closed()),
         }
     }
     Ok(discovery)
@@ -428,5 +473,17 @@ mod tests {
         assert_eq!(json["ok"], false);
         assert_eq!(json["models"], serde_json::json!([]));
         assert!(json["error"].as_str().unwrap().contains("kiro-cli"));
+    }
+
+    #[test]
+    fn codex_runtime_discovery_stays_launch_closed() {
+        let error = discover_runtime(&ProviderId::new("codex").unwrap(), Path::new("/tmp")).unwrap_err();
+        match error {
+            DiscoveryError::Contract(ContractError::Unverified { field, reason }) => {
+                assert_eq!(field, "codex launch");
+                assert_eq!(reason.code, "codex-launch-not-admitted");
+            }
+            other => panic!("codex runtime discovery: {other}"),
+        }
     }
 }

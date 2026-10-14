@@ -1,25 +1,32 @@
 //! ---
-//! purpose: Codex CLI phase-1 contract leaf for the fifteen facets and seven hooks.
-//! contract: Unregistered descriptor. Fresh and Resume validate; launch stays unverified at the model gate.
-//! boundary: No registry entry, no process signals, no global config writes, no credential or rollout-body reads.
+//! purpose: Codex CLI contract leaf for the fifteen facets and seven hooks.
+//! contract: H1 catalog reads `debug models --bundled` from the seat wrapper. Launch stays refused.
+//! boundary: No process signals, no global config writes, no credential or rollout-body reads, no static model list.
 //! ---
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use serde::Deserialize;
 
 use crate::contract::delivery::{CaptureFrame, InputSurface, InteractionObservation};
 use crate::contract::descriptor::*;
 use crate::contract::hooks::{
-    InteractionHook, PlanHook, ProviderHooks, ScopedSessionEvidence, SessionHook,
+    BoundedReadHost, CatalogHook, CatalogRequest, InteractionHook, PlanHook, ProviderHooks,
+    ReadBounds, ReadFailure, ReadOutput, ScopedSessionEvidence, SessionHook,
 };
-use crate::contract::plan::{LaunchPlan, ResolvedLaunch};
+use crate::contract::plan::{
+    CatalogObservation, EnvironmentDelta, LaunchPlan, ModelRecord, ResolvedLaunch,
+};
 use crate::contract::session::{CaptureOrigin, NativeSessionId, ResumeBinding, SessionStorage};
 use crate::contract::types::*;
+use crate::host::command::{CommandEnd, CommandRequest, CommandRunner, OutputLimits};
+use crate::host::process::{fingerprint_file, resolve_cwd};
+use crate::host::{HostError, HostErrorKind};
 
-const MODEL: Reason = Reason {
-    code: "codex-model-catalog-not-run",
-    message: "Codex model catalog was not measured; a configured model is not a bounded catalog",
+const SELECTION: Reason = Reason {
+    code: "codex-model-selection-not-admitted",
+    message: "Catalog IDs were measured, but none is admitted as a launch model",
 };
 const EFFORT: Reason = Reason {
     code: "codex-effort-not-remeasured",
@@ -89,10 +96,6 @@ const LAUNCH: Reason = Reason {
     code: "codex-launch-not-admitted",
     message: "Codex launch is not admitted",
 };
-const H1: Reason = Reason {
-    code: "codex-h1-catalog-not-run",
-    message: "Codex H1 catalog hook was not run",
-};
 const H3: Reason = Reason {
     code: "codex-h3-no-owned-mount",
     message: "Codex has no owned MCP mount",
@@ -130,6 +133,16 @@ const ROLLOUT_DATE: Reason = Reason {
     message: "Codex rollout date does not match the date directory",
 };
 
+pub const CATALOG_SOURCE: CatalogSource = CatalogSource {
+    arguments: &["debug", "models", "--bundled"],
+    schema: "codex-debug-models-bundled-json-v1",
+};
+pub const CATALOG_HARNESS: &str = "codex-seat-wrapper";
+pub const CATALOG_UI: &str = "bundled-catalog";
+/// Symlink fact only. Catalog execution uses the canonical seat wrapper.
+pub const SEAT_WRAPPER_LINK: &str = "/opt/homebrew/bin/codex";
+const MAX_WRAPPER_BYTES: u64 = 1024 * 1024;
+
 const PHASE1_INTERACTIVE_ARGUMENTS: &[&str] = &["--no-alt-screen", "--no-daemon"];
 const FORBIDDEN_INTERACTIVE_ARGUMENTS: &[&str] = &[
     "--last",
@@ -156,9 +169,9 @@ pub static CODEX_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         leader: Support::Unverified(LEADER),
     },
     model: ModelFacet {
-        selection: Support::Unverified(MODEL),
+        selection: Support::Unverified(SELECTION),
         omitted: OmittedModel::Reject,
-        catalog: Support::Unverified(MODEL),
+        catalog: Support::Supported(CATALOG_SOURCE),
     },
     effort: EffortFacet {
         admission: [const { EffortAdmission::Reject(EFFORT) }; 6],
@@ -239,7 +252,7 @@ pub struct CodexAdapter;
 impl CodexAdapter {
     pub fn hooks(&self) -> ProviderHooks<'_> {
         ProviderHooks {
-            catalog: HookBinding::Unverified(H1),
+            catalog: HookBinding::Bound(self),
             plan: HookBinding::Bound(self),
             materialize: HookBinding::Unverified(H3),
             session: HookBinding::Bound(self),
@@ -250,16 +263,52 @@ impl CodexAdapter {
     }
 
     pub fn plan_phase1(&self) -> Result<LaunchPlan, ContractError> {
-        Err(ContractError::Unverified {
-            field: "codex launch",
-            reason: LAUNCH,
-        })
+        Err(launch_not_admitted())
+    }
+}
+
+pub fn launch_not_admitted() -> ContractError {
+    ContractError::Unverified {
+        field: "codex launch",
+        reason: LAUNCH,
     }
 }
 
 impl PlanHook for CodexAdapter {
     fn plan(&self, _resolved: &ResolvedLaunch) -> Result<LaunchPlan, ContractError> {
         self.plan_phase1()
+    }
+}
+
+impl CatalogHook for CodexAdapter {
+    fn discover(
+        &self,
+        request: &CatalogRequest,
+        host: &mut dyn BoundedReadHost,
+    ) -> Result<CatalogObservation, ReadFailure> {
+        validate_catalog_request(request).map_err(ReadFailure::Error)?;
+        let output = host.read_catalog(request)?;
+        if output.elapsed > request.bounds.deadline {
+            return Err(ReadFailure::TimedOut {
+                elapsed: output.elapsed,
+            });
+        }
+        if output.stdout.len() > request.bounds.max_output_bytes {
+            return Err(ReadFailure::OutputLimit {
+                limit: request.bounds.max_output_bytes,
+            });
+        }
+        if output.exit_code != 0 {
+            return Err(ReadFailure::Exit {
+                code: output.exit_code,
+            });
+        }
+        Ok(CatalogObservation {
+            provider: request.provider.clone(),
+            native: request.native.clone(),
+            schema: request.source.schema.into(),
+            models: parse_bundled_catalog(&output.stdout).map_err(ReadFailure::Error)?,
+        })
     }
 }
 
@@ -469,4 +518,290 @@ fn session_record(bytes: &[u8]) -> Result<CodexSessionRecord, ContractError> {
     let text = std::str::from_utf8(bytes)
         .map_err(|_| unverified("codex session record", RECORD_UNREADABLE))?;
     serde_json::from_str(text).map_err(|_| unverified("codex session record", RECORD_UNREADABLE))
+}
+
+pub fn resolve_seat_wrapper(path: &Path) -> Result<PathBuf, ContractError> {
+    require_absolute(path, "codex catalog executable")?;
+    let canonical = path
+        .canonicalize()
+        .map_err(|_| ContractError::Invalid("codex catalog executable"))?;
+    let text = canonical
+        .to_str()
+        .ok_or(ContractError::Invalid("codex catalog executable"))?;
+    if classify_image_role(text) != CodexImageRole::SeatWrapper {
+        return Err(ContractError::Invalid("codex catalog executable"));
+    }
+    Ok(canonical)
+}
+
+pub fn validate_catalog_request(request: &CatalogRequest) -> Result<PathBuf, ContractError> {
+    request.bounds.validate()?;
+    request.native.validate()?;
+    require_absolute(&request.cwd.path, "codex catalog cwd")?;
+    if request.provider.as_str() != "codex"
+        || request.source != CATALOG_SOURCE
+        || request.native.harness != CATALOG_HARNESS
+        || request.native.ui != CATALOG_UI
+    {
+        return Err(ContractError::Mismatch("codex catalog grant"));
+    }
+    resolve_seat_wrapper(&request.executable)
+}
+
+pub fn probe_seat_version<R: CommandRunner>(
+    wrapper: &Path,
+    runner: &mut R,
+    bounds: ReadBounds,
+) -> Result<NativeIdentity, HostError> {
+    bounds
+        .validate()
+        .map_err(|_| HostError::new("Codex probe bounds", HostErrorKind::Invalid))?;
+    let wrapper = resolve_seat_wrapper(wrapper)
+        .map_err(|_| HostError::new("Codex seat wrapper", HostErrorKind::Invalid))?;
+    let started = Instant::now();
+    let hash = fingerprint_file(&wrapper, MAX_WRAPPER_BYTES, bounds.deadline)?;
+    let remaining = bounds.deadline.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return Err(HostError::new("Codex version deadline", HostErrorKind::Deadline));
+    }
+    let output = runner.run(&catalog_command(
+        &wrapper,
+        &["--version"],
+        None,
+        ReadBounds {
+            deadline: remaining,
+            ..bounds
+        },
+    ));
+    if output.end == CommandEnd::TimedOut || output.elapsed > remaining {
+        return Err(HostError::new("Codex version deadline", HostErrorKind::Deadline));
+    }
+    if output.end == CommandEnd::OutputLimit || output.stdout.len() > bounds.max_output_bytes {
+        return Err(HostError::new("Codex version output", HostErrorKind::Invalid));
+    }
+    if !output.success() {
+        return Err(HostError::new("Codex version command", HostErrorKind::Command));
+    }
+    let version = std::str::from_utf8(&output.stdout)
+        .map_err(|_| HostError::new("Codex version", HostErrorKind::Invalid))?
+        .trim();
+    if version.is_empty() {
+        return Err(HostError::new("Codex version", HostErrorKind::Invalid));
+    }
+    if fingerprint_file(
+        &wrapper,
+        MAX_WRAPPER_BYTES,
+        bounds.deadline.saturating_sub(started.elapsed()),
+    )? != hash
+    {
+        return Err(HostError::new(
+            "Codex seat wrapper changed during probe",
+            HostErrorKind::Conflict,
+        ));
+    }
+    Ok(NativeIdentity {
+        version: version.to_string(),
+        harness: CATALOG_HARNESS.into(),
+        ui: CATALOG_UI.into(),
+        platform: if cfg!(target_os = "macos") {
+            Platform::MacOs
+        } else if cfg!(target_os = "linux") {
+            Platform::Linux
+        } else {
+            Platform::Windows
+        },
+        executable_sha256: hash,
+    })
+}
+
+fn catalog_command(
+    executable: &Path,
+    arguments: &[&str],
+    cwd: Option<PathBuf>,
+    bounds: ReadBounds,
+) -> CommandRequest {
+    CommandRequest {
+        executable: executable.into(),
+        arguments: arguments.iter().map(|arg| (*arg).into()).collect(),
+        cwd,
+        environment: EnvironmentDelta {
+            remove: Default::default(),
+            set: Default::default(),
+        },
+        stdin: None,
+        budget: bounds.deadline,
+        reject_stdout: None,
+        limits: OutputLimits {
+            stdout: bounds.max_output_bytes,
+            stderr: bounds.max_output_bytes,
+            stdin: 0,
+        },
+    }
+}
+
+/// One captured catalog grant. The child argv is only `debug models --bundled`.
+pub struct NativeCatalog<R> {
+    grant: CatalogRequest,
+    executable: PathBuf,
+    runner: R,
+}
+
+impl<R: CommandRunner> NativeCatalog<R> {
+    pub fn new(grant: CatalogRequest, runner: R) -> Result<Self, ContractError> {
+        let executable = validate_catalog_request(&grant)?;
+        Ok(Self {
+            grant,
+            executable,
+            runner,
+        })
+    }
+}
+
+impl<R: CommandRunner> BoundedReadHost for NativeCatalog<R> {
+    fn read_catalog(&mut self, request: &CatalogRequest) -> Result<ReadOutput, ReadFailure> {
+        if *request != self.grant {
+            return Err(ReadFailure::Error(ContractError::Mismatch(
+                "captured codex catalog request",
+            )));
+        }
+        let started = Instant::now();
+        let verify = |executable: &Path| -> Result<(), ReadFailure> {
+            if resolve_cwd(&request.cwd.path).map_err(|_| {
+                ReadFailure::Error(ContractError::Mismatch("codex catalog cwd"))
+            })? != request.cwd
+            {
+                return Err(ReadFailure::Error(ContractError::Mismatch(
+                    "codex catalog cwd",
+                )));
+            }
+            let remaining = request.bounds.deadline.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err(ReadFailure::TimedOut {
+                    elapsed: started.elapsed(),
+                });
+            }
+            if fingerprint_file(executable, MAX_WRAPPER_BYTES, remaining).map_err(|_| {
+                ReadFailure::Error(ContractError::Mismatch("codex catalog executable"))
+            })? != request.native.executable_sha256
+            {
+                return Err(ReadFailure::Error(ContractError::Mismatch(
+                    "codex catalog executable",
+                )));
+            }
+            Ok(())
+        };
+        verify(&self.executable)?;
+        let remaining = request.bounds.deadline.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err(ReadFailure::TimedOut {
+                elapsed: started.elapsed(),
+            });
+        }
+        let output = self.runner.run(&catalog_command(
+            &self.executable,
+            CATALOG_SOURCE.arguments,
+            Some(request.cwd.path.clone()),
+            ReadBounds {
+                deadline: remaining,
+                ..request.bounds
+            },
+        ));
+        if output.end == CommandEnd::TimedOut || output.elapsed > remaining {
+            return Err(ReadFailure::TimedOut {
+                elapsed: started.elapsed().max(output.elapsed),
+            });
+        }
+        if output.end == CommandEnd::OutputLimit
+            || output.stdout.len() > request.bounds.max_output_bytes
+        {
+            return Err(ReadFailure::OutputLimit {
+                limit: request.bounds.max_output_bytes,
+            });
+        }
+        if !output.success() {
+            return match (output.end, output.exit_code) {
+                (CommandEnd::Exited, Some(code)) => Err(ReadFailure::Exit { code }),
+                _ => Err(ReadFailure::Error(ContractError::Invalid(
+                    "codex model catalog",
+                ))),
+            };
+        }
+        verify(&self.executable)?;
+        Ok(ReadOutput {
+            stdout: output.stdout,
+            elapsed: started.elapsed(),
+            exit_code: 0,
+        })
+    }
+}
+
+pub fn parse_bundled_catalog(bytes: &[u8]) -> Result<Vec<ModelRecord>, ContractError> {
+    let invalid = || ContractError::Invalid("codex model catalog");
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let object = value.as_object().ok_or_else(invalid)?;
+    if object.len() != 1 || !object.contains_key("models") {
+        return Err(invalid());
+    }
+    let models = object["models"].as_array().ok_or_else(invalid)?;
+    if models.is_empty() {
+        return Err(invalid());
+    }
+    let mut records = Vec::with_capacity(models.len());
+    let mut seen = Vec::<String>::with_capacity(models.len());
+    for model in models {
+        let model = model.as_object().ok_or_else(invalid)?;
+        let slug = exact_text(model.get("slug")).ok_or_else(invalid)?;
+        if seen.iter().any(|id| id == &slug) {
+            return Err(ContractError::AmbiguousModel);
+        }
+        seen.push(slug.clone());
+        if exact_text(model.get("display_name")).is_none() {
+            return Err(invalid());
+        }
+        let visibility = model.get("visibility").and_then(serde_json::Value::as_str);
+        if visibility != Some("list") && visibility != Some("hide") {
+            return Err(invalid());
+        }
+        if model.get("supported_in_api") != Some(&serde_json::Value::Bool(true)) {
+            return Err(invalid());
+        }
+        let levels = model
+            .get("supported_reasoning_levels")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(invalid)?;
+        if levels.is_empty() {
+            return Err(invalid());
+        }
+        let mut efforts = Vec::with_capacity(levels.len());
+        for level in levels {
+            let raw = level.get("effort").and_then(serde_json::Value::as_str);
+            let effort = match raw {
+                Some("low") => Effort::Low,
+                Some("medium") => Effort::Medium,
+                Some("high") => Effort::High,
+                Some("xhigh") => Effort::Xhigh,
+                Some("max") => Effort::Max,
+                Some("ultra") => Effort::Ultra,
+                _ => return Err(invalid()),
+            };
+            if efforts.contains(&effort) {
+                return Err(invalid());
+            }
+            efforts.push(effort);
+        }
+        records.push(ModelRecord {
+            id: slug,
+            efforts: Support::Supported(efforts),
+        });
+    }
+    Ok(records)
+}
+
+fn exact_text(value: Option<&serde_json::Value>) -> Option<String> {
+    let text = value?.as_str()?;
+    if text.is_empty() || text != text.trim() {
+        None
+    } else {
+        Some(text.to_string())
+    }
 }

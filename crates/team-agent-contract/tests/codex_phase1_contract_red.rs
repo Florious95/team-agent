@@ -16,8 +16,8 @@ use team_agent_contract::contract::session::*;
 use team_agent_contract::contract::types::*;
 use team_agent_contract::providers::codex::{
     admit_rollout_name, argv_mutates_global_config, classify_image_role, forbidden_interactive_argument,
-    may_signal, phase1_interactive_arguments, seat_pair_ok, CodexAdapter, CodexImageRole,
-    CODEX_DESCRIPTOR,
+    may_signal, parse_bundled_catalog, phase1_interactive_arguments, seat_pair_ok, validate_catalog_request,
+    CodexAdapter, CodexImageRole, CATALOG_HARNESS, CATALOG_SOURCE, CATALOG_UI, CODEX_DESCRIPTOR,
 };
 
 const V7: &str = "018f6b6a-7c4e-7a1b-8c2d-111111111111";
@@ -117,13 +117,18 @@ fn fifteen_facets_match_phase1_admission() {
 
     assert_eq!(
         unverified_code(d.model.selection.require("model selection")),
-        "codex-model-catalog-not-run"
+        "codex-model-selection-not-admitted"
     );
     assert_eq!(d.model.omitted, OmittedModel::Reject);
     assert_eq!(
-        unverified_code(d.model.catalog.require("catalog")),
-        "codex-model-catalog-not-run"
+        d.model.catalog.require("catalog").expect("catalog supported"),
+        &CATALOG_SOURCE
     );
+    assert_eq!(
+        CATALOG_SOURCE.arguments,
+        &["debug", "models", "--bundled"][..]
+    );
+    assert_eq!(CATALOG_SOURCE.schema, "codex-debug-models-bundled-json-v1");
 
     for effort in Effort::ALL {
         match &d.effort.admission[effort.index()] {
@@ -249,10 +254,7 @@ fn fifteen_facets_match_phase1_admission() {
 fn seven_hooks_bind_only_plan_session_and_interaction() {
     let adapter = seated();
     let hooks = adapter.hooks();
-    assert_eq!(
-        unverified_code(hooks.catalog.require("H1 CatalogHook")),
-        "codex-h1-catalog-not-run"
-    );
+    assert!(hooks.catalog.require("H1 CatalogHook").is_ok());
     assert!(hooks.plan.require("H2 PlanHook").is_ok());
     assert_eq!(
         unverified_code(hooks.materialize.require("H3 MaterializeHook")),
@@ -281,8 +283,7 @@ fn fresh_descriptor_validates_and_launch_stays_closed() {
     validate_descriptor(&CODEX_DESCRIPTOR, &hooks, Operation::Fresh).unwrap();
     validate_descriptor(&CODEX_DESCRIPTOR, &hooks, Operation::Resume).unwrap();
 
-    let catalog = validate_descriptor(&CODEX_DESCRIPTOR, &hooks, Operation::Catalog).unwrap_err();
-    assert_eq!(unverified_code::<()>(Err(catalog)), "codex-model-catalog-not-run");
+    validate_descriptor(&CODEX_DESCRIPTOR, &hooks, Operation::Catalog).unwrap();
     for operation in [
         Operation::InWindowBranch,
         Operation::NewSeatFullSnapshot,
@@ -330,7 +331,7 @@ fn fresh_descriptor_validates_and_launch_stays_closed() {
             Err(err) => err,
             Ok(_) => panic!("expected Err, got Ok"),
         };
-        assert_eq!(code_of(Err(err)), "codex-model-catalog-not-run");
+        assert_eq!(code_of(Err(err)), "codex-model-selection-not-admitted");
     }
 }
 
@@ -491,4 +492,145 @@ fn session_bind_accepts_only_a_native_exact_rollout_path() {
         unverified_code(relative),
         "codex-rollout-path-not-absolute"
     );
+}
+
+fn bundled_model(slug: &str, visibility: &str, api: serde_json::Value, efforts: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "slug": slug,
+        "display_name": format!("{slug} display"),
+        "visibility": visibility,
+        "supported_in_api": api,
+        "supported_reasoning_levels": efforts.iter().map(|effort| serde_json::json!({
+            "effort": effort,
+            "description": "not a model alias",
+        })).collect::<Vec<_>>(),
+        "base_instructions": "ignored",
+    })
+}
+
+#[test]
+fn bundled_catalog_keeps_hidden_rows_and_ignores_unknown_ids() {
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "models": [
+            bundled_model("seat-hide", "hide", serde_json::Value::Bool(true), &["xhigh", "max"]),
+            bundled_model("seat-list", "list", serde_json::Value::Bool(true), &["low", "medium"]),
+        ]
+    })).unwrap();
+    let models = parse_bundled_catalog(&bytes).unwrap();
+    assert_eq!(models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(), ["seat-hide", "seat-list"]);
+    assert!(models.iter().all(|model| model.id != "o3"));
+    assert_eq!(models[0].efforts, Support::Supported(vec![Effort::Xhigh, Effort::Max]));
+    assert_eq!(models[1].efforts, Support::Supported(vec![Effort::Low, Effort::Medium]));
+}
+
+#[test]
+fn bundled_catalog_rejects_malformed_documents() {
+    let valid = bundled_model("seat-list", "list", serde_json::Value::Bool(true), &["high"]);
+    let cases: Vec<(&str, serde_json::Value, bool)> = vec![
+        ("extra key", serde_json::json!({"models": [valid.clone()], "extra": true}), false),
+        ("empty", serde_json::json!({"models": []}), false),
+        ("duplicate", serde_json::json!({"models": [valid.clone(), valid.clone()]}), true),
+        ("visibility", serde_json::json!({"models": [bundled_model("seat-list", "none", serde_json::Value::Bool(true), &["high"])]}), false),
+        ("blank slug", serde_json::json!({"models": [{
+            "slug": " seat-list ",
+            "display_name": "Seat",
+            "visibility": "list",
+            "supported_in_api": true,
+            "supported_reasoning_levels": [{"effort": "low"}],
+        }]}), false),
+        ("unknown effort", serde_json::json!({"models": [bundled_model("seat-list", "list", serde_json::Value::Bool(true), &["turbo"])]}), false),
+        ("api flag", serde_json::json!({"models": [bundled_model("seat-list", "list", serde_json::Value::String("true".into()), &["low"])]}), false),
+    ];
+    for (name, value, ambiguous) in cases {
+        let error = parse_bundled_catalog(&serde_json::to_vec(&value).unwrap()).expect_err(name);
+        if ambiguous {
+            assert!(matches!(error, ContractError::AmbiguousModel), "{name}: {error:?}");
+        } else {
+            assert!(matches!(error, ContractError::Invalid("codex model catalog")), "{name}: {error:?}");
+        }
+    }
+}
+
+struct ScriptedHost {
+    result: Result<ReadOutput, ReadFailure>,
+}
+
+impl BoundedReadHost for ScriptedHost {
+    fn read_catalog(&mut self, _request: &CatalogRequest) -> Result<ReadOutput, ReadFailure> {
+        std::mem::replace(&mut self.result, Err(ReadFailure::Exit { code: -1 }))
+    }
+}
+
+fn catalog_request(max_output_bytes: usize) -> CatalogRequest {
+    let root = std::env::temp_dir().join(format!("codex-h1-{}", std::process::id()));
+    let bin = root.join("node_modules/@openai/codex/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let executable = bin.join("codex.js");
+    std::fs::write(&executable, b"fixture\n").unwrap();
+    CatalogRequest {
+        provider: ProviderId::new("codex").unwrap(),
+        native: NativeIdentity {
+            version: "fixture".into(),
+            harness: CATALOG_HARNESS.into(),
+            ui: CATALOG_UI.into(),
+            platform: Platform::MacOs,
+            executable_sha256: Digest([3; 32]),
+        },
+        executable,
+        cwd: CwdIdentity {
+            path: PathBuf::from("/tmp/codex-h1"),
+            identity: Digest([4; 32]),
+        },
+        source: CATALOG_SOURCE,
+        bounds: ReadBounds {
+            deadline: Duration::from_secs(30),
+            max_output_bytes,
+        },
+    }
+}
+
+#[test]
+fn catalog_read_failures_do_not_yield_an_observation() {
+    let adapter = seated();
+    let request = catalog_request(4);
+    validate_catalog_request(&request).unwrap();
+    let cases = [
+        ReadOutput { stdout: Vec::new(), elapsed: Duration::from_secs(31), exit_code: 0 },
+        ReadOutput { stdout: b"12345".to_vec(), elapsed: Duration::from_secs(1), exit_code: 0 },
+        ReadOutput { stdout: b"{}".to_vec(), elapsed: Duration::from_secs(1), exit_code: 2 },
+    ];
+    let mut saw_timeout = false;
+    let mut saw_limit = false;
+    let mut saw_exit = false;
+    for output in cases {
+        let result = adapter.discover(&request, &mut ScriptedHost { result: Ok(output) });
+        match result {
+            Err(ReadFailure::TimedOut { .. }) => saw_timeout = true,
+            Err(ReadFailure::OutputLimit { limit: 4 }) => saw_limit = true,
+            Err(ReadFailure::Exit { code: 2 }) => saw_exit = true,
+            Err(other) => panic!("unexpected catalog failure: {other:?}"),
+            Ok(_) => panic!("catalog observation"),
+        }
+    }
+    assert!(saw_timeout && saw_limit && saw_exit);
+}
+
+#[test]
+fn bundled_slugs_are_not_hardcoded() {
+    let source = include_str!("../src/providers/codex.rs");
+    for slug in [
+        "gpt-6-astra",
+        "gpt-6.1-sol",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-daybreak-blue-latest",
+        "gpt-daybreak-red-latest",
+        "codex-auto-review",
+    ] {
+        assert!(!source.contains(slug), "{slug}");
+    }
 }
