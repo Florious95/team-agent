@@ -11,7 +11,7 @@ exclude = ["crates/team-agent-contract"]
 
 [workspace.package]
 edition = "2021"
-version = "0.5.116"
+version = "0.5.117"
 license = "AGPL-3.0"
 rust-version = "1.95"
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.117]
+
+- **Reliable multiline submission (Issue #321, PR #323):** legacy Pi and Cursor Agent sends now require a known empty composer, stable owned-paste evidence and one logical Enter. Exact owner/carrier/birth/nonce binding, cooperative input locking and message-bound tmux buffers prevent cross-pane or stale-owner writes; uncertain effects never cause repaste or blind extra keys.
+- **Owned delayed Enter rescue:** atomically schedule a one-shot 90–120s rescue for proven submitted-unverified input, with current ownership, non-busy composer and residue checks. Null, historical, changed or foreign paste evidence is refused rather than adopted.
+- **Pi native surfaces:** distinguish the measured completed update-notice border from the idle editor; recognize Pi's native folded-paste markers and persist their owned Pasted-phase latch before stability waiting, so a later rescue retains valid evidence.
+- **Bounded validation:** official two-platform CI passed (Ubuntu 3,564; macOS finite root 371; excluded contract 290; all zero failures, overlapping packs not summed). Independent real-machine R10 acceptance passed single 26-line/2,959-byte sends, input consumption, exact Worker ACK and same-task result delivery to the actual Native Pi Leader for Cursor Agent and Pi, including Pi's native pre-send update notice. This does not claim a full provider/model/busy-state or native rescue-branch matrix.
+
 ## [0.5.116]
 
 - **Stopped-seat restart invariant (Issue #317, PR #318):** preserve explicitly stopped seats across team-wide restart in both legacy and contract paths. Explicit `start-agent` resumes the seat and authoritatively updates both state mirrors while clearing the stop fence; unrelated stale writers cannot revive it. Unexpectedly dead seats remain recoverable, and existing explicit reset semantics are unchanged.
