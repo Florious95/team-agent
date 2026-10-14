@@ -16,8 +16,9 @@ use team_agent_contract::contract::session::*;
 use team_agent_contract::contract::types::*;
 use team_agent_contract::providers::codex::{
     admit_rollout_name, argv_mutates_global_config, classify_image_role, forbidden_interactive_argument,
-    may_signal, parse_bundled_catalog, phase1_interactive_arguments, seat_pair_ok, validate_catalog_request,
-    CodexAdapter, CodexImageRole, CATALOG_HARNESS, CATALOG_SOURCE, CATALOG_UI, CODEX_DESCRIPTOR,
+    interactive_launch_plan, may_signal, parse_bundled_catalog, phase1_interactive_arguments,
+    seat_pair_ok, startup_modal_intercept, validate_catalog_request, CodexAdapter, CodexImageRole,
+    CodexLaunchImages, CATALOG_HARNESS, CATALOG_SOURCE, CATALOG_UI, CODEX_DESCRIPTOR,
 };
 
 const V7: &str = "018f6b6a-7c4e-7a1b-8c2d-111111111111";
@@ -377,6 +378,148 @@ fn interactive_argv_cannot_update_install_or_write_global_mcp() {
     assert!(!argv_mutates_global_config(phase1_interactive_arguments()));
 }
 
+fn measured_images(wrapper: &str, engine: &str) -> CodexLaunchImages {
+    CodexLaunchImages {
+        wrapper: PathBuf::from(wrapper),
+        wrapper_sha256: Digest([1; 32]),
+        engine: PathBuf::from(engine),
+        engine_sha256: Digest([2; 32]),
+        wrapper_version: "0.160.1".into(),
+        engine_version: "0.160.1".into(),
+    }
+}
+
+fn assert_launch_refused(images: &CodexLaunchImages, cwd: &str, expected: &ExpectedSession) {
+    let error = interactive_launch_plan(images, &PathBuf::from(cwd), expected).unwrap_err();
+    assert_eq!(error, ContractError::Invalid("codex interactive launch"));
+}
+
+#[test]
+fn interactive_launch_plan_keeps_the_two_measured_flags() {
+    let cwd = PathBuf::from("/tmp/codex-phase1");
+    let plan = interactive_launch_plan(
+        &measured_images(WRAPPER, ENGINE),
+        &cwd,
+        &ExpectedSession::CaptureAfterLaunch,
+    )
+    .unwrap();
+    let arguments: Vec<_> = plan
+        .arguments
+        .iter()
+        .map(|arg| arg.to_str().unwrap())
+        .collect();
+    assert_eq!(arguments, phase1_interactive_arguments());
+    assert_eq!(arguments.len(), 2);
+    let launcher = plan.launcher.expect("wrapper launcher");
+    assert_eq!(launcher.executable, PathBuf::from(WRAPPER));
+    assert_eq!(launcher.sha256, Digest([1; 32]));
+    assert_eq!(plan.executable, PathBuf::from(ENGINE));
+    assert!(plan.executable_inputs.is_empty());
+    assert_eq!(plan.cwd, cwd);
+    assert!(plan.environment.remove.is_empty());
+    assert!(plan.environment.set.is_empty());
+    assert!(plan.materialization.is_empty());
+    assert_eq!(plan.expected_session, ExpectedSession::CaptureAfterLaunch);
+    for carrier in [
+        &plan.carriers.model,
+        &plan.carriers.prompt,
+        &plan.carriers.mcp,
+        &plan.carriers.bypass,
+        &plan.carriers.effort,
+    ] {
+        assert_eq!(*carrier, CarrierUse::NotRequested);
+    }
+}
+
+#[test]
+fn interactive_launch_plan_rejects_unmeasured_images() {
+    let expected = ExpectedSession::CaptureAfterLaunch;
+    let mut versions = measured_images(WRAPPER, ENGINE);
+    versions.engine_version = "0.162.1".into();
+    assert_launch_refused(&versions, "/tmp/codex-phase1", &expected);
+    let mut empty = measured_images(WRAPPER, ENGINE);
+    empty.wrapper_version.clear();
+    empty.engine_version.clear();
+    assert_launch_refused(&empty, "/tmp/codex-phase1", &expected);
+    let mut zero = measured_images(WRAPPER, ENGINE);
+    zero.wrapper_sha256 = Digest([0; 32]);
+    assert_launch_refused(&zero, "/tmp/codex-phase1", &expected);
+    let mut same = measured_images(WRAPPER, ENGINE);
+    same.engine_sha256 = same.wrapper_sha256;
+    assert_launch_refused(&same, "/tmp/codex-phase1", &expected);
+    assert_launch_refused(
+        &measured_images(
+            "node_modules/@openai/codex/bin/codex.js",
+            "codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex",
+        ),
+        "/tmp/codex-phase1",
+        &expected,
+    );
+    assert_launch_refused(
+        &measured_images(DAEMON, ENGINE),
+        "/tmp/codex-phase1",
+        &expected,
+    );
+    assert_launch_refused(
+        &measured_images(WRAPPER, SHADOW),
+        "/tmp/codex-phase1",
+        &expected,
+    );
+    assert_launch_refused(
+        &measured_images("/opt/homebrew/bin/codex", ENGINE),
+        "/tmp/codex-phase1",
+        &expected,
+    );
+    assert_launch_refused(
+        &measured_images(WRAPPER, ENGINE),
+        "relative/codex-phase1",
+        &expected,
+    );
+    assert_launch_refused(
+        &measured_images(WRAPPER, ENGINE),
+        "/tmp/codex-phase1",
+        &ExpectedSession::PendingAllocation,
+    );
+}
+
+#[test]
+fn startup_modal_intercept_stops_before_any_key() {
+    let trust = startup_modal_intercept(
+        "Trust and continue\nUpdate now\nAsk Codex to do anything",
+    )
+    .unwrap_err();
+    assert_eq!(
+        trust,
+        ContractError::Unverified {
+            field: "codex startup modal",
+            reason: Reason {
+                code: "codex-folder-trust-modal",
+                message: "Codex folder trust modal blocks the frame",
+            },
+        }
+    );
+    let update = startup_modal_intercept("Update available\n1. Update now").unwrap_err();
+    match update {
+        ContractError::Unverified { field, reason } => {
+            assert_eq!(field, "codex startup modal");
+            assert_eq!(reason.code, "codex-update-modal");
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    startup_modal_intercept("Ask Codex to do anything").unwrap();
+    let source = include_str!("../src/providers/codex.rs");
+    let body = source
+        .split_once("pub fn startup_modal_intercept")
+        .unwrap()
+        .1
+        .split_once("pub fn classify_image_role")
+        .unwrap()
+        .0;
+    for token in ["Enter", "ESC", "Down"] {
+        assert!(!body.contains(token), "{token}");
+    }
+}
+
 #[test]
 fn startup_frames_keep_modals_ahead_of_the_composer() {
     let adapter = seated();
@@ -633,4 +776,5 @@ fn bundled_slugs_are_not_hardcoded() {
     ] {
         assert!(!source.contains(slug), "{slug}");
     }
+    assert!(!source.contains("/opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js"));
 }

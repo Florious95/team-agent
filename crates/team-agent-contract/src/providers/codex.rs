@@ -1,9 +1,10 @@
 //! ---
 //! purpose: Codex CLI contract leaf for the fifteen facets and seven hooks.
-//! contract: H1 catalog reads `debug models --bundled` from the seat wrapper. Launch stays refused.
+//! contract: H1 catalog reads `debug models --bundled` from the seat wrapper. PlanHook stays refused. H2 is a pure argv plan plus a modal refusal.
 //! boundary: No process signals, no global config writes, no credential or rollout-body reads, no static model list.
 //! ---
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -16,7 +17,8 @@ use crate::contract::hooks::{
     ReadBounds, ReadFailure, ReadOutput, ScopedSessionEvidence, SessionHook,
 };
 use crate::contract::plan::{
-    CatalogObservation, EnvironmentDelta, LaunchPlan, ModelRecord, ResolvedLaunch,
+    CarrierReport, CarrierUse, CatalogObservation, EnvironmentDelta, ExpectedSession, LaunchEntrypoint,
+    LaunchPlan, ModelRecord, ResolvedLaunch,
 };
 use crate::contract::session::{CaptureOrigin, NativeSessionId, ResumeBinding, SessionStorage};
 use crate::contract::types::*;
@@ -96,6 +98,18 @@ const LAUNCH: Reason = Reason {
     code: "codex-launch-not-admitted",
     message: "Codex launch is not admitted",
 };
+const FOLDER_TRUST_MODAL: Reason = Reason {
+    code: "codex-folder-trust-modal",
+    message: "Codex folder trust modal blocks the frame",
+};
+const UPDATE_MODAL: Reason = Reason {
+    code: "codex-update-modal",
+    message: "Codex update modal blocks the frame",
+};
+const TRUST_AND_CONTINUE: &str = "Trust and continue";
+const UPDATE_AVAILABLE: &str = "Update available";
+const UPDATE_NOW: &str = "Update now";
+const COMPOSER_PLACEHOLDER: &str = "Ask Codex to do anything";
 const H3: Reason = Reason {
     code: "codex-h3-no-owned-mount",
     message: "Codex has no owned MCP mount",
@@ -342,17 +356,17 @@ impl SessionHook for CodexAdapter {
 
 impl InteractionHook for CodexAdapter {
     fn interpret(&self, frame: &CaptureFrame) -> InteractionObservation {
-        let (surface, predicate) = if frame.text.contains("Trust and continue") {
+        let (surface, predicate) = if frame.text.contains(TRUST_AND_CONTINUE) {
             (
                 InputSurface::StartupRiskWarning,
-                Some("codex-folder-trust-modal".to_string()),
+                Some(FOLDER_TRUST_MODAL.code.to_string()),
             )
-        } else if frame.text.contains("Update available") || frame.text.contains("Update now") {
+        } else if frame.text.contains(UPDATE_AVAILABLE) || frame.text.contains(UPDATE_NOW) {
             (
                 InputSurface::StartupRiskWarning,
-                Some("codex-update-modal".to_string()),
+                Some(UPDATE_MODAL.code.to_string()),
             )
-        } else if frame.text.contains("Ask Codex to do anything") {
+        } else if frame.text.contains(COMPOSER_PLACEHOLDER) {
             (InputSurface::ComposerReady, None)
         } else {
             (
@@ -369,6 +383,95 @@ impl InteractionHook for CodexAdapter {
             paste_latch: frame.paste_latch.clone(),
             control_paste: None,
         }
+    }
+}
+
+pub struct CodexLaunchImages {
+    pub wrapper: PathBuf,
+    pub wrapper_sha256: Digest,
+    pub engine: PathBuf,
+    pub engine_sha256: Digest,
+    pub wrapper_version: String,
+    pub engine_version: String,
+}
+
+pub fn interactive_launch_plan(
+    images: &CodexLaunchImages,
+    cwd: &Path,
+    expected: &ExpectedSession,
+) -> Result<LaunchPlan, ContractError> {
+    let invalid = || ContractError::Invalid("codex interactive launch");
+    require_absolute(&images.wrapper, "codex interactive launch")?;
+    require_absolute(&images.engine, "codex interactive launch")?;
+    require_absolute(cwd, "codex interactive launch")?;
+    let wrapper = images.wrapper.to_str().ok_or_else(invalid)?;
+    let engine = images.engine.to_str().ok_or_else(invalid)?;
+    if classify_image_role(wrapper) != CodexImageRole::SeatWrapper
+        || classify_image_role(engine) != CodexImageRole::SeatEngine
+    {
+        return Err(invalid());
+    }
+    if images.wrapper_version.trim().is_empty()
+        || images.engine_version.trim().is_empty()
+        || !seat_pair_ok(&images.wrapper_version, &images.engine_version)
+    {
+        return Err(invalid());
+    }
+    let zero = Digest([0; 32]);
+    if images.wrapper_sha256 == zero
+        || images.engine_sha256 == zero
+        || images.wrapper_sha256 == images.engine_sha256
+    {
+        return Err(invalid());
+    }
+    if *expected != ExpectedSession::CaptureAfterLaunch {
+        return Err(invalid());
+    }
+    if PHASE1_INTERACTIVE_ARGUMENTS.len() != 2
+        || PHASE1_INTERACTIVE_ARGUMENTS
+            .iter()
+            .any(|arg| forbidden_interactive_argument(arg))
+        || argv_mutates_global_config(PHASE1_INTERACTIVE_ARGUMENTS)
+    {
+        return Err(invalid());
+    }
+    Ok(LaunchPlan {
+        executable: images.engine.clone(),
+        launcher: Some(LaunchEntrypoint {
+            executable: images.wrapper.clone(),
+            sha256: images.wrapper_sha256,
+        }),
+        arguments: PHASE1_INTERACTIVE_ARGUMENTS
+            .iter()
+            .copied()
+            .map(OsString::from)
+            .collect(),
+        executable_inputs: Vec::new(),
+        cwd: cwd.to_path_buf(),
+        environment: EnvironmentDelta {
+            remove: Default::default(),
+            set: Default::default(),
+        },
+        expected_session: ExpectedSession::CaptureAfterLaunch,
+        materialization: Vec::new(),
+        carriers: CarrierReport {
+            model: CarrierUse::NotRequested,
+            prompt: CarrierUse::NotRequested,
+            mcp: CarrierUse::NotRequested,
+            bypass: CarrierUse::NotRequested,
+            effort: CarrierUse::NotRequested,
+        },
+    })
+}
+
+/// Refusal only. A clear frame does not authorize a key.
+pub fn startup_modal_intercept(text: &str) -> Result<(), ContractError> {
+    if text.contains(TRUST_AND_CONTINUE) {
+        Err(unverified("codex startup modal", FOLDER_TRUST_MODAL))
+    } else if text.contains(UPDATE_AVAILABLE) || text.contains(UPDATE_NOW) {
+        Err(unverified("codex startup modal", UPDATE_MODAL))
+    } else {
+        Ok(())
     }
 }
 
