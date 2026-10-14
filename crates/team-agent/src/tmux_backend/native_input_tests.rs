@@ -422,7 +422,8 @@ fn native_input_r6_idle_notice_reaches_owned_paste_and_one_submit() {
 
 #[test]
 fn native_input_capsule_baseline_exclusion_is_provider_aware() {
-    let history = "old [paste #1 +30 lines] tail\n[paste #2 1234 chars]\n[Pasted text #3 +25 lines]\n";
+    let history =
+        "old [paste #1 +30 lines] tail\n[paste #2 1234 chars]\n[Pasted text #3 +25 lines]\n";
     assert_eq!(
         capsule_labels(Provider::Pi, history),
         vec!["[paste #1 +30 lines]", "[paste #2 1234 chars]"]
@@ -477,21 +478,30 @@ fn native_input_pi_rescue_retains_latch_but_never_adopts_unowned_residue() {
         match mutation {
             "missing_latch" => invalid.capsule = None,
             "wrong_latch" => invalid.capsule = Some("[paste #2 +30 lines]".into()),
-            "baseline_label" => invalid.baseline_capsules.push("[paste #1 +30 lines]".into()),
+            "baseline_label" => invalid
+                .baseline_capsules
+                .push("[paste #1 +30 lines]".into()),
             _ => unreachable!(),
         }
         assert_eq!(
-            f.backend.rescue_native_input(&invalid, &|| true, None).unwrap(),
+            f.backend
+                .rescue_native_input(&invalid, &|| true, None)
+                .unwrap(),
             EnterRescueOutcome::NoEffect {
                 reason: "residue_mismatch",
                 reobserve: false,
             }
         );
     }
-    for label in ["[paste #2 +30 lines]", "[paste #1 +30 lines]\nforeign draft"] {
+    for label in [
+        "[paste #2 +30 lines]",
+        "[paste #1 +30 lines]\nforeign draft",
+    ] {
         f.state.lock().unwrap().folded_label = label.into();
         assert_eq!(
-            f.backend.rescue_native_input(&evidence, &|| true, None).unwrap(),
+            f.backend
+                .rescue_native_input(&evidence, &|| true, None)
+                .unwrap(),
             EnterRescueOutcome::NoEffect {
                 reason: "residue_mismatch",
                 reobserve: false,
@@ -501,7 +511,9 @@ fn native_input_pi_rescue_retains_latch_but_never_adopts_unowned_residue() {
     f.state.lock().unwrap().folded_label = "[paste #1 +30 lines]".into();
     f.state.lock().unwrap().busy = true;
     assert_eq!(
-        f.backend.rescue_native_input(&evidence, &|| true, None).unwrap(),
+        f.backend
+            .rescue_native_input(&evidence, &|| true, None)
+            .unwrap(),
         EnterRescueOutcome::NoEffect {
             reason: "busy",
             reobserve: true,
@@ -510,11 +522,15 @@ fn native_input_pi_rescue_retains_latch_but_never_adopts_unowned_residue() {
     f.state.lock().unwrap().busy = false;
     assert_eq!(f.state.lock().unwrap().entered, 0);
     assert_eq!(
-        f.backend.rescue_native_input(&evidence, &|| true, None).unwrap(),
+        f.backend
+            .rescue_native_input(&evidence, &|| true, None)
+            .unwrap(),
         EnterRescueOutcome::Entered { accepted: true }
     );
     assert!(matches!(
-        f.backend.rescue_native_input(&evidence, &|| true, None).unwrap(),
+        f.backend
+            .rescue_native_input(&evidence, &|| true, None)
+            .unwrap(),
         EnterRescueOutcome::NoEffect { .. }
     ));
     let state = f.state.lock().unwrap();
