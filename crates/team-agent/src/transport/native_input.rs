@@ -210,7 +210,7 @@ pub(crate) fn inspect_input(
 fn cursor_input(text: &str) -> Option<InputFrame> {
     use team_agent_contract::contract::delivery::InputSurface;
     let (surface, rows, capsule, busy) =
-        team_agent_contract::providers::cursor::interaction::inspect_composer(text)?;
+        team_agent_contract::providers::cursor::interaction::inspect_legacy_composer(text)?;
     let first = rows.first()?.strip_prefix("→ ")?;
     let footer = rows.iter().rposition(|row| {
         row.strip_suffix("Run Everything").is_some_and(|prefix| {
@@ -228,9 +228,10 @@ fn cursor_input(text: &str) -> Option<InputFrame> {
     if tail.is_empty() {
         return None;
     }
-    let header: Vec<_> = text.lines().map(str::trim).collect();
-    let version = header.windows(2).find(|pair| pair[0] == "Cursor Agent")?[1];
-    let identity = format!("{version}:{}", input_digest(&tail.join("\n")));
+    // Startup history can leave Tail(200) between Ready/Pasted/Accepted. The
+    // immutable carrier birth/nonce remains in NativeInputBinding; this UI
+    // context is the current native cwd/footer tail, not a version attestation.
+    let identity = format!("cursor-current-composer-v1:{}", input_digest(&tail.join("\n")));
     let footer_row = rows[footer]
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -560,7 +561,10 @@ mod tests {
         let with_header = inspect_input(Provider::CursorAgent, &header).unwrap();
         assert!(with_header.empty() && !with_header.busy);
         assert_eq!(ready.footer, with_header.footer);
-        assert_eq!(ready.identity, with_header.identity, "startup history is not a new UI identity");
+        assert_eq!(
+            ready.identity, with_header.identity,
+            "startup history is not a new UI identity"
+        );
     }
 
     #[test]
@@ -571,7 +575,9 @@ mod tests {
         assert!(!draft.empty());
         assert_eq!(draft.capsule.as_deref(), Some(label));
         let dirty = CURSOR_FOLLOWUP.replace("Add a follow-up", "Add a follow-up draft");
-        assert!(!inspect_input(Provider::CursorAgent, &dirty).unwrap().empty());
+        assert!(!inspect_input(Provider::CursorAgent, &dirty)
+            .unwrap()
+            .empty());
         for dirty in [
             CURSOR_FOLLOWUP.replace("Add a follow-up", "Add a follow-up\nforeign draft"),
             CURSOR_FOLLOWUP.replace("Add a follow-up", &format!("{label}\nforeign draft")),

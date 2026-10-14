@@ -171,7 +171,11 @@ impl CommandRunner for Runner {
             && argv.iter().any(|arg| arg == "capture-pane")
         {
             let followup = matches!(state.mode, Mode::CursorFollowup | Mode::CursorHeaderEvicted);
-            let placeholder = if followup { "Add a follow-up" } else { "Plan, search, build anything" };
+            let placeholder = if followup {
+                "Add a follow-up"
+            } else {
+                "Plan, search, build anything"
+            };
             let header = if matches!(state.mode, Mode::CursorFollowup)
                 || (matches!(state.mode, Mode::CursorHeaderEvicted) && state.pasted > 0)
             {
@@ -186,7 +190,9 @@ impl CommandRunner for Runner {
             } else {
                 (placeholder, "[Pasted text #1 +25 lines]")
             };
-            format!("{header}{history}\n→ {composer}\nGrok 4.7 High Run Everything\n/owned/project\n")
+            format!(
+                "{header}{history}\n→ {composer}\nGrok 4.7 High Run Everything\n/owned/project\n"
+            )
         } else {
             stdout
         };
@@ -721,10 +727,16 @@ fn native_input_cursor_clean_followup_uses_one_paste_one_enter_across_banner_evi
         f.state.lock().unwrap().provider = Provider::CursorAgent;
         let (report, evidence) = f.inject();
         let report = report.unwrap();
-        assert_eq!(report.submit_verification, SubmitVerification::EnterSentWithoutPlaceholderCheck);
+        assert_eq!(
+            report.submit_verification,
+            SubmitVerification::EnterSentWithoutPlaceholderCheck
+        );
         let evidence = evidence.unwrap();
         assert_eq!(evidence.phase, NativeInputPhase::Accepted);
-        assert_eq!(evidence.capsule.as_deref(), Some("[Pasted text #2 +25 lines]"));
+        assert_eq!(
+            evidence.capsule.as_deref(),
+            Some("[Pasted text #2 +25 lines]")
+        );
         let state = f.state.lock().unwrap();
         assert_eq!((state.pasted, state.entered), (1, 1));
     }
