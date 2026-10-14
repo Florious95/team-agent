@@ -482,6 +482,16 @@ fn a3_pane_not_found_keeps_its_catalog_reason_and_cause() {
 fn issue326_plain_pi_stale_pane_offers_explicit_clean_environment_retry() {
     let case = Case::new("issue326-stale-pi");
     case.set_mode("pane-not-found");
+    let pi_pane = "%%managed\\t%s\\t0\\tpi\\t0\\t%s\\tpi\\t";
+    let pi_tmux = TMUX_SHIM.replace(
+        "%%managed\\t%s\\t0\\tcodex\\t0\\t%s\\tcodex\\t",
+        pi_pane,
+    );
+    assert!(
+        pi_tmux.contains(pi_pane),
+        "Pi pane metadata fixture must match the spawned window"
+    );
+    write_executable(&case.fake_bin.join("tmux"), &pi_tmux);
     let pi_real = case.fake_bin.join("pi-discovery-fixture");
     write_executable(&pi_real, PI_DISCOVERY_SHIM);
     std::os::unix::fs::symlink(&pi_real, case.fake_bin.join("pi"))
