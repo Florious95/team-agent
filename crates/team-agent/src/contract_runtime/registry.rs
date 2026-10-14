@@ -10,7 +10,9 @@ use team_agent_contract::contract::{
     types::{ContractError, Support},
 };
 use team_agent_contract::kiro::{self, KiroAdapter, KIRO_DESCRIPTOR};
-use team_agent_contract::providers::codex::{CodexAdapter, CodexLaunchImages, CODEX_DESCRIPTOR};
+use team_agent_contract::providers::codex::{
+    owned_mcp_toml, CodexAdapter, CodexLaunchImages, CODEX_DESCRIPTOR,
+};
 use team_agent_contract::providers::cursor::{self, CursorAdapter, CURSOR_DESCRIPTOR};
 use team_agent_contract::providers::grok_build::{self, GrokAdapter, GROK_BUILD_DESCRIPTOR};
 use team_agent_contract::runtime::{
@@ -146,19 +148,38 @@ impl NativeProvider {
             Self::GrokBuild => GrokAdapter::new(grok_build::McpStdio {
                 executable, arguments, environment,
             }).map(NativeAdapter::GrokBuild),
-            Self::Codex => {
-                if executable.as_os_str().is_empty() && arguments.is_empty() && environment.is_empty() {
-                    Ok(NativeAdapter::Codex(CodexAdapter::new()))
-                } else {
-                    Err(match CodexAdapter::new().hooks().materialize.require("codex mcp stdio") {
-                        Err(err) => err,
-                        Ok(_) => panic!("phase 3 keeps Codex H3 unverified"),
-                    })
-                }
-            }
+            Self::Codex => codex_owned_adapter(executable, arguments, environment)
+                .map(NativeAdapter::Codex),
         }
     }
 }
+
+fn codex_owned_adapter(
+    executable: PathBuf,
+    arguments: Vec<String>,
+    environment: BTreeMap<String, String>,
+) -> Result<CodexAdapter, ContractError> {
+    if !arguments.is_empty() || !environment.is_empty() {
+        return Err(codex_h3_refusal());
+    }
+    if executable.as_os_str().is_empty() {
+        return Ok(CodexAdapter::new());
+    }
+    let Some(command) = executable.to_str() else {
+        return Err(codex_h3_refusal());
+    };
+    owned_mcp_toml(CODEX_OWNED_MCP_KEY, command)?;
+    Ok(CodexAdapter::new().with_owned_mcp(CODEX_OWNED_MCP_KEY, command))
+}
+
+fn codex_h3_refusal() -> ContractError {
+    match owned_mcp_toml(CODEX_OWNED_MCP_KEY, "relative") {
+        Err(error) => error,
+        Ok(_) => ContractError::Invalid("codex mcp"),
+    }
+}
+
+const CODEX_OWNED_MCP_KEY: &str = "team_orchestrator";
 
 pub(super) enum NativeAdapter {
     Kiro(KiroAdapter),
@@ -340,6 +361,21 @@ mod tests {
         let native = codex
             .adapter(PathBuf::new(), Vec::new(), BTreeMap::new())
             .expect("empty codex adapter");
+        let mounted = codex
+            .adapter(PathBuf::from("/usr/bin/true"), Vec::new(), BTreeMap::new())
+            .expect("absolute stdio command mounts team_orchestrator");
+        match &mounted {
+            NativeAdapter::Codex(adapter) => {
+                let (key, command) = adapter.owned_stdio().expect("owned stdio");
+                assert_eq!(key, "team_orchestrator");
+                assert_eq!(command, "/usr/bin/true");
+                assert_eq!(
+                    owned_mcp_toml(key, command).expect("owned toml"),
+                    b"[mcp_servers.team_orchestrator]\ncommand = \"/usr/bin/true\"\n"
+                );
+            }
+            _ => panic!("expected the codex unit adapter"),
+        }
         let err = match native {
             NativeAdapter::Codex(adapter) => match adapter.plan_phase1() {
                 Err(error) => error,

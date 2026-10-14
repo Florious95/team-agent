@@ -1,6 +1,6 @@
 //! ---
 //! purpose: Codex CLI contract leaf for the fifteen facets and seven hooks.
-//! contract: H1 catalog reads `debug models --bundled` from the seat wrapper. An empty adapter still refuses launch. LaunchOnly Fresh with seat images returns the two-flag plan. H2 modal intercept stays a refusal.
+//! contract: H1 catalog reads `debug models --bundled` from the seat wrapper. An empty adapter still refuses launch. LaunchOnly Fresh with seat images returns the two-flag plan. H3 writes only an owned `codex/mcp.toml` for one absolute stdio command. H6 modal intercept stays a refusal.
 //! boundary: No process signals, no global config writes, no credential or rollout-body reads, no static model list.
 //! ---
 
@@ -14,18 +14,20 @@ use serde::Deserialize;
 use crate::contract::delivery::{CaptureFrame, InputSurface, InteractionObservation};
 use crate::contract::descriptor::*;
 use crate::contract::hooks::{
-    BoundedReadHost, CatalogHook, CatalogRequest, InteractionHook, PlanHook, ProviderHooks,
-    ReadBounds, ReadFailure, ReadOutput, ScopedSessionEvidence, SessionHook,
+    BoundedReadHost, CatalogHook, CatalogRequest, InteractionHook, MaterializeHook, OwnedIo, PlanHook,
+    ProviderHooks, ReadBounds, ReadFailure, ReadOutput, ScopedSessionEvidence, SessionHook,
 };
 use crate::contract::plan::{
     CarrierReport, CarrierUse, CatalogObservation, EffortResolution, EnvironmentDelta, ExpectedSession,
-    LaunchEntrypoint, LaunchMode, LaunchPlan, ModelRecord, ResolvedLaunch,
+    LaunchEntrypoint, LaunchMode, LaunchPlan, MaterializeReceipt, ModelRecord, OwnedResourceReceipt,
+    OwnedResourceRequest, PartialFailure, ResolvedLaunch, ResourceWriteEffect,
 };
+use crate::contract::types::valid_id;
 use crate::contract::session::{CaptureOrigin, NativeSessionId, ResumeBinding, SessionStorage};
 use crate::contract::types::*;
 use crate::host::command::{CommandEnd, CommandRequest, CommandRunner, OutputLimits};
 use crate::host::process::{fingerprint_file, resolve_cwd};
-use crate::host::{HostError, HostErrorKind};
+use crate::host::{digest, HostError, HostErrorKind};
 
 const SELECTION: Reason = Reason {
     code: "codex-model-selection-not-admitted",
@@ -252,6 +254,10 @@ pub static CODEX_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
                 disposition: ResourceDisposition::OwnedPreserved,
             },
             ResourcePolicy {
+                kind: ResourceKind::McpConfig,
+                disposition: ResourceDisposition::OwnedRemovable,
+            },
+            ResourcePolicy {
                 kind: ResourceKind::GlobalSettings,
                 disposition: ResourceDisposition::Forbidden,
             },
@@ -265,6 +271,7 @@ pub static CODEX_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
 
 pub struct CodexAdapter {
     images: Option<CodexLaunchImages>,
+    owned_mcp: Option<(String, String)>,
 }
 
 impl Default for CodexAdapter {
@@ -275,7 +282,10 @@ impl Default for CodexAdapter {
 
 impl CodexAdapter {
     pub fn new() -> Self {
-        Self { images: None }
+        Self {
+            images: None,
+            owned_mcp: None,
+        }
     }
 
     pub fn with_launch_images(mut self, images: CodexLaunchImages) -> Self {
@@ -283,11 +293,27 @@ impl CodexAdapter {
         self
     }
 
+    /// One owned stdio server. An empty adapter still has no mount.
+    pub fn with_owned_mcp(
+        mut self,
+        server_key: impl Into<String>,
+        command: impl Into<String>,
+    ) -> Self {
+        self.owned_mcp = Some((server_key.into(), command.into()));
+        self
+    }
+
+    pub fn owned_stdio(&self) -> Option<(&str, &str)> {
+        self.owned_mcp
+            .as_ref()
+            .map(|(server_key, command)| (server_key.as_str(), command.as_str()))
+    }
+
     pub fn hooks(&self) -> ProviderHooks<'_> {
         ProviderHooks {
             catalog: HookBinding::Bound(self),
             plan: HookBinding::Bound(self),
-            materialize: HookBinding::Unverified(H3),
+            materialize: HookBinding::Bound(self),
             session: HookBinding::Bound(self),
             semantic: HookBinding::Unverified(H5),
             interaction: HookBinding::Bound(self),
@@ -335,6 +361,43 @@ impl PlanHook for CodexAdapter {
             return Err(unverified("prompt", PROMPT));
         }
         interactive_launch_plan(images, &request.paths.cwd.path, resolved.expected_session())
+    }
+}
+
+impl MaterializeHook for CodexAdapter {
+    fn materialize(
+        &self,
+        requests: &[OwnedResourceRequest],
+        io: &mut dyn OwnedIo,
+    ) -> Result<MaterializeReceipt, PartialFailure> {
+        let Some((server_key, command)) = &self.owned_mcp else {
+            return Err(no_owned_mount_failure());
+        };
+        let contents = match owned_mcp_toml(server_key, command) {
+            Ok(contents) => contents,
+            Err(error) => {
+                return Err(PartialFailure {
+                    error,
+                    receipt: MaterializeReceipt { resources: Vec::new() },
+                })
+            }
+        };
+        let Some(request) = exact_owned_mcp_request(requests, &contents) else {
+            return Err(no_owned_mount_failure());
+        };
+        let receipt = io.create_exclusive(request)?;
+        if owned_receipt_matches(request, &receipt) {
+            Ok(MaterializeReceipt {
+                resources: vec![receipt],
+            })
+        } else {
+            Err(PartialFailure {
+                error: no_owned_mount(),
+                receipt: MaterializeReceipt {
+                    resources: vec![receipt],
+                },
+            })
+        }
     }
 }
 
@@ -556,6 +619,71 @@ pub fn forbidden_interactive_argument(arg: &str) -> bool {
 pub fn argv_mutates_global_config(argv: &[&str]) -> bool {
     argv.windows(2)
         .any(|pair| pair[0] == "mcp" && pair[1] == "add")
+}
+
+/// Body of the owned Codex MCP file. Only the measured `[mcp_servers.<key>]` command table.
+pub fn owned_mcp_toml(server_key: &str, command: &str) -> Result<Vec<u8>, ContractError> {
+    if !valid_id(server_key) || !absolute_stdio_command(command) {
+        return Err(no_owned_mount());
+    }
+    Ok(format!("[mcp_servers.{server_key}]\ncommand = \"{command}\"\n").into_bytes())
+}
+
+fn absolute_stdio_command(command: &str) -> bool {
+    command.starts_with('/')
+        && !command.is_empty()
+        && !command
+            .chars()
+            .any(|ch| ch == '"' || ch == '\\' || ch == '\n' || ch.is_whitespace())
+}
+
+fn no_owned_mount() -> ContractError {
+    unverified("codex mcp", H3)
+}
+
+fn no_owned_mount_failure() -> PartialFailure {
+    PartialFailure {
+        error: no_owned_mount(),
+        receipt: MaterializeReceipt { resources: Vec::new() },
+    }
+}
+
+fn exact_owned_mcp_request<'a>(
+    requests: &'a [OwnedResourceRequest],
+    contents: &[u8],
+) -> Option<&'a OwnedResourceRequest> {
+    let [request] = requests else {
+        return None;
+    };
+    if request.kind != ResourceKind::McpConfig
+        || request.path.relative() != Path::new("codex/mcp.toml")
+        || request.contents != contents
+        || codex_home_root(request.path.root())
+    {
+        return None;
+    }
+    Some(request)
+}
+
+fn codex_home_root(root: &Path) -> bool {
+    let Some(text) = root.to_str() else {
+        return true;
+    };
+    let trimmed = text.trim_end_matches('/');
+    trimmed == "/Users/alauda/.codex" || trimmed.ends_with("/.codex")
+}
+
+fn owned_receipt_matches(request: &OwnedResourceRequest, receipt: &OwnedResourceReceipt) -> bool {
+    receipt.path == request.path
+        && receipt.owner == request.owner
+        && receipt.kind == request.kind
+        && receipt.exclusive
+        && receipt.disposition == ResourceDisposition::OwnedRemovable
+        && matches!(
+            receipt.write_effect,
+            ResourceWriteEffect::Written { bytes_sha256 }
+                if bytes_sha256 == digest(&request.contents)
+        )
 }
 
 pub fn admit_rollout_name(

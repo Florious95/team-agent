@@ -4,7 +4,7 @@
 //!           A missing `providers::codex` module is the expected red compile.
 //!           Green means the admission table matches. It is not G1–G5 acceptance.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use team_agent_contract::contract::delivery::*;
@@ -16,8 +16,9 @@ use team_agent_contract::contract::session::*;
 use team_agent_contract::contract::types::*;
 use team_agent_contract::providers::codex::{
     admit_rollout_name, argv_mutates_global_config, classify_image_role, forbidden_interactive_argument,
-    interactive_launch_plan, may_signal, parse_bundled_catalog, phase1_interactive_arguments,
-    seat_pair_ok, startup_modal_intercept, validate_catalog_request, CodexAdapter, CodexImageRole,
+    interactive_launch_plan, may_signal, owned_mcp_toml, parse_bundled_catalog,
+    phase1_interactive_arguments, seat_pair_ok, startup_modal_intercept, validate_catalog_request,
+    CodexAdapter, CodexImageRole,
     CodexLaunchImages, CATALOG_HARNESS, CATALOG_SOURCE, CATALOG_UI, CODEX_DESCRIPTOR,
 };
 
@@ -234,6 +235,10 @@ fn fifteen_facets_match_phase1_admission() {
         disposition: ResourceDisposition::OwnedPreserved,
     }));
     assert!(teardown.contains(&ResourcePolicy {
+        kind: ResourceKind::McpConfig,
+        disposition: ResourceDisposition::OwnedRemovable,
+    }));
+    assert!(teardown.contains(&ResourcePolicy {
         kind: ResourceKind::GlobalSettings,
         disposition: ResourceDisposition::Forbidden,
     }));
@@ -241,19 +246,16 @@ fn fifteen_facets_match_phase1_admission() {
         kind: ResourceKind::NativeDatabase,
         disposition: ResourceDisposition::Forbidden,
     }));
-    assert_eq!(teardown.len(), 3);
+    assert_eq!(teardown.len(), 4);
 }
 
 #[test]
-fn seven_hooks_bind_only_plan_session_and_interaction() {
+fn seven_hooks_bind_catalog_plan_materialize_session_and_interaction() {
     let adapter = seated();
     let hooks = adapter.hooks();
     assert!(hooks.catalog.require("H1 CatalogHook").is_ok());
     assert!(hooks.plan.require("H2 PlanHook").is_ok());
-    assert_eq!(
-        unverified_code(hooks.materialize.require("H3 MaterializeHook")),
-        "codex-h3-no-owned-mount"
-    );
+    assert!(hooks.materialize.require("H3 MaterializeHook").is_ok());
     assert!(hooks.session.require("H4 SessionHook").is_ok());
     assert_eq!(
         unverified_code(hooks.semantic.require("H5 SemanticReader")),
@@ -323,6 +325,7 @@ fn interactive_argv_cannot_update_install_or_write_global_mcp() {
         assert!(forbidden_interactive_argument(arg), "{arg}");
     }
     assert!(!forbidden_interactive_argument(WRAPPER));
+    assert!(argv_mutates_global_config(&["mcp", "add"]));
     assert!(argv_mutates_global_config(&[
         "codex", "mcp", "add", "team", "--", "/usr/bin/true"
     ]));
@@ -440,6 +443,7 @@ fn launch_only_fresh_with_images_returns_the_two_flag_plan() {
         .map(|arg| arg.to_str().unwrap())
         .collect();
     assert_eq!(arguments, phase1_interactive_arguments());
+    assert!(plan.materialization.is_empty());
     let launcher = plan.launcher.expect("wrapper");
     assert_eq!(launcher.executable, PathBuf::from(WRAPPER));
     assert_eq!(plan.executable, PathBuf::from(ENGINE));
@@ -617,7 +621,7 @@ fn startup_modal_intercept_stops_before_any_key() {
         .split_once("pub fn classify_image_role")
         .unwrap()
         .0;
-    for token in ["Enter", "ESC", "Down"] {
+    for token in ["Enter", "ESC", "Down", "0x03"] {
         assert!(!body.contains(token), "{token}");
     }
 }
@@ -636,6 +640,7 @@ fn startup_frames_keep_modals_ahead_of_the_composer() {
     ));
     assert_eq!(trust.surface, InputSurface::StartupRiskWarning);
     assert_eq!(trust.predicate.as_deref(), Some("codex-folder-trust-modal"));
+    assert!(trust.control_paste.is_none());
 
     let ready = adapter.interpret(&frame(
         "OpenAI Codex (v0.160.1)\nAsk Codex to do anything",
@@ -860,6 +865,190 @@ fn catalog_read_failures_do_not_yield_an_observation() {
     assert!(saw_timeout && saw_limit && saw_exit);
 }
 
+struct CountingIo {
+    writes: usize,
+}
+
+impl CountingIo {
+    fn new() -> Self {
+        Self { writes: 0 }
+    }
+}
+
+impl OwnedIo for CountingIo {
+    fn create_exclusive(
+        &mut self,
+        request: &OwnedResourceRequest,
+    ) -> Result<OwnedResourceReceipt, PartialFailure> {
+        self.writes += 1;
+        Ok(OwnedResourceReceipt {
+            path: request.path.clone(),
+            owner: request.owner.clone(),
+            operation: OperationId::new("h3").unwrap(),
+            kind: request.kind,
+            disposition: ResourceDisposition::OwnedRemovable,
+            write_effect: ResourceWriteEffect::Written {
+                bytes_sha256: team_agent_contract::host::digest(&request.contents),
+            },
+            exclusive: true,
+            creation_identity: None,
+        })
+    }
+
+    fn read_bound_session(
+        &mut self,
+        _: &ResumeBinding,
+        _: ReadBounds,
+    ) -> Result<ReadOutput, ReadFailure> {
+        Err(ReadFailure::Unknown(Reason {
+            code: "unused",
+            message: "unused",
+        }))
+    }
+
+    fn validate_configuration(
+        &mut self,
+        _: &OwnedValidationRequest,
+    ) -> Result<ReadOutput, ReadFailure> {
+        Err(ReadFailure::Unknown(Reason {
+            code: "unused",
+            message: "unused",
+        }))
+    }
+}
+
+fn mcp_request(root: &str, contents: Vec<u8>) -> OwnedResourceRequest {
+    OwnedResourceRequest {
+        path: OwnedPath::new(PathBuf::from(root), PathBuf::from("codex/mcp.toml")).unwrap(),
+        owner: instance(),
+        kind: ResourceKind::McpConfig,
+        contents,
+    }
+}
+
+fn assert_h3_unwritten(adapter: &CodexAdapter, requests: &[OwnedResourceRequest]) {
+    let mut io = CountingIo::new();
+    let failure = adapter.materialize(requests, &mut io).unwrap_err();
+    assert_eq!(
+        unverified_code::<()>(Err(failure.error)),
+        "codex-h3-no-owned-mount"
+    );
+    assert!(failure.receipt.resources.is_empty());
+    assert_eq!(io.writes, 0);
+}
+
+#[test]
+fn owned_mcp_file_is_one_exclusive_stdio_table() {
+    assert_eq!(
+        owned_mcp_toml("team_a", "/usr/bin/true").unwrap(),
+        b"[mcp_servers.team_a]\ncommand = \"/usr/bin/true\"\n"
+    );
+    assert_eq!(
+        owned_mcp_toml("team_orchestrator", "/usr/bin/true").unwrap(),
+        b"[mcp_servers.team_orchestrator]\ncommand = \"/usr/bin/true\"\n"
+    );
+    for (key, command) in [
+        ("", "/usr/bin/true"),
+        ("team.a", "/usr/bin/true"),
+        ("team_a", ""),
+        ("team_a", "usr/bin/true"),
+        ("team_a", "/usr/bin/tru\"e"),
+        ("team_a", "/usr/bin/true\n"),
+        ("team_a", "/usr/bin/true --flag"),
+        ("team_a", "/usr/bin/true\t--flag"),
+    ] {
+        assert_eq!(
+            unverified_code(owned_mcp_toml(key, command)),
+            "codex-h3-no-owned-mount"
+        );
+    }
+
+    assert_h3_unwritten(&CodexAdapter::new(), &[]);
+    assert_h3_unwritten(&CodexAdapter::new().with_owned_mcp("team_a", "usr/bin/true"), &[]);
+
+    let adapter = CodexAdapter::new().with_owned_mcp("team_orchestrator", "/usr/bin/true");
+    let contents = owned_mcp_toml("team_orchestrator", "/usr/bin/true").unwrap();
+    let mut with_args = contents.clone();
+    with_args.extend(b"args = []\n");
+    assert_h3_unwritten(
+        &adapter,
+        &[mcp_request("/tmp/codex-runtime", with_args)],
+    );
+    let mut with_env = contents.clone();
+    with_env.extend(b"env = {}\n");
+    assert_h3_unwritten(&adapter, &[mcp_request("/tmp/codex-runtime", with_env)]);
+    assert_h3_unwritten(
+        &adapter,
+        &[
+            mcp_request("/tmp/codex-runtime", contents.clone()),
+            mcp_request("/tmp/codex-runtime", contents.clone()),
+        ],
+    );
+    assert_h3_unwritten(
+        &adapter,
+        &[mcp_request("/Users/alauda/.codex", contents.clone())],
+    );
+    assert_h3_unwritten(
+        &adapter,
+        &[mcp_request("/tmp/home/.codex", contents.clone())],
+    );
+
+    let mut io = CountingIo::new();
+    let receipt = adapter
+        .materialize(
+            &[mcp_request("/tmp/codex-runtime", contents.clone())],
+            &mut io,
+        )
+        .unwrap();
+    assert_eq!(io.writes, 1);
+    assert_eq!(receipt.resources.len(), 1);
+    let written = &receipt.resources[0];
+    assert!(written.exclusive);
+    assert_eq!(written.disposition, ResourceDisposition::OwnedRemovable);
+    assert_eq!(written.kind, ResourceKind::McpConfig);
+    assert_eq!(written.path.relative(), Path::new("codex/mcp.toml"));
+    assert_eq!(written.path.root(), Path::new("/tmp/codex-runtime"));
+    assert!(matches!(
+        written.write_effect,
+        ResourceWriteEffect::Written { bytes_sha256 }
+            if bytes_sha256 == team_agent_contract::host::digest(&contents)
+    ));
+
+    let mounted = adapter.with_launch_images(measured_images(WRAPPER, ENGINE));
+    let hooks = mounted.hooks();
+    let resolved = resolve_launch(
+        &CODEX_DESCRIPTOR,
+        &hooks,
+        &phase1_request(Operation::Fresh, LaunchMode::LaunchOnly, None, false, None),
+        None,
+    )
+    .expect("owned file does not change launch-only admission");
+    let plan = mounted.plan(&resolved).expect("launch only argv stays closed");
+    let arguments: Vec<_> = plan.arguments.iter().map(|arg| arg.to_str().unwrap()).collect();
+    assert_eq!(arguments, phase1_interactive_arguments());
+    assert!(plan.materialization.is_empty());
+    assert_eq!(plan.carriers.mcp, CarrierUse::NotRequested);
+    let worker = match resolve_launch(
+        &CODEX_DESCRIPTOR,
+        &hooks,
+        &phase1_request(
+            Operation::Fresh,
+            LaunchMode::FullWorker,
+            None,
+            false,
+            Some("worker"),
+        ),
+        None,
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("full worker must not plan"),
+    };
+    assert_eq!(
+        unverified_code::<LaunchPlan>(Err(worker)),
+        "codex-prompt-bytes-not-observed"
+    );
+}
+
 #[test]
 fn bundled_slugs_are_not_hardcoded() {
     let source = include_str!("../src/providers/codex.rs");
@@ -880,4 +1069,6 @@ fn bundled_slugs_are_not_hardcoded() {
     }
     assert!(!source.contains("/opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js"));
     assert!(!source.contains(ENGINE));
+    assert!(!source.contains("recon_echo"));
+    assert!(!source.contains("config.toml"));
 }
