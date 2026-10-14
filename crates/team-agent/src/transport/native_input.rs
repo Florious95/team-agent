@@ -272,7 +272,9 @@ fn border(line: &str) -> bool {
 fn pi_closed_update_notice(rows: &[&str], closing: usize, editor_start: usize, top: usize) -> bool {
     let rule = rows[closing].trim();
     if !rule.chars().all(|character| character == '─')
-        || !rows[closing + 1..top].iter().all(|row| row.trim().is_empty())
+        || !rows[closing + 1..top]
+            .iter()
+            .all(|row| row.trim().is_empty())
     {
         return false;
     }
@@ -454,7 +456,8 @@ mod tests {
         let frame = super::inspect_input(Provider::Pi, &busy, 24).unwrap();
         assert!(frame.empty());
         assert!(frame.busy);
-        for composer in ["foreign draft\n────────\n", "\n────────\n"] {
+        for composer in ["foreign draft\n────────\n", "\n────────\n"]
+        {
             let foreign = PI_R6_IDLE.replace(top, &format!(" pi-target ─\n{composer}\n"));
             assert!(super::inspect_input(Provider::Pi, &foreign, 24).is_none());
         }
