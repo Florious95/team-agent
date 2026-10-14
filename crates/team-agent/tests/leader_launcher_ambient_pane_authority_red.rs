@@ -539,9 +539,20 @@ fn issue326_plain_pi_stale_pane_offers_explicit_clean_environment_retry() {
     );
     retry.env("TEAM_AGENT_TEST_OUTER_ENV_AFTER", &parent_env_after);
     let retried = retry.output().expect("run advertised recovery command");
-    let recovered = json_stdout("issue326 explicit clean retry", &retried);
-    assert_eq!(recovered["ok"], json!(true), "{recovered}");
-    assert_eq!(recovered["mode"], json!("managed_tmux_client"));
+    assert!(
+        retried.status.success(),
+        "advertised command must succeed; status={} stderr={}",
+        retried.status,
+        String::from_utf8_lossy(&retried.stderr)
+    );
+    // Execute the exact advertised command, whose default output is human text.
+    // Adding --json here would no longer test the command copied by the user.
+    let recovered = String::from_utf8(retried.stdout).expect("human launch result");
+    assert!(recovered.lines().any(|line| line == "ok: True"), "{recovered}");
+    assert!(
+        recovered.lines().any(|line| line == "mode: managed_tmux_client"),
+        "{recovered}"
+    );
     let log_after_retry = case.tmux_log();
     let new_operations = log_after_retry
         .strip_prefix(&log_before_retry)
