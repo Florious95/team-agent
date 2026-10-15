@@ -6,11 +6,10 @@
 //! - inside that same tmux server, the launcher switches the existing client
 //!   to the managed leader instead of running the provider in the caller pane
 //!   or attempting a nested attach;
-//! - inside a different tmux server, the default is an N38 explainable
-//!   refusal, while the explicit `--allow-nested-attach` opt-in permits the
-//!   nested attach;
-//! - a stale pane id from the real incident does not collapse the different-
-//!   server branch into the generic ambient-pane-observation refusal.
+//! - an ordinary launch inside another server automatically creates/attaches
+//!   its workspace-owned pane, without adopting or mutating the old pane;
+//! - a stale pane id also takes this isolated path; explicit nested-attach
+//!   intent continues to require verified ambient authority.
 //!
 //! The public CLI is executed by absolute Cargo binary path. No real provider
 //! or tmux server is used: a hermetic PATH shim records the physical route,
@@ -150,26 +149,26 @@ fn n41_same_server_switches_client_instead_of_running_provider_in_caller_pane() 
 
 #[test]
 #[serial(env)]
-fn n41_different_server_default_refuses_with_n38_and_zero_launch() {
+fn n41_different_server_default_automatically_attaches_owned_workspace() {
     let case = Case::new("n41-different-server-live");
     let output = case.run_in_pty(
-        &["codex", "--", "--n41-contract-canary"],
+        &["codex", "--json", "--", "--n41-contract-canary"],
         Ambient::DifferentServerLivePane,
     );
 
-    assert_different_server_default_refusal(&case, &output, "N41_DIFFERENT_SERVER_DEFAULT");
+    assert_isolated_managed_attach(&case, &output, "N41_DIFFERENT_SERVER_DEFAULT");
 }
 
 #[test]
 #[serial(env)]
-fn n41_user_sample_stale_pane_still_takes_different_server_branch() {
+fn n41_user_sample_stale_pane_automatically_attaches_owned_workspace() {
     let case = Case::new("n41-different-server-stale-pane");
     let output = case.run_in_pty(
-        &["codex", "--", "--n41-user-sample-canary"],
+        &["codex", "--json", "--", "--n41-user-sample-canary"],
         Ambient::DifferentServerMissingPane,
     );
 
-    assert_different_server_default_refusal(&case, &output, "N41_USER_SAMPLE_PANE_NOT_FOUND");
+    assert_isolated_managed_attach(&case, &output, "N41_USER_SAMPLE_PANE_NOT_FOUND");
 }
 
 #[test]
@@ -211,45 +210,22 @@ fn n41_different_server_explicit_opt_in_allows_nested_attach() {
     );
 }
 
-fn assert_different_server_default_refusal(case: &Case, output: &Output, signature: &str) {
-    let text = output_text(output);
-    let lower = text.to_ascii_lowercase();
+fn assert_isolated_managed_attach(case: &Case, output: &Output, signature: &str) {
+    let value = json_stdout(signature, output);
     let log = case.tmux_log();
-    let route = observed_route(&log, &case.provider_log(), output.status.success());
-
+    assert_eq!(value["mode"], json!("managed_tmux_client"));
     assert_eq!(
-        route,
-        ObservedRoute::Refused,
-        "{signature}: a different tmux server must be refused by default before provider or \
-         managed-client launch; observed_route={route:?} status={} tmux_log={log:?} \
-         provider_log={:?} output={text:?}",
-        output.status,
-        case.provider_log()
+        observed_route(&log, &case.provider_log(), output.status.success()),
+        ObservedRoute::AttachSession,
+        "{signature}: must create/attach the owned workspace, not adopt the ambient pane"
     );
-    for marker in ["error", "action", "log"] {
-        assert!(
-            lower
-                .lines()
-                .any(|line| line.trim_start().starts_with(marker)),
-            "{signature}: N38 refusal must contain a {marker:?} line; output={text:?}"
-        );
+    assert!(has_operation(&log, "new-session"));
+    assert!(log.contains(case.target_socket_name()));
+    assert!(!has_operation(&log, "switch-client"));
+    assert_eq!(case.provider_launches(), 0);
+    for operation in log.lines().filter(|line| line.contains(case.source_endpoint_str())) {
+        assert!(has_operation(operation, "list-panes"), "{signature}: old endpoint mutation {operation}");
     }
-    assert!(
-        text.contains(case.source_endpoint_str()) && text.contains(case.target_socket_name()),
-        "{signature}: refusal must identify the observed and requested tmux server facts; \
-         source_endpoint={:?} target_socket_name={:?} output={text:?}",
-        case.source_endpoint_str(),
-        case.target_socket_name()
-    );
-    assert!(
-        case.provider_launches() == 0
-            && !has_operation(&log, "new-session")
-            && !has_operation(&log, "attach-session")
-            && !has_operation(&log, "switch-client"),
-        "{signature}: default refusal must be pre-launch; tmux_log={log:?} \
-         provider_log={:?}",
-        case.provider_log()
-    );
 }
 
 #[derive(Clone, Copy)]
@@ -510,14 +486,6 @@ fn json_stdout(label: &str, output: &Output) -> Value {
             String::from_utf8_lossy(&output.stderr)
         )
     })
-}
-
-fn output_text(output: &Output) -> String {
-    format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    )
 }
 
 fn open_pty() -> io::Result<(File, File, String)> {

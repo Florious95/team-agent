@@ -105,39 +105,6 @@ fn folded_marker(value: &str) -> Option<&str> {
     }) { return None; }
     Some(marker)
 }
-#[cfg(test)]
-mod composer_observation_tests {
-    use super::*;
-
-    fn frame(composer: &str, history: &str) -> String {
-        format!("Cursor Agent\nv2026.10.01-e373342\n{history}\n→ {composer}\nGrok 4.7 High Run Everything\n")
-    }
-
-    #[test]
-    fn inspect_composer_observes_only_current_label_without_granting_seen() {
-        let label = "[Pasted text #1 +25 lines]";
-        let draft = frame(label, "old history");
-        let (surface, _, current, _) = inspect_composer(&draft).unwrap();
-        assert_eq!(surface, InputSurface::ComposerContainsPaste);
-        assert_eq!(current, Some(label));
-        let ready = frame("Plan, search, build anything", label);
-        let (surface, _, current, _) = inspect_composer(&ready).unwrap();
-        assert_eq!(surface, InputSurface::ComposerReady);
-        assert_eq!(current, None);
-        let busy = frame("Add a follow-up ctrl+c to stop", label);
-        assert_eq!(inspect_composer(&busy).unwrap().0, InputSurface::Busy);
-        assert!(inspect_composer(&frame(label, "⠘⠆ Working")).unwrap().3);
-        assert!(inspect_composer("→ [Pasted text #1 +25 lines]").is_none());
-        for marker in ["[Pasted text #0 +25 lines]", "[Pasted text #01 +25 lines]", "[Pasted text #1 +0 lines]", "[Pasted text #1 +25 lines] suffix"] {
-            assert_eq!(inspect_composer(&frame(marker, "")).unwrap().2, None);
-        }
-        // The port deliberately returns these rows: the root must reject extra
-        // editable content, not treat first-line ComposerReady as whole-editor empty.
-        let extra = frame("Plan, search, build anything\nother editable line", "");
-        assert!(inspect_composer(&extra).unwrap().1.contains(&"other editable line"));
-    }
-}
-
 /// Read-only native composer view; ownership/correlation remains the caller's job.
 /// Reuses the contract grammar without granting acceptance or authorizing a key.
 pub fn inspect_composer(text: &str) -> Option<(InputSurface, Vec<&str>, Option<&str>, bool)> {
@@ -155,6 +122,40 @@ pub fn inspect_composer(text: &str) -> Option<(InputSurface, Vec<&str>, Option<&
     let mut status = preceding.next().copied();
     if status.is_some_and(|line| line.starts_with("Tip: ")) { status = preceding.next().copied(); }
     let busy = matches!(observed, InputSurface::Busy) || status.is_some_and(working);
+    Some((observed, composer, marker, busy))
+}
+
+/// Legacy cursor_agent observation only: the startup banner can leave a
+/// bounded scrollback capture after a completed turn. Require the current
+/// native footer/context instead; this does not change contract H4/H6 surface
+/// admission, create a paste latch, or authorize any input.
+pub fn inspect_legacy_composer(text: &str) -> Option<(InputSurface, Vec<&str>, Option<&str>, bool)> {
+    let lines: Vec<_> = text.lines().map(str::trim).collect();
+    // Expanded native editors put the arrow on its own row. Select the
+    // current block before consulting history; strict H4/H6 grammar is unchanged.
+    let index = lines.iter().rposition(|line| *line == "→" || line.starts_with("→ "))?;
+    // Do not let an arrow quoted inside an expanded draft replace its real
+    // opening and turn foreign editable text into a seemingly empty composer.
+    if lines[..index].contains(&"→") { return None; }
+    let composer = lines[index..].to_vec();
+    let footer = composer.iter().rposition(|row| row.strip_suffix("Run Everything")
+        .is_some_and(|prefix| !prefix.trim().is_empty() && !prefix.trim_start().starts_with("→ ")))?;
+    if footer == 0 || !composer[footer + 1..].iter().any(|row| !row.is_empty()) { return None; }
+    let current = if composer[0] == "→" {
+        // A bare arrow is not empty-ready proof. Only expose an expanded
+        // nonempty body; the caller still owns marker, busy and stability gates.
+        if !composer[1..footer].iter().any(|row| !row.is_empty()) { return None; }
+        ""
+    } else { composer[0].strip_prefix("→ ")? };
+    let mut preceding = lines[..index].iter().rev().filter(|line| !line.is_empty());
+    let mut status = preceding.next().copied();
+    if status.is_some_and(|line| line.starts_with("Tip: ")) { status = preceding.next().copied(); }
+    let stop_hint = current.strip_suffix("ctrl+c to stop").is_some_and(|prefix| placeholder(prefix.trim()));
+    let busy = stop_hint || status.is_some_and(working);
+    let observed = if stop_hint || (placeholder(current) && busy) { InputSurface::Busy }
+        else if placeholder(current) { InputSurface::ComposerReady }
+        else { InputSurface::ComposerContainsPaste };
+    let marker = folded_marker(current);
     Some((observed, composer, marker, busy))
 }
 
@@ -268,5 +269,69 @@ impl SemanticReader for CursorAdapter {
             }
         } else { ProbeOutcome::Unknown(UNVERIFIED) };
         Probe { scope: record.scope.clone(), outcome }
+    }
+}
+
+#[cfg(test)]
+mod composer_observation_tests {
+    use super::*;
+
+    fn frame(composer: &str, history: &str) -> String {
+        format!("Cursor Agent\nv2026.10.01-e373342\n{history}\n→ {composer}\nGrok 4.7 High Run Everything\n")
+    }
+
+    #[test]
+    fn inspect_composer_observes_only_current_label_without_granting_seen() {
+        let label = "[Pasted text #1 +25 lines]";
+        let draft = frame(label, "old history");
+        let (surface, _, current, _) = inspect_composer(&draft).unwrap();
+        assert_eq!(surface, InputSurface::ComposerContainsPaste);
+        assert_eq!(current, Some(label));
+        let ready = frame("Plan, search, build anything", label);
+        let (surface, _, current, _) = inspect_composer(&ready).unwrap();
+        assert_eq!(surface, InputSurface::ComposerReady);
+        assert_eq!(current, None);
+        let busy = frame("Add a follow-up ctrl+c to stop", label);
+        assert_eq!(inspect_composer(&busy).unwrap().0, InputSurface::Busy);
+        assert!(inspect_composer(&frame(label, "⠘⠆ Working")).unwrap().3);
+        assert!(inspect_composer("→ [Pasted text #1 +25 lines]").is_none());
+        for marker in ["[Pasted text #0 +25 lines]", "[Pasted text #01 +25 lines]", "[Pasted text #1 +0 lines]", "[Pasted text #1 +25 lines] suffix"] {
+            assert_eq!(inspect_composer(&frame(marker, "")).unwrap().2, None);
+        }
+        // The port deliberately returns these rows: the root must reject extra
+        // editable content, not treat first-line ComposerReady as whole-editor empty.
+        let extra = frame("Plan, search, build anything\nother editable line", "");
+        assert!(inspect_composer(&extra).unwrap().1.contains(&"other editable line"));
+    }
+
+    #[test]
+    fn legacy_composer_observes_headerless_followup_without_changing_contract_admission() {
+        let ready = "→ Add a follow-up\nGrok 4.7 High Run Everything\n/owned/project\n";
+        assert!(inspect_composer(ready).is_none());
+        assert_eq!(surface(ready), InputSurface::ShellOrUnknown);
+        assert_eq!(inspect_legacy_composer(ready).unwrap().0, InputSurface::ComposerReady);
+        let busy = ready.replace("Add a follow-up", "Add a follow-up ctrl+c to stop");
+        assert!(inspect_legacy_composer(&busy).unwrap().3);
+        let draft = ready.replace("Add a follow-up", "foreign draft");
+        assert_eq!(inspect_legacy_composer(&draft).unwrap().0, InputSurface::ComposerContainsPaste);
+        assert!(inspect_legacy_composer("→ Add a follow-up\n").is_none());
+    }
+
+    #[test]
+    fn legacy_composer_observes_standalone_arrow_expanded_body_not_an_empty_editor() {
+        let current = "→\n  wrapped editable body\n  [team-agent-token:msg_one]\n\nGrok 4.7 High Run Everything\n/owned/project\n";
+        for prefix in ["", "Cursor Agent\nv2026.10.14-0f9edde\n→ Add a follow-up\nGrok 4.7 High Run Everything\n/old/project\n"] {
+            let text = format!("{prefix}{current}");
+            let (observed, rows, capsule, busy) = inspect_legacy_composer(&text).unwrap();
+            assert_eq!(observed, InputSurface::ComposerContainsPaste);
+            assert_eq!(rows[0], "→");
+            assert!(rows.contains(&"[team-agent-token:msg_one]"));
+            assert!(capsule.is_none() && !busy);
+        }
+        assert_eq!(surface(current), InputSurface::ShellOrUnknown);
+        assert!(inspect_composer(current).is_none());
+        assert!(inspect_legacy_composer("→\nGrok 4.7 High Run Everything\n/owned/project\n").is_none());
+        assert!(inspect_legacy_composer("→\nforeign draft\n").is_none());
+        assert!(inspect_legacy_composer("→\nforeign draft\n→ Add a follow-up\nGrok 4.7 High Run Everything\n/owned/project\n").is_none());
     }
 }

@@ -20,6 +20,12 @@ enum Mode {
     R6IdleNotice,
     PiFolded,
     PiFoldedUnstable,
+    CursorFollowup,
+    CursorHeaderEvicted,
+    CursorHistoryOnly,
+    CursorLongHistory,
+    CursorExpanded,
+    CursorExpandedDirty,
 }
 struct State {
     mode: Mode,
@@ -53,7 +59,13 @@ impl CommandRunner for Runner {
             };
             let height = if matches!(
                 state.mode,
-                Mode::R6IdleNotice | Mode::PiFolded | Mode::PiFoldedUnstable
+                Mode::R6IdleNotice
+                    | Mode::PiFolded
+                    | Mode::PiFoldedUnstable
+                    | Mode::CursorHistoryOnly
+                    | Mode::CursorLongHistory
+                    | Mode::CursorExpanded
+                    | Mode::CursorExpandedDirty
             ) {
                 24
             } else {
@@ -168,14 +180,58 @@ impl CommandRunner for Runner {
         let stdout = if state.provider == Provider::CursorAgent
             && argv.iter().any(|arg| arg == "capture-pane")
         {
+            let followup = matches!(
+                state.mode,
+                Mode::CursorFollowup
+                    | Mode::CursorHeaderEvicted
+                    | Mode::CursorHistoryOnly
+                    | Mode::CursorLongHistory
+                    | Mode::CursorExpanded
+                    | Mode::CursorExpandedDirty
+            );
+            let placeholder = if followup {
+                "Add a follow-up"
+            } else {
+                "Plan, search, build anything"
+            };
+            let header = if matches!(state.mode, Mode::CursorFollowup)
+                || (matches!(state.mode, Mode::CursorHeaderEvicted) && state.pasted > 0)
+            {
+                ""
+            } else {
+                "Cursor Agent\nv2026.10.01-e373342\n"
+            };
             let (composer, history) = if state.entered > 0 {
-                ("Plan, search, build anything", "[Pasted text #2 +25 lines]")
+                (placeholder, "[Pasted text #2 +25 lines]")
             } else if state.pasted > 0 {
                 ("[Pasted text #2 +25 lines]", "[Pasted text #1 +25 lines]")
             } else {
-                ("Plan, search, build anything", "[Pasted text #1 +25 lines]")
+                (placeholder, "[Pasted text #1 +25 lines]")
             };
-            format!("Cursor Agent\nv2026.10.01-e373342\n{history}\n→ {composer}\nGrok 4.7 High Run Everything\n/owned/project\n")
+            let padding = if matches!(state.mode, Mode::CursorLongHistory) {
+                "historical transcript row\n".repeat(70)
+            } else {
+                String::new()
+            };
+            let frame = format!(
+                "{header}{history}\n{padding}→ {composer}\nGrok 4.7 High Run Everything\n/owned/project\n"
+            );
+            if matches!(state.mode, Mode::CursorExpanded | Mode::CursorExpandedDirty) {
+                let expanded = include_str!("../../tests/fixtures/cursor-followup-expanded.txt");
+                if matches!(state.mode, Mode::CursorExpandedDirty)
+                    || state.pasted > 0 && state.entered == 0
+                {
+                    format!("[Pasted text #1 +30 lines]\n{expanded}")
+                } else if state.entered > 0 {
+                    format!("{marker}\n→ Add a follow-up\nGrok 4.7 256K High · 8.6% Run Everything\n/owned/project\n")
+                } else {
+                    "[Pasted text #1 +30 lines]\n→ Add a follow-up\nGrok 4.7 256K High · 8.6% Run Everything\n/owned/project\n".into()
+                }
+            } else if matches!(state.mode, Mode::CursorHistoryOnly) {
+                format!("{frame}{}", "unknown current row\n".repeat(24))
+            } else {
+                frame
+            }
         } else {
             stdout
         };
@@ -701,6 +757,87 @@ fn native_input_cursor_owned_new_capsule_transfers_to_transcript_without_token_c
     let state = f.state.lock().unwrap();
     assert_eq!(state.pasted, 1);
     assert_eq!(state.entered, 1);
+}
+
+#[test]
+fn native_input_cursor_clean_followup_uses_one_paste_one_enter_across_banner_eviction() {
+    for mode in [
+        Mode::CursorFollowup,
+        Mode::CursorHeaderEvicted,
+        Mode::CursorLongHistory,
+    ] {
+        let f = Fixture::new(mode);
+        f.state.lock().unwrap().provider = Provider::CursorAgent;
+        let (report, evidence) = f.inject();
+        let report = report.unwrap();
+        assert_eq!(
+            report.submit_verification,
+            SubmitVerification::EnterSentWithoutPlaceholderCheck
+        );
+        let evidence = evidence.unwrap();
+        assert_eq!(evidence.phase, NativeInputPhase::Accepted);
+        assert_eq!(
+            evidence.capsule.as_deref(),
+            Some("[Pasted text #2 +25 lines]")
+        );
+        let state = f.state.lock().unwrap();
+        assert_eq!((state.pasted, state.entered), (1, 1));
+    }
+}
+
+#[test]
+fn native_input_cursor_expanded_followup_reaches_seen_then_one_enter() {
+    let f = Fixture::new(Mode::CursorExpanded);
+    f.state.lock().unwrap().provider = Provider::CursorAgent;
+    let text = "For a harmless terminal-scroll fixture, reply with exactly 240 numbered lines, one per line, from 001 through 240, each formatted `NNN: amber`; do not use tools or change any files. Then wait.\n\n[team-agent-token:msg_one]";
+    let (report, evidence) = with_native_input(Some(f.request()), || {
+        f.backend.inject(
+            &Target::Pane(PaneId::new("%1")),
+            &InjectPayload::Text(text.into()),
+            Key::Enter,
+            true,
+        )
+    });
+    let report = report.unwrap();
+    assert_eq!(
+        report.submit_verification,
+        SubmitVerification::EnterSentWithoutPlaceholderCheck
+    );
+    assert_eq!(
+        report.inject_verification,
+        InjectVerification::CaptureContainsToken
+    );
+    let evidence = evidence.unwrap();
+    assert_eq!(evidence.phase, NativeInputPhase::Accepted);
+    assert!(evidence.capsule.is_none());
+    assert_eq!(evidence.baseline_capsules, ["[Pasted text #1 +30 lines]"]);
+    let state = f.state.lock().unwrap();
+    assert_eq!((state.pasted, state.entered), (1, 1));
+    assert!(state.stage_captures[1] >= 2);
+}
+
+#[test]
+fn native_input_cursor_foreign_expanded_followup_is_zero_effect() {
+    let f = Fixture::new(Mode::CursorExpandedDirty);
+    f.state.lock().unwrap().provider = Provider::CursorAgent;
+    let (report, _) = f.inject();
+    assert!(report.is_err());
+    let state = f.state.lock().unwrap();
+    assert_eq!((state.pasted, state.entered), (0, 0));
+}
+
+#[test]
+fn native_input_cursor_history_only_composer_cannot_authorize_paste_or_enter() {
+    let f = Fixture::new(Mode::CursorHistoryOnly);
+    f.state.lock().unwrap().provider = Provider::CursorAgent;
+    let (result, _) = f.inject();
+    let state = f.state.lock().unwrap();
+    assert_eq!(
+        (state.pasted, state.entered),
+        (0, 0),
+        "old history is not current composer authority"
+    );
+    assert!(result.is_err());
 }
 
 #[test]

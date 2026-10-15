@@ -80,7 +80,7 @@ fn trust(frame: &CaptureFrame) -> bool {
         && lines.iter().filter(|line| **line == cwd).count() == 1
         && lines.iter().any(|line| line.split_whitespace().collect::<Vec<_>>() == ["Yes,", "proceed", "y"])
         && lines.iter().any(|line| line.split_whitespace().collect::<Vec<_>>() == ["No,", "quit", "n"])
-        && lines.iter().any(|line| *line == "Grok Build may run or modify contents in this directory,")
+        && lines.contains(&"Grok Build may run or modify contents in this directory,")
 }
 #[derive(Clone, Copy)]
 enum NativeRectangle { Session, PastePreview }

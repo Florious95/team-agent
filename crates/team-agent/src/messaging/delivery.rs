@@ -299,34 +299,6 @@ fn prepare_message_state(
             }
         }
     }
-    if batch
-        && recipient_is_busy(
-            prepared.scoped.as_ref().unwrap_or(state),
-            &message.recipient,
-        )
-    {
-        event_log.write(
-            "send.deferred_busy",
-            serde_json::json!({
-                "message_id": message_id,
-                "sender": message.sender,
-                "recipient": message.recipient,
-                "reason": "recipient_busy",
-            }),
-        )?;
-        return Ok(Err(DeliveryOutcome {
-            ok: false,
-            status: DeliveryStatus::Queued,
-            message_status: MessageStatusShadow(message.status.clone()),
-            message_id: Some(message_id.to_string()),
-            verification: None,
-            stage: None,
-            reason: None,
-            channel: None,
-            ack_forced_off: false,
-            turn_verification: None,
-        }));
-    }
     Ok(Ok(prepared))
 }
 
@@ -682,34 +654,33 @@ fn deliver_prepared_message(
         canonical_owner_team_id.as_deref(),
         resolved.metadata.as_ref(),
     );
-    let recipient_cursor = recipient_is_cursor_agent(state, &message.recipient);
-    let native_request = recipient_provider(state, &message.recipient)
-        .filter(|provider| matches!(provider, Provider::Pi | Provider::CursorAgent))
-        .filter(|_| message.recipient != "leader" && transport.supports_owned_native_input())
-        .map(|provider| crate::transport::native_input::NativeInputRequest {
-            message_id: message_id.to_string(),
-            owner_team_id: canonical_owner_team_id.clone().unwrap_or_default(),
-            recipient: message.recipient.clone(), provider,
-            pane_id: resolved.metadata.as_ref().map(|meta| meta.target_pane_id.clone()).unwrap_or_default(),
-            pane_pid: resolved.metadata.as_ref().and_then(|meta| meta.target_pane_pid).unwrap_or_default(),
-            session: resolved.metadata.as_ref().map(|meta| meta.target_session.clone()).unwrap_or_default(),
-            window: resolved.metadata.as_ref().map(|meta| meta.target_window.clone()).unwrap_or_default(),
-        });
-    let guarded_native = native_request.is_some();
-    let (inject_attempt, native_evidence) = crate::transport::native_input::with_native_input(native_request, || {
-        crate::tmux_backend::with_paste_to_submit_floor(
-            paste_to_submit_floor_for_recipient(state, &message.recipient),
-            || crate::tmux_backend::with_cursor_single_enter(recipient_cursor, || {
-                transport.inject_with_submit_observer(&target, &payload, Key::Enter, true, Some(&submit_observer))
-            }),
-        )
-    });
+    // v0.5.113 delivery: address/owner and pane serialization are authoritative;
+    // composer appearance is not admission. Native CLIs buffer/queue input.
+    let inject_attempt = crate::tmux_backend::with_paste_to_submit_floor(
+        paste_to_submit_floor_for_recipient(state, &message.recipient),
+        || {
+            crate::tmux_backend::with_cursor_single_enter(
+                recipient_requires_single_enter(state, &message.recipient),
+                || {
+                    transport.inject_with_submit_observer(
+                        &target,
+                        &payload,
+                        Key::Enter,
+                        true,
+                        Some(&submit_observer),
+                    )
+                },
+            )
+        },
+    );
     let inject_report = match inject_attempt {
         Ok(report) => {
             // grok 忙时第一次回车只入显式队列。默认 send-now：只重按回车顶出去。
             // 无 `Enter:send now` 时零次额外按键，claude/codex 行为不变。
             // cursor：第二下 Enter 打断进行中回合，不走 flush。
-            if !guarded_native && !crate::provider::submit_now::keep_provider_queue_requested() && !recipient_cursor {
+            if !crate::provider::submit_now::keep_provider_queue_requested()
+                && recipient_allows_explicit_queue_flush(state, &message.recipient)
+            {
                 match crate::provider::submit_now::flush_explicit_queue(transport, &target) {
                     Ok(flush) if flush.extra_enters > 0 => {
                         let _ = event_log.write(
@@ -739,28 +710,6 @@ fn deliver_prepared_message(
         }
         Err(error) => {
             let reason = format!("inject_failed:{error}");
-            if guarded_native {
-                let pasted = native_evidence.as_ref().filter(|evidence|
-                    evidence.phase >= crate::transport::native_input::NativeInputPhase::MayHavePasted);
-                let status = if let Some(evidence) = pasted {
-                    super::enter_rescue::park(store, evidence, attempt, &reason, event_log)?;
-                    "submitted_unverified"
-                } else {
-                    super::enter_rescue::release_no_effect(store, message_id, attempt)?;
-                    "target_resolved"
-                };
-                event_log.write("native_input.deferred", serde_json::json!({
-                    "message_id": message_id, "reason": reason, "status": status,
-                    "may_have_pasted": pasted.is_some(),
-                }))?;
-                return Ok(DeliveryOutcome {
-                    ok: false, status: DeliveryStatus::Queued,
-                    message_status: MessageStatusShadow(status.to_string()),
-                    message_id: Some(message_id.to_string()), verification: Some(reason),
-                    stage: Some(DeliveryStage::Inject), reason: None, channel: None,
-                    ack_forced_off: false, turn_verification: None,
-                });
-            }
             if message.recipient == "leader" {
                 store.mark(message_id, "failed", Some("leader_not_attached"))?;
                 event_log.write(
@@ -926,11 +875,7 @@ fn deliver_prepared_message(
                 turn_verification: Some(turn_verification),
             });
         }
-        if let Some(evidence) = native_evidence.as_ref() {
-            super::enter_rescue::park(store, evidence, attempt, &reason, event_log)?;
-        } else {
-            store.mark(message_id, "submitted_unverified", Some(&reason))?;
-        }
+        store.mark(message_id, "submitted_unverified", Some(&reason))?;
         return Ok(DeliveryOutcome {
             ok: false,
             status: DeliveryStatus::Failed,
@@ -2305,8 +2250,8 @@ fn only_team_entry(state: &serde_json::Value) -> Option<&serde_json::Value> {
     }
 }
 
-/// `_deliver_pending_messages` (`delivery.py:484`):扫 pending 队列逐条投递;busy 收件人写
-/// `send.deferred_busy` 跳过 (**不丢**,card §131)。返回投递的 message_id 列表。
+/// Deliver pending rows without activity/composer admission; native CLIs queue input.
+/// Returns the message IDs whose post-submit evidence verified delivery.
 pub fn deliver_pending_messages(
     workspace: &Path,
     state: &serde_json::Value,
@@ -2500,13 +2445,6 @@ fn recipient_provider(state: &serde_json::Value, recipient: &str) -> Option<Prov
         .and_then(parse_canonical_provider)
 }
 
-fn recipient_is_cursor_agent(state: &serde_json::Value, recipient: &str) -> bool {
-    matches!(
-        recipient_provider(state, recipient),
-        Some(Provider::CursorAgent)
-    )
-}
-
 /// ---
 /// purpose: paste→Enter 地板按收件人 provider 选择
 /// contract: CursorAgent 与 Grok 为 1s；其余（含 claude）为 ZERO
@@ -2547,16 +2485,6 @@ pub(crate) fn recipient_allows_explicit_queue_flush(
         recipient_provider(state, recipient),
         Some(Provider::CursorAgent | Provider::Pi)
     )
-}
-
-pub(crate) fn recipient_is_busy(state: &serde_json::Value, recipient: &str) -> bool {
-    state
-        .get("agents")
-        .and_then(serde_json::Value::as_object)
-        .and_then(|agents| agents.get(recipient))
-        .and_then(|agent| agent.get("status"))
-        .and_then(serde_json::Value::as_str)
-        == Some("busy")
 }
 
 fn leader_rollout_path(state: &serde_json::Value) -> Option<std::path::PathBuf> {

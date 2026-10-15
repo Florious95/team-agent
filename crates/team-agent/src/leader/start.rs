@@ -48,9 +48,6 @@ enum ManagedClientAttachMode {
     SwitchClient,
 }
 
-const DIFFERENT_TMUX_SERVER_PREFIX: &str =
-    "managed launcher refuses a different ambient tmux server";
-
 impl PreparedLeaderStart {
     pub(crate) fn plan(&self) -> &LeaderStartPlan {
         &self.plan
@@ -141,8 +138,6 @@ pub(crate) fn prepare_leader_start_with_nested_attach(
     let (ambient_authority, managed_client_attach_mode, managed_exec_provider) =
         if explicit_external_path || state_external_path {
             (ambient_pane_authority_preflight(workspace)?, None, false)
-        } else if workspace_state_is_managed_provider_reentry(workspace) {
-            (ambient_pane_authority_preflight(workspace)?, None, true)
         } else {
             managed_launcher_ambient_route(
                 provider,
@@ -159,7 +154,7 @@ pub(crate) fn prepare_leader_start_with_nested_attach(
         confirm_attach,
         attach_session,
         external_leader,
-        std::env::var_os("TMUX").is_some(),
+        ambient_authority.is_some(),
         managed_client_attach_mode,
         managed_exec_provider,
         allow_nested_attach,
@@ -613,64 +608,49 @@ fn managed_launcher_ambient_route(
     ),
     PrepareLeaderStartError,
 > {
-    let Some(tmux) = std::env::var_os("TMUX") else {
-        return Ok((
-            None,
-            Some(ManagedClientAttachMode::AttachSession),
-            false,
-        ));
+    let isolated = || (None, Some(ManagedClientAttachMode::AttachSession), false);
+    let authority = match ambient_pane_authority_preflight(workspace) {
+        Ok(Some(authority)) => authority,
+        Ok(None) => return Ok(isolated()),
+        Err(PrepareLeaderStartError::PaneAuthorityRefused(_)) if !allow_nested_attach => {
+            // An inherited tuple cannot authorize adoption, but an ordinary
+            // managed launch can still create its own workspace pane. Keep
+            // explicit external/attach and nested-attach intent fail-closed.
+            return Ok(isolated());
+        }
+        Err(error) => return Err(error),
     };
-    let tmux = tmux.into_string().map_err(|_| {
-        PrepareLeaderStartError::PaneAuthorityRefused(ambient_tmux_endpoint_refusal(
-            workspace,
-            pane_refusal::AmbientTmuxEndpointUnavailableCause::TmuxValueNotUnicode,
-        ))
-    })?;
-    let observed_endpoint = validated_ambient_tmux_endpoint(workspace, &tmux)
-        .map_err(PrepareLeaderStartError::PaneAuthorityRefused)?;
-    if provider == Provider::Pi && provider_args.is_empty() && !allow_nested_attach {
-        // Pi's zero-argument managed entry already owns this verified pane as its
-        // user-facing terminal. Replacing the current process is safe on either
-        // the workspace server or another server; switching/attaching would move
-        // the user away from the positively verified workspace pane.
-        let authority = verified_ambient_pane_authority(workspace, &tmux)
-            .map_err(PrepareLeaderStartError::PaneAuthorityRefused)?;
+    if workspace_state_is_managed_provider_reentry(workspace)
+        || (provider == Provider::Pi && provider_args.is_empty() && !allow_nested_attach)
+    {
+        // Only verified current-pane authority permits replacing the caller.
         return Ok((Some(authority), None, true));
     }
-    let target_socket_name = TmuxBackend::for_workspace(workspace)
-        .tmux_endpoint()
-        .ok_or_else(|| LeaderError::Start("workspace tmux endpoint missing".to_string()))?;
     let target_endpoint = crate::tmux_backend::socket_path_for_workspace(workspace);
     let same_server = target_endpoint.as_ref().is_some_and(|target| {
-        let observed = Path::new(&observed_endpoint)
+        let observed = Path::new(&authority.endpoint)
             .canonicalize()
-            .unwrap_or_else(|_| PathBuf::from(&observed_endpoint));
+            .unwrap_or_else(|_| PathBuf::from(&authority.endpoint));
         let target = target.canonicalize().unwrap_or_else(|_| target.clone());
         observed == target
     });
     if same_server {
-        let authority = verified_ambient_pane_authority(workspace, &tmux)
-            .map_err(PrepareLeaderStartError::PaneAuthorityRefused)?;
         return Ok((
             Some(authority),
             Some(ManagedClientAttachMode::SwitchClient),
             false,
         ));
     }
-    if !allow_nested_attach {
-        return Err(LeaderError::Validation(format!(
-            "{DIFFERENT_TMUX_SERVER_PREFIX}: observed_endpoint={observed_endpoint}; \
-             requested_workspace_socket={target_socket_name}"
-        ))
-        .into());
+    if allow_nested_attach {
+        return Ok((
+            Some(authority),
+            Some(ManagedClientAttachMode::AttachSession),
+            false,
+        ));
     }
-    let authority = verified_ambient_pane_authority(workspace, &tmux)
-        .map_err(PrepareLeaderStartError::PaneAuthorityRefused)?;
-    Ok((
-        Some(authority),
-        Some(ManagedClientAttachMode::AttachSession),
-        false,
-    ))
+    // Do not switch/adopt the unrelated server. The existing managed attach
+    // child clears TMUX/TMUX_PANE without changing the caller's environment.
+    Ok(isolated())
 }
 
 fn validated_ambient_tmux_endpoint(

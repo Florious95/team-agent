@@ -5,10 +5,9 @@
 //! - a complete tuple may select the direct provider path only when the caller
 //!   controlling tty, live pane and requested workspace agree; redirected
 //!   stdin is not an authority source;
-//! - a live but foreign historical pane must fail loudly with the catalog
-//!   reason whose required fact set matches what was actually observed, without
-//!   starting a provider, switching to managed mode, or changing canonical
-//!   state, leader registry or message store;
+//! - explicit external/attach intent still refuses a foreign or unavailable
+//!   pane before effects; ordinary managed entry instead creates its own
+//!   workspace pane without adopting or mutating that ambient pane;
 //! - the same workspace-mismatch facts and a copyable recovery action reach the
 //!   independent `diagnose --json` and default `doctor --json` public callers;
 //! - messages that failed in the attach window are either physically retried
@@ -475,6 +474,200 @@ fn a3_pane_not_found_keeps_its_catalog_reason_and_cause() {
         )),
         "A3 pane not found",
     );
+}
+
+#[test]
+#[serial(env)]
+fn issue326_plain_pi_stale_pane_automatically_isolates_without_changing_parent() {
+    let case = Case::new("issue326-stale-pi");
+    case.set_mode("pane-not-found");
+    let pi_pane = "%%managed\\t%s\\t0\\tpi\\t0\\t%s\\tpi\\t";
+    let pi_tmux = TMUX_SHIM.replace(
+        "%%managed\\t%s\\t0\\tcodex\\t0\\t%s\\tcodex\\t",
+        pi_pane,
+    );
+    assert!(
+        pi_tmux.contains(pi_pane),
+        "Pi pane metadata fixture must match the spawned window"
+    );
+    let pi_tmux = pi_tmux.replace(
+        "  *\" set-buffer \"*)",
+        "  *\" attach-session \"*)\n    [ -z \"${TMUX+x}\" ] && [ -z \"${TMUX_PANE+x}\" ] || exit 119\n    printf 'attach-env-cleared\\n' >> \"$TEAM_AGENT_TEST_TMUX_LOG\"\n    exit 0\n    ;;\n  *\" set-buffer \"*)",
+    );
+    write_executable(&case.fake_bin.join("tmux"), &pi_tmux);
+    let pi_real = case.fake_bin.join("pi-discovery-fixture");
+    write_executable(&pi_real, PI_DISCOVERY_SHIM);
+    std::os::unix::fs::symlink(&pi_real, case.fake_bin.join("pi"))
+        .expect("independently resolved Pi fixture entry");
+    std::os::unix::fs::symlink(
+        env!("CARGO_BIN_EXE_team-agent"),
+        case.fake_bin.join("team-agent"),
+    )
+    .expect("test-owned public command entry");
+    let parent_env_after = case.env.root().join("outer-tmux-after");
+    let script = "team-agent pi --json; result=$?; printf '%s\\n%s\\n' \"$TMUX\" \"$TMUX_PANE\" > \"$TEAM_AGENT_TEST_OUTER_ENV_AFTER\"; exit \"$result\"";
+    let mut command = case.command_for_program(
+        Path::new("/bin/sh"),
+        &["-c", script],
+        Some(AMBIENT_PANE),
+    );
+    command.env("TEAM_AGENT_TEST_OUTER_ENV_AFTER", &parent_env_after);
+    let output = command.output().expect("ordinary Pi entry with inherited stale tuple");
+    assert_owned_managed_isolation(&case, &output, "automatic stale Pi isolation");
+    assert!(case.tmux_log().contains("attach-env-cleared"));
+    assert_eq!(
+        fs::read_to_string(parent_env_after).unwrap(),
+        format!("{},4242,0\n{AMBIENT_PANE}\n", case.endpoint.display()),
+        "automatic isolation must not change its parent shell environment"
+    );
+}
+
+#[test]
+#[serial(env)]
+fn issue326_untrusted_ambient_metadata_selects_owned_managed_launch() {
+    for (tag, mode, tuple, pane) in [
+        ("missing-pane", "pane-not-found", true, Some(AMBIENT_PANE)),
+        ("missing-id", "matching", true, None),
+        ("malformed-tuple", "matching", false, Some(AMBIENT_PANE)),
+        ("no-controlling-tty", "matching", true, Some(AMBIENT_PANE)),
+    ] {
+        let case = Case::new(&format!("issue326-auto-{tag}"));
+        case.set_mode(mode);
+        let tmux = if tuple {
+            format!("{},4242,0", case.endpoint.display())
+        } else {
+            "not-a-tmux-tuple".to_string()
+        };
+        let output = case.run_with_ambient_tuple(
+            &["codex", "--json", "--", "--contract-canary"],
+            Some(tmux),
+            pane,
+        );
+        assert_owned_managed_isolation(&case, &output, tag);
+        assert!(case.tmux_log().contains("--contract-canary"));
+    }
+}
+
+#[test]
+#[serial(env)]
+fn issue326_live_foreign_workspace_is_not_adopted_even_with_matching_tty() {
+    let case = Case::new("issue326-auto-foreign-workspace");
+    case.set_mode("foreign-workspace");
+    let output = case.run_with_controlling_tty(
+        &["codex", "--json", "--", "--contract-canary"],
+        AMBIENT_PANE,
+    );
+    assert_owned_managed_isolation(&case, &output, "foreign workspace with current tty");
+}
+
+#[test]
+#[serial(env)]
+fn issue326_stale_managed_reentry_is_not_ambient_authority() {
+    let case = Case::new("issue326-auto-stale-reentry");
+    case.set_mode("pane-not-found");
+    save_runtime_state(&case.workspace, &json!({
+        "active_team_key": TEAM,
+        "teams": {TEAM: {
+            "team_key": TEAM,
+            "leader_receiver": {
+                "status": "attached",
+                "pane_id": AMBIENT_PANE,
+                "tmux_socket": case.endpoint,
+                "session_name": "team-agent-leader-codex-stale"
+            }
+        }}
+    })).expect("seed stale managed receiver");
+    let output = case.run(&["codex", "--json", "--", "--contract-canary"], Some(AMBIENT_PANE));
+    let receiver = assert_owned_managed_route(&case, &output, "stale managed reentry");
+    // Existing parallel-Leader registration deliberately preserves its first
+    // scalar binding. Isolation adds the new exact binding, not authority to
+    // delete or rewrite the previous receiver's history.
+    assert_eq!(receiver["pane_id"], json!(AMBIENT_PANE));
+    let bindings = receiver["bound_panes"].as_array().expect("parallel bindings");
+    assert_eq!(bindings.len(), 2);
+    assert!(bindings.iter().any(|binding| {
+        binding["pane_id"] == json!(AMBIENT_PANE)
+            && binding["tmux_socket"] == json!(case.endpoint.to_str().unwrap())
+    }));
+}
+
+fn assert_owned_managed_isolation(case: &Case, output: &Output, label: &str) {
+    let receiver = assert_owned_managed_route(case, output, label);
+    assert_eq!(receiver["pane_id"], json!("%managed"), "{label}: {receiver}");
+}
+
+fn assert_owned_managed_route(case: &Case, output: &Output, label: &str) -> Value {
+    let value = json_stdout(label, output);
+    assert_eq!(value["mode"], json!("managed_tmux_client"), "{label}: {value}");
+    let log = case.tmux_log();
+    assert!(contains_tmux_operation(&log, "new-session"), "{label}: no owned pane");
+    assert!(contains_tmux_operation(&log, "attach-session"), "{label}: no managed attach");
+    assert!(!contains_tmux_operation(&log, "switch-client"), "{label}: must not switch old client");
+    assert_eq!(case.provider_launches(), 0, "{label}: must not execute in old pane");
+    for operation in log.lines().filter(|line| line.contains(case.endpoint.to_str().unwrap())) {
+        assert!(contains_tmux_operation(operation, "list-panes"), "{label}: old endpoint mutation {operation}");
+    }
+    let state: Value = serde_json::from_slice(&fs::read(case.state_path()).unwrap()).unwrap();
+    let team_key = state["active_team_key"].as_str().expect("launched canonical team");
+    let receiver = &state["teams"][team_key]["leader_receiver"];
+    assert_ne!(receiver["tmux_socket"], json!(case.endpoint.to_str().unwrap()), "{label}: {receiver}");
+    let bindings = receiver["bound_panes"].as_array().expect("owned receiver bindings");
+    assert_eq!(bindings.iter().filter(|binding| {
+        binding["pane_id"] == json!("%managed")
+            && binding["tmux_socket"] == receiver["tmux_socket"]
+    }).count(), 1, "{label}: must bind the one new owned pane exactly");
+    receiver.clone()
+}
+
+#[test]
+#[serial(env)]
+fn issue326_explicit_nested_and_persisted_external_intent_stay_strict() {
+    for external_state in [false, true] {
+        let case = Case::new(if external_state { "issue326-state-external" } else { "issue326-nested" });
+        case.set_mode("pane-not-found");
+        if external_state {
+            case.declare_external_topology();
+        }
+        let before = case.durable_snapshot();
+        let args: &[&str] = if external_state {
+            &["codex", "--json"]
+        } else {
+            &["codex", "--allow-nested-attach", "--json"]
+        };
+        let output = case.run(args, Some(AMBIENT_PANE));
+        let value = json_stdout_even_on_error("strict ambient intent", &output);
+        assert_typed_prelaunch_refusal(
+            &output, &value,
+            refusal_catalog::PaneAuthorityRefusalReason::AmbientPaneWorkspaceUnavailable,
+            Some((refusal_catalog::PaneAuthorityRefusalField::ObservedPaneWorkspace, "pane_not_found")),
+            "strict ambient intent",
+        );
+        assert_no_provider_or_managed_spawn(&case, "strict ambient intent");
+        case.assert_durable_unchanged(&before, "explicit/state external refusal stays effect-free");
+    }
+}
+
+#[test]
+#[serial(env)]
+fn issue326_external_pi_intent_is_not_rewritten_as_a_plain_launch() {
+    let case = Case::new("issue326-external-pi");
+    case.set_mode("pane-not-found");
+    let durable_before = case.durable_snapshot();
+    let output = case.run(&["pi", "--external-leader", "--json"], Some(AMBIENT_PANE));
+    let value = json_stdout_even_on_error("issue326 explicit external Pi", &output);
+    assert_typed_prelaunch_refusal(
+        &output,
+        &value,
+        refusal_catalog::PaneAuthorityRefusalReason::AmbientPaneWorkspaceUnavailable,
+        Some((
+            refusal_catalog::PaneAuthorityRefusalField::ObservedPaneWorkspace,
+            "pane_not_found",
+        )),
+        "issue326 explicit external Pi",
+    );
+    assert!(value.get("recovery_command").is_none());
+    assert_no_provider_or_managed_spawn(&case, "issue326 explicit external Pi");
+    case.assert_durable_unchanged(&durable_before, "external refusal stays effect-free");
 }
 
 #[test]
@@ -2845,6 +3038,15 @@ fn value_names_attach_window_debt(value: &Value, expected_count: u64) -> bool {
         _ => false,
     }
 }
+
+// Discovery only: a managed tmux recorder must never execute a real provider.
+const PI_DISCOVERY_SHIM: &str = r#"#!/bin/sh
+case "${1-}" in
+  --version) printf 'pi 1.2.0\n' ;;
+  --list-models) printf 'provider model\nopenai-codex gpt-6-luna\n' ;;
+  *) printf 'unexpected native Pi launch in controlled fixture\n' >&2; exit 125 ;;
+esac
+"#;
 
 const PROVIDER_SHIM: &str = r#"#!/bin/sh
 if [ "${1-}" = "--version" ]; then

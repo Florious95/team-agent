@@ -424,6 +424,26 @@ pub mod lifecycle_port {
         });
         if let Some(object) = value.as_object_mut() {
             object.extend(facts);
+            // Only a plain Pi entry can be retried verbatim with this command.
+            // Never drop explicit attach/external intent or provider arguments,
+            // clear the caller's environment, or adopt the unverified pane.
+            if cfg!(unix)
+                && provider == Provider::Pi
+                && attach == &LeaderLauncherArgs::default()
+            {
+                let command = "env -u TMUX -u TMUX_PANE team-agent pi";
+                object.insert("recovery_command".to_string(), json!(command));
+                object.insert(
+                    ACTION_FIELD.to_string(),
+                    json!(format!(
+                        "The inherited TMUX/TMUX_PANE could not be authorized for \
+                         requested_workspace; this is not an empty-directory error. \
+                         To explicitly retry from requested_workspace, run `{command}`. \
+                         This removes the inherited variables only for the new process \
+                         and does not detach or modify your current tmux pane. {action}"
+                    )),
+                );
+            }
         }
         value
     }
