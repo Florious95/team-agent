@@ -174,6 +174,9 @@ impl Transport for DeliverOkTransport {
     fn kind(&self) -> BackendKind {
         BackendKind::Tmux
     }
+    fn supports_owned_native_input(&self) -> bool {
+        true
+    }
     fn spawn_first(
         &self,
         _s: &SessionName,
@@ -201,6 +204,8 @@ impl Transport for DeliverOkTransport {
         _s: Key,
         _b: bool,
     ) -> Result<InjectReport, TransportError> {
+        assert!(crate::transport::native_input::current_request().is_none(),
+            "ordinary sends must use v0.5.113 direct input, not pre-paste idle admission");
         Ok(InjectReport {
             stage_reached: crate::transport::InjectStage::Submit,
             inject_verification: crate::transport::InjectVerification::CaptureContainsToken,
@@ -344,13 +349,10 @@ fn spine_delivery_skips_queued_statuses() {
     );
 }
 
-// #2 (CONTRACT, corrected) — busy recipient = LIFECYCLE status=="busy" → emit ONE send.deferred_busy
-// {recipient,reason:"recipient_busy"} and do NOT deliver (row stays 'accepted'). golden delivery.py:491
-// gates on `state.agents[recipient].status == "busy"`, NOT on turn-level agent_health=WORKING.
-// (The prior version of this test seeded agent_health=WORKING + status="running" and asserted deferral,
-//  misreading golden — that stale lock is the root of the deferred_busy regression; corrected here.)
+// Input is unconditional: native CLIs queue messages while working. Activity
+// metadata must not prevent a pending message from reaching paste + Enter.
 #[test]
-fn spine_delivery_busy_recipient_defers_with_event() {
+fn spine_delivery_busy_recipient_is_injected_without_idle_deferral() {
     let ws = tmp_ws("deliver-busy");
     let store = store_for(&ws);
     let log = EventLog::new(&ws);
@@ -361,33 +363,30 @@ fn spine_delivery_busy_recipient_defers_with_event() {
 
     let delivered = deliver_pending_messages(&ws, &state, &DeliverOkTransport, &log).unwrap();
 
-    assert!(
-        !delivered.contains(&mid),
-        "a busy recipient's message must NOT be delivered"
-    );
-    assert_eq!(
-        message_status_of(&store, &mid),
-        "accepted",
-        "the row must stay 'accepted' (no-drop, left for a later tick)"
-    );
+    assert!(delivered.contains(&mid));
+    assert_eq!(message_status_of(&store, &mid), "delivered");
     let events = read_event_log(&ws);
     let deferred: Vec<_> = events
         .iter()
         .filter(|e| e.get("event").and_then(|v| v.as_str()) == Some("send.deferred_busy"))
         .collect();
-    assert_eq!(
-        deferred.len(),
-        1,
-        "exactly one send.deferred_busy event expected; got {events:?}"
-    );
-    assert_eq!(
-        deferred[0].get("recipient").and_then(|v| v.as_str()),
-        Some("w1")
-    );
-    assert_eq!(
-        deferred[0].get("reason").and_then(|v| v.as_str()),
-        Some("recipient_busy")
-    );
+    assert!(deferred.is_empty());
+}
+
+#[test]
+fn spine_delivery_pi_cursor_uses_v113_direct_input_without_idle_scope() {
+    for provider in ["pi", "cursor_agent"] {
+        let ws = tmp_ws(&format!("direct-input-{provider}"));
+        let store = store_for(&ws);
+        let log = EventLog::new(&ws);
+        let mid = store
+            .create_message(Some("t"), "leader", "w1", "hi", None, true, None)
+            .unwrap();
+        let state = serde_json::json!({"agents": {"w1": {"provider": provider, "status": "running"}}});
+        let delivered = deliver_pending_messages(&ws, &state, &DeliverOkTransport, &log).unwrap();
+        assert!(delivered.contains(&mid), "{provider}");
+        assert_eq!(message_status_of(&store, &mid), "delivered");
+    }
 }
 
 // CONTRACT (shared-root, real-machine-driven; golden = correct-behavior baseline): an ALIVE worker

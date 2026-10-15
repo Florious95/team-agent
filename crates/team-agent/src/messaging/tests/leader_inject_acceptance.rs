@@ -735,7 +735,7 @@ fn resource188_batch_and_public_single_prepare_once_and_keep_fresh_leader_load()
 }
 
 #[test]
-fn resource188_busy_and_refused_candidates_prepare_once_without_claiming() {
+fn resource188_busy_is_injected_but_owner_refusal_still_prepares_without_claiming() {
     use crate::messaging::delivery::preparation_probe::COUNTS;
     let mut case = Case::new("188-busy");
     case.state["agents"] = serde_json::json!({"worker": {"agent_id": "worker", "status": "busy"}});
@@ -767,14 +767,13 @@ fn resource188_busy_and_refused_candidates_prepare_once_without_claiming() {
             Some("missing-team"),
         )
         .unwrap();
-    let before = case.message_status(&busy);
     COUNTS.with(|counts| counts.set((0, 0, 0)));
     deliver_pending_messages(&case.workspace, &case.state, &transport, &case.event_log).unwrap();
-    assert_eq!(COUNTS.with(|counts| counts.get()), (2, 2, 0));
-    assert_eq!(case.message_status(&busy), before);
+    assert_eq!(COUNTS.with(|counts| counts.get()), (2, 2, 1));
+    assert_ne!(case.message_status(&busy), "accepted");
     assert_ne!(case.message_status(&refused), "delivered");
-    assert_eq!(transport.inject_count(), 0);
-    assert!(case.events().contains("send.deferred_busy"));
+    assert_eq!(transport.inject_count(), 1);
+    assert!(!case.events().contains("send.deferred_busy"));
     assert!(case.events().contains("delivery.projection_refused"));
 }
 
