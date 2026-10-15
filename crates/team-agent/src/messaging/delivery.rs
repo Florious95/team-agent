@@ -221,7 +221,7 @@ pub fn deliver_pending_message(
         });
     };
     match prepare_message_state(
-        workspace, store, message_id, event_log, state, &message,
+        workspace, store, message_id, event_log, state, &message, false,
     )? {
         Ok(prepared) => deliver_prepared_message(
             workspace, store, transport, message_id, event_log, state, message, prepared,
@@ -251,6 +251,7 @@ fn prepare_message_state(
     event_log: &EventLog,
     state: &serde_json::Value,
     message: &PendingMessage,
+    batch: bool,
 ) -> Result<Result<PreparedMessageState, DeliveryOutcome>, MessagingError> {
     #[cfg(test)]
     preparation_probe::COUNTS.with(|counts| {
@@ -660,9 +661,15 @@ fn deliver_prepared_message(
         || {
             crate::tmux_backend::with_cursor_single_enter(
                 recipient_requires_single_enter(state, &message.recipient),
-                || transport.inject_with_submit_observer(
-                    &target, &payload, Key::Enter, true, Some(&submit_observer),
-                ),
+                || {
+                    transport.inject_with_submit_observer(
+                        &target,
+                        &payload,
+                        Key::Enter,
+                        true,
+                        Some(&submit_observer),
+                    )
+                },
             )
         },
     );
@@ -2281,6 +2288,7 @@ pub fn deliver_pending_messages(
             event_log,
             state,
             &message,
+            true,
         )? {
             Ok(prepared) => prepared,
             Err(_) => continue,
