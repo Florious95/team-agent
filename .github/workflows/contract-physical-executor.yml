@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           persist-credentials: false
       - name: Freeze production source and prepare toolchain
         shell: bash
