@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::lifecycle::launch::pi_mcp::pi_seat_paths;
 use crate::messaging::delivery::{
-    paste_to_submit_floor_for_recipient, recipient_allows_explicit_queue_flush, recipient_is_busy,
+    paste_to_submit_floor_for_recipient, recipient_allows_explicit_queue_flush,
     recipient_requires_single_enter,
 };
 use crate::model::enums::{Provider, ProviderEffort};
@@ -186,17 +186,12 @@ fn pi_delivery_submits_one_enter_and_never_flushes_or_retries() {
         paste_to_submit_floor_for_recipient(&idle, "worker-a"),
         Duration::ZERO
     );
-    assert!(!recipient_is_busy(&idle, "worker-a"));
-
     let busy = serde_json::json!({
         "agents": {
             "worker-a": {"provider": "pi", "status": "busy"}
         }
     });
-    assert!(
-        recipient_is_busy(&busy, "worker-a"),
-        "known busy must take the existing send.deferred_busy path before paste"
-    );
+    // Working native CLIs queue the same single-Enter input; no idle admission.
     assert!(recipient_requires_single_enter(&busy, "worker-a"));
     assert!(!recipient_allows_explicit_queue_flush(&busy, "worker-a"));
 }
