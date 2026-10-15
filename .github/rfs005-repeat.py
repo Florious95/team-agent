@@ -15,6 +15,9 @@ for index in range(count):
     case = root / f"{index:03d}"
     case.mkdir()
     env = os.environ.copy()
+    product = Path("target/debug/team-agent").resolve()
+    assert product.is_file(), product
+    env["CARGO_BIN_EXE_team-agent"] = str(product)
     if mode != "baseline":
         env.update(RFS005_MODE=mode, RFS005_HOLD_MS="120", RFS005_RECEIPT_DIR=str(case.resolve()))
     start = time.time()
@@ -32,6 +35,9 @@ for index in range(count):
     rows.append(row)
     print(mode, row, flush=True)
     (root / "results.json").write_text(json.dumps(rows, indent=2) + "\n")
+    if code != 0 and not row['missing_refusal']:
+        print("Unrelated fixture/apparatus failure; stop rather than counting as RFS005 evidence", flush=True)
+        sys.exit(2)
 summary = dict(mode=mode, total=len(rows), passed=sum(r['exit']==0 and r['actually_ran'] for r in rows),
                failed=sum(r['exit']!=0 for r in rows), failures=[r for r in rows if r['exit']!=0])
 (root / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
