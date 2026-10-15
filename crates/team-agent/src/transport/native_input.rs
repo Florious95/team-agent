@@ -202,15 +202,23 @@ pub(crate) fn inspect_input(
 ) -> Option<InputFrame> {
     match provider {
         Provider::Pi => pi_input(text, pane_height),
-        Provider::CursorAgent => cursor_input(text),
+        Provider::CursorAgent => cursor_input(text, pane_height),
         _ => None,
     }
 }
 
-fn cursor_input(text: &str) -> Option<InputFrame> {
+fn cursor_input(text: &str, pane_height: u32) -> Option<InputFrame> {
     use team_agent_contract::contract::delivery::InputSurface;
+    if pane_height == 0 {
+        return None;
+    }
+    let text_rows: Vec<_> = text.lines().collect();
+    // Only the current viewport authorizes input; retain full history below
+    // solely for same-message transcript correlation.
+    let viewport_start = text_rows.len().saturating_sub(pane_height as usize);
+    let viewport = text_rows[viewport_start..].join("\n");
     let (surface, rows, capsule, busy) =
-        team_agent_contract::providers::cursor::interaction::inspect_composer(text)?;
+        team_agent_contract::providers::cursor::interaction::inspect_legacy_composer(&viewport)?;
     let first = rows.first()?.strip_prefix("→ ")?;
     let footer = rows.iter().rposition(|row| {
         row.strip_suffix("Run Everything").is_some_and(|prefix| {
@@ -228,9 +236,13 @@ fn cursor_input(text: &str) -> Option<InputFrame> {
     if tail.is_empty() {
         return None;
     }
-    let header: Vec<_> = text.lines().map(str::trim).collect();
-    let version = header.windows(2).find(|pair| pair[0] == "Cursor Agent")?[1];
-    let identity = format!("{version}:{}", input_digest(&tail.join("\n")));
+    // Startup history can leave Tail(200) between Ready/Pasted/Accepted. The
+    // immutable carrier birth/nonce remains in NativeInputBinding; this UI
+    // context is the current native cwd/footer tail, not a version attestation.
+    let identity = format!(
+        "cursor-current-composer-v1:{}",
+        input_digest(&tail.join("\n"))
+    );
     let footer_row = rows[footer]
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -247,7 +259,6 @@ fn cursor_input(text: &str) -> Option<InputFrame> {
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let text_rows: Vec<_> = text.lines().collect();
     let arrow = text_rows
         .iter()
         .rposition(|line| line.trim().starts_with("→ "))?;
@@ -542,6 +553,74 @@ mod tests {
         ] {
             assert_eq!(pi_paste_capsule(label), None, "{label}");
         }
+    }
+
+    // Native Issue #328 current-composer rows; transcript removed and private
+    // cwd replaced with /owned/project. Startup banner is genuinely absent
+    // from the owned pane's Tail(200), not a fabricated invalid version.
+    const CURSOR_FOLLOWUP: &str =
+        include_str!("../../tests/fixtures/cursor-followup-headerless.txt");
+
+    #[test]
+    fn native_input_cursor_clean_followup_does_not_require_scrolled_startup_banner() {
+        let ready = inspect_input(Provider::CursorAgent, CURSOR_FOLLOWUP).unwrap();
+        assert!(ready.empty());
+        assert!(!ready.busy);
+        assert!(ready.capsule.is_none());
+        let header = format!("Cursor Agent\nv2026.10.14-0f9edde\n{CURSOR_FOLLOWUP}");
+        let with_header = inspect_input(Provider::CursorAgent, &header).unwrap();
+        assert!(with_header.empty() && !with_header.busy);
+        assert_eq!(ready.footer, with_header.footer);
+        assert_eq!(
+            ready.identity, with_header.identity,
+            "startup history is not a new UI identity"
+        );
+    }
+
+    #[test]
+    fn native_input_cursor_headerless_followup_retains_draft_busy_and_footer_fences() {
+        let label = "[Pasted text #2 +25 lines]";
+        let folded = CURSOR_FOLLOWUP.replace("Add a follow-up", label);
+        let draft = inspect_input(Provider::CursorAgent, &folded).unwrap();
+        assert!(!draft.empty());
+        assert_eq!(draft.capsule.as_deref(), Some(label));
+        let dirty = CURSOR_FOLLOWUP.replace("Add a follow-up", "Add a follow-up draft");
+        assert!(!inspect_input(Provider::CursorAgent, &dirty)
+            .unwrap()
+            .empty());
+        for dirty in [
+            CURSOR_FOLLOWUP.replace("Add a follow-up", "Add a follow-up\nforeign draft"),
+            CURSOR_FOLLOWUP.replace("Add a follow-up", &format!("{label}\nforeign draft")),
+        ] {
+            assert!(inspect_input(Provider::CursorAgent, &dirty).is_none());
+        }
+        let busy = CURSOR_FOLLOWUP.replace("Add a follow-up", "Add a follow-up ctrl+c to stop");
+        assert!(inspect_input(Provider::CursorAgent, &busy).unwrap().busy);
+        let working = format!("⠘⠆ Working\n{CURSOR_FOLLOWUP}");
+        assert!(inspect_input(Provider::CursorAgent, &working).unwrap().busy);
+        for unknown in [
+            "→ Add a follow-up\n".to_string(),
+            CURSOR_FOLLOWUP.replace("Run Everything", "unknown footer"),
+            CURSOR_FOLLOWUP.replace("  /owned/project\n", ""),
+        ] {
+            assert!(inspect_input(Provider::CursorAgent, &unknown).is_none());
+        }
+    }
+
+    #[test]
+    fn native_input_cursor_requires_composer_in_current_viewport_not_old_history() {
+        for header in ["", "Cursor Agent\nv2026.10.14-0f9edde\n"] {
+            let hidden = format!(
+                "{header}{CURSOR_FOLLOWUP}{}",
+                "unknown current row\n".repeat(24)
+            );
+            assert!(super::inspect_input(Provider::CursorAgent, &hidden, 24).is_none());
+        }
+        assert!(super::inspect_input(Provider::CursorAgent, CURSOR_FOLLOWUP, 0).is_none());
+        let current = super::inspect_input(Provider::CursorAgent, CURSOR_FOLLOWUP, 24).unwrap();
+        let changed = CURSOR_FOLLOWUP.replace("/owned/project", "/different/project");
+        let changed = super::inspect_input(Provider::CursorAgent, &changed, 24).unwrap();
+        assert_ne!(current.identity, changed.identity);
     }
 
     #[test]

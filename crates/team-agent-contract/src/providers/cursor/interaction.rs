@@ -136,6 +136,19 @@ mod composer_observation_tests {
         let extra = frame("Plan, search, build anything\nother editable line", "");
         assert!(inspect_composer(&extra).unwrap().1.contains(&"other editable line"));
     }
+
+    #[test]
+    fn legacy_composer_observes_headerless_followup_without_changing_contract_admission() {
+        let ready = "→ Add a follow-up\nGrok 4.7 High Run Everything\n/owned/project\n";
+        assert!(inspect_composer(ready).is_none());
+        assert_eq!(surface(ready), InputSurface::ShellOrUnknown);
+        assert_eq!(inspect_legacy_composer(ready).unwrap().0, InputSurface::ComposerReady);
+        let busy = ready.replace("Add a follow-up", "Add a follow-up ctrl+c to stop");
+        assert!(inspect_legacy_composer(&busy).unwrap().3);
+        let draft = ready.replace("Add a follow-up", "foreign draft");
+        assert_eq!(inspect_legacy_composer(&draft).unwrap().0, InputSurface::ComposerContainsPaste);
+        assert!(inspect_legacy_composer("→ Add a follow-up\n").is_none());
+    }
 }
 
 /// Read-only native composer view; ownership/correlation remains the caller's job.
@@ -155,6 +168,31 @@ pub fn inspect_composer(text: &str) -> Option<(InputSurface, Vec<&str>, Option<&
     let mut status = preceding.next().copied();
     if status.is_some_and(|line| line.starts_with("Tip: ")) { status = preceding.next().copied(); }
     let busy = matches!(observed, InputSurface::Busy) || status.is_some_and(working);
+    Some((observed, composer, marker, busy))
+}
+
+/// Legacy cursor_agent observation only: the startup banner can leave a
+/// bounded scrollback capture after a completed turn. Require the current
+/// native footer/context instead; this does not change contract H4/H6 surface
+/// admission, create a paste latch, or authorize any input.
+pub fn inspect_legacy_composer(text: &str) -> Option<(InputSurface, Vec<&str>, Option<&str>, bool)> {
+    if let Some(observation) = inspect_composer(text) { return Some(observation); }
+    let composer = composer_lines(text)?;
+    let footer = composer.iter().rposition(|row| row.strip_suffix("Run Everything")
+        .is_some_and(|prefix| !prefix.trim().is_empty() && !prefix.trim_start().starts_with("→ ")))?;
+    if footer == 0 || !composer[footer + 1..].iter().any(|row| !row.is_empty()) { return None; }
+    let current = composer.first()?.strip_prefix("→ ")?;
+    let lines: Vec<_> = text.lines().map(str::trim).collect();
+    let index = lines.iter().rposition(|line| line.starts_with("→ "))?;
+    let mut preceding = lines[..index].iter().rev().filter(|line| !line.is_empty());
+    let mut status = preceding.next().copied();
+    if status.is_some_and(|line| line.starts_with("Tip: ")) { status = preceding.next().copied(); }
+    let stop_hint = current.strip_suffix("ctrl+c to stop").is_some_and(|prefix| placeholder(prefix.trim()));
+    let busy = stop_hint || status.is_some_and(working);
+    let observed = if stop_hint || (placeholder(current) && busy) { InputSurface::Busy }
+        else if placeholder(current) { InputSurface::ComposerReady }
+        else { InputSurface::ComposerContainsPaste };
+    let marker = folded_marker(current);
     Some((observed, composer, marker, busy))
 }
 
