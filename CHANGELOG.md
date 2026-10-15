@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.118]
+
+- **Adaptive ambient pane recovery (Issue #326):** isolate an inherited foreign or unavailable tmux pane into a workspace-owned managed Leader launch instead of blocking ordinary startup. Explicit external, attach and nested-attach intent retains strict pane/workspace/terminal authority checks; unrelated panes are not adopted or rewritten.
+- **Cursor follow-up and multiline submission (Issue #328):** recognize clean current `Add a follow-up` composers after startup banners leave the viewport, including expanded multiline input with a standalone arrow and folded-paste surfaces. Keep historical transcript blocks separate from the current editable area so follow-up messages can reach their normal Enter submission path.
+- **Restore unconditional v0.5.113 input (Issue #321, PR #331):** remove the regressive pre-paste idle admission from legacy message delivery. Restore unconditional native paste-and-submit behavior instead of repeatedly deferring messages while waiting for an idle composer.
+- **Release metadata:** align the Rust workspace/lockfile, installer, three platform packages and official publishing workflow at 0.5.118. The tag workflow retains full workspace verification and three-platform build/publish gates; candidate compilation and metadata preparation alone do not establish real-machine acceptance or unrestricted scenario coverage.
+
 ## [0.5.117]
 
 - **Reliable multiline submission (Issue #321, PR #323):** legacy Pi and Cursor Agent sends now require a known empty composer, stable owned-paste evidence and one logical Enter. Exact owner/carrier/birth/nonce binding, cooperative input locking and message-bound tmux buffers prevent cross-pane or stale-owner writes; uncertain effects never cause repaste or blind extra keys.
