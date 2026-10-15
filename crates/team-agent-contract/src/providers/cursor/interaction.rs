@@ -149,6 +149,23 @@ mod composer_observation_tests {
         assert_eq!(inspect_legacy_composer(&draft).unwrap().0, InputSurface::ComposerContainsPaste);
         assert!(inspect_legacy_composer("→ Add a follow-up\n").is_none());
     }
+
+    #[test]
+    fn legacy_composer_observes_standalone_arrow_expanded_body_not_an_empty_editor() {
+        let current = "→\n  wrapped editable body\n  [team-agent-token:msg_one]\n\nGrok 4.7 High Run Everything\n/owned/project\n";
+        for prefix in ["", "Cursor Agent\nv2026.10.14-0f9edde\n→ Add a follow-up\nGrok 4.7 High Run Everything\n/old/project\n"] {
+            let text = format!("{prefix}{current}");
+            let (observed, rows, capsule, busy) = inspect_legacy_composer(&text).unwrap();
+            assert_eq!(observed, InputSurface::ComposerContainsPaste);
+            assert_eq!(rows[0], "→");
+            assert!(rows.contains(&"[team-agent-token:msg_one]"));
+            assert!(capsule.is_none() && !busy);
+        }
+        assert_eq!(surface(current), InputSurface::ShellOrUnknown);
+        assert!(inspect_composer(current).is_none());
+        assert!(inspect_legacy_composer("→\nGrok 4.7 High Run Everything\n/owned/project\n").is_none());
+        assert!(inspect_legacy_composer("→\nforeign draft\n").is_none());
+    }
 }
 
 /// Read-only native composer view; ownership/correlation remains the caller's job.

@@ -608,6 +608,34 @@ mod tests {
     }
 
     #[test]
+    fn native_input_cursor_real_expanded_followup_is_nonempty_current_marker_not_capsule() {
+        let expanded = include_str!("../../tests/fixtures/cursor-followup-expanded.txt");
+        let marker = "[team-agent-token:msg_one]";
+        for prefix in ["".to_string(), format!("Cursor Agent\nv2026.10.14-0f9edde\n{CURSOR_FOLLOWUP}")] {
+            let text = format!("{prefix}{expanded}");
+            let frame = inspect_input(Provider::CursorAgent, &text).unwrap();
+            assert!(!frame.empty() && !frame.busy);
+            assert!(frame.has_marker(marker));
+            assert!(frame.capsule.is_none());
+            assert!(!frame.transcript.contains(marker));
+            let changed = text.replace("/owned/project", "/different/project");
+            assert_ne!(frame.identity, inspect_input(Provider::CursorAgent, &changed).unwrap().identity);
+        }
+        let duplicate = expanded.replace(marker, &format!("{marker}\n{marker}"));
+        assert!(!inspect_input(Provider::CursorAgent, &duplicate).unwrap().has_marker(marker));
+        let busy = expanded.replace("  →", "⠘⠆ Working\n  →");
+        assert!(inspect_input(Provider::CursorAgent, &busy).unwrap().busy);
+        for unknown in [
+            "→\nGrok 4.7 High Run Everything\n/owned/project\n".to_string(),
+            expanded.replace("Run Everything", "unknown footer"),
+            expanded.replace("  /owned/project\n", ""),
+            format!("{expanded}{}", "unknown current row\n".repeat(24)),
+        ] {
+            assert!(super::inspect_input(Provider::CursorAgent, &unknown, 24).is_none());
+        }
+    }
+
+    #[test]
     fn native_input_cursor_requires_composer_in_current_viewport_not_old_history() {
         for header in ["", "Cursor Agent\nv2026.10.14-0f9edde\n"] {
             let hidden = format!(
