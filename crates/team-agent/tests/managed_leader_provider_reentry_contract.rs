@@ -11,8 +11,10 @@
 //! - The same physical pane remains the owner even if the process UUID changes.
 //! - A different pane may not silently steal the canonical leader binding.
 //! - The accepted same-pane fixture has a real controlling tty that matches the
-//!   live pane; missing/mismatched tty or foreign workspace stays refused with
-//!   the catalog reason and fact set that describes what was actually observed.
+//!   live pane. With explicit `--external-leader` intent, missing/mismatched tty
+//!   or foreign workspace stays refused with the observed catalog facts.
+//! - Ordinary managed launch may instead isolate an unrelated ambient tuple;
+//!   that default route is covered by leader_launcher_ambient_pane_authority_red.
 
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
@@ -125,7 +127,7 @@ fn same_physical_pane_with_new_uuid_is_still_owner() {
 
 #[test]
 #[serial(env)]
-fn ambient_pane_without_controlling_tty_is_refused() {
+fn explicit_external_pane_without_controlling_tty_is_refused() {
     let case = ReentryCase::new("ambient-without-controlling-tty");
     case.seed_managed_leader_state("old-managed-uuid");
     case.seed_refusal_durable_canaries();
@@ -148,7 +150,7 @@ fn ambient_pane_without_controlling_tty_is_refused() {
 
 #[test]
 #[serial(env)]
-fn controlling_tty_not_matching_ambient_pane_is_refused() {
+fn explicit_external_controlling_tty_not_matching_pane_is_refused() {
     let case = ReentryCase::new("ambient-mismatched-controlling-tty");
     case.seed_managed_leader_state("old-managed-uuid");
     case.seed_refusal_durable_canaries();
@@ -169,7 +171,7 @@ fn controlling_tty_not_matching_ambient_pane_is_refused() {
 
 #[test]
 #[serial(env)]
-fn matching_tty_in_foreign_workspace_is_refused() {
+fn explicit_external_matching_tty_in_foreign_workspace_is_refused() {
     let case = ReentryCase::new("ambient-foreign-workspace");
     case.seed_managed_leader_state("old-managed-uuid");
     case.seed_refusal_durable_canaries();
@@ -537,7 +539,7 @@ impl ReentryCase {
         let measurement_file =
             measurement_file(&measurement_path).expect("create no-control measurement file");
         let measurement_fd = measurement_file.as_raw_fd();
-        let mut command = self.command(&["claude", "--json"], pane, None);
+        let mut command = self.command(&["claude", "--external-leader", "--json"], pane, None);
         command
             .stdin(Stdio::from(stdin_slave))
             .stdout(Stdio::piped())
@@ -567,7 +569,7 @@ impl ReentryCase {
         let (_other_master, _other_slave, other_tty) =
             open_pty().expect("allocate distinct pane tty");
         self.run_ta_with_controlling_tty(
-            &["claude", "--json"],
+            &["claude", "--external-leader", "--json"],
             pane,
             None,
             Some(&other_tty),
@@ -577,7 +579,7 @@ impl ReentryCase {
 
     fn run_leader_provider_from_foreign_workspace(&self, pane: &str) -> Output {
         self.run_ta_with_controlling_tty(
-            &["claude", "--json"],
+            &["claude", "--external-leader", "--json"],
             pane,
             None,
             None,

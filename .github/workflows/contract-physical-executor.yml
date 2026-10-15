@@ -185,6 +185,7 @@ jobs:
               run_case root-leader cargo test -p team-agent --lib --locked leader:: -- --test-threads=1
               run_case launcher-dispatch cargo test -p team-agent --test leader_launcher_n41_path_dispatch_red --locked -- --test-threads=1
               run_case pane-workspace cargo test -p team-agent --test pane_workspace_mismatch_red --locked -- --test-threads=1
+              run_case managed-reentry cargo test -p team-agent --test managed_leader_provider_reentry_contract --locked -- --test-threads=1
               ;;
             issue321|issue321-full)
               run_case root-tmux cargo test -p team-agent --lib --locked tmux_backend -- --test-threads=1
