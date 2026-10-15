@@ -219,7 +219,10 @@ fn cursor_input(text: &str, pane_height: u32) -> Option<InputFrame> {
     let viewport = text_rows[viewport_start..].join("\n");
     let (surface, rows, capsule, busy) =
         team_agent_contract::providers::cursor::interaction::inspect_legacy_composer(&viewport)?;
-    let first = rows.first()?.strip_prefix("→ ")?;
+    let first = match *rows.first()? {
+        "→" => "",
+        row => row.strip_prefix("→ ")?,
+    };
     let footer = rows.iter().rposition(|row| {
         row.strip_suffix("Run Everything").is_some_and(|prefix| {
             !prefix.trim().is_empty() && !prefix.trim_start().starts_with("→ ")
@@ -261,7 +264,7 @@ fn cursor_input(text: &str, pane_height: u32) -> Option<InputFrame> {
     };
     let arrow = text_rows
         .iter()
-        .rposition(|line| line.trim().starts_with("→ "))?;
+        .rposition(|line| line.trim() == "→" || line.trim().starts_with("→ "))?;
     Some(InputFrame {
         composer,
         transcript: text.lines().take(arrow).collect::<Vec<_>>().join("\n"),
@@ -611,7 +614,10 @@ mod tests {
     fn native_input_cursor_real_expanded_followup_is_nonempty_current_marker_not_capsule() {
         let expanded = include_str!("../../tests/fixtures/cursor-followup-expanded.txt");
         let marker = "[team-agent-token:msg_one]";
-        for prefix in ["".to_string(), format!("Cursor Agent\nv2026.10.14-0f9edde\n{CURSOR_FOLLOWUP}")] {
+        for prefix in [
+            "".to_string(),
+            format!("Cursor Agent\nv2026.10.14-0f9edde\n{CURSOR_FOLLOWUP}"),
+        ] {
             let text = format!("{prefix}{expanded}");
             let frame = inspect_input(Provider::CursorAgent, &text).unwrap();
             assert!(!frame.empty() && !frame.busy);
@@ -619,14 +625,22 @@ mod tests {
             assert!(frame.capsule.is_none());
             assert!(!frame.transcript.contains(marker));
             let changed = text.replace("/owned/project", "/different/project");
-            assert_ne!(frame.identity, inspect_input(Provider::CursorAgent, &changed).unwrap().identity);
+            assert_ne!(
+                frame.identity,
+                inspect_input(Provider::CursorAgent, &changed)
+                    .unwrap()
+                    .identity
+            );
         }
         let duplicate = expanded.replace(marker, &format!("{marker}\n{marker}"));
-        assert!(!inspect_input(Provider::CursorAgent, &duplicate).unwrap().has_marker(marker));
+        assert!(!inspect_input(Provider::CursorAgent, &duplicate)
+            .unwrap()
+            .has_marker(marker));
         let busy = expanded.replace("  →", "⠘⠆ Working\n  →");
         assert!(inspect_input(Provider::CursorAgent, &busy).unwrap().busy);
         for unknown in [
             "→\nGrok 4.7 High Run Everything\n/owned/project\n".to_string(),
+            "→\nforeign draft\n→ Add a follow-up\nGrok 4.7 High Run Everything\n/owned/project\n".to_string(),
             expanded.replace("Run Everything", "unknown footer"),
             expanded.replace("  /owned/project\n", ""),
             format!("{expanded}{}", "unknown current row\n".repeat(24)),

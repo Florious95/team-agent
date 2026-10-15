@@ -165,6 +165,7 @@ mod composer_observation_tests {
         assert!(inspect_composer(current).is_none());
         assert!(inspect_legacy_composer("→\nGrok 4.7 High Run Everything\n/owned/project\n").is_none());
         assert!(inspect_legacy_composer("→\nforeign draft\n").is_none());
+        assert!(inspect_legacy_composer("→\nforeign draft\n→ Add a follow-up\nGrok 4.7 High Run Everything\n/owned/project\n").is_none());
     }
 }
 
@@ -193,14 +194,23 @@ pub fn inspect_composer(text: &str) -> Option<(InputSurface, Vec<&str>, Option<&
 /// native footer/context instead; this does not change contract H4/H6 surface
 /// admission, create a paste latch, or authorize any input.
 pub fn inspect_legacy_composer(text: &str) -> Option<(InputSurface, Vec<&str>, Option<&str>, bool)> {
-    if let Some(observation) = inspect_composer(text) { return Some(observation); }
-    let composer = composer_lines(text)?;
+    let lines: Vec<_> = text.lines().map(str::trim).collect();
+    // Expanded native editors put the arrow on its own row. Select the
+    // current block before consulting history; strict H4/H6 grammar is unchanged.
+    let index = lines.iter().rposition(|line| *line == "→" || line.starts_with("→ "))?;
+    // Do not let an arrow quoted inside an expanded draft replace its real
+    // opening and turn foreign editable text into a seemingly empty composer.
+    if lines[..index].contains(&"→") { return None; }
+    let composer = lines[index..].to_vec();
     let footer = composer.iter().rposition(|row| row.strip_suffix("Run Everything")
         .is_some_and(|prefix| !prefix.trim().is_empty() && !prefix.trim_start().starts_with("→ ")))?;
     if footer == 0 || !composer[footer + 1..].iter().any(|row| !row.is_empty()) { return None; }
-    let current = composer.first()?.strip_prefix("→ ")?;
-    let lines: Vec<_> = text.lines().map(str::trim).collect();
-    let index = lines.iter().rposition(|line| line.starts_with("→ "))?;
+    let current = if composer[0] == "→" {
+        // A bare arrow is not empty-ready proof. Only expose an expanded
+        // nonempty body; the caller still owns marker, busy and stability gates.
+        if !composer[1..footer].iter().any(|row| !row.is_empty()) { return None; }
+        ""
+    } else { composer[0].strip_prefix("→ ")? };
     let mut preceding = lines[..index].iter().rev().filter(|line| !line.is_empty());
     let mut status = preceding.next().copied();
     if status.is_some_and(|line| line.starts_with("Tip: ")) { status = preceding.next().copied(); }

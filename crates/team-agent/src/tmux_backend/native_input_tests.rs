@@ -218,7 +218,9 @@ impl CommandRunner for Runner {
             );
             if matches!(state.mode, Mode::CursorExpanded | Mode::CursorExpandedDirty) {
                 let expanded = include_str!("../../tests/fixtures/cursor-followup-expanded.txt");
-                if matches!(state.mode, Mode::CursorExpandedDirty) || state.pasted > 0 && state.entered == 0 {
+                if matches!(state.mode, Mode::CursorExpandedDirty)
+                    || state.pasted > 0 && state.entered == 0
+                {
                     format!("[Pasted text #1 +30 lines]\n{expanded}")
                 } else if state.entered > 0 {
                     format!("{marker}\n→ Add a follow-up\nGrok 4.7 256K High · 8.6% Run Everything\n/owned/project\n")
@@ -797,8 +799,14 @@ fn native_input_cursor_expanded_followup_reaches_seen_then_one_enter() {
         )
     });
     let report = report.unwrap();
-    assert_eq!(report.submit_verification, SubmitVerification::EnterSentWithoutPlaceholderCheck);
-    assert_eq!(report.inject_verification, InjectVerification::CaptureContainsToken);
+    assert_eq!(
+        report.submit_verification,
+        SubmitVerification::EnterSentWithoutPlaceholderCheck
+    );
+    assert_eq!(
+        report.inject_verification,
+        InjectVerification::CaptureContainsToken
+    );
     let evidence = evidence.unwrap();
     assert_eq!(evidence.phase, NativeInputPhase::Accepted);
     assert!(evidence.capsule.is_none());
