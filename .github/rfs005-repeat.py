@@ -1,4 +1,4 @@
-"""Bounded, sequential original-test/control experiments; no production hooks."""
+"""Bounded original-test/control experiments; no production source changes."""
 import json
 import os
 from pathlib import Path
@@ -20,6 +20,8 @@ for index in range(count):
     env["CARGO_BIN_EXE_team-agent"] = str(product)
     if mode != "baseline":
         env.update(RFS005_MODE=mode, RFS005_HOLD_MS="120", RFS005_RECEIPT_DIR=str(case.resolve()))
+    if mode == "barrier":
+        env["LD_PRELOAD"] = str(Path("/tmp/rfs005-rename-barrier.so"))
     start = time.time()
     try:
         with (case / "test.log").open("w") as log:
@@ -46,3 +48,5 @@ if not all(r['actually_ran'] and r['exit'] != 124 for r in rows):
     sys.exit(2)
 if mode == "quiesced" and summary['failed']:
     sys.exit(1)
+if mode == "barrier" and not all(r['missing_refusal'] for r in rows):
+    sys.exit(2)

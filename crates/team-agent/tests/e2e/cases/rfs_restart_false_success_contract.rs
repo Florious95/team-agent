@@ -74,8 +74,21 @@ fn rfs_refused_dirty_topology_event_precedes_any_spawn_argv_event() {
     let old_socket = state_socket(&ws);
     let new_socket = unique_socket("rfs005-new");
     let _guard = TmuxSocketGuard::new(vec![old_socket.clone(), new_socket.clone()]);
-    create_dummy_session(&new_socket, "rfs005-leader-side", ws.path().to_path_buf());
     let mode = std::env::var("RFS005_MODE").unwrap_or_default();
+    let receipt_dir = std::env::var("RFS005_RECEIPT_DIR").ok().map(PathBuf::from);
+    if mode == "barrier" {
+        let dir = receipt_dir.as_ref().unwrap();
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("arm"), "pause one exact coordinator state rename").unwrap();
+        // Guarantee a changed observation if its first tick already committed.
+        let state = ws.read_state();
+        let pane = state["agents"]["a"]["pane_id"].as_str().unwrap();
+        let status = Command::new("tmux").args([
+            "-S", &old_socket, "send-keys", "-t", pane, "rfs005-observation-nudge", "Enter",
+        ]).status().unwrap();
+        assert!(status.success());
+    }
+    create_dummy_session(&new_socket, "rfs005-leader-side", ws.path().to_path_buf());
     if mode == "quiesced" {
         use std::thread;
         use std::time::{Duration, Instant};
@@ -94,9 +107,33 @@ fn rfs_refused_dirty_topology_event_precedes_any_spawn_argv_event() {
         }
         eprintln!("RFS005_QUIESCED pid={raw_pid} owned=true running=false");
     }
+    if mode == "barrier" {
+        let waiting = receipt_dir.as_ref().unwrap().join("writer-waiting");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(9);
+        loop {
+            if let Some(pid) = fs::read_to_string(&waiting).ok()
+                .and_then(|text| text.lines().next()?.parse::<u32>().ok()) {
+                assert!(ws.pid_is_owned_coordinator(pid), "not our fixture coordinator {pid}");
+                eprintln!("RFS005_BARRIER owned_coordinator_pid={pid}");
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "no coordinator rename barrier");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
     rfs005_snapshot(&ws, "before-seed");
     write_split_brain_state(&ws, &old_socket, &new_socket);
     rfs005_snapshot(&ws, "after-seed");
+    if mode == "barrier" {
+        let dir = receipt_dir.as_ref().unwrap();
+        fs::write(dir.join("release-writer"), "fixture seed complete").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !dir.join("writer-completed").exists() {
+            assert!(std::time::Instant::now() < deadline, "coordinator rename did not finish");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        rfs005_snapshot(&ws, "after-released-rename");
+    }
     if let Ok(ms) = std::env::var("RFS005_HOLD_MS") {
         let deadline = std::time::Instant::now()
             + std::time::Duration::from_millis(ms.parse().unwrap());

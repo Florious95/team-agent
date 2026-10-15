@@ -62,6 +62,9 @@ jobs:
           cmp rfs005-evidence/baseline-product.sha256 rfs005-evidence/observed-product.sha256
           python3 .github/rfs005-repeat.py observe /tmp/rfs005-observed-e2e 80
           python3 .github/rfs005-repeat.py quiesced /tmp/rfs005-observed-e2e 30
+          gcc -shared -fPIC -Wall -Wextra -Werror .github/rfs005-rename-barrier.c -ldl -o /tmp/rfs005-rename-barrier.so
+          sha256sum .github/rfs005-rename-barrier.c /tmp/rfs005-rename-barrier.so > rfs005-evidence/barrier-apparatus.sha256
+          python3 .github/rfs005-repeat.py barrier /tmp/rfs005-observed-e2e 3
       - name: Bind evidence
         if: always()
         shell: bash
