@@ -1,317 +1,79 @@
-name: Contract physical executor (controlled macOS fixtures)
+name: RFS005 isolated fixture investigation
 
 on:
-  pull_request:
-    paths:
-      - "crates/team-agent-contract/**"
-      - ".github/workflows/contract-physical-executor.yml"
   workflow_dispatch:
-    inputs:
-      source_sha:
-        description: Optional exact product SHA for finite Grok/root regression
-        required: false
-        default: ""
-        type: string
-      expected_tree:
-        description: Exact product tree when source_sha is supplied
-        required: false
-        default: ""
-        type: string
-      regression_scope:
-        description: Fixed finite suite or owned host ancestry/native target
-        required: false
-        default: full
-        type: choice
-        options:
-          - full
-          - host-ancestry
-          - host-native
-          - issue321
-          - issue321-full
-          - issue321-f1
-          - issue326
 
 permissions:
   contents: read
 
 jobs:
-  macos-fixtures:
-    if: github.event_name != 'workflow_dispatch' || inputs.source_sha == ''
-    runs-on: macos-14
+  rfs005-linux:
+    runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
       RUSTUP_TOOLCHAIN: "1.95.0"
-      CONTRACT_OLD_SCOPE: "fixture-old-scope"
-      TEAM_AGENT_K2_FOREIGN_PROBE: "fixture-foreign-team"
-      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ env.SOURCE_SHA }}
-          fetch-depth: 0
+          fetch-depth: 2
           persist-credentials: false
-      - name: Prepare fixed toolchain and controlled fixture executables
+      - name: Freeze production source and prepare toolchain
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
-          if ! command -v tmux >/dev/null; then brew install tmux; fi
-          printf 'CONTRACT_TMUX=%s\n' "$(command -v tmux)" >> "$GITHUB_ENV"
-          printf 'CONTRACT_PYTHON=%s\n' "$(python3 -c 'import os,sys; print(os.path.realpath(sys.executable))')" >> "$GITHUB_ENV"
-          printf 'CARGO_TARGET_DIR=%s\n' "$RUNNER_TEMP/contract-physical-target" >> "$GITHUB_ENV"
-          mkdir contract-evidence
-          git rev-parse HEAD 'HEAD^{tree}' > contract-evidence/source.txt
-          rustc -vV > contract-evidence/toolchain.txt
-          cargo --version >> contract-evidence/toolchain.txt
-          tmux -V >> contract-evidence/toolchain.txt
-          python3 --version >> contract-evidence/toolchain.txt
-      - name: Execute contract and real-tmux fake-process tests
-        shell: bash
-        run: |
-          set -uo pipefail
-          cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets -- --nocapture 2>&1 | tee contract-evidence/test.log
-          statuses=("${PIPESTATUS[@]}")
-          printf '%s\n' "${statuses[0]}" > contract-evidence/test.exit
-          test "${statuses[1]}" -eq 0 || exit 125
-          exit "${statuses[0]}"
-      - name: Clippy
-        shell: bash
-        run: |
-          set -uo pipefail
-          cargo clippy --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets -- -D warnings 2>&1 | tee contract-evidence/clippy.log
-          statuses=("${PIPESTATUS[@]}")
-          printf '%s\n' "${statuses[0]}" > contract-evidence/clippy.exit
-          test "${statuses[1]}" -eq 0 || exit 125
-          exit "${statuses[0]}"
-      - name: Format and legacy byte-freeze
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo fmt --manifest-path crates/team-agent-contract/Cargo.toml --check
-          git diff --exit-code
-          python3 - <<'PY'
-          import json, subprocess
-          def entries(ref):
-              return {p: m for row in subprocess.check_output(['git','ls-tree','-rz',ref]).split(b'\0') if row for m,p in [row.split(b'\t',1)]}
-          base=entries('508f37bf8884f6c4c6288ae00bab2938d9300ed3')
-          head=entries('HEAD')
-          changed=[p.decode() for p,m in base.items() if head.get(p)!=m]
-          proof={'baseline_entries':len(base),'changed':changed}
-          print(json.dumps(proof))
-          assert not changed
-          with open('contract-evidence/byte-freeze.json','w') as f: json.dump(proof,f)
-          PY
-      - name: Preserve exact logs and receipt hashes
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          if test -d contract-evidence; then
-            (cd contract-evidence && shasum -a 256 ./* > artifact-sha256.txt)
-          fi
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: contract-physical-${{ github.run_id }}-${{ github.run_attempt }}
-          path: contract-evidence/
-          if-no-files-found: error
-          retention-days: 14
-
-  grok-root-regression:
-    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && inputs.regression_scope != 'issue321-f1'
-    runs-on: macos-14
-    timeout-minutes: 45
-    env:
-      SOURCE_SHA: ${{ inputs.source_sha }}
-      EXPECTED_TREE: ${{ inputs.expected_tree }}
-      REGRESSION_SCOPE: ${{ inputs.regression_scope }}
-      RUSTUP_TOOLCHAIN: "1.95.0"
-      CONTRACT_OLD_SCOPE: fixture-old-scope
-      TEAM_AGENT_K2_FOREIGN_PROBE: fixture-foreign-team
-    steps:
-      - name: Validate fixed inputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$EXPECTED_TREE" =~ ^[0-9a-f]{40}$ ]]
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ inputs.source_sha }}
-          fetch-depth: 1
-          persist-credentials: false
-      - name: Verify product source and prepare controlled fixtures
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_TREE"
-          test -z "$(git status --porcelain=v1)"
-          rustup toolchain install 1.95.0 --profile minimal --component rustfmt
-          if ! command -v tmux >/dev/null; then brew install tmux; fi
-          printf 'CONTRACT_TMUX=%s\n' "$(command -v tmux)" >> "$GITHUB_ENV"
-          printf 'CONTRACT_PYTHON=%s\n' "$(python3 -c 'import os,sys; print(os.path.realpath(sys.executable))')" >> "$GITHUB_ENV"
-          mkdir regression-evidence
-          git rev-parse HEAD 'HEAD^{tree}' > regression-evidence/source.txt
-          rustc -vV > regression-evidence/toolchain.txt
-          cargo --version >> regression-evidence/toolchain.txt
-          tmux -V >> regression-evidence/toolchain.txt
-          python3 --version >> regression-evidence/toolchain.txt
-      - name: Execute finite root and contract regressions
-        shell: bash
-        run: |
-          set -euo pipefail
-          run_case() {
-            local name="$1"
-            shift
-            set +e
-            "$@" 2>&1 | tee "regression-evidence/${name}.log"
-            local statuses=("${PIPESTATUS[@]}")
-            set -e
-            printf '%s\n' "${statuses[0]}" > "regression-evidence/${name}.exit"
-            test "${statuses[1]}" -eq 0 || return 125
-            return "${statuses[0]}"
-          }
-          case "$REGRESSION_SCOPE" in
-            host-ancestry)
-              run_case host-ancestry cargo test --manifest-path crates/team-agent-contract/Cargo.toml --test host_ancestry --locked -- --test-threads=1
-              ;;
-            host-native)
-              run_case host-native cargo test --manifest-path crates/team-agent-contract/Cargo.toml --test host_native --locked -- --test-threads=1
-              ;;
-            issue326)
-              run_case ambient-authority cargo test -p team-agent --test leader_launcher_ambient_pane_authority_red --locked -- --test-threads=1
-              run_case root-leader cargo test -p team-agent --lib --locked leader:: -- --test-threads=1
-              run_case launcher-dispatch cargo test -p team-agent --test leader_launcher_n41_path_dispatch_red --locked -- --test-threads=1
-              run_case pane-workspace cargo test -p team-agent --test pane_workspace_mismatch_red --locked -- --test-threads=1
-              run_case managed-reentry cargo test -p team-agent --test managed_leader_provider_reentry_contract --locked -- --test-threads=1
-              ;;
-            issue321|issue321-full)
-              run_case root-tmux cargo test -p team-agent --lib --locked tmux_backend -- --test-threads=1
-              run_case root-transport cargo test -p team-agent --lib --locked transport:: -- --test-threads=1
-              run_case root-messaging cargo test -p team-agent --lib --locked messaging:: -- --test-threads=1
-              run_case root-input-lock cargo test -p team-agent --lib --locked pane_input_lock -- --test-threads=1
-              run_case input-channel-lock cargo test -p team-agent --test pane_input_channel_lock --locked -- --test-threads=1
-              run_case contract-birth-port cargo test --manifest-path crates/team-agent-contract/Cargo.toml --lib --locked process_birth_identity -- --test-threads=1
-              run_case contract-composer-port cargo test --manifest-path crates/team-agent-contract/Cargo.toml --lib --locked composer_observation_tests -- --test-threads=1
-              if test "$REGRESSION_SCOPE" = issue321-full; then
-                run_case contract-all cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets -- --test-threads=1
-              fi
-              ;;
-            full)
-              run_case root-stopped cargo test -p team-agent --lib --locked stop -- --test-threads=1
-              run_case root-shutdown cargo test -p team-agent --lib --locked shutdown -- --test-threads=1
-              run_case root-restart cargo test -p team-agent --lib --locked lifecycle::restart -- --test-threads=1
-              run_case root-contract cargo test -p team-agent --lib --locked contract_runtime -- --test-threads=1
-              run_case public-lifecycle cargo test -p team-agent --test add_agent_restart_saveconflict_contract --locked -- --test-threads=1
-              run_case claim-endpoint cargo test -p team-agent --test claim_endpoint_convergence_contract --locked -- --test-threads=1
-              run_case reboot-recovery cargo test -p team-agent --test reboot_recovery_followup_0531_contract --locked -- --test-threads=1
-              run_case restart-precision cargo test -p team-agent --test restart_recovery_precision_0532_contract --locked -- --test-threads=1
-              run_case shutdown-annotation cargo test -p team-agent --test shutdown_and_annotation_batch5_6 --locked -- --test-threads=1
-              run_case e2e cargo test -p team-agent --test e2e --locked -- --test-threads=1
-              run_case contract-all cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets -- --test-threads=1
-              ;;
-            *) exit 64 ;;
-          esac
-      - name: Check scoped formatting and retain a remote formatting patch
-        if: always() && (inputs.regression_scope == 'issue321' || inputs.regression_scope == 'issue321-full')
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Do not reformat the pre-existing byte-frozen contract grammar or
-          # unrelated legacy bodies. These are the five wholly new Rust files.
-          files=(
-            crates/team-agent/src/messaging/enter_rescue.rs
-            crates/team-agent/src/messaging/enter_rescue_tests.rs
-            crates/team-agent/src/tmux_backend/native_input.rs
-            crates/team-agent/src/tmux_backend/native_input_tests.rs
-            crates/team-agent/src/transport/native_input.rs
-          )
-          set +e
-          rustfmt --edition 2021 --config skip_children=true --check "${files[@]}" > regression-evidence/format.log 2>&1
-          rc=$?
-          set -e
-          printf '%s\n' "$rc" > regression-evidence/format.exit
-          rustfmt --edition 2021 --config skip_children=true "${files[@]}"
-          git diff --binary -- "${files[@]}" > regression-evidence/format.patch
-          git restore --worktree -- "${files[@]}"
-          exit "$rc"
-      - name: Bind retained evidence hashes
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          if test -d regression-evidence; then
-            (cd regression-evidence && shasum -a 256 ./* > SHA256SUMS)
-          fi
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: grok-root-regression-${{ github.run_id }}
-          path: regression-evidence/
-          if-no-files-found: error
-          retention-days: 14
-
-  workspace-all-linux:
-    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && (inputs.regression_scope == 'issue321-full' || inputs.regression_scope == 'issue321-f1')
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    env:
-      SOURCE_SHA: ${{ inputs.source_sha }}
-      EXPECTED_TREE: ${{ inputs.expected_tree }}
-      RUSTUP_TOOLCHAIN: "1.95.0"
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ inputs.source_sha }}
-          fetch-depth: 1
-          persist-credentials: false
-      - name: Verify exact workspace source and prepare published-platform toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$EXPECTED_TREE" =~ ^[0-9a-f]{40}$ ]]
-          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_TREE"
-          test -z "$(git status --porcelain=v1)"
+          mkdir rfs005-evidence
+          git rev-parse HEAD 'HEAD^{tree}' > rfs005-evidence/source.txt
+          git diff --exit-code 9eee354655375180d99ed2e8d0a636dfc32f1b84 -- crates/team-agent/src Cargo.lock Cargo.toml crates/team-agent/Cargo.toml
           rustup toolchain install 1.95.0 --profile minimal
           if ! command -v tmux >/dev/null; then
             sudo apt-get update
             sudo apt-get install -y tmux
           fi
-          mkdir workspace-evidence
-          git rev-parse HEAD 'HEAD^{tree}' > workspace-evidence/source.txt
-          rustc -vV > workspace-evidence/toolchain.txt
-          cargo --version >> workspace-evidence/toolchain.txt
-          tmux -V >> workspace-evidence/toolchain.txt
-      - name: Run fixed workspace or controlled role-fixture target
+          { uname -a; rustc -vV; cargo --version; tmux -V; nproc; } > rfs005-evidence/host.txt
+      - name: Compile and exercise exact unchanged RFS005 baseline
         shell: bash
         run: |
-          set -uo pipefail
-          set +e
-          command=(cargo test --workspace --locked --no-fail-fast)
-          if test "${{ inputs.regression_scope }}" = issue321-f1; then
-            command=(cargo test -p team-agent --test role_config_minimal_diff_red --locked -- --test-threads=1)
-          fi
-          "${command[@]}" 2>&1 | tee workspace-evidence/test.log
-          statuses=("${PIPESTATUS[@]}")
-          printf '%s\n' "${statuses[0]}" > workspace-evidence/test.exit
-          test "${statuses[1]}" -eq 0 || exit 125
-          exit "${statuses[0]}"
-      - name: Bind full-workspace receipt hashes
+          set -euo pipefail
+          fixture=crates/team-agent/tests/e2e/cases/rfs_restart_false_success_contract.rs
+          git show 9eee354655375180d99ed2e8d0a636dfc32f1b84:"$fixture" > "$fixture"
+          sha256sum "$fixture" > rfs005-evidence/original-fixture.sha256
+          cargo test -p team-agent --test e2e --locked --no-run --message-format=json > rfs005-evidence/baseline-build.json 2> rfs005-evidence/baseline-build.log
+          python3 - <<'PY'
+          import json, pathlib, shutil
+          rows=[json.loads(s) for s in pathlib.Path('rfs005-evidence/baseline-build.json').read_text().splitlines()]
+          binary=next(x['executable'] for x in rows if x.get('target',{}).get('name')=='e2e' and x.get('executable'))
+          shutil.copy2(binary, '/tmp/rfs005-baseline-e2e')
+          PY
+          sha256sum target/debug/team-agent > rfs005-evidence/baseline-product.sha256
+          python3 .github/rfs005-repeat.py baseline /tmp/rfs005-baseline-e2e 150
+          git restore --worktree -- "$fixture"
+      - name: Compile test-only observation and quiesced positive control
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p team-agent --test e2e --locked --no-run --message-format=json > rfs005-evidence/observed-build.json 2> rfs005-evidence/observed-build.log
+          python3 - <<'PY'
+          import json, pathlib, shutil
+          rows=[json.loads(s) for s in pathlib.Path('rfs005-evidence/observed-build.json').read_text().splitlines()]
+          binary=next(x['executable'] for x in rows if x.get('target',{}).get('name')=='e2e' and x.get('executable'))
+          shutil.copy2(binary, '/tmp/rfs005-observed-e2e')
+          PY
+          sha256sum target/debug/team-agent > rfs005-evidence/observed-product.sha256
+          cmp rfs005-evidence/baseline-product.sha256 rfs005-evidence/observed-product.sha256
+          python3 .github/rfs005-repeat.py observe /tmp/rfs005-observed-e2e 80
+          python3 .github/rfs005-repeat.py quiesced /tmp/rfs005-observed-e2e 30
+      - name: Bind evidence
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-          if test -d workspace-evidence; then
-            (cd workspace-evidence && sha256sum ./* > SHA256SUMS)
-          fi
+          git diff --exit-code 9eee354655375180d99ed2e8d0a636dfc32f1b84 -- crates/team-agent/src Cargo.lock Cargo.toml crates/team-agent/Cargo.toml
+          git status --porcelain=v1 > rfs005-evidence/final-source-status.txt
+          (cd rfs005-evidence && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: workspace-issue321-${{ github.run_id }}
-          path: workspace-evidence/
+          name: rfs005-independent-${{ github.run_id }}
+          path: rfs005-evidence/
           if-no-files-found: error
           retention-days: 14

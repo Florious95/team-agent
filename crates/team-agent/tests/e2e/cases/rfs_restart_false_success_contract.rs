@@ -75,9 +75,49 @@ fn rfs_refused_dirty_topology_event_precedes_any_spawn_argv_event() {
     let new_socket = unique_socket("rfs005-new");
     let _guard = TmuxSocketGuard::new(vec![old_socket.clone(), new_socket.clone()]);
     create_dummy_session(&new_socket, "rfs005-leader-side", ws.path().to_path_buf());
+    let mode = std::env::var("RFS005_MODE").unwrap_or_default();
+    if mode == "quiesced" {
+        use std::thread;
+        use std::time::{Duration, Instant};
+        use team_agent::coordinator::{pid_is_running, stop_coordinator, Pid, WorkspacePath};
+        let raw_pid = fs::read_to_string(ws.coordinator_pid_file()).unwrap()
+            .trim().parse::<u32>().unwrap();
+        assert!(ws.pid_is_owned_coordinator(raw_pid));
+        let pid = Pid::new(raw_pid);
+        let stopped = stop_coordinator(&WorkspacePath::new(ws.path().to_path_buf())).unwrap();
+        assert!(stopped.ok);
+        assert_eq!(stopped.pid, Some(pid));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while pid_is_running(pid).unwrap() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        eprintln!("RFS005_QUIESCED pid={raw_pid} owned=true running=false");
+    }
+    rfs005_snapshot(&ws, "before-seed");
     write_split_brain_state(&ws, &old_socket, &new_socket);
-
-    let _ = run_ta(&ws, &["restart", ws_path, "--json"]);
+    rfs005_snapshot(&ws, "after-seed");
+    if let Ok(ms) = std::env::var("RFS005_HOLD_MS") {
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(ms.parse().unwrap());
+        let mut previous = fs::read(ws.state_json_path()).unwrap_or_default();
+        let mut changes = 0;
+        while std::time::Instant::now() < deadline {
+            let current = fs::read(ws.state_json_path()).unwrap_or_default();
+            if current != previous {
+                changes += 1;
+                rfs005_snapshot(&ws, &format!("background-change-{changes}"));
+                previous = current;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+    rfs005_snapshot(&ws, "before-restart");
+    let out = run_ta(&ws, &["restart", ws_path, "--json"]);
+    if !mode.is_empty() {
+        eprintln!("RFS005_RESTART exit={} stdout={} stderr={}", out.exit_code, out.stdout, out.stderr);
+    }
+    rfs005_snapshot(&ws, "after-restart");
     let events = read_events(&ws);
     let refused = event_index(&events, EVENT_RESTART_REFUSED_DIRTY_TOPOLOGY).unwrap_or_else(|| {
         panic!("R2 RED: missing {EVENT_RESTART_REFUSED_DIRTY_TOPOLOGY}; events={events:?}")
@@ -391,6 +431,31 @@ impl Drop for TmuxSocketGuard {
             }
         }
     }
+}
+
+// Investigation-only snapshots. Production bytes stay frozen at PR331's head.
+fn rfs005_snapshot(ws: &TestWorkspace, stage: &str) {
+    let Ok(dir) = std::env::var("RFS005_RECEIPT_DIR") else { return; };
+    let dir = PathBuf::from(dir);
+    fs::create_dir_all(&dir).unwrap();
+    let bytes = fs::read(ws.state_json_path()).unwrap_or_default();
+    fs::write(dir.join(format!("{stage}.state.json")), &bytes).unwrap();
+    for (source, suffix) in [
+        (ws.events_jsonl_path(), "events.jsonl"),
+        (ws.path().join(".team/runtime/coordinator_tick.json"), "tick.json"),
+    ] {
+        if let Ok(bytes) = fs::read(source) {
+            fs::write(dir.join(format!("{stage}.{suffix}")), bytes).unwrap();
+        }
+    }
+    let state: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    eprintln!("RFS005_SNAPSHOT {}", json!({
+        "stage": stage, "valid_json": !state.is_null(),
+        "root_endpoint": state["tmux_endpoint"], "root_socket": state["tmux_socket"],
+        "canonical_endpoint": state["teams"]["rfs005"]["tmux_endpoint"],
+        "canonical_socket": state["teams"]["rfs005"]["tmux_socket"],
+        "path": dir,
+    }));
 }
 
 fn write_split_brain_state(ws: &TestWorkspace, old_socket: &str, new_socket: &str) {
