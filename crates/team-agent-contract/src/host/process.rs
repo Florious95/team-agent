@@ -53,6 +53,7 @@ fn image_stamp(metadata: &Metadata) -> ImageStamp {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn read_limited(path: &Path, limit: usize, operation: &'static str) -> Result<Vec<u8>, HostError> {
     let file = File::open(path).map_err(|e| HostError::io(operation, e))?;
     let mut bytes = Vec::new();
