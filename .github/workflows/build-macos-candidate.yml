@@ -13,6 +13,14 @@ on:
         description: "Exact 40-character tree SHA expected at source_sha"
         required: true
         type: string
+      incremental_base_sha:
+        description: "Optional exact baseline commit to compile first in the same target directory"
+        required: false
+        type: string
+      incremental_base_tree:
+        description: "Required exact tree when incremental_base_sha is supplied"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -26,6 +34,8 @@ jobs:
       EXPECTED_TREE_INPUT: ${{ inputs.expected_tree }}
       RUST_TOOLCHAIN: "1.95.0"
       TARGET: "aarch64-apple-darwin"
+      INCREMENTAL_BASE_SHA: ${{ inputs.incremental_base_sha }}
+      INCREMENTAL_BASE_TREE: ${{ inputs.incremental_base_tree }}
 
     steps:
       - name: Validate dispatch inputs and runner
@@ -44,6 +54,10 @@ jobs:
 
           validate_sha source_sha "$SOURCE_SHA_INPUT"
           validate_sha expected_tree "$EXPECTED_TREE_INPUT"
+          if [[ -n "$INCREMENTAL_BASE_SHA" || -n "$INCREMENTAL_BASE_TREE" ]]; then
+            validate_sha incremental_base_sha "$INCREMENTAL_BASE_SHA"
+            validate_sha incremental_base_tree "$INCREMENTAL_BASE_TREE"
+          fi
 
           if [[ "${GITHUB_REPOSITORY:-}" != "Florious95/team-agent" ]]; then
             echo "::error::workflow must run in Florious95/team-agent"
@@ -125,19 +139,50 @@ jobs:
           printf 'CARGO_VERSION=%s\n' "$cargo_version" >> "$GITHUB_ENV"
           printf 'RUSTC_HOST=%s\n' "$rustc_host" >> "$GITHUB_ENV"
 
-      - name: Build requested source
+      - name: Build requested source (optionally incremental from exact baseline)
         shell: bash
         run: |
           set -euo pipefail
           export RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN"
-          cargo build -p team-agent --bin team-agent --release --target aarch64-apple-darwin --locked
+          export CARGO_TARGET_DIR="${RUNNER_TEMP}/team-agent-candidate-target"
+          mkdir -p "${RUNNER_TEMP}/candidate-build-receipts"
+          receipts="${RUNNER_TEMP}/candidate-build-receipts"
+          build_source() {
+            local label="$1"
+            printf 'source_sha=%s\nsource_tree=%s\ntarget_dir=%s\ncargo_incremental=%s\n' \
+              "$(git rev-parse HEAD)" "$(git rev-parse 'HEAD^{tree}')" "$CARGO_TARGET_DIR" "${CARGO_INCREMENTAL:-default}" > "$receipts/${label}-source.txt"
+            set +e
+            cargo build -p team-agent --bin team-agent --release --target "$TARGET" --locked \
+              --message-format=json-render-diagnostics > "$receipts/${label}-cargo.jsonl" 2> "$receipts/${label}-cargo.log"
+            result=$?
+            set -e
+            printf '%s\n' "$result" > "$receipts/${label}-cargo.exit"
+            if [[ "$result" != 0 ]]; then
+              tail -n 100 "$receipts/${label}-cargo.log"
+              return "$result"
+            fi
+          }
+          if [[ -n "$INCREMENTAL_BASE_SHA" ]]; then
+            export CARGO_INCREMENTAL=1
+            git fetch --no-tags --depth=1 origin "$INCREMENTAL_BASE_SHA"
+            git checkout --detach "$INCREMENTAL_BASE_SHA"
+            test "$(git rev-parse HEAD)" = "$INCREMENTAL_BASE_SHA"
+            test "$(git rev-parse 'HEAD^{tree}')" = "$INCREMENTAL_BASE_TREE"
+            test -z "$(git status --porcelain=v1 --untracked-files=all)"
+            build_source baseline
+            git checkout --detach "$SOURCE_SHA"
+            test "$(git rev-parse 'HEAD^{tree}')" = "$SOURCE_TREE"
+            test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          fi
+          build_source candidate
+          printf 'CANDIDATE_TARGET_DIR=%s\n' "$CARGO_TARGET_DIR" >> "$GITHUB_ENV"
 
       - name: Verify and package candidate
         shell: bash
         run: |
           set -euo pipefail
 
-          built_binary="target/${TARGET}/release/team-agent"
+          built_binary="${CANDIDATE_TARGET_DIR}/${TARGET}/release/team-agent"
           dist="dist"
           binary_name="team-agent-aarch64-apple-darwin"
           binary="${dist}/${binary_name}"
@@ -225,6 +270,8 @@ jobs:
           target=${TARGET}
           version=${version}
           binary_sha256=${binary_sha256}
+          incremental_base_sha=${INCREMENTAL_BASE_SHA}
+          incremental_base_tree=${INCREMENTAL_BASE_TREE}
           EOF
 
           tar -czf "$archive" -C "$dist" "$binary_name" SOURCE.txt BUILD.txt CLI-VERSION.txt
@@ -247,6 +294,15 @@ jobs:
           for output in "$binary" "$archive" "${dist}/SOURCE.txt" "${dist}/BUILD.txt" "${dist}/CLI-VERSION.txt" "${dist}/SHA256SUMS"; do
             test -f "$output"
           done
+
+      - name: Upload build receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: candidate-build-receipts-${{ github.run_id }}
+          path: ${{ runner.temp }}/candidate-build-receipts/
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Upload candidate artifact
         uses: actions/upload-artifact@v4
