@@ -11,6 +11,7 @@
 //!   - 物理 Enter 已出（pane/转录已有 token）后 observer/state 落盘失败不得返 Err 重投
 //!   - 提交前持久化失败仍返 Err，由 batch 记 item_blocked 隔离
 //!   - 同 message_id 的 token 已在 pane/转录则拒绝二次注入
+//!   - Codex 启动框注入前经 interpret；命中则不粘贴，status=codex_startup_modal
 //! maturity: wired
 //! ---
 //!
@@ -400,6 +401,17 @@ fn deliver_prepared_message(
             counts.set((prepare, project, claim + 1));
         });
     }
+    if message.status == CODEX_STARTUP_MODAL_STATUS {
+        if let Some(outcome) = recheck_held_codex_startup_modal(
+            store,
+            transport,
+            state,
+            message_id,
+            &message.recipient,
+        )? {
+            return Ok(outcome);
+        }
+    }
     let attempt = if store.claim_for_delivery(message_id)? {
         message.delivery_attempts.saturating_add(1)
     } else {
@@ -615,6 +627,11 @@ fn deliver_prepared_message(
     // and DO NOT inject the task. The coordinator's startup-prompt phase will dismiss
     // the trust prompt, and the SAME message_id is later replayed through this same
     // delivery pipeline (no parallel side channel).
+    // Codex startup frames are not a composer. interpret refuses the paste;
+    // seeing the frame does not authorize Trust, Skip, or purpose keys.
+    if codex_pane_startup_modal(transport, state, &message.recipient, &target) == Some(true) {
+        return hold_codex_startup_modal(store, event_log, message_id, &message.recipient);
+    }
     if recipient_pane_has_actionable_startup_prompt(transport, state, &message.recipient, &target) {
         store.mark(message_id, "queued_until_trust", None)?;
         event_log.write(
@@ -843,6 +860,13 @@ fn deliver_prepared_message(
     // waits for its authoritative provider transcript below.
     let verified = submit_verified;
     if !verified {
+        // Token never appeared on a startup frame: the paste did not submit.
+        // Leave the row retriable instead of freezing submitted_unverified.
+        if !readback_verified
+            && codex_pane_startup_modal(transport, state, &message.recipient, &target) == Some(true)
+        {
+            return hold_codex_startup_modal(store, event_log, message_id, &message.recipient);
+        }
         let reason = if !readback_verified {
             "pane_readback_unverified:capture_missing_token".to_string()
         } else {
@@ -2288,7 +2312,8 @@ pub fn deliver_pending_messages(
             "select message_id from messages
              where status in (
                  'pending', 'accepted', 'target_resolved',
-                 'submitted_pending_acceptance', 'queued_until_leader_attach', ?1
+                 'submitted_pending_acceptance', 'queued_until_leader_attach',
+                 'codex_startup_modal', ?1
              )
              order by created_at, message_id",
         )?;
@@ -2379,6 +2404,94 @@ fn message_for_delivery(
         )
         .optional()?;
     Ok(message)
+}
+
+const CODEX_STARTUP_MODAL_STATUS: &str = "codex_startup_modal";
+
+/// `Some(true)` blocks paste. `Some(false)` is a clear frame. `None` means the
+/// pane was not observed. Only Codex frames go through `CodexAdapter::interpret`.
+fn codex_pane_startup_modal(
+    transport: &dyn Transport,
+    state: &serde_json::Value,
+    recipient: &str,
+    target: &Target,
+) -> Option<bool> {
+    if !matches!(recipient_provider(state, recipient), Some(Provider::Codex)) {
+        return Some(false);
+    }
+    let text = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        transport.capture(target, CaptureRange::Tail(80))
+    })) {
+        Ok(Ok(captured)) => captured.text,
+        _ => return None,
+    };
+    use team_agent_contract::contract::delivery::InputSurface;
+    use team_agent_contract::contract::hooks::InteractionHook;
+    let observation = team_agent_contract::providers::codex::CodexAdapter::new().interpret(
+        &team_agent_contract::providers::codex::worker_capture_frame(&text),
+    );
+    Some(observation.surface == InputSurface::StartupRiskWarning)
+}
+
+fn codex_startup_modal_outcome(message_id: &str) -> DeliveryOutcome {
+    DeliveryOutcome {
+        ok: false,
+        status: DeliveryStatus::RetryScheduled,
+        message_status: MessageStatusShadow(CODEX_STARTUP_MODAL_STATUS.to_string()),
+        message_id: Some(message_id.to_string()),
+        verification: Some(CODEX_STARTUP_MODAL_STATUS.to_string()),
+        stage: None,
+        reason: None,
+        channel: None,
+        ack_forced_off: false,
+        turn_verification: None,
+    }
+}
+
+fn hold_codex_startup_modal(
+    store: &MessageStore,
+    event_log: &EventLog,
+    message_id: &str,
+    recipient: &str,
+) -> Result<DeliveryOutcome, MessagingError> {
+    store.mark(
+        message_id,
+        CODEX_STARTUP_MODAL_STATUS,
+        Some(CODEX_STARTUP_MODAL_STATUS),
+    )?;
+    event_log.write(
+        "delivery.codex_startup_modal",
+        serde_json::json!({
+            "message_id": message_id,
+            "recipient": recipient,
+            "reason": CODEX_STARTUP_MODAL_STATUS,
+            "paste": false,
+        }),
+    )?;
+    Ok(codex_startup_modal_outcome(message_id))
+}
+
+/// A held startup row is not claimable, so ticks can see it without burning
+/// delivery attempts. A clear frame is returned to `accepted` for one claim.
+fn recheck_held_codex_startup_modal(
+    store: &MessageStore,
+    transport: &dyn Transport,
+    state: &serde_json::Value,
+    message_id: &str,
+    recipient: &str,
+) -> Result<Option<DeliveryOutcome>, MessagingError> {
+    let live_targets = match transport.list_targets() {
+        Ok(targets) => targets,
+        Err(_) => return Ok(Some(codex_startup_modal_outcome(message_id))),
+    };
+    let resolved = resolve_inject_target(state, recipient, transport, &live_targets);
+    match codex_pane_startup_modal(transport, state, recipient, &resolved.target) {
+        Some(false) => {
+            store.mark(message_id, "accepted", None)?;
+            Ok(None)
+        }
+        Some(true) | None => Ok(Some(codex_startup_modal_outcome(message_id))),
+    }
 }
 
 /// Pre-inject gate (Contract B): peek the recipient pane and answer "is there an

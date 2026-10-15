@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 
 use crate::contract::delivery::{
-    CaptureFrame, InputProfile, InputSurface, InputTiming, InteractionObservation, PasteMode,
-    PayloadTrailer, PhysicalKey, ProfileIdentity, RetryBudget, SubmitPolicy,
+    CaptureFrame, InputProfile, InputSurface, InputTiming, InteractionObservation, PasteLatch,
+    PasteMode, PayloadTrailer, PhysicalKey, ProfileIdentity, RetryBudget, SubmitPolicy,
 };
 use crate::contract::descriptor::*;
 use crate::contract::hooks::{
@@ -102,9 +102,10 @@ const UPDATE_MODAL: Reason = Reason {
     message: "Codex update modal blocks the frame",
 };
 const TRUST_AND_CONTINUE: &str = "Trust and continue";
-const UPDATE_AVAILABLE: &str = "Update available";
 const UPDATE_NOW: &str = "Update now";
+const SKIP_UNTIL_NEXT_VERSION: &str = "Skip until next version";
 const COMPOSER_PLACEHOLDER: &str = "Ask Codex to do anything";
+const PROMPT_MARK: char = '›';
 const H3: Reason = Reason {
     code: "codex-h3-no-owned-mount",
     message: "Codex has no owned MCP mount",
@@ -487,6 +488,9 @@ fn full_worker_plan(
     }
     let mut plan =
         interactive_launch_plan(images, &request.paths.cwd.path, resolved.expected_session())?;
+    plan.arguments.push(OsString::from("-c"));
+    plan.arguments
+        .push(OsString::from("check_for_update_on_startup=false"));
     let owner = request.identity.clone();
     let mcp_path = OwnedPath::new(root.clone(), PathBuf::from("codex/mcp.toml"))?;
     let prompt_path = OwnedPath::new(root.clone(), PathBuf::from("codex/prompt.txt"))?;
@@ -635,17 +639,13 @@ impl SessionHook for CodexAdapter {
 
 impl InteractionHook for CodexAdapter {
     fn interpret(&self, frame: &CaptureFrame) -> InteractionObservation {
-        let (surface, predicate) = if frame.text.contains(TRUST_AND_CONTINUE) {
+        let current = current_prompt_line(&frame.text);
+        let (surface, predicate) = if let Some(reason) = startup_modal_reason(&frame.text) {
             (
                 InputSurface::StartupRiskWarning,
-                Some(FOLDER_TRUST_MODAL.code.to_string()),
+                Some(reason.code.to_string()),
             )
-        } else if frame.text.contains(UPDATE_AVAILABLE) || frame.text.contains(UPDATE_NOW) {
-            (
-                InputSurface::StartupRiskWarning,
-                Some(UPDATE_MODAL.code.to_string()),
-            )
-        } else if frame.text.contains(COMPOSER_PLACEHOLDER) {
+        } else if current.is_some_and(|line| line.contains(COMPOSER_PLACEHOLDER)) {
             (InputSurface::ComposerReady, None)
         } else {
             (
@@ -744,14 +744,72 @@ pub fn interactive_launch_plan(
     })
 }
 
+/// Last capture line whose first non-space character is `›`. Scrollback above it is not the current surface.
+pub fn current_prompt_line(text: &str) -> Option<&str> {
+    text.lines().rev().find_map(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with(PROMPT_MARK).then_some(trimmed)
+    })
+}
+
+/// Refusal only. A clear frame does not authorize a key.
+/// Only the current `›` line can be a startup modal. A greeting above it, including
+/// `Shall we give this cursor a purpose?`, is not a modal.
+pub fn startup_modal_reason(text: &str) -> Option<Reason> {
+    let line = current_prompt_line(text)?;
+    if line.contains(COMPOSER_PLACEHOLDER) {
+        return None;
+    }
+    if line.contains(TRUST_AND_CONTINUE) {
+        return Some(FOLDER_TRUST_MODAL);
+    }
+    if text.contains(SKIP_UNTIL_NEXT_VERSION)
+        && (line.contains(UPDATE_NOW) || line.contains(SKIP_UNTIL_NEXT_VERSION))
+    {
+        return Some(UPDATE_MODAL);
+    }
+    None
+}
+
+/// Frame passed to [`CodexAdapter::interpret`] before a live worker paste.
+/// Screen text is the only observation; the scope is a delivery placeholder.
+pub fn worker_capture_frame(text: &str) -> CaptureFrame {
+    use crate::contract::probe::EvidenceScope;
+    CaptureFrame {
+        scope: EvidenceScope {
+            identity: InstanceIdentity {
+                scope: ScopeId::new("codex_worker").expect("codex worker scope"),
+                seat: SeatId::new("codex_worker").expect("codex worker seat"),
+                instance: InstanceId::new("codex_worker").expect("codex worker instance"),
+                generation: Generation(0),
+            },
+            endpoint: "tmux".into(),
+            pane: "worker".into(),
+            binding: "delivery".into(),
+            session: None,
+            sequence: 0,
+            observed_at: Duration::ZERO,
+            valid_for: Duration::from_secs(30),
+            source: "pane-capture".into(),
+        },
+        text: text.to_string(),
+        cwd: None,
+        input: None,
+        baseline: None,
+        profile_id: CODEX_SUBMIT_PROFILES[0].id.to_string(),
+        operation: Operation::OrdinarySend,
+        message: None,
+        attempt: None,
+        after_step: None,
+        paste_latch: PasteLatch::NeverSeen,
+    }
+}
+
 /// Refusal only. A clear frame does not authorize a key.
 pub fn startup_modal_intercept(text: &str) -> Result<(), ContractError> {
-    if text.contains(TRUST_AND_CONTINUE) {
-        Err(unverified("codex startup modal", FOLDER_TRUST_MODAL))
-    } else if text.contains(UPDATE_AVAILABLE) || text.contains(UPDATE_NOW) {
-        Err(unverified("codex startup modal", UPDATE_MODAL))
-    } else {
-        Ok(())
+    match startup_modal_reason(text) {
+        Some(reason) => Err(unverified("codex startup modal", reason)),
+        None => Ok(()),
     }
 }
 
@@ -1428,5 +1486,47 @@ fn exact_text(value: Option<&serde_json::Value>) -> Option<String> {
         None
     } else {
         Some(text.to_string())
+    }
+}
+
+#[cfg(test)]
+mod startup_frame_tests {
+    use super::*;
+    use crate::contract::hooks::InteractionHook;
+
+    #[test]
+    fn current_chevron_decides_composer_trust_and_update() {
+        let adapter = CodexAdapter::new();
+        let composer = "\
+Shall we give this cursor a purpose?
+Trust and continue
+Skip until next version
+› Ask Codex to do anything?";
+        let seen = adapter.interpret(&worker_capture_frame(composer));
+        assert_eq!(seen.surface, InputSurface::ComposerReady);
+        assert_eq!(seen.predicate, None);
+        assert!(startup_modal_intercept(composer).is_ok());
+
+        let trust = "\
+Shall we give this cursor a purpose?
+Ask Codex to do anything
+› 1. Trust and continue";
+        let seen = adapter.interpret(&worker_capture_frame(trust));
+        assert_eq!(seen.surface, InputSurface::StartupRiskWarning);
+        assert_eq!(seen.predicate.as_deref(), Some(FOLDER_TRUST_MODAL.code));
+        assert!(startup_modal_intercept(trust).is_err());
+
+        let update = "\
+Skip until next version
+› 1. Update now (runs `npm install -g @openai/codex`)";
+        let seen = adapter.interpret(&worker_capture_frame(update));
+        assert_eq!(seen.surface, InputSurface::StartupRiskWarning);
+        assert_eq!(seen.predicate.as_deref(), Some(UPDATE_MODAL.code));
+
+        let skipped = "› 3. Skip until next version";
+        assert_eq!(
+            startup_modal_reason(skipped).map(|reason| reason.code),
+            Some(UPDATE_MODAL.code)
+        );
     }
 }

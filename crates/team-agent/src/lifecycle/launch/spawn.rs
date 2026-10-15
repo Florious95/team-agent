@@ -351,6 +351,18 @@ pub(super) fn spawn_agents(
                 }),
             );
         }
+        if matches!(provider, Provider::Codex) {
+            let spawn_cwd = crate::layout::worker_env::worker_spawn_cwd(agent, workspace);
+            if let (Some(root), Some(home)) = (
+                crate::provider::adapters::codex::git_work_root(&spawn_cwd),
+                crate::provider::adapters::codex::codex_home_from_env(&env),
+            ) {
+                crate::provider::adapters::codex::ensure_worker_directory_trust(&home, &root)
+                    .map_err(|error| {
+                        LifecycleError::StatePersist(format!("codex directory trust: {error}"))
+                    })?;
+            }
+        }
         // Grok 无 --mcp-config；写 <cwd>/.grok/config.toml 让 CLI 读到 team-agent。
         if matches!(provider, Provider::Grok) {
             ensure_grok_login_and_folder_trust(workspace)?;

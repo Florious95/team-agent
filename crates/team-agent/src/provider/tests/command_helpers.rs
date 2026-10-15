@@ -22,7 +22,7 @@ fn command_helpers_keep_provider_argv_bytes_and_order() {
     assert_eq!(codex::codex_base_command(
         Some("resume"), AuthMode::Subscription, Some(&mcp), Some(raw), Some(""),
         true, Some(&overrides), Some(ProviderEffort::Max),
-    ), ["codex", "resume", "--no-alt-screen", "--disable", "shell_snapshot", "--disable", "apps", "--profile", "", "--dangerously-bypass-approvals-and-sandbox", "--model", "", "-c", "model_reasoning_effort=low", "-c", "model_reasoning_effort=max", "-c", "developer_instructions=\" \\\"'\\\\\\n \""]);
+    ), ["codex", "resume", "--no-alt-screen", "--disable", "shell_snapshot", "--disable", "apps", "--profile", "", "--dangerously-bypass-approvals-and-sandbox", "--model", "", "-c", "model_reasoning_effort=low", "-c", "model_reasoning_effort=max", "-c", "developer_instructions=\" \\\"'\\\\\\n \"", "-c", "check_for_update_on_startup=false"]);
 
     assert_eq!(copilot::copilot_base_command(
         AuthMode::Subscription, Some(&mcp), Some(raw), Some(""), true,
@@ -47,7 +47,7 @@ fn command_helpers_keep_absent_options_and_safe_defaults() {
         None, None, None, false, false, None,
     ).expect("claude"), ["claude", "--permission-mode", "default"]);
     assert_eq!(codex::codex_base_command(None, AuthMode::Subscription, None, None, None, false, None, None),
-        ["codex", "--no-alt-screen", "--disable", "shell_snapshot", "--disable", "apps"]);
+        ["codex", "--no-alt-screen", "--disable", "shell_snapshot", "--disable", "apps", "-c", "check_for_update_on_startup=false"]);
     assert_eq!(copilot::copilot_base_command(AuthMode::Subscription, None, None, None, false),
         ["copilot", "--no-color", "--no-auto-update", "--no-remote", "--disable-builtin-mcps", "--allow-tool", "team_orchestrator"]);
     assert_eq!(cursor_agent::cursor_agent_base_command(None, false).expect("cursor"), ["agent", "--workspace", "{workspace}"]);
