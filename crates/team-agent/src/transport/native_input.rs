@@ -640,7 +640,8 @@ mod tests {
         assert!(inspect_input(Provider::CursorAgent, &busy).unwrap().busy);
         for unknown in [
             "→\nGrok 4.7 High Run Everything\n/owned/project\n".to_string(),
-            "→\nforeign draft\n→ Add a follow-up\nGrok 4.7 High Run Everything\n/owned/project\n".to_string(),
+            "→\nforeign draft\n→ Add a follow-up\nGrok 4.7 High Run Everything\n/owned/project\n"
+                .to_string(),
             expanded.replace("Run Everything", "unknown footer"),
             expanded.replace("  /owned/project\n", ""),
             format!("{expanded}{}", "unknown current row\n".repeat(24)),
