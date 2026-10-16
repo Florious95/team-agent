@@ -214,32 +214,55 @@ fn scope() -> EvidenceScope {
         sequence: 1, observed_at: Duration::ZERO, valid_for: Duration::from_secs(2), source: "controlled-cursor-token-frame".into(),
     }
 }
-fn text(body: &str) -> String { format!("Cursor Agent\nv{VERSION}\n\n{body}\n\nGPT-5.6 Luna Extra High\n/owned cwd") }
+fn text(body: &str) -> String { format!("Cursor Agent\nv{VERSION}\n\n{body}\n\nGPT-5.6 Luna Extra High Run Everything\n/owned cwd") }
 #[test]
 fn business_acceptance_reuses_seen_then_submit_and_transcript_anti_replay_fence() {
     let adapter = CursorAdapter::new(McpStdio { executable: "/fixture/candidate".into(), arguments: vec![], environment: Default::default() }).unwrap();
     let token = "[team-agent-token:msg-current]";
+    let mut baseline_scope = scope();
+    baseline_scope.session = Some(NativeSessionId::new(SID).unwrap());
+    let mut current_scope = baseline_scope.clone();
+    current_scope.sequence += 1;
     let mut frame = CaptureFrame {
-        scope: scope(), text: text(&format!("→ payload\n  {token}")),
+        scope: current_scope, text: text(&format!("→ payload\n  {token}")),
         cwd: None, input: None,
-        baseline: Some(CaptureBaseline { scope: scope(), text: text("→ Add a follow-up") }),
+        baseline: Some(CaptureBaseline { scope: baseline_scope, text: text("→ Add a follow-up") }),
         profile_id: PROFILE.into(), operation: Operation::FirstBusiness,
         message: Some(MessageId::new("msg-current").unwrap()), attempt: Some(AttemptId::new("attempt-current").unwrap()),
         after_step: Some(StepKind::Paste), paste_latch: PasteLatch::NeverSeen,
     };
+    // Each missing prerequisite independently refuses this otherwise valid
+    // controlled frame; do not relax production grammar to repair the fixture.
+    let mut no_footer = frame.clone();
+    no_footer.text = no_footer.text.replace(" Run Everything", "");
+    let mut no_session = frame.clone();
+    no_session.scope.session = None;
+    no_session.baseline.as_mut().unwrap().scope.session = None;
+    let mut same_sequence = frame.clone();
+    same_sequence.scope.sequence = same_sequence.baseline.as_ref().unwrap().scope.sequence;
+    for invalid in [no_footer, no_session, same_sequence] {
+        let observed = adapter.interpret(&invalid);
+        assert_eq!(observed.paste_latch, PasteLatch::NeverSeen);
+        assert!(observed.current_message.is_none() && observed.current_attempt.is_none());
+        assert_ne!(observed.surface, InputSurface::NativeAccepted);
+    }
     frame.paste_latch = adapter.interpret(&frame).paste_latch;
     assert!(matches!(frame.paste_latch, PasteLatch::Seen { .. }));
+    frame.scope.sequence += 1;
     frame.text = text(&format!("payload\n{token}\n\n⠘⠆ Working  1 token\n\n→ Add a follow-up  ctrl+c to stop"));
     assert_ne!(adapter.interpret(&frame).surface, InputSurface::NativeAccepted);
+    frame.scope.sequence += 1;
     frame.after_step = Some(StepKind::InitialSubmit);
     let accepted = adapter.interpret(&frame);
     assert_eq!(accepted.surface, InputSurface::NativeAccepted);
     assert_eq!(accepted.current_message, frame.message);
     assert_eq!(accepted.current_attempt, frame.attempt);
     for bad in [text("→ Add a follow-up"), text(&format!("→ draft {token}")), text(&format!("{token}\n→ new draft"))] {
+        frame.scope.sequence += 1;
         frame.text = bad;
         assert_ne!(adapter.interpret(&frame).surface, InputSurface::NativeAccepted);
     }
+    frame.scope.sequence += 1;
     frame.after_step = Some(StepKind::Paste); frame.paste_latch = PasteLatch::NeverSeen;
     frame.text = text(&format!("→ payload {token}"));
     frame.baseline.as_mut().unwrap().text = text(&format!("old {token}\n→ Add a follow-up"));

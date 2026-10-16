@@ -70,7 +70,7 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
-          cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets -- --nocapture 2>&1 | tee contract-evidence/test.log
+          cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets --no-fail-fast -- --nocapture 2>&1 | tee contract-evidence/test.log
           statuses=("${PIPESTATUS[@]}")
           printf '%s\n' "${statuses[0]}" > contract-evidence/test.exit
           test "${statuses[1]}" -eq 0 || exit 125
@@ -204,7 +204,7 @@ jobs:
               run_case contract-birth-port cargo test --manifest-path crates/team-agent-contract/Cargo.toml --lib --locked process_birth_identity -- --test-threads=1
               run_case contract-composer-port cargo test --manifest-path crates/team-agent-contract/Cargo.toml --lib --locked composer_observation_tests -- --test-threads=1
               if test "$REGRESSION_SCOPE" = issue321-full; then
-                run_case contract-all cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets -- --test-threads=1
+                run_case contract-all cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets --no-fail-fast -- --test-threads=1
               fi
               ;;
             full)
@@ -218,7 +218,7 @@ jobs:
               run_case restart-precision cargo test -p team-agent --test restart_recovery_precision_0532_contract --locked -- --test-threads=1
               run_case shutdown-annotation cargo test -p team-agent --test shutdown_and_annotation_batch5_6 --locked -- --test-threads=1
               run_case e2e cargo test -p team-agent --test e2e --locked -- --test-threads=1
-              run_case contract-all cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets -- --test-threads=1
+              run_case contract-all cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets --no-fail-fast -- --test-threads=1
               ;;
             *) exit 64 ;;
           esac

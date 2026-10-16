@@ -13,6 +13,7 @@ enum Mode {
     History,
     Changed,
     UnknownAfterEnter,
+    UnknownWithReplacement,
 }
 struct State {
     mode: Mode,
@@ -34,7 +35,9 @@ impl CommandRunner for Runner {
         let stdout = if argv.iter().any(|a| a == "display-message") {
             let format = argv.last().unwrap();
             if format.contains("socket_path") {
-                let nonce = if matches!(s.mode, Mode::UnknownAfterEnter) && s.entered > 0 {
+                let nonce = if (matches!(s.mode, Mode::UnknownAfterEnter) && s.entered > 0)
+                    || (matches!(s.mode, Mode::UnknownWithReplacement) && s.captures > 0)
+                {
                     "replaced"
                 } else {
                     &s.nonce
@@ -58,7 +61,7 @@ impl CommandRunner for Runner {
             s.captures += 1;
             let marker = "[team-agent-token:msg_one]";
             match s.mode {
-                Mode::Unknown => "unknown native screen".into(),
+                Mode::Unknown | Mode::UnknownWithReplacement => "unknown native screen".into(),
                 Mode::Capsule => pi("[paste #1 +30 lines]", "", false),
                 Mode::History => pi("", marker, false),
                 Mode::Changed if s.captures >= 3 => pi("different draft", "", false),
@@ -233,16 +236,32 @@ fn busy_unstable_unknown_or_final_authorization_failure_sends_no_key() {
     let f = Fixture::new(Mode::Normal);
     let c = f.snapshot();
     f.state.lock().unwrap().mode = Mode::Unknown;
-    assert!(matches!(
+    assert_eq!(
         f.backend.rescue_guarded_enter(&c, &|| true, None).unwrap(),
-        EnterRescueOutcome::NoEffect { .. }
-    ));
+        no_effect("surface_unknown", true)
+    );
     assert_eq!(f.entered(), 0);
     let f = Fixture::new(Mode::Normal);
     let c = f.snapshot();
     assert!(matches!(
         f.backend.rescue_guarded_enter(&c, &|| false, None).unwrap(),
         EnterRescueOutcome::NoEffect { .. }
+    ));
+    assert_eq!(f.entered(), 0);
+}
+
+#[test]
+fn unknown_observation_still_checks_original_carrier_before_zero_effect_refusal() {
+    let f = Fixture::new(Mode::Normal);
+    let c = f.snapshot();
+    {
+        let mut state = f.state.lock().unwrap();
+        state.mode = Mode::UnknownWithReplacement;
+        state.captures = 0;
+    }
+    assert!(matches!(
+        f.backend.rescue_guarded_enter(&c, &|| true, None),
+        Err(TransportError::NativeInputNotReady { reason }) if reason == "rescue_binding_changed"
     ));
     assert_eq!(f.entered(), 0);
 }

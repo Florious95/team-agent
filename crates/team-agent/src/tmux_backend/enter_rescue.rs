@@ -159,10 +159,18 @@ impl TmuxBackend {
         if self.rescue_binding(expected, false)? != *expected {
             return Err(refusal("rescue_binding_changed"));
         }
-        let frame = self.observe_native_input(
+        let frame = match self.observe_native_input(
             &Target::Pane(PaneId::new(&expected.pane_id)),
             expected.provider,
-        )?;
+        ) {
+            Ok(frame) => frame,
+            Err(TransportError::NativeInputNotReady { reason })
+                if reason == "native_surface_unknown" =>
+            {
+                None
+            }
+            Err(error) => return Err(error),
+        };
         if self.rescue_binding(expected, false)? != *expected {
             return Err(refusal("rescue_binding_changed"));
         }
