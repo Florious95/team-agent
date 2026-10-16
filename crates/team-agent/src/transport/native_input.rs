@@ -131,7 +131,7 @@ pub(crate) fn record_evidence(evidence: &NativeInputEvidence) {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct InputFrame {
+pub struct InputFrame {
     pub composer: String,
     pub transcript: String,
     pub identity: String,
@@ -193,6 +193,10 @@ impl InputFrame {
 fn input_digest(text: &str) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(text.as_bytes()))
+}
+
+pub(crate) fn supports_input_observation(provider: Provider) -> bool {
+    matches!(provider, Provider::Pi | Provider::CursorAgent)
 }
 
 pub(crate) fn inspect_input(

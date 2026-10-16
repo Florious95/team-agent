@@ -88,15 +88,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Match the finite suite's wholly new Rust-file formatting scope.
-          # Existing contract/legacy formatting debt is not a release rewrite;
-          # a historical migration SHA is not a permanent development freeze.
+          # Check the bounded native-input/watchdog files, not unrelated historical debt.
           files=(
             crates/team-agent/src/messaging/enter_rescue.rs
             crates/team-agent/src/messaging/enter_rescue_tests.rs
+            crates/team-agent/src/messaging/delivery_consumption_tests.rs
             crates/team-agent/src/tmux_backend/native_input.rs
             crates/team-agent/src/tmux_backend/native_input_tests.rs
+            crates/team-agent/src/tmux_backend/enter_rescue.rs
+            crates/team-agent/src/tmux_backend/enter_rescue_tests.rs
             crates/team-agent/src/transport/native_input.rs
+            crates/team-agent/src/transport/enter_rescue.rs
           )
           set +e
           rustfmt --edition 2021 --config skip_children=true --check "${files[@]}" 2>&1 | tee contract-evidence/format.log
@@ -192,6 +194,8 @@ jobs:
               run_case managed-reentry cargo test -p team-agent --test managed_leader_provider_reentry_contract --locked -- --test-threads=1
               ;;
             issue321|issue321-full)
+              run_case workspace-check cargo check --workspace --all-targets --locked
+              run_case contract-check cargo check --manifest-path crates/team-agent-contract/Cargo.toml --all-targets --locked
               run_case root-tmux cargo test -p team-agent --lib --locked tmux_backend -- --test-threads=1
               run_case root-transport cargo test -p team-agent --lib --locked transport:: -- --test-threads=1
               run_case root-messaging cargo test -p team-agent --lib --locked messaging:: -- --test-threads=1
@@ -223,14 +227,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Do not reformat the pre-existing byte-frozen contract grammar or
-          # unrelated legacy bodies. These are the five wholly new Rust files.
+          # Retain a remote-only formatting patch for the bounded changed modules.
+          # No historical SHA freeze or unrelated legacy-body formatting rewrite.
           files=(
             crates/team-agent/src/messaging/enter_rescue.rs
             crates/team-agent/src/messaging/enter_rescue_tests.rs
+            crates/team-agent/src/messaging/delivery_consumption_tests.rs
             crates/team-agent/src/tmux_backend/native_input.rs
             crates/team-agent/src/tmux_backend/native_input_tests.rs
+            crates/team-agent/src/tmux_backend/enter_rescue.rs
+            crates/team-agent/src/tmux_backend/enter_rescue_tests.rs
             crates/team-agent/src/transport/native_input.rs
+            crates/team-agent/src/transport/enter_rescue.rs
           )
           set +e
           rustfmt --edition 2021 --config skip_children=true --check "${files[@]}" > regression-evidence/format.log 2>&1

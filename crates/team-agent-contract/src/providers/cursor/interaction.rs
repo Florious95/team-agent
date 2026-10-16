@@ -8,10 +8,10 @@ use std::time::Duration;
 pub const PROFILE: &str = "cursor-tui-v1";
 // Recipe identity, NOT an installed release hash. Framework timing bounds are
 // deliberate budgets, not a claim that one recon run proved production latency.
-// SHA256 cursor-tui-v1|bracketed|enter=1|trailer=none|retry=never|capture=100ms|stable=200ms|floor=100ms|deadline=30s|correlation=baseline-seen-token-gone-transcript|folded-seen=empty-current-owned-paste-v1|folded-accepted=new-transcript-block-v1-or-visible-token
+// SHA256 cursor-tui-v1|bracketed|enter=1|trailer=none|retry=never|capture=100ms|stable=200ms|floor=100ms|deadline=30s|correlation=baseline-seen-token-gone-transcript|folded-seen=empty-current-owned-paste-v1|folded-accepted=new-transcript-block-v1-or-visible-token|composer=footer-bounded-inline-or-standalone-arrow-v2|visible-seen=attempt-scoped-current-region-v2|visible-accepted=empty-current-new-transcript-v2
 pub const POLICY: Digest = Digest([
-    0x68, 0x83, 0x0f, 0x7a, 0x67, 0x1d, 0xd8, 0x0a, 0x81, 0xec, 0x92, 0xb6, 0xa2, 0xe4, 0x05, 0xfd,
-    0xf3, 0x64, 0xa1, 0xfa, 0x0a, 0x70, 0xbe, 0x42, 0x7b, 0xcb, 0xff, 0xd0, 0x8d, 0x16, 0xdd, 0x73,
+    0x08, 0x90, 0x5f, 0x19, 0x3b, 0xf8, 0x3a, 0x4d, 0xb5, 0xe9, 0x96, 0xc9, 0x70, 0xd9, 0x64, 0xa0,
+    0x63, 0x63, 0x8c, 0xf4, 0x2b, 0x99, 0xea, 0x3c, 0xe4, 0x59, 0x17, 0xdf, 0x4d, 0x79, 0xf2, 0x16,
 ]);
 const SUBMIT: SubmitPolicy = SubmitPolicy {
     paste_mode: PasteMode::Bracketed, payload_trailer: PayloadTrailer::None,
@@ -53,30 +53,75 @@ fn working(line: &str) -> bool {
 fn placeholder(text: &str) -> bool {
     matches!(text, "Plan, search, build anything" | "Add a follow-up")
 }
+fn native_footer(line: &str) -> bool {
+    line.trim().strip_suffix("Run Everything")
+        .is_some_and(|prefix| !prefix.trim().is_empty() && !prefix.trim_start().starts_with('→'))
+}
+struct ComposerView<'a> {
+    start: usize,
+    rows: Vec<&'a str>,
+    input: String,
+    footer: usize,
+    busy: bool,
+    empty: bool,
+}
+// Physical captures show inline text and a standalone `  →` followed by
+// indented editable rows. Retain the whole region, not its last quoted arrow.
+// Footer/mode rows are native chrome, never input or transcript-token evidence.
+fn composer_view(text: &str) -> Option<ComposerView<'_>> {
+    let lines: Vec<_> = text.lines().collect();
+    let footer = lines.iter().rposition(|line| native_footer(line))?;
+    let context: Vec<_> = lines[footer + 1..].iter().map(|line| line.trim()).filter(|line| !line.is_empty()).collect();
+    if !context.first().is_some_and(|line| line.starts_with('/'))
+        || context.iter().any(|line| *line == "→" || line.starts_with("→ "))
+    { return None; }
+    let start = lines[..footer].iter().rposition(|line| {
+        let trimmed = line.trim_start();
+        line.len() - trimmed.len() <= 2 && (trimmed.trim_end() == "→" || trimmed.starts_with("→ "))
+    })?;
+    let previous_footer = lines[..start].iter().rposition(|line| native_footer(line)).map_or(0, |index| index + 1);
+    if lines[previous_footer..start].iter().any(|line| line.trim() == "→") { return None; }
+    let rows: Vec<_> = lines[start..].iter().map(|line| line.trim()).collect();
+    let footer = footer - start;
+    let mut end = footer;
+    while end > 1 && rows[end - 1].is_empty() { end -= 1; }
+    if end > 1 && rows[end - 1] == "Ask (shift+tab to cycle)"
+        && lines[start + end - 1].len() - lines[start + end - 1].trim_start().len() <= 2
+    {
+        end -= 1;
+        while end > 1 && rows[end - 1].is_empty() { end -= 1; }
+    }
+    let first = rows[0].strip_prefix("→ ").unwrap_or("");
+    let continuation = &rows[1..end];
+    let single = continuation.iter().all(|line| line.is_empty());
+    // A bare arrow does not prove an empty editor. Only expose its nonempty
+    // expanded body; a literal placeholder plus another row is also a draft.
+    if rows[0] == "→" && single { return None; }
+    let stop = single && first.strip_suffix("ctrl+c to stop").is_some_and(|text| placeholder(text.trim()));
+    let empty = single && (placeholder(first) || stop);
+    let mut preceding = lines[..start].iter().rev().map(|line| line.trim()).filter(|line| !line.is_empty());
+    let mut status = preceding.next();
+    if status.is_some_and(|line| line.starts_with("Tip: ")) { status = preceding.next(); }
+    let busy = stop || status.is_some_and(working);
+    let input = std::iter::once(first).chain(continuation.iter().copied()).collect::<Vec<_>>().join("\n");
+    Some(ComposerView { start, rows, input, footer, busy, empty })
+}
 fn surface(text: &str) -> InputSurface {
     let lines: Vec<_> = text.lines().map(str::trim).collect();
     if !lines.windows(2).any(|pair| pair[0] == "Cursor Agent"
         && pair[1].strip_prefix('v').is_some_and(|version| parse_version(version.as_bytes()).is_ok()))
     { return InputSurface::ShellOrUnknown; }
-    let Some(index) = lines.iter().rposition(|line| line.starts_with("→ ")) else { return InputSurface::ShellOrUnknown; };
-    let composer = lines[index].strip_prefix("→ ").unwrap().trim();
-    // Stop hint is attached to the *current* composer, not a full-screen search.
-    if composer.strip_suffix("ctrl+c to stop").is_some_and(|prefix| placeholder(prefix.trim())) {
-        return InputSurface::Busy;
-    }
-    if !placeholder(composer) { return InputSurface::ComposerContainsPaste; }
-    // The first observed Working frame precedes the cancel hint. Inspect only
-    // the nearest status (and one optional Tip), never old transcript matches.
-    let mut preceding = lines[..index].iter().rev().filter(|line| !line.is_empty());
-    let mut status = preceding.next().copied();
-    if status.is_some_and(|line| line.starts_with("Tip: ")) { status = preceding.next().copied(); }
-    if status.is_some_and(working) { InputSurface::Busy } else { InputSurface::ComposerReady }
+    let Some(composer) = composer_view(text) else { return InputSurface::ShellOrUnknown; };
+    if composer.busy { InputSurface::Busy }
+    else if composer.empty { InputSurface::ComposerReady }
+    else { InputSurface::ComposerContainsPaste }
 }
 // A folded block is native UI identity, NOT a claim that its hidden token was
 // read. Keep the latch bound to this attempt/subject; never reuse a screen label
 // across generations, sessions, panes, messages or attempts.
 const FOLDED_RECEIPT: &str = "cursor-owned-folded-paste-v1:";
-fn folded_prefix(frame: &CaptureFrame) -> Option<String> {
+const VISIBLE_RECEIPT: &str = "cursor-owned-visible-paste-v2:";
+fn receipt_prefix(frame: &CaptureFrame, kind: &str) -> Option<String> {
     if !matches!(frame.operation, Operation::FirstBusiness | Operation::OrdinarySend) {
         return None;
     }
@@ -86,12 +131,19 @@ fn folded_prefix(frame: &CaptureFrame) -> Option<String> {
         frame.message.as_ref()?, frame.attempt.as_ref()?,
         frame.operation == Operation::FirstBusiness,
     )).ok()?;
-    Some(format!("{FOLDED_RECEIPT}{context}:"))
+    Some(format!("{kind}{context}:"))
 }
-fn composer_lines(text: &str) -> Option<Vec<&str>> {
-    let lines: Vec<_> = text.lines().map(str::trim).collect();
-    let index = lines.iter().rposition(|line| line.starts_with("→ "))?;
-    Some(lines[index..].to_vec())
+fn folded_prefix(frame: &CaptureFrame) -> Option<String> { receipt_prefix(frame, FOLDED_RECEIPT) }
+fn composer_lines(text: &str) -> Option<Vec<&str>> { Some(composer_view(text)?.rows) }
+fn current_baseline(frame: &CaptureFrame, baseline: &CaptureBaseline) -> bool {
+    baseline.scope.identity == frame.scope.identity
+        && baseline.scope.endpoint == frame.scope.endpoint && baseline.scope.pane == frame.scope.pane
+        && baseline.scope.binding == frame.scope.binding && baseline.scope.session == frame.scope.session
+        && baseline.scope.sequence < frame.scope.sequence && baseline.scope.observed_at <= frame.scope.observed_at
+}
+fn same_footer(before: &ComposerView<'_>, current: &ComposerView<'_>) -> bool {
+    before.rows[before.footer + 1..].iter().filter(|line| !line.is_empty())
+        .eq(current.rows[current.footer + 1..].iter().filter(|line| !line.is_empty()))
 }
 fn folded_marker(value: &str) -> Option<&str> {
     // R6 capture includes the visible `^[` prefix before the native block.
@@ -112,17 +164,11 @@ pub fn inspect_composer(text: &str) -> Option<(InputSurface, Vec<&str>, Option<&
     if matches!(observed, InputSurface::ShellOrUnknown) {
         return None;
     }
-    let composer = composer_lines(text)?;
-    let marker = composer.first()
+    let composer = composer_view(text)?;
+    let marker = composer.rows.first()
         .and_then(|line| line.strip_prefix("→ "))
         .and_then(|value| folded_marker(value.trim()));
-    let lines: Vec<_> = text.lines().map(str::trim).collect();
-    let index = lines.iter().rposition(|line| line.starts_with("→ "))?;
-    let mut preceding = lines[..index].iter().rev().filter(|line| !line.is_empty());
-    let mut status = preceding.next().copied();
-    if status.is_some_and(|line| line.starts_with("Tip: ")) { status = preceding.next().copied(); }
-    let busy = matches!(observed, InputSurface::Busy) || status.is_some_and(working);
-    Some((observed, composer, marker, busy))
+    Some((observed, composer.rows, marker, composer.busy))
 }
 
 /// Legacy cursor_agent observation only: the startup banner can leave a
@@ -132,7 +178,7 @@ pub fn inspect_composer(text: &str) -> Option<(InputSurface, Vec<&str>, Option<&
 pub fn inspect_legacy_composer(text: &str) -> Option<(InputSurface, Vec<&str>, Option<&str>, bool)> {
     let lines: Vec<_> = text.lines().map(str::trim).collect();
     // Expanded native editors put the arrow on its own row. Select the
-    // current block before consulting history; strict H4/H6 grammar is unchanged.
+    // current block before consulting history; canonical admission stays separate.
     let index = lines.iter().rposition(|line| *line == "→" || line.starts_with("→ "))?;
     // Do not let an arrow quoted inside an expanded draft replace its real
     // opening and turn foreign editable text into a seemingly empty composer.
@@ -170,12 +216,7 @@ fn correlate_folded_input(frame: &CaptureFrame, observation: &mut InteractionObs
     let Some(prefix) = folded_prefix(frame) else { return refuse; };
     let Some(baseline) = &frame.baseline else { return refuse; };
     let expected = format!("[team-agent-token:{}]", frame.message.as_ref().unwrap().as_str());
-    let same_subject = baseline.scope.identity == frame.scope.identity
-        && baseline.scope.endpoint == frame.scope.endpoint && baseline.scope.pane == frame.scope.pane
-        && baseline.scope.binding == frame.scope.binding && baseline.scope.session == frame.scope.session;
-    if !same_subject || baseline.scope.sequence >= frame.scope.sequence
-        || baseline.scope.observed_at > frame.scope.observed_at
-        || surface(&baseline.text) != InputSurface::ComposerReady
+    if !current_baseline(frame, baseline) || surface(&baseline.text) != InputSurface::ComposerReady
         || baseline.text.contains(&expected)
     { return refuse; }
     let Some(current) = composer_lines(&frame.text) else { return refuse; };
@@ -212,7 +253,10 @@ fn correlate_folded_input(frame: &CaptureFrame, observation: &mut InteractionObs
             let folded_transferred = empty_composer
                 && new_blocks.next() == Some(original) && new_blocks.next().is_none();
             let current_has_token = current.iter().any(|line| line.contains(&expected));
-            if !current_has_token && (frame.text.contains(&expected) || folded_transferred)
+            let transcript_has_token = composer_view(&frame.text).is_some_and(|view| {
+                frame.text.lines().take(view.start).map(|line| line.matches(&expected).count()).sum::<usize>() == 1
+            });
+            if !current_has_token && empty_composer && (transcript_has_token || folded_transferred)
                 && matches!(observation.surface, InputSurface::Busy | InputSurface::ComposerReady)
             {
                 observation.surface = InputSurface::NativeAccepted;
@@ -241,6 +285,39 @@ fn correlate_folded_input(frame: &CaptureFrame, observation: &mut InteractionObs
     }
     true
 }
+fn correlate_visible_input(frame: &CaptureFrame, observation: &mut InteractionObservation) {
+    let Some(prefix) = receipt_prefix(frame, VISIBLE_RECEIPT) else { return; };
+    let Some(baseline) = &frame.baseline else { return; };
+    let expected = format!("[team-agent-token:{}]", frame.message.as_ref().unwrap().as_str());
+    if !current_baseline(frame, baseline) || baseline.text.contains(&expected)
+        || surface(&baseline.text) != InputSurface::ComposerReady
+    { return; }
+    let (Some(before), Some(current)) = (composer_view(&baseline.text), composer_view(&frame.text)) else { return; };
+    if !same_footer(&before, &current) { return; }
+    let identity = format!("{prefix}{expected}");
+    let pending = current.input.matches(&expected).count() == 1;
+    match (&frame.paste_latch, frame.after_step) {
+        (PasteLatch::NeverSeen, Some(StepKind::Paste))
+        | (PasteLatch::Seen { .. }, Some(StepKind::Paste))
+            if pending && observation.surface == InputSurface::ComposerContainsPaste
+                && (matches!(frame.paste_latch, PasteLatch::NeverSeen)
+                    || matches!(&frame.paste_latch, PasteLatch::Seen { native_identity } if native_identity == &identity)) =>
+        {
+            observation.paste_latch = PasteLatch::Seen { native_identity: identity };
+        }
+        (PasteLatch::Seen { native_identity }, Some(StepKind::InitialSubmit))
+            if native_identity == &identity && current.empty
+                && matches!(observation.surface, InputSurface::Busy | InputSurface::ComposerReady)
+                && frame.text.lines().take(current.start).collect::<Vec<_>>().join("\n").matches(&expected).count() == 1 =>
+        {
+            observation.surface = InputSurface::NativeAccepted;
+            observation.paste_latch = PasteLatch::Gone { native_identity: identity };
+        }
+        _ => return,
+    }
+    observation.current_message = frame.message.clone();
+    observation.current_attempt = frame.attempt.clone();
+}
 impl InteractionHook for CursorAdapter {
     fn interpret(&self, frame: &CaptureFrame) -> InteractionObservation {
         let mut observation = InteractionObservation {
@@ -250,11 +327,8 @@ impl InteractionHook for CursorAdapter {
         };
         if frame.profile_id != PROFILE { return observation; }
         observation.surface = surface(&frame.text);
-        let lines: Vec<_> = frame.text.lines().collect();
-        let composer = lines.iter().rposition(|line| line.trim().starts_with("→ "))
-            .map(|index| lines[index..].join("\n"));
         if !correlate_folded_input(frame, &mut observation) {
-            correlate_business_input(frame, &mut observation, composer.as_deref());
+            correlate_visible_input(frame, &mut observation);
         }
         observation
     }
@@ -277,7 +351,7 @@ mod composer_observation_tests {
     use super::*;
 
     fn frame(composer: &str, history: &str) -> String {
-        format!("Cursor Agent\nv2026.10.01-e373342\n{history}\n→ {composer}\nGrok 4.7 High Run Everything\n")
+        format!("Cursor Agent\nv2026.10.01-e373342\n{history}\n→ {composer}\nGrok 4.7 High Run Everything\n/owned/project\n")
     }
 
     #[test]

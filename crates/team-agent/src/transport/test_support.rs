@@ -57,6 +57,8 @@ struct OfflineState {
     /// answer keyed by pane id. Used by leader provider health tests.
     pane_current_commands: BTreeMap<String, String>,
     session_owner: Option<super::SessionOwner>,
+    native_input_observation: Option<super::native_input::InputFrame>,
+    native_input_error: Option<String>,
 }
 
 impl Default for OfflineState {
@@ -85,6 +87,8 @@ impl Default for OfflineState {
             capture_ranges: Vec::new(),
             pane_current_commands: BTreeMap::new(),
             session_owner: None,
+            native_input_observation: None,
+            native_input_error: None,
         }
     }
 }
@@ -95,6 +99,16 @@ pub struct OfflineTransport {
 }
 
 impl OfflineTransport {
+    pub fn with_native_input_observation(self, frame: super::native_input::InputFrame) -> Self {
+        self.with_state(|state| state.native_input_observation = Some(frame));
+        self
+    }
+
+    pub fn with_native_input_error(self, reason: &str) -> Self {
+        self.with_state(|state| state.native_input_error = Some(reason.into()));
+        self
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -434,6 +448,17 @@ impl OfflineTransport {
 }
 
 impl Transport for OfflineTransport {
+    fn observe_native_input(
+        &self,
+        _target: &Target,
+        _provider: crate::model::enums::Provider,
+    ) -> Result<Option<super::native_input::InputFrame>, TransportError> {
+        self.with_state(|state| match &state.native_input_error {
+            Some(reason) => Err(TransportError::NativeInputNotReady { reason: reason.clone() }),
+            None => Ok(state.native_input_observation.clone()),
+        })
+    }
+
     fn kind(&self) -> BackendKind {
         BackendKind::Tmux
     }
