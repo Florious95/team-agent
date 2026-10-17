@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.119]
+
+- **No delivery from a pending draft:** separate token visibility from input consumption. A token still present in the current composer prevents duplicate paste but never establishes delivery; a known native unknown surface remains unverified even when the submit command succeeds.
+- **Independent delayed Enter watchdog:** atomically register a 90-second safety-net job for every submitted-unverified transition, without coupling registration to the native-input state machine or optional paste proof. A single rescue Enter still requires the original message/owner/carrier identity, exclusive input lock, stable non-busy residue and current authority; missing proof refuses safely, and uncertain effects are never replayed.
+- **Cursor multiline consumption:** unify footer-bounded inline and standalone-arrow expanded composers in the Cursor leaf. Message/attempt/session-bound Seen-to-Gone receipts require confirmed submit, an empty current composer and unique new transcript evidence; preserve folded-paste fencing and the single-Enter policy.
+- **Validation and release scope:** official dual-platform CI passed (Ubuntu workspace 3,608 passed; macOS root packs 143/46/211/2/7 passed, excluded contract 299 passed; all zero failures, overlapping packs not summed), with independent contract Clippy/format checks. The candidate was exercised in the main team before release authorization. This does not claim a complete native four-state, provider/model or rescue matrix.
+
 ## [0.5.118]
 
 - **Adaptive ambient pane recovery (Issue #326):** isolate an inherited foreign or unavailable tmux pane into a workspace-owned managed Leader launch instead of blocking ordinary startup. Explicit external, attach and nested-attach intent retains strict pane/workspace/terminal authority checks; unrelated panes are not adopted or rewritten.
