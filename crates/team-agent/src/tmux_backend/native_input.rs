@@ -38,6 +38,25 @@ pub(crate) fn digest(text: &str) -> String {
 }
 
 impl TmuxBackend {
+    pub(super) fn observe_current_native_input(
+        &self,
+        target: &Target,
+        provider: Provider,
+    ) -> Result<Option<InputFrame>, TransportError> {
+        if !crate::transport::native_input::supports_input_observation(provider) {
+            return Ok(None);
+        }
+        // Pure observation: no nonce initialization, paste, or key.
+        let binding = self.query_native_binding(target, true)?;
+        let capture = self.capture(target, CaptureRange::Tail(200))?;
+        let frame = inspect_input(provider, &capture.text, binding.pane_height)
+            .ok_or_else(|| refused("native_surface_unknown"))?;
+        if self.query_native_binding(target, true)? != binding {
+            return Err(refused("binding_changed"));
+        }
+        Ok(Some(frame))
+    }
+
     fn native_binding(&self, target: &Target) -> Result<NativeInputBinding, TransportError> {
         self.query_native_binding(target, false)
     }

@@ -349,3 +349,153 @@ fn transcript_transfer_requires_current_baseline_and_profile() {
     let mut changed = original; changed.baseline.as_mut().unwrap().text = screen("", "unsent baseline"); cases.push(changed);
     for frame in cases { assert_latched_unaccepted(&frame); }
 }
+
+// Controlled projections of the physical 2026.10.14 standalone-arrow capture
+// (SHA256 11fcef68395beff484ecd0f24679563b149cf6163c85e9a3d0b946d2c26b40e6)
+// and 2026.10.01 inline multiline editor. Only the measured layout is reused;
+// these fixtures do not execute Cursor, inspect hidden state or prove timing.
+fn visible_frame(standalone: bool) -> CaptureFrame {
+    let mut frame = frame();
+    let first = if standalone { "" } else { "controlled task" };
+    frame.text = screen("", &format!("{first}\n    controlled continuation\n\n    {}", token(&frame)));
+    frame
+}
+fn visible_seen_frame() -> CaptureFrame {
+    let mut frame = visible_frame(true);
+    frame.paste_latch = adapter().interpret(&frame).paste_latch;
+    assert!(matches!(frame.paste_latch, PasteLatch::Seen { .. }));
+    frame.scope = scope(3);
+    frame
+}
+
+#[test]
+fn inline_and_standalone_expanded_input_latch_only_the_current_attempt() {
+    for standalone in [false, true] {
+        let mut frame = visible_frame(standalone);
+        let observed = adapter().interpret(&frame);
+        assert_eq!(observed.surface, InputSurface::ComposerContainsPaste);
+        assert_eq!(observed.current_message, frame.message);
+        assert_eq!(observed.current_attempt, frame.attempt);
+        let PasteLatch::Seen { ref native_identity } = observed.paste_latch else { panic!("owned visible input required") };
+        assert!(native_identity.starts_with("cursor-owned-visible-paste-v2:"));
+        frame.paste_latch = observed.paste_latch.clone();
+        frame.scope = scope(3);
+        assert_eq!(adapter().interpret(&frame).paste_latch, observed.paste_latch);
+        frame.attempt = Some(AttemptId::new("different-attempt").unwrap());
+        assert_latched_unaccepted(&frame);
+    }
+}
+
+#[test]
+fn expanded_token_is_not_consumed_until_confirmed_enter_and_transcript_transfer() {
+    for operation in [Operation::FirstBusiness, Operation::OrdinarySend] {
+        for status in ["", "⠘⠣ Working"] {
+            let mut frame = visible_frame(true);
+            frame.operation = operation;
+            frame.paste_latch = adapter().interpret(&frame).paste_latch;
+            frame.scope = scope(3);
+            frame.text = screen(&format!("{}\n{status}", token(&frame)), "Add a follow-up");
+            assert_latched_unaccepted(&frame); // Paste is not a submit receipt.
+            frame.after_step = Some(StepKind::InitialSubmit);
+            frame.text = frame.text.replace("Extra High  Run", "Extra High · 10.1%  Run");
+            let observed = adapter().interpret(&frame);
+            assert_eq!(observed.surface, InputSurface::NativeAccepted);
+            let PasteLatch::Seen { native_identity } = frame.paste_latch else { panic!("seen required") };
+            assert_eq!(observed.paste_latch, PasteLatch::Gone { native_identity });
+            assert_eq!(observed.current_message, frame.message);
+            assert_eq!(observed.current_attempt, frame.attempt);
+        }
+    }
+}
+
+#[test]
+fn expanded_placeholder_or_quoted_arrow_cannot_hide_editable_rows() {
+    for draft in [
+        "Plan, search, build anything\n    retained draft",
+        "Add a follow-up\n    retained draft",
+        "Add a follow-up\n    Ask (shift+tab to cycle)",
+        "\n    retained draft\n    → Add a follow-up",
+    ] {
+        let mut frame = frame(); frame.text = screen("", draft);
+        assert_eq!(adapter().interpret(&frame).surface, InputSurface::ComposerContainsPaste);
+        assert_unseen(&frame);
+    }
+    let mut frame = visible_frame(true);
+    frame.text = frame.text.replace("controlled continuation", "→ Add a follow-up");
+    let observed = adapter().interpret(&frame);
+    assert!(matches!(observed.paste_latch, PasteLatch::Seen { .. }));
+    assert_eq!(observed.surface, InputSurface::ComposerContainsPaste);
+}
+
+#[test]
+fn expanded_input_requires_current_empty_baseline_and_owned_footer() {
+    let original = visible_frame(true);
+    let mut cases = Vec::new();
+    let mut changed = original.clone(); changed.after_step = None; cases.push(changed);
+    let mut changed = original.clone(); changed.baseline = None; cases.push(changed);
+    let mut changed = original.clone(); changed.scope.session = None; cases.push(changed);
+    let mut changed = original.clone(); changed.profile_id = "unknown".into(); cases.push(changed);
+    let mut changed = original.clone(); changed.baseline.as_mut().unwrap().scope.pane = "%9".into(); cases.push(changed);
+    let mut changed = original.clone(); changed.baseline.as_mut().unwrap().scope.sequence = 2; cases.push(changed);
+    let mut changed = original.clone(); changed.baseline.as_mut().unwrap().text = screen("", "retained draft"); cases.push(changed);
+    let mut changed = original.clone(); changed.baseline.as_mut().unwrap().text = screen(&token(&changed), "Add a follow-up"); cases.push(changed);
+    let mut changed = original.clone(); changed.text = changed.text.replace("/owned/cwd", "/different/cwd"); cases.push(changed);
+    let mut changed = original.clone(); changed.text = changed.text.replace("Run Everything", "unknown footer"); cases.push(changed);
+    let mut changed = original.clone(); changed.text = changed.text.replace("/owned/cwd\n", ""); cases.push(changed);
+    let mut changed = original.clone(); changed.text = screen("⠘⠣ Working", &format!("\n    {}", token(&changed))); cases.push(changed);
+    let mut changed = original.clone(); changed.text = changed.text.replace(&token(&changed), &format!("{}\n    {}", token(&changed), token(&changed))); cases.push(changed);
+    let mut changed = original; changed.text = screen(&token(&changed), "Add a follow-up"); cases.push(changed);
+    for frame in cases { assert_unseen(&frame); }
+}
+
+#[test]
+fn expanded_acceptance_does_not_follow_disappearance_busy_answers_or_dirty_composer() {
+    let mut frame = visible_seen_frame();
+    frame.after_step = Some(StepKind::InitialSubmit);
+    for history in ["", "⠘⠣ Working", "5535", "team report_result"] {
+        frame.text = screen(history, "Add a follow-up");
+        assert_latched_unaccepted(&frame);
+    }
+    for draft in [
+        "retained draft", "Add a follow-up\n    retained draft", "\n    retained draft",
+    ] {
+        frame.text = screen(&token(&frame), draft);
+        assert_latched_unaccepted(&frame);
+    }
+    frame.text = screen(&format!("{}\n{}", token(&frame), token(&frame)), "Add a follow-up");
+    assert_latched_unaccepted(&frame);
+    frame.text = screen(&token(&frame), "Add a follow-up").replace("/owned/cwd", "/different/cwd");
+    assert_latched_unaccepted(&frame);
+}
+
+#[test]
+fn footer_and_old_transcript_tokens_never_authorize_an_expanded_paste() {
+    let mut frame = visible_frame(true);
+    frame.text = screen("", "\n    unrelated draft").replace("/owned/cwd", &format!("/owned/cwd/{}", token(&frame)));
+    assert_unseen(&frame);
+    frame.text = screen("", "\n    unrelated draft").replace("Extra High  Run", &format!("Extra High {}  Run", token(&frame)));
+    assert_unseen(&frame);
+    frame.text = screen(&token(&frame), "\n    unrelated draft");
+    assert_unseen(&frame);
+    frame.text = screen("", &format!("\n    {}", token(&frame)))
+        .replace("Cursor Agent\nv2026.10.01-e373342\n", "");
+    assert_unseen(&frame); // Canonical admission is not the legacy read-only port.
+}
+
+#[test]
+fn expanded_region_uses_native_mode_chrome_but_never_an_old_footer() {
+    let mut frame = visible_frame(false);
+    frame.text = frame.text.replace("\nGPT-5.6", "\n  Ask (shift+tab to cycle)\nGPT-5.6");
+    assert!(matches!(adapter().interpret(&frame).paste_latch, PasteLatch::Seen { .. }));
+    let ready = screen("", "Add a follow-up").replace("\nGPT-5.6", "\n  Ask (shift+tab to cycle)\nGPT-5.6");
+    frame.text = ready.clone();
+    assert_eq!(adapter().interpret(&frame).surface, InputSurface::ComposerReady);
+    for current in [
+        screen("", "Add a follow-up").replace("Run Everything", "unknown footer"),
+        screen("", &format!("\n    {}", token(&frame))).replace("Run Everything", "unknown footer"),
+    ] {
+        frame.text = format!("{ready}{current}");
+        assert_eq!(adapter().interpret(&frame).surface, InputSurface::ShellOrUnknown);
+        assert_unseen(&frame);
+    }
+}

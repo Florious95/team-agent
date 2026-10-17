@@ -1,64 +1,58 @@
 #![allow(clippy::unwrap_used, clippy::panic)]
 use super::*;
 use crate::model::enums::Provider;
-use crate::transport::native_input::{NativeInputBinding, NativeInputRequest};
+use crate::transport::enter_rescue::{EnterRescueProof, EnterRescueTarget};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct Fixture {
     workspace: std::path::PathBuf,
     store: MessageStore,
     log: EventLog,
-    evidence: NativeInputEvidence,
+    context: EnterRescueContext,
 }
 impl Fixture {
     fn new() -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let workspace = std::env::temp_dir().join(format!(
-            "ta-enter-rescue-{}-{}",
+            "ta-independent-rescue-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::SeqCst)
         ));
         std::fs::create_dir(&workspace).unwrap();
         let store = MessageStore::open(&workspace).unwrap();
         let log = EventLog::new(&workspace);
-        let request = NativeInputRequest {
+        let context = EnterRescueContext {
             message_id: "msg_one".into(),
             owner_team_id: "team".into(),
             recipient: "worker".into(),
-            provider: Provider::Pi,
-            pane_id: "%1".into(),
-            pane_pid: 2,
-            session: "session".into(),
-            window: "worker".into(),
-        };
-        let evidence = NativeInputEvidence {
-            request,
-            binding: NativeInputBinding {
-                endpoint: "/tmp/owned-test.sock".into(),
+            payload_sha256: digest(&render_message("leader", None, "body", "msg_one")),
+            target: Some(EnterRescueTarget {
+                provider: Provider::Pi,
+                endpoint: "/tmp/owned.sock".into(),
                 pane_id: "%1".into(),
                 pane_pid: 2,
                 pane_height: 120,
-                carrier_birth: "test-birth".into(),
-                binding_nonce: "test-nonce".into(),
+                carrier_birth: "original-birth".into(),
+                binding_nonce: "original-nonce".into(),
                 session: "session".into(),
                 window: "worker".into(),
-            },
-            payload_sha256: digest(&render_message("leader", None, "body", "msg_one")),
-            ui_identity: "gpt-6-luna".into(),
-            footer_sha256: digest(""),
-            baseline_sha256: digest("baseline"),
-            baseline_capsules: vec![],
-            phase: NativeInputPhase::Submitted,
-            capsule: None,
+            }),
+            proof: Some(EnterRescueProof {
+                ui_identity: "pi-model".into(),
+                footer_sha256: digest("footer"),
+                visible_marker: true,
+                transcript_marker_absent: true,
+                owned_capsule: None,
+            }),
         };
         let fixture = Self {
             workspace,
             store,
             log,
-            evidence,
+            context,
         };
-        let conn = fixture.conn();
-        conn.execute("insert into messages(message_id,owner_team_id,sender,recipient,content,status,created_at,updated_at,delivery_attempts) values('msg_one','team','leader','worker','body','target_resolved','old','old',1)", []).unwrap();
+        fixture.conn().execute("insert into messages(message_id,owner_team_id,sender,recipient,content,status,created_at,updated_at,delivery_attempts) values('msg_one','team','leader','worker','body','submitted_unverified','old','old',1)",[]).unwrap();
         fixture.state("running", false);
         fixture
     }
@@ -73,23 +67,21 @@ impl Fixture {
         )
         .unwrap();
     }
-    fn park(&self, age: i64) {
-        park_at(
-            &self.store,
-            &self.evidence,
-            1,
-            "uncertain",
-            &self.log,
-            Utc::now() - Duration::seconds(age),
-        )
-        .unwrap();
+    fn schedule(&self, age: i64, bound: bool) {
+        let mut conn = self.conn();
+        let tx = conn.transaction().unwrap();
+        schedule_in_tx(&tx, "msg_one", Utc::now() - Duration::seconds(age)).unwrap();
+        tx.commit().unwrap();
+        if bound {
+            assert!(bind_pending_context(&self.store, &self.context).unwrap());
+        }
     }
     fn job(&self) -> (i64, String, String) {
         self.conn()
             .query_row(
                 "select id,payload_json,status from scheduled_events",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap()
     }
@@ -98,9 +90,21 @@ impl Fixture {
             .query_row(
                 "select status from messages where message_id='msg_one'",
                 [],
-                |row| row.get(0),
+                |r| r.get(0),
             )
             .unwrap()
+    }
+    fn fire(&self, execute: &Executor<'_>) -> bool {
+        let (id, payload, _) = self.job();
+        fire_with(
+            &self.workspace,
+            &self.store,
+            &self.log,
+            id,
+            &payload,
+            execute,
+        )
+        .unwrap()
     }
 }
 impl Drop for Fixture {
@@ -112,11 +116,11 @@ impl Drop for Fixture {
 #[test]
 fn enter_rescue_first_successful_key_arms_original_turn_before_acceptance_poll() {
     let f = Fixture::new();
-    f.park(95);
+    f.schedule(95, true);
     super::super::delivery::with_rescue_submit_observer(
         &f.workspace,
         &f.store,
-        &f.evidence,
+        &f.context,
         &f.log,
         |observer| {
             observer.after_physical_submit();
@@ -144,7 +148,7 @@ fn enter_rescue_post_key_owner_or_receiver_loss_is_unknown_without_cross_team_wr
         "stopped",
     ] {
         let f = Fixture::new();
-        f.park(95);
+        f.schedule(95, true);
         let (id, payload, _) = f.job();
         let effects = AtomicUsize::new(0);
         let path = crate::model::paths::runtime_dir(&f.workspace).join("state.json");
@@ -156,11 +160,11 @@ fn enter_rescue_post_key_owner_or_receiver_loss_is_unknown_without_cross_team_wr
             &f.log,
             id,
             &payload,
-            &|evidence, _| {
+            &|context, _| {
                 super::super::delivery::with_rescue_submit_observer(
                     &f.workspace,
                     &f.store,
-                    evidence,
+                    context,
                     &f.log,
                     |observer| {
                         effects.fetch_add(1, Ordering::SeqCst);
@@ -196,7 +200,7 @@ fn enter_rescue_post_key_owner_or_receiver_loss_is_unknown_without_cross_team_wr
             },
         )
         .unwrap();
-        // The rejected commit must not change even one byte of the replacement state.
+        // A rejected post-key commit must preserve every byte of replacement state.
         let expected = replacement.borrow().clone();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
         assert_eq!(f.job().2, "unknown", "{change}");
@@ -223,7 +227,7 @@ fn enter_rescue_post_key_owner_or_receiver_loss_is_unknown_without_cross_team_wr
 #[test]
 fn enter_rescue_owner_loss_at_state_save_hook_refuses_without_default_fallback() {
     let f = Fixture::new();
-    f.park(95);
+    f.schedule(95, true);
     let path = crate::model::paths::runtime_dir(&f.workspace).join("state.json");
     let replacement = serde_json::json!({"team_key":"other","active_team_key":"other","session_name":"session","agents":{"worker":{"provider":"pi","status":"running","pane_id":"%1","pane_pid":2,"window":"worker"}}}).to_string();
     let hook_path = path.clone();
@@ -234,7 +238,7 @@ fn enter_rescue_owner_loss_at_state_save_hook_refuses_without_default_fallback()
     assert!(super::super::delivery::with_rescue_submit_observer(
         &f.workspace,
         &f.store,
-        &f.evidence,
+        &f.context,
         &f.log,
         |observer| {
             observer.after_physical_submit();
@@ -249,9 +253,9 @@ fn enter_rescue_owner_loss_at_state_save_hook_refuses_without_default_fallback()
 #[test]
 fn enter_rescue_switched_top_projection_updates_only_retained_original_owner() {
     let f = Fixture::new();
-    f.park(95);
+    f.schedule(95, true);
     super::super::delivery::with_rescue_submit_observer(
-        &f.workspace, &f.store, &f.evidence, &f.log, |observer| {
+        &f.workspace, &f.store, &f.context, &f.log, |observer| {
             let original = crate::state::persist::load_runtime_state(&f.workspace).unwrap();
             let mut other = original.clone();
             other["team_key"] = "other".into();
@@ -277,102 +281,177 @@ fn enter_rescue_switched_top_projection_updates_only_retained_original_owner() {
 }
 
 #[test]
-fn enter_rescue_atomic_park_and_due90_no_early_effect() {
+fn every_unverified_row_registers_independently_of_native_receipts() {
     let f = Fixture::new();
-    f.park(0);
-    let (id, payload, status) = f.job();
+    f.schedule(0, false);
+    let (_, payload, status) = f.job();
+    let job: RescueJob = serde_json::from_str(&payload).unwrap();
     assert_eq!(status, "pending");
-    assert_eq!(f.message_status(), "submitted_unverified");
-    let times: (String, String, String) = f
+    assert!(job.context.target.is_none());
+    assert!(job.context.proof.is_none());
+    assert!(!payload.contains("evidence"));
+    assert!(!payload.contains("NativeInput"));
+    let due: String = f
         .conn()
-        .query_row(
-            "select owner_team_id,created_at,due_at from scheduled_events",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
+        .query_row("select due_at from scheduled_events", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(times.0, "team");
     assert_eq!(
-        DateTime::parse_from_rfc3339(&times.2).unwrap()
-            - DateTime::parse_from_rfc3339(&times.1).unwrap(),
+        timestamp(&due).unwrap() - timestamp(&job.registered_at).unwrap(),
         Duration::seconds(90)
     );
-    assert!(!fire_with(
-        &f.workspace,
-        &f.store,
-        &f.log,
-        id,
-        &payload,
-        &|_, _| panic!("not due")
-    )
-    .unwrap());
-    assert!(park_at(&f.store, &f.evidence, 1, "again", &f.log, Utc::now()).is_err());
     assert_eq!(
-        f.conn()
-            .query_row("select count(*) from scheduled_events", [], |r| r
-                .get::<_, i64>(0))
-            .unwrap(),
-        1
+        timestamp(&job.expires_at).unwrap() - timestamp(&job.registered_at).unwrap(),
+        Duration::seconds(120)
     );
 }
 
 #[test]
-fn enter_rescue_insert_failure_rolls_back_original_uncertainty() {
+fn even_missing_owner_or_recipient_gets_a_job_then_refuses_without_keys() {
     let f = Fixture::new();
-    f.conn().execute_batch("create trigger refuse_job before insert on scheduled_events begin select raise(abort,'fixture'); end;").unwrap();
-    assert!(park_at(&f.store, &f.evidence, 1, "uncertain", &f.log, Utc::now()).is_err());
-    assert_eq!(f.message_status(), "target_resolved");
+    f.conn()
+        .execute("update messages set owner_team_id=null,recipient=null", [])
+        .unwrap();
+    f.schedule(95, false);
+    assert_eq!(f.job().2, "pending");
+    assert!(f.fire(&|_, _| panic!("unowned registration is not key authority")));
+    assert_eq!(f.job().2, "refused");
 }
 
 #[test]
-fn enter_rescue_no_effect_deferral_releases_only_exact_unspent_claim() {
+fn registration_is_durable_and_never_resets_a_claimed_or_unknown_attempt() {
+    for status in ["pending", "claimed", "unknown", "done", "refused"] {
+        let f = Fixture::new();
+        f.schedule(95, false);
+        f.conn()
+            .execute("update scheduled_events set status=?1", [status])
+            .unwrap();
+        let original = f.job();
+        f.schedule(0, false);
+        assert_eq!(f.job(), original);
+        let count: i64 = f
+            .conn()
+            .query_row("select count(*) from scheduled_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+}
+
+#[test]
+fn unbound_job_is_observed_then_refused_without_executor() {
     let f = Fixture::new();
-    release_no_effect(&f.store, "msg_one", 2).unwrap();
-    assert_eq!(
-        f.conn()
-            .query_row("select delivery_attempts from messages", [], |r| r
-                .get::<_, i64>(0))
-            .unwrap(),
-        1
-    );
-    release_no_effect(&f.store, "msg_one", 1).unwrap();
-    assert_eq!(
-        f.conn()
-            .query_row("select delivery_attempts from messages", [], |r| r
-                .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-    assert!(f.store.claim_for_delivery("msg_one").unwrap());
-    assert_eq!(
-        f.conn()
-            .query_row("select delivery_attempts from messages", [], |r| r
-                .get::<_, i64>(0))
-            .unwrap(),
-        1
-    );
+    f.schedule(95, false);
+    assert!(f.fire(&|_, _| panic!("unbound job must not reach keys")));
+    assert_eq!(f.job().2, "refused");
+    assert_eq!(f.message_status(), "submitted_unverified");
+    let result: String = f
+        .conn()
+        .query_row("select result_json from scheduled_events", [], |r| r.get(0))
+        .unwrap();
+    assert!(result.contains("proof_missing"));
 }
 
 #[test]
-fn enter_rescue_canonical_stopped_changed_consumed_expired_and_superseded_refuse() {
-    for case in [
-        "stopped",
-        "explicit_stop",
+fn supplement_cannot_change_original_clock_scope_digest_or_bound_carrier() {
+    let f = Fixture::new();
+    f.schedule(95, false);
+    let before: (String, String) = f
+        .conn()
+        .query_row("select due_at,created_at from scheduled_events", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert!(bind_pending_context(&f.store, &f.context).unwrap());
+    let after: (String, String) = f
+        .conn()
+        .query_row("select due_at,created_at from scheduled_events", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(before, after);
+    for field in [
+        "owner",
+        "recipient",
+        "digest",
+        "pid",
+        "birth",
+        "nonce",
+        "endpoint",
+    ] {
+        let mut other = f.context.clone();
+        match field {
+            "owner" => other.owner_team_id = "other".into(),
+            "recipient" => other.recipient = "other".into(),
+            "digest" => other.payload_sha256 = digest("different"),
+            "pid" => other.target.as_mut().unwrap().pane_pid = 3,
+            "birth" => other.target.as_mut().unwrap().carrier_birth = "reused".into(),
+            "nonce" => other.target.as_mut().unwrap().binding_nonce = "replacement".into(),
+            _ => other.target.as_mut().unwrap().endpoint = "/tmp/other.sock".into(),
+        }
+        assert!(!bind_pending_context(&f.store, &other).unwrap(), "{field}");
+    }
+}
+
+#[test]
+fn early_expired_or_extended_jobs_have_no_effect() {
+    for (age, extend) in [(0, false), (121, false), (95, true)] {
+        let f = Fixture::new();
+        f.schedule(age, true);
+        let (id, payload, _) = f.job();
+        let payload = if extend {
+            let mut j: RescueJob = serde_json::from_str(&payload).unwrap();
+            j.expires_at = (Utc::now() + Duration::hours(1)).to_rfc3339();
+            let p = serde_json::to_string(&j).unwrap();
+            f.conn()
+                .execute("update scheduled_events set payload_json=?1", [&p])
+                .unwrap();
+            p
+        } else {
+            payload
+        };
+        f.conn()
+            .execute(
+                "update scheduled_events set due_at='1970-01-01T00:00:00+00:00'",
+                [],
+            )
+            .unwrap();
+        assert!(fire_with(
+            &f.workspace,
+            &f.store,
+            &f.log,
+            id,
+            &payload,
+            &|_, _| panic!("invalid clock")
+        )
+        .unwrap());
+        assert_eq!(f.job().2, "refused");
+    }
+}
+
+#[test]
+fn current_canonical_message_and_original_owner_recipient_remain_required() {
+    for change in [
+        "ack",
         "content",
         "owner",
-        "consumed",
-        "expired",
-        "superseded",
-        "job_scope",
+        "recipient",
+        "stop",
+        "pid",
+        "provider",
+        "session",
+        "window",
+        "newer",
     ] {
         let f = Fixture::new();
-        f.park(if case == "expired" { 121 } else { 95 });
-        match case {
-            "stopped" => f.state("stopped", false),
-            "explicit_stop" => f.state("running", true),
+        f.schedule(95, true);
+        match change {
+            "ack" => {
+                f.conn()
+                    .execute("update messages set status='acknowledged'", [])
+                    .unwrap();
+            }
             "content" => {
                 f.conn()
-                    .execute("update messages set content='changed'", [])
+                    .execute("update messages set content='edited'", [])
                     .unwrap();
             }
             "owner" => {
@@ -380,187 +459,175 @@ fn enter_rescue_canonical_stopped_changed_consumed_expired_and_superseded_refuse
                     .execute("update messages set owner_team_id='other'", [])
                     .unwrap();
             }
-            "consumed" => {
+            "recipient" => {
                 f.conn()
-                    .execute("update messages set status='acknowledged'", [])
+                    .execute("update messages set recipient='other'", [])
                     .unwrap();
             }
-            "superseded" => {
-                f.conn().execute("insert into messages(message_id,owner_team_id,recipient,status,created_at,delivery_attempts) values('msg_two','team','worker','submitted_unverified','z',1)",[]).unwrap();
+            "stop" => f.state("running", true),
+            "newer" => {
+                f.conn().execute("insert into messages(message_id,owner_team_id,recipient,created_at,delivery_attempts) values('msg_new','team','worker','z',1)",[]).unwrap();
             }
-            "job_scope" => {
-                f.conn()
-                    .execute("update scheduled_events set owner_team_id='other'", [])
-                    .unwrap();
+            field => {
+                let p = crate::model::paths::runtime_dir(&f.workspace).join("state.json");
+                let mut state: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+                match field {
+                    "pid" => state["agents"]["worker"]["pane_pid"] = 3.into(),
+                    "provider" => state["agents"]["worker"]["provider"] = "cursor_agent".into(),
+                    "session" => state["session_name"] = "other".into(),
+                    _ => state["agents"]["worker"]["window"] = "other".into(),
+                };
+                std::fs::write(p, state.to_string()).unwrap();
             }
-            "expired" => {}
-            _ => unreachable!(),
         }
-        let (id, payload, _) = f.job();
-        assert!(fire_with(
-            &f.workspace,
-            &f.store,
-            &f.log,
-            id,
-            &payload,
-            &|_, _| panic!("{case}: forbidden effect")
-        )
-        .unwrap());
-        assert_eq!(f.job().2, "refused", "{case}");
+        assert!(f.fire(&|_, _| panic!("canonical change {change}")));
+        assert_eq!(f.job().2, "refused", "{change}");
     }
 }
 
 #[test]
-fn enter_rescue_no_effect_can_reobserve_but_unknown_or_claimed_never_replays() {
+fn one_cas_and_ambiguous_effect_or_error_never_replay() {
+    for error in [false, true] {
+        let f = Fixture::new();
+        f.schedule(95, true);
+        let calls = Cell::new(0);
+        assert!(f.fire(&|_, authorize| {
+            calls.set(calls.get() + 1);
+            assert!(authorize());
+            if error {
+                Err(MessagingError::Validation("may have sent".into()))
+            } else {
+                Ok(EnterRescueOutcome::Entered { accepted: false })
+            }
+        }));
+        assert_eq!(f.job().2, "unknown");
+        assert!(!f.fire(&|_, _| panic!("unknown replay")));
+        assert_eq!(calls.get(), 1);
+        assert_eq!(f.message_status(), "submitted_unverified");
+    }
     let f = Fixture::new();
-    f.park(95);
-    let (id, payload, _) = f.job();
-    assert!(fire_with(
-        &f.workspace,
-        &f.store,
-        &f.log,
-        id,
-        &payload,
-        &|_, authorize| {
-            assert!(authorize());
-            Ok(EnterRescueOutcome::NoEffect {
-                reason: "busy",
-                reobserve: true,
-            })
-        }
-    )
-    .unwrap());
-    assert_eq!(f.job().2, "pending");
-    assert!(!fire_with(
-        &f.workspace,
-        &f.store,
-        &f.log,
-        id,
-        &payload,
-        &|_, _| panic!("not yet due")
-    )
-    .unwrap());
-    f.conn()
-        .execute("update scheduled_events set due_at='0'", [])
-        .unwrap();
-    assert!(fire_with(
-        &f.workspace,
-        &f.store,
-        &f.log,
-        id,
-        &payload,
-        &|_, authorize| {
-            assert!(authorize());
-            Ok(EnterRescueOutcome::Entered { accepted: false })
-        }
-    )
-    .unwrap());
-    assert_eq!(f.job().2, "unknown");
-    assert_eq!(f.message_status(), "submitted_unverified");
-    assert!(!fire_with(
-        &f.workspace,
-        &f.store,
-        &f.log,
-        id,
-        &payload,
-        &|_, _| panic!("unknown replay")
-    )
-    .unwrap());
+    f.schedule(95, true);
     f.conn()
         .execute("update scheduled_events set status='claimed'", [])
         .unwrap();
-    assert!(!fire_with(
-        &f.workspace,
-        &f.store,
-        &f.log,
-        id,
-        &payload,
-        &|_, _| panic!("crash replay")
-    )
-    .unwrap());
+    assert!(!f.fire(&|_, _| panic!("crash replay")));
 }
 
 #[test]
-fn enter_rescue_concurrent_claim_is_one_effect_and_updates_original_only() {
+fn no_effect_busy_reobserves_within_original_window_only() {
     let f = Fixture::new();
-    f.park(95);
-    let (id, payload, _) = f.job();
-    let effects = AtomicUsize::new(0);
-    std::thread::scope(|scope| {
-        for _ in 0..2 {
-            scope.spawn(|| {
-                fire_with(
-                    &f.workspace,
-                    &f.store,
-                    &f.log,
-                    id,
-                    &payload,
-                    &|_, authorize| {
-                        assert!(authorize());
-                        effects.fetch_add(1, Ordering::SeqCst);
-                        std::thread::sleep(std::time::Duration::from_millis(20));
-                        Ok(EnterRescueOutcome::Entered { accepted: true })
-                    },
-                )
-                .unwrap()
+    f.schedule(95, true);
+    assert!(f.fire(&|_, _| Ok(EnterRescueOutcome::NoEffect {
+        reason: "busy",
+        reobserve: true
+    })));
+    assert_eq!(f.job().2, "pending");
+    let due: String = f
+        .conn()
+        .query_row("select due_at from scheduled_events", [], |r| r.get(0))
+        .unwrap();
+    assert!(timestamp(&due).unwrap() > Utc::now());
+    let f = Fixture::new();
+    f.schedule(119, true);
+    assert!(f.fire(&|_, _| Ok(EnterRescueOutcome::NoEffect {
+        reason: "busy",
+        reobserve: true
+    })));
+    assert_eq!(f.job().2, "refused");
+}
+
+#[test]
+fn consumed_or_single_accepted_enter_updates_only_original_unverified_row() {
+    for consumed in [false, true] {
+        let f = Fixture::new();
+        f.schedule(95, true);
+        assert!(f.fire(&|_, _| Ok(if consumed {
+            EnterRescueOutcome::Consumed
+        } else {
+            EnterRescueOutcome::Entered { accepted: true }
+        })));
+        assert_eq!(f.job().2, "done");
+        assert_eq!(f.message_status(), "delivered");
+        assert!(!f.fire(&|_, _| panic!("done replay")));
+    }
+    let f = Fixture::new();
+    f.schedule(95, true);
+    assert!(f.fire(&|_, _| {
+        f.conn()
+            .execute("update messages set status='acknowledged'", [])
+            .unwrap();
+        Ok(EnterRescueOutcome::Entered { accepted: true })
+    }));
+    assert_eq!(f.message_status(), "acknowledged");
+}
+
+#[test]
+fn final_authorizer_detects_canonical_changes_during_transport_checks() {
+    let f = Fixture::new();
+    f.schedule(95, true);
+    assert!(f.fire(&|_, authorize| {
+        assert!(authorize());
+        f.state("stopped", true);
+        assert!(!authorize());
+        Ok(EnterRescueOutcome::NoEffect {
+            reason: "canonical_changed",
+            reobserve: false,
+        })
+    }));
+    assert_eq!(f.job().2, "refused");
+}
+
+#[test]
+fn revoked_scheduler_claim_is_not_key_authority() {
+    let f = Fixture::new();
+    f.schedule(95, true);
+    assert!(f.fire(&|_, authorize| {
+        assert!(authorize());
+        f.conn()
+            .execute("update scheduled_events set status='refused'", [])
+            .unwrap();
+        assert!(!authorize());
+        Ok(EnterRescueOutcome::NoEffect {
+            reason: "claim_revoked",
+            reobserve: false,
+        })
+    }));
+    assert_eq!(f.job().2, "refused");
+}
+
+#[test]
+fn tampered_event_scope_or_untrusted_proof_cannot_execute() {
+    for change in ["scope", "capsule", "capsule_scope", "missing"] {
+        let f = Fixture::new();
+        f.schedule(95, false);
+        let mut context = f.context.clone();
+        if change == "capsule" || change == "capsule_scope" {
+            let scope_sha256 = if change == "capsule_scope" {
+                digest("foreign receipt")
+            } else {
+                context.scope_sha256().unwrap()
+            };
+            let proof = context.proof.as_mut().unwrap();
+            proof.visible_marker = false;
+            proof.owned_capsule = Some(crate::transport::enter_rescue::OwnedCapsule {
+                scope_sha256,
+                label: "[paste #1 +30 lines]".into(),
+                baseline_sha256: digest("baseline"),
+                baseline_capsules: vec![],
+                observed_after_owned_paste: change == "capsule_scope",
             });
         }
-    });
-    assert_eq!(effects.load(Ordering::SeqCst), 1);
-    assert_eq!(f.job().2, "done");
-    assert_eq!(f.message_status(), "delivered");
-    assert_eq!(
-        f.conn()
-            .query_row("select count(*) from messages", [], |r| r.get::<_, i64>(0))
-            .unwrap(),
-        1
-    );
-}
-
-#[test]
-fn enter_rescue_revalidates_at_effect_and_keeps_unknown_errors_terminal() {
-    let f = Fixture::new();
-    f.park(95);
-    let (id, payload, _) = f.job();
-    fire_with(
-        &f.workspace,
-        &f.store,
-        &f.log,
-        id,
-        &payload,
-        &|_, authorize| {
-            f.state("stopped", true);
-            assert!(!authorize());
-            Ok(EnterRescueOutcome::NoEffect {
-                reason: "canonical_changed",
-                reobserve: false,
-            })
-        },
-    )
-    .unwrap();
-    assert_eq!(f.job().2, "refused");
-    let other = Fixture::new();
-    other.park(95);
-    let (id, payload, _) = other.job();
-    fire_with(
-        &other.workspace,
-        &other.store,
-        &other.log,
-        id,
-        &payload,
-        &|_, _| {
-            Err(crate::transport::TransportError::Io(std::io::Error::other("may have sent")).into())
-        },
-    )
-    .unwrap();
-    assert_eq!(other.job().2, "unknown");
-    assert!(!fire_with(
-        &other.workspace,
-        &other.store,
-        &other.log,
-        id,
-        &payload,
-        &|_, _| panic!("error replay")
-    )
-    .unwrap());
+        if change == "missing" {
+            context.proof = None;
+        }
+        assert!(bind_pending_context(&f.store, &context).unwrap());
+        if change == "scope" {
+            f.conn()
+                .execute("update scheduled_events set owner_team_id='other'", [])
+                .unwrap();
+        }
+        assert!(f.fire(&|_, _| panic!("untrusted job")));
+        assert_eq!(f.job().2, "refused");
+    }
 }

@@ -67,6 +67,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod enter_rescue;
 pub mod native_input;
 
 #[cfg(test)]
@@ -987,6 +988,39 @@ pub trait Transport: Send + Sync {
             observer.after_physical_submit();
         }
         Ok(report)
+    }
+
+    /// Observation only; None means this backend/provider has no native parser.
+    /// An implemented parser with an incomplete frame returns an error, not absence.
+    fn observe_native_input(
+        &self,
+        _target: &Target,
+        _provider: crate::model::enums::Provider,
+    ) -> Result<Option<native_input::InputFrame>, TransportError> {
+        Ok(None)
+    }
+
+    /// Snapshot the original attempted target without submitting or adopting a capsule.
+    fn snapshot_enter_rescue(
+        &self,
+        _target: &Target,
+        context: &enter_rescue::EnterRescueContext,
+        _rendered_payload: &str,
+    ) -> Result<enter_rescue::EnterRescueContext, TransportError> {
+        Ok(context.clone())
+    }
+
+    /// Independent delayed Enter-only watchdog, not native-input admission.
+    fn rescue_enter_guarded(
+        &self,
+        _context: &enter_rescue::EnterRescueContext,
+        _authorize: &dyn Fn() -> bool,
+        _observer: Option<&dyn SubmitObserver>,
+    ) -> Result<enter_rescue::EnterRescueOutcome, TransportError> {
+        Ok(enter_rescue::EnterRescueOutcome::NoEffect {
+            reason: "unsupported_backend",
+            reobserve: false,
+        })
     }
 
     /// Enter-only recovery; unsupported backends have an explicit zero-effect refusal.

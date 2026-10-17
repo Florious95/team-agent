@@ -73,6 +73,7 @@ use crate::transport::{
     SubmitVerification, Target, Transport, TransportError, TurnVerification, WindowName,
 };
 
+mod enter_rescue;
 mod native_input;
 
 pub const PANE_BINDING_NONCE_METADATA_KEY: &str = "TEAM_AGENT_PANE_BINDING_NONCE";
@@ -3846,6 +3847,32 @@ impl Transport for TmuxBackend {
             // diagnostics applicable.
             submit_diagnostics: None,
         })
+    }
+
+    fn observe_native_input(
+        &self,
+        target: &Target,
+        provider: crate::model::enums::Provider,
+    ) -> Result<Option<crate::transport::native_input::InputFrame>, TransportError> {
+        self.observe_current_native_input(target, provider)
+    }
+
+    fn snapshot_enter_rescue(
+        &self,
+        target: &Target,
+        context: &crate::transport::enter_rescue::EnterRescueContext,
+        rendered_payload: &str,
+    ) -> Result<crate::transport::enter_rescue::EnterRescueContext, TransportError> {
+        self.snapshot_rescue_context(target, context, rendered_payload)
+    }
+
+    fn rescue_enter_guarded(
+        &self,
+        context: &crate::transport::enter_rescue::EnterRescueContext,
+        authorize: &dyn Fn() -> bool,
+        observer: Option<&dyn SubmitObserver>,
+    ) -> Result<crate::transport::enter_rescue::EnterRescueOutcome, TransportError> {
+        self.rescue_guarded_enter(context, authorize, observer)
     }
 
     fn rescue_enter(&self, evidence: &crate::transport::native_input::NativeInputEvidence, authorize: &dyn Fn() -> bool, observer: Option<&dyn SubmitObserver>)

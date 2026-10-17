@@ -64,7 +64,7 @@ use crate::transport::{PaneId, Target, Transport};
 pub mod activity;
 pub mod address;
 pub mod delivery;
-mod enter_rescue;
+pub(crate) mod enter_rescue;
 pub mod helpers;
 pub mod leader_channel;
 pub mod leader_receiver;

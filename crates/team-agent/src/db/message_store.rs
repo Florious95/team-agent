@@ -379,9 +379,10 @@ impl MessageStore {
         status: &str,
         error: Option<&str>,
     ) -> Result<(), MessageStoreError> {
-        let conn = crate::db::schema::open_db(&self.path)?;
+        let mut conn = crate::db::schema::open_db(&self.path)?;
+        let tx = conn.transaction()?;
         let now = now_ts();
-        let changed = conn.execute(
+        let changed = tx.execute(
             "update messages
              set status = case
                  when status = 'acknowledged'
@@ -407,7 +408,7 @@ impl MessageStore {
             params![message_id, status, now, error],
         )?;
         if changed == 0 {
-            let prior: Option<String> = conn
+            let prior: Option<String> = tx
                 .query_row(
                     "select status from messages where message_id = ?1",
                     params![message_id],
@@ -449,6 +450,12 @@ impl MessageStore {
             )?;
             return Ok(());
         }
+        if status == "submitted_unverified" {
+            // Uncertainty and its independent safety net are one durable transition.
+            // Registration never depends on provider, parser, binding or paste proof.
+            crate::messaging::enter_rescue::schedule_in_tx(&tx, message_id, chrono::Utc::now())?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
