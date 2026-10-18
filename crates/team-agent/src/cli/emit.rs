@@ -57,14 +57,6 @@ pub fn run(argv: &[String], cwd: &Path) -> ExitCode {
         println!("{}", default_help());
         return ExitCode::Ok;
     };
-    if is_machine_command(command)
-        && argv[1..]
-            .iter()
-            .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
-    {
-        eprintln!("{HUMAN_NAVIGATION}");
-        return ExitCode::Usage;
-    }
     if command == "route" {
         return super::route::run(&argv[1..]);
     }
@@ -85,22 +77,7 @@ pub fn run(argv: &[String], cwd: &Path) -> ExitCode {
         println!("team-agent {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::Ok;
     }
-    // CR-063/G4: every registered subcommand's `--help` must short-circuit before dispatch,
-    // before argument validation, leader-pane checks, or runtime-state writes.
-    //
-    // The gate stays on KNOWN subcommands so an unknown command still falls through to
-    // the argparse-style invalid-choice path (golden parser.py:84; covered by
-    // `cli_unknown_command_red` and the `claude_code` divergence guard which would
-    // otherwise be silently passthrough-shaped).
-    if is_known_subcommand(command)
-        && argv
-            .iter()
-            .skip(1)
-            .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
-    {
-        println!("{}", command_help(Some(command)));
-        return ExitCode::Ok;
-    }
+    // The command grammar distinguishes free help from consumed/literal payload.
     match dispatch(command, &argv[1..], cwd) {
         Ok(exit) => exit,
         Err(error) => emit_cli_error_for_command(command, &argv[1..], cwd, &error),
@@ -150,6 +127,8 @@ fn emit_cli_error_for_command(
             eprintln!("{explanation}\n\n{help}");
         }
         ExitCode::Usage
+    } else if matches!(error, CliError::Usage(_)) {
+        emit_parser_usage(command, args, error)
     } else if command == "status" {
         emit_status_cli_error(error)
     } else {
@@ -218,33 +197,22 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
     if command == "leader-prompt" {
         return Ok(super::leader_prompt::run(args));
     }
-    // Keep the removed flag harmless for older scripts and persisted command
-    // lines; the default tmux backend is already the only runtime path.
-    let filtered_args: Vec<String> = args
-        .iter()
-        .filter(|arg| arg.as_str() != "--no-display")
-        .cloned()
-        .collect();
-    let args = filtered_args.as_slice();
-    if is_machine_command(command) {
-        if args
-            .iter()
-            .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
-        {
+    let machine = is_machine_command(command);
+    if !machine && !matches!(command_spec(command).map(|spec| spec.kind), Some(CommandKind::Dispatch(_))) {
+        return Ok(emit_unknown_subcommand_usage(command));
+    }
+    let checked = super::arguments::parse(command, args)?;
+    if checked.help {
+        if machine {
             eprintln!("{HUMAN_NAVIGATION}");
             return Ok(ExitCode::Usage);
         }
-        return dispatch_machine(command, args, cwd);
+        println!("{}", command_help(Some(command)));
+        return Ok(ExitCode::Ok);
     }
-    let Some(spec) = command_spec(command) else {
-        return Ok(emit_unknown_subcommand_usage(command));
-    };
-    match spec.kind {
-        CommandKind::Dispatch(_) => {}
-        CommandKind::LeaderPassthrough { .. } => {
-            return Ok(emit_unknown_subcommand_usage(command));
-        }
-    }
+    let normalized = resolve_command_scope(command, checked.tokens, cwd)?;
+    let args = normalized.as_slice();
+    if machine { return dispatch_machine(command, args, cwd); }
     if args.iter().all(|arg| arg == "--json")
         && matches!(
             command,
@@ -612,9 +580,14 @@ fn install_skill_args(args: &[String]) -> Result<InstallSkillArgs, CliError> {
 
 /// 取 `--flag <value>` 的值(用于 install-skill 的 --source/--dest,parse_args 不覆盖的旗标)。
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
-    args.iter()
-        .position(|a| a == flag)
-        .and_then(|i| args.get(i + 1).cloned())
+    for (index, argument) in args.iter().enumerate() {
+        if argument == "--" { break; }
+        if argument == flag { return args.get(index + 1).cloned(); }
+        if let Some((key, value)) = argument.split_once('=') {
+            if key == flag { return Some(value.to_string()); }
+        }
+    }
+    None
 }
 
 /// `team-agent install-skill`(RED-1 单源):repo `skills/team-agent` → `~/.codex|.claude|.copilot`。
@@ -685,7 +658,20 @@ fn resolve_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+fn emit_parser_usage(command: &str, args: &[String], error: &CliError) -> ExitCode {
+    if super::arguments::has_flag(command, args, "--json") {
+        let payload = error.to_payload(Path::new(""), command);
+        if let Ok(value) = serde_json::to_value(payload) {
+            println!("{}", python_compact_json(&crate::redaction::redact_external_value(&value)));
+        }
+    } else {
+        eprintln!("error: {}\nUse team-agent {command} --help.", crate::redaction::redact_external_text(&error.to_string()));
+    }
+    ExitCode::Usage
+}
+
 fn emit_cli_error(command: &str, args: &[String], cwd: &Path, error: &CliError) -> ExitCode {
+    if matches!(error, CliError::Usage(_)) { return emit_parser_usage(command, args, error); }
     let parsed = parse_args(args);
     let workspace = workspace(&parsed, cwd);
     let log_path = cli_error_log_path(&workspace);
@@ -820,7 +806,7 @@ fn python_compact_json(value: &Value) -> String {
 }
 
 fn has_arg(args: &[String], needle: &str) -> bool {
-    args.iter().any(|arg| arg == needle)
+    args.iter().take_while(|arg| arg.as_str() != "--").any(|arg| arg == needle)
 }
 
 #[derive(Debug, Default)]
@@ -894,6 +880,19 @@ struct ParsedArgs {
 }
 
 fn parse_args(args: &[String]) -> ParsedArgs {
+    let mut expanded = Vec::new();
+    let mut literal = false;
+    for argument in args {
+        if argument == "--" { literal = true; }
+        if !literal && argument.starts_with("--") {
+            if let Some((flag, value)) = argument.split_once('=') {
+                expanded.extend([flag.to_string(), value.to_string()]);
+                continue;
+            }
+        }
+        expanded.push(argument.clone());
+    }
+    let args = expanded.as_slice();
     let mut parsed = ParsedArgs::default();
     let mut i = 0usize;
     while i < args.len() {
@@ -901,6 +900,10 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             break;
         };
         match arg.as_str() {
+            "--" => {
+                parsed.positionals.extend_from_slice(&args[i + 1..]);
+                break;
+            }
             "--workspace" => {
                 parsed.workspace = next_arg(args, &mut i).map(PathBuf::from);
             }
@@ -1034,7 +1037,52 @@ fn parse_seconds_ms(raw: &str) -> Option<u64> {
 fn parse_cli_provider(raw: Option<&str>) -> Result<crate::provider::Provider, CliError> {
     let raw = raw.unwrap_or("codex");
     serde_json::from_value::<crate::provider::Provider>(serde_json::json!(raw))
-        .map_err(|_| CliError::Runtime(format!("unknown provider: {raw}")))
+        .map_err(|_| CliError::Usage(format!("unknown provider: {raw}")))
+}
+
+fn explicit_path(value: &str) -> bool {
+    value == "." || value == ".." || value.contains('/') || value.contains('\\')
+        || Path::new(value).is_absolute()
+        || (value.as_bytes().get(1) == Some(&b':') && value.as_bytes().first().is_some_and(u8::is_ascii_alphabetic))
+}
+
+fn checked_workspace(path: &Path, cwd: &Path) -> Result<PathBuf, CliError> {
+    let path = resolve_cli_path(cwd, path);
+    let canonical = std::fs::canonicalize(&path).map_err(|_| CliError::Usage(format!(
+        "workspace does not exist or is unavailable: {}", path.display()
+    )))?;
+    if !canonical.is_dir() {
+        return Err(CliError::Usage(format!("workspace is not a directory: {}", path.display())));
+    }
+    Ok(canonical)
+}
+
+fn resolve_command_scope(command: &str, mut args: Vec<String>, cwd: &Path) -> Result<Vec<String>, CliError> {
+    let mut selected = None;
+    for argument in &mut args {
+        if argument == "--" { break; }
+        if let Some(path) = argument.strip_prefix("--workspace=") {
+            let canonical = checked_workspace(Path::new(path), cwd)?;
+            *argument = format!("--workspace={}", canonical.display());
+            selected = Some(canonical);
+        }
+    }
+    if command == "restart" {
+        let index = args.iter().position(|arg| arg == "--")
+            .and_then(|index| (index + 1 < args.len()).then_some(index + 1))
+            .or_else(|| args.iter().position(|arg| !arg.starts_with('-')));
+        if let Some(index) = index {
+            if !explicit_path(&args[index]) {
+                return Err(CliError::Usage("bare restart targets are ambiguous; use restart --workspace PATH or restart ./PATH for a team".to_string()));
+            }
+            let canonical = checked_workspace(Path::new(&args[index]), cwd)?;
+            if selected.as_ref().is_some_and(|selected| selected != &canonical) {
+                return Err(CliError::Usage("restart WORKSPACE conflicts with --workspace".to_string()));
+            }
+            args[index] = canonical.to_string_lossy().into_owned();
+        }
+    }
+    Ok(args)
 }
 
 fn workspace(parsed: &ParsedArgs, cwd: &Path) -> PathBuf {
@@ -1289,52 +1337,7 @@ fn warn_send_legacy_delivery_flags(args: &[String]) {
 }
 
 fn validate_send_flags(args: &[String]) -> Result<(), CliError> {
-    const ALLOWED: &[&str] = &[
-        "--workspace",
-        "--team",
-        "--targets",
-        "--target",
-        "--to",
-        "--to-name",
-        "--to-leader",
-        "--pane",
-        "--task",
-        "--watch-result",
-        "--requires-ack",
-        "--no-ack",
-        "--no-wait",
-        "--timeout",
-        "--confirm-human",
-        "--message-id",
-        "--mailbox",
-        "--presentation-sink",
-        "--message-class",
-        "--case-id",
-        "--json",
-        "-h",
-        "--help",
-    ];
-    const ALLOWED_PREFIXES: &[&str] = &[
-        "--team=",
-        "--pane=",
-        "--to-name=",
-        "--to-leader=",
-        "--presentation-sink=",
-        "--message-class=",
-        "--case-id=",
-    ];
-    if let Some(flag) = args.iter().find(|arg| {
-        arg.starts_with('-')
-            && !ALLOWED.contains(&arg.as_str())
-            && !ALLOWED_PREFIXES
-                .iter()
-                .any(|prefix| arg.starts_with(prefix))
-    }) {
-        return Err(CliError::Usage(format!(
-            "unrecognized argument for `send`: {flag}"
-        )));
-    }
-    Ok(())
+    super::arguments::parse("send", args).map(|_| ())
 }
 
 /// Stage 4 of identity-boundary unified plan (architect direction
@@ -1445,7 +1448,9 @@ fn attach_leader_args(args: &[String], cwd: &Path) -> Result<AttachLeaderArgs, C
             .pane
             .filter(|pane| !pane.is_empty())
             .map(crate::transport::PaneId::new),
-        provider: parse_cli_provider(parsed.provider.as_deref())?,
+        provider: parse_cli_provider(Some(parsed.provider.as_deref()
+            .filter(|provider| !provider.trim().is_empty())
+            .ok_or_else(|| CliError::Usage("attach-leader requires --provider <name>".to_string()))?))?,
         confirm: parsed.confirm,
         json: parsed.json,
     })
@@ -1485,11 +1490,12 @@ fn shutdown_args(args: &[String], cwd: &Path) -> Result<ShutdownArgs, CliError> 
 
 fn restart_args(args: &[String], cwd: &Path) -> Result<RestartArgs, CliError> {
     let parsed = parse_args(args);
-    let workspace = parsed
-        .positionals
-        .first()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace(&parsed, cwd));
+    let workspace = if let Some(path) = parsed.positionals.first() {
+        if !explicit_path(path) {
+            return Err(CliError::Usage("bare restart targets are ambiguous; use restart --workspace PATH or restart ./PATH for a team".to_string()));
+        }
+        resolve_cli_path(cwd, Path::new(path))
+    } else { workspace(&parsed, cwd) };
     refuse_if_multi_alive_team_missing_scope("restart", &workspace, parsed.team.as_deref())?;
     Ok(RestartArgs {
         workspace,
@@ -1551,7 +1557,7 @@ fn role_agent_args(
         } else {
             index += 1;
             args.get(index)
-                .filter(|value| !value.starts_with("--"))
+                .filter(|value| flag == "--prompt" || !value.starts_with("--"))
                 .ok_or_else(|| CliError::Usage(format!("missing value for {flag}")))?
                 .clone()
         };
@@ -1671,6 +1677,9 @@ mod role_cli_tests {
 
 fn start_agent_args(args: &[String], cwd: &Path) -> Result<StartAgentArgs, CliError> {
     let (parsed, role_config) = role_agent_args(args, false)?;
+    if parsed.force {
+        return Err(CliError::Usage("start-agent does not support --force; use stop-agent AGENT followed by start-agent AGENT for a safe restart".to_string()));
+    }
     Ok(StartAgentArgs {
         role_config,
         agent: required_pos(&parsed, 0, "agent")?,

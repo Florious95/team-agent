@@ -232,7 +232,7 @@ jobs:
             *) exit 64 ;;
           esac
       - name: Check scoped formatting and retain a remote formatting patch
-        if: always() && (inputs.regression_scope == 'issue321' || inputs.regression_scope == 'issue321-full')
+        if: always() && (inputs.regression_scope == 'issue321' || inputs.regression_scope == 'issue321-full' || inputs.regression_scope == 'issue334' || inputs.regression_scope == 'issue334-red')
         shell: bash
         run: |
           set -euo pipefail
@@ -250,6 +250,9 @@ jobs:
             crates/team-agent/src/transport/enter_rescue.rs
           )
           set +e
+          if [[ "$REGRESSION_SCOPE" == issue334* ]]; then
+            files=(crates/team-agent/src/cli/arguments.rs crates/team-agent/src/cli/tests/parser_safety.rs)
+          fi
           rustfmt --edition 2021 --config skip_children=true --check "${files[@]}" > regression-evidence/format.log 2>&1
           rc=$?
           set -e

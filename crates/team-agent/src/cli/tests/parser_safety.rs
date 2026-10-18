@@ -139,3 +139,66 @@ fn real_control_help_remains_an_effect_free_short_circuit() {
     assert_eq!(run(&strings(&["status", "--unknown", "--help"]), &sandbox.0), ExitCode::Ok);
     assert!(std::fs::read_dir(&sandbox.0).unwrap().next().is_none());
 }
+
+#[test]
+fn every_dispatch_command_has_a_closed_control_schema() {
+    for spec in COMMAND_SPECS {
+        if !matches!(spec.kind, CommandKind::Dispatch(_)) || matches!(spec.name, "route" | "leader-prompt") { continue; }
+        let checked = super::super::arguments::parse(spec.name, &strings(&["--help"])).unwrap();
+        assert!(checked.help, "{} must have a schema", spec.name);
+        assert!(super::super::arguments::parse(spec.name, &strings(&["--unknown"])).is_err());
+    }
+    for command in ["wait", "coordinator", "attach-app-server-leader"] {
+        assert!(super::super::arguments::parse(command, &strings(&["--workspace", "--once"])).is_err());
+    }
+}
+
+#[test]
+fn canonical_scope_equal_and_split_share_one_directory_and_reject_conflicts() {
+    let sandbox = Sandbox::new();
+    let selected = sandbox.0.join("scope=a b");
+    std::fs::create_dir(&selected).unwrap();
+    let canonical = std::fs::canonicalize(&selected).unwrap();
+    for args in [strings(&["--workspace", "scope=a b"]), strings(&["--workspace=scope=a b"])] {
+        let checked = super::super::arguments::parse("status", &args).unwrap();
+        let args = resolve_command_scope("status", checked.tokens, &sandbox.0).unwrap();
+        assert_eq!(parse_args(&args).workspace, Some(canonical.clone()));
+    }
+    let args = super::super::arguments::parse("restart", &strings(&["./scope=a b", "--workspace=."])).unwrap();
+    assert!(matches!(resolve_command_scope("restart", args.tokens, &sandbox.0), Err(CliError::Usage(_))));
+    let args = super::super::arguments::parse("restart", &strings(&["./scope=a b", "--workspace=scope=a b"])).unwrap();
+    let args = resolve_command_scope("restart", args.tokens, &sandbox.0).unwrap();
+    assert_eq!(restart_args(&args, &sandbox.0).unwrap().workspace, canonical);
+}
+
+#[test]
+fn payload_help_is_not_control_and_compatibility_flags_do_not_delete_literals() {
+    let checked = super::super::arguments::parse("add-agent", &strings(&["w", "--provider=pi", "--bypass=false", "--prompt", "--help"])).unwrap();
+    assert!(!checked.help);
+    let (_, patch) = role_agent_args(&checked.tokens, true).unwrap();
+    assert_eq!(patch.prompt.as_deref(), Some("--help"));
+    let checked = super::super::arguments::parse("send", &strings(&["w", "--", "--help", "--no-display", "--workspace=a=b"])).unwrap();
+    assert!(!checked.help);
+    assert_eq!(parse_args(&checked.tokens).positionals, strings(&["w", "--help", "--no-display", "--workspace=a=b"]));
+    let checked = super::super::arguments::parse("quick-start", &strings(&["--no-display", "--", "--no-display"])).unwrap();
+    assert_eq!(checked.tokens, strings(&["--", "--no-display"]));
+    assert!(super::super::arguments::parse("status", &strings(&["--yes"])).is_err());
+    assert!(!super::super::arguments::has_flag("add-agent", &strings(&["--prompt", "--json"]), "--json"));
+}
+
+#[test]
+fn restart_node_directory_matrix_always_refuses_without_mutating_state() {
+    for agent in [false, true] {
+        for directory in [false, true] {
+            let sandbox = Sandbox::new();
+            let runtime = sandbox.0.join(".team/runtime");
+            std::fs::create_dir_all(&runtime).unwrap();
+            let state = if agent { r#"{"agents":{"worker":{"status":"stopped"}}}"# } else { r#"{"agents":{}}"# };
+            std::fs::write(runtime.join("state.json"), state).unwrap();
+            if directory { std::fs::create_dir(sandbox.0.join("worker")).unwrap(); }
+            assert_eq!(run(&strings(&["restart", "worker"]), &sandbox.0), ExitCode::Usage);
+            assert_eq!(std::fs::read_to_string(runtime.join("state.json")).unwrap(), state);
+            assert!(!sandbox.0.join(".team/logs").exists());
+        }
+    }
+}

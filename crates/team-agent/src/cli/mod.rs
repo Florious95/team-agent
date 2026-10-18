@@ -57,6 +57,7 @@ pub(crate) const STATUS_REMINDER: &str =
     "Next: use team-agent inbox leader -n 3 for replies. Status is not proof of task completion; do not inspect worker terminal content.";
 
 pub mod adapters;
+mod arguments;
 #[cfg(unix)]
 mod shutdown_socket;
 pub mod attach_app_server_leader;
