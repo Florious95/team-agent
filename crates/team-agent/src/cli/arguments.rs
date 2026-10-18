@@ -13,6 +13,7 @@ enum ValueKind {
     Seconds,
     PositiveSeconds,
     Choice(&'static [&'static str]),
+    FoldedChoice(&'static [&'static str]),
 }
 use ValueKind::*;
 
@@ -30,7 +31,7 @@ fn schema(command: &str) -> Option<Schema> {
                 ("--name", Token),
                 ("--team-id", Token),
                 ("--yes", Switch),
-                ("--backend", Choice(&["tmux", "conpty"])),
+                ("--backend", FoldedChoice(&["tmux", "conpty"])),
                 ("--detail", Switch),
                 ("--no-display", Switch),
             ],
@@ -204,6 +205,7 @@ fn valid_value(kind: ValueKind, value: &str) -> bool {
                 && (!matches!(kind, PositiveSeconds) || number > 0.0)
         }),
         Choice(values) => values.contains(&value),
+        FoldedChoice(values) => values.contains(&value.trim().to_ascii_lowercase().as_str()),
         _ => true,
     }
 }

@@ -1355,6 +1355,7 @@ fn warn_send_legacy_delivery_flags(args: &[String]) {
     for flag in FLAGS {
         if args
             .iter()
+            .take_while(|arg| arg.as_str() != "--")
             .any(|arg| arg == flag || arg.starts_with(&format!("{flag}=")))
         {
             eprintln!(

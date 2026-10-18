@@ -221,8 +221,13 @@ fn every_dispatch_command_has_a_closed_control_schema() {
         }
         let checked = super::super::arguments::parse(spec.name, &strings(&["--help"])).unwrap();
         assert!(checked.help, "{} must have a schema", spec.name);
-        let compatibility = super::super::arguments::parse(spec.name, &strings(&["--no-display"])).unwrap();
-        assert!(compatibility.tokens.is_empty(), "explicit legacy no-display control: {}", spec.name);
+        let compatibility =
+            super::super::arguments::parse(spec.name, &strings(&["--no-display"])).unwrap();
+        assert!(
+            compatibility.tokens.is_empty(),
+            "explicit legacy no-display control: {}",
+            spec.name
+        );
         assert!(super::super::arguments::parse(spec.name, &strings(&["--unknown"])).is_err());
     }
     for command in ["wait", "coordinator", "attach-app-server-leader"] {
@@ -330,14 +335,34 @@ fn restart_node_directory_matrix_always_refuses_without_mutating_state() {
 
 #[test]
 fn text_queries_and_native_rendering_switches_keep_literal_boundaries() {
+    for backend in ["tmux", "TMUX", " conpty "] {
+        let input = format!("--backend={backend}");
+        let checked = super::super::arguments::parse("quick-start", &[input]).unwrap();
+        let parsed = quick_start_args(&checked.tokens, Path::new(".")).unwrap();
+        assert_eq!(parsed.backend.as_deref(), Some(backend));
+    }
     for query in ["", "  ", "--help", "a=b"] {
-        let checked = super::super::arguments::parse("models", &strings(&[&format!("--search={query}")])).unwrap();
+        let checked =
+            super::super::arguments::parse("models", &strings(&[&format!("--search={query}")]))
+                .unwrap();
         assert!(!checked.help);
         let parsed = models_args(&checked.tokens).unwrap();
-        assert_eq!(parsed.search.as_deref(), (!query.trim().is_empty()).then_some(query));
+        assert_eq!(
+            parsed.search.as_deref(),
+            (!query.trim().is_empty()).then_some(query)
+        );
     }
-    let checked = super::super::arguments::parse("models", &strings(&["--search", "--help"])).unwrap();
+    let checked =
+        super::super::arguments::parse("models", &strings(&["--search", "--help"])).unwrap();
     assert!(!checked.help);
-    assert!(super::super::arguments::has_flag("pi", &strings(&["--json", "--", "--help"]), "--json"));
-    assert!(!super::super::arguments::has_flag("pi", &strings(&["--", "--json"]), "--json"));
+    assert!(super::super::arguments::has_flag(
+        "pi",
+        &strings(&["--json", "--", "--help"]),
+        "--json"
+    ));
+    assert!(!super::super::arguments::has_flag(
+        "pi",
+        &strings(&["--", "--json"]),
+        "--json"
+    ));
 }
