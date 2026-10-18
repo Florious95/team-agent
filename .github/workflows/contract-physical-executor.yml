@@ -30,6 +30,8 @@ on:
           - issue321-full
           - issue321-f1
           - issue326
+          - issue334-red
+          - issue334
 
 permissions:
   contents: read
@@ -186,6 +188,13 @@ jobs:
             host-native)
               run_case host-native cargo test --manifest-path crates/team-agent-contract/Cargo.toml --test host_native --locked -- --test-threads=1
               ;;
+            issue334-red)
+              run_case parser-safety cargo test -p team-agent --lib --locked cli::emit::parser_safety_tests -- --test-threads=1
+              ;;
+            issue334)
+              run_case workspace-check cargo check --workspace --all-targets --locked
+              run_case root-cli cargo test -p team-agent --lib --locked cli:: -- --test-threads=1
+              ;;
             issue326)
               run_case ambient-authority cargo test -p team-agent --test leader_launcher_ambient_pane_authority_red --locked -- --test-threads=1
               run_case root-leader cargo test -p team-agent --lib --locked leader:: -- --test-threads=1
@@ -266,7 +275,7 @@ jobs:
           retention-days: 14
 
   workspace-all-linux:
-    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && (inputs.regression_scope == 'issue321-full' || inputs.regression_scope == 'issue321-f1')
+    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && (inputs.regression_scope == 'issue321-full' || inputs.regression_scope == 'issue321-f1' || inputs.regression_scope == 'issue334')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:

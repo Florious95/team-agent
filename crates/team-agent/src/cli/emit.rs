@@ -2766,3 +2766,7 @@ mod tests {
         // without it.
     }
 }
+
+#[cfg(test)]
+#[path = "tests/parser_safety.rs"]
+mod parser_safety_tests;
