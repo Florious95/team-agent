@@ -77,7 +77,21 @@ pub fn run(argv: &[String], cwd: &Path) -> ExitCode {
         println!("team-agent {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::Ok;
     }
-    // The command grammar distinguishes free help from consumed/literal payload.
+    // Classify syntax/scope errors before dispatch; contextual status refusals
+    // retain their existing stderr-only contract. Resolve the scope only once.
+    if is_machine_command(command)
+        || matches!(command_spec(command).map(|spec| spec.kind), Some(CommandKind::Dispatch(_)))
+    {
+        let checked = match prepare_control_args(command, &argv[1..], cwd) {
+            Ok(checked) => checked,
+            Err(error) => return emit_parser_usage(command, &argv[1..], &error),
+        };
+        let error_args = checked.tokens.clone();
+        return match dispatch_prepared(command, checked, cwd) {
+            Ok(exit) => exit,
+            Err(error) => emit_cli_error_for_command(command, &error_args, cwd, &error),
+        };
+    }
     match dispatch(command, &argv[1..], cwd) {
         Ok(exit) => exit,
         Err(error) => emit_cli_error_for_command(command, &argv[1..], cwd, &error),
@@ -113,7 +127,7 @@ fn emit_cli_error_for_command(
             },
             _ => error.to_string(),
         };
-        if has_arg(args, "--json") {
+        if super::arguments::has_flag(command, args, "--json") {
             let payload = error.to_payload(Path::new(""), command);
             let mut value = serde_json::to_value(payload)
                 .unwrap_or_else(|_| serde_json::json!({"ok": false, "error": error.to_string()}));
@@ -127,13 +141,18 @@ fn emit_cli_error_for_command(
             eprintln!("{explanation}\n\n{help}");
         }
         ExitCode::Usage
-    } else if matches!(error, CliError::Usage(_)) {
-        emit_parser_usage(command, args, error)
     } else if command == "status" {
         emit_status_cli_error(error)
+    } else if matches!(error, CliError::Usage(_)) {
+        emit_parser_usage(command, args, error)
     } else {
         emit_cli_error(command, args, cwd, error)
     }
+}
+
+#[cfg(test)]
+pub(crate) fn __test_runtime_error_emitter(command: &str, cwd: &Path, error: &CliError) -> ExitCode {
+    emit_cli_error(command, &[], cwd, error)
 }
 
 fn emit_status_cli_error(error: &CliError) -> ExitCode {
@@ -201,7 +220,17 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
     if !machine && !matches!(command_spec(command).map(|spec| spec.kind), Some(CommandKind::Dispatch(_))) {
         return Ok(emit_unknown_subcommand_usage(command));
     }
-    let checked = super::arguments::parse(command, args)?;
+    dispatch_prepared(command, prepare_control_args(command, args, cwd)?, cwd)
+}
+
+fn prepare_control_args(command: &str, args: &[String], cwd: &Path) -> Result<super::arguments::CheckedArgs, CliError> {
+    let mut checked = super::arguments::parse(command, args)?;
+    if !checked.help { checked.tokens = resolve_command_scope(command, checked.tokens, cwd)?; }
+    Ok(checked)
+}
+
+fn dispatch_prepared(command: &str, checked: super::arguments::CheckedArgs, cwd: &Path) -> Result<ExitCode, CliError> {
+    let machine = is_machine_command(command);
     if checked.help {
         if machine {
             eprintln!("{HUMAN_NAVIGATION}");
@@ -210,8 +239,7 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         println!("{}", command_help(Some(command)));
         return Ok(ExitCode::Ok);
     }
-    let normalized = resolve_command_scope(command, checked.tokens, cwd)?;
-    let args = normalized.as_slice();
+    let args = checked.tokens.as_slice();
     if machine { return dispatch_machine(command, args, cwd); }
     if args.iter().all(|arg| arg == "--json")
         && matches!(
@@ -660,7 +688,8 @@ fn resolve_path(path: &Path) -> PathBuf {
 
 fn emit_parser_usage(command: &str, args: &[String], error: &CliError) -> ExitCode {
     if super::arguments::has_flag(command, args, "--json") {
-        let payload = error.to_payload(Path::new(""), command);
+        let mut payload = error.to_payload(Path::new(""), command);
+        payload.action = format!("Use team-agent {command} --help to correct the command arguments.");
         if let Ok(value) = serde_json::to_value(payload) {
             println!("{}", python_compact_json(&crate::redaction::redact_external_value(&value)));
         }
@@ -685,7 +714,7 @@ fn emit_cli_error(command: &str, args: &[String], cwd: &Path, error: &CliError) 
     let mut payload = payload_error.to_payload(&log_path, command);
     payload.error = safe_error;
     if let CliError::AddressRefusal { error, action, .. } = payload_error {
-        if !has_arg(args, "--json") {
+        if !super::arguments::has_flag(command, args, "--json") {
             payload.error = crate::redaction::redact_external_text(error);
             payload.action = action.clone();
         }
@@ -728,7 +757,7 @@ fn emit_cli_error(command: &str, args: &[String], cwd: &Path, error: &CliError) 
             .map(|value| crate::redaction::redact_external_text(&value))
             .collect()
     });
-    if has_arg(args, "--json") {
+    if super::arguments::has_flag(command, args, "--json") {
         if let Ok(value) = serde_json::to_value(payload) {
             println!("{}", python_compact_json(&value));
         }
@@ -1034,8 +1063,7 @@ fn parse_seconds_ms(raw: &str) -> Option<u64> {
     }
 }
 
-fn parse_cli_provider(raw: Option<&str>) -> Result<crate::provider::Provider, CliError> {
-    let raw = raw.unwrap_or("codex");
+fn parse_cli_provider(raw: &str) -> Result<crate::provider::Provider, CliError> {
     serde_json::from_value::<crate::provider::Provider>(serde_json::json!(raw))
         .map_err(|_| CliError::Usage(format!("unknown provider: {raw}")))
 }
@@ -1448,9 +1476,9 @@ fn attach_leader_args(args: &[String], cwd: &Path) -> Result<AttachLeaderArgs, C
             .pane
             .filter(|pane| !pane.is_empty())
             .map(crate::transport::PaneId::new),
-        provider: parse_cli_provider(Some(parsed.provider.as_deref()
+        provider: parse_cli_provider(parsed.provider.as_deref()
             .filter(|provider| !provider.trim().is_empty())
-            .ok_or_else(|| CliError::Usage("attach-leader requires --provider <name>".to_string()))?))?,
+            .ok_or_else(|| CliError::Usage("attach-leader requires --provider <name>".to_string()))?)?,
         confirm: parsed.confirm,
         json: parsed.json,
     })
@@ -2563,11 +2591,15 @@ mod tests {
     #[test]
     fn send_pane_still_rejects_to_and_empty_message() {
         let cwd = tmp_workspace();
-        let args = send_args(
+        let err = send_args(
             &cli_argv(&["--pane", "%1596", "--to", "worker", "hello"]),
             &cwd,
-        )
-        .unwrap();
+        ).unwrap_err();
+        assert!(matches!(err, CliError::Usage(ref message) if message.contains("one recipient addressing mode")));
+        // The public parser now refuses first; the typed handler must still
+        // reject the same conflict if a non-CLI caller constructs it directly.
+        let mut args = send_args(&cli_argv(&["--pane", "%1596", "hello"]), &cwd).unwrap();
+        args.targets = Some("worker".to_string());
         let err = cmd_send(&args).unwrap_err();
         assert!(
             matches!(err, CliError::Usage(ref message) if message.contains("--pane") && message.contains("--to") && message.contains("cannot") && message.contains("combined")),

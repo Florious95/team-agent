@@ -127,24 +127,13 @@ fn agent_001_force_never_leaves_duplicate_same_role_panes() {
     );
     assert_eq!(after_agent["pane_id"], after[0].0);
     assert_eq!(after_agent["pane_pid"], after[0].1);
-    if out.is_success() {
-        assert_ne!(
-            after[0].0, before[0].0,
-            "successful force must replace old pane"
-        );
-    } else {
-        assert_eq!(
-            after, before,
-            "refusal must be a zero-mutation pre-spawn refusal"
-        );
-        assert_eq!(after_agent["pane_id"], before_agent["pane_id"]);
-        assert_eq!(after_agent["pane_pid"], before_agent["pane_pid"]);
-        let error = format!("{}\n{}", out.stdout, out.stderr).to_ascii_lowercase();
-        assert!(
-            error.contains("cohort") || error.contains("same-role") || error.contains("duplicate"),
-            "safe refusal must name the cohort proof; error={error}"
-        );
-    }
+    assert_eq!(out.exit_code, 2, "--force is now a parser-level refusal");
+    assert_eq!(after, before, "refusal must be a zero-mutation pre-spawn refusal");
+    assert_eq!(after_agent["pane_id"], before_agent["pane_id"]);
+    assert_eq!(after_agent["pane_pid"], before_agent["pane_pid"]);
+    let error = format!("{}\n{}", out.stdout, out.stderr).to_ascii_lowercase();
+    assert!(error.contains("--force") && error.contains("stop-agent") && error.contains("start-agent"),
+        "safe refusal must explain the supported stop/start flow; error={error}");
 
     let _ = run_ta(
         &ws,

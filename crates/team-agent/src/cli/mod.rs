@@ -195,7 +195,7 @@ pub mod lifecycle_port {
             crate::leader::LeaderLaunchStatus::NotStarted => false,
         };
         let leader_attach_command = if outcome.reason.as_deref() == Some("PaneWorkspaceMismatch") {
-            Some("team-agent attach-leader".to_string())
+            Some(format!("team-agent attach-leader --provider {}", crate::provider::wire::provider_wire(provider)))
         } else {
             leader_attach_command_for_plan(cwd, &plan)
         };
@@ -388,14 +388,16 @@ pub mod lifecycle_port {
         }
 
         let hint_action = match refusal.recovery.hint_action {
-            PaneAuthorityRecoveryHint::AttachLeader => "team-agent attach-leader",
+            PaneAuthorityRecoveryHint::AttachLeader => format!(
+                "team-agent attach-leader --provider {}", crate::provider::wire::provider_wire(provider)
+            ),
         };
         let action = match refusal.recovery.action {
             PaneAuthorityRecoveryAction::OpenTerminalOutsideCurrentTmuxPaneOrAttachFromMatchingPane => {
-                "open a new terminal window outside the current tmux/pane, confirm TMUX and \
+                format!("open a new terminal window outside the current tmux/pane, confirm TMUX and \
                  TMUX_PANE are absent, change directory to the requested workspace, and restart \
                  the leader; alternatively enter the matching workspace pane and run \
-                 `team-agent attach-leader`"
+                 `{hint_action}`")
             }
         };
         facts.insert(

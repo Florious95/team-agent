@@ -84,9 +84,10 @@ fn install_skill_invalid_target_is_usage_error() {
     );
     assert_eq!(
         code,
-        ExitCode::Error,
-        "install-skill --target bogus must error (CliError::Usage -> emit_cli_error exit 1)"
+        ExitCode::Usage,
+        "invalid control values must fail as Usage2 before installation"
     );
+    assert!(!ws.join(".team/logs").exists());
     let _ = std::fs::remove_dir_all(&ws);
     let _ = std::fs::remove_dir_all(source.parent().unwrap());
 }

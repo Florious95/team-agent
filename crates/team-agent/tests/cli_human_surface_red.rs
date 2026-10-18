@@ -346,6 +346,12 @@ fn examples_property(command: &str) {
                 .replace("$PANE", "%999999")
                 .replace("${PANE}", "%999999");
         }
+        // Explicit workspace selection now requires an existing directory. Supply
+        // the advertised example's workspace while leaving missing role resources
+        // to the normal command-level refusal below.
+        if argv.windows(2).any(|pair| pair[0] == "--workspace" && pair[1] == "./project") {
+            fs::create_dir_all(cwd.join("project")).unwrap();
+        }
         // Execute the printed argv WITHOUT adding --help; missing fixture resources may
         // safely refuse with exit1, but a parser/required-argument refusal (2) is not an example.
         let refs = argv.iter().map(String::as_str).collect::<Vec<_>>();

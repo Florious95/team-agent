@@ -136,23 +136,14 @@ fn p3_human_doctor_is_bounded_and_control_clean_for_generated_inputs() {
         let workspace = tmp_dir(&format!("p3-long-{index}"));
         let home = tmp_dir(&format!("p3-home-{index}"));
         let workspace_arg = path(&workspace);
-        let output = run_with_env(
-            &[
-                "doctor",
-                "--workspace",
-                workspace_arg.as_str(),
-                "--team",
-                team.as_str(),
-            ],
-            &workspace,
-            &home,
-            None,
-        );
+        let mut args = vec!["doctor", "--workspace", workspace_arg.as_str()];
+        // Empty means no explicit team in this generated-input case, not an
+        // explicitly blank scope (which Phase 0 correctly rejects).
+        if !team.is_empty() { args.extend(["--team", team.as_str()]); }
+        let output = run_with_env(&args, &workspace, &home, None);
         let human = String::from_utf8(output.stdout).expect("human output must be UTF-8");
-        let json = run_with_env(
-            &["doctor", "--workspace", workspace_arg.as_str(), "--team", team.as_str(), "--json"],
-            &workspace, &home, None,
-        );
+        args.push("--json");
+        let json = run_with_env(&args, &workspace, &home, None);
         let expected: Value = serde_json::from_slice(&json.stdout).expect("doctor JSON evidence");
         let mut detail_count = 0;
         for (line_no, line) in human.lines().enumerate() {

@@ -75,7 +75,8 @@ fn doctor_missing_workspace_and_invalid_configuration_still_fail_readonly() {
             &home,
         );
         let body: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(output.status.code(), Some(1), "{body}");
+        let expected_exit = if workspace == &missing { 2 } else { 1 };
+        assert_eq!(output.status.code(), Some(expected_exit), "{body}");
         assert_eq!(body["ok"], false, "{body}");
         assert!(!workspace.join(".team").exists());
     }

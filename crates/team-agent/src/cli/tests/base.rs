@@ -875,7 +875,12 @@ fn kiro_leader_entry_has_help_and_typed_refusal_without_native_or_fallback_effec
         assert_eq!(value["reason"], "kiro_leader_not_admitted");
         let mut argv = vec!["kiro".into()];
         argv.extend(args);
-        assert_eq!(crate::cli::run(&argv, &cwd), ExitCode::Error);
+        let expected = if values.contains(&"--attach-existing") {
+            ExitCode::Usage // Unknown controls fail before capability dispatch.
+        } else {
+            ExitCode::Error // Supported syntax retains the typed refusal.
+        };
+        assert_eq!(crate::cli::run(&argv, &cwd), expected);
     }
     assert_eq!(std::fs::read_dir(&cwd).unwrap().count(), 0);
     assert_eq!(

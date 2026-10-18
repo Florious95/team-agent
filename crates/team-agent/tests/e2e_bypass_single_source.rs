@@ -168,9 +168,9 @@ fn e2e_edit_role_restart_drift_denied() {
     }
 }
 
-/// E2E-3:restart --force → fresh spawn 反映新值。
+/// E2E-3: ordinary restart reapplies the edited role; removed --force is not an authority.
 #[test]
-fn e2e_edit_role_restart_force_fresh_spawn() {
+fn e2e_edit_role_restart_applies_edited_bypass() {
     let ws = mini_team_ws("bypass-e2e-force");
     let out = run_ta(
         &ws,
@@ -189,8 +189,11 @@ fn e2e_edit_role_restart_force_fresh_spawn() {
     );
     std::fs::write(&role_path, body).unwrap();
 
-    // restart --force → fresh spawn,新值生效。
-    let force = run_ta(&ws, &["restart", "--force", "--json"]);
+    // The former --force was ignored; assert its new safe rejection before
+    // exercising the same ordinary restart behavior and original bypass checks.
+    let rejected = run_ta(&ws, &["restart", "--force", "--json"]);
+    assert_eq!(rejected.exit_code, 2, "removed --force must not trigger restart");
+    let force = run_ta(&ws, &["restart", "--json"]);
     let force_json = serde_json::from_str::<serde_json::Value>(&force.stdout)
         .unwrap_or_else(|_| serde_json::json!({}));
     let state = ws.read_state();

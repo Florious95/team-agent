@@ -8,6 +8,7 @@ enum ValueKind {
     Token,
     Path,
     Payload,
+    Query,
     Count,
     Seconds,
     PositiveSeconds,
@@ -60,7 +61,7 @@ fn schema(command: &str) -> Option<Schema> {
             usize::MAX,
         ),
         "status" => (&[("--detail", Switch), ("--summary", Switch)], 1),
-        "models" => (&[("--provider", Token), ("--search", Token)], usize::MAX),
+        "models" => (&[("--provider", Token), ("--search", Query)], usize::MAX),
         "inbox" => (&[("--limit", Count)], 1),
         "shutdown" => (&[("--keep-logs", Switch)], 0),
         "restart" => (
@@ -99,7 +100,7 @@ fn schema(command: &str) -> Option<Schema> {
         ),
         "doctor" => (
             &[
-                ("--gate", Choice(&["orphans", "comms"])),
+                ("--gate", Token), // Preserve the doctor's typed unknown_gate refusal.
                 ("--comms", Switch),
                 ("--fix", Switch),
                 ("--fix-schema", Switch),
@@ -177,7 +178,7 @@ fn canonical_flag<'a>(command: &str, flag: &'a str) -> &'a str {
 
 fn option(schema: &Schema, command: &str, flag: &str) -> Option<ValueKind> {
     match flag {
-        "--help" | "--json" => Some(Switch),
+        "--help" | "--json" | "--no-display" => Some(Switch),
         "--workspace" if schema.workspace => Some(Path),
         "--team" if schema.team => Some(Token),
         "--role-file" if command == "start-agent" => None,
@@ -192,7 +193,7 @@ fn option(schema: &Schema, command: &str, flag: &str) -> Option<ValueKind> {
 
 fn valid_value(kind: ValueKind, value: &str) -> bool {
     if value.trim().is_empty() {
-        return false;
+        return matches!(kind, Query);
     }
     match kind {
         Count => value.parse::<usize>().is_ok(),
@@ -255,7 +256,8 @@ pub(super) fn parse(command: &str, args: &[String]) -> Result<CheckedArgs, CliEr
             if inline.is_some() {
                 error.get_or_insert_with(|| format!("{flag} does not take a value"));
             }
-            // Compatibility no-op only in the two legacy lifecycle control grammars.
+            // Explicit historical compatibility flag, never inferred from an unknown
+            // option and never removed from a consumed or post-delimiter payload.
             if flag != "--no-display" {
                 tokens.push(flag.to_string());
             }
@@ -264,7 +266,7 @@ pub(super) fn parse(command: &str, args: &[String]) -> Result<CheckedArgs, CliEr
                 Some(value)
             } else {
                 args.get(i + 1)
-                    .filter(|value| matches!(kind, Payload) || !value.starts_with('-'))
+                    .filter(|value| matches!(kind, Payload | Query) || !value.starts_with('-'))
                     .map(|value| {
                         i += 1;
                         value.as_str()
@@ -318,7 +320,11 @@ pub(super) fn parse(command: &str, args: &[String]) -> Result<CheckedArgs, CliEr
 /// Rendering switches must not be inferred from a consumed value or literal payload.
 pub(super) fn has_flag(command: &str, args: &[String], needle: &str) -> bool {
     let Some(schema) = schema(command) else {
-        return false;
+        // Dedicated native parsers retain their pre-delimiter rendering switch.
+        return args
+            .iter()
+            .take_while(|arg| arg.as_str() != "--")
+            .any(|arg| arg == needle);
     };
     let mut i = 0;
     while i < args.len() {
@@ -337,7 +343,7 @@ pub(super) fn has_flag(command: &str, args: &[String], needle: &str) -> bool {
             if !matches!(kind, Switch) && inline.is_none() {
                 if args
                     .get(i + 1)
-                    .is_some_and(|value| matches!(kind, Payload) || !value.starts_with('-'))
+                    .is_some_and(|value| matches!(kind, Payload | Query) || !value.starts_with('-'))
                 {
                     i += 1;
                 }

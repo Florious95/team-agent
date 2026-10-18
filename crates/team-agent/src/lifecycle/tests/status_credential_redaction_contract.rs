@@ -355,6 +355,13 @@ fn red6_cli_restart_reports_and_top_level_error_logs_are_redacted() {
         combined.push_str(&String::from_utf8_lossy(&output.stdout));
         combined.push_str(&String::from_utf8_lossy(&output.stderr));
     }
+    assert!(read_cli_error_logs(&workspace).is_empty(),
+        "invalid profile syntax must not create a runtime diagnostic log");
+    // Keep the original physical-log redaction assertion on the same actual
+    // runtime-error emitter, separately from the new zero-log Usage boundary.
+    assert_eq!(crate::cli::emit::__test_runtime_error_emitter(
+        "restart", &workspace, &crate::cli::CliError::Runtime(diagnostic.clone())
+    ), crate::cli::ExitCode::Error);
     let logs = read_cli_error_logs(&workspace);
     let output_safe = !combined.contains(&marker) && combined.contains(REDACTED);
     let logs_safe = !logs.contains(&marker) && logs.contains(REDACTED);
