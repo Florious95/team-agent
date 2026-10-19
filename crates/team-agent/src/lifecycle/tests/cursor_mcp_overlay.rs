@@ -441,7 +441,7 @@ fn sample_mcp_config(agent_id: &str, workspace: &str) -> McpConfig {
     McpConfig {
         raw: serde_json::json!({
             "team_orchestrator": {
-                "command": "/bin/team-agent-test",
+                "command": std::env::current_exe().unwrap(),
                 "args": ["mcp-server", "--workspace", workspace],
                 "env": {
                     "TEAM_AGENT_ID": agent_id,
@@ -462,8 +462,8 @@ fn isolated_cursor_prepare_materializes_per_seat_project_not_workspace_overlay()
         .expect("prepare isolated cursor")
         .expect("isolation defaults on");
     assert!(
-        project.ends_with("provider-config/seat-iso/cursor"),
-        "per-seat project must be materialized: {}",
+        !project.starts_with(&ws) && project.file_name().unwrap().to_string_lossy().starts_with("ta-cursor-"),
+        "per-seat native project must be outside workspace Git ancestry: {}",
         project.display()
     );
     assert!(project.join(".cursor").is_dir());
