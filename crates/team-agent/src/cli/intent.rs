@@ -158,8 +158,13 @@ fn path_syntax(value: &str) -> bool {
     super::emit::explicit_path(value)
 }
 fn logical_agent_id(value: &str) -> Result<AgentId, CliError> {
-    if value.is_empty() || value.starts_with('-') || path_syntax(value)
-        || !value.chars().all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.')) {
+    if value.is_empty()
+        || value.starts_with('-')
+        || path_syntax(value)
+        || !value
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
         return Err(usage("invalid agent ID"));
     }
     Ok(AgentId::new(value))
@@ -376,11 +381,19 @@ fn lifecycle_intent(
             Subject::Team {
                 source: Some(source),
             } => super::emit::intent_source_workspace(source, cwd)?,
-            _ if path_workspace.is_none() && cwd.join("TEAM.md").is_file() && cwd.join("agents").is_dir() => super::emit::intent_source_workspace(cwd, cwd)?,
+            _ if path_workspace.is_none()
+                && cwd.join("TEAM.md").is_file()
+                && cwd.join("agents").is_dir() =>
+            {
+                super::emit::intent_source_workspace(cwd, cwd)?
+            }
             _ => path_workspace.clone().unwrap_or(cwd.canonicalize()?),
         },
     };
-    let pinned_workspace = flags.contains_key("--workspace") || path_workspace.is_some() || matches!(&subject, Subject::Team { source: Some(_) }) || (cwd.join("TEAM.md").is_file() && cwd.join("agents").is_dir());
+    let pinned_workspace = flags.contains_key("--workspace")
+        || path_workspace.is_some()
+        || matches!(&subject, Subject::Team { source: Some(_) })
+        || (cwd.join("TEAM.md").is_file() && cwd.join("agents").is_dir());
     if !workspace.is_dir() {
         return Err(usage("workspace must be an existing directory"));
     }
@@ -481,7 +494,10 @@ fn execute_plan(
                     CmdOutput::None => Value::Null,
                 },
             ),
-            Err(error) => (false, json!({"ok":false,"error":crate::redaction::redact_external_text(&error.to_string())})),
+            Err(error) => (
+                false,
+                json!({"ok":false,"error":crate::redaction::redact_external_text(&error.to_string())}),
+            ),
         };
         let stop_unconfirmed = plan.intent.verb == Verb::Restart
             && matches!(step, Step::StopAgent(_))
@@ -514,7 +530,11 @@ fn execute_plan(
             stop_succeeded = true;
         }
     }
-    let partial = !ok && (stop_succeeded || results.iter().any(|result| result.get("ok").and_then(Value::as_bool) == Some(true)));
+    let partial = !ok
+        && (stop_succeeded
+            || results
+                .iter()
+                .any(|result| result.get("ok").and_then(Value::as_bool) == Some(true)));
     Ok(CmdResult::from_json(
         json!({"ok":ok,"action":plan.intent.verb,"surface":plan.intent.surface,"scope":actual_scope,"session_policy":plan.intent.session,"status":if partial {"partial"} else if !ok {"failed"} else if pending {"pending"} else if results.is_empty() {if plan.intent.verb == Verb::Stop {"already_stopped"} else {"already_running"}} else {"actions_completed"},"steps":results,"skipped":plan.skipped,"configuration_note":"Running processes were not edited; role body synchronization and business readiness are not claimed.","last_confirmed_effect":if stop_succeeded {Some("original_instance_stopped")} else {None},"current_state":if !ok {Some("unknown")} else {None},"recovery":if !ok && stop_succeeded {Some("Inspect status/doctor in the same explicit workspace/team; only use start AGENT after resolving the failure. Native unknown is not permission to retry.")} else {None}}),
         plan.intent.json,

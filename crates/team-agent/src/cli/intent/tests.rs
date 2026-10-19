@@ -177,11 +177,7 @@ fn stop_failure_never_starts_and_spawn_failure_preserves_partial_uncertainty() {
         };
         assert_eq!(
             value["status"],
-            if fail_at == 0 {
-                "failed"
-            } else {
-                "partial"
-            }
+            if fail_at == 0 { "failed" } else { "partial" }
         );
         assert_eq!(
             value["steps"][fail_at]["receipt"]["error"],
@@ -473,7 +469,15 @@ fn syntax_session_matrix_and_directory_ambiguity_are_deterministic() {
     .is_err());
     std::fs::create_dir(root.path().join("agents")).unwrap();
     std::fs::write(root.path().join("TEAM.md"), "---\nname: caller\n---\n").unwrap();
-    let path_intent = lifecycle_intent("restart", Verb::Restart, &args(&["./worker", "--dry-run"]), root.path(), false, false).unwrap();
+    let path_intent = lifecycle_intent(
+        "restart",
+        Verb::Restart,
+        &args(&["./worker", "--dry-run"]),
+        root.path(),
+        false,
+        false,
+    )
+    .unwrap();
     assert_eq!(path_intent.workspace, root.path().join("worker"));
     assert!(path_intent.pinned_workspace);
     let role = root.path().join("role.md");
@@ -486,8 +490,24 @@ fn syntax_session_matrix_and_directory_ambiguity_are_deterministic() {
     let intent =
         lifecycle_intent("start", Verb::Start, &tokens, root.path(), false, false).unwrap();
     assert_eq!(intent.role_file, Some(role));
-    assert!(lifecycle_intent("start", Verb::Start, &args(&["--from=role.md"]), root.path(), false, false).is_err());
-    assert!(lifecycle_intent("start", Verb::Start, &args(&["one", "--role-file=worker"]), root.path(), false, false).is_err());
+    assert!(lifecycle_intent(
+        "start",
+        Verb::Start,
+        &args(&["--from=role.md"]),
+        root.path(),
+        false,
+        false
+    )
+    .is_err());
+    assert!(lifecycle_intent(
+        "start",
+        Verb::Start,
+        &args(&["one", "--role-file=worker"]),
+        root.path(),
+        false,
+        false
+    )
+    .is_err());
 }
 
 #[test]

@@ -65,7 +65,10 @@ fn stopped_team_starts_both_and_mixed_start_leaves_live_peer_untouched() {
         [("start_agent", Some("one")), ("start_agent", Some("two"))]
     );
     assert_eq!(plan.scope.team.as_deref(), Some("fixture"));
-    install(root.path(), &[("one", "running", false), ("two", "stopped", false)]);
+    install(
+        root.path(),
+        &[("one", "running", false), ("two", "stopped", false)],
+    );
     let plan = plan_with_observer(intent, |_, id, _| {
         Ok(if id == "one" {
             Observation::Live
@@ -324,7 +327,15 @@ fn stopped_text_without_physical_identity_is_unknown_and_standalone_source_keeps
         .unwrap(),
         Observation::Unknown
     );
-    assert_eq!(observe(&selected, "one", &json!({"status":"stopped","provider":"pi","pane_pid":std::process::id()})).unwrap(), Observation::Unknown);
+    assert_eq!(
+        observe(
+            &selected,
+            "one",
+            &json!({"status":"stopped","provider":"pi","pane_pid":std::process::id()})
+        )
+        .unwrap(),
+        Observation::Unknown
+    );
     let (root, _) = fixture(&["one"]);
     let values = vec![
         "--from".into(),
@@ -346,7 +357,10 @@ fn stopped_text_without_physical_identity_is_unknown_and_standalone_source_keeps
 
 #[test]
 fn declared_provider_aliases_do_not_create_false_drift_or_absorb_native_routes() {
-    assert!(!drift(&json!({"provider":"agent"}), &json!({"provider":"cursor_agent"})));
+    assert!(!drift(
+        &json!({"provider":"agent"}),
+        &json!({"provider":"cursor_agent"})
+    ));
     assert!(same_provider("claude-code", "claude_code"));
     assert!(!same_provider("cursor", "cursor_agent"));
     assert!(!same_provider("grok_build", "grok"));
@@ -358,10 +372,20 @@ fn native_noop_compares_all_five_authoritative_launch_settings() {
     use crate::contract_runtime::{config::RoleConfig, prompt::Prompt};
     use team_agent_contract::contract::types::{Digest, ProviderId, SeatId};
     let old = RoleConfig {
-        id: SeatId::new("one").unwrap(), provider: ProviderId::new("cursor").unwrap(),
-        source: PathBuf::from("/fixture/one.md"), role: "one".into(), model: "original".into(),
-        effort: None, bypass: true, paused: false, body: "body".into(),
-        prompt: Prompt { text: String::new(), sha256: Digest([0; 32]), sources: vec![] },
+        id: SeatId::new("one").unwrap(),
+        provider: ProviderId::new("cursor").unwrap(),
+        source: PathBuf::from("/fixture/one.md"),
+        role: "one".into(),
+        model: "original".into(),
+        effort: None,
+        bypass: true,
+        paused: false,
+        body: "body".into(),
+        prompt: Prompt {
+            text: String::new(),
+            sha256: Digest([0; 32]),
+            sources: vec![],
+        },
     };
     assert!(!native_settings_changed(&old, &old.clone()));
     for field in ["provider", "model", "effort", "bypass", "paused"] {
@@ -373,23 +397,41 @@ fn native_noop_compares_all_five_authoritative_launch_settings() {
             "bypass" => current.bypass = false,
             _ => current.paused = true,
         }
-        assert!(native_settings_changed(&old, &current), "unexamined launch drift: {field}");
+        assert!(
+            native_settings_changed(&old, &current),
+            "unexamined launch drift: {field}"
+        );
     }
 }
 
 #[test]
 #[cfg(unix)]
 fn native_kernel_exit_can_recover_ready_but_mismatched_liveness_never_noops() {
-    use team_agent_contract::{host::process::ProcessState as P, orchestration::store::SeatStatus as S};
+    use team_agent_contract::{
+        host::process::ProcessState as P, orchestration::store::SeatStatus as S,
+    };
     for (status, process, root, expected) in [
         (S::Ready, P::Alive, "running", Observation::Live),
         (S::Ready, P::Exited, "running", Observation::StoppedVerified),
-        (S::Stopped, P::Exited, "stopped", Observation::StoppedVerified),
+        (
+            S::Stopped,
+            P::Exited,
+            "stopped",
+            Observation::StoppedVerified,
+        ),
         (S::Ready, P::Alive, "stopped", Observation::Unknown),
         (S::Stopped, P::Alive, "running", Observation::Unknown),
         (S::Stopped, P::Exited, "running", Observation::Unknown),
         (S::Ready, P::Replaced, "running", Observation::Unknown),
-        (S::Ready, P::Unknown(team_agent_contract::host::HostError::new("fixture", team_agent_contract::host::HostErrorKind::Unknown)), "running", Observation::Unknown),
+        (
+            S::Ready,
+            P::Unknown(team_agent_contract::host::HostError::new(
+                "fixture",
+                team_agent_contract::host::HostErrorKind::Unknown,
+            )),
+            "running",
+            Observation::Unknown,
+        ),
     ] {
         assert_eq!(native_observation(status, process, Some(root)), expected);
     }
@@ -400,33 +442,84 @@ fn native_kernel_exit_can_recover_ready_but_mismatched_liveness_never_noops() {
 fn preserve_context_preflight_and_corrupt_metadata_refuse_before_stop() {
     let (root, _) = fixture(&["one"]);
     install(root.path(), &[("one", "running", false)]);
-    let selected = resolve_active_team_readonly(root.path(), Some("fixture"), SelectorMode::RuntimeOnly).unwrap();
-    for signal in [json!({"first_send_at":"2026-10-19T00:00:00Z"}), json!({"task_prompt_delivered":true}), json!({"last_result_at":"2026-10-19T00:00:00Z"})] {
+    let selected =
+        resolve_active_team_readonly(root.path(), Some("fixture"), SelectorMode::RuntimeOnly)
+            .unwrap();
+    for signal in [
+        json!({"first_send_at":"2026-10-19T00:00:00Z"}),
+        json!({"task_prompt_delivered":true}),
+        json!({"last_result_at":"2026-10-19T00:00:00Z"}),
+    ] {
         let mut row = json!({"provider":"pi"});
-        row.as_object_mut().unwrap().extend(signal.as_object().unwrap().clone());
+        row.as_object_mut()
+            .unwrap()
+            .extend(signal.as_object().unwrap().clone());
         assert!(preflight_start(&selected, "one", &row, SessionPolicy::Preserve).is_err());
         assert!(preflight_start(&selected, "one", &row, SessionPolicy::Auto).is_ok());
     }
-    for field in ["session_id", "rollout_path", "last_result_at", "spawn_cwd", "first_send_at", "task_prompt_delivered"] {
-        let mut row = json!({"provider":"pi"}); row[field] = json!([]);
-        for policy in [SessionPolicy::Auto, SessionPolicy::Preserve] { assert!(preflight_start(&selected, "one", &row, policy).is_err(), "corrupt {field}"); }
+    for field in [
+        "session_id",
+        "rollout_path",
+        "last_result_at",
+        "spawn_cwd",
+        "first_send_at",
+        "task_prompt_delivered",
+    ] {
+        let mut row = json!({"provider":"pi"});
+        row[field] = json!([]);
+        for policy in [SessionPolicy::Auto, SessionPolicy::Preserve] {
+            assert!(
+                preflight_start(&selected, "one", &row, policy).is_err(),
+                "corrupt {field}"
+            );
+        }
     }
     let outside = Sandbox::new();
-    assert!(preflight_start(&selected, "one", &json!({"provider":"pi", "spawn_cwd":outside.path()}), SessionPolicy::Auto).is_err());
-    assert!(preflight_start(&selected, "one", &json!({"provider":"pi", "session_id":"captured"}), SessionPolicy::Auto).is_err());
+    assert!(preflight_start(
+        &selected,
+        "one",
+        &json!({"provider":"pi", "spawn_cwd":outside.path()}),
+        SessionPolicy::Auto
+    )
+    .is_err());
+    assert!(preflight_start(
+        &selected,
+        "one",
+        &json!({"provider":"pi", "session_id":"captured"}),
+        SessionPolicy::Auto
+    )
+    .is_err());
 }
 
 #[test]
 #[serial_test::serial(env)]
 fn pinned_child_scope_never_inherits_parent_runtime_and_spec_only_never_creates() {
-    let (parent, _) = fixture(&["one"]); install(parent.path(), &[("one", "running", false)]);
-    let child = parent.path().join("child"); std::fs::create_dir(&child).unwrap();
+    let (parent, _) = fixture(&["one"]);
+    install(parent.path(), &[("one", "running", false)]);
+    let child = parent.path().join("child");
+    std::fs::create_dir(&child).unwrap();
     std::fs::create_dir(child.join("agents")).unwrap();
-    std::fs::write(child.join("TEAM.md"), "---\nname: child\nprovider: pi\n---\n").unwrap(); write_role(&child, "two");
-    let mut intent = super::super::tests::intent(Verb::Start); intent.workspace = child.clone(); intent.team = None; intent.subject = Subject::Team { source: Some(child.clone()) };
-    let plan = plan_with_observer(intent.clone(), |_,_,_| panic!("parent must not be selected")).unwrap();
-    assert_eq!(plan.scope.workspace, child); assert_eq!(actions(&plan), [("quick_start", None)]);
-    let path = crate::model::paths::runtime_spec_path(&child, "orphan"); std::fs::create_dir_all(path.parent().unwrap()).unwrap(); std::fs::write(path, "agents: []\n").unwrap();
-    assert!(plan_with_observer(intent, |_,_,_| panic!()).is_err());
+    std::fs::write(
+        child.join("TEAM.md"),
+        "---\nname: child\nprovider: pi\n---\n",
+    )
+    .unwrap();
+    write_role(&child, "two");
+    let mut intent = super::super::tests::intent(Verb::Start);
+    intent.workspace = child.clone();
+    intent.team = None;
+    intent.subject = Subject::Team {
+        source: Some(child.clone()),
+    };
+    let plan = plan_with_observer(intent.clone(), |_, _, _| {
+        panic!("parent must not be selected")
+    })
+    .unwrap();
+    assert_eq!(plan.scope.workspace, child);
+    assert_eq!(actions(&plan), [("quick_start", None)]);
+    let path = crate::model::paths::runtime_spec_path(&child, "orphan");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, "agents: []\n").unwrap();
+    assert!(plan_with_observer(intent, |_, _, _| panic!()).is_err());
     assert!(!crate::state::persist::runtime_state_path(&child).exists());
 }

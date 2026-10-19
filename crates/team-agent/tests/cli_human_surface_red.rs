@@ -313,7 +313,11 @@ fn examples_property(command: &str) {
     if matches!(command, "start" | "team") {
         // The new dry-run creation example needs a real source, not a fake
         // missing-path exception to the strict Phase0 parser contract.
-        fs::write(cwd.join("TEAM.md"), "---\nname: canonical-example\nprovider: pi\n---\nControlled documentation example.\n").unwrap();
+        fs::write(
+            cwd.join("TEAM.md"),
+            "---\nname: canonical-example\nprovider: pi\n---\nControlled documentation example.\n",
+        )
+        .unwrap();
     }
     let help = text(&env.run_cli(&cwd, &[command, "--help"]));
     let examples = examples(&help, command);
@@ -359,7 +363,10 @@ fn examples_property(command: &str) {
         // Explicit workspace selection now requires an existing directory. Supply
         // the advertised example's workspace while leaving missing role resources
         // to the normal command-level refusal below.
-        if argv.windows(2).any(|pair| pair[0] == "--workspace" && pair[1] == "./project") {
+        if argv
+            .windows(2)
+            .any(|pair| pair[0] == "--workspace" && pair[1] == "./project")
+        {
             fs::create_dir_all(cwd.join("project")).unwrap();
         }
         // Execute the printed argv WITHOUT adding --help; missing fixture resources may

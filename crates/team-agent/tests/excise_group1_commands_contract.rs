@@ -168,7 +168,17 @@ fn invocation_variants(command: &str, workspace: &Path) -> Vec<(String, Vec<Stri
         }
     }
     if matches!(command, "start" | "stop") {
-        variants.push(("retired-flags".into(), vec![command.into(), if command == "start" { "--spec=never-read.yaml".into() } else { "--force".into() }]));
+        variants.push((
+            "retired-flags".into(),
+            vec![
+                command.into(),
+                if command == "start" {
+                    "--spec=never-read.yaml".into()
+                } else {
+                    "--force".into()
+                },
+            ],
+        ));
     }
     variants
 }
@@ -233,21 +243,37 @@ fn assert_surface_contract(command: &str, restored: bool) {
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         let mut violations = Vec::new();
-        let expected_exit = if !restored { 1 } else if label.contains("help") { 0 } else if label == "retired-flags" || command == "start" { 2 } else { 1 };
+        let expected_exit = if !restored {
+            1
+        } else if label.contains("help") {
+            0
+        } else if label == "retired-flags" || command == "start" {
+            2
+        } else {
+            1
+        };
         if output.status.code() != Some(expected_exit) {
-            violations.push(format!("exit={:?}, expected {expected_exit}", output.status.code()));
+            violations.push(format!(
+                "exit={:?}, expected {expected_exit}",
+                output.status.code()
+            ));
         }
         let expected_error = format!("Unknown command: '{command}'");
         if !restored {
             if !stderr.contains(&expected_error) {
-                violations.push(format!("stderr lacks {expected_error:?}: {}", preview(&output.stderr)));
+                violations.push(format!(
+                    "stderr lacks {expected_error:?}: {}",
+                    preview(&output.stderr)
+                ));
             }
             if !output.stdout.is_empty() {
                 violations.push(format!("stdout must be empty: {}", preview(&output.stdout)));
             }
         } else if stderr.contains(&expected_error) {
             violations.push("canonical Phase1 surface was treated as unknown".into());
-        } else if label.contains("help") && !String::from_utf8_lossy(&output.stdout).contains("Purpose:") {
+        } else if label.contains("help")
+            && !String::from_utf8_lossy(&output.stdout).contains("Purpose:")
+        {
             violations.push("canonical help is missing its public purpose".into());
         }
         if before != after {
