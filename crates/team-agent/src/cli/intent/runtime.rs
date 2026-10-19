@@ -346,7 +346,9 @@ fn observe(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation
         return Ok(Observation::Unknown);
     }
     #[cfg(unix)]
-    let carrier_birth = checked(team_agent_contract::host::process::process_birth_identity(pid))?;
+    let carrier_birth = checked(team_agent_contract::host::process::process_birth_identity(
+        pid,
+    ))?;
     let backend = checked(
         crate::lifecycle::restart::lifecycle_worker_tmux_backend_selection_for_state(
             &selected.run_workspace,
@@ -386,15 +388,20 @@ fn observe(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation
     let positive_command = command == crate::provider::wire::command_name(native)
         || crate::leader::provider_attribution::command_matches_provider(native, command);
     let positive_surface = if !positive_command && !command.is_empty() {
-        let frame = checked(backend.observe_native_input(
-            &Target::Pane(PaneId::new(pane.unwrap_or(""))), native,
-        ))?;
+        let frame = checked(
+            backend.observe_native_input(&Target::Pane(PaneId::new(pane.unwrap_or(""))), native),
+        )?;
         // Original start/restart supervises the native child with a shell carrier.
         // A shell alone (including its inert post-exit tail) is never Live.
         let mut live_child = false;
         if frame.is_some() && shell_carrier(command) {
             for child in checked(crate::platform::process::process_tree(pid))? {
-                if child != pid && matches!(checked(crate::platform::process::pid_liveness(child))?, crate::platform::process::ProcessLiveness::Live) {
+                if child != pid
+                    && matches!(
+                        checked(crate::platform::process::pid_liveness(child))?,
+                        crate::platform::process::ProcessLiveness::Live
+                    )
+                {
                     live_child = true;
                     break;
                 }
@@ -408,7 +415,10 @@ fn observe(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation
         return Ok(Observation::Unknown);
     }
     #[cfg(unix)]
-    if checked(team_agent_contract::host::process::process_birth_identity(pid))? != carrier_birth {
+    if checked(team_agent_contract::host::process::process_birth_identity(
+        pid,
+    ))? != carrier_birth
+    {
         return Ok(Observation::Unknown);
     }
     Ok(Observation::Live)

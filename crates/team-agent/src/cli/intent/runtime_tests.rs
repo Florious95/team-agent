@@ -408,8 +408,14 @@ fn native_noop_compares_all_five_authoritative_launch_settings() {
 fn original_supervised_shell_needs_both_current_native_frame_and_live_child() {
     for shell in ["sh", "bash", "zsh", "fish"] {
         assert!(surface_liveness(shell, true, true));
-        assert!(!surface_liveness(shell, true, false), "stale native screen without child");
-        assert!(!surface_liveness(shell, false, true), "inert tail sleep is not a provider");
+        assert!(
+            !surface_liveness(shell, true, false),
+            "stale native screen without child"
+        );
+        assert!(
+            !surface_liveness(shell, false, true),
+            "inert tail sleep is not a provider"
+        );
         assert!(!surface_liveness(shell, false, false));
     }
     assert!(!surface_liveness("", true, true));
@@ -419,8 +425,8 @@ fn original_supervised_shell_needs_both_current_native_frame_and_live_child() {
 
 #[test]
 fn unchanged_observation_port_rejects_native_screen_followed_by_exit_tail() {
-    use crate::transport::native_input::inspect_input;
     use crate::model::enums::Provider;
+    use crate::transport::native_input::inspect_input;
     let native = "────────────────────────\n\n────────────────────────\ngpt-6-luna · max · 0%/272k · 0% · $0.00\n";
     assert!(inspect_input(Provider::Pi, native, 24).is_some());
     for tail in ["[team-agent worker] pi exited with 1\n", "[team-agent] Provider exited; this pane no longer accepts input. Restart from another pane with the appropriate team-agent start command.\n", "$ "] {
