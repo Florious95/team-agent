@@ -2273,6 +2273,7 @@ mod containment_tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn f14_owned_socket_registration_is_exact_and_drop_spares_unregistered_socket() {
         let nonce = format!(
             "{}-{}",

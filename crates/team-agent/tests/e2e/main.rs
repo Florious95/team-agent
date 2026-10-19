@@ -187,6 +187,7 @@ mod framework_tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn positive_subprocess_callers_are_distinct_and_do_not_mutate_global_environment() {
         let keys = ["HOME", "TMUX", "TMUX_PANE", "TEAM_AGENT_LEADER_PROVIDER"];
         let before = keys.map(|key| std::env::var_os(key));
