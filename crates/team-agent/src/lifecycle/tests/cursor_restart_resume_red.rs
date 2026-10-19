@@ -26,12 +26,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::lifecycle::restart::classify_restart_plan_with_resume_validation;
 use crate::lifecycle::types::ResumeDecision;
-use crate::provider::session_scan::cursor::{
-    cursor_session_archive_present, cursor_session_dir,
-};
+use crate::model::ids::AgentId;
+use crate::provider::session_scan::cursor::{cursor_session_archive_present, cursor_session_dir};
 use crate::state::persist::{load_runtime_state, save_runtime_state};
 use serial_test::serial;
-use crate::model::ids::AgentId;
 use team_agent::lifecycle::{
     cursor_mcp_project_dir, fork_agent_with_transport, quick_start_with_transport_in_workspace,
     restart_with_transport,
@@ -93,7 +91,10 @@ fn cursor_restart_uses_resume_when_session_captured_and_archive_present() {
         let path = home
             .join(".cursor")
             .join("chats")
-            .join(format!("{:x}", md5::compute(primary.to_string_lossy().as_bytes())))
+            .join(format!(
+                "{:x}",
+                md5::compute(primary.to_string_lossy().as_bytes())
+            ))
             .join(sid);
         std::fs::create_dir_all(&path).unwrap();
         std::fs::write(path.join("store.db"), b"").unwrap();
@@ -103,7 +104,10 @@ fn cursor_restart_uses_resume_when_session_captured_and_archive_present() {
     assert_eq!(cursor_session_dir(sid).as_deref(), Some(dir.as_path()));
 
     let mut state = load_runtime_state(&ws).expect("load");
-    assert_eq!(state["agents"]["cursor_writer"]["spawn_cwd"], primary.to_string_lossy().as_ref());
+    assert_eq!(
+        state["agents"]["cursor_writer"]["spawn_cwd"],
+        primary.to_string_lossy().as_ref()
+    );
     patch_cursor_writer(&mut state, sid, &dir, &primary);
     save_runtime_state(&ws, &state).expect("save captured");
 
@@ -126,11 +130,20 @@ fn cursor_restart_uses_resume_when_session_captured_and_archive_present() {
         "resume argv must not use --continue; argv={argv:?}"
     );
     let after = load_runtime_state(&ws).unwrap();
-    assert_eq!(after["agents"]["cursor_writer"]["spawn_cwd"], primary.to_string_lossy().as_ref());
+    assert_eq!(
+        after["agents"]["cursor_writer"]["spawn_cwd"],
+        primary.to_string_lossy().as_ref()
+    );
     assert_eq!(after["agents"]["cursor_writer"]["session_id"], sid);
-    assert_eq!(cursor_mcp_project_dir(&ws, "cursor_writer").unwrap(), primary_before);
+    assert_eq!(
+        cursor_mcp_project_dir(&ws, "cursor_writer").unwrap(),
+        primary_before
+    );
     assert_eq!(argv_flag(&argv, "--workspace").as_deref(), primary.to_str());
-    assert!(argv_contains_adjacent(&argv, &["--add-dir", ws.to_str().unwrap()]));
+    assert!(argv_contains_adjacent(
+        &argv,
+        &["--add-dir", ws.to_str().unwrap()]
+    ));
 }
 
 #[test]

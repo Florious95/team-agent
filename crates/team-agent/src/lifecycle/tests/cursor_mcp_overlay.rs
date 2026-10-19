@@ -349,10 +349,14 @@ fn cursor_spawn_writes_identity_into_project_mcp_json() {
         &mut crate::provider::get_adapter,
         false,
         0,
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(report.assigned, vec!["cursor_writer"]);
     assert_eq!(capture["agents"]["cursor_writer"]["session_id"], sid);
-    assert_eq!(capture["agents"]["cursor_writer"]["spawn_cwd"], project.to_string_lossy().as_ref());
+    assert_eq!(
+        capture["agents"]["cursor_writer"]["spawn_cwd"],
+        project.to_string_lossy().as_ref()
+    );
 }
 
 #[test]
