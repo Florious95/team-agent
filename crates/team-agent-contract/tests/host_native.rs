@@ -3,6 +3,7 @@ mod physical_support;
 use physical_support::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
@@ -131,8 +132,11 @@ fn owned_process_diagnostic(pid: u32, executable: &Path, hash: Digest) -> String
     format!("pid={pid}; kernel_image={image:?}; fixed_image_capture={observed:?}")
 }
 
+static NEXT_FIXTURE_ROOT: AtomicU64 = AtomicU64::new(0);
+
 fn native_fixture_root(nonce: u128) -> PathBuf {
-    PathBuf::from("/tmp").join(format!("tac-k2-{}-{nonce}", std::process::id()))
+    let sequence = NEXT_FIXTURE_ROOT.fetch_add(1, Ordering::Relaxed);
+    PathBuf::from("/tmp").join(format!("tac-k2-{}-{nonce}-{sequence}", std::process::id()))
 }
 
 fn native_case(mode: &str, content: &str, expected_keys: usize) {
@@ -498,5 +502,9 @@ fn fixture_roots_are_unique_for_parallel_identical_clock_samples() {
         .into_iter()
         .map(|handle| handle.join().unwrap())
         .collect();
-    assert_eq!(roots.len(), CALLERS, "clock repetition must not alias fixture roots");
+    assert_eq!(
+        roots.len(),
+        CALLERS,
+        "clock repetition must not alias fixture roots"
+    );
 }
