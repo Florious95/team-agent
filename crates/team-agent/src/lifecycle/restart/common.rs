@@ -462,6 +462,9 @@ pub(super) fn spawn_agent_window(
             &mut env,
         )?;
     }
+    // Keep provider/native cwd distinct from the real Team workspace. Cursor
+    // changes cwd to --workspace before writing its cwd-keyed session archive.
+    let mut native_spawn_cwd = spawn_cwd.to_path_buf();
     // 0.5.67 Cursor 方案 1 变体: role 经 workspace rules 文件注入 (不 argv)。
     if provider == crate::provider::Provider::CursorAgent {
         crate::lifecycle::launch::refuse_second_cursor_occupant(
@@ -479,6 +482,9 @@ pub(super) fn spawn_agent_window(
             agent_id.as_str(),
             &mcp_config,
         )?;
+        if let Some(primary) = project.as_ref() {
+            native_spawn_cwd = primary.clone();
+        }
         crate::lifecycle::launch::enable_cursor_workspace_mcp_with_profile(
             workspace,
             project.as_deref(),
@@ -694,7 +700,7 @@ pub(super) fn spawn_agent_window(
         plan,
         profile_launch,
         layout_placement: layout_placement.cloned(),
-        spawn_cwd: spawn_cwd.to_path_buf(),
+        spawn_cwd: native_spawn_cwd,
         owner_team_id: team_id,
     })
 }

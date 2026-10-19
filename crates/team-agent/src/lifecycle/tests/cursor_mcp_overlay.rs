@@ -329,6 +329,30 @@ fn cursor_spawn_writes_identity_into_project_mcp_json() {
         argv_workspace,
         physical_workspace_path(&project).to_string_lossy()
     );
+    let state = crate::state::persist::load_runtime_state(&ws).unwrap();
+    let row = state.pointer("/agents/cursor_writer").unwrap();
+    assert_eq!(row["spawn_cwd"], project.to_string_lossy().as_ref());
+    assert_eq!(row["session_id"], serde_json::Value::Null);
+
+    // Measured native layout: the store bucket uses --workspace primary, not
+    // --add-dir. A decoy in the real project's bucket must never be selected.
+    let sid = "d298b261-23bb-42bb-bbeb-b2ec08d81ca3";
+    for (cwd, id) in [(&project, sid), (&ws, "foreign-project-session")] {
+        let bucket = format!("{:x}", md5::compute(cwd.to_string_lossy().as_bytes()));
+        let archive = _hermetic.home().join(".cursor/chats").join(bucket).join(id);
+        std::fs::create_dir_all(&archive).unwrap();
+        std::fs::write(archive.join("meta.json"), b"{}").unwrap();
+    }
+    let mut capture = serde_json::json!({"agents": {"cursor_writer": row.clone()}});
+    let report = crate::provider::session::capture::capture_missing_provider_sessions_once(
+        &mut capture,
+        &mut crate::provider::get_adapter,
+        false,
+        0,
+    ).unwrap();
+    assert_eq!(report.assigned, vec!["cursor_writer"]);
+    assert_eq!(capture["agents"]["cursor_writer"]["session_id"], sid);
+    assert_eq!(capture["agents"]["cursor_writer"]["spawn_cwd"], project.to_string_lossy().as_ref());
 }
 
 #[test]
