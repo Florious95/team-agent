@@ -1319,6 +1319,31 @@ pub(super) fn seed_healthy_coordinator(workspace: &std::path::Path) {
     .unwrap();
 }
 
+#[test]
+#[cfg(unix)]
+#[serial(env)]
+fn issue337_owned_fixture_caller_admits_fresh_launch_without_guard_bypass() {
+    let env = hermetic_guard::HermeticTestEnv::enter_with_leader("issue337-fixture-caller");
+    let workspace = env.workspace("ws");
+    let team = workspace.join("roles");
+    std::fs::create_dir_all(team.join("agents")).unwrap();
+    std::fs::write(team.join("TEAM.md"), QS_TEAM_MD).unwrap();
+    std::fs::write(team.join("agents/implementer.md"), QS_VALID_ROLE).unwrap();
+    seed_healthy_coordinator(&workspace);
+    let transport = OfflineTransport::new();
+    let report = quick_start_with_transport_in_workspace(
+        &workspace, &team, None, true, Some("fixture-team"), &transport,
+    ).unwrap();
+    let QuickStartReport::Ready { launch, .. } = report else { panic!("owned caller must admit launch: {report:?}") };
+    assert!(launch.leader_receiver_attached);
+    assert_eq!(launch.started.len(), 1);
+    assert_eq!(transport.spawn_records().len(), 1);
+    let socket = std::env::var("TMUX").unwrap().split(',').next().unwrap().to_string();
+    assert!(std::path::Path::new(&socket).exists());
+    drop(env);
+    assert!(!std::path::Path::new(&socket).exists());
+}
+
 fn seed_canonical_team_identity(workspace: &std::path::Path, team_key: &str) {
     let mut state = crate::state::persist::load_runtime_state(workspace).unwrap();
     state["active_team_key"] = json!(team_key);

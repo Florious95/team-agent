@@ -147,6 +147,7 @@ pub struct HermeticTestEnv {
     root: PathBuf,
     home: PathBuf,
     previous: Vec<(&'static str, Option<String>)>,
+    fixture_caller: Vec<(&'static str, String)>,
     /// 0.5.43 debt-sweep (§6.1): test-owned resource ledger. Drop
     /// cleanup walks these EXACT entries (never a host-wide scan).
     /// Order matters: pids first (stop coordinator/child tree), then
@@ -205,8 +206,40 @@ impl HermeticTestEnv {
             root,
             home,
             previous,
+            fixture_caller: Vec::new(),
             owned: Mutex::new(OwnedResources::default()),
         }
+    }
+
+    /// Explicit positive fixture: a real, ledger-owned caller pane, not a
+    /// production admission bypass or a model/business acceptance witness.
+    /// In-process callers must hold the existing serial(env) test lock.
+    pub fn enter_with_leader(tag: &str) -> Self {
+        let mut env = Self::enter(tag);
+        env.assert_no_real_tmux();
+        let socket = short_tmux_socket("caller");
+        assert!(!socket.exists(), "fixture caller endpoint already exists");
+        let output = Command::new("tmux")
+            .args(["-u", "-S"]).arg(&socket).args(["-f", "/dev/null", "new-session", "-d", "-s", "fixture-caller", "-c"])
+            .arg(&env.root).args(["-P", "-F", "#{pane_id}", "exec sleep 86400"])
+            .env_remove("TMUX").env_remove("TMUX_PANE")
+            .output().expect("create owned fixture caller");
+        assert!(output.status.success(), "fixture caller failed: {output:?}");
+        env.register_owned_tmux_socket(&socket);
+        let pane = String::from_utf8(output.stdout).expect("fixture pane UTF8").trim().to_string();
+        assert!(pane.strip_prefix('%').is_some_and(|digits| !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())));
+        let endpoint = socket.to_str().expect("fixture endpoint UTF8").to_string();
+        env.fixture_caller = vec![
+            ("TMUX", format!("{endpoint},0,0")), ("TMUX_PANE", pane.clone()),
+            ("TEAM_AGENT_CALLER_PROVIDER", "fake".into()),
+            ("TEAM_AGENT_CALLER_PANE_ID", pane),
+            ("TEAM_AGENT_CALLER_TMUX_ENDPOINT", endpoint),
+            ("TEAM_AGENT_LEADER_PROVIDER", "fake".into()),
+        ];
+        for (key, value) in &env.fixture_caller {
+            unsafe { std::env::set_var(key, value); }
+        }
+        env
     }
 
     pub fn workspace(&self, tag: &str) -> PathBuf {
@@ -262,6 +295,9 @@ impl HermeticTestEnv {
         command.args(args).current_dir(cwd).env("HOME", &self.home);
         for key in CALLER_IDENTITY_ENVS {
             command.env_remove(key);
+        }
+        for (key, value) in &self.fixture_caller {
+            command.env(key, value);
         }
         for (key, value) in extra_env {
             command.env(key, value);
