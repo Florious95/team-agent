@@ -411,7 +411,7 @@
       "bucket": "declared_gap",
       "covered": false,
       "owner": "runtime-owner:status",
-      "plan": "Execute the compatibility detail flag and assert the same concise nine-field readonly projection; no coordinator/history dump or extra diagnostic fields are implied."
+      "plan": "Execute the compatibility detail flag and assert the same concise readonly node projection: original nine fields, plus observation_reason and scoped next_action for uncertainty; no coordinator/history dump or detail-only fields are implied."
     },
     {
       "command": "team-agent status --json",

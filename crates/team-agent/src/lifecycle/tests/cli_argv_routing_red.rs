@@ -1224,6 +1224,9 @@ fn a13_materializer_version_catalog_and_nonagent_command_builders_are_not_routed
 #[serial(env)]
 fn a07_attach_existing_never_opens_enabled_invalid_route_config() {
     let f = Fixture::new("argv-attach");
+    // This planner-only case explicitly models attach from outside tmux,
+    // not the owned caller used by positive worker-start fixtures.
+    f.env.scrub_tmux();
     f.raw("invalid JSON");
     f.switch(Some("on"));
     let plan = f.leader(Provider::Pi, true, true).unwrap();
