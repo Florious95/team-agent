@@ -27,7 +27,7 @@ team-agent doctor --workspace "$WORKSPACE" --team "$TEAM" --json
 team-agent inbox "$AGENT_ID" --workspace "$WORKSPACE" --team "$TEAM" -n 3 --json
 ```
 
-Status is the concise node projection: use `runtime_status`, `activity`, `health` and the reported attach target without inferring absent internals. `--detail` is not a full historical dump. Follow doctor's actual owner/receiver/coordinator findings and recovery actions. Installed is not authenticated; unknown is not proven dead, stopped or unavailable.
+Status is the concise node projection: use `runtime_status`, `activity`, `health` and the reported attach target without inferring absent internals. An uncertain node also carries `observation_reason` and an explicitly scoped `next_action`; healthy nodes retain the compact existing fields. `--detail` is not a full historical dump. Follow doctor's actual owner/receiver/coordinator findings and recovery actions. Installed is not authenticated; unknown is not proven dead, stopped or unavailable.
 
 Accepted/queued messages are not replies. Keep task/result/receiver evidence separate from transport acceptance. If the worker already has a report but MCP is broken, use the payload handoff contingency below rather than guessing it was delivered.
 

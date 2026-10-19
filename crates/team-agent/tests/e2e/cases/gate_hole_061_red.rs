@@ -88,51 +88,15 @@ fn tooth_1_existing_launch_smoke_runs_documented_quick_start_verbatim() {
         vec!["team-agent", "quick-start", ".team/current"],
         "TOOTH-1: runner changed the documented argv"
     );
-    assert_eq!(
-        out.exit_code, 1,
-        "an incomplete leader bind is not launch success"
-    );
-    let report: Value = serde_json::from_str(
-        out.stdout.strip_prefix("quick-start report:\n")
-            .expect("incomplete launch must expose its full English report"),
-    ).expect("complete quick-start diagnostic JSON");
-    assert_eq!(report["ok"], false);
-    assert_eq!(report["ready"], false);
-    assert_eq!(report["status"], "leader_binding_incomplete");
-    assert_eq!(report["reason"], "caller_pane_missing");
-    assert_eq!(report["worker_readiness"]["all_workers_spawned"], true);
-    assert_eq!(report["worker_readiness"]["all_attached_receiver"], false);
-    let next_actions = report["next_actions"].as_array().expect("typed next actions");
-    assert!(!next_actions.is_empty());
-    assert!(next_actions.iter().all(|action| action.as_str()
-        .is_some_and(|action| !action.contains("claim-leader"))),
-        "TOOTH-1: next actions must not suggest claiming leadership: {next_actions:?}");
-    // Full diagnostics explicitly prohibit claiming; that warning is not an unsafe suggestion.
-    for key in ["readiness", "worker_readiness"] {
-        assert_eq!(report[key]["next_action"],
-            "run from the intended leader tmux pane; do not run claim-leader",
-            "TOOTH-1: {key} must retain safe binding guidance");
-    }
-    assert!(
-        out.stdout.contains("quick-start degraded:")
-            && out.stdout.contains("status")
-            && out.stderr.is_empty(),
-        "TOOTH-1: incomplete launch must give safe English guidance and typed cause; stdout={} stderr={}",
-        out.stdout,
-        out.stderr
-    );
-    let events = std::fs::read_to_string(ws.events_jsonl_path()).expect("launch events");
-    assert!(
-        events
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .any(|event| {
-                event["event"] == "quick_start.leader_bind_refused"
-                    && event["reason"] == "caller_pane_missing"
-                    && event["stage"] == "caller_pane"
-            }),
-        "TOOTH-1: the typed no-caller bind refusal must remain in machine evidence: {events}"
-    );
+    assert_eq!(out.exit_code, 0,
+        "TOOTH-1: documented positive journey has a real owned caller; stdout={} stderr={}",
+        out.stdout, out.stderr);
+    assert!(!out.stdout.contains("leader_binding_incomplete"));
+    assert!(!out.stdout.contains("caller_pane_missing"));
+    assert!(out.stderr.is_empty());
+    // #337 forbids the former after-spawn no-caller fixture. Keep the
+    // documented positive journey and its canonical runtime assertions;
+    // the independent missing-caller test below requires zero effects.
 
     assert_file_exists(&ws.state_json_path());
     assert_file_absent(&ws.path().join(".team/current/.team/runtime/state.json"));
@@ -813,6 +777,22 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
                 .map(|value| value.to_string())
         })
         .unwrap_or_else(|| "non-string panic payload".to_string())
+}
+
+#[test]
+fn missing_caller_refuses_documented_launch_before_runtime_or_workers() {
+    let ws = documented_fake_team("gate061-no-caller", "coder");
+    let out = run_ta_env(&ws, &["quick-start", ".team/current", "--json"],
+        &[("TMUX", ""), ("TMUX_PANE", "")]);
+    assert_eq!(out.exit_code, 1);
+    let report = out.json();
+    assert_eq!(report["status"], "preflight_blocked");
+    assert!(report["blockers"].as_array().unwrap().iter()
+        .any(|blocker| blocker.as_str().is_some_and(|text| text.contains("caller_pane_missing"))));
+    assert_eq!(report["effects"]["worker_panes_started"], serde_json::json!([]));
+    assert_eq!(report["effects"]["coordinator_start"], "not_attempted");
+    assert_file_absent(&ws.state_json_path());
+    assert_file_absent(&ws.coordinator_pid_file());
 }
 
 fn documented_fake_team(tag: &str, agent_id: &str) -> TestWorkspace {

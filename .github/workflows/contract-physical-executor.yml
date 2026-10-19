@@ -31,6 +31,9 @@ on:
           - issue321-f1
           - issue326
           - issue334-red
+          - cli-defects-red
+          - cli-defects-admission
+          - cli-defects-fixtures
           - issue334
           - cli-phase1
           - cli-phase1-format
@@ -235,15 +238,41 @@ jobs:
             host-native)
               run_case host-native cargo test --manifest-path crates/team-agent-contract/Cargo.toml --test host_native --locked -- --test-threads=1
               ;;
+            cli-defects-red)
+              run_case blind-defects cargo test -p team-agent --lib --locked issue33 -- --test-threads=1
+              ;;
+            cli-defects-admission)
+              run_case launch-admission cargo test -p team-agent --lib --locked lifecycle::tests::launch_spawn::quick_start_ -- --test-threads=1
+              ;;
+            cli-defects-fixtures)
+              run_case fixture-cli cargo build -p team-agent --bin team-agent --locked
+              run_case provider-fixtures cargo test -p team-agent --lib --locked -- --test-threads=1 \
+                lifecycle::tests::copilot_provider_red lifecycle::tests::behavioral_diff_264_red \
+                lifecycle::tests::claude_compatible_config_red lifecycle::tests::claude_profile_launch_red \
+                lifecycle::tests::cursor_mcp_overlay lifecycle::tests::cursor_require_explicit_model_red \
+                lifecycle::tests::cursor_restart_resume_red lifecycle::tests::grok_effort_argv_red \
+                lifecycle::tests::grok_mcp_overlay_red lifecycle::tests::grok_require_explicit_model_red \
+                lifecycle::tests::grok_restart_resume_red lifecycle::tests::phase_b_contracts \
+                lifecycle::tests::acceptance_b_batch_red lifecycle::tests::cli_argv_routing_red \
+                lifecycle::tests::clone_agent_preserves_source_tools lifecycle::tests::clone_fork_copilot_perms_red \
+                lifecycle::tests::communication_mode_runtime_contract_red lifecycle::tests::phase_golden \
+                lifecycle::tests::startup_latency_contract lifecycle::tests::team_in_team_identity_scope_red \
+                lifecycle::tests::verify_rs031_window_consistency_red \
+                cli::lifecycle_port::quick_start_value_tests
+              ;;
             issue334-red)
               run_case workspace-check cargo check --workspace --all-targets --locked
               run_case parser-safety cargo test -p team-agent --lib --locked cli::emit::parser_safety_tests -- --test-threads=1
               ;;
             cli-phase1)
               run_case workspace-check cargo check --workspace --all-targets --locked
+              run_case fixture-cli cargo build -p team-agent --bin team-agent --locked
               run_case cli-parser cargo test -p team-agent --lib --locked cli::emit:: -- --test-threads=1
               run_case cli-commands cargo test -p team-agent --lib --locked cli::tests:: -- --test-threads=1
               run_case cli-intent cargo test -p team-agent --lib --locked cli::intent:: -- --test-threads=1
+              run_case blind-defects cargo test -p team-agent --lib --locked issue33 -- --test-threads=1
+              run_case launch-admission cargo test -p team-agent --lib --locked lifecycle::tests::launch_spawn -- --test-threads=1
+              run_case fresh-admission cargo test -p team-agent --lib --locked fresh_quick_start_leader_binding_tests -- --test-threads=1
               run_case cli-human cargo test -p team-agent --test cli_human_surface_red --locked -- --test-threads=1
               run_case public-docs cargo test -p team-agent --test cli_phase2_public_docs_contract --locked -- --test-threads=1
               run_case test-isolation cargo test -p team-agent --lib --locked lifecycle::tests::test_isolation_escape_contract::r6_static_guard_rejects_dangerous_tests_without_hermetic_boundary -- --test-threads=1
@@ -346,7 +375,7 @@ jobs:
           retention-days: 14
 
   workspace-all-linux:
-    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && (inputs.regression_scope == 'issue321-full' || inputs.regression_scope == 'issue321-f1' || inputs.regression_scope == 'issue334' || inputs.regression_scope == 'cli-phase1' || inputs.regression_scope == 'cli-phase1-e2e')
+    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && (inputs.regression_scope == 'issue321-full' || inputs.regression_scope == 'issue321-f1' || inputs.regression_scope == 'issue334' || inputs.regression_scope == 'cli-phase1' || inputs.regression_scope == 'cli-phase1-e2e' || inputs.regression_scope == 'cli-defects-fixtures')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -373,6 +402,7 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y tmux
           fi
+          printf 'CONTRACT_TMUX=%s\n' "$(command -v tmux)" >> "$GITHUB_ENV"
           mkdir workspace-evidence
           git rev-parse HEAD 'HEAD^{tree}' > workspace-evidence/source.txt
           rustc -vV > workspace-evidence/toolchain.txt
@@ -389,6 +419,9 @@ jobs:
           fi
           if test "${{ inputs.regression_scope }}" = cli-phase1-e2e; then
             command=(cargo test -p team-agent --test e2e --locked -- --test-threads=1)
+          fi
+          if test "${{ inputs.regression_scope }}" = cli-defects-fixtures; then
+            command=(cargo test -p team-agent --locked --no-fail-fast --test e2e --test e2e_bypass_single_source --test e6_offline_mailbox_toname_e2e_contract --test msg_protocol_m2c_to_grammar_contract --test msg_sendpath_persist_first_contract --test role_lifecycle_intermediate_layer_red --test team_in_team_scope_commands_red -- --test-threads=1)
           fi
           "${command[@]}" 2>&1 | tee workspace-evidence/test.log
           statuses=("${PIPESTATUS[@]}")

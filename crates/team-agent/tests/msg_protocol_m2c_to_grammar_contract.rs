@@ -48,8 +48,7 @@ struct GrammarCase {
 
 impl GrammarCase {
     fn start(tag: &str) -> Self {
-        let env = HermeticTestEnv::enter(tag);
-        env.scrub_tmux();
+        let env = HermeticTestEnv::for_subprocess_with_leader(tag);
         let workspace = env.workspace(tag);
         std::fs::create_dir_all(workspace.join("agents")).expect("create agents dir");
         std::fs::write(
@@ -251,6 +250,7 @@ fn positional_to_accepts_full_logical_grammar_into_one_funnel() {
 #[serial(env)]
 fn positional_to_leader_form_refuses_canonically_when_unbound() {
     let case = GrammarCase::start("m2c-leader");
+    hermetic_guard::seed_unattached_leader(&case.workspace, case.env.home());
     let to = format!("{TEAM}/leader");
     let (parsed, combined) = case.send_positional(to.as_str(), None, "m2c leader probe");
     let value = parsed.as_ref().unwrap_or_else(|| {

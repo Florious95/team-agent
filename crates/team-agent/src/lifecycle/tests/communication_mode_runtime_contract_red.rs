@@ -31,10 +31,9 @@ const CONTRACT_HEADING_PREFIX: &str = "# Team Agent communication contract: ";
 #[test]
 #[serial_test::serial(env)]
 fn t06_each_official_mode_selects_one_runtime_contract_in_real_spawn_prompt() {
-    let hermetic = hermetic_guard::HermeticTestEnv::enter("communication-mode-official");
-    hermetic.scrub_tmux();
-    hermetic.assert_no_real_tmux();
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("communication-mode-official");
     let root = fixture("official", None);
+    super::launch_spawn::seed_healthy_coordinator(&root);
     let transport = RecordingTransport::default();
     quick_start_with_transport_in_workspace(
         &root,
@@ -87,10 +86,9 @@ fn t06_each_official_mode_selects_one_runtime_contract_in_real_spawn_prompt() {
 #[test]
 #[serial_test::serial(env)]
 fn t06_selected_templates_project_the_two_signed_communication_boundaries() {
-    let hermetic = hermetic_guard::HermeticTestEnv::enter("communication-mode-semantics");
-    hermetic.scrub_tmux();
-    hermetic.assert_no_real_tmux();
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("communication-mode-semantics");
     let root = fixture("semantics", None);
+    super::launch_spawn::seed_healthy_coordinator(&root);
     let transport = RecordingTransport::default();
     quick_start_with_transport_in_workspace(
         &root,
@@ -141,10 +139,9 @@ fn t06_selected_templates_project_the_two_signed_communication_boundaries() {
 #[test]
 #[serial_test::serial(env)]
 fn t07_final_spawn_prompt_does_not_leak_leader_centric_obligations_into_orchestrated() {
-    let hermetic = hermetic_guard::HermeticTestEnv::enter("communication-mode-negative-boundary");
-    hermetic.scrub_tmux();
-    hermetic.assert_no_real_tmux();
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("communication-mode-negative-boundary");
     let root = fixture("negative-boundary", None);
+    super::launch_spawn::seed_healthy_coordinator(&root);
     let transport = RecordingTransport::default();
     quick_start_with_transport_in_workspace(
         &root,

@@ -36,6 +36,26 @@ use super::*;
 
 // ── lifecycle::launch —— 冷启 / quick-start / 危险审批探测 ──────────────────
 
+/// White-box producer/worker-engine fixture, not a public start admission path.
+/// Keep unbound producer assertions separate from public caller admission.
+#[cfg(test)]
+pub(crate) fn materialize_unbound_state_for_test(
+    workspace: &Path, team_dir: &Path, team_key: &str,
+    transport: &crate::transport::test_support::OfflineTransport,
+) -> Result<LaunchReport, LifecycleError> {
+    let spec = crate::compiler::compile_team(team_dir)
+        .map_err(|error| LifecycleError::Compile(error.to_string()))?;
+    let path = crate::model::paths::runtime_spec_path(workspace, team_key);
+    spec_state::write_spec_atomic(&path, &spec)?;
+    let path = path.canonicalize().map_err(|error| LifecycleError::StatePersist(error.to_string()))?;
+    let mut state = spec_state::initial_runtime_state(
+        &spec, &path, workspace, team_dir, team_key, transport.tmux_endpoint().as_deref(),
+    );
+    quick_start_transport::annotate_runtime_transport(&mut state, transport, workspace, None);
+    state_projection::save_launched_team_state_for_key(workspace, &state, Some(team_key), None)?;
+    launch_with_transport_in_workspace(workspace, &path, false, true, true, transport)
+}
+
 /// ---
 /// purpose: 冷启全队的默认入口，按 spec 所在目录绑定 per-team tmux socket 后转 launch_with_transport
 /// params:

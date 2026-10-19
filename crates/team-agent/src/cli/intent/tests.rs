@@ -239,6 +239,90 @@ fn role_change_between_stop_and_start_refuses_without_rollback_claim() {
     assert_eq!(value["current_state"], "unknown");
 }
 #[test]
+fn issue337_failed_handler_preserves_confirmed_and_uncertain_effects() {
+    for (coordinator, workers, confirmed) in [
+        ("not_attempted", json!(["worker"]), true),
+        ("attempted_unknown", json!([]), false),
+    ] {
+        let result = execute_plan(
+            plan(Verb::Start, &["start"]),
+            &mut |_| Ok(CmdResult::from_json(json!({
+                "ok": false, "status": "partial", "error": "original failure",
+                "effects": {"worker_panes_started": workers, "coordinator_start": coordinator},
+            }), true)),
+            &mut |_, _, _| Ok(()),
+        ).unwrap();
+        assert_eq!(result.exit, ExitCode::Error);
+        let CmdOutput::Json(value) = result.output else {
+            panic!()
+        };
+        assert_eq!(value["status"], "partial");
+        assert_eq!(value["steps"][0]["receipt"]["error"], "original failure");
+        assert_eq!(
+            value["effects"][0]["effects"]["coordinator_start"],
+            coordinator
+        );
+        assert_eq!(!value["last_confirmed_effect"].is_null(), confirmed);
+        let recovery = value["recovery"].as_str().unwrap();
+        assert!(recovery.contains("--workspace"));
+        assert!(recovery.contains("--team"));
+        assert!(recovery.contains("doctor"));
+        assert!(!recovery.contains("claim-leader"));
+    }
+}
+
+#[test]
+fn issue337_zero_effect_refusal_is_explicit_at_top_without_hiding_prior_uncertainty() {
+    for prior_unknown in [false, true] {
+        let mut call = 0;
+        let actions = if prior_unknown {
+            vec!["start", "start"]
+        } else {
+            vec!["start"]
+        };
+        let result = execute_plan(
+            plan(Verb::Start, &actions),
+            &mut |_| {
+                call += 1;
+                let receipt = if prior_unknown && call == 1 {
+                    json!({"ok":false,"error":"unclassified handler failure"})
+                } else {
+                    json!({"ok":false,"status":"preflight_blocked",
+                        "effects":{"worker_panes_started":[],"coordinator_start":"not_attempted"},
+                        "next_actions":["run from the intended live Leader pane; no process was started"]})
+                };
+                Ok(CmdResult::from_json(receipt, true))
+            },
+            &mut |_, _, _| Ok(()),
+        ).unwrap();
+        let CmdOutput::Json(value) = result.output else {
+            panic!()
+        };
+        assert_eq!(value["status"], "failed");
+        assert_eq!(
+            value["current_state"],
+            if prior_unknown {
+                "unknown"
+            } else {
+                "unchanged"
+            }
+        );
+        assert!(value["last_confirmed_effect"].is_null());
+        assert_eq!(
+            value["effects"][0]["effects"]["coordinator_start"],
+            "not_attempted"
+        );
+        let recovery = value["recovery"].as_str().unwrap();
+        if prior_unknown {
+            assert!(recovery.contains("doctor"));
+            assert!(!recovery.contains("no process was started"));
+        } else {
+            assert!(recovery.contains("live Leader pane"));
+        }
+    }
+}
+
+#[test]
 fn dry_run_never_calls_handler_or_execution_admission() {
     let mut plan = plan(Verb::Restart, &["stop", "start"]);
     plan.intent.dry_run = true;

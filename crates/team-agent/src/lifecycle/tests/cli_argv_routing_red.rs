@@ -46,7 +46,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new(tag: &str) -> Self {
-        let env = hermetic::HermeticTestEnv::enter(tag);
+        let env = hermetic::HermeticTestEnv::enter_with_leader(tag);
         let ws = env.workspace("workspace");
         let team = ws.join("roles");
         fs::create_dir_all(team.join("agents")).unwrap();
@@ -68,7 +68,12 @@ impl Fixture {
         let real_pi = env.root().join("pi-real");
         executable(&real_pi, &script);
         std::os::unix::fs::symlink(&real_pi, bin.join("pi")).unwrap();
-        executable(&bin.join("tmux"), "#!/bin/sh\ncase \"$*\" in\n*-V*) echo 'tmux 3.4';;\n*has-session*) exit 1;;\n*list-sessions*|*list-windows*|*list-panes*) exit 0;;\n*) exit 0;;\nesac\n");
+        let caller = std::env::var("TMUX").expect("owned fixture caller").split(',').next().unwrap().to_string();
+        let native_tmux = hermetic::fixture_tmux_binary();
+        executable(&bin.join("tmux"), &format!(
+            "#!/bin/sh\nwant_socket=0\nfor argument in \"$@\"; do\n  if [ \"$want_socket\" = 1 ]; then\n    if [ \"$argument\" = {} ]; then exec {} \"$@\"; fi\n    break\n  fi\n  if [ \"$argument\" = -S ]; then want_socket=1; fi\ndone\ncase \"$*\" in\n*-V*) echo 'tmux 3.4';;\n*has-session*) exit 1;;\n*list-sessions*|*list-windows*|*list-panes*) exit 0;;\n*) exit 0;;\nesac\n",
+            crate::cli::shell_quote(&caller), crate::cli::shell_quote(&native_tmux.to_string_lossy()),
+        ));
         let guards = vec![
             env.with_env("PATH", &format!("{}:/usr/bin:/bin", bin.display())),
             env.with_env(SWITCH, "off"),
@@ -1219,6 +1224,9 @@ fn a13_materializer_version_catalog_and_nonagent_command_builders_are_not_routed
 #[serial(env)]
 fn a07_attach_existing_never_opens_enabled_invalid_route_config() {
     let f = Fixture::new("argv-attach");
+    // This planner-only case explicitly models attach from outside tmux,
+    // not the owned caller used by positive worker-start fixtures.
+    f.env.scrub_tmux();
     f.raw("invalid JSON");
     f.switch(Some("on"));
     let plan = f.leader(Provider::Pi, true, true).unwrap();

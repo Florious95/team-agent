@@ -35,10 +35,8 @@ use team_agent::transport::{
 #[test]
 #[serial(env)]
 fn quick_start_team_id_persists_requested_team_key_for_lifecycle_selection() {
-    let hermetic = hermetic_guard::HermeticTestEnv::enter("team-in-team-requested-key");
-    hermetic.scrub_tmux();
-    hermetic.assert_no_real_tmux();
     let _env = EnvGuard::unset();
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("team-in-team-requested-key");
     let root = tmp_dir("team-id-key");
     seed_healthy_coordinator(&root);
     let team_dir = write_team_dir(&root, "teamdir", "w1");

@@ -4201,13 +4201,20 @@ impl Transport for TmuxBackend {
             return Err(subprocess_error(list_argv, output));
         }
         for line in output.stdout.lines() {
-            let Some((pane, window)) = line.split_once('\t') else {
+            // Some tmux/runner combinations return the literal escape. Split
+            // only the first column boundary; window names are not unescaped.
+            let separator = line.find('\t').map(|at| (at, 1)).into_iter()
+                .chain(line.find("\\t").map(|at| (at, 2)))
+                .min_by_key(|(at, _)| *at);
+            let Some((at, width)) = separator else {
                 return Err(TransportError::Subprocess {
                     argv: list_argv,
                     code: output.code,
                     stderr: "tmux returned an invalid session pane listing".to_string(),
                 });
             };
+            let (pane, rest) = line.split_at(at);
+            let window = &rest[width..];
             if !targets.iter().any(|target| match target {
                 Target::Pane(id) => id.as_str() == pane,
                 Target::SessionWindow {

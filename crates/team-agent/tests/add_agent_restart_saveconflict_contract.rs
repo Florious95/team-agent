@@ -16,6 +16,9 @@ use team_agent::model::paths::runtime_spec_path;
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 use team_agent::state::StateError;
 
+#[path = "support/hermetic.rs"]
+mod hermetic_guard;
+
 static CASE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
@@ -323,6 +326,7 @@ fn persist_guard_still_rejects_live_topology_deletion() {
 }
 
 struct CliCase {
+    caller: hermetic_guard::HermeticTestEnv,
     root: PathBuf,
     home: PathBuf,
     workspace: PathBuf,
@@ -342,6 +346,7 @@ impl CliCase {
         std::fs::create_dir_all(&workspace).expect("create workspace");
         let team = format!("aa0530{}{}", std::process::id(), seq);
         Self {
+            caller: hermetic_guard::HermeticTestEnv::for_subprocess_with_leader(tag),
             root,
             home,
             workspace,
@@ -405,25 +410,8 @@ impl CliCase {
             .env("HOME", &self.home)
             .env("TEAM_AGENT_TEST_TMP", test_tmp_root())
             .env("TMPDIR", test_tmp_root());
-        for key in [
-            "TMUX",
-            "TMUX_PANE",
-            "TEAM_AGENT_LEADER_PANE_ID",
-            "TEAM_AGENT_LEADER_SESSION_UUID",
-            "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE",
-            "TEAM_AGENT_LEADER_PROVIDER",
-            "TEAM_AGENT_MACHINE_FINGERPRINT",
-            "TEAM_AGENT_WORKSPACE",
-            "TEAM_AGENT_TEAM_ID",
-            "TEAM_AGENT_OWNER_TEAM_ID",
-            "TEAM_AGENT_ACTIVE_TEAM",
-            "TEAM_AGENT_ID",
-            "TEAM_AGENT_CALLER_PROVIDER",
-            "TEAM_AGENT_CALLER_PANE_ID",
-            "TEAM_AGENT_CALLER_TMUX_ENDPOINT",
-        ] {
-            command.env_remove(key);
-        }
+        self.caller.configure_command(&mut command);
+        command.env("HOME", &self.home);
         let output = command.output().expect("run team-agent");
         eprintln!(
             "$ team-agent {}\nexit={}\nstdout={}\nstderr={}",

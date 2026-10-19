@@ -32,7 +32,9 @@ use team_agent::transport::test_support::OfflineTransport;
 #[test]
 #[serial(env)]
 fn cursor_role_missing_model_uses_provider_default() {
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("cursor-no-model");
     let ws = tmp_dir("cursor-no-model");
+    super::launch_spawn::seed_healthy_coordinator(&ws);
     let team = write_role_team(&ws, "cursortm", "cursor_writer", None, None);
     let transport = OfflineTransport::new();
     quick_start_with_transport_in_workspace(
@@ -54,8 +56,9 @@ fn cursor_role_missing_model_uses_provider_default() {
 #[test]
 #[serial(env)]
 fn cursor_role_explicit_model_reaches_argv() {
-    let _hermetic = hermetic_guard::HermeticTestEnv::enter("cursor-with-model");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("cursor-with-model");
     let ws = tmp_dir("cursor-with-model");
+    super::launch_spawn::seed_healthy_coordinator(&ws);
     let team = write_role_team(
         &ws,
         "cursortm",
@@ -116,7 +119,7 @@ fn cursor_role_with_effort_refuses_to_start() {
 #[test]
 #[serial(env)]
 fn cursor_second_seat_in_same_workspace_is_refused() {
-    let _hermetic = hermetic_guard::HermeticTestEnv::enter("cursor-two");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("cursor-two");
     let ws = tmp_dir("cursor-two");
     let team = ws.join("cursortm");
     std::fs::create_dir_all(team.join("agents")).unwrap();

@@ -115,6 +115,7 @@ struct BriefNode {
     health: String,
     session_name: Option<String>,
     tmux_command: Option<String>,
+    observation_reason: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,9 +126,10 @@ struct AttachContext {
     pane: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct ProbeResult {
     nodes: Vec<ProbeNode>,
+    exited: BTreeSet<(String, String, String)>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -158,7 +160,7 @@ pub(crate) fn status_brief_scoped(workspace: &Path, state: &Value, agent: Option
     json!({
         "nodes": nodes
             .into_iter()
-            .map(|(node, _)| node.into_json())
+            .map(|(node, _)| scoped_node_json(node, workspace, state))
             .collect::<Vec<_>>()
     })
 }
@@ -167,14 +169,22 @@ pub(crate) fn status_brief_scoped(workspace: &Path, state: &Value, agent: Option
 /// context only when multiple nodes make that repetition useful.
 pub(crate) fn format_status_brief(workspace: &Path, state: &Value, agent: Option<&str>) -> String {
     let nodes = project_status_nodes(workspace, state, agent);
-    if nodes.len() <= 1 {
-        return nodes
-            .into_iter()
-            .filter_map(|(node, _)| format_brief_node(&node.into_json()))
-            .collect::<Vec<_>>()
-            .join("\n");
+    let diagnostics = nodes.iter().filter(|(node, _)| node.observation_reason.is_some())
+        .map(|(node, _)| {
+            let value = scoped_node_json(node.clone(), workspace, state);
+            format!("observation {}: {}; next_action: {}", node.name,
+                value["observation_reason"].as_str().unwrap_or("observation_inconclusive"),
+                value["next_action"].as_str().unwrap_or(""))
+        }).collect::<Vec<_>>();
+    let mut output = if nodes.len() <= 1 {
+        nodes.into_iter().filter_map(|(node, _)| format_brief_node(&node.into_json()))
+            .collect::<Vec<_>>().join("\n")
+    } else { format_multi_node_brief(nodes) };
+    if !diagnostics.is_empty() {
+        output.push('\n');
+        output.push_str(&diagnostics.join("\n"));
     }
-    format_multi_node_brief(nodes)
+    output
 }
 
 fn project_status_nodes(
@@ -200,13 +210,18 @@ fn project_status_nodes(
         .map(|node| {
             #[cfg(unix)]
             if crate::contract_runtime::registry::descriptor(&node.provider).is_some() {
-                let mut brief = BriefNode::unknown(node);
+                let mut brief = BriefNode::unknown(node).with_reason("native_runtime_projection_unavailable");
                 if let Ok(native) = crate::contract_runtime::framework::project_seat(
                     _workspace,
                     &crate::state::projection::team_state_key(state),
                     &node.name,
                 ) {
                     brief.runtime_status = native["status"].as_str().unwrap_or("unknown").into();
+                    brief.observation_reason = match brief.runtime_status.as_str() {
+                        "running" => Some("activity_or_health_not_observed"),
+                        "stopped" => None,
+                        _ => Some("native_runtime_not_ready"),
+                    };
                     brief.model = native["model"].as_str().map(str::to_owned);
                     brief.effort = native["effort"].as_str().map(str::to_owned);
                     if brief.runtime_status == "running" {
@@ -596,11 +611,14 @@ fn sample_native_panes(
     } else {
         snapshots(&pids)
     };
+    let exited = panes.iter().filter(|fields| {
+        native_pane_pid(fields[3]).and_then(|pid| processes.get(&pid)).is_some_and(|p| p.zombie)
+    }).map(|fields| (fields[0].to_string(), fields[1].to_string(), fields[2].to_string())).collect();
     let nodes = panes
         .into_iter()
         .filter_map(|fields| parse_native_pane(fields, endpoint, registered, &processes))
         .collect();
-    ProbeResult { nodes }
+    ProbeResult { nodes, exited }
 }
 
 fn native_pane_fields(line: &str) -> Option<[&str; 5]> {
@@ -1199,7 +1217,7 @@ fn parse_probe(bytes: &[u8], requested_endpoint: &str) -> Result<ProbeResult, ()
         .iter()
         .filter_map(|node| parse_probe_node(node, report_socket))
         .collect();
-    Ok(ProbeResult { nodes })
+    Ok(ProbeResult { nodes, ..Default::default() })
 }
 
 #[cfg(test)]
@@ -1273,18 +1291,34 @@ fn project_node_with_attach(
                 health: "unknown".to_string(),
                 session_name: None,
                 tmux_command: None,
+                observation_reason: None,
             },
-            MatchResult::Unique(_) | MatchResult::Ambiguous => BriefNode::unknown(node),
+            MatchResult::Unique(_) | MatchResult::Ambiguous => BriefNode::unknown(node).with_reason("stopped_registration_has_live_pane"),
         };
         return (projected, None);
     }
     let MatchResult::Unique(observed) = matched else {
-        return (BriefNode::unknown(node), None);
+        let reason = if matches!(matched, MatchResult::Ambiguous) {
+            "pane_observation_ambiguous"
+        } else if node.endpoint.is_none() {
+            "endpoint_unregistered"
+        } else if node.session.is_none() || node.pane.is_none() {
+            "pane_binding_incomplete"
+        } else if let Some(sample) = probe.and_then(Option::as_ref) {
+            if sample.exited.iter().any(|(session, window, pane)| {
+                node.session.as_deref() == Some(session.as_str())
+                    && node.window.as_deref().is_none_or(|name| name == window)
+                    && node.pane.as_deref() == Some(pane.as_str())
+            }) { "pane_process_exited" }
+            else if matches!(node.lifecycle.as_deref(), Some("starting" | "launching" | "pending")) { "startup_not_yet_observed" }
+            else { "registered_pane_not_observed" }
+        } else { "endpoint_probe_unavailable" };
+        return (BriefNode::unknown(node).with_reason(reason), None);
     };
     if !node.provider.eq_ignore_ascii_case("unknown")
         && !node.provider.eq_ignore_ascii_case(&observed.provider)
     {
-        return (BriefNode::unknown(node), None);
+        return (BriefNode::unknown(node).with_reason("provider_observation_mismatch"), None);
     }
     let pi_channel = observed.provider.eq_ignore_ascii_case("pi")
         && observed.evidence_method.as_deref() == Some("pi_activity_channel");
@@ -1321,6 +1355,7 @@ fn project_node_with_attach(
             health: health.to_string(),
             session_name: observed.session_name.clone(),
             tmux_command,
+            observation_reason: (activity == "unknown" || health == "unknown").then_some("activity_or_health_not_observed"),
         },
         attach,
     )
@@ -1405,7 +1440,13 @@ impl BriefNode {
             health: "unknown".to_string(),
             session_name: None,
             tmux_command: None,
+            observation_reason: Some("observation_inconclusive"),
         }
+    }
+
+    fn with_reason(mut self, reason: &'static str) -> Self {
+        self.observation_reason = Some(reason);
+        self
     }
 
     fn into_json(self) -> Value {
@@ -1425,8 +1466,28 @@ impl BriefNode {
             "tmux_command".to_string(),
             self.tmux_command.map(Value::String).unwrap_or(Value::Null),
         );
+        if let Some(reason) = self.observation_reason {
+            object.insert("observation_reason".into(), json!(reason));
+        }
         Value::Object(object)
     }
+}
+
+fn scoped_node_json(node: BriefNode, workspace: &Path, state: &Value) -> Value {
+    let mut value = node.into_json();
+    if let Some(reason) = value["observation_reason"].as_str() {
+        let guidance = match reason {
+            "pane_process_exited" => "pane process exit confirmed; inspect saved session and Leader binding before explicit start",
+            "startup_not_yet_observed" | "native_runtime_not_ready" => "wait for startup convergence and recheck this scope; do not reset on unknown",
+            _ => "inspect this scope's observation and identity; do not infer process exit or retry lifecycle from unknown alone",
+        };
+        value["next_action"] = json!(format!(
+            "team-agent doctor --workspace {} --team {} --json; {guidance}",
+            shell_quote(&workspace.to_string_lossy()),
+            shell_quote(&crate::state::projection::team_state_key(state)),
+        ));
+    }
+    value
 }
 
 #[cfg(test)]
@@ -1446,6 +1507,35 @@ mod native_ps_batch_regressions {
             pane: Some(pane.into()),
             lifecycle: None,
         }
+    }
+
+    #[test]
+    fn issue338_unknown_status_has_reason_and_same_scope_next_action() {
+        let state = json!({
+            "team_key": "scoped-team", "session_name": "sess",
+            "agents": {"worker": {"provider": "pi", "status": "running"}}
+        });
+        let status = status_brief_scoped(Path::new("/owned/workspace with spaces"), &state, None);
+        let node = &status["nodes"][0];
+        assert_eq!(node["runtime_status"], "unknown");
+        assert_eq!(node["observation_reason"], "endpoint_unregistered");
+        let action = node["next_action"].as_str().unwrap();
+        assert!(action.contains("--workspace '/owned/workspace with spaces'"));
+        assert!(action.contains("--team 'scoped-team'"));
+        assert!(action.contains("doctor"));
+        assert!(!action.contains("restart"));
+    }
+
+    #[test]
+    fn issue338_confirmed_zombie_is_not_reported_as_unexplained_unknown() {
+        let node = registered("e1", "%7");
+        let probe = sample_native_panes("hp\tw\t%7\t123\tpi\n", "e1", &[node.clone()], |_| {
+            BTreeMap::from([(123, ProcessSnapshot { zombie: true })])
+        });
+        let value = project_node(&node, Some(&Some(probe))).into_json();
+        assert_eq!(value["runtime_status"], "unknown");
+        assert_eq!(value["observation_reason"], "pane_process_exited");
+        assert!(value["tmux_command"].is_null());
     }
 
     #[test]
@@ -1713,6 +1803,7 @@ mod tests {
                     None,
                     Some(ProbeResult {
                         nodes: vec![probe("pi_activity_channel")],
+                        ..Default::default()
                     }),
                 ] {
                     let value = project_node(&node, Some(&sample)).into_json();
@@ -1724,7 +1815,11 @@ mod tests {
                         settings.0.unwrap_or("null"),
                         settings.1.unwrap_or("null")
                     )));
-                    assert_eq!(value.as_object().unwrap().len(), 9);
+                    let diagnostics = usize::from(value.get("observation_reason").is_some());
+                    assert_eq!(value.as_object().unwrap().len(), 9 + diagnostics);
+                    if value["runtime_status"] == "unknown" {
+                        assert!(!value["observation_reason"].as_str().unwrap().is_empty());
+                    }
                 }
             }
         }
@@ -1757,6 +1852,7 @@ mod tests {
             &node,
             Some(&Some(ProbeResult {
                 nodes: vec![observed],
+                ..Default::default()
             })),
         );
         assert_eq!(projected.runtime_status, "running");
@@ -1772,6 +1868,7 @@ mod tests {
             &node,
             Some(&Some(ProbeResult {
                 nodes: vec![observed],
+                ..Default::default()
             })),
         );
         assert_eq!(projected.activity, "idle");
@@ -1800,6 +1897,7 @@ mod tests {
             &node,
             Some(&Some(ProbeResult {
                 nodes: vec![observed],
+                ..Default::default()
             })),
         );
         assert_eq!(projected.runtime_status, "unknown");
@@ -1814,6 +1912,7 @@ mod tests {
             &node,
             Some(&Some(ProbeResult {
                 nodes: vec![probe("pi_activity_channel"), probe("pi_activity_channel")],
+                ..Default::default()
             })),
         );
         assert_eq!(projected.runtime_status, "unknown");
@@ -1829,6 +1928,7 @@ mod tests {
             &node,
             Some(&Some(ProbeResult {
                 nodes: vec![observed],
+                ..Default::default()
             })),
         );
         assert_eq!(projected.runtime_status, "unknown");
@@ -1841,6 +1941,7 @@ mod tests {
             &node,
             Some(&Some(ProbeResult {
                 nodes: vec![probe("pi_activity_channel"), probe("pi_activity_channel")],
+                ..Default::default()
             })),
         );
         assert_eq!(projected.runtime_status, "unknown");

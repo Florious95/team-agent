@@ -174,8 +174,9 @@ fn unowned_running_ws() -> PathBuf {
 #[test]
 #[serial(env)]
 fn quick_start_compiles_real_spec_to_team_spec_yaml() {
-    let _hermetic = enter_hermetic("launch-spawn-compile-spec");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("launch-spawn-compile-spec");
     let team = quick_start_team_dir(QS_VALID_ROLE);
+    seed_healthy_coordinator(&crate::model::paths::team_workspace(&team).unwrap());
     let transport = OfflineTransport::new();
     let result = quick_start_with_transport(&team, None, true, None, &transport);
 
@@ -209,9 +210,10 @@ fn quick_start_compiles_real_spec_to_team_spec_yaml() {
 #[test]
 #[serial(env)]
 fn quick_start_without_team_id_uses_compiled_team_name_as_canonical_key() {
-    let _hermetic = enter_hermetic("launch-spawn-canonical-team");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("launch-spawn-canonical-team");
     let team = quick_start_team_dir(QS_VALID_ROLE);
     let workspace = crate::model::paths::team_workspace(&team).unwrap();
+    seed_healthy_coordinator(&workspace);
     let transport = OfflineTransport::new();
 
     let result = quick_start_with_transport(&team, None, true, None, &transport);
@@ -231,8 +233,9 @@ fn quick_start_without_team_id_uses_compiled_team_name_as_canonical_key() {
 #[test]
 #[serial(env)]
 fn existing_runtime_producer_scopes_canonical_team() {
-    let _hermetic = enter_hermetic("launch-spawn-existing-producer");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("launch-spawn-existing-producer");
     let team = quick_start_team_dir(QS_VALID_ROLE);
+    seed_healthy_coordinator(&crate::model::paths::team_workspace(&team).unwrap());
     let transport = OfflineTransport::new();
     let first = quick_start_with_transport(&team, Some("from-name"), true, None, &transport)
         .expect("first quick-start");
@@ -342,8 +345,9 @@ fn existing_runtime_empty_top_level_agents_still_emits_bob() {
 #[test]
 #[serial(env)]
 fn quick_start_teamdir_under_dot_team_uses_project_workspace_for_status_and_collect() {
-    let _hermetic = enter_hermetic("launch-spawn-dot-team-workspace");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("launch-spawn-dot-team-workspace");
     let workspace = temp_ws();
+    seed_healthy_coordinator(&workspace);
     let team = workspace.join(".team").join("current");
     std::fs::create_dir_all(team.join("agents")).unwrap();
     std::fs::write(team.join("TEAM.md"), QS_TEAM_MD).unwrap();
@@ -417,7 +421,7 @@ fn quick_start_teamdir_under_dot_team_uses_project_workspace_for_status_and_coll
 #[test]
 #[serial(env)]
 fn quick_start_default_workspace_compiled_spec_uses_project_root() {
-    let _hermetic = enter_hermetic("launch-spawn-default-workspace");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("launch-spawn-default-workspace");
     let workspace = temp_ws();
     std::fs::create_dir_all(workspace.join("agents")).unwrap();
     std::fs::write(workspace.join("TEAM.md"), QS_TEAM_MD).unwrap();
@@ -724,8 +728,9 @@ fn unowned_running_ws_all_paused() -> PathBuf {
 #[test]
 #[serial(env)]
 fn spine_quick_start_seeds_state_under_team_workspace_not_team_dir() {
-    let _hermetic = enter_hermetic("launch-spawn-spine-workspace");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("launch-spawn-spine-workspace");
     let team = quick_start_team_dir(QS_VALID_ROLE); // <base>/teamdir
+    seed_healthy_coordinator(&crate::model::paths::team_workspace(&team).unwrap());
     let transport = OfflineTransport::new();
     let _ = quick_start_with_transport(&team, None, true, None, &transport);
     let workspace = team.parent().unwrap(); // team_workspace(<base>/teamdir) = <base>
@@ -1302,21 +1307,32 @@ fn start_agent_session_generation_inherits_birth_or_stamps_recreated_session() {
 /// Seed a HEALTHY coordinator at `workspace` (this process's pid + matching metadata + db schema) so
 /// quick_start's internal start_coordinator returns AlreadyRunning — NO real daemon subprocess spawn.
 pub(super) fn seed_healthy_coordinator(workspace: &std::path::Path) {
-    let wp = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
-    std::fs::create_dir_all(crate::model::paths::runtime_dir(workspace)).unwrap();
-    let _ = crate::message_store::MessageStore::open(workspace).unwrap(); // create db schema (schema.ok)
-    let me = crate::coordinator::Pid::new(std::process::id());
-    crate::coordinator::write_coordinator_metadata(
-        &wp,
-        me,
-        crate::coordinator::MetadataSource::Boot,
-    )
-    .unwrap();
-    std::fs::write(
-        crate::coordinator::coordinator_pid_path(&wp),
-        me.to_string(),
-    )
-    .unwrap();
+    hermetic_guard::seed_in_process_coordinator(workspace);
+}
+
+#[test]
+#[cfg(unix)]
+#[serial(env)]
+fn issue337_owned_fixture_caller_admits_fresh_launch_without_guard_bypass() {
+    let env = hermetic_guard::HermeticTestEnv::enter_with_leader("issue337-fixture-caller");
+    let workspace = env.workspace("ws");
+    let team = workspace.join("roles");
+    std::fs::create_dir_all(team.join("agents")).unwrap();
+    std::fs::write(team.join("TEAM.md"), QS_TEAM_MD).unwrap();
+    std::fs::write(team.join("agents/implementer.md"), QS_VALID_ROLE).unwrap();
+    seed_healthy_coordinator(&workspace);
+    let transport = OfflineTransport::new();
+    let report = quick_start_with_transport_in_workspace(
+        &workspace, &team, None, true, Some("fixture-team"), &transport,
+    ).unwrap();
+    let QuickStartReport::Ready { launch, .. } = report else { panic!("owned caller must admit launch: {report:?}") };
+    assert!(launch.leader_receiver_attached);
+    assert_eq!(launch.started.len(), 1);
+    assert_eq!(transport.spawn_records().len(), 1);
+    let socket = std::env::var("TMUX").unwrap().split(',').next().unwrap().to_string();
+    assert!(std::path::Path::new(&socket).exists());
+    drop(env);
+    assert!(!std::path::Path::new(&socket).exists());
 }
 
 fn seed_canonical_team_identity(workspace: &std::path::Path, team_key: &str) {
@@ -1333,7 +1349,7 @@ fn seed_canonical_team_identity(workspace: &std::path::Path, team_key: &str) {
 #[test]
 #[serial(env)]
 fn quick_start_with_transport_spawns_workers_not_dry_run() {
-    let _hermetic = enter_hermetic("launch-spawn-spawn-path");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("launch-spawn-spawn-path");
     let team = quick_start_team_dir(QS_VALID_ROLE); // one agent: implementer / provider codex
     let workspace = team.parent().expect("team_workspace(team_dir) = parent"); // where start_coordinator runs
     seed_healthy_coordinator(workspace);
@@ -1422,7 +1438,7 @@ fn adaptive_layout_plan_8_workers_is_3_3_2() {
 #[test]
 #[serial(env)]
 fn quick_start_default_adaptive_groups_workers_into_layout_panes() {
-    let _hermetic = enter_hermetic("launch-spawn-adaptive-layout");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("launch-spawn-adaptive-layout");
     let roles = (1..=4)
         .map(|i| {
             let id = format!("w{i}");
@@ -1507,7 +1523,7 @@ fn quick_start_tmux_backend_uses_workspace_private_endpoint() {
 #[test]
 #[serial(env)]
 fn quick_start_persists_selected_tmux_endpoint_and_attach_commands() {
-    let _hermetic = enter_hermetic("launch-spawn-endpoint-attach");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("launch-spawn-endpoint-attach");
     let team = quick_start_team_dir(QS_VALID_ROLE);
     let workspace = team.parent().expect("team_workspace(team_dir) = parent");
     seed_healthy_coordinator(workspace);
@@ -1568,23 +1584,27 @@ fn annotate_runtime_tmux_endpoint_persists_workspace_socket_as_full_path() {
 #[test]
 #[serial(env)]
 fn quick_start_preserves_managed_leader_topology_and_emits_leader_attach_command() {
-    let _hermetic = enter_hermetic("launch-spawn-managed-leader");
-    let team = quick_start_team_dir(QS_VALID_ROLE);
-    let workspace = team.parent().expect("team_workspace(team_dir) = parent");
+    let hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("launch-spawn-managed-leader");
+    let workspace = hermetic.root();
+    let team = workspace.join("teamdir");
+    std::fs::create_dir_all(team.join("agents")).unwrap();
+    std::fs::write(team.join("TEAM.md"), QS_TEAM_MD).unwrap();
+    std::fs::write(team.join("agents/implementer.md"), QS_VALID_ROLE).unwrap();
     seed_healthy_coordinator(workspace);
+    let endpoint = std::env::var("TMUX").unwrap().split(',').next().unwrap().to_string();
     crate::state::persist::save_runtime_state(
         workspace,
         &json!({
             "active_team_key": "teamdir",
-            "session_name": "team-teamdir",
+            "session_name": null,
             "is_external_leader": false,
             "leader_client": {"diagnostic_only": true, "attach_mode": "attach-session"},
-            "leader_receiver": {"mode": "direct_tmux", "status": "attached", "pane_id": "%42"},
-            "team_owner": {"pane_id": "%42", "owner_epoch": 1},
+            "tmux_socket": endpoint,
+            "tmux_endpoint": endpoint,
             "agents": {},
             "teams": {
                 "teamdir": {
-                    "session_name": "team-teamdir",
+                    "session_name": null,
                     "is_external_leader": false,
                     "leader_client": {"diagnostic_only": true, "attach_mode": "attach-session"},
                     "agents": {}
@@ -1593,9 +1613,25 @@ fn quick_start_preserves_managed_leader_topology_and_emits_leader_attach_command
         }),
     )
     .expect("seed managed leader state");
+    let attached = crate::cli::cmd_attach_leader(&crate::cli::AttachLeaderArgs {
+        workspace: workspace.to_path_buf(), team: Some("teamdir".into()), pane: None,
+        provider: crate::model::enums::Provider::Fake, confirm: false, json: true,
+    }).expect("bind the real owned caller through the public lease port");
+    assert_eq!(attached.exit, crate::cli::ExitCode::Ok, "{attached:?}");
+    let mut state = crate::state::persist::load_runtime_state(workspace).unwrap();
+    assert!(state["session_name"].is_null(), "leader-only bootstrap has no worker session");
+    assert!(state["teams"]["teamdir"]["session_name"].is_null());
+    assert!(state["teams"]["teamdir"]["agents"].as_object().unwrap().is_empty());
+    // The owned fake caller models the already-managed launcher topology;
+    // retain the real binding while setting the presentation fixture metadata.
+    state["is_external_leader"] = json!(false);
+    state["leader_client"] = json!({"diagnostic_only": true, "attach_mode": "attach-session"});
+    state["teams"]["teamdir"]["is_external_leader"] = json!(false);
+    state["teams"]["teamdir"]["leader_client"] = state["leader_client"].clone();
+    crate::state::persist::save_runtime_state(workspace, &state).unwrap();
     let transport = OfflineTransport::new();
 
-    let report = quick_start_with_transport(&team, None, true, None, &transport)
+    let report = quick_start_with_transport(&team, None, true, Some("teamdir"), &transport)
         .expect("quick_start_with_transport must reach Ready");
     let attach_commands = match report {
         QuickStartReport::Ready {
@@ -2872,8 +2908,9 @@ fn stop_agent_adaptive_kills_target_pane_not_shared_layout_window() {
 #[test]
 #[serial(env)]
 fn quick_start_seeds_tasks_key_from_compiled_spec() {
-    let _hermetic = enter_hermetic("launch-spawn-tasks-key");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("launch-spawn-tasks-key");
     let team = quick_start_team_dir(QS_VALID_ROLE);
+    seed_healthy_coordinator(&crate::model::paths::team_workspace(&team).unwrap());
     let transport = OfflineTransport::new();
     let _ = quick_start_with_transport(&team, None, true, None, &transport);
     let workspace = team
@@ -2921,7 +2958,7 @@ fn quick_start_seeds_tasks_key_from_compiled_spec() {
 //   suffix (active_team_key, teams).
 #[test]
 #[serial(env)]
-fn quick_start_state_seeds_spec_path_workspace_leader() {
+fn quick_start_unbound_state_producer_seeds_spec_path_workspace_leader() {
     let _hermetic = enter_hermetic("launch-spawn-state-seeds");
     // Bug 2 owner team-scope: top-level owner triple is dropped when the seeded
     // pane is empty; an ambient TMUX_PANE (tests run inside the dev's tmux session)
@@ -2932,10 +2969,14 @@ fn quick_start_state_seeds_spec_path_workspace_leader() {
     let _tmux = EnvVarGuard::unset("TMUX");
     let team = quick_start_team_dir(QS_VALID_ROLE);
     let transport = OfflineTransport::new();
-    let _ = quick_start_with_transport(&team, None, true, None, &transport);
     let workspace = team
         .parent()
         .expect("team_workspace(<base>/teamdir) = <base>");
+    // Test the real unbound state producer plus recording-only worker stage.
+    // Public start correctly refuses this absent caller (separate regressions).
+    crate::lifecycle::launch::materialize_unbound_state_for_test(
+        workspace, &team, "quickteam", &transport,
+    ).expect("materialize the unbound producer fixture without public start");
     // E5: spec_path in state now points to .team/runtime/<team_key>/, team_dir stays the user role dir.
     let spec_path = quick_start_runtime_spec_path(&team);
     let (raw, state) = raw_runtime_state(workspace);
@@ -3018,10 +3059,11 @@ fn quick_start_state_seeds_spec_path_workspace_leader() {
 #[test]
 #[serial(env)]
 fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
-    let _hermetic = enter_hermetic("launch-spawn-running-state");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("launch-spawn-running-state");
     const FIXED_SPAWNED_AT: &str = "2026-06-04T00:00:00+00:00";
     let _clock_guard = EnvVarGuard::set("TEAM_AGENT_TEST_FIXED_SPAWNED_AT", FIXED_SPAWNED_AT);
     let team = quick_start_team_dir(QS_VALID_ROLE);
+    seed_healthy_coordinator(&crate::model::paths::team_workspace(&team).unwrap());
     let transport = OfflineTransport::new();
     let _ = quick_start_with_transport(&team, None, true, None, &transport);
     let workspace = team

@@ -46,8 +46,9 @@ const CLAUDE_ROLE: &str = "---\nname: clauder\nrole: Claude Worker\nprovider: cl
 #[test]
 #[serial(env)]
 fn worker_mcp_owner_team_scope_must_match_runtime_team_key_not_spec_name() {
-    let hermetic = HermeticTestEnv::enter("rs031-mcp-owner-scope");
+    let hermetic = HermeticTestEnv::enter_with_leader("rs031-mcp-owner-scope");
     let team = mixed_provider_team_dir(&hermetic, "mcp-owner-scope");
+    super::launch_spawn::seed_healthy_coordinator(team.parent().unwrap());
     let transport = RecordingTransport::new()
         .with_windows(vec![WindowName::new("clauder"), WindowName::new("codexer")]);
     let launch = ready_launch(

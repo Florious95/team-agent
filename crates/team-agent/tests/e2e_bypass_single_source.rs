@@ -24,7 +24,7 @@ use framework::*;
 /// 全部用 codex provider(true 角色才有 bypass flag,避免 fail-loud);
 /// 断言基于 state 落盘(运行面),不依赖真实 codex 进程就绪。
 fn mini_team_ws(tag: &str) -> TestWorkspace {
-    let ws = TestWorkspace::new(tag);
+    let ws = TestWorkspace::new(tag).with_owned_caller();
     let team = ws.path();
     std::fs::create_dir_all(team.join(".team/current/agents")).unwrap();
     std::fs::write(
@@ -120,6 +120,9 @@ fn e2e_edit_role_restart_drift_denied() {
         &["quick-start", ".team/current", "--yes", "--no-display", "--json"],
     );
     let _ = out;
+    // Retain this contract's original unattached-leader precondition after
+    // the positive startup has satisfied caller admission.
+    seed_unattached_leader(&ws);
 
     // 把 worker_true 的 dangerously_skip_permissions 从 true 改成 false(声明面)。
     let role_path = ws
@@ -177,6 +180,7 @@ fn e2e_edit_role_restart_applies_edited_bypass() {
         &["quick-start", ".team/current", "--yes", "--no-display", "--json"],
     );
     let _ = out;
+    seed_unattached_leader(&ws);
 
     // worker_false:false → true。
     let role_path = ws

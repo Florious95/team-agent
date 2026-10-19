@@ -87,9 +87,15 @@ fn e6_real_cli_live_team_unattached_leader_queues_then_attach_replays_once() {
     assert_eq!(
         all_workers_spawned,
         Some(true),
-        "E6 e2e RED setup: fake worker must be spawned so target team is live even though quick-start may exit nonzero for leader_receiver_unbound; code={:?} output={quick_json}",
+        "E6 setup: admitted fake startup must spawn the target worker; code={:?} output={quick_json}",
         quick_start.status.code()
     );
+    assert!(quick_start.status.success(), "positive caller admission: {quick_json}");
+    // #337 correctly forbids creating workers without a caller. This mailbox
+    // compatibility test explicitly seeds a historical never-attached record
+    // AFTER lawful startup; it is not a claim that public start can bypass
+    // admission. All queue/attach/replay assertions below remain unchanged.
+    case.seed_never_attached_mailbox_state();
 
     let status = case.run_cli(
         case.target_workspace(),
@@ -723,7 +729,7 @@ struct E6Case {
 
 impl E6Case {
     fn new(tag: &str) -> Self {
-        let env = HermeticTestEnv::enter(&format!("e6-{tag}"));
+        let env = HermeticTestEnv::enter_with_leader(&format!("e6-{tag}"));
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let root = env
             .root()
@@ -832,10 +838,25 @@ impl E6Case {
         ] {
             command.env_remove(key);
         }
+        if command.get_args().next().is_some_and(|arg| arg == "quick-start") {
+            self.env.configure_command(&mut command);
+            command.env("HOME", &self.home);
+        }
         if let Some(identity) = identity {
             command.env("TEAM_AGENT_ID", identity);
         }
         command.output().expect("run team-agent")
+    }
+
+    fn seed_never_attached_mailbox_state(&self) {
+        let before = runtime_state(self.target_workspace());
+        let scope = &self.team_key;
+        hermetic_guard::seed_unattached_leader(self.target_workspace(), &self.home);
+        let after = runtime_state(self.target_workspace());
+        assert_eq!(after["agents"], before["agents"]);
+        assert_eq!(after["session_name"], before["session_name"]);
+        assert_eq!(after["tmux_socket"], before["tmux_socket"]);
+        assert!(after.pointer(&format!("/teams/{scope}/leader_receiver")).is_none());
     }
 
     fn start_leader_pane(&self, tmux_socket: &str, session_name: &str) -> String {

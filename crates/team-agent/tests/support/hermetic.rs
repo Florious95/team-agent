@@ -67,6 +67,17 @@ fn test_binary_path() -> PathBuf {
     path
 }
 
+/// The CI-selected public tmux tool, retained before a test isolates PATH.
+/// This is a fixture driver path, not production executable authorization.
+pub fn fixture_tmux_binary() -> PathBuf {
+    let path = std::env::var_os("CONTRACT_TMUX").map(PathBuf::from).unwrap_or_else(|| {
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|directory| directory.join("tmux")).find(|path| path.is_file())
+            .expect("tmux fixture driver is required")
+    });
+    path.canonicalize().expect("canonical tmux fixture driver")
+}
+
 /// 0.5.43 debt-sweep (debt-sweep-locate.md §4.2): short, process-unique
 /// absolute tmux socket path for tests that exec real `tmux -S`. Root
 /// cause of the Gate2 flake is macOS `AF_UNIX sun_path` >104 bytes when
@@ -143,10 +154,68 @@ pub fn spawn_owned_coordinator(workspace: &Path) -> Child {
         .expect("spawn fixture coordinator process")
 }
 
+/// Simulate an already-running coordinator for IN-PROCESS SUT calls only.
+/// The matching metadata uses the test PID; never use this for a spawned CLI.
+pub fn seed_in_process_coordinator(workspace: &Path) {
+    let scope = team_agent::coordinator::WorkspacePath::new(workspace.to_path_buf());
+    std::fs::create_dir_all(team_agent::model::paths::runtime_dir(workspace)).unwrap();
+    let _store = team_agent::message_store::MessageStore::open(workspace).unwrap();
+    let pid = team_agent::coordinator::Pid::new(std::process::id());
+    team_agent::coordinator::write_coordinator_metadata(
+        &scope, pid, team_agent::coordinator::MetadataSource::Boot,
+    ).unwrap();
+    std::fs::write(team_agent::coordinator::coordinator_pid_path(&scope), pid.to_string()).unwrap();
+}
+
+/// Explicit historical/negative fixture after lawful positive startup. This
+/// does not claim public start can bypass caller admission. Preserve all worker
+/// topology while clearing only the active team's attachment under state-save.
+pub fn seed_unattached_leader(workspace: &Path, home: &Path) {
+    let runtime = team_agent::model::paths::runtime_dir(workspace);
+    let lock = std::fs::OpenOptions::new().read(true).write(true)
+        .open(runtime.join("state-save.lock")).expect("existing fixture state-save lock");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while !team_agent::platform::file_lock::try_lock_once_nonblocking(&lock).expect("fixture state lock") {
+        assert!(std::time::Instant::now() < deadline, "fixture state lock deadline");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let path = runtime.join("state.json");
+    let before: Value = serde_json::from_slice(&std::fs::read(&path).expect("fixture state")).expect("fixture JSON");
+    let team = before["active_team_key"].as_str().expect("active fixture team").to_owned();
+    let mut state = before.clone();
+    let root = state.as_object_mut().expect("root state");
+    root.remove("leader_receiver");
+    root.remove("team_owner");
+    let canonical = state["teams"][&team].as_object_mut().expect("canonical fixture team");
+    canonical.remove("leader_receiver");
+    canonical.remove("team_owner");
+    assert_eq!(state["agents"], before["agents"]);
+    assert_eq!(state["teams"][&team]["agents"], before["teams"][&team]["agents"]);
+    assert_eq!(state["session_name"], before["session_name"]);
+    assert_eq!(state["tmux_socket"], before["tmux_socket"]);
+    std::fs::write(&path, serde_json::to_vec_pretty(&state).expect("encode fixture"))
+        .expect("write explicit unbound fixture");
+    team_agent::platform::file_lock::unlock(&lock).expect("unlock fixture state");
+    // A former healthy registry projection is a separate attachment fact. Do
+    // not leave it behind in a control that specifically models no attachment.
+    let registry_path = home.join(".team-agent/leaders").join(format!("{}__{team}.json",
+        team_agent::leader::registry::workspace_hash(workspace)));
+    if registry_path.exists() {
+        let entry: team_agent::leader::registry::LeaderRegistryEntry = serde_json::from_slice(
+            &std::fs::read(&registry_path).expect("own fixture registry entry"))
+            .expect("fixture registry JSON");
+        assert_eq!(entry.workspace, std::fs::canonicalize(workspace).expect("fixture workspace"));
+        assert_eq!(entry.team_key, team);
+        std::fs::remove_file(registry_path).expect("remove exact own attachment projection");
+    }
+}
+
 pub struct HermeticTestEnv {
     root: PathBuf,
     home: PathBuf,
     previous: Vec<(&'static str, Option<String>)>,
+    fixture_caller: Vec<(&'static str, String)>,
+    caller_tmux: Option<PathBuf>,
     /// 0.5.43 debt-sweep (§6.1): test-owned resource ledger. Drop
     /// cleanup walks these EXACT entries (never a host-wide scan).
     /// Order matters: pids first (stop coordinator/child tree), then
@@ -173,7 +242,7 @@ pub struct EnvOverride {
 }
 
 impl HermeticTestEnv {
-    pub fn enter(tag: &str) -> Self {
+    fn isolated(tag: &str) -> Self {
         let base = std::env::var_os("TEAM_AGENT_TEST_TMP")
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
@@ -190,22 +259,81 @@ impl HermeticTestEnv {
         std::fs::create_dir_all(home.join(".team-agent/leaders"))
             .expect("create hermetic registry root");
 
-        let mut previous = Vec::new();
+        Self {
+            root,
+            home,
+            previous: Vec::new(),
+            fixture_caller: Vec::new(),
+            caller_tmux: None,
+            owned: Mutex::new(OwnedResources::default()),
+        }
+    }
+
+    pub fn enter(tag: &str) -> Self {
+        let mut env = Self::isolated(tag);
         for key in std::iter::once("HOME").chain(CALLER_IDENTITY_ENVS.iter().copied()) {
-            previous.push((key, std::env::var(key).ok()));
+            env.previous.push((key, std::env::var(key).ok()));
         }
         unsafe {
-            std::env::set_var("HOME", &home);
+            std::env::set_var("HOME", &env.home);
             for key in CALLER_IDENTITY_ENVS {
                 std::env::remove_var(key);
             }
         }
+        env
+    }
 
-        Self {
-            root,
-            home,
-            previous,
-            owned: Mutex::new(OwnedResources::default()),
+    /// Explicit positive fixture: a real, ledger-owned caller pane, not a
+    /// production admission bypass or a model/business acceptance witness.
+    /// In-process callers must hold the existing serial(env) test lock.
+    pub fn enter_with_leader(tag: &str) -> Self {
+        let mut env = Self::enter(tag);
+        env.assert_no_real_tmux();
+        env.spawn_fixture_caller();
+        for (key, value) in &env.fixture_caller {
+            unsafe { std::env::set_var(key, value); }
+        }
+        env
+    }
+
+    /// Parallel subprocess fixtures never mutate or restore the test process's
+    /// HOME/caller environment. The caller is supplied only to their commands.
+    pub fn for_subprocess_with_leader(tag: &str) -> Self {
+        let mut env = Self::isolated(tag);
+        env.spawn_fixture_caller();
+        env
+    }
+
+    fn spawn_fixture_caller(&mut self) {
+        let socket = short_tmux_socket("caller");
+        assert!(!socket.exists(), "fixture caller endpoint already exists");
+        let tmux = fixture_tmux_binary();
+        self.caller_tmux = Some(tmux.clone());
+        let output = Command::new(tmux)
+            .args(["-u", "-S"]).arg(&socket).args(["-f", "/dev/null", "new-session", "-d", "-s", "fixture-caller", "-c"])
+            .arg(&self.root).args(["-P", "-F", "#{pane_id}", "exec sleep 86400"])
+            .env("HOME", &self.home).env_remove("TMUX").env_remove("TMUX_PANE")
+            .output().expect("create owned fixture caller");
+        assert!(output.status.success(), "fixture caller failed: {output:?}");
+        self.register_owned_tmux_socket(&socket);
+        let pane = String::from_utf8(output.stdout).expect("fixture pane UTF8").trim().to_string();
+        assert!(pane.strip_prefix('%').is_some_and(|digits| !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())));
+        let endpoint = socket.to_str().expect("fixture endpoint UTF8").to_string();
+        // This models an explicit external fake Leader, not an inherited
+        // Team Agent caller tuple bound to the worker transport's endpoint.
+        self.fixture_caller = vec![
+            ("TMUX", format!("{endpoint},0,0")), ("TMUX_PANE", pane),
+            ("TEAM_AGENT_LEADER_PROVIDER", "fake".into()),
+        ];
+    }
+
+    pub fn configure_command(&self, command: &mut Command) {
+        command.env("HOME", &self.home);
+        for key in CALLER_IDENTITY_ENVS {
+            command.env_remove(key);
+        }
+        for (key, value) in &self.fixture_caller {
+            command.env(key, value);
         }
     }
 
@@ -259,10 +387,8 @@ impl HermeticTestEnv {
 
     pub fn run_cli_env(&self, cwd: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> Output {
         let mut command = Command::new(test_binary_path());
-        command.args(args).current_dir(cwd).env("HOME", &self.home);
-        for key in CALLER_IDENTITY_ENVS {
-            command.env_remove(key);
-        }
+        command.args(args).current_dir(cwd);
+        self.configure_command(&mut command);
         for (key, value) in extra_env {
             command.env(key, value);
         }
@@ -391,7 +517,8 @@ impl Drop for HermeticTestEnv {
             }
             for socket in owned.tmux_sockets.drain(..) {
                 if let Some(socket_str) = socket.to_str() {
-                    let _ = Command::new("tmux")
+                    let tmux = self.caller_tmux.as_deref().unwrap_or_else(|| Path::new("tmux"));
+                    let _ = Command::new(tmux)
                         .args(["-S", socket_str, "kill-server"])
                         .output();
                 }

@@ -22,10 +22,7 @@ mod hermetic_guard;
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
 fn enter_hermetic(tag: &str) -> hermetic_guard::HermeticTestEnv {
-    let env = hermetic_guard::HermeticTestEnv::enter(tag);
-    env.scrub_tmux();
-    env.assert_no_real_tmux();
-    env
+    hermetic_guard::HermeticTestEnv::enter_with_leader(tag)
 }
 
 use std::path::{Path, PathBuf};
@@ -159,6 +156,7 @@ fn seed_healthy_coordinator(workspace: &Path) {
 
 fn seed_grok(tag: &str, effort: Option<&str>) -> (PathBuf, PathBuf, HomeGuard, PathBuf) {
     let ws = tmp_dir(tag);
+    super::launch_spawn::seed_healthy_coordinator(&ws);
     let home = tmp_dir(&format!("{tag}-home"));
     seed_grok_home(&home, Some(&ws));
     let guard = HomeGuard::set(&home);

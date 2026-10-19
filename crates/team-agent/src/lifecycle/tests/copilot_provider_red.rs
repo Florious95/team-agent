@@ -1,4 +1,4 @@
-//! Copilot provider contracts (command-substitution tier, zero real sessions).
+//! Copilot provider contracts (zero model sessions; owned physical caller fixture).
 //!
 //! Basis docs (sole truth sources — where the in-tree implementation deviates, these
 //! contracts stay red):
@@ -32,10 +32,7 @@ mod hermetic_guard;
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
 fn enter_hermetic(tag: &str) -> hermetic_guard::HermeticTestEnv {
-    let env = hermetic_guard::HermeticTestEnv::enter(tag);
-    env.scrub_tmux();
-    env.assert_no_real_tmux();
-    env
+    hermetic_guard::HermeticTestEnv::enter_with_leader(tag)
 }
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -875,6 +872,8 @@ fn copilot_mcp_residual_scan_unavailable_degrades_honestly_no_false_positive() {
     let home = tmp_ws("residual-unavail-home");
     std::fs::create_dir_all(home.join(".copilot")).unwrap();
     let empty_bin = tmp_ws("no-copilot-bin");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(hermetic_guard::fixture_tmux_binary(), empty_bin.join("tmux")).unwrap();
     let _guard = EnvGuard::set(&[
         (ANCESTRY_KEY, NEUTRAL_ANCESTRY),
         (
@@ -1942,6 +1941,9 @@ fn copilot_empty_mcp_list_shim(tag: &str) -> TempWorkspace {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        // Only the explicit owned caller needs tmux; no provider is exposed by
+        // this symlink and the worker transport remains the recording fixture.
+        std::os::unix::fs::symlink(hermetic_guard::fixture_tmux_binary(), bin.join("tmux")).unwrap();
         // coordinator health needs the seeded test PID's real non-zombie status.
         // Keep PATH isolated and refuse any broader process inspection.
         std::fs::write(

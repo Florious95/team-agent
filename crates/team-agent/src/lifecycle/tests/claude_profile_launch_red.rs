@@ -34,12 +34,11 @@ use team_agent::transport::{
 #[test]
 #[serial(env)]
 fn compatible_api_profile_quick_start_spawns_claude_with_profile_env_and_state_metadata() {
-    let hermetic = hermetic_guard::HermeticTestEnv::enter("claude-profile-quick-start");
-    hermetic.scrub_tmux();
-    hermetic.assert_no_real_tmux();
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("claude-profile-quick-start");
     assert_s0_profile_launch_shape();
 
     let ws = tmp_dir("profile-launch");
+    super::launch_spawn::seed_healthy_coordinator(&ws);
     let team = write_claude_profile_team(&ws, "claudeprof", "clauder");
     let transport = RecordingTransport::default();
 

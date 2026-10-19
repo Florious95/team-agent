@@ -433,7 +433,7 @@ fn f1_legacy_fields_are_silently_tolerated_by_public_add_and_worker_replies() {
 #[test]
 fn f2_first_compile_plain_text_role_uses_provider_native_safe_defaults() {
     let team_id = "rolecfgf2first";
-    let ws = TestWorkspace::new(team_id);
+    let ws = TestWorkspace::new(team_id).with_owned_caller();
     write_plain_team(&ws, &[("plain", PLAIN_PROMPT)]);
     let shims = ProviderShims::install(&ws);
 
@@ -447,7 +447,7 @@ fn f2_first_compile_plain_text_role_uses_provider_native_safe_defaults() {
 #[test]
 fn f2_dynamic_add_plain_text_role_uses_provider_native_safe_defaults() {
     let team_id = "rolecfgf2add";
-    let ws = TestWorkspace::new(team_id);
+    let ws = TestWorkspace::new(team_id).with_owned_caller();
     write_plain_team(&ws, &[("seed", SEED_PROMPT)]);
     let shims = ProviderShims::install(&ws);
     quick_start(&ws, team_id, &shims);
