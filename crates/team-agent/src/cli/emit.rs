@@ -1567,7 +1567,10 @@ pub(super) fn intent_alias(command: &str, args: &[String], cwd: &Path) -> Result
     }
     let args = checked.tokens.as_slice();
     match command {
-        "status" => cmd_status(&status_args(args, cwd)),
+        "status" => {
+            let parsed = status_args(args, cwd);
+            cmd_status_for_team(&parsed, parsed.team.as_deref())
+        }
         "add-agent" => cmd_add_agent(&add_agent_args(args, cwd)?),
         "remove-agent" => cmd_remove_agent(&remove_agent_args(args, cwd)?),
         "reset-agent" => cmd_reset_agent(&reset_agent_args(args, cwd)?),
