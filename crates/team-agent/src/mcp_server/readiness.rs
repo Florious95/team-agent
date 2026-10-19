@@ -35,8 +35,8 @@ struct Handshake {
     workspace: PathBuf,
     owner: String,
     agent: String,
-    started_at: DateTime<Utc>,
-    flushed_at: DateTime<Utc>,
+    started_at: String,
+    flushed_at: String,
     server: ProcessStamp,
     ancestors: Vec<Ancestor>,
 }
@@ -174,8 +174,8 @@ pub(crate) fn publish(
         workspace: workspace.clone(),
         owner: owner.to_string(),
         agent: agent.to_string(),
-        started_at,
-        flushed_at: Utc::now(),
+        started_at: started_at.to_rfc3339(),
+        flushed_at: Utc::now().to_rfc3339(),
         server,
         ancestors,
     };
@@ -195,7 +195,9 @@ pub(crate) fn publish(
             {
                 return Err("mcp_handshake_scope_mismatch");
             }
-            if old.started_at > receipt.started_at {
+            let old_started = DateTime::parse_from_rfc3339(&old.started_at)
+                .map_err(|_| "mcp_handshake_invalid")?;
+            if old_started > started_at {
                 return Ok(());
             }
         }
@@ -290,7 +292,11 @@ pub(crate) fn preflight(
         .and_then(Value::as_str)
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .ok_or("mcp_handshake_spawn_missing")?;
-    if receipt.started_at < spawned_at || receipt.flushed_at < receipt.started_at {
+    let started_at = DateTime::parse_from_rfc3339(&receipt.started_at)
+        .map_err(|_| "mcp_handshake_invalid")?;
+    let flushed_at = DateTime::parse_from_rfc3339(&receipt.flushed_at)
+        .map_err(|_| "mcp_handshake_invalid")?;
+    if started_at < spawned_at || flushed_at < started_at {
         return Err("mcp_handshake_stale_spawn");
     }
     let expected_config = workspace
