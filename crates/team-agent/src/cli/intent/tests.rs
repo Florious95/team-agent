@@ -528,6 +528,7 @@ fn no_eligible_is_scoped_nonzero_with_skipped_and_zero_handlers_even_in_dry_run(
         };
         assert_eq!(value["scope"]["team"], "pinned");
         assert_eq!(value["status"], "no_eligible_agents");
+        assert_eq!(value["phase"], "planning");
         assert_eq!(value["skipped"][0]["agent"], "one");
         assert_eq!(value["skipped"][0]["reason"], "paused");
         assert_eq!(value["steps"], json!([]));

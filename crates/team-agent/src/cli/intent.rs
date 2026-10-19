@@ -465,7 +465,7 @@ fn execute_plan(
 ) -> Result<CmdResult, CliError> {
     if let Some(reason) = plan.no_eligible {
         return Ok(CmdResult::from_json(
-            json!({"ok":false,"action":plan.intent.verb,"surface":plan.intent.surface,"scope":plan.scope,"session_policy":plan.intent.session,"dry_run":plan.intent.dry_run,"status":"no_eligible_agents","error":reason,"steps":[],"skipped":plan.skipped}),
+            json!({"ok":false,"action":plan.intent.verb,"surface":plan.intent.surface,"scope":plan.scope,"session_policy":plan.intent.session,"dry_run":plan.intent.dry_run,"status":"no_eligible_agents","phase":"planning","error":reason,"steps":[],"skipped":plan.skipped}),
             plan.intent.json,
         ));
     }
