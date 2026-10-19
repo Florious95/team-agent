@@ -64,6 +64,17 @@ fn discover(
         .next()
         .ok_or_else(|| usage("missing team source"))
 }
+fn validate_roster(spec: &Yaml, directory: &Path) -> Result<(), CliError> {
+    checked(crate::model::spec::validate_spec(spec, directory))?;
+    if let Some(agents) = spec.get("agents").and_then(Yaml::as_list) {
+        for agent in agents {
+            if let Some(id) = agent.get("id").and_then(Yaml::as_str) {
+                logical_agent_id(id).map_err(|_| refusal("invalid agent identity in selected roster"))?;
+            }
+        }
+    }
+    Ok(())
+}
 fn remember(plan: &mut Plan, path: &Path) -> Result<(), CliError> {
     if !plan.files.iter().any(|(p, _)| p == path) {
         plan.files.push((path.to_owned(), std::fs::read(path)?));
@@ -201,17 +212,30 @@ fn check_native_noop_settings(selected: &SelectedTeam, id: &str, row: &Value) ->
 }
 
 fn paused(row: &Value) -> bool {
-    row.get("status").and_then(Value::as_str) == Some("paused")
+    row.get("status").and_then(Value::as_str).is_some_and(|status| status.eq_ignore_ascii_case("paused"))
+}
+
+#[cfg(unix)]
+fn native_observation(status: team_agent_contract::orchestration::store::SeatStatus, process: team_agent_contract::host::process::ProcessState, root_status: Option<&str>) -> Observation {
+    use team_agent_contract::{host::process::ProcessState, orchestration::store::SeatStatus};
+    match (status, process) {
+        (SeatStatus::Ready, ProcessState::Alive) if root_status == Some("running") => Observation::Live,
+        (SeatStatus::Ready, ProcessState::Exited) => Observation::StoppedVerified,
+        (SeatStatus::Stopped, ProcessState::Exited) if root_status == Some("stopped") => Observation::StoppedVerified,
+        _ => Observation::Unknown,
+    }
 }
 
 /// Positive native/store or exact carrier+pane+provider observations only.
 fn observe(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation, CliError> {
+    if !row.is_object() || row.get("provider").is_some_and(|value| !value.is_null() && !value.is_string()) {
+        return Err(refusal("invalid persisted provider metadata"));
+    }
     #[cfg(unix)]
     if crate::contract_runtime::framework::is_contract(row) {
         use team_agent_contract::{
             contract::types::SeatId,
-            host::process::{sample_process, ProcessState},
-            orchestration::store::SeatStatus,
+            host::process::sample_process,
         };
         if crate::contract_runtime::framework::is_paused_unstarted(row) {
             return Ok(Observation::Unstarted);
@@ -233,11 +257,12 @@ fn observe(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation
         let Some(target) = seat.physical.as_ref() else {
             return Ok(Observation::Unknown);
         };
-        return Ok(match (seat.status, sample_process(&target.process)) {
-            (SeatStatus::Ready, ProcessState::Alive) if row.get("status").and_then(Value::as_str) == Some("running") => Observation::Live,
-            (SeatStatus::Stopped, ProcessState::Exited) if row.get("status").and_then(Value::as_str) == Some("stopped") => Observation::StoppedVerified,
-            _ => Observation::Unknown,
-        });
+        return Ok(native_observation(seat.status, sample_process(&target.process), row.get("status").and_then(Value::as_str)));
+    }
+    let native = crate::provider::wire::parse_provider(provider(row)).ok_or_else(|| refusal("unknown provider"))?;
+    let status = row.get("status").and_then(Value::as_str).unwrap_or("");
+    if !["running", "stopped", "dead"].iter().any(|known| status.eq_ignore_ascii_case(known)) {
+        return Ok(Observation::Unknown);
     }
     let Some(pid) = row
         .get("pane_pid")
@@ -254,7 +279,7 @@ fn observe(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation
         }
         crate::platform::process::ProcessLiveness::Live => (),
     }
-    if row.get("status").and_then(Value::as_str) == Some("stopped") {
+    if !status.eq_ignore_ascii_case("running") {
         return Ok(Observation::Unknown);
     }
     let backend = checked(
@@ -280,15 +305,16 @@ fn observe(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation
     if matches.len() != 1 {
         return Ok(Observation::Unknown);
     }
-    let native = crate::provider::wire::parse_provider(provider(row))
-        .ok_or_else(|| refusal("unknown provider"))?;
+    let Some(session) = session else { return Ok(Observation::Unknown); };
+    let owner = checked(backend.session_owner(&crate::transport::SessionName::new(session)))?;
+    let generation = crate::state::projection::session_generation(&selected.state);
+    if owner.as_ref().is_none_or(|owner| Path::new(&owner.workspace) != selected.run_workspace || owner.team != selected.team_key || Some(owner.generation.as_str()) != generation) {
+        return Ok(Observation::Unknown);
+    }
     let command = matches[0].current_command.as_deref().unwrap_or("");
     let positive_command = command == crate::provider::wire::command_name(native)
         || crate::leader::provider_attribution::command_matches_provider(native, command);
-    let positive_surface = if !positive_command && matches!(
-        native,
-        crate::model::enums::Provider::Pi | crate::model::enums::Provider::CursorAgent
-    ) && !matches!(command, "sh" | "bash" | "zsh" | "fish" | "")
+    let positive_surface = if !positive_command && !matches!(command, "sh" | "bash" | "zsh" | "fish" | "")
     {
         checked(
             backend.observe_native_input(&Target::Pane(PaneId::new(pane.unwrap_or(""))), native),
@@ -355,16 +381,35 @@ fn preflight_start(
     }
     let provider = crate::provider::wire::parse_provider(provider(row))
         .ok_or_else(|| refusal("unknown provider before restart"))?;
+    for field in ["session_id", "rollout_path", "last_result_at", "spawn_cwd"] {
+        if row.get(field).is_some_and(|value| !value.is_null() && !value.is_string()) {
+            return Err(refusal(format!("invalid resume metadata: {field}")));
+        }
+    }
+    if crate::lifecycle::restart::classify_first_send_at(row.get("first_send_at").unwrap_or(&Value::Null)) == crate::lifecycle::FirstSendAtState::Corrupt {
+        return Err(refusal("invalid first_send_at metadata before stop"));
+    }
     let session = row
         .get("session_id")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(crate::provider::SessionId::new);
+    if session_policy == SessionPolicy::Preserve && !crate::lifecycle::restart::restart_agent_never_captured(row, session.as_ref().map(|sid| sid.as_str())) && session.is_none() {
+        return Err(refusal("resume_not_ready before stop: captured session is missing for existing task context"));
+    }
     let rollout = row
         .get("rollout_path")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(crate::provider::RolloutPath::new);
+    if session.is_some() && row.get("spawn_cwd").and_then(Value::as_str).is_none_or(|cwd| cwd.is_empty()) {
+        return Err(refusal("resume metadata lacks the scoped spawn cwd"));
+    }
+    if let Some(cwd) = row.get("spawn_cwd").and_then(Value::as_str).filter(|cwd| !cwd.is_empty()) {
+        let cwd = checked(Path::new(cwd).canonicalize())?;
+        if !cwd.is_dir() || !cwd.starts_with(&selected.run_workspace) { return Err(refusal("legacy incarnation cwd is outside the selected workspace; no context or scope fallback")); }
+    }
+    if row.get("task_prompt_delivered").is_some_and(|value| !value.is_null() && !value.is_boolean()) { return Err(refusal("invalid task context metadata before stop")); }
     let (exists, checked_paths) = session
         .as_ref()
         .map(|session| {
@@ -396,16 +441,10 @@ fn add(
     id: &str,
     source: Option<PathBuf>,
 ) -> Result<(), CliError> {
-    if selected
-        .state
-        .get("agent_lifecycle")
-        .and_then(|a| a.get(id))
-        .and_then(|a| a.get("state"))
-        .and_then(Value::as_str)
-        == Some("retired")
+    if selected.state.get("agent_lifecycle").and_then(|lifecycle| lifecycle.get(id)).is_some()
     {
         return Err(refusal(
-            "removed agent history is not an absent role; use explicit add",
+            "agent lifecycle history is not an absent role; use explicit recovery/add",
         ));
     }
     let patch = plan.intent.patch.clone();
@@ -480,12 +519,16 @@ fn plan_with_observer(
         expected: BTreeMap::new(),
         topology: None,
     };
-    let runtime_workspace = checked(crate::model::paths::canonical_run_workspace(
-        &plan.scope.workspace,
-    ))?;
+    let runtime_workspace = if plan.intent.pinned_workspace { plan.scope.workspace.clone() } else { checked(crate::model::paths::canonical_run_workspace(&plan.scope.workspace))? };
     let has_state = crate::state::persist::runtime_state_path(&runtime_workspace).is_file();
     if has_state {
         plan.scope.workspace = runtime_workspace;
+    }
+    if !has_state {
+        let runtime = plan.scope.workspace.join(".team/runtime");
+        let mut spec_only = plan.scope.workspace.join("team.spec.yaml").is_file();
+        if runtime.is_dir() { for entry in std::fs::read_dir(runtime)? { spec_only |= entry?.path().join("team.spec.yaml").is_file(); } }
+        if spec_only { return Err(refusal("runtime spec exists without its state; select the owning workspace or repair it explicitly")); }
     }
     let raw = if has_state {
         Some(crate::state::persist::load_runtime_state_without_migrations(&plan.scope.workspace)?)
@@ -538,7 +581,16 @@ fn plan_with_observer(
             ));
         }
         let source = discover(&plan.scope.workspace, explicit, None)?;
-        let _ = checked(crate::compiler::compile_team(&source))?;
+        let compiled = checked(crate::compiler::compile_team(&source))?;
+        validate_roster(&compiled, &source)?;
+        let create = QuickStartArgs {
+            workspace: plan.scope.workspace.clone(), agents_dir: source.clone(), name: None,
+            team_id: plan.intent.team.clone(), yes: false, json: true, detail: true, backend: None,
+        };
+        #[cfg(unix)]
+        if let Some(config) = checked(crate::contract_runtime::config::read_team(&create))? {
+            if config.roles.len() == config.members.len() && config.roles.iter().all(|role| role.paused) { return Err(refusal("no_eligible_agents; all configured native roles are paused")); }
+        }
         remember(&mut plan, &source.join("TEAM.md"))?;
         for entry in std::fs::read_dir(source.join("agents"))? {
             let path = entry?.path();
@@ -546,16 +598,7 @@ fn plan_with_observer(
                 remember(&mut plan, &path)?;
             }
         }
-        plan.steps.push(Step::CreateTeam(QuickStartArgs {
-            workspace: plan.scope.workspace.clone(),
-            agents_dir: source,
-            name: None,
-            team_id: plan.intent.team.clone(),
-            yes: false,
-            json: true,
-            detail: true,
-            backend: None,
-        }));
+        plan.steps.push(Step::CreateTeam(create));
         return Ok(plan);
     }
     let selected = selected.ok_or_else(|| refusal("missing selected runtime"))?;
@@ -602,7 +645,7 @@ fn plan_with_observer(
             for (id, row) in rows {
                 if !paused(row)
                     && !crate::state::projection::agent_explicit_stop(row)
-                    && row.get("status").and_then(Value::as_str) != Some("stopped")
+                    && !crate::state::projection::agent_stopped_for_restart(row)
                 {
                     let obs = observe(&selected, id, row)?;
                     if obs == Observation::Unknown {
@@ -625,6 +668,7 @@ fn plan_with_observer(
     }
     let spec = spec.ok_or_else(|| refusal("missing spec"))?;
     let spec_value = checked(yaml::loads(&std::fs::read_to_string(spec)?))?;
+    validate_roster(&spec_value, spec.parent().unwrap_or(&selected.run_workspace))?;
     let spec_ids: BTreeSet<String> = spec_value
         .get("agents")
         .and_then(Yaml::as_list)
@@ -647,6 +691,7 @@ fn plan_with_observer(
     } else {
         let source = discover(&plan.scope.workspace, None, Some(&selected))?;
         let compiled = checked(crate::compiler::compile_team(&source))?;
+        validate_roster(&compiled, &source)?;
         let mut ids: BTreeSet<String> = rows.keys().cloned().collect();
         if let Some(agents) = compiled.get("agents").and_then(Yaml::as_list) {
             for agent in agents {
@@ -772,11 +817,19 @@ fn plan_with_observer(
             ));
         }
         let shutdown = selected.state.get("status").and_then(Value::as_str) == Some("shutdown");
+        if !shutdown && !eligible.iter().any(|(id, _, _, _)| rows.get(id.as_str()).is_some_and(|row| !crate::state::projection::agent_stopped_for_restart(row))) {
+            return Err(refusal("no_eligible_agents; stopped roster requires explicit team start"));
+        }
         if !shutdown
             || eligible
                 .iter()
                 .any(|(_, obs, _, _)| *obs == Observation::Live)
         {
+            for (id, obs, _, _) in &eligible {
+                if rows.get(id.as_str()).is_some_and(crate::state::projection::agent_stopped_for_restart) {
+                    plan.skipped.push(json!({"agent":id,"observation":obs,"reason":"stopped_preserved_by_original_restart"}));
+                }
+            }
             plan.steps.clear();
             plan.steps.push(Step::RestartTeam(restart_args(&plan)));
         }

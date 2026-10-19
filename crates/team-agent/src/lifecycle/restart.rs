@@ -110,6 +110,7 @@ pub(crate) use rebuild::{
 pub(crate) use remove::remove_agent_with_transport;
 pub use remove::{remove_agent, remove_agent_flag_requirements};
 pub use selection::decide_start_mode;
+pub(crate) use selection::restart_agent_never_captured;
 
 /// Read-only CLI preflight facade. Reuses the original provider-specific probe;
 /// does not capture a session, write state, or authorize a future spawn.

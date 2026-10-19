@@ -34,6 +34,7 @@ pub(super) fn intent(verb: Verb) -> Intent {
         verb,
         subject: Subject::Agent(AgentId::new("one")),
         workspace: PathBuf::from("/fixture"),
+        pinned_workspace: true,
         team: Some("pinned".into()),
         session: SessionPolicy::Preserve,
         session_converge_deadline_ms: None,
@@ -153,7 +154,7 @@ fn restart_executes_exact_pinned_stop_start_and_preserves_original_receipts() {
     assert_eq!(value["steps"][1]["mode"], "resumed");
 }
 #[test]
-fn stop_failure_never_starts_and_spawn_failure_is_partial_stopped() {
+fn stop_failure_never_starts_and_spawn_failure_preserves_partial_uncertainty() {
     for fail_at in [0, 1] {
         let mut calls = Vec::new();
         let result = execute_plan(
@@ -179,7 +180,7 @@ fn stop_failure_never_starts_and_spawn_failure_is_partial_stopped() {
             if fail_at == 0 {
                 "failed"
             } else {
-                "partial_stopped"
+                "partial"
             }
         );
         assert_eq!(
@@ -236,7 +237,9 @@ fn role_change_between_stop_and_start_refuses_without_rollback_claim() {
     let CmdOutput::Json(value) = result.output else {
         panic!()
     };
-    assert_eq!(value["status"], "partial_stopped");
+    assert_eq!(value["status"], "partial");
+    assert_eq!(value["last_confirmed_effect"], "original_instance_stopped");
+    assert_eq!(value["current_state"], "unknown");
 }
 #[test]
 fn dry_run_never_calls_handler_or_execution_admission() {
@@ -468,6 +471,11 @@ fn syntax_session_matrix_and_directory_ambiguity_are_deterministic() {
         false
     )
     .is_err());
+    std::fs::create_dir(root.path().join("agents")).unwrap();
+    std::fs::write(root.path().join("TEAM.md"), "---\nname: caller\n---\n").unwrap();
+    let path_intent = lifecycle_intent("restart", Verb::Restart, &args(&["./worker", "--dry-run"]), root.path(), false, false).unwrap();
+    assert_eq!(path_intent.workspace, root.path().join("worker"));
+    assert!(path_intent.pinned_workspace);
     let role = root.path().join("role.md");
     std::fs::write(&role, "fixture").unwrap();
     let tokens = vec![

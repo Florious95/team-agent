@@ -41,6 +41,7 @@ pub(super) struct Intent {
     verb: Verb,
     subject: Subject,
     workspace: PathBuf,
+    pinned_workspace: bool,
     team: Option<String>,
     session: SessionPolicy,
     session_converge_deadline_ms: Option<u64>,
@@ -112,7 +113,40 @@ pub(super) struct Plan {
     topology: Option<Value>,
 }
 
-pub(super) const HELP: &str = "Usage: team-agent start [AGENT|./TEAMDIR] [--from TEAMDIR] [--workspace PATH] [--team KEY] [--session preserve|auto] [--dry-run] [--json]\n       team-agent stop [AGENT] [--workspace PATH] [--team KEY] [--json]\n       team-agent restart AGENT [--session auto|preserve] [--dry-run] [--json]\n       team-agent team <start|stop|restart|status> [TEAMDIR] [OPTIONS]\n       team-agent agent <start|stop|restart|add|remove|reset|clone|fork> AGENT [OPTIONS]\n\nstart is idempotent only after verified physical identity; running roles are not edited.\nstart activates the non-paused roster, including explicitly stopped seats.\nteam restart preserves paused/explicitly stopped seats; its default is session auto.\nLegacy bare/path restart keeps preserve and original receipts. auto is not reset/fresh.\nAgent IDs (including reviewer.v2) are never inferred from directory existence.\nPaths use ./DIR, --from DIR or team start DIR; stop paths require --workspace.\nDry-run is read-only; original lock/native admission remains deferred.\nExamples:\n  team-agent start --from ./roles\n  team-agent start reviewer\n  team-agent team restart --session preserve\n  team-agent agent restart reviewer --dry-run --json";
+pub(super) fn help(command: &str) -> String {
+    let (purpose, usage, options, examples, next) = match command {
+        "start" => (
+            "Start a team or one agent without replacing verified running processes.",
+            "[AGENT|./TEAMDIR] [--from TEAMDIR] [--workspace PATH] [--team KEY] [--session preserve|auto] [--dry-run] [--json]",
+            "--from selects TEAM.md and agents/; all relative paths use the calling directory.\nAgent IDs such as reviewer.v2 stay agent IDs even when a same-named directory exists.\nTeam start activates the non-paused roster, including explicitly stopped seats.\n--role-file or explicit --provider and --bypass true|false provide new-agent decisions.\n--model, --effort, --prompt and --profile update a stopped agent; stop a running agent first.\nSession defaults to preserve; auto only permits the original legal fresh fallback.\n--dry-run performs no lifecycle action; final locked admission remains deferred.\nAlready running does not claim role-file synchronization or business readiness.",
+            "  team-agent start --from . --dry-run --json\n  team-agent start reviewer --dry-run --json",
+            "Use team-agent status and team-agent inbox leader -n 3 for actual replies.",
+        ),
+        "stop" => (
+            "Stop the selected team or one registered agent while retaining session associations.",
+            "[AGENT] [--workspace PATH] [--team KEY] [--json]",
+            "Without an agent, use the original team shutdown and its residual-resource checks.\nAn agent target uses the original single-agent stop.\nUse --workspace for another directory; a positional path is rejected.\nNo reset, force, role edits or automatic takeover is performed.",
+            "  team-agent stop --workspace . --json\n  team-agent stop reviewer --workspace . --json",
+            "Use team-agent start to explicitly activate the stopped non-paused roster.",
+        ),
+        "team" => (
+            "Select a team lifecycle operation explicitly.",
+            "<start|stop|restart|status> [OPTIONS]",
+            "start [TEAMDIR] or --from TEAMDIR creates once or starts stopped members.\nstop delegates to the original team shutdown; status keeps the original read-only output.\nrestart defaults to --session auto and preserves paused or explicitly stopped seats.\nLegacy bare or explicit-path restart still defaults to preserve and keeps its old receipt.\n--workspace PATH and --team KEY select the team; no ambiguous directory is guessed.\n--dry-run on start/restart is read-only; native refusals never fall back to legacy.\nauto is not reset and cannot invent an unsupported fresh capability.",
+            "  team-agent team start . --dry-run --json\n  team-agent team restart --workspace . --dry-run --json",
+            "Use team-agent team status; start, rather than restart, deliberately activates stopped members.",
+        ),
+        "agent" => (
+            "Select an agent lifecycle operation explicitly without guessing a team directory.",
+            "<start|stop|restart|add|remove|reset|clone|fork> AGENT [OPTIONS]",
+            "--workspace PATH and --team KEY select the team.\nstart keeps verified running processes and can add an absent agent with complete decisions.\nrestart defaults to --session auto; --session preserve keeps the original refusal policy.\nSingle-agent restart checks roles and capabilities before stop, then uses original stop/start.\n--dry-run on start/restart is read-only; role patches are not accepted by restart.\nadd/remove/reset/clone/fork retain the original capability and confirmation flags.\nreset requires --discard-session; fork requires --as NEW_ID; --in-place is not supported.",
+            "  team-agent agent start reviewer --dry-run --json\n  team-agent agent restart reviewer --session preserve --dry-run --json",
+            "Inspect team-agent status before using agent start after a partial result; an unknown replacement must not be retried blindly.",
+        ),
+        _ => return super::emit::command_help(Some(command)),
+    };
+    format!("Purpose:\n{purpose}\nUsage: team-agent {command} {usage}\n\nOptions:\n{options}\n\nExamples:\n{examples}\n\nNext Action:\n{next}")
+}
 
 fn usage(message: impl Into<String>) -> CliError {
     CliError::Usage(message.into())
@@ -122,6 +156,13 @@ fn refusal(message: impl Into<String>) -> CliError {
 }
 fn path_syntax(value: &str) -> bool {
     super::emit::explicit_path(value)
+}
+fn logical_agent_id(value: &str) -> Result<AgentId, CliError> {
+    if value.is_empty() || value.starts_with('-') || path_syntax(value)
+        || !value.chars().all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.')) {
+        return Err(usage("invalid agent ID"));
+    }
+    Ok(AgentId::new(value))
 }
 fn existing_path(cwd: &Path, value: &str) -> Result<PathBuf, CliError> {
     let path = Path::new(value);
@@ -207,7 +248,7 @@ fn run_canonical(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult
                 .first()
                 .is_some_and(|a| matches!(a.as_str(), "--help" | "-h"))
         {
-            return Ok(CmdResult::human(HELP));
+            return Ok(CmdResult::human(help(command)));
         }
         let sub = args[0].as_str();
         if command == "team" && sub == "status" {
@@ -240,7 +281,7 @@ fn run_canonical(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult
     };
     let checked = super::arguments::parse(schema, args)?;
     if checked.help {
-        return Ok(CmdResult::human(HELP));
+        return Ok(CmdResult::human(help(command)));
     }
     let intent = lifecycle_intent(
         command,
@@ -305,20 +346,12 @@ fn lifecycle_intent(
     } else if restart_path.is_some() {
         Subject::Team { source: None }
     } else if let Some(id) = pos.first() {
-        if !id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
-            || id.starts_with('-')
-            || id.is_empty()
-        {
-            return Err(usage("invalid agent ID"));
-        }
         if verb == Verb::Restart && !explicit_agent && cwd.join(id).is_dir() {
             return Err(usage(
                 "ambiguous restart target: use agent restart ID or --workspace PATH",
             ));
         }
-        Subject::Agent(AgentId::new(id))
+        Subject::Agent(logical_agent_id(id)?)
     } else {
         Subject::Team { source: None }
     };
@@ -343,9 +376,11 @@ fn lifecycle_intent(
             Subject::Team {
                 source: Some(source),
             } => super::emit::intent_source_workspace(source, cwd)?,
+            _ if path_workspace.is_none() && cwd.join("TEAM.md").is_file() && cwd.join("agents").is_dir() => super::emit::intent_source_workspace(cwd, cwd)?,
             _ => path_workspace.clone().unwrap_or(cwd.canonicalize()?),
         },
     };
+    let pinned_workspace = flags.contains_key("--workspace") || path_workspace.is_some() || matches!(&subject, Subject::Team { source: Some(_) }) || (cwd.join("TEAM.md").is_file() && cwd.join("agents").is_dir());
     if !workspace.is_dir() {
         return Err(usage("workspace must be an existing directory"));
     }
@@ -398,6 +433,7 @@ fn lifecycle_intent(
         verb,
         subject,
         workspace,
+        pinned_workspace,
         team: flags.get("--team").cloned(),
         session,
         session_converge_deadline_ms,
@@ -432,7 +468,7 @@ fn execute_plan(
     for step in &plan.steps {
         if let Err(error) = recheck(&plan, step, stop_succeeded) {
             ok = false;
-            results.push(json!({"action":step.name(),"agent":step.agent(),"ok":false,"phase":"recheck","error":error.to_string()}));
+            results.push(json!({"action":step.name(),"agent":step.agent(),"ok":false,"phase":"recheck","error":crate::redaction::redact_external_text(&error.to_string())}));
             break;
         }
         let result = execute(step);
@@ -445,7 +481,7 @@ fn execute_plan(
                     CmdOutput::None => Value::Null,
                 },
             ),
-            Err(error) => (false, json!({"ok":false,"error":error.to_string()})),
+            Err(error) => (false, json!({"ok":false,"error":crate::redaction::redact_external_text(&error.to_string())})),
         };
         let stop_unconfirmed = plan.intent.verb == Verb::Restart
             && matches!(step, Step::StopAgent(_))
@@ -478,8 +514,9 @@ fn execute_plan(
             stop_succeeded = true;
         }
     }
+    let partial = !ok && (stop_succeeded || results.iter().any(|result| result.get("ok").and_then(Value::as_bool) == Some(true)));
     Ok(CmdResult::from_json(
-        json!({"ok":ok,"action":plan.intent.verb,"surface":plan.intent.surface,"scope":actual_scope,"session_policy":plan.intent.session,"status":if !ok && stop_succeeded {"partial_stopped"} else if !ok {"failed"} else if pending {"pending"} else if results.is_empty() {if plan.intent.verb == Verb::Stop {"already_stopped"} else {"already_running"}} else {"actions_completed"},"steps":results,"skipped":plan.skipped,"configuration_note":"Running processes were not edited; role body synchronization and business readiness are not claimed.","recovery":if !ok && stop_succeeded {Some("Use start AGENT in the same explicit workspace/team after resolving the reported failure")} else {None}}),
+        json!({"ok":ok,"action":plan.intent.verb,"surface":plan.intent.surface,"scope":actual_scope,"session_policy":plan.intent.session,"status":if partial {"partial"} else if !ok {"failed"} else if pending {"pending"} else if results.is_empty() {if plan.intent.verb == Verb::Stop {"already_stopped"} else {"already_running"}} else {"actions_completed"},"steps":results,"skipped":plan.skipped,"configuration_note":"Running processes were not edited; role body synchronization and business readiness are not claimed.","last_confirmed_effect":if stop_succeeded {Some("original_instance_stopped")} else {None},"current_state":if !ok {Some("unknown")} else {None},"recovery":if !ok && stop_succeeded {Some("Inspect status/doctor in the same explicit workspace/team; only use start AGENT after resolving the failure. Native unknown is not permission to retry.")} else {None}}),
         plan.intent.json,
     ))
 }

@@ -22,7 +22,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
+// Named Phase1 catalog migration: four canonical lifecycle surfaces are public.
 const HUMAN: &[&str] = &[
+    "start",
+    "stop",
+    "team",
+    "agent",
     "quick-start",
     "send",
     "status",
@@ -305,6 +310,11 @@ fn examples_property(command: &str) {
     let path = canary_path(&env);
     fs::create_dir(cwd.join("agents")).unwrap();
     fs::write(cwd.join("agents/reviewer.md"), "---\nname: reviewer\nrole: assistant\nprovider: pi\nmodel: openai-codex/gpt-6-luna\nauth_mode: subscription\ndangerously_skip_permissions: false\n---\nReview changes.\n").unwrap();
+    if matches!(command, "start" | "team") {
+        // The new dry-run creation example needs a real source, not a fake
+        // missing-path exception to the strict Phase0 parser contract.
+        fs::write(cwd.join("TEAM.md"), "---\nname: canonical-example\nprovider: pi\n---\nControlled documentation example.\n").unwrap();
+    }
     let help = text(&env.run_cli(&cwd, &[command, "--help"]));
     let examples = examples(&help, command);
     assert!(
@@ -375,21 +385,21 @@ fn examples_property(command: &str) {
 }
 
 #[test]
-fn h1_public_catalog_is_exactly_thirty_human_records_and_no_machine_record() {
+fn h1_public_catalog_is_exactly_thirty_five_human_records_and_no_machine_record() {
     let actual = catalog::COMMAND_SPECS
         .iter()
         .map(|s| s.name)
         .collect::<BTreeSet<_>>();
     assert_eq!(
         catalog::COMMAND_SPECS.len(),
-        31,
-        "H1 physically remove Machine records, not only change visibility/tier"
+        35,
+        "H1 retains the exact catalog, including four Phase1 lifecycle surfaces"
     );
     assert_eq!(actual, HUMAN.iter().copied().collect());
 }
 #[test]
 #[serial(env)]
-fn h1_root_discovers_all_thirty_once_in_catalog_and_zero_private_names() {
+fn h1_root_discovers_all_thirty_five_once_in_catalog_and_zero_private_names() {
     let env = HermeticTestEnv::enter("root-human");
     let cwd = env.workspace("empty");
     let out = env.run_cli(&cwd, &["--help"]);
@@ -405,7 +415,7 @@ fn h1_root_discovers_all_thirty_once_in_catalog_and_zero_private_names() {
         .collect::<Vec<_>>();
     assert_eq!(
         visible.len(),
-        31,
+        35,
         "H1 root command list: {visible:?}\n{help}"
     );
     assert_eq!(
@@ -548,6 +558,7 @@ macro_rules! human_properties {
     )+};
 }
 human_properties! {
+    start => "start", stop => "stop", team => "team", agent => "agent",
     quick_start => "quick-start", send => "send", status => "status", models => "models",
     restart => "restart", shutdown => "shutdown", add_agent => "add-agent", start_agent => "start-agent",
     stop_agent => "stop-agent", reset_agent => "reset-agent", clone_agent => "clone-agent", fork_agent => "fork-agent",

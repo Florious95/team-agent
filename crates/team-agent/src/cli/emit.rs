@@ -430,8 +430,8 @@ pub(super) const WORKER_TEMPLATE: &str = "---\nname: worker\nrole: assistant\npr
 const HUMAN_NAVIGATION: &str = "Use team-agent --help to list available commands.";
 
 pub(super) fn command_help(command: Option<&str>) -> String {
-    if command.is_some_and(|name| matches!(name, "start" | "stop" | "team" | "agent")) {
-        return super::intent::HELP.to_string();
+    if let Some(name) = command.filter(|name| matches!(*name, "start" | "stop" | "team" | "agent")) {
+        return super::intent::help(name);
     }
     let Some(name) = command else {
         return default_help();
@@ -523,7 +523,7 @@ pub(super) fn command_help(command: Option<&str>) -> String {
         out.push_str(&format!("\n\nMinimal two-file configuration (create manually; not written automatically):\nTEAM.md:\n{TEAM_TEMPLATE}\nagents/worker.md:\n{WORKER_TEMPLATE}"));
     }
     if name == "restart" {
-        out.push_str("\nPhase1: restart AGENT selects one registered agent (default session auto); use agent restart ID to disambiguate a same-named directory. Legacy bare or explicit-path restart retains preserve and original receipts. New team restart defaults to auto. auto never means reset; native capability refusals remain authoritative.");
+        out.push_str("\nRestart forms: restart AGENT selects one registered agent (default session auto); use agent restart ID to disambiguate a same-named directory. Legacy bare or explicit-path restart retains preserve and original receipts. New team restart defaults to auto. auto never means reset; native capability refusals remain authoritative.");
     }
     if name == "cursor" {
         out.push_str("\nDiscover models with team-agent models --provider cursor_agent.");
