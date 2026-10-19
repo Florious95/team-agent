@@ -375,6 +375,7 @@ pub(crate) fn run_pi_catalog_preflight(
 }
 
 mod cursor_mcp_iso;
+pub(crate) use cursor_mcp_iso::cursor_mcp_primary_matches_scope;
 pub use cursor_mcp_iso::{
     cursor_mcp_isolation_enabled, cursor_mcp_json_path, cursor_mcp_project_dir,
     materialize_cursor_mcp_project,

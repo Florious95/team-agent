@@ -442,6 +442,37 @@ fn stop_args(plan: &Plan, id: &str) -> StopAgentArgs {
         json: true,
     }
 }
+fn check_incarnation_cwd(
+    selected: &SelectedTeam,
+    id: &str,
+    row: &Value,
+    provider: crate::provider::Provider,
+) -> Result<(), CliError> {
+    if let Some(cwd) = row
+        .get("spawn_cwd")
+        .and_then(Value::as_str)
+        .filter(|cwd| !cwd.is_empty())
+    {
+        let declared_cwd = Path::new(cwd);
+        let cwd = checked(declared_cwd.canonicalize())?;
+        let inside = cwd.starts_with(&selected.run_workspace);
+        #[cfg(unix)]
+        let owned_cursor_primary = !inside
+            && provider == crate::provider::Provider::CursorAgent
+            && checked(crate::lifecycle::launch::cursor_mcp_primary_matches_scope(
+                &selected.run_workspace,
+                &selected.team_key,
+                id,
+                declared_cwd,
+            ))?;
+        #[cfg(not(unix))]
+        let owned_cursor_primary = false;
+        if !cwd.is_dir() || !(inside || owned_cursor_primary) {
+            return Err(refusal("legacy incarnation cwd is outside the selected workspace; no context or scope fallback"));
+        }
+    }
+    Ok(())
+}
 fn preflight_start(
     selected: &SelectedTeam,
     id: &str,
@@ -515,16 +546,7 @@ fn preflight_start(
     {
         return Err(refusal("resume metadata lacks the scoped spawn cwd"));
     }
-    if let Some(cwd) = row
-        .get("spawn_cwd")
-        .and_then(Value::as_str)
-        .filter(|cwd| !cwd.is_empty())
-    {
-        let cwd = checked(Path::new(cwd).canonicalize())?;
-        if !cwd.is_dir() || !cwd.starts_with(&selected.run_workspace) {
-            return Err(refusal("legacy incarnation cwd is outside the selected workspace; no context or scope fallback"));
-        }
-    }
+    check_incarnation_cwd(selected, id, row, provider)?;
     if row
         .get("task_prompt_delivered")
         .is_some_and(|value| !value.is_null() && !value.is_boolean())
@@ -1133,6 +1155,19 @@ pub(super) fn recheck(plan: &Plan, step: &Step, after_stop: bool) -> Result<(), 
                     return Err(refusal("carrier replaced since planning"));
                 }
             }
+        }
+        #[cfg(unix)]
+        if !crate::contract_runtime::framework::is_contract(row)
+            && crate::provider::wire::parse_provider(provider(row)) == Some(crate::provider::Provider::CursorAgent)
+            && (matches!(step, Step::StartAgent(_))
+                || (plan.intent.verb == Verb::Restart && matches!(step, Step::StopAgent(_)))
+                || (matches!(step, Step::RestartTeam(_))
+                    && row.get("status").and_then(Value::as_str) == Some("running")
+                    && !crate::state::projection::agent_explicit_stop(row)))
+        {
+            // Reopen the same ownership proof at the existing execution recheck,
+            // before effects; a planning-time receipt is not a filesystem lease.
+            check_incarnation_cwd(&selected, id, row, crate::provider::Provider::CursorAgent)?;
         }
     }
     Ok(())

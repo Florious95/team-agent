@@ -81,6 +81,26 @@ pub fn cursor_mcp_json_path(workspace: &Path, agent_id: &str) -> Result<PathBuf,
     Ok(cursor_mcp_project_dir(workspace, agent_id)?.join(".cursor/mcp.json"))
 }
 
+/// Read-only scope proof for CLI planning. An external pathname or a matching
+/// directory name is not ownership: the existing selected-team record must pin
+/// this exact physical cwd. Never materialize or repair during preflight.
+pub(crate) fn cursor_mcp_primary_matches_scope(
+    workspace: &Path,
+    owner_team_id: &str,
+    agent_id: &str,
+    declared_cwd: &Path,
+) -> Result<bool, LifecycleError> {
+    validate_agent_id(agent_id)?;
+    let workspace = workspace.canonicalize().map_err(failure)?;
+    let Some(record) = read_record(&workspace, agent_id)? else {
+        return Ok(false);
+    };
+    if record.owner_team_id != owner_team_id || record.directory.path != declared_cwd {
+        return Ok(false);
+    }
+    Ok(reopen(&record)?.path() == declared_cwd)
+}
+
 /// Metadata-only mirror of the measured native project-root boundary. A .git
 /// directory OR worktree file on any ancestor would redirect native MCP loading.
 pub(super) fn validate_cursor_mcp_project_root(project: &Path) -> Result<(), LifecycleError> {
