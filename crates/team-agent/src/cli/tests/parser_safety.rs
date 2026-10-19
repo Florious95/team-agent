@@ -221,7 +221,11 @@ fn every_dispatch_command_has_a_closed_control_schema() {
         }
         // Family grammars select the concrete operation before its closed
         // schema; the family itself has no permissive catch-all flag parser.
-        let schema = if matches!(spec.name, "team" | "agent") { "intent-start" } else { spec.name };
+        let schema = if matches!(spec.name, "team" | "agent") {
+            "intent-start"
+        } else {
+            spec.name
+        };
         let checked = super::super::arguments::parse(schema, &strings(&["--help"])).unwrap();
         assert!(checked.help, "{} must have a schema", spec.name);
         let compatibility =
@@ -327,7 +331,11 @@ fn restart_node_directory_phase1_migration_refuses_without_mutating_state() {
                 run(&strings(&["restart", "worker"]), &sandbox.0),
                 // P3 Phase1: a plain ID is an agent intent; same-name directory
                 // remains a syntax ambiguity. Incomplete runtime still refuses.
-                if directory { ExitCode::Usage } else { ExitCode::Error }
+                if directory {
+                    ExitCode::Usage
+                } else {
+                    ExitCode::Error
+                }
             );
             assert_eq!(
                 std::fs::read_to_string(runtime.join("state.json")).unwrap(),

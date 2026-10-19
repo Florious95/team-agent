@@ -48,10 +48,15 @@ fn discover(
             }
         }
     }
+    if candidates.is_empty() {
+        return Err(usage(format!(
+            "action_required: prepare {}/TEAM.md and {}/agents/<id>.md, then use --from TEAMDIR. Nothing was written or started. Role template (fill your decisions): provider: <choose>; dangerously_skip_permissions: <true|false>; model/effort: <optional>.",
+            workspace.display(), workspace.display()
+        )));
+    }
     if candidates.len() != 1 {
         return Err(usage(format!(
-            "action_required: found {} complete team sources; supply --from TEAMDIR",
-            candidates.len()
+            "action_required: multiple complete team sources {candidates:?}; supply --from TEAMDIR"
         )));
     }
     candidates
@@ -116,7 +121,14 @@ fn provider(row: &Value) -> &str {
 fn topology(state: &Value) -> Value {
     let mut owner = serde_json::Map::new();
     for key in ["pane_id", "provider", "owner_epoch", "machine_fingerprint"] {
-        owner.insert(key.into(), state.get("team_owner").and_then(|o| o.get(key)).cloned().unwrap_or(Value::Null));
+        owner.insert(
+            key.into(),
+            state
+                .get("team_owner")
+                .and_then(|o| o.get(key))
+                .cloned()
+                .unwrap_or(Value::Null),
+        );
     }
     json!({"tmux_socket": state.get("tmux_socket"), "transport": state.get("transport"), "owner": owner, "owner_epoch": state.get("owner_epoch")})
 }
@@ -278,7 +290,12 @@ fn stop_args(plan: &Plan, id: &str) -> StopAgentArgs {
         json: true,
     }
 }
-fn preflight_start(selected: &SelectedTeam, id: &str, row: &Value, session_policy: SessionPolicy) -> Result<(), CliError> {
+fn preflight_start(
+    selected: &SelectedTeam,
+    id: &str,
+    row: &Value,
+    session_policy: SessionPolicy,
+) -> Result<(), CliError> {
     #[cfg(unix)]
     if crate::contract_runtime::framework::is_contract(row) {
         use team_agent_contract::contract::types::SeatId;
@@ -301,14 +318,37 @@ fn preflight_start(selected: &SelectedTeam, id: &str, row: &Value, session_polic
         ))?;
         return Ok(());
     }
-    let provider = crate::provider::wire::parse_provider(provider(row)).ok_or_else(|| refusal("unknown provider before restart"))?;
-    let session = row.get("session_id").and_then(Value::as_str).filter(|s| !s.is_empty()).map(crate::provider::SessionId::new);
-    let rollout = row.get("rollout_path").and_then(Value::as_str).filter(|s| !s.is_empty()).map(crate::provider::RolloutPath::new);
-    let (exists, checked_paths) = session.as_ref().map(|session| crate::lifecycle::restart::surface_resume_backing_probe(
-        &selected.run_workspace, &AgentId::new(id), row, provider, session, rollout.as_ref(),
-    )).unwrap_or_default();
+    let provider = crate::provider::wire::parse_provider(provider(row))
+        .ok_or_else(|| refusal("unknown provider before restart"))?;
+    let session = row
+        .get("session_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(crate::provider::SessionId::new);
+    let rollout = row
+        .get("rollout_path")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(crate::provider::RolloutPath::new);
+    let (exists, checked_paths) = session
+        .as_ref()
+        .map(|session| {
+            crate::lifecycle::restart::surface_resume_backing_probe(
+                &selected.run_workspace,
+                &AgentId::new(id),
+                row,
+                provider,
+                session,
+                rollout.as_ref(),
+            )
+        })
+        .unwrap_or_default();
     let mode = crate::lifecycle::restart::decide_start_mode(
-        crate::provider::wire::provider_wire(provider), session.as_ref(), rollout.as_ref(), exists, session_policy == SessionPolicy::Auto,
+        crate::provider::wire::provider_wire(provider),
+        session.as_ref(),
+        rollout.as_ref(),
+        exists,
+        session_policy == SessionPolicy::Auto,
     );
     if mode == crate::lifecycle::StartMode::Noop {
         return Err(refusal(format!("resume_not_ready before stop: {id}; backing_checked={checked_paths:?}; choose --session auto only if fresh fallback is acceptable")));
@@ -338,7 +378,10 @@ fn add(
         Some(path) => {
             let (meta, _) = checked(crate::compiler::read_front_matter(&path))?;
             if (meta.get("provider").and_then(Yaml::as_str).is_none() && patch.provider.is_none())
-                || (!matches!(meta.get("dangerously_skip_permissions"), Some(Yaml::Bool(_))) && patch.bypass.is_none())
+                || (!matches!(
+                    meta.get("dangerously_skip_permissions"),
+                    Some(Yaml::Bool(_))
+                ) && patch.bypass.is_none())
             {
                 return Err(usage("role creation requires explicit provider and dangerously_skip_permissions decisions"));
             }
@@ -402,22 +445,31 @@ fn plan_with_observer(
         expected: BTreeMap::new(),
         topology: None,
     };
-    let runtime_workspace = checked(crate::model::paths::canonical_run_workspace(&plan.scope.workspace))?;
+    let runtime_workspace = checked(crate::model::paths::canonical_run_workspace(
+        &plan.scope.workspace,
+    ))?;
     let has_state = crate::state::persist::runtime_state_path(&runtime_workspace).is_file();
-    if has_state { plan.scope.workspace = runtime_workspace; }
+    if has_state {
+        plan.scope.workspace = runtime_workspace;
+    }
     let raw = if has_state {
         Some(crate::state::persist::load_runtime_state_without_migrations(&plan.scope.workspace)?)
     } else {
         None
     };
-    if raw.as_ref().is_some_and(|state| !state.is_object() || state.get("teams").is_some_and(|teams| !teams.is_object())) {
-        return Err(refusal("invalid runtime state; creation is not a repair fallback"));
+    if raw.as_ref().is_some_and(|state| {
+        !state.is_object() || state.get("teams").is_some_and(|teams| !teams.is_object())
+    }) {
+        return Err(refusal(
+            "invalid runtime state; creation is not a repair fallback",
+        ));
     }
     let new_named_team =
         raw.as_ref()
             .zip(plan.intent.team.as_deref())
             .is_some_and(|(raw, team)| {
-                team != "current" && !crate::lifecycle::launch::surface_has_runtime_team(raw, team)
+                team != "current"
+                    && !crate::lifecycle::launch::surface_has_runtime_team(raw, team)
                     && !raw
                         .get("teams")
                         .and_then(|t| t.get(team))
@@ -724,9 +776,22 @@ pub(super) fn recheck(plan: &Plan, step: &Step, after_stop: bool) -> Result<(), 
     }
     if let Step::CreateTeam(args) = step {
         let role_dir = args.agents_dir.join("agents");
-        let current: BTreeSet<_> = std::fs::read_dir(&role_dir)?.map(|entry| entry.map(|e| e.path())).collect::<Result<Vec<_>, _>>()?.into_iter().filter(|path| path.extension().is_some_and(|s| s == "md")).collect();
-        let planned: BTreeSet<_> = plan.files.iter().map(|(path, _)| path).filter(|path| path.parent() == Some(role_dir.as_path())).cloned().collect();
-        if current != planned { return Err(refusal("creation roster changed since planning")); }
+        let current: BTreeSet<_> = std::fs::read_dir(&role_dir)?
+            .map(|entry| entry.map(|e| e.path()))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|path| path.extension().is_some_and(|s| s == "md"))
+            .collect();
+        let planned: BTreeSet<_> = plan
+            .files
+            .iter()
+            .map(|(path, _)| path)
+            .filter(|path| path.parent() == Some(role_dir.as_path()))
+            .cloned()
+            .collect();
+        if current != planned {
+            return Err(refusal("creation roster changed since planning"));
+        }
         return Ok(());
     }
     let selected = resolve_active_team_readonly(
@@ -739,7 +804,11 @@ pub(super) fn recheck(plan: &Plan, step: &Step, after_stop: bool) -> Result<(), 
     {
         return Err(refusal("canonical scope changed"));
     }
-    if plan.topology.as_ref().is_some_and(|expected| topology(&selected.state) != *expected) {
+    if plan
+        .topology
+        .as_ref()
+        .is_some_and(|expected| topology(&selected.state) != *expected)
+    {
         return Err(refusal("owner or transport binding changed since planning"));
     }
     let id = step.agent().map(AgentId::new);

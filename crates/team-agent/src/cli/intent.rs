@@ -138,8 +138,14 @@ fn options(tokens: &[String]) -> (Vec<String>, BTreeMap<String, String>) {
     let mut flags = BTreeMap::new();
     let mut literal = false;
     for token in tokens {
-        if literal { pos.push(token.clone()); continue; }
-        if token == "--" { literal = true; continue; }
+        if literal {
+            pos.push(token.clone());
+            continue;
+        }
+        if token == "--" {
+            literal = true;
+            continue;
+        }
         if let Some((key, value)) = token
             .split_once('=')
             .filter(|(key, _)| key.starts_with("--"))
@@ -172,16 +178,24 @@ pub(super) fn run(
         let (pos, flags) = options(&checked.tokens);
         let surface = if !flags.contains_key("--session")
             && !flags.contains_key("--dry-run")
-            && pos.first().is_none_or(|p| path_syntax(p)) {
+            && pos.first().is_none_or(|p| path_syntax(p))
+        {
             Surface::FrozenLegacy
-        } else { Surface::Canonical };
-        if surface == Surface::FrozenLegacy { return None; }
+        } else {
+            Surface::Canonical
+        };
+        if surface == Surface::FrozenLegacy {
+            return None;
+        }
     }
     Some(match run_canonical(command, args, cwd) {
         Err(error) if !matches!(error, CliError::Usage(_)) => {
             // New surfaces use one effect-free refusal envelope. In particular,
             // never reparse a --prompt payload as an error-log workspace.
-            Ok(CmdResult::from_json(json!({"ok":false,"action":command,"scope":null,"phase":"planning_or_selection","error":crate::redaction::redact_external_text(&error.to_string())}), super::arguments::has_flag(command, args, "--json")))
+            Ok(CmdResult::from_json(
+                json!({"ok":false,"action":command,"scope":null,"phase":"planning_or_selection","error":crate::redaction::redact_external_text(&error.to_string())}),
+                super::arguments::has_flag(command, args, "--json"),
+            ))
         }
         result => result,
     })
@@ -228,12 +242,26 @@ fn run_canonical(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult
     if checked.help {
         return Ok(CmdResult::human(HELP));
     }
-    let intent = lifecycle_intent(command, verb, &checked.tokens, cwd, explicit_agent, explicit_team)?;
+    let intent = lifecycle_intent(
+        command,
+        verb,
+        &checked.tokens,
+        cwd,
+        explicit_agent,
+        explicit_team,
+    )?;
     let plan = runtime::plan(intent)?;
     execute_plan(plan, &mut |step| step.execute(), &mut runtime::recheck)
 }
 
-fn lifecycle_intent(command: &str, verb: Verb, tokens: &[String], cwd: &Path, explicit_agent: bool, explicit_team: bool) -> Result<Intent, CliError> {
+fn lifecycle_intent(
+    command: &str,
+    verb: Verb,
+    tokens: &[String],
+    cwd: &Path,
+    explicit_agent: bool,
+    explicit_team: bool,
+) -> Result<Intent, CliError> {
     let (pos, flags) = options(tokens);
     if verb == Verb::Stop && pos.first().is_some_and(|p| path_syntax(p)) {
         return Err(usage(
@@ -321,9 +349,16 @@ fn lifecycle_intent(command: &str, verb: Verb, tokens: &[String], cwd: &Path, ex
         return Err(usage("positional workspace conflicts with --workspace"));
     }
     if matches!(subject, Subject::Agent(_)) && flags.contains_key("--session-converge-deadline") {
-        return Err(usage("--session-converge-deadline applies only to team restart"));
+        return Err(usage(
+            "--session-converge-deadline applies only to team restart",
+        ));
     }
-    let session_converge_deadline_ms = flags.get("--session-converge-deadline").map(|value| super::emit::parse_seconds_ms(value).ok_or_else(|| usage("invalid session deadline"))).transpose()?;
+    let session_converge_deadline_ms = flags
+        .get("--session-converge-deadline")
+        .map(|value| {
+            super::emit::parse_seconds_ms(value).ok_or_else(|| usage("invalid session deadline"))
+        })
+        .transpose()?;
     let role_file = flags
         .get("--role-file")
         .map(|path| existing_path(cwd, path))
@@ -405,12 +440,23 @@ fn execute_plan(
             ),
             Err(error) => (false, json!({"ok":false,"error":error.to_string()})),
         };
-        let stop_unconfirmed = plan.intent.verb == Verb::Restart && matches!(step, Step::StopAgent(_)) && success && receipt.get("stopped").and_then(Value::as_bool) != Some(true);
+        let stop_unconfirmed = plan.intent.verb == Verb::Restart
+            && matches!(step, Step::StopAgent(_))
+            && success
+            && receipt.get("stopped").and_then(Value::as_bool) != Some(true);
         let success = success && !stop_unconfirmed;
         if matches!(step, Step::CreateTeam(_)) {
-            if let Some(team) = receipt.get("team").and_then(Value::as_str).filter(|team| !team.is_empty()) { actual_scope.team = Some(team.to_string()); }
+            if let Some(team) = receipt
+                .get("team")
+                .and_then(Value::as_str)
+                .filter(|team| !team.is_empty())
+            {
+                actual_scope.team = Some(team.to_string());
+            }
         }
-        pending |= success && (receipt.get("ready").and_then(Value::as_bool) == Some(false) || receipt.get("status").and_then(Value::as_str) == Some("pending_tool_load"));
+        pending |= success
+            && (receipt.get("ready").and_then(Value::as_bool) == Some(false)
+                || receipt.get("status").and_then(Value::as_str) == Some("pending_tool_load"));
         results.push(json!({"action":step.name(),"agent":step.agent(),"ok":success,"phase":if stop_unconfirmed {"stop_not_confirmed"} else {"handler"},"mode":receipt.get("start_mode").or_else(||receipt.get("mode")).cloned().unwrap_or(json!("unknown")),"receipt":receipt}));
         if !success {
             ok = false;

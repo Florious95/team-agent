@@ -217,7 +217,10 @@ fn role_change_between_stop_and_start_refuses_without_rollback_claim() {
         plan(Verb::Restart, &["stop", "start"]),
         &mut |_| {
             calls += 1;
-            Ok(CmdResult::from_json(json!({"ok":true,"stopped":true}), true))
+            Ok(CmdResult::from_json(
+                json!({"ok":true,"stopped":true}),
+                true,
+            ))
         },
         &mut |_, _, after_stop| {
             if after_stop {
@@ -327,46 +330,184 @@ fn canonical_help_and_invalid_flags_do_not_create_runtime() {
 
 #[test]
 fn delimiter_and_consumed_prompt_are_never_rendering_or_scope_controls() {
-    let checked=super::super::arguments::parse("intent-start",&args(&["--","--workspace=foreign"])).unwrap();
-    let (pos,flags)=options(&checked.tokens);assert_eq!(pos,["--workspace=foreign"]);assert!(flags.is_empty());
-    assert!(!super::super::arguments::has_flag("start",&args(&["one","--prompt","--json"]),"--json"));
-    assert!(!super::super::arguments::has_flag("agent",&args(&["start","one","--prompt","--json"]),"--json"));
+    let checked =
+        super::super::arguments::parse("intent-start", &args(&["--", "--workspace=foreign"]))
+            .unwrap();
+    let (pos, flags) = options(&checked.tokens);
+    assert_eq!(pos, ["--workspace=foreign"]);
+    assert!(flags.is_empty());
+    assert!(!super::super::arguments::has_flag(
+        "start",
+        &args(&["one", "--prompt", "--json"]),
+        "--json"
+    ));
+    assert!(!super::super::arguments::has_flag(
+        "agent",
+        &args(&["start", "one", "--prompt", "--json"]),
+        "--json"
+    ));
 }
 
 #[test]
 fn unconfirmed_stop_never_authorizes_a_restart_start_step() {
-    for receipt in [json!({"ok":true,"stopped":false}),json!({"ok":true})] {
-        let mut calls=0;
-        let result=execute_plan(plan(Verb::Restart,&["stop","start"]),&mut |_| {calls+=1;Ok(CmdResult::from_json(receipt.clone(),true))},&mut|_,_,_|Ok(())).unwrap();
-        assert_eq!(calls,1);assert_eq!(result.exit,ExitCode::Error);
-        let CmdOutput::Json(value)=result.output else{panic!()};assert_eq!(value["steps"][0]["phase"],"stop_not_confirmed");assert_eq!(value["status"],"failed");
+    for receipt in [json!({"ok":true,"stopped":false}), json!({"ok":true})] {
+        let mut calls = 0;
+        let result = execute_plan(
+            plan(Verb::Restart, &["stop", "start"]),
+            &mut |_| {
+                calls += 1;
+                Ok(CmdResult::from_json(receipt.clone(), true))
+            },
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(result.exit, ExitCode::Error);
+        let CmdOutput::Json(value) = result.output else {
+            panic!()
+        };
+        assert_eq!(value["steps"][0]["phase"], "stop_not_confirmed");
+        assert_eq!(value["status"], "failed");
     }
 }
 
 #[test]
 fn syntax_session_matrix_and_directory_ambiguity_are_deterministic() {
-    let root=Sandbox::new();std::fs::create_dir(root.path().join("worker")).unwrap();
-    for (command,verb,input,agent,team,expected) in [
-        ("start",Verb::Start,vec!["worker"],false,false,SessionPolicy::Preserve),
-        ("agent",Verb::Restart,vec!["worker"],true,false,SessionPolicy::Auto),
-        ("team",Verb::Restart,vec![],false,true,SessionPolicy::Auto),
-        ("restart",Verb::Restart,vec![],false,false,SessionPolicy::Preserve),
-        ("restart",Verb::Restart,vec!["--session=auto"],false,false,SessionPolicy::Auto),
-        ("agent",Verb::Restart,vec!["worker","--session=preserve"],true,false,SessionPolicy::Preserve),
-        ("start",Verb::Start,vec!["worker","--allow-fresh"],false,false,SessionPolicy::Auto),
-    ] { let intent=lifecycle_intent(command,verb,&args(&input),root.path(),agent,team).unwrap();assert_eq!(intent.session,expected);if input.first()==Some(&"worker") {assert!(matches!(intent.subject,Subject::Agent(_)));} }
-    assert!(lifecycle_intent("restart",Verb::Restart,&args(&["worker"]),root.path(),false,false).is_err());
-    assert!(lifecycle_intent("restart",Verb::Restart,&args(&["--session=preserve","--allow-fresh"]),root.path(),false,false).is_err());
-    assert!(lifecycle_intent("start",Verb::Start,&args(&["worker","--from=worker"]),root.path(),false,false).is_err());
-    let role=root.path().join("role.md");std::fs::write(&role,"fixture").unwrap();
-    let tokens=vec!["one".into(),format!("--workspace={}",root.path().join("worker").display()),"--role-file=role.md".into()];
-    let intent=lifecycle_intent("start",Verb::Start,&tokens,root.path(),false,false).unwrap();assert_eq!(intent.role_file,Some(role));
+    let root = Sandbox::new();
+    std::fs::create_dir(root.path().join("worker")).unwrap();
+    for (command, verb, input, agent, team, expected) in [
+        (
+            "start",
+            Verb::Start,
+            vec!["worker"],
+            false,
+            false,
+            SessionPolicy::Preserve,
+        ),
+        (
+            "agent",
+            Verb::Restart,
+            vec!["worker"],
+            true,
+            false,
+            SessionPolicy::Auto,
+        ),
+        (
+            "team",
+            Verb::Restart,
+            vec![],
+            false,
+            true,
+            SessionPolicy::Auto,
+        ),
+        (
+            "restart",
+            Verb::Restart,
+            vec![],
+            false,
+            false,
+            SessionPolicy::Preserve,
+        ),
+        (
+            "restart",
+            Verb::Restart,
+            vec!["--session=auto"],
+            false,
+            false,
+            SessionPolicy::Auto,
+        ),
+        (
+            "agent",
+            Verb::Restart,
+            vec!["worker", "--session=preserve"],
+            true,
+            false,
+            SessionPolicy::Preserve,
+        ),
+        (
+            "start",
+            Verb::Start,
+            vec!["worker", "--allow-fresh"],
+            false,
+            false,
+            SessionPolicy::Auto,
+        ),
+    ] {
+        let intent =
+            lifecycle_intent(command, verb, &args(&input), root.path(), agent, team).unwrap();
+        assert_eq!(intent.session, expected);
+        if input.first() == Some(&"worker") {
+            assert!(matches!(intent.subject, Subject::Agent(_)));
+        }
+    }
+    assert!(lifecycle_intent(
+        "restart",
+        Verb::Restart,
+        &args(&["worker"]),
+        root.path(),
+        false,
+        false
+    )
+    .is_err());
+    assert!(lifecycle_intent(
+        "restart",
+        Verb::Restart,
+        &args(&["--session=preserve", "--allow-fresh"]),
+        root.path(),
+        false,
+        false
+    )
+    .is_err());
+    assert!(lifecycle_intent(
+        "start",
+        Verb::Start,
+        &args(&["worker", "--from=worker"]),
+        root.path(),
+        false,
+        false
+    )
+    .is_err());
+    let role = root.path().join("role.md");
+    std::fs::write(&role, "fixture").unwrap();
+    let tokens = vec![
+        "one".into(),
+        format!("--workspace={}", root.path().join("worker").display()),
+        "--role-file=role.md".into(),
+    ];
+    let intent =
+        lifecycle_intent("start", Verb::Start, &tokens, root.path(), false, false).unwrap();
+    assert_eq!(intent.role_file, Some(role));
 }
 
 #[test]
 fn accepted_pending_creation_keeps_original_receipt_and_actual_canonical_team() {
-    let mut p=plan(Verb::Start,&[]);p.scope.team=None;
-    p.steps.push(Step::CreateTeam(QuickStartArgs{workspace:PathBuf::from("/fixture"),agents_dir:PathBuf::from("/fixture"),name:None,team_id:None,yes:false,json:true,detail:true,backend:None}));
-    let result=execute_plan(p,&mut|_|Ok(CmdResult::from_json(json!({"ok":true,"status":"pending_tool_load","ready":false,"team":"actual-key"}),true)),&mut|_,_,_|Ok(())).unwrap();
-    let CmdOutput::Json(value)=result.output else{panic!()};assert_eq!(value["status"],"pending");assert_eq!(value["scope"]["team"],"actual-key");assert_eq!(value["steps"][0]["receipt"]["ready"],false);
+    let mut p = plan(Verb::Start, &[]);
+    p.scope.team = None;
+    p.steps.push(Step::CreateTeam(QuickStartArgs {
+        workspace: PathBuf::from("/fixture"),
+        agents_dir: PathBuf::from("/fixture"),
+        name: None,
+        team_id: None,
+        yes: false,
+        json: true,
+        detail: true,
+        backend: None,
+    }));
+    let result = execute_plan(
+        p,
+        &mut |_| {
+            Ok(CmdResult::from_json(
+                json!({"ok":true,"status":"pending_tool_load","ready":false,"team":"actual-key"}),
+                true,
+            ))
+        },
+        &mut |_, _, _| Ok(()),
+    )
+    .unwrap();
+    let CmdOutput::Json(value) = result.output else {
+        panic!()
+    };
+    assert_eq!(value["status"], "pending");
+    assert_eq!(value["scope"]["team"], "actual-key");
+    assert_eq!(value["steps"][0]["receipt"]["ready"], false);
 }

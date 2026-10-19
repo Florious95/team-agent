@@ -351,10 +351,16 @@ pub(super) fn has_flag(command: &str, args: &[String], needle: &str) -> bool {
     if matches!(command, "team" | "agent") {
         if let Some((operation, args)) = args.split_first() {
             let command = match operation.as_str() {
-                "start" => "intent-start", "stop" => "intent-stop", "restart" => "intent-restart",
+                "start" => "intent-start",
+                "stop" => "intent-stop",
+                "restart" => "intent-restart",
                 "status" if command == "team" => "status",
-                "add" => "add-agent", "remove" => "remove-agent", "reset" => "reset-agent",
-                "clone" => "clone-agent", "fork" => "fork-agent", _ => return false,
+                "add" => "add-agent",
+                "remove" => "remove-agent",
+                "reset" => "reset-agent",
+                "clone" => "clone-agent",
+                "fork" => "fork-agent",
+                _ => return false,
             };
             return has_flag(command, args, needle);
         }

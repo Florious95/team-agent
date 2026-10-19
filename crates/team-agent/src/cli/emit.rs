@@ -349,7 +349,7 @@ fn is_known_subcommand(command: &str) -> bool {
 }
 
 pub(crate) fn default_help() -> String {
-    let mut out = String::from("Team Agent: create a team, send tasks, read replies and shut down safely.\n\n1. Prepare agents\n   Run team-agent quick-start in the project directory. An empty directory receives TEAM.md and agents/worker.md templates to create manually.\n2. Open a leader and create the team\n   With Pi installed and signed in, run team-agent pi.\n   Run team-agent quick-start in that leader's tool context.\n   To recover an existing team, see team-agent restart --help; do not take over or delete it.\n3. Send tasks and read replies\n   team-agent send worker 'Calculate 245 * 37 and reply to the leader.'\n   team-agent inbox leader -n 3\n   team-agent status\n   Sending is not completion; wait for an actual reply.\n4. Diagnose and shut down\n   team-agent doctor --workspace .\n   team-agent shutdown --workspace . --json\n   Verify this team's residual resources are empty, then diagnose the selected workspace.\n\nSelect workspace/team scope with --workspace/--team. Discover model names with models.\nWindows ConPTY requires a Windows host and an installed shim; tmux commands are not a generic Windows path.\n");
+    let mut out = String::from("Team Agent: create a team, send tasks, read replies and shut down safely.\n\n1. Prepare agents\n   Prepare TEAM.md and agents/*.md with explicit provider and bypass decisions; use --from for an external source.\n2. Open a leader and create the team\n   With Pi installed and signed in, run team-agent pi.\n   Run team-agent start in that leader's tool context. Verified live members stay unchanged; stopped members are started.\n   Use team restart for a deliberate restart (session auto); legacy bare restart retains preserve. Do not take over or delete an existing team.\n3. Send tasks and read replies\n   team-agent send worker 'Calculate 245 * 37 and reply to the leader.'\n   team-agent inbox leader -n 3\n   team-agent status\n   Sending is not completion; wait for an actual reply.\n4. Diagnose and stop\n   team-agent doctor --workspace .\n   team-agent stop --workspace . --json\n   Verify this team's residual resources are empty, then diagnose the selected workspace.\n\nSelect workspace/team scope with --workspace/--team. Discover model names with models.\nWindows ConPTY requires a Windows host and an installed shim; tmux commands are not a generic Windows path.\n");
     append_help_section(
         &mut out,
         "Getting started",
@@ -521,6 +521,9 @@ pub(super) fn command_help(command: Option<&str>) -> String {
     );
     if name == "quick-start" {
         out.push_str(&format!("\n\nMinimal two-file configuration (create manually; not written automatically):\nTEAM.md:\n{TEAM_TEMPLATE}\nagents/worker.md:\n{WORKER_TEMPLATE}"));
+    }
+    if name == "restart" {
+        out.push_str("\nPhase1: restart AGENT selects one registered agent (default session auto); use agent restart ID to disambiguate a same-named directory. Legacy bare or explicit-path restart retains preserve and original receipts. New team restart defaults to auto. auto never means reset; native capability refusals remain authoritative.");
     }
     if name == "cursor" {
         out.push_str("\nDiscover models with team-agent models --provider cursor_agent.");
