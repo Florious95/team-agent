@@ -240,7 +240,9 @@ jobs:
           }
           case "$REGRESSION_SCOPE" in
             issue342-handshake)
-              run_case mcp-handshake cargo test -p team-agent --lib --locked mcp_server::readiness::tests::missing_handshake_defers_then_a_live_scoped_receipt_admits -- --exact --nocapture
+              run_case mcp-handshake cargo test -p team-agent --lib --locked mcp_server::readiness -- --test-threads=1 --nocapture
+              run_case mcp-wire cargo test -p team-agent --lib --locked mcp_server::wire -- --test-threads=1 --nocapture
+              run_case message-handshake cargo test -p team-agent --lib --locked messaging::tests::dup_inject -- --test-threads=1 --nocapture
               ;;
             issue342-red)
               run_case cursor-project-root cargo test -p team-agent --test cursor_mcp_project_root_red --locked -- --test-threads=1

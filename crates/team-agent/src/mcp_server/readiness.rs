@@ -20,6 +20,9 @@ use crate::transport::{PaneInfo, Target};
 
 type Result<T> = std::result::Result<T, &'static str>;
 const MAX_RECEIPT_BYTES: u64 = 64 * 1024;
+// A 73MB debug image exceeded 2s on the official host. This is a finite
+// computation budget, never a sleep or a minimum startup delay.
+const IMAGE_EVIDENCE_BUDGET: Duration = Duration::from_secs(10);
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -147,7 +150,7 @@ pub(crate) fn publish(
         .canonicalize()
         .map_err(|_| "mcp_handshake_workspace")?;
     let executable = std::env::current_exe().map_err(|_| "mcp_handshake_image")?;
-    let image = fingerprint_file(&executable, 512 * 1024 * 1024, Duration::from_secs(2))
+    let image = fingerprint_file(&executable, 512 * 1024 * 1024, IMAGE_EVIDENCE_BUDGET)
         .map_err(|error| {
             let _ = crate::event_log::EventLog::new(&workspace).write(
                 "mcp.handshake_evidence_failed",
@@ -156,7 +159,7 @@ pub(crate) fn publish(
                     "operation": error.operation,
                     "kind": format!("{:?}", error.kind),
                     "image_bytes": std::fs::metadata(&executable).ok().map(|m| m.len()),
-                    "budget_ms": 2000,
+                    "budget_ms": IMAGE_EVIDENCE_BUDGET.as_millis(),
                 }),
             );
             "mcp_handshake_image"
@@ -165,7 +168,7 @@ pub(crate) fn publish(
         std::process::id(),
         &executable,
         image,
-        Duration::from_secs(2),
+        IMAGE_EVIDENCE_BUDGET,
     )
     .map_err(|_| "mcp_handshake_process")?;
     let mut ancestors = Vec::new();
