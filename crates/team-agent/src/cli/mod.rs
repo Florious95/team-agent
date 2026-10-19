@@ -58,6 +58,7 @@ pub(crate) const STATUS_REMINDER: &str =
 
 pub mod adapters;
 mod arguments;
+mod intent;
 #[cfg(unix)]
 mod shutdown_socket;
 pub mod attach_app_server_leader;

@@ -77,6 +77,12 @@ pub fn run(argv: &[String], cwd: &Path) -> ExitCode {
         println!("team-agent {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::Ok;
     }
+    if let Some(result) = super::intent::run(command, &argv[1..], cwd) {
+        return match result {
+            Ok(result) => emit_result(result),
+            Err(error) => emit_cli_error_for_command(command, &argv[1..], cwd, &error),
+        };
+    }
     // Classify syntax/scope errors before dispatch; contextual status refusals
     // retain their existing stderr-only contract. Resolve the scope only once.
     if is_machine_command(command)
@@ -215,6 +221,9 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
     }
     if command == "leader-prompt" {
         return Ok(super::leader_prompt::run(args));
+    }
+    if let Some(result) = super::intent::run(command, args, cwd) {
+        return result.map(emit_result);
     }
     let machine = is_machine_command(command);
     if !machine && !matches!(command_spec(command).map(|spec| spec.kind), Some(CommandKind::Dispatch(_))) {
@@ -420,6 +429,9 @@ pub(super) const WORKER_TEMPLATE: &str = "---\nname: worker\nrole: assistant\npr
 const HUMAN_NAVIGATION: &str = "Use team-agent --help to list available commands.";
 
 pub(super) fn command_help(command: Option<&str>) -> String {
+    if command.is_some_and(|name| matches!(name, "start" | "stop" | "team" | "agent")) {
+        return super::intent::HELP.to_string();
+    }
     let Some(name) = command else {
         return default_help();
     };
@@ -1537,6 +1549,34 @@ fn restart_args(args: &[String], cwd: &Path) -> Result<RestartArgs, CliError> {
 }
 
 // Keep strict role CLI parsing separate from the legacy shared parser.
+pub(super) fn intent_role_patch(args: &[String]) -> Result<crate::lifecycle::role_config::RoleConfigPatch, CliError> {
+    role_agent_args(args, false).map(|(_, patch)| patch)
+}
+
+/// Explicit object aliases reuse the same syntax checks, typed builders and handlers.
+pub(super) fn intent_alias(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult, CliError> {
+    let mut checked = prepare_control_args(command, args, cwd)?;
+    if checked.help { return Ok(CmdResult::human(command_help(Some(command)))); }
+    for token in &mut checked.tokens {
+        if let Some(path) = token.strip_prefix("--role-file=") {
+            let path = Path::new(path);
+            let path = if path.is_absolute() { path.to_path_buf() } else { cwd.join(path) };
+            let path = path.canonicalize().map_err(|e| CliError::Usage(format!("invalid explicit role file: {e}")))?;
+            *token = format!("--role-file={}", path.display());
+        }
+    }
+    let args = checked.tokens.as_slice();
+    match command {
+        "status" => cmd_status(&status_args(args, cwd)),
+        "add-agent" => cmd_add_agent(&add_agent_args(args, cwd)?),
+        "remove-agent" => cmd_remove_agent(&remove_agent_args(args, cwd)?),
+        "reset-agent" => cmd_reset_agent(&reset_agent_args(args, cwd)?),
+        "clone-agent" => cmd_clone_agent(&clone_agent_args(args, cwd)?),
+        "fork-agent" => cmd_fork_agent(&fork_agent_args(args, cwd)?),
+        _ => Err(CliError::Usage("unsupported lifecycle alias".into())),
+    }
+}
+
 fn role_agent_args(
     args: &[String],
     add: bool,
@@ -2138,8 +2178,8 @@ mod tests {
             .collect();
         assert_eq!(
             expected.len(),
-            31,
-            "the public catalog includes Leader prompt management and the Kiro capability gate"
+            35,
+            "the public catalog adds the four canonical lifecycle surfaces"
         );
         for spec_name in &expected {
             assert!(

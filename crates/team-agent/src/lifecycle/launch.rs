@@ -384,6 +384,14 @@ pub use worker_env::{apply_cursor_subscription_proxy_env, CursorProxyPresence};
 mod identity;
 pub(super) use identity::*;
 
+// Read-only CLI surface facades; predicate bodies and launch behavior stay unchanged.
+pub(crate) fn surface_has_runtime_team(state: &serde_json::Value, team: &str) -> bool {
+    identity::runtime_state_has_quick_start_team(state, team)
+}
+pub(crate) fn surface_is_leader_bootstrap(state: &serde_json::Value) -> bool {
+    identity::is_quick_start_leader_bootstrap(state)
+}
+
 // Test-only seam for the real leader producer -> unchanged bootstrap classifier.
 #[cfg(test)]
 pub(crate) fn quick_start_has_runtime_for_test(state: &serde_json::Value, team: &str) -> bool {

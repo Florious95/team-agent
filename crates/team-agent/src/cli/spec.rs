@@ -32,6 +32,10 @@ pub(crate) enum TokenUsage {
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DispatchKind {
+    Start,
+    Stop,
+    Team,
+    Agent,
     QuickStart,
     Send,
     Status,
@@ -59,6 +63,10 @@ pub(crate) enum DispatchKind {
     AttachLeader,
 }
 pub(crate) const ALL_DISPATCH_KINDS: &[DispatchKind] = &[
+    DispatchKind::Start,
+    DispatchKind::Stop,
+    DispatchKind::Team,
+    DispatchKind::Agent,
     DispatchKind::QuickStart,
     DispatchKind::Send,
     DispatchKind::Status,
@@ -110,6 +118,10 @@ pub(crate) struct CommandSpec {
 // Only human operations belong here. Compatibility commands are private in emit.rs.
 #[rustfmt::skip]
 pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
+    CommandSpec { name: "start", tier: CommandTier::Core, category: CommandCategory::Start, kind: CommandKind::Dispatch(DispatchKind::Start), summary: "Start a team or agent; verified live instances stay unchanged", usage: "team-agent start [AGENT|./TEAMDIR] [--from TEAMDIR] [--workspace PATH] [--team KEY] [--session preserve|auto] [--dry-run] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, sunset: None, action: None, governance: None },
+    CommandSpec { name: "stop", tier: CommandTier::Core, category: CommandCategory::TeamLifecycle, kind: CommandKind::Dispatch(DispatchKind::Stop), summary: "Stop the selected team or one agent, retaining session associations", usage: "team-agent stop [AGENT] [--workspace PATH] [--team KEY] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
+    CommandSpec { name: "team", tier: CommandTier::Core, category: CommandCategory::TeamLifecycle, kind: CommandKind::Dispatch(DispatchKind::Team), summary: "Explicit team start, stop, restart or status", usage: "team-agent team <start|stop|restart|status> [OPTIONS]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, sunset: None, action: None, governance: None },
+    CommandSpec { name: "agent", tier: CommandTier::Core, category: CommandCategory::WorkerLifecycle, kind: CommandKind::Dispatch(DispatchKind::Agent), summary: "Explicit agent lifecycle operations", usage: "team-agent agent <start|stop|restart|add|remove|reset|clone|fork> AGENT [OPTIONS]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, sunset: None, action: None, governance: None },
     CommandSpec { name: "quick-start", tier: CommandTier::Core, category: CommandCategory::Start, kind: CommandKind::Dispatch(DispatchKind::QuickStart), summary: "Create a team from role files; use restart for an initialized team", usage: "team-agent quick-start [TEAMDIR] [--workspace WORKSPACE] [--team TEAM] [--name NAME] [--team-id TEAM] [--yes] [--backend tmux|conpty] [--json] [--detail]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, sunset: None, action: None, governance: None },
     CommandSpec { name: "send", tier: CommandTier::Core, category: CommandCategory::Start, kind: CommandKind::Dispatch(DispatchKind::Send), summary: "Send a task to a specified agent", usage: "team-agent send <agent> MESSAGE... [--workspace WORKSPACE] [--team TEAM] [--mailbox] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, sunset: Some("a future compatibility release"), action: Some("Use team-agent send <agent> 'task message'; select scope with --workspace and --team"), governance: None },
     CommandSpec { name: "status", tier: CommandTier::Core, category: CommandCategory::Start, kind: CommandKind::Dispatch(DispatchKind::Status), summary: "Check agent status without reading conversation content", usage: "team-agent status [<agent>] [--workspace WORKSPACE] [--team TEAM] [--json] [--summary|--detail]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },

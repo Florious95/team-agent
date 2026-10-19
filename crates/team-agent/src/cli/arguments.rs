@@ -26,6 +26,21 @@ struct Schema {
 
 fn schema(command: &str) -> Option<Schema> {
     let (flags, max_positionals): (&'static [(&'static str, ValueKind)], usize) = match command {
+        "intent-start" => (
+            &[
+                ("--from", Path), ("--session", Choice(&["auto", "preserve"])),
+                ("--dry-run", Switch), ("--allow-fresh", Switch),
+                ("--provider", Token), ("--model", Token), ("--effort", Token),
+                ("--bypass", Choice(&["true", "false"])), ("--prompt", Payload),
+                ("--profile", Token), ("--role-file", Path),
+            ], 1,
+        ),
+        "intent-stop" => (&[], 1),
+        "intent-restart" => (
+            &[("--session", Choice(&["auto", "preserve"])), ("--dry-run", Switch),
+              ("--allow-fresh", Switch), ("--session-converge-deadline", Seconds),
+              ("--detail", Switch)], 1,
+        ),
         "quick-start" => (
             &[
                 ("--name", Token),

@@ -32,6 +32,7 @@ on:
           - issue326
           - issue334-red
           - issue334
+          - cli-phase1
 
 permissions:
   contents: read
@@ -192,6 +193,14 @@ jobs:
               run_case workspace-check cargo check --workspace --all-targets --locked
               run_case parser-safety cargo test -p team-agent --lib --locked cli::emit::parser_safety_tests -- --test-threads=1
               ;;
+            cli-phase1)
+              run_case workspace-check cargo check --workspace --all-targets --locked
+              run_case cli-all cargo test -p team-agent --lib --locked cli:: -- --test-threads=1
+              run_case root-restart cargo test -p team-agent --lib --locked lifecycle::restart -- --test-threads=1
+              run_case root-role cargo test -p team-agent --lib --locked lifecycle::role_config -- --test-threads=1
+              run_case root-contract cargo test -p team-agent --lib --locked contract_runtime -- --test-threads=1
+              run_case contract-all cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets --no-fail-fast -- --test-threads=1
+              ;;
             issue334)
               run_case workspace-check cargo check --workspace --all-targets --locked
               run_case cli-parser cargo test -p team-agent --lib --locked cli::emit:: -- --test-threads=1
@@ -234,7 +243,7 @@ jobs:
             *) exit 64 ;;
           esac
       - name: Check scoped formatting and retain a remote formatting patch
-        if: always() && (inputs.regression_scope == 'issue321' || inputs.regression_scope == 'issue321-full' || inputs.regression_scope == 'issue334' || inputs.regression_scope == 'issue334-red')
+        if: always() && (inputs.regression_scope == 'issue321' || inputs.regression_scope == 'issue321-full' || inputs.regression_scope == 'issue334' || inputs.regression_scope == 'issue334-red' || inputs.regression_scope == 'cli-phase1')
         shell: bash
         run: |
           set -euo pipefail
@@ -254,6 +263,9 @@ jobs:
           set +e
           if [[ "$REGRESSION_SCOPE" == issue334* ]]; then
             files=(crates/team-agent/src/cli/arguments.rs crates/team-agent/src/cli/tests/parser_safety.rs)
+          fi
+          if [[ "$REGRESSION_SCOPE" == cli-phase1 ]]; then
+            files=(crates/team-agent/src/cli/arguments.rs crates/team-agent/src/cli/intent.rs crates/team-agent/src/cli/intent/runtime.rs crates/team-agent/src/cli/intent/tests.rs crates/team-agent/src/cli/intent/runtime_tests.rs)
           fi
           rustfmt --edition 2021 --config skip_children=true --check "${files[@]}" > regression-evidence/format.log 2>&1
           rc=$?
@@ -280,7 +292,7 @@ jobs:
           retention-days: 14
 
   workspace-all-linux:
-    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && (inputs.regression_scope == 'issue321-full' || inputs.regression_scope == 'issue321-f1' || inputs.regression_scope == 'issue334')
+    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && (inputs.regression_scope == 'issue321-full' || inputs.regression_scope == 'issue321-f1' || inputs.regression_scope == 'issue334' || inputs.regression_scope == 'cli-phase1')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
