@@ -447,7 +447,26 @@ fn current_command_surface_from_emit(emit: &str) -> BTreeSet<String> {
             }),
     );
     names.extend(parse_const_str_array(emit, "LEADER_PASSTHROUGH_COMMANDS"));
+    names.extend(intent_dispatch_names(emit, &read_repo_file("crates/team-agent/src/cli/intent.rs")));
     names
+}
+
+fn intent_dispatch_names(emit: &str, intent: &str) -> BTreeSet<String> {
+    if !emit.contains("if let Some(result) = super::intent::run(command, args, cwd)") {
+        return BTreeSet::new();
+    }
+    let Some(run) = intent.split_once("pub(super) fn run(").map(|(_, body)| body) else { return BTreeSet::new(); };
+    let Some(guard) = run.split_once("if !matches!(command,").and_then(|(_, body)| body.split_once(") {").map(|(guard, _)| guard)) else { return BTreeSet::new(); };
+    guard.split('"').skip(1).step_by(2).map(str::to_string).collect()
+}
+
+#[test]
+fn canonical_forwarder_is_counted_only_with_both_real_wiring_and_intent_guard() {
+    let emit = read_repo_file("crates/team-agent/src/cli/emit.rs");
+    let intent = read_repo_file("crates/team-agent/src/cli/intent.rs");
+    assert_eq!(intent_dispatch_names(&emit, &intent), ["agent", "restart", "start", "stop", "team"].into_iter().map(str::to_string).collect());
+    assert!(intent_dispatch_names(&emit.replace("super::intent::run(command, args, cwd)", "missing_forwarder(command, args, cwd)"), &intent).is_empty());
+    assert!(intent_dispatch_names(&emit, &intent.replace("if !matches!(command,", "if !matches!(unbound_command,")).is_empty());
 }
 
 fn parse_const_str_array(source: &str, const_name: &str) -> Vec<String> {
