@@ -1720,6 +1720,7 @@ mod fresh_quick_start_leader_binding_tests {
         let env = HermeticTestEnv::enter("issue337-unobservable-caller");
         env.scrub_tmux();
         env.assert_no_real_tmux();
+        std::env::set_var("TMUX", "/private/tmp/issue337/default,1,0");
         std::env::set_var("TMUX_PANE", "%42");
         std::env::set_var(CALLER_PANE_ENV, "%42");
         std::env::set_var(CALLER_PROVIDER_ENV, "pi");
