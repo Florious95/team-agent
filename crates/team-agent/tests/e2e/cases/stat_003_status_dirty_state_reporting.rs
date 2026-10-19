@@ -9,8 +9,9 @@ fn stat_003_status_dirty_state_reporting() {
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
     let qs = quick_start_fake(&ws, team_id);
     assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
-    // Corrupt the authoritative canonical receiver as well as the legacy
-    // mirror; a healthy canonical binding must not be hidden by a stale root.
+    // Remove the independent healthy owner before corrupting both receiver
+    // mirrors; otherwise the negative fixture still has a valid live Leader.
+    seed_unattached_leader(&ws);
     let mut state = ws.read_state();
     let dirty = json!({"mode": "direct_tmux", "status": "attached", "pane_id": ""});
     state["leader_receiver"] = dirty.clone();
