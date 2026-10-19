@@ -518,9 +518,14 @@ fn no_eligible_is_scoped_nonzero_with_skipped_and_zero_handlers_even_in_dry_run(
         p.intent.dry_run = dry_run;
         p.no_eligible = Some("all selected seats are paused");
         p.skipped.push(json!({"agent":"one","reason":"paused"}));
-        let result = execute_plan(p, &mut |_| panic!("blocked handler"), &mut |_,_,_| panic!("blocked recheck")).unwrap();
+        let result = execute_plan(p, &mut |_| panic!("blocked handler"), &mut |_, _, _| {
+            panic!("blocked recheck")
+        })
+        .unwrap();
         assert_eq!(result.exit, ExitCode::Error);
-        let CmdOutput::Json(value) = result.output else { panic!() };
+        let CmdOutput::Json(value) = result.output else {
+            panic!()
+        };
         assert_eq!(value["scope"]["team"], "pinned");
         assert_eq!(value["status"], "no_eligible_agents");
         assert_eq!(value["skipped"][0]["agent"], "one");

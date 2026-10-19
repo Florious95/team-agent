@@ -149,15 +149,24 @@ fn all_paused_no_eligible_and_single_restart_never_unpauses() {
 #[test]
 #[serial_test::serial(env)]
 fn no_eligible_restart_preserves_scoped_held_and_stopped_skip_reasons() {
-    for explicit in [false,true] {
+    for explicit in [false, true] {
         let (root, mut intent) = fixture(&["one"]);
         install(root.path(), &[("one", "stopped", explicit)]);
         intent.verb = Verb::Restart;
-        let blocked = plan_with_observer(intent, |_,_,_| Ok(Observation::StoppedVerified)).unwrap();
-        assert!(blocked.no_eligible.is_some()); assert!(blocked.steps.is_empty());
+        let blocked =
+            plan_with_observer(intent, |_, _, _| Ok(Observation::StoppedVerified)).unwrap();
+        assert!(blocked.no_eligible.is_some());
+        assert!(blocked.steps.is_empty());
         assert_eq!(blocked.scope.team.as_deref(), Some("fixture"));
         assert_eq!(blocked.skipped[0]["agent"], "one");
-        assert_eq!(blocked.skipped[0]["reason"], if explicit {"explicit_stop"} else {"stopped_preserved_by_original_restart"});
+        assert_eq!(
+            blocked.skipped[0]["reason"],
+            if explicit {
+                "explicit_stop"
+            } else {
+                "stopped_preserved_by_original_restart"
+            }
+        );
     }
 }
 

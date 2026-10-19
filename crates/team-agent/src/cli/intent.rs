@@ -464,7 +464,10 @@ fn execute_plan(
     recheck: &mut impl FnMut(&Plan, &Step, bool) -> Result<(), CliError>,
 ) -> Result<CmdResult, CliError> {
     if let Some(reason) = plan.no_eligible {
-        return Ok(CmdResult::from_json(json!({"ok":false,"action":plan.intent.verb,"surface":plan.intent.surface,"scope":plan.scope,"session_policy":plan.intent.session,"dry_run":plan.intent.dry_run,"status":"no_eligible_agents","error":reason,"steps":[],"skipped":plan.skipped}), plan.intent.json));
+        return Ok(CmdResult::from_json(
+            json!({"ok":false,"action":plan.intent.verb,"surface":plan.intent.surface,"scope":plan.scope,"session_policy":plan.intent.session,"dry_run":plan.intent.dry_run,"status":"no_eligible_agents","error":reason,"steps":[],"skipped":plan.skipped}),
+            plan.intent.json,
+        ));
     }
     let descriptions: Vec<_> = plan
         .steps

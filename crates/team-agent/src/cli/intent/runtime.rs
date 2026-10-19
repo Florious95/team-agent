@@ -741,7 +741,12 @@ fn plan_with_observer(
             if config.roles.len() == config.members.len()
                 && config.roles.iter().all(|role| role.paused)
             {
-                plan.skipped.extend(config.roles.iter().map(|role| json!({"agent":role.id.as_str(),"reason":"paused"})));
+                plan.skipped.extend(
+                    config
+                        .roles
+                        .iter()
+                        .map(|role| json!({"agent":role.id.as_str(),"reason":"paused"})),
+                );
                 return Ok(no_eligible(plan, "all configured native roles are paused"));
             }
         }
@@ -811,7 +816,10 @@ fn plan_with_observer(
                 }
             }
             if !active {
-                return Ok(no_eligible(plan, "missing spec cannot be rebuilt without an active roster"));
+                return Ok(no_eligible(
+                    plan,
+                    "missing spec cannot be rebuilt without an active roster",
+                ));
             }
             plan.steps.push(Step::RestartTeam(restart_args(&plan)));
             return Ok(plan);
@@ -969,7 +977,10 @@ fn plan_with_observer(
             .filter(|(_, _, explicit, paused)| !explicit && !paused)
             .collect();
         if eligible.is_empty() {
-            return Ok(no_eligible(plan, "use team start to explicitly activate a nonpaused roster"));
+            return Ok(no_eligible(
+                plan,
+                "use team start to explicitly activate a nonpaused roster",
+            ));
         }
         let shutdown = selected.state.get("status").and_then(Value::as_str) == Some("shutdown");
         if !shutdown
@@ -979,7 +990,10 @@ fn plan_with_observer(
             })
         {
             plan.skipped.extend(eligible.iter().map(|(id,obs,_,_)| json!({"agent":id,"observation":obs,"reason":"stopped_preserved_by_original_restart"})));
-            return Ok(no_eligible(plan, "stopped roster requires explicit team start"));
+            return Ok(no_eligible(
+                plan,
+                "stopped roster requires explicit team start",
+            ));
         }
         if !shutdown
             || eligible
