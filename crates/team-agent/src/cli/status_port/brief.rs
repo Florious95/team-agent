@@ -1475,9 +1475,14 @@ impl BriefNode {
 
 fn scoped_node_json(node: BriefNode, workspace: &Path, state: &Value) -> Value {
     let mut value = node.into_json();
-    if value.get("observation_reason").is_some() {
+    if let Some(reason) = value["observation_reason"].as_str() {
+        let guidance = match reason {
+            "pane_process_exited" => "pane process exit confirmed; inspect saved session and Leader binding before explicit start",
+            "startup_not_yet_observed" | "native_runtime_not_ready" => "wait for startup convergence and recheck this scope; do not reset on unknown",
+            _ => "inspect this scope's observation and identity; do not infer process exit or retry lifecycle from unknown alone",
+        };
         value["next_action"] = json!(format!(
-            "team-agent doctor --workspace {} --team {} --json; observation is inconclusive, do not restart or reset based on unknown alone",
+            "team-agent doctor --workspace {} --team {} --json; {guidance}",
             shell_quote(&workspace.to_string_lossy()),
             shell_quote(&crate::state::projection::team_state_key(state)),
         ));

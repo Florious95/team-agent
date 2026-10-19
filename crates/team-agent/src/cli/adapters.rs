@@ -746,6 +746,11 @@ fn unified_default_doctor_report(args: &DoctorArgs, mut value: Value) -> Value {
         }
         Err(error) => {
             runtime["status"] = Value::String("unresolved".to_string());
+            runtime["observation_reason"] = json!("runtime_selection_failed");
+            runtime["next_action"] = json!(format!(
+                "team-agent status --workspace {} --team {} --json; verify the intended workspace/team selector before lifecycle changes",
+                shell_quote(&requested_workspace), shell_quote(team_key),
+            ));
             append_issue_repair(
                 &mut value,
                 "runtime_selection_failed",

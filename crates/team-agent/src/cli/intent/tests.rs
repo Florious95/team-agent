@@ -253,10 +253,15 @@ fn issue337_failed_handler_preserves_confirmed_and_uncertain_effects() {
             &mut |_, _, _| Ok(()),
         ).unwrap();
         assert_eq!(result.exit, ExitCode::Error);
-        let CmdOutput::Json(value) = result.output else { panic!() };
+        let CmdOutput::Json(value) = result.output else {
+            panic!()
+        };
         assert_eq!(value["status"], "partial");
         assert_eq!(value["steps"][0]["receipt"]["error"], "original failure");
-        assert_eq!(value["effects"][0]["effects"]["coordinator_start"], coordinator);
+        assert_eq!(
+            value["effects"][0]["effects"]["coordinator_start"],
+            coordinator
+        );
         assert_eq!(!value["last_confirmed_effect"].is_null(), confirmed);
         let recovery = value["recovery"].as_str().unwrap();
         assert!(recovery.contains("--workspace"));

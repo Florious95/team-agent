@@ -511,12 +511,15 @@ fn execute_plan(
         };
         partial_effect |= receipt.get("status").and_then(Value::as_str) == Some("partial");
         if let Some(effect) = receipt.get("effects") {
-            let workers = effect.get("worker_panes_started").and_then(Value::as_array)
+            let workers = effect
+                .get("worker_panes_started")
+                .and_then(Value::as_array)
                 .is_some_and(|workers| !workers.is_empty());
             let coordinator = effect.get("coordinator_start").and_then(Value::as_str);
             handler_effect_confirmed |= workers || coordinator == Some("running_confirmed");
             if workers || matches!(coordinator, Some("running_confirmed" | "attempted_unknown")) {
-                effects.push(json!({"action": step.name(), "agent": step.agent(), "effects": effect}));
+                effects
+                    .push(json!({"action": step.name(), "agent": step.agent(), "effects": effect}));
             }
         }
         let stop_unconfirmed = plan.intent.verb == Verb::Restart
@@ -558,9 +561,15 @@ fn execute_plan(
                 .iter()
                 .any(|result| result.get("ok").and_then(Value::as_bool) == Some(true)));
     let recovery = if !ok && (stop_succeeded || partial_effect || !effects.is_empty()) {
-        let team = actual_scope.team.as_deref().map(|team| format!(" --team {}", shell_quote(team))).unwrap_or_default();
+        let team = actual_scope
+            .team
+            .as_deref()
+            .map(|team| format!(" --team {}", shell_quote(team)))
+            .unwrap_or_default();
         Some(format!("team-agent doctor --workspace {}{team} --json; inspect confirmed/unknown effects before retrying; no automatic rollback is claimed", shell_quote(&actual_scope.workspace.to_string_lossy())))
-    } else { None };
+    } else {
+        None
+    };
     Ok(CmdResult::from_json(
         json!({"ok":ok,"action":plan.intent.verb,"surface":plan.intent.surface,"scope":actual_scope,"session_policy":plan.intent.session,"status":if partial {"partial"} else if !ok {"failed"} else if pending {"pending"} else if results.is_empty() {if plan.intent.verb == Verb::Stop {"already_stopped"} else {"already_running"}} else {"actions_completed"},"steps":results,"skipped":plan.skipped,"effects":effects,"configuration_note":"Running processes were not edited; role body synchronization and business readiness are not claimed.","last_confirmed_effect":if stop_succeeded {Some("original_instance_stopped")} else if handler_effect_confirmed {Some("handler_effects_confirmed")} else {None},"current_state":if !ok {Some("unknown")} else {None},"recovery":recovery}),
         plan.intent.json,
