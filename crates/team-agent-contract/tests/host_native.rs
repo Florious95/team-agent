@@ -131,6 +131,10 @@ fn owned_process_diagnostic(pid: u32, executable: &Path, hash: Digest) -> String
     format!("pid={pid}; kernel_image={image:?}; fixed_image_capture={observed:?}")
 }
 
+fn native_fixture_root(nonce: u128) -> PathBuf {
+    PathBuf::from("/tmp").join(format!("tac-k2-{}-{nonce}", std::process::id()))
+}
+
 fn native_case(mode: &str, content: &str, expected_keys: usize) {
     let tmux = configured_binary("CONTRACT_TMUX");
     assert_eq!(
@@ -147,7 +151,7 @@ fn native_case(mode: &str, content: &str, expected_keys: usize) {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = PathBuf::from("/tmp").join(format!("tac-k2-{}-{nonce}", std::process::id()));
+    let root = native_fixture_root(nonce);
     let mut identity = owner();
     identity.instance = InstanceId::new(format!("native-{mode}-{nonce}")).unwrap();
     let directory = ScopedDirectory::create(&root, identity.clone()).unwrap();
@@ -475,4 +479,24 @@ fn real_tmux_guarded_retry_counts_each_key_without_repaste() {
 #[test]
 fn real_tmux_queue_flush_is_explicit_and_bounded() {
     native_case("queue", "queue fixture", 3);
+}
+
+#[test]
+fn fixture_roots_are_unique_for_parallel_identical_clock_samples() {
+    const CALLERS: usize = 16;
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(CALLERS));
+    let handles: Vec<_> = (0..CALLERS)
+        .map(|_| {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                native_fixture_root(1_792_000_000_000_000_000)
+            })
+        })
+        .collect();
+    let roots: BTreeSet<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect();
+    assert_eq!(roots.len(), CALLERS, "clock repetition must not alias fixture roots");
 }
