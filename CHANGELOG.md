@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.120]
+
+- **Strict CLI safety (Issue #334):** reject unknown options, excess operands, missing values and removed `start-agent --force`; parse `--key=value` consistently, refuse nonexistent explicit workspaces, reject ambiguous bare restart operands and require an explicit `attach-leader` provider. Native payloads after `--` remain untouched.
+- **Intuitive lifecycle commands:** add `start`, `stop`, `restart <agent>`, `team` and `agent` surfaces with a thin intent layer. Start handles initial formation, proven-live no-ops, stopped-seat wakeup and role-only additions; restart preflights session backing before stop, with `auto` on new surfaces and the legacy bare restart's `preserve` default retained.
+- **Public journey alignment:** synchronize CLI help/next actions, Skills, operator references, README and packaged mirrors; legacy lifecycle commands remain compatibility bridges and coverage gaps remain honestly declared.
+- **Lifecycle and diagnostic hardening (Issues #336–#338):** accept raw TAB or literal backslash-t pane-listing separators; require live caller evidence before fresh worker/coordinator effects and preserve honest partial-effect receipts; explain uncertain status/doctor observations with scoped recovery guidance instead of treating unknown as dead.
+- **Release scope:** metadata-only version alignment to 0.5.120 after PRs #335/#339. Exact-source dual-platform automated gates passed (Linux workspace 3,695 passed/0 failed executions; selected macOS root/CLI groups and excluded contract 299 passed/0 failed). Existing ignored tests remain ignored; overlapping groups are not a unique test total, and these counts do not assert an unrestricted native provider/model matrix.
+
 ## [0.5.119]
 
 - **No delivery from a pending draft:** separate token visibility from input consumption. A token still present in the current composer prevents duplicate paste but never establishes delivery; a known native unknown surface remains unverified even when the submit command succeeds.
