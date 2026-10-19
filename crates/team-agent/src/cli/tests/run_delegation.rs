@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "../../../tests/support/hermetic.rs"]
+mod hermetic_guard;
+
 struct TeamSocketGuard {
     ws: std::path::PathBuf,
 }
@@ -212,10 +215,16 @@ fn run_dispatches_quick_start_compiles_spec() {
 // coordinator/health.rs, message_store.
 // =========================================================================
 #[test]
-fn cli_quick_start_invokes_real_lifecycle_compiles_spec() {
-    let team = deleg_team_dir_with_healthy_coordinator();
-    let ws = crate::model::paths::team_workspace(&team).unwrap();
-    let _guard = TeamSocketGuard { ws };
+#[serial_test::serial(env)]
+fn cli_quick_start_invokes_real_lifecycle_admission_before_runtime_effects() {
+    let env = hermetic_guard::HermeticTestEnv::enter("issue337-cli-admission");
+    env.scrub_tmux();
+    env.assert_no_real_tmux();
+    let workspace = env.workspace("ws");
+    let team = workspace.join("roles");
+    std::fs::create_dir_all(team.join("agents")).unwrap();
+    std::fs::write(team.join("TEAM.md"), DELEG_TEAM_MD).unwrap();
+    std::fs::write(team.join("agents/implementer.md"), DELEG_VALID_ROLE).unwrap();
     let args = QuickStartArgs {
         workspace: crate::model::paths::team_workspace(&team).unwrap(),
         agents_dir: team.clone(),
@@ -226,16 +235,17 @@ fn cli_quick_start_invokes_real_lifecycle_compiles_spec() {
         json: true,
         detail: false,
     };
-    let _ = cmd_quick_start(&args); // real quick_start compiles the spec before any coordinator/launch step
-                                    // E5: spec compiled to .team/runtime/<team_key>/, NOT the user team dir.
-    let team_key = "clidelegteam";
-    let workspace = crate::model::paths::team_workspace(&team).unwrap();
-    let runtime_spec = crate::model::paths::runtime_spec_path(&workspace, &team_key);
-    assert!(
-            runtime_spec.exists(),
-            "cmd_quick_start must delegate to crate::lifecycle::quick_start, which compiles team.spec.yaml \
-             under .team/runtime/<team_key>/; the placeholder never writes it"
-        );
+    let result = cmd_quick_start(&args).expect("real lifecycle admission");
+    assert_eq!(result.exit, ExitCode::Error);
+    let CmdOutput::Json(value) = result.output else { panic!() };
+    assert_eq!(value["status"], "preflight_blocked");
+    assert!(value["blockers"].to_string().contains("caller_pane_missing"));
+    assert_eq!(value["effects"]["worker_panes_started"], json!([]));
+    assert_eq!(value["effects"]["coordinator_start"], "not_attempted");
+    let runtime_spec = crate::model::paths::runtime_spec_path(&args.workspace, "clidelegteam");
+    assert!(!runtime_spec.exists(), "#337 admission precedes runtime spec publication");
+    assert!(!crate::state::persist::runtime_state_path(&args.workspace).exists());
+    assert!(!args.workspace.join(".team/team.db").exists());
     assert!(
         !team.join("team.spec.yaml").exists(),
         "E5: quick_start must NOT write spec into the user team dir"
@@ -333,12 +343,10 @@ fn cli_add_agent_duplicate_id_surfaces_real_error() {
         );
 }
 
-// 5 [P1] — cmd_status --json emits the concise nine-field node projection.
-// Status must not leak coordinator/db/history diagnostics; missing exact nodeprobe evidence remains
-// an explicit unknown projection. The fixture still seeds a real store to ensure the status path
-// does not accidentally depend on coordinator or mailbox reads.
+// Nine base fields remain; #338 adds only observation reason and scoped action
+// when uncertain. No coordinator/db/history/payload data enters the node.
 #[test]
-fn cli_status_emits_nine_field_brief_without_diagnostics() {
+fn cli_status_emits_brief_with_scoped_unknown_diagnostics() {
     let ws = seed_status_workspace(); // writes .team/runtime/state.json
     let store = crate::message_store::MessageStore::open(&ws).unwrap();
     let _ = store
@@ -406,10 +414,46 @@ fn cli_status_emits_nine_field_brief_without_diagnostics() {
             "health",
             "session_name",
             "tmux_command",
+            "observation_reason",
+            "next_action",
         ]
         .into_iter()
         .collect()
     );
+    assert_eq!(nodes[0]["runtime_status"], "unknown");
+    assert!(!nodes[0]["observation_reason"].as_str().unwrap().is_empty());
+    assert!(nodes[0]["next_action"].as_str().unwrap().contains(&*args.workspace.to_string_lossy()));
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn issue338_doctor_reports_same_scope_unknown_observations_without_state_writes() {
+    let env = hermetic_guard::HermeticTestEnv::enter("issue338-doctor");
+    env.scrub_tmux();
+    env.assert_no_real_tmux();
+    let workspace = env.workspace("ws");
+    crate::state::persist::save_runtime_state(&workspace, &json!({
+        "team_key": "current", "session_name": "test-workers",
+        "agents": {"worker": {"provider": "pi", "status": "running"}},
+    })).unwrap();
+    // Complete the existing legacy-to-current state normalization as fixture
+    // preparation; this test covers observation of an already-current runtime.
+    crate::state::persist::load_runtime_state(&workspace).unwrap();
+    let state_path = crate::state::persist::runtime_state_path(&workspace);
+    let before = std::fs::read(&state_path).unwrap();
+    let result = cmd_doctor(&DoctorArgs {
+        spec: None, workspace: workspace.clone(), gate: None, comms: false,
+        team: Some("current".into()), fix: false, fix_schema: false,
+        cleanup_orphans: false, confirm: false, json: true,
+    }).unwrap();
+    let CmdOutput::Json(value) = result.output else { panic!() };
+    let node = &value["runtime"]["observations"][0];
+    assert_eq!(node["name"], "worker");
+    assert_eq!(node["observation_reason"], "endpoint_unregistered");
+    let action = node["next_action"].as_str().unwrap();
+    assert!(action.contains("--team 'current'"));
+    assert!(action.contains(&*workspace.to_string_lossy()));
+    assert_eq!(std::fs::read(state_path).unwrap(), before);
 }
 
 // 6 [P1] — cmd_shutdown delegates to the REAL crate::coordinator::stop_coordinator (+ tmux

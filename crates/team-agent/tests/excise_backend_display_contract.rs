@@ -69,7 +69,7 @@ fn R2_team_md_display_backend_is_ignored_and_tmux_stays_silent() {
     .into_iter()
     .enumerate()
     {
-        let env = HermeticTestEnv::enter(&format!("excise-r2-{index}"));
+        let env = HermeticTestEnv::for_subprocess_with_leader(&format!("excise-r2-{index}"));
         let workspace = env.workspace("workspace");
         write_fake_team(&workspace, Some(value));
         let workspace_arg = path_string(&workspace);
@@ -168,7 +168,7 @@ fn R3_no_display_subsystem_import() {
 #[test]
 #[serial]
 fn R4_cleanup_matrix_mock() {
-    let env = HermeticTestEnv::enter("excise-r4");
+    let env = HermeticTestEnv::for_subprocess_with_leader("excise-r4");
     let workspace = env.workspace("workspace");
     write_fake_team(&workspace, None);
     let workspace_arg = path_string(&workspace);

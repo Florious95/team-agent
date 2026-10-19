@@ -32,7 +32,7 @@ fn enter_hermetic(tag: &str) -> hermetic_guard::HermeticTestEnv {
 #[test]
 #[serial_test::serial(env)]
 fn concurrent_reset_discard_session_serializes() {
-    let _hermetic = enter_hermetic("phase-b-concurrent-reset");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("phase-b-concurrent-reset");
     let ids = (1..=6).map(|n| format!("w{n}")).collect::<Vec<_>>();
     let role_docs = ids
         .iter()
@@ -139,7 +139,7 @@ fn concurrent_reset_discard_session_serializes() {
 #[test]
 #[serial_test::serial(env)]
 fn add_fork_remove_share_lifecycle_lock_behavior() {
-    let _hermetic = enter_hermetic("phase-b-fork");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("phase-b-fork");
     let _home = LaneHomeGuard::enter("phase-b-fork");
     let (add_team, add_workspace, add_role, add_transport) = add_fixture();
     let add_agent = aid("w2");
@@ -324,7 +324,7 @@ fn add_fork_remove_share_lifecycle_lock_behavior() {
 #[test]
 #[serial_test::serial(env)]
 fn breal_spawn_ownership_mismatch_fails_without_state_pollution() {
-    let _hermetic = enter_hermetic("phase-b-spawn-ownership");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("phase-b-spawn-ownership");
     let (workspace, _team) = breal_workspace();
     let transport = BRealTransport::misowned();
 
@@ -366,7 +366,9 @@ fn breal_spawn_ownership_mismatch_fails_without_state_pollution() {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn breal_provider_missing_window_disappeared_fails_closed() {
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("phase-b-missing-window");
     let (workspace, _team) = breal_workspace();
     let transport = BRealTransport::dead_after_spawn();
 
@@ -404,7 +406,9 @@ fn breal_provider_missing_window_disappeared_fails_closed() {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn breal_reset_rehydrates_role_context_from_compiled_spec() {
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("phase-b-reset-context");
     let (workspace, _team) = breal_workspace();
     strip_runtime_command_context(&workspace);
     let transport = BRealTransport::owned();
@@ -438,7 +442,7 @@ fn breal_reset_rehydrates_role_context_from_compiled_spec() {
 #[test]
 #[serial_test::serial(env)]
 fn breal_restart_rehydrates_role_context_from_compiled_spec() {
-    let _hermetic = enter_hermetic("phase-b-restart-role-context");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("phase-b-restart-role-context");
     let (workspace, _team) = breal_one_worker_workspace();
     strip_runtime_command_context(&workspace);
     let transport = BRealTransport::owned();

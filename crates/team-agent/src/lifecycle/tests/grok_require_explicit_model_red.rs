@@ -14,10 +14,7 @@ mod hermetic_guard;
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
 fn enter_hermetic(tag: &str) -> hermetic_guard::HermeticTestEnv {
-    let env = hermetic_guard::HermeticTestEnv::enter(tag);
-    env.scrub_tmux();
-    env.assert_no_real_tmux();
-    env
+    hermetic_guard::HermeticTestEnv::enter_with_leader(tag)
 }
 
 use std::path::{Path, PathBuf};
@@ -31,7 +28,9 @@ use team_agent::transport::test_support::OfflineTransport;
 #[test]
 #[serial(env)]
 fn grok_role_missing_model_uses_provider_default() {
+    let _hermetic = enter_hermetic("grok-no-model");
     let ws = tmp_dir("grok-no-model");
+    super::launch_spawn::seed_healthy_coordinator(&ws);
     let home = tmp_dir("grok-no-model-home");
     seed_grok_home(&home, Some(&ws));
     let _guard = HomeGuard::set(&home);
@@ -67,6 +66,7 @@ fn grok_role_missing_model_uses_provider_default() {
 fn grok_role_explicit_model_reaches_argv() {
     let _hermetic = enter_hermetic("grok-explicit-model");
     let ws = tmp_dir("grok-with-model");
+    super::launch_spawn::seed_healthy_coordinator(&ws);
     let home = tmp_dir("grok-with-model-home");
     seed_grok_home(&home, Some(&ws));
     let _guard = HomeGuard::set(&home);
@@ -103,6 +103,7 @@ fn grok_role_explicit_model_reaches_argv() {
 fn claude_role_missing_model_still_starts() {
     let _hermetic = enter_hermetic("grok-claude-missing-model");
     let ws = tmp_dir("claude-no-model");
+    super::launch_spawn::seed_healthy_coordinator(&ws);
     let team = write_role_team(
         &ws,
         "claudeteam",

@@ -110,6 +110,23 @@ pub(crate) use rebuild::{
 pub(crate) use remove::remove_agent_with_transport;
 pub use remove::{remove_agent, remove_agent_flag_requirements};
 pub use selection::decide_start_mode;
+pub(crate) use selection::restart_agent_never_captured;
+
+/// Read-only CLI preflight facade. Reuses the original provider-specific probe;
+/// does not capture a session, write state, or authorize a future spawn.
+pub(crate) fn surface_resume_backing_probe(
+    workspace: &Path,
+    agent_id: &AgentId,
+    agent: &serde_json::Value,
+    provider: Provider,
+    session: &SessionId,
+    rollout: Option<&RolloutPath>,
+) -> (bool, Vec<std::path::PathBuf>) {
+    let probe = common::resume_backing_probe_for_agent(
+        workspace, agent_id, agent, provider, session, rollout,
+    );
+    (probe.exists, probe.checked_paths)
+}
 pub(crate) use selection::{classify_first_send_at, classify_restart_plan, python_type_name};
 // Layer 2 (leader follow-up 2026-06-22): test-visible workspace-aware
 // classification so lifecycle/tests/restart.rs can exercise the

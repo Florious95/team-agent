@@ -57,14 +57,6 @@ pub fn run(argv: &[String], cwd: &Path) -> ExitCode {
         println!("{}", default_help());
         return ExitCode::Ok;
     };
-    if is_machine_command(command)
-        && argv[1..]
-            .iter()
-            .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
-    {
-        eprintln!("{HUMAN_NAVIGATION}");
-        return ExitCode::Usage;
-    }
     if command == "route" {
         return super::route::run(&argv[1..]);
     }
@@ -85,21 +77,26 @@ pub fn run(argv: &[String], cwd: &Path) -> ExitCode {
         println!("team-agent {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::Ok;
     }
-    // CR-063/G4: every registered subcommand's `--help` must short-circuit before dispatch,
-    // before argument validation, leader-pane checks, or runtime-state writes.
-    //
-    // The gate stays on KNOWN subcommands so an unknown command still falls through to
-    // the argparse-style invalid-choice path (golden parser.py:84; covered by
-    // `cli_unknown_command_red` and the `claude_code` divergence guard which would
-    // otherwise be silently passthrough-shaped).
-    if is_known_subcommand(command)
-        && argv
-            .iter()
-            .skip(1)
-            .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
+    if let Some(result) = super::intent::run(command, &argv[1..], cwd) {
+        return match result {
+            Ok(result) => emit_result(result),
+            Err(error) => emit_cli_error_for_command(command, &argv[1..], cwd, &error),
+        };
+    }
+    // Classify syntax/scope errors before dispatch; contextual status refusals
+    // retain their existing stderr-only contract. Resolve the scope only once.
+    if is_machine_command(command)
+        || matches!(command_spec(command).map(|spec| spec.kind), Some(CommandKind::Dispatch(_)))
     {
-        println!("{}", command_help(Some(command)));
-        return ExitCode::Ok;
+        let checked = match prepare_control_args(command, &argv[1..], cwd) {
+            Ok(checked) => checked,
+            Err(error) => return emit_parser_usage(command, &argv[1..], &error),
+        };
+        let error_args = checked.tokens.clone();
+        return match dispatch_prepared(command, checked, cwd) {
+            Ok(exit) => exit,
+            Err(error) => emit_cli_error_for_command(command, &error_args, cwd, &error),
+        };
     }
     match dispatch(command, &argv[1..], cwd) {
         Ok(exit) => exit,
@@ -136,7 +133,7 @@ fn emit_cli_error_for_command(
             },
             _ => error.to_string(),
         };
-        if has_arg(args, "--json") {
+        if super::arguments::has_flag(command, args, "--json") {
             let payload = error.to_payload(Path::new(""), command);
             let mut value = serde_json::to_value(payload)
                 .unwrap_or_else(|_| serde_json::json!({"ok": false, "error": error.to_string()}));
@@ -152,9 +149,16 @@ fn emit_cli_error_for_command(
         ExitCode::Usage
     } else if command == "status" {
         emit_status_cli_error(error)
+    } else if matches!(error, CliError::Usage(_)) {
+        emit_parser_usage(command, args, error)
     } else {
         emit_cli_error(command, args, cwd, error)
     }
+}
+
+#[cfg(test)]
+pub(crate) fn __test_runtime_error_emitter(command: &str, cwd: &Path, error: &CliError) -> ExitCode {
+    emit_cli_error(command, &[], cwd, error)
 }
 
 fn emit_status_cli_error(error: &CliError) -> ExitCode {
@@ -218,33 +222,34 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
     if command == "leader-prompt" {
         return Ok(super::leader_prompt::run(args));
     }
-    // Keep the removed flag harmless for older scripts and persisted command
-    // lines; the default tmux backend is already the only runtime path.
-    let filtered_args: Vec<String> = args
-        .iter()
-        .filter(|arg| arg.as_str() != "--no-display")
-        .cloned()
-        .collect();
-    let args = filtered_args.as_slice();
-    if is_machine_command(command) {
-        if args
-            .iter()
-            .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
-        {
+    if let Some(result) = super::intent::run(command, args, cwd) {
+        return result.map(emit_result);
+    }
+    let machine = is_machine_command(command);
+    if !machine && !matches!(command_spec(command).map(|spec| spec.kind), Some(CommandKind::Dispatch(_))) {
+        return Ok(emit_unknown_subcommand_usage(command));
+    }
+    dispatch_prepared(command, prepare_control_args(command, args, cwd)?, cwd)
+}
+
+fn prepare_control_args(command: &str, args: &[String], cwd: &Path) -> Result<super::arguments::CheckedArgs, CliError> {
+    let mut checked = super::arguments::parse(command, args)?;
+    if !checked.help { checked.tokens = resolve_command_scope(command, checked.tokens, cwd)?; }
+    Ok(checked)
+}
+
+fn dispatch_prepared(command: &str, checked: super::arguments::CheckedArgs, cwd: &Path) -> Result<ExitCode, CliError> {
+    let machine = is_machine_command(command);
+    if checked.help {
+        if machine {
             eprintln!("{HUMAN_NAVIGATION}");
             return Ok(ExitCode::Usage);
         }
-        return dispatch_machine(command, args, cwd);
+        println!("{}", command_help(Some(command)));
+        return Ok(ExitCode::Ok);
     }
-    let Some(spec) = command_spec(command) else {
-        return Ok(emit_unknown_subcommand_usage(command));
-    };
-    match spec.kind {
-        CommandKind::Dispatch(_) => {}
-        CommandKind::LeaderPassthrough { .. } => {
-            return Ok(emit_unknown_subcommand_usage(command));
-        }
-    }
+    let args = checked.tokens.as_slice();
+    if machine { return dispatch_machine(command, args, cwd); }
     if args.iter().all(|arg| arg == "--json")
         && matches!(
             command,
@@ -344,17 +349,18 @@ fn is_known_subcommand(command: &str) -> bool {
 }
 
 pub(crate) fn default_help() -> String {
-    let mut out = String::from("Team Agent: create a team, send tasks, read replies and shut down safely.\n\n1. Prepare agents\n   Run team-agent quick-start in the project directory. An empty directory receives TEAM.md and agents/worker.md templates to create manually.\n2. Open a leader and create the team\n   With Pi installed and signed in, run team-agent pi.\n   Run team-agent quick-start in that leader's tool context.\n   To recover an existing team, see team-agent restart --help; do not take over or delete it.\n3. Send tasks and read replies\n   team-agent send worker 'Calculate 245 * 37 and reply to the leader.'\n   team-agent inbox leader -n 3\n   team-agent status\n   Sending is not completion; wait for an actual reply.\n4. Diagnose and shut down\n   team-agent doctor --workspace .\n   team-agent shutdown --workspace . --json\n   Verify this team's residual resources are empty, then diagnose the selected workspace.\n\nSelect workspace/team scope with --workspace/--team. Discover model names with models.\nWindows ConPTY requires a Windows host and an installed shim; tmux commands are not a generic Windows path.\n");
+    let mut out = String::from("Team Agent: create a team, send tasks, read replies and shut down safely.\n\n1. Prepare agents\n   Prepare TEAM.md and agents/*.md with explicit provider and bypass decisions; use --from for an external source.\n2. Open a leader and create the team\n   With Pi installed and signed in, run team-agent pi.\n   Run team-agent start in that leader's tool context. Verified live members stay unchanged; stopped members are started.\n   Use team restart for a deliberate restart (session auto); legacy bare restart retains preserve. Do not take over or delete an existing team.\n3. Send tasks and read replies\n   team-agent send worker 'Calculate 245 * 37 and reply to the leader.'\n   team-agent inbox leader -n 3\n   team-agent status\n   Sending is not completion; wait for an actual reply.\n4. Diagnose and stop\n   team-agent doctor --workspace .\n   team-agent stop --workspace . --json\n   Verify this team's residual resources are empty, then diagnose the selected workspace.\n\nSelect workspace/team scope with --workspace/--team. Discover model names with models.\nWindows ConPTY requires a Windows host and an installed shim; tmux commands are not a generic Windows path.\n");
     append_help_section(
         &mut out,
         "Getting started",
-        &["quick-start", "send", "status", "models", "inbox"],
+        &["start", "quick-start", "send", "status", "models", "inbox"],
     );
-    append_help_section(&mut out, "Team lifecycle", &["restart", "shutdown"]);
+    append_help_section(&mut out, "Team lifecycle", &["stop", "team", "restart", "shutdown"]);
     append_help_section(
         &mut out,
         "Agent lifecycle",
         &[
+            "agent",
             "add-agent",
             "start-agent",
             "stop-agent",
@@ -424,6 +430,9 @@ pub(super) const WORKER_TEMPLATE: &str = "---\nname: worker\nrole: assistant\npr
 const HUMAN_NAVIGATION: &str = "Use team-agent --help to list available commands.";
 
 pub(super) fn command_help(command: Option<&str>) -> String {
+    if let Some(name) = command.filter(|name| matches!(*name, "start" | "stop" | "team" | "agent")) {
+        return super::intent::help(name);
+    }
     let Some(name) = command else {
         return default_help();
     };
@@ -440,7 +449,7 @@ pub(super) fn command_help(command: Option<&str>) -> String {
         "quick-start" => (
             "TEAMDIR contains TEAM.md and agents/; --workspace selects the runtime project.\n--name sets the team name; --team/--team-id selects the team; --yes retains compatibility; --detail includes full diagnostics.\nProviders must be installed and signed in. Declare provider/model/effort in role files; permission bypass defaults to false.\n--backend tmux is for POSIX; conpty requires a Windows host and an installed ConPTY shim.",
             "team-agent quick-start\nteam-agent quick-start ./roles --workspace ./project\nteam-agent quick-start . --json",
-            "Check Pi installation and sign-in; verify models with team-agent models --provider pi.\nRun team-agent pi, then quick-start in that leader's tool context. For an existing team, see restart --help."),
+            "Compatibility bridge only. In the authorized Leader context, prefer team-agent start --from TEAMDIR for complete new configuration and team-agent start for later activation. Check models and native sign-in first; inspect status and actual replies after starting."),
         "send" => ("<agent> is an agent name from status; MESSAGE is the task text.\n--mailbox stores a message without injecting it into the current conversation; default delivery targets the agent conversation.",
             "team-agent send worker 'Calculate 245 * 37 and reply to the leader.'\nteam-agent send worker 'Review the changes' --workspace . --team help-demo\nteam-agent send worker 'Read this when next available' --mailbox",
             "Acceptance is not delivery or completion. Wait for an actual reply; use team-agent inbox leader -n 3. Diagnose with status/doctor rather than repeated sends."),
@@ -449,25 +458,25 @@ pub(super) fn command_help(command: Option<&str>) -> String {
         "status" => ("Optional <agent> selects one agent. --summary/--detail retain compatibility and do not add fields.\nNine fields: name/provider/model/effort/runtime_status/activity/health/session_name/tmux_command.\nRuntime, activity and health are distinct. unknown means insufficient evidence; null means unset. No default model is guessed.",
             "team-agent status\nteam-agent status worker\nteam-agent status --workspace . --team help-demo --json", "Read replies with team-agent inbox leader -n 3; diagnose problems with team-agent doctor --workspace ."),
         "models" => ("--provider selects the provider, default pi. QUERY or --search performs keyword search; they are mutually exclusive.\nUse cursor for the contract-native Cursor catalog; cursor_agent retains the legacy entrypoint. Copilot has no model discovery entrypoint here. Results come from the native catalog, not guesses.",
-            "team-agent models --provider pi\nteam-agent models --provider pi --search luna\nteam-agent models --provider cursor --json", "Use the exact returned model name in a role file or add-agent --model before launch."),
-        "restart" => ("WORKSPACE defaults to the current project; saved sessions are preferred.\nUse --allow-fresh only after explicit authorization to lose saved context. --session-converge-deadline sets the wait in seconds.",
-            "team-agent restart .\nteam-agent restart . --team help-demo --json", "Check status after restart. Obtain authorization before creating a fresh session; takeover is not a substitute for restart."),
-        "shutdown" => ("Shuts down only the selected workspace/team. Logs are retained by default; --keep-logs remains compatible.\n--json reports scope, degradation and owned residuals. Success does not mean other teams were shut down.",
-            "team-agent shutdown --workspace .\nteam-agent shutdown --workspace . --team help-demo --json", "Verify this team's owned residuals are empty, then run team-agent doctor --workspace . Do not clean up other teams."),
-        "add-agent" => ("<agent> names the new agent. --provider selects the provider; --model sets the model; --effort sets reasoning effort.\n--bypass controls permission bypass (example: false); --prompt sets responsibilities; --profile selects authentication/proxy settings.\nProvider and bypass must be explicit in arguments or --role-file. Conflicting settings are refused, not guessed. Use --force to replace an agent only after explicit authorization.",
-            "team-agent add-agent reviewer --provider pi --model openai-codex/gpt-6-luna --bypass false --prompt 'Review tasks'\nteam-agent add-agent reviewer --role-file ./agents/reviewer.md", "Verify the agent with status, then run team-agent send reviewer 'Review the changes'."),
-        "start-agent" => ("Starts an existing agent only; stop-agent first if it is running.\n--provider selects the provider; --model sets the model; --effort sets reasoning effort; --bypass controls permission bypass.\n--prompt/--profile changes responsibilities/authentication. Use --allow-fresh only after explicit authorization to lose saved context.",
-            "team-agent start-agent worker\nteam-agent start-agent worker --model openai-codex/gpt-6-luna", "Use add-agent for a new agent. Check status after starting, then send a task."),
-        "stop-agent" => ("<agent> names the agent to stop. This is not removal; configuration and session history are retained.",
-            "team-agent stop-agent worker\nteam-agent stop-agent worker --workspace . --team help-demo --json", "Verify stopped status; resume with team-agent start-agent worker."),
-        "reset-agent" => ("Requires explicit --discard-session. Stops the old process, clears the saved session association and attempts a fresh restart. Paused agents stay paused. This does not delete all native provider history.",
-            "team-agent reset-agent worker --discard-session\nteam-agent reset-agent worker --discard-session --workspace . --team help-demo --json", "Verify with team-agent status. After a normal reset, send a new task; another start-agent is unnecessary."),
-        "clone-agent" => ("<agent> is the source; --as names the new agent; --label sets a readable label.\nCreates an agent from copied configuration, not a complete conversation copy.",
-            "team-agent clone-agent worker --as reviewer\nteam-agent clone-agent worker --as reviewer --label 'Review agent' --workspace .", "Check the new agent with status, then send reviewer an independent task."),
-        "fork-agent" => ("<agent> is the source; --as names the new agent; --label sets a readable label.\nRequires a captured source session and supported fork behavior. Unsupported cases are refused; not all providers support the same kind of fork.",
-            "team-agent fork-agent worker --as experiment\nteam-agent fork-agent worker --as experiment --workspace . --team help-demo --json", "Inspect status after success, then send a task to the resulting agent. Stop or remove a new seat when finished."),
-        "remove-agent" => ("Requires --confirm. Spec-defined agents also require --from-spec; dynamic agents do not.\nDeletes only the managed role copy, not an external user role file. Stop a running agent first.\n--force stops and removes a running agent; use only after understanding the risk and receiving explicit authorization.",
-            "team-agent remove-agent reviewer --confirm\nteam-agent remove-agent reviewer --from-spec --confirm --workspace . --team help-demo --json", "Save required replies first; verify status and configuration scope after removal. Do not force-clean other agents."),
+            "team-agent models --provider pi\nteam-agent models --provider pi --search luna\nteam-agent models --provider cursor --json", "Use the exact returned model in a role file or team-agent start AGENT --model MODEL; stop a running seat before changing its settings."),
+        "restart" => ("restart AGENT and team restart default to --session auto; bare/explicit-path restart keeps preserve.\n--session preserve requires continuation evidence; auto permits only the original legal fresh fallback, not guaranteed saved memory.\n--dry-run plans without lifecycle effects. --allow-fresh is the legacy authorized opt-in; --session-converge-deadline is in seconds.",
+            "team-agent restart worker --dry-run --json\nteam-agent restart worker --session preserve --workspace . --dry-run --json", "Use team-agent team restart for deliberate team recovery; choose --session preserve when context must be retained. Team restart leaves explicitly stopped/paused seats alone; team-agent start intentionally activates the non-paused roster. Inspect partial/unknown outcomes with status/doctor, never blind reset or retry."),
+        "shutdown" => ("Compatibility bridge: stop only the selected workspace/team. Logs are retained by default; --keep-logs remains compatible.\n--json reports scope, degradation and owned residuals. Success does not mean other teams were shut down.",
+            "team-agent shutdown --workspace .\nteam-agent shutdown --workspace . --team help-demo --json", "Prefer team-agent stop --workspace . --team KEY --json. Verify this team's owned residuals are empty; use team-agent start for authorized later activation. Do not clean up other teams or shared servers."),
+        "add-agent" => ("Compatibility add-only entry. <agent> names the new seat; --provider/--model/--effort select intentional launch settings.\n--bypass requires true|false; --prompt sets responsibilities; --profile selects a local profile.\nProvider and bypass must be explicit in arguments or --role-file. Conflicting settings are refused before writes. --force requires explicit authorization, a positively dead old pane and no live cohort.",
+            "team-agent add-agent reviewer --provider pi --model openai-codex/gpt-6-luna --bypass false --prompt 'Review tasks'\nteam-agent add-agent reviewer --role-file ./agents/reviewer.md", "Prefer team-agent start reviewer --role-file FILE for add-or-wake, or team-agent agent add reviewer for strict new-seat behavior. Keep provider/bypass explicit; check status and send a task after actual startup."),
+        "start-agent" => ("Compatibility entry starts an existing stopped seat only; a running seat is refused.\n--provider/--model/--effort/--bypass select intentional settings; --prompt replaces permanent instructions and --profile selects local authentication.\nA different provider is refused. Use --allow-fresh only after explicit authorization to lose saved context.",
+            "team-agent start-agent worker\nteam-agent start-agent worker --model openai-codex/gpt-6-luna", "Prefer team-agent start worker for daily add-or-wake or verified live no-op. Use team-agent stop worker before applying changed settings; inspect status and send a task afterward. A no-op is not role synchronization or business readiness."),
+        "stop-agent" => ("Compatibility single-agent stop; configuration and saved session associations are retained, not removed.",
+            "team-agent stop-agent worker\nteam-agent stop-agent worker --workspace . --team help-demo --json", "Prefer team-agent stop worker. Verify the stopped result; intentionally wake with team-agent start worker, then check status before sending new work."),
+        "reset-agent" => ("Compatibility entry requires explicit --discard-session. Stops the old process, clears the saved association and attempts fresh startup. Paused agents stay paused; not all native history is deleted.",
+            "team-agent reset-agent worker --discard-session\nteam-agent reset-agent worker --discard-session --workspace . --team help-demo --json", "Prefer team-agent agent reset worker --discard-session only after explicit context-loss approval. Never use reset as a resume-refusal fallback; check the actual result/status before sending new work."),
+        "clone-agent" => ("Compatibility entry: <agent> is the source; --as names the new agent; --label sets a readable label.\nCopies configuration, not a complete conversation.",
+            "team-agent clone-agent worker --as reviewer\nteam-agent clone-agent worker --as reviewer --label 'Review agent' --workspace .", "Prefer team-agent agent clone worker --as reviewer. Check the new agent with status, then send it an independent task; original capability gates still apply."),
+        "fork-agent" => ("Compatibility entry: <agent> is the source; --as names the new agent; --label sets a readable label.\nRequires captured context and admitted new-seat fork capability. Unsupported providers refuse without fallback.",
+            "team-agent fork-agent worker --as experiment\nteam-agent fork-agent worker --as experiment --workspace . --team help-demo --json", "Prefer team-agent agent fork worker --as experiment where admitted. Inspect status before sending work; finish with team-agent stop experiment or the explicit agent remove operation."),
+        "remove-agent" => ("Compatibility entry requires --confirm. Spec-defined agents also require --from-spec; dynamic agents do not.\nDeletes only the managed role copy, not external user files. Stop a running agent first.\n--force stops/removes a running agent only with explicit authorization and the original safety checks.",
+            "team-agent remove-agent reviewer --confirm\nteam-agent remove-agent reviewer --from-spec --confirm --workspace . --team help-demo --json", "Prefer team-agent agent remove reviewer --confirm with any required --from-spec. Save replies first and verify the resulting scope/status; do not force-clean other agents."),
         "leaders" => ("Lists live leaders by default; --all includes stale registrations and --stale selects stale entries.\nQUERY/--search filters workspace/team/name. --prune removes verified retired registrations; preview with --dry-run.",
             "team-agent leaders\nteam-agent leaders --all --json\nteam-agent leaders --prune --dry-run", "Select --workspace/--team from the reported scope. Registry cleanup is not process shutdown."),
         "doctor" => ("Read-only diagnosis by default; SPEC is an optional configuration path.\n--comms/--gate comms checks channels, not actual replies; --gate orphans checks residual resources.\nUse --fix/--fix-schema/--cleanup-orphans only within authorized scope. Dangerous repairs require --confirm.",
@@ -475,19 +484,19 @@ pub(super) fn command_help(command: Option<&str>) -> String {
         "approvals" => ("Optional <agent> selects one agent. Observes permission prompts without granting approval.",
             "team-agent approvals\nteam-agent approvals worker --json", "Verify the requested permission, handle it in the actual provider prompt, then check status."),
         "profile" => ("init creates a profile; doctor checks it; show displays settings. NAME is the profile name.\n--auth-mode selects authentication; --proxy-mode direct bypasses proxies and inherit uses the environment proxy.\nProfiles belong to the selected workspace, not automatically to an isolated --team. Do not expose credentials.",
-            "team-agent profile init local --auth-mode subscription\nteam-agent profile doctor local\nteam-agent profile show local", "After validation, select --profile local with add-agent/start-agent. Use native provider sign-in when needed."),
+            "team-agent profile init local --auth-mode subscription\nteam-agent profile doctor local\nteam-agent profile show local", "After validation, use team-agent start AGENT --profile local; stop a running seat before changing settings. Use native sign-in when needed, never copy external credentials."),
         "install-skill" => ("--source must be a verified skill directory; --target selects codex/claude/copilot/all.\n--dest overrides the destination; --dry-run previews; --uninstall removes the target skill. Installation is not required to create a team.",
             "team-agent install-skill --source \"$SKILL_DIR\" --target codex --dry-run\nteam-agent install-skill --source \"$SKILL_DIR\" --target codex", "Set SKILL_DIR to a verified directory and inspect the preview before installation. Do not overwrite unknown user files."),
         "claim-leader" => ("Use only when doctor recommends leader registration and this terminal is the actual leader.\n--confirm authorizes registration; it does not open a new provider.",
             "team-agent claim-leader --workspace . --json\nteam-agent claim-leader --workspace . --team help-demo --confirm --json", "Verify doctor findings and terminal ownership first. A refusal without confirmation is not successful registration."),
-        "takeover" => ("Use only when doctor recommends takeover and the user has authorized it. This changes leader ownership.\nWith a usable team terminal, takeover may execute even without --confirm; it is not a read-only preview. Use restart for normal recovery.",
+        "takeover" => ("Use only when doctor recommends takeover and the user has authorized it. This changes leader ownership.\nWith a usable team terminal, takeover may execute even without --confirm; it is not a read-only preview. Use team restart --session preserve for normal context-preserving recovery.",
             "team-agent takeover --workspace . --team help-demo --confirm\nteam-agent takeover --workspace . --team help-demo --confirm --json", "Verify leader/team ownership before confirmation. Check status/doctor afterwards; do not take over someone else's team."),
         "attach-leader" => ("PANE must be a verified leader terminal, not a guessed pane id.\n--provider selects the actual provider; --confirm authorizes attachment to an existing leader. Use only when doctor recommends it.",
             "team-agent attach-leader --pane \"$PANE\" --provider pi --workspace .\nteam-agent attach-leader --pane \"$PANE\" --provider pi --workspace . --team help-demo --confirm --json", "Set PANE to the verified terminal. Confirm attachment with doctor before sending a task."),
         "kiro" => ("Kiro leader launching is not admitted by this candidate. This entry returns the stable capability refusal kiro_leader_not_admitted (exit 1).\nNo native process, leader binding, attach or provider fallback is attempted. --help/-h is read-only and exits 0.",
-            "team-agent kiro\nteam-agent kiro --json", "Use provider: kiro in a worker role with team-agent quick-start; worker support does not grant leader capability."),
+            "team-agent kiro\nteam-agent kiro --json", "Use provider: kiro in a complete worker role source with team-agent start --from TEAMDIR; worker support does not grant Leader capability."),
         _ => ("Install the provider and complete native sign-in first. The current directory is the workspace.\nUse --attach-existing/--confirm only after verifying leader ownership and receiving authorization; --attach-session selects a verified session.\n--external-leader selects an external leader; --allow-nested-attach requires explicit authorization for nested terminals.\nArguments after -- pass through unchanged. Bare --help/-h displays this help without starting the provider.",
-            "", "Run team-agent quick-start in the opened leader's tool context, not in an ordinary worker conversation."),
+            "", "Prepare complete TEAM.md/roles with explicit user choices, then run team-agent start in the opened Leader's tool context, never an ordinary worker conversation."),
     };
     let examples = if matches!(spec.kind, CommandKind::LeaderPassthrough { .. }) {
         let native = if name == "cursor" { "agent" } else { name };
@@ -512,6 +521,9 @@ pub(super) fn command_help(command: Option<&str>) -> String {
     );
     if name == "quick-start" {
         out.push_str(&format!("\n\nMinimal two-file configuration (create manually; not written automatically):\nTEAM.md:\n{TEAM_TEMPLATE}\nagents/worker.md:\n{WORKER_TEMPLATE}"));
+    }
+    if name == "restart" {
+        out.push_str("\nRestart forms: restart AGENT selects one registered agent (default session auto); use agent restart ID to disambiguate a same-named directory. Legacy bare or explicit-path restart retains preserve and original receipts. New team restart defaults to auto. auto never means reset; native capability refusals remain authoritative.");
     }
     if name == "cursor" {
         out.push_str("\nDiscover models with team-agent models --provider cursor_agent.");
@@ -612,9 +624,14 @@ fn install_skill_args(args: &[String]) -> Result<InstallSkillArgs, CliError> {
 
 /// 取 `--flag <value>` 的值(用于 install-skill 的 --source/--dest,parse_args 不覆盖的旗标)。
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
-    args.iter()
-        .position(|a| a == flag)
-        .and_then(|i| args.get(i + 1).cloned())
+    for (index, argument) in args.iter().enumerate() {
+        if argument == "--" { break; }
+        if argument == flag { return args.get(index + 1).cloned(); }
+        if let Some((key, value)) = argument.split_once('=') {
+            if key == flag { return Some(value.to_string()); }
+        }
+    }
+    None
 }
 
 /// `team-agent install-skill`(RED-1 单源):repo `skills/team-agent` → `~/.codex|.claude|.copilot`。
@@ -685,7 +702,21 @@ fn resolve_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+fn emit_parser_usage(command: &str, args: &[String], error: &CliError) -> ExitCode {
+    if super::arguments::has_flag(command, args, "--json") {
+        let mut payload = error.to_payload(Path::new(""), command);
+        payload.action = format!("Use team-agent {command} --help to correct the command arguments.");
+        if let Ok(value) = serde_json::to_value(payload) {
+            println!("{}", python_compact_json(&crate::redaction::redact_external_value(&value)));
+        }
+    } else {
+        eprintln!("error: {}\nUse team-agent {command} --help.", crate::redaction::redact_external_text(&error.to_string()));
+    }
+    ExitCode::Usage
+}
+
 fn emit_cli_error(command: &str, args: &[String], cwd: &Path, error: &CliError) -> ExitCode {
+    if matches!(error, CliError::Usage(_)) { return emit_parser_usage(command, args, error); }
     let parsed = parse_args(args);
     let workspace = workspace(&parsed, cwd);
     let log_path = cli_error_log_path(&workspace);
@@ -699,7 +730,7 @@ fn emit_cli_error(command: &str, args: &[String], cwd: &Path, error: &CliError) 
     let mut payload = payload_error.to_payload(&log_path, command);
     payload.error = safe_error;
     if let CliError::AddressRefusal { error, action, .. } = payload_error {
-        if !has_arg(args, "--json") {
+        if !super::arguments::has_flag(command, args, "--json") {
             payload.error = crate::redaction::redact_external_text(error);
             payload.action = action.clone();
         }
@@ -742,7 +773,7 @@ fn emit_cli_error(command: &str, args: &[String], cwd: &Path, error: &CliError) 
             .map(|value| crate::redaction::redact_external_text(&value))
             .collect()
     });
-    if has_arg(args, "--json") {
+    if super::arguments::has_flag(command, args, "--json") {
         if let Ok(value) = serde_json::to_value(payload) {
             println!("{}", python_compact_json(&value));
         }
@@ -820,7 +851,7 @@ fn python_compact_json(value: &Value) -> String {
 }
 
 fn has_arg(args: &[String], needle: &str) -> bool {
-    args.iter().any(|arg| arg == needle)
+    args.iter().take_while(|arg| arg.as_str() != "--").any(|arg| arg == needle)
 }
 
 #[derive(Debug, Default)]
@@ -894,6 +925,19 @@ struct ParsedArgs {
 }
 
 fn parse_args(args: &[String]) -> ParsedArgs {
+    let mut expanded = Vec::new();
+    let mut literal = false;
+    for argument in args {
+        if argument == "--" { literal = true; }
+        if !literal && argument.starts_with("--") {
+            if let Some((flag, value)) = argument.split_once('=') {
+                expanded.extend([flag.to_string(), value.to_string()]);
+                continue;
+            }
+        }
+        expanded.push(argument.clone());
+    }
+    let args = expanded.as_slice();
     let mut parsed = ParsedArgs::default();
     let mut i = 0usize;
     while i < args.len() {
@@ -901,6 +945,10 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             break;
         };
         match arg.as_str() {
+            "--" => {
+                parsed.positionals.extend_from_slice(&args[i + 1..]);
+                break;
+            }
             "--workspace" => {
                 parsed.workspace = next_arg(args, &mut i).map(PathBuf::from);
             }
@@ -1022,7 +1070,7 @@ fn next_arg(args: &[String], index: &mut usize) -> Option<String> {
     args.get(*index).cloned()
 }
 
-fn parse_seconds_ms(raw: &str) -> Option<u64> {
+pub(super) fn parse_seconds_ms(raw: &str) -> Option<u64> {
     let seconds = raw.parse::<f64>().ok()?;
     if seconds.is_finite() && seconds >= 0.0 {
         Some((seconds * 1000.0).round() as u64)
@@ -1031,10 +1079,54 @@ fn parse_seconds_ms(raw: &str) -> Option<u64> {
     }
 }
 
-fn parse_cli_provider(raw: Option<&str>) -> Result<crate::provider::Provider, CliError> {
-    let raw = raw.unwrap_or("codex");
+fn parse_cli_provider(raw: &str) -> Result<crate::provider::Provider, CliError> {
     serde_json::from_value::<crate::provider::Provider>(serde_json::json!(raw))
-        .map_err(|_| CliError::Runtime(format!("unknown provider: {raw}")))
+        .map_err(|_| CliError::Usage(format!("unknown provider: {raw}")))
+}
+
+pub(super) fn explicit_path(value: &str) -> bool {
+    value == "." || value == ".." || value.contains('/') || value.contains('\\')
+        || Path::new(value).is_absolute()
+        || (value.as_bytes().get(1) == Some(&b':') && value.as_bytes().first().is_some_and(u8::is_ascii_alphabetic))
+}
+
+fn checked_workspace(path: &Path, cwd: &Path) -> Result<PathBuf, CliError> {
+    let path = resolve_cli_path(cwd, path);
+    let canonical = std::fs::canonicalize(&path).map_err(|_| CliError::Usage(format!(
+        "workspace does not exist or is unavailable: {}", path.display()
+    )))?;
+    if !canonical.is_dir() {
+        return Err(CliError::Usage(format!("workspace is not a directory: {}", path.display())));
+    }
+    Ok(canonical)
+}
+
+fn resolve_command_scope(command: &str, mut args: Vec<String>, cwd: &Path) -> Result<Vec<String>, CliError> {
+    let mut selected = None;
+    for argument in &mut args {
+        if argument == "--" { break; }
+        if let Some(path) = argument.strip_prefix("--workspace=") {
+            let canonical = checked_workspace(Path::new(path), cwd)?;
+            *argument = format!("--workspace={}", canonical.display());
+            selected = Some(canonical);
+        }
+    }
+    if command == "restart" {
+        let index = args.iter().position(|arg| arg == "--")
+            .and_then(|index| (index + 1 < args.len()).then_some(index + 1))
+            .or_else(|| args.iter().position(|arg| !arg.starts_with('-')));
+        if let Some(index) = index {
+            if !explicit_path(&args[index]) {
+                return Err(CliError::Usage("bare restart targets are ambiguous; use restart --workspace PATH or restart ./PATH for a team".to_string()));
+            }
+            let canonical = checked_workspace(Path::new(&args[index]), cwd)?;
+            if selected.as_ref().is_some_and(|selected| selected != &canonical) {
+                return Err(CliError::Usage("restart WORKSPACE conflicts with --workspace".to_string()));
+            }
+            args[index] = canonical.to_string_lossy().into_owned();
+        }
+    }
+    Ok(args)
 }
 
 fn workspace(parsed: &ParsedArgs, cwd: &Path) -> PathBuf {
@@ -1279,6 +1371,7 @@ fn warn_send_legacy_delivery_flags(args: &[String]) {
     for flag in FLAGS {
         if args
             .iter()
+            .take_while(|arg| arg.as_str() != "--")
             .any(|arg| arg == flag || arg.starts_with(&format!("{flag}=")))
         {
             eprintln!(
@@ -1289,52 +1382,7 @@ fn warn_send_legacy_delivery_flags(args: &[String]) {
 }
 
 fn validate_send_flags(args: &[String]) -> Result<(), CliError> {
-    const ALLOWED: &[&str] = &[
-        "--workspace",
-        "--team",
-        "--targets",
-        "--target",
-        "--to",
-        "--to-name",
-        "--to-leader",
-        "--pane",
-        "--task",
-        "--watch-result",
-        "--requires-ack",
-        "--no-ack",
-        "--no-wait",
-        "--timeout",
-        "--confirm-human",
-        "--message-id",
-        "--mailbox",
-        "--presentation-sink",
-        "--message-class",
-        "--case-id",
-        "--json",
-        "-h",
-        "--help",
-    ];
-    const ALLOWED_PREFIXES: &[&str] = &[
-        "--team=",
-        "--pane=",
-        "--to-name=",
-        "--to-leader=",
-        "--presentation-sink=",
-        "--message-class=",
-        "--case-id=",
-    ];
-    if let Some(flag) = args.iter().find(|arg| {
-        arg.starts_with('-')
-            && !ALLOWED.contains(&arg.as_str())
-            && !ALLOWED_PREFIXES
-                .iter()
-                .any(|prefix| arg.starts_with(prefix))
-    }) {
-        return Err(CliError::Usage(format!(
-            "unrecognized argument for `send`: {flag}"
-        )));
-    }
-    Ok(())
+    super::arguments::parse("send", args).map(|_| ())
 }
 
 /// Stage 4 of identity-boundary unified plan (architect direction
@@ -1445,7 +1493,9 @@ fn attach_leader_args(args: &[String], cwd: &Path) -> Result<AttachLeaderArgs, C
             .pane
             .filter(|pane| !pane.is_empty())
             .map(crate::transport::PaneId::new),
-        provider: parse_cli_provider(parsed.provider.as_deref())?,
+        provider: parse_cli_provider(parsed.provider.as_deref()
+            .filter(|provider| !provider.trim().is_empty())
+            .ok_or_else(|| CliError::Usage("attach-leader requires --provider <name>".to_string()))?)?,
         confirm: parsed.confirm,
         json: parsed.json,
     })
@@ -1485,11 +1535,12 @@ fn shutdown_args(args: &[String], cwd: &Path) -> Result<ShutdownArgs, CliError> 
 
 fn restart_args(args: &[String], cwd: &Path) -> Result<RestartArgs, CliError> {
     let parsed = parse_args(args);
-    let workspace = parsed
-        .positionals
-        .first()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace(&parsed, cwd));
+    let workspace = if let Some(path) = parsed.positionals.first() {
+        if !explicit_path(path) {
+            return Err(CliError::Usage("bare restart targets are ambiguous; use restart --workspace PATH or restart ./PATH for a team".to_string()));
+        }
+        resolve_cli_path(cwd, Path::new(path))
+    } else { workspace(&parsed, cwd) };
     refuse_if_multi_alive_team_missing_scope("restart", &workspace, parsed.team.as_deref())?;
     Ok(RestartArgs {
         workspace,
@@ -1502,6 +1553,41 @@ fn restart_args(args: &[String], cwd: &Path) -> Result<RestartArgs, CliError> {
 }
 
 // Keep strict role CLI parsing separate from the legacy shared parser.
+pub(super) fn intent_source_workspace(source: &Path, cwd: &Path) -> Result<PathBuf, CliError> {
+    quick_start_args(&[source.to_string_lossy().into_owned()], cwd).map(|args| args.workspace)
+}
+
+pub(super) fn intent_role_patch(args: &[String]) -> Result<crate::lifecycle::role_config::RoleConfigPatch, CliError> {
+    role_agent_args(args, false).map(|(_, patch)| patch)
+}
+
+/// Explicit object aliases reuse the same syntax checks, typed builders and handlers.
+pub(super) fn intent_alias(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult, CliError> {
+    let mut checked = prepare_control_args(command, args, cwd)?;
+    if checked.help { return Ok(CmdResult::human(command_help(Some(command)))); }
+    for token in &mut checked.tokens {
+        if let Some(path) = token.strip_prefix("--role-file=") {
+            let path = Path::new(path);
+            let path = if path.is_absolute() { path.to_path_buf() } else { cwd.join(path) };
+            let path = path.canonicalize().map_err(|e| CliError::Usage(format!("invalid explicit role file: {e}")))?;
+            *token = format!("--role-file={}", path.display());
+        }
+    }
+    let args = checked.tokens.as_slice();
+    match command {
+        "status" => {
+            let parsed = status_args(args, cwd);
+            cmd_status_for_team(&parsed, parsed.team.as_deref())
+        }
+        "add-agent" => cmd_add_agent(&add_agent_args(args, cwd)?),
+        "remove-agent" => cmd_remove_agent(&remove_agent_args(args, cwd)?),
+        "reset-agent" => cmd_reset_agent(&reset_agent_args(args, cwd)?),
+        "clone-agent" => cmd_clone_agent(&clone_agent_args(args, cwd)?),
+        "fork-agent" => cmd_fork_agent(&fork_agent_args(args, cwd)?),
+        _ => Err(CliError::Usage("unsupported lifecycle alias".into())),
+    }
+}
+
 fn role_agent_args(
     args: &[String],
     add: bool,
@@ -1551,7 +1637,7 @@ fn role_agent_args(
         } else {
             index += 1;
             args.get(index)
-                .filter(|value| !value.starts_with("--"))
+                .filter(|value| flag == "--prompt" || !value.starts_with("--"))
                 .ok_or_else(|| CliError::Usage(format!("missing value for {flag}")))?
                 .clone()
         };
@@ -1671,6 +1757,9 @@ mod role_cli_tests {
 
 fn start_agent_args(args: &[String], cwd: &Path) -> Result<StartAgentArgs, CliError> {
     let (parsed, role_config) = role_agent_args(args, false)?;
+    if parsed.force {
+        return Err(CliError::Usage("start-agent does not support --force; use stop-agent AGENT followed by start-agent AGENT for a safe restart".to_string()));
+    }
     Ok(StartAgentArgs {
         role_config,
         agent: required_pos(&parsed, 0, "agent")?,
@@ -2100,8 +2189,8 @@ mod tests {
             .collect();
         assert_eq!(
             expected.len(),
-            31,
-            "the public catalog includes Leader prompt management and the Kiro capability gate"
+            35,
+            "the public catalog adds the four canonical lifecycle surfaces"
         );
         for spec_name in &expected {
             assert!(
@@ -2554,11 +2643,15 @@ mod tests {
     #[test]
     fn send_pane_still_rejects_to_and_empty_message() {
         let cwd = tmp_workspace();
-        let args = send_args(
+        let err = send_args(
             &cli_argv(&["--pane", "%1596", "--to", "worker", "hello"]),
             &cwd,
-        )
-        .unwrap();
+        ).unwrap_err();
+        assert!(matches!(err, CliError::Usage(ref message) if message.contains("one recipient addressing mode")));
+        // The public parser now refuses first; the typed handler must still
+        // reject the same conflict if a non-CLI caller constructs it directly.
+        let mut args = send_args(&cli_argv(&["--pane", "%1596", "hello"]), &cwd).unwrap();
+        args.targets = Some("worker".to_string());
         let err = cmd_send(&args).unwrap_err();
         assert!(
             matches!(err, CliError::Usage(ref message) if message.contains("--pane") && message.contains("--to") && message.contains("cannot") && message.contains("combined")),
@@ -2630,7 +2723,9 @@ mod tests {
         // 'statu' typo → status; 'add-agen' → add-agent.
         assert_eq!(nearest_subcommand("statu"), Some("status"));
         assert_eq!(nearest_subcommand("add-agen"), Some("add-agent"));
-        assert_eq!(nearest_subcommand("start-agnet"), Some("start-agent"));
+        // Presentation migration: the new canonical short verb is now a
+        // prefix candidate in the unchanged shared similarity ranking.
+        assert_eq!(nearest_subcommand("start-agnet"), Some("start"));
     }
 
     #[test]
@@ -2766,3 +2861,7 @@ mod tests {
         // without it.
     }
 }
+
+#[cfg(test)]
+#[path = "tests/parser_safety.rs"]
+mod parser_safety_tests;

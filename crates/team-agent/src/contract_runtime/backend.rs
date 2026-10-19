@@ -689,7 +689,7 @@ fn write_role(binding: &Binding, identity: &InstanceIdentity, role: &RoleConfig)
     file.sync_all()?;
     Ok(())
 }
-pub(super) fn read_role(binding: &Binding, identity: &InstanceIdentity) -> Result<RoleConfig, BackendError> {
+pub(crate) fn read_role(binding: &Binding, identity: &InstanceIdentity) -> Result<RoleConfig, BackendError> {
     let mut path = role_path(binding, identity);
     // Existing generation-one deployments retain their immutable source.
     if identity.generation == Generation(1) {

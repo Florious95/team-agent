@@ -291,8 +291,9 @@ fn cursor_mcp_enable_child_env_applies_direct_profile_unsets() {
 #[test]
 #[serial(env)]
 fn cursor_spawn_writes_identity_into_project_mcp_json() {
-    let _hermetic = hermetic_guard::HermeticTestEnv::enter("cursor-mcp-spawn");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("cursor-mcp-spawn");
     let ws = tmp_dir("cursor-mcp-spawn");
+    super::launch_spawn::seed_healthy_coordinator(&ws);
     let team = write_cursor_team(&ws, "cursortm", "cursor_writer");
     let selected = cursor_mcp_json_path(&ws, "cursor_writer").unwrap();
     assert!(
@@ -331,11 +332,12 @@ fn cursor_spawn_writes_identity_into_project_mcp_json() {
 #[test]
 #[serial(env)]
 fn cursor_spawn_isolation_off_writes_workspace_mcp_json() {
-    let _hermetic = hermetic_guard::HermeticTestEnv::enter("cursor-mcp-spawn-legacy");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("cursor-mcp-spawn-legacy");
     let key = "TEAM_AGENT_CURSOR_MCP_ISOLATION";
     let prev = std::env::var(key).ok();
     std::env::set_var(key, "0");
     let ws = tmp_dir("cursor-mcp-spawn-legacy");
+    super::launch_spawn::seed_healthy_coordinator(&ws);
     let team = write_cursor_team(&ws, "cursortm", "cursor_writer");
     let result = quick_start_with_transport_in_workspace(
         &ws,

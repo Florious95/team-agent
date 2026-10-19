@@ -57,6 +57,8 @@ pub(crate) const STATUS_REMINDER: &str =
     "Next: use team-agent inbox leader -n 3 for replies. Status is not proof of task completion; do not inspect worker terminal content.";
 
 pub mod adapters;
+mod arguments;
+mod intent;
 #[cfg(unix)]
 mod shutdown_socket;
 pub mod attach_app_server_leader;
@@ -194,7 +196,7 @@ pub mod lifecycle_port {
             crate::leader::LeaderLaunchStatus::NotStarted => false,
         };
         let leader_attach_command = if outcome.reason.as_deref() == Some("PaneWorkspaceMismatch") {
-            Some("team-agent attach-leader".to_string())
+            Some(format!("team-agent attach-leader --provider {}", crate::provider::wire::provider_wire(provider)))
         } else {
             leader_attach_command_for_plan(cwd, &plan)
         };
@@ -387,14 +389,16 @@ pub mod lifecycle_port {
         }
 
         let hint_action = match refusal.recovery.hint_action {
-            PaneAuthorityRecoveryHint::AttachLeader => "team-agent attach-leader",
+            PaneAuthorityRecoveryHint::AttachLeader => format!(
+                "team-agent attach-leader --provider {}", crate::provider::wire::provider_wire(provider)
+            ),
         };
         let action = match refusal.recovery.action {
             PaneAuthorityRecoveryAction::OpenTerminalOutsideCurrentTmuxPaneOrAttachFromMatchingPane => {
-                "open a new terminal window outside the current tmux/pane, confirm TMUX and \
+                format!("open a new terminal window outside the current tmux/pane, confirm TMUX and \
                  TMUX_PANE are absent, change directory to the requested workspace, and restart \
                  the leader; alternatively enter the matching workspace pane and run \
-                 `team-agent attach-leader`"
+                 `{hint_action}`")
             }
         };
         facts.insert(
@@ -4091,6 +4095,25 @@ pub mod lifecycle_port {
                     "reminder": crate::cli::QUICK_START_REMINDER,
                     "readiness": readiness_json.clone(),
                     "worker_readiness": readiness_json,
+                    "effects": {"worker_panes_started": agent_ids, "coordinator_start": "running_confirmed"},
+                })
+            }
+            crate::lifecycle::QuickStartReport::Partial {
+                workspace, session_name, launch, team, error, coordinator_state,
+            } => {
+                let agents: Vec<_> = launch.started.iter().map(|agent| agent.agent_id.as_str())
+                    .chain(launch.contract_started.iter().map(|id| id.as_str())).collect();
+                let recovery = format!(
+                    "team-agent doctor --workspace {} --team {} --json; inspect confirmed effects before any retry; no automatic rollback is claimed",
+                    shell_quote(&workspace.to_string_lossy()), shell_quote(&team),
+                );
+                json!({
+                    "ok": false, "status": "partial", "phase": "post_spawn",
+                    "workspace": workspace, "team": team, "session_name": session_name.as_str(),
+                    "error": crate::redaction::redact_external_text(&error),
+                    "effects": {"worker_panes_started": agents, "coordinator_start": coordinator_state},
+                    "last_confirmed_effect": if agents.is_empty() {Value::Null} else {json!("worker_panes_started")},
+                    "current_state": "unknown", "recovery": recovery,
                 })
             }
             crate::lifecycle::QuickStartReport::ExistingRuntime {
@@ -4122,6 +4145,7 @@ pub mod lifecycle_port {
                 "ok": false,
                 "status": "preflight_blocked",
                 "reason": "quick-start preflight blocked",
+                "effects": {"worker_panes_started": [], "coordinator_start": "not_attempted"},
                 "summary": summary,
                 "blockers": blockers,
                 "next_actions": next_actions,
@@ -4203,6 +4227,25 @@ pub mod lifecycle_port {
             assert!(detail["worker_readiness"]
                 .get("leader_receiver_attached")
                 .is_some());
+        }
+
+        #[test]
+        fn issue337_partial_start_receipt_retains_workers_and_scoped_recovery() {
+            let crate::lifecycle::QuickStartReport::Ready { launch, .. } = pending_tool_load_report() else { panic!() };
+            let value = quick_start_value(crate::lifecycle::QuickStartReport::Partial {
+                workspace: PathBuf::from("/owned/work space"),
+                session_name: crate::transport::SessionName::new("team-demo"),
+                launch, team: "demo".into(), error: "caller disappeared".into(),
+                coordinator_state: "not_attempted".into(),
+            });
+            assert_eq!(value["status"], "partial");
+            assert_eq!(value["effects"]["worker_panes_started"], json!(["worker"]));
+            assert_eq!(value["effects"]["coordinator_start"], "not_attempted");
+            assert_eq!(value["last_confirmed_effect"], "worker_panes_started");
+            let recovery = value["recovery"].as_str().unwrap();
+            let argv = split_shell_argv(recovery);
+            assert!(argv.windows(2).any(|pair| pair == ["--workspace", "/owned/work space"]));
+            assert!(argv.windows(2).any(|pair| pair == ["--team", "demo"]));
         }
 
         fn pending_tool_load_report() -> crate::lifecycle::QuickStartReport {
@@ -4425,7 +4468,7 @@ pub mod lifecycle_port {
         #[test]
         #[serial_test::serial(env)]
         fn existing_runtime_producer_scopes_send_team() {
-            let _hermetic = super::super::hermetic_test_support::HermeticTestEnv::enter(
+            let _hermetic = super::super::hermetic_test_support::HermeticTestEnv::enter_with_leader(
                 "quick-start-value-existing-runtime",
             );
             let root = std::env::temp_dir().join(format!(
@@ -4448,6 +4491,7 @@ pub mod lifecycle_port {
                 "---\nname: implementer\nrole: Implementation Engineer\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nImplement bounded tasks.\n",
             )
             .unwrap();
+            super::super::hermetic_test_support::seed_in_process_coordinator(&root);
             let transport = crate::transport::test_support::OfflineTransport::new();
             let first = crate::lifecycle::quick_start_with_transport(
                 &team_dir,

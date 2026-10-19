@@ -1,106 +1,73 @@
-# Team-In-Team Reference
+# Team-in-team reference
 
-This reference is for explicitly requested nested Team Agent teams. Use it only when the user or leader asks a worker to create or operate a child team. For normal work, a worker should stay inside its parent team and report through `team_orchestrator`.
+Use only when the user/Leader explicitly authorizes a child Team Agent team. Ordinary workers stay in their parent team and report through their three team-scoped MCP tools. A provider's built-in team feature is not a substitute for Team Agent.
 
-## Safety Rules
+## Protect the parent
 
-- Use the Team Agent framework skill and `team-agent` CLI. Do not use a provider's built-in agent-team feature when the user asked for Team Agent.
-- Never create a child team in the parent team's `.team/current` directory.
-- Never edit, delete, or reuse files under the parent team's `.team/current`.
-- Never shut down a team just because `.team/current` is already occupied. In a nested setup, that is probably the parent team; shutting it down can kill the main node.
-- A child team needs its own workspace directory. The role-doc directory is not the child workspace.
-- The MCP surface is exactly `send_message`, `report_result`, and optional `get_team_status`; it is team-scoped. A worker must not try to widen `send_message` to another team. Lifecycle management uses the authorized native CLI.
+- Never create, reuse, edit or delete the parent team's `.team/current` as a child workspace.
+- Choose an independent child workspace before writing TEAM/role files. The role directory is not the workspace.
+- Never stop the parent because a name, session or directory already exists. Treat collisions as scope/refusal evidence.
+- Loading a skill or receiving a task does not change caller authority. If original native caller admission refuses creation, preserve the receipt and ask the authorized Leader to bootstrap; do not spoof or clear CALLER/Leader identity, claim another pane, or copy authentication.
+- MCP remains team-scoped: `send_message`, `report_result`, optional `get_team_status`. Lifecycle stays on the separately authorized public CLI.
 
-## Child Workspace
+## Create the child through start
 
-Pick an independent directory before writing `TEAM.md` or agent role docs. A safe default is a child workspace under the parent workspace, but outside the parent `.team/current`:
+The following paths are placeholders for a new, explicitly authorized workspace, not a command to reuse a live team:
 
-```bash
-PARENT_WORKSPACE="$PWD"
-case "$PARENT_WORKSPACE" in
-  */.team/current|*/.team/current/*)
-    echo "Refusing to create a child team from parent .team/current; cd to the parent workspace root first." >&2
-    exit 1
-    ;;
-esac
-CHILD_TEAM="child-review-team"
-CHILD_WORKSPACE="$PARENT_WORKSPACE/.team/children/review-$(date +%Y%m%d%H%M%S)"
-mkdir -p "$CHILD_WORKSPACE"
-cd "$CHILD_WORKSPACE"
-mkdir -p .team/current/agents
+```sh
+CHILD_WORKSPACE=/absolute/new/child-workspace
+CHILD_TEAM=child-review-team
+mkdir -p "$CHILD_WORKSPACE/.team/current/agents"
 ```
 
-Then create the child team's files inside the child workspace:
+Write a bounded goal in `$CHILD_WORKSPACE/.team/current/TEAM.md` and complete roles in its `agents/`. Record the user's provider and boolean bypass decisions; use the main skill's role format. Do not infer Pi/bypass or create roles from a parent's private configuration.
 
-```bash
-cat > .team/current/TEAM.md <<'EOF'
-A bounded child team for reviewing the requested files and reporting findings.
-EOF
+From an admitted native Leader context:
 
-cat > .team/current/agents/reviewer.md <<'EOF'
-# Independent Reviewer
-
-Review only the files and instructions provided by the child-team leader.
-Use `send_message` for progress and report findings with `report_result` exactly once.
-EOF
-
-team-agent quick-start .team/current
+```sh
+team-agent start --from "$CHILD_WORKSPACE/.team/current" \
+  --workspace "$CHILD_WORKSPACE" --team "$CHILD_TEAM"
+team-agent team status --workspace "$CHILD_WORKSPACE" --team "$CHILD_TEAM" --json
 ```
 
-If `quick-start` reports that `current` or a tmux session already exists, do not run `shutdown`. Move to a new child workspace or change the child team name.
+Start creates a genuinely uninitialized complete team once. Later start can wake stopped non-paused members or prove a live no-op; it is not repair/reset and does not prove business readiness. Resolve unknown scope, drift, conflicting state or caller refusal instead of switching to an old creation command or deleting runtime files.
 
-## Parent Protection
+## Parent-child messages are two-hop
 
-The parent worker is also the child team's leader. Keep the two scopes separate:
+The parent worker may act as child Leader only within explicitly delegated authority. Keep the bindings separate:
+1. Parent Leader instructs the parent worker through the parent team's MCP.
+2. The admitted child Leader sends into the child using explicit workspace/team:
 
-- Parent team: the worker talks upward with its parent `team_orchestrator` MCP tools.
-- Child team: the same worker talks downward with `team-agent send --workspace "$CHILD_WORKSPACE" --team "$CHILD_TEAM" ...`.
-
-Do not run child lifecycle commands against the parent workspace. Always pass the child workspace and team when operating the child team from the parent worker.
-
-## Parent-Child Messaging
-
-Use explicit two-hop routing.
-
-Parent leader to child worker:
-
-1. Parent leader sends the child-task instruction to the parent worker that owns the child team.
-2. Parent worker sends into the child team:
-
-```bash
-team-agent send reviewer "Review this patch and report findings" \
-  --workspace "$CHILD_WORKSPACE" \
-  --team "$CHILD_TEAM" \
-  --watch-result
+```sh
+team-agent send reviewer "Review the requested files and report findings" \
+  --workspace "$CHILD_WORKSPACE" --team "$CHILD_TEAM"
+team-agent inbox leader --workspace "$CHILD_WORKSPACE" --team "$CHILD_TEAM" -n 3
 ```
 
-Child worker to parent leader:
-
-1. Child worker reports to its child leader:
+Accepted/queued is not the child's answer. A child worker reports using its own logical MCP tools:
 
 ```text
-team_orchestrator.send_message(to="leader", content="short progress")
-team_orchestrator.report_result(summary="short completion", status="success")
+send_message(to="leader", content="short progress")
+report_result(summary="short completion")
 ```
 
-2. The parent worker, acting as child leader, relays the relevant summary upward to the parent leader with its parent-team MCP tools.
+3. The parent worker relays the actual result upward with its **parent** MCP tools. Do not tell a child worker to address parent IDs directly or widen its MCP scope. Cross-team CLI scope selection is not a worker privilege escalation shortcut.
 
-Do not ask a child worker to send directly to a parent-team agent id. Current MCP scope is team-local and should refuse out-of-scope peers. Use CLI `--workspace` and `--team` only from the appropriate leader/operator side when crossing team boundaries.
+## Manage and finish only the child
 
-## Clean-Context Roles
-
-Asking for a clean-context role is a normal feature request when the user wants a blind reviewer, a fresh second opinion, or a role that forgets earlier conversation. It is not the same as failure recovery.
-
-For an existing worker that should restart with a blank provider context, the leader can use:
-
-```bash
-team-agent reset-agent "$AGENT_ID" --workspace "$WORKSPACE" --team "$TEAM" --discard-session --json
+```sh
+team-agent stop reviewer --workspace "$CHILD_WORKSPACE" --team "$CHILD_TEAM"
+team-agent start reviewer --workspace "$CHILD_WORKSPACE" --team "$CHILD_TEAM"
+team-agent team restart --session preserve --workspace "$CHILD_WORKSPACE" --team "$CHILD_TEAM"
+team-agent stop --workspace "$CHILD_WORKSPACE" --team "$CHILD_TEAM" --json
 ```
 
-Use this only when the user intentionally wants a clean context. For incident recovery, follow `recovery-runbook.md`, where context-preserving repair comes first.
+Use preserve when recovery must retain context; new restart otherwise defaults to auto, which can permit a legal fresh session and is not a memory guarantee. Team restart preserves explicitly stopped/paused seats; intentionally waking the roster uses team start. Unknown/partial/native unsupported outcomes are not permission to reset or fall back. Check child-owned residuals after stop; do not kill shared servers or parent resources.
 
-## Framework Gaps To Track
+For an intentionally clean-context worker, only after explicit approval:
 
-- Nested mode needs a way to pin the framework Team Agent skill by absolute path, so providers do not choose their built-in agent-team feature.
-- A child-team worker should be prevented from shutting down the parent team by mistake.
-- Child team creation should avoid defaulting to the fragile parent `current` directory.
+```sh
+team-agent agent reset "$AGENT_ID" --workspace "$CHILD_WORKSPACE" --team "$CHILD_TEAM" --discard-session --json
+```
+
+This is not incident recovery; use [the recovery reference](recovery-runbook.md) for that. Legacy initial-creation, shutdown and suffixed agent commands remain compatibility bridges only; new child-team instructions use the forms above.

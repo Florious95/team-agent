@@ -1,5 +1,6 @@
-//! Process-level contract for the complete removal of the first eight legacy CLI commands.
-//! Every invocation must be rejected by the normal unknown-command parser before side effects.
+//! Process-level removal contract for six legacy commands. Phase1 restores
+//! start/stop as new canonical surfaces, never their retired flags/engines.
+//! Both groups retain exact workspace/home snapshots and owned-process canaries.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
@@ -166,6 +167,19 @@ fn invocation_variants(command: &str, workspace: &Path) -> Vec<(String, Vec<Stri
             variants.push((label.to_string(), argv));
         }
     }
+    if matches!(command, "start" | "stop") {
+        variants.push((
+            "retired-flags".into(),
+            vec![
+                command.into(),
+                if command == "start" {
+                    "--spec=never-read.yaml".into()
+                } else {
+                    "--force".into()
+                },
+            ],
+        ));
+    }
     variants
 }
 
@@ -197,7 +211,7 @@ impl Drop for ProcessCanary {
     }
 }
 
-fn assert_removed_command_contract(command: &str) {
+fn assert_surface_contract(command: &str, restored: bool) {
     let env = HermeticTestEnv::enter(&format!("excise-{command}"));
     let temp_root = env.root().to_str().expect("hermetic root is UTF-8");
     let variant_count = invocation_variants(command, env.root()).len();
@@ -229,18 +243,38 @@ fn assert_removed_command_contract(command: &str) {
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         let mut violations = Vec::new();
-        if output.status.code() != Some(1) {
-            violations.push(format!("exit={:?}, expected 1", output.status.code()));
-        }
-        let expected_error = format!("Unknown command: '{command}'");
-        if !stderr.contains(&expected_error) {
+        let expected_exit = if !restored {
+            1
+        } else if label.contains("help") {
+            0
+        } else if label == "retired-flags" || command == "start" {
+            2
+        } else {
+            1
+        };
+        if output.status.code() != Some(expected_exit) {
             violations.push(format!(
-                "stderr lacks {expected_error:?}: {}",
-                preview(&output.stderr)
+                "exit={:?}, expected {expected_exit}",
+                output.status.code()
             ));
         }
-        if !output.stdout.is_empty() {
-            violations.push(format!("stdout must be empty: {}", preview(&output.stdout)));
+        let expected_error = format!("Unknown command: '{command}'");
+        if !restored {
+            if !stderr.contains(&expected_error) {
+                violations.push(format!(
+                    "stderr lacks {expected_error:?}: {}",
+                    preview(&output.stderr)
+                ));
+            }
+            if !output.stdout.is_empty() {
+                violations.push(format!("stdout must be empty: {}", preview(&output.stdout)));
+            }
+        } else if stderr.contains(&expected_error) {
+            violations.push("canonical Phase1 surface was treated as unknown".into());
+        } else if label.contains("help")
+            && !String::from_utf8_lossy(&output.stdout).contains("Purpose:")
+        {
+            violations.push("canonical help is missing its public purpose".into());
         }
         if before != after {
             violations.push(format!(
@@ -262,7 +296,7 @@ fn assert_removed_command_contract(command: &str) {
 
     assert!(
         failures.is_empty(),
-        "removed command {command:?} violated its rejection/zero-side-effect contract:\n{}",
+        "command {command:?} violated its scoped zero-side-effect contract:\n{}",
         failures.join("\n")
     );
 }
@@ -282,15 +316,23 @@ macro_rules! removed_command_test {
         #[test]
         #[serial(env)]
         fn $name() {
-            assert_removed_command_contract($command);
+            assert_surface_contract($command, false);
         }
     };
 }
 
 removed_command_test!(diagnose_is_rejected_without_side_effects, "diagnose");
 removed_command_test!(init_is_rejected_without_side_effects, "init");
-removed_command_test!(start_is_rejected_without_side_effects, "start");
-removed_command_test!(stop_is_rejected_without_side_effects, "stop");
+#[test]
+#[serial(env)]
+fn start_is_restored_without_configuration_or_retired_flags_side_effects() {
+    assert_surface_contract("start", true);
+}
+#[test]
+#[serial(env)]
+fn stop_is_restored_without_runtime_or_retired_flags_side_effects() {
+    assert_surface_contract("stop", true);
+}
 removed_command_test!(
     restart_agent_is_rejected_without_side_effects,
     "restart-agent"

@@ -2218,6 +2218,43 @@ fn kill_session_and_kill_window_argv() {
 }
 
 #[test]
+fn issue336_session_listing_accepts_tab_and_literal_escape_without_rewriting_names() {
+    for separator in ["\t", "\\t"] {
+        let (backend, calls) = backend_with(
+            MockResp::Out(ok("")),
+            vec![
+                MockResp::Out(ok(&format!("%7{separator}worker\\tname\n"))),
+                MockResp::Out(ok("%8\n")),
+            ],
+        );
+        backend.preserve_session_before_stop(
+            &SessionName::new("sess"),
+            &[Target::SessionWindow {
+                session: SessionName::new("sess"),
+                window: WindowName::new("worker\\tname"),
+            }],
+        ).unwrap();
+        assert_eq!(calls.lock().unwrap().len(), 4, "separator={separator:?}");
+    }
+}
+
+#[test]
+fn issue336_escaped_listing_keeps_survivors_and_malformed_rows_fail_closed() {
+    let (backend, calls) = backend_with(MockResp::Out(ok("%7\\tworker\n%8\\tleader\n")), vec![]);
+    backend.preserve_session_before_stop(
+        &SessionName::new("sess"), &[Target::Pane(PaneId::new("%7"))],
+    ).unwrap();
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    for row in ["%7 worker", "%7", ""] {
+        let (backend, calls) = backend_with(MockResp::Out(ok(row)), vec![]);
+        assert!(backend.preserve_session_before_stop(
+            &SessionName::new("sess"), &[Target::Pane(PaneId::new("%7"))],
+        ).is_err());
+        assert_eq!(calls.lock().unwrap().len(), 1);
+    }
+}
+
+#[test]
 fn stop_session_preservation_creates_processless_anchor_by_exact_pane_id() {
     let (be, rec) = backend_with(
         MockResp::Out(ok("")),

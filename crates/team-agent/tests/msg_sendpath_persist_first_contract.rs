@@ -68,8 +68,7 @@ struct SendPathCase {
 
 impl SendPathCase {
     fn start(tag: &str) -> Self {
-        let env = HermeticTestEnv::enter(tag);
-        env.scrub_tmux();
+        let env = HermeticTestEnv::for_subprocess_with_leader(tag);
         let workspace = env.workspace(tag);
         std::fs::create_dir_all(workspace.join("agents")).expect("create agents dir");
         std::fs::write(
@@ -604,6 +603,7 @@ fn c2_positional_alias_and_mcp_share_one_persisted_fingerprint() {
 #[serial(env)]
 fn c3_pre_persist_refusals_leave_zero_db_side_effects() {
     let case = SendPathCase::start("carc-c3");
+    hermetic_guard::seed_unattached_leader(&case.workspace, case.env.home());
     let leader_form = format!("{TEAM}/leader");
     let probes: Vec<(&str, Vec<&str>)> = vec![
         (

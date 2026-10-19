@@ -24,7 +24,7 @@ use framework::*;
 /// 全部用 codex provider(true 角色才有 bypass flag,避免 fail-loud);
 /// 断言基于 state 落盘(运行面),不依赖真实 codex 进程就绪。
 fn mini_team_ws(tag: &str) -> TestWorkspace {
-    let ws = TestWorkspace::new(tag);
+    let ws = TestWorkspace::new(tag).with_owned_caller();
     let team = ws.path();
     std::fs::create_dir_all(team.join(".team/current/agents")).unwrap();
     std::fs::write(
@@ -120,6 +120,9 @@ fn e2e_edit_role_restart_drift_denied() {
         &["quick-start", ".team/current", "--yes", "--no-display", "--json"],
     );
     let _ = out;
+    // Retain this contract's original unattached-leader precondition after
+    // the positive startup has satisfied caller admission.
+    seed_unattached_leader(&ws);
 
     // 把 worker_true 的 dangerously_skip_permissions 从 true 改成 false(声明面)。
     let role_path = ws
@@ -168,15 +171,16 @@ fn e2e_edit_role_restart_drift_denied() {
     }
 }
 
-/// E2E-3:restart --force → fresh spawn 反映新值。
+/// E2E-3: ordinary restart reapplies the edited role; removed --force is not an authority.
 #[test]
-fn e2e_edit_role_restart_force_fresh_spawn() {
+fn e2e_edit_role_restart_applies_edited_bypass() {
     let ws = mini_team_ws("bypass-e2e-force");
     let out = run_ta(
         &ws,
         &["quick-start", ".team/current", "--yes", "--no-display", "--json"],
     );
     let _ = out;
+    seed_unattached_leader(&ws);
 
     // worker_false:false → true。
     let role_path = ws
@@ -189,8 +193,11 @@ fn e2e_edit_role_restart_force_fresh_spawn() {
     );
     std::fs::write(&role_path, body).unwrap();
 
-    // restart --force → fresh spawn,新值生效。
-    let force = run_ta(&ws, &["restart", "--force", "--json"]);
+    // The former --force was ignored; assert its new safe rejection before
+    // exercising the same ordinary restart behavior and original bypass checks.
+    let rejected = run_ta(&ws, &["restart", "--force", "--json"]);
+    assert_eq!(rejected.exit_code, 2, "removed --force must not trigger restart");
+    let force = run_ta(&ws, &["restart", "--json"]);
     let force_json = serde_json::from_str::<serde_json::Value>(&force.stdout)
         .unwrap_or_else(|_| serde_json::json!({}));
     let state = ws.read_state();

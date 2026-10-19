@@ -944,52 +944,56 @@ fn preflight_fresh_leader_identity(
         .ok()
         .filter(|pane| !pane.is_empty());
     let current_endpoint = crate::tmux_backend::socket_name_from_tmux_env();
-    match crate::layout::worker_env::caller_provider_resolution(
+    let refusal = |stage: &str, reason: &str, action: &str| {
+        Some((
+            format!("quick-start refused before spawn: {}", reason.replace('_', " ")),
+            vec![format!("stage={stage} reason={reason}")],
+            vec![action.to_string()],
+        ))
+    };
+    let resolution = crate::layout::worker_env::caller_provider_resolution(
         pane.as_deref(),
         current_endpoint.as_deref(),
         transport.tmux_endpoint().as_deref(),
-    ) {
-        crate::layout::worker_env::CallerProviderResolution::Invalid => Some((
-            "quick-start refused before spawn: invalid caller tuple".to_string(),
-            vec!["stage=strict_provider reason=invalid_caller_tuple".to_string()],
-            vec![
-                "fix conflicting CALLER_* / TEAM_AGENT_LEADER_* identity; do not run claim-leader"
-                    .to_string(),
-            ],
-        )),
-        crate::layout::worker_env::CallerProviderResolution::Valid(_) => None,
-        crate::layout::worker_env::CallerProviderResolution::Absent => {
-            let Some(pane) = pane else {
-                return None;
-            };
-            let command =
-                query_caller_pane_command(transport, &PaneId::new(pane)).unwrap_or_default();
-            let explicit = std::env::var("TEAM_AGENT_LEADER_PROVIDER")
-                .ok()
-                .filter(|provider| !provider.is_empty());
-            if command.trim().is_empty() {
-                return Some((
-                    "quick-start refused before spawn: command unobservable".to_string(),
-                    vec!["stage=command_observation reason=command_unobservable".to_string()],
-                    vec!["run from a live provider pane; do not run claim-leader".to_string()],
-                ));
-            }
-            if crate::leader::owner_bind::strict_owner_bind_provider(explicit.as_deref(), &command)
-                .is_some()
-            {
-                None
-            } else {
-                Some((
-                    "quick-start refused before spawn: provider unresolved".to_string(),
-                    vec!["stage=strict_provider reason=provider_unresolved".to_string()],
-                    vec![
-                        "set TEAM_AGENT_LEADER_PROVIDER or run from a provider pane; do not run claim-leader"
-                            .to_string(),
-                    ],
-                ))
-            }
+    );
+    if matches!(resolution, crate::layout::worker_env::CallerProviderResolution::Invalid) {
+        return refusal("strict_provider", "invalid_caller_tuple",
+            "fix conflicting CALLER_* / TEAM_AGENT_LEADER_* identity; do not run claim-leader");
+    }
+    let Some(pane) = pane else {
+        return refusal("caller_pane", "caller_pane_missing",
+            "run start from the intended live Leader provider pane; no workers or coordinator were started");
+    };
+    let pane = PaneId::new(pane);
+    let command = query_caller_pane_command(transport, &pane).unwrap_or_default();
+    if command.trim().is_empty() {
+        return refusal("command_observation", "command_unobservable",
+            "run from a live provider pane; do not run claim-leader");
+    }
+    if matches!(resolution, crate::layout::worker_env::CallerProviderResolution::Absent) {
+        let explicit = std::env::var("TEAM_AGENT_LEADER_PROVIDER")
+            .ok().filter(|provider| !provider.is_empty());
+        if crate::leader::owner_bind::strict_owner_bind_provider(explicit.as_deref(), &command).is_none() {
+            return refusal("strict_provider", "provider_unresolved",
+                "set TEAM_AGENT_LEADER_PROVIDER or run from a provider pane; do not run claim-leader");
         }
     }
+    // A typed caller tuple is identity evidence, not proof that its pane still
+    // exists. Use the caller's endpoint, never the worker server's same %id.
+    let targets = match list_caller_targets(transport) {
+        Ok(targets) => targets,
+        Err(_) => return refusal("caller_pane", "caller_pane_unobservable",
+            "inspect the intended Leader endpoint; no workers or coordinator were started"),
+    };
+    let Some(target) = targets.iter().find(|target| target.pane_id == pane) else {
+        return refusal("caller_pane", "caller_pane_not_live",
+            "run from the intended live Leader pane; no workers or coordinator were started");
+    };
+    if target.current_path.as_ref().is_none_or(|path| path.as_os_str().is_empty()) {
+        return refusal("caller_pane", "caller_cwd_unobservable",
+            "inspect the intended Leader pane workspace before retrying start");
+    }
+    None
 }
 
 fn bind_fresh_quick_start_leader(
@@ -1151,6 +1155,12 @@ pub fn quick_start_in_workspace_with_backend(
         // team_key. When quick-start's downstream code runs, state.json
         // still has whatever it had before (empty on fresh launch), so
         // the spec-compile + worker-spawn path runs normally.
+        let caller_transport = quick_start_tmux_backend(&workspace);
+        if let Some((summary, blockers, next_actions)) = preflight_fresh_leader_identity(&caller_transport) {
+            return Ok(QuickStartReport::PreflightBlocked {
+                summary, blockers, next_actions, attach_commands: Vec::new(),
+            });
+        }
         let run_ws = crate::coordinator::WorkspacePath::new(workspace.clone());
         let start_report =
             crate::coordinator::health::start_coordinator_with_team(&run_ws, Some(team_key_str))
@@ -1508,46 +1518,53 @@ pub(crate) fn quick_start_with_transport_in_workspace_pi_preflight(
     let quick_start_phase_timer = crate::lifecycle::restart::RestartPhaseTimer::start();
     let mut launch =
         launch_with_transport_in_workspace(&workspace, &spec_path, false, yes, true, transport)?;
-    annotate_persisted_team_depth(
-        &workspace,
-        &state_team_key,
-        team_depth.parent_team_key.as_deref(),
-        team_depth.team_depth,
-    )?;
-    // Fresh initialization owns this one fail-closed bind attempt. It is
-    // independent of worker layout, so receiver binding is always attempted
-    // binding. Readiness receives true only after canonical registry readback.
-    let _ = take_fresh_bind_refusal();
-    launch.leader_receiver_attached = bind_fresh_quick_start_leader(
-        &workspace,
-        &state_team_key,
-        seeded_owner.as_ref(),
-        seeded_receiver.as_ref(),
-        transport,
-    )?;
-    if !launch.leader_receiver_attached {
-        if let Some((stage, reason)) = take_fresh_bind_refusal() {
-            launch.leader_bind_stage = Some(stage.to_string());
-            launch.leader_bind_reason = Some(reason.to_string());
+    let mut coordinator_state = "not_attempted";
+    let completion = (|| -> Result<(), LifecycleError> {
+        annotate_persisted_team_depth(
+            &workspace, &state_team_key,
+            team_depth.parent_team_key.as_deref(), team_depth.team_depth,
+        )?;
+        // Recheck at the original bind/commit point: preflight is not a lease
+        // over the caller pane. A lost caller must not start a coordinator.
+        let _ = take_fresh_bind_refusal();
+        launch.leader_receiver_attached = bind_fresh_quick_start_leader(
+            &workspace, &state_team_key, seeded_owner.as_ref(),
+            seeded_receiver.as_ref(), transport,
+        )?;
+        if !launch.leader_receiver_attached {
+            if let Some((stage, reason)) = take_fresh_bind_refusal() {
+                launch.leader_bind_stage = Some(stage.to_string());
+                launch.leader_bind_reason = Some(reason.to_string());
+            }
+            return Err(LifecycleError::RequirementUnmet(format!(
+                "Leader binding failed after worker launch: {}",
+                launch.leader_bind_reason.as_deref().unwrap_or("unknown")
+            )));
         }
-    }
-    launch.session_capture_incomplete_agents =
-        quick_start_session_capture_incomplete_agents(&workspace, &state_team_key);
-    let coordinator_workspace = crate::coordinator::WorkspacePath::new(workspace.clone());
-    let coordinator_report = crate::coordinator::start_coordinator(&coordinator_workspace)
-        .map_err(|error| {
-            LifecycleError::StatePersist(format!(
+        launch.session_capture_incomplete_agents =
+            quick_start_session_capture_incomplete_agents(&workspace, &state_team_key);
+        let coordinator_workspace = crate::coordinator::WorkspacePath::new(workspace.clone());
+        coordinator_state = "attempted_unknown";
+        let coordinator_report = crate::coordinator::start_coordinator(&coordinator_workspace)
+            .map_err(|error| LifecycleError::StatePersist(format!(
                 "coordinator start failed for {}: {error}; inspect {} before retrying",
                 workspace.display(),
                 crate::coordinator::coordinator_log_path(&coordinator_workspace).display()
-            ))
-        })?;
-    quick_start_phase_timer.emit(
-        &workspace,
-        "launch.phase",
-        crate::lifecycle::restart::LifecyclePhase::CoordinatorStart,
-    );
-    require_quick_start_coordinator_started(&coordinator_report, &workspace)?;
+            )))?;
+        quick_start_phase_timer.emit(
+            &workspace, "launch.phase",
+            crate::lifecycle::restart::LifecyclePhase::CoordinatorStart,
+        );
+        require_quick_start_coordinator_started(&coordinator_report, &workspace)?;
+        coordinator_state = "running_confirmed";
+        Ok(())
+    })();
+    if let Err(error) = completion {
+        return Ok(QuickStartReport::Partial {
+            workspace, session_name, launch: Box::new(launch), team: state_team_key,
+            error: error.to_string(), coordinator_state: coordinator_state.to_string(),
+        });
+    }
     let coordinator_action = "coordinator started";
     // BUG-7: build an honest readiness verdict from the post-spawn runtime state.
     // - If persist_spawn_agent_state (BUG-2 fix) marked any agent non-running, the
@@ -1700,6 +1717,78 @@ mod fresh_quick_start_leader_binding_tests {
     use super::hermetic::HermeticTestEnv;
 
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn issue337_missing_caller_is_refused_before_any_launch_effect() {
+        let env = HermeticTestEnv::enter("issue337-no-caller");
+        env.scrub_tmux();
+        env.assert_no_real_tmux();
+        let transport = OfflineTransport::new();
+        let refusal = preflight_fresh_leader_identity(&transport)
+            .expect("a missing caller must not reach worker/coordinator spawn");
+        assert!(refusal.1.iter().any(|reason| reason.contains("caller_pane_missing")));
+        assert!(!env.home().join(".team").exists());
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn issue337_typed_caller_still_requires_a_current_live_pane_observation() {
+        let env = HermeticTestEnv::enter("issue337-unobservable-caller");
+        env.scrub_tmux();
+        env.assert_no_real_tmux();
+        std::env::set_var("TMUX", "/private/tmp/issue337/default,1,0");
+        std::env::set_var("TMUX_PANE", "%42");
+        std::env::set_var(CALLER_PANE_ENV, "%42");
+        std::env::set_var(CALLER_PROVIDER_ENV, "pi");
+        std::env::set_var(CALLER_ENDPOINT_ENV, "/private/tmp/issue337/default");
+        let transport = OfflineTransport::new().with_tmux_endpoint("/private/tmp/issue337/default");
+        let refusal = preflight_fresh_leader_identity(&transport)
+            .expect("typed identity is not a live pane observation");
+        assert!(refusal.1.iter().any(|reason| reason.contains("unobservable") || reason.contains("not_live")));
+        assert!(!env.home().join(".team").exists());
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn issue337_fresh_start_without_caller_creates_no_runtime_or_worker() {
+        let env = HermeticTestEnv::enter("issue337-zero-effects");
+        env.scrub_tmux();
+        env.assert_no_real_tmux();
+        let workspace = env.workspace("ws");
+        let team = workspace.join("roles");
+        std::fs::create_dir_all(team.join("agents")).unwrap();
+        std::fs::write(team.join("TEAM.md"), "---\nname: fresh\nobjective: test\nprovider: codex\n---\nTeam.\n").unwrap();
+        std::fs::write(team.join("agents/worker.md"), "---\nname: worker\nrole: Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\n---\nTest.\n").unwrap();
+        let transport = OfflineTransport::new();
+        let report = quick_start_with_transport_in_workspace(
+            &workspace, &team, None, true, Some("fresh"), &transport,
+        ).unwrap();
+        assert!(matches!(report, QuickStartReport::PreflightBlocked { .. }));
+        assert!(transport.spawn_records().is_empty());
+        assert!(!workspace.join(".team/team.db").exists());
+        assert!(!crate::state::persist::runtime_state_path(&workspace).exists());
+        assert!(!crate::model::paths::runtime_spec_path(&workspace, "fresh").exists());
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn issue337_exact_live_typed_caller_passes_readonly_preflight() {
+        let env = HermeticTestEnv::enter("issue337-positive");
+        env.scrub_tmux();
+        env.assert_no_real_tmux();
+        let _tmux = env.with_env("TMUX", "/private/tmp/issue337/default,1,0");
+        let _pane = env.with_env("TMUX_PANE", "%1");
+        let _provider = env.with_env(CALLER_PROVIDER_ENV, "pi");
+        let _caller = env.with_env(CALLER_PANE_ENV, "%1");
+        let _endpoint = env.with_env(CALLER_ENDPOINT_ENV, "/private/tmp/issue337/default");
+        let transport = OfflineTransport::new()
+            .with_tmux_endpoint("/private/tmp/issue337/default")
+            .with_pane_current_command("%1", "bash")
+            .with_targets(vec![caller_target(env.workspace("caller"), None)]);
+        assert!(preflight_fresh_leader_identity(&transport).is_none());
+        assert!(transport.spawn_records().is_empty());
+    }
 
     #[test]
     fn bootstrap_binding_is_preserved_without_epoch_reset_or_takeover() {

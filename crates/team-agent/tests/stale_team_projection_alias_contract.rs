@@ -114,7 +114,7 @@ struct SupermarketCase {
 
 impl SupermarketCase {
     fn new(tag: &str) -> Self {
-        let env = hermetic_guard::HermeticTestEnv::enter(tag);
+        let env = hermetic_guard::HermeticTestEnv::for_subprocess_with_leader(tag);
         let workspace = env.workspace(tag);
         let current_dir = workspace.join(CURRENT);
         let research_dir = workspace.join(RESEARCH);
@@ -269,17 +269,7 @@ impl SupermarketCase {
     }
 
     fn run<const N: usize>(&self, args: [&str; N]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_team-agent"))
-            .args(args)
-            .current_dir(&self.workspace)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .env("HOME", self.env.home())
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
-            .output()
-            .expect("run team-agent")
+        self.env.run_cli(&self.workspace, &args)
     }
 
     fn team_dir(&self, team: &str) -> &str {

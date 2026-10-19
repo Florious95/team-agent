@@ -518,6 +518,9 @@ fn wleak_to_name_leader_reused_pane_id_must_not_inject_foreign_worker() {
         foreign_window,
         foreign_ws.path().to_path_buf(),
     );
+    // This stale-receiver control must not retain the separate healthy owner
+    // established by the now-admitted positive launch fixture.
+    seed_unattached_leader(&target_ws);
     write_leader_receiver_tuple(
         &target_ws,
         team_id,

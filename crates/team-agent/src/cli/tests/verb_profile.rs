@@ -194,7 +194,9 @@ fn profile_init_accepts_local_proxy_mode_and_rejects_unknown_values() {
         ]),
         &ws,
     );
-    assert_eq!(invalid, ExitCode::Error, "unknown proxy mode must fail");
+    assert_eq!(invalid, ExitCode::Usage, "unknown proxy mode must fail as Usage2");
+    assert!(!profiles_dir(&ws).join("bad_proxy.env").exists());
+    assert!(!ws.join(".team/logs").exists());
     let _ = std::fs::remove_dir_all(&ws);
 }
 

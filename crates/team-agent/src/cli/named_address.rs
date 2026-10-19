@@ -1050,6 +1050,7 @@ fn resolve_leader(
                 None,
                 None,
                 transport.tmux_endpoint(),
+                None,
             );
             err.candidates =
                 leader_advisory_candidates(state, team, transport, "state_recorded_socket");
@@ -1111,6 +1112,7 @@ fn resolve_leader(
                 session,
                 window,
                 socket,
+                string_field(receiver, "provider"),
             );
             if matches!(
                 &reason,
@@ -1131,6 +1133,7 @@ fn resolve_leader(
                 session,
                 window,
                 socket,
+                string_field(receiver, "provider"),
             );
             err.log = format!("{} channel_probe_failed={error}", err.log);
             Err(err)
@@ -1574,14 +1577,20 @@ fn leader_not_attached_third_party(
     session: Option<&str>,
     window: Option<&str>,
     socket: Option<String>,
+    provider: Option<&str>,
 ) -> NamedAddressError {
     let workspace = target_workspace.display();
     let mut err = NamedAddressError::new(
         NamedAddressErrorKind::LeaderNotAttached,
         "target team leader is not attached on its recorded tmux endpoint",
     );
+    let provider = provider.and_then(crate::provider::wire::parse_provider)
+        .map(crate::provider::wire::provider_wire);
+    let workspace_arg = super::adapters::shell_quote(&target_workspace.to_string_lossy());
+    let team_arg = super::adapters::shell_quote(team);
     err.action = format!(
-        "Ask the target team owner to run `team-agent attach-leader --workspace {workspace} --team {team}`; the sender-side offline mailbox will requeue the message once attach succeeds"
+        "Ask the target team owner to select the actual Leader provider and run `team-agent attach-leader --workspace {workspace_arg} --team {team_arg} --provider {}`; the sender-side offline mailbox will requeue the message once attach succeeds",
+        provider.unwrap_or("<provider>")
     );
     err.log = format!(
         "name={team}/leader expected_pane={} expected_session={} expected_window={} tmux_socket={}",

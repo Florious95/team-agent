@@ -37,6 +37,9 @@ use rusqlite::Connection;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+#[path = "../support/hermetic.rs"]
+mod hermetic_guard;
+
 // ----------------------------------------------------------------------------
 // 1. TestWorkspace — per-test temp dir with auto-cleanup (Drop)
 // ----------------------------------------------------------------------------
@@ -84,6 +87,7 @@ pub struct TestWorkspace {
     /// BEFORE the workspace directory removal (verified by RED
     /// `e2e_workspace_drop_cleans_exact_tmux_before_removing_workspace`).
     pub(crate) owned_tmux_sockets: Mutex<Vec<PathBuf>>,
+    pub(crate) caller: Option<hermetic_guard::HermeticTestEnv>,
 }
 
 impl TestWorkspace {
@@ -108,6 +112,7 @@ impl TestWorkspace {
             path,
             ta_binary: Mutex::new(None),
             owned_tmux_sockets: Mutex::new(Vec::new()),
+            caller: None,
         }
     }
 
@@ -215,10 +220,23 @@ impl TestWorkspace {
         }
     }
 
-    /// Write a minimal TEAM.md + agents/<id>.md tree that uses
-    /// `provider: fake` (no subscription, no real provider binary). Returns
-    /// `self` for chaining.
+    /// Explicit positive fixture admission, not a production bypass. The real
+    /// caller is supplied per command without touching process-global env.
+    pub fn with_owned_caller(mut self) -> Self {
+        assert!(self.caller.is_none(), "caller fixture already allocated");
+        self.caller = Some(hermetic_guard::HermeticTestEnv::for_subprocess_with_leader("e2e"));
+        self
+    }
+
+    /// Write a fake team and give positive subprocess journeys a real,
+    /// exact-owned external caller. No process-global environment mutation.
     pub fn with_fake_spec(self, agent_ids: &[&str]) -> Self {
+        let this = self.with_owned_caller();
+        this.write_fake_spec(agent_ids);
+        this
+    }
+
+    fn write_fake_spec(&self, agent_ids: &[&str]) {
         let team_md = format!(
             "---\nname: e2e-{}\nobjective: E2E fake team fixture.\nprovider: fake\ndisplay_backend: none\n---\n\nTeam.\n",
             self.short_tag(),
@@ -233,7 +251,6 @@ impl TestWorkspace {
             std::fs::write(agents_dir.join(format!("{id}.md")), body)
                 .unwrap_or_else(|e| panic!("write agents/{id}.md: {e}"));
         }
-        self
     }
 
     fn short_tag(&self) -> String {
@@ -820,6 +837,9 @@ pub fn run_ta_env(ws: &TestWorkspace, args: &[&str], extra_env: &[(&str, &str)])
         .stderr(Stdio::piped());
     for key in CALLER_IDENTITY_ENVS {
         cmd.env_remove(key);
+    }
+    if let Some(caller) = &ws.caller {
+        caller.configure_command(&mut cmd);
     }
     for (k, v) in extra_env {
         cmd.env(k, v);
@@ -1435,6 +1455,7 @@ fn record_last_command_observation(
         .iter()
         .rev()
         .find_map(|(key, value)| (*key == "HOME").then_some(PathBuf::from(*value)))
+        .or_else(|| ws.caller.as_ref().map(|caller| caller.home().to_path_buf()))
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
     let command_json = serde_json::from_str::<Value>(&result.stdout).unwrap_or(Value::Null);
     let message_id = command_json
@@ -1739,6 +1760,13 @@ fn write_delivery_timeout_snapshot(snapshot: &Value) -> PathBuf {
 // ----------------------------------------------------------------------------
 // 8. Convenience: build a runtime workspace with a single fake-spec quick-start
 // ----------------------------------------------------------------------------
+
+/// Explicit negative/historical setup after an admitted positive launch.
+/// Clears only the active team's receiver/owner; workers remain unchanged.
+pub fn seed_unattached_leader(ws: &TestWorkspace) {
+    let caller = ws.caller.as_ref().expect("admitted positive caller fixture");
+    hermetic_guard::seed_unattached_leader(ws.path(), caller.home());
+}
 
 /// True only for a successful bind/launch, or the legacy degraded statuses
 /// that still mean workers spawned. This is **not** a leader-binding success
@@ -2252,6 +2280,7 @@ mod containment_tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn f14_owned_socket_registration_is_exact_and_drop_spares_unregistered_socket() {
         let nonce = format!(
             "{}-{}",

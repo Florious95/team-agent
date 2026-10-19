@@ -300,7 +300,7 @@ fn p3_invalid_role_remains_a_real_compile_diagnostic() {
 #[test]
 #[serial(env)]
 fn p4_quick_start_compiles_valid_team_and_rejects_invalid_role() {
-    let env = HermeticTestEnv::enter("compile-p4");
+    let env = HermeticTestEnv::enter_with_leader("compile-p4");
     let valid = fixture(&env, "valid");
     let workspace = env.workspace("runtime");
     let _result = cmd_quick_start(&QuickStartArgs {
@@ -405,7 +405,7 @@ fn p3_missing_team_md_is_reported_by_compiler_path() {
 #[test]
 #[serial(env)]
 fn p4_quick_start_keeps_canonical_runtime_spec_location() {
-    let env = HermeticTestEnv::enter("compile-p4-location");
+    let env = HermeticTestEnv::enter_with_leader("compile-p4-location");
     let team = fixture(&env, "team");
     let workspace = env.workspace("runtime");
     let _ = cmd_quick_start(&QuickStartArgs {

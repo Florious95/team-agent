@@ -1,262 +1,111 @@
-# Team Agent Recovery Reference
+# Team Agent recovery reference
 
-This reference is for the Rust Team Agent runtime. This reference is a live document.
+Recover the selected team through public CLI evidence, not guessed bindings or old creation habits. Check that the chosen binary exposes `start`, `stop`, `team` and `agent` help. A reused candidate version string alone does not establish feature support. If missing, ask for an authorized supporting installation; do not switch binaries or rewrite state automatically.
 
-When a Team Agent framework problem appears, check this reference first. After the problem is resolved, update this reference before closing the work, whether or not the final fix used an existing entry here. New recovery advice may be added only after RS validation on a real Team Agent environment; unverified Python-only procedures stay out of this external reference.
+## Authority and non-destructive order
 
-## Validation Gate
+| Level | Who | Scope |
+|---|---|---|
+| L1 | Any agent | Read-only status/doctor/inbox, evidence and current-payload handoff |
+| L2 | Authorized Leader | Context-preserving team/agent lifecycle repair |
+| L3 | Explicitly authorized user/operator | Claim/takeover, intentional context discard, exceptional state/coordinator surgery |
 
-Every prescription below must carry an RS verification record. A command copied from Python 0.2.11 or from an incident note is not valid until it has been verified against the RS runtime. If RS behavior differs, document the RS behavior, not the Python behavior.
+A worker must not run L2/L3 because it can read this reference. Explicit child-team delegation still requires original caller admission and parent protection. Follow [nested teams](team-in-team.md).
 
-Use placeholders only:
+1. Diagnose at L1 in the exact workspace/team.
+2. Prefer proven resume with `--session preserve`.
+3. Stop on unknown, partial or capability refusal; do not reset, retry or adopt a replacement blindly.
+4. Only explicit user/operator authorization can permit context loss or binding surgery. Never broadly kill shared servers or edit another workspace.
 
-- `$WORKSPACE` for the team workspace
-- `$TEAM` for the active team key when a command needs one
-- `$AGENT_ID` for a worker id
-- `$TASK_ID` for a task id
+Use placeholders, not private paths: `$WORKSPACE`, `$TEAM`, `$AGENT_ID`, `$TASK_ID`.
 
-Do not write recipes that depend on a user's private absolute paths, private specification fields, or unverified local state.
+## 1. L1 read-only triage
 
-## Recovery Levels
-
-| Level | Who may run it | Scope | Misuse consequence |
-| --- | --- | --- | --- |
-| L1 | Any agent, including a worker | Read-only diagnosis, file report handoff, status/log/result inspection, current-payload E23 fallback only | Low risk, but must not mutate bindings or lifecycle state |
-| L2 | Leader only | Resume-oriented lifecycle repair such as restart of an existing team or worker | A worker running L2 must be treated as `worker.privilege_escalation_attempt` |
-| L3 | User/operator only | Claiming/taking over leader ownership, state surgery, coordinator respawn, fresh/reset | E19/#232 class risk: wrong workspace or pane can steal ownership or destroy context |
-
-Spine for every incident:
-
-1. Diagnose with L1 read-only commands.
-2. Prefer resume or repair that preserves context.
-3. Use L3 surgery only when the user/operator explicitly approves and the coordinator/write owner is controlled.
-4. Use fresh/reset only as the last resort.
-
-Fresh/reset red line:
-
-> WARNING: context will be lost. Run this only after diagnostics, resume, and repair have all failed and the user has explicitly typed approval. Do not make it the default. Each use must emit `recovery.context_reset` with source and approval timestamp.
-
-## Symptom Index
-
-| Symptom | Root cause family | Prescription |
-| --- | --- | --- |
-| Status is confusing, messages/results may be pending, or a worker says it cannot report | Need a safe read-only picture first | §1 L1 Read-Only Triage |
-| Leader pane exists but messages say `leader_not_attached`, `rebind_required`, `team_owner_mismatch`, or leader 被抢 | Leader ownership or receiver binding drift | §2 L3 Claim Or Rebind Leader |
-| A live team must be recovered without losing worker context | Resume/restart path needed | §3 L2 Restart With Resume First |
-| Shutdown/restart cleanup status is ambiguous | Need residue-based truth, not a single `ok` field | §4 L1/L2 Cleanup Verification |
-| MCP tool call fails with `Transport closed` while the worker still has the payload | Provider-owned MCP stdio child died | §5 MCP Transport-Dead Payload Handoff |
-
-## 1. L1 Read-Only Triage
-
-[contextual: preserved] [level: L1] Any agent may run this. It reads state only and does not mutate the team.
-
-Diagnosis:
-
-```bash
-team-agent status --workspace "$WORKSPACE" --json --detail
+```sh
+team-agent team status --workspace "$WORKSPACE" --team "$TEAM" --json
+team-agent doctor --workspace "$WORKSPACE" --team "$TEAM" --json
 team-agent inbox "$AGENT_ID" --workspace "$WORKSPACE" --team "$TEAM" -n 3 --json
 ```
 
-What to look for:
+Status is the concise node projection: use `runtime_status`, `activity`, `health` and the reported attach target without inferring absent internals. An uncertain node also carries `observation_reason` and an explicitly scoped `next_action`; healthy nodes retain the compact existing fields. `--detail` is not a full historical dump. Follow doctor's actual owner/receiver/coordinator findings and recovery actions. Installed is not authenticated; unknown is not proven dead, stopped or unavailable.
 
-- `leader_receiver.status`
-- `coordinator.status`
-- agent `status`
-- uncollected results
-- messages stuck in `accepted`, `failed`, or `rebind_required`
+Accepted/queued messages are not replies. Keep task/result/receiver evidence separate from transport acceptance. If the worker already has a report but MCP is broken, use the payload handoff contingency below rather than guessing it was delivered.
 
-Resume/repair:
+## 2. L3 claim or rebind only when diagnosed
 
-- If the answer identifies an L2/L3 condition, do not run the elevated command from a worker pane. Send the evidence to the leader/user.
-- If MCP reporting is broken, write a handoff artifact under the team's artifacts directory and tell the leader the relative path.
+Use only when diagnosis identifies owner/receiver binding drift and the intended Leader pane/workspace/team are verified. Do not use this to bypass a failed creation, resume or caller check:
 
-Last resort:
-
-- None. This entry is read-only. Do not turn triage into fresh/reset.
-
-RS verification record:
-
-- `#249 Python 0.2.11 -> Rust 0.3.2 upgrade compatibility`: Rust `status`, `collect`, and `read` succeeded against an upgraded live team; restart resumed and post-restart MCP delivery worked. Evidence ledger: `dogfood-execution-ledger-T2.md`, case `#249`.
-- Mac mini LOOP/G1-G4 evidence also captured status and command outputs after restart/shutdown flows; see `g1g4-macmini-confirm-report.md`.
-
-Python 0.2.11 compatibility note:
-
-- Python teams used equivalent `status`/`collect` verbs. Python-specific wrapper paths are deprecated and are intentionally not listed here.
-
-## 2. L3 Claim Or Rebind Leader
-
-[contextual: preserved] [level: L3] User/operator only. A worker must not run this. Misuse can steal the leader binding or recreate E19/#232 style ownership damage.
-
-Use this when L1 triage shows the leader pane is live but leader-bound delivery is blocked by ownership or receiver drift.
-
-Diagnosis:
-
-```bash
-team-agent status --workspace "$WORKSPACE" --json --detail
-```
-
-Confirm:
-
-- The current pane is the intended leader/operator pane.
-- The workspace is the intended team workspace.
-- The target team is the intended `$TEAM` when multiple teams share a workspace.
-
-Resume/repair:
-
-```bash
+```sh
 team-agent claim-leader --workspace "$WORKSPACE" --team "$TEAM" --json
 ```
 
-If the previous owner is live and the user explicitly approves stealing ownership, add the product's confirmation flag:
+If the previous owner is live, taking ownership additionally needs explicit user approval and the public confirmation flag:
 
-```bash
+```sh
 team-agent claim-leader --workspace "$WORKSPACE" --team "$TEAM" --confirm --json
 ```
 
-Validate:
+Recheck status/doctor and real Leader-bound delivery afterward. A command receipt alone is not actual client consumption. Do not clear CALLER/Leader identity or manually patch binding fields. State/coordinator surgery requires its own exact authorization and controlled write owner; it is not a normal recovery recipe.
 
-```bash
-team-agent status --workspace "$WORKSPACE" --json --detail
+## 3. L2 restart with strict continuation first
+
+```sh
+team-agent team restart --session preserve --workspace "$WORKSPACE" --team "$TEAM" --json
+team-agent agent restart "$AGENT_ID" --session preserve --workspace "$WORKSPACE" --team "$TEAM" --json
 ```
 
-The receiver should be attached and new leader-bound delivery should no longer report `leader_not_attached`.
+Run the applicable operation, not both automatically. Single-seat restart preflights continuation/capabilities before stop and starts only after confirmed stop. Known missing capture/backing for existing context refuses before destruction. A genuinely never-used seat may still take its original first-fresh path; that is not evidence of remembered-context restoration.
 
-Extreme surgery:
+Team restart leaves explicitly stopped and paused seats alone. To intentionally wake the selected stopped non-paused roster, use:
 
-- Do not edit binding fields by hand unless a user/operator has approved the exact state repair and the coordinator/write owner is stopped or otherwise controlled.
-
-Last resort:
-
-- Fresh/reset is not a leader claim repair. Do not use it here.
-
-RS verification record:
-
-- Dogfood T2 R2: old live team restart/claim/takeover passed from the persistent leader pane. Evidence ledger: `dogfood-execution-ledger-T2.md`, case `R2`.
-- RS #235 bug3 Mac mini run: `claim-leader` and `takeover` claimed live panes and persisted `leader_receiver.status="attached"` with `claimed_via="claim-leader"`. Evidence root id: `7b146ce-bug3-20260606T023011Z`.
-- G1-G4 report: help path for `claim-leader` exited 0 and did not trigger action validation. Evidence: `g1g4-macmini-confirm-report.md`, CR-063.
-
-Python 0.2.11 compatibility note:
-
-- Python had analogous claim/takeover verbs. Use RS commands above for RS teams.
-
-## 3. L2 Restart With Resume First
-
-[contextual: partial] [level: L2] Leader only. A worker must not run this. The goal is to preserve session context; resume is always before fresh.
-
-Use this when L1 triage shows a team or worker needs lifecycle repair but the state still carries enough runtime/session context to resume.
-
-Diagnosis:
-
-```bash
-team-agent status --workspace "$WORKSPACE" --json --detail
+```sh
+team-agent start --workspace "$WORKSPACE" --team "$TEAM" --json
 ```
 
-Resume/repair:
+This activation is not a repair fallback and must be authorized for the roster. It neither unpauses seats nor guesses around corrupt/spec-only/unknown state. A live no-op is not changed role-file synchronization or business readiness.
 
-```bash
-team-agent restart "$WORKSPACE" --team "$TEAM" --json
+New restart defaults to **auto** when the option is omitted: proven resume or only the original legal fresh fallback. Auto can lose remembered context; it is not synonymous with preserve or reset. If strict continuation refuses, retain the receipt and escalate. Only if the user explicitly authorizes the possible loss may the Leader choose:
+
+```sh
+team-agent team restart --session auto --workspace "$WORKSPACE" --team "$TEAM" --json
 ```
 
-A single-worker clean-context reset is not a resume operation. Only after the user explicitly approves discarding that worker's session, use:
+Unsupported native fresh/resume remains a refusal; do not change provider, force legacy fallback or repeatedly retry a partial/unknown generation. Validate actual node identities/session receipts and a natural worker reply before claiming recovery.
 
-```bash
-team-agent reset-agent "$AGENT_ID" --workspace "$WORKSPACE" --team "$TEAM" --discard-session --json
+## 4. L1 verification / L2 scoped stop
+
+Only an authorized Leader stops the selected team:
+
+```sh
+team-agent stop --workspace "$WORKSPACE" --team "$TEAM" --json
 ```
 
-Validate:
+Verify actual typed results, not just exit0:
+- Intended team session/panes and owned native/helper/coordinator processes have the expected terminal outcome.
+- Returned `residuals.sessions`, `residuals.processes` and `residuals.owned_files` are empty, with no unresolved degraded/unknown verification.
+- Where zero-removable-resource acceptance is required, independently check the frozen owned inventory, including sockets, twice. Keep predeclared native archives/evidence separate from live residuals.
+- Shared coordinator/Leader/sibling resources remain protected. A stopped last-team coordinator can be expected, not automatically a new defect.
 
-```bash
-team-agent status --workspace "$WORKSPACE" --json --detail
-team-agent inbox "$AGENT_ID" --workspace "$WORKSPACE" --team "$TEAM" -n 3 --json
+Do not manually unlink unknown sockets or kill shared tmux servers to manufacture success. Preserve a failing scene and its ownership/birth evidence.
+
+## 5. MCP transport-dead payload handoff
+
+If a worker already owns the current report payload and its MCP stdio transport closes before normal send/report acceptance, preserve the exact payload in a team-scoped handoff artifact and inform the Leader/user through the remaining authorized visible channel. Do not copy credentials or substitute a database write/manual answer for natural Leader consumption.
+
+This L1 contingency is not a general alternate messaging system or permission for worker lifecycle repair. After an authorized restart/resume, return to the three normal MCP tools. Queued notification, server write and actual Leader receipt remain different evidence layers.
+
+## 6. Intentional clean context is not incident recovery
+
+Only after explicit user approval to discard that worker's association:
+
+```sh
+team-agent agent reset "$AGENT_ID" --workspace "$WORKSPACE" --team "$TEAM" --discard-session --json
 ```
 
-The expected result is `status="restarted"` or an equivalent running projection without duplicate-session errors. Do not treat a partial failure on one worker as permission to reset the whole team.
+Warn that context will be lost. Each intentional fresh/reset must retain `recovery.context_reset` audit evidence with authorization source and timestamp; missing evidence is not permission to fabricate an event or claim approval. Preserve the actual result and do not claim every native archive was erased. Reset is never an automatic response to preserve refusal, permission prompts or partial replacement.
 
-Extreme surgery:
+## Compatibility and validation scope
 
-- If restart reports a resume-integrity refusal, stop and escalate. Do not silently rerun with fresh flags.
+The old bare/explicit-path `restart` keeps its preserve default; `quick-start`, `shutdown` and suffixed agent commands remain compatibility bridges for existing scripts, not these daily recovery instructions. Do not mechanically rename scripts or rewrite historical receipts as if they used the new surface.
 
-Last resort:
-
-```bash
-# Last resort only; see red line at top of this reference.
-team-agent restart "$WORKSPACE" --team "$TEAM" --allow-fresh --json
-```
-
-WARNING: context will be lost. Run this only after diagnostics, resume, and repair have all failed and the user has explicitly typed approval. Do not make it the default. Each use must emit `recovery.context_reset` with source and approval timestamp.
-
-RS verification record:
-
-- Dogfood T2 R2: restart returned restarted and status after restart showed a running team. Evidence ledger: `dogfood-execution-ledger-T2.md`.
-- Dogfood #249: Rust restart resumed session `019e9ffd-c99c-7b60-bff3-9612ab35bcf5`, post-restart MCP delivery worked, and cleanup residue was 0. Evidence ledger: `dogfood-execution-ledger-T2.md`, case `#249`.
-- G1-G4 Mac mini reconfirmation: restart recovered the same fake team in CR-007, after acknowledge-idle context in CR-021, and in coordinator recovery context in CR-052. Evidence: `g1g4-macmini-confirm-report.md`.
-
-Python 0.2.11 compatibility note:
-
-- Python restart procedures are deprecated compatibility background only. For RS teams, use the RS commands above.
-
-## 4. L1/L2 Cleanup Verification
-
-[contextual: partial] [level: L1 for verification, L2 for shutdown command] A worker may inspect cleanup evidence. Only the leader should run lifecycle cleanup.
-
-Diagnosis:
-
-```bash
-team-agent status --workspace "$WORKSPACE" --json --detail
-```
-
-Resume/repair:
-
-- If a leader intentionally stops or shuts down a test team, verify by residue, not by a single top-level `ok` field.
-- For cleanup verification, inspect whether the team session is gone and whether residual process/session lists are empty in the command output or status evidence.
-
-Leader command:
-
-```bash
-team-agent shutdown --workspace "$WORKSPACE" --keep-logs --json
-```
-
-Validate:
-
-- `session_killed=true` is decisive for a session that was expected to be killed.
-- `residuals.sessions=[]` and `residuals.processes=[]` are decisive for cleanup.
-- A missing coordinator after a successful cleanup can be expected; do not classify it alone as a product failure.
-
-Extreme surgery:
-
-- Do not manually kill shared tmux servers from a worker pane.
-
-Last resort:
-
-- None. Cleanup verification is not a context reset path.
-
-RS verification record:
-
-- Dogfood T2 R3: quick-start with true Codex worker, MCP server live, shutdown returned `ok=true`, `session_killed=true`, endpoint `has-session` rc=1, and post MCP/node/codex/process residue lines were all 0. Evidence ledger: `dogfood-execution-ledger-T2.md`.
-- G1-G4 CR-005: stop returned `ok=true`, `status="stopped"`, `session_killed=true`; following shutdown reported missing without treating that alone as failure. Evidence: `g1g4-macmini-confirm-report.md`.
-
-Python 0.2.11 compatibility note:
-
-- Python cleanup notes may mention direct tmux commands. They are not listed here as RS recovery prescriptions.
-
-## 5. MCP Transport-Dead Payload Handoff
-
-[contextual: preserved] [level: L1] If the worker already has a leader-bound payload in hand and the MCP transport dies before the normal `send` or `report_result` path can accept it, preserve the payload in a file handoff artifact and ask for leader/user recovery through the visible channel that still works.
-
-After restart/resume, use the normal MCP tool path again. Do not treat file handoff as a general message path or as permission to run arbitrary L2/L3 recovery operations.
-
-Python 0.2.11 compatibility note:
-
-- Python MCP stdio EOF had no durable reconnect. File handoff was the practical fallback.
-
-## Held Out Of This Reference
-
-[contextual: unknown] Python-only procedures from older incident notes are intentionally not included as external RS prescriptions:
-
-- legacy roster block cloning
-- direct live runtime-state injection
-- raw coordinator respawn commands
-- direct tmux-server surgery
-- hard-coded runtime paths
-
-These may be useful forensic background for maintainers, but each must pass the RS validation gate before becoming a user-facing recipe.
+The short start/stop/restart journey has isolated two-Pi lifecycle verification, including live no-op, held-seat preservation, both-seat activation and scoped cleanup. Automated fixtures cover continuation/backing/partial/native/mixed refusals. This is not a fresh all-provider same-session memory or all-platform acceptance claim. Earlier Rust resume/cleanup records retain their original scope in history; Python-only repair, roster cloning, raw state injection and direct server/coordinator surgery are not promoted into validated public recipes.

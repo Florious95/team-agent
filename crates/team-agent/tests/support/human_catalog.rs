@@ -4,6 +4,10 @@
 use std::collections::BTreeSet;
 
 pub const HUMAN_COMMANDS: &[&str] = &[
+    "start",
+    "stop",
+    "team",
+    "agent",
     "quick-start",
     "send",
     "status",
