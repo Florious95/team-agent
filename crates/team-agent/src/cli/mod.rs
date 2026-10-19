@@ -1724,7 +1724,10 @@ pub mod lifecycle_port {
             let wp = crate::coordinator::WorkspacePath::new(run_workspace.clone());
             let coordinator_pid_before_stop = crate::coordinator::coordinator_health(&wp).pid;
             coordinator_pid_for_report = coordinator_pid_before_stop.map(|pid| pid.get());
-            match stop_coordinator_bounded(wp, std::time::Duration::from_millis(900)) {
+            // Owned termination can use 5s graceful + 5s escalation waits.
+            // Await its result within the existing shutdown deadline, not an
+            // unrelated 900ms cap that abandons a still-finishing stop worker.
+            match stop_coordinator_bounded(wp, deadline.remaining()) {
                 Some(Ok(report)) => Some(report),
                 Some(Err(error)) => {
                     kill_error.get_or_insert(error);

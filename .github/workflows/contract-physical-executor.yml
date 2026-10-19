@@ -246,6 +246,7 @@ jobs:
               run_case cursor-project-root cargo test -p team-agent --test cursor_mcp_project_root_red --locked -- --test-threads=1
               run_case cursor-launch cargo test -p team-agent --lib --locked cursor_ -- --test-threads=1
               run_case root-restart cargo test -p team-agent --lib --locked lifecycle::restart -- --test-threads=1
+              run_case shutdown-completion cargo test -p team-agent --lib --locked cli::tests::shutdown_kill_plan -- --test-threads=1
               run_case contract-all cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets --no-fail-fast -- --test-threads=1
               ;;
             host-ancestry)

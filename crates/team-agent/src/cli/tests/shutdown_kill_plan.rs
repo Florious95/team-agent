@@ -1255,6 +1255,62 @@ fn bounded_coordinator_stop_returns_grace_window_late_success() {
 }
 
 #[test]
+fn bounded_coordinator_stop_retains_completion_beyond_old_1150ms_cap() {
+    let ws = tmp_shutdown_workspace("coordinator-stop-after-old-cap");
+    let cleanup = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker_cleanup = cleanup.clone();
+    let report = crate::cli::lifecycle_port::stop_coordinator_bounded_with(
+        crate::coordinator::WorkspacePath::new(ws),
+        std::time::Duration::from_secs(20),
+        move |_workspace| {
+            std::thread::sleep(std::time::Duration::from_millis(1300));
+            worker_cleanup.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(crate::coordinator::StopReport {
+                ok: true,
+                status: crate::coordinator::StopOutcome::Stopped,
+                pid: Some(crate::coordinator::Pid::new(12345)),
+            })
+        },
+    )
+    .expect("completion inside the shutdown budget must not be abandoned")
+    .expect("owned stop completed successfully");
+
+    assert!(cleanup.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(report.ok);
+    assert_eq!(report.status, crate::coordinator::StopOutcome::Stopped);
+}
+
+#[test]
+fn bounded_coordinator_stop_does_not_claim_completion_after_budget_exhaustion() {
+    let ws = tmp_shutdown_workspace("coordinator-stop-real-timeout");
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+    let report = crate::cli::lifecycle_port::stop_coordinator_bounded_with(
+        crate::coordinator::WorkspacePath::new(ws),
+        std::time::Duration::from_millis(1),
+        move |_workspace| {
+            release_rx.recv().unwrap();
+            completed_tx.send(()).unwrap();
+            Ok(crate::coordinator::StopReport {
+                ok: true,
+                status: crate::coordinator::StopOutcome::Stopped,
+                pid: Some(crate::coordinator::Pid::new(12345)),
+            })
+        },
+    );
+
+    assert!(report.is_none(), "an unfinished stop must remain unknown");
+    assert!(matches!(
+        completed_rx.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    release_tx.send(()).unwrap();
+    completed_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("release the controlled worker without leaving a blocked thread");
+}
+
+#[test]
 fn shutdown_outcome_late_or_postcheck_gone_is_ok_with_lsof_diagnostic() {
     let out = crate::cli::lifecycle_port::classify_shutdown_outcome(
         crate::cli::lifecycle_port::ShutdownOutcomeInput {
