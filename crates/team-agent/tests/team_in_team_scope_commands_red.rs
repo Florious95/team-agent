@@ -64,7 +64,7 @@ fn status_team_selector_filters_agents_tasks_messages_and_results_to_that_team()
     ]);
     assert_success(&output, "status --team teamA --json");
     let status = stdout_json(&output);
-    assert_brief_nodes(&status, &["worker_a"]);
+    assert_brief_nodes(&status, &["worker_a"], "teamA");
 
     let detail_output = run_cli([
         "status",
@@ -77,7 +77,7 @@ fn status_team_selector_filters_agents_tasks_messages_and_results_to_that_team()
     ]);
     assert_success(&detail_output, "status --team teamA --json --detail");
     let detail = stdout_json(&detail_output);
-    assert_brief_nodes(&detail, &["worker_a"]);
+    assert_brief_nodes(&detail, &["worker_a"], "teamA");
     assert_eq!(
         status.get("nodes"),
         detail.get("nodes"),
@@ -177,7 +177,7 @@ fn status_without_team_in_multi_alive_workspace_refuses_with_team_target_ambiguo
     ]);
     assert_success(&scoped, "status --team teamA --json");
     let scoped_body = stdout_json(&scoped);
-    assert_brief_nodes(&scoped_body, &["worker_a"]);
+    assert_brief_nodes(&scoped_body, &["worker_a"], "teamA");
 }
 
 #[test]
@@ -321,7 +321,7 @@ fn stdout_json(output: &Output) -> Value {
     })
 }
 
-fn assert_brief_nodes(value: &Value, expected_names: &[&str]) {
+fn assert_brief_nodes(value: &Value, expected_names: &[&str], team: &str) {
     let nodes = value
         .get("nodes")
         .and_then(Value::as_array)
@@ -341,9 +341,14 @@ fn assert_brief_nodes(value: &Value, expected_names: &[&str]) {
         keys.sort();
         assert_eq!(
             keys,
-            vec!["activity", "effort", "health", "model", "name", "provider", "runtime_status", "session_name", "tmux_command"],
-            "status brief node shape: {node}"
+            vec!["activity", "effort", "health", "model", "name", "next_action", "observation_reason", "provider", "runtime_status", "session_name", "tmux_command"],
+            "unknown status retains all original fields plus scoped diagnostics: {node}"
         );
+        assert_eq!(node["observation_reason"], "endpoint_unregistered");
+        let next = node["next_action"].as_str().expect("unknown status guidance");
+        assert!(next.starts_with("team-agent doctor --workspace "));
+        assert!(next.contains(&format!("--team '{team}'")));
+        assert!(next.contains("do not restart or reset based on unknown alone"));
     }
 }
 

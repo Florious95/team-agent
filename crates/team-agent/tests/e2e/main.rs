@@ -104,6 +104,7 @@ mod framework_tests {
                 .join(format!("ta-e2e-platform-{}-0", std::process::id())),
             ta_binary: std::sync::Mutex::new(Some(normalize_existing_path(&bin))),
             owned_tmux_sockets: std::sync::Mutex::new(Vec::new()),
+            caller: None,
         };
         let platform_tmp_owned = format!(
             "{} coordinator --workspace {}",
@@ -183,6 +184,36 @@ mod framework_tests {
         assert!(!no_caller_worker_only_fixture_started(&wrap(bind_ok.clone())));
         assert!(quick_start_launched(&wrap(bind_ok)));
         assert!(!quick_start_launched(&wrap(spawned.clone())));
+    }
+
+    #[test]
+    fn positive_subprocess_callers_are_distinct_and_do_not_mutate_global_environment() {
+        let keys = ["HOME", "TMUX", "TMUX_PANE", "TEAM_AGENT_LEADER_PROVIDER"];
+        let before = keys.map(|key| std::env::var_os(key));
+        let endpoints = {
+            let one = TestWorkspace::new("caller-one").with_fake_spec(&["a"]);
+            let two = TestWorkspace::new("caller-two").with_fake_spec(&["a"]);
+            let configured = |ws: &TestWorkspace| {
+                let mut command = std::process::Command::new(ta_binary());
+                ws.caller.as_ref().unwrap().configure_command(&mut command);
+                command.get_envs().filter_map(|(key, value)| {
+                    value.map(|value| (key.to_string_lossy().into_owned(), value.to_string_lossy().into_owned()))
+                }).collect::<std::collections::BTreeMap<_, _>>()
+            };
+            let one_env = configured(&one);
+            let two_env = configured(&two);
+            assert_ne!(one_env["TMUX"], two_env["TMUX"]);
+            assert_ne!(one_env["HOME"], two_env["HOME"]);
+            assert_eq!(one_env["TEAM_AGENT_LEADER_PROVIDER"], "fake");
+            assert_eq!(two_env["TEAM_AGENT_LEADER_PROVIDER"], "fake");
+            assert_eq!(keys.map(|key| std::env::var_os(key)), before);
+            [one_env["TMUX"].split(',').next().unwrap().to_owned(),
+             two_env["TMUX"].split(',').next().unwrap().to_owned()]
+        };
+        assert_eq!(keys.map(|key| std::env::var_os(key)), before);
+        for endpoint in endpoints {
+            assert!(!std::path::Path::new(&endpoint).exists(), "owned caller socket must be removed");
+        }
     }
 
     #[test]

@@ -73,8 +73,7 @@ struct CloneScopeCase {
 
 impl CloneScopeCase {
     fn start(tag: &str) -> Self {
-        let env = HermeticTestEnv::enter(tag);
-        env.scrub_tmux();
+        let env = HermeticTestEnv::for_subprocess_with_leader(tag);
         let workspace = env.workspace(tag);
         write_team_docs(&workspace);
         let shim_dir = write_claude_shim(&workspace);

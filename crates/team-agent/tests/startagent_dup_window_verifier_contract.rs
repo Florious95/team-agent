@@ -47,8 +47,7 @@ struct DupWindowCase {
 impl DupWindowCase {
     /// Start a real fake-provider team through the default silent tmux path.
     fn start(tag: &str, workers: &[&str]) -> Self {
-        let env = HermeticTestEnv::enter(tag);
-        env.scrub_tmux();
+        let env = HermeticTestEnv::for_subprocess_with_leader(tag);
         let workspace = env.workspace(tag);
         write_team_docs(&workspace, workers);
         let args = vec![
@@ -59,10 +58,8 @@ impl DupWindowCase {
             "--json",
         ];
         let output = env.run_cli(&workspace, &args);
-        // A leaderless CLI quick-start reports degraded (`leader_receiver_unbound`,
-        // non-zero exit) while still spawning every worker — the same state a
-        // real user is in right before `claim-leader`. The fixture only needs
-        // the workers to be physically up.
+        // Positive topology fixture has an exact-owned external caller;
+        // missing-caller admission remains fail-closed in dedicated tests.
         let value: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
             panic!(
                 "quick-start --json must emit JSON for the {tag} fixture; stdout={} stderr={}",

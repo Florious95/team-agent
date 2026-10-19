@@ -468,9 +468,7 @@ struct LaunchLatencyCase {
 
 impl LaunchLatencyCase {
     fn new(tag: &str, workers: usize) -> Self {
-        let env = hermetic_guard::HermeticTestEnv::enter(tag);
-        env.scrub_tmux();
-        env.assert_no_real_tmux();
+        let env = hermetic_guard::HermeticTestEnv::enter_with_leader(tag);
         let workspace = env.workspace(tag);
         let team_dir = workspace.join("teamdir");
         fs::create_dir_all(&team_dir).expect("create launch team dir");

@@ -62,7 +62,7 @@ fn role(id: &str, provider: &str, model: &str, effort: Option<&str>, bypass: boo
     s.push_str(&format!("---\n{prompt}\n")); s
 }
 fn ws_seed(tag: &str, provider: &str, model: &str, effort: Option<&str>) -> (TestWorkspace, Shims) {
-    let ws = TestWorkspace::new(tag);
+    let ws = TestWorkspace::new(tag).with_owned_caller();
     fs::write(ws.path().join("TEAM.md"), "Isolated lifecycle team.\n").unwrap();
     fs::create_dir_all(ws.path().join("agents")).unwrap();
     fs::write(ws.path().join("agents/seed.md"), role("seed", provider, model, effort, false, "Seed prompt.")).unwrap();

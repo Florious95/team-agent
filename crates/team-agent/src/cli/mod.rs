@@ -4468,7 +4468,7 @@ pub mod lifecycle_port {
         #[test]
         #[serial_test::serial(env)]
         fn existing_runtime_producer_scopes_send_team() {
-            let _hermetic = super::super::hermetic_test_support::HermeticTestEnv::enter(
+            let _hermetic = super::super::hermetic_test_support::HermeticTestEnv::enter_with_leader(
                 "quick-start-value-existing-runtime",
             );
             let root = std::env::temp_dir().join(format!(
@@ -4491,6 +4491,7 @@ pub mod lifecycle_port {
                 "---\nname: implementer\nrole: Implementation Engineer\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nImplement bounded tasks.\n",
             )
             .unwrap();
+            super::super::hermetic_test_support::seed_in_process_coordinator(&root);
             let transport = crate::transport::test_support::OfflineTransport::new();
             let first = crate::lifecycle::quick_start_with_transport(
                 &team_dir,

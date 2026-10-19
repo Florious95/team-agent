@@ -94,8 +94,8 @@ fn hermetic_caller_envs() -> &'static [&'static str] {
 
 #[test]
 #[serial_test::serial(env)]
-fn phase_golden_unbound_not_ready_requires_claim_leader() {
-    let diagnose = run_diagnose_after_quick_start();
+fn phase_golden_missing_registry_requires_index_publication_not_claim() {
+    let diagnose = run_diagnose_after_unbound_state_fixture();
     let issues = diagnose
         .get("issues")
         .and_then(Value::as_array)
@@ -177,22 +177,16 @@ fn cmd_value(result: Result<CmdResult, crate::cli::CliError>) -> Value {
     }
 }
 
-fn run_diagnose_after_quick_start() -> Value {
+fn run_diagnose_after_unbound_state_fixture() -> Value {
     let hermetic = HermeticTestEnv::enter("tombstone-claim-leader");
     let _permission_mode = EnvVarGuard::set(ANCESTRY_ENV, "[]");
     let team = two_worker_team_dir(&hermetic);
     let workspace = team.parent().expect("workspace").to_path_buf();
     seed_healthy_coordinator(&workspace);
     let launch_transport = codex_ready_transport();
-    quick_start_with_transport_in_workspace(
-        &workspace,
-        &team,
-        None,
-        true,
-        None,
-        &launch_transport,
-    )
-    .expect("tombstone fixture must quick-start");
+    crate::lifecycle::launch::materialize_unbound_state_for_test(
+        &workspace, &team, "teamdir", &launch_transport,
+    ).expect("materialize the recording-only tombstone fixture, not a callerless public start");
     let mut state = crate::state::persist::load_runtime_state(&workspace)
         .expect("tombstone fixture must persist runtime state");
     crate::lifecycle::launch::seed_launched_owner_from_caller_with_provider_lookup(

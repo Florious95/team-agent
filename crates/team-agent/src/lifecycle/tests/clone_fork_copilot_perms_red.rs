@@ -168,7 +168,7 @@ impl Case {
     /// product's existing test seam so the derived approval policy is a
     /// function of the FIXTURE, never of the host process tree.
     fn start_with_ancestry(tag: &str, ancestry_argv: &[&str]) -> Self {
-        let env = HermeticTestEnv::enter(tag);
+        let env = HermeticTestEnv::enter_with_leader(tag);
         let workspace = env.workspace("ws");
         write_team_docs(&workspace, "claude");
         let shim_dir = write_claude_backing_shim(&workspace);
@@ -500,8 +500,9 @@ fn r8_copilot_fork_is_no_longer_capability_refused() {
         // the capability gate — a CLI-shaped R8 could never be RED. An in-process
         // RecordingTransport stands the team up without a live copilot TUI (no
         // ready-screen hang).
-        let env = HermeticTestEnv::enter("cf-r8");
+        let env = HermeticTestEnv::enter_with_leader("cf-r8");
         let workspace = env.workspace("ws");
+        super::launch_spawn::seed_healthy_coordinator(&workspace);
         let team_dir = write_copilot_team_docs(&workspace);
         // Session ABSENT at quick-start so it can create the team session; spawn_first
         // flips session_present true, so the later fork sees a live session. (Starting

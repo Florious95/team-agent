@@ -42,7 +42,7 @@ struct Case {
 
 impl Case {
     fn start(tag: &str) -> Self {
-        let env = HermeticTestEnv::enter(tag);
+        let env = HermeticTestEnv::for_subprocess_with_leader(tag);
         let workspace = env.workspace("ws");
         write_team_docs(&workspace, "SOURCE_ROLE_BODY_ORIGINAL");
         let shim_dir = write_claude_shim(&workspace);

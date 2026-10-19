@@ -54,7 +54,7 @@ struct Case {
 impl Case {
     fn start() -> Self {
         ensure_team_agent_cli();
-        let env = HermeticTestEnv::enter("g1ct");
+        let env = HermeticTestEnv::enter_with_leader("g1ct");
         let workspace = env.workspace("ws");
         write_team_docs(&workspace);
         Self { env, workspace }
@@ -131,6 +131,12 @@ impl Case {
             TEAM_NAME,
             "--json",
         ]);
+    }
+}
+
+impl Drop for Case {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -338,6 +344,7 @@ fn clone_ok(case: &Case, source: &str, dest: &str, phase: &str) {
 
 /// clone 后分身 role 保留源席 tools；编译 spec 不投影 tools。
 #[test]
+#[serial_test::serial(env)]
 fn clone_agent_preserves_source_tools() {
     let case = Case::start();
     let qs = case.run(&[

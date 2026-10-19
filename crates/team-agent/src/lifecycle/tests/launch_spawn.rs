@@ -1307,21 +1307,7 @@ fn start_agent_session_generation_inherits_birth_or_stamps_recreated_session() {
 /// Seed a HEALTHY coordinator at `workspace` (this process's pid + matching metadata + db schema) so
 /// quick_start's internal start_coordinator returns AlreadyRunning — NO real daemon subprocess spawn.
 pub(super) fn seed_healthy_coordinator(workspace: &std::path::Path) {
-    let wp = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
-    std::fs::create_dir_all(crate::model::paths::runtime_dir(workspace)).unwrap();
-    let _ = crate::message_store::MessageStore::open(workspace).unwrap(); // create db schema (schema.ok)
-    let me = crate::coordinator::Pid::new(std::process::id());
-    crate::coordinator::write_coordinator_metadata(
-        &wp,
-        me,
-        crate::coordinator::MetadataSource::Boot,
-    )
-    .unwrap();
-    std::fs::write(
-        crate::coordinator::coordinator_pid_path(&wp),
-        me.to_string(),
-    )
-    .unwrap();
+    hermetic_guard::seed_in_process_coordinator(workspace);
 }
 
 #[test]

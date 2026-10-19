@@ -68,8 +68,7 @@ struct SendPathCase {
 
 impl SendPathCase {
     fn start(tag: &str) -> Self {
-        let env = HermeticTestEnv::enter(tag);
-        env.scrub_tmux();
+        let env = HermeticTestEnv::for_subprocess_with_leader(tag);
         let workspace = env.workspace(tag);
         std::fs::create_dir_all(workspace.join("agents")).expect("create agents dir");
         std::fs::write(

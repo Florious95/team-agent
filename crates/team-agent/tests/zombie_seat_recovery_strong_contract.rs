@@ -38,8 +38,7 @@ struct SeatCase {
 
 impl SeatCase {
     fn start(tag: &str, team: &str, workers: &[&str]) -> Self {
-        let env = HermeticTestEnv::enter(tag);
-        env.scrub_tmux();
+        let env = HermeticTestEnv::for_subprocess_with_leader(tag);
         let workspace = env.workspace(tag);
         std::fs::create_dir_all(workspace.join("agents")).expect("create agents dir");
         std::fs::create_dir_all(workspace.join("masters")).expect("create masters dir");
@@ -70,8 +69,8 @@ impl SeatCase {
             "--yes",
             "--json",
         ]);
-        // quick-start may exit nonzero for leader_receiver_unbound while still
-        // spawning workers — assert the physical precondition, not ok here.
+        // The owned external caller permits this positive worker fixture;
+        // retain its physical spawn precondition independently of ok.
         assert!(
             value
                 .get("worker_readiness")

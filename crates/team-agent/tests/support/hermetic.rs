@@ -154,6 +154,19 @@ pub fn spawn_owned_coordinator(workspace: &Path) -> Child {
         .expect("spawn fixture coordinator process")
 }
 
+/// Simulate an already-running coordinator for IN-PROCESS SUT calls only.
+/// The matching metadata uses the test PID; never use this for a spawned CLI.
+pub fn seed_in_process_coordinator(workspace: &Path) {
+    let scope = team_agent::coordinator::WorkspacePath::new(workspace.to_path_buf());
+    std::fs::create_dir_all(team_agent::model::paths::runtime_dir(workspace)).unwrap();
+    let _store = team_agent::message_store::MessageStore::open(workspace).unwrap();
+    let pid = team_agent::coordinator::Pid::new(std::process::id());
+    team_agent::coordinator::write_coordinator_metadata(
+        &scope, pid, team_agent::coordinator::MetadataSource::Boot,
+    ).unwrap();
+    std::fs::write(team_agent::coordinator::coordinator_pid_path(&scope), pid.to_string()).unwrap();
+}
+
 pub struct HermeticTestEnv {
     root: PathBuf,
     home: PathBuf,
@@ -186,7 +199,7 @@ pub struct EnvOverride {
 }
 
 impl HermeticTestEnv {
-    pub fn enter(tag: &str) -> Self {
+    fn isolated(tag: &str) -> Self {
         let base = std::env::var_os("TEAM_AGENT_TEST_TMP")
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
@@ -203,25 +216,28 @@ impl HermeticTestEnv {
         std::fs::create_dir_all(home.join(".team-agent/leaders"))
             .expect("create hermetic registry root");
 
-        let mut previous = Vec::new();
-        for key in std::iter::once("HOME").chain(CALLER_IDENTITY_ENVS.iter().copied()) {
-            previous.push((key, std::env::var(key).ok()));
-        }
-        unsafe {
-            std::env::set_var("HOME", &home);
-            for key in CALLER_IDENTITY_ENVS {
-                std::env::remove_var(key);
-            }
-        }
-
         Self {
             root,
             home,
-            previous,
+            previous: Vec::new(),
             fixture_caller: Vec::new(),
             caller_tmux: None,
             owned: Mutex::new(OwnedResources::default()),
         }
+    }
+
+    pub fn enter(tag: &str) -> Self {
+        let mut env = Self::isolated(tag);
+        for key in std::iter::once("HOME").chain(CALLER_IDENTITY_ENVS.iter().copied()) {
+            env.previous.push((key, std::env::var(key).ok()));
+        }
+        unsafe {
+            std::env::set_var("HOME", &env.home);
+            for key in CALLER_IDENTITY_ENVS {
+                std::env::remove_var(key);
+            }
+        }
+        env
     }
 
     /// Explicit positive fixture: a real, ledger-owned caller pane, not a
@@ -230,30 +246,52 @@ impl HermeticTestEnv {
     pub fn enter_with_leader(tag: &str) -> Self {
         let mut env = Self::enter(tag);
         env.assert_no_real_tmux();
+        env.spawn_fixture_caller();
+        for (key, value) in &env.fixture_caller {
+            unsafe { std::env::set_var(key, value); }
+        }
+        env
+    }
+
+    /// Parallel subprocess fixtures never mutate or restore the test process's
+    /// HOME/caller environment. The caller is supplied only to their commands.
+    pub fn for_subprocess_with_leader(tag: &str) -> Self {
+        let mut env = Self::isolated(tag);
+        env.spawn_fixture_caller();
+        env
+    }
+
+    fn spawn_fixture_caller(&mut self) {
         let socket = short_tmux_socket("caller");
         assert!(!socket.exists(), "fixture caller endpoint already exists");
         let tmux = fixture_tmux_binary();
-        env.caller_tmux = Some(tmux.clone());
+        self.caller_tmux = Some(tmux.clone());
         let output = Command::new(tmux)
             .args(["-u", "-S"]).arg(&socket).args(["-f", "/dev/null", "new-session", "-d", "-s", "fixture-caller", "-c"])
-            .arg(&env.root).args(["-P", "-F", "#{pane_id}", "exec sleep 86400"])
-            .env_remove("TMUX").env_remove("TMUX_PANE")
+            .arg(&self.root).args(["-P", "-F", "#{pane_id}", "exec sleep 86400"])
+            .env("HOME", &self.home).env_remove("TMUX").env_remove("TMUX_PANE")
             .output().expect("create owned fixture caller");
         assert!(output.status.success(), "fixture caller failed: {output:?}");
-        env.register_owned_tmux_socket(&socket);
+        self.register_owned_tmux_socket(&socket);
         let pane = String::from_utf8(output.stdout).expect("fixture pane UTF8").trim().to_string();
         assert!(pane.strip_prefix('%').is_some_and(|digits| !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())));
         let endpoint = socket.to_str().expect("fixture endpoint UTF8").to_string();
         // This models an explicit external fake Leader, not an inherited
         // Team Agent caller tuple bound to the worker transport's endpoint.
-        env.fixture_caller = vec![
+        self.fixture_caller = vec![
             ("TMUX", format!("{endpoint},0,0")), ("TMUX_PANE", pane),
             ("TEAM_AGENT_LEADER_PROVIDER", "fake".into()),
         ];
-        for (key, value) in &env.fixture_caller {
-            unsafe { std::env::set_var(key, value); }
+    }
+
+    pub fn configure_command(&self, command: &mut Command) {
+        command.env("HOME", &self.home);
+        for key in CALLER_IDENTITY_ENVS {
+            command.env_remove(key);
         }
-        env
+        for (key, value) in &self.fixture_caller {
+            command.env(key, value);
+        }
     }
 
     pub fn workspace(&self, tag: &str) -> PathBuf {
@@ -306,13 +344,8 @@ impl HermeticTestEnv {
 
     pub fn run_cli_env(&self, cwd: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> Output {
         let mut command = Command::new(test_binary_path());
-        command.args(args).current_dir(cwd).env("HOME", &self.home);
-        for key in CALLER_IDENTITY_ENVS {
-            command.env_remove(key);
-        }
-        for (key, value) in &self.fixture_caller {
-            command.env(key, value);
-        }
+        command.args(args).current_dir(cwd);
+        self.configure_command(&mut command);
         for (key, value) in extra_env {
             command.env(key, value);
         }
