@@ -72,7 +72,15 @@ impl Case {
     }
 
     fn publish(&self) {
-        publish(&self.ws, "owner", "worker", self.started).unwrap();
+        let outcome = publish(&self.ws, "owner", "worker", self.started);
+        if outcome.is_err() {
+            for event in crate::event_log::EventLog::new(&self.ws).tail(0).unwrap() {
+                if event["event"] == "mcp.handshake_evidence_failed" {
+                    eprintln!("CONTROLLED_MCP_HANDSHAKE_FAILURE {event}");
+                }
+            }
+        }
+        outcome.unwrap();
     }
 
     fn admission(&self) -> Result<Option<Admission>> {

@@ -148,7 +148,19 @@ pub(crate) fn publish(
         .map_err(|_| "mcp_handshake_workspace")?;
     let executable = std::env::current_exe().map_err(|_| "mcp_handshake_image")?;
     let image = fingerprint_file(&executable, 512 * 1024 * 1024, Duration::from_secs(2))
-        .map_err(|_| "mcp_handshake_image")?;
+        .map_err(|error| {
+            let _ = crate::event_log::EventLog::new(&workspace).write(
+                "mcp.handshake_evidence_failed",
+                serde_json::json!({
+                    "stage": "image_fingerprint",
+                    "operation": error.operation,
+                    "kind": format!("{:?}", error.kind),
+                    "image_bytes": std::fs::metadata(&executable).ok().map(|m| m.len()),
+                    "budget_ms": 2000,
+                }),
+            );
+            "mcp_handshake_image"
+        })?;
     let server = capture_process(
         std::process::id(),
         &executable,
@@ -292,10 +304,10 @@ pub(crate) fn preflight(
         .and_then(Value::as_str)
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .ok_or("mcp_handshake_spawn_missing")?;
-    let started_at = DateTime::parse_from_rfc3339(&receipt.started_at)
-        .map_err(|_| "mcp_handshake_invalid")?;
-    let flushed_at = DateTime::parse_from_rfc3339(&receipt.flushed_at)
-        .map_err(|_| "mcp_handshake_invalid")?;
+    let started_at =
+        DateTime::parse_from_rfc3339(&receipt.started_at).map_err(|_| "mcp_handshake_invalid")?;
+    let flushed_at =
+        DateTime::parse_from_rfc3339(&receipt.flushed_at).map_err(|_| "mcp_handshake_invalid")?;
     if started_at < spawned_at || flushed_at < started_at {
         return Err("mcp_handshake_stale_spawn");
     }

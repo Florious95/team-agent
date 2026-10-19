@@ -41,6 +41,7 @@ on:
           - issue342-red
           - issue342
           - issue342-format
+          - issue342-handshake
 
 permissions:
   contents: read
@@ -238,6 +239,9 @@ jobs:
             return "${statuses[0]}"
           }
           case "$REGRESSION_SCOPE" in
+            issue342-handshake)
+              run_case mcp-handshake cargo test -p team-agent --lib --locked mcp_server::readiness::tests::missing_handshake_defers_then_a_live_scoped_receipt_admits -- --exact --nocapture
+              ;;
             issue342-red)
               run_case cursor-project-root cargo test -p team-agent --test cursor_mcp_project_root_red --locked -- --test-threads=1
               ;;
@@ -370,7 +374,7 @@ jobs:
           if [[ "$REGRESSION_SCOPE" == cli-phase1 ]]; then
             files=(crates/team-agent/src/cli/arguments.rs crates/team-agent/src/cli/intent.rs crates/team-agent/src/cli/intent/runtime.rs crates/team-agent/src/cli/intent/tests.rs crates/team-agent/src/cli/intent/runtime_tests.rs crates/team-agent/src/cli/tests/parser_safety.rs crates/team-agent/tests/cli_human_surface_red.rs crates/team-agent/tests/excise_group1_commands_contract.rs crates/team-agent/tests/support/human_catalog.rs crates/team-agent/tests/c1_command_spec_contract.rs crates/team-agent/tests/cli_phase2_public_docs_contract.rs)
           fi
-          if [[ "$REGRESSION_SCOPE" == issue342 ]]; then
+          if [[ "$REGRESSION_SCOPE" == issue342 || "$REGRESSION_SCOPE" == issue342-handshake ]]; then
             files=(crates/team-agent/src/lifecycle/launch/cursor_mcp_iso.rs crates/team-agent/src/lifecycle/launch/cursor_mcp.rs crates/team-agent/src/lifecycle/tests/cursor_mcp_overlay.rs crates/team-agent/src/lifecycle/tests/cursor_restart_resume_red.rs crates/team-agent/tests/cursor_mcp_project_root_red.rs crates/team-agent/src/cli/intent/runtime.rs crates/team-agent/src/cli/intent/runtime_tests.rs crates/team-agent/src/mcp_server/readiness.rs crates/team-agent/src/mcp_server/readiness_tests.rs)
           fi
           rustfmt --edition 2021 --config skip_children=true --check "${files[@]}" > regression-evidence/format.log 2>&1
