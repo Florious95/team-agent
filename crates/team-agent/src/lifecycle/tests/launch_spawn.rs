@@ -1598,10 +1598,14 @@ fn annotate_runtime_tmux_endpoint_persists_workspace_socket_as_full_path() {
 #[test]
 #[serial(env)]
 fn quick_start_preserves_managed_leader_topology_and_emits_leader_attach_command() {
-    let _hermetic = enter_hermetic("launch-spawn-managed-leader");
-    let team = quick_start_team_dir(QS_VALID_ROLE);
-    let workspace = team.parent().expect("team_workspace(team_dir) = parent");
+    let hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("launch-spawn-managed-leader");
+    let workspace = hermetic.root();
+    let team = workspace.join("teamdir");
+    std::fs::create_dir_all(team.join("agents")).unwrap();
+    std::fs::write(team.join("TEAM.md"), QS_TEAM_MD).unwrap();
+    std::fs::write(team.join("agents/implementer.md"), QS_VALID_ROLE).unwrap();
     seed_healthy_coordinator(workspace);
+    let endpoint = std::env::var("TMUX").unwrap().split(',').next().unwrap().to_string();
     crate::state::persist::save_runtime_state(
         workspace,
         &json!({
@@ -1609,8 +1613,8 @@ fn quick_start_preserves_managed_leader_topology_and_emits_leader_attach_command
             "session_name": "team-teamdir",
             "is_external_leader": false,
             "leader_client": {"diagnostic_only": true, "attach_mode": "attach-session"},
-            "leader_receiver": {"mode": "direct_tmux", "status": "attached", "pane_id": "%42"},
-            "team_owner": {"pane_id": "%42", "owner_epoch": 1},
+            "tmux_socket": endpoint,
+            "tmux_endpoint": endpoint,
             "agents": {},
             "teams": {
                 "teamdir": {
@@ -1623,9 +1627,22 @@ fn quick_start_preserves_managed_leader_topology_and_emits_leader_attach_command
         }),
     )
     .expect("seed managed leader state");
+    let attached = crate::cli::cmd_attach_leader(&crate::cli::AttachLeaderArgs {
+        workspace: workspace.to_path_buf(), team: Some("teamdir".into()), pane: None,
+        provider: crate::model::enums::Provider::Fake, confirm: false, json: true,
+    }).expect("bind the real owned caller through the public lease port");
+    assert_eq!(attached.exit, crate::cli::ExitCode::Ok, "{attached:?}");
+    let mut state = crate::state::persist::load_runtime_state(workspace).unwrap();
+    // The owned fake caller models the already-managed launcher topology;
+    // retain the real binding while setting the presentation fixture metadata.
+    state["is_external_leader"] = json!(false);
+    state["leader_client"] = json!({"diagnostic_only": true, "attach_mode": "attach-session"});
+    state["teams"]["teamdir"]["is_external_leader"] = json!(false);
+    state["teams"]["teamdir"]["leader_client"] = state["leader_client"].clone();
+    crate::state::persist::save_runtime_state(workspace, &state).unwrap();
     let transport = OfflineTransport::new();
 
-    let report = quick_start_with_transport(&team, None, true, None, &transport)
+    let report = quick_start_with_transport(&team, None, true, Some("teamdir"), &transport)
         .expect("quick_start_with_transport must reach Ready");
     let attach_commands = match report {
         QuickStartReport::Ready {
@@ -2952,7 +2969,7 @@ fn quick_start_seeds_tasks_key_from_compiled_spec() {
 //   suffix (active_team_key, teams).
 #[test]
 #[serial(env)]
-fn quick_start_state_seeds_spec_path_workspace_leader() {
+fn quick_start_unbound_state_producer_seeds_spec_path_workspace_leader() {
     let _hermetic = enter_hermetic("launch-spawn-state-seeds");
     // Bug 2 owner team-scope: top-level owner triple is dropped when the seeded
     // pane is empty; an ambient TMUX_PANE (tests run inside the dev's tmux session)
@@ -2963,10 +2980,14 @@ fn quick_start_state_seeds_spec_path_workspace_leader() {
     let _tmux = EnvVarGuard::unset("TMUX");
     let team = quick_start_team_dir(QS_VALID_ROLE);
     let transport = OfflineTransport::new();
-    let _ = quick_start_with_transport(&team, None, true, None, &transport);
     let workspace = team
         .parent()
         .expect("team_workspace(<base>/teamdir) = <base>");
+    // Test the real unbound state producer plus recording-only worker stage.
+    // Public start correctly refuses this absent caller (separate regressions).
+    crate::lifecycle::launch::materialize_unbound_state_for_test(
+        workspace, &team, "quickteam", &transport,
+    ).expect("materialize the unbound producer fixture without public start");
     // E5: spec_path in state now points to .team/runtime/<team_key>/, team_dir stays the user role dir.
     let spec_path = quick_start_runtime_spec_path(&team);
     let (raw, state) = raw_runtime_state(workspace);
