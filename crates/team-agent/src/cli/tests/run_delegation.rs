@@ -436,6 +436,9 @@ fn issue338_doctor_reports_same_scope_unknown_observations_without_state_writes(
         "team_key": "current", "session_name": "test-workers",
         "agents": {"worker": {"provider": "pi", "status": "running"}},
     })).unwrap();
+    // Complete the existing legacy-to-current state normalization as fixture
+    // preparation; this test covers observation of an already-current runtime.
+    crate::state::persist::load_runtime_state(&workspace).unwrap();
     let state_path = crate::state::persist::runtime_state_path(&workspace);
     let before = std::fs::read(&state_path).unwrap();
     let result = cmd_doctor(&DoctorArgs {

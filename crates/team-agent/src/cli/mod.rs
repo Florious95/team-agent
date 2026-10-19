@@ -4243,8 +4243,9 @@ pub mod lifecycle_port {
             assert_eq!(value["effects"]["coordinator_start"], "not_attempted");
             assert_eq!(value["last_confirmed_effect"], "worker_panes_started");
             let recovery = value["recovery"].as_str().unwrap();
-            assert!(recovery.contains("--workspace '/owned/work space'"));
-            assert!(recovery.contains("--team 'demo'"));
+            let argv = split_shell_argv(recovery);
+            assert!(argv.windows(2).any(|pair| pair == ["--workspace", "/owned/work space"]));
+            assert!(argv.windows(2).any(|pair| pair == ["--team", "demo"]));
         }
 
         fn pending_tool_load_report() -> crate::lifecycle::QuickStartReport {
