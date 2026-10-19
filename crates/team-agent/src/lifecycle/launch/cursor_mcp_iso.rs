@@ -8,7 +8,9 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use team_agent_contract::contract::types::{Generation, InstanceId, InstanceIdentity, ScopeId, SeatId};
+use team_agent_contract::contract::types::{
+    Generation, InstanceId, InstanceIdentity, ScopeId, SeatId,
+};
 use team_agent_contract::host::files::{DirectoryReceipt, ScopedDirectory};
 use team_agent_contract::host::{digest, digest_hex};
 
@@ -42,18 +44,26 @@ fn failure(reason: impl std::fmt::Display) -> LifecycleError {
 }
 
 fn record_path(workspace: &Path, agent_id: &str) -> PathBuf {
-    workspace.join(".team/runtime/provider-config").join(agent_id).join("cursor-project.json")
+    workspace
+        .join(".team/runtime/provider-config")
+        .join(agent_id)
+        .join("cursor-project.json")
 }
 
 fn project_key(workspace: &Path, agent_id: &str) -> String {
-    digest_hex(digest(format!("{}\0{agent_id}", workspace.display()).as_bytes()))
+    digest_hex(digest(
+        format!("{}\0{agent_id}", workspace.display()).as_bytes(),
+    ))
 }
 
 fn planned_project(workspace: &Path, agent_id: &str) -> Result<PathBuf, LifecycleError> {
     // Do not assume TMPDIR is outside Git, or use an unchecked symlink alias.
     let parent = std::env::temp_dir().canonicalize().map_err(failure)?;
     validate_cursor_mcp_project_root(&parent)?;
-    Ok(parent.join(format!("ta-cursor-{}", &project_key(workspace, agent_id)[..32])))
+    Ok(parent.join(format!(
+        "ta-cursor-{}",
+        &project_key(workspace, agent_id)[..32]
+    )))
 }
 
 /// Computes a new path without creating it; existing allocations must reopen
@@ -79,7 +89,11 @@ pub(super) fn validate_cursor_mcp_project_root(project: &Path) -> Result<(), Lif
     }
     for ancestor in project.ancestors() {
         match std::fs::symlink_metadata(ancestor.join(".git")) {
-            Ok(_) => return Err(failure("Git ancestor would redirect native MCP projectRoot")),
+            Ok(_) => {
+                return Err(failure(
+                    "Git ancestor would redirect native MCP projectRoot",
+                ))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(failure(e)),
         }
@@ -103,7 +117,10 @@ pub fn materialize_cursor_mcp_project(
         }
         return Ok(reopen(&record)?.path().to_path_buf());
     }
-    let legacy = workspace.join(".team/runtime/provider-config").join(agent_id).join("cursor");
+    let legacy = workspace
+        .join(".team/runtime/provider-config")
+        .join(agent_id)
+        .join("cursor");
     match std::fs::symlink_metadata(&legacy) {
         Ok(_) => return Err(failure("unrecorded legacy primary exists; preserve its cwd/SID and explicitly select a fresh seat")),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -112,30 +129,47 @@ pub fn materialize_cursor_mcp_project(
     let path = planned_project(&workspace, agent_id)?;
     let key = project_key(&workspace, agent_id);
     let mut nonce = [0u8; 32];
-    std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut nonce)).map_err(failure)?;
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut nonce))
+        .map_err(failure)?;
     let owner = InstanceIdentity {
         scope: ScopeId::new(format!("legacy-cursor-{}", &key[..32])).map_err(failure)?,
         seat: SeatId::new(format!("seat-{}", &key[32..])).map_err(failure)?,
-        instance: InstanceId::new(format!("cwd-{}", digest_hex(digest(&nonce)))).map_err(failure)?,
+        instance: InstanceId::new(format!("cwd-{}", digest_hex(digest(&nonce))))
+            .map_err(failure)?,
         generation: Generation(1),
     };
     let directory = ScopedDirectory::create(&path, owner).map_err(failure)?;
-    std::fs::DirBuilder::new().mode(0o700).create(path.join(".cursor")).map_err(failure)?;
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(path.join(".cursor"))
+        .map_err(failure)?;
     link_workspace_rules(&workspace, &path.join(".cursor"))?;
     let record = ProjectRecord {
-        workspace: workspace.clone(), agent_id: agent_id.into(),
-        owner_team_id: owner_team_id.into(), directory: directory.receipt().clone(),
+        workspace: workspace.clone(),
+        agent_id: agent_id.into(),
+        owner_team_id: owner_team_id.into(),
+        directory: directory.receipt().clone(),
     };
     let record_path = record_path(&workspace, agent_id);
-    let parent = record_path.parent().ok_or_else(|| failure("missing record parent"))?;
+    let parent = record_path
+        .parent()
+        .ok_or_else(|| failure("missing record parent"))?;
     std::fs::create_dir_all(parent).map_err(failure)?;
     if parent.canonicalize().map_err(failure)? != parent {
         return Err(failure("record parent is a symlink"));
     }
     let bytes = serde_json::to_vec(&record).map_err(failure)?;
-    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(record_path).map_err(failure)?;
-    file.write_all(&bytes).and_then(|()| file.sync_all()).map_err(failure)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(record_path)
+        .map_err(failure)?;
+    file.write_all(&bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(failure)?;
     directory.check_live().map_err(failure)?;
     validate_cursor_mcp_project_root(&path)?;
     Ok(path)
@@ -148,23 +182,34 @@ fn read_record(workspace: &Path, agent_id: &str) -> Result<Option<ProjectRecord>
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(failure(e)),
     };
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.nlink() != 1
-        || metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.nlink() != 1
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0
         || path.parent().and_then(|p| p.canonicalize().ok()).as_deref() != path.parent()
     {
         return Err(failure("unowned or aliased project record"));
     }
-    let file = std::fs::OpenOptions::new().read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(&path).map_err(failure)?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)
+        .map_err(failure)?;
     let opened = file.metadata().map_err(failure)?;
     if opened.dev() != metadata.dev() || opened.ino() != metadata.ino() {
         return Err(failure("project record replaced"));
     }
     let mut bytes = Vec::new();
     file.take(65537).read_to_end(&mut bytes).map_err(failure)?;
-    if bytes.len() > 65536 { return Err(failure("oversized project record")); }
+    if bytes.len() > 65536 {
+        return Err(failure("oversized project record"));
+    }
     let record: ProjectRecord = serde_json::from_slice(&bytes).map_err(failure)?;
-    if record.workspace != workspace || record.agent_id != agent_id || record.owner_team_id.trim().is_empty() {
+    if record.workspace != workspace
+        || record.agent_id != agent_id
+        || record.owner_team_id.trim().is_empty()
+    {
         return Err(failure("project record identity mismatch"));
     }
     Ok(Some(record))
@@ -172,7 +217,8 @@ fn read_record(workspace: &Path, agent_id: &str) -> Result<Option<ProjectRecord>
 
 fn reopen(record: &ProjectRecord) -> Result<ScopedDirectory, LifecycleError> {
     let key = project_key(&record.workspace, &record.agent_id);
-    if record.directory.path.file_name().and_then(|n| n.to_str()) != Some(format!("ta-cursor-{}", &key[..32]).as_str())
+    if record.directory.path.file_name().and_then(|n| n.to_str())
+        != Some(format!("ta-cursor-{}", &key[..32]).as_str())
         || record.directory.owner.scope.as_str() != format!("legacy-cursor-{}", &key[..32])
         || record.directory.owner.seat.as_str() != format!("seat-{}", &key[32..])
         || record.directory.owner.generation != Generation(1)
@@ -183,8 +229,10 @@ fn reopen(record: &ProjectRecord) -> Result<ScopedDirectory, LifecycleError> {
     validate_cursor_mcp_project_root(directory.path())?;
     let cursor = directory.path().join(".cursor");
     let metadata = std::fs::symlink_metadata(&cursor).map_err(failure)?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink()
-        || metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0
     {
         return Err(failure("unowned .cursor directory"));
     }
@@ -192,10 +240,15 @@ fn reopen(record: &ProjectRecord) -> Result<ScopedDirectory, LifecycleError> {
 }
 
 fn validate_agent_id(agent_id: &str) -> Result<(), LifecycleError> {
-    if agent_id.is_empty() || agent_id.contains("..")
-        || !agent_id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    if agent_id.is_empty()
+        || agent_id.contains("..")
+        || !agent_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
     {
-        return Err(failure("agent id must be a single path segment [A-Za-z0-9._-]+"));
+        return Err(failure(
+            "agent id must be a single path segment [A-Za-z0-9._-]+",
+        ));
     }
     Ok(())
 }

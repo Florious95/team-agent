@@ -281,10 +281,15 @@ pub fn prepare_cursor_seat_mcp(
     mcp_config: &crate::provider::McpConfig,
 ) -> Result<Option<PathBuf>, LifecycleError> {
     if cursor_mcp_isolation_enabled() {
-        let server = mcp_config.raw.get("team_orchestrator")
+        let server = mcp_config
+            .raw
+            .get("team_orchestrator")
             .or_else(|| mcp_config.raw.get("team-agent"));
         let env = server.and_then(|s| s.get("env"));
-        let field = |key| env.and_then(|v| v.get(key)).and_then(serde_json::Value::as_str);
+        let field = |key| {
+            env.and_then(|v| v.get(key))
+                .and_then(serde_json::Value::as_str)
+        };
         let physical = physical_workspace_path(workspace);
         if field("TEAM_AGENT_ID") != Some(agent_id)
             || field("TEAM_AGENT_WORKSPACE") != physical.to_str()
@@ -293,8 +298,11 @@ pub fn prepare_cursor_seat_mcp(
                 "cursor MCP resolved identity does not match the selected workspace/seat".into(),
             ));
         }
-        let owner = field("TEAM_AGENT_OWNER_TEAM_ID").filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| LifecycleError::RequirementUnmet("cursor MCP missing owner team".into()))?;
+        let owner = field("TEAM_AGENT_OWNER_TEAM_ID")
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| {
+                LifecycleError::RequirementUnmet("cursor MCP missing owner team".into())
+            })?;
         let project = materialize_cursor_mcp_project(&physical, agent_id, owner)?;
         apply_cursor_mcp_overlay(&project, mcp_config)?;
         validate_cursor_project_mcp(&physical, &project)?;
@@ -329,9 +337,7 @@ pub fn enable_cursor_workspace_mcp_with_profile(
     }
     let argv = cursor_mcp_enable_argv();
     let mut command = Command::new(&argv[0]);
-    command
-        .args(&argv[1..])
-        .current_dir(&physical);
+    command.args(&argv[1..]).current_dir(&physical);
     apply_cursor_mcp_enable_profile_env(&mut command, profile_launch);
     let output = command.output().map_err(|e| {
         LifecycleError::RequirementUnmet(format!(
@@ -371,42 +377,71 @@ fn validate_cursor_project_mcp(workspace: &Path, project: &Path) -> Result<(), L
     use std::io::Read;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     validate_cursor_mcp_project_root(project)?;
-    let refuse = || LifecycleError::RequirementUnmet(
+    let refuse = || {
+        LifecycleError::RequirementUnmet(
         "cursor MCP private config is missing, mismatched, or its server executable is unavailable; native tools are not ready".into(),
-    );
-    let file = std::fs::OpenOptions::new().read(true)
+    )
+    };
+    let file = std::fs::OpenOptions::new()
+        .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(project.join(".cursor/mcp.json")).map_err(|_| refuse())?;
+        .open(project.join(".cursor/mcp.json"))
+        .map_err(|_| refuse())?;
     let metadata = file.metadata().map_err(|_| refuse())?;
-    if !metadata.is_file() || metadata.nlink() != 1 || metadata.uid() != unsafe { libc::geteuid() } {
+    if !metadata.is_file() || metadata.nlink() != 1 || metadata.uid() != unsafe { libc::geteuid() }
+    {
         return Err(refuse());
     }
     let mut bytes = Vec::new();
-    file.take(65537).read_to_end(&mut bytes).map_err(|_| refuse())?;
-    if bytes.len() > 65536 { return Err(refuse()); }
+    file.take(65537)
+        .read_to_end(&mut bytes)
+        .map_err(|_| refuse())?;
+    if bytes.len() > 65536 {
+        return Err(refuse());
+    }
     let config: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| refuse())?;
-    let server = config.get("mcpServers").and_then(|v| v.get("team_orchestrator"))
+    let server = config
+        .get("mcpServers")
+        .and_then(|v| v.get("team_orchestrator"))
         .ok_or_else(refuse)?;
     let env = server.get("env").ok_or_else(refuse)?;
     for key in REQUIRED_IDENTITY_KEYS {
-        if env.get(*key).and_then(serde_json::Value::as_str)
+        if env
+            .get(*key)
+            .and_then(serde_json::Value::as_str)
             .is_none_or(|s| s.trim().is_empty() || s.contains('{'))
         {
             return Err(refuse());
         }
     }
-    let seat = env.get("TEAM_AGENT_ID").and_then(serde_json::Value::as_str).ok_or_else(refuse)?;
-    let owner = env.get("TEAM_AGENT_OWNER_TEAM_ID").and_then(serde_json::Value::as_str).ok_or_else(refuse)?;
-    if env.get("TEAM_AGENT_WORKSPACE").and_then(serde_json::Value::as_str) != workspace.to_str()
+    let seat = env
+        .get("TEAM_AGENT_ID")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(refuse)?;
+    let owner = env
+        .get("TEAM_AGENT_OWNER_TEAM_ID")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(refuse)?;
+    if env
+        .get("TEAM_AGENT_WORKSPACE")
+        .and_then(serde_json::Value::as_str)
+        != workspace.to_str()
         || cursor_mcp_project_dir(workspace, seat)? != project
         || materialize_cursor_mcp_project(workspace, seat, owner)? != project
     {
         return Err(refuse());
     }
-    let command = server.get("command").and_then(serde_json::Value::as_str).ok_or_else(refuse)?;
+    let command = server
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(refuse)?;
     let metadata = std::fs::metadata(command).map_err(|_| refuse())?;
-    let current = std::env::current_exe().and_then(std::fs::canonicalize).map_err(|_| refuse())?;
-    if !Path::new(command).is_absolute() || !metadata.is_file() || metadata.mode() & 0o111 == 0
+    let current = std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .map_err(|_| refuse())?;
+    if !Path::new(command).is_absolute()
+        || !metadata.is_file()
+        || metadata.mode() & 0o111 == 0
         || std::fs::canonicalize(command).map_err(|_| refuse())? != current
         || server.get("args") != Some(&serde_json::json!(["mcp-server", "--workspace", workspace]))
     {
