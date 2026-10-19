@@ -229,11 +229,10 @@ impl HermeticTestEnv {
         let pane = String::from_utf8(output.stdout).expect("fixture pane UTF8").trim().to_string();
         assert!(pane.strip_prefix('%').is_some_and(|digits| !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())));
         let endpoint = socket.to_str().expect("fixture endpoint UTF8").to_string();
+        // This models an explicit external fake Leader, not an inherited
+        // Team Agent caller tuple bound to the worker transport's endpoint.
         env.fixture_caller = vec![
-            ("TMUX", format!("{endpoint},0,0")), ("TMUX_PANE", pane.clone()),
-            ("TEAM_AGENT_CALLER_PROVIDER", "fake".into()),
-            ("TEAM_AGENT_CALLER_PANE_ID", pane),
-            ("TEAM_AGENT_CALLER_TMUX_ENDPOINT", endpoint),
+            ("TMUX", format!("{endpoint},0,0")), ("TMUX_PANE", pane),
             ("TEAM_AGENT_LEADER_PROVIDER", "fake".into()),
         ];
         for (key, value) in &env.fixture_caller {
