@@ -272,6 +272,13 @@ fn native_observation(
     }
 }
 
+fn shell_carrier(command: &str) -> bool {
+    matches!(command, "sh" | "bash" | "zsh" | "fish")
+}
+fn surface_liveness(command: &str, native_frame: bool, live_child: bool) -> bool {
+    !command.is_empty() && native_frame && (!shell_carrier(command) || live_child)
+}
+
 /// Positive native/store or exact carrier+pane+provider observations only.
 fn observe(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation, CliError> {
     if !row.is_object()
@@ -338,6 +345,8 @@ fn observe(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation
     if !status.eq_ignore_ascii_case("running") {
         return Ok(Observation::Unknown);
     }
+    #[cfg(unix)]
+    let carrier_birth = checked(team_agent_contract::host::process::process_birth_identity(pid))?;
     let backend = checked(
         crate::lifecycle::restart::lifecycle_worker_tmux_backend_selection_for_state(
             &selected.run_workspace,
@@ -376,13 +385,22 @@ fn observe(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation
     let command = matches[0].current_command.as_deref().unwrap_or("");
     let positive_command = command == crate::provider::wire::command_name(native)
         || crate::leader::provider_attribution::command_matches_provider(native, command);
-    let positive_surface = if !positive_command
-        && !matches!(command, "sh" | "bash" | "zsh" | "fish" | "")
-    {
-        checked(
-            backend.observe_native_input(&Target::Pane(PaneId::new(pane.unwrap_or(""))), native),
-        )?
-        .is_some()
+    let positive_surface = if !positive_command && !command.is_empty() {
+        let frame = checked(backend.observe_native_input(
+            &Target::Pane(PaneId::new(pane.unwrap_or(""))), native,
+        ))?;
+        // Original start/restart supervises the native child with a shell carrier.
+        // A shell alone (including its inert post-exit tail) is never Live.
+        let mut live_child = false;
+        if frame.is_some() && shell_carrier(command) {
+            for child in checked(crate::platform::process::process_tree(pid))? {
+                if child != pid && matches!(checked(crate::platform::process::pid_liveness(child))?, crate::platform::process::ProcessLiveness::Live) {
+                    live_child = true;
+                    break;
+                }
+            }
+        }
+        surface_liveness(command, frame.is_some(), live_child)
     } else {
         false
     };
@@ -390,9 +408,9 @@ fn observe(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation
         return Ok(Observation::Unknown);
     }
     #[cfg(unix)]
-    checked(team_agent_contract::host::process::process_birth_identity(
-        pid,
-    ))?;
+    if checked(team_agent_contract::host::process::process_birth_identity(pid))? != carrier_birth {
+        return Ok(Observation::Unknown);
+    }
     Ok(Observation::Live)
 }
 fn start_args(plan: &Plan, id: &str, patch: RoleConfigPatch) -> StartAgentArgs {
