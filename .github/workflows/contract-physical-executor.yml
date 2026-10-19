@@ -249,6 +249,8 @@ jobs:
               run_case cli-commands cargo test -p team-agent --lib --locked cli::tests:: -- --test-threads=1
               run_case cli-intent cargo test -p team-agent --lib --locked cli::intent:: -- --test-threads=1
               run_case blind-defects cargo test -p team-agent --lib --locked issue33 -- --test-threads=1
+              run_case launch-admission cargo test -p team-agent --lib --locked lifecycle::tests::launch_spawn -- --test-threads=1
+              run_case fresh-admission cargo test -p team-agent --lib --locked fresh_quick_start_leader_binding_tests -- --test-threads=1
               run_case cli-human cargo test -p team-agent --test cli_human_surface_red --locked -- --test-threads=1
               run_case public-docs cargo test -p team-agent --test cli_phase2_public_docs_contract --locked -- --test-threads=1
               run_case test-isolation cargo test -p team-agent --lib --locked lifecycle::tests::test_isolation_escape_contract::r6_static_guard_rejects_dangerous_tests_without_hermetic_boundary -- --test-threads=1
