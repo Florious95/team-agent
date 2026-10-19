@@ -1158,7 +1158,8 @@ pub(super) fn recheck(plan: &Plan, step: &Step, after_stop: bool) -> Result<(), 
         }
         #[cfg(unix)]
         if !crate::contract_runtime::framework::is_contract(row)
-            && crate::provider::wire::parse_provider(provider(row)) == Some(crate::provider::Provider::CursorAgent)
+            && crate::provider::wire::parse_provider(provider(row))
+                == Some(crate::provider::Provider::CursorAgent)
             && (matches!(step, Step::StartAgent(_))
                 || (plan.intent.verb == Verb::Restart && matches!(step, Step::StopAgent(_)))
                 || (matches!(step, Step::RestartTeam(_))
