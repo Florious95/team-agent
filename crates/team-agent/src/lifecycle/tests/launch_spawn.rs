@@ -1610,7 +1610,7 @@ fn quick_start_preserves_managed_leader_topology_and_emits_leader_attach_command
         workspace,
         &json!({
             "active_team_key": "teamdir",
-            "session_name": "team-teamdir",
+            "session_name": null,
             "is_external_leader": false,
             "leader_client": {"diagnostic_only": true, "attach_mode": "attach-session"},
             "tmux_socket": endpoint,
@@ -1618,7 +1618,7 @@ fn quick_start_preserves_managed_leader_topology_and_emits_leader_attach_command
             "agents": {},
             "teams": {
                 "teamdir": {
-                    "session_name": "team-teamdir",
+                    "session_name": null,
                     "is_external_leader": false,
                     "leader_client": {"diagnostic_only": true, "attach_mode": "attach-session"},
                     "agents": {}
@@ -1633,6 +1633,9 @@ fn quick_start_preserves_managed_leader_topology_and_emits_leader_attach_command
     }).expect("bind the real owned caller through the public lease port");
     assert_eq!(attached.exit, crate::cli::ExitCode::Ok, "{attached:?}");
     let mut state = crate::state::persist::load_runtime_state(workspace).unwrap();
+    assert!(state["session_name"].is_null(), "leader-only bootstrap has no worker session");
+    assert!(state["teams"]["teamdir"]["session_name"].is_null());
+    assert!(state["teams"]["teamdir"]["agents"].as_object().unwrap().is_empty());
     // The owned fake caller models the already-managed launcher topology;
     // retain the real binding while setting the presentation fixture metadata.
     state["is_external_leader"] = json!(false);

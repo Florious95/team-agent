@@ -40,7 +40,7 @@ use team_agent::transport::test_support::OfflineTransport;
 #[test]
 #[serial(env)]
 fn cursor_fresh_spawn_does_not_invent_session_id() {
-    let _hermetic = hermetic_guard::HermeticTestEnv::enter("cursor-fresh");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("cursor-fresh");
     let (ws, _home, _guard, team) = seed_cursor("pending");
     let transport = OfflineTransport::new();
     quick_start_with_transport_in_workspace(&ws, &team, None, true, Some("cursortm"), &transport)
@@ -80,7 +80,7 @@ fn cursor_fresh_spawn_does_not_invent_session_id() {
 #[test]
 #[serial(env)]
 fn cursor_restart_uses_resume_when_session_captured_and_archive_present() {
-    let _hermetic = hermetic_guard::HermeticTestEnv::enter("cursor-resume");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("cursor-resume");
     let (ws, home, _guard, team) = seed_cursor("resume");
     let first = OfflineTransport::new();
     quick_start_with_transport_in_workspace(&ws, &team, None, true, Some("cursortm"), &first)
@@ -182,7 +182,7 @@ fn cursor_classify_resumes_when_archive_present_and_refuses_when_missing() {
 #[test]
 #[serial(env)]
 fn cursor_fork_agent_refuses_as_unsupported_not_unverified() {
-    let _hermetic = hermetic_guard::HermeticTestEnv::enter("cursor-fork");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("cursor-fork");
     let (ws, _home, _guard, team) = seed_cursor("fork");
     let transport = OfflineTransport::new();
     quick_start_with_transport_in_workspace(&ws, &team, None, true, Some("cursortm"), &transport)
@@ -280,6 +280,7 @@ fn seed_healthy_coordinator(workspace: &Path) {
 
 fn seed_cursor(tag: &str) -> (PathBuf, PathBuf, HomeGuard, PathBuf) {
     let ws = tmp_dir(tag);
+    super::launch_spawn::seed_healthy_coordinator(&ws);
     let home = tmp_dir(&format!("{tag}-home"));
     let guard = HomeGuard::set(&home);
     let team = write_cursor_role(&ws);

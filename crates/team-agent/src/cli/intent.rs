@@ -515,7 +515,9 @@ fn execute_plan(
         partial_effect |= receipt.get("status").and_then(Value::as_str) == Some("partial");
         known_no_effect &= receipt["status"] == "preflight_blocked"
             && receipt["effects"]["coordinator_start"] == "not_attempted"
-            && receipt["effects"]["worker_panes_started"].as_array().is_some_and(Vec::is_empty);
+            && receipt["effects"]["worker_panes_started"]
+                .as_array()
+                .is_some_and(Vec::is_empty);
         if let Some(effect) = receipt.get("effects") {
             let workers = effect
                 .get("worker_panes_started")
@@ -523,7 +525,8 @@ fn execute_plan(
                 .is_some_and(|workers| !workers.is_empty());
             let coordinator = effect.get("coordinator_start").and_then(Value::as_str);
             handler_effect_confirmed |= workers || coordinator == Some("running_confirmed");
-            partial_effect |= workers || matches!(coordinator, Some("running_confirmed" | "attempted_unknown"));
+            partial_effect |=
+                workers || matches!(coordinator, Some("running_confirmed" | "attempted_unknown"));
             effects.push(json!({"action": step.name(), "agent": step.agent(), "effects": effect}));
         }
         let stop_unconfirmed = plan.intent.verb == Verb::Restart
@@ -532,9 +535,16 @@ fn execute_plan(
             && receipt.get("stopped").and_then(Value::as_bool) != Some(true);
         let success = success && !stop_unconfirmed;
         if !success {
-            refusal_hint = receipt.get("recovery").and_then(Value::as_str)
-                .or_else(|| receipt.get("next_actions").and_then(Value::as_array)
-                    .and_then(|actions| actions.first()).and_then(Value::as_str))
+            refusal_hint = receipt
+                .get("recovery")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    receipt
+                        .get("next_actions")
+                        .and_then(Value::as_array)
+                        .and_then(|actions| actions.first())
+                        .and_then(Value::as_str)
+                })
                 .map(str::to_string);
         }
         if matches!(step, Step::CreateTeam(_)) {

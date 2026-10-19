@@ -32,10 +32,9 @@ use team_agent::transport::{
 #[test]
 #[serial(env)]
 fn compatible_api_profile_writes_claude_settings_and_project_state_with_mcp_servers() {
-    let hermetic = hermetic_guard::HermeticTestEnv::enter("claude-compatible-config");
-    hermetic.scrub_tmux();
-    hermetic.assert_no_real_tmux();
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("claude-compatible-config");
     let ws = tmp_dir("compatible-config-files");
+    super::launch_spawn::seed_healthy_coordinator(&ws);
     let team = write_claude_profile_team(&ws, "cfgteam", "clauder");
     let transport = RecordingTransport::default();
 

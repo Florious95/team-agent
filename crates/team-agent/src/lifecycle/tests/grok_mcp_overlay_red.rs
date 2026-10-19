@@ -15,10 +15,7 @@ mod hermetic_guard;
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
 fn enter_hermetic(tag: &str) -> hermetic_guard::HermeticTestEnv {
-    let env = hermetic_guard::HermeticTestEnv::enter(tag);
-    env.scrub_tmux();
-    env.assert_no_real_tmux();
-    env
+    hermetic_guard::HermeticTestEnv::enter_with_leader(tag)
 }
 
 use std::path::{Path, PathBuf};
@@ -218,6 +215,7 @@ fn two_grok_seats_coexist_when_toml_has_no_per_seat_keys() {
 fn leftover_per_seat_key_is_cleared_before_start() {
     let _hermetic = enter_hermetic("grok-overlay-leftover-seat");
     let ws = tmp_dir("grok-cwd-per-seat");
+    super::launch_spawn::seed_healthy_coordinator(&ws);
     let home = tmp_dir("grok-cwd-per-seat-home");
     seed_grok_home(&home, Some(&ws));
     let _guard = HomeGuard::set(&home);
@@ -345,6 +343,7 @@ fn grok_missing_login_refuses_to_start() {
 fn grok_spawn_writes_resolved_team_agent_into_project_grok_config() {
     let _hermetic = enter_hermetic("grok-overlay-spawn");
     let ws = tmp_dir("grok-mcp-overlay");
+    super::launch_spawn::seed_healthy_coordinator(&ws);
     let home = tmp_dir("grok-mcp-overlay-home");
     seed_grok_home(&home, Some(&ws));
     let _guard = HomeGuard::set(&home);

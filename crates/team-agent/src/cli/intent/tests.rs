@@ -275,7 +275,11 @@ fn issue337_failed_handler_preserves_confirmed_and_uncertain_effects() {
 fn issue337_zero_effect_refusal_is_explicit_at_top_without_hiding_prior_uncertainty() {
     for prior_unknown in [false, true] {
         let mut call = 0;
-        let actions = if prior_unknown { vec!["start", "start"] } else { vec!["start"] };
+        let actions = if prior_unknown {
+            vec!["start", "start"]
+        } else {
+            vec!["start"]
+        };
         let result = execute_plan(
             plan(Verb::Start, &actions),
             &mut |_| {
@@ -291,11 +295,23 @@ fn issue337_zero_effect_refusal_is_explicit_at_top_without_hiding_prior_uncertai
             },
             &mut |_, _, _| Ok(()),
         ).unwrap();
-        let CmdOutput::Json(value) = result.output else { panic!() };
+        let CmdOutput::Json(value) = result.output else {
+            panic!()
+        };
         assert_eq!(value["status"], "failed");
-        assert_eq!(value["current_state"], if prior_unknown {"unknown"} else {"unchanged"});
+        assert_eq!(
+            value["current_state"],
+            if prior_unknown {
+                "unknown"
+            } else {
+                "unchanged"
+            }
+        );
         assert!(value["last_confirmed_effect"].is_null());
-        assert_eq!(value["effects"][0]["effects"]["coordinator_start"], "not_attempted");
+        assert_eq!(
+            value["effects"][0]["effects"]["coordinator_start"],
+            "not_attempted"
+        );
         let recovery = value["recovery"].as_str().unwrap();
         if prior_unknown {
             assert!(recovery.contains("doctor"));

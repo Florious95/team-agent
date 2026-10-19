@@ -245,7 +245,13 @@ jobs:
               run_case launch-admission cargo test -p team-agent --lib --locked lifecycle::tests::launch_spawn::quick_start_ -- --test-threads=1
               ;;
             cli-defects-fixtures)
-              run_case copilot-fixtures cargo test -p team-agent --lib --locked lifecycle::tests::copilot_provider_red -- --test-threads=1
+              run_case provider-fixtures cargo test -p team-agent --lib --locked -- --test-threads=1 \
+                lifecycle::tests::copilot_provider_red lifecycle::tests::behavioral_diff_264_red \
+                lifecycle::tests::claude_compatible_config_red lifecycle::tests::claude_profile_launch_red \
+                lifecycle::tests::cursor_mcp_overlay lifecycle::tests::cursor_require_explicit_model_red \
+                lifecycle::tests::cursor_restart_resume_red lifecycle::tests::grok_effort_argv_red \
+                lifecycle::tests::grok_mcp_overlay_red lifecycle::tests::grok_require_explicit_model_red \
+                lifecycle::tests::grok_restart_resume_red lifecycle::tests::phase_b_contracts
               ;;
             issue334-red)
               run_case workspace-check cargo check --workspace --all-targets --locked
