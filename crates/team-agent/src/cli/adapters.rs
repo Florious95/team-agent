@@ -724,6 +724,11 @@ fn unified_default_doctor_report(args: &DoctorArgs, mut value: Value) -> Value {
                 );
                 merge_report_array(&mut value, "issues", &issues);
                 merge_report_array(&mut value, "suggested_repairs", &repairs);
+                let brief = crate::cli::status_port::status_brief_scoped(
+                    &selected.run_workspace, &state, None,
+                );
+                let observations = brief["nodes"].as_array().into_iter().flatten()
+                    .filter(|node| node.get("observation_reason").is_some()).cloned().collect::<Vec<_>>();
                 let run_workspace = selected.run_workspace.to_string_lossy().to_string();
                 runtime = json!({
                     "status": "present",
@@ -733,6 +738,7 @@ fn unified_default_doctor_report(args: &DoctorArgs, mut value: Value) -> Value {
                     "session_name": state.get("session_name").cloned().unwrap_or(Value::Null),
                     "leader_receiver": state.get("leader_receiver").cloned().unwrap_or(Value::Null),
                     "agent_count": state.get("agents").and_then(Value::as_object).map_or(0, serde_json::Map::len),
+                    "observations": observations,
                     "message_count": count_dir_entries(&selected.run_workspace.join(".team").join("messages")),
                     "result_count": count_dir_entries(&selected.run_workspace.join(".team").join("results")),
                 });

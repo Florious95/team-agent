@@ -4095,6 +4095,25 @@ pub mod lifecycle_port {
                     "reminder": crate::cli::QUICK_START_REMINDER,
                     "readiness": readiness_json.clone(),
                     "worker_readiness": readiness_json,
+                    "effects": {"worker_panes_started": agent_ids, "coordinator_start": "running_confirmed"},
+                })
+            }
+            crate::lifecycle::QuickStartReport::Partial {
+                workspace, session_name, launch, team, error, coordinator_state,
+            } => {
+                let agents: Vec<_> = launch.started.iter().map(|agent| agent.agent_id.as_str())
+                    .chain(launch.contract_started.iter().map(|id| id.as_str())).collect();
+                let recovery = format!(
+                    "team-agent doctor --workspace {} --team {} --json; inspect confirmed effects before any retry; no automatic rollback is claimed",
+                    shell_quote(&workspace.to_string_lossy()), shell_quote(&team),
+                );
+                json!({
+                    "ok": false, "status": "partial", "phase": "post_spawn",
+                    "workspace": workspace, "team": team, "session_name": session_name.as_str(),
+                    "error": crate::redaction::redact_external_text(&error),
+                    "effects": {"worker_panes_started": agents, "coordinator_start": coordinator_state},
+                    "last_confirmed_effect": if agents.is_empty() {Value::Null} else {json!("worker_panes_started")},
+                    "current_state": "unknown", "recovery": recovery,
                 })
             }
             crate::lifecycle::QuickStartReport::ExistingRuntime {
@@ -4126,6 +4145,7 @@ pub mod lifecycle_port {
                 "ok": false,
                 "status": "preflight_blocked",
                 "reason": "quick-start preflight blocked",
+                "effects": {"worker_panes_started": [], "coordinator_start": "not_attempted"},
                 "summary": summary,
                 "blockers": blockers,
                 "next_actions": next_actions,
@@ -4207,6 +4227,24 @@ pub mod lifecycle_port {
             assert!(detail["worker_readiness"]
                 .get("leader_receiver_attached")
                 .is_some());
+        }
+
+        #[test]
+        fn issue337_partial_start_receipt_retains_workers_and_scoped_recovery() {
+            let crate::lifecycle::QuickStartReport::Ready { launch, .. } = pending_tool_load_report() else { panic!() };
+            let value = quick_start_value(crate::lifecycle::QuickStartReport::Partial {
+                workspace: PathBuf::from("/owned/work space"),
+                session_name: crate::transport::SessionName::new("team-demo"),
+                launch, team: "demo".into(), error: "caller disappeared".into(),
+                coordinator_state: "not_attempted".into(),
+            });
+            assert_eq!(value["status"], "partial");
+            assert_eq!(value["effects"]["worker_panes_started"], json!(["worker"]));
+            assert_eq!(value["effects"]["coordinator_start"], "not_attempted");
+            assert_eq!(value["last_confirmed_effect"], "worker_panes_started");
+            let recovery = value["recovery"].as_str().unwrap();
+            assert!(recovery.contains("--workspace '/owned/work space'"));
+            assert!(recovery.contains("--team 'demo'"));
         }
 
         fn pending_tool_load_report() -> crate::lifecycle::QuickStartReport {

@@ -512,6 +512,16 @@ pub enum QuickStartReport {
         worker_readiness: QuickStartReadiness,
         team: String,
     },
+    /// Workers may exist, but post-spawn admission/coordinator completion failed.
+    /// Preserve confirmed effects; never disguise this as a preflight refusal.
+    Partial {
+        workspace: PathBuf,
+        session_name: SessionName,
+        launch: Box<LaunchReport>,
+        team: String,
+        error: String,
+        coordinator_state: String,
+    },
     /// 已有 runtime state → quick-start 拒绝并引导用 restart。
     ExistingRuntime {
         team: Option<String>,
