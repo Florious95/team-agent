@@ -67,6 +67,17 @@ fn test_binary_path() -> PathBuf {
     path
 }
 
+/// The CI-selected public tmux tool, retained before a test isolates PATH.
+/// This is a fixture driver path, not production executable authorization.
+pub fn fixture_tmux_binary() -> PathBuf {
+    let path = std::env::var_os("CONTRACT_TMUX").map(PathBuf::from).unwrap_or_else(|| {
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|directory| directory.join("tmux")).find(|path| path.is_file())
+            .expect("tmux fixture driver is required")
+    });
+    path.canonicalize().expect("canonical tmux fixture driver")
+}
+
 /// 0.5.43 debt-sweep (debt-sweep-locate.md §4.2): short, process-unique
 /// absolute tmux socket path for tests that exec real `tmux -S`. Root
 /// cause of the Gate2 flake is macOS `AF_UNIX sun_path` >104 bytes when
@@ -148,6 +159,7 @@ pub struct HermeticTestEnv {
     home: PathBuf,
     previous: Vec<(&'static str, Option<String>)>,
     fixture_caller: Vec<(&'static str, String)>,
+    caller_tmux: Option<PathBuf>,
     /// 0.5.43 debt-sweep (§6.1): test-owned resource ledger. Drop
     /// cleanup walks these EXACT entries (never a host-wide scan).
     /// Order matters: pids first (stop coordinator/child tree), then
@@ -207,6 +219,7 @@ impl HermeticTestEnv {
             home,
             previous,
             fixture_caller: Vec::new(),
+            caller_tmux: None,
             owned: Mutex::new(OwnedResources::default()),
         }
     }
@@ -219,7 +232,9 @@ impl HermeticTestEnv {
         env.assert_no_real_tmux();
         let socket = short_tmux_socket("caller");
         assert!(!socket.exists(), "fixture caller endpoint already exists");
-        let output = Command::new("tmux")
+        let tmux = fixture_tmux_binary();
+        env.caller_tmux = Some(tmux.clone());
+        let output = Command::new(tmux)
             .args(["-u", "-S"]).arg(&socket).args(["-f", "/dev/null", "new-session", "-d", "-s", "fixture-caller", "-c"])
             .arg(&env.root).args(["-P", "-F", "#{pane_id}", "exec sleep 86400"])
             .env_remove("TMUX").env_remove("TMUX_PANE")
@@ -426,7 +441,8 @@ impl Drop for HermeticTestEnv {
             }
             for socket in owned.tmux_sockets.drain(..) {
                 if let Some(socket_str) = socket.to_str() {
-                    let _ = Command::new("tmux")
+                    let tmux = self.caller_tmux.as_deref().unwrap_or_else(|| Path::new("tmux"));
+                    let _ = Command::new(tmux)
                         .args(["-S", socket_str, "kill-server"])
                         .output();
                 }

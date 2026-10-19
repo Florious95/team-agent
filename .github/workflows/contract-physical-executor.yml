@@ -33,6 +33,7 @@ on:
           - issue334-red
           - cli-defects-red
           - cli-defects-admission
+          - cli-defects-fixtures
           - issue334
           - cli-phase1
           - cli-phase1-format
@@ -243,6 +244,9 @@ jobs:
             cli-defects-admission)
               run_case launch-admission cargo test -p team-agent --lib --locked lifecycle::tests::launch_spawn::quick_start_ -- --test-threads=1
               ;;
+            cli-defects-fixtures)
+              run_case copilot-fixtures cargo test -p team-agent --lib --locked lifecycle::tests::copilot_provider_red -- --test-threads=1
+              ;;
             issue334-red)
               run_case workspace-check cargo check --workspace --all-targets --locked
               run_case parser-safety cargo test -p team-agent --lib --locked cli::emit::parser_safety_tests -- --test-threads=1
@@ -384,6 +388,7 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y tmux
           fi
+          printf 'CONTRACT_TMUX=%s\n' "$(command -v tmux)" >> "$GITHUB_ENV"
           mkdir workspace-evidence
           git rev-parse HEAD 'HEAD^{tree}' > workspace-evidence/source.txt
           rustc -vV > workspace-evidence/toolchain.txt
