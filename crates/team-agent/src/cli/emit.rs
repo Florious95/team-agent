@@ -353,13 +353,14 @@ pub(crate) fn default_help() -> String {
     append_help_section(
         &mut out,
         "Getting started",
-        &["quick-start", "send", "status", "models", "inbox"],
+        &["start", "quick-start", "send", "status", "models", "inbox"],
     );
-    append_help_section(&mut out, "Team lifecycle", &["restart", "shutdown"]);
+    append_help_section(&mut out, "Team lifecycle", &["stop", "team", "restart", "shutdown"]);
     append_help_section(
         &mut out,
         "Agent lifecycle",
         &[
+            "agent",
             "add-agent",
             "start-agent",
             "stop-agent",
@@ -1066,7 +1067,7 @@ fn next_arg(args: &[String], index: &mut usize) -> Option<String> {
     args.get(*index).cloned()
 }
 
-fn parse_seconds_ms(raw: &str) -> Option<u64> {
+pub(super) fn parse_seconds_ms(raw: &str) -> Option<u64> {
     let seconds = raw.parse::<f64>().ok()?;
     if seconds.is_finite() && seconds >= 0.0 {
         Some((seconds * 1000.0).round() as u64)
@@ -1080,7 +1081,7 @@ fn parse_cli_provider(raw: &str) -> Result<crate::provider::Provider, CliError> 
         .map_err(|_| CliError::Usage(format!("unknown provider: {raw}")))
 }
 
-fn explicit_path(value: &str) -> bool {
+pub(super) fn explicit_path(value: &str) -> bool {
     value == "." || value == ".." || value.contains('/') || value.contains('\\')
         || Path::new(value).is_absolute()
         || (value.as_bytes().get(1) == Some(&b':') && value.as_bytes().first().is_some_and(u8::is_ascii_alphabetic))
@@ -1549,6 +1550,10 @@ fn restart_args(args: &[String], cwd: &Path) -> Result<RestartArgs, CliError> {
 }
 
 // Keep strict role CLI parsing separate from the legacy shared parser.
+pub(super) fn intent_source_workspace(source: &Path, cwd: &Path) -> Result<PathBuf, CliError> {
+    quick_start_args(&[source.to_string_lossy().into_owned()], cwd).map(|args| args.workspace)
+}
+
 pub(super) fn intent_role_patch(args: &[String]) -> Result<crate::lifecycle::role_config::RoleConfigPatch, CliError> {
     role_agent_args(args, false).map(|(_, patch)| patch)
 }
@@ -2715,7 +2720,9 @@ mod tests {
         // 'statu' typo → status; 'add-agen' → add-agent.
         assert_eq!(nearest_subcommand("statu"), Some("status"));
         assert_eq!(nearest_subcommand("add-agen"), Some("add-agent"));
-        assert_eq!(nearest_subcommand("start-agnet"), Some("start-agent"));
+        // Presentation migration: the new canonical short verb is now a
+        // prefix candidate in the unchanged shared similarity ranking.
+        assert_eq!(nearest_subcommand("start-agnet"), Some("start"));
     }
 
     #[test]

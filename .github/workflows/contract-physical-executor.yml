@@ -33,11 +33,56 @@ on:
           - issue334-red
           - issue334
           - cli-phase1
+          - cli-phase1-format
 
 permissions:
   contents: read
 
 jobs:
+  cli-phase1-format:
+    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && (inputs.regression_scope == 'cli-phase1' || inputs.regression_scope == 'cli-phase1-format')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      RUSTUP_TOOLCHAIN: "1.95.0"
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      EXPECTED_TREE: ${{ inputs.expected_tree }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify exact source and format only the bounded new surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_TREE" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_TREE"
+          test -z "$(git status --porcelain=v1)"
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt
+          mkdir format-evidence
+          git rev-parse HEAD 'HEAD^{tree}' > format-evidence/source.txt
+          files=(crates/team-agent/src/cli/arguments.rs crates/team-agent/src/cli/intent.rs crates/team-agent/src/cli/intent/runtime.rs crates/team-agent/src/cli/intent/tests.rs crates/team-agent/src/cli/intent/runtime_tests.rs crates/team-agent/src/cli/tests/parser_safety.rs)
+          set +e
+          rustfmt --edition 2021 --config skip_children=true --check "${files[@]}" > format-evidence/format.log 2>&1
+          rc=$?
+          set -e
+          printf '%s\n' "$rc" > format-evidence/format.exit
+          rustfmt --edition 2021 --config skip_children=true "${files[@]}"
+          git diff --binary -- "${files[@]}" > format-evidence/format.patch
+          (cd format-evidence && sha256sum ./* > SHA256SUMS)
+          exit "$rc"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cli-phase1-format-${{ github.run_id }}
+          path: format-evidence/
+          if-no-files-found: error
+          retention-days: 14
+
   macos-fixtures:
     if: github.event_name != 'workflow_dispatch' || inputs.source_sha == ''
     runs-on: macos-14
@@ -128,7 +173,7 @@ jobs:
           retention-days: 14
 
   grok-root-regression:
-    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && inputs.regression_scope != 'issue321-f1'
+    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && inputs.regression_scope != 'issue321-f1' && inputs.regression_scope != 'cli-phase1-format'
     runs-on: macos-14
     timeout-minutes: 45
     env:
@@ -195,7 +240,9 @@ jobs:
               ;;
             cli-phase1)
               run_case workspace-check cargo check --workspace --all-targets --locked
-              run_case cli-all cargo test -p team-agent --lib --locked cli:: -- --test-threads=1
+              run_case cli-parser cargo test -p team-agent --lib --locked cli::emit:: -- --test-threads=1
+              run_case cli-commands cargo test -p team-agent --lib --locked cli::tests:: -- --test-threads=1
+              run_case cli-intent cargo test -p team-agent --lib --locked cli::intent:: -- --test-threads=1
               run_case root-restart cargo test -p team-agent --lib --locked lifecycle::restart -- --test-threads=1
               run_case root-role cargo test -p team-agent --lib --locked lifecycle::role_config -- --test-threads=1
               run_case root-contract cargo test -p team-agent --lib --locked contract_runtime -- --test-threads=1
@@ -265,7 +312,7 @@ jobs:
             files=(crates/team-agent/src/cli/arguments.rs crates/team-agent/src/cli/tests/parser_safety.rs)
           fi
           if [[ "$REGRESSION_SCOPE" == cli-phase1 ]]; then
-            files=(crates/team-agent/src/cli/arguments.rs crates/team-agent/src/cli/intent.rs crates/team-agent/src/cli/intent/runtime.rs crates/team-agent/src/cli/intent/tests.rs crates/team-agent/src/cli/intent/runtime_tests.rs)
+            files=(crates/team-agent/src/cli/arguments.rs crates/team-agent/src/cli/intent.rs crates/team-agent/src/cli/intent/runtime.rs crates/team-agent/src/cli/intent/tests.rs crates/team-agent/src/cli/intent/runtime_tests.rs crates/team-agent/src/cli/tests/parser_safety.rs)
           fi
           rustfmt --edition 2021 --config skip_children=true --check "${files[@]}" > regression-evidence/format.log 2>&1
           rc=$?

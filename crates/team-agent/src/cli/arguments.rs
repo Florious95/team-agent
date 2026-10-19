@@ -26,7 +26,7 @@ struct Schema {
 
 fn schema(command: &str) -> Option<Schema> {
     let (flags, max_positionals): (&'static [(&'static str, ValueKind)], usize) = match command {
-        "intent-start" => (
+        "intent-start" | "start" => (
             &[
                 ("--from", Path),
                 ("--session", Choice(&["auto", "preserve"])),
@@ -42,7 +42,7 @@ fn schema(command: &str) -> Option<Schema> {
             ],
             1,
         ),
-        "intent-stop" => (&[], 1),
+        "intent-stop" | "stop" => (&[], 1),
         "intent-restart" => (
             &[
                 ("--session", Choice(&["auto", "preserve"])),
@@ -348,6 +348,17 @@ pub(super) fn parse(command: &str, args: &[String]) -> Result<CheckedArgs, CliEr
 
 /// Rendering switches must not be inferred from a consumed value or literal payload.
 pub(super) fn has_flag(command: &str, args: &[String], needle: &str) -> bool {
+    if matches!(command, "team" | "agent") {
+        if let Some((operation, args)) = args.split_first() {
+            let command = match operation.as_str() {
+                "start" => "intent-start", "stop" => "intent-stop", "restart" => "intent-restart",
+                "status" if command == "team" => "status",
+                "add" => "add-agent", "remove" => "remove-agent", "reset" => "reset-agent",
+                "clone" => "clone-agent", "fork" => "fork-agent", _ => return false,
+            };
+            return has_flag(command, args, needle);
+        }
+    }
     let Some(schema) = schema(command) else {
         // Dedicated native parsers retain their pre-delimiter rendering switch.
         return args

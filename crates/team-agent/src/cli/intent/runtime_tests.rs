@@ -219,3 +219,53 @@ fn explicit_source_and_relative_role_file_are_resolved_from_caller_not_workspace
     );
     assert!(!workspace.join(".team").exists());
 }
+
+#[test]
+fn genuine_bootstrap_uses_original_predicate_but_history_is_not_fresh() {
+    let (root, intent) = fixture(&["one"]);
+    let state = crate::state::persist::runtime_state_path(root.path());
+    std::fs::create_dir_all(state.parent().unwrap()).unwrap();
+    let bootstrap = json!({"team_key":"fixture","agents":{},"tasks":[],"session_name":null,"team_owner":{"pane_id":"%0"},"leader_receiver":{"pane_id":"%0","status":"attached"}});
+    std::fs::write(&state,serde_json::to_vec(&bootstrap).unwrap()).unwrap();
+    assert_eq!(actions(&plan_with_observer(intent.clone(),|_,_,_|panic!()).unwrap()),[("quick_start",None)]);
+    let mut history=bootstrap;history["tasks"]=json!({"old":{}});
+    std::fs::write(&state,serde_json::to_vec(&history).unwrap()).unwrap();
+    assert!(plan_with_observer(intent,|_,_,_|panic!()).is_err());
+}
+
+#[test]
+fn preserve_rejects_known_missing_backing_before_stop_auto_uses_existing_decision() {
+    let (root, _) = fixture(&["one"]);install(root.path(),&[("one","running",false)]);
+    let selected=resolve_active_team_readonly(root.path(),Some("fixture"),SelectorMode::RuntimeOnly).unwrap();
+    let row=json!({"provider":"pi","session_id":"missing-session","rollout_path":root.path().join("missing.jsonl"),"spawn_cwd":root.path()});
+    assert!(preflight_start(&selected,"one",&row,SessionPolicy::Preserve).is_err());
+    assert!(preflight_start(&selected,"one",&row,SessionPolicy::Auto).is_ok());
+    assert!(preflight_start(&selected,"one",&json!({"provider":"pi"}),SessionPolicy::Preserve).is_ok(),"first fresh has no captured context to discard");
+    for policy in [SessionPolicy::Auto,SessionPolicy::Preserve] { assert!(preflight_start(&selected,"one",&json!({"provider":"cursor"}),policy).is_err(),"unadmitted native resume cannot fall back to legacy/fresh"); }
+}
+
+#[test]
+fn changed_role_and_socket_refuse_in_the_real_readonly_recheck() {
+    let(root,intent)=fixture(&["one"]);install(root.path(),&[("one","stopped",false)]);
+    let plan=plan_with_observer(intent,|_,_,_|Ok(Observation::StoppedVerified)).unwrap();
+    let path=root.path().join("agents/one.md");let original=std::fs::read(&path).unwrap();
+    std::fs::write(&path,b"changed role").unwrap();assert!(recheck(&plan,&plan.steps[0],false).is_err());std::fs::write(path,original).unwrap();
+    let state=crate::state::persist::runtime_state_path(root.path());let mut raw:Value=serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();raw["teams"]["fixture"]["tmux_socket"]=json!("/different/endpoint");std::fs::write(state,serde_json::to_vec(&raw).unwrap()).unwrap();
+    assert!(recheck(&plan,&plan.steps[0],false).is_err());
+}
+
+#[test]
+fn creation_rejects_an_added_role_before_the_original_create_handler() {
+    let(root,intent)=fixture(&["one"]);let plan=plan_with_observer(intent,|_,_,_|panic!()).unwrap();
+    write_role(root.path(),"two");assert!(recheck(&plan,&plan.steps[0],false).is_err());
+    assert!(!crate::state::persist::runtime_state_path(root.path()).exists());
+}
+
+#[test]
+fn stopped_text_without_physical_identity_is_unknown_and_standalone_source_keeps_its_workspace() {
+    let(root,_)=fixture(&["one"]);install(root.path(),&[("one","stopped",false)]);
+    let selected=resolve_active_team_readonly(root.path(),Some("fixture"),SelectorMode::RuntimeOnly).unwrap();
+    assert_eq!(observe(&selected,"one",&json!({"status":"stopped","provider":"pi"})).unwrap(),Observation::Unknown);
+    let(root,_)=fixture(&["one"]);let values=vec!["--from".into(),root.path().to_string_lossy().into_owned(),"--dry-run".into(),"--json".into()];
+    let result=super::super::run("start",&values,root.path()).unwrap().unwrap();let CmdOutput::Json(value)=result.output else{panic!()};assert_eq!(value["scope"]["workspace"],root.path().to_string_lossy().as_ref());
+}

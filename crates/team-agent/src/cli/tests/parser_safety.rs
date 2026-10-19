@@ -219,16 +219,19 @@ fn every_dispatch_command_has_a_closed_control_schema() {
         {
             continue;
         }
-        let checked = super::super::arguments::parse(spec.name, &strings(&["--help"])).unwrap();
+        // Family grammars select the concrete operation before its closed
+        // schema; the family itself has no permissive catch-all flag parser.
+        let schema = if matches!(spec.name, "team" | "agent") { "intent-start" } else { spec.name };
+        let checked = super::super::arguments::parse(schema, &strings(&["--help"])).unwrap();
         assert!(checked.help, "{} must have a schema", spec.name);
         let compatibility =
-            super::super::arguments::parse(spec.name, &strings(&["--no-display"])).unwrap();
+            super::super::arguments::parse(schema, &strings(&["--no-display"])).unwrap();
         assert!(
             compatibility.tokens.is_empty(),
             "explicit legacy no-display control: {}",
             spec.name
         );
-        assert!(super::super::arguments::parse(spec.name, &strings(&["--unknown"])).is_err());
+        assert!(super::super::arguments::parse(schema, &strings(&["--unknown"])).is_err());
     }
     for command in ["wait", "coordinator", "attach-app-server-leader"] {
         assert!(
@@ -305,7 +308,7 @@ fn payload_help_is_not_control_and_compatibility_flags_do_not_delete_literals() 
 }
 
 #[test]
-fn restart_node_directory_matrix_always_refuses_without_mutating_state() {
+fn restart_node_directory_phase1_migration_refuses_without_mutating_state() {
     for agent in [false, true] {
         for directory in [false, true] {
             let sandbox = Sandbox::new();
@@ -322,12 +325,16 @@ fn restart_node_directory_matrix_always_refuses_without_mutating_state() {
             }
             assert_eq!(
                 run(&strings(&["restart", "worker"]), &sandbox.0),
-                ExitCode::Usage
+                // P3 Phase1: a plain ID is an agent intent; same-name directory
+                // remains a syntax ambiguity. Incomplete runtime still refuses.
+                if directory { ExitCode::Usage } else { ExitCode::Error }
             );
             assert_eq!(
                 std::fs::read_to_string(runtime.join("state.json")).unwrap(),
                 state
             );
+            // Canonical planning refusals are effect-free envelopes; legacy
+            // restart diagnostics remain on their frozen entry point.
             assert!(!sandbox.0.join(".team/logs").exists());
         }
     }

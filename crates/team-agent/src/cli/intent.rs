@@ -43,6 +43,7 @@ pub(super) struct Intent {
     workspace: PathBuf,
     team: Option<String>,
     session: SessionPolicy,
+    session_converge_deadline_ms: Option<u64>,
     dry_run: bool,
     json: bool,
     role_file: Option<PathBuf>,
@@ -108,6 +109,7 @@ pub(super) struct Plan {
     skipped: Vec<Value>,
     files: Vec<(PathBuf, Vec<u8>)>,
     expected: BTreeMap<String, Value>,
+    topology: Option<Value>,
 }
 
 pub(super) const HELP: &str = "Usage: team-agent start [AGENT|./TEAMDIR] [--from TEAMDIR] [--workspace PATH] [--team KEY] [--session preserve|auto] [--dry-run] [--json]\n       team-agent stop [AGENT] [--workspace PATH] [--team KEY] [--json]\n       team-agent restart AGENT [--session auto|preserve] [--dry-run] [--json]\n       team-agent team <start|stop|restart|status> [TEAMDIR] [OPTIONS]\n       team-agent agent <start|stop|restart|add|remove|reset|clone|fork> AGENT [OPTIONS]\n\nstart is idempotent only after verified physical identity; running roles are not edited.\nstart activates the non-paused roster, including explicitly stopped seats.\nteam restart preserves paused/explicitly stopped seats; its default is session auto.\nLegacy bare/path restart keeps preserve and original receipts. auto is not reset/fresh.\nAgent IDs (including reviewer.v2) are never inferred from directory existence.\nPaths use ./DIR, --from DIR or team start DIR; stop paths require --workspace.\nDry-run is read-only; original lock/native admission remains deferred.\nExamples:\n  team-agent start --from ./roles\n  team-agent start reviewer\n  team-agent team restart --session preserve\n  team-agent agent restart reviewer --dry-run --json";
@@ -119,10 +121,7 @@ fn refusal(message: impl Into<String>) -> CliError {
     CliError::Runtime(message.into())
 }
 fn path_syntax(value: &str) -> bool {
-    matches!(value, "." | "..")
-        || value.contains('/')
-        || value.contains('\\')
-        || value.as_bytes().get(1) == Some(&b':')
+    super::emit::explicit_path(value)
 }
 fn existing_path(cwd: &Path, value: &str) -> Result<PathBuf, CliError> {
     let path = Path::new(value);
@@ -137,7 +136,10 @@ fn existing_path(cwd: &Path, value: &str) -> Result<PathBuf, CliError> {
 fn options(tokens: &[String]) -> (Vec<String>, BTreeMap<String, String>) {
     let mut pos = Vec::new();
     let mut flags = BTreeMap::new();
+    let mut literal = false;
     for token in tokens {
+        if literal { pos.push(token.clone()); continue; }
+        if token == "--" { literal = true; continue; }
         if let Some((key, value)) = token
             .split_once('=')
             .filter(|(key, _)| key.starts_with("--"))
@@ -168,16 +170,21 @@ pub(super) fn run(
             Err(e) => return Some(Err(e)),
         };
         let (pos, flags) = options(&checked.tokens);
-        if !flags.contains_key("--session")
+        let surface = if !flags.contains_key("--session")
             && !flags.contains_key("--dry-run")
-            && pos.first().is_none_or(|p| path_syntax(p))
-        {
-            let surface = Surface::FrozenLegacy;
-            debug_assert_eq!(surface, Surface::FrozenLegacy);
-            return None;
-        }
+            && pos.first().is_none_or(|p| path_syntax(p)) {
+            Surface::FrozenLegacy
+        } else { Surface::Canonical };
+        if surface == Surface::FrozenLegacy { return None; }
     }
-    Some(run_canonical(command, args, cwd))
+    Some(match run_canonical(command, args, cwd) {
+        Err(error) if !matches!(error, CliError::Usage(_)) => {
+            // New surfaces use one effect-free refusal envelope. In particular,
+            // never reparse a --prompt payload as an error-log workspace.
+            Ok(CmdResult::from_json(json!({"ok":false,"action":command,"scope":null,"phase":"planning_or_selection","error":crate::redaction::redact_external_text(&error.to_string())}), super::arguments::has_flag(command, args, "--json")))
+        }
+        result => result,
+    })
 }
 fn run_canonical(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult, CliError> {
     let (verb, args, explicit_agent, explicit_team) = if matches!(command, "team" | "agent") {
@@ -221,7 +228,13 @@ fn run_canonical(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult
     if checked.help {
         return Ok(CmdResult::human(HELP));
     }
-    let (pos, flags) = options(&checked.tokens);
+    let intent = lifecycle_intent(command, verb, &checked.tokens, cwd, explicit_agent, explicit_team)?;
+    let plan = runtime::plan(intent)?;
+    execute_plan(plan, &mut |step| step.execute(), &mut runtime::recheck)
+}
+
+fn lifecycle_intent(command: &str, verb: Verb, tokens: &[String], cwd: &Path, explicit_agent: bool, explicit_team: bool) -> Result<Intent, CliError> {
+    let (pos, flags) = options(tokens);
     if verb == Verb::Stop && pos.first().is_some_and(|p| path_syntax(p)) {
         return Err(usage(
             "stop accepts an agent ID; select a workspace with --workspace",
@@ -297,7 +310,7 @@ fn run_canonical(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult
         None => match &subject {
             Subject::Team {
                 source: Some(source),
-            } => crate::model::paths::team_workspace(source).map_err(|e| usage(e.to_string()))?,
+            } => super::emit::intent_source_workspace(source, cwd)?,
             _ => path_workspace.clone().unwrap_or(cwd.canonicalize()?),
         },
     };
@@ -307,13 +320,17 @@ fn run_canonical(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult
     if path_workspace.is_some_and(|path| path != workspace) {
         return Err(usage("positional workspace conflicts with --workspace"));
     }
+    if matches!(subject, Subject::Agent(_)) && flags.contains_key("--session-converge-deadline") {
+        return Err(usage("--session-converge-deadline applies only to team restart"));
+    }
+    let session_converge_deadline_ms = flags.get("--session-converge-deadline").map(|value| super::emit::parse_seconds_ms(value).ok_or_else(|| usage("invalid session deadline"))).transpose()?;
     let role_file = flags
         .get("--role-file")
         .map(|path| existing_path(cwd, path))
         .transpose()?;
     let patch = if verb == Verb::Start {
         let mut role_args = vec!["intent-agent".to_string()];
-        for token in &checked.tokens {
+        for token in tokens {
             if token.split_once('=').is_some_and(|(k, _)| {
                 matches!(
                     k,
@@ -334,20 +351,19 @@ fn run_canonical(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult
             "team start does not apply per-agent role patches; use start AGENT",
         ));
     }
-    let intent = Intent {
+    Ok(Intent {
         surface: Surface::Canonical,
         verb,
         subject,
         workspace,
         team: flags.get("--team").cloned(),
         session,
+        session_converge_deadline_ms,
         dry_run: flags.contains_key("--dry-run"),
         json: flags.contains_key("--json"),
         role_file,
         patch,
-    };
-    let plan = runtime::plan(intent)?;
-    execute_plan(plan, &mut |step| step.execute(), &mut runtime::recheck)
+    })
 }
 
 fn execute_plan(
@@ -367,6 +383,8 @@ fn execute_plan(
         ));
     }
     let mut results = Vec::new();
+    let mut actual_scope = plan.scope.clone();
+    let mut pending = false;
     let mut ok = true;
     let mut stop_succeeded = false;
     for step in &plan.steps {
@@ -387,7 +405,13 @@ fn execute_plan(
             ),
             Err(error) => (false, json!({"ok":false,"error":error.to_string()})),
         };
-        results.push(json!({"action":step.name(),"agent":step.agent(),"ok":success,"mode":receipt.get("start_mode").or_else(||receipt.get("mode")).cloned().unwrap_or(json!("unknown")),"receipt":receipt}));
+        let stop_unconfirmed = plan.intent.verb == Verb::Restart && matches!(step, Step::StopAgent(_)) && success && receipt.get("stopped").and_then(Value::as_bool) != Some(true);
+        let success = success && !stop_unconfirmed;
+        if matches!(step, Step::CreateTeam(_)) {
+            if let Some(team) = receipt.get("team").and_then(Value::as_str).filter(|team| !team.is_empty()) { actual_scope.team = Some(team.to_string()); }
+        }
+        pending |= success && (receipt.get("ready").and_then(Value::as_bool) == Some(false) || receipt.get("status").and_then(Value::as_str) == Some("pending_tool_load"));
+        results.push(json!({"action":step.name(),"agent":step.agent(),"ok":success,"phase":if stop_unconfirmed {"stop_not_confirmed"} else {"handler"},"mode":receipt.get("start_mode").or_else(||receipt.get("mode")).cloned().unwrap_or(json!("unknown")),"receipt":receipt}));
         if !success {
             ok = false;
             if plan.intent.verb != Verb::Start {
@@ -402,7 +426,7 @@ fn execute_plan(
         }
     }
     Ok(CmdResult::from_json(
-        json!({"ok":ok,"action":plan.intent.verb,"surface":plan.intent.surface,"scope":plan.scope,"session_policy":plan.intent.session,"status":if !ok && stop_succeeded {"partial_stopped"} else if !ok {"failed"} else if results.is_empty() {"already_running"} else {"completed"},"steps":results,"skipped":plan.skipped,"configuration_note":"Running processes were not edited; role body synchronization and business readiness are not claimed.","recovery":if !ok && stop_succeeded {Some("Use start AGENT in the same explicit workspace/team after resolving the reported failure")} else {None}}),
+        json!({"ok":ok,"action":plan.intent.verb,"surface":plan.intent.surface,"scope":actual_scope,"session_policy":plan.intent.session,"status":if !ok && stop_succeeded {"partial_stopped"} else if !ok {"failed"} else if pending {"pending"} else if results.is_empty() {if plan.intent.verb == Verb::Stop {"already_stopped"} else {"already_running"}} else {"actions_completed"},"steps":results,"skipped":plan.skipped,"configuration_note":"Running processes were not edited; role body synchronization and business readiness are not claimed.","recovery":if !ok && stop_succeeded {Some("Use start AGENT in the same explicit workspace/team after resolving the reported failure")} else {None}}),
         plan.intent.json,
     ))
 }
