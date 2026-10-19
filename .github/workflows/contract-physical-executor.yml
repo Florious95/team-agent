@@ -74,7 +74,7 @@ jobs:
           git rev-parse HEAD 'HEAD^{tree}' > format-evidence/source.txt
           files=(crates/team-agent/src/cli/arguments.rs crates/team-agent/src/cli/intent.rs crates/team-agent/src/cli/intent/runtime.rs crates/team-agent/src/cli/intent/tests.rs crates/team-agent/src/cli/intent/runtime_tests.rs crates/team-agent/src/cli/tests/parser_safety.rs crates/team-agent/tests/cli_human_surface_red.rs crates/team-agent/tests/excise_group1_commands_contract.rs crates/team-agent/tests/support/human_catalog.rs crates/team-agent/tests/c1_command_spec_contract.rs crates/team-agent/tests/cli_phase2_public_docs_contract.rs)
           if [[ '${{ inputs.regression_scope }}' == issue342-format ]]; then
-            files=(crates/team-agent/src/lifecycle/launch/cursor_mcp_iso.rs crates/team-agent/src/lifecycle/launch/cursor_mcp.rs crates/team-agent/src/lifecycle/tests/cursor_mcp_overlay.rs crates/team-agent/src/lifecycle/tests/cursor_restart_resume_red.rs crates/team-agent/tests/cursor_mcp_project_root_red.rs crates/team-agent/src/cli/intent/runtime.rs crates/team-agent/src/cli/intent/runtime_tests.rs)
+            files=(crates/team-agent/src/lifecycle/launch/cursor_mcp_iso.rs crates/team-agent/src/lifecycle/launch/cursor_mcp.rs crates/team-agent/src/lifecycle/tests/cursor_mcp_overlay.rs crates/team-agent/src/lifecycle/tests/cursor_restart_resume_red.rs crates/team-agent/tests/cursor_mcp_project_root_red.rs crates/team-agent/src/cli/intent/runtime.rs crates/team-agent/src/cli/intent/runtime_tests.rs crates/team-agent/src/mcp_server/readiness.rs crates/team-agent/src/mcp_server/readiness_tests.rs)
           fi
           set +e
           rustfmt --edition 2021 --config skip_children=true --check "${files[@]}" > format-evidence/format.log 2>&1
@@ -247,6 +247,9 @@ jobs:
               run_case cursor-launch cargo test -p team-agent --lib --locked cursor_ -- --test-threads=1
               run_case root-restart cargo test -p team-agent --lib --locked lifecycle::restart -- --test-threads=1
               run_case shutdown-completion cargo test -p team-agent --lib --locked cli::tests::shutdown_kill_plan -- --test-threads=1
+              run_case mcp-handshake cargo test -p team-agent --lib --locked mcp_server::readiness -- --test-threads=1
+              run_case mcp-wire cargo test -p team-agent --lib --locked mcp_server::wire -- --test-threads=1
+              run_case message-handshake cargo test -p team-agent --lib --locked messaging::tests::dup_inject -- --test-threads=1
               run_case contract-all cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets --no-fail-fast -- --test-threads=1
               ;;
             host-ancestry)
@@ -368,7 +371,7 @@ jobs:
             files=(crates/team-agent/src/cli/arguments.rs crates/team-agent/src/cli/intent.rs crates/team-agent/src/cli/intent/runtime.rs crates/team-agent/src/cli/intent/tests.rs crates/team-agent/src/cli/intent/runtime_tests.rs crates/team-agent/src/cli/tests/parser_safety.rs crates/team-agent/tests/cli_human_surface_red.rs crates/team-agent/tests/excise_group1_commands_contract.rs crates/team-agent/tests/support/human_catalog.rs crates/team-agent/tests/c1_command_spec_contract.rs crates/team-agent/tests/cli_phase2_public_docs_contract.rs)
           fi
           if [[ "$REGRESSION_SCOPE" == issue342 ]]; then
-            files=(crates/team-agent/src/lifecycle/launch/cursor_mcp_iso.rs crates/team-agent/src/lifecycle/launch/cursor_mcp.rs crates/team-agent/src/lifecycle/tests/cursor_mcp_overlay.rs crates/team-agent/src/lifecycle/tests/cursor_restart_resume_red.rs crates/team-agent/tests/cursor_mcp_project_root_red.rs crates/team-agent/src/cli/intent/runtime.rs crates/team-agent/src/cli/intent/runtime_tests.rs)
+            files=(crates/team-agent/src/lifecycle/launch/cursor_mcp_iso.rs crates/team-agent/src/lifecycle/launch/cursor_mcp.rs crates/team-agent/src/lifecycle/tests/cursor_mcp_overlay.rs crates/team-agent/src/lifecycle/tests/cursor_restart_resume_red.rs crates/team-agent/tests/cursor_mcp_project_root_red.rs crates/team-agent/src/cli/intent/runtime.rs crates/team-agent/src/cli/intent/runtime_tests.rs crates/team-agent/src/mcp_server/readiness.rs crates/team-agent/src/mcp_server/readiness_tests.rs)
           fi
           rustfmt --edition 2021 --config skip_children=true --check "${files[@]}" > regression-evidence/format.log 2>&1
           rc=$?

@@ -29,6 +29,44 @@ use crate::transport::{
 };
 
 #[test]
+#[cfg(unix)]
+fn eager_mcp_waits_without_claim_or_input_then_delivers_the_same_message() {
+    let mut case = WorkerCase::new("mcp-handshake", "cursor_agent");
+    let carrier = crate::platform::process::current_parent_pid().unwrap();
+    let config = case.workspace.join(".team/runtime/mcp/w1.json");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, serde_json::to_vec(&serde_json::json!({
+        "mcpServers": {"team_orchestrator": {
+            "command": std::env::current_exe().unwrap().canonicalize().unwrap(),
+            "env": {"TEAM_AGENT_WORKSPACE": case.workspace, "TEAM_AGENT_ID": "w1", "TEAM_AGENT_OWNER_TEAM_ID": "dup-team"}
+        }}
+    })).unwrap()).unwrap();
+    case.state["team_key"] = serde_json::json!("dup-team");
+    case.state["agents"]["w1"]["mcp_config"] = serde_json::json!(config);
+    case.state["agents"]["w1"]["pane_pid"] = serde_json::json!(carrier);
+    case.state["agents"]["w1"]["spawned_at"] = serde_json::json!((chrono::Utc::now() - chrono::Duration::seconds(10)).to_rfc3339());
+    case.state["teams"] = serde_json::json!({"dup-team": case.state.clone()});
+    crate::state::persist::save_runtime_state(&case.workspace, &case.state).unwrap();
+    let transport = RecordingTransport { carrier: Some(carrier), ..RecordingTransport::new("") };
+    let message_id = case.store.create_message(None, "leader", "w1", "handshake canary", None, false, Some("dup-team")).unwrap();
+    for _ in 0..3 {
+        let outcome = deliver_pending_message(&case.workspace, &case.store, &transport,
+            &message_id, &case.event_log, &case.state).unwrap();
+        assert!(!outcome.ok);
+        assert!(outcome.verification.as_deref().unwrap().starts_with("mcp_handshake_"));
+        assert_eq!(transport.inject_count(), 0);
+    }
+    let connection = rusqlite::Connection::open(case.store.db_path()).unwrap();
+    let attempts: i64 = connection.query_row("select delivery_attempts from messages where message_id=?1", [&message_id], |row| row.get(0)).unwrap();
+    assert_eq!(attempts, 0, "waiting is not a physical delivery attempt");
+    crate::mcp_server::readiness::publish(&case.workspace, "dup-team", "w1", chrono::Utc::now()).unwrap();
+    let outcome = deliver_pending_message(&case.workspace, &case.store, &transport,
+        &message_id, &case.event_log, &case.state).unwrap();
+    assert_eq!(outcome.message_id.as_deref(), Some(message_id.as_str()));
+    assert_eq!(transport.inject_count(), 1, "same queued row proceeds after the real receipt");
+}
+
+#[test]
 fn error_retry_claim_is_single_winner_across_two_delivers() {
     let case = WorkerCase::new("claim-gate", "fake");
     let transport = RecordingTransport::new("");
@@ -273,6 +311,7 @@ fn poison_state_file(workspace: &Path) {
 struct RecordingTransport {
     injects: Arc<AtomicUsize>,
     capture: Arc<Mutex<String>>,
+    carrier: Option<u32>,
 }
 
 impl RecordingTransport {
@@ -280,6 +319,7 @@ impl RecordingTransport {
         Self {
             injects: Arc::new(AtomicUsize::new(0)),
             capture: Arc::new(Mutex::new(capture.to_string())),
+            carrier: None,
         }
     }
 
@@ -370,7 +410,7 @@ impl Transport for RecordingTransport {
             current_command: Some("sleep".to_string()),
             current_path: None,
             active: true,
-            pane_pid: None,
+            pane_pid: self.carrier,
             leader_env: BTreeMap::new(),
         }])
     }
