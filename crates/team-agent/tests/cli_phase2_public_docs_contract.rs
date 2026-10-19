@@ -1,12 +1,15 @@
 //! Public lifecycle guidance follows the intuitive surface without changing bridges.
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
+#[path = "support/hermetic.rs"]
+mod hermetic;
+
+use hermetic::HermeticTestEnv;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::process::Output;
 
 const LEGACY: &[&str] = &[
     "quick-start",
@@ -38,34 +41,19 @@ fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap()
 }
 struct Case {
+    env: HermeticTestEnv,
     root: PathBuf,
 }
 impl Case {
     fn new() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "ta-phase2-docs-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&path).unwrap();
-        let root = path.canonicalize().unwrap();
-        fs::create_dir(root.join("home")).unwrap();
-        Self { root }
+        let env = HermeticTestEnv::enter("phase2-public-docs");
+        env.assert_no_real_tmux();
+        let root = env.workspace("docs");
+        env.assert_path_under_root(&root);
+        Self { env, root }
     }
     fn run(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_team-agent"))
-            .args(args)
-            .current_dir(&self.root)
-            .env("HOME", self.root.join("home"))
-            .env("TEAM_AGENT_CLI_ARGV_ROUTING", "off")
-            .output()
-            .unwrap()
-    }
-}
-impl Drop for Case {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
+        self.env.run_cli_env(&self.root, args, &[("TEAM_AGENT_CLI_ARGV_ROUTING", "off")])
     }
 }
 fn inventory(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
@@ -88,6 +76,7 @@ fn inventory(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn actual_help_keeps_new_and_legacy_commands_discoverable_without_effects() {
     let case = Case::new();
     let before = inventory(&case.root);
@@ -168,6 +157,8 @@ fn current_public_guides_have_no_legacy_shell_recipe() {
         repo().join("README.zh.md"),
     ];
     paths.extend(REFERENCES.iter().map(|name| skill().join(name)));
+    paths.push(repo().join("docs/reference/team-agent-operator.md"));
+    paths.push(skill().join("docs/reference/team-agent-operator.md"));
     for path in paths {
         let text = read(&path);
         let mut shell = false;
@@ -268,6 +259,29 @@ fn local_skill_links_resolve_inside_the_packaged_single_source() {
 }
 
 #[test]
+fn existing_handbook_mirrors_and_new_coverage_promises_are_synchronized() {
+    let canonical = fs::read(repo().join("docs/reference/team-agent-operator.md")).unwrap();
+    assert!(!fs::symlink_metadata(skill().join("docs/reference/team-agent-operator.md")).unwrap().file_type().is_symlink(), "npm excludes symlinks: the existing packaged mirror must be materialized");
+    for mirror in ["docs/reference/team-agent-operator.md", "references/team-agent-operator.md"] {
+        assert_eq!(fs::read(skill().join(mirror)).unwrap(), canonical);
+    }
+    let coverage: Value = serde_json::from_str(&read(&skill().join("command-coverage.json"))).unwrap();
+    assert_eq!(coverage["authority"]["compact_skill_smoke"]["policy"], "all_compact_commands_are_subset_only");
+    for command in [
+        "team-agent start --from .team/current --workspace . --team project-team",
+        "team-agent stop --workspace . --team project-team --json",
+        "team-agent team restart --workspace . --team project-team --json",
+        "team-agent start reviewer --workspace . --team project-team",
+    ] {
+        let entries: Vec<_> = coverage["commands"].as_array().unwrap().iter().filter(|entry| entry["command"] == command).collect();
+        assert_eq!(entries.len(), 1, "missing or duplicate: {command}");
+        assert_eq!(entries[0]["bucket"], "declared_gap");
+        assert_eq!(entries[0]["covered"], false);
+    }
+}
+
+#[test]
+#[serial_test::serial(env)]
 fn actual_install_skill_copies_core_and_all_references_to_private_home() {
     let case = Case::new();
     let source = skill();
@@ -285,10 +299,11 @@ fn actual_install_skill_copies_core_and_all_references_to_private_home() {
     assert_eq!(installed.len(), 3);
     let mut files = vec!["SKILL.md"];
     files.extend_from_slice(REFERENCES);
+    files.extend(["docs/reference/team-agent-operator.md", "command-coverage.json"]);
     for target in installed {
         let dest = Path::new(target["dest"].as_str().unwrap());
         assert!(
-            dest.starts_with(case.root.join("home")),
+            dest.starts_with(case.env.home()),
             "not isolated: {target}"
         );
         assert_eq!(target["dry_run"], false);
@@ -303,6 +318,7 @@ fn actual_install_skill_copies_core_and_all_references_to_private_home() {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn documented_creation_forms_are_readonly_plans_not_native_spawns() {
     let case = Case::new();
     let source = case.root.join(".team/current");

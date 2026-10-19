@@ -347,8 +347,9 @@ fn tooth_3a_every_skill_command_is_recorded_losslessly() {
         .expect("read product Team Agent SKILL.md");
     let compact = extract_team_agent_commands(&skill);
     assert!(
-        compact.contains("team-agent quick-start .team/current"),
-        "TOOTH-3 harness canary: extractor missed the canonical quick-start command"
+        compact.contains("team-agent start --from .team/current --workspace . --team project-team")
+            && compact.contains("team-agent send reviewer \"Review this change\" --workspace . --team project-team"),
+        "TOOTH-3 harness canary: extractor missed current scoped start/send commands"
     );
 
     let manifest = load_coverage_manifest("TOOTH-3A");
@@ -371,7 +372,7 @@ fn tooth_3a_every_skill_command_is_recorded_losslessly() {
         "TOOTH-3A AUTHORITY-METADATA RED: compact skill path must be repository canonical"
     );
     assert_eq!(
-        authority.compact_skill_smoke.policy, "quick_start_and_send_are_subset_only",
+        authority.compact_skill_smoke.policy, "all_compact_commands_are_subset_only",
         "TOOTH-3A AUTHORITY-METADATA RED: compact skill must be subset-only"
     );
     let handbook = std::fs::read_to_string(repo_root().join(&authority.handbook.path))
@@ -389,19 +390,14 @@ fn tooth_3a_every_skill_command_is_recorded_losslessly() {
         .chain(live_help.iter())
         .cloned()
         .collect::<BTreeSet<_>>();
-    let compact_smoke = compact
-        .into_iter()
-        .filter(|command| {
-            command.starts_with("team-agent quick-start") || command.starts_with("team-agent send")
-        })
-        .collect::<BTreeSet<_>>();
-    let compact_missing = compact_smoke
+    // Current public Skill promises are all accountable, not only two legacy roots.
+    let compact_missing = compact
         .difference(&listed)
         .cloned()
         .collect::<Vec<_>>();
     assert!(
         compact_missing.is_empty(),
-        "TOOTH-3A COMPACT-SMOKE RED: quick-start/send promises from the compact skill \
+        "TOOTH-3A COMPACT-SMOKE RED: all command promises from the compact skill \
          must remain a subset of the manifest; missing={compact_missing:?}"
     );
     let missing = normative.difference(&listed).cloned().collect::<Vec<_>>();

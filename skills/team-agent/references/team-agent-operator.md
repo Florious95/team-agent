@@ -1,5 +1,109 @@
 # Team Agent operator reference
 
+Canonical source: `docs/reference/team-agent-operator.md`. The two packaged mirrors under `skills/team-agent/docs/reference/` and `skills/team-agent/references/` are byte-identical; update the source and synchronize both, never maintain divergent operating instructions.
+
+<!-- command-coverage:normative-start -->
+## Normative command inventory and compatibility accountability
+
+The current daily forms below are coverage authorities, not permission to execute every command. Provider/permission choices, scope, caller, session and capability guards in this guide still apply. New forms remain honestly `declared_gap` until the strict source/assertion/negative-twin evidence exists; successful Help or a separate finite journey is not automatic promotion. Every compact-Skill command must belong to exactly one coverage bucket.
+
+### Current documented forms
+```text
+team-agent --version
+team-agent agent clone reviewer --as second-reviewer --workspace . --team project-team
+team-agent agent fork reviewer --as continued-reviewer --workspace . --team project-team
+team-agent agent remove reviewer --confirm --workspace . --team project-team
+team-agent agent reset reviewer --discard-session --workspace . --team project-team
+team-agent agent restart reviewer --session preserve --workspace . --team project-team
+team-agent doctor --workspace . --json
+team-agent inbox leader --workspace . --team project-team -n 3
+team-agent models --provider NAME
+team-agent profile init my-api --auth-mode compatible_api --workspace .
+team-agent restart reviewer --workspace . --team project-team
+team-agent route add pi -- --verbose
+team-agent route clear pi
+team-agent route disable
+team-agent route enable
+team-agent route set pi -- --mode rpc
+team-agent route show pi --json
+team-agent route status --json
+team-agent send reviewer "Review the current change and report the main risk." --workspace . --team project-team
+team-agent send reviewer "Review this change" --workspace . --team project-team
+team-agent start --from ./my-team --workspace . --team project-team
+team-agent start --from .team/current --workspace . --team project-team
+team-agent start --help
+team-agent start --workspace . --team project-team
+team-agent start analyst --provider pi --bypass false --prompt "Analyze the proposed change"
+team-agent start auditor --role-file /absolute/path/to/auditor.md
+team-agent start reviewer --effort high --bypass false
+team-agent start reviewer --effort high --bypass false --workspace . --team project-team
+team-agent start reviewer --workspace . --team project-team
+team-agent status --json
+team-agent stop --workspace . --team project-team --json
+team-agent stop reviewer
+team-agent stop reviewer --workspace . --team project-team
+team-agent team --help
+team-agent team restart --session preserve --workspace . --team project-team
+team-agent team restart --workspace . --team project-team
+team-agent team restart --workspace . --team project-team --json
+```
+
+### Retained compatibility and negative-probe forms — NOT daily recipes
+The following old argv remain in the closed-world catalog for existing scripts and historical tests. Some intentionally invalid or removed flag combinations are negative probes, not supported operational advice. Existing covered records keep their original evidence and are not renamed to imply new-command coverage.
+
+```text
+team-agent add-agent <agent> --role-file <file>
+team-agent add-agent reviewer --role-file .team/current/agents/reviewer.md --workspace .
+team-agent approvals
+team-agent approvals <agent_id>
+team-agent approvals [coder]
+team-agent attach-leader
+team-agent claim-leader
+team-agent claude
+team-agent clone-agent <source> --as <new>
+team-agent codex
+team-agent codex --dangerously-bypass-approvals-and-sandbox
+team-agent doctor
+team-agent fork-agent <source> --as <new>
+team-agent inbox <agent_id> -n 3
+team-agent inbox coder -n 3
+team-agent profile doctor <name> --workspace . --json
+team-agent profile init <name> --auth-mode subscription --workspace .
+team-agent profile init claude-default --auth-mode subscription --workspace .
+team-agent profile init codex-default --auth-mode subscription --workspace .
+team-agent profile init deepseek --auth-mode compatible_api --workspace .
+team-agent profile show <name> --workspace . --json
+team-agent profile show deepseek --workspace . --json
+team-agent quick-start
+team-agent quick-start ./roles --team-id alpha
+team-agent quick-start .team/alpha
+team-agent quick-start .team/current
+team-agent quick-start <dir>
+team-agent quick-start <plain-text-team-dir>
+team-agent remove-agent <agent> --workspace . --confirm
+team-agent reset-agent <agent> --discard-session
+team-agent restart
+team-agent restart .
+team-agent restart . --allow-fresh
+team-agent restart . --team <session_name_or_team_name>
+team-agent send --task task_initial "Start"
+team-agent send --watch-result
+team-agent send --watch-result coder "Do the bounded task"
+team-agent send TO MESSAGE
+team-agent send reviewer "..."
+team-agent send reviewer "Review this change"
+team-agent shutdown --workspace . --keep-logs
+team-agent start-agent <agent>
+team-agent start-agent <agent_id> --workspace .
+team-agent start-agent coder --workspace .
+team-agent status
+team-agent status --detail --json
+team-agent status coder
+```
+
+The exact test binary's root Help complements this marked inventory; it does not authorize model launches or convert untested forms into covered claims.
+<!-- command-coverage:normative-end -->
+
 Only the authorized Leader operates team lifecycle. Check the chosen binary's `start --help` and `team --help`; an old installed CLI or a reused candidate version string is not proof of the intuitive surface. Do not silently install, switch binaries or copy credentials to make an example work.
 
 ## Configure once, use start/stop
@@ -109,7 +213,7 @@ A role may explicitly reference `auth_mode: compatible_api` and `profile: my-api
 
 `status` / `team status` expose the concise node projection; `--detail` does not restore historical internal dumps. Use `doctor` for diagnosis. Check actual readiness and returned recovery actions; unknown evidence is not a stopped/live proof. Stop with `stop --workspace PATH --team KEY --json` and verify scoped residual sessions, processes and owned files. Protect parent/sibling/shared resources.
 
-Workers have only `send_message`, `report_result` and optional `get_team_status`. Report completion through `report_result`; do not promote a worker to lifecycle operator. See [nested teams](team-in-team.md) and [recovery](recovery-runbook.md).
+Workers have only `send_message`, `report_result` and optional `get_team_status`. Report completion through `report_result`; do not promote a worker to lifecycle operator. See [nested teams](https://github.com/Florious95/team-agent/blob/main/skills/team-agent/references/team-in-team.md) and [recovery](https://github.com/Florious95/team-agent/blob/main/skills/team-agent/references/recovery-runbook.md).
 
 ## Legacy command bridges
 
