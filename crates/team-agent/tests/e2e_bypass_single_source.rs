@@ -120,6 +120,9 @@ fn e2e_edit_role_restart_drift_denied() {
         &["quick-start", ".team/current", "--yes", "--no-display", "--json"],
     );
     let _ = out;
+    // Retain this contract's original unattached-leader precondition after
+    // the positive startup has satisfied caller admission.
+    seed_unattached_leader(&ws);
 
     // 把 worker_true 的 dangerously_skip_permissions 从 true 改成 false(声明面)。
     let role_path = ws
@@ -177,6 +180,7 @@ fn e2e_edit_role_restart_applies_edited_bypass() {
         &["quick-start", ".team/current", "--yes", "--no-display", "--json"],
     );
     let _ = out;
+    seed_unattached_leader(&ws);
 
     // worker_false:false → true。
     let role_path = ws

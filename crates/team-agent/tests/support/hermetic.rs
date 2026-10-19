@@ -170,7 +170,7 @@ pub fn seed_in_process_coordinator(workspace: &Path) {
 /// Explicit historical/negative fixture after lawful positive startup. This
 /// does not claim public start can bypass caller admission. Preserve all worker
 /// topology while clearing only the active team's attachment under state-save.
-pub fn seed_unattached_leader(workspace: &Path) {
+pub fn seed_unattached_leader(workspace: &Path, home: &Path) {
     let runtime = team_agent::model::paths::runtime_dir(workspace);
     let lock = std::fs::OpenOptions::new().read(true).write(true)
         .open(runtime.join("state-save.lock")).expect("existing fixture state-save lock");
@@ -196,6 +196,18 @@ pub fn seed_unattached_leader(workspace: &Path) {
     std::fs::write(&path, serde_json::to_vec_pretty(&state).expect("encode fixture"))
         .expect("write explicit unbound fixture");
     team_agent::platform::file_lock::unlock(&lock).expect("unlock fixture state");
+    // A former healthy registry projection is a separate attachment fact. Do
+    // not leave it behind in a control that specifically models no attachment.
+    let registry_path = home.join(".team-agent/leaders").join(format!("{}__{team}.json",
+        team_agent::leader::registry::workspace_hash(workspace)));
+    if registry_path.exists() {
+        let entry: team_agent::leader::registry::LeaderRegistryEntry = serde_json::from_slice(
+            &std::fs::read(&registry_path).expect("own fixture registry entry"))
+            .expect("fixture registry JSON");
+        assert_eq!(entry.workspace, std::fs::canonicalize(workspace).expect("fixture workspace"));
+        assert_eq!(entry.team_key, team);
+        std::fs::remove_file(registry_path).expect("remove exact own attachment projection");
+    }
 }
 
 pub struct HermeticTestEnv {

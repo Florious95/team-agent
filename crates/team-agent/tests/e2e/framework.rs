@@ -1764,7 +1764,8 @@ fn write_delivery_timeout_snapshot(snapshot: &Value) -> PathBuf {
 /// Explicit negative/historical setup after an admitted positive launch.
 /// Clears only the active team's receiver/owner; workers remain unchanged.
 pub fn seed_unattached_leader(ws: &TestWorkspace) {
-    hermetic_guard::seed_unattached_leader(ws.path());
+    let caller = ws.caller.as_ref().expect("admitted positive caller fixture");
+    hermetic_guard::seed_unattached_leader(ws.path(), caller.home());
 }
 
 /// True only for a successful bind/launch, or the legacy degraded statuses

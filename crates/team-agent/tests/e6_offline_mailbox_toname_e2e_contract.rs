@@ -851,12 +851,7 @@ impl E6Case {
     fn seed_never_attached_mailbox_state(&self) {
         let before = runtime_state(self.target_workspace());
         let scope = &self.team_key;
-        hermetic_guard::seed_unattached_leader(self.target_workspace());
-        let _home = self.env.with_env("HOME", self.home.to_str().expect("fixture HOME UTF8"));
-        if let Some(path) = team_agent::leader::registry::unregister_entry(self.target_workspace(), scope) {
-            assert!(path.starts_with(&self.home));
-            assert!(!path.exists());
-        }
+        hermetic_guard::seed_unattached_leader(self.target_workspace(), &self.home);
         let after = runtime_state(self.target_workspace());
         assert_eq!(after["agents"], before["agents"]);
         assert_eq!(after["session_name"], before["session_name"]);
