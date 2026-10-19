@@ -66,7 +66,7 @@ jobs:
           rustup toolchain install 1.95.0 --profile minimal --component rustfmt
           mkdir format-evidence
           git rev-parse HEAD 'HEAD^{tree}' > format-evidence/source.txt
-          files=(crates/team-agent/src/cli/arguments.rs crates/team-agent/src/cli/intent.rs crates/team-agent/src/cli/intent/runtime.rs crates/team-agent/src/cli/intent/tests.rs crates/team-agent/src/cli/intent/runtime_tests.rs crates/team-agent/src/cli/tests/parser_safety.rs crates/team-agent/tests/cli_human_surface_red.rs crates/team-agent/tests/excise_group1_commands_contract.rs crates/team-agent/tests/support/human_catalog.rs crates/team-agent/tests/c1_command_spec_contract.rs)
+          files=(crates/team-agent/src/cli/arguments.rs crates/team-agent/src/cli/intent.rs crates/team-agent/src/cli/intent/runtime.rs crates/team-agent/src/cli/intent/tests.rs crates/team-agent/src/cli/intent/runtime_tests.rs crates/team-agent/src/cli/tests/parser_safety.rs crates/team-agent/tests/cli_human_surface_red.rs crates/team-agent/tests/excise_group1_commands_contract.rs crates/team-agent/tests/support/human_catalog.rs crates/team-agent/tests/c1_command_spec_contract.rs crates/team-agent/tests/cli_phase2_public_docs_contract.rs)
           set +e
           rustfmt --edition 2021 --config skip_children=true --check "${files[@]}" > format-evidence/format.log 2>&1
           rc=$?
@@ -245,6 +245,7 @@ jobs:
               run_case cli-commands cargo test -p team-agent --lib --locked cli::tests:: -- --test-threads=1
               run_case cli-intent cargo test -p team-agent --lib --locked cli::intent:: -- --test-threads=1
               run_case cli-human cargo test -p team-agent --test cli_human_surface_red --locked -- --test-threads=1
+              run_case public-docs cargo test -p team-agent --test cli_phase2_public_docs_contract --locked -- --test-threads=1
               run_case command-registry cargo test -p team-agent --test c1_command_spec_contract --locked -- --test-threads=1
               run_case excised-commands cargo test -p team-agent --test excise_group1_commands_contract --locked -- --test-threads=1
               run_case root-restart cargo test -p team-agent --lib --locked lifecycle::restart -- --test-threads=1
@@ -316,7 +317,7 @@ jobs:
             files=(crates/team-agent/src/cli/arguments.rs crates/team-agent/src/cli/tests/parser_safety.rs)
           fi
           if [[ "$REGRESSION_SCOPE" == cli-phase1 ]]; then
-            files=(crates/team-agent/src/cli/arguments.rs crates/team-agent/src/cli/intent.rs crates/team-agent/src/cli/intent/runtime.rs crates/team-agent/src/cli/intent/tests.rs crates/team-agent/src/cli/intent/runtime_tests.rs crates/team-agent/src/cli/tests/parser_safety.rs crates/team-agent/tests/cli_human_surface_red.rs crates/team-agent/tests/excise_group1_commands_contract.rs crates/team-agent/tests/support/human_catalog.rs crates/team-agent/tests/c1_command_spec_contract.rs)
+            files=(crates/team-agent/src/cli/arguments.rs crates/team-agent/src/cli/intent.rs crates/team-agent/src/cli/intent/runtime.rs crates/team-agent/src/cli/intent/tests.rs crates/team-agent/src/cli/intent/runtime_tests.rs crates/team-agent/src/cli/tests/parser_safety.rs crates/team-agent/tests/cli_human_surface_red.rs crates/team-agent/tests/excise_group1_commands_contract.rs crates/team-agent/tests/support/human_catalog.rs crates/team-agent/tests/c1_command_spec_contract.rs crates/team-agent/tests/cli_phase2_public_docs_contract.rs)
           fi
           rustfmt --edition 2021 --config skip_children=true --check "${files[@]}" > regression-evidence/format.log 2>&1
           rc=$?

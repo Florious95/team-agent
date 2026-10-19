@@ -20,7 +20,7 @@
 - 队友之间直接互发消息对齐(前端问后端要接口定义,不用经过你)
 - 你只跟队长说话,队长汇总进度、有分歧才来问你
 
-整个过程没有配置文件,没有新的界面要学。会跟 Claude 聊天,就会带团队。
+不用学习新的编排界面或语言：队长按你批准的方案准备团队文件。会跟 Claude 聊天，就会带团队。
 
 ## 安装
 
@@ -35,6 +35,51 @@ team-agent claude
 ```
 
 就这两步。后面发生的一切都在对话里。
+
+## 日常 CLI：start、stop、restart
+
+先核对实际二进制的 `team-agent start --help` 与 `team-agent team --help`。缺少这些入口时，应取得经授权的支持版本，不能仅凭版本号断定功能存在。生命周期命令由合法原生 **Leader 的工具上下文**执行，普通 Worker 不能据此升权。
+
+队长一次性准备 `TEAM.md` 与 `agents/*.md`，明确记录用户选择的 Provider 和布尔型权限绕过策略，例如：
+
+```text
+.team/current/
+  TEAM.md
+  agents/reviewer.md
+```
+
+配置完整后，显式选定工作区和团队：
+
+```sh
+team-agent start --from .team/current --workspace . --team project-team
+team-agent start --workspace . --team project-team
+team-agent send reviewer "检查修改并回报主要风险" --workspace . --team project-team
+team-agent inbox leader --workspace . --team project-team -n 3
+team-agent stop reviewer --workspace . --team project-team
+team-agent start reviewer --workspace . --team project-team
+team-agent restart reviewer --workspace . --team project-team
+team-agent stop --workspace . --team project-team --json
+team-agent start --workspace . --team project-team
+team-agent team restart --workspace . --team project-team --json
+```
+
+| 命令 | 意图与边界 |
+|---|---|
+| `start` | 完整配置首次建队；后续激活所选非 paused 席位；已确证存活且无配置漂移的实例保持不变 |
+| `start AGENT` | 唤醒停止席位、确证存活 no-op，或从完整角色文件加入 RoleOnly 席位；全新 ID 必须明确 Provider/bypass |
+| `stop [AGENT]` | 停单席或所选整队，保留会话关联；整队停止返回自有残留报告 |
+| `restart AGENT` | 先预检、确认停止后再启动该席位；不偷偷改角色或 reset |
+| `team restart` | 明确重启整队，保留显式停止和 paused 席位 |
+| `team status` / `status` | 读取简要节点投影；深入诊断用 `doctor` |
+| `agent add/remove/reset/clone/fork` | 保留原确认/能力门禁；reset 要求 `--discard-session`，fork 要求 `--as NEW_ID` |
+
+新单席/整队重启默认 `--session auto`：有确证就续接，否则仅允许原引擎支持的合法 fresh。**auto 不是记忆不丢失的保证。** 严格恢复用 `team-agent team restart --session preserve --workspace . --team project-team`；已知无法续接时停止前拒绝。unknown/partial 不是 reset 或盲目重试许可。start/restart 的 `--dry-run` 不产生生命周期效果；没有可操作目标时非零拒绝，不伪报启动成功。
+
+no-op 不表示角色正文/参数修改已生效，也不表示业务就绪；修改运行席位前先 stop。消息已排队不是回包。最终 stop 后核验所选团队残留为空，不能清理兄弟团队或共享服务器。团队目录用 `--from DIR`/明确路径选择；`reviewer.v2` 仍是节点 ID，同名目录歧义用 `agent restart ID` 消除。原生 Provider 不支持的能力必须拒绝，fork 的 `--in-place` 尚未实现。
+
+### 旧命令仅作兼容桥接
+
+既有自动化仍可保留 `quick-start`、`shutdown` 与 `*-agent`，但新日常指引采用上面的直觉命令。旧裸/显式路径 `restart` 保持 preserve 默认和原回执；新 `team restart` 默认 auto。旧单席 start 拒绝运行节点，新 start 可以确证 no-op：不要机械改名脚本或假设 JSON 逐字节等价。详见[操作 Skill](skills/team-agent/SKILL.md)与[操作参考](skills/team-agent/references/team-agent-operator.md)。
 
 ## 你可以说什么
 

@@ -73,7 +73,7 @@ linked-release: <version-or-status>
 
 ## Relationship to SKILL.md
 
-SKILL.md 保留团队 CLI 操作必备(quick-start / send / status / restart / shutdown / failure rules / worker protocol)。所有【流程/治理】层面的扩展(release flow / bug flow / 看板基础)都从 SKILL.md 分出到 references/,以保持 SKILL 主体的【最关键】定位。
+SKILL.md 保留日常 CLI 操作主路(start / stop / team restart / agent 操作 / send / status / failure rules / worker protocol)。旧创建、关闭与后缀命令仅作为兼容桥接，不再用作日常操作指引；历史案卷中的原命令不改写。所有【流程/治理】层面的扩展(release flow / bug flow / 看板基础)仍放在 references/，不借本次命令对齐扩展治理或发布权限。
 
 ## Relationship to future Web Kanban
 
