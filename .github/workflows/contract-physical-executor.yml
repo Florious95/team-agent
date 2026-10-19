@@ -32,6 +32,7 @@ on:
           - issue326
           - issue334-red
           - cli-defects-red
+          - cli-defects-admission
           - issue334
           - cli-phase1
           - cli-phase1-format
@@ -238,6 +239,9 @@ jobs:
               ;;
             cli-defects-red)
               run_case blind-defects cargo test -p team-agent --lib --locked issue33 -- --test-threads=1
+              ;;
+            cli-defects-admission)
+              run_case launch-admission cargo test -p team-agent --lib --locked lifecycle::tests::launch_spawn::quick_start_ -- --test-threads=1
               ;;
             issue334-red)
               run_case workspace-check cargo check --workspace --all-targets --locked

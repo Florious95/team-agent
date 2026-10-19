@@ -174,8 +174,9 @@ fn unowned_running_ws() -> PathBuf {
 #[test]
 #[serial(env)]
 fn quick_start_compiles_real_spec_to_team_spec_yaml() {
-    let _hermetic = enter_hermetic("launch-spawn-compile-spec");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("launch-spawn-compile-spec");
     let team = quick_start_team_dir(QS_VALID_ROLE);
+    seed_healthy_coordinator(&crate::model::paths::team_workspace(&team).unwrap());
     let transport = OfflineTransport::new();
     let result = quick_start_with_transport(&team, None, true, None, &transport);
 
@@ -209,9 +210,10 @@ fn quick_start_compiles_real_spec_to_team_spec_yaml() {
 #[test]
 #[serial(env)]
 fn quick_start_without_team_id_uses_compiled_team_name_as_canonical_key() {
-    let _hermetic = enter_hermetic("launch-spawn-canonical-team");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("launch-spawn-canonical-team");
     let team = quick_start_team_dir(QS_VALID_ROLE);
     let workspace = crate::model::paths::team_workspace(&team).unwrap();
+    seed_healthy_coordinator(&workspace);
     let transport = OfflineTransport::new();
 
     let result = quick_start_with_transport(&team, None, true, None, &transport);
@@ -231,8 +233,9 @@ fn quick_start_without_team_id_uses_compiled_team_name_as_canonical_key() {
 #[test]
 #[serial(env)]
 fn existing_runtime_producer_scopes_canonical_team() {
-    let _hermetic = enter_hermetic("launch-spawn-existing-producer");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("launch-spawn-existing-producer");
     let team = quick_start_team_dir(QS_VALID_ROLE);
+    seed_healthy_coordinator(&crate::model::paths::team_workspace(&team).unwrap());
     let transport = OfflineTransport::new();
     let first = quick_start_with_transport(&team, Some("from-name"), true, None, &transport)
         .expect("first quick-start");
@@ -342,8 +345,9 @@ fn existing_runtime_empty_top_level_agents_still_emits_bob() {
 #[test]
 #[serial(env)]
 fn quick_start_teamdir_under_dot_team_uses_project_workspace_for_status_and_collect() {
-    let _hermetic = enter_hermetic("launch-spawn-dot-team-workspace");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("launch-spawn-dot-team-workspace");
     let workspace = temp_ws();
+    seed_healthy_coordinator(&workspace);
     let team = workspace.join(".team").join("current");
     std::fs::create_dir_all(team.join("agents")).unwrap();
     std::fs::write(team.join("TEAM.md"), QS_TEAM_MD).unwrap();
@@ -417,7 +421,7 @@ fn quick_start_teamdir_under_dot_team_uses_project_workspace_for_status_and_coll
 #[test]
 #[serial(env)]
 fn quick_start_default_workspace_compiled_spec_uses_project_root() {
-    let _hermetic = enter_hermetic("launch-spawn-default-workspace");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("launch-spawn-default-workspace");
     let workspace = temp_ws();
     std::fs::create_dir_all(workspace.join("agents")).unwrap();
     std::fs::write(workspace.join("TEAM.md"), QS_TEAM_MD).unwrap();
@@ -724,8 +728,9 @@ fn unowned_running_ws_all_paused() -> PathBuf {
 #[test]
 #[serial(env)]
 fn spine_quick_start_seeds_state_under_team_workspace_not_team_dir() {
-    let _hermetic = enter_hermetic("launch-spawn-spine-workspace");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("launch-spawn-spine-workspace");
     let team = quick_start_team_dir(QS_VALID_ROLE); // <base>/teamdir
+    seed_healthy_coordinator(&crate::model::paths::team_workspace(&team).unwrap());
     let transport = OfflineTransport::new();
     let _ = quick_start_with_transport(&team, None, true, None, &transport);
     let workspace = team.parent().unwrap(); // team_workspace(<base>/teamdir) = <base>
@@ -1358,7 +1363,7 @@ fn seed_canonical_team_identity(workspace: &std::path::Path, team_key: &str) {
 #[test]
 #[serial(env)]
 fn quick_start_with_transport_spawns_workers_not_dry_run() {
-    let _hermetic = enter_hermetic("launch-spawn-spawn-path");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("launch-spawn-spawn-path");
     let team = quick_start_team_dir(QS_VALID_ROLE); // one agent: implementer / provider codex
     let workspace = team.parent().expect("team_workspace(team_dir) = parent"); // where start_coordinator runs
     seed_healthy_coordinator(workspace);
@@ -1447,7 +1452,7 @@ fn adaptive_layout_plan_8_workers_is_3_3_2() {
 #[test]
 #[serial(env)]
 fn quick_start_default_adaptive_groups_workers_into_layout_panes() {
-    let _hermetic = enter_hermetic("launch-spawn-adaptive-layout");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("launch-spawn-adaptive-layout");
     let roles = (1..=4)
         .map(|i| {
             let id = format!("w{i}");
@@ -1532,7 +1537,7 @@ fn quick_start_tmux_backend_uses_workspace_private_endpoint() {
 #[test]
 #[serial(env)]
 fn quick_start_persists_selected_tmux_endpoint_and_attach_commands() {
-    let _hermetic = enter_hermetic("launch-spawn-endpoint-attach");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("launch-spawn-endpoint-attach");
     let team = quick_start_team_dir(QS_VALID_ROLE);
     let workspace = team.parent().expect("team_workspace(team_dir) = parent");
     seed_healthy_coordinator(workspace);
@@ -2897,8 +2902,9 @@ fn stop_agent_adaptive_kills_target_pane_not_shared_layout_window() {
 #[test]
 #[serial(env)]
 fn quick_start_seeds_tasks_key_from_compiled_spec() {
-    let _hermetic = enter_hermetic("launch-spawn-tasks-key");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("launch-spawn-tasks-key");
     let team = quick_start_team_dir(QS_VALID_ROLE);
+    seed_healthy_coordinator(&crate::model::paths::team_workspace(&team).unwrap());
     let transport = OfflineTransport::new();
     let _ = quick_start_with_transport(&team, None, true, None, &transport);
     let workspace = team
@@ -3043,10 +3049,11 @@ fn quick_start_state_seeds_spec_path_workspace_leader() {
 #[test]
 #[serial(env)]
 fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
-    let _hermetic = enter_hermetic("launch-spawn-running-state");
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("launch-spawn-running-state");
     const FIXED_SPAWNED_AT: &str = "2026-06-04T00:00:00+00:00";
     let _clock_guard = EnvVarGuard::set("TEAM_AGENT_TEST_FIXED_SPAWNED_AT", FIXED_SPAWNED_AT);
     let team = quick_start_team_dir(QS_VALID_ROLE);
+    seed_healthy_coordinator(&crate::model::paths::team_workspace(&team).unwrap());
     let transport = OfflineTransport::new();
     let _ = quick_start_with_transport(&team, None, true, None, &transport);
     let workspace = team
