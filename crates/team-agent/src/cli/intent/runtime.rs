@@ -470,6 +470,8 @@ fn plan_with_observer(
             .is_some_and(|(raw, team)| {
                 team != "current"
                     && !crate::lifecycle::launch::surface_has_runtime_team(raw, team)
+                    && !(crate::state::projection::team_state_key(raw) == team
+                        && crate::lifecycle::launch::surface_is_leader_bootstrap(raw))
                     && !raw
                         .get("teams")
                         .and_then(|t| t.get(team))
