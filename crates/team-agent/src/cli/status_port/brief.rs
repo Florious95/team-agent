@@ -1449,6 +1449,35 @@ mod native_ps_batch_regressions {
     }
 
     #[test]
+    fn issue338_unknown_status_has_reason_and_same_scope_next_action() {
+        let state = json!({
+            "team_key": "scoped-team", "session_name": "sess",
+            "agents": {"worker": {"provider": "pi", "status": "running"}}
+        });
+        let status = status_brief_scoped(Path::new("/owned/workspace with spaces"), &state, None);
+        let node = &status["nodes"][0];
+        assert_eq!(node["runtime_status"], "unknown");
+        assert_eq!(node["observation_reason"], "endpoint_unregistered");
+        let action = node["next_action"].as_str().unwrap();
+        assert!(action.contains("--workspace '/owned/workspace with spaces'"));
+        assert!(action.contains("--team 'scoped-team'"));
+        assert!(action.contains("doctor"));
+        assert!(!action.contains("restart"));
+    }
+
+    #[test]
+    fn issue338_confirmed_zombie_is_not_reported_as_unexplained_unknown() {
+        let node = registered("e1", "%7");
+        let probe = sample_native_panes("hp\tw\t%7\t123\tpi\n", "e1", &[node.clone()], |_| {
+            BTreeMap::from([(123, ProcessSnapshot { zombie: true })])
+        });
+        let value = project_node(&node, Some(&Some(probe))).into_json();
+        assert_eq!(value["runtime_status"], "unknown");
+        assert_eq!(value["observation_reason"], "pane_process_exited");
+        assert!(value["tmux_command"].is_null());
+    }
+
+    #[test]
     fn eight_panes_use_one_endpoint_query() {
         let registered = (0..8)
             .map(|i| registered("e1", &format!("%{i}")))

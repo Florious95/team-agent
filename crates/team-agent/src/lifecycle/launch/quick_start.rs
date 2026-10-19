@@ -1702,6 +1702,36 @@ mod fresh_quick_start_leader_binding_tests {
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     #[test]
+    #[serial_test::serial(env)]
+    fn issue337_missing_caller_is_refused_before_any_launch_effect() {
+        let env = HermeticTestEnv::enter("issue337-no-caller");
+        env.scrub_tmux();
+        env.assert_no_real_tmux();
+        let transport = OfflineTransport::new();
+        let refusal = preflight_fresh_leader_identity(&transport)
+            .expect("a missing caller must not reach worker/coordinator spawn");
+        assert!(refusal.1.iter().any(|reason| reason.contains("caller_pane_missing")));
+        assert!(!env.home().join(".team").exists());
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn issue337_typed_caller_still_requires_a_current_live_pane_observation() {
+        let env = HermeticTestEnv::enter("issue337-unobservable-caller");
+        env.scrub_tmux();
+        env.assert_no_real_tmux();
+        std::env::set_var("TMUX_PANE", "%42");
+        std::env::set_var(CALLER_PANE_ENV, "%42");
+        std::env::set_var(CALLER_PROVIDER_ENV, "pi");
+        std::env::set_var(CALLER_ENDPOINT_ENV, "/private/tmp/issue337/default");
+        let transport = OfflineTransport::new().with_tmux_endpoint("/private/tmp/issue337/default");
+        let refusal = preflight_fresh_leader_identity(&transport)
+            .expect("typed identity is not a live pane observation");
+        assert!(refusal.1.iter().any(|reason| reason.contains("unobservable") || reason.contains("not_live")));
+        assert!(!env.home().join(".team").exists());
+    }
+
+    #[test]
     fn bootstrap_binding_is_preserved_without_epoch_reset_or_takeover() {
         let bootstrap = json!({
             "team_owner": {"pane_id": "%0", "provider": "pi", "owner_epoch": 7, "claimed_via": "claim-leader"},
