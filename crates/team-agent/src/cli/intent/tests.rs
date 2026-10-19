@@ -75,6 +75,7 @@ fn plan(verb: Verb, actions: &[&str]) -> Plan {
         scope,
         steps,
         skipped: vec![],
+        no_eligible: None,
         files: vec![],
         expected: BTreeMap::new(),
         topology: None,
@@ -508,6 +509,25 @@ fn syntax_session_matrix_and_directory_ambiguity_are_deterministic() {
         false
     )
     .is_err());
+}
+
+#[test]
+fn no_eligible_is_scoped_nonzero_with_skipped_and_zero_handlers_even_in_dry_run() {
+    for dry_run in [false, true] {
+        let mut p = plan(Verb::Start, &["start"]);
+        p.intent.dry_run = dry_run;
+        p.no_eligible = Some("all selected seats are paused");
+        p.skipped.push(json!({"agent":"one","reason":"paused"}));
+        let result = execute_plan(p, &mut |_| panic!("blocked handler"), &mut |_,_,_| panic!("blocked recheck")).unwrap();
+        assert_eq!(result.exit, ExitCode::Error);
+        let CmdOutput::Json(value) = result.output else { panic!() };
+        assert_eq!(value["scope"]["team"], "pinned");
+        assert_eq!(value["status"], "no_eligible_agents");
+        assert_eq!(value["skipped"][0]["agent"], "one");
+        assert_eq!(value["skipped"][0]["reason"], "paused");
+        assert_eq!(value["steps"], json!([]));
+        assert_eq!(value["dry_run"], dry_run);
+    }
 }
 
 #[test]

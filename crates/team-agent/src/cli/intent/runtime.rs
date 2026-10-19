@@ -627,6 +627,11 @@ fn add(
 pub(super) fn plan(intent: Intent) -> Result<Plan, CliError> {
     plan_with_observer(intent, observe)
 }
+fn no_eligible(mut plan: Plan, reason: &'static str) -> Plan {
+    plan.steps.clear();
+    plan.no_eligible = Some(reason);
+    plan
+}
 
 fn plan_with_observer(
     intent: Intent,
@@ -640,6 +645,7 @@ fn plan_with_observer(
         intent,
         steps: vec![],
         skipped: vec![],
+        no_eligible: None,
         files: vec![],
         expected: BTreeMap::new(),
         topology: None,
@@ -735,9 +741,8 @@ fn plan_with_observer(
             if config.roles.len() == config.members.len()
                 && config.roles.iter().all(|role| role.paused)
             {
-                return Err(refusal(
-                    "no_eligible_agents; all configured native roles are paused",
-                ));
+                plan.skipped.extend(config.roles.iter().map(|role| json!({"agent":role.id.as_str(),"reason":"paused"})));
+                return Ok(no_eligible(plan, "all configured native roles are paused"));
             }
         }
         remember(&mut plan, &source.join("TEAM.md"))?;
@@ -801,12 +806,12 @@ fn plan_with_observer(
                         return Err(refusal("unknown physical identity"));
                     }
                     active = true;
+                } else {
+                    plan.skipped.push(json!({"agent":id,"reason":if paused(row){"paused"}else if crate::state::projection::agent_explicit_stop(row){"explicit_stop"}else{"stopped_preserved_by_original_restart"}}));
                 }
             }
             if !active {
-                return Err(refusal(
-                    "no_eligible_agents; missing spec cannot be rebuilt by start",
-                ));
+                return Ok(no_eligible(plan, "missing spec cannot be rebuilt without an active roster"));
             }
             plan.steps.push(Step::RestartTeam(restart_args(&plan)));
             return Ok(plan);
@@ -964,9 +969,7 @@ fn plan_with_observer(
             .filter(|(_, _, explicit, paused)| !explicit && !paused)
             .collect();
         if eligible.is_empty() {
-            return Err(refusal(
-                "no_eligible_agents; use team start to explicitly activate stopped roster",
-            ));
+            return Ok(no_eligible(plan, "use team start to explicitly activate a nonpaused roster"));
         }
         let shutdown = selected.state.get("status").and_then(Value::as_str) == Some("shutdown");
         if !shutdown
@@ -975,9 +978,8 @@ fn plan_with_observer(
                     .is_some_and(|row| !crate::state::projection::agent_stopped_for_restart(row))
             })
         {
-            return Err(refusal(
-                "no_eligible_agents; stopped roster requires explicit team start",
-            ));
+            plan.skipped.extend(eligible.iter().map(|(id,obs,_,_)| json!({"agent":id,"observation":obs,"reason":"stopped_preserved_by_original_restart"})));
+            return Ok(no_eligible(plan, "stopped roster requires explicit team start"));
         }
         if !shutdown
             || eligible
@@ -1003,7 +1005,7 @@ fn plan_with_observer(
             .iter()
             .any(|s| s.get("reason").and_then(Value::as_str) == Some("already_running"))
     {
-        return Err(refusal("no_eligible_agents"));
+        return Ok(no_eligible(plan, "no eligible nonpaused roster"));
     }
     Ok(plan)
 }

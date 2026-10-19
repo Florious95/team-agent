@@ -108,6 +108,7 @@ pub(super) struct Plan {
     scope: ResolvedScope,
     steps: Vec<Step>,
     skipped: Vec<Value>,
+    no_eligible: Option<&'static str>,
     files: Vec<(PathBuf, Vec<u8>)>,
     expected: BTreeMap<String, Value>,
     topology: Option<Value>,
@@ -462,6 +463,9 @@ fn execute_plan(
     execute: &mut impl FnMut(&Step) -> Result<CmdResult, CliError>,
     recheck: &mut impl FnMut(&Plan, &Step, bool) -> Result<(), CliError>,
 ) -> Result<CmdResult, CliError> {
+    if let Some(reason) = plan.no_eligible {
+        return Ok(CmdResult::from_json(json!({"ok":false,"action":plan.intent.verb,"surface":plan.intent.surface,"scope":plan.scope,"session_policy":plan.intent.session,"dry_run":plan.intent.dry_run,"status":"no_eligible_agents","error":reason,"steps":[],"skipped":plan.skipped}), plan.intent.json));
+    }
     let descriptions: Vec<_> = plan
         .steps
         .iter()

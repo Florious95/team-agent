@@ -138,11 +138,29 @@ fn new_restart_preserves_held_seats_and_shutdown_branch_starts_only_eligible() {
 fn all_paused_no_eligible_and_single_restart_never_unpauses() {
     let (root, mut intent) = fixture(&["one"]);
     install(root.path(), &[("one", "paused", false)]);
-    assert!(plan_with_observer(intent.clone(), |_, _, _| panic!("paused probe")).is_err());
+    let blocked = plan_with_observer(intent.clone(), |_, _, _| panic!("paused probe")).unwrap();
+    assert!(blocked.no_eligible.is_some());
+    assert!(blocked.steps.is_empty());
+    assert_eq!(blocked.skipped[0]["reason"], "paused");
     intent.verb = Verb::Restart;
     intent.subject = Subject::Agent(AgentId::new("one"));
     assert!(plan_with_observer(intent, |_, _, _| panic!("paused probe")).is_err());
 }
+#[test]
+#[serial_test::serial(env)]
+fn no_eligible_restart_preserves_scoped_held_and_stopped_skip_reasons() {
+    for explicit in [false,true] {
+        let (root, mut intent) = fixture(&["one"]);
+        install(root.path(), &[("one", "stopped", explicit)]);
+        intent.verb = Verb::Restart;
+        let blocked = plan_with_observer(intent, |_,_,_| Ok(Observation::StoppedVerified)).unwrap();
+        assert!(blocked.no_eligible.is_some()); assert!(blocked.steps.is_empty());
+        assert_eq!(blocked.scope.team.as_deref(), Some("fixture"));
+        assert_eq!(blocked.skipped[0]["agent"], "one");
+        assert_eq!(blocked.skipped[0]["reason"], if explicit {"explicit_stop"} else {"stopped_preserved_by_original_restart"});
+    }
+}
+
 #[test]
 #[serial_test::serial(env)]
 fn role_only_add_and_absent_creation_need_explicit_decisions() {
@@ -184,8 +202,10 @@ fn spec_only_state_only_and_missing_spec_do_not_fallback_to_creation() {
         plan_with_observer(intent.clone(), |_, _, _| Ok(Observation::StoppedVerified)).is_err()
     );
     intent.verb = Verb::Restart;
-    let plan = plan_with_observer(intent, |_, _, _| Ok(Observation::StoppedVerified));
-    assert!(plan.is_err());
+    let blocked = plan_with_observer(intent, |_, _, _| Ok(Observation::StoppedVerified)).unwrap();
+    assert!(blocked.no_eligible.is_some());
+    assert!(blocked.steps.is_empty());
+    assert_eq!(blocked.skipped[0]["agent"], "one");
 }
 #[test]
 #[serial_test::serial(env)]
