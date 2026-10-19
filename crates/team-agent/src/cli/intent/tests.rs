@@ -102,6 +102,7 @@ fn registered_truth_table_keeps_physics_configuration_and_intent_separate() {
         assert!(seat_actions(verb, Live, true, false, false, false).is_err());
     }
     assert!(seat_actions(Start, Live, false, false, true, false).is_err());
+    assert!(seat_actions(Start, Live, false, true, false, false).is_err());
     assert!(seat_actions(Restart, Unstarted, false, false, false, false).is_err());
     assert!(seat_actions(Start, Live, true, false, false, true)
         .unwrap()
@@ -477,6 +478,8 @@ fn syntax_session_matrix_and_directory_ambiguity_are_deterministic() {
     let intent =
         lifecycle_intent("start", Verb::Start, &tokens, root.path(), false, false).unwrap();
     assert_eq!(intent.role_file, Some(role));
+    assert!(lifecycle_intent("start", Verb::Start, &args(&["--from=role.md"]), root.path(), false, false).is_err());
+    assert!(lifecycle_intent("start", Verb::Start, &args(&["one", "--role-file=worker"]), root.path(), false, false).is_err());
 }
 
 #[test]

@@ -321,6 +321,7 @@ fn stopped_text_without_physical_identity_is_unknown_and_standalone_source_keeps
         .unwrap(),
         Observation::Unknown
     );
+    assert_eq!(observe(&selected, "one", &json!({"status":"stopped","provider":"pi","pane_pid":std::process::id()})).unwrap(), Observation::Unknown);
     let (root, _) = fixture(&["one"]);
     let values = vec![
         "--from".into(),
@@ -338,4 +339,37 @@ fn stopped_text_without_physical_identity_is_unknown_and_standalone_source_keeps
         value["scope"]["workspace"],
         root.path().to_string_lossy().as_ref()
     );
+}
+
+#[test]
+fn declared_provider_aliases_do_not_create_false_drift_or_absorb_native_routes() {
+    assert!(!drift(&json!({"provider":"agent"}), &json!({"provider":"cursor_agent"})));
+    assert!(same_provider("claude-code", "claude_code"));
+    assert!(!same_provider("cursor", "cursor_agent"));
+    assert!(!same_provider("grok_build", "grok"));
+}
+
+#[test]
+#[cfg(unix)]
+fn native_noop_compares_all_five_authoritative_launch_settings() {
+    use crate::contract_runtime::{config::RoleConfig, prompt::Prompt};
+    use team_agent_contract::contract::types::{Digest, ProviderId, SeatId};
+    let old = RoleConfig {
+        id: SeatId::new("one").unwrap(), provider: ProviderId::new("cursor").unwrap(),
+        source: PathBuf::from("/fixture/one.md"), role: "one".into(), model: "original".into(),
+        effort: None, bypass: true, paused: false, body: "body".into(),
+        prompt: Prompt { text: String::new(), sha256: Digest([0; 32]), sources: vec![] },
+    };
+    assert!(!native_settings_changed(&old, &old.clone()));
+    for field in ["provider", "model", "effort", "bypass", "paused"] {
+        let mut current = old.clone();
+        match field {
+            "provider" => current.provider = ProviderId::new("kiro").unwrap(),
+            "model" => current.model = "changed".into(),
+            "effort" => current.effort = Some("high".into()),
+            "bypass" => current.bypass = false,
+            _ => current.paused = true,
+        }
+        assert!(native_settings_changed(&old, &current), "unexamined launch drift: {field}");
+    }
 }

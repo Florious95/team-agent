@@ -295,8 +295,12 @@ fn lifecycle_intent(
             .filter(|p| explicit_team || (verb == Verb::Start && path_syntax(p)))
     });
     let subject = if let Some(source) = team_source {
+        let source = existing_path(cwd, source)?;
+        if !source.is_dir() {
+            return Err(usage("team source must be an existing directory"));
+        }
         Subject::Team {
-            source: Some(existing_path(cwd, source)?),
+            source: Some(source),
         }
     } else if restart_path.is_some() {
         Subject::Team { source: None }
@@ -363,6 +367,9 @@ fn lifecycle_intent(
         .get("--role-file")
         .map(|path| existing_path(cwd, path))
         .transpose()?;
+    if role_file.as_ref().is_some_and(|path| !path.is_file()) {
+        return Err(usage("--role-file must be an existing regular file"));
+    }
     let patch = if verb == Verb::Start {
         let mut role_args = vec!["intent-agent".to_string()];
         for token in tokens {
@@ -495,6 +502,9 @@ fn seat_actions(
     }
     if team && verb == Verb::Restart && explicit_stop {
         return Ok(vec![]);
+    }
+    if verb == Verb::Start && observation == Observation::Live && explicit_stop {
+        return Err(refusal("live process contradicts the explicit-stop fence; inspect the selected agent before start"));
     }
     if observation == Observation::Unknown {
         return Err(refusal(

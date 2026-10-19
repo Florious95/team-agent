@@ -153,8 +153,14 @@ fn relevant(row: &Value) -> Value {
     }
     Value::Object(object)
 }
+fn same_provider(left: &str, right: &str) -> bool {
+    match (crate::provider::wire::parse_provider(left), crate::provider::wire::parse_provider(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => left == right,
+    }
+}
 fn drift(row: &Value, compiled: &Value) -> bool {
-    provider(row) != provider(compiled)
+    !same_provider(provider(row), provider(compiled))
         || row
             .get("as_launched_dangerously_skip_permissions")
             .and_then(Value::as_bool)
@@ -170,6 +176,30 @@ fn drift(row: &Value, compiled: &Value) -> bool {
             .zip(compiled.get("model").filter(|v| !v.is_null()))
             .is_some_and(|(old, new)| old != new)
 }
+#[cfg(unix)]
+fn native_settings_changed(old: &crate::contract_runtime::config::RoleConfig, current: &crate::contract_runtime::config::RoleConfig) -> bool {
+    old.provider != current.provider || old.model != current.model || old.effort != current.effort || old.bypass != current.bypass || old.paused != current.paused
+}
+
+fn check_native_noop_settings(selected: &SelectedTeam, id: &str, row: &Value) -> Result<(), CliError> {
+    #[cfg(unix)]
+    if crate::contract_runtime::framework::is_contract(row) {
+        use team_agent_contract::contract::types::SeatId;
+        let backend = checked(crate::contract_runtime::backend::Backend::open_readonly(&selected.run_workspace, &selected.team_key))?;
+        let seat = checked(backend.store.seat(&checked(SeatId::new(id))?))?.ok_or_else(|| refusal("missing native snapshot identity"))?;
+        if row.get("contract_instance").and_then(Value::as_str) != Some(seat.identity.instance.as_str()) || row.get("generation").and_then(Value::as_u64) != Some(seat.identity.generation.0) {
+            return Err(refusal("native incarnation changed during no-op planning"));
+        }
+        let old = checked(crate::contract_runtime::backend::read_role(&backend.binding, &seat.identity))?;
+        let config = checked(crate::contract_runtime::framework::team_config(&selected.run_workspace, &selected.team_dir, &selected.team_key))?.ok_or_else(|| refusal("missing native configuration"))?;
+        let current = config.roles.iter().find(|role| role.id.as_str() == id).ok_or_else(|| refusal("native role no longer configured"))?;
+        if native_settings_changed(&old, current) {
+            return Err(refusal(format!("native launch configuration drift for {id}; stop before applying settings")));
+        }
+    }
+    Ok(())
+}
+
 fn paused(row: &Value) -> bool {
     row.get("status").and_then(Value::as_str) == Some("paused")
 }
@@ -192,7 +222,9 @@ fn observe(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation
         ))?;
         let seat = checked(backend.store.seat(&checked(SeatId::new(id))?))?
             .ok_or_else(|| refusal("missing canonical native seat"))?;
-        if row.get("contract_instance").and_then(Value::as_str)
+        if provider(row) != seat.provider.as_str()
+            || row.get("contract_scope").and_then(Value::as_str) != Some(seat.identity.scope.as_str())
+            || row.get("contract_instance").and_then(Value::as_str)
             != Some(seat.identity.instance.as_str())
             || row.get("generation").and_then(Value::as_u64) != Some(seat.identity.generation.0)
         {
@@ -202,8 +234,8 @@ fn observe(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation
             return Ok(Observation::Unknown);
         };
         return Ok(match (seat.status, sample_process(&target.process)) {
-            (SeatStatus::Ready, ProcessState::Alive) => Observation::Live,
-            (SeatStatus::Stopped, ProcessState::Exited) => Observation::StoppedVerified,
+            (SeatStatus::Ready, ProcessState::Alive) if row.get("status").and_then(Value::as_str) == Some("running") => Observation::Live,
+            (SeatStatus::Stopped, ProcessState::Exited) if row.get("status").and_then(Value::as_str) == Some("stopped") => Observation::StoppedVerified,
             _ => Observation::Unknown,
         });
     }
@@ -221,6 +253,9 @@ fn observe(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation
             return Ok(Observation::Unknown)
         }
         crate::platform::process::ProcessLiveness::Live => (),
+    }
+    if row.get("status").and_then(Value::as_str) == Some("stopped") {
+        return Ok(Observation::Unknown);
     }
     let backend = checked(
         crate::lifecycle::restart::lifecycle_worker_tmux_backend_selection_for_state(
@@ -250,7 +285,7 @@ fn observe(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation
     let command = matches[0].current_command.as_deref().unwrap_or("");
     let positive_command = command == crate::provider::wire::command_name(native)
         || crate::leader::provider_attribution::command_matches_provider(native, command);
-    let positive_surface = if matches!(
+    let positive_surface = if !positive_command && matches!(
         native,
         crate::model::enums::Provider::Pi | crate::model::enums::Provider::CursorAgent
     ) && !matches!(command, "sh" | "bash" | "zsh" | "fish" | "")
@@ -683,6 +718,7 @@ fn plan_with_observer(
         if actions.is_empty() {
             if obs == Observation::Live && plan.intent.verb == Verb::Start {
                 let (_, compiled) = role(&mut plan, &selected, &id, None)?;
+                check_native_noop_settings(&selected, &id, row)?;
                 if drift(row, &compiled) {
                     return Err(refusal(format!(
                         "known launch configuration drift for running {id}; stop before applying"
@@ -693,7 +729,7 @@ fn plan_with_observer(
         } else {
             if plan.intent.verb != Verb::Stop {
                 let (_, compiled) = role(&mut plan, &selected, &id, None)?;
-                if provider(row) != provider(&compiled) {
+                if !same_provider(provider(row), provider(&compiled)) {
                     return Err(refusal("registered provider cannot change"));
                 }
                 preflight_start(&selected, &id, row, plan.intent.session)?;
@@ -837,7 +873,7 @@ pub(super) fn recheck(plan: &Plan, step: &Step, after_stop: bool) -> Result<(), 
             .get(id)
             .ok_or_else(|| refusal("missing original incarnation"))?;
         if after_stop && plan.intent.verb == Verb::Restart && matches!(step, Step::StartAgent(_)) {
-            if provider(row) != provider(expected)
+            if !same_provider(provider(row), provider(expected))
                 || row.get("generation").unwrap_or(&Value::Null)
                     != expected.get("generation").unwrap_or(&Value::Null)
                 || observe(&selected, id, row)? != Observation::StoppedVerified
