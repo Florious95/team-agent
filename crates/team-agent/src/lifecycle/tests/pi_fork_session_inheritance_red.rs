@@ -90,6 +90,7 @@ impl Drop for PathEnvGuard {
 struct Fixture {
     #[cfg(unix)]
     _path_guard: PathEnvGuard,
+    _caller: hermetic_guard::HermeticTestEnv,
     root: PathBuf,
     team_dir: PathBuf,
     run_workspace: PathBuf,
@@ -103,6 +104,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        let caller = hermetic_guard::HermeticTestEnv::enter_with_leader("pi-fork-owned-caller");
         let root = super::temp_ws();
         #[cfg(unix)]
         let path_guard = PathEnvGuard::with_fake_pi(&root);
@@ -122,6 +124,7 @@ impl Fixture {
         )
         .expect("write referenced profile");
 
+        super::launch_spawn::seed_healthy_coordinator(&root);
         let setup = team_agent::lifecycle::launch::quick_start_with_transport(
             &team_dir,
             None,
@@ -198,6 +201,7 @@ impl Fixture {
         let fixture = Self {
             #[cfg(unix)]
             _path_guard: path_guard,
+            _caller: caller,
             root,
             team_dir,
             run_workspace,
