@@ -53,7 +53,8 @@ impl Case {
         Self { env, root }
     }
     fn run(&self, args: &[&str]) -> Output {
-        self.env.run_cli_env(&self.root, args, &[("TEAM_AGENT_CLI_ARGV_ROUTING", "off")])
+        self.env
+            .run_cli_env(&self.root, args, &[("TEAM_AGENT_CLI_ARGV_ROUTING", "off")])
     }
 }
 fn inventory(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
@@ -261,19 +262,37 @@ fn local_skill_links_resolve_inside_the_packaged_single_source() {
 #[test]
 fn existing_handbook_mirrors_and_new_coverage_promises_are_synchronized() {
     let canonical = fs::read(repo().join("docs/reference/team-agent-operator.md")).unwrap();
-    assert!(!fs::symlink_metadata(skill().join("docs/reference/team-agent-operator.md")).unwrap().file_type().is_symlink(), "npm excludes symlinks: the existing packaged mirror must be materialized");
-    for mirror in ["docs/reference/team-agent-operator.md", "references/team-agent-operator.md"] {
+    assert!(
+        !fs::symlink_metadata(skill().join("docs/reference/team-agent-operator.md"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "npm excludes symlinks: the existing packaged mirror must be materialized"
+    );
+    for mirror in [
+        "docs/reference/team-agent-operator.md",
+        "references/team-agent-operator.md",
+    ] {
         assert_eq!(fs::read(skill().join(mirror)).unwrap(), canonical);
     }
-    let coverage: Value = serde_json::from_str(&read(&skill().join("command-coverage.json"))).unwrap();
-    assert_eq!(coverage["authority"]["compact_skill_smoke"]["policy"], "all_compact_commands_are_subset_only");
+    let coverage: Value =
+        serde_json::from_str(&read(&skill().join("command-coverage.json"))).unwrap();
+    assert_eq!(
+        coverage["authority"]["compact_skill_smoke"]["policy"],
+        "all_compact_commands_are_subset_only"
+    );
     for command in [
         "team-agent start --from .team/current --workspace . --team project-team",
         "team-agent stop --workspace . --team project-team --json",
         "team-agent team restart --workspace . --team project-team --json",
         "team-agent start reviewer --workspace . --team project-team",
     ] {
-        let entries: Vec<_> = coverage["commands"].as_array().unwrap().iter().filter(|entry| entry["command"] == command).collect();
+        let entries: Vec<_> = coverage["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["command"] == command)
+            .collect();
         assert_eq!(entries.len(), 1, "missing or duplicate: {command}");
         assert_eq!(entries[0]["bucket"], "declared_gap");
         assert_eq!(entries[0]["covered"], false);
@@ -299,13 +318,13 @@ fn actual_install_skill_copies_core_and_all_references_to_private_home() {
     assert_eq!(installed.len(), 3);
     let mut files = vec!["SKILL.md"];
     files.extend_from_slice(REFERENCES);
-    files.extend(["docs/reference/team-agent-operator.md", "command-coverage.json"]);
+    files.extend([
+        "docs/reference/team-agent-operator.md",
+        "command-coverage.json",
+    ]);
     for target in installed {
         let dest = Path::new(target["dest"].as_str().unwrap());
-        assert!(
-            dest.starts_with(case.env.home()),
-            "not isolated: {target}"
-        );
+        assert!(dest.starts_with(case.env.home()), "not isolated: {target}");
         assert_eq!(target["dry_run"], false);
         for file in &files {
             assert_eq!(
