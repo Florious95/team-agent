@@ -24,7 +24,7 @@ use framework::*;
 /// 全部用 codex provider(true 角色才有 bypass flag,避免 fail-loud);
 /// 断言基于 state 落盘(运行面),不依赖真实 codex 进程就绪。
 fn mini_team_ws(tag: &str) -> TestWorkspace {
-    let ws = TestWorkspace::new(tag);
+    let ws = TestWorkspace::new(tag).with_owned_caller();
     let team = ws.path();
     std::fs::create_dir_all(team.join(".team/current/agents")).unwrap();
     std::fs::write(

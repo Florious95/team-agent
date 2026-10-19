@@ -167,6 +167,37 @@ pub fn seed_in_process_coordinator(workspace: &Path) {
     std::fs::write(team_agent::coordinator::coordinator_pid_path(&scope), pid.to_string()).unwrap();
 }
 
+/// Explicit historical/negative fixture after lawful positive startup. This
+/// does not claim public start can bypass caller admission. Preserve all worker
+/// topology while clearing only the active team's attachment under state-save.
+pub fn seed_unattached_leader(workspace: &Path) {
+    let runtime = team_agent::model::paths::runtime_dir(workspace);
+    let lock = std::fs::OpenOptions::new().read(true).write(true)
+        .open(runtime.join("state-save.lock")).expect("existing fixture state-save lock");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while !team_agent::platform::file_lock::try_lock_once_nonblocking(&lock).expect("fixture state lock") {
+        assert!(std::time::Instant::now() < deadline, "fixture state lock deadline");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let path = runtime.join("state.json");
+    let before: Value = serde_json::from_slice(&std::fs::read(&path).expect("fixture state")).expect("fixture JSON");
+    let team = before["active_team_key"].as_str().expect("active fixture team").to_owned();
+    let mut state = before.clone();
+    let root = state.as_object_mut().expect("root state");
+    root.remove("leader_receiver");
+    root.remove("team_owner");
+    let canonical = state["teams"][&team].as_object_mut().expect("canonical fixture team");
+    canonical.remove("leader_receiver");
+    canonical.remove("team_owner");
+    assert_eq!(state["agents"], before["agents"]);
+    assert_eq!(state["teams"][&team]["agents"], before["teams"][&team]["agents"]);
+    assert_eq!(state["session_name"], before["session_name"]);
+    assert_eq!(state["tmux_socket"], before["tmux_socket"]);
+    std::fs::write(&path, serde_json::to_vec_pretty(&state).expect("encode fixture"))
+        .expect("write explicit unbound fixture");
+    team_agent::platform::file_lock::unlock(&lock).expect("unlock fixture state");
+}
+
 pub struct HermeticTestEnv {
     root: PathBuf,
     home: PathBuf,

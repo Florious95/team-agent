@@ -348,7 +348,7 @@ fn assert_brief_nodes(value: &Value, expected_names: &[&str], team: &str) {
         let next = node["next_action"].as_str().expect("unknown status guidance");
         assert!(next.starts_with("team-agent doctor --workspace "));
         assert!(next.contains(&format!("--team '{team}'")));
-        assert!(next.contains("do not restart or reset based on unknown alone"));
+        assert!(next.contains("do not infer process exit or retry lifecycle from unknown alone"));
     }
 }
 

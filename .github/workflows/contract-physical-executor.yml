@@ -421,7 +421,7 @@ jobs:
             command=(cargo test -p team-agent --test e2e --locked -- --test-threads=1)
           fi
           if test "${{ inputs.regression_scope }}" = cli-defects-fixtures; then
-            command=(cargo test -p team-agent --lib --locked lifecycle::tests::pi_fork_session_inheritance_red -- --test-threads=1)
+            command=(cargo test -p team-agent --locked --no-fail-fast --test e2e --test e2e_bypass_single_source --test e6_offline_mailbox_toname_e2e_contract --test msg_protocol_m2c_to_grammar_contract --test msg_sendpath_persist_first_contract --test role_lifecycle_intermediate_layer_red --test team_in_team_scope_commands_red -- --test-threads=1)
           fi
           "${command[@]}" 2>&1 | tee workspace-evidence/test.log
           statuses=("${PIPESTATUS[@]}")

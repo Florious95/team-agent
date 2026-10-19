@@ -250,6 +250,7 @@ fn positional_to_accepts_full_logical_grammar_into_one_funnel() {
 #[serial(env)]
 fn positional_to_leader_form_refuses_canonically_when_unbound() {
     let case = GrammarCase::start("m2c-leader");
+    hermetic_guard::seed_unattached_leader(&case.workspace);
     let to = format!("{TEAM}/leader");
     let (parsed, combined) = case.send_positional(to.as_str(), None, "m2c leader probe");
     let value = parsed.as_ref().unwrap_or_else(|| {

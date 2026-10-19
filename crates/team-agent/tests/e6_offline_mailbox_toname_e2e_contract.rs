@@ -849,27 +849,9 @@ impl E6Case {
     }
 
     fn seed_never_attached_mailbox_state(&self) {
-        let lock_path = self.target_workspace().join(".team/runtime/state-save.lock");
-        let lock = std::fs::OpenOptions::new().read(true).write(true).open(lock_path)
-            .expect("startup created state-save lock");
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while !team_agent::platform::file_lock::try_lock_once_nonblocking(&lock).unwrap() {
-            assert!(Instant::now() < deadline, "historical fixture state lock deadline");
-            std::thread::sleep(Duration::from_millis(10));
-        }
         let before = runtime_state(self.target_workspace());
         let scope = &self.team_key;
-        let mut state = before.clone();
-        let root = state.as_object_mut().expect("root state");
-        root.remove("leader_receiver");
-        root.remove("team_owner");
-        let team = state.pointer_mut(&format!("/teams/{scope}"))
-            .and_then(Value::as_object_mut).expect("canonical mailbox team");
-        team.remove("leader_receiver");
-        team.remove("team_owner");
-        std::fs::write(self.target_workspace().join(".team/runtime/state.json"),
-            serde_json::to_vec_pretty(&state).unwrap()).expect("write historical unbound fixture");
-        team_agent::platform::file_lock::unlock(&lock).unwrap();
+        hermetic_guard::seed_unattached_leader(self.target_workspace());
         let _home = self.env.with_env("HOME", self.home.to_str().expect("fixture HOME UTF8"));
         if let Some(path) = team_agent::leader::registry::unregister_entry(self.target_workspace(), scope) {
             assert!(path.starts_with(&self.home));

@@ -603,6 +603,7 @@ fn c2_positional_alias_and_mcp_share_one_persisted_fingerprint() {
 #[serial(env)]
 fn c3_pre_persist_refusals_leave_zero_db_side_effects() {
     let case = SendPathCase::start("carc-c3");
+    hermetic_guard::seed_unattached_leader(&case.workspace);
     let leader_form = format!("{TEAM}/leader");
     let probes: Vec<(&str, Vec<&str>)> = vec![
         (

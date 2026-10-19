@@ -182,7 +182,7 @@ fn pair(argv: &[String], key: &str, value: &str) -> bool { argv.windows(2).any(|
 
 #[test]
 fn traditional_quick_start_and_add_role_file_without_cli_provider_or_bypass_regressions() {
-    let legacy = TestWorkspace::new("rolelife-legacy-quick-start");
+    let legacy = TestWorkspace::new("rolelife-legacy-quick-start").with_owned_caller();
     fs::write(legacy.path().join("TEAM.md"), "Traditional plain-text team objective.\n").unwrap();
     fs::create_dir_all(legacy.path().join("agents")).unwrap();
     let legacy_role = b"Traditional worker role without provider/bypass frontmatter.\n";

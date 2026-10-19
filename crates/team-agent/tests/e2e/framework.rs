@@ -1761,6 +1761,12 @@ fn write_delivery_timeout_snapshot(snapshot: &Value) -> PathBuf {
 // 8. Convenience: build a runtime workspace with a single fake-spec quick-start
 // ----------------------------------------------------------------------------
 
+/// Explicit negative/historical setup after an admitted positive launch.
+/// Clears only the active team's receiver/owner; workers remain unchanged.
+pub fn seed_unattached_leader(ws: &TestWorkspace) {
+    hermetic_guard::seed_unattached_leader(ws.path());
+}
+
 /// True only for a successful bind/launch, or the legacy degraded statuses
 /// that still mean workers spawned. This is **not** a leader-binding success
 /// predicate for `leader_binding_incomplete`.
