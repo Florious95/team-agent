@@ -18,7 +18,9 @@ struct Case {
 impl Case {
     fn new() -> Self {
         let ws = std::env::temp_dir().join(format!(
-            "ta-mcp-handshake-{}-{}", std::process::id(), crate::provider::adapter::next_session_token()
+            "ta-mcp-handshake-{}-{}",
+            std::process::id(),
+            crate::provider::adapter::next_session_token()
         ));
         std::fs::create_dir(&ws).unwrap();
         let ws = ws.canonicalize().unwrap();
@@ -42,16 +44,31 @@ impl Case {
             "pane_id": "%1", "pane_pid": carrier
         }}});
         let panes = vec![PaneInfo {
-            pane_id: PaneId::new("%1"), session: SessionName::new("owned"),
-            window_index: None, window_name: None, pane_index: None, tty: None,
-            current_command: None, current_path: None, active: true,
-            pane_pid: Some(carrier), leader_env: BTreeMap::new(),
+            pane_id: PaneId::new("%1"),
+            session: SessionName::new("owned"),
+            window_index: None,
+            window_name: None,
+            pane_index: None,
+            tty: None,
+            current_command: None,
+            current_path: None,
+            active: true,
+            pane_pid: Some(carrier),
+            leader_env: BTreeMap::new(),
         }];
-        Self { ws, state, target: Target::Pane(PaneId::new("%1")), panes, started }
+        Self {
+            ws,
+            state,
+            target: Target::Pane(PaneId::new("%1")),
+            panes,
+            started,
+        }
     }
 
     fn path(&self) -> PathBuf {
-        self.ws.join(".team/runtime/mcp-handshakes").join(format!("{}.json", key("owner", "worker")))
+        self.ws
+            .join(".team/runtime/mcp-handshakes")
+            .join(format!("{}.json", key("owner", "worker")))
     }
 
     fn publish(&self) {
@@ -74,7 +91,10 @@ fn missing_handshake_defers_then_a_live_scoped_receipt_admits() {
     let case = Case::new();
     assert!(case.admission().is_err());
     case.publish();
-    let admission = case.admission().unwrap().expect("eager client must require a receipt");
+    let admission = case
+        .admission()
+        .unwrap()
+        .expect("eager client must require a receipt");
     revalidate(&admission, &case.target, &case.panes).unwrap();
 }
 
@@ -99,13 +119,27 @@ fn malformed_stale_birth_ancestry_and_image_receipts_refuse() {
     case.publish();
     let original: Value = serde_json::from_slice(&std::fs::read(case.path()).unwrap()).unwrap();
     let mut changed = Vec::new();
-    let mut v = original.clone(); v["schema"] = json!(2); changed.push(v);
-    let mut v = original.clone(); v["server"]["identity"]["birth_identity"] = json!("wrong-birth"); changed.push(v);
-    let mut v = original.clone(); v["server"]["identity"]["executable"] = json!("/not-authorized"); changed.push(v);
-    let mut v = original.clone(); v["server"]["image"]["inode"] = json!(0); changed.push(v);
-    let mut v = original.clone(); v["ancestors"][0]["birth"] = json!("reused-parent"); changed.push(v);
-    let mut v = original.clone(); v["server"]["parent"] = json!(1); changed.push(v);
-    let mut v = original.clone(); v["started_at"] = json!("2000-01-01T00:00:00Z"); changed.push(v);
+    let mut v = original.clone();
+    v["schema"] = json!(2);
+    changed.push(v);
+    let mut v = original.clone();
+    v["server"]["identity"]["birth_identity"] = json!("wrong-birth");
+    changed.push(v);
+    let mut v = original.clone();
+    v["server"]["identity"]["executable"] = json!("/not-authorized");
+    changed.push(v);
+    let mut v = original.clone();
+    v["server"]["image"]["inode"] = json!(0);
+    changed.push(v);
+    let mut v = original.clone();
+    v["ancestors"][0]["birth"] = json!("reused-parent");
+    changed.push(v);
+    let mut v = original.clone();
+    v["server"]["parent"] = json!(1);
+    changed.push(v);
+    let mut v = original.clone();
+    v["started_at"] = json!("2000-01-01T00:00:00Z");
+    changed.push(v);
     for value in changed {
         std::fs::write(case.path(), serde_json::to_vec(&value).unwrap()).unwrap();
         assert!(case.admission().is_err());
@@ -123,7 +157,8 @@ fn changed_current_target_and_new_spawn_do_not_reuse_a_handshake() {
     other[0].pane_pid = Some(std::process::id());
     assert!(revalidate(&admission, &case.target, &other).is_err());
     assert!(revalidate(&admission, &Target::Pane(PaneId::new("%2")), &case.panes).is_err());
-    case.state["agents"]["worker"]["spawned_at"] = json!((Utc::now() + chrono::Duration::seconds(1)).to_rfc3339());
+    case.state["agents"]["worker"]["spawned_at"] =
+        json!((Utc::now() + chrono::Duration::seconds(1)).to_rfc3339());
     assert!(case.admission().is_err());
 }
 
@@ -132,7 +167,13 @@ fn older_helper_cannot_overwrite_a_newer_handshake() {
     let case = Case::new();
     case.publish();
     let original = std::fs::read(case.path()).unwrap();
-    publish(&case.ws, "owner", "worker", case.started - chrono::Duration::seconds(1)).unwrap();
+    publish(
+        &case.ws,
+        "owner",
+        "worker",
+        case.started - chrono::Duration::seconds(1),
+    )
+    .unwrap();
     assert_eq!(std::fs::read(case.path()).unwrap(), original);
 }
 
@@ -149,7 +190,10 @@ fn symlink_and_writable_evidence_are_not_adopted_or_overwritten() {
     assert!(case.admission().is_err());
     assert!(publish(&case.ws, "owner", "worker", case.started).is_err());
     assert_eq!(std::fs::read(outside).unwrap(), b"untouched");
-    assert!(std::fs::symlink_metadata(case.path()).unwrap().file_type().is_symlink());
+    assert!(std::fs::symlink_metadata(case.path())
+        .unwrap()
+        .file_type()
+        .is_symlink());
 }
 
 #[test]
@@ -158,7 +202,11 @@ fn config_scope_and_authorized_executable_cannot_be_substituted() {
     case.publish();
     let path = case.ws.join(".team/runtime/mcp/worker.json");
     let original: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    for field in ["TEAM_AGENT_ID", "TEAM_AGENT_OWNER_TEAM_ID", "TEAM_AGENT_WORKSPACE"] {
+    for field in [
+        "TEAM_AGENT_ID",
+        "TEAM_AGENT_OWNER_TEAM_ID",
+        "TEAM_AGENT_WORKSPACE",
+    ] {
         let mut value = original.clone();
         value["mcpServers"]["team_orchestrator"]["env"][field] = json!("foreign");
         std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
@@ -177,7 +225,10 @@ fn fake_and_pi_keep_their_existing_non_eager_or_runtime_registry_admission() {
     assert!(crate::provider::get_adapter(Provider::CursorAgent).requires_worker_mcp_handshake());
     let case = Case::new();
     for provider in ["fake", "pi"] {
-        let mut state = case.state.clone(); state["agents"]["worker"]["provider"] = json!(provider);
-        assert!(preflight(&case.ws, Some("owner"), "worker", &state).unwrap().is_none());
+        let mut state = case.state.clone();
+        state["agents"]["worker"]["provider"] = json!(provider);
+        assert!(preflight(&case.ws, Some("owner"), "worker", &state)
+            .unwrap()
+            .is_none());
     }
 }

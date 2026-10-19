@@ -80,9 +80,7 @@ fn key(owner: &str, agent: &str) -> String {
 
 fn read_json(path: &Path, require_private: bool) -> Result<Value> {
     let before = private_metadata(path, false)?;
-    if (require_private && before.mode() & 0o777 != 0o600)
-        || before.len() > MAX_RECEIPT_BYTES
-    {
+    if (require_private && before.mode() & 0o777 != 0o600) || before.len() > MAX_RECEIPT_BYTES {
         return Err("mcp_handshake_invalid");
     }
     let file = OpenOptions::new()
@@ -145,12 +143,19 @@ pub(crate) fn publish(
     if owner.is_empty() || agent.is_empty() {
         return Err("mcp_handshake_scope_missing");
     }
-    let workspace = workspace.canonicalize().map_err(|_| "mcp_handshake_workspace")?;
+    let workspace = workspace
+        .canonicalize()
+        .map_err(|_| "mcp_handshake_workspace")?;
     let executable = std::env::current_exe().map_err(|_| "mcp_handshake_image")?;
     let image = fingerprint_file(&executable, 512 * 1024 * 1024, Duration::from_secs(2))
         .map_err(|_| "mcp_handshake_image")?;
-    let server = capture_process(std::process::id(), &executable, image, Duration::from_secs(2))
-        .map_err(|_| "mcp_handshake_process")?;
+    let server = capture_process(
+        std::process::id(),
+        &executable,
+        image,
+        Duration::from_secs(2),
+    )
+    .map_err(|_| "mcp_handshake_process")?;
     let mut ancestors = Vec::new();
     let mut parent = server.parent;
     for _ in 0..MAX_NATIVE_PARENT_HOPS {
@@ -183,7 +188,11 @@ pub(crate) fn publish(
         Ok(_) => {
             let old: Handshake = serde_json::from_value(read_json(&path, true)?)
                 .map_err(|_| "mcp_handshake_invalid")?;
-            if old.workspace != workspace || old.owner != owner || old.agent != agent || old.schema != 1 {
+            if old.workspace != workspace
+                || old.owner != owner
+                || old.agent != agent
+                || old.schema != 1
+            {
                 return Err("mcp_handshake_scope_mismatch");
             }
             if old.started_at > receipt.started_at {
@@ -193,7 +202,11 @@ pub(crate) fn publish(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err("mcp_handshake_invalid"),
     }
-    let temp = dir.join(format!("{name}.{}-{}.tmp", std::process::id(), crate::provider::adapter::next_session_token()));
+    let temp = dir.join(format!(
+        "{name}.{}-{}.tmp",
+        std::process::id(),
+        crate::provider::adapter::next_session_token()
+    ));
     let result = (|| {
         let mut file = OpenOptions::new()
             .write(true)
@@ -245,59 +258,99 @@ pub(crate) fn preflight(
     let Some(config) = agent.get("mcp_config").and_then(Value::as_str) else {
         return Ok(None);
     };
-    let provider = agent.get("provider").and_then(Value::as_str)
+    let provider = agent
+        .get("provider")
+        .and_then(Value::as_str)
         .and_then(crate::provider::wire::parse_provider)
         .ok_or("mcp_handshake_provider_missing")?;
     if !crate::provider::get_adapter(provider).requires_worker_mcp_handshake() {
         return Ok(None);
     }
-    let owner = owner.filter(|s| !s.is_empty()).ok_or("mcp_handshake_scope_missing")?;
-    let workspace = workspace.canonicalize().map_err(|_| "mcp_handshake_workspace")?;
+    let owner = owner
+        .filter(|s| !s.is_empty())
+        .ok_or("mcp_handshake_scope_missing")?;
+    let workspace = workspace
+        .canonicalize()
+        .map_err(|_| "mcp_handshake_workspace")?;
     let dir = directory(&workspace, false)?;
-    let receipt: Handshake = serde_json::from_value(read_json(&dir.join(format!("{}.json", key(owner, agent_id))), true)?)
-        .map_err(|_| "mcp_handshake_invalid")?;
-    if receipt.schema != 1 || receipt.workspace != workspace
-        || receipt.owner != owner || receipt.agent != agent_id
+    let receipt: Handshake = serde_json::from_value(read_json(
+        &dir.join(format!("{}.json", key(owner, agent_id))),
+        true,
+    )?)
+    .map_err(|_| "mcp_handshake_invalid")?;
+    if receipt.schema != 1
+        || receipt.workspace != workspace
+        || receipt.owner != owner
+        || receipt.agent != agent_id
     {
         return Err("mcp_handshake_scope_mismatch");
     }
-    let spawned_at = agent.get("spawned_at").and_then(Value::as_str)
+    let spawned_at = agent
+        .get("spawned_at")
+        .and_then(Value::as_str)
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .ok_or("mcp_handshake_spawn_missing")?;
     if receipt.started_at < spawned_at || receipt.flushed_at < receipt.started_at {
         return Err("mcp_handshake_stale_spawn");
     }
-    let expected_config = workspace.join(".team/runtime/mcp").join(format!("{agent_id}.json"));
-    if Path::new(config).canonicalize().map_err(|_| "mcp_handshake_config_missing")?
+    let expected_config = workspace
+        .join(".team/runtime/mcp")
+        .join(format!("{agent_id}.json"));
+    if Path::new(config)
+        .canonicalize()
+        .map_err(|_| "mcp_handshake_config_missing")?
         != expected_config
     {
         return Err("mcp_handshake_config_scope");
     }
     private_metadata(&workspace.join(".team/runtime/mcp"), true)?;
     let config = read_json(Path::new(config), false)?;
-    let server_config = config.get("team_orchestrator")
-        .or_else(|| config.get("mcpServers").and_then(|servers| servers.get("team_orchestrator")))
+    let server_config = config
+        .get("team_orchestrator")
+        .or_else(|| {
+            config
+                .get("mcpServers")
+                .and_then(|servers| servers.get("team_orchestrator"))
+        })
         .ok_or("mcp_handshake_config_missing")?;
-    let expected = server_config.get("command").and_then(Value::as_str)
+    let expected = server_config
+        .get("command")
+        .and_then(Value::as_str)
         .ok_or("mcp_handshake_config_missing")?;
     if !Path::new(expected).is_absolute()
-        || Path::new(expected).canonicalize().map_err(|_| "mcp_handshake_image")? != receipt.server.identity.executable
+        || Path::new(expected)
+            .canonicalize()
+            .map_err(|_| "mcp_handshake_image")?
+            != receipt.server.identity.executable
     {
         return Err("mcp_handshake_image");
     }
-    let env = server_config.get("env").ok_or("mcp_handshake_config_missing")?;
+    let env = server_config
+        .get("env")
+        .ok_or("mcp_handshake_config_missing")?;
     if env.get("TEAM_AGENT_ID").and_then(Value::as_str) != Some(agent_id)
         || env.get("TEAM_AGENT_OWNER_TEAM_ID").and_then(Value::as_str) != Some(owner)
-        || env.get("TEAM_AGENT_WORKSPACE").and_then(Value::as_str)
-            .and_then(|s| Path::new(s).canonicalize().ok()).as_ref() != Some(&workspace)
+        || env
+            .get("TEAM_AGENT_WORKSPACE")
+            .and_then(Value::as_str)
+            .and_then(|s| Path::new(s).canonicalize().ok())
+            .as_ref()
+            != Some(&workspace)
     {
         return Err("mcp_handshake_config_scope");
     }
-    let carrier = agent.get("pane_pid").and_then(Value::as_u64)
-        .and_then(|pid| u32::try_from(pid).ok()).ok_or("mcp_handshake_carrier_missing")?;
-    let pane_id = agent.get("pane_id").and_then(Value::as_str)
-        .filter(|id| !id.is_empty()).ok_or("mcp_handshake_carrier_missing")?;
-    let carrier_birth = process_birth_identity(carrier).map_err(|_| "mcp_handshake_carrier_missing")?;
+    let carrier = agent
+        .get("pane_pid")
+        .and_then(Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok())
+        .ok_or("mcp_handshake_carrier_missing")?;
+    let pane_id = agent
+        .get("pane_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or("mcp_handshake_carrier_missing")?;
+    let carrier_birth =
+        process_birth_identity(carrier).map_err(|_| "mcp_handshake_carrier_missing")?;
     if sample_process(&receipt.server) != ProcessState::Alive {
         return Err("mcp_handshake_server_not_live");
     }
@@ -331,11 +384,14 @@ pub(crate) fn revalidate(admission: &Admission, target: &Target, panes: &[PaneIn
     let Target::Pane(id) = target else {
         return Err("mcp_handshake_carrier_missing");
     };
-    let pane = panes.iter().find(|pane| &pane.pane_id == id)
+    let pane = panes
+        .iter()
+        .find(|pane| &pane.pane_id == id)
         .ok_or("mcp_handshake_carrier_missing")?;
     if id.as_str() != admission.pane_id
         || pane.pane_pid != Some(admission.carrier)
-        || process_birth_identity(admission.carrier).ok().as_deref() != Some(admission.carrier_birth.as_str())
+        || process_birth_identity(admission.carrier).ok().as_deref()
+            != Some(admission.carrier_birth.as_str())
         || sample_process(&admission.server) != ProcessState::Alive
     {
         return Err("mcp_handshake_carrier_mismatch");
