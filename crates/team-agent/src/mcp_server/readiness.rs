@@ -260,7 +260,7 @@ pub(crate) struct Admission {
 }
 
 /// Observation-only preflight, before claiming a delivery attempt. Missing facts
-/// leave the SAME queued row untouched; coordinator retry is driven by facts.
+/// perform no input; the delivery owner releases only its exact claim for retry.
 pub(crate) fn preflight(
     workspace: &Path,
     owner: Option<&str>,
@@ -419,6 +419,12 @@ pub(crate) fn revalidate(admission: &Admission, target: &Target, panes: &[PaneIn
         return Err("mcp_handshake_carrier_mismatch");
     }
     Ok(())
+}
+
+// Test construction stays in the MCP process-evidence owner, not messaging.
+#[cfg(test)]
+pub(crate) fn test_carrier_pid() -> Option<u32> {
+    crate::platform::process::current_parent_pid()
 }
 
 #[cfg(test)]

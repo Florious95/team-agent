@@ -243,6 +243,9 @@ jobs:
               run_case mcp-handshake cargo test -p team-agent --lib --locked mcp_server::readiness -- --test-threads=1 --nocapture
               run_case mcp-wire cargo test -p team-agent --lib --locked mcp_server::wire -- --test-threads=1 --nocapture
               run_case message-handshake cargo test -p team-agent --lib --locked messaging::tests::dup_inject -- --test-threads=1 --nocapture
+              run_case startup-trust-retry cargo test -p team-agent --lib --locked contract_b_step2_retry_delivers_queued_message_after_startup_trust_is_handled -- --test-threads=1 --nocapture
+              run_case readiness-release-cas cargo test -p team-agent --lib --locked release_delivery_before_input -- --test-threads=1
+              run_case process-owner-boundary cargo test -p team-agent --test platform_process_caller_whitelist_batch0 --locked -- --test-threads=1
               ;;
             issue342-red)
               run_case cursor-project-root cargo test -p team-agent --test cursor_mcp_project_root_red --locked -- --test-threads=1
@@ -256,6 +259,9 @@ jobs:
               run_case mcp-handshake cargo test -p team-agent --lib --locked mcp_server::readiness -- --test-threads=1
               run_case mcp-wire cargo test -p team-agent --lib --locked mcp_server::wire -- --test-threads=1
               run_case message-handshake cargo test -p team-agent --lib --locked messaging::tests::dup_inject -- --test-threads=1
+              run_case startup-trust-retry cargo test -p team-agent --lib --locked contract_b_step2_retry_delivers_queued_message_after_startup_trust_is_handled -- --test-threads=1
+              run_case readiness-release-cas cargo test -p team-agent --lib --locked release_delivery_before_input -- --test-threads=1
+              run_case process-owner-boundary cargo test -p team-agent --test platform_process_caller_whitelist_batch0 --locked -- --test-threads=1
               run_case contract-all cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets --no-fail-fast -- --test-threads=1
               ;;
             host-ancestry)

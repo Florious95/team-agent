@@ -30,9 +30,9 @@ use crate::transport::{
 
 #[test]
 #[cfg(unix)]
-fn eager_mcp_waits_without_claim_or_input_then_delivers_the_same_message() {
+fn eager_mcp_waits_without_spending_input_attempts_then_delivers_the_same_message() {
     let mut case = WorkerCase::new("mcp-handshake", "cursor_agent");
-    let carrier = crate::platform::process::current_parent_pid().unwrap();
+    let carrier = crate::mcp_server::readiness::test_carrier_pid().unwrap();
     let config = case.workspace.join(".team/runtime/mcp/w1.json");
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     std::fs::write(&config, serde_json::to_vec(&serde_json::json!({
