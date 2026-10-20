@@ -44,6 +44,7 @@ on:
           - issue342-handshake
           - issue342-shutdown-fixture
           - issue345-red
+          - issue345-fixtures
           - issue345
 
 permissions:
@@ -255,6 +256,9 @@ jobs:
               ;;
             issue342-red)
               run_case cursor-project-root cargo test -p team-agent --test cursor_mcp_project_root_red --locked -- --test-threads=1
+              ;;
+            issue345-fixtures)
+              run_case messaging-fixtures cargo test -p team-agent --lib --locked messaging::tests -- --test-threads=1 --nocapture
               ;;
             issue345-red)
               run_case issue345 cargo test -p team-agent --lib --locked issue345 -- --test-threads=1 --nocapture
