@@ -397,8 +397,8 @@ fn spine_delivery_pi_cursor_uses_v113_direct_input_without_idle_scope() {
                 "env": {"TEAM_AGENT_WORKSPACE": ws, "TEAM_AGENT_ID": "w1", "TEAM_AGENT_OWNER_TEAM_ID": "spine-team"}
             }}
         })).unwrap()).unwrap();
-        let mut state = serde_json::json!({"team_key": "spine-team", "session_name": "spine", "agents": {"w1": {
-            "provider": provider, "status": "running", "mcp_config": config,
+        let mut state = serde_json::json!({"team_key": "spine-team", "active_team_key": "spine-team", "session_name": "spine", "agents": {"w1": {
+            "provider": provider, "status": "running", "window": "w1", "mcp_config": config,
             "spawned_at": (chrono::Utc::now() - chrono::Duration::seconds(10)).to_rfc3339(),
             "pane_id": "%spine", "pane_pid": carrier
         }}});
@@ -410,12 +410,12 @@ fn spine_delivery_pi_cursor_uses_v113_direct_input_without_idle_scope() {
         }
         let transport = DeliverOkTransport { targets: vec![PaneInfo {
             pane_id: PaneId::new("%spine"), session: SessionName::new("spine"),
-            window_index: None, window_name: None, pane_index: None, tty: None,
+            window_index: None, window_name: Some(WindowName::new("w1")), pane_index: None, tty: None,
             current_command: None, current_path: None, active: true,
             pane_pid: Some(carrier), leader_env: BTreeMap::new(),
         }] };
         let delivered = deliver_pending_messages(&ws, &state, &transport, &log).unwrap();
-        assert!(delivered.contains(&mid), "{provider}");
+        assert!(delivered.contains(&mid), "{provider}: {:?}", read_event_log(&ws));
         assert_eq!(message_status_of(&store, &mid), "delivered");
     }
 }
@@ -561,7 +561,7 @@ fn spine_delivery_injects_resolvable_target_not_bare_agent_pane() {
     // in-team, non-busy agent -> deliver proceeds; the session-qualified resolution uses session_name + window.
     let state = serde_json::json!({
         "session_name": "team-x",
-        "agents": {"w1": {"status": "idle", "window": "w1"}}
+        "agents": {"w1": {"provider": "fake", "status": "idle", "window": "w1"}}
     });
     let transport = OfflineTransport::new();
 
@@ -616,7 +616,7 @@ fn spine_delivery_injects_rendered_protocol_block_not_raw_content() {
         .unwrap();
     let state = serde_json::json!({
         "session_name": "team-x",
-        "agents": {"w1": {"status": "idle", "window": "w1"}}
+        "agents": {"w1": {"provider": "fake", "status": "idle", "window": "w1"}}
     });
     let transport = OfflineTransport::new();
 
