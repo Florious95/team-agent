@@ -150,8 +150,8 @@ pub(crate) fn publish(
         .canonicalize()
         .map_err(|_| "mcp_handshake_workspace")?;
     let executable = std::env::current_exe().map_err(|_| "mcp_handshake_image")?;
-    let image = fingerprint_file(&executable, 512 * 1024 * 1024, IMAGE_EVIDENCE_BUDGET)
-        .map_err(|error| {
+    let image = fingerprint_file(&executable, 512 * 1024 * 1024, IMAGE_EVIDENCE_BUDGET).map_err(
+        |error| {
             let _ = crate::event_log::EventLog::new(&workspace).write(
                 "mcp.handshake_evidence_failed",
                 serde_json::json!({
@@ -163,7 +163,8 @@ pub(crate) fn publish(
                 }),
             );
             "mcp_handshake_image"
-        })?;
+        },
+    )?;
     let server = capture_process(
         std::process::id(),
         &executable,
