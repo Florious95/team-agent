@@ -779,7 +779,9 @@ fn contract_b_step2_retry_delivers_queued_message_after_startup_trust_is_handled
     .with_session_present(true)
     .with_windows(vec![WindowName::new("w1")]);
     #[cfg(unix)]
-    transport.state.lock().unwrap().carrier = Some(carrier);
+    {
+        transport.state.lock().unwrap().carrier = Some(carrier);
+    }
     let event_log = EventLog::new(&ws);
 
     let deferred =
@@ -812,7 +814,9 @@ fn contract_b_step2_retry_delivers_queued_message_after_startup_trust_is_handled
     // control can progress, model the successful live helper handshake before
     // the coordinator retries this SAME queued row.
     #[cfg(unix)]
-    crate::mcp_server::readiness::publish(&ws, owner, "w1", chrono::Utc::now()).unwrap();
+    {
+        crate::mcp_server::readiness::publish(&ws, owner, "w1", chrono::Utc::now()).unwrap();
+    }
     let coord = Coordinator::new(
         WorkspacePath::new(ws.to_path_buf()),
         Box::new(RealAdapterRegistry),
