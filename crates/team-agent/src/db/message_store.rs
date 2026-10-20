@@ -1217,11 +1217,19 @@ mod tests {
         s.mark(&mid, "target_resolved", Some("other_owner")).unwrap();
         assert!(!s.release_delivery_before_input(&mid, 1, "stale").unwrap());
         assert_eq!(col_str(&read(&s), &mid, "error").as_deref(), Some("other_owner"));
+        assert!(s.claim_for_delivery(&mid).unwrap());
+        assert!(!s.release_delivery_before_input(&mid, 1, "old_claim").unwrap());
+        assert_eq!(col_i64(&read(&s), &mid, "delivery_attempts"), 2);
+        assert_eq!(col_str(&read(&s), &mid, "error"), None);
         for status in ["cancelled", "delivered", "submitted_unverified"] {
-            s.mark(&mid, status, None).unwrap();
-            assert!(!s.release_delivery_before_input(&mid, 1, "stale").unwrap());
-            assert_eq!(status_of(&read(&s), &mid), status);
-            assert_eq!(col_i64(&read(&s), &mid, "delivery_attempts"), 1);
+            // Each terminal/effect state needs its own row: mark correctly
+            // refuses to downgrade a previously delivered row.
+            let changed = s.create_message(Some("t"), "s", "r", "c", None, true, None).unwrap();
+            assert!(s.claim_for_delivery(&changed).unwrap());
+            s.mark(&changed, status, None).unwrap();
+            assert!(!s.release_delivery_before_input(&changed, 1, "stale").unwrap());
+            assert_eq!(status_of(&read(&s), &changed), status);
+            assert_eq!(col_i64(&read(&s), &changed, "delivery_attempts"), 1);
         }
     }
 
