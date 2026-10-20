@@ -165,7 +165,7 @@ fn observer_state_save_failure_after_enter_does_not_return_err() {
 
 #[test]
 fn pane_token_refuses_second_inject_for_claude_grok_cursor() {
-    for provider in ["claude", "grok", "cursor"] {
+    for provider in ["claude", "grok", "cursor_agent"] {
         let mut case = WorkerCase::new(&format!("token-{provider}"), provider);
         #[cfg(unix)]
         let carrier = crate::mcp_server::readiness::test_carrier_pid().unwrap();
