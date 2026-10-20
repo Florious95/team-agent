@@ -1962,9 +1962,10 @@ fn shutdown_fixture_server_gone(socket: &str, server_pid: Option<u32>) -> bool {
     if !listener_gone {
         return false;
     }
-    let Some(pid) = server_pid else {
-        return true; // An already-dead fake worker can leave no PID to observe.
-    };
+    server_pid.is_none_or(shutdown_fixture_process_exited)
+}
+
+fn shutdown_fixture_process_exited(pid: u32) -> bool {
     // Linux CI may retain a reparented zombie: kill(pid, 0) alone would falsely
     // call it live. Observe only this owned PID and stat, never argv/env.
     let Ok(output) = Command::new("ps")
@@ -2344,7 +2345,7 @@ mod containment_tests {
             assert!(!shutdown_fixture_server_gone(socket, Some(previous)));
             assert!(!shutdown_fixture_server_gone(socket, None), "live listener is not missing proof");
             ensure_shutdown_fixture_session(&ws);
-            assert!(shutdown_fixture_server_gone(socket, Some(previous)));
+            assert!(shutdown_fixture_process_exited(previous), "the previous process is dead even though the replacement now owns the listener");
             let replacement = shutdown_fixture_server_pid(socket).expect("replacement server PID");
             assert_ne!(previous, replacement);
             assert!(!shutdown_fixture_server_gone(socket, Some(replacement)));
