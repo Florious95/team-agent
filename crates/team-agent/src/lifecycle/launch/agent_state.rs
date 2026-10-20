@@ -129,6 +129,14 @@ pub(super) fn running_agent_state(
     if let Some(started_agent) = started_agent {
         persist_started_agent_plan_state(&mut state, started_agent);
     }
+    // Cursor chdirs to its native --workspace primary. Session archives are
+    // keyed by this directory, not the real project supplied via --add-dir.
+    let cursor_cwd = if provider == Provider::CursorAgent && cursor_mcp_isolation_enabled() {
+        Some(cursor_mcp_project_dir(workspace, id)?)
+    } else {
+        None
+    };
+    let spawn_cwd = cursor_cwd.as_deref().unwrap_or(spawn_cwd);
     state.insert(
         "spawn_cwd".to_string(),
         serde_json::json!(spawn_cwd.to_string_lossy().to_string()),

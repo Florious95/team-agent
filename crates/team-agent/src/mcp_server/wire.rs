@@ -190,17 +190,20 @@ fn run_stdio_loop_inner<R: BufRead, W: Write>(
     report: &mut ServerRunReport,
     marker: &McpServerLifecycleMarker,
 ) -> Result<ServerRunReport, McpError> {
+    let mut initialized = false;
     for line in reader.lines() {
         let line = line?;
         report.requests_read = report.requests_read.saturating_add(1);
-        let (frame, tools_list_success) = handle_stdin_line(tools, &line, report)?;
+        let (frame, response_kind) = handle_stdin_line(tools, &line, report)?;
         if let Some(value) = frame {
             let value = crate::redaction::redact_external_value(&value);
             serde_json::to_writer(&mut *writer, &value)?;
             writer.write_all(b"\n")?;
             writer.flush()?;
-            if tools_list_success {
-                marker.write_tools_list_response_written();
+            match response_kind {
+                ResponseKind::Initialize => initialized = true,
+                ResponseKind::ToolsList => marker.write_tools_list_response_written(initialized),
+                ResponseKind::Other => {}
             }
             report.responses_written = report.responses_written.saturating_add(1);
         }
@@ -209,11 +212,17 @@ fn run_stdio_loop_inner<R: BufRead, W: Write>(
     Ok(report.clone())
 }
 
+enum ResponseKind {
+    Initialize,
+    ToolsList,
+    Other,
+}
+
 fn handle_stdin_line(
     tools: &TeamOrchestratorTools,
     line: &str,
     report: &mut ServerRunReport,
-) -> Result<(Option<Value>, bool), McpError> {
+) -> Result<(Option<Value>, ResponseKind), McpError> {
     let request: Value = match serde_json::from_str(line) {
         Ok(value) => value,
         Err(err) => {
@@ -224,23 +233,28 @@ fn handle_stdin_line(
                     -32700,
                     format!("parse error: {err}"),
                 )),
-                false,
+                ResponseKind::Other,
             ));
         }
     };
     if request.get("jsonrpc").and_then(Value::as_str) == Some("2.0") {
-        let is_tools_list = request.get("method").and_then(Value::as_str) == Some("tools/list");
+        let method = request.get("method").and_then(Value::as_str);
+        let valid_id = request.get("id").is_some_and(|id| id.is_string() || id.is_number());
         match handle_mcp(tools, &request)? {
             Some(response) => {
-                let tools_list_success = is_tools_list && response.error.is_none();
+                let kind = match (method, valid_id && response.error.is_none()) {
+                    (Some("initialize"), true) => ResponseKind::Initialize,
+                    (Some("tools/list"), true) => ResponseKind::ToolsList,
+                    _ => ResponseKind::Other,
+                };
                 if response.error.is_some() {
                     report.error_frames = report.error_frames.saturating_add(1);
                 }
-                Ok((Some(serde_json::to_value(response)?), tools_list_success))
+                Ok((Some(serde_json::to_value(response)?), kind))
             }
             None => {
                 report.notifications_skipped = report.notifications_skipped.saturating_add(1);
-                Ok((None, false))
+                Ok((None, ResponseKind::Other))
             }
         }
     } else {
@@ -251,7 +265,7 @@ fn handle_stdin_line(
                 err.to_envelope()
             }
         };
-        Ok((Some(value), false))
+        Ok((Some(value), ResponseKind::Other))
     }
 }
 
@@ -281,6 +295,7 @@ struct McpServerLifecycleMarker {
     workspace: std::path::PathBuf,
     agent_id: Option<String>,
     owner_team_id: Option<String>,
+    started_at: chrono::DateTime<chrono::Utc>,
     pid: u32,
     ppid: u32,
 }
@@ -291,6 +306,7 @@ impl McpServerLifecycleMarker {
             workspace: workspace.to_path_buf(),
             agent_id: non_empty_env("TEAM_AGENT_ID"),
             owner_team_id: non_empty_env("TEAM_AGENT_OWNER_TEAM_ID"),
+            started_at: chrono::Utc::now(),
             pid: std::process::id(),
             ppid: parent_pid(),
         }
@@ -300,7 +316,7 @@ impl McpServerLifecycleMarker {
         self.write("mcp.server_started", None, None);
     }
 
-    fn write_tools_list_response_written(&self) {
+    fn write_tools_list_response_written(&self, initialized: bool) {
         let _ = EventLog::new(&self.workspace).write(
             "mcp.tools_list_response_written",
             serde_json::json!({
@@ -313,8 +329,17 @@ impl McpServerLifecycleMarker {
                 "ppid": self.ppid,
                 "spawn_epoch": null,
                 "spawn_epoch_source": "unavailable",
+                "initialize_response_flushed": initialized,
             }),
         );
+        #[cfg(unix)]
+        if initialized {
+            if let (Some(owner), Some(agent)) = (&self.owner_team_id, &self.agent_id) {
+                if let Err(reason) = super::readiness::publish(&self.workspace, owner, agent, self.started_at) {
+                    self.write("mcp.handshake_receipt_failed", Some(reason), None);
+                }
+            }
+        }
     }
 
     fn write_exit(&self, reason: &str, error: Option<&str>) {
@@ -723,6 +748,66 @@ mod e23_lifecycle_marker_tests {
             .iter()
             .any(|event| event["event"] == serde_json::json!("mcp.tools_list_response_written")));
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[cfg(unix)]
+    fn run_bound_handshake<W: Write>(ws: &Path, input: &str, writer: &mut W) -> Result<ServerRunReport, McpError> {
+        let marker = McpServerLifecycleMarker {
+            workspace: ws.to_path_buf(), agent_id: Some("worker".into()),
+            owner_team_id: Some("owner".into()), started_at: chrono::Utc::now(),
+            pid: std::process::id(), ppid: parent_pid(),
+        };
+        run_stdio_loop_inner(&TeamOrchestratorTools::new(ws), std::io::Cursor::new(input.as_bytes()),
+            writer, &mut ServerRunReport::default(), &marker)
+    }
+
+    #[cfg(unix)]
+    fn handshake_receipts(ws: &Path) -> usize {
+        std::fs::read_dir(ws.join(".team/runtime/mcp-handshakes"))
+            .map(|files| files.filter_map(Result::ok)
+                .filter(|file| file.path().extension().is_some_and(|ext| ext == "json")).count())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn stdio_handshake_receipt_requires_initialize_and_tools_list_flush() {
+        let initialize = r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#;
+        let tools = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
+        let invalid_initialize = r#"{"jsonrpc":"2.0","method":"initialize"}"#;
+        let invalid_tools = r#"{"jsonrpc":"2.0","method":"tools/list"}"#;
+        for (tag, requests, expected) in [
+            ("init-only", vec![initialize], 0),
+            ("list-only", vec![tools], 0),
+            ("invalid-init", vec![invalid_initialize, tools], 0),
+            ("invalid-list", vec![initialize, invalid_tools], 0),
+            ("ready", vec![initialize, tools], 1),
+        ] {
+            let ws = marker_ws(tag);
+            let mut output = Vec::new();
+            run_bound_handshake(&ws, &(requests.join("\n") + "\n"), &mut output).unwrap();
+            assert_eq!(handshake_receipts(&ws), expected, "{tag}");
+            let _ = std::fs::remove_dir_all(ws);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn stdio_failed_tools_list_flush_cannot_publish_a_handshake() {
+        struct FailSecondFlush(usize);
+        impl Write for FailSecondFlush {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> { Ok(buf.len()) }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.0 += 1;
+                if self.0 == 2 { Err(std::io::Error::other("controlled tools/list flush failure")) }
+                else { Ok(()) }
+            }
+        }
+        let ws = marker_ws("handshake-flush-failure");
+        let input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n";
+        assert!(run_bound_handshake(&ws, input, &mut FailSecondFlush(0)).is_err());
+        assert_eq!(handshake_receipts(&ws), 0);
+        let _ = std::fs::remove_dir_all(ws);
     }
 
     #[test]

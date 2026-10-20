@@ -585,6 +585,30 @@ impl MessageStore {
         Ok(rows == 1)
     }
 
+    /// Release only an owned claim that has performed no input. Readiness
+    /// waiting must remain retryable without consuming the input-attempt budget.
+    /// A changed attempt, status, or error means this caller no longer owns it.
+    pub(crate) fn release_delivery_before_input(
+        &self,
+        message_id: &str,
+        attempt: u32,
+        reason: &str,
+    ) -> Result<bool, MessageStoreError> {
+        if attempt == 0 || reason.is_empty() {
+            return Ok(false);
+        }
+        let conn = crate::db::schema::open_db(&self.path)?;
+        let rows = conn.execute(
+            "update messages
+             set delivery_attempts = delivery_attempts - 1,
+                 error = ?3, updated_at = ?4
+             where message_id = ?1 and status = 'target_resolved'
+               and error is null and delivery_attempts = ?2",
+            params![message_id, attempt, reason, now_ts()],
+        )?;
+        Ok(rows == 1)
+    }
+
     /// Read inbox rows through [`Self::inbox`]; recovery transitions below are
     /// separate repository owners and are not claim eligibility.
     pub fn requeue_blocked_leader_messages(
@@ -1166,6 +1190,47 @@ mod tests {
             "cleared error must lose the second claim"
         );
         assert_eq!(col_i64(&read(&s), &mid, "delivery_attempts"), 1);
+    }
+
+    #[test]
+    fn release_delivery_before_input_preserves_budget_and_single_winner() {
+        let s = store();
+        let mid = s.create_message(Some("t"), "s", "r", "c", None, true, None).unwrap();
+        assert!(s.claim_for_delivery(&mid).unwrap());
+        assert!(!s.claim_for_delivery(&mid).unwrap());
+        assert!(s.release_delivery_before_input(&mid, 1, "mcp_handshake_missing").unwrap());
+        assert_eq!(col_i64(&read(&s), &mid, "delivery_attempts"), 0);
+        assert_eq!(col_str(&read(&s), &mid, "error").as_deref(), Some("mcp_handshake_missing"));
+        assert!(!s.release_delivery_before_input(&mid, 1, "late").unwrap());
+        assert!(s.claim_for_delivery(&mid).unwrap());
+        assert!(!s.claim_for_delivery(&mid).unwrap());
+        assert_eq!(col_i64(&read(&s), &mid, "delivery_attempts"), 1);
+    }
+
+    #[test]
+    fn release_delivery_before_input_cannot_overwrite_changed_claims() {
+        let s = store();
+        let mid = s.create_message(Some("t"), "s", "r", "c", None, true, None).unwrap();
+        assert!(s.claim_for_delivery(&mid).unwrap());
+        assert!(!s.release_delivery_before_input(&mid, 0, "missing").unwrap());
+        assert!(!s.release_delivery_before_input(&mid, 2, "stale").unwrap());
+        s.mark(&mid, "target_resolved", Some("other_owner")).unwrap();
+        assert!(!s.release_delivery_before_input(&mid, 1, "stale").unwrap());
+        assert_eq!(col_str(&read(&s), &mid, "error").as_deref(), Some("other_owner"));
+        assert!(s.claim_for_delivery(&mid).unwrap());
+        assert!(!s.release_delivery_before_input(&mid, 1, "old_claim").unwrap());
+        assert_eq!(col_i64(&read(&s), &mid, "delivery_attempts"), 2);
+        assert_eq!(col_str(&read(&s), &mid, "error"), None);
+        for status in ["cancelled", "delivered", "submitted_unverified"] {
+            // Each terminal/effect state needs its own row: mark correctly
+            // refuses to downgrade a previously delivered row.
+            let changed = s.create_message(Some("t"), "s", "r", "c", None, true, None).unwrap();
+            assert!(s.claim_for_delivery(&changed).unwrap());
+            s.mark(&changed, status, None).unwrap();
+            assert!(!s.release_delivery_before_input(&changed, 1, "stale").unwrap());
+            assert_eq!(status_of(&read(&s), &changed), status);
+            assert_eq!(col_i64(&read(&s), &changed, "delivery_attempts"), 1);
+        }
     }
 
     #[test]

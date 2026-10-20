@@ -38,13 +38,18 @@ on:
           - cli-phase1
           - cli-phase1-format
           - cli-phase1-e2e
+          - issue342-red
+          - issue342
+          - issue342-format
+          - issue342-handshake
+          - issue342-shutdown-fixture
 
 permissions:
   contents: read
 
 jobs:
   cli-phase1-format:
-    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && (inputs.regression_scope == 'cli-phase1' || inputs.regression_scope == 'cli-phase1-format')
+    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && (inputs.regression_scope == 'cli-phase1' || inputs.regression_scope == 'cli-phase1-format' || inputs.regression_scope == 'issue342-format')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
@@ -70,6 +75,9 @@ jobs:
           mkdir format-evidence
           git rev-parse HEAD 'HEAD^{tree}' > format-evidence/source.txt
           files=(crates/team-agent/src/cli/arguments.rs crates/team-agent/src/cli/intent.rs crates/team-agent/src/cli/intent/runtime.rs crates/team-agent/src/cli/intent/tests.rs crates/team-agent/src/cli/intent/runtime_tests.rs crates/team-agent/src/cli/tests/parser_safety.rs crates/team-agent/tests/cli_human_surface_red.rs crates/team-agent/tests/excise_group1_commands_contract.rs crates/team-agent/tests/support/human_catalog.rs crates/team-agent/tests/c1_command_spec_contract.rs crates/team-agent/tests/cli_phase2_public_docs_contract.rs)
+          if [[ '${{ inputs.regression_scope }}' == issue342-format ]]; then
+            files=(crates/team-agent/src/lifecycle/launch/cursor_mcp_iso.rs crates/team-agent/src/lifecycle/launch/cursor_mcp.rs crates/team-agent/src/lifecycle/tests/cursor_mcp_overlay.rs crates/team-agent/src/lifecycle/tests/cursor_restart_resume_red.rs crates/team-agent/tests/cursor_mcp_project_root_red.rs crates/team-agent/src/cli/intent/runtime.rs crates/team-agent/src/cli/intent/runtime_tests.rs crates/team-agent/src/mcp_server/readiness.rs crates/team-agent/src/mcp_server/readiness_tests.rs)
+          fi
           set +e
           rustfmt --edition 2021 --config skip_children=true --check "${files[@]}" > format-evidence/format.log 2>&1
           rc=$?
@@ -177,7 +185,7 @@ jobs:
           retention-days: 14
 
   grok-root-regression:
-    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && inputs.regression_scope != 'issue321-f1' && inputs.regression_scope != 'cli-phase1-format' && inputs.regression_scope != 'cli-phase1-e2e'
+    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && inputs.regression_scope != 'issue321-f1' && inputs.regression_scope != 'cli-phase1-format' && inputs.regression_scope != 'cli-phase1-e2e' && inputs.regression_scope != 'issue342-format'
     runs-on: macos-14
     timeout-minutes: 45
     env:
@@ -232,6 +240,35 @@ jobs:
             return "${statuses[0]}"
           }
           case "$REGRESSION_SCOPE" in
+            issue342-shutdown-fixture)
+              run_case shutdown-fixture cargo test -p team-agent --test e2e --locked shutdown -- --test-threads=1 --nocapture
+              ;;
+            issue342-handshake)
+              run_case mcp-handshake cargo test -p team-agent --lib --locked mcp_server::readiness -- --test-threads=1 --nocapture
+              run_case mcp-wire cargo test -p team-agent --lib --locked mcp_server::wire -- --test-threads=1 --nocapture
+              run_case message-handshake cargo test -p team-agent --lib --locked messaging::tests::dup_inject -- --test-threads=1 --nocapture
+              run_case startup-trust-retry cargo test -p team-agent --lib --locked contract_b_step2_retry_delivers_queued_message_after_startup_trust_is_handled -- --test-threads=1 --nocapture
+              run_case readiness-release-cas cargo test -p team-agent --lib --locked release_delivery_before_input -- --test-threads=1
+              run_case process-owner-boundary cargo test -p team-agent --test platform_process_caller_whitelist_batch0 --locked -- --test-threads=1
+              ;;
+            issue342-red)
+              run_case cursor-project-root cargo test -p team-agent --test cursor_mcp_project_root_red --locked -- --test-threads=1
+              ;;
+            issue342)
+              run_case workspace-check cargo check --workspace --all-targets --locked
+              run_case cursor-project-root cargo test -p team-agent --test cursor_mcp_project_root_red --locked -- --test-threads=1
+              run_case cursor-launch cargo test -p team-agent --lib --locked cursor_ -- --test-threads=1
+              run_case root-restart cargo test -p team-agent --lib --locked lifecycle::restart -- --test-threads=1
+              run_case shutdown-completion cargo test -p team-agent --lib --locked cli::tests::shutdown_kill_plan -- --test-threads=1
+              run_case mcp-handshake cargo test -p team-agent --lib --locked mcp_server::readiness -- --test-threads=1
+              run_case mcp-wire cargo test -p team-agent --lib --locked mcp_server::wire -- --test-threads=1
+              run_case message-handshake cargo test -p team-agent --lib --locked messaging::tests::dup_inject -- --test-threads=1
+              run_case startup-trust-retry cargo test -p team-agent --lib --locked contract_b_step2_retry_delivers_queued_message_after_startup_trust_is_handled -- --test-threads=1
+              run_case readiness-release-cas cargo test -p team-agent --lib --locked release_delivery_before_input -- --test-threads=1
+              run_case process-owner-boundary cargo test -p team-agent --test platform_process_caller_whitelist_batch0 --locked -- --test-threads=1
+              run_case shutdown-fixture cargo test -p team-agent --test e2e --locked shutdown -- --test-threads=1
+              run_case contract-all cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets --no-fail-fast -- --test-threads=1
+              ;;
             host-ancestry)
               run_case host-ancestry cargo test --manifest-path crates/team-agent-contract/Cargo.toml --test host_ancestry --locked -- --test-threads=1
               ;;
@@ -326,7 +363,7 @@ jobs:
             *) exit 64 ;;
           esac
       - name: Check scoped formatting and retain a remote formatting patch
-        if: always() && (inputs.regression_scope == 'issue321' || inputs.regression_scope == 'issue321-full' || inputs.regression_scope == 'issue334' || inputs.regression_scope == 'issue334-red' || inputs.regression_scope == 'cli-phase1')
+        if: always() && (inputs.regression_scope == 'issue321' || inputs.regression_scope == 'issue321-full' || inputs.regression_scope == 'issue334' || inputs.regression_scope == 'issue334-red' || inputs.regression_scope == 'cli-phase1' || inputs.regression_scope == 'issue342')
         shell: bash
         run: |
           set -euo pipefail
@@ -349,6 +386,9 @@ jobs:
           fi
           if [[ "$REGRESSION_SCOPE" == cli-phase1 ]]; then
             files=(crates/team-agent/src/cli/arguments.rs crates/team-agent/src/cli/intent.rs crates/team-agent/src/cli/intent/runtime.rs crates/team-agent/src/cli/intent/tests.rs crates/team-agent/src/cli/intent/runtime_tests.rs crates/team-agent/src/cli/tests/parser_safety.rs crates/team-agent/tests/cli_human_surface_red.rs crates/team-agent/tests/excise_group1_commands_contract.rs crates/team-agent/tests/support/human_catalog.rs crates/team-agent/tests/c1_command_spec_contract.rs crates/team-agent/tests/cli_phase2_public_docs_contract.rs)
+          fi
+          if [[ "$REGRESSION_SCOPE" == issue342 || "$REGRESSION_SCOPE" == issue342-handshake ]]; then
+            files=(crates/team-agent/src/lifecycle/launch/cursor_mcp_iso.rs crates/team-agent/src/lifecycle/launch/cursor_mcp.rs crates/team-agent/src/lifecycle/tests/cursor_mcp_overlay.rs crates/team-agent/src/lifecycle/tests/cursor_restart_resume_red.rs crates/team-agent/tests/cursor_mcp_project_root_red.rs crates/team-agent/src/cli/intent/runtime.rs crates/team-agent/src/cli/intent/runtime_tests.rs crates/team-agent/src/mcp_server/readiness.rs crates/team-agent/src/mcp_server/readiness_tests.rs)
           fi
           rustfmt --edition 2021 --config skip_children=true --check "${files[@]}" > regression-evidence/format.log 2>&1
           rc=$?
@@ -375,7 +415,7 @@ jobs:
           retention-days: 14
 
   workspace-all-linux:
-    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && (inputs.regression_scope == 'issue321-full' || inputs.regression_scope == 'issue321-f1' || inputs.regression_scope == 'issue334' || inputs.regression_scope == 'cli-phase1' || inputs.regression_scope == 'cli-phase1-e2e' || inputs.regression_scope == 'cli-defects-fixtures')
+    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && (inputs.regression_scope == 'issue321-full' || inputs.regression_scope == 'issue321-f1' || inputs.regression_scope == 'issue334' || inputs.regression_scope == 'cli-phase1' || inputs.regression_scope == 'cli-phase1-e2e' || inputs.regression_scope == 'cli-defects-fixtures' || inputs.regression_scope == 'issue342' || inputs.regression_scope == 'issue342-shutdown-fixture')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -422,6 +462,9 @@ jobs:
           fi
           if test "${{ inputs.regression_scope }}" = cli-defects-fixtures; then
             command=(cargo test -p team-agent --locked --no-fail-fast --test e2e --test e2e_bypass_single_source --test e6_offline_mailbox_toname_e2e_contract --test msg_protocol_m2c_to_grammar_contract --test msg_sendpath_persist_first_contract --test role_lifecycle_intermediate_layer_red --test team_in_team_scope_commands_red -- --test-threads=1)
+          fi
+          if test "${{ inputs.regression_scope }}" = issue342-shutdown-fixture; then
+            command=(cargo test -p team-agent --test e2e --locked shutdown -- --test-threads=1 --nocapture)
           fi
           "${command[@]}" 2>&1 | tee workspace-evidence/test.log
           statuses=("${PIPESTATUS[@]}")

@@ -302,6 +302,49 @@ fn prepare_message_state(
     Ok(Ok(prepared))
 }
 
+#[cfg(unix)]
+fn mcp_handshake_pending_outcome(
+    store: &MessageStore,
+    event_log: &EventLog,
+    message_id: &str,
+    attempt: u32,
+    reason: &str,
+) -> Result<DeliveryOutcome, MessagingError> {
+    // No paste/key has occurred. Only this exact claim may be released; a
+    // concurrent cancellation or newer delivery must never be overwritten.
+    if !store.release_delivery_before_input(message_id, attempt, reason)? {
+        return Ok(DeliveryOutcome {
+            ok: false,
+            status: DeliveryStatus::Refused,
+            message_status: MessageStatusShadow("target_resolved".to_string()),
+            message_id: Some(message_id.to_string()),
+            verification: None,
+            stage: None,
+            reason: Some(DeliveryRefusal::MessageAlreadyClaimed),
+            channel: None,
+            ack_forced_off: false,
+            turn_verification: None,
+        });
+    }
+    event_log.write("delivery.deferred_mcp_handshake", serde_json::json!({
+        "message_id": message_id,
+        "reason": reason,
+        "effect": "none",
+    }))?;
+    Ok(DeliveryOutcome {
+        ok: false,
+        status: DeliveryStatus::Degraded,
+        message_status: MessageStatusShadow("target_resolved".to_string()),
+        message_id: Some(message_id.to_string()),
+        verification: Some(reason.to_string()),
+        stage: None,
+        reason: None,
+        channel: None,
+        ack_forced_off: false,
+        turn_verification: None,
+    })
+}
+
 fn deliver_prepared_message(
     workspace: &Path,
     store: &MessageStore,
@@ -641,6 +684,25 @@ fn deliver_prepared_message(
             ack_forced_off: false,
             turn_verification: None,
         });
+    }
+    // Startup control must remain reachable before protocol admission: some
+    // clients cannot initialize MCP until their trust prompt is answered.
+    // No business input is allowed before the current tools/list flush. A
+    // readiness-only refusal releases this exact claim without spending an
+    // input attempt; it never holds a pane-input lock or sleeps for startup.
+    #[cfg(unix)]
+    {
+        let admission = crate::mcp_server::readiness::preflight(
+            workspace, canonical_owner_team_id.as_deref(), &message.recipient, state,
+        ).and_then(|admission| {
+            if let Some(admission) = admission.as_ref() {
+                crate::mcp_server::readiness::revalidate(admission, &target, &live_targets)?;
+            }
+            Ok(())
+        });
+        if let Err(reason) = admission {
+            return mcp_handshake_pending_outcome(store, event_log, message_id, attempt, reason);
+        }
     }
     let rendered = render_message(
         &message.sender,

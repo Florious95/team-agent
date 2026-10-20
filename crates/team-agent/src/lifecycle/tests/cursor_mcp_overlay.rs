@@ -262,10 +262,7 @@ fn cursor_mcp_enable_child_env_applies_direct_profile_unsets() {
     }
     command.env("NO_PROXY", "fixture");
     command.env("no_proxy", "fixture");
-    crate::lifecycle::launch::apply_cursor_mcp_enable_profile_env(
-        &mut command,
-        Some(&launch),
-    );
+    crate::lifecycle::launch::apply_cursor_mcp_enable_profile_env(&mut command, Some(&launch));
     let output = command.output().expect("env child should run");
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
@@ -280,7 +277,9 @@ fn cursor_mcp_enable_child_env_applies_direct_profile_unsets() {
         "GLOBAL_AGENT_HTTP_PROXY",
     ] {
         assert!(
-            !text.lines().any(|line| line.starts_with(&format!("{key}="))),
+            !text
+                .lines()
+                .any(|line| line.starts_with(&format!("{key}="))),
             "direct MCP child must omit {key}"
         );
     }
@@ -326,7 +325,38 @@ fn cursor_spawn_writes_identity_into_project_mcp_json() {
     let enable_cwd = cursor_mcp_enable_working_dir(&ws, Some(&project));
     assert_eq!(enable_cwd, physical_workspace_path(&project));
     let argv_workspace = spawn_argv_workspace_flag(&ws).expect("spawn argv --workspace");
-    assert_eq!(argv_workspace, physical_workspace_path(&project).to_string_lossy());
+    assert_eq!(
+        argv_workspace,
+        physical_workspace_path(&project).to_string_lossy()
+    );
+    let state = crate::state::persist::load_runtime_state(&ws).unwrap();
+    let row = state.pointer("/agents/cursor_writer").unwrap();
+    assert_eq!(row["spawn_cwd"], project.to_string_lossy().as_ref());
+    assert_eq!(row["session_id"], serde_json::Value::Null);
+
+    // Measured native layout: the store bucket uses --workspace primary, not
+    // --add-dir. A decoy in the real project's bucket must never be selected.
+    let sid = "d298b261-23bb-42bb-bbeb-b2ec08d81ca3";
+    for (cwd, id) in [(&project, sid), (&ws, "foreign-project-session")] {
+        let bucket = format!("{:x}", md5::compute(cwd.to_string_lossy().as_bytes()));
+        let archive = _hermetic.home().join(".cursor/chats").join(bucket).join(id);
+        std::fs::create_dir_all(&archive).unwrap();
+        std::fs::write(archive.join("meta.json"), b"{}").unwrap();
+    }
+    let mut capture = serde_json::json!({"agents": {"cursor_writer": row.clone()}});
+    let report = crate::provider::session::capture::capture_missing_provider_sessions_once(
+        &mut capture,
+        &mut crate::provider::get_adapter,
+        false,
+        0,
+    )
+    .unwrap();
+    assert_eq!(report.assigned, vec!["cursor_writer"]);
+    assert_eq!(capture["agents"]["cursor_writer"]["session_id"], sid);
+    assert_eq!(
+        capture["agents"]["cursor_writer"]["spawn_cwd"],
+        project.to_string_lossy().as_ref()
+    );
 }
 
 #[test]
@@ -361,13 +391,14 @@ fn cursor_spawn_isolation_off_writes_workspace_mcp_json() {
     });
     assert_cursor_identity_overlay(&text, "cursor_writer", &ws);
     assert!(
-        !cursor_mcp_json_path(&ws, "cursor_writer")
-            .unwrap()
-            .exists(),
+        !cursor_mcp_json_path(&ws, "cursor_writer").unwrap().exists(),
         "isolation-off must not materialize the per-seat project overlay"
     );
     let argv_workspace = spawn_argv_workspace_flag(&ws).expect("spawn argv --workspace");
-    assert_eq!(argv_workspace, physical_workspace_path(&ws).to_string_lossy());
+    assert_eq!(
+        argv_workspace,
+        physical_workspace_path(&ws).to_string_lossy()
+    );
 }
 
 fn assert_cursor_identity_overlay(text: &str, agent_id: &str, workspace: &Path) {
@@ -441,7 +472,7 @@ fn sample_mcp_config(agent_id: &str, workspace: &str) -> McpConfig {
     McpConfig {
         raw: serde_json::json!({
             "team_orchestrator": {
-                "command": "/bin/team-agent-test",
+                "command": std::env::current_exe().unwrap(),
                 "args": ["mcp-server", "--workspace", workspace],
                 "env": {
                     "TEAM_AGENT_ID": agent_id,
@@ -458,12 +489,21 @@ fn sample_mcp_config(agent_id: &str, workspace: &str) -> McpConfig {
 #[serial(env)]
 fn isolated_cursor_prepare_materializes_per_seat_project_not_workspace_overlay() {
     let ws = tmp_dir("cursor-iso-clean");
-    let project = prepare_cursor_seat_mcp(&ws, "seat-iso", &sample_mcp_config("seat-iso", &ws.to_string_lossy()))
-        .expect("prepare isolated cursor")
-        .expect("isolation defaults on");
+    let project = prepare_cursor_seat_mcp(
+        &ws,
+        "seat-iso",
+        &sample_mcp_config("seat-iso", &ws.to_string_lossy()),
+    )
+    .expect("prepare isolated cursor")
+    .expect("isolation defaults on");
     assert!(
-        project.ends_with("provider-config/seat-iso/cursor"),
-        "per-seat project must be materialized: {}",
+        !project.starts_with(&ws)
+            && project
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("ta-cursor-"),
+        "per-seat native project must be outside workspace Git ancestry: {}",
         project.display()
     );
     assert!(project.join(".cursor").is_dir());
@@ -489,7 +529,10 @@ fn isolated_cursor_prepare_materializes_per_seat_project_not_workspace_overlay()
         .find(|pair| pair[0] == "--workspace")
         .map(|pair| pair[1].as_str())
         .unwrap();
-    assert_eq!(workspace_flag, physical_workspace_path(&project).to_string_lossy());
+    assert_eq!(
+        workspace_flag,
+        physical_workspace_path(&project).to_string_lossy()
+    );
     assert_eq!(
         include_str!("../launch/spawn.rs").contains("prepare_cursor_seat_mcp("),
         true,

@@ -89,6 +89,8 @@ use crate::messaging::{self, DeliveryOutcome, MessageTarget, SendOptions, Truste
 pub mod helpers;
 pub(crate) mod lifecycle_tools;
 pub mod normalize;
+#[cfg(unix)]
+pub(crate) mod readiness;
 pub mod tools;
 pub mod types;
 pub mod wire;

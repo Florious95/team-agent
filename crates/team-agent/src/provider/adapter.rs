@@ -214,6 +214,13 @@ pub trait ProviderAdapter {
     /// compatible_api 走 `ensure_compatible_claude_mcp_config`)。
     fn mcp_config(&self, auth_mode: AuthMode) -> Result<McpConfig, ProviderError>;
 
+    /// Eager stdio clients must publish their initial MCP handshake before input.
+    /// Pi owns admission in its runtime registry hooks; Fake has no MCP client.
+    /// The process-stamp receipt port is currently POSIX-only, not a Windows claim.
+    fn requires_worker_mcp_handshake(&self) -> bool {
+        cfg!(unix) && !matches!(self.provider(), Provider::Fake | Provider::Pi)
+    }
+
     /// 安装 MCP server。gemini 写全局 `~/.gemini/settings.json` 并备份/还原
     /// (`gemini.py:40-78`)——有副作用 I/O,失败可还原 → Result。
     fn install_mcp(&self, config: &McpConfig) -> Result<(), ProviderError>;

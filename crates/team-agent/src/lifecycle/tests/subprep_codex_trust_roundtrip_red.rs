@@ -720,8 +720,12 @@ fn contract_b_step2_retry_delivers_queued_message_after_startup_trust_is_handled
     let ws = tmp_dir("b-step2-trust-retry");
     let mcp_config = ws.join(".team").join("runtime").join("mcp").join("w1.json");
     std::fs::create_dir_all(mcp_config.parent().unwrap()).unwrap();
-    std::fs::write(&mcp_config, "{}").unwrap();
-    let state = json!({
+    // This worker genuinely depends on MCP. Bind the controlled receipt to the
+    // live test carrier rather than bypassing readiness with an empty config.
+    let owner = "subprep-trust-retry";
+    let mut state = json!({
+        "team_key": owner,
+        "active_team_key": owner,
         "session_name": "team-ta-subroot-SUB-PROBE-2-send-turn-idle",
         "team_dir": ws.join("teamdir").to_string_lossy().to_string(),
         "agents": {
@@ -736,6 +740,21 @@ fn contract_b_step2_retry_delivers_queued_message_after_startup_trust_is_handled
             }
         }
     });
+    #[cfg(unix)]
+    let carrier = {
+        let carrier = crate::mcp_server::readiness::test_carrier_pid().unwrap();
+        state["agents"]["w1"]["pane_pid"] = json!(carrier);
+        state["agents"]["w1"]["spawned_at"] =
+            json!((chrono::Utc::now() - chrono::Duration::seconds(10)).to_rfc3339());
+        carrier
+    };
+    state["teams"] = json!({owner: state.clone()});
+    std::fs::write(&mcp_config, serde_json::to_vec(&json!({
+        "mcpServers": {"team_orchestrator": {
+            "command": std::env::current_exe().unwrap().canonicalize().unwrap(),
+            "env": {"TEAM_AGENT_WORKSPACE": ws.to_path_buf(), "TEAM_AGENT_ID": "w1", "TEAM_AGENT_OWNER_TEAM_ID": owner}
+        }}
+    })).unwrap()).unwrap();
     team_agent::state::persist::save_runtime_state(&ws, &state).unwrap();
 
     let store = MessageStore::open(&ws).unwrap();
@@ -748,7 +767,7 @@ fn contract_b_step2_retry_delivers_queued_message_after_startup_trust_is_handled
             "SUB step2 probe: reply with one sentence and call report_result exactly once.",
             None,
             true,
-            None,
+            Some(owner),
         )
         .unwrap();
     let transport = RecordingTransport::new(vec![
@@ -759,6 +778,10 @@ fn contract_b_step2_retry_delivers_queued_message_after_startup_trust_is_handled
     ])
     .with_session_present(true)
     .with_windows(vec![WindowName::new("w1")]);
+    #[cfg(unix)]
+    {
+        transport.state.lock().unwrap().carrier = Some(carrier);
+    }
     let event_log = EventLog::new(&ws);
 
     let deferred =
@@ -787,6 +810,13 @@ fn contract_b_step2_retry_delivers_queued_message_after_startup_trust_is_handled
         "fixture sanity: delivery defer must be observable as delivery.deferred_startup_prompt"
     );
 
+    // No receipt existed during the actionable trust prompt. Once startup
+    // control can progress, model the successful live helper handshake before
+    // the coordinator retries this SAME queued row.
+    #[cfg(unix)]
+    {
+        crate::mcp_server::readiness::publish(&ws, owner, "w1", chrono::Utc::now()).unwrap();
+    }
     let coord = Coordinator::new(
         WorkspacePath::new(ws.to_path_buf()),
         Box::new(RealAdapterRegistry),
@@ -1045,6 +1075,7 @@ struct TransportState {
     session_present: bool,
     windows: Vec<WindowName>,
     spawn_argv: Vec<Vec<String>>,
+    carrier: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -1189,7 +1220,19 @@ impl Transport for RecordingTransport {
     }
 
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
-        Ok(Vec::new())
+        Ok(self.state.lock().unwrap().carrier.map(|carrier| PaneInfo {
+            pane_id: PaneId::new("%7"),
+            session: SessionName::new("team-ta-subroot-SUB-PROBE-2-send-turn-idle"),
+            window_index: None,
+            window_name: Some(WindowName::new("w1")),
+            pane_index: None,
+            tty: None,
+            current_command: None,
+            current_path: None,
+            active: true,
+            pane_pid: Some(carrier),
+            leader_env: BTreeMap::new(),
+        }).into_iter().collect())
     }
 
     fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {
