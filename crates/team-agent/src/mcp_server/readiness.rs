@@ -441,7 +441,9 @@ pub(crate) fn test_ready_worker(
 ) -> PaneInfo {
     let workspace = workspace.canonicalize().unwrap();
     let carrier = test_carrier_pid().unwrap();
-    let config = workspace.join(".team/runtime/mcp").join(format!("{agent}.json"));
+    let config = workspace
+        .join(".team/runtime/mcp")
+        .join(format!("{agent}.json"));
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     std::fs::write(&config, serde_json::to_vec(&serde_json::json!({
         "mcpServers": {"team_orchestrator": {
@@ -455,7 +457,8 @@ pub(crate) fn test_ready_worker(
     row["mcp_config"] = serde_json::json!(config);
     row["pane_id"] = serde_json::json!(pane);
     row["pane_pid"] = serde_json::json!(carrier);
-    row["spawned_at"] = serde_json::json!((Utc::now() - chrono::Duration::seconds(10)).to_rfc3339());
+    row["spawned_at"] =
+        serde_json::json!((Utc::now() - chrono::Duration::seconds(10)).to_rfc3339());
     let window = row["window"].as_str().unwrap_or(agent).to_string();
     let session = state["session_name"].as_str().unwrap().to_string();
     if state["teams"][owner].is_object() {
@@ -475,8 +478,15 @@ pub(crate) fn test_ready_worker(
         pane_pid: Some(carrier),
         leader_env: Default::default(),
     };
-    let admission = preflight(&workspace, Some(owner), agent, state).unwrap().unwrap();
-    revalidate(&admission, &Target::Pane(target.pane_id.clone()), std::slice::from_ref(&target)).unwrap();
+    let admission = preflight(&workspace, Some(owner), agent, state)
+        .unwrap()
+        .unwrap();
+    revalidate(
+        &admission,
+        &Target::Pane(target.pane_id.clone()),
+        std::slice::from_ref(&target),
+    )
+    .unwrap();
     target
 }
 

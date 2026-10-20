@@ -125,7 +125,11 @@ fn successful_transport_report_does_not_override_unconsumed_composer() {
         let mut f = Fixture::new("cursor_agent");
         #[cfg(unix)]
         let panes = vec![crate::mcp_server::readiness::test_ready_worker(
-            &f.workspace, &mut f.state, "team", "worker", "%1",
+            &f.workspace,
+            &mut f.state,
+            "team",
+            "worker",
+            "%1",
         )];
         #[cfg(not(unix))]
         let panes = f.transport().list_targets().unwrap();

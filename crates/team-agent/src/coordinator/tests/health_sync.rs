@@ -282,7 +282,7 @@ fn spine2_sync_health_working_status_delivers_same_tick() {
     );
     let store = MessageStore::open(&dir).unwrap();
     let mid = store
-        .create_message(Some("t"), "leader", "w1", "hi", None, true, None)
+        .create_message(Some("t"), "leader", "w1", "hi", None, true, Some("current"))
         .unwrap();
     let conn = crate::db::schema::open_db(store.db_path()).unwrap();
     conn.execute(

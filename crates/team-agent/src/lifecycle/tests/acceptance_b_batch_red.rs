@@ -76,7 +76,7 @@ fn b4_monitor_step_failure_does_not_block_deliver_pending() {
             "do the thing",
             None,
             false,
-            None,
+            Some("team-b4"),
         )
         .unwrap();
 
