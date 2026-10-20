@@ -122,9 +122,16 @@ fn successful_transport_report_does_not_override_unconsumed_composer() {
         "[Pasted text #1 +25 lines]",
         "foreign draft",
     ] {
-        let f = Fixture::new("cursor_agent");
+        let mut f = Fixture::new("cursor_agent");
+        #[cfg(unix)]
+        let panes = vec![crate::mcp_server::readiness::test_ready_worker(
+            &f.workspace, &mut f.state, "team", "worker", "%1",
+        )];
+        #[cfg(not(unix))]
+        let panes = f.transport().list_targets().unwrap();
         let t = f
             .transport()
+            .with_targets(panes)
             .with_native_input_observation(frame(composer, ""));
         let out = f.deliver(&t);
         assert!(!out.ok, "composer={composer}");

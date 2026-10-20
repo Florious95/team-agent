@@ -8,6 +8,9 @@
 
 #[path = "support/hermetic.rs"]
 mod hermetic_guard;
+#[path = "support/mcp_sim_harness.rs"]
+#[allow(dead_code)]
+mod mcp_sim_harness;
 #[allow(dead_code)]
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
@@ -231,7 +234,11 @@ fn delivery_defers_claude_trust_prompt_then_replays_same_message_after_handled()
     );
 
     store.mark(&message_id, "accepted", None).unwrap();
-    let handled_state = delivery_state("handled");
+    let mut handled_state = delivery_state("handled");
+    let (_mcp, pane) = mcp_sim_harness::ready_delivery_worker(
+        &ws, &mut handled_state, "ctxteam", "clauder", "%1",
+    );
+    *transport.targets.lock().unwrap() = vec![pane];
     let delivered = deliver_pending_messages(&ws, &handled_state, &transport, &log)
         .expect("handled Claude trust prompt should allow replay through the normal delivery path");
     assert_eq!(
@@ -265,6 +272,7 @@ struct ScriptedTransport {
     injects: std::sync::Arc<Mutex<Vec<(Target, String)>>>,
     session_present: bool,
     windows: std::sync::Arc<Mutex<Vec<WindowName>>>,
+    targets: std::sync::Arc<Mutex<Vec<PaneInfo>>>,
 }
 
 impl Clone for ScriptedTransport {
@@ -275,6 +283,7 @@ impl Clone for ScriptedTransport {
             injects: self.injects.clone(),
             session_present: self.session_present,
             windows: self.windows.clone(),
+            targets: self.targets.clone(),
         }
     }
 }
@@ -289,6 +298,7 @@ impl ScriptedTransport {
             injects: std::sync::Arc::new(Mutex::new(Vec::new())),
             session_present: true,
             windows: std::sync::Arc::new(Mutex::new(Vec::new())),
+            targets: std::sync::Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -393,7 +403,7 @@ impl Transport for ScriptedTransport {
     }
 
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
-        Ok(Vec::new())
+        Ok(self.targets.lock().unwrap().clone())
     }
 
     fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {

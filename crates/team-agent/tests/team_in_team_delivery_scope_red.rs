@@ -140,12 +140,13 @@ fn single_team_pending_delivery_still_uses_the_top_level_projection() {
     );
 }
 
+// These recording transports exercise owner/team routing, not a native MCP client.
 fn multi_team_state() -> Value {
     json!({
         "active_team_key": "teamA",
         "session_name": "team-teamA",
         "agents": {
-            "a1": {"status": "running", "provider": "codex", "window": "a1"}
+            "a1": {"status": "running", "provider": "fake", "window": "a1"}
         },
         "tasks": [],
         "teams": {
@@ -153,7 +154,7 @@ fn multi_team_state() -> Value {
                 "status": "alive",
                 "session_name": "team-teamA",
                 "agents": {
-                    "a1": {"status": "running", "provider": "codex", "window": "a1"}
+                    "a1": {"status": "running", "provider": "fake", "window": "a1"}
                 },
                 "tasks": []
             },
@@ -161,7 +162,7 @@ fn multi_team_state() -> Value {
                 "status": "alive",
                 "session_name": "team-teamB",
                 "agents": {
-                    "w1": {"status": "running", "provider": "codex", "window": "w1"}
+                    "w1": {"status": "running", "provider": "fake", "window": "w1"}
                 },
                 "tasks": []
             }
@@ -174,7 +175,7 @@ fn single_team_state() -> Value {
         "active_team_key": "teamB",
         "session_name": "team-teamB",
         "agents": {
-            "w1": {"status": "running", "provider": "codex", "window": "w1"}
+            "w1": {"status": "running", "provider": "fake", "window": "w1"}
         },
         "tasks": [],
         "teams": {
@@ -182,7 +183,7 @@ fn single_team_state() -> Value {
                 "status": "alive",
                 "session_name": "team-teamB",
                 "agents": {
-                    "w1": {"status": "running", "provider": "codex", "window": "w1"}
+                    "w1": {"status": "running", "provider": "fake", "window": "w1"}
                 },
                 "tasks": []
             }

@@ -15,6 +15,7 @@ use super::*;
 /// agent. `has_session`→true (gate passes); `inject`→Ok (delivery may run); the rest are Ok defaults.
 struct CapturingTransport {
     scrollback: String,
+    targets: Vec<PaneInfo>,
 }
 impl Transport for CapturingTransport {
     fn kind(&self) -> BackendKind {
@@ -73,7 +74,7 @@ impl Transport for CapturingTransport {
         Ok(PaneLiveness::Live)
     }
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
-        Ok(Vec::new())
+        Ok(self.targets.clone())
     }
     fn has_session(&self, _s: &SessionName) -> Result<bool, TransportError> {
         Ok(true)
@@ -107,6 +108,14 @@ fn seeded_health_coord(
     agents: serde_json::Value,
     scrollback: &str,
 ) -> (Coordinator, std::path::PathBuf) {
+    seeded_health_coord_with_readiness(agents, scrollback, false)
+}
+
+fn seeded_health_coord_with_readiness(
+    agents: serde_json::Value,
+    scrollback: &str,
+    ready: bool,
+) -> (Coordinator, std::path::PathBuf) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
@@ -115,11 +124,18 @@ fn seeded_health_coord(
         N.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    crate::state::persist::save_runtime_state(
-        &dir,
-        &serde_json::json!({ "session_name": "team-health", "agents": agents }),
-    )
-    .unwrap();
+    let mut state = serde_json::json!({ "session_name": "team-health", "agents": agents });
+    #[cfg(unix)]
+    let targets = if ready {
+        vec![crate::mcp_server::readiness::test_ready_worker(
+            &dir, &mut state, "current", "w1", "%1",
+        )]
+    } else {
+        Vec::new()
+    };
+    #[cfg(not(unix))]
+    let targets = { let _ = ready; Vec::new() };
+    crate::state::persist::save_runtime_state(&dir, &state).unwrap();
     let ws = WorkspacePath::new(dir.clone());
     let reg: Box<dyn ProviderRegistry> = Box::new(MockRegistry::new(&[], &[]));
     let coord = Coordinator::for_test(
@@ -127,6 +143,7 @@ fn seeded_health_coord(
         reg,
         Box::new(CapturingTransport {
             scrollback: scrollback.to_string(),
+            targets,
         }),
         None,
         None,
@@ -260,7 +277,9 @@ fn spine2_capture_missing_captures_session_id_for_missing_agent() {
 // activity/agent_health WORKING remains diagnostic turn state.
 #[test]
 fn spine2_sync_health_working_status_delivers_same_tick() {
-    let (coord, dir) = seeded_health_coord(one_agent("codex"), "Working (5s · esc to interrupt)");
+    let (coord, dir) = seeded_health_coord_with_readiness(
+        one_agent("codex"), "Working (5s · esc to interrupt)", true,
+    );
     let store = MessageStore::open(&dir).unwrap();
     let mid = store
         .create_message(Some("t"), "leader", "w1", "hi", None, true, None)
