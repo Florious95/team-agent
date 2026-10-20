@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.121]
+
+- **Native Cursor MCP isolation (Issue #342):** launch legacy Cursor seats with an owned, non-Git primary project root and preserve project access through `--add-dir`; keep the recorded native spawn cwd and strict workspace/team/seat admission aligned across start and restart. Stale parent-repository MCP configuration is not adopted.
+- **MCP handshake before first input:** require fresh, identity-bound initialize/tools-list response receipts before injecting a Cursor task. Successful process startup or a written configuration alone is not tool readiness; stale or missing handshake evidence defers input safely.
+- **Lifecycle shutdown convergence:** align the CLI coordinator wait with its graceful shutdown budget; retain scoped zero-residual verification and add a bounded server-death fence to the controlled `shut_004` fixture rather than weakening production cleanup assertions.
+- **Finite native validation:** exact-source dual-platform regression gates passed; fresh Cursor and Grok Build 1.0.62 journeys completed hello, 5535, same-session restart recalls and scoped cleanup. Full-window native histories showed direct Team MCP calls without source searches, scripts or hand-written RPC, with independently confirmed natural Leader receipts. This is not a claim of all-provider/model coverage or seamless live executable upgrades.
+- **Release metadata:** align the Rust workspace/lockfile, installer, three platform packages and official publishing workflow at 0.5.121. This release branch changes only the eight standard version/changelog files; publication does not replace running teams automatically.
+
 ## [0.5.120]
 
 - **Strict CLI safety (Issue #334):** reject unknown options, excess operands, missing values and removed `start-agent --force`; parse `--key=value` consistently, refuse nonexistent explicit workspaces, reject ambiguous bare restart operands and require an explicit `attach-leader` provider. Native payloads after `--` remain untouched.
