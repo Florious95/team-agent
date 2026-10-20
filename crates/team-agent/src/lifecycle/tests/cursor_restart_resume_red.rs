@@ -41,20 +41,49 @@ use team_agent::transport::test_support::OfflineTransport;
 fn issue345_dynamic_cursor_start_persists_its_generated_mcp_path() {
     let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("cursor-dynamic-mcp");
     let (ws, _home, _guard, team) = seed_cursor("dynamic-mcp");
-    std::fs::write(team.join("agents/cursor_writer.md"), "---\nprovider: fake\ndangerously_skip_permissions: true\n---\nControl seat.\n").unwrap();
+    std::fs::write(
+        team.join("agents/cursor_writer.md"),
+        "---\nprovider: fake\ndangerously_skip_permissions: true\n---\nControl seat.\n",
+    )
+    .unwrap();
     let transport = OfflineTransport::new();
-    quick_start_with_transport_in_workspace(&ws, &team, None, true, Some("cursortm"), &transport).unwrap();
-    let role = team.join("cursor-dynamic.md");
+    quick_start_with_transport_in_workspace(&ws, &team, None, true, Some("cursortm"), &transport)
+        .unwrap();
+    let role = team.join("cursor_dynamic.md");
     std::fs::write(&role, "---\nprovider: cursor_agent\nmodel: grok-4.7-high\nauth_mode: subscription\ndangerously_skip_permissions: true\n---\nDynamic Cursor seat.\n").unwrap();
-    crate::lifecycle::add_agent_with_transport(&team, &AgentId::new("cursor_dynamic"), &role, false, Some("cursortm"), &transport).unwrap();
+    crate::lifecycle::add_agent_with_transport(
+        &team,
+        &AgentId::new("cursor_dynamic"),
+        &role,
+        false,
+        Some("cursortm"),
+        &transport,
+    )
+    .unwrap();
     let state = load_runtime_state(&ws).unwrap();
     let expected = ws.join(".team/runtime/mcp/cursor_dynamic.json");
-    assert!(expected.is_file(), "positive control: spawn generated the real config");
-    assert_eq!(state["agents"]["cursor_dynamic"]["mcp_config"].as_str(), expected.to_str());
-    assert_eq!(state["teams"]["cursortm"]["agents"]["cursor_dynamic"]["mcp_config"].as_str(), expected.to_str());
-    let config: serde_json::Value = serde_json::from_slice(&std::fs::read(&expected).unwrap()).unwrap();
-    assert_eq!(config["mcpServers"]["team_orchestrator"]["env"]["TEAM_AGENT_ID"], "cursor_dynamic");
-    assert_eq!(config["mcpServers"]["team_orchestrator"]["env"]["TEAM_AGENT_OWNER_TEAM_ID"], "cursortm");
+    assert!(
+        expected.is_file(),
+        "positive control: spawn generated the real config"
+    );
+    assert_eq!(
+        state["agents"]["cursor_dynamic"]["mcp_config"].as_str(),
+        expected.to_str()
+    );
+    assert_eq!(
+        state["teams"]["cursortm"]["agents"]["cursor_dynamic"]["mcp_config"].as_str(),
+        expected.to_str()
+    );
+    let config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&expected).unwrap()).unwrap();
+    assert_eq!(
+        config["mcpServers"]["team_orchestrator"]["env"]["TEAM_AGENT_ID"],
+        "cursor_dynamic"
+    );
+    assert_eq!(
+        config["mcpServers"]["team_orchestrator"]["env"]["TEAM_AGENT_OWNER_TEAM_ID"],
+        "cursortm"
+    );
 }
 
 #[test]
@@ -63,18 +92,52 @@ fn issue345_cursor_wakeup_restores_missing_derived_mcp_path() {
     let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("cursor-wakeup-mcp");
     let (ws, _home, _guard, team) = seed_cursor("wakeup-mcp");
     let transport = OfflineTransport::new();
-    quick_start_with_transport_in_workspace(&ws, &team, None, true, Some("cursortm"), &transport).unwrap();
-    crate::lifecycle::restart::stop_agent_with_transport(&ws, &AgentId::new("cursor_writer"), Some("cursortm"), &transport).unwrap();
+    quick_start_with_transport_in_workspace(&ws, &team, None, true, Some("cursortm"), &transport)
+        .unwrap();
+    crate::lifecycle::restart::stop_agent_with_transport(
+        &ws,
+        &AgentId::new("cursor_writer"),
+        Some("cursortm"),
+        &transport,
+    )
+    .unwrap();
     let mut state = load_runtime_state(&ws).unwrap();
-    state["agents"]["cursor_writer"].as_object_mut().unwrap().remove("mcp_config");
-    state["teams"]["cursortm"]["agents"]["cursor_writer"].as_object_mut().unwrap().remove("mcp_config");
-    save_runtime_state(&ws, &state).unwrap();
-    crate::lifecycle::restart::start_agent_with_transport(&ws, &AgentId::new("cursor_writer"), false, false, true, Some("cursortm"), &transport).unwrap();
+    state["agents"]["cursor_writer"]
+        .as_object_mut()
+        .unwrap()
+        .remove("mcp_config");
+    state["teams"]["cursortm"]["agents"]["cursor_writer"]
+        .as_object_mut()
+        .unwrap()
+        .remove("mcp_config");
+    // Plant an actual legacy row; ordinary state saves intentionally backfill fields.
+    std::fs::write(
+        crate::state::persist::runtime_state_path(&ws),
+        serde_json::to_vec(&state).unwrap(),
+    )
+    .unwrap();
+    assert!(load_runtime_state(&ws).unwrap()["agents"]["cursor_writer"].get("mcp_config").is_none());
+    crate::lifecycle::restart::start_agent_with_transport(
+        &ws,
+        &AgentId::new("cursor_writer"),
+        false,
+        false,
+        true,
+        Some("cursortm"),
+        &transport,
+    )
+    .unwrap();
     let after = load_runtime_state(&ws).unwrap();
     let expected = ws.join(".team/runtime/mcp/cursor_writer.json");
     assert!(expected.is_file());
-    assert_eq!(after["agents"]["cursor_writer"]["mcp_config"].as_str(), expected.to_str());
-    assert_eq!(after["teams"]["cursortm"]["agents"]["cursor_writer"]["mcp_config"].as_str(), expected.to_str());
+    assert_eq!(
+        after["agents"]["cursor_writer"]["mcp_config"].as_str(),
+        expected.to_str()
+    );
+    assert_eq!(
+        after["teams"]["cursortm"]["agents"]["cursor_writer"]["mcp_config"].as_str(),
+        expected.to_str()
+    );
 }
 
 #[test]
@@ -150,9 +213,21 @@ fn cursor_restart_uses_resume_when_session_captured_and_archive_present() {
         primary.to_string_lossy().as_ref()
     );
     patch_cursor_writer(&mut state, sid, &dir, &primary);
-    state["agents"]["cursor_writer"].as_object_mut().unwrap().remove("mcp_config");
-    state["teams"]["cursortm"]["agents"]["cursor_writer"].as_object_mut().unwrap().remove("mcp_config");
-    save_runtime_state(&ws, &state).expect("save captured");
+    state["agents"]["cursor_writer"]
+        .as_object_mut()
+        .unwrap()
+        .remove("mcp_config");
+    state["teams"]["cursortm"]["agents"]["cursor_writer"]
+        .as_object_mut()
+        .unwrap()
+        .remove("mcp_config");
+    // Preserve the real captured SID while removing only the derived config path.
+    std::fs::write(
+        crate::state::persist::runtime_state_path(&ws),
+        serde_json::to_vec(&state).unwrap(),
+    )
+    .unwrap();
+    assert!(load_runtime_state(&ws).unwrap()["agents"]["cursor_writer"].get("mcp_config").is_none());
 
     seed_healthy_coordinator(&ws);
 
@@ -179,8 +254,14 @@ fn cursor_restart_uses_resume_when_session_captured_and_archive_present() {
     );
     assert_eq!(after["agents"]["cursor_writer"]["session_id"], sid);
     let expected_config = ws.join(".team/runtime/mcp/cursor_writer.json");
-    assert_eq!(after["agents"]["cursor_writer"]["mcp_config"].as_str(), expected_config.to_str());
-    assert_eq!(after["teams"]["cursortm"]["agents"]["cursor_writer"]["mcp_config"].as_str(), expected_config.to_str());
+    assert_eq!(
+        after["agents"]["cursor_writer"]["mcp_config"].as_str(),
+        expected_config.to_str()
+    );
+    assert_eq!(
+        after["teams"]["cursortm"]["agents"]["cursor_writer"]["mcp_config"].as_str(),
+        expected_config.to_str()
+    );
     assert_eq!(
         cursor_mcp_project_dir(&ws, "cursor_writer").unwrap(),
         primary_before
