@@ -273,9 +273,6 @@ pub(crate) fn preflight(
     let Some(agent) = state.get("agents").and_then(|agents| agents.get(agent_id)) else {
         return Ok(None);
     };
-    let Some(config) = agent.get("mcp_config").and_then(Value::as_str) else {
-        return Ok(None);
-    };
     let provider = agent
         .get("provider")
         .and_then(Value::as_str)
@@ -284,6 +281,11 @@ pub(crate) fn preflight(
     if !crate::provider::get_adapter(provider).requires_worker_mcp_handshake() {
         return Ok(None);
     }
+    let config = agent
+        .get("mcp_config")
+        .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .ok_or("mcp_handshake_config_missing")?;
     let owner = owner
         .filter(|s| !s.is_empty())
         .ok_or("mcp_handshake_scope_missing")?;

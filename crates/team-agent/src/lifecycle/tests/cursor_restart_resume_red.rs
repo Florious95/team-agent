@@ -116,7 +116,9 @@ fn issue345_cursor_wakeup_restores_missing_derived_mcp_path() {
         serde_json::to_vec(&state).unwrap(),
     )
     .unwrap();
-    assert!(load_runtime_state(&ws).unwrap()["agents"]["cursor_writer"].get("mcp_config").is_none());
+    assert!(load_runtime_state(&ws).unwrap()["agents"]["cursor_writer"]
+        .get("mcp_config")
+        .is_none());
     crate::lifecycle::restart::start_agent_with_transport(
         &ws,
         &AgentId::new("cursor_writer"),
@@ -227,7 +229,9 @@ fn cursor_restart_uses_resume_when_session_captured_and_archive_present() {
         serde_json::to_vec(&state).unwrap(),
     )
     .unwrap();
-    assert!(load_runtime_state(&ws).unwrap()["agents"]["cursor_writer"].get("mcp_config").is_none());
+    assert!(load_runtime_state(&ws).unwrap()["agents"]["cursor_writer"]
+        .get("mcp_config")
+        .is_none());
 
     seed_healthy_coordinator(&ws);
 
