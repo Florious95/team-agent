@@ -1903,9 +1903,23 @@ fn ensure_shutdown_fixture_session(ws: &TestWorkspace) {
     if socket.is_empty() || session.is_empty() {
         return;
     }
-    let _ = Command::new("tmux")
+    let server_pid = shutdown_fixture_server_pid(socket);
+    let killed = Command::new("tmux")
         .args(["-S", socket, "kill-session", "-t", session])
-        .status();
+        .output()
+        .expect("stop previous shutdown fixture session");
+    // Killing the last session can reply before its server has exited. Never
+    // send new-session into that dying server, and never retry a creation.
+    assert!(
+        wait_for(
+            || shutdown_fixture_server_gone(socket, server_pid),
+            Duration::from_secs(2),
+            Duration::from_millis(10),
+        ),
+        "previous shutdown fixture server did not exit: pid={server_pid:?}, status={}, stderr={}",
+        killed.status,
+        String::from_utf8_lossy(&killed.stderr)
+    );
     let workspace = ws
         .path()
         .canonicalize()
@@ -1922,6 +1936,50 @@ fn ensure_shutdown_fixture_session(ws: &TestWorkspace) {
         created.success(),
         "create shutdown fixture session failed: status={created}"
     );
+}
+
+fn shutdown_fixture_server_pid(socket: &str) -> Option<u32> {
+    let output = Command::new("tmux")
+        .args(["-N", "-S", socket, "display-message", "-p", "#{pid}"])
+        .output()
+        .expect("observe owned shutdown fixture server");
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()?.trim().parse::<u32>().ok().filter(|pid| *pid > 1)
+}
+
+fn shutdown_fixture_server_gone(socket: &str, server_pid: Option<u32>) -> bool {
+    // Only an absent/refused exact endpoint proves no listener. A successful
+    // connection or any other error is not death evidence.
+    #[cfg(unix)]
+    let listener_gone = matches!(
+        std::os::unix::net::UnixStream::connect(socket),
+        Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused)
+    );
+    #[cfg(not(unix))]
+    let listener_gone = !Path::new(socket).exists();
+    if !listener_gone {
+        return false;
+    }
+    let Some(pid) = server_pid else {
+        return true; // An already-dead fake worker can leave no PID to observe.
+    };
+    // Linux CI may retain a reparented zombie: kill(pid, 0) alone would falsely
+    // call it live. Observe only this owned PID and stat, never argv/env.
+    let Ok(output) = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "pid=,stat="])
+        .output()
+    else {
+        return false;
+    };
+    if output.status.code() == Some(1) && output.stdout.is_empty() && output.stderr.is_empty() {
+        return true;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let fields: Vec<_> = text.split_whitespace().collect();
+    output.status.success() && fields.len() == 2
+        && fields[0].parse::<u32>().ok() == Some(pid) && fields[1].starts_with('Z')
 }
 
 /// Keep the worker-only fake fixture aligned with the production ownership
@@ -2266,6 +2324,31 @@ mod containment_tests {
             .lock()
             .expect("ownership ledger lock")
             .len()
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn shutdown_fixture_replacement_waits_for_previous_server_death() {
+        let ws = TestWorkspace::new("shutdown-server-death");
+        let tmp = normalize_existing_path(&std::env::temp_dir());
+        let endpoint = tmp.join(format!("tmux-{}/ta-shutdown-death-{}-{}",
+            unsafe { libc::geteuid() }, std::process::id(),
+            WORKSPACE_COUNTER.fetch_add(1, Ordering::Relaxed)));
+        let session = "shutdown-fixture-death-control";
+        tmux_socket(&endpoint, session);
+        ws.register_owned_tmux_socket(&endpoint);
+        ws.seed_state(serde_json::json!({"tmux_socket": endpoint, "session_name": session}));
+        let socket = endpoint.to_str().unwrap();
+        for _ in 0..3 {
+            let previous = shutdown_fixture_server_pid(socket).expect("live owned server PID");
+            assert!(!shutdown_fixture_server_gone(socket, Some(previous)));
+            assert!(!shutdown_fixture_server_gone(socket, None), "live listener is not missing proof");
+            ensure_shutdown_fixture_session(&ws);
+            assert!(shutdown_fixture_server_gone(socket, Some(previous)));
+            let replacement = shutdown_fixture_server_pid(socket).expect("replacement server PID");
+            assert_ne!(previous, replacement);
+            assert!(!shutdown_fixture_server_gone(socket, Some(replacement)));
+        }
     }
 
     struct AmbientTmuxGuard(Option<std::ffi::OsString>);

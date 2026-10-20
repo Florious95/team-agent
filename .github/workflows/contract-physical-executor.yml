@@ -42,6 +42,7 @@ on:
           - issue342
           - issue342-format
           - issue342-handshake
+          - issue342-shutdown-fixture
 
 permissions:
   contents: read
@@ -239,6 +240,9 @@ jobs:
             return "${statuses[0]}"
           }
           case "$REGRESSION_SCOPE" in
+            issue342-shutdown-fixture)
+              run_case shutdown-fixture cargo test -p team-agent --test e2e --locked shutdown -- --test-threads=1 --nocapture
+              ;;
             issue342-handshake)
               run_case mcp-handshake cargo test -p team-agent --lib --locked mcp_server::readiness -- --test-threads=1 --nocapture
               run_case mcp-wire cargo test -p team-agent --lib --locked mcp_server::wire -- --test-threads=1 --nocapture
@@ -262,6 +266,7 @@ jobs:
               run_case startup-trust-retry cargo test -p team-agent --lib --locked contract_b_step2_retry_delivers_queued_message_after_startup_trust_is_handled -- --test-threads=1
               run_case readiness-release-cas cargo test -p team-agent --lib --locked release_delivery_before_input -- --test-threads=1
               run_case process-owner-boundary cargo test -p team-agent --test platform_process_caller_whitelist_batch0 --locked -- --test-threads=1
+              run_case shutdown-fixture cargo test -p team-agent --test e2e --locked shutdown -- --test-threads=1
               run_case contract-all cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets --no-fail-fast -- --test-threads=1
               ;;
             host-ancestry)
@@ -410,7 +415,7 @@ jobs:
           retention-days: 14
 
   workspace-all-linux:
-    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && (inputs.regression_scope == 'issue321-full' || inputs.regression_scope == 'issue321-f1' || inputs.regression_scope == 'issue334' || inputs.regression_scope == 'cli-phase1' || inputs.regression_scope == 'cli-phase1-e2e' || inputs.regression_scope == 'cli-defects-fixtures' || inputs.regression_scope == 'issue342')
+    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && (inputs.regression_scope == 'issue321-full' || inputs.regression_scope == 'issue321-f1' || inputs.regression_scope == 'issue334' || inputs.regression_scope == 'cli-phase1' || inputs.regression_scope == 'cli-phase1-e2e' || inputs.regression_scope == 'cli-defects-fixtures' || inputs.regression_scope == 'issue342' || inputs.regression_scope == 'issue342-shutdown-fixture')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -457,6 +462,9 @@ jobs:
           fi
           if test "${{ inputs.regression_scope }}" = cli-defects-fixtures; then
             command=(cargo test -p team-agent --locked --no-fail-fast --test e2e --test e2e_bypass_single_source --test e6_offline_mailbox_toname_e2e_contract --test msg_protocol_m2c_to_grammar_contract --test msg_sendpath_persist_first_contract --test role_lifecycle_intermediate_layer_red --test team_in_team_scope_commands_red -- --test-threads=1)
+          fi
+          if test "${{ inputs.regression_scope }}" = issue342-shutdown-fixture; then
+            command=(cargo test -p team-agent --test e2e --locked shutdown -- --test-threads=1 --nocapture)
           fi
           "${command[@]}" 2>&1 | tee workspace-evidence/test.log
           statuses=("${PIPESTATUS[@]}")
