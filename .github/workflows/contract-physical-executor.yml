@@ -43,6 +43,8 @@ on:
           - issue342-format
           - issue342-handshake
           - issue342-shutdown-fixture
+          - issue345-red
+          - issue345
 
 permissions:
   contents: read
@@ -254,7 +256,10 @@ jobs:
             issue342-red)
               run_case cursor-project-root cargo test -p team-agent --test cursor_mcp_project_root_red --locked -- --test-threads=1
               ;;
-            issue342)
+            issue345-red)
+              run_case issue345 cargo test -p team-agent --lib --locked issue345 -- --test-threads=1 --nocapture
+              ;;
+            issue342|issue345)
               run_case workspace-check cargo check --workspace --all-targets --locked
               run_case cursor-project-root cargo test -p team-agent --test cursor_mcp_project_root_red --locked -- --test-threads=1
               run_case cursor-launch cargo test -p team-agent --lib --locked cursor_ -- --test-threads=1
@@ -363,7 +368,7 @@ jobs:
             *) exit 64 ;;
           esac
       - name: Check scoped formatting and retain a remote formatting patch
-        if: always() && (inputs.regression_scope == 'issue321' || inputs.regression_scope == 'issue321-full' || inputs.regression_scope == 'issue334' || inputs.regression_scope == 'issue334-red' || inputs.regression_scope == 'cli-phase1' || inputs.regression_scope == 'issue342')
+        if: always() && (inputs.regression_scope == 'issue321' || inputs.regression_scope == 'issue321-full' || inputs.regression_scope == 'issue334' || inputs.regression_scope == 'issue334-red' || inputs.regression_scope == 'cli-phase1' || inputs.regression_scope == 'issue342' || inputs.regression_scope == 'issue345' || inputs.regression_scope == 'issue345-red')
         shell: bash
         run: |
           set -euo pipefail
@@ -390,6 +395,9 @@ jobs:
           if [[ "$REGRESSION_SCOPE" == issue342 || "$REGRESSION_SCOPE" == issue342-handshake ]]; then
             files=(crates/team-agent/src/lifecycle/launch/cursor_mcp_iso.rs crates/team-agent/src/lifecycle/launch/cursor_mcp.rs crates/team-agent/src/lifecycle/tests/cursor_mcp_overlay.rs crates/team-agent/src/lifecycle/tests/cursor_restart_resume_red.rs crates/team-agent/tests/cursor_mcp_project_root_red.rs crates/team-agent/src/cli/intent/runtime.rs crates/team-agent/src/cli/intent/runtime_tests.rs crates/team-agent/src/mcp_server/readiness.rs crates/team-agent/src/mcp_server/readiness_tests.rs)
           fi
+          if [[ "$REGRESSION_SCOPE" == issue345* ]]; then
+            files=(crates/team-agent/src/mcp_server/readiness.rs crates/team-agent/src/mcp_server/readiness_tests.rs crates/team-agent/src/lifecycle/tests/cursor_restart_resume_red.rs)
+          fi
           rustfmt --edition 2021 --config skip_children=true --check "${files[@]}" > regression-evidence/format.log 2>&1
           rc=$?
           set -e
@@ -415,7 +423,7 @@ jobs:
           retention-days: 14
 
   workspace-all-linux:
-    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && (inputs.regression_scope == 'issue321-full' || inputs.regression_scope == 'issue321-f1' || inputs.regression_scope == 'issue334' || inputs.regression_scope == 'cli-phase1' || inputs.regression_scope == 'cli-phase1-e2e' || inputs.regression_scope == 'cli-defects-fixtures' || inputs.regression_scope == 'issue342' || inputs.regression_scope == 'issue342-shutdown-fixture')
+    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && (inputs.regression_scope == 'issue321-full' || inputs.regression_scope == 'issue321-f1' || inputs.regression_scope == 'issue334' || inputs.regression_scope == 'cli-phase1' || inputs.regression_scope == 'cli-phase1-e2e' || inputs.regression_scope == 'cli-defects-fixtures' || inputs.regression_scope == 'issue342' || inputs.regression_scope == 'issue342-shutdown-fixture' || inputs.regression_scope == 'issue345')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:

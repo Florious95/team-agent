@@ -67,6 +67,30 @@ fn eager_mcp_waits_without_spending_input_attempts_then_delivers_the_same_messag
 }
 
 #[test]
+#[cfg(unix)]
+fn issue345_missing_eager_config_defers_without_input_or_attempts() {
+    let mut case = WorkerCase::new("missing-mcp-config", "cursor_agent");
+    let carrier = crate::mcp_server::readiness::test_carrier_pid().unwrap();
+    case.state["team_key"] = serde_json::json!("dup-team");
+    case.state["agents"]["w1"]["pane_pid"] = serde_json::json!(carrier);
+    case.state["agents"]["w1"]["spawned_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
+    case.state["teams"] = serde_json::json!({"dup-team": case.state.clone()});
+    crate::state::persist::save_runtime_state(&case.workspace, &case.state).unwrap();
+    let transport = RecordingTransport { carrier: Some(carrier), ..RecordingTransport::new("") };
+    let message_id = case.store.create_message(None, "leader", "w1", "missing config canary", None, false, Some("dup-team")).unwrap();
+    for _ in 0..3 {
+        let outcome = deliver_pending_message(&case.workspace, &case.store, &transport,
+            &message_id, &case.event_log, &case.state).unwrap();
+        assert!(!outcome.ok);
+        assert!(outcome.verification.as_deref().unwrap().starts_with("mcp_handshake_"));
+        assert_eq!(transport.inject_count(), 0, "missing metadata must never reach input");
+    }
+    let connection = rusqlite::Connection::open(case.store.db_path()).unwrap();
+    let attempts: i64 = connection.query_row("select delivery_attempts from messages where message_id=?1", [&message_id], |row| row.get(0)).unwrap();
+    assert_eq!(attempts, 0, "metadata wait is not an input attempt");
+}
+
+#[test]
 fn error_retry_claim_is_single_winner_across_two_delivers() {
     let case = WorkerCase::new("claim-gate", "fake");
     let transport = RecordingTransport::new("");
