@@ -416,8 +416,12 @@ pub fn ready_delivery_worker(
         state["teams"][owner]["agents"][worker] = state["agents"][worker].clone();
     }
     team_agent::state::persist::save_runtime_state(&workspace, state).unwrap();
-    let client = spawn_mcp_client(&workspace, worker, owner);
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut client = spawn_mcp_client(&workspace, worker, owner);
+    let observed_at = std::time::Instant::now();
+    // Publication hashes the selected file and running image under separate
+    // 10s production budgets. Observe both, plus bounded publication margin;
+    // never replace the exact receipt predicate with elapsed time.
+    let deadline = observed_at + Duration::from_secs(30);
     loop {
         let ready = std::fs::read_dir(workspace.join(".team/runtime/mcp-handshakes"))
             .into_iter().flatten().flatten()
@@ -427,9 +431,16 @@ pub fn ready_delivery_worker(
             .any(|value| value["owner"] == owner && value["agent"] == worker
                 && value["server"]["identity"]["pid"] == client.child.id());
         if ready { break; }
-        assert!(std::time::Instant::now() < deadline, "actual stdio helper did not publish its handshake: {}", EventLog::new(&workspace).tail(0).unwrap().len());
+        assert!(std::time::Instant::now() < deadline,
+            "actual stdio helper did not publish its handshake: mcp_events={:?}, child_status={:?}, image_bytes={:?}",
+            EventLog::new(&workspace).tail(0).unwrap().into_iter()
+                .filter(|event| event["event"].as_str().is_some_and(|name| name.starts_with("mcp.")))
+                .collect::<Vec<_>>(),
+            client.child.try_wait(),
+            std::fs::metadata(test_binary_path()).map(|metadata| metadata.len()));
         std::thread::sleep(Duration::from_millis(10));
     }
+    eprintln!("CONTROLLED_MCP_READY elapsed_ms={} image_bytes={:?}", observed_at.elapsed().as_millis(), std::fs::metadata(test_binary_path()).map(|metadata| metadata.len()));
     (client, team_agent::transport::PaneInfo {
         pane_id: PaneId::new(pane), session: SessionName::new(session),
         window_index: None, window_name: Some(WindowName::new(window)),
