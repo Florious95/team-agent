@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.122]
+
+- **Dynamic-seat MCP configuration (Issue #345):** carry the actual generated MCP configuration through single-seat startup and team respawn, and persist it with the existing lifecycle state commit. Dynamic Cursor seats no longer lose their required configuration metadata.
+- **Fail-closed worker readiness:** decide whether the Provider requires an MCP handshake before treating configuration as optional. Missing or invalid required configuration defers delivery without input or attempt consumption; non-MCP Providers retain their declared behavior.
+- **Regression and native evidence:** add dynamic-start, stopped-wakeup, preserved-session and zero-effect admission regressions; align positive delivery fixtures with real handshake prerequisites. A fresh dynamic Cursor first task consumed the correct native tool directory on its first query, then called send_message/report_result directly with natural Leader receipts and zero-residual scoped cleanup. This is finite validation, not a guarantee for all unguided discovery strategies or all Provider/model combinations.
+- **Release metadata:** align the eight standard version/changelog files at 0.5.122. Installing a published package does not automatically replace a running team's binary.
+
 ## [0.5.121]
 
 - **Native Cursor MCP isolation (Issue #342):** launch legacy Cursor seats with an owned, non-Git primary project root and preserve project access through `--add-dir`; keep the recorded native spawn cwd and strict workspace/team/seat admission aligned across start and restart. Stale parent-repository MCP configuration is not adopted.
