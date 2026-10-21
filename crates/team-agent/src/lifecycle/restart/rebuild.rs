@@ -2480,6 +2480,9 @@ fn mark_agent_respawned(
         "spawn_cwd".to_string(),
         serde_json::json!(spawn.spawn_cwd.to_string_lossy().to_string()),
     );
+    if let Some(path) = &spawn.mcp_config_path {
+        agent.insert("mcp_config".to_string(), serde_json::json!(path));
+    }
     // 0.5.38 (`.team/artifacts/startup-latency-locate.md` §7): every
     // multi-worker restart respawn is a fresh process cohort. The
     // pre-0.5.38 code only wrote `spawned_at` here and left `spawn_epoch`
@@ -2968,6 +2971,7 @@ impl Clone for ParallelSpawnResult {
                 profile_launch: self.spawn.profile_launch.clone(),
                 layout_placement: self.spawn.layout_placement.clone(),
                 spawn_cwd: self.spawn.spawn_cwd.clone(),
+                mcp_config_path: self.spawn.mcp_config_path.clone(),
                 owner_team_id: self.spawn.owner_team_id.clone(),
             },
             spawn_start: self.spawn_start,
@@ -4232,6 +4236,7 @@ tasks:
             profile_launch: crate::provider::ProviderProfileLaunch::default(),
             layout_placement: None,
             spawn_cwd: std::path::PathBuf::from("/tmp/team-epoch"),
+            mcp_config_path: None,
             owner_team_id: None,
         };
         mark_agent_respawned(

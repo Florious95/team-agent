@@ -273,9 +273,6 @@ pub(crate) fn preflight(
     let Some(agent) = state.get("agents").and_then(|agents| agents.get(agent_id)) else {
         return Ok(None);
     };
-    let Some(config) = agent.get("mcp_config").and_then(Value::as_str) else {
-        return Ok(None);
-    };
     let provider = agent
         .get("provider")
         .and_then(Value::as_str)
@@ -284,6 +281,11 @@ pub(crate) fn preflight(
     if !crate::provider::get_adapter(provider).requires_worker_mcp_handshake() {
         return Ok(None);
     }
+    let config = agent
+        .get("mcp_config")
+        .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .ok_or("mcp_handshake_config_missing")?;
     let owner = owner
         .filter(|s| !s.is_empty())
         .ok_or("mcp_handshake_scope_missing")?;
@@ -425,6 +427,67 @@ pub(crate) fn revalidate(admission: &Admission, target: &Target, panes: &[PaneIn
 #[cfg(test)]
 pub(crate) fn test_carrier_pid() -> Option<u32> {
     crate::platform::process::current_parent_pid()
+}
+
+/// Bind a controlled live test helper through the real receipt publisher. This
+/// does not bypass preflight or fabricate a process/image/ancestry receipt.
+#[cfg(test)]
+pub(crate) fn test_ready_worker(
+    workspace: &Path,
+    state: &mut Value,
+    owner: &str,
+    agent: &str,
+    pane: &str,
+) -> PaneInfo {
+    let workspace = workspace.canonicalize().unwrap();
+    let carrier = test_carrier_pid().unwrap();
+    let config = workspace
+        .join(".team/runtime/mcp")
+        .join(format!("{agent}.json"));
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, serde_json::to_vec(&serde_json::json!({
+        "mcpServers": {"team_orchestrator": {
+            "command": std::env::current_exe().unwrap().canonicalize().unwrap(),
+            "env": {"TEAM_AGENT_WORKSPACE": workspace, "TEAM_AGENT_ID": agent, "TEAM_AGENT_OWNER_TEAM_ID": owner}
+        }}
+    })).unwrap()).unwrap();
+    state["team_key"] = serde_json::json!(owner);
+    state["active_team_key"] = serde_json::json!(owner);
+    let row = &mut state["agents"][agent];
+    row["mcp_config"] = serde_json::json!(config);
+    row["pane_id"] = serde_json::json!(pane);
+    row["pane_pid"] = serde_json::json!(carrier);
+    row["spawned_at"] =
+        serde_json::json!((Utc::now() - chrono::Duration::seconds(10)).to_rfc3339());
+    let window = row["window"].as_str().unwrap_or(agent).to_string();
+    let session = state["session_name"].as_str().unwrap().to_string();
+    if state["teams"][owner].is_object() {
+        state["teams"][owner]["agents"][agent] = state["agents"][agent].clone();
+    }
+    publish(&workspace, owner, agent, Utc::now()).unwrap();
+    let target = PaneInfo {
+        pane_id: crate::transport::PaneId::new(pane),
+        session: crate::transport::SessionName::new(session),
+        window_index: None,
+        window_name: Some(crate::transport::WindowName::new(window)),
+        pane_index: None,
+        tty: None,
+        current_command: None,
+        current_path: Some(workspace.clone()),
+        active: true,
+        pane_pid: Some(carrier),
+        leader_env: Default::default(),
+    };
+    let admission = preflight(&workspace, Some(owner), agent, state)
+        .unwrap()
+        .unwrap();
+    revalidate(
+        &admission,
+        &Target::Pane(target.pane_id.clone()),
+        std::slice::from_ref(&target),
+    )
+    .unwrap();
+    target
 }
 
 #[cfg(test)]

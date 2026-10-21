@@ -169,7 +169,10 @@ fn p2_scheduler_unknown_kind_surfaces_error() {
 
 /// A delivery transport whose `inject` RECORDS-and-succeeds (the real deliver loop legitimately
 /// injects; the §84-guard NoopTransport panics). Only `inject` is reached by deliver_pending_message.
-struct DeliverOkTransport;
+#[derive(Default)]
+struct DeliverOkTransport {
+    targets: Vec<PaneInfo>,
+}
 impl Transport for DeliverOkTransport {
     fn kind(&self) -> BackendKind {
         BackendKind::Tmux
@@ -232,7 +235,7 @@ impl Transport for DeliverOkTransport {
         Ok(PaneLiveness::Unknown)
     }
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
-        Ok(Vec::new())
+        Ok(self.targets.clone())
     }
     fn has_session(&self, _s: &SessionName) -> Result<bool, TransportError> {
         Ok(true)
@@ -333,9 +336,9 @@ fn spine_delivery_skips_queued_statuses() {
         .unwrap();
     set_message_status(&store, &qidle, "queued_until_idle");
     set_message_status(&store, &qstart, "queued_until_start");
-    let state = serde_json::json!({"agents": {"w1": {}}});
+    let state = serde_json::json!({"agents": {"w1": {"provider": "fake"}}});
 
-    let _ = deliver_pending_messages(&ws, &state, &DeliverOkTransport, &log).unwrap();
+    let _ = deliver_pending_messages(&ws, &state, &DeliverOkTransport::default(), &log).unwrap();
 
     assert_eq!(
         message_status_of(&store, &qidle),
@@ -359,9 +362,9 @@ fn spine_delivery_busy_recipient_is_injected_without_idle_deferral() {
     let mid = store
         .create_message(Some("t"), "leader", "w1", "hi", None, true, None)
         .unwrap();
-    let state = serde_json::json!({"agents": {"w1": {"status": "busy"}}});
+    let state = serde_json::json!({"agents": {"w1": {"provider": "fake", "status": "busy"}}});
 
-    let delivered = deliver_pending_messages(&ws, &state, &DeliverOkTransport, &log).unwrap();
+    let delivered = deliver_pending_messages(&ws, &state, &DeliverOkTransport::default(), &log).unwrap();
 
     assert!(delivered.contains(&mid));
     assert_eq!(message_status_of(&store, &mid), "delivered");
@@ -380,11 +383,39 @@ fn spine_delivery_pi_cursor_uses_v113_direct_input_without_idle_scope() {
         let store = store_for(&ws);
         let log = EventLog::new(&ws);
         let mid = store
-            .create_message(Some("t"), "leader", "w1", "hi", None, true, None)
+            .create_message(Some("t"), "leader", "w1", "hi", None, true, Some("spine-team"))
             .unwrap();
-        let state = serde_json::json!({"agents": {"w1": {"provider": provider, "status": "running"}}});
-        let delivered = deliver_pending_messages(&ws, &state, &DeliverOkTransport, &log).unwrap();
-        assert!(delivered.contains(&mid), "{provider}");
+        #[cfg(unix)]
+        let carrier = crate::mcp_server::readiness::test_carrier_pid().unwrap();
+        #[cfg(not(unix))]
+        let carrier = std::process::id();
+        let config = ws.join(".team/runtime/mcp/w1.json");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, serde_json::to_vec(&serde_json::json!({
+            "mcpServers": {"team_orchestrator": {
+                "command": std::env::current_exe().unwrap().canonicalize().unwrap(),
+                "env": {"TEAM_AGENT_WORKSPACE": ws, "TEAM_AGENT_ID": "w1", "TEAM_AGENT_OWNER_TEAM_ID": "spine-team"}
+            }}
+        })).unwrap()).unwrap();
+        let mut state = serde_json::json!({"team_key": "spine-team", "active_team_key": "spine-team", "session_name": "spine", "agents": {"w1": {
+            "provider": provider, "status": "running", "window": "w1", "mcp_config": config,
+            "spawned_at": (chrono::Utc::now() - chrono::Duration::seconds(10)).to_rfc3339(),
+            "pane_id": "%spine", "pane_pid": carrier
+        }}});
+        state["teams"] = serde_json::json!({"spine-team": state.clone()});
+        crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+        #[cfg(unix)]
+        if provider == "cursor_agent" {
+            crate::mcp_server::readiness::publish(&ws, "spine-team", "w1", chrono::Utc::now()).unwrap();
+        }
+        let transport = DeliverOkTransport { targets: vec![PaneInfo {
+            pane_id: PaneId::new("%spine"), session: SessionName::new("spine"),
+            window_index: None, window_name: Some(WindowName::new("w1")), pane_index: None, tty: None,
+            current_command: None, current_path: None, active: true,
+            pane_pid: Some(carrier), leader_env: BTreeMap::new(),
+        }] };
+        let delivered = deliver_pending_messages(&ws, &state, &transport, &log).unwrap();
+        assert!(delivered.contains(&mid), "{provider}: {:?}", read_event_log(&ws));
         assert_eq!(message_status_of(&store, &mid), "delivered");
     }
 }
@@ -405,9 +436,9 @@ fn contract_alive_worker_with_working_health_is_deliverable_not_deferred() {
         .create_message(Some("t"), "leader", "w1", "hi", None, true, None)
         .unwrap();
     seed_agent_health(&store, "w1", "WORKING"); // turn-level state — must NOT gate delivery
-    let state = serde_json::json!({"agents": {"w1": {"status": "running"}}}); // lifecycle: alive
+    let state = serde_json::json!({"agents": {"w1": {"provider": "fake", "status": "running"}}}); // lifecycle: alive
 
-    let delivered = deliver_pending_messages(&ws, &state, &DeliverOkTransport, &log).unwrap();
+    let delivered = deliver_pending_messages(&ws, &state, &DeliverOkTransport::default(), &log).unwrap();
 
     let events = read_event_log(&ws);
     let deferred: Vec<_> = events
@@ -530,7 +561,7 @@ fn spine_delivery_injects_resolvable_target_not_bare_agent_pane() {
     // in-team, non-busy agent -> deliver proceeds; the session-qualified resolution uses session_name + window.
     let state = serde_json::json!({
         "session_name": "team-x",
-        "agents": {"w1": {"status": "idle", "window": "w1"}}
+        "agents": {"w1": {"provider": "fake", "status": "idle", "window": "w1"}}
     });
     let transport = OfflineTransport::new();
 
@@ -585,7 +616,7 @@ fn spine_delivery_injects_rendered_protocol_block_not_raw_content() {
         .unwrap();
     let state = serde_json::json!({
         "session_name": "team-x",
-        "agents": {"w1": {"status": "idle", "window": "w1"}}
+        "agents": {"w1": {"provider": "fake", "status": "idle", "window": "w1"}}
     });
     let transport = OfflineTransport::new();
 

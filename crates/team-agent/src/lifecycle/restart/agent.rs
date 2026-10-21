@@ -1410,6 +1410,9 @@ pub(super) fn mark_agent_started(
         "spawn_cwd".to_string(),
         serde_json::json!(spawn.spawn_cwd.to_string_lossy().to_string()),
     );
+    if let Some(path) = &spawn.mcp_config_path {
+        agent.insert("mcp_config".to_string(), serde_json::json!(path));
+    }
     // 0.4.6 Stage 1+2: ensure spawn_epoch is present after every start.
     // reset_agent_at_paths bumps it before start; non-reset starts
     // initialise to 1 (or preserve existing) so capture/event paths can

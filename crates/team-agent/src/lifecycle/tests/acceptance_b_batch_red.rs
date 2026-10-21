@@ -59,6 +59,14 @@ fn b4_monitor_step_failure_does_not_block_deliver_pending() {
     let _g = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
     let ws = tmp_ws("b4-monitor");
     seed_copilot_team_state(&ws, "cp1", true);
+    let mut state = team_agent::state::persist::load_runtime_state(&ws).unwrap();
+    #[cfg(unix)]
+    let targets = vec![crate::mcp_server::readiness::test_ready_worker(
+        &ws, &mut state, "team-b4", "cp1", "%41",
+    )];
+    #[cfg(not(unix))]
+    let targets = Vec::new();
+    save_runtime_state(&ws, &state).unwrap();
     let store = MessageStore::open(&ws).unwrap();
     store
         .create_message(
@@ -68,14 +76,17 @@ fn b4_monitor_step_failure_does_not_block_deliver_pending() {
             "do the thing",
             None,
             false,
-            None,
+            Some("team-b4"),
         )
         .unwrap();
 
     let coord = Coordinator::new(
         WorkspacePath::new(ws.clone()),
         Box::new(RealRegistry),
-        Box::new(MonitorFailTransport::new()),
+        Box::new(MonitorFailTransport {
+            targets,
+            ..MonitorFailTransport::new()
+        }),
     );
     let report = coord.tick();
 
@@ -603,11 +614,13 @@ fn attach_socket_path(command: &str) -> Option<PathBuf> {
 /// (B-4). Sessions/windows present so the tick proceeds to the monitor steps.
 struct MonitorFailTransport {
     session: Mutex<bool>,
+    targets: Vec<PaneInfo>,
 }
 impl MonitorFailTransport {
     fn new() -> Self {
         Self {
             session: Mutex::new(true),
+            targets: Vec::new(),
         }
     }
 }
@@ -688,7 +701,7 @@ impl Transport for MonitorFailTransport {
         }
     }
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
-        Ok(Vec::new())
+        Ok(self.targets.clone())
     }
     fn list_windows(&self, _s: &SessionName) -> Result<Vec<WindowName>, TransportError> {
         Ok(vec![WindowName::new("cp1")])

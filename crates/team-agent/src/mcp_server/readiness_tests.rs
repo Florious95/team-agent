@@ -95,6 +95,29 @@ impl Drop for Case {
 }
 
 #[test]
+fn issue345_missing_mcp_config_does_not_disable_eager_admission() {
+    for provider in ["cursor_agent", "codex", "claude"] {
+        let mut case = Case::new();
+        case.state["agents"]["worker"]["provider"] = json!(provider);
+        case.state["agents"]["worker"]
+            .as_object_mut()
+            .unwrap()
+            .remove("mcp_config");
+        assert!(
+            case.admission().is_err(),
+            "missing config cannot disable {provider} admission"
+        );
+        for value in [Value::Null, json!(false), json!(""), json!(" ")] {
+            case.state["agents"]["worker"]["mcp_config"] = value;
+            assert!(
+                case.admission().is_err(),
+                "invalid config cannot disable {provider} admission"
+            );
+        }
+    }
+}
+
+#[test]
 fn missing_handshake_defers_then_a_live_scoped_receipt_admits() {
     let case = Case::new();
     assert!(case.admission().is_err());
@@ -235,6 +258,13 @@ fn fake_and_pi_keep_their_existing_non_eager_or_runtime_registry_admission() {
     for provider in ["fake", "pi"] {
         let mut state = case.state.clone();
         state["agents"]["worker"]["provider"] = json!(provider);
+        assert!(preflight(&case.ws, Some("owner"), "worker", &state)
+            .unwrap()
+            .is_none());
+        state["agents"]["worker"]
+            .as_object_mut()
+            .unwrap()
+            .remove("mcp_config");
         assert!(preflight(&case.ws, Some("owner"), "worker", &state)
             .unwrap()
             .is_none());

@@ -45,6 +45,8 @@ pub(super) struct SpawnedAgentWindow {
     pub profile_launch: crate::provider::ProviderProfileLaunch,
     pub layout_placement: Option<crate::lifecycle::launch::LayoutPlacement>,
     pub spawn_cwd: std::path::PathBuf,
+    /// Actual configuration generated for this spawn, not inferred from old state.
+    pub mcp_config_path: Option<std::path::PathBuf>,
     /// Issue 2 (Round 3b gate review §6): the resolved `owner_team_id` used
     /// for this spawn's MCP env / command. Callers (`mark_agent_respawned`,
     /// `mark_agent_started`) must persist this back into the agent row so
@@ -701,6 +703,7 @@ pub(super) fn spawn_agent_window(
         profile_launch,
         layout_placement: layout_placement.cloned(),
         spawn_cwd: native_spawn_cwd,
+        mcp_config_path,
         owner_team_id: team_id,
     })
 }

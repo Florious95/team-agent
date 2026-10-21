@@ -651,10 +651,10 @@ fn contract_b_delivery_gate_trusts_startup_handled_state_over_pane_scrollback() 
             "SUB step2 probe: handled startup trust must deliver despite scrollback residue.",
             None,
             true,
-            None,
+            Some("subprep-scrollback"),
         )
         .unwrap();
-    let handled_state = json!({
+    let mut handled_state = json!({
         "session_name": "team-ta-subroot-SUB-PROBE-2-send-turn-idle",
         "agents": {
             "w1": {
@@ -670,9 +670,15 @@ fn contract_b_delivery_gate_trusts_startup_handled_state_over_pane_scrollback() 
             }
         }
     });
+    #[cfg(unix)]
+    let pane = crate::mcp_server::readiness::test_ready_worker(
+        &handled_ws, &mut handled_state, "subprep-scrollback", "w1", "%7",
+    );
     team_agent::state::persist::save_runtime_state(&handled_ws, &handled_state).unwrap();
     let handled_transport =
         RecordingTransport::new(vec![SUBROOT_FULL_TRUST_PANE_AFTER_QUICKSTART.to_string()]);
+    #[cfg(unix)]
+    { handled_transport.state.lock().unwrap().carrier = pane.pane_pid; }
     let handled_log = EventLog::new(&handled_ws);
     let handled = deliver_pending_message(
         &handled_ws,

@@ -383,6 +383,62 @@ pub struct McpClient {
     trace_path: PathBuf,
 }
 
+/// Keep an actual stdio helper alive for positive delivery tests that require
+/// MCP readiness. The real initialize/tools-list writer publishes the receipt;
+/// the calling test process is its controlled carrier, not a guessed native PID.
+pub fn ready_delivery_worker(
+    workspace: &Path,
+    state: &mut Value,
+    owner: &str,
+    worker: &str,
+    pane: &str,
+) -> (McpClient, team_agent::transport::PaneInfo) {
+    let workspace = workspace.canonicalize().unwrap();
+    let carrier = std::process::id();
+    let config = workspace.join(".team/runtime/mcp").join(format!("{worker}.json"));
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, serde_json::to_vec(&json!({
+        "mcpServers": {"team_orchestrator": {
+            "command": test_binary_path().canonicalize().unwrap(),
+            "env": {"TEAM_AGENT_WORKSPACE": workspace, "TEAM_AGENT_ID": worker, "TEAM_AGENT_OWNER_TEAM_ID": owner}
+        }}
+    })).unwrap()).unwrap();
+    state["team_key"] = json!(owner);
+    state["active_team_key"] = json!(owner);
+    let agent = &mut state["agents"][worker];
+    agent["mcp_config"] = json!(config);
+    agent["pane_id"] = json!(pane);
+    agent["pane_pid"] = json!(carrier);
+    agent["spawned_at"] = json!((chrono::Utc::now() - chrono::Duration::seconds(10)).to_rfc3339());
+    let window = agent["window"].as_str().unwrap_or(worker).to_string();
+    let session = state["session_name"].as_str().unwrap().to_string();
+    if state["teams"][owner].is_object() {
+        state["teams"][owner]["agents"][worker] = state["agents"][worker].clone();
+    }
+    team_agent::state::persist::save_runtime_state(&workspace, state).unwrap();
+    let client = spawn_mcp_client(&workspace, worker, owner);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let ready = std::fs::read_dir(workspace.join(".team/runtime/mcp-handshakes"))
+            .into_iter().flatten().flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+            .filter_map(|entry| std::fs::read(entry.path()).ok())
+            .filter_map(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .any(|value| value["owner"] == owner && value["agent"] == worker
+                && value["server"]["identity"]["pid"] == client.child.id());
+        if ready { break; }
+        assert!(std::time::Instant::now() < deadline, "actual stdio helper did not publish its handshake: {}", EventLog::new(&workspace).tail(0).unwrap().len());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    (client, team_agent::transport::PaneInfo {
+        pane_id: PaneId::new(pane), session: SessionName::new(session),
+        window_index: None, window_name: Some(WindowName::new(window)),
+        pane_index: None, tty: None, current_command: None,
+        current_path: Some(workspace), active: true, pane_pid: Some(carrier),
+        leader_env: BTreeMap::new(),
+    })
+}
+
 pub fn spawn_mcp_client(workspace: &Path, worker_id: &str, owner_team_id: &str) -> McpClient {
     spawn_mcp_client_with_catalog_check(workspace, worker_id, owner_team_id, true)
 }
