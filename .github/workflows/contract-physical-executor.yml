@@ -45,6 +45,7 @@ on:
           - issue342-shutdown-fixture
           - issue345-red
           - issue345-fixtures
+          - issue345-trust-fixture
           - issue345
 
 permissions:
@@ -188,7 +189,7 @@ jobs:
           retention-days: 14
 
   grok-root-regression:
-    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && inputs.regression_scope != 'issue321-f1' && inputs.regression_scope != 'cli-phase1-format' && inputs.regression_scope != 'cli-phase1-e2e' && inputs.regression_scope != 'issue342-format'
+    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && inputs.regression_scope != 'issue321-f1' && inputs.regression_scope != 'cli-phase1-format' && inputs.regression_scope != 'cli-phase1-e2e' && inputs.regression_scope != 'issue342-format' && inputs.regression_scope != 'issue345-trust-fixture'
     runs-on: macos-14
     timeout-minutes: 45
     env:
@@ -432,7 +433,7 @@ jobs:
           retention-days: 14
 
   workspace-all-linux:
-    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && (inputs.regression_scope == 'issue321-full' || inputs.regression_scope == 'issue321-f1' || inputs.regression_scope == 'issue334' || inputs.regression_scope == 'cli-phase1' || inputs.regression_scope == 'cli-phase1-e2e' || inputs.regression_scope == 'cli-defects-fixtures' || inputs.regression_scope == 'issue342' || inputs.regression_scope == 'issue342-shutdown-fixture' || inputs.regression_scope == 'issue345')
+    if: github.event_name == 'workflow_dispatch' && inputs.source_sha != '' && (inputs.regression_scope == 'issue321-full' || inputs.regression_scope == 'issue321-f1' || inputs.regression_scope == 'issue334' || inputs.regression_scope == 'cli-phase1' || inputs.regression_scope == 'cli-phase1-e2e' || inputs.regression_scope == 'cli-defects-fixtures' || inputs.regression_scope == 'issue342' || inputs.regression_scope == 'issue342-shutdown-fixture' || inputs.regression_scope == 'issue345' || inputs.regression_scope == 'issue345-trust-fixture')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -482,6 +483,9 @@ jobs:
           fi
           if test "${{ inputs.regression_scope }}" = issue342-shutdown-fixture; then
             command=(cargo test -p team-agent --test e2e --locked shutdown -- --test-threads=1 --nocapture)
+          fi
+          if test "${{ inputs.regression_scope }}" = issue345-trust-fixture; then
+            command=(cargo test -p team-agent --test claude_provider_trust_prompt_red --locked -- --test-threads=1 --nocapture)
           fi
           "${command[@]}" 2>&1 | tee workspace-evidence/test.log
           statuses=("${PIPESTATUS[@]}")
