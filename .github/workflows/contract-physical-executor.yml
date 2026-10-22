@@ -250,6 +250,21 @@ jobs:
               ;;
             *) exit 64 ;;
           esac
+      - name: Bind focused regression evidence
+        if: ${{ always() && inputs.regression_scope == 'cursor-excise' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -d regression-evidence; then
+            (cd regression-evidence && shasum -a 256 ./* > focused-SHA256SUMS)
+          fi
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() && inputs.regression_scope == 'cursor-excise' }}
+        with:
+          name: cursor-focused-${{ github.run_id }}
+          path: regression-evidence/
+          if-no-files-found: error
+          retention-days: 14
       - name: Complete full root library regression
         if: ${{ always() && inputs.regression_scope == 'cursor-excise' }}
         shell: bash

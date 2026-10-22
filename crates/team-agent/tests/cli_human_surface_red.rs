@@ -375,7 +375,7 @@ fn h1_public_catalog_is_exactly_thirty_human_records_and_no_machine_record() {
         .collect::<BTreeSet<_>>();
     assert_eq!(
         catalog::COMMAND_SPECS.len(),
-        31,
+        30,
         "H1 physically remove Machine records, not only change visibility/tier"
     );
     assert_eq!(actual, HUMAN.iter().copied().collect());
@@ -398,7 +398,7 @@ fn h1_root_discovers_all_thirty_once_in_catalog_and_zero_private_names() {
         .collect::<Vec<_>>();
     assert_eq!(
         visible.len(),
-        31,
+        30,
         "H1 root command list: {visible:?}\n{help}"
     );
     assert_eq!(
