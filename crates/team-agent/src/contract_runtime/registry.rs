@@ -343,7 +343,7 @@ mod tests {
                 assert_eq!(field, "codex tool panel");
                 assert_eq!(reason.code, "codex-tool-panel-not-admitted");
             }
-            other => panic!("codex tool panel: {other:?}"),
+            _ => panic!("expected unverified Codex tool panel"),
         }
         assert_eq!(codex.server_key().expect("static server key"), "team_orchestrator");
         assert!(matches!(
@@ -365,7 +365,7 @@ mod tests {
                     ["contract-mcp".to_string(), "/tmp/codex-workspace".to_string()]
                 );
             }
-            other => panic!("contract-mcp args: {other:?}"),
+            _ => panic!("expected Codex owned MCP arguments"),
         }
         assert!(matches!(
             codex.adapter(PathBuf::new(), vec!["mcp".into()], BTreeMap::new()),
