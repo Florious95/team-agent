@@ -558,8 +558,6 @@ impl BusySignalKind {
 pub enum SubmitConsumptionReason {
     /// The token/input identity disappeared in the consumption capture.
     ConsumptionFromCapture,
-    /// Cursor's bounded polling observed a provider-busy signal.
-    CursorPollingBusy,
     /// The final fallback capture observed a provider-busy signal.
     FallbackBusy,
     /// The payload had no token marker, so no structural consumption probe ran.
@@ -575,7 +573,6 @@ impl SubmitConsumptionReason {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ConsumptionFromCapture => "consumption_from_capture",
-            Self::CursorPollingBusy => "cursor_poll_busy",
             Self::FallbackBusy => "fallback_busy",
             Self::NoMarker => "no_marker",
             Self::Unverified => "unverified",

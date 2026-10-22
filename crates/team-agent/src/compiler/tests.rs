@@ -8,13 +8,13 @@ use std::sync::atomic::{AtomicU32, Ordering};
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 #[test]
-fn cursor_effort_is_rejected_by_shared_admission_for_every_level() {
-    for effort in ["low", "medium", "high", "xhigh", "max", "ultra"] {
-        let role = write_tmp("cursor.md", &format!("---\nprovider: cursor_agent\neffort: {effort}\n---\nRole\n"));
+fn retired_cursor_provider_is_rejected_before_effort_admission() {
+    for provider in ["cursor_agent", "agent"] {
+        let role = write_tmp("retired.md", &format!("---\nprovider: {provider}\n---\nRole\n"));
         let error = compile_role_agent(&role, &Value::Map(Vec::new()), "/workspace")
             .err()
-            .expect("Cursor must reject effort before command construction");
-        assert!(error.to_string().contains("cursor_agent does not support effort; the Cursor CLI has no --effort flag"));
+            .expect("retired provider must reject before command construction");
+        assert!(error.to_string().contains("retired provider"));
         fs::remove_dir_all(role.parent().unwrap()).unwrap();
     }
 }

@@ -24,9 +24,6 @@ pub enum Provider {
     /// Grok CLI (0.5.67 provider-adapter). Append system prompt via `--rules`,
     /// bypass `--always-approve`, session `--session-id`.
     Grok,
-    /// Cursor `agent` CLI (0.5.67 provider-adapter). Append system prompt via
-    /// workspace `.cursor/rules/*.mdc` (方案 1 变体), bypass `--force`.
-    CursorAgent,
     /// Pi coding agent CLI. Models are selected from its live catalog.
     Pi,
     Fake,
@@ -45,7 +42,6 @@ pub enum Provider {
 ///   - pi: low|medium|high|xhigh|max → `--thinking <level>`
 ///   - grok: low|medium|high|xhigh → `--effort <level>`; max/ultra rejected
 ///   - copilot / gemini_cli / fake: low..xhigh ignored with warning; max/ultra rejected
-///   - cursor_agent: all effort rejected
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ProviderEffort {
     #[serde(rename = "low")]
@@ -95,7 +91,7 @@ impl ProviderEffort {
             Provider::Codex => true,
             Provider::Claude | Provider::ClaudeCode | Provider::Pi => self != Self::Ultra,
             Provider::Grok => !matches!(self, Self::Max | Self::Ultra),
-            Provider::Copilot | Provider::GeminiCli | Provider::CursorAgent | Provider::Fake => {
+            Provider::Copilot | Provider::GeminiCli | Provider::Fake => {
                 false
             }
         }
@@ -104,9 +100,6 @@ impl ProviderEffort {
     /// One admission policy for compiler, direct specs and runtime commands.
     /// Ok(None) preserves the legacy warning-and-ignore providers.
     pub fn resolve_for_provider(self, provider: Provider) -> Result<Option<Self>, &'static str> {
-        if provider == Provider::CursorAgent {
-            return Err("cursor_agent does not support effort; the Cursor CLI has no --effort flag");
-        }
         if self.is_supported_by(provider) {
             Ok(Some(self))
         } else if self == Self::Ultra {

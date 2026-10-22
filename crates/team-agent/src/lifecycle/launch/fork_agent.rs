@@ -73,7 +73,6 @@ fn refuse_missing_in_window_fork(provider: Provider, provider_raw: &str) -> Life
         Provider::Grok
             | Provider::Claude
             | Provider::ClaudeCode
-            | Provider::CursorAgent
             | Provider::Pi
     ) {
         LifecycleError::Provider(format!(

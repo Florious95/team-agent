@@ -353,14 +353,6 @@ impl ProviderAdapter for BasicProviderAdapter {
                 native_mcp_config: false,
                 writes_global_settings: false,
             },
-            // Cursor agent: --resume [chatId] 有 → resume true; 无 fork flag →
-            // fork false; 无 --mcp-config → native_mcp_config false。
-            Provider::CursorAgent => ProviderCaps {
-                resume: true,
-                fork: false,
-                native_mcp_config: false,
-                writes_global_settings: false,
-            },
             Provider::Pi => ProviderCaps {
                 resume: true,
                 fork: false,
@@ -414,9 +406,6 @@ impl ProviderAdapter for BasicProviderAdapter {
             // 标"weak / no auth-status command available";Compatible/Official 走 BYOK
             // 路径,有 COPILOT_PROVIDER_BASE_URL 时已脱离 GitHub 登录通道。
             Provider::Copilot => copilot_auth_hint(auth_mode),
-            // Cursor: 登录探测未接。U-17 前不得把未观测写成 Present（shim 对
-            // `cursor-agent status` 会假绿 Logged in）。缺键 ≠ 已知未登录，故不用 Missing。
-            Provider::CursorAgent => AuthHintStatus::Unknown,
             Provider::Pi => AuthHintStatus::Unknown,
             _ => match auth_mode {
                 AuthMode::Subscription => AuthHintStatus::Present,
@@ -485,10 +474,6 @@ impl ProviderAdapter for BasicProviderAdapter {
             }
             Provider::Grok => Ok(grok_launch_command(
                 system_prompt,
-                model,
-                dangerously_skip_permissions,
-            )?),
-            Provider::CursorAgent => Ok(cursor_agent_base_command(
                 model,
                 dangerously_skip_permissions,
             )?),
@@ -619,20 +604,6 @@ impl ProviderAdapter for BasicProviderAdapter {
                 Ok(CommandPlan {
                     argv,
                     expected_session_id: Some(SessionId::new(expected)),
-                    provider_projects_root: None,
-                    managed_mcp_config: false,
-                })
-            }
-            Provider::CursorAgent => {
-                // U-01 create-chat 无登录超时；禁止发明 --session-id。
-                // pending 只能是 CLI chatId，本拍不造假 uuid。
-                let argv = cursor_agent_base_command(
-                    ctx.model,
-                    ctx.dangerously_skip_permissions,
-                )?;
-                Ok(CommandPlan {
-                    argv,
-                    expected_session_id: None,
                     provider_projects_root: None,
                     managed_mcp_config: false,
                 })
@@ -816,15 +787,6 @@ impl ProviderAdapter for BasicProviderAdapter {
                 argv.push(session_id.as_str().to_string());
                 Ok(argv)
             }
-            // Cursor resume: base + `--resume <chatId>`。
-            Provider::CursorAgent => {
-                let mut argv = cursor_agent_base_command(model, dangerously_skip_permissions)?;
-                // Put --resume immediately after `agent` so the CLI treats it as
-                // the session mode rather than a trailing flag after --workspace.
-                argv.insert(1, "--resume".to_string());
-                argv.insert(2, session_id.as_str().to_string());
-                Ok(argv)
-            }
             Provider::Pi => Err(ProviderError::ResumeUnavailable(
                 "pi resume requires the captured exact session path".to_string(),
             )),
@@ -918,26 +880,6 @@ impl ProviderAdapter for BasicProviderAdapter {
                 )?;
                 argv.push("--resume".to_string());
                 argv.push(session_id.as_str().to_string());
-                Ok(CommandPlan::argv_only(argv))
-            }
-            Provider::CursorAgent => {
-                let Some(session_id) = session_id else {
-                    return Err(ProviderError::ResumeUnavailable(
-                        "cursor_agent resume requires chatId; empty --resume is forbidden (picker)".to_string(),
-                    ));
-                };
-                let raw = session_id.as_str();
-                if raw.is_empty() || raw.contains('/') || raw.contains('\\') || raw.contains('\0') {
-                    return Err(ProviderError::ResumeUnavailable(
-                        "cursor_agent resume rejected forged or empty chatId".to_string(),
-                    ));
-                }
-                let mut argv = cursor_agent_base_command(
-                    ctx.model,
-                    ctx.dangerously_skip_permissions,
-                )?;
-                argv.push("--resume".to_string());
-                argv.push(raw.to_string());
                 Ok(CommandPlan::argv_only(argv))
             }
             _ => self
@@ -1037,7 +979,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                 argv.push("--fork-session".to_string());
                 Ok(argv)
             }
-            Provider::Pi | Provider::CursorAgent | Provider::GeminiCli | Provider::Fake => {
+            Provider::Pi | Provider::GeminiCli | Provider::Fake => {
                 Err(ProviderError::CapabilityUnsupported(format!(
                     "{} does not support native session fork",
                     provider_wire(self.provider)
@@ -1245,13 +1187,6 @@ impl ProviderAdapter for BasicProviderAdapter {
             Provider::Grok | Provider::GeminiCli | Provider::Fake => {
                 patterns(r">", r"working|processing", r"Error|Traceback")
             }
-            // Cursor: U-15 未过前不得用 generic `>` 单独判已证实 idle。
-            // 字面量 `cursor-idle-unset-until-u15` 不会出现在屏上。
-            Provider::CursorAgent => patterns(
-                r"cursor-idle-unset-until-u15",
-                r"cursor-busy-unset-until-u15",
-                r"Error|Traceback",
-            ),
         }
     }
 
@@ -1355,7 +1290,6 @@ pub(crate) fn json_inline(value: &serde_json::Value) -> String {
 use super::adapters::claude::{claude_base_command, claude_launch_command};
 use super::adapters::codex::codex_base_command;
 use super::adapters::copilot::copilot_base_command;
-use super::adapters::cursor_agent::cursor_agent_base_command;
 use super::adapters::fake::fake_worker_command;
 use super::adapters::grok::{grok_base_command, grok_launch_command};
 

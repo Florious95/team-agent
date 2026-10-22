@@ -442,7 +442,7 @@ pub(crate) fn inject(
                 Some(path),
             )
             .for_provider(provider);
-            error.action = "Use pi, claude, codex or grok, or clear leader-prompt; Cursor requires native private-plugin isolation evidence";
+            error.action = "Use pi, claude, codex or grok, or clear leader-prompt";
             return Err(error);
         }
     };
@@ -890,7 +890,6 @@ mod tests {
     fn leader_prompt_unadmitted_providers_fail_without_argv_mutation() {
         let path = Path::new("/home/example/.team-agent/leader-prompt.txt");
         for provider in [
-            Provider::CursorAgent,
             Provider::Copilot,
             Provider::GeminiCli,
             Provider::Fake,

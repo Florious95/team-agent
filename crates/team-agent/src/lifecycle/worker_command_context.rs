@@ -226,10 +226,8 @@ fn mcp_tool_name(provider: Provider, server: &str, tool: &str) -> String {
         Provider::Grok => format!("{server}__{tool}"),
         // Pi's owned extension binds these logical operations to the observed MCP call surface.
         Provider::Pi => tool.to_string(),
-        // CursorAgent / Codex / Copilot / GeminiCli / Fake: 未验证，沿用现状点号。
-        // CursorAgent 不可与 grok 同臂：仓库里没有活转录，`{server}__{tool}` 是推断。
-        Provider::CursorAgent
-        | Provider::Codex
+        // Codex / Copilot / GeminiCli / Fake: 未验证，沿用现状点号。
+        Provider::Codex
         | Provider::Copilot
         | Provider::GeminiCli
         | Provider::Fake => format!("{server}.{tool}"),

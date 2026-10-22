@@ -24,6 +24,67 @@
 
 use crate::model::enums::Provider;
 
+pub(crate) const RETIRED_PROVIDER_ERROR: &str =
+    "retired provider cursor_agent/agent is unsupported; configure provider: cursor explicitly";
+
+pub(crate) fn is_retired_provider(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "cursor_agent" | "agent"
+    )
+}
+
+/// Inspect declared provider keys even when malformed YAML would become plain text.
+pub(crate) fn has_retired_provider_header(raw: &str) -> bool {
+    let (meta, _) = crate::compiler::split_front_matter(raw);
+    if let Some(provider) = meta.get("provider") {
+        return provider.as_str().is_some_and(is_retired_provider);
+    }
+    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let Some(header) = normalized.strip_prefix("---\n") else {
+        return false;
+    };
+    header
+        .lines()
+        .take_while(|line| *line != "---")
+        .any(|line| {
+            line == line.trim_start()
+                && line.split_once(':').is_some_and(|(key, value)| {
+                    key.trim().trim_matches(['\'', '"']) == "provider"
+                        && is_retired_provider(
+                            value
+                                .split('#')
+                                .next()
+                                .unwrap_or("")
+                                .trim()
+                                .trim_matches(['\'', '"']),
+                        )
+                })
+        })
+}
+
+pub(crate) fn require_active_state_providers(
+    state: &serde_json::Value,
+    target: Option<&str>,
+) -> Result<(), &'static str> {
+    if state
+        .get("agents")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|agents| {
+            agents.iter().any(|(id, row)| {
+                target.is_none_or(|target| target == id)
+                    && row
+                        .get("provider")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(is_retired_provider)
+            })
+        })
+    {
+        return Err(RETIRED_PROVIDER_ERROR);
+    }
+    Ok(())
+}
+
 /// Canonical snake_case wire string for `Provider`. Used for state JSON,
 /// log fields, and any cross-process serialization. Stable: do not change
 /// existing values.
@@ -35,7 +96,6 @@ pub(crate) fn provider_wire(provider: Provider) -> &'static str {
         Provider::Copilot => "copilot",
         Provider::GeminiCli => "gemini_cli",
         Provider::Grok => "grok",
-        Provider::CursorAgent => "cursor_agent",
         Provider::Pi => "pi",
         Provider::Fake => "fake",
     }
@@ -83,7 +143,6 @@ pub(crate) fn requires_resume_backing(provider: Provider) -> bool {
             | Provider::ClaudeCode
             | Provider::Copilot
             | Provider::Grok
-            | Provider::CursorAgent
             | Provider::Pi
     )
 }
@@ -104,10 +163,6 @@ pub(crate) fn aliases(provider: Provider) -> &'static [&'static str] {
         Provider::Copilot => &["copilot"],
         Provider::GeminiCli => &["gemini_cli"],
         Provider::Grok => &["grok"],
-        // canonical wire form 恒为首项 (parse_provider round-trip 依赖); "agent"
-        // 是 exec 二进制名, 仅作 alias (不参与 command-text 子串匹配, 见
-        // leader/provider_attribution.rs TODO)。
-        Provider::CursorAgent => &["cursor_agent", "agent"],
         Provider::Pi => &["pi"],
         Provider::Fake => &["fake"],
     }
@@ -124,7 +179,6 @@ pub(crate) fn command_name(provider: Provider) -> &'static str {
         Provider::Copilot => "copilot",
         Provider::GeminiCli => "gemini",
         Provider::Grok => "grok",
-        Provider::CursorAgent => "agent",
         Provider::Pi => "pi",
         Provider::Fake => "team-agent",
     }
@@ -137,7 +191,6 @@ const ALL_PROVIDERS: &[Provider] = &[
     Provider::Copilot,
     Provider::GeminiCli,
     Provider::Grok,
-    Provider::CursorAgent,
     Provider::Pi,
     Provider::Fake,
 ];
@@ -287,6 +340,33 @@ mod tests {
         assert_eq!(parse_provider(""), None);
         assert_eq!(parse_provider("openai"), None);
         assert_eq!(parse_provider("CLAUDE"), None); // case-sensitive
+    }
+
+    #[test]
+    fn retired_headers_check_top_level_without_rejecting_active_roles() {
+        for provider in ["pi", "claude", "claude_code"] {
+            let role = format!("---\nprovider: {provider}\nexample:\n  provider: agent\nnotes: |\n  provider: cursor_agent\n---\nprovider: agent\n");
+            assert!(!has_retired_provider_header(&role));
+        }
+        assert!(!has_retired_provider_header("---\nexample:\n  provider: agent\n---\n"));
+        for provider in ["cursor_agent", "agent"] {
+            assert!(has_retired_provider_header(&format!("---\nprovider: {provider}\n---\n")));
+            assert!(has_retired_provider_header(&format!("---\nprovider: {provider}\nmissing closing delimiter")));
+            assert_eq!(parse_provider(provider), None);
+        }
+    }
+
+    #[test]
+    fn retired_state_guard_is_scoped_to_the_addressed_seat() {
+        let state = serde_json::json!({"agents": {
+            "pi": {"provider": "pi"},
+            "claude": {"provider": "claude"},
+            "retired": {"provider": "cursor_agent"}
+        }});
+        assert!(require_active_state_providers(&state, Some("pi")).is_ok());
+        assert!(require_active_state_providers(&state, Some("claude")).is_ok());
+        assert!(require_active_state_providers(&state, Some("retired")).is_err());
+        assert!(require_active_state_providers(&state, None).is_err());
     }
 
     #[test]

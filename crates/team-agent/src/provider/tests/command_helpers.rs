@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use super::*;
 use crate::model::enums::ProviderEffort;
-use crate::provider::adapters::{claude, codex, copilot, cursor_agent, grok, pi};
+use crate::provider::adapters::{claude, codex, copilot, grok, pi};
 use crate::provider::ProviderCommandOverrides;
 
 #[test]
@@ -27,8 +27,6 @@ fn command_helpers_keep_provider_argv_bytes_and_order() {
     assert_eq!(copilot::copilot_base_command(
         AuthMode::Subscription, Some(&mcp), Some(raw), Some(""), true,
     ), ["copilot", "--no-color", "--no-auto-update", "--no-remote", "--disable-builtin-mcps", "--allow-all", "--allow-tool", "team_orchestrator", "--model", "", "--additional-mcp-config", "{}"]);
-    assert_eq!(cursor_agent::cursor_agent_base_command(Some(raw), true).expect("cursor"),
-        ["agent", "--trust", "--sandbox", "disabled", "--force", "--model", raw, "--workspace", "{workspace}"]);
     assert_eq!(grok::grok_base_command(Some(raw), Some("  model-id  "), true, Some(ProviderEffort::Medium)).expect("grok"),
         ["grok", "--always-approve", "--model", "model-id", "--effort", "medium", "--rules", raw]);
     assert_eq!(grok::grok_base_command(Some(""), Some("  "), false, None).expect("grok empty"), ["grok", "--rules", ""]);
@@ -50,6 +48,5 @@ fn command_helpers_keep_absent_options_and_safe_defaults() {
         ["codex", "--no-alt-screen", "--disable", "shell_snapshot", "--disable", "apps", "-c", "check_for_update_on_startup=false"]);
     assert_eq!(copilot::copilot_base_command(AuthMode::Subscription, None, None, None, false),
         ["copilot", "--no-color", "--no-auto-update", "--no-remote", "--disable-builtin-mcps", "--allow-tool", "team_orchestrator"]);
-    assert_eq!(cursor_agent::cursor_agent_base_command(None, false).expect("cursor"), ["agent", "--workspace", "{workspace}"]);
     assert_eq!(grok::grok_base_command(None, None, false, None).expect("grok"), ["grok"]);
 }

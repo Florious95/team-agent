@@ -26,7 +26,7 @@ pub static CURSOR_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         id: "cursor",
         display_name: "Cursor Agent (contract)",
         binary: "cursor-agent",
-        // cursor_agent/agent remain legacy routes; this is not a state migration.
+        // cursor_agent/agent are retired; use the canonical cursor key explicitly.
         aliases: &[],
         leader: Support::Unverified(UNVERIFIED),
     },

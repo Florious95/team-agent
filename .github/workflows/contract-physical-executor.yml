@@ -26,6 +26,7 @@ on:
           - full
           - host-ancestry
           - host-native
+          - cursor-excise
 
 permissions:
   contents: read
@@ -170,6 +171,37 @@ jobs:
             return "${statuses[0]}"
           }
           case "$REGRESSION_SCOPE" in
+            cursor-excise)
+              run_case root-check cargo check -p team-agent --all-targets --locked
+              run_case root-build cargo build -p team-agent --bin team-agent --locked
+              cursor_exit=0
+              run_case root-lib cargo test -p team-agent --lib --locked -- --test-threads=1 || cursor_exit=1
+              run_case pi-lib cargo test -p team-agent --lib --locked pi_ -- --test-threads=1 || cursor_exit=1
+              run_case claude-lib cargo test -p team-agent --lib --locked claude -- --test-threads=1 || cursor_exit=1
+              run_case cursor-integrations cargo test -p team-agent --locked --no-fail-fast \
+                --test cli_argv_routing_red \
+                --test contract_config \
+                --test doctor_property_contract \
+                --test fork_blast_radius_other_providers \
+                --test fork_capability_behavior \
+                --test issue238_codex_effort_contract \
+                --test model_fuzzy_lookup_red \
+                --test provider_effort_mapping_contract \
+                --test submit_behavior_blast_radius \
+                -- --test-threads=1 || cursor_exit=1
+              run_case pi-claude-integrations cargo test -p team-agent --locked --no-fail-fast \
+                --test provider_effort_mvp_red \
+                --test claude_provider_command_plan_red \
+                --test provider_claude_session_uuid_red \
+                --test claude_session_deterministic_attribution_red \
+                --test claude_provider_classify_red \
+                --test claude_provider_trust_prompt_red \
+                --test profile_smoke_red \
+                --test team_in_team_delivery_scope_red \
+                -- --test-threads=1 || cursor_exit=1
+              run_case contract-all cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets -- --test-threads=1 || cursor_exit=1
+              exit "$cursor_exit"
+              ;;
             host-ancestry)
               run_case host-ancestry cargo test --manifest-path crates/team-agent-contract/Cargo.toml --test host_ancestry --locked -- --test-threads=1
               ;;

@@ -42,6 +42,9 @@ pub struct IgnoredTeamField {
 pub fn read_front_matter(path: &Path) -> Result<(Value, String), ModelError> {
     let text = fs::read_to_string(path)
         .map_err(|e| ModelError::Runtime(format!("{}: {e}", path.display())))?;
+    if crate::provider::wire::has_retired_provider_header(&text) {
+        return Err(ModelError::Validation(format!("{}: {}", path.display(), crate::provider::wire::RETIRED_PROVIDER_ERROR)));
+    }
     Ok(split_front_matter(&text))
 }
 
@@ -494,6 +497,9 @@ fn compile_role_agent_with_mode(
     let provider = string_field(&meta, "provider")
         .filter(|provider| !provider.trim().is_empty())
         .unwrap_or_else(|| "pi".to_string());
+    if crate::provider::wire::is_retired_provider(&provider) {
+        return Err(ModelError::Validation(crate::provider::wire::RETIRED_PROVIDER_ERROR.into()));
+    }
     let is_pi = parse_canonical_provider(&provider) == Some(Provider::Pi);
     let contract_opt_in = matches!(meta.get("contract_runtime"), Some(Value::Bool(true)));
     #[cfg(unix)]

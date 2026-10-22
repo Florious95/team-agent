@@ -85,8 +85,8 @@ team-agent route disable
 （忽略大小写和两侧空白），无效值安全关闭。`enable/disable` 不清映射，`set` 精确替换、
 `add` 按序追加、`clear` 删除一个映射。结果同时报告持久化态、实际有效态与环境覆盖。
 
-Provider 键为 `claude`、`codex`、`copilot`、`gemini_cli`、`grok`、`cursor_agent`、`pi`。
-Claude/Claude Code 共用映射；支持 `claude_code/claude-code` 和 `agent/cursor` 别名。
+Provider 键为 `claude`、`codex`、`copilot`、`gemini_cli`、`grok`、`pi`。
+Claude/Claude Code 共用映射；支持 `claude_code/claude-code` 别名。
 第一个 `--` 后全部是字面 argv，包括 `--help`、`--json`、空字符串、`{workspace}`，不会二次 shell 展开。
 注入位置为原生 executable 之后、原有参数之前。不要保存密码/token，或覆盖框架管理的
 session/MCP/权限参数；既有身份、认证与安全检查不变。

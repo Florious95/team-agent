@@ -323,34 +323,6 @@ pub(super) fn spawn_agents(
                 );
             }
         }
-        // Cursor: role 经 .cursor/rules。MCP 身份默认写 provider-config/<id>/cursor
-        // （不继承父进程 TEAM_AGENT_*）。--workspace 指该工程根，--add-dir 真 workspace。
-        // 隔离关闭时仍拒绝第二席（共用 mcp.json last-writer）。不改 HOME。
-        if matches!(provider, Provider::CursorAgent) {
-            refuse_second_cursor_occupant(workspace, agent_id_raw, Some(spec))?;
-            apply_cursor_agent_rules_overlay(workspace, agent_id_raw, system_prompt.as_str())?;
-            let project = crate::lifecycle::launch::prepare_cursor_seat_mcp(
-                workspace,
-                agent_id_raw,
-                &mcp_config,
-            )?;
-            enable_cursor_workspace_mcp_with_profile(
-                workspace,
-                project.as_deref(),
-                Some(&profile_launch),
-            )?;
-            apply_cursor_spawn_workspace_pointers(&mut plan.argv, workspace, agent_id_raw)?;
-            let proxy = apply_cursor_subscription_proxy_env_with_profile(&mut env, &profile_launch);
-            let event_log = crate::event_log::EventLog::new(workspace);
-            let _ = event_log.write(
-                "provider.cursor.proxy_presence",
-                serde_json::json!({
-                    "agent_id": agent_id_raw,
-                    "https_proxy": proxy.https_proxy,
-                    "no_proxy": proxy.no_proxy,
-                }),
-            );
-        }
         if matches!(provider, Provider::Codex) {
             let spawn_cwd = crate::layout::worker_env::worker_spawn_cwd(agent, workspace);
             if let (Some(root), Some(home)) = (

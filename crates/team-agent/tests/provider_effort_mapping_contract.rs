@@ -23,14 +23,13 @@ fn effort_mapping_keeps_all_six_wire_values_and_trim_only_parsing() {
 }
 
 #[test]
-fn effort_mapping_keeps_nine_provider_by_six_level_admission_matrix() {
+fn effort_mapping_keeps_eight_provider_by_six_level_admission_matrix() {
     for provider in [Provider::Claude, Provider::ClaudeCode, Provider::Codex,
         Provider::Copilot, Provider::GeminiCli, Provider::Grok,
-        Provider::CursorAgent, Provider::Pi, Provider::Fake] {
+        Provider::Pi, Provider::Fake] {
         for (effort, _) in LEVELS {
             // This literal contract is deliberately independent of is_supported_by.
             let expected = match (provider, effort) {
-                (Provider::CursorAgent, _) => Err("cursor_agent does not support effort; the Cursor CLI has no --effort flag"),
                 (Provider::Codex, _) => Ok(Some(effort)),
                 (_, ProviderEffort::Ultra) => Err("effort 'ultra' is only supported by codex"),
                 (Provider::Claude | Provider::ClaudeCode | Provider::Pi, _) => Ok(Some(effort)),

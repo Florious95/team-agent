@@ -112,7 +112,7 @@ fn leader_prompt_plans_preserve_absent_baseline_append_only_leaders_and_never_ma
         let _routing = h.with_env("TEAM_AGENT_CLI_ARGV_ROUTING", "off");
         let config = crate::leader::prompt::config_path().unwrap();
         let providers = [Provider::Pi, Provider::Claude, Provider::ClaudeCode, Provider::Codex,
-            Provider::Grok, Provider::CursorAgent, Provider::Copilot];
+            Provider::Grok, Provider::Copilot];
         for provider in providers {
             let workspace = h.workspace(&format!("provider-{}", crate::provider::wire::provider_wire(provider)));
             let baseline = plan(provider, &workspace, &[], false).unwrap();
@@ -122,7 +122,7 @@ fn leader_prompt_plans_preserve_absent_baseline_append_only_leaders_and_never_ma
             assert_eq!(stable_argv(&empty), stable_argv(&baseline), "empty configuration changed argv for {provider:?}");
             assert_eq!(empty.leader_env, baseline.leader_env);
             fs::write(&config, SENTINEL).unwrap();
-            if matches!(provider, Provider::CursorAgent | Provider::Copilot) {
+            if matches!(provider, Provider::Copilot) {
                 let LeaderError::Prompt(error) = plan(provider, &workspace, &[], false).unwrap_err() else { panic!("typed unsupported") };
                 assert_eq!(error.reason, "leader_prompt_unsupported");
             } else {
@@ -177,7 +177,6 @@ fn leader_prompt_attach_skips_corrupt_configuration_and_all_injection_for_every_
                 Provider::ClaudeCode,
                 Provider::Codex,
                 Provider::Grok,
-                Provider::CursorAgent,
                 Provider::Copilot,
             ] {
                 let workspace = h.workspace(&format!("attach-{provider:?}"));

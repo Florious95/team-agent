@@ -56,6 +56,8 @@ pub fn require_legacy_lifecycle(
     ) else {
         return Ok(());
     };
+    crate::provider::wire::require_active_state_providers(&selected.state, agent)
+        .map_err(|error| crate::cli::CliError::Runtime(error.into()))?;
     let selected_native = match agent {
         Some(id) => selected
             .state
@@ -64,6 +66,15 @@ pub fn require_legacy_lifecycle(
             .is_some_and(is_contract),
         None => has_contract(&selected.state),
     };
+    // Check only the addressed role; a retired sibling must not block Pi/Claude.
+    if let Some(id) = agent {
+        if let Ok(path) = crate::lifecycle::launch::role_source::resolve_role_source(
+            &selected.run_workspace, &selected.team_dir, &selected.state,
+            &crate::model::ids::AgentId::new(id),
+        ) {
+            require_legacy_role(Some(&path), None)?;
+        }
+    }
     let configured_native = selected
         .state
         .get("team_dir")
@@ -106,6 +117,12 @@ pub fn require_legacy_role(
         }
         None => (None, false),
     };
+    if provider.is_some_and(crate::provider::wire::is_retired_provider)
+        || declared.as_deref().is_some_and(crate::provider::wire::is_retired_provider)
+        || file.as_deref().is_some_and(crate::provider::wire::has_retired_provider_header)
+    {
+        return Err(crate::cli::CliError::Runtime(crate::provider::wire::RETIRED_PROVIDER_ERROR.into()));
+    }
     let selected = provider.or(declared.as_deref());
     let opt_in = file_opt_in
         && provider

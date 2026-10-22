@@ -8,8 +8,6 @@
 //!       what: 按 bypass 结论写或清 MCP 自动放行相关变量
 //!     - name: apply_copilot_instructions_overlay
 //!       what: 把角色提示词写成 per-agent 的 AGENTS.md 并指向它
-//!     - name: apply_cursor_agent_rules_overlay
-//!       what: 把角色提示词写成 workspace 内 per-agent 的 cursor rules 文件
 //!     - name: fill_spawn_placeholders_full
 //!       what: 替换 argv 里的 workspace、agent_id 与 team_id 占位符
 //!   depends:
@@ -254,41 +252,6 @@ pub(crate) fn apply_copilot_instructions_overlay(
     Ok(())
 }
 
-/// ---
-/// purpose: 把角色提示词写成 workspace 内 per-agent 的 cursor rules 文件
-/// params:
-///   system_prompt: 写入 rules 正文，文件头声明 alwaysApply
-/// returns: 成功返回空值
-/// errors: 建目录或写文件失败时返回 StatePersist
-/// ---
-/// 0.5.67 Cursor append-system-prompt 方案 1 变体（冒烟 PASS, see
-/// .team/artifacts/0.5.67-cursor-rules-smoke.md）— Cursor `agent` CLI 无
-/// append/rule CLI flag, 只从 workspace 静态 rules 文件读:
-///   `.cursor/rules/**/*.mdc` (alwaysApply: true) / `AGENTS.md` / `.cursorrules`。
-///
-/// 这里在 launch 路径写 `<workspace>/.cursor/rules/team-agent-role-<agent_id>.mdc`
-/// 并把 role（= compile_worker_system_prompt 输出）放进去, argv 只带
-/// `--workspace <workspace>`（cursor_agent.rs）。cursor CLI 读取该目录即加载 role。
-///
-/// 目录布局为 workspace 内 `.cursor/rules/`（Cursor 唯一 rules 通道; 无法像 copilot
-/// 那样放 `.team/runtime/` —— 那是 Cursor 不读的路径）。文件名含 `<agent_id>`
-/// 保证 per-agent 隔离, 不互相污染。
-pub(crate) fn apply_cursor_agent_rules_overlay(
-    workspace: &Path,
-    agent_id: &str,
-    system_prompt: &str,
-) -> Result<(), LifecycleError> {
-    let dir = workspace.join(".cursor").join("rules");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", dir.display())))?;
-    let rules = dir.join(format!("team-agent-role-{agent_id}.mdc"));
-    let content = format!(
-        "---\ndescription: Team Agent role injection (auto-generated)\nalwaysApply: true\n---\n\n{system_prompt}\n"
-    );
-    std::fs::write(&rules, content.as_bytes())
-        .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", rules.display())))?;
-    Ok(())
-}
 
 /// ---
 /// purpose: 扫出 copilot 侧残留的 MCP server，对非本框架的逐个追加禁用参数
@@ -448,76 +411,6 @@ pub(super) fn parse_copilot_mcp_list_server_names(text: &str) -> Vec<String> {
         out.push(token);
     }
     out
-}
-
-/// Subscription seats inherit parent env, but that is implicit. Cursor cloud
-/// on this host is blocked without a proxy; `profile_launch` copies these
-/// keys only on the compatible-api path. Copy them explicitly here so a
-/// subscription cursor seat sees the same keys. Values may contain
-/// credentials — callers must only log presence/length, never the value.
-const CURSOR_PROXY_KEYS: &[&str] = &[
-    "HTTPS_PROXY",
-    "HTTP_PROXY",
-    "ALL_PROXY",
-    "NO_PROXY",
-    "https_proxy",
-    "http_proxy",
-    "all_proxy",
-    "no_proxy",
-];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CursorProxyPresence {
-    pub https_proxy: bool,
-    pub no_proxy: bool,
-}
-
-/// ---
-/// purpose: 给订阅制 cursor 席位显式补上父进程里的代理变量
-/// params:
-///   env: 就地补键，已有同名键不覆盖
-/// returns: 记录是否存在 https 代理与 no_proxy，只记存在与否不记值
-/// ---
-pub fn apply_cursor_subscription_proxy_env(
-    env: &mut BTreeMap<String, String>,
-) -> CursorProxyPresence {
-    let mut https_proxy = false;
-    let mut no_proxy = false;
-    for key in CURSOR_PROXY_KEYS {
-        let Ok(value) = std::env::var(key) else {
-            continue;
-        };
-        if value.is_empty() {
-            continue;
-        }
-        if key.eq_ignore_ascii_case("HTTPS_PROXY") {
-            https_proxy = true;
-        }
-        if key.eq_ignore_ascii_case("NO_PROXY") {
-            no_proxy = true;
-        }
-        env.entry((*key).to_string()).or_insert(value);
-    }
-    CursorProxyPresence {
-        https_proxy,
-        no_proxy,
-    }
-}
-
-pub(crate) fn apply_cursor_subscription_proxy_env_with_profile(
-    env: &mut BTreeMap<String, String>,
-    profile_launch: &crate::provider::ProviderProfileLaunch,
-) -> CursorProxyPresence {
-    if crate::lifecycle::profile_launch::cursor_subscription_direct_mode(profile_launch) {
-        for key in &profile_launch.env_unset {
-            env.remove(key);
-        }
-        return CursorProxyPresence {
-            https_proxy: false,
-            no_proxy: env.keys().any(|key| key.eq_ignore_ascii_case("NO_PROXY")),
-        };
-    }
-    apply_cursor_subscription_proxy_env(env)
 }
 
 /// ---

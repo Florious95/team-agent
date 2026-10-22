@@ -3,7 +3,7 @@
 //! contract:
 //!   provides:
 //!     - name: deliver_stored_message
-//!       what: 单次物理注入；grok 队列默认再按回车顶出；cursor 打开单回车闸且不 flush send-now
+//!       what: 单次物理注入；grok 队列默认再按回车顶出
 //! boundary:
 //!   - 不把物理 success 写成 delivered
 //!   - 不重粘文本
@@ -343,6 +343,8 @@ fn deliver_prepared_message(
 ) -> Result<DeliveryOutcome, MessagingError> {
     let canonical_owner_team_id = prepared.canonical_owner_team_id;
     let state = prepared.scoped.as_ref().unwrap_or(fallback);
+    crate::provider::wire::require_active_state_providers(state, Some(&message.recipient))
+        .map_err(|error| MessagingError::Provider(error.into()))?;
     if message.recipient == "leader"
         && matches!(
             message.status.as_str(),
@@ -699,27 +701,21 @@ fn deliver_prepared_message(
         canonical_owner_team_id.as_deref(),
         resolved.metadata.as_ref(),
     );
-    let recipient_cursor = recipient_is_cursor_agent(state, &message.recipient);
     let inject_attempt = crate::tmux_backend::with_paste_to_submit_floor(
         paste_to_submit_floor_for_recipient(state, &message.recipient),
-        || {
-            crate::tmux_backend::with_cursor_single_enter(recipient_cursor, || {
-                transport.inject_with_submit_observer(
-                    &target,
-                    &payload,
-                    Key::Enter,
-                    true,
-                    Some(&submit_observer),
-                )
-            })
-        },
+        || transport.inject_with_submit_observer(
+            &target,
+            &payload,
+            Key::Enter,
+            true,
+            Some(&submit_observer),
+        ),
     );
     let inject_report = match inject_attempt {
         Ok(report) => {
             // grok 忙时第一次回车只入显式队列。默认 send-now：只重按回车顶出去。
             // 无 `Enter:send now` 时零次额外按键，claude/codex 行为不变。
-            // cursor：第二下 Enter 打断进行中回合，不走 flush。
-            if !crate::provider::submit_now::keep_provider_queue_requested() && !recipient_cursor {
+            if !crate::provider::submit_now::keep_provider_queue_requested() {
                 match crate::provider::submit_now::flush_explicit_queue(transport, &target) {
                     Ok(flush) if flush.extra_enters > 0 => {
                         let _ = event_log.write(
@@ -2564,7 +2560,6 @@ fn recipient_pane_has_actionable_startup_prompt(
         ),
         Provider::Pi
         | Provider::Grok
-        | Provider::CursorAgent
         | Provider::GeminiCli
         | Provider::Fake => false,
     }
@@ -2580,25 +2575,18 @@ fn recipient_provider(state: &serde_json::Value, recipient: &str) -> Option<Prov
         .and_then(parse_canonical_provider)
 }
 
-fn recipient_is_cursor_agent(state: &serde_json::Value, recipient: &str) -> bool {
-    matches!(
-        recipient_provider(state, recipient),
-        Some(Provider::CursorAgent)
-    )
-}
-
 /// ---
 /// purpose: paste→Enter 地板按收件人 provider 选择
-/// contract: CursorAgent 与 Grok 为 1s；其余（含 claude）为 ZERO
-/// boundary: 不改 cursor 单回车闸；不把地板套到 claude/codex
+/// contract: Grok 为 1s；其余（含 claude）为 ZERO
+/// boundary: 不把地板套到 claude/codex
 /// ---
 pub(crate) fn paste_to_submit_floor_for_recipient(
     state: &serde_json::Value,
     recipient: &str,
 ) -> Duration {
     match recipient_provider(state, recipient) {
-        Some(Provider::CursorAgent) | Some(Provider::Grok) => {
-            crate::tmux_backend::CURSOR_PASTE_TO_SUBMIT_FLOOR
+        Some(Provider::Grok) => {
+            crate::tmux_backend::GROK_PASTE_TO_SUBMIT_FLOOR
         }
         _ => Duration::ZERO,
     }
@@ -2606,18 +2594,18 @@ pub(crate) fn paste_to_submit_floor_for_recipient(
 
 /// ---
 /// purpose: 判断收件 provider 是否必须禁止 submit observer 重按 Enter
-/// returns: CursorAgent 与 Pi 为 true，其余为 false
+/// returns: Pi 为 true，其余为 false
 /// ---
 pub(crate) fn recipient_requires_single_enter(state: &serde_json::Value, recipient: &str) -> bool {
     matches!(
         recipient_provider(state, recipient),
-        Some(Provider::CursorAgent | Provider::Pi)
+        Some(Provider::Pi)
     )
 }
 
 /// ---
 /// purpose: 判断收件 provider 是否允许 Grok send-now 显式队列 flush
-/// returns: CursorAgent 与 Pi 为 false，其余为 true
+/// returns: Pi 为 false，其余为 true
 /// ---
 pub(crate) fn recipient_allows_explicit_queue_flush(
     state: &serde_json::Value,
@@ -2625,7 +2613,7 @@ pub(crate) fn recipient_allows_explicit_queue_flush(
 ) -> bool {
     !matches!(
         recipient_provider(state, recipient),
-        Some(Provider::CursorAgent | Provider::Pi)
+        Some(Provider::Pi)
     )
 }
 
@@ -3643,12 +3631,10 @@ mod paste_floor_tests {
     }
 
     #[test]
-    fn grok_paste_to_submit_floor_matches_cursor() {
+    fn grok_paste_to_submit_floor_is_one_second() {
         let grok = paste_to_submit_floor_for_recipient(&state_with_provider("grok"), "w1");
-        let cursor = paste_to_submit_floor_for_recipient(&state_with_provider("cursor_agent"), "w1");
-        assert_eq!(grok, crate::tmux_backend::CURSOR_PASTE_TO_SUBMIT_FLOOR);
-        assert_eq!(cursor, crate::tmux_backend::CURSOR_PASTE_TO_SUBMIT_FLOOR);
-        assert_eq!(grok, cursor);
+        assert_eq!(grok, crate::tmux_backend::GROK_PASTE_TO_SUBMIT_FLOOR);
+        assert_eq!(grok, Duration::from_secs(1));
     }
 
     #[test]

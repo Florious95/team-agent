@@ -639,7 +639,7 @@ pub fn incomplete_resumable_agent_ids(state: &Value) -> Vec<String> {
 /// boundary:
 ///   - 只读 event log 与 rollout 路径存在性，不扫 provider 存档、不调分配器
 ///   - 不走分配器的 claimed-key 冲突检查，只看 exclude_session_ids 与 tombstone
-///   - rollout_path 存在性用 exists()——对目录型 backing(grok/cursor)只要目录在就为真
+///   - rollout_path 存在性用 exists()——对目录型 backing(grok)只要目录在就为真
 ///   - claude 家族额外过滤 leader-marker transcript;其它 provider 无等价归属过滤
 ///   - 修复成功会清掉 attribution_ambiguous 标记
 /// ---

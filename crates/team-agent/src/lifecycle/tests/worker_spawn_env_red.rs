@@ -35,6 +35,42 @@ const RUNTIME_TEAM_KEY: &str = "teamdir";
 
 #[test]
 #[serial(env)]
+fn retired_cursor_sibling_does_not_block_pi_or_claude_single_seat_start() {
+    let _home = hermetic_guard::HermeticTestEnv::enter("retired-sibling-scope");
+    let _caller = EnvGuard::set([
+        ("TEAM_AGENT_ID", "worker_a"),
+        ("TEAM_AGENT_TEAM_ID", RUNTIME_TEAM_KEY),
+    ]);
+    for provider in ["pi", "claude"] {
+        let team = tmp_dir(provider).join("teamdir");
+        std::fs::create_dir_all(team.join("agents")).unwrap();
+        std::fs::write(team.join("TEAM.md"), "---\nname: teamdir\n---\nTeam.\n").unwrap();
+        let role = role_doc_for_provider("worker_a", "Paused Worker", provider)
+            .replace("pi-test-model", "openai-codex/gpt-6-luna");
+        std::fs::write(team.join("agents/worker_a.md"), role).unwrap();
+        let spec = team_agent::compiler::compile_team(&team).unwrap();
+        std::fs::write(team.join("team.spec.yaml"), team_agent::model::yaml::dumps(&spec)).unwrap();
+        for retired in ["cursor_agent", "agent"] {
+            seed_restart_state_as(&team, "worker_a", provider);
+            let mut state = team_agent::state::persist::load_runtime_state(&team).unwrap();
+            state["agents"]["worker_a"]["paused"] = json!(true);
+            state["agents"]["retired"] = json!({"provider": retired, "status": "running"});
+            team_agent::state::persist::save_runtime_state(&team, &state).unwrap();
+            let transport = RecordingTransport::new().with_session_present(false);
+            let outcome = crate::lifecycle::start_agent_with_transport(
+                &team, &AgentId::new("worker_a"), false, false, false, None, &transport,
+            ).unwrap_or_else(|error| panic!("{provider} single-seat start blocked by {retired}: {error}"));
+            assert!(matches!(outcome, crate::lifecycle::StartAgentOutcome::Paused { .. }));
+            assert!(transport.spawns.lock().unwrap().is_empty());
+            assert!(crate::lifecycle::launch::ensure_owner_allowed_for_state(
+                &state, Some(&AgentId::new("retired")),
+            ).is_err());
+        }
+    }
+}
+
+#[test]
+#[serial(env)]
 fn worker_spawn_inherits_parent_process_env_for_proxy_and_ca() {
     let _guard = EnvGuard::set([
         ("TA_SPAWN_ENV_CANARY", "FOO"),
@@ -93,103 +129,6 @@ fn worker_spawn_inherits_parent_process_env_for_proxy_and_ca() {
         "worker spawn env contract failed:\n{}",
         failures.join("\n")
     );
-}
-
-#[test]
-#[serial(env)]
-fn cursor_subscription_proxy_profile_reaches_fresh_and_restart_transport_final_env() {
-    let _guard = EnvGuard::set([
-        ("HTTPS_PROXY", "https://upper-https:1"),
-        ("HTTP_PROXY", "http://upper-http:1"),
-        ("ALL_PROXY", "socks5://upper-all:1"),
-        ("https_proxy", "https://lower-https:1"),
-        ("http_proxy", "http://lower-http:1"),
-        ("all_proxy", "socks5://lower-all:1"),
-        ("NO_PROXY", "localhost,127.0.0.1"),
-        ("no_proxy", "localhost,127.0.0.1"),
-        ("GLOBAL_AGENT_HTTPS_PROXY", "https://global-https:1"),
-        ("GLOBAL_AGENT_HTTP_PROXY", "http://global-http:1"),
-    ]);
-
-    let launch_direct = compiled_cursor_profile_team("cursor-direct-launch", "direct");
-    let launch_transport = RecordingTransport::new().with_session_present(false);
-    launch_with_transport(
-        &launch_direct.join("team.spec.yaml"),
-        false,
-        true,
-        true,
-        &launch_transport,
-    )
-    .expect("direct Cursor launch fixture should spawn");
-    assert_cursor_proxy_spawn(&launch_transport.single_spawn(), true);
-
-    let restart_direct = compiled_cursor_profile_team("cursor-direct-restart", "direct");
-    seed_restart_state_with_profile(&restart_direct, "worker_a", "cursor_proxy");
-    let restart_transport = RecordingTransport::new().with_session_present(false);
-    restart_with_transport(&restart_direct, true, None, &restart_transport)
-        .expect("direct Cursor restart fixture should spawn");
-    assert_cursor_proxy_spawn(&restart_transport.single_spawn(), true);
-
-    let launch_inherit = compiled_cursor_profile_team("cursor-inherit-launch", "inherit");
-    let inherit_transport = RecordingTransport::new().with_session_present(false);
-    launch_with_transport(
-        &launch_inherit.join("team.spec.yaml"),
-        false,
-        true,
-        true,
-        &inherit_transport,
-    )
-    .expect("inherit Cursor launch fixture should spawn");
-    assert_cursor_proxy_spawn(&inherit_transport.single_spawn(), false);
-
-    let restart_inherit = compiled_cursor_profile_team("cursor-inherit-restart", "inherit");
-    seed_restart_state_with_profile(&restart_inherit, "worker_a", "cursor_proxy");
-    let restart_inherit_transport = RecordingTransport::new().with_session_present(false);
-    restart_with_transport(
-        &restart_inherit,
-        true,
-        None,
-        &restart_inherit_transport,
-    )
-    .expect("inherit Cursor restart fixture should spawn");
-    assert_cursor_proxy_spawn(&restart_inherit_transport.single_spawn(), false);
-}
-
-fn assert_cursor_proxy_spawn(spawn: &RecordedSpawn, direct: bool) {
-    let keys = [
-        "HTTPS_PROXY",
-        "HTTP_PROXY",
-        "ALL_PROXY",
-        "https_proxy",
-        "http_proxy",
-        "all_proxy",
-        "GLOBAL_AGENT_HTTPS_PROXY",
-        "GLOBAL_AGENT_HTTP_PROXY",
-    ];
-    for key in keys {
-        if direct {
-            assert!(!spawn.env.contains_key(key), "direct env must omit {key}");
-            assert!(
-                spawn.env_unset.iter().any(|candidate| candidate == key),
-                "direct env_unset must contain {key}; got {:?}",
-                spawn.env_unset
-            );
-        } else {
-            assert!(spawn.env.contains_key(key), "inherit env must preserve {key}");
-            assert!(
-                spawn.env_unset.iter().all(|candidate| candidate != key),
-                "inherit env_unset must not contain {key}; got {:?}",
-                spawn.env_unset
-            );
-        }
-    }
-    for key in ["NO_PROXY", "no_proxy"] {
-        assert!(spawn.env.contains_key(key), "NO_PROXY bypass key must remain: {key}");
-        assert!(
-            spawn.env_unset.iter().all(|candidate| candidate != key),
-            "NO_PROXY bypass key must not be unset: {key}"
-        );
-    }
 }
 
 #[test]
@@ -507,39 +446,6 @@ fn compiled_team_dir(label: &str, agents: &[(&str, &str)]) -> PathBuf {
     compiled_team_dir_for_provider(label, agents, "codex")
 }
 
-fn compiled_cursor_profile_team(label: &str, proxy_mode: &str) -> PathBuf {
-    let team = tmp_dir(label).join("teamdir");
-    std::fs::create_dir_all(team.join("agents")).unwrap();
-    std::fs::write(
-        team.join("TEAM.md"),
-        "---\nname: envteam\nobjective: Cursor proxy environment contract.\nprovider: cursor_agent\n---\n\nTeam.\n",
-    )
-    .unwrap();
-    std::fs::write(
-        team.join("agents").join("worker_a.md"),
-        "---\nname: worker_a\nrole: Cursor Worker\nprovider: cursor_agent\nmodel: sonnet-4-thinking\nauth_mode: subscription\nprofile: cursor_proxy\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nCursor worker.\n",
-    )
-    .unwrap();
-    for directory in [
-        team.join("profiles"),
-        team.join(".team/current/profiles"),
-    ] {
-        std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(
-            directory.join("cursor_proxy.env"),
-            format!("AUTH_MODE=subscription\nPROFILE_NAME=cursor_proxy\nPROXY_MODE={proxy_mode}\n"),
-        )
-        .unwrap();
-    }
-    let spec = team_agent::compiler::compile_team(&team).unwrap();
-    std::fs::write(
-        team.join("team.spec.yaml"),
-        team_agent::model::yaml::dumps(&spec),
-    )
-    .unwrap();
-    team
-}
-
 fn compiled_team_dir_for_provider(label: &str, agents: &[(&str, &str)], provider: &str) -> PathBuf {
     let team = tmp_dir(label).join("teamdir");
     std::fs::create_dir_all(team.join("agents")).unwrap();
@@ -578,13 +484,6 @@ fn role_doc_for_provider(name: &str, role: &str, provider: &str) -> String {
 
 fn seed_restart_state(team: &Path, agent_id: &str) {
     seed_restart_state_as(team, agent_id, "codex");
-}
-
-fn seed_restart_state_with_profile(team: &Path, agent_id: &str, profile: &str) {
-    seed_restart_state_as(team, agent_id, "cursor_agent");
-    let mut state = team_agent::state::persist::load_runtime_state(team).unwrap();
-    state["agents"][agent_id]["profile"] = json!(profile);
-    team_agent::state::persist::save_runtime_state(team, &state).unwrap();
 }
 
 fn seed_restart_state_as(team: &Path, agent_id: &str, provider: &str) {

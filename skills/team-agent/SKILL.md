@@ -99,8 +99,8 @@ none changes the switch. `enable`/`disable` preserve mappings in `~/.team-agent/
 trimmed); invalid values disable routing. Check `persisted_enabled`, `effective_enabled` and
 `override_status` rather than assuming `enable` defeats an environment OFF.
 
-Keys: `claude`, `codex`, `copilot`, `gemini_cli`, `grok`, `cursor_agent`, `pi`.
-Claude/Claude Code share `claude`; aliases `claude_code/claude-code`, `agent/cursor` are accepted.
+Keys: `claude`, `codex`, `copilot`, `gemini_cli`, `grok`, `pi`.
+Claude/Claude Code share `claude`; aliases `claude_code/claude-code` are accepted.
 The first `--` ends control parsing: subsequent tokens, including `--help`, `--json`, empty strings
 and `{workspace}`, are literal data. Tokens go after the executable and before its original tail;
 there is no shell expansion. Do not route secrets or override framework-managed session/MCP/permission flags.

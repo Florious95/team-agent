@@ -33,7 +33,6 @@ const CANONICAL: &[(&str, Provider)] = &[
     ("copilot", Provider::Copilot),
     ("gemini_cli", Provider::GeminiCli),
     ("grok", Provider::Grok),
-    ("cursor_agent", Provider::CursorAgent),
     ("pi", Provider::Pi),
 ];
 struct Fixture {
@@ -582,7 +581,6 @@ provider_tests! {
     a06_copilot => "copilot", Copilot;
     a06_gemini_cli => "gemini_cli", GeminiCli;
     a06_grok => "grok", Grok;
-    a06_cursor_agent => "cursor_agent", CursorAgent;
     a06_pi => "pi", Pi;
 }
 
@@ -1229,7 +1227,7 @@ fn a07_attach_existing_never_opens_enabled_invalid_route_config() {
 
 #[test]
 #[serial(env)]
-fn a13_all_provider_version_auth_and_cursor_mcp_auxiliary_argv_are_native() {
+fn a13_all_provider_version_and_auth_auxiliary_argv_are_native() {
     let f = Fixture::new("argv-aux");
     let mappings = CANONICAL
         .iter()
@@ -1242,10 +1240,6 @@ fn a13_all_provider_version_auth_and_cursor_mcp_auxiliary_argv_are_native() {
     }
     let _ = crate::provider::get_adapter(Provider::ClaudeCode)
         .auth_hint(crate::model::enums::AuthMode::Subscription);
-    assert_eq!(
-        crate::lifecycle::launch::cursor_mcp_enable_argv(),
-        ["agent", "mcp", "enable", "team_orchestrator"]
-    );
     let _ = f.cold("copilot");
     let probes = fs::read_to_string(&f.probes).unwrap();
     assert!(!probes.contains("route-must-not-enter-aux"));

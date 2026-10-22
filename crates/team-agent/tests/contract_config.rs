@@ -194,17 +194,16 @@ fn cursor_compiler_preserves_native_id_and_does_not_inherit_team_effort() {
 }
 
 #[test]
-fn mixed_contract_providers_do_not_migrate_legacy_cursor_names_or_state() {
+fn mixed_contract_providers_reject_retired_cursor_names_without_migration() {
     let (_sandbox, args) = fixture();
     for (name, provider) in [
         ("a-cursor", "cursor"), ("b-kiro", "kiro"), ("c-pi", "pi"),
-        ("d-legacy-cursor", "cursor_agent"), ("e-legacy-agent", "agent"),
     ] {
         role(&args, name, provider);
     }
     let config = read_team(&args).unwrap().unwrap();
     assert_eq!(config.roles.len(), 2);
-    assert_eq!(config.members.len(), 5);
+    assert_eq!(config.members.len(), 3);
     for member in &config.members {
         let expected = if ["cursor", "kiro"].contains(&member.provider.as_str()) {
             RuntimeFamily::Contract
@@ -214,9 +213,16 @@ fn mixed_contract_providers_do_not_migrate_legacy_cursor_names_or_state() {
         assert_eq!(member.runtime, expected, "{}", member.provider);
     }
     for provider in ["cursor_agent", "agent"] {
+        role(&args, "retired-worker", provider);
+        let path = args.agents_dir.join("agents/retired-worker.md");
+        let before = std::fs::read(&path).unwrap();
+        assert!(read_team(&args).is_err(), "mixed team accepted {provider}");
+        assert!(team_agent::compiler::compile_team(&args.agents_dir).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_file(path).unwrap();
         let state = serde_json::json!({"provider":provider,"pane_id":"%0","runtime_family":"legacy"});
         assert!(!team_agent::contract_runtime::framework::is_contract(&state));
-        assert!(team_agent::contract_runtime::framework::require_legacy_role(None, Some(provider)).is_ok());
+        assert!(team_agent::contract_runtime::framework::require_legacy_role(None, Some(provider)).is_err());
     }
     let current = serde_json::json!({"provider":"cursor","runtime_family":"contract"});
     assert!(team_agent::contract_runtime::framework::is_contract(&current));
@@ -224,13 +230,102 @@ fn mixed_contract_providers_do_not_migrate_legacy_cursor_names_or_state() {
 }
 
 #[test]
-fn legacy_cursor_only_config_stays_on_legacy_track() {
+fn retired_cursor_names_refuse_at_each_configuration_entry_without_writes() {
+    use team_agent::model::{enums::Provider, spec::validate_spec, yaml};
     let (_sandbox, args) = fixture();
     for provider in ["cursor_agent", "agent"] {
         role(&args, "worker", provider);
+        let path = args.agents_dir.join("agents/worker.md");
+        let before = std::fs::read(&path).unwrap();
+        assert!(read_team(&args).is_err(), "read_team delegated {provider}");
+        assert!(team_agent::compiler::compile_role_agent(
+            &path,
+            &yaml::Value::Map(Vec::new()),
+            args.workspace.to_str().unwrap(),
+        ).is_err(), "compile_role accepted {provider}");
+        assert!(team_agent::compiler::compile_team(&args.agents_dir).is_err());
+        assert!(serde_json::from_value::<Provider>(serde_json::json!(provider)).is_err());
+        let raw = include_str!("../src/model/testdata/team.spec.yaml")
+            .replace("provider: codex", &format!("provider: {provider}"));
+        let spec = yaml::loads(&raw).unwrap();
+        let error = validate_spec(&spec, &args.workspace).unwrap_err().to_string();
+        assert!(error.contains(provider), "spec rejected for a different reason: {error}");
+        for explicit in [None, Some("pi"), Some(provider)] {
+            assert!(team_agent::contract_runtime::framework::require_legacy_role(
+                Some(&path), explicit,
+            ).is_err(), "retired file {provider} bypassed with {explicit:?}");
+        }
+        assert!(team_agent::contract_runtime::framework::require_legacy_role(None, Some(provider)).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::write(&path, format!("---\nprovider: {provider}\nmodel: native-id\nmissing closing delimiter")).unwrap();
+        assert!(read_team(&args).is_err(), "malformed {provider} fell back to legacy");
+        assert!(team_agent::contract_runtime::framework::require_legacy_role(Some(&path), None).is_err());
+    }
+    for path in [".team", ".cursor", ".kiro"] {
+        assert!(!args.workspace.join(path).exists());
+    }
+}
+
+#[test]
+fn pi_and_claude_roles_keep_nested_and_body_provider_examples() {
+    use team_agent::model::yaml::Value;
+    let (_sandbox, args) = fixture();
+    for (provider, model) in [("pi", "openai-codex/gpt-6-luna"), ("claude", "claude-sonnet-4.5")] {
+        let path = args.agents_dir.join("agents/worker.md");
+        let body = "Examples are ordinary role content.\nprovider: agent\n---\nprovider: cursor_agent\n";
+        let raw = format!("---\nprovider: {provider}\nmodel: {model}\nexample:\n  provider: agent\nnotes: |\n  provider: cursor_agent\n---\n{body}");
+        std::fs::write(&path, &raw).unwrap();
+        let compiled = team_agent::compiler::compile_role_agent(
+            &path, &Value::Map(Vec::new()), args.workspace.to_str().unwrap(),
+        ).unwrap_or_else(|error| panic!("valid {provider} role refused: {error}"));
+        assert_eq!(compiled.agent.get("provider").and_then(Value::as_str), Some(provider));
         assert!(read_team(&args).unwrap().is_none());
+        assert!(team_agent::contract_runtime::framework::require_legacy_role(Some(&path), None).is_ok());
+        assert!(team_agent::compiler::compile_team(&args.agents_dir).is_ok());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
     }
     assert!(!args.workspace.join(".team").exists());
+}
+
+#[test]
+fn pi_and_claude_lifecycle_guards_ignore_retired_siblings() {
+    use team_agent::contract_runtime::framework::require_legacy_lifecycle;
+    use team_agent::state::{persist, selector};
+    let (_sandbox, args) = fixture();
+    for (id, provider, model) in [
+        ("pi-worker", "pi", "openai-codex/gpt-6-luna"),
+        ("claude-worker", "claude", "claude-sonnet-4.5"),
+    ] {
+        std::fs::write(args.agents_dir.join(format!("agents/{id}.md")),
+            format!("---\nprovider: {provider}\nmodel: {model}\n---\nWorker.\n")).unwrap();
+    }
+    for retired in ["cursor_agent", "agent"] {
+        role(&args, "retired", retired);
+        persist::save_runtime_state(&args.workspace, &serde_json::json!({
+            "team_key": "demo", "active_team_key": "demo", "team_dir": args.agents_dir,
+            "agents": {
+                "pi-worker": {"provider": "pi"},
+                "claude-worker": {"provider": "claude"},
+                "retired": {"provider": retired},
+            },
+        })).unwrap();
+        let selected = selector::resolve_active_team_readonly(
+            &args.workspace, None, selector::SelectorMode::RuntimeOnly,
+        ).expect("the public guard must examine a real selected team");
+        assert_eq!(selected.state["agents"]["retired"]["provider"], retired);
+        let path = persist::runtime_state_path(&args.workspace);
+        let before = std::fs::read(&path).unwrap();
+        for id in ["pi-worker", "claude-worker"] {
+            require_legacy_lifecycle(&args.workspace, None, Some(id), "start-agent")
+                .unwrap_or_else(|error| panic!("{id} blocked by sibling {retired}: {error}"));
+        }
+        for target in [Some("retired"), None] {
+            let error = require_legacy_lifecycle(&args.workspace, None, target, "restart")
+                .unwrap_err().to_string();
+            assert!(error.contains("retired provider"), "{error}");
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
 }
 
 #[test]

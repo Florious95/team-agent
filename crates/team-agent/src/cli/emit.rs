@@ -48,7 +48,7 @@ fn emit_with_json_order(
 }
 
 ///
-/// `main(argv)`(`parser.py:84`):**CLI 唯一进程入口**。codex/claude/copilot/grok/cursor passthrough 早返回 →
+/// `main(argv)`(`parser.py:84`):**CLI 唯一进程入口**。codex/claude/copilot/grok passthrough 早返回 →
 /// 解析 argv 到 subcommand → 调对应 handler → 异常落盘 + 信封 + `ExitCode::Error` →
 /// `consume_leader_inbox_summary` → `emit` → `result.ok is False ? Error : Ok`。
 /// **行为入口**:契约可端到端跑 argv→(stdout, exit code)。
@@ -325,7 +325,7 @@ fn dispatch_machine(command: &str, args: &[String], cwd: &Path) -> Result<ExitCo
 // Command grammar, not provider identity parsing: these are top-level CLI
 // passthrough verbs for starting a leader under a provider executable.
 const LEADER_PASSTHROUGH_COMMANDS: &[&str] =
-    &["codex", "claude", "copilot", "grok", "cursor", "pi"];
+    &["codex", "claude", "copilot", "grok", "pi"];
 
 pub(crate) fn is_leader_passthrough_command(command: &str) -> bool {
     LEADER_PASSTHROUGH_COMMANDS.contains(&command)
@@ -382,7 +382,7 @@ pub(crate) fn default_help() -> String {
     append_help_section(
         &mut out,
         "Leader launch",
-        &["pi", "codex", "claude", "copilot", "grok", "cursor", "kiro"],
+        &["pi", "codex", "claude", "copilot", "grok", "kiro"],
     );
     out.push_str("\nCommand arguments and examples: team-agent <command> --help");
     out
@@ -448,7 +448,7 @@ pub(super) fn command_help(command: Option<&str>) -> String {
             "team-agent inbox leader -n 3\nteam-agent inbox worker --limit 5\nteam-agent inbox leader --workspace . --team help-demo --json", "Wait for a natural reply, then check team-agent status if needed. Do not inspect worker terminal content."),
         "status" => ("Optional <agent> selects one agent. --summary/--detail retain compatibility and do not add fields.\nNine fields: name/provider/model/effort/runtime_status/activity/health/session_name/tmux_command.\nRuntime, activity and health are distinct. unknown means insufficient evidence; null means unset. No default model is guessed.",
             "team-agent status\nteam-agent status worker\nteam-agent status --workspace . --team help-demo --json", "Read replies with team-agent inbox leader -n 3; diagnose problems with team-agent doctor --workspace ."),
-        "models" => ("--provider selects the provider, default pi. QUERY or --search performs keyword search; they are mutually exclusive.\nUse cursor for the contract-native Cursor catalog; cursor_agent retains the legacy entrypoint. Copilot has no model discovery entrypoint here. Results come from the native catalog, not guesses.",
+        "models" => ("--provider selects the provider, default pi. QUERY or --search performs keyword search; they are mutually exclusive.\nUse cursor for the contract-native Cursor catalog. Copilot has no model discovery entrypoint here. Results come from the native catalog, not guesses.",
             "team-agent models --provider pi\nteam-agent models --provider pi --search luna\nteam-agent models --provider cursor --json", "Use the exact returned model name in a role file or add-agent --model before launch."),
         "restart" => ("WORKSPACE defaults to the current project; saved sessions are preferred.\nUse --allow-fresh only after explicit authorization to lose saved context. --session-converge-deadline sets the wait in seconds.",
             "team-agent restart .\nteam-agent restart . --team help-demo --json", "Check status after restart. Obtain authorization before creating a fresh session; takeover is not a substitute for restart."),
@@ -490,7 +490,7 @@ pub(super) fn command_help(command: Option<&str>) -> String {
             "", "Run team-agent quick-start in the opened leader's tool context, not in an ordinary worker conversation."),
     };
     let examples = if matches!(spec.kind, CommandKind::LeaderPassthrough { .. }) {
-        let native = if name == "cursor" { "agent" } else { name };
+        let native = name;
         if name == "pi" {
             "team-agent pi\nteam-agent pi -- --model openai-codex/gpt-6-luna\npi --help".to_string()
         } else {
@@ -512,9 +512,6 @@ pub(super) fn command_help(command: Option<&str>) -> String {
     );
     if name == "quick-start" {
         out.push_str(&format!("\n\nMinimal two-file configuration (create manually; not written automatically):\nTEAM.md:\n{TEAM_TEMPLATE}\nagents/worker.md:\n{WORKER_TEMPLATE}"));
-    }
-    if name == "cursor" {
-        out.push_str("\nDiscover models with team-agent models --provider cursor_agent.");
     }
     if name == "copilot" {
         out.push_str(
@@ -2433,12 +2430,12 @@ mod tests {
 
         let cursor = models_args(&cli_argv(&[
             "--provider",
-            "cursor_agent",
+            "cursor",
             "--search",
             "GPT Luna",
         ]))
         .unwrap();
-        assert_eq!(cursor.provider, "cursor_agent");
+        assert_eq!(cursor.provider, "cursor");
         assert_eq!(cursor.search.as_deref(), Some("GPT Luna"));
 
         let both = models_args(&cli_argv(&["luna", "--search", "gpt"])).unwrap_err();

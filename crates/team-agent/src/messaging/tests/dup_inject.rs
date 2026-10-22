@@ -102,8 +102,8 @@ fn observer_state_save_failure_after_enter_does_not_return_err() {
 }
 
 #[test]
-fn pane_token_refuses_second_inject_for_claude_grok_cursor() {
-    for provider in ["claude", "grok", "cursor"] {
+fn pane_token_refuses_second_inject_for_claude_grok() {
+    for provider in ["claude", "grok"] {
         let case = WorkerCase::new(&format!("token-{provider}"), provider);
         let transport = RecordingTransport::new("");
         let message_id = case.seed_leader_to_worker(&format!("{provider} canary"));

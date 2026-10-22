@@ -66,11 +66,7 @@ pub fn route_key(provider: Provider) -> Option<&'static str> {
 }
 
 pub fn parse_route_provider(raw: &str) -> Option<Provider> {
-    let provider = if raw == "cursor" {
-        Provider::CursorAgent
-    } else {
-        wire::parse_provider(raw)?
-    };
+    let provider = wire::parse_provider(raw)?;
     route_key(provider).map(|_| provider)
 }
 

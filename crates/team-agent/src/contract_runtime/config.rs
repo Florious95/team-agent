@@ -187,10 +187,16 @@ fn read_team_inner(
             Err(_) => return Ok(None), // let the legacy compiler report its existing I/O error
             },
         };
+        if crate::provider::wire::has_retired_provider_header(&raw) {
+            return Err(ConfigError::Unsupported(crate::provider::wire::RETIRED_PROVIDER_ERROR));
+        }
         let (meta, body) = split_front_matter(&raw);
         let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
         if meta.get("provider").is_none() && malformed_contract_header(&normalized) {
             return Err(invalid(&path, "front matter"));
+        }
+        if meta.get("provider").and_then(Value::as_str).is_some_and(crate::provider::wire::is_retired_provider) {
+            return Err(ConfigError::Unsupported(crate::provider::wire::RETIRED_PROVIDER_ERROR));
         }
         if meta
             .get("provider")

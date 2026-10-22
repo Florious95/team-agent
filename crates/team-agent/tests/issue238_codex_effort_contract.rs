@@ -62,12 +62,11 @@ fn expected_admission(provider: Provider, raw: &str) -> Admission {
             "low" | "medium" | "high" | "xhigh" => Admission::Ignored,
             _ => Admission::Rejected,
         },
-        Provider::CursorAgent => Admission::Rejected,
     }
 }
 
 #[test]
-fn r2_nine_by_six_provider_admission_matrix_is_exact() {
+fn r2_eight_by_six_provider_admission_matrix_is_exact() {
     let providers = [
         Provider::Claude,
         Provider::ClaudeCode,
@@ -75,11 +74,10 @@ fn r2_nine_by_six_provider_admission_matrix_is_exact() {
         Provider::Copilot,
         Provider::GeminiCli,
         Provider::Grok,
-        Provider::CursorAgent,
         Provider::Pi,
         Provider::Fake,
     ];
-    assert_eq!(providers.len(), 9);
+    assert_eq!(providers.len(), 8);
     for provider in providers {
         for raw in EFFORT_WIRE {
             let parsed = effort(raw);
@@ -93,9 +91,7 @@ fn r2_nine_by_six_provider_admission_matrix_is_exact() {
                 (Admission::Accepted, Ok(Some(actual))) => assert_eq!(actual.as_str(), raw),
                 (Admission::Ignored, Ok(None)) => {}
                 (Admission::Rejected, Err(reason)) => {
-                    let expected_reason = if provider == Provider::CursorAgent {
-                        "cursor_agent does not support effort; the Cursor CLI has no --effort flag"
-                    } else if raw == "ultra" {
+                    let expected_reason = if raw == "ultra" {
                         "effort 'ultra' is only supported by codex"
                     } else {
                         "effort 'max' is only supported by claude/claude_code/codex/pi"
@@ -260,15 +256,6 @@ fn r4_direct_spec_uses_shared_rejection_reasons_and_keeps_unknowns_unknown() {
         "{grok_max}"
     );
 
-    let cursor = validate_direct_spec(&direct_spec_text(
-        "cursor_agent",
-        "cursor-model",
-        Some("low"),
-        None,
-    ))
-    .expect_err("Cursor effort");
-    assert!(cursor.contains("cursor_agent does not support effort"));
-
     let unknown = validate_direct_spec(&direct_spec_text("codex", "null", Some("turbo"), None))
         .expect_err("unknown effort");
     assert!(unknown.contains("/agents/0/effort: unknown effort 'turbo'"));
@@ -362,10 +349,6 @@ fn r8_legacy_ignored_and_protected_provider_contracts_remain_intact() {
             assert!(effort(raw).resolve_for_provider(provider).is_err());
         }
     }
-    assert!(effort("low")
-        .resolve_for_provider(Provider::CursorAgent)
-        .expect_err("Cursor")
-        .contains("cursor_agent does not support effort"));
     assert_eq!(
         effort("max").resolve_for_provider(Provider::Claude),
         Ok(Some(effort("max")))

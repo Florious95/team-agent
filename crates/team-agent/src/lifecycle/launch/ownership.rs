@@ -55,6 +55,8 @@ pub(crate) fn ensure_owner_allowed_for_state(
     state: &serde_json::Value,
     target_role: Option<&AgentId>,
 ) -> Result<(), LifecycleError> {
+    crate::provider::wire::require_active_state_providers(state, target_role.map(AgentId::as_str))
+        .map_err(|error| LifecycleError::Provider(error.into()))?;
     struct NoopLiveness;
     impl crate::state::owner_gate::PaneLivenessProbe for NoopLiveness {
         fn liveness(&self, _pane_id: &str) -> crate::model::enums::PaneLiveness {

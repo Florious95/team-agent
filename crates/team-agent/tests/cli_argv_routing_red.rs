@@ -20,7 +20,6 @@ const KEYS: &[&str] = &[
     "copilot",
     "gemini_cli",
     "grok",
-    "cursor_agent",
     "pi",
 ];
 static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -326,8 +325,6 @@ fn a06_aliases_canonicalize_without_changing_provider_wire_contract() {
     for (alias, canonical) in [
         ("claude_code", "claude"),
         ("claude-code", "claude"),
-        ("agent", "cursor_agent"),
-        ("cursor", "cursor_agent"),
     ] {
         let v = f.ok(&["route", "set", alias, "--json", "--", alias], None);
         assert_eq!(v["provider"], canonical);
@@ -336,6 +333,26 @@ fn a06_aliases_canonicalize_without_changing_provider_wire_contract() {
     }
     for key in f.disk()["providers"].as_object().unwrap().keys() {
         assert!(KEYS.contains(&key.as_str()));
+    }
+}
+
+#[test]
+fn a06_retired_cursor_names_refuse_without_route_config_mutation() {
+    let f = Fixture::new();
+    f.seed(r#"{"schema_version":1,"enabled":false,"providers":{"pi":["keep"]}}"#);
+    let before = fs::read(f.config()).unwrap();
+    for provider in ["cursor_agent", "agent", "cursor"] {
+        for args in [
+            vec!["route", "show", provider, "--json"],
+            vec!["route", "set", provider, "--json", "--", "--force"],
+            vec!["route", "clear", provider, "--json"],
+        ] {
+            let out = f.run(&args, None);
+            assert!(!out.status.success(), "retired route accepted: {args:?}");
+            let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+            assert_eq!(value["ok"], false);
+            assert_eq!(fs::read(f.config()).unwrap(), before);
+        }
     }
 }
 

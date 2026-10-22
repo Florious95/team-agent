@@ -9,7 +9,6 @@
 //!   - codex → `--dangerously-bypass-approvals-and-sandbox`
 //!   - copilot → `--allow-all`(0.3.27 P1 E54 symptom 2 起)
 //!   - grok → `--always-approve`
-//!   - cursor_agent → `--force`
 //!
 //! 未定义(返回 None)的 provider:调用侧必须 fail-loud,不得静默 fallback。
 
@@ -22,7 +21,6 @@ pub(crate) fn provider_bypass_flag(provider: Provider) -> Option<&'static str> {
         Provider::Codex => Some("--dangerously-bypass-approvals-and-sandbox"),
         Provider::Copilot => Some("--allow-all"),
         Provider::Grok => Some("--always-approve"),
-        Provider::CursorAgent => Some("--force"),
         Provider::Pi => None,
         // TODO: 查 gemini_cli 的等价 bypass 参数;未定义前 fail-loud。
         Provider::GeminiCli => None,
@@ -34,10 +32,8 @@ pub(crate) fn provider_bypass_flag(provider: Provider) -> Option<&'static str> {
 /// 找已知 bypass flag。**只做检测,不做行为决策**(0.6.0 删)。
 ///
 /// 不认 `--force`:那是 team-agent 自己的 CLI 旗(`init --force` /
-/// `remove-agent --confirm --force` / `restart --force`),与 cursor worker
-/// 的 `--force` 撞名。本函数看不到「当前在看哪个 provider 的 argv」,
-/// 认 `--force` 会把既有非 grok/cursor 路径误判成 bypass。
-/// cursor worker 的 bypass 仍走 [`provider_bypass_flag`],不走这条检测面。
+/// `remove-agent --confirm --force` / `restart --force`)。
+/// 认 `--force` 会把既有生命周期操作误判成 bypass。
 /// `--always-approve` 可以认:team-agent 自己没有这个旗。
 ///
 /// TODO(0.6.0): remove
@@ -93,14 +89,10 @@ mod tests {
     }
 
     #[test]
-    fn grok_and_cursor_bypass_flags() {
+    fn grok_bypass_flag() {
         assert_eq!(
             provider_bypass_flag(Provider::Grok),
             Some("--always-approve")
-        );
-        assert_eq!(
-            provider_bypass_flag(Provider::CursorAgent),
-            Some("--force")
         );
     }
 
