@@ -27,6 +27,7 @@ on:
           - host-ancestry
           - host-native
           - cursor-excise
+          - cursor-excise-baseline
 
 permissions:
   contents: read
@@ -118,7 +119,7 @@ jobs:
   grok-root-regression:
     if: github.event_name == 'workflow_dispatch' && inputs.source_sha != ''
     runs-on: macos-14
-    timeout-minutes: 45
+    timeout-minutes: ${{ inputs.regression_scope == 'cursor-excise' && 90 || 45 }}
     env:
       SOURCE_SHA: ${{ inputs.source_sha }}
       EXPECTED_TREE: ${{ inputs.expected_tree }}
@@ -155,6 +156,11 @@ jobs:
           cargo --version >> regression-evidence/toolchain.txt
           tmux -V >> regression-evidence/toolchain.txt
           python3 --version >> regression-evidence/toolchain.txt
+          if test "$REGRESSION_SCOPE" = cursor-excise; then
+            physical_tmp=$(python3 -c 'import os,tempfile; print(os.path.realpath(tempfile.gettempdir()))')
+            printf 'TMPDIR=%s\n' "$physical_tmp" >> "$GITHUB_ENV"
+            printf '%s\n' "$physical_tmp" > regression-evidence/temporary-directory.txt
+          fi
       - name: Execute finite root and contract regressions
         shell: bash
         run: |
@@ -175,7 +181,6 @@ jobs:
               run_case root-check cargo check -p team-agent --all-targets --locked
               run_case root-build cargo build -p team-agent --bin team-agent --locked
               cursor_exit=0
-              run_case root-lib cargo test -p team-agent --lib --locked -- --test-threads=1 || cursor_exit=1
               run_case pi-lib cargo test -p team-agent --lib --locked pi_ -- --test-threads=1 || cursor_exit=1
               run_case claude-lib cargo test -p team-agent --lib --locked claude -- --test-threads=1 || cursor_exit=1
               run_case cursor-integrations cargo test -p team-agent --locked --no-fail-fast \
@@ -210,6 +215,20 @@ jobs:
               run_case contract-all cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets -- --test-threads=1 || cursor_exit=1
               exit "$cursor_exit"
               ;;
+            cursor-excise-baseline)
+              run_case root-check cargo check -p team-agent --all-targets --locked
+              run_case root-build cargo build -p team-agent --bin team-agent --locked
+              baseline_exit=0
+              run_case baseline-help cargo test -p team-agent --lib --locked cli::emit::tests::default_help_lists_only_default_help_specs -- --exact --test-threads=1 || baseline_exit=1
+              run_case baseline-ps cargo test -p team-agent --lib --locked cli::status_port::brief::native_ps_batch_regressions::native_ps_partial_selection_preserves_a_live_pid -- --exact --test-threads=1 || baseline_exit=1
+              run_case baseline-pi cargo test -p team-agent --lib --locked lifecycle::tests::pi_fork_session_inheritance_red -- --test-threads=1 || baseline_exit=1
+              run_case baseline-trust cargo test -p team-agent --lib --locked lifecycle::tests::subprep_codex_trust_roundtrip_red::contract_b_step2_retry_delivers_queued_message_after_startup_trust_is_handled -- --exact --test-threads=1 || baseline_exit=1
+              export TMPDIR=$(python3 -c 'import os,tempfile; print(os.path.realpath(tempfile.gettempdir()))')
+              printf '%s\n' "$TMPDIR" > regression-evidence/physical-temporary-directory.txt
+              run_case baseline-physical-pi cargo test -p team-agent --lib --locked lifecycle::tests::pi_fork_session_inheritance_red -- --test-threads=1 || baseline_exit=1
+              run_case baseline-physical-trust cargo test -p team-agent --lib --locked lifecycle::tests::subprep_codex_trust_roundtrip_red::contract_b_step2_retry_delivers_queued_message_after_startup_trust_is_handled -- --exact --test-threads=1 || baseline_exit=1
+              exit "$baseline_exit"
+              ;;
             host-ancestry)
               run_case host-ancestry cargo test --manifest-path crates/team-agent-contract/Cargo.toml --test host_ancestry --locked -- --test-threads=1
               ;;
@@ -231,6 +250,19 @@ jobs:
               ;;
             *) exit 64 ;;
           esac
+      - name: Complete full root library regression
+        if: ${{ always() && inputs.regression_scope == 'cursor-excise' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(cat regression-evidence/root-check.exit)" = 0
+          test "$(cat regression-evidence/root-build.exit)" = 0
+          set +e
+          cargo test -p team-agent --lib --locked -- --test-threads=1 2>&1 | tee regression-evidence/root-lib.log
+          statuses=("${PIPESTATUS[@]}")
+          printf '%s\n' "${statuses[0]}" > regression-evidence/root-lib.exit
+          test "${statuses[1]}" -eq 0 || exit 125
+          exit "${statuses[0]}"
       - name: Bind retained evidence hashes
         if: always()
         shell: bash

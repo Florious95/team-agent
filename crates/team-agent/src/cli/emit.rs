@@ -2097,8 +2097,8 @@ mod tests {
             .collect();
         assert_eq!(
             expected.len(),
-            31,
-            "the public catalog includes Leader prompt management and the Kiro capability gate"
+            30,
+            "the public catalog excludes the retired Cursor launcher"
         );
         for spec_name in &expected {
             assert!(
