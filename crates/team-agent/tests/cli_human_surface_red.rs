@@ -40,7 +40,6 @@ const HUMAN: &[&str] = &[
     "claude",
     "copilot",
     "grok",
-    "cursor",
     "pi",
     "kiro",
     "leaders",
@@ -323,7 +322,7 @@ fn examples_property(command: &str) {
         .count();
     let launcher = matches!(
         command,
-        "pi" | "codex" | "claude" | "copilot" | "grok" | "cursor"
+        "pi" | "codex" | "claude" | "copilot" | "grok"
     );
     let minimum = if launcher && command != "pi" { 1 } else { 2 };
     assert!(
@@ -548,7 +547,7 @@ human_properties! {
     remove_agent => "remove-agent", doctor => "doctor", approvals => "approvals", leaders => "leaders",
     route => "route", leader_prompt => "leader-prompt", profile => "profile", install_skill => "install-skill",
     claim_leader => "claim-leader", takeover => "takeover", attach_leader => "attach-leader",
-    pi => "pi", codex => "codex", claude => "claude", copilot => "copilot", grok => "grok", cursor => "cursor", kiro => "kiro", inbox => "inbox",
+    pi => "pi", codex => "codex", claude => "claude", copilot => "copilot", grok => "grok", kiro => "kiro", inbox => "inbox",
 }
 macro_rules! hidden_properties {
     ($($id:ident => $command:literal),+ $(,)?) => {$ (
@@ -660,6 +659,7 @@ macro_rules! retired_properties {
     )+};
 }
 retired_properties! {
+    retired_cursor_launcher => "cursor",
     r289_e2e => "e2e", r289_allow_peer_talk => "allow-peer-talk", r289_results => "results",
     r289_validate => "validate", r289_identity => "identity", r289_sessions => "sessions",
     r289_watch => "watch", r289_peek => "peek", r289_wait_ready => "wait-ready", r289_preflight => "preflight",

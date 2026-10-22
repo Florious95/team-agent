@@ -180,6 +180,14 @@ jobs:
               run_case claude-lib cargo test -p team-agent --lib --locked claude -- --test-threads=1 || cursor_exit=1
               run_case cursor-integrations cargo test -p team-agent --locked --no-fail-fast \
                 --test cli_argv_routing_red \
+                --test cli_bare_journey_red \
+                --test cli_human_surface_red \
+                --test leader_launcher_red \
+                --test leader_prompt_contract \
+                --test c1_command_spec_contract \
+                --test c2_command_internalization_deletion_contract \
+                --test governance_g0_metrics \
+                --test debt_sweep_0544_contract \
                 --test contract_config \
                 --test doctor_property_contract \
                 --test fork_blast_radius_other_providers \

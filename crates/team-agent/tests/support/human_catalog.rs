@@ -21,7 +21,6 @@ pub const HUMAN_COMMANDS: &[&str] = &[
     "claude",
     "copilot",
     "grok",
-    "cursor",
     "pi",
     "kiro",
     "leaders",
@@ -40,6 +39,7 @@ pub const MACHINE_COMMANDS: &[&str] = &["wait", "attach-app-server-leader", "coo
 
 /// Physically removed commands, not hidden Machine commands.
 pub const RETIRED_COMMANDS: &[&str] = &[
+    "cursor",
     "e2e",
     "allow-peer-talk",
     "results",
