@@ -219,6 +219,10 @@ jobs:
               run_case root-check cargo check -p team-agent --all-targets --locked
               run_case root-build cargo build -p team-agent --bin team-agent --locked
               baseline_exit=0
+              baseline_physical_tmp=$(python3 -c 'import os,tempfile; print(os.path.realpath(tempfile.gettempdir()))')
+              printf '%s\n' "$baseline_physical_tmp" > regression-evidence/focused-temporary-directory.txt
+              run_case baseline-focused-integrations env TMPDIR="$baseline_physical_tmp" cargo test -p team-agent --locked --no-fail-fast --test contract_config --test model_fuzzy_lookup_red -- --test-threads=1 || baseline_exit=1
+              run_case baseline-contract-all env TMPDIR="$baseline_physical_tmp" cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets -- --test-threads=1 || baseline_exit=1
               run_case baseline-help cargo test -p team-agent --lib --locked cli::emit::tests::default_help_lists_only_default_help_specs -- --exact --test-threads=1 || baseline_exit=1
               run_case baseline-ps cargo test -p team-agent --lib --locked cli::status_port::brief::native_ps_batch_regressions::native_ps_partial_selection_preserves_a_live_pid -- --exact --test-threads=1 || baseline_exit=1
               run_case baseline-pi cargo test -p team-agent --lib --locked lifecycle::tests::pi_fork_session_inheritance_red -- --test-threads=1 || baseline_exit=1
