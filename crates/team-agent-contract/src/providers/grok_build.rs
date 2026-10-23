@@ -108,7 +108,7 @@ impl PlanHook for GrokAdapter {
         }
         // The Homebrew `grok` entry is a symlink to `grok-native`. Execing that
         // symlink is why tmux shows grok-native. Run the same inode under the name grok.
-        let named = native::public_name_link(&runtime.engine, &r.paths.cwd.path).map_err(|_| ContractError::Invalid("Grok public name"))?;
+        let named = native::public_name_link(&runtime.engine).map_err(|error| ContractError::Invalid(error.operation))?;
         let launcher = runtime.launcher().map(|entry| entry.executable);
         let launcher_is_wrapper = launcher.as_ref().is_some_and(|path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file()));
         let (launcher, grok_real) = if launcher_is_wrapper {

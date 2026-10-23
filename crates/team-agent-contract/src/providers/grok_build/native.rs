@@ -67,12 +67,27 @@ pub fn resolve_engine(launcher: &Path) -> Result<PathBuf, HostError> {
 /// A same-inode file named `grok`. Execing the official symlink displays
 /// `grok-native` because tmux uses the resolved basename. This link is the
 /// public name; it is not a second image.
-pub fn public_name_link(engine: &Path, cwd: &Path) -> Result<PathBuf, HostError> {
+pub fn public_name_link(engine: &Path) -> Result<PathBuf, HostError> {
     let engine = engine.canonicalize().map_err(|error| HostError::io("Grok public name", error))?;
     if engine.file_name().is_none_or(|name| name != "grok-native") {
         return Err(HostError::new("Grok public name image", HostErrorKind::Ownership));
     }
-    let link = cwd.join("grok");
+    // The seat workspace may be another volume. A hard link only works beside the image.
+    let parent = std::env::temp_dir();
+    #[cfg(unix)]
+    let dir = {
+        use std::os::unix::fs::MetadataExt;
+        let engine_meta = std::fs::metadata(&engine).map_err(|error| HostError::io("Grok public name", error))?;
+        let parent_dev = std::fs::metadata(&parent).map_err(|error| HostError::io("Grok public name", error))?.dev();
+        if engine_meta.dev() != parent_dev {
+            return Err(HostError::new("Grok public name cross-device", HostErrorKind::Unsupported));
+        }
+        parent.join(format!("team-agent-grok-name-{}", engine_meta.ino()))
+    };
+    #[cfg(not(unix))]
+    let dir = parent.join("team-agent-grok-name");
+    std::fs::create_dir_all(&dir).map_err(|error| HostError::io("Grok public name", error))?;
+    let link = dir.join("grok");
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
