@@ -129,6 +129,32 @@ fn folded_seen_is_bound_to_confirmed_paste_payload_and_empty_composer() {
     }
 }
 #[test]
+fn long_paste_kb_label_reaches_seen_with_owned_proof() {
+    let mut f = frame();
+    f.input.as_mut().unwrap().lines = 190;
+    f.text = screen(&paste_preview(&[HEADER, "…", "[team-agent-token:message-1]"]), "[Pasted: 10 KB]");
+    let observed = adapter().interpret(&f);
+    assert!(matches!(observed.paste_latch, PasteLatch::Seen { .. }));
+    assert_eq!(observed.current_message, f.message);
+    assert_eq!(observed.current_attempt, f.attempt);
+}
+#[test]
+fn long_paste_cjk_preview_uses_display_cells() {
+    let mut f = frame();
+    // Captured 1.0.67 preview: an 86-cell inner width, not 86 scalars.
+    // One leading space + ten Han characters (20 cells) + 65 spaces.
+    let wide_row = format!("│ {}{}│", "中文".repeat(5), " ".repeat(65));
+    let preview = paste_preview(&[HEADER, "…", "[team-agent-token:message-1]"])
+        .replace(&format!("│ {:<84} │", "…"), &wide_row);
+    f.text = screen(&preview, "[Pasted: 161 lines]");
+    let observed = adapter().interpret(&f);
+    assert!(matches!(observed.paste_latch, PasteLatch::Seen { .. }));
+    assert_eq!(observed.current_attempt, f.attempt);
+    let mut bad = f;
+    bad.text = bad.text.replace(&wide_row, &wide_row.replace('│', " "));
+    assert_eq!(adapter().interpret(&bad).paste_latch, PasteLatch::NeverSeen);
+}
+#[test]
 fn folded_enter_requires_new_matching_transcript_not_disappearance_or_busy_alone() {
     let mut f = frame(); f.paste_latch = adapter().interpret(&f).paste_latch;
     f.scope = scope(3); f.after_step = Some(StepKind::InitialSubmit);

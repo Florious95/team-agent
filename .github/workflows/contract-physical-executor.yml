@@ -53,6 +53,7 @@ on:
           - startup-bridge
           - startup-receipt-red
           - startup-receipt
+          - startup-grok-paste
 
 permissions:
   contents: read
@@ -250,6 +251,9 @@ jobs:
             return "${statuses[0]}"
           }
           case "$REGRESSION_SCOPE" in
+            startup-grok-paste)
+              run_case grok-long-paste cargo test --manifest-path crates/team-agent-contract/Cargo.toml --test grok_build_contract --locked long_paste_ -- --test-threads=1 --nocapture
+              ;;
             startup-red-spec)
               run_case startup-spec-red cargo test -p team-agent --lib --locked startup_spec_red -- --test-threads=1 --nocapture
               ;;
