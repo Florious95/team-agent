@@ -22,7 +22,7 @@ use crate::contract::plan::{
 use crate::contract::probe::ProcessAliveEvidence;
 
 const FORMAT: &str = "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{session_name}\t#{window_name}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_in_mode}\t#{pane_mode}\t#{@tac_binding}\t#{pane_width}\t#{pane_height}";
-const CONFIG: &[u8] = b"set-option -g default-shell /bin/sh\nset-window-option -g remain-on-exit on\nset-window-option -g automatic-rename off\nset-window-option -g allow-rename off\nset-option -s exit-empty on\n";
+const CONFIG: &[u8] = b"set-option -g default-shell /bin/sh\nset-window-option -g remain-on-exit on\nset-option -s exit-empty on\n";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HostLimits {
@@ -719,8 +719,6 @@ impl<R: CommandRunner> TmuxHost<R> {
                 "-d".into(),
                 "-s".into(),
                 session_name.clone().into(),
-                "-n".into(),
-                "worker".into(),
                 "-x".into(),
                 self.limits.columns.to_string().into(),
                 "-y".into(),
@@ -740,8 +738,9 @@ impl<R: CommandRunner> TmuxHost<R> {
         }
         let initial = parse_pane(&result.stdout, PaneMetadataStage::NewSession)?;
         receipt.pane = Some(initial.address.clone());
+        // Window title is tmux/native presentation, not an ownership key.
         if initial.address.session_name != session_name
-            || initial.address.window_name != "worker"
+            || initial.address.window.is_empty()
             || initial.columns != self.limits.columns
             || initial.rows != self.limits.rows
         {
