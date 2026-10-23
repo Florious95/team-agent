@@ -79,7 +79,7 @@ unset TEAM_AGENT_HOST_NAMES TEAM_AGENT_HOST_KEY
     Ok(script)
 }
 
-fn public_command<'a>(plan: &'a LaunchPlan) -> &'a std::ffi::OsStr {
+fn public_command(plan: &LaunchPlan) -> &std::ffi::OsStr {
     let entry = plan.launcher.as_ref().map_or(&plan.executable, |entry| &entry.executable);
     // Only the internal image name is rewritten. An approved absolute launcher,
     // including a test fixture, still runs as given so PATH cannot substitute it.
