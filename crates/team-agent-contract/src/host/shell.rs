@@ -59,13 +59,20 @@ pub fn launch_script(
         script.extend(quote(value)?);
         script.push(b'\n');
     }
+    // Exec the public command the user would type. Never exec a canonicalized
+    // deep image: that skips wrappers, proxies and the name users recognize.
     script.extend_from_slice(b"exec ");
-    let entry = plan.launcher.as_ref().map_or(&plan.executable, |entry| &entry.executable);
-    script.extend(quote(entry.as_os_str())?);
+    script.extend(quote(public_command(plan))?);
     for argument in &plan.arguments {
         script.push(b' ');
         script.extend(quote(argument)?);
     }
     script.push(b'\n');
     Ok(script)
+}
+
+fn public_command(plan: &LaunchPlan) -> &std::ffi::OsStr {
+    let entry = plan.launcher.as_ref().map_or(plan.executable.as_os_str(), |entry| entry.executable.as_os_str());
+    let name = std::path::Path::new(entry).file_name().unwrap_or(entry);
+    if name == "grok-native" { std::ffi::OsStr::new("grok") } else { name }
 }

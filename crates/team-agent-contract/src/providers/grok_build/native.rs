@@ -64,37 +64,6 @@ pub fn resolve_engine(launcher: &Path) -> Result<PathBuf, HostError> {
     }
     Ok(engine)
 }
-/// Public command path. The verified image may be stored as `grok-native`;
-/// execing that filename is what tmux and ps display. A same-inode link named
-/// `grok` keeps the image check and presents the public command.
-pub fn public_exec_path(engine: &Path, cwd: &Path) -> Result<PathBuf, HostError> {
-    let engine = engine.canonicalize().map_err(|error| HostError::io("Grok public exec", error))?;
-    if engine.file_name().is_none_or(|name| name != "grok-native") {
-        return Err(HostError::new("Grok public exec image", HostErrorKind::Ownership));
-    }
-    let link = cwd.join("grok");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let engine_meta = std::fs::metadata(&engine).map_err(|error| HostError::io("Grok public exec", error))?;
-        match std::fs::hard_link(&engine, &link) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let link_meta = std::fs::metadata(&link).map_err(|error| HostError::io("Grok public exec", error))?;
-                if !link_meta.is_file() || link_meta.dev() != engine_meta.dev() || link_meta.ino() != engine_meta.ino() {
-                    return Err(HostError::new("Grok public exec link", HostErrorKind::Conflict));
-                }
-            }
-            Err(error) => return Err(HostError::io("Grok public exec link", error)),
-        }
-        Ok(link)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = link;
-        Err(HostError::new("Grok public exec", HostErrorKind::Unsupported))
-    }
-}
 /// Root calls this after resolving/owning the stable primary, before H3 effects.
 /// Metadata only; no user/account config bodies or Git administrative files.
 pub fn require_private_primary(cwd: &crate::contract::session::CwdIdentity) -> Result<(), HostError> {
@@ -115,7 +84,7 @@ pub fn require_private_primary(cwd: &crate::contract::session::CwdIdentity) -> R
 fn command(entry: &Path, engine: &Path, args: &[&str], cwd: Option<PathBuf>, bounds: ReadBounds) -> CommandRequest {
     CommandRequest {
         executable: entry.into(), arguments: args.iter().map(|arg| (*arg).into()).collect(), cwd,
-        environment: EnvironmentDelta { remove: Default::default(), set: std::collections::BTreeMap::from([("GROK_REAL".into(), engine.as_os_str().to_owned())]) },
+        environment: EnvironmentDelta { remove: std::collections::BTreeSet::from(["GROK_REAL".into()]), set: Default::default() },
         stdin: None, budget: bounds.deadline, reject_stdout: None,
         limits: OutputLimits { stdout: bounds.max_output_bytes, stderr: bounds.max_output_bytes, stdin: 0 },
     }
