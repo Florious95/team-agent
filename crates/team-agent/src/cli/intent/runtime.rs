@@ -814,47 +814,20 @@ fn plan_with_observer(
         return Ok(plan);
     }
     let spec = selected.spec_path.as_ref().filter(|p| p.is_file());
-    if spec.is_none() {
-        if plan.intent.verb == Verb::Restart && target.is_none() {
-            // Original active restart owns spec reconstruction and pre-destroy validation.
-            let rows = selected
-                .state
-                .get("agents")
-                .and_then(Value::as_object)
-                .ok_or_else(|| refusal("missing agents"))?;
-            let mut active = false;
-            for (id, row) in rows {
-                if !paused(row)
-                    && !crate::state::projection::agent_explicit_stop(row)
-                    && !crate::state::projection::agent_stopped_for_restart(row)
-                {
-                    let obs = observe(&selected, id, row)?;
-                    if obs == Observation::Unknown {
-                        return Err(refusal("unknown physical identity"));
-                    }
-                    active = true;
-                } else {
-                    plan.skipped.push(json!({"agent":id,"reason":if paused(row){"paused"}else if crate::state::projection::agent_explicit_stop(row){"explicit_stop"}else{"stopped_preserved_by_original_restart"}}));
-                }
-            }
-            if !active {
-                return Ok(no_eligible(
-                    plan,
-                    "missing spec cannot be rebuilt without an active roster",
-                ));
-            }
-            plan.steps.push(Step::RestartTeam(restart_args(&plan)));
-            return Ok(plan);
-        }
-        return Err(refusal(
-            "runtime spec missing; use explicit team restart to request supported reconstruction",
-        ));
-    }
-    let spec = spec.ok_or_else(|| refusal("missing spec"))?;
-    let spec_value = checked(yaml::loads(&std::fs::read_to_string(spec)?))?;
+    let missing_spec = spec.is_none();
+    let runtime_spec = crate::model::paths::runtime_spec_path(&selected.run_workspace, &selected.team_key);
+    let spec_value = match spec {
+        Some(path) => checked(yaml::loads(&std::fs::read_to_string(path)?))?,
+        None if plan.intent.verb != Verb::Stop => checked(
+            crate::lifecycle::restart::compile_runtime_spec_from_roles(
+                &selected.run_workspace, &selected.team_key, &selected.state,
+            ),
+        )?,
+        None => return Err(refusal("runtime spec missing; team stop can inspect and stop the selected runtime without rebuilding it")),
+    };
     validate_roster(
         &spec_value,
-        spec.parent().unwrap_or(&selected.run_workspace),
+        spec.unwrap_or(&runtime_spec).parent().unwrap_or(&selected.run_workspace),
     )?;
     let spec_ids: BTreeSet<String> = spec_value
         .get("agents")
@@ -1042,6 +1015,11 @@ fn plan_with_observer(
             .any(|s| s.get("reason").and_then(Value::as_str) == Some("already_running"))
     {
         return Ok(no_eligible(plan, "no eligible nonpaused roster"));
+    }
+    if missing_spec {
+        plan.steps.insert(0, Step::RestoreSpec {
+            workspace: selected.run_workspace, team: selected.team_key, compiled: spec_value,
+        });
     }
     Ok(plan)
 }
