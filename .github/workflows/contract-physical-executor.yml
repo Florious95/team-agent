@@ -276,6 +276,8 @@ jobs:
               ;;
             startup-bridge)
               run_case workspace-check cargo check --workspace --all-targets --locked
+              # Attach integration fixtures require the real debug CLI, not cargo check metadata.
+              run_case workspace-bin cargo build -p team-agent --bin team-agent --locked
               run_case root-contract cargo test -p team-agent --lib --locked contract_runtime -- --test-threads=1
               run_case root-launch cargo test -p team-agent --lib --locked lifecycle::tests::launch_spawn -- --test-threads=1
               run_case root-fresh-binding cargo test -p team-agent --lib --locked fresh_quick_start_leader_binding_tests -- --test-threads=1
