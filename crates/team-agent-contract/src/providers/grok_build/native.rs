@@ -81,7 +81,7 @@ pub fn require_private_primary(cwd: &crate::contract::session::CwdIdentity) -> R
     }
     Ok(())
 }
-fn command(entry: &Path, engine: &Path, args: &[&str], cwd: Option<PathBuf>, bounds: ReadBounds) -> CommandRequest {
+fn command(entry: &Path, _engine: &Path, args: &[&str], cwd: Option<PathBuf>, bounds: ReadBounds) -> CommandRequest {
     CommandRequest {
         executable: entry.into(), arguments: args.iter().map(|arg| (*arg).into()).collect(), cwd,
         environment: EnvironmentDelta { remove: std::collections::BTreeSet::from(["GROK_REAL".into()]), set: Default::default() },
