@@ -237,7 +237,8 @@ fn native_case_on(mode: &str, content: &str, expected_keys: usize, shared_worksp
             &["set-window-option", "-g", "remain-on-exit", "off"]).success());
         let global = raw_tmux(&mut peer, &tmux, &target.endpoint,
             &["show-options", "-gwv", "remain-on-exit"]);
-        assert!(global.success(), "global option baseline: {global:?}");
+        assert!(global.success(), "global option baseline: end={:?} exit={:?} stderr={}",
+            global.end, global.exit_code, String::from_utf8_lossy(&global.stderr));
         assert_eq!(global.stdout, b"off\n");
         let shared = SharedTmux { endpoint: target.endpoint.clone(),
             socket: Some((target.socket_device, target.socket_inode)), session_name,
@@ -490,7 +491,8 @@ fn native_case_on(mode: &str, content: &str, expected_keys: usize, shared_worksp
             &["show-buffer", "-b", "foreign-fixture-buffer"]).stdout, b"preserve-me");
         let global = raw_tmux(&mut peer, &tmux, &target.endpoint,
             &["show-options", "-gwv", "remain-on-exit"]);
-        assert!(global.success(), "global option after borrowed close: {global:?}");
+        assert!(global.success(), "global option after borrowed close: end={:?} exit={:?} stderr={}",
+            global.end, global.exit_code, String::from_utf8_lossy(&global.stderr));
         assert_eq!(global.stdout, global_before);
         let peer_closed = peer.close_owned_pane(&peer_target, &clock, clock.now() + Duration::from_secs(5));
         assert_eq!(peer_closed.pane_close.outcome, StepOutcome::Confirmed, "{peer_closed:?}");
