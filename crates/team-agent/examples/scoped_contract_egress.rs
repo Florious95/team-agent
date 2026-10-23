@@ -1,3 +1,5 @@
+/Users/runner/work/team-agent/team-agent/crates/team-agent/examples/scoped_contract_egress.rs:
+
 //! Explicit operator-only forwarding of existing committed native MCP receipts.
 //! No coordinator loop, native input, new source envelope, or candidate migration.
 use std::{error::Error, io, path::PathBuf, time::Duration};
@@ -25,7 +27,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--workspace" if workspace.is_none() => {
-                workspace = Some(PathBuf::from(args.next().ok_or_else(|| invalid("workspace value"))?));
+                workspace = Some(PathBuf::from(
+                    args.next().ok_or_else(|| invalid("workspace value"))?,
+                ));
             }
             "--team" if team.is_none() => {
                 team = Some(args.next().ok_or_else(|| invalid("team value"))?.clone());
@@ -47,23 +51,37 @@ fn run() -> Result<(), Box<dyn Error>> {
     let metadata = workspace.join(".team/runtime/coordinator.json");
     let original = std::fs::read(&metadata)?;
     let value: Value = serde_json::from_slice(&original)?;
-    let pid = value["pid"].as_u64().and_then(|pid| u32::try_from(pid).ok())
-        .filter(|pid| *pid > 1).ok_or_else(|| invalid("coordinator PID missing"))?;
-    let binary = PathBuf::from(value["binary_path"].as_str()
-        .ok_or_else(|| invalid("coordinator image missing"))?).canonicalize()?;
+    let pid = value["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .filter(|pid| *pid > 1)
+        .ok_or_else(|| invalid("coordinator PID missing"))?;
+    let binary = PathBuf::from(
+        value["binary_path"]
+            .as_str()
+            .ok_or_else(|| invalid("coordinator image missing"))?,
+    )
+    .canonicalize()?;
     let hash = fingerprint_file(&binary, 1024 * 1024 * 1024, Duration::from_secs(5))?;
     let daemon = capture_process(pid, &binary, hash, Duration::from_secs(5))?;
     let outcome = team_agent::contract_runtime::forward::drain_scoped_pending_egress(
         &workspace, &team, &scope, apply,
-    ).map_err(io::Error::other)?;
+    )
+    .map_err(io::Error::other)?;
     if std::fs::read(metadata)? != original || sample_process(&daemon) != ProcessState::Alive {
-        return Err(io::Error::other("coordinator identity changed; inspect, never replay Unknown forwards").into());
+        return Err(io::Error::other(
+            "coordinator identity changed; inspect, never replay Unknown forwards",
+        )
+        .into());
     }
-    println!("{}", json!({
-        "ok":true, "coordinator_pid":pid, "coordinator_birth":daemon.identity.birth_identity,
-        "coordinator_unchanged":true, "receipt":outcome,
-        "boundary":"framework forwarding acceptance is not actual Leader consumption"
-    }));
+    println!(
+        "{}",
+        json!({
+            "ok":true, "coordinator_pid":pid, "coordinator_birth":daemon.identity.birth_identity,
+            "coordinator_unchanged":true, "receipt":outcome,
+            "boundary":"framework forwarding acceptance is not actual Leader consumption"
+        })
+    );
     Ok(())
 }
 
