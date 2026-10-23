@@ -54,6 +54,7 @@ on:
           - startup-receipt-red
           - startup-receipt
           - startup-grok-paste
+          - startup-egress
 
 permissions:
   contents: read
@@ -251,6 +252,17 @@ jobs:
             return "${statuses[0]}"
           }
           case "$REGRESSION_SCOPE" in
+            startup-egress)
+              run_case egress-check cargo check --workspace --all-targets --locked
+              run_case egress-root cargo test -p team-agent --lib --locked contract_runtime::forward -- --test-threads=1 --nocapture
+              run_case egress-forward cargo test --manifest-path crates/team-agent-contract/Cargo.toml --test forward --locked -- --test-threads=1
+              run_case egress-build cargo build -p team-agent --example scoped_contract_egress --release --locked
+              run_case egress-help target/release/examples/scoped_contract_egress --help
+              cp target/release/examples/scoped_contract_egress regression-evidence/scoped_contract_egress
+              printf 'source_sha=%s\nsource_tree=%s\n' "$SOURCE_SHA" "$EXPECTED_TREE" > regression-evidence/OPERATOR-SOURCE.txt
+              rustfmt --edition 2021 --emit stdout crates/team-agent/examples/scoped_contract_egress.rs > regression-evidence/scoped_contract_egress.formatted.rs
+              run_case egress-format rustfmt --edition 2021 --check crates/team-agent/examples/scoped_contract_egress.rs
+              ;;
             startup-grok-paste)
               run_case grok-long-paste cargo test --manifest-path crates/team-agent-contract/Cargo.toml --test grok_build_contract --locked long_paste_ -- --test-threads=1 --nocapture
               ;;
