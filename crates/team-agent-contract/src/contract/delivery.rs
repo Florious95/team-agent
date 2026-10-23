@@ -348,6 +348,7 @@ pub struct CaptureBaseline {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InputShape {
     pub sha256: Digest,
+    pub bytes: usize,
     pub lines: usize,
     pub first_line: String,
 }

@@ -29,7 +29,7 @@ fn paste_preview(rows: &[&str]) -> String {
 }
 fn frame() -> CaptureFrame {
     CaptureFrame { scope: scope(2), text: screen(&paste_preview(&[HEADER, "…", "[team-agent-token:message-1]"]), "[Pasted: 161 lines]"),
-        cwd: Some("/owned/cwd".into()), input: Some(InputShape { sha256: digest(b"immutable input"), lines: 161, first_line: HEADER.into() }),
+        cwd: Some("/owned/cwd".into()), input: Some(InputShape { sha256: digest(b"immutable input"), bytes: 10507, lines: 161, first_line: HEADER.into() }),
         baseline: Some(CaptureBaseline { scope: scope(1), text: screen("", "") }), profile_id: PROFILE.into(), operation: Operation::FirstBusiness,
         message: Some(MessageId::new("message-1").unwrap()), attempt: Some(AttemptId::new("attempt-1").unwrap()), after_step: Some(StepKind::Paste), paste_latch: PasteLatch::NeverSeen }
 }
@@ -139,6 +139,35 @@ fn long_paste_kb_label_reaches_seen_with_owned_proof() {
     assert_eq!(observed.current_attempt, f.attempt);
 }
 #[test]
+fn long_paste_kb_forms_keep_ownership_and_size_guards() {
+    for (label, bytes) in [("10 KB", 10507), ("10.3 KB", 10507), ("12.5 KB", 12800)] {
+        let mut f = frame();
+        f.input.as_mut().unwrap().bytes = bytes;
+        let preview = paste_preview(&[HEADER, "…", "[team-agent-token:message-1]"]);
+        f.text = screen(&preview, &format!("[Pasted: {label}]"));
+        assert!(matches!(adapter().interpret(&f).paste_latch, PasteLatch::Seen { .. }), "{label}");
+        for case in 0..8 {
+            let mut bad = f.clone();
+            match case {
+                0 => bad.input.as_mut().unwrap().bytes = 1024,
+                1 => bad.input.as_mut().unwrap().bytes = 0,
+                2 => bad.baseline.as_mut().unwrap().text = screen("", "foreign draft"),
+                3 => bad.text = bad.text.replace("[team-agent-token:message-1]", "[team-agent-token:other]"),
+                4 => bad.text = bad.text.replace(HEADER, "an unrelated preview row"),
+                5 => bad.after_step = None,
+                6 => bad.baseline.as_mut().unwrap().text = screen(&format!("[Pasted: {label}]"), ""),
+                _ => bad.scope.identity.generation = Generation(2),
+            }
+            assert_eq!(adapter().interpret(&bad).paste_latch, PasteLatch::NeverSeen, "{label} case {case}");
+        }
+    }
+    for label in ["0 KB", "01 KB", "+10 KB", "-10 KB", "1e1 KB", "10. KB", "10..3 KB", "10.0000 KB", "10 kb", "10 MB", "10 KB] suffix", "9 KB", "11 KB"] {
+        let mut f = frame();
+        f.text = screen(&paste_preview(&[HEADER, "…", "[team-agent-token:message-1]"]), &format!("[Pasted: {label}]"));
+        assert_eq!(adapter().interpret(&f).paste_latch, PasteLatch::NeverSeen, "{label}");
+    }
+}
+#[test]
 fn long_paste_cjk_preview_uses_display_cells() {
     let mut f = frame();
     // Captured 1.0.67 preview: an 86-cell inner width, not 86 scalars.
@@ -153,6 +182,19 @@ fn long_paste_cjk_preview_uses_display_cells() {
     let mut bad = f;
     bad.text = bad.text.replace(&wide_row, &wide_row.replace('│', " "));
     assert_eq!(adapter().interpret(&bad).paste_latch, PasteLatch::NeverSeen);
+}
+#[test]
+fn long_paste_combining_and_emoji_preview_keep_closed_edges() {
+    for (text, padding) in [("e\u{301}", 84), ("👩‍💻", 83)] {
+        let mut f = frame();
+        let row = format!("│ {text}{}│", " ".repeat(padding));
+        let preview = paste_preview(&[HEADER, "…", "[team-agent-token:message-1]"])
+            .replace(&format!("│ {:<84} │", "…"), &row);
+        f.text = screen(&preview, "[Pasted: 161 lines]");
+        assert!(matches!(adapter().interpret(&f).paste_latch, PasteLatch::Seen { .. }));
+        f.text = f.text.replace(&row, &format!("│ {text}{}│", " ".repeat(padding - 1)));
+        assert_eq!(adapter().interpret(&f).paste_latch, PasteLatch::NeverSeen);
+    }
 }
 #[test]
 fn folded_enter_requires_new_matching_transcript_not_disappearance_or_busy_alone() {
@@ -183,7 +225,7 @@ fn folded_preview_above_restored_history_and_scrollbar_proves_current_header_and
     for history in [over_history(&preview), preview.lines().map(|row| format!("{row}               █\n")).collect()] {
         f.text = screen(&history, "[Pasted: 140 lines]");
         let seen = adapter().interpret(&f);
-        assert!(matches!(&seen.paste_latch, PasteLatch::Seen { native_identity } if native_identity.starts_with("grok-owned-folded-v2:")));
+        assert!(matches!(&seen.paste_latch, PasteLatch::Seen { native_identity } if native_identity.starts_with("grok-owned-folded-v3:")));
         assert_eq!(seen.current_attempt, f.attempt);
         assert_eq!(seen.current_message, f.message);
         assert_eq!(seen.surface, InputSurface::ComposerContainsPaste);
@@ -233,7 +275,7 @@ fn submitted_transcript_scrollbar_never_requires_cropping_or_accepts_preview_as_
     assert_ne!(adapter().interpret(&f).surface, InputSurface::NativeAccepted);
     f.baseline.as_mut().unwrap().text = screen("", "");
     if let PasteLatch::Seen { native_identity } = &mut f.paste_latch {
-        *native_identity = native_identity.replace("grok-owned-folded-v2:", "grok-owned-folded-v1:");
+        *native_identity = native_identity.replace("grok-owned-folded-v3:", "grok-owned-folded-v1:");
     }
     assert_ne!(adapter().interpret(&f).surface, InputSurface::NativeAccepted);
 }
