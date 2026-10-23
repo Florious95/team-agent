@@ -1546,9 +1546,10 @@ fn quick_start_persists_selected_tmux_endpoint_and_attach_commands() {
         "attach commands must use the selected socket endpoint: {attach_commands:?}"
     );
     assert!(
-        attach_commands.iter().any(|cmd| cmd.contains(":leader")),
-        "fresh managed quick-start must include the leader window attach command: {attach_commands:?}"
+        !attach_commands.iter().any(|cmd| cmd.contains(":leader")),
+        "managed metadata does not prove an unreported leader window exists: {attach_commands:?}"
     );
+    assert!(attach_commands.iter().any(|cmd| cmd.ends_with(":implementer")));
     let (_raw, state) = raw_runtime_state(workspace);
     assert_eq!(state["tmux_endpoint"], json!(endpoint));
     assert_eq!(state["tmux_socket"], json!(endpoint));
@@ -1583,7 +1584,7 @@ fn annotate_runtime_tmux_endpoint_persists_workspace_socket_as_full_path() {
 
 #[test]
 #[serial(env)]
-fn quick_start_preserves_managed_leader_topology_and_emits_leader_attach_command() {
+fn quick_start_preserves_managed_leader_topology_without_inventing_a_leader_window() {
     let hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("launch-spawn-managed-leader");
     let workspace = hermetic.root();
     let team = workspace.join("teamdir");
@@ -1641,9 +1642,10 @@ fn quick_start_preserves_managed_leader_topology_and_emits_leader_attach_command
     };
 
     assert!(
-        attach_commands.iter().any(|cmd| cmd.contains(":leader")),
-        "managed topology quick-start output must include the leader window attach command: {attach_commands:?}"
+        !attach_commands.iter().any(|cmd| cmd.contains(":leader")),
+        "managed ownership must survive, but a missing physical leader window is not an attach target: {attach_commands:?}"
     );
+    assert!(attach_commands.iter().any(|cmd| cmd.ends_with(":implementer")));
     let (_raw, state) = raw_runtime_state(workspace);
     assert_eq!(state["is_external_leader"], json!(false));
     assert_eq!(state["leader_client"]["diagnostic_only"], json!(true));

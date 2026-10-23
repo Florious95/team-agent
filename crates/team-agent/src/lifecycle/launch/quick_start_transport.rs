@@ -360,5 +360,9 @@ mod workspace_attach_tests {
             ["tmux -S /private/tmp/owned/tmux.sock attach -t team-native:grok-worker"]);
         assert!(attach_commands_for_runtime_windows(Some("authorized-workspace"),
             Path::new("/not-the-selected-socket"), &session, std::iter::empty()).is_empty());
+        assert_eq!(attach_commands_for_runtime_windows(Some("authorized-workspace"),
+            Path::new("/not-the-selected-socket"), &session, ["leader", "grok-worker"]),
+            ["tmux -L authorized-workspace attach -t team-native:leader",
+             "tmux -L authorized-workspace attach -t team-native:grok-worker"]);
     }
 }
