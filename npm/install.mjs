@@ -2,7 +2,7 @@
 /**
  * purpose: place the Team Agent runtime and login wrappers via the npx installer
  * contract: wrappers land only in the declared bin dir (~/.local/bin or --prefix/bin); installer-managed wrappers recorded in the manifest or recognized by marker are rewritten onto this install's runtime; a non-writable declared dir fails closed with ACTION
- * boundary: never selects a PATH entry as the install target; never creates wrappers in third-party package dirs; does not treat host login PATH order as a landing picker
+ * boundary: never selects a PATH entry as the install target; never creates wrappers in third-party package dirs; does not treat host login PATH order as a landing picker; install does not run doctor or treat a missing MCP server as a failure
  */
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -63,56 +63,6 @@ function isCliEntrypoint() {
   } catch {
     return path.resolve(process.argv[1]) === modulePath;
   }
-}
-
-export function doctorSelfCheckVerdict(doctorBody, spawnMeta = {}) {
-  if (spawnMeta.error || spawnMeta.signal) {
-    return { kind: "advisory", blockers: [] };
-  }
-
-  let body;
-  try {
-    body = JSON.parse(doctorBody || "");
-  } catch {
-    return { kind: "advisory", blockers: [] };
-  }
-
-  const blockers = [];
-  // Doctor JSON source: crates/team-agent/src/cli/mod.rs:2739-2764.
-  if (body?.tmux?.installed === false) {
-    blockers.push("tmux not installed");
-  }
-  if (!body?.mcp?.server_command) {
-    blockers.push("MCP server command missing");
-  }
-  const profileSmokeStatus = body?.profile_smoke?.status;
-  const profileSmokeNonBlocking =
-    profileSmokeStatus === "legacy_team_invalid" || profileSmokeStatus === "not_required";
-  if (
-    body?.error === "profile_smoke_failed" ||
-    (body?.profile_smoke?.ok === false && !profileSmokeNonBlocking)
-  ) {
-    blockers.push("profile smoke failed");
-  }
-
-  if (blockers.length > 0) {
-    return { kind: "blockers", blockers };
-  }
-
-  const noContext =
-    body?.ok === false && body?.error === "workspace has no Team Agent spec or runtime context";
-  if (body?.ok === true || noContext) {
-    return { kind: "ok", blockers: [] };
-  }
-
-  return { kind: "advisory", blockers: [] };
-}
-
-export function doctorSelfCheckLine(verdict) {
-  if (verdict.kind === "blockers") {
-    return `doctor: found blockers (${verdict.blockers.join("; ")}); run team-agent doctor in your project for details`;
-  }
-  return "doctor: ok (run team-agent doctor inside a team workspace for a full report)";
 }
 
 function printHelp() {
@@ -187,19 +137,6 @@ function install(argv) {
   });
 
   const teamAgent = path.join(binDir, "team-agent");
-  console.log(`installed: ${teamAgent}`);
-  if (installTarget.readyNow) {
-    console.log(`installed to ${binDir} (on PATH, ready now)`);
-  } else if (installTarget.rc?.files?.length > 0) {
-    console.log(`installed to ${binDir}; added ${binDir} to ${installTarget.rc.files.join(", ")}; restart terminal or open a new shell to use team-agent`);
-  } else if (installTarget.rc?.skipped?.length > 0) {
-    console.log(`installed to ${binDir}; PATH entry already present in ${installTarget.rc.skipped.join(", ")}; restart terminal or open a new shell to use team-agent`);
-  } else {
-    console.log(`installed to ${binDir}; add it to PATH to use team-agent by name`);
-  }
-  console.log(`runtime: ${dest}`);
-  console.log(`binary: ${platformBinary.packageName}`);
-  console.log("skill: installed for Codex, Claude and Copilot");
 
   // 0.3.6 hotfix · C-5 cr verdict — post-install binary smoke 门(走 `--help`
   // 子命令,因为 0.3.x CLI 现阶段没有 --version)。真跑一次 binary 才能抓住
@@ -219,25 +156,20 @@ function install(argv) {
     console.error(`LOG: ${teamAgent} --help => ${log}`);
     process.exit(1);
   }
-  console.log("smoke: team-agent --help ok");
-
-  const doctorWorkspace = makeDoctorWorkspace();
-  try {
-    const doctor = spawnSync(teamAgent, ["doctor", "--json", "--workspace", doctorWorkspace], {
-      text: true,
-      encoding: "utf8",
-      timeout: DOCTOR_TIMEOUT_MS,
-    });
-    const verdict = doctorSelfCheckVerdict(doctor.stdout, doctor);
-    console.log(doctorSelfCheckLine(verdict));
-  } finally {
-    fs.rmSync(doctorWorkspace, { recursive: true, force: true });
-  }
   const pathCheck = verifyInstalledTeamAgentOnPath({
     env: process.env,
     expectedVersion: version,
   });
-  console.log(`post-install: ${pathCheck.entry} --version = ${pathCheck.version}`);
+  console.log(`Installed Team Agent ${version}`);
+  console.log(teamAgent);
+  if (shadowRepairs.length > 0) {
+    console.log(`Updated ${shadowRepairs.length} older Team Agent command${shadowRepairs.length === 1 ? "" : "s"}.`);
+  }
+  if (pathCheck.status === "ready") {
+    console.log("Ready in this terminal. Run: team-agent --help");
+  } else {
+    console.log("Open a new terminal, then run: team-agent --help");
+  }
 }
 
 function runDoctor(argv) {
@@ -389,36 +321,26 @@ export function repairPathShadowingTeamAgentCommands(options = {}) {
   const repairs = [];
   const recordedBinDirs = options.recordedBinDirs || recordedManagedBinDirs(options.manifest);
   const candidates = pathShadowRepairCandidates(env.PATH || "", home, binDir, recordedBinDirs);
-  log?.(`path-shadow: scanning ${candidates.length} candidate bin dirs for managed wrappers`);
   for (const candidateDir of candidates) {
     const entry = candidateDir.dir;
     if (isVersionManagedPath(entry)) {
-      log?.(`path-shadow: skip ${path.join(entry, "team-agent")} source=${candidateDir.source} reason=version-managed-path`);
       continue;
     }
     for (const name of WRAPPER_NAMES) {
       const candidate = path.join(entry, name);
       if (!fs.existsSync(candidate)) {
-        if (name === "team-agent" && candidateDir.source === "home-local-bin") {
-          log?.(`path-shadow: checked ${candidate} source=${candidateDir.source} reason=not-found`);
-        }
         continue;
       }
-      log?.(`path-shadow: found ${candidate} source=${candidateDir.source}`);
       if (!isExecutableFile(candidate)) {
-        log?.(`path-shadow: skip ${candidate} source=${candidateDir.source} reason=not-executable-file`);
         continue;
       }
       if (sameFile(candidate, installedWrapper) && name === "team-agent") {
-        log?.(`path-shadow: skip ${candidate} source=${candidateDir.source} reason=installed-wrapper`);
         continue;
       }
       if (sameFile(candidate, runtimeBinary)) {
-        log?.(`path-shadow: skip ${candidate} source=${candidateDir.source} reason=runtime-binary`);
         continue;
       }
       if (!isInstallerManagedWrapper(candidate)) {
-        log?.(`path-shadow: skip ${candidate} source=${candidateDir.source} reason=not-installer-managed`);
         continue;
       }
       const extraArgs = name === "team_orchestrator" ? ["mcp-server"] : name === "team-agent-coordinator" ? ["coordinator"] : [];
@@ -428,12 +350,11 @@ export function repairPathShadowingTeamAgentCommands(options = {}) {
         const detail = error instanceof Error ? error.message : String(error);
         throw new Error(`failed to update PATH-shadowing team-agent at ${candidate}: ${detail}`);
       }
-      log?.(`path-shadow: updated ${candidate} source=${candidateDir.source} to runtime shim`);
       repairs.push({ file: candidate, binDir: entry, source: candidateDir.source });
     }
   }
-  if (repairs.length === 0) {
-    log?.("path-shadow: no stale team-agent command repaired");
+  if (repairs.length > 0) {
+    log?.(`updated ${repairs.length} older Team Agent command${repairs.length === 1 ? "" : "s"}`);
   }
   return repairs;
 }
@@ -451,11 +372,10 @@ export function verifyInstalledTeamAgentOnPath(options = {}) {
     timeout: VERSION_SMOKE_TIMEOUT_MS,
   });
   const entry = (which.stdout || "").split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+  // A fresh ~/.local/bin install is not on the current shell PATH yet. That is
+  // guidance, not a failed install.
   if (which.status !== 0 || !entry) {
-    throw new Error(
-      `post-install version check failed: \`which team-agent\` did not find the installed command. ` +
-        `Expected version ${expectedVersion}. Add the install bin directory to PATH or restart your shell.`,
-    );
+    return { status: "not-on-current-path" };
   }
   const versionProbe = spawnSync(entry, ["--version"], {
     text: true,
@@ -479,7 +399,7 @@ export function verifyInstalledTeamAgentOnPath(options = {}) {
         `but installer installed ${expectedVersion}. Remove or update the earlier PATH entry that shadows Team Agent.`,
     );
   }
-  return { entry, version: actualVersion };
+  return { status: "ready", entry, version: actualVersion };
 }
 
 export function parseTeamAgentVersion(output) {

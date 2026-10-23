@@ -3,10 +3,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
-  doctorSelfCheckLine,
-  doctorSelfCheckVerdict,
   parseTeamAgentVersion,
   readInstallManifest,
   repairPathShadowingTeamAgentCommands,
@@ -14,47 +13,6 @@ import {
   verifyInstalledTeamAgentOnPath,
   writeInstallManifest,
 } from "./install.mjs";
-
-test("empty doctor workspace is ok for installer self-check", () => {
-  const verdict = doctorSelfCheckVerdict(
-    JSON.stringify({
-      ok: false,
-      error: "workspace has no Team Agent spec or runtime context",
-      tmux: { installed: true },
-      mcp: { server_command: "/x/team_orchestrator" },
-    }),
-    { status: 1 },
-  );
-
-  assert.equal(verdict.kind, "ok");
-  assert.deepEqual(verdict.blockers, []);
-});
-
-test("real doctor blockers remain blockers", () => {
-  const verdict = doctorSelfCheckVerdict(
-    JSON.stringify({
-      ok: false,
-      tmux: { installed: false },
-      mcp: { server_command: null },
-    }),
-    { status: 1 },
-  );
-
-  assert.equal(verdict.kind, "blockers");
-  assert.ok(verdict.blockers.some((blocker) => blocker.includes("tmux")));
-});
-
-test("unparseable or killed doctor self-check is advisory without blocker wording", () => {
-  for (const [doctorBody, spawnMeta] of [
-    ["", { status: 1 }],
-    ["not json", { status: 1 }],
-    [JSON.stringify({ ok: false }), { signal: "SIGTERM" }],
-  ]) {
-    const verdict = doctorSelfCheckVerdict(doctorBody, spawnMeta);
-    assert.equal(verdict.kind, "advisory");
-    assert.doesNotMatch(doctorSelfCheckLine(verdict), /has blockers/);
-  }
-});
 
 test("install bin resolver ignores writable third-party PATH dirs and uses declared ~/.local/bin", () => {
   const root = tempRoot("path-choice");
@@ -138,9 +96,8 @@ test("post-install repair updates higher-priority stale local team-agent binary"
   });
 
   assert.deepEqual(repairs.map((repair) => repair.file), [path.join(localBin, "team-agent")]);
-  assert.ok(logs.some((line) => line.includes("path-shadow: scanning")));
-  assert.ok(logs.some((line) => line.includes(`found ${path.join(localBin, "team-agent")}`)));
-  assert.ok(logs.some((line) => line.includes(`updated ${path.join(localBin, "team-agent")}`)));
+  assert.deepEqual(logs, ["updated 1 older Team Agent command"]);
+  assert.equal(logs.some((line) => line.includes("path-shadow:")), false);
   const repaired = fs.readFileSync(path.join(localBin, "team-agent"), "utf8");
   assert.match(repaired, /team-agent installer wrapper/);
   assert.match(repaired, new RegExp(escapeRegExp(runtimeBinary)));
@@ -168,7 +125,7 @@ test("post-install repair probes home local bin even when npm PATH misses it", (
   });
 
   assert.deepEqual(repairs.map((repair) => repair.file), [path.join(localBin, "team-agent")]);
-  assert.ok(logs.some((line) => line.includes(`found ${path.join(localBin, "team-agent")} source=home-local-bin`)));
+  assert.equal(logs.some((line) => line.includes("path-shadow:")), false);
   const repaired = fs.readFileSync(path.join(localBin, "team-agent"), "utf8");
   assert.match(repaired, /team-agent installer wrapper/);
   assert.match(repaired, new RegExp(escapeRegExp(runtimeBinary)));
@@ -210,8 +167,18 @@ test("post-install version check verifies the actual team-agent resolved on PATH
     expectedVersion: "1.2.3",
   });
 
+  assert.equal(check.status, "ready");
   assert.equal(check.entry, path.join(binDir, "team-agent"));
   assert.equal(check.version, "1.2.3");
+});
+
+test("current shell missing team-agent is not an install failure", () => {
+  const check = verifyInstalledTeamAgentOnPath({
+    env: { PATH: "/usr/bin:/bin" },
+    expectedVersion: "1.2.3",
+  });
+
+  assert.equal(check.status, "not-on-current-path");
 });
 
 test("post-install version check fails when PATH still resolves an old team-agent", () => {
@@ -255,10 +222,7 @@ test("install manifest persists selected bin dir for later commands", () => {
 // in-place overwrite. The Darwin ad-hoc codesign helper must also be wired
 // in between staging and the swap.
 test("installer stages under temp dir and codesigns before atomic rename", () => {
-  const source = fs.readFileSync(
-    path.join(path.dirname(new URL(import.meta.url).pathname), "install.mjs"),
-    "utf8",
-  );
+  const source = fs.readFileSync(fileURLToPath(new URL("./install.mjs", import.meta.url)), "utf8");
   // Temp-dir staging pattern: `.${version}.${process.pid}.tmp` under runtimeRoot.
   assert.match(
     source,
