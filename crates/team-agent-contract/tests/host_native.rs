@@ -233,6 +233,9 @@ fn native_case_on(mode: &str, content: &str, expected_keys: usize, shared_worksp
         assert!(spawned.problem.is_none(), "anchor: {spawned:?}");
         let session_name = spawned.pane.as_ref().unwrap().session_name.clone();
         let target = spawned.target.unwrap();
+        assert!(std::env::var_os("TEAM_AGENT_SHARED_SERVER_ONLY_IDENTITY").is_none());
+        assert!(raw_tmux(&mut peer, &tmux, &target.endpoint,
+            &["set-environment", "-g", "TEAM_AGENT_SHARED_SERVER_ONLY_IDENTITY", "foreign-server-identity"]).success());
         assert!(raw_tmux(&mut peer, &tmux, &target.endpoint,
             &["set-window-option", "-g", "remain-on-exit", "off"]).success());
         let global = raw_tmux(&mut peer, &tmux, &target.endpoint,
