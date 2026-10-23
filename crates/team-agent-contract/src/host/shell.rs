@@ -46,6 +46,14 @@ pub fn launch_script(
             HostErrorKind::Invalid,
         ));
     }
+    // A borrowed tmux server can contain identity keys absent from the caller.
+    // Enumerate only TEAM_AGENT_ names inside the child; opaque auth/proxy values
+    // never leave this pipeline or enter a host receipt. No eval or value export.
+    script.extend_from_slice(br#"[ -x /usr/bin/env ] && [ -x /usr/bin/sed ] || exit 126
+TEAM_AGENT_HOST_NAMES=$(/usr/bin/env | /usr/bin/sed -n 's/^\(TEAM_AGENT_[A-Za-z0-9_]*\)=.*/\1/p') || exit 126
+for TEAM_AGENT_HOST_KEY in $TEAM_AGENT_HOST_NAMES; do unset "$TEAM_AGENT_HOST_KEY" || exit 126; done
+unset TEAM_AGENT_HOST_NAMES TEAM_AGENT_HOST_KEY
+"#);
     // Clear inherited framework identities first; only the explicit captured overlay wins.
     for key in plan.environment.remove.union(inherited_identity_keys) {
         script.extend_from_slice(b"unset ");
