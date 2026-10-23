@@ -391,9 +391,13 @@ fn wrapper_bytes_and_stamp_are_distinct_from_final_image() {
     plan.launcher = Some(LaunchEntrypoint { executable: wrapper.clone(), sha256: stamp.sha256 });
     validate_launch_plan(&descriptor, &resolved, &plan).unwrap();
     let script = String::from_utf8(team_agent_contract::host::shell::launch_script(&plan, &Default::default()).unwrap()).unwrap();
-    assert!(script.contains("exec 'approved-wrapper'"));
-    assert!(!script.contains(wrapper.to_str().unwrap()));
+    assert!(script.contains(&format!("exec '{}'", wrapper.display())));
     assert!(!script.contains("exec '/fake/bin'"));
+    plan.launcher = None;
+    plan.executable = std::path::PathBuf::from("/opt/grok/grok-native");
+    let deep = String::from_utf8(team_agent_contract::host::shell::launch_script(&plan, &Default::default()).unwrap()).unwrap();
+    assert!(deep.contains("exec 'grok'"));
+    assert!(!deep.contains("grok-native"));
     std::fs::write(&wrapper, b"replaced").unwrap(); assert!(verify_executable_inputs(&[stamp]).is_err());
     assert!(capture_launch_file(&wrapper, digest(b"original"), 1024, Duration::from_secs(2)).is_err());
 }

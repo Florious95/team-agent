@@ -71,8 +71,13 @@ pub fn launch_script(
     Ok(script)
 }
 
-fn public_command(plan: &LaunchPlan) -> &std::ffi::OsStr {
-    let entry = plan.launcher.as_ref().map_or(plan.executable.as_os_str(), |entry| entry.executable.as_os_str());
-    let name = std::path::Path::new(entry).file_name().unwrap_or(entry);
-    if name == "grok-native" { std::ffi::OsStr::new("grok") } else { name }
+fn public_command<'a>(plan: &'a LaunchPlan) -> &'a std::ffi::OsStr {
+    let entry = plan.launcher.as_ref().map_or(&plan.executable, |entry| &entry.executable);
+    // Only the internal image name is rewritten. An approved absolute launcher,
+    // including a test fixture, still runs as given so PATH cannot substitute it.
+    if entry.file_name().is_some_and(|name| name == "grok-native") {
+        std::ffi::OsStr::new("grok")
+    } else {
+        entry.as_os_str()
+    }
 }
