@@ -605,6 +605,9 @@ pub(crate) fn start_needs_reconciliation(workspace: &Path, team: &str, seat: &Se
     require_candidate(&backend.binding)?;
     let class = existing_start(&backend, seat)?;
     let current = backend.store.seat(seat)?;
+    if current.as_ref().is_some_and(|seat| row.get("provider").and_then(serde_json::Value::as_str) != Some(seat.provider.as_str())) {
+        return Err(Error::Fence.into());
+    }
     let matches = |identity: &InstanceIdentity| {
         row.get("contract_scope").and_then(serde_json::Value::as_str) == Some(identity.scope.as_str())
             && row.get("contract_instance").and_then(serde_json::Value::as_str) == Some(identity.instance.as_str())
@@ -623,13 +626,14 @@ pub(crate) fn start_needs_reconciliation(workspace: &Path, team: &str, seat: &Se
     { return Err(Error::Fence.into()); }
     Ok(seed || current.as_ref().is_some_and(|seat| !matches(&seat.identity)
         || seat.status == SeatStatus::Starting
+        || row.get("session_id").and_then(serde_json::Value::as_str) != seat.session.as_ref().map(|session| session.native_session.as_str())
         || (seat.status == SeatStatus::Stopped && row.get("status").and_then(serde_json::Value::as_str) != Some("stopped"))
         || (seat.status != SeatStatus::Stopped && row.get("status").and_then(serde_json::Value::as_str) != Some("running")))
         || matches!(class, Some(ExistingStart::FinishReceipt(_) | ExistingStart::Pending(_) | ExistingStart::Blocked(_))))
 }
 
 /// Read-only preflight, reused by the CLI before any role write or stop.
-pub(crate) fn preflight_start_role(workspace: &Path, team: &str, role: &RoleConfig) -> Result<(), BackendError> {
+pub(crate) fn preflight_start_role(workspace: &Path, team: &str, role: &RoleConfig) -> Result<bool, BackendError> {
     let backend = Backend::open_readonly(workspace, team)?;
     require_candidate(&backend.binding)?;
     match existing_start(&backend, &role.id)? {
@@ -641,9 +645,9 @@ pub(crate) fn preflight_start_role(workspace: &Path, team: &str, role: &RoleConf
         Some(ExistingStart::Committed(record) | ExistingStart::FinishReceipt(record)) => { validate_existing(&backend, role, &record)?; },
         Some(ExistingStart::Resume(_)) => { prepare_resume(workspace, team, &role.id, Some(role))?; },
         Some(ExistingStart::Pending(record) | ExistingStart::Blocked(record)) => return Err(receipt_error(record)),
-        None => {}, // Full-team fresh preflight is supplied by the caller.
+        None => return Ok(true), // Caller must run full-team fresh preflight before writes.
     }
-    Ok(())
+    Ok(false)
 }
 
 fn finish_receipt(backend: &mut Backend, record: OperationRecord) -> Result<OperationRecord, BackendError> {
@@ -1251,6 +1255,27 @@ mod tests {
     #[test]
     fn startup_receipt_red_uncertain_is_blocked_with_original_receipt() {
         assert_receipt_class(SeatStatus::Starting, Phase::F3Spawn, Outcome::NeedsRecovery, Some("spawn"), "blocked");
+    }
+
+    #[test]
+    fn startup_receipt_projection_repair_refuses_foreign_or_guessed_identity() {
+        let mut fixture = RoleFixture::new();
+        fixture.binding.candidate = std::env::current_exe().unwrap().canonicalize().unwrap();
+        fixture.binding.candidate_sha256 = fingerprint_file(&fixture.binding.candidate, 1024 * 1024 * 1024, Duration::from_secs(10)).unwrap();
+        let backend = fixture.canonical(SeatStatus::Starting, Phase::F4Commit, Outcome::Running, None);
+        let original = backend.store.creation_receipt(&fixture.identity.seat, Some(&fixture.identity)).unwrap().unwrap();
+        let seed = serde_json::json!({"provider":"cursor","status":"unknown"});
+        assert!(start_needs_reconciliation(&fixture.root, "test", &fixture.identity.seat, &seed).unwrap());
+        let exact = serde_json::json!({"provider":"cursor","status":"unknown","contract_scope":fixture.identity.scope,
+            "contract_instance":fixture.identity.instance,"generation":fixture.identity.generation});
+        assert!(start_needs_reconciliation(&fixture.root, "test", &fixture.identity.seat, &exact).unwrap());
+        for (key, value) in [("provider", serde_json::json!("grok_build")), ("contract_scope", serde_json::json!("foreign")),
+            ("contract_instance", serde_json::json!("another")), ("generation", serde_json::json!(2))] {
+            let mut forged = exact.clone(); forged[key] = value;
+            assert!(start_needs_reconciliation(&fixture.root, "test", &fixture.identity.seat, &forged).is_err(), "{key}");
+        }
+        assert_eq!(backend.store.operation(&original.id).unwrap(), original);
+        assert!(preflight_start_role(&fixture.root, "test", &fixture.role).is_err(), "classification is not Native admission");
     }
 
     #[test]

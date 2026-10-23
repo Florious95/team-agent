@@ -125,9 +125,13 @@ pub fn start_agent(
         if unstarted {
             // Full pure team admission precedes native allocation or role writes.
             backend::preflight(&config).map_err(error)?;
-        } else {
-            backend::preflight_start_role(&selected.run_workspace, &selected.team_key, role).map_err(error)?;
+        } else if backend::preflight_start_role(&selected.run_workspace, &selected.team_key, role).map_err(error)? {
+            backend::preflight(&config).map_err(error)?;
         }
+        let before = if unstarted { None } else {
+            Backend::open_readonly(&selected.run_workspace, &selected.team_key).map_err(error)?
+                .store.creation_receipt(id, None).map_err(error)?
+        };
         crate::lifecycle::role_config::commit_contract_role(&source, &previous, &next).map_err(error)?;
         let receipt = backend::start(&selected.run_workspace, &selected.team_key, role, &config.members).map_err(error)?.1;
         // An uncertain operation never rolls the authoritative native store back
@@ -137,7 +141,13 @@ pub fn start_agent(
             &crate::coordinator::WorkspacePath::new(selected.run_workspace.clone()), Some(&selected.team_key),
         ).map_err(error)?;
         Ok(json!({"ok":coordinator.ok,"agent_id":agent,"status":"running","runtime":"contract",
-            "start_mode":if unstarted {"fresh"} else {"resumed"}, "operation":receipt.id,
+            "start_mode":match before {
+                None => "fresh",
+                Some(ref original) if original.outcome == Outcome::Compensated => "fresh",
+                Some(ref original) if original.id == receipt.id && original.outcome != Outcome::Committed => "receipt_completed",
+                Some(ref original) if original.id == receipt.id => "reused",
+                Some(_) => "resumed",
+            }, "operation":receipt.id,
             "session_id":projection.get("session_id"),"generation":projection.get("generation"),
             "coordinator":crate::lifecycle::coordinator_start_summary_value(
                 &crate::lifecycle::CoordinatorStartSummary::from_start_report(&coordinator))}))

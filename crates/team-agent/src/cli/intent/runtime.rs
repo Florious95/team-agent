@@ -503,9 +503,11 @@ fn preflight_start(
         if crate::contract_runtime::framework::is_paused_unstarted(row) {
             checked(crate::contract_runtime::backend::preflight(&config))?;
         } else {
-            checked(crate::contract_runtime::backend::preflight_start_role(
+            if checked(crate::contract_runtime::backend::preflight_start_role(
                 &selected.run_workspace, &selected.team_key, role,
-            ))?;
+            ))? {
+                checked(crate::contract_runtime::backend::preflight(&config))?;
+            }
         }
         return Ok(());
     }

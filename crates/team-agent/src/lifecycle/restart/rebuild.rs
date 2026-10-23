@@ -569,9 +569,18 @@ fn restart_with_selected_team_and_transport(
     // no authoritative live agents, the previous behavior (pre-spawn
     // teardown of a stale empty session) is preserved so tests that
     // seed a fake-live session without live agent rows still work.
+    #[cfg(unix)]
+    let shared_native_windows = crate::contract_runtime::backend::has_shared_windows(
+        &selected.run_workspace, &selected.team_key,
+    ).map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;
+    #[cfg(not(unix))]
+    let shared_native_windows = false;
+    // Canonical windows share this session but are NOT legacy restart targets.
+    // Keep the session, and retire only each successful legacy replacement's
+    // exact old pane through the existing build-before-destroy path.
     let live_worker_session_deferred_teardown =
         session_live_or_default(transport, &session_name, false)
-            && !collect_live_agents_from_state(&state).is_empty();
+            && (shared_native_windows || !collect_live_agents_from_state(&state).is_empty());
     let inherited_generation =
         crate::state::projection::session_generation(&state).map(str::to_string);
     let same_role_cohort_targets =
@@ -586,12 +595,6 @@ fn restart_with_selected_team_and_transport(
     } else {
         std::collections::BTreeSet::new()
     };
-    #[cfg(unix)]
-    let shared_native_windows = crate::contract_runtime::backend::has_shared_windows(
-        &selected.run_workspace, &selected.team_key,
-    ).map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;
-    #[cfg(not(unix))]
-    let shared_native_windows = false;
     if destroy_stale_worker_session(session_live_or_default(transport, &session_name, false),
         live_worker_session_deferred_teardown, shared_native_windows)
     {
@@ -4017,10 +4020,9 @@ fn restart_candidate_has_context(state: &serde_json::Value) -> bool {
         })
 }
 
-// Extracted old predicate: the RED test demonstrates that session-wide stale
-// teardown was unaware of canonical windows on the now shared workspace server.
-fn destroy_stale_worker_session(live: bool, deferred: bool, _shared_native: bool) -> bool {
-    live && !deferred
+// Never let a legacy session-wide kill bypass canonical native teardown.
+fn destroy_stale_worker_session(live: bool, deferred: bool, shared_native: bool) -> bool {
+    live && !deferred && !shared_native
 }
 
 #[cfg(test)]
