@@ -769,7 +769,12 @@ impl<R: CommandRunner> TmuxHost<R> {
         }
         loop {
             let pane = self.query_pane(&initial.address.pane, clock, deadline)?;
-            if pane.address != initial.address || pane.binding != binding {
+            if pane.address.session != initial.address.session
+                || pane.address.window != initial.address.window
+                || pane.address.pane != initial.address.pane
+                || pane.address.pid != initial.address.pid
+                || pane.binding != binding
+            {
                 return Err(HostError::new(
                     "spawn pane changed",
                     HostErrorKind::Ownership,
