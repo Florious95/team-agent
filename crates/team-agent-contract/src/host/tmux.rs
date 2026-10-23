@@ -22,7 +22,7 @@ use crate::contract::plan::{
 use crate::contract::probe::ProcessAliveEvidence;
 
 const FORMAT: &str = "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{session_name}\t#{window_name}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_in_mode}\t#{pane_mode}\t#{@tac_binding}\t#{pane_width}\t#{pane_height}";
-const CONFIG: &[u8] = b"set-option -g default-shell /bin/sh\nset-window-option -g remain-on-exit on\nset-window-option -g automatic-rename off\nset-window-option -g allow-rename off\nset-option -s exit-empty on\n";
+const CONFIG: &[u8] = b"set-option -g default-shell /bin/sh\nset-window-option -g remain-on-exit on\nset-option -s exit-empty on\n";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HostLimits {
@@ -782,13 +782,12 @@ impl<R: CommandRunner> TmuxHost<R> {
         let signature = directory_signature(self.directory.receipt());
         let session_name = self.shared.as_ref().map(|shared| shared.session_name.clone())
             .unwrap_or_else(|| format!("tac-{}", &signature[..24]));
-        let window_name = if self.shared.is_some() { self.directory.receipt().owner.seat.as_str() } else { "worker" }.to_string();
         let mut shell = Vec::new();
         if self.shared.is_some() {
             // Only this new window is configured, before it execs the native
             // image. Never load per-seat global config into a borrowed server.
-            for (option, value) in [("remain-on-exit", "on"), ("window-size", "manual"),
-                ("automatic-rename", "off"), ("allow-rename", "off")] {
+            // Do not override automatic-rename: the native CLI owns the title.
+            for (option, value) in [("remain-on-exit", "on"), ("window-size", "manual")] {
                 shell.extend(quote(self.executable.as_os_str())?);
                 shell.extend_from_slice(b" -S "); shell.extend(quote(self.endpoint.as_os_str())?);
                 shell.extend_from_slice(b" set-window-option -t \"$TMUX_PANE\" ");
@@ -823,7 +822,7 @@ impl<R: CommandRunner> TmuxHost<R> {
                 "new-session".into(), "-d".into(), "-s".into(), session_name.clone().into(),
                 "-x".into(), self.limits.columns.to_string().into(), "-y".into(), self.limits.rows.to_string().into()]
         };
-        arguments.extend(["-n".into(), window_name.clone().into(), "-P".into(), "-F".into(), FORMAT.into(), shell]);
+        arguments.extend(["-P".into(), "-F".into(), FORMAT.into(), shell]);
         let result = self.command(arguments, None, clock, deadline)?;
         receipt.may_have_spawned = result.may_have_executed();
         if !result.success() {
@@ -831,8 +830,10 @@ impl<R: CommandRunner> TmuxHost<R> {
         }
         let initial = parse_pane(&result.stdout, PaneMetadataStage::NewSession)?;
         receipt.pane = Some(initial.address.clone());
+        // The returned window id is the ownership key. Its display name belongs
+        // to tmux and the native CLI, so a rename cannot fail this spawn.
         if initial.address.session_name != session_name
-            || initial.address.window_name != window_name
+            || initial.address.window.is_empty()
             || self.shared.as_ref().and_then(|shared| shared.session.as_ref()).is_some_and(|session| session != &initial.address.session)
             || (self.shared.is_none() && (initial.columns != self.limits.columns || initial.rows != self.limits.rows))
         {
