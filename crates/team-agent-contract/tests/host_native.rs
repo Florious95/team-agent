@@ -140,10 +140,10 @@ fn native_fixture_root(nonce: u128) -> PathBuf {
 }
 
 fn native_case(mode: &str, content: &str, expected_keys: usize) {
-    native_case_on(mode, content, expected_keys, false);
+    native_case_on(mode, content, expected_keys, false, false);
 }
 
-fn native_case_on(mode: &str, content: &str, expected_keys: usize, shared_workspace: bool) {
+fn native_case_on(mode: &str, content: &str, expected_keys: usize, shared_workspace: bool, new_session: bool) {
     let tmux = configured_binary("CONTRACT_TMUX");
     assert_eq!(
         std::env::var("CONTRACT_OLD_SCOPE").as_deref(),
@@ -241,10 +241,12 @@ fn native_case_on(mode: &str, content: &str, expected_keys: usize, shared_worksp
             global.end, global.exit_code, String::from_utf8_lossy(&global.stderr));
         assert_eq!(global.stdout, b"off\n");
         let shared = SharedTmux { endpoint: target.endpoint.clone(),
-            socket: Some((target.socket_device, target.socket_inode)), session_name,
-            session: Some(target.session.clone()) };
+            socket: Some((target.socket_device, target.socket_inode)),
+            session_name: if new_session { format!("team-shared-{nonce}") } else { session_name },
+            session: if new_session { None } else { Some(target.session.clone()) } };
         let refused_dir = ScopedDirectory::create(&directory.path().join("refused"), launch.request().identity.clone()).unwrap();
         let mut wrong = shared.clone(); wrong.session_name = "not-the-authorized-session".into();
+        wrong.session = Some(target.session.clone());
         let mut refused = TmuxHost::new_shared(refused_dir, tmux.clone(), limits, NoLocaleRunner::default(), wrong).unwrap();
         let before = raw_tmux(&mut peer, &tmux, &target.endpoint,
             &["list-windows", "-a", "-F", "#{window_id}"]).stdout;
@@ -283,10 +285,15 @@ fn native_case_on(mode: &str, content: &str, expected_keys: usize, shared_worksp
     assert_eq!(target.shared_endpoint, shared_workspace);
     if let Some((_, peer, _)) = &anchor {
         assert_eq!(target.endpoint, peer.endpoint);
-        assert_eq!(target.session, peer.session);
+        assert_eq!(target.created_session, new_session);
+        if new_session { assert_ne!(target.session, peer.session); }
+        else { assert_eq!(target.session, peer.session); }
         assert_ne!(target.pane, peer.pane);
         assert_ne!(target.window, peer.window);
         let mut forged = target.clone(); forged.shared_endpoint = false;
+        assert!(TmuxHost::restore_owned(forged, tmux.clone(), limits, NoLocaleRunner::default(),
+            &clock, clock.now() + Duration::from_secs(5)).is_err());
+        let mut forged = target.clone(); forged.created_session = !target.created_session;
         assert!(TmuxHost::restore_owned(forged, tmux.clone(), limits, NoLocaleRunner::default(),
             &clock, clock.now() + Duration::from_secs(5)).is_err());
         host = TmuxHost::restore_owned(target.clone(), tmux.clone(), limits, NoLocaleRunner::default(),
@@ -518,7 +525,9 @@ fn native_case_on(mode: &str, content: &str, expected_keys: usize, shared_worksp
         "tmux_server_pid":server.identity.pid,"tmux_server_birth":server.identity.birth_identity,
         "paste_confirmed":report.counts.paste.confirmed,"keys_issued":report.counts.keys_issued(),"initial":report.counts.initial.confirmed,
         "confirmation":report.counts.confirmation.confirmed,"retry":report.counts.retry.confirmed,"wrap_gap":report.counts.wrap_gap.confirmed,
-        "queue":report.counts.queue.confirmed,"native_exited":true,"private_tmux_server_exited":true,"socket_preserved":close.socket_preserved,
+        "queue":report.counts.queue.confirmed,"native_exited":true,"private_tmux_server_exited":!shared_workspace,
+        "shared_endpoint":target.shared_endpoint,"created_session":target.created_session,
+        "fixture_server_exited_after_owner_close":true,"socket_preserved":close.socket_preserved,
         "native_events":events});
     std::fs::write(
         host.directory().path().join("fixture-receipt.json"),
@@ -533,6 +542,7 @@ fn historical_target_receipts_keep_private_socket_ownership() {
     let original = target();
     let mut value = serde_json::to_value(&original).unwrap();
     value.as_object_mut().unwrap().remove("shared_endpoint");
+    value.as_object_mut().unwrap().remove("created_session");
     let restored: team_agent_contract::host::transport::TargetReceipt = serde_json::from_value(value).unwrap();
     assert_eq!(restored, original);
     assert!(!restored.shared_endpoint);
@@ -540,7 +550,12 @@ fn historical_target_receipts_keep_private_socket_ownership() {
 
 #[test]
 fn real_tmux_shared_workspace_is_visible_and_preserves_peer_socket_and_global_options() {
-    native_case_on("single", "shared workspace\nexact native input\nno peer effects", 1, true);
+    native_case_on("single", "shared workspace\nexact native input\nno peer effects", 1, true, false);
+}
+
+#[test]
+fn real_tmux_new_team_session_uses_existing_workspace_server_and_preserves_other_team() {
+    native_case_on("single", "new visible team session\nexisting workspace server", 1, true, true);
 }
 
 #[test]

@@ -314,10 +314,10 @@ pub struct SharedTmux {
     pub session: Option<String>,
 }
 
-fn target_binding(directory: &DirectoryReceipt, device: u64, inode: u64, shared: Option<&std::path::Path>) -> String {
+fn target_binding(directory: &DirectoryReceipt, device: u64, inode: u64, shared: Option<&std::path::Path>, created_session: bool) -> String {
     let signature = directory_signature(directory);
     let key = match shared {
-        Some(endpoint) => format!("shared-v1:{signature}:{device}:{inode}:{}", endpoint.display()),
+        Some(endpoint) => format!("shared-v1:{signature}:{device}:{inode}:{created_session}:{}", endpoint.display()),
         None => format!("{signature}:{device}:{inode}"),
     };
     digest_hex(digest(key.as_bytes()))
@@ -397,7 +397,7 @@ impl<R: CommandRunner> TmuxHost<R> {
             })?
         } else { Self::new(directory, executable, limits, runner)? };
         let binding = target_binding(&target.directory, target.socket_device, target.socket_inode,
-            target.shared_endpoint.then_some(target.endpoint.as_path()));
+            target.shared_endpoint.then_some(target.endpoint.as_path()), target.created_session);
         if target.endpoint != host.endpoint
             || target.binding != binding
             || target.columns != limits.columns
@@ -842,8 +842,9 @@ impl<R: CommandRunner> TmuxHost<R> {
             ));
         }
         let (device, inode) = self.socket_identity()?;
+        let created_session = self.shared.as_ref().is_some_and(|shared| shared.session.is_none());
         let binding = target_binding(self.directory.receipt(), device, inode,
-            self.shared.as_ref().map(|shared| shared.endpoint.as_path()));
+            self.shared.as_ref().map(|shared| shared.endpoint.as_path()), created_session);
         let set = self.command(
             vec![
                 "set-option".into(),
@@ -902,6 +903,7 @@ impl<R: CommandRunner> TmuxHost<R> {
                     socket_device: device,
                     socket_inode: inode,
                     shared_endpoint: self.shared.is_some(),
+                    created_session,
                     session: pane.address.session,
                     window: pane.address.window,
                     pane: pane.address.pane,

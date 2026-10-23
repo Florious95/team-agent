@@ -22,6 +22,9 @@ pub struct TargetReceipt {
     /// Missing on historical receipts means the original private host mode.
     #[serde(default)]
     pub shared_endpoint: bool,
+    /// Only a captured new shared session may acquire its root ownership marker.
+    #[serde(default)]
+    pub created_session: bool,
     pub session: String,
     pub window: String,
     pub pane: String,
