@@ -116,7 +116,8 @@ pub(crate) fn aliases(provider: Provider) -> &'static [&'static str] {
 /// Executable name we exec for the worker. `Claude` and `ClaudeCode` both
 /// resolve to `claude` — the distinction is in state semantics
 /// (`ClaudeCode` is the canonical CLI; `Claude` is a legacy alias kept for
-/// older specs).
+/// older specs). Spawn this public name. Do not replace it with a
+/// canonicalized deep binary; that skips the user's wrapper.
 pub(crate) fn command_name(provider: Provider) -> &'static str {
     match provider {
         Provider::Claude | Provider::ClaudeCode => "claude",

@@ -404,7 +404,8 @@ struct Runner;
 impl CommandRunner for Runner {
     fn run(&mut self, request: &CommandRequest) -> CommandReceipt {
         assert_eq!(request.arguments, [std::ffi::OsString::from("--version")]);
-        assert!(request.environment.set.contains_key("GROK_REAL"));
+        assert!(!request.environment.set.contains_key("GROK_REAL"));
+        assert!(request.environment.remove.contains("GROK_REAL"));
         CommandReceipt { end: CommandEnd::Exited, exit_code: Some(0), child_pid: Some(42), child_reaped: true,
             stdout: b"grok 1.0.52 (0920c8169e27)\n".to_vec(), stderr: vec![], elapsed: Duration::from_millis(1) }
     }
@@ -458,7 +459,8 @@ fn wrapper_bytes_and_stamp_are_distinct_from_final_image() {
     plan.launcher = Some(LaunchEntrypoint { executable: wrapper.clone(), sha256: stamp.sha256 });
     validate_launch_plan(&descriptor, &resolved, &plan).unwrap();
     let script = String::from_utf8(team_agent_contract::host::shell::launch_script(&plan, &Default::default()).unwrap()).unwrap();
-    assert!(script.contains(&format!("exec '{}'", wrapper.display())));
+    assert!(script.contains("exec 'approved-wrapper'"));
+    assert!(!script.contains(wrapper.to_str().unwrap()));
     assert!(!script.contains("exec '/fake/bin'"));
     std::fs::write(&wrapper, b"replaced").unwrap(); assert!(verify_executable_inputs(&[stamp]).is_err());
     assert!(capture_launch_file(&wrapper, digest(b"original"), 1024, Duration::from_secs(2)).is_err());

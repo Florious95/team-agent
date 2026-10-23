@@ -106,9 +106,10 @@ impl PlanHook for GrokAdapter {
             ExpectedSession::Resume(binding) => arguments.extend(["--resume".into(), binding.native_session.as_str().into()]),
             _ => return Err(ContractError::Invalid("Grok fresh/current or exact resume only")),
         }
-        let public_exec = native::public_exec_path(&runtime.engine, &r.paths.cwd.path).map_err(|_| ContractError::Invalid("Grok public exec"))?;
+        // Do not set GROK_REAL. The public `grok` wrapper owns that default;
+        // forcing the deep image skips the user's proxy and shows grok-native.
         Ok(LaunchPlan { executable: runtime.engine.clone(), launcher: runtime.launcher(), arguments, executable_inputs: vec![], cwd: r.paths.cwd.path.clone(),
-            environment: EnvironmentDelta { remove: BTreeSet::from(["XAI_API_KEY".into(), "GROK_API_KEY".into()]), set: BTreeMap::from([("HOME".into(), runtime.home().as_os_str().to_owned()), ("GROK_REAL".into(), public_exec.as_os_str().to_owned())]) },
+            environment: EnvironmentDelta { remove: BTreeSet::from(["XAI_API_KEY".into(), "GROK_API_KEY".into(), "GROK_REAL".into()]), set: BTreeMap::from([("HOME".into(), runtime.home().as_os_str().to_owned())]) },
             expected_session: resolved.expected_session().clone(),
             carriers: CarrierReport { model: CarrierUse::Specified(CarrierRef::Arguments(vec![0,1])), prompt: CarrierUse::Specified(CarrierRef::Resource(prompt.path.clone())), mcp: CarrierUse::Specified(CarrierRef::Resource(mcp.path.clone())), bypass, effort },
             materialization: vec![mcp, prompt] })
