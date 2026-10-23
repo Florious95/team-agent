@@ -127,23 +127,31 @@ pub fn start_role(
     team: &str,
     id: &str,
 ) -> Result<(), crate::lifecycle::LifecycleError> {
-    let error = |error: String| crate::lifecycle::LifecycleError::Provider(error);
-    let config = team_config(workspace, directory, team)
-        .map_err(|e| error(e.to_string()))?
-        .ok_or_else(|| error("contract role no longer configured".into()))?;
-    let role = config
-        .roles
-        .iter()
-        .find(|role| role.id.as_str() == id)
-        .ok_or_else(|| error("contract role not found".into()))?;
-    let (_, record) =
-        backend::start(workspace, team, role, &config.members).map_err(|e| error(e.to_string()))?;
-    if record.outcome != Outcome::Committed {
-        return Err(error(format!(
-            "native startup {:?}: {}",
-            record.outcome,
-            record.failure.unwrap_or_default()
-        )));
+    let result = super::commands::with_agent(workspace, Some(team), id, "start-role", |selected, seat| {
+        let error = |error: String| crate::cli::CliError::Runtime(error);
+        if directory.canonicalize()? != selected.team_dir.canonicalize()? {
+            return Err(error("native role source changed while acquiring lifecycle ownership".into()));
+        }
+        let config = team_config(&selected.run_workspace, &selected.team_dir, &selected.team_key)
+            .map_err(|e| error(e.to_string()))?
+            .ok_or_else(|| error("contract role no longer configured".into()))?;
+        let role = config.roles.iter().find(|role| &role.id == seat)
+            .ok_or_else(|| error("contract role not found".into()))?;
+        let (_, record) = backend::start(&selected.run_workspace, &selected.team_key, role, &config.members)
+            .map_err(|e| error(e.to_string()))?;
+        if record.outcome != Outcome::Committed {
+            return Err(error(format!("native startup seat={id} operation={:?} phase={:?} outcome={:?}: {}",
+                record.id, record.phase, record.outcome, record.failure.unwrap_or_default())));
+        }
+        // Preserve each committed seat before a later discovery/spawn can fail.
+        // A whole-batch error must never hide this generation's physical effects.
+        let projected = super::commands::publish_at(&selected.run_workspace, &selected.team_key, seat, true)?;
+        backend::bind_workspace_session(&selected.run_workspace, &selected.team_key, seat)
+            .map_err(|e| error(e.to_string()))?;
+        Ok(projected)
+    }).map_err(|e| crate::lifecycle::LifecycleError::Provider(e.to_string()))?;
+    if result.is_none() {
+        return Err(crate::lifecycle::LifecycleError::Provider("native startup scope/seat is not addressable; no legacy fallback".into()));
     }
     Ok(())
 }

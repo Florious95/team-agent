@@ -21,7 +21,7 @@ fn error(error: impl std::fmt::Display) -> CliError {
 
 /// None delegates only a non-contract selection. Once selected, any identity,
 /// ownership, state or physical error stays on this route and cannot fall back.
-fn with_agent(
+pub(super) fn with_agent(
     workspace: &Path,
     team: Option<&str>,
     agent: &str,
@@ -52,9 +52,11 @@ fn with_agent(
 }
 
 fn publish(selected: &SelectedTeam, id: &SeatId, clear_stop: bool) -> Result<Value, CliError> {
-    publish_at(&selected.run_workspace, &selected.team_key, id, clear_stop)
+    let projected = publish_at(&selected.run_workspace, &selected.team_key, id, clear_stop)?;
+    backend::bind_workspace_session(&selected.run_workspace, &selected.team_key, id).map_err(error)?;
+    Ok(projected)
 }
-fn publish_at(workspace: &Path, team: &str, id: &SeatId, clear_stop: bool) -> Result<Value, CliError> {
+pub(super) fn publish_at(workspace: &Path, team: &str, id: &SeatId, clear_stop: bool) -> Result<Value, CliError> {
     let projected = framework::project_seat(workspace, team, id.as_str()).map_err(error)?;
     StateRepository::new(workspace).commit(
         StateWriteIntent::StartAgent { team_key: team, agent_id: id.as_str() },

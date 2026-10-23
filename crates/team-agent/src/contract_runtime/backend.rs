@@ -19,10 +19,13 @@ use team_agent_contract::host::{
     digest, digest_hex,
     materialize::ScopedMaterializer,
     process::{fingerprint_file, resolve_cwd},
-    tmux::HostLimits,
+    tmux::{HostLimits, SharedTmux, TmuxHost},
+    transport::PhysicalTransport,
 };
 use team_agent_contract::orchestration::{lifecycle::*, physical::*, store::*, Error};
 use thiserror::Error as ThisError;
+
+use crate::transport::Transport;
 
 use super::{
     config::{MemberRoute, RoleConfig, RuntimeFamily},
@@ -203,6 +206,131 @@ impl Backend {
         file.sync_all()?;
         Ok(Self { store, binding })
     }
+}
+
+fn workspace_socket(path: &Path) -> Result<Option<(u64, u64)>, BackendError> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    // Root already uses libc for UID checks; this syscall has no pointer input.
+    let uid = unsafe { libc::geteuid() };
+    if !metadata.file_type().is_socket() || metadata.uid() != uid {
+        return Err(ContractError::Mismatch("workspace socket owner/type").into());
+    }
+    Ok(Some((metadata.dev(), metadata.ino())))
+}
+
+/// The selected root transport is authority; ambient TMUX is never a selector.
+/// This runs only in the owning lifecycle action, after native F0 admission.
+fn workspace_tmux(
+    binding: &Binding,
+    seat: &SeatId,
+    claim: Option<&team_agent_contract::host::transport::TargetReceipt>,
+) -> Result<(SharedTmux, crate::tmux_backend::TmuxBackend, String), BackendError> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    let selected = crate::state::selector::resolve_active_team_readonly(
+        &binding.workspace.path, Some(&binding.team), crate::state::selector::SelectorMode::RuntimeOnly,
+    ).map_err(|_| ContractError::Mismatch("workspace topology scope"))?;
+    if selected.run_workspace != binding.workspace.path || selected.team_key != binding.team {
+        return Err(Error::Fence.into());
+    }
+    crate::lifecycle::launch::ensure_owner_allowed_for_state(&selected.state,
+        Some(&crate::model::ids::AgentId::new(seat.as_str())))
+        .map_err(|_| ContractError::Mismatch("workspace topology caller ownership"))?;
+    let transport = crate::lifecycle::restart::lifecycle_worker_tmux_backend_selection_for_state(
+        &selected.run_workspace, &selected.state,
+    ).map_err(|_| ContractError::Mismatch("workspace topology transport"))?.backend;
+    let endpoint = transport.tmux_endpoint().filter(|s| !s.is_empty())
+        .ok_or(ContractError::Invalid("explicit workspace tmux endpoint required"))?;
+    let named = !Path::new(&endpoint).is_absolute();
+    let endpoint = if named {
+        crate::tmux_backend::socket_path_for_name(&endpoint)
+            .ok_or(ContractError::Invalid("workspace tmux socket name"))?
+    } else { PathBuf::from(endpoint) };
+    let parent = endpoint.parent().ok_or(ContractError::Invalid("workspace socket parent"))?;
+    if !parent.exists() && named && claim.is_none() {
+        if let Err(error) = std::fs::DirBuilder::new().mode(0o700).create(parent) {
+            if error.kind() != std::io::ErrorKind::AlreadyExists { return Err(error.into()); }
+        }
+    }
+    let metadata = std::fs::symlink_metadata(parent)?;
+    let physical_parent = parent.canonicalize()?;
+    if !metadata.is_dir() || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o777 != 0o700 || (!named && physical_parent != parent)
+    { return Err(ContractError::Mismatch("workspace socket parent ownership").into()); }
+    let endpoint = physical_parent.join(endpoint.file_name().ok_or(ContractError::Invalid("workspace socket name"))?);
+    let session_name = selected.state.get("session_name").and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty() && !s.chars().any(|c| c.is_control() || c == ':'))
+        .ok_or(ContractError::Invalid("workspace team session name"))?.to_owned();
+    let generation = crate::state::projection::session_generation(&selected.state)
+        .unwrap_or(&session_name).to_owned();
+    let socket = workspace_socket(&endpoint)?;
+    let mut session = None;
+    if socket.is_some() {
+        let result = RealCommandRunner::default().run(&CommandRequest {
+            executable: binding.tmux.clone(), arguments: vec!["-u".into(), "-S".into(), endpoint.as_os_str().to_owned(),
+                "-N".into(), "list-sessions".into(), "-F".into(), "#{session_id}:#{session_name}".into()],
+            cwd: None, environment: EnvironmentDelta { remove: Default::default(), set: Default::default() },
+            stdin: None, budget: Duration::from_secs(5), limits: OutputLimits { stdout: 65536, stderr: 4096, stdin: 1 },
+            reject_stdout: None,
+        });
+        if result.success() {
+            let text = std::str::from_utf8(&result.stdout).map_err(|_| ContractError::Invalid("workspace session metadata"))?;
+            for line in text.lines() {
+                let (id, name) = line.split_once(':').ok_or(ContractError::Invalid("workspace session metadata"))?;
+                if !id.strip_prefix('$').is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())) {
+                    return Err(ContractError::Invalid("workspace session ID").into());
+                }
+                if name == session_name {
+                    if session.replace(id.to_owned()).is_some() { return Err(Error::Fence.into()); }
+                }
+            }
+        } else if !(result.end == CommandEnd::Exited && result.exit_code == Some(1) && result.child_reaped
+            && result.stdout.is_empty() && result.stderr == format!("no server running on {}\n", endpoint.display()).as_bytes())
+        { return Err(ContractError::Mismatch("workspace server observation unavailable").into()); }
+        if workspace_socket(&endpoint)? != socket { return Err(Error::Fence.into()); }
+    }
+    if let Some(id) = &session {
+        let owner = transport.session_owner(&crate::transport::SessionName::new(&session_name))
+            .map_err(|_| ContractError::Mismatch("workspace session owner observation"))?;
+        let may_claim = claim.is_some_and(|target| target.shared_endpoint && target.created_session
+            && target.identity().scope == binding.scope && &target.identity().seat == seat
+            && target.endpoint == endpoint && target.session == *id
+            && Some((target.socket_device, target.socket_inode)) == socket);
+        if !owner.as_ref().is_some_and(|owner| Path::new(&owner.workspace) == binding.workspace.path
+            && owner.team == binding.team && owner.generation == generation)
+            && !(owner.is_none() && may_claim)
+        { return Err(ContractError::Mismatch("workspace session ownership").into()); }
+    } else if claim.is_some() { return Err(ContractError::Mismatch("committed workspace session disappeared").into()); }
+    Ok((SharedTmux { endpoint, socket, session_name, session }, transport, generation))
+}
+
+/// Projection is saved first by the caller. Only an exact current target that
+/// actually created this shared session may seed a missing root owner marker.
+pub(super) fn bind_workspace_session(workspace: &Path, team: &str, seat: &SeatId) -> Result<(), BackendError> {
+    let backend = Backend::open_readonly(workspace, team)?;
+    let current = backend.store.seat(seat)?.ok_or(BackendError::Metadata)?;
+    let target = current.physical.as_ref().ok_or(BackendError::Metadata)?;
+    if !target.shared_endpoint { return Ok(()); }
+    let clock = RealClock::new();
+    let deadline = Duration::from_secs(5);
+    let mut host = TmuxHost::restore_owned(target.clone(), backend.binding.tmux.clone(),
+        settings(&backend.binding, registry::provider(current.provider.as_str())?).limits,
+        RealCommandRunner::default(), &clock, deadline)?;
+    host.validate_target(target, &clock, deadline)?;
+    let (topology, transport, generation) = workspace_tmux(&backend.binding, seat, Some(target))?;
+    let session = crate::transport::SessionName::new(&topology.session_name);
+    transport.set_session_owner_with_generation(&session, &backend.binding.workspace.path, team, &generation)
+        .map_err(|_| ContractError::Mismatch("workspace session owner commit"))?;
+    let owner = transport.session_owner(&session).map_err(|_| ContractError::Mismatch("workspace session owner readback"))?;
+    if !owner.is_some_and(|owner| Path::new(&owner.workspace) == backend.binding.workspace.path
+        && owner.team == team && owner.generation == generation)
+    { return Err(Error::Fence.into()); }
+    host.validate_target(target, &clock, deadline)?;
+    Ok(())
 }
 
 pub(super) fn settings(binding: &Binding, provider: registry::NativeProvider) -> PhysicalSettings {
@@ -490,6 +618,8 @@ pub fn start(
         Some(&discovered.catalog),
     )?;
     let plan = adapter.plan(&resolved)?;
+    validate_launch_plan(descriptor, &resolved, &plan)?;
+    let (workspace_topology, _, _) = workspace_tmux(&backend.binding, &role.id, None)?;
     let operation = OperationId::new(format!("start-{}", request.identity.instance.as_str()))?;
     let mut io = ScopedMaterializer::new(
         descriptor,
@@ -512,6 +642,7 @@ pub fn start(
         &clock,
     )?;
     physical.evidence = policy_evidence(&role.provider, &request.native, candidate_sha256)?;
+    physical.workspace_tmux = Some(workspace_topology);
     let record = Lifecycle {
         store: &mut backend.store,
         host: &mut physical,
@@ -645,6 +776,24 @@ pub fn resume(prepared: PreparedResume) -> Result<OperationRecord, BackendError>
     let plan = adapter.plan(&resolved)?;
     validate_launch_plan(descriptor, &resolved, &plan)?;
     write_role(&backend.binding, &prepared.request.identity, &prepared.role)?;
+    let shared_parent = parent.physical.as_ref().is_some_and(|target| target.shared_endpoint);
+    let workspace_topology = if shared_parent {
+        // Validate root topology before stopping. Capture again only after the
+        // authorized stop, since its last pane may destroy the old session ID.
+        let (before, _, _) = workspace_tmux(&backend.binding, &prepared.role.id, None)?;
+        if parent.status != SeatStatus::Stopped {
+            let target = parent.physical.as_ref().ok_or(BackendError::Metadata)?;
+            if before.endpoint != target.endpoint || before.session.as_deref() != Some(target.session.as_str()) {
+                return Err(ContractError::Mismatch("resume workspace session").into());
+            }
+            let stopped = stop(&backend.binding.workspace.path, &backend.binding.team, &prepared.role.id)?;
+            if stopped.outcome != Outcome::Committed {
+                return Err(BackendError::Shutdown { operation: stopped.id, phase: stopped.phase,
+                    outcome: stopped.outcome, failure: stopped.failure });
+            }
+        }
+        Some(workspace_tmux(&backend.binding, &prepared.role.id, None)?.0)
+    } else { None };
     let operation = OperationId::new(format!("resume-{}", prepared.request.identity.instance.as_str()))?;
     let mut io = ScopedMaterializer::new(descriptor, &resolved, &plan, operation.clone(), RealCommandRunner::default())?;
     let clock = RealClock::new();
@@ -656,6 +805,7 @@ pub fn resume(prepared: PreparedResume) -> Result<OperationRecord, BackendError>
         settings(&backend.binding, selected), operation.clone(), &clock,
     )?;
     physical.evidence = policy_evidence(&prepared.role.provider, &prepared.request.native, backend.binding.candidate_sha256)?;
+    physical.workspace_tmux = workspace_topology;
     let record = Lifecycle { store: &mut backend.store, host: &mut physical, io: &mut io }.startup(
         &Adapter { descriptor, hooks: &hooks, catalog: Some(&prepared.discovered.catalog) },
         &prepared.request,

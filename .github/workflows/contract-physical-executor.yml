@@ -50,6 +50,7 @@ on:
           - startup-red-spec
           - startup-spec
           - startup-host
+          - startup-bridge
 
 permissions:
   contents: read
@@ -254,6 +255,16 @@ jobs:
               run_case startup-spec cargo test -p team-agent --lib --locked startup_spec -- --test-threads=1 --nocapture
               run_case startup-intent cargo test -p team-agent --lib --locked cli::intent -- --test-threads=1
               run_case startup-restart cargo test -p team-agent --lib --locked lifecycle::restart -- --test-threads=1
+              ;;
+            startup-bridge)
+              run_case workspace-check cargo check --workspace --all-targets --locked
+              run_case root-contract cargo test -p team-agent --lib --locked contract_runtime -- --test-threads=1
+              run_case root-launch cargo test -p team-agent --lib --locked lifecycle::tests::launch_spawn -- --test-threads=1
+              run_case root-fresh-binding cargo test -p team-agent --lib --locked fresh_quick_start_leader_binding_tests -- --test-threads=1
+              run_case root-attach cargo test -p team-agent --lib --locked attach -- --test-threads=1
+              run_case root-intent cargo test -p team-agent --lib --locked cli::intent -- --test-threads=1
+              run_case root-restart cargo test -p team-agent --lib --locked lifecycle::restart -- --test-threads=1
+              run_case contract-all cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets --no-fail-fast -- --test-threads=1
               ;;
             startup-host)
               run_case host-close-policy cargo test --manifest-path crates/team-agent-contract/Cargo.toml --lib --locked orchestration::physical -- --test-threads=1

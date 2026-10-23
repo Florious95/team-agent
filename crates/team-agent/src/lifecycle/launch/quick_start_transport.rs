@@ -239,25 +239,10 @@ pub(super) fn attach_commands_for_runtime_windows<'a>(
 ) -> Vec<String> {
     let windows = window_names.into_iter().collect::<Vec<_>>();
     let attach = if let Some(endpoint) = endpoint.filter(|endpoint| !endpoint.is_empty()) {
-        if Path::new(endpoint).is_absolute() {
-            windows
-                .iter()
-                .map(|window_name| {
-                    format!(
-                        "tmux -S {} attach -t {}:{}",
-                        endpoint,
-                        session_name.as_str(),
-                        window_name
-                    )
-                })
-                .collect::<Vec<_>>()
-        } else {
-            crate::tmux_backend::attach_commands_for_windows(
-                workspace,
-                session_name,
-                windows.iter().copied(),
-            )
-        }
+        let address = serde_json::json!({"tmux_endpoint":endpoint});
+        windows.iter().filter_map(|window| crate::tmux_backend::attach_command_for_runtime_state_or_workspace(
+            workspace, Some(&address), session_name, window,
+        )).collect::<Vec<_>>()
     } else {
         crate::tmux_backend::attach_commands_for_windows(
             workspace,
@@ -358,4 +343,22 @@ pub(super) fn attach_window_names_with_managed_leader(
 /// ---
 pub(super) fn state_uses_managed_leader(state: &serde_json::Value) -> bool {
     crate::state::projection::state_is_managed_leader(state)
+}
+
+#[cfg(test)]
+mod workspace_attach_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_shared_endpoint_is_not_replaced_by_workspace_hash() {
+        let session = SessionName::new("team-native");
+        assert_eq!(attach_commands_for_runtime_windows(Some("authorized-workspace"),
+            Path::new("/not-the-selected-socket"), &session, ["grok-worker"]),
+            ["tmux -L authorized-workspace attach -t team-native:grok-worker"]);
+        assert_eq!(attach_commands_for_runtime_windows(Some("/private/tmp/owned/tmux.sock"),
+            Path::new("/not-the-selected-socket"), &session, ["grok-worker"]),
+            ["tmux -S /private/tmp/owned/tmux.sock attach -t team-native:grok-worker"]);
+        assert!(attach_commands_for_runtime_windows(Some("authorized-workspace"),
+            Path::new("/not-the-selected-socket"), &session, std::iter::empty()).is_empty());
+    }
 }
