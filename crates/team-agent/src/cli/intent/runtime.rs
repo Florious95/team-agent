@@ -815,6 +815,31 @@ fn plan_with_observer(
     }
     let spec = selected.spec_path.as_ref().filter(|p| p.is_file());
     let missing_spec = spec.is_none();
+    if missing_spec && plan.intent.verb == Verb::Restart && target.is_none() {
+        // Keep restart's stopped-roster fence ahead of spec/source admission.
+        // Its original locked handler owns reconstruction for active rosters.
+        let rows = selected.state.get("agents").and_then(Value::as_object)
+            .ok_or_else(|| refusal("missing agents"))?;
+        let mut active = false;
+        for (id, row) in rows {
+            if !paused(row)
+                && !crate::state::projection::agent_explicit_stop(row)
+                && !crate::state::projection::agent_stopped_for_restart(row)
+            {
+                if observe(&selected, id, row)? == Observation::Unknown {
+                    return Err(refusal("unknown physical identity"));
+                }
+                active = true;
+            } else {
+                plan.skipped.push(json!({"agent":id,"reason":if paused(row){"paused"}else if crate::state::projection::agent_explicit_stop(row){"explicit_stop"}else{"stopped_preserved_by_original_restart"}}));
+            }
+        }
+        if !active {
+            return Ok(no_eligible(plan, "stopped roster requires explicit team start"));
+        }
+        plan.steps.push(Step::RestartTeam(restart_args(&plan)));
+        return Ok(plan);
+    }
     let runtime_spec = crate::model::paths::runtime_spec_path(&selected.run_workspace, &selected.team_key);
     let spec_value = match spec {
         Some(path) => checked(yaml::loads(&std::fs::read_to_string(path)?))?,
