@@ -91,6 +91,7 @@ pub fn target() -> TargetReceipt {
         endpoint: "/tmp/contract-fixture/tmux.sock".into(),
         socket_device: 1,
         socket_inode: 3,
+        shared_endpoint: false,
         session: "$1".into(),
         window: "@1".into(),
         pane: "%1".into(),

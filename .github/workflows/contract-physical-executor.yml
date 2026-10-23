@@ -49,6 +49,7 @@ on:
           - issue345
           - startup-red-spec
           - startup-spec
+          - startup-host
 
 permissions:
   contents: read
@@ -253,6 +254,12 @@ jobs:
               run_case startup-spec cargo test -p team-agent --lib --locked startup_spec -- --test-threads=1 --nocapture
               run_case startup-intent cargo test -p team-agent --lib --locked cli::intent -- --test-threads=1
               run_case startup-restart cargo test -p team-agent --lib --locked lifecycle::restart -- --test-threads=1
+              ;;
+            startup-host)
+              run_case host-close-policy cargo test --manifest-path crates/team-agent-contract/Cargo.toml --lib --locked orchestration::physical -- --test-threads=1
+              run_case host-native cargo test --manifest-path crates/team-agent-contract/Cargo.toml --test host_native --locked -- --test-threads=1 --nocapture
+              run_case physical-lifecycle cargo test --manifest-path crates/team-agent-contract/Cargo.toml --test physical_lifecycle --locked -- --test-threads=1
+              run_case transaction-faults cargo test --manifest-path crates/team-agent-contract/Cargo.toml --test transaction_faults --locked -- --test-threads=1
               ;;
             issue342-shutdown-fixture)
               run_case shutdown-fixture cargo test -p team-agent --test e2e --locked shutdown -- --test-threads=1 --nocapture
