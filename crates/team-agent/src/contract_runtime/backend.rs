@@ -513,6 +513,22 @@ pub fn preflight(team: &super::config::TeamConfig) -> Result<(), BackendError> {
     Ok(())
 }
 
+#[derive(Debug)]
+enum ExistingStart {
+    Committed(OperationRecord),
+    FinishReceipt(OperationRecord),
+    Pending(OperationRecord),
+    Resume(SeatRecord),
+    Blocked(OperationRecord),
+}
+
+// RED seam: extracted from the original unconditional existing-seat guard,
+// with identical production behavior. Classification is not native admission.
+fn existing_start(backend: &Backend, seat: &SeatId) -> Result<Option<ExistingStart>, BackendError> {
+    if backend.store.seat(seat)?.is_some() { return Err(Error::Conflict.into()); }
+    Ok(None)
+}
+
 /// Fresh startup is distinct from resume. An existing generation is never
 /// silently replaced with a new native session.
 pub fn start(
@@ -568,7 +584,7 @@ pub fn start(
     {
         return Err(Error::Fence.into());
     }
-    if backend.store.seat(&role.id)?.is_some() {
+    if existing_start(&backend, &role.id)?.is_some() {
         return Err(Error::Conflict.into());
     }
     let route = backend.binding.framework().route()?;
@@ -1003,8 +1019,92 @@ mod tests {
                 } };
             Self { root, binding, role, identity }
         }
+
+        // Receipt-only fixtures never authorize a native action; the runtime
+        // must separately revalidate candidate, role, socket and process birth.
+        fn canonical(&mut self, status: SeatStatus, phase: Phase, outcome: Outcome, pending: Option<&str>) -> Backend {
+            self.binding.transport_root = self.binding.workspace.path.join("native-store");
+            self.binding.endpoint = endpoint(&self.binding.scope);
+            let store = ContractStore::create(&self.binding.transport_root, self.binding.scope.clone(), &self.binding.endpoint).unwrap();
+            let target = SeatRecord { identity: self.identity.clone(), provider: self.role.provider.clone(),
+                native: NativeIdentity { version: "fixture".into(), harness: "fixture".into(), ui: "controlled".into(),
+                    platform: Platform::MacOs, executable_sha256: digest(b"fixture") },
+                cwd: self.binding.workspace.clone(), endpoint: self.binding.endpoint.clone(), pane: "%1".into(),
+                binding_key: "controlled".into(), profile: "fixture".into(), server_key: "fixture".into(),
+                evidence_kind: EvidenceKind::Fixture, status, process: None, physical: None, session: None,
+                resources: vec![], workspace_resources: vec![], bootstrap_used: false };
+            let operation = OperationRecord { id: OperationId::new("controlled-start").unwrap(), kind: TransactionKind::Startup,
+                target: target.clone(), parent: None, phase, pending: pending.map(str::to_owned), resources: vec![],
+                effect: team_agent_contract::contract::delivery::DeliveryEffect::NoEffect, outcome, preserved: vec![], failure: None };
+            let db = rusqlite::Connection::open(self.binding.transport_root.join("contract.db")).unwrap();
+            db.execute("INSERT INTO contract_seats VALUES(?1,?2)", rusqlite::params![self.identity.seat.as_str(), serde_json::to_string(&target).unwrap()]).unwrap();
+            db.execute("INSERT INTO contract_generations VALUES(?1,?2)", rusqlite::params![self.identity.seat.as_str(), self.identity.generation.0]).unwrap();
+            db.execute("INSERT INTO contract_instances VALUES(?1,?2,?3)", rusqlite::params![self.identity.instance.as_str(), self.identity.seat.as_str(), self.identity.generation.0]).unwrap();
+            db.execute("INSERT INTO contract_operations VALUES(?1,?2)", rusqlite::params![operation.id.as_str(), serde_json::to_string(&operation).unwrap()]).unwrap();
+            if matches!(outcome, Outcome::Running | Outcome::NeedsRecovery) {
+                db.execute("INSERT INTO contract_leases VALUES(?1,?2)", rusqlite::params![self.identity.seat.as_str(), operation.id.as_str()]).unwrap();
+            }
+            std::fs::write(root_for(&self.binding.workspace.path, &self.binding.scope).join("framework-binding.json"),
+                serde_json::to_vec(&self.binding).unwrap()).unwrap();
+            drop(db); drop(store);
+            Backend::open_readonly(&self.binding.workspace.path, "test").unwrap()
+        }
     }
     impl Drop for RoleFixture { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.root); } }
+
+    fn assert_receipt_class(status: SeatStatus, phase: Phase, outcome: Outcome, pending: Option<&str>, expected: &str) {
+            let mut fixture = RoleFixture::new();
+            let backend = fixture.canonical(status, phase, outcome, pending);
+            let before = serde_json::to_vec(&backend.store.seat(&fixture.identity.seat).unwrap()).unwrap();
+            let receipt = backend.store.creation_receipt(&fixture.identity.seat, Some(&fixture.identity)).unwrap().unwrap();
+            assert_eq!(receipt.phase, phase);
+            assert_eq!(receipt.outcome, outcome);
+            let result = existing_start(&backend, &fixture.identity.seat);
+            assert_eq!(serde_json::to_vec(&backend.store.seat(&fixture.identity.seat).unwrap()).unwrap(), before);
+            assert_eq!(backend.store.operation(&receipt.id).unwrap(), receipt);
+            let classified = result.unwrap_or_else(|error| panic!("{expected} must not collapse to unconditional Conflict: {error}"));
+            let matches = match classified {
+                Some(ExistingStart::Committed(record)) => expected == "committed" && record.id == receipt.id,
+                Some(ExistingStart::FinishReceipt(record)) => expected == "finish" && record.id == receipt.id,
+                Some(ExistingStart::Pending(record)) => expected == "pending" && record.id == receipt.id,
+                Some(ExistingStart::Resume(record)) => expected == "resume" && record.identity == fixture.identity,
+                Some(ExistingStart::Blocked(record)) => expected == "blocked" && record.id == receipt.id,
+                None => false,
+            };
+            assert!(matches, "wrong receipt class for {expected}");
+    }
+
+    #[test]
+    fn startup_receipt_red_committed_is_reused_not_conflicted() {
+        assert_receipt_class(SeatStatus::Ready, Phase::F5Receipt, Outcome::Committed, None, "committed");
+    }
+    #[test]
+    fn startup_receipt_red_f4_is_receipt_completion_not_fresh() {
+        assert_receipt_class(SeatStatus::Starting, Phase::F4Commit, Outcome::Running, None, "finish");
+    }
+    #[test]
+    fn startup_receipt_red_inflight_is_pending_not_replayed() {
+        assert_receipt_class(SeatStatus::Starting, Phase::F3Spawn, Outcome::Running, Some("spawn"), "pending");
+    }
+    #[test]
+    fn startup_receipt_red_stopped_is_resume_not_fresh() {
+        assert_receipt_class(SeatStatus::Stopped, Phase::F5Receipt, Outcome::Committed, None, "resume");
+    }
+    #[test]
+    fn startup_receipt_red_uncertain_is_blocked_with_original_receipt() {
+        assert_receipt_class(SeatStatus::Starting, Phase::F3Spawn, Outcome::NeedsRecovery, Some("spawn"), "blocked");
+    }
+
+    #[test]
+    fn startup_receipt_lookup_refuses_cross_scope_and_generation_fallback() {
+        let mut fixture = RoleFixture::new();
+        let backend = fixture.canonical(SeatStatus::Ready, Phase::F5Receipt, Outcome::Committed, None);
+        let mut wrong = fixture.identity.clone(); wrong.generation = Generation(2);
+        assert!(backend.store.creation_receipt(&fixture.identity.seat, Some(&wrong)).is_err());
+        wrong = fixture.identity.clone(); wrong.scope = ScopeId::new("foreign").unwrap();
+        assert!(backend.store.creation_receipt(&fixture.identity.seat, Some(&wrong)).is_err());
+        assert!(backend.store.creation_receipt(&SeatId::new("absent").unwrap(), None).unwrap().is_none());
+    }
 
     #[test]
     fn restart_skips_stopped_mirror_and_stopped_native_store_before_resume_discovery() {

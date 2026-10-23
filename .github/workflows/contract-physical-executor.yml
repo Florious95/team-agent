@@ -51,6 +51,7 @@ on:
           - startup-spec
           - startup-host
           - startup-bridge
+          - startup-receipt-red
 
 permissions:
   contents: read
@@ -255,6 +256,9 @@ jobs:
               run_case startup-spec cargo test -p team-agent --lib --locked startup_spec -- --test-threads=1 --nocapture
               run_case startup-intent cargo test -p team-agent --lib --locked cli::intent -- --test-threads=1
               run_case startup-restart cargo test -p team-agent --lib --locked lifecycle::restart -- --test-threads=1
+              ;;
+            startup-receipt-red)
+              run_case startup-receipts cargo test -p team-agent --lib --locked startup_receipt -- --test-threads=1 --nocapture
               ;;
             startup-bridge)
               run_case workspace-check cargo check --workspace --all-targets --locked
