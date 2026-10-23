@@ -47,6 +47,7 @@ on:
           - issue345-fixtures
           - issue345-trust-fixture
           - issue345
+          - startup-red-spec
 
 permissions:
   contents: read
@@ -244,6 +245,9 @@ jobs:
             return "${statuses[0]}"
           }
           case "$REGRESSION_SCOPE" in
+            startup-red-spec)
+              run_case startup-spec-red cargo test -p team-agent --lib --locked startup_spec_red -- --test-threads=1 --nocapture
+              ;;
             issue342-shutdown-fixture)
               run_case shutdown-fixture cargo test -p team-agent --test e2e --locked shutdown -- --test-threads=1 --nocapture
               ;;

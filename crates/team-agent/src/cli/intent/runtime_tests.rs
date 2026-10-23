@@ -56,6 +56,43 @@ fn absent_source_is_one_original_create_not_restart_or_probe() {
 }
 #[test]
 #[serial_test::serial(env)]
+fn startup_spec_red_stopped_team_uses_start_without_restart_or_planning_writes() {
+    let (root, intent) = fixture(&["one", "two"]);
+    install(root.path(), &[("one", "stopped", true), ("two", "stopped", false)]);
+    let spec = crate::model::paths::runtime_spec_path(root.path(), "fixture");
+    std::fs::remove_file(&spec).unwrap();
+    let state = crate::state::persist::runtime_state_path(root.path());
+    let before = std::fs::read(&state).unwrap();
+    let result = plan_with_observer(intent, |_, _, _| Ok(Observation::StoppedVerified));
+    assert_eq!(std::fs::read(&state).unwrap(), before);
+    assert!(!spec.exists(), "readonly planning must not rebuild the spec");
+    let plan = result.expect("complete roles must provide a noncircular start plan when only the derived spec is missing");
+    assert_eq!(plan.steps.iter().filter_map(|step| match step {
+        Step::StartAgent(args) => Some(args.agent.as_str()), _ => None,
+    }).collect::<Vec<_>>(), ["one", "two"]);
+    assert!(!plan.steps.iter().any(|step| matches!(step, Step::RestartTeam(_) | Step::StopAgent(_))));
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn startup_spec_red_live_team_recovers_metadata_without_process_restart() {
+    let (root, intent) = fixture(&["one"]);
+    install(root.path(), &[("one", "running", false)]);
+    let spec = crate::model::paths::runtime_spec_path(root.path(), "fixture");
+    std::fs::remove_file(&spec).unwrap();
+    let state = crate::state::persist::runtime_state_path(root.path());
+    let before = std::fs::read(&state).unwrap();
+    let result = plan_with_observer(intent, |_, _, _| Ok(Observation::Live));
+    assert_eq!(std::fs::read(&state).unwrap(), before);
+    assert!(!spec.exists());
+    let plan = result.expect("missing derived metadata must not require restarting a verified live seat");
+    assert!(!plan.steps.iter().any(|step| matches!(step,
+        Step::StartAgent(_) | Step::StopAgent(_) | Step::RestartTeam(_) | Step::CreateTeam(_))));
+    assert!(plan.skipped.iter().any(|entry| entry["reason"] == "already_running"));
+}
+
+#[test]
+#[serial_test::serial(env)]
 fn stopped_team_starts_both_and_mixed_start_leaves_live_peer_untouched() {
     let (root, intent) = fixture(&["one", "two"]);
     install(
