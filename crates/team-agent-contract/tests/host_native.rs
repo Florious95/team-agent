@@ -235,6 +235,10 @@ fn native_case_on(mode: &str, content: &str, expected_keys: usize, shared_worksp
         let target = spawned.target.unwrap();
         assert!(raw_tmux(&mut peer, &tmux, &target.endpoint,
             &["set-window-option", "-g", "remain-on-exit", "off"]).success());
+        let global = raw_tmux(&mut peer, &tmux, &target.endpoint,
+            &["show-options", "-gwv", "remain-on-exit"]);
+        assert!(global.success(), "global option baseline: {global:?}");
+        assert_eq!(global.stdout, b"off\n");
         let shared = SharedTmux { endpoint: target.endpoint.clone(),
             socket: Some((target.socket_device, target.socket_inode)), session_name,
             session: Some(target.session.clone()) };
@@ -251,7 +255,7 @@ fn native_case_on(mode: &str, content: &str, expected_keys: usize, shared_worksp
         let bad_dir = ScopedDirectory::create(&directory.path().join("wrong-inode"), launch.request().identity.clone()).unwrap();
         let mut wrong_inode = shared.clone(); wrong_inode.socket.as_mut().unwrap().1 += 1;
         assert!(TmuxHost::new_shared(bad_dir, tmux.clone(), limits, NoLocaleRunner::default(), wrong_inode).is_err());
-        anchor = Some((peer, target));
+        anchor = Some((peer, target, global.stdout));
         Some(shared)
     } else { None };
     let mut host = match shared {
@@ -276,7 +280,7 @@ fn native_case_on(mode: &str, content: &str, expected_keys: usize, shared_worksp
     );
     let target = spawn.target.unwrap();
     assert_eq!(target.shared_endpoint, shared_workspace);
-    if let Some((_, peer)) = &anchor {
+    if let Some((_, peer, _)) = &anchor {
         assert_eq!(target.endpoint, peer.endpoint);
         assert_eq!(target.session, peer.session);
         assert_ne!(target.pane, peer.pane);
@@ -476,7 +480,7 @@ fn native_case_on(mode: &str, content: &str, expected_keys: usize, shared_worksp
     assert_eq!(close.socket_cleanup.outcome, StepOutcome::Confirmed, "{close:?}");
     assert!(close.socket_cleanup.error.is_none());
     assert_eq!(close.shared_endpoint, shared_workspace);
-    if let Some((mut peer, peer_target)) = anchor {
+    if let Some((mut peer, peer_target, global_before)) = anchor {
         assert!(close.socket_preserved, "borrowed socket must remain: {close:?}");
         assert_eq!(sample_process(&peer_target.process), ProcessState::Alive);
         let current = std::fs::symlink_metadata(&target.endpoint).unwrap();
@@ -484,8 +488,10 @@ fn native_case_on(mode: &str, content: &str, expected_keys: usize, shared_worksp
         assert_eq!((current.dev(), current.ino()), (target.socket_device, target.socket_inode));
         assert_eq!(raw_tmux(&mut peer, &tmux, &target.endpoint,
             &["show-buffer", "-b", "foreign-fixture-buffer"]).stdout, b"preserve-me");
-        assert_eq!(raw_tmux(&mut peer, &tmux, &target.endpoint,
-            &["show-window-options", "-gqv", "remain-on-exit"]).stdout, b"off\n");
+        let global = raw_tmux(&mut peer, &tmux, &target.endpoint,
+            &["show-options", "-gwv", "remain-on-exit"]);
+        assert!(global.success(), "global option after borrowed close: {global:?}");
+        assert_eq!(global.stdout, global_before);
         let peer_closed = peer.close_owned_pane(&peer_target, &clock, clock.now() + Duration::from_secs(5));
         assert_eq!(peer_closed.pane_close.outcome, StepOutcome::Confirmed, "{peer_closed:?}");
         assert_eq!(peer_closed.native, ProcessState::Exited);
