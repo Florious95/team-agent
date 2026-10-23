@@ -27,11 +27,39 @@ impl Drop for Sandbox {
 
 #[test]
 fn native_receipt_reconciliation_is_start_only_not_implicit_stop_or_restart() {
-    assert_eq!(seat_actions(Verb::Start, Observation::NativeReconcile, false, false, false, true).unwrap(), vec!["start"]);
+    assert_eq!(
+        seat_actions(
+            Verb::Start,
+            Observation::NativeReconcile,
+            false,
+            false,
+            false,
+            true
+        )
+        .unwrap(),
+        vec!["start"]
+    );
     for verb in [Verb::Stop, Verb::Restart] {
-        assert!(seat_actions(verb, Observation::NativeReconcile, false, false, false, false).is_err());
+        assert!(seat_actions(
+            verb,
+            Observation::NativeReconcile,
+            false,
+            false,
+            false,
+            false
+        )
+        .is_err());
     }
-    assert!(seat_actions(Verb::Restart, Observation::NativeReconcile, false, true, false, true).unwrap().is_empty());
+    assert!(seat_actions(
+        Verb::Restart,
+        Observation::NativeReconcile,
+        false,
+        true,
+        false,
+        true
+    )
+    .unwrap()
+    .is_empty());
 }
 
 fn args(values: &[&str]) -> Vec<String> {

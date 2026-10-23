@@ -224,7 +224,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_TREE"
           test -z "$(git status --porcelain=v1)"
-          rustup toolchain install 1.95.0 --profile minimal --component rustfmt
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
           if ! command -v tmux >/dev/null; then brew install tmux; fi
           printf 'CONTRACT_TMUX=%s\n' "$(command -v tmux)" >> "$GITHUB_ENV"
           printf 'CONTRACT_PYTHON=%s\n' "$(python3 -c 'import os,sys; print(os.path.realpath(sys.executable))')" >> "$GITHUB_ENV"
@@ -377,6 +377,7 @@ jobs:
               run_case root-role cargo test -p team-agent --lib --locked lifecycle::role_config -- --test-threads=1
               run_case root-contract cargo test -p team-agent --lib --locked contract_runtime -- --test-threads=1
               run_case contract-all cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets --no-fail-fast -- --test-threads=1
+              run_case contract-clippy cargo clippy --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets -- -D warnings
               ;;
             issue334)
               run_case workspace-check cargo check --workspace --all-targets --locked

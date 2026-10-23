@@ -244,7 +244,9 @@ fn check_native_noop_settings(
             )));
         }
         checked(crate::contract_runtime::backend::preflight_start_role(
-            &selected.run_workspace, &selected.team_key, current,
+            &selected.run_workspace,
+            &selected.team_key,
+            current,
         ))?;
     }
     Ok(())
@@ -297,9 +299,14 @@ fn observe(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation
         if crate::contract_runtime::framework::is_paused_unstarted(row) {
             return Ok(Observation::Unstarted);
         }
-        if checked(crate::contract_runtime::backend::start_needs_reconciliation(
-            &selected.run_workspace, &selected.team_key, &checked(SeatId::new(id))?, row,
-        ))? {
+        if checked(
+            crate::contract_runtime::backend::start_needs_reconciliation(
+                &selected.run_workspace,
+                &selected.team_key,
+                &checked(SeatId::new(id))?,
+                row,
+            ),
+        )? {
             return Ok(Observation::NativeReconcile);
         }
         let backend = checked(crate::contract_runtime::backend::Backend::open_readonly(
@@ -504,7 +511,9 @@ fn preflight_start(
             checked(crate::contract_runtime::backend::preflight(&config))?;
         } else {
             if checked(crate::contract_runtime::backend::preflight_start_role(
-                &selected.run_workspace, &selected.team_key, role,
+                &selected.run_workspace,
+                &selected.team_key,
+                role,
             ))? {
                 checked(crate::contract_runtime::backend::preflight(&config))?;
             }
@@ -828,7 +837,10 @@ fn plan_with_observer(
     if missing_spec && plan.intent.verb == Verb::Restart && target.is_none() {
         // Keep restart's stopped-roster fence ahead of spec/source admission.
         // Its original locked handler owns reconstruction for active rosters.
-        let rows = selected.state.get("agents").and_then(Value::as_object)
+        let rows = selected
+            .state
+            .get("agents")
+            .and_then(Value::as_object)
             .ok_or_else(|| refusal("missing agents"))?;
         let mut active = false;
         for (id, row) in rows {
@@ -845,12 +857,16 @@ fn plan_with_observer(
             }
         }
         if !active {
-            return Ok(no_eligible(plan, "stopped roster requires explicit team start"));
+            return Ok(no_eligible(
+                plan,
+                "stopped roster requires explicit team start",
+            ));
         }
         plan.steps.push(Step::RestartTeam(restart_args(&plan)));
         return Ok(plan);
     }
-    let runtime_spec = crate::model::paths::runtime_spec_path(&selected.run_workspace, &selected.team_key);
+    let runtime_spec =
+        crate::model::paths::runtime_spec_path(&selected.run_workspace, &selected.team_key);
     let spec_value = match spec {
         Some(path) => checked(yaml::loads(&std::fs::read_to_string(path)?))?,
         None if plan.intent.verb != Verb::Stop => checked(
@@ -862,7 +878,9 @@ fn plan_with_observer(
     };
     validate_roster(
         &spec_value,
-        spec.unwrap_or(&runtime_spec).parent().unwrap_or(&selected.run_workspace),
+        spec.unwrap_or(&runtime_spec)
+            .parent()
+            .unwrap_or(&selected.run_workspace),
     )?;
     let spec_ids: BTreeSet<String> = spec_value
         .get("agents")
@@ -1052,9 +1070,14 @@ fn plan_with_observer(
         return Ok(no_eligible(plan, "no eligible nonpaused roster"));
     }
     if missing_spec {
-        plan.steps.insert(0, Step::RestoreSpec {
-            workspace: selected.run_workspace, team: selected.team_key, compiled: spec_value,
-        });
+        plan.steps.insert(
+            0,
+            Step::RestoreSpec {
+                workspace: selected.run_workspace,
+                team: selected.team_key,
+                compiled: spec_value,
+            },
+        );
     }
     Ok(plan)
 }

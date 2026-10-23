@@ -66,7 +66,11 @@ pub(super) enum Observation {
 }
 #[derive(Clone, Debug)]
 pub(super) enum Step {
-    RestoreSpec { workspace: PathBuf, team: String, compiled: crate::model::yaml::Value },
+    RestoreSpec {
+        workspace: PathBuf,
+        team: String,
+        compiled: crate::model::yaml::Value,
+    },
     CreateTeam(QuickStartArgs),
     StartAgent(StartAgentArgs),
     AddAgent(AddAgentArgs),
@@ -96,11 +100,20 @@ impl Step {
     }
     fn execute(&self) -> Result<CmdResult, CliError> {
         match self {
-            Self::RestoreSpec { workspace, team, compiled } => {
-                let path = crate::lifecycle::restart::restore_missing_runtime_spec(workspace, team, compiled)
-                    .map_err(|e| CliError::Runtime(e.to_string()))?;
-                Ok(CmdResult::from_json(json!({"ok":true,"status":"metadata_restored","spec_path":path,
-                    "effects":{"native_processes":"not_attempted","native_input":"not_attempted"}}), true))
+            Self::RestoreSpec {
+                workspace,
+                team,
+                compiled,
+            } => {
+                let path = crate::lifecycle::restart::restore_missing_runtime_spec(
+                    workspace, team, compiled,
+                )
+                .map_err(|e| CliError::Runtime(e.to_string()))?;
+                Ok(CmdResult::from_json(
+                    json!({"ok":true,"status":"metadata_restored","spec_path":path,
+                    "effects":{"native_processes":"not_attempted","native_input":"not_attempted"}}),
+                    true,
+                ))
             }
             Self::CreateTeam(a) => cmd_quick_start(a),
             Self::StartAgent(a) => cmd_start_agent(a),

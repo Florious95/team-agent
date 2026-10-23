@@ -58,19 +58,35 @@ fn absent_source_is_one_original_create_not_restart_or_probe() {
 #[serial_test::serial(env)]
 fn startup_spec_red_stopped_team_uses_start_without_restart_or_planning_writes() {
     let (root, intent) = fixture(&["one", "two"]);
-    install(root.path(), &[("one", "stopped", true), ("two", "stopped", false)]);
+    install(
+        root.path(),
+        &[("one", "stopped", true), ("two", "stopped", false)],
+    );
     let spec = crate::model::paths::runtime_spec_path(root.path(), "fixture");
     std::fs::remove_file(&spec).unwrap();
     let state = crate::state::persist::runtime_state_path(root.path());
     let before = std::fs::read(&state).unwrap();
     let result = plan_with_observer(intent, |_, _, _| Ok(Observation::StoppedVerified));
     assert_eq!(std::fs::read(&state).unwrap(), before);
-    assert!(!spec.exists(), "readonly planning must not rebuild the spec");
+    assert!(
+        !spec.exists(),
+        "readonly planning must not rebuild the spec"
+    );
     let plan = result.expect("complete roles must provide a noncircular start plan when only the derived spec is missing");
-    assert_eq!(plan.steps.iter().filter_map(|step| match step {
-        Step::StartAgent(args) => Some(args.agent.as_str()), _ => None,
-    }).collect::<Vec<_>>(), ["one", "two"]);
-    assert!(!plan.steps.iter().any(|step| matches!(step, Step::RestartTeam(_) | Step::StopAgent(_))));
+    assert_eq!(
+        plan.steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::StartAgent(args) => Some(args.agent.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        ["one", "two"]
+    );
+    assert!(!plan
+        .steps
+        .iter()
+        .any(|step| matches!(step, Step::RestartTeam(_) | Step::StopAgent(_))));
 }
 
 #[test]
@@ -85,10 +101,16 @@ fn startup_spec_red_live_team_recovers_metadata_without_process_restart() {
     let result = plan_with_observer(intent, |_, _, _| Ok(Observation::Live));
     assert_eq!(std::fs::read(&state).unwrap(), before);
     assert!(!spec.exists());
-    let plan = result.expect("missing derived metadata must not require restarting a verified live seat");
-    assert!(!plan.steps.iter().any(|step| matches!(step,
-        Step::StartAgent(_) | Step::StopAgent(_) | Step::RestartTeam(_) | Step::CreateTeam(_))));
-    assert!(plan.skipped.iter().any(|entry| entry["reason"] == "already_running"));
+    let plan =
+        result.expect("missing derived metadata must not require restarting a verified live seat");
+    assert!(!plan.steps.iter().any(|step| matches!(
+        step,
+        Step::StartAgent(_) | Step::StopAgent(_) | Step::RestartTeam(_) | Step::CreateTeam(_)
+    )));
+    assert!(plan
+        .skipped
+        .iter()
+        .any(|entry| entry["reason"] == "already_running"));
 }
 
 #[test]
@@ -101,16 +123,25 @@ fn startup_spec_repair_executes_only_metadata_and_preserves_seat_identity() {
     let state = crate::state::persist::runtime_state_path(root.path());
     let before: Value = serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
     let plan = plan_with_observer(intent, |_, _, _| Ok(Observation::StoppedVerified)).unwrap();
-    let repair = plan.steps.iter().find(|step| matches!(step, Step::RestoreSpec { .. })).unwrap();
+    let repair = plan
+        .steps
+        .iter()
+        .find(|step| matches!(step, Step::RestoreSpec { .. }))
+        .unwrap();
     for _ in 0..2 {
         recheck(&plan, repair, false).unwrap();
         assert_eq!(repair.execute().unwrap().exit, ExitCode::Ok);
         assert!(spec.is_file());
         let after: Value = serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
         assert_eq!(after["teams"]["fixture"]["spec_path"], json!(spec));
-        assert_eq!(relevant(&after["teams"]["fixture"]["agents"]["one"]),
-            relevant(&before["teams"]["fixture"]["agents"]["one"]));
-        assert_eq!(after["teams"]["fixture"]["agents"]["one"]["explicit_stop"], true);
+        assert_eq!(
+            relevant(&after["teams"]["fixture"]["agents"]["one"]),
+            relevant(&before["teams"]["fixture"]["agents"]["one"])
+        );
+        assert_eq!(
+            after["teams"]["fixture"]["agents"]["one"]["explicit_stop"],
+            true
+        );
     }
 }
 
@@ -124,13 +155,22 @@ fn startup_spec_repair_rechecks_source_under_lock_and_unknown_stays_blocked() {
     assert!(plan_with_observer(intent.clone(), |_, _, _| Ok(Observation::Unknown)).is_err());
     assert!(!spec.exists());
     let plan = plan_with_observer(intent, |_, _, _| Ok(Observation::StoppedVerified)).unwrap();
-    let repair = plan.steps.iter().find(|step| matches!(step, Step::RestoreSpec { .. })).unwrap();
+    let repair = plan
+        .steps
+        .iter()
+        .find(|step| matches!(step, Step::RestoreSpec { .. }))
+        .unwrap();
     let state = crate::state::persist::runtime_state_path(root.path());
     let before = std::fs::read(&state).unwrap();
     let role = root.path().join("agents/one.md");
-    let changed = std::fs::read_to_string(&role).unwrap().replace("Fixture", "Changed role body");
+    let changed = std::fs::read_to_string(&role)
+        .unwrap()
+        .replace("Fixture", "Changed role body");
     std::fs::write(role, changed).unwrap();
-    assert!(repair.execute().is_err(), "the executor must not rely only on the earlier planner recheck");
+    assert!(
+        repair.execute().is_err(),
+        "the executor must not rely only on the earlier planner recheck"
+    );
     assert_eq!(std::fs::read(state).unwrap(), before);
     assert!(!spec.exists());
 }
@@ -143,7 +183,8 @@ fn startup_spec_missing_restart_still_preserves_explicit_stop() {
     let spec = crate::model::paths::runtime_spec_path(root.path(), "fixture");
     std::fs::remove_file(&spec).unwrap();
     intent.verb = Verb::Restart;
-    let plan = plan_with_observer(intent, |_, _, _| panic!("held seat must not be probed")).unwrap();
+    let plan =
+        plan_with_observer(intent, |_, _, _| panic!("held seat must not be probed")).unwrap();
     assert!(plan.steps.is_empty());
     assert!(plan.no_eligible.is_some());
     assert_eq!(plan.skipped[0]["reason"], "explicit_stop");
