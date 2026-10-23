@@ -106,10 +106,20 @@ impl PlanHook for GrokAdapter {
             ExpectedSession::Resume(binding) => arguments.extend(["--resume".into(), binding.native_session.as_str().into()]),
             _ => return Err(ContractError::Invalid("Grok fresh/current or exact resume only")),
         }
-        // Do not set GROK_REAL. The public `grok` wrapper owns that default;
-        // forcing the deep image skips the user's proxy and shows grok-native.
-        Ok(LaunchPlan { executable: runtime.engine.clone(), launcher: runtime.launcher(), arguments, executable_inputs: vec![], cwd: r.paths.cwd.path.clone(),
-            environment: EnvironmentDelta { remove: BTreeSet::from(["XAI_API_KEY".into(), "GROK_API_KEY".into(), "GROK_REAL".into()]), set: BTreeMap::from([("HOME".into(), runtime.home().as_os_str().to_owned())]) },
+        // The Homebrew `grok` entry is a symlink to `grok-native`. Execing that
+        // symlink is why tmux shows grok-native. Run the same inode under the name grok.
+        let named = native::public_name_link(&runtime.engine, &r.paths.cwd.path).map_err(|_| ContractError::Invalid("Grok public name"))?;
+        let launcher = runtime.launcher().map(|entry| entry.executable);
+        let launcher_is_wrapper = launcher.as_ref().is_some_and(|path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file()));
+        let (launcher, grok_real) = if launcher_is_wrapper {
+            (runtime.launcher(), Some(named))
+        } else {
+            (Some(crate::contract::plan::LaunchEntrypoint { executable: named.clone(), sha256: runtime.native.executable_sha256 }), None)
+        };
+        let mut set = BTreeMap::from([("HOME".into(), runtime.home().as_os_str().to_owned())]);
+        if let Some(real) = grok_real { set.insert("GROK_REAL".into(), real.as_os_str().to_owned()); }
+        Ok(LaunchPlan { executable: runtime.engine.clone(), launcher, arguments, executable_inputs: vec![], cwd: r.paths.cwd.path.clone(),
+            environment: EnvironmentDelta { remove: BTreeSet::from(["XAI_API_KEY".into(), "GROK_API_KEY".into(), "GROK_REAL".into()]), set },
             expected_session: resolved.expected_session().clone(),
             carriers: CarrierReport { model: CarrierUse::Specified(CarrierRef::Arguments(vec![0,1])), prompt: CarrierUse::Specified(CarrierRef::Resource(prompt.path.clone())), mcp: CarrierUse::Specified(CarrierRef::Resource(mcp.path.clone())), bypass, effort },
             materialization: vec![mcp, prompt] })

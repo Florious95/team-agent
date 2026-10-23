@@ -64,6 +64,37 @@ pub fn resolve_engine(launcher: &Path) -> Result<PathBuf, HostError> {
     }
     Ok(engine)
 }
+/// A same-inode file named `grok`. Execing the official symlink displays
+/// `grok-native` because tmux uses the resolved basename. This link is the
+/// public name; it is not a second image.
+pub fn public_name_link(engine: &Path, cwd: &Path) -> Result<PathBuf, HostError> {
+    let engine = engine.canonicalize().map_err(|error| HostError::io("Grok public name", error))?;
+    if engine.file_name().is_none_or(|name| name != "grok-native") {
+        return Err(HostError::new("Grok public name image", HostErrorKind::Ownership));
+    }
+    let link = cwd.join("grok");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let engine_meta = std::fs::metadata(&engine).map_err(|error| HostError::io("Grok public name", error))?;
+        match std::fs::hard_link(&engine, &link) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let link_meta = std::fs::metadata(&link).map_err(|error| HostError::io("Grok public name", error))?;
+                if !link_meta.is_file() || link_meta.dev() != engine_meta.dev() || link_meta.ino() != engine_meta.ino() {
+                    return Err(HostError::new("Grok public name link", HostErrorKind::Conflict));
+                }
+            }
+            Err(error) => return Err(HostError::io("Grok public name link", error)),
+        }
+        Ok(link)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = link;
+        Err(HostError::new("Grok public name", HostErrorKind::Unsupported))
+    }
+}
 /// Root calls this after resolving/owning the stable primary, before H3 effects.
 /// Metadata only; no user/account config bodies or Git administrative files.
 pub fn require_private_primary(cwd: &crate::contract::session::CwdIdentity) -> Result<(), HostError> {
