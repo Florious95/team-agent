@@ -52,6 +52,7 @@ on:
           - startup-host
           - startup-bridge
           - startup-receipt-red
+          - startup-receipt
 
 permissions:
   contents: read
@@ -259,6 +260,15 @@ jobs:
               ;;
             startup-receipt-red)
               run_case startup-receipts cargo test -p team-agent --lib --locked startup_receipt -- --test-threads=1 --nocapture
+              ;;
+            startup-receipt)
+              run_case startup-check cargo check --workspace --all-targets --locked
+              run_case startup-receipts cargo test -p team-agent --lib --locked startup_receipt -- --test-threads=1 --nocapture
+              run_case startup-shared-session cargo test -p team-agent --lib --locked startup_shared_session -- --test-threads=1 --nocapture
+              run_case startup-attach cargo test -p team-agent --lib --locked quick_start_persists_selected_tmux_endpoint_and_attach_commands -- --test-threads=1
+              run_case startup-managed-topology cargo test -p team-agent --lib --locked quick_start_preserves_managed_leader_topology_without_inventing_a_leader_window -- --test-threads=1
+              run_case startup-intent cargo test -p team-agent --lib --locked cli::intent -- --test-threads=1
+              run_case startup-runtime cargo test -p team-agent --lib --locked contract_runtime -- --test-threads=1
               ;;
             startup-bridge)
               run_case workspace-check cargo check --workspace --all-targets --locked

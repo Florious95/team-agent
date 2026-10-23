@@ -5,7 +5,6 @@ use std::path::Path;
 use serde_json::{json, Value};
 use team_agent_contract::contract::types::SeatId;
 use team_agent_contract::orchestration::store::{Outcome, SeatStatus};
-use team_agent_contract::host::process::{sample_process, ProcessState};
 
 use crate::cli::CliError;
 use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
@@ -123,26 +122,14 @@ pub fn start_agent(
             return Ok(json!({"ok":false,"agent_id":agent,"status":"paused","reason":"agent_paused"}));
         }
         let unstarted = framework::is_paused_unstarted(row);
-        let prepared = if unstarted {
+        if unstarted {
             // Full pure team admission precedes native allocation or role writes.
             backend::preflight(&config).map_err(error)?;
-            None
         } else {
-            let backend = Backend::open_readonly(&selected.run_workspace, &selected.team_key).map_err(error)?;
-            let seat = backend.store.seat(id).map_err(error)?.ok_or(BackendError::Metadata).map_err(error)?;
-            if seat.status == SeatStatus::Unknown {
-                return Err(error("native seat state is unknown; explicit reconciliation required"));
-            }
-            if seat.status != SeatStatus::Stopped && seat.physical.as_ref().is_some_and(|target| sample_process(&target.process) == ProcessState::Alive) {
-                return Err(error("native seat is already running; use stop-agent first"));
-            }
-            Some(backend::prepare_resume(&selected.run_workspace, &selected.team_key, id, Some(role)).map_err(error)?)
-        };
+            backend::preflight_start_role(&selected.run_workspace, &selected.team_key, role).map_err(error)?;
+        }
         crate::lifecycle::role_config::commit_contract_role(&source, &previous, &next).map_err(error)?;
-        let receipt = match prepared {
-            Some(prepared) => backend::resume(prepared).map_err(error)?,
-            None => backend::start(&selected.run_workspace, &selected.team_key, role, &config.members).map_err(error)?.1,
-        };
+        let receipt = backend::start(&selected.run_workspace, &selected.team_key, role, &config.members).map_err(error)?.1;
         // An uncertain operation never rolls the authoritative native store back
         // to the old generation. The receipt remains available for recovery.
         let projection = checked_projection(&receipt, || publish(selected, id, true))?;

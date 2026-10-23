@@ -61,6 +61,7 @@ pub(super) enum Observation {
     Live,
     StoppedVerified,
     Unstarted,
+    NativeReconcile,
     Unknown,
 }
 #[derive(Clone, Debug)]

@@ -586,8 +586,14 @@ fn restart_with_selected_team_and_transport(
     } else {
         std::collections::BTreeSet::new()
     };
-    if session_live_or_default(transport, &session_name, false)
-        && !live_worker_session_deferred_teardown
+    #[cfg(unix)]
+    let shared_native_windows = crate::contract_runtime::backend::has_shared_windows(
+        &selected.run_workspace, &selected.team_key,
+    ).map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;
+    #[cfg(not(unix))]
+    let shared_native_windows = false;
+    if destroy_stale_worker_session(session_live_or_default(transport, &session_name, false),
+        live_worker_session_deferred_teardown, shared_native_windows)
     {
         eprintln!(
             "team_agent::layout restart_precondition_warning worker_session=`{}` action=killing \
@@ -4011,8 +4017,22 @@ fn restart_candidate_has_context(state: &serde_json::Value) -> bool {
         })
 }
 
+// Extracted old predicate: the RED test demonstrates that session-wide stale
+// teardown was unaware of canonical windows on the now shared workspace server.
+fn destroy_stale_worker_session(live: bool, deferred: bool, _shared_native: bool) -> bool {
+    live && !deferred
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn startup_shared_session_never_bulk_kills_contract_windows() {
+        assert!(!super::destroy_stale_worker_session(true, false, true));
+        assert!(!super::destroy_stale_worker_session(true, true, true));
+        assert!(super::destroy_stale_worker_session(true, false, false));
+        assert!(!super::destroy_stale_worker_session(false, false, false));
+    }
+
     use super::*;
     use std::collections::BTreeMap;
     use std::path::Path;

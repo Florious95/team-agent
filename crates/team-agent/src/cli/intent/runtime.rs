@@ -243,6 +243,9 @@ fn check_native_noop_settings(
                 "native launch configuration drift for {id}; stop before applying settings"
             )));
         }
+        checked(crate::contract_runtime::backend::preflight_start_role(
+            &selected.run_workspace, &selected.team_key, current,
+        ))?;
     }
     Ok(())
 }
@@ -293,6 +296,11 @@ fn observe(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation
         use team_agent_contract::{contract::types::SeatId, host::process::sample_process};
         if crate::contract_runtime::framework::is_paused_unstarted(row) {
             return Ok(Observation::Unstarted);
+        }
+        if checked(crate::contract_runtime::backend::start_needs_reconciliation(
+            &selected.run_workspace, &selected.team_key, &checked(SeatId::new(id))?, row,
+        ))? {
+            return Ok(Observation::NativeReconcile);
         }
         let backend = checked(crate::contract_runtime::backend::Backend::open_readonly(
             &selected.run_workspace,
@@ -481,7 +489,6 @@ fn preflight_start(
 ) -> Result<(), CliError> {
     #[cfg(unix)]
     if crate::contract_runtime::framework::is_contract(row) {
-        use team_agent_contract::contract::types::SeatId;
         let config = checked(crate::contract_runtime::framework::team_config(
             &selected.run_workspace,
             &selected.team_dir,
@@ -493,12 +500,13 @@ fn preflight_start(
             .iter()
             .find(|r| r.id.as_str() == id)
             .ok_or_else(|| refusal("missing native role"))?;
-        checked(crate::contract_runtime::backend::prepare_resume(
-            &selected.run_workspace,
-            &selected.team_key,
-            &checked(SeatId::new(id))?,
-            Some(role),
-        ))?;
+        if crate::contract_runtime::framework::is_paused_unstarted(row) {
+            checked(crate::contract_runtime::backend::preflight(&config))?;
+        } else {
+            checked(crate::contract_runtime::backend::preflight_start_role(
+                &selected.run_workspace, &selected.team_key, role,
+            ))?;
+        }
         return Ok(());
     }
     let provider = crate::provider::wire::parse_provider(provider(row))
