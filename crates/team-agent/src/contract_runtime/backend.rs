@@ -624,12 +624,24 @@ pub(crate) fn start_needs_reconciliation(workspace: &Path, team: &str, seat: &Se
             && row.get("session_id").and_then(serde_json::Value::as_str)
                 == parent.session.as_ref().map(|session| session.native_session.as_str()))
     { return Err(Error::Fence.into()); }
-    Ok(seed || current.as_ref().is_some_and(|seat| !matches(&seat.identity)
+    let needs_projection = seed || current.as_ref().is_some_and(|seat| !matches(&seat.identity)
         || seat.status == SeatStatus::Starting
         || row.get("session_id").and_then(serde_json::Value::as_str) != seat.session.as_ref().map(|session| session.native_session.as_str())
         || (seat.status == SeatStatus::Stopped && row.get("status").and_then(serde_json::Value::as_str) != Some("stopped"))
         || (seat.status != SeatStatus::Stopped && row.get("status").and_then(serde_json::Value::as_str) != Some("running")))
-        || matches!(class, Some(ExistingStart::FinishReceipt(_) | ExistingStart::Pending(_) | ExistingStart::Blocked(_))))
+        || matches!(class, Some(ExistingStart::FinishReceipt(_) | ExistingStart::Pending(_) | ExistingStart::Blocked(_)));
+    if needs_projection { return Ok(true); }
+    if let Some(current) = current.filter(|current| current.status != SeatStatus::Stopped) {
+        if let Some(target) = current.physical.as_ref().filter(|target| target.shared_endpoint) {
+            // A crash after JSON projection but before the owner marker is not
+            // a verified no-op. Reuse only this exact creator receipt, under
+            // the existing lifecycle lock; a foreign marker still refuses.
+            let (topology, transport, _) = workspace_tmux(&backend.binding, seat, Some(target))?;
+            return Ok(transport.session_owner(&crate::transport::SessionName::new(&topology.session_name))
+                .map_err(|_| ContractError::Mismatch("workspace session owner observation"))?.is_none());
+        }
+    }
+    Ok(false)
 }
 
 /// Read-only preflight, reused by the CLI before any role write or stop.

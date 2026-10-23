@@ -50,11 +50,6 @@ pub(super) fn with_agent(
     apply(&latest, &SeatId::new(agent).map_err(error)?).map(Some)
 }
 
-fn publish(selected: &SelectedTeam, id: &SeatId, clear_stop: bool) -> Result<Value, CliError> {
-    let projected = publish_at(&selected.run_workspace, &selected.team_key, id, clear_stop)?;
-    backend::bind_workspace_session(&selected.run_workspace, &selected.team_key, id).map_err(error)?;
-    Ok(projected)
-}
 pub(super) fn publish_at(workspace: &Path, team: &str, id: &SeatId, clear_stop: bool) -> Result<Value, CliError> {
     let projected = framework::project_seat(workspace, team, id.as_str()).map_err(error)?;
     StateRepository::new(workspace).commit(
@@ -71,6 +66,9 @@ pub(super) fn publish_at(workspace: &Path, team: &str, id: &SeatId, clear_stop: 
             }
         },
     ).map_err(error)?;
+    // Fresh, explicit resume and team restart share this one publication path.
+    // Only the exact live receipt may claim a session it actually created.
+    backend::bind_workspace_session(workspace, team, id).map_err(error)?;
     Ok(projected)
 }
 
@@ -136,7 +134,7 @@ pub fn start_agent(
         let receipt = backend::start(&selected.run_workspace, &selected.team_key, role, &config.members).map_err(error)?.1;
         // An uncertain operation never rolls the authoritative native store back
         // to the old generation. The receipt remains available for recovery.
-        let projection = checked_projection(&receipt, || publish(selected, id, true))?;
+        let projection = checked_projection(&receipt, || publish_at(&selected.run_workspace, &selected.team_key, id, true))?;
         let coordinator = crate::coordinator::start_coordinator_with_team(
             &crate::coordinator::WorkspacePath::new(selected.run_workspace.clone()), Some(&selected.team_key),
         ).map_err(error)?;
@@ -258,6 +256,23 @@ pub fn stop_agent(
 
 #[cfg(test)]
 mod tests {
+    // Assembly guard, not a substitute for the real shared-session restart/
+    // shutdown RED→GREEN journey. All start callers must use this common path.
+    #[test]
+    fn shared_owner_claim_follows_common_projection_commit_including_team_restart() {
+        let source = include_str!("commands.rs");
+        let body = source.split_once("pub(super) fn publish_at").unwrap().1
+            .split_once("fn check_record").unwrap().0;
+        let persisted = body.find("StateRepository::new(workspace).commit").unwrap();
+        let claimed = body.find("backend::bind_workspace_session(workspace, team, id)").unwrap();
+        let returned = body.find("Ok(projected)").unwrap();
+        assert!(persisted < claimed && claimed < returned);
+        let restart = source.split_once("pub(crate) fn restart_prepared").unwrap().1
+            .split_once("pub fn restart(").unwrap().0;
+        assert!(restart.contains("publish_at(workspace, team, &id, false)"));
+        assert!(!include_str!("framework.rs").contains("backend::bind_workspace_session"));
+    }
+
     use super::*;
     use team_agent_contract::contract::{delivery::DeliveryEffect, session::CwdIdentity, types::*};
     use team_agent_contract::orchestration::store::{OperationRecord, Phase, SeatRecord, TransactionKind};

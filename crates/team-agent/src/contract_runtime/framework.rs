@@ -146,8 +146,6 @@ pub fn start_role(
         // Preserve each committed seat before a later discovery/spawn can fail.
         // A whole-batch error must never hide this generation's physical effects.
         let projected = super::commands::publish_at(&selected.run_workspace, &selected.team_key, seat, true)?;
-        backend::bind_workspace_session(&selected.run_workspace, &selected.team_key, seat)
-            .map_err(|e| error(e.to_string()))?;
         Ok(projected)
     }).map_err(|e| crate::lifecycle::LifecycleError::Provider(e.to_string()))?;
     if result.is_none() {
