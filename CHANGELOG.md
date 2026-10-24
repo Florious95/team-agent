@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.123]
+
+- **Shared workspace session:** start on the workspace-derived tmux socket instead of a private `tac-<hash>` server. A repeated start reuses the live process. Read-only `doctor` does not rebuild a deleted derived spec; the next non-dry-run `start` restores that metadata under the lifecycle lock without replacing a verified live seat.
+- **Installer without startup gates:** a fresh install does not run doctor, does not fail when MCP is absent, and does not emit path-shadow noise. A PATH that does not yet see `team-agent` gets the new-terminal hint instead of a false install failure.
+- **Native teammate names:** do not force teammate window titles. A Grok seat presents the public command `grok`, not `grok-native`. Doctor accepts a recorded live pane id and does not require the window title to equal the agent id.
+- **Same-volume public name:** the `grok` hard link is created on the image volume. System `/tmp` is used only when it shares that volume; otherwise the link is created beside the image. Caller `TMPDIR` is not used.
+- **Release metadata:** align the eight standard version/changelog files at 0.5.123. Installing a published package does not automatically replace a running team's binary.
+
 ## [0.5.122]
 
 - **Dynamic-seat MCP configuration (Issue #345):** carry the actual generated MCP configuration through single-seat startup and team respawn, and persist it with the existing lifecycle state commit. Dynamic Cursor seats no longer lose their required configuration metadata.
