@@ -92,9 +92,7 @@ fn command_for_model(model: &str) -> Vec<String> {
         effort: Some(ProviderEffort::Medium),
         system_prompt: "worker contract",
         session_dir: Some(Path::new("/workspace/.team/runtime/pi/t1/w1/sessions")),
-        session: PiSessionSelector::Fresh {
-            session_id: "716ba0cb-c491-4471-b41a-43c8d5e1f05a",
-        },
+        session: PiSessionSelector::Fresh,
         agent_id: "w1",
     })
     .expect("catalog member must build a semantic Pi argv")
