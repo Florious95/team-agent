@@ -168,7 +168,12 @@ function install(argv) {
   if (pathCheck.status === "ready") {
     console.log("Ready in this terminal. Run: team-agent --help");
   } else {
-    console.log("Open a new terminal, then run: team-agent --help");
+    console.log(pathActivationGuidance({
+      binDir,
+      teamAgent,
+      rc: installTarget.rc,
+      shell: path.basename(process.env.SHELL || ""),
+    }));
   }
 }
 
@@ -561,7 +566,9 @@ function ensureBinDirOnShellRc(binDir, options = {}) {
 
 function shellRcTargets(shell, home) {
   if (shell === "zsh") {
-    return { files: [path.join(home, ".zshrc")], style: "posix" };
+    // Login shells, including ssh and macOS Terminal, read .zprofile and do
+    // not read .zshrc unless they are also interactive. Write both.
+    return { files: [path.join(home, ".zprofile"), path.join(home, ".zshrc")], style: "posix" };
   }
   if (shell === "bash") {
     return { files: [path.join(home, ".bashrc"), path.join(home, ".bash_profile")], style: "posix" };
@@ -571,11 +578,41 @@ function shellRcTargets(shell, home) {
   }
   if (!shell || shell === "sh") {
     return {
-      files: [process.platform === "darwin" ? path.join(home, ".zshrc") : path.join(home, ".profile")],
+      files: process.platform === "darwin"
+        ? [path.join(home, ".zprofile"), path.join(home, ".zshrc")]
+        : [path.join(home, ".profile")],
       style: "posix",
     };
   }
   return null;
+}
+
+export function pathActivationGuidance(options = {}) {
+  const binDir = options.binDir;
+  const teamAgent = options.teamAgent;
+  const rc = options.rc || { files: [], skipped: [] };
+  const refresh = options.shell === "zsh" ? "rehash" : "hash -r";
+  const lines = [
+    "This shell cannot see team-agent yet. A child installer cannot change the shell that launched it.",
+    "Run this in the current shell:",
+    `  export PATH="${binDir}:$PATH"`,
+    `  ${refresh}`,
+    "  team-agent --help",
+    "Or run the installed command directly:",
+    `  ${teamAgent} --help`,
+  ];
+  const written = rc.files || [];
+  const skipped = rc.skipped || [];
+  if (written.length > 0) {
+    lines.push(`New shells read: ${written.join(", ")}`);
+  } else if (skipped.length > 0) {
+    lines.push(`Shell startup already contains the PATH entry: ${skipped.join(", ")}`);
+  } else if (rc.unsupported) {
+    lines.push("This shell has no supported startup file. Keep the export above.");
+  } else {
+    lines.push("Could not update a shell startup file. Keep the export above.");
+  }
+  return lines.join("\n");
 }
 
 function installedBinDir(runtimeRoot, opts) {

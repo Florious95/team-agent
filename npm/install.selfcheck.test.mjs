@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   parseTeamAgentVersion,
+  pathActivationGuidance,
   readInstallManifest,
   repairPathShadowingTeamAgentCommands,
   resolveInstallBinDir,
@@ -52,8 +53,20 @@ test("install bin resolver falls back to shell rc idempotently", () => {
   assert.equal(first.kind, "shell_rc");
   assert.equal(first.readyNow, false);
   assert.equal(second.binDir, first.binDir);
-  const zshrc = fs.readFileSync(path.join(root, ".zshrc"), "utf8");
-  assert.equal((zshrc.match(/# team-agent PATH \(E48\)/g) || []).length, 1);
+  for (const file of [".zprofile", ".zshrc"]) {
+    const text = fs.readFileSync(path.join(root, file), "utf8");
+    assert.equal((text.match(/# team-agent PATH \(E48\)/g) || []).length, 1, file);
+  }
+  const guidance = pathActivationGuidance({
+    binDir: first.binDir,
+    teamAgent: path.join(first.binDir, "team-agent"),
+    rc: first.rc,
+    shell: "zsh",
+  });
+  assert.match(guidance, /export PATH=/);
+  assert.match(guidance, /rehash/);
+  assert.match(guidance, /Or run the installed command directly/);
+  assert.doesNotMatch(guidance, /Open a new terminal/);
 });
 
 test("install bin resolver does not adopt a writable PATH dir that already has a foreign wrapper", () => {
