@@ -19,10 +19,13 @@ use team_agent_contract::host::{
     digest, digest_hex,
     materialize::ScopedMaterializer,
     process::{fingerprint_file, resolve_cwd},
-    tmux::HostLimits,
+    tmux::{HostLimits, SharedTmux, TmuxHost},
+    transport::PhysicalTransport,
 };
 use team_agent_contract::orchestration::{lifecycle::*, physical::*, store::*, Error};
 use thiserror::Error as ThisError;
+
+use crate::transport::Transport;
 
 use super::{
     config::{MemberRoute, RoleConfig, RuntimeFamily},
@@ -205,6 +208,144 @@ impl Backend {
     }
 }
 
+fn workspace_socket(path: &Path) -> Result<Option<(u64, u64)>, BackendError> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    // Root already uses libc for UID checks; this syscall has no pointer input.
+    let uid = unsafe { libc::geteuid() };
+    if !metadata.file_type().is_socket() || metadata.uid() != uid {
+        return Err(ContractError::Mismatch("workspace socket owner/type").into());
+    }
+    Ok(Some((metadata.dev(), metadata.ino())))
+}
+
+/// The selected root transport is authority; ambient TMUX is never a selector.
+/// This runs only in the owning lifecycle action, after native F0 admission.
+fn workspace_tmux(
+    binding: &Binding,
+    seat: &SeatId,
+    claim: Option<&team_agent_contract::host::transport::TargetReceipt>,
+) -> Result<(SharedTmux, crate::tmux_backend::TmuxBackend, String), BackendError> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    let selected = crate::state::selector::resolve_active_team_readonly(
+        &binding.workspace.path, Some(&binding.team), crate::state::selector::SelectorMode::RuntimeOnly,
+    ).map_err(|_| ContractError::Mismatch("workspace topology scope"))?;
+    if selected.run_workspace != binding.workspace.path || selected.team_key != binding.team {
+        return Err(Error::Fence.into());
+    }
+    crate::lifecycle::launch::ensure_owner_allowed_for_state(&selected.state,
+        Some(&crate::model::ids::AgentId::new(seat.as_str())))
+        .map_err(|_| ContractError::Mismatch("workspace topology caller ownership"))?;
+    let transport = crate::lifecycle::restart::lifecycle_worker_tmux_backend_selection_for_state(
+        &selected.run_workspace, &selected.state,
+    ).map_err(|_| ContractError::Mismatch("workspace topology transport"))?.backend;
+    let endpoint = transport.tmux_endpoint().filter(|s| !s.is_empty())
+        .ok_or(ContractError::Invalid("explicit workspace tmux endpoint required"))?;
+    let named = !Path::new(&endpoint).is_absolute();
+    let endpoint = if named {
+        crate::tmux_backend::socket_path_for_name(&endpoint)
+            .ok_or(ContractError::Invalid("workspace tmux socket name"))?
+    } else { PathBuf::from(endpoint) };
+    let parent = endpoint.parent().ok_or(ContractError::Invalid("workspace socket parent"))?;
+    if !parent.exists() && named && claim.is_none() {
+        if let Err(error) = std::fs::DirBuilder::new().mode(0o700).create(parent) {
+            if error.kind() != std::io::ErrorKind::AlreadyExists { return Err(error.into()); }
+        }
+    }
+    let metadata = std::fs::symlink_metadata(parent)?;
+    let physical_parent = parent.canonicalize()?;
+    if !metadata.is_dir() || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o777 != 0o700 || (!named && physical_parent != parent)
+    { return Err(ContractError::Mismatch("workspace socket parent ownership").into()); }
+    let endpoint = physical_parent.join(endpoint.file_name().ok_or(ContractError::Invalid("workspace socket name"))?);
+    let session_name = selected.state.get("session_name").and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty() && !s.chars().any(|c| c.is_control() || c == ':'))
+        .ok_or(ContractError::Invalid("workspace team session name"))?.to_owned();
+    let generation = crate::state::projection::session_generation(&selected.state)
+        .unwrap_or(&session_name).to_owned();
+    let socket = workspace_socket(&endpoint)?;
+    let mut session = None;
+    if socket.is_some() {
+        let result = RealCommandRunner::default().run(&CommandRequest {
+            executable: binding.tmux.clone(), arguments: vec!["-u".into(), "-S".into(), endpoint.as_os_str().to_owned(),
+                "-N".into(), "list-sessions".into(), "-F".into(), "#{session_id}:#{session_name}".into()],
+            cwd: None, environment: EnvironmentDelta { remove: Default::default(), set: Default::default() },
+            stdin: None, budget: Duration::from_secs(5), limits: OutputLimits { stdout: 65536, stderr: 4096, stdin: 1 },
+            reject_stdout: None,
+        });
+        if result.success() {
+            let text = std::str::from_utf8(&result.stdout).map_err(|_| ContractError::Invalid("workspace session metadata"))?;
+            for line in text.lines() {
+                let (id, name) = line.split_once(':').ok_or(ContractError::Invalid("workspace session metadata"))?;
+                if !id.strip_prefix('$').is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())) {
+                    return Err(ContractError::Invalid("workspace session ID").into());
+                }
+                if name == session_name {
+                    if session.replace(id.to_owned()).is_some() { return Err(Error::Fence.into()); }
+                }
+            }
+        } else if !(result.end == CommandEnd::Exited && result.exit_code == Some(1) && result.child_reaped
+            && result.stdout.is_empty() && result.stderr == format!("no server running on {}\n", endpoint.display()).as_bytes())
+        { return Err(ContractError::Mismatch("workspace server observation unavailable").into()); }
+        if workspace_socket(&endpoint)? != socket { return Err(Error::Fence.into()); }
+    }
+    if let Some(id) = &session {
+        let owner = transport.session_owner(&crate::transport::SessionName::new(&session_name))
+            .map_err(|_| ContractError::Mismatch("workspace session owner observation"))?;
+        let may_claim = claim.is_some_and(|target| target.shared_endpoint && target.created_session
+            && target.identity().scope == binding.scope && &target.identity().seat == seat
+            && target.endpoint == endpoint && target.session == *id
+            && Some((target.socket_device, target.socket_inode)) == socket);
+        if !owner.as_ref().is_some_and(|owner| Path::new(&owner.workspace) == binding.workspace.path
+            && owner.team == binding.team && owner.generation == generation)
+            && !(owner.is_none() && may_claim)
+        { return Err(ContractError::Mismatch("workspace session ownership").into()); }
+    } else if claim.is_some() { return Err(ContractError::Mismatch("committed workspace session disappeared").into()); }
+    if claim.is_some_and(|target| target.endpoint != endpoint
+        || session.as_deref() != Some(target.session.as_str()))
+    { return Err(ContractError::Mismatch("committed workspace target changed").into()); }
+    Ok((SharedTmux { endpoint, socket, session_name, session }, transport, generation))
+}
+
+/// Projection is saved first by the caller. Only an exact current target that
+/// actually created this shared session may seed a missing root owner marker.
+pub(super) fn bind_workspace_session(workspace: &Path, team: &str, seat: &SeatId) -> Result<(), BackendError> {
+    let backend = Backend::open_readonly(workspace, team)?;
+    let current = backend.store.seat(seat)?.ok_or(BackendError::Metadata)?;
+    let target = current.physical.as_ref().ok_or(BackendError::Metadata)?;
+    if !target.shared_endpoint { return Ok(()); }
+    let clock = RealClock::new();
+    let deadline = Duration::from_secs(5);
+    let mut host = TmuxHost::restore_owned(target.clone(), backend.binding.tmux.clone(),
+        settings(&backend.binding, registry::provider(current.provider.as_str())?).limits,
+        RealCommandRunner::default(), &clock, deadline)?;
+    host.validate_target(target, &clock, deadline)?;
+    let (topology, transport, generation) = workspace_tmux(&backend.binding, seat, Some(target))?;
+    let session = crate::transport::SessionName::new(&topology.session_name);
+    transport.set_session_owner_with_generation(&session, &backend.binding.workspace.path, team, &generation)
+        .map_err(|_| ContractError::Mismatch("workspace session owner commit"))?;
+    let owner = transport.session_owner(&session).map_err(|_| ContractError::Mismatch("workspace session owner readback"))?;
+    if !owner.is_some_and(|owner| Path::new(&owner.workspace) == backend.binding.workspace.path
+        && owner.team == team && owner.generation == generation)
+    { return Err(Error::Fence.into()); }
+    host.validate_target(target, &clock, deadline)?;
+    Ok(())
+}
+
+/// A session-wide legacy kill must not bypass canonical teardown of any
+/// contract window, including a paused or currently unselected seat.
+pub(crate) fn has_shared_windows(workspace: &Path, team: &str) -> Result<bool, BackendError> {
+    let cwd = resolve_cwd(workspace)?;
+    if !root_for(&cwd.path, &scope_for(&cwd, team)?).exists() { return Ok(false); }
+    let backend = Backend::open_readonly(&cwd.path, team)?;
+    Ok(backend.store.seats()?.iter().any(|seat|
+        seat.physical.as_ref().is_some_and(|target| target.shared_endpoint)))
+}
+
 pub(super) fn settings(binding: &Binding, provider: registry::NativeProvider) -> PhysicalSettings {
     PhysicalSettings {
         tmux: binding.tmux.clone(),
@@ -385,6 +526,153 @@ pub fn preflight(team: &super::config::TeamConfig) -> Result<(), BackendError> {
     Ok(())
 }
 
+#[derive(Debug)]
+enum ExistingStart {
+    Committed(OperationRecord),
+    FinishReceipt(OperationRecord),
+    Pending(OperationRecord),
+    Resume(SeatRecord),
+    Blocked(OperationRecord),
+}
+
+// Receipt classification is read-only, never native admission or permission
+// to replay an unfinished host effect. Check parent leases before old success.
+fn existing_start(backend: &Backend, seat: &SeatId) -> Result<Option<ExistingStart>, BackendError> {
+    let unfinished: Vec<_> = backend.store.unfinished()?.into_iter().filter(|record| {
+        &record.target.identity.seat == seat
+            || record.parent.as_ref().is_some_and(|parent| &parent.identity.seat == seat)
+    }).collect();
+    if unfinished.len() > 1 { return Err(Error::Fence.into()); }
+    if let Some(record) = unfinished.into_iter().next() {
+        if record.target.identity.scope != backend.binding.scope { return Err(Error::Fence.into()); }
+        return Ok(Some(if record.phase == Phase::F4Commit && record.pending.is_none()
+            && matches!(record.kind, TransactionKind::Startup | TransactionKind::Restart
+                | TransactionKind::NewSeatFullSnapshot | TransactionKind::NativeNewSeat)
+        { ExistingStart::FinishReceipt(record) }
+        else if record.outcome == Outcome::Running { ExistingStart::Pending(record) }
+        else { ExistingStart::Blocked(record) }));
+    }
+    let Some(current) = backend.store.seat(seat)? else {
+        return match backend.store.creation_receipt(seat, None)? {
+            None => Ok(None),
+            Some(record) if record.outcome == Outcome::Compensated => Ok(None),
+            Some(_) => Err(Error::Fence.into()),
+        };
+    };
+    if current.identity.scope != backend.binding.scope { return Err(Error::Fence.into()); }
+    let record = backend.store.creation_receipt(seat, Some(&current.identity))?.ok_or(Error::Fence)?;
+    if record.outcome != Outcome::Committed || record.phase != Phase::F5Receipt || record.pending.is_some() {
+        return Ok(Some(ExistingStart::Blocked(record)));
+    }
+    Ok(Some(if current.status == SeatStatus::Stopped { ExistingStart::Resume(current) }
+        else { ExistingStart::Committed(record) }))
+}
+
+fn require_candidate(binding: &Binding) -> Result<(), BackendError> {
+    let candidate = std::env::current_exe()?.canonicalize()?;
+    if candidate != binding.candidate || fingerprint_file(&candidate, 1024 * 1024 * 1024,
+        Duration::from_secs(10))? != binding.candidate_sha256 { return Err(Error::Fence.into()); }
+    Ok(())
+}
+
+fn validate_existing(backend: &Backend, role: &RoleConfig, record: &OperationRecord) -> Result<SeatRecord, BackendError> {
+    let current = backend.store.assert_current(&record.target.identity)?;
+    if current.evidence_kind != EvidenceKind::Native || current.provider != role.provider
+        || current.status == SeatStatus::Unknown
+        || serde_json::to_vec(&read_role(&backend.binding, &current.identity)?).map_err(|_| BackendError::Metadata)?
+            != serde_json::to_vec(role).map_err(|_| BackendError::Metadata)?
+    { return Err(ContractError::Mismatch("existing native launch configuration").into()); }
+    let target = current.physical.as_ref().ok_or(BackendError::Metadata)?;
+    let clock = RealClock::new();
+    let deadline = Duration::from_secs(5);
+    let mut host = TmuxHost::restore_owned(target.clone(), backend.binding.tmux.clone(),
+        settings(&backend.binding, registry::provider(current.provider.as_str())?).limits,
+        RealCommandRunner::default(), &clock, deadline)?;
+    host.validate_target(target, &clock, deadline)?;
+    Ok(current)
+}
+
+fn receipt_error(record: OperationRecord) -> BackendError {
+    BackendError::Shutdown { operation: record.id, phase: record.phase,
+        outcome: record.outcome, failure: record.failure.or(record.pending) }
+}
+
+/// Plan only against this selected store and exact row (or an unbound seed).
+/// A stale parent can be repaired only by its actual creation receipt, never
+/// by selecting the greatest generation or adopting a discovered process.
+pub(crate) fn start_needs_reconciliation(workspace: &Path, team: &str, seat: &SeatId, row: &serde_json::Value) -> Result<bool, BackendError> {
+    let backend = Backend::open_readonly(workspace, team)?;
+    require_candidate(&backend.binding)?;
+    let class = existing_start(&backend, seat)?;
+    let current = backend.store.seat(seat)?;
+    if current.as_ref().is_some_and(|seat| row.get("provider").and_then(serde_json::Value::as_str) != Some(seat.provider.as_str())) {
+        return Err(Error::Fence.into());
+    }
+    let matches = |identity: &InstanceIdentity| {
+        row.get("contract_scope").and_then(serde_json::Value::as_str) == Some(identity.scope.as_str())
+            && row.get("contract_instance").and_then(serde_json::Value::as_str) == Some(identity.instance.as_str())
+            && row.get("generation").and_then(serde_json::Value::as_u64) == Some(identity.generation.0)
+    };
+    let seed = ["contract_scope", "contract_instance", "generation", "session_id"].iter()
+        .all(|key| row.get(*key).is_none_or(serde_json::Value::is_null));
+    let record = match &class {
+        Some(ExistingStart::Committed(record) | ExistingStart::FinishReceipt(record)) => Some(record),
+        _ => None,
+    };
+    if !seed && !current.as_ref().is_some_and(|seat| matches(&seat.identity))
+        && !record.and_then(|record| record.parent.as_ref()).is_some_and(|parent| matches(&parent.identity)
+            && row.get("session_id").and_then(serde_json::Value::as_str)
+                == parent.session.as_ref().map(|session| session.native_session.as_str()))
+    { return Err(Error::Fence.into()); }
+    let needs_projection = seed || current.as_ref().is_some_and(|seat| !matches(&seat.identity)
+        || seat.status == SeatStatus::Starting
+        || row.get("session_id").and_then(serde_json::Value::as_str) != seat.session.as_ref().map(|session| session.native_session.as_str())
+        || (seat.status == SeatStatus::Stopped && row.get("status").and_then(serde_json::Value::as_str) != Some("stopped"))
+        || (seat.status != SeatStatus::Stopped && row.get("status").and_then(serde_json::Value::as_str) != Some("running")))
+        || matches!(class, Some(ExistingStart::FinishReceipt(_) | ExistingStart::Pending(_) | ExistingStart::Blocked(_)));
+    if needs_projection { return Ok(true); }
+    if let Some(current) = current.filter(|current| current.status != SeatStatus::Stopped) {
+        if let Some(target) = current.physical.as_ref().filter(|target| target.shared_endpoint) {
+            // A crash after JSON projection but before the owner marker is not
+            // a verified no-op. Reuse only this exact creator receipt, under
+            // the existing lifecycle lock; a foreign marker still refuses.
+            let (topology, transport, _) = workspace_tmux(&backend.binding, seat, Some(target))?;
+            return Ok(transport.session_owner(&crate::transport::SessionName::new(&topology.session_name))
+                .map_err(|_| ContractError::Mismatch("workspace session owner observation"))?.is_none());
+        }
+    }
+    Ok(false)
+}
+
+/// Read-only preflight, reused by the CLI before any role write or stop.
+pub(crate) fn preflight_start_role(workspace: &Path, team: &str, role: &RoleConfig) -> Result<bool, BackendError> {
+    let backend = Backend::open_readonly(workspace, team)?;
+    require_candidate(&backend.binding)?;
+    match existing_start(&backend, &role.id)? {
+        Some(ExistingStart::Committed(record))
+            if backend.store.assert_current(&record.target.identity)?.physical.as_ref().is_some_and(|target|
+                team_agent_contract::host::process::sample_process(&target.process) == team_agent_contract::host::process::ProcessState::Exited) => {
+            prepare_resume(workspace, team, &role.id, Some(role))?;
+        },
+        Some(ExistingStart::Committed(record) | ExistingStart::FinishReceipt(record)) => { validate_existing(&backend, role, &record)?; },
+        Some(ExistingStart::Resume(_)) => { prepare_resume(workspace, team, &role.id, Some(role))?; },
+        Some(ExistingStart::Pending(record) | ExistingStart::Blocked(record)) => return Err(receipt_error(record)),
+        None => return Ok(true), // Caller must run full-team fresh preflight before writes.
+    }
+    Ok(false)
+}
+
+fn finish_receipt(backend: &mut Backend, record: OperationRecord) -> Result<OperationRecord, BackendError> {
+    let selected = registry::provider(record.target.provider.as_str())?;
+    let adapter = adapter(&backend.binding, &record.target.identity, &record.target.provider)?;
+    let hooks = adapter.hooks();
+    let clock = RealClock::new();
+    let mut host = PhysicalRuntime::new(Registration { descriptor: selected.descriptor(), hooks: &hooks,
+        controls: selected.controls(), startup: selected.startup(), session_panel: selected.session_panel() },
+        settings(&backend.binding, selected), record.id.clone(), &clock)?;
+    Ok(Lifecycle { store: &mut backend.store, host: &mut host, io: &mut NoNewIo }.recover(&record.id)?)
+}
+
 /// Fresh startup is distinct from resume. An existing generation is never
 /// silently replaced with a new native session.
 pub fn start(
@@ -393,6 +681,36 @@ pub fn start(
     role: &RoleConfig,
     members: &[MemberRoute],
 ) -> Result<(Binding, OperationRecord), BackendError> {
+    let cwd = resolve_cwd(workspace)?;
+    let scope = scope_for(&cwd, team)?;
+    if root_for(&cwd.path, &scope).exists() {
+        let mut backend = Backend::open(&cwd.path, team)?;
+        require_candidate(&backend.binding)?;
+        match existing_start(&backend, &role.id)? {
+            Some(ExistingStart::Committed(record)) => {
+                let current = backend.store.assert_current(&record.target.identity)?;
+                if current.physical.as_ref().is_some_and(|target|
+                    team_agent_contract::host::process::sample_process(&target.process) == team_agent_contract::host::process::ProcessState::Exited) {
+                    let prepared = prepare_resume(workspace, team, &role.id, Some(role))?;
+                    return Ok((backend.binding, resume(prepared)?));
+                }
+                validate_existing(&backend, role, &record)?;
+                return Ok((backend.binding, record));
+            },
+            Some(ExistingStart::FinishReceipt(record)) => {
+                validate_existing(&backend, role, &record)?;
+                let record = finish_receipt(&mut backend, record)?;
+                return Ok((backend.binding, record));
+            },
+            Some(ExistingStart::Resume(current)) => {
+                if current.provider != role.provider { return Err(Error::Fence.into()); }
+                let prepared = prepare_resume(workspace, team, &role.id, Some(role))?;
+                return Ok((backend.binding, resume(prepared)?));
+            },
+            Some(ExistingStart::Pending(record) | ExistingStart::Blocked(record)) => return Err(receipt_error(record)),
+            None => {},
+        }
+    }
     let selected = registry::provider(role.provider.as_str())?;
     let descriptor = selected.descriptor();
     let discovered = discovery::discover_runtime(&role.provider, workspace)?;
@@ -440,7 +758,7 @@ pub fn start(
     {
         return Err(Error::Fence.into());
     }
-    if backend.store.seat(&role.id)?.is_some() {
+    if existing_start(&backend, &role.id)?.is_some() {
         return Err(Error::Conflict.into());
     }
     let route = backend.binding.framework().route()?;
@@ -490,6 +808,8 @@ pub fn start(
         Some(&discovered.catalog),
     )?;
     let plan = adapter.plan(&resolved)?;
+    validate_launch_plan(descriptor, &resolved, &plan)?;
+    let (workspace_topology, _, _) = workspace_tmux(&backend.binding, &role.id, None)?;
     let operation = OperationId::new(format!("start-{}", request.identity.instance.as_str()))?;
     let mut io = ScopedMaterializer::new(
         descriptor,
@@ -512,6 +832,7 @@ pub fn start(
         &clock,
     )?;
     physical.evidence = policy_evidence(&role.provider, &request.native, candidate_sha256)?;
+    physical.workspace_tmux = Some(workspace_topology);
     let record = Lifecycle {
         store: &mut backend.store,
         host: &mut physical,
@@ -645,6 +966,24 @@ pub fn resume(prepared: PreparedResume) -> Result<OperationRecord, BackendError>
     let plan = adapter.plan(&resolved)?;
     validate_launch_plan(descriptor, &resolved, &plan)?;
     write_role(&backend.binding, &prepared.request.identity, &prepared.role)?;
+    let shared_parent = parent.physical.as_ref().is_some_and(|target| target.shared_endpoint);
+    let workspace_topology = if shared_parent {
+        // Validate root topology before stopping. Capture again only after the
+        // authorized stop, since its last pane may destroy the old session ID.
+        let (before, _, _) = workspace_tmux(&backend.binding, &prepared.role.id, None)?;
+        if parent.status != SeatStatus::Stopped {
+            let target = parent.physical.as_ref().ok_or(BackendError::Metadata)?;
+            if before.endpoint != target.endpoint || before.session.as_deref() != Some(target.session.as_str()) {
+                return Err(ContractError::Mismatch("resume workspace session").into());
+            }
+            let stopped = stop(&backend.binding.workspace.path, &backend.binding.team, &prepared.role.id)?;
+            if stopped.outcome != Outcome::Committed {
+                return Err(BackendError::Shutdown { operation: stopped.id, phase: stopped.phase,
+                    outcome: stopped.outcome, failure: stopped.failure });
+            }
+        }
+        Some(workspace_tmux(&backend.binding, &prepared.role.id, None)?.0)
+    } else { None };
     let operation = OperationId::new(format!("resume-{}", prepared.request.identity.instance.as_str()))?;
     let mut io = ScopedMaterializer::new(descriptor, &resolved, &plan, operation.clone(), RealCommandRunner::default())?;
     let clock = RealClock::new();
@@ -656,6 +995,7 @@ pub fn resume(prepared: PreparedResume) -> Result<OperationRecord, BackendError>
         settings(&backend.binding, selected), operation.clone(), &clock,
     )?;
     physical.evidence = policy_evidence(&prepared.role.provider, &prepared.request.native, backend.binding.candidate_sha256)?;
+    physical.workspace_tmux = workspace_topology;
     let record = Lifecycle { store: &mut backend.store, host: &mut physical, io: &mut io }.startup(
         &Adapter { descriptor, hooks: &hooks, catalog: Some(&prepared.discovered.catalog) },
         &prepared.request,
@@ -853,8 +1193,156 @@ mod tests {
                 } };
             Self { root, binding, role, identity }
         }
+
+        // Receipt-only fixtures never authorize a native action; the runtime
+        // must separately revalidate candidate, role, socket and process birth.
+        fn canonical(&mut self, status: SeatStatus, phase: Phase, outcome: Outcome, pending: Option<&str>) -> Backend {
+            self.binding.transport_root = self.binding.workspace.path.join("native-store");
+            self.binding.endpoint = endpoint(&self.binding.scope);
+            let store = ContractStore::create(&self.binding.transport_root, self.binding.scope.clone(), &self.binding.endpoint).unwrap();
+            let target = SeatRecord { identity: self.identity.clone(), provider: self.role.provider.clone(),
+                native: NativeIdentity { version: "fixture".into(), harness: "fixture".into(), ui: "controlled".into(),
+                    platform: Platform::MacOs, executable_sha256: digest(b"fixture") },
+                cwd: self.binding.workspace.clone(), endpoint: self.binding.endpoint.clone(), pane: "%1".into(),
+                binding_key: "controlled".into(), profile: "fixture".into(), server_key: "fixture".into(),
+                evidence_kind: EvidenceKind::Fixture, status, process: None, physical: None, session: None,
+                resources: vec![], workspace_resources: vec![], bootstrap_used: false };
+            let operation = OperationRecord { id: OperationId::new("controlled-start").unwrap(), kind: TransactionKind::Startup,
+                target: target.clone(), parent: None, phase, pending: pending.map(str::to_owned), resources: vec![],
+                effect: team_agent_contract::contract::delivery::DeliveryEffect::NoEffect, outcome, preserved: vec![], failure: None };
+            let db = rusqlite::Connection::open(self.binding.transport_root.join("contract.db")).unwrap();
+            db.execute("INSERT INTO contract_seats VALUES(?1,?2)", rusqlite::params![self.identity.seat.as_str(), serde_json::to_string(&target).unwrap()]).unwrap();
+            db.execute("INSERT INTO contract_generations VALUES(?1,?2)", rusqlite::params![self.identity.seat.as_str(), self.identity.generation.0]).unwrap();
+            db.execute("INSERT INTO contract_instances VALUES(?1,?2,?3)", rusqlite::params![self.identity.instance.as_str(), self.identity.seat.as_str(), self.identity.generation.0]).unwrap();
+            db.execute("INSERT INTO contract_operations VALUES(?1,?2)", rusqlite::params![operation.id.as_str(), serde_json::to_string(&operation).unwrap()]).unwrap();
+            if matches!(outcome, Outcome::Running | Outcome::NeedsRecovery) {
+                db.execute("INSERT INTO contract_leases VALUES(?1,?2)", rusqlite::params![self.identity.seat.as_str(), operation.id.as_str()]).unwrap();
+            }
+            std::fs::write(root_for(&self.binding.workspace.path, &self.binding.scope).join("framework-binding.json"),
+                serde_json::to_vec(&self.binding).unwrap()).unwrap();
+            drop(db); drop(store);
+            Backend::open_readonly(&self.binding.workspace.path, "test").unwrap()
+        }
     }
     impl Drop for RoleFixture { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.root); } }
+
+    fn assert_receipt_class(status: SeatStatus, phase: Phase, outcome: Outcome, pending: Option<&str>, expected: &str) {
+            let mut fixture = RoleFixture::new();
+            let backend = fixture.canonical(status, phase, outcome, pending);
+            let before = serde_json::to_vec(&backend.store.seat(&fixture.identity.seat).unwrap()).unwrap();
+            let receipt = backend.store.creation_receipt(&fixture.identity.seat, Some(&fixture.identity)).unwrap().unwrap();
+            assert_eq!(receipt.phase, phase);
+            assert_eq!(receipt.outcome, outcome);
+            let result = existing_start(&backend, &fixture.identity.seat);
+            assert_eq!(serde_json::to_vec(&backend.store.seat(&fixture.identity.seat).unwrap()).unwrap(), before);
+            assert_eq!(backend.store.operation(&receipt.id).unwrap(), receipt);
+            let classified = result.unwrap_or_else(|error| panic!("{expected} must not collapse to unconditional Conflict: {error}"));
+            let matches = match classified {
+                Some(ExistingStart::Committed(record)) => expected == "committed" && record.id == receipt.id,
+                Some(ExistingStart::FinishReceipt(record)) => expected == "finish" && record.id == receipt.id,
+                Some(ExistingStart::Pending(record)) => expected == "pending" && record.id == receipt.id,
+                Some(ExistingStart::Resume(record)) => expected == "resume" && record.identity == fixture.identity,
+                Some(ExistingStart::Blocked(record)) => expected == "blocked" && record.id == receipt.id,
+                None => false,
+            };
+            assert!(matches, "wrong receipt class for {expected}");
+    }
+
+    #[test]
+    fn startup_receipt_red_committed_is_reused_not_conflicted() {
+        assert_receipt_class(SeatStatus::Ready, Phase::F5Receipt, Outcome::Committed, None, "committed");
+    }
+    #[test]
+    fn startup_receipt_red_f4_is_receipt_completion_not_fresh() {
+        assert_receipt_class(SeatStatus::Starting, Phase::F4Commit, Outcome::Running, None, "finish");
+    }
+    #[test]
+    fn startup_receipt_red_inflight_is_pending_not_replayed() {
+        assert_receipt_class(SeatStatus::Starting, Phase::F3Spawn, Outcome::Running, Some("spawn"), "pending");
+    }
+    #[test]
+    fn startup_receipt_red_stopped_is_resume_not_fresh() {
+        assert_receipt_class(SeatStatus::Stopped, Phase::F5Receipt, Outcome::Committed, None, "resume");
+    }
+    #[test]
+    fn startup_receipt_red_uncertain_is_blocked_with_original_receipt() {
+        assert_receipt_class(SeatStatus::Starting, Phase::F3Spawn, Outcome::NeedsRecovery, Some("spawn"), "blocked");
+    }
+
+    #[test]
+    fn startup_receipt_projection_repair_refuses_foreign_or_guessed_identity() {
+        let mut fixture = RoleFixture::new();
+        fixture.binding.candidate = std::env::current_exe().unwrap().canonicalize().unwrap();
+        fixture.binding.candidate_sha256 = fingerprint_file(&fixture.binding.candidate, 1024 * 1024 * 1024, Duration::from_secs(10)).unwrap();
+        let backend = fixture.canonical(SeatStatus::Starting, Phase::F4Commit, Outcome::Running, None);
+        let original = backend.store.creation_receipt(&fixture.identity.seat, Some(&fixture.identity)).unwrap().unwrap();
+        let seed = serde_json::json!({"provider":"cursor","status":"unknown"});
+        assert!(start_needs_reconciliation(&fixture.root, "test", &fixture.identity.seat, &seed).unwrap());
+        let exact = serde_json::json!({"provider":"cursor","status":"unknown","contract_scope":fixture.identity.scope,
+            "contract_instance":fixture.identity.instance,"generation":fixture.identity.generation});
+        assert!(start_needs_reconciliation(&fixture.root, "test", &fixture.identity.seat, &exact).unwrap());
+        for (key, value) in [("provider", serde_json::json!("grok_build")), ("contract_scope", serde_json::json!("foreign")),
+            ("contract_instance", serde_json::json!("another")), ("generation", serde_json::json!(2))] {
+            let mut forged = exact.clone(); forged[key] = value;
+            assert!(start_needs_reconciliation(&fixture.root, "test", &fixture.identity.seat, &forged).is_err(), "{key}");
+        }
+        assert_eq!(backend.store.operation(&original.id).unwrap(), original);
+        assert!(preflight_start_role(&fixture.root, "test", &fixture.role).is_err(), "classification is not Native admission");
+    }
+
+    #[test]
+    fn startup_receipt_fixture_cannot_authorize_reuse_or_native_input() {
+        let mut fixture = RoleFixture::new();
+        let backend = fixture.canonical(SeatStatus::Ready, Phase::F5Receipt, Outcome::Committed, None);
+        let record = backend.store.creation_receipt(&fixture.identity.seat, Some(&fixture.identity)).unwrap().unwrap();
+        assert!(validate_existing(&backend, &fixture.role, &record).is_err());
+        assert_eq!(backend.store.operation(&record.id).unwrap(), record);
+    }
+
+    #[test]
+    fn startup_receipt_unfinished_parent_wins_over_old_committed_generation() {
+        let mut fixture = RoleFixture::new();
+        let backend = fixture.canonical(SeatStatus::Ready, Phase::F5Receipt, Outcome::Committed, None);
+        let mut interrupted = backend.store.creation_receipt(&fixture.identity.seat, Some(&fixture.identity)).unwrap().unwrap();
+        interrupted.parent = Some(interrupted.target.clone());
+        interrupted.id = OperationId::new("uncertain-restart").unwrap();
+        interrupted.kind = TransactionKind::Restart;
+        interrupted.target.identity.instance = InstanceId::new("second").unwrap();
+        interrupted.target.identity.generation = Generation(2);
+        interrupted.phase = Phase::F3Spawn;
+        interrupted.pending = Some("spawn".into());
+        interrupted.outcome = Outcome::NeedsRecovery;
+        let db = rusqlite::Connection::open(fixture.binding.transport_root.join("contract.db")).unwrap();
+        db.execute("INSERT INTO contract_operations VALUES(?1,?2)", rusqlite::params![interrupted.id.as_str(), serde_json::to_string(&interrupted).unwrap()]).unwrap();
+        assert!(matches!(existing_start(&backend, &fixture.identity.seat).unwrap(),
+            Some(ExistingStart::Blocked(record)) if record == interrupted));
+        assert_eq!(backend.store.seat(&fixture.identity.seat).unwrap().unwrap().identity, fixture.identity);
+    }
+
+    #[test]
+    fn startup_receipt_missing_committed_seat_refuses_but_compensated_allows_fresh_proposal() {
+        for outcome in [Outcome::Committed, Outcome::Compensated] {
+            let mut fixture = RoleFixture::new();
+            let backend = fixture.canonical(SeatStatus::Stopped, Phase::F5Receipt, outcome, None);
+            let db = rusqlite::Connection::open(fixture.binding.transport_root.join("contract.db")).unwrap();
+            db.execute("DELETE FROM contract_seats", []).unwrap();
+            let result = existing_start(&backend, &fixture.identity.seat);
+            if outcome == Outcome::Committed { assert!(result.is_err()); }
+            else { assert!(result.unwrap().is_none()); }
+            assert_eq!(backend.store.propose_identity(&fixture.identity.seat).unwrap().generation, Generation(2));
+        }
+    }
+
+    #[test]
+    fn startup_receipt_lookup_refuses_cross_scope_and_generation_fallback() {
+        let mut fixture = RoleFixture::new();
+        let backend = fixture.canonical(SeatStatus::Ready, Phase::F5Receipt, Outcome::Committed, None);
+        let mut wrong = fixture.identity.clone(); wrong.generation = Generation(2);
+        assert!(backend.store.creation_receipt(&fixture.identity.seat, Some(&wrong)).is_err());
+        wrong = fixture.identity.clone(); wrong.scope = ScopeId::new("foreign").unwrap();
+        assert!(backend.store.creation_receipt(&fixture.identity.seat, Some(&wrong)).is_err());
+        assert!(backend.store.creation_receipt(&SeatId::new("absent").unwrap(), None).unwrap().is_none());
+    }
 
     #[test]
     fn restart_skips_stopped_mirror_and_stopped_native_store_before_resume_discovery() {

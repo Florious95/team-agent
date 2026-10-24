@@ -5,7 +5,6 @@ use std::path::Path;
 use serde_json::{json, Value};
 use team_agent_contract::contract::types::SeatId;
 use team_agent_contract::orchestration::store::{Outcome, SeatStatus};
-use team_agent_contract::host::process::{sample_process, ProcessState};
 
 use crate::cli::CliError;
 use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
@@ -21,7 +20,7 @@ fn error(error: impl std::fmt::Display) -> CliError {
 
 /// None delegates only a non-contract selection. Once selected, any identity,
 /// ownership, state or physical error stays on this route and cannot fall back.
-fn with_agent(
+pub(super) fn with_agent(
     workspace: &Path,
     team: Option<&str>,
     agent: &str,
@@ -51,10 +50,7 @@ fn with_agent(
     apply(&latest, &SeatId::new(agent).map_err(error)?).map(Some)
 }
 
-fn publish(selected: &SelectedTeam, id: &SeatId, clear_stop: bool) -> Result<Value, CliError> {
-    publish_at(&selected.run_workspace, &selected.team_key, id, clear_stop)
-}
-fn publish_at(workspace: &Path, team: &str, id: &SeatId, clear_stop: bool) -> Result<Value, CliError> {
+pub(super) fn publish_at(workspace: &Path, team: &str, id: &SeatId, clear_stop: bool) -> Result<Value, CliError> {
     let projected = framework::project_seat(workspace, team, id.as_str()).map_err(error)?;
     StateRepository::new(workspace).commit(
         StateWriteIntent::StartAgent { team_key: team, agent_id: id.as_str() },
@@ -70,6 +66,9 @@ fn publish_at(workspace: &Path, team: &str, id: &SeatId, clear_stop: bool) -> Re
             }
         },
     ).map_err(error)?;
+    // Fresh, explicit resume and team restart share this one publication path.
+    // Only the exact live receipt may claim a session it actually created.
+    backend::bind_workspace_session(workspace, team, id).map_err(error)?;
     Ok(projected)
 }
 
@@ -121,34 +120,32 @@ pub fn start_agent(
             return Ok(json!({"ok":false,"agent_id":agent,"status":"paused","reason":"agent_paused"}));
         }
         let unstarted = framework::is_paused_unstarted(row);
-        let prepared = if unstarted {
+        if unstarted {
             // Full pure team admission precedes native allocation or role writes.
             backend::preflight(&config).map_err(error)?;
-            None
-        } else {
-            let backend = Backend::open_readonly(&selected.run_workspace, &selected.team_key).map_err(error)?;
-            let seat = backend.store.seat(id).map_err(error)?.ok_or(BackendError::Metadata).map_err(error)?;
-            if seat.status == SeatStatus::Unknown {
-                return Err(error("native seat state is unknown; explicit reconciliation required"));
-            }
-            if seat.status != SeatStatus::Stopped && seat.physical.as_ref().is_some_and(|target| sample_process(&target.process) == ProcessState::Alive) {
-                return Err(error("native seat is already running; use stop-agent first"));
-            }
-            Some(backend::prepare_resume(&selected.run_workspace, &selected.team_key, id, Some(role)).map_err(error)?)
+        } else if backend::preflight_start_role(&selected.run_workspace, &selected.team_key, role).map_err(error)? {
+            backend::preflight(&config).map_err(error)?;
+        }
+        let before = if unstarted { None } else {
+            Backend::open_readonly(&selected.run_workspace, &selected.team_key).map_err(error)?
+                .store.creation_receipt(id, None).map_err(error)?
         };
         crate::lifecycle::role_config::commit_contract_role(&source, &previous, &next).map_err(error)?;
-        let receipt = match prepared {
-            Some(prepared) => backend::resume(prepared).map_err(error)?,
-            None => backend::start(&selected.run_workspace, &selected.team_key, role, &config.members).map_err(error)?.1,
-        };
+        let receipt = backend::start(&selected.run_workspace, &selected.team_key, role, &config.members).map_err(error)?.1;
         // An uncertain operation never rolls the authoritative native store back
         // to the old generation. The receipt remains available for recovery.
-        let projection = checked_projection(&receipt, || publish(selected, id, true))?;
+        let projection = checked_projection(&receipt, || publish_at(&selected.run_workspace, &selected.team_key, id, true))?;
         let coordinator = crate::coordinator::start_coordinator_with_team(
             &crate::coordinator::WorkspacePath::new(selected.run_workspace.clone()), Some(&selected.team_key),
         ).map_err(error)?;
         Ok(json!({"ok":coordinator.ok,"agent_id":agent,"status":"running","runtime":"contract",
-            "start_mode":if unstarted {"fresh"} else {"resumed"}, "operation":receipt.id,
+            "start_mode":match before {
+                None => "fresh",
+                Some(ref original) if original.outcome == Outcome::Compensated => "fresh",
+                Some(ref original) if original.id == receipt.id && original.outcome != Outcome::Committed => "receipt_completed",
+                Some(ref original) if original.id == receipt.id => "reused",
+                Some(_) => "resumed",
+            }, "operation":receipt.id,
             "session_id":projection.get("session_id"),"generation":projection.get("generation"),
             "coordinator":crate::lifecycle::coordinator_start_summary_value(
                 &crate::lifecycle::CoordinatorStartSummary::from_start_report(&coordinator))}))
@@ -259,6 +256,23 @@ pub fn stop_agent(
 
 #[cfg(test)]
 mod tests {
+    // Assembly guard, not a substitute for the real shared-session restart/
+    // shutdown RED→GREEN journey. All start callers must use this common path.
+    #[test]
+    fn shared_owner_claim_follows_common_projection_commit_including_team_restart() {
+        let source = include_str!("commands.rs");
+        let body = source.split_once("pub(super) fn publish_at").unwrap().1
+            .split_once("fn check_record").unwrap().0;
+        let persisted = body.find("StateRepository::new(workspace).commit").unwrap();
+        let claimed = body.find("backend::bind_workspace_session(workspace, team, id)").unwrap();
+        let returned = body.find("Ok(projected)").unwrap();
+        assert!(persisted < claimed && claimed < returned);
+        let restart = source.split_once("pub(crate) fn restart_prepared").unwrap().1
+            .split_once("pub fn restart(").unwrap().0;
+        assert!(restart.contains("publish_at(workspace, team, &id, false)"));
+        assert!(!include_str!("framework.rs").contains("backend::bind_workspace_session"));
+    }
+
     use super::*;
     use team_agent_contract::contract::{delivery::DeliveryEffect, session::CwdIdentity, types::*};
     use team_agent_contract::orchestration::store::{OperationRecord, Phase, SeatRecord, TransactionKind};

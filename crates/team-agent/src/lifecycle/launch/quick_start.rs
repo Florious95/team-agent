@@ -1579,15 +1579,10 @@ pub(crate) fn quick_start_with_transport_in_workspace_pi_preflight(
         crate::lifecycle::restart::LifecyclePhase::ReadinessWait,
     );
     let worker_readiness = quick_start_worker_readiness(&workspace, &state_team_key);
-    let attach_windows = load_runtime_state(&workspace)
-        .ok()
-        .map(|state| {
-            attach_window_names_with_managed_leader(
-                &state,
-                started_attach_window_names(&launch.started),
-            )
-        })
-        .unwrap_or_else(|| started_attach_window_names(&launch.started));
+    // The selected server is the display surface. Do not invent a leader
+    // window or omit native windows merely because they are not legacy starts.
+    let attach_windows = transport.list_windows(&session_name).unwrap_or_default()
+        .into_iter().map(|window| window.as_str().to_owned()).collect::<Vec<_>>();
     let attach_commands = attach_commands_for_runtime_windows(
         launch.tmux_endpoint.as_deref(),
         &workspace,
@@ -1597,15 +1592,9 @@ pub(crate) fn quick_start_with_transport_in_workspace_pi_preflight(
     let mut next_actions = vec![format!(
         "team compiled; real spawn is behind the transport/provider boundary; {coordinator_action}"
     )];
-    // Stage QR (design doc
-    // .team/artifacts/quickstart-restart-separation-design.md):
-    // quick-start is initial-creation-only. After success, remind the
-    // operator that subsequent starts must go through restart so the
-    // user's context (sessions, ownership, tasks) survives.
     next_actions.push(
-        "quick-start initialized this team; for all subsequent starts use \
-         `team-agent restart` to resume context (quick-start refuses on \
-         already-initialised teams)"
+        "team initialized; use `team-agent start` for idempotent activation, or \
+         `team-agent team restart` for an intentional restart; quick-start is a compatibility creation command"
             .to_string(),
     );
     if should_emit_workspace_socket_missing_hint(

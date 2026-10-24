@@ -78,7 +78,13 @@ pub(super) fn spawn_agents(
     let mut contract_started = Vec::new();
     #[cfg(not(unix))]
     let contract_started = Vec::new();
-    for agent in spec_agent_values(spec) {
+    let agents = spec_agent_values(spec);
+    #[cfg(unix)]
+    let has_contract = agents.iter().any(|agent| agent.get("provider").and_then(Value::as_str)
+        .is_some_and(|provider| crate::contract_runtime::registry::descriptor(provider).is_some()));
+    #[cfg(not(unix))]
+    let has_contract = false;
+    for agent in agents {
         let Some(agent_id_raw) = agent.get("id").and_then(Value::as_str) else {
             continue;
         };
@@ -406,7 +412,7 @@ pub(super) fn spawn_agents(
         }
         // One independent tmux window per worker; no GUI/display layout.
         let window = WindowName::new(agent_id_raw);
-        let spawn = if started.is_empty() {
+        let spawn = if started.is_empty() && contract_started.is_empty() {
             transport.spawn_first_with_env_unset(
                 session_name,
                 &window,
@@ -455,6 +461,17 @@ pub(super) fn spawn_agents(
                 .or_else(|| profile_launch.claude_projects_root.clone()),
             managed_mcp_config: plan.managed_mcp_config || profile_launch.managed_mcp_config,
         });
+        if has_contract && contract_started.is_empty() && started.len() == 1 {
+            // A native seat following the first legacy seat must be able to
+            // verify the same session before borrowing it, not after the batch.
+            let selected = crate::state::selector::resolve_active_team_readonly(workspace,
+                Some(&mcp_team_id), crate::state::selector::SelectorMode::RuntimeOnly)
+                .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
+            let generation = crate::state::projection::session_generation(&selected.state)
+                .unwrap_or(session_name.as_str());
+            transport.set_session_owner_with_generation(session_name, workspace, &mcp_team_id, generation)
+                .map_err(|e| LifecycleError::Transport(e.to_string()))?;
+        }
     }
     Ok((started, contract_started))
 }

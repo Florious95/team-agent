@@ -46,13 +46,14 @@ impl std::fmt::Display for Error {
             ),
             Self::NativeClose(receipt) => write!(
                 f,
-                "owned native close incomplete: pane_outcome={:?}; pane_problem={:?}; native={:?}; socket_outcome={:?}; socket_problem={:?}; socket_preserved={}",
+                "owned native close incomplete: pane_outcome={:?}; pane_problem={:?}; native={:?}; socket_outcome={:?}; socket_problem={:?}; socket_preserved={}; shared_endpoint={}",
                 receipt.pane_close.outcome,
                 receipt.pane_close.error,
                 receipt.native,
                 receipt.socket_cleanup.outcome,
                 receipt.socket_cleanup.error,
-                receipt.socket_preserved
+                receipt.socket_preserved,
+                receipt.shared_endpoint
             ),
             _ => write!(f, "{self:?}"),
         }

@@ -4,11 +4,12 @@ use super::{GrokAdapter, UNVERIFIED};
 use crate::contract::{delivery::*, hooks::*, probe::*, session::*, types::*};
 use crate::runtime::delivery::{ControlDefinition, ControlInputMode, ControlKind, StartupDefinition};
 use std::{path::Path, time::Duration};
+use unicode_width::UnicodeWidthStr;
 
 pub const PROFILE: &str = "grok-build-tui-v1";
 pub const STARTUP_PROFILE: &str = "grok-build-trust-v1";
-pub const POLICY_RECIPE: &str = "grok-build-tui-v1/r3:runtime-native-image+wrapper;owned-server-ambient-coexistence;120x40;paste-bracketed;enter-once;retry-never;queue-owned-visible-token+Queued · Enter to send now:Enter-once:150ms;capture100ms;stable200ms;paste-floor100ms;deadline30s;trust-v1:exact-cwd+bypass:y-once;session-info:direct+unique-closed-modal-own-width+current-uuid+cwd+version:Escape-once;exit:direct+native-exited+dead-pane-close;folded-v2:empty-baseline+confirmed-paste+payload-shape+attempt+closed-preview-header-and-token->confirmed-enter+new-unboxed-transcript-prefix+empty-composer+busy-or-ready";
-pub const POLICY: Digest = Digest([12, 94, 109, 155, 52, 187, 119, 245, 16, 43, 51, 217, 166, 79, 178, 193, 110, 80, 160, 216, 148, 171, 184, 51, 78, 193, 154, 126, 21, 140, 5, 224]);
+pub const POLICY_RECIPE: &str = "grok-build-tui-v1/r4:runtime-native-image+wrapper;owned-server-ambient-coexistence;120x40;paste-bracketed;enter-once;retry-never;queue-owned-visible-token+Queued · Enter to send now:Enter-once:150ms;capture100ms;stable200ms;paste-floor100ms;deadline30s;trust-v1:exact-cwd+bypass:y-once;session-info:direct+unique-closed-modal-own-width+current-uuid+cwd+version:Escape-once;exit:direct+native-exited+dead-pane-close;folded-v3:empty-baseline+confirmed-paste+payload-shape-bytes+lines-or-kib-rounded-0-to-3-decimals+attempt+closed-preview-unicode-width-0.2.2-header-and-token->confirmed-enter+new-unboxed-transcript-prefix+empty-composer+busy-or-ready";
+pub const POLICY: Digest = Digest([237, 202, 29, 239, 0, 84, 254, 167, 176, 220, 103, 23, 138, 74, 35, 135, 47, 198, 216, 119, 229, 66, 62, 40, 185, 89, 214, 5, 238, 57, 166, 22]);
 const QUEUE: &str = "grok-owned-queue-send-now";
 pub static PROFILES: &[InputProfile] = &[InputProfile {
     id: PROFILE, identity: ProfileIdentity::RuntimeCaptured, harness: "grok-build", ui: "tui",
@@ -123,8 +124,11 @@ fn rectangle_rows<'a>(lines: &[&'a str], kind: NativeRectangle) -> Result<Vec<&'
         }
         let mut candidates = line.match_indices('│').filter_map(|(start, _)| {
             let rest = &line[start + '│'.len_utf8()..];
-            let (end, edge) = rest.char_indices().nth(*width)?;
-            (edge == '│').then_some(rest[..end].trim())
+            let mut edges = rest.char_indices().filter(|(end, edge)|
+                *edge == '│' && UnicodeWidthStr::width(&rest[..*end]) == *width);
+            let (end, _) = edges.next()?;
+            if edges.next().is_some() { return None; }
+            Some(rest[..end].trim())
         });
         let row = candidates.next().ok_or_else(invalid)?;
         if candidates.next().is_some() { return Err(invalid()); }
@@ -168,8 +172,8 @@ fn folded_identity(frame: &CaptureFrame) -> Option<String> {
     let input = frame.input.as_ref()?;
     let context = serde_json::to_string(&(&frame.scope.identity, &frame.scope.endpoint, &frame.scope.pane,
         &frame.scope.binding, frame.scope.session.as_ref()?, frame.message.as_ref()?, frame.attempt.as_ref()?,
-        frame.operation == Operation::FirstBusiness, input.sha256, input.lines, &input.first_line)).ok()?;
-    Some(format!("grok-owned-folded-v2:{context}"))
+        frame.operation == Operation::FirstBusiness, input.sha256, input.bytes, input.lines, &input.first_line)).ok()?;
+    Some(format!("grok-owned-folded-v3:{context}"))
 }
 fn visible_prefix(line: &str, first: &str) -> bool {
     let line = boxed(line).unwrap_or(line.trim());
@@ -178,20 +182,39 @@ fn visible_prefix(line: &str, first: &str) -> bool {
     // fragment of the immutable payload, never any arbitrary transcript row.
     visible.len() >= 24 && (visible.starts_with(first) || first.starts_with(visible))
 }
+fn folded_marker_matches(current: &str, input: &InputShape) -> bool {
+    if current == format!("[Pasted: {} lines]", input.lines) { return true; }
+    let Some(size) = current.strip_prefix("[Pasted: ").and_then(|s| s.strip_suffix(" KB]")) else { return false; };
+    let (whole, fraction) = size.split_once('.').map_or((size, ""), |(whole, fraction)| (whole, fraction));
+    if whole.is_empty() || whole.len() > 12 || (whole.len() > 1 && whole.starts_with('0'))
+        || !whole.bytes().all(|b| b.is_ascii_digit()) || fraction.len() > 3
+        || !fraction.bytes().all(|b| b.is_ascii_digit()) || (size.contains('.') && fraction.is_empty())
+        || input.bytes == 0
+    { return false; }
+    let Ok(whole) = whole.parse::<u128>() else { return false; };
+    let decimals = fraction.len() as u32;
+    let scale = 10u128.pow(decimals);
+    let fraction = if fraction.is_empty() { 0 } else {
+        let Ok(value) = fraction.parse::<u128>() else { return false; }; value
+    };
+    // A rounded native size label is metadata, never the payload ownership proof.
+    // Compare its displayed precision with executor-owned bytes using integer math.
+    let shown = whole * scale + fraction;
+    shown > 0 && (input.bytes as u128 * scale + 512) / 1024 == shown
+}
 fn folded(frame: &CaptureFrame, observation: &mut InteractionObservation) -> bool {
-    let owned = matches!(&frame.paste_latch, PasteLatch::Seen { native_identity } | PasteLatch::Gone { native_identity } if native_identity.starts_with("grok-owned-folded-v2:"));
+    let owned = matches!(&frame.paste_latch, PasteLatch::Seen { native_identity } | PasteLatch::Gone { native_identity } if native_identity.starts_with("grok-owned-folded-v3:"));
     let Some(identity) = folded_identity(frame) else { return owned; };
     let Some(input) = &frame.input else { return owned; };
     let Some(before) = &frame.baseline else { return owned; };
     let token = format!("[team-agent-token:{}]", frame.message.as_ref().unwrap().as_str());
     if !current_subject(frame) || before.text.contains(&token) || input.first_line.len() < 24 { return owned; }
     let Some((index, current)) = composer(&frame.text) else { return owned; };
-    let marker = format!("[Pasted: {} lines]", input.lines);
     let correlate = |observation: &mut InteractionObservation| {
         observation.current_message = frame.message.clone(); observation.current_attempt = frame.attempt.clone();
     };
-    if frame.after_step == Some(StepKind::Paste) && current == marker
-        && input.lines > 1 && !before.text.contains(&marker)
+    if frame.after_step == Some(StepKind::Paste) && folded_marker_matches(&current, input)
+        && input.lines > 1 && !before.text.contains(&current)
         && rectangle_rows(&frame.text.lines().take(index - 1).collect::<Vec<_>>(), NativeRectangle::PastePreview)
             .is_ok_and(|rows| rows.iter().any(|row| visible_prefix(row, &input.first_line))
                 && rows.iter().filter(|row| **row == token.as_str()).count() == 1)

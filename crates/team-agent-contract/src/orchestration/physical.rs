@@ -16,7 +16,7 @@ use crate::host::{
     files::ScopedDirectory,
     materialize::remove_quiescent,
     process::{resolve_cwd, ProcessState},
-    tmux::{CloseReceipt, HostLimits, TmuxHost},
+    tmux::{CloseReceipt, HostLimits, SharedTmux, TmuxHost},
     transport::*,
     HostError,
 };
@@ -52,6 +52,9 @@ pub struct PhysicalRuntime<'a> {
     /// Framework-supplied exact prompt, checked against the owned H3 receipt.
     /// RuntimeBridge carries it in the first business packet, not as a system role.
     pub initial_prompt: Option<String>,
+    /// Supplied only by the owning root's verified workspace topology.
+    /// None preserves historical private-host behavior, including old receipts.
+    pub workspace_tmux: Option<SharedTmux>,
 }
 fn host_error(error: HostError) -> Error {
     if error.metadata.is_some() || error.process.is_some() {
@@ -60,12 +63,13 @@ fn host_error(error: HostError) -> Error {
         Error::Host(error.operation)
     }
 }
-fn confirm_close(receipt: CloseReceipt) -> Result<(), Error> {
-    if receipt.pane_close.outcome == StepOutcome::Confirmed
+fn confirm_close(receipt: CloseReceipt, shared: bool) -> Result<(), Error> {
+    if receipt.shared_endpoint == shared
+        && receipt.pane_close.outcome == StepOutcome::Confirmed
         && receipt.native == ProcessState::Exited
         && receipt.socket_cleanup.outcome == StepOutcome::Confirmed
         && receipt.socket_cleanup.error.is_none()
-        && !receipt.socket_preserved
+        && (shared || !receipt.socket_preserved)
     {
         Ok(())
     } else {
@@ -98,6 +102,7 @@ impl<'a> PhysicalRuntime<'a> {
             protocol: None,
             bootstrap: None,
             initial_prompt: None,
+            workspace_tmux: None,
         })
     }
     /// Fresh T1/T2 plus independently supplied protocol facts. Capturing a pane
@@ -335,13 +340,12 @@ impl LifecycleHost for PhysicalRuntime<'_> {
             seat.identity.clone(),
         )
         .map_err(host_error)?;
-        let mut host = TmuxHost::new(
-            directory,
-            self.settings.tmux.clone(),
-            self.settings.limits,
-            RealCommandRunner::default(),
-        )
-        .map_err(host_error)?;
+        let mut host = match self.workspace_tmux.clone() {
+            Some(shared) => TmuxHost::new_shared(directory, self.settings.tmux.clone(),
+                self.settings.limits, RealCommandRunner::default(), shared),
+            None => TmuxHost::new(directory, self.settings.tmux.clone(),
+                self.settings.limits, RealCommandRunner::default()),
+        }.map_err(host_error)?;
         let spawned = host.spawn_owned(
             descriptor,
             resolved,
@@ -412,7 +416,7 @@ impl LifecycleHost for PhysicalRuntime<'_> {
         }
         let mut host = self.reopen(&target, deadline)?;
         let receipt = host.close_owned_pane(&target, self.clock, deadline);
-        confirm_close(receipt)?;
+        confirm_close(receipt, target.shared_endpoint)?;
         self.quiescent = Some(seat.clone());
         // The host removed only its receipt-matched dead socket. Preserve attempt
         // journals/diagnostics; never kill-server, remove a shared cwd, or recurse.
@@ -685,8 +689,9 @@ mod tests {
                     native: native.clone(),
                     socket_cleanup: crate::host::transport::ActionResult::confirmed(),
                     socket_preserved: false,
+                    shared_endpoint: false,
                 };
-                let result = confirm_close(receipt.clone());
+                let result = confirm_close(receipt.clone(), false);
                 if outcome == StepOutcome::Confirmed && native == ProcessState::Exited {
                     assert_eq!(result, Ok(()));
                 } else {
@@ -714,8 +719,8 @@ mod tests {
         {
             for socket_preserved in [false, true] {
                 let receipt = CloseReceipt { pane_close: ActionResult::confirmed(), native: ProcessState::Exited,
-                    socket_cleanup: socket_cleanup.clone(), socket_preserved };
-                let result = confirm_close(receipt.clone());
+                    socket_cleanup: socket_cleanup.clone(), socket_preserved, shared_endpoint: false };
+                let result = confirm_close(receipt.clone(), false);
                 if socket_cleanup.outcome == StepOutcome::Confirmed && !socket_preserved {
                     assert_eq!(result, Ok(()));
                 } else {
@@ -726,6 +731,19 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn shared_close_requires_matching_ownership_without_claiming_socket_absence() {
+        use crate::host::transport::ActionResult;
+        let receipt = CloseReceipt { pane_close: ActionResult::confirmed(), native: ProcessState::Exited,
+            socket_cleanup: ActionResult::confirmed(), socket_preserved: true, shared_endpoint: true };
+        assert_eq!(confirm_close(receipt.clone(), true), Ok(()));
+        assert!(confirm_close(receipt.clone(), false).is_err());
+        let mut private = receipt.clone(); private.shared_endpoint = false;
+        assert!(confirm_close(private, true).is_err());
+        let mut failed = receipt; failed.pane_close = ActionResult::refused(HostError::new("owned pane close", HostErrorKind::Ownership));
+        assert!(confirm_close(failed, true).is_err());
     }
 
     #[test]
