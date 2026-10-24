@@ -1,5 +1,3 @@
-/Users/runner/work/team-agent/team-agent/crates/team-agent/examples/scoped_contract_egress.rs:
-
 //! Explicit operator-only forwarding of existing committed native MCP receipts.
 //! No coordinator loop, native input, new source envelope, or candidate migration.
 use std::{error::Error, io, path::PathBuf, time::Duration};
