@@ -3,7 +3,7 @@
 //! contract:
 //!   provides:
 //!     - name: scan_session_store
-//!       what: 只读每个 JSONL 的首个完整 header，并按 id/cwd/spawned_at 返回候选
+//!       what: 只读每个 JSONL 的首个完整 header；有预期 id 时按 id/cwd/spawned_at，否则按 cwd/spawned_at 读取 Pi 自己的 id
 //!     - name: validate_exact_backing
 //!       what: restart 前重验 exact path 的 id/cwd header
 //! boundary:
@@ -49,13 +49,8 @@ fn read_header(path: &Path) -> Option<PiSessionHeader> {
     (header.record_type == "session" && header.version == 3).then_some(header)
 }
 
-fn header_matches(
-    header: &PiSessionHeader,
-    expected_session_id: &SessionId,
-    spawn_cwd: &Path,
-    spawned_at: Option<&str>,
-) -> bool {
-    if header.id != expected_session_id.as_str() || !paths_equal(&header.cwd, spawn_cwd) {
+fn header_matches_spawn(header: &PiSessionHeader, spawn_cwd: &Path, spawned_at: Option<&str>) -> bool {
+    if !paths_equal(&header.cwd, spawn_cwd) {
         return false;
     }
     let Ok(header_timestamp) = chrono::DateTime::parse_from_rfc3339(&header.timestamp) else {
@@ -68,6 +63,16 @@ fn header_matches(
         return false;
     };
     header_timestamp >= spawned_at
+}
+
+fn header_matches(
+    header: &PiSessionHeader,
+    expected_session_id: &SessionId,
+    spawn_cwd: &Path,
+    spawned_at: Option<&str>,
+) -> bool {
+    header.id == expected_session_id.as_str()
+        && header_matches_spawn(header, spawn_cwd, spawned_at)
 }
 
 fn collect_jsonl(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), ProviderError> {
@@ -125,15 +130,14 @@ pub(crate) fn validate_exact_backing(
 
 /// ---
 /// purpose: 仅在 recorded seat root 内递归捕获 Pi session header 候选
-/// returns: 每个 id/cwd/timestamp 精确匹配的 JSONL 各返回一个候选
+/// returns: 有预期 id 时按 id/cwd/timestamp 匹配；否则读取 Pi header 自己的 id，并按 cwd/timestamp 匹配
 /// errors: root 内目录枚举失败时返回 ProviderError
 /// ---
 pub(super) fn scan_session_store(
     context: &CaptureSessionContext,
 ) -> Result<Vec<CapturedSessionCandidate>, ProviderError> {
-    let (Some(root), Some(expected_session_id), Some(spawned_at)) = (
+    let (Some(root), Some(spawned_at)) = (
         context.provider_projects_root.as_deref(),
-        context.expected_session_id.as_ref(),
         context.spawned_at.as_deref(),
     ) else {
         return Ok(Vec::new());
@@ -149,15 +153,24 @@ pub(super) fn scan_session_store(
         .into_iter()
         .filter_map(|path| {
             let header = read_header(&path)?;
-            header_matches(
-                &header,
-                expected_session_id,
-                &context.spawn_cwd,
-                Some(spawned_at),
-            )
-            .then(|| CapturedSessionCandidate {
+            let session_id = if let Some(expected_session_id) = context.expected_session_id.as_ref() {
+                if !header_matches(
+                    &header,
+                    expected_session_id,
+                    &context.spawn_cwd,
+                    Some(spawned_at),
+                ) {
+                    return None;
+                }
+                expected_session_id.clone()
+            } else if header_matches_spawn(&header, &context.spawn_cwd, Some(spawned_at)) {
+                SessionId::new(header.id)
+            } else {
+                return None;
+            };
+            Some(CapturedSessionCandidate {
                 captured: CapturedSession {
-                    session_id: Some(expected_session_id.clone()),
+                    session_id: Some(session_id),
                     rollout_path: Some(RolloutPath::new(path)),
                     captured_via: CaptureVia::FsWatch,
                     attribution_confidence: Confidence::High,

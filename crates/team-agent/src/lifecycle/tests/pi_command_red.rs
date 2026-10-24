@@ -20,9 +20,7 @@ fn request(session: PiSessionSelector<'static>) -> PiCommandRequest<'static> {
 
 #[test]
 fn pi_command_omits_unset_model_and_thinking_flags() {
-    let mut request = request(PiSessionSelector::Fresh {
-        session_id: "a2320d4e-7b3a-44ae-b3b8-d5de57033b01",
-    });
+    let mut request = request(PiSessionSelector::Fresh);
     request.model = None;
     request.effort = None;
     let argv = build_pi_command_argv(request).expect("Pi provider defaults");
@@ -38,9 +36,7 @@ fn leader_request() -> PiCommandRequest<'static> {
         effort: None,
         system_prompt: "frozen leader prompt",
         session_dir: None,
-        session: PiSessionSelector::Fresh {
-            session_id: "da8c3622-2378-4d05-a26c-e826a6ef6d63",
-        },
+        session: PiSessionSelector::Fresh,
         agent_id: "leader",
     }
 }
@@ -57,8 +53,6 @@ fn pi_interactive_leader_argv_preserves_native_session_discovery() {
             "/workspace/.team/runtime/pi/current/leader/team-mcp.ts",
             "--append-system-prompt",
             "frozen leader prompt",
-            "--session-id",
-            "da8c3622-2378-4d05-a26c-e826a6ef6d63",
             "--name",
             "leader",
         ]
@@ -98,9 +92,7 @@ fn pi_leader_session_scope_keeps_explicit_and_external_routes_isolated() {
 
 #[test]
 fn pi_command_preserves_direct_pi_defaults_with_only_team_runtime_additions() {
-    let fresh = build_pi_command_argv(request(PiSessionSelector::Fresh {
-        session_id: "da8c3622-2378-4d05-a26c-e826a6ef6d63",
-    }))
+    let fresh = build_pi_command_argv(request(PiSessionSelector::Fresh))
     .expect("fresh Pi command");
     assert_eq!(
         fresh,
@@ -116,8 +108,6 @@ fn pi_command_preserves_direct_pi_defaults_with_only_team_runtime_additions() {
             "frozen worker prompt",
             "--session-dir",
             "/workspace/.team/runtime/pi/team-a/worker-a/sessions",
-            "--session-id",
-            "da8c3622-2378-4d05-a26c-e826a6ef6d63",
             "--name",
             "worker-a",
         ]
@@ -178,9 +168,7 @@ fn pi_command_preserves_direct_pi_defaults_with_only_team_runtime_additions() {
 
 #[test]
 fn pi_command_keeps_direct_plugins_skills_context_auth_and_tools() {
-    let argv = build_pi_command_argv(request(PiSessionSelector::Fresh {
-        session_id: "76f682b1-ecc3-4586-850f-ab2e2bb04cb3",
-    }))
+    let argv = build_pi_command_argv(request(PiSessionSelector::Fresh))
     .expect("fresh Pi command");
 
     for forbidden in [

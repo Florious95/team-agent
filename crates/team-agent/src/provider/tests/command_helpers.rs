@@ -36,8 +36,8 @@ fn command_helpers_keep_provider_argv_bytes_and_order() {
         extension: std::path::Path::new("extension.ts"), model: Some("vendor/model"),
         effort: Some(ProviderEffort::XHigh), system_prompt: raw,
         session_dir: Some(std::path::Path::new("sessions")),
-        session: pi::PiSessionSelector::Fresh { session_id: "session-id" }, agent_id: "worker",
-    }).expect("pi"), ["pi", "-e", "extension.ts", "--model", "vendor/model", "--thinking", "xhigh", "--append-system-prompt", raw, "--session-dir", "sessions", "--session-id", "session-id", "--name", "worker"]);
+        session: pi::PiSessionSelector::Fresh, agent_id: "worker",
+    }).expect("pi"), ["pi", "-e", "extension.ts", "--model", "vendor/model", "--thinking", "xhigh", "--append-system-prompt", raw, "--session-dir", "sessions", "--name", "worker"]);
 }
 
 #[test]

@@ -762,8 +762,8 @@ pub(crate) struct PiMaterializeRequest<'a> {
 }
 
 /// ---
-/// purpose: 共享物化 Pi leader 与 TeamMate 的 wrapper、UUID 和 CommandPlan
-/// returns: fresh Pi CommandPlan；isolated seats carry their session root, while the
+/// purpose: 共享物化 Pi leader 与 TeamMate 的 wrapper 和 CommandPlan
+/// returns: fresh Pi CommandPlan 不传 --session-id；isolated seats carry their session root, while the
 ///          interactive leader preserves Pi's native default root
 /// errors: resolver、exact model、wrapper 或 argv 构造失败时返回 ProviderError
 /// ---
@@ -858,19 +858,16 @@ fn materialize_pi_plan_with_session(
         })?;
         (argv, None)
     } else {
-        let session_id = new_pi_session_id();
         let argv = build_pi_command_argv(PiCommandRequest {
             extension: &wrapper,
             model: model.as_deref(),
             effort: request.effort,
             system_prompt: request.system_prompt,
             session_dir,
-            session: PiSessionSelector::Fresh {
-                session_id: session_id.as_str(),
-            },
+            session: PiSessionSelector::Fresh,
             agent_id: request.agent_id,
         })?;
-        (argv, Some(session_id))
+        (argv, None)
     };
     Ok(CommandPlan {
         argv,
