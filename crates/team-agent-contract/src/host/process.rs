@@ -332,6 +332,21 @@ pub fn resolve_cwd(path: &Path) -> Result<crate::contract::session::CwdIdentity,
 
 /// Capture once before readiness; later samples compare birth/image metadata without hashing
 /// a large executable on every terminal poll. No name/argv scan and no protected data store.
+fn same_executable_inode(live: &Path, expected: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(live) = std::fs::metadata(live) else { return false };
+        let Ok(expected) = std::fs::metadata(expected) else { return false };
+        live.is_file() && expected.is_file() && live.dev() == expected.dev() && live.ino() == expected.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (live, expected);
+        false
+    }
+}
+
 pub fn capture_process(
     pid: u32,
     expected_executable: &Path,
@@ -349,7 +364,9 @@ pub fn capture_process(
     let expected = expected_executable
         .canonicalize()
         .map_err(|e| HostError::io("executable identity", e))?;
-    if path != expected {
+    // A public `grok` hard link is the same image as `grok-native`. Path
+    // spelling is display, not a different executable.
+    if path != expected && !same_executable_inode(&path, &expected) {
         return Err(HostError::new(
             "process executable",
             HostErrorKind::Ownership,

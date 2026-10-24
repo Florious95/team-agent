@@ -320,27 +320,15 @@ pub(crate) fn restart_with_transport_with_session_convergence_deadline(
             crate::model::paths::runtime_dir(&resolved_ws).display()
         )));
     }
-    // RED-2(P0)修:存在性门下移到 resolve 之后,用 selected.spec_path(读序 B:runtime 优先、
-    // legacy 用户目录回落)判,而非 resolve 前自拼 workspace/team.spec.yaml(spec-demote 后 spec
-    // 不在用户目录 → 旧门误报缺)。resolve_active_team(RequireSpec) 内部已按 spec_path 校验存在性,
-    // 故直接交给它;失败信息(含真实 expected runtime spec 路径)即正确的 N38。
-    let selected = crate::state::selector::resolve_active_team(
+    // The spec is derived. Select runtime identity first; the locked owner/source
+    // admission below rebuilds it before any teardown. Requiring it here made
+    // the advertised missing-spec recovery command reject its own prerequisite.
+    let selected = crate::state::selector::resolve_active_team_readonly(
         workspace,
         team,
-        crate::state::selector::SelectorMode::RequireSpec,
+        crate::state::selector::SelectorMode::RuntimeOnly,
     )
     .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
-    // 显式存在性门(下移后):selected.spec_path 经读序 B 已定位 runtime/legacy spec。
-    // 缺(空目录 restart 等)→ 报真实期望路径,不误导去用户目录找。
-    if !selected.spec_path.as_ref().is_some_and(|p| p.exists()) {
-        let expected = selected.spec_path.clone().unwrap_or_else(|| {
-            crate::model::paths::runtime_spec_path(&selected.run_workspace, &selected.team_key)
-        });
-        return Err(LifecycleError::TeamSelect(format!(
-            "missing spec for restart: {} (run `team-agent quick-start <teamdir>` first, or restore the team's role docs)",
-            expected.display()
-        )));
-    }
     restart_with_selected_team_and_transport(
         selected,
         allow_fresh,
@@ -373,10 +361,10 @@ fn restart_with_selected_team_and_transport(
     })?;
     // Selection happened before the lifecycle lock. A stop-agent that won the
     // lock must not be undone by the old running snapshot used by restart.
-    let mut state = crate::state::selector::resolve_active_team(
+    let mut state = crate::state::selector::resolve_active_team_readonly(
         &selected.run_workspace,
         Some(selected.team_key.as_str()),
-        crate::state::selector::SelectorMode::RequireSpec,
+        crate::state::selector::SelectorMode::RuntimeOnly,
     )
     .map_err(|error| LifecycleError::TeamSelect(error.to_string()))?
     .state;
@@ -581,9 +569,18 @@ fn restart_with_selected_team_and_transport(
     // no authoritative live agents, the previous behavior (pre-spawn
     // teardown of a stale empty session) is preserved so tests that
     // seed a fake-live session without live agent rows still work.
+    #[cfg(unix)]
+    let shared_native_windows = crate::contract_runtime::backend::has_shared_windows(
+        &selected.run_workspace, &selected.team_key,
+    ).map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;
+    #[cfg(not(unix))]
+    let shared_native_windows = false;
+    // Canonical windows share this session but are NOT legacy restart targets.
+    // Keep the session, and retire only each successful legacy replacement's
+    // exact old pane through the existing build-before-destroy path.
     let live_worker_session_deferred_teardown =
         session_live_or_default(transport, &session_name, false)
-            && !collect_live_agents_from_state(&state).is_empty();
+            && (shared_native_windows || !collect_live_agents_from_state(&state).is_empty());
     let inherited_generation =
         crate::state::projection::session_generation(&state).map(str::to_string);
     let same_role_cohort_targets =
@@ -598,8 +595,8 @@ fn restart_with_selected_team_and_transport(
     } else {
         std::collections::BTreeSet::new()
     };
-    if session_live_or_default(transport, &session_name, false)
-        && !live_worker_session_deferred_teardown
+    if destroy_stale_worker_session(session_live_or_default(transport, &session_name, false),
+        live_worker_session_deferred_teardown, shared_native_windows)
     {
         eprintln!(
             "team_agent::layout restart_precondition_warning worker_session=`{}` action=killing \
@@ -3699,6 +3696,26 @@ fn rebuild_runtime_spec_from_roles(
     team_key: &str,
     state: &serde_json::Value,
 ) -> Result<YamlValue, LifecycleError> {
+    let spec = compile_runtime_spec_from_roles(run_workspace, team_key, state)?;
+    let spec_path = crate::model::paths::runtime_spec_path(run_workspace, team_key);
+    crate::lifecycle::launch::write_spec_atomic(&spec_path, &spec)?;
+    let team_dir = state.get("team_dir").and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty()).map(std::path::PathBuf::from)
+        .unwrap_or_else(|| run_workspace.to_path_buf());
+    let legacy_spec = team_dir.join("team.spec.yaml");
+    if legacy_spec.exists() && legacy_spec != spec_path {
+        let _ = std::fs::remove_file(&legacy_spec);
+    }
+    Ok(spec)
+}
+
+/// Read-only counterpart of restart's existing compiler. It preserves dynamic
+/// role sources, retired-seat filtering and the established session override.
+pub(crate) fn compile_runtime_spec_from_roles(
+    run_workspace: &Path,
+    team_key: &str,
+    state: &serde_json::Value,
+) -> Result<YamlValue, LifecycleError> {
     // team_dir(角色定义源)优先取 state.team_dir;缺则回落 run_workspace(自含 team-dir 布局,
     // run_workspace 本身即角色目录)。两者都无角色定义则下面的齐全性检查会显式拒。
     let team_dir = state
@@ -3758,16 +3775,50 @@ fn rebuild_runtime_spec_from_roles(
     // 三行式,不静默 prune 已 live 的 helper(persist SaveConflict 保护继续生效)。
     merge_state_dynamic_role_files(&mut spec, run_workspace, &team_dir, team_key, state)?;
     filter_retired_agents_from_spec(&mut spec, &retired_agent_ids(state));
-    // 写 runtime spec(覆盖,原子 tmp+rename;Bug2)。
-    let spec_path = crate::model::paths::runtime_spec_path(run_workspace, team_key);
-    crate::lifecycle::launch::write_spec_atomic(&spec_path, &spec)?;
-    // RC-A6a:重建成功后清理用户目录的 legacy spec(中间产物不该留在角色目录)。
-    // 仅删 team_dir 下的 team.spec.yaml(角色定义 TEAM.md/agents 不动);失败不致命(best-effort)。
-    let legacy_spec = team_dir.join("team.spec.yaml");
-    if legacy_spec.exists() && legacy_spec != spec_path {
-        let _ = std::fs::remove_file(&legacy_spec);
-    }
     Ok(spec)
+}
+
+/// Repair only derived metadata. The caller's readonly plan is checked again
+/// under lifecycle ownership; no process/session/control action is performed.
+pub(crate) fn restore_missing_runtime_spec(
+    workspace: &Path,
+    team: &str,
+    expected: &YamlValue,
+) -> Result<std::path::PathBuf, LifecycleError> {
+    let run_workspace = crate::model::paths::canonical_run_workspace(workspace)
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace: &run_workspace, operation: "restore-runtime-spec", team: Some(team), agent_id: None,
+    })?;
+    let selected = crate::state::selector::resolve_active_team_readonly(
+        &run_workspace, Some(team), crate::state::selector::SelectorMode::RuntimeOnly,
+    ).map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
+    crate::lifecycle::launch::ensure_owner_allowed_for_state(&selected.state, None)?;
+    if selected.run_workspace != run_workspace || selected.team_key != team {
+        return Err(LifecycleError::TeamSelect("runtime spec repair scope changed".into()));
+    }
+    let spec_path = crate::model::paths::runtime_spec_path(&run_workspace, team);
+    let current = compile_runtime_spec_from_roles(&run_workspace, team, &selected.state)?;
+    if &current != expected {
+        return Err(LifecycleError::TeamSelect("role/source changed since runtime spec repair planning".into()));
+    }
+    if spec_path.exists() {
+        let text = std::fs::read_to_string(&spec_path)
+            .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+        if yaml::loads(&text).map_err(|e| LifecycleError::Compile(e.to_string()))? != current {
+            return Err(LifecycleError::TeamSelect("runtime spec changed since repair planning".into()));
+        }
+    } else {
+        crate::lifecycle::launch::write_spec_atomic(&spec_path, &current)?;
+    }
+    let mut state = selected.state;
+    state["spec_path"] = serde_json::json!(spec_path);
+    crate::state::repository::StateRepository::new(&run_workspace).save(
+        crate::state::repository::StateWriteIntent::RestartTeam {
+            team_key: team, topology_authority_agent_ids: &[], skip_capture_backfill_agent_ids: &[],
+        }, &state,
+    ).map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    Ok(spec_path)
 }
 
 fn filter_retired_agents_from_spec(
@@ -3969,8 +4020,21 @@ fn restart_candidate_has_context(state: &serde_json::Value) -> bool {
         })
 }
 
+// Never let a legacy session-wide kill bypass canonical native teardown.
+fn destroy_stale_worker_session(live: bool, deferred: bool, shared_native: bool) -> bool {
+    live && !deferred && !shared_native
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn startup_shared_session_never_bulk_kills_contract_windows() {
+        assert!(!super::destroy_stale_worker_session(true, false, true));
+        assert!(!super::destroy_stale_worker_session(true, true, true));
+        assert!(super::destroy_stale_worker_session(true, false, false));
+        assert!(!super::destroy_stale_worker_session(false, false, false));
+    }
+
     use super::*;
     use std::collections::BTreeMap;
     use std::path::Path;

@@ -93,6 +93,79 @@ pub(crate) fn classify_tmux_server_error(error_text: &str) -> &'static str {
     }
 }
 
+fn recorded_mux_pane(agent_state: &Value) -> Option<&str> {
+    ["pane_id", "native_pane"].iter().find_map(|key| {
+        agent_state
+            .get(*key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn explicit_window_name(agent_state: &Value) -> Option<&str> {
+    ["window", "window_name"].iter().find_map(|key| {
+        agent_state
+            .get(*key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn is_public_window_name(provider: &str, window: &str) -> bool {
+    // Contract ids such as grok_build are not legacy Provider aliases, but
+    // their tmux title is the public command, not the seat id.
+    if provider == "grok_build" && window == "grok" {
+        return true;
+    }
+    parse_provider(provider).is_some_and(|parsed| {
+        command_name(parsed) == window
+            || crate::layout::worker_window_helpers::provider_window_name(parsed) == window
+    })
+}
+
+fn window_name_reconciles(
+    agent_id: &str,
+    agent_state: &Value,
+    windows: &[crate::transport::WindowName],
+) -> bool {
+    let explicit = explicit_window_name(agent_state);
+    let provider = agent_state
+        .get("provider")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    windows.iter().any(|window| {
+        let name = window.as_str();
+        explicit.is_some_and(|expected| expected == name)
+            || is_public_window_name(provider, name)
+            || name == agent_id
+    })
+}
+
+/// A native CLI owns its window title. Seat presence is the recorded pane id
+/// on this transport; display names are only a fallback.
+fn worker_window_is_missing(
+    agent_id: &str,
+    agent_state: &Value,
+    windows: &[crate::transport::WindowName],
+    panes: &[crate::transport::PaneInfo],
+    backend: &dyn Transport,
+) -> bool {
+    if let Some(pane_id) = recorded_mux_pane(agent_state) {
+        if panes.iter().any(|pane| pane.pane_id.as_str() == pane_id) {
+            return false;
+        }
+        if !panes.is_empty() {
+            return true;
+        }
+        match backend.has_pane(&crate::transport::PaneId::new(pane_id)) {
+            Ok(Some(true)) => return false,
+            Ok(Some(false)) => return true,
+            _ => {}
+        }
+    }
+    !window_name_reconciles(agent_id, agent_state, windows)
+}
+
 pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value, Value) {
     diagnose_runtime_with_workspace(None, state, backend)
 }
@@ -244,6 +317,7 @@ fn diagnose_runtime_with_workspace(
         if let Ok(windows) = backend.list_windows(&crate::transport::SessionName::new(
             session_name.to_string(),
         )) {
+            let panes = backend.list_targets().unwrap_or_default();
             if let Some(agents) = state.get("agents").and_then(Value::as_object) {
                 for (agent_id, agent_state) in agents {
                     let provider = agent_state
@@ -290,16 +364,7 @@ fn diagnose_runtime_with_workspace(
                                 .map(|path| path.to_string_lossy().to_string()),
                         }));
                     }
-                    let window = ["window", "window_name"]
-                        .iter()
-                        .find_map(|key| {
-                            agent_state
-                                .get(*key)
-                                .and_then(Value::as_str)
-                                .filter(|s| !s.is_empty())
-                        })
-                        .unwrap_or(agent_id);
-                    if !windows.iter().any(|w| w.as_str() == window) {
+                    if worker_window_is_missing(agent_id, agent_state, &windows, &panes, backend) {
                         issues.push(json!(format!("worker_window_missing:{agent_id}")));
                     }
                     if agent_state
@@ -1308,6 +1373,107 @@ mod tests {
             "diagnose should include an explicit repair hint for the mismatched tuple; repairs={repairs}"
         );
         let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    fn pane(session: &str, pane_id: &str, window: &str) -> crate::transport::PaneInfo {
+        crate::transport::PaneInfo {
+            pane_id: crate::transport::PaneId::new(pane_id),
+            session: crate::transport::SessionName::new(session),
+            window_index: None,
+            window_name: Some(crate::transport::WindowName::new(window)),
+            pane_index: None,
+            tty: None,
+            current_command: Some(window.to_string()),
+            current_path: None,
+            active: true,
+            pane_pid: Some(1),
+            leader_env: Default::default(),
+        }
+    }
+
+    fn has_issue(issues: &Value, issue: &str) -> bool {
+        issues
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item.as_str() == Some(issue)))
+    }
+
+    fn grok_state(extra: Value) -> Value {
+        let mut agent = json!({
+            "provider": "grok_build",
+            "status": "running",
+            "runtime_family": "contract",
+            "window": null,
+            "pane_id": null,
+            "session_name": null
+        });
+        if let (Some(agent), Some(extra)) = (agent.as_object_mut(), extra.as_object()) {
+            for (key, value) in extra {
+                agent.insert(key.clone(), value.clone());
+            }
+        }
+        json!({
+            "session_name": "team-current",
+            "agents": { "grok-seat": agent }
+        })
+    }
+
+    #[test]
+    fn doctor_accepts_live_native_pane_when_window_title_is_not_agent_id() {
+        let state = grok_state(json!({"native_pane": "%1"}));
+        let backend = crate::transport::test_support::OfflineTransport::new()
+            .with_session_present(true)
+            .with_windows(vec![crate::transport::WindowName::new("grok")])
+            .with_targets(vec![pane("team-current", "%1", "renamed-by-cli")]);
+        let (issues, _) = diagnose_runtime(&state, &backend);
+        assert!(
+            !has_issue(&issues, "worker_window_missing:grok-seat"),
+            "live pane id must prove the seat without the agent-id window name; issues={issues}"
+        );
+    }
+
+    #[test]
+    fn doctor_does_not_treat_another_public_window_as_a_missing_pane() {
+        let state = grok_state(json!({"native_pane": "%1"}));
+        let backend = crate::transport::test_support::OfflineTransport::new()
+            .with_session_present(true)
+            .with_windows(vec![crate::transport::WindowName::new("grok")])
+            .with_targets(vec![pane("team-current", "%9", "grok")]);
+        let (issues, _) = diagnose_runtime(&state, &backend);
+        assert!(
+            has_issue(&issues, "worker_window_missing:grok-seat"),
+            "a same-named window must not hide a different pane id; issues={issues}"
+        );
+    }
+
+    #[test]
+    fn doctor_accepts_public_window_name_when_no_pane_id_is_recorded() {
+        let state = grok_state(json!({}));
+        let backend = crate::transport::test_support::OfflineTransport::new()
+            .with_session_present(true)
+            .with_windows(vec![crate::transport::WindowName::new("grok")]);
+        let (issues, _) = diagnose_runtime(&state, &backend);
+        assert!(
+            !has_issue(&issues, "worker_window_missing:grok-seat"),
+            "public command title is a valid fallback; issues={issues}"
+        );
+    }
+
+    #[test]
+    fn doctor_still_accepts_legacy_agent_id_window_name() {
+        let state = json!({
+            "session_name": "team-current",
+            "agents": {
+                "worker-a": { "provider": "pi", "status": "running" }
+            }
+        });
+        let backend = crate::transport::test_support::OfflineTransport::new()
+            .with_session_present(true)
+            .with_windows(vec![crate::transport::WindowName::new("worker-a")]);
+        let (issues, _) = diagnose_runtime(&state, &backend);
+        assert!(
+            !has_issue(&issues, "worker_window_missing:worker-a"),
+            "legacy agent-id windows remain present; issues={issues}"
+        );
     }
 }
 

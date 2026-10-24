@@ -47,6 +47,14 @@ on:
           - issue345-fixtures
           - issue345-trust-fixture
           - issue345
+          - startup-red-spec
+          - startup-spec
+          - startup-host
+          - startup-bridge
+          - startup-receipt-red
+          - startup-receipt
+          - startup-grok-paste
+          - startup-egress
 
 permissions:
   contents: read
@@ -218,7 +226,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_TREE"
           test -z "$(git status --porcelain=v1)"
-          rustup toolchain install 1.95.0 --profile minimal --component rustfmt
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
           if ! command -v tmux >/dev/null; then brew install tmux; fi
           printf 'CONTRACT_TMUX=%s\n' "$(command -v tmux)" >> "$GITHUB_ENV"
           printf 'CONTRACT_PYTHON=%s\n' "$(python3 -c 'import os,sys; print(os.path.realpath(sys.executable))')" >> "$GITHUB_ENV"
@@ -244,6 +252,58 @@ jobs:
             return "${statuses[0]}"
           }
           case "$REGRESSION_SCOPE" in
+            startup-egress)
+              run_case egress-check cargo check --workspace --all-targets --locked
+              run_case egress-root cargo test -p team-agent --lib --locked contract_runtime::forward -- --test-threads=1 --nocapture
+              run_case egress-forward cargo test --manifest-path crates/team-agent-contract/Cargo.toml --test forward --locked -- --test-threads=1
+              run_case egress-build cargo build -p team-agent --example scoped_contract_egress --release --locked
+              run_case egress-help target/release/examples/scoped_contract_egress --help
+              cp target/release/examples/scoped_contract_egress regression-evidence/scoped_contract_egress
+              printf 'source_sha=%s\nsource_tree=%s\n' "$SOURCE_SHA" "$EXPECTED_TREE" > regression-evidence/OPERATOR-SOURCE.txt
+              rustfmt --edition 2021 --emit stdout crates/team-agent/examples/scoped_contract_egress.rs > regression-evidence/scoped_contract_egress.formatted.rs
+              run_case egress-format rustfmt --edition 2021 --check crates/team-agent/examples/scoped_contract_egress.rs
+              ;;
+            startup-grok-paste)
+              run_case grok-long-paste cargo test --manifest-path crates/team-agent-contract/Cargo.toml --test grok_build_contract --locked long_paste_ -- --test-threads=1 --nocapture
+              ;;
+            startup-red-spec)
+              run_case startup-spec-red cargo test -p team-agent --lib --locked startup_spec_red -- --test-threads=1 --nocapture
+              ;;
+            startup-spec)
+              run_case startup-spec cargo test -p team-agent --lib --locked startup_spec -- --test-threads=1 --nocapture
+              run_case startup-intent cargo test -p team-agent --lib --locked cli::intent -- --test-threads=1
+              run_case startup-restart cargo test -p team-agent --lib --locked lifecycle::restart -- --test-threads=1
+              ;;
+            startup-receipt-red)
+              run_case startup-receipts cargo test -p team-agent --lib --locked startup_receipt -- --test-threads=1 --nocapture
+              ;;
+            startup-receipt)
+              run_case startup-check cargo check --workspace --all-targets --locked
+              run_case startup-receipts cargo test -p team-agent --lib --locked startup_receipt -- --test-threads=1 --nocapture
+              run_case startup-shared-session cargo test -p team-agent --lib --locked startup_shared_session -- --test-threads=1 --nocapture
+              run_case startup-attach cargo test -p team-agent --lib --locked quick_start_persists_selected_tmux_endpoint_and_attach_commands -- --test-threads=1
+              run_case startup-managed-topology cargo test -p team-agent --lib --locked quick_start_preserves_managed_leader_topology_without_inventing_a_leader_window -- --test-threads=1
+              run_case startup-intent cargo test -p team-agent --lib --locked cli::intent -- --test-threads=1
+              run_case startup-runtime cargo test -p team-agent --lib --locked contract_runtime -- --test-threads=1
+              ;;
+            startup-bridge)
+              run_case workspace-check cargo check --workspace --all-targets --locked
+              # Attach integration fixtures require the real debug CLI, not cargo check metadata.
+              run_case workspace-bin cargo build -p team-agent --bin team-agent --locked
+              run_case root-contract cargo test -p team-agent --lib --locked contract_runtime -- --test-threads=1
+              run_case root-launch cargo test -p team-agent --lib --locked lifecycle::tests::launch_spawn -- --test-threads=1
+              run_case root-fresh-binding cargo test -p team-agent --lib --locked fresh_quick_start_leader_binding_tests -- --test-threads=1
+              run_case root-attach cargo test -p team-agent --lib --locked attach -- --test-threads=1
+              run_case root-intent cargo test -p team-agent --lib --locked cli::intent -- --test-threads=1
+              run_case root-restart cargo test -p team-agent --lib --locked lifecycle::restart -- --test-threads=1
+              run_case contract-all cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets --no-fail-fast -- --test-threads=1
+              ;;
+            startup-host)
+              run_case host-close-policy cargo test --manifest-path crates/team-agent-contract/Cargo.toml --lib --locked orchestration::physical -- --test-threads=1
+              run_case host-native cargo test --manifest-path crates/team-agent-contract/Cargo.toml --test host_native --locked -- --test-threads=1 --nocapture
+              run_case physical-lifecycle cargo test --manifest-path crates/team-agent-contract/Cargo.toml --test physical_lifecycle --locked -- --test-threads=1
+              run_case transaction-faults cargo test --manifest-path crates/team-agent-contract/Cargo.toml --test transaction_faults --locked -- --test-threads=1
+              ;;
             issue342-shutdown-fixture)
               run_case shutdown-fixture cargo test -p team-agent --test e2e --locked shutdown -- --test-threads=1 --nocapture
               ;;
@@ -335,6 +395,7 @@ jobs:
               run_case root-role cargo test -p team-agent --lib --locked lifecycle::role_config -- --test-threads=1
               run_case root-contract cargo test -p team-agent --lib --locked contract_runtime -- --test-threads=1
               run_case contract-all cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets --no-fail-fast -- --test-threads=1
+              run_case contract-clippy cargo clippy --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets -- -D warnings
               ;;
             issue334)
               run_case workspace-check cargo check --workspace --all-targets --locked

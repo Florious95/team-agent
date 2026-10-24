@@ -64,6 +64,98 @@ pub fn resolve_engine(launcher: &Path) -> Result<PathBuf, HostError> {
     }
     Ok(engine)
 }
+/// A same-inode file named `grok`. Execing the official symlink displays
+/// `grok-native` because tmux uses the resolved basename. This link is the
+/// public name; it is not a second image.
+///
+/// A hard link cannot cross devices. `TMPDIR` is caller-controlled and may sit
+/// on another volume, so it is never a candidate. Use system `/tmp` only when
+/// that directory is already on the image volume; otherwise link beside the image.
+pub fn public_name_link(engine: &Path) -> Result<PathBuf, HostError> {
+    let engine = engine.canonicalize().map_err(|error| HostError::io("Grok public name", error))?;
+    if engine.file_name().is_none_or(|name| name != "grok-native") {
+        return Err(HostError::new("Grok public name image", HostErrorKind::Ownership));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = engine;
+        return Err(HostError::new("Grok public name", HostErrorKind::Unsupported));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let engine_meta = std::fs::metadata(&engine).map_err(|error| HostError::io("Grok public name", error))?;
+        let mut skipped_cross_device = false;
+        let mut last_error = None;
+        for root in same_volume_name_roots(&engine, engine_meta.dev()) {
+            match place_public_name_link(&engine, &root, engine_meta.dev(), engine_meta.ino()) {
+                Ok(link) => return Ok(link),
+                Err(error) if error.operation == "Grok public name cross-device" => skipped_cross_device = true,
+                Err(error) if is_unwritable(&error) || error.kind == HostErrorKind::Conflict => last_error = Some(error),
+                Err(error) => return Err(error),
+            }
+        }
+        if skipped_cross_device && last_error.is_none() {
+            return Err(HostError::new("Grok public name cross-device", HostErrorKind::Unsupported));
+        }
+        Err(last_error.unwrap_or_else(|| HostError::new("Grok public name link", HostErrorKind::Unknown)))
+    }
+}
+#[cfg(unix)]
+fn same_volume_name_roots(engine: &Path, engine_dev: u64) -> Vec<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let mut roots = Vec::new();
+    if let Ok(system_tmp) = Path::new("/tmp").canonicalize() {
+        if std::fs::metadata(&system_tmp).is_ok_and(|meta| meta.is_dir() && meta.dev() == engine_dev) {
+            roots.push(system_tmp);
+        }
+    }
+    if let Some(parent) = engine.parent() {
+        if std::fs::metadata(parent).is_ok_and(|meta| meta.is_dir() && meta.dev() == engine_dev) {
+            roots.push(parent.to_path_buf());
+        }
+    }
+    roots
+}
+#[cfg(unix)]
+fn place_public_name_link(engine: &Path, root: &Path, engine_dev: u64, ino: u64) -> Result<PathBuf, HostError> {
+    use std::os::unix::fs::MetadataExt;
+    let dir = root.join(format!("team-agent-grok-name-{ino}"));
+    match std::fs::create_dir(&dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
+            return Err(HostError::new("Grok public name cross-device", HostErrorKind::Unsupported));
+        }
+        Err(error) => return Err(HostError::io("Grok public name", error)),
+    }
+    let dir_meta = std::fs::symlink_metadata(&dir).map_err(|error| HostError::io("Grok public name", error))?;
+    if dir_meta.file_type().is_symlink() || !dir_meta.is_dir() {
+        return Err(HostError::new("Grok public name link", HostErrorKind::Conflict));
+    }
+    let dir_meta = std::fs::metadata(&dir).map_err(|error| HostError::io("Grok public name", error))?;
+    if dir_meta.dev() != engine_dev {
+        return Err(HostError::new("Grok public name cross-device", HostErrorKind::Unsupported));
+    }
+    let link = dir.join("grok");
+    match std::fs::hard_link(engine, &link) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
+            return Err(HostError::new("Grok public name cross-device", HostErrorKind::Unsupported));
+        }
+        Err(error) => return Err(HostError::io("Grok public name link", error)),
+    }
+    let link_meta = std::fs::metadata(&link).map_err(|error| HostError::io("Grok public name", error))?;
+    if !link_meta.is_file() || link_meta.dev() != engine_dev || link_meta.ino() != ino {
+        return Err(HostError::new("Grok public name link", HostErrorKind::Conflict));
+    }
+    Ok(link)
+}
+#[cfg(unix)]
+fn is_unwritable(error: &HostError) -> bool {
+    matches!(error.kind, HostErrorKind::Io(std::io::ErrorKind::PermissionDenied) | HostErrorKind::Io(std::io::ErrorKind::ReadOnlyFilesystem))
+}
 /// Root calls this after resolving/owning the stable primary, before H3 effects.
 /// Metadata only; no user/account config bodies or Git administrative files.
 pub fn require_private_primary(cwd: &crate::contract::session::CwdIdentity) -> Result<(), HostError> {
@@ -81,10 +173,10 @@ pub fn require_private_primary(cwd: &crate::contract::session::CwdIdentity) -> R
     }
     Ok(())
 }
-fn command(entry: &Path, engine: &Path, args: &[&str], cwd: Option<PathBuf>, bounds: ReadBounds) -> CommandRequest {
+fn command(entry: &Path, _engine: &Path, args: &[&str], cwd: Option<PathBuf>, bounds: ReadBounds) -> CommandRequest {
     CommandRequest {
         executable: entry.into(), arguments: args.iter().map(|arg| (*arg).into()).collect(), cwd,
-        environment: EnvironmentDelta { remove: Default::default(), set: std::collections::BTreeMap::from([("GROK_REAL".into(), engine.as_os_str().to_owned())]) },
+        environment: EnvironmentDelta { remove: std::collections::BTreeSet::from(["GROK_REAL".into()]), set: Default::default() },
         stdin: None, budget: bounds.deadline, reject_stdout: None,
         limits: OutputLimits { stdout: bounds.max_output_bytes, stderr: bounds.max_output_bytes, stdin: 0 },
     }
@@ -200,4 +292,36 @@ pub fn parse_catalog(bytes: &[u8]) -> Result<Vec<ModelRecord>, ContractError> {
     }
     if models.is_empty() || !ids.contains(default) || marked != Some(default) { return Err(invalid()); }
     Ok(models)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+
+    #[test]
+    fn public_name_link_stays_on_the_image_volume_and_ignores_tmpdir() {
+        let env_temp = std::env::temp_dir();
+        let image = env_temp.join(format!("ta-grok-image-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&image);
+        std::fs::create_dir_all(&image).unwrap();
+        let engine = image.join("grok-native");
+        std::fs::write(&engine, b"not-a-real-grok").unwrap();
+        let link = public_name_link(&engine).expect("same-volume public name");
+        let engine_meta = std::fs::metadata(&engine).unwrap();
+        let link_meta = std::fs::metadata(&link).unwrap();
+        assert_eq!(link.file_name().and_then(|name| name.to_str()), Some("grok"));
+        assert_eq!(link_meta.dev(), engine_meta.dev());
+        assert_eq!(link_meta.ino(), engine_meta.ino());
+        let link_root = link.parent().and_then(Path::parent).unwrap().canonicalize().unwrap();
+        let system_tmp = Path::new("/tmp").canonicalize().unwrap();
+        let image_root = image.canonicalize().unwrap();
+        assert!(link_root == system_tmp || link_root == image_root, "link root {link_root:?}");
+        let env_root = env_temp.canonicalize().unwrap_or(env_temp);
+        if env_root != system_tmp && env_root != image_root {
+            assert_ne!(link_root, env_root, "public name must not borrow TMPDIR {env_root:?}");
+        }
+        let _ = std::fs::remove_dir_all(&image);
+        let _ = std::fs::remove_dir_all(system_tmp.join(format!("team-agent-grok-name-{}", engine_meta.ino())));
+    }
 }

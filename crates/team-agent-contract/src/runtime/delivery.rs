@@ -615,7 +615,7 @@ impl Run<'_, '_> {
             text: sample.text,
             cwd: Some(self.request.target.cwd.path.clone()),
             input: std::str::from_utf8(&self.request.input.bytes).ok().map(|text| InputShape {
-                sha256: digest(&self.request.input.bytes), lines: text.lines().count(),
+                sha256: digest(&self.request.input.bytes), bytes: self.request.input.bytes.len(), lines: text.lines().count(),
                 first_line: text.lines().next().unwrap_or_default().into(),
             }),
             baseline: self.baseline.clone(),

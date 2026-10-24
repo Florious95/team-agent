@@ -284,6 +284,26 @@ impl ContractStore {
         )?;
         Ok(serde_json::from_str(&raw)?)
     }
+    /// Bounded read-only creation receipt lookup. An exact identity never falls
+    /// back to another generation; None selects the last creation for this seat.
+    pub fn creation_receipt(&self, seat: &SeatId, identity: Option<&InstanceIdentity>) -> Result<Option<OperationRecord>, Error> {
+        if identity.is_some_and(|id| id.scope != self.scope || &id.seat != seat) { return Err(Error::Fence); }
+        let raw: Option<String> = self.connection.query_row(
+            "SELECT record FROM contract_operations WHERE json_extract(record,'$.target.identity.scope')=?1
+             AND json_extract(record,'$.target.identity.seat')=?2
+             AND json_extract(record,'$.kind') IN ('Startup','Restart','NewSeatFullSnapshot','NativeNewSeat')
+             AND (?3 IS NULL OR json_extract(record,'$.target.identity.instance')=?3)
+             ORDER BY json_extract(record,'$.target.identity.generation') DESC,rowid DESC LIMIT 1",
+            params![self.scope.as_str(), seat.as_str(), identity.map(|id| id.instance.as_str())],
+            |row| row.get(0),
+        ).optional()?;
+        let receipt: Option<OperationRecord> = raw.map(|raw| serde_json::from_str(&raw)).transpose()?;
+        if receipt.as_ref().is_some_and(|record| identity.is_some_and(|id| &record.target.identity != id)) {
+            return Err(Error::Fence);
+        }
+        Ok(receipt)
+    }
+
     pub fn unfinished(&self) -> Result<Vec<OperationRecord>, Error> {
         let mut statement = self
             .connection

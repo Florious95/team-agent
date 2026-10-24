@@ -22,7 +22,7 @@ use crate::contract::plan::{
 use crate::contract::probe::ProcessAliveEvidence;
 
 const FORMAT: &str = "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}\t#{session_name}\t#{window_name}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_in_mode}\t#{pane_mode}\t#{@tac_binding}\t#{pane_width}\t#{pane_height}";
-const CONFIG: &[u8] = b"set-option -g default-shell /bin/sh\nset-window-option -g remain-on-exit on\nset-window-option -g automatic-rename off\nset-window-option -g allow-rename off\nset-option -s exit-empty on\n";
+const CONFIG: &[u8] = b"set-option -g default-shell /bin/sh\nset-window-option -g remain-on-exit on\nset-option -s exit-empty on\n";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HostLimits {
@@ -272,6 +272,7 @@ pub struct CloseReceipt {
     pub native: ProcessState,
     pub socket_cleanup: ActionResult,
     pub socket_preserved: bool,
+    pub shared_endpoint: bool,
 }
 
 // A failed query or zero sessions is not a no-listener witness. This exact,
@@ -303,11 +304,32 @@ pub(crate) fn observe_native_exit(
     native
 }
 
-/// One host instance owns one private endpoint/generation. No default server or adoption.
+/// Root-authorized workspace topology, not a discovered ambient server. Existing
+/// sockets/sessions must carry the metadata sampled by the owning root caller.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SharedTmux {
+    pub endpoint: PathBuf,
+    pub socket: Option<(u64, u64)>,
+    pub session_name: String,
+    pub session: Option<String>,
+}
+
+fn target_binding(directory: &DirectoryReceipt, device: u64, inode: u64, shared: Option<&std::path::Path>, created_session: bool) -> String {
+    let signature = directory_signature(directory);
+    let key = match shared {
+        Some(endpoint) => format!("shared-v1:{signature}:{device}:{inode}:{created_session}:{}", endpoint.display()),
+        None => format!("{signature}:{device}:{inode}"),
+    };
+    digest_hex(digest(key.as_bytes()))
+}
+
+/// Owns a generation's directory and pane. A workspace server is borrowed;
+/// historical private endpoints retain their original exclusive cleanup policy.
 pub struct TmuxHost<R: CommandRunner> {
     directory: ScopedDirectory,
     executable: PathBuf,
     endpoint: PathBuf,
+    shared: Option<SharedTmux>,
     limits: HostLimits,
     runner: R,
     target: Option<TargetReceipt>,
@@ -346,6 +368,7 @@ impl<R: CommandRunner> TmuxHost<R> {
             directory,
             executable,
             endpoint,
+            shared: None,
             limits,
             runner,
             target: None,
@@ -366,16 +389,15 @@ impl<R: CommandRunner> TmuxHost<R> {
         deadline: Duration,
     ) -> Result<Self, HostError> {
         let directory = ScopedDirectory::reopen(target.directory.clone())?;
-        let mut host = Self::new(directory, executable, limits, runner)?;
-        let binding = digest_hex(digest(
-            format!(
-                "{}:{}:{}",
-                directory_signature(&target.directory),
-                target.socket_device,
-                target.socket_inode
-            )
-            .as_bytes(),
-        ));
+        let mut host = if target.shared_endpoint {
+            Self::new_shared(directory, executable, limits, runner, SharedTmux {
+                endpoint: target.endpoint.clone(),
+                socket: Some((target.socket_device, target.socket_inode)),
+                session_name: "restored".into(), session: Some(target.session.clone()),
+            })?
+        } else { Self::new(directory, executable, limits, runner)? };
+        let binding = target_binding(&target.directory, target.socket_device, target.socket_inode,
+            target.shared_endpoint.then_some(target.endpoint.as_path()), target.created_session);
         if target.endpoint != host.endpoint
             || target.binding != binding
             || target.columns != limits.columns
@@ -389,6 +411,48 @@ impl<R: CommandRunner> TmuxHost<R> {
         }
         host.target = Some(target.clone());
         host.check_bound(&target, clock, deadline, false)?;
+        Ok(host)
+    }
+
+    pub fn new_shared(
+        directory: ScopedDirectory,
+        executable: PathBuf,
+        limits: HostLimits,
+        runner: R,
+        shared: SharedTmux,
+    ) -> Result<Self, HostError> {
+        crate::contract::types::require_absolute(&shared.endpoint, "workspace tmux endpoint")
+            .map_err(|_| HostError::new("workspace tmux endpoint", HostErrorKind::Invalid))?;
+        let mut host = Self::new(directory, executable, limits, runner)?;
+        if shared.endpoint == host.endpoint || shared.endpoint.to_str().is_none()
+            || shared.endpoint.as_os_str().as_encoded_bytes().len() >= 104
+            || shared.session_name.is_empty() || shared.session_name.chars().any(|c| c.is_control() || c == ':')
+            || shared.session.as_ref().is_some_and(|session| !numbered(session, '$'))
+        {
+            return Err(HostError::new("workspace tmux topology", HostErrorKind::Invalid));
+        }
+        let parent = shared.endpoint.parent().ok_or_else(|| HostError::new("workspace socket parent", HostErrorKind::Invalid))?;
+        if parent.canonicalize().map_err(|e| HostError::io("workspace socket parent", e))? != parent {
+            return Err(HostError::new("workspace socket parent changed", HostErrorKind::Ownership));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = std::fs::symlink_metadata(parent).map_err(|e| HostError::io("workspace socket parent", e))?;
+            if !metadata.is_dir() || metadata.uid() != nix::unistd::geteuid().as_raw() || metadata.mode() & 0o777 != 0o700 {
+                return Err(HostError::new("workspace socket parent ownership", HostErrorKind::Ownership));
+            }
+        }
+        host.endpoint = shared.endpoint.clone();
+        let actual = match host.socket_identity() {
+            Ok(identity) => Some(identity),
+            Err(error) if error.kind == HostErrorKind::Io(std::io::ErrorKind::NotFound) => None,
+            Err(error) => return Err(error),
+        };
+        if actual != shared.socket || (shared.session.is_some() && actual.is_none()) {
+            return Err(HostError::new("workspace socket changed", HostErrorKind::Ownership));
+        }
+        host.shared = Some(shared);
         Ok(host)
     }
 
@@ -425,7 +489,8 @@ impl<R: CommandRunner> TmuxHost<R> {
             arguments: argv,
             cwd: None,
             environment: EnvironmentDelta {
-                remove: BTreeSet::from(["TMUX".into(), "TMUX_PANE".into()]),
+                remove: if self.shared.is_some() { BTreeSet::new() }
+                    else { BTreeSet::from(["TMUX".into(), "TMUX_PANE".into()]) },
                 set: BTreeMap::new(),
             },
             stdin,
@@ -598,15 +663,30 @@ impl<R: CommandRunner> TmuxHost<R> {
         {
             return Err(HostError::new("spawn scope/cwd", HostErrorKind::Ownership));
         }
-        match std::fs::symlink_metadata(&self.endpoint) {
-            Ok(_) => {
-                return Err(HostError::new(
-                    "existing endpoint is not adopted",
-                    HostErrorKind::Conflict,
-                ))
+        if let Some(shared) = self.shared.clone() {
+            let actual = match self.socket_identity() {
+                Ok(identity) => Some(identity),
+                Err(error) if error.kind == HostErrorKind::Io(std::io::ErrorKind::NotFound) => None,
+                Err(error) => return Err(error),
+            };
+            if actual != shared.socket {
+                return Err(HostError::new("workspace socket changed before spawn", HostErrorKind::Ownership));
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(HostError::io("endpoint preflight", error)),
+            if let Some(session) = &shared.session {
+                let observed = self.command(vec!["display-message".into(), "-p".into(), "-t".into(),
+                    session.clone().into(), "#{session_id}:#{session_name}".into()], None, clock, deadline)?;
+                if !observed.success() || observed.stdout != format!("{session}:{}\n", shared.session_name).as_bytes()
+                    || self.socket_identity()? != shared.socket.ok_or_else(|| HostError::new("workspace socket missing", HostErrorKind::Ownership))?
+                {
+                    return Err(HostError::new("workspace session changed before spawn", HostErrorKind::Ownership));
+                }
+            }
+        } else {
+            match std::fs::symlink_metadata(&self.endpoint) {
+                Ok(_) => return Err(HostError::new("existing endpoint is not adopted", HostErrorKind::Conflict)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                Err(error) => return Err(HostError::io("endpoint preflight", error)),
+            }
         }
         let candidate = resolved
             .request()
@@ -686,7 +766,9 @@ impl<R: CommandRunner> TmuxHost<R> {
                 HostErrorKind::Invalid,
             ));
         }
-        for (name, bytes) in [("tmux.conf", CONFIG), ("launch.sh", script.as_slice())] {
+        let files = if self.shared.is_some() { vec![("launch.sh", script.as_slice())] }
+            else { vec![("tmux.conf", CONFIG), ("launch.sh", script.as_slice())] };
+        for (name, bytes) in files {
             match self.directory.create_file(name, bytes) {
                 Ok(file) => receipt.files.push(file),
                 Err(failure) => {
@@ -698,8 +780,25 @@ impl<R: CommandRunner> TmuxHost<R> {
             }
         }
         let signature = directory_signature(self.directory.receipt());
-        let session_name = format!("tac-{}", &signature[..24]);
-        let mut shell = b"exec /bin/sh ".to_vec();
+        let session_name = self.shared.as_ref().map(|shared| shared.session_name.clone())
+            .unwrap_or_else(|| format!("tac-{}", &signature[..24]));
+        let mut shell = Vec::new();
+        if self.shared.is_some() {
+            // Only this new window is configured, before it execs the native
+            // image. Never load per-seat global config into a borrowed server.
+            // Do not override automatic-rename: the native CLI owns the title.
+            for (option, value) in [("remain-on-exit", "on"), ("window-size", "manual")] {
+                shell.extend(quote(self.executable.as_os_str())?);
+                shell.extend_from_slice(b" -S "); shell.extend(quote(self.endpoint.as_os_str())?);
+                shell.extend_from_slice(b" set-window-option -t \"$TMUX_PANE\" ");
+                shell.extend_from_slice(option.as_bytes()); shell.push(b' ');
+                shell.extend_from_slice(value.as_bytes()); shell.extend_from_slice(b" || exit 126; ");
+            }
+            shell.extend(quote(self.executable.as_os_str())?);
+            shell.extend_from_slice(b" -S "); shell.extend(quote(self.endpoint.as_os_str())?);
+            shell.extend_from_slice(format!(" resize-window -t \"$TMUX_PANE\" -x {} -y {} || exit 126; ", self.limits.columns, self.limits.rows).as_bytes());
+        }
+        shell.extend_from_slice(b"exec /bin/sh ");
         shell.extend(quote(self.directory.path().join("launch.sh").as_os_str())?);
         #[cfg(unix)]
         let shell = {
@@ -711,39 +810,32 @@ impl<R: CommandRunner> TmuxHost<R> {
             String::from_utf8(shell)
                 .map_err(|_| HostError::new("host platform", HostErrorKind::Unsupported))?,
         );
-        let result = self.command(
-            vec![
-                "-f".into(),
-                self.directory.path().join("tmux.conf").into_os_string(),
-                "new-session".into(),
-                "-d".into(),
-                "-s".into(),
-                session_name.clone().into(),
-                "-n".into(),
-                "worker".into(),
-                "-x".into(),
-                self.limits.columns.to_string().into(),
-                "-y".into(),
-                self.limits.rows.to_string().into(),
-                "-P".into(),
-                "-F".into(),
-                FORMAT.into(),
-                shell,
-            ],
-            None,
-            clock,
-            deadline,
-        )?;
+        let mut arguments = if let Some(shared) = &self.shared {
+            if let Some(session) = &shared.session {
+                vec!["new-window".into(), "-d".into(), "-t".into(), session.clone().into()]
+            } else {
+                vec!["new-session".into(), "-d".into(), "-s".into(), session_name.clone().into(),
+                    "-x".into(), self.limits.columns.to_string().into(), "-y".into(), self.limits.rows.to_string().into()]
+            }
+        } else {
+            vec!["-f".into(), self.directory.path().join("tmux.conf").into_os_string(),
+                "new-session".into(), "-d".into(), "-s".into(), session_name.clone().into(),
+                "-x".into(), self.limits.columns.to_string().into(), "-y".into(), self.limits.rows.to_string().into()]
+        };
+        arguments.extend(["-P".into(), "-F".into(), FORMAT.into(), shell]);
+        let result = self.command(arguments, None, clock, deadline)?;
         receipt.may_have_spawned = result.may_have_executed();
         if !result.success() {
             return Err(command_error(&result, "tmux spawn"));
         }
         let initial = parse_pane(&result.stdout, PaneMetadataStage::NewSession)?;
         receipt.pane = Some(initial.address.clone());
+        // The returned window id is the ownership key. Its display name belongs
+        // to tmux and the native CLI, so a rename cannot fail this spawn.
         if initial.address.session_name != session_name
-            || initial.address.window_name != "worker"
-            || initial.columns != self.limits.columns
-            || initial.rows != self.limits.rows
+            || initial.address.window.is_empty()
+            || self.shared.as_ref().and_then(|shared| shared.session.as_ref()).is_some_and(|session| session != &initial.address.session)
+            || (self.shared.is_none() && (initial.columns != self.limits.columns || initial.rows != self.limits.rows))
         {
             return Err(HostError::new(
                 "returned spawn target",
@@ -751,7 +843,9 @@ impl<R: CommandRunner> TmuxHost<R> {
             ));
         }
         let (device, inode) = self.socket_identity()?;
-        let binding = digest_hex(digest(format!("{signature}:{device}:{inode}").as_bytes()));
+        let created_session = self.shared.as_ref().is_some_and(|shared| shared.session.is_none());
+        let binding = target_binding(self.directory.receipt(), device, inode,
+            self.shared.as_ref().map(|shared| shared.endpoint.as_path()), created_session);
         let set = self.command(
             vec![
                 "set-option".into(),
@@ -770,7 +864,12 @@ impl<R: CommandRunner> TmuxHost<R> {
         }
         loop {
             let pane = self.query_pane(&initial.address.pane, clock, deadline)?;
-            if pane.address != initial.address || pane.binding != binding {
+            if pane.address.session != initial.address.session
+                || pane.address.window != initial.address.window
+                || pane.address.pane != initial.address.pane
+                || pane.address.pid != initial.address.pid
+                || pane.binding != binding
+            {
                 return Err(HostError::new(
                     "spawn pane changed",
                     HostErrorKind::Ownership,
@@ -798,6 +897,10 @@ impl<R: CommandRunner> TmuxHost<R> {
                         HostErrorKind::Deadline,
                     ));
                 }
+                if pane.columns != self.limits.columns || pane.rows != self.limits.rows {
+                    clock.sleep(self.limits.poll_interval.min(remaining(clock, deadline).unwrap_or_default()));
+                    continue;
+                }
                 verify_executable_inputs(&inputs)?;
                 process.inputs = inputs;
                 return Ok(TargetReceipt {
@@ -805,6 +908,8 @@ impl<R: CommandRunner> TmuxHost<R> {
                     endpoint: self.endpoint.clone(),
                     socket_device: device,
                     socket_inode: inode,
+                    shared_endpoint: self.shared.is_some(),
+                    created_session,
                     session: pane.address.session,
                     window: pane.address.window,
                     pane: pane.address.pane,
@@ -939,9 +1044,14 @@ impl<R: CommandRunner> TmuxHost<R> {
             || sample_process(&target.process),
         );
         let socket_cleanup = if action.outcome == StepOutcome::Confirmed && native == ProcessState::Exited {
-            match &lane {
-                Ok(lane) => self.cleanup_dead_socket(target, lane, clock, deadline),
-                Err(error) => ActionResult::refused(error.clone()),
+            if self.shared.is_some() {
+                // This host owns the pane, never the workspace server/socket.
+                ActionResult::confirmed()
+            } else {
+                match &lane {
+                    Ok(lane) => self.cleanup_dead_socket(target, lane, clock, deadline),
+                    Err(error) => ActionResult::refused(error.clone()),
+                }
             }
         } else { ActionResult { outcome: StepOutcome::NoEffect, error: None } };
         CloseReceipt {
@@ -949,6 +1059,7 @@ impl<R: CommandRunner> TmuxHost<R> {
             native,
             socket_cleanup,
             socket_preserved: std::fs::symlink_metadata(&self.endpoint).is_ok(),
+            shared_endpoint: self.shared.is_some(),
         }
     }
 }

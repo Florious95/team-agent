@@ -208,9 +208,68 @@ pub fn drain(
     Ok(completed)
 }
 
+/// Explicit operator egress only: reuse committed native receipts, never run a
+/// coordinator tick, provider admission, input delivery, or candidate migration.
+/// The original runtime binding remains authoritative even when this helper was
+/// built from a newer revision. Pending forwards retain their exact source IDs.
+pub fn drain_scoped_pending_egress(
+    workspace: &std::path::Path,
+    team: &str,
+    expected_scope: &str,
+    apply: bool,
+) -> Result<Value, String> {
+    if !workspace.is_absolute() || team.is_empty() || team.trim() != team {
+        return Err("egress requires an absolute workspace and exact explicit team".into());
+    }
+    ScopeId::new(expected_scope).map_err(|error| error.to_string())?;
+    let selected = crate::state::selector::resolve_active_team_readonly(
+        workspace, Some(team), crate::state::selector::SelectorMode::RuntimeOnly,
+    ).map_err(|error| error.to_string())?;
+    crate::lifecycle::launch::ensure_owner_allowed_for_state(&selected.state, None)
+        .map_err(|error| error.to_string())?;
+    let original = super::backend::Backend::open_readonly(&selected.run_workspace, &selected.team_key)
+        .map_err(|error| error.to_string())?;
+    if original.binding.scope.as_str() != expected_scope || original.binding.team != team {
+        return Err("egress scope/binding mismatch".into());
+    }
+    let binding = serde_json::to_value(&original.binding).map_err(|error| error.to_string())?;
+    let before: Vec<_> = original.store.pending_forwards(32).map_err(|error| error.to_string())?
+        .into_iter().map(|intent| intent.id).collect();
+    drop(original);
+    let processed = if apply {
+        let mut backend = super::backend::Backend::open(&selected.run_workspace, &selected.team_key)
+            .map_err(|error| error.to_string())?;
+        if serde_json::to_value(&backend.binding).map_err(|error| error.to_string())? != binding {
+            return Err("egress binding changed before claim".into());
+        }
+        drain(&backend.binding.framework(), &mut backend.store, 32).map_err(|error| error.to_string())?
+    } else { 0 };
+    let after = super::backend::Backend::open_readonly(&selected.run_workspace, &selected.team_key)
+        .map_err(|error| error.to_string())?;
+    if serde_json::to_value(&after.binding).map_err(|error| error.to_string())? != binding {
+        return Err("egress binding changed during forwarding".into());
+    }
+    let pending: Vec<_> = after.store.pending_forwards(32).map_err(|error| error.to_string())?
+        .into_iter().map(|intent| intent.id).collect();
+    Ok(json!({"scope":expected_scope,"team":team,"apply":apply,"processed":processed,
+        "pending_before":before,"pending_after":pending,"binding_unchanged":true,
+        "native_input":"not_invoked","coordinator_lifecycle":"not_invoked",
+        "leader_consumption":"requires actual natural receipt"}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn egress_operator_refuses_implicit_workspace_team_and_invalid_scope_before_io() {
+        for (workspace, team, scope) in [
+            ("relative", "team", "scope"), ("/", "", "scope"),
+            ("/", " team", "scope"), ("/", "team", ""), ("/", "team", "bad/scope"),
+        ] {
+            assert!(drain_scoped_pending_egress(std::path::Path::new(workspace), team, scope, false).is_err());
+            assert!(drain_scoped_pending_egress(std::path::Path::new(workspace), team, scope, true).is_err());
+        }
+    }
     #[test]
     fn compact_native_result_becomes_the_existing_framework_business_schema() {
         let compact = json!({"schema_version":1,"agent_id":"worker","task_id":"msg-bound","status":"completed","summary":"5535"});
