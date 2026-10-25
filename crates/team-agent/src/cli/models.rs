@@ -399,7 +399,7 @@ mod tests {
             panic!("expected JSON projection")
         };
         let value: Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(value["ok"], true);
+        assert_eq!(value["ok"], true, "{text}");
         assert_eq!(value["provider"], "cursor_agent");
         assert_eq!(value["models"].as_array().unwrap().len(), 1);
         assert_eq!(value["models"][0]["role_model"], "gpt-5.6-luna-high");
@@ -721,7 +721,6 @@ esac"#);
 
     #[cfg(unix)]
     fn fixture_program(program: &str, body: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let root = std::env::current_exe()
             .unwrap()
@@ -737,15 +736,33 @@ esac"#);
             ));
         std::fs::create_dir(&root).unwrap();
         let path = root.join(program);
-        std::fs::write(
+        install_executable(
             &path,
-            format!("#!/bin/sh\nprintf '%s\\n' \"$#:$1\" >> \"$0.count\"\n{body}\n"),
-        )
-        .unwrap();
-        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
-        permissions.set_mode(0o700);
-        std::fs::set_permissions(&path, permissions).unwrap();
+            &format!("#!/bin/sh\nprintf '%s\\n' \"$#:$1\" >> \"$0.count\"\n{body}\n"),
+        );
         path
+    }
+
+    /// Linux refuses to exec an inode still open for writing anywhere (ETXTBSY),
+    /// and a parallel test's fork can briefly inherit our write fd. Only a
+    /// short-lived `cp` ever writes the executable, so no test thread holds it.
+    #[cfg(unix)]
+    fn install_executable(path: &Path, script: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let staged = path.with_extension("staged");
+        std::fs::write(&staged, script).unwrap();
+        let copied = std::process::Command::new("/bin/cp")
+            .arg(&staged)
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(
+            copied.success(),
+            "install fixture executable {}",
+            path.display()
+        );
+        std::fs::remove_file(&staged).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     #[cfg(unix)]
@@ -827,7 +844,7 @@ esac"#);
         let script = format!(
             "#!/bin/sh\nprintf '1\\n' > \"$0.entered\" || :\n{script}body_status=$?\nprintf '1\\n' > \"$0.completed\" || :\nexit \"$body_status\"\n"
         );
-        std::fs::write(&path, script).unwrap();
+        install_executable(&path, &script);
         path
     }
 

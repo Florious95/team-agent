@@ -812,7 +812,25 @@ fn r05_bad_source_tuples_and_jsonl_fail_closed_without_a_fresh_target() {
             }
             _ => unreachable!(),
         }
-        fixture.save_state(&state);
+        if case == "missing-tuple" {
+            // An ordinary save backfills the latest complete tuple (stale-writer
+            // protection), so only a capture-backfill-skipping writer can drop it.
+            team_agent::state::projection::save_team_scoped_state_with_lifecycle_topology_authority_and_capture_backfill_skip(
+                &fixture.run_workspace,
+                &state,
+                &fixture.team_key,
+                &[SOURCE],
+                &[],
+            )
+            .expect("persist the incomplete source tuple");
+        } else {
+            fixture.save_state(&state);
+        }
+        assert_eq!(
+            fixture.state()["agents"][SOURCE]["rollout_path"],
+            state["agents"][SOURCE]["rollout_path"],
+            "R05 ({case}): the adversarial source row must be what fork reads"
+        );
         let transport = fixture.transport();
         let result = fixture.fork(TARGET, None, &transport);
         assert!(
