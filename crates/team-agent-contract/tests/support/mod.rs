@@ -145,7 +145,7 @@ impl PlanHook for Fake {
     fn plan(&self, resolved: &ResolvedLaunch) -> Result<LaunchPlan, ContractError> {
         let r = resolved.request();
         Ok(LaunchPlan {
-            launcher: None,
+            launcher: r.paths.launcher.clone(),
             executable_inputs: vec![],
             executable: r.paths.executable.clone(),
             arguments: vec![
@@ -483,6 +483,15 @@ impl Drop for Sandbox {
         let _ = std::fs::remove_dir_all(&self.parent);
     }
 }
+/// A structural public command for plans that are never spawned.
+pub fn launcher(command: &str, directory: &str) -> LaunchEntrypoint {
+    LaunchEntrypoint {
+        command: command.into(),
+        search_path: directory.into(),
+        executable: std::path::Path::new(directory).join(command),
+        sha256: HASH,
+    }
+}
 pub fn request(root: &std::path::Path, seat: &str) -> LaunchRequest {
     LaunchRequest {
         provider: "fake".into(),
@@ -508,6 +517,7 @@ pub fn request(root: &std::path::Path, seat: &str) -> LaunchRequest {
             executable_sha256: HASH,
         },
         paths: LaunchPaths {
+            launcher: launcher("fake", "/fake"),
             executable: "/fake/bin".into(),
             candidate: "/fake/candidate".into(),
             cwd: CwdIdentity {

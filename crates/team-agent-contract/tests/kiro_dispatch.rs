@@ -22,57 +22,69 @@ fn failed(end: CommandEnd, code: Option<i32>, stderr: &str) -> CommandReceipt {
     }
 }
 
-#[test]
-fn bundle_dispatcher_symlink_resolves_its_actual_chat_helper_without_path_mutation() {
-    let sandbox = Sandbox::new();
+struct VersionOnly;
+impl CommandRunner for VersionOnly {
+    fn run(&mut self, request: &CommandRequest) -> CommandReceipt {
+        assert_eq!(request.arguments, vec![std::ffi::OsString::from("--version")]);
+        assert_eq!(request.executable.file_name().unwrap(), "kiro-cli");
+        let mut receipt = failed(CommandEnd::Exited, Some(0), "");
+        receipt.stdout = b"kiro-cli 2.28.0\n".to_vec();
+        receipt
+    }
+}
+/// The observed macOS layout: a PATH symlink to the bundle's public dispatcher.
+fn bundle(sandbox: &Sandbox) -> (std::path::PathBuf, std::path::PathBuf) {
     let bundle = sandbox.parent.join("App Bundle/MacOS");
     std::fs::create_dir_all(&bundle).unwrap();
     executable(&bundle.join("kiro-cli"));
     executable(&bundle.join("kiro-cli-chat"));
-    let wrapper = sandbox.parent.join("kiro-cli");
-    symlink(bundle.join("kiro-cli"), &wrapper).unwrap();
-    assert_eq!(
-        resolve_helper(&wrapper, &sandbox.parent).unwrap(),
-        bundle.join("kiro-cli-chat")
-    );
-    assert!(std::fs::symlink_metadata(wrapper)
-        .unwrap()
-        .file_type()
-        .is_symlink());
+    let bin = sandbox.parent.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    symlink(bundle.join("kiro-cli"), bin.join("kiro-cli")).unwrap();
+    (bin, bundle)
 }
 #[test]
-fn local_install_helper_is_a_declared_fallback_not_a_home_scan() {
+fn public_kiro_cli_on_path_is_the_entry_and_its_dispatcher_image_is_the_fence() {
     let sandbox = Sandbox::new();
-    let wrapper = sandbox.parent.join("kiro-cli");
-    executable(&wrapper);
+    let (bin, bundle) = bundle(&sandbox);
+    let command = PublicCommand::resolve("kiro-cli", bin.as_os_str()).unwrap();
+    assert_eq!(command.entry, bin.join("kiro-cli"), "the PATH symlink is kept as found");
+    let runtime = probe_runtime(&command, &mut VersionOnly, discovery_bounds()).unwrap();
+    assert_eq!(runtime.engine, bundle.join("kiro-cli").canonicalize().unwrap());
+    assert_eq!(runtime.native.harness, "v2");
+    assert_eq!(runtime.launcher().command, "kiro-cli");
+    assert_eq!(runtime.launcher().executable, bin.join("kiro-cli"));
+    assert!(std::fs::symlink_metadata(bin.join("kiro-cli")).unwrap().file_type().is_symlink());
+}
+#[test]
+fn user_wrapper_before_kiro_cli_is_kept_and_no_install_directory_is_guessed() {
+    let sandbox = Sandbox::new();
+    let (bin, bundle) = bundle(&sandbox);
+    let wrappers = sandbox.parent.join("wrappers");
+    std::fs::create_dir(&wrappers).unwrap();
+    std::fs::write(wrappers.join("kiro-cli"), b"#!/bin/sh\nexec kiro-cli \"$@\"\n").unwrap();
+    std::fs::set_permissions(wrappers.join("kiro-cli"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let command = PublicCommand::resolve("kiro-cli", &std::env::join_paths([&wrappers, &bin]).unwrap()).unwrap();
+    assert_eq!(command.entry, wrappers.join("kiro-cli"));
+    let runtime = probe_runtime(&command, &mut VersionOnly, discovery_bounds()).unwrap();
+    assert_eq!(runtime.engine, bundle.join("kiro-cli").canonicalize().unwrap());
+    assert_eq!(runtime.launcher().executable, wrappers.join("kiro-cli"));
+    // Only the user's PATH is searched: a helper in a conventional install
+    // directory never substitutes for a missing native `kiro-cli`.
     let local = sandbox.parent.join(".local/bin");
     std::fs::create_dir_all(&local).unwrap();
     executable(&local.join("kiro-cli-chat"));
-    assert_eq!(
-        resolve_helper(&wrapper, &sandbox.parent).unwrap(),
-        local.join("kiro-cli-chat")
-    );
-    assert!(!sandbox.parent.join(".kiro").exists());
+    let alone = PublicCommand::resolve("kiro-cli", wrappers.as_os_str()).unwrap();
+    assert!(probe_runtime(&alone, &mut VersionOnly, discovery_bounds()).is_err());
+    assert!(PublicCommand::resolve("kiro-cli", local.as_os_str()).is_err());
 }
 #[test]
-fn explicit_helper_does_not_silently_switch_installations() {
+fn nonexecutable_kiro_cli_is_not_claimed_as_available() {
     let sandbox = Sandbox::new();
-    let direct = sandbox.parent.join("explicit/kiro-cli-chat");
-    std::fs::create_dir(direct.parent().unwrap()).unwrap();
-    let local = sandbox.parent.join(".local/bin");
-    std::fs::create_dir_all(&local).unwrap();
-    executable(&local.join("kiro-cli-chat"));
-    assert!(resolve_helper(&direct, &sandbox.parent).is_err());
-    executable(&direct);
-    assert_eq!(resolve_helper(&direct, &sandbox.parent).unwrap(), direct);
-}
-#[test]
-fn nonexecutable_helper_is_not_claimed_as_available() {
-    let sandbox = Sandbox::new();
-    let direct = sandbox.parent.join("kiro-cli-chat");
+    let direct = sandbox.parent.join("kiro-cli");
     std::fs::write(&direct, b"not executable").unwrap();
     std::fs::set_permissions(&direct, std::fs::Permissions::from_mode(0o600)).unwrap();
-    assert!(resolve_helper(&direct, &sandbox.parent).is_err());
+    assert!(PublicCommand::resolve("kiro-cli", sandbox.parent.as_os_str()).is_err());
 }
 #[test]
 fn launcher_and_engine_banners_parse_release_versions_without_an_update_allowlist() {
@@ -116,7 +128,7 @@ fn malformed_version_diagnostics_preserve_the_banner_but_escape_and_bound_output
     assert!(error.len() < 512);
 }
 #[test]
-fn engine_probe_binds_the_observed_release_to_unchanged_binary_bytes() {
+fn launcher_probe_binds_the_observed_release_to_unchanged_entry_bytes() {
     struct VersionRunner {
         stdout: &'static [u8],
         replace: bool,
@@ -140,19 +152,19 @@ fn engine_probe_binds_the_observed_release_to_unchanged_binary_bytes() {
         }
     }
     for (stdout, replace) in [
-        (b"kiro-cli-chat 2.29.0\n".as_slice(), false),
-        (b"kiro-cli-chat 2.29.invalid\n", false),
-        (b"kiro-cli-chat 2.29.0\n", true),
+        (b"kiro-cli 2.29.0\n".as_slice(), false),
+        (b"kiro-cli 2.29.invalid\n", false),
+        (b"kiro-cli 2.29.0\n", true),
     ] {
         let sandbox = Sandbox::new();
-        let engine = sandbox.parent.join("kiro-cli-chat");
-        executable(&engine);
+        executable(&sandbox.parent.join("kiro-cli"));
+        let command = PublicCommand::resolve("kiro-cli", sandbox.parent.as_os_str()).unwrap();
         let mut runner = VersionRunner {
             stdout,
             replace,
             calls: 0,
         };
-        let result = probe_engine(&engine, &mut runner, discovery_bounds());
+        let result = probe_launcher(&command, &mut runner, discovery_bounds());
         assert_eq!(runner.calls, 1);
         if replace {
             assert!(matches!(result, Err(EngineProbeError::Host(error))

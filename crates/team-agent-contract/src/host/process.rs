@@ -283,6 +283,22 @@ pub fn capture_launch_file(
     }
 }
 
+/// Pre-spawn fence for the bare-name exec. PATH must still select the planned
+/// entry and the bytes behind it must be unchanged, so the shell's own lookup
+/// runs what was probed. The stamp covers the file the entry resolves to.
+pub fn capture_public_command(
+    entry: &crate::contract::plan::LaunchEntrypoint, max_bytes: u64, budget: Duration,
+) -> Result<ExecutableInputStamp, HostError> {
+    entry.validate().map_err(|_| HostError::new("public launch command", HostErrorKind::Invalid))?;
+    let resolved = super::command::PublicCommand::resolve(&entry.command, &entry.search_path)?;
+    if resolved.entry != entry.executable || resolved.search_path != entry.search_path {
+        return Err(HostError::new("public command PATH route changed", HostErrorKind::Conflict));
+    }
+    let target = entry.executable.canonicalize()
+        .map_err(|error| HostError::io("public command resolution", error))?;
+    capture_launch_file(&target, entry.sha256, max_bytes, budget)
+}
+
 /// Recheck the captured inode/size/mtime, not a hash of large code on every poll.
 pub fn verify_executable_inputs(inputs: &[ExecutableInputStamp]) -> Result<(), HostError> {
     #[cfg(not(unix))]
@@ -332,21 +348,6 @@ pub fn resolve_cwd(path: &Path) -> Result<crate::contract::session::CwdIdentity,
 
 /// Capture once before readiness; later samples compare birth/image metadata without hashing
 /// a large executable on every terminal poll. No name/argv scan and no protected data store.
-fn same_executable_inode(live: &Path, expected: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let Ok(live) = std::fs::metadata(live) else { return false };
-        let Ok(expected) = std::fs::metadata(expected) else { return false };
-        live.is_file() && expected.is_file() && live.dev() == expected.dev() && live.ino() == expected.ino()
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (live, expected);
-        false
-    }
-}
-
 pub fn capture_process(
     pid: u32,
     expected_executable: &Path,
@@ -364,9 +365,7 @@ pub fn capture_process(
     let expected = expected_executable
         .canonicalize()
         .map_err(|e| HostError::io("executable identity", e))?;
-    // A public `grok` hard link is the same image as `grok-native`. Path
-    // spelling is display, not a different executable.
-    if path != expected && !same_executable_inode(&path, &expected) {
+    if path != expected {
         return Err(HostError::new(
             "process executable",
             HostErrorKind::Ownership,

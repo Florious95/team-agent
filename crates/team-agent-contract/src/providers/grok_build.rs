@@ -82,6 +82,7 @@ impl PlanHook for GrokAdapter {
         let runtime = self.runtime.as_ref().ok_or(ContractError::Unverified { field: "Grok runtime installation", reason: UNVERIFIED })?;
         let project = self.project.as_ref().ok_or(ContractError::Invalid("Grok actual project"))?;
         if resolved.provider().as_str() != "grok_build" || r.native != runtime.native || r.paths.executable != runtime.engine
+            || r.paths.launcher != runtime.launcher()
             || !interaction::PROFILES[0].matches_native(&r.native) || r.channel != Channel::Tmux || r.mode != LaunchMode::FullWorker
             || r.auth != AuthMode::NativeSubscription || self.mcp.executable != r.paths.candidate || !matches!(r.operation, Operation::Fresh | Operation::Resume)
         { return Err(ContractError::Mismatch("Grok native launch identity")); }
@@ -106,20 +107,11 @@ impl PlanHook for GrokAdapter {
             ExpectedSession::Resume(binding) => arguments.extend(["--resume".into(), binding.native_session.as_str().into()]),
             _ => return Err(ContractError::Invalid("Grok fresh/current or exact resume only")),
         }
-        // The Homebrew `grok` entry is a symlink to `grok-native`. Execing that
-        // symlink is why tmux shows grok-native. Run the same inode under the name grok.
-        let named = native::public_name_link(&runtime.engine).map_err(|error| ContractError::Invalid(error.operation))?;
-        let launcher = runtime.launcher().map(|entry| entry.executable);
-        let launcher_is_wrapper = launcher.as_ref().is_some_and(|path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file()));
-        let (launcher, grok_real) = if launcher_is_wrapper {
-            (runtime.launcher(), Some(named))
-        } else {
-            (Some(crate::contract::plan::LaunchEntrypoint { executable: named.clone(), sha256: runtime.native.executable_sha256 }), None)
-        };
-        let mut set = BTreeMap::from([("HOME".into(), runtime.home().as_os_str().to_owned())]);
-        if let Some(real) = grok_real { set.insert("GROK_REAL".into(), real.as_os_str().to_owned()); }
-        Ok(LaunchPlan { executable: runtime.engine.clone(), launcher, arguments, executable_inputs: vec![], cwd: r.paths.cwd.path.clone(),
-            environment: EnvironmentDelta { remove: BTreeSet::from(["XAI_API_KEY".into(), "GROK_API_KEY".into(), "GROK_REAL".into()]), set },
+        // The pane execs bare `grok` through PATH, so the user's wrapper runs and
+        // keeps the name. The engine is only the image that route must exec into.
+        Ok(LaunchPlan { executable: runtime.engine.clone(), launcher: r.paths.launcher.clone(), arguments, executable_inputs: vec![], cwd: r.paths.cwd.path.clone(),
+            environment: EnvironmentDelta { remove: BTreeSet::from(["XAI_API_KEY".into(), "GROK_API_KEY".into()]),
+                set: BTreeMap::from([("HOME".into(), runtime.home().as_os_str().to_owned())]) },
             expected_session: resolved.expected_session().clone(),
             carriers: CarrierReport { model: CarrierUse::Specified(CarrierRef::Arguments(vec![0,1])), prompt: CarrierUse::Specified(CarrierRef::Resource(prompt.path.clone())), mcp: CarrierUse::Specified(CarrierRef::Resource(mcp.path.clone())), bypass, effort },
             materialization: vec![mcp, prompt] })

@@ -1,5 +1,5 @@
-//! Kiro 2.28.0 adapter boundary. Helper version and chat parameter syntax are
-//! observed, including an authenticated model catalog and the V2 R0 surface.
+//! Kiro 2.28.0 adapter boundary. Public `kiro-cli` launch via PATH; chat parameter
+//! syntax is observed, including an authenticated model catalog and the V2 R0 surface.
 //! Configuration intent and server replies never imply native MCP consumption.
 mod catalog;
 pub mod interaction;
@@ -200,14 +200,6 @@ impl PlanHook for KiroAdapter {
         {
             return Err(ContractError::Invalid("Kiro V2/TUI launch scope"));
         }
-        if request
-            .paths
-            .executable
-            .file_name()
-            .is_none_or(|name| name != "kiro-cli-chat")
-        {
-            return Err(ContractError::Mismatch("Kiro direct chat engine"));
-        }
         if self.mcp.executable != request.paths.candidate {
             return Err(ContractError::Mismatch("MCP candidate"));
         }
@@ -272,8 +264,10 @@ impl PlanHook for KiroAdapter {
             remove: BTreeSet::from(["KIRO_CHAT_UI".into()]),
             set: BTreeMap::from([("KIRO_CHAT_UI".into(), "tui".into())]),
         };
+        // The pane execs bare `kiro-cli chat ...`; the native dispatcher starts
+        // its own chat helper. `executable` is the dispatcher image fence only.
         Ok(LaunchPlan {
-            launcher: None,
+            launcher: request.paths.launcher.clone(),
             executable_inputs: vec![],
             executable: request.paths.executable.clone(),
             arguments,

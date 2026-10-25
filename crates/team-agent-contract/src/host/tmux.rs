@@ -7,7 +7,7 @@ use super::clock::{remaining, Clock};
 use super::command::{CommandEnd, CommandReceipt, CommandRequest, CommandRunner, OutputLimits};
 use super::files::{fingerprint_materialized, DirectoryReceipt, FileReceipt, ScopedDirectory};
 use super::process::{
-    capture_executable_inputs, capture_launch_file, capture_process, fingerprint_file, resolve_cwd, sample_process,
+    capture_executable_inputs, capture_process, capture_public_command, fingerprint_file, resolve_cwd, sample_process,
     verify_executable_inputs, ProcessState,
 };
 use super::shell::{launch_script, quote};
@@ -647,12 +647,10 @@ impl<R: CommandRunner> TmuxHost<R> {
             self.limits.max_executable_bytes,
             remaining(clock, deadline).ok_or_else(|| HostError::new("interpreter input deadline", HostErrorKind::Deadline))?,
         )?;
-        if let Some(entry) = &plan.launcher {
-            inputs.push(capture_launch_file(&entry.executable, entry.sha256,
-                self.limits.max_executable_bytes,
-                remaining(clock, deadline).ok_or_else(|| HostError::new("launch entry deadline", HostErrorKind::Deadline))?,
-            )?);
-        }
+        inputs.push(capture_public_command(&plan.launcher,
+            self.limits.max_executable_bytes,
+            remaining(clock, deadline).ok_or_else(|| HostError::new("launch entry deadline", HostErrorKind::Deadline))?,
+        )?);
         if self.target.is_some()
             || self.directory.receipt().owner != resolved.request().identity
             || !self

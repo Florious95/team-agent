@@ -29,8 +29,10 @@ impl Runner {
 impl CommandRunner for Runner {
     fn run(&mut self, request: &CommandRequest) -> CommandReceipt {
         assert!(request.stdin.is_none());
+        // Every command runs the PATH-selected public entry, never node/index.js.
+        assert_eq!(request.executable.file_name().unwrap(), "cursor-agent");
         if request.arguments.last().is_some_and(|argument| argument == "create-chat") {
-            assert_eq!(request.environment.set.get("CURSOR_INVOKED_AS"), Some(&OsString::from("cursor-agent")));
+            assert!(!request.environment.set.contains_key("CURSOR_INVOKED_AS"));
             assert!(request.environment.set.contains_key("HOME"));
             assert!(request.environment.remove.contains("CURSOR_API_KEY"));
             assert!(request.environment.remove.contains("CURSOR_API_ENDPOINT"));
@@ -50,8 +52,10 @@ fn installation(sandbox: &Sandbox) -> (RuntimeInstallation, CatalogObservation, 
     }
     let home = sandbox.parent.join("auth-home");
     std::fs::create_dir(&home).unwrap();
-    let mut runner = Runner::outputs(&[format!("{VERSION}\n").as_bytes(), b"v22.19.0\n"]);
-    let runtime = probe_runtime(&launcher, &home, &mut runner, bounds()).unwrap();
+    let mut runner = Runner::outputs(&[format!("{VERSION}\n").as_bytes()]);
+    let command = PublicCommand::resolve("cursor-agent", dir.as_os_str()).unwrap();
+    assert_eq!(command.entry, launcher);
+    let runtime = probe_runtime(&command, &home, &mut runner, bounds()).unwrap();
     let metadata = NativeIdentity {
         harness: METADATA_HARNESS.into(), ui: METADATA_UI.into(), executable_sha256: digest(LAUNCHER),
         ..runtime.native.clone()
@@ -80,6 +84,7 @@ fn fixture(sandbox: &Sandbox) -> (CursorAdapter, LaunchRequest, CatalogObservati
     let mut r = support::request(&sandbox.root, "worker");
     r.provider = "cursor".into();
     r.native = runtime.native.clone();
+    r.paths.launcher = runtime.launcher();
     r.paths.executable = runtime.engine.clone();
     r.paths.cwd = resolve_cwd(&cwd).unwrap();
     r.model = Some("gpt-5.6-luna-xhigh".into());
@@ -89,15 +94,17 @@ fn fixture(sandbox: &Sandbox) -> (CursorAdapter, LaunchRequest, CatalogObservati
     (adapter(runtime, project), r, catalog)
 }
 #[test]
-fn direct_runtime_and_catalog_bridge_bind_node_and_entry_not_launcher_bytes() {
+fn runtime_bridges_the_public_launcher_to_the_vendor_node_it_execs_into() {
     let sandbox = Sandbox::new();
     let (runtime, metadata, runner) = installation(&sandbox);
-    assert_eq!(runner.calls.len(), 2);
-    assert_eq!(runner.calls[1].0, runtime.engine);
-    assert_eq!(runner.calls[1].1, vec![OsString::from("--use-system-ca"), OsString::from("--version")]);
+    // One metadata probe through the public entry; Node itself is never run.
+    assert_eq!(runner.calls.len(), 1);
+    assert_eq!(runner.calls[0].1, vec![OsString::from("--version")]);
+    assert_eq!(runtime.engine, sandbox.parent.join(VERSION).join("node"));
     assert_eq!(runtime.native.executable_sha256, digest(b"controlled node image"));
     assert_ne!(runtime.native.executable_sha256, metadata.native.executable_sha256);
-    assert_eq!(runtime.executable_input(1).sha256, digest(b"controlled entry module"));
+    assert_eq!(runtime.launcher().command, "cursor-agent");
+    assert_eq!(runtime.launcher().sha256, digest(LAUNCHER));
     assert_eq!(runtime.bind_catalog(&metadata).unwrap().native, runtime.native);
     let mut wrong = metadata.clone(); wrong.native.version = "2027.01.01-abcdef".into();
     assert!(runtime.bind_catalog(&wrong).is_err());
@@ -115,7 +122,8 @@ fn native_allocator_needs_real_exit_zero_and_never_reuses_timeout_uuid() {
     let cwd = resolve_cwd(&sandbox.parent).unwrap();
     let mut runner = Runner::outputs(&[format!("{SID}\n").as_bytes()]);
     assert_eq!(allocate_chat(&runtime, &cwd, &mut runner, bounds()).unwrap().as_str(), SID);
-    assert_eq!(runner.calls[0].1, vec![OsString::from("--use-system-ca"), runtime.entry().as_os_str().to_owned(), OsString::from("create-chat")]);
+    assert_eq!(runner.calls[0].0, runtime.launcher().executable);
+    assert_eq!(runner.calls[0].1, vec![OsString::from("create-chat")]);
     for (end, code) in [(CommandEnd::TimedOut, None), (CommandEnd::Exited, Some(1)), (CommandEnd::OutputLimit, None)] {
         let mut runner = Runner::outputs(&[SID.as_bytes()]);
         runner.outputs[0].end = end; runner.outputs[0].exit_code = code;
@@ -140,8 +148,16 @@ fn fresh_plan_uses_private_mcp_approved_exact_session_and_prompt_bridge() {
         assert!(plan.arguments.windows(2).any(|pair| pair[0] == "--workspace" && pair[1] == r.paths.cwd.path.as_os_str()));
         assert_eq!(plan.arguments.iter().any(|arg| arg == "--force"), bypass);
         assert!(!plan.arguments.iter().any(|arg| arg == "--continue" || arg == "--session-id" || arg == "--sandbox"));
-        assert_eq!(plan.executable_inputs.len(), 1);
-        assert_eq!(plan.arguments[plan.executable_inputs[0].argument], plan.executable_inputs[0].path.as_os_str());
+        // The pane execs bare `cursor-agent`; its vendor script picks Node itself.
+        assert_eq!(plan.launcher, r.paths.launcher);
+        assert_eq!(plan.executable, r.paths.executable);
+        assert!(plan.executable_inputs.is_empty());
+        assert_eq!(plan.arguments[0], "--model");
+        assert!(!plan.arguments.iter().any(|arg| arg == "--use-system-ca" || arg.to_string_lossy().ends_with("index.js")));
+        assert!(!plan.environment.set.contains_key("CURSOR_INVOKED_AS") && !plan.environment.set.contains_key("NODE_COMPILE_CACHE"));
+        let script = String::from_utf8(team_agent_contract::host::shell::launch_script(&plan, &Default::default()).unwrap()).unwrap();
+        assert!(script.contains("\nexec 'cursor-agent' '--model' 'gpt-5.6-luna-xhigh'"), "{script}");
+        assert!(!script.contains("/node'") && !script.contains("index.js"), "{script}");
         assert_eq!(plan.materialization.len(), 2);
         assert_eq!(plan.materialization[1].kind, ResourceKind::Prompt);
         assert_eq!(plan.materialization[1].contents, r.prompt.as_ref().unwrap().as_bytes());
@@ -149,7 +165,7 @@ fn fresh_plan_uses_private_mcp_approved_exact_session_and_prompt_bridge() {
         let config: serde_json::Value = serde_json::from_slice(&plan.materialization[0].contents).unwrap();
         assert_eq!(config["mcpServers"]["team"]["command"], "/fake/candidate");
         assert!(plan.environment.remove.contains("CURSOR_API_KEY"));
-        let mut invalid = plan.clone(); invalid.executable_inputs[0].argument = 0;
+        let mut invalid = plan.clone(); invalid.launcher.executable = r.paths.executable.clone();
         assert!(validate_launch_plan(&CURSOR_DESCRIPTOR, &resolved, &invalid).is_err());
     }
 }
@@ -198,14 +214,51 @@ fn exact_resume_never_allocates_a_new_session_or_switches_cwd() {
     assert!(resolve_launch(&CURSOR_DESCRIPTOR, &adapter.hooks(), &r, Some(&catalog)).is_err());
 }
 #[test]
-fn interpreter_entry_stamps_reject_replacement_without_process_argv_reads() {
+fn public_command_fence_rejects_a_replaced_entry_or_a_changed_path_route() {
     let sandbox = Sandbox::new();
     let (runtime, _, _) = installation(&sandbox);
-    let inputs = capture_executable_inputs(&[runtime.executable_input(1)], 1024 * 1024, Duration::from_secs(2)).unwrap();
+    let launcher = runtime.launcher();
+    let inputs = vec![capture_public_command(&launcher, 1024 * 1024, Duration::from_secs(2)).unwrap()];
     assert!(verify_executable_inputs(&inputs).is_ok());
-    std::fs::write(runtime.entry(), b"replacement module with a different length").unwrap();
+    // A user wrapper placed ahead after planning changes the route: re-plan, never adopt.
+    let ahead = sandbox.parent.join("ahead");
+    std::fs::create_dir(&ahead).unwrap();
+    std::fs::write(ahead.join("cursor-agent"), b"#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(ahead.join("cursor-agent"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut moved = launcher.clone();
+    moved.search_path = std::env::join_paths([ahead.as_path(), launcher.executable.parent().unwrap()]).unwrap();
+    assert!(capture_public_command(&moved, 1024 * 1024, Duration::from_secs(2)).is_err());
+    std::fs::write(&launcher.executable, b"replacement launcher with a different length").unwrap();
     assert!(verify_executable_inputs(&inputs).is_err());
-    assert!(capture_executable_inputs(&[runtime.executable_input(1)], 1024 * 1024, Duration::from_secs(2)).is_err());
+    assert!(capture_public_command(&launcher, 1024 * 1024, Duration::from_secs(2)).is_err());
+}
+#[test]
+fn user_wrapper_named_cursor_agent_first_on_path_is_kept_and_routes_to_the_vendor_install() {
+    let sandbox = Sandbox::new();
+    let (runtime, _, _) = installation(&sandbox);
+    let wrappers = sandbox.parent.join("proxy/bin");
+    std::fs::create_dir_all(&wrappers).unwrap();
+    let marker = sandbox.parent.join("wrapper-invocations");
+    let vendor = sandbox.parent.join(VERSION).join("cursor-agent");
+    std::fs::write(&vendor, b"#!/bin/sh\nprintf 'vendor %s\\n' \"$*\"\n").unwrap();
+    std::fs::write(wrappers.join("cursor-agent"), format!(
+        "#!/bin/sh\nprintf 'wrapper\\n' >> '{}'\nexec '{}' \"$@\"\n", marker.display(), vendor.display())).unwrap();
+    std::fs::set_permissions(wrappers.join("cursor-agent"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::join_paths([wrappers.as_path(), vendor.parent().unwrap()]).unwrap();
+    let command = PublicCommand::resolve("cursor-agent", &path).unwrap();
+    assert_eq!(command.entry, wrappers.join("cursor-agent"));
+    assert_eq!(resolve_installation(&command).unwrap(), sandbox.parent.join(VERSION));
+    let mut runner = Runner::outputs(&[format!("{VERSION}\n").as_bytes()]);
+    let wrapped = probe_runtime(&command, runtime.home(), &mut runner, bounds()).unwrap();
+    assert_eq!(runner.calls[0].0, wrappers.join("cursor-agent"), "metadata probes run the wrapper");
+    assert_eq!(wrapped.engine, runtime.engine);
+    assert_eq!(wrapped.launcher().executable, wrappers.join("cursor-agent"));
+    // The real shell runs bare `cursor-agent` through the wrapper to the vendor script.
+    let output = std::process::Command::new("/bin/sh").arg("-c").arg("exec cursor-agent --model gpt-5.6-luna-xhigh")
+        .env("PATH", &wrapped.launcher().search_path).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "wrapper\n");
+    assert_eq!(output.stdout, b"vendor --model gpt-5.6-luna-xhigh\n");
 }
 fn scope() -> EvidenceScope {
     EvidenceScope {

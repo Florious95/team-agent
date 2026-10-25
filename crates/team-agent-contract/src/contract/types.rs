@@ -287,6 +287,15 @@ pub fn require_absolute(path: &Path, field: &'static str) -> Result<(), Contract
     }
 }
 
+/// A bare public command name such as `grok`: the shell resolves it through
+/// PATH. Never a path, so no absolute or relative image can be named here.
+pub fn valid_command_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+}
+
 /// Lexically constrained request, NOT a proof against symlinks or concurrent writers.
 /// The future owned-I/O implementation must additionally enforce no-follow and ownership.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

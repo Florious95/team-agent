@@ -470,6 +470,33 @@ esac"#);
 
     #[cfg(unix)]
     #[test]
+    fn grok_build_contract_catalog_runs_the_public_grok_found_on_path() {
+        let program = fixture_program("grok", r#"
+test "$#" = 1 || exit 9
+case "$1" in
+  --version) printf '%s\n' 'grok 1.0.52 (0920c8169e27)' ;;
+  models) exec /bin/cat "$TEAM_AGENT_MODELS_FIXTURE" ;;
+  *) exit 9 ;;
+esac"#);
+        let mut grok = CliFixture::new(program);
+        let response = grok.program.with_extension("stdout");
+        std::fs::write(&response, include_bytes!("../provider/testdata/grok-models-authenticated.stdout")).unwrap();
+        grok.response = Some(response);
+        let output = run_public_models_cli(&grok.program, grok.response.as_deref(),
+            &["models", "--provider", "grok_build", "--json"]);
+        let text = public_cli_text(&output);
+        let calls = std::fs::read_to_string(grok.program.with_extension("count")).unwrap_or_default();
+        assert!(output.status.success(), "{text}");
+        // Whatever `grok` PATH selects answers every probe; no install path is assumed.
+        assert_eq!(calls, "1:--version\n1:models\n");
+        let value: Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(value["provider"], "grok_build");
+        assert_eq!(value["source"]["executable"], grok.program.to_str().unwrap());
+        assert!(value["models"].as_array().unwrap().iter().any(|row| row["model_id"] == "grok-4.7-build-fast"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn cursor_contract_bad_version_has_no_legacy_entrypoint_fallback() {
         use std::os::unix::fs::PermissionsExt;
         let cursor = CliFixture::new(fixture_program("cursor-agent", "printf '%s\\n' 'Cursor release unknown'"));

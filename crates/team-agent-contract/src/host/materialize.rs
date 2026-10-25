@@ -54,8 +54,9 @@ impl<R: CommandRunner> ScopedMaterializer<R> {
             roots,
             policies: descriptor.teardown.resources.to_vec(),
             operation,
-            executable: plan.executable.clone(),
-            executable_hash: resolved.request().native.executable_sha256,
+            // Validation runs the same public command as the pane, wrappers included.
+            executable: plan.launcher.executable.clone(),
+            executable_hash: plan.launcher.sha256,
             runner,
         })
     }

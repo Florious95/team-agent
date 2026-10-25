@@ -420,36 +420,108 @@ fn session_binding_uses_only_modal_fields_not_matching_background_metadata() {
 struct Runner;
 impl CommandRunner for Runner {
     fn run(&mut self, request: &CommandRequest) -> CommandReceipt {
+        // Probes run the PATH entry itself and leave the user's environment alone.
         assert_eq!(request.arguments, [std::ffi::OsString::from("--version")]);
-        assert!(!request.environment.set.contains_key("GROK_REAL"));
-        assert!(request.environment.remove.contains("GROK_REAL"));
+        assert_eq!(request.executable.file_name().unwrap(), "grok");
+        assert!(request.environment.set.is_empty() && request.environment.remove.is_empty());
         CommandReceipt { end: CommandEnd::Exited, exit_code: Some(0), child_pid: Some(42), child_reaped: true,
             stdout: b"grok 1.0.52 (0920c8169e27)\n".to_vec(), stderr: vec![], elapsed: Duration::from_millis(1) }
     }
 }
-#[test]
-fn runtime_catalog_and_launch_identity_fence_exact_native_without_release_pins() {
-    let sandbox = support::Sandbox::new(); let engine = sandbox.parent.join("grok-native");
-    std::fs::write(&engine, b"controlled final native").unwrap(); std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o700)).unwrap();
+fn write_executable(path: &Path, bytes: &[u8]) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, bytes).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+/// vendor/bin/grok -> vendor/lib/grok-native, the layout an npm/Homebrew
+/// install leaves on PATH. `image` is the native file the symlink ends in.
+fn vendor_install(root: &Path, image: Option<&Path>) -> (std::path::PathBuf, std::path::PathBuf) {
+    let (bin, native) = (root.join("vendor/bin"), root.join("vendor/lib/grok-native"));
+    std::fs::create_dir_all(&bin).unwrap();
+    match image {
+        Some(image) => { std::fs::create_dir_all(native.parent().unwrap()).unwrap(); std::os::unix::fs::symlink(image, &native).unwrap(); }
+        None => write_executable(&native, b"controlled final native"),
+    }
+    std::os::unix::fs::symlink(&native, bin.join("grok")).unwrap();
+    (bin, native.canonicalize().unwrap())
+}
+fn grok_launch(sandbox: &support::Sandbox, command: &PublicCommand) -> (GrokAdapter, ResolvedLaunch, LaunchPlan, RuntimeInstallation) {
     let bounds = ReadBounds { deadline: Duration::from_secs(10), max_output_bytes: 65536 };
-    let metadata = probe_launcher(&engine, &mut Runner, bounds).unwrap();
-    let mut runtime = probe_runtime(&engine, &sandbox.parent, &mut Runner, bounds).unwrap(); runtime.native.platform = Platform::MacOs;
+    let metadata = probe_launcher(command, &mut Runner, bounds).unwrap();
+    let mut runtime = probe_runtime(command, &sandbox.parent, &mut Runner, bounds).unwrap(); runtime.native.platform = Platform::MacOs;
     let catalog = CatalogObservation { provider: ProviderId::new("grok_build").unwrap(), native: metadata, schema: CATALOG_SOURCE.schema.into(), models: parse_catalog(CATALOG.as_bytes()).unwrap() };
     let catalog = runtime.bind_catalog(&catalog).unwrap();
     let a = adapter().with_runtime(runtime.clone()).with_project("/actual/project".into()).unwrap();
-    let mut r = support::request(&sandbox.root, "worker"); r.provider = "grok_build".into(); r.native = runtime.native;
-    r.paths.executable = engine; r.paths.candidate = "/fake/candidate".into(); r.model = Some("grok-4.7".into());
+    std::fs::create_dir_all(&sandbox.root).unwrap();
+    let mut r = support::request(&sandbox.root, "worker"); r.provider = "grok_build".into(); r.native = runtime.native.clone();
+    r.paths.launcher = runtime.launcher(); r.paths.executable = runtime.engine.clone(); r.paths.candidate = "/fake/candidate".into(); r.model = Some("grok-4.7".into());
     r.prompt = Some("user\nproject\nrole\nTEAM".into()); r.input_profile = Some(PROFILE.into()); r.bypass = true;
     let resolved = resolve_launch(&GROK_BUILD_DESCRIPTOR, &a.hooks(), &r, Some(&catalog)).unwrap();
     let plan = a.plan(&resolved).unwrap(); validate_launch_plan(&GROK_BUILD_DESCRIPTOR, &resolved, &plan).unwrap();
+    (a, resolved, plan, runtime)
+}
+#[test]
+fn runtime_catalog_and_launch_identity_fence_exact_native_without_release_pins() {
+    let sandbox = support::Sandbox::new();
+    let (bin, image) = vendor_install(&sandbox.parent, None);
+    let command = PublicCommand::resolve("grok", bin.as_os_str()).unwrap();
+    let (a, resolved, plan, runtime) = grok_launch(&sandbox, &command);
+    // The vendor symlink is the entry as found; the inner image is only the fence.
+    assert_eq!(plan.launcher.command, "grok");
+    assert_eq!(plan.launcher.executable, bin.join("grok"));
+    assert_eq!(plan.executable, image);
+    assert_eq!(runtime.native.executable_sha256, digest(b"controlled final native"));
+    assert!(!plan.environment.set.contains_key("GROK_REAL") && !plan.environment.remove.contains("GROK_REAL"));
     assert!(matches!(plan.expected_session, ExpectedSession::CaptureAfterLaunch));
     assert!(!plan.arguments.iter().any(|arg| arg == "--session-id" || arg == "--continue" || arg == "--add-dir"));
+    let r = resolved.request().clone();
     assert_eq!(plan.materialization[1].contents, r.prompt.as_ref().unwrap().as_bytes());
+    let catalog = CatalogObservation { provider: ProviderId::new("grok_build").unwrap(), native: runtime.native.clone(), schema: CATALOG_SOURCE.schema.into(), models: parse_catalog(CATALOG.as_bytes()).unwrap() };
     let mut descriptor = GROK_BUILD_DESCRIPTOR.clone(); descriptor.tool_names.naming = Support::Supported(ToolNaming::StaticServer { key: "team" });
     assert!(resolve_launch(&descriptor, &a.hooks(), &r, Some(&catalog)).is_err());
     descriptor = GROK_BUILD_DESCRIPTOR.clone(); descriptor.workspace.shared_cwd = true;
     assert!(resolve_launch(&descriptor, &a.hooks(), &r, Some(&catalog)).is_err());
-    r.model = Some("luna-invented".into()); assert!(resolve_launch(&GROK_BUILD_DESCRIPTOR, &a.hooks(), &r, Some(&catalog)).is_err());
+    let mut wrong = r.clone(); wrong.model = Some("luna-invented".into());
+    assert!(resolve_launch(&GROK_BUILD_DESCRIPTOR, &a.hooks(), &wrong, Some(&catalog)).is_err());
+    // A launcher other than the probed PATH route can never be planned.
+    let mut wrong = r.clone(); wrong.paths.launcher.sha256 = digest(b"another entry");
+    let resolved = resolve_launch(&GROK_BUILD_DESCRIPTOR, &a.hooks(), &wrong, Some(&catalog)).unwrap();
+    assert!(a.plan(&resolved).is_err());
+}
+#[test]
+fn grok_launch_runs_the_user_wrapper_prepended_to_path_then_the_native_image() {
+    let sandbox = support::Sandbox::new();
+    // The "native image" echoes its argv, so exec-through is observable.
+    let (vendor, image) = vendor_install(&sandbox.parent, Some(Path::new("/bin/echo")));
+    let wrappers = sandbox.parent.join("user wrappers");
+    let marker = sandbox.parent.join("wrapper-invocations");
+    write_executable(&wrappers.join("grok"), format!(
+        "#!/bin/sh\nprintf '%s|%s\\n' \"${{0##*/}}\" \"$1\" >> '{}'\nexec '{}' \"$@\"\n",
+        marker.display(), vendor.join("grok").display()).as_bytes());
+    let path = std::env::join_paths([wrappers.as_path(), vendor.as_path(), Path::new("/usr/bin"), Path::new("/bin")]).unwrap();
+    let command = PublicCommand::resolve("grok", &path).unwrap();
+    assert_eq!(command.entry, wrappers.join("grok"), "the user wrapper is the public entry");
+    let (_, _, plan, runtime) = grok_launch(&sandbox, &command);
+    assert_eq!(plan.launcher.executable, wrappers.join("grok"));
+    assert_eq!(plan.executable, image);
+    assert_eq!(runtime.engine, Path::new("/bin/echo").canonicalize().unwrap());
+    let script = team_agent_contract::host::shell::launch_script(&plan, &Default::default()).unwrap();
+    let text = String::from_utf8(script.clone()).unwrap();
+    assert!(text.contains("\nexec 'grok' '--model' 'grok-4.7'"), "{text}");
+    for forbidden in ["grok-native", "GROK_REAL", "/usr/local/bin/grok", "/opt/homebrew", "team-agent-grok-name"] {
+        assert!(!text.contains(forbidden), "{forbidden} in {text}");
+    }
+    assert!(!text.contains(&format!("exec '{}", image.display())));
+    // Run the generated script with the real system shell: PATH lookup of bare
+    // `grok` must reach the user wrapper, which then execs the native image.
+    let launch = sandbox.parent.join("launch.sh");
+    std::fs::write(&launch, &script).unwrap();
+    let output = std::process::Command::new("/bin/sh").arg(&launch).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(std::fs::read_to_string(&marker).expect("the user wrapper genuinely ran"), "grok|--model\n");
+    let echoed = String::from_utf8(output.stdout).unwrap();
+    assert!(echoed.starts_with("--model grok-4.7 --cwd "), "{echoed}");
+    assert!(echoed.contains("--always-approve"));
 }
 #[test]
 fn private_primary_rejects_git_and_inherited_config_without_reading_bodies() {
@@ -465,7 +537,7 @@ fn private_primary_rejects_git_and_inherited_config_without_reading_bodies() {
     assert!(require_private_primary(&identity).is_err());
 }
 #[test]
-fn wrapper_bytes_and_stamp_are_distinct_from_final_image() {
+fn launch_script_execs_the_bare_public_command_and_entry_bytes_are_fenced() {
     let sandbox = support::Sandbox::new(); let wrapper = sandbox.parent.join("approved-wrapper");
     std::fs::write(&wrapper, b"exec final image after approved route").unwrap();
     let stamp = capture_launch_file(&wrapper, digest(b"exec final image after approved route"), 1024, Duration::from_secs(2)).unwrap();
@@ -473,16 +545,13 @@ fn wrapper_bytes_and_stamp_are_distinct_from_final_image() {
     let descriptor = support::descriptor(); let request = support::request(&sandbox.root, "worker");
     let resolved = resolve_launch(&descriptor, &support::hooks(), &request, None).unwrap();
     let mut plan = support::Fake.plan(&resolved).unwrap();
-    plan.launcher = Some(LaunchEntrypoint { executable: wrapper.clone(), sha256: stamp.sha256 });
     validate_launch_plan(&descriptor, &resolved, &plan).unwrap();
     let script = String::from_utf8(team_agent_contract::host::shell::launch_script(&plan, &Default::default()).unwrap()).unwrap();
-    assert!(script.contains(&format!("exec '{}'", wrapper.display())));
-    assert!(!script.contains("exec '/fake/bin'"));
-    plan.launcher = None;
-    plan.executable = std::path::PathBuf::from("/opt/grok/grok-native");
-    let deep = String::from_utf8(team_agent_contract::host::shell::launch_script(&plan, &Default::default()).unwrap()).unwrap();
-    assert!(deep.contains("exec 'grok'"));
-    assert!(!deep.contains("grok-native"));
+    assert!(script.contains("\nexport PATH='/fake'\nexec 'fake' 'chat' "), "{script}");
+    assert!(!script.contains("exec '/"), "no absolute image or entry is ever exec'd: {script}");
+    // Neither the entry path nor the inner image can replace the bare name.
+    plan.launcher.command = "/fake/bin".into();
+    assert!(team_agent_contract::host::shell::launch_script(&plan, &Default::default()).is_err());
     std::fs::write(&wrapper, b"replaced").unwrap(); assert!(verify_executable_inputs(&[stamp]).is_err());
     assert!(capture_launch_file(&wrapper, digest(b"original"), 1024, Duration::from_secs(2)).is_err());
 }

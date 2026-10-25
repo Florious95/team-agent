@@ -67,25 +67,19 @@ unset TEAM_AGENT_HOST_NAMES TEAM_AGENT_HOST_KEY
         script.extend(quote(value)?);
         script.push(b'\n');
     }
-    // Exec the public command the user would type. Never exec a canonicalized
-    // deep image: that skips wrappers, proxies and the name users recognize.
-    script.extend_from_slice(b"exec ");
-    script.extend(quote(public_command(plan))?);
+    // Exec the public command by bare name, exactly as the user's shell would:
+    // `sh` resolves it through PATH, so wrappers on PATH run and keep their name.
+    plan.launcher
+        .validate()
+        .map_err(|_| HostError::new("public launch command", HostErrorKind::Invalid))?;
+    script.extend_from_slice(b"export PATH=");
+    script.extend(quote(&plan.launcher.search_path)?);
+    script.extend_from_slice(b"\nexec ");
+    script.extend(quote(std::ffi::OsStr::new(&plan.launcher.command))?);
     for argument in &plan.arguments {
         script.push(b' ');
         script.extend(quote(argument)?);
     }
     script.push(b'\n');
     Ok(script)
-}
-
-fn public_command(plan: &LaunchPlan) -> &std::ffi::OsStr {
-    let entry = plan.launcher.as_ref().map_or(&plan.executable, |entry| &entry.executable);
-    // Only the internal image name is rewritten. An approved absolute launcher,
-    // including a test fixture, still runs as given so PATH cannot substitute it.
-    if entry.file_name().is_some_and(|name| name == "grok-native") {
-        std::ffi::OsStr::new("grok")
-    } else {
-        entry.as_os_str()
-    }
 }

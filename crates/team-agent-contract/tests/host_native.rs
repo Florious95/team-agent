@@ -144,6 +144,10 @@ fn native_case(mode: &str, content: &str, expected_keys: usize) {
 }
 
 fn native_case_on(mode: &str, content: &str, expected_keys: usize, shared_workspace: bool, new_session: bool) {
+    native_case_with(mode, content, expected_keys, shared_workspace, new_session, false);
+}
+
+fn native_case_with(mode: &str, content: &str, expected_keys: usize, shared_workspace: bool, new_session: bool, user_wrapper: bool) {
     let tmux = configured_binary("CONTRACT_TMUX");
     assert_eq!(
         std::env::var("CONTRACT_OLD_SCOPE").as_deref(),
@@ -172,6 +176,11 @@ fn native_case_on(mode: &str, content: &str, expected_keys: usize, shared_worksp
     let cwd = resolve_cwd(&cwd_path).unwrap();
     let candidate = std::env::current_exe().unwrap().canonicalize().unwrap();
     let (executable, native_hash) = native_terminal::copy_executable(directory.path());
+    let wrapper_marker = user_wrapper.then(|| directory.path().join("user-wrapper-invocations"));
+    let launcher = match &wrapper_marker {
+        Some(marker) => public_launcher_behind_wrapper(&executable, marker),
+        None => public_launcher(&executable, native_hash),
+    };
     let n = native(native_hash);
     let d = descriptor(mode, &n);
     let h = native_terminal::hooks();
@@ -191,6 +200,7 @@ fn native_case_on(mode: &str, content: &str, expected_keys: usize, shared_worksp
             identity,
             native: n,
             paths: LaunchPaths {
+                launcher: launcher.clone(),
                 executable: executable.clone(),
                 candidate,
                 cwd: cwd.clone(),
@@ -285,6 +295,15 @@ fn native_case_on(mode: &str, content: &str, expected_keys: usize, shared_worksp
             .map(|pane| owned_process_diagnostic(pane.pid, &executable, native_hash))
     );
     let target = spawn.target.unwrap();
+    if let Some(marker) = &wrapper_marker {
+        // The pane's bare `fixture` resolved to the user wrapper first on PATH;
+        // it ran exactly once in the pane PID and exec'd the image in place.
+        assert_eq!(
+            std::fs::read_to_string(marker).expect("the user wrapper genuinely ran"),
+            format!("{} fixture\n", target.process.identity.pid)
+        );
+        assert_eq!(launch.request().paths.launcher, launcher);
+    }
     assert_eq!(target.shared_endpoint, shared_workspace);
     if let Some((_, peer, _)) = &anchor {
         assert_eq!(target.endpoint, peer.endpoint);
@@ -559,6 +578,11 @@ fn real_tmux_shared_workspace_is_visible_and_preserves_peer_socket_and_global_op
 #[test]
 fn real_tmux_new_team_session_uses_existing_workspace_server_and_preserves_other_team() {
     native_case_on("single", "new visible team session\nexisting workspace server", 1, true, true);
+}
+
+#[test]
+fn real_tmux_pane_runs_the_user_wrapper_prepended_to_path() {
+    native_case_with("single", "user wrapper on PATH\nexec through to the native image", 1, false, false, true);
 }
 
 #[test]

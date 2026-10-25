@@ -29,19 +29,11 @@ use crate::model::enums::{Provider, ProviderEffort};
 use crate::provider::adapters::pi::{build_pi_command_argv, PiCommandRequest, PiSessionSelector};
 use crate::provider::{CommandPlan, McpConfig, ProviderError, SessionId};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PiExecutableFileType {
-    Wrapper,
-    Symlink,
-    Binary,
-}
-
+/// The first executable `pi` on PATH, exactly what the worker's bare `pi`
+/// runs: a wrapper, npm symlink or plain binary alike. No inner binary is probed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PiExecutableChain {
     pub path_entry: PathBuf,
-    pub path_entry_type: PiExecutableFileType,
-    pub launch_executable: PathBuf,
-    pub real_binary: PathBuf,
     pub pi_version: String,
     pub catalog_sha256: String,
 }
@@ -169,20 +161,13 @@ pub(crate) fn verify_started_pi_model(selected: &str, observed: &str) -> Result<
 }
 
 /// ---
-/// purpose: 校验 Pi launch/real path 与 live catalog；MCP 能力在实际 Pi context 验证
-/// returns: executable chain 与 catalog receipt 完整时成功
+/// purpose: 校验 Pi PATH entry 与 live catalog；MCP 能力在实际 Pi context 验证
+/// returns: PATH entry 与 catalog receipt 完整时成功
 /// errors: 缺路径或 catalog receipt 时返回 ProviderError
 /// ---
 pub(crate) fn validate_pi_executable_chain(chain: &PiExecutableChain) -> Result<(), ProviderError> {
     if !chain.path_entry.is_absolute()
-        || !chain.launch_executable.is_absolute()
-        || !chain.real_binary.is_absolute()
-        || !matches!(
-            chain.path_entry_type,
-            PiExecutableFileType::Wrapper | PiExecutableFileType::Symlink
-        )
-        || chain.launch_executable != chain.path_entry
-        || chain.real_binary == chain.launch_executable
+        || chain.path_entry.file_name().is_none_or(|name| name != "pi")
         || chain.catalog_sha256.len() != 64
         || !chain
             .catalog_sha256
@@ -479,21 +464,6 @@ fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn executable_file_type(path: &Path) -> Result<PiExecutableFileType, ProviderError> {
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|error| ProviderError::Io(format!("{}: {error}", path.display())))?;
-    if metadata.file_type().is_symlink() {
-        return Ok(PiExecutableFileType::Symlink);
-    }
-    let bytes = std::fs::read(path)
-        .map_err(|error| ProviderError::Io(format!("{}: {error}", path.display())))?;
-    if bytes.starts_with(b"#!") {
-        Ok(PiExecutableFileType::Wrapper)
-    } else {
-        Ok(PiExecutableFileType::Binary)
-    }
-}
-
 #[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct PiCatalogTestObservation {
@@ -610,12 +580,7 @@ impl crate::provider::model_catalog::CatalogObserver for PiCatalogObserver {
 }
 
 pub(crate) fn pi_model_candidates(requested: &str) -> Result<Vec<String>, ProviderError> {
-    let path = std::env::var_os("PATH")
-        .ok_or_else(|| ProviderError::Command("PATH is not set".to_string()))?;
-    let executable = std::env::split_paths(&path)
-        .map(|directory| directory.join("pi"))
-        .find(|candidate| candidate.is_file())
-        .ok_or_else(|| ProviderError::Command("Pi executable not found on PATH".to_string()))?;
+    let executable = pi_path_entry()?;
     let catalog = run_pi_catalog(&executable, Duration::from_secs(10), 1024 * 1024)
         .map_err(ProviderError::Command)?;
     let models = parse_pi_list_models_table(&catalog)?;
@@ -629,21 +594,13 @@ pub(crate) fn pi_model_candidates(requested: &str) -> Result<Vec<String>, Provid
         .collect())
 }
 
-fn pi_path_entries() -> Result<Vec<PathBuf>, ProviderError> {
+/// The shell's own PATH choice: the first executable `pi`, kept as found.
+fn pi_path_entry() -> Result<PathBuf, ProviderError> {
     let path = std::env::var_os("PATH")
         .ok_or_else(|| ProviderError::Command("PATH is not set".to_string()))?;
-    let mut seen = BTreeSet::new();
-    let entries = std::env::split_paths(&path)
-        .map(|directory| directory.join("pi"))
-        .filter(|candidate| candidate.is_file())
-        .filter(|candidate| seen.insert(candidate.clone()))
-        .collect::<Vec<_>>();
-    if entries.is_empty() {
-        return Err(ProviderError::Command(
-            "Pi executable not found on PATH".to_string(),
-        ));
-    }
-    Ok(entries)
+    team_agent_contract::host::command::PublicCommand::resolve("pi", &path)
+        .map(|command| command.entry)
+        .map_err(|_| ProviderError::Command("Pi executable not found on PATH".to_string()))
 }
 
 fn command_stdout(executable: &Path, args: &[&str]) -> Result<Vec<u8>, ProviderError> {
@@ -675,53 +632,17 @@ fn command_stdout(executable: &Path, args: &[&str]) -> Result<Vec<u8>, ProviderE
 /// ---
 pub(crate) fn resolve_pi_executable_chain(
 ) -> Result<(PiExecutableChain, Vec<String>), ProviderError> {
-    let path_entries = pi_path_entries()?;
-    let path_entry = path_entries[0].clone();
-    let path_entry_type = executable_file_type(&path_entry)?;
-    if !matches!(
-        path_entry_type,
-        PiExecutableFileType::Wrapper | PiExecutableFileType::Symlink
-    ) {
-        return Err(ProviderError::Command(
-            "the direct Pi PATH entry is not a verified wrapper or npm symlink".to_string(),
-        ));
-    }
+    // Probe through the PATH entry itself so a user wrapper sees every probe.
+    let path_entry = pi_path_entry()?;
     let version =
         String::from_utf8(command_stdout(&path_entry, &["--version"])?).map_err(|error| {
             ProviderError::Command(format!("Pi version output is not UTF-8: {error}"))
         })?;
-    let version = version.trim().to_string();
-    let launch_identity = std::fs::canonicalize(&path_entry)
-        .map_err(|error| ProviderError::Io(format!("{}: {error}", path_entry.display())))?;
-    let real_binary = if path_entry_type == PiExecutableFileType::Symlink {
-        launch_identity
-    } else {
-        path_entries
-            .iter()
-            .find_map(|candidate| {
-                let real = std::fs::canonicalize(candidate).ok()?;
-                (real != launch_identity).then_some(real)
-            })
-            .ok_or_else(|| {
-                ProviderError::Command(
-                    "Pi PATH wrapper has no independently resolved real executable".to_string(),
-                )
-            })?
-    };
-    let _real_version =
-        String::from_utf8(command_stdout(&real_binary, &["--version"])?).map_err(|error| {
-            ProviderError::Command(format!(
-                "Pi real binary version output is not UTF-8: {error}"
-            ))
-        })?;
     let catalog = command_stdout(&path_entry, &["--list-models"])?;
     let models = parse_pi_list_models_table(&catalog)?;
     let chain = PiExecutableChain {
-        path_entry: path_entry.clone(),
-        path_entry_type,
-        launch_executable: path_entry,
-        real_binary,
-        pi_version: version,
+        path_entry,
+        pi_version: version.trim().to_string(),
         catalog_sha256: sha256(&catalog),
     };
     validate_pi_executable_chain(&chain)?;

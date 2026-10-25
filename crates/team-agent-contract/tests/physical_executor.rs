@@ -705,6 +705,7 @@ fn startup_ack_requires_resolved_permission_and_reobserves_modal_clear() {
         identity: owner(),
         native: target.native.clone(),
         paths: LaunchPaths {
+            launcher: fixture_launcher(),
             executable: "/fixture/bin".into(),
             candidate: "/fixture/candidate".into(),
             cwd: target.cwd.clone(),

@@ -101,9 +101,11 @@ fn descriptor_and_seven_hooks_keep_unknown_lifecycle_and_legacy_aliases_closed()
 fn metadata_probe_is_evergreen_but_never_claims_node_or_a_tui_profile() {
     let sandbox = Sandbox::new();
     let grant = grant(&sandbox);
+    let command = PublicCommand::resolve("cursor-agent", sandbox.parent.as_os_str()).unwrap();
+    assert_eq!(command.entry, grant.executable);
     for version in ["2026.10.01-e373342", "2027.01.02-aabbccdd"] {
         let mut runner = runner(vec!["--version"], CommandEnd::Exited, Some(0), format!("{version}\n").as_bytes());
-        let native = probe_launcher(&grant.executable, &mut runner, bounds()).unwrap();
+        let native = probe_launcher(&command, &mut runner, bounds()).unwrap();
         assert_eq!(native.version, version);
         assert_eq!(native.executable_sha256, digest(LAUNCHER));
         assert_eq!(native.harness, METADATA_HARNESS);
@@ -116,12 +118,19 @@ fn metadata_probe_is_evergreen_but_never_claims_node_or_a_tui_profile() {
     }
     let error = parse_version(b"unexpected-banner").unwrap_err().to_string();
     assert!(error.contains("unexpected-banner"));
-    let alias = sandbox.parent.join("agent");
-    std::os::unix::fs::symlink(&grant.executable, &alias).unwrap();
-    assert_eq!(resolve_launcher(&alias).unwrap(), grant.executable.canonicalize().unwrap());
-    let proxy = sandbox.parent.join("cursor");
-    std::fs::write(&proxy, LAUNCHER).unwrap();
-    assert!(resolve_launcher(&proxy).is_err());
+    // A PATH symlink stays the entry as found; its bytes are the launcher's.
+    let links = sandbox.parent.join("links");
+    std::fs::create_dir(&links).unwrap();
+    std::os::unix::fs::symlink(&grant.executable, links.join("cursor-agent")).unwrap();
+    let linked = PublicCommand::resolve("cursor-agent", links.as_os_str()).unwrap();
+    assert_eq!(linked.entry, links.join("cursor-agent"));
+    let mut runner = runner(vec!["--version"], CommandEnd::Exited, Some(0), b"2026.10.01-e373342\n");
+    assert_eq!(probe_launcher(&linked, &mut runner, bounds()).unwrap().executable_sha256, digest(LAUNCHER));
+    // Another public name is not Cursor's command and is never searched for.
+    std::fs::write(links.join("cursor"), LAUNCHER).unwrap();
+    std::fs::set_permissions(links.join("cursor"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::remove_file(links.join("cursor-agent")).unwrap();
+    assert!(PublicCommand::resolve("cursor-agent", links.as_os_str()).is_err());
 }
 
 #[test]

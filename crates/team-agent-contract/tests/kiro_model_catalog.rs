@@ -7,7 +7,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use team_agent_contract::contract::{hooks::*, plan::*, session::CwdIdentity, types::*};
 use team_agent_contract::kiro::{
-    native::CHAT_CATALOG_SOURCE, KiroAdapter, McpStdio, KIRO_DESCRIPTOR,
+    native::{CHAT_CATALOG_SOURCE, METADATA_HARNESS, METADATA_UI}, KiroAdapter, McpStdio, KIRO_DESCRIPTOR,
 };
 
 const NATIVE_CATALOG: &[u8] = include_bytes!("fixtures/kiro-2.28.0-models.json");
@@ -36,12 +36,12 @@ fn request() -> CatalogRequest {
         provider: ProviderId::new("kiro").unwrap(),
         native: NativeIdentity {
             version: "2.28.0".into(),
-            harness: "v3".into(),
-            ui: "tui".into(),
+            harness: METADATA_HARNESS.into(),
+            ui: METADATA_UI.into(),
             platform: Platform::MacOs,
             executable_sha256: Digest([1; 32]),
         },
-        executable: "/fixture/kiro-cli-chat".into(),
+        executable: "/fixture/kiro-cli".into(),
         cwd: CwdIdentity {
             path: "/fixture/work".into(),
             identity: Digest([2; 32]),
@@ -254,8 +254,12 @@ fn invalid_read_grants_are_rejected_before_the_host_is_invoked() {
     let mut wrong = base.clone();
     wrong.native.version = "2.invalid.0".into();
     cases.push(wrong);
+    // The inner chat helper is not the public command and is never read.
     let mut wrong = base.clone();
-    wrong.executable = "/fixture/kiro-cli".into();
+    wrong.executable = "/fixture/kiro-cli-chat".into();
+    cases.push(wrong);
+    let mut wrong = base.clone();
+    wrong.native.harness = "v2".into();
     cases.push(wrong);
     let mut wrong = base.clone();
     wrong.cwd.path = "relative".into();
