@@ -840,18 +840,17 @@ fn a09_resume_retains_session_metadata_while_routes_change() {
     let f = Fixture::new("argv-resume");
     f.start_team("pi", &["worker"]);
     let selected = crate::state::projection::select_runtime_state(&f.ws, Some("argvteam")).unwrap();
-    let pending = selected["agents"]["worker"]["_pending_session_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    // Fresh Pi assigns its own session id; capture records it afterwards.
+    assert!(selected["agents"]["worker"]["_pending_session_id"].is_null());
+    let session_id = "8d6c1f2e-4a5b-4c7d-9e0f-a09000000001";
     let session = crate::lifecycle::launch::pi_mcp::pi_seat_paths(&f.ws, "argvteam", "worker")
         .sessions
         .join("valid.jsonl");
     fs::create_dir_all(session.parent().unwrap()).unwrap();
-    fs::write(&session, format!("{}\n{}\n", json!({"type":"session","version":3,"id":pending,"cwd":f.ws,"timestamp":"2026-01-01T00:00:00Z"}), json!({"type":"message","id":"a","parentId":null,"timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":[{"type":"text","text":"seed"}]}}))).unwrap();
+    fs::write(&session, format!("{}\n{}\n", json!({"type":"session","version":3,"id":session_id,"cwd":f.ws,"timestamp":"2026-01-01T00:00:00Z"}), json!({"type":"message","id":"a","parentId":null,"timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":[{"type":"text","text":"seed"}]}}))).unwrap();
     f.mutate_agent("worker", |a| {
         a["status"] = json!("stopped");
-        a["session_id"] = json!(pending);
+        a["session_id"] = json!(session_id);
         a["rollout_path"] = json!(session);
         a["captured_at"] = json!("2026-01-01T00:00:01Z");
         a["captured_via"] = json!("session_scan");

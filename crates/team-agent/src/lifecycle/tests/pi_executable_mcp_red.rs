@@ -690,13 +690,14 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
                 .any(|arg| arg.as_str() == other_candidate.to_string_lossy().as_ref())
         );
 
-        let pending_session_id = started_agent
-            .pending_session_id
-            .clone()
-            .expect("fresh worker carries a pending Pi session id");
+        assert!(
+            started_agent.pending_session_id.is_none(),
+            "fresh Pi assigns its own session id"
+        );
+        let foreign_session_id = format!("{worker}-foreign");
         write_pi_session_header(
             &home_candidate,
-            pending_session_id.as_str(),
+            &foreign_session_id,
             &worker_workspace,
             "2099-01-01T00:00:00Z",
         );
@@ -710,27 +711,45 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
             .join("foreign.jsonl");
         write_pi_session_header(
             &cross_seat,
-            pending_session_id.as_str(),
+            &foreign_session_id,
             &worker_workspace,
             "2099-01-01T00:00:00Z",
         );
-        let candidates = scan_session_candidates_once(
-            Provider::Pi,
-            &CaptureSessionContext {
-                agent_id: worker.to_string(),
-                spawn_cwd: worker_workspace.clone(),
-                pane_id: None,
-                pane_pid: None,
-                spawned_at: Some(started_agent.spawned_at.clone()),
-                expected_session_id: Some(pending_session_id),
-                provider_projects_root: Some(paths.sessions.clone()),
-            },
-        )
-        .expect("scan the recorded worker seat only");
+        let context = CaptureSessionContext {
+            agent_id: worker.to_string(),
+            spawn_cwd: worker_workspace.clone(),
+            pane_id: None,
+            pane_pid: None,
+            spawned_at: Some(started_agent.spawned_at.clone()),
+            expected_session_id: None,
+            provider_projects_root: Some(paths.sessions.clone()),
+        };
+        let candidates = scan_session_candidates_once(Provider::Pi, &context)
+            .expect("scan the recorded worker seat only");
         assert!(
             candidates.is_empty(),
             "HOME and another worker seat must not become capture candidates: {candidates:?}"
         );
+        // Positive control: Pi's own header inside the recorded seat is captured.
+        let own = paths.sessions.join("own.jsonl");
+        write_pi_session_header(
+            &own,
+            &format!("{worker}-own"),
+            &worker_workspace,
+            "2099-01-01T00:00:00Z",
+        );
+        let candidates = scan_session_candidates_once(Provider::Pi, &context)
+            .expect("scan the recorded worker seat only");
+        assert_eq!(candidates.len(), 1, "{candidates:?}");
+        assert_eq!(
+            candidates[0]
+                .captured
+                .session_id
+                .as_ref()
+                .map(SessionId::as_str),
+            Some(format!("{worker}-own").as_str())
+        );
+        std::fs::remove_file(&cross_seat).expect("clear foreign header from the other seat");
     }
 
     let restart_workspace = hermetic.workspace("worker-restart");
