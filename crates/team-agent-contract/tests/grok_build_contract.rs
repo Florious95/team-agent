@@ -300,14 +300,31 @@ fn queue_flush_requires_the_exact_current_visible_token_and_footer() {
     let queued = adapter().interpret(&f);
     assert_eq!(queued.surface, InputSurface::Queued);
     assert_eq!(queued.predicate.as_deref(), Some(PROFILES[0].policy.require("queue").unwrap().queue_flush[0].predicate));
-    for bad in ["1 queued · Enter: send now", "Queued · Enter to send now old", "Enter:send now"] {
+    let mut legacy = f.clone();
+    legacy.text = screen(&format!("#1 {token}\nEnter:send now"), "");
+    assert_eq!(adapter().interpret(&legacy).predicate.as_deref(), Some(PROFILES[0].policy.require("queue").unwrap().queue_flush[0].predicate));
+    for bad in ["1 queued · Enter: send now", "Queued · Enter to send now old", "enter send now"] {
         let mut wrong = f.clone(); wrong.text = screen(&format!("#1 {token}\n{bad}"), "");
-        assert!(adapter().interpret(&wrong).predicate.is_none());
+        assert!(adapter().interpret(&wrong).predicate.is_none(), "{bad}");
     }
     let mut other = f.clone(); other.text = screen("#1 another message\nQueued · Enter to send now", "");
     assert!(adapter().interpret(&other).predicate.is_none());
     f.after_step = Some(StepKind::QueueFlush); f.text = screen(token, "");
     assert_eq!(adapter().interpret(&f).surface, InputSurface::NativeAccepted);
+}
+#[test]
+fn swallowed_folded_capsule_requests_one_more_enter_and_busy_empty_composer_does_not() {
+    let mut f = frame();
+    f.paste_latch = adapter().interpret(&f).paste_latch;
+    f.scope = scope(3);
+    f.after_step = Some(StepKind::InitialSubmit);
+    let held = adapter().interpret(&f);
+    assert_eq!(held.surface, InputSurface::Queued);
+    assert_eq!(held.predicate.as_deref(), Some(PROFILES[0].policy.require("queue").unwrap().queue_flush[0].predicate));
+    f.text = screen("⠼ Waiting for response… 0.2s", "");
+    let busy = adapter().interpret(&f);
+    assert_ne!(busy.surface, InputSurface::Queued);
+    assert!(busy.predicate.is_none());
 }
 #[test]
 fn visible_multiline_token_uses_existing_correlation_not_folded_fallback() {
