@@ -283,6 +283,29 @@ fn shell_carrier(command: &str) -> bool {
 fn surface_liveness(command: &str, native_frame: bool, live_child: bool) -> bool {
     !command.is_empty() && native_frame && (!shell_carrier(command) || live_child)
 }
+fn argv0_names(argv0: &str, native: crate::provider::Provider) -> bool {
+    Path::new(argv0).file_name().and_then(|name| name.to_str())
+        == Some(crate::provider::wire::command_name(native))
+}
+/// Native installers may exec a version-named file (Claude Code:
+/// `~/.local/bin/claude` -> `versions/<semver>`), so tmux reports the version
+/// as the pane command. The exact argv[0] of the pane process, or of a live
+/// child under its carrier, still names the provider. Unobservable is not
+/// positive evidence.
+fn launched_as_provider(pid: u32, native: crate::provider::Provider) -> bool {
+    let named = |pid: u32| {
+        crate::platform::argv::argv_tokens(pid)
+            .and_then(|argv| argv.into_iter().next())
+            .is_some_and(|argv0| argv0_names(&argv0, native))
+    };
+    named(pid)
+        || crate::platform::process::process_tree(pid)
+            .unwrap_or_default()
+            .into_iter()
+            .any(|child| {
+                child != pid && named(child) && crate::platform::process::pid_is_alive(child)
+            })
+}
 
 /// Positive native/store or exact carrier+pane+provider observations only.
 fn observe(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation, CliError> {
@@ -401,7 +424,8 @@ fn observe(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation
     }
     let command = matches[0].current_command.as_deref().unwrap_or("");
     let positive_command = command == crate::provider::wire::command_name(native)
-        || crate::leader::provider_attribution::command_matches_provider(native, command);
+        || crate::leader::provider_attribution::command_matches_provider(native, command)
+        || (!command.is_empty() && !shell_carrier(command) && launched_as_provider(pid, native));
     let positive_surface = if !positive_command && !command.is_empty() {
         let frame = checked(
             backend.observe_native_input(&Target::Pane(PaneId::new(pane.unwrap_or(""))), native),

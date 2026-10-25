@@ -704,6 +704,67 @@ fn original_supervised_shell_needs_both_current_native_frame_and_live_child() {
 }
 
 #[test]
+fn provider_argv0_is_exact_basename_not_substring() {
+    use crate::model::enums::Provider;
+    assert!(argv0_names("claude", Provider::Claude));
+    assert!(argv0_names("/Users/u/.local/bin/claude", Provider::Claude));
+    assert!(argv0_names("claude", Provider::ClaudeCode));
+    for argv0 in ["2.1.309", "claude-wrapper", "team-agent", "node", ""] {
+        assert!(!argv0_names(argv0, Provider::Claude), "{argv0}");
+    }
+    assert!(argv0_names("agent", Provider::CursorAgent));
+    assert!(!argv0_names("team-agent", Provider::CursorAgent));
+}
+
+#[test]
+#[cfg(unix)]
+fn version_named_native_install_is_identified_by_launch_argv0() {
+    // Claude Code's native installer execs `versions/<semver>`; tmux then
+    // reports e.g. `2.1.309` as the pane command while argv[0] stays `claude`.
+    use crate::model::enums::Provider;
+    use std::os::unix::process::CommandExt;
+    let mut claude = std::process::Command::new("sleep")
+        .arg0("claude")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let mut other = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let launched = launched_as_provider(claude.id(), Provider::Claude);
+    let _ = claude.kill();
+    let _ = claude.wait();
+    assert!(launched);
+    let launched = launched_as_provider(other.id(), Provider::Claude);
+    let _ = other.kill();
+    let _ = other.wait();
+    assert!(!launched);
+}
+
+#[test]
+#[cfg(unix)]
+fn supervised_carrier_child_launched_as_provider_is_identified() {
+    // Original restart supervises the provider as a child of a shell carrier.
+    use crate::model::enums::Provider;
+    use std::os::unix::process::CommandExt;
+    let mut carrier = std::process::Command::new("bash")
+        .args(["-c", "exec -a claude sleep 30 & wait"])
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut launched = false;
+    while !launched && std::time::Instant::now() < deadline {
+        launched = launched_as_provider(carrier.id(), Provider::Claude);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    unsafe { libc::kill(-(carrier.id() as i32), libc::SIGKILL) };
+    let _ = carrier.wait();
+    assert!(launched);
+}
+
+#[test]
 fn unchanged_observation_port_rejects_native_screen_followed_by_exit_tail() {
     use crate::model::enums::Provider;
     use crate::transport::native_input::inspect_input;
