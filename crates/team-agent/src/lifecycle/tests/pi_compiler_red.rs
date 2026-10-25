@@ -58,9 +58,7 @@ fn command(_tools: &[&str], effort: ProviderEffort, model: &str) -> Result<Vec<S
         session_dir: Some(Path::new(
             "/workspace/.team/runtime/pi/t1/pi-worker/sessions",
         )),
-        session: PiSessionSelector::Fresh {
-            session_id: "c5ddf218-24a5-4e74-960c-ab6606ea7e8c",
-        },
+        session: PiSessionSelector::Fresh,
         agent_id: "pi-worker",
     })
     .map_err(|error| error.to_string())

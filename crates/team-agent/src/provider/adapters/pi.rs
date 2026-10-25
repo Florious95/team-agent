@@ -18,7 +18,9 @@ use crate::provider::command_helpers::{append_opt_pair, append_pair};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum PiSessionSelector<'a> {
-    Fresh { session_id: &'a str },
+    /// Pi assigns the session id. Passing `--session-id` makes Pi warn and
+    /// then create, because the id is not a project session yet.
+    Fresh,
     Resume { path: &'a Path },
 }
 
@@ -74,9 +76,7 @@ pub(crate) fn build_pi_command_argv(
     // Keep the pure argv builder usable before a fixture root is materialized, while
     // refusing a missing exact file once the recorded path's parent exists.
     match request.session {
-        PiSessionSelector::Fresh { session_id } if !session_id.trim().is_empty() => {
-            append_pair(&mut argv, "--session-id", session_id);
-        }
+        PiSessionSelector::Fresh => {}
         PiSessionSelector::Resume { path }
             if !path.as_os_str().is_empty()
                 && (!path.parent().is_some_and(Path::is_dir) || path.is_file()) =>

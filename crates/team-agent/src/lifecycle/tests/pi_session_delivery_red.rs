@@ -134,6 +134,27 @@ fn pi_session_capture_requires_header_id_cwd_generation_and_unique_claim() {
 }
 
 #[test]
+fn pi_fresh_capture_reads_the_header_id_pi_wrote() {
+    let root = temp_root("native-header");
+    let cwd = root.join("workspace");
+    let sessions = root.join("seat/sessions");
+    std::fs::create_dir_all(&cwd).expect("create cwd");
+    let native_id = "410271aa-2a95-46fe-a92e-41927688fb0c";
+    let path = sessions.join("pi-created.jsonl");
+    write_header(&path, native_id, &cwd, "2026-08-29T10:00:01Z");
+    let mut context = scan_context(&cwd, &sessions, "unused", "2026-08-29T10:00:00Z");
+    context.expected_session_id = None;
+
+    let candidates = scan_session_candidates_once(Provider::Pi, &context).expect("native header scan");
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(
+        candidates[0].captured.session_id.as_ref().map(SessionId::as_str),
+        Some(native_id)
+    );
+    std::fs::remove_dir_all(root).expect("remove native header fixture");
+}
+
+#[test]
 fn pi_restart_uses_exact_path_and_refuses_missing_backing() {
     let root = temp_root("resume");
     let cwd = root.join("workspace");

@@ -2587,9 +2587,11 @@ fn leader_rollout_path(state: &serde_json::Value) -> Option<std::path::PathBuf> 
             pane_id: None,
             pane_pid: None,
             spawned_at: Some(native.get("spawned_at")?.as_str()?.into()),
-            expected_session_id: Some(crate::provider::SessionId::new(
-                native.get("expected_session_id")?.as_str()?,
-            )),
+            expected_session_id: native
+                .get("expected_session_id")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+                .map(crate::provider::SessionId::new),
             provider_projects_root: Some(native.get("provider_projects_root")?.as_str()?.into()),
         };
         if !context.spawn_cwd.is_absolute()
