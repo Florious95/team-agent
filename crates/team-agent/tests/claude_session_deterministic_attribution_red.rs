@@ -71,24 +71,6 @@ R/<slug>/<U>.jsonl; a >300 newer decoy pool must not evict or replace U; paths={
 
 #[test]
 #[serial(env)]
-fn p2_expected_codex_session_keeps_the_codex_scanner() {
-    let env = hermetic_guard::HermeticTestEnv::enter("attr-p2");
-    let cwd = env.workspace("p2");
-    let root = env.root().join("codex-sessions");
-    let path = root.join(format!("rollout-2026-07-30T00-00-00-{TARGET}.jsonl"));
-    write_codex(&path, TARGET, &cwd);
-
-    let candidates = scan(Provider::Codex, context(&cwd, Some(TARGET), Some(root)));
-    assert_eq!(
-        candidate_paths(&candidates),
-        vec![path],
-        "P2_RED_PROVIDER_GATE: Codex+expected must keep the Codex rollout scanner; \
-a Claude-only expected-path shortcut would return the wrong shape or no candidate"
-    );
-}
-
-#[test]
-#[serial(env)]
 fn p3_claude_without_expected_session_keeps_existing_multi_candidate_behavior() {
     let env = hermetic_guard::HermeticTestEnv::enter("attr-p3");
     let cwd = env.workspace("p3");
@@ -213,16 +195,6 @@ fn p7b_non_provider_session_team_files_stay_excluded_for_all_provider_families()
     write_claude_user(&claude_junk, TARGET, &cwd, None);
     let claude = scan(Provider::ClaudeCode, context(&cwd, None, Some(claude_root)));
 
-    let codex_root = env.root().join("p7b-codex-sessions");
-    let codex_valid = codex_root.join(format!("rollout-2026-07-30T00-00-00-{TARGET}.jsonl"));
-    write_codex(&codex_valid, TARGET, &cwd);
-    let codex_junk = cwd.join(".team/artifacts/codex-junk.jsonl");
-    write_codex(&codex_junk, TARGET, &cwd);
-    let codex = scan(
-        Provider::Codex,
-        context(&cwd, Some(TARGET), Some(codex_root)),
-    );
-
     let copilot_junk = cwd.join(".team/runtime/provider-env/copilot-junk.jsonl");
     write_jsonl(
         &copilot_junk,
@@ -238,7 +210,6 @@ fn p7b_non_provider_session_team_files_stay_excluded_for_all_provider_families()
 
     for (provider, valid, junk, candidates) in [
         ("claude", claude_valid, claude_junk, claude),
-        ("codex", codex_valid, codex_junk, codex),
         ("copilot", copilot_valid, copilot_junk, copilot),
     ] {
         let paths = candidate_paths(&candidates);
@@ -444,19 +415,6 @@ fn write_claude_user(path: &Path, session_id: &str, cwd: &Path, title: Option<&s
         "message": {"role": "user", "content": "fixture"},
     }));
     write_jsonl(path, &records);
-}
-
-fn write_codex(path: &Path, session_id: &str, cwd: &Path) {
-    write_jsonl(
-        path,
-        &[json!({
-            "type": "session_meta",
-            "payload": {
-                "id": session_id,
-                "cwd": cwd.to_string_lossy(),
-            }
-        })],
-    );
 }
 
 fn write_copilot_store(home: &Path, session_id: &str, cwd: &Path) -> PathBuf {

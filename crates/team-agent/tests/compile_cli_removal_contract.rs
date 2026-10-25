@@ -21,7 +21,7 @@ use team_agent::cli::{
 };
 
 const TEAM_MD: &str = "---\nname: contract-team\nobjective: Contract fixture.\nprovider: codex\nmodel: gpt-5.5\n---\n\nContract fixture.\n";
-const ROLE_MD: &str = "---\nname: worker\nrole: Contract Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nDo contract work.\n";
+const ROLE_MD: &str = "---\nname: worker\nrole: Contract Worker\nprovider: claude\nmodel: claude-sonnet-5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nDo contract work.\n";
 const INVALID_ROLE_MD: &str = "---\nname: broken\nrole: Broken Worker\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\n---\n\nMissing provider.\n";
 
 fn fixture(env: &HermeticTestEnv, tag: &str) -> PathBuf {
@@ -386,7 +386,7 @@ fn p1_compiler_retains_core_shape_and_is_read_only() {
         agents[0]
             .get("provider")
             .and_then(team_agent::model::yaml::Value::as_str),
-        Some("codex")
+        Some("claude")
     );
     assert_eq!(snapshot(env.root()), before);
 }

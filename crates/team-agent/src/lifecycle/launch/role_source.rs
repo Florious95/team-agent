@@ -144,7 +144,7 @@ pub(crate) fn materialize_latest_role(
     label: Option<&str>,
 ) -> Result<MaterializedRole, LifecycleError> {
     let source_path = resolve_role_source(run_workspace, team_dir, state, source_agent_id)?;
-    let (mut meta, body) = crate::compiler::read_front_matter(&source_path)
+    let (mut meta, body) = crate::compiler::read_role_front_matter(&source_path)
         .map_err(|error| LifecycleError::Compile(error.to_string()))?;
     set_yaml_map_value(
         &mut meta,

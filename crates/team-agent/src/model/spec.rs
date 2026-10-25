@@ -1173,7 +1173,7 @@ mod tests {
         // 角色文档故意省略该字段；纯文本默认必须写入 compiled spec。
         std::fs::write(
             team.join("agents").join("w.md"),
-            "---\nname: w\nrole: Worker\nprovider: codex\ntools:\n  - mcp_team\n---\n\nw.\n",
+            "---\nname: w\nrole: Worker\nprovider: claude\ntools:\n  - mcp_team\n---\n\nw.\n",
         )
         .unwrap();
         let spec = crate::compiler::compile_team(&team)

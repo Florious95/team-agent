@@ -293,7 +293,7 @@ fn live_pane(ws: &Path) -> PaneInfo {
         window_name: Some(WindowName::new("worker")),
         pane_index: None,
         tty: None,
-        current_command: Some("codex".into()),
+        current_command: Some("claude".into()),
         current_path: None,
         active: true,
         pane_pid: None,
@@ -306,15 +306,15 @@ fn live_pane(ws: &Path) -> PaneInfo {
 fn a01_default_off_matches_explicit_off_at_cold_common_and_leader_boundaries() {
     let f = Fixture::new("argv-a01");
     f.switch(None);
-    let cold = f.cold("codex");
+    let cold = f.cold("claude");
     assert!(!f.config().exists());
     unsafe {
         std::env::set_var("TMUX", "fixture,1,0");
     }
     let leader = f.leader(Provider::Codex, true, false).unwrap();
-    f.seed(true, json!({"codex":["must-not-appear"]}));
+    f.seed(true, json!({"claude":["must-not-appear"]}));
     f.switch(Some("off"));
-    assert_eq!(normalized(&f.cold("codex")), normalized(&cold));
+    assert_eq!(normalized(&f.cold("claude")), normalized(&cold));
     let off_leader = f.leader(Provider::Codex, true, false).unwrap();
     assert_eq!(off_leader.argv, leader.argv);
     same_leader_env(&off_leader.leader_env, &leader.leader_env);
@@ -326,7 +326,7 @@ fn a01_default_off_matches_explicit_off_at_cold_common_and_leader_boundaries() {
     drop(f);
     let f = Fixture::new("argv-a01-common");
     f.switch(None);
-    f.start_team("codex", &["worker"]);
+    f.start_team("claude", &["worker"]);
     let baseline = offline();
     start_agent_with_transport(
         &f.ws,
@@ -338,7 +338,7 @@ fn a01_default_off_matches_explicit_off_at_cold_common_and_leader_boundaries() {
         &baseline,
     )
     .unwrap();
-    f.seed(true, json!({"codex":["must-not-appear"]}));
+    f.seed(true, json!({"claude":["must-not-appear"]}));
     f.switch(Some("off"));
     let t = offline();
     start_agent_with_transport(
@@ -367,16 +367,16 @@ fn a01_default_off_matches_explicit_off_at_cold_common_and_leader_boundaries() {
 #[serial(env)]
 fn a02_off_invalid_and_unopted_bad_json_preserve_native_startup() {
     let f = Fixture::new("argv-a02");
-    let base = f.cold("codex");
+    let base = f.cold("claude");
     for raw in [
         "bad JSON",
         r#"{"enabled":false,"providers":"bad"}"#,
-        r#"{"enabled":true,"providers":{"codex":[0]}}"#,
+        r#"{"enabled":true,"providers":{"claude":[0]}}"#,
     ] {
         f.raw(raw);
         for value in [Some("off"), Some(" 0 "), Some(""), Some("bogus")] {
             f.switch(value);
-            assert_eq!(normalized(&f.cold("codex")), normalized(&base));
+            assert_eq!(normalized(&f.cold("claude")), normalized(&base));
         }
     }
     for raw in [
@@ -386,7 +386,7 @@ fn a02_off_invalid_and_unopted_bad_json_preserve_native_startup() {
     ] {
         f.raw(raw);
         f.switch(None);
-        assert_eq!(normalized(&f.cold("codex")), normalized(&base));
+        assert_eq!(normalized(&f.cold("claude")), normalized(&base));
     }
 }
 
@@ -445,16 +445,16 @@ fn off_fifo_child() {
 #[serial(env)]
 fn a03_persisted_enabled_and_env_override_apply_at_native_cold_boundary() {
     let f = Fixture::new("argv-a03");
-    let base = f.cold("codex");
+    let base = f.cold("claude");
     for (persisted, env, should_route) in [
         (true, None, true),
         (false, None, false),
         (false, Some("on"), true),
         (true, Some("false"), false),
     ] {
-        f.seed(persisted, json!({"codex":["route-priority"]}));
+        f.seed(persisted, json!({"claude":["route-priority"]}));
         f.switch(env);
-        let argv = f.cold("codex");
+        let argv = f.cold("claude");
         injected(
             &base,
             &if should_route {
@@ -577,7 +577,6 @@ macro_rules! provider_tests { ($($name:ident => $key:literal, $provider:ident;)*
 provider_tests! {
     a06_claude => "claude", Claude;
     a06_claude_code => "claude", ClaudeCode;
-    a06_codex => "codex", Codex;
     a06_copilot => "copilot", Copilot;
     a06_gemini_cli => "gemini_cli", GeminiCli;
     a06_grok => "grok", Grok;
@@ -709,15 +708,15 @@ fn a07_pi_explicit_invalid_arguments_remain_rejected_under_routing() {
 #[serial(env)]
 fn a08_quick_start_first_later_paused_dry_run_and_live_noop() {
     let f = Fixture::new("argv-quick");
-    f.seed(true, json!({"codex":["cold-route"]}));
+    f.seed(true, json!({"claude":["cold-route"]}));
     f.switch(None);
-    let t = f.start_team("codex", &["worker", "mate"]);
+    let t = f.start_team("claude", &["worker", "mate"]);
     let observed_spawns = t.spawn_records();
     let noop =
         quick_start_with_transport_in_workspace(&f.ws, &f.team, None, true, Some("argvteam"), &t);
     assert!(noop.is_ok());
     assert_eq!(t.spawn_records().len(), 2, "live-noop must not spawn again");
-    let spec = f.spec("codex", &["worker", "mate"]);
+    let spec = f.spec("claude", &["worker", "mate"]);
     f.raw("invalid schema");
     f.switch(Some("on"));
     let dry = offline();
@@ -725,7 +724,7 @@ fn a08_quick_start_first_later_paused_dry_run_and_live_noop() {
     assert!(dry.spawn_records().is_empty());
     drop(f);
     let f = Fixture::new("argv-paused");
-    let spec = f.spec("codex", &["worker", "mate"]);
+    let spec = f.spec("claude", &["worker", "mate"]);
     f.raw("invalid schema");
     f.switch(Some("on"));
     // Typed paused flags, not assumptions about YAML renderer indentation.
@@ -764,8 +763,8 @@ fn a08_quick_start_first_later_paused_dry_run_and_live_noop() {
 #[serial(env)]
 fn a09_start_fresh_missing_backing_reset_and_add_use_new_route_once() {
     let f = Fixture::new("argv-single");
-    f.start_team("codex", &["worker"]);
-    f.seed(true, json!({"codex":["single-route"]}));
+    f.start_team("claude", &["worker"]);
+    f.seed(true, json!({"claude":["single-route"]}));
     f.switch(None);
     let mut samples = Vec::new();
     for backing in [false, true] {
@@ -808,7 +807,7 @@ fn a09_start_fresh_missing_backing_reset_and_add_use_new_route_once() {
     assert_eq!(reset.spawn_records().len(), 1);
     samples.push(reset.spawn_records()[0].1.clone());
     let role_file = f.ws.join("mate-role.md");
-    fs::write(&role_file, role("codex", "mate")).unwrap();
+    fs::write(&role_file, role("claude", "mate")).unwrap();
     let added = offline().with_session_present(true);
     add_agent_with_transport(
         &f.team,
@@ -904,7 +903,7 @@ fn a09_resume_retains_session_metadata_while_routes_change() {
 #[serial(env)]
 fn a09_remove_rollback_respawns_original_seat_with_route_once() {
     let f = Fixture::new("argv-rollback");
-    f.start_team("codex", &["worker", "mate"]);
+    f.start_team("claude", &["worker", "mate"]);
     f.mutate_agent("worker", |a| {
         a["pane_id"] = json!("%old");
         a["window"] = json!("worker");
@@ -913,7 +912,7 @@ fn a09_remove_rollback_respawns_original_seat_with_route_once() {
         "TEAM_AGENT_TEST_FAIL_REMOVE_AFTER_AGENT_HEALTH_DELETE",
         "argv-route-red",
     );
-    f.seed(true, json!({"codex":["rollback-route"]}));
+    f.seed(true, json!({"claude":["rollback-route"]}));
     f.switch(None);
     let t = offline()
         .with_session_present(true)
@@ -1052,10 +1051,10 @@ esac
 #[serial(env)]
 fn a09_allowed_force_recreate_uses_route_once_after_old_seat_is_dead() {
     let f = Fixture::new("argv-force");
-    f.start_team("codex", &["worker"]);
+    f.start_team("claude", &["worker"]);
     let role_file = f.ws.join("replacement.md");
-    fs::write(&role_file, role("codex", "worker")).unwrap();
-    f.seed(true, json!({"codex":["force-route"]}));
+    fs::write(&role_file, role("claude", "worker")).unwrap();
+    f.seed(true, json!({"claude":["force-route"]}));
     f.switch(None);
     let t = offline();
     let result = crate::lifecycle::launch::add_agent_with_transport_force(
@@ -1079,7 +1078,7 @@ fn a09_allowed_force_recreate_uses_route_once_after_old_seat_is_dead() {
 #[serial(env)]
 fn a10_live_start_noop_is_not_validated_against_bad_route_config() {
     let f = Fixture::new("argv-keep");
-    f.start_team("codex", &["worker"]);
+    f.start_team("claude", &["worker"]);
     f.mutate_agent("worker", |a| {
         a["pane_id"] = json!("%old");
         a["window"] = json!("worker");
@@ -1113,10 +1112,10 @@ fn a10_live_start_noop_is_not_validated_against_bad_route_config() {
 #[serial(env)]
 fn a10_restart_first_parallel_later_reloads_mapping_without_stacking() {
     let f = Fixture::new("argv-restart");
-    f.start_team("codex", &["worker", "mate", "third"]);
+    f.start_team("claude", &["worker", "mate", "third"]);
     let mut samples = Vec::new();
     for marker in ["route-generation-one", "route-generation-two"] {
-        f.seed(true, json!({"codex":[marker]}));
+        f.seed(true, json!({"claude":[marker]}));
         f.switch(None);
         let t = offline();
         let result = restart_with_transport(&f.ws, true, Some("argvteam"), &t);
@@ -1142,7 +1141,7 @@ fn a10_restart_first_parallel_later_reloads_mapping_without_stacking() {
 #[serial(env)]
 fn a11_enabled_bad_schema_fails_before_native_spawn_at_all_three_boundaries() {
     let f = Fixture::new("argv-errors");
-    f.start_team("codex", &["worker"]);
+    f.start_team("claude", &["worker"]);
     for raw in [
         "bad JSON",
         r#"{"schema_version":2,"enabled":true,"providers":{}}"#,
@@ -1153,7 +1152,7 @@ fn a11_enabled_bad_schema_fails_before_native_spawn_at_all_three_boundaries() {
     ] {
         f.raw(raw);
         f.switch(Some("on"));
-        let spec = f.spec("codex", &["worker"]);
+        let spec = f.spec("claude", &["worker"]);
         let cold = offline();
         assert!(
             launch_with_transport_in_workspace(&f.ws, &spec, false, false, true, &cold).is_err(),
@@ -1311,10 +1310,10 @@ fn a14_conpty_spawn_request_frame_preserves_routed_vector_not_windows_live_pass(
     let f = Fixture::new("argv-conpty");
     f.seed(
         true,
-        json!({"codex":["", "a b", "路由", "\"x\"\\", "line\nbreak"]}),
+        json!({"claude":["", "a b", "路由", "\"x\"\\", "line\nbreak"]}),
     );
     f.switch(None);
-    let argv = f.cold("codex");
+    let argv = f.cold("claude");
     assert_eq!(&argv[1..6], &["", "a b", "路由", "\"x\"\\", "line\nbreak"]);
     let request = SpawnRequest {
         session: "team-argvteam".into(),
@@ -1338,10 +1337,10 @@ fn a14_conpty_spawn_request_frame_preserves_routed_vector_not_windows_live_pass(
 #[serial(env)]
 fn a15_provider_drift_and_unknown_force_remain_refused() {
     let f = Fixture::new("argv-drift");
-    f.start_team("codex", &["worker"]);
+    f.start_team("claude", &["worker"]);
     f.seed(
         true,
-        json!({"pi":["must-not-spawn"],"codex":["must-not-spawn"]}),
+        json!({"pi":["must-not-spawn"],"claude":["must-not-spawn"]}),
     );
     f.switch(None);
     f.mutate_agent("worker", |a| {
@@ -1364,7 +1363,7 @@ fn a15_provider_drift_and_unknown_force_remain_refused() {
     );
     assert!(!f.native_file().exists());
     let role_file = f.ws.join("replacement.md");
-    fs::write(&role_file, role("codex", "worker")).unwrap();
+    fs::write(&role_file, role("claude", "worker")).unwrap();
     // The public role-config admission guard owns unknown/live force refusal.
     // Its native tmux fixture returns inconclusive identity, never proven dead.
     executable(&f.bin.join("tmux"), "#!/bin/sh\ncase \"$*\" in\n*-V*) echo 'tmux 3.4';;\n*display-message*) echo 'fixture backend unavailable' >&2; exit 1;;\n*) exit 0;;\nesac\n");
@@ -1392,12 +1391,12 @@ fn a15_provider_drift_and_unknown_force_remain_refused() {
 #[serial(env)]
 fn a15_route_does_not_relax_running_start_reset_discard_or_unsupported_fork() {
     let f = Fixture::new("argv-old-refusals");
-    f.start_team("codex", &["worker"]);
+    f.start_team("claude", &["worker"]);
     f.mutate_agent("worker", |a| {
         a["pane_id"] = json!("%old");
         a["window"] = json!("worker");
     });
-    f.seed(true, json!({"codex":["refusal-route"]}));
+    f.seed(true, json!({"claude":["refusal-route"]}));
     f.switch(None);
     let t = offline()
         .with_session_present(true)

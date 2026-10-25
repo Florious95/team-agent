@@ -274,7 +274,7 @@ impl RollbackFixture {
                 "agents": {
                     "alpha": {
                         "status": "stopped",
-                        "provider": "codex",
+                        "provider": "claude",
                         "auth_mode": "subscription",
                         "window": "alpha",
                         "session_id": "sess-alpha",
@@ -285,7 +285,7 @@ impl RollbackFixture {
                     },
                     "bravo": {
                         "status": "running",
-                        "provider": "codex",
+                        "provider": "claude",
                         "auth_mode": "subscription",
                         "window": "bravo",
                         "session_id": "sess-bravo",
@@ -322,7 +322,7 @@ impl RollbackFixture {
                     "agents": {
                         "newfork": {
                             "status": "running",
-                            "provider": "codex",
+                            "provider": "claude",
                             "pane_id": "%sibling-newfork",
                             "owner_team_id": "sibling"
                         }
@@ -390,7 +390,7 @@ impl RollbackFixture {
 
 fn agent_doc(name: &str, role: &str) -> String {
     format!(
-        "---\nname: {name}\nrole: {role}\nprovider: codex\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{role}.\n"
+        "---\nname: {name}\nrole: {role}\nprovider: claude\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{role}.\n"
     )
 }
 

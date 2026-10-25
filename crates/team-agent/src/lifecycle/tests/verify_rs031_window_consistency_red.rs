@@ -39,7 +39,7 @@ use hermetic::HermeticTestEnv;
 const TEAM_MD: &str =
     "---\nname: verify031\nobjective: Verify mixed provider windows.\nprovider: codex\n---\n\nTeam.\n";
 
-const CODEX_ROLE: &str = "---\nname: codexer\nrole: Codex Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nCodex worker.\n";
+const CODEX_ROLE: &str = "---\nname: codexer\nrole: Codex Worker\nprovider: claude\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nCodex worker.\n";
 
 const CLAUDE_ROLE: &str = "---\nname: clauder\nrole: Claude Worker\nprovider: claude\nmodel: claude-sonnet-4-6\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nClaude worker.\n";
 
@@ -263,14 +263,14 @@ fn leader_bound_delivery_must_target_bound_leader_pane_not_missing_leader_window
         },
         "team_owner": {
             "pane_id": "%0",
-            "provider": "codex",
+            "provider": "claude",
             "owner_epoch": 1
         },
         "owner_epoch": 1,
         "agents": {
             "codexer": {
                 "status": "running",
-                "provider": "codex",
+                "provider": "claude",
                 "window": "codexer"
             }
         },
@@ -286,13 +286,13 @@ fn leader_bound_delivery_must_target_bound_leader_pane_not_missing_leader_window
                 },
                 "team_owner": {
                     "pane_id": "%0",
-                    "provider": "codex",
+                    "provider": "claude",
                     "owner_epoch": 1
                 },
                 "agents": {
                     "codexer": {
                         "status": "running",
-                        "provider": "codex",
+                        "provider": "claude",
                         "window": "codexer"
                     }
                 }
@@ -387,7 +387,7 @@ fn worker_to_leader_delivery_succeeds_when_attached_leader_pane_lives_on_default
             },
             "team_owner": {
                 "pane_id": leader_pane.as_str(),
-                "provider": "codex",
+                "provider": "claude",
                 "owner_epoch": 1,
                 "claimed_via": "quick-start"
             },
@@ -395,7 +395,7 @@ fn worker_to_leader_delivery_succeeds_when_attached_leader_pane_lives_on_default
             "agents": {
                 "codexer": {
                     "status": "running",
-                    "provider": "codex",
+                    "provider": "claude",
                     "window": "codexer",
                     "pane_id": product_worker_pane.as_str(),
                     "startup_prompts": "handled"
@@ -414,14 +414,14 @@ fn worker_to_leader_delivery_succeeds_when_attached_leader_pane_lives_on_default
                     },
                     "team_owner": {
                         "pane_id": leader_pane.as_str(),
-                        "provider": "codex",
+                        "provider": "claude",
                         "owner_epoch": 1,
                         "claimed_via": "quick-start"
                     },
                     "agents": {
                         "codexer": {
                             "status": "running",
-                            "provider": "codex",
+                            "provider": "claude",
                             "window": "codexer",
                             "pane_id": product_worker_pane.as_str(),
                             "startup_prompts": "handled"
@@ -496,7 +496,7 @@ fn assert_bound_reachable_leader_send_message_injects(
         },
         "team_owner": {
             "pane_id": leader_pane.as_str(),
-            "provider": "codex",
+            "provider": "claude",
             "owner_epoch": 7,
             "claimed_via": claimed_via
         },
@@ -504,7 +504,7 @@ fn assert_bound_reachable_leader_send_message_injects(
         "agents": {
             "codexer": {
                 "status": "running",
-                "provider": "codex",
+                "provider": "claude",
                 "window": "codexer",
                 "pane_id": worker_pane.as_str(),
                 "startup_prompts": "handled"
@@ -602,7 +602,7 @@ fn unbound_or_unreachable_worker_to_leader_remains_rebind_required_without_autod
                 "session_name": "team-bug4-unbound",
                 "active_team_key": "teamdir",
                 "leader": {"id": "leader", "provider": "codex"},
-                "agents": {"codexer": {"status": "running", "provider": "codex", "window": "codexer"}}
+                "agents": {"codexer": {"status": "running", "provider": "claude", "window": "codexer"}}
             }),
             RecordingTransport::new(),
         ),
@@ -619,8 +619,8 @@ fn unbound_or_unreachable_worker_to_leader_remains_rebind_required_without_autod
                     "pane_id": "%missing-leader",
                     "owner_epoch": 1
                 },
-                "team_owner": {"pane_id": "%missing-leader", "provider": "codex", "owner_epoch": 1},
-                "agents": {"codexer": {"status": "running", "provider": "codex", "window": "codexer"}}
+                "team_owner": {"pane_id": "%missing-leader", "provider": "claude", "owner_epoch": 1},
+                "agents": {"codexer": {"status": "running", "provider": "claude", "window": "codexer"}}
             }),
             RecordingTransport::new()
                 .with_liveness(vec![("%missing-leader".to_string(), PaneLiveness::Dead)]),
@@ -903,7 +903,7 @@ impl Transport for RecordingTransport {
         range: CaptureRange,
     ) -> Result<CapturedText, TransportError> {
         Ok(CapturedText {
-            text: "OpenAI Codex".to_string(),
+            text: "Claude Code\n❯ ".to_string(),
             range,
         })
     }

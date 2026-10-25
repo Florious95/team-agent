@@ -247,7 +247,7 @@ fn write_team_dir(root: &Path, dir_name: &str, agent: &str) -> PathBuf {
 
 fn role_doc(agent: &str) -> String {
     format!(
-        "---\nname: {agent}\nrole: Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n"
+        "---\nname: {agent}\nrole: Worker\nprovider: claude\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n"
     )
 }
 
@@ -290,7 +290,7 @@ fn agent_state(team: &str, agent: &str) -> Value {
         "agent_id": agent,
         "owner_team_id": team,
         "status": "running",
-        "provider": "codex",
+        "provider": "claude",
         "role": "Worker",
         "window": agent
     })

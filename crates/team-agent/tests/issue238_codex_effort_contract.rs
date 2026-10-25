@@ -8,11 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use team_agent::compiler::compile_role_agent;
-use team_agent::model::enums::{AuthMode, Provider, ProviderEffort};
+use team_agent::model::enums::{Provider, ProviderEffort};
 use team_agent::model::{spec::validate_spec, yaml, ModelError};
-use team_agent::provider::{
-    get_adapter, ProviderAdapter, ProviderCommandContext, ProviderProfileLaunch, SessionId,
-};
 
 const EFFORT_WIRE: [&str; 6] = ["low", "medium", "high", "xhigh", "max", "ultra"];
 
@@ -157,23 +154,18 @@ fn compiled_effort(
 #[test]
 fn r3_compiler_role_wins_team_and_pi_does_not_inherit_team_effort() {
     assert_eq!(
-        compiled_effort("codex", None, Some("max"), Some("high"))
-            .expect("Codex role max"),
+        compiled_effort("claude", None, Some("max"), Some("high"))
+            .expect("Claude role max"),
         Some("max".to_string())
     );
     assert_eq!(
-        compiled_effort("codex", None, None, Some("max")).expect("Codex TEAM max"),
+        compiled_effort("claude", None, None, Some("max")).expect("Claude TEAM max"),
         Some("max".to_string())
     );
     assert_eq!(
-        compiled_effort("codex", None, Some("high"), Some("max"))
+        compiled_effort("claude", None, Some("high"), Some("max"))
             .expect("role overrides TEAM"),
         Some("high".to_string())
-    );
-    assert_eq!(
-        compiled_effort("codex", None, Some("ultra"), Some("max"))
-            .expect("Codex role ultra"),
-        Some("ultra".to_string())
     );
 
     let pi_model = Some("openai-codex/gpt-5.6-luna");
@@ -261,84 +253,6 @@ fn r4_direct_spec_uses_shared_rejection_reasons_and_keeps_unknowns_unknown() {
     assert!(unknown.contains("/agents/0/effort: unknown effort 'turbo'"));
 }
 
-fn codex_context<'a>(
-    profile_launch: Option<&'a ProviderProfileLaunch>,
-    effort: Option<ProviderEffort>,
-) -> ProviderCommandContext<'a> {
-    ProviderCommandContext {
-        auth_mode: AuthMode::Subscription,
-        mcp_config: None,
-        system_prompt: Some("Issue #238 contract prompt"),
-        model: Some("gpt-5.6-luna"),
-        dangerously_skip_permissions: true,
-        profile_launch,
-        agent_id_hint: Some("issue238"),
-        effort,
-    }
-}
-
-fn codex_effort_configs(argv: &[String]) -> Vec<String> {
-    argv.windows(2)
-        .filter_map(|window| {
-            (window[0] == "-c" && window[1].starts_with("model_reasoning_effort="))
-                .then(|| window[1].clone())
-        })
-        .collect()
-}
-
-#[test]
-fn r5_codex_fresh_resume_fork_plans_preserve_profile_and_effort() {
-    let mut profile = ProviderProfileLaunch::default();
-    profile.command_overrides.codex_config = vec![
-        "model_reasoning_effort=low".to_string(),
-        "profile_key=value".to_string(),
-    ];
-    let adapter = get_adapter(Provider::Codex);
-    let session_id = SessionId::new("issue238-session");
-
-    for raw in ["max", "ultra"] {
-        let parsed = effort(raw);
-        let expected = format!("model_reasoning_effort={raw}");
-        let plans = [
-            adapter
-                .build_command_plan(codex_context(Some(&profile), Some(parsed)))
-                .expect("fresh plan"),
-            adapter
-                .build_resume_command_plan(
-                    Some(&session_id),
-                    codex_context(Some(&profile), Some(parsed)),
-                )
-                .expect("resume plan"),
-            adapter
-                .fork_plan(Some(&session_id), codex_context(Some(&profile), Some(parsed)))
-                .expect("fork plan"),
-        ];
-        for plan in plans {
-            assert_eq!(
-                codex_effort_configs(&plan.argv),
-                vec!["model_reasoning_effort=low".to_string(), expected.clone()]
-            );
-            assert!(plan.argv.iter().any(|arg| arg == "profile_key=value"));
-            assert_eq!(
-                plan.argv
-                    .iter()
-                    .filter(|arg| arg.starts_with("model_reasoning_effort="))
-                    .last()
-                    .map(String::as_str),
-                Some(expected.as_str())
-            );
-        }
-    }
-
-    let no_effort = adapter
-        .build_command_plan(codex_context(Some(&profile), None))
-        .expect("None plan");
-    assert_eq!(
-        codex_effort_configs(&no_effort.argv),
-        vec!["model_reasoning_effort=low".to_string()]
-    );
-}
-
 #[test]
 fn r8_legacy_ignored_and_protected_provider_contracts_remain_intact() {
     for provider in [Provider::Copilot, Provider::GeminiCli, Provider::Fake] {
@@ -356,16 +270,6 @@ fn r8_legacy_ignored_and_protected_provider_contracts_remain_intact() {
 }
 
 #[test]
-fn command_plan_surface_is_public_and_none_has_no_override_without_profile() {
-    let adapter = get_adapter(Provider::Codex);
-    assert_eq!(adapter.provider(), Provider::Codex);
-    let plan = adapter
-        .build_command_plan(codex_context(None, None))
-        .expect("Codex default plan");
-    assert!(codex_effort_configs(&plan.argv).is_empty());
-}
-
-#[test]
 fn direct_fixture_is_repository_local_and_valid_without_effort() {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/model/testdata/team.spec.yaml");
     assert!(fixture.is_file(), "missing fixture: {}", fixture.display());
@@ -374,19 +278,6 @@ fn direct_fixture_is_repository_local_and_valid_without_effort() {
     assert_eq!(loaded.get("version").and_then(yaml::Value::as_i64), Some(1));
     assert_eq!(loaded.get("agents").and_then(yaml::Value::as_list).map(|v| v.len()), Some(3));
     assert!(validate_direct_spec(&text).is_ok());
-}
-
-#[test]
-fn codex_max_command_literal_is_explicit_and_adjacent_to_c() {
-    let plan = get_adapter(Provider::Codex)
-        .build_command_plan(codex_context(None, Some(effort("max"))))
-        .expect("Codex max plan");
-    assert!(plan.argv.windows(2).any(|window| {
-        window[0] == "-c" && window[1] == "model_reasoning_effort=max"
-    }));
-    assert!(plan.argv.windows(2).any(|window| {
-        window[0] == "--model" && window[1] == "gpt-5.6-luna"
-    }));
 }
 
 #[test]

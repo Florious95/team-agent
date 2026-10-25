@@ -81,6 +81,11 @@
 //!   B 案(留死字面注释喂扫描)驳回=注释欺骗扫描器。
 //!   台账新增 §二·补4:源码扫描齿禁锚单文件路径,应锚模块树(文件拆分=
 //!   常规重构,不该震碎契约)。
+//! - V3 (legacy Codex worker excision) — tooth 3 retired together with its
+//!   only subject, the Codex NEW-backing candidate scanner
+//!   (`context_fork/codex.rs` excluded_session_ids / excluded_backing_paths).
+//!   Remaining fork proofs bind a pre-assigned expected session id, so there
+//!   is no candidate scanner to relax. Needs verifier re-signature.
 
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
@@ -268,49 +273,6 @@ fn pending_seat_has_bounded_grace_then_typed_failure() {
         has_grace,
         has_typed_failure,
         silent_downgrade
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Tooth 3 — source rollout cannot masquerade as NEW; no cwd-latest relaxation
-// ---------------------------------------------------------------------------
-
-#[test]
-#[serial(env)]
-fn source_rollout_cannot_masquerade_as_new_backing() {
-    // A 案(msg_ef0fa4adad80):read context_fork.rs PLUS submodule
-    // tree (source_exclusions/claimed_set 现 codex.rs/outcome.rs 消费).
-    let src = read_context_fork_module_text();
-    // Face 1 — canonical scanner call site must explicitly build a
-    // `claimed` / `excluded` set containing source_session_id AND its
-    // backing_path AND (per locate §5.1#5) sibling agents.
-    let excludes_source = src.contains("excluded") || src.contains("claimed_set");
-    let excludes_source_id =
-        src.contains("source_session_id") && (src.contains("insert") || src.contains("push"));
-    // Face 2 — scanner MUST NOT be relaxed to cwd-latest / mtime-latest.
-    // We assert on the negative: no source line inside the module tree
-    // may contain `cwd_latest` or `mtime_latest` as a scanner mode.
-    let has_relaxation = src.contains("cwd_latest")
-        || src.contains("mtime_latest")
-        || src.contains("CwdLatest")
-        || src.contains("MtimeLatest");
-    // Face 3 — `!=source` alone is insufficient; must be programmatic
-    // claim/excluded set (the "boolean not equal" implementation is
-    // what §1.2#4 flagged as fragile).
-    // We enforce Face 3 by requiring the exclusion be expressed as a
-    // set operation, not merely a `!=` comparison.
-    let only_neq = !excludes_source && src.contains("!= source") || src.contains("!= self.source");
-    assert!(
-        excludes_source && excludes_source_id && !has_relaxation && !only_neq,
-        "canonical scanner claim/excluded set incomplete (module tree). \
-         locate §5.1+§7#3: source_session_id + backing_path + sibling agents \
-         must be in a programmatic excluded set; scanner must NOT relax to \
-         cwd-latest/mtime-latest. excludes_source={} excludes_source_id={} \
-         has_relaxation={} only_neq={}",
-        excludes_source,
-        excludes_source_id,
-        has_relaxation,
-        only_neq
     );
 }
 

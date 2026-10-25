@@ -4425,7 +4425,7 @@ pub mod lifecycle_port {
             .unwrap();
             std::fs::write(
                 team_dir.join("agents").join("implementer.md"),
-                "---\nname: implementer\nrole: Implementation Engineer\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nImplement bounded tasks.\n",
+                "---\nname: implementer\nrole: Implementation Engineer\nprovider: claude\nmodel: claude-sonnet-5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nImplement bounded tasks.\n",
             )
             .unwrap();
             let transport = crate::transport::test_support::OfflineTransport::new();

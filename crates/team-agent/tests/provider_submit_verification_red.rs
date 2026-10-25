@@ -259,19 +259,19 @@ fn delivery_state() -> Value {
         "active_team_key": "team",
         "session_name": "team-peer",
         "agents": {
-            "worker_a": {"status": "running", "window": "worker_a", "provider": "codex"},
-            "worker_b": {"status": "running", "window": "worker_b", "provider": "codex"},
-            "talker": {"status": "running", "window": "talker", "provider": "codex"},
-            "coder": {"status": "running", "window": "coder", "provider": "codex"}
+            "worker_a": {"status": "running", "window": "worker_a", "provider": "claude"},
+            "worker_b": {"status": "running", "window": "worker_b", "provider": "claude"},
+            "talker": {"status": "running", "window": "talker", "provider": "claude"},
+            "coder": {"status": "running", "window": "coder", "provider": "claude"}
         },
         "teams": {
             "team": {
                 "session_name": "team-peer",
                 "agents": {
-                    "worker_a": {"status": "running", "window": "worker_a", "provider": "codex"},
-                    "worker_b": {"status": "running", "window": "worker_b", "provider": "codex"},
-                    "talker": {"status": "running", "window": "talker", "provider": "codex"},
-                    "coder": {"status": "running", "window": "coder", "provider": "codex"}
+                    "worker_a": {"status": "running", "window": "worker_a", "provider": "claude"},
+                    "worker_b": {"status": "running", "window": "worker_b", "provider": "claude"},
+                    "talker": {"status": "running", "window": "talker", "provider": "claude"},
+                    "coder": {"status": "running", "window": "coder", "provider": "claude"}
                 }
             }
         }

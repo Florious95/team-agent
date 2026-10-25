@@ -189,10 +189,10 @@ fn human_status_detail_renders_session_missing_restart_hint() {
 #[test]
 #[serial(env)]
 fn restart_after_convergence_uses_physical_spawn_on_selected_endpoint() {
-    let case = Recovery0531Case::new("r4-physical-spawn", ProviderShape::Codex)
+    let case = Recovery0531Case::new("r4-physical-spawn", ProviderShape::Claude)
         .with_team_session_mode(TeamSessionMode::SpawnTracked);
-    case.seed_converged_state("codex");
-    case.write_team_spec("codex", "gpt-5");
+    case.seed_converged_state("claude");
+    case.write_team_spec("claude", "claude-sonnet-5");
     case.seed_healthy_coordinator();
 
     let restart = case.run_ta(&["restart", case.workspace_str(), "--team", TEAM, "--json"]);
@@ -257,7 +257,7 @@ fn restart_after_convergence_uses_physical_spawn_on_selected_endpoint() {
 #[derive(Clone, Copy)]
 enum ProviderShape {
     Fake,
-    Codex,
+    Claude,
 }
 
 #[derive(Clone, Copy)]
@@ -339,7 +339,7 @@ impl Recovery0531Case {
             "id": WORKER,
             "name": WORKER,
             "provider": provider,
-            "model": if provider == "fake" { "fake" } else { "gpt-5" },
+            "model": if provider == "fake" { "fake" } else { "claude-sonnet-5" },
             "window": WORKER,
             // Converged positive recovery is crashed; R3 stays terminal stopped.
             "status": if convergence.is_some() { "dead" } else { "stopped" },
@@ -731,7 +731,7 @@ fn assert_terminal_worker_registration(state: &Value, label: &str) {
 fn provider_command(provider: ProviderShape) -> &'static str {
     match provider {
         ProviderShape::Fake => "fake",
-        ProviderShape::Codex => "codex",
+        ProviderShape::Claude => "claude",
     }
 }
 

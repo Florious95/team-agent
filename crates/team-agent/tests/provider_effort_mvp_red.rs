@@ -44,35 +44,6 @@ mod adapter_argv {
         );
     }
 
-    #[test]
-    fn codex_fresh_argv_contains_adjacent_model_reasoning_effort_xhigh() {
-        let adapter = get_adapter(Provider::Codex);
-        let plan = adapter
-            .build_command_plan(ctx(Some(ProviderEffort::XHigh)))
-            .expect("codex plan");
-        let argv = &plan.argv;
-        let kv = format!("model_reasoning_effort={}", "xhigh");
-        let pos = argv
-            .iter()
-            .position(|a| a == &kv)
-            .unwrap_or_else(|| panic!("{kv} missing in {argv:?}"));
-        assert_eq!(argv[pos - 1], "-c", "-c must precede {kv}");
-    }
-
-    #[test]
-    fn codex_fresh_argv_omits_effort_when_none() {
-        let adapter = get_adapter(Provider::Codex);
-        let plan = adapter.build_command_plan(ctx(None)).expect("codex plan");
-        assert!(
-            !plan
-                .argv
-                .iter()
-                .any(|a| a.starts_with("model_reasoning_effort=")),
-            "no model_reasoning_effort=… when None; got {:?}",
-            plan.argv
-        );
-    }
-
     fn grok_ctx<'a>(effort: Option<ProviderEffort>) -> ProviderCommandContext<'a> {
         ProviderCommandContext {
             auth_mode: AuthMode::Subscription,

@@ -231,7 +231,7 @@ fn respawn_ws_one_resumable_worker() -> PathBuf {
         &ws,
         &json!({
             "session_name": "team-sa",
-            "agents": {"alpha": {"status": "running", "provider": "codex", "session_id": "sess-a", "rollout_path": rollout.to_string_lossy(), "first_send_at": "2026-05-27T10:00:00+00:00"}}
+            "agents": {"alpha": {"status": "running", "provider": "claude", "session_id": "sess-a", "rollout_path": rollout.to_string_lossy(), "first_send_at": "2026-05-27T10:00:00+00:00"}}
         }),
     )
     .unwrap();
@@ -449,8 +449,8 @@ fn bugb_routed_team_ws() -> PathBuf {
         &json!({
             "session_name": "team-laneateam",
             "agents": {
-                "alpha": {"status": "stopped", "provider": "codex", "window": "alpha"},
-                "bravo": {"status": "stopped", "provider": "codex", "window": "bravo"}
+                "alpha": {"status": "stopped", "provider": "claude", "window": "alpha"},
+                "bravo": {"status": "stopped", "provider": "claude", "window": "bravo"}
             }
         }),
     )

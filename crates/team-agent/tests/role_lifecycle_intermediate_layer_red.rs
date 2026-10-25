@@ -25,8 +25,8 @@ impl Shims {
         executable(&pi_target, &format!(
             "#!/bin/sh\nset -eu\ncase \"${{1:-}}\" in\n--version) exit 0;;\n--list-models) printf 'provider model\\nopenai-codex gpt-6-luna\\nopenai-codex gpt-5.6-luna\\n'; exit 0;;\nlist) exit 64;;\nesac\n[ -n \"${{TEAM_AGENT_AGENT_ID:-}}\" ] && [ -n \"${{TEAM_AGENT_WORKSPACE:-}}\" ] || exit 0\nprintf '%s\\0' pi \"$@\" > \"${{TEAM_AGENT_WORKSPACE}}/.role-lifecycle-launch/${{TEAM_AGENT_AGENT_ID}}.argv\"\n[ ! -f \"${{TEAM_AGENT_WORKSPACE}}/.role-lifecycle-fail-launch\" ] || exit 73\nexec {} fake-worker --workspace \"${{TEAM_AGENT_WORKSPACE}}\" --agent-id \"${{TEAM_AGENT_AGENT_ID}}\"\n", binary));
         symlink(&pi_target, dir.join("pi")).unwrap();
-        executable(&dir.join("codex"), &format!(
-            "#!/bin/sh\nset -eu\n[ -n \"${{TEAM_AGENT_AGENT_ID:-}}\" ] && [ -n \"${{TEAM_AGENT_WORKSPACE:-}}\" ] || exit 0\nprintf '%s\\0' codex \"$@\" > \"${{TEAM_AGENT_WORKSPACE}}/.role-lifecycle-launch/${{TEAM_AGENT_AGENT_ID}}.argv\"\n[ ! -f \"${{TEAM_AGENT_WORKSPACE}}/.role-lifecycle-fail-launch\" ] || exit 73\nexec {} fake-worker --workspace \"${{TEAM_AGENT_WORKSPACE}}\" --agent-id \"${{TEAM_AGENT_AGENT_ID}}\"\n", binary));
+        executable(&dir.join("claude"), &format!(
+            "#!/bin/sh\nset -eu\n[ -n \"${{TEAM_AGENT_AGENT_ID:-}}\" ] && [ -n \"${{TEAM_AGENT_WORKSPACE:-}}\" ] || exit 0\nprintf '%s\\0' claude \"$@\" \"ANTHROPIC_BASE_URL=${{ANTHROPIC_BASE_URL:-}}\" > \"${{TEAM_AGENT_WORKSPACE}}/.role-lifecycle-launch/${{TEAM_AGENT_AGENT_ID}}.argv\"\n[ ! -f \"${{TEAM_AGENT_WORKSPACE}}/.role-lifecycle-fail-launch\" ] || exit 73\nexec {} fake-worker --workspace \"${{TEAM_AGENT_WORKSPACE}}\" --agent-id \"${{TEAM_AGENT_AGENT_ID}}\"\n", binary));
         let inherited = std::env::var("PATH").unwrap_or_default();
         let real_tmux = std::env::split_paths(&inherited).map(|p| p.join("tmux")).find(|p| p.is_file()).expect("tmux available for isolated E2E tests");
         executable(&dir.join("tmux"), &format!(
@@ -132,22 +132,20 @@ fn compiled_from(raw: &str, id: &str) -> Yaml {
 fn compiled(ws: &TestWorkspace, id: &str) -> Yaml {
     compiled_from(&fs::read_to_string(spec_path(ws)).unwrap(), id)
 }
-fn codex_profile_role(id: &str, profile: &str, prompt: &str) -> String {
-    role(id, "codex", "gpt-5.6-luna", None, false, prompt)
+fn claude_profile_role(id: &str, profile: &str, prompt: &str) -> String {
+    role(id, "claude", "claude-sonnet-5", None, false, prompt)
         .replace("auth_mode: subscription\n", "auth_mode: compatible_api\n")
         .replace("tools:\n", &format!("profile: {profile}\ntools:\n"))
 }
-fn write_codex_profile(dir: &Path, name: &str, provider_id: &str, base_url: &str) {
+fn write_claude_profile(dir: &Path, name: &str, base_url: &str) {
     fs::create_dir_all(dir).unwrap();
     fs::write(dir.join(format!("{name}.env")), format!(
-        "AUTH_MODE=compatible_api\nMODEL_PROVIDER={provider_id}\nBASE_URL={base_url}\nAPI_KEY=role-lifecycle-fake-only\nMODEL=gpt-5.6-luna\n"
+        "AUTH_MODE=compatible_api\nBASE_URL={base_url}\nAPI_KEY=role-lifecycle-fake-only\nMODEL=claude-sonnet-5\n"
     )).unwrap();
 }
-fn assert_codex_profile(argv: &[String], provider_id: &str, base_url: &str) {
-    let selector = format!("model_provider=\"{provider_id}\"");
-    let endpoint = format!("model_providers.{provider_id}.base_url=\"{base_url}\"");
-    assert!(pair(argv, "-c", &selector), "missing Codex profile selector: {argv:?}");
-    assert!(pair(argv, "-c", &endpoint), "missing self-contained Codex profile endpoint: {argv:?}");
+fn assert_claude_profile(argv: &[String], base_url: &str) {
+    let endpoint = format!("ANTHROPIC_BASE_URL={base_url}");
+    assert!(argv.iter().any(|arg| arg == &endpoint), "missing self-contained Claude profile endpoint: {argv:?}");
 }
 fn assert_config(ws: &TestWorkspace, id: &str, provider: &str, model: &str, effort: Option<&str>, bypass: bool) {
     let v = compiled(ws, id);
@@ -292,7 +290,7 @@ fn add_file_cli_arbitration_accepts_equal_and_rejects_conflicting_values_atomica
     for (id, fields, should_pass) in [
         ("same", vec!["--provider", "pi", "--model", "openai-codex/gpt-5.6-luna", "--effort", "high", "--bypass", "false", "--prompt", "Body."], true),
         ("same-prompt-trim", vec!["--prompt", " \tBody.\n "], true),
-        ("conf-provider", vec!["--provider", "codex"], false),
+        ("conf-provider", vec!["--provider", "claude"], false),
         ("conf-bypass", vec!["--bypass", "true"], false),
         ("conf-model", vec!["--model", "openai-codex/gpt-6-luna"], false),
         ("conf-effort", vec!["--effort", "xhigh"], false),
@@ -338,17 +336,6 @@ fn running_start_refuses_plain_and_parameterized_calls_without_mutation() {
 }
 
 #[test]
-fn s5_codex_stop_change_model_effort_restart_updates_frontmatter_spec_and_native_argv() {
-    let (ws, shims) = ws_seed("rolelife-s5-codex", "codex", "gpt-5.6-luna", Some("medium")); stop(&ws, &shims, "seed");
-    let r = run(&ws, &shims, &start(&ws, "seed", &["--provider", "codex", "--model", "gpt-6-luna", "--effort", "ultra"]));
-    assert!(r.is_success(), "Codex patch: {} {}", r.stdout, r.stderr);
-    assert!(fs::read_to_string(role_path(&ws, "seed")).unwrap().contains("effort: ultra"));
-    assert_config(&ws, "seed", "codex", "gpt-6-luna", Some("ultra"), false);
-    let argv = shims.capture("seed"); assert!(pair(&argv, "--model", "gpt-6-luna"));
-    assert!(pair(&argv, "-c", "model_reasoning_effort=ultra"), "authoritative Codex wire key: {argv:?}");
-}
-
-#[test]
 fn s5_pi_stop_change_model_effort_restart_updates_frontmatter_spec_and_thinking_argv() {
     let (ws, shims) = ws_seed("rolelife-s5-pi", "pi", "gpt-6-luna", None); stop(&ws, &shims, "seed");
     let r = run(&ws, &shims, &start(&ws, "seed", &["--provider", "pi", "--model", "openai-codex/gpt-5.6-luna", "--effort", "xhigh"]));
@@ -373,7 +360,7 @@ fn stopped_start_partial_patches_bypass_and_prompt_and_preserves_omitted_values(
 
 #[test]
 fn cross_provider_changes_are_rejected_both_ways_but_same_provider_is_allowed() {
-    for (provider, model, effort, target) in [("pi", "gpt-6-luna", None, "codex"), ("codex", "gpt-5.6-luna", Some("medium"), "pi")] {
+    for (provider, model, effort, target) in [("pi", "gpt-6-luna", None, "claude"), ("claude", "claude-sonnet-5", Some("medium"), "pi")] {
         let (ws, shims) = ws_seed(&format!("rolelife-cross-{provider}"), provider, model, effort); stop(&ws, &shims, "seed");
         quiesce_owned_coordinator_before_rejection_snapshot(&ws);
         let before = snapshot(&ws, &shims, "seed"); let r = run(&ws, &shims, &start(&ws, "seed", &["--provider", target]));
@@ -439,16 +426,16 @@ fn failed_prompt_bypass_start_restores_complete_existing_role_and_spec() {
 
 #[test]
 fn stopped_start_profile_patch_uses_workspace_profile_values() {
-    let (ws, shims) = ws_seed("rolelife-start-profile", "codex", "gpt-5.6-luna", None); stop(&ws, &shims, "seed");
-    let role_without_profile = role("seed", "codex", "gpt-5.6-luna", None, false, "Profile patch.")
+    let (ws, shims) = ws_seed("rolelife-start-profile", "claude", "claude-sonnet-5", None); stop(&ws, &shims, "seed");
+    let role_without_profile = role("seed", "claude", "claude-sonnet-5", None, false, "Profile patch.")
         .replace("auth_mode: subscription\n", "auth_mode: compatible_api\n");
     fs::write(role_path(&ws, "seed"), role_without_profile).unwrap();
-    write_codex_profile(&ws.path().join("profiles"), "workspace-only", "workspace_local", "http://workspace.invalid/v1");
+    write_claude_profile(&ws.path().join("profiles"), "workspace-only", "http://workspace.invalid/v1");
     let r = run(&ws, &shims, &start(&ws, "seed", &["--profile", "workspace-only"]));
     assert!(r.is_success(), "start profile patch: {} {}", r.stdout, r.stderr);
     assert!(fs::read_to_string(role_path(&ws, "seed")).unwrap().contains("profile: workspace-only"));
     assert_eq!(compiled(&ws, "seed").get("profile").and_then(Yaml::as_str), Some("workspace-only"));
-    assert_codex_profile(&shims.capture("seed"), "workspace_local", "http://workspace.invalid/v1");
+    assert_claude_profile(&shims.capture("seed"), "http://workspace.invalid/v1");
 }
 
 #[test]
@@ -456,21 +443,21 @@ fn imported_role_profile_is_workspace_local_not_an_external_template_dependency(
     let (ws, shims) = ws_seed("rolelife-import-profile", "pi", "gpt-6-luna", None);
     let external_root = ws.path().join("external-template");
     let source = external_root.join("agent.md"); fs::create_dir_all(&external_root).unwrap();
-    let bytes = codex_profile_role("profiled", "workspace-only", "Imported profile role.");
+    let bytes = claude_profile_role("profiled", "workspace-only", "Imported profile role.");
     fs::write(&source, &bytes).unwrap();
-    write_codex_profile(&ws.path().join("profiles"), "workspace-only", "workspace_local", "http://workspace.invalid/v1");
-    write_codex_profile(&external_root.join("profiles"), "workspace-only", "external_ghost", "http://external.invalid/v1");
+    write_claude_profile(&ws.path().join("profiles"), "workspace-only", "http://workspace.invalid/v1");
+    write_claude_profile(&external_root.join("profiles"), "workspace-only", "http://external.invalid/v1");
     let add = run(&ws, &shims, &cli(&ws, "add-agent", "profiled", &["--role-file", source.to_str().unwrap(), "--no-display"]));
     assert!(add.is_success(), "external profiled add: {} {}", add.stdout, add.stderr);
     assert_eq!(fs::read(&source).unwrap(), bytes.as_bytes());
     assert_eq!(fs::read(role_path(&ws, "profiled")).unwrap(), bytes.as_bytes());
-    assert_codex_profile(&shims.capture("profiled"), "workspace_local", "http://workspace.invalid/v1");
+    assert_claude_profile(&shims.capture("profiled"), "http://workspace.invalid/v1");
     assert_eq!(compiled(&ws, "profiled").get("profile").and_then(Yaml::as_str), Some("workspace-only"));
     stop(&ws, &shims, "profiled");
     fs::remove_dir_all(&external_root).unwrap();
     let restarted = run(&ws, &shims, &start(&ws, "profiled", &["--profile", "workspace-only"]));
     assert!(restarted.is_success(), "restart must remain workspace-self-contained: {} {}", restarted.stdout, restarted.stderr);
-    assert_codex_profile(&shims.capture("profiled"), "workspace_local", "http://workspace.invalid/v1");
+    assert_claude_profile(&shims.capture("profiled"), "http://workspace.invalid/v1");
 }
 
 #[test]
@@ -484,18 +471,10 @@ fn runtime_spec_and_launch_capture_are_not_substitutes_for_required_live_ui_chec
 }
 
 #[test]
-fn codex_max_effort_uses_issue_238_authoritative_wire_key() {
-    let (ws, shims) = ws_seed("rolelife-codex-max", "codex", "gpt-5.6-luna", Some("medium")); stop(&ws, &shims, "seed");
-    let r = run(&ws, &shims, &start(&ws, "seed", &["--effort", "max"]));
-    assert!(r.is_success(), "Codex max: {} {}", r.stdout, r.stderr);
-    assert!(pair(&shims.capture("seed"), "-c", "model_reasoning_effort=max"));
-}
-
-#[test]
 fn external_role_conflict_and_duplicate_refusals_leave_canonical_files_and_spec_unchanged() {
     let (ws, shims) = ws_seed("rolelife-zero-side-effects", "pi", "gpt-6-luna", None);
     let source = ws.path().join("conflict.md"); fs::write(&source, role("conflict", "pi", "gpt-5.6-luna", None, false, "File body.")).unwrap();
     let before = snapshot(&ws, &shims, "conflict");
-    let r = run(&ws, &shims, &cli(&ws, "add-agent", "conflict", &["--role-file", source.to_str().unwrap(), "--provider", "codex"]));
+    let r = run(&ws, &shims, &cli(&ws, "add-agent", "conflict", &["--role-file", source.to_str().unwrap(), "--provider", "claude"]));
     reject(&r, "provider conflict"); assert_eq!(snapshot(&ws, &shims, "conflict"), before); assert!(!role_path(&ws, "conflict").exists());
 }

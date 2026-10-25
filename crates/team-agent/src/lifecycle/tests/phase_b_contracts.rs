@@ -46,7 +46,7 @@ fn concurrent_reset_discard_session_serializes() {
     let workspace = team.parent().expect("team workspace").to_path_buf();
     seed_healthy_coordinator(&workspace);
 
-    let launch_transport = codex_ready_transport();
+    let launch_transport = claude_ready_transport();
     let quick_start = quick_start_with_transport_in_workspace(
         &workspace,
         &team,
@@ -61,7 +61,7 @@ fn concurrent_reset_discard_session_serializes() {
         "fixture must launch: {quick_start:?}"
     );
 
-    let reset_transport = codex_ready_transport()
+    let reset_transport = claude_ready_transport()
         .with_session_present(true)
         .with_windows(ids.iter().map(|id| WindowName::new(id.as_str())).collect());
     let outcomes = ids
@@ -224,10 +224,9 @@ fn add_fork_remove_share_lifecycle_lock_behavior() {
     );
     let fork_held_text = format!("{fork_held:?}");
     assert!(
-        fork_held_text.contains("unverified")
-            || fork_held_text.contains("未验证")
+        fork_held_text.contains("refuses --as")
             || fork_held_text.contains("LifecycleLockTimeout"),
-        "codex in-window fork is unverified (lock is not reached); got {fork_held:?}"
+        "claude in-window fork refuses a new --as seat (lock is not reached); got {fork_held:?}"
     );
     assert!(
         fork_transport.spawns().is_empty(),
@@ -256,8 +255,8 @@ fn add_fork_remove_share_lifecycle_lock_behavior() {
     );
     let fork_after_text = format!("{fork_after:?}");
     assert!(
-        fork_after_text.contains("unverified") || fork_after_text.contains("未验证"),
-        "codex in-window fork stays unverified after lock release; got {fork_after:?}"
+        fork_after_text.contains("refuses --as"),
+        "claude in-window fork still refuses a new --as seat after lock release; got {fork_after:?}"
     );
 
     let remove_workspace = lanea_team_ws("stopped");
@@ -477,12 +476,12 @@ fn team_dir_with_roles(role_docs: &[(&str, &str)]) -> PathBuf {
 }
 
 fn breal_workspace() -> (PathBuf, PathBuf) {
-    let w1 = "---\nname: w1\nrole: Phase B Real Worker One\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker one body.\n";
-    let w2 = "---\nname: w2\nrole: Phase B Real Worker Two\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker two body.\n";
+    let w1 = "---\nname: w1\nrole: Phase B Real Worker One\nprovider: claude\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker one body.\n";
+    let w2 = "---\nname: w2\nrole: Phase B Real Worker Two\nprovider: claude\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker two body.\n";
     let team = team_dir_with_roles(&[("w1.md", w1), ("w2.md", w2)]);
     let workspace = team.parent().expect("team workspace").to_path_buf();
     seed_healthy_coordinator(&workspace);
-    let launch_transport = codex_ready_transport();
+    let launch_transport = claude_ready_transport();
     quick_start_with_transport_in_workspace(
         &workspace,
         &team,
@@ -496,11 +495,11 @@ fn breal_workspace() -> (PathBuf, PathBuf) {
 }
 
 fn breal_one_worker_workspace() -> (PathBuf, PathBuf) {
-    let w1 = "---\nname: w1\nrole: Phase B Real Worker One\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker one body.\n";
+    let w1 = "---\nname: w1\nrole: Phase B Real Worker One\nprovider: claude\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker one body.\n";
     let team = team_dir_with_roles(&[("w1.md", w1)]);
     let workspace = team.parent().expect("team workspace").to_path_buf();
     seed_healthy_coordinator(&workspace);
-    let launch_transport = codex_ready_transport();
+    let launch_transport = claude_ready_transport();
     quick_start_with_transport_in_workspace(
         &workspace,
         &team,
@@ -538,7 +537,7 @@ fn strip_runtime_command_context(workspace: &std::path::Path) {
 
 fn role_doc(id: &str) -> String {
     format!(
-        "---\nname: {id}\nrole: {id} Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{id} worker.\n"
+        "---\nname: {id}\nrole: {id} Worker\nprovider: claude\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{id} worker.\n"
     )
 }
 
@@ -546,7 +545,7 @@ fn add_fixture() -> (PathBuf, PathBuf, PathBuf, OfflineTransport) {
     let team = quick_start_team_dir(QS_VALID_ROLE);
     let workspace = team.parent().expect("team workspace").to_path_buf();
     seed_healthy_coordinator(&workspace);
-    let launch_transport = codex_ready_transport();
+    let launch_transport = claude_ready_transport();
     quick_start_with_transport_in_workspace(
         &workspace,
         &team,
@@ -562,14 +561,14 @@ fn add_fixture() -> (PathBuf, PathBuf, PathBuf, OfflineTransport) {
         team,
         workspace,
         role,
-        codex_ready_transport().with_session_present(true),
+        claude_ready_transport().with_session_present(true),
     )
 }
 
-fn codex_ready_transport() -> OfflineTransport {
+fn claude_ready_transport() -> OfflineTransport {
     let mut transport = OfflineTransport::new();
     for pane in 0..32 {
-        transport = transport.with_capture_for_pane(format!("%{pane}"), "OpenAI Codex");
+        transport = transport.with_capture_for_pane(format!("%{pane}"), "Claude Code\n❯ ");
     }
     transport
 }
@@ -728,7 +727,7 @@ impl Transport for BRealTransport {
         range: CaptureRange,
     ) -> Result<CapturedText, TransportError> {
         Ok(CapturedText {
-            text: "OpenAI Codex".to_string(),
+            text: "Claude Code\n❯ ".to_string(),
             range,
         })
     }

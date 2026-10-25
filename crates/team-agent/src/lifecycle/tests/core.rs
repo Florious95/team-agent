@@ -231,10 +231,10 @@ fn start_mode_serde_names_match_python_start_mode_strings() {
 
 // ───────────────────────────────────────────────────────────────────────
 // decide_start_mode — bug-085 四象限 + E20 #264 gap closure.
-//   codex sess  rollout-present any-fresh   -> resumed
-//   codex sess  backing-MISSING !allow_fresh -> noop/refuse (绝不静默 resume 死 session)
-//   codex sess  backing-MISSING  allow_fresh -> fresh_after_missing_rollout
-//   codex no-sess any                        -> fresh
+//   claude sess rollout-present any-fresh   -> resumed
+//   claude sess backing-MISSING !allow_fresh -> noop/refuse (绝不静默 resume 死 session)
+//   claude sess backing-MISSING  allow_fresh -> fresh_after_missing_rollout
+//   claude no-sess any                       -> fresh
 //   claude/copilot sess backing-missing       -> fresh_after_missing_rollout 或 noop/refuse
 //   claude no-sess                            -> fresh
 // 这是 bug-085 把 start_mode 分类从 start_agent 的 lock+spawn 全路径剥离出来的命门。
@@ -248,16 +248,16 @@ fn rp(p: &str) -> RolloutPath {
 }
 
 #[test]
-fn decide_start_mode_codex_missing_rollout_with_allow_fresh_is_fresh_after_missing() {
-    // bug-085 唯一 FreshAfterMissingRollout 臂:codex + 有 session_id + rollout 缺 + allow_fresh。
+fn decide_start_mode_claude_missing_rollout_with_allow_fresh_is_fresh_after_missing() {
+    // bug-085 唯一 FreshAfterMissingRollout 臂:可 resume provider + 有 session_id + rollout 缺 + allow_fresh。
     assert_eq!(
-        decide_start_mode("codex", Some(&sid("s1")), None, false, true),
+        decide_start_mode("claude", Some(&sid("s1")), None, false, true),
         StartMode::FreshAfterMissingRollout
     );
     // rollout 路径存在但文件已不在,同样命中。
     assert_eq!(
         decide_start_mode(
-            "codex",
+            "claude",
             Some(&sid("s1")),
             Some(&rp("/gone.jsonl")),
             false,
@@ -268,19 +268,19 @@ fn decide_start_mode_codex_missing_rollout_with_allow_fresh_is_fresh_after_missi
 }
 
 #[test]
-fn decide_start_mode_codex_missing_rollout_without_allow_fresh_refuses() {
+fn decide_start_mode_claude_missing_rollout_without_allow_fresh_refuses() {
     // E20 C①:backing 缺且 !allow_fresh → 诚实拒绝,绝不 resume 进死 session。
     assert_eq!(
-        decide_start_mode("codex", Some(&sid("s1")), None, false, false),
+        decide_start_mode("claude", Some(&sid("s1")), None, false, false),
         StartMode::Noop
     );
 }
 
 #[test]
-fn decide_start_mode_codex_rollout_present_is_resumed_regardless_of_fresh() {
+fn decide_start_mode_claude_rollout_present_is_resumed_regardless_of_fresh() {
     assert_eq!(
         decide_start_mode(
-            "codex",
+            "claude",
             Some(&sid("s1")),
             Some(&rp("/r.jsonl")),
             true,
@@ -289,7 +289,7 @@ fn decide_start_mode_codex_rollout_present_is_resumed_regardless_of_fresh() {
         StartMode::Resumed
     );
     assert_eq!(
-        decide_start_mode("codex", Some(&sid("s1")), Some(&rp("/r.jsonl")), true, true),
+        decide_start_mode("claude", Some(&sid("s1")), Some(&rp("/r.jsonl")), true, true),
         StartMode::Resumed
     );
 }
@@ -297,11 +297,11 @@ fn decide_start_mode_codex_rollout_present_is_resumed_regardless_of_fresh() {
 #[test]
 fn decide_start_mode_no_session_is_fresh() {
     assert_eq!(
-        decide_start_mode("codex", None, None, false, true),
+        decide_start_mode("claude", None, None, false, true),
         StartMode::Fresh
     );
     assert_eq!(
-        decide_start_mode("codex", None, None, false, false),
+        decide_start_mode("claude", None, None, false, false),
         StartMode::Fresh
     );
 }
@@ -602,14 +602,14 @@ fn classify_restart_plan_never_interacted_null_session_with_allow_fresh_marks_fo
 }
 
 #[test]
-fn classify_restart_plan_codex_with_session_still_resumes() {
-    // E6 层2 回归锁(不误伤): codex worker first_send_at=null 但 session_id 已捕 →
+fn classify_restart_plan_claude_with_session_still_resumes() {
+    // E6 层2 回归锁(不误伤): claude worker first_send_at=null 但 session_id 已捕 →
     // 仍走 Resume(分流轴是 session_id 有无,不是 interacted)。防层2 修法把 has_session 也误判。
     let ws = temp_ws();
-    let rollout = ws.join("codex-rollout.jsonl");
-    std::fs::write(&rollout, "{}\n").unwrap();
+    let rollout = ws.join("claude-session.jsonl");
+    std::fs::write(&rollout, "{\"type\":\"user\",\"sessionId\":\"sess-claude-abc\"}\n").unwrap();
     let state = json!({
-        "agents": { "w1": { "provider": "codex", "session_id": "sess-codex-abc", "rollout_path": rollout.to_string_lossy() } }
+        "agents": { "w1": { "provider": "claude", "session_id": "sess-claude-abc", "rollout_path": rollout.to_string_lossy() } }
     });
     let plan = classify_restart_plan(&state, false).expect("纯验证不应 Err");
     assert_eq!(plan.decisions.len(), 1);

@@ -1795,7 +1795,7 @@ mod fresh_quick_start_leader_binding_tests {
             "---\nname: current\nobjective: Bootstrap fixture.\n---\n",
         )
         .unwrap();
-        std::fs::write(team.join("agents/worker.md"), "---\nname: worker\nrole: Worker\nprovider: codex\nauth_mode: subscription\ndangerously_skip_permissions: false\n---\nBounded fixture.\n").unwrap();
+        std::fs::write(team.join("agents/worker.md"), "---\nname: worker\nrole: Worker\nprovider: claude\nauth_mode: subscription\ndangerously_skip_permissions: false\n---\nBounded fixture.\n").unwrap();
         let state_path = crate::state::persist::runtime_state_path(&workspace);
         std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         let state = json!({

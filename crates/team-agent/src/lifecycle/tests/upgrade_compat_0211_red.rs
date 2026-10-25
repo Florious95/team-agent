@@ -248,7 +248,7 @@ fn upgrade_restart_plan_uses_persisted_session_id() {
         "agents": {
             "w1": {
                 "status": "running",
-                "provider": "codex",
+                "provider": "claude",
                 "session_id": "sess-upgrade",
                 "rollout_path": rollout.to_string_lossy(),
                 "first_send_at": "2026-06-07T01:00:00+00:00"
@@ -332,7 +332,7 @@ fn upgrade_restart_refuses_interacted_worker_without_session_id() {
         "agents": {
             "w1": {
                 "status": "running",
-                "provider": "codex",
+                "provider": "claude",
                 "session_id": null,
                 "first_send_at": "2026-06-07T01:00:00+00:00"
             }
@@ -373,21 +373,34 @@ fn upgrade_rust_mcp_config_uses_current_binary_and_runtime_key() {
         format!("{report:?}").contains("Resumed"),
         "restart report must show resume path for persisted session_id; report={report:?}"
     );
-    assert!(
-        command_line.contains(&current_exe),
-        "restarted worker MCP command must use the current Rust candidate binary path; current_exe={current_exe} command_line={command_line:?}"
+    // Claude reads MCP from the `--mcp-config` file, so check the file the
+    // restarted argv points at rather than inline argv overrides.
+    let mcp_path = spawn
+        .argv
+        .windows(2)
+        .find(|pair| pair[0] == "--mcp-config")
+        .map(|pair| PathBuf::from(&pair[1]))
+        .unwrap_or_else(|| panic!("restarted Claude worker must pass --mcp-config; command_line={command_line:?}"));
+    let mcp: Value = serde_json::from_str(&std::fs::read_to_string(&mcp_path).unwrap()).unwrap();
+    let server = mcp["mcpServers"]
+        .as_object()
+        .and_then(|servers| servers.values().next())
+        .unwrap_or_else(|| panic!("MCP config must declare the team server; mcp={mcp}"));
+    assert_eq!(
+        server["command"].as_str(),
+        Some(current_exe.as_str()),
+        "restarted worker MCP command must use the current Rust candidate binary path; mcp={mcp}"
     );
     assert!(
         command_line.contains("TEAM_AGENT_OWNER_TEAM_ID=upgrade-key")
-            && command_line.contains("TEAM_AGENT_OWNER_TEAM_ID=\"upgrade-key\""),
-        "spawn env and MCP config must both use runtime team key upgrade-key; command_line={command_line:?}"
+            && server["env"]["TEAM_AGENT_OWNER_TEAM_ID"].as_str() == Some("upgrade-key"),
+        "spawn env and MCP config must both use runtime team key upgrade-key; command_line={command_line:?} mcp={mcp}"
     );
     assert!(
         spawn
             .argv
             .windows(2)
-            .any(|pair| pair[0] == "codex" && pair[1] == "resume")
-            && spawn.argv.iter().any(|arg| arg == "sess-upgrade"),
+            .any(|pair| pair[0] == "--resume" && pair[1] == "sess-upgrade"),
         "restart must resume persisted provider session, not fresh start; command_line={command_line:?}"
     );
 }
@@ -443,7 +456,7 @@ impl UpgradeFixture {
         std::fs::create_dir_all(self.team_dir.join("agents")).unwrap();
         std::fs::write(
             self.team_dir.join("agents").join("upgrade_worker.md"),
-            "---\nname: upgrade_worker\nrole: Upgrade Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n",
+            "---\nname: upgrade_worker\nrole: Upgrade Worker\nprovider: claude\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n",
         )
         .unwrap();
         let spec = team_agent::compiler::compile_team(&self.team_dir).unwrap();
@@ -471,7 +484,7 @@ impl UpgradeFixture {
                 "agents": {
                     "upgrade_worker": {
                         "status": "running",
-                        "provider": "codex",
+                        "provider": "claude",
                         "role": "Upgrade Worker",
                         "tools": ["mcp_team"],
                         "window": "upgrade_worker",
@@ -492,7 +505,7 @@ impl UpgradeFixture {
                         "agents": {
                             "upgrade_worker": {
                                 "status": "running",
-                                "provider": "codex",
+                                "provider": "claude",
                                 "role": "Upgrade Worker",
                                 "tools": ["mcp_team"],
                                 "window": "upgrade_worker",

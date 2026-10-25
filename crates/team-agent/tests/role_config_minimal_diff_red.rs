@@ -35,11 +35,6 @@ impl ProviderShims {
         write_executable(&pi_target, &pi_script);
         symlink(&pi_target, dir.join("pi")).expect("install Pi symlink entry");
 
-        let codex_script = format!(
-            "#!/bin/sh\nset -eu\nif [ -z \"${{TEAM_AGENT_AGENT_ID:-}}\" ] || [ -z \"${{TEAM_AGENT_WORKSPACE:-}}\" ]; then exit 0; fi\nprintf '%s\\0' 'codex' \"$@\" > \"${{TEAM_AGENT_WORKSPACE}}/.role-config-launch/${{TEAM_AGENT_AGENT_ID}}.argv\"\nexec {} fake-worker --workspace \"${{TEAM_AGENT_WORKSPACE}}\" --agent-id \"${{TEAM_AGENT_AGENT_ID}}\"\n",
-            binary,
-        );
-        write_executable(&dir.join("codex"), &codex_script);
         let inherited = std::env::var("PATH").unwrap_or_default();
         let path = format!("{}:{inherited}", dir.display());
         Self { path }

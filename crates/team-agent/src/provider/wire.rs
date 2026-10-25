@@ -27,11 +27,38 @@ use crate::model::enums::Provider;
 pub(crate) const RETIRED_PROVIDER_ERROR: &str =
     "retired provider cursor_agent/agent is unsupported; configure provider: cursor explicitly";
 
+pub(crate) const LEGACY_CODEX_ERROR: &str =
+    "legacy provider codex is retired; configure provider: codex with contract_runtime: true";
+
 pub(crate) fn is_retired_provider(raw: &str) -> bool {
     matches!(
         raw.trim().to_ascii_lowercase().as_str(),
         "cursor_agent" | "agent"
     )
+}
+
+/// Old Codex spellings. The exact contract id `codex` is not in this set by
+/// itself: admission depends on [`legacy_codex_refused`].
+pub(crate) fn is_legacy_codex_key(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "codex" | "codex_cli" | "codex-cli"
+    )
+}
+
+/// Refuse a legacy Codex key before any side effect.
+///
+/// Exact `codex` plus an already-decided contract opt-in stays on the contract
+/// leaf. Every other spelling, including `CODEX` and `codex_cli`, is refused
+/// even when the opt-in flag is set.
+pub(crate) fn legacy_codex_refused(raw: &str, contract_opt_in: bool) -> bool {
+    let trimmed = raw.trim();
+    is_legacy_codex_key(trimmed) && !(trimmed == "codex" && contract_opt_in)
+}
+
+pub(crate) fn json_contract_opt_in(row: &serde_json::Value) -> bool {
+    row.get("contract_runtime") == Some(&serde_json::Value::Bool(true))
+        || row.get("runtime_family").and_then(serde_json::Value::as_str) == Some("contract")
 }
 
 /// Inspect declared provider keys even when malformed YAML would become plain text.
@@ -63,6 +90,48 @@ pub(crate) fn has_retired_provider_header(raw: &str) -> bool {
         })
 }
 
+/// Top-level provider key only. A contract Codex role is not a legacy key.
+/// Body text that mentions `provider: codex` does not match.
+pub(crate) fn has_legacy_codex_header(raw: &str) -> bool {
+    let (meta, _) = crate::compiler::split_front_matter(raw);
+    if meta.get("provider").is_some() || meta.get("contract_runtime").is_some() {
+        let provider = meta.get("provider").and_then(|value| value.as_str()).unwrap_or("");
+        let opt_in = matches!(
+            meta.get("contract_runtime"),
+            Some(crate::model::yaml::Value::Bool(true))
+        ) || meta.get("runtime_family").and_then(|value| value.as_str()) == Some("contract");
+        return legacy_codex_refused(provider, opt_in);
+    }
+    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let Some(header) = normalized.strip_prefix("---\n") else {
+        return false;
+    };
+    let mut provider = None;
+    let mut opt_in = false;
+    for line in header.lines().take_while(|line| *line != "---") {
+        if line != line.trim_start() {
+            continue;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim().trim_matches(['\'', '"']);
+        let value = value
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .trim_matches(['\'', '"']);
+        match key {
+            "provider" => provider = Some(value.to_string()),
+            "contract_runtime" if matches!(value, "true" | "True" | "TRUE") => opt_in = true,
+            "runtime_family" if value.eq_ignore_ascii_case("contract") => opt_in = true,
+            _ => {}
+        }
+    }
+    provider.is_some_and(|provider| legacy_codex_refused(&provider, opt_in))
+}
+
 pub(crate) fn require_active_state_providers(
     state: &serde_json::Value,
     target: Option<&str>,
@@ -73,16 +142,41 @@ pub(crate) fn require_active_state_providers(
         .is_some_and(|agents| {
             agents.iter().any(|(id, row)| {
                 target.is_none_or(|target| target == id)
-                    && row
-                        .get("provider")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(is_retired_provider)
+                    && row_refuses_provider(row)
             })
         })
     {
-        return Err(RETIRED_PROVIDER_ERROR);
+        return Err(if state_has_legacy_codex(state, target) {
+            LEGACY_CODEX_ERROR
+        } else {
+            RETIRED_PROVIDER_ERROR
+        });
     }
     Ok(())
+}
+
+fn row_refuses_provider(row: &serde_json::Value) -> bool {
+    let Some(provider) = row.get("provider").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    is_retired_provider(provider) || legacy_codex_refused(provider, json_contract_opt_in(row))
+}
+
+fn state_has_legacy_codex(state: &serde_json::Value, target: Option<&str>) -> bool {
+    state
+        .get("agents")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|agents| {
+            agents.iter().any(|(id, row)| {
+                target.is_none_or(|target| target == id)
+                    && row
+                        .get("provider")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|provider| {
+                            legacy_codex_refused(provider, json_contract_opt_in(row))
+                        })
+            })
+        })
 }
 
 /// Canonical snake_case wire string for `Provider`. Used for state JSON,
@@ -367,6 +461,43 @@ mod tests {
         assert!(require_active_state_providers(&state, Some("claude")).is_ok());
         assert!(require_active_state_providers(&state, Some("retired")).is_err());
         assert!(require_active_state_providers(&state, None).is_err());
+    }
+
+    #[test]
+    fn legacy_codex_refusal_is_case_insensitive_and_ignores_role_prose() {
+        for key in ["codex", "CODEX", "Codex", "codex_cli", "codex-cli", " Codex "] {
+            assert!(legacy_codex_refused(key, false), "{key}");
+            assert!(legacy_codex_refused(key.trim(), key.trim() != "codex"), "{key}");
+        }
+        assert!(!legacy_codex_refused("codex", true));
+        assert!(legacy_codex_refused("CODEX", true));
+        assert!(!legacy_codex_refused("pi", false));
+        assert!(!legacy_codex_refused("claude", true));
+        assert!(!legacy_codex_refused("cursor", false));
+        let pi = "---\nprovider: pi\nexample:\n  provider: codex\nnotes: |\n  provider: CODEX\n---\nprovider: codex\n";
+        assert!(!has_legacy_codex_header(pi));
+        assert!(!has_legacy_codex_header("---\nprovider: claude\n---\n"));
+        assert!(!has_legacy_codex_header(
+            "---\nprovider: codex\ncontract_runtime: true\n---\n"
+        ));
+        assert!(has_legacy_codex_header("---\nprovider: codex\n---\n"));
+        assert!(has_legacy_codex_header("---\nprovider: CODEX\ncontract_runtime: true\n---\n"));
+        assert!(has_legacy_codex_header("---\nprovider: codex_cli\n---\nmissing"));
+        let state = serde_json::json!({"agents": {
+            "pi": {"provider": "pi", "notes": "provider: codex"},
+            "claude": {"provider": "claude"},
+            "cursor": {"provider": "cursor", "contract_runtime": true},
+            "contract_codex": {"provider": "codex", "contract_runtime": true},
+            "legacy": {"provider": "CODEX"}
+        }});
+        assert!(require_active_state_providers(&state, Some("pi")).is_ok());
+        assert!(require_active_state_providers(&state, Some("claude")).is_ok());
+        assert!(require_active_state_providers(&state, Some("cursor")).is_ok());
+        assert!(require_active_state_providers(&state, Some("contract_codex")).is_ok());
+        assert_eq!(
+            require_active_state_providers(&state, Some("legacy")),
+            Err(LEGACY_CODEX_ERROR)
+        );
     }
 
     #[test]
