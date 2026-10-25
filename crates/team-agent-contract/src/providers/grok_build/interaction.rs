@@ -8,8 +8,8 @@ use unicode_width::UnicodeWidthStr;
 
 pub const PROFILE: &str = "grok-build-tui-v1";
 pub const STARTUP_PROFILE: &str = "grok-build-trust-v1";
-pub const POLICY_RECIPE: &str = "grok-build-tui-v1/r4:runtime-native-image+wrapper;owned-server-ambient-coexistence;120x40;paste-bracketed;enter-once;retry-never;queue-owned-visible-token+Queued · Enter to send now:Enter-once:150ms;capture100ms;stable200ms;paste-floor100ms;deadline30s;trust-v1:exact-cwd+bypass:y-once;session-info:direct+unique-closed-modal-own-width+current-uuid+cwd+version:Escape-once;exit:direct+native-exited+dead-pane-close;folded-v3:empty-baseline+confirmed-paste+payload-shape-bytes+lines-or-kib-rounded-0-to-3-decimals+attempt+closed-preview-unicode-width-0.2.2-header-and-token->confirmed-enter+new-unboxed-transcript-prefix+empty-composer+busy-or-ready";
-pub const POLICY: Digest = Digest([237, 202, 29, 239, 0, 84, 254, 167, 176, 220, 103, 23, 138, 74, 35, 135, 47, 198, 216, 119, 229, 66, 62, 40, 185, 89, 214, 5, 238, 57, 166, 22]);
+pub const POLICY_RECIPE: &str = "grok-build-tui-v1/r5:runtime-native-image+wrapper;owned-server-ambient-coexistence;120x40;paste-bracketed;enter-once;retry-never;queue-owned-visible-token+Queued · Enter to send now|Enter:send now:Enter-once:150ms;folded-capsule-still-in-composer:same-Enter-once;capture100ms;stable200ms;paste-floor100ms;deadline30s;trust-v1:exact-cwd+bypass:y-once;session-info:direct+unique-closed-modal-own-width+current-uuid+cwd+version:Escape-once;exit:direct+native-exited+dead-pane-close;folded-v3:empty-baseline+confirmed-paste+payload-shape-bytes+lines-or-kib-rounded-0-to-3-decimals+attempt+closed-preview-unicode-width-0.2.2-header-and-token->confirmed-enter+new-unboxed-transcript-prefix+empty-composer+busy-or-ready";
+pub const POLICY: Digest = Digest([165, 117, 153, 51, 155, 109, 234, 245, 92, 96, 176, 156, 210, 3, 205, 181, 202, 35, 40, 73, 148, 167, 220, 151, 249, 103, 123, 119, 61, 175, 204, 123]);
 const QUEUE: &str = "grok-owned-queue-send-now";
 pub static PROFILES: &[InputProfile] = &[InputProfile {
     id: PROFILE, identity: ProfileIdentity::RuntimeCaptured, harness: "grok-build", ui: "tui",
@@ -60,7 +60,19 @@ fn composer(text: &str) -> Option<(usize, String)> {
     }
     None
 }
-fn queue_visible(text: &str) -> bool { text.lines().any(|line| line.trim() == "Queued · Enter to send now") }
+fn queue_visible(text: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim();
+        line == "Queued · Enter to send now" || line.contains("Enter:send now")
+    })
+}
+fn folded_capsule_still_owned(frame: &CaptureFrame) -> bool {
+    let Some(input) = frame.input.as_ref() else { return false; };
+    let Some((_, current)) = composer(&frame.text) else { return false; };
+    !current.is_empty()
+        && folded_marker_matches(&current, input)
+        && matches!(&frame.paste_latch, PasteLatch::Seen { native_identity } if native_identity.starts_with("grok-owned-folded-v3:"))
+}
 pub fn surface(text: &str) -> InputSurface {
     let Some((index, input)) = composer(text) else { return InputSurface::ShellOrUnknown; };
     if !input.is_empty() { return InputSurface::ComposerContainsPaste; }
@@ -257,9 +269,12 @@ impl InteractionHook for GrokAdapter {
             let owned_visible = token.as_ref().is_some_and(|token| matches!(&frame.paste_latch, PasteLatch::Seen { native_identity } if native_identity == token))
                 && frame.attempt.is_some() && current_subject(frame)
                 && token.as_ref().is_some_and(|token| frame.baseline.as_ref().is_some_and(|before| !before.text.contains(token)));
-            if frame.after_step == Some(StepKind::InitialSubmit) && owned_visible && queue_visible(&frame.text)
-                && token.as_ref().is_some_and(|token| frame.text.lines().any(|line| line.trim().starts_with("#1 ") && line.contains(token)))
-            {
+            let queued_owned = frame.after_step == Some(StepKind::InitialSubmit) && owned_visible && queue_visible(&frame.text)
+                && token.as_ref().is_some_and(|token| frame.text.contains(token));
+            let swallowed_fold = frame.after_step == Some(StepKind::InitialSubmit)
+                && observation.surface != InputSurface::NativeAccepted
+                && folded_capsule_still_owned(frame);
+            if queued_owned || swallowed_fold {
                 observation.surface = InputSurface::Queued; observation.predicate = Some(QUEUE.into());
                 observation.current_message = frame.message.clone(); observation.current_attempt = frame.attempt.clone();
             }
