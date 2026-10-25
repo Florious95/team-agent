@@ -70,7 +70,7 @@ pub(crate) fn profile_smoke_checks_for_agents_with_profile_dir(
 /// ---
 /// purpose: 单个 agent 的 profile 冒烟
 /// params:
-///   agent: 单个 agent 节点，缺 provider 按 codex、缺 auth_mode 按 subscription
+///   agent: 单个 agent 节点；缺 provider 或 legacy codex 键按已退役拒绝，缺 auth_mode 按 subscription
 ///   timeout: 单次 HTTP 探测的超时
 /// returns: 结果 JSON。非 compatible_api 记 not_required，profile 里关掉冒烟记 skipped_by_profile，其余走真实请求
 /// ---
@@ -85,9 +85,8 @@ pub(crate) fn smoke_check_agent_profile(
         .and_then(YamlValue::as_str)
         .unwrap_or("agent")
         .to_string();
-    let provider = agent
-        .get("provider")
-        .and_then(YamlValue::as_str)
+    let raw_provider = agent.get("provider").and_then(YamlValue::as_str);
+    let provider = raw_provider
         .and_then(profile_launch::parse_provider)
         .unwrap_or(Provider::Codex);
     let auth_mode = agent
@@ -95,6 +94,18 @@ pub(crate) fn smoke_check_agent_profile(
         .and_then(YamlValue::as_str)
         .and_then(profile_launch::parse_auth_mode)
         .unwrap_or(AuthMode::Subscription);
+    let contract_opt_in = agent.get("contract_runtime") == Some(&YamlValue::Bool(true));
+    if raw_provider
+        .is_none_or(|raw| crate::provider::wire::legacy_codex_refused(raw, contract_opt_in))
+    {
+        return invalid_profile(
+            &agent_id,
+            provider,
+            agent.get("profile").and_then(YamlValue::as_str),
+            auth_mode,
+            crate::provider::wire::LEGACY_CODEX_ERROR,
+        );
+    }
     let profile = agent
         .get("profile")
         .and_then(YamlValue::as_str)

@@ -199,7 +199,7 @@ fn claude_compatible_api_is_refused_as_unsupported_auth() {
 
 #[test]
 fn unverified_providers_are_refused_as_unverified_not_unsupported() {
-    for provider in ["codex", "copilot", "gemini_cli"] {
+    for provider in ["copilot", "gemini_cli"] {
         let ws = seat_ws(provider, provider, "subscription");
         let (result, injected) = fork_on(&ws, "forked from\n");
         let err = match result {

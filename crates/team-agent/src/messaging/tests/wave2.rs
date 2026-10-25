@@ -262,7 +262,7 @@ fn u1_c_delivery_peek_uses_tail_eighty_not_full() {
         "session_name": "team-tail-range",
         "agents": {
             "w1": {
-                "provider": "codex",
+                "provider": "claude",
                 "pane_id": "%cdx",
                 "window": "w1",
                 "startup_prompts": "pending",  // NOT handled — triggers peek path
@@ -280,7 +280,7 @@ fn u1_c_delivery_peek_uses_tail_eighty_not_full() {
         .with_targets(vec![pane_info_w("%cdx", "team-tail-range", "w1")])
         .with_session_present(true)
         .with_default_liveness(PaneLiveness::Live)
-        .with_capture_for_pane("%cdx", "OpenAI Codex\ncodex>\n");
+        .with_capture_for_pane("%cdx", "Claude Code\n❯ \n");
 
     let _ = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &state).unwrap();
 
@@ -319,7 +319,7 @@ fn u1_c_delivery_real_trust_modal_still_parks_queued_until_trust() {
         "session_name": "team-realtrust",
         "agents": {
             "w1": {
-                "provider": "codex",
+                "provider": "claude",
                 "pane_id": "%cdx",
                 "window": "w1",
                 "startup_prompts": "pending",
@@ -333,10 +333,11 @@ fn u1_c_delivery_real_trust_modal_still_parks_queued_until_trust() {
 
     // Live trust modal — fits well inside Tail(80).
     let live_trust = "\
-Loading codex...
-Do you trust the contents of this directory?
-› 1. Yes, continue
-› 2. No, exit
+Quick safety check
+Is this a project you created or one you trust?
+❯ 1. Yes, I trust this folder
+  2. No, exit
+Enter to confirm
 ";
 
     let transport = OfflineTransport::new()

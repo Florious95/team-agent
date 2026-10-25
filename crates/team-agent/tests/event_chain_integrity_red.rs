@@ -29,7 +29,7 @@ fn c3_worker_send_accepted_row_and_delivered_event_keep_one_message_id_across_st
         "agents": {
             "w1": {
                 "agent_id": "w1",
-                "provider": "codex",
+                "provider": "claude",
                 "status": "running",
                 "window": "w1"
             }

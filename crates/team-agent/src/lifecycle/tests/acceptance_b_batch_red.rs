@@ -223,7 +223,7 @@ fn b5_status_surfaces_runtime_hint_on_stale_coordinator_with_backlog() {
     save_runtime_state(
         &ws,
         &json!({"session_name": "team-b5", "active_team_key": "team-b5", "agents": {
-            "w1": {"status": "running", "provider": "codex", "agent_id": "w1", "window": "w1"}
+            "w1": {"status": "running", "provider": "claude", "agent_id": "w1", "window": "w1"}
         }}),
     )
     .unwrap();
@@ -275,7 +275,7 @@ fn b5_status_no_hint_when_coordinator_healthy() {
     save_runtime_state(
         &ws,
         &json!({"session_name": "team-b5h", "active_team_key": "team-b5h", "agents": {
-            "w1": {"status": "running", "provider": "codex", "agent_id": "w1", "window": "w1"}
+            "w1": {"status": "running", "provider": "claude", "agent_id": "w1", "window": "w1"}
         }, "tmux_endpoint": socket, "tmux_socket": socket}),
     )
     .unwrap();
@@ -396,7 +396,7 @@ fn write_min_team(ws: &Path, name: &str) -> PathBuf {
     .unwrap();
     std::fs::write(
         team.join("agents/worker_a.md"),
-        "---\nname: worker_a\nrole: Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n",
+        "---\nname: worker_a\nrole: Worker\nprovider: claude\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n",
     )
     .unwrap();
     team
@@ -850,7 +850,7 @@ impl Transport for WindowedTransport {
     }
     fn capture(&self, _t: &Target, r: CaptureRange) -> Result<CapturedText, TransportError> {
         Ok(CapturedText {
-            text: "OpenAI Codex\ncodex>".to_string(),
+            text: "Claude Code\n❯ ".to_string(),
             range: r,
         })
     }

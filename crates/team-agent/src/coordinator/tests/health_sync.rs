@@ -260,7 +260,7 @@ fn spine2_capture_missing_captures_session_id_for_missing_agent() {
 // activity/agent_health WORKING remains diagnostic turn state.
 #[test]
 fn spine2_sync_health_working_status_delivers_same_tick() {
-    let (coord, dir) = seeded_health_coord(one_agent("codex"), "Working (5s · esc to interrupt)");
+    let (coord, dir) = seeded_health_coord(one_agent("claude"), "Working (5s · esc to interrupt)");
     let store = MessageStore::open(&dir).unwrap();
     let mid = store
         .create_message(Some("t"), "leader", "w1", "hi", None, true, None)
@@ -306,7 +306,7 @@ fn spine2_sync_health_working_status_delivers_same_tick() {
 // must be reconciled to this contract.)
 #[test]
 fn contract_working_worker_stays_alive_and_deliverable_in_real_tick() {
-    let (coord, dir) = seeded_health_coord(one_agent("codex"), "Working (5s · esc to interrupt)");
+    let (coord, dir) = seeded_health_coord(one_agent("claude"), "Working (5s · esc to interrupt)");
     let store = MessageStore::open(&dir).unwrap();
     let _mid = store
         .create_message(Some("t"), "leader", "w1", "hi", None, true, None)
@@ -341,37 +341,34 @@ fn contract_working_worker_stays_alive_and_deliverable_in_real_tick() {
 // blocked re-classification — even when the rollout grew and the worker
 // process was alive.
 //
+// These contracts originally used Codex rollouts; they are expressed on
+// Claude transcripts since the legacy Codex worker was retired.
+//
 // Fix: JSONL has the floor. If it returns a definite activity, write
 // activity + agent_health BEFORE any pane work and BYPASS warm-idle
 // suppression for that agent on that tick.
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Write a real-shape Codex rollout prefix to `path`. The prefix ends
-/// after `event_msg/task_started` (no `task_complete` follows), matching
-/// the architect's specification.
-fn write_codex_rollout_prefix_task_started(path: &std::path::Path) {
+/// Write a Claude transcript whose last assistant record stopped on
+/// `tool_use`: the turn is still open.
+fn write_claude_transcript_open_turn(path: &std::path::Path) {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).unwrap();
     }
-    // session_meta + task_started — minimal but realistic shape per
-    // architect §2 ("real rollout uses modern Codex records: session_meta,
-    // event_msg, response_item, turn_context"). The classifier needs only
-    // task_started to declare an open turn (provider/classify.rs:364-398).
-    let body = "{\"type\":\"session_meta\",\"session_id\":\"019eeda2-7e2f-77a1-bc66-f8d485c8d2c8\",\"created\":\"2026-06-22T12:41:49Z\"}\n\
-                {\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"},\"ts\":\"2026-06-22T12:42:54Z\"}\n";
+    let body = "{\"type\":\"user\",\"sessionId\":\"019eeda2-7e2f-77a1-bc66-f8d485c8d2c8\",\"message\":{\"role\":\"user\",\"content\":\"go\"}}\n\
+                {\"type\":\"assistant\",\"requestId\":\"req_rm039\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_rm039\",\"name\":\"Bash\",\"input\":{}}],\"stop_reason\":\"tool_use\"}}\n";
     std::fs::write(path, body).unwrap();
 }
 
-/// Write a real-shape Codex rollout ending with `event_msg/task_complete`
-/// (full turn close). The classifier MUST return Idle with rationale
-/// `provider_jsonl:task_complete`.
-fn write_codex_rollout_task_complete(path: &std::path::Path) {
+/// Write a Claude transcript ending in an `end_turn` assistant record (full
+/// turn close). The classifier MUST return Idle with rationale
+/// `provider_jsonl:end_turn`.
+fn write_claude_transcript_end_turn(path: &std::path::Path) {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).unwrap();
     }
-    let body = "{\"type\":\"session_meta\",\"session_id\":\"019eeda2-7e2f-77a1-bc66-f8d485c8d2c8\",\"created\":\"2026-06-22T12:41:49Z\"}\n\
-                {\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"},\"ts\":\"2026-06-22T12:42:54Z\"}\n\
-                {\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"},\"ts\":\"2026-06-22T12:46:08Z\"}\n";
+    let body = "{\"type\":\"user\",\"sessionId\":\"019eeda2-7e2f-77a1-bc66-f8d485c8d2c8\",\"message\":{\"role\":\"user\",\"content\":\"go\"}}\n\
+                {\"type\":\"assistant\",\"requestId\":\"req_rm039\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"stop_reason\":\"end_turn\"}}\n";
     std::fs::write(path, body).unwrap();
 }
 
@@ -388,9 +385,8 @@ fn agent_activity_rationale(dir: &std::path::Path, agent: &str) -> Option<String
 
 // RED #2 (architect §6.2): an agent currently marked idle with
 // `coordinator_idle_capture_next_at` in the future MUST still get
-// re-classified as `working` once its rollout JSONL records
-// `event_msg/task_started`. The JSONL classifier must beat warm-idle
-// suppression.
+// re-classified as `working` once its rollout JSONL records an open turn.
+// The JSONL classifier must beat warm-idle suppression.
 #[test]
 fn rm039_stat001_jsonl_overrides_warm_idle_suppression_for_open_turn() {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -401,12 +397,12 @@ fn rm039_stat001_jsonl_overrides_warm_idle_suppression_for_open_turn() {
         std::process::id(),
         n
     ));
-    write_codex_rollout_prefix_task_started(&rollout);
+    write_claude_transcript_open_turn(&rollout);
     // future timestamp — would have suppressed pane re-capture
     let next_at = (chrono::Utc::now() + chrono::Duration::seconds(120)).to_rfc3339();
     let agents = serde_json::json!({
         "stat-worker": {
-            "provider": "codex",
+            "provider": "claude",
             "window": "w1",
             "pane_id": "%1",
             "status": "running",
@@ -424,7 +420,7 @@ fn rm039_stat001_jsonl_overrides_warm_idle_suppression_for_open_turn() {
     assert_eq!(
         status.as_deref(),
         Some("working"),
-        "RM-039-STAT-001 third-round: JSONL `task_started` must override warm-idle \
+        "RM-039-STAT-001 third-round: an open JSONL turn must override warm-idle \
          suppression even when the pane scrollback still shows the idle prompt; got {status:?}"
     );
     let rationale = agent_activity_rationale(&dir, "stat-worker");
@@ -437,8 +433,8 @@ fn rm039_stat001_jsonl_overrides_warm_idle_suppression_for_open_turn() {
     );
 }
 
-// RED #4 (architect §6.4): a full rollout ending in `event_msg/task_complete`
-// MUST return/persist idle with rationale `provider_jsonl:task_complete`.
+// RED #4 (architect §6.4): a full rollout ending in a closed turn (`end_turn`)
+// MUST return/persist idle with rationale `provider_jsonl:end_turn`.
 // This preserves the E47 stale-working fix and proves the JSONL-first
 // reorder did not regress the close-turn classification.
 #[test]
@@ -451,10 +447,10 @@ fn rm039_stat001_jsonl_close_turn_preserves_e47_idle_classification() {
         std::process::id(),
         n
     ));
-    write_codex_rollout_task_complete(&rollout);
+    write_claude_transcript_end_turn(&rollout);
     let agents = serde_json::json!({
         "stat-worker": {
-            "provider": "codex",
+            "provider": "claude",
             "window": "w1",
             "pane_id": "%1",
             "status": "running",
@@ -464,7 +460,7 @@ fn rm039_stat001_jsonl_close_turn_preserves_e47_idle_classification() {
         }
     });
     // The pane Tail(40) still shows the live working spinner — the E47
-    // stale-working scenario. The JSONL `task_complete` MUST close the
+    // stale-working scenario. The JSONL `end_turn` MUST close the
     // turn anyway.
     let (coord, dir) = seeded_health_coord(agents, "Working (5s · esc to interrupt)\n• Working\n");
     coord.tick().expect("tick");
@@ -472,13 +468,13 @@ fn rm039_stat001_jsonl_close_turn_preserves_e47_idle_classification() {
     assert_eq!(
         status.as_deref(),
         Some("idle"),
-        "RM-039-STAT-001 third-round must preserve E47: `task_complete` closes the turn \
+        "RM-039-STAT-001 third-round must preserve E47: `end_turn` closes the turn \
          even when pane scrollback still shows a working spinner; got {status:?}"
     );
     let rationale = agent_activity_rationale(&dir, "stat-worker");
     assert_eq!(
         rationale.as_deref(),
-        Some("provider_jsonl:task_complete"),
-        "rationale must be `provider_jsonl:task_complete`, not stale pane working; got {rationale:?}"
+        Some("provider_jsonl:end_turn"),
+        "rationale must be `provider_jsonl:end_turn`, not stale pane working; got {rationale:?}"
     );
 }

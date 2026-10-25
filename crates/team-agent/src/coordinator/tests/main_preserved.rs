@@ -128,8 +128,8 @@ fn tick_swallows_capture_failure_and_still_delivers_to_other_agent() {
         &serde_json::json!({
             "session_name": "team-spine",
             "agents": {
-                "w1": { "provider": "codex", "status": "stopped", "window": "w1" },
-                "w2": { "provider": "codex", "status": "running", "window": "w2" }
+                "w1": { "provider": "claude", "status": "stopped", "window": "w1" },
+                "w2": { "provider": "claude", "status": "running", "window": "w2" }
             }
         }),
     )

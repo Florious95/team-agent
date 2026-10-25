@@ -146,17 +146,17 @@ fn two_worker_team_dir(hermetic: &HermeticTestEnv) -> PathBuf {
     team
 }
 
-fn codex_ready_transport() -> OfflineTransport {
+fn claude_ready_transport() -> OfflineTransport {
     let mut transport = OfflineTransport::new();
     for pane in 0..16 {
-        transport = transport.with_capture_for_pane(format!("%{pane}"), "OpenAI Codex");
+        transport = transport.with_capture_for_pane(format!("%{pane}"), "Claude Code\n❯ ");
     }
     transport
 }
 
 fn role_doc(id: &str) -> String {
     format!(
-        "---\nname: {id}\nrole: {id} Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{id} worker.\n"
+        "---\nname: {id}\nrole: {id} Worker\nprovider: claude\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{id} worker.\n"
     )
 }
 
@@ -183,7 +183,7 @@ fn run_diagnose_after_quick_start() -> Value {
     let team = two_worker_team_dir(&hermetic);
     let workspace = team.parent().expect("workspace").to_path_buf();
     seed_healthy_coordinator(&workspace);
-    let launch_transport = codex_ready_transport();
+    let launch_transport = claude_ready_transport();
     quick_start_with_transport_in_workspace(
         &workspace,
         &team,

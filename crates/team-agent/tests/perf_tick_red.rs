@@ -333,17 +333,13 @@ fn seed_tick_state_provider(ws: &Path, agents: &[(&str, Option<&PathBuf>, &str)]
 // ──────────────────────────── P2 · session capture bounds ───────────────────────────
 
 /// C-P2-4 (reverse case `p2_session_capture_tail_skips_invalid_utf8_body`): a
-/// candidate with a valid session_meta head and invalid UTF-8 bytes beyond 64KB must
+/// candidate with a valid session record head and invalid UTF-8 bytes beyond 64KB must
 /// still be captured. Today `read_to_string` of the WHOLE file fails on the poisoned
 /// tail and silently skips the candidate (adapter.rs:783-785) — a silent miss.
 #[test]
 fn p2_session_capture_tail_skips_invalid_utf8_body() {
     let dir = tmp_ws("p2-utf8");
-    let mut bytes = format!(
-        "{{\"session_meta\":{{\"payload\":{{\"id\":\"11111111-2222-4333-8444-555555555555\",\"cwd\":\"{}\"}}}}}}\n",
-        dir.to_string_lossy()
-    )
-    .into_bytes();
+    let mut bytes = claude_record("11111111-2222-4333-8444-555555555555", &dir).into_bytes();
     let pad =
         "{\"type\":\"pad\",\"data\":\"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"}\n".as_bytes();
     while bytes.len() < 80 * 1024 {
@@ -352,7 +348,7 @@ fn p2_session_capture_tail_skips_invalid_utf8_body() {
     bytes.extend_from_slice(&[0xFF, 0xFE, 0xFD, 0xFF]); // poisoned tail, invalid UTF-8
     std::fs::write(dir.join("rollout-w1.jsonl"), &bytes).unwrap();
 
-    let candidates = get_adapter(Provider::Codex)
+    let candidates = get_adapter(Provider::Claude)
         .capture_session_candidates(&capture_context("w1", &dir), 0)
         .expect("scan should succeed");
     assert!(
@@ -360,7 +356,7 @@ fn p2_session_capture_tail_skips_invalid_utf8_body() {
             candidate.captured.session_id.as_ref().map(|id| id.as_str())
                 == Some("11111111-2222-4333-8444-555555555555")
         }),
-        "C-P2-4: head-bounded read (Python claude.py:432 reads 200 lines; session_meta \
+        "C-P2-4: head-bounded read (Python claude.py:432 reads 200 lines; the session record \
 is in the file head) must capture the session despite a poisoned tail; whole-file \
 read_to_string silently skips the candidate. candidates={candidates:?}"
     );
@@ -385,14 +381,11 @@ fn p2_candidate_cap_300_mtime_priority() {
     }
     std::fs::write(
         dir.join("rollout-w1.jsonl"),
-        format!(
-            "{{\"session_meta\":{{\"payload\":{{\"id\":\"22222222-3333-4444-8555-666666666666\",\"cwd\":\"{}\"}}}}}}\n",
-            dir.to_string_lossy()
-        ),
+        claude_record("22222222-3333-4444-8555-666666666666", &dir),
     )
     .unwrap();
 
-    let candidates = get_adapter(Provider::Codex)
+    let candidates = get_adapter(Provider::Claude)
         .capture_session_candidates(&capture_context("w1", &dir), 0)
         .expect("scan should succeed");
     assert!(
@@ -768,6 +761,18 @@ fn chmod(path: &Path, mode: u32) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
     }
+}
+
+fn claude_record(session_id: &str, cwd: &Path) -> String {
+    format!(
+        "{}\n",
+        json!({
+            "type": "user",
+            "sessionId": session_id,
+            "cwd": cwd.to_string_lossy(),
+            "message": {"role": "user", "content": "fixture"},
+        })
+    )
 }
 
 fn capture_context(agent_id: &str, spawn_cwd: &Path) -> CaptureSessionContext {

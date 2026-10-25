@@ -100,6 +100,12 @@ pub(crate) fn prepare_provider_profile_launch_with_profile_dir(
     if agent.get("provider").and_then(YamlValue::as_str).is_some_and(crate::provider::wire::is_retired_provider) {
         return Err(LifecycleError::Provider(crate::provider::wire::RETIRED_PROVIDER_ERROR.into()));
     }
+    if agent.get("provider").and_then(YamlValue::as_str).is_some_and(|provider| {
+        crate::provider::wire::legacy_codex_refused(provider, false)
+            || parse_provider(provider) == Some(Provider::Codex)
+    }) {
+        return Err(LifecycleError::Provider(crate::provider::wire::LEGACY_CODEX_ERROR.into()));
+    }
     let input = AgentProfileInput {
         id: agent
             .get("id")
@@ -155,6 +161,12 @@ pub(crate) fn prepare_provider_profile_launch_from_json(
 ) -> Result<ProviderProfileLaunch, LifecycleError> {
     if agent.get("provider").and_then(serde_json::Value::as_str).is_some_and(crate::provider::wire::is_retired_provider) {
         return Err(LifecycleError::Provider(crate::provider::wire::RETIRED_PROVIDER_ERROR.into()));
+    }
+    if agent.get("provider").and_then(serde_json::Value::as_str).is_some_and(|provider| {
+        crate::provider::wire::legacy_codex_refused(provider, false)
+            || parse_provider(provider) == Some(Provider::Codex)
+    }) {
+        return Err(LifecycleError::Provider(crate::provider::wire::LEGACY_CODEX_ERROR.into()));
     }
     let input = AgentProfileInput {
         id: agent

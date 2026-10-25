@@ -36,7 +36,7 @@ fn compile_fixture(team_value: Option<&str>, role_value: Option<&str>) -> Result
     fs::write(
         root.join("agents/worker.md"),
         format!(
-            "---\nname: worker\nrole: Worker\nprovider: codex\nmodel: gpt-5\ntools:\n  - mcp_team\n{}---\n\nT05 worker.\n",
+            "---\nname: worker\nrole: Worker\nprovider: claude\nmodel: claude-sonnet-5\ntools:\n  - mcp_team\n{}---\n\nT05 worker.\n",
             field(role_value)
         ),
     )

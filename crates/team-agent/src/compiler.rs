@@ -40,12 +40,26 @@ pub struct IgnoredTeamField {
 
 /// Read optional YAML front matter; malformed or non-object headers are plain text.
 pub fn read_front_matter(path: &Path) -> Result<(Value, String), ModelError> {
+    Ok(split_front_matter(&read_front_matter_text(path)?))
+}
+
+/// Read a role document. TEAM.md `provider: codex` names the still-supported
+/// Codex leader, so only role documents refuse the legacy Codex worker key.
+pub fn read_role_front_matter(path: &Path) -> Result<(Value, String), ModelError> {
+    let text = read_front_matter_text(path)?;
+    if crate::provider::wire::has_legacy_codex_header(&text) {
+        return Err(ModelError::Validation(format!("{}: {}", path.display(), crate::provider::wire::LEGACY_CODEX_ERROR)));
+    }
+    Ok(split_front_matter(&text))
+}
+
+fn read_front_matter_text(path: &Path) -> Result<String, ModelError> {
     let text = fs::read_to_string(path)
         .map_err(|e| ModelError::Runtime(format!("{}: {e}", path.display())))?;
     if crate::provider::wire::has_retired_provider_header(&text) {
         return Err(ModelError::Validation(format!("{}: {}", path.display(), crate::provider::wire::RETIRED_PROVIDER_ERROR)));
     }
-    Ok(split_front_matter(&text))
+    Ok(text)
 }
 
 /// Parse the same captured bytes that a prompt receipt hashes; the existing
@@ -477,7 +491,7 @@ fn compile_role_agent_with_mode(
     workspace_s: &str,
     team_communication_mode: CommunicationMode,
 ) -> Result<CompiledRole, ModelError> {
-    let (meta, body) = read_front_matter(role_path)?;
+    let (meta, body) = read_role_front_matter(role_path)?;
     let communication_mode =
         communication_mode_field(&meta, role_path)?.unwrap_or(team_communication_mode);
     let id = string_field(&meta, "agent_id")
@@ -497,11 +511,14 @@ fn compile_role_agent_with_mode(
     let provider = string_field(&meta, "provider")
         .filter(|provider| !provider.trim().is_empty())
         .unwrap_or_else(|| "pi".to_string());
+    let contract_opt_in = matches!(meta.get("contract_runtime"), Some(Value::Bool(true)));
     if crate::provider::wire::is_retired_provider(&provider) {
         return Err(ModelError::Validation(crate::provider::wire::RETIRED_PROVIDER_ERROR.into()));
     }
+    if crate::provider::wire::legacy_codex_refused(&provider, contract_opt_in) {
+        return Err(ModelError::Validation(crate::provider::wire::LEGACY_CODEX_ERROR.into()));
+    }
     let is_pi = parse_canonical_provider(&provider) == Some(Provider::Pi);
-    let contract_opt_in = matches!(meta.get("contract_runtime"), Some(Value::Bool(true)));
     #[cfg(unix)]
     let contract = crate::contract_runtime::registry::contract_dispatch(&provider, contract_opt_in)
         .then(|| crate::contract_runtime::registry::descriptor(&provider))

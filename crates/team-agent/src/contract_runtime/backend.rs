@@ -552,10 +552,10 @@ pub fn start(
     let plan = adapter.plan(&resolved)?;
     if role.provider.as_str() == "codex" {
         if let (Some(root), Some(home)) = (
-            crate::provider::adapters::codex::git_work_root(&request.paths.cwd.path),
-            crate::provider::adapters::codex::codex_home_dir(),
+            super::codex_directory_trust::git_work_root(&request.paths.cwd.path),
+            super::codex_directory_trust::codex_home_dir(),
         ) {
-            crate::provider::adapters::codex::ensure_worker_directory_trust(&home, &root)?;
+            super::codex_directory_trust::ensure_worker_directory_trust(&home, &root)?;
         }
     }
     let operation = OperationId::new(format!("start-{}", request.identity.instance.as_str()))?;

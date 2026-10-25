@@ -3,33 +3,10 @@ use super::*;
 
 // ═════════════════════════════════════════════════════════════════════════
 
-const DELEG_ROLE_ALPHA_COMPAT: &str = "---\nname: alpha\nrole: Alpha Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: compatible_api\ndangerously_skip_permissions: false\nprofile: alpha-compat\ntools:\n  - mcp_team\n---\n\nAlpha.\n";
+const DELEG_ROLE_ALPHA_COMPAT: &str = "---\nname: alpha\nrole: Alpha Worker\nprovider: claude\nmodel: gpt-5.5\nauth_mode: compatible_api\ndangerously_skip_permissions: false\nprofile: alpha-compat\ntools:\n  - mcp_team\n---\n\nAlpha.\n";
 
 type LaneKills = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
 pub(super) type LaneSpawns = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<String>)>>>;
-
-fn emit_codex_fork_backing(argv: &[String], cwd: &std::path::Path) {
-    if !argv.windows(2).any(|pair| pair == ["codex", "fork"]) {
-        return;
-    }
-    static SESSION_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let sequence = SESSION_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let session_id = format!("lane-fork-{}-{sequence}", std::process::id());
-    let root = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".codex/sessions/lane-fixture");
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(
-        root.join(format!("rollout-{session_id}.jsonl")),
-        format!(
-            "{{\"session_meta\":{{\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"{}\"}}}},\"created_at\":\"{}\"}}\n",
-            cwd.to_string_lossy(),
-            chrono::Utc::now().to_rfc3339()
-        ),
-    )
-    .unwrap();
-}
 
 pub(super) struct LaneHomeGuard {
     previous: Option<std::ffi::OsString>,
@@ -123,7 +100,6 @@ impl crate::transport::Transport for LaneTransport {
             .lock()
             .unwrap()
             .push(chrono::Utc::now().to_rfc3339());
-        emit_codex_fork_backing(argv, c);
         self.spawns
             .lock()
             .unwrap()
@@ -159,7 +135,6 @@ impl crate::transport::Transport for LaneTransport {
             .lock()
             .unwrap()
             .push(chrono::Utc::now().to_rfc3339());
-        emit_codex_fork_backing(argv, c);
         self.spawns
             .lock()
             .unwrap()
@@ -211,7 +186,7 @@ impl crate::transport::Transport for LaneTransport {
             // single-lock transaction instead of burning the provider's
             // bounded startup-prompt polling interval on an unobservable
             // empty screen.
-            text: "OpenAI Codex\n›".to_string(),
+            text: "Claude Code\n❯ ".to_string(),
             range: r,
         })
     }
@@ -423,7 +398,7 @@ fn lanea_one_agent_ws(alpha_status: &str) -> PathBuf {
     std::fs::write(ws.join("agents").join("alpha.md"), DELEG_ROLE_ALPHA).unwrap();
     let spec = crate::compiler::compile_team(&ws).expect("compile 1-agent team");
     std::fs::write(ws.join("team.spec.yaml"), crate::model::yaml::dumps(&spec)).unwrap();
-    crate::state::persist::save_runtime_state(&ws, &json!({ "session_name": "team-laneateam", "agents": { "alpha": { "status": alpha_status, "provider": "codex", "window": "alpha" } } })).unwrap();
+    crate::state::persist::save_runtime_state(&ws, &json!({ "session_name": "team-laneateam", "agents": { "alpha": { "status": alpha_status, "provider": "claude", "window": "alpha" } } })).unwrap();
     ws
 }
 
@@ -484,8 +459,8 @@ fn remove_agent_from_fixture_state(ws: &std::path::Path, agent_id: &str) {
 fn force_remove_reconciles_all_seat_quadrants_without_cross_team_same_name_kill() {
     for quadrant in ["state-only", "spec-only", "physical-only", "mixed"] {
         let ws = lanea_ws_agents(json!({
-            "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" },
-            "bravo": { "status": "running", "provider": "codex", "window": "bravo" }
+            "alpha": { "status": "stopped", "provider": "claude", "window": "alpha" },
+            "bravo": { "status": "running", "provider": "claude", "window": "bravo" }
         }));
         let local_physical = matches!(quadrant, "physical-only");
         let tx = LaneTransport::new(
@@ -555,8 +530,8 @@ fn force_remove_reconciles_all_seat_quadrants_without_cross_team_same_name_kill(
 #[test]
 fn remove_persists_retired_tombstone_and_explicit_readd_clears_it() {
     let ws = lanea_ws_agents(json!({
-        "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" },
-        "bravo": { "status": "running", "provider": "codex", "window": "bravo" }
+        "alpha": { "status": "stopped", "provider": "claude", "window": "alpha" },
+        "bravo": { "status": "running", "provider": "claude", "window": "bravo" }
     }));
     let mut seeded = crate::state::persist::load_runtime_state(&ws).unwrap();
     seeded["team_key"] = json!("laneateam");
@@ -655,8 +630,8 @@ fn remove_persists_retired_tombstone_and_explicit_readd_clears_it() {
 fn add_agent_authority_must_not_cross_team_erase_sibling_same_id_retirement() {
     // Disk latest: team A alive with alpha; team B alpha ABSENT + retired.
     let ws = lanea_ws_agents(json!({
-        "alpha": { "status": "running", "provider": "codex", "window": "alpha" },
-        "bravo": { "status": "running", "provider": "codex", "window": "bravo" }
+        "alpha": { "status": "running", "provider": "claude", "window": "alpha" },
+        "bravo": { "status": "running", "provider": "claude", "window": "bravo" }
     }));
     let mut latest = crate::state::persist::load_runtime_state(&ws).unwrap();
     latest["team_key"] = json!("laneateam");
@@ -687,7 +662,7 @@ fn add_agent_authority_must_not_cross_team_erase_sibling_same_id_retirement() {
     incoming_stale["teams"]["sibling"] = json!({
         "team_key": "sibling",
         "status": "alive",
-        "agents": { "alpha": { "status": "running", "provider": "codex", "window": "alpha" } },
+        "agents": { "alpha": { "status": "running", "provider": "claude", "window": "alpha" } },
         "agent_lifecycle": {}
     });
 
@@ -732,8 +707,8 @@ fn add_agent_authority_must_not_cross_team_erase_sibling_same_id_retirement() {
 fn terminal_active_team_key_does_not_widen_topology_authority_to_bare_id() {
     // Disk latest: laneateam alive with alpha; sibling alpha ABSENT + retired.
     let ws = lanea_ws_agents(json!({
-        "alpha": { "status": "running", "provider": "codex", "window": "alpha" },
-        "bravo": { "status": "running", "provider": "codex", "window": "bravo" }
+        "alpha": { "status": "running", "provider": "claude", "window": "alpha" },
+        "bravo": { "status": "running", "provider": "claude", "window": "bravo" }
     }));
     let mut latest = crate::state::persist::load_runtime_state(&ws).unwrap();
     latest["team_key"] = json!("laneateam");
@@ -760,7 +735,7 @@ fn terminal_active_team_key_does_not_widen_topology_authority_to_bare_id() {
     incoming_stale["teams"]["sibling"] = json!({
         "team_key": "sibling",
         "status": "alive",
-        "agents": { "alpha": { "status": "running", "provider": "codex", "window": "alpha" } },
+        "agents": { "alpha": { "status": "running", "provider": "claude", "window": "alpha" } },
         "agent_lifecycle": {}
     });
 
@@ -805,8 +780,8 @@ fn terminal_active_team_key_does_not_widen_topology_authority_to_bare_id() {
 #[test]
 fn current_alias_authority_does_not_leak_into_real_sibling_same_id_retirement() {
     let ws = lanea_ws_agents(json!({
-        "alpha": { "status": "running", "provider": "codex", "window": "alpha" },
-        "bravo": { "status": "running", "provider": "codex", "window": "bravo" }
+        "alpha": { "status": "running", "provider": "claude", "window": "alpha" },
+        "bravo": { "status": "running", "provider": "claude", "window": "bravo" }
     }));
     let mut latest = crate::state::persist::load_runtime_state(&ws).unwrap();
     latest["team_key"] = json!("laneateam");
@@ -833,7 +808,7 @@ fn current_alias_authority_does_not_leak_into_real_sibling_same_id_retirement() 
     incoming_stale["teams"]["sibling"] = json!({
         "team_key": "sibling",
         "status": "alive",
-        "agents": { "alpha": { "status": "running", "provider": "codex", "window": "alpha" } },
+        "agents": { "alpha": { "status": "running", "provider": "claude", "window": "alpha" } },
         "agent_lifecycle": {}
     });
 
@@ -865,7 +840,7 @@ fn current_alias_authority_does_not_leak_into_real_sibling_same_id_retirement() 
     );
 }
 
-const CHARLIE_ROLE: &str = "---\nname: charlie\nrole: Charlie Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nCharlie.\n";
+const CHARLIE_ROLE: &str = "---\nname: charlie\nrole: Charlie Worker\nprovider: claude\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nCharlie.\n";
 
 struct HermeticTestEnv {
     root: std::path::PathBuf,
@@ -938,8 +913,8 @@ fn seed_charlie(ws: &std::path::Path, tx: &LaneTransport) -> std::path::PathBuf 
 fn force_recreate_is_one_lock_transaction_for_all_seat_quadrants_and_rolls_back_failure() {
     for quadrant in ["state-only", "spec-only", "physical-only", "mixed"] {
         let ws = lanea_ws_agents(json!({
-            "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" },
-            "bravo": { "status": "running", "provider": "codex", "window": "bravo" }
+            "alpha": { "status": "stopped", "provider": "claude", "window": "alpha" },
+            "bravo": { "status": "running", "provider": "claude", "window": "bravo" }
         }));
         let tx = LaneTransport::new("team-laneateam", &[]);
         seed_healthy_coordinator(&ws);
@@ -1016,8 +991,8 @@ fn force_recreate_is_one_lock_transaction_for_all_seat_quadrants_and_rolls_back_
     }
 
     let ws = lanea_ws_agents(json!({
-        "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" },
-        "bravo": { "status": "running", "provider": "codex", "window": "bravo" }
+        "alpha": { "status": "stopped", "provider": "claude", "window": "alpha" },
+        "bravo": { "status": "running", "provider": "claude", "window": "bravo" }
     }));
     let tx = LaneTransport::new("team-laneateam", &[]);
     seed_healthy_coordinator(&ws);
@@ -1072,8 +1047,8 @@ fn force_recreate_post_consumption_failure_restores_before_tuple_and_health() {
     let ws = lanea_ws_agents_at(
         hermetic.workspace_root(),
         json!({
-            "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" },
-            "bravo": { "status": "running", "provider": "codex", "window": "bravo" }
+            "alpha": { "status": "stopped", "provider": "claude", "window": "alpha" },
+            "bravo": { "status": "running", "provider": "claude", "window": "bravo" }
         }),
     );
     let tx = LaneTransport::new("team-laneateam", &[]);
@@ -1154,8 +1129,8 @@ fn force_remove_scopes_agent_health_to_canonical_team_key() {
     let ws = lanea_ws_agents_at(
         hermetic.workspace_root(),
         json!({
-            "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" },
-            "bravo": { "status": "running", "provider": "codex", "window": "bravo" }
+            "alpha": { "status": "stopped", "provider": "claude", "window": "alpha" },
+            "bravo": { "status": "running", "provider": "claude", "window": "bravo" }
         }),
     );
     let tx = LaneTransport::new("team-laneateam", &[]);
@@ -1257,14 +1232,14 @@ pub(super) fn fork_ws(alpha_role: &str) -> PathBuf {
             "agents": {
                 "alpha": {
                     "status": "running",
-                    "provider": "codex",
+                    "provider": "claude",
                     "window": "alpha",
                     "session_id": "sess-a",
                     "rollout_path": rollout.to_string_lossy(),
                     "captured_at": "2026-06-25T10:00:00+00:00",
                     "captured_via": "session.captured"
                 },
-                "bravo": { "status": "running", "provider": "codex", "window": "bravo" }
+                "bravo": { "status": "running", "provider": "claude", "window": "bravo" }
             }
         }),
     )
@@ -1282,7 +1257,7 @@ pub(super) fn fork_ws(alpha_role: &str) -> PathBuf {
 #[test]
 fn lanea_stop_window_absent_returns_stopped_false_no_kill() {
     let ws = lanea_ws_agents(
-        json!({ "alpha": { "status": "running", "provider": "codex", "window": "alpha" } }),
+        json!({ "alpha": { "status": "running", "provider": "claude", "window": "alpha" } }),
     );
     let tx = LaneTransport::new("team-laneateam", &[]); // alpha's window is ABSENT
     let report = stop_agent_with_transport(&ws, &aid("alpha"), None, &tx)
@@ -1304,7 +1279,7 @@ fn lanea_stop_window_absent_returns_stopped_false_no_kill() {
 #[test]
 fn lanea_stop_window_present_kills_and_stopped_true() {
     let ws = lanea_ws_agents(
-        json!({ "alpha": { "status": "running", "provider": "codex", "window": "alpha" } }),
+        json!({ "alpha": { "status": "running", "provider": "claude", "window": "alpha" } }),
     );
     let tx = LaneTransport::new("team-laneateam", &["alpha"]); // window present
     let report =
@@ -1331,7 +1306,7 @@ fn lanea_stop_window_present_kills_and_stopped_true() {
 #[test]
 fn lanea_reset_paused_agent_returns_ok_not_err() {
     let ws = lanea_ws_agents(json!({
-        "alpha": { "status": "running", "provider": "codex", "window": "alpha", "paused": true, "session_id": "sess-a" }
+        "alpha": { "status": "running", "provider": "claude", "window": "alpha", "paused": true, "session_id": "sess-a" }
     }));
     let tx = LaneTransport::new("team-laneateam", &["alpha"]);
     let result = reset_agent_with_transport(&ws, &aid("alpha"), true, false, None, &tx);
@@ -1355,8 +1330,8 @@ fn lanea_reset_paused_agent_returns_ok_not_err() {
 #[test]
 fn lanea_remove_dynamic_agent_removable_without_from_spec() {
     let ws = lanea_ws_agents(json!({
-        "alpha": { "status": "stopped", "provider": "codex", "window": "alpha", "dynamic_role_file": ".team/dynamic-role-files/alpha.md" },
-        "bravo": { "status": "stopped", "provider": "codex", "window": "bravo" }
+        "alpha": { "status": "stopped", "provider": "claude", "window": "alpha", "dynamic_role_file": ".team/dynamic-role-files/alpha.md" },
+        "bravo": { "status": "stopped", "provider": "claude", "window": "bravo" }
     }));
     // make the dynamic role file exist (so removal resolves+deletes it cleanly under either path policy).
     let dyn_dir = ws.join(".team").join("dynamic-role-files");
@@ -1383,8 +1358,8 @@ fn lanea_remove_dynamic_agent_removable_without_from_spec() {
 fn remove_preserves_external_role_source_for_both_flag_forms() {
     for from_spec in [false, true] {
         let ws = lanea_ws_agents(json!({
-            "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" },
-            "bravo": { "status": "stopped", "provider": "codex", "window": "bravo" }
+            "alpha": { "status": "stopped", "provider": "claude", "window": "alpha" },
+            "bravo": { "status": "stopped", "provider": "claude", "window": "bravo" }
         }));
         let external_dir = ws.join("role-masters");
         std::fs::create_dir_all(&external_dir).unwrap();
@@ -1423,11 +1398,11 @@ fn remove_agent_preserves_registered_role_markdown_by_default() {
     let ws = lanea_ws_agents(json!({
         "alpha": {
             "status": "stopped",
-            "provider": "codex",
+            "provider": "claude",
             "window": "alpha",
             "dynamic_role_file": ".team/dynamic-role-files/alpha.md"
         },
-        "bravo": { "status": "stopped", "provider": "codex", "window": "bravo" }
+        "bravo": { "status": "stopped", "provider": "claude", "window": "bravo" }
     }));
     let role = ws.join(".team/dynamic-role-files/alpha.md");
     std::fs::create_dir_all(role.parent().unwrap()).unwrap();
@@ -1458,8 +1433,8 @@ fn remove_preserves_managed_path_symlink_escape() {
     use std::os::unix::fs::symlink;
 
     let ws = lanea_ws_agents(json!({
-        "alpha": { "status": "stopped", "provider": "codex", "window": "alpha", "dynamic_role_file": ".team/dynamic-role-files/alpha.md" },
-        "bravo": { "status": "stopped", "provider": "codex", "window": "bravo" }
+        "alpha": { "status": "stopped", "provider": "claude", "window": "alpha", "dynamic_role_file": ".team/dynamic-role-files/alpha.md" },
+        "bravo": { "status": "stopped", "provider": "claude", "window": "bravo" }
     }));
     let external = ws.join("role-masters").join("alpha.md");
     std::fs::create_dir_all(external.parent().unwrap()).unwrap();
@@ -1487,8 +1462,8 @@ fn remove_preserves_managed_path_symlink_escape() {
 #[test]
 fn remove_agent_deletes_unrecorded_default_managed_role() {
     let ws = lanea_ws_agents(json!({
-        "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" },
-        "bravo": { "status": "stopped", "provider": "codex", "window": "bravo" }
+        "alpha": { "status": "stopped", "provider": "claude", "window": "alpha" },
+        "bravo": { "status": "stopped", "provider": "claude", "window": "bravo" }
     }));
     let role = ws.join(".team").join("dynamic-role-files").join("alpha.md");
     std::fs::create_dir_all(role.parent().unwrap()).unwrap();
@@ -1512,8 +1487,8 @@ fn remove_agent_deletes_unrecorded_default_managed_role() {
 #[test]
 fn force_remove_state_only_seat_is_idempotent() {
     let ws = lanea_ws_agents(json!({
-        "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" },
-        "bravo": { "status": "stopped", "provider": "codex", "window": "bravo" }
+        "alpha": { "status": "stopped", "provider": "claude", "window": "alpha" },
+        "bravo": { "status": "stopped", "provider": "claude", "window": "bravo" }
     }));
     let spec_path = ws.join("team.spec.yaml");
     let spec = crate::model::yaml::loads(&std::fs::read_to_string(&spec_path).unwrap()).unwrap();
@@ -1543,7 +1518,7 @@ fn force_remove_state_only_seat_is_idempotent() {
 #[test]
 fn lanea_remove_unknown_agent_precedes_from_spec_refusal() {
     let ws = lanea_ws_agents(
-        json!({ "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" } }),
+        json!({ "alpha": { "status": "stopped", "provider": "claude", "window": "alpha" } }),
     );
     let tx = LaneTransport::new("team-laneateam", &[]);
     let text = format!(
@@ -1566,8 +1541,8 @@ fn lanea_remove_unknown_agent_precedes_from_spec_refusal() {
 #[test]
 fn lanea_remove_writes_markdown_team_state_not_json() {
     let ws = lanea_ws_agents(json!({
-        "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" },
-        "bravo": { "status": "running", "provider": "codex", "window": "bravo" }
+        "alpha": { "status": "stopped", "provider": "claude", "window": "alpha" },
+        "bravo": { "status": "running", "provider": "claude", "window": "bravo" }
     }));
     let tx = LaneTransport::new("team-laneateam", &[]);
     let _ =
@@ -1587,7 +1562,7 @@ fn lanea_remove_writes_markdown_team_state_not_json() {
         "golden has a '## Agents' section; got:\n{team_state}"
     );
     assert!(
-        team_state.contains("bravo: Bravo Worker on codex"),
+        team_state.contains("bravo: Bravo Worker on claude"),
         "the '## Agents' section must list the remaining agent bravo (golden '- {{id}}: {{role}} on {{provider}} ({{status}})'); got:\n{team_state}"
     );
     assert!(
@@ -1605,8 +1580,8 @@ fn lanea_remove_writes_markdown_team_state_not_json() {
 #[test]
 fn lanea_remove_is_running_honors_tmux_window_fallback() {
     let ws = lanea_ws_agents(json!({
-        "alpha": { "status": "idle", "provider": "codex", "window": "alpha" }, // stale status, but window is live
-        "bravo": { "status": "stopped", "provider": "codex", "window": "bravo" }
+        "alpha": { "status": "idle", "provider": "claude", "window": "alpha" }, // stale status, but window is live
+        "bravo": { "status": "stopped", "provider": "claude", "window": "bravo" }
     }));
     let tx = LaneTransport::new("team-laneateam", &["alpha"]); // alpha's tmux window EXISTS
     let result = remove_agent_with_transport(&ws, &aid("alpha"), true, false, None, &tx); // force=FALSE
@@ -1659,8 +1634,8 @@ fn lanea_remove_rollback_restarts_force_stopped_worker() {
 #[test]
 fn lanea_remove_dynamic_role_file_missing_does_not_block_unregister() {
     let ws = lanea_ws_agents(json!({
-        "alpha": { "status": "stopped", "provider": "codex", "window": "alpha", "dynamic_role_file": ".team/dynamic-role-files/custom.md" }, // file NOT created
-        "bravo": { "status": "stopped", "provider": "codex", "window": "bravo" }
+        "alpha": { "status": "stopped", "provider": "claude", "window": "alpha", "dynamic_role_file": ".team/dynamic-role-files/custom.md" }, // file NOT created
+        "bravo": { "status": "stopped", "provider": "claude", "window": "bravo" }
     }));
     let tx = LaneTransport::new("team-laneateam", &[]);
     let result = remove_agent_with_transport(&ws, &aid("alpha"), true, true, None, &tx);
@@ -1711,7 +1686,7 @@ fn lanea_fork_dup_target_leader_id_is_already_exists() {
     );
     assert!(
         text.contains("unverified") || text.contains("未验证") || text.contains("refuses --as"),
-        "codex in-window fork is unverified; leader-id duplicate is not reached. got {text}"
+        "in-place fork refuses --as before the leader-id duplicate is reached. got {text}"
     );
 }
 
@@ -1733,7 +1708,7 @@ fn lanea_fork_window_already_exists_guard_before_spec_mutation() {
             || text.contains("未验证")
             || text.contains("refuses --as")
             || text.contains("tmux window already exists for fork target: team-laneateam:newfork"),
-        "codex in-window fork is unverified; window-exists guard is not reached. got {text}"
+        "in-place fork refuses --as before the window-exists guard is reached. got {text}"
     );
     let spec_text = std::fs::read_to_string(ws.join("team.spec.yaml")).unwrap();
     assert!(
@@ -1752,13 +1727,16 @@ fn lanea_fork_window_already_exists_guard_before_spec_mutation() {
 #[test]
 fn lanea_fork_gate_error_text_and_spec_rollback_on_adapter_arm() {
     let ws = fork_ws(DELEG_ROLE_ALPHA_COMPAT); // source alpha auth_mode=compatible_api -> native fork unsupported
+    let mut state = crate::state::persist::load_runtime_state(&ws).unwrap();
+    state["agents"]["alpha"]["auth_mode"] = json!("compatible_api");
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
     let tx = LaneTransport::new("team-laneateam", &[]);
     let result =
         fork_agent_with_transport(&ws, &aid("alpha"), &aid("newfork"), None, false, None, &tx);
     let text = format!("{result:?}");
     assert!(
-        text.contains("unverified") || text.contains("未验证"),
-        "codex is unverified (any auth), not 'does not support'. got {text}"
+        text.contains("does not support native session fork"),
+        "golden operations.py:329-330 gate text for compatible_api claude. got {text}"
     );
     let spec_text = std::fs::read_to_string(ws.join("team.spec.yaml")).unwrap();
     assert!(
@@ -1768,35 +1746,20 @@ fn lanea_fork_gate_error_text_and_spec_rollback_on_adapter_arm() {
     );
 }
 
-// Successful fork reports the verified provider session id, never the pane id.
+// In-place fork keeps the session on the source seat, so `--as` is refused before any spawn.
 #[test]
 #[serial_test::serial(env)]
-fn lanea_fork_report_session_id_is_not_pane_id() {
+fn lanea_fork_as_new_seat_is_refused_by_in_place_fork() {
     let _home = LaneHomeGuard::enter("fork-report");
-    let ws = fork_ws(DELEG_ROLE_ALPHA); // codex+subscription -> native fork supported -> full success path
-    let mut state = crate::state::persist::load_runtime_state(&ws).unwrap();
-    let source = PathBuf::from(state["agents"]["alpha"]["rollout_path"].as_str().unwrap());
-    let codex_root = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap()
-        .join(".codex/sessions/lane-fixture");
-    std::fs::create_dir_all(&codex_root).unwrap();
-    let discoverable_source = codex_root.join("rollout-sess-a.jsonl");
-    std::fs::copy(source, &discoverable_source).unwrap();
-    state["agents"]["alpha"]["rollout_path"] =
-        json!(discoverable_source.to_string_lossy().to_string());
-    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let ws = fork_ws(DELEG_ROLE_ALPHA);
     let tx = LaneTransport::new("team-laneateam", &[]);
     let result =
         fork_agent_with_transport(&ws, &aid("alpha"), &aid("newfork"), None, false, None, &tx);
     let err = match result {
         Err(error) => error.to_string(),
-        Ok(_) => panic!("codex in-window fork is unverified and must refuse"),
+        Ok(_) => panic!("in-place fork must refuse --as newfork"),
     };
-    assert!(
-        err.contains("unverified") || err.contains("未验证"),
-        "codex must refuse as unverified; got {err}"
-    );
+    assert!(err.contains("refuses --as newfork"), "got {err}");
 }
 
 #[test]

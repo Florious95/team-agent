@@ -43,8 +43,8 @@ pub(super) fn lanea_team_ws(status: &str) -> PathBuf {
         &json!({
             "session_name": "team-laneateam",
             "agents": {
-                "alpha": {"status": status, "provider": "codex", "window": "alpha"},
-                "bravo": {"status": status, "provider": "codex", "window": "bravo"}
+                "alpha": {"status": status, "provider": "claude", "window": "alpha"},
+                "bravo": {"status": status, "provider": "claude", "window": "bravo"}
             }
         }),
     )
@@ -320,7 +320,7 @@ fn add_agent_joins_w2_into_running_roster_and_existing_session() {
         workspace,
         &json!({
             "session_name": "team-implteam",
-            "agents": {"w1": {"status": "running", "provider": "codex", "window": "w1"}}
+            "agents": {"w1": {"status": "running", "provider": "claude", "window": "w1"}}
         }),
     )
     .unwrap();
@@ -329,7 +329,7 @@ fn add_agent_joins_w2_into_running_roster_and_existing_session() {
     let role_file = team_dir.join("w2-role.md");
     std::fs::write(
         &role_file,
-        "---\nname: w2\nrole: Worker Two\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker two.\n",
+        "---\nname: w2\nrole: Worker Two\nprovider: claude\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker two.\n",
     )
     .unwrap();
     let transport = OfflineTransport::new().with_session_present(true);

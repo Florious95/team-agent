@@ -9,8 +9,6 @@
 //!
 //! Per-file scope:
 //!   * `claude` — Claude/ClaudeCode argv, bypass flag, auth hint, model passthrough.
-//!   * `codex`  — Codex argv, profile flags, MCP `-c` injection with 600s
-//!     tool_timeout, developer-instructions escaping.
 //!   * `copilot` — Copilot argv (no-color/no-remote/disable-builtin-mcps),
 //!     MCP `type→transport` translation, resume base, weak auth hint.
 //!   * `fake`   — Built-in scripted worker exec path.
@@ -22,7 +20,6 @@
 
 pub(crate) mod claude;
 pub(crate) mod claude_fork;
-pub(crate) mod codex;
 pub(crate) mod copilot;
 pub(crate) mod copilot_fork;
 pub(crate) mod fake;

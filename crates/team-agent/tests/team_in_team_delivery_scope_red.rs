@@ -145,7 +145,7 @@ fn multi_team_state() -> Value {
         "active_team_key": "teamA",
         "session_name": "team-teamA",
         "agents": {
-            "a1": {"status": "running", "provider": "codex", "window": "a1"}
+            "a1": {"status": "running", "provider": "claude", "window": "a1"}
         },
         "tasks": [],
         "teams": {
@@ -153,7 +153,7 @@ fn multi_team_state() -> Value {
                 "status": "alive",
                 "session_name": "team-teamA",
                 "agents": {
-                    "a1": {"status": "running", "provider": "codex", "window": "a1"}
+                    "a1": {"status": "running", "provider": "claude", "window": "a1"}
                 },
                 "tasks": []
             },
@@ -161,7 +161,7 @@ fn multi_team_state() -> Value {
                 "status": "alive",
                 "session_name": "team-teamB",
                 "agents": {
-                    "w1": {"status": "running", "provider": "codex", "window": "w1"}
+                    "w1": {"status": "running", "provider": "claude", "window": "w1"}
                 },
                 "tasks": []
             }
@@ -174,7 +174,7 @@ fn single_team_state() -> Value {
         "active_team_key": "teamB",
         "session_name": "team-teamB",
         "agents": {
-            "w1": {"status": "running", "provider": "codex", "window": "w1"}
+            "w1": {"status": "running", "provider": "claude", "window": "w1"}
         },
         "tasks": [],
         "teams": {
@@ -182,7 +182,7 @@ fn single_team_state() -> Value {
                 "status": "alive",
                 "session_name": "team-teamB",
                 "agents": {
-                    "w1": {"status": "running", "provider": "codex", "window": "w1"}
+                    "w1": {"status": "running", "provider": "claude", "window": "w1"}
                 },
                 "tasks": []
             }

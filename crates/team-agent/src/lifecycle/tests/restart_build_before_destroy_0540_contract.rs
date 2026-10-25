@@ -97,7 +97,7 @@ fn server_exited_during_replacement_spawn_does_not_cascade_session_disappeared_a
     let case = RestartCase::new(
         "case-b-no-second-cascade",
         worker_ids(2),
-        ProviderShape::CodexResumable,
+        ProviderShape::ClaudeResumable,
     );
     let transport =
         BuildBeforeDestroyTransport::recording(worker_ids(2)).with_server_exit_after_first_spawn();
@@ -278,21 +278,21 @@ impl RestartCase {
 #[derive(Clone, Copy)]
 enum ProviderShape {
     Fake,
-    CodexResumable,
+    ClaudeResumable,
 }
 
 impl ProviderShape {
     fn provider(self) -> &'static str {
         match self {
             Self::Fake => "fake",
-            Self::CodexResumable => "codex",
+            Self::ClaudeResumable => "claude",
         }
     }
 
     fn model(self) -> &'static str {
         match self {
             Self::Fake => "fake",
-            Self::CodexResumable => "gpt-5.5",
+            Self::ClaudeResumable => "claude-sonnet-5",
         }
     }
 }
@@ -354,9 +354,13 @@ fn seed_restart_state(
                 "spawn_cwd": workspace.to_string_lossy(),
                 "spawned_at": "2026-07-14T00:00:00+00:00",
             });
-            if matches!(provider, ProviderShape::CodexResumable) {
+            if matches!(provider, ProviderShape::ClaudeResumable) {
                 let rollout = workspace.join(format!("{worker}.jsonl"));
-                fs::write(&rollout, "{}\n").expect("write rollout fixture");
+                fs::write(
+                    &rollout,
+                    format!("{}\n", json!({"type": "user", "sessionId": format!("session-{worker}")})),
+                )
+                .expect("write rollout fixture");
                 let row_obj = row.as_object_mut().expect("agent row object");
                 row_obj.insert("session_id".to_string(), json!(format!("session-{worker}")));
                 row_obj.insert(

@@ -11,7 +11,6 @@ use crate::provider::types::{CapturedSession, ProviderError, SessionId};
 use crate::provider::Provider;
 
 pub(crate) mod claude;
-pub(crate) mod codex;
 pub(crate) mod common;
 pub(crate) mod copilot;
 pub(crate) mod grok;
@@ -40,6 +39,11 @@ pub(crate) fn scan_session_candidates_once(
     provider: Provider,
     context: &CaptureSessionContext,
 ) -> Result<Vec<CapturedSessionCandidate>, ProviderError> {
+    if matches!(provider, Provider::Codex) {
+        return Err(ProviderError::Command(
+            crate::provider::wire::LEGACY_CODEX_ERROR.into(),
+        ));
+    }
     if matches!(provider, Provider::Copilot) {
         return Ok(copilot::scan_session_store(context));
     }
@@ -57,16 +61,10 @@ pub(crate) fn scan_session_candidates_once(
 
     let candidates = common::candidate_session_files(provider, context)?;
     let mut out = common::parse_candidate_files(provider, context, candidates);
-    if matches!(provider, Provider::Codex) {
-        codex::retain_spawn_cwd(context, &mut out);
-    }
     common::apply_spawned_at_filter(provider, context, &mut out);
 
     if matches!(provider, Provider::Claude | Provider::ClaudeCode) {
         return claude::apply_expected_session_filter(context, out);
-    }
-    if matches!(provider, Provider::Codex) {
-        out = codex::apply_expected_session_filter(context, out);
     }
 
     common::apply_spawn_time_window_if_unique(provider, context, &mut out);

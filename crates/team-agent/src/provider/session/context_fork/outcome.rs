@@ -71,7 +71,7 @@ pub(crate) fn transition_pending_context_fork(
 ///   before: spawn 前 backing 基线
 ///   expected_backing_path: 精确快照路径，透传
 ///   source_agent_id: 透传给 verify_context_fork(当前该参数不参与判定)
-///   agent_id: 目标席位 id;既用于 codex 身份比对，也写进 Pending.target_agent
+///   agent_id: 目标席位 id，写进 Pending.target_agent
 ///   spawn_cwd: 目标席位工作目录，透传并写进 Pending 的扫描上下文
 ///   spawned_at: 时间边界，透传并写进 Pending
 ///   deadline: 轮询预算
@@ -141,7 +141,7 @@ mod tests {
         );
         assert_eq!(
             context_fork_convergence_deadline(Provider::Codex),
-            Duration::from_secs(10)
+            Duration::from_secs(5)
         );
         assert_eq!(
             context_fork_convergence_deadline(Provider::Copilot),
@@ -150,24 +150,24 @@ mod tests {
     }
 
     #[test]
-    fn codex_without_new_backing_is_typed_pending() {
+    fn claude_without_new_backing_is_typed_pending() {
         let root =
-            std::env::temp_dir().join(format!("ta-codex-fork-pending-{}", std::process::id()));
+            std::env::temp_dir().join(format!("ta-claude-fork-pending-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let plan = CommandPlan {
             argv: Vec::new(),
-            expected_session_id: None,
+            expected_session_id: Some(SessionId::new("fork-session")),
             provider_projects_root: Some(root.clone()),
             managed_mcp_config: false,
         };
-        let before = ContextBackingSnapshot::capture(Provider::Codex, &plan);
+        let before = ContextBackingSnapshot::capture(Provider::Claude, &plan);
         let outcome = observe_context_fork(
-            Provider::Codex,
+            Provider::Claude,
             &SessionId::new("source-session"),
             &plan,
             &before,
-            None,
+            Some(&root.join("fork-session.jsonl")),
             "source",
             "fork",
             &root,

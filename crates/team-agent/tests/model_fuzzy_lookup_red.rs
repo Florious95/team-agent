@@ -1313,11 +1313,7 @@ exit 77
 
     #[test]
     fn f17_launch_builders_keep_exact_unlisted_models_and_pi_preflight_boundary() {
-        for provider in [
-            Provider::Codex,
-            Provider::Claude,
-            Provider::ClaudeCode,
-        ] {
+        for provider in [Provider::Claude, Provider::ClaudeCode] {
             let exact_unlisted = "manual-model-id-not-in-discovery-catalog";
             let plan = get_adapter(provider)
                 .build_command_plan(context(exact_unlisted, None))
@@ -1362,20 +1358,7 @@ exit 77
     }
 
     #[test]
-    fn f17_codex_max_and_ultra_effort_and_custom_model_remain_verbatim() {
-        let model = "codex-custom-unlisted-model";
-        for effort in [ProviderEffort::Max, ProviderEffort::Ultra] {
-            let plan = get_adapter(Provider::Codex)
-                .build_command_plan(context(model, Some(effort)))
-                .expect("Codex effort launch plan");
-            assert!(contains_pair(&plan.argv, "--model", model));
-            let wire_effort = format!("model_reasoning_effort={}", effort.as_str());
-            assert!(
-                contains_pair(&plan.argv, "-c", &wire_effort),
-                "effort must remain native: {:?}",
-                plan.argv
-            );
-        }
+    fn f17_claude_max_effort_and_custom_model_remain_verbatim() {
         let claude_model = "claude-custom-unlisted-model";
         let claude = get_adapter(Provider::Claude)
             .build_command_plan(context(claude_model, Some(ProviderEffort::Max)))

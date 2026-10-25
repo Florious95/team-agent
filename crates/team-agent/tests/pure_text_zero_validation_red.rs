@@ -67,7 +67,7 @@ fn bypass(agent: &Value) -> bool {
     }
 }
 
-const VALID_ROLE: &str = "---\nname: worker\nrole: Worker\nprovider: codex\nmodel: custom-model\nauth_mode: subscription\ndangerously_skip_permissions: true\n---\nA valid role prompt.";
+const VALID_ROLE: &str = "---\nname: worker\nrole: Worker\nprovider: claude\nmodel: custom-model\nauth_mode: subscription\ndangerously_skip_permissions: true\n---\nA valid role prompt.";
 
 #[test]
 fn r01_plain_text_team_md_becomes_objective() {
@@ -107,7 +107,7 @@ fn r03_undeclared_bypass_defaults_to_false() {
     fixture.write_docs(
         "Plain-text team objective.",
         "worker.md",
-        "---\nname: worker\nrole: Worker\nprovider: codex\nmodel: custom-model\nauth_mode: subscription\n---\nDo the work.",
+        "---\nname: worker\nrole: Worker\nprovider: claude\nmodel: custom-model\nauth_mode: subscription\n---\nDo the work.",
     );
 
     let spec = fixture
@@ -177,7 +177,7 @@ fn r07_unclosed_pseudo_yaml_falls_back_to_the_entire_plain_text_prompt() {
 #[test]
 fn r08_valid_frontmatter_explicit_values_override_defaults() {
     let fixture = TeamFixture::new("r08");
-    let role = "---\nname: explicit-worker\nrole: Explicit Worker\nprovider: codex\nmodel: custom-model\nauth_mode: subscription\ndangerously_skip_permissions: false\n---\nExplicitly configured prompt.";
+    let role = "---\nname: explicit-worker\nrole: Explicit Worker\nprovider: claude\nmodel: custom-model\nauth_mode: subscription\ndangerously_skip_permissions: false\n---\nExplicitly configured prompt.";
     fixture.write_docs("Plain-text team objective.", "worker.md", role);
 
     let spec = fixture
@@ -185,7 +185,7 @@ fn r08_valid_frontmatter_explicit_values_override_defaults() {
         .expect("valid historical frontmatter remains supported");
     let agent = first_agent(&spec);
     assert_eq!(string_field(agent, "id"), "explicit-worker");
-    assert_eq!(string_field(agent, "provider"), "codex");
+    assert_eq!(string_field(agent, "provider"), "claude");
     assert_eq!(string_field(agent, "model"), "custom-model");
     assert!(!bypass(agent), "an explicit false value overrides the default");
     assert_eq!(prompt(agent), "Explicitly configured prompt.");

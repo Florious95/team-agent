@@ -5,6 +5,7 @@
 //! contract role and its real framework/native binding, not a provider guess.
 pub mod backend;
 pub mod commands;
+pub(crate) mod codex_directory_trust;
 pub mod config;
 pub mod discovery;
 pub mod forward;

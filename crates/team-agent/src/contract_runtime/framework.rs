@@ -128,6 +128,11 @@ pub fn require_legacy_role(
         && provider
             .map(|name| declared.as_deref() == Some(name))
             .unwrap_or(true);
+    if file.as_deref().is_some_and(crate::provider::wire::has_legacy_codex_header)
+        || selected.is_some_and(|name| crate::provider::wire::legacy_codex_refused(name, opt_in))
+    {
+        return Err(crate::cli::CliError::Runtime(crate::provider::wire::LEGACY_CODEX_ERROR.into()));
+    }
     if selected.is_some_and(|name| {
         super::registry::contract_dispatch(name, opt_in)
             || (super::registry::descriptor(name).is_none() && super::registry::recognizes(name))

@@ -39,7 +39,7 @@ fn restart_repairs_missing_resume_session_from_events_before_resume_decision() {
             "session.captured",
             json!({
                 "agent_id": "worker_a",
-                "provider": "codex",
+                "provider": "claude",
                 "session_id": "sess-from-events",
                 "rollout_path": rollout.to_string_lossy().to_string(),
                 "attribution_confidence": "high"
@@ -101,7 +101,7 @@ fn restart_does_not_resurrect_tombstoned_event_session_and_refuses_without_allow
             "session.captured",
             json!({
                 "agent_id": "worker_a",
-                "provider": "codex",
+                "provider": "claude",
                 "session_id": "sess-tombstoned",
                 "rollout_path": rollout.to_string_lossy().to_string(),
                 "attribution_confidence": "high"
@@ -151,7 +151,7 @@ impl ResumeFixture {
         .unwrap();
         std::fs::write(
             team.join("agents").join("worker_a.md"),
-            "---\nname: worker_a\nrole: Worker A\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n",
+            "---\nname: worker_a\nrole: Worker A\nprovider: claude\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n",
         )
         .unwrap();
         let spec = team_agent::compiler::compile_team(&team).unwrap();
@@ -174,7 +174,7 @@ impl ResumeFixture {
                 "agents": {
                     "worker_a": {
                         "status": "running",
-                        "provider": "codex",
+                        "provider": "claude",
                         "auth_mode": "subscription",
                         "role": "Worker A",
                         "tools": ["mcp_team"],

@@ -314,3 +314,10 @@ fn symlink_files_directories_and_cycles_keep_following_metadata_and_depth_semant
         .any(|item| item.path == dir.join("dangling.jsonl")));
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn parse_spawned_at_rfc3339_roundtrips_and_rejects_junk() {
+    assert!(parse_spawned_at("2026-06-10T21:40:00+00:00").is_some());
+    assert!(parse_spawned_at("not-a-date").is_none());
+    assert!(parse_spawned_at("").is_none());
+}
