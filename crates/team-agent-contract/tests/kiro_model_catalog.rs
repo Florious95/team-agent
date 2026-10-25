@@ -7,7 +7,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use team_agent_contract::contract::{hooks::*, plan::*, session::CwdIdentity, types::*};
 use team_agent_contract::kiro::{
-    native::CHAT_CATALOG_SOURCE, KiroAdapter, McpStdio, KIRO_DESCRIPTOR,
+    native::{CHAT_CATALOG_SOURCE, METADATA_HARNESS, METADATA_UI}, KiroAdapter, McpStdio, KIRO_DESCRIPTOR,
 };
 
 const NATIVE_CATALOG: &[u8] = include_bytes!("fixtures/kiro-2.28.0-models.json");
