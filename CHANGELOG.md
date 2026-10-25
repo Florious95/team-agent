@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.5.124]
+
+- **Current-shell install (#359):** when `~/.local/bin` is not on the installing shell's PATH, print the exact `export` and `rehash` commands plus the absolute binary. Also write the PATH marker to both `~/.zprofile` and `~/.zshrc`.
+- **Quiet fresh Pi session (#361):** do not pass a preassigned `--session-id` on a fresh Pi launch. Pi creates the session itself, and capture reads the id from the session header.
+- **Grok second Enter (#363):** press a second Enter only when the queue footer is `Queued · Enter to send now` or `Enter:send now`, or when the owned folded capsule is still in the composer. Do not press it on an empty busy composer.
+- **Public PATH launch (#364):** launch providers through their public PATH command instead of a hardcoded deep image path.
+- **Version-named Claude panes (#367):** recognize native Claude panes whose command name includes the version in canonical lifecycle checks.
+- **Release metadata:** align the eight standard version/changelog files at 0.5.124. Installing a published package does not automatically replace a running team's binary.
+
 ## [0.5.123]
 
 - **Shared workspace session:** start on the workspace-derived tmux socket instead of a private `tac-<hash>` server. A repeated start reuses the live process. Read-only `doctor` does not rebuild a deleted derived spec; the next non-dry-run `start` restores that metadata under the lifecycle lock without replacing a verified live seat.
