@@ -234,7 +234,7 @@ impl PlanHook for Fixture {
             _ => {}
         }
         Ok(LaunchPlan {
-            launcher: None,
+            launcher: request.paths.launcher.clone(),
             executable_inputs: vec![],
             executable: request.paths.executable.clone(),
             arguments,
@@ -364,6 +364,12 @@ fn request() -> LaunchRequest {
         identity: identity(),
         native: native(),
         paths: LaunchPaths {
+            launcher: LaunchEntrypoint {
+                command: "fixture-cli".into(),
+                search_path: "/opt/fixture user bin:/usr/bin".into(),
+                executable: "/opt/fixture user bin/fixture-cli".into(),
+                sha256: HASH,
+            },
             executable: "/Applications/Fixture CLI.app/bin/fixture".into(),
             candidate: "/tmp/contract candidate/bin".into(),
             cwd: CwdIdentity {
@@ -616,6 +622,7 @@ fn plans_are_deterministic_and_keep_argv_boundaries() {
     assert!(plan == FIXTURE.plan(&value).unwrap());
     assert!(validate_launch_plan(&descriptor(), &value, &plan).is_ok());
     assert_eq!(plan.executable, request().paths.executable);
+    assert_eq!(plan.launcher, request().paths.launcher);
     assert_eq!(plan.cwd, request().paths.cwd.path);
     assert!(plan
         .arguments
@@ -623,6 +630,42 @@ fn plans_are_deterministic_and_keep_argv_boundaries() {
     assert!(plan
         .arguments
         .contains(&OsString::from("native/vendor/model-X")));
+}
+
+#[test]
+fn every_plan_execs_the_framework_resolved_public_command_by_bare_name() {
+    let value = resolved();
+    let original = FIXTURE.plan(&value).unwrap();
+    // A provider cannot swap the command, its PATH route or the entry it fences.
+    for change in 0..5 {
+        let mut p = original.clone();
+        match change {
+            0 => p.launcher.command = "fixture-cli-native".into(),
+            1 => p.launcher.executable = "/Applications/Fixture CLI.app/bin/fixture-cli".into(),
+            2 => p.launcher.search_path = "/usr/bin".into(),
+            3 => {
+                p.environment.set.insert("PATH".into(), "/elsewhere".into());
+            }
+            _ => {
+                p.environment.remove.insert("PATH".into());
+            }
+        }
+        assert!(validate_launch_plan(&descriptor(), &value, &p).is_err(), "{change}");
+    }
+    // The request itself must name the descriptor's public binary on its PATH.
+    for (command, executable) in [
+        ("fixture", "/opt/fixture user bin/fixture"),
+        ("/opt/x/fixture-cli", "/opt/x/fixture-cli"),
+        ("fixture-cli", "/elsewhere/fixture-cli"),
+    ] {
+        let mut r = request();
+        r.paths.launcher.command = command.into();
+        r.paths.launcher.executable = executable.into();
+        assert!(resolve_launch(&descriptor(), &hooks(), &r, Some(&catalog())).is_err(), "{command}");
+    }
+    let mut r = request();
+    r.paths.launcher.search_path = "relative/bin:/opt/fixture user bin".into();
+    assert!(resolve_launch(&descriptor(), &hooks(), &r, Some(&catalog())).is_err());
 }
 
 #[test]

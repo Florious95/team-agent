@@ -20,11 +20,11 @@
 
 ## 已实现的边界
 
-`src/kiro.rs` 提供唯一 `KIRO_DESCRIPTOR`：id=`kiro`、public binary=`kiro-cli`、全量 15 facets；物理 plan 只接受 framework 解析后的 `kiro-cli-chat` engine。旧六家、根 manifest/lockfile 未修改。
+`src/kiro.rs` 提供唯一 `KIRO_DESCRIPTOR`：id=`kiro`、public binary=`kiro-cli`、全量 15 facets；物理 plan 只 exec framework 经 PATH 解析的公开 `kiro-cli`（`exec 'kiro-cli' chat …`），dispatcher 自己启动 chat helper；plan 的 `executable` 只是 PATH route 上 dispatcher 原生 image 的验证目标。旧六家、根 manifest/lockfile 未修改。
 
 ### Helper 与有界 catalog read host
 
-`src/kiro/native.rs` 不扫描 HOME，不修改 PATH/软链，不安装组件，不读取环境或凭据。对明确传入的 launcher/home 只检查 canonical launcher sibling、`~/.local/bin/kiro-cli-chat` 和 macOS bundle helper；显式 helper 缺失不切换到另一安装。要求 regular executable；版本按合法 `major.minor.patch` 解析，畸形输出报告实际 banner（转义、有界），不做版本猜测或 fallback。新版本使用本次动态捕获的 engine hash；探测期间替换以及已启动代际的身份变化仍拒绝。
+`src/kiro/native.rs` 不扫描 HOME，不修改 PATH/软链，不安装组件，不读取环境或凭据，也不猜安装目录。framework 用 PATH 解析第一个可执行 `kiro-cli`（wrapper/symlink 按原样保留）；`probe_launcher` 运行该入口本身（wrapper 也看见探测），`probe_runtime` 取同一 PATH route 上第一个非 `#!` 原生 image 作为 dispatcher 指纹。版本按合法 `major.minor.patch` 解析，畸形输出报告实际 banner（转义、有界），不做版本猜测或 fallback。新版本使用本次动态捕获的 hash；探测期间替换以及已启动代际的身份变化仍拒绝。
 
 `CatalogReader` 捕获完整 read grant（provider/native/executable/cwd/source/bounds），调用前核 cwd identity 与 executable hash。只允许 `chat --list-models --format json`；关闭 stdin、stdout/stderr 字节上限、共享绝对 deadline。公共 command runner 支持数据化 stdout guard，发现已观测 auth marker 后终止**本次自有 child**，返回 `ReadFailure::AuthRequired`。不发登录命令、不重试、不换模型。
 

@@ -144,14 +144,16 @@ fn captured_validator_uses_required_path_option_without_shell_splitting() {
     let cwd = sandbox.parent.join("workspace with 'quote' 中文");
     std::fs::create_dir(&cwd).unwrap();
     request.paths.cwd = resolve_cwd(&cwd).unwrap();
-    request.paths.executable = sandbox.parent.join("kiro-cli-chat");
-    std::fs::write(
-        &request.paths.executable,
-        b"controlled validator; never executed",
-    )
-    .unwrap();
-    request.native.executable_sha256 =
-        team_agent_contract::host::digest(b"controlled validator; never executed");
+    // Validation runs the same public command the pane would exec.
+    let bin = sandbox.parent.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    std::fs::write(bin.join("fake"), b"controlled validator; never executed").unwrap();
+    request.paths.launcher = LaunchEntrypoint {
+        command: "fake".into(),
+        search_path: bin.clone().into_os_string(),
+        executable: bin.join("fake"),
+        sha256: team_agent_contract::host::digest(b"controlled validator; never executed"),
+    };
     // This exercises owned configuration validation, not the fake terminal's
     // FullWorker profile (which is deliberately pinned to its own image hash).
     request.mode = LaunchMode::LaunchOnly;
@@ -166,7 +168,7 @@ fn captured_validator_uses_required_path_option_without_shell_splitting() {
         &plan,
         OperationId::new("validate").unwrap(),
         Validator {
-            executable: request.paths.executable,
+            executable: request.paths.launcher.executable,
             cwd,
             path: plan.materialization[0].path.path(),
             calls: 0,

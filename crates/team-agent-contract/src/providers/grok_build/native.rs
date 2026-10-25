@@ -1,5 +1,6 @@
-//! Public wrapper routing and final native image are separate, generation-bound
-//! identities. No installed version/hash pin, credential read, login or fallback.
+//! The public `grok` command on PATH is what runs, user wrappers included. The
+//! final native image is only a verification target derived from that same
+//! PATH route. No installed version/hash pin, credential read, login or fallback.
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -37,125 +38,6 @@ pub fn parse_version(bytes: &[u8]) -> Result<String, ProbeError> {
     { return Err(invalid()); }
     Ok(value.into())
 }
-pub fn resolve_launcher(path: &Path) -> Result<PathBuf, HostError> {
-    require_absolute(path, "Grok public launcher").map_err(|_| HostError::new("Grok launcher path", HostErrorKind::Invalid))?;
-    let path = path.canonicalize().map_err(|error| HostError::io("Grok launcher resolution", error))?;
-    let metadata = std::fs::metadata(&path).map_err(|error| HostError::io("Grok launcher metadata", error))?;
-    if !metadata.is_file() || !matches!(path.file_name().and_then(|name| name.to_str()), Some("grok" | "grok-native")) {
-        return Err(HostError::new("Grok public entry required", HostErrorKind::Invalid));
-    }
-    #[cfg(unix)] {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o111 == 0 { return Err(HostError::new("Grok entry executable", HostErrorKind::Invalid)); }
-    }
-    Ok(path)
-}
-/// This installation's observed public wrapper execs the Homebrew native alias.
-/// Resolve the alias, not wrapper shell contents or its private proxy.env.
-pub fn resolve_engine(launcher: &Path) -> Result<PathBuf, HostError> {
-    let launcher = resolve_launcher(launcher)?;
-    if launcher.file_name().is_some_and(|name| name == "grok-native") { return Ok(launcher); }
-    if launcher != Path::new("/usr/local/bin/grok") {
-        return Err(HostError::new("Grok wrapper route unverified", HostErrorKind::Unsupported));
-    }
-    let engine = resolve_launcher(Path::new("/opt/homebrew/bin/grok"))?;
-    if engine.file_name().is_none_or(|name| name != "grok-native") {
-        return Err(HostError::new("Grok final native image", HostErrorKind::Ownership));
-    }
-    Ok(engine)
-}
-/// A same-inode file named `grok`. Execing the official symlink displays
-/// `grok-native` because tmux uses the resolved basename. This link is the
-/// public name; it is not a second image.
-///
-/// A hard link cannot cross devices. `TMPDIR` is caller-controlled and may sit
-/// on another volume, so it is never a candidate. Use system `/tmp` only when
-/// that directory is already on the image volume; otherwise link beside the image.
-pub fn public_name_link(engine: &Path) -> Result<PathBuf, HostError> {
-    let engine = engine.canonicalize().map_err(|error| HostError::io("Grok public name", error))?;
-    if engine.file_name().is_none_or(|name| name != "grok-native") {
-        return Err(HostError::new("Grok public name image", HostErrorKind::Ownership));
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = engine;
-        return Err(HostError::new("Grok public name", HostErrorKind::Unsupported));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let engine_meta = std::fs::metadata(&engine).map_err(|error| HostError::io("Grok public name", error))?;
-        let mut skipped_cross_device = false;
-        let mut last_error = None;
-        for root in same_volume_name_roots(&engine, engine_meta.dev()) {
-            match place_public_name_link(&engine, &root, engine_meta.dev(), engine_meta.ino()) {
-                Ok(link) => return Ok(link),
-                Err(error) if error.operation == "Grok public name cross-device" => skipped_cross_device = true,
-                Err(error) if is_unwritable(&error) || error.kind == HostErrorKind::Conflict => last_error = Some(error),
-                Err(error) => return Err(error),
-            }
-        }
-        if skipped_cross_device && last_error.is_none() {
-            return Err(HostError::new("Grok public name cross-device", HostErrorKind::Unsupported));
-        }
-        Err(last_error.unwrap_or_else(|| HostError::new("Grok public name link", HostErrorKind::Unknown)))
-    }
-}
-#[cfg(unix)]
-fn same_volume_name_roots(engine: &Path, engine_dev: u64) -> Vec<PathBuf> {
-    use std::os::unix::fs::MetadataExt;
-    let mut roots = Vec::new();
-    if let Ok(system_tmp) = Path::new("/tmp").canonicalize() {
-        if std::fs::metadata(&system_tmp).is_ok_and(|meta| meta.is_dir() && meta.dev() == engine_dev) {
-            roots.push(system_tmp);
-        }
-    }
-    if let Some(parent) = engine.parent() {
-        if std::fs::metadata(parent).is_ok_and(|meta| meta.is_dir() && meta.dev() == engine_dev) {
-            roots.push(parent.to_path_buf());
-        }
-    }
-    roots
-}
-#[cfg(unix)]
-fn place_public_name_link(engine: &Path, root: &Path, engine_dev: u64, ino: u64) -> Result<PathBuf, HostError> {
-    use std::os::unix::fs::MetadataExt;
-    let dir = root.join(format!("team-agent-grok-name-{ino}"));
-    match std::fs::create_dir(&dir) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
-            return Err(HostError::new("Grok public name cross-device", HostErrorKind::Unsupported));
-        }
-        Err(error) => return Err(HostError::io("Grok public name", error)),
-    }
-    let dir_meta = std::fs::symlink_metadata(&dir).map_err(|error| HostError::io("Grok public name", error))?;
-    if dir_meta.file_type().is_symlink() || !dir_meta.is_dir() {
-        return Err(HostError::new("Grok public name link", HostErrorKind::Conflict));
-    }
-    let dir_meta = std::fs::metadata(&dir).map_err(|error| HostError::io("Grok public name", error))?;
-    if dir_meta.dev() != engine_dev {
-        return Err(HostError::new("Grok public name cross-device", HostErrorKind::Unsupported));
-    }
-    let link = dir.join("grok");
-    match std::fs::hard_link(engine, &link) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
-            return Err(HostError::new("Grok public name cross-device", HostErrorKind::Unsupported));
-        }
-        Err(error) => return Err(HostError::io("Grok public name link", error)),
-    }
-    let link_meta = std::fs::metadata(&link).map_err(|error| HostError::io("Grok public name", error))?;
-    if !link_meta.is_file() || link_meta.dev() != engine_dev || link_meta.ino() != ino {
-        return Err(HostError::new("Grok public name link", HostErrorKind::Conflict));
-    }
-    Ok(link)
-}
-#[cfg(unix)]
-fn is_unwritable(error: &HostError) -> bool {
-    matches!(error.kind, HostErrorKind::Io(std::io::ErrorKind::PermissionDenied) | HostErrorKind::Io(std::io::ErrorKind::ReadOnlyFilesystem))
-}
 /// Root calls this after resolving/owning the stable primary, before H3 effects.
 /// Metadata only; no user/account config bodies or Git administrative files.
 pub fn require_private_primary(cwd: &crate::contract::session::CwdIdentity) -> Result<(), HostError> {
@@ -173,28 +55,27 @@ pub fn require_private_primary(cwd: &crate::contract::session::CwdIdentity) -> R
     }
     Ok(())
 }
-fn command(entry: &Path, _engine: &Path, args: &[&str], cwd: Option<PathBuf>, bounds: ReadBounds) -> CommandRequest {
+fn command(entry: &Path, args: &[&str], cwd: Option<PathBuf>, bounds: ReadBounds) -> CommandRequest {
     CommandRequest {
         executable: entry.into(), arguments: args.iter().map(|arg| (*arg).into()).collect(), cwd,
-        environment: EnvironmentDelta { remove: std::collections::BTreeSet::from(["GROK_REAL".into()]), set: Default::default() },
+        environment: EnvironmentDelta { remove: BTreeSet::new(), set: Default::default() },
         stdin: None, budget: bounds.deadline, reject_stdout: None,
         limits: OutputLimits { stdout: bounds.max_output_bytes, stderr: bounds.max_output_bytes, stdin: 0 },
     }
 }
-pub fn probe_launcher<R: CommandRunner>(entry: &Path, runner: &mut R, bounds: ReadBounds) -> Result<NativeIdentity, ProbeError> {
+/// Runs the PATH-selected entry itself, so a wrapper sees every probe too.
+pub fn probe_launcher<R: CommandRunner>(command: &PublicCommand, runner: &mut R, bounds: ReadBounds) -> Result<NativeIdentity, ProbeError> {
     bounds.validate().map_err(|_| HostError::new("Grok probe bounds", HostErrorKind::Invalid))?;
     let started = Instant::now();
-    let entry = resolve_launcher(entry)?;
-    let engine = resolve_engine(&entry)?;
-    let hash = fingerprint_file(&entry, MAX_IMAGE, bounds.deadline)?;
+    let hash = fingerprint_file(&command.entry, MAX_IMAGE, bounds.deadline)?;
     let remaining = bounds.deadline.saturating_sub(started.elapsed());
     if remaining.is_zero() { return Err(HostError::new("Grok version deadline", HostErrorKind::Deadline).into()); }
-    let output = runner.run(&command(&entry, &engine, &["--version"], None, ReadBounds { deadline: remaining, ..bounds }));
+    let output = runner.run(&self::command(&command.entry, &["--version"], None, ReadBounds { deadline: remaining, ..bounds }));
     if !output.success() || output.elapsed > remaining || output.stdout.len() > bounds.max_output_bytes {
         return Err(HostError::new("Grok version command", HostErrorKind::Command).into());
     }
     let version = parse_version(&output.stdout)?;
-    if fingerprint_file(&entry, MAX_IMAGE, bounds.deadline.saturating_sub(started.elapsed()))? != hash {
+    if fingerprint_file(&command.entry, MAX_IMAGE, bounds.deadline.saturating_sub(started.elapsed()))? != hash {
         return Err(HostError::new("Grok entry changed", HostErrorKind::Conflict).into());
     }
     Ok(NativeIdentity { version, harness: METADATA_HARNESS.into(), ui: METADATA_UI.into(),
@@ -204,15 +85,14 @@ pub fn probe_launcher<R: CommandRunner>(entry: &Path, runner: &mut R, bounds: Re
 pub struct RuntimeInstallation {
     pub engine: PathBuf,
     pub native: NativeIdentity,
-    launcher: PathBuf,
+    command: PublicCommand,
     launcher_native: NativeIdentity,
     home: PathBuf,
 }
 impl RuntimeInstallation {
     pub fn home(&self) -> &Path { &self.home }
-    pub fn launcher(&self) -> Option<LaunchEntrypoint> {
-        (self.launcher != self.engine).then(|| LaunchEntrypoint { executable: self.launcher.clone(), sha256: self.launcher_native.executable_sha256 })
-    }
+    /// The pane execs bare `grok` through this PATH; `engine` is never exec'd.
+    pub fn launcher(&self) -> LaunchEntrypoint { self.command.launch_entrypoint(self.launcher_native.executable_sha256) }
     pub fn bind_catalog(&self, catalog: &CatalogObservation) -> Result<CatalogObservation, ContractError> {
         if catalog.provider.as_str() != "grok_build" || catalog.native != self.launcher_native || catalog.schema != CATALOG_SOURCE.schema {
             return Err(ContractError::Mismatch("Grok catalog/runtime installation"));
@@ -220,17 +100,16 @@ impl RuntimeInstallation {
         let mut result = catalog.clone(); result.native = self.native.clone(); Ok(result)
     }
 }
-pub fn probe_runtime<R: CommandRunner>(entry: &Path, home: &Path, runner: &mut R, bounds: ReadBounds) -> Result<RuntimeInstallation, ProbeError> {
+pub fn probe_runtime<R: CommandRunner>(command: &PublicCommand, home: &Path, runner: &mut R, bounds: ReadBounds) -> Result<RuntimeInstallation, ProbeError> {
     let started = Instant::now();
     let home = resolve_cwd(home)?.path;
-    let launcher = resolve_launcher(entry)?;
-    let engine = resolve_engine(&launcher)?;
+    let engine = command.native_image()?;
     let hash = fingerprint_file(&engine, MAX_IMAGE, bounds.deadline)?;
-    let launcher_native = probe_launcher(&launcher, runner, ReadBounds { deadline: bounds.deadline.saturating_sub(started.elapsed()), ..bounds })?;
+    let launcher_native = probe_launcher(command, runner, ReadBounds { deadline: bounds.deadline.saturating_sub(started.elapsed()), ..bounds })?;
     if fingerprint_file(&engine, MAX_IMAGE, bounds.deadline.saturating_sub(started.elapsed()))? != hash {
         return Err(HostError::new("Grok updated during discovery", HostErrorKind::Conflict).into());
     }
-    Ok(RuntimeInstallation { engine, launcher, home,
+    Ok(RuntimeInstallation { engine, command: command.clone(), home,
         native: NativeIdentity { harness: "grok-build".into(), ui: "tui".into(), executable_sha256: hash, ..launcher_native.clone() }, launcher_native })
 }
 pub fn validate_catalog_request(request: &CatalogRequest) -> Result<(), ContractError> {
@@ -238,6 +117,7 @@ pub fn validate_catalog_request(request: &CatalogRequest) -> Result<(), Contract
     request.native.validate()?;
     require_absolute(&request.executable, "Grok catalog executable")?;
     if request.provider.as_str() != "grok_build" || request.source != CATALOG_SOURCE
+        || request.executable.file_name().is_none_or(|name| name != "grok")
         || request.native.harness != METADATA_HARNESS || request.native.ui != METADATA_UI
         || parse_version(format!("grok {}", request.native.version).as_bytes()).is_err()
     { return Err(ContractError::Mismatch("Grok catalog grant")); }
@@ -253,19 +133,16 @@ impl<R: CommandRunner> BoundedReadHost for NativeCatalog<R> {
         if *request != self.grant { return Err(ReadFailure::Error(ContractError::Mismatch("captured Grok catalog request"))); }
         let started = Instant::now();
         let mismatch = || ReadFailure::Error(ContractError::Mismatch("Grok catalog installation/cwd"));
-        let engine = resolve_engine(&request.executable).map_err(|_| mismatch())?;
-        let image = fingerprint_file(&engine, MAX_IMAGE, request.bounds.deadline).map_err(|_| mismatch())?;
         let verify = || {
             if resolve_cwd(&request.cwd.path).map_err(|_| mismatch())? != request.cwd { return Err(mismatch()); }
-            for (path, expected) in [(&request.executable, request.native.executable_sha256), (&engine, image)] {
-                if fingerprint_file(path, MAX_IMAGE, request.bounds.deadline.saturating_sub(started.elapsed())).map_err(|_| mismatch())? != expected { return Err(mismatch()); }
-            }
+            if fingerprint_file(&request.executable, MAX_IMAGE, request.bounds.deadline.saturating_sub(started.elapsed())).map_err(|_| mismatch())?
+                != request.native.executable_sha256 { return Err(mismatch()); }
             Ok(())
         };
         verify()?;
         let remaining = request.bounds.deadline.saturating_sub(started.elapsed());
         if remaining.is_zero() { return Err(ReadFailure::TimedOut { elapsed: started.elapsed() }); }
-        let output = self.runner.run(&command(&request.executable, &engine, CATALOG_SOURCE.arguments, Some(request.cwd.path.clone()), ReadBounds { deadline: remaining, ..request.bounds }));
+        let output = self.runner.run(&command(&request.executable, CATALOG_SOURCE.arguments, Some(request.cwd.path.clone()), ReadBounds { deadline: remaining, ..request.bounds }));
         if output.end == CommandEnd::TimedOut || output.elapsed > remaining { return Err(ReadFailure::TimedOut { elapsed: started.elapsed().max(output.elapsed) }); }
         if output.end == CommandEnd::OutputLimit || output.stdout.len() > request.bounds.max_output_bytes { return Err(ReadFailure::OutputLimit { limit: request.bounds.max_output_bytes }); }
         if !output.success() { return match (output.end, output.exit_code) { (CommandEnd::Exited, Some(code)) => Err(ReadFailure::Exit { code }), _ => Err(ReadFailure::Unknown(super::UNVERIFIED)) }; }
@@ -292,36 +169,4 @@ pub fn parse_catalog(bytes: &[u8]) -> Result<Vec<ModelRecord>, ContractError> {
     }
     if models.is_empty() || !ids.contains(default) || marked != Some(default) { return Err(invalid()); }
     Ok(models)
-}
-
-#[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-    use std::os::unix::fs::MetadataExt;
-
-    #[test]
-    fn public_name_link_stays_on_the_image_volume_and_ignores_tmpdir() {
-        let env_temp = std::env::temp_dir();
-        let image = env_temp.join(format!("ta-grok-image-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&image);
-        std::fs::create_dir_all(&image).unwrap();
-        let engine = image.join("grok-native");
-        std::fs::write(&engine, b"not-a-real-grok").unwrap();
-        let link = public_name_link(&engine).expect("same-volume public name");
-        let engine_meta = std::fs::metadata(&engine).unwrap();
-        let link_meta = std::fs::metadata(&link).unwrap();
-        assert_eq!(link.file_name().and_then(|name| name.to_str()), Some("grok"));
-        assert_eq!(link_meta.dev(), engine_meta.dev());
-        assert_eq!(link_meta.ino(), engine_meta.ino());
-        let link_root = link.parent().and_then(Path::parent).unwrap().canonicalize().unwrap();
-        let system_tmp = Path::new("/tmp").canonicalize().unwrap();
-        let image_root = image.canonicalize().unwrap();
-        assert!(link_root == system_tmp || link_root == image_root, "link root {link_root:?}");
-        let env_root = env_temp.canonicalize().unwrap_or(env_temp);
-        if env_root != system_tmp && env_root != image_root {
-            assert_ne!(link_root, env_root, "public name must not borrow TMPDIR {env_root:?}");
-        }
-        let _ = std::fs::remove_dir_all(&image);
-        let _ = std::fs::remove_dir_all(system_tmp.join(format!("team-agent-grok-name-{}", engine_meta.ino())));
-    }
 }

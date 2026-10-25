@@ -6,8 +6,8 @@ use team_agent_contract::contract::{
     descriptor::{PromptCarrier, ProviderDescriptor, ToolNaming},
     types::InstanceIdentity,
     hooks::{PlanHook, ProviderHooks},
-    plan::{LaunchPlan, ResolvedLaunch},
-    types::{ContractError, Support},
+    plan::{CatalogObservation, LaunchEntrypoint, LaunchPlan, ResolvedLaunch},
+    types::{ContractError, NativeIdentity, Support},
 };
 use team_agent_contract::kiro::{self, KiroAdapter, KIRO_DESCRIPTOR};
 use team_agent_contract::providers::cursor::{self, CursorAdapter, CURSOR_DESCRIPTOR};
@@ -19,10 +19,47 @@ use team_agent_contract::runtime::{
 
 const DESCRIPTORS: &[&ProviderDescriptor] = &[&KIRO_DESCRIPTOR, &CURSOR_DESCRIPTOR, &GROK_BUILD_DESCRIPTOR];
 
+/// One provider's public command route: the PATH-selected entry the pane execs
+/// by bare name and the native image that route must exec into.
 #[derive(Clone)]
 pub enum NativeRuntime {
+    Kiro(kiro::native::RuntimeInstallation),
     Cursor(cursor::native::RuntimeInstallation),
     GrokBuild(grok_build::native::RuntimeInstallation),
+}
+
+impl NativeRuntime {
+    pub fn launcher(&self) -> LaunchEntrypoint {
+        match self {
+            Self::Kiro(runtime) => runtime.launcher(),
+            Self::Cursor(runtime) => runtime.launcher(),
+            Self::GrokBuild(runtime) => runtime.launcher(),
+        }
+    }
+
+    pub fn engine(&self) -> &PathBuf {
+        match self {
+            Self::Kiro(runtime) => &runtime.engine,
+            Self::Cursor(runtime) => &runtime.engine,
+            Self::GrokBuild(runtime) => &runtime.engine,
+        }
+    }
+
+    pub fn native(&self) -> &NativeIdentity {
+        match self {
+            Self::Kiro(runtime) => &runtime.native,
+            Self::Cursor(runtime) => &runtime.native,
+            Self::GrokBuild(runtime) => &runtime.native,
+        }
+    }
+
+    pub fn bind_catalog(&self, catalog: &CatalogObservation) -> Result<CatalogObservation, ContractError> {
+        match self {
+            Self::Kiro(runtime) => runtime.bind_catalog(catalog),
+            Self::Cursor(runtime) => runtime.bind_catalog(catalog),
+            Self::GrokBuild(runtime) => runtime.bind_catalog(catalog),
+        }
+    }
 }
 
 /// Leaf selection stays here; the framework, lifecycle and outbox remain shared.
@@ -143,7 +180,8 @@ impl NativeAdapter {
         runtime: Option<NativeRuntime>,
     ) -> Result<Self, ContractError> {
         match self {
-            Self::Kiro(adapter) if runtime.is_none() => Ok(Self::Kiro(adapter)),
+            // Kiro plans from the framework-resolved launch paths alone.
+            Self::Kiro(adapter) if matches!(runtime, None | Some(NativeRuntime::Kiro(_))) => Ok(Self::Kiro(adapter)),
             Self::Kiro(_) => Err(ContractError::Mismatch("native runtime provider")),
             Self::Cursor(adapter) => {
                 let adapter = adapter.with_project(project)?;

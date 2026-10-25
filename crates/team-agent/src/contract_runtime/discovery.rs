@@ -2,7 +2,7 @@
 use std::path::{Path, PathBuf};
 
 use team_agent_contract::contract::{hooks::*, plan::CatalogObservation, types::*};
-use team_agent_contract::host::{command::RealCommandRunner, process::resolve_cwd};
+use team_agent_contract::host::{command::{PublicCommand, RealCommandRunner}, process::resolve_cwd};
 use team_agent_contract::kiro::native as kiro;
 use team_agent_contract::providers::cursor::native as cursor;
 use team_agent_contract::providers::grok_build::native as grok;
@@ -31,12 +31,16 @@ pub enum DiscoveryError {
 }
 
 pub struct Discovery {
+    /// The provider's public command exactly as the user's shell resolves it.
+    pub command: PublicCommand,
     pub engine: PathBuf,
     pub native: NativeIdentity,
     pub catalog: CatalogObservation,
     pub runtime: Option<NativeRuntime>,
 }
 
+/// Canonical tool path for framework infrastructure such as tmux. Providers
+/// never use this: they launch their public command through [`public_command`].
 pub fn executable(name: &'static str) -> Result<PathBuf, DiscoveryError> {
     let path = std::env::var_os("PATH").ok_or(DiscoveryError::Executable(name))?;
     for directory in std::env::split_paths(&path) {
@@ -52,6 +56,13 @@ pub fn executable(name: &'static str) -> Result<PathBuf, DiscoveryError> {
     Err(DiscoveryError::Executable(name))
 }
 
+/// The first `name` on this process's PATH, kept as found so user wrappers and
+/// vendor symlinks stay in the route. No install directory is ever guessed.
+pub fn public_command(name: &'static str) -> Result<PublicCommand, DiscoveryError> {
+    let path = std::env::var_os("PATH").ok_or(DiscoveryError::Executable(name))?;
+    PublicCommand::resolve(name, &path).map_err(|_| DiscoveryError::Executable(name))
+}
+
 pub fn discover(provider: &ProviderId, workspace: &Path) -> Result<Discovery, DiscoveryError> {
     let selected = registry::provider(provider.as_str()).map_err(DiscoveryError::Contract)?;
     let descriptor = selected.descriptor();
@@ -59,43 +70,23 @@ pub fn discover(provider: &ProviderId, workspace: &Path) -> Result<Discovery, Di
         deadline: std::time::Duration::from_secs(30),
         max_output_bytes: 1024 * 1024,
     };
-    let launcher = if selected == NativeProvider::GrokBuild {
-        // This macOS admission preserves the explicitly approved proxy entry.
-        // PATH may put the inner image first; it must never bypass the wrapper.
-        grok::resolve_launcher(Path::new("/usr/local/bin/grok"))?
-    } else {
-        executable(descriptor.identity.binary)?
-    };
-    let (engine, native) = match selected {
-        NativeProvider::Kiro => {
-            let home = std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .ok_or(DiscoveryError::Executable("HOME for native installation lookup"))?;
-            let engine = kiro::resolve_helper(&launcher, &home)?;
-            let native = kiro::probe_engine(&engine, &mut RealCommandRunner::default(), bounds)?;
-            (engine, native)
-        }
-        NativeProvider::Cursor => {
-            let engine = cursor::resolve_launcher(&launcher)?;
-            let native = cursor::probe_launcher(&engine, &mut RealCommandRunner::default(), bounds)?;
-            (engine, native)
-        }
-        NativeProvider::GrokBuild => {
-            let engine = grok::resolve_launcher(&launcher)?;
-            let native = grok::probe_launcher(&engine, &mut RealCommandRunner::default(), bounds)?;
-            (engine, native)
-        }
+    // Every metadata probe runs the PATH-selected entry, wrappers included.
+    let command = public_command(descriptor.identity.binary)?;
+    let native = match selected {
+        NativeProvider::Kiro => kiro::probe_launcher(&command, &mut RealCommandRunner::default(), bounds)?,
+        NativeProvider::Cursor => cursor::probe_launcher(&command, &mut RealCommandRunner::default(), bounds)?,
+        NativeProvider::GrokBuild => grok::probe_launcher(&command, &mut RealCommandRunner::default(), bounds)?,
     };
     let request = CatalogRequest {
         provider: ProviderId::new(descriptor.identity.id).map_err(DiscoveryError::Contract)?,
         native: native.clone(),
-        executable: engine.clone(),
+        executable: command.entry.clone(),
         cwd: resolve_cwd(workspace)?,
         source: descriptor.model.catalog.require("native catalog source").map_err(DiscoveryError::Contract)?.clone(),
         bounds,
     };
-    // H1 does not use these pointers or execute an MCP server. Cursor's
-    // launcher fingerprint authorizes only metadata reads, never worker launch.
+    // H1 does not use these pointers or execute an MCP server. The launcher
+    // fingerprint authorizes only metadata reads, never worker launch.
     let adapter = selected.adapter(
         std::env::current_exe()?.canonicalize()?,
         Vec::new(),
@@ -120,38 +111,31 @@ pub fn discover(provider: &ProviderId, workspace: &Path) -> Result<Discovery, Di
             catalog_hook.discover(&request, &mut host)
         }
     }.map_err(DiscoveryError::Catalog)?;
-    let result = Discovery { engine, native, catalog, runtime: None };
+    let result = Discovery { engine: command.entry.clone(), command, native, catalog, runtime: None };
     validate_catalog(provider, &result).map_err(DiscoveryError::Contract)?;
     Ok(result)
 }
 
-/// Runtime discovery is separate from public catalog metadata. Cursor explicitly
-/// bridges the same installation's catalog to its proven Node/entry identity.
+/// Runtime discovery is separate from public catalog metadata. Each provider
+/// bridges its catalog to the native image its public command route execs into.
 pub(super) fn discover_runtime(provider: &ProviderId, workspace: &Path) -> Result<Discovery, DiscoveryError> {
     let mut discovery = discover(provider, workspace)?;
     let selected = registry::provider(provider.as_str()).map_err(DiscoveryError::Contract)?;
-    if selected != NativeProvider::Kiro {
-        let home = std::env::var_os("HOME").map(PathBuf::from)
-            .ok_or(DiscoveryError::Executable("HOME for native subscription"))?;
-        let bounds = ReadBounds { deadline: std::time::Duration::from_secs(30), max_output_bytes: 1024 * 1024 };
-        match selected {
-            NativeProvider::Cursor => {
-                let runtime = cursor::probe_runtime(&discovery.engine, &home, &mut RealCommandRunner::default(), bounds)?;
-                discovery.catalog = runtime.bind_catalog(&discovery.catalog).map_err(DiscoveryError::Contract)?;
-                discovery.engine = runtime.engine.clone();
-                discovery.native = runtime.native.clone();
-                discovery.runtime = Some(NativeRuntime::Cursor(runtime));
-            }
-            NativeProvider::GrokBuild => {
-                let runtime = grok::probe_runtime(&discovery.engine, &home, &mut RealCommandRunner::default(), bounds)?;
-                discovery.catalog = runtime.bind_catalog(&discovery.catalog).map_err(DiscoveryError::Contract)?;
-                discovery.engine = runtime.engine.clone();
-                discovery.native = runtime.native.clone();
-                discovery.runtime = Some(NativeRuntime::GrokBuild(runtime));
-            }
-            NativeProvider::Kiro => unreachable!(),
-        }
-    }
+    let bounds = ReadBounds { deadline: std::time::Duration::from_secs(30), max_output_bytes: 1024 * 1024 };
+    let home = || std::env::var_os("HOME").map(PathBuf::from)
+        .ok_or(DiscoveryError::Executable("HOME for native subscription"));
+    let runtime = match selected {
+        NativeProvider::Kiro => NativeRuntime::Kiro(
+            kiro::probe_runtime(&discovery.command, &mut RealCommandRunner::default(), bounds)?),
+        NativeProvider::Cursor => NativeRuntime::Cursor(
+            cursor::probe_runtime(&discovery.command, &home()?, &mut RealCommandRunner::default(), bounds)?),
+        NativeProvider::GrokBuild => NativeRuntime::GrokBuild(
+            grok::probe_runtime(&discovery.command, &home()?, &mut RealCommandRunner::default(), bounds)?),
+    };
+    discovery.catalog = runtime.bind_catalog(&discovery.catalog).map_err(DiscoveryError::Contract)?;
+    discovery.engine = runtime.engine().clone();
+    discovery.native = runtime.native().clone();
+    discovery.runtime = Some(runtime);
     Ok(discovery)
 }
 
@@ -245,6 +229,10 @@ mod tests {
     use crate::cli::{CmdOutput, ExitCode, ModelsArgs};
     use team_agent_contract::contract::plan::ModelRecord;
 
+    fn controlled_command(name: &str) -> PublicCommand {
+        PublicCommand { name: name.into(), search_path: "/controlled".into(), entry: format!("/controlled/{name}").into() }
+    }
+
     #[test]
     fn native_catalog_projection_preserves_ids_without_claiming_auth_or_effort() {
         let native = NativeIdentity {
@@ -255,8 +243,9 @@ mod tests {
             executable_sha256: Digest([1; 32]),
         };
         let discovery = Discovery {
+            command: controlled_command("kiro-cli"),
             runtime: None,
-            engine: "/controlled/kiro-cli-chat".into(),
+            engine: "/controlled/kiro-cli".into(),
             native: native.clone(),
             catalog: CatalogObservation {
                 provider: ProviderId::new("kiro").unwrap(),
@@ -319,6 +308,7 @@ mod tests {
             executable_sha256: Digest([2; 32]),
         };
         Discovery {
+            command: controlled_command("cursor-agent"),
             runtime: None,
             engine: "/controlled/cursor-agent".into(),
             native: native.clone(),

@@ -1,4 +1,4 @@
-//! Cursor native worker: explicit Node/entry identity, native chat allocation,
+//! Cursor native worker: public `cursor-agent` launch via PATH, native chat allocation,
 //! private project MCP, and first-business terminal prompt delivery. Declared
 //! recipes are not substitutes for candidate-bound live acceptance evidence.
 pub mod interaction;
@@ -176,7 +176,8 @@ impl PlanHook for CursorAdapter {
         let runtime = self.runtime.as_ref().ok_or_else(|| refusal("Cursor runtime installation"))?;
         let project = self.project.as_ref().ok_or(ContractError::Invalid("Cursor project directory"))?;
         if resolved.provider().as_str() != "cursor" || r.native != runtime.native
-            || r.paths.executable != runtime.engine || !interaction::PROFILES[0].matches_native(&r.native)
+            || r.paths.executable != runtime.engine || r.paths.launcher != runtime.launcher()
+            || !interaction::PROFILES[0].matches_native(&r.native)
             || r.channel != Channel::Tmux || r.mode != LaunchMode::FullWorker
             || r.auth != AuthMode::NativeSubscription || self.mcp.executable != r.paths.candidate
             || !matches!(r.operation, Operation::Fresh | Operation::Resume)
@@ -191,9 +192,9 @@ impl PlanHook for CursorAdapter {
             path: OwnedPath::new(r.paths.cwd.path.clone(), ".cursor/team-agent-prompt.txt".into())?,
             kind: ResourceKind::Prompt, contents: prompt.as_bytes().to_vec(),
         };
-        let mut arguments: Vec<OsString> = vec!["--use-system-ca".into(), runtime.entry().as_os_str().to_owned()];
-        let model_index = arguments.len();
-        arguments.extend(["--model".into(), resolved.model().ok_or(ContractError::Invalid("Cursor exact model"))?.into()]);
+        // The pane execs bare `cursor-agent`; the vendor script itself picks
+        // --use-system-ca, index.js, CURSOR_INVOKED_AS and the compile cache.
+        let mut arguments: Vec<OsString> = vec!["--model".into(), resolved.model().ok_or(ContractError::Invalid("Cursor exact model"))?.into()];
         arguments.extend(["--workspace".into(), r.paths.cwd.path.as_os_str().to_owned(),
             "--add-dir".into(), project.as_os_str().to_owned(), "--approve-mcps".into(), "--trust".into()]);
         // --trust concerns our private primary directory. Native tool bypass is
@@ -215,25 +216,18 @@ impl PlanHook for CursorAdapter {
         if !matches!(resolved.effort(), EffortResolution::Unspecified) {
             return Err(ContractError::EffortRejected(EFFORT));
         }
-        let cache = if r.native.platform == Platform::MacOs {
-            runtime.home().join("Library/Caches/cursor-compile-cache")
-        } else { runtime.home().join(".cache/cursor-compile-cache") };
         Ok(LaunchPlan {
-            launcher: None,
+            launcher: r.paths.launcher.clone(),
             executable: runtime.engine.clone(), arguments,
-            executable_inputs: vec![runtime.executable_input(1)],
+            executable_inputs: vec![],
             cwd: r.paths.cwd.path.clone(),
             environment: EnvironmentDelta {
                 remove: BTreeSet::from(["CURSOR_API_KEY".into(), "CURSOR_API_ENDPOINT".into()]),
-                set: BTreeMap::from([
-                    ("HOME".into(), runtime.home().as_os_str().to_owned()),
-                    ("CURSOR_INVOKED_AS".into(), "cursor-agent".into()),
-                    ("NODE_COMPILE_CACHE".into(), cache.into_os_string()),
-                ]),
+                set: BTreeMap::from([("HOME".into(), runtime.home().as_os_str().to_owned())]),
             },
             expected_session: resolved.expected_session().clone(),
             carriers: CarrierReport {
-                model: CarrierUse::Specified(CarrierRef::Arguments(vec![model_index, model_index + 1])),
+                model: CarrierUse::Specified(CarrierRef::Arguments(vec![0, 1])),
                 prompt: CarrierUse::Specified(CarrierRef::Resource(prompt.path.clone())),
                 mcp: CarrierUse::Specified(CarrierRef::Resource(mcp.path.clone())),
                 bypass, effort: CarrierUse::NotRequested,

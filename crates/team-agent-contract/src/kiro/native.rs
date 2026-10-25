@@ -1,6 +1,8 @@
-//! Select and fingerprint the actual chat engine, not the macOS dispatcher.
-//! No installation, symlink repair, global PATH mutation or credential discovery.
-use crate::contract::{descriptor::CatalogSource, hooks::*, plan::EnvironmentDelta, types::*};
+//! The public `kiro-cli` command on PATH is what runs, user wrappers included;
+//! the vendor dispatcher starts its own chat helper. The dispatcher image is
+//! only a verification target derived from that PATH route. No installation,
+//! symlink repair, global PATH mutation, install-directory guess or credential read.
+use crate::contract::{descriptor::CatalogSource, hooks::*, plan::*, types::*};
 use crate::host::{
     command::*,
     process::{fingerprint_file, resolve_cwd},
@@ -11,65 +13,14 @@ use std::time::{Duration, Instant};
 
 pub const CHAT_CATALOG_ARGUMENTS: &[&str] = &["chat", "--list-models", "--format", "json"];
 pub const AUTH_PORTAL_MARKER: &[u8] = b"Opening auth portal and logging in...";
+pub const METADATA_HARNESS: &str = "kiro-launcher";
+pub const METADATA_UI: &str = "metadata";
+const MAX_IMAGE: u64 = 1024 * 1024 * 1024;
 /// CLI syntax and the models[]/model_id JSON schema are observed on 2.28.0.
 pub const CHAT_CATALOG_SOURCE: CatalogSource = CatalogSource {
     arguments: CHAT_CATALOG_ARGUMENTS,
     schema: "kiro-2.28.0-list-models-json-v1",
 };
-
-/// `home` is supplied by the framework, not looked up by the provider. Only two
-/// declared installation locations and the launcher's sibling are considered.
-/// The first executable engine is selected; version failure is NOT a reason to
-/// silently substitute another installation or launch a different provider.
-pub fn resolve_helper(launcher: &Path, home: &Path) -> Result<PathBuf, HostError> {
-    require_absolute(launcher, "Kiro launcher")
-        .map_err(|_| HostError::new("Kiro launcher path", HostErrorKind::Invalid))?;
-    require_absolute(home, "Kiro installation home")
-        .map_err(|_| HostError::new("Kiro home path", HostErrorKind::Invalid))?;
-    let mut candidates = vec![];
-    if launcher
-        .file_name()
-        .is_some_and(|name| name == "kiro-cli-chat")
-    {
-        candidates.push(launcher.to_path_buf());
-    } else {
-        let canonical = launcher
-            .canonicalize()
-            .map_err(|e| HostError::io("Kiro launcher resolution", e))?;
-        if let Some(parent) = canonical.parent() {
-            candidates.push(parent.join("kiro-cli-chat"));
-        }
-        candidates.push(home.join(".local/bin/kiro-cli-chat"));
-        #[cfg(target_os = "macos")]
-        candidates.push(PathBuf::from(
-            "/Applications/Kiro CLI.app/Contents/MacOS/kiro-cli-chat",
-        ));
-    }
-    for candidate in candidates {
-        let metadata = match std::fs::metadata(&candidate) {
-            Ok(m) => m,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(HostError::io("Kiro helper metadata", e)),
-        };
-        if !metadata.is_file() {
-            continue;
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if metadata.permissions().mode() & 0o111 == 0 {
-                continue;
-            }
-        }
-        return candidate
-            .canonicalize()
-            .map_err(|e| HostError::io("Kiro helper resolution", e));
-    }
-    Err(HostError::new(
-        "Kiro chat helper unavailable",
-        HostErrorKind::Unknown,
-    ))
-}
 
 #[derive(Debug)]
 pub enum EngineProbeError {
@@ -123,9 +74,10 @@ pub fn parse_version(stdout: &[u8]) -> Result<String, EngineProbeError> {
     Ok(version.into())
 }
 
-/// This establishes executable identity only, never T2/T3 or business readiness.
-pub fn probe_engine<R: CommandRunner>(
-    engine: &Path,
+/// Metadata identity of the PATH-selected entry. It runs that entry itself, so
+/// a wrapper sees the probe too. Never T2/T3 or business readiness.
+pub fn probe_launcher<R: CommandRunner>(
+    command: &PublicCommand,
     runner: &mut R,
     bounds: ReadBounds,
 ) -> Result<NativeIdentity, EngineProbeError> {
@@ -133,13 +85,13 @@ pub fn probe_engine<R: CommandRunner>(
         .validate()
         .map_err(|_| HostError::new("Kiro probe bounds", HostErrorKind::Invalid))?;
     let started = Instant::now();
-    let hash = fingerprint_file(engine, 1024 * 1024 * 1024, bounds.deadline)?;
+    let hash = fingerprint_file(&command.entry, MAX_IMAGE, bounds.deadline)?;
     let budget = bounds.deadline.saturating_sub(started.elapsed());
     if budget.is_zero() {
         return Err(HostError::new("Kiro version deadline", HostErrorKind::Deadline).into());
     }
     let result = runner.run(&CommandRequest {
-        executable: engine.to_path_buf(),
+        executable: command.entry.clone(),
         arguments: vec!["--version".into()],
         cwd: None,
         environment: EnvironmentDelta {
@@ -156,16 +108,16 @@ pub fn probe_engine<R: CommandRunner>(
         },
     });
     if !result.success() {
-        return Err(HostError::new("Kiro engine version command", HostErrorKind::Command).into());
+        return Err(HostError::new("Kiro version command", HostErrorKind::Command).into());
     }
     let version = parse_version(&result.stdout)?;
     let remaining = bounds.deadline.saturating_sub(started.elapsed());
     if remaining.is_zero() {
         return Err(HostError::new("Kiro version deadline", HostErrorKind::Deadline).into());
     }
-    if fingerprint_file(engine, 1024 * 1024 * 1024, remaining)? != hash {
+    if fingerprint_file(&command.entry, MAX_IMAGE, remaining)? != hash {
         return Err(HostError::new(
-            "Kiro engine changed during version probe",
+            "Kiro launcher changed during version probe",
             HostErrorKind::Conflict,
         )
         .into());
@@ -179,10 +131,67 @@ pub fn probe_engine<R: CommandRunner>(
     };
     Ok(NativeIdentity {
         version,
-        harness: "v2".into(),
-        ui: "tui".into(),
+        harness: METADATA_HARNESS.into(),
+        ui: METADATA_UI.into(),
         platform,
         executable_sha256: hash,
+    })
+}
+
+/// One public `kiro-cli` route and the dispatcher image it must run as.
+#[derive(Clone)]
+pub struct RuntimeInstallation {
+    pub engine: PathBuf,
+    pub native: NativeIdentity,
+    command: PublicCommand,
+    launcher_native: NativeIdentity,
+}
+impl RuntimeInstallation {
+    /// The pane execs bare `kiro-cli` through this PATH; `engine` is never exec'd.
+    pub fn launcher(&self) -> LaunchEntrypoint {
+        self.command.launch_entrypoint(self.launcher_native.executable_sha256)
+    }
+    pub fn bind_catalog(&self, catalog: &CatalogObservation) -> Result<CatalogObservation, ContractError> {
+        if catalog.provider.as_str() != "kiro"
+            || catalog.native != self.launcher_native
+            || catalog.schema != CHAT_CATALOG_SOURCE.schema
+        {
+            return Err(ContractError::Mismatch("Kiro catalog/runtime installation"));
+        }
+        let mut bound = catalog.clone();
+        bound.native = self.native.clone();
+        Ok(bound)
+    }
+}
+
+/// The native `kiro-cli` dispatcher on the PATH route keeps the pane PID while
+/// its chat helper runs; a new release is captured by version and hash here.
+pub fn probe_runtime<R: CommandRunner>(
+    command: &PublicCommand,
+    runner: &mut R,
+    bounds: ReadBounds,
+) -> Result<RuntimeInstallation, EngineProbeError> {
+    let started = Instant::now();
+    let engine = command.native_image()?;
+    let hash = fingerprint_file(&engine, MAX_IMAGE, bounds.deadline)?;
+    let launcher_native = probe_launcher(
+        command,
+        runner,
+        ReadBounds { deadline: bounds.deadline.saturating_sub(started.elapsed()), ..bounds },
+    )?;
+    if fingerprint_file(&engine, MAX_IMAGE, bounds.deadline.saturating_sub(started.elapsed()))? != hash {
+        return Err(HostError::new("Kiro updated during discovery", HostErrorKind::Conflict).into());
+    }
+    Ok(RuntimeInstallation {
+        engine,
+        command: command.clone(),
+        native: NativeIdentity {
+            harness: "v2".into(),
+            ui: "tui".into(),
+            executable_sha256: hash,
+            ..launcher_native.clone()
+        },
+        launcher_native,
     })
 }
 
@@ -257,14 +266,16 @@ pub(super) fn validate_catalog_request(grant: &CatalogRequest) -> Result<(), Con
     grant.bounds.validate()?;
     require_absolute(&grant.cwd.path, "Kiro catalog cwd")?;
     grant.native.validate()?;
-    require_absolute(&grant.executable, "Kiro catalog engine")?;
+    require_absolute(&grant.executable, "Kiro catalog launcher")?;
     if grant.provider.as_str() != "kiro"
         || !is_release_version(&grant.native.version)
+        || grant.native.harness != METADATA_HARNESS
+        || grant.native.ui != METADATA_UI
         || grant.source != CHAT_CATALOG_SOURCE
         || grant
             .executable
             .file_name()
-            .is_none_or(|name| name != "kiro-cli-chat")
+            .is_none_or(|name| name != "kiro-cli")
     {
         return Err(ContractError::Mismatch("Kiro catalog grant"));
     }
@@ -295,7 +306,7 @@ impl<R: CommandRunner> BoundedReadHost for CatalogReader<R> {
         }
         let hash = fingerprint_file(
             &request.executable,
-            1024 * 1024 * 1024,
+            MAX_IMAGE,
             request.bounds.deadline.saturating_sub(started.elapsed()),
         )
         .map_err(|_| ReadFailure::Error(ContractError::Mismatch("catalog executable")))?;

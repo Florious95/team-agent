@@ -284,6 +284,21 @@ caller-provider/pane/socket 只在 native invocation 中绑定实际目标 shell
 
 P5 必须核 returned pane 对应请求 session/window 与 endpoint；owner generation 和 native session 分开。当前 final shell command 上限 16,000 bytes，与文本 buffer 的 16 KiB 分流阈值无关。超限在 spawn 前拒绝。不能为了“统一 shell”删除 leader authentic receipt 或把 inert shell 当活 Provider。
 
+### 4.4 原生命令调用：只经 PATH 执行公开命令
+
+**规范 C13 — 每个 Provider 只启动自己的公开命令名，与用户在 shell 里输入它完全一致。** 契约 runtime 的执行链如下：
+
+1. **解析**：framework 用本进程 PATH 解析 `descriptor.identity.binary`（`grok`、`cursor-agent`、`kiro-cli` …），得到 `host::command::PublicCommand`：PATH 上第一个可执行匹配，**按原样保留**——用户 wrapper 与厂商 symlink 都不 canonicalize；相对/空 PATH 项丢弃，不搜索也不导出。
+2. **契约**：`LaunchPaths.launcher` 与 `LaunchPlan.launcher` 是必填的 `LaunchEntrypoint { command, search_path, executable, sha256 }`。`resolve_launch` 要求 `command == descriptor.identity.binary` 且 `executable` 位于 `search_path` 某一项；`validate_launch_plan` 要求 plan 的 launcher 与 framework 解析结果逐字段相等，env delta 不得设置或删除 `PATH`。任何 Provider 都无法表达“exec 某个绝对 image”。
+3. **执行**：launch.sh 只写 `export PATH='<search_path>'` 与 `exec '<command>' args…`，由 `/bin/sh` 自己做 PATH 查找，所以 PATH 上的用户 wrapper 一定运行，进程以公开命令名启动。`node index.js`、内部 helper、hard link、改名副本都不会被 exec。
+4. **验证目标**：`LaunchPlan.executable` 只是该 route 必须 exec-through 到的 kernel image，由同一 PATH route 推导，从不 exec：Grok/Kiro 为 route 上第一个非 `#!` 原生 image（`PublicCommand::native_image`）；Cursor 为 route 上第一个旁有 `node` 与 `index.js` 的厂商 `cursor-agent` 版本目录中的 `node`（目录名须等于该 route 报告的版本）。不得硬编码 `/usr/local/bin`、`/opt/homebrew`、`/Applications`、`~/.local/bin`、`node_modules` 等安装位置，不得注入 wrapper 私有变量（如 `GROK_REAL`）或替厂商脚本设置 `CURSOR_INVOKED_AS`/`NODE_COMPILE_CACHE`。
+5. **围栏**：spawn 前 host 用同一 `search_path` 重新解析（`capture_public_command`）；PATH route 或 entry 字节一变就拒绝并重新规划，不 adopt。spawn 后 pane PID 的 kernel image 必须等于 `executable` 且 hash 一致——wrapper 必须 `exec` 下一个命令，fork 后等待的 wrapper 不被当作 native。
+6. **辅助命令**：metadata `--version`、catalog、Cursor `create-chat`、Kiro `agent validate` 都运行 PATH entry 本身，wrapper 看见每一次调用。
+
+legacy runtime 的 claude/codex/copilot/grok/agent/gemini/pi 在 tmux shell 中 exec 裸命令名，同样服从 C13；Pi preflight 接受 PATH 上第一个 `pi`（wrapper、npm symlink 或二进制）并只通过它探测。
+
+已知可见后果：tmux 标题由 native 进程决定。Homebrew/npm 的 `grok` 是指向 `grok-native` 的 symlink，pane 标题显示厂商 image 名，与用户在终端里输入 `grok` 时一致；希望经代理 wrapper 的用户须把 wrapper 放在 PATH 前面。Kiro dispatcher 找不到自己的 helper 属于厂商安装问题，按 native 失败报告，不再回退到 bundle 路径。
+
 ## 5. 消息发送与微观物理通信合同
 
 ### 5.1 两个方向、三个结果
@@ -758,6 +773,7 @@ dangerously_skip_permissions: true
 - [ ] model discovery、exact/opaque selection、effort 六档、权限和 profile 分别有依据。
 - [ ] H2 没有隐藏随机/I/O；H4 只产 binding；H3/H7 失败仍返回 partial receipt；argv 与物化分离。
 - [ ] 共享 env/unset、identity、host wrapper/route 没被绕过；planned carriers 不冒称 native 已使用。
+- [ ] 启动、探测、catalog 与辅助命令只经 PATH 执行公开命令（C13）；无硬编码安装路径、内部 image exec、hard link 或 wrapper 私有变量；PATH 前置 wrapper 的标记测试通过。
 - [ ] MCP carrier 被 native 实际读取；工具名来自真实 binding；三 logical tools 不另造协议。
 - [ ] 物理 policy 在生产 caller 使用；一次 paste；1/2/多级 Enter 有明确 guard、预算和真实计数。
 - [ ] token/framing/suffix 与 submit key、native receipt、business end 分开；碰撞 fixture 覆盖。

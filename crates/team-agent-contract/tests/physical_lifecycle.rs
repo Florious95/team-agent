@@ -312,6 +312,7 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
         },
         native,
         paths: LaunchPaths {
+            launcher: physical_support::public_launcher(&executable, native_hash),
             executable,
             candidate: std::env::current_exe().unwrap(),
             cwd: resolve_cwd(&cwd_path).unwrap(),

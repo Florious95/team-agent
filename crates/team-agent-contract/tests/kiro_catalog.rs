@@ -47,18 +47,19 @@ fn fixture(
     sandbox: &Sandbox,
     output: CommandReceipt,
 ) -> (CatalogRequest, CatalogReader<CapturedRunner>) {
-    let engine = sandbox.parent.join("kiro-cli-chat");
-    std::fs::write(&engine, b"fake engine bytes; never executed").unwrap();
+    // The public `kiro-cli` PATH entry, as discovery finds it; never executed here.
+    let launcher = sandbox.parent.join("kiro-cli");
+    std::fs::write(&launcher, b"fake launcher bytes; never executed").unwrap();
     let request = CatalogRequest {
         provider: ProviderId::new("kiro").unwrap(),
         native: NativeIdentity {
             version: "2.28.0".into(),
-            harness: "v3".into(),
-            ui: "tui".into(),
+            harness: METADATA_HARNESS.into(),
+            ui: METADATA_UI.into(),
             platform: Platform::Linux,
-            executable_sha256: digest(b"fake engine bytes; never executed"),
+            executable_sha256: digest(b"fake launcher bytes; never executed"),
         },
-        executable: engine,
+        executable: launcher,
         cwd: resolve_cwd(&sandbox.parent).unwrap(),
         source: CHAT_CATALOG_SOURCE,
         bounds: discovery_bounds(),

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::lifecycle::launch::launch_with_transport_in_workspace;
 use crate::lifecycle::launch::pi_mcp::{
-    PiExecutableChain, PiExecutableFileType, PiMaterializeRequest, PiSessionScope,
+    PiExecutableChain, PiMaterializeRequest, PiSessionScope,
     PiWrapperRequest, materialize_pi_plan, materialize_pi_resume_plan,
     parse_pi_list_models_table, pi_seat_paths, resolve_pi_executable_chain,
     validate_pi_executable_chain, validate_pi_wrapper_source, write_pi_wrapper,
@@ -105,46 +105,34 @@ fn mcp_config(candidate: &Path, workspace: &Path, agent_id: &str) -> McpConfig {
 }
 
 #[test]
-fn pi_executable_chain_freezes_wrapper_real_binary_and_catalog() {
+fn pi_executable_chain_accepts_any_first_path_entry_and_freezes_catalog() {
     let chain = PiExecutableChain {
         path_entry: PathBuf::from("/Users/fixture/.local/bin/pi"),
-        path_entry_type: PiExecutableFileType::Wrapper,
-        launch_executable: PathBuf::from("/Users/fixture/.local/bin/pi"),
-        real_binary: PathBuf::from(
-            "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
-        ),
         pi_version: "0.84.3".to_string(),
         catalog_sha256: CATALOG_DIGEST.to_string(),
     };
-    validate_pi_executable_chain(&chain).expect("the protocol-capable wrapper chain is valid");
+    validate_pi_executable_chain(&chain).expect("the PATH wrapper entry is valid");
 
-    let mut homebrew_symlink_entry = chain.clone();
-    homebrew_symlink_entry.real_binary = PathBuf::from("/opt/homebrew/bin/pi");
-    validate_pi_executable_chain(&homebrew_symlink_entry)
-        .expect("the distinct Homebrew symlink entry may resolve to the shebang cli.js target");
+    // A plain binary or compiled wrapper first on PATH is what bare `pi` runs.
+    let mut direct_binary = chain.clone();
+    direct_binary.path_entry = PathBuf::from("/opt/homebrew/bin/pi");
+    validate_pi_executable_chain(&direct_binary)
+        .expect("a direct binary first on PATH is the native launch entry");
 
-    let mut wrong_version = chain.clone();
-    wrong_version.pi_version = "0.84.4".to_string();
-    validate_pi_executable_chain(&wrong_version)
+    let mut newer = chain.clone();
+    newer.pi_version = "0.84.4".to_string();
+    validate_pi_executable_chain(&newer)
         .expect("an arbitrary newer Pi version with the same public protocol is valid");
 
-    let mut missing_real = chain.clone();
-    missing_real.real_binary = PathBuf::new();
-    assert!(validate_pi_executable_chain(&missing_real).is_err());
+    for bad in ["", "pi", "/opt/homebrew/bin/pi-native"] {
+        let mut wrong = chain.clone();
+        wrong.path_entry = PathBuf::from(bad);
+        assert!(validate_pi_executable_chain(&wrong).is_err(), "{bad:?}");
+    }
 
     let mut wrong_catalog = chain.clone();
     wrong_catalog.catalog_sha256 = "00".repeat(32);
     assert!(validate_pi_executable_chain(&wrong_catalog).is_err());
-
-    let mut direct_binary = chain.clone();
-    direct_binary.path_entry = PathBuf::from("/opt/homebrew/bin/pi");
-    direct_binary.path_entry_type = PiExecutableFileType::Binary;
-    direct_binary.launch_executable = direct_binary.path_entry.clone();
-    direct_binary.real_binary = direct_binary.path_entry.clone();
-    assert!(
-        validate_pi_executable_chain(&direct_binary).is_err(),
-        "a direct Homebrew binary must not replace the verified PATH wrapper launch entry"
-    );
 
     assert!(parse_pi_list_models_table(b"provider model\nopenai-codex gpt-5.6-luna\n").is_ok());
     assert!(parse_pi_list_models_table(b"provider model\n").is_err());
@@ -178,14 +166,38 @@ fn pi_standard_npm_symlink_is_a_verified_launch_entry() {
 
         let (chain, models) = resolve_pi_executable_chain()
             .expect("the first PATH Pi entry must define direct Pi behavior");
-        assert_eq!(chain.path_entry, bin.join("pi"));
-        assert_eq!(chain.path_entry_type, PiExecutableFileType::Symlink);
-        assert_eq!(chain.launch_executable, bin.join("pi"));
-        assert_eq!(
-            chain.real_binary,
-            std::fs::canonicalize(&real).expect("canonical real Pi entry")
-        );
+        assert_eq!(chain.path_entry, bin.join("pi"), "the npm symlink is kept as found");
         assert_eq!(models, ["team-agent/qwen3.8-27b"]);
+
+        // A user wrapper prepended to PATH is the entry, and every probe runs it.
+        let wrappers = root.join("wrappers");
+        std::fs::create_dir_all(&wrappers).expect("create wrapper dir");
+        let marker = root.join("wrapper-invocations");
+        std::fs::write(
+            wrappers.join("pi"),
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexec '{}' \"$@\"\n",
+                marker.display(),
+                bin.join("pi").display()
+            ),
+        )
+        .expect("write user Pi wrapper");
+        std::fs::set_permissions(wrappers.join("pi"), std::fs::Permissions::from_mode(0o755))
+            .expect("make user Pi wrapper executable");
+        unsafe {
+            std::env::set_var(
+                "PATH",
+                std::env::join_paths([&wrappers, &bin, &later_bin]).expect("join wrapper PATH"),
+            );
+        }
+        let (chain, models) =
+            resolve_pi_executable_chain().expect("a user wrapper first on PATH is accepted");
+        assert_eq!(chain.path_entry, wrappers.join("pi"));
+        assert_eq!(models, ["team-agent/qwen3.8-27b"]);
+        assert_eq!(
+            std::fs::read_to_string(&marker).expect("the wrapper genuinely ran"),
+            "--version\n--list-models\n"
+        );
         std::fs::remove_dir_all(root).expect("remove symlink fixture");
     });
 }

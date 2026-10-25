@@ -356,6 +356,59 @@ impl InteractionHook for FixtureHooks {
         }
     }
 }
+/// The fixture's public command: a PATH directory whose `fixture` entry is a
+/// symlink to the controlled image, so the pane execs bare `fixture` and the
+/// shell's own PATH lookup selects it. Nothing execs the image path directly.
+#[cfg(unix)]
+pub fn public_launcher(image: &std::path::Path, sha256: Digest) -> LaunchEntrypoint {
+    let bin = image.parent().unwrap().join("public-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let entry = bin.join("fixture");
+    let _ = std::fs::remove_file(&entry);
+    std::os::unix::fs::symlink(image, &entry).unwrap();
+    LaunchEntrypoint {
+        command: "fixture".into(),
+        search_path: std::env::join_paths([bin.as_path(), std::path::Path::new("/usr/bin"), std::path::Path::new("/bin")]).unwrap(),
+        executable: entry,
+        sha256,
+    }
+}
+
+/// A user wrapper named `fixture` prepended to PATH ahead of the vendor entry.
+/// It records its PID and name, then execs the next `fixture` on PATH in place.
+#[cfg(unix)]
+pub fn public_launcher_behind_wrapper(image: &std::path::Path, marker: &std::path::Path) -> LaunchEntrypoint {
+    use std::os::unix::fs::PermissionsExt;
+    let vendor = public_launcher(image, Digest([0; 32]));
+    let wrappers = image.parent().unwrap().join("user-wrappers");
+    std::fs::create_dir_all(&wrappers).unwrap();
+    let entry = wrappers.join("fixture");
+    let script = format!(
+        "#!/bin/sh\nprintf '%s %s\\n' \"$$\" \"${{0##*/}}\" >> '{}'\nexec '{}' \"$@\"\n",
+        marker.display(),
+        vendor.executable.display()
+    );
+    std::fs::write(&entry, &script).unwrap();
+    std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let vendor_bin = vendor.executable.parent().unwrap();
+    LaunchEntrypoint {
+        command: "fixture".into(),
+        search_path: std::env::join_paths([wrappers.as_path(), vendor_bin, std::path::Path::new("/usr/bin"), std::path::Path::new("/bin")]).unwrap(),
+        executable: entry,
+        sha256: team_agent_contract::host::digest(script.as_bytes()),
+    }
+}
+
+/// A structural public command for fixture plans that are never spawned.
+pub fn fixture_launcher() -> LaunchEntrypoint {
+    LaunchEntrypoint {
+        command: "fixture".into(),
+        search_path: "/fixture".into(),
+        executable: "/fixture/fixture".into(),
+        sha256: Digest([7; 32]),
+    }
+}
+
 impl PlanHook for FixtureHooks {
     fn plan(&self, resolved: &ResolvedLaunch) -> Result<LaunchPlan, ContractError> {
         let r = resolved.request();
@@ -377,7 +430,7 @@ impl PlanHook for FixtureHooks {
             "fixture-server".into(),
         ];
         Ok(LaunchPlan {
-            launcher: None,
+            launcher: r.paths.launcher.clone(),
             executable_inputs: vec![],
             executable: r.paths.executable.clone(),
             cwd: r.paths.cwd.path.clone(),

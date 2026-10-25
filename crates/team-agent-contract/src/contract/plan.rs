@@ -37,6 +37,9 @@ pub enum LaunchMode {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LaunchPaths {
+    /// The framework-resolved public command; every plan execs exactly this.
+    pub launcher: LaunchEntrypoint,
+    /// The native image that public command must exec into, verified after spawn.
     pub executable: PathBuf,
     pub candidate: PathBuf,
     pub cwd: CwdIdentity,
@@ -140,6 +143,10 @@ fn resolve_launch_inner(
     }
     validate_descriptor(descriptor, hooks, request.operation)?;
     request.native.validate()?;
+    request.paths.launcher.validate()?;
+    if request.paths.launcher.command != descriptor.identity.binary {
+        return Err(ContractError::Mismatch("public launch command"));
+    }
     for path in [
         &request.paths.executable,
         &request.paths.candidate,
@@ -538,20 +545,43 @@ pub struct ExecutableInput {
     pub sha256: Digest,
 }
 
-/// Approved exec-through entry. Its bytes are fenced separately from the final
-/// kernel image; it never authorizes an arbitrary shell fragment or PID adoption.
+/// The public command a native pane execs by bare name with PATH set to
+/// `search_path`, exactly as the user's shell runs it, so wrappers on PATH
+/// always run. `executable` is the PATH match seen at plan time (it may be a
+/// user wrapper or a vendor symlink) and `sha256` fences the bytes behind it.
+/// Never a shell fragment, a canonicalized inner image, or PID adoption.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LaunchEntrypoint {
+    pub command: String,
+    pub search_path: OsString,
     pub executable: PathBuf,
     pub sha256: Digest,
+}
+
+impl LaunchEntrypoint {
+    /// Structure only; the host re-resolves PATH and fences bytes before spawn.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        require_absolute(&self.executable, "public launch command")?;
+        let mut directories = std::env::split_paths(&self.search_path);
+        if !valid_command_name(&self.command)
+            || self.search_path.as_encoded_bytes().contains(&0)
+            || directories.any(|directory| require_absolute(&directory, "PATH entry").is_err())
+            || self.executable.file_name() != Some(std::ffi::OsStr::new(&self.command))
+            || !std::env::split_paths(&self.search_path).any(|directory| Some(directory.as_path()) == self.executable.parent())
+        {
+            return Err(ContractError::Invalid("public launch command"));
+        }
+        Ok(())
+    }
 }
 
 /// Structured executable/argv/environment, never a shell fragment. No Debug payload dump.
 #[derive(Clone, PartialEq, Eq)]
 pub struct LaunchPlan {
-    /// Final kernel image, including when an approved wrapper execs it in-place.
+    /// Final kernel image the public command execs through to, in place.
+    /// A verification target only: the pane never execs this path directly.
     pub executable: PathBuf,
-    pub launcher: Option<LaunchEntrypoint>,
+    pub launcher: LaunchEntrypoint,
     pub arguments: Vec<OsString>,
     pub executable_inputs: Vec<ExecutableInput>,
     pub cwd: PathBuf,
@@ -623,12 +653,16 @@ pub fn validate_launch_plan(
         return Err(ContractError::Invalid("argv contains NUL"));
     }
     plan.environment.validate()?;
-    if let Some(launcher) = &plan.launcher {
-        require_absolute(&launcher.executable, "launch entry")?;
-        if launcher.executable == plan.executable {
-            return Err(ContractError::Invalid("redundant launch entry"));
-        }
+    // Every provider launches the framework-resolved public command; PATH
+    // belongs to that route, so no plan can exec an absolute or inner image.
+    plan.launcher.validate()?;
+    if plan.launcher != request.paths.launcher || plan.launcher.command != descriptor.identity.binary {
+        return Err(ContractError::Mismatch("public launch command"));
     }
+    if plan.environment.remove.contains("PATH") || plan.environment.set.contains_key("PATH") {
+        return Err(ContractError::Invalid("PATH is owned by the public launch command"));
+    }
+    require_absolute(&plan.executable, "native image")?;
     let mut inputs = Vec::new();
     for input in &plan.executable_inputs {
         require_absolute(&input.path, "interpreter program input")?;

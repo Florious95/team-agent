@@ -295,3 +295,132 @@ impl CommandRunner for RealCommandRunner {
         }
     }
 }
+
+/// A public command exactly as the user's shell runs it: the first executable
+/// `name` on PATH. `entry` is that PATH entry as found (a user wrapper or a
+/// vendor symlink stays itself); it is never canonicalized into an inner image.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicCommand {
+    pub name: String,
+    /// Absolute PATH entries only, in order. This exact value is exported to the
+    /// native process, so the shell's own lookup selects `entry` again.
+    pub search_path: OsString,
+    pub entry: PathBuf,
+}
+
+impl PublicCommand {
+    /// Relative and empty PATH entries are dropped: the shell would resolve them
+    /// against whatever the cwd is, so they are neither searched nor exported.
+    pub fn resolve(name: &str, path: &std::ffi::OsStr) -> Result<Self, super::HostError> {
+        use super::{HostError, HostErrorKind};
+        if !crate::contract::types::valid_command_name(name) {
+            return Err(HostError::new("public command name", HostErrorKind::Invalid));
+        }
+        let directories: Vec<PathBuf> = std::env::split_paths(path)
+            .filter(|directory| require_absolute(directory, "PATH entry").is_ok())
+            .collect();
+        if directories.is_empty() {
+            return Err(HostError::new("PATH entries", HostErrorKind::Invalid));
+        }
+        let search_path = std::env::join_paths(directories)
+            .map_err(|_| HostError::new("PATH entries", HostErrorKind::Invalid))?;
+        let entry = path_matches(name, &search_path).into_iter().next().ok_or_else(|| {
+            HostError::new("public command not on PATH", HostErrorKind::Io(std::io::ErrorKind::NotFound))
+        })?;
+        Ok(Self { name: name.into(), search_path, entry })
+    }
+
+    /// Every executable match in PATH order; the first is `entry`. A wrapper
+    /// conventionally execs a later match, so providers find the installation a
+    /// route ends in from this list, never from a guessed install directory.
+    pub fn route(&self) -> Vec<PathBuf> {
+        path_matches(&self.name, &self.search_path)
+    }
+
+    /// The native image a route execs into: the first match whose resolved file
+    /// is not a `#!` script. A user wrapper conventionally execs a later match;
+    /// nothing outside the user's own PATH is searched or assumed.
+    pub fn native_image(&self) -> Result<PathBuf, super::HostError> {
+        use super::{HostError, HostErrorKind};
+        for candidate in self.route() {
+            let image = candidate.canonicalize().map_err(|error| HostError::io("public command route", error))?;
+            let mut magic = Vec::with_capacity(2);
+            std::fs::File::open(&image).and_then(|file| file.take(2).read_to_end(&mut magic))
+                .map_err(|error| HostError::io("public command route image", error))?;
+            if magic != b"#!" {
+                return Ok(image);
+            }
+        }
+        Err(HostError::new("native image not on PATH after its wrappers", HostErrorKind::Unsupported))
+    }
+
+    /// The pane entrypoint for this command, fencing the bytes PATH selected.
+    pub fn launch_entrypoint(&self, sha256: crate::contract::types::Digest) -> crate::contract::plan::LaunchEntrypoint {
+        crate::contract::plan::LaunchEntrypoint {
+            command: self.name.clone(), search_path: self.search_path.clone(), executable: self.entry.clone(), sha256,
+        }
+    }
+}
+
+fn path_matches(name: &str, search_path: &std::ffi::OsStr) -> Vec<PathBuf> {
+    std::env::split_paths(search_path)
+        .filter(|directory| directory.is_absolute())
+        .map(|directory| directory.join(name))
+        .filter(|candidate| is_executable_file(candidate))
+        .collect()
+}
+
+fn is_executable_file(path: &std::path::Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else { return false };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        metadata.is_file()
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn executable(path: &std::path::Path, bytes: &[u8]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn public_command_keeps_the_path_entry_and_finds_the_image_after_wrappers() {
+        let root = std::env::temp_dir().join(format!("ta-public-command-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (wrappers, vendor, image) = (root.join("wrappers"), root.join("vendor/bin"), root.join("vendor/lib/tool-native"));
+        executable(&wrappers.join("tool"), b"#!/bin/sh\nexec tool \"$@\"\n");
+        executable(&image, b"\x7fELF controlled native image");
+        std::fs::create_dir_all(&vendor).unwrap();
+        std::os::unix::fs::symlink(&image, vendor.join("tool")).unwrap();
+        std::fs::write(root.join("not-executable"), b"x").unwrap();
+        let path = std::env::join_paths([std::path::Path::new("relative/dir"), root.as_path(), wrappers.as_path(), vendor.as_path()]).unwrap();
+        let command = PublicCommand::resolve("tool", &path).unwrap();
+        assert_eq!(command.entry, wrappers.join("tool"), "the wrapper stays the public entry");
+        assert_eq!(command.search_path, std::env::join_paths([&root, &wrappers, &vendor]).unwrap(), "relative PATH entries are dropped");
+        assert_eq!(command.route(), [wrappers.join("tool"), vendor.join("tool")]);
+        assert_eq!(command.native_image().unwrap(), image.canonicalize().unwrap());
+        // Without a wrapper the vendor symlink itself is the entry; it is not canonicalized.
+        let direct = PublicCommand::resolve("tool", vendor.as_os_str()).unwrap();
+        assert_eq!(direct.entry, vendor.join("tool"));
+        assert_eq!(direct.native_image().unwrap(), image.canonicalize().unwrap());
+        // A wrapper whose native image is not on PATH is refused, never guessed.
+        assert!(PublicCommand::resolve("tool", wrappers.as_os_str()).unwrap().native_image().is_err());
+        for bad in ["", ".", "..", "/bin/tool", "dir/tool", "tool name"] {
+            assert!(PublicCommand::resolve(bad, &path).is_err(), "{bad:?}");
+        }
+        assert!(PublicCommand::resolve("not-executable", &path).is_err());
+        assert!(PublicCommand::resolve("tool", std::ffi::OsStr::new("relative:also/relative")).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

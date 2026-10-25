@@ -40,7 +40,8 @@ fn fixture_request() -> LaunchRequest {
     r.native.version = "2.28.0".into();
     r.native.harness = "v2".into();
     r.native.ui = "tui".into();
-    r.paths.executable = "/Applications/Kiro CLI.app/Contents/MacOS/kiro-cli-chat".into();
+    r.paths.launcher = launcher("kiro-cli", "/opt/kiro user bin");
+    r.paths.executable = "/opt/kiro install/bin/kiro-cli".into();
     r.paths.cwd.path = "/work/code 中 'quoted'".into();
     r.model = Some("exact-provider-model/KeepCase".into());
     r.prompt = Some("line one\nquotes \" and 中文".into());
@@ -49,7 +50,10 @@ fn fixture_request() -> LaunchRequest {
     // admission below owns its profile; no Kiro terminal profile is fabricated.
     r
 }
-fn fixture_resolved(mut r: LaunchRequest) -> ResolvedLaunch {
+fn fixture_resolved(r: LaunchRequest) -> ResolvedLaunch {
+    fixture_resolution(r).unwrap()
+}
+fn fixture_resolution(mut r: LaunchRequest) -> Result<ResolvedLaunch, ContractError> {
     let mut d = fixture_descriptor();
     // Reuse the existing generic fake profile, explicitly scoped to this synthetic
     // identity, rather than pretend it is a captured Kiro terminal fixture.
@@ -63,7 +67,7 @@ fn fixture_resolved(mut r: LaunchRequest) -> ResolvedLaunch {
     let profiles = Box::leak(vec![profile].into_boxed_slice());
     d.input.profiles = Support::Supported(profiles);
     r.mode = LaunchMode::FullWorker;
-    resolve_launch(&d, &hooks(), &r, None).unwrap()
+    resolve_launch(&d, &hooks(), &r, None)
 }
 
 #[test]
@@ -104,7 +108,15 @@ fn documentation_plan_keeps_argument_boundaries_and_encodes_owned_agent_json() {
     let plan = adapter.plan(&resolved).unwrap();
     validate_launch_plan(&fixture_descriptor(), &resolved, &plan).unwrap();
     assert_eq!(plan.executable, request.paths.executable);
+    assert_eq!(plan.launcher, request.paths.launcher);
     assert_eq!(plan.cwd, request.paths.cwd.path);
+    // The pane execs bare `kiro-cli chat ...` via PATH, never the inner helper.
+    let script = String::from_utf8(
+        team_agent_contract::host::shell::launch_script(&plan, &Default::default()).unwrap(),
+    )
+    .unwrap();
+    assert!(script.contains("\nexport PATH='/opt/kiro user bin'\nexec 'kiro-cli' 'chat' '--agent'"), "{script}");
+    assert!(!script.contains("kiro-cli-chat") && !script.contains("exec '/"), "{script}");
     let args: Vec<_> = plan.arguments.iter().map(|v| v.to_str().unwrap()).collect();
     assert_eq!(&args[..2], &["chat", "--agent"]);
     assert!(!args.contains(&"--v3"));
@@ -183,9 +195,11 @@ fn native_effort_syntax_does_not_imply_model_catalog_authorization() {
         KIRO_DESCRIPTOR.input.profiles,
         Support::Supported(_)
     ));
+    // A request whose public command is not `kiro-cli` on its own PATH never resolves.
     let mut request = fixture_request();
-    request.paths.executable = "/opt/homebrew/bin/kiro-cli".into();
-    assert!(adapter().plan(&fixture_resolved(request)).is_err());
+    assert!(fixture_resolution(request.clone()).is_ok());
+    request.paths.launcher = launcher("kiro-cli-chat", "/opt/kiro user bin");
+    assert!(matches!(fixture_resolution(request), Err(ContractError::Mismatch("public launch command"))));
 }
 
 #[test]

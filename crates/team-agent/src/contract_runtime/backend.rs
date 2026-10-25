@@ -431,6 +431,10 @@ fn request(
         return Err(ContractError::AmbiguousProfile.into());
     }
     profile.policy.require("native submit policy")?;
+    // The worker execs exactly the public command its runtime route was probed on.
+    let launcher = discovered.runtime.as_ref()
+        .ok_or(ContractError::Invalid("native runtime installation"))?
+        .launcher();
     Ok(LaunchRequest {
         provider: role.provider.as_str().into(),
         operation: Operation::Fresh,
@@ -444,6 +448,7 @@ fn request(
         identity,
         native: discovered.native.clone(),
         paths: LaunchPaths {
+            launcher,
             executable: discovered.engine.clone(),
             candidate: binding.candidate.clone(),
             cwd: binding.workspace.clone(),
@@ -1486,6 +1491,9 @@ mod tests {
             ui: "metadata".into(), platform: Platform::MacOs, executable_sha256: digest(b"launcher"),
         };
         let mut discovery = Discovery {
+            command: team_agent_contract::host::command::PublicCommand {
+                name: "cursor-agent".into(), search_path: "/controlled".into(), entry: "/controlled/cursor-agent".into(),
+            },
             runtime: None,
             engine: "/controlled/cursor-agent".into(), native: native.clone(),
             catalog: CatalogObservation { provider, native,
