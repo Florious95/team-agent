@@ -470,7 +470,7 @@ fn preflight_request(
     discovered: &Discovery,
 ) -> Result<LaunchRequest, BackendError> {
     let mut request = request(binding, role, identity, discovered)?;
-    if registry::provider(role.provider.as_str())? == registry::NativeProvider::GrokBuild {
+    if matches!(registry::provider(role.provider.as_str())?, registry::NativeProvider::GrokBuild | registry::NativeProvider::Codex) {
         // Pure H2 only: this is a proposed private path, not a filesystem receipt.
         request.paths.cwd = team_agent_contract::contract::session::CwdIdentity {
             path: binding.transport_root.join("workspaces").join(role.id.as_str()),
@@ -478,6 +478,20 @@ fn preflight_request(
         };
     }
     Ok(request)
+}
+
+/// Providers whose native config search would otherwise inherit a Git or
+/// project configuration ancestor. Metadata only; no body is read.
+fn require_private_primary(
+    selected: registry::NativeProvider,
+    cwd: &team_agent_contract::contract::session::CwdIdentity,
+) -> Result<(), BackendError> {
+    match selected {
+        registry::NativeProvider::GrokBuild => team_agent_contract::providers::grok_build::native::require_private_primary(cwd)?,
+        registry::NativeProvider::Codex => team_agent_contract::providers::codex::launcher::require_private_primary(cwd)?,
+        registry::NativeProvider::Kiro | registry::NativeProvider::Cursor => {}
+    }
+    Ok(())
 }
 
 /// Team-wide native discovery/admission before the shared launcher creates any
@@ -793,9 +807,7 @@ pub fn start(
     if !descriptor.workspace.shared_cwd {
         request.paths.cwd = super::workspace::prepare(&backend.binding, &role.id)?;
     }
-    if selected == registry::NativeProvider::GrokBuild {
-        team_agent_contract::providers::grok_build::native::require_private_primary(&request.paths.cwd)?;
-    }
+    require_private_primary(selected, &request.paths.cwd)?;
     if let Some(registry::NativeRuntime::Cursor(runtime)) = &discovered.runtime {
         request.preassigned_session = Some(
             team_agent_contract::providers::cursor::native::allocate_chat(
@@ -942,9 +954,7 @@ pub fn prepare_resume(
         binding: source, expected_source: parent.identity,
     });
     let selected = registry::provider(role.provider.as_str())?;
-    if selected == registry::NativeProvider::GrokBuild {
-        team_agent_contract::providers::grok_build::native::require_private_primary(&request.paths.cwd)?;
-    }
+    require_private_primary(selected, &request.paths.cwd)?;
     let resolved = resolve_launch(selected.descriptor(), &hooks, &request, Some(&discovered.catalog))?;
     validate_launch_plan(selected.descriptor(), &resolved, &adapter.plan(&resolved)?)?;
     Ok(PreparedResume { binding: backend.binding, role, discovered, request })

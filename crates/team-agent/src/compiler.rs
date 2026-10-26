@@ -495,8 +495,31 @@ fn compile_role_agent_with_mode(
         .filter(|provider| !provider.trim().is_empty())
         .unwrap_or_else(|| "pi".to_string());
     let is_pi = parse_canonical_provider(&provider) == Some(Provider::Pi);
+    // An exact boolean opt-in; a bare shared key (codex) keeps its legacy meaning.
+    let contract_runtime = match meta.get("contract_runtime") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => {
+            return Err(ModelError::Validation(format!(
+                "{}: contract_runtime must be a boolean",
+                role_path.display()
+            )))
+        }
+    };
     #[cfg(unix)]
-    let contract = crate::contract_runtime::registry::descriptor(&provider);
+    let contract = crate::contract_runtime::registry::declared(&provider, contract_runtime);
+    #[cfg(not(unix))]
+    let contract: Option<()> = None;
+    if contract_runtime && contract.is_none() {
+        return Err(ModelError::Validation(format!(
+            "{}: contract_runtime: true requires a contract provider (got {provider})",
+            role_path.display()
+        )));
+    }
+    // The compiled spec and state carry the leaf's canonical id, so legacy
+    // readers of a shared key never mistake this seat for a legacy one.
+    #[cfg(unix)]
+    let provider = contract.map_or(provider, |descriptor| descriptor.identity.id.to_string());
     #[cfg(unix)]
     let contract_role = contract.is_some();
     #[cfg(not(unix))]

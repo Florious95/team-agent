@@ -16,6 +16,9 @@ const FORBIDDEN: &[&str] = &[
     "--use-system-ca",
     "CURSOR_INVOKED_AS",
     "NODE_COMPILE_CACHE",
+    "CODEX_REAL",
+    "codex.js",
+    "@openai/codex",
 ];
 
 fn sources(directory: &Path, files: &mut Vec<PathBuf>) {
@@ -70,7 +73,7 @@ fn no_provider_install_path_inner_image_or_launcher_hack_in_production_code() {
 fn every_provider_plan_execs_the_framework_resolved_public_command() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut plans = 0;
-    for path in [manifest.join("src/kiro.rs"), manifest.join("src/providers/cursor.rs"), manifest.join("src/providers/grok_build.rs")] {
+    for path in [manifest.join("src/kiro.rs"), manifest.join("src/providers/cursor.rs"), manifest.join("src/providers/grok_build.rs"), manifest.join("src/providers/codex.rs")] {
         let text = std::fs::read_to_string(&path).unwrap();
         for (offset, _) in text.match_indices("LaunchPlan {") {
             if text[..offset].ends_with("Ok(") {
@@ -81,7 +84,7 @@ fn every_provider_plan_execs_the_framework_resolved_public_command() {
             }
         }
     }
-    assert_eq!(plans, 3, "one plan per contract provider");
+    assert_eq!(plans, 4, "one plan per contract provider");
     // Discovery resolves each provider's public command through PATH, as found.
     let discovery = std::fs::read_to_string(manifest.join("../team-agent/src/contract_runtime/discovery.rs")).unwrap();
     assert!(discovery.contains("public_command(descriptor.identity.binary)"));
