@@ -17,6 +17,10 @@ const R6_IDLE: &str = include_str!("fixtures/pi-tui-idle-24.txt");
 const R7_FOLDED: &str = include_str!("fixtures/pi-tui-folded-24.txt");
 const SPACED: &str = include_str!("fixtures/pi-list-models-spaced-ids.txt");
 const G0: &str = include_str!("fixtures/pi-list-models-g0.txt");
+/// R1 native capture (120x40): `/session` after a fresh start, its path too
+/// wide for the `File:` row, then an update notice above the editor.
+const R1_SESSION: &str = include_str!("fixtures/pi-tui-session-info-120.txt");
+const R1_SID: &str = "01a176f7-40a9-70cf-8c99-bf95cc575d26";
 const FOOTER: &str = "~/…/workspaces/worker\n0.0%/272k (auto)                                                                    (openai-codex) gpt-6-luna • high";
 
 /// Pi's own `--list-models` layout: every cell padded to its column, joined by two spaces.
@@ -527,6 +531,19 @@ fn session_binding_reads_only_the_newest_complete_info_block() {
     assert!(adapter().bind(&forged).is_err());
     let mut foreign = evidence(screen(&info(SID), "")); foreign.native.harness = "codex".into();
     assert!(adapter().bind(&foreign).is_err());
+}
+#[test]
+fn measured_session_card_binds_through_a_bare_file_label_and_an_update_notice() {
+    assert_eq!(surface(R1_SESSION), InputSurface::ComposerReady);
+    assert_eq!(session_id(R1_SESSION).unwrap().as_str(), R1_SID);
+    let card = frame(R1_SESSION.into(), Operation::SessionInspect, Some(StepKind::InitialSubmit), PasteLatch::Seen { native_identity: "/session".into() });
+    assert_eq!(adapter().interpret(&card).surface, InputSurface::NativeAccepted);
+    assert_eq!(adapter().bind(&evidence(R1_SESSION.into())).unwrap().native_session.as_str(), R1_SID);
+    // Without its label, or naming another session's file, the card never binds.
+    for bad in [R1_SESSION.replace(" File:\n", ""), R1_SESSION.replace(&format!("_{R1_SID}.jsonl"), &format!("_{OTHER}.jsonl"))] {
+        assert!(session_id(&bad).is_err());
+        assert!(adapter().bind(&evidence(bad)).is_err());
+    }
 }
 #[test]
 fn private_primary_rejects_git_and_inherited_pi_project_context_without_reading_bodies() {

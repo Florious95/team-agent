@@ -8,8 +8,8 @@ use crate::runtime::delivery::{ControlDefinition, ControlInputMode, ControlKind}
 use std::time::Duration;
 
 pub const PROFILE: &str = "pi-tui-v1";
-pub const POLICY_RECIPE: &str = "pi-tui-v1/r1:runtime-native-image-or-env-node+wrapper;--no-approve:no-trust-screen;owned-cwd-extension-server-ambient-coexistence;120x40;paste-bracketed;enter-once;retry-never;queue-preserve;editor:last-two-rulers-within-13-rows+nonblank-footer-below;busy:top-ruler-run<8|braille-or-interrupt/cancel-status-above;fold:>10-lines:[paste #N +L lines]:L==lines|>1000-chars:[paste #N C chars]:C<=bytes:empty-baseline+confirmed-paste+attempt->confirmed-enter+empty-composer+token-above-editor+busy-or-ready;inline:token-in-composer->token-in-history;session:profile-paste+/session+new-Session-Info-block+one-ID-uuid+File-ends-_uuid.jsonl;exit:profile-paste+/quit+native-exited+dead-pane-close;capture100ms;stable200ms;paste-floor100ms;deadline30s";
-pub const POLICY: Digest = Digest([142, 205, 126, 76, 18, 137, 42, 118, 141, 208, 104, 29, 113, 154, 53, 175, 131, 186, 170, 180, 6, 25, 11, 139, 4, 214, 92, 229, 8, 153, 17, 71]);
+pub const POLICY_RECIPE: &str = "pi-tui-v1/r2:runtime-native-image-or-env-node+wrapper;--no-approve:no-trust-screen;owned-cwd-extension-server-ambient-coexistence;120x40;paste-bracketed;enter-once;retry-never;queue-preserve;editor:last-two-rulers-within-13-rows+nonblank-footer-below;busy:top-ruler-run<8|braille-or-interrupt/cancel-status-above;fold:>10-lines:[paste #N +L lines]:L==lines|>1000-chars:[paste #N C chars]:C<=bytes:empty-baseline+confirmed-paste+attempt->confirmed-enter+empty-composer+token-above-editor+busy-or-ready;inline:token-in-composer->token-in-history;session:profile-paste+/session+new-Session-Info-block+one-ID-uuid+File-label-or-own-wrapped-rows-ends-_uuid.jsonl;exit:profile-paste+/quit+native-exited+dead-pane-close;capture100ms;stable200ms;paste-floor100ms;deadline30s";
+pub const POLICY: Digest = Digest([74, 181, 235, 173, 72, 194, 23, 24, 96, 115, 36, 82, 244, 234, 116, 29, 21, 244, 139, 146, 137, 116, 155, 227, 134, 112, 14, 28, 80, 241, 38, 206]);
 const SESSION: &str = "/session";
 const QUIT: &str = "/quit";
 const FOLDED: &str = "pi-owned-paste-v1:";
@@ -130,9 +130,10 @@ fn folded(frame: &CaptureFrame, observation: &mut InteractionObservation, lines:
 }
 fn info_blocks(text: &str) -> usize { rows(text).iter().filter(|line| line.trim() == "Session Info").count() }
 /// The newest `/session` block above the editor: exactly one `ID: <uuid>` and
-/// a `File:` path (wrapped at the pane width) naming that session's
-/// `<timestamp>_<uuid>.jsonl`. A UUID in chat output or a requested
-/// `--session` argument cannot bind.
+/// a `File:` path naming that session's `<timestamp>_<uuid>.jsonl`. A path
+/// wider than the pane moves to its own rows after a bare `File:` label and is
+/// hard-wrapped there. A UUID in chat output or a requested `--session`
+/// argument cannot bind.
 pub fn session_id(text: &str) -> Result<NativeSessionId, ContractError> {
     let invalid = || ContractError::Invalid("Pi session info");
     let lines = rows(text);
@@ -144,9 +145,9 @@ pub fn session_id(text: &str) -> Result<NativeSessionId, ContractError> {
     let ids: Vec<usize> = block.iter().enumerate().filter(|(_, line)| line.starts_with("ID: ")).map(|(index, _)| index).collect();
     let [row] = ids.as_slice() else { return Err(invalid()); };
     let id = block[*row]["ID: ".len()..].trim();
-    let file = block[..*row].iter().position(|line| line.starts_with("File: ")).ok_or_else(invalid)?;
+    let file = block[..*row].iter().position(|line| *line == "File:" || line.starts_with("File: ")).ok_or_else(invalid)?;
     let path = block[file..*row].concat();
-    let path = &path["File: ".len()..];
+    let path = path.strip_prefix("File:").ok_or_else(invalid)?.trim_start();
     if !session_uuid(id) || !path.starts_with('/') || !path.ends_with(&format!("_{id}.jsonl")) { return Err(invalid()); }
     NativeSessionId::new(id)
 }
