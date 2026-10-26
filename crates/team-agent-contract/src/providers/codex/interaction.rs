@@ -38,7 +38,7 @@ pub static CONTROLS: &[ControlDefinition] = &[ControlDefinition {
 /// it also start with `›`; the prompt marks the first visible composer row.
 fn composer(lines: &[&str]) -> Option<(usize, String)> {
     let prompt = |line: &str| ["›", "»"].into_iter().find(|glyph| line == *glyph || line.strip_prefix(glyph).is_some_and(|rest| rest.starts_with(' ')));
-    let index = lines.iter().rposition(|line| prompt(*line).is_some())?;
+    let index = lines.iter().rposition(|line| prompt(line).is_some())?;
     let glyph = prompt(lines[index])?;
     Some((index, lines[index][glyph.len()..].trim().to_owned()))
 }
