@@ -250,6 +250,11 @@ fn read_team_inner(
         if !ids.insert(id.clone()) {
             return Err(invalid(&source, "duplicate agent id"));
         }
+        // `leader` is the framework's own forwarding route. A role of that name
+        // on either runtime would shadow it, so refuse before any seat spawns.
+        if id == "leader" {
+            return Err(invalid(&source, "reserved worker id"));
+        }
         let provider = text(&meta, "provider", &source)?.unwrap_or_else(|| "pi".into());
         let opted = opted_in(&meta, &source)?;
         let registration = super::registry::declared(&provider, opted);
@@ -273,9 +278,6 @@ fn read_team_inner(
         let provider =
             ProviderId::new(registration.identity.id).map_err(|_| invalid(&source, "provider"))?;
         let id = SeatId::new(id).map_err(|_| invalid(&source, "agent id"))?;
-        if id.as_str() == "leader" {
-            return Err(invalid(&source, "reserved worker id"));
-        }
         if text(&meta, "auth_mode", &source)?.is_some_and(|value| value != "subscription")
             || text(&meta, "profile", &source)?.is_some()
         {

@@ -358,3 +358,19 @@ fn malformed_or_misdirected_codex_opt_in_fails_closed() {
     assert!(matches!(read_team(&args), Err(ConfigError::Invalid { field: "front matter", .. })));
     assert!(!args.workspace.join(".team").exists());
 }
+
+#[test]
+fn legacy_role_named_leader_cannot_shadow_the_framework_route_of_a_contract_team() {
+    let (_sandbox, args) = fixture();
+    // A legacy-only team keeps its existing behavior: no contract selection.
+    role(&args, "leader", "pi");
+    assert!(read_team(&args).unwrap().is_none());
+    // With a contract seat, `leader` is the framework's own forwarding route.
+    // Refuse before compile/spawn instead of a late, opaque route Conflict.
+    codex_role(&args, "onboarding-worker", "contract_runtime: true\n");
+    assert!(matches!(
+        read_team(&args),
+        Err(ConfigError::Invalid { field: "reserved worker id", .. })
+    ));
+    assert!(!args.workspace.join(".team").exists());
+}
