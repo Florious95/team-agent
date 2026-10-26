@@ -232,7 +232,13 @@ pub(super) fn send_human_output(value: &Value) -> String {
     if value.get("delivered").and_then(Value::as_bool) == Some(true) {
         format!("Delivered to {agent}. {}", crate::cli::SEND_REMINDER)
     } else {
-        "Task accepted, but delivery to the agent's conversation is still pending.\nNext: check team-agent status or team-agent doctor --workspace .; wait for an actual reply without repeated sends.".to_string()
+        let waiting = value
+            .get("deferred_reason")
+            .and_then(Value::as_str)
+            .filter(|reason| reason.starts_with("mcp_handshake_"))
+            .map(|reason| format!(": {agent}'s MCP server has not completed its handshake ({reason}); after 5 minutes the message is parked and the leader is notified"))
+            .unwrap_or_default();
+        format!("Task accepted, but delivery to the agent's conversation is still pending{waiting}.\nNext: check team-agent status or team-agent doctor --workspace .; wait for an actual reply without repeated sends.")
     }
 }
 

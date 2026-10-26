@@ -68,6 +68,68 @@ fn eager_mcp_waits_without_spending_input_attempts_then_delivers_the_same_messag
 
 #[test]
 #[cfg(unix)]
+fn issue372_bounded_handshake_wait_parks_notifies_once_then_publish_delivers() {
+    let mut case = WorkerCase::new("mcp-handshake-park", "cursor_agent");
+    let carrier = crate::mcp_server::readiness::test_carrier_pid().unwrap();
+    let config = case.workspace.join(".team/runtime/mcp/w1.json");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, serde_json::to_vec(&serde_json::json!({
+        "mcpServers": {"team_orchestrator": {
+            "command": std::env::current_exe().unwrap().canonicalize().unwrap(),
+            "env": {"TEAM_AGENT_WORKSPACE": case.workspace, "TEAM_AGENT_ID": "w1", "TEAM_AGENT_OWNER_TEAM_ID": "dup-team"}
+        }}
+    })).unwrap()).unwrap();
+    let long_ago = (chrono::Utc::now() - chrono::Duration::seconds(400)).to_rfc3339();
+    case.state["team_key"] = serde_json::json!("dup-team");
+    case.state["agents"]["w1"]["mcp_config"] = serde_json::json!(config);
+    case.state["agents"]["w1"]["pane_pid"] = serde_json::json!(carrier);
+    case.state["agents"]["w1"]["spawned_at"] = serde_json::json!(long_ago);
+    case.state["teams"] = serde_json::json!({"dup-team": case.state.clone()});
+    crate::state::persist::save_runtime_state(&case.workspace, &case.state).unwrap();
+    let transport = RecordingTransport { carrier: Some(carrier), ..RecordingTransport::new("") };
+    let ids: Vec<String> = (0..2)
+        .map(|n| case.store.create_message(None, "leader", "w1", &format!("parked canary {n}"), None, false, Some("dup-team")).unwrap())
+        .collect();
+    let connection = rusqlite::Connection::open(case.store.db_path()).unwrap();
+    connection.execute("update messages set created_at = ?1", [&long_ago]).unwrap();
+    for id in &ids {
+        let outcome = deliver_pending_message(&case.workspace, &case.store, &transport,
+            id, &case.event_log, &case.state).unwrap();
+        assert_eq!(outcome.message_status.0, "queued_until_start", "{outcome:?}");
+        assert!(outcome.verification.as_deref().unwrap().starts_with("mcp_handshake_timeout:mcp_handshake_"));
+    }
+    assert_eq!(transport.inject_count(), 0, "a parked wait never reaches input");
+    let row = |id: &str| -> (String, Option<String>, i64) {
+        connection.query_row(
+            "select status, error, delivery_attempts from messages where message_id = ?1",
+            [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap()
+    };
+    for id in &ids {
+        assert_eq!(row(id.as_str()), ("queued_until_start".to_string(), Some("mcp_handshake_timeout".to_string()), 0));
+    }
+    let events = case.events();
+    assert_eq!(events.matches("\"delivery.mcp_handshake_parked\"").count(), 2, "{events}");
+    assert_eq!(events.matches("\"delivery.mcp_handshake_parked_notification\"").count(), 1,
+        "one leader notice per seat spawn: {events}");
+    let notices: i64 = connection.query_row(
+        "select count(*) from leader_notification_log where result_id like 'mcp_handshake.timeout:w1:%'",
+        [], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(notices, 1);
+
+    crate::mcp_server::readiness::publish(&case.workspace, "dup-team", "w1", chrono::Utc::now()).unwrap();
+    for id in &ids {
+        assert_eq!(row(id.as_str()).0, "accepted", "a fresh receipt resumes parked rows");
+    }
+    let outcome = deliver_pending_message(&case.workspace, &case.store, &transport,
+        &ids[0], &case.event_log, &case.state).unwrap();
+    assert_eq!(outcome.message_id.as_deref(), Some(ids[0].as_str()));
+    assert_eq!(transport.inject_count(), 1, "the same parked row is delivered after the receipt");
+}
+
+#[test]
+#[cfg(unix)]
 fn issue345_missing_eager_config_defers_without_input_or_attempts() {
     let mut case = WorkerCase::new("missing-mcp-config", "cursor_agent");
     let carrier = crate::mcp_server::readiness::test_carrier_pid().unwrap();

@@ -5,7 +5,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -105,34 +105,26 @@ fn read_json(path: &Path, require_private: bool) -> Result<Value> {
     serde_json::from_slice(&data).map_err(|_| "mcp_handshake_invalid")
 }
 
-struct ReceiptLock(File);
-impl Drop for ReceiptLock {
-    fn drop(&mut self) {
-        let _ = crate::platform::file_lock::unlock(&self.0);
-    }
+/// Per-server receipts plus the pre-#372 single-slot file, if one remains.
+fn receipt_paths(dir: &Path, name: &str) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let file = entry.file_name().into_string().ok()?;
+            let rest = file.strip_prefix(name)?.strip_suffix(".json")?;
+            let per_server = rest
+                .strip_prefix('.')
+                .is_some_and(|pid| pid.parse::<u32>().is_ok());
+            (rest.is_empty() || per_server).then(|| entry.path())
+        })
+        .collect()
 }
 
-fn lock(path: &Path) -> Result<ReceiptLock> {
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-        .map_err(|_| "mcp_handshake_lock")?;
-    private_metadata(path, false)?;
-    let start = Instant::now();
-    loop {
-        match crate::platform::file_lock::try_lock_once_nonblocking(&file) {
-            Ok(true) => return Ok(ReceiptLock(file)),
-            Ok(false) if start.elapsed() < Duration::from_millis(500) => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            _ => return Err("mcp_handshake_lock"),
-        }
-    }
+fn read_receipt(path: &Path) -> Result<Handshake> {
+    serde_json::from_value(read_json(path, true)?).map_err(|_| "mcp_handshake_invalid")
 }
 
 /// Only the actual stdio writer calls this after initialize and tools/list flush.
@@ -198,27 +190,27 @@ pub(crate) fn publish(
     let dir = directory(&workspace, true)?;
     let before = private_metadata(&dir, true)?;
     let name = key(owner, agent);
-    let path = dir.join(format!("{name}.json"));
-    let _lock = lock(&dir.join(format!("{name}.lock")))?;
+    // #372: each server owns its receipt, so a foreign or exited server that
+    // inherited this seat's identity can never erase the seat's live evidence.
+    let path = dir.join(format!("{name}.{}.json", std::process::id()));
     match std::fs::symlink_metadata(&path) {
         Ok(_) => {
-            let old: Handshake = serde_json::from_value(read_json(&path, true)?)
-                .map_err(|_| "mcp_handshake_invalid")?;
-            if old.workspace != workspace
-                || old.owner != owner
-                || old.agent != agent
-                || old.schema != 1
-            {
-                return Err("mcp_handshake_scope_mismatch");
-            }
-            let old_started = DateTime::parse_from_rfc3339(&old.started_at)
-                .map_err(|_| "mcp_handshake_invalid")?;
-            if old_started > started_at {
-                return Ok(());
-            }
+            private_metadata(&path, false)?;
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err("mcp_handshake_invalid"),
+    }
+    for sibling in receipt_paths(&dir, &name) {
+        let exited = sibling != path
+            && read_receipt(&sibling).is_ok_and(|old| {
+                matches!(
+                    sample_process(&old.server),
+                    ProcessState::Exited | ProcessState::Replaced
+                )
+            });
+        if exited {
+            let _ = std::fs::remove_file(&sibling);
+        }
     }
     let temp = dir.join(format!(
         "{name}.{}-{}.tmp",
@@ -247,8 +239,21 @@ pub(crate) fn publish(
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
+        return result;
     }
+    resume_parked(&workspace, owner, agent);
     result
+}
+
+/// A fresh receipt resumes this seat's parked messages. A foreign server's
+/// receipt only causes one cheap re-park: delivery re-runs full preflight.
+fn resume_parked(workspace: &Path, owner: &str, agent: &str) {
+    if !workspace.join(".team/runtime/team.db").exists() {
+        return;
+    }
+    if let Ok(store) = crate::message_store::MessageStore::open(workspace) {
+        let _ = store.requeue_parked_deliveries(agent, owner);
+    }
 }
 
 #[derive(Debug)]
@@ -293,30 +298,11 @@ pub(crate) fn preflight(
         .canonicalize()
         .map_err(|_| "mcp_handshake_workspace")?;
     let dir = directory(&workspace, false)?;
-    let receipt: Handshake = serde_json::from_value(read_json(
-        &dir.join(format!("{}.json", key(owner, agent_id))),
-        true,
-    )?)
-    .map_err(|_| "mcp_handshake_invalid")?;
-    if receipt.schema != 1
-        || receipt.workspace != workspace
-        || receipt.owner != owner
-        || receipt.agent != agent_id
-    {
-        return Err("mcp_handshake_scope_mismatch");
-    }
     let spawned_at = agent
         .get("spawned_at")
         .and_then(Value::as_str)
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .ok_or("mcp_handshake_spawn_missing")?;
-    let started_at =
-        DateTime::parse_from_rfc3339(&receipt.started_at).map_err(|_| "mcp_handshake_invalid")?;
-    let flushed_at =
-        DateTime::parse_from_rfc3339(&receipt.flushed_at).map_err(|_| "mcp_handshake_invalid")?;
-    if started_at < spawned_at || flushed_at < started_at {
-        return Err("mcp_handshake_stale_spawn");
-    }
     let expected_config = workspace
         .join(".team/runtime/mcp")
         .join(format!("{agent_id}.json"));
@@ -341,14 +327,12 @@ pub(crate) fn preflight(
         .get("command")
         .and_then(Value::as_str)
         .ok_or("mcp_handshake_config_missing")?;
-    if !Path::new(expected).is_absolute()
-        || Path::new(expected)
-            .canonicalize()
-            .map_err(|_| "mcp_handshake_image")?
-            != receipt.server.identity.executable
-    {
+    if !Path::new(expected).is_absolute() {
         return Err("mcp_handshake_image");
     }
+    let expected = Path::new(expected)
+        .canonicalize()
+        .map_err(|_| "mcp_handshake_image")?;
     let env = server_config
         .get("env")
         .ok_or("mcp_handshake_config_missing")?;
@@ -375,32 +359,99 @@ pub(crate) fn preflight(
         .ok_or("mcp_handshake_carrier_missing")?;
     let carrier_birth =
         process_birth_identity(carrier).map_err(|_| "mcp_handshake_carrier_missing")?;
-    if sample_process(&receipt.server) != ProcessState::Alive {
-        return Err("mcp_handshake_server_not_live");
-    }
-    let mut parent = receipt.server.parent;
-    let mut matched = false;
-    for ancestor in receipt.ancestors.iter().take(MAX_NATIVE_PARENT_HOPS) {
-        if ancestor.pid != parent
-            || process_birth_identity(parent).ok().as_deref() != Some(ancestor.birth.as_str())
+    let admit = |receipt: &Handshake| -> Result<()> {
+        if receipt.schema != 1
+            || receipt.workspace != workspace
+            || receipt.owner != owner
+            || receipt.agent != agent_id
         {
+            return Err("mcp_handshake_scope_mismatch");
+        }
+        let started_at = DateTime::parse_from_rfc3339(&receipt.started_at)
+            .map_err(|_| "mcp_handshake_invalid")?;
+        let flushed_at = DateTime::parse_from_rfc3339(&receipt.flushed_at)
+            .map_err(|_| "mcp_handshake_invalid")?;
+        if started_at < spawned_at || flushed_at < started_at {
+            return Err("mcp_handshake_stale_spawn");
+        }
+        if receipt.server.identity.executable != expected {
+            return Err("mcp_handshake_image");
+        }
+        if sample_process(&receipt.server) != ProcessState::Alive {
+            return Err("mcp_handshake_server_not_live");
+        }
+        let mut parent = receipt.server.parent;
+        let mut matched = false;
+        for ancestor in receipt.ancestors.iter().take(MAX_NATIVE_PARENT_HOPS) {
+            if ancestor.pid != parent
+                || process_birth_identity(parent).ok().as_deref() != Some(ancestor.birth.as_str())
+            {
+                return Err("mcp_handshake_ancestry");
+            }
+            if parent == carrier {
+                matched = true;
+                break;
+            }
+            parent = crate::platform::argv::parent_pid(parent).unwrap_or(0);
+        }
+        if !matched || sample_process(&receipt.server) != ProcessState::Alive {
             return Err("mcp_handshake_ancestry");
         }
-        if parent == carrier {
-            matched = true;
-            break;
+        Ok(())
+    };
+    // #372: admit the newest live receipt descended from this seat's pane.
+    // Receipts of foreign servers (inherited identity, other process trees)
+    // are dropped before any process probe; they cannot mask the seat's own.
+    let mut receipts: Vec<_> = receipt_paths(&dir, &key(owner, agent_id))
+        .into_iter()
+        .map(|path| read_receipt(&path))
+        .collect();
+    receipts.sort_by_key(|receipt| {
+        std::cmp::Reverse(
+            receipt
+                .as_ref()
+                .ok()
+                .and_then(|r| DateTime::parse_from_rfc3339(&r.started_at).ok()),
+        )
+    });
+    let (mut own_refusal, mut refusal) = (None, None);
+    for receipt in receipts {
+        let receipt = match receipt {
+            Ok(receipt) => receipt,
+            Err(reason) => {
+                refusal = refusal.or(Some(reason));
+                continue;
+            }
+        };
+        if !receipt.ancestors.iter().any(|ancestor| ancestor.pid == carrier) {
+            refusal = refusal.or(Some("mcp_handshake_ancestry"));
+            continue;
         }
-        parent = crate::platform::argv::parent_pid(parent).unwrap_or(0);
+        match admit(&receipt) {
+            Ok(()) => {
+                return Ok(Some(Admission {
+                    server: receipt.server,
+                    carrier,
+                    carrier_birth,
+                    pane_id: pane_id.to_string(),
+                }))
+            }
+            Err(reason) => own_refusal = own_refusal.or(Some(reason)),
+        }
     }
-    if !matched || sample_process(&receipt.server) != ProcessState::Alive {
-        return Err("mcp_handshake_ancestry");
-    }
-    Ok(Some(Admission {
-        server: receipt.server,
-        carrier,
-        carrier_birth,
-        pane_id: pane_id.to_string(),
-    }))
+    Err(own_refusal.or(refusal).unwrap_or("mcp_handshake_missing"))
+}
+
+/// Diagnostic only, never admission: live `mcp-server` processes under a pane.
+pub(crate) fn live_servers_under(carrier: u32) -> Vec<u32> {
+    crate::platform::process::process_tree(carrier)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|pid| {
+            crate::platform::argv::argv_tokens(*pid)
+                .is_some_and(|argv| argv.iter().any(|arg| arg == "mcp-server"))
+        })
+        .collect()
 }
 
 /// Recheck against the actual resolved target immediately before the input path.

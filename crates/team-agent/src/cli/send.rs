@@ -17,7 +17,8 @@ use coordinator::{
 };
 pub use persist::send_options_from_args;
 use persist::{
-    initial_delivery_allows_watch, observe_initial_delivery_for_watch, routing_ambiguous_value,
+    attach_mcp_handshake_wait, initial_delivery_allows_watch, observe_initial_delivery_for_watch,
+    routing_ambiguous_value,
 };
 use presentation::{
     add_send_reminder_if_ok, attach_positional_typo_suggestions, cmd_send_result,
@@ -123,6 +124,7 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
         outcome = observe_initial_delivery_for_watch(&selected, &target, &outcome, &opts)?;
     }
     let mut value = delivery_outcome_json(&outcome, &target, &content, &opts);
+    attach_mcp_handshake_wait(&mut value, &selected, &target, &outcome);
     // 0.5.45 naming-addressing (design §3.5, RED-2/RED-3 positional):
     // when the refusal reason is `target_not_in_team` AND the target
     // was a Single non-special short id, attach scope-safe

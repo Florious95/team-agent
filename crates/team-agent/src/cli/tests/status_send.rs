@@ -706,6 +706,23 @@ fn cmd_send_default_human_output_is_brief_without_false_delivered() {
 }
 
 #[test]
+#[cfg(unix)]
+fn issue372_queued_send_names_the_mcp_handshake_it_waits_on() {
+    let r = cmd_send(&queued_send_args_fixture(true)).expect("cmd_send returns CmdResult");
+    let CmdOutput::Json(v) = r.output else {
+        panic!("--json send must emit Json");
+    };
+    assert_eq!(v["deferred_reason"], json!("mcp_handshake_config_missing"), "{v}");
+    let r = cmd_send(&queued_send_args_fixture(false)).expect("cmd_send returns CmdResult");
+    let text = emit(&r.output, r.as_json).expect("send should render human text");
+    assert!(
+        text.contains("w1's MCP server has not completed its handshake (mcp_handshake_config_missing)")
+            && text.contains("after 5 minutes the message is parked"),
+        "{text}"
+    );
+}
+
+#[test]
 fn cmd_send_json_shape_keeps_056_fields() {
     let args = queued_send_args_fixture(true);
     let r = cmd_send(&args).expect("cmd_send returns CmdResult");

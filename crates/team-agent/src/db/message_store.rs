@@ -87,6 +87,9 @@ pub struct NotificationClaimParams<'a> {
     pub pane_id: Option<&'a str>,
 }
 
+/// Error of a row parked by [`MessageStore::park_delivery_before_input`] (#372).
+pub(crate) const MCP_HANDSHAKE_TIMEOUT: &str = "mcp_handshake_timeout";
+
 /// Canonical initial message-row statuses shared by persistence, presentation,
 /// claiming and recovery. New durable dispositions must be added here first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -609,6 +612,46 @@ impl MessageStore {
         Ok(rows == 1)
     }
 
+    /// Park an owned pre-input claim whose readiness wait reached its bound.
+    /// `queued_until_start` is claimable but never polled by `deliver_pending`;
+    /// only [`Self::requeue_parked_deliveries`] or a seat restart resumes it.
+    pub(crate) fn park_delivery_before_input(
+        &self,
+        message_id: &str,
+        attempt: u32,
+    ) -> Result<bool, MessageStoreError> {
+        if attempt == 0 {
+            return Ok(false);
+        }
+        let conn = crate::db::schema::open_db(&self.path)?;
+        let rows = conn.execute(
+            "update messages
+             set status = 'queued_until_start',
+                 delivery_attempts = delivery_attempts - 1,
+                 error = ?3, updated_at = ?4
+             where message_id = ?1 and status = 'target_resolved'
+               and error is null and delivery_attempts = ?2",
+            params![message_id, attempt, MCP_HANDSHAKE_TIMEOUT, now_ts()],
+        )?;
+        Ok(rows == 1)
+    }
+
+    /// Return one seat's parked rows to the normal delivery queue.
+    pub(crate) fn requeue_parked_deliveries(
+        &self,
+        recipient: &str,
+        owner_team_id: &str,
+    ) -> Result<usize, MessageStoreError> {
+        let conn = crate::db::schema::open_db(&self.path)?;
+        Ok(conn.execute(
+            "update messages
+             set status = 'accepted', error = null, updated_at = ?4
+             where recipient = ?1 and status = 'queued_until_start' and error = ?3
+               and (owner_team_id = ?2 or owner_team_id is null)",
+            params![recipient, owner_team_id, MCP_HANDSHAKE_TIMEOUT, now_ts()],
+        )?)
+    }
+
     /// Read inbox rows through [`Self::inbox`]; recovery transitions below are
     /// separate repository owners and are not claim eligibility.
     pub fn requeue_blocked_leader_messages(
@@ -657,8 +700,8 @@ impl MessageStore {
             let mut stmt = tx.prepare(
                 "select message_id from messages
                  where recipient = ?1
-                   and status = ?2
-                   and error = 'tmux_target_missing'
+                   and ((status = ?2 and error = 'tmux_target_missing')
+                        or (status = 'queued_until_start' and error = ?4))
                    and (
                        (?3 is null and owner_team_id is null)
                        or owner_team_id = ?3
@@ -670,7 +713,8 @@ impl MessageStore {
                     params![
                         agent_id,
                         MessageRowStatus::QueuedPaneMissing.as_str(),
-                        owner_team_id
+                        owner_team_id,
+                        MCP_HANDSHAKE_TIMEOUT
                     ],
                     |row| row.get::<_, String>(0),
                 )?
@@ -1231,6 +1275,37 @@ mod tests {
             assert_eq!(status_of(&read(&s), &changed), status);
             assert_eq!(col_i64(&read(&s), &changed, "delivery_attempts"), 1);
         }
+    }
+
+    #[test]
+    fn issue372_parked_handshake_claim_is_exact_and_resumes_per_seat() {
+        let s = store();
+        let mid = s.create_message(Some("t"), "s", "r", "c", None, true, Some("team-a")).unwrap();
+        assert!(!s.park_delivery_before_input(&mid, 1).unwrap(), "unclaimed rows never park");
+        assert!(s.claim_for_delivery(&mid).unwrap());
+        assert!(!s.park_delivery_before_input(&mid, 2).unwrap(), "a stale claim cannot park");
+        assert!(s.park_delivery_before_input(&mid, 1).unwrap());
+        assert!(!s.park_delivery_before_input(&mid, 1).unwrap(), "single winner");
+        let c = read(&s);
+        assert_eq!(status_of(&c, &mid), "queued_until_start");
+        assert_eq!(col_str(&c, &mid, "error").as_deref(), Some(MCP_HANDSHAKE_TIMEOUT));
+        assert_eq!(col_i64(&c, &mid, "delivery_attempts"), 0, "waiting spends no input attempt");
+        assert_eq!(s.requeue_parked_deliveries("other", "team-a").unwrap(), 0);
+        assert_eq!(s.requeue_parked_deliveries("r", "team-b").unwrap(), 0);
+        assert_eq!(s.requeue_parked_deliveries("r", "team-a").unwrap(), 1);
+        let c = read(&s);
+        assert_eq!(status_of(&c, &mid), "accepted");
+        assert_eq!(col_str(&c, &mid, "error"), None);
+    }
+
+    #[test]
+    fn issue372_seat_restart_also_resumes_parked_handshake_rows() {
+        let s = store();
+        let mid = s.create_message(Some("t"), "s", "r", "c", None, true, Some("team-a")).unwrap();
+        assert!(s.claim_for_delivery(&mid).unwrap());
+        assert!(s.park_delivery_before_input(&mid, 1).unwrap());
+        assert_eq!(s.recover_worker_pane_available("r", Some("team-a")).unwrap(), vec![mid.clone()]);
+        assert_eq!(status_of(&read(&s), &mid), "accepted");
     }
 
     #[test]

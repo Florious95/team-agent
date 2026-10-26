@@ -66,9 +66,27 @@ impl Case {
     }
 
     fn path(&self) -> PathBuf {
-        self.ws
-            .join(".team/runtime/mcp-handshakes")
-            .join(format!("{}.json", key("owner", "worker")))
+        self.sibling(&std::process::id().to_string())
+    }
+
+    /// `<key>.<suffix>.json`; an empty suffix names the pre-#372 single slot.
+    fn sibling(&self, suffix: &str) -> PathBuf {
+        let name = key("owner", "worker");
+        let file = if suffix.is_empty() {
+            format!("{name}.json")
+        } else {
+            format!("{name}.{suffix}.json")
+        };
+        self.ws.join(".team/runtime/mcp-handshakes").join(file)
+    }
+
+    fn write_private(&self, path: &Path, value: &Value) {
+        std::fs::write(path, serde_json::to_vec(value).unwrap()).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    fn receipt(&self) -> Value {
+        serde_json::from_slice(&std::fs::read(self.path()).unwrap()).unwrap()
     }
 
     fn publish(&self) {
@@ -193,19 +211,100 @@ fn changed_current_target_and_new_spawn_do_not_reuse_a_handshake() {
     assert!(case.admission().is_err());
 }
 
+// Receipt pids beyond any real pid_max, so they never collide with this test.
+const EXITED: &str = "4000000001";
+const FOREIGN: &str = "4000000002";
+
+/// A server outside the seat pane (inherited TEAM_AGENT_ID) or an exited one
+/// may hold a newer receipt; neither can mask the seat's live server (#372).
+fn foreign_and_exited(case: &Case) -> (Value, Value) {
+    let newer = (case.started + chrono::Duration::seconds(5)).to_rfc3339();
+    let mut foreign = case.receipt();
+    foreign["started_at"] = json!(newer);
+    foreign["flushed_at"] = json!(newer);
+    foreign["ancestors"] = json!([{"pid": 1_000_000_001_u32, "birth": "fixture-tmux"}]);
+    let mut exited = case.receipt();
+    exited["started_at"] = json!(newer);
+    exited["flushed_at"] = json!(newer);
+    exited["server"]["identity"]["birth_identity"] = json!("exited-server");
+    (foreign, exited)
+}
+
 #[test]
-fn older_helper_cannot_overwrite_a_newer_handshake() {
+fn issue372_foreign_or_exited_receipts_cannot_mask_the_live_seat_server() {
     let case = Case::new();
     case.publish();
-    let original = std::fs::read(case.path()).unwrap();
-    publish(
-        &case.ws,
-        "owner",
-        "worker",
-        case.started - chrono::Duration::seconds(1),
-    )
-    .unwrap();
-    assert_eq!(std::fs::read(case.path()).unwrap(), original);
+    let (foreign, exited) = foreign_and_exited(&case);
+    case.write_private(&case.sibling(EXITED), &exited);
+    case.write_private(&case.sibling(FOREIGN), &foreign);
+    let admission = case.admission().unwrap().expect("live seat receipt admits");
+    assert_eq!(admission.server.identity.pid, std::process::id());
+    revalidate(&admission, &case.target, &case.panes).unwrap();
+
+    std::fs::remove_file(case.path()).unwrap();
+    assert_eq!(case.admission().unwrap_err(), "mcp_handshake_server_not_live");
+    std::fs::remove_file(case.sibling(EXITED)).unwrap();
+    assert_eq!(case.admission().unwrap_err(), "mcp_handshake_ancestry");
+    std::fs::remove_file(case.sibling(FOREIGN)).unwrap();
+    assert_eq!(case.admission().unwrap_err(), "mcp_handshake_missing");
+}
+
+#[test]
+fn issue372_pre_upgrade_single_slot_receipt_still_admits() {
+    let case = Case::new();
+    case.publish();
+    std::fs::rename(case.path(), case.sibling("")).unwrap();
+    assert!(case.admission().unwrap().is_some());
+}
+
+#[test]
+fn issue372_publish_prunes_exited_receipts_and_keeps_live_ones() {
+    let case = Case::new();
+    case.publish();
+    let (foreign, exited) = foreign_and_exited(&case);
+    case.write_private(&case.sibling(""), &exited);
+    case.write_private(&case.sibling(EXITED), &exited);
+    case.write_private(&case.sibling(FOREIGN), &foreign);
+    case.publish();
+    assert!(!case.sibling("").exists());
+    assert!(!case.sibling(EXITED).exists());
+    assert!(case.sibling(FOREIGN).exists(), "a live foreign receipt is only ignored");
+    assert!(case.admission().unwrap().is_some());
+}
+
+#[test]
+fn issue372_publish_resumes_only_this_seats_parked_messages() {
+    let case = Case::new();
+    let store = crate::message_store::MessageStore::open(&case.ws).unwrap();
+    let parked = store
+        .create_message(None, "leader", "worker", "parked", None, false, Some("owner"))
+        .unwrap();
+    let other = store
+        .create_message(None, "leader", "worker", "other team", None, false, Some("other"))
+        .unwrap();
+    for id in [&parked, &other] {
+        assert!(store.claim_for_delivery(id).unwrap());
+        assert!(store.park_delivery_before_input(id, 1).unwrap());
+    }
+    case.publish();
+    let row = |id: &str| -> (String, Option<String>) {
+        rusqlite::Connection::open(store.db_path())
+            .unwrap()
+            .query_row(
+                "select status, error from messages where message_id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    };
+    assert_eq!(row(parked.as_str()), ("accepted".to_string(), None));
+    assert_eq!(
+        row(other.as_str()),
+        (
+            "queued_until_start".to_string(),
+            Some("mcp_handshake_timeout".to_string())
+        )
+    );
 }
 
 #[test]
