@@ -122,6 +122,10 @@ fn is_public_window_name(provider: &str, window: &str) -> bool {
     if provider == "codex_tui" && matches!(window, "codex" | "node") {
         return true;
     }
+    // The same holds for npm-installed Pi; legacy `pi` keeps its own rule.
+    if provider == "pi_tui" && matches!(window, "pi" | "node") {
+        return true;
+    }
     parse_provider(provider).is_some_and(|parsed| {
         command_name(parsed) == window
             || crate::layout::worker_window_helpers::provider_window_name(parsed) == window
@@ -1456,6 +1460,9 @@ mod tests {
         assert!(is_public_window_name("codex_tui", "node"));
         assert!(!is_public_window_name("codex_tui", "grok"));
         assert!(!is_public_window_name("grok_build", "node"));
+        assert!(is_public_window_name("pi_tui", "pi"));
+        assert!(is_public_window_name("pi_tui", "node"));
+        assert!(!is_public_window_name("pi_tui", "codex"));
     }
 
     #[test]

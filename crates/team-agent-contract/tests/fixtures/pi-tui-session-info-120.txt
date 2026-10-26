@@ -1,0 +1,40 @@
+[Extensions]
+  @firstpick/pi-extension-codex-fast-mode, auto-retry-bad-request.ts, codex-computer-use-mcp:integrations/pi,
+extensions, no-proxy-lan.ts, nodeprobe-pi-activity.js, NVlabs/SoL-Pi:src/sol-pi, retry-empty-gemini-response.ts,
+team-agent-mcp.ts, team-agent-models.ts
+
+
+ Session Info
+
+ File:
+ /Users/tester/.pi/agent/sessions/--private-tmp-ta-8f565786e4076cad0765646b-workspaces-onboarding-worker--/2026-10-26T0
+ 6-47-57-866Z_01a176f7-40a9-70cf-8c99-bf95cc575d26.jsonl
+ ID: 01a176f7-40a9-70cf-8c99-bf95cc575d26
+
+ Messages
+ Total: 0
+ User: 0
+ Assistant: 0
+ Tools: 0 calls, 0 results
+
+ Tokens
+ Input: 0
+ Output: 0
+ Total: 0
+
+ Cache Warming
+ Mode: streaming
+ Status: Inactive (waiting for first request)
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Package Updates Available
+ Package updates are available. Run pi update --extensions
+ Packages:
+ - codex-computer-use-mcp
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+gpt-6-luna · high · 0%/272k · 0% · $0.00                                                               onboarding-worker

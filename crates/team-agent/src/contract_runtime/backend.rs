@@ -470,7 +470,7 @@ fn preflight_request(
     discovered: &Discovery,
 ) -> Result<LaunchRequest, BackendError> {
     let mut request = request(binding, role, identity, discovered)?;
-    if matches!(registry::provider(role.provider.as_str())?, registry::NativeProvider::GrokBuild | registry::NativeProvider::Codex) {
+    if matches!(registry::provider(role.provider.as_str())?, registry::NativeProvider::GrokBuild | registry::NativeProvider::Codex | registry::NativeProvider::Pi) {
         // Pure H2 only: this is a proposed private path, not a filesystem receipt.
         request.paths.cwd = team_agent_contract::contract::session::CwdIdentity {
             path: binding.transport_root.join("workspaces").join(role.id.as_str()),
@@ -489,6 +489,7 @@ fn require_private_primary(
     match selected {
         registry::NativeProvider::GrokBuild => team_agent_contract::providers::grok_build::native::require_private_primary(cwd)?,
         registry::NativeProvider::Codex => team_agent_contract::providers::codex::launcher::require_private_primary(cwd)?,
+        registry::NativeProvider::Pi => team_agent_contract::providers::pi::launcher::require_private_primary(cwd)?,
         registry::NativeProvider::Kiro | registry::NativeProvider::Cursor => {}
     }
     Ok(())
