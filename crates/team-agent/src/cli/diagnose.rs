@@ -126,6 +126,14 @@ fn is_public_window_name(provider: &str, window: &str) -> bool {
     if provider == "pi_tui" && matches!(window, "pi" | "node") {
         return true;
     }
+    // tmux names a Claude pane after the image its `claude` route execs: an npm
+    // `claude.exe`, or the native installer's version-named `<semver>` file.
+    if provider == "claude_tui"
+        && (matches!(window, "claude" | "claude.exe")
+            || team_agent_contract::providers::claude::catalog::semver(window))
+    {
+        return true;
+    }
     parse_provider(provider).is_some_and(|parsed| {
         command_name(parsed) == window
             || crate::layout::worker_window_helpers::provider_window_name(parsed) == window
@@ -1463,6 +1471,17 @@ mod tests {
         assert!(is_public_window_name("pi_tui", "pi"));
         assert!(is_public_window_name("pi_tui", "node"));
         assert!(!is_public_window_name("pi_tui", "codex"));
+    }
+
+    #[test]
+    fn claude_contract_window_may_carry_its_npm_or_version_named_image() {
+        for window in ["claude", "claude.exe", "2.1.309", "2.1.282"] {
+            assert!(is_public_window_name("claude_tui", window), "{window}");
+        }
+        for window in ["2.1", "claude-wrapper", "node", "grok"] {
+            assert!(!is_public_window_name("claude_tui", window), "{window}");
+        }
+        assert!(!is_public_window_name("grok_build", "2.1.309"));
     }
 
     #[test]
