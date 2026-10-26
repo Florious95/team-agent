@@ -122,8 +122,10 @@ impl<R: CommandRunner> BoundedReadHost for NativeCatalog<R> {
 }
 /// Picker values carry a context variant such as `[1m]`; `--model` takes them verbatim.
 fn model_id(value: &str) -> bool { !value.is_empty() && value.len() <= 128 && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.[]".contains(&byte)) }
-/// Exactly one `initialize` response for our request id, from this same
-/// installation version. Every picker row is a launch ID by its exact resolved
+/// Exactly one `initialize` response for our request id. A response that
+/// names its `claude_code_version` (2.1.309 does; 2.1.282 omits it) must name
+/// the version the launcher probe saw; the read itself is fenced to the same
+/// hash-checked entry either way. Every picker row is a launch ID by its exact resolved
 /// model and, unless it is the moving `default`, by its own selector value.
 /// An ID reached from several rows keeps only the Team efforts all of them list.
 pub fn parse_catalog(bytes: &[u8], version: &str) -> Result<Vec<ModelRecord>, ContractError> {
@@ -140,7 +142,7 @@ pub fn parse_catalog(bytes: &[u8], version: &str) -> Result<Vec<ModelRecord>, Co
         response = Some(inner.get("response").ok_or_else(invalid)?.clone());
     }
     let response = response.ok_or_else(invalid)?;
-    if response.get("claude_code_version").and_then(serde_json::Value::as_str) != Some(version) {
+    if response.get("claude_code_version").is_some_and(|reported| reported.as_str() != Some(version)) {
         return Err(ContractError::Mismatch("Claude catalog installation version"));
     }
     let rows = response.get("models").and_then(serde_json::Value::as_array).filter(|rows| !rows.is_empty()).ok_or_else(invalid)?;

@@ -106,8 +106,11 @@ fn catalog_lists_resolved_ids_and_picker_values_with_their_own_team_efforts() {
     assert_eq!(records[0].efforts, all);
     assert_eq!(records[4].efforts, Support::Supported(vec![Effort::Low, Effort::Medium, Effort::High]));
     assert_eq!(records[6].efforts, Support::Supported(vec![]), "no effort levels, no effort carrier");
-    // The catalog must come from the installation the launcher probe saw.
+    // A reported version must be the installation the launcher probe saw;
+    // 2.1.282 reports none, and its hash-fenced read still parses.
     assert!(matches!(parse_catalog(CATALOG.as_bytes(), "2.1.282"), Err(ContractError::Mismatch(_))));
+    assert!(matches!(parse_catalog(CATALOG.replace("\"claude_code_version\":\"2.1.309\",", "\"claude_code_version\":2109,").as_bytes(), "2.1.309"), Err(ContractError::Mismatch(_))));
+    assert_eq!(parse_catalog(CATALOG.replace("\"claude_code_version\":\"2.1.309\",", "").as_bytes(), "2.1.282").unwrap().len(), 8);
     assert!(matches!(parse_catalog(CATALOG.replace("\"value\":\"sonnet\"", "\"value\":\"opus\"").as_bytes(), "2.1.309"), Err(ContractError::AmbiguousModel)));
     // A selector shared with another row keeps only the efforts both list.
     let shared = CATALOG.replace("\"value\":\"sonnet\",\"resolvedModel\":\"claude-sonnet-5-5\"", "\"value\":\"sonnet\",\"resolvedModel\":\"claude-opus-5-5\"");
