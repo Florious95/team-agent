@@ -536,3 +536,29 @@ fn semantic_reader_maps_only_busy_and_ready() {
     assert_eq!(read(&ready("")), ProbeOutcome::Observed(SemanticEvidence::Idle));
     assert!(matches!(read("plain"), ProbeOutcome::Unknown(_)));
 }
+#[test]
+fn legacy_composer_reads_normalized_captures_without_changing_contract_admission() {
+    // Legacy captures replace U+00A0 with a space and trim line ends.
+    let legacy = |text: &str| text.replace('\u{a0}', " ").lines().map(str::trim_end).collect::<Vec<_>>().join("\n");
+    let inspect = |text: &str| inspect_legacy_composer(&legacy(text));
+    assert_eq!(inspect(&ready("")), Some((InputSurface::ComposerReady, String::new())));
+    assert_eq!(surface(&legacy(&ready("").replace("❯\u{a0}", "❯\u{a0}draft"))), InputSurface::ShellOrUnknown, "contract admission unchanged");
+    assert_eq!(inspect(&screen("", "", "draft")), Some((InputSurface::ComposerContainsPaste, "draft".into())));
+    // The submitted turn echoed above the box is history, not composer.
+    let echoed = inspect(&screen(&turn(&payload()), "· Percolating…", "")).unwrap();
+    assert_eq!(echoed, (InputSurface::Busy, String::new()));
+    for spinner in ["✻ Baking…", "✢ Boondoggling… (3s · thinking)", "✶ Sprouting…\n  ⎿  ☐ one\n     ☐ two\n     ☐ three\n     ☐ four\n     ☐ five\n     ☐ six"] {
+        assert_eq!(inspect(&screen("❯ question", spinner, "")).unwrap().0, InputSurface::Busy, "{spinner}");
+    }
+    for idle in ["✻ Worked for 3s", "  · item…", "⏺ Thinking…", "❯ Writing…"] {
+        assert_eq!(inspect(&screen("", idle, "")).unwrap().0, InputSurface::ComposerReady, "{idle}");
+    }
+    // Queued input is held natively: busy, and nothing left to submit.
+    assert_eq!(inspect(&screen(&turn(&payload()), "", "Press up to edit queued messages")), Some((InputSurface::Busy, String::new())));
+    let submitted = include_str!("fixtures/claude-2.1.309-submitted.txt");
+    assert_eq!(inspect(submitted), Some((InputSurface::Busy, String::new())));
+    let folded = include_str!("fixtures/claude-2.1.309-folded.txt");
+    assert_eq!(inspect(folded), Some((InputSurface::ComposerContainsPaste, "[Pasted text #1 +134 lines]".into())));
+    assert_eq!(inspect("plain shell $ "), None);
+    assert!(spinner_row("· Percolating…") && !spinner_row("✻ Worked for 3s"));
+}

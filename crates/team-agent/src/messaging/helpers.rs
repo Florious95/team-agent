@@ -158,6 +158,25 @@ pub(crate) fn latest_prompt_signal(scrollback: &str) -> Option<AgentActivity> {
     // IRON LAW (activity.rs:3 / bug-071/077/085): no-signal in the bottom
     // region must be Uncertain (caller treats None here as "no decisive
     // signal" and surfaces Uncertain), NEVER silently flipped to Idle.
+    // #379: Claude Code's spinner sits above its composer box, outside the
+    // bottom five rows, and its finished-turn `✻ Worked for 3s` sits inside
+    // them. The box's own grammar (shared with delivery) decides instead.
+    if let Some((surface, _)) =
+        team_agent_contract::providers::claude::interaction::inspect_legacy_composer(scrollback)
+    {
+        use team_agent_contract::contract::delivery::InputSurface;
+        match surface {
+            InputSurface::Busy => {
+                return Some(AgentActivity {
+                    status: ActivityStatus::Working,
+                    confidence: 0.9,
+                    rationale: "claude_spinner_row".to_string(),
+                })
+            }
+            InputSurface::ComposerReady => return Some(idle_activity()),
+            _ => {}
+        }
+    }
     let active_region: Vec<&str> = scrollback
         .lines()
         .rev()

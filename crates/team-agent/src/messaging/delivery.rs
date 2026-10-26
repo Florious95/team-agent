@@ -1001,7 +1001,31 @@ fn deliver_prepared_message(
     // worker delivery both require post-submit evidence; leader additionally
     // waits for its authoritative provider transcript below.
     let native_consumed = observed_token_consumed(transport, state, &message.recipient, &target, message_id);
-    let verified = submit_verified && native_consumed != Some(false);
+    let mut verified = submit_verified && native_consumed != Some(false);
+    // #379: a pane the verifier could not read is not a failed send. The
+    // recipient's own transcript row (user turn or queued enqueue) is the
+    // provider's receipt; native observers keep their veto.
+    if !verified
+        && native_consumed.is_none()
+        && recipient_transcript_contains_within(
+            state,
+            &message.recipient,
+            &message_token_marker(message_id),
+            TRANSCRIPT_RECEIPT_TAIL_BYTES,
+        )
+    {
+        verified = true;
+        event_log.write(
+            "send.unverified_reconciled",
+            serde_json::json!({
+                "message_id": message_id,
+                "recipient": message.recipient,
+                "source": "recipient_transcript",
+                "submit_verification": submit_verification_wire(inject_report.submit_verification),
+                "attempts": inject_report.attempts,
+            }),
+        )?;
+    }
     if !verified {
         let reason = if native_consumed == Some(false) {
             "submit_unverified:current_composer_or_consumption_unknown".to_string()
@@ -1024,6 +1048,7 @@ fn deliver_prepared_message(
             "recipient": message.recipient,
             "reason": reason,
             "attempts": inject_report.attempts,
+            "delivery_attempt": attempt,
             "submit_attempts_detail": submit_attempts_detail,
         });
         merge_inject_readback_fields(
@@ -1033,7 +1058,8 @@ fn deliver_prepared_message(
             resolved.metadata.as_ref(),
         );
         event_log.write("send.unverified", unverified)?;
-        if inject_report.attempts >= u32::from(SEND_RETRY_MAX_ATTEMPTS) {
+        // #379: the budget is delivery attempts, not Enter presses inside one.
+        if attempt >= u32::from(SEND_RETRY_MAX_ATTEMPTS) {
             store.mark(message_id, "failed", Some("send_unverified_exhausted"))?;
             emit_send_failed_exhausted(
                 workspace,
@@ -1041,7 +1067,7 @@ fn deliver_prepared_message(
                 event_log,
                 message_id,
                 &message.recipient,
-                inject_report.attempts,
+                attempt,
                 "send_unverified_exhausted",
                 &reason,
                 Some(&inject_report),
@@ -1080,8 +1106,8 @@ fn deliver_prepared_message(
     // token actually reached the worker's transcript before marking
     // delivered. This catches the gate's mis-attribution: pane inject
     // succeeded but the token landed in the leader/unassigned transcript,
-    // not the worker's. Budget per architect plan: 64KB tail / single
-    // per-delivery check / short grace window. Phase-1 Claude only —
+    // not the worker's. Budget: receipt-window tail (#379: the user row can
+    // trail seconds of tool output) / short grace window. Phase-1 Claude only —
     // codex/copilot keep the pre-fix behaviour (will be addressed in
     // phase-2 once Claude phase-1 is field-validated).
     if let Some((rollout_path, provider_wire_str)) =
@@ -1091,7 +1117,8 @@ fn deliver_prepared_message(
         let grace = std::time::Duration::from_millis(200);
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
         let transcript_has_token = loop {
-            let found = rollout_tail_contains(&rollout_path, &token_marker, 64 * 1024);
+            let found =
+                rollout_tail_contains(&rollout_path, &token_marker, TRANSCRIPT_RECEIPT_TAIL_BYTES);
             if found || std::time::Instant::now() >= deadline {
                 break found;
             }
@@ -3709,12 +3736,21 @@ pub(crate) fn token_already_visible(
 }
 
 fn recipient_transcript_contains(state: &serde_json::Value, recipient: &str, marker: &str) -> bool {
-    for path in recipient_transcript_paths(state, recipient) {
-        if rollout_tail_contains(&path, marker, 64 * 1024) {
-            return true;
-        }
-    }
-    false
+    recipient_transcript_contains_within(state, recipient, marker, 64 * 1024)
+}
+
+/// The receipt row can sit behind seconds of tool output by verdict time.
+const TRANSCRIPT_RECEIPT_TAIL_BYTES: u64 = 1024 * 1024;
+
+fn recipient_transcript_contains_within(
+    state: &serde_json::Value,
+    recipient: &str,
+    marker: &str,
+    tail_bytes: u64,
+) -> bool {
+    recipient_transcript_paths(state, recipient)
+        .iter()
+        .any(|path| rollout_tail_contains(path, marker, tail_bytes))
 }
 
 fn recipient_transcript_paths(

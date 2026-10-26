@@ -1255,6 +1255,8 @@ fn fire_due_scheduled_events_fires_each_scheduled_kind() {
 
 struct UnverifiedInjectTransport {
     readback_visible: bool,
+    /// #379: the recipient's transcript, written at submit like a native CLI.
+    receipt: Option<PathBuf>,
 }
 impl Transport for UnverifiedInjectTransport {
     fn kind(&self) -> BackendKind {
@@ -1283,10 +1285,14 @@ impl Transport for UnverifiedInjectTransport {
     fn inject(
         &self,
         _t: &Target,
-        _p: &InjectPayload,
+        p: &InjectPayload,
         _s: Key,
         _b: bool,
     ) -> Result<InjectReport, TransportError> {
+        if let (Some(path), Some(text)) = (&self.receipt, p.text()) {
+            let row = serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": text});
+            std::fs::write(path, format!("{row}\n")).unwrap();
+        }
         Ok(InjectReport {
             stage_reached: crate::transport::InjectStage::Submit,
             inject_verification: if self.readback_visible {
@@ -1575,6 +1581,7 @@ fn deliver_pending_submit_unverified_is_not_saved_by_readback() {
         &store,
         &UnverifiedInjectTransport {
             readback_visible: true,
+            receipt: None,
         },
         &message_id,
         &log,
@@ -1619,12 +1626,21 @@ fn deliver_pending_exhausted_unverified_send_emits_failed_event() {
     let message_id = store
         .create_message(None, "leader", "w1", "ping", None, false, None)
         .unwrap();
+    // #379: exhaustion is the outer delivery budget; this is its last attempt.
+    crate::db::schema::open_db(store.db_path())
+        .unwrap()
+        .execute(
+            "update messages set delivery_attempts = ?2 where message_id = ?1",
+            rusqlite::params![message_id, i64::from(SEND_RETRY_MAX_ATTEMPTS) - 1],
+        )
+        .unwrap();
 
     let out = deliver_pending_message(
         &ws,
         &store,
         &UnverifiedInjectTransport {
             readback_visible: false,
+            receipt: None,
         },
         &message_id,
         &log,
@@ -1636,9 +1652,10 @@ fn deliver_pending_exhausted_unverified_send_emits_failed_event() {
     assert_eq!(out.message_status.0, "failed");
     let events = log.tail(0).unwrap();
     assert!(
-        events.iter().any(
-            |event| event.get("event").and_then(serde_json::Value::as_str) == Some("send.failed")
-        ),
+        events.iter().any(|event| {
+            event.get("event").and_then(serde_json::Value::as_str) == Some("send.failed")
+                && event.get("attempts") == Some(&serde_json::json!(SEND_RETRY_MAX_ATTEMPTS))
+        }),
         "exhausted unverified send must emit send.failed; got {events:?}"
     );
     assert!(
@@ -1648,6 +1665,95 @@ fn deliver_pending_exhausted_unverified_send_emits_failed_event() {
         ),
         "exhausted unverified send must queue a leader-visible notification; got {events:?}"
     );
+}
+
+#[test]
+fn issue379_inner_enter_presses_do_not_spend_the_delivery_budget() {
+    let ws = tmp_ws("innerenters");
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let state = serde_json::json!({
+        "session_name": "team-innerenters",
+        "leader_receiver": {"pane_id": "%leader"},
+        "agents": {"w1": {"provider": "fake", "pane_id": "%1"}}
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let message_id = store
+        .create_message(None, "leader", "w1", "ping", None, false, None)
+        .unwrap();
+
+    // One delivery whose verifier pressed Enter SEND_RETRY_MAX_ATTEMPTS times.
+    let out = deliver_pending_message(
+        &ws,
+        &store,
+        &UnverifiedInjectTransport {
+            readback_visible: false,
+            receipt: None,
+        },
+        &message_id,
+        &log,
+        &state,
+    )
+    .unwrap();
+
+    assert_eq!(out.message_status.0, "submitted_unverified", "{out:?}");
+    let events = log.tail(0).unwrap();
+    let event = |name: &str| {
+        events
+            .iter()
+            .find(|event| event.get("event").and_then(serde_json::Value::as_str) == Some(name))
+    };
+    assert!(event("send.failed").is_none(), "first attempt is not exhausted; got {events:?}");
+    let unverified = event("send.unverified").expect("send.unverified");
+    assert_eq!(unverified.get("attempts"), Some(&serde_json::json!(SEND_RETRY_MAX_ATTEMPTS)));
+    assert_eq!(unverified.get("delivery_attempt"), Some(&serde_json::json!(1)));
+}
+
+#[test]
+fn issue379_recipient_transcript_receipt_upgrades_an_unread_pane_to_delivered() {
+    let ws = tmp_ws("transcriptreceipt");
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let rollout = ws.join("w1-transcript.jsonl");
+    let state = serde_json::json!({
+        "session_name": "team-transcriptreceipt",
+        "leader_receiver": {"pane_id": "%leader"},
+        "agents": {"w1": {"provider": "fake", "pane_id": "%1", "rollout_path": rollout}}
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let message_id = store
+        .create_message(None, "leader", "w1", "ping", None, false, None)
+        .unwrap();
+    crate::db::schema::open_db(store.db_path())
+        .unwrap()
+        .execute(
+            "update messages set delivery_attempts = ?2 where message_id = ?1",
+            rusqlite::params![message_id, i64::from(SEND_RETRY_MAX_ATTEMPTS) - 1],
+        )
+        .unwrap();
+
+    let out = deliver_pending_message(
+        &ws,
+        &store,
+        &UnverifiedInjectTransport {
+            readback_visible: false,
+            receipt: Some(rollout),
+        },
+        &message_id,
+        &log,
+        &state,
+    )
+    .unwrap();
+
+    assert!(out.ok, "{out:?}");
+    assert_eq!(out.message_status.0, "delivered");
+    let events = log.tail(0).unwrap();
+    let names: Vec<_> = events
+        .iter()
+        .filter_map(|event| event.get("event").and_then(serde_json::Value::as_str))
+        .collect();
+    assert!(names.contains(&"send.unverified_reconciled"), "{names:?}");
+    assert!(!names.contains(&"send.unverified") && !names.contains(&"send.failed"), "{names:?}");
 }
 
 #[test]
