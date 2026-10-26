@@ -2325,12 +2325,15 @@ fn native_activity_for_agent(agent: &Value) -> Option<crate::messaging::AgentAct
         .and_then(Value::as_str)
         .and_then(parse_provider)
         .is_some_and(crate::provider::wire::is_claude_family);
-    let registry = agent_rollout_path(agent).filter(|_| claude).and_then(|rollout| {
-        crate::provider::claude_registry_turn_state(
-            &rollout,
-            agent.get("pane_id").and_then(Value::as_str),
-        )
-    });
+    let registry = crate::provider::claude_registry_key(agent)
+        .filter(|_| claude)
+        .and_then(|(sessions, session_id)| {
+            crate::provider::claude_registry_turn_state(
+                &sessions,
+                &session_id,
+                agent.get("pane_id").and_then(Value::as_str),
+            )
+        });
     let (status, state) = match registry {
         Some(TurnState::Working) => (ActivityStatus::Working, "busy"),
         Some(TurnState::BlockedOnHuman) => (ActivityStatus::Uncertain, "waiting"),
@@ -2981,6 +2984,15 @@ mod u1_tests {
         let background = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"Command running in background with ID: bg1"}]}}"#;
         std::fs::write(&rollout, format!("{background}\n{end_turn}\n")).unwrap();
         assert_eq!(observe(), Some((ActivityStatus::Working, "provider_jsonl:background_task".into())));
+        // Cold start: no transcript captured yet, only the launch's session id and root.
+        let cold = serde_json::json!({
+            "provider": "claude", "pane_id": "%7", "_pending_session_id": sid,
+            "claude_projects_root": config.join("projects"),
+        });
+        assert_eq!(
+            native_activity_for_agent(&cold).map(|a| (a.status, a.rationale)),
+            Some((ActivityStatus::Idle, "claude_session_registry:idle".into()))
+        );
         let _ = std::fs::remove_dir_all(&config);
     }
 

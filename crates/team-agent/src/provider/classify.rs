@@ -68,19 +68,42 @@ pub fn classify(
     Ok(decide_state(fact, process))
 }
 
-/// #379: Claude Code's own live turn state. The CLI rewrites
-/// `<config>/sessions/<pid>.json` on every transition (`running`→`busy`,
-/// `requires_action`→`waiting`, `idle`→`idle`); its transcript is
-/// `<config>/projects/<slug>/<sessionId>.jsonl`. So the record is read beside
-/// the transcript this agent is bound to and must carry that session id, a
-/// live pid and, when it names one, the same tmux pane. None = no decisive record.
-pub fn claude_registry_turn_state(rollout_path: &std::path::Path, pane_id: Option<&str>) -> Option<TurnState> {
-    let session_id = rollout_path.file_stem()?.to_str()?;
-    let projects = rollout_path.parent()?.parent()?;
+/// #379: where an agent's Claude process keeps its live registry record and
+/// under which session id. Beside the captured transcript
+/// (`<config>/projects/<slug>/<sessionId>.jsonl`); before capture, under the
+/// projects root it was launched with (profile, else the native
+/// `$HOME/.claude/projects`) and the `--session-id` it was started under.
+pub fn claude_registry_key(agent: &serde_json::Value) -> Option<(std::path::PathBuf, String)> {
+    let text = |key: &str| {
+        agent.get(key).and_then(serde_json::Value::as_str).filter(|value| !value.is_empty())
+    };
+    let (projects, session_id) = match text("rollout_path").map(std::path::Path::new) {
+        Some(rollout) => (rollout.parent()?.parent()?.to_path_buf(), rollout.file_stem()?.to_str()?),
+        None => (
+            text("claude_projects_root").map(std::path::PathBuf::from).or_else(|| {
+                std::env::var_os("HOME")
+                    .map(|home| std::path::PathBuf::from(home).join(".claude").join("projects"))
+            })?,
+            text("_pending_session_id").or_else(|| text("session_id"))?,
+        ),
+    };
     if projects.file_name()? != "projects" {
         return None;
     }
-    let entries = std::fs::read_dir(projects.parent()?.join("sessions")).ok()?;
+    Some((projects.parent()?.join("sessions"), session_id.to_owned()))
+}
+
+/// #379: Claude Code's own live turn state. The CLI writes `status` into
+/// `<config>/sessions/<pid>.json` at startup and on every transition
+/// (`running`→`busy`, `requires_action`→`waiting`, `idle`→`idle`). A record
+/// counts only with this session id, a live pid and, when it names one, the
+/// same tmux pane. None = no decisive record.
+pub fn claude_registry_turn_state(
+    sessions: &std::path::Path,
+    session_id: &str,
+    pane_id: Option<&str>,
+) -> Option<TurnState> {
+    let entries = std::fs::read_dir(sessions).ok()?;
     entries.flatten().find_map(|entry| {
         let path = entry.path();
         if path.extension()? != "json" || entry.metadata().ok()?.len() > 64 * 1024 {

@@ -89,7 +89,7 @@ struct RegisteredNode {
     window: Option<String>,
     pane: Option<String>,
     lifecycle: Option<String>,
-    rollout_path: Option<String>,
+    claude_registry: Option<(std::path::PathBuf, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -535,7 +535,7 @@ fn registered_node(name: &str, value: &Value, state: &Value) -> RegisteredNode {
             .or_else(|| first_string(display, &["pane_id"]))
             .or_else(|| first_string(target, &["pane_id"])),
         lifecycle: string_at(value, &["status"]).map(|status| status.to_ascii_lowercase()),
-        rollout_path: string_at(value, &["rollout_path"]),
+        claude_registry: crate::provider::claude_registry_key(value),
     }
 }
 
@@ -1407,8 +1407,8 @@ fn claude_node(node: &RegisteredNode) -> bool {
 /// #379: a live Claude pane always runs the Claude process, so its command
 /// name says nothing about the turn; Claude's own session registry does.
 fn claude_registry_activity(node: &RegisteredNode) -> &'static str {
-    let state = node.rollout_path.as_deref().and_then(|path| {
-        crate::provider::claude_registry_turn_state(Path::new(path), node.pane.as_deref())
+    let state = node.claude_registry.as_ref().and_then(|(sessions, session_id)| {
+        crate::provider::claude_registry_turn_state(sessions, session_id, node.pane.as_deref())
     });
     match state {
         Some(crate::provider::TurnState::Working) => "working",
@@ -1528,7 +1528,7 @@ mod native_ps_batch_regressions {
             window: Some("w".into()),
             pane: Some(pane.into()),
             lifecycle: None,
-            rollout_path: None,
+            claude_registry: None,
         }
     }
 
@@ -1793,7 +1793,7 @@ mod tests {
             window: Some("win".to_string()),
             pane: Some("%7".to_string()),
             lifecycle: None,
-            rollout_path: None,
+            claude_registry: None,
         }
     }
 
@@ -1917,7 +1917,7 @@ mod tests {
         let record = config.join("sessions").join(format!("{}.json", std::process::id()));
         let mut node = registered();
         node.provider = "claude".to_string();
-        node.rollout_path = Some(rollout.to_string_lossy().into_owned());
+        node.claude_registry = crate::provider::claude_registry_key(&json!({"rollout_path": rollout}));
         let mut observed = probe("native_tmux");
         observed.provider = "claude".to_string();
         observed.activity = "working".to_string();
@@ -1927,6 +1927,16 @@ mod tests {
             std::fs::write(&record, body.to_string()).unwrap();
             assert_eq!(project_node(&node, Some(&sample)).activity, expected, "{status}");
         }
+        // Cold start: the ready prompt before any transcript is captured.
+        let body = json!({"pid": std::process::id(), "sessionId": sid, "tmux": "sess:@1.%7", "status": "idle"});
+        std::fs::write(&record, body.to_string()).unwrap();
+        let cold = registered_node(
+            "worker",
+            &json!({"provider": "claude", "_pending_session_id": sid, "claude_projects_root": config.join("projects")}),
+            &json!({}),
+        );
+        node.claude_registry = cold.claude_registry;
+        assert_eq!(project_node(&node, Some(&sample)).activity, "idle");
         std::fs::remove_file(&record).unwrap();
         let projected = project_node(&node, Some(&sample));
         assert_eq!(projected.activity, "unknown", "the process name is not a turn state");

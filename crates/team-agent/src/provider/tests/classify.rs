@@ -147,7 +147,7 @@ fn classify_open_turn_dead_is_abnormal_crashed_mid_turn() {
 // Nodes / monitor_state passed as serde_json::Value dicts (Python dict shape).
 
 
-// #379: Claude Code's live session registry beside the bound transcript.
+// #379: Claude Code's live session registry, located before and after capture.
 #[cfg(unix)]
 #[test]
 fn claude_registry_turn_state_reads_the_live_record_for_this_transcript() {
@@ -159,11 +159,24 @@ fn claude_registry_turn_state_reads_the_live_record_for_this_transcript() {
     std::fs::create_dir_all(config.join("sessions")).unwrap();
     let rollout = projects.join(format!("{sid}.jsonl"));
     std::fs::write(&rollout, "").unwrap();
+    let sessions = config.join("sessions");
+    let expected_key = Some((sessions.clone(), sid.to_string()));
+    assert_eq!(claude_registry_key(&serde_json::json!({"rollout_path": rollout})), expected_key);
+    // Cold start: the launch's `--session-id` and projects root, before any capture.
+    assert_eq!(
+        claude_registry_key(&serde_json::json!({
+            "_pending_session_id": sid, "session_id": "stale", "claude_projects_root": config.join("projects"),
+        })),
+        expected_key
+    );
+    // Only `<config>/projects/<slug>/<id>.jsonl` names a registry.
+    assert_eq!(claude_registry_key(&serde_json::json!({"rollout_path": config.join(format!("{sid}.jsonl"))})), None);
     let live = std::process::id();
     let write = |pid: u32, session: &str, tmux: &str, status: &str| {
         let record = serde_json::json!({"pid": pid, "sessionId": session, "tmux": tmux, "status": status});
-        std::fs::write(config.join("sessions").join(format!("{pid}.json")), record.to_string()).unwrap();
+        std::fs::write(sessions.join(format!("{pid}.json")), record.to_string()).unwrap();
     };
+    let read = |pane: Option<&str>| claude_registry_turn_state(&sessions, sid, pane);
     for (status, expected) in [
         ("busy", Some(TurnState::Working)),
         ("waiting", Some(TurnState::BlockedOnHuman)),
@@ -171,20 +184,18 @@ fn claude_registry_turn_state_reads_the_live_record_for_this_transcript() {
         ("starting", None),
     ] {
         write(live, sid, "team-x:@3.%7", status);
-        assert_eq!(claude_registry_turn_state(&rollout, Some("%7")), expected, "{status}");
+        assert_eq!(read(Some("%7")), expected, "{status}");
     }
     write(live, sid, "team-x:@3.%7", "busy");
-    assert_eq!(claude_registry_turn_state(&rollout, None), Some(TurnState::Working));
-    assert_eq!(claude_registry_turn_state(&rollout, Some("%8")), None, "another pane's record");
+    assert_eq!(read(None), Some(TurnState::Working));
+    assert_eq!(read(Some("%8")), None, "another pane's record");
     write(live, "99999999-2222-4333-8444-555555555555", "team-x:@3.%7", "busy");
-    assert_eq!(claude_registry_turn_state(&rollout, Some("%7")), None, "another session's record");
-    std::fs::remove_file(config.join("sessions").join(format!("{live}.json"))).unwrap();
+    assert_eq!(read(Some("%7")), None, "another session's record");
+    std::fs::remove_file(sessions.join(format!("{live}.json"))).unwrap();
     let mut child = std::process::Command::new("true").spawn().unwrap();
     let dead = child.id();
     child.wait().unwrap();
     write(dead, sid, "team-x:@3.%7", "busy");
-    assert_eq!(claude_registry_turn_state(&rollout, Some("%7")), None, "a dead process is no evidence");
-    // Only `<config>/projects/<slug>/<id>.jsonl` names a registry.
-    assert_eq!(claude_registry_turn_state(&config.join(format!("{sid}.jsonl")), None), None);
+    assert_eq!(read(Some("%7")), None, "a dead process is no evidence");
     let _ = std::fs::remove_dir_all(&config);
 }
