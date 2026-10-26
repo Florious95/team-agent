@@ -830,7 +830,7 @@ impl Coordinator {
             // runs so the CapturedRuntimeFact map stays populated for
             // downstream runtime detectors; only the activity classify
             // happens once.
-            let jsonl_first = jsonl_activity_for_agent(agent);
+            let jsonl_first = native_activity_for_agent(agent);
             if let Some(activity) = jsonl_first.as_ref() {
                 remember_idle_capture_schedule(agent, activity);
                 write_activity(agent, activity, false);
@@ -2313,6 +2313,44 @@ fn jsonl_activity_for_agent(agent: &Value) -> Option<crate::messaging::AgentActi
     activity
 }
 
+/// #379: for Claude, its live session registry outranks the transcript tail,
+/// which still reads idle between a submitted prompt and the first assistant
+/// record. Busy and waiting are decisive; idle yields only to a background
+/// task the transcript still holds open.
+fn native_activity_for_agent(agent: &Value) -> Option<crate::messaging::AgentActivity> {
+    use crate::messaging::{ActivityStatus, AgentActivity};
+    let jsonl = jsonl_activity_for_agent(agent);
+    let claude = agent
+        .get("provider")
+        .and_then(Value::as_str)
+        .and_then(parse_provider)
+        .is_some_and(crate::provider::wire::is_claude_family);
+    let registry = agent_rollout_path(agent).filter(|_| claude).and_then(|rollout| {
+        crate::provider::claude_registry_turn_state(
+            &rollout,
+            agent.get("pane_id").and_then(Value::as_str),
+        )
+    });
+    let (status, state) = match registry {
+        Some(TurnState::Working) => (ActivityStatus::Working, "busy"),
+        Some(TurnState::BlockedOnHuman) => (ActivityStatus::Uncertain, "waiting"),
+        Some(TurnState::Idle)
+            if jsonl
+                .as_ref()
+                .is_some_and(|activity| activity.rationale == "provider_jsonl:background_task") =>
+        {
+            return jsonl;
+        }
+        Some(TurnState::Idle) => (ActivityStatus::Idle, "idle"),
+        _ => return jsonl,
+    };
+    Some(AgentActivity {
+        status,
+        confidence: 0.95,
+        rationale: format!("claude_session_registry:{state}"),
+    })
+}
+
 fn runtime_approval_target(
     agent: &Value,
     session_name: Option<&str>,
@@ -2907,6 +2945,44 @@ fn notify_session_missing(
 mod u1_tests {
     use super::*;
     use std::io::Write as _;
+
+    // #379: the registry beside the transcript decides Claude's live turn.
+    #[cfg(unix)]
+    #[test]
+    fn issue379_claude_registry_outranks_an_idle_transcript_tail() {
+        use crate::messaging::ActivityStatus;
+        let config = std::env::temp_dir().join(format!("ta-379-native-activity-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&config);
+        let sid = "22222222-3333-4444-8555-666666666666";
+        let projects = config.join("projects").join("-owned-cwd");
+        std::fs::create_dir_all(&projects).unwrap();
+        std::fs::create_dir_all(config.join("sessions")).unwrap();
+        let rollout = projects.join(format!("{sid}.jsonl"));
+        let pid = std::process::id();
+        let registry = |status: &str| {
+            let record = serde_json::json!({"pid": pid, "sessionId": sid, "tmux": "team-x:@1.%7", "status": status});
+            std::fs::write(config.join("sessions").join(format!("{pid}.json")), record.to_string()).unwrap();
+        };
+        let end_turn = r#"{"type":"assistant","requestId":"r1","message":{"stop_reason":"end_turn"}}"#;
+        let agent = serde_json::json!({
+            "provider": "claude", "pane_id": "%7", "rollout_path": rollout, "process_alive": true,
+        });
+        let observe = || native_activity_for_agent(&agent).map(|a| (a.status, a.rationale));
+
+        // A submitted prompt before its first assistant record: the tail still reads idle.
+        std::fs::write(&rollout, format!("{end_turn}\n")).unwrap();
+        registry("busy");
+        assert_eq!(observe(), Some((ActivityStatus::Working, "claude_session_registry:busy".into())));
+        registry("waiting");
+        assert_eq!(observe(), Some((ActivityStatus::Uncertain, "claude_session_registry:waiting".into())));
+        registry("idle");
+        assert_eq!(observe(), Some((ActivityStatus::Idle, "claude_session_registry:idle".into())));
+        // A background shell the transcript holds open keeps the worker busy.
+        let background = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"Command running in background with ID: bg1"}]}}"#;
+        std::fs::write(&rollout, format!("{background}\n{end_turn}\n")).unwrap();
+        assert_eq!(observe(), Some((ActivityStatus::Working, "provider_jsonl:background_task".into())));
+        let _ = std::fs::remove_dir_all(&config);
+    }
 
     struct CaptureFailureRegistry;
 

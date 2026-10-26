@@ -1891,6 +1891,16 @@ fn token_in_bottom_n(text: &str, marker: &str, n: usize) -> bool {
         .any(|line| line.contains(marker))
 }
 
+/// #379: Claude Code echoes the submitted turn right above its composer box,
+/// well inside the bottom-15 window. When that box is recognized only the text
+/// between its rules is composer; otherwise the whole tail stays in charge.
+fn composer_view(text: &str) -> std::borrow::Cow<'_, str> {
+    match team_agent_contract::providers::claude::interaction::inspect_legacy_composer(text) {
+        Some((_, current)) => std::borrow::Cow::Owned(current),
+        None => std::borrow::Cow::Borrowed(text),
+    }
+}
+
 /// purpose: token 在本轮注入中的三态观测
 /// contract:
 ///   - Visible: 当前 capture 可见
@@ -2010,7 +2020,7 @@ fn latch_paste(text: &str, current: Option<PasteLatch>) -> Option<PasteLatch> {
     if current.is_some() {
         return current;
     }
-    let prompt = pasted_prompt_in_composer(text, 15)?;
+    let prompt = pasted_prompt_in_composer(&composer_view(text), 15)?;
     if let Some(id) = prompt.id {
         return Some(PasteLatch::HashId(id));
     }
@@ -2053,6 +2063,7 @@ fn consumption_from_placeholder(text: &str, tracked: Option<PasteLatch>) -> Opti
 /// boundary: 不重粘文本；不把不同 grok 行数当成可重按的同一次；tracked 为 None 时占位符路径一律不重按（token 仍在底 15 非空行的重按与 tracked 无关）
 /// ---
 pub(crate) fn should_resubmit_enter(text: &str, marker: &str, tracked: Option<PasteLatch>) -> bool {
+    let text = &*composer_view(text);
     if token_in_bottom_n(text, marker, 15) {
         return true;
     }
@@ -2087,7 +2098,8 @@ pub(crate) fn this_paste_identity_in_composer(
     marker: &str,
     tracked: Option<PasteLatch>,
 ) -> bool {
-    should_resubmit_enter(text, marker, tracked) || composer_joined(text, 15).contains(marker)
+    should_resubmit_enter(text, marker, tracked)
+        || composer_joined(&composer_view(text), 15).contains(marker)
 }
 
 /// ---
@@ -2149,6 +2161,7 @@ pub(crate) fn should_resubmit_enter_cursor(text: &str, marker: &str) -> bool {
 /// boundary: token 出现在未折叠的高块里不算完成（按早了）；只判「能不能按」，不判「按了有没有成」
 /// ---
 pub(crate) fn paste_ready_for_enter(text: &str, marker: &str) -> bool {
+    let text = &*composer_view(text);
     if pasted_prompt_in_composer(text, 15).is_some() {
         return true;
     }
@@ -2185,6 +2198,7 @@ pub(crate) fn consumption_from_capture(
     token_ever_visible: bool,
     tracked: Option<PasteLatch>,
 ) -> Option<bool> {
+    let text = &*composer_view(text);
     let token_now = token_in_bottom_n(text, marker, 15);
     match token_sighting(token_now, token_ever_visible) {
         TokenSighting::Visible => Some(false),
@@ -2231,10 +2245,13 @@ struct ConsumptionDiagnostics {
     current_marker_in_bottom_15: Option<bool>,
     paste_identity_in_composer: Option<bool>,
     consumption_from_capture_result: Option<bool>,
+    /// Busy in any post-Enter sample: one final frame lands on a random spinner phase.
+    busy_seen: bool,
 }
 
 impl ConsumptionDiagnostics {
     fn record(&mut self, observation: ConsumptionCaptureObservation) {
+        self.busy_seen |= observation.busy.is_some();
         self.busy_signal_kind = observation.busy.map(|match_| match_.kind);
         self.busy_line_from_bottom = observation.busy.map(|match_| match_.line_from_bottom);
         self.current_marker_in_bottom_15 = observation.marker_in_bottom_15;
@@ -2316,6 +2333,22 @@ fn busy_signal_kind_in_line(line: &str) -> Option<BusySignalKind> {
 }
 
 fn provider_busy_signal_match(text: &str) -> Option<BusySignalMatch> {
+    use team_agent_contract::{contract::delivery::InputSurface, providers::claude::interaction};
+    // #379: Claude Code's box decides alone. Its spinner glyph animates through
+    // `·` and a finished turn leaves `✻ Worked for 3s` in the window, so a
+    // per-line glyph scan is neither stable nor live.
+    if let Some((surface, _)) = interaction::inspect_legacy_composer(text) {
+        let row = text
+            .lines()
+            .rev()
+            .filter(|line| !line.trim().is_empty())
+            .position(interaction::spinner_row)
+            .unwrap_or(0);
+        return (surface == InputSurface::Busy).then_some(BusySignalMatch {
+            kind: BusySignalKind::SpinnerGlyph,
+            line_from_bottom: u8::try_from(row).unwrap_or(u8::MAX),
+        });
+    }
     text.lines()
         .rev()
         .filter(|line| !line.trim().is_empty())
@@ -2351,6 +2384,7 @@ pub(crate) fn observe_turn_from_capture(text: &str, marker: Option<&str>) -> Tur
     if provider_busy_signal_in_tail(text) {
         return TurnVerification::LeaderNewTurnBoundaryVerified;
     }
+    let text = &*composer_view(text);
     let paste_still = pasted_prompt_in_composer(text, 15).is_some();
     let token_still = marker
         .map(|m| token_in_bottom_n(text, m, 15))
@@ -2382,8 +2416,9 @@ fn submit_attempt_observation(
     let marker_position = marker.and_then(|m| marker_position_from_bottom(&captured.text, m));
     // marker 在时也走 pasted_prompt_match：折叠占位符是编排长粘贴的正信号，
     // 不能只在无 token 载荷上才认。matched 仍表示「composer 里还有待提交信号」。
+    let composer = composer_view(&captured.text);
     let (matched, matched_literal, where_in_tail) = if let Some(marker) = marker {
-        if token_in_bottom_n(&captured.text, marker, 15) {
+        if token_in_bottom_n(&composer, marker, 15) {
             (
                 true,
                 marker_position.map(|_| marker.to_string()),
@@ -2391,7 +2426,7 @@ fn submit_attempt_observation(
             )
         } else if let Some((literal, where_in_tail)) = pasted_prompt_match(&captured.text) {
             (
-                pasted_prompt_in_composer(&captured.text, 15).is_some(),
+                pasted_prompt_in_composer(&composer, 15).is_some(),
                 Some(literal.to_string()),
                 Some(where_in_tail),
             )
@@ -3673,7 +3708,7 @@ impl Transport for TmuxBackend {
                                 marker,
                                 inject_start.elapsed().as_millis() as u64,
                             ));
-                            if observation.busy.is_some() {
+                            if consumption_diagnostics.busy_seen {
                                 consumption_reason = SubmitConsumptionReason::FallbackBusy;
                                 SubmitVerification::EnterSentWithoutPlaceholderCheck
                             } else {

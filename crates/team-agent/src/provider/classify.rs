@@ -68,6 +68,48 @@ pub fn classify(
     Ok(decide_state(fact, process))
 }
 
+/// #379: Claude Code's own live turn state. The CLI rewrites
+/// `<config>/sessions/<pid>.json` on every transition (`running`→`busy`,
+/// `requires_action`→`waiting`, `idle`→`idle`); its transcript is
+/// `<config>/projects/<slug>/<sessionId>.jsonl`. So the record is read beside
+/// the transcript this agent is bound to and must carry that session id, a
+/// live pid and, when it names one, the same tmux pane. None = no decisive record.
+pub fn claude_registry_turn_state(rollout_path: &std::path::Path, pane_id: Option<&str>) -> Option<TurnState> {
+    let session_id = rollout_path.file_stem()?.to_str()?;
+    let projects = rollout_path.parent()?.parent()?;
+    if projects.file_name()? != "projects" {
+        return None;
+    }
+    let entries = std::fs::read_dir(projects.parent()?.join("sessions")).ok()?;
+    entries.flatten().find_map(|entry| {
+        let path = entry.path();
+        if path.extension()? != "json" || entry.metadata().ok()?.len() > 64 * 1024 {
+            return None;
+        }
+        let record: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+        let field = |key: &str| record.get(key).and_then(serde_json::Value::as_str);
+        if field("sessionId") != Some(session_id) {
+            return None;
+        }
+        // `tmux` is `<session>:@<window>.%<pane>`.
+        if let (Some(pane), Some(tmux)) = (pane_id, field("tmux")) {
+            if tmux.rsplit_once('.').map(|(_, recorded)| recorded) != Some(pane) {
+                return None;
+            }
+        }
+        let pid = u32::try_from(record.get("pid")?.as_u64()?).ok()?;
+        if !crate::platform::process::pid_is_alive(pid) {
+            return None;
+        }
+        match field("status")? {
+            "busy" => Some(TurnState::Working),
+            "waiting" => Some(TurnState::BlockedOnHuman),
+            "idle" => Some(TurnState::Idle),
+            _ => None,
+        }
+    })
+}
+
 /// Blocker-2 Layer-2: scan Claude transcript records for background task
 /// lifecycle markers. Returns `Some(turn_id)` when at least one background
 /// task is OPEN (started but not closed) — caller treats as `TurnOpen` with
@@ -419,7 +461,7 @@ fn decide_state(fact: &LifecycleFact, process: ProcessLiveness) -> ClassifyResul
             ProcessLiveness::Alive => classify_result(
                 TurnState::Working,
                 fact.turn_id.clone(),
-                if fact.reason == "assistant_in_flight" {
+                if matches!(fact.reason.as_str(), "assistant_in_flight" | "background_task") {
                     &fact.reason
                 } else {
                     "open_turn"

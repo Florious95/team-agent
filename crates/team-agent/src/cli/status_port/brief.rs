@@ -89,6 +89,7 @@ struct RegisteredNode {
     window: Option<String>,
     pane: Option<String>,
     lifecycle: Option<String>,
+    rollout_path: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -534,6 +535,7 @@ fn registered_node(name: &str, value: &Value, state: &Value) -> RegisteredNode {
             .or_else(|| first_string(display, &["pane_id"]))
             .or_else(|| first_string(target, &["pane_id"])),
         lifecycle: string_at(value, &["status"]).map(|status| status.to_ascii_lowercase()),
+        rollout_path: string_at(value, &["rollout_path"]),
     }
 }
 
@@ -1325,6 +1327,8 @@ fn project_node_with_attach(
     let native_tmux = observed.evidence_method.as_deref() == Some("native_tmux");
     let activity = if observed.provider.eq_ignore_ascii_case("pi") && !pi_channel && !native_tmux {
         "unknown"
+    } else if native_tmux && claude_node(node) {
+        claude_registry_activity(node)
     } else {
         valid_activity(&observed.activity)
     };
@@ -1393,6 +1397,24 @@ fn matches_registered(node: &RegisteredNode, observed: &ProbeNode) -> bool {
             .as_deref()
             .is_none_or(|window| window == observed.window)
         && node.pane.as_deref() == Some(observed.pane.as_str())
+}
+
+fn claude_node(node: &RegisteredNode) -> bool {
+    crate::provider::wire::parse_provider(&node.provider)
+        .is_some_and(crate::provider::wire::is_claude_family)
+}
+
+/// #379: a live Claude pane always runs the Claude process, so its command
+/// name says nothing about the turn; Claude's own session registry does.
+fn claude_registry_activity(node: &RegisteredNode) -> &'static str {
+    let state = node.rollout_path.as_deref().and_then(|path| {
+        crate::provider::claude_registry_turn_state(Path::new(path), node.pane.as_deref())
+    });
+    match state {
+        Some(crate::provider::TurnState::Working) => "working",
+        Some(crate::provider::TurnState::Idle) => "idle",
+        _ => "unknown",
+    }
 }
 
 fn valid_activity(value: &str) -> &str {
@@ -1506,6 +1528,7 @@ mod native_ps_batch_regressions {
             window: Some("w".into()),
             pane: Some(pane.into()),
             lifecycle: None,
+            rollout_path: None,
         }
     }
 
@@ -1770,6 +1793,7 @@ mod tests {
             window: Some("win".to_string()),
             pane: Some("%7".to_string()),
             lifecycle: None,
+            rollout_path: None,
         }
     }
 
@@ -1876,6 +1900,38 @@ mod tests {
             projected.tmux_command.as_deref(),
             Some("tmux -S '/tmp/tmux socket/o'\\''k' attach -t 'sess:win.%7'"),
         );
+    }
+
+    // #379: a live Claude pane always runs Claude; its registry names the turn.
+    #[cfg(unix)]
+    #[test]
+    fn issue379_claude_activity_comes_from_its_session_registry_not_the_pane_command() {
+        let config = std::env::temp_dir().join(format!("ta-379-brief-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&config);
+        let sid = "33333333-4444-4555-8666-777777777777";
+        let projects = config.join("projects").join("-owned-cwd");
+        std::fs::create_dir_all(&projects).unwrap();
+        std::fs::create_dir_all(config.join("sessions")).unwrap();
+        let rollout = projects.join(format!("{sid}.jsonl"));
+        std::fs::write(&rollout, "").unwrap();
+        let record = config.join("sessions").join(format!("{}.json", std::process::id()));
+        let mut node = registered();
+        node.provider = "claude".to_string();
+        node.rollout_path = Some(rollout.to_string_lossy().into_owned());
+        let mut observed = probe("native_tmux");
+        observed.provider = "claude".to_string();
+        observed.activity = "working".to_string();
+        let sample = Some(ProbeResult { nodes: vec![observed], ..Default::default() });
+        for (status, expected) in [("busy", "working"), ("idle", "idle"), ("waiting", "unknown")] {
+            let body = json!({"pid": std::process::id(), "sessionId": sid, "tmux": "sess:@1.%7", "status": status});
+            std::fs::write(&record, body.to_string()).unwrap();
+            assert_eq!(project_node(&node, Some(&sample)).activity, expected, "{status}");
+        }
+        std::fs::remove_file(&record).unwrap();
+        let projected = project_node(&node, Some(&sample));
+        assert_eq!(projected.activity, "unknown", "the process name is not a turn state");
+        assert_eq!(projected.observation_reason, Some("activity_or_health_not_observed"));
+        let _ = std::fs::remove_dir_all(&config);
     }
 
     #[test]
