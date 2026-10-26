@@ -292,7 +292,7 @@ fn plan_carries_model_effort_bypass_mcp_and_exact_resume_without_startup_keys() 
         cwd: r.paths.cwd.clone(), native: r.native.clone(), source: r.identity.clone(), origin: CaptureOrigin::CurrentNativeSession,
         evidence_kind: r.evidence_kind, evidence_sha256: digest(b"status card"), backing: None };
     let mut resume = r.clone(); resume.operation = Operation::Resume; resume.identity.generation = Generation(2);
-    resume.resume = Some(ResumeRequest { binding: binding.clone(), expected_source: r.identity.clone() });
+    resume.resume = Some(ResumeRequest { binding, expected_source: r.identity.clone() });
     let args = strings(&plan_ok(&a, &resume, &catalog));
     assert_eq!(args.first().map(String::as_str), Some("resume"));
     assert_eq!(args.last().map(String::as_str), Some(SID));

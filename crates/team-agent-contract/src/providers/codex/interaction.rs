@@ -79,7 +79,7 @@ fn uuid(text: &str) -> bool {
     text.len() == 36 && text.bytes().enumerate().all(|(i, byte)| if [8, 13, 18, 23].contains(&i) { byte == b'-' } else { byte.is_ascii_hexdigit() })
 }
 /// The last `/status` card: rows after its `>_ OpenAI Codex (vX)` header, up to the composer.
-fn status_card<'a>(lines: &[&'a str]) -> Option<(&'a str, &[&'a str])> {
+fn status_card<'a, 'b>(lines: &'b [&'a str]) -> Option<(&'a str, &'b [&'a str])> {
     let end = composer(lines).map_or(lines.len(), |(index, _)| index);
     let header = lines[..end].iter().rposition(|line| line.contains(">_ OpenAI Codex (v"))?;
     let version = lines[header].trim().strip_prefix(">_ OpenAI Codex (v")?.strip_suffix(')')?;
