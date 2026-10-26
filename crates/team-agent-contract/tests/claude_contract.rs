@@ -36,8 +36,9 @@ fn scope(sequence: u64) -> EvidenceScope {
 const RULE: &str = "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────";
 /// Banner, history, the rows just above the composer (spinner/tip/hint), the
 /// composer between two rules, then the user's status line and mode footer.
+/// The live composer row is `❯` + U+00A0; history turns use `❯` + a space.
 fn screen(history: &str, above: &str, composer: &str) -> String {
-    format!(" ▐▛███▛█   Claude Code v2.1.309\n▝▜██████▀  Haiku 5.5 · Claude API\n ▝▝   ▝▝   /owned/cwd\n\n{history}\n\n{above}\n                                                                                                     ◐ medium · /effort\n{RULE}\n❯ {composer}\n{RULE}\n  Ctx: n/a | Haiku 5.5 | worker\n  ⏵⏵ auto mode on (shift+tab to cycle)\n")
+    format!(" ▐▛███▛█   Claude Code v2.1.309\n▝▜██████▀  Haiku 5.5 · Claude API\n ▝▝   ▝▝   /owned/cwd\n\n{history}\n\n{above}\n                                                                                                     ◐ medium · /effort\n{RULE}\n❯\u{a0}{composer}\n{RULE}\n  Ctx: n/a | Haiku 5.5 | worker\n  ⏵⏵ auto mode on (shift+tab to cycle)\n")
 }
 fn ready(history: &str) -> String { screen(history, "", "") }
 fn payload() -> String { format!("{HEADER}\n\nCompute 123 * 45.\n\n{TOKEN}") }
@@ -378,8 +379,10 @@ fn surfaces_follow_the_composer_between_the_last_two_rules() {
     assert_eq!(surface(&screen(&format!("{}\n  ctrl+x ctrl+s to send now", turn(&payload())), "", "Press up to edit queued messages")), InputSurface::Busy);
     assert_eq!(surface(&screen("", "", "draft text")), InputSurface::ComposerContainsPaste);
     assert_eq!(surface(&screen("", "", "[Pasted text #1 +4 lines]")), InputSurface::ComposerContainsPaste);
-    // History turns above the composer also start with `❯`.
+    // History turns above the composer also start with `❯`, but with an
+    // ordinary space; such a row between the rules is not the live composer.
     assert_eq!(surface(&ready(&turn(&payload()))), InputSurface::ComposerReady);
+    assert_eq!(surface(&ready("").replace("❯\u{a0}", "❯ draft")), InputSurface::ShellOrUnknown);
     // The slash menu sits above the composer; its own selection carries `❯`.
     let slash = screen("", "  ❯ /exit                       Exit the CLI\n    /context                    Visualize current context usage as a colored grid", "/exit");
     assert_eq!(surface(&slash), InputSurface::ComposerContainsPaste);
@@ -459,6 +462,35 @@ fn folded_paste_is_bound_to_this_attempt_and_accepted_by_the_expanded_turn() {
     assert_ne!(adapter().interpret(&submitted).surface, InputSurface::NativeAccepted);
     submitted.text = screen("", "", folded);
     assert_ne!(adapter().interpret(&submitted).surface, InputSurface::NativeAccepted);
+}
+#[test]
+fn captured_2_1_309_frames_fold_then_accept_a_bootstrap_sized_paste() {
+    // Byte-exact tmux 120x40 captures: the live composer row is `❯` + U+00A0.
+    let ready = include_str!("fixtures/claude-2.1.309-ready.txt");
+    let folded = include_str!("fixtures/claude-2.1.309-folded.txt");
+    let submitted = include_str!("fixtures/claude-2.1.309-submitted.txt");
+    assert!(folded.contains("❯\u{a0}[Pasted text #1 +134 lines]"));
+    assert_eq!(surface(ready), InputSurface::ComposerReady);
+    assert_eq!(surface(folded), InputSurface::ComposerContainsPaste);
+    assert_eq!(surface(submitted), InputSurface::Busy);
+    // The probe payload: a header, 132 role rows, the request and the token (134 newlines).
+    let mut payload = String::from("Team Agent message from leader for task-1:\n");
+    for i in 1..133 {
+        payload.push_str(&format!("Role line {i}: a realistic instruction row of moderate width so wrapping and folding behave like a Team bootstrap packet.\n"));
+    }
+    payload.push_str("Reply with exactly: PONG-BIG\n[team-agent-token:msg_probe0000135]");
+    let mut pasted = frame(folded.into(), Operation::FirstBusiness, Some(StepKind::Paste), PasteLatch::NeverSeen);
+    pasted.input = Some(shape(&payload));
+    pasted.message = Some(MessageId::new("msg_probe0000135").unwrap());
+    pasted.baseline.as_mut().unwrap().text = ready.into();
+    let seen = adapter().interpret(&pasted);
+    assert_eq!(seen.surface, InputSurface::ComposerContainsPaste);
+    assert!(matches!(&seen.paste_latch, PasteLatch::Seen { native_identity } if native_identity.starts_with("claude-owned-paste-v1:")));
+    let mut entered = pasted.clone();
+    entered.text = submitted.into(); entered.after_step = Some(StepKind::InitialSubmit); entered.paste_latch = seen.paste_latch.clone();
+    let accepted = adapter().interpret(&entered);
+    assert_eq!(accepted.surface, InputSurface::NativeAccepted);
+    assert!(matches!(accepted.paste_latch, PasteLatch::Gone { .. }));
 }
 #[test]
 fn exit_control_is_typed_into_an_empty_composer_only() {

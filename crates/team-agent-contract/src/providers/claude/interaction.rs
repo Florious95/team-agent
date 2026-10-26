@@ -14,8 +14,8 @@ use crate::runtime::delivery::{ControlDefinition, ControlInputMode, ControlKind}
 use std::time::Duration;
 
 pub const PROFILE: &str = "claude-tui-v1";
-pub const POLICY_RECIPE: &str = "claude-tui-v1/r1:runtime-native-image-or-version-named+wrapper;--session-id-derived|--resume-exact;owned-argv-server+allowedTools-ambient-coexistence;120x40;paste-bracketed;enter-once;retry-never;queue-native:token-above-composer+placeholder-Press up to edit queued messages=busy;composer:region-between-last-two-column0-rules,first-row-❯;busy:spinner-row-·✢✳✶✻✽-Verb…-within-6-rows-above-composer;streaming-text-hides-spinner:reads-ready;folder-trust:no-exit-default:never-keyed;fold:any-newline:[Pasted text #N +M lines]:M=newlines|single-line:[Pasted text #N]:empty-baseline+confirmed-paste+shape+attempt->confirmed-enter+empty-composer+token-in-history+busy-or-ready;inline:token-in-composer->token-in-history;exit:direct+/exit+native-exited+dead-pane-close;capture100ms;stable200ms;paste-floor100ms;deadline30s";
-pub const POLICY: Digest = Digest([222, 227, 46, 36, 166, 227, 241, 133, 78, 10, 36, 23, 0, 146, 142, 59, 207, 68, 89, 242, 28, 188, 176, 138, 76, 44, 240, 132, 16, 111, 160, 184]);
+pub const POLICY_RECIPE: &str = "claude-tui-v1/r2:runtime-native-image-or-version-named+wrapper;--session-id-derived|--resume-exact;owned-argv-server+allowedTools-ambient-coexistence;120x40;paste-bracketed;enter-once;retry-never;queue-native:token-above-composer+placeholder-Press up to edit queued messages=busy;composer:region-between-last-two-column0-rules,first-row-❯+U+00A0(history-turns:❯+space);busy:spinner-row-·✢✳✶✻✽-Verb…-within-6-rows-above-composer;streaming-text-hides-spinner:reads-ready;folder-trust:no-exit-default:never-keyed;fold:any-newline:[Pasted text #N +M lines]:M=newlines|single-line:[Pasted text #N]:empty-baseline+confirmed-paste+shape+attempt->confirmed-enter+empty-composer+token-in-history+busy-or-ready;inline:token-in-composer->token-in-history;exit:direct+/exit+native-exited+dead-pane-close;capture100ms;stable200ms;paste-floor100ms;deadline30s";
+pub const POLICY: Digest = Digest([165, 7, 11, 215, 203, 134, 85, 169, 254, 208, 146, 22, 125, 100, 41, 100, 210, 72, 15, 198, 137, 192, 94, 243, 4, 78, 69, 191, 213, 53, 169, 15]);
 const FOLDED: &str = "claude-owned-paste-v1:";
 const TRUST: &str = "claude-folder-trust-modal";
 /// The composer placeholder while Claude holds queued input for the turn boundary.
@@ -41,15 +41,15 @@ fn rows(text: &str) -> Vec<&str> { text.lines().map(str::trim_end).collect() }
 /// A full-width rule drawn from column 0; transcript text is indented.
 fn rule(line: &str) -> bool { line.chars().count() >= 40 && line.chars().all(|ch| ch == '─') }
 /// The live composer is the region between the last two rules; its first row
-/// carries `❯`. History user turns also start with `❯` but sit above it.
-/// Returns (top rule index, composer text with continuation indents removed);
-/// the queued-input placeholder is drawn there too.
+/// is `❯` + U+00A0 (2.1.282 and 2.1.309 alike). History user turns start with
+/// `❯` + an ordinary space and sit above it. Returns (top rule index, composer
+/// text with continuation indents removed); the queued placeholder is drawn there too.
 fn composer(lines: &[&str]) -> Option<(usize, String)> {
     let bottom = lines.iter().rposition(|line| rule(line))?;
     let top = lines[..bottom].iter().rposition(|line| rule(line))?;
     let region = &lines[top + 1..bottom];
     let first = region.first()?;
-    let first = if *first == "❯" { "" } else { first.strip_prefix("❯ ")? };
+    let first = if *first == "❯" { "" } else { first.strip_prefix("❯\u{a0}")? };
     let mut text = vec![first.trim()];
     text.extend(region[1..].iter().map(|line| line.trim()));
     Some((top, text.join("\n").trim().to_owned()))
