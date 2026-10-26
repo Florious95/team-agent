@@ -3,34 +3,17 @@
 //! PATH: a standalone native `codex`, or the `node` that PATH selects when the
 //! route ends in a `#!/usr/bin/env node` launcher script. Nothing is exec'd
 //! from here, and no install directory is guessed.
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use crate::contract::{hooks::ReadBounds, plan::*, session::CwdIdentity, types::*};
 use crate::host::{command::*, process::{fingerprint_file, resolve_cwd}, HostError, HostErrorKind};
 use super::catalog::{probe_launcher, ProbeError, CATALOG_SOURCE, MAX_IMAGE};
 
-/// `env` re-resolves its operand through the PATH this route exports, so the
-/// interpreter is the same PATH's first native `node`, never a guessed one.
-fn env_node_interpreter(head: &[u8]) -> bool {
-    let line = head.split(|byte| *byte == b'\n').next().unwrap_or_default();
-    let Some(line) = std::str::from_utf8(line).ok().and_then(|line| line.trim_end().strip_prefix("#!")) else { return false };
-    let mut words = line.split_whitespace();
-    matches!((words.next(), words.next(), words.next()), (Some(env), Some("node"), None)
-        if env.starts_with('/') && Path::new(env).file_name().is_some_and(|name| name == "env"))
-}
-/// The kernel image a `codex` route must exec into. Other `#!` scripts on the
-/// route are user wrappers that conventionally exec a later match.
+/// The kernel image a `codex` route must exec into: a standalone native
+/// `codex`, or the PATH's own `node` behind the npm `#!/usr/bin/env node`
+/// launcher. Other `#!` scripts on the route are user wrappers.
 pub fn resolve_engine(command: &PublicCommand) -> Result<PathBuf, HostError> {
-    for candidate in command.route() {
-        let image = candidate.canonicalize().map_err(|error| HostError::io("Codex PATH route", error))?;
-        let mut head = Vec::with_capacity(256);
-        std::fs::File::open(&image).and_then(|file| file.take(256).read_to_end(&mut head))
-            .map_err(|error| HostError::io("Codex PATH route image", error))?;
-        if !head.starts_with(b"#!") { return Ok(image); }
-        if env_node_interpreter(&head) { return PublicCommand::resolve("node", &command.search_path)?.native_image(); }
-    }
-    Err(HostError::new("Codex native image not on PATH after its wrappers", HostErrorKind::Unsupported))
+    command.env_launcher_image("node")
 }
 /// One public command route and the native image it must exec into.
 /// Metadata discovery stays a separate identity until this bridge.

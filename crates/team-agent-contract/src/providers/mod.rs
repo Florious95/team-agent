@@ -2,3 +2,4 @@
 pub mod codex;
 pub mod cursor;
 pub mod grok_build;
+pub mod pi;
