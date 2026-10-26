@@ -44,7 +44,7 @@ pub fn semver(value: &str) -> bool {
     let (release, prerelease) = value.split_once('-').map_or((value, None), |(release, tag)| (release, Some(tag)));
     let parts: Vec<_> = release.split('.').collect();
     parts.len() == 3 && parts.iter().all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
-            && !(part.len() > 1 && part.starts_with('0')) && part.parse::<u64>().is_ok())
+            && (part.len() == 1 || !part.starts_with('0')) && part.parse::<u64>().is_ok())
         && prerelease.is_none_or(|tag| !tag.is_empty() && tag.len() <= 64 && tag.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'.'))
 }
 pub fn parse_version(bytes: &[u8]) -> Result<String, ProbeError> {
