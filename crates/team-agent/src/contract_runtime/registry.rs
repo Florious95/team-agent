@@ -10,6 +10,7 @@ use team_agent_contract::contract::{
     types::{ContractError, NativeIdentity, Support},
 };
 use team_agent_contract::kiro::{self, KiroAdapter, KIRO_DESCRIPTOR};
+use team_agent_contract::providers::codex::{self, CodexAdapter, CODEX_DESCRIPTOR};
 use team_agent_contract::providers::cursor::{self, CursorAdapter, CURSOR_DESCRIPTOR};
 use team_agent_contract::providers::grok_build::{self, GrokAdapter, GROK_BUILD_DESCRIPTOR};
 use team_agent_contract::runtime::{
@@ -17,7 +18,12 @@ use team_agent_contract::runtime::{
     native_panel::{NativePanelPolicy, SessionPanelPolicy},
 };
 
-const DESCRIPTORS: &[&ProviderDescriptor] = &[&KIRO_DESCRIPTOR, &CURSOR_DESCRIPTOR, &GROK_BUILD_DESCRIPTOR];
+const DESCRIPTORS: &[&ProviderDescriptor] = &[&KIRO_DESCRIPTOR, &CURSOR_DESCRIPTOR, &GROK_BUILD_DESCRIPTOR, &CODEX_DESCRIPTOR];
+/// Declared keys the legacy runtime also owns (the Codex worker, leader and
+/// app-server). Only an explicit `contract_runtime: true` maps one to its leaf,
+/// whose distinct canonical id is what compiled specs and state then carry, so
+/// legacy readers never mistake a contract seat for a legacy one.
+const OPT_IN: &[(&str, &ProviderDescriptor)] = &[("codex", &CODEX_DESCRIPTOR)];
 
 /// One provider's public command route: the PATH-selected entry the pane execs
 /// by bare name and the native image that route must exec into.
@@ -26,6 +32,7 @@ pub enum NativeRuntime {
     Kiro(kiro::native::RuntimeInstallation),
     Cursor(cursor::native::RuntimeInstallation),
     GrokBuild(grok_build::native::RuntimeInstallation),
+    Codex(codex::launcher::RuntimeInstallation),
 }
 
 impl NativeRuntime {
@@ -34,6 +41,7 @@ impl NativeRuntime {
             Self::Kiro(runtime) => runtime.launcher(),
             Self::Cursor(runtime) => runtime.launcher(),
             Self::GrokBuild(runtime) => runtime.launcher(),
+            Self::Codex(runtime) => runtime.launcher(),
         }
     }
 
@@ -42,6 +50,7 @@ impl NativeRuntime {
             Self::Kiro(runtime) => &runtime.engine,
             Self::Cursor(runtime) => &runtime.engine,
             Self::GrokBuild(runtime) => &runtime.engine,
+            Self::Codex(runtime) => &runtime.engine,
         }
     }
 
@@ -50,6 +59,7 @@ impl NativeRuntime {
             Self::Kiro(runtime) => &runtime.native,
             Self::Cursor(runtime) => &runtime.native,
             Self::GrokBuild(runtime) => &runtime.native,
+            Self::Codex(runtime) => &runtime.native,
         }
     }
 
@@ -58,6 +68,7 @@ impl NativeRuntime {
             Self::Kiro(runtime) => runtime.bind_catalog(catalog),
             Self::Cursor(runtime) => runtime.bind_catalog(catalog),
             Self::GrokBuild(runtime) => runtime.bind_catalog(catalog),
+            Self::Codex(runtime) => runtime.bind_catalog(catalog),
         }
     }
 }
@@ -68,6 +79,7 @@ pub(super) enum NativeProvider {
     Kiro,
     Cursor,
     GrokBuild,
+    Codex,
 }
 
 impl NativeProvider {
@@ -76,13 +88,14 @@ impl NativeProvider {
             Self::Kiro => &KIRO_DESCRIPTOR,
             Self::Cursor => &CURSOR_DESCRIPTOR,
             Self::GrokBuild => &GROK_BUILD_DESCRIPTOR,
+            Self::Codex => &CODEX_DESCRIPTOR,
         }
     }
 
     pub fn action_budget(self) -> std::time::Duration {
         // Kiro's existing budget is unchanged; Cursor's measured cold-ready
         // path needs a larger finite bound, not an unbounded readiness wait.
-        std::time::Duration::from_secs(match self { Self::Kiro => 30, Self::Cursor | Self::GrokBuild => 90 })
+        std::time::Duration::from_secs(match self { Self::Kiro => 30, Self::Cursor | Self::GrokBuild | Self::Codex => 90 })
     }
 
     pub fn controls(self) -> &'static [ControlDefinition] {
@@ -90,6 +103,7 @@ impl NativeProvider {
             Self::Kiro => kiro::interaction::CONTROLS,
             Self::Cursor => cursor::interaction::CONTROLS,
             Self::GrokBuild => grok_build::interaction::CONTROLS,
+            Self::Codex => codex::interaction::CONTROLS,
         }
     }
 
@@ -102,20 +116,21 @@ impl NativeProvider {
     /// These providers use the separately fenced native tool-roundtrip ledger,
     /// never a guessed neutral tools panel or another provider's inspector.
     pub fn uses_tool_roundtrips(self) -> bool {
-        matches!(self, Self::Cursor | Self::GrokBuild)
+        matches!(self, Self::Cursor | Self::GrokBuild | Self::Codex)
     }
 
     pub fn startup(self) -> Option<&'static StartupDefinition> {
         match self {
             Self::GrokBuild => Some(&grok_build::interaction::STARTUP),
-            Self::Kiro | Self::Cursor => None,
+            Self::Kiro | Self::Cursor | Self::Codex => None,
         }
     }
 
     pub fn session_panel(self) -> Option<&'static SessionPanelPolicy> {
         match self {
             Self::GrokBuild => Some(&grok_build::interaction::SESSION_PANEL),
-            Self::Kiro | Self::Cursor => None,
+            // `/status` prints a history card, not a modal: nothing to close.
+            Self::Kiro | Self::Cursor | Self::Codex => None,
         }
     }
 
@@ -130,14 +145,19 @@ impl NativeProvider {
                 field: "Grok Build native Team-tool inspector",
                 reason: grok_build::UNVERIFIED,
             }),
+            Self::Codex => Err(ContractError::Unverified {
+                field: "Codex native Team-tool inspector",
+                reason: codex::UNVERIFIED,
+            }),
         }
     }
 
     pub fn server_key_for(self, identity: &InstanceIdentity) -> Result<String, ContractError> {
-        if self == Self::GrokBuild {
-            return Ok(grok_build::server_key(identity));
+        match self {
+            Self::GrokBuild => Ok(grok_build::server_key(identity)),
+            Self::Codex => Ok(codex::server_key(identity)),
+            Self::Kiro | Self::Cursor => Ok(self.server_key()?.into()),
         }
-        Ok(self.server_key()?.into())
     }
 
     pub fn server_key(self) -> Result<&'static str, ContractError> {
@@ -163,6 +183,9 @@ impl NativeProvider {
             Self::GrokBuild => GrokAdapter::new(grok_build::McpStdio {
                 executable, arguments, environment,
             }).map(NativeAdapter::GrokBuild),
+            Self::Codex => CodexAdapter::new(codex::McpStdio {
+                executable, arguments, environment,
+            }).map(NativeAdapter::Codex),
         }
     }
 }
@@ -171,6 +194,7 @@ pub(super) enum NativeAdapter {
     Kiro(KiroAdapter),
     Cursor(CursorAdapter),
     GrokBuild(GrokAdapter),
+    Codex(CodexAdapter),
 }
 
 impl NativeAdapter {
@@ -199,6 +223,14 @@ impl NativeAdapter {
                     None => adapter,
                 }))
             }
+            Self::Codex(adapter) => {
+                let adapter = adapter.with_project(project)?;
+                Ok(Self::Codex(match runtime {
+                    Some(NativeRuntime::Codex(runtime)) => adapter.with_runtime(runtime),
+                    Some(_) => return Err(ContractError::Mismatch("native runtime provider")),
+                    None => adapter,
+                }))
+            }
         }
     }
 
@@ -207,6 +239,7 @@ impl NativeAdapter {
             Self::Kiro(adapter) => adapter.hooks(),
             Self::Cursor(adapter) => adapter.hooks(),
             Self::GrokBuild(adapter) => adapter.hooks(),
+            Self::Codex(adapter) => adapter.hooks(),
         }
     }
 
@@ -215,6 +248,7 @@ impl NativeAdapter {
             Self::Kiro(adapter) => adapter.plan(request),
             Self::Cursor(adapter) => adapter.plan(request),
             Self::GrokBuild(adapter) => adapter.plan(request),
+            Self::Codex(adapter) => adapter.plan(request),
         }
     }
 }
@@ -225,6 +259,7 @@ pub(super) fn provider(key: &str) -> Result<NativeProvider, ContractError> {
         "kiro" => Ok(NativeProvider::Kiro),
         "cursor" => Ok(NativeProvider::Cursor),
         "grok_build" => Ok(NativeProvider::GrokBuild),
+        "codex_tui" => Ok(NativeProvider::Codex),
         _ => Err(ContractError::Invalid("contract provider dispatcher")),
     }
 }
@@ -239,18 +274,28 @@ pub fn descriptor(key: &str) -> Option<&'static ProviderDescriptor> {
     })
 }
 
+/// The leaf a role document selects. Canonical contract keys need no flag; a
+/// shared legacy key selects its leaf only with `contract_runtime: true` and is
+/// otherwise left to the legacy path unchanged (never re-routed).
+pub fn declared(key: &str, contract_runtime: bool) -> Option<&'static ProviderDescriptor> {
+    OPT_IN.iter().find(|(shared, _)| contract_runtime && *shared == key).map(|(_, descriptor)| *descriptor)
+        .or_else(|| descriptor(key))
+}
+
 /// Recognize a misspelled/case-modified contract declaration so it can fail
 /// explicitly instead of accidentally selecting a legacy default provider.
-pub fn recognizes(key: &str) -> bool {
+/// A shared legacy key is a contract declaration only when opted in.
+pub fn recognizes(key: &str, contract_runtime: bool) -> bool {
     let key = key.trim();
-    DESCRIPTORS.iter().any(|descriptor| {
-        descriptor.identity.id.eq_ignore_ascii_case(key)
-            || descriptor
-                .identity
-                .aliases
-                .iter()
-                .any(|alias| alias.eq_ignore_ascii_case(key))
-    })
+    (contract_runtime && OPT_IN.iter().any(|(shared, _)| shared.eq_ignore_ascii_case(key)))
+        || DESCRIPTORS.iter().any(|descriptor| {
+            descriptor.identity.id.eq_ignore_ascii_case(key)
+                || descriptor
+                    .identity
+                    .aliases
+                    .iter()
+                    .any(|alias| alias.eq_ignore_ascii_case(key))
+        })
 }
 
 #[cfg(test)]
@@ -263,18 +308,57 @@ mod tests {
         assert_eq!(provider("kiro").unwrap(), NativeProvider::Kiro);
         for legacy in ["cursor_agent", "agent", "pi", "codex", "grok"] {
             assert!(descriptor(legacy).is_none());
-            assert!(!recognizes(legacy));
+            assert!(!recognizes(legacy, false));
             assert!(provider(legacy).is_err());
         }
         assert_eq!(provider("grok_build").unwrap(), NativeProvider::GrokBuild);
-        assert!(recognizes(" Grok_Build "));
+        assert!(recognizes(" Grok_Build ", false));
         assert!(descriptor("Grok_Build").is_none());
         assert!(GROK_BUILD_DESCRIPTOR.identity.aliases.is_empty());
-        assert!(recognizes(" Cursor "));
+        assert!(recognizes(" Cursor ", false));
         assert!(descriptor("Cursor").is_none());
         for descriptor in descriptors() {
             assert_eq!(provider(descriptor.identity.id).unwrap().descriptor(), *descriptor);
         }
+    }
+
+    #[test]
+    fn bare_codex_keeps_its_legacy_meaning_and_only_opt_in_selects_the_leaf() {
+        assert_eq!(CODEX_DESCRIPTOR.identity.id, "codex_tui");
+        assert_eq!(CODEX_DESCRIPTOR.identity.binary, "codex");
+        assert_eq!(provider("codex_tui").unwrap(), NativeProvider::Codex);
+        // Legacy state rows, compiled specs and CLI overrides keep `codex`.
+        assert!(descriptor("codex").is_none());
+        assert!(provider("codex").is_err());
+        assert!(declared("codex", false).is_none());
+        assert_eq!(declared("codex", true), Some(&CODEX_DESCRIPTOR));
+        assert_eq!(declared("codex_tui", false), Some(&CODEX_DESCRIPTOR));
+        for spelling in ["codex", " Codex ", "CODEX"] {
+            assert!(!recognizes(spelling, false), "{spelling:?}");
+            assert!(recognizes(spelling, true), "{spelling:?}");
+        }
+        // A case variant opted in is recognized (to fail explicitly), never selected.
+        assert!(declared("Codex", true).is_none());
+        assert!(declared("pi", true).is_none());
+        assert_eq!(declared("grok_build", true), Some(&GROK_BUILD_DESCRIPTOR));
+        let mut identity = InstanceIdentity {
+            scope: team_agent_contract::contract::types::ScopeId::new("scope").unwrap(),
+            seat: team_agent_contract::contract::types::SeatId::new("worker").unwrap(),
+            instance: team_agent_contract::contract::types::InstanceId::new("instance").unwrap(),
+            generation: team_agent_contract::contract::types::Generation(1),
+        };
+        let first = NativeProvider::Codex.server_key_for(&identity).unwrap();
+        assert_eq!(first, codex::server_key(&identity));
+        assert_ne!(first, grok_build::server_key(&identity));
+        identity.generation = team_agent_contract::contract::types::Generation(2);
+        assert_ne!(first, NativeProvider::Codex.server_key_for(&identity).unwrap());
+        assert!(NativeProvider::Codex.tool_panel().is_err());
+        assert!(NativeProvider::Codex.startup().is_none());
+        assert!(NativeProvider::Codex.session_panel().is_none());
+        assert!(NativeProvider::Codex.uses_tool_roundtrips());
+        assert!(NativeProvider::Codex.first_business_bootstrap());
+        let kinds: Vec<_> = NativeProvider::Codex.controls().iter().map(|control| control.command).collect();
+        assert_eq!(kinds, ["/status", "/exit"]);
     }
 
     #[test]

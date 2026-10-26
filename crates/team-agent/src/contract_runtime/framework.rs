@@ -88,18 +88,20 @@ pub fn require_legacy_role(
     path: Option<&Path>,
     provider: Option<&str>,
 ) -> Result<(), crate::cli::CliError> {
-    let declared = path
+    let meta = path
         .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|raw| {
-            crate::compiler::split_front_matter(&raw)
-                .0
-                .get("provider")
-                .and_then(crate::model::yaml::Value::as_str)
-                .map(str::to_owned)
-        });
+        .map(|raw| crate::compiler::split_front_matter(&raw).0);
+    let declared = meta.as_ref().and_then(|meta| {
+        meta.get("provider")
+            .and_then(crate::model::yaml::Value::as_str)
+            .map(str::to_owned)
+    });
+    let opted_in = meta.as_ref().is_some_and(|meta| {
+        matches!(meta.get("contract_runtime"), Some(crate::model::yaml::Value::Bool(true)))
+    });
     if provider
         .or(declared.as_deref())
-        .is_some_and(super::registry::recognizes)
+        .is_some_and(|provider| super::registry::recognizes(provider, opted_in))
     {
         return Err(crate::cli::CliError::Runtime("contract_capability_unverified: mutable contract-native role lifecycle is not admitted; use initial quick-start; no role file was changed".into()));
     }

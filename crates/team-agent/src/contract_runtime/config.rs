@@ -99,25 +99,26 @@ fn mode(meta: &Value, path: &Path) -> Result<Option<CommunicationMode>, ConfigEr
         .transpose()
 }
 
+/// `contract_runtime` is an exact boolean; a bare shared key stays legacy.
+fn opted_in(meta: &Value, path: &Path) -> Result<bool, ConfigError> {
+    match meta.get("contract_runtime") {
+        None => Ok(false),
+        Some(Value::Bool(value)) => Ok(*value),
+        _ => Err(invalid(path, "contract_runtime")),
+    }
+}
+
 /// A malformed explicit contract header cannot fall back to the default Pi worker.
 fn malformed_contract_header(body: &str) -> bool {
     body.strip_prefix("---\n").is_some_and(|header| {
-        header
+        let fields: Vec<(&str, &str)> = header
             .lines()
             .take_while(|line| *line != "---")
-            .any(|line| {
-                line.split_once(':').is_some_and(|(key, value)| {
-                    key.trim() == "provider"
-                        && super::registry::recognizes(
-                            value
-                                .split('#')
-                                .next()
-                                .unwrap_or("")
-                                .trim()
-                                .trim_matches(['\'', '"']),
-                        )
-                })
-            })
+            .filter_map(|line| line.split_once(':'))
+            .map(|(key, value)| (key.trim(), value.split('#').next().unwrap_or("").trim().trim_matches(['\'', '"'])))
+            .collect();
+        let opted_in = fields.iter().any(|(key, value)| *key == "contract_runtime" && *value == "true");
+        opted_in || fields.iter().any(|(key, value)| *key == "provider" && super::registry::recognizes(value, false))
     })
 }
 
@@ -180,10 +181,12 @@ fn read_team_inner(
         if meta.get("provider").is_none() && malformed_contract_header(&normalized) {
             return Err(invalid(&path, "front matter"));
         }
-        if meta
-            .get("provider")
-            .and_then(Value::as_str)
-            .is_some_and(super::registry::recognizes)
+        let opted = opted_in(&meta, &path)?;
+        if opted
+            || meta
+                .get("provider")
+                .and_then(Value::as_str)
+                .is_some_and(|provider| super::registry::recognizes(provider, false))
         {
             selected = true;
         }
@@ -247,9 +250,15 @@ fn read_team_inner(
         if !ids.insert(id.clone()) {
             return Err(invalid(&source, "duplicate agent id"));
         }
+        // `leader` is the framework's own forwarding route. A role of that name
+        // on either runtime would shadow it, so refuse before any seat spawns.
+        if id == "leader" {
+            return Err(invalid(&source, "reserved worker id"));
+        }
         let provider = text(&meta, "provider", &source)?.unwrap_or_else(|| "pi".into());
-        let registration = super::registry::descriptor(&provider);
-        if registration.is_none() && super::registry::recognizes(&provider) {
+        let opted = opted_in(&meta, &source)?;
+        let registration = super::registry::declared(&provider, opted);
+        if registration.is_none() && (opted || super::registry::recognizes(&provider, false)) {
             return Err(invalid(&source, "provider"));
         }
         let runtime = if registration.is_some() {
@@ -269,9 +278,6 @@ fn read_team_inner(
         let provider =
             ProviderId::new(registration.identity.id).map_err(|_| invalid(&source, "provider"))?;
         let id = SeatId::new(id).map_err(|_| invalid(&source, "agent id"))?;
-        if id.as_str() == "leader" {
-            return Err(invalid(&source, "reserved worker id"));
-        }
         if text(&meta, "auth_mode", &source)?.is_some_and(|value| value != "subscription")
             || text(&meta, "profile", &source)?.is_some()
         {

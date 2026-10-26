@@ -117,6 +117,11 @@ fn is_public_window_name(provider: &str, window: &str) -> bool {
     if provider == "grok_build" && window == "grok" {
         return true;
     }
+    // An npm-installed Codex runs its vendor launcher under PATH's `node`, so
+    // tmux names the pane after that process instead of `codex`.
+    if provider == "codex_tui" && matches!(window, "codex" | "node") {
+        return true;
+    }
     parse_provider(provider).is_some_and(|parsed| {
         command_name(parsed) == window
             || crate::layout::worker_window_helpers::provider_window_name(parsed) == window
@@ -1443,6 +1448,14 @@ mod tests {
             has_issue(&issues, "worker_window_missing:grok-seat"),
             "a same-named window must not hide a different pane id; issues={issues}"
         );
+    }
+
+    #[test]
+    fn codex_contract_window_may_carry_its_public_or_node_launcher_name() {
+        assert!(is_public_window_name("codex_tui", "codex"));
+        assert!(is_public_window_name("codex_tui", "node"));
+        assert!(!is_public_window_name("codex_tui", "grok"));
+        assert!(!is_public_window_name("grok_build", "node"));
     }
 
     #[test]

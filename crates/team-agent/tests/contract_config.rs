@@ -296,3 +296,81 @@ fn worker_named_leader_is_not_a_leader_launcher_and_non_tmux_refuses() {
     assert!(!args.workspace.join(".team").exists());
     assert!(!args.workspace.join(".kiro").exists());
 }
+
+fn codex_role(args: &QuickStartArgs, name: &str, extra: &str) {
+    std::fs::write(args.agents_dir.join("agents").join(format!("{name}.md")), format!(
+        "---\nprovider: codex\nmodel: gpt-6-luna\ndangerously_skip_permissions: true\n{extra}---\nCodex role body\n"
+    )).unwrap();
+}
+
+#[test]
+fn bare_codex_stays_legacy_and_only_an_exact_opt_in_selects_the_contract_leaf() {
+    use team_agent::model::yaml::Value;
+    let (_sandbox, args) = fixture();
+    codex_role(&args, "legacy-worker", "");
+    codex_role(&args, "opted-out", "contract_runtime: false\n");
+    // A team of bare/opted-out Codex roles never enters the contract path.
+    assert!(read_team(&args).unwrap().is_none());
+    codex_role(&args, "native-worker", "contract_runtime: true\n");
+    let config = read_team(&args).unwrap().unwrap();
+    assert_eq!(config.roles.len(), 1);
+    assert_eq!(config.roles[0].id.as_str(), "native-worker");
+    assert_eq!(config.roles[0].provider.as_str(), "codex_tui");
+    let routes: Vec<_> = config.members.iter().map(|member| (member.id.as_str(), member.provider.as_str(), member.runtime)).collect();
+    assert_eq!(routes, [
+        ("legacy-worker", "codex", RuntimeFamily::Legacy),
+        ("native-worker", "codex_tui", RuntimeFamily::Contract),
+        ("opted-out", "codex", RuntimeFamily::Legacy),
+    ]);
+    // The compiled spec carries the leaf's distinct canonical id; legacy rows keep `codex`.
+    let spec = team_agent::compiler::compile_team(&args.agents_dir).unwrap();
+    let providers: Vec<_> = spec.get("agents").and_then(Value::as_list).unwrap().iter()
+        .map(|agent| (agent.get("id").and_then(Value::as_str).unwrap(), agent.get("provider").and_then(Value::as_str).unwrap()))
+        .collect();
+    assert_eq!(providers, [("legacy-worker", "codex"), ("native-worker", "codex_tui"), ("opted-out", "codex")]);
+    // Mutable lifecycle refuses only the contract declaration.
+    let native = args.agents_dir.join("agents/native-worker.md");
+    let legacy = args.agents_dir.join("agents/legacy-worker.md");
+    assert!(team_agent::contract_runtime::framework::require_legacy_role(Some(&native), None).is_err());
+    assert!(team_agent::contract_runtime::framework::require_legacy_role(Some(&legacy), None).is_ok());
+    assert!(team_agent::contract_runtime::framework::require_legacy_role(None, Some("codex")).is_ok());
+    assert!(team_agent::contract_runtime::framework::require_legacy_role(None, Some("codex_tui")).is_err());
+    assert!(!args.workspace.join(".team").exists());
+}
+
+#[test]
+fn malformed_or_misdirected_codex_opt_in_fails_closed() {
+    let (_sandbox, args) = fixture();
+    for (provider, extra, field) in [
+        ("codex", "contract_runtime: \"yes\"\n", "contract_runtime"),
+        ("codex", "contract_runtime: 1\n", "contract_runtime"),
+        ("pi", "contract_runtime: true\n", "provider"),
+        ("Codex", "contract_runtime: true\n", "provider"),
+    ] {
+        std::fs::write(args.agents_dir.join("agents/worker.md"), format!(
+            "---\nprovider: {provider}\nmodel: gpt-6-luna\n{extra}---\nBody\n"
+        )).unwrap();
+        assert!(matches!(read_team(&args), Err(ConfigError::Invalid { field: actual, .. }) if actual == field), "{provider} {extra}");
+        assert!(team_agent::compiler::compile_team(&args.agents_dir).is_err(), "{provider} {extra}");
+    }
+    // An unparseable header that opted in cannot fall back to a default worker.
+    std::fs::write(args.agents_dir.join("agents/worker.md"), "---\nprovider: codex\ncontract_runtime: true\nmissing closing delimiter").unwrap();
+    assert!(matches!(read_team(&args), Err(ConfigError::Invalid { field: "front matter", .. })));
+    assert!(!args.workspace.join(".team").exists());
+}
+
+#[test]
+fn legacy_role_named_leader_cannot_shadow_the_framework_route_of_a_contract_team() {
+    let (_sandbox, args) = fixture();
+    // A legacy-only team keeps its existing behavior: no contract selection.
+    role(&args, "leader", "pi");
+    assert!(read_team(&args).unwrap().is_none());
+    // With a contract seat, `leader` is the framework's own forwarding route.
+    // Refuse before compile/spawn instead of a late, opaque route Conflict.
+    codex_role(&args, "onboarding-worker", "contract_runtime: true\n");
+    assert!(matches!(
+        read_team(&args),
+        Err(ConfigError::Invalid { field: "reserved worker id", .. })
+    ));
+    assert!(!args.workspace.join(".team").exists());
+}
