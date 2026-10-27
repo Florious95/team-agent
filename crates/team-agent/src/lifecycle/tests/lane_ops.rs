@@ -641,8 +641,8 @@ fn remove_persists_retired_tombstone_and_explicit_readd_clears_it() {
 #[serial_test::serial(env)]
 fn issue391_force_readd_adopts_the_role_file_a_removed_seat_left_behind() {
     let ws = lanea_ws_agents(json!({
-        "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" },
-        "bravo": { "status": "running", "provider": "codex", "window": "bravo" }
+        "alpha": { "status": "stopped", "provider": "fake", "window": "alpha" },
+        "bravo": { "status": "running", "provider": "fake", "window": "bravo" }
     }));
     let mut seeded = crate::state::persist::load_runtime_state(&ws).unwrap();
     seeded["team_key"] = json!("laneateam");
@@ -665,7 +665,7 @@ fn issue391_force_readd_adopts_the_role_file_a_removed_seat_left_behind() {
         )
     };
     let same = crate::lifecycle::role_config::RoleConfigPatch {
-        provider: Some("codex".into()),
+        provider: Some("fake".into()),
         bypass: Some(false),
         ..Default::default()
     };
