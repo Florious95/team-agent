@@ -1702,7 +1702,7 @@ thread_local! {
     static CURSOR_SINGLE_ENTER: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Run `f` with a paste→Enter floor. Delivery sets 1s for CursorAgent and Grok.
+/// Run `f` with a paste→Enter floor. Delivery sets 1s for Grok.
 /// Tests pass a small non-zero Duration to cover the sleep branch.
 /// Default is ZERO — claude/codex and unset callers pay nothing.
 /// This is not TEAM_AGENT_TEST_TMP (that var is a path, always set in seats).
@@ -1712,7 +1712,7 @@ thread_local! {
 ///   floor: 本次生效的最小间隔;ZERO 表示不等
 ///   f: 在该地板下执行的闭包
 /// returns: 原样返回 f 的返回值
-/// boundary: thread_local 作用域,不跨线程;只设阈值,真正的等待发生在 sleep_remaining_paste_to_submit_floor;默认 ZERO,只有 delivery 对 cursor 才设 1s
+/// boundary: thread_local 作用域,不跨线程;只设阈值,真正的等待发生在 sleep_remaining_paste_to_submit_floor;默认 ZERO,只有 delivery 对 Grok 才设 1s
 /// ---
 pub fn with_paste_to_submit_floor<R>(floor: Duration, f: impl FnOnce() -> R) -> R {
     PASTE_TO_SUBMIT_FLOOR.with(|cell| {
@@ -1733,7 +1733,7 @@ pub(crate) fn current_paste_to_submit_floor() -> Duration {
 }
 
 /// ---
-/// purpose: cursor 注入单回车闸（delivery 仅对 CursorAgent 打开）
+/// purpose: 单回车闸（delivery 仅对 Pi 打开；最初为 Cursor 实测）
 /// contract: 默认关；打开后重试 Enter 仅当 token 仍在输入区且无 busy
 /// boundary: 不改 claude/grok/codex 默认重试；测试隔离下默认关
 /// ---

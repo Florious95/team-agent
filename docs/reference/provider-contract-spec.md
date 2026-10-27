@@ -48,7 +48,7 @@
 | Codex | `-c` 配置、JSONL turn/fault、native catalog；leader 另有 app-server | `caps.fork=true` 不等公开 `fork-agent` 可用；普通 worker 仍走 CLI |
 | Claude / ClaudeCode | prompt/permission flags、inline/file/managed MCP、projects root、JSONL | 两个 wire 值同一 executable；native/compatible 的会话与 profile 门不同 |
 | Pi | owned extension、runtime MCP、live exact catalog、exact-path resume、完整快照新席 fork | 旧 adapter launch/resume 不适用；没有专用 semantic turn reader；单 Enter helper 未生产接线 |
-| CursorAgent | isolated project、rules、MCP 文件与 enable、archive/chatId | 所有 role effort 拒绝；输入重按有 busy guard；不得改 HOME 来隔离 |
+| Cursor（契约叶 `cursor`；`cursor-agent`/`agent`/`cursor_agent` 均为声明名） | 公开 `cursor-agent`、私有 cwd 的 owned `.cursor/mcp.json` + `--approve-mcps`、`create-chat` 精确 chatId | 旧 `cursor_agent` 引擎已移除；所有 role effort 拒绝；旧 state 行只准 stop/remove |
 | Grok | rules/session argv、目录 MCP、login/trust、原窗 `/fork`、native queue | 目录配置有独占限制；catalog 可见不是登录证明；队列收下不是新 turn |
 | GeminiCli | 最小 `gemini [--model RAW]`、共享宿主、遗留 global installer | 无公开 native leader verb / catalog / resume / fork；普通 spawn MCP 连通未证 |
 

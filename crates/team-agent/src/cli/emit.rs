@@ -1643,9 +1643,20 @@ fn role_agent_args(
         }
         match flag {
             "--provider" => {
-                let provider = crate::provider::wire::parse_provider(&value)
-                    .ok_or_else(|| CliError::Usage(format!("unknown provider: {value}")))?;
-                role.provider = Some(crate::provider::wire::provider_wire(provider).to_string());
+                // A contract name (e.g. `agent` for Cursor) is written as its leaf id.
+                #[cfg(unix)]
+                let contract = crate::contract_runtime::registry::declared(&value, false)
+                    .map(|descriptor| descriptor.identity.id);
+                #[cfg(not(unix))]
+                let contract: Option<&str> = None;
+                let provider = match contract {
+                    Some(id) => id,
+                    None => crate::provider::wire::provider_wire(
+                        crate::provider::wire::parse_provider(&value)
+                            .ok_or_else(|| CliError::Usage(format!("unknown provider: {value}")))?,
+                    ),
+                };
+                role.provider = Some(provider.to_string());
             }
             "--bypass" => {
                 role.bypass = Some(match value.as_str() {
@@ -1730,6 +1741,24 @@ mod role_cli_tests {
             role_agent_args(&strings(&["w", "--provider=pi", "--bypass=false"]), true).unwrap();
         assert_eq!(patch.provider.as_deref(), Some("pi"));
         assert_eq!(patch.bypass, Some(false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_accepts_contract_names_as_their_leaf_id() {
+        for (name, leaf) in [
+            ("cursor", "cursor"), ("cursor-agent", "cursor"), ("agent", "cursor"),
+            ("cursor_agent", "cursor"), ("kiro", "kiro"), ("codex_tui", "codex_tui"),
+        ] {
+            let (_, patch) = role_agent_args(
+                &strings(&["w", "--provider", name, "--bypass", "true"]), true,
+            ).unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(patch.provider.as_deref(), Some(leaf), "{name}");
+        }
+        let (_, patch) =
+            role_agent_args(&strings(&["w", "--provider", "codex", "--bypass", "true"]), true).unwrap();
+        assert_eq!(patch.provider.as_deref(), Some("codex"), "a bare shared key stays legacy");
+        assert!(role_agent_args(&strings(&["w", "--provider", "Cursor", "--bypass", "true"]), true).is_err());
     }
 
     #[test]

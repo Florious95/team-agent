@@ -3467,17 +3467,18 @@ pub mod lifecycle_port {
     ) -> Result<Value, CliError> {
         let agent_id = crate::model::ids::AgentId::new(agent);
         let source = (!role_file.is_empty()).then(|| Path::new(role_file));
+        // A contract role is added by the same role transaction; its seat then
+        // starts in the native framework (lifecycle::launch::add_agent).
         #[cfg(unix)]
-        {
+        if !crate::contract_runtime::framework::declares_contract(
+            source,
+            role_config.provider.as_deref(),
+        ) {
             crate::contract_runtime::framework::require_legacy_lifecycle(
                 workspace,
                 team,
                 Some(agent),
                 "add-agent",
-            )?;
-            crate::contract_runtime::framework::require_legacy_role(
-                source,
-                role_config.provider.as_deref(),
             )?;
         }
         match crate::lifecycle::role_config::add_agent_from_role(

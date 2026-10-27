@@ -237,6 +237,37 @@ fn every_cursor_name_alone_selects_the_contract_leaf() {
 }
 
 #[test]
+fn pre_upgrade_cursor_agent_row_admits_only_teardown_and_never_blocks_siblings() {
+    use team_agent::contract_runtime::framework::require_legacy_lifecycle;
+    use team_agent::state::{persist, selector};
+    let (_sandbox, args) = fixture();
+    std::fs::write(args.agents_dir.join("agents/pi-worker.md"),
+        "---\nprovider: pi\nmodel: openai-codex/gpt-6-luna\n---\nWorker.\n").unwrap();
+    for retired in ["cursor_agent", "agent"] {
+        // The role file now declares the contract leaf; the recorded row is legacy.
+        role(&args, "retired", retired);
+        persist::save_runtime_state(&args.workspace, &serde_json::json!({
+            "team_key": "demo", "active_team_key": "demo", "team_dir": args.agents_dir,
+            "agents": {"pi-worker": {"provider": "pi"}, "retired": {"provider": retired}},
+        })).unwrap();
+        selector::resolve_active_team_readonly(
+            &args.workspace, None, selector::SelectorMode::RuntimeOnly,
+        ).expect("the guard must examine a real selected team");
+        for operation in ["stop-agent", "remove-agent"] {
+            require_legacy_lifecycle(&args.workspace, None, Some("retired"), operation)
+                .unwrap_or_else(|error| panic!("{retired} {operation}: {error}"));
+        }
+        for operation in ["start-agent", "reset-agent", "fork-agent", "clone-agent"] {
+            let error = require_legacy_lifecycle(&args.workspace, None, Some("retired"), operation)
+                .unwrap_err().to_string();
+            assert!(error.contains("legacy cursor_agent seat"), "{operation}: {error}");
+        }
+        require_legacy_lifecycle(&args.workspace, None, Some("pi-worker"), "start-agent")
+            .unwrap_or_else(|error| panic!("sibling blocked by {retired}: {error}"));
+    }
+}
+
+#[test]
 fn cursor_mutation_malformed_declarations_and_api_profiles_refuse_without_writes() {
     let (_sandbox, args) = fixture();
     role(&args, "worker", "cursor");

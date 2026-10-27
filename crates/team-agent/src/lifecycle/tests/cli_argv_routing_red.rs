@@ -1397,6 +1397,42 @@ fn a15_provider_drift_and_unknown_force_remain_refused() {
 
 #[test]
 #[serial(env)]
+fn issue381_every_cursor_name_adds_through_the_contract_leaf_never_legacy_agent() {
+    let f = Fixture::new("cursor-contract-add");
+    f.start_team("codex", &["worker"]);
+    let before = crate::state::projection::select_runtime_state(&f.ws, Some("argvteam")).unwrap();
+    let probes_before = fs::read_to_string(&f.probes).unwrap_or_default();
+    for (index, name) in ["cursor", "cursor-agent", "agent", "cursor_agent"].into_iter().enumerate() {
+        let id = format!("cursor-{index}");
+        let added = crate::lifecycle::role_config::add_agent_from_role(
+            &f.ws,
+            &AgentId::new(&id),
+            None,
+            &crate::lifecycle::role_config::RoleConfigPatch {
+                provider: Some(name.into()),
+                model: Some("gpt-5.6-luna-xhigh".into()),
+                bypass: Some(true),
+                prompt: Some("Reply to every task.".into()),
+                ..Default::default()
+            },
+            false,
+            Some("argvteam"),
+        );
+        // The fixture PATH has a fake legacy `agent` but no `cursor-agent`:
+        // the contract leaf's discovery refuses before any native effect.
+        let error = added.expect_err("no cursor-agent on PATH").to_string();
+        assert!(error.contains("cursor-agent"), "{name}: {error}");
+        assert!(!f.team.join(format!("agents/{id}.md")).exists(), "{name}: role rolled back");
+        let after = crate::state::projection::select_runtime_state(&f.ws, Some("argvteam")).unwrap();
+        assert!(after["agents"].get(&id).is_none(), "{name}: seed row rolled back");
+        assert_eq!(after["agents"]["worker"], before["agents"]["worker"], "{name}");
+    }
+    let probes = fs::read_to_string(&f.probes).unwrap_or_default();
+    assert_eq!(probes, probes_before, "no legacy `agent` probe or catalog read");
+}
+
+#[test]
+#[serial(env)]
 fn a15_route_does_not_relax_running_start_reset_discard_or_unsupported_fork() {
     let f = Fixture::new("argv-old-refusals");
     f.start_team("codex", &["worker"]);

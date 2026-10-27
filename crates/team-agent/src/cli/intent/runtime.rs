@@ -631,29 +631,13 @@ fn add(
             {
                 return Err(usage("role creation requires explicit provider and dangerously_skip_permissions decisions"));
             }
-            let (_, compiled) = role(plan, selected, id, Some(&path))?;
-            #[cfg(unix)]
-            if crate::contract_runtime::registry::descriptor(provider(&compiled)).is_some() {
-                return Err(refusal(
-                    "native dynamic add is not admitted; no legacy fallback",
-                ));
-            }
+            role(plan, selected, id, Some(&path))?;
             path.to_string_lossy().into_owned()
         }
         None => {
             if patch.provider.is_none() || patch.bypass.is_none() {
                 return Err(usage(
                     "unknown agent: supply a complete --role-file or --provider and --bypass",
-                ));
-            }
-            #[cfg(unix)]
-            if patch
-                .provider
-                .as_deref()
-                .is_some_and(|p| crate::contract_runtime::registry::descriptor(p).is_some())
-            {
-                return Err(refusal(
-                    "native dynamic add is not admitted; no legacy fallback",
                 ));
             }
             String::new()

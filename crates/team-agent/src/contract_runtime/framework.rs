@@ -54,15 +54,27 @@ pub fn require_legacy_lifecycle(
     ) else {
         return Ok(());
     };
+    let row = agent.and_then(|id| selected.state.get("agents").and_then(|agents| agents.get(id)));
+    // A pre-upgrade legacy Cursor seat has no engine left; only teardown is admitted.
+    let teardown = matches!(operation, "stop-agent" | "remove-agent");
+    if !teardown
+        && row
+            .and_then(|row| row.get("provider"))
+            .and_then(Value::as_str)
+            .is_some_and(crate::provider::wire::is_retired_provider)
+    {
+        return Err(crate::cli::CliError::Runtime(
+            crate::provider::wire::RETIRED_PROVIDER_ERROR.into(),
+        ));
+    }
     let selected_native = match agent {
-        Some(id) => selected
-            .state
-            .get("agents")
-            .and_then(|agents| agents.get(id))
-            .is_some_and(is_contract),
+        Some(_) => row.is_some_and(is_contract),
         None => has_contract(&selected.state),
     };
-    let configured_native = selected
+    // A recorded legacy seat is torn down on its own runtime even when its role
+    // document now declares a contract leaf (`cursor_agent` before the upgrade).
+    let configured_native = !(teardown && row.is_some())
+        && selected
         .state
         .get("team_dir")
         .and_then(Value::as_str)
@@ -88,6 +100,13 @@ pub fn require_legacy_role(
     path: Option<&Path>,
     provider: Option<&str>,
 ) -> Result<(), crate::cli::CliError> {
+    if declares_contract(path, provider) {
+        return Err(crate::cli::CliError::Runtime("contract_capability_unverified: mutable contract-native role lifecycle is not admitted; use initial quick-start; no role file was changed".into()));
+    }
+    Ok(())
+}
+/// Whether a role document or CLI provider value selects a contract leaf.
+pub fn declares_contract(path: Option<&Path>, provider: Option<&str>) -> bool {
     let meta = path
         .and_then(|path| std::fs::read_to_string(path).ok())
         .map(|raw| crate::compiler::split_front_matter(&raw).0);
@@ -99,13 +118,9 @@ pub fn require_legacy_role(
     let opted_in = meta.as_ref().is_some_and(|meta| {
         matches!(meta.get("contract_runtime"), Some(crate::model::yaml::Value::Bool(true)))
     });
-    if provider
+    provider
         .or(declared.as_deref())
         .is_some_and(|provider| super::registry::recognizes(provider, opted_in))
-    {
-        return Err(crate::cli::CliError::Runtime("contract_capability_unverified: mutable contract-native role lifecycle is not admitted; use initial quick-start; no role file was changed".into()));
-    }
-    Ok(())
 }
 pub fn team_config(
     workspace: &Path,
@@ -134,26 +149,37 @@ pub fn start_role(
         if directory.canonicalize()? != selected.team_dir.canonicalize()? {
             return Err(error("native role source changed while acquiring lifecycle ownership".into()));
         }
-        let config = team_config(&selected.run_workspace, &selected.team_dir, &selected.team_key)
-            .map_err(|e| error(e.to_string()))?
-            .ok_or_else(|| error("contract role no longer configured".into()))?;
-        let role = config.roles.iter().find(|role| &role.id == seat)
-            .ok_or_else(|| error("contract role not found".into()))?;
-        let (_, record) = backend::start(&selected.run_workspace, &selected.team_key, role, &config.members)
-            .map_err(|e| error(e.to_string()))?;
-        if record.outcome != Outcome::Committed {
-            return Err(error(format!("native startup seat={id} operation={:?} phase={:?} outcome={:?}: {}",
-                record.id, record.phase, record.outcome, record.failure.unwrap_or_default())));
-        }
-        // Preserve each committed seat before a later discovery/spawn can fail.
-        // A whole-batch error must never hide this generation's physical effects.
-        let projected = super::commands::publish_at(&selected.run_workspace, &selected.team_key, seat, true)?;
-        Ok(projected)
+        start_configured(&selected.run_workspace, &selected.team_dir, &selected.team_key, seat)
     }).map_err(|e| crate::lifecycle::LifecycleError::Provider(e.to_string()))?;
     if result.is_none() {
         return Err(crate::lifecycle::LifecycleError::Provider("native startup scope/seat is not addressable; no legacy fallback".into()));
     }
     Ok(())
+}
+
+/// Start one configured contract role and publish its seat. The caller holds
+/// the lifecycle lock (or owns the whole launch) and has seeded the state row.
+pub(crate) fn start_configured(
+    workspace: &Path,
+    directory: &Path,
+    team: &str,
+    seat: &SeatId,
+) -> Result<Value, crate::cli::CliError> {
+    let error = |error: String| crate::cli::CliError::Runtime(error);
+    let config = team_config(workspace, directory, team)
+        .map_err(|e| error(e.to_string()))?
+        .ok_or_else(|| error("contract role no longer configured".into()))?;
+    let role = config.roles.iter().find(|role| &role.id == seat)
+        .ok_or_else(|| error(format!("contract role not found in {}", directory.join("agents").display())))?;
+    let (_, record) = backend::start(workspace, team, role, &config.members)
+        .map_err(|e| error(e.to_string()))?;
+    if record.outcome != Outcome::Committed {
+        return Err(error(format!("native startup seat={} operation={:?} phase={:?} outcome={:?}: {}",
+            seat.as_str(), record.id, record.phase, record.outcome, record.failure.unwrap_or_default())));
+    }
+    // Preserve each committed seat before a later discovery/spawn can fail.
+    // A whole-batch error must never hide this generation's physical effects.
+    super::commands::publish_at(workspace, team, seat, true)
 }
 
 pub fn project_seat(workspace: &Path, team: &str, id: &str) -> Result<Value, BackendError> {
