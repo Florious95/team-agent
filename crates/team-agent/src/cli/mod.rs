@@ -3319,10 +3319,12 @@ pub mod lifecycle_port {
                 Some(agent),
                 "start-agent",
             )?;
-            crate::contract_runtime::framework::require_legacy_role(
-                None,
-                role_config.provider.as_deref(),
-            )?;
+            // Only an explicit override can move this legacy seat onto a leaf.
+            // An omitted provider keeps the existing role's provider; it is not
+            // a new role defaulting to `pi`.
+            if let Some(provider) = role_config.provider.as_deref() {
+                crate::contract_runtime::framework::require_legacy_role(None, Some(provider))?;
+            }
         }
         let _ = force; // Never grants authority to stop an already-running seat.
         let agent_id = crate::model::ids::AgentId::new(agent);

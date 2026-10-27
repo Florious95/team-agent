@@ -22,7 +22,9 @@ use team_agent::cli::{
 
 const TEAM_MD: &str = "---\nname: contract-team\nobjective: Contract fixture.\nprovider: codex\nmodel: gpt-5.5\n---\n\nContract fixture.\n";
 const ROLE_MD: &str = "---\nname: worker\nrole: Contract Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nDo contract work.\n";
-const INVALID_ROLE_MD: &str = "---\nname: broken\nrole: Broken Worker\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\n---\n\nMissing provider.\n";
+// An omitted provider is the default Pi leaf, so only an unknown provider is
+// a compile diagnostic.
+const INVALID_ROLE_MD: &str = "---\nname: broken\nrole: Broken Worker\nprovider: imaginary\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\n---\n\nUnknown provider.\n";
 
 fn fixture(env: &HermeticTestEnv, tag: &str) -> PathBuf {
     let team = env.workspace(tag);

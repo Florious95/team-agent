@@ -18,6 +18,8 @@ team-agent agent restart reviewer --session preserve --workspace . --team projec
 team-agent doctor --workspace . --json
 team-agent inbox leader --workspace . --team project-team -n 3
 team-agent models --provider NAME
+team-agent models --provider claude
+team-agent models --provider pi
 team-agent profile init my-api --auth-mode compatible_api --workspace .
 team-agent restart reviewer --workspace . --team project-team
 team-agent route add pi -- --verbose
