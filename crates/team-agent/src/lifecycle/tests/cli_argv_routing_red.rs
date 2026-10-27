@@ -1370,3 +1370,46 @@ fn a15_route_does_not_relax_running_start_reset_discard_or_unsupported_fork() {
     let before = load_runtime_state(&f.ws).unwrap();
     assert!(before.pointer("/agents/forked").is_none());
 }
+
+#[test]
+#[serial(env)]
+fn a16_cold_spawn_refuses_retired_or_missing_worker_provider_before_any_pane() {
+    use crate::model::yaml::Value as Yaml;
+    // A pre-upgrade spec agent naming a retired legacy key, or naming no
+    // provider at all, never falls back to a legacy engine.
+    for (tag, provider, expected) in [
+        ("argv-retired-codex", Some("codex"), "legacy codex seat has no runtime in this release"),
+        ("argv-retired-grok", Some("grok"), "legacy grok seat has no runtime in this release"),
+        ("argv-missing-provider", None, "unknown worker provider \"\""),
+    ] {
+        let f = Fixture::new(tag);
+        let spec = f.spec("copilot", &["worker"]);
+        let mut edited = crate::model::yaml::loads(&fs::read_to_string(&spec).unwrap()).unwrap();
+        let Yaml::Map(top) = &mut edited else {
+            panic!("fixture spec object");
+        };
+        let Yaml::List(agents) = &mut top.iter_mut().find(|(key, _)| key == "agents").unwrap().1 else {
+            panic!("fixture agents list");
+        };
+        for agent in agents {
+            let Yaml::Map(fields) = agent else {
+                panic!("fixture agent object");
+            };
+            fields.retain(|(key, _)| key != "provider");
+            if let Some(provider) = provider {
+                fields.push(("provider".into(), Yaml::Str(provider.into())));
+            }
+        }
+        fs::write(&spec, crate::model::yaml::dumps(&edited)).unwrap();
+        let state_path = crate::state::persist::runtime_state_path(&f.ws);
+        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        fs::write(state_path, "{}").unwrap();
+        let t = offline();
+        let error = launch_with_transport_in_workspace(&f.ws, &spec, false, false, true, &t)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{tag}: {error}");
+        assert!(t.spawn_records().is_empty(), "{tag}");
+        assert!(!f.native_file().exists(), "{tag}");
+    }
+}

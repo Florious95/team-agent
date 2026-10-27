@@ -3,8 +3,9 @@ use super::*;
 use crate::transport::test_support::OfflineTransport;
 
 // Removal contract for the retired abnormal-exit automatic recovery path.
-// Abnormal exits remain visible and keep a copyable manual start-agent hint,
-// but coordinator ticks must never schedule or execute lifecycle work.
+// Abnormal exits remain visible with a manual recovery hint (a pre-upgrade
+// legacy row is told to stop/remove and add again, since start-agent refuses
+// it), but coordinator ticks must never schedule or execute lifecycle work.
 
 #[test]
 fn abnormal_exit_is_reported_without_auto_recovery_intent_or_action() {
@@ -47,15 +48,16 @@ fn abnormal_exit_is_reported_without_auto_recovery_intent_or_action() {
         transport.spawn_records()
     );
 
+    // The claude_code row is a pre-upgrade legacy seat: start-agent would be
+    // refused, so the hint names the stop/remove + re-add recovery instead.
     let content = case.latest_leader_notification();
     assert!(
         content.contains("No automatic restart was performed.")
-            && content.contains("To recover manually, run: team-agent start-agent fe-admin")
-            && content.contains("--workspace")
-            && content.contains("--team research")
-            && content.contains("--force")
-            && content.contains("--json"),
-        "abnormal notification must remain visible and keep the copyable manual recovery command; content={content}"
+            && content.contains(
+                "legacy claude seat has no runtime in this release; stop or remove it, then add it again (provider: claude)"
+            )
+            && !content.contains("start-agent"),
+        "abnormal notification must remain visible and never suggest a refused start-agent; content={content}"
     );
 }
 

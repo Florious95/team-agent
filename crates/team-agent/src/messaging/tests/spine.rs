@@ -377,11 +377,15 @@ fn spine_delivery_busy_recipient_is_injected_without_idle_deferral() {
 }
 
 #[test]
-fn spine_delivery_refuses_retired_claude_and_pi_rows_before_input() {
+fn spine_delivery_refuses_retired_legacy_rows_before_input() {
     for (provider, expected) in [
         ("pi", "legacy pi seat has no runtime in this release"),
         ("claude", "legacy claude seat has no runtime in this release"),
         ("claude_code", "legacy claude seat has no runtime in this release"),
+        ("codex", "legacy codex seat has no runtime in this release"),
+        ("codex_cli", "legacy codex seat has no runtime in this release"),
+        ("codex-cli", "legacy codex seat has no runtime in this release"),
+        ("grok", "legacy grok seat has no runtime in this release"),
     ] {
         let ws = tmp_ws(&format!("retired-{provider}"));
         let store = store_for(&ws);

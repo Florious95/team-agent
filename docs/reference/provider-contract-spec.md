@@ -190,7 +190,7 @@ Hook 路由唯一化：P2→H1，P3→H2，P4→H3，P6/P8 的 native UI→H6，
 | runtime MCP bridge | 现有 `lifecycle/launch/pi_mcp.rs::materialize_pi_plan`（仅 Pi leader）；`pi_mcp_extension.js`（仅 Pi） | 新 Provider 若需 bridge，做自己有官方接口的窄物化/观察模块，不冒用 Pi extension |
 | 实际 launch 入口 | 现有 [`lifecycle/launch/spawn.rs`](../../crates/team-agent/src/lifecycle/launch/spawn.rs) `spawn_agents`；`lifecycle/restart/common.rs::spawn_agent_window`；`leader/start.rs` | 三条入口显式使用同一配置决策；辅助 catalog/version/MCP enable 不经过 host argv-route |
 | 宿主 shell | 现有 [`tmux_backend.rs`](../../crates/team-agent/src/tmux_backend.rs) `shell_command/worker_shell_wrapper_command/leader_shell_wrapper_command/spawn_with_command` | 通常不改；接 operation policy，不塞 Provider if/else |
-| 启动菜单/fast-mode | 现有 `provider/startup_prompt.rs`；`ProviderAdapter::handle_startup_prompts_outcome/enable_fast_mode`；`spawn_agents` | H6 识别、descriptor 给动作；Codex `/fast` 当前只有 cold caller，不能据方法存在说 restart 同样执行 |
+| 启动菜单 | 现有 `provider/startup_prompt.rs`；`ProviderAdapter::handle_startup_prompts_outcome`；`spawn_agents` | H6 识别、descriptor 给动作；旧 Codex `/fast`（`enable_fast_mode`）已随旧 worker 引擎移除，`runtime.fast` 不再有生产读者 |
 | Agent → Team | 现有 [`mcp_server/wire.rs`](../../crates/team-agent/src/mcp_server/wire.rs) `dispatch_tool`；`mcp_server/tools.rs::send_message_with_presentation/report_result_with_presentation` | native 工具名映射到现有三 logical tools；身份由框架注入 |
 | Team → Agent | 现有 [`messaging/delivery.rs`](../../crates/team-agent/src/messaging/delivery.rs) `deliver_pending_messages/deliver_prepared_message/render_message` | 复用 persist-first funnel，按收件 channel 选协议；不得另建 provider send 队列 |
 | 声明/七个行为钩子 | **拟议** `ProviderDescriptor` / `ProviderHooks`；基线仍是 `BasicProviderAdapter` match | 用 §1.4–1.5 做完整 registration；现有 `adapters/<new>.rs` 可继续承载实现，不要求七个新文件 |
@@ -203,7 +203,7 @@ Hook 路由唯一化：P2→H1，P3→H2，P4→H3，P6/P8 的 native UI→H6，
 | L3 server/client/return probe | 现有 `mcp_server/wire.rs::McpServerLifecycleMarker`（尚无可用 epoch/ready consumer）；Pi runtime events | 新协议 observer 通过 §6 的 scoped `Probe<E>` 接 readiness；server write 不能代替 client received |
 | semantic activity/fault | 现有 `coordinator/tick.rs::jsonl_activity_for_agent`；`provider/classify.rs::latest_explicit_error_fact`；`messaging/activity.rs` | H5 仅解释 turn/fault，不制造业务回复；无 reader 则 Unknown/Unsupported，不是空闲 |
 | 会话归属/恢复 | 现有 `ProviderAdapter::capture_session_candidates/recover_session_id`；`provider/session_scan/`、`provider/session/` | 返回候选与置信依据，由框架按席分配；exact backing 不降为 sid-only |
-| 公开 fork | 现有 [`lifecycle/launch/fork_agent.rs`](../../crates/team-agent/src/lifecycle/launch/fork_agent.rs) `fork_agent_with_transport/in_window_fork`；[`lifecycle/restart/avatar.rs`](../../crates/team-agent/src/lifecycle/restart/avatar.rs) `fork_pi_new_seat_locked` | **拟议**在此引入模式化准入/结果；旧 `ProviderAdapter::fork_plan/materialize_fork_backing` 仅 native plan 层 |
+| 公开 fork | 现有 [`contract_runtime/fork.rs`](../../crates/team-agent/src/contract_runtime/fork.rs)（契约席位唯一 fork 管线）；[`lifecycle/launch/fork_agent.rs`](../../crates/team-agent/src/lifecycle/launch/fork_agent.rs) `fork_agent_with_transport`（legacy 席位一律拒绝，零按键） | 模式化准入/结果见 §7.1；旧原窗 `/fork`（`in_window_fork`）、Pi 快照新席（`avatar.rs`）与 Codex 会话文件物化（`materialize_fork_backing`）已移除；`ProviderAdapter::fork_plan` 仅剩 Copilot native plan 层 |
 | stop/reset/remove/shutdown | 现有 `lifecycle/restart/agent.rs::stop_agent_at_paths/reset_agent_at_paths`；`restart/remove.rs::remove_agent_inner`；`cli/mod.rs::lifecycle_port::shutdown_with_transport_and_state` | 复用 scoped teardown，提供 owned 资源信息，不新增按进程名清理器 |
 
 这张表是导航，不是把所有文件都列为每次接入的必改清单。例如只有 CLI launch 不代表必须增加 native leader 命令；不支持 fork 的 Provider 应接安全拒绝，不写假 fork 实现。
@@ -453,7 +453,7 @@ validate binding + capability + budget
 | Claude/Codex/Gemini | generic；普通 caller 也扫描 Grok queue mark，无 mark 才是 0 额外键 |
 | human leader | `TextSkipConsumptionPoll` 一次 Enter，但仍需 authoritative leader receipt |
 | leader fallback | 裸 Text/inject，不设置 worker Provider TLS，不能套 worker 特例 |
-| in-window fork | 无 token、非 bracketed command；首次 1 + 至多 7 重按，不重新 paste |
+| in-window fork | 已随旧 Grok worker 引擎移除（原窗 `/fork` 不再注入任何按键） |
 | Codex app-server leader | Unix socket initialize/resume/binding check/turn-start；**0 个 Tmux 键** |
 | StartupMenu | 无正文 buffer；Codex update `[Down, Enter]`，trust `[Enter]`；Claude trust `[Enter]`；handled 不等已消失 |
 | EmptyWake | `InjectPayload::Empty` 直接一键，无消费检查；不把 Text("") 替换成它 |
@@ -642,7 +642,7 @@ InWindowBranch 没有等价回滚机制。新契约要分辨旧 screen mark 与�
 
 ### 第 1 步：注册与准入，不先启动
 
-1. `model/enums.rs` 增 `NovaCli`，`provider/wire.rs` 增 canonical/binary/显式 alias/ALL_PROVIDERS；目标 registration 绑定 descriptor+hooks。编译只能找穷尽 match 缺口，还要定向审查 `build_command_plan`、startup outcome、`enable_fast_mode`、paste floor、resume backing 的 wildcard fallback；未知值不得借此变 generic/Codex。
+1. `model/enums.rs` 增 `NovaCli`，`provider/wire.rs` 增 canonical/binary/显式 alias/ALL_PROVIDERS；目标 registration 绑定 descriptor+hooks。编译只能找穷尽 match 缺口，还要定向审查 `build_command_plan`、startup outcome、resume backing 的 wildcard fallback；未知值不得借此变 generic/Codex。
 2. compiler、direct spec、role creation/runtime patch 的 provider/auth/effort 准入一致表达 Nova 合同；保现有入口的错误层次、raw bytes 与默认值。审查 schema/公开帮助，但不擅自增加 `team-agent nova` 命令。
 3. 更新 catalog source/parser/action，保有界 runner 和 shared matcher；原始 fixtures 覆盖完整格式、重复、顺序、no-match、坏输出、超限、timeout。
 4. 模型解析与 effort resolver 分开；同一请求从 role、direct spec、add/start/restart 均不能绕过准入。
