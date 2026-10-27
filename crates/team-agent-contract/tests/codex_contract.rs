@@ -266,7 +266,7 @@ fn plan_carries_model_effort_bypass_mcp_and_exact_resume_without_startup_keys() 
     assert!(args[9].starts_with("developer_instructions=\"The actual task project is "));
     assert_eq!(args[11], format!("mcp_servers.{key}.command=\"/fake/candidate\""));
     assert!(args.ends_with(&["--dangerously-bypass-approvals-and-sandbox".into(), "-c".into(), "model_reasoning_effort=max".into()]));
-    assert!(!args.iter().any(|arg| arg == "resume" || arg.contains("trust") || arg == "--last" || arg.contains("projects.")));
+    assert!(!args.iter().any(|arg| arg == "resume" || arg.contains("trust") || arg == "--last" || arg.contains("projects.") || arg == "--sandbox"));
     assert_eq!(plan.carriers.model, CarrierUse::Specified(CarrierRef::Arguments(vec![4, 5])));
     assert!(matches!(&plan.carriers.mcp, CarrierUse::Specified(CarrierRef::Arguments(indices)) if indices.len() == 12 && indices[0] == 10));
     assert_eq!(plan.environment.remove, std::collections::BTreeSet::from(["CODEX_API_KEY".to_string(), "OPENAI_API_KEY".to_string()]));
@@ -283,6 +283,8 @@ fn plan_carries_model_effort_bypass_mcp_and_exact_resume_without_startup_keys() 
     r.role_effort = None; r.bypass = false;
     let args = strings(&plan_ok(&a, &r, &catalog));
     assert!(!args.iter().any(|arg| arg.contains("dangerously") || arg.contains("model_reasoning_effort")));
+    // A read-only sandbox would make Codex exit 1 on `--add-dir`.
+    assert!(args.windows(2).any(|pair| pair == ["--sandbox", "workspace-write"]) && args.contains(&"--add-dir".to_string()));
     // Model omission, hidden or invented IDs never launch.
     for model in [None, Some("codex-auto-review"), Some("gpt-6-luna-invented")] {
         r.model = model.map(Into::into);

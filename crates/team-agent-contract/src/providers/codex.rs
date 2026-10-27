@@ -96,7 +96,12 @@ impl PlanHook for CodexAdapter {
         let start = arguments.len();
         arguments.extend(self.mcp_overrides(&r.identity)?);
         let mcp = CarrierUse::Specified(CarrierRef::Arguments((start..arguments.len()).collect()));
-        let bypass = if r.bypass { let index = arguments.len(); arguments.push("--dangerously-bypass-approvals-and-sandbox".into()); CarrierUse::Specified(CarrierRef::Arguments(vec![index])) } else { CarrierUse::NotRequested };
+        // Without bypass the untrusted private cwd can resolve a read-only sandbox,
+        // where Codex rejects `--add-dir` at startup ("Error adding directories",
+        // exit 1). workspace-write is the native mode that admits the project root;
+        // approvals stay on the user's native policy.
+        let bypass = if r.bypass { let index = arguments.len(); arguments.push("--dangerously-bypass-approvals-and-sandbox".into()); CarrierUse::Specified(CarrierRef::Arguments(vec![index])) }
+            else { arguments.extend(["--sandbox".into(), "workspace-write".into()]); CarrierUse::NotRequested };
         let effort = match resolved.effort() {
             EffortResolution::Unspecified => CarrierUse::NotRequested,
             EffortResolution::Pass(effort) => { let index = arguments.len(); arguments.extend(["-c".into(), format!("model_reasoning_effort={}", effort.as_str()).into()]); CarrierUse::Specified(CarrierRef::Arguments(vec![index, index + 1])) },
