@@ -178,7 +178,11 @@ fn read_team_inner(
         };
         let (meta, body) = split_front_matter(&raw);
         let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
-        if meta.get("provider").is_none() && malformed_contract_header(&normalized) {
+        // Only an unparsed header loses both keys; an omitted provider is the default `pi`.
+        if meta.get("provider").is_none()
+            && meta.get("contract_runtime").is_none()
+            && malformed_contract_header(&normalized)
+        {
             return Err(invalid(&path, "front matter"));
         }
         let opted = opted_in(&meta, &path)?;

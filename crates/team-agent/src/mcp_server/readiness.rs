@@ -529,15 +529,15 @@ pub(crate) fn test_ready_worker(
         pane_pid: Some(carrier),
         leader_env: Default::default(),
     };
-    let admission = preflight(&workspace, Some(owner), agent, state)
-        .unwrap()
+    // Like delivery, a provider without a worker handshake gate has nothing to revalidate.
+    if let Some(admission) = preflight(&workspace, Some(owner), agent, state).unwrap() {
+        revalidate(
+            &admission,
+            &Target::Pane(target.pane_id.clone()),
+            std::slice::from_ref(&target),
+        )
         .unwrap();
-    revalidate(
-        &admission,
-        &Target::Pane(target.pane_id.clone()),
-        std::slice::from_ref(&target),
-    )
-    .unwrap();
+    }
     target
 }
 
