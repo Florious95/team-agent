@@ -24,36 +24,55 @@
 
 use crate::model::enums::Provider;
 
-/// A state row written by a release that still ran the legacy Cursor engine.
-/// No legacy runtime exists for it now; it must never fall back to another
-/// provider. Role and CLI declarations of these names select the contract leaf.
+/// A state row written by a release that still ran a legacy worker engine:
+/// Cursor's `cursor_agent`/`agent`, Claude Code's `claude`/`claude_code` or
+/// Pi's `pi`. No legacy worker runtime exists for it now; it must never fall
+/// back to another provider. Role and CLI declarations of these names select
+/// the contract leaf, whose state row carries the leaf id instead. A leader is
+/// not an `agents` row, so its own provider key is unaffected.
 pub(crate) const RETIRED_PROVIDER_ERROR: &str =
     "legacy cursor_agent seat has no runtime in this release; stop or remove it, then add it again (provider: cursor)";
+const RETIRED_CLAUDE_ERROR: &str =
+    "legacy claude seat has no runtime in this release; stop or remove it, then add it again (provider: claude)";
+const RETIRED_PI_ERROR: &str =
+    "legacy pi seat has no runtime in this release; stop or remove it, then add it again (provider: pi)";
 
 pub(crate) fn is_retired_provider(raw: &str) -> bool {
-    matches!(raw.trim().to_ascii_lowercase().as_str(), "cursor_agent" | "agent")
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "cursor_agent" | "agent" | "claude" | "claude_code" | "claude-code" | "pi"
+    )
+}
+
+/// The refusal for a retired state row, naming the provider to re-add it with.
+pub(crate) fn retired_provider_error(raw: &str) -> &'static str {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "claude" | "claude_code" | "claude-code" => RETIRED_CLAUDE_ERROR,
+        "pi" => RETIRED_PI_ERROR,
+        _ => RETIRED_PROVIDER_ERROR,
+    }
 }
 
 pub(crate) fn require_active_state_providers(
     state: &serde_json::Value,
     target: Option<&str>,
 ) -> Result<(), &'static str> {
-    if state
+    let retired = state
         .get("agents")
         .and_then(serde_json::Value::as_object)
-        .is_some_and(|agents| {
-            agents.iter().any(|(id, row)| {
-                target.is_none_or(|target| target == id)
-                    && row
-                        .get("provider")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(is_retired_provider)
+        .and_then(|agents| {
+            agents.iter().find_map(|(id, row)| {
+                row.get("provider")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|provider| {
+                        target.is_none_or(|target| target == id) && is_retired_provider(provider)
+                    })
             })
-        })
-    {
-        return Err(RETIRED_PROVIDER_ERROR);
+        });
+    match retired {
+        Some(provider) => Err(retired_provider_error(provider)),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Canonical snake_case wire string for `Provider`. Used for state JSON,
@@ -239,9 +258,7 @@ mod tests {
             "compiler must validate providers through typed helpers"
         );
         assert!(
-            delivery_rs.contains("parse_canonical_provider")
-                && delivery_rs.contains("parse_provider")
-                && delivery_rs.contains("provider_wire"),
+            delivery_rs.contains("parse_canonical_provider"),
             "message delivery provider dispatch must use wire helpers"
         );
         for (path, source) in [
@@ -317,16 +334,27 @@ mod tests {
     #[test]
     fn retired_state_guard_is_scoped_to_the_addressed_seat() {
         let state = serde_json::json!({"agents": {
-            "pi": {"provider": "pi"},
-            "claude": {"provider": "claude"},
-            "retired": {"provider": "cursor_agent"}
+            "pi": {"provider": "pi_tui"},
+            "claude": {"provider": "claude_tui"},
+            "copilot": {"provider": "copilot"},
+            "retired": {"provider": "cursor_agent"},
+            "legacy_claude": {"provider": "claude_code"},
+            "legacy_pi": {"provider": "pi"}
         }});
         assert!(require_active_state_providers(&state, Some("pi")).is_ok());
         assert!(require_active_state_providers(&state, Some("claude")).is_ok());
-        assert!(require_active_state_providers(&state, Some("retired")).is_err());
+        assert!(require_active_state_providers(&state, Some("copilot")).is_ok());
+        assert_eq!(require_active_state_providers(&state, Some("retired")), Err(RETIRED_PROVIDER_ERROR));
+        assert_eq!(require_active_state_providers(&state, Some("legacy_claude")), Err(RETIRED_CLAUDE_ERROR));
+        assert_eq!(require_active_state_providers(&state, Some("legacy_pi")), Err(RETIRED_PI_ERROR));
         assert!(require_active_state_providers(&state, None).is_err());
         for retired in ["cursor_agent", "agent"] {
             assert_eq!(parse_provider(retired), None, "no legacy engine to parse into");
+        }
+        // The leader keys still parse: a leader is never an `agents` row.
+        for leader in ["claude", "claude_code", "pi"] {
+            assert!(is_retired_provider(leader), "{leader}");
+            assert!(parse_provider(leader).is_some(), "{leader}");
         }
     }
 

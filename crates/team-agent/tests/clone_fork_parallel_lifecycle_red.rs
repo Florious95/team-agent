@@ -1,25 +1,19 @@
-//! agent-clone-fork · successor RED batch 3 (verifier) — R4 parallel N +
-//! R5 role-lifecycle rollback teeth + R6 source-immutability GUARDRAIL.
+//! agent-clone-fork · successor RED batch 3 (verifier) — R5 role-lifecycle
+//! rollback teeth + R6 source-immutability GUARDRAIL.
 //!
 //! From locate.md §7 R4/R5 + §3 surface (fork state row / window / pane
 //! `fork_agent.rs:146-162,183`, remove/rollback `restart/remove.rs`,
 //! `fork_agent.rs:334-453`) + §4.4 (parallel-N transaction) + §5 observation
 //! points 6/9/10, NOT the §4 root-cause design. Baseline `9e6be51` (v0.5.52).
 //!
-//! Each Case seeds the SOURCE session tuple (a hermetic PATH-shim has no real
-//! captured backing) so the fork reaches its success path; the RED is about the
-//! NEW identities and the failure-path residue, not the source's backing.
+//! Each Case seeds the SOURCE session tuple (the built-in fake worker has no
+//! real captured backing); the RED is about the failure-path residue and source
+//! immutability, not the source's backing.
 //!
-//! - **R4 parallel N** (identity + backing uniqueness under REAL concurrency):
-//!   forking the same source N=3 times, launched SIMULTANEOUSLY via a barrier,
-//!   must yield pairwise-distinct NEW `session_id`s AND pairwise-distinct backings
-//!   (each non-null, none equal to the source). Baseline red: every fork reports
-//!   ok with `session_id=null` (locate §3 success/readback; batch2 R2), so N forks
-//!   are indistinguishable as forked contexts. Window/pane uniqueness is a
-//!   POSITIVE CONTROL (baseline already assigns them distinct) — it must stay
-//!   green, guarding against a "reject everything" false red. The concurrency is a
-//!   real barrier (leader ruling: the parallel axis is a user red line, not a
-//!   sequential loop); provider-side lock-timeout semantics remain E2E (§5.8).
+//! R4 (parallel-N clones with pairwise-unique NEW sessions and backings) was
+//! retired with the legacy Claude Code worker: its offline proof relied on a
+//! `claude` PATH shim writing per-session transcripts that clone discovered
+//! under `~/.claude/projects` (`find_claude_backing`, removed).
 //!
 //! - **R5 role-lifecycle rollback teeth** (failure-path residue): when the
 //!   provider backing cannot converge (source `rollout_path` points at a missing
@@ -48,7 +42,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Output;
-use std::time::Instant;
 
 use serde_json::{json, Value};
 
@@ -62,15 +55,7 @@ const SOURCE: &str = "src_worker";
 struct Case {
     env: HermeticTestEnv,
     workspace: PathBuf,
-    shim_path: String,
     socket: Option<PathBuf>,
-}
-
-struct CloneAttempt {
-    name: String,
-    report: Value,
-    elapsed_ms: u128,
-    completed: bool,
 }
 
 impl Case {
@@ -78,16 +63,9 @@ impl Case {
         let env = HermeticTestEnv::for_subprocess_with_leader(tag);
         let workspace = env.workspace("ws");
         write_team_docs(&workspace);
-        let shim_dir = write_claude_shim(&workspace);
-        let shim_path = format!(
-            "{}:{}",
-            shim_dir.display(),
-            std::env::var("PATH").expect("PATH present")
-        );
         let mut case = Self {
             env,
             workspace,
-            shim_path,
             socket: None,
         };
         case.quick_start();
@@ -110,8 +88,7 @@ impl Case {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        self.env
-            .run_cli_env(&self.workspace, args, &[("PATH", self.shim_path.as_str())])
+        self.env.run_cli(&self.workspace, args)
     }
 
     fn quick_start(&mut self) {
@@ -182,39 +159,6 @@ impl Case {
         );
     }
 
-    /// 2026-08-23 rehome (R4 only): the identity/backing-uniqueness axis is a
-    /// `clone` concern — `fork` never produces a NEW named seat and reports
-    /// `session_id: None` by design (`wiki/C1/分身与克隆.md`). r5/r6 keep using
-    /// `fork()` below; only R4 moved.
-    fn clone_seat(&self, as_name: &str) -> CloneAttempt {
-        let started = Instant::now();
-        let out = self.run(&[
-            "clone-agent",
-            SOURCE,
-            "--as",
-            as_name,
-            "--workspace",
-            self.ws(),
-            "--team",
-            TEAM_NAME,
-            "--no-display",
-            "--json",
-        ]);
-        let report = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| {
-            json!({
-                "ok": out.status.success(),
-                "_exit": out.status.code(),
-                "_stderr": String::from_utf8_lossy(&out.stderr),
-            })
-        });
-        CloneAttempt {
-            name: as_name.to_string(),
-            report,
-            elapsed_ms: started.elapsed().as_millis(),
-            completed: true,
-        }
-    }
-
     fn fork(&self, as_name: &str) -> Value {
         let out = self.run(&[
             "fork-agent",
@@ -256,84 +200,6 @@ impl Case {
         }
         serde_json::Map::new()
     }
-
-    fn event_line_count(&self) -> usize {
-        std::fs::read_to_string(self.workspace.join(".team/logs/events.jsonl"))
-            .map(|raw| raw.lines().count())
-            .unwrap_or(0)
-    }
-
-    fn r4_diagnostics(
-        &self,
-        attempts: &[CloneAttempt],
-        event_boundary: usize,
-        names: &[&str],
-    ) -> String {
-        let rows = self.team_agent_rows();
-        let state_rows = names
-            .iter()
-            .copied()
-            .chain(std::iter::once(SOURCE))
-            .map(|name| {
-                (
-                    name.to_string(),
-                    rows.get(name).cloned().unwrap_or(Value::Null),
-                )
-            })
-            .collect::<serde_json::Map<_, _>>();
-
-        let event_path = self.workspace.join(".team/logs/events.jsonl");
-        let invocation_events = match std::fs::read_to_string(&event_path) {
-            Ok(raw) => raw
-                .lines()
-                .skip(event_boundary)
-                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                .filter(|event| {
-                    let name = event
-                        .get("event")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_ascii_lowercase();
-                    ["lifecycle", "lock", "reservation", "rollback"]
-                        .iter()
-                        .any(|marker| name.contains(marker))
-                })
-                .collect::<Vec<_>>(),
-            Err(error) => vec![json!({
-                "unavailable": format!("EventLog unavailable within invocation boundary: {error}"),
-                "path": event_path,
-            })],
-        };
-        let non_ok_clones = attempts
-            .iter()
-            .filter(|attempt| attempt.report.get("ok").and_then(Value::as_bool) != Some(true))
-            .map(|attempt| attempt.name.as_str())
-            .collect::<Vec<_>>();
-
-        serde_json::to_string_pretty(&json!({
-            "case": "r4_parallel_n_clones_have_pairwise_unique_new_sessions",
-            "workspace": self.ws(),
-            "team": TEAM_NAME,
-            "clone_names": names,
-            "non_ok_clones": non_ok_clones,
-            "event_boundary_line_count": event_boundary,
-            "clone_attempts": attempts.iter().map(|attempt| json!({
-                "name": attempt.name,
-                "report": attempt.report,
-                "elapsed_ms": attempt.elapsed_ms,
-                "completed": attempt.completed,
-            })).collect::<Vec<_>>(),
-            "state_rows": state_rows,
-            "invocation_lifecycle_events": invocation_events,
-            "unavailable_fields": {
-                "reservation_owner": "unavailable: B0 exposes no authoritative clone-reservation owner field",
-                "lock_acquire_release_timeline": "unavailable: B0 EventLog exposes no clone lock acquire/release timeline",
-                "state_conflict": "unavailable: B0 exposes no authoritative state-conflict event field",
-                "rollback": "available only when B0 emits a matching invocation EventLog event"
-            }
-        }))
-        .unwrap_or_else(|error| format!("diagnostic context serialization unavailable: {error}"))
-    }
 }
 
 impl Drop for Case {
@@ -372,270 +238,10 @@ fn write_team_docs(workspace: &Path) {
     std::fs::write(
         workspace.join("agents").join(format!("{SOURCE}.md")),
         format!(
-            "---\nname: {SOURCE}\nrole: {SOURCE}\nprovider: claude\nmodel: claude-sonnet-5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{SOURCE} body.\n"
+            "---\nname: {SOURCE}\nrole: {SOURCE}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{SOURCE} body.\n"
         ),
     )
     .expect("write source role doc");
-}
-
-/// Success-path shim that produces a DISTINCT NEW backing per fork. Each fork
-/// spawn carries `--resume <expected>` on argv (adapter.rs:875-889 —
-/// leader ruling msg_8f9411befb90 A 案: current product uses --resume, not
-/// --session-id; the pre-A shim scanned only --session-id, matched nothing,
-/// produced no backing, and thereby collapsed R4 into A 案 R3's input
-/// domain "no backing must Pending" — mutually exclusive contracts.);
-/// the shim writes a claude transcript at the exact path the session scanner reads
-/// (`$HOME/.claude/projects/<encoded-cwd>/<uuid>.jsonl`, encoding per
-/// session_scan/claude.rs: every non-alphanumeric char → '-'), keyed to that
-/// uuid. This lets each of the N forks capture a distinct verified NEW backing —
-/// without it, a spawn-only shim produces no NEW backing and the MUST-17
-/// implementation refuses every fork (context_fork_unverified), which would make
-/// R4's uniqueness assertions unreachable (vacuous green — the false-green-hole
-/// runtime-owner surfaced). The RED cause is unchanged: at baseline the fork
-/// reports session_id=null regardless of the emitted backing.
-fn write_claude_shim(workspace: &Path) -> PathBuf {
-    let bin_dir = workspace.join("shim-bin");
-    std::fs::create_dir_all(&bin_dir).expect("create shim dir");
-    let shim = bin_dir.join("claude");
-    std::fs::write(
-        &shim,
-        r#"#!/bin/sh
-# Parse `--resume <expected>` (current claude fork argv shape, adapter.rs:875-889).
-# Also accept `--session-id <expected>` as a defensive fallback so any future
-# argv rewrite that reintroduces --session-id does not silently kill backing
-# emission (defense-in-depth per A 案 return-issue防线).
-sid=""
-prev=""
-for a in "$@"; do
-  case "$prev" in
-    --resume|--session-id) sid="$a" ;;
-  esac
-  prev="$a"
-done
-if [ -n "$sid" ]; then
-  enc=$(printf '%s' "$PWD" | sed 's/[^a-zA-Z0-9]/-/g')
-  dir="$HOME/.claude/projects/$enc"
-  mkdir -p "$dir"
-  printf '{"sessionId":"%s","type":"fork-backing"}\n' "$sid" > "$dir/$sid.jsonl"
-fi
-echo 'claude shim ready'
-exec sleep 3600
-"#,
-    )
-    .expect("write claude shim");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod claude shim");
-    }
-    bin_dir
-}
-
-fn new_session_of(row: &Value) -> Option<String> {
-    row.get("session_id")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-}
-
-fn window_of(row: &Value) -> Option<String> {
-    row.get("window")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-}
-
-fn pane_of(row: &Value) -> Option<String> {
-    row.get("pane_id")
-        .or_else(|| row.get("pane"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-}
-
-fn backing_of(row: &Value) -> Option<String> {
-    row.get("rollout_path")
-        .or_else(|| row.get("backing_path"))
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-}
-
-/// R4 — forking the same source N=3 must yield pairwise-distinct NEW session ids
-/// (each non-null, none equal to the source). Baseline red: every fork reports ok
-/// with session_id=null, so the N forks are indistinguishable as forked contexts.
-///
-/// Window/pane uniqueness is a POSITIVE CONTROL: baseline already assigns them
-/// distinct, and it must stay green — this guards against a degenerate "reject
-/// everything" implementation passing the session assertion for the wrong reason.
-///
-/// REVISION 2 (2026-07-21, leader ruling msg_432066100c50): the parallel-N axis
-/// is a user red line and must NOT be downgraded to a sequential loop — locate §7
-/// R4's prototype is "barrier 同时发 N=3". A sequential loop only proves
-/// repeatability; concurrency isolation (workspace-lock contention, reservation
-/// mutual-exclusion, identity uniqueness under race) is only exercised when the N
-/// forks are launched SIMULTANEOUSLY. This revision uses a real `Barrier` +
-/// scoped threads so all N `fork-agent` subprocesses race, and asserts identity
-/// AND backing uniqueness directly: session_id + rollout_path/backing pairwise
-/// distinct + ownership (locate §5.6). (True provider-side lock-timeout /
-/// one-seat-failure-doesn't-block-others is a subscription-E2E concern, §5.8 —
-/// not asserted offline.)
-///
-/// REVISION 1 (implement interlock — runtime-owner surfaced a vacuous green): the
-/// original shim only spawned (no NEW backing), so the MUST-17 implementation
-/// refused every fork and the `all_ok` early-return skipped ALL uniqueness
-/// assertions — a vacuous green (false-green-hole type 8: assertion unreachable).
-/// The shim now emits a distinct NEW backing per fork (keyed to the predetermined
-/// --session-id) and every fork MUST report ok.
-///
-/// 🔴 2026-08-23 REHOME to `clone-agent`: this axis was written on `fork`, but
-/// per `wiki/C1/分身与克隆.md` a fork produces a provider-opened, UNNAMED window
-/// whose session id the provider assigns and the framework never sees
-/// (`fork_agent.rs` reports `session_id: None`, `new_agent_id == source`).
-/// "N concurrent creations must yield pairwise-distinct NEW session ids" has no
-/// landing point there. `clone` is the verb whose session id is framework
-/// predetermined/captured, so the requirement lives here. The window/pane
-/// uniqueness assertions below remain a POSITIVE CONTROL (29bf8e6c) and move
-/// WITH the axis they guard — they are not left behind on fork as an ownerless
-/// scaffold.
-/// ⛔ Rewritten to clone semantics, not the fork fixture carried across:
-/// `clone_seat()` is a separate helper; r5/r6 keep the fork helper.
-#[test]
-fn r4_parallel_n_clones_have_pairwise_unique_new_sessions() {
-    let case = Case::start("cf-r4");
-    case.seed_source_tuple(&case.rollout_path());
-    std::fs::write(case.rollout_path(), "{\"type\":\"fixture-source\"}\n").expect("write rollout");
-
-    let names = ["f1", "f2", "f3"];
-    let event_boundary = case.event_line_count();
-    // REAL concurrency: a barrier releases all N fork subprocesses simultaneously
-    // so workspace-lock contention / reservation mutual-exclusion is actually
-    // exercised (a sequential loop would not). Scoped threads borrow `&case`.
-    let barrier = std::sync::Barrier::new(names.len());
-    let forks: Vec<CloneAttempt> = std::thread::scope(|scope| {
-        let handles: Vec<_> = names
-            .iter()
-            .map(|&n| {
-                let barrier = &barrier;
-                let case = &case;
-                scope.spawn(move || {
-                    barrier.wait();
-                    case.clone_seat(n)
-                })
-            })
-            .collect();
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
-    });
-    let diagnostics = case.r4_diagnostics(&forks, event_boundary, &names);
-
-    // Every fork MUST report ok — no early-return escape that would leave the
-    // uniqueness assertions unreachable (vacuous green, type 8).
-    for attempt in &forks {
-        let n = &attempt.name;
-        let fork = &attempt.report;
-        assert_eq!(
-            fork.get("ok").and_then(Value::as_bool),
-            Some(true),
-            "clone {n} must report ok so the N-way uniqueness assertions are reachable (no vacuous \
-             green). A refusal of a legitimate concurrent clone is itself the failure. clone={fork}; \
-             diagnostic_context={diagnostics}"
-        );
-    }
-
-    let rows = case.team_agent_rows();
-    let source_session = rows.get(SOURCE).and_then(new_session_of);
-
-    let uniq = |v: &[String]| {
-        let mut s = v.to_vec();
-        s.sort();
-        s.dedup();
-        s.len() == v.len()
-    };
-
-    // POSITIVE CONTROL: window + pane must be pairwise distinct across forks.
-    // Baseline satisfies this; it must never regress (guards against a
-    // reject-everything impl passing the session assertion for the wrong reason).
-    let mut windows: Vec<String> = Vec::new();
-    let mut panes: Vec<String> = Vec::new();
-    for n in &names {
-        let row = rows
-            .get(*n)
-            .unwrap_or_else(|| panic!("fork {n} row present; diagnostic_context={diagnostics}"));
-        if let Some(w) = window_of(row) {
-            windows.push(w);
-        }
-        if let Some(p) = pane_of(row) {
-            panes.push(p);
-        }
-    }
-    assert!(
-        windows.len() == names.len() && uniq(&windows),
-        "positive control: N forks must have pairwise-distinct windows; windows={windows:?}; \
-         diagnostic_context={diagnostics}"
-    );
-    assert!(
-        panes.len() == names.len() && uniq(&panes),
-        "positive control: N forks must have pairwise-distinct panes; panes={panes:?}; \
-         diagnostic_context={diagnostics}"
-    );
-
-    // R4 red: NEW session ids must be present, pairwise distinct, and != source.
-    let mut new_sessions: Vec<String> = Vec::new();
-    for n in &names {
-        let row = rows.get(*n).unwrap_or_else(|| {
-            panic!("fork {n} row present for session assertion; diagnostic_context={diagnostics}")
-        });
-        let sess = new_session_of(row).unwrap_or_else(|| {
-            panic!(
-                "fork {n} reported ok but carries no NEW session id (session_id=null): N concurrent \
-                 forks are indistinguishable as forked contexts (locate §3/§4.4; batch2 R2). row={row}; \
-                 diagnostic_context={diagnostics}"
-            )
-        });
-        assert_ne!(
-            Some(&sess),
-            source_session.as_ref(),
-            "fork {n} NEW session id must differ from the source; got {sess}; \
-             diagnostic_context={diagnostics}"
-        );
-        new_sessions.push(sess);
-    }
-    assert!(
-        uniq(&new_sessions),
-        "N concurrent forks must have PAIRWISE-DISTINCT new session ids; got {new_sessions:?}; \
-         diagnostic_context={diagnostics}"
-    );
-
-    // R4 backing uniqueness (leader ruling msg_432066100c50 §2, locate §5.6): each
-    // fork must own a DISTINCT backing, not merely a distinct session id — two
-    // forks with different session ids pointing at the same backing rollout would
-    // be false-independent. Assert rollout_path/backing pairwise distinct, != the
-    // source's, and non-empty.
-    let source_backing = rows.get(SOURCE).and_then(backing_of);
-    let mut backings: Vec<String> = Vec::new();
-    for n in &names {
-        let row = rows.get(*n).unwrap_or_else(|| {
-            panic!("fork {n} row present for backing assertion; diagnostic_context={diagnostics}")
-        });
-        let backing = backing_of(row).unwrap_or_else(|| {
-            panic!(
-                "fork {n} reported ok but carries no NEW backing (rollout_path/backing_path empty): a \
-                 forked context must own an independent backing, not just a distinct id (locate §5.6). \
-                 row={row}; diagnostic_context={diagnostics}"
-            )
-        });
-        assert_ne!(
-            Some(&backing),
-            source_backing.as_ref(),
-            "fork {n} backing must differ from the source's backing; got {backing}; \
-             diagnostic_context={diagnostics}"
-        );
-        backings.push(backing);
-    }
-    assert!(
-        uniq(&backings),
-        "N concurrent forks must own PAIRWISE-DISTINCT backings (independent context, not shared \
-         rollout); got {backings:?}; diagnostic_context={diagnostics}"
-    );
 }
 
 /// Snapshot of the SOURCE-owned bytes that a fork MUST NOT mutate: the source

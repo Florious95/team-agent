@@ -141,10 +141,6 @@ fn idle_leader_activity_never_arms_but_leader_idle_allows_ping() {
 // Full own-vs-foreign realpath judgement + truncated-workspace logic deferred.
 
 // Real fixtures (mirrored into the rust workspace from team-agent-public).
-const CLAUDE_IDLE_FIXTURE: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../snapshot/fixtures/idle_prompts/claude_code_idle.txt"
-));
 const CODEX_IDLE_FIXTURE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../snapshot/fixtures/idle_prompts/codex_idle.txt"
@@ -156,27 +152,6 @@ const CODEX_WORKING_FIXTURE: &str = include_str!(concat!(
 
 fn fixture_matches(re: &regex::Regex, fixture: &str) -> bool {
     fixture.lines().any(|l| re.is_match(l))
-}
-
-#[test]
-fn claude_status_patterns_compile() {
-    // provider_cli/claude.py:225 status_patterns idle=r"[>❯]\s".
-    // The real fixture has prompt lines like "❯ /compact" → idle MUST match.
-    // The processing pattern r"[✶✢✽✻✳·].*…" must NOT match those idle prompt lines.
-    let adapter = get_adapter(Provider::ClaudeCode);
-    let pats = adapter.status_patterns().expect("status_patterns ok");
-    assert!(
-        fixture_matches(&pats.idle, CLAUDE_IDLE_FIXTURE),
-        "claude idle pattern must match a '❯ ' prompt line in the idle fixture"
-    );
-    assert!(
-        pats.idle.is_match("❯ /compact"),
-        "claude idle pattern matches the canonical prompt line"
-    );
-    assert!(
-        !pats.processing.is_match("❯ /compact"),
-        "claude processing pattern must NOT match an idle prompt line"
-    );
 }
 
 #[test]

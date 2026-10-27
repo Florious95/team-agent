@@ -40,7 +40,7 @@ const TEAM_MD: &str =
 
 const CODEX_ROLE: &str = "---\nname: codexer\nrole: Codex Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nCodex worker.\n";
 
-const CLAUDE_ROLE: &str = "---\nname: clauder\nrole: Claude Worker\nprovider: claude\nmodel: claude-sonnet-4-6\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nClaude worker.\n";
+const COPILOT_ROLE: &str = "---\nname: copiloter\nrole: Copilot Worker\nprovider: copilot\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nCopilot worker.\n";
 
 #[test]
 #[ignore = "real-machine: quick-start worker readiness gate"]
@@ -51,10 +51,10 @@ fn t1_quick_start_must_not_emit_bare_ready_when_worker_tool_load_is_unverified()
     let team = bug7_team_dir(&hermetic, "t1-pending");
     // Both agents spawn successfully (recording transport reports both windows live)
     // but the framework has no way to verify the worker MCP tool set actually
-    // loaded — codex/claude can still reject schemas asynchronously. The report
+    // loaded — codex/copilot can still reject schemas asynchronously. The report
     // therefore must be PendingToolLoad, not bare Ready.
     let transport = RecordingTransport::new()
-        .with_windows(vec![WindowName::new("codexer"), WindowName::new("clauder")]);
+        .with_windows(vec![WindowName::new("codexer"), WindowName::new("copiloter")]);
     let report = quick_start_with_transport(&team, None, true, None, &transport)
         .expect("quick_start_with_transport should succeed for healthy spawn");
     let QuickStartReport::Ready {
@@ -98,8 +98,8 @@ fn t2_quick_start_must_report_degraded_when_a_worker_spawn_yields_no_live_window
     hermetic.assert_no_real_tmux();
     let team = bug7_team_dir(&hermetic, "t2-degraded");
     // Recording transport simulates the Mac mini final capture: only the codex
-    // window exists after launch; the claude window never materialized (no
-    // `claude` binary on PATH, etc.). BUG-2 fix already marks `clauder` as
+    // window exists after launch; the copilot window never materialized (no
+    // `copilot` binary on PATH, etc.). BUG-2 fix already marks `copiloter` as
     // spawn_failed in runtime state; BUG-7 must surface that as a Degraded
     // verdict so quick-start cannot pretend the team is ready.
     let transport = RecordingTransport::new().with_windows(vec![WindowName::new("codexer")]);
@@ -117,9 +117,9 @@ fn t2_quick_start_must_report_degraded_when_a_worker_spawn_yields_no_live_window
         );
     };
     assert!(
-        unhealthy_agents.iter().any(|id| id == "clauder"),
+        unhealthy_agents.iter().any(|id| id == "copiloter"),
         "T2: Degraded verdict must list the agent whose window never materialized \
-         (clauder); got unhealthy_agents={unhealthy_agents:?}"
+         (copiloter); got unhealthy_agents={unhealthy_agents:?}"
     );
     let rendered = render_quick_start_summary(&report);
     assert!(
@@ -128,8 +128,8 @@ fn t2_quick_start_must_report_degraded_when_a_worker_spawn_yields_no_live_window
          the report as ready; got {rendered:?}"
     );
     assert!(
-        rendered.contains("clauder"),
-        "T2: CLI summary should mention the unhealthy agent id (clauder); got {rendered:?}"
+        rendered.contains("copiloter"),
+        "T2: CLI summary should mention the unhealthy agent id (copiloter); got {rendered:?}"
     );
 }
 
@@ -145,7 +145,8 @@ fn bug7_team_dir(hermetic: &HermeticTestEnv, tag: &str) -> PathBuf {
     std::fs::create_dir_all(team.join("agents")).expect("mkdir teamdir/agents");
     std::fs::write(team.join("TEAM.md"), TEAM_MD).expect("write TEAM.md");
     std::fs::write(team.join("agents").join("codexer.md"), CODEX_ROLE).expect("write codexer.md");
-    std::fs::write(team.join("agents").join("clauder.md"), CLAUDE_ROLE).expect("write clauder.md");
+    std::fs::write(team.join("agents").join("copiloter.md"), COPILOT_ROLE)
+        .expect("write copiloter.md");
     team
 }
 

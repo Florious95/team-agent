@@ -377,42 +377,36 @@ fn spine_delivery_busy_recipient_is_injected_without_idle_deferral() {
 }
 
 #[test]
-fn spine_delivery_pi_uses_v113_direct_input_without_idle_scope() {
-    for provider in ["pi"] {
-        let ws = tmp_ws(&format!("direct-input-{provider}"));
+fn spine_delivery_refuses_retired_claude_and_pi_rows_before_input() {
+    for (provider, expected) in [
+        ("pi", "legacy pi seat has no runtime in this release"),
+        ("claude", "legacy claude seat has no runtime in this release"),
+        ("claude_code", "legacy claude seat has no runtime in this release"),
+    ] {
+        let ws = tmp_ws(&format!("retired-{provider}"));
         let store = store_for(&ws);
         let log = EventLog::new(&ws);
         let mid = store
-            .create_message(Some("t"), "leader", "w1", "hi", None, true, Some("spine-team"))
+            .create_message(Some("t"), "leader", "w1", "hi", None, true, None)
             .unwrap();
-        #[cfg(unix)]
-        let carrier = crate::mcp_server::readiness::test_carrier_pid().unwrap();
-        #[cfg(not(unix))]
-        let carrier = std::process::id();
-        let config = ws.join(".team/runtime/mcp/w1.json");
-        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
-        std::fs::write(&config, serde_json::to_vec(&serde_json::json!({
-            "mcpServers": {"team_orchestrator": {
-                "command": std::env::current_exe().unwrap().canonicalize().unwrap(),
-                "env": {"TEAM_AGENT_WORKSPACE": ws, "TEAM_AGENT_ID": "w1", "TEAM_AGENT_OWNER_TEAM_ID": "spine-team"}
-            }}
-        })).unwrap()).unwrap();
-        let mut state = serde_json::json!({"team_key": "spine-team", "active_team_key": "spine-team", "session_name": "spine", "agents": {"w1": {
-            "provider": provider, "status": "running", "window": "w1", "mcp_config": config,
-            "spawned_at": (chrono::Utc::now() - chrono::Duration::seconds(10)).to_rfc3339(),
-            "pane_id": "%spine", "pane_pid": carrier
-        }}});
-        state["teams"] = serde_json::json!({"spine-team": state.clone()});
-        crate::state::persist::save_runtime_state(&ws, &state).unwrap();
-        let transport = DeliverOkTransport { targets: vec![PaneInfo {
-            pane_id: PaneId::new("%spine"), session: SessionName::new("spine"),
-            window_index: None, window_name: Some(WindowName::new("w1")), pane_index: None, tty: None,
-            current_command: None, current_path: None, active: true,
-            pane_pid: Some(carrier), leader_env: BTreeMap::new(),
-        }] };
-        let delivered = deliver_pending_messages(&ws, &state, &transport, &log).unwrap();
-        assert!(delivered.contains(&mid), "{provider}: {:?}", read_event_log(&ws));
-        assert_eq!(message_status_of(&store, &mid), "delivered");
+        let state = serde_json::json!({"agents": {"w1": {"provider": provider, "status": "running"}}});
+
+        // NoopTransport panics on any call: the refusal precedes every pane effect.
+        let delivered = deliver_pending_messages(&ws, &state, &NoopTransport, &log).unwrap();
+
+        assert!(delivered.is_empty(), "{provider}");
+        assert_ne!(message_status_of(&store, &mid), "delivered", "{provider}");
+        let blocked = read_event_log(&ws)
+            .into_iter()
+            .find(|e| e.get("event").and_then(|v| v.as_str()) == Some("delivery.item_blocked"));
+        assert!(
+            blocked
+                .as_ref()
+                .and_then(|e| e.get("error"))
+                .and_then(|v| v.as_str())
+                .is_some_and(|error| error.contains(expected)),
+            "{provider}: {blocked:?}"
+        );
     }
 }
 

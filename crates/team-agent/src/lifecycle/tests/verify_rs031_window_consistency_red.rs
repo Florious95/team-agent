@@ -41,7 +41,7 @@ const TEAM_MD: &str =
 
 const CODEX_ROLE: &str = "---\nname: codexer\nrole: Codex Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nCodex worker.\n";
 
-const CLAUDE_ROLE: &str = "---\nname: clauder\nrole: Claude Worker\nprovider: claude\nmodel: claude-sonnet-4-6\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nClaude worker.\n";
+const COPILOT_ROLE: &str = "---\nname: copiloter\nrole: Copilot Worker\nprovider: copilot\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nCopilot worker.\n";
 
 #[test]
 #[serial(env)]
@@ -50,7 +50,7 @@ fn worker_mcp_owner_team_scope_must_match_runtime_team_key_not_spec_name() {
     let team = mixed_provider_team_dir(&hermetic, "mcp-owner-scope");
     super::launch_spawn::seed_healthy_coordinator(team.parent().unwrap());
     let transport = RecordingTransport::new()
-        .with_windows(vec![WindowName::new("clauder"), WindowName::new("codexer")]);
+        .with_windows(vec![WindowName::new("copiloter"), WindowName::new("codexer")]);
     let launch = ready_launch(
         quick_start_with_transport(&team, None, true, None, &transport)
             .expect("quick-start should reach worker spawn path"),
@@ -194,7 +194,8 @@ fn running_worker_state_must_only_be_written_for_windows_that_exist_after_launch
     let spec_path = team.join("team.spec.yaml");
     std::fs::write(&spec_path, team_agent::model::yaml::dumps(&spec)).expect("write spec");
 
-    // Simulates the Mac mini final capture: the codex window exists, the claude window does not.
+    // Simulates the Mac mini final capture: the codex window exists, the other worker's
+    // (originally Claude, here Copilot) window does not.
     // launch_with_transport currently never verifies the post-spawn window set before persisting
     // `status=running`, so this fixture pins the state/physical invariant directly.
     let transport = RecordingTransport::new().with_windows(vec![WindowName::new("codexer")]);
@@ -742,8 +743,8 @@ fn mixed_provider_team_dir(hermetic: &HermeticTestEnv, tag: &str) -> PathBuf {
     let team = hermetic.workspace(tag).join("teamdir");
     std::fs::create_dir_all(team.join("agents")).expect("create agents dir");
     std::fs::write(team.join("TEAM.md"), TEAM_MD).expect("write TEAM.md");
-    std::fs::write(team.join("agents").join("clauder.md"), CLAUDE_ROLE)
-        .expect("write clauder role");
+    std::fs::write(team.join("agents").join("copiloter.md"), COPILOT_ROLE)
+        .expect("write copiloter role");
     std::fs::write(team.join("agents").join("codexer.md"), CODEX_ROLE).expect("write codexer role");
     team
 }

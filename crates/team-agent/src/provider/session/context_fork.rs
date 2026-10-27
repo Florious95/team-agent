@@ -5,9 +5,9 @@
 //!     - name: ContextBackingSnapshot
 //!       what: spawn 前对 provider backing 根下 .jsonl 的 (len, mtime) 基线快照，用于判「变过」
 //!     - name: verify_context_fork
-//!       what: 按 provider 路由到 copilot/codex/claude 三条验证路径，成功给 ContextForkProof
+//!       what: 按 provider 路由到 copilot/codex 两条验证路径，成功给 ContextForkProof
 //!     - name: context_fork_convergence_deadline
-//!       what: 每个 provider 各自的收敛预算(claude 45s / codex 10s / 其余 5s)
+//!       what: 每个 provider 各自的收敛预算(codex 10s / 其余 5s)
 //!     - name: ContextForkProof
 //!       what: 已验证的 fork 证明:新旧 session id、backing 路径、captured_via、归属置信度
 //!     - name: ContextForkTermination
@@ -22,6 +22,7 @@
 //!   - 不创建/改写 backing(codex 的物化改写在 context_fork/codex.rs，不在本文件)
 //!   - 未证明即 Timeout/Rejected，绝不退化成「假定成功」
 //!   - grok / gemini / fake 没有可验证 backing，一律直接 Rejected
+//!   - Claude Code / Pi worker 只走 contract leaf 的原生 new-seat fork；遗留 worker 行一律 Rejected
 //! maturity: wired
 //! ---
 use std::collections::BTreeMap;
@@ -44,7 +45,6 @@ pub(crate) enum ContextForkTermination {
     Rejected(#[from] ProviderError),
 }
 
-mod claude;
 mod codex;
 mod outcome;
 pub(crate) use codex::materialize_codex_fork;
@@ -56,7 +56,7 @@ pub(crate) use outcome::{
 /// purpose: 给出该 provider 等待 fork backing 落盘的收敛预算
 /// params:
 ///   provider: 目标 provider;全枚举穷举，无兜底臂
-/// returns: Claude/ClaudeCode 45s、Codex 10s、其余(Copilot/Grok/GeminiCli/Fake) 5s
+/// returns: Codex 10s、其余(Claude/ClaudeCode/Copilot/Grok/Pi/GeminiCli/Fake) 5s
 /// contract:
 ///   provides:
 ///     - name: context_fork_convergence_deadline
@@ -67,9 +67,13 @@ pub(crate) use outcome::{
 pub(crate) fn context_fork_convergence_deadline(provider: Provider) -> Duration {
     // Expiration is consumed by ContextForkOutcome::Pending(PendingContextFork).
     match provider {
-        Provider::Claude | Provider::ClaudeCode => Duration::from_secs(45),
         Provider::Codex => Duration::from_secs(10),
-        Provider::Copilot | Provider::Grok | Provider::Pi | Provider::GeminiCli
+        Provider::Claude
+        | Provider::ClaudeCode
+        | Provider::Copilot
+        | Provider::Grok
+        | Provider::Pi
+        | Provider::GeminiCli
         | Provider::Fake => Duration::from_secs(5),
     }
 }
@@ -121,12 +125,12 @@ impl ContextBackingSnapshot {
 /// ---
 /// purpose: fork 后按 provider 分派验证，只有拿到「新会话 backing 可读且不等于源会话」的实证才返回证明
 /// params:
-///   provider: 决定走 copilot(sqlite 行存在) / codex(候选扫描认领) / claude(轮询双路径) 三条路之一
+///   provider: 决定走 copilot(sqlite 行存在) / codex(候选扫描认领) 两条路之一
 ///   source_session_id: 被 fork 的源会话 id;新会话等于它即判失败
 ///   plan: 提供 expected_session_id 与隔离 backing 根
 ///   before: spawn 前的 ContextBackingSnapshot 基线，用于判「文件变过」
-///   expected_backing_path: 精确快照路径。claude 必需，缺失即拒绝;codex 仅在 plan 带 expected id 时必需(无 expected id 走 legacy「唯一变过的新 rollout」认领，可为 None);两者都不做同目录猜测
-///   spawn_cwd: codex 分支据此构造扫描上下文;claude 分支据此推导 provider 侧 projects 目录
+///   expected_backing_path: 精确快照路径。codex 仅在 plan 带 expected id 时必需(无 expected id 走 legacy「唯一变过的新 rollout」认领，可为 None);不做同目录猜测
+///   spawn_cwd: codex 分支据此构造扫描上下文
 ///   spawned_at: codex 候选扫描的时间边界
 ///   deadline: 轮询预算，来自 context_fork_convergence_deadline
 /// returns: ContextForkProof——新旧 session id、backing 路径、captured_via、attribution_confidence
@@ -138,7 +142,7 @@ impl ContextBackingSnapshot {
 /// boundary:
 ///   - 不修改 backing、不写 state、不发事件
 ///   - _source_agent_id 当前不参与任何判定(仅 codex 用 agent_id 做 embedded 身份比对)
-///   - 未列入三条路径的 provider 一律 CaptureFailed，绝不返回「无法验证但放行」
+///   - 未列入两条路径的 provider 一律 CaptureFailed，绝不返回「无法验证但放行」
 /// ---
 pub(crate) fn verify_context_fork(
     provider: Provider,
@@ -164,17 +168,6 @@ pub(crate) fn verify_context_fork(
             agent_id,
             spawn_cwd,
             spawned_at,
-            deadline,
-        );
-    }
-    if matches!(provider, Provider::Claude | Provider::ClaudeCode) {
-        return claude::verify_claude_fork(
-            provider,
-            source_session_id,
-            plan,
-            before,
-            expected_backing_path,
-            spawn_cwd,
             deadline,
         );
     }
@@ -249,10 +242,9 @@ fn provider_backing_root(provider: Provider, plan: &CommandPlan) -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     match provider {
-        Provider::Claude | Provider::ClaudeCode => home.join(".claude").join("projects"),
         Provider::Codex => home.join(".codex").join("sessions"),
         Provider::Copilot => home.join(".copilot").join("session-state"),
-        Provider::Pi => PathBuf::new(),
+        Provider::Claude | Provider::ClaudeCode | Provider::Pi => PathBuf::new(),
         Provider::Grok | Provider::GeminiCli | Provider::Fake => home,
     }
 }
@@ -386,90 +378,6 @@ mod tests {
 
         assert_eq!(proof.new_session_id.as_str(), "fresh-session");
         assert_eq!(proof.backing_path, fresh);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn claude_fork_proof_is_partitioned_by_exact_snapshot_path() {
-        let root = std::env::temp_dir().join(format!(
-            "ta-claude-fork-proof-partition-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join(".team/logs")).unwrap();
-        let expected = SessionId::new("22222222-2222-4222-8222-222222222222");
-        let plan = CommandPlan {
-            argv: Vec::new(),
-            expected_session_id: Some(expected.clone()),
-            provider_projects_root: Some(root.clone()),
-            managed_mcp_config: false,
-        };
-        let before = ContextBackingSnapshot::capture(Provider::Claude, &plan);
-        std::fs::write(
-            root.join(".team/logs/events.jsonl"),
-            "{\"event\":\"noise\"}\n",
-        )
-        .unwrap();
-        std::fs::write(
-            root.join("11111111-1111-4111-8111-111111111111.jsonl"),
-            "{\"type\":\"sibling-snapshot\"}\n",
-        )
-        .unwrap();
-        let expected_path = root.join(format!("{}.jsonl", expected.as_str()));
-        std::fs::write(&expected_path, "{\"type\":\"own-snapshot\"}\n").unwrap();
-        let proof = verify_context_fork(
-            Provider::Claude,
-            &SessionId::new("source-session"),
-            &plan,
-            &before,
-            Some(&expected_path),
-            "source",
-            "fork",
-            &root,
-            "2026-07-22T00:00:00Z",
-            Duration::ZERO,
-        )
-        .unwrap();
-        assert_eq!(proof.new_session_id, expected);
-        assert_eq!(proof.backing_path, expected_path);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-    #[test]
-    fn claude_fork_proof_never_uses_events_jsonl_as_backing() {
-        let root = std::env::temp_dir().join(format!(
-            "ta-claude-fork-proof-no-events-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join(".team/logs")).unwrap();
-        let expected = SessionId::new("33333333-3333-4333-8333-333333333333");
-        let plan = CommandPlan {
-            argv: Vec::new(),
-            expected_session_id: Some(expected.clone()),
-            provider_projects_root: Some(root.clone()),
-            managed_mcp_config: false,
-        };
-        let before = ContextBackingSnapshot::capture(Provider::Claude, &plan);
-        std::fs::write(
-            root.join(".team/logs/events.jsonl"),
-            "{\"event\":\"noise\"}\n",
-        )
-        .unwrap();
-        let missing = root.join(format!("{}.jsonl", expected.as_str()));
-        let error = verify_context_fork(
-            Provider::Claude,
-            &SessionId::new("source-session"),
-            &plan,
-            &before,
-            Some(&missing),
-            "source",
-            "fork",
-            &root,
-            "2026-07-22T00:00:00Z",
-            Duration::ZERO,
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("context_fork_unverified"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

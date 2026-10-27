@@ -1643,10 +1643,11 @@ fn role_agent_args(
         }
         match flag {
             "--provider" => {
-                // A contract name (e.g. `agent` for Cursor) is written as its leaf id.
+                // A contract name is written as the leaf's public name (`agent` →
+                // `cursor`, `claude_code` → `claude`); it declares the same leaf.
                 #[cfg(unix)]
                 let contract = crate::contract_runtime::registry::declared(&value, false)
-                    .map(|descriptor| descriptor.identity.id);
+                    .map(crate::contract_runtime::registry::public_name);
                 #[cfg(not(unix))]
                 let contract: Option<&str> = None;
                 let provider = match contract {
@@ -1749,6 +1750,9 @@ mod role_cli_tests {
         for (name, leaf) in [
             ("cursor", "cursor"), ("cursor-agent", "cursor"), ("agent", "cursor"),
             ("cursor_agent", "cursor"), ("kiro", "kiro"), ("codex_tui", "codex_tui"),
+            // Claude Code and Pi keep their public command names, which declare the leaf.
+            ("claude", "claude"), ("claude_code", "claude"), ("claude-code", "claude"),
+            ("claude_tui", "claude"), ("pi", "pi"), ("pi_tui", "pi"),
         ] {
             let (_, patch) = role_agent_args(
                 &strings(&["w", "--provider", name, "--bypass", "true"]), true,

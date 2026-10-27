@@ -10,7 +10,6 @@ use std::path::PathBuf;
 use crate::provider::types::{CapturedSession, ProviderError, SessionId};
 use crate::provider::Provider;
 
-pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod common;
 pub(crate) mod copilot;
@@ -49,10 +48,10 @@ pub(crate) fn scan_session_candidates_once(
     if matches!(provider, Provider::Pi) {
         return pi::scan_session_store(context);
     }
-    if matches!(provider, Provider::Claude | Provider::ClaudeCode)
-        && context.expected_session_id.is_some()
-    {
-        return Ok(claude::scan_expected_session(context));
+    // Claude Code workers run only through the contract leaf; a pre-upgrade
+    // legacy row has nothing left to capture.
+    if matches!(provider, Provider::Claude | Provider::ClaudeCode) {
+        return Ok(Vec::new());
     }
 
     let candidates = common::candidate_session_files(provider, context)?;
@@ -62,9 +61,6 @@ pub(crate) fn scan_session_candidates_once(
     }
     common::apply_spawned_at_filter(provider, context, &mut out);
 
-    if matches!(provider, Provider::Claude | Provider::ClaudeCode) {
-        return claude::apply_expected_session_filter(context, out);
-    }
     if matches!(provider, Provider::Codex) {
         out = codex::apply_expected_session_filter(context, out);
     }
@@ -73,5 +69,3 @@ pub(crate) fn scan_session_candidates_once(
     common::sort_expected_first_if_needed(context, &mut out);
     Ok(out)
 }
-
-pub(crate) use claude::rollout_path_has_leader_marker as rollout_path_has_claude_leader_marker;

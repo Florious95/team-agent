@@ -235,8 +235,8 @@ fn start_mode_serde_names_match_python_start_mode_strings() {
 //   codex sess  backing-MISSING !allow_fresh -> noop/refuse (绝不静默 resume 死 session)
 //   codex sess  backing-MISSING  allow_fresh -> fresh_after_missing_rollout
 //   codex no-sess any                        -> fresh
-//   claude/copilot sess backing-missing       -> fresh_after_missing_rollout 或 noop/refuse
-//   claude no-sess                            -> fresh
+//   copilot/grok sess backing-missing         -> fresh_after_missing_rollout 或 noop/refuse
+//   copilot no-sess                           -> fresh
 // 这是 bug-085 把 start_mode 分类从 start_agent 的 lock+spawn 全路径剥离出来的命门。
 // ───────────────────────────────────────────────────────────────────────
 
@@ -308,7 +308,7 @@ fn decide_start_mode_no_session_is_fresh() {
 
 #[test]
 fn decide_start_mode_checks_backing_for_all_resumable_providers() {
-    for provider in ["claude", "claude_code", "copilot"] {
+    for provider in ["copilot", "grok"] {
         assert_eq!(
             decide_start_mode(provider, Some(&sid("s1")), None, false, true),
             StartMode::FreshAfterMissingRollout,
@@ -326,14 +326,15 @@ fn decide_start_mode_checks_backing_for_all_resumable_providers() {
         );
     }
     assert_eq!(
-        decide_start_mode("claude", None, None, false, true),
+        decide_start_mode("copilot", None, None, false, true),
         StartMode::Fresh
     );
 }
 
 #[test]
 fn decide_start_mode_refuses_session_id_for_nonresumable_providers() {
-    for provider in ["fake", "gemini_cli"] {
+    // A persisted legacy Claude Code / Pi worker row is no longer resumable.
+    for provider in ["fake", "gemini_cli", "claude", "claude_code", "pi"] {
         assert_eq!(
             decide_start_mode(provider, Some(&sid("s1")), None, true, false),
             StartMode::Noop,
@@ -384,7 +385,7 @@ fn classify_restart_plan_interacted_unresumable_no_allow_fresh_yields_refuse() {
         "session_name": "team-a",
         "agents": {
             "w1": {
-                "provider": "claude",
+                "provider": "copilot",
                 "first_send_at": "2026-05-27T10:00:00+00:00",
                 "session_id": null
             }
@@ -437,7 +438,7 @@ fn classify_restart_plan_interacted_unresumable_with_allow_fresh_yields_fresh_st
     let state = json!({
         "agents": {
             "w1": {
-                "provider": "claude",
+                "provider": "copilot",
                 "first_send_at": "2026-05-27T10:00:00+00:00",
                 "session_id": null
             }
@@ -467,7 +468,7 @@ fn classify_restart_plan_never_captured_null_session_auto_fresh_partial_resume()
     // not captured" bug state) — see the OTHER refuse-interacted test below
     // and upgrade_restart_refuses_interacted_worker_without_session_id.
     let state = json!({
-        "agents": { "w1": { "provider": "claude", "session_id": null } }
+        "agents": { "w1": { "provider": "copilot", "session_id": null } }
     });
     let plan = classify_restart_plan(&state, false).expect("纯验证不应 Err");
     assert_eq!(plan.decisions.len(), 1);
@@ -493,7 +494,7 @@ fn restart_required_missing_skips_never_captured_workers() {
     use crate::lifecycle::restart::restart_required_missing_session_agent_ids;
     let state = json!({
         "agents": {
-            "w1": { "provider": "claude", "session_id": null, "status": "running" }
+            "w1": { "provider": "copilot", "session_id": null, "status": "running" }
         }
     });
     let missing = restart_required_missing_session_agent_ids(&state);
@@ -513,7 +514,7 @@ fn restart_required_missing_keeps_null_session_with_first_send_at() {
     let state = json!({
         "agents": {
             "w1": {
-                "provider": "claude",
+                "provider": "copilot",
                 "session_id": null,
                 "status": "running",
                 "spawn_cwd": "/tmp/ws",
@@ -539,7 +540,7 @@ fn restart_required_missing_keeps_null_session_with_last_result_at() {
     let state = json!({
         "agents": {
             "w1": {
-                "provider": "claude",
+                "provider": "copilot",
                 "session_id": null,
                 "status": "running",
                 "spawn_cwd": "/tmp/ws",
@@ -565,7 +566,7 @@ fn classify_restart_plan_null_session_with_last_result_at_refuses_without_allow_
     let state = json!({
         "agents": {
             "w1": {
-                "provider": "claude",
+                "provider": "copilot",
                 "session_id": null,
                 "last_result_at": "2026-01-01T00:00:00+00:00",
             }
@@ -586,7 +587,7 @@ fn classify_restart_plan_null_session_with_last_result_at_refuses_without_allow_
 fn classify_restart_plan_never_interacted_null_session_with_allow_fresh_marks_forced_fresh() {
     // E6 层2: 同上自启动 null-session worker,但显式 --allow-fresh → 用户主动认账丢上下文 → FreshStart。
     let state = json!({
-        "agents": { "w1": { "provider": "claude", "session_id": null } }
+        "agents": { "w1": { "provider": "copilot", "session_id": null } }
     });
     let plan = classify_restart_plan(&state, true).expect("纯验证不应 Err");
     assert_eq!(plan.decisions.len(), 1);
@@ -748,9 +749,9 @@ fn classify_restart_plan_produces_corrupt_entries_with_python_type_names() {
     // ("str"/"int"/"list") —— 锁跨语言 type-name 映射,不是手设字段。
     let state = json!({
         "agents": {
-            "w_str": { "provider": "claude", "first_send_at": "" },
-            "w_int": { "provider": "claude", "first_send_at": 0 },
-            "w_list": { "provider": "claude", "first_send_at": [] }
+            "w_str": { "provider": "copilot", "first_send_at": "" },
+            "w_int": { "provider": "copilot", "first_send_at": 0 },
+            "w_list": { "provider": "copilot", "first_send_at": [] }
         }
     });
     // corrupt 非空 → restart 在 teardown 之前 hard refuse(决策前)。

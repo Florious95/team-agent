@@ -186,11 +186,14 @@ fn read_team_inner(
             return Err(invalid(&path, "front matter"));
         }
         let opted = opted_in(&meta, &path)?;
+        // An omitted provider is the default `pi`, which declares the Pi leaf.
         if opted
-            || meta
-                .get("provider")
-                .and_then(Value::as_str)
-                .is_some_and(|provider| super::registry::recognizes(provider, false))
+            || match meta.get("provider") {
+                None | Some(Value::Null) => true,
+                Some(provider) => provider
+                    .as_str()
+                    .is_some_and(|provider| super::registry::recognizes(provider, false)),
+            }
         {
             selected = true;
         }

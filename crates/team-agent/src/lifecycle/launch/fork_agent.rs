@@ -1,9 +1,9 @@
 //! ---
-//! purpose: Pi 以完整会话快照、Claude 以原生 --fork-session 创建独立席位；Grok 保持窗口内分身
+//! purpose: legacy 席位的窗口内分身（Grok）；Claude Code / Pi 席位只走 contract 管道的原生新席位 fork
 //! contract:
 //!   provides:
 //!     - name: fork_agent_with_transport
-//!       what: Pi 走锁内快照新席位；Claude 走锁内原生 fork 新席位，不再原地 /branch；Grok 走窗口内斜杠 fork
+//!       what: Grok 走窗口内斜杠 fork；升级前遗留的 claude/pi worker 行明确拒绝
 //!     - name: in_window_fork
 //!       what: 已验证的 provider+subscription 给出 command+screen_mark；未验证返回 None
 //!   depends:
@@ -12,7 +12,7 @@
 //!     - crate::lifecycle::profile_launch
 //!     - crate::transport::Transport
 //! boundary:
-//!   - 仅 Pi 与 Claude 的锁内专用管道注册并启动新席位
+//!   - 新席位 fork 只由 contract_runtime::fork 管道完成，这里不注册新席位
 //!   - 窗口内分身不 spawn 新 pane，不改 TEAM_AGENT_ID / MCP / 席位名
 //!   - 重试只重按回车，不重粘 /fork
 //!   - 不把 pane 锁超时从 200ms 调大
@@ -45,8 +45,8 @@ pub struct InWindowFork {
 /// grok `/fork` mark `forked from` (2026-08-17).
 /// Claude's `/branch` is retired here: it moves the SOURCE process onto the
 /// branch (renamed "<title> (Branch)") while the seat's captured tuple still
-/// names the old session, and creates no seat. Claude forks only into a new
-/// seat through its native `--fork-session` (restart::claude_fork).
+/// names the old session, and creates no seat. Claude Code and Pi fork only
+/// into a new seat through the contract pipeline (`contract_runtime::fork`).
 pub fn in_window_fork(provider: Provider, auth: AuthMode) -> Option<InWindowFork> {
     match (provider, auth) {
         (Provider::Grok, AuthMode::Subscription) => Some(InWindowFork {
@@ -131,27 +131,16 @@ pub fn fork_agent_with_transport(
         .get("auth_mode")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("subscription");
+    // A pre-upgrade Claude Code or Pi row has no legacy runtime to fork from;
+    // contract seats fork through the contract pipeline before this point.
+    if crate::provider::wire::is_retired_provider(provider_raw) {
+        return Err(LifecycleError::Provider(
+            crate::provider::wire::retired_provider_error(provider_raw).into(),
+        ));
+    }
+    let _ = (label, open_display);
     let provider = parse_provider(provider_raw).unwrap_or(Provider::Grok);
     let auth = parse_auth_mode(auth_raw).unwrap_or(AuthMode::Subscription);
-    if provider == Provider::Pi {
-        return crate::lifecycle::restart::fork_pi_new_seat_locked(
-            &selected,
-            source_agent_id,
-            as_agent_id,
-            label,
-            transport,
-        );
-    }
-    if matches!(provider, Provider::Claude | Provider::ClaudeCode) {
-        return crate::lifecycle::restart::fork_claude_new_seat_locked(
-            &selected,
-            source_agent_id,
-            as_agent_id,
-            label,
-            open_display,
-            transport,
-        );
-    }
     let Some(spec) = in_window_fork(provider, auth) else {
         return Err(refuse_missing_in_window_fork(provider, provider_raw));
     };
@@ -211,7 +200,6 @@ pub fn fork_agent_with_transport(
         },
         session_id: None,
         backing_state: ForkBackingState::Verified,
-        pi_fork: None,
     })
 }
 

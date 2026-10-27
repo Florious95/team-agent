@@ -13,7 +13,7 @@
 //! never-captured state correctly auto-freshes (no context to lose). The
 //! genuine "session_id=Some + backing missing → still Refuse" path is
 //! covered at the unit level by upgrade_compat_0211_red::
-//! restart_refuses_interacted_claude_worker_without_session_id_partial_resume_preserves_guard
+//! restart_refuses_interacted_copilot_worker_without_session_id_partial_resume_preserves_guard
 //! and selection.rs's existing first_send_at + null session_id branch.
 //!
 //! This e2e fixture now asserts the observable end-state of the original

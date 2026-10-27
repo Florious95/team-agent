@@ -47,6 +47,16 @@ pub fn clone_agent(
         .ok_or_else(|| {
             LifecycleError::RequirementUnmet(format!("unknown worker agent id: {source_agent_id}"))
         })?;
+    // A pre-upgrade Claude Code or Pi row has no legacy runtime to clone onto.
+    if let Some(retired) = source_agent
+        .get("provider")
+        .and_then(serde_json::Value::as_str)
+        .filter(|provider| crate::provider::wire::is_retired_provider(provider))
+    {
+        return Err(LifecycleError::Provider(
+            crate::provider::wire::retired_provider_error(retired).into(),
+        ));
+    }
     let source_session_id = source_agent
         .get("session_id")
         .and_then(serde_json::Value::as_str)
@@ -122,35 +132,9 @@ fn read_agent_session(
         .get("rollout_path")
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.is_empty())
-        .map(std::path::PathBuf::from)
-        .or_else(|| find_claude_backing(agent, session))?;
+        .map(std::path::PathBuf::from)?;
     let distinct = source_session_id.is_none_or(|source| source.as_str() != session);
     (distinct && backing.is_file()).then(|| (SessionId::new(session), backing))
-}
-
-fn find_claude_backing(agent: &serde_json::Value, session: &str) -> Option<std::path::PathBuf> {
-    let root = agent
-        .get("claude_projects_root")
-        .and_then(serde_json::Value::as_str)
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(|home| std::path::PathBuf::from(home).join(".claude/projects"))
-        })?;
-    let target = format!("{session}.jsonl");
-    let mut pending = vec![root];
-    while let Some(dir) = pending.pop() {
-        let entries = std::fs::read_dir(&dir).ok()?;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                pending.push(path);
-            } else if path.file_name().and_then(|name| name.to_str()) == Some(target.as_str()) {
-                return Some(path);
-            }
-        }
-    }
-    None
 }
 
 fn persist_clone_session(

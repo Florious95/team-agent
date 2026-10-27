@@ -147,7 +147,6 @@ pub(crate) fn rollback_add_agent_atomic(
 /// params:
 ///   meta: 角色文档 front matter
 ///   dynamic_role_file: 角色文件路径，记进 state 供 restart 重建 spec 用
-///   fork_parent: 给出时首次 spawn 以原生 fork 继承该会话，起成后即清除
 /// returns: 成功返回空值，席位状态记为 starting
 /// errors: 读或写 runtime state 失败时返回 StatePersist
 /// ---
@@ -157,21 +156,10 @@ pub(super) fn upsert_agent_state_from_role(
     agent_id: &AgentId,
     meta: &Value,
     dynamic_role_file: &Path,
-    fork_parent: Option<&crate::provider::SessionId>,
 ) -> Result<(), LifecycleError> {
-    let mut entry = starting_agent_entry(workspace, agent_id, meta, dynamic_role_file);
-    if let (Some(parent), Some(object)) = (fork_parent, entry.as_object_mut()) {
-        object.insert(
-            FORK_PARENT_SESSION_ID.to_string(),
-            serde_json::json!(parent.as_str()),
-        );
-    }
+    let entry = starting_agent_entry(workspace, agent_id, meta, dynamic_role_file);
     upsert_agent_entry(workspace, canonical_team_key, agent_id, entry)
 }
-
-/// One-shot spawn instruction: the next fresh spawn of this row natively forks
-/// this parent session instead of starting empty. Every start consumes it.
-pub(crate) const FORK_PARENT_SESSION_ID: &str = "_fork_parent_session_id";
 
 /// ---
 /// purpose: 把一席的 starting 行写进团队 state 并落盘
@@ -213,199 +201,6 @@ pub(crate) fn upsert_agent_entry(
         Some(canonical_team_key),
         Some(agent_id.as_str()),
     )
-}
-
-/// ---
-/// purpose: 首次登记 Pi fork 席位，原子带入目标角色与完整 fork capture seed
-/// returns: 成功后 TARGET 已按 ForkAgent typed intent 登记为 starting
-/// errors: 重复席位、无效 capture seed 或 state 写入失败时拒绝
-/// ---
-pub(crate) fn fork_upsert_agent_state_from_role(
-    workspace: &Path,
-    canonical_team_key: &str,
-    agent_id: &AgentId,
-    meta: &Value,
-    compiled_agent: &Value,
-    dynamic_role_file: &Path,
-    seed: &ForkCaptureSeed,
-) -> Result<(), LifecycleError> {
-    if agent_id == &seed.source_agent_id {
-        return Err(LifecycleError::RequirementUnmet(
-            "fork target must differ from source".to_string(),
-        ));
-    }
-    if seed.captured.captured_via != crate::provider::CaptureVia::ForkSnapshot
-        || seed.captured.attribution_confidence != crate::provider::Confidence::High
-        || seed.captured.session_id.is_none()
-        || seed.captured.rollout_path.is_none()
-        || seed.captured_at.is_empty()
-    {
-        return Err(LifecycleError::RequirementUnmet(
-            "fork capture seed is incomplete or not a verified Pi snapshot".to_string(),
-        ));
-    }
-    if compiled_agent.get("id").and_then(Value::as_str) != Some(agent_id.as_str()) {
-        return Err(LifecycleError::Compile(
-            "compiled fork role id does not match target".to_string(),
-        ));
-    }
-    let sessions_root = std::fs::canonicalize(&seed.pi_sessions_root)
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    let backing = seed.captured.rollout_path.as_ref().ok_or_else(|| {
-        LifecycleError::RequirementUnmet("fork backing path is missing".to_string())
-    })?;
-    let backing_path = std::fs::canonicalize(&backing.0)
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    if !backing_path.starts_with(&sessions_root) {
-        return Err(LifecycleError::RequirementUnmet(
-            "fork backing is outside the target Pi session root".to_string(),
-        ));
-    }
-
-    let mut state =
-        crate::state::projection::select_runtime_state(workspace, Some(canonical_team_key))
-            .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
-    if !state.is_object() {
-        state = serde_json::json!({});
-    }
-    let root = state.as_object_mut().ok_or_else(|| {
-        LifecycleError::StatePersist("runtime state root is not an object".to_string())
-    })?;
-    let agents = root
-        .entry("agents".to_string())
-        .or_insert_with(|| serde_json::json!({}));
-    if !agents.is_object() {
-        *agents = serde_json::json!({});
-    }
-    let agent_map = agents.as_object_mut().ok_or_else(|| {
-        LifecycleError::StatePersist("runtime state agents is not an object".to_string())
-    })?;
-    if agent_map.contains_key(agent_id.as_str()) {
-        return Err(LifecycleError::RequirementUnmet(format!(
-            "agent id already exists in selected team: {}",
-            agent_id
-        )));
-    }
-
-    let source_profile_dir = agent_map
-        .get(seed.source_agent_id.as_str())
-        .and_then(serde_json::Value::as_object)
-        .and_then(|source| source.get("_profile_dir"))
-        .and_then(serde_json::Value::as_str)
-        .filter(|path| !path.is_empty())
-        .map(|path| serde_json::json!(path));
-    let mut entry = starting_agent_entry(workspace, agent_id, meta, dynamic_role_file);
-    let entry_object = entry.as_object_mut().ok_or_else(|| {
-        LifecycleError::StatePersist("fork target entry is not an object".to_string())
-    })?;
-    for field in [
-        "provider",
-        "auth_mode",
-        "role",
-        "model",
-        "effort",
-        "profile",
-        "tools",
-        "system_prompt",
-        "output_contract",
-        "communication_mode",
-        "working_directory",
-        "cwd",
-        "config",
-        "name",
-        "dangerously_skip_permissions",
-    ] {
-        if let Some(value) = compiled_agent.get(field) {
-            entry_object.insert(field.to_string(), yaml_value_to_json(value));
-        }
-    }
-    if compiled_agent.get("model").is_some() && !entry_object.contains_key("model_source") {
-        entry_object.insert("model_source".to_string(), serde_json::json!("team"));
-    }
-    entry_object.insert("agent_id".to_string(), serde_json::json!(agent_id.as_str()));
-    entry_object.insert("label".to_string(), serde_json::json!(agent_id.as_str()));
-    entry_object.insert(
-        "owner_team_id".to_string(),
-        serde_json::json!(canonical_team_key),
-    );
-    entry_object.insert(
-        "claude_projects_root".to_string(),
-        serde_json::json!(sessions_root.to_string_lossy().to_string()),
-    );
-    entry_object.insert(
-        "forked_from".to_string(),
-        serde_json::json!(seed.source_agent_id.as_str()),
-    );
-    entry_object.insert(
-        "spawn_cwd".to_string(),
-        serde_json::json!(seed.captured.spawn_cwd.to_string_lossy().to_string()),
-    );
-    entry_object.insert(
-        "session_id".to_string(),
-        serde_json::json!(seed.captured.session_id.as_ref().map(|id| id.as_str())),
-    );
-    let backing = seed.captured.rollout_path.as_ref().ok_or_else(|| {
-        LifecycleError::RequirementUnmet("fork backing path is missing".to_string())
-    })?;
-    entry_object.insert(
-        "rollout_path".to_string(),
-        serde_json::json!(backing.0.to_string_lossy().to_string()),
-    );
-    entry_object.insert(
-        "captured_at".to_string(),
-        serde_json::json!(seed.captured_at.as_str()),
-    );
-    entry_object.insert(
-        "captured_via".to_string(),
-        serde_json::to_value(seed.captured.captured_via)
-            .map_err(|e| LifecycleError::StatePersist(e.to_string()))?,
-    );
-    entry_object.insert(
-        "attribution_confidence".to_string(),
-        serde_json::to_value(seed.captured.attribution_confidence)
-            .map_err(|e| LifecycleError::StatePersist(e.to_string()))?,
-    );
-    entry_object.insert("capture_state".to_string(), serde_json::json!("captured"));
-    if let Some(profile_dir) = source_profile_dir {
-        entry_object.insert("_profile_dir".to_string(), profile_dir);
-    } else {
-        entry_object.insert(
-            "_profile_dir".to_string(),
-            serde_json::json!(seed.profile_dir.to_string_lossy().to_string()),
-        );
-    }
-    agent_map.insert(agent_id.as_str().to_string(), entry);
-    crate::lifecycle::restart::remove::clear_agent_retirement_in_state(&mut state, agent_id);
-    crate::state::repository::StateRepository::new(workspace)
-        .save(
-            crate::state::repository::StateWriteIntent::ForkAgent {
-                team_key: canonical_team_key,
-                agent_id: agent_id.as_str(),
-            },
-            &state,
-        )
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))
-}
-
-fn yaml_value_to_json(value: &Value) -> serde_json::Value {
-    match value {
-        Value::Null => serde_json::Value::Null,
-        Value::Bool(value) => serde_json::json!(value),
-        Value::Int(value) => serde_json::json!(value),
-        Value::Float(value) => serde_json::Number::from_f64(*value)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null),
-        Value::Str(value) => serde_json::json!(value),
-        Value::List(values) => {
-            serde_json::Value::Array(values.iter().map(yaml_value_to_json).collect())
-        }
-        Value::Map(values) => serde_json::Value::Object(
-            values
-                .iter()
-                .map(|(key, value)| (key.clone(), yaml_value_to_json(value)))
-                .collect(),
-        ),
-    }
 }
 
 fn starting_agent_entry(

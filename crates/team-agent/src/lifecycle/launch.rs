@@ -23,15 +23,6 @@ use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
 
 use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 
-#[derive(Clone, Debug)]
-pub(crate) struct ForkCaptureSeed {
-    pub source_agent_id: AgentId,
-    pub captured: crate::provider::CapturedSession,
-    pub captured_at: String,
-    pub pi_sessions_root: PathBuf,
-    pub profile_dir: PathBuf,
-}
-
 use super::*;
 
 // ── lifecycle::launch —— 冷启 / quick-start / 危险审批探测 ──────────────────
@@ -360,20 +351,6 @@ pub(crate) use mcp_config::{
 
 pub(crate) mod pi_mcp;
 
-pub(crate) fn run_pi_catalog_preflight(
-    agents_dir: &std::path::Path,
-    discover: &mut dyn FnMut(&str) -> Result<Vec<String>, ()>,
-) -> Result<(), crate::lifecycle::LifecycleError> {
-    crate::compiler::preflight_pi_models_in_team_with(agents_dir, discover).map_err(|error| {
-        crate::lifecycle::LifecycleError::PiModelPreflight {
-            requested: error.requested,
-            candidates: error.candidates,
-            action: error.action,
-            not_ready: error.not_ready,
-        }
-    })
-}
-
 mod worker_env;
 pub(super) use worker_env::*;
 pub(crate) use worker_env::{
@@ -433,7 +410,7 @@ pub(super) use add_agent::*;
 pub use add_agent::{add_agent, add_agent_force};
 pub(crate) use add_agent::{
     add_agent_with_transport, add_agent_with_transport_at_paths_locked,
-    add_agent_with_transport_force, add_forked_agent_locked, force_recreate_with_transport_locked,
+    add_agent_with_transport_force, force_recreate_with_transport_locked,
 };
 
 pub(crate) mod add_agent_state;

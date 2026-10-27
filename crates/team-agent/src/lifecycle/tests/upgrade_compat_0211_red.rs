@@ -276,7 +276,7 @@ fn restart_auto_fresh_never_captured_worker_without_allow_fresh() {
         "agents": {
             "never_captured": {
                 "status": "running",
-                "provider": "claude",
+                "provider": "copilot",
                 "session_id": null,
                 "first_send_at": null
             }
@@ -302,15 +302,15 @@ fn restart_auto_fresh_never_captured_worker_without_allow_fresh() {
 /// state — restart without --allow-fresh must STILL Refuse, never
 /// silently fresh (architect rule: 绝不静默 fresh). This is what the
 /// existing `upgrade_restart_refuses_interacted_worker_without_session_id`
-/// test pins; this test pins the SAME guard for Claude (the partial-resume
+/// test pins; this test pins the SAME guard for Copilot (the partial-resume
 /// change must not weaken it for any provider).
 #[test]
-fn restart_refuses_interacted_claude_worker_without_session_id_partial_resume_preserves_guard() {
+fn restart_refuses_interacted_copilot_worker_without_session_id_partial_resume_preserves_guard() {
     let state = json!({
         "agents": {
             "interacted_no_sid": {
                 "status": "running",
-                "provider": "claude",
+                "provider": "copilot",
                 "session_id": null,
                 "first_send_at": "2026-06-26T01:00:00+00:00"
             }

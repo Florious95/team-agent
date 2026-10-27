@@ -208,7 +208,7 @@ impl ProfileFixture {
         std::fs::write(
             team.join("profiles").join("local.env"),
             format!(
-                "ANTHROPIC_BASE_URL={base_url}\nANTHROPIC_AUTH_TOKEN={token}\nANTHROPIC_MODEL=mock-claude\n"
+                "OPENAI_BASE_URL={base_url}\nOPENAI_API_KEY={token}\nOPENAI_MODEL=mock-codex\n"
             ),
         )
         .unwrap();
@@ -218,8 +218,8 @@ impl ProfileFixture {
         )
         .unwrap();
         std::fs::write(
-            team.join("agents").join("clauder.md"),
-            "---\nname: clauder\nrole: Claude Worker\nprovider: claude\nauth_mode: compatible_api\nprofile: local\nmodel: null\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n",
+            team.join("agents").join("codexer.md"),
+            "---\nname: codexer\nrole: Codex Worker\nprovider: codex\nauth_mode: compatible_api\nprofile: local\nmodel: null\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n",
         )
         .unwrap();
         Self { root, team }

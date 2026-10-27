@@ -315,7 +315,13 @@ const ALIAS_JSON: &str = r#"{"version":1,"team":{"name":"debate-team","mode":"su
 fn compile_provider_models_do_not_fill_claude_code_role_model() {
     let team = build_team(ALIAS_TEAM, &[("implementer.md", ALIAS_ROLE)], &[]);
     let spec = compile_team(&team).unwrap();
-    assert_eq!(templated_compact_json(&spec), ALIAS_JSON);
+    // On unix a `claude_code` role compiles to the Claude Code contract leaf's id.
+    let expected = if cfg!(unix) {
+        ALIAS_JSON.replace(r#""provider":"claude_code""#, r#""provider":"claude_tui""#)
+    } else {
+        ALIAS_JSON.to_string()
+    };
+    assert_eq!(templated_compact_json(&spec), expected);
 }
 
 // Omitted role model remains null; the provider supplies its native default.
@@ -419,7 +425,9 @@ fn compile_missing_provider_defaults_to_pi() {
     let team = build_team(TEAM_BASE, &[("implementer.md", ROLE_MISSING_PROVIDER)], &[]);
     let spec = compile_team(&team).expect("an omitted provider defaults to Pi");
     let agent = agent0(&spec);
-    assert_eq!(agent.get("provider"), Some(&Value::Str("pi".to_string())));
+    // On unix the default `pi` compiles to the Pi contract leaf's id.
+    let expected = if cfg!(unix) { "pi_tui" } else { "pi" };
+    assert_eq!(agent.get("provider"), Some(&Value::Str(expected.to_string())));
     assert_eq!(
         agent.get("model"),
         Some(&Value::Str("team-agent/qwen3.8-27b".to_string()))
@@ -536,13 +544,20 @@ fn team_provider_model_aliases_do_not_fill_role_model() {
 
 #[test]
 fn claude_role_without_model_keeps_provider_native_default() {
-    // A missing explicit model stays null for both Claude provider names.
+    // A missing explicit model stays null for both Claude provider names, each
+    // of which compiles to the Claude Code contract leaf on unix.
     for prov in ["claude", "claude_code"] {
         let team = build_team(TM_CODEX, &[("w.md", &role_nomodel(prov))], &[]);
         let spec = compile_team(&team).unwrap();
         assert_eq!(
             agent0(&spec).get("model"),
             Some(&Value::Null),
+            "provider {prov}"
+        );
+        let expected = if cfg!(unix) { "claude_tui" } else { prov };
+        assert_eq!(
+            agent0(&spec).get("provider").and_then(Value::as_str),
+            Some(expected),
             "provider {prov}"
         );
     }

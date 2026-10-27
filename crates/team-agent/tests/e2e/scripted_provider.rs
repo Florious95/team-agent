@@ -1,7 +1,7 @@
 #![allow(dead_code)] // Used by T2-tier cases that land in the next batch.
 //! Scripted provider shim for T2 tier E2E cases.
 //!
-//! The Team Agent runtime invokes external `codex` / `claude` / `copilot`
+//! The Team Agent runtime invokes external `codex` / `copilot`
 //! binaries to spawn provider sessions. T2 tests want to exercise CLI paths
 //! that branch on provider behavior (resume decision, session backing,
 //! activity classifier) WITHOUT touching real subscription auth or the
@@ -39,10 +39,6 @@ impl ScriptedProvider {
     /// handle. Drop the workspace to clean it up.
     pub fn with_codex(ws: &TestWorkspace, behavior: ScriptedBehavior) -> Self {
         Self::install(ws, "codex", behavior)
-    }
-
-    pub fn with_claude(ws: &TestWorkspace, behavior: ScriptedBehavior) -> Self {
-        Self::install(ws, "claude", behavior)
     }
 
     fn install(ws: &TestWorkspace, name: &str, behavior: ScriptedBehavior) -> Self {

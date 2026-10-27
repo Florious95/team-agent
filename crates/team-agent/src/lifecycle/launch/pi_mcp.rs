@@ -1,14 +1,16 @@
 //! ---
-//! purpose: Pi executable/catalog 验证、原生/公共 MCP 能力注册与共享启动计划物化
+//! purpose: Pi leader 的 executable/catalog 验证、MCP 能力注册与 fresh 启动计划物化
 //! contract:
 //!   provides:
 //!     - name: materialize_pi_plan
-//!       what: 为 leader 与 TeamMate 生成同一来源的 Pi CommandPlan
+//!       what: 为 `team-agent pi` leader 生成 fresh Pi CommandPlan
 //!     - name: write_pi_wrapper
 //!       what: 原子写入 0600 per-seat runtime MCP registration extension
+//!     - name: pi_cleanup_plan
+//!       what: 移除升级前遗留的 legacy Pi worker 席位时只删 wrapper
 //! boundary:
-//!   - 不枚举 Pi session；resume 只重验调用方给出的 exact backing
-//!   - 不投递消息、不执行 cleanup 或 doctor 判定
+//!   - Pi worker 席位只走 contract `pi_tui` leaf；这里不再 spawn/resume/fork worker
+//!   - 不枚举 Pi session；不投递消息、不执行 doctor 判定
 //!   - 不读取 credentials 或 provider settings 值
 //! maturity: wired
 //! ---
@@ -16,18 +18,15 @@
 use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::io::Write;
-#[cfg(test)]
-use std::cell::RefCell;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
 use crate::model::enums::{Provider, ProviderEffort};
-use crate::provider::adapters::pi::{build_pi_command_argv, PiCommandRequest, PiSessionSelector};
-use crate::provider::{CommandPlan, McpConfig, ProviderError, SessionId};
+use crate::provider::command_helpers::{append_opt_pair, append_pair};
+use crate::provider::{CommandPlan, McpConfig, ProviderError};
 
 /// The first executable `pi` on PATH, exactly what the worker's bare `pi`
 /// runs: a wrapper, npm symlink or plain binary alike. No inner binary is probed.
@@ -96,14 +95,6 @@ pub(crate) fn pi_seat_paths(workspace: &Path, team_id: &str, agent_id: &str) -> 
 }
 
 /// ---
-/// purpose: 为 Pi fresh 启动生成框架预分配 UUID
-/// returns: 新 SessionId
-/// ---
-pub(crate) fn new_pi_session_id() -> SessionId {
-    SessionId::new(crate::provider::adapter::next_session_token())
-}
-
-/// ---
 /// purpose: 解析 pi --list-models 未过滤表格为 provider/model exact ids
 /// returns: 保序且无重复的 exact ids
 /// errors: 非 UTF-8、header/row 异常、重复或空 catalog 时返回 ProviderError
@@ -144,20 +135,6 @@ pub(crate) fn select_exact_pi_model(
         )));
     }
     Ok(selected.clone())
-}
-
-/// ---
-/// purpose: 对比选定与启动后客观观测到的 Pi model identity
-/// returns: 完全相等且非空时成功
-/// errors: 缺失或不匹配时返回 ProviderError
-/// ---
-pub(crate) fn verify_started_pi_model(selected: &str, observed: &str) -> Result<(), ProviderError> {
-    if observed.is_empty() || selected != observed {
-        return Err(ProviderError::Command(format!(
-            "Pi started model mismatch: selected={selected:?} observed={observed:?}"
-        )));
-    }
-    Ok(())
 }
 
 /// ---
@@ -464,136 +441,6 @@ fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-#[cfg(test)]
-#[derive(Debug, Default)]
-pub(crate) struct PiCatalogTestObservation {
-    pub(crate) spawn_count: usize,
-    pub(crate) argv: Vec<String>,
-    pub(crate) parent_pid: Option<u32>,
-    pub(crate) parent_exit_success: Option<bool>,
-    pub(crate) parent_exit_code: Option<i32>,
-    pub(crate) reader_timeout: bool,
-}
-
-#[cfg(test)]
-struct PiCatalogTestContext {
-    receipt: PathBuf,
-    helper_mode: Option<String>,
-    observation: PiCatalogTestObservation,
-}
-
-#[cfg(test)]
-thread_local! {
-    static PI_CATALOG_TEST_CONTEXT: RefCell<Option<PiCatalogTestContext>> = RefCell::new(None);
-}
-
-#[cfg(test)]
-pub(crate) fn with_pi_catalog_test_observation<T>(
-    receipt: &Path,
-    helper_mode: Option<&str>,
-    action: impl FnOnce() -> T,
-) -> (T, PiCatalogTestObservation) {
-    PI_CATALOG_TEST_CONTEXT.with(|slot| {
-        assert!(slot
-            .replace(Some(PiCatalogTestContext {
-                receipt: receipt.to_path_buf(),
-                helper_mode: helper_mode.map(str::to_owned),
-                observation: PiCatalogTestObservation::default(),
-            }))
-            .is_none());
-        let result = action();
-        let context = slot.take().expect("Pi catalog test context");
-        (result, context.observation)
-    })
-}
-
-#[cfg(test)]
-fn observe_pi_catalog_test(f: impl FnOnce(&mut PiCatalogTestContext)) {
-    PI_CATALOG_TEST_CONTEXT.with(|slot| {
-        if let Some(context) = slot.borrow_mut().as_mut() {
-            f(context);
-        }
-    });
-}
-
-#[cfg(test)]
-pub(crate) fn run_pi_catalog_after_parent_exit_for_test(
-    stdout: std::process::ChildStdout,
-    parent_pid: u32,
-    status: std::process::ExitStatus,
-    timeout: Duration,
-    max_bytes: u64,
-) -> Result<Vec<u8>, String> {
-    observe_pi_catalog_test(|context| {
-        context.observation.parent_pid = Some(parent_pid);
-        context.observation.parent_exit_success = Some(status.success());
-        context.observation.parent_exit_code = status.code();
-    });
-    crate::provider::model_catalog::finish_stdout_after_exit(
-        stdout, status, timeout, max_bytes, &mut PiCatalogObserver,
-    )
-    .map_err(|error| error.pi_legacy_message())
-}
-
-/// Shared bounded native-command runner; launch preflight keeps its exact model gate.
-pub(crate) fn run_pi_catalog(
-    executable: &Path,
-    timeout: Duration,
-    max_bytes: u64,
-) -> Result<Vec<u8>, String> {
-    let mut extra_env = Vec::new();
-    #[cfg(test)]
-    observe_pi_catalog_test(|context| {
-        context.observation.spawn_count += 1;
-        context.observation.argv.push("--list-models".to_string());
-        extra_env.push(("TEAM_AGENT_MODELS_TIMEOUT_RECEIPT".into(), context.receipt.as_os_str().into()));
-        if let Some(mode) = context.helper_mode.as_deref() {
-            extra_env.push(("TEAM_AGENT_MODELS_TIMEOUT_MODE".into(), mode.into()));
-        }
-    });
-    crate::provider::model_catalog::run_command(
-        executable, &["--list-models"], None, None, &[], &extra_env, timeout, max_bytes,
-        &mut PiCatalogObserver,
-    )
-    .map_err(|error| error.pi_legacy_message())
-}
-
-struct PiCatalogObserver;
-impl crate::provider::model_catalog::CatalogObserver for PiCatalogObserver {
-    #[cfg(test)]
-    fn spawned(&mut self, pid: u32) {
-        observe_pi_catalog_test(|context| context.observation.parent_pid = Some(pid));
-    }
-
-    #[cfg(test)]
-    fn exited(&mut self, status: &std::process::ExitStatus) {
-        observe_pi_catalog_test(|context| {
-            context.observation.parent_exit_success = Some(status.success());
-            context.observation.parent_exit_code = status.code();
-        });
-    }
-
-    #[cfg(test)]
-    fn output_timeout(&mut self) {
-        observe_pi_catalog_test(|context| context.observation.reader_timeout = true);
-    }
-}
-
-pub(crate) fn pi_model_candidates(requested: &str) -> Result<Vec<String>, ProviderError> {
-    let executable = pi_path_entry()?;
-    let catalog = run_pi_catalog(&executable, Duration::from_secs(10), 1024 * 1024)
-        .map_err(ProviderError::Command)?;
-    let models = parse_pi_list_models_table(&catalog)?;
-    Ok(models
-        .into_iter()
-        .filter(|model| {
-            model
-                .rsplit_once('/')
-                .is_some_and(|(_, name)| name == requested)
-        })
-        .collect())
-}
-
 /// The shell's own PATH choice: the first executable `pi`, kept as found.
 fn pi_path_entry() -> Result<PathBuf, ProviderError> {
     let path = std::env::var_os("PATH")
@@ -683,34 +530,13 @@ pub(crate) struct PiMaterializeRequest<'a> {
 }
 
 /// ---
-/// purpose: 共享物化 Pi leader 与 TeamMate 的 wrapper 和 CommandPlan
-/// returns: fresh Pi CommandPlan 不传 --session-id；isolated seats carry their session root, while the
-///          interactive leader preserves Pi's native default root
+/// purpose: 物化 Pi leader 的 wrapper 和 fresh CommandPlan
+/// returns: fresh Pi CommandPlan 不传 --session-id；an isolated leader carries its session root,
+///          while the interactive leader preserves Pi's native default root
 /// errors: resolver、exact model、wrapper 或 argv 构造失败时返回 ProviderError
 /// ---
 pub(crate) fn materialize_pi_plan(
     request: PiMaterializeRequest<'_>,
-) -> Result<CommandPlan, ProviderError> {
-    materialize_pi_plan_with_session(request, None)
-}
-
-/// ---
-/// purpose: 用上游已验证的 captured id/path 物化 Pi exact-path resume 计划
-/// returns: 与 fresh 共用 resolver/wrapper/argv builder，且不再生成 session id
-/// errors: backing 缺失或越出席位 root 时拒绝；header id/cwd 由 session scanner 在调用前验证
-/// ---
-pub(crate) fn materialize_pi_resume_plan(
-    request: PiMaterializeRequest<'_>,
-    session_id: &SessionId,
-    session_path: &Path,
-    spawn_cwd: &Path,
-) -> Result<CommandPlan, ProviderError> {
-    materialize_pi_plan_with_session(request, Some((session_id, session_path, spawn_cwd)))
-}
-
-fn materialize_pi_plan_with_session(
-    request: PiMaterializeRequest<'_>,
-    resume: Option<(&SessionId, &Path, &Path)>,
 ) -> Result<CommandPlan, ProviderError> {
     let (_chain, catalog) = resolve_pi_executable_chain()?;
     let model = request
@@ -722,41 +548,10 @@ fn materialize_pi_plan_with_session(
         PiSessionScope::Isolated => Some(paths.sessions.as_path()),
         PiSessionScope::NativeDefault => None,
     };
-    let resume = if let Some((session_id, session_path, spawn_cwd)) = resume {
-        let session_dir = session_dir.ok_or_else(|| {
-            ProviderError::ResumeUnavailable(format!(
-                "Pi session root is unavailable {}",
-                paths.sessions.display()
-            ))
-        })?;
-        let session_root = std::fs::canonicalize(session_dir).map_err(|error| {
-            ProviderError::ResumeUnavailable(format!(
-                "Pi session root is unavailable {}: {error}",
-                paths.sessions.display()
-            ))
-        })?;
-        let exact_path = std::fs::canonicalize(session_path).map_err(|error| {
-            ProviderError::ResumeUnavailable(format!(
-                "Pi exact session backing is unavailable {}: {error}",
-                session_path.display()
-            ))
-        })?;
-        if !exact_path.starts_with(&session_root) {
-            return Err(ProviderError::ResumeUnavailable(format!(
-                "Pi exact session backing is outside the recorded seat root: {}",
-                exact_path.display()
-            )));
-        }
-        let _ = spawn_cwd;
-        Some((session_id, exact_path))
-    } else {
-        if let Some(session_dir) = session_dir {
-            std::fs::create_dir_all(session_dir).map_err(|error| {
-                ProviderError::Io(format!("{}: {error}", session_dir.display()))
-            })?;
-        }
-        None
-    };
+    if let Some(session_dir) = session_dir {
+        std::fs::create_dir_all(session_dir)
+            .map_err(|error| ProviderError::Io(format!("{}: {error}", session_dir.display())))?;
+    }
     let candidate = candidate_from_mcp_config(request.mcp_config)?;
     let wrapper = write_pi_wrapper(PiWrapperRequest {
         destination: &paths.wrapper,
@@ -767,33 +562,68 @@ fn materialize_pi_plan_with_session(
         workspace: request.workspace,
         include_tools: request.team_mcp_tools,
     })?;
-    let (argv, expected_session_id) = if let Some((_session_id, exact_path)) = resume {
-        let argv = build_pi_command_argv(PiCommandRequest {
-            extension: &wrapper,
-            model: model.as_deref(),
-            effort: request.effort,
-            system_prompt: request.system_prompt,
-            session_dir,
-            session: PiSessionSelector::Resume { path: &exact_path },
-            agent_id: request.agent_id,
-        })?;
-        (argv, None)
-    } else {
-        let argv = build_pi_command_argv(PiCommandRequest {
-            extension: &wrapper,
-            model: model.as_deref(),
-            effort: request.effort,
-            system_prompt: request.system_prompt,
-            session_dir,
-            session: PiSessionSelector::Fresh,
-            agent_id: request.agent_id,
-        })?;
-        (argv, None)
-    };
+    let argv = build_pi_command_argv(PiCommandRequest {
+        extension: &wrapper,
+        model: model.as_deref(),
+        effort: request.effort,
+        system_prompt: request.system_prompt,
+        session_dir,
+        agent_id: request.agent_id,
+    })?;
     Ok(CommandPlan {
         argv,
-        expected_session_id,
+        expected_session_id: None,
         provider_projects_root: session_dir.map(Path::to_path_buf),
         managed_mcp_config: false,
     })
+}
+
+pub(crate) struct PiCommandRequest<'a> {
+    pub extension: &'a Path,
+    pub model: Option<&'a str>,
+    pub effort: Option<ProviderEffort>,
+    pub system_prompt: &'a str,
+    /// Team-owned session root for an isolated leader; `None` preserves Pi's native default.
+    pub session_dir: Option<&'a Path>,
+    pub agent_id: &'a str,
+}
+
+/// ---
+/// purpose: 从已验证 semantic request 构造仅追加 Team Agent MCP/提示/session root 的 fresh Pi argv
+/// returns: exact ordered argv，argv[0] 固定为裸 `pi`；Pi 自己分配 session id
+/// errors: 必需字段为空时返回 ProviderError
+/// ---
+pub(crate) fn build_pi_command_argv(
+    request: PiCommandRequest<'_>,
+) -> Result<Vec<String>, ProviderError> {
+    if request.extension.as_os_str().is_empty()
+        || request
+            .session_dir
+            .is_some_and(|session_dir| session_dir.as_os_str().is_empty())
+        || request.model.is_some_and(|model| model.trim().is_empty())
+        || request.system_prompt.trim().is_empty()
+        || request.agent_id.trim().is_empty()
+    {
+        return Err(ProviderError::Command(
+            "Pi command requires extension, prompt, and agent id".to_string(),
+        ));
+    }
+    // The command stays PATH-resolved at spawn time, so a user wrapper runs.
+    let mut argv = vec![
+        "pi".to_string(),
+        "-e".to_string(),
+        request.extension.to_string_lossy().into_owned(),
+    ];
+    append_opt_pair(&mut argv, "--model", request.model);
+    if let Some(effort) = request.effort {
+        argv.push("--thinking".to_string());
+        argv.push(effort.as_str().to_string());
+    }
+    append_pair(&mut argv, "--append-system-prompt", request.system_prompt);
+    if let Some(session_dir) = request.session_dir {
+        append_pair(&mut argv, "--session-dir", session_dir.to_string_lossy().into_owned());
+    }
+    // Passing `--session-id` makes Pi warn and then create: Pi names a fresh session.
+    append_pair(&mut argv, "--name", request.agent_id);
+    Ok(argv)
 }

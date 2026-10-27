@@ -596,7 +596,7 @@
       "plan": "Bind this exact documented argv to an isolated HermeticTestEnv result and an assertion/negative-twin pair before promotion. For lifecycle use an authorized owned team and verify scope, identity, outcome and cleanup; help or readonly plans alone do not establish lifecycle coverage."
     },
     {
-      "command": "team-agent start analyst --provider pi --bypass false --prompt \"Analyze the proposed change\"",
+      "command": "team-agent start analyst --provider pi --model openai-codex/gpt-6-luna --bypass false --prompt \"Analyze the proposed change\"",
       "bucket": "declared_gap",
       "covered": false,
       "owner": "runtime-owner:public-cli",

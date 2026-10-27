@@ -396,14 +396,6 @@ pub enum LifecycleError {
     /// 编译 spec / role doc 失败(`compile_team`/`compile_role_doc_agent`)。
     #[error("spec compile failed: {0}")]
     Compile(String),
-    /// Pi model/schema admission failed before lifecycle reservation or writes.
-    #[error("pi model preflight failed: {requested}")]
-    PiModelPreflight {
-        requested: String,
-        candidates: Vec<String>,
-        action: String,
-        not_ready: bool,
-    },
     /// provider 命令构造 / resume 不可用(`ResumeUnavailable`)。
     #[error("provider error: {0}")]
     Provider(String),
@@ -618,8 +610,8 @@ pub struct AddAgentReport {
     pub role_file: PathBuf,
 }
 
-/// `fork_agent(...)` 结果。Pi 的 snapshot fork 附带可审计的 source/target backing 细节；
-/// 已支持的其他 provider 保持既有报告字段。
+/// `fork_agent(...)` 结果(legacy 窗口内分身)。Claude Code / Pi 的新席位 fork
+/// 由 contract 管道直接给出回执，不经过这里。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForkAgentReport {
     pub source_agent_id: AgentId,
@@ -627,14 +619,6 @@ pub struct ForkAgentReport {
     pub env: AgentActionEnvelope,
     pub session_id: Option<SessionId>,
     pub backing_state: ForkBackingState,
-    pub pi_fork: Option<PiForkDetails>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PiForkDetails {
-    pub source_session_id: SessionId,
-    pub session_id: SessionId,
-    pub backing_path: RolloutPath,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

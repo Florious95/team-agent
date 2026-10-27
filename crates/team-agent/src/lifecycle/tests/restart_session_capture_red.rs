@@ -624,35 +624,6 @@ fn provider_home_codex_rollout_from_foreign_workspace_is_not_captured() {
 #[test]
 #[ignore = "real-machine: provider session filesystem + restart/shutdown lifecycle convergence"]
 #[serial(env)]
-fn provider_home_claude_session_is_captured_for_restart_resume() {
-    let fixture = RestartFixture::new("claude-home-capture", "claude");
-    let _home = HomeGuard::with_home(fixture.root.join("home"));
-    let claude_session = "claude-sess-240";
-    seed_claude_home_session(&fixture.home(), &fixture.spawn_cwd, claude_session);
-    seed_running_state_without_session(&fixture.team, "claude", &fixture.spawn_cwd);
-
-    let adapter = get_adapter(Provider::Claude);
-    let captured = adapter
-        .capture_session_id("worker_a", &fixture.spawn_cwd, 0)
-        .expect("Claude provider-home capture should not error")
-        .expect("Claude session under HOME/.claude/sessions must be discoverable before restart");
-
-    assert_eq!(
-        captured.session_id.as_ref().map(|id| id.as_str()),
-        Some(claude_session),
-        "Claude capture must recover sessionId from provider-home session JSON"
-    );
-    assert!(
-        captured.rollout_path.as_ref().is_some_and(|path| path
-            .as_path()
-            .starts_with(fixture.home().join(".claude/sessions"))),
-        "Claude capture must scan provider home, not only spawn_cwd; captured={captured:?}"
-    );
-}
-
-#[test]
-#[ignore = "real-machine: provider session filesystem + restart/shutdown lifecycle convergence"]
-#[serial(env)]
 fn restart_force_captures_real_codex_session_meta_before_teardown() {
     let fixture = RestartFixture::new("restart-codex-force-capture", "codex");
     let _home = HomeGuard::with_home(fixture.root.join("home"));
@@ -677,30 +648,6 @@ fn restart_force_captures_real_codex_session_meta_before_teardown() {
         "transport should not need multiple destructive teardowns; kill_count={}",
         transport.kill_count()
     );
-}
-
-#[test]
-#[ignore = "real-machine: provider session filesystem + restart/shutdown lifecycle convergence"]
-#[serial(env)]
-fn restart_force_captures_claude_session_before_teardown() {
-    let fixture = RestartFixture::new("restart-claude-force-capture", "claude");
-    let _home = HomeGuard::with_home(fixture.root.join("home"));
-    let claude_session = "claude-sess-before-kill";
-    seed_claude_home_session(&fixture.home(), &fixture.spawn_cwd, claude_session);
-    seed_running_state_without_session(&fixture.team, "claude", &fixture.spawn_cwd);
-    let transport = RecordingTransport::new().with_session_present(true);
-
-    let report = restart_with_transport(&fixture.team, false, None, &transport)
-        .expect("restart should succeed after forced session capture");
-
-    assert_restarted_with_resume(&report, claude_session);
-    assert_spawn_contains_adjacent(
-        &transport.single_spawn_argv(),
-        &["--resume", claude_session],
-        "Claude restart must spawn `claude ... --resume <session_id>`",
-    );
-    assert_state_session_id(&fixture.team, claude_session);
-    assert_events_contain_resume_decision(&fixture.team, "resume", claude_session);
 }
 
 #[test]
@@ -755,23 +702,6 @@ fn persisted_session_id_is_the_resume_authority_for_restart_plan_and_spawn_argv(
         &codex_transport.single_spawn_argv(),
         &["resume", "codex-known-session"],
         "Codex restart must use the persisted session id",
-    );
-
-    let claude = RestartFixture::new("claude-resume-authority", "claude");
-    seed_running_state_with_session(
-        &claude.team,
-        "claude",
-        &claude.spawn_cwd,
-        "claude-known-session",
-    );
-    let claude_transport = RecordingTransport::new().with_session_present(true);
-    let claude_report = restart_with_transport(&claude.team, false, None, &claude_transport)
-        .expect("persisted Claude session_id must be resumable");
-    assert_restarted_with_resume(&claude_report, "claude-known-session");
-    assert_spawn_contains_adjacent(
-        &claude_transport.single_spawn_argv(),
-        &["--resume", "claude-known-session"],
-        "Claude restart must use the persisted session id",
     );
 }
 
@@ -980,16 +910,6 @@ fn agent_session<'a>(state: &'a serde_json::Value, agent_id: &str) -> Option<&'a
         .filter(|value| !value.is_empty())
 }
 
-fn assert_spawn_contains_adjacent(argv: &[String], expected: &[&str], message: &str) {
-    assert!(
-        argv.windows(expected.len()).any(|window| window
-            .iter()
-            .map(String::as_str)
-            .eq(expected.iter().copied())),
-        "{message}; argv={argv:?}"
-    );
-}
-
 fn assert_spawn_contains_ordered(argv: &[String], expected: &[&str], message: &str) {
     let mut index = 0;
     for arg in argv {
@@ -1096,20 +1016,6 @@ fn seed_codex_home_rollout_with_agent_hint(
                 }
             })
         ),
-    )
-    .unwrap();
-}
-
-fn seed_claude_home_session(home: &Path, spawn_cwd: &Path, session_id: &str) {
-    let dir = home.join(".claude/sessions");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("worker-a-session.json"),
-        serde_json::to_string(&json!({
-            "sessionId": session_id,
-            "cwd": spawn_cwd.to_string_lossy().to_string()
-        }))
-        .unwrap(),
     )
     .unwrap();
 }
@@ -1322,12 +1228,7 @@ impl RestartFixture {
         std::fs::write(
             team.join("agents/worker_a.md"),
             format!(
-                "---\nname: worker_a\nrole: Worker\nprovider: {provider}\nmodel: {}\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n",
-                if provider == "claude" {
-                    "claude-sonnet-4-6"
-                } else {
-                    "gpt-5.5"
-                }
+                "---\nname: worker_a\nrole: Worker\nprovider: {provider}\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n"
             ),
         )
         .unwrap();
@@ -1360,12 +1261,7 @@ impl RestartFixture {
         std::fs::write(
             team.join("agents/worker_a.md"),
             format!(
-                "---\nname: worker_a\nrole: Worker\nprovider: {provider}\nmodel: {}\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n",
-                if provider == "claude" {
-                    "claude-sonnet-4-6"
-                } else {
-                    "gpt-5.5"
-                }
+                "---\nname: worker_a\nrole: Worker\nprovider: {provider}\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n"
             ),
         )
         .unwrap();

@@ -55,16 +55,15 @@ pub fn require_legacy_lifecycle(
         return Ok(());
     };
     let row = agent.and_then(|id| selected.state.get("agents").and_then(|agents| agents.get(id)));
-    // A pre-upgrade legacy Cursor seat has no engine left; only teardown is admitted.
+    // A pre-upgrade legacy Cursor, Claude or Pi seat has no engine left; only teardown is admitted.
     let teardown = matches!(operation, "stop-agent" | "remove-agent");
-    if !teardown
-        && row
-            .and_then(|row| row.get("provider"))
-            .and_then(Value::as_str)
-            .is_some_and(crate::provider::wire::is_retired_provider)
+    if let Some(retired) = row
+        .and_then(|row| row.get("provider"))
+        .and_then(Value::as_str)
+        .filter(|provider| !teardown && crate::provider::wire::is_retired_provider(provider))
     {
         return Err(crate::cli::CliError::Runtime(
-            crate::provider::wire::RETIRED_PROVIDER_ERROR.into(),
+            crate::provider::wire::retired_provider_error(retired).into(),
         ));
     }
     let selected_native = match agent {
@@ -118,9 +117,8 @@ pub fn declares_contract(path: Option<&Path>, provider: Option<&str>) -> bool {
     let opted_in = meta.as_ref().is_some_and(|meta| {
         matches!(meta.get("contract_runtime"), Some(crate::model::yaml::Value::Bool(true)))
     });
-    provider
-        .or(declared.as_deref())
-        .is_some_and(|provider| super::registry::recognizes(provider, opted_in))
+    // An omitted provider is the default `pi`, which declares the Pi leaf.
+    super::registry::recognizes(provider.or(declared.as_deref()).unwrap_or("pi"), opted_in)
 }
 pub fn team_config(
     workspace: &Path,

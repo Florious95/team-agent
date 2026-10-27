@@ -20,7 +20,9 @@
 //!   (The SQLite foreign-key table integrity + exact-nonce recall are the GREEN
 //!   half / subscription-E2E per §1.4 — not asserted offline here.)
 //!
-//! - **R7 permission-clamp GUARDRAIL (naturally-green, not a RED, per L1 r2)**: a
+//! - **R7 permission-clamp GUARDRAIL (retired)**: R7/R7b drove a legacy Claude
+//!   seat fork through a backing shim; that runtime is gone, so they left with it.
+//!   Original charter: a
 //!   fork's effective approval policy must be derived from the LEADER
 //!   (`source=leader_process`, `worker_capability_above_leader=false`), never a
 //!   raw clone of a source-declared capability above the leader (MUST-16).
@@ -45,7 +47,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Command;
 use std::sync::Mutex;
 
 use serde_json::{json, Value};
@@ -67,19 +69,9 @@ use hermetic_guard::HermeticTestEnv;
 const TEAM_NAME: &str = "cf-batch4";
 const SOURCE: &str = "cp_worker";
 const NEW: &str = "cp_fork";
-const R7_CHILD: &str = "TEAM_AGENT_TEST_CF_R7_CHILD";
-const R7B_CHILD: &str = "TEAM_AGENT_TEST_CF_R7B_CHILD";
 const R8_CHILD: &str = "TEAM_AGENT_TEST_CF_R8_CHILD";
 const ISOLATION_GUARD_CHILD: &str = "TEAM_AGENT_TEST_CF_ISOLATION_GUARD_CHILD";
 const PARENT_PID_ENV: &str = "TEAM_AGENT_TEST_CF_PARENT_PID";
-const R7_TEST: &str = concat!(
-    "lifecycle::tests::clone_fork_copilot_perms_red::",
-    "r7_fork_effective_permissions_are_clamped_to_leader_guardrail"
-);
-const R7B_TEST: &str = concat!(
-    "lifecycle::tests::clone_fork_copilot_perms_red::",
-    "r7b_fork_policy_under_restricted_leader_ancestry_is_disabled"
-);
 const R8_TEST: &str = concat!(
     "lifecycle::tests::clone_fork_copilot_perms_red::",
     "r8_copilot_fork_is_no_longer_capability_refused"
@@ -127,247 +119,6 @@ fn copilot_clone_fork_env_fixtures_run_outside_parent_process() {
             "clone/fork env fixtures must never run in the parent lib-test process"
         );
     });
-}
-
-/// Gate6 CI-hermeticity revision: the R7 fixture must pin the process-ancestry
-/// seam explicitly (`TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON`) instead of
-/// depending on the REAL ancestry of the test-runner host. Unpinned, a local
-/// runner descending from a dangerous-bypass leader yields
-/// `source=leader_process` (historical local green) while a clean CI runner
-/// correctly yields `source=disabled` — a non-hermetic assertion, not a product
-/// regression. Precedent: `codex_mcp_approval_inheritance_red.rs` `MockAncestry`
-/// (pins both bypass and restricted leader argv).
-const ANCESTRY_ENV: &str = "TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON";
-const CODEX_BYPASS: &str = "--dangerously-bypass-approvals-and-sandbox";
-const RESTRICTED_LEADER_ARGV: &[&str] = &[
-    "codex",
-    "--sandbox",
-    "read-only",
-    "--ask-for-approval",
-    "on-request",
-];
-
-struct Case {
-    env: HermeticTestEnv,
-    workspace: PathBuf,
-    shim_path: String,
-    ancestry_json: String,
-    socket: Option<PathBuf>,
-}
-
-impl Case {
-    /// R7 (permission-clamp guardrail) uses a claude source with a success-path
-    /// backing shim so the fork actually produces a NEW row whose permission clamp
-    /// can be inspected — without a real fork the guardrail would read no row and
-    /// pass vacuously. (R8 does not use Case: it exercises the library entry with
-    /// an in-process RecordingTransport — see `r8_...`.)
-    fn start(tag: &str) -> Self {
-        Self::start_with_ancestry(tag, &["codex", CODEX_BYPASS])
-    }
-
-    /// Every CLI invocation of this Case pins `ancestry_argv` through the
-    /// product's existing test seam so the derived approval policy is a
-    /// function of the FIXTURE, never of the host process tree.
-    fn start_with_ancestry(tag: &str, ancestry_argv: &[&str]) -> Self {
-        let env = HermeticTestEnv::enter_with_leader(tag);
-        let workspace = env.workspace("ws");
-        write_team_docs(&workspace, "claude");
-        let shim_dir = write_claude_backing_shim(&workspace);
-        let shim_path = format!(
-            "{}:{}",
-            shim_dir.display(),
-            std::env::var("PATH").expect("PATH present")
-        );
-        let mut case = Self {
-            env,
-            workspace,
-            shim_path,
-            ancestry_json: serde_json::to_string(ancestry_argv).expect("ancestry argv json"),
-            socket: None,
-        };
-        case.quick_start();
-        case.seed_source_session_tuple();
-        case
-    }
-
-    fn ws(&self) -> &str {
-        self.workspace.to_str().expect("ws utf8")
-    }
-
-    fn state_path(&self) -> PathBuf {
-        self.workspace
-            .join(".team")
-            .join("runtime")
-            .join("state.json")
-    }
-
-    fn run(&self, args: &[&str]) -> Output {
-        self.env.run_cli_env(
-            &self.workspace,
-            args,
-            &[
-                ("PATH", self.shim_path.as_str()),
-                (ANCESTRY_ENV, self.ancestry_json.as_str()),
-            ],
-        )
-    }
-
-    fn quick_start(&mut self) {
-        let out = self.run(&[
-            "quick-start",
-            self.ws(),
-            "--workspace",
-            self.ws(),
-            "--name",
-            TEAM_NAME,
-            "--yes",
-            "--json",
-        ]);
-        if let Ok(v) = serde_json::from_slice::<Value>(&out.stdout) {
-            if let Some(cmd) = v
-                .get("attach_commands")
-                .and_then(|a| a.as_array())
-                .and_then(|a| a.first())
-                .and_then(|c| c.as_str())
-                .or_else(|| v.get("leader_attach_command").and_then(|c| c.as_str()))
-            {
-                let toks: Vec<&str> = cmd.split_whitespace().collect();
-                if let Some(i) = toks.iter().position(|t| *t == "-S") {
-                    if let Some(sock) = toks.get(i + 1) {
-                        self.socket = Some(PathBuf::from(*sock));
-                    }
-                }
-            }
-        }
-    }
-
-    /// Seed the SOURCE session tuple so the fork reaches the capability gate
-    /// (not a missing-session gate) — mirrors the old refusal contract's
-    /// `seed_session_id`, which existed precisely so "the capability gate is what
-    /// fires".
-    fn seed_source_session_tuple(&self) {
-        // A real rollout file the source tuple points at.
-        let rollout_file = self.workspace.join("fixture-source-rollout.jsonl");
-        let _ = std::fs::write(&rollout_file, "{\"type\":\"fixture-source\"}\n");
-        let Ok(raw) = std::fs::read_to_string(self.state_path()) else {
-            return;
-        };
-        let Ok(mut state) = serde_json::from_str::<Value>(&raw) else {
-            return;
-        };
-        let tuple = json!({
-            "session_id": "sess-cf-batch4-source",
-            "rollout_path": rollout_file.to_string_lossy(),
-            "captured_at": "2026-07-21T00:00:00Z",
-            "captured_via": "contract-fixture"
-        });
-        let mut patch = |row: &mut Value| {
-            if let Some(obj) = row.as_object_mut() {
-                for (k, v) in tuple.as_object().unwrap() {
-                    obj.insert(k.clone(), v.clone());
-                }
-            }
-        };
-        if let Some(row) = state.get_mut("agents").and_then(|a| a.get_mut(SOURCE)) {
-            patch(row);
-        }
-        if let Some(teams) = state.get_mut("teams").and_then(Value::as_object_mut) {
-            for team in teams.values_mut() {
-                if let Some(row) = team.get_mut("agents").and_then(|a| a.get_mut(SOURCE)) {
-                    patch(row);
-                }
-            }
-        }
-        let _ = std::fs::write(
-            self.state_path(),
-            serde_json::to_string_pretty(&state).unwrap(),
-        );
-    }
-
-    fn fork(&self, as_name: &str) -> Value {
-        let out = self.run(&[
-            "fork-agent",
-            SOURCE,
-            "--as",
-            as_name,
-            "--workspace",
-            self.ws(),
-            "--team",
-            TEAM_NAME,
-            "--json",
-        ]);
-        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-        serde_json::from_slice::<Value>(&out.stdout).unwrap_or_else(|_| {
-            json!({
-                "ok": out.status.success(),
-                "_exit": out.status.code(),
-                "_stderr": stderr,
-            })
-        })
-    }
-
-    fn team_agent_rows(&self) -> serde_json::Map<String, Value> {
-        let Ok(raw) = std::fs::read_to_string(self.state_path()) else {
-            return serde_json::Map::new();
-        };
-        let Ok(v) = serde_json::from_str::<Value>(&raw) else {
-            return serde_json::Map::new();
-        };
-        if let Some(teams) = v.get("teams").and_then(Value::as_object) {
-            for team in teams.values() {
-                if let Some(agents) = team.get("agents").and_then(Value::as_object) {
-                    if agents.contains_key(SOURCE) {
-                        return agents.clone();
-                    }
-                }
-            }
-        }
-        serde_json::Map::new()
-    }
-}
-
-impl Drop for Case {
-    fn drop(&mut self) {
-        if let Some(sock) = &self.socket {
-            let _ = std::process::Command::new("tmux")
-                .args(["-S", sock.to_str().unwrap_or(""), "kill-server"])
-                .output();
-        }
-        let ws = self.workspace.to_string_lossy().to_string();
-        if let Ok(out) = std::process::Command::new("ps")
-            .args(["-axo", "pid=,command="])
-            .output()
-        {
-            for line in String::from_utf8_lossy(&out.stdout).lines() {
-                if line.contains(&ws) {
-                    if let Some(pid) = line.split_whitespace().next() {
-                        let _ = std::process::Command::new("kill")
-                            .args(["-TERM", pid])
-                            .output();
-                    }
-                }
-            }
-        }
-        let _ = &self.env;
-    }
-}
-
-fn write_team_docs(workspace: &Path, provider: &str) {
-    std::fs::create_dir_all(workspace.join("agents")).expect("create agents dir");
-    std::fs::write(
-        workspace.join("TEAM.md"),
-        format!(
-            "---\nname: {TEAM_NAME}\nobjective: clone-fork batch4.\nprovider: {provider}\n---\n"
-        ),
-    )
-    .expect("write TEAM.md");
-    std::fs::write(
-        workspace.join("agents").join(format!("{SOURCE}.md")),
-        format!(
-            "---\nname: {SOURCE}\nrole: {SOURCE}\nprovider: {provider}\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{SOURCE} body.\n"
-        ),
-    )
-    .expect("write source role doc");
 }
 
 /// Copilot team docs for the library-entry R8 (a separate agents dir so the
@@ -446,43 +197,6 @@ fn seed_source_tuple_in_state(workspace: &Path, agent: &str) {
     save_runtime_state(workspace, &state).expect("save seeded state");
 }
 
-/// Claude success-path shim producing a NEW backing keyed to the predetermined
-/// `--session-id` (same mechanism as batch3): the R7 fork must actually complete
-/// so a NEW state row exists to inspect for the permission clamp — otherwise the
-/// guardrail reads no row and passes vacuously (false-green-hole type 8).
-fn write_claude_backing_shim(workspace: &Path) -> PathBuf {
-    let bin_dir = workspace.join("shim-bin");
-    std::fs::create_dir_all(&bin_dir).expect("create shim dir");
-    let shim = bin_dir.join("claude");
-    std::fs::write(
-        &shim,
-        r#"#!/bin/sh
-sid=""
-prev=""
-for a in "$@"; do
-  if [ "$prev" = "--session-id" ]; then sid="$a"; fi
-  prev="$a"
-done
-if [ -n "$sid" ]; then
-  enc=$(printf '%s' "$PWD" | sed 's/[^a-zA-Z0-9]/-/g')
-  dir="$HOME/.claude/projects/$enc"
-  mkdir -p "$dir"
-  printf '{"sessionId":"%s","type":"fork-backing"}\n' "$sid" > "$dir/$sid.jsonl"
-fi
-echo 'claude shim ready'
-exec sleep 3600
-"#,
-    )
-    .expect("write claude shim");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod claude shim");
-    }
-    bin_dir
-}
-
 /// R8 Copilot fork caps RE-CHARTER — a Copilot fork must no longer be refused by a
 /// blanket capability gate (§1.4 proves the directory-copy + SQLite-transaction
 /// primitive is feasible under an isolated COPILOT_HOME). Baseline red: the fork
@@ -543,94 +257,6 @@ fn r8_copilot_fork_is_no_longer_capability_refused() {
             "Copilot in-window fork is unverified; result={result:?}"
         );
     });
-}
-
-/// R7 permission-clamp GUARDRAIL — a fork's effective approval policy is derived
-/// from the LEADER and never escalates above it (MUST-16). 0.5.66 bypass 单源:
-/// fork 的 approval policy 由源角色的 `dangerously_skip_permissions` 派生
-/// (本 fixture = false → `source=disabled`),不再依赖 leader argv 继承。任何
-/// fork 都不得出现 `source=leader_process`(旧模型已删)或 capability 高于源。
-#[test]
-#[serial_test::serial(env)]
-fn r7_fork_effective_permissions_are_clamped_to_leader_guardrail() {
-    run_process_isolated(R7_CHILD, R7_TEST, || {
-        // Claude source + success-path backing shim so the fork COMPLETES and a NEW
-        // row exists to inspect — no vacuous pass on a refused fork. The source role
-        // declares `dangerously_skip_permissions: false`, so the fork's policy must
-        // resolve to `disabled` (fail-closed) — the new single-source model.
-        let case = Case::start("cf-r7");
-        let fork = case.fork(NEW);
-        assert_eq!(
-            fork.get("ok").and_then(Value::as_bool),
-            Some(true),
-            "R7 fixture precondition: the claude fork must complete so a NEW row exists to check the \
-             permission clamp (no vacuous guardrail). fork={fork}"
-        );
-        let policy = new_row_policy(&case);
-        let source = policy.get("source").and_then(Value::as_str);
-        assert_ne!(
-            source,
-            Some("leader_process"),
-            "0.5.66: fork policy must never be leader_process (old ancestry model removed); \
-             policy={policy}"
-        );
-        assert_eq!(
-            source,
-            Some("disabled"),
-            "guardrail: a fork's approval policy derives from the role's dangerously_skip_permissions \
-             (false → disabled), never raw-cloned escalation; MUST-16. policy={policy}"
-        );
-        assert_ne!(
-            policy.get("worker_capability_above_leader").and_then(Value::as_bool),
-            Some(true),
-            "guardrail: a fork must never carry a capability above the leader; MUST-16. policy={policy}"
-        );
-    });
-}
-
-/// R7b reverse positive control — same source role (dangerously_skip_permissions:
-/// false) must also resolve to `source=disabled` under any ancestry seam. 0.5.66
-/// 起 policy 与 leader argv 无关:source 恒 `disabled`,fork 恒不升级(MUST-16)。
-#[test]
-#[serial_test::serial(env)]
-fn r7b_fork_policy_under_restricted_leader_ancestry_is_disabled() {
-    run_process_isolated(R7B_CHILD, R7B_TEST, || {
-        let case = Case::start_with_ancestry("cf-r7b", RESTRICTED_LEADER_ARGV);
-        let fork = case.fork(NEW);
-        assert_eq!(
-            fork.get("ok").and_then(Value::as_bool),
-            Some(true),
-            "R7b fixture precondition: the claude fork must complete so a NEW row exists to check the \
-             policy (no vacuous control). fork={fork}"
-        );
-        let policy = new_row_policy(&case);
-        assert_eq!(
-            policy.get("source").and_then(Value::as_str),
-            Some("disabled"),
-            "fail-closed: source role declares dangerously_skip_permissions=false → fork policy must \
-             be disabled; policy={policy}"
-        );
-        assert_ne!(
-            policy
-                .get("worker_capability_above_leader")
-                .and_then(Value::as_bool),
-            Some(true),
-            "a fork must never yield a capability above the source; MUST-16. policy={policy}"
-        );
-    });
-}
-
-fn new_row_policy(case: &Case) -> Value {
-    let rows = case.team_agent_rows();
-    let new_row = rows
-        .get(NEW)
-        .unwrap_or_else(|| panic!("NEW fork row must exist to inspect the policy; rows={rows:?}"));
-    new_row
-        .get("effective_approval_policy")
-        .cloned()
-        .unwrap_or_else(|| {
-            panic!("NEW fork row must carry an effective_approval_policy; row={new_row}")
-        })
 }
 
 // ---------------------------------------------------------------------------

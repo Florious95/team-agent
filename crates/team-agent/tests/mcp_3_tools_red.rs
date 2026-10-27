@@ -328,119 +328,26 @@ fn assert_pi_wrapper_identity(path: &Path, agent_id: &str, team_id: &str) {
     assert!(source.contains("pi.registerMcpServer(alias"), "runtime wrapper must use the native registration API");
 }
 
-fn write_pi_runtime_spec(root: &Path, team_id: &str) -> PathBuf {
-    let spec = root.join(".team").join("runtime").join(team_id).join("team.spec.yaml");
-    std::fs::create_dir_all(root.join("agents")).unwrap();
-    std::fs::write(root.join("TEAM.md"), format!(r#"---
-name: {team_id}
-objective: M03 Pi MCP tool registration.
-provider: pi
----
-
-M03 team.
-"#)).unwrap();
-    std::fs::write(root.join("agents/worker_a.md"), r#"---
-name: worker_a
-role: Worker
-provider: pi
-model: team-agent/qwen3.8-27b
-auth_mode: subscription
-dangerously_skip_permissions: true
-tools:
-  - mcp_team
----
-
-M03 worker.
-"#).unwrap();
-    std::fs::create_dir_all(spec.parent().unwrap()).unwrap();
-    let text = format!(r#"version: 1
-team:
-  name: "{team_id}"
-  mode: "supervisor_worker"
-  objective: "M03 Pi MCP tool registration"
-  workspace: "{}"
-leader:
-  id: "leader"
-  role: "Leader"
-  provider: "pi"
-  model: "team-agent/qwen3.8-27b"
-  effort: "max"
-  tools: ["mcp_team"]
-agents:
-  - id: "worker_a"
-    role: "Worker"
-    provider: "pi"
-    model: "team-agent/qwen3.8-27b"
-    effort: "max"
-    auth_mode: "subscription"
-    dangerously_skip_permissions: true
-    working_directory: "{}"
-    system_prompt:
-      inline: "A test worker."
-      file: null
-    tools: ["mcp_team"]
-    permission_mode: "restricted"
-routing:
-  default_assignee: "worker_a"
-  rules: []
-communication:
-  protocol: "mcp_inbox"
-  topology: "leader_centered"
-  worker_to_worker: true
-  result_format: "result_envelope_v1"
-  message_store:
-    sqlite: ".team/runtime/team.db"
-runtime:
-  backend: "tmux"
-  display_backend: "none"
-  session_name: "team-{team_id}"
-  auto_launch: true
-  startup_order: ["worker_a"]
-  dangerously_skip_permissions: false
-tasks: []
-"#, root.display(), root.display());
-    std::fs::write(&spec, &text).unwrap();
-    std::fs::write(root.join("team.spec.yaml"), text).unwrap();
-    spec
-}
-
 #[test]
 #[serial_test::serial(env)]
-fn m03_initial_resume_and_pi_leader_materialization_all_consume_three_tools() {
+fn m03_pi_leader_materialization_consumes_three_tools() {
     let _hermetic = HermeticTestEnv::enter("mcp-3-m03");
     let case = TempCase::new("m03");
     let (_bin, path) = write_fake_pi(case.path());
     let _path_guard = PathGuard::install(&path);
-    let spec = write_pi_runtime_spec(case.path(), "teamA");
-    let backend = OwnedTmuxBackend(TmuxBackend::for_workspace(case.path()));
-    team_agent::lifecycle::launch_with_transport_in_workspace(
-        case.path(), &spec, false, false, true, &backend.0,
-    ).expect("initial Pi worker launch must materialize its MCP registration");
-    let worker_path = case.path().join(".team/runtime/pi/teamA/worker_a/team-mcp.ts");
-    let initial = include_tools_from_wrapper(&worker_path);
-    assert_pi_wrapper_identity(&worker_path, "worker_a", "teamA");
-    std::fs::remove_file(&worker_path).expect("force restart path to rematerialize the worker wrapper");
-    // The restart API may report a separate coordinator-readiness failure in this isolated
-    // transport fixture; M03 observes the actual per-seat wrapper emitted by its restart plan.
-    let restart_result = team_agent::lifecycle::restart::restart(case.path(), true, Some("teamA"));
-    assert!(worker_path.is_file(), "restart did not materialize a fresh worker Pi wrapper: {restart_result:?}");
-    let resumed = include_tools_from_wrapper(&worker_path);
-    assert_pi_wrapper_identity(&worker_path, "worker_a", "teamA");
+    let _backend = OwnedTmuxBackend(TmuxBackend::for_workspace(case.path()));
 
-    // Execute the real leader dispatcher; this writes the per-leader Pi wrapper before
-    // starting the provider and exercises the same start plan consumed by the CLI.
+    // Pi workers run only through the contract leaf; the Pi leader is the remaining
+    // consumer of the Team-owned wrapper. Execute the real leader dispatcher; this writes
+    // the per-leader Pi wrapper before starting the provider. A fresh workspace has no
+    // team state, so the leader's team key is `current`.
     let _ = team_agent::cli::emit::run(&["pi".to_string()], case.path());
-    let leader_path = case.path().join(".team/runtime/pi/teamA/leader/team-mcp.ts");
+    let leader_path = case.path().join(".team/runtime/pi/current/leader/team-mcp.ts");
     let leader = include_tools_from_wrapper(&leader_path);
-    assert_pi_wrapper_identity(&leader_path, "leader", "teamA");
+    assert_pi_wrapper_identity(&leader_path, "leader", "current");
     let expected = BTreeSet::from(RETAINED.map(str::to_string));
-    assert!(
-        initial.len() == 3 && resumed.len() == 3 && leader.len() == 3,
-        "M03 all consumers must have exactly three includeTools: initial={initial:?}; restart/resume={resumed:?}; leader={leader:?}"
-    );
-    for (consumer, tools) in [("initial worker", initial), ("restart/resume worker", resumed), ("Pi leader", leader)] {
-        assert_eq!(tools.into_iter().collect::<BTreeSet<_>>(), expected, "M03 {consumer} exact tools");
-    }
+    assert_eq!(leader.len(), 3, "M03 Pi leader must have exactly three includeTools: {leader:?}");
+    assert_eq!(leader.into_iter().collect::<BTreeSet<_>>(), expected, "M03 Pi leader exact tools");
 }
 
 #[test]

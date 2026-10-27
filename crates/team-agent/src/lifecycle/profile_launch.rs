@@ -97,8 +97,8 @@ pub(crate) fn prepare_provider_profile_launch_with_profile_dir(
     profile_dir: Option<&Path>,
     mcp_config: Option<&McpConfig>,
 ) -> Result<ProviderProfileLaunch, LifecycleError> {
-    if agent.get("provider").and_then(YamlValue::as_str).is_some_and(crate::provider::wire::is_retired_provider) {
-        return Err(LifecycleError::Provider(crate::provider::wire::RETIRED_PROVIDER_ERROR.into()));
+    if let Some(retired) = agent.get("provider").and_then(YamlValue::as_str).filter(|provider| crate::provider::wire::is_retired_provider(provider)) {
+        return Err(LifecycleError::Provider(crate::provider::wire::retired_provider_error(retired).into()));
     }
     let input = AgentProfileInput {
         id: agent
@@ -153,8 +153,8 @@ pub(crate) fn prepare_provider_profile_launch_from_json(
     agent: &serde_json::Value,
     mcp_config: Option<&McpConfig>,
 ) -> Result<ProviderProfileLaunch, LifecycleError> {
-    if agent.get("provider").and_then(serde_json::Value::as_str).is_some_and(crate::provider::wire::is_retired_provider) {
-        return Err(LifecycleError::Provider(crate::provider::wire::RETIRED_PROVIDER_ERROR.into()));
+    if let Some(retired) = agent.get("provider").and_then(serde_json::Value::as_str).filter(|provider| crate::provider::wire::is_retired_provider(provider)) {
+        return Err(LifecycleError::Provider(crate::provider::wire::retired_provider_error(retired).into()));
     }
     let input = AgentProfileInput {
         id: agent
@@ -205,9 +205,6 @@ fn prepare_profile_launch(
         return Ok(ProviderProfileLaunch::default());
     };
     let Some(path) = find_profile_file(workspace, profile, agent.profile_dir.as_deref()) else {
-        if agent.provider == Provider::Pi && agent.auth_mode == AuthMode::Subscription {
-            return Ok(ProviderProfileLaunch::default());
-        }
         return Err(profile_not_found(profile));
     };
     let loaded = read_profile_file(path)?;
@@ -215,26 +212,8 @@ fn prepare_profile_launch(
 
     let mut env_overlay = provider_env_exports(agent.provider, agent.auth_mode, &loaded.values);
     let mut env_unset = provider_env_unsets(agent.provider, agent.auth_mode);
-    let mut claude_config_dir = None;
-    let mut claude_projects_root = None;
-    let mut managed_mcp_config = false;
-
-    if matches!(agent.provider, Provider::Claude | Provider::ClaudeCode)
-        && agent.auth_mode == AuthMode::CompatibleApi
-    {
-        let dir = compatible_claude_config_dir(workspace, &agent.id)?;
-        if let Some(config) = mcp_config {
-            ensure_compatible_claude_mcp_config(&dir, workspace, config)?;
-            managed_mcp_config = true;
-        }
-        let projects_root = dir.join("projects");
-        env_overlay.insert(
-            "CLAUDE_CONFIG_DIR".to_string(),
-            dir.to_string_lossy().to_string(),
-        );
-        claude_projects_root = Some(projects_root);
-        claude_config_dir = Some(dir);
-    }
+    // Claude Code's compatible-API config dir went with its legacy worker runtime.
+    let _ = mcp_config;
 
     env_overlay.extend(compatible_api_network_exports(
         agent.auth_mode,
@@ -254,9 +233,9 @@ fn prepare_profile_launch(
         env_overlay,
         env_unset,
         command_overrides,
-        claude_config_dir,
-        claude_projects_root,
-        managed_mcp_config,
+        claude_config_dir: None,
+        claude_projects_root: None,
+        managed_mcp_config: false,
     })
 }
 
@@ -439,19 +418,6 @@ fn provider_env_exports(
         return exports;
     }
     match provider {
-        Provider::Claude | Provider::ClaudeCode => {
-            append_env_pair(&mut exports, "ANTHROPIC_BASE_URL", value_or_alternate(values, "ANTHROPIC_BASE_URL", "BASE_URL"));
-            if auth_mode == AuthMode::OfficialApi {
-                append_env_pair(&mut exports, "ANTHROPIC_API_KEY", value_or_alternate(values, "ANTHROPIC_API_KEY", "API_KEY"));
-            }
-            append_env_pair(&mut exports, "ANTHROPIC_AUTH_TOKEN", value_or_alternate(values, "ANTHROPIC_AUTH_TOKEN", "AUTH_TOKEN")
-                .or_else(|| {
-                    (auth_mode == AuthMode::CompatibleApi)
-                        .then(|| value_or_alternate(values, "ANTHROPIC_API_KEY", "API_KEY"))
-                        .flatten()
-                }));
-            append_env_pair(&mut exports, "ANTHROPIC_MODEL", profile_model(values));
-        }
         Provider::Codex => {
             let key = value_or_alternate(values, "OPENAI_API_KEY", "API_KEY");
             append_env_pair(&mut exports, "TEAM_AGENT_PROVIDER_API_KEY", key);
@@ -480,8 +446,9 @@ fn provider_env_exports(
                 }
             }
         }
-        // Grok and Pi retain their native subscription credentials.
-        Provider::Grok | Provider::Pi => {}
+        // Grok retains its native subscription credentials. Claude Code and Pi
+        // workers run only through their subscription-only contract leaves.
+        Provider::Claude | Provider::ClaudeCode | Provider::Grok | Provider::Pi => {}
         Provider::Fake => {}
     }
     exports
@@ -502,11 +469,8 @@ mod append_env_contract {
         let map = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
             pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
         };
-        for provider in [Provider::Claude, Provider::ClaudeCode] {
-            assert_eq!(provider_env_exports(provider, AuthMode::OfficialApi, &values), map(&[
-                ("ANTHROPIC_BASE_URL", " raw\nbase "), ("ANTHROPIC_API_KEY", "dummy"),
-                ("ANTHROPIC_AUTH_TOKEN", "dummy-token"), ("ANTHROPIC_MODEL", " raw model "),
-            ]));
+        for provider in [Provider::Claude, Provider::ClaudeCode, Provider::Pi] {
+            assert!(provider_env_exports(provider, AuthMode::OfficialApi, &values).is_empty());
         }
         assert_eq!(provider_env_exports(Provider::Codex, AuthMode::CompatibleApi, &values), map(&[
             ("TEAM_AGENT_PROVIDER_API_KEY", "native-dummy"), ("OPENAI_API_KEY", "native-dummy"),
@@ -703,270 +667,6 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-fn compatible_claude_config_dir(
-    workspace: &Path,
-    agent_id: &str,
-) -> Result<PathBuf, LifecycleError> {
-    let dir = workspace
-        .join(".team/runtime/provider-config")
-        .join(agent_id)
-        .join("claude");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", dir.display())))?;
-    ensure_compatible_claude_config(&dir, workspace)?;
-    Ok(dir)
-}
-
-fn ensure_compatible_claude_config(dir: &Path, workspace: &Path) -> Result<(), LifecycleError> {
-    let settings_path = dir.join("settings.json");
-    let mut settings = read_json_object(&settings_path)?;
-    insert_if_missing(&mut settings, "theme", serde_json::json!("auto"));
-    insert_if_missing(
-        &mut settings,
-        "skipDangerousModePermissionPrompt",
-        serde_json::json!(true),
-    );
-    settings.insert(
-        "hasCompletedOnboarding".to_string(),
-        serde_json::json!(true),
-    );
-    settings.insert(
-        "hasTrustDialogAccepted".to_string(),
-        serde_json::json!(true),
-    );
-    insert_if_missing(
-        &mut settings,
-        "lastOnboardingVersion",
-        serde_json::json!("2.1.0"),
-    );
-    insert_if_missing(
-        &mut settings,
-        "firstStartTime",
-        serde_json::json!("1970-01-01T00:00:00.000Z"),
-    );
-    insert_if_missing(&mut settings, "numStartups", serde_json::json!(0));
-    insert_if_missing(
-        &mut settings,
-        "projectOnboardingSeenCount",
-        serde_json::json!(1),
-    );
-    write_json_object(&settings_path, &settings)?;
-
-    let state_path = dir.join(".claude.json");
-    let mut state = read_json_object(&state_path)?;
-    state.insert(
-        "hasCompletedOnboarding".to_string(),
-        serde_json::json!(true),
-    );
-    insert_if_missing(
-        &mut state,
-        "lastOnboardingVersion",
-        serde_json::json!("2.1.0"),
-    );
-    insert_if_missing(
-        &mut state,
-        "firstStartTime",
-        serde_json::json!("1970-01-01T00:00:00.000Z"),
-    );
-    insert_if_missing(&mut state, "numStartups", serde_json::json!(0));
-    ensure_claude_projects(&mut state, workspace, None);
-    write_json_object(&state_path, &state)
-}
-
-fn ensure_compatible_claude_mcp_config(
-    dir: &Path,
-    workspace: &Path,
-    mcp_config: &McpConfig,
-) -> Result<(), LifecycleError> {
-    let state_path = dir.join(".claude.json");
-    let mut state = read_json_object(&state_path)?;
-    state.insert(
-        "hasCompletedOnboarding".to_string(),
-        serde_json::json!(true),
-    );
-    state.insert(
-        "hasTrustDialogAccepted".to_string(),
-        serde_json::json!(true),
-    );
-    insert_if_missing(
-        &mut state,
-        "projectOnboardingSeenCount",
-        serde_json::json!(1),
-    );
-    state.insert("mcpServers".to_string(), mcp_config.raw.clone());
-    state.insert(
-        "enabledMcpjsonServers".to_string(),
-        serde_json::json!(mcp_server_names(&mcp_config.raw)),
-    );
-    ensure_claude_projects(&mut state, workspace, Some(&mcp_config.raw));
-    write_json_object(&state_path, &state)
-}
-
-fn ensure_claude_projects(
-    state: &mut serde_json::Map<String, serde_json::Value>,
-    workspace: &Path,
-    mcp_servers: Option<&serde_json::Value>,
-) {
-    if !state
-        .get("projects")
-        .is_some_and(serde_json::Value::is_object)
-    {
-        state.insert("projects".to_string(), serde_json::json!({}));
-    }
-    let Some(projects) = state
-        .get_mut("projects")
-        .and_then(serde_json::Value::as_object_mut)
-    else {
-        return;
-    };
-    for key in claude_project_keys(workspace) {
-        let entry = projects.entry(key).or_insert_with(|| serde_json::json!({}));
-        if !entry.is_object() {
-            *entry = serde_json::json!({});
-        }
-        let Some(project) = entry.as_object_mut() else {
-            continue;
-        };
-        project.insert(
-            "hasTrustDialogAccepted".to_string(),
-            serde_json::json!(true),
-        );
-        insert_if_missing(project, "projectOnboardingSeenCount", serde_json::json!(1));
-        if let Some(mcp_servers) = mcp_servers {
-            insert_if_missing(project, "allowedTools", serde_json::json!([]));
-            insert_if_missing(project, "mcpContextUris", serde_json::json!([]));
-            project.insert(
-                "enabledMcpjsonServers".to_string(),
-                serde_json::json!(mcp_server_names(mcp_servers)),
-            );
-            insert_if_missing(project, "disabledMcpjsonServers", serde_json::json!([]));
-            insert_if_missing(
-                project,
-                "hasClaudeMdExternalIncludesApproved",
-                serde_json::json!(false),
-            );
-            insert_if_missing(
-                project,
-                "hasClaudeMdExternalIncludesWarningShown",
-                serde_json::json!(false),
-            );
-            if !project
-                .get("mcpServers")
-                .is_some_and(serde_json::Value::is_object)
-            {
-                project.insert("mcpServers".to_string(), serde_json::json!({}));
-            }
-            if let Some(existing) = project
-                .get_mut("mcpServers")
-                .and_then(serde_json::Value::as_object_mut)
-            {
-                if let Some(servers) = mcp_servers.as_object() {
-                    existing.extend(servers.clone());
-                }
-            }
-        }
-    }
-}
-
-fn mcp_server_names(mcp_servers: &serde_json::Value) -> Vec<String> {
-    mcp_servers
-        .as_object()
-        .map(|servers| servers.keys().cloned().collect())
-        .unwrap_or_default()
-}
-
-/// swallow batch 4 C1-C4 (MUST-NOT-9/13): a CORRUPT provider-config JSON fails
-/// EXPLICITLY — the old `unwrap_or_default` turned a parse failure into an empty map
-/// that the subsequent write flattened back over the user's file (silent destructive
-/// rewrite). A missing file stays Ok(empty) — only an existing-but-unparseable file
-/// errors, naming the path + parse detail + next action; the file is never touched.
-fn read_json_object(
-    path: &Path,
-) -> Result<serde_json::Map<String, serde_json::Value>, LifecycleError> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(serde_json::Map::new());
-        }
-        Err(error) => {
-            return Err(LifecycleError::RequirementUnmet(format!(
-                "profile_invalid_json: {} could not be read: {error}; fix or remove the file (or restore a backup) and relaunch",
-                path.display()
-            )));
-        }
-    };
-    match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(serde_json::Value::Object(map)) => Ok(map),
-        Ok(other) => Err(LifecycleError::RequirementUnmet(format!(
-            "profile_invalid_json: {} is not a JSON object (found {}); fix or remove the file (or restore a backup) and relaunch",
-            path.display(),
-            json_kind(&other)
-        ))),
-        Err(error) => Err(LifecycleError::RequirementUnmet(format!(
-            "profile_invalid_json: {} could not be parsed: {error}; fix or remove the file (or restore a backup) and relaunch",
-            path.display()
-        ))),
-    }
-}
-
-fn json_kind(value: &serde_json::Value) -> &'static str {
-    match value {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "a boolean",
-        serde_json::Value::Number(_) => "a number",
-        serde_json::Value::String(_) => "a string",
-        serde_json::Value::Array(_) => "an array",
-        serde_json::Value::Object(_) => "an object",
-    }
-}
-
-fn write_json_object(
-    path: &Path,
-    value: &serde_json::Map<String, serde_json::Value>,
-) -> Result<(), LifecycleError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", parent.display())))?;
-    }
-    let body = serde_json::to_string_pretty(value)
-        .map_err(|e| LifecycleError::StatePersist(format!("serialize {}: {e}", path.display())))?;
-    std::fs::write(path, format!("{body}\n"))
-        .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", path.display())))?;
-    set_owner_only_permissions(path)
-}
-
-fn insert_if_missing(
-    map: &mut serde_json::Map<String, serde_json::Value>,
-    key: &str,
-    value: serde_json::Value,
-) {
-    map.entry(key.to_string()).or_insert(value);
-}
-
-fn claude_project_keys(workspace: &Path) -> Vec<String> {
-    let mut keys = vec![workspace.to_string_lossy().to_string()];
-    if let Ok(resolved) = workspace.canonicalize() {
-        let resolved = resolved.to_string_lossy().to_string();
-        if !keys.iter().any(|key| key == &resolved) {
-            keys.push(resolved);
-        }
-    }
-    for key in keys.clone() {
-        if let Some(stripped) = key.strip_prefix("/private/var/") {
-            push_unique_string(&mut keys, format!("/var/{stripped}"));
-        } else if let Some(stripped) = key.strip_prefix("/var/") {
-            push_unique_string(&mut keys, format!("/private/var/{stripped}"));
-        }
-    }
-    keys
-}
-
-fn push_unique_string(values: &mut Vec<String>, value: String) {
-    if !values.iter().any(|existing| existing == &value) {
-        values.push(value);
-    }
-}
-
 fn compatible_api_network_exports(
     auth_mode: AuthMode,
     values: &BTreeMap<String, String>,
@@ -1004,7 +704,7 @@ fn required_profile_keys(provider: Provider, auth_mode: AuthMode) -> &'static [&
         return &[];
     }
     match provider {
-        Provider::Claude | Provider::ClaudeCode | Provider::Codex => match auth_mode {
+        Provider::Codex => match auth_mode {
             AuthMode::OfficialApi => &["API_KEY"],
             AuthMode::CompatibleApi => &["BASE_URL", "API_KEY"],
             AuthMode::Subscription => &[],
@@ -1013,8 +713,9 @@ fn required_profile_keys(provider: Provider, auth_mode: AuthMode) -> &'static [&
         // C-7-1 cr verdict: copilot 一期 subscription-only,无 BYOK required key 集合;
         // 二期 BYOK 立项时填(向后兼容字段保留)。
         Provider::Copilot => &[],
-        // 0.5.67: Grok/Pi 一期无 BYOK required key 集合 (同 copilot 精神)。
-        Provider::Grok | Provider::Pi => &[],
+        // 0.5.67: Grok 一期无 BYOK required key 集合 (同 copilot 精神)。Claude Code/Pi
+        // worker 只走 subscription-only contract leaf。
+        Provider::Claude | Provider::ClaudeCode | Provider::Grok | Provider::Pi => &[],
         Provider::Fake => &[],
     }
 }

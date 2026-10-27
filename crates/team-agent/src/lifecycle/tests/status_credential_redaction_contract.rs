@@ -686,7 +686,7 @@ fn write_profile_fixture(root: &Path, base_url: &str, token: &str) -> PathBuf {
     fs::write(
         team.join("profiles/local.env"),
         format!(
-            "ANTHROPIC_BASE_URL={base_url}\nANTHROPIC_AUTH_TOKEN={token}\nANTHROPIC_MODEL=mock-model\n"
+            "OPENAI_BASE_URL={base_url}\nOPENAI_API_KEY={token}\nOPENAI_MODEL=mock-model\n"
         ),
     )
     .unwrap();
@@ -697,7 +697,7 @@ fn write_profile_fixture(root: &Path, base_url: &str, token: &str) -> PathBuf {
     .unwrap();
     fs::write(
         team.join("agents/worker.md"),
-        "---\nname: worker\nrole: Worker\nprovider: claude\nauth_mode: compatible_api\ndangerously_skip_permissions: false\nprofile: local\nmodel: null\ntools:\n  - mcp_team\n---\n\nWorker.\n",
+        "---\nname: worker\nrole: Worker\nprovider: codex\nauth_mode: compatible_api\ndangerously_skip_permissions: false\nprofile: local\nmodel: null\ntools:\n  - mcp_team\n---\n\nWorker.\n",
     )
     .unwrap();
     team

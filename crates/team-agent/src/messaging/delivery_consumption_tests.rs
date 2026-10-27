@@ -103,7 +103,7 @@ fn frame(composer: &str, transcript: &str) -> InputFrame {
 
 #[test]
 fn current_token_in_composer_is_not_duplicate_delivered_or_repasted() {
-    let f = Fixture::new("pi");
+    let f = Fixture::new("fake");
     let marker = message_token_marker("msg_one");
     let t = f
         .transport()
@@ -122,7 +122,7 @@ fn successful_transport_report_does_not_override_unconsumed_composer() {
         "[Pasted text #1 +25 lines]",
         "foreign draft",
     ] {
-        let mut f = Fixture::new("pi");
+        let mut f = Fixture::new("fake");
         #[cfg(unix)]
         let panes = vec![crate::mcp_server::readiness::test_ready_worker(
             &f.workspace,
@@ -146,7 +146,7 @@ fn successful_transport_report_does_not_override_unconsumed_composer() {
 
 #[test]
 fn unknown_current_native_surface_is_unverified_not_success() {
-    let f = Fixture::new("pi");
+    let f = Fixture::new("fake");
     let t = f
         .transport()
         .with_native_input_error("native_surface_unknown");
@@ -167,7 +167,7 @@ fn pane_visibility_without_an_observation_protocol_is_not_duplicate_acceptance()
 
 #[test]
 fn current_empty_composer_and_unique_transcript_token_prove_consumption() {
-    let f = Fixture::new("pi");
+    let f = Fixture::new("fake");
     let marker = message_token_marker("msg_one");
     let t = f
         .transport()
@@ -180,7 +180,7 @@ fn current_empty_composer_and_unique_transcript_token_prove_consumption() {
 
 #[test]
 fn busy_answers_or_duplicate_history_tokens_do_not_prove_consumption() {
-    let f = Fixture::new("pi");
+    let f = Fixture::new("fake");
     let target = Target::Pane(PaneId::new("%1"));
     for transcript in [
         "answer is 5535",

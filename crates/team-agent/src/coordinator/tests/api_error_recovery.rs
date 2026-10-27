@@ -8,7 +8,7 @@ use crate::transport::test_support::OfflineTransport;
 
 #[test]
 fn abnormal_exit_is_reported_without_auto_recovery_intent_or_action() {
-    let case = RecoveryCase::new("reported-no-auto");
+    let case = RecoveryCase::new("reported-no-auto", "claude_code");
     case.seed_agent("baseline-429");
     let transport = OfflineTransport::new().with_session_present(true);
     let coord = case.coord(transport.clone());
@@ -61,7 +61,9 @@ fn abnormal_exit_is_reported_without_auto_recovery_intent_or_action() {
 
 #[test]
 fn first_turn_death_cannot_enter_auto_respawn_loop_and_manual_start_still_recovers() {
-    let case = RecoveryCase::new("first-turn-death-no-loop");
+    // A pre-upgrade claude_code row cannot be started any more; Codex keeps
+    // both an explicit failed-turn fact and a resumable manual start.
+    let case = RecoveryCase::new("first-turn-death-no-loop", "codex");
     case.seed_agent("baseline-429");
     let transport = OfflineTransport::new().with_session_present(true);
     let coord = case.coord(transport.clone());
@@ -131,10 +133,11 @@ fn first_turn_death_cannot_enter_auto_respawn_loop_and_manual_start_still_recove
 
 struct RecoveryCase {
     root: std::path::PathBuf,
+    provider: &'static str,
 }
 
 impl RecoveryCase {
-    fn new(tag: &str) -> Self {
+    fn new(tag: &str, provider: &'static str) -> Self {
         let base = std::env::var_os("TEAM_AGENT_TEST_TMP")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
@@ -148,7 +151,7 @@ impl RecoveryCase {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        Self { root }
+        Self { root, provider }
     }
 
     fn coord(&self, transport: OfflineTransport) -> Coordinator {
@@ -163,7 +166,8 @@ impl RecoveryCase {
 
     fn seed_agent(&self, uuid: &str) {
         let rollout = self.rollout();
-        std::fs::write(&rollout, claude_api_error_line(uuid)).unwrap();
+        std::fs::write(&rollout, self.error_line(uuid)).unwrap();
+        let model = if self.provider == "codex" { "gpt-5.5" } else { "sonnet" };
         let state = serde_json::json!({
             "active_team_key": "research",
             "team_key": "research",
@@ -179,8 +183,8 @@ impl RecoveryCase {
                 "fe-admin": {
                     "agent_id": "fe-admin",
                     "id": "fe-admin",
-                    "provider": "claude_code",
-                    "model": "sonnet",
+                    "provider": self.provider,
+                    "model": model,
                     "status": "running",
                     "window": "fe-admin",
                     "rollout_path": rollout,
@@ -236,8 +240,15 @@ impl RecoveryCase {
             .append(true)
             .open(self.rollout())
             .unwrap();
-        file.write_all(claude_api_error_line(uuid).as_bytes())
+        file.write_all(self.error_line(uuid).as_bytes())
             .unwrap();
+    }
+
+    fn error_line(&self, uuid: &str) -> String {
+        match self.provider {
+            "codex" => codex_failed_turn_line(uuid),
+            _ => claude_api_error_line(uuid),
+        }
     }
 
     fn rollout(&self) -> std::path::PathBuf {
@@ -288,6 +299,16 @@ fn claude_api_error_line(uuid: &str) -> String {
             "apiErrorStatus": 429,
             "sessionId": "session-supermarket",
             "version": "2.1.181"
+        })
+    )
+}
+
+fn codex_failed_turn_line(turn_id: &str) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({
+            "method": "turn/completed",
+            "params": {"turn": {"id": turn_id, "status": "failed"}}
         })
     )
 }

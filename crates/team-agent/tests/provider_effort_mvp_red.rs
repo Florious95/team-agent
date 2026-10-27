@@ -4,7 +4,7 @@
 /// Steps 5 + 6: adapter argv contains adjacent effort flag.
 mod adapter_argv {
     use team_agent::model::enums::{AuthMode, Provider, ProviderEffort};
-    use team_agent::provider::{get_adapter, McpConfig, ProviderCommandContext};
+    use team_agent::provider::{get_adapter, ProviderCommandContext};
 
     fn ctx<'a>(effort: Option<ProviderEffort>) -> ProviderCommandContext<'a> {
         ProviderCommandContext {
@@ -17,31 +17,6 @@ mod adapter_argv {
             agent_id_hint: Some("dev"),
             effort,
         }
-    }
-
-    #[test]
-    fn claude_fresh_argv_contains_adjacent_effort_high() {
-        let adapter = get_adapter(Provider::Claude);
-        let plan = adapter
-            .build_command_plan(ctx(Some(ProviderEffort::High)))
-            .expect("claude plan");
-        let argv = &plan.argv;
-        let pos = argv
-            .iter()
-            .position(|a| a == "--effort")
-            .unwrap_or_else(|| panic!("--effort missing in {argv:?}"));
-        assert_eq!(argv[pos + 1], "high", "--effort must be followed by 'high'");
-    }
-
-    #[test]
-    fn claude_fresh_argv_omits_effort_when_none() {
-        let adapter = get_adapter(Provider::Claude);
-        let plan = adapter.build_command_plan(ctx(None)).expect("claude plan");
-        assert!(
-            !plan.argv.iter().any(|a| a == "--effort"),
-            "no --effort when effort is None; got {:?}",
-            plan.argv
-        );
     }
 
     #[test]
@@ -135,24 +110,6 @@ mod adapter_argv {
             argv.iter().any(|a| a == "--resume"),
             "resume argv must still resume; got {argv:?}"
         );
-    }
-
-    /// Effort=max on Claude survives an MCP-config code path.
-    #[test]
-    fn claude_effort_with_mcp_config_still_includes_effort_flag() {
-        let cfg = McpConfig {
-            raw: serde_json::json!({}),
-        };
-        let mut c = ctx(Some(ProviderEffort::Max));
-        c.mcp_config = Some(&cfg);
-        let adapter = get_adapter(Provider::Claude);
-        let plan = adapter.build_command_plan(c).expect("claude plan");
-        let pos = plan
-            .argv
-            .iter()
-            .position(|a| a == "--effort")
-            .unwrap_or_else(|| panic!("--effort missing in {:?}", plan.argv));
-        assert_eq!(plan.argv[pos + 1], "max");
     }
 }
 

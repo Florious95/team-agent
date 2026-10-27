@@ -2,10 +2,9 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::lifecycle::launch::pi_mcp::{
-    parse_pi_list_models_table, select_exact_pi_model, verify_started_pi_model,
+    build_pi_command_argv, parse_pi_list_models_table, select_exact_pi_model, PiCommandRequest,
 };
 use crate::model::enums::ProviderEffort;
-use crate::provider::adapters::pi::{build_pi_command_argv, PiCommandRequest, PiSessionSelector};
 
 const CATALOG: &[u8] = include_bytes!("fixtures/pi_list_models_g0.stdout.txt");
 // Public pi --list-models rows captured for issue #186, preserving column widths.
@@ -87,13 +86,12 @@ fn argv_has_pair(argv: &[String], flag: &str, value: &str) -> bool {
 
 fn command_for_model(model: &str) -> Vec<String> {
     build_pi_command_argv(PiCommandRequest {
-        extension: Path::new("/workspace/.team/runtime/pi/t1/w1/team-mcp.ts"),
+        extension: Path::new("/workspace/.team/runtime/pi/t1/leader/team-mcp.ts"),
         model: Some(model),
         effort: Some(ProviderEffort::Medium),
-        system_prompt: "worker contract",
-        session_dir: Some(Path::new("/workspace/.team/runtime/pi/t1/w1/sessions")),
-        session: PiSessionSelector::Fresh,
-        agent_id: "w1",
+        system_prompt: "leader contract",
+        session_dir: Some(Path::new("/workspace/.team/runtime/pi/t1/leader/sessions")),
+        agent_id: "leader",
     })
     .expect("catalog member must build a semantic Pi argv")
 }
@@ -134,7 +132,7 @@ fn pi_catalog_discovers_all_exact_ids_and_rejects_invalid_or_ambiguous_selection
 }
 
 #[test]
-fn pi_exact_catalog_id_is_forwarded_and_started_identity_must_match() {
+fn pi_exact_catalog_id_is_forwarded_byte_for_byte() {
     let models = parse_pi_list_models_table(CATALOG).expect("frozen unfiltered table must parse");
     assert_eq!(models.len(), 221);
 
@@ -151,14 +149,4 @@ fn pi_exact_catalog_id_is_forwarded_and_started_identity_must_match() {
             "model selector must occur exactly once: {argv:?}"
         );
     }
-
-    assert!(verify_started_pi_model("team-agent/qwen3.8-27b", "team-agent/qwen3.8-27b").is_ok());
-    assert!(
-        verify_started_pi_model("team-agent/qwen3.8-27b", "xai/grok-4.6").is_err(),
-        "started identity mismatch must refuse rather than trust pane chrome"
-    );
-    assert!(
-        verify_started_pi_model("team-agent/qwen3.8-27b", "").is_err(),
-        "missing objective started-model evidence must not pass"
-    );
 }

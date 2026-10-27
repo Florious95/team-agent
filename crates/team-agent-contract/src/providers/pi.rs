@@ -1,6 +1,6 @@
-//! Pi coding agent contract leaf, canonical key `pi_tui`. The legacy `pi`
-//! worker and leader keep their own path: a role declaring `pi` selects this
-//! leaf only with `contract_runtime: true`.
+//! Pi coding agent contract leaf, canonical key `pi_tui`. It is the only Pi
+//! worker runtime: a role declaring `pi` (or omitting its provider) selects
+//! it. The `team-agent pi` leader keeps its own path.
 //! Measured recipes do not themselves constitute Team G1–G5 acceptance.
 pub mod catalog;
 pub mod descriptor;

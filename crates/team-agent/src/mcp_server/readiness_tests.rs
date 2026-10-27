@@ -114,7 +114,7 @@ impl Drop for Case {
 
 #[test]
 fn issue345_missing_mcp_config_does_not_disable_eager_admission() {
-    for provider in ["grok", "codex", "claude"] {
+    for provider in ["grok", "codex", "copilot"] {
         let mut case = Case::new();
         case.state["agents"]["worker"]["provider"] = json!(provider);
         case.state["agents"]["worker"]

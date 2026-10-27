@@ -1,11 +1,9 @@
 //! ---
-//! purpose: 在记录的 Pi 席位 session root 内按真实 header 捕获 exact JSONL backing
+//! purpose: 在记录的 Pi session root 内按真实 header 捕获 exact JSONL backing（Pi leader 的投递回执用）
 //! contract:
 //!   provides:
 //!     - name: scan_session_store
 //!       what: 只读每个 JSONL 的首个完整 header；有预期 id 时按 id/cwd/spawned_at，否则按 cwd/spawned_at 读取 Pi 自己的 id
-//!     - name: validate_exact_backing
-//!       what: restart 前重验 exact path 的 id/cwd header
 //! boundary:
 //!   - 只递归 recorded provider_projects_root，不扫描 HOME 或消息正文
 //!   - 不以文件名、mtime 或唯一文件替代 header 匹配
@@ -93,37 +91,6 @@ fn collect_jsonl(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), ProviderErro
         } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "jsonl") {
             out.push(path);
         }
-    }
-    Ok(())
-}
-
-/// ---
-/// purpose: restart 前重验调用方给出的 exact Pi JSONL backing
-/// returns: header type/version/id/cwd 全匹配时成功
-/// errors: 文件缺失、header 不完整或 identity 不匹配时返回 ResumeUnavailable
-/// ---
-pub(crate) fn validate_exact_backing(
-    path: &Path,
-    expected_session_id: &SessionId,
-    spawn_cwd: &Path,
-) -> Result<(), ProviderError> {
-    if !path.is_file() {
-        return Err(ProviderError::ResumeUnavailable(format!(
-            "Pi exact session backing is missing: {}",
-            path.display()
-        )));
-    }
-    let header = read_header(path).ok_or_else(|| {
-        ProviderError::ResumeUnavailable(format!(
-            "Pi exact session backing has no complete session header: {}",
-            path.display()
-        ))
-    })?;
-    if !header_matches(&header, expected_session_id, spawn_cwd, None) {
-        return Err(ProviderError::ResumeUnavailable(format!(
-            "Pi exact session backing header does not match id/cwd: {}",
-            path.display()
-        )));
     }
     Ok(())
 }

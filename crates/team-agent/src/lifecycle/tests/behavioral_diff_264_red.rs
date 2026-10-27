@@ -269,14 +269,14 @@ fn d6_compiled_system_prompt_first_section_is_identity() {
         &ws,
         &TeamFixture {
             name: "d6team",
-            provider: "claude",
+            provider: "codex",
             fast: false,
             agents: &[AgentDoc {
                 id: "worker_a",
                 role: "Prompt Order Worker",
-                provider: "claude",
+                provider: "codex",
                 auth_mode: "subscription",
-                model: Some("fake"),
+                model: Some("gpt-5.5"),
                 profile: None,
                 tools: &["mcp_team"],
                 body: "ROLE BODY SENTINEL for prompt ordering.",
@@ -287,10 +287,15 @@ fn d6_compiled_system_prompt_first_section_is_identity() {
     let transport = RecordingTransport::new();
 
     quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("d6team"), &transport)
-        .expect("quick-start should spawn the claude worker");
+        .expect("quick-start should spawn the codex worker");
     let spawn = transport.single_spawn();
-    let prompt = flag_value(&spawn.argv, "--append-system-prompt")
-        .expect("claude argv must carry --append-system-prompt");
+    // The identity line has no `\`, `"` or newline, so codex's escaping leaves it verbatim.
+    let prompt = spawn
+        .argv
+        .iter()
+        .find_map(|arg| arg.strip_prefix("developer_instructions=\""))
+        .expect("codex argv must carry -c developer_instructions")
+        .to_string();
 
     let identity = "You are Team Agent worker `worker_a` with role `Prompt Order Worker`. \
 When asked about your role or identity, answer with this Team Agent worker identity first, \
