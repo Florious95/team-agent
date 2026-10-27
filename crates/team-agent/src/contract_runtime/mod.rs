@@ -7,6 +7,7 @@ pub mod backend;
 pub mod commands;
 pub mod config;
 pub mod discovery;
+pub mod fork;
 pub mod forward;
 pub mod framework;
 pub mod mcp;

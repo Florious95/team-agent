@@ -50,7 +50,7 @@ use super::*;
 /// pre-write JSON (so the half-written `status:starting` row is gone). The
 /// caller propagates the ORIGINAL operation error after rollback; rollback
 /// errors are swallowed (best-effort, no panic).
-pub(super) fn rollback_add_agent_atomic(
+pub(crate) fn rollback_add_agent_atomic(
     run_workspace: &Path,
     spec_path: &Path,
     pre_spec_text: Option<&str>,
@@ -165,7 +165,7 @@ pub(super) fn upsert_agent_state_from_role(
 /// purpose: 把一席的 starting 行写进团队 state 并落盘
 /// errors: 读或写 runtime state 失败时返回 StatePersist
 /// ---
-pub(super) fn upsert_agent_entry(
+pub(crate) fn upsert_agent_entry(
     workspace: &Path,
     canonical_team_key: &str,
     agent_id: &AgentId,

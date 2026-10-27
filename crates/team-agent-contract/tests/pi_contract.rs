@@ -4,7 +4,7 @@
 #![cfg(unix)]
 mod support;
 use std::{collections::BTreeMap, ffi::OsString, os::unix::fs::PermissionsExt, path::{Path, PathBuf}, time::Duration};
-use team_agent_contract::contract::{delivery::*, descriptor::*, hooks::*, plan::*, probe::*, session::*, types::*};
+use team_agent_contract::contract::{delivery::*, descriptor::*, fork::{resolve_fork, select_new_seat_mode, ForkMode, ForkRequest}, hooks::*, plan::*, probe::*, session::*, types::*};
 use team_agent_contract::host::{command::*, digest, process::resolve_cwd};
 use team_agent_contract::providers::pi::{catalog::*, interaction::*, launcher::*, *};
 
@@ -83,7 +83,11 @@ fn all_facets_and_hooks_disclose_the_owned_extension_server_under_a_distinct_key
     for operation in [Operation::Catalog, Operation::Fresh, Operation::Resume, Operation::FirstBusiness, Operation::SessionInspect, Operation::Stop] {
         validate_descriptor(&PI_DESCRIPTOR, &hooks, operation).unwrap();
     }
-    for operation in [Operation::NativeNewSeat, Operation::NewSeatFullSnapshot, Operation::InWindowBranch] {
+    // A distinct new seat forks through the provider's own CLI; snapshot and
+    // in-window branches stay closed.
+    validate_descriptor(&PI_DESCRIPTOR, &hooks, Operation::NativeNewSeat).unwrap();
+    assert_eq!(select_new_seat_mode(&PI_DESCRIPTOR).unwrap(), ForkMode::NativeNewSeat);
+    for operation in [Operation::NewSeatFullSnapshot, Operation::InWindowBranch] {
         assert!(validate_descriptor(&PI_DESCRIPTOR, &hooks, operation).is_err(), "{operation:?}");
     }
     assert_eq!(PI_DESCRIPTOR.mcp.carrier, Support::Supported(McpCarrier::ScopedConfig));
@@ -566,4 +570,43 @@ fn semantic_reader_maps_only_busy_and_ready() {
     assert_eq!(read(&framed("", &working(), "")), ProbeOutcome::Observed(SemanticEvidence::Busy));
     assert_eq!(read(&screen("", "")), ProbeOutcome::Observed(SemanticEvidence::Idle));
     assert!(matches!(read("plain"), ProbeOutcome::Unknown(_)));
+}
+
+#[test]
+fn native_fork_names_the_parent_id_from_a_new_private_primary() {
+    let sandbox = support::Sandbox::new();
+    let image = sandbox.parent.join("vendor/lib/pi-native");
+    write_executable(&image, b"controlled final native");
+    let bin = sandbox.parent.join("vendor/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(&image, bin.join("pi")).unwrap();
+    let command = PublicCommand::resolve("pi", bin.as_os_str()).unwrap();
+    let project = sandbox.parent.join("project");
+    let (a, parent, catalog, _) = pi_launch(&sandbox, &command, &project);
+    // The parent session was captured in the parent's own private primary.
+    let source = ResumeBinding { provider: ProviderId::new(ID).unwrap(), native_session: NativeSessionId::new(SID).unwrap(), storage: SessionStorage::Local,
+        cwd: CwdIdentity { path: "/private/tmp/ta-0123/workspaces/worker".into(), identity: digest(b"parent cwd") }, native: parent.native.clone(),
+        source: parent.identity.clone(), origin: CaptureOrigin::CurrentNativeSession, evidence_kind: parent.evidence_kind,
+        evidence_sha256: digest(b"parent session"), backing: None };
+    let mut r = parent.clone();
+    r.identity.seat = SeatId::new("worker-fork").unwrap();
+    r.identity.instance = InstanceId::new("fork-1").unwrap();
+    r.operation = Operation::NativeNewSeat;
+    let request = ForkRequest { mode: ForkMode::NativeNewSeat, auth: r.auth, source: source.clone(), expected_source: parent.identity.clone(),
+        target: r.identity.clone(), target_native_session: None, target_backing: None, channel: r.channel, input_profile: r.input_profile.clone(),
+        cwd: r.paths.cwd.clone(), native: r.native.clone(), evidence_kind: r.evidence_kind, selected_turn: None,
+        operation_id: OperationId::new("fork-1").unwrap() };
+    r.fork = Some(Box::new(resolve_fork(&PI_DESCRIPTOR, &a.hooks(), &request).unwrap()));
+    let built = plan_ok(&a, &r, &catalog);
+    let args = strings(&built);
+    // `--fork <uuid>` resolves the parent across cwds; the child lands in this cwd.
+    assert!(args.ends_with(&["--fork".into(), SID.into()]));
+    assert!(!args.iter().any(|arg| arg == "--session"));
+    assert_eq!(built.expected_session, ExpectedSession::CaptureAfterNativeFork { parent: source.native_session.clone() });
+    // The child is captured after launch: a framework-preassigned child is refused.
+    let mut preassigned = r.clone(); preassigned.preassigned_session = Some(NativeSessionId::new(SID).unwrap());
+    assert!(plan_ok_result(&a, &preassigned, &catalog).is_err());
+    // A same-seat target is never a new-seat fork.
+    let mut same = request.clone(); same.target = parent.identity.clone();
+    assert!(resolve_fork(&PI_DESCRIPTOR, &a.hooks(), &same).is_err());
 }

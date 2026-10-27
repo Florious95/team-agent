@@ -25,7 +25,11 @@ pub static CLAUDE_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     tool_names: ToolNameFacet { naming: Support::Supported(ToolNaming::RuntimeBound) },
     // `--session-id <uuid>` names the fresh session; `--resume <uuid>` reopens it.
     session: SessionFacet { fresh: FreshSession::Preassigned, resume: Support::Supported(ResumeMode::ExactId) },
-    fork: ForkFacet { in_window: Support::Unverified(UNVERIFIED), full_snapshot: Support::Unverified(UNVERIFIED), native_new_seat: Support::Unverified(UNVERIFIED), allowed_auth: &[] },
+    // A new seat forks natively: `--resume <parent transcript path>
+    // --fork-session --session-id <child>` from the seat's own private primary
+    // (2.1.282: the child is written in the new cwd, every record re-keyed, the
+    // parent byte-identical). `/branch` would move the parent itself: unverified.
+    fork: ForkFacet { in_window: Support::Unverified(UNVERIFIED), full_snapshot: Support::Unverified(UNVERIFIED), native_new_seat: Support::Supported(()), allowed_auth: &[AuthMode::NativeSubscription] },
     input: InputFacet { profiles: Support::Supported(super::interaction::PROFILES) },
     startup: StartupFacet { interactive: true, authorized_consent: Support::Unsupported(STARTUP) },
     probe_sources: ProbeSourcesFacet { process: Support::Supported(ProbeSource::Host), pane: Support::Supported(ProbeSource::NativeSurface), server: Support::Supported(ProbeSource::ServerLifecycle), client_binding: Support::Supported(ProbeSource::NativeRuntime), round_trip: Support::Supported(ProbeSource::NativeRuntime), semantic: Support::Supported(ProbeSource::NativeSurface) },

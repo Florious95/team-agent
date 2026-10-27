@@ -16,6 +16,12 @@ pub const UNVERIFIED: Reason = Reason {
     code: "cursor-native-admission-missing",
     message: "Cursor recon does not establish this operation; no Kiro or legacy fallback is allowed",
 };
+/// 2026.10.22 offers `--resume [chatId]`, `--continue`, `create-chat` and `ls`
+/// only; each chat lives in a native SQLite store the framework never copies.
+const FORK: Reason = Reason {
+    code: "cursor-has-no-session-fork",
+    message: "Cursor Agent has no native fork command and its chat store is a native database; no copy, branch or fresh substitute is made",
+};
 const EFFORT: Reason = Reason {
     code: "cursor-effort-is-native-model-id",
     message: "Select an exact catalog model ID; a separate effort flag or suffix rewrite is not verified",
@@ -68,9 +74,9 @@ pub static CURSOR_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         resume: Support::Supported(ResumeMode::ExactId),
     },
     fork: ForkFacet {
-        in_window: Support::Unverified(UNVERIFIED),
-        full_snapshot: Support::Unverified(UNVERIFIED),
-        native_new_seat: Support::Unverified(UNVERIFIED),
+        in_window: Support::Unsupported(FORK),
+        full_snapshot: Support::Unsupported(FORK),
+        native_new_seat: Support::Unsupported(FORK),
         allowed_auth: &[],
     },
     input: InputFacet { profiles: Support::Supported(&interaction::PROFILES) },
@@ -293,7 +299,7 @@ impl SessionHook for CursorAdapter {
 }
 impl ForkHook for CursorAdapter {
     fn stage(&self, _request: &ResolvedFork, _io: &mut dyn OwnedIo) -> Result<NativeForkPlan, PartialFailure> {
-        Err(partial(refusal("Cursor native fork lineage"), vec![]))
+        Err(partial(ContractError::Unsupported { field: "Cursor session fork", reason: FORK }, vec![]))
     }
 }
 impl CatalogHook for CursorAdapter {

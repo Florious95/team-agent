@@ -25,7 +25,10 @@ pub static CODEX_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         tools: &TEAM_TOOLS, isolation: McpIsolation::OwnedServerIsolated },
     tool_names: ToolNameFacet { naming: Support::Supported(ToolNaming::RuntimeBound) },
     session: SessionFacet { fresh: FreshSession::CaptureAfterLaunch, resume: Support::Supported(ResumeMode::ExactId) },
-    fork: ForkFacet { in_window: Support::Unverified(UNVERIFIED), full_snapshot: Support::Unverified(UNVERIFIED), native_new_seat: Support::Unverified(UNVERIFIED), allowed_auth: &[] },
+    // A new seat forks natively with `codex fork <parent uuid>` (0.160.1: the
+    // parent resolves by ID from another cwd; the child thread records
+    // `forked_from_id` and the new cwd; the parent is untouched).
+    fork: ForkFacet { in_window: Support::Unverified(UNVERIFIED), full_snapshot: Support::Unverified(UNVERIFIED), native_new_seat: Support::Supported(()), allowed_auth: &[AuthMode::NativeSubscription] },
     input: InputFacet { profiles: Support::Supported(super::interaction::PROFILES) },
     startup: StartupFacet { interactive: true, authorized_consent: Support::Unsupported(STARTUP) },
     probe_sources: ProbeSourcesFacet { process: Support::Supported(ProbeSource::Host), pane: Support::Supported(ProbeSource::NativeSurface), server: Support::Supported(ProbeSource::ServerLifecycle), client_binding: Support::Supported(ProbeSource::NativeRuntime), round_trip: Support::Supported(ProbeSource::NativeRuntime), semantic: Support::Supported(ProbeSource::NativeSurface) },

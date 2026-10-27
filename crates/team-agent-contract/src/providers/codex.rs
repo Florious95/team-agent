@@ -66,19 +66,23 @@ impl PlanHook for CodexAdapter {
         if resolved.provider().as_str() != ID || r.native != runtime.native || r.paths.executable != runtime.engine
             || r.paths.launcher != runtime.launcher()
             || !interaction::PROFILES[0].matches_native(&r.native) || r.channel != Channel::Tmux || r.mode != LaunchMode::FullWorker
-            || r.auth != AuthMode::NativeSubscription || self.mcp.executable != r.paths.candidate || !matches!(r.operation, Operation::Fresh | Operation::Resume)
+            || r.auth != AuthMode::NativeSubscription || self.mcp.executable != r.paths.candidate
+            || !matches!(r.operation, Operation::Fresh | Operation::Resume | Operation::NativeNewSeat)
         { return Err(ContractError::Mismatch("Codex native launch identity")); }
         if r.paths.cwd.path == *project { return Err(ContractError::Invalid("Codex private primary required")); }
         let prompt = r.prompt.as_ref().ok_or(ContractError::Invalid("Codex worker prompt"))?;
         let prompt = OwnedResourceRequest { owner: r.identity.clone(), path: OwnedPath::new(r.paths.cwd.path.clone(), PROMPT_FILE.into())?, kind: ResourceKind::Prompt, contents: prompt.as_bytes().to_vec() };
-        let resume = match resolved.expected_session() {
+        // `codex fork <uuid>` resolves the parent thread by ID from any cwd and
+        // starts a new thread (`forked_from_id`) in this seat's own cwd.
+        let session = match resolved.expected_session() {
             ExpectedSession::CaptureAfterLaunch => None,
-            ExpectedSession::Resume(binding) if session_uuid(binding.native_session.as_str()) => Some(binding.native_session.as_str()),
-            _ => return Err(ContractError::Invalid("Codex fresh/current or exact resume only")),
+            ExpectedSession::Resume(binding) if session_uuid(binding.native_session.as_str()) => Some(("resume", binding.native_session.as_str())),
+            ExpectedSession::CaptureAfterNativeFork { parent } if session_uuid(parent.as_str()) => Some(("fork", parent.as_str())),
+            _ => return Err(ContractError::Invalid("Codex fresh/current, exact resume or native fork only")),
         };
         // The update modal is disabled for this invocation; the private non-Git
         // cwd has no trust screen. --no-daemon keeps the engine in the owned pane.
-        let mut arguments: Vec<OsString> = resume.map(|_| OsString::from("resume")).into_iter().collect();
+        let mut arguments: Vec<OsString> = session.map(|(subcommand, _)| OsString::from(subcommand)).into_iter().collect();
         arguments.extend(["--no-alt-screen".into(), "--no-daemon".into(), "-c".into(), "check_for_update_on_startup=false".into()]);
         let model = arguments.len();
         arguments.extend(["--model".into(), resolved.model().ok_or(ContractError::Invalid("Codex exact model"))?.into(),
@@ -93,7 +97,7 @@ impl PlanHook for CodexAdapter {
             EffortResolution::Pass(effort) => { let index = arguments.len(); arguments.extend(["-c".into(), format!("model_reasoning_effort={}", effort.as_str()).into()]); CarrierUse::Specified(CarrierRef::Arguments(vec![index, index + 1])) },
             EffortResolution::Ignored { reason, .. } => return Err(ContractError::EffortRejected(*reason)),
         };
-        arguments.extend(resume.map(OsString::from));
+        arguments.extend(session.map(|(_, id)| OsString::from(id)));
         // The pane execs bare `codex` through PATH, so the user's wrapper runs and
         // keeps the name. The engine is only the image that route must exec into.
         Ok(LaunchPlan { executable: runtime.engine.clone(), launcher: r.paths.launcher.clone(), arguments, executable_inputs: vec![], cwd: r.paths.cwd.path.clone(),
@@ -128,8 +132,9 @@ impl CatalogHook for CodexAdapter {
         Ok(CatalogObservation { provider: request.provider.clone(), native: request.native.clone(), schema: request.source.schema.into(), models: catalog::parse_catalog(&output.stdout).map_err(ReadFailure::Error)? })
     }
 }
+/// Codex's own `codex fork <uuid>` creates the child thread; nothing is staged.
 impl ForkHook for CodexAdapter {
-    fn stage(&self, _request: &ResolvedFork, _io: &mut dyn OwnedIo) -> Result<NativeForkPlan, PartialFailure> {
-        Err(failure(ContractError::Unverified { field: "Codex fork lineage", reason: UNVERIFIED }, vec![]))
+    fn stage(&self, request: &ResolvedFork, _io: &mut dyn OwnedIo) -> Result<NativeForkPlan, PartialFailure> {
+        native_new_seat_stage(request).map_err(|error| failure(error, vec![]))
     }
 }

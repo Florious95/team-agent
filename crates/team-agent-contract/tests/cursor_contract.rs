@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use support::{request, Sandbox};
 use team_agent_contract::contract::{
-    delivery::*, descriptor::*, hooks::*, plan::*, probe::*, session::*, types::*,
+    delivery::*, descriptor::*, fork::select_new_seat_mode, hooks::*, plan::*, probe::*, session::*, types::*,
 };
 use team_agent_contract::host::{command::*, digest, process::resolve_cwd};
 use team_agent_contract::providers::cursor::{interaction::*, native::*, *};
@@ -88,9 +88,11 @@ fn descriptor_and_seven_hooks_keep_unknown_lifecycle_and_legacy_aliases_closed()
     assert_eq!(CURSOR_DESCRIPTOR.model.omitted, OmittedModel::Reject);
     assert!(!CURSOR_DESCRIPTOR.effort.inherit_team_default);
     for admission in &CURSOR_DESCRIPTOR.effort.admission { assert!(matches!(admission, EffortAdmission::Reject(_))); }
+    // No native fork command and a native-database chat store: authoritative refusal.
     for op in [Operation::InWindowBranch, Operation::NewSeatFullSnapshot, Operation::NativeNewSeat] {
-        assert!(matches!(validate_descriptor(&CURSOR_DESCRIPTOR, &hooks, op), Err(ContractError::Unverified { .. })));
+        assert!(matches!(validate_descriptor(&CURSOR_DESCRIPTOR, &hooks, op), Err(ContractError::Unsupported { .. })));
     }
+    assert!(matches!(select_new_seat_mode(&CURSOR_DESCRIPTOR), Err(ContractError::Unsupported { .. })));
     // Even an independently resolved controlled fake must not get a Cursor plan.
     let r = request(std::path::Path::new("/fixture"), "worker");
     let resolved = resolve_launch(&support::descriptor(), &support::hooks(), &r, None).unwrap();

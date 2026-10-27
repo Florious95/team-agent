@@ -3533,6 +3533,14 @@ pub mod lifecycle_port {
     ) -> Result<Value, CliError> {
         let source = crate::model::ids::AgentId::new(source_agent);
         let dest = crate::model::ids::AgentId::new(as_agent_id);
+        // A contract seat forks through the generic contract pipeline; every
+        // leaf's descriptor decides admission. No legacy fallback is taken.
+        #[cfg(unix)]
+        if let Some(receipt) =
+            crate::contract_runtime::fork::fork_agent(workspace, team, source_agent, as_agent_id, label)?
+        {
+            return Ok(receipt);
+        }
         #[cfg(unix)]
         crate::contract_runtime::framework::require_legacy_lifecycle(
             workspace,
