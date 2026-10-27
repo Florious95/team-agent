@@ -560,12 +560,30 @@ fn r7_fork_effective_permissions_are_clamped_to_leader_guardrail() {
         // resolve to `disabled` (fail-closed) — the new single-source model.
         let case = Case::start("cf-r7");
         let fork = case.fork(NEW);
-        let err = fork.to_string();
-        assert!(
-            err.contains("refuses --as")
-                || err.contains("in-place")
-                || fork.get("ok") == Some(&json!(false)),
-            "in-place fork refuses --as {NEW}; no NEW row to clamp. fork={fork}"
+        assert_eq!(
+            fork.get("ok").and_then(Value::as_bool),
+            Some(true),
+            "R7 fixture precondition: the claude fork must complete so a NEW row exists to check the \
+             permission clamp (no vacuous guardrail). fork={fork}"
+        );
+        let policy = new_row_policy(&case);
+        let source = policy.get("source").and_then(Value::as_str);
+        assert_ne!(
+            source,
+            Some("leader_process"),
+            "0.5.66: fork policy must never be leader_process (old ancestry model removed); \
+             policy={policy}"
+        );
+        assert_eq!(
+            source,
+            Some("disabled"),
+            "guardrail: a fork's approval policy derives from the role's dangerously_skip_permissions \
+             (false → disabled), never raw-cloned escalation; MUST-16. policy={policy}"
+        );
+        assert_ne!(
+            policy.get("worker_capability_above_leader").and_then(Value::as_bool),
+            Some(true),
+            "guardrail: a fork must never carry a capability above the leader; MUST-16. policy={policy}"
         );
     });
 }
@@ -579,14 +597,40 @@ fn r7b_fork_policy_under_restricted_leader_ancestry_is_disabled() {
     run_process_isolated(R7B_CHILD, R7B_TEST, || {
         let case = Case::start_with_ancestry("cf-r7b", RESTRICTED_LEADER_ARGV);
         let fork = case.fork(NEW);
-        let err = fork.to_string();
-        assert!(
-            err.contains("refuses --as")
-                || err.contains("in-place")
-                || fork.get("ok") == Some(&json!(false)),
-            "in-place fork refuses --as {NEW}; no NEW row. fork={fork}"
+        assert_eq!(
+            fork.get("ok").and_then(Value::as_bool),
+            Some(true),
+            "R7b fixture precondition: the claude fork must complete so a NEW row exists to check the \
+             policy (no vacuous control). fork={fork}"
+        );
+        let policy = new_row_policy(&case);
+        assert_eq!(
+            policy.get("source").and_then(Value::as_str),
+            Some("disabled"),
+            "fail-closed: source role declares dangerously_skip_permissions=false → fork policy must \
+             be disabled; policy={policy}"
+        );
+        assert_ne!(
+            policy
+                .get("worker_capability_above_leader")
+                .and_then(Value::as_bool),
+            Some(true),
+            "a fork must never yield a capability above the source; MUST-16. policy={policy}"
         );
     });
+}
+
+fn new_row_policy(case: &Case) -> Value {
+    let rows = case.team_agent_rows();
+    let new_row = rows
+        .get(NEW)
+        .unwrap_or_else(|| panic!("NEW fork row must exist to inspect the policy; rows={rows:?}"));
+    new_row
+        .get("effective_approval_policy")
+        .cloned()
+        .unwrap_or_else(|| {
+            panic!("NEW fork row must carry an effective_approval_policy; row={new_row}")
+        })
 }
 
 // ---------------------------------------------------------------------------

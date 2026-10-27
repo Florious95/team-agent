@@ -1008,11 +1008,11 @@ impl ProviderAdapter for BasicProviderAdapter {
                         provider_wire(self.provider)
                     )));
                 }
-                if session_id.is_none() {
+                let Some(session_id) = session_id else {
                     return Err(ProviderError::ResumeUnavailable(
                         "fork requires session_id".to_string(),
                     ));
-                }
+                };
                 let expected = next_session_token();
                 let managed = ctx
                     .profile_launch
@@ -1031,8 +1031,21 @@ impl ProviderAdapter for BasicProviderAdapter {
                     managed,
                     ctx.effort,
                 )?;
-                argv.push("--resume".to_string());
+                // Native new-seat fork: Claude copies the parent (only read)
+                // into the preassigned child, so capture binds the child
+                // exactly as a fresh spawn. `--session-id` with `--resume` is
+                // admitted only together with `--fork-session`.
+                argv.push("--session-id".to_string());
                 argv.push(expected.clone());
+                argv.push("--resume".to_string());
+                argv.push(session_id.as_str().to_string());
+                argv.push("--fork-session".to_string());
+                if let Some(agent_id) = ctx.agent_id_hint {
+                    if !agent_id.is_empty() {
+                        argv.push("--name".to_string());
+                        argv.push(agent_id.to_string());
+                    }
+                }
                 Ok(CommandPlan {
                     argv,
                     expected_session_id: Some(SessionId::new(expected)),

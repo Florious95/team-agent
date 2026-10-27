@@ -284,6 +284,11 @@ pub(super) fn spawn_agent_window(
     } else {
         None
     };
+    let fork_parent = agent
+        .get(crate::lifecycle::launch::add_agent_state::FORK_PARENT_SESSION_ID)
+        .and_then(serde_json::Value::as_str)
+        .filter(|parent| !parent.is_empty())
+        .map(SessionId::new);
     // Contract C / F6.4: thread compiled role/tools/MCP context through restart as well —
     // a restarted worker must come back up with the SAME callable MCP capability + role
     // prompt as a fresh launch, else `report_result` becomes unreachable after every restart.
@@ -421,14 +426,12 @@ pub(super) fn spawn_agent_window(
         }
         .map_err(|e| LifecycleError::Provider(e.to_string()))?
     } else {
-        match resume_session_id {
-            Some(session_id) => adapter
-                .build_resume_command_plan(Some(session_id), context)
-                .map_err(|e| LifecycleError::Provider(e.to_string()))?,
-            None => adapter
-                .build_command_plan(context)
-                .map_err(|e| LifecycleError::Provider(e.to_string()))?,
+        match (resume_session_id, fork_parent.as_ref()) {
+            (Some(session_id), _) => adapter.build_resume_command_plan(Some(session_id), context),
+            (None, Some(parent)) => adapter.fork_plan(Some(parent), context),
+            (None, None) => adapter.build_command_plan(context),
         }
+        .map_err(|e| LifecycleError::Provider(e.to_string()))?
     };
     if !plan.managed_mcp_config && !profile_launch.managed_mcp_config {
         if let Some(mcp_config_path) = mcp_config_path.as_ref() {
@@ -456,6 +459,20 @@ pub(super) fn spawn_agent_window(
     );
     crate::lifecycle::launch::apply_profile_launch_env(&mut env, &profile_launch);
     crate::lifecycle::launch::apply_mcp_auto_approval_env(&mut env, safety);
+    if resume_session_id.is_none()
+        && fork_parent.is_some()
+        && matches!(
+            provider,
+            crate::provider::Provider::Claude | crate::provider::Provider::ClaudeCode
+        )
+    {
+        // A fork keeps the whole parent history: a new seat never stops on
+        // Claude's stale-resume "summary or full session" modal.
+        env.insert(
+            "CLAUDE_CODE_RESUME_THRESHOLD_MINUTES".to_string(),
+            "1000000000".to_string(),
+        );
+    }
     if provider == crate::provider::Provider::Copilot {
         crate::lifecycle::launch::apply_copilot_instructions_overlay(
             workspace,

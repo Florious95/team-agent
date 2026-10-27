@@ -3,11 +3,11 @@
 //! contract:
 //!   provides:
 //!     - name: A16-capability-matrix-behavior
-//!       what: grok subscription 真注入斜杠命令；旧 Claude 拒并指向 claude_tui；compatible_api 拒；未验证 provider 拒且理由是未验证
+//!       what: grok subscription 真注入斜杠命令；Claude 同名就地分身拒并要求新席位；compatible_api 拒；未验证 provider 拒且理由是未验证
 //! boundary:
 //!   - 不把 in_window_fork_command 查表当通过
 //!   - 基线红必须是断言失败，不是 unresolved import
-//!   - 旧 Claude 不再注入 /branch：它会把源席自身切到新分支且不产生新席
+//!   - Claude 不再注入 /branch：它会把源席自身切到新分支且不产生新席
 //! maturity: wired
 //! ---
 
@@ -135,17 +135,18 @@ fn grok_subscription_injects_slash_fork_and_accepts_forked_from() {
 }
 
 #[test]
-fn legacy_claude_subscription_refuses_in_place_branch_and_names_the_contract_leaf() {
+fn legacy_claude_subscription_refuses_in_place_branch_and_asks_for_a_new_seat() {
     // `/branch` moved the source process onto the branch while its seat kept the
-    // old session tuple, and created no seat. Claude forks via `claude_tui` only.
+    // old session tuple, and created no seat. Claude forks only into a new seat.
     for (tag, screen) in [
         ("claude-sub", "Branched conversation. You are now in the new branch (session abc).\n"),
         ("claude-empty", "Failed to branch conversation: No conversation to branch\n"),
     ] {
         let ws = seat_ws(tag, "claude", "subscription");
         let (result, injected) = fork_on(&ws, screen);
-        let text = result.expect_err("legacy Claude must refuse").to_string();
-        assert!(text.contains("claude_tui"), "refusal must name the contract leaf; got {text}");
+        let text = result.expect_err("in-place Claude fork must refuse").to_string();
+        assert!(text.contains("--as <new agent id>"), "refusal must ask for a new seat; got {text}");
+        assert!(!text.contains("claude_tui"), "the user never edits the provider key; got {text}");
         assert!(
             !injected.iter().any(|t| t == "/branch" || t == "/fork"),
             "legacy Claude must not inject a slash command; got {injected:?}"

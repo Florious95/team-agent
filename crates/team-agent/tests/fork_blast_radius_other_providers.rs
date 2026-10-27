@@ -3,7 +3,7 @@
 //! contract:
 //!   provides:
 //!     - name: A9-other-providers-unchanged
-//!       what: grok+subscription=/fork；旧 Claude 一律 None（只经 claude_tui 分身）；其余未验证为 None
+//!       what: grok+subscription=/fork；Claude 一律 None（只以原生 --fork-session 起新席位）；其余未验证为 None
 //! boundary:
 //!   - 不把「函数存在」当通过
 //!   - 不给未验证 provider 填推断斜杠命令
@@ -35,7 +35,7 @@ fn grok_compatible_api_does_not_get_slash_fork() {
 
 #[test]
 fn legacy_claude_never_branches_in_place() {
-    // `/branch` moved the source seat itself; Claude forks only via claude_tui.
+    // `/branch` moved the source seat itself; Claude forks only into a new seat.
     for provider in [Provider::Claude, Provider::ClaudeCode] {
         for auth in [AuthMode::Subscription, AuthMode::CompatibleApi, AuthMode::OfficialApi] {
             assert_eq!(

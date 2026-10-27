@@ -151,6 +151,11 @@ pub(crate) fn materialize_latest_role(
         "name",
         Value::Str(as_agent_id.as_str().to_string()),
     )?;
+    // `agent_id` outranks `name` when compiling: the new seat must not keep
+    // compiling to the source's id.
+    if let Value::Map(pairs) = &mut meta {
+        pairs.retain(|(key, _)| key != "agent_id");
+    }
     if let Some(label) = label
         .map(strip_label_quotes)
         .filter(|value| !value.is_empty())
