@@ -10,6 +10,9 @@ use std::{collections::{BTreeMap, BTreeSet}, ffi::OsString, path::{Path, PathBuf
 use crate::contract::{descriptor::*, fork::*, hooks::*, plan::*, session::{NativeSessionId, ResumeBinding}, types::*};
 
 const PROMPT_FILE: &str = "team-agent-prompt.txt";
+/// Claude's own threshold (minutes) for its stale-resume summary modal.
+pub const RESUME_THRESHOLD: &str = "CLAUDE_CODE_RESUME_THRESHOLD_MINUTES";
+const RESUME_THRESHOLD_NEVER: &str = "1000000000";
 // Never derive Debug: argv/env/prompt values are not diagnostic payloads.
 pub struct McpStdio { pub executable: PathBuf, pub arguments: Vec<String>, pub environment: BTreeMap<String, String> }
 pub struct ClaudeAdapter { mcp: McpStdio, runtime: Option<launcher::RuntimeInstallation>, project: Option<PathBuf> }
@@ -97,14 +100,15 @@ impl PlanHook for ClaudeAdapter {
             ExpectedSession::Preassigned(id) if *id == session_id(&r.identity) => vec!["--session-id".into(), id.as_str().into()],
             ExpectedSession::Resume(binding) if session_uuid(binding.native_session.as_str()) => vec!["--resume".into(), binding.native_session.as_str().into()],
             // Native fork into this new seat: the parent transcript by absolute
-            // path, a new session under the derived child ID, and this seat's
-            // name instead of the copied parent title. The parent is only read.
+            // path and a new session under the derived child ID. The parent is
+            // only read. No `--name`: 2.1.309 draws a session name as a label
+            // inside the prompt-box border, which is not this profile's composer.
             ExpectedSession::PreassignedNativeFork { parent, child } if *child == session_id(&r.identity) && session_uuid(parent.as_str()) => {
                 let fork = r.fork.as_ref().ok_or(ContractError::Invalid("Claude fork source"))?;
                 let source = &fork.request().source;
                 if source.native_session != *parent { return Err(ContractError::Mismatch("Claude fork parent")); }
                 vec!["--resume".into(), transcript_path(runtime.home(), source)?.into_os_string(), "--fork-session".into(),
-                    "--session-id".into(), child.as_str().into(), "--name".into(), r.identity.seat.as_str().into()]
+                    "--session-id".into(), child.as_str().into()]
             }
             ExpectedSession::PendingAllocation => Vec::new(), // pure preflight; host refuses to spawn
             _ => return Err(ContractError::Invalid("Claude derived fresh session, exact resume or native fork only")),
@@ -124,11 +128,17 @@ impl PlanHook for ClaudeAdapter {
             EffortResolution::Ignored { reason, .. } => return Err(ContractError::EffortRejected(*reason)),
         };
         arguments.extend(session);
+        let mut environment: BTreeMap<String, OsString> = BTreeMap::from([("HOME".into(), runtime.home().as_os_str().to_owned())]);
+        if r.operation != Operation::Fresh {
+            // 2.1.309 opens a "Resume from summary / Resume full session" modal
+            // for a resumed conversation whose last turn is 70+ minutes old and
+            // 100k+ tokens. A seat never answers a modal: keep the full history.
+            environment.insert(RESUME_THRESHOLD.into(), RESUME_THRESHOLD_NEVER.into());
+        }
         // The pane execs bare `claude` through PATH, so the user's wrapper runs and
         // keeps the name. The engine is only the image that route must exec into.
         Ok(LaunchPlan { executable: runtime.engine.clone(), launcher: r.paths.launcher.clone(), arguments, executable_inputs: vec![], cwd: r.paths.cwd.path.clone(),
-            environment: EnvironmentDelta { remove: catalog::DROPPED_ENVIRONMENT.iter().map(|key| (*key).into()).collect(),
-                set: BTreeMap::from([("HOME".into(), runtime.home().as_os_str().to_owned())]) },
+            environment: EnvironmentDelta { remove: catalog::DROPPED_ENVIRONMENT.iter().map(|key| (*key).into()).collect(), set: environment },
             expected_session: resolved.expected_session().clone(),
             carriers: CarrierReport { model: CarrierUse::Specified(CarrierRef::Arguments(vec![0, 1])), prompt: CarrierUse::Specified(CarrierRef::Resource(prompt.path.clone())), mcp, bypass, effort },
             materialization: vec![prompt] })

@@ -593,7 +593,12 @@ fn native_fork_reads_the_parent_transcript_by_path_into_a_new_preassigned_child(
     let built = plan(&a, &r, &catalog).unwrap();
     let args = strings(&built);
     let child = session_id(&r.identity);
-    assert_eq!(&args[args.len() - 7..], ["--resume", transcript.to_str().unwrap(), "--fork-session", "--session-id", child.as_str(), "--name", "worker-fork"]);
+    assert_eq!(&args[args.len() - 5..], ["--resume", transcript.to_str().unwrap(), "--fork-session", "--session-id", child.as_str()]);
+    // A session name is drawn inside the prompt-box border (not this profile's
+    // composer): never passed. A resumed history never opens the summary modal.
+    assert!(!args.iter().any(|arg| arg == "--name"));
+    assert!(built.environment.set.contains_key(RESUME_THRESHOLD));
+    assert!(!plan(&a, &parent, &catalog).unwrap().environment.set.contains_key(RESUME_THRESHOLD), "fresh launches are unchanged");
     assert_eq!(built.expected_session, ExpectedSession::PreassignedNativeFork { parent: source.native_session.clone(), child });
     // The parent's own ID as the child, or no derived child at all, never launches.
     let mut same = r.clone(); same.preassigned_session = Some(source.native_session.clone());

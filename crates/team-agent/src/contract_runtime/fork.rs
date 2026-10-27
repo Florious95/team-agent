@@ -124,16 +124,18 @@ fn fork_locked(
             return Err(error("forked contract role is paused or changed provider; nothing was started"));
         }
         register_spec(selected, &role_path, target, &spec_path, undo.pre_spec.as_deref())?;
-        upsert_agent_entry(workspace, team, &AgentId::new(target), json!({
-            "agent_id": target, "provider": role.provider.as_str(), "runtime_family": "contract",
-            "status": "starting", "contract_instance": null, "pane_id": null, "forked_from": source_id.as_str(),
-        })).map_err(error)?;
         let record = native_fork(workspace, team, source_id, role, &config.members).map_err(error)?;
         if record.outcome != Outcome::Committed {
             return Err(error(BackendError::Shutdown {
                 operation: record.id, phase: record.phase, outcome: record.outcome, failure: record.failure,
             }));
         }
+        // The roster row appears only once the native seat has committed: a
+        // half-built target never enters the coordinator tick's projection.
+        upsert_agent_entry(workspace, team, &AgentId::new(target), json!({
+            "agent_id": target, "provider": role.provider.as_str(), "runtime_family": "contract",
+            "status": "starting", "contract_instance": null, "pane_id": null, "forked_from": source_id.as_str(),
+        })).map_err(error)?;
         let projection = commands::publish_at(workspace, team, &target_id, true)?;
         let coordinator = crate::coordinator::start_coordinator_with_team(
             &crate::coordinator::WorkspacePath::new(workspace.to_path_buf()), Some(team),
