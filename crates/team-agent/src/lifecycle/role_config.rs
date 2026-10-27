@@ -115,7 +115,19 @@ fn add_at_selected(
         Some(path) => read_text(path)?,
         None => String::new(),
     };
-    let reconciled = reconcile_creation(&text, patch)?;
+    #[allow(unused_mut)]
+    let mut reconciled = reconcile_creation(&text, patch)?;
+    // A generated legacy role falls back to its id as instructions at compile
+    // time; a contract role requires a body, so give it a neutral default.
+    #[cfg(unix)]
+    if source.is_none()
+        && reconciled.prompt.is_none()
+        && crate::contract_runtime::framework::declares_contract(None, reconciled.provider.as_deref())
+    {
+        reconciled.prompt = Some(format!(
+            "You are {agent_id}. Complete the tasks assigned by the leader.\n"
+        ));
+    }
     let next = patched_role(&text, agent_id, &reconciled, source.is_none())?;
     let snapshot = RoleSnapshot::capture(selected, &role_path)?;
     let result = (|| {

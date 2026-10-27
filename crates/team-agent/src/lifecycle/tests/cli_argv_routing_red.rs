@@ -1412,7 +1412,8 @@ fn issue381_every_cursor_name_adds_through_the_contract_leaf_never_legacy_agent(
                 provider: Some(name.into()),
                 model: Some("gpt-5.6-luna-xhigh".into()),
                 bypass: Some(true),
-                prompt: Some("Reply to every task.".into()),
+                // An omitted --prompt still yields a valid contract role body.
+                prompt: (index > 0).then(|| "Reply to every task.".into()),
                 ..Default::default()
             },
             false,
