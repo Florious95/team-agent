@@ -334,10 +334,7 @@ fn examples_property(command: &str) {
                 .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
         })
         .count();
-    let launcher = matches!(
-        command,
-        "pi" | "codex" | "claude" | "copilot" | "grok"
-    );
+    let launcher = matches!(command, "pi" | "codex" | "claude" | "copilot" | "grok");
     let minimum = if launcher && command != "pi" { 1 } else { 2 };
     assert!(
         functional >= minimum,
