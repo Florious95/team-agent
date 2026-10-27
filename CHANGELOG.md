@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.126]
+
+- **Legacy Claude Code and Pi worker runtimes removed (#388):** Claude Code and Pi workers run only on the unified contract leaves `claude_tui` and `pi_tui`, which launch the public PATH command (user wrappers run). A pre-upgrade `claude`, `claude_code`, `claude-code` or `pi` worker seat is refused before any side effect with "legacy <p> seat has no runtime in this release"; stop or remove it, then add it again. Leader launches (`team-agent claude`, `team-agent pi`) are unchanged.
+- **Public names select the leaf (#388):** `claude`, `claude_code`, `claude-code` and `pi` select `claude_tui` and `pi_tui` in role files, `add-agent --provider` and `team-agent models` without a `_tui` suffix or `contract_runtime: true`; an omitted provider is still the default Pi. `add-agent` records the public name. Claude and Pi workers need an exact catalog model (`team-agent models --provider claude|pi`).
+- **Native single-command seat fork (#386, #387):** `fork-agent <seat> --as <new>` forks a Claude Code, Pi or Codex contract seat into a distinct new seat through one framework pipeline, using each CLI's native fork (`claude --resume … --fork-session`, `pi --fork`, `codex fork`). Claude forks reach a ready composer without the stale-resume modal. Cursor has no native fork and refuses.
+- **Legacy code reference:** the removed implementations stay in git history. Read them at the parent of the #388 merge, for example `git show 5f3a08d8^:crates/team-agent/src/provider/adapters/claude.rs`, or at tag `v0.5.125`.
+- **Release metadata:** align the eight standard version/changelog files at 0.5.126. Installing a published package does not automatically replace a running team's binary.
+
 ## [0.5.125]
 
 - **Unified contract framework:** Codex (`codex_tui`, #374), Pi (`pi_tui`, #378) and Claude Code (`claude_tui`, #377) run as contract-native workers beside Cursor. Each launches its public PATH command (user wrappers run) with an owned per-generation MCP server. A bare `codex`/`pi` role selects its leaf only with `contract_runtime: true`; legacy `codex`, `pi`, `claude` and `claude_code` seats keep their runtime.
