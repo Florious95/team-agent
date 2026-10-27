@@ -321,10 +321,6 @@ pub struct ProviderCaps {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ProviderCommandOverrides {
     pub model: Option<String>,
-    /// Python `provider_env.py:62-65` — profile CODEX_PROFILE/NATIVE_PROFILE → `--profile <x>`.
-    pub codex_profile: Option<String>,
-    /// Python `provider_env.py:66-79` — compatible_api model_provider `-c` items, verbatim.
-    pub codex_config: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

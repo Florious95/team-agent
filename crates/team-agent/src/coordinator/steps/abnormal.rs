@@ -219,11 +219,8 @@ pub(crate) fn detect_abnormal_exits(
         {
             continue;
         }
-        let manual_command =
-            recovery_manual_command(agent.agent_id.as_str(), workspace, team.as_str());
-        let manual_recovery_hint = format!(
-            "No automatic restart was performed.\nTo recover manually, run: {manual_command}"
-        );
+        let manual_recovery_hint =
+            recovery_hint(agent.agent_id.as_str(), agent.provider, workspace, team.as_str());
         let content = format_abnormal_exit_message(
             &team,
             &agent,
@@ -1392,6 +1389,27 @@ pid_status: {pid_status}\n\n\
     )
 }
 
+/// A pre-upgrade legacy Claude Code, Codex, Grok or Pi seat has no runtime, so
+/// `start-agent` would be refused; it is stopped/removed and added again.
+fn recovery_hint(
+    agent_id: &str,
+    provider: crate::model::enums::Provider,
+    workspace: &Path,
+    team: &str,
+) -> String {
+    let wire = provider_wire(provider);
+    if crate::provider::wire::is_retired_provider(wire) {
+        return format!(
+            "No automatic restart was performed.\n{}",
+            crate::provider::wire::retired_provider_error(wire)
+        );
+    }
+    format!(
+        "No automatic restart was performed.\nTo recover manually, run: {}",
+        recovery_manual_command(agent_id, workspace, team)
+    )
+}
+
 fn recovery_manual_command(agent_id: &str, workspace: &Path, team: &str) -> String {
     let workspace_str = workspace.to_string_lossy();
     let shell_workspace = workspace_str.replace('\'', "'\\''");
@@ -2265,5 +2283,27 @@ mod tests {
             pid: None,
             current_command: None,
         }
+    }
+
+    #[test]
+    fn retired_legacy_rows_get_a_remove_and_re_add_hint_not_a_refused_start_agent() {
+        use crate::model::enums::Provider;
+        let workspace = std::path::Path::new("/tmp/ws");
+        for provider in [Provider::Claude, Provider::ClaudeCode, Provider::Codex, Provider::Grok, Provider::Pi] {
+            let hint = recovery_hint("w1", provider, workspace, "research");
+            assert!(hint.starts_with("No automatic restart was performed.\n"), "{hint}");
+            assert!(
+                hint.contains("seat has no runtime in this release; stop or remove it, then add it again"),
+                "{hint}"
+            );
+            assert!(!hint.contains("start-agent"), "{hint}");
+        }
+        assert!(recovery_hint("w1", Provider::Codex, workspace, "research").ends_with("(provider: codex)"));
+        assert!(recovery_hint("w1", Provider::Grok, workspace, "research").ends_with("(provider: grok)"));
+        let hint = recovery_hint("w1", Provider::Copilot, workspace, "research");
+        assert!(
+            hint.ends_with("To recover manually, run: team-agent start-agent w1 --workspace '/tmp/ws' --team research --force --json"),
+            "{hint}"
+        );
     }
 }

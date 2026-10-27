@@ -3,8 +3,9 @@ use super::*;
 use crate::transport::test_support::OfflineTransport;
 
 // Removal contract for the retired abnormal-exit automatic recovery path.
-// Abnormal exits remain visible and keep a copyable manual start-agent hint,
-// but coordinator ticks must never schedule or execute lifecycle work.
+// Abnormal exits remain visible with a manual recovery hint (a pre-upgrade
+// legacy row is told to stop/remove and add again, since start-agent refuses
+// it), but coordinator ticks must never schedule or execute lifecycle work.
 
 #[test]
 fn abnormal_exit_is_reported_without_auto_recovery_intent_or_action() {
@@ -47,22 +48,25 @@ fn abnormal_exit_is_reported_without_auto_recovery_intent_or_action() {
         transport.spawn_records()
     );
 
+    // The claude_code row is a pre-upgrade legacy seat: start-agent would be
+    // refused, so the hint names the stop/remove + re-add recovery instead.
     let content = case.latest_leader_notification();
     assert!(
         content.contains("No automatic restart was performed.")
-            && content.contains("To recover manually, run: team-agent start-agent fe-admin")
-            && content.contains("--workspace")
-            && content.contains("--team research")
-            && content.contains("--force")
-            && content.contains("--json"),
-        "abnormal notification must remain visible and keep the copyable manual recovery command; content={content}"
+            && content.contains(
+                "legacy claude seat has no runtime in this release; stop or remove it, then add it again (provider: claude)"
+            )
+            && !content.contains("start-agent"),
+        "abnormal notification must remain visible and never suggest a refused start-agent; content={content}"
     );
 }
 
 #[test]
 fn first_turn_death_cannot_enter_auto_respawn_loop_and_manual_start_still_recovers() {
-    // A pre-upgrade claude_code row cannot be started any more; Codex keeps
-    // both an explicit failed-turn fact and a resumable manual start.
+    // No surviving legacy worker has both an explicit failed-turn fact and a
+    // startable runtime: a pre-upgrade codex row keeps its fault reader but
+    // has no runtime. Detection runs on that row; manual recovery re-adds the
+    // seat on a startable (fake) worker.
     let case = RecoveryCase::new("first-turn-death-no-loop", "codex");
     case.seed_agent("baseline-429");
     let transport = OfflineTransport::new().with_session_present(true);
@@ -108,6 +112,7 @@ fn first_turn_death_cannot_enter_auto_respawn_loop_and_manual_start_still_recove
     );
 
     case.seed_healthy_coordinator();
+    case.readd_as_fake_worker();
     let manual_transport = OfflineTransport::new().with_session_present(true);
     let outcome = crate::lifecycle::start_agent_with_transport(
         &case.root,
@@ -223,6 +228,18 @@ impl RecoveryCase {
         agent["process_liveness"] = serde_json::json!("dead");
         agent["last_output_at"] = serde_json::Value::Null;
         agent["first_send_at"] = serde_json::Value::Null;
+        crate::state::persist::save_runtime_state(&self.root, &state).unwrap();
+    }
+
+    fn readd_as_fake_worker(&self) {
+        let mut state = self.state();
+        let agent = &mut state["agents"]["fe-admin"];
+        agent["provider"] = serde_json::json!("fake");
+        agent["model"] = serde_json::json!("fake");
+        // A fake worker has no resume; the re-added seat starts fresh.
+        if let Some(agent) = agent.as_object_mut() {
+            agent.remove("session_id");
+        }
         crate::state::persist::save_runtime_state(&self.root, &state).unwrap();
     }
 

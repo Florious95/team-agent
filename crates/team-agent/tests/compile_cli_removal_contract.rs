@@ -21,7 +21,7 @@ use team_agent::cli::{
 };
 
 const TEAM_MD: &str = "---\nname: contract-team\nobjective: Contract fixture.\nprovider: codex\nmodel: gpt-5.5\n---\n\nContract fixture.\n";
-const ROLE_MD: &str = "---\nname: worker\nrole: Contract Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nDo contract work.\n";
+const ROLE_MD: &str = "---\nname: worker\nrole: Contract Worker\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nDo contract work.\n";
 // An omitted provider is the default Pi leaf, so only an unknown provider is
 // a compile diagnostic.
 const INVALID_ROLE_MD: &str = "---\nname: broken\nrole: Broken Worker\nprovider: imaginary\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\n---\n\nUnknown provider.\n";
@@ -388,7 +388,7 @@ fn p1_compiler_retains_core_shape_and_is_read_only() {
         agents[0]
             .get("provider")
             .and_then(team_agent::model::yaml::Value::as_str),
-        Some("codex")
+        Some("fake")
     );
     assert_eq!(snapshot(env.root()), before);
 }

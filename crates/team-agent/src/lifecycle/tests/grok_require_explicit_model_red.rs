@@ -1,10 +1,7 @@
-//! purpose: grok 席位角色文件必须显式写 model，缺则拒绝启动
-//! contract: 缺 model 的 grok 角色启动失败（错误含 model 与原因）；写了 model
-//!   则该值进入 worker argv 的 `--model <值>`；copilot 缺 model 行为不变
-//! boundary: 只钉 Provider::Grok 的启动契约；不改 claude/codex/copilot 路径
-//!
-//! 修之前判红（40e91fba）：grok 角色缺 model 仍会成功启动（compiler 填
-//! 内建默认 grok-4，argv 带 `--model grok-4`，看起来完全正常）。
+//! purpose: copilot 席位角色文件缺 model 时仍能正常启动
+//! contract: 缺 model 的 copilot 角色启动成功并真的 spawn worker
+//! boundary: legacy Grok worker runtime 已移除（grok 角色现走 grok_build 合约叶），
+//!   本文件只保留 copilot 缺 model 的回归钉子
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -24,80 +21,7 @@ use serial_test::serial;
 use team_agent::lifecycle::quick_start_with_transport_in_workspace;
 use team_agent::transport::test_support::OfflineTransport;
 
-/// An omitted Grok role model preserves the provider-native default.
-#[test]
-#[serial(env)]
-fn grok_role_missing_model_uses_provider_default() {
-    let _hermetic = enter_hermetic("grok-no-model");
-    let ws = tmp_dir("grok-no-model");
-    super::launch_spawn::seed_healthy_coordinator(&ws);
-    let home = tmp_dir("grok-no-model-home");
-    seed_grok_home(&home, Some(&ws));
-    let _guard = HomeGuard::set(&home);
-    let team = write_role_team(
-        &ws,
-        "grokteam",
-        "grok_writer",
-        "grok",
-        None,
-        "Grok Writer",
-    );
-    let transport = OfflineTransport::new();
-
-    quick_start_with_transport_in_workspace(
-        &ws,
-        &team,
-        None,
-        true,
-        Some("grokteam"),
-        &transport,
-    )
-    .expect("Grok may use its provider-native model default");
-    let argv = first_spawn_argv(&transport);
-    assert!(
-        !argv.iter().any(|arg| arg == "--model"),
-        "an omitted model must not fabricate a --model argument: {argv:?}"
-    );
-}
-
-/// 2. grok 角色写了 model ⇒ 正常启动，且该值真的进 argv（`--model <值>` 相邻）。
-#[test]
-#[serial(env)]
-fn grok_role_explicit_model_reaches_argv() {
-    let _hermetic = enter_hermetic("grok-explicit-model");
-    let ws = tmp_dir("grok-with-model");
-    super::launch_spawn::seed_healthy_coordinator(&ws);
-    let home = tmp_dir("grok-with-model-home");
-    seed_grok_home(&home, Some(&ws));
-    let _guard = HomeGuard::set(&home);
-    let team = write_role_team(
-        &ws,
-        "grokteam",
-        "grok_writer",
-        "grok",
-        Some("grok-4.6"),
-        "Grok Writer",
-    );
-    let transport = OfflineTransport::new();
-
-    quick_start_with_transport_in_workspace(
-        &ws,
-        &team,
-        None,
-        true,
-        Some("grokteam"),
-        &transport,
-    )
-    .expect("grok role with explicit model must start");
-
-    let argv = first_spawn_argv(&transport);
-    assert!(
-        argv_contains_adjacent(&argv, &["--model", "grok-4.6"]),
-        "declared model must appear as adjacent `--model grok-4.6` in worker argv; argv={argv:?}"
-    );
-}
-
-/// 3. copilot 角色缺 model ⇒ 行为不变（仍能启动，不被 grok 的硬性 model 要求误伤）。
+/// copilot 角色缺 model ⇒ 行为不变（仍能启动）。
 #[test]
 #[serial(env)]
 fn copilot_role_missing_model_still_starts() {
@@ -124,7 +48,7 @@ fn copilot_role_missing_model_still_starts() {
     );
     assert!(
         result.is_ok(),
-        "copilot role without model must keep starting; grok-only requirement leaked; err={result:?}"
+        "copilot role without model must keep starting; err={result:?}"
     );
     let argv = first_spawn_argv(&transport);
     assert!(
@@ -140,14 +64,6 @@ fn first_spawn_argv(transport: &OfflineTransport) -> Vec<String> {
         "expected a worker spawn so argv can be inspected; records={records:?}"
     );
     records[0].1.clone()
-}
-
-fn argv_contains_adjacent(hay: &[String], needle: &[&str]) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    hay.windows(needle.len())
-        .any(|window| window.iter().map(String::as_str).eq(needle.iter().copied()))
 }
 
 fn write_role_team(
@@ -179,40 +95,6 @@ fn write_role_team(
     )
     .unwrap();
     team
-}
-
-fn seed_grok_home(home: &Path, trusted_cwd: Option<&Path>) {
-    let grok = home.join(".grok");
-    std::fs::create_dir_all(&grok).unwrap();
-    std::fs::write(grok.join("auth.json"), r#"{"test":"ok"}"#).unwrap();
-    if let Some(cwd) = trusted_cwd {
-        std::fs::write(
-            grok.join("trusted_folders.toml"),
-            format!("[folders.\"{}\"]\ntrusted = true\n", cwd.display()),
-        )
-        .unwrap();
-    }
-}
-
-struct HomeGuard {
-    prev: Option<String>,
-}
-
-impl HomeGuard {
-    fn set(home: &Path) -> Self {
-        let prev = std::env::var("HOME").ok();
-        std::env::set_var("HOME", home);
-        Self { prev }
-    }
-}
-
-impl Drop for HomeGuard {
-    fn drop(&mut self) {
-        match &self.prev {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-    }
 }
 
 fn tmp_dir(tag: &str) -> PathBuf {

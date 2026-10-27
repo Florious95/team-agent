@@ -2192,7 +2192,7 @@ mod u1_tests {
     #[test]
     fn canonical_pending_capture_preserves_legacy_missing_boundary() {
         let agent = serde_json::json!({
-            "provider": "codex",
+            "provider": "copilot",
             "status": "running",
             "spawn_cwd": "/tmp/u1-cwd",
             "capture_state": "pending_first_turn"
@@ -2204,112 +2204,12 @@ mod u1_tests {
     }
 
     #[test]
-    fn canonical_delayed_capture_rejects_prior_round_codex_rollout() {
-        let dir =
-            std::env::temp_dir().join(format!("ta-delayed-stale-codex-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let stale =
-            dir.join("rollout-2026-07-21T23-18-28-019f8541-c986-7f50-b9e6-6503c89df98c.jsonl");
-        std::fs::write(
-            &stale,
-            format!(
-                "{{\"session_meta\":{{\"payload\":{{\"id\":\"019f8541-c986-7f50-b9e6-6503c89df98c\",\"cwd\":\"{}\",\"created_at\":\"2026-07-21T23:18:28+00:00\"}}}}}}\n",
-                dir.to_string_lossy()
-            ),
-        )
-        .unwrap();
-        let mut state = serde_json::json!({
-            "agents": {
-                "clone": {
-                    "provider": "codex",
-                    "status": "running",
-                    "spawn_cwd": dir.to_string_lossy(),
-                    "spawned_at": "2026-07-22T02:12:27+00:00",
-                    "capture_state": "pending_first_turn"
-                }
-            }
-        });
-        let mut adapter_for = crate::provider::get_adapter;
-
-        let report = capture_missing_provider_sessions_once(&mut state, &mut adapter_for, true, 0)
-            .expect("delayed capture pass");
-
-        assert!(report.assigned.is_empty());
-        assert!(state["agents"]["clone"]["session_id"].is_null());
-        assert_ne!(
-            state["agents"]["clone"]["capture_state"],
-            serde_json::json!("captured")
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn canonical_delayed_capture_ignores_active_foreign_cwd_rollouts() {
-        use std::io::Write;
-
-        let root =
-            std::env::temp_dir().join(format!("ta-codex-dirty-domain-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let current_cwd = root.join("current");
-        let foreign_cwd = root.join("foreign");
-        std::fs::create_dir_all(&current_cwd).unwrap();
-        std::fs::create_dir_all(&foreign_cwd).unwrap();
-        let stale_current = current_cwd.join(
-            "cache/current/rollout-2026-07-21T23-18-28-019f8541-c986-7f50-b9e6-6503c89df98c.jsonl",
-        );
-        let fresh_foreign = current_cwd.join(
-            "cache/foreign/rollout-2026-07-22T04-01-00-019f8644-7060-7000-8000-000000000001.jsonl",
-        );
-        let fresh_current = current_cwd.join(
-            "cache/current/rollout-2026-07-22T04-01-01-019f8644-7450-7000-8000-000000000002.jsonl",
-        );
-        let write_rollout = |path: &std::path::Path, cwd: &std::path::Path, id: &str| {
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(
-                path,
-                format!(
-                    "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"cwd\":\"{}\"}}}}\n",
-                    cwd.to_string_lossy()
-                ),
-            )
-            .unwrap();
-        };
-        write_rollout(&stale_current, &current_cwd, "stale-current");
-        write_rollout(&fresh_foreign, &foreign_cwd, "fresh-foreign");
-        write_rollout(&fresh_current, &current_cwd, "fresh-current");
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(&stale_current)
-            .unwrap()
-            .write_all(b"{\"type\":\"event_msg\"}\n")
-            .unwrap();
-        let mut state = serde_json::json!({
-            "agents": {"clone": {
-                "provider": "codex", "status": "running",
-                "spawn_cwd": current_cwd.to_string_lossy(),
-                "spawned_at": "2026-07-21T20:00:00+00:00",
-                "capture_state": "pending_first_turn"
-            }}
-        });
-        let mut adapter_for = crate::provider::get_adapter;
-
-        let report = capture_missing_provider_sessions_once(&mut state, &mut adapter_for, true, 0)
-            .expect("canonical delayed capture");
-
-        assert_eq!(report.candidate_count_by_agent.get("clone"), Some(&1));
-        assert_eq!(state["agents"]["clone"]["session_id"], "fresh-current");
-        assert_eq!(state["agents"]["clone"]["capture_state"], "captured");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
     fn existing_team_session_is_rejected_while_fresh_candidate_is_accepted() {
         let mut state = serde_json::json!({
             "session_name": "current",
             "agents": {
                 "clone": {
-                    "provider": "codex",
+                    "provider": "copilot",
                     "status": "running",
                     "spawn_cwd": "/tmp/u1-cwd"
                 }
@@ -2318,7 +2218,7 @@ mod u1_tests {
                 "archived": {
                     "agents": {
                         "old-seat": {
-                            "provider": "codex",
+                            "provider": "copilot",
                             "session_id": "stale-session",
                             "rollout_path": "/tmp/stale.jsonl"
                         }
@@ -2357,12 +2257,12 @@ mod u1_tests {
         let mut state = serde_json::json!({
             "agents": {
                 "bad": {
-                    "provider": "codex",
+                    "provider": "copilot",
                     "status": "running",
                     "spawn_cwd": "/tmp/u1-bad"
                 },
                 "good": {
-                    "provider": "codex",
+                    "provider": "copilot",
                     "status": "running",
                     "spawn_cwd": "/tmp/u1-good"
                 }

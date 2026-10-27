@@ -107,7 +107,7 @@ fn run_dispatches_send_to_handler_returns_ok() {
         &ws,
         &serde_json::json!({
             "active_team_key": "current",
-            "teams": {"current": {"agents": {"w1": {"provider": "codex"}}}}
+            "teams": {"current": {"agents": {"w1": {"provider": "fake"}}}}
         }),
     )
     .unwrap();
@@ -185,7 +185,7 @@ fn run_dispatches_quick_start_compiles_spec() {
     .unwrap();
     std::fs::write(
             dir.join("agents").join("implementer.md"),
-            "---\nname: implementer\nrole: Impl\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nImpl.\n",
+            "---\nname: implementer\nrole: Impl\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nImpl.\n",
         )
         .unwrap();
     let argv = vec![
@@ -320,7 +320,7 @@ fn cli_add_agent_duplicate_id_surfaces_real_error() {
         &json!({
             "session_name": "team-deleg-addagent",
             "agents": {
-                "implementer": {"status": "running", "provider": "codex", "window": "implementer"}
+                "implementer": {"status": "running", "provider": "fake", "window": "implementer"}
             }
         }),
     )

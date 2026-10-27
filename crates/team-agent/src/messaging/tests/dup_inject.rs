@@ -31,7 +31,7 @@ use crate::transport::{
 #[test]
 #[cfg(unix)]
 fn eager_mcp_waits_without_spending_input_attempts_then_delivers_the_same_message() {
-    let mut case = WorkerCase::new("mcp-handshake", "grok");
+    let mut case = WorkerCase::new("mcp-handshake", "copilot");
     let carrier = crate::mcp_server::readiness::test_carrier_pid().unwrap();
     let config = case.workspace.join(".team/runtime/mcp/w1.json");
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
@@ -69,7 +69,7 @@ fn eager_mcp_waits_without_spending_input_attempts_then_delivers_the_same_messag
 #[test]
 #[cfg(unix)]
 fn issue372_bounded_handshake_wait_parks_notifies_once_then_publish_delivers() {
-    let mut case = WorkerCase::new("mcp-handshake-park", "grok");
+    let mut case = WorkerCase::new("mcp-handshake-park", "copilot");
     let carrier = crate::mcp_server::readiness::test_carrier_pid().unwrap();
     let config = case.workspace.join(".team/runtime/mcp/w1.json");
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
@@ -131,7 +131,7 @@ fn issue372_bounded_handshake_wait_parks_notifies_once_then_publish_delivers() {
 #[test]
 #[cfg(unix)]
 fn issue345_missing_eager_config_defers_without_input_or_attempts() {
-    let mut case = WorkerCase::new("missing-mcp-config", "grok");
+    let mut case = WorkerCase::new("missing-mcp-config", "copilot");
     let carrier = crate::mcp_server::readiness::test_carrier_pid().unwrap();
     case.state["team_key"] = serde_json::json!("dup-team");
     case.state["agents"]["w1"]["pane_pid"] = serde_json::json!(carrier);
@@ -226,71 +226,70 @@ fn observer_state_save_failure_after_enter_does_not_return_err() {
 }
 
 #[test]
-fn pane_token_refuses_second_inject_for_copilot_grok() {
-    for provider in ["copilot", "grok"] {
-        let mut case = WorkerCase::new(&format!("token-{provider}"), provider);
-        #[cfg(unix)]
-        let carrier = crate::mcp_server::readiness::test_carrier_pid().unwrap();
-        #[cfg(not(unix))]
-        let carrier = std::process::id();
-        let config = case.workspace.join(".team/runtime/mcp/w1.json");
-        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
-        std::fs::write(&config, serde_json::to_vec(&serde_json::json!({
-            "mcpServers": {"team_orchestrator": {
-                "command": std::env::current_exe().unwrap().canonicalize().unwrap(),
-                "env": {"TEAM_AGENT_WORKSPACE": case.workspace, "TEAM_AGENT_ID": "w1", "TEAM_AGENT_OWNER_TEAM_ID": "dup-team"}
-            }}
-        })).unwrap()).unwrap();
-        case.state["team_key"] = serde_json::json!("dup-team");
-        case.state["agents"]["w1"]["mcp_config"] = serde_json::json!(config);
-        case.state["agents"]["w1"]["pane_pid"] = serde_json::json!(carrier);
-        case.state["agents"]["w1"]["spawned_at"] = serde_json::json!((chrono::Utc::now() - chrono::Duration::seconds(10)).to_rfc3339());
-        case.state["teams"] = serde_json::json!({"dup-team": case.state.clone()});
-        crate::state::persist::save_runtime_state(&case.workspace, &case.state).unwrap();
-        #[cfg(unix)]
-        crate::mcp_server::readiness::publish(&case.workspace, "dup-team", "w1", chrono::Utc::now()).unwrap();
-        let transport = RecordingTransport { carrier: Some(carrier), ..RecordingTransport::new("") };
-        let message_id = case.store.create_message(None, "leader", "w1", &format!("{provider} canary"), None, false, Some("dup-team")).unwrap();
-        let first = deliver_pending_message(
-            &case.workspace,
-            &case.store,
-            &transport,
-            &message_id,
-            &case.event_log,
-            &case.state,
-        )
-        .expect("first inject");
-        assert_eq!(
-            transport.inject_count(),
-            1,
-            "provider={provider} first inject failed: {first:?}"
-        );
+fn pane_token_refuses_second_inject_for_copilot() {
+    let provider = "copilot";
+    let mut case = WorkerCase::new(&format!("token-{provider}"), provider);
+    #[cfg(unix)]
+    let carrier = crate::mcp_server::readiness::test_carrier_pid().unwrap();
+    #[cfg(not(unix))]
+    let carrier = std::process::id();
+    let config = case.workspace.join(".team/runtime/mcp/w1.json");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, serde_json::to_vec(&serde_json::json!({
+        "mcpServers": {"team_orchestrator": {
+            "command": std::env::current_exe().unwrap().canonicalize().unwrap(),
+            "env": {"TEAM_AGENT_WORKSPACE": case.workspace, "TEAM_AGENT_ID": "w1", "TEAM_AGENT_OWNER_TEAM_ID": "dup-team"}
+        }}
+    })).unwrap()).unwrap();
+    case.state["team_key"] = serde_json::json!("dup-team");
+    case.state["agents"]["w1"]["mcp_config"] = serde_json::json!(config);
+    case.state["agents"]["w1"]["pane_pid"] = serde_json::json!(carrier);
+    case.state["agents"]["w1"]["spawned_at"] = serde_json::json!((chrono::Utc::now() - chrono::Duration::seconds(10)).to_rfc3339());
+    case.state["teams"] = serde_json::json!({"dup-team": case.state.clone()});
+    crate::state::persist::save_runtime_state(&case.workspace, &case.state).unwrap();
+    #[cfg(unix)]
+    crate::mcp_server::readiness::publish(&case.workspace, "dup-team", "w1", chrono::Utc::now()).unwrap();
+    let transport = RecordingTransport { carrier: Some(carrier), ..RecordingTransport::new("") };
+    let message_id = case.store.create_message(None, "leader", "w1", &format!("{provider} canary"), None, false, Some("dup-team")).unwrap();
+    let first = deliver_pending_message(
+        &case.workspace,
+        &case.store,
+        &transport,
+        &message_id,
+        &case.event_log,
+        &case.state,
+    )
+    .expect("first inject");
+    assert_eq!(
+        transport.inject_count(),
+        1,
+        "provider={provider} first inject failed: {first:?}"
+    );
 
-        case.store
-            .mark(&message_id, "target_resolved", Some("probe_failed"))
-            .unwrap();
-        let second = deliver_pending_message(
-            &case.workspace,
-            &case.store,
-            &transport,
-            &message_id,
-            &case.event_log,
-            &case.state,
-        )
-        .expect("second deliver");
-        assert_eq!(
-            transport.inject_count(),
-            1,
-            "provider={provider} pane token must refuse second inject: {second:?}"
-        );
-        assert!(
-            second.status == DeliveryStatus::AlreadyDelivered
-                || second.reason == Some(DeliveryRefusal::MessageAlreadyClaimed)
-                || case.events().contains("delivery.duplicate_token_refused"),
-            "provider={provider} missing duplicate refuse. outcome={second:?} events={}",
-            case.events()
-        );
-    }
+    case.store
+        .mark(&message_id, "target_resolved", Some("probe_failed"))
+        .unwrap();
+    let second = deliver_pending_message(
+        &case.workspace,
+        &case.store,
+        &transport,
+        &message_id,
+        &case.event_log,
+        &case.state,
+    )
+    .expect("second deliver");
+    assert_eq!(
+        transport.inject_count(),
+        1,
+        "provider={provider} pane token must refuse second inject: {second:?}"
+    );
+    assert!(
+        second.status == DeliveryStatus::AlreadyDelivered
+            || second.reason == Some(DeliveryRefusal::MessageAlreadyClaimed)
+            || case.events().contains("delivery.duplicate_token_refused"),
+        "provider={provider} missing duplicate refuse. outcome={second:?} events={}",
+        case.events()
+    );
 }
 
 #[test]

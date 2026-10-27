@@ -13,11 +13,6 @@ use super::{AuthMode, Provider};
 
 pub use crate::provider::session_scan::{CaptureSessionContext, CapturedSessionCandidate};
 
-pub trait ForkBackingMaterialization {
-    fn path(&self) -> &Path;
-    fn handoff(&mut self);
-}
-
 // ===========================================================================
 // TRAIT: ProviderAdapter (method SIGNATURES only — 无 body)
 // ===========================================================================
@@ -192,24 +187,6 @@ pub trait ProviderAdapter {
         .map(CommandPlan::argv_only)
     }
 
-    fn materialize_fork_backing(
-        &self,
-        source_path: &Path,
-        source_session_id: &SessionId,
-        source_agent_id: &str,
-        target_agent_id: &str,
-        plan: &mut CommandPlan,
-    ) -> Result<Option<Box<dyn ForkBackingMaterialization>>, ProviderError> {
-        let _ = (
-            source_path,
-            source_session_id,
-            source_agent_id,
-            target_agent_id,
-            plan,
-        );
-        Ok(None)
-    }
-
     /// 计算本 provider 该用的 MCP server 配置(`adapter.py` mcp_config;claude
     /// compatible_api 走 `ensure_compatible_claude_mcp_config`)。
     fn mcp_config(&self, auth_mode: AuthMode) -> Result<McpConfig, ProviderError>;
@@ -272,28 +249,6 @@ pub trait ProviderAdapter {
         }))
         .unwrap_or_default()
     }
-
-    /// Python launch/core.py:235-237 + tmux_prompt.py:124-129 — `runtime.fast` toggles
-    /// codex fast mode by sending `/fast` + Enter to the worker pane after spawn.
-    /// Providers without a fast-mode toggle are a no-op so upper layers stay
-    /// provider-agnostic (F032). Returns whether a toggle was sent.
-    fn enable_fast_mode(
-        &self,
-        transport: &dyn crate::transport::Transport,
-        target: &crate::transport::Target,
-    ) -> bool {
-        match self.provider() {
-            Provider::Codex => {
-                let keys: Vec<crate::transport::Key> = "/fast"
-                    .chars()
-                    .map(crate::transport::Key::Char)
-                    .chain([crate::transport::Key::Enter])
-                    .collect();
-                transport.send_keys(target, &keys).is_ok()
-            }
-            _ => false,
-        }
-    }
 }
 
 // ===========================================================================
@@ -323,12 +278,6 @@ impl ProviderAdapter for BasicProviderAdapter {
 
     fn caps(&self) -> ProviderCaps {
         match self.provider {
-            Provider::Codex => ProviderCaps {
-                resume: true,
-                fork: true,
-                native_mcp_config: false,
-                writes_global_settings: false,
-            },
             // Copilot resume 走 --resume <sid>;store fork 在隔离 COPILOT_HOME
             // 复制并重键 session backing 后以 --resume <new sid> 启动。
             // native_mcp_config=true(`--additional-mcp-config` 接 inline JSON 或 @file);
@@ -346,17 +295,14 @@ impl ProviderAdapter for BasicProviderAdapter {
                 native_mcp_config: false,
                 writes_global_settings: true,
             },
-            // Grok: --resume/--fork-session 齐全 → resume/fork true; 无原生
-            // --mcp-config flag → native_mcp_config false (MCP 走 .grok/config.toml)。
-            Provider::Grok => ProviderCaps {
-                resume: true,
-                fork: true,
-                native_mcp_config: false,
-                writes_global_settings: false,
-            },
-            // Claude Code and Pi workers run only through their contract leaves.
-            // A persisted legacy row is neither resumable nor capture-pending.
-            Provider::Claude | Provider::ClaudeCode | Provider::Pi => ProviderCaps {
+            // Claude Code, Codex, Grok and Pi workers run only through their
+            // contract leaves. A persisted legacy row is neither resumable nor
+            // capture-pending.
+            Provider::Claude
+            | Provider::ClaudeCode
+            | Provider::Codex
+            | Provider::Grok
+            | Provider::Pi => ProviderCaps {
                 resume: false,
                 fork: false,
                 native_mcp_config: false,
@@ -408,8 +354,12 @@ impl ProviderAdapter for BasicProviderAdapter {
             // 标"weak / no auth-status command available";Compatible/Official 走 BYOK
             // 路径,有 COPILOT_PROVIDER_BASE_URL 时已脱离 GitHub 登录通道。
             Provider::Copilot => copilot_auth_hint(auth_mode),
-            // No legacy worker probe remains for Claude Code or Pi.
-            Provider::Claude | Provider::ClaudeCode | Provider::Pi => AuthHintStatus::Unknown,
+            // No legacy worker probe remains for Claude Code, Codex, Grok or Pi.
+            Provider::Claude
+            | Provider::ClaudeCode
+            | Provider::Codex
+            | Provider::Grok
+            | Provider::Pi => AuthHintStatus::Unknown,
             _ => match auth_mode {
                 AuthMode::Subscription => AuthHintStatus::Present,
                 AuthMode::OfficialApi | AuthMode::CompatibleApi => AuthHintStatus::MissingOrUnknown,
@@ -436,16 +386,6 @@ impl ProviderAdapter for BasicProviderAdapter {
         dangerously_skip_permissions: bool,
     ) -> Result<Vec<String>, ProviderError> {
         match self.provider {
-            Provider::Codex => Ok(codex_base_command(
-                None,
-                auth_mode,
-                mcp_config,
-                system_prompt,
-                model,
-                dangerously_skip_permissions,
-                None,
-                None,
-            )),
             // §C1 worker argv 形态 + C-1/C-5/C-6 cr verdict:
             //   copilot --no-color --no-auto-update [<dangerous|granular>] [--model]
             //          --additional-mcp-config <inline json> --session-id <expected_uuid> -C <cwd>
@@ -467,14 +407,11 @@ impl ProviderAdapter for BasicProviderAdapter {
                 }
                 Ok(argv)
             }
-            Provider::Grok => Ok(grok_launch_command(
-                system_prompt,
-                model,
-                dangerously_skip_permissions,
-            )?),
-            Provider::Claude | Provider::ClaudeCode | Provider::Pi => {
-                Err(ProviderError::Command(retired_worker(self.provider)))
-            }
+            Provider::Claude
+            | Provider::ClaudeCode
+            | Provider::Codex
+            | Provider::Grok
+            | Provider::Pi => Err(ProviderError::Command(retired_worker(self.provider))),
             Provider::Fake => Ok(fake_worker_command()),
         }
     }
@@ -484,52 +421,11 @@ impl ProviderAdapter for BasicProviderAdapter {
         ctx: ProviderCommandContext<'_>,
     ) -> Result<CommandPlan, ProviderError> {
         match self.provider {
-            // codex.py:105-118 — the profile command overrides (codex_profile / codex_config)
-            // ride on `agent["_provider_profile"]`, which only the plan path carries.
-            //
-            // 0.3.31 Codex capture correction (reverts ad518f8): Codex CLI does
-            // NOT accept `--session-id`, so a framework-generated UUID is never
-            // matched against Codex's own session_meta.payload.id. Setting
-            // expected_session_id caused the apply-time Stage 1 guard to
-            // permanently reject the real Codex transcript. Codex capture must
-            // anchor on (cwd, spawned_at) instead — handled in
-            // `provider/session_scan/codex.rs`.
-            Provider::Codex => Ok(CommandPlan::argv_only(codex_base_command(
-                None,
-                ctx.auth_mode,
-                ctx.mcp_config,
-                ctx.system_prompt,
-                ctx.model,
-                ctx.dangerously_skip_permissions,
-                ctx.profile_launch.map(|profile| &profile.command_overrides),
-                ctx.effort,
-            ))),
             // §C1 + §C4 cr verdict — copilot plan 端预定 UUID + workspace `-C` 双保险:
             //   * `--session-id <uuid>`(claude 同法,捕获免目录扫描,sqlite 仅校验)
             //   * `-C <workspace>`(双保险,即便 spawn cwd 漂移也能锚定)
             // mcp_config inline 形态由 build_command 写入,launch 路径会用
             // point_native_mcp_config_at_file 重写为 @<file> 形(§C1 note)。
-            Provider::Grok => {
-                // Align with Claude/Copilot: the UUID on `--session-id` is
-                // also the capture hint. `CommandPlan::argv_only` used to
-                // drop expected_session_id, so `_pending_session_id` was
-                // never written and restart could not resume.
-                let expected = next_session_token();
-                let mut argv = grok_base_command(
-                    ctx.system_prompt,
-                    ctx.model,
-                    ctx.dangerously_skip_permissions,
-                    ctx.effort,
-                )?;
-                argv.push("--session-id".to_string());
-                argv.push(expected.clone());
-                Ok(CommandPlan {
-                    argv,
-                    expected_session_id: Some(SessionId::new(expected)),
-                    provider_projects_root: None,
-                    managed_mcp_config: false,
-                })
-            }
             Provider::Copilot => {
                 let expected = next_session_token();
                 let mut argv = copilot_base_command(
@@ -548,9 +444,11 @@ impl ProviderAdapter for BasicProviderAdapter {
                     managed_mcp_config: false,
                 })
             }
-            Provider::Claude | Provider::ClaudeCode | Provider::Pi => {
-                Err(ProviderError::Command(retired_worker(self.provider)))
-            }
+            Provider::Claude
+            | Provider::ClaudeCode
+            | Provider::Codex
+            | Provider::Grok
+            | Provider::Pi => Err(ProviderError::Command(retired_worker(self.provider))),
             _ => self
                 .build_command_with_permissions(
                     ctx.auth_mode,
@@ -560,29 +458,6 @@ impl ProviderAdapter for BasicProviderAdapter {
                     ctx.dangerously_skip_permissions,
                 )
                 .map(CommandPlan::argv_only),
-        }
-    }
-
-    fn materialize_fork_backing(
-        &self,
-        source_path: &Path,
-        source_session_id: &SessionId,
-        source_agent_id: &str,
-        target_agent_id: &str,
-        plan: &mut CommandPlan,
-    ) -> Result<Option<Box<dyn ForkBackingMaterialization>>, ProviderError> {
-        match self.provider {
-            Provider::Codex => crate::provider::session::materialize_codex_fork(
-                source_path,
-                source_session_id,
-                source_agent_id,
-                target_agent_id,
-                plan,
-            )
-            .map(|materialized| {
-                Some(Box::new(materialized) as Box<dyn ForkBackingMaterialization>)
-            }),
-            _ => Ok(None),
         }
     }
 
@@ -677,20 +552,6 @@ impl ProviderAdapter for BasicProviderAdapter {
             ));
         };
         match self.provider {
-            Provider::Codex => {
-                let mut argv = codex_base_command(
-                    Some("resume"),
-                    auth_mode,
-                    mcp_config,
-                    system_prompt,
-                    model,
-                    dangerously_skip_permissions,
-                    None,
-                    None,
-                );
-                argv.push(session_id.as_str().to_string());
-                Ok(argv)
-            }
             // §C1 cr verdict:resume 同 base + `--resume <sid>`(去 --session-id,
             // copilot --resume 接受 id|name)。
             Provider::Copilot => {
@@ -700,85 +561,15 @@ impl ProviderAdapter for BasicProviderAdapter {
                 argv.push(session_id.as_str().to_string());
                 Ok(argv)
             }
-            // Grok resume: base + `--resume <id>` (grok -r/--resume 接受 id|title)。
-            Provider::Grok => {
-                let mut argv = grok_base_command(
-                    system_prompt,
-                    model,
-                    dangerously_skip_permissions,
-                    None,
-                )?;
-                argv.push("--resume".to_string());
-                argv.push(session_id.as_str().to_string());
-                Ok(argv)
-            }
-            Provider::Claude | Provider::ClaudeCode | Provider::Pi => {
-                Err(ProviderError::ResumeUnavailable(retired_worker(self.provider)))
-            }
+            Provider::Claude
+            | Provider::ClaudeCode
+            | Provider::Codex
+            | Provider::Grok
+            | Provider::Pi => Err(ProviderError::ResumeUnavailable(retired_worker(self.provider))),
             Provider::GeminiCli | Provider::Fake => Err(ProviderError::ResumeUnavailable(format!(
                 "{} resume requires session_id",
                 provider_wire(self.provider)
             ))),
-        }
-    }
-
-    fn build_resume_command_plan(
-        &self,
-        session_id: Option<&SessionId>,
-        ctx: ProviderCommandContext<'_>,
-    ) -> Result<CommandPlan, ProviderError> {
-        match self.provider {
-            Provider::Codex => {
-                if !self.session_is_resumable(session_id, ctx.auth_mode)? {
-                    return Err(ProviderError::ResumeUnavailable(format!(
-                        "{} resume requires session_id",
-                        provider_wire(self.provider)
-                    )));
-                }
-                let Some(session_id) = session_id else {
-                    return Err(ProviderError::ResumeUnavailable(
-                        "resume requires session_id".to_string(),
-                    ));
-                };
-                let mut argv = codex_base_command(
-                    Some("resume"),
-                    ctx.auth_mode,
-                    ctx.mcp_config,
-                    ctx.system_prompt,
-                    ctx.model,
-                    ctx.dangerously_skip_permissions,
-                    ctx.profile_launch.map(|profile| &profile.command_overrides),
-                    ctx.effort,
-                );
-                argv.push(session_id.as_str().to_string());
-                Ok(CommandPlan::argv_only(argv))
-            }
-            Provider::Grok => {
-                let Some(session_id) = session_id else {
-                    return Err(ProviderError::ResumeUnavailable(
-                        "resume requires session_id".to_string(),
-                    ));
-                };
-                let mut argv = grok_base_command(
-                    ctx.system_prompt,
-                    ctx.model,
-                    ctx.dangerously_skip_permissions,
-                    ctx.effort,
-                )?;
-                argv.push("--resume".to_string());
-                argv.push(session_id.as_str().to_string());
-                Ok(CommandPlan::argv_only(argv))
-            }
-            _ => self
-                .build_resume_command_with_context(
-                    session_id,
-                    ctx.auth_mode,
-                    ctx.mcp_config,
-                    ctx.system_prompt,
-                    ctx.model,
-                    ctx.dangerously_skip_permissions,
-                )
-                .map(CommandPlan::argv_only),
         }
     }
 
@@ -795,10 +586,10 @@ impl ProviderAdapter for BasicProviderAdapter {
         &self,
         session_id: Option<&SessionId>,
         auth_mode: AuthMode,
-        mcp_config: Option<&McpConfig>,
-        system_prompt: Option<&str>,
-        model: Option<&str>,
-        dangerously_skip_permissions: bool,
+        _mcp_config: Option<&McpConfig>,
+        _system_prompt: Option<&str>,
+        _model: Option<&str>,
+        _dangerously_skip_permissions: bool,
     ) -> Result<Vec<String>, ProviderError> {
         if !self.caps().fork || auth_mode == AuthMode::CompatibleApi {
             return Err(ProviderError::CapabilityUnsupported(format!(
@@ -806,51 +597,23 @@ impl ProviderAdapter for BasicProviderAdapter {
                 provider_wire(self.provider)
             )));
         }
-        let Some(session_id) = session_id else {
+        if session_id.is_none() {
             return Err(ProviderError::ResumeUnavailable(
                 "fork requires session_id".to_string(),
             ));
-        };
+        }
         match self.provider {
-            Provider::Codex => {
-                let mut argv = codex_base_command(
-                    Some("fork"),
-                    auth_mode,
-                    mcp_config,
-                    system_prompt,
-                    model,
-                    dangerously_skip_permissions,
-                    None,
-                    None,
-                );
-                argv.push(session_id.as_str().to_string());
-                Ok(argv)
-            }
             // Context-free adapter calls cannot materialize the Copilot store fork.
             // The lifecycle path uses `fork_plan`, which receives the prepared isolated
             // backing; never degrade this context-free call to a fresh spawn.
             Provider::Copilot => Err(ProviderError::CapabilityUnsupported(
                 "copilot CLI 无 fork 旗标,session-store 不支持 branched continuation".to_string(),
             )),
-            // Grok fork: base + 新 `--session-id` + `--resume <src>` + `--fork-session`
-            // (grok help: --fork-session 需配合 --resume/--continue)。
-            Provider::Grok => {
-                let mut argv = grok_base_command(
-                    system_prompt,
-                    model,
-                    dangerously_skip_permissions,
-                    None,
-                )?;
-                argv.push("--session-id".to_string());
-                argv.push(next_session_token());
-                argv.push("--resume".to_string());
-                argv.push(session_id.as_str().to_string());
-                argv.push("--fork-session".to_string());
-                Ok(argv)
-            }
-            Provider::Claude | Provider::ClaudeCode | Provider::Pi => {
-                Err(ProviderError::CapabilityUnsupported(retired_worker(self.provider)))
-            }
+            Provider::Claude
+            | Provider::ClaudeCode
+            | Provider::Codex
+            | Provider::Grok
+            | Provider::Pi => Err(ProviderError::CapabilityUnsupported(retired_worker(self.provider))),
             Provider::GeminiCli | Provider::Fake => {
                 Err(ProviderError::CapabilityUnsupported(format!(
                     "{} does not support native session fork",
@@ -866,31 +629,6 @@ impl ProviderAdapter for BasicProviderAdapter {
         ctx: ProviderCommandContext<'_>,
     ) -> Result<CommandPlan, ProviderError> {
         match self.provider {
-            Provider::Codex => {
-                if !self.caps().fork || ctx.auth_mode == AuthMode::CompatibleApi {
-                    return Err(ProviderError::CapabilityUnsupported(format!(
-                        "{} does not support native session fork",
-                        provider_wire(self.provider)
-                    )));
-                }
-                let Some(session_id) = session_id else {
-                    return Err(ProviderError::ResumeUnavailable(
-                        "fork requires session_id".to_string(),
-                    ));
-                };
-                let mut argv = codex_base_command(
-                    Some("fork"),
-                    ctx.auth_mode,
-                    ctx.mcp_config,
-                    ctx.system_prompt,
-                    ctx.model,
-                    ctx.dangerously_skip_permissions,
-                    ctx.profile_launch.map(|profile| &profile.command_overrides),
-                    ctx.effort,
-                );
-                argv.push(session_id.as_str().to_string());
-                Ok(CommandPlan::argv_only(argv))
-            }
             Provider::Copilot => {
                 if ctx.auth_mode == AuthMode::CompatibleApi {
                     return Err(ProviderError::CapabilityUnsupported(
@@ -936,25 +674,6 @@ impl ProviderAdapter for BasicProviderAdapter {
                     managed_mcp_config: profile.managed_mcp_config,
                 })
             }
-            Provider::Grok => {
-                let Some(session_id) = session_id else {
-                    return Err(ProviderError::ResumeUnavailable(
-                        "fork requires session_id".to_string(),
-                    ));
-                };
-                let mut argv = grok_base_command(
-                    ctx.system_prompt,
-                    ctx.model,
-                    ctx.dangerously_skip_permissions,
-                    ctx.effort,
-                )?;
-                argv.push("--session-id".to_string());
-                argv.push(next_session_token());
-                argv.push("--resume".to_string());
-                argv.push(session_id.as_str().to_string());
-                argv.push("--fork-session".to_string());
-                Ok(CommandPlan::argv_only(argv))
-            }
             _ => self
                 .fork_with_context(
                     session_id,
@@ -997,25 +716,23 @@ impl ProviderAdapter for BasicProviderAdapter {
 
     fn status_patterns(&self) -> Result<StatusPatterns, ProviderError> {
         match self.provider {
-            Provider::Codex => patterns(
-                r"(›|❯|codex>)",
-                r"•.*esc to interrupt",
-                r"Error|Traceback|panic",
-            ),
             Provider::Copilot => patterns(
                 r"(?m)^\s*❯\s*$| / commands · \? help",
                 r"working|processing",
                 r"Error|panic",
             ),
-            // Claude Code and Pi workers run only through their contract leaves;
-            // these placeholders never match real pane chrome.
-            Provider::Claude | Provider::ClaudeCode | Provider::Pi => patterns(
+            // Claude Code, Codex, Grok and Pi workers run only through their
+            // contract leaves; these placeholders never match real pane chrome.
+            Provider::Claude
+            | Provider::ClaudeCode
+            | Provider::Codex
+            | Provider::Grok
+            | Provider::Pi => patterns(
                 r"legacy-worker-idle-retired",
                 r"legacy-worker-busy-retired",
                 r"legacy-worker-error-retired",
             ),
-            // Grok: 暂无专有 status 正则, 沿用 generic。
-            Provider::Grok | Provider::GeminiCli | Provider::Fake => {
+            Provider::GeminiCli | Provider::Fake => {
                 patterns(r">", r"working|processing", r"Error|Traceback")
             }
         }
@@ -1032,8 +749,8 @@ impl ProviderAdapter for BasicProviderAdapter {
 
 use crate::provider::wire::{command_name, provider_wire};
 
-/// Claude Code and Pi workers run only through their contract leaves
-/// (`provider: claude` / `provider: pi`); their legacy worker builders were
+/// Claude Code, Codex, Grok and Pi workers run only through their contract
+/// leaves (`provider: claude|codex|grok|pi`); their legacy worker builders were
 /// excised. Only a pre-upgrade state row can still name the legacy key.
 fn retired_worker(provider: Provider) -> String {
     format!(
@@ -1078,27 +795,15 @@ fn command_on_path(name: &str) -> bool {
     std::env::split_paths(&path).any(|dir| dir.join(name).is_file())
 }
 
-/// Shared JSON renderer used by the codex `-c mcp_servers.*=...` overrides
-/// and any other adapter that wants inline JSON. String values are quoted
-/// (with quote escape); other values use serde's default Display.
-pub(crate) fn json_inline(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::String(s) => format!("\"{}\"", s.replace('"', "\\\"")),
-        other => other.to_string(),
-    }
-}
-
 // 0.4.x decoupling step 2: provider-local command builders moved to provider/adapters/.
 // Only the entry points the trait impl actually calls are re-imported here;
 // The per-provider command helpers and MCP renderers are called from within
 // the extracted base-command functions, not directly by this file.
-use super::adapters::codex::codex_base_command;
 use super::adapters::copilot::copilot_base_command;
 use super::adapters::fake::fake_worker_command;
-use super::adapters::grok::{grok_base_command, grok_launch_command};
 
-/// Contract C / MUST-8: the per-worker Team Agent MCP server config used by Claude
-/// (`--mcp-config`) and Codex (`-c mcp_servers.*` injection). Placeholders
+/// Contract C / MUST-8: the per-worker Team Agent MCP server config used by the
+/// remaining legacy workers (Copilot `--additional-mcp-config`). Placeholders
 /// `{workspace}` / `{agent_id}` / `{team_id}` are substituted at spawn time by
 /// [`crate::lifecycle::launch::fill_spawn_placeholders`]; this template MUST NOT
 /// contain hardcoded paths or agent/team ids — the probe5 RED probe burned that.
@@ -1180,17 +885,14 @@ pub(crate) fn next_session_token() -> String {
 #[cfg(test)]
 mod fork_materialization_source_guard {
     #[test]
-    fn lifecycle_uses_in_window_fork_not_session_file_materialization() {
+    fn legacy_fork_neither_materializes_backing_nor_injects_into_the_source_pane() {
         let source = include_str!("../lifecycle/launch/fork_agent.rs");
         assert!(
-            source.contains("in_window_fork(") && source.contains("inject_clean_command"),
-            "fork must stay on the shared in-window inject path"
+            source.contains("is_retired_provider") && source.contains("unverified (未验证)"),
+            "legacy fork must refuse retired rows and unverified providers"
         );
-        assert!(
-            !source.contains(".materialize_fork_backing("),
-            "session-file fork materialization must stay gone"
-        );
-        assert!(!source.contains("materialize_codex_fork"));
-        assert!(!source.contains("codex_fork"));
+        for gone in [".materialize_fork_backing(", "materialize_codex_fork", "codex_fork", ".inject(", "send_keys"] {
+            assert!(!source.contains(gone), "legacy fork must not use {gone}");
+        }
     }
 }

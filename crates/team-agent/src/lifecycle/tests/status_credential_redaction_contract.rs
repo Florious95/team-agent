@@ -82,7 +82,7 @@ fn red2_false_positive_guard_preserves_team_provider_and_model_truth() {
     let structural_fields_preserved = [
         ("/team_key", json!("current")),
         ("/auth_mode", json!("subscription")),
-        ("/provider", json!("codex")),
+        ("/provider", json!("copilot")),
         ("/model", json!("gpt-contract")),
         ("/provider_source", json!("role")),
         ("/model_source", json!("role")),
@@ -450,7 +450,7 @@ fn seed_redaction_state(workspace: &Path, marker: &str, team_key: &str) {
     let mixed = mixed_sensitive_value(marker);
     let agent = json!({
         "agent_id": "worker",
-        "provider": "codex",
+        "provider": "copilot",
         "model": "gpt-contract",
         "provider_source": "role",
         "model_source": "role",
@@ -500,7 +500,7 @@ fn mixed_sensitive_value(marker: &str) -> Value {
         "nested": [{"values": [diagnostic.clone(), credential_url(marker)]}],
         "team_key": "current",
         "auth_mode": "subscription",
-        "provider": "codex",
+        "provider": "copilot",
         "model": "gpt-contract",
         "provider_source": "role",
         "model_source": "role",
@@ -773,8 +773,8 @@ fn red8_bearer_token_inside_free_text_is_masked_without_over_redaction() {
     let log = EventLog::new(&workspace);
     // Attack-input shape (case.md section 2.4 / arch delta-smell6 probe): a
     // user-controlled prompt travels as free text INSIDE an argv value
-    // (worker_command_context -> codex.rs `-c developer_instructions=<prompt>`
-    // -> launch.rs spawn_argv event). The bearer token hides in prose - not
+    // (a codex seat's `-c developer_instructions=<prompt>` argv value
+    // -> spawn_argv event). The bearer token hides in prose - not
     // under a sensitive key, assignment key, or flag-value pair - so the
     // shape matrix must map the attack input, not the scrubber branches.
     let written = log

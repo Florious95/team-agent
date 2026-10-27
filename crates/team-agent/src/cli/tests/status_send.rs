@@ -554,7 +554,7 @@ fn queued_send_args_fixture(json: bool) -> SendArgs {
         &ws,
         &json!({
             "active_team_key": "current",
-            "teams": {"current": {"agents": {"w1": {"provider": "codex"}}}}
+            "teams": {"current": {"agents": {"w1": {"provider": "copilot"}}}}
         }),
     )
     .unwrap();
@@ -828,7 +828,7 @@ fn cmd_send_canonicalizes_legacy_session_alias_before_membership_projection() {
                 "teamdir": {
                     "status": "alive",
                     "session_name": "team-displayname",
-                    "agents": {"w1": {"provider": "codex", "status": "running"}}
+                    "agents": {"w1": {"provider": "copilot", "status": "running"}}
                 }
             }
         }),

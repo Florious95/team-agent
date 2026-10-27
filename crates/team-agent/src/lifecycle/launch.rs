@@ -3,7 +3,7 @@
 //! contract:
 //!   provides:
 //!     - name: fork_agent
-//!       what: 成员分身入口，grok 走窗口内命令
+//!       what: 成员分身入口；legacy 席位一律拒绝，新席位 fork 只走 contract 管道
 //! boundary:
 //!   - 不读 provider 会话落盘
 //! maturity: wired
@@ -334,18 +334,10 @@ pub(crate) use agent_state::{
     persist_effective_approval_policy_from_agent,
 };
 
-mod grok_per_seat;
-pub(crate) use grok_per_seat::{
-    is_per_seat_env_key, non_per_seat_env_in_tables, per_seat_keys_in_toml,
-    strip_per_seat_keys_from_toml,
-};
-
 mod mcp_config;
-pub use mcp_config::apply_grok_mcp_overlay;
 pub(super) use mcp_config::*;
 pub(crate) use mcp_config::{
-    ensure_grok_login_and_folder_trust, grok_shared_cwd_error, point_native_mcp_config_at_file,
-    reconcile_grok_toml_per_seat_keys, resolve_mcp_config, write_worker_mcp_config,
+    point_native_mcp_config_at_file, resolve_mcp_config, write_worker_mcp_config,
     write_worker_mcp_config_for_provider,
 };
 
@@ -418,7 +410,7 @@ pub(super) use add_agent_state::*;
 
 mod fork_agent;
 pub(super) use fork_agent::*;
-pub use fork_agent::{fork_agent_with_transport, in_window_fork, in_window_fork_command};
+pub use fork_agent::fork_agent_with_transport;
 
 mod fork_entry;
 pub use fork_entry::fork_agent;

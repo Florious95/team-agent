@@ -222,16 +222,16 @@ impl crate::transport::Transport for SessionProbeRecordingTransport {
         unimplemented!("not reached")
     }
 }
-fn respawn_ws_one_resumable_worker() -> PathBuf {
+// The spawn-kind decision is independent of the start mode, so a fresh `fake` worker (no stored
+// session) exercises the same respawn path without a provider resume backing.
+fn respawn_ws_one_worker() -> PathBuf {
     let ws = temp_ws().join("respawn_dead_session");
     std::fs::create_dir_all(&ws).unwrap();
-    let rollout = ws.join("alpha-rollout.jsonl");
-    std::fs::write(&rollout, "{}\n").unwrap();
     crate::state::persist::save_runtime_state(
         &ws,
         &json!({
             "session_name": "team-sa",
-            "agents": {"alpha": {"status": "running", "provider": "codex", "session_id": "sess-a", "rollout_path": rollout.to_string_lossy(), "first_send_at": "2026-05-27T10:00:00+00:00"}}
+            "agents": {"alpha": {"status": "running", "provider": "fake"}}
         }),
     )
     .unwrap();
@@ -246,7 +246,7 @@ fn respawn_ws_one_resumable_worker() -> PathBuf {
 // the transport implements has_session, so the only failure is the wrong spawn kind.
 #[test]
 fn start_agent_respawn_into_dead_session_uses_new_session_not_new_window() {
-    let ws = respawn_ws_one_resumable_worker();
+    let ws = respawn_ws_one_worker();
     let spawns = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     // session_exists=false models the dead CP-1 `-L` server after --discard-session.
     let transport = SessionProbeRecordingTransport {
@@ -449,8 +449,8 @@ fn bugb_routed_team_ws() -> PathBuf {
         &json!({
             "session_name": "team-laneateam",
             "agents": {
-                "alpha": {"status": "stopped", "provider": "codex", "window": "alpha"},
-                "bravo": {"status": "stopped", "provider": "codex", "window": "bravo"}
+                "alpha": {"status": "stopped", "provider": "fake", "window": "alpha"},
+                "bravo": {"status": "stopped", "provider": "fake", "window": "bravo"}
             }
         }),
     )

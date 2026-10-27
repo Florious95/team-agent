@@ -4,9 +4,10 @@
 //! - `.team/artifacts/PERF-DESIGN-FINAL-20260730.md` P1-P9.
 //! - `ARB-20260730-12` P7b `.team` non-session exclusion.
 //!
-//! Claude Code workers run only through the contract leaf, so the legacy
-//! Claude scanner contracts (P1, P3-P7a, P7c, P9) left with that engine; the
-//! provider-neutral contracts below stay.
+//! Claude Code and Codex workers run only through their contract leaves, so
+//! the legacy Claude and Codex scanner contracts (P1-P7a, P7c, P9 and the
+//! Codex P7b row) left with those engines; the provider-neutral contracts
+//! below stay.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
@@ -28,37 +29,9 @@ const OLD_TS: &str = "2020-01-01T00:00:00Z";
 
 #[test]
 #[serial(env)]
-fn p2_expected_codex_session_keeps_the_codex_scanner() {
-    let env = hermetic_guard::HermeticTestEnv::enter("attr-p2");
-    let cwd = env.workspace("p2");
-    let root = env.root().join("codex-sessions");
-    let path = root.join(format!("rollout-2026-07-30T00-00-00-{TARGET}.jsonl"));
-    write_codex(&path, TARGET, &cwd);
-
-    let candidates = scan(Provider::Codex, context(&cwd, Some(TARGET), Some(root)));
-    assert_eq!(
-        candidate_paths(&candidates),
-        vec![path],
-        "P2_RED_PROVIDER_GATE: Codex+expected must keep the Codex rollout scanner; \
-a Claude-only expected-path shortcut would return the wrong shape or no candidate"
-    );
-}
-
-#[test]
-#[serial(env)]
 fn p7b_non_provider_session_team_files_stay_excluded_for_all_provider_families() {
     let env = hermetic_guard::HermeticTestEnv::enter("attr-p7b");
     let cwd = env.workspace("p7b");
-
-    let codex_root = env.root().join("p7b-codex-sessions");
-    let codex_valid = codex_root.join(format!("rollout-2026-07-30T00-00-00-{TARGET}.jsonl"));
-    write_codex(&codex_valid, TARGET, &cwd);
-    let codex_junk = cwd.join(".team/artifacts/codex-junk.jsonl");
-    write_codex(&codex_junk, TARGET, &cwd);
-    let codex = scan(
-        Provider::Codex,
-        context(&cwd, Some(TARGET), Some(codex_root)),
-    );
 
     let copilot_junk = cwd.join(".team/runtime/provider-env/copilot-junk.jsonl");
     write_jsonl(
@@ -73,20 +46,15 @@ fn p7b_non_provider_session_team_files_stay_excluded_for_all_provider_families()
     );
     let copilot = scan(Provider::Copilot, context(&cwd, Some(TARGET), None));
 
-    for (provider, valid, junk, candidates) in [
-        ("codex", codex_valid, codex_junk, codex),
-        ("copilot", copilot_valid, copilot_junk, copilot),
-    ] {
-        let paths = candidate_paths(&candidates);
-        assert_eq!(
-            paths,
-            vec![valid],
-            "P7B_RED_TEAM_SHIELD_REMOVED: {provider} must retain its legal \
+    let paths = candidate_paths(&copilot);
+    assert_eq!(
+        paths,
+        vec![copilot_valid],
+        "P7B_RED_TEAM_SHIELD_REMOVED: copilot must retain its legal \
 provider-session positive control while excluding non-session .team junk; \
 narrowing the shield may exempt only an explicit provider session root, never \
-runtime/artifact junk={junk:?}; paths={paths:?}"
-        );
-    }
+runtime/artifact junk={copilot_junk:?}; paths={paths:?}"
+    );
 }
 
 #[test]
@@ -154,19 +122,6 @@ fn candidate_paths(candidates: &[team_agent::provider::CapturedSessionCandidate]
                 .map(|path| path.as_path().to_path_buf())
         })
         .collect()
-}
-
-fn write_codex(path: &Path, session_id: &str, cwd: &Path) {
-    write_jsonl(
-        path,
-        &[json!({
-            "type": "session_meta",
-            "payload": {
-                "id": session_id,
-                "cwd": cwd.to_string_lossy(),
-            }
-        })],
-    );
 }
 
 fn write_copilot_store(home: &Path, session_id: &str, cwd: &Path) -> PathBuf {

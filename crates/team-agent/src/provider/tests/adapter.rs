@@ -2,10 +2,6 @@
 fn trimmed_provider_builders_preserve_fresh_and_resume_argv() {
     for (provider, base) in [
         (
-            Provider::Grok,
-            vec!["grok", "--model", "test-model", "--rules", "role"],
-        ),
-        (
             Provider::Copilot,
             vec![
                 "copilot", "--no-color", "--no-auto-update", "--no-remote",
@@ -170,10 +166,11 @@ fn capture_session_id_no_match_returns_none() {
 // ---- resume / fork / build_command / caps — command-build core ----
 
 #[test]
-fn retired_claude_worker_caps_are_neither_resumable_nor_forkable() {
-    // Claude Code workers run only through the contract leaf; a pre-upgrade
-    // legacy row must never become capture-pending or resumable.
-    for provider in [Provider::Claude, Provider::ClaudeCode] {
+fn retired_worker_caps_are_neither_resumable_nor_forkable() {
+    // Claude Code, Codex and Grok workers run only through their contract
+    // leaves; a pre-upgrade legacy row must never become capture-pending or
+    // resumable.
+    for provider in [Provider::Claude, Provider::ClaudeCode, Provider::Codex, Provider::Grok] {
         let adapter = get_adapter(provider);
         assert_eq!(
             adapter.caps(),
@@ -190,6 +187,38 @@ fn retired_claude_worker_caps_are_neither_resumable_nor_forkable() {
             adapter.build_command(AuthMode::Subscription, None, Some("worker"), Some("opus")),
             Err(ProviderError::Command(_))
         ));
+        let ctx = ProviderCommandContext {
+            auth_mode: AuthMode::Subscription,
+            mcp_config: None,
+            system_prompt: Some("worker"),
+            model: Some("opus"),
+            dangerously_skip_permissions: false,
+            profile_launch: None,
+            agent_id_hint: Some("worker"),
+            effort: None,
+        };
+        match adapter.build_command_plan(ctx) {
+            Err(ProviderError::Command(text)) => assert!(
+                text.contains("worker runtime was excised"),
+                "{provider:?}: {text}"
+            ),
+            other => panic!("{provider:?} legacy plan must be refused, got {other:?}"),
+        }
+        let session = SessionId::new("legacy-session");
+        assert!(
+            matches!(
+                adapter.build_resume_command(Some(&session), AuthMode::Subscription, None),
+                Err(ProviderError::ResumeUnavailable(_))
+            ),
+            "{provider:?} resume"
+        );
+        assert!(
+            matches!(
+                adapter.fork(Some(&session), AuthMode::Subscription, None),
+                Err(ProviderError::CapabilityUnsupported(_))
+            ),
+            "{provider:?} fork"
+        );
     }
 }
 
@@ -222,15 +251,6 @@ fn session_is_resumable_none_session_is_false_not_panic() {
     assert!(matches!(res, Ok(false)), "None session → Ok(false), never panic (bug-085)");
 }
 
-/// true iff `needle` (e.g. ["--model","opus"]) appears as a contiguous run in `hay`.
-fn argv_contains_adjacent(hay: &[String], needle: &[&str]) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    hay.windows(needle.len())
-        .any(|w| w.iter().zip(needle).all(|(a, b)| a == b))
-}
-
 #[test]
 fn unsupported_provider_capability_error_message_shape() {
     // unsupported.py:31 ProviderCapabilityError — placeholder providers reject
@@ -252,107 +272,6 @@ fn unsupported_provider_capability_error_message_shape() {
 // ═══════════════ P2 FIX-LOOP RED (复绿即对抗 cross-model findings) ═══════════════
 // Lock the CORRECT Python v0.2.11 behavior the strengthened contracts missed.
 // Golden re-probed via /tmp/probe_p2_provider.py vs team-agent-public @ 439bef8.
-
-// ═══════════════ 0.5.67 provider-adapter (Grok) ═══════════════
-// 不跑 cargo (禁 cargo 红线), 静态编码 + leader verify 时执行。
-
-#[test]
-fn test_grok_build_command_includes_rules_flag_when_system_prompt_set() {
-    let adapter = get_adapter(Provider::Grok);
-    let argv = adapter
-        .build_command(AuthMode::Subscription, None, Some("be helpful"), Some("grok-4"))
-        .expect("build_command ok");
-    assert!(
-        argv_contains_adjacent(&argv, &["--model", "grok-4"]),
-        "argv must contain `--model grok-4` adjacency: {argv:?}"
-    );
-    assert!(
-        argv_contains_adjacent(&argv, &["--rules", "be helpful"]),
-        "grok append-system-prompt must be `--rules 'be helpful'`: {argv:?}"
-    );
-}
-
-#[test]
-fn test_grok_build_command_bypass_flag_when_dangerous() {
-    let adapter = get_adapter(Provider::Grok);
-    let dangerous = adapter
-        .build_command_with_permissions(
-            AuthMode::Subscription,
-            None,
-            None,
-            Some("grok-4"),
-            true,
-        )
-        .expect("dangerous build_command ok");
-    assert!(
-        argv_contains_adjacent(&dangerous, &["--always-approve"]),
-        "dangerous grok must include `--always-approve`: {dangerous:?}"
-    );
-    let safe = adapter
-        .build_command(AuthMode::Subscription, None, None, Some("grok-4"))
-        .expect("safe build_command ok");
-    assert!(
-        !safe.iter().any(|a| a == "--always-approve"),
-        "non-dangerous grok must not include --always-approve: {safe:?}"
-    );
-}
-
-#[test]
-fn test_grok_build_command_omits_missing_model() {
-    let adapter = get_adapter(Provider::Grok);
-    let argv = adapter
-        .build_command(AuthMode::Subscription, None, None, None)
-        .expect("missing model preserves the provider-native default");
-    assert!(
-        !argv.iter().any(|arg| arg == "--model"),
-        "missing model must not fabricate a --model argument: {argv:?}"
-    );
-    assert!(
-        argv_contains_adjacent(
-            &adapter
-                .build_command(AuthMode::Subscription, None, None, Some("grok-4.6"))
-                .expect("explicit model must build"),
-            &["--model", "grok-4.6"]
-        ),
-        "explicit model must still become adjacent `--model grok-4.6`"
-    );
-}
-
-#[test]
-fn test_grok_build_command_plan_binds_expected_session_id_to_argv() {
-    let adapter = get_adapter(Provider::Grok);
-    let plan = adapter
-        .build_command_plan(ProviderCommandContext {
-            auth_mode: AuthMode::Subscription,
-            mcp_config: None,
-            system_prompt: None,
-            model: Some("grok-4.6"),
-            dangerously_skip_permissions: false,
-            profile_launch: None,
-            agent_id_hint: Some("w1"),
-            effort: None,
-        })
-        .expect("grok plan");
-    let sid = plan
-        .expected_session_id
-        .as_ref()
-        .map(|s| s.as_str())
-        .expect("grok fresh plan must carry expected_session_id");
-    assert!(
-        !sid.is_empty(),
-        "expected_session_id must be a non-empty uuid"
-    );
-    assert!(
-        argv_contains_adjacent(&plan.argv, &["--session-id", sid]),
-        "argv --session-id must match expected_session_id; argv={:?}",
-        plan.argv
-    );
-    assert!(
-        !plan.argv.iter().any(|a| a == "--resume"),
-        "fresh grok plan must not include --resume; argv={:?}",
-        plan.argv
-    );
-}
 
 #[test]
 fn pi_wire_roundtrip_requires_backing() {

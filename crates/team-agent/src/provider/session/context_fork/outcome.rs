@@ -71,7 +71,7 @@ pub(crate) fn transition_pending_context_fork(
 ///   before: spawn 前 backing 基线
 ///   expected_backing_path: 精确快照路径，透传
 ///   source_agent_id: 透传给 verify_context_fork(当前该参数不参与判定)
-///   agent_id: 目标席位 id;既用于 codex 身份比对，也写进 Pending.target_agent
+///   agent_id: 目标席位 id，写进 Pending.target_agent
 ///   spawn_cwd: 目标席位工作目录，透传并写进 Pending 的扫描上下文
 ///   spawned_at: 时间边界，透传并写进 Pending
 ///   deadline: 轮询预算
@@ -134,23 +134,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn convergence_deadlines_are_provider_specific() {
-        assert_eq!(
-            context_fork_convergence_deadline(Provider::Codex),
-            Duration::from_secs(10)
-        );
-        assert_eq!(
-            context_fork_convergence_deadline(Provider::Copilot),
-            Duration::from_secs(5)
-        );
+    fn convergence_deadlines_are_bounded_for_every_provider() {
+        for provider in [Provider::Codex, Provider::Copilot, Provider::Grok] {
+            assert_eq!(context_fork_convergence_deadline(provider), Duration::from_secs(5));
+        }
     }
 
     #[test]
-    fn codex_without_new_backing_is_typed_pending() {
+    fn retired_legacy_codex_fork_is_rejected_not_pending() {
         let root =
-            std::env::temp_dir().join(format!("ta-codex-fork-pending-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+            std::env::temp_dir().join(format!("ta-codex-fork-retired-{}", std::process::id()));
         let plan = CommandPlan {
             argv: Vec::new(),
             expected_session_id: None,
@@ -170,11 +163,6 @@ mod tests {
             "2026-07-24T00:00:00Z",
             Duration::ZERO,
         );
-        let ContextForkOutcome::Pending(pending) = outcome else {
-            panic!("missing backing must remain a typed pending fork")
-        };
-        assert_eq!(pending.source_session_id.as_str(), "source-session");
-        assert_eq!(pending.target_agent, "fork");
-        let _ = std::fs::remove_dir_all(&root);
+        assert!(matches!(outcome, ContextForkOutcome::Rejected(_)), "{outcome:?}");
     }
 }

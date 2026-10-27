@@ -1,6 +1,6 @@
-//! Codex CLI contract leaf, canonical key `codex_tui`. The legacy `codex`
-//! worker, leader and app-server keep their own path: a role declaring `codex`
-//! selects this leaf only with `contract_runtime: true`.
+//! Codex CLI contract leaf, canonical key `codex_tui`. It is the only Codex
+//! worker runtime: a role declaring `codex`, `codex_cli` or `codex-cli`
+//! selects it. The `team-agent codex` leader and app-server keep their own path.
 //! Measured recipes do not themselves constitute Team G1–G5 acceptance.
 pub mod catalog;
 pub mod descriptor;
@@ -32,6 +32,10 @@ impl CodexAdapter {
     pub fn hooks(&self) -> ProviderHooks<'_> { ProviderHooks { catalog: HookBinding::Bound(self), plan: HookBinding::Bound(self), materialize: HookBinding::Bound(self), session: HookBinding::Bound(self), semantic: HookBinding::Bound(self), interaction: HookBinding::Bound(self), fork: HookBinding::Bound(self) } }
     /// The owned stdio server as `-c` overrides for this invocation only. The
     /// owned tools never prompt; every other approval follows the bypass intent.
+    /// They also stay in the initial tool list: for a catalog model with
+    /// `supports_search_tool`, Codex otherwise defers every MCP tool behind its
+    /// own `tool_search`, whose `limit: Option<usize>` rejects a model's `5.0`
+    /// before any search runs, so the team tools are never found (#394).
     pub fn mcp_overrides(&self, owner: &InstanceIdentity) -> Result<Vec<OsString>, ContractError> {
         let key = server_key(owner);
         let args = self.mcp.arguments.iter().map(|arg| toml_string(arg)).collect::<Result<Vec<_>, _>>()?.join(", ");
@@ -43,7 +47,8 @@ impl CodexAdapter {
             let env = self.mcp.environment.iter().map(|(key, value)| Ok(format!("{} = {}", toml_string(key)?, toml_string(value)?))).collect::<Result<Vec<_>, ContractError>>()?;
             values.push(format!("mcp_servers.{key}.env={{ {} }}", env.join(", ")));
         }
-        values.extend([format!("mcp_servers.{key}.tool_timeout_sec=600.0"), format!("mcp_servers.{key}.default_tools_approval_mode=\"approve\"")]);
+        values.extend([format!("mcp_servers.{key}.tool_timeout_sec=600.0"), format!("mcp_servers.{key}.default_tools_approval_mode=\"approve\""),
+            format!("mcp_servers.{key}.omit_tools_from=[\"deferred\"]")]);
         Ok(values.into_iter().flat_map(|value| [OsString::from("-c"), value.into()]).collect())
     }
 }
@@ -91,7 +96,12 @@ impl PlanHook for CodexAdapter {
         let start = arguments.len();
         arguments.extend(self.mcp_overrides(&r.identity)?);
         let mcp = CarrierUse::Specified(CarrierRef::Arguments((start..arguments.len()).collect()));
-        let bypass = if r.bypass { let index = arguments.len(); arguments.push("--dangerously-bypass-approvals-and-sandbox".into()); CarrierUse::Specified(CarrierRef::Arguments(vec![index])) } else { CarrierUse::NotRequested };
+        // Without bypass the untrusted private cwd can resolve a read-only sandbox,
+        // where Codex rejects `--add-dir` at startup ("Error adding directories",
+        // exit 1). workspace-write is the native mode that admits the project root;
+        // approvals stay on the user's native policy.
+        let bypass = if r.bypass { let index = arguments.len(); arguments.push("--dangerously-bypass-approvals-and-sandbox".into()); CarrierUse::Specified(CarrierRef::Arguments(vec![index])) }
+            else { arguments.extend(["--sandbox".into(), "workspace-write".into()]); CarrierUse::NotRequested };
         let effort = match resolved.effort() {
             EffortResolution::Unspecified => CarrierUse::NotRequested,
             EffortResolution::Pass(effort) => { let index = arguments.len(); arguments.extend(["-c".into(), format!("model_reasoning_effort={}", effort.as_str()).into()]); CarrierUse::Specified(CarrierRef::Arguments(vec![index, index + 1])) },

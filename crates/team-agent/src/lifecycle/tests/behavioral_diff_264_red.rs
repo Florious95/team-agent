@@ -1,17 +1,15 @@
-//! #264 behavioral diff regression contracts (D1-D9).
+//! #264 behavioral diff regression contracts (D4-D6, D8-D9).
 //!
 //! Source of truth: Python runtime 0.2.11 (`~/.team-agent/runtime/0.2.11/src/team_agent/`).
 //! Every asserted value below was grounded by executing the Python truth source
-//! (CodexAdapter.build_command / compile_system_prompt / providers.shell_command) —
+//! (compile_system_prompt / providers.shell_command) —
 //! see `.team/artifacts/264-behavioral-diff-report.md` for the per-item file:line evidence.
+//! D1-D3 (codex argv golden) and D7 (codex `/fast` toggle) retired with the legacy
+//! Codex worker runtime.
 //!
-//! D1: codex developer_instructions triple escape (\\ then " then \n)  — codex.py:120-121
-//! D2: codex MCP `-c mcp_servers.<name>.tool_timeout_sec=600.0`        — codex.py:129
-//! D3: codex `--profile <CODEX_PROFILE>` + `-c <codex_config>` items   — codex.py:105-107,117-118 / provider_env.py:62-79
 //! D4: worker shell env TEAM_AGENT_ID=<worker self> (overrides parent)  — providers.py:131
 //! D5: fresh launch spawn cwd == workspace (tmux cwd + state.spawn_cwd) — providers.py:145 / launch/core.py:253
 //! D6: compiled system prompt first section is identity                 — prompt.py:39
-//! D7: runtime.fast → codex fast-mode toggle "/fast" after spawn        — launch/core.py:235-237
 //! D8: launch session_name fallback = team-{name}, not a constant       — launch/core.py:56
 //! D9: profile env_unset truly unsets in the worker shell line          — providers.py:142-145 / provider_env.py:82-90
 
@@ -41,138 +39,6 @@ use team_agent::transport::{
 const ANCESTRY_KEY: &str = "TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON";
 const NEUTRAL_ANCESTRY: &str = "[\"/bin/zsh\"]";
 
-/// D1+D2+D3: one codex argv golden locks the three codex command-construction gaps.
-///
-/// Python golden (executed 0.2.11 CodexAdapter.build_command with the same profile values):
-/// `codex --no-alt-screen --disable shell_snapshot --disable apps --profile relay-fast
-///  --sandbox read-only --ask-for-approval on-request --model gpt-5.5
-///  -c model_provider="relay" -c model_providers.relay.base_url="https://relay.example/v1"
-///  -c model_providers.relay.env_key="TEAM_AGENT_PROVIDER_API_KEY"
-///  -c model_providers.relay.wire_api="chat" -c model_providers.relay.name="Relay"
-///  -c developer_instructions="...\n...ESCAPE-CHECK back\\slash \"dq\" end..."
-///  -c mcp_servers.team_orchestrator.command="..." ... -c mcp_servers.team_orchestrator.tool_timeout_sec=600.0`
-#[test]
-#[serial(env)]
-fn d1_d2_d3_codex_argv_matches_python_golden_escape_timeout_profile() {
-    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("behavioral-d123-codex");
-    let _ancestry = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
-    let ws = tmp_dir("d123-codex-argv");
-    let team_dir = write_team(
-        &ws,
-        &TeamFixture {
-            name: "d123team",
-            provider: "codex",
-            fast: false,
-            agents: &[AgentDoc {
-                id: "worker_a",
-                role: "Codex Diff Worker",
-                provider: "codex",
-                auth_mode: "compatible_api",
-                model: Some("gpt-5.5"),
-                profile: Some("relay"),
-                tools: &["mcp_team"],
-                body: "ESCAPE-CHECK back\\slash \"dq\" end",
-            }],
-        },
-    );
-    write_relay_profile(&team_dir);
-    seed_healthy_coordinator(&ws);
-    let transport = RecordingTransport::new();
-
-    quick_start_with_transport_in_workspace(
-        &ws,
-        &team_dir,
-        None,
-        true,
-        Some("d123team"),
-        &transport,
-    )
-    .expect("quick-start should reach codex command construction");
-    let spawn = transport.single_spawn();
-    let argv = &spawn.argv;
-    let mut failures = Vec::new();
-
-    // D1: triple escape, Python order \\ -> \" -> \n (codex.py:120-121).
-    let dev = argv
-        .iter()
-        .find(|arg| arg.starts_with("developer_instructions=\""));
-    match dev {
-        None => failures
-            .push("D1: no `-c developer_instructions=\"...\"` value in codex argv".to_string()),
-        Some(dev) => {
-            if dev.contains('\n') {
-                failures.push(format!(
-                    "D1: developer_instructions value contains RAW newlines; Python escapes them as literal \\n (codex.py:120). head={:?}",
-                    dev.chars().take(120).collect::<String>()
-                ));
-            }
-            // Raw marker `ESCAPE-CHECK back\slash "dq" end` must arrive as `back\\slash \"dq\" end`.
-            let escaped_marker = "ESCAPE-CHECK back\\\\slash \\\"dq\\\" end";
-            if !dev.contains(escaped_marker) {
-                failures.push(format!(
-                    "D1: developer_instructions must contain the Python-escaped marker {escaped_marker:?} (backslash doubled before quote/newline escaping)"
-                ));
-            }
-        }
-    }
-
-    // D2: codex.py:129 — every MCP server gets tool_timeout_sec=600.0.
-    let timeout_item = "mcp_servers.team_orchestrator.tool_timeout_sec=600.0";
-    if !argv.iter().any(|arg| arg == timeout_item) {
-        failures.push(format!("D2: codex argv missing `-c {timeout_item}`"));
-    }
-
-    // D3: profile command overrides (provider_env.py:62-79 + codex.py:105-107,117-118).
-    if flag_value(argv, "--profile").as_deref() != Some("relay-fast") {
-        failures.push(format!(
-            "D3: codex argv must carry `--profile relay-fast` from profile CODEX_PROFILE; got {:?}",
-            flag_value(argv, "--profile")
-        ));
-    }
-    for config in [
-        "model_provider=\"relay\"",
-        "model_providers.relay.base_url=\"https://relay.example/v1\"",
-        "model_providers.relay.env_key=\"TEAM_AGENT_PROVIDER_API_KEY\"",
-        "model_providers.relay.wire_api=\"chat\"",
-        "model_providers.relay.name=\"Relay\"",
-    ] {
-        if !argv.iter().any(|arg| arg == config) {
-            failures.push(format!(
-                "D3: codex argv missing `-c {config}` (profile codex_config)"
-            ));
-        }
-    }
-    // Python golden order: --profile before --sandbox; codex_config -c before developer_instructions.
-    if let (Some(profile_idx), Some(sandbox_idx)) = (
-        argv.iter().position(|arg| arg == "--profile"),
-        argv.iter().position(|arg| arg == "--sandbox"),
-    ) {
-        if profile_idx > sandbox_idx {
-            failures
-                .push("D3: `--profile` must precede `--sandbox` (codex.py:105-113)".to_string());
-        }
-    }
-    if let (Some(config_idx), Some(dev_idx)) = (
-        argv.iter()
-            .position(|arg| arg == "model_provider=\"relay\""),
-        argv.iter()
-            .position(|arg| arg.starts_with("developer_instructions=")),
-    ) {
-        if config_idx > dev_idx {
-            failures.push(
-                "D3: profile codex_config `-c` items must precede developer_instructions (codex.py:117-121)"
-                    .to_string(),
-            );
-        }
-    }
-
-    assert!(
-        failures.is_empty(),
-        "D1/D2/D3 codex argv contract failed:\n{}\nargv={argv:?}",
-        failures.join("\n")
-    );
-}
-
 /// D4: providers.py:131 — the worker shell env must export TEAM_AGENT_ID=<the worker itself>,
 /// overriding any TEAM_AGENT_ID inherited from the launching process (e.g. an add-agent issued
 /// from another worker's MCP server, whose environ carries the CALLER's TEAM_AGENT_ID).
@@ -185,7 +51,7 @@ fn d4_worker_shell_env_sets_team_agent_id_to_worker_self() {
         ("TEAM_AGENT_ID", "stale-mcp-caller"),
     ]);
     let ws = tmp_dir("d4-spawn-env");
-    let team_dir = write_team(&ws, &simple_codex_team("d4team", "worker_a", "Env Worker"));
+    let team_dir = write_team(&ws, &simple_fake_team("d4team", "worker_a", "Env Worker"));
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
 
@@ -223,7 +89,7 @@ fn d5_fresh_launch_spawn_cwd_and_state_use_workspace() {
     let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("behavioral-d5-spawn-cwd");
     let _ancestry = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
     let ws = tmp_dir("d5-spawn-cwd");
-    let team_dir = write_team(&ws, &simple_codex_team("d5team", "worker_a", "Cwd Worker"));
+    let team_dir = write_team(&ws, &simple_fake_team("d5team", "worker_a", "Cwd Worker"));
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
 
@@ -270,13 +136,12 @@ fn d6_compiled_system_prompt_first_section_is_identity() {
         &TeamFixture {
             name: "d6team",
             provider: "codex",
-            fast: false,
             agents: &[AgentDoc {
                 id: "worker_a",
                 role: "Prompt Order Worker",
-                provider: "codex",
+                provider: "copilot",
                 auth_mode: "subscription",
-                model: Some("gpt-5.5"),
+                model: None,
                 profile: None,
                 tools: &["mcp_team"],
                 body: "ROLE BODY SENTINEL for prompt ordering.",
@@ -287,15 +152,16 @@ fn d6_compiled_system_prompt_first_section_is_identity() {
     let transport = RecordingTransport::new();
 
     quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("d6team"), &transport)
-        .expect("quick-start should spawn the codex worker");
+        .expect("quick-start should spawn the copilot worker");
     let spawn = transport.single_spawn();
-    // The identity line has no `\`, `"` or newline, so codex's escaping leaves it verbatim.
-    let prompt = spawn
-        .argv
-        .iter()
-        .find_map(|arg| arg.strip_prefix("developer_instructions=\""))
-        .expect("codex argv must carry -c developer_instructions")
-        .to_string();
+    // Copilot receives the compiled system prompt verbatim through the per-worker
+    // AGENTS.md that COPILOT_CUSTOM_INSTRUCTIONS_DIRS points at (never argv).
+    let instructions_dir = spawn
+        .env
+        .get("COPILOT_CUSTOM_INSTRUCTIONS_DIRS")
+        .expect("copilot spawn env must carry COPILOT_CUSTOM_INSTRUCTIONS_DIRS");
+    let prompt = std::fs::read_to_string(Path::new(instructions_dir).join("AGENTS.md"))
+        .expect("copilot per-worker AGENTS.md must hold the compiled system prompt");
 
     let identity = "You are Team Agent worker `worker_a` with role `Prompt Order Worker`. \
 When asked about your role or identity, answer with this Team Agent worker identity first, \
@@ -315,32 +181,6 @@ chunks=[identity, TEAMMATE_SYSTEM_PROMPT, ...]; live ps confirms identity-first)
     );
 }
 
-/// D7: launch/core.py:235-237 — runtime.fast + provider==codex must toggle codex fast mode
-/// after spawn by sending `/fast` + Enter to the worker pane (tmux_prompt.py:124-129).
-#[test]
-#[serial(env)]
-fn d7_runtime_fast_sends_codex_fast_mode_toggle() {
-    let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("behavioral-d7-fast-mode");
-    let _ancestry = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
-    let ws = tmp_dir("d7-fast-mode");
-    let mut fixture = simple_codex_team("d7team", "worker_a", "Fast Worker");
-    fixture.fast = true;
-    let team_dir = write_team(&ws, &fixture);
-    seed_healthy_coordinator(&ws);
-    let transport = RecordingTransport::new();
-
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("d7team"), &transport)
-        .expect("quick-start should spawn the codex worker");
-    transport.single_spawn();
-    let sent = transport.sent_text();
-    assert!(
-        sent.iter().any(|text| text.contains("/fast")),
-        "D7: TEAM.md `fast: true` (compiled to runtime.fast) must send the `/fast` toggle to the \
-codex worker after spawn (Python launch/core.py:235-237 + tmux_prompt.py:124-129); recorded \
-keystrokes/injections={sent:?}"
-    );
-}
-
 /// D8: launch/core.py:56 — when the spec carries no runtime.session_name, the session falls
 /// back to `team-{team.name}`, never a fixed constant.
 #[test]
@@ -350,7 +190,7 @@ fn d8_launch_session_name_fallback_derives_from_team_name() {
     let ws = tmp_dir("d8-session-name");
     let team_dir = write_team(
         &ws,
-        &simple_codex_team("d8team", "worker_a", "Session Worker"),
+        &simple_fake_team("d8team", "worker_a", "Session Worker"),
     );
     let spec = team_agent::compiler::compile_team(&team_dir).expect("compile fixture team");
     let spec_text = team_agent::model::yaml::dumps(&spec);
@@ -378,8 +218,8 @@ not a constant; argv={:?}",
     );
 }
 
-/// D9: provider_env.py:82-90 + providers.py:142-145 — profile env_unset keys (codex
-/// compatible_api → OPENAI_API_KEY / OPENAI_BASE_URL) must be REALLY unset in the worker
+/// D9: provider_env.py:82-90 + providers.py:142-145 — profile env_unset keys (gemini_cli
+/// compatible_api → GEMINI_API_KEY) must be REALLY unset in the worker
 /// shell line (Python sources the env file whose first lines are `unset <KEY>`), because the
 /// tmux server environment can still carry stale values that plain map-removal cannot clear.
 #[test]
@@ -387,7 +227,7 @@ not a constant; argv={:?}",
 fn d9_profile_env_unset_reaches_worker_shell_line() {
     let _guard = EnvGuard::set(&[
         (ANCESTRY_KEY, NEUTRAL_ANCESTRY),
-        ("OPENAI_API_KEY", "stale-parent-key"),
+        ("GEMINI_API_KEY", "stale-parent-key"),
     ]);
     let ws = tmp_dir("d9-env-unset");
     let team_dir = write_team(
@@ -395,20 +235,19 @@ fn d9_profile_env_unset_reaches_worker_shell_line() {
         &TeamFixture {
             name: "d9team",
             provider: "codex",
-            fast: false,
             agents: &[AgentDoc {
                 id: "worker_a",
                 role: "Unset Worker",
-                provider: "codex",
+                provider: "gemini_cli",
                 auth_mode: "compatible_api",
-                model: Some("gpt-5.5"),
+                model: Some("gemini-2.5-pro"),
                 profile: Some("relay-nokey"),
                 tools: &["mcp_team"],
                 body: "Unset worker.",
             }],
         },
     );
-    // No API_KEY on purpose: OPENAI_API_KEY lands in env_unset (provider_env.py:51-52) and is
+    // No API_KEY on purpose: GEMINI_API_KEY lands in env_unset (provider_env.py:51-52) and is
     // never re-exported, so the stale tmux-server/parent value leaks unless the shell really
     // unsets it. (With API_KEY present the overlay re-export would mask the missing unset.)
     let profiles = team_dir.join("profiles");
@@ -442,17 +281,17 @@ fn d9_profile_env_unset_reaches_worker_shell_line() {
     let env_file = ws.join(".team/runtime/provider-env/worker_a.env");
     let mut failures = Vec::new();
     let env_file_text = std::fs::read_to_string(&env_file).unwrap_or_default();
-    if !env_file_text.contains("unset OPENAI_API_KEY") {
+    if !env_file_text.contains("unset GEMINI_API_KEY") {
         failures.push(format!(
-            "D9: provider env file must contain `unset OPENAI_API_KEY` (Python provider_env.py:86); path={} content={env_file_text:?}",
+            "D9: provider env file must contain `unset GEMINI_API_KEY` (Python provider_env.py:86); path={} content={env_file_text:?}",
             env_file.display()
         ));
     }
-    let unsets_inline = shell_line.contains("unset OPENAI_API_KEY");
+    let unsets_inline = shell_line.contains("unset GEMINI_API_KEY");
     let sources_env_file = shell_line.contains(&*env_file.to_string_lossy());
     if !(unsets_inline || sources_env_file) {
         failures.push(format!(
-            "D9: worker shell line must really unset OPENAI_API_KEY — either inline `unset OPENAI_API_KEY` \
+            "D9: worker shell line must really unset GEMINI_API_KEY — either inline `unset GEMINI_API_KEY` \
 or by sourcing the env file `{}` before exec (Python providers.py:142-145); shell_line={shell_line:?}",
             env_file.display()
         ));
@@ -471,7 +310,6 @@ or by sourcing the env file `{}` before exec (Python providers.py:142-145); shel
 struct TeamFixture<'a> {
     name: &'a str,
     provider: &'a str,
-    fast: bool,
     agents: &'a [AgentDoc<'a>],
 }
 
@@ -486,7 +324,7 @@ struct AgentDoc<'a> {
     body: &'a str,
 }
 
-fn simple_codex_team(
+fn simple_fake_team(
     name: &'static str,
     agent: &'static str,
     role: &'static str,
@@ -494,9 +332,9 @@ fn simple_codex_team(
     let agents: &'static [AgentDoc<'static>] = Box::leak(Box::new([AgentDoc {
         id: agent,
         role,
-        provider: "codex",
+        provider: "fake",
         auth_mode: "subscription",
-        model: Some("gpt-5.5"),
+        model: Some("fake"),
         profile: None,
         tools: &["mcp_team"],
         body: Box::leak(format!("{role}.").into_boxed_str()),
@@ -504,7 +342,6 @@ fn simple_codex_team(
     TeamFixture {
         name,
         provider: "codex",
-        fast: false,
         agents,
     }
 }
@@ -512,11 +349,10 @@ fn simple_codex_team(
 fn write_team(workspace: &Path, fixture: &TeamFixture<'_>) -> PathBuf {
     let team = workspace.join(fixture.name);
     std::fs::create_dir_all(team.join("agents")).unwrap();
-    let fast = if fixture.fast { "fast: true\n" } else { "" };
     std::fs::write(
         team.join("TEAM.md"),
         format!(
-            "---\nname: {}\nobjective: 264 behavioral diff fixture.\nprovider: {}\n{fast}---\n\nTeam fixture.\n",
+            "---\nname: {}\nobjective: 264 behavioral diff fixture.\nprovider: {}\n---\n\nTeam fixture.\n",
             fixture.name, fixture.provider
         ),
     )
@@ -545,24 +381,6 @@ fn write_team(workspace: &Path, fixture: &TeamFixture<'_>) -> PathBuf {
         .unwrap();
     }
     team
-}
-
-/// Profile values mirror the Python golden run: provider_env.py:62-79 turns these into
-/// codex_profile=relay-fast plus the five `-c` codex_config items asserted in D3.
-fn write_relay_profile(team_dir: &Path) {
-    let profiles = team_dir.join("profiles");
-    std::fs::create_dir_all(&profiles).unwrap();
-    std::fs::write(
-        profiles.join("relay.env"),
-        "AUTH_MODE=compatible_api\n\
-         BASE_URL=https://relay.example/v1\n\
-         API_KEY=sk-relay-264\n\
-         MODEL_PROVIDER=relay\n\
-         WIRE_API=chat\n\
-         PROVIDER_NAME=Relay\n\
-         CODEX_PROFILE=relay-fast\n",
-    )
-    .unwrap();
 }
 
 fn seed_healthy_coordinator(workspace: &Path) {
@@ -599,11 +417,6 @@ fn tmp_dir(tag: &str) -> PathBuf {
     std::fs::canonicalize(dir).unwrap()
 }
 
-fn flag_value(argv: &[String], flag: &str) -> Option<String> {
-    argv.windows(2)
-        .find_map(|pair| (pair[0] == flag).then(|| pair[1].clone()))
-}
-
 struct EnvGuard {
     previous: Vec<(&'static str, Option<String>)>,
 }
@@ -633,7 +446,7 @@ impl Drop for EnvGuard {
 }
 
 // ---------------------------------------------------------------------------
-// recording transport (argv + env + cwd + session + keystrokes)
+// recording transport (argv + env + cwd + session)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
@@ -647,7 +460,6 @@ struct RecordedSpawn {
 #[derive(Default)]
 struct RecordingTransport {
     spawns: Mutex<Vec<RecordedSpawn>>,
-    sent_text: Mutex<Vec<String>>,
     session_present: Mutex<bool>,
 }
 
@@ -664,10 +476,6 @@ impl RecordingTransport {
             "fixture should record exactly one worker spawn; spawns={spawns:?}"
         );
         spawns[0].clone()
-    }
-
-    fn sent_text(&self) -> Vec<String> {
-        self.sent_text.lock().unwrap().clone()
     }
 
     fn record_spawn(
@@ -725,13 +533,10 @@ impl Transport for RecordingTransport {
     fn inject(
         &self,
         _target: &Target,
-        payload: &InjectPayload,
+        _payload: &InjectPayload,
         _submit: Key,
         _bracketed: bool,
     ) -> Result<InjectReport, TransportError> {
-        if let Some(text) = payload.text() {
-            self.sent_text.lock().unwrap().push(text.to_string());
-        }
         Ok(InjectReport {
             stage_reached: InjectStage::Submit,
             inject_verification: InjectVerification::CaptureContainsToken,
@@ -742,16 +547,7 @@ impl Transport for RecordingTransport {
         })
     }
 
-    fn send_keys(&self, _target: &Target, keys: &[Key]) -> Result<(), TransportError> {
-        let text: String = keys
-            .iter()
-            .map(|key| match key {
-                Key::Char(c) => *c,
-                Key::Enter => '\n',
-                _ => '\u{FFFD}',
-            })
-            .collect();
-        self.sent_text.lock().unwrap().push(text);
+    fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
         Ok(())
     }
 
@@ -760,8 +556,9 @@ impl Transport for RecordingTransport {
         _target: &Target,
         range: CaptureRange,
     ) -> Result<CapturedText, TransportError> {
+        // A ready Copilot screen ends the D6 startup-trust poll immediately.
         Ok(CapturedText {
-            text: "Claude Code\n> \nOpenAI Codex\ncodex>".to_string(),
+            text: team_agent::provider::COPILOT_READY_MARKER.to_string(),
             range,
         })
     }

@@ -1724,7 +1724,7 @@ mod fresh_quick_start_leader_binding_tests {
         let team = workspace.join("roles");
         std::fs::create_dir_all(team.join("agents")).unwrap();
         std::fs::write(team.join("TEAM.md"), "---\nname: fresh\nobjective: test\nprovider: codex\n---\nTeam.\n").unwrap();
-        std::fs::write(team.join("agents/worker.md"), "---\nname: worker\nrole: Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\n---\nTest.\n").unwrap();
+        std::fs::write(team.join("agents/worker.md"), "---\nname: worker\nrole: Worker\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\n---\nTest.\n").unwrap();
         let transport = OfflineTransport::new();
         let report = quick_start_with_transport_in_workspace(
             &workspace, &team, None, true, Some("fresh"), &transport,
@@ -1849,7 +1849,7 @@ mod fresh_quick_start_leader_binding_tests {
             "---\nname: current\nobjective: Bootstrap fixture.\n---\n",
         )
         .unwrap();
-        std::fs::write(team.join("agents/worker.md"), "---\nname: worker\nrole: Worker\nprovider: codex\nauth_mode: subscription\ndangerously_skip_permissions: false\n---\nBounded fixture.\n").unwrap();
+        std::fs::write(team.join("agents/worker.md"), "---\nname: worker\nrole: Worker\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\n---\nBounded fixture.\n").unwrap();
         let state_path = crate::state::persist::runtime_state_path(&workspace);
         std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         let state = json!({

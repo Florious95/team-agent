@@ -1694,7 +1694,8 @@ fn inject_verification_for_payload(payload: &InjectPayload) -> InjectVerificatio
 /// scrollback token cannot verify a new message.
 /// Measured cursor-agent 2026.08.11 floor: text and first Enter ≥1s apart
 /// (phase0 M2-5/M2-6; `.team/scripts/cursor_send.sh`).
-/// Grok uses the same 1s floor (悬案B：零地板时 Enter 落在折叠窗口内被吞).
+/// The legacy Grok worker used the same 1s floor (悬案B：零地板时 Enter 落在折叠窗口内被吞);
+/// contract leaves own their own paste timing.
 pub const CURSOR_PASTE_TO_SUBMIT_FLOOR: Duration = Duration::from_secs(1);
 
 thread_local! {
@@ -1702,7 +1703,7 @@ thread_local! {
     static CURSOR_SINGLE_ENTER: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Run `f` with a paste→Enter floor. Delivery sets 1s for Grok.
+/// Run `f` with a paste→Enter floor. No legacy recipient sets one now.
 /// Tests pass a small non-zero Duration to cover the sleep branch.
 /// Default is ZERO — claude/codex and unset callers pay nothing.
 /// This is not TEAM_AGENT_TEST_TMP (that var is a path, always set in seats).
@@ -1712,7 +1713,7 @@ thread_local! {
 ///   floor: 本次生效的最小间隔;ZERO 表示不等
 ///   f: 在该地板下执行的闭包
 /// returns: 原样返回 f 的返回值
-/// boundary: thread_local 作用域,不跨线程;只设阈值,真正的等待发生在 sleep_remaining_paste_to_submit_floor;默认 ZERO,只有 delivery 对 Grok 才设 1s
+/// boundary: thread_local 作用域,不跨线程;只设阈值,真正的等待发生在 sleep_remaining_paste_to_submit_floor;默认 ZERO(legacy grok worker 退役后 delivery 不再设地板)
 /// ---
 pub fn with_paste_to_submit_floor<R>(floor: Duration, f: impl FnOnce() -> R) -> R {
     PASTE_TO_SUBMIT_FLOOR.with(|cell| {

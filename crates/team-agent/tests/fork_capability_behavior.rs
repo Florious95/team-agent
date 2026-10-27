@@ -3,11 +3,11 @@
 //! contract:
 //!   provides:
 //!     - name: A16-capability-matrix-behavior
-//!       what: grok subscription 真注入斜杠命令；升级前遗留的 claude/pi worker 行在注入前即拒；compatible_api 拒；未验证 provider 拒且理由是未验证
+//!       what: 升级前遗留的 claude/codex/grok/pi worker 行在注入前即拒；未验证 provider 拒且理由是未验证
 //! boundary:
-//!   - 不把 in_window_fork_command 查表当通过
+//!   - 不把能力查表当通过
 //!   - 基线红必须是断言失败，不是 unresolved import
-//!   - Claude 不再注入 /branch：它会把源席自身切到新分支且不产生新席；Claude Code / Pi 只走 contract 管道 fork
+//!   - 不注入 /branch 或 /fork：Claude Code / Codex / Grok / Pi 只走 contract 管道 fork 出新席
 //! maturity: wired
 //! ---
 
@@ -39,10 +39,15 @@ fn seat_ws(tag: &str, provider: &str, auth: &str) -> std::path::PathBuf {
             .as_nanos()
     ));
     std::fs::create_dir_all(ws.join("agents")).unwrap();
+    // TEAM.md names the leader, which accepts only canonical provider keys.
+    let leader = match provider {
+        "codex_cli" | "codex-cli" => "codex",
+        other => other,
+    };
     std::fs::write(
         ws.join("TEAM.md"),
         format!(
-            "---\nname: fx\nobjective: capability matrix.\nprovider: {provider}\nauth_mode: {auth}\n---\n"
+            "---\nname: fx\nobjective: capability matrix.\nprovider: {leader}\nauth_mode: {auth}\n---\n"
         ),
     )
     .unwrap();
@@ -123,37 +128,32 @@ fn fork_on(
 }
 
 #[test]
-fn grok_subscription_injects_slash_fork_and_accepts_forked_from() {
-    let ws = seat_ws("grok-sub", "grok", "subscription");
-    let (result, injected) = fork_on(&ws, "Session new (forked from old-id)\n");
-    assert!(result.is_ok(), "grok subscription must take in-window path: {result:?}");
-    assert!(
-        injected.iter().any(|t| t == "/fork"),
-        "must inject official /fork via set-buffer, got {injected:?}"
-    );
-    let _ = std::fs::remove_dir_all(&ws);
-}
-
-#[test]
-fn legacy_claude_and_pi_rows_are_refused_as_retired_before_any_injection() {
+fn legacy_worker_rows_are_refused_as_retired_before_any_injection() {
     // A pre-upgrade worker row has no legacy runtime to fork from; the user is
     // told to re-add the seat by its public provider name, never the leaf id.
-    for (tag, provider, auth) in [
-        ("claude-sub", "claude", "subscription"),
-        ("claude-compat", "claude", "compatible_api"),
-        ("pi-sub", "pi", "subscription"),
+    for (tag, provider, auth, public) in [
+        ("claude-sub", "claude", "subscription", "claude"),
+        ("claude-compat", "claude", "compatible_api", "claude"),
+        ("pi-sub", "pi", "subscription", "pi"),
+        ("codex-sub", "codex", "subscription", "codex"),
+        ("codex_cli-sub", "codex_cli", "subscription", "codex"),
+        ("codex-cli-sub", "codex-cli", "subscription", "codex"),
+        ("grok-sub", "grok", "subscription", "grok"),
+        ("grok-compat", "grok", "compatible_api", "grok"),
     ] {
         let ws = seat_ws(tag, provider, auth);
         let (result, injected) = fork_on(&ws, "Branched conversation. (forked from old-id)\n");
         let text = result.expect_err("a retired worker row must refuse").to_string();
         assert!(
             text.contains(&format!(
-                "legacy {provider} seat has no runtime in this release; stop or remove it, then add it again (provider: {provider})"
+                "legacy {public} seat has no runtime in this release; stop or remove it, then add it again (provider: {public})"
             )),
             "{tag}: refusal must name the retired seat and how to re-add it; got {text}"
         );
         assert!(
-            !text.contains("claude_tui") && !text.contains("pi_tui"),
+            !["claude_tui", "pi_tui", "codex_tui", "grok_build"]
+                .iter()
+                .any(|leaf| text.contains(leaf)),
             "{tag}: the user never edits the provider key; got {text}"
         );
         assert!(
@@ -165,25 +165,8 @@ fn legacy_claude_and_pi_rows_are_refused_as_retired_before_any_injection() {
 }
 
 #[test]
-fn grok_compatible_api_is_refused_as_unsupported_auth() {
-    let ws = seat_ws("grok-compat", "grok", "compatible_api");
-    let (result, injected) = fork_on(&ws, "Session new (forked from old-id)\n");
-    let err = result.expect_err("compatible_api must refuse");
-    let text = err.to_string();
-    assert!(
-        text.contains("does not support"),
-        "auth_mode gate keeps the support wording; got {text}"
-    );
-    assert!(
-        !injected.iter().any(|t| t == "/branch" || t == "/fork"),
-        "compatible_api must not inject a slash command; got {injected:?}"
-    );
-    let _ = std::fs::remove_dir_all(&ws);
-}
-
-#[test]
 fn unverified_providers_are_refused_as_unverified_not_unsupported() {
-    for provider in ["codex", "copilot", "gemini_cli"] {
+    for provider in ["copilot", "gemini_cli"] {
         let ws = seat_ws(provider, provider, "subscription");
         let (result, injected) = fork_on(&ws, "forked from\n");
         let err = match result {

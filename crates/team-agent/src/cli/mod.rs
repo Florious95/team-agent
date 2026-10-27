@@ -3414,6 +3414,12 @@ pub mod lifecycle_port {
         discard_session: bool,
         team: Option<&str>,
     ) -> Result<Value, CliError> {
+        #[cfg(unix)]
+        if let Some(receipt) =
+            crate::contract_runtime::commands::reset_agent(workspace, team, agent, discard_session)?
+        {
+            return Ok(receipt);
+        }
         let agent_id = crate::model::ids::AgentId::new(agent);
         #[cfg(unix)]
         crate::contract_runtime::framework::require_legacy_lifecycle(
@@ -3602,6 +3608,12 @@ pub mod lifecycle_port {
         force: bool,
         team: Option<&str>,
     ) -> Result<Value, CliError> {
+        #[cfg(unix)]
+        if let Some(receipt) = crate::contract_runtime::commands::remove_agent(
+            workspace, team, agent, from_spec, confirm, force,
+        )? {
+            return Ok(receipt);
+        }
         let agent_id = crate::model::ids::AgentId::new(agent);
         #[cfg(unix)]
         crate::contract_runtime::framework::require_legacy_lifecycle(
@@ -4486,7 +4498,7 @@ pub mod lifecycle_port {
             .unwrap();
             std::fs::write(
                 team_dir.join("agents").join("implementer.md"),
-                "---\nname: implementer\nrole: Implementation Engineer\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nImplement bounded tasks.\n",
+                "---\nname: implementer\nrole: Implementation Engineer\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nImplement bounded tasks.\n",
             )
             .unwrap();
             super::super::hermetic_test_support::seed_in_process_coordinator(&root);

@@ -1,43 +1,15 @@
-//! Issue #238 lifecycle-side contracts for persisted/recovered effort and Pi
-//! leader argument admission. This module deliberately calls the same
+//! Issue #238 lifecycle-side contracts for effort admission and Pi leader
+//! argument admission. This module deliberately calls the same
 //! lifecycle helpers used by spawn/restart instead of duplicating resolution.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-use crate::lifecycle::launch::{
-    provider_effort_for_spawn, provider_effort_for_spawn_json, provider_effort_from_raw,
-};
 use crate::lifecycle::launch::pi_mcp::parse_pi_leader_args;
+use crate::lifecycle::launch::provider_effort_from_raw;
 use crate::model::enums::{Provider, ProviderEffort};
-use crate::model::yaml::Value as Yaml;
-use serde_json::json;
 
 fn args(items: &[&str]) -> Vec<String> {
     items.iter().map(|item| (*item).to_string()).collect()
-}
-
-#[test]
-fn r6_spawn_and_persisted_recovery_preserve_codex_effort_literals() {
-    for raw in ["max", "ultra"] {
-        let yaml_agent = Yaml::Map(vec![(
-            "effort".to_string(),
-            Yaml::Str(raw.to_string()),
-        )]);
-        let json_agent = json!({"effort": raw});
-
-        let direct = provider_effort_from_raw(Some(raw), Provider::Codex)
-            .expect("direct lifecycle resolution")
-            .expect("Codex effort");
-        let spawned = provider_effort_for_spawn(&yaml_agent, Provider::Codex)
-            .expect("YAML spawn resolution")
-            .expect("spawned Codex effort");
-        let recovered = provider_effort_for_spawn_json(&json_agent, Provider::Codex)
-            .expect("JSON recovery resolution")
-            .expect("recovered Codex effort");
-        assert_eq!(direct.as_str(), raw);
-        assert_eq!(spawned.as_str(), raw);
-        assert_eq!(recovered.as_str(), raw);
-    }
 }
 
 #[test]

@@ -30,7 +30,7 @@ fn cli_send_persists_real_message_row() {
         &ws,
         &serde_json::json!({
             "active_team_key": "current",
-            "teams": {"current": {"agents": {"w1": {"provider": "codex"}}}}
+            "teams": {"current": {"agents": {"w1": {"provider": "copilot"}}}}
         }),
     )
     .unwrap();

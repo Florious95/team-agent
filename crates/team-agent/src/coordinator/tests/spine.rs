@@ -126,7 +126,7 @@ fn seeded_spine_coord(
         &dir,
         &serde_json::json!({
             "session_name": "team-spine",
-            "agents": { "w1": { "provider": "codex" } },
+            "agents": { "w1": { "provider": "fake" } },
         }),
     )
     .unwrap();

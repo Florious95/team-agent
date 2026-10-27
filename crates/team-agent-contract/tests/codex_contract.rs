@@ -106,6 +106,9 @@ fn catalog_keeps_listed_ids_and_their_own_team_efforts_without_fallback() {
     assert_eq!(records[0].efforts, Support::Supported(vec![Effort::Low, Effort::Medium, Effort::High, Effort::Xhigh, Effort::Max]));
     assert_eq!(records[1].efforts, Support::Supported(vec![Effort::Low, Effort::Ultra]), "none is not a Team tier");
     assert!(matches!(parse_catalog(CATALOG.replace("gpt-6-sol", "gpt-6-luna").as_bytes()), Err(ContractError::AmbiguousModel)));
+    for slug in ["group/grok4.7", "cursor/grok-4.7@500k", "grok/grok-4.7@500k", "vendor/model:tag"] {
+        assert_eq!(parse_catalog(CATALOG.replace("gpt-6-luna", slug).as_bytes()).unwrap()[0].id, slug, "namespaced/tagged slug");
+    }
     for bad in [CATALOG.replace("\"hide\"", "\"secret\""), CATALOG.replace("supported_reasoning_levels\":[]", "supported_reasoning_levels\":null"),
         CATALOG.replace("\"list\"", "\"hide\""), "{\"models\":[]}".into(), "not json".into(), CATALOG.replace("gpt-6-luna", "gpt 6 luna"),
         CATALOG.replace("{\"effort\":\"high\",\"description\":\"h\"}", "{\"effort\":\"low\",\"description\":\"h\"}")]
@@ -126,6 +129,7 @@ fn owned_server_overrides_are_toml_values_with_a_per_generation_key() {
         format!("mcp_servers.{key}.env={{ \"OWNED_VALUE\" = \"quoted \\\"text\\\"\\nnext\" }}"),
         format!("mcp_servers.{key}.tool_timeout_sec=600.0"),
         format!("mcp_servers.{key}.default_tools_approval_mode=\"approve\""),
+        format!("mcp_servers.{key}.omit_tools_from=[\"deferred\"]"),
     ]);
     let mut other = owner.clone(); other.generation = Generation(2); assert_ne!(key, server_key(&other));
     other = owner; other.seat = SeatId::new("peer").unwrap(); assert_ne!(key, server_key(&other));
@@ -262,9 +266,9 @@ fn plan_carries_model_effort_bypass_mcp_and_exact_resume_without_startup_keys() 
     assert!(args[9].starts_with("developer_instructions=\"The actual task project is "));
     assert_eq!(args[11], format!("mcp_servers.{key}.command=\"/fake/candidate\""));
     assert!(args.ends_with(&["--dangerously-bypass-approvals-and-sandbox".into(), "-c".into(), "model_reasoning_effort=max".into()]));
-    assert!(!args.iter().any(|arg| arg == "resume" || arg.contains("trust") || arg == "--last" || arg.contains("projects.")));
+    assert!(!args.iter().any(|arg| arg == "resume" || arg.contains("trust") || arg == "--last" || arg.contains("projects.") || arg == "--sandbox"));
     assert_eq!(plan.carriers.model, CarrierUse::Specified(CarrierRef::Arguments(vec![4, 5])));
-    assert!(matches!(&plan.carriers.mcp, CarrierUse::Specified(CarrierRef::Arguments(indices)) if indices.len() == 10 && indices[0] == 10));
+    assert!(matches!(&plan.carriers.mcp, CarrierUse::Specified(CarrierRef::Arguments(indices)) if indices.len() == 12 && indices[0] == 10));
     assert_eq!(plan.environment.remove, std::collections::BTreeSet::from(["CODEX_API_KEY".to_string(), "OPENAI_API_KEY".to_string()]));
     assert!(!plan.environment.set.contains_key("PATH") && !plan.environment.set.contains_key("CODEX_HOME"));
     assert_eq!(plan.materialization.len(), 1);
@@ -279,6 +283,8 @@ fn plan_carries_model_effort_bypass_mcp_and_exact_resume_without_startup_keys() 
     r.role_effort = None; r.bypass = false;
     let args = strings(&plan_ok(&a, &r, &catalog));
     assert!(!args.iter().any(|arg| arg.contains("dangerously") || arg.contains("model_reasoning_effort")));
+    // A read-only sandbox would make Codex exit 1 on `--add-dir`.
+    assert!(args.windows(2).any(|pair| pair == ["--sandbox", "workspace-write"]) && args.contains(&"--add-dir".to_string()));
     // Model omission, hidden or invented IDs never launch.
     for model in [None, Some("codex-auto-review"), Some("gpt-6-luna-invented")] {
         r.model = model.map(Into::into);

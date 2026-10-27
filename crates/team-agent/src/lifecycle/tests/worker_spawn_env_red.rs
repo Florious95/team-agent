@@ -1,9 +1,9 @@
 //! Worker provider spawn environment contracts.
 //!
-//! #229 B-layer root cause: spawned Codex workers must inherit the parent `team-agent`
-//! process environment (proxy/CA/PATH/etc.) just like a user typing `codex` in the same terminal,
-//! then overlay the Team Agent identity env. The contract is path-generic and covers the three
-//! worker spawn surfaces that can launch Codex: quick-start/launch, restart, and add-agent.
+//! #229 B-layer root cause: spawned legacy-runtime workers must inherit the parent `team-agent`
+//! process environment (proxy/CA/PATH/etc.) just like a user typing the provider command (here
+//! `copilot`) in the same terminal, then overlay the Team Agent identity env. The contract is
+//! path-generic and covers the three worker spawn surfaces: quick-start/launch, restart, and add-agent.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -21,7 +21,7 @@ use serde_json::json;
 use serial_test::serial;
 use team_agent::lifecycle::{
     add_agent_with_transport, fork_agent_with_transport, launch_with_transport,
-    restart_with_transport,
+    restart_with_transport, LifecycleError,
 };
 use team_agent::model::ids::AgentId;
 use team_agent::transport::{
@@ -119,7 +119,7 @@ fn tmux_control_filter_uses_env_keys_not_substring_in_inherited_values() {
         ),
     ]);
     let spawn = RecordedSpawn {
-        argv: vec!["codex".to_string()],
+        argv: vec!["copilot".to_string()],
         env: env.clone(),
         env_unset: Vec::new(),
         session: SessionName::new("s"),
@@ -167,7 +167,7 @@ fn worker_spawn_scrubs_cross_provider_process_identity_but_keeps_config_env() {
         ("NODE_EXTRA_CA_CERTS", "/canary/ca.pem"),
     ]);
 
-    // The identity scrub is provider-agnostic; a Codex worker exercises every spawn surface.
+    // The identity scrub is provider-agnostic; a Copilot worker exercises every spawn surface.
     let launch_team = compiled_team_dir("cross-launch", &[("worker_a", "Launch Worker")]);
     let launch_transport = RecordingTransport::new().with_session_present(false);
     launch_with_transport(
@@ -218,11 +218,11 @@ fn worker_spawn_scrubs_cross_provider_process_identity_but_keeps_config_env() {
 
 #[test]
 #[serial(env)]
-fn worker_spawn_codex_in_window_fork_reports_unverified_not_unsupported() {
-    // 已废除的行为：旧实现把 codex in-window fork 当成已验证能力（或报「不支持」），此断言证明它确实没了。
-    // 本轮裁定：codex 走这条路必须明确报「未验证」，不是「不支持」。
-    let _home = hermetic_guard::HermeticTestEnv::enter("codex-fork-unverified");
-    let team = compiled_team_dir("codex-fork-tombstone", &[("worker_a", "Fork Source")]);
+fn worker_spawn_legacy_fork_reports_unverified_not_unsupported() {
+    // 已废除的行为：旧的 legacy fork 入口把 in-window fork 当成已验证能力（或报「不支持」），此断言证明它确实没了。
+    // 本轮裁定：即便是声明了 fork 能力的 copilot 源席，legacy 入口也必须明确报「未验证」，不是「不支持」，且不 spawn。
+    let _home = hermetic_guard::HermeticTestEnv::enter("legacy-fork-unverified");
+    let team = compiled_team_dir("legacy-fork-tombstone", &[("worker_a", "Fork Source")]);
     seed_forkable_source_state(&team, "worker_a");
     let transport = RecordingTransport::new().with_session_present(true);
     let err = fork_agent_with_transport(
@@ -234,15 +234,22 @@ fn worker_spawn_codex_in_window_fork_reports_unverified_not_unsupported() {
         None,
         &transport,
     )
-    .expect_err("codex in-window fork must refuse as unverified");
-    let text = err.to_string();
+    .expect_err("the legacy fork entry must refuse as unverified");
     assert!(
-        text.contains("未验证") && text.contains("unverified"),
-        "codex in-window fork must report 未验证; err={text}"
+        matches!(
+            &err,
+            LifecycleError::Provider(message) if message == "copilot native session fork is unverified (未验证); no legacy fork or fresh replacement was performed"
+        ),
+        "the legacy fork entry must report 未验证 for the copilot source; err={err}"
     );
+    let text = err.to_string();
     assert!(
         !text.contains("不支持") && !text.contains("does not support"),
         "the ruling is unverified, not unsupported; err={text}"
+    );
+    assert!(
+        transport.spawns.lock().unwrap().is_empty(),
+        "the refused legacy fork must not spawn a pane"
     );
 }
 
@@ -331,14 +338,14 @@ fn spawn_env_contract_failures(
             "{surface}: worker spawn must filter tmux control env from inherited parent env; present_keys={present:?}"
         ));
     }
-    if !spawn.argv.iter().any(|part| part == "codex") {
+    if !spawn.argv.iter().any(|part| part == "copilot") {
         failures.push(format!(
-            "{surface}: provider executable must remain the command name `codex`"
+            "{surface}: provider executable must remain the command name `copilot`"
         ));
     }
-    if spawn.argv.iter().any(|part| part.ends_with("/codex")) {
+    if spawn.argv.iter().any(|part| part.ends_with("/copilot")) {
         failures.push(format!(
-            "{surface}: provider executable must not be hard-coded as an absolute codex path"
+            "{surface}: provider executable must not be hard-coded as an absolute copilot path"
         ));
     }
     failures
@@ -398,7 +405,7 @@ fn cross_provider_identity_failures(surface: &str, spawn: &RecordedSpawn) -> Vec
 }
 
 fn compiled_team_dir(label: &str, agents: &[(&str, &str)]) -> PathBuf {
-    compiled_team_dir_for_provider(label, agents, "codex")
+    compiled_team_dir_for_provider(label, agents, "copilot")
 }
 
 fn compiled_team_dir_for_provider(label: &str, agents: &[(&str, &str)], provider: &str) -> PathBuf {
@@ -428,7 +435,7 @@ fn compiled_team_dir_for_provider(label: &str, agents: &[(&str, &str)], provider
 }
 
 fn role_doc(name: &str, role: &str) -> String {
-    role_doc_for_provider(name, role, "codex")
+    role_doc_for_provider(name, role, "copilot")
 }
 
 fn role_doc_for_provider(name: &str, role: &str, provider: &str) -> String {
@@ -438,7 +445,7 @@ fn role_doc_for_provider(name: &str, role: &str, provider: &str) -> String {
 }
 
 fn seed_restart_state(team: &Path, agent_id: &str) {
-    seed_restart_state_as(team, agent_id, "codex");
+    seed_restart_state_as(team, agent_id, "copilot");
 }
 
 fn seed_restart_state_as(team: &Path, agent_id: &str, provider: &str) {
@@ -468,7 +475,7 @@ fn seed_restart_state_as(team: &Path, agent_id: &str, provider: &str) {
 }
 
 fn seed_running_add_agent_state(team: &Path, agent_id: &str) {
-    seed_running_add_agent_state_as(team, agent_id, "codex");
+    seed_running_add_agent_state_as(team, agent_id, "copilot");
 }
 
 fn seed_running_add_agent_state_as(team: &Path, agent_id: &str, provider: &str) {
@@ -498,28 +505,6 @@ fn seed_running_add_agent_state_as(team: &Path, agent_id: &str, provider: &str) 
 
 fn seed_forkable_source_state(team: &Path, agent_id: &str) {
     let workspace = team_agent::model::paths::team_workspace(team).unwrap();
-    let rollout_root = PathBuf::from(std::env::var_os("HOME").expect("hermetic HOME"))
-        .join(".codex/sessions/worker-spawn-source");
-    std::fs::create_dir_all(&rollout_root).unwrap();
-    let rollout = rollout_root.join("rollout-sess-worker-a.jsonl");
-    std::fs::write(
-        &rollout,
-        format!(
-            "{}\n{}\n",
-            json!({
-                "type": "session_meta",
-                "payload": {"id": "sess-worker-a", "cwd": workspace}
-            }),
-            json!({
-                "type": "response_item",
-                "payload": {"content": [{
-                    "type": "input_text",
-                    "text": format!("You are Team Agent worker `{agent_id}` with role `fixture`.")
-                }]}
-            })
-        ),
-    )
-    .unwrap();
     team_agent::state::persist::save_runtime_state(
         &workspace,
         &json!({
@@ -530,13 +515,12 @@ fn seed_forkable_source_state(team: &Path, agent_id: &str) {
             "agents": {
                 agent_id: {
                     "status": "running",
-                    "provider": "codex",
+                    "provider": "copilot",
                     "auth_mode": "subscription",
                     "role": "Fork Source",
                     "window": agent_id,
                     "owner_team_id": RUNTIME_TEAM_KEY,
                     "session_id": "sess-worker-a",
-                    "rollout_path": rollout.to_string_lossy().to_string(),
                     "captured_at": "2026-07-16T00:00:00+00:00",
                     "captured_via": "session.captured",
                     "tools": ["mcp_team"]
@@ -669,11 +653,10 @@ impl RecordingTransport {
         session: &SessionName,
         window: &WindowName,
         argv: &[String],
-        cwd: &Path,
+        _cwd: &Path,
         env: &BTreeMap<String, String>,
         env_unset: &[String],
     ) -> SpawnResult {
-        emit_codex_fork_backing(argv, cwd);
         let mut spawns = self.spawns.lock().unwrap();
         let pane_id = PaneId::new(format!("%{}", spawns.len() + 1));
         spawns.push(RecordedSpawn {
@@ -691,36 +674,6 @@ impl RecordingTransport {
             child_pid: None,
         }
     }
-}
-
-fn emit_codex_fork_backing(argv: &[String], cwd: &Path) {
-    if !argv
-        .windows(2)
-        .any(|pair| pair[0] == "codex" && pair[1] == "fork")
-    {
-        return;
-    }
-    static SESSION_SEQ: AtomicU64 = AtomicU64::new(0);
-    let session_id = format!(
-        "worker-spawn-fork-{}-{}",
-        std::process::id(),
-        SESSION_SEQ.fetch_add(1, Ordering::Relaxed)
-    );
-    let root = PathBuf::from(std::env::var_os("HOME").expect("hermetic HOME"))
-        .join(".codex/sessions/worker-spawn-env-fixture");
-    std::fs::create_dir_all(&root).unwrap();
-    let record = serde_json::json!({
-        "session_meta": {"payload": {
-            "id": session_id.clone(),
-            "cwd": cwd.to_string_lossy(),
-            "created_at": chrono::Utc::now().to_rfc3339(),
-        }}
-    });
-    std::fs::write(
-        root.join(format!("rollout-{session_id}.jsonl")),
-        format!("{record}\n"),
-    )
-    .unwrap();
 }
 
 impl Transport for RecordingTransport {
@@ -800,8 +753,9 @@ impl Transport for RecordingTransport {
         _target: &Target,
         range: CaptureRange,
     ) -> Result<CapturedText, TransportError> {
+        // The Copilot ready screen lets the startup-prompt handler return at once.
         Ok(CapturedText {
-            text: String::new(),
+            text: team_agent::provider::COPILOT_READY_MARKER.to_string(),
             range,
         })
     }
@@ -833,7 +787,7 @@ impl Transport for RecordingTransport {
                 window_name: Some(spawn.window.clone()),
                 pane_index: None,
                 tty: None,
-                current_command: Some("codex".to_string()),
+                current_command: Some("copilot".to_string()),
                 current_path: None,
                 active: false,
                 pane_pid: None,

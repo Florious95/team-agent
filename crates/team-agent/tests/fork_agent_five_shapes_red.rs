@@ -81,6 +81,13 @@
 //!   B 案(留死字面注释喂扫描)驳回=注释欺骗扫描器。
 //!   台账新增 §二·补4:源码扫描齿禁锚单文件路径,应锚模块树(文件拆分=
 //!   常规重构,不该震碎契约)。
+//! - V3 (legacy Codex/Grok worker excision) — tooth 3 re-anchored: the
+//!   programmatic excluded set lived in the deleted Codex rollout scanner;
+//!   the surviving faces are explicit NEW == source rejection + no
+//!   cwd/mtime-latest relaxation. Tooth 5 deleted: it froze the real
+//!   `codex fork` subscription gate (tests/subscription_fork_cold_start_gate.rs)
+//!   and the adapter's `codex fork` hidden-prompt lock, both of which guarded
+//!   the excised legacy Codex fork path (Codex forks only via its contract leaf).
 
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
@@ -278,15 +285,15 @@ fn pending_seat_has_bounded_grace_then_typed_failure() {
 #[test]
 #[serial(env)]
 fn source_rollout_cannot_masquerade_as_new_backing() {
-    // A 案(msg_ef0fa4adad80):read context_fork.rs PLUS submodule
-    // tree (source_exclusions/claimed_set 现 codex.rs/outcome.rs 消费).
+    // V3: the programmatic excluded set lived in the Codex rollout scanner
+    // (context_fork/codex.rs), excised with the legacy Codex worker. The only
+    // remaining verifier proves the NEW session by its exact expected id, so
+    // the surviving faces are an explicit NEW == source rejection and no
+    // latest-file relaxation anywhere in the module tree.
     let src = read_context_fork_module_text();
-    // Face 1 — canonical scanner call site must explicitly build a
-    // `claimed` / `excluded` set containing source_session_id AND its
-    // backing_path AND (per locate §5.1#5) sibling agents.
-    let excludes_source = src.contains("excluded") || src.contains("claimed_set");
-    let excludes_source_id =
-        src.contains("source_session_id") && (src.contains("insert") || src.contains("push"));
+    // Face 1 — the verifier explicitly rejects a NEW session equal to the
+    // source (whitespace-blind, same projection as tooth 4).
+    let rejects_source_collision = code_no_ws(&src).contains("==source_session_id");
     // Face 2 — scanner MUST NOT be relaxed to cwd-latest / mtime-latest.
     // We assert on the negative: no source line inside the module tree
     // may contain `cwd_latest` or `mtime_latest` as a scanner mode.
@@ -294,23 +301,14 @@ fn source_rollout_cannot_masquerade_as_new_backing() {
         || src.contains("mtime_latest")
         || src.contains("CwdLatest")
         || src.contains("MtimeLatest");
-    // Face 3 — `!=source` alone is insufficient; must be programmatic
-    // claim/excluded set (the "boolean not equal" implementation is
-    // what §1.2#4 flagged as fragile).
-    // We enforce Face 3 by requiring the exclusion be expressed as a
-    // set operation, not merely a `!=` comparison.
-    let only_neq = !excludes_source && src.contains("!= source") || src.contains("!= self.source");
     assert!(
-        excludes_source && excludes_source_id && !has_relaxation && !only_neq,
-        "canonical scanner claim/excluded set incomplete (module tree). \
-         locate §5.1+§7#3: source_session_id + backing_path + sibling agents \
-         must be in a programmatic excluded set; scanner must NOT relax to \
-         cwd-latest/mtime-latest. excludes_source={} excludes_source_id={} \
-         has_relaxation={} only_neq={}",
-        excludes_source,
-        excludes_source_id,
-        has_relaxation,
-        only_neq
+        rejects_source_collision && !has_relaxation,
+        "context_fork module tree lets the source masquerade as the NEW backing. \
+         locate §5.1+§7#3: a NEW session equal to source_session_id must be \
+         rejected explicitly; the verifier must NOT relax to \
+         cwd-latest/mtime-latest. rejects_source_collision={} has_relaxation={}",
+        rejects_source_collision,
+        has_relaxation
     );
 }
 
@@ -358,64 +356,6 @@ fn source_existence_uses_state_not_spec() {
         spec_hit,
         state_before_spec,
         spec_still_authoritative
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Tooth 5 — real subscription gate freezes the cold-start matrix
-// ---------------------------------------------------------------------------
-
-#[test]
-#[serial(env)]
-fn real_subscription_gate_freezes_cold_start_matrix() {
-    let tests_root = crate_tests();
-    // Face 1 — a file whose name contains BOTH `subscription` and
-    // `fork` must exist under crates/team-agent/tests/.
-    let mut found_file: Option<PathBuf> = None;
-    if let Ok(entries) = fs::read_dir(&tests_root) {
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().to_lowercase();
-            if name.contains("subscription") && name.contains("fork") && name.ends_with(".rs") {
-                found_file = Some(e.path());
-                break;
-            }
-        }
-    }
-    // Face 2 — its body must reference the ordered acceptance items
-    // frozen by locate §6#5: `codex --version` + no prompt +
-    // cold_start + nonce + NEW session id + source_unchanged.
-    let mut face2 = false;
-    if let Some(p) = &found_file {
-        if let Ok(t) = fs::read_to_string(p) {
-            face2 = t.contains("codex --version")
-                && t.contains("no_prompt")
-                && (t.contains("cold_start") || t.contains("cold-start"))
-                && t.contains("nonce")
-                && (t.contains("distinct") || t.contains("new_session_id"))
-                && t.contains("source_unchanged");
-        }
-    }
-    // Face 3 (§7#1) — provider/adapter.rs must NOT pass a non-empty
-    // prompt to `codex fork`. Baseline currently passes only
-    // `<session_id>` (§2.2); we lock it here so a "helpful" retry
-    // patch cannot silently activate a hidden turn.
-    let adapter = read_src("provider/adapter.rs");
-    let hidden_prompt = adapter.contains("codex")
-        && adapter.contains("fork")
-        && adapter.contains("prompt")
-        && (adapter.contains(".arg(\"fork\")") || adapter.contains("\"fork\","))
-        && adapter.contains(".arg(&prompt)");
-    assert!(
-        found_file.is_some() && face2 && !hidden_prompt,
-        "real subscription gate missing / hidden-prompt risk. locate §6#5+§7#1: \
-         a tests/*.rs file containing `subscription`+`fork` in its name must \
-         exercise codex --version + no_prompt + cold_start + nonce + \
-         distinct new_session_id + source_unchanged. Also adapter must not \
-         attach a prompt to `codex fork`. found_file={:?} face2={} \
-         hidden_prompt={}",
-        found_file,
-        face2,
-        hidden_prompt
     );
 }
 

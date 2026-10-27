@@ -2508,7 +2508,7 @@ fn collect_task_scoped_result_collects_and_marks_task_done() {
         &ws,
         &serde_json::json!({
             "session_name": "team-x",
-            "agents": { "w1": { "provider": "codex" } },
+            "agents": { "w1": { "provider": "copilot" } },
             "tasks": [ { "id": "t2", "assignee": "w1", "title": "t2", "status": "pending" } ]
         }),
     )
@@ -2571,7 +2571,7 @@ fn collect_output_matches_golden_collected_shape() {
         &ws,
         &serde_json::json!({
             "session_name": "team-x",
-            "agents": { "w1": { "provider": "codex" } },
+            "agents": { "w1": { "provider": "copilot" } },
             "tasks": [ { "id": "t2", "assignee": "w1", "title": "t2", "status": "pending" } ]
         }),
     )
@@ -2653,7 +2653,7 @@ fn send_with_unknown_task_id_raises_unknown_task() {
         &ws,
         &serde_json::json!({
             "session_name": "team-x",
-            "agents": { "w1": { "provider": "codex" } },
+            "agents": { "w1": { "provider": "copilot" } },
             "tasks": []
         }),
     )
@@ -2698,7 +2698,7 @@ fn send_route_task_id_false_skips_task_validation_and_queues() {
     let ws = tmp_ws("sendroutefalse");
     crate::state::persist::save_runtime_state(
         &ws,
-        &serde_json::json!({ "session_name": "team-x", "agents": { "w1": { "provider": "codex" } }, "tasks": [] }),
+        &serde_json::json!({ "session_name": "team-x", "agents": { "w1": { "provider": "copilot" } }, "tasks": [] }),
     ).unwrap();
     let _ = store_for(&ws);
     let opts = SendOptions {
@@ -2729,7 +2729,7 @@ fn send_route_task_id_true_known_task_succeeds() {
         &ws,
         &serde_json::json!({
             "session_name": "team-x",
-            "agents": { "w1": { "provider": "codex" } },
+            "agents": { "w1": { "provider": "copilot" } },
             "tasks": [ { "id": "t-known", "assignee": "w1", "title": "t", "status": "pending" } ]
         }),
     )

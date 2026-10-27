@@ -49,9 +49,10 @@ const SUB: &str = "sub";
 #[serial(env)]
 fn restart_resume_spawns_worker_with_team_dir_cwd_matching_launch() {
     let case = HotfixCase::new("restart-cwd");
-    case.write_team(CURRENT, "greeter", Provider::Codex);
+    case.write_team(CURRENT, "greeter", Provider::Copilot);
     case.seed_restart_state(CURRENT, "greeter", "sess-current", "handled");
     case.seed_healthy_coordinator();
+    let _home = case.copilot_home_with_session("sess-current");
     let transport = RecordingTransport::new().with_session_present(false);
 
     restart_with_transport(&case.team_dir(CURRENT), false, Some(CURRENT), &transport)
@@ -62,8 +63,8 @@ fn restart_resume_spawns_worker_with_team_dir_cwd_matching_launch() {
         spawn.cwd,
         case.team_dir(CURRENT),
         "RC0: restart/resume must spawn the worker in the same team directory cwd used by first launch. \
-         Passing the run workspace root makes Codex detect cwd != session cwd and show the \
-         'Choose working directory to resume this session' prompt. spawn={spawn:?}"
+         Passing the run workspace root makes the resumed provider see cwd != session cwd \
+         (Codex showed a 'Choose working directory to resume this session' prompt). spawn={spawn:?}"
     );
 }
 
@@ -72,9 +73,10 @@ fn restart_resume_spawns_worker_with_team_dir_cwd_matching_launch() {
 #[serial(env)]
 fn restart_resets_startup_prompt_state_for_respawn() {
     let case = HotfixCase::new("restart-startup-state");
-    case.write_team(CURRENT, "greeter", Provider::Codex);
+    case.write_team(CURRENT, "greeter", Provider::Copilot);
     case.seed_restart_state(CURRENT, "greeter", "sess-current", "handled");
     case.seed_healthy_coordinator();
+    let _home = case.copilot_home_with_session("sess-current");
     let transport = RecordingTransport::new().with_session_present(false);
 
     restart_with_transport(&case.team_dir(CURRENT), false, Some(CURRENT), &transport)
@@ -328,6 +330,26 @@ impl HotfixCase {
         self.workspace.join(".team/runtime/team.db")
     }
 
+    /// Copilot resume backing is the `sessions` row in
+    /// `$HOME/.copilot/session-store.db`; seed it under a fixture HOME and
+    /// point HOME there for the guard's lifetime (callers are `serial(env)`).
+    fn copilot_home_with_session(&self, session_id: &str) -> HomeGuard {
+        let home = self.workspace.parent().unwrap().join("home");
+        let db = home.join(".copilot").join("session-store.db");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(db).unwrap();
+        conn.execute_batch(
+            "create table if not exists sessions (id text primary key, cwd text, created_at text);",
+        )
+        .unwrap();
+        conn.execute(
+            "insert or replace into sessions(id, cwd, created_at) values (?1, ?2, '2026-06-07T01:00:00Z')",
+            rusqlite::params![session_id, self.workspace.to_string_lossy()],
+        )
+        .unwrap();
+        HomeGuard::set(&home)
+    }
+
     fn write_team(&self, team: &str, agent_id: &str, provider: Provider) {
         let dir = self.team_dir(team);
         std::fs::create_dir_all(dir.join("agents")).unwrap();
@@ -498,7 +520,7 @@ fn restart_agent(
     json!({
         "status": "running",
         "agent_id": agent_id,
-        "provider": "codex",
+        "provider": "copilot",
         "role": "Greeter",
         "tools": ["mcp_team"],
         "window": agent_id,
@@ -520,7 +542,7 @@ fn team_state(team: &str, agent_id: &str, team_dir: &Path, with_leader_receiver:
         "agents": {
             agent_id: {
                 "status": "running",
-                "provider": "codex",
+                "provider": "copilot",
                 "window": agent_id,
                 "owner_team_id": team,
                 "spawn_cwd": team_dir.to_string_lossy(),
@@ -1013,6 +1035,25 @@ impl ProviderAdapter for StaticCaptureAdapter {
         _sleep_s: f64,
     ) -> Vec<HandledPrompt> {
         Vec::new()
+    }
+}
+
+struct HomeGuard(Option<std::ffi::OsString>);
+
+impl HomeGuard {
+    fn set(home: &Path) -> Self {
+        let previous = std::env::var_os("HOME");
+        std::env::set_var("HOME", home);
+        Self(previous)
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(previous) => std::env::set_var("HOME", previous),
+            None => std::env::remove_var("HOME"),
+        }
     }
 }
 

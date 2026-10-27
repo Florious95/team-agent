@@ -881,7 +881,7 @@ fn team_entry(
             json!({
                 "agent_id": agent_id,
                 "status": status,
-                "provider": "codex",
+                "provider": "fake",
                 "auth_mode": "subscription",
                 "role": agent_id,
                 "window": agent_id,
@@ -1057,7 +1057,7 @@ fn team_dir(root: &Path, name: &str, agents: &[(&str, &str)]) -> PathBuf {
 
 fn role_doc(name: &str, role: &str) -> String {
     format!(
-        "---\nname: {name}\nrole: {role}\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{role}.\n"
+        "---\nname: {name}\nrole: {role}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{role}.\n"
     )
 }
 

@@ -3,6 +3,7 @@
 //! Launch/restart may spawn a pane and then ask the provider adapter to handle startup prompts.
 //! A provider-specific prompt handler panic must not unwind out of the user command and leave a
 //! half-initialized runtime. The command should still complete once the pane has been spawned.
+//! Copilot is the surviving legacy worker with a startup (folder-trust) prompt handler.
 
 #[path = "../../../tests/support/hermetic.rs"]
 mod hermetic_guard;
@@ -15,6 +16,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 
 use serde_json::json;
+use serial_test::serial;
 use team_agent::lifecycle::{launch_with_transport, restart_with_transport, RestartReport};
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
@@ -27,10 +29,12 @@ static SEQ: AtomicU32 = AtomicU32::new(0);
 
 const TEAM_MD: &str =
     "---\nname: f032team\nobjective: F032 lifecycle prompt fault probe.\nprovider: codex\n---\n\nF032.\n";
-const ROLE_MD: &str = "---\nname: implementer\nrole: Implementation Engineer\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nImplement.\n";
+const ROLE_MD: &str = "---\nname: implementer\nrole: Implementation Engineer\nprovider: copilot\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nImplement.\n";
 
 #[test]
+#[serial(env)]
 fn f032_launch_spawn_path_treats_startup_prompt_panic_as_best_effort() {
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter("f032-launch");
     let team = compiled_team_dir("launch");
     let spec_path = team.join("team.spec.yaml");
     let transport = PanicOnStartupPromptTransport::new();
@@ -52,8 +56,10 @@ fn f032_launch_spawn_path_treats_startup_prompt_panic_as_best_effort() {
 }
 
 #[test]
+#[serial(env)]
 fn f032_restart_spawn_path_treats_startup_prompt_panic_as_best_effort() {
-    let workspace = restart_workspace("restart");
+    let hermetic = hermetic_guard::HermeticTestEnv::enter("f032-restart");
+    let workspace = restart_workspace("restart", hermetic.home());
     let transport = PanicOnStartupPromptTransport::new();
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -101,10 +107,19 @@ fn compiled_team_dir(label: &str) -> PathBuf {
     team
 }
 
-fn restart_workspace(label: &str) -> PathBuf {
+fn restart_workspace(label: &str, home: &Path) -> PathBuf {
     let ws = compiled_team_dir(label);
-    let rollout = ws.join("implementer-rollout.jsonl");
-    std::fs::write(&rollout, "{}\n").expect("seed rollout backing");
+    // Copilot resume backing is the session-store row under $HOME/.copilot.
+    let db = home.join(".copilot").join("session-store.db");
+    std::fs::create_dir_all(db.parent().expect("session store parent"))
+        .expect("create copilot home");
+    let conn = rusqlite::Connection::open(db).expect("open copilot session store");
+    conn.execute_batch(
+        "create table if not exists sessions (id text primary key, name text, created_at text);
+         insert or replace into sessions(id, name, created_at)
+             values ('f0320000-0000-4000-8000-000000000032', 'f032', '2026-05-27T10:00:00Z');",
+    )
+    .expect("seed copilot session store");
     team_agent::state::persist::save_runtime_state(
         &ws,
         &json!({
@@ -112,9 +127,8 @@ fn restart_workspace(label: &str) -> PathBuf {
             "agents": {
                 "implementer": {
                     "status": "running",
-                    "provider": "codex",
-                    "session_id": "sess-impl",
-                    "rollout_path": rollout.to_string_lossy(),
+                    "provider": "copilot",
+                    "session_id": "f0320000-0000-4000-8000-000000000032",
                     "first_send_at": "2026-05-27T10:00:00+00:00"
                 }
             }

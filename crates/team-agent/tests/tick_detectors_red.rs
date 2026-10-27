@@ -36,7 +36,7 @@ fn tick_reports_compaction_from_real_worker_capture_not_empty_placeholder() {
         /compact\n\
         Context compacted. Compaction completed; continue from the summary.\n\
         ❯\n";
-    let fixture = TickFixture::new("compaction", worker_capture, "");
+    let fixture = TickFixture::new("compaction", "fake", worker_capture, "");
     let report = fixture.coord.tick().expect("tick should complete");
     let events = fixture.events();
 
@@ -66,7 +66,9 @@ fn tick_reports_compaction_from_real_worker_capture_not_empty_placeholder() {
 fn tick_marks_codex_session_drift_and_send_refuses_drifted_worker() {
     let worker_capture =
         "Codex resumed. Switched to thread 22222222-2222-4222-8222-222222222222\n❯\n";
-    let fixture = TickFixture::new("drift", worker_capture, "");
+    // The session-drift detector reads only Codex rows (its Codex TUI thread
+    // marker), so this pre-upgrade worker row stays `codex`.
+    let fixture = TickFixture::new("drift", "codex", worker_capture, "");
     let report = fixture.coord.tick().expect("tick should complete");
     let state = load_runtime_state(&fixture.workspace).expect("load post-tick state");
 
@@ -119,7 +121,7 @@ fn tick_records_leader_api_error_once_per_fingerprint_from_leader_capture() {
         Working...\n\
         API Error: Overloaded\n\
         529 too many requests, please retry later\n";
-    let fixture = TickFixture::new("api-error", "❯\n", leader_capture);
+    let fixture = TickFixture::new("api-error", "fake", "❯\n", leader_capture);
 
     let first = fixture.coord.tick().expect("first tick should complete");
     let events_after_first = fixture.events();
@@ -157,9 +159,9 @@ struct TickFixture {
 }
 
 impl TickFixture {
-    fn new(tag: &str, worker_capture: &str, leader_capture: &str) -> Self {
+    fn new(tag: &str, worker_provider: &str, worker_capture: &str, leader_capture: &str) -> Self {
         let workspace = tmp_dir(tag);
-        seed_state(&workspace);
+        seed_state(&workspace, worker_provider);
         let registry = Arc::new(CountingRegistry::default());
         let transport = DetectorTransport {
             worker_capture: worker_capture.to_string(),
@@ -315,7 +317,7 @@ impl Transport for DetectorTransport {
     }
 }
 
-fn seed_state(workspace: &Path) {
+fn seed_state(workspace: &Path, worker_provider: &str) {
     save_runtime_state(
         workspace,
         &json!({
@@ -336,7 +338,7 @@ fn seed_state(workspace: &Path) {
             },
             "agents": {
                 "w1": {
-                    "provider": "codex",
+                    "provider": worker_provider,
                     "status": "running",
                     "session_id": "11111111-1111-4111-8111-111111111111",
                     "window": "w1",
@@ -361,7 +363,7 @@ fn seed_state(workspace: &Path) {
                     },
                     "agents": {
                         "w1": {
-                            "provider": "codex",
+                            "provider": worker_provider,
                             "status": "running",
                             "session_id": "11111111-1111-4111-8111-111111111111",
                             "window": "w1",

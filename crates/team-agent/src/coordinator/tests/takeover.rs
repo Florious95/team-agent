@@ -170,7 +170,7 @@ fn slice2b_detect_stuck_no_longer_synthesized_by_framework_n35() {
     let stale = (chrono::Utc::now() - chrono::Duration::seconds(1000)).to_rfc3339();
     let (coord, dir, _inj) = takeover_coord(serde_json::json!({
         "session_name": "team-h",
-        "agents": { "w1": { "provider": "codex" } },
+        "agents": { "w1": { "provider": "copilot" } },
     }));
     seed_agent_health(&dir, "w1", "RUNNING", &stale, Some("team-h"));
     let store = MessageStore::open(&dir).unwrap();
@@ -197,7 +197,7 @@ fn slice2b_detect_deadlocks_no_longer_synthesized_by_framework_n35() {
     let now = chrono::Utc::now().to_rfc3339();
     let (coord, dir, _inj) = takeover_coord(serde_json::json!({
         "session_name": "team-h",
-        "agents": { "w1": { "provider": "codex" }, "w2": { "provider": "codex" } },
+        "agents": { "w1": { "provider": "copilot" }, "w2": { "provider": "copilot" } },
     }));
     seed_agent_health(&dir, "w1", "IDLE", &now, Some("team-h"));
     let store = MessageStore::open(&dir).unwrap();
@@ -274,7 +274,7 @@ fn slice2b_takeover_unarmed_idle_worker_is_never_pinged() {
 fn slice2b_unknown_persistent_no_longer_emitted_at_threshold_tick_n35() {
     let (coord, dir, _inj) = takeover_coord(serde_json::json!({
         "session_name": "team-h",
-        "agents": { "w1": { "provider": "codex" } },
+        "agents": { "w1": { "provider": "copilot" } },
         "coordinator": { "unknown_ticks": { "w1": 59 } }
     }));
     coord.tick().expect("tick");

@@ -2,10 +2,10 @@
 mod hermetic_guard;
 
 use super::agent_ops::lanea_team_ws;
-use super::lane_ops::{fork_ws, LaneHomeGuard, LaneTransport};
-use super::launch_spawn::{
-    quick_start_team_dir, seed_healthy_coordinator, DELEG_ROLE_ALPHA, QS_VALID_ROLE,
+use super::lane_ops::{
+    assert_legacy_fork_unverified, fork_ws, LaneHomeGuard, LaneTransport, COPILOT_ROLE_ALPHA,
 };
+use super::launch_spawn::{quick_start_team_dir, seed_healthy_coordinator, QS_VALID_ROLE};
 use super::*;
 use crate::lifecycle::lock::{
     acquire_agent_lifecycle_lock_for_test, override_agent_lifecycle_lock_deadlines_for_test,
@@ -46,7 +46,7 @@ fn concurrent_reset_discard_session_serializes() {
     let workspace = team.parent().expect("team workspace").to_path_buf();
     seed_healthy_coordinator(&workspace);
 
-    let launch_transport = codex_ready_transport();
+    let launch_transport = copilot_ready_transport();
     let quick_start = quick_start_with_transport_in_workspace(
         &workspace,
         &team,
@@ -61,7 +61,7 @@ fn concurrent_reset_discard_session_serializes() {
         "fixture must launch: {quick_start:?}"
     );
 
-    let reset_transport = codex_ready_transport()
+    let reset_transport = copilot_ready_transport()
         .with_session_present(true)
         .with_windows(ids.iter().map(|id| WindowName::new(id.as_str())).collect());
     let outcomes = ids
@@ -203,7 +203,7 @@ fn add_fork_remove_share_lifecycle_lock_behavior() {
         "released add-agent must add the worker"
     );
 
-    let fork_workspace = fork_ws(DELEG_ROLE_ALPHA);
+    let fork_workspace = fork_ws(COPILOT_ROLE_ALPHA);
     let fork_transport = LaneTransport::new("team-laneateam", &[]);
     let fork_spec_before = std::fs::read_to_string(fork_workspace.join("team.spec.yaml")).unwrap();
     let fork_state_before = crate::state::persist::load_runtime_state(&fork_workspace).unwrap();
@@ -213,21 +213,18 @@ fn add_fork_remove_share_lifecycle_lock_behavior() {
         Duration::from_millis(120),
         Duration::from_secs(5),
     );
-    let fork_held = crate::lifecycle::fork_agent_with_transport(
-        &fork_workspace,
-        &aid("alpha"),
-        &fork_agent,
-        None,
-        false,
-        None,
-        &fork_transport,
-    );
-    let fork_held_text = format!("{fork_held:?}");
-    assert!(
-        fork_held_text.contains("unverified")
-            || fork_held_text.contains("未验证")
-            || fork_held_text.contains("LifecycleLockTimeout"),
-        "codex in-window fork is unverified (lock is not reached); got {fork_held:?}"
+    // The legacy fork entry takes the lifecycle lock before reading the source row.
+    assert_lock_timeout(
+        crate::lifecycle::fork_agent_with_transport(
+            &fork_workspace,
+            &aid("alpha"),
+            &fork_agent,
+            None,
+            false,
+            None,
+            &fork_transport,
+        ),
+        "fork-agent",
     );
     assert!(
         fork_transport.spawns().is_empty(),
@@ -254,10 +251,10 @@ fn add_fork_remove_share_lifecycle_lock_behavior() {
         None,
         &fork_transport,
     );
-    let fork_after_text = format!("{fork_after:?}");
+    assert_legacy_fork_unverified(&fork_after, "copilot");
     assert!(
-        fork_after_text.contains("unverified") || fork_after_text.contains("未验证"),
-        "codex in-window fork stays unverified after lock release; got {fork_after:?}"
+        fork_transport.spawns().is_empty(),
+        "released legacy fork-agent stays refused and must not spawn a window"
     );
 
     let remove_workspace = lanea_team_ws("stopped");
@@ -423,19 +420,17 @@ fn breal_reset_rehydrates_role_context_from_compiled_spec() {
     )
     .expect("reset should use spec-rehydrated role context");
 
-    let spawns = transport.spawn_records();
-    let argv = spawns
-        .last()
-        .map(|record| record.join("\n"))
+    let prompt = transport
+        .spawn_instructions()
+        .pop()
         .expect("reset must spawn w1");
     assert!(
-        argv.contains("role `Phase B Real Worker One`")
-            || argv.contains("role Phase B Real Worker One"),
-        "spawn argv must carry role from compiled spec/role doc, got:\n{argv}"
+        prompt.contains("role `Phase B Real Worker One`"),
+        "spawned worker instructions must carry role from compiled spec/role doc, got:\n{prompt}"
     );
     assert!(
-        !argv.contains("role `developer`") && !argv.contains("role developer"),
-        "spawn argv must not fall back to generic developer, got:\n{argv}"
+        !prompt.contains("role `developer`"),
+        "spawned worker instructions must not fall back to generic developer, got:\n{prompt}"
     );
 }
 
@@ -450,19 +445,17 @@ fn breal_restart_rehydrates_role_context_from_compiled_spec() {
     crate::lifecycle::restart_with_transport(&workspace, true, Some("teamdir"), &transport)
         .expect("restart should use spec-rehydrated role context");
 
-    let spawns = transport.spawn_records();
-    let argv = spawns
-        .last()
-        .map(|record| record.join("\n"))
+    let prompt = transport
+        .spawn_instructions()
+        .pop()
         .expect("restart must spawn w1");
     assert!(
-        argv.contains("role `Phase B Real Worker One`")
-            || argv.contains("role Phase B Real Worker One"),
-        "restart spawn argv must carry role from compiled spec/role doc, got:\n{argv}"
+        prompt.contains("role `Phase B Real Worker One`"),
+        "restart worker instructions must carry role from compiled spec/role doc, got:\n{prompt}"
     );
     assert!(
-        !argv.contains("role `developer`") && !argv.contains("role developer"),
-        "restart spawn argv must not fall back to generic developer, got:\n{argv}"
+        !prompt.contains("role `developer`"),
+        "restart worker instructions must not fall back to generic developer, got:\n{prompt}"
     );
 }
 
@@ -481,12 +474,12 @@ fn team_dir_with_roles(role_docs: &[(&str, &str)]) -> PathBuf {
 }
 
 fn breal_workspace() -> (PathBuf, PathBuf) {
-    let w1 = "---\nname: w1\nrole: Phase B Real Worker One\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker one body.\n";
-    let w2 = "---\nname: w2\nrole: Phase B Real Worker Two\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker two body.\n";
+    let w1 = "---\nname: w1\nrole: Phase B Real Worker One\nprovider: copilot\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker one body.\n";
+    let w2 = "---\nname: w2\nrole: Phase B Real Worker Two\nprovider: copilot\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker two body.\n";
     let team = team_dir_with_roles(&[("w1.md", w1), ("w2.md", w2)]);
     let workspace = team.parent().expect("team workspace").to_path_buf();
     seed_healthy_coordinator(&workspace);
-    let launch_transport = codex_ready_transport();
+    let launch_transport = copilot_ready_transport();
     quick_start_with_transport_in_workspace(
         &workspace,
         &team,
@@ -500,11 +493,11 @@ fn breal_workspace() -> (PathBuf, PathBuf) {
 }
 
 fn breal_one_worker_workspace() -> (PathBuf, PathBuf) {
-    let w1 = "---\nname: w1\nrole: Phase B Real Worker One\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker one body.\n";
+    let w1 = "---\nname: w1\nrole: Phase B Real Worker One\nprovider: copilot\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker one body.\n";
     let team = team_dir_with_roles(&[("w1.md", w1)]);
     let workspace = team.parent().expect("team workspace").to_path_buf();
     seed_healthy_coordinator(&workspace);
-    let launch_transport = codex_ready_transport();
+    let launch_transport = copilot_ready_transport();
     quick_start_with_transport_in_workspace(
         &workspace,
         &team,
@@ -542,7 +535,7 @@ fn strip_runtime_command_context(workspace: &std::path::Path) {
 
 fn role_doc(id: &str) -> String {
     format!(
-        "---\nname: {id}\nrole: {id} Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{id} worker.\n"
+        "---\nname: {id}\nrole: {id} Worker\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{id} worker.\n"
     )
 }
 
@@ -550,7 +543,7 @@ fn add_fixture() -> (PathBuf, PathBuf, PathBuf, OfflineTransport) {
     let team = quick_start_team_dir(QS_VALID_ROLE);
     let workspace = team.parent().expect("team workspace").to_path_buf();
     seed_healthy_coordinator(&workspace);
-    let launch_transport = codex_ready_transport();
+    let launch_transport = copilot_ready_transport();
     quick_start_with_transport_in_workspace(
         &workspace,
         &team,
@@ -566,14 +559,17 @@ fn add_fixture() -> (PathBuf, PathBuf, PathBuf, OfflineTransport) {
         team,
         workspace,
         role,
-        codex_ready_transport().with_session_present(true),
+        copilot_ready_transport().with_session_present(true),
     )
 }
 
-fn codex_ready_transport() -> OfflineTransport {
+/// Every pane shows the Copilot ready screen, so a Copilot worker's startup-prompt handler returns
+/// at once instead of polling an empty pane; `fake` workers never capture.
+fn copilot_ready_transport() -> OfflineTransport {
     let mut transport = OfflineTransport::new();
     for pane in 0..32 {
-        transport = transport.with_capture_for_pane(format!("%{pane}"), "OpenAI Codex");
+        transport = transport
+            .with_capture_for_pane(format!("%{pane}"), crate::provider::COPILOT_READY_MARKER);
     }
     transport
 }
@@ -629,32 +625,34 @@ enum BRealMode {
 struct BRealTransport {
     mode: BRealMode,
     spawns: std::sync::Mutex<Vec<Vec<String>>>,
+    // Copilot carries the compiled role prompt in the per-worker AGENTS.md named by
+    // COPILOT_CUSTOM_INSTRUCTIONS_DIRS, not in argv; snapshot it at spawn time.
+    instructions: std::sync::Mutex<Vec<String>>,
 }
 
 impl BRealTransport {
-    fn misowned() -> Self {
+    fn new(mode: BRealMode) -> Self {
         Self {
-            mode: BRealMode::Misowned,
+            mode,
             spawns: std::sync::Mutex::new(Vec::new()),
+            instructions: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    fn misowned() -> Self {
+        Self::new(BRealMode::Misowned)
     }
 
     fn dead_after_spawn() -> Self {
-        Self {
-            mode: BRealMode::DeadAfterSpawn,
-            spawns: std::sync::Mutex::new(Vec::new()),
-        }
+        Self::new(BRealMode::DeadAfterSpawn)
     }
 
     fn owned() -> Self {
-        Self {
-            mode: BRealMode::Owned,
-            spawns: std::sync::Mutex::new(Vec::new()),
-        }
+        Self::new(BRealMode::Owned)
     }
 
-    fn spawn_records(&self) -> Vec<Vec<String>> {
-        self.spawns.lock().unwrap().clone()
+    fn spawn_instructions(&self) -> Vec<String> {
+        self.instructions.lock().unwrap().clone()
     }
 
     fn spawn_result(
@@ -662,8 +660,16 @@ impl BRealTransport {
         session: &SessionName,
         window: &WindowName,
         argv: &[String],
+        env: &std::collections::BTreeMap<String, String>,
     ) -> SpawnResult {
         self.spawns.lock().unwrap().push(argv.to_vec());
+        self.instructions.lock().unwrap().push(
+            env.get("COPILOT_CUSTOM_INSTRUCTIONS_DIRS")
+                .and_then(|dir| {
+                    std::fs::read_to_string(std::path::Path::new(dir).join("AGENTS.md")).ok()
+                })
+                .unwrap_or_default(),
+        );
         let pane = match self.mode {
             BRealMode::Misowned => "%5",
             BRealMode::DeadAfterSpawn => "%9",
@@ -689,9 +695,9 @@ impl Transport for BRealTransport {
         window: &WindowName,
         argv: &[String],
         _cwd: &std::path::Path,
-        _env: &std::collections::BTreeMap<String, String>,
+        env: &std::collections::BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
-        Ok(self.spawn_result(session, window, argv))
+        Ok(self.spawn_result(session, window, argv, env))
     }
 
     fn spawn_into(
@@ -700,9 +706,9 @@ impl Transport for BRealTransport {
         window: &WindowName,
         argv: &[String],
         _cwd: &std::path::Path,
-        _env: &std::collections::BTreeMap<String, String>,
+        env: &std::collections::BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
-        Ok(self.spawn_result(session, window, argv))
+        Ok(self.spawn_result(session, window, argv, env))
     }
 
     fn inject(
@@ -732,7 +738,7 @@ impl Transport for BRealTransport {
         range: CaptureRange,
     ) -> Result<CapturedText, TransportError> {
         Ok(CapturedText {
-            text: "OpenAI Codex".to_string(),
+            text: crate::provider::COPILOT_READY_MARKER.to_string(),
             range,
         })
     }

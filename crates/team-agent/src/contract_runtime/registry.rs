@@ -22,19 +22,18 @@ use team_agent_contract::runtime::{
 };
 
 const DESCRIPTORS: &[&ProviderDescriptor] = &[&KIRO_DESCRIPTOR, &CURSOR_DESCRIPTOR, &GROK_BUILD_DESCRIPTOR, &CODEX_DESCRIPTOR, &PI_DESCRIPTOR, &CLAUDE_DESCRIPTOR];
-/// Declared keys the legacy runtime also owns (the Codex worker, leader and
-/// app-server). Only an explicit `contract_runtime: true` maps one to its leaf,
-/// whose distinct canonical id is what compiled specs and state then carry, so
-/// legacy readers never mistake a contract seat for a legacy one.
-const OPT_IN: &[(&str, &ProviderDescriptor)] = &[("codex", &CODEX_DESCRIPTOR)];
-/// Declaration names that select a leaf without opt-in: Cursor's legacy key,
-/// its npm package/public command and its binary; Claude Code's and Pi's public
-/// names (`pi` is also the default role provider). The leaf's distinct id is
-/// what compiled specs and state carry. A persisted legacy state row keeps its
-/// key and is never reclassified ([`descriptor`] does not match it).
+/// Declaration names that select a leaf: Cursor's legacy key, its npm
+/// package/public command and its binary; the public names of Claude Code,
+/// Codex, Grok Build and Pi (`pi` is also the default role provider). The
+/// leaf's distinct id is what compiled specs and state carry. A persisted
+/// legacy state row keeps its key and is never reclassified ([`descriptor`]
+/// does not match it). Leaders are not leaves: `team-agent codex|grok|claude|pi`
+/// keep their own launchers.
 const TRANSITION: &[(&str, &ProviderDescriptor)] = &[
     ("cursor_agent", &CURSOR_DESCRIPTOR), ("cursor-agent", &CURSOR_DESCRIPTOR), ("agent", &CURSOR_DESCRIPTOR),
     ("claude", &CLAUDE_DESCRIPTOR), ("claude_code", &CLAUDE_DESCRIPTOR), ("claude-code", &CLAUDE_DESCRIPTOR),
+    ("codex", &CODEX_DESCRIPTOR), ("codex_cli", &CODEX_DESCRIPTOR), ("codex-cli", &CODEX_DESCRIPTOR),
+    ("grok", &GROK_BUILD_DESCRIPTOR),
     ("pi", &PI_DESCRIPTOR),
 ];
 
@@ -360,23 +359,23 @@ pub fn descriptor(key: &str) -> Option<&'static ProviderDescriptor> {
     })
 }
 
-/// The leaf a role document selects. Canonical contract keys and transition
-/// names (Cursor, Claude Code, Pi) need no flag; the shared legacy `codex` key
-/// selects its leaf only with `contract_runtime: true` and is otherwise left to
-/// the legacy path unchanged (never re-routed).
-pub fn declared(key: &str, contract_runtime: bool) -> Option<&'static ProviderDescriptor> {
-    OPT_IN.iter().find(|(shared, _)| contract_runtime && *shared == key)
-        .or_else(|| TRANSITION.iter().find(|(retired, _)| *retired == key))
+/// The leaf a role document or CLI value selects: a canonical contract key or
+/// a transition name (Cursor, Claude Code, Codex, Grok Build, Pi). No flag is
+/// needed; `contract_runtime: true` is accepted but selects nothing extra.
+pub fn declared(key: &str) -> Option<&'static ProviderDescriptor> {
+    TRANSITION.iter().find(|(retired, _)| *retired == key)
         .map(|(_, descriptor)| *descriptor)
         .or_else(|| descriptor(key))
 }
 
 /// The provider name a generated role document records for a leaf. Claude
-/// Code and Pi keep their public command names (`claude`, `pi`), which declare
-/// the leaf; every other leaf is named by its canonical id.
+/// Code, Codex, Grok Build and Pi keep their public command names, which
+/// declare the leaf; every other leaf is named by its canonical id.
 pub fn public_name(descriptor: &ProviderDescriptor) -> &'static str {
     match descriptor.identity.id {
         "claude_tui" => "claude",
+        "codex_tui" => "codex",
+        "grok_build" => "grok",
         "pi_tui" => "pi",
         id => id,
     }
@@ -384,11 +383,9 @@ pub fn public_name(descriptor: &ProviderDescriptor) -> &'static str {
 
 /// Recognize a misspelled/case-modified contract declaration so it can fail
 /// explicitly instead of accidentally selecting a legacy default provider.
-/// A shared legacy key is a contract declaration only when opted in.
-pub fn recognizes(key: &str, contract_runtime: bool) -> bool {
+pub fn recognizes(key: &str) -> bool {
     let key = key.trim();
-    (contract_runtime && OPT_IN.iter().any(|(shared, _)| shared.eq_ignore_ascii_case(key)))
-        || TRANSITION.iter().any(|(retired, _)| retired.eq_ignore_ascii_case(key))
+    TRANSITION.iter().any(|(retired, _)| retired.eq_ignore_ascii_case(key))
         || DESCRIPTORS.iter().any(|descriptor| {
             descriptor.identity.id.eq_ignore_ascii_case(key)
                 || descriptor
@@ -407,27 +404,21 @@ mod tests {
     fn canonical_cursor_does_not_reclassify_legacy_names() {
         assert_eq!(provider("cursor").unwrap(), NativeProvider::Cursor);
         assert_eq!(provider("kiro").unwrap(), NativeProvider::Kiro);
-        for legacy in ["codex", "grok"] {
-            assert!(descriptor(legacy).is_none());
-            assert!(!recognizes(legacy, false));
-            assert!(provider(legacy).is_err());
-        }
-        // Every Cursor name declares the leaf; a persisted legacy row keeps its runtime.
+        // Every Cursor name declares the leaf; a persisted legacy row is never reclassified.
         for name in ["cursor", "cursor_agent", "cursor-agent", "agent"] {
-            assert_eq!(declared(name, false).unwrap().identity.id, "cursor");
-            assert_eq!(declared(name, true).unwrap().identity.id, "cursor");
+            assert_eq!(declared(name).unwrap().identity.id, "cursor");
         }
         for legacy in ["cursor_agent", "cursor-agent", "agent"] {
             assert!(descriptor(legacy).is_none());
             assert!(provider(legacy).is_err());
         }
-        assert!(recognizes(" Cursor_Agent ", false));
-        assert!(declared("Cursor_Agent", false).is_none());
+        assert!(recognizes(" Cursor_Agent "));
+        assert!(declared("Cursor_Agent").is_none());
         assert_eq!(provider("grok_build").unwrap(), NativeProvider::GrokBuild);
-        assert!(recognizes(" Grok_Build ", false));
+        assert!(recognizes(" Grok_Build "));
         assert!(descriptor("Grok_Build").is_none());
         assert!(GROK_BUILD_DESCRIPTOR.identity.aliases.is_empty());
-        assert!(recognizes(" Cursor ", false));
+        assert!(recognizes(" Cursor "));
         assert!(descriptor("Cursor").is_none());
         for descriptor in descriptors() {
             assert_eq!(provider(descriptor.identity.id).unwrap().descriptor(), *descriptor);
@@ -435,24 +426,28 @@ mod tests {
     }
 
     #[test]
-    fn bare_codex_keeps_its_legacy_meaning_and_only_opt_in_selects_the_leaf() {
+    fn every_public_codex_name_selects_the_leaf_and_a_legacy_row_is_never_reclassified() {
         assert_eq!(CODEX_DESCRIPTOR.identity.id, "codex_tui");
         assert_eq!(CODEX_DESCRIPTOR.identity.binary, "codex");
         assert_eq!(provider("codex_tui").unwrap(), NativeProvider::Codex);
-        // Legacy state rows, compiled specs and CLI overrides keep `codex`.
-        assert!(descriptor("codex").is_none());
-        assert!(provider("codex").is_err());
-        assert!(declared("codex", false).is_none());
-        assert_eq!(declared("codex", true), Some(&CODEX_DESCRIPTOR));
-        assert_eq!(declared("codex_tui", false), Some(&CODEX_DESCRIPTOR));
-        for spelling in ["codex", " Codex ", "CODEX"] {
-            assert!(!recognizes(spelling, false), "{spelling:?}");
-            assert!(recognizes(spelling, true), "{spelling:?}");
+        assert_eq!(declared("codex_tui"), Some(&CODEX_DESCRIPTOR));
+        // Every public Codex name declares the leaf without opt-in; a persisted
+        // legacy `codex` row keeps its key and is never reclassified.
+        for name in ["codex", "codex_cli", "codex-cli"] {
+            assert_eq!(declared(name), Some(&CODEX_DESCRIPTOR), "{name}");
+            assert!(recognizes(name), "{name}");
+            assert!(descriptor(name).is_none(), "{name}");
+            assert!(provider(name).is_err(), "{name}");
         }
-        // A case variant opted in is recognized (to fail explicitly), never selected.
-        assert!(declared("Codex", true).is_none());
-        assert_eq!(declared("claude", true), Some(&CLAUDE_DESCRIPTOR));
-        assert_eq!(declared("grok_build", true), Some(&GROK_BUILD_DESCRIPTOR));
+        for spelling in [" Codex ", "CODEX", "Codex_CLI"] {
+            assert!(recognizes(spelling), "{spelling:?}");
+        }
+        // A case variant is recognized (to fail explicitly), never selected.
+        assert!(declared("Codex").is_none());
+        assert_eq!(public_name(&CODEX_DESCRIPTOR), "codex");
+        assert_eq!(declared(public_name(&CODEX_DESCRIPTOR)), Some(&CODEX_DESCRIPTOR));
+        assert_eq!(declared("claude"), Some(&CLAUDE_DESCRIPTOR));
+        assert_eq!(declared("grok_build"), Some(&GROK_BUILD_DESCRIPTOR));
         let mut identity = InstanceIdentity {
             scope: team_agent_contract::contract::types::ScopeId::new("scope").unwrap(),
             seat: team_agent_contract::contract::types::SeatId::new("worker").unwrap(),
@@ -479,21 +474,20 @@ mod tests {
         assert_eq!(CLAUDE_DESCRIPTOR.identity.id, "claude_tui");
         assert_eq!(CLAUDE_DESCRIPTOR.identity.binary, "claude");
         assert_eq!(provider("claude_tui").unwrap(), NativeProvider::Claude);
-        assert_eq!(declared("claude_tui", false), Some(&CLAUDE_DESCRIPTOR));
-        // Every public Claude name declares the leaf, with or without opt-in;
-        // a persisted legacy row keeps its key and is never reclassified.
+        assert_eq!(declared("claude_tui"), Some(&CLAUDE_DESCRIPTOR));
+        // Every public Claude name declares the leaf; a persisted legacy row
+        // keeps its key and is never reclassified.
         for name in ["claude", "claude_code", "claude-code"] {
-            assert_eq!(declared(name, false), Some(&CLAUDE_DESCRIPTOR), "{name}");
-            assert_eq!(declared(name, true), Some(&CLAUDE_DESCRIPTOR), "{name}");
-            assert!(recognizes(name, false), "{name}");
+            assert_eq!(declared(name), Some(&CLAUDE_DESCRIPTOR), "{name}");
+            assert!(recognizes(name), "{name}");
             assert!(descriptor(name).is_none(), "{name}");
             assert!(provider(name).is_err(), "{name}");
         }
-        assert!(declared("Claude", false).is_none());
+        assert!(declared("Claude").is_none());
         assert_eq!(public_name(&CLAUDE_DESCRIPTOR), "claude");
-        assert_eq!(declared(public_name(&CLAUDE_DESCRIPTOR), false), Some(&CLAUDE_DESCRIPTOR));
-        assert!(recognizes(" Claude ", false));
-        assert!(recognizes(" Claude_TUI ", false));
+        assert_eq!(declared(public_name(&CLAUDE_DESCRIPTOR)), Some(&CLAUDE_DESCRIPTOR));
+        assert!(recognizes(" Claude "));
+        assert!(recognizes(" Claude_TUI "));
         let mut identity = InstanceIdentity {
             scope: ScopeId::new("scope").unwrap(), seat: SeatId::new("worker").unwrap(),
             instance: InstanceId::new("instance").unwrap(), generation: Generation(1),
@@ -521,18 +515,16 @@ mod tests {
         assert_eq!(PI_DESCRIPTOR.identity.id, "pi_tui");
         assert_eq!(PI_DESCRIPTOR.identity.binary, "pi");
         assert_eq!(provider("pi_tui").unwrap(), NativeProvider::Pi);
-        // `pi` (also the default role provider) declares the leaf with or
-        // without opt-in; a persisted legacy `pi` row is never reclassified.
+        // `pi` (also the default role provider) declares the leaf; a
+        // persisted legacy `pi` row is never reclassified.
         assert!(descriptor("pi").is_none());
         assert!(provider("pi").is_err());
-        assert_eq!(declared("pi", false), Some(&PI_DESCRIPTOR));
-        assert_eq!(declared("pi", true), Some(&PI_DESCRIPTOR));
-        assert_eq!(declared("pi_tui", false), Some(&PI_DESCRIPTOR));
+        assert_eq!(declared("pi"), Some(&PI_DESCRIPTOR));
+        assert_eq!(declared("pi_tui"), Some(&PI_DESCRIPTOR));
         for spelling in ["pi", " Pi ", "PI"] {
-            assert!(recognizes(spelling, false), "{spelling:?}");
-            assert!(recognizes(spelling, true), "{spelling:?}");
+            assert!(recognizes(spelling), "{spelling:?}");
         }
-        assert!(declared("Pi", true).is_none());
+        assert!(declared("Pi").is_none());
         assert_eq!(public_name(&PI_DESCRIPTOR), "pi");
         assert_eq!(public_name(&CURSOR_DESCRIPTOR), "cursor");
         let mut identity = InstanceIdentity {
@@ -558,6 +550,13 @@ mod tests {
     #[test]
     fn grok_server_key_is_generation_bound_and_has_no_inspector_fallback() {
         use team_agent_contract::contract::types::{Generation, InstanceId, ScopeId, SeatId};
+        // The public `grok` name declares the leaf; a legacy `grok` row is never reclassified.
+        assert_eq!(declared("grok"), Some(&GROK_BUILD_DESCRIPTOR));
+        assert!(recognizes(" Grok "));
+        assert!(declared("Grok").is_none());
+        assert!(descriptor("grok").is_none());
+        assert!(provider("grok").is_err());
+        assert_eq!(public_name(&GROK_BUILD_DESCRIPTOR), "grok");
         let mut identity = InstanceIdentity {
             scope: ScopeId::new("scope").unwrap(), seat: SeatId::new("worker").unwrap(),
             instance: InstanceId::new("instance").unwrap(), generation: Generation(1),

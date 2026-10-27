@@ -1,3 +1,4 @@
+use super::lane_ops::assert_legacy_fork_unverified;
 use super::launch_spawn::{
     quick_start_team_dir, restart_ws_two_resumable_workers, seed_healthy_coordinator,
     DELEG_ROLE_ALPHA, DELEG_ROLE_BRAVO, QS_VALID_ROLE,
@@ -43,8 +44,8 @@ pub(super) fn lanea_team_ws(status: &str) -> PathBuf {
         &json!({
             "session_name": "team-laneateam",
             "agents": {
-                "alpha": {"status": status, "provider": "codex", "window": "alpha"},
-                "bravo": {"status": status, "provider": "codex", "window": "bravo"}
+                "alpha": {"status": status, "provider": "fake", "window": "alpha"},
+                "bravo": {"status": status, "provider": "fake", "window": "bravo"}
             }
         }),
     )
@@ -264,14 +265,9 @@ fn lanea_fork_agent_unknown_source_is_unknown_worker_before_session_check() {
 fn lanea_fork_agent_duplicate_target_is_already_exists_before_session_check() {
     let ws = lanea_team_ws("stopped");
     // target 'bravo' already exists in the spec -> duplicate; source 'alpha' exists (its session_id is irrelevant).
-    let text = format!(
-        "{:?}",
-        fork_agent(&ws, &aid("alpha"), &aid("bravo"), None, false, None)
-    );
-    assert!(
-        text.contains("unverified") || text.contains("未验证") || text.contains("refuses --as"),
-        "codex fork is unverified in-window; duplicate --as is not reached. got {text}"
-    );
+    // The legacy fork entry refuses the fake source as unverified; duplicate --as is not reached.
+    let result = fork_agent(&ws, &aid("alpha"), &aid("bravo"), None, false, None);
+    assert_legacy_fork_unverified(&result, "fake");
 }
 
 // SEAM-GATED real-machine boundary (note to porter): stop_agent / reset_agent / fork_agent must drive a
@@ -320,7 +316,7 @@ fn add_agent_joins_w2_into_running_roster_and_existing_session() {
         workspace,
         &json!({
             "session_name": "team-implteam",
-            "agents": {"w1": {"status": "running", "provider": "codex", "window": "w1"}}
+            "agents": {"w1": {"status": "running", "provider": "fake", "window": "w1"}}
         }),
     )
     .unwrap();
@@ -329,7 +325,7 @@ fn add_agent_joins_w2_into_running_roster_and_existing_session() {
     let role_file = team_dir.join("w2-role.md");
     std::fs::write(
         &role_file,
-        "---\nname: w2\nrole: Worker Two\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker two.\n",
+        "---\nname: w2\nrole: Worker Two\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker two.\n",
     )
     .unwrap();
     let transport = OfflineTransport::new().with_session_present(true);

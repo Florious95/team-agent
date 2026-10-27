@@ -275,8 +275,8 @@ pub(super) fn spawn_agent_window(
     // (agent row → active_team_key) for back-compat with non-restart callers.
     owner_team_id_override: Option<&str>,
 ) -> Result<SpawnedAgentWindow, LifecycleError> {
-    // A pre-upgrade Claude Code or Pi worker row has no legacy runtime left;
-    // refuse before any MCP file, profile or pane side effect.
+    // A pre-upgrade Claude Code, Codex, Grok or Pi worker row has no legacy
+    // runtime left; refuse before any MCP file, profile or pane side effect.
     if let Some(retired) = agent
         .get("provider")
         .and_then(serde_json::Value::as_str)
@@ -423,10 +423,6 @@ pub(super) fn spawn_agent_window(
             &system_prompt,
             &mut env,
         )?;
-    }
-    if provider == crate::provider::Provider::Grok {
-        crate::lifecycle::launch::ensure_grok_login_and_folder_trust(workspace)?;
-        crate::lifecycle::launch::apply_grok_mcp_overlay(workspace, &mcp_config)?;
     }
     // Spawn cwd is override-or-workspace (E56: ignore drifted state
     // `.team/runtime/<team_key>/`).
@@ -1153,7 +1149,7 @@ pub(super) fn session_live_or_default(
 
 /// ---
 /// purpose: 取席位行的 provider
-/// returns: 解析成功用它，缺失或不认识时退到 codex
+/// returns: 解析成功用它，缺失或不认识时退到已退役的 legacy codex 键(其后一律拒绝，不会起席)
 /// ---
 pub(super) fn agent_provider(agent: &serde_json::Value) -> Provider {
     agent
@@ -1318,41 +1314,17 @@ pub(super) fn resume_backing_probe_for_agent(
             let _ = (workspace, agent_id, agent, session_id, rollout_path);
             false
         }
-        Provider::Codex => {
-            let rollout_ok = rollout_path_exists(rollout_path);
-            let scan_roots = codex_session_transcript_scan_roots(agent, rollout_path);
-            for root in &scan_roots {
-                checked_paths.push(root.clone());
-            }
-            rollout_ok
-                || codex_session_transcript_exists_with_roots(session_id.as_str(), &scan_roots)
-        }
         Provider::Copilot => {
             if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
                 checked_paths.push(home.join(".copilot/session-store.db"));
             }
             copilot_session_store_has_session(session_id.as_str())
         }
-        Provider::Grok => {
-            let spawn_cwd = agent
-                .get("spawn_cwd")
-                .and_then(serde_json::Value::as_str)
-                .map(PathBuf::from)
-                .unwrap_or_else(|| workspace.to_path_buf());
-            match crate::provider::session_scan::grok::grok_session_dir(
-                &spawn_cwd,
-                session_id.as_str(),
-            ) {
-                Some(dir) => {
-                    checked_paths.push(dir.clone());
-                    crate::provider::session_scan::grok::grok_session_archive_present(&dir)
-                }
-                None => false,
-            }
-        }
-        // Claude Code and Pi workers run only through their contract leaves.
+        // Claude Code, Codex, Grok and Pi workers run only through their contract leaves.
         Provider::Claude
         | Provider::ClaudeCode
+        | Provider::Codex
+        | Provider::Grok
         | Provider::Pi
         | Provider::GeminiCli
         | Provider::Fake => false,
@@ -1387,86 +1359,6 @@ pub(super) fn provider_wire_supports_resume(provider: &str) -> bool {
     parse_provider(provider)
         .map(provider_supports_resume)
         .unwrap_or(false)
-}
-
-fn rollout_path_exists(rollout_path: Option<&RolloutPath>) -> bool {
-    rollout_path
-        .as_ref()
-        .is_some_and(|path| path.as_path().exists())
-}
-
-fn codex_session_transcript_exists(
-    agent: &serde_json::Value,
-    session_id: &str,
-    rollout_path: Option<&RolloutPath>,
-) -> bool {
-    let roots = codex_session_transcript_scan_roots(agent, rollout_path);
-    codex_session_transcript_exists_with_roots(session_id, &roots)
-}
-
-fn codex_session_transcript_scan_roots(
-    agent: &serde_json::Value,
-    rollout_path: Option<&RolloutPath>,
-) -> Vec<PathBuf> {
-    let mut roots: Vec<PathBuf> = Vec::new();
-    if let Some(parent) = rollout_path
-        .map(RolloutPath::as_path)
-        .and_then(Path::parent)
-        .filter(|path| path.is_dir())
-    {
-        roots.push(parent.to_path_buf());
-    }
-    if let Some(root) = agent
-        .get("codex_sessions_root")
-        .and_then(serde_json::Value::as_str)
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-        .filter(|path| path.is_dir())
-    {
-        roots.push(root);
-    }
-    if let Some(root) = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join(".codex").join("sessions"))
-        .filter(|path| path.is_dir())
-    {
-        roots.push(root);
-    }
-    roots.sort();
-    roots.dedup();
-    roots
-}
-
-fn codex_session_transcript_exists_with_roots(session_id: &str, roots: &[PathBuf]) -> bool {
-    if session_id.is_empty() {
-        return false;
-    }
-    roots
-        .iter()
-        .any(|root| session_transcript_exists_under(root, session_id, 4))
-}
-
-fn session_transcript_exists_under(root: &Path, session_id: &str, max_depth: usize) -> bool {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return false;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_file() {
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if name.ends_with(".jsonl") && name.contains(session_id) {
-                return true;
-            }
-        } else if max_depth > 0
-            && path.is_dir()
-            && session_transcript_exists_under(&path, session_id, max_depth.saturating_sub(1))
-        {
-            return true;
-        }
-    }
-    false
 }
 
 fn copilot_session_store_has_session(session_id: &str) -> bool {
@@ -2156,42 +2048,5 @@ mod e36_transcript_backing_tests {
             serde_json::json!({"pending_agent_ids": ["worker"]}),
         )
         .is_err());
-    }
-
-    #[test]
-    fn codex_session_transcript_is_recognized_when_rollout_path_is_stale() {
-        let scratch = ScratchDir::new("codex-recognized");
-        let sessions_root = scratch.path().join("sessions");
-        let dated = sessions_root.join("2026").join("06").join("20");
-        std::fs::create_dir_all(&dated).expect("mkdir dated sessions");
-        let session_id = "019ee540-37ed-7a20-a141-1d654224d209";
-        std::fs::write(
-            dated.join(format!("rollout-2026-06-20T21-37-31-{session_id}.jsonl")),
-            b"{}\n",
-        )
-        .expect("codex transcript");
-
-        let stale = RolloutPath::new(scratch.path().join("old").join("missing.jsonl"));
-        let agent = serde_json::json!({
-            "codex_sessions_root": sessions_root.to_string_lossy(),
-        });
-        assert!(
-            codex_session_transcript_exists(&agent, session_id, Some(&stale)),
-            "matching codex transcript under codex_sessions_root must count as resume backing"
-        );
-    }
-
-    #[test]
-    fn missing_codex_session_transcript_is_not_backing() {
-        let scratch = ScratchDir::new("codex-missing");
-        let sessions_root = scratch.path().join("sessions");
-        std::fs::create_dir_all(&sessions_root).expect("mkdir sessions");
-        let agent = serde_json::json!({
-            "codex_sessions_root": sessions_root.to_string_lossy(),
-        });
-        assert!(
-            !codex_session_transcript_exists(&agent, "019ee540-ffff-7a20-a141-1d654224d209", None,),
-            "no matching codex transcript => no backing"
-        );
     }
 }

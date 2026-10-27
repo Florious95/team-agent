@@ -248,7 +248,7 @@ fn upgrade_restart_plan_uses_persisted_session_id() {
         "agents": {
             "w1": {
                 "status": "running",
-                "provider": "codex",
+                "provider": "copilot",
                 "session_id": "sess-upgrade",
                 "rollout_path": rollout.to_string_lossy(),
                 "first_send_at": "2026-06-07T01:00:00+00:00"
@@ -332,7 +332,7 @@ fn upgrade_restart_refuses_interacted_worker_without_session_id() {
         "agents": {
             "w1": {
                 "status": "running",
-                "provider": "codex",
+                "provider": "fake",
                 "session_id": null,
                 "first_send_at": "2026-06-07T01:00:00+00:00"
             }
@@ -358,6 +358,7 @@ fn upgrade_rust_mcp_config_uses_current_binary_and_runtime_key() {
     fixture.write_spec(TEAM_KEY, LEGACY_NAME);
     fixture.seed_restartable_state();
     fixture.seed_healthy_coordinator();
+    let _home = fixture.copilot_home_with_session("sess-upgrade");
     let transport = RecordingTransport::new().with_session_present(false);
 
     let report = restart_with_transport(&fixture.team_dir, false, Some(TEAM_KEY), &transport)
@@ -373,22 +374,37 @@ fn upgrade_rust_mcp_config_uses_current_binary_and_runtime_key() {
         format!("{report:?}").contains("Resumed"),
         "restart report must show resume path for persisted session_id; report={report:?}"
     );
+    // Copilot reads its MCP config from `--additional-mcp-config @<file>`.
+    let mcp_config_path = spawn
+        .argv
+        .windows(2)
+        .find(|pair| pair[0] == "--additional-mcp-config")
+        .and_then(|pair| pair[1].strip_prefix('@'))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            panic!("restarted copilot worker must point --additional-mcp-config at its MCP file; command_line={command_line:?}")
+        });
+    let mcp_text = std::fs::read_to_string(&mcp_config_path).unwrap();
+    let mcp_config: Value = serde_json::from_str(&mcp_text).unwrap();
     assert!(
-        command_line.contains(&current_exe),
-        "restarted worker MCP command must use the current Rust candidate binary path; current_exe={current_exe} command_line={command_line:?}"
+        mcp_text.contains(&current_exe),
+        "restarted worker MCP command must use the current Rust candidate binary path; current_exe={current_exe} mcp_config={mcp_text}"
     );
     assert!(
         command_line.contains("TEAM_AGENT_OWNER_TEAM_ID=upgrade-key")
-            && command_line.contains("TEAM_AGENT_OWNER_TEAM_ID=\"upgrade-key\""),
-        "spawn env and MCP config must both use runtime team key upgrade-key; command_line={command_line:?}"
+            && mcp_config
+                .pointer("/mcpServers/team_orchestrator/env/TEAM_AGENT_OWNER_TEAM_ID")
+                .and_then(Value::as_str)
+                == Some("upgrade-key"),
+        "spawn env and MCP config must both use runtime team key upgrade-key; command_line={command_line:?} mcp_config={mcp_text}"
     );
     assert!(
-        spawn
-            .argv
-            .windows(2)
-            .any(|pair| pair[0] == "codex" && pair[1] == "resume")
-            && spawn.argv.iter().any(|arg| arg == "sess-upgrade"),
-        "restart must resume persisted provider session, not fresh start; command_line={command_line:?}"
+        spawn.argv.iter().any(|arg| arg == "copilot")
+            && spawn
+                .argv
+                .windows(2)
+                .any(|pair| pair[0] == "--resume" && pair[1] == "sess-upgrade"),
+        "restart must resume persisted provider session (`copilot ... --resume <sid>`), not fresh start; command_line={command_line:?}"
     );
 }
 
@@ -443,7 +459,7 @@ impl UpgradeFixture {
         std::fs::create_dir_all(self.team_dir.join("agents")).unwrap();
         std::fs::write(
             self.team_dir.join("agents").join("upgrade_worker.md"),
-            "---\nname: upgrade_worker\nrole: Upgrade Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n",
+            "---\nname: upgrade_worker\nrole: Upgrade Worker\nprovider: copilot\nmodel: gpt-5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n",
         )
         .unwrap();
         let spec = team_agent::compiler::compile_team(&self.team_dir).unwrap();
@@ -471,7 +487,7 @@ impl UpgradeFixture {
                 "agents": {
                     "upgrade_worker": {
                         "status": "running",
-                        "provider": "codex",
+                        "provider": "copilot",
                         "role": "Upgrade Worker",
                         "tools": ["mcp_team"],
                         "window": "upgrade_worker",
@@ -492,7 +508,7 @@ impl UpgradeFixture {
                         "agents": {
                             "upgrade_worker": {
                                 "status": "running",
-                                "provider": "codex",
+                                "provider": "copilot",
                                 "role": "Upgrade Worker",
                                 "tools": ["mcp_team"],
                                 "window": "upgrade_worker",
@@ -509,6 +525,26 @@ impl UpgradeFixture {
             }),
         )
         .unwrap();
+    }
+
+    /// Copilot resume backing is the `sessions` row in
+    /// `$HOME/.copilot/session-store.db`; seed it under a fixture HOME and point
+    /// HOME there for the guard's lifetime (callers are `serial(env)`).
+    fn copilot_home_with_session(&self, session_id: &str) -> HomeGuard {
+        let home = self.workspace.parent().unwrap().join("home");
+        let db = home.join(".copilot").join("session-store.db");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(db).unwrap();
+        conn.execute_batch(
+            "create table if not exists sessions (id text primary key, cwd text, created_at text);",
+        )
+        .unwrap();
+        conn.execute(
+            "insert or replace into sessions(id, cwd, created_at) values (?1, ?2, '2026-06-07T01:00:00Z')",
+            params![session_id, self.team_dir.to_string_lossy()],
+        )
+        .unwrap();
+        HomeGuard::set(&home)
     }
 
     fn dual_team_state(&self, active: &str) -> Value {
@@ -654,6 +690,25 @@ impl UpgradeFixture {
                 ((*table).to_string(), count)
             })
             .collect()
+    }
+}
+
+struct HomeGuard(Option<std::ffi::OsString>);
+
+impl HomeGuard {
+    fn set(home: &Path) -> Self {
+        let previous = std::env::var_os("HOME");
+        std::env::set_var("HOME", home);
+        Self(previous)
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(previous) => std::env::set_var("HOME", previous),
+            None => std::env::remove_var("HOME"),
+        }
     }
 }
 

@@ -97,7 +97,7 @@ fn server_exited_during_replacement_spawn_does_not_cascade_session_disappeared_a
     let case = RestartCase::new(
         "case-b-no-second-cascade",
         worker_ids(2),
-        ProviderShape::CodexResumable,
+        ProviderShape::CopilotResumable,
     );
     let transport =
         BuildBeforeDestroyTransport::recording(worker_ids(2)).with_server_exit_after_first_spawn();
@@ -257,6 +257,9 @@ impl RestartCase {
 
     fn seed_state_with_panes(&self, provider: ProviderShape, panes: &BTreeMap<String, String>) {
         seed_restart_state(&self.workspace, &self.workers, provider, panes);
+        if matches!(provider, ProviderShape::CopilotResumable) {
+            seed_copilot_session_store(self.env.home(), &self.workers);
+        }
         seed_healthy_coordinator(&self.workspace);
     }
 
@@ -278,21 +281,21 @@ impl RestartCase {
 #[derive(Clone, Copy)]
 enum ProviderShape {
     Fake,
-    CodexResumable,
+    CopilotResumable,
 }
 
 impl ProviderShape {
     fn provider(self) -> &'static str {
         match self {
             Self::Fake => "fake",
-            Self::CodexResumable => "codex",
+            Self::CopilotResumable => "copilot",
         }
     }
 
     fn model(self) -> &'static str {
         match self {
             Self::Fake => "fake",
-            Self::CodexResumable => "gpt-5.5",
+            Self::CopilotResumable => "gpt-5",
         }
     }
 }
@@ -354,7 +357,7 @@ fn seed_restart_state(
                 "spawn_cwd": workspace.to_string_lossy(),
                 "spawned_at": "2026-07-14T00:00:00+00:00",
             });
-            if matches!(provider, ProviderShape::CodexResumable) {
+            if matches!(provider, ProviderShape::CopilotResumable) {
                 let rollout = workspace.join(format!("{worker}.jsonl"));
                 fs::write(&rollout, "{}\n").expect("write rollout fixture");
                 let row_obj = row.as_object_mut().expect("agent row object");
@@ -399,6 +402,25 @@ fn seed_restart_state(
         }),
     )
     .expect("seed runtime state");
+}
+
+/// Copilot resume backing is the `sessions` row in the hermetic
+/// `$HOME/.copilot/session-store.db`.
+fn seed_copilot_session_store(home: &Path, workers: &[String]) {
+    let db = home.join(".copilot").join("session-store.db");
+    fs::create_dir_all(db.parent().expect("copilot store parent")).expect("create copilot dir");
+    let conn = rusqlite::Connection::open(db).expect("open copilot session store");
+    conn.execute_batch(
+        "create table if not exists sessions (id text primary key, cwd text, created_at text);",
+    )
+    .expect("create copilot sessions table");
+    for worker in workers {
+        conn.execute(
+            "insert or replace into sessions(id, cwd, created_at) values (?1, ?2, '2026-07-14T00:00:00Z')",
+            rusqlite::params![format!("session-{worker}"), home.to_string_lossy()],
+        )
+        .expect("seed copilot session row");
+    }
 }
 
 fn seed_healthy_coordinator(workspace: &Path) {

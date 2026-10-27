@@ -42,6 +42,10 @@ CREATE TABLE results(result_id TEXT PRIMARY KEY, owner_team_id TEXT NOT NULL, ta
 CREATE TABLE contract_outbox(message_id TEXT PRIMARY KEY REFERENCES messages(message_id), target TEXT NOT NULL,
  state TEXT NOT NULL, attempt TEXT, effect TEXT NOT NULL);
 ";
+/// Additive and created on first retirement: user_version 4 stores stay
+/// readable by binaries that never query it.
+const RETIREMENTS: &str = "CREATE TABLE IF NOT EXISTS contract_retirements(instance TEXT PRIMARY KEY,
+ seat TEXT NOT NULL, record TEXT NOT NULL);";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SeatStatus {
@@ -319,6 +323,62 @@ impl ContractStore {
     }
     pub fn assert_current(&self, identity: &InstanceIdentity) -> Result<SeatRecord, Error> {
         current(&self.connection, &self.scope, identity)
+    }
+    /// A held lease is an in-flight lifecycle operation, registry inspection or
+    /// delivery attempt. Observation only; it never takes or releases one.
+    pub fn leased(&self, seat: &SeatId) -> Result<bool, Error> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM contract_leases WHERE seat=?1)",
+            [seat.as_str()],
+            |r| r.get(0),
+        )?)
+    }
+    /// Explicit end of a seat identity (remove-agent / reset-agent). Only the
+    /// exact current, positively Stopped and unleased seat may retire. Creation
+    /// receipts and the generation counter stay as history, so a later start
+    /// of this ID allocates the next generation fresh and never resumes the
+    /// retired native session. Stores created before this table get it here.
+    pub fn retire(&mut self, identity: &InstanceIdentity) -> Result<SeatRecord, Error> {
+        let scope = self.scope.clone();
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute_batch(RETIREMENTS)?;
+        let seat = current(&tx, &scope, identity)?;
+        if seat.status != SeatStatus::Stopped {
+            return Err(Error::Invalid("only a stopped seat can retire"));
+        }
+        lifecycle_unleased(&tx, &identity.seat)?;
+        tx.execute(
+            "INSERT INTO contract_retirements VALUES(?1,?2,?3)",
+            params![
+                identity.instance.as_str(),
+                identity.seat.as_str(),
+                serde_json::to_string(&seat)?
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM contract_seats WHERE seat=?1",
+            [identity.seat.as_str()],
+        )?;
+        tx.commit()?;
+        Ok(seat)
+    }
+    pub fn retired(&self, identity: &InstanceIdentity) -> Result<bool, Error> {
+        if identity.scope != self.scope {
+            return Err(Error::Fence);
+        }
+        let table: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='contract_retirements')",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(table
+            && self.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM contract_retirements WHERE instance=?1 AND seat=?2)",
+                params![identity.instance.as_str(), identity.seat.as_str()],
+                |r| r.get(0),
+            )?)
     }
 
     pub(crate) fn begin(&mut self, operation: &OperationRecord) -> Result<(), Error> {

@@ -21,7 +21,8 @@ Use existing resources rather than establishing accounts. `team-agent doctor --w
 |---|---|
 | Pi | Several model catalogs; every Pi worker needs an exact qualified model ID such as `openai-codex/gpt-6-luna` from `team-agent models --provider pi`; Pi has no permission prompt to bypass, so keep bypass `false` |
 | Claude | Every Claude worker needs an exact model ID from `team-agent models --provider claude`; existing subscription login only |
-| Codex / other native CLIs | The user's existing workflow, native permissions, model catalog and supported session capabilities |
+| Codex / Grok | Every Codex or Grok worker needs an exact model ID from `team-agent models --provider codex` or `team-agent models --provider grok`; existing subscription login only |
+| Other native CLIs | The user's existing workflow, native permissions, model catalog and supported session capabilities |
 | Bypass `true` | Fewer interruptions, broader automatic authority |
 | Bypass `false` | Native permissions remain; human confirmation may interrupt unattended work |
 
@@ -97,7 +98,7 @@ team-agent start reviewer --effort high --bypass false
 
 The Pi/false example above still requires the user's explicit choices. File/CLI conflicts are rejected before writing or startup. Omitted settings/body are preserved; `--prompt` replaces the permanent role body, not a one-time task. Stop a running worker before changing settings or instructions. Provider changes are refused. Startup failure restores role/spec bytes and reports failure, not an applied update.
 
-Use `agent add/remove/reset/clone/fork` only for those explicit operations. Reset needs intentional approval and `--discard-session`; fork requires `--as NEW_ID`, and `--in-place` is not supported. See [the operator reference](references/team-agent-operator.md) for capability, profile, force and import boundaries. Never put secrets in role text or copy authentication from another directory.
+Use `agent add/remove/reset/clone/fork` only for those explicit operations. Reset needs intentional approval and `--discard-session`. Remove and reset refuse a seat that is still working: wait for it or `stop` it first (remove also needs `--force` for a running idle seat). Fork requires `--as NEW_ID`, and `--in-place` is not supported. See [the operator reference](references/team-agent-operator.md) for capability, profile, force and import boundaries. Never put secrets in role text or copy authentication from another directory.
 
 ## Optional native CLI argv routing
 
