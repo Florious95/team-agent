@@ -32,6 +32,10 @@ impl CodexAdapter {
     pub fn hooks(&self) -> ProviderHooks<'_> { ProviderHooks { catalog: HookBinding::Bound(self), plan: HookBinding::Bound(self), materialize: HookBinding::Bound(self), session: HookBinding::Bound(self), semantic: HookBinding::Bound(self), interaction: HookBinding::Bound(self), fork: HookBinding::Bound(self) } }
     /// The owned stdio server as `-c` overrides for this invocation only. The
     /// owned tools never prompt; every other approval follows the bypass intent.
+    /// They also stay in the initial tool list: for a catalog model with
+    /// `supports_search_tool`, Codex otherwise defers every MCP tool behind its
+    /// own `tool_search`, whose `limit: Option<usize>` rejects a model's `5.0`
+    /// before any search runs, so the team tools are never found (#394).
     pub fn mcp_overrides(&self, owner: &InstanceIdentity) -> Result<Vec<OsString>, ContractError> {
         let key = server_key(owner);
         let args = self.mcp.arguments.iter().map(|arg| toml_string(arg)).collect::<Result<Vec<_>, _>>()?.join(", ");
@@ -43,7 +47,8 @@ impl CodexAdapter {
             let env = self.mcp.environment.iter().map(|(key, value)| Ok(format!("{} = {}", toml_string(key)?, toml_string(value)?))).collect::<Result<Vec<_>, ContractError>>()?;
             values.push(format!("mcp_servers.{key}.env={{ {} }}", env.join(", ")));
         }
-        values.extend([format!("mcp_servers.{key}.tool_timeout_sec=600.0"), format!("mcp_servers.{key}.default_tools_approval_mode=\"approve\"")]);
+        values.extend([format!("mcp_servers.{key}.tool_timeout_sec=600.0"), format!("mcp_servers.{key}.default_tools_approval_mode=\"approve\""),
+            format!("mcp_servers.{key}.omit_tools_from=[\"deferred\"]")]);
         Ok(values.into_iter().flat_map(|value| [OsString::from("-c"), value.into()]).collect())
     }
 }
