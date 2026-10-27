@@ -19,8 +19,9 @@ Use existing resources rather than establishing accounts. `team-agent doctor --w
 
 | Choice | Explain |
 |---|---|
-| Pi | Several model catalogs; an explicit model needs a qualified ID such as `openai-codex/gpt-6-luna` |
-| Codex / Claude / other native CLIs | The user's existing workflow, native permissions, model catalog and supported session capabilities |
+| Pi | Several model catalogs; every Pi worker needs an exact qualified model ID such as `openai-codex/gpt-6-luna` from `team-agent models --provider pi`; Pi has no permission prompt to bypass, so keep bypass `false` |
+| Claude | Every Claude worker needs an exact model ID from `team-agent models --provider claude`; existing subscription login only |
+| Codex / other native CLIs | The user's existing workflow, native permissions, model catalog and supported session capabilities |
 | Bypass `true` | Fewer interruptions, broader automatic authority |
 | Bypass `false` | Native permissions remain; human confirmation may interrupt unattended work |
 
@@ -36,11 +37,12 @@ Keep the goal in `TEAM.md` and each worker's instructions in `agents/*.md`. The 
   agents/reviewer.md
 ```
 
-Record provider and boolean bypass in every new role. This example assumes the user explicitly chose Pi and bypass false; it is not a default:
+Record provider, model and boolean bypass in every new role. This example assumes the user explicitly chose Pi, a model copied from `team-agent models --provider pi`, and bypass false; it is not a default:
 
 ```markdown
 ---
 provider: pi
+model: openai-codex/gpt-6-luna
 dangerously_skip_permissions: false
 ---
 Review the change and report concrete regression risks.
@@ -88,7 +90,7 @@ With the user's provider/bypass choices, `start` unifies adding an absent seat a
 
 ```sh
 team-agent start auditor --role-file /absolute/path/to/auditor.md
-team-agent start analyst --provider pi --bypass false --prompt "Analyze the proposed change"
+team-agent start analyst --provider pi --model openai-codex/gpt-6-luna --bypass false --prompt "Analyze the proposed change"
 team-agent stop reviewer
 team-agent start reviewer --effort high --bypass false
 ```
