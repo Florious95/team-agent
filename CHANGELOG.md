@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.5.125]
+
+- **Unified contract framework:** Codex (`codex_tui`, #374), Pi (`pi_tui`, #378) and Claude Code (`claude_tui`, #377) run as contract-native workers beside Cursor. Each launches its public PATH command (user wrappers run) with an owned per-generation MCP server. A bare `codex`/`pi` role selects its leaf only with `contract_runtime: true`; legacy `codex`, `pi`, `claude` and `claude_code` seats keep their runtime.
+- **Cursor on the contract leaf only (#381, #382):** the legacy `cursor_agent` engine, which launched bare `agent` without `--approve-mcps` and parked every message on `mcp_handshake_missing`, is removed. `cursor`, `cursor-agent`, `agent` and `cursor_agent` all select the `cursor` leaf in role files, `--provider` and `team-agent models`; it runs `cursor-agent` with an owned `.cursor/mcp.json`. A pre-upgrade `cursor_agent` seat can only be stopped or removed, then added again.
+- **Dynamic contract add-agent (#382):** `add-agent` (and `start AGENT` / `agent add` for a new seat) admits contract roles, with a default role body when `--prompt` is omitted. A stopped seat's closed pane no longer fences a new seat on a restarted shared tmux server, and a refused add rolls back without leaving a native process behind.
+- **Claude delivery and status (#379, #380):** Claude's echoed turn above the composer no longer reads as an unconsumed draft, so a delivered message is not reported `send_unverified_exhausted`. `status` and the coordinator read Claude's live session registry (busy, waiting or idle) instead of the pane command.
+- **MCP handshake self-healing (#372, #373):** each MCP server publishes its own handshake receipt, so a foreign server can no longer clobber a seat's slot. A handshake wait is bounded at 300s, then the message parks as `queued_until_start` with one leader notice and resumes when a fresh receipt arrives.
+- **Release metadata:** align the eight standard version/changelog files at 0.5.125. Installing a published package does not automatically replace a running team's binary.
+
 ## [0.5.124]
 
 - **Current-shell install (#359):** when `~/.local/bin` is not on the installing shell's PATH, print the exact `export` and `rehash` commands plus the absolute binary. Also write the PATH marker to both `~/.zprofile` and `~/.zshrc`.
