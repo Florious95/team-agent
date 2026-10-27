@@ -1468,7 +1468,6 @@ pub(super) fn mark_agent_started(
     agent.remove("startup_prompts");
     agent.remove("startup_prompt_status");
     agent.remove("startup_prompt_probe_epoch");
-    agent.remove(crate::lifecycle::launch::add_agent_state::FORK_PARENT_SESSION_ID);
     agent.remove("startup_prompt_probe_disabled_at");
     Ok(())
 }

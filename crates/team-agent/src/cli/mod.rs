@@ -3549,30 +3549,14 @@ pub mod lifecycle_port {
             "fork-agent",
         )?;
         match crate::lifecycle::fork_agent(workspace, &source, &dest, label, true, team) {
-            Ok(report) => {
-                let mut value = json!({
-                    "ok": true,
-                    "source_agent_id": report.source_agent_id.as_str(),
-                    "new_agent_id": report.new_agent_id.as_str(),
-                    "session_id": report.session_id.as_ref().map(|session| session.as_str()),
-                    "new_session_id": report.session_id.as_ref().map(|session| session.as_str()),
-                    "backing_state": report.backing_state,
-                });
-                if let (Some(details), Some(object)) = (report.pi_fork, value.as_object_mut()) {
-                    object.insert("status".to_string(), json!("forked"));
-                    object.insert("target".to_string(), json!(report.new_agent_id.as_str()));
-                    object.insert(
-                        "source_session_id".to_string(),
-                        json!(details.source_session_id.as_str()),
-                    );
-                    object.insert("session_id".to_string(), json!(details.session_id.as_str()));
-                    object.insert(
-                        "backing_path".to_string(),
-                        json!(details.backing_path.0.to_string_lossy().to_string()),
-                    );
-                }
-                Ok(value)
-            }
+            Ok(report) => Ok(json!({
+                "ok": true,
+                "source_agent_id": report.source_agent_id.as_str(),
+                "new_agent_id": report.new_agent_id.as_str(),
+                "session_id": report.session_id.as_ref().map(|session| session.as_str()),
+                "new_session_id": report.session_id.as_ref().map(|session| session.as_str()),
+                "backing_state": report.backing_state,
+            })),
             Err(e) => Ok(error_value(e)),
         }
     }

@@ -3,7 +3,8 @@
 use crate::contract::{descriptor::*, types::*};
 
 /// The canonical contract key compiled specs and state carry. Role documents
-/// may declare the shared legacy key `pi` with `contract_runtime: true`.
+/// declare it as `pi`; a persisted pre-upgrade `pi` state row keeps its key and
+/// is never reclassified onto this leaf.
 pub const ID: &str = "pi_tui";
 pub const UNVERIFIED: Reason = Reason { code: "pi-native-admission-missing", message: "This Pi capability lacks scoped native evidence; no legacy or other-provider fallback is allowed" };
 const LEVEL: Reason = Reason { code: "pi-effort-level-unproven", message: "Pi's catalog lists reasoning yes/no only and Pi clamps a level the model lacks; xhigh/max are refused, never silently lowered" };

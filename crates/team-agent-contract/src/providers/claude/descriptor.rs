@@ -2,8 +2,9 @@
 //! sibling modules; nothing here reads the environment or runs a process.
 use crate::contract::{descriptor::*, types::*};
 
-/// The canonical contract key compiled specs and state carry. `claude` and
-/// `claude_code` stay legacy Provider keys and never select this leaf.
+/// The canonical contract key compiled specs and state carry. Role documents
+/// declare it as `claude` (or `claude_code`); a persisted pre-upgrade `claude`
+/// state row keeps its key and is never reclassified onto this leaf.
 pub const ID: &str = "claude_tui";
 pub const UNVERIFIED: Reason = Reason { code: "claude-native-admission-missing", message: "This Claude Code capability lacks scoped native evidence; no legacy or other-provider fallback is allowed" };
 const STARTUP: Reason = Reason { code: "claude-folder-trust-not-keyed", message: "Folder trust is the user's own global consent and its focus defaults to No, exit; the private primary must already sit under a folder the user trusts. No startup key is ever authorized" };
