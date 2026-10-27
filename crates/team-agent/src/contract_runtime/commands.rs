@@ -431,6 +431,18 @@ pub fn remove_agent(
     })
 }
 
+/// Ok: the seat is stopped, exited or idle; Err: the reset refusal receipt.
+fn reset_guard(observed: Activity, agent: &str) -> Result<Activity, Value> {
+    match observed {
+        Activity::Working(evidence) => Err(refused(agent, "agent_working", RESET_WORKING,
+            Some(evidence), "wait for the agent to finish, or stop it, then rerun reset-agent")),
+        Activity::Unverified(evidence) => Err(refused(agent, "agent_activity_unverified",
+            "agent activity could not be verified idle; wait for completion or stop the agent before resetting session",
+            Some(evidence), "stop the agent, then rerun reset-agent")),
+        clear => Ok(clear),
+    }
+}
+
 /// Discards the native session only when the seat is provably not working,
 /// then starts the same seat ID on a fresh generation and session.
 pub fn reset_agent(
@@ -456,25 +468,31 @@ pub fn reset_agent(
         if role.paused {
             return Ok(json!({"ok":false,"agent_id":agent,"status":"paused","reason":"agent_paused","runtime":"contract"}));
         }
+        let live = !framework::is_paused_unstarted(row);
+        // The guard runs when the command is invoked, before the slow native
+        // admission below: a message sent just before reset is still queued or
+        // in flight then. It runs again right before the stop, so work that
+        // began during admission is refused too.
+        if live {
+            if let Err(refusal) = reset_guard(activity(&selected.run_workspace, &selected.team_key, id)?, agent) {
+                return Ok(refusal);
+            }
+        }
         // Pure admission of the replacement precedes any stop or retirement.
         let mut admission = config.clone();
         admission.roles.retain(|candidate| &candidate.id == id);
         backend::preflight(&admission).map_err(error)?;
         let mut stopped = None;
         let mut discarded = None;
-        if !framework::is_paused_unstarted(row) {
+        if live {
             // The fresh start below must not fail its candidate fence after the
             // old seat is already gone.
             backend::require_candidate(&Backend::open_readonly(&selected.run_workspace, &selected.team_key)
                 .map_err(error)?.binding).map_err(error)?;
-            match activity(&selected.run_workspace, &selected.team_key, id)? {
-                Activity::Stopped => {}
-                Activity::Working(evidence) => return Ok(refused(agent, "agent_working", RESET_WORKING,
-                    Some(evidence), "wait for the agent to finish, or stop it, then rerun reset-agent")),
-                Activity::Unverified(evidence) => return Ok(refused(agent, "agent_activity_unverified",
-                    "agent activity could not be verified idle; wait for completion or stop the agent before resetting session",
-                    Some(evidence), "stop the agent, then rerun reset-agent")),
-                Activity::Idle | Activity::Exited => stopped = Some(stop_seat(selected, id)?),
+            match reset_guard(activity(&selected.run_workspace, &selected.team_key, id)?, agent) {
+                Err(refusal) => return Ok(refusal),
+                Ok(Activity::Stopped) => {}
+                Ok(_) => stopped = Some(stop_seat(selected, id)?),
             }
             discarded = backend::retire(&selected.run_workspace, &selected.team_key, id).map_err(error)?
                 .and_then(|seat| seat.session).map(|session| session.native_session);
@@ -623,6 +641,20 @@ mod tests {
             assert!(matches!(classify(&ready, &surface(other, b"idle")), Activity::Unverified(_)), "{other:?}");
             assert!(matches!(classify(&surface(other, b"idle"), &ready), Activity::Unverified(_)), "{other:?}");
         }
+    }
+
+    // 2.8a: a reset issued right after a send must observe the queued or
+    // in-flight message, not a turn that the slow admission let finish.
+    #[test]
+    fn reset_guards_the_seat_before_its_slow_admission_and_again_before_the_stop() {
+        let source = include_str!("commands.rs");
+        let body = source.split_once("pub fn reset_agent(").unwrap().1
+            .split_once("#[cfg(test)]").unwrap().0;
+        let first = body.find("reset_guard(activity(").unwrap();
+        let admission = body.find("backend::preflight(&admission)").unwrap();
+        let second = body.rfind("reset_guard(activity(").unwrap();
+        let stop = body.find("stop_seat(selected, id)").unwrap();
+        assert!(first < admission && admission < second && second < stop);
     }
 
     #[test]
