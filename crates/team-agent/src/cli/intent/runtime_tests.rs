@@ -336,6 +336,51 @@ fn role_only_add_and_absent_creation_need_explicit_decisions() {
 }
 #[test]
 #[serial_test::serial(env)]
+fn issue391_start_readmits_a_removed_seat_from_its_left_behind_role_file() {
+    let (root, mut intent) = fixture(&["one"]);
+    install(root.path(), &[("one", "stopped", false)]);
+    // remove-agent keeps the user's role file and leaves a retired tombstone.
+    write_role(root.path(), "two");
+    let state = crate::state::persist::runtime_state_path(root.path());
+    let mut raw: Value = serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+    let tombstone = json!({"two": {"state": "retired", "changed_at": "2026-10-27T15:25:48Z", "reason": "remove-agent"}});
+    raw["agent_lifecycle"] = tombstone.clone();
+    raw["teams"]["fixture"]["agent_lifecycle"] = tombstone;
+    std::fs::write(&state, serde_json::to_vec(&raw).unwrap()).unwrap();
+    intent.subject = Subject::Agent(AgentId::new("two"));
+    let plan = plan_with_observer(intent.clone(), |_, _, _| panic!("unregistered probe")).unwrap();
+    assert_eq!(actions(&plan), [("add_agent", Some("two"))]);
+    let Step::AddAgent(args) = &plan.steps[0] else {
+        panic!()
+    };
+    assert_eq!(
+        Path::new(&args.role_file),
+        root.path().join("agents/two.md"),
+        "the left-behind role file is the seat's definition"
+    );
+    // Team start still leaves a removed seat retired.
+    let mut team = intent.clone();
+    team.subject = Subject::Team { source: None };
+    let plan = plan_with_observer(team, |_, _, _| Ok(Observation::StoppedVerified)).unwrap();
+    assert_eq!(actions(&plan), [("start_agent", Some("one"))]);
+    assert!(plan
+        .skipped
+        .iter()
+        .any(|entry| entry["agent"] == "two" && entry["reason"] == "retired"));
+    // History the planner cannot classify is refused without naming a phantom command.
+    raw["agent_lifecycle"]["two"]["state"] = json!("quarantined");
+    raw["teams"]["fixture"]["agent_lifecycle"]["two"]["state"] = json!("quarantined");
+    std::fs::write(&state, serde_json::to_vec(&raw).unwrap()).unwrap();
+    let error = plan_with_observer(intent, |_, _, _| panic!())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("unrecognized lifecycle history") && !error.contains("recovery"),
+        "{error}"
+    );
+}
+#[test]
+#[serial_test::serial(env)]
 fn spec_only_state_only_and_missing_spec_do_not_fallback_to_creation() {
     let (root, mut intent) = fixture(&["one", "two"]);
     install(root.path(), &[("one", "stopped", false)]);

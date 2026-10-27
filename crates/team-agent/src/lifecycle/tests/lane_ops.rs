@@ -634,6 +634,96 @@ fn remove_persists_retired_tombstone_and_explicit_readd_clears_it() {
     );
 }
 
+/// #391: remove-agent keeps the user's role file and leaves a retired
+/// tombstone. `add-agent --force` without `--role-file` must re-adopt that
+/// file instead of refusing "role file already exists" forever.
+#[test]
+#[serial_test::serial(env)]
+fn issue391_force_readd_adopts_the_role_file_a_removed_seat_left_behind() {
+    let ws = lanea_ws_agents(json!({
+        "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" },
+        "bravo": { "status": "running", "provider": "codex", "window": "bravo" }
+    }));
+    let mut seeded = crate::state::persist::load_runtime_state(&ws).unwrap();
+    seeded["team_key"] = json!("laneateam");
+    seeded["active_team_key"] = json!("laneateam");
+    let mut nested = crate::state::projection::compact_team_state(&seeded);
+    nested["status"] = json!("alive");
+    seeded["teams"] = json!({ "laneateam": nested });
+    crate::state::persist::save_runtime_state(&ws, &seeded).unwrap();
+    let tx = LaneTransport::new("team-laneateam", &[]);
+    let role = ws.join("agents").join("alpha.md");
+    let load = || crate::state::persist::load_runtime_state(&ws).unwrap();
+    let add = |patch: &crate::lifecycle::role_config::RoleConfigPatch, force: bool| {
+        crate::lifecycle::role_config::add_agent_from_role_with_transport(
+            &ws,
+            &aid("alpha"),
+            None,
+            patch,
+            force,
+            &tx,
+        )
+    };
+    let same = crate::lifecycle::role_config::RoleConfigPatch {
+        provider: Some("codex".into()),
+        bypass: Some(false),
+        ..Default::default()
+    };
+
+    remove_agent_with_transport(&ws, &aid("alpha"), true, true, None, &tx).unwrap();
+    assert_eq!(std::fs::read_to_string(&role).unwrap(), DELEG_ROLE_ALPHA);
+    assert_eq!(
+        load()["teams"]["laneateam"]["agent_lifecycle"]["alpha"]["state"],
+        "retired"
+    );
+
+    let refused = add(&same, false).unwrap_err().to_string();
+    assert!(
+        refused.contains("role file already exists") && refused.contains("--force"),
+        "without --force the refusal names a real way out: {refused}"
+    );
+    assert!(load()["teams"]["laneateam"]["agents"]
+        .get("alpha")
+        .is_none());
+
+    add(&same, true).unwrap_or_else(|error| panic!("force re-add failed: {error}"));
+    let readded = load();
+    assert!(
+        readded["teams"]["laneateam"]["agent_lifecycle"]
+            .get("alpha")
+            .is_none(),
+        "force re-add consumes the retired tombstone"
+    );
+    assert!(readded["teams"]["laneateam"]["agents"]
+        .get("alpha")
+        .is_some());
+    assert_eq!(
+        std::fs::read_to_string(&role).unwrap(),
+        DELEG_ROLE_ALPHA,
+        "equal CLI values keep the adopted file byte-identical"
+    );
+
+    // A second removal, then --force with a different model: CLI values
+    // override the adopted frontmatter and the role body is kept.
+    remove_agent_with_transport(&ws, &aid("alpha"), true, true, None, &tx).unwrap();
+    let changed = crate::lifecycle::role_config::RoleConfigPatch {
+        model: Some("gpt-5.4".into()),
+        ..same
+    };
+    add(&changed, true)
+        .unwrap_or_else(|error| panic!("force re-add with override failed: {error}"));
+    let (meta, _) = crate::compiler::read_front_matter(&role).unwrap();
+    assert_eq!(
+        meta.get("model")
+            .and_then(crate::model::yaml::Value::as_str),
+        Some("gpt-5.4")
+    );
+    assert!(std::fs::read_to_string(&role).unwrap().contains("Alpha."));
+    assert!(load()["teams"]["laneateam"]["agents"]
+        .get("alpha")
+        .is_some());
+}
+
 /// Cross-product RED (verifier, slice2b authority leak): the FAILURE dimension
 /// (a stale writer whose incoming projection predates a sibling retirement) x the
 /// BOUNDARY dimension (a sibling team carrying the SAME agent id). The tracked
