@@ -609,15 +609,17 @@ fn add(
     id: &str,
     source: Option<PathBuf>,
 ) -> Result<(), CliError> {
+    // An explicit start re-admits a removed seat: the add consumes its retired
+    // tombstone. Only lifecycle history this planner cannot classify is refused.
     if selected
         .state
         .get("agent_lifecycle")
         .and_then(|lifecycle| lifecycle.get(id))
-        .is_some()
+        .is_some_and(|entry| entry.get("state").and_then(Value::as_str) != Some("retired"))
     {
-        return Err(refusal(
-            "agent lifecycle history is not an absent role; use explicit recovery/add",
-        ));
+        return Err(refusal(format!(
+            "agent {id} has unrecognized lifecycle history; refusing to re-admit it"
+        )));
     }
     let patch = plan.intent.patch.clone();
     let role_file = match source {

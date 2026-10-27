@@ -52,6 +52,20 @@ pub fn add_agent_from_role(
     })
 }
 
+#[cfg(test)]
+pub(crate) fn add_agent_from_role_with_transport(
+    workspace: &Path,
+    agent_id: &AgentId,
+    source: Option<&Path>,
+    patch: &RoleConfigPatch,
+    force: bool,
+    transport: &dyn Transport,
+) -> Result<AddAgentReport, LifecycleError> {
+    with_selected(&select(workspace, None)?, agent_id, |selected| {
+        add_at_selected(selected, agent_id, source, patch, force, transport)
+    })
+}
+
 pub fn start_agent_from_role(
     workspace: &Path,
     agent_id: &AgentId,
@@ -108,27 +122,38 @@ fn add_at_selected(
         )));
     }
     let role_path = role_path(selected, agent_id);
-    if !recreate {
+    // --force re-adopts the role file a removed seat left behind (#391): CLI
+    // values override its frontmatter and its body is kept.
+    let adopted = !recreate
+        && force
+        && source.is_none()
+        && fs::symlink_metadata(&role_path).is_ok_and(|meta| meta.is_file());
+    if !recreate && !adopted {
         check_destination(&role_path, source)?;
     }
     let text = match source {
         Some(path) => read_text(path)?,
+        None if adopted => patched_role(&read_text(&role_path)?, agent_id, patch, false)?,
         None => String::new(),
     };
+    let generated = source.is_none() && !adopted;
     #[allow(unused_mut)]
     let mut reconciled = reconcile_creation(&text, patch)?;
     // A generated legacy role falls back to its id as instructions at compile
     // time; a contract role requires a body, so give it a neutral default.
     #[cfg(unix)]
-    if source.is_none()
+    if generated
         && reconciled.prompt.is_none()
-        && crate::contract_runtime::framework::declares_contract(None, reconciled.provider.as_deref())
+        && crate::contract_runtime::framework::declares_contract(
+            None,
+            reconciled.provider.as_deref(),
+        )
     {
         reconciled.prompt = Some(format!(
             "You are {agent_id}. Complete the tasks assigned by the leader.\n"
         ));
     }
-    let next = patched_role(&text, agent_id, &reconciled, source.is_none())?;
+    let next = patched_role(&text, agent_id, &reconciled, generated)?;
     let snapshot = RoleSnapshot::capture(selected, &role_path)?;
     let result = (|| {
         if snapshot.role.bytes.as_deref() != Some(next.as_bytes()) {
@@ -449,8 +474,13 @@ fn check_destination(path: &Path, source: Option<&Path>) -> Result<(), Lifecycle
                 .is_some_and(|(source, target)| source == target)
         }) {
             return Err(LifecycleError::RequirementUnmet(format!(
-                "role file already exists: {}",
-                path.display()
+                "role file already exists: {}{}",
+                path.display(),
+                if source.is_none() {
+                    "; reuse it with --role-file or re-adopt it with --force"
+                } else {
+                    ""
+                }
             )));
         }
     }
