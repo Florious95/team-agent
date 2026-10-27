@@ -986,6 +986,111 @@ fn a09_pi_fork_inherits_session_and_routes_only_new_native_spawn() {
 
 #[test]
 #[serial(env)]
+fn a09_claude_fork_spawns_native_fork_seat_and_leaves_source_unchanged() {
+    let f = Fixture::new("argv-claude-fork");
+    f.start_team("claude", &["worker"]);
+    let parent = "11111111-2222-4333-8444-555555555555";
+    let transcript = f.ws.join("parent-transcript.jsonl");
+    fs::write(&transcript, "{\"type\":\"user\"}\n").unwrap();
+    f.mutate_agent("worker", |a| {
+        a["session_id"] = json!(parent);
+        a["rollout_path"] = json!(transcript);
+        a["captured_at"] = json!("2026-01-01T00:00:01Z");
+        a["captured_via"] = json!("session_scan");
+        a["capture_state"] = json!("captured");
+    });
+    let tuple = |state: &Value| {
+        ["session_id", "rollout_path", "captured_at", "captured_via"]
+            .map(|key| state["agents"]["worker"][key].clone())
+    };
+    let before =
+        tuple(&crate::state::projection::select_runtime_state(&f.ws, Some("argvteam")).unwrap());
+
+    // No in-place branch: the same id is refused before any key or spawn.
+    let same = offline().with_session_present(true);
+    let refused = fork_agent_with_transport(
+        &f.ws,
+        &AgentId::new("worker"),
+        &AgentId::new("worker"),
+        None,
+        false,
+        Some("argvteam"),
+        &same,
+    );
+    assert!(format!("{refused:?}").contains("new seat"), "{refused:?}");
+    assert!(same.spawn_records().is_empty() && same.inject_payloads().is_empty());
+
+    let t = offline().with_session_present(true);
+    let report = fork_agent_with_transport(
+        &f.ws,
+        &AgentId::new("worker"),
+        &AgentId::new("forked"),
+        None,
+        false,
+        Some("argvteam"),
+        &t,
+    )
+    .expect("a legacy Claude seat forks into a new seat in one call");
+    assert_eq!(report.new_agent_id.as_str(), "forked");
+    // The shim never writes the child transcript: pending, never a fabricated id.
+    assert_eq!(
+        report.backing_state,
+        crate::lifecycle::ForkBackingState::PendingContextFork
+    );
+    assert!(report.session_id.is_none());
+    let spawns = t.spawn_records();
+    assert_eq!(spawns.len(), 1);
+    let argv = &spawns[0].1;
+    let after = |flag: &str| {
+        argv.iter()
+            .position(|value| value == flag)
+            .and_then(|index| argv.get(index + 1))
+            .cloned()
+    };
+    assert_eq!(after("--resume").as_deref(), Some(parent), "{argv:?}");
+    assert!(
+        argv.iter().any(|value| value == "--fork-session"),
+        "{argv:?}"
+    );
+    let child = after("--session-id").expect("preassigned child session");
+    assert_ne!(child, parent);
+
+    let state = crate::state::projection::select_runtime_state(&f.ws, Some("argvteam")).unwrap();
+    let row = &state["agents"]["forked"];
+    assert_eq!(row["provider"], "claude", "{row}");
+    assert_eq!(row["status"], "running", "{row}");
+    assert_eq!(row["_pending_session_id"], json!(child), "{row}");
+    assert!(
+        row.get("_fork_parent_session_id").is_none(),
+        "one-shot fork instruction: {row}"
+    );
+    assert!(
+        row.get("forked_from").is_none(),
+        "capture must own the new row: {row}"
+    );
+    assert_eq!(tuple(&state), before, "the parent tuple is only read");
+    assert_eq!(
+        fs::read_to_string(&transcript).unwrap(),
+        "{\"type\":\"user\"}\n"
+    );
+    let events = crate::event_log::EventLog::new(&f.ws).tail(0).unwrap();
+    let spawn = events
+        .iter()
+        .rev()
+        .find(|event| {
+            event["event"] == "provider.worker.spawn_argv" && event["agent_id"] == "forked"
+        })
+        .expect("fork spawn argv event");
+    assert!(
+        spawn["env_overlay_keys"].as_array().is_some_and(|keys| keys
+            .iter()
+            .any(|key| key == "CLAUDE_CODE_RESUME_THRESHOLD_MINUTES")),
+        "a fork never stops on the stale-resume modal: {spawn}"
+    );
+}
+
+#[test]
+#[serial(env)]
 fn a09_public_clone_reaches_native_argv_without_inheriting_old_route() {
     let f = Fixture::new("argv-clone");
     f.start_team("pi", &["worker"]);

@@ -147,6 +147,7 @@ pub(crate) fn rollback_add_agent_atomic(
 /// params:
 ///   meta: 角色文档 front matter
 ///   dynamic_role_file: 角色文件路径，记进 state 供 restart 重建 spec 用
+///   fork_parent: 给出时首次 spawn 以原生 fork 继承该会话，起成后即清除
 /// returns: 成功返回空值，席位状态记为 starting
 /// errors: 读或写 runtime state 失败时返回 StatePersist
 /// ---
@@ -156,10 +157,21 @@ pub(super) fn upsert_agent_state_from_role(
     agent_id: &AgentId,
     meta: &Value,
     dynamic_role_file: &Path,
+    fork_parent: Option<&crate::provider::SessionId>,
 ) -> Result<(), LifecycleError> {
-    let entry = starting_agent_entry(workspace, agent_id, meta, dynamic_role_file);
+    let mut entry = starting_agent_entry(workspace, agent_id, meta, dynamic_role_file);
+    if let (Some(parent), Some(object)) = (fork_parent, entry.as_object_mut()) {
+        object.insert(
+            FORK_PARENT_SESSION_ID.to_string(),
+            serde_json::json!(parent.as_str()),
+        );
+    }
     upsert_agent_entry(workspace, canonical_team_key, agent_id, entry)
 }
+
+/// One-shot spawn instruction: the next fresh spawn of this row natively forks
+/// this parent session instead of starting empty. Every start consumes it.
+pub(crate) const FORK_PARENT_SESSION_ID: &str = "_fork_parent_session_id";
 
 /// ---
 /// purpose: 把一席的 starting 行写进团队 state 并落盘

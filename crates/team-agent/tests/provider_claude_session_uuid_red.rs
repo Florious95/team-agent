@@ -35,7 +35,7 @@ fn claude_fresh_launch_session_id_is_rfc4122_uuid_not_session_prefix() {
 }
 
 #[test]
-fn claude_fork_snapshot_id_is_rfc4122_uuid_and_resume_only() {
+fn claude_native_fork_child_id_is_rfc4122_uuid_and_parent_is_only_resumed() {
     let source_session = SessionId::new("11111111-2222-4333-8444-555555555555");
     for provider in [Provider::Claude, Provider::ClaudeCode] {
         let adapter = get_adapter(provider);
@@ -54,22 +54,23 @@ fn claude_fork_snapshot_id_is_rfc4122_uuid_and_resume_only() {
                 },
             )
             .expect("Claude lifecycle fork plan should build");
-        let snapshot_id = plan
+        let child_id = plan
             .expected_session_id
             .as_ref()
-            .expect("Claude lifecycle fork must allocate a snapshot id")
+            .expect("Claude lifecycle fork must preassign the child session id")
             .as_str();
 
         assert!(
-            is_rfc4122_uuid(snapshot_id),
-            "Claude fork snapshot id must be a valid RFC4122 UUID; provider={provider:?} snapshot_id={snapshot_id:?} plan={plan:?}"
+            is_rfc4122_uuid(child_id) && child_id != source_session.as_str(),
+            "Claude fork child id must be a new valid RFC4122 UUID; provider={provider:?} child_id={child_id:?} plan={plan:?}"
         );
+        // Claude itself copies the parent into the child (`--session-id` with
+        // `--resume` is admitted only with `--fork-session`); the parent is only read.
         assert!(
-            argv_contains_adjacent(&plan.argv, &["--resume", snapshot_id])
-                && !plan.argv.iter().any(|arg| arg == "--session-id")
-                && !plan.argv.iter().any(|arg| arg == "--fork-session")
-                && !plan.argv.iter().any(|arg| arg == source_session.as_str()),
-            "Claude fork must resume only the materialized snapshot id; provider={provider:?} plan={plan:?}"
+            argv_contains_adjacent(&plan.argv, &["--session-id", child_id])
+                && argv_contains_adjacent(&plan.argv, &["--resume", source_session.as_str()])
+                && plan.argv.iter().any(|arg| arg == "--fork-session"),
+            "Claude fork must natively fork the parent into the preassigned child; provider={provider:?} plan={plan:?}"
         );
     }
 }
