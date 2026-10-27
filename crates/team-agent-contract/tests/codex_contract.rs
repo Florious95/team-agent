@@ -106,7 +106,9 @@ fn catalog_keeps_listed_ids_and_their_own_team_efforts_without_fallback() {
     assert_eq!(records[0].efforts, Support::Supported(vec![Effort::Low, Effort::Medium, Effort::High, Effort::Xhigh, Effort::Max]));
     assert_eq!(records[1].efforts, Support::Supported(vec![Effort::Low, Effort::Ultra]), "none is not a Team tier");
     assert!(matches!(parse_catalog(CATALOG.replace("gpt-6-sol", "gpt-6-luna").as_bytes()), Err(ContractError::AmbiguousModel)));
-    assert_eq!(parse_catalog(CATALOG.replace("gpt-6-luna", "group/grok4.7").as_bytes()).unwrap()[0].id, "group/grok4.7", "namespaced slug");
+    for slug in ["group/grok4.7", "cursor/grok-4.7@500k", "grok/grok-4.7@500k", "vendor/model:tag"] {
+        assert_eq!(parse_catalog(CATALOG.replace("gpt-6-luna", slug).as_bytes()).unwrap()[0].id, slug, "namespaced/tagged slug");
+    }
     for bad in [CATALOG.replace("\"hide\"", "\"secret\""), CATALOG.replace("supported_reasoning_levels\":[]", "supported_reasoning_levels\":null"),
         CATALOG.replace("\"list\"", "\"hide\""), "{\"models\":[]}".into(), "not json".into(), CATALOG.replace("gpt-6-luna", "gpt 6 luna"),
         CATALOG.replace("{\"effort\":\"high\",\"description\":\"h\"}", "{\"effort\":\"low\",\"description\":\"h\"}")]
