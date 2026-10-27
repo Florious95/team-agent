@@ -19,7 +19,6 @@
 
 use std::cell::{Cell, RefCell};
 use std::path::Path;
-use std::time::Duration;
 
 use rusqlite::{params, OptionalExtension};
 
@@ -837,17 +836,12 @@ fn deliver_prepared_message(
     );
     // v0.5.113 delivery: address/owner and pane serialization are authoritative;
     // composer appearance is not admission. Native CLIs buffer/queue input.
-    let inject_attempt = crate::tmux_backend::with_paste_to_submit_floor(
-        paste_to_submit_floor_for_recipient(state, &message.recipient),
-        || {
-            transport.inject_with_submit_observer(
-                &target,
-                &payload,
-                Key::Enter,
-                true,
-                Some(&submit_observer),
-            )
-        },
+    let inject_attempt = transport.inject_with_submit_observer(
+        &target,
+        &payload,
+        Key::Enter,
+        true,
+        Some(&submit_observer),
     );
     let inject_report = match inject_attempt {
         Ok(report) => {
@@ -2553,18 +2547,15 @@ fn recipient_pane_has_actionable_startup_prompt(
         _ => return false,
     };
     match provider {
-        Provider::Codex => matches!(
-            crate::provider::classify_codex_startup_screen(&captured),
-            crate::provider::StartupScreenDecision::AnswerWorkspaceTrust
-                | crate::provider::StartupScreenDecision::SkipUpdatePrompt
-        ),
         Provider::Copilot => matches!(
             crate::provider::classify_copilot_startup_screen(&captured),
             crate::provider::StartupScreenDecision::AnswerWorkspaceTrust
         ),
-        // Claude Code and Pi workers run only through their contract leaves.
+        // Claude Code, Codex, Grok and Pi workers run only through their
+        // contract leaves; a legacy row was refused before this peek.
         Provider::Claude
         | Provider::ClaudeCode
+        | Provider::Codex
         | Provider::Pi
         | Provider::Grok
         | Provider::GeminiCli
@@ -2580,23 +2571,6 @@ fn recipient_provider(state: &serde_json::Value, recipient: &str) -> Option<Prov
         .and_then(|agent| agent.get("provider"))
         .and_then(serde_json::Value::as_str)
         .and_then(parse_canonical_provider)
-}
-
-/// ---
-/// purpose: paste→Enter 地板按收件人 provider 选择
-/// contract: Grok 为 1s；其余（含 claude）为 ZERO
-/// boundary: 不把地板套到 claude/codex
-/// ---
-pub(crate) fn paste_to_submit_floor_for_recipient(
-    state: &serde_json::Value,
-    recipient: &str,
-) -> Duration {
-    match recipient_provider(state, recipient) {
-        Some(Provider::Grok) => {
-            crate::tmux_backend::CURSOR_PASTE_TO_SUBMIT_FLOOR
-        }
-        _ => Duration::ZERO,
-    }
 }
 
 fn leader_rollout_path(state: &serde_json::Value) -> Option<std::path::PathBuf> {
@@ -3730,32 +3704,6 @@ mod consumption_tests;
 #[cfg(test)]
 mod paste_floor_tests {
     use super::*;
-    use std::time::Duration;
-
-    fn state_with_provider(provider: &str) -> serde_json::Value {
-        serde_json::json!({
-            "agents": { "w1": { "provider": provider } }
-        })
-    }
-
-    #[test]
-    fn grok_paste_to_submit_floor_is_one_second() {
-        let grok = paste_to_submit_floor_for_recipient(&state_with_provider("grok"), "w1");
-        assert_eq!(grok, crate::tmux_backend::CURSOR_PASTE_TO_SUBMIT_FLOOR);
-        assert_eq!(grok, Duration::from_secs(1));
-    }
-
-    #[test]
-    fn claude_and_codex_paste_to_submit_floor_stays_zero() {
-        assert_eq!(
-            paste_to_submit_floor_for_recipient(&state_with_provider("claude"), "w1"),
-            Duration::ZERO
-        );
-        assert_eq!(
-            paste_to_submit_floor_for_recipient(&state_with_provider("codex"), "w1"),
-            Duration::ZERO
-        );
-    }
 
     fn empty_report() -> InjectReport {
         InjectReport {

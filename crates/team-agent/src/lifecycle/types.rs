@@ -61,9 +61,6 @@ pub mod event_names {
     pub const DISPLAY_ADAPTIVE_BLOCKED: &str = "display.adaptive_blocked";
     pub const DISPLAY_ADAPTIVE_REBUILT: &str = "display.adaptive_rebuilt";
     pub const DISPLAY_ADAPTIVE_CLOSED: &str = "display.adaptive_closed";
-    /// Directory-scoped grok toml dropped leftover per-seat `TEAM_AGENT_*` keys.
-    /// Fields: `path` (file), `keys` (names only — never values).
-    pub const GROK_TOML_PER_SEAT_KEYS_CLEARED: &str = "lifecycle.grok_toml.per_seat_keys_cleared";
 }
 
 // ===========================================================================
@@ -610,8 +607,8 @@ pub struct AddAgentReport {
     pub role_file: PathBuf,
 }
 
-/// `fork_agent(...)` 结果(legacy 窗口内分身)。Claude Code / Pi 的新席位 fork
-/// 由 contract 管道直接给出回执，不经过这里。
+/// `fork_agent(...)` 结果。legacy 席位不再 fork；Claude Code / Codex / Grok /
+/// Pi 的新席位 fork 由 contract 管道直接给出回执，不经过这里。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForkAgentReport {
     pub source_agent_id: AgentId,

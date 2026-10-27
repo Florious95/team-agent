@@ -7,9 +7,10 @@ type ModelRecord = crate::provider::model_catalog::ModelRecord;
 
 pub fn cmd_models(args: &ModelsArgs) -> Result<CmdResult, CliError> {
     #[cfg(unix)]
-    if let Some(descriptor) = crate::contract_runtime::registry::declared(&args.provider, false) {
+    if let Some(descriptor) = crate::contract_runtime::registry::declared(&args.provider) {
         // A role's provider names its catalog: `agent` or `cursor-agent` is the
-        // Cursor leaf; `claude`/`claude_code` and `pi` are the Claude Code and Pi leaves.
+        // Cursor leaf; `claude`/`claude_code`, `codex`, `grok` and `pi` are the
+        // Claude Code, Codex, Grok Build and Pi leaves.
         let args = ModelsArgs { provider: descriptor.identity.id.into(), ..args.clone() };
         return crate::contract_runtime::discovery::models(&args);
     }
@@ -157,28 +158,32 @@ esac"#);
     #[cfg(unix)]
     #[test]
     fn grok_build_contract_catalog_runs_the_public_grok_found_on_path() {
-        let program = fixture_program("grok", r#"
+        // The public `grok` provider name declares the Grok Build leaf; both
+        // names read the same contract catalog.
+        for name in ["grok_build", "grok"] {
+            let program = fixture_program("grok", r#"
 test "$#" = 1 || exit 9
 case "$1" in
   --version) printf '%s\n' 'grok 1.0.52 (0920c8169e27)' ;;
   models) exec /bin/cat "$TEAM_AGENT_MODELS_FIXTURE" ;;
   *) exit 9 ;;
 esac"#);
-        let mut grok = CliFixture::new(program);
-        let response = grok.program.with_extension("stdout");
-        std::fs::write(&response, include_bytes!("../provider/testdata/grok-models-authenticated.stdout")).unwrap();
-        grok.response = Some(response);
-        let output = run_public_models_cli(&grok.program, grok.response.as_deref(),
-            &["models", "--provider", "grok_build", "--json"]);
-        let text = public_cli_text(&output);
-        let calls = std::fs::read_to_string(grok.program.with_extension("count")).unwrap_or_default();
-        assert!(output.status.success(), "{text}");
-        // Whatever `grok` PATH selects answers every probe; no install path is assumed.
-        assert_eq!(calls, "1:--version\n1:models\n");
-        let value: Value = serde_json::from_str(text.trim()).unwrap();
-        assert_eq!(value["provider"], "grok_build");
-        assert_eq!(value["source"]["executable"], grok.program.to_str().unwrap());
-        assert!(value["models"].as_array().unwrap().iter().any(|row| row["model_id"] == "grok-4.7-build-fast"));
+            let mut grok = CliFixture::new(program);
+            let response = grok.program.with_extension("stdout");
+            std::fs::write(&response, include_bytes!("../provider/testdata/grok-models-authenticated.stdout")).unwrap();
+            grok.response = Some(response);
+            let output = run_public_models_cli(&grok.program, grok.response.as_deref(),
+                &["models", "--provider", name, "--json"]);
+            let text = public_cli_text(&output);
+            let calls = std::fs::read_to_string(grok.program.with_extension("count")).unwrap_or_default();
+            assert!(output.status.success(), "{name}: {text}");
+            // Whatever `grok` PATH selects answers every probe; no install path is assumed.
+            assert_eq!(calls, "1:--version\n1:models\n", "{name}");
+            let value: Value = serde_json::from_str(text.trim()).unwrap();
+            assert_eq!(value["provider"], "grok_build", "{name}");
+            assert_eq!(value["source"]["executable"], grok.program.to_str().unwrap(), "{name}");
+            assert!(value["models"].as_array().unwrap().iter().any(|row| row["model_id"] == "grok-4.7-build-fast"), "{name}");
+        }
     }
 
     #[cfg(unix)]
@@ -236,158 +241,6 @@ esac"#));
 
     #[cfg(unix)]
     #[test]
-    fn grok_public_cli_uses_native_catalog_and_keeps_shared_projection() {
-        let grok = native_cli_fixture(
-            "grok",
-            include_bytes!("../provider/testdata/grok-models-authenticated.stdout"),
-        );
-        let json = run_public_models_cli(
-            &grok.program,
-            grok.response.as_deref(),
-            &["models", "--provider", "grok", "--json"],
-        );
-        let human = run_public_models_cli(
-            &grok.program,
-            grok.response.as_deref(),
-            &["models", "--provider", "grok", "--search", "BUILD FAST"],
-        );
-        let no_match = run_public_models_cli(
-            &grok.program,
-            grok.response.as_deref(),
-            &[
-                "models",
-                "--provider",
-                "grok",
-                "--search",
-                "definitely-absent",
-            ],
-        );
-        let json_text = public_cli_text(&json);
-        let human_text = public_cli_text(&human);
-        let no_match_text = public_cli_text(&no_match);
-        let calls =
-            std::fs::read_to_string(grok.program.with_extension("count")).unwrap_or_default();
-        drop(grok);
-        assert!(json.status.success(), "{json_text}");
-        assert!(human.status.success(), "{human_text}");
-        assert!(no_match.status.success(), "{no_match_text}");
-        assert_eq!(calls, "1:models\n".repeat(3));
-        let value: Value = serde_json::from_str(json_text.trim()).unwrap();
-        assert_eq!(value["schema_version"], "models.v1");
-        assert_eq!(value["provider"], "grok");
-        assert_eq!(value["auth_basis"], "catalog_visibility");
-        let models = value["models"].as_array().unwrap();
-        assert_eq!(
-            models
-                .iter()
-                .map(|model| model["model_id"].as_str().unwrap())
-                .collect::<Vec<_>>(),
-            vec!["grok-4.7", "grok-4.7-build-fast", "grok-4.5", "grok-4.6"]
-        );
-        assert!(models.iter().all(|model| model["provider"] == "grok"
-            && model["vendor"] == "xai"
-            && model["aliases"] == json!([])));
-        assert_eq!(models[0]["default"], false);
-        assert_eq!(models[3]["default"], true);
-        assert!(human_text.contains("grok-4.7-build-fast"));
-        assert!(no_match_text.contains("No models matched --search"));
-        assert!(no_match_text.contains("auth: ok (catalog_visibility)"));
-
-        let grok = native_cli_fixture(
-            "grok",
-            include_bytes!("../provider/testdata/grok-models-unauthenticated.stdout"),
-        );
-        let changed_default = run_public_models_cli(
-            &grok.program,
-            grok.response.as_deref(),
-            &["models", "--provider", "grok", "--json"],
-        );
-        let changed_text = public_cli_text(&changed_default);
-        drop(grok);
-        assert!(changed_default.status.success(), "{changed_text}");
-        let changed: Value = serde_json::from_str(changed_text.trim()).unwrap();
-        assert_eq!(changed["models"][0]["model_id"], "grok-4.7");
-        assert_eq!(changed["models"][0]["default"], true);
-        assert_eq!(changed["models"][1]["default"], false);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn grok_invalid_native_catalogs_fail_closed_without_fallback() {
-        let cases: [(&str, Vec<u8>); 7] = [
-            ("unknown row", b"You are logged in with grok.com.\n\nDefault model: grok-4.6\n\nAvailable models:\n  - grok-4.6\n  ? grok-4.5\n".to_vec()),
-            ("duplicate", b"You are logged in with grok.com.\n\nDefault model: grok-4.6\n\nAvailable models:\n  - grok-4.6\n  - grok-4.6\n".to_vec()),
-            ("invalid id", b"You are logged in with grok.com.\n\nDefault model: grok-4.6\n\nAvailable models:\n  * grok bad (default)\n".to_vec()),
-            ("control id", b"You are logged in with grok.com.\n\nDefault model: grok-4.6\n\nAvailable models:\n  * grok-\x01evil (default)\n".to_vec()),
-            ("empty", b"You are not authenticated.\n\nDefault model: grok-4.6\n\nAvailable models:\n".to_vec()),
-            ("contradictory default", b"You are not authenticated.\n\nDefault model: grok-4.6\n\nAvailable models:\n  * grok-4.7 (default)\n  - grok-4.6\n".to_vec()),
-            ("invalid utf8", vec![b'Y', b'o', b'u', 0xff]),
-        ];
-        let mut outcomes = Vec::new();
-        for (name, bytes) in cases {
-            let grok = native_cli_fixture("grok", &bytes);
-            let output = run_public_models_cli(
-                &grok.program,
-                grok.response.as_deref(),
-                &["models", "--provider", "grok", "--json"],
-            );
-            let text = public_cli_text(&output);
-            let calls =
-                std::fs::read_to_string(grok.program.with_extension("count")).unwrap_or_default();
-            outcomes.push((name, output.status.success(), text, calls));
-        }
-        for (name, success, text, calls) in outcomes {
-            assert!(!success, "{name} catalog unexpectedly accepted: {text}");
-            assert_eq!(calls, "1:models\n", "{name}");
-            let value: Value = serde_json::from_str(text.trim()).unwrap();
-            assert_eq!(value["schema_version"], "models.v1", "{name}");
-            assert_eq!(value["ok"], false, "{name}");
-            assert_eq!(value["models"], json!([]), "{name}");
-            assert!(
-                !value["error"]
-                    .as_str()
-                    .unwrap()
-                    .to_ascii_lowercase()
-                    .contains("unsupported model provider"),
-                "{name}: {text}"
-            );
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn grok_nonzero_native_command_is_not_a_successful_empty_catalog() {
-        let grok = CliFixture::new(fixture_program(
-            "grok",
-            "printf 'private diagnostic' >&2\nexit 7",
-        ));
-        let output = run_public_models_cli(
-            &grok.program,
-            None,
-            &["models", "--provider", "grok", "--json"],
-        );
-        let text = public_cli_text(&output);
-        let calls =
-            std::fs::read_to_string(grok.program.with_extension("count")).unwrap_or_default();
-        drop(grok);
-        assert!(!output.status.success(), "{text}");
-        assert_eq!(calls, "1:models\n");
-        assert!(!text.contains("private diagnostic"));
-        let value: Value = serde_json::from_str(text.trim()).unwrap();
-        assert_eq!(value["ok"], false);
-        assert_eq!(value["models"], json!([]));
-        assert!(
-            value["error"]
-                .as_str()
-                .unwrap()
-                .to_ascii_lowercase()
-                .contains("grok"),
-            "{text}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn grok_failure_help_and_unsupported_action_are_publicly_diagnostic() {
         let missing = CliFixture::new(fixture_program("not-grok", "exit 0"));
         let output = run_public_models_cli(
@@ -397,7 +250,11 @@ esac"#));
         );
         let text = public_cli_text(&output);
         let value: Value = serde_json::from_str(text.trim()).unwrap();
+        // `grok` reads the Grok Build leaf catalog; a missing PATH `grok` fails
+        // closed there with no legacy catalog fallback.
         assert_eq!(value["ok"], false);
+        assert_eq!(value["provider"], "grok_build", "{text}");
+        assert_eq!(value["models"], json!([]), "{text}");
         assert!(
             value["error"]
                 .as_str()
@@ -406,7 +263,6 @@ esac"#));
                 .contains("grok"),
             "{text}"
         );
-        assert!(value["action"].as_str().unwrap().contains("grok"), "{text}");
         assert!(crate::cli::emit::default_help().contains("grok"));
         assert!(crate::cli::spec::command_spec("models")
             .unwrap()
@@ -499,16 +355,6 @@ esac"#));
         fn drop(&mut self) {
             cleanup_fixture(&self.program);
         }
-    }
-
-    #[cfg(unix)]
-    fn native_cli_fixture(program: &str, bytes: &[u8]) -> CliFixture {
-        let program = fixture_program(program, "exec /bin/cat \"$TEAM_AGENT_MODELS_FIXTURE\"");
-        let mut fixture = CliFixture::new(program);
-        let response = fixture.program.with_extension("stdout");
-        std::fs::write(&response, bytes).unwrap();
-        fixture.response = Some(response);
-        fixture
     }
 
     #[cfg(unix)]

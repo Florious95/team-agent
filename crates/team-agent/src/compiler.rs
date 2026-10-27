@@ -386,7 +386,8 @@ fn compile_role_agent_with_mode(
     let provider = string_field(&meta, "provider")
         .filter(|provider| !provider.trim().is_empty())
         .unwrap_or_else(|| "pi".to_string());
-    // An exact boolean opt-in; a bare shared key (codex) keeps its legacy meaning.
+    // An exact boolean; every contract name (codex, grok, claude, pi, ...)
+    // selects its leaf without it, `true` only insists on a contract leaf.
     let contract_runtime = match meta.get("contract_runtime") {
         None => false,
         Some(Value::Bool(value)) => *value,
@@ -398,7 +399,7 @@ fn compile_role_agent_with_mode(
         }
     };
     #[cfg(unix)]
-    let contract = crate::contract_runtime::registry::declared(&provider, contract_runtime);
+    let contract = crate::contract_runtime::registry::declared(&provider);
     #[cfg(not(unix))]
     let contract: Option<()> = None;
     if contract_runtime && contract.is_none() {

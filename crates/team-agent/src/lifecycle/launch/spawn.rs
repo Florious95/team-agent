@@ -69,10 +69,6 @@ pub(super) fn spawn_agents(
     let team_dir = team_dir_buf
         .as_deref()
         .unwrap_or_else(|| spec_path.parent().unwrap_or_else(|| Path::new(".")));
-    let runtime_fast = matches!(
-        spec.get("runtime").and_then(|v| v.get("fast")),
-        Some(Value::Bool(true))
-    );
     let mut started = Vec::new();
     #[cfg(unix)]
     let mut contract_started = Vec::new();
@@ -111,8 +107,9 @@ pub(super) fn spawn_agents(
             // persist_spawn_agent_state projects the actual K3 seat separately.
             continue;
         }
-        // A pre-upgrade Claude Code or Pi worker spec has no legacy runtime
-        // left; refuse before any MCP file, profile or pane side effect.
+        // A pre-upgrade Claude Code, Codex, Grok or Pi worker spec has no
+        // legacy runtime left; refuse before any MCP file, profile or pane
+        // side effect.
         if let Some(retired) = agent
             .get("provider")
             .and_then(Value::as_str)
@@ -123,11 +120,11 @@ pub(super) fn spawn_agents(
             ));
         }
         let agent_id = AgentId::new(agent_id_raw);
-        let provider = agent
-            .get("provider")
-            .and_then(Value::as_str)
-            .and_then(parse_provider)
-            .unwrap_or(Provider::Codex);
+        // No provider silently falls back to a legacy engine.
+        let raw_provider = agent.get("provider").and_then(Value::as_str).unwrap_or("");
+        let provider = parse_provider(raw_provider).ok_or_else(|| {
+            LifecycleError::Provider(format!("unknown worker provider {raw_provider:?}"))
+        })?;
         let auth_mode = agent
             .get("auth_mode")
             .and_then(Value::as_str)
@@ -316,11 +313,6 @@ pub(super) fn spawn_agents(
                 );
             }
         }
-        // Grok 无 --mcp-config；写 <cwd>/.grok/config.toml 让 CLI 读到 team-agent。
-        if matches!(provider, Provider::Grok) {
-            ensure_grok_login_and_folder_trust(workspace)?;
-            apply_grok_mcp_overlay(workspace, &mcp_config)?;
-        }
         crate::provider::argv_route::apply(provider, &mut plan.argv)
             .map_err(|error| LifecycleError::Provider(error.to_string()))?;
         let spawn_epoch = u64::try_from(started.len()).unwrap_or(u64::MAX);
@@ -398,11 +390,6 @@ pub(super) fn spawn_agents(
             30,
             0.5,
         );
-        // Python launch/core.py:235-237 — runtime.fast toggles the provider's fast mode
-        // after spawn; provider specifics live behind the adapter (F032).
-        if runtime_fast {
-            let _ = adapter.enable_fast_mode(transport, &Target::Pane(spawn.pane_id.clone()));
-        }
         if matches!(transport.liveness(&spawn.pane_id), Ok(PaneLiveness::Dead)) {
             continue;
         }

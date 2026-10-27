@@ -3,7 +3,7 @@
 //! contract:
 //!   provides:
 //!     - name: candidate_session_files
-//!       what: 按 provider 枚举候选文件(隔离根 + spawn_cwd 递归 + provider HOME 目录)，去重排序并按 mtime 截到 300 条
+//!       what: 枚举候选文件(隔离根 + spawn_cwd 递归)，去重排序并按 mtime 截到 300 条
 //!     - name: parse_candidate_files
 //!       what: 逐个读头 64KB 解析成 CapturedSessionCandidate，途中套 cwd 匹配与 embedded 身份两道排除
 //!     - name: apply_spawned_at_filter
@@ -29,8 +29,6 @@
 //!   requires:
 //!     - name: crate::provider::helpers
 //!       what: find_session_id 与 parse_jsonl_records
-//!     - name: super::codex
-//!       what: spawned_at 解析、uuid 精度截断与 rollout 创建时间
 //! boundary:
 //!   - 一律只读:不写盘、不改 state、不发事件
 //!   - 只产出候选与事实;归属最终由上游分配器裁定，本文件不写会话
@@ -64,10 +62,10 @@ pub(super) const CAPTURE_HEAD_BYTES: u64 = 65_536;
 /// ---
 /// purpose: 枚举本席位可能对应的会话文件，产出待解析的候选路径表
 /// params:
-///   provider: 决定要不要去 ~/.codex/sessions 找
+///   _provider: 保留调用形状;不再有 provider HOME 目录分支
 ///   context: provider_projects_root(隔离根)、spawn_cwd(必扫)、agent_id(参与文件名匹配)
 /// returns: 去重并排序后的候选;requires_cwd_match=false 的排前面，同组按路径字典序
-/// errors: 只有 spawn_cwd 这一层根目录读不开才上抛 Io;provider HOME 侧目录读失败静默跳过
+/// errors: 只有 spawn_cwd 这一层根目录读不开才上抛 Io;隔离根读失败静默跳过
 /// contract:
 ///   provides:
 ///     - name: candidate_session_files
@@ -76,10 +74,10 @@ pub(super) const CAPTURE_HEAD_BYTES: u64 = 65_536;
 ///   - spawn_cwd 递归最深 4 层;工作区是用户代码仓，任何名含 session 的 json 都会被列进来
 ///   - .team 运行时目录一律排除，除非它就在 claude 的隔离根之下
 ///   - 超过 300 条按 mtime 由新到旧截断;被截掉的候选不产生任何信号
-///   - Copilot / Grok / GeminiCli / Fake 不走 HOME 分支——它们各有专属扫描
+///   - 任何 provider 都不走 HOME 分支——Copilot / Pi 各有专属扫描，退役的 legacy 席位不扫描
 /// ---
 pub(super) fn candidate_session_files(
-    provider: Provider,
+    _provider: Provider,
     context: &CaptureSessionContext,
 ) -> Result<Vec<SessionCandidate>, ProviderError> {
     let mut out = Vec::new();
@@ -94,25 +92,6 @@ pub(super) fn candidate_session_files(
         None,
         &mut out,
     )?;
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        match provider {
-            Provider::Codex => {
-                collect_optional_candidate_files(
-                    &home.join(".codex").join("sessions"),
-                    &context.agent_id,
-                    None,
-                    &mut out,
-                )?;
-            }
-            Provider::Claude
-            | Provider::ClaudeCode
-            | Provider::Copilot
-            | Provider::Grok
-            | Provider::Pi
-            | Provider::GeminiCli
-            | Provider::Fake => {}
-        }
-    }
     out.sort_by(|a, b| {
         a.requires_cwd_match
             .cmp(&b.requires_cwd_match)
@@ -202,20 +181,19 @@ pub(super) fn parse_candidate_files(
 /// ---
 /// purpose: 用席位的进程世代边界剔除上一代/别人留下的旧存档
 /// params:
-///   provider: Codex 走 rollout 创建时间，其余走文件 mtime
-///   context: spawned_at 缺失则不过滤(legacy 行);expected id 存在且是 Codex 时把边界截到毫秒
+///   _provider: 保留调用形状;所有 provider 都按文件 mtime 判定
+///   context: spawned_at 缺失则不过滤(legacy 行)
 ///   out: 就地过滤的候选列表
 /// contract:
 ///   provides:
 ///     - name: apply_spawned_at_filter
-///       what: fail-closed —— spawned_at 存在但解析不了(或截断失败)时清空候选，绝不放行
+///       what: fail-closed —— spawned_at 存在但解析不了时清空候选，绝不放行
 /// boundary:
 ///   - 无 spawned_at 时整体跳过过滤,把守卫让给分配器的身份与唯一性判据
 ///   - 无 rollout_path、取不到时间的候选一律剔除
-///   - Codex 刻意不用 mtime:追加写与邻席活动都会抬升 mtime
 /// ---
 pub(super) fn apply_spawned_at_filter(
-    provider: Provider,
+    _provider: Provider,
     context: &CaptureSessionContext,
     out: &mut Vec<CapturedSessionCandidate>,
 ) {
@@ -224,30 +202,23 @@ pub(super) fn apply_spawned_at_filter(
         // the canonical runtime capture path rejects such rows before scan.
         return;
     };
-    let Some(spawned_at) = super::codex::parse_spawned_at(raw_spawned_at) else {
+    let Some(spawned_at) = parse_spawned_at(raw_spawned_at) else {
         out.clear();
         return;
     };
-    let codex_spawned_at =
-        if matches!(provider, Provider::Codex) && context.expected_session_id.is_some() {
-            let Some(timestamp) = super::codex::truncate_to_uuid_precision(spawned_at) else {
-                out.clear();
-                return;
-            };
-            timestamp
-        } else {
-            spawned_at
-        };
     out.retain(|candidate| {
         let Some(path) = candidate.captured.rollout_path.as_ref() else {
             return false;
         };
-        if matches!(provider, Provider::Codex) {
-            return super::codex::rollout_created_at(path.as_path())
-                .is_some_and(|created_at| created_at >= codex_spawned_at);
-        }
         candidate_mtime(path.as_path()).is_some_and(|mtime| mtime >= spawned_at)
     });
+}
+
+/// RFC3339 only; the caller decides what `None` means (the filter clears).
+pub(super) fn parse_spawned_at(raw: &str) -> Option<std::time::SystemTime> {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|dt| std::time::SystemTime::from(dt.with_timezone(&chrono::Utc)))
 }
 
 fn candidate_mtime(path: &Path) -> Option<std::time::SystemTime> {
@@ -259,7 +230,7 @@ fn candidate_mtime(path: &Path) -> Option<std::time::SystemTime> {
 /// ---
 /// purpose: 在时间窗只能唯一确定一条候选时才据此收窄，避免用弱判据在多条候选间乱挑
 /// params:
-///   provider: Codex 用 rollout 创建时间，其余用 mtime
+///   _provider: 保留调用形状;所有 provider 都用 mtime
 ///   context: 需要 spawned_at;有 expected id 且候选不超过 1 条时直接不动
 ///   out: 就地可能被替换的候选列表
 /// contract:
@@ -271,18 +242,14 @@ fn candidate_mtime(path: &Path) -> Option<std::time::SystemTime> {
 ///   - 不排序、不去重;只做"唯一即取"的收窄
 /// ---
 pub(super) fn apply_spawn_time_window_if_unique(
-    provider: Provider,
+    _provider: Provider,
     context: &CaptureSessionContext,
     out: &mut Vec<CapturedSessionCandidate>,
 ) {
     if context.expected_session_id.is_some() && out.len() <= 1 {
         return;
     }
-    let Some(spawned_at) = context
-        .spawned_at
-        .as_deref()
-        .and_then(super::codex::parse_spawned_at)
-    else {
+    let Some(spawned_at) = context.spawned_at.as_deref().and_then(parse_spawned_at) else {
         return;
     };
     let within: Vec<CapturedSessionCandidate> = out
@@ -292,10 +259,7 @@ pub(super) fn apply_spawn_time_window_if_unique(
                 .captured
                 .rollout_path
                 .as_ref()
-                .and_then(|p| match provider {
-                    Provider::Codex => super::codex::rollout_created_at(p.as_path()),
-                    _ => candidate_mtime(p.as_path()),
-                })
+                .and_then(|p| candidate_mtime(p.as_path()))
                 .is_some_and(|created_at| created_at >= spawned_at)
         })
         .cloned()

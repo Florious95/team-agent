@@ -418,12 +418,6 @@ fn provider_env_exports(
         return exports;
     }
     match provider {
-        Provider::Codex => {
-            let key = value_or_alternate(values, "OPENAI_API_KEY", "API_KEY");
-            append_env_pair(&mut exports, "TEAM_AGENT_PROVIDER_API_KEY", key);
-            append_env_pair(&mut exports, "OPENAI_API_KEY", key);
-            append_env_pair(&mut exports, "OPENAI_BASE_URL", values.get("BASE_URL").filter(|value| !value.is_empty()).map(String::as_str));
-        }
         Provider::GeminiCli => {
             append_env_pair(&mut exports, "GEMINI_API_KEY", value_or_alternate(values, "GEMINI_API_KEY", "API_KEY"));
         }
@@ -446,9 +440,9 @@ fn provider_env_exports(
                 }
             }
         }
-        // Grok retains its native subscription credentials. Claude Code and Pi
-        // workers run only through their subscription-only contract leaves.
-        Provider::Claude | Provider::ClaudeCode | Provider::Grok | Provider::Pi => {}
+        // Claude Code, Codex, Grok and Pi workers run only through their
+        // subscription-only contract leaves.
+        Provider::Claude | Provider::ClaudeCode | Provider::Codex | Provider::Grok | Provider::Pi => {}
         Provider::Fake => {}
     }
     exports
@@ -469,13 +463,10 @@ mod append_env_contract {
         let map = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
             pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
         };
-        for provider in [Provider::Claude, Provider::ClaudeCode, Provider::Pi] {
+        for provider in [Provider::Claude, Provider::ClaudeCode, Provider::Codex, Provider::Grok, Provider::Pi] {
             assert!(provider_env_exports(provider, AuthMode::OfficialApi, &values).is_empty());
+            assert!(provider_env_exports(provider, AuthMode::CompatibleApi, &values).is_empty());
         }
-        assert_eq!(provider_env_exports(Provider::Codex, AuthMode::CompatibleApi, &values), map(&[
-            ("TEAM_AGENT_PROVIDER_API_KEY", "native-dummy"), ("OPENAI_API_KEY", "native-dummy"),
-            ("OPENAI_BASE_URL", " raw\nbase "),
-        ]));
         assert_eq!(provider_env_exports(Provider::GeminiCli, AuthMode::OfficialApi, &values), map(&[("GEMINI_API_KEY", "dummy")]));
         assert_eq!(provider_env_exports(Provider::Copilot, AuthMode::CompatibleApi, &values), map(&[
             ("COPILOT_PROVIDER_BASE_URL", " raw\nbase "), ("COPILOT_PROVIDER_TYPE", "custom"),
@@ -570,48 +561,7 @@ fn provider_command_overrides(
         _ if agent.model.is_some() => agent.model.clone(),
         _ => profile_model(values).map(str::to_string),
     };
-    let mut codex_profile = None;
-    let mut codex_config = Vec::new();
-    // Python provider_env.py:62-79 (_provider_command_overrides codex branch).
-    match agent.provider {
-        Provider::Codex => {
-            codex_profile =
-                value_or_alternate(values, "CODEX_PROFILE", "NATIVE_PROFILE").map(str::to_string);
-            let model_provider = values.get("MODEL_PROVIDER").filter(|v| !v.is_empty());
-            let base_url = values.get("BASE_URL").filter(|v| !v.is_empty());
-            if agent.auth_mode == AuthMode::CompatibleApi {
-                if let (Some(model_provider), Some(base_url)) = (model_provider, base_url) {
-                    if safe_codex_provider_id(model_provider) {
-                        codex_config.push(format!("model_provider=\"{model_provider}\""));
-                        let prefix = format!("model_providers.{model_provider}");
-                        codex_config.push(format!("{prefix}.base_url=\"{base_url}\""));
-                        codex_config
-                            .push(format!("{prefix}.env_key=\"TEAM_AGENT_PROVIDER_API_KEY\""));
-                        if let Some(wire_api) = values.get("WIRE_API").filter(|v| !v.is_empty()) {
-                            codex_config.push(format!("{prefix}.wire_api=\"{wire_api}\""));
-                        }
-                        if let Some(name) = values.get("PROVIDER_NAME").filter(|v| !v.is_empty()) {
-                            codex_config.push(format!("{prefix}.name=\"{name}\""));
-                        }
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-    ProviderCommandOverrides {
-        model,
-        codex_profile,
-        codex_config,
-    }
-}
-
-/// Python helpers.py:33-34 `_safe_codex_provider_id`: `[A-Za-z0-9_-]+`.
-fn safe_codex_provider_id(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    ProviderCommandOverrides { model }
 }
 
 fn write_runtime_env_file(
@@ -704,18 +654,12 @@ fn required_profile_keys(provider: Provider, auth_mode: AuthMode) -> &'static [&
         return &[];
     }
     match provider {
-        Provider::Codex => match auth_mode {
-            AuthMode::OfficialApi => &["API_KEY"],
-            AuthMode::CompatibleApi => &["BASE_URL", "API_KEY"],
-            AuthMode::Subscription => &[],
-        },
         Provider::GeminiCli => &["API_KEY"],
         // C-7-1 cr verdict: copilot 一期 subscription-only,无 BYOK required key 集合;
         // 二期 BYOK 立项时填(向后兼容字段保留)。
         Provider::Copilot => &[],
-        // 0.5.67: Grok 一期无 BYOK required key 集合 (同 copilot 精神)。Claude Code/Pi
-        // worker 只走 subscription-only contract leaf。
-        Provider::Claude | Provider::ClaudeCode | Provider::Grok | Provider::Pi => &[],
+        // Claude Code/Codex/Grok/Pi worker 只走 subscription-only contract leaf。
+        Provider::Claude | Provider::ClaudeCode | Provider::Codex | Provider::Grok | Provider::Pi => &[],
         Provider::Fake => &[],
     }
 }

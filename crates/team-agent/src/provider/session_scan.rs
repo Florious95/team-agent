@@ -10,10 +10,8 @@ use std::path::PathBuf;
 use crate::provider::types::{CapturedSession, ProviderError, SessionId};
 use crate::provider::Provider;
 
-pub(crate) mod codex;
 pub(crate) mod common;
 pub(crate) mod copilot;
-pub(crate) mod grok;
 pub(crate) mod pi;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,29 +40,21 @@ pub(crate) fn scan_session_candidates_once(
     if matches!(provider, Provider::Copilot) {
         return Ok(copilot::scan_session_store(context));
     }
-    if matches!(provider, Provider::Grok) {
-        return Ok(grok::scan_session_store(context));
-    }
     if matches!(provider, Provider::Pi) {
         return pi::scan_session_store(context);
     }
-    // Claude Code workers run only through the contract leaf; a pre-upgrade
-    // legacy row has nothing left to capture.
-    if matches!(provider, Provider::Claude | Provider::ClaudeCode) {
+    // Claude Code, Codex and Grok workers run only through their contract
+    // leaves; a pre-upgrade legacy row has nothing left to capture.
+    if matches!(
+        provider,
+        Provider::Claude | Provider::ClaudeCode | Provider::Codex | Provider::Grok
+    ) {
         return Ok(Vec::new());
     }
 
     let candidates = common::candidate_session_files(provider, context)?;
     let mut out = common::parse_candidate_files(provider, context, candidates);
-    if matches!(provider, Provider::Codex) {
-        codex::retain_spawn_cwd(context, &mut out);
-    }
     common::apply_spawned_at_filter(provider, context, &mut out);
-
-    if matches!(provider, Provider::Codex) {
-        out = codex::apply_expected_session_filter(context, out);
-    }
-
     common::apply_spawn_time_window_if_unique(provider, context, &mut out);
     common::sort_expected_first_if_needed(context, &mut out);
     Ok(out)

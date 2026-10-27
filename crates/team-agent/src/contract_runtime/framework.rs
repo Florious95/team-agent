@@ -55,7 +55,7 @@ pub fn require_legacy_lifecycle(
         return Ok(());
     };
     let row = agent.and_then(|id| selected.state.get("agents").and_then(|agents| agents.get(id)));
-    // A pre-upgrade legacy Cursor, Claude or Pi seat has no engine left; only teardown is admitted.
+    // A pre-upgrade legacy Cursor, Claude, Codex, Grok or Pi seat has no engine left; only teardown is admitted.
     let teardown = matches!(operation, "stop-agent" | "remove-agent");
     if let Some(retired) = row
         .and_then(|row| row.get("provider"))
@@ -114,11 +114,8 @@ pub fn declares_contract(path: Option<&Path>, provider: Option<&str>) -> bool {
             .and_then(crate::model::yaml::Value::as_str)
             .map(str::to_owned)
     });
-    let opted_in = meta.as_ref().is_some_and(|meta| {
-        matches!(meta.get("contract_runtime"), Some(crate::model::yaml::Value::Bool(true)))
-    });
     // An omitted provider is the default `pi`, which declares the Pi leaf.
-    super::registry::recognizes(provider.or(declared.as_deref()).unwrap_or("pi"), opted_in)
+    super::registry::recognizes(provider.or(declared.as_deref()).unwrap_or("pi"))
 }
 pub fn team_config(
     workspace: &Path,

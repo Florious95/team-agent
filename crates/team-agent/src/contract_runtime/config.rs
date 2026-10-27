@@ -99,7 +99,8 @@ fn mode(meta: &Value, path: &Path) -> Result<Option<CommunicationMode>, ConfigEr
         .transpose()
 }
 
-/// `contract_runtime` is an exact boolean; a bare shared key stays legacy.
+/// `contract_runtime` is an exact boolean. Every contract name selects its leaf
+/// without it; `true` only insists that the provider be a contract leaf.
 fn opted_in(meta: &Value, path: &Path) -> Result<bool, ConfigError> {
     match meta.get("contract_runtime") {
         None => Ok(false),
@@ -118,7 +119,7 @@ fn malformed_contract_header(body: &str) -> bool {
             .map(|(key, value)| (key.trim(), value.split('#').next().unwrap_or("").trim().trim_matches(['\'', '"'])))
             .collect();
         let opted_in = fields.iter().any(|(key, value)| *key == "contract_runtime" && *value == "true");
-        opted_in || fields.iter().any(|(key, value)| *key == "provider" && super::registry::recognizes(value, false))
+        opted_in || fields.iter().any(|(key, value)| *key == "provider" && super::registry::recognizes(value))
     })
 }
 
@@ -192,7 +193,7 @@ fn read_team_inner(
                 None | Some(Value::Null) => true,
                 Some(provider) => provider
                     .as_str()
-                    .is_some_and(|provider| super::registry::recognizes(provider, false)),
+                    .is_some_and(super::registry::recognizes),
             }
         {
             selected = true;
@@ -264,8 +265,8 @@ fn read_team_inner(
         }
         let provider = text(&meta, "provider", &source)?.unwrap_or_else(|| "pi".into());
         let opted = opted_in(&meta, &source)?;
-        let registration = super::registry::declared(&provider, opted);
-        if registration.is_none() && (opted || super::registry::recognizes(&provider, false)) {
+        let registration = super::registry::declared(&provider);
+        if registration.is_none() && (opted || super::registry::recognizes(&provider)) {
             return Err(invalid(&source, "provider"));
         }
         let runtime = if registration.is_some() {

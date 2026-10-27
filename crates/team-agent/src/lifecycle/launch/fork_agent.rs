@@ -1,91 +1,32 @@
 //! ---
-//! purpose: legacy 席位的窗口内分身（Grok）；Claude Code / Pi 席位只走 contract 管道的原生新席位 fork
+//! purpose: legacy 席位的 fork 入口；legacy 席位一律拒绝，新席位 fork 只走 contract 管道
 //! contract:
 //!   provides:
 //!     - name: fork_agent_with_transport
-//!       what: Grok 走窗口内斜杠 fork；升级前遗留的 claude/pi worker 行明确拒绝
-//!     - name: in_window_fork
-//!       what: 已验证的 provider+subscription 给出 command+screen_mark；未验证返回 None
+//!       what: 持席位生命周期锁读取源席；升级前遗留的 claude/codex/grok/pi worker 行按退役拒绝，其余 legacy provider 报未验证
 //!   depends:
 //!     - crate::lifecycle::lock
-//!     - crate::lifecycle::pane_input_lock
-//!     - crate::lifecycle::profile_launch
-//!     - crate::transport::Transport
 //! boundary:
-//!   - 新席位 fork 只由 contract_runtime::fork 管道完成，这里不注册新席位
-//!   - 窗口内分身不 spawn 新 pane，不改 TEAM_AGENT_ID / MCP / 席位名
-//!   - 重试只重按回车，不重粘 /fork
-//!   - 不把 pane 锁超时从 200ms 调大
+//!   - 新席位 fork 只由 contract_runtime::fork 管道完成，这里不注册新席位、不注入窗口
+//!   - 不 spawn pane，不改 TEAM_AGENT_ID / MCP / 席位名
 //!   - 未验证的 provider 不猜斜杠命令
 //! maturity: wired
 //! ---
 
 use super::*;
-use crate::lifecycle::pane_input_lock::{
-    acquire_or_proceed, PaneInputLockRequest, PANE_INPUT_LOCK_TIMEOUT_EVENT,
-};
-use crate::lifecycle::profile_launch::{parse_auth_mode, parse_provider};
-use crate::model::enums::{AuthMode, Provider};
-
-const MAX_ENTER_RETRIES: u32 = 8;
-
-/// Injected slash command + the screen mark that proves it landed.
-/// Difference between providers lives only in this data.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InWindowFork {
-    pub command: &'static str,
-    pub screen_mark: &'static str,
-}
 
 /// ---
-/// purpose: 给出该 provider 与鉴权方式下窗口内 fork 用的斜杠命令与成功标记
-/// returns: 已实测验证的组合返回命令与屏幕标记，其余一律 None
-/// ---
-/// Official in-window fork. None = unverified or unsupported-auth.
-/// grok `/fork` mark `forked from` (2026-08-17).
-/// Claude's `/branch` is retired here: it moves the SOURCE process onto the
-/// branch (renamed "<title> (Branch)") while the seat's captured tuple still
-/// names the old session, and creates no seat. Claude Code and Pi fork only
-/// into a new seat through the contract pipeline (`contract_runtime::fork`).
-pub fn in_window_fork(provider: Provider, auth: AuthMode) -> Option<InWindowFork> {
-    match (provider, auth) {
-        (Provider::Grok, AuthMode::Subscription) => Some(InWindowFork {
-            command: "/fork",
-            screen_mark: "forked from",
-        }),
-        _ => None,
-    }
-}
-
-/// ---
-/// purpose: 只取窗口内 fork 的斜杠命令
-/// returns: 有已验证组合时返回命令，否则 None
-/// ---
-pub fn in_window_fork_command(provider: Provider, auth: AuthMode) -> Option<&'static str> {
-    in_window_fork(provider, auth).map(|spec| spec.command)
-}
-
-fn refuse_missing_in_window_fork(provider: Provider, provider_raw: &str) -> LifecycleError {
-    if matches!(provider, Provider::Grok | Provider::Pi) {
-        LifecycleError::Provider(format!(
-            "{provider_raw} does not support native session fork"
-        ))
-    } else {
-        LifecycleError::Provider(format!(
-            "{provider_raw} in-window fork is unverified (未验证)"
-        ))
-    }
-}
-
-/// ---
-/// purpose: 在源席窗口内注入官方斜杠命令完成就地分身
+/// purpose: legacy 席位的 fork：只读源席后拒绝，不做任何副作用
 /// params:
 ///   source_agent_id: 被 fork 的席位
 ///   as_agent_id: 新席位名
-///   transport: 目标 team 实际使用的 transport
-/// returns: fork 报告，屏幕出现该 provider 的实测标记才记为已验证
-/// errors: 选不到 team 返回 TeamSelect，provider 或鉴权方式未验证返回 Provider，注入失败返回 LifecycleError
+///   transport: 目标 team 实际使用的 transport（legacy 席位不再注入）
+/// returns: 不返回成功；contract 席位在此之前已由 contract 管道处理
+/// errors: 选不到 team 返回 TeamSelect，退役 provider 行与其余 legacy provider 返回 Provider
 /// ---
+/// The Grok in-window `/fork` was the last legacy fork; Claude Code, Codex,
+/// Grok and Pi fork only into a new seat through the contract pipeline
+/// (`contract_runtime::fork`).
 pub fn fork_agent_with_transport(
     workspace: &Path,
     source_agent_id: &AgentId,
@@ -95,6 +36,7 @@ pub fn fork_agent_with_transport(
     team: Option<&str>,
     transport: &dyn Transport,
 ) -> Result<ForkAgentReport, LifecycleError> {
+    let _ = (as_agent_id, label, open_display, transport);
     let selected = crate::state::selector::resolve_active_team(
         workspace,
         team,
@@ -115,7 +57,6 @@ pub fn fork_agent_with_transport(
         crate::state::selector::SelectorMode::RequireSpec,
     )
     .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
-    let run_ws = selected.run_workspace.clone();
     let agent = selected
         .state
         .get("agents")
@@ -127,124 +68,15 @@ pub fn fork_agent_with_transport(
         .get("provider")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("unknown");
-    let auth_raw = agent
-        .get("auth_mode")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("subscription");
-    // A pre-upgrade Claude Code or Pi row has no legacy runtime to fork from;
-    // contract seats fork through the contract pipeline before this point.
+    // A pre-upgrade Claude Code, Codex, Grok or Pi row has no legacy runtime
+    // to fork from; contract seats fork through the contract pipeline before
+    // this point.
     if crate::provider::wire::is_retired_provider(provider_raw) {
         return Err(LifecycleError::Provider(
             crate::provider::wire::retired_provider_error(provider_raw).into(),
         ));
     }
-    let _ = (label, open_display);
-    let provider = parse_provider(provider_raw).unwrap_or(Provider::Grok);
-    let auth = parse_auth_mode(auth_raw).unwrap_or(AuthMode::Subscription);
-    let Some(spec) = in_window_fork(provider, auth) else {
-        return Err(refuse_missing_in_window_fork(provider, provider_raw));
-    };
-    if as_agent_id.as_str() != source_agent_id.as_str() {
-        return Err(LifecycleError::RequirementUnmet(format!(
-            "in-place fork refuses --as {as_agent_id}: session stays on {source_agent_id}"
-        )));
-    }
-    let pane_raw = agent
-        .get("pane_id")
-        .and_then(serde_json::Value::as_str)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            LifecycleError::RequirementUnmet(format!(
-                "source agent {source_agent_id} has no pane_id"
-            ))
-        })?;
-    let target = Target::Pane(PaneId::new(pane_raw));
-    let lock = acquire_or_proceed(PaneInputLockRequest {
-        workspace: Some(&run_ws),
-        target_key: pane_raw,
-        operation: "fork-inject",
-    });
-    if lock.is_none() {
-        let _ = crate::event_log::EventLog::new(&run_ws).write(
-            PANE_INPUT_LOCK_TIMEOUT_EVENT,
-            serde_json::json!({
-                "during": "fork-inject",
-                "agent_id": source_agent_id.as_str(),
-                "pane_id": pane_raw,
-                "observed_at": chrono::Utc::now().to_rfc3339(),
-            }),
-        );
-    }
-    inject_clean_command(transport, &target, spec.command)?;
-    wait_for_screen_mark(transport, &target, spec.screen_mark)?;
-    drop(lock);
-    crate::event_log::EventLog::new(&run_ws)
-        .write(
-            "lifecycle.fork.in_place",
-            serde_json::json!({
-                "source_agent_id": source_agent_id.as_str(),
-                "agent_id": source_agent_id.as_str(),
-                "pane_id": pane_raw,
-                "command": spec.command,
-                "screen_mark": spec.screen_mark,
-            }),
-        )
-        .map_err(|e| LifecycleError::StatePersist(format!("fork audit write failed: {e}")))?;
-    Ok(ForkAgentReport {
-        source_agent_id: source_agent_id.clone(),
-        new_agent_id: source_agent_id.clone(),
-        env: AgentActionEnvelope {
-            agent_id: source_agent_id.clone(),
-            state_file: crate::state::persist::runtime_state_path(&run_ws),
-            coordinator_started: false,
-        },
-        session_id: None,
-        backing_state: ForkBackingState::Verified,
-    })
-}
-
-fn inject_clean_command(
-    transport: &dyn Transport,
-    target: &Target,
-    command: &str,
-) -> Result<(), LifecycleError> {
-    transport
-        .inject(
-            target,
-            &crate::transport::InjectPayload::TextSkipConsumptionPoll(command.to_string()),
-            crate::transport::Key::Enter,
-            false,
-        )
-        .map_err(|e| LifecycleError::Transport(e.to_string()))?;
-    Ok(())
-}
-
-const NO_CONVERSATION_TO_BRANCH: &str = "Failed to branch conversation: No conversation to branch";
-
-fn wait_for_screen_mark(
-    transport: &dyn Transport,
-    target: &Target,
-    screen_mark: &str,
-) -> Result<(), LifecycleError> {
-    for attempt in 0..MAX_ENTER_RETRIES {
-        let cap = transport
-            .capture(target, crate::transport::CaptureRange::Tail(40))
-            .map_err(|e| LifecycleError::Transport(e.to_string()))?;
-        if cap.text.contains(screen_mark) {
-            return Ok(());
-        }
-        if cap.text.contains(NO_CONVERSATION_TO_BRANCH) {
-            return Err(LifecycleError::RequirementUnmet(
-                NO_CONVERSATION_TO_BRANCH.to_string(),
-            ));
-        }
-        if attempt + 1 < MAX_ENTER_RETRIES {
-            // Mixed text in the box is not failure. Retry Enter only — never re-paste the slash command.
-            let _ = transport.send_keys(target, &[crate::transport::Key::Enter]);
-            std::thread::sleep(std::time::Duration::from_millis(80));
-        }
-    }
-    Err(LifecycleError::RequirementUnmet(format!(
-        "fork inject did not produce {screen_mark:?} on screen"
+    Err(LifecycleError::Provider(format!(
+        "{provider_raw} native session fork is unverified (未验证); no legacy fork or fresh replacement was performed"
     )))
 }

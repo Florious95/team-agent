@@ -4486,7 +4486,7 @@ pub mod lifecycle_port {
             .unwrap();
             std::fs::write(
                 team_dir.join("agents").join("implementer.md"),
-                "---\nname: implementer\nrole: Implementation Engineer\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nImplement bounded tasks.\n",
+                "---\nname: implementer\nrole: Implementation Engineer\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nImplement bounded tasks.\n",
             )
             .unwrap();
             super::super::hermetic_test_support::seed_in_process_coordinator(&root);

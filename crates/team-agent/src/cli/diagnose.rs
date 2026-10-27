@@ -1180,22 +1180,6 @@ mod tests {
         );
     }
 
-    fn write_codex_identity_rollout(
-        workspace: &std::path::Path,
-        session_id: &str,
-        embedded_agent_id: &str,
-    ) -> std::path::PathBuf {
-        let path = workspace.join("rollout-poison.jsonl");
-        let text = format!(
-            "{{\"session_meta\":{{\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"{}\"}}}}}}\n\
-             {{\"type\":\"turn_context\",\"payload\":{{}}}}\n\
-             {{\"type\":\"response_item\",\"payload\":{{\"content\":[{{\"type\":\"input_text\",\"text\":\"You are Team Agent worker `{embedded_agent_id}` with role `fixture`.\"}}]}}}}\n",
-            workspace.to_string_lossy()
-        );
-        std::fs::write(&path, text).expect("write rollout");
-        path
-    }
-
     fn coordinator_health_fixture(
         status: crate::coordinator::CoordinatorHealthStatus,
         metadata_mismatch_reason: Option<&str>,
@@ -1269,59 +1253,6 @@ mod tests {
             coordinator_issue_id(&json!({"session_name": "team-fixture"}), &health),
             Some("coordinator_schema_incompatible")
         );
-    }
-
-    #[test]
-    fn diagnose_surfaces_codex_session_identity_mismatch() {
-        let workspace =
-            std::env::temp_dir().join(format!("ta-diagnose-crossbind-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&workspace);
-        std::fs::create_dir_all(&workspace).unwrap();
-        let rollout = write_codex_identity_rollout(
-            &workspace,
-            "019f3327-c35a-7023-b3cd-1bea93a7a157",
-            "ios-dev",
-        );
-        let state = json!({
-            "session_name": "team-fixture",
-            "leader_receiver": {
-                "mode": "direct_tmux",
-                "status": "attached",
-                "pane_id": "%leader",
-                "provider": "codex"
-            },
-            "agents": {
-                "frontend": {
-                    "provider": "codex",
-                    "status": "running",
-                    "session_id": "019f3327-c35a-7023-b3cd-1bea93a7a157",
-                    "rollout_path": rollout.to_string_lossy(),
-                    "captured_at": "2026-07-05T17:04:04Z",
-                    "captured_via": "fs_watch",
-                    "spawn_cwd": workspace.to_string_lossy(),
-                    "window": "frontend"
-                }
-            }
-        });
-        let backend = crate::transport::test_support::OfflineTransport::new()
-            .with_session_present(true)
-            .with_windows(vec![crate::transport::WindowName::new("frontend")]);
-        let (issues, repairs) = diagnose_runtime(&state, &backend);
-        assert!(
-            issues
-                .as_array()
-                .is_some_and(|items| items.iter().any(|item| item.as_str()
-                    == Some("session_identity_mismatch:frontend"))),
-            "diagnose must surface session_identity_mismatch for poisoned Codex tuples; issues={issues}"
-        );
-        assert!(
-            repairs.as_array().is_some_and(|items| items.iter().any(|item| {
-                item.get("issue").and_then(Value::as_str)
-                    == Some("session_identity_mismatch:frontend")
-            })),
-            "diagnose should include an explicit repair hint for the mismatched tuple; repairs={repairs}"
-        );
-        let _ = std::fs::remove_dir_all(&workspace);
     }
 
     fn pane(session: &str, pane_id: &str, window: &str) -> crate::transport::PaneInfo {

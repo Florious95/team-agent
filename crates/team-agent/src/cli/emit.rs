@@ -1644,9 +1644,10 @@ fn role_agent_args(
         match flag {
             "--provider" => {
                 // A contract name is written as the leaf's public name (`agent` →
-                // `cursor`, `claude_code` → `claude`); it declares the same leaf.
+                // `cursor`, `claude_code` → `claude`, `codex_cli` → `codex`); it
+                // declares the same leaf.
                 #[cfg(unix)]
-                let contract = crate::contract_runtime::registry::declared(&value, false)
+                let contract = crate::contract_runtime::registry::declared(&value)
                     .map(crate::contract_runtime::registry::public_name);
                 #[cfg(not(unix))]
                 let contract: Option<&str> = None;
@@ -1749,19 +1750,19 @@ mod role_cli_tests {
     fn provider_accepts_contract_names_as_their_leaf_id() {
         for (name, leaf) in [
             ("cursor", "cursor"), ("cursor-agent", "cursor"), ("agent", "cursor"),
-            ("cursor_agent", "cursor"), ("kiro", "kiro"), ("codex_tui", "codex_tui"),
-            // Claude Code and Pi keep their public command names, which declare the leaf.
+            ("cursor_agent", "cursor"), ("kiro", "kiro"),
+            // Claude Code, Codex, Grok Build and Pi keep their public command
+            // names, which declare the leaf.
             ("claude", "claude"), ("claude_code", "claude"), ("claude-code", "claude"),
-            ("claude_tui", "claude"), ("pi", "pi"), ("pi_tui", "pi"),
+            ("claude_tui", "claude"), ("codex", "codex"), ("codex_cli", "codex"),
+            ("codex-cli", "codex"), ("codex_tui", "codex"), ("grok", "grok"),
+            ("grok_build", "grok"), ("pi", "pi"), ("pi_tui", "pi"),
         ] {
             let (_, patch) = role_agent_args(
                 &strings(&["w", "--provider", name, "--bypass", "true"]), true,
             ).unwrap_or_else(|error| panic!("{name}: {error}"));
             assert_eq!(patch.provider.as_deref(), Some(leaf), "{name}");
         }
-        let (_, patch) =
-            role_agent_args(&strings(&["w", "--provider", "codex", "--bypass", "true"]), true).unwrap();
-        assert_eq!(patch.provider.as_deref(), Some("codex"), "a bare shared key stays legacy");
         assert!(role_agent_args(&strings(&["w", "--provider", "Cursor", "--bypass", "true"]), true).is_err());
     }
 

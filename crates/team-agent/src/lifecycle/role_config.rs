@@ -342,12 +342,11 @@ fn reconcile_creation(
         .get("provider")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty());
-    let opted_in = matches!(meta.get("contract_runtime"), Some(Value::Bool(true)));
     if let Some(file_provider) = file_provider {
-        let file_provider = declared_provider(file_provider, opted_in)
+        let file_provider = declared_provider(file_provider)
             .ok_or_else(|| LifecycleError::Compile("unknown role provider".into()))?;
         if let Some(provider) = &next.provider {
-            if declared_provider(provider, opted_in) != Some(file_provider) {
+            if declared_provider(provider) != Some(file_provider) {
                 return Err(conflict("provider"));
             }
             next.provider = None;
@@ -415,13 +414,11 @@ fn reconcile_creation(
 
 /// One identity per declared provider: its contract leaf id, else its legacy
 /// wire form, so `agent` in a role file and `--provider cursor` agree.
-fn declared_provider(value: &str, contract_runtime: bool) -> Option<&'static str> {
+fn declared_provider(value: &str) -> Option<&'static str> {
     #[cfg(unix)]
-    if let Some(descriptor) = crate::contract_runtime::registry::declared(value, contract_runtime) {
+    if let Some(descriptor) = crate::contract_runtime::registry::declared(value) {
         return Some(descriptor.identity.id);
     }
-    #[cfg(not(unix))]
-    let _ = contract_runtime;
     crate::provider::wire::parse_provider(value).map(crate::provider::wire::provider_wire)
 }
 
