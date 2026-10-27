@@ -491,6 +491,20 @@
       "plan": "Bind this exact documented argv to an isolated HermeticTestEnv result and an assertion/negative-twin pair before promotion. For lifecycle use an authorized owned team and verify scope, identity, outcome and cleanup; help or readonly plans alone do not establish lifecycle coverage."
     },
     {
+      "command": "team-agent models --provider claude",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:public-cli",
+      "plan": "Bind this exact documented argv to an isolated HermeticTestEnv result and an assertion/negative-twin pair before promotion. For lifecycle use an authorized owned team and verify scope, identity, outcome and cleanup; help or readonly plans alone do not establish lifecycle coverage."
+    },
+    {
+      "command": "team-agent models --provider pi",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:public-cli",
+      "plan": "Bind this exact documented argv to an isolated HermeticTestEnv result and an assertion/negative-twin pair before promotion. For lifecycle use an authorized owned team and verify scope, identity, outcome and cleanup; help or readonly plans alone do not establish lifecycle coverage."
+    },
+    {
       "command": "team-agent profile init my-api --auth-mode compatible_api --workspace .",
       "bucket": "declared_gap",
       "covered": false,
