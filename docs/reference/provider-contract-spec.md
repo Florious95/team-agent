@@ -258,6 +258,7 @@ enum CarrierUse {
 
 - MCP server 必须指向当前 candidate 的绝对 executable，使用既有 `mcp-server --workspace ...` 与 captured Team identity。namespace 由 native client/runtime binding 决定，不猜固定前缀。
 - 声明载体为 `ArgvConfig / ScopedFile / RuntimeBridge / Unsupported`，另记 scope（invocation / seat / cwd / global）。`native_mcp_config=false` 不等于没有 MCP。
+- owned 工具必须留在模型的初始工具面。native client 若把 MCP 工具延迟到自己的检索工具之后，检索参数由 client 解析，Team server 既看不到也修不了：Codex 对 `supports_search_tool=true` 的 catalog 模型把全部 MCP 工具挂到内建 `tool_search`，模型给出 `limit: 5.0` 时被 `Option<usize>` 拒为 `invalid number`，检索从未执行，模型据此认定工具不存在（#394）。契约叶按 server 关闭该面（Codex `omit_tools_from=["deferred"]`），不改用户 catalog 或全局配置。
 - scoped 文件有 owner、权限、原内容/写入摘要与恢复条件。需要 global settings 的新接入必须单独获授权并有 compare-owned-content 恢复；不得照搬 Gemini installer 注释承诺不存在的 backup/restore。
 - subscription、official_api、compatible_api 分别准入。没有 credential mapper 的模式拒绝/标未支持，不能靠 metadata 接受来宣称可用。日志只记录变量名与去敏原因，不记录凭据。
 

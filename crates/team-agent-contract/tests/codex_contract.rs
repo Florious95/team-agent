@@ -126,6 +126,7 @@ fn owned_server_overrides_are_toml_values_with_a_per_generation_key() {
         format!("mcp_servers.{key}.env={{ \"OWNED_VALUE\" = \"quoted \\\"text\\\"\\nnext\" }}"),
         format!("mcp_servers.{key}.tool_timeout_sec=600.0"),
         format!("mcp_servers.{key}.default_tools_approval_mode=\"approve\""),
+        format!("mcp_servers.{key}.omit_tools_from=[\"deferred\"]"),
     ]);
     let mut other = owner.clone(); other.generation = Generation(2); assert_ne!(key, server_key(&other));
     other = owner; other.seat = SeatId::new("peer").unwrap(); assert_ne!(key, server_key(&other));
@@ -264,7 +265,7 @@ fn plan_carries_model_effort_bypass_mcp_and_exact_resume_without_startup_keys() 
     assert!(args.ends_with(&["--dangerously-bypass-approvals-and-sandbox".into(), "-c".into(), "model_reasoning_effort=max".into()]));
     assert!(!args.iter().any(|arg| arg == "resume" || arg.contains("trust") || arg == "--last" || arg.contains("projects.")));
     assert_eq!(plan.carriers.model, CarrierUse::Specified(CarrierRef::Arguments(vec![4, 5])));
-    assert!(matches!(&plan.carriers.mcp, CarrierUse::Specified(CarrierRef::Arguments(indices)) if indices.len() == 10 && indices[0] == 10));
+    assert!(matches!(&plan.carriers.mcp, CarrierUse::Specified(CarrierRef::Arguments(indices)) if indices.len() == 12 && indices[0] == 10));
     assert_eq!(plan.environment.remove, std::collections::BTreeSet::from(["CODEX_API_KEY".to_string(), "OPENAI_API_KEY".to_string()]));
     assert!(!plan.environment.set.contains_key("PATH") && !plan.environment.set.contains_key("CODEX_HOME"));
     assert_eq!(plan.materialization.len(), 1);
