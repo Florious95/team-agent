@@ -104,7 +104,9 @@ impl<R: CommandRunner> BoundedReadHost for NativeCatalog<R> {
         Ok(ReadOutput { stdout: output.stdout, elapsed: started.elapsed(), exit_code: 0 })
     }
 }
-fn model_id(value: &str) -> bool { !value.is_empty() && value.len() <= 128 && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte)) }
+/// `/` admits namespaced slugs such as `group/grok4.7`; the ID only travels as
+/// one `--model` argv element, never as a path.
+fn model_id(value: &str) -> bool { !value.is_empty() && value.len() <= 128 && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_./".contains(&byte)) }
 /// The whole JSON document is parsed before filtering. Only `visibility: list`
 /// rows are launch IDs (the same rows the legacy catalog shows). Each keeps the
 /// Team efforts among its own native reasoning levels; other levels are not Team tiers.
