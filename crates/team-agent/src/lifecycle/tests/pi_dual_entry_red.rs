@@ -1,10 +1,7 @@
 use crate::cli::spec::{CommandKind, COMMAND_SPECS};
-use crate::compiler::compile_role_agent;
 use crate::lifecycle::launch::pi_mcp::parse_pi_leader_args;
-use crate::model::enums::{AuthMode, Provider, ProviderEffort};
+use crate::model::enums::{Provider, ProviderEffort};
 use crate::model::ids::AgentId;
-use crate::model::yaml::Value;
-use crate::provider::{get_adapter, ProviderCommandContext};
 use crate::transport::test_support::OfflineTransport;
 use crate::transport::{Transport, WindowName};
 use serde_json::json;
@@ -81,36 +78,6 @@ fn dynamic_add_fixture(root: &Path, label: &str, role_doc: &str) -> (PathBuf, Pa
     .expect("seed dynamic runtime state");
     super::launch_spawn::seed_healthy_coordinator(&team);
     (team, role)
-}
-
-#[cfg(unix)]
-struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-#[cfg(unix)]
-impl EnvVarGuard {
-    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-        let previous = std::env::var_os(key);
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, previous }
-    }
-}
-
-#[cfg(unix)]
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        unsafe {
-            if let Some(previous) = self.previous.take() {
-                std::env::set_var(self.key, previous);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
 }
 
 #[test]
@@ -200,51 +167,6 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
             "leader input must refuse ambiguous or materializer-owned fields: {invalid:?}"
         );
     }
-
-    let root = hermetic.workspace("core-dual");
-    let role = root.join("worker.md");
-    std::fs::write(
-        &role,
-        "---\nname: worker-a\nrole: developer\nprovider: pi\nmodel: team-agent/qwen3.8-27b\nauth_mode: subscription\neffort: max\ntools:\n  - mcp_team\ndangerously_skip_permissions: true\n---\nworker contract\n",
-    )
-    .expect("write teammate role");
-    let teammate = compile_role_agent(&role, &Value::Map(Vec::new()), "/workspace")
-        .expect("provider: pi teammate must compile separately");
-    assert_eq!(
-        teammate.agent.get("provider").and_then(Value::as_str),
-        Some("pi")
-    );
-
-    std::fs::write(
-        &role,
-        "---\nname: worker-a\nrole: developer\nprovider: pi\nauth_mode: subscription\ntools:\n  - mcp_team\n---\nworker contract\n",
-    )
-    .expect("write provider-default teammate role");
-    let defaults = compile_role_agent(&role, &Value::Map(Vec::new()), "/workspace")
-        .expect("provider: pi teammate may preserve provider-native defaults");
-    assert_eq!(defaults.agent.get("model"), Some(&Value::Null));
-    assert_eq!(defaults.agent.get("effort"), None);
-    assert_eq!(
-        defaults.agent.get("dangerously_skip_permissions"),
-        Some(&Value::Bool(false))
-    );
-    std::fs::remove_dir_all(root).expect("remove role fixture");
-
-    let adapter = get_adapter(Provider::Pi);
-    let raw_build = adapter.build_command_plan(ProviderCommandContext {
-        auth_mode: AuthMode::Subscription,
-        mcp_config: None,
-        system_prompt: None,
-        model: None,
-        dangerously_skip_permissions: false,
-        profile_launch: None,
-        agent_id_hint: None,
-        effort: None,
-    });
-    assert!(raw_build
-        .expect_err("Pi adapter must refuse callers that skip the shared materializer")
-        .to_string()
-        .contains("shared lifecycle materializer"));
 
     let dynamic_root = hermetic.workspace("teammate-dual");
     let fake_role = "---\nname: mate\nrole: Dynamic Worker\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\ndynamic\n";
@@ -364,69 +286,6 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
         "dynamic add must not create a second tmux session"
     );
 
-    let pi_provider_root = hermetic.workspace("pi-add-provider");
-    let pi_bin = pi_provider_root.join("bin");
-    std::fs::create_dir_all(&pi_bin).expect("create Pi test bin");
-    let pi_real = pi_provider_root.join("pi-cli");
-    std::fs::write(
-        &pi_real,
-        "#!/bin/sh\ncase \"$1\" in\n  --version) printf '0.84.4\\n' ;;\n  --list-models) printf 'provider model\\nteam-agent qwen3.8-27b\\n' ;;\n  list) exit 64 ;;\n  *) exit 64 ;;\nesac\n",
-    )
-    .expect("write protocol-capable Pi test executable");
-    std::fs::set_permissions(
-        &pi_real,
-        std::os::unix::fs::PermissionsExt::from_mode(0o755),
-    )
-    .expect("make Pi test executable");
-    std::os::unix::fs::symlink(&pi_real, pi_bin.join("pi")).expect("link Pi test executable");
-    let _pi_path = EnvVarGuard::set("PATH", pi_bin.as_os_str());
-    let pi_success_role = "---\nname: mate\nrole: Pi Dynamic Worker\nprovider: pi\nmodel: team-agent/qwen3.8-27b\nauth_mode: subscription\neffort: max\ntools:\n  - mcp_team\ndangerously_skip_permissions: true\n---\n\ndynamic pi\n";
-    let (pi_success_team, pi_success_role_path) =
-        dynamic_add_fixture(&dynamic_root, "dynamic-pi-success", pi_success_role);
-    let pi_success_transport = OfflineTransport::new().with_session_present(true);
-    crate::lifecycle::add_agent_with_transport(
-        &pi_success_team,
-        &AgentId::new("mate"),
-        &pi_success_role_path,
-        false,
-        None,
-        &pi_success_transport,
-    )
-    .expect("Pi dynamic add must commit after spawning its materialized plan");
-    let pi_spawn = pi_success_transport.spawn_records();
-    assert_eq!(pi_spawn.len(), 1, "Pi dynamic add must spawn exactly once");
-    let pi_state = crate::state::persist::load_runtime_state(&pi_success_team)
-        .expect("load successful Pi add state");
-    assert_eq!(
-        pi_state
-            .pointer("/agents/mate/status")
-            .and_then(serde_json::Value::as_str),
-        Some("running"),
-        "successful Pi add must commit the running seat"
-    );
-    let pi_events = crate::event_log::EventLog::new(&pi_success_team)
-        .tail(50)
-        .expect("read successful Pi add events");
-    let pi_start_event = pi_events
-        .iter()
-        .find(|event| {
-            event.get("event").and_then(serde_json::Value::as_str)
-                == Some("start_agent.agent_start")
-        })
-        .expect("successful Pi add must emit start event");
-    let pi_event_command = pi_start_event
-        .get("command")
-        .and_then(serde_json::Value::as_array)
-        .expect("successful Pi start event command")
-        .iter()
-        .map(|value| value.as_str().expect("Pi argv string").to_string())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        pi_event_command, pi_spawn[0].1,
-        "Pi start event must record the exact materialized plan that was spawned"
-    );
-    drop(_pi_path);
-
     let (rollback_team, rollback_role) =
         dynamic_add_fixture(&dynamic_root, "dynamic-rollback", fake_role);
     let events_path = rollback_team.join(".team/logs/events.jsonl");
@@ -452,8 +311,7 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
         "failed dynamic add must not retain the inserted seat"
     );
 
-    let pi_role = "---\nname: mate\nrole: Pi Dynamic Worker\nprovider: pi\nmodel: team-agent/qwen3.8-27b\nauth_mode: subscription\neffort: max\ntools:\n  - mcp_team\ndangerously_skip_permissions: true\n---\n\ndynamic pi\n";
-    let (noop_team, noop_role) = dynamic_add_fixture(&dynamic_root, "dynamic-noop", pi_role);
+    let (noop_team, noop_role) = dynamic_add_fixture(&dynamic_root, "dynamic-noop", fake_role);
     let noop_transport = OfflineTransport::new()
         .with_session_present(true)
         .with_windows(vec![WindowName::new("mate")]);
@@ -465,7 +323,7 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
         None,
         &noop_transport,
     )
-    .expect_err("a newly added Pi seat cannot succeed through start_agent.noop");
+    .expect_err("a newly added seat cannot succeed through start_agent.noop");
     assert!(noop.to_string().contains("start_agent.noop"));
     assert!(noop_transport.spawn_records().is_empty());
     let noop_state =
@@ -495,8 +353,6 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
 
     let shared_source = include_str!("../launch/pi_mcp.rs");
     let leader_source = include_str!("../../leader/start.rs");
-    let teammate_source = include_str!("../launch/spawn.rs");
-    let restart_source = include_str!("../restart/common.rs");
     let restart_agent_source = include_str!("../restart/agent.rs");
     let add_source = include_str!("../launch/add_agent.rs");
     assert!(
@@ -510,17 +366,8 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
     assert_eq!(
         shared_source.matches("fn materialize_pi_plan(").count(),
         1,
-        "leader and teammate call sites must depend on one shared materializer definition"
+        "the Pi leader must depend on one Core materializer definition"
     );
-    assert_eq!(
-        shared_source
-            .matches("fn materialize_pi_resume_plan(")
-            .count(),
-        1,
-        "resume must share the same Core materializer module"
-    );
-    assert!(teammate_source.contains("materialize_pi_plan("));
-    assert!(restart_source.contains("materialize_pi_plan("));
     assert!(add_source.contains("start_agent_at_paths("));
     assert!(restart_agent_source.contains("&spawn.plan,"));
     std::fs::remove_dir_all(dynamic_root).expect("remove dynamic fixtures");

@@ -3538,7 +3538,7 @@ mod tests {
             std::fs::write(&path, serde_json::json!({
                 "active_team_key":"current", "session_name":"team-existing-workers",
                 "spec_path":"/fixture/spec.yml", "team_dir":"/fixture/roles",
-                "agents":{"worker":{"agent_id":"worker","provider":"pi","status":status}},
+                "agents":{"worker":{"agent_id":"worker","provider":"copilot","status":status}},
                 "tasks":[{"task_id":"existing-task"}],
             }).to_string()).unwrap();
             persist_exec_provider_leader_binding(&plan, &workspace, &authority, false).unwrap();

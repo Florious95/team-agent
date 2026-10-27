@@ -105,12 +105,12 @@ fn b2_startup_prompt_capture_failure_is_observable_not_silent() {
             "session_name": "team-ctxteam",
             "team_dir": ws.to_string_lossy(),
             "agents": {
-                "clauder": {
-                    "provider": "claude",
+                "copiloter": {
+                    "provider": "copilot",
                     "status": "running",
                     "startup_prompts": "pending",
                     "startup_prompt_status": "pending",
-                    "window": "clauder",
+                    "window": "copiloter",
                     "pane_id": "%1",
                     "mcp_ready": true,
                     "owner_team_id": "ctxteam",
@@ -132,7 +132,7 @@ fn b2_startup_prompt_capture_failure_is_observable_not_silent() {
     let events = events_text(&ws);
     let state = load_runtime_state(&ws).unwrap();
     let startup = state
-        .pointer("/agents/clauder/startup_prompts")
+        .pointer("/agents/copiloter/startup_prompts")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
         .to_string();
@@ -295,7 +295,7 @@ impl Transport for CaptureFailsTransport {
     }
 
     fn list_windows(&self, _session: &SessionName) -> Result<Vec<WindowName>, TransportError> {
-        Ok(vec![WindowName::new("clauder")])
+        Ok(vec![WindowName::new("copiloter")])
     }
 
     fn set_session_env(
@@ -329,7 +329,7 @@ impl ProviderRegistry for RealAdapterRegistry {
 }
 
 fn seed_rollout(ws: &Path) -> String {
-    let rollout = ws.join("rollout-clauder.jsonl");
+    let rollout = ws.join("rollout-copiloter.jsonl");
     std::fs::write(&rollout, "{\"type\":\"system\",\"subtype\":\"boot\"}\n").unwrap();
     rollout.to_string_lossy().to_string()
 }

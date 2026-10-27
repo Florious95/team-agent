@@ -6,8 +6,8 @@
 //! It was moved to `clone-agent` because the behaviour it asserts has no
 //! landing point in `fork` at all — see `wiki/C1/分身与克隆.md`:
 //!
-//! - `fork` injects the provider's own command (grok `/fork`, claude
-//!   `/branch`) into the SOURCE pane; the provider opens its own window, the
+//! - `fork` injects the provider's own command (grok `/fork`) into the
+//!   SOURCE pane; the provider opens its own window, the
 //!   session id is provider-assigned, and **the window has no name**. So
 //!   "address the new thing by name / see it in status / retire it with
 //!   stop-agent" cannot be satisfied by fork — by design, not by defect
@@ -37,8 +37,8 @@
 //!   3. new seat is visible in team status,
 //!   4. new seat can be retired (stop-agent succeeds).
 //!
-//! Harness: real binary + real tmux on the team's own socket; provider is a
-//! `claude` PATH shim (repo convention for external CLIs — zero tokens). All
+//! Harness: real binary + real tmux on the team's own socket; provider is the
+//! built-in fake worker (zero tokens). All
 //! verbs the user runs are canonical: quick-start / clone-agent / send /
 //! status / stop-agent / shutdown.
 //!
@@ -67,7 +67,6 @@ const CLONE: &str = "cloned";
 struct CloneScopeCase {
     env: HermeticTestEnv,
     workspace: PathBuf,
-    shim_path: String,
     socket: PathBuf,
 }
 
@@ -76,16 +75,9 @@ impl CloneScopeCase {
         let env = HermeticTestEnv::for_subprocess_with_leader(tag);
         let workspace = env.workspace(tag);
         write_team_docs(&workspace);
-        let shim_dir = write_claude_shim(&workspace);
-        let shim_path = format!(
-            "{}:{}",
-            shim_dir.display(),
-            std::env::var("PATH").expect("PATH present")
-        );
         let case = Self {
             env,
             workspace,
-            shim_path,
             socket: PathBuf::new(),
         };
         // `--team-id` pins the runtime team key to the spec name — the same
@@ -131,11 +123,8 @@ impl CloneScopeCase {
         self.workspace.to_str().expect("workspace utf8")
     }
 
-    /// Every CLI call carries the claude-shim PATH so spawned workers resolve
-    /// `claude` to the offline shim (zero provider tokens).
     fn run_cli(&self, args: &[&str]) -> Output {
-        self.env
-            .run_cli_env(&self.workspace, args, &[("PATH", self.shim_path.as_str())])
+        self.env.run_cli(&self.workspace, args)
     }
 
     fn discover_socket(&self) -> PathBuf {
@@ -236,43 +225,10 @@ fn write_team_docs(workspace: &Path) {
     std::fs::write(
         workspace.join("agents").join(format!("{SOURCE}.md")),
         format!(
-            "---\nname: {SOURCE}\nrole: {SOURCE}\nprovider: claude\nmodel: claude-sonnet-5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{SOURCE}.\n"
+            "---\nname: {SOURCE}\nrole: {SOURCE}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{SOURCE}.\n"
         ),
     )
     .expect("write source role doc");
-}
-
-fn write_claude_shim(workspace: &Path) -> PathBuf {
-    let bin_dir = workspace.join("shim-bin");
-    std::fs::create_dir_all(&bin_dir).expect("create shim dir");
-    let shim = bin_dir.join("claude");
-    std::fs::write(
-        &shim,
-        r#"#!/bin/sh
-sid=""
-prev=""
-for arg in "$@"; do
-  if [ "$prev" = "--session-id" ]; then sid="$arg"; fi
-  prev="$arg"
-done
-if [ -n "$sid" ]; then
-  encoded=$(printf '%s' "$PWD" | sed 's/[^a-zA-Z0-9]/-/g')
-  dir="$HOME/.claude/projects/$encoded"
-  mkdir -p "$dir"
-  printf '{"sessionId":"%s","type":"clone-backing"}\n' "$sid" > "$dir/$sid.jsonl"
-fi
-echo "claude shim ready"
-exec sleep 3600
-"#,
-    )
-    .expect("write claude shim");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod claude shim");
-    }
-    bin_dir
 }
 
 fn json_stdout(output: &Output, context: &str) -> Value {

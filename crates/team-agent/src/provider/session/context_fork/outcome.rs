@@ -136,10 +136,6 @@ mod tests {
     #[test]
     fn convergence_deadlines_are_provider_specific() {
         assert_eq!(
-            context_fork_convergence_deadline(Provider::Claude),
-            Duration::from_secs(45)
-        );
-        assert_eq!(
             context_fork_convergence_deadline(Provider::Codex),
             Duration::from_secs(10)
         );

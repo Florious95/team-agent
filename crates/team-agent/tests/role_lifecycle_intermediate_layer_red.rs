@@ -6,7 +6,7 @@ mod framework;
 use framework::{quick_start_workers_available, run_ta_env, TestWorkspace};
 use serde_json::Value as Json;
 use std::fs;
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -21,10 +21,6 @@ impl Shims {
         fs::create_dir_all(&dir).unwrap();
         fs::create_dir_all(&capture_dir).unwrap();
         let binary = quote(&framework::ta_binary().to_string_lossy());
-        let pi_target = dir.join("pi-test-target");
-        executable(&pi_target, &format!(
-            "#!/bin/sh\nset -eu\ncase \"${{1:-}}\" in\n--version) exit 0;;\n--list-models) printf 'provider model\\nopenai-codex gpt-6-luna\\nopenai-codex gpt-5.6-luna\\n'; exit 0;;\nlist) exit 64;;\nesac\n[ -n \"${{TEAM_AGENT_AGENT_ID:-}}\" ] && [ -n \"${{TEAM_AGENT_WORKSPACE:-}}\" ] || exit 0\nprintf '%s\\0' pi \"$@\" > \"${{TEAM_AGENT_WORKSPACE}}/.role-lifecycle-launch/${{TEAM_AGENT_AGENT_ID}}.argv\"\n[ ! -f \"${{TEAM_AGENT_WORKSPACE}}/.role-lifecycle-fail-launch\" ] || exit 73\nexec {} fake-worker --workspace \"${{TEAM_AGENT_WORKSPACE}}\" --agent-id \"${{TEAM_AGENT_AGENT_ID}}\"\n", binary));
-        symlink(&pi_target, dir.join("pi")).unwrap();
         executable(&dir.join("codex"), &format!(
             "#!/bin/sh\nset -eu\n[ -n \"${{TEAM_AGENT_AGENT_ID:-}}\" ] && [ -n \"${{TEAM_AGENT_WORKSPACE:-}}\" ] || exit 0\nprintf '%s\\0' codex \"$@\" > \"${{TEAM_AGENT_WORKSPACE}}/.role-lifecycle-launch/${{TEAM_AGENT_AGENT_ID}}.argv\"\n[ ! -f \"${{TEAM_AGENT_WORKSPACE}}/.role-lifecycle-fail-launch\" ] || exit 73\nexec {} fake-worker --workspace \"${{TEAM_AGENT_WORKSPACE}}\" --agent-id \"${{TEAM_AGENT_AGENT_ID}}\"\n", binary));
         let inherited = std::env::var("PATH").unwrap_or_default();
@@ -56,7 +52,6 @@ fn executable(path: &Path, body: &str) {
     fs::set_permissions(path, mode).unwrap();
 }
 fn role(id: &str, provider: &str, model: &str, effort: Option<&str>, bypass: bool, prompt: &str) -> String {
-    let model = if provider == "pi" && !model.contains('/') { format!("openai-codex/{model}") } else { model.to_string() };
     let mut s = format!("---\nname: {id}\nrole: Lifecycle worker\nprovider: {provider}\nmodel: {model}\nauth_mode: subscription\ndangerously_skip_permissions: {bypass}\ntools:\n  - mcp_team\n");
     if let Some(e) = effort { s.push_str(&format!("effort: {e}\n")); }
     s.push_str(&format!("---\n{prompt}\n")); s
@@ -152,8 +147,7 @@ fn assert_codex_profile(argv: &[String], provider_id: &str, base_url: &str) {
 fn assert_config(ws: &TestWorkspace, id: &str, provider: &str, model: &str, effort: Option<&str>, bypass: bool) {
     let v = compiled(ws, id);
     assert_eq!(v.get("provider").and_then(Yaml::as_str), Some(provider), "{v:?}");
-    let expected_model = if provider == "pi" && !model.contains('/') { format!("openai-codex/{model}") } else { model.to_string() };
-    assert_eq!(v.get("model").and_then(Yaml::as_str), Some(expected_model.as_str()), "{v:?}");
+    assert_eq!(v.get("model").and_then(Yaml::as_str), Some(model), "{v:?}");
     assert_eq!(v.get("effort").and_then(Yaml::as_str), effort, "{v:?}");
     assert!(matches!(v.get("dangerously_skip_permissions"), Some(Yaml::Bool(actual)) if *actual == bypass), "{v:?}");
 }
@@ -182,40 +176,30 @@ fn pair(argv: &[String], key: &str, value: &str) -> bool { argv.windows(2).any(|
 
 #[test]
 fn traditional_quick_start_and_add_role_file_without_cli_provider_or_bypass_regressions() {
-    let legacy = TestWorkspace::new("rolelife-legacy-quick-start").with_owned_caller();
-    fs::write(legacy.path().join("TEAM.md"), "Traditional plain-text team objective.\n").unwrap();
-    fs::create_dir_all(legacy.path().join("agents")).unwrap();
-    let legacy_role = b"Traditional worker role without provider/bypass frontmatter.\n";
-    fs::write(legacy.path().join("agents/legacy.md"), legacy_role).unwrap();
-    let legacy_shims = Shims::install(&legacy);
-    let legacy_root = legacy.path().to_string_lossy().into_owned();
-    let quick = run_ta_env(&legacy, &["quick-start", &legacy_root, "--workspace", &legacy_root, "--team-id", "rolelife-legacy", "--yes", "--no-display", "--json"], &legacy_shims.env());
-    assert!(quick_start_workers_available(&quick), "legacy quick-start: {} {}", quick.stdout, quick.stderr);
-    assert_eq!(fs::read(legacy.path().join("agents/legacy.md")).unwrap(), legacy_role);
-    assert!(!legacy_shims.capture("legacy").is_empty(), "legacy role must still launch without add-agent admission fields");
-    if let Some(socket) = legacy.read_state().get("tmux_socket").and_then(Json::as_str) { legacy.register_owned_tmux_socket(Path::new(socket)); }
-
-    let (ws, shims) = ws_seed("rolelife-traditional", "pi", "gpt-6-luna", None);
-    assert_eq!(shims.capture("seed").first().map(String::as_str), Some("pi"));
+    // A plain-text role (no front matter) now selects the default Pi contract
+    // leaf, which needs a declared model; its legacy launch half was retired
+    // with the legacy Pi worker runtime.
+    let (ws, shims) = ws_seed("rolelife-traditional", "codex", "gpt-6-luna", None);
+    assert_eq!(shims.capture("seed").first().map(String::as_str), Some("codex"));
     let source = ws.path().join("traditional.md");
-    let bytes = role("traditional", "pi", "gpt-6-luna", None, false, "Traditional role-file prompt.");
+    let bytes = role("traditional", "codex", "gpt-6-luna", None, false, "Traditional role-file prompt.");
     fs::write(&source, &bytes).unwrap();
     let add = run(&ws, &shims, &cli(&ws, "add-agent", "traditional", &["--role-file", source.to_str().unwrap(), "--no-display"]));
     assert!(add.is_success(), "traditional role-file add: {} {}", add.stdout, add.stderr);
     assert_eq!(fs::read(&source).unwrap(), bytes.as_bytes());
-    assert_eq!(shims.capture("traditional").first().map(String::as_str), Some("pi"));
+    assert_eq!(shims.capture("traditional").first().map(String::as_str), Some("codex"));
 }
 
 #[test]
 fn add_required_values_cli_generation_and_file_completion() {
-    let (ws, shims) = ws_seed("rolelife-add-required", "pi", "gpt-6-luna", None);
+    let (ws, shims) = ws_seed("rolelife-add-required", "codex", "gpt-6-luna", None);
     let no_provider = ws.path().join("no-provider.md");
     fs::write(&no_provider, "---\nname: no-provider\nrole: Missing provider\ndangerously_skip_permissions: false\n---\nPrompt.\n").unwrap();
     let no_bypass = ws.path().join("no-bypass.md");
-    fs::write(&no_bypass, "---\nname: no-bypass\nrole: Missing bypass\nprovider: pi\n---\nPrompt.\n").unwrap();
+    fs::write(&no_bypass, "---\nname: no-bypass\nrole: Missing bypass\nprovider: codex\n---\nPrompt.\n").unwrap();
     for (id, source, flags) in [
         ("no-provider", no_provider, vec!["--role-file", "", "--bypass", "false", "--prompt", "prompt"]),
-        ("no-bypass", no_bypass, vec!["--role-file", "", "--provider", "pi", "--prompt", "prompt"]),
+        ("no-bypass", no_bypass, vec!["--role-file", "", "--provider", "codex", "--prompt", "prompt"]),
     ] {
         let mut flags = flags;
         flags[1] = source.to_str().unwrap();
@@ -223,19 +207,19 @@ fn add_required_values_cli_generation_and_file_completion() {
         let r = run(&ws, &shims, &cli(&ws, "add-agent", id, &flags)); reject(&r, "missing required add-agent field");
         assert_eq!(snapshot(&ws, &shims, id), before); assert!(!role_path(&ws, id).exists());
     }
-    let generated = run(&ws, &shims, &cli(&ws, "add-agent", "generated", &["--provider", "pi", "--bypass", "false", "--model", "openai-codex/gpt-5.6-luna", "--effort", "high", "--prompt", "CLI prompt.", "--no-display"]));
+    let generated = run(&ws, &shims, &cli(&ws, "add-agent", "generated", &["--provider", "codex", "--bypass", "false", "--model", "gpt-5.6-luna", "--effort", "high", "--prompt", "CLI prompt.", "--no-display"]));
     assert!(generated.is_success(), "CLI-only add: {} {}", generated.stdout, generated.stderr);
     assert!(fs::read_to_string(role_path(&ws, "generated")).unwrap().contains("CLI prompt."));
-    assert_config(&ws, "generated", "pi", "gpt-5.6-luna", Some("high"), false);
+    assert_config(&ws, "generated", "codex", "gpt-5.6-luna", Some("high"), false);
     let source = ws.path().join("partial.md"); fs::write(&source, "---\nname: filled\nrole: Filled\n---\nCLI body.\n").unwrap();
-    let filled = run(&ws, &shims, &cli(&ws, "add-agent", "filled", &["--role-file", source.to_str().unwrap(), "--provider", "pi", "--bypass", "false", "--model", "openai-codex/gpt-5.6-luna", "--prompt", "CLI body."]));
+    let filled = run(&ws, &shims, &cli(&ws, "add-agent", "filled", &["--role-file", source.to_str().unwrap(), "--provider", "codex", "--bypass", "false", "--model", "gpt-5.6-luna", "--prompt", "CLI body."]));
     assert!(filled.is_success(), "CLI completion: {} {}", filled.stdout, filled.stderr);
-    assert_config(&ws, "filled", "pi", "gpt-5.6-luna", None, false);
+    assert_config(&ws, "filled", "codex", "gpt-5.6-luna", None, false);
 }
 
 #[test]
 fn invalid_add_and_start_parameter_syntax_rejects_before_any_mutation() {
-    let (ws, shims) = ws_seed("rolelife-invalid-args", "pi", "gpt-6-luna", None); stop(&ws, &shims, "seed");
+    let (ws, shims) = ws_seed("rolelife-invalid-args", "codex", "gpt-6-luna", None); stop(&ws, &shims, "seed");
     quiesce_owned_coordinator_before_rejection_snapshot(&ws);
     let add_cases: [(&str, &[&str]); 5] = [
         ("bare-bypass", &["--role-file", "", "--bypass"]),
@@ -246,7 +230,7 @@ fn invalid_add_and_start_parameter_syntax_rejects_before_any_mutation() {
     ];
     for (id, fields) in add_cases {
         let source = ws.path().join(format!("{id}-source.md"));
-        let source_bytes = role(id, "pi", "gpt-6-luna", None, false, "Valid source.");
+        let source_bytes = role(id, "codex", "gpt-6-luna", None, false, "Valid source.");
         fs::write(&source, &source_bytes).unwrap();
         let mut flags = fields.to_vec(); flags[1] = source.to_str().unwrap();
         let before = snapshot(&ws, &shims, id); let seed_before = snapshot(&ws, &shims, "seed");
@@ -257,7 +241,7 @@ fn invalid_add_and_start_parameter_syntax_rejects_before_any_mutation() {
     }
     let start_cases: [&[&str]; 5] = [
         &["--bypass"], &["--bypass", "maybe"], &["--no-bypass"],
-        &["--provider", "imaginary"], &["--provider", "pi", "--effort", "ultra"],
+        &["--provider", "imaginary"], &["--provider", "codex", "--effort", "impossible"],
     ];
     for fields in start_cases {
         let before = snapshot(&ws, &shims, "seed");
@@ -269,14 +253,14 @@ fn invalid_add_and_start_parameter_syntax_rejects_before_any_mutation() {
 
 #[test]
 fn add_local_role_is_in_place_and_external_template_is_imported_then_reloaded_locally() {
-    let (ws, shims) = ws_seed("rolelife-add-source", "pi", "gpt-6-luna", None);
+    let (ws, shims) = ws_seed("rolelife-add-source", "codex", "gpt-6-luna", None);
     let local = role_path(&ws, "local");
-    let local_bytes = role("local", "pi", "gpt-5.6-luna", None, false, "Local prompt."); fs::write(&local, &local_bytes).unwrap();
+    let local_bytes = role("local", "codex", "gpt-5.6-luna", None, false, "Local prompt."); fs::write(&local, &local_bytes).unwrap();
     let r = run(&ws, &shims, &cli(&ws, "add-agent", "local", &["--role-file", local.to_str().unwrap()]));
     assert!(r.is_success(), "canonical add: {} {}", r.stdout, r.stderr); assert_eq!(fs::read(&local).unwrap(), local_bytes.as_bytes());
     assert_eq!(fs::read_dir(ws.path().join("agents")).unwrap().filter_map(Result::ok).filter(|e| e.file_name().to_string_lossy().starts_with("local")).count(), 1, "canonical role must not be duplicated");
     let source = ws.path().join("templates/external.md"); fs::create_dir_all(source.parent().unwrap()).unwrap();
-    let bytes = role("external", "pi", "gpt-6-luna", None, false, "Imported prompt."); fs::write(&source, &bytes).unwrap();
+    let bytes = role("external", "codex", "gpt-6-luna", None, false, "Imported prompt."); fs::write(&source, &bytes).unwrap();
     let r = run(&ws, &shims, &cli(&ws, "add-agent", "external", &["--role-file", source.to_str().unwrap()]));
     assert!(r.is_success(), "external add: {} {}", r.stdout, r.stderr);
     let canonical = role_path(&ws, "external"); assert_eq!(fs::read(&canonical).unwrap(), bytes.as_bytes());
@@ -288,36 +272,36 @@ fn add_local_role_is_in_place_and_external_template_is_imported_then_reloaded_lo
 
 #[test]
 fn add_file_cli_arbitration_accepts_equal_and_rejects_conflicting_values_atomically() {
-    let (ws, shims) = ws_seed("rolelife-arbitration", "pi", "gpt-6-luna", None);
+    let (ws, shims) = ws_seed("rolelife-arbitration", "codex", "gpt-6-luna", None);
     for (id, fields, should_pass) in [
-        ("same", vec!["--provider", "pi", "--model", "openai-codex/gpt-5.6-luna", "--effort", "high", "--bypass", "false", "--prompt", "Body."], true),
+        ("same", vec!["--provider", "codex", "--model", "gpt-5.6-luna", "--effort", "high", "--bypass", "false", "--prompt", "Body."], true),
         ("same-prompt-trim", vec!["--prompt", " \tBody.\n "], true),
-        ("conf-provider", vec!["--provider", "codex"], false),
+        ("conf-provider", vec!["--provider", "copilot"], false),
         ("conf-bypass", vec!["--bypass", "true"], false),
-        ("conf-model", vec!["--model", "openai-codex/gpt-6-luna"], false),
+        ("conf-model", vec!["--model", "gpt-6-luna"], false),
         ("conf-effort", vec!["--effort", "xhigh"], false),
         ("conf-prompt", vec!["--prompt", "Different body."], false),
     ] {
         let source = ws.path().join(format!("{id}-source.md"));
-        let source_bytes = role(id, "pi", "gpt-5.6-luna", Some("high"), false, "Body.");
+        let source_bytes = role(id, "codex", "gpt-5.6-luna", Some("high"), false, "Body.");
         fs::write(&source, &source_bytes).unwrap();
         let mut flags = vec!["--role-file", source.to_str().unwrap()]; flags.extend(fields);
         let before = snapshot(&ws, &shims, id); let r = run(&ws, &shims, &cli(&ws, "add-agent", id, &flags));
         if should_pass { assert!(r.is_success(), "equal values: {} {}", r.stdout, r.stderr); assert_eq!(fs::read(&source).unwrap(), source_bytes.as_bytes()); }
         else { reject(&r, "file/CLI conflict"); assert_eq!(snapshot(&ws, &shims, id), before); assert!(!role_path(&ws, id).exists()); assert_eq!(fs::read(&source).unwrap(), source_bytes.as_bytes()); }
     }
-    let source = ws.path().join("file-only.md"); fs::write(&source, role("file-only", "pi", "gpt-5.6-luna", None, false, "File only.")).unwrap();
+    let source = ws.path().join("file-only.md"); fs::write(&source, role("file-only", "codex", "gpt-5.6-luna", None, false, "File only.")).unwrap();
     let r = run(&ws, &shims, &cli(&ws, "add-agent", "file-only", &["--role-file", source.to_str().unwrap()]));
     assert!(r.is_success(), "traditional file-only definition: {} {}", r.stdout, r.stderr);
 }
 
 #[test]
 fn duplicate_add_running_or_stopped_is_fail_closed_with_zero_session_side_effects() {
-    let (ws, shims) = ws_seed("rolelife-duplicate", "pi", "gpt-6-luna", None);
+    let (ws, shims) = ws_seed("rolelife-duplicate", "codex", "gpt-6-luna", None);
     // Attribute all snapshot changes to the rejected command, not a daemon
     // tick racing the stop that removes the worker's pane binding.
     quiesce_owned_coordinator_before_rejection_snapshot(&ws);
-    let source = ws.path().join("other.md"); fs::write(&source, role("seed", "pi", "gpt-5.6-luna", None, false, "Other." )).unwrap();
+    let source = ws.path().join("other.md"); fs::write(&source, role("seed", "codex", "gpt-5.6-luna", None, false, "Other." )).unwrap();
     for stopped in [false, true] {
         if stopped { stop(&ws, &shims, "seed"); }
         let before = snapshot(&ws, &shims, "seed");
@@ -328,8 +312,8 @@ fn duplicate_add_running_or_stopped_is_fail_closed_with_zero_session_side_effect
 
 #[test]
 fn running_start_refuses_plain_and_parameterized_calls_without_mutation() {
-    let (ws, shims) = ws_seed("rolelife-running", "pi", "gpt-6-luna", None);
-    for flags in [&[][..], &["--model", "openai-codex/gpt-5.6-luna", "--effort", "high", "--bypass", "true"][..]] {
+    let (ws, shims) = ws_seed("rolelife-running", "codex", "gpt-6-luna", None);
+    for flags in [&[][..], &["--model", "gpt-5.6-luna", "--effort", "high", "--bypass", "true"][..]] {
         let before = snapshot(&ws, &shims, "seed");
         let r = run(&ws, &shims, &start(&ws, "seed", flags)); reject(&r, "start already-running seat");
         let text = format!("{} {}", r.stdout, r.stderr).to_lowercase(); assert!(text.contains("running") || text.contains("already"));
@@ -349,22 +333,12 @@ fn s5_codex_stop_change_model_effort_restart_updates_frontmatter_spec_and_native
 }
 
 #[test]
-fn s5_pi_stop_change_model_effort_restart_updates_frontmatter_spec_and_thinking_argv() {
-    let (ws, shims) = ws_seed("rolelife-s5-pi", "pi", "gpt-6-luna", None); stop(&ws, &shims, "seed");
-    let r = run(&ws, &shims, &start(&ws, "seed", &["--provider", "pi", "--model", "openai-codex/gpt-5.6-luna", "--effort", "xhigh"]));
-    assert!(r.is_success(), "Pi patch: {} {}", r.stdout, r.stderr);
-    let text = fs::read_to_string(role_path(&ws, "seed")).unwrap(); assert!(text.contains("effort: xhigh"));
-    assert_config(&ws, "seed", "pi", "gpt-5.6-luna", Some("xhigh"), false);
-    let argv = shims.capture("seed"); assert!(pair(&argv, "--model", "openai-codex/gpt-5.6-luna")); assert!(pair(&argv, "--thinking", "xhigh"));
-}
-
-#[test]
 fn stopped_start_partial_patches_bypass_and_prompt_and_preserves_omitted_values() {
-    let (ws, shims) = ws_seed("rolelife-partial", "pi", "gpt-6-luna", None); stop(&ws, &shims, "seed");
+    let (ws, shims) = ws_seed("rolelife-partial", "codex", "gpt-6-luna", None); stop(&ws, &shims, "seed");
     for (value, expected) in [("true", true), ("false", false)] {
         let r = run(&ws, &shims, &start(&ws, "seed", &["--bypass", value, "--prompt", "Patched prompt."]));
         assert!(r.is_success(), "bypass={value}: {} {}", r.stdout, r.stderr);
-        assert_config(&ws, "seed", "pi", "gpt-6-luna", None, expected);
+        assert_config(&ws, "seed", "codex", "gpt-6-luna", None, expected);
         assert!(fs::read_to_string(role_path(&ws, "seed")).unwrap().contains("Patched prompt."));
         assert!(shims.capture("seed").iter().any(|arg| arg.contains("Patched prompt.")));
         stop(&ws, &shims, "seed");
@@ -373,35 +347,35 @@ fn stopped_start_partial_patches_bypass_and_prompt_and_preserves_omitted_values(
 
 #[test]
 fn cross_provider_changes_are_rejected_both_ways_but_same_provider_is_allowed() {
-    for (provider, model, effort, target) in [("pi", "gpt-6-luna", None, "codex"), ("codex", "gpt-5.6-luna", Some("medium"), "pi")] {
+    for (provider, model, effort, target) in [("fake", "fake", None, "codex"), ("codex", "gpt-5.6-luna", Some("medium"), "fake")] {
         let (ws, shims) = ws_seed(&format!("rolelife-cross-{provider}"), provider, model, effort); stop(&ws, &shims, "seed");
         quiesce_owned_coordinator_before_rejection_snapshot(&ws);
         let before = snapshot(&ws, &shims, "seed"); let r = run(&ws, &shims, &start(&ws, "seed", &["--provider", target]));
         reject(&r, "cross-provider switch"); assert!(format!("{} {}", r.stdout, r.stderr).to_lowercase().contains("provider"));
         assert_eq!(snapshot(&ws, &shims, "seed"), before);
     }
-    let (ws, shims) = ws_seed("rolelife-same-provider", "pi", "gpt-6-luna", None); stop(&ws, &shims, "seed");
-    let r = run(&ws, &shims, &start(&ws, "seed", &["--provider", "pi"]));
+    let (ws, shims) = ws_seed("rolelife-same-provider", "codex", "gpt-6-luna", None); stop(&ws, &shims, "seed");
+    let r = run(&ws, &shims, &start(&ws, "seed", &["--provider", "codex"]));
     assert!(r.is_success(), "same provider must start: {} {}", r.stdout, r.stderr);
 }
 
 #[test]
 fn hand_edited_stopped_role_is_recompiled_and_used_by_start() {
-    let (ws, shims) = ws_seed("rolelife-manual-edit", "pi", "gpt-6-luna", None); stop(&ws, &shims, "seed");
-    let manual = role("seed", "pi", "gpt-5.6-luna", Some("high"), false, "Manual edit prompt.");
+    let (ws, shims) = ws_seed("rolelife-manual-edit", "codex", "gpt-6-luna", None); stop(&ws, &shims, "seed");
+    let manual = role("seed", "codex", "gpt-5.6-luna", Some("high"), false, "Manual edit prompt.");
     fs::write(role_path(&ws, "seed"), &manual).unwrap();
     let r = run(&ws, &shims, &start(&ws, "seed", &[])); assert!(r.is_success(), "manual reload: {} {}", r.stdout, r.stderr);
-    assert_config(&ws, "seed", "pi", "gpt-5.6-luna", Some("high"), false);
-    let argv = shims.capture("seed"); assert!(pair(&argv, "--model", "openai-codex/gpt-5.6-luna")); assert!(pair(&argv, "--thinking", "high"));
+    assert_config(&ws, "seed", "codex", "gpt-5.6-luna", Some("high"), false);
+    let argv = shims.capture("seed"); assert!(pair(&argv, "--model", "gpt-5.6-luna")); assert!(pair(&argv, "-c", "model_reasoning_effort=high"));
 }
 
 #[test]
 fn failed_parameterized_start_restores_existing_role_and_spec_bytes() {
-    let (ws, shims) = ws_seed("rolelife-rollback-existing", "pi", "gpt-6-luna", None); stop(&ws, &shims, "seed");
+    let (ws, shims) = ws_seed("rolelife-rollback-existing", "codex", "gpt-6-luna", None); stop(&ws, &shims, "seed");
     quiesce_owned_coordinator_before_rejection_snapshot(&ws);
     let spec = spec_path(&ws); let before = snapshot(&ws, &shims, "seed");
     fs::write(ws.path().join(".role-lifecycle-fail-launch"), b"injected tmux spawn failure").unwrap();
-    let r = run(&ws, &shims, &start(&ws, "seed", &["--model", "openai-codex/gpt-5.6-luna", "--effort", "high"]));
+    let r = run(&ws, &shims, &start(&ws, "seed", &["--model", "gpt-5.6-luna", "--effort", "high"]));
     assert!(!r.is_success(), "injected spawn failure must surface: {} {}", r.stdout, r.stderr);
     let failed_argv = fs::read(&shims.tmux_capture).expect("tmux wrapper proves spawn failure").split(|b| *b == 0).filter(|b| !b.is_empty()).map(|b| String::from_utf8(b.to_vec()).unwrap()).collect::<Vec<_>>();
     assert!(failed_argv.iter().any(|arg| ["new-session", "new-window", "split-window"].contains(&arg.as_str())), "failure must reach tmux creation: {failed_argv:?}");
@@ -411,14 +385,14 @@ fn failed_parameterized_start_restores_existing_role_and_spec_bytes() {
     assert_eq!(snapshot(&ws, &shims, "seed"), before, "failed start must restore files, runtime binding, and pane topology");
     assert!(spec.exists());
     assert!(!ws.path().join("agents/seed.md.tmp").exists()); assert!(!ws.path().join("agents/seed.md.bak").exists());
-    assert!(staged_role.contains("model: openai-codex/gpt-5.6-luna") && staged_role.contains("effort: high"), "new role config must reach failure boundary: {staged_role}");
-    assert_eq!(staged_agent.get("model").and_then(Yaml::as_str), Some("openai-codex/gpt-5.6-luna"));
+    assert!(staged_role.contains("model: gpt-5.6-luna") && staged_role.contains("effort: high"), "new role config must reach failure boundary: {staged_role}");
+    assert_eq!(staged_agent.get("model").and_then(Yaml::as_str), Some("gpt-5.6-luna"));
     assert_eq!(staged_agent.get("effort").and_then(Yaml::as_str), Some("high"));
 }
 
 #[test]
 fn failed_prompt_bypass_start_restores_complete_existing_role_and_spec() {
-    let (ws, shims) = ws_seed("rolelife-rollback-prompt-bypass", "pi", "gpt-6-luna", None); stop(&ws, &shims, "seed");
+    let (ws, shims) = ws_seed("rolelife-rollback-prompt-bypass", "codex", "gpt-6-luna", None); stop(&ws, &shims, "seed");
     quiesce_owned_coordinator_before_rejection_snapshot(&ws);
     let spec = spec_path(&ws); let before = snapshot(&ws, &shims, "seed");
     fs::write(ws.path().join(".role-lifecycle-fail-launch"), b"injected tmux spawn failure").unwrap();
@@ -453,7 +427,7 @@ fn stopped_start_profile_patch_uses_workspace_profile_values() {
 
 #[test]
 fn imported_role_profile_is_workspace_local_not_an_external_template_dependency() {
-    let (ws, shims) = ws_seed("rolelife-import-profile", "pi", "gpt-6-luna", None);
+    let (ws, shims) = ws_seed("rolelife-import-profile", "codex", "gpt-6-luna", None);
     let external_root = ws.path().join("external-template");
     let source = external_root.join("agent.md"); fs::create_dir_all(&external_root).unwrap();
     let bytes = codex_profile_role("profiled", "workspace-only", "Imported profile role.");
@@ -478,7 +452,7 @@ fn runtime_spec_and_launch_capture_are_not_substitutes_for_required_live_ui_chec
     // The final-candidate LIVE-S5 pane/UI verification is separately frozen in
     // the design document. This hermetic fake-provider contract asserts argv
     // only and intentionally makes no claim about what a real UI displays.
-    let (ws, shims) = ws_seed("rolelife-ui-boundary", "pi", "gpt-6-luna", None);
+    let (ws, shims) = ws_seed("rolelife-ui-boundary", "codex", "gpt-6-luna", None);
     assert!(shims.capture_path("seed").starts_with(ws.path()));
     assert!(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/e2e/framework.rs").is_file());
 }
@@ -493,9 +467,9 @@ fn codex_max_effort_uses_issue_238_authoritative_wire_key() {
 
 #[test]
 fn external_role_conflict_and_duplicate_refusals_leave_canonical_files_and_spec_unchanged() {
-    let (ws, shims) = ws_seed("rolelife-zero-side-effects", "pi", "gpt-6-luna", None);
-    let source = ws.path().join("conflict.md"); fs::write(&source, role("conflict", "pi", "gpt-5.6-luna", None, false, "File body.")).unwrap();
+    let (ws, shims) = ws_seed("rolelife-zero-side-effects", "codex", "gpt-6-luna", None);
+    let source = ws.path().join("conflict.md"); fs::write(&source, role("conflict", "codex", "gpt-5.6-luna", None, false, "File body.")).unwrap();
     let before = snapshot(&ws, &shims, "conflict");
-    let r = run(&ws, &shims, &cli(&ws, "add-agent", "conflict", &["--role-file", source.to_str().unwrap(), "--provider", "codex"]));
+    let r = run(&ws, &shims, &cli(&ws, "add-agent", "conflict", &["--role-file", source.to_str().unwrap(), "--provider", "copilot"]));
     reject(&r, "provider conflict"); assert_eq!(snapshot(&ws, &shims, "conflict"), before); assert!(!role_path(&ws, "conflict").exists());
 }

@@ -1,6 +1,6 @@
 //! purpose: grok 席位角色文件必须显式写 model，缺则拒绝启动
 //! contract: 缺 model 的 grok 角色启动失败（错误含 model 与原因）；写了 model
-//!   则该值进入 worker argv 的 `--model <值>`；claude 缺 model 行为不变
+//!   则该值进入 worker argv 的 `--model <值>`；copilot 缺 model 行为不变
 //! boundary: 只钉 Provider::Grok 的启动契约；不改 claude/codex/copilot 路径
 //!
 //! 修之前判红（40e91fba）：grok 角色缺 model 仍会成功启动（compiler 填
@@ -97,20 +97,20 @@ fn grok_role_explicit_model_reaches_argv() {
     );
 }
 
-/// 3. claude 角色缺 model ⇒ 行为不变（仍能启动，不被 grok 的硬性 model 要求误伤）。
+/// 3. copilot 角色缺 model ⇒ 行为不变（仍能启动，不被 grok 的硬性 model 要求误伤）。
 #[test]
 #[serial(env)]
-fn claude_role_missing_model_still_starts() {
-    let _hermetic = enter_hermetic("grok-claude-missing-model");
-    let ws = tmp_dir("claude-no-model");
+fn copilot_role_missing_model_still_starts() {
+    let _hermetic = enter_hermetic("grok-copilot-missing-model");
+    let ws = tmp_dir("copilot-no-model");
     super::launch_spawn::seed_healthy_coordinator(&ws);
     let team = write_role_team(
         &ws,
-        "claudeteam",
-        "clauder",
-        "claude",
+        "copilotteam",
+        "copiloter",
+        "copilot",
         None,
-        "Claude Worker",
+        "Copilot Worker",
     );
     let transport = OfflineTransport::new();
 
@@ -119,17 +119,17 @@ fn claude_role_missing_model_still_starts() {
         &team,
         None,
         true,
-        Some("claudeteam"),
+        Some("copilotteam"),
         &transport,
     );
     assert!(
         result.is_ok(),
-        "claude role without model must keep starting; grok-only requirement leaked; err={result:?}"
+        "copilot role without model must keep starting; grok-only requirement leaked; err={result:?}"
     );
     let argv = first_spawn_argv(&transport);
     assert!(
         !argv.is_empty(),
-        "claude seat must still spawn; argv={argv:?}"
+        "copilot seat must still spawn; argv={argv:?}"
     );
 }
 

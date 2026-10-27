@@ -45,7 +45,7 @@ mod contract_route_tests {
     fn mixed_team_retains_legacy_classification_without_native_codex_fallback() {
         let state = serde_json::json!({"agents": {
             "native": {"provider":"cursor","status":"running","session_id":"native-id"},
-            "legacy": {"provider":"pi","status":"running"},
+            "legacy": {"provider":"copilot","status":"running"},
         }});
         let plan = classify_restart_plan(&state, false).unwrap();
         assert_eq!(plan.decisions.len(), 1);
@@ -61,11 +61,11 @@ mod stopped_restart_tests {
     #[test]
     fn stopped_rows_never_enter_validation_or_fresh_spawn_even_with_allow_fresh() {
         let state = serde_json::json!({"agents": {
-            "stopped": {"provider":"pi","status":"stopped","explicit_stop":true,
+            "stopped": {"provider":"copilot","status":"stopped","explicit_stop":true,
                 "session_id":"preserved","generation":7,"first_send_at":false},
-            "legacy_stopped": {"provider":"pi","status":"stopped"},
-            "marker": {"provider":"pi","status":"running","explicit_stop":true},
-            "active": {"provider":"pi","status":"running"}
+            "legacy_stopped": {"provider":"copilot","status":"stopped"},
+            "marker": {"provider":"copilot","status":"running","explicit_stop":true},
+            "active": {"provider":"copilot","status":"running"}
         }});
         let before = state.clone();
         for allow_fresh in [false, true] {

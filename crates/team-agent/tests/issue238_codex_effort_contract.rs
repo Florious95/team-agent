@@ -177,20 +177,24 @@ fn r3_compiler_role_wins_team_and_pi_does_not_inherit_team_effort() {
     );
 
     let pi_model = Some("openai-codex/gpt-5.6-luna");
-    assert_eq!(
-        compiled_effort("pi", pi_model, Some("max"), Some("high"))
-            .expect("Pi role max"),
-        Some("max".to_string())
-    );
-    assert_eq!(
-        compiled_effort("pi", pi_model, None, Some("ultra")).expect("Pi TEAM isolation"),
-        None,
-        "Pi does not inherit TEAM effort or inject a global default"
-    );
-    let error = compiled_effort("pi", pi_model, Some("ultra"), None)
-        .expect_err("Pi ultra must be rejected")
-        .to_string();
-    assert!(error.contains("effort 'ultra' is only supported by codex"), "{error}");
+    if cfg!(unix) {
+        // `provider: pi` compiles to the Pi contract leaf, which admits only
+        // explicit role effort and refuses levels Pi cannot prove.
+        assert_eq!(
+            compiled_effort("pi", pi_model, Some("high"), Some("max"))
+                .expect("Pi role high"),
+            Some("high".to_string())
+        );
+        assert_eq!(
+            compiled_effort("pi", pi_model, None, Some("ultra")).expect("Pi TEAM isolation"),
+            None,
+            "Pi does not inherit TEAM effort or inject a global default"
+        );
+        let error = compiled_effort("pi", pi_model, Some("ultra"), None)
+            .expect_err("Pi ultra must be rejected")
+            .to_string();
+        assert!(error.contains("Pi has no ultra thinking level"), "{error}");
+    }
 }
 
 fn direct_spec_text(
@@ -391,16 +395,19 @@ fn codex_max_command_literal_is_explicit_and_adjacent_to_c() {
 
 #[test]
 fn codex_looking_pi_model_does_not_change_provider_semantics() {
-    assert_eq!(
-        compiled_effort(
+    if cfg!(unix) {
+        // The Pi leaf decides admission by provider, never by model namespace:
+        // max stays refused although Codex itself admits it.
+        let error = compiled_effort(
             "pi",
             Some("openai-codex/gpt-5.6-luna"),
             Some("max"),
             None,
         )
-        .expect("Pi max"),
-        Some("max".to_string())
-    );
+        .expect_err("Pi leaf max")
+        .to_string();
+        assert!(error.contains("xhigh/max are refused"), "{error}");
+    }
     assert_eq!(
         effort("max").resolve_for_provider(Provider::Pi),
         Ok(Some(effort("max")))

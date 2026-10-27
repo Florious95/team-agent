@@ -230,48 +230,6 @@ fn spine2_sync_health_records_last_output_at() {
     );
 }
 
-// P1 — capture_missing: an agent with NO session_id but a discoverable transcript under spawn_cwd gets
-// its session_id captured + persisted (real capture_session_id); an agent that already has one is
-// untouched. Golden sessions/capture.py:capture_missing_sessions.
-#[test]
-fn spine2_capture_missing_captures_session_id_for_missing_agent() {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static N: AtomicU64 = AtomicU64::new(0);
-    let tdir = std::env::temp_dir().join(format!(
-        "ta-rs-health-tx-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&tdir).unwrap();
-    // lane-046-capture-gap: Claude no-expected_session_id capture now requires
-    // positive_agent_id_match (TEAM_AGENT_ID=<id>) OR agent_path_match. Without
-    // a worker-identity signal, weak candidates can be leader transcripts and
-    // must not be attributed to a worker. The seeded transcript includes the
-    // TEAM_AGENT_ID marker for w1.
-    std::fs::write(
-        tdir.join("session.jsonl"),
-        r#"{"type":"user","sessionId":"sess-found","cwd":"x","message":{"content":"TEAM_AGENT_ID=w1 hi"}}"#,
-    )
-    .unwrap();
-    let agents = serde_json::json!({
-        "w1": { "provider": "claude_code", "window": "w1", "spawn_cwd": tdir.to_string_lossy() },
-        "w2": { "provider": "claude_code", "window": "w2", "session_id": "existing-sess" },
-    });
-    let (coord, dir) = seeded_health_coord(agents, "");
-    coord.tick().expect("tick");
-    assert!(
-        agent_field(&dir, "w1", "session_id").and_then(|v| v.as_str().map(str::to_string)).is_some(),
-        "capture_missing must capture+persist a session_id for an agent with a discoverable transcript; today it's a probe"
-    );
-    assert_eq!(
-        agent_field(&dir, "w2", "session_id")
-            .and_then(|v| v.as_str().map(str::to_string))
-            .as_deref(),
-        Some("existing-sess"),
-        "an agent that already has a session_id must be untouched"
-    );
-}
-
 // CONTRACT — sync_health runs BEFORE deliver_pending, but turn-level WORKING state must not make an
 // alive worker undeliverable. Busy delivery deferral is lifecycle-only (`state.agents[id].status=="busy"`);
 // activity/agent_health WORKING remains diagnostic turn state.

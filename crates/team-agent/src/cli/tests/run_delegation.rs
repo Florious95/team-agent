@@ -252,9 +252,10 @@ fn cli_quick_start_invokes_real_lifecycle_admission_before_runtime_effects() {
     );
 }
 
-// 2 [P0] — cmd_quick_start over an INVALID role doc surfaces the REAL compiler error (missing
-// `provider`), proving delegation to crate::lifecycle (compile fails before any spawn). The
-// placeholder returns a canned {ok:true} with no error -> RED. OS-safe (compile fails early).
+// 2 [P0] — cmd_quick_start over an INVALID role doc surfaces the REAL compiler error (unknown
+// `provider`; an omitted one is the default Pi leaf), proving delegation to crate::lifecycle
+// (compile fails before any spawn). The placeholder returns a canned {ok:true} with no error
+// -> RED. OS-safe (compile fails early).
 #[test]
 fn cli_quick_start_invalid_spec_surfaces_real_compile_error() {
     let team = deleg_uniq_dir("qsbad");
@@ -274,7 +275,7 @@ fn cli_quick_start_invalid_spec_surfaces_real_compile_error() {
     let text = outcome_text(cmd_quick_start(&args));
     assert!(
             text.contains("provider"),
-            "cmd_quick_start must surface the REAL compiler error for a role doc missing `provider` \
+            "cmd_quick_start must surface the REAL compiler error for a role doc with an unknown `provider` \
              (proving delegation to crate::lifecycle, not the placeholder's canned ok:true); got {text}"
         );
 }

@@ -20,10 +20,10 @@ fn fixture(ids: &[&str]) -> (Sandbox, Intent) {
     (root, intent)
 }
 fn write_role(root: &Path, id: &str) {
-    std::fs::write(root.join("agents").join(format!("{id}.md")),format!("---\nname: {id}\nprovider: pi\nmodel: openai-codex/gpt-6-luna\neffort: max\ndangerously_skip_permissions: true\n---\nFixture\n")).unwrap();
+    std::fs::write(root.join("agents").join(format!("{id}.md")),format!("---\nname: {id}\nprovider: copilot\nmodel: gpt-6-luna\neffort: high\ndangerously_skip_permissions: true\n---\nFixture\n")).unwrap();
 }
 fn install(root: &Path, ids: &[(&str, &str, bool)]) {
-    let agents:serde_json::Map<String,Value>=ids.iter().map(|(id,status,explicit)|((*id).into(),json!({"provider":"pi","status":status,"explicit_stop":explicit,"pane_pid":std::process::id(),"pane_id":format!("%{id}"),"window":id}))).collect();
+    let agents:serde_json::Map<String,Value>=ids.iter().map(|(id,status,explicit)|((*id).into(),json!({"provider":"copilot","status":status,"explicit_stop":explicit,"pane_pid":std::process::id(),"pane_id":format!("%{id}"),"window":id}))).collect();
     let entry = json!({"team_key":"fixture","team_dir":root,"status":"alive","session_name":"team-fixture","agents":agents,"tasks":{}});
     let mut raw = entry.clone();
     raw["active_team_key"] = json!("fixture");
@@ -427,14 +427,14 @@ fn preserve_rejects_known_missing_backing_before_stop_auto_uses_existing_decisio
     let selected =
         resolve_active_team_readonly(root.path(), Some("fixture"), SelectorMode::RuntimeOnly)
             .unwrap();
-    let row = json!({"provider":"pi","session_id":"missing-session","rollout_path":root.path().join("missing.jsonl"),"spawn_cwd":root.path()});
+    let row = json!({"provider":"copilot","session_id":"missing-session","rollout_path":root.path().join("missing.jsonl"),"spawn_cwd":root.path()});
     assert!(preflight_start(&selected, "one", &row, SessionPolicy::Preserve).is_err());
     assert!(preflight_start(&selected, "one", &row, SessionPolicy::Auto).is_ok());
     assert!(
         preflight_start(
             &selected,
             "one",
-            &json!({"provider":"pi"}),
+            &json!({"provider":"copilot"}),
             SessionPolicy::Preserve
         )
         .is_ok(),
@@ -488,7 +488,7 @@ fn stopped_text_without_physical_identity_is_unknown_and_standalone_source_keeps
         observe(
             &selected,
             "one",
-            &json!({"status":"stopped","provider":"pi"})
+            &json!({"status":"stopped","provider":"copilot"})
         )
         .unwrap(),
         Observation::Unknown
@@ -497,7 +497,7 @@ fn stopped_text_without_physical_identity_is_unknown_and_standalone_source_keeps
         observe(
             &selected,
             "one",
-            &json!({"status":"stopped","provider":"pi","pane_pid":std::process::id()})
+            &json!({"status":"stopped","provider":"copilot","pane_pid":std::process::id()})
         )
         .unwrap(),
         Observation::Unknown
@@ -701,7 +701,7 @@ fn preserve_context_preflight_and_corrupt_metadata_refuse_before_stop() {
         json!({"task_prompt_delivered":true}),
         json!({"last_result_at":"2026-10-19T00:00:00Z"}),
     ] {
-        let mut row = json!({"provider":"pi"});
+        let mut row = json!({"provider":"copilot"});
         row.as_object_mut()
             .unwrap()
             .extend(signal.as_object().unwrap().clone());
@@ -716,7 +716,7 @@ fn preserve_context_preflight_and_corrupt_metadata_refuse_before_stop() {
         "first_send_at",
         "task_prompt_delivered",
     ] {
-        let mut row = json!({"provider":"pi"});
+        let mut row = json!({"provider":"copilot"});
         row[field] = json!([]);
         for policy in [SessionPolicy::Auto, SessionPolicy::Preserve] {
             assert!(
@@ -729,14 +729,14 @@ fn preserve_context_preflight_and_corrupt_metadata_refuse_before_stop() {
     assert!(preflight_start(
         &selected,
         "one",
-        &json!({"provider":"pi", "spawn_cwd":outside.path()}),
+        &json!({"provider":"copilot", "spawn_cwd":outside.path()}),
         SessionPolicy::Auto
     )
     .is_err());
     assert!(preflight_start(
         &selected,
         "one",
-        &json!({"provider":"pi", "session_id":"captured"}),
+        &json!({"provider":"copilot", "session_id":"captured"}),
         SessionPolicy::Auto
     )
     .is_err());

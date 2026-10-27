@@ -36,10 +36,11 @@
 //!   fresh-clone code path (dropping `backing_state` from the report so it
 //!   looks like a Verified clone) is also RED.
 //!
-//! Offline structural RED (PATH-shim provider, zero tokens): the source session
-//! backing is seeded as fixture prep (a hermetic shim has no real captured
-//! session); this batch pins that ok requires a VERIFIED NEW backing, not that
-//! the fork "remembers" the nonce (that is subscription-E2E, locate §4.5).
+//! Offline structural RED (built-in fake provider, zero tokens): the source
+//! session backing is seeded as fixture prep (the fake worker has no real
+//! captured session and never writes a NEW backing); this batch pins that ok
+//! requires a VERIFIED NEW backing, not that the fork "remembers" the nonce
+//! (that is subscription-E2E, locate §4.5).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -60,27 +61,19 @@ const NEW: &str = "new_worker";
 struct Case {
     env: HermeticTestEnv,
     workspace: PathBuf,
-    shim_path: String,
     socket: Option<PathBuf>,
 }
 
 impl Case {
-    /// `emit_transcript=false` is the R3 teeth shim: the provider only spawns
-    /// (sleeps) and never writes a session transcript/backing.
-    fn start(tag: &str, emit_transcript: bool) -> Self {
+    /// The source seat is the built-in fake worker: it only runs and never
+    /// writes a session transcript/backing (the R3 teeth input).
+    fn start(tag: &str) -> Self {
         let env = HermeticTestEnv::enter(tag);
         let workspace = env.workspace("ws");
         write_team_docs(&workspace);
-        let shim_dir = write_claude_shim(&workspace, emit_transcript);
-        let shim_path = format!(
-            "{}:{}",
-            shim_dir.display(),
-            std::env::var("PATH").expect("PATH present")
-        );
         let mut case = Self {
             env,
             workspace,
-            shim_path,
             socket: None,
         };
         case.quick_start();
@@ -100,8 +93,7 @@ impl Case {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        self.env
-            .run_cli_env(&self.workspace, args, &[("PATH", self.shim_path.as_str())])
+        self.env.run_cli(&self.workspace, args)
     }
 
     fn quick_start(&mut self) {
@@ -133,7 +125,7 @@ impl Case {
         }
     }
 
-    /// Seed the SOURCE backing tuple (a hermetic shim has no real captured
+    /// Seed the SOURCE backing tuple (the fake worker has no real captured
     /// session) so the fork has a valid source to copy from. The RED is about
     /// the NEW backing, not the source's.
     fn seed_source_session_tuple(&self) {
@@ -262,39 +254,10 @@ fn write_team_docs(workspace: &Path) {
     std::fs::write(
         workspace.join("agents").join(format!("{SOURCE}.md")),
         format!(
-            "---\nname: {SOURCE}\nrole: {SOURCE}\nprovider: claude\nmodel: claude-sonnet-5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{SOURCE}.\n"
+            "---\nname: {SOURCE}\nrole: {SOURCE}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{SOURCE}.\n"
         ),
     )
     .expect("write source role doc");
-}
-
-fn write_claude_shim(workspace: &Path, emit_transcript: bool) -> PathBuf {
-    let bin_dir = workspace.join("shim-bin");
-    std::fs::create_dir_all(&bin_dir).expect("create shim dir");
-    let shim = bin_dir.join("claude");
-    // R3 teeth: with emit_transcript=false the shim ONLY spawns (sleeps) and
-    // never writes any session backing — a spawn-without-transcript that the old
-    // implementation would wrongly accept as a forked context.
-    // The tail is a stdin read-loop instead of `sleep` so the shim can answer
-    // the in-window fork command the product injects into the pane
-    // (`/branch` -> screen mark `Branched conversation`, see
-    // `lifecycle/launch/fork_agent.rs` `in_window_fork`). r2/r3 never inject
-    // anything, so for them the loop is just a live foreground process, exactly
-    // as `sleep` was.
-    let tail = "while IFS= read -r line; do\n  case \"$line\" in\n    */branch*) echo 'Branched conversation' ;;\n  esac\ndone\nexec sleep 3600\n";
-    let body = if emit_transcript {
-        format!("#!/bin/sh\nmkdir -p \"$HOME/.claude/projects/shim\"\necho '{{\"type\":\"shim\"}}' > \"$HOME/.claude/projects/shim/session.jsonl\"\necho 'claude shim ready'\n{tail}")
-    } else {
-        format!("#!/bin/sh\necho 'claude shim ready'\n{tail}")
-    };
-    std::fs::write(&shim, body).expect("write claude shim");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod claude shim");
-    }
-    bin_dir
 }
 
 /// Helper: classify the fork report into one of the FOUR admissible shapes
@@ -429,7 +392,7 @@ fn classify_fork_shape(fork: &Value) -> Result<ForkShape, String> {
 /// backing_state=="pending_context_fork" declared — neither typed shape.
 #[test]
 fn r2_fork_ok_is_typed_verified_or_pending() {
-    let case = Case::start("cf-r2", true);
+    let case = Case::start("cf-r2");
     let fork = case.fork();
     if fork.get("ok").and_then(Value::as_bool) != Some(true) {
         // If the product refuses (a legitimate non-ok), R2 does not apply
@@ -533,7 +496,7 @@ fn r2b_fork_report_schema_admits_typed_backing_state() {
     // A real fork may fail before producing a success report (for example,
     // when its transport endpoint is unavailable). Only inspect
     // success-only schema fields after the positive ok:true gate.
-    let case = Case::start("cf-r2b", true);
+    let case = Case::start("cf-r2b");
     let fork = case.fork_in_place();
     if fork.get("ok").and_then(Value::as_bool) != Some(true) {
         assert_error_envelope(&fork);
@@ -543,8 +506,8 @@ fn r2b_fork_report_schema_admits_typed_backing_state() {
 }
 
 /// R3 false-success + pending-vs-refuse teeth (A 案 co-revision) — a
-/// provider shim that only SPAWNS and produces NO NEW transcript/backing
-/// must NOT be reported as a Verified forked context. Admissible outcomes:
+/// provider that only SPAWNS and produces NO NEW transcript/backing (the fake
+/// worker) must NOT be reported as a Verified forked context. Admissible outcomes:
 ///   (P)  Pending (`backing_state==pending_context_fork` + tuple null +
 ///                 seat retained pending typed grace expiry), or
 ///   (Ru) Refuse with `context_fork_unverified`, or
@@ -554,24 +517,24 @@ fn r2b_fork_report_schema_admits_typed_backing_state() {
 /// fresh-clone downgrade.
 #[test]
 fn r3_spawn_without_transcript_is_pending_or_refuse_never_fabricated() {
-    let case = Case::start("cf-r3", false);
+    let case = Case::start("cf-r3");
     let fork = case.fork();
     let shape = classify_fork_shape(&fork).unwrap_or_else(|msg| panic!("{msg}"));
     match shape {
         ForkShape::Verified { new_session_id } => {
-            // A shim that emits no transcript CANNOT legitimately arrive at
+            // A worker that emits no transcript CANNOT legitimately arrive at
             // Verified: the classifier already validates the session id
             // shape, but the R3 case adds the semantic guarantee that no
             // real backing was produced. If the product reports Verified
             // anyway, the false-success family has resurfaced.
             panic!(
-                "spawn-only shim reported Verified with new_session_id={new_session_id:?}; \
+                "spawn-only worker reported Verified with new_session_id={new_session_id:?}; \
                  no NEW backing was produced by design. This is the 2026-07-17 \
                  false-success family — spawn is not success. fork={fork}"
             );
         }
         ForkShape::Pending | ForkShape::RefuseUnverified | ForkShape::RefuseOther => {
-            // All three are admissible for the R3 shim path.
+            // All three are admissible for the R3 spawn-only path.
         }
     }
 }

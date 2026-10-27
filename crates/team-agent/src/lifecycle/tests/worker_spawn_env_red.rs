@@ -167,8 +167,8 @@ fn worker_spawn_scrubs_cross_provider_process_identity_but_keeps_config_env() {
         ("NODE_EXTRA_CA_CERTS", "/canary/ca.pem"),
     ]);
 
-    let launch_team =
-        compiled_team_dir_for_provider("cross-launch", &[("worker_a", "Launch Worker")], "claude");
+    // The identity scrub is provider-agnostic; a Codex worker exercises every spawn surface.
+    let launch_team = compiled_team_dir("cross-launch", &[("worker_a", "Launch Worker")]);
     let launch_transport = RecordingTransport::new().with_session_present(false);
     launch_with_transport(
         &launch_team.join("team.spec.yaml"),
@@ -179,25 +179,16 @@ fn worker_spawn_scrubs_cross_provider_process_identity_but_keeps_config_env() {
     )
     .expect("launch fixture should spawn worker");
 
-    let restart_team = compiled_team_dir_for_provider(
-        "cross-restart",
-        &[("worker_a", "Restart Worker")],
-        "claude",
-    );
-    seed_restart_state_as(&restart_team, "worker_a", "claude");
+    let restart_team = compiled_team_dir("cross-restart", &[("worker_a", "Restart Worker")]);
+    seed_restart_state(&restart_team, "worker_a");
     let restart_transport = RecordingTransport::new().with_session_present(false);
     restart_with_transport(&restart_team, true, None, &restart_transport)
         .expect("restart fixture should spawn worker");
 
-    let add_team =
-        compiled_team_dir_for_provider("cross-add", &[("worker_a", "Existing Worker")], "claude");
-    seed_running_add_agent_state_as(&add_team, "worker_a", "claude");
+    let add_team = compiled_team_dir("cross-add", &[("worker_a", "Existing Worker")]);
+    seed_running_add_agent_state(&add_team, "worker_a");
     let role_file = add_team.parent().unwrap().join("worker_b.md");
-    std::fs::write(
-        &role_file,
-        role_doc_for_provider("worker_b", "Added Worker", "claude"),
-    )
-    .unwrap();
+    std::fs::write(&role_file, role_doc("worker_b", "Added Worker")).unwrap();
     let add_transport = RecordingTransport::new().with_session_present(true);
     add_agent_with_transport(
         &add_team,

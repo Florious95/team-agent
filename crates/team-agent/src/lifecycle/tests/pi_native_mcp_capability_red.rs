@@ -18,9 +18,8 @@ use std::time::{Duration, Instant};
 
 use crate::event_log::EventLog;
 use crate::lifecycle::launch::pi_mcp::{
-    materialize_pi_plan, pi_model_candidates, pi_seat_paths, PiMaterializeRequest, PiSessionScope,
+    materialize_pi_plan, pi_seat_paths, PiMaterializeRequest, PiSessionScope,
 };
-use crate::lifecycle::launch::run_pi_catalog_preflight;
 use crate::lifecycle::tests::test_binary_path;
 use crate::message_store::MessageStore;
 use crate::provider::McpConfig;
@@ -90,23 +89,6 @@ esac
         "TEAM_AGENT_TEST_PI_CALL_LOG",
         call_log.to_str().expect("call log path must be UTF-8"),
     );
-
-    let roles = hermetic.workspace("roles");
-    let agents = roles.join("agents");
-    std::fs::create_dir_all(&agents).expect("create Pi role directory");
-    std::fs::write(
-        agents.join("n1.md"),
-        "---\nprovider: pi\nmodel: team-agent/qwen3.8-27b\n---\nN1 native Pi fixture\n",
-    )
-    .expect("write exact-model Pi role");
-    assert_eq!(
-        pi_model_candidates("qwen3.8-27b").expect("fake Pi model catalog"),
-        ["team-agent/qwen3.8-27b"],
-        "catalog discovery must succeed without consulting the package list"
-    );
-    let mut discover = |requested: &str| pi_model_candidates(requested).map_err(|_| ());
-    run_pi_catalog_preflight(&roles, &mut discover)
-        .expect("exact-model catalog preflight must pass on native-only Pi");
 
     let harness = sim::McpSimHarness::new();
     harness.bind_leader_receiver_to_team("teamA");

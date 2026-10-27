@@ -1,26 +1,26 @@
 use std::path::Path;
 
-use crate::lifecycle::launch::pi_mcp::{pi_leader_session_scope, PiSessionScope};
+use crate::lifecycle::launch::pi_mcp::{
+    build_pi_command_argv, pi_leader_session_scope, PiCommandRequest, PiSessionScope,
+};
 use crate::model::enums::ProviderEffort;
-use crate::provider::adapters::pi::{build_pi_command_argv, PiCommandRequest, PiSessionSelector};
 
-fn request(session: PiSessionSelector<'static>) -> PiCommandRequest<'static> {
+fn isolated_leader_request() -> PiCommandRequest<'static> {
     PiCommandRequest {
-        extension: Path::new("/workspace/.team/runtime/pi/team-a/worker-a/team-mcp.ts"),
+        extension: Path::new("/workspace/.team/runtime/pi/team-a/leader/team-mcp.ts"),
         model: Some("team-agent/qwen3.8-27b"),
         effort: Some(ProviderEffort::High),
-        system_prompt: "frozen worker prompt",
+        system_prompt: "frozen leader prompt",
         session_dir: Some(Path::new(
-            "/workspace/.team/runtime/pi/team-a/worker-a/sessions",
+            "/workspace/.team/runtime/pi/team-a/leader/sessions",
         )),
-        session,
-        agent_id: "worker-a",
+        agent_id: "leader",
     }
 }
 
 #[test]
 fn pi_command_omits_unset_model_and_thinking_flags() {
-    let mut request = request(PiSessionSelector::Fresh);
+    let mut request = isolated_leader_request();
     request.model = None;
     request.effort = None;
     let argv = build_pi_command_argv(request).expect("Pi provider defaults");
@@ -36,7 +36,6 @@ fn leader_request() -> PiCommandRequest<'static> {
         effort: None,
         system_prompt: "frozen leader prompt",
         session_dir: None,
-        session: PiSessionSelector::Fresh,
         agent_id: "leader",
     }
 }
@@ -92,84 +91,67 @@ fn pi_leader_session_scope_keeps_explicit_and_external_routes_isolated() {
 
 #[test]
 fn pi_command_preserves_direct_pi_defaults_with_only_team_runtime_additions() {
-    let fresh = build_pi_command_argv(request(PiSessionSelector::Fresh))
-    .expect("fresh Pi command");
+    let fresh = build_pi_command_argv(isolated_leader_request()).expect("fresh Pi command");
     assert_eq!(
         fresh,
         [
             "pi",
             "-e",
-            "/workspace/.team/runtime/pi/team-a/worker-a/team-mcp.ts",
+            "/workspace/.team/runtime/pi/team-a/leader/team-mcp.ts",
             "--model",
             "team-agent/qwen3.8-27b",
             "--thinking",
             "high",
             "--append-system-prompt",
-            "frozen worker prompt",
+            "frozen leader prompt",
             "--session-dir",
-            "/workspace/.team/runtime/pi/team-a/worker-a/sessions",
+            "/workspace/.team/runtime/pi/team-a/leader/sessions",
             "--name",
-            "worker-a",
+            "leader",
         ]
         .map(str::to_string)
     );
 
-    let resume = build_pi_command_argv(request(PiSessionSelector::Resume {
-        path: Path::new(
-            "/workspace/.team/runtime/pi/team-a/worker-a/sessions/2026/08/session.jsonl",
-        ),
-    }))
-    .expect("resume Pi command");
-    assert!(resume.windows(2).any(|pair| {
-        pair == [
-            "--session",
-            "/workspace/.team/runtime/pi/team-a/worker-a/sessions/2026/08/session.jsonl",
-        ]
-    }));
-    assert!(!resume.iter().any(|arg| arg == "--session-id"));
-
-    for argv in [&fresh, &resume] {
-        assert_eq!(argv.first().map(String::as_str), Some("pi"));
-        for forbidden in [
-            "rpc",
-            "--mode",
-            "--print",
-            "-p",
-            "-r",
-            "--resume",
-            "-c",
-            "--continue",
-            "--mcp-config",
-            "--provider",
-            "--fork",
-            "--workspace",
-            "--cwd",
-            "--rules",
-            "--always-approve",
-            "--force",
-            "--trust",
-            "--sandbox",
-            "--no-extensions",
-            "--no-approve",
-            "--no-context-files",
-            "--no-skills",
-            "--no-prompt-templates",
-            "--tui-mode",
-            "--tools",
-            "--system-prompt",
-        ] {
-            assert!(
-                !argv.iter().any(|arg| arg == forbidden),
-                "materializer-owned Pi argv must not inherit {forbidden}: {argv:?}"
-            );
-        }
+    for forbidden in [
+        "rpc",
+        "--mode",
+        "--print",
+        "-p",
+        "-r",
+        "--resume",
+        "-c",
+        "--continue",
+        "--session",
+        "--session-id",
+        "--mcp-config",
+        "--provider",
+        "--fork",
+        "--workspace",
+        "--cwd",
+        "--rules",
+        "--always-approve",
+        "--force",
+        "--trust",
+        "--sandbox",
+        "--no-extensions",
+        "--no-approve",
+        "--no-context-files",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--tui-mode",
+        "--tools",
+        "--system-prompt",
+    ] {
+        assert!(
+            !fresh.iter().any(|arg| arg == forbidden),
+            "materializer-owned Pi argv must not inherit {forbidden}: {fresh:?}"
+        );
     }
 }
 
 #[test]
 fn pi_command_keeps_direct_plugins_skills_context_auth_and_tools() {
-    let argv = build_pi_command_argv(request(PiSessionSelector::Fresh))
-    .expect("fresh Pi command");
+    let argv = build_pi_command_argv(isolated_leader_request()).expect("fresh Pi command");
 
     for forbidden in [
         "--no-context-files",
@@ -184,17 +166,17 @@ fn pi_command_keeps_direct_plugins_skills_context_auth_and_tools() {
         assert_eq!(
             argv.iter().filter(|arg| arg.as_str() == forbidden).count(),
             0,
-            "TeamMate Pi must preserve the direct Pi default instead of adding {forbidden}; argv={argv:?}"
+            "Pi leader must preserve the direct Pi default instead of adding {forbidden}; argv={argv:?}"
         );
     }
     assert!(argv.windows(2).any(|pair| {
         pair == [
             "-e",
-            "/workspace/.team/runtime/pi/team-a/worker-a/team-mcp.ts",
+            "/workspace/.team/runtime/pi/team-a/leader/team-mcp.ts",
         ]
     }));
     assert_eq!(argv.iter().filter(|arg| arg.as_str() == "-e").count(), 1);
     assert!(argv
         .windows(2)
-        .any(|pair| pair == ["--append-system-prompt", "frozen worker prompt"]));
+        .any(|pair| pair == ["--append-system-prompt", "frozen leader prompt"]));
 }

@@ -123,9 +123,9 @@ fn stopped_start_commit_updates_exact_target_and_both_mirrors()
         let held = json!({"agent_id":"worker","provider":"grok_build","runtime_family":"contract",
             "status":"stopped","explicit_stop":true,"generation":1,"contract_instance":"instance-one",
             "session_id":"same-session","native_endpoint":"old-endpoint"});
-        let peer = json!({"agent_id":"peer","provider":"pi","status":"stopped","explicit_stop":true,
+        let peer = json!({"agent_id":"peer","provider":"copilot","status":"stopped","explicit_stop":true,
             "session_id":"peer-session","generation":1});
-        let control = json!({"agent_id":"control","provider":"pi","status":"running","session_id":"control-session"});
+        let control = json!({"agent_id":"control","provider":"copilot","status":"running","session_id":"control-session"});
         let agents = json!({"worker":held,"peer":peer,"control":control});
         let initial = json!({"session_name":"team-a","active_team_key":"team-a","agents":agents,
             "teams":{"team-a":{"session_name":"team-a","status":"alive","agents":agents},

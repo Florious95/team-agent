@@ -3,11 +3,11 @@
 //! contract:
 //!   provides:
 //!     - name: A16-capability-matrix-behavior
-//!       what: grok subscription 真注入斜杠命令；Claude 同名就地分身拒并要求新席位；compatible_api 拒；未验证 provider 拒且理由是未验证
+//!       what: grok subscription 真注入斜杠命令；升级前遗留的 claude/pi worker 行在注入前即拒；compatible_api 拒；未验证 provider 拒且理由是未验证
 //! boundary:
 //!   - 不把 in_window_fork_command 查表当通过
 //!   - 基线红必须是断言失败，不是 unresolved import
-//!   - Claude 不再注入 /branch：它会把源席自身切到新分支且不产生新席
+//!   - Claude 不再注入 /branch：它会把源席自身切到新分支且不产生新席；Claude Code / Pi 只走 contract 管道 fork
 //! maturity: wired
 //! ---
 
@@ -135,30 +135,39 @@ fn grok_subscription_injects_slash_fork_and_accepts_forked_from() {
 }
 
 #[test]
-fn legacy_claude_subscription_refuses_in_place_branch_and_asks_for_a_new_seat() {
-    // `/branch` moved the source process onto the branch while its seat kept the
-    // old session tuple, and created no seat. Claude forks only into a new seat.
-    for (tag, screen) in [
-        ("claude-sub", "Branched conversation. You are now in the new branch (session abc).\n"),
-        ("claude-empty", "Failed to branch conversation: No conversation to branch\n"),
+fn legacy_claude_and_pi_rows_are_refused_as_retired_before_any_injection() {
+    // A pre-upgrade worker row has no legacy runtime to fork from; the user is
+    // told to re-add the seat by its public provider name, never the leaf id.
+    for (tag, provider, auth) in [
+        ("claude-sub", "claude", "subscription"),
+        ("claude-compat", "claude", "compatible_api"),
+        ("pi-sub", "pi", "subscription"),
     ] {
-        let ws = seat_ws(tag, "claude", "subscription");
-        let (result, injected) = fork_on(&ws, screen);
-        let text = result.expect_err("in-place Claude fork must refuse").to_string();
-        assert!(text.contains("--as <new agent id>"), "refusal must ask for a new seat; got {text}");
-        assert!(!text.contains("claude_tui"), "the user never edits the provider key; got {text}");
+        let ws = seat_ws(tag, provider, auth);
+        let (result, injected) = fork_on(&ws, "Branched conversation. (forked from old-id)\n");
+        let text = result.expect_err("a retired worker row must refuse").to_string();
+        assert!(
+            text.contains(&format!(
+                "legacy {provider} seat has no runtime in this release; stop or remove it, then add it again (provider: {provider})"
+            )),
+            "{tag}: refusal must name the retired seat and how to re-add it; got {text}"
+        );
+        assert!(
+            !text.contains("claude_tui") && !text.contains("pi_tui"),
+            "{tag}: the user never edits the provider key; got {text}"
+        );
         assert!(
             !injected.iter().any(|t| t == "/branch" || t == "/fork"),
-            "legacy Claude must not inject a slash command; got {injected:?}"
+            "{tag}: a retired row must not inject a slash command; got {injected:?}"
         );
         let _ = std::fs::remove_dir_all(&ws);
     }
 }
 
 #[test]
-fn claude_compatible_api_is_refused_as_unsupported_auth() {
-    let ws = seat_ws("claude-compat", "claude", "compatible_api");
-    let (result, injected) = fork_on(&ws, "Branched conversation.\n");
+fn grok_compatible_api_is_refused_as_unsupported_auth() {
+    let ws = seat_ws("grok-compat", "grok", "compatible_api");
+    let (result, injected) = fork_on(&ws, "Session new (forked from old-id)\n");
     let err = result.expect_err("compatible_api must refuse");
     let text = err.to_string();
     assert!(

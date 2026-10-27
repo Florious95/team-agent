@@ -136,32 +136,3 @@ fn full_discovery_preserves_competitors_expected_id_and_cross_team_claims() {
     assert_eq!(report.assigned, vec!["worker"]);
     assert_eq!(state["agents"]["worker"]["session_id"], "first");
 }
-
-#[test]
-#[serial(env)]
-fn generic_claude_discovery_keeps_explicit_team_root_and_rejects_runtime_siblings() {
-    let env = hermetic_guard::HermeticTestEnv::enter("discovery-claude");
-    let cwd = env.workspace("claude");
-    let root = cwd.join(".team/runtime/claude/projects");
-    let owned = root.join("cwd/owned.jsonl");
-    let sibling = cwd.join(".team/artifacts/other.jsonl");
-    for path in [&owned, &sibling] {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let record = json!({
-            "type": "user", "sessionId": "claude-owned", "cwd": cwd,
-            "message": {"role": "user", "content":
-                "You are Team Agent worker `worker` with role `fixture`."}
-        });
-        std::fs::write(path, format!("{record}\n")).unwrap();
-    }
-    let mut state = pending(&cwd);
-    state["agents"]["worker"]["provider"] = json!("claude_code");
-    state["agents"]["worker"]["spawned_at"] = json!("2020-01-01T00:00:00Z");
-    state["agents"]["worker"]["claude_projects_root"] = json!(root);
-    let report =
-        capture_missing_provider_sessions_once(&mut state, &mut get_adapter, true, 0)
-            .unwrap();
-    assert_eq!(report.candidate_count_by_agent.get("worker"), Some(&1));
-    assert_eq!(report.assigned, vec!["worker"]);
-    assert_eq!(state["agents"]["worker"]["rollout_path"], json!(owned));
-}

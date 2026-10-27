@@ -226,8 +226,8 @@ fn observer_state_save_failure_after_enter_does_not_return_err() {
 }
 
 #[test]
-fn pane_token_refuses_second_inject_for_claude_grok() {
-    for provider in ["claude", "grok"] {
+fn pane_token_refuses_second_inject_for_copilot_grok() {
+    for provider in ["copilot", "grok"] {
         let mut case = WorkerCase::new(&format!("token-{provider}"), provider);
         #[cfg(unix)]
         let carrier = crate::mcp_server::readiness::test_carrier_pid().unwrap();
@@ -295,7 +295,7 @@ fn pane_token_refuses_second_inject_for_claude_grok() {
 
 #[test]
 fn transcript_token_refuses_second_inject() {
-    let case = WorkerCase::new("transcript", "claude");
+    let case = WorkerCase::new("transcript", "copilot");
     let message_id = case.seed_leader_to_worker("transcript canary");
     std::fs::write(
         &case.rollout,

@@ -349,7 +349,7 @@ fn documented_creation_forms_are_readonly_plans_not_native_spawns() {
     .unwrap();
     fs::write(
         source.join("agents/reviewer.md"),
-        "---\nprovider: pi\ndangerously_skip_permissions: false\n---\nReview the change.\n",
+        "---\nprovider: pi\nmodel: openai-codex/gpt-6-luna\ndangerously_skip_permissions: false\n---\nReview the change.\n",
     )
     .unwrap();
     let before = inventory(&case.root);

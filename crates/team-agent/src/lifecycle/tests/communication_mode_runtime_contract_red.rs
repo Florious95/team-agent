@@ -57,7 +57,7 @@ fn t06_each_official_mode_selects_one_runtime_contract_in_real_spawn_prompt() {
             .iter()
             .find(|spawn| spawn.window.as_str().contains(id))
             .unwrap_or_else(|| panic!("T06/{id}: no spawn recorded for product-catalog mode"));
-        let prompt = flag_value(&spawn.argv, "--append-system-prompt");
+        let prompt = spawn_prompt(&spawn.argv);
         let own_heading = format!("{CONTRACT_HEADING_PREFIX}{id}");
         assert!(
             prompt.contains(&own_heading),
@@ -106,7 +106,7 @@ fn t06_selected_templates_project_the_two_signed_communication_boundaries() {
             .iter()
             .find(|spawn| spawn.window.as_str().contains(id))
             .unwrap_or_else(|| panic!("T06/{id}: missing recorded spawn"));
-        flag_value(&spawn.argv, "--append-system-prompt")
+        spawn_prompt(&spawn.argv)
     };
 
     let leader = prompt(CommunicationMode::LeaderCentric);
@@ -161,7 +161,7 @@ fn t07_final_spawn_prompt_does_not_leak_leader_centric_obligations_into_orchestr
                 .as_str()
                 .contains(CommunicationMode::Orchestrated.as_str())
         })
-        .map(|spawn| flag_value(&spawn.argv, "--append-system-prompt"))
+        .map(|spawn| spawn_prompt(&spawn.argv))
         .expect("T07/orchestrated: missing recorded spawn");
 
     for required in [
@@ -189,7 +189,7 @@ fn t07_final_spawn_prompt_does_not_leak_leader_centric_obligations_into_orchestr
     let default_spawns = default_transport.spawns.lock().unwrap();
     let default_prompt = default_spawns
         .first()
-        .map(|spawn| flag_value(&spawn.argv, "--append-system-prompt"))
+        .map(|spawn| spawn_prompt(&spawn.argv))
         .expect("T07/leader_centric positive control: missing recorded default spawn");
     for required in [
         "Progress, blockers, questions:",
@@ -266,7 +266,7 @@ fn fixture(tag: &str, team_mode: Option<&str>) -> PathBuf {
         std::fs::write(
             root.join("agents").join(format!("worker_{id}.md")),
             format!(
-                "---\nname: worker_{id}\nrole: Communication Worker\nprovider: claude\ndangerously_skip_permissions: false\ncommunication_mode: {id}\ntools:\n  - mcp_team\n---\n\nROLE BODY SENTINEL {id}\n"
+                "---\nname: worker_{id}\nrole: Communication Worker\nprovider: codex\nmodel: gpt-5.5\ndangerously_skip_permissions: false\ncommunication_mode: {id}\ntools:\n  - mcp_team\n---\n\nROLE BODY SENTINEL {id}\n"
             ),
         )
         .unwrap();
@@ -285,17 +285,36 @@ fn default_fixture(tag: &str) -> PathBuf {
     }
     std::fs::write(
         root.join("agents").join("worker_default.md"),
-        "---\nname: worker_default\nrole: Communication Worker\nprovider: claude\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nROLE BODY SENTINEL default\n",
+        "---\nname: worker_default\nrole: Communication Worker\nprovider: codex\nmodel: gpt-5.5\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nROLE BODY SENTINEL default\n",
     )
     .unwrap();
     root
 }
 
-fn flag_value(argv: &[String], flag: &str) -> String {
-    argv.windows(2)
-        .find(|pair| pair[0] == flag)
-        .map(|pair| pair[1].clone())
-        .unwrap_or_default()
+/// The Codex worker carries the assembled prompt as one escaped
+/// `-c developer_instructions="..."` override; undo that escaping.
+fn spawn_prompt(argv: &[String]) -> String {
+    let Some(escaped) = argv
+        .iter()
+        .find_map(|arg| arg.strip_prefix("developer_instructions=\""))
+        .and_then(|value| value.strip_suffix('"'))
+    else {
+        return String::new();
+    };
+    let mut prompt = String::with_capacity(escaped.len());
+    let mut chars = escaped.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            prompt.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => prompt.push('\n'),
+            Some(other) => prompt.push(other),
+            None => prompt.push('\\'),
+        }
+    }
+    prompt
 }
 
 #[derive(Debug, Clone)]
