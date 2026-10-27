@@ -351,7 +351,7 @@ fn native_canaries(f: &Fixture) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let bin = f.root.join("native-canaries");
     fs::create_dir(&bin).unwrap();
-    for name in ["pi", "codex", "claude", "grok", "agent", "copilot", "tmux"] {
+    for name in ["pi", "codex", "claude", "grok", "copilot", "tmux"] {
         let path = bin.join(name);
         let log = f.root.join(format!("{name}-executed"));
         // A missing session is a real preflight result, not a synthetic caller tuple.
@@ -377,7 +377,7 @@ fn leader_prompt_unreadable_and_unsupported_leaders_fail_before_native_spawn_or_
     ) {
         return;
     }
-    for provider in ["pi", "claude", "codex", "grok", "cursor", "copilot"] {
+    for provider in ["pi", "claude", "codex", "grok", "copilot"] {
         let f = Fixture::new();
         f.set(SENTINEL);
         let bin = native_canaries(&f);
@@ -398,11 +398,11 @@ fn leader_prompt_unreadable_and_unsupported_leaders_fail_before_native_spawn_or_
         assert_eq!(json(&output)["config_path"], f.path().to_str().unwrap());
         assert!(!String::from_utf8_lossy(&output.stdout).contains(SENTINEL));
         assert!(!f.cwd.join(".team").exists());
-        for name in ["pi", "claude", "codex", "grok", "agent", "copilot"] {
+        for name in ["pi", "claude", "codex", "grok", "copilot"] {
             assert!(!f.root.join(format!("{name}-executed")).exists());
         }
     }
-    for provider in ["cursor", "copilot"] {
+    for provider in ["copilot"] {
         let f = Fixture::new();
         f.set(SENTINEL);
         let bin = native_canaries(&f);

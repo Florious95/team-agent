@@ -52,7 +52,6 @@ case "$name" in
   codex) source_file=$CODEX_CATALOG_FILE ;;
   claude) source_file=$CLAUDE_CATALOG_FILE ;;
   pi) source_file=$PI_CATALOG_FILE ;;
-  agent) source_file=$CURSOR_CATALOG_FILE ;;
   *) exit 64 ;;
 esac
 if [ -f "$source_file" ]; then /bin/cat "$source_file"; fi
@@ -84,7 +83,6 @@ exit "${FAKE_EXIT_CODE:-0}"
         codex_catalog: PathBuf,
         claude_catalog: PathBuf,
         pi_catalog: PathBuf,
-        cursor_catalog: PathBuf,
         stderr_file: PathBuf,
     }
 
@@ -107,7 +105,6 @@ exit "${FAKE_EXIT_CODE:-0}"
                 codex_catalog: root.join("codex-catalog.json"),
                 claude_catalog: root.join("claude-catalog.jsonl"),
                 pi_catalog: root.join("pi-catalog.txt"),
-                cursor_catalog: root.join("cursor-catalog.txt"),
                 stderr_file: root.join("provider-stderr.txt"),
                 root,
                 bin,
@@ -116,15 +113,16 @@ exit "${FAKE_EXIT_CODE:-0}"
                 workspace,
                 trace,
             };
-            for executable in ["codex", "claude", "pi", "agent"] {
+            for executable in ["codex", "claude", "pi"] {
                 fixture.write_executable(executable, FAKE_PROVIDER);
             }
+            fixture.write_executable("agent", r#"#!/bin/sh
+printf '%s\n' retired-entrypoint >> "$TRACE_DIR/agent.calls"
+exit 77
+"#);
             fixture.set_codex(&codex_catalog_text());
             fixture.set_claude(&claude_catalog_text(&claude_rows()));
             fixture.set_pi("provider model\nopenai-codex gpt-5.6-sol\nopenai-codex gpt-5.6-luna\n");
-            fixture.set_cursor(
-                "Available models\ngpt-5.6-luna-high - GPT-5.6 Luna 1M High\nauto - Auto (default)\n",
-            );
             fixture
         }
 
@@ -158,10 +156,6 @@ exit "${FAKE_EXIT_CODE:-0}"
             fs::write(&self.pi_catalog, text).expect("write fake Pi catalog");
         }
 
-        fn set_cursor(&self, text: &str) {
-            fs::write(&self.cursor_catalog, text).expect("write fake Cursor catalog");
-        }
-
         fn run(&self, args: &[&str]) -> Output {
             self.run_with(args, &[])
         }
@@ -179,7 +173,6 @@ exit "${FAKE_EXIT_CODE:-0}"
                 .env("CODEX_CATALOG_FILE", &self.codex_catalog)
                 .env("CLAUDE_CATALOG_FILE", &self.claude_catalog)
                 .env("PI_CATALOG_FILE", &self.pi_catalog)
-                .env("CURSOR_CATALOG_FILE", &self.cursor_catalog)
                 .env("FAKE_STDERR_FILE", &self.stderr_file)
                 // The child must remove this inherited marker only for Claude.
                 .env("CLAUDECODE", "outer-session-sentinel");
@@ -1162,20 +1155,25 @@ exit "${FAKE_EXIT_CODE:-0}"
         let help = fixture.run(&["models", "--help"]);
         assert!(help.status.success(), "models help is available");
         let help = String::from_utf8_lossy(&help.stdout);
-        for provider in ["pi", "cursor_agent", "codex", "claude", "claude_code"] {
+        for provider in ["pi", "cursor", "codex", "claude", "claude_code"] {
             assert!(
                 help.contains(provider),
                 "F14 help must list {provider}: {help}"
             );
         }
-        for alias in ["agent", "cloud"] {
+        // Every Cursor name reads the contract catalog through `cursor-agent`
+        // (absent here), never the retired `agent` entrypoint.
+        for alias in ["cursor_agent", "cursor-agent", "agent"] {
             let out = fixture.run(&["models", "--provider", alias, "--json"]);
-            let err = failed_json(&out, &format!("F14 unsupported legacy alias {alias}"));
-            assert!(err["error"]
-                .as_str()
-                .unwrap()
-                .contains("unsupported model provider"));
+            let err = failed_json(&out, &format!("F14 Cursor name {alias}"));
+            assert_eq!(err["provider"], "cursor", "{alias}");
         }
+        let out = fixture.run(&["models", "--provider", "cloud", "--json"]);
+        let err = failed_json(&out, "F14 unsupported alias cloud");
+        assert!(err["error"]
+            .as_str()
+            .unwrap()
+            .contains("unsupported model provider"));
         assert_eq!(
             fixture.calls_total(),
             1,
@@ -1230,15 +1228,6 @@ exit "${FAKE_EXIT_CODE:-0}"
             "openai-codex/gpt-5.6-sol"
         );
         assert_eq!(pi_filtered["models"][0]["current"], false);
-
-        let cursor = Fixture::new();
-        let cursor_value = successful_json(
-            &cursor.run(&["models", "--provider", "cursor_agent", "--json"]),
-            "F15 Cursor catalog default",
-        );
-        assert_eq!(record(&cursor_value, "auto")["default"], true);
-        assert_eq!(record(&cursor_value, "auto")["current"], Value::Null);
-        assert_eq!(cursor_value["current_role_model"], Value::Null);
 
         let codex = Fixture::new();
         let codex_value = successful_json(
@@ -1333,7 +1322,6 @@ exit "${FAKE_EXIT_CODE:-0}"
             Provider::Codex,
             Provider::Claude,
             Provider::ClaudeCode,
-            Provider::CursorAgent,
         ] {
             let exact_unlisted = "manual-model-id-not-in-discovery-catalog";
             let plan = get_adapter(provider)
@@ -1518,7 +1506,7 @@ exit "${FAKE_EXIT_CODE:-0}"
         let help = fixture.run(&["models", "--help"]);
         assert!(help.status.success());
         let help = String::from_utf8_lossy(&help.stdout);
-        for provider in ["pi", "cursor_agent", "codex", "claude", "claude_code", "grok"] {
+        for provider in ["pi", "cursor", "codex", "claude", "claude_code", "grok"] {
             assert!(
                 help.contains(provider),
                 "F20 registered provider absent from help: {provider}"

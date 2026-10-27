@@ -131,8 +131,8 @@ The default is OFF. `~/.team-agent/argv-routing.json` stores the switch and mapp
 `enable`/`disable` preserve mappings; `set` replaces, `add` appends, and `clear` removes one mapping.
 Commands report both persisted and effective states, including an active environment override.
 
-Provider keys: `claude`, `codex`, `copilot`, `gemini_cli`, `grok`, `cursor_agent`, `pi`.
-Claude/Claude Code share one mapping; `claude_code`/`claude-code` and `agent`/`cursor` are accepted aliases.
+Provider keys: `claude`, `codex`, `copilot`, `gemini_cli`, `grok`, `pi`.
+Claude/Claude Code share one mapping; `claude_code`/`claude-code` are accepted aliases.
 Everything after the first `--` is literal argv data, including `--help`, `--json`, empty strings
 and `{workspace}`; no shell expansion is performed. Arguments are inserted immediately after
 the native executable, before its original arguments. Do not store secrets or override framework-managed

@@ -194,29 +194,29 @@ fn cursor_compiler_preserves_native_id_and_does_not_inherit_team_effort() {
 }
 
 #[test]
-fn mixed_contract_providers_do_not_migrate_legacy_cursor_names_or_state() {
+fn mixed_contract_providers_route_every_cursor_name_without_migrating_state() {
     let (_sandbox, args) = fixture();
     for (name, provider) in [
         ("a-cursor", "cursor"), ("b-kiro", "kiro"), ("c-pi", "pi"),
-        ("d-legacy-cursor", "cursor_agent"), ("e-legacy-agent", "agent"),
+        ("d-cursor-agent", "cursor_agent"), ("e-agent", "agent"), ("f-cursor-agent", "cursor-agent"),
     ] {
         role(&args, name, provider);
     }
     let config = read_team(&args).unwrap().unwrap();
-    assert_eq!(config.roles.len(), 2);
-    assert_eq!(config.members.len(), 5);
+    assert_eq!(config.roles.len(), 5);
+    assert_eq!(config.members.len(), 6);
     for member in &config.members {
-        let expected = if ["cursor", "kiro"].contains(&member.provider.as_str()) {
-            RuntimeFamily::Contract
-        } else {
-            RuntimeFamily::Legacy
-        };
-        assert_eq!(member.runtime, expected, "{}", member.provider);
+        let expected = if member.id == "c-pi" { RuntimeFamily::Legacy } else { RuntimeFamily::Contract };
+        assert_eq!(member.runtime, expected, "{}", member.id);
+        if member.id != "b-kiro" && member.id != "c-pi" {
+            assert_eq!(member.provider, "cursor", "{}", member.id);
+        }
     }
-    for provider in ["cursor_agent", "agent"] {
+    for provider in ["cursor_agent", "cursor-agent", "agent"] {
+        // A declaration selects the leaf; a persisted legacy row is never reclassified.
+        assert!(team_agent::contract_runtime::framework::require_legacy_role(None, Some(provider)).is_err());
         let state = serde_json::json!({"provider":provider,"pane_id":"%0","runtime_family":"legacy"});
         assert!(!team_agent::contract_runtime::framework::is_contract(&state));
-        assert!(team_agent::contract_runtime::framework::require_legacy_role(None, Some(provider)).is_ok());
     }
     let current = serde_json::json!({"provider":"cursor","runtime_family":"contract"});
     assert!(team_agent::contract_runtime::framework::is_contract(&current));
@@ -224,11 +224,14 @@ fn mixed_contract_providers_do_not_migrate_legacy_cursor_names_or_state() {
 }
 
 #[test]
-fn legacy_cursor_only_config_stays_on_legacy_track() {
+fn every_cursor_name_alone_selects_the_contract_leaf() {
     let (_sandbox, args) = fixture();
-    for provider in ["cursor_agent", "agent"] {
+    for provider in ["cursor_agent", "cursor-agent", "agent"] {
         role(&args, "worker", provider);
-        assert!(read_team(&args).unwrap().is_none());
+        let config = read_team(&args).unwrap().unwrap();
+        assert_eq!(config.roles.len(), 1, "{provider}");
+        assert_eq!(config.roles[0].provider.as_str(), "cursor", "{provider}");
+        assert_eq!(config.members[0].runtime, RuntimeFamily::Contract, "{provider}");
     }
     assert!(!args.workspace.join(".team").exists());
 }

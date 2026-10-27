@@ -1067,7 +1067,6 @@ fn provider_name(provider: Provider) -> &'static str {
         Provider::Copilot => "copilot",
         Provider::GeminiCli => "gemini",
         Provider::Grok => "grok",
-        Provider::CursorAgent => "cursor_agent",
         Provider::Pi => "pi",
         Provider::Fake => "fake",
     }

@@ -26,7 +26,8 @@ pub static CURSOR_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         id: "cursor",
         display_name: "Cursor Agent (contract)",
         binary: "cursor-agent",
-        // cursor_agent/agent remain legacy routes; this is not a state migration.
+        // cursor_agent/cursor-agent/agent select this leaf only as declarations
+        // (framework registry); legacy state rows are never reclassified.
         aliases: &[],
         leader: Support::Unverified(UNVERIFIED),
     },

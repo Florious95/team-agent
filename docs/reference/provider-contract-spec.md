@@ -229,7 +229,7 @@ Hook 路由唯一化：P2→H1，P3→H2，P4→H3，P6/P8 的 native UI→H6，
 
 role effort 优先 TEAM；Pi 不继承 TEAM；两者没有就 native default。parse trim 但大小写敏感。`ultra` 含 Codex client delegation，不准降成 max。支持 flag 不证明每模型支持该档。新 Provider 对六档逐项作准入决策；新接入不复制 Gemini 的历史忽略习惯作为缺省。
 
-Codex carrier 为 `-c model_reasoning_effort=LEVEL` 且在 profile config 后，Claude/Grok 为 `--effort`，Pi 为 `--thinking`；Cursor/Gemini 无该 flag。既有 inner 错误保字节：`cursor_agent does not support effort; the Cursor CLI has no --effort flag`、`effort 'ultra' is only supported by codex`、`effort 'max' is only supported by claude/claude_code/codex/pi`。各 CLI/compiler/spec/runtime wrapper、聚合顺序与 raw/trim 仍各有合同，不能只比较 inner 就声称公开错误等价。
+Codex carrier 为 `-c model_reasoning_effort=LEVEL` 且在 profile config 后，Claude/Grok 为 `--effort`，Pi 为 `--thinking`；Cursor/Gemini 无该 flag。Cursor 契约叶以模型 ID 承载 effort，任何 effort 被描述符拒绝。既有 inner 错误保字节：`effort 'ultra' is only supported by codex`、`effort 'max' is only supported by claude/claude_code/codex/pi`。各 CLI/compiler/spec/runtime wrapper、聚合顺序与 raw/trim 仍各有合同，不能只比较 inner 就声称公开错误等价。
 
 Pi 特例保留：compile shape 校验不是 launch exact membership；首次 slash 两边非空不意味着只能一个 slash；内部空格可属于 exact ID；final raw 与 trim 不等要拒绝。非 Pi `validate_model=Ok(true)` 不是强验证；`verify_started_pi_model` 有定义/测试不等生产已用。
 

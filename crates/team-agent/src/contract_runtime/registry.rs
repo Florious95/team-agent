@@ -26,6 +26,12 @@ const DESCRIPTORS: &[&ProviderDescriptor] = &[&KIRO_DESCRIPTOR, &CURSOR_DESCRIPT
 /// whose distinct canonical id is what compiled specs and state then carry, so
 /// legacy readers never mistake a contract seat for a legacy one.
 const OPT_IN: &[(&str, &ProviderDescriptor)] = &[("codex", &CODEX_DESCRIPTOR), ("pi", &PI_DESCRIPTOR)];
+/// Declaration names that select a leaf without opt-in: Cursor's legacy key,
+/// its npm package/public command and its binary. A persisted legacy state row
+/// keeps its key and is never reclassified ([`descriptor`] does not match it).
+const TRANSITION: &[(&str, &ProviderDescriptor)] = &[
+    ("cursor_agent", &CURSOR_DESCRIPTOR), ("cursor-agent", &CURSOR_DESCRIPTOR), ("agent", &CURSOR_DESCRIPTOR),
+];
 
 /// One provider's public command route: the PATH-selected entry the pane execs
 /// by bare name and the native image that route must exec into.
@@ -338,7 +344,9 @@ pub fn descriptor(key: &str) -> Option<&'static ProviderDescriptor> {
 /// shared legacy key selects its leaf only with `contract_runtime: true` and is
 /// otherwise left to the legacy path unchanged (never re-routed).
 pub fn declared(key: &str, contract_runtime: bool) -> Option<&'static ProviderDescriptor> {
-    OPT_IN.iter().find(|(shared, _)| contract_runtime && *shared == key).map(|(_, descriptor)| *descriptor)
+    OPT_IN.iter().find(|(shared, _)| contract_runtime && *shared == key)
+        .or_else(|| TRANSITION.iter().find(|(retired, _)| *retired == key))
+        .map(|(_, descriptor)| *descriptor)
         .or_else(|| descriptor(key))
 }
 
@@ -348,6 +356,7 @@ pub fn declared(key: &str, contract_runtime: bool) -> Option<&'static ProviderDe
 pub fn recognizes(key: &str, contract_runtime: bool) -> bool {
     let key = key.trim();
     (contract_runtime && OPT_IN.iter().any(|(shared, _)| shared.eq_ignore_ascii_case(key)))
+        || TRANSITION.iter().any(|(retired, _)| retired.eq_ignore_ascii_case(key))
         || DESCRIPTORS.iter().any(|descriptor| {
             descriptor.identity.id.eq_ignore_ascii_case(key)
                 || descriptor
@@ -366,11 +375,22 @@ mod tests {
     fn canonical_cursor_does_not_reclassify_legacy_names() {
         assert_eq!(provider("cursor").unwrap(), NativeProvider::Cursor);
         assert_eq!(provider("kiro").unwrap(), NativeProvider::Kiro);
-        for legacy in ["cursor_agent", "agent", "pi", "codex", "grok"] {
+        for legacy in ["pi", "codex", "grok"] {
             assert!(descriptor(legacy).is_none());
             assert!(!recognizes(legacy, false));
             assert!(provider(legacy).is_err());
         }
+        // Every Cursor name declares the leaf; a persisted legacy row keeps its runtime.
+        for name in ["cursor", "cursor_agent", "cursor-agent", "agent"] {
+            assert_eq!(declared(name, false).unwrap().identity.id, "cursor");
+            assert_eq!(declared(name, true).unwrap().identity.id, "cursor");
+        }
+        for legacy in ["cursor_agent", "cursor-agent", "agent"] {
+            assert!(descriptor(legacy).is_none());
+            assert!(provider(legacy).is_err());
+        }
+        assert!(recognizes(" Cursor_Agent ", false));
+        assert!(declared("Cursor_Agent", false).is_none());
         assert_eq!(provider("grok_build").unwrap(), NativeProvider::GrokBuild);
         assert!(recognizes(" Grok_Build ", false));
         assert!(descriptor("Grok_Build").is_none());

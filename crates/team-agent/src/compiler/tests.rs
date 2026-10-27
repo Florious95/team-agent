@@ -7,14 +7,30 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
+#[cfg(unix)]
 #[test]
-fn cursor_effort_is_rejected_by_shared_admission_for_every_level() {
-    for effort in ["low", "medium", "high", "xhigh", "max", "ultra"] {
-        let role = write_tmp("cursor.md", &format!("---\nprovider: cursor_agent\neffort: {effort}\n---\nRole\n"));
+fn every_cursor_provider_name_compiles_to_the_contract_leaf() {
+    for provider in ["cursor", "cursor_agent", "cursor-agent", "agent"] {
+        let role = write_tmp(
+            "cursor.md",
+            &format!("---\nprovider: {provider}\nmodel: gpt-5.6-luna-xhigh\n---\nRole\n"),
+        );
+        let compiled = compile_role_agent(&role, &Value::Map(Vec::new()), "/workspace").unwrap();
+        assert_eq!(
+            compiled.agent.get("provider").and_then(Value::as_str),
+            Some("cursor"),
+            "{provider}"
+        );
+        fs::remove_dir_all(role.parent().unwrap()).unwrap();
+        // The leaf's effort admission applies, not a legacy warning-and-ignore.
+        let role = write_tmp(
+            "cursor.md",
+            &format!("---\nprovider: {provider}\nmodel: gpt-5.6-luna-xhigh\neffort: high\n---\nRole\n"),
+        );
         let error = compile_role_agent(&role, &Value::Map(Vec::new()), "/workspace")
             .err()
-            .expect("Cursor must reject effort before command construction");
-        assert!(error.to_string().contains("cursor_agent does not support effort; the Cursor CLI has no --effort flag"));
+            .expect("Cursor effort is a model ID, never a separate flag");
+        assert!(error.to_string().contains("exact catalog model ID"), "{provider}: {error}");
         fs::remove_dir_all(role.parent().unwrap()).unwrap();
     }
 }

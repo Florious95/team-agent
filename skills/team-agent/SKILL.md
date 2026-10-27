@@ -113,7 +113,7 @@ team-agent route disable
 
 `set` replaces one mapping, `add` appends without deduplication, `clear` removes it; none changes the switch. `enable`/`disable` preserve mappings in `~/.team-agent/argv-routing.json`. `TEAM_AGENT_CLI_ARGV_ROUTING` overrides the switch: `1/true/on`, `0/false/off` (case-insensitive, trimmed); invalid values disable routing. Check `persisted_enabled`, `effective_enabled` and `override_status`.
 
-Keys: `claude`, `codex`, `copilot`, `gemini_cli`, `grok`, `cursor_agent`, `pi`. Claude/Claude Code share `claude`; aliases `claude_code/claude-code`, `agent/cursor` are accepted. Everything after the first `--`, including `--help`, `--json`, empty strings and `{workspace}`, is literal argv. No shell expansion. Do not route secrets or override framework-managed session/MCP/permission flags.
+Keys: `claude`, `codex`, `copilot`, `gemini_cli`, `grok`, `pi`. Claude/Claude Code share `claude`; aliases `claude_code/claude-code` are accepted. Everything after the first `--`, including `--help`, `--json`, empty strings and `{workspace}`, is literal argv. No shell expansion. Do not route secrets or override framework-managed session/MCP/permission flags.
 
 Mappings affect the next actual native spawn, not running/attached processes, dry-run or helper probes. Invalid enabled configuration refuses spawn; an emergency environment OFF avoids reading it, while `route disable` will not overwrite a broken file. Pi `--mode rpc` does not provide an RPC host or replace Team Agent's transport.
 

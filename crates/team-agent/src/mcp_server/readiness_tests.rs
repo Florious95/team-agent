@@ -39,7 +39,7 @@ impl Case {
         assert!(carrier > 1);
         let started = Utc::now();
         let state = json!({"agents": {"worker": {
-            "provider": "cursor_agent", "mcp_config": config,
+            "provider": "grok", "mcp_config": config,
             "spawned_at": (started - chrono::Duration::seconds(10)).to_rfc3339(),
             "pane_id": "%1", "pane_pid": carrier
         }}});
@@ -114,7 +114,7 @@ impl Drop for Case {
 
 #[test]
 fn issue345_missing_mcp_config_does_not_disable_eager_admission() {
-    for provider in ["cursor_agent", "codex", "claude"] {
+    for provider in ["grok", "codex", "claude"] {
         let mut case = Case::new();
         case.state["agents"]["worker"]["provider"] = json!(provider);
         case.state["agents"]["worker"]
@@ -352,7 +352,7 @@ fn config_scope_and_authorized_executable_cannot_be_substituted() {
 fn fake_and_pi_keep_their_existing_non_eager_or_runtime_registry_admission() {
     assert!(!crate::provider::get_adapter(Provider::Fake).requires_worker_mcp_handshake());
     assert!(!crate::provider::get_adapter(Provider::Pi).requires_worker_mcp_handshake());
-    assert!(crate::provider::get_adapter(Provider::CursorAgent).requires_worker_mcp_handshake());
+    assert!(crate::provider::get_adapter(Provider::Grok).requires_worker_mcp_handshake());
     let case = Case::new();
     for provider in ["fake", "pi"] {
         let mut state = case.state.clone();

@@ -21,7 +21,7 @@
 //!   - 只回答「fork 有没有产生一个可读的、不等于源会话的新 backing」，不回答会话内容对不对
 //!   - 不创建/改写 backing(codex 的物化改写在 context_fork/codex.rs，不在本文件)
 //!   - 未证明即 Timeout/Rejected，绝不退化成「假定成功」
-//!   - grok / cursor / gemini / fake 没有可验证 backing，一律直接 Rejected
+//!   - grok / gemini / fake 没有可验证 backing，一律直接 Rejected
 //! maturity: wired
 //! ---
 use std::collections::BTreeMap;
@@ -56,7 +56,7 @@ pub(crate) use outcome::{
 /// purpose: 给出该 provider 等待 fork backing 落盘的收敛预算
 /// params:
 ///   provider: 目标 provider;全枚举穷举，无兜底臂
-/// returns: Claude/ClaudeCode 45s、Codex 10s、其余(Copilot/Grok/CursorAgent/GeminiCli/Fake) 5s
+/// returns: Claude/ClaudeCode 45s、Codex 10s、其余(Copilot/Grok/GeminiCli/Fake) 5s
 /// contract:
 ///   provides:
 ///     - name: context_fork_convergence_deadline
@@ -69,7 +69,7 @@ pub(crate) fn context_fork_convergence_deadline(provider: Provider) -> Duration 
     match provider {
         Provider::Claude | Provider::ClaudeCode => Duration::from_secs(45),
         Provider::Codex => Duration::from_secs(10),
-        Provider::Copilot | Provider::Grok | Provider::CursorAgent | Provider::Pi | Provider::GeminiCli
+        Provider::Copilot | Provider::Grok | Provider::Pi | Provider::GeminiCli
         | Provider::Fake => Duration::from_secs(5),
     }
 }
@@ -253,7 +253,7 @@ fn provider_backing_root(provider: Provider, plan: &CommandPlan) -> PathBuf {
         Provider::Codex => home.join(".codex").join("sessions"),
         Provider::Copilot => home.join(".copilot").join("session-state"),
         Provider::Pi => PathBuf::new(),
-        Provider::Grok | Provider::CursorAgent | Provider::GeminiCli | Provider::Fake => home,
+        Provider::Grok | Provider::GeminiCli | Provider::Fake => home,
     }
 }
 

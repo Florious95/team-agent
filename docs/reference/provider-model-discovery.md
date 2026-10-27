@@ -7,7 +7,7 @@
 | `--provider` value | Native source | Canonical result ID |
 |---|---|---|
 | `pi` | `pi --list-models` | Pi's exact `provider/model` ID |
-| `cursor_agent` | `agent --list-models` | Cursor catalog ID |
+| `cursor` (also `cursor-agent`, `agent`, `cursor_agent`) | `cursor-agent --list-models` through the contract runtime | Cursor catalog ID |
 | `codex` | `codex debug models` | Codex `slug` |
 | `claude` | Claude CLI SDK stream-json `initialize` response | selector `resolvedModel` |
 | `claude_code` | same Claude source as `claude` | selector `resolvedModel`; output provider remains `claude_code` |

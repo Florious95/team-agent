@@ -27,5 +27,4 @@ pub(crate) mod copilot;
 pub(crate) mod copilot_fork;
 pub(crate) mod fake;
 pub(crate) mod grok;
-pub(crate) mod cursor_agent;
 pub(crate) mod pi;

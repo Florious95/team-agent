@@ -622,7 +622,6 @@ fn h7_native_delimiter_help_preserves_existing_provider_rules_and_raw_order() {
         ("claude", "claude"),
         ("copilot", "copilot"),
         ("grok", "grok"),
-        ("cursor", "agent"),
     ] {
         let ws = env.workspace(wrapper);
         let socket = hermetic::short_tmux_socket("286-native");

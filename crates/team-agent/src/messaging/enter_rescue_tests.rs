@@ -474,7 +474,7 @@ fn current_canonical_message_and_original_owner_recipient_remain_required() {
                     serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
                 match field {
                     "pid" => state["agents"]["worker"]["pane_pid"] = 3.into(),
-                    "provider" => state["agents"]["worker"]["provider"] = "cursor_agent".into(),
+                    "provider" => state["agents"]["worker"]["provider"] = "grok".into(),
                     "session" => state["session_name"] = "other".into(),
                     _ => state["agents"]["worker"]["window"] = "other".into(),
                 };

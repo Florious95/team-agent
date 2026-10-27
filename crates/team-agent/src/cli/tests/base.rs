@@ -730,7 +730,7 @@ fn cmd_leader_passthrough_help_is_pure_human_guidance() {
     let env = crate::cli::hermetic_test_support::HermeticTestEnv::enter("launcher-help-unit");
     let cwd = env.workspace("empty");
     let tools = [
-        "pi", "codex", "claude", "copilot", "grok", "agent", "cursor",
+        "pi", "codex", "claude", "copilot", "grok",
     ];
     let bin = env.root().join("canaries");
     std::fs::create_dir(&bin).unwrap();
@@ -744,7 +744,7 @@ fn cmd_leader_passthrough_help_is_pure_human_guidance() {
         }
         env.with_env("PATH", &bin.to_string_lossy())
     };
-    for provider in ["pi", "codex", "claude", "copilot", "grok", "cursor"] {
+    for provider in ["pi", "codex", "claude", "copilot", "grok"] {
         for alias in ["-h", "--help"] {
             let result = cmd_leader_passthrough(provider, &[alias.into()], &cwd).unwrap();
             assert_eq!(result.exit, ExitCode::Ok);
@@ -780,19 +780,12 @@ fn cmd_leader_passthrough_maps_copilot_provider() {
 }
 
 #[test]
-fn cmd_leader_passthrough_maps_grok_and_cursor_not_claude() {
+fn cmd_leader_passthrough_maps_grok_and_rejects_retired_cursor_names() {
     assert_eq!(
         leader_passthrough_provider("grok"),
         Some(crate::model::enums::Provider::Grok)
     );
-    assert_eq!(
-        leader_passthrough_provider("cursor"),
-        Some(crate::model::enums::Provider::CursorAgent)
-    );
-    assert_ne!(
-        leader_passthrough_provider("cursor"),
-        Some(crate::model::enums::Provider::ClaudeCode)
-    );
+    assert_eq!(leader_passthrough_provider("cursor"), None);
     assert_eq!(leader_passthrough_provider("agent"), None);
     assert_eq!(leader_passthrough_provider("cursor_agent"), None);
     assert_eq!(leader_passthrough_provider("not-a-passthrough"), None);
