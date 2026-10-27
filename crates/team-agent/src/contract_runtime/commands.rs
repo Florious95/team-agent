@@ -1,9 +1,14 @@
 //! Public lifecycle dispatch for contract seats. A private native pane is never
 //! operated through the legacy workspace socket or provider-enum fallback.
 use std::path::Path;
+use std::time::Duration;
 
 use serde_json::{json, Value};
-use team_agent_contract::contract::types::SeatId;
+use team_agent_contract::contract::delivery::InputSurface;
+use team_agent_contract::contract::probe::{PaneReadyEvidence, Probe, ProbeOutcome};
+use team_agent_contract::contract::types::{Digest, OperationId, SeatId};
+use team_agent_contract::host::{clock::RealClock, process::{sample_process, ProcessState}};
+use team_agent_contract::orchestration::physical::{PhysicalRuntime, Registration};
 use team_agent_contract::orchestration::store::{Outcome, SeatStatus};
 
 use crate::cli::CliError;
@@ -12,7 +17,7 @@ use crate::model::ids::AgentId;
 use crate::state::repository::{StateRepository, StateWriteIntent};
 use crate::state::selector::{resolve_active_team_readonly, SelectedTeam, SelectorMode};
 
-use super::{backend::{self, Backend, BackendError}, config, framework};
+use super::{backend::{self, Backend, BackendError}, config, framework, registry};
 
 fn error(error: impl std::fmt::Display) -> CliError {
     CliError::Runtime(error.to_string())
@@ -127,8 +132,12 @@ pub fn start_agent(
             backend::preflight(&config).map_err(error)?;
         }
         let before = if unstarted { None } else {
-            Backend::open_readonly(&selected.run_workspace, &selected.team_key).map_err(error)?
-                .store.creation_receipt(id, None).map_err(error)?
+            let backend = Backend::open_readonly(&selected.run_workspace, &selected.team_key).map_err(error)?;
+            // A retired generation is history, not a session this start resumes.
+            match backend.store.creation_receipt(id, None).map_err(error)? {
+                Some(record) if backend.store.retired(&record.target.identity).map_err(error)? => None,
+                other => other,
+            }
         };
         crate::lifecycle::role_config::commit_contract_role(&source, &previous, &next).map_err(error)?;
         let receipt = backend::start(&selected.run_workspace, &selected.team_key, role, &config.members).map_err(error)?.1;
@@ -254,6 +263,249 @@ pub fn stop_agent(
     })
 }
 
+/// What remove/reset may rely on. Idle needs positive evidence; anything the
+/// framework cannot prove idle is never treated as idle.
+#[derive(Debug, PartialEq, Eq)]
+enum Activity {
+    Stopped,
+    Exited,
+    Idle,
+    Working(String),
+    Unverified(String),
+}
+
+// Two captures this far apart straddle a one-second elapsed counter, and a
+// streamed reply that hides a provider's busy marker still changes the frame.
+const SETTLE: Duration = Duration::from_millis(1500);
+const REMOVE_WORKING: &str = "agent is currently working; stop the agent before removing it";
+const RESET_WORKING: &str =
+    "agent is currently working; wait for completion or stop the agent before resetting session";
+
+/// Read-only: a held seat lease, then the seat's own pane read twice, then
+/// the lease and queue again so a delivery between the captures still counts.
+fn activity(workspace: &Path, team: &str, id: &SeatId) -> Result<Activity, CliError> {
+    let backend = Backend::open_readonly(workspace, team).map_err(error)?;
+    let busy = || Activity::Working("a lifecycle operation or message delivery holds the seat".into());
+    // An interrupted startup holds the lease before its seat row is published.
+    if backend.store.leased(id).map_err(error)? {
+        return Ok(busy());
+    }
+    let Some(seat) = backend.store.seat(id).map_err(error)? else {
+        return Ok(Activity::Stopped);
+    };
+    if seat.status == SeatStatus::Stopped {
+        return Ok(Activity::Stopped);
+    }
+    let Some(target) = seat.physical.as_ref() else {
+        return Ok(Activity::Unverified("no native target is recorded".into()));
+    };
+    match sample_process(&target.process) {
+        ProcessState::Alive => {}
+        ProcessState::Exited | ProcessState::Replaced => return Ok(Activity::Exited),
+        ProcessState::Unknown(failure) => {
+            return Ok(Activity::Unverified(format!("native process state is unknown: {failure}")))
+        }
+    }
+    // Starting stays until the first delivery; only the surface decides then.
+    if seat.status == SeatStatus::Unknown {
+        return Ok(Activity::Unverified("native seat is quarantined after an uncertain native effect".into()));
+    }
+    let selected = registry::provider(seat.provider.as_str()).map_err(error)?;
+    let adapter = backend::adapter(&backend.binding, &seat.identity, &seat.provider).map_err(error)?;
+    let hooks = adapter.hooks();
+    let clock = RealClock::new();
+    let nonce = backend.store.propose_identity(id).map_err(error)?.instance;
+    let physical = PhysicalRuntime::new(
+        Registration {
+            descriptor: selected.descriptor(),
+            hooks: &hooks,
+            controls: selected.controls(),
+            startup: selected.startup(),
+            session_panel: selected.session_panel(),
+        },
+        backend::settings(&backend.binding, selected),
+        OperationId::new(format!("observe-{}", nonce.as_str())).map_err(error)?,
+        &clock,
+    ).map_err(error)?;
+    let capture = || physical.surface(&seat)
+        .map_err(|failure| Activity::Unverified(format!("native surface capture failed: {failure}")));
+    let first = match capture() {
+        Ok(sample) => sample,
+        Err(unverified) => return Ok(unverified),
+    };
+    std::thread::sleep(SETTLE);
+    let observed = match capture() {
+        Ok(second) => classify(&first, &second),
+        Err(unverified) => unverified,
+    };
+    if observed == Activity::Idle {
+        if backend.store.leased(id).map_err(error)? {
+            return Ok(busy());
+        }
+        if backend.store.has_queued_for(&seat.identity).map_err(error)? {
+            return Ok(Activity::Working("a queued message is about to be delivered".into()));
+        }
+    }
+    Ok(observed)
+}
+
+fn classify(
+    first: &(Probe<PaneReadyEvidence>, Digest),
+    second: &(Probe<PaneReadyEvidence>, Digest),
+) -> Activity {
+    let read = |sample: &(Probe<PaneReadyEvidence>, Digest)| match &sample.0.outcome {
+        ProbeOutcome::Observed(pane) => Some(pane.surface),
+        _ => None,
+    };
+    let (before, after) = (read(first), read(second));
+    if let Some(busy) = [before, after].into_iter().flatten().find(|surface| matches!(surface,
+        InputSurface::Busy | InputSurface::Queued | InputSurface::ComposerContainsPaste | InputSurface::NativeAccepted))
+    {
+        return Activity::Working(format!("native surface reads {busy:?}"));
+    }
+    match (before, after) {
+        (Some(InputSurface::ComposerReady), Some(InputSurface::ComposerReady)) if first.1 == second.1 => Activity::Idle,
+        (Some(InputSurface::ComposerReady), Some(InputSurface::ComposerReady)) => {
+            Activity::Working("native output changed between two captures".into())
+        }
+        _ => Activity::Unverified(format!("native surface reads {before:?} then {after:?}")),
+    }
+}
+
+fn refused(agent: &str, reason: &str, error: &str, evidence: Option<String>, action: &str) -> Value {
+    json!({"ok":false,"agent_id":agent,"status":"refused","runtime":"contract","reason":reason,
+        "error":error,"evidence":evidence,"action":action})
+}
+
+fn stop_seat(selected: &SelectedTeam, id: &SeatId) -> Result<OperationId, CliError> {
+    let receipt = backend::stop(&selected.run_workspace, &selected.team_key, id).map_err(error)?;
+    check_record(&receipt)?;
+    Ok(receipt.id)
+}
+
+/// A working seat is never removed, even with --force. A stopped seat needs
+/// only --confirm; an idle live seat also needs --force and is stopped first.
+pub fn remove_agent(
+    workspace: &Path,
+    team: Option<&str>,
+    agent: &str,
+    from_spec: bool,
+    confirm: bool,
+    force: bool,
+) -> Result<Option<Value>, CliError> {
+    with_agent(workspace, team, agent, "remove-agent", |selected, id| {
+        if !confirm {
+            return Ok(refused(agent, "confirm_required", "remove-agent requires --confirm", None, "rerun with --confirm"));
+        }
+        let row = selected.state.get("agents").and_then(|agents| agents.get(agent))
+            .ok_or(BackendError::Metadata).map_err(error)?;
+        let agent_id = AgentId::new(agent);
+        // Every shared-record input resolves before the native seat is touched.
+        crate::lifecycle::restart::remove::preflight_contract_removal(
+            &selected.run_workspace, &agent_id, Some(&selected.team_key),
+        ).map_err(error)?;
+        let mut stopped = None;
+        if !framework::is_paused_unstarted(row) {
+            match activity(&selected.run_workspace, &selected.team_key, id)? {
+                Activity::Stopped => {}
+                Activity::Working(evidence) => return Ok(refused(agent, "agent_working", REMOVE_WORKING,
+                    Some(evidence), "wait for the agent to finish, or stop it, then rerun remove-agent")),
+                Activity::Unverified(evidence) => return Ok(refused(agent, "agent_activity_unverified",
+                    "agent activity could not be verified idle; stop the agent before removing it",
+                    Some(evidence), "stop the agent, then rerun remove-agent")),
+                Activity::Idle if !force => return Ok(refused(agent, "force_required",
+                    "agent is running; remove-agent requires --force", None,
+                    "rerun with --force to stop and remove the running agent")),
+                Activity::Idle | Activity::Exited => stopped = Some(stop_seat(selected, id)?),
+            }
+            // The native identity ends before the shared records: a failure
+            // below leaves a row a rerun removes, never a resumable old seat.
+            backend::retire(&selected.run_workspace, &selected.team_key, id).map_err(error)?;
+        }
+        let report = crate::lifecycle::restart::remove::remove_contract_records_locked(
+            &selected.run_workspace, &agent_id, from_spec, force, stopped.is_some(),
+            Some(&selected.team_key),
+        ).map_err(error)?;
+        Ok(json!({"ok":true,"agent_id":agent,"status":"removed","runtime":"contract",
+            "stopped":stopped.is_some(),"operation":stopped,"report":format!("{report:?}")}))
+    })
+}
+
+/// Discards the native session only when the seat is provably not working,
+/// then starts the same seat ID on a fresh generation and session.
+pub fn reset_agent(
+    workspace: &Path,
+    team: Option<&str>,
+    agent: &str,
+    discard_session: bool,
+) -> Result<Option<Value>, CliError> {
+    with_agent(workspace, team, agent, "reset-agent", |selected, id| {
+        if !discard_session {
+            return Ok(json!({"ok":false,"agent_id":agent,"status":"refused","runtime":"contract",
+                "reason":"discard_session_required"}));
+        }
+        let row = selected.state.get("agents").and_then(|agents| agents.get(agent))
+            .ok_or(BackendError::Metadata).map_err(error)?;
+        let config = framework::team_config(&selected.run_workspace, &selected.team_dir, &selected.team_key)
+            .map_err(error)?.ok_or_else(|| error("contract role no longer configured"))?;
+        let role = config.roles.iter().find(|role| &role.id == id)
+            .ok_or_else(|| error("contract role no longer configured"))?;
+        if row.get("provider").and_then(Value::as_str) != Some(role.provider.as_str()) {
+            return Err(error("provider change requires a new seat identity"));
+        }
+        if role.paused {
+            return Ok(json!({"ok":false,"agent_id":agent,"status":"paused","reason":"agent_paused","runtime":"contract"}));
+        }
+        // Pure admission of the replacement precedes any stop or retirement.
+        let mut admission = config.clone();
+        admission.roles.retain(|candidate| &candidate.id == id);
+        backend::preflight(&admission).map_err(error)?;
+        let mut stopped = None;
+        let mut discarded = None;
+        if !framework::is_paused_unstarted(row) {
+            // The fresh start below must not fail its candidate fence after the
+            // old seat is already gone.
+            backend::require_candidate(&Backend::open_readonly(&selected.run_workspace, &selected.team_key)
+                .map_err(error)?.binding).map_err(error)?;
+            match activity(&selected.run_workspace, &selected.team_key, id)? {
+                Activity::Stopped => {}
+                Activity::Working(evidence) => return Ok(refused(agent, "agent_working", RESET_WORKING,
+                    Some(evidence), "wait for the agent to finish, or stop it, then rerun reset-agent")),
+                Activity::Unverified(evidence) => return Ok(refused(agent, "agent_activity_unverified",
+                    "agent activity could not be verified idle; wait for completion or stop the agent before resetting session",
+                    Some(evidence), "stop the agent, then rerun reset-agent")),
+                Activity::Idle | Activity::Exited => stopped = Some(stop_seat(selected, id)?),
+            }
+            discarded = backend::retire(&selected.run_workspace, &selected.team_key, id).map_err(error)?
+                .and_then(|seat| seat.session).map(|session| session.native_session);
+        }
+        // The row stops naming the retired incarnation. If the fresh start
+        // below fails, this unbound stopped seed is skipped by team restart
+        // and admitted fresh by a later start.
+        StateRepository::new(&selected.run_workspace).commit(
+            StateWriteIntent::StartAgent { team_key: &selected.team_key, agent_id: agent },
+            |state| {
+                if let Some(row) = state.get_mut("agents").and_then(|agents| agents.get_mut(agent)).and_then(Value::as_object_mut) {
+                    for key in ["contract_scope", "contract_instance", "generation", "session_id"] {
+                        row.insert(key.into(), Value::Null);
+                    }
+                    row.insert("status".into(), json!("stopped"));
+                }
+            },
+        ).map_err(error)?;
+        let projection = framework::start_configured(&selected.run_workspace, &selected.team_dir, &selected.team_key, id)?;
+        let coordinator = crate::coordinator::start_coordinator_with_team(
+            &crate::coordinator::WorkspacePath::new(selected.run_workspace.clone()), Some(&selected.team_key),
+        ).map_err(error)?;
+        Ok(json!({"ok":coordinator.ok,"agent_id":agent,"status":"reset","runtime":"contract",
+            "start_mode":"fresh","stopped":stopped.is_some(),"operation":stopped,
+            "discarded_session_id":discarded,"session_id":projection.get("session_id"),
+            "new_session_id":projection.get("session_id"),"generation":projection.get("generation"),
+            "coordinator":crate::lifecycle::coordinator_start_summary_value(
+                &crate::lifecycle::CoordinatorStartSummary::from_start_report(&coordinator))}))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     // Assembly guard, not a substitute for the real shared-session restart/
@@ -336,5 +588,52 @@ mod tests {
         let error = checked_projection(&record, || Err(super::error(BackendError::Metadata)))
             .unwrap_err().to_string();
         assert!(error.contains("metadata is invalid"));
+    }
+
+    fn surface(surface: Option<InputSurface>, text: &[u8]) -> (Probe<PaneReadyEvidence>, Digest) {
+        let scope = team_agent_contract::contract::probe::EvidenceScope {
+            identity: receipt(Outcome::Committed).target.identity, endpoint: "fixture".into(),
+            pane: "%0".into(), binding: "fixture".into(), session: None, sequence: 1,
+            observed_at: Duration::ZERO, valid_for: Duration::from_secs(2), source: "fixture".into(),
+        };
+        let outcome = match surface {
+            Some(surface) => ProbeOutcome::Observed(PaneReadyEvidence { profile_id: "fixture".into(), surface }),
+            None => ProbeOutcome::Pending { deadline: Duration::ZERO },
+        };
+        (Probe { scope, outcome }, team_agent_contract::host::digest(text))
+    }
+
+    #[test]
+    fn working_guard_calls_a_seat_idle_only_on_two_still_composer_ready_captures() {
+        let ready = surface(Some(InputSurface::ComposerReady), b"idle");
+        assert_eq!(classify(&ready, &ready.clone()), Activity::Idle);
+        // A streamed reply can hide the busy marker, but it still moves the frame.
+        assert!(matches!(classify(&ready, &surface(Some(InputSurface::ComposerReady), b"idle, then more")),
+            Activity::Working(_)));
+        for busy in [InputSurface::Busy, InputSurface::Queued, InputSurface::ComposerContainsPaste,
+            InputSurface::NativeAccepted]
+        {
+            assert!(matches!(classify(&ready, &surface(Some(busy), b"idle")), Activity::Working(_)), "{busy:?}");
+            assert!(matches!(classify(&surface(Some(busy), b"x"), &surface(None, b"x")), Activity::Working(_)),
+                "{busy:?}");
+        }
+        for other in [None, Some(InputSurface::Starting), Some(InputSurface::ShellOrUnknown),
+            Some(InputSurface::StartupRiskWarning), Some(InputSurface::Fault)]
+        {
+            assert!(matches!(classify(&ready, &surface(other, b"idle")), Activity::Unverified(_)), "{other:?}");
+            assert!(matches!(classify(&surface(other, b"idle"), &ready), Activity::Unverified(_)), "{other:?}");
+        }
+    }
+
+    #[test]
+    fn remove_and_reset_route_contract_seats_before_the_legacy_refusal() {
+        let cli = include_str!("../cli/mod.rs");
+        for (entry, native, gate) in [
+            ("pub fn remove_agent(", "contract_runtime::commands::remove_agent(", "\"remove-agent\","),
+            ("pub fn reset_agent(", "contract_runtime::commands::reset_agent(", "\"reset-agent\","),
+        ] {
+            let body = cli.split_once(entry).unwrap().1;
+            assert!(body.find(native).unwrap() < body.find(gate).unwrap(), "{entry}");
+        }
     }
 }

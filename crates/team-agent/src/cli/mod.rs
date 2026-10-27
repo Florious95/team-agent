@@ -3414,6 +3414,12 @@ pub mod lifecycle_port {
         discard_session: bool,
         team: Option<&str>,
     ) -> Result<Value, CliError> {
+        #[cfg(unix)]
+        if let Some(receipt) =
+            crate::contract_runtime::commands::reset_agent(workspace, team, agent, discard_session)?
+        {
+            return Ok(receipt);
+        }
         let agent_id = crate::model::ids::AgentId::new(agent);
         #[cfg(unix)]
         crate::contract_runtime::framework::require_legacy_lifecycle(
@@ -3602,6 +3608,12 @@ pub mod lifecycle_port {
         force: bool,
         team: Option<&str>,
     ) -> Result<Value, CliError> {
+        #[cfg(unix)]
+        if let Some(receipt) = crate::contract_runtime::commands::remove_agent(
+            workspace, team, agent, from_spec, confirm, force,
+        )? {
+            return Ok(receipt);
+        }
         let agent_id = crate::model::ids::AgentId::new(agent);
         #[cfg(unix)]
         crate::contract_runtime::framework::require_legacy_lifecycle(

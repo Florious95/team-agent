@@ -98,7 +98,7 @@ team-agent start reviewer --effort high --bypass false
 
 The Pi/false example above still requires the user's explicit choices. File/CLI conflicts are rejected before writing or startup. Omitted settings/body are preserved; `--prompt` replaces the permanent role body, not a one-time task. Stop a running worker before changing settings or instructions. Provider changes are refused. Startup failure restores role/spec bytes and reports failure, not an applied update.
 
-Use `agent add/remove/reset/clone/fork` only for those explicit operations. Reset needs intentional approval and `--discard-session`; fork requires `--as NEW_ID`, and `--in-place` is not supported. See [the operator reference](references/team-agent-operator.md) for capability, profile, force and import boundaries. Never put secrets in role text or copy authentication from another directory.
+Use `agent add/remove/reset/clone/fork` only for those explicit operations. Reset needs intentional approval and `--discard-session`. Remove and reset refuse a seat that is still working: wait for it or `stop` it first (remove also needs `--force` for a running idle seat). Fork requires `--as NEW_ID`, and `--in-place` is not supported. See [the operator reference](references/team-agent-operator.md) for capability, profile, force and import boundaries. Never put secrets in role text or copy authentication from another directory.
 
 ## Optional native CLI argv routing
 

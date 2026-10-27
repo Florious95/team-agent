@@ -577,6 +577,8 @@ fn existing_start(backend: &Backend, seat: &SeatId) -> Result<Option<ExistingSta
         return match backend.store.creation_receipt(seat, None)? {
             None => Ok(None),
             Some(record) if record.outcome == Outcome::Compensated => Ok(None),
+            // remove/reset ended this identity explicitly; the next start is fresh.
+            Some(record) if backend.store.retired(&record.target.identity)? => Ok(None),
             Some(_) => Err(Error::Fence.into()),
         };
     };
@@ -1178,6 +1180,16 @@ impl OwnedIo for NoNewIo {
     }
 }
 
+/// Retire a stopped seat's current identity. None: the store holds no seat
+/// for this ID (never started, or already retired).
+pub(crate) fn retire(workspace: &Path, team: &str, seat: &SeatId) -> Result<Option<SeatRecord>, BackendError> {
+    let mut backend = Backend::open(workspace, team)?;
+    let Some(current) = backend.store.seat(seat)? else {
+        return Ok(None);
+    };
+    Ok(Some(backend.store.retire(&current.identity)?))
+}
+
 pub fn stop(workspace: &Path, team: &str, seat: &SeatId) -> Result<OperationRecord, BackendError> {
     let mut backend = Backend::open(workspace, team)?;
     let target = backend
@@ -1375,6 +1387,30 @@ mod tests {
             else { assert!(result.unwrap().is_none()); }
             assert_eq!(backend.store.propose_identity(&fixture.identity.seat).unwrap().generation, Generation(2));
         }
+    }
+
+    #[test]
+    fn retired_identity_lets_its_seat_id_start_fresh_and_a_live_seat_never_retires() {
+        {
+            let mut fixture = RoleFixture::new();
+            let backend = fixture.canonical(SeatStatus::Ready, Phase::F5Receipt, Outcome::Committed, None);
+            let mut writer = ContractStore::open(&fixture.binding.transport_root,
+                fixture.binding.scope.clone(), &fixture.binding.endpoint).unwrap();
+            assert!(writer.retire(&fixture.identity).is_err());
+            assert!(matches!(existing_start(&backend, &fixture.identity.seat).unwrap(),
+                Some(ExistingStart::Committed(_))));
+        }
+        let mut fixture = RoleFixture::new();
+        let backend = fixture.canonical(SeatStatus::Stopped, Phase::F5Receipt, Outcome::Committed, None);
+        assert!(matches!(existing_start(&backend, &fixture.identity.seat).unwrap(),
+            Some(ExistingStart::Resume(_))));
+        let mut writer = ContractStore::open(&fixture.binding.transport_root,
+            fixture.binding.scope.clone(), &fixture.binding.endpoint).unwrap();
+        assert_eq!(writer.retire(&fixture.identity).unwrap().identity, fixture.identity);
+        // Never a resume of the retired session, and never the missing-seat fence.
+        assert!(existing_start(&backend, &fixture.identity.seat).unwrap().is_none());
+        assert!(seat_unclaimed(&backend, &fixture.identity.seat).unwrap());
+        assert_eq!(backend.store.propose_identity(&fixture.identity.seat).unwrap().generation, Generation(2));
     }
 
     #[test]

@@ -653,6 +653,135 @@ fn remove_agent_at_paths(
     }
 }
 
+struct ContractRemovalInputs {
+    paths: LifecyclePaths,
+    team: Option<String>,
+    transport: crate::tmux_backend::TmuxBackend,
+    state: serde_json::Value,
+    spec: YamlValue,
+    team_key: String,
+}
+
+impl ContractRemovalInputs {
+    fn resolve(workspace: &Path, agent_id: &AgentId, team: Option<&str>) -> Result<Self, LifecycleError> {
+        let paths = lifecycle_paths(workspace, team)?;
+        let team = paths.canonical_team(team).map(str::to_string);
+        let transport = paths.tmux_backend()?;
+        let state = resolve_team_scoped_state_or_refuse(&paths.run_workspace, team.as_deref())?;
+        crate::lifecycle::launch::ensure_owner_allowed_for_state(&state, Some(agent_id))?;
+        let spec = load_team_spec(&paths.spec_workspace)?;
+        let team_key = state
+            .get("active_team_key")
+            .and_then(serde_json::Value::as_str)
+            .filter(|key| !key.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| crate::state::projection::team_state_key(&state));
+        Ok(Self { paths, team, transport, state, spec, team_key })
+    }
+
+    fn refs(&self) -> LifecyclePathRefs<'_> {
+        LifecyclePathRefs {
+            run_workspace: &self.paths.run_workspace,
+            spec_workspace: &self.paths.spec_workspace,
+        }
+    }
+
+    fn rollback(&self, agent_id: &AgentId) -> Result<RemoveRollback, LifecycleError> {
+        RemoveRollback::capture(
+            &self.paths.run_workspace,
+            &self.paths.spec_workspace,
+            &self.spec,
+            &self.state,
+            &self.team_key,
+            agent_id,
+        )
+    }
+}
+
+/// ---
+/// purpose: 契约席位摘除前的只读预检；在原生席位停机或退役之前，确认逻辑摘除所需输入都能解析
+/// errors: 选不到 team、owner 门不过、spec 缺失或摘除后 spec 校验不过时返回 LifecycleError
+/// ---
+/// Deterministic failures surface while the native seat is still intact.
+pub(crate) fn preflight_contract_removal(
+    workspace: &Path,
+    agent_id: &AgentId,
+    team: Option<&str>,
+) -> Result<(), LifecycleError> {
+    let inputs = ContractRemovalInputs::resolve(workspace, agent_id, team)?;
+    inputs.rollback(agent_id)?;
+    let removed = spec_without_agent(&inputs.spec, agent_id);
+    if should_validate_removed_spec(&removed, &inputs.refs()) {
+        crate::model::spec::validate_spec(&removed, &inputs.paths.run_workspace)
+            .map_err(|e| LifecycleError::Compile(e.to_string()))?;
+    }
+    Ok(())
+}
+
+/// ---
+/// purpose: 契约席位的逻辑摘除；原生 store 的停机与退役已由调用方在同一把生命周期锁下完成
+/// returns: 摘除结果
+/// errors: 选不到 team、owner 门不过或写盘失败时返回 LifecycleError，并按快照回滚
+/// ---
+/// A contract seat has no workspace pane to resolve, so no legacy transport
+/// identity is consulted. Only the shared logical records are removed.
+pub(crate) fn remove_contract_records_locked(
+    workspace: &Path,
+    agent_id: &AgentId,
+    from_spec: bool,
+    force: bool,
+    stopped: bool,
+    team: Option<&str>,
+) -> Result<RemoveAgentOutcome, LifecycleError> {
+    let inputs = ContractRemovalInputs::resolve(workspace, agent_id, team)?;
+    let rollback = inputs.rollback(agent_id)?;
+    let refs = inputs.refs();
+    let team = inputs.team.as_deref();
+    let result = remove_agent_inner(
+        &refs,
+        agent_id,
+        &inputs.spec,
+        inputs.state.clone(),
+        None,
+        &inputs.team_key,
+        false,
+        team,
+        &inputs.transport,
+    );
+    match result {
+        Ok(success) => {
+            write_remove_complete_event(
+                refs.run_workspace,
+                agent_id,
+                from_spec,
+                force,
+                stopped,
+                success.role_file_removed,
+                success.cleared_locations,
+            )?;
+            Ok(success.outcome)
+        }
+        Err(error) => {
+            let restore_errors =
+                rollback.restore(refs.run_workspace, refs.spec_workspace, team, &inputs.transport);
+            let rollback_ok = restore_errors.is_empty();
+            let _ = write_remove_rollback_events(RemoveRollbackEvent {
+                agent_id,
+                workspace: refs.run_workspace,
+                from_spec,
+                force,
+                stopped,
+                error: &error,
+                rollback_ok,
+                restore_errors: &restore_errors,
+            });
+            Err(LifecycleError::StatePersist(format!(
+                "remove-agent failed for {agent_id}: {error}; rollback_ok={rollback_ok}"
+            )))
+        }
+    }
+}
+
 fn remove_agent_inner(
     paths: &LifecyclePathRefs<'_>,
     agent_id: &AgentId,

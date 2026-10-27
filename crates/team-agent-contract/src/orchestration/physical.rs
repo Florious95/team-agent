@@ -109,6 +109,35 @@ impl<'a> PhysicalRuntime<'a> {
     /// never upgrades server writes into a native client binding.
     pub fn readiness(&self, seat: &SeatRecord) -> Result<ReadinessSample, Error> {
         let target = self.target(seat)?;
+        let (pane, _) = self.surface(seat)?;
+        let protocol = self.protocol.clone().unwrap_or_else(|| {
+            collect_protocol(
+                target,
+                &seat.identity.instance,
+                &seat.server_key,
+                &[],
+                self.clock.now(),
+                self.settings.freshness,
+            )
+        });
+        Ok(ReadinessSample {
+            process: collect_process(target, self.clock, self.settings.freshness),
+            pane,
+            binding: protocol.binding,
+            server: protocol.server,
+            minimum_sequence: 0,
+            now: self.clock.now(),
+        })
+    }
+    /// One fresh H6 reading of the seat's own pane plus a digest of the
+    /// captured text, so a caller can tell a changing frame from a still one.
+    /// Read-only: no key, lease or delivery readiness comes from it.
+    pub fn surface(
+        &self,
+        seat: &SeatRecord,
+    ) -> Result<(crate::contract::probe::Probe<crate::contract::probe::PaneReadyEvidence>, Digest), Error>
+    {
+        let target = self.target(seat)?;
         let deadline = self.deadline()?;
         let mut host = self.reopen(target, deadline)?;
         let capture = host
@@ -135,24 +164,7 @@ impl<'a> PhysicalRuntime<'a> {
             .hooks
             .interaction
             .require("H6 Interaction")?;
-        let protocol = self.protocol.clone().unwrap_or_else(|| {
-            collect_protocol(
-                target,
-                &seat.identity.instance,
-                &seat.server_key,
-                &[],
-                self.clock.now(),
-                self.settings.freshness,
-            )
-        });
-        Ok(ReadinessSample {
-            process: collect_process(target, self.clock, self.settings.freshness),
-            pane: collect_pane(&frame, *interaction),
-            binding: protocol.binding,
-            server: protocol.server,
-            minimum_sequence: 0,
-            now: self.clock.now(),
-        })
+        Ok((collect_pane(&frame, *interaction), digest(frame.text.as_bytes())))
     }
     /// Current registry capture, not a server-side tools/list inference. The
     /// caller serializes this with its seat lifecycle/outbox owner.
