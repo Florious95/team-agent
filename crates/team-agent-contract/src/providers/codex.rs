@@ -1,6 +1,6 @@
-//! Codex CLI contract leaf, canonical key `codex_tui`. The legacy `codex`
-//! worker, leader and app-server keep their own path: a role declaring `codex`
-//! selects this leaf only with `contract_runtime: true`.
+//! Codex CLI contract leaf, canonical key `codex_tui`. It is the only Codex
+//! worker runtime: a role declaring `codex`, `codex_cli` or `codex-cli`
+//! selects it. The `team-agent codex` leader and app-server keep their own path.
 //! Measured recipes do not themselves constitute Team G1–G5 acceptance.
 pub mod catalog;
 pub mod descriptor;

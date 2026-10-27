@@ -45,11 +45,11 @@
 
 | Provider | 已接入的主要载体 | 必须保留的限制 |
 |---|---|---|
-| Codex | `-c` 配置、JSONL turn/fault、native catalog；leader 另有 app-server | `caps.fork=true` 不等公开 `fork-agent` 可用；普通 worker 仍走 CLI |
+| Codex（契约叶 `codex_tui`；`codex`/`codex_cli`/`codex-cli` 均为声明名） | 公开 `codex`、私有非 Git cwd（无信任屏）、按代 owned MCP、native catalog、`codex fork` 原生新席；leader 另有 app-server | 旧 Codex worker 引擎（argv/resume/fork 物化、rollout 扫描、`/fast`、profile `-c` 覆盖）已移除；仅订阅登录；须显式 catalog 模型；旧 state 行只准 stop/remove；`team-agent codex` leader 与 `codex_app_server` 不变 |
 | Claude（契约叶 `claude_tui`；`claude`/`claude_code`/`claude-code` 均为声明名） | 公开 `claude`、按代 `--mcp-config`、`--session-id`/`--resume` 精确 UUID、原生新席 fork | 旧 Claude worker 引擎已移除；仅订阅登录；须显式 catalog 模型；旧 state 行只准 stop/remove；`team-agent claude` leader 不变 |
 | Pi（契约叶 `pi_tui`；`pi` 与省略 provider 均为声明名） | 公开 `pi`、`-e` 加载的 owned extension、live exact catalog、`--fork <uuid>` 原生新席 | 旧 Pi worker 引擎（物化/resume/快照 fork/单 Enter 闸）已移除；须显式 catalog 模型；旧 state 行只准 stop/remove；`team-agent pi` leader 仍用 `pi_mcp::materialize_pi_plan` |
 | Cursor（契约叶 `cursor`；`cursor-agent`/`agent`/`cursor_agent` 均为声明名） | 公开 `cursor-agent`、私有 cwd 的 owned `.cursor/mcp.json` + `--approve-mcps`、`create-chat` 精确 chatId | 旧 `cursor_agent` 引擎已移除；所有 role effort 拒绝；旧 state 行只准 stop/remove |
-| Grok | rules/session argv、目录 MCP、login/trust、原窗 `/fork`、native queue | 目录配置有独占限制；catalog 可见不是登录证明；队列收下不是新 turn |
+| Grok（契约叶 `grok_build`；`grok` 为声明名） | 公开 `grok`、按代 owned MCP、startup/session panel、native queue | 旧 Grok worker 引擎（argv/resume、`.grok/config.toml` 目录 MCP、login/trust 门、原窗 `/fork`、会话存档探测）已移除；须显式 catalog 模型；旧 state 行只准 stop/remove；`team-agent grok` leader 不变；catalog 可见不是登录证明；队列收下不是新 turn |
 | GeminiCli | 最小 `gemini [--model RAW]`、共享宿主、遗留 global installer | 无公开 native leader verb / catalog / resume / fork；普通 spawn MCP 连通未证 |
 
 “第七家”是本六家比较矩阵之外的新例子，不是声称 enum 只有六个值；Copilot、Fake 及历史 alias 仍存在。
@@ -295,13 +295,13 @@ P5 必须核 returned pane 对应请求 session/window 与 endpoint；owner gene
 5. **围栏**：spawn 前 host 用同一 `search_path` 重新解析（`capture_public_command`）；PATH route 或 entry 字节一变就拒绝并重新规划，不 adopt。spawn 后 pane PID 的 kernel image 必须等于 `executable` 且 hash 一致——wrapper 必须 `exec` 下一个命令，fork 后等待的 wrapper 不被当作 native。
 6. **辅助命令**：metadata `--version`、catalog（Codex 为 `codex debug models`，Pi 为 `pi --no-approve --list-models`，Claude 为 stream-json `initialize` 控制请求，不发起模型回合）、Cursor `create-chat`、Kiro `agent validate` 都运行 PATH entry 本身，wrapper 看见每一次调用。
 
-Codex 契约叶的规范键为 `codex_tui`（`binary = "codex"`）。角色文档声明共享 legacy 键 `codex` 时，只有显式 `contract_runtime: true` 才选择该叶；编译后的 spec 与 state 只携带 `codex_tui`，legacy 读者因而不会把契约席位当成 legacy Codex worker。裸 `codex`、Codex leader 与 `codex_app_server` 保持原路径。
+Codex 契约叶的规范键为 `codex_tui`（`binary = "codex"`）；`codex`/`codex_cli`/`codex-cli` 无须 `contract_runtime` 即选择该叶（`contract_runtime: true` 仍被接受，但不再有额外含义），编译后的 spec 与 state 只携带 `codex_tui`；旧 Codex worker 引擎已移除，升级前的 `codex`/`codex_cli`/`codex-cli` state 行不被重分类，只准 stop/remove。Codex leader（`team-agent codex`）与 `codex_app_server` 保持原路径。Grok Build 契约叶的规范键为 `grok_build`（`binary = "grok"`）；`grok` 无须 opt-in 即选择该叶，旧 Grok worker 引擎已移除，升级前的 `grok` state 行只准 stop/remove；Grok leader（`team-agent grok`）保持自身路径。
 
 Pi 契约叶：规范键 `pi_tui`（`binary = "pi"`）。`provider: pi`（或省略 provider 的默认 `pi`）无须 `contract_runtime` 即选择该叶，编译后的 spec 与 state 只携带 `pi_tui`；旧 Pi worker 引擎已移除，升级前的 `pi` state 行不被重分类，只准 stop/remove。Pi leader（`team-agent pi`）保持自身路径。Pi 没有逐次调用的 MCP argv，项目 `.pi/mcp.json` 只在受信项目读取且会被替换型 MCP 扩展忽略，因此 owned MCP 载体是私有 cwd 中由 `-e` 显式加载、按代绑定 server key 的 Pi 扩展文件；`--no-approve` 在 argv 中决定项目信任，不出现信任屏、不加载项目本地资源。
 
 Claude 契约叶的规范键为 `claude_tui`（`binary = "claude"`）；`claude`/`claude_code`/`claude-code` 无须 `contract_runtime` 即选择该叶，编译后的 spec 与 state 只携带 `claude_tui`；旧 Claude worker 引擎已移除，升级前的 `claude`/`claude_code` state 行不被重分类，只准 stop/remove。Claude leader（`team-agent claude`）保持自身路径。新会话以 `--session-id` 传入由实例身份派生的 UUID，恢复用 `--resume <uuid>`。文件夹信任界面默认焦点为 `No, exit`，契约从不替用户应答：私有 primary 须位于用户已信任的目录之下，否则启动 fail-closed。
 
-legacy runtime 的 codex/copilot/grok/gemini worker 与 claude/pi leader 在 tmux shell 中 exec 裸命令名，同样服从 C13；Pi leader 物化接受 PATH 上第一个 `pi`（wrapper、npm symlink 或二进制）并只通过它探测。
+legacy runtime 的 copilot/gemini worker 与 claude/codex/grok/pi leader 在 tmux shell 中 exec 裸命令名，同样服从 C13；Pi leader 物化接受 PATH 上第一个 `pi`（wrapper、npm symlink 或二进制）并只通过它探测。
 
 已知可见后果：tmux 标题由 native 进程决定。Homebrew/npm 的 `grok` 是指向 `grok-native` 的 symlink，pane 标题显示厂商 image 名，与用户在终端里输入 `grok` 时一致；希望经代理 wrapper 的用户须把 wrapper 放在 PATH 前面。Kiro dispatcher 找不到自己的 helper 属于厂商安装问题，按 native 失败报告，不再回退到 bundle 路径。
 
@@ -443,7 +443,7 @@ validate binding + capability + budget
 |---|---|
 | buffer | `<16 KiB` set-buffer；`≥16 KiB` load-buffer/stdin；一次 paste 后 delete；不逐字符输入 |
 | paste-ready | Tail80，50ms poll，窗口 `max(2000, bytes/25)` ms；timeout/读失败仍可能继续 submit |
-| floor | Cursor/Grok caller 设 1s；其余 0；不等于 Transport 自动识别 Provider |
+| floor | 旧 Cursor/Grok worker caller 曾设 1s，随旧引擎移除；现无 legacy caller 设地板，契约叶自管粘贴时序；不等于 Transport 自动识别 Provider |
 | mode | 每次 Enter 前查询；Copy/Unknown cancel，Tree/View `q`，Client `d`；失败不阻止 submit |
 | generic submit | 主循环最多 3 次总提交；特定 wrapped-gap 额外最多 1 次；不代表固定四次 |
 | consumption | Tail40，最多 12×100ms；连续 capture 失败最多 4 次、20ms pause；失败只重读 |
@@ -457,7 +457,7 @@ validate binding + capability + budget
 | Codex app-server leader | Unix socket initialize/resume/binding check/turn-start；**0 个 Tmux 键** |
 | StartupMenu | 无正文 buffer；Codex update `[Down, Enter]`，trust `[Enter]`；Claude trust `[Enter]`；handled 不等已消失 |
 | EmptyWake | `InjectPayload::Empty` 直接一键，无消费检查；不把 Text("") 替换成它 |
-| FastModeToggle | Codex `/fast` 的 Char 序列 + Enter；仅 cold `spawn_agents` 在 runtime.fast 下调用，不是 message-body 逐字输入 |
+| FastModeToggle | 已随旧 Codex worker 引擎移除（`runtime.fast` 不再发送 `/fast`） |
 
 每个新 channel 必须明确 payload kind、是否 bracketed、policy 来源、预算和证据要求。非 Enter 键在当前低层不走同样消费循环，不能继承它的 submit 保证；新 native 特殊提交键需独立契约/证据，不按字节伪装 Enter。
 
@@ -574,7 +574,7 @@ Pi 的 `ToolsAvailable` 是 direct registry 事实；proxy 可用时 stage 可�
 
 拟议 `ForkPolicy::admit(provider, auth, public_surface, source)` 返回 Supported(具体模式) / Unsupported / Unverified；后两者在按键/创建席位前拒绝。typed result 至少有 `mode, source_identity, target_identity, evidence_origin, backing_state, readiness, effects/preserved, compensation_status`。原窗 `target_agent_id=source_agent_id`、`new_session_id=None` 合法，不造 UUID；H7 只负责声明的 native staging，公共 lifecycle 负责锁/注册/spawn/补偿执行。
 
-当前公开矩阵（#385）：contract 席位一律经 `contract_runtime::fork` 这一条通用管线，由 descriptor 的 fork facet 选模式（`select_new_seat_mode`：NativeNewSeat → NewSeatFullSnapshot → facet 自身的 Unsupported/Unverified 拒绝），零写入拒绝。`claude_tui`（`--resume <父 transcript 绝对路径> --fork-session --session-id <派生子 id> --name <席>`）、`pi_tui`（`--fork <父 uuid>`）、`codex_tui`（`codex fork … <父 uuid>`）为 NativeNewSeat；`cursor` Unsupported（无原生 fork 动词、会话库为原生 SQLite）；`grok_build` 与 `kiro` 未验证/不支持。旧运行时：Grok subscription `/fork` + `forked from` 仍是原窗模式。旧 Pi 快照新席 fork 与旧 Claude 新席 fork（#387）随旧 worker 引擎一并移除：`claude`/`pi` 角色即契约叶，经上面的通用管线 fork；升级前的旧 `claude`/`pi` 行拒绝 fork。native adapter 的 auth 门与公开门不同，不顺手拉齐。
+当前公开矩阵（#385）：contract 席位一律经 `contract_runtime::fork` 这一条通用管线，由 descriptor 的 fork facet 选模式（`select_new_seat_mode`：NativeNewSeat → NewSeatFullSnapshot → facet 自身的 Unsupported/Unverified 拒绝），零写入拒绝。`claude_tui`（`--resume <父 transcript 绝对路径> --fork-session --session-id <派生子 id> --name <席>`）、`pi_tui`（`--fork <父 uuid>`）、`codex_tui`（`codex fork … <父 uuid>`）为 NativeNewSeat；`cursor` Unsupported（无原生 fork 动词、会话库为原生 SQLite）；`grok_build` 与 `kiro` 未验证/不支持。旧 Grok 原窗 `/fork`、旧 Codex 会话文件 fork 物化、旧 Pi 快照新席 fork 与旧 Claude 新席 fork（#387）随旧 worker 引擎一并移除：`claude`/`codex`/`grok`/`pi` 角色即契约叶，经上面的通用管线 fork；升级前的旧行拒绝 fork，其余 legacy provider 的 `fork-agent` 一律以未验证拒绝，零按键、零 pane。native adapter 的 auth 门与公开门不同，不顺手拉齐。
 
 ### 7.2 Resume binding
 

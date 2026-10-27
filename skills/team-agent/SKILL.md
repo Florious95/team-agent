@@ -21,7 +21,8 @@ Use existing resources rather than establishing accounts. `team-agent doctor --w
 |---|---|
 | Pi | Several model catalogs; every Pi worker needs an exact qualified model ID such as `openai-codex/gpt-6-luna` from `team-agent models --provider pi`; Pi has no permission prompt to bypass, so keep bypass `false` |
 | Claude | Every Claude worker needs an exact model ID from `team-agent models --provider claude`; existing subscription login only |
-| Codex / other native CLIs | The user's existing workflow, native permissions, model catalog and supported session capabilities |
+| Codex / Grok | Every Codex or Grok worker needs an exact model ID from `team-agent models --provider codex` or `team-agent models --provider grok`; existing subscription login only |
+| Other native CLIs | The user's existing workflow, native permissions, model catalog and supported session capabilities |
 | Bypass `true` | Fewer interruptions, broader automatic authority |
 | Bypass `false` | Native permissions remain; human confirmation may interrupt unattended work |
 
