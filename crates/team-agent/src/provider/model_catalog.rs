@@ -78,14 +78,13 @@ impl CatalogError {
     pub fn action(&self, provider: &str) -> String {
         let executable = match provider {
             "pi" => "pi",
-            "cursor_agent" => "agent",
             "codex" => "codex",
             "claude" | "claude_code" => "claude",
             "grok" => "grok",
             _ => "provider CLI",
         };
         match self {
-            Self::UnsupportedProvider => "choose a supported provider: pi, cursor_agent, codex, claude, claude_code, or grok".into(),
+            Self::UnsupportedProvider => "choose a supported provider: pi, codex, claude, claude_code, or grok".into(),
             Self::ExecutableUnavailable => format!("install or repair the PATH-first `{executable}` executable, then retry `team-agent models --provider {provider}`"),
             Self::UnsupportedSchema => format!("upgrade `{executable}` to a version that supports its model catalog protocol, then retry `team-agent models --provider {provider}`"),
             Self::CommandFailed => format!("run `{executable}` directly to check catalog/account access, then retry `team-agent models --provider {provider}`"),
@@ -117,7 +116,6 @@ impl CatalogError {
 fn display_provider(provider: &str) -> &str {
     match provider {
         "pi" => "Pi",
-        "cursor_agent" => "Cursor",
         "codex" => "Codex",
         "claude" | "claude_code" => "Claude",
         "grok" => "Grok",
@@ -133,7 +131,6 @@ pub fn parse_catalog_provider(name: &str) -> Option<Provider> {
 #[derive(Clone, Copy)]
 enum CatalogSource {
     Pi,
-    CursorAgent,
     Codex,
     Grok,
     Claude,
@@ -143,7 +140,6 @@ enum CatalogSource {
 fn catalog_source(provider: Provider) -> Option<CatalogSource> {
     match provider {
         Provider::Pi => Some(CatalogSource::Pi),
-        Provider::CursorAgent => Some(CatalogSource::CursorAgent),
         Provider::Codex => Some(CatalogSource::Codex),
         Provider::Claude | Provider::ClaudeCode => Some(CatalogSource::Claude),
         Provider::Grok => Some(CatalogSource::Grok),
@@ -159,10 +155,6 @@ pub fn discover_model_catalog(provider_name: &str) -> Result<Vec<ModelRecord>, C
         CatalogSource::Pi => {
             let bytes = run_native("pi", &["--list-models"], None, None, &[], CATALOG_TIMEOUT, MAX_CATALOG_BYTES, &mut NoopObserver)?;
             parse_pi_catalog(&bytes)?
-        }
-        CatalogSource::CursorAgent => {
-            let bytes = run_native("agent", &["--list-models"], None, None, &[], CATALOG_TIMEOUT, MAX_CATALOG_BYTES, &mut NoopObserver)?;
-            parse_cursor_catalog(&bytes)?
         }
         CatalogSource::Codex => {
             let bytes = run_native("codex", &["debug", "models"], None, None, &[], CATALOG_TIMEOUT, MAX_CATALOG_BYTES, &mut NoopObserver)?;
@@ -223,38 +215,6 @@ pub(crate) fn parse_pi_catalog(bytes: &[u8]) -> Result<Vec<ModelRecord>, Catalog
             provider: "pi".into(), vendor: vendor.into(), display_name: exact.clone(), id: exact,
             default: None, aliases: Vec::new(),
         });
-    }
-    if records.is_empty() { return Err(CatalogError::Empty); }
-    Ok(records)
-}
-
-pub(crate) fn parse_cursor_catalog(bytes: &[u8]) -> Result<Vec<ModelRecord>, CatalogError> {
-    let text = std::str::from_utf8(bytes).map_err(|_| CatalogError::InvalidUtf8)?;
-    let lines = text.lines().collect::<Vec<_>>();
-    let tip_line = lines
-        .iter()
-        .rposition(|line| !line.trim().is_empty())
-        .filter(|index| {
-            lines[*index]
-                .strip_prefix("Tip: use --model ")
-                .is_some_and(|tip| !tip.is_empty())
-        });
-    let mut records: Vec<ModelRecord> = Vec::new();
-    for (index, line) in lines.into_iter().enumerate() {
-        if Some(index) == tip_line {
-            continue;
-        }
-        let line = line.trim();
-        if line.is_empty() || line.trim_end_matches(':').eq_ignore_ascii_case("available models") { continue; }
-        let Some((id, display)) = line.split_once(" - ") else { return Err(CatalogError::Malformed); };
-        let id = id.trim();
-        if id.is_empty() || id.chars().any(char::is_whitespace) || display.trim().is_empty() { return Err(CatalogError::Malformed); }
-        if records.iter().any(|record| record.id == id) { return Err(CatalogError::DuplicateIdentity(id.into())); }
-        let display = display.trim();
-        let default = display.ends_with("(default)");
-        let display_name = display.strip_suffix("(default)").map_or(display, str::trim).to_string();
-        let vendor = id.split_once('-').map_or("cursor", |(vendor, _)| vendor).to_string();
-        records.push(ModelRecord { provider: "cursor_agent".into(), vendor, id: id.into(), display_name, default: Some(default), aliases: Vec::new() });
     }
     if records.is_empty() { return Err(CatalogError::Empty); }
     Ok(records)
@@ -862,7 +822,6 @@ mod tests {
     fn provider_capability_is_explicit_and_exact() {
         for (name, provider) in [
             ("pi", Provider::Pi),
-            ("cursor_agent", Provider::CursorAgent),
             ("codex", Provider::Codex),
             ("claude", Provider::Claude),
             ("claude_code", Provider::ClaudeCode),
@@ -872,7 +831,7 @@ mod tests {
             assert_eq!(provider_wire(provider), name);
             assert!(catalog_source(provider).is_some());
         }
-        for name in ["", "cloud", "cursor", "agent", "claude-code", "copilot", "gemini_cli", "fake", "Pi", "CODEX", " pi", "pi ", "pi/model", "codex:model", "claude_code_extra"] {
+        for name in ["", "cloud", "cursor", "cursor_agent", "agent", "claude-code", "copilot", "gemini_cli", "fake", "Pi", "CODEX", " pi", "pi ", "pi/model", "codex:model", "claude_code_extra"] {
             assert_eq!(parse_catalog_provider(name), None);
         }
         for provider in [Provider::Copilot, Provider::GeminiCli, Provider::Fake] {
@@ -948,34 +907,4 @@ mod tests {
         assert!(model_matches(&row, "  "));
     }
 
-    #[test]
-    fn frozen_cursor_catalog_skips_only_its_native_trailing_tip() {
-        let frozen = include_bytes!("testdata/cursor-list-models-native.stdout");
-        let records = parse_cursor_catalog(frozen).unwrap();
-        let low = records.iter().find(|row| row.id == "gpt-5.6-luna-low").unwrap();
-        assert_eq!(low.provider.as_str(), "cursor_agent");
-        assert_eq!(low.vendor.as_str(), "gpt");
-        assert_eq!(low.display_name, "GPT-5.6 Luna 1M Low (current)");
-        assert_eq!(low.default, Some(false));
-        assert!(low.aliases.is_empty());
-        let xhigh = records.iter().find(|row| row.id == "gpt-5.6-luna-xhigh").unwrap();
-        assert_eq!(xhigh.id.as_str(), "gpt-5.6-luna-xhigh");
-        assert_eq!(xhigh.display_name, "GPT-5.6 Luna 1M Extra High");
-        let auto = records.iter().find(|row| row.id == "auto").unwrap();
-        assert_eq!(auto.default, Some(true));
-
-        let text = std::str::from_utf8(frozen).unwrap();
-        let without_tip = text.split_once("\nTip: use --model ").unwrap().0;
-        assert_eq!(parse_cursor_catalog(without_tip.as_bytes()).unwrap(), parse_cursor_catalog(frozen).unwrap());
-    }
-
-    #[test]
-    fn cursor_tip_compatibility_keeps_fail_closed_row_validation() {
-        let duplicate = b"Available models\na - A\na - A\n";
-        assert!(matches!(parse_cursor_catalog(duplicate), Err(CatalogError::DuplicateIdentity(_))));
-        assert!(matches!(parse_cursor_catalog(b"Available models\n"), Err(CatalogError::Empty)));
-        assert!(matches!(parse_cursor_catalog(&[b'A', 0xff]), Err(CatalogError::InvalidUtf8)));
-        assert!(matches!(parse_cursor_catalog(b"Available models\na - A\nnot a model row\n"), Err(CatalogError::Malformed)));
-        assert!(matches!(parse_cursor_catalog(b"Available models\na - A\nTip: use --model a to switch.\nunexpected tail\n"), Err(CatalogError::Malformed)));
-    }
 }

@@ -14,17 +14,12 @@ const CATALOG_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CATALOG_BYTES: u64 = 1024 * 1024;
 type ModelRecord = crate::provider::model_catalog::ModelRecord;
 
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CatalogFormat {
-    Pi,
-    CursorAgent,
-}
-
 pub fn cmd_models(args: &ModelsArgs) -> Result<CmdResult, CliError> {
     #[cfg(unix)]
-    if crate::contract_runtime::registry::descriptor(&args.provider).is_some() {
-        return crate::contract_runtime::discovery::models(args);
+    if let Some(descriptor) = crate::contract_runtime::registry::declared(&args.provider, false) {
+        // A role's provider names its catalog: `agent` or `cursor-agent` is the Cursor leaf.
+        let args = ModelsArgs { provider: descriptor.identity.id.into(), ..args.clone() };
+        return crate::contract_runtime::discovery::models(&args);
     }
     let records = match crate::provider::model_catalog::discover_model_catalog(&args.provider) {
         Ok(records) => records,
@@ -107,7 +102,6 @@ fn render_catalog(args: &ModelsArgs, all: Vec<ModelRecord>) -> Result<CmdResult,
     }
 }
 
-/// Existing injectable Pi boundary retained for deterministic command/timeout tests.
 #[cfg(test)]
 fn cmd_models_with(
     args: &ModelsArgs,
@@ -115,45 +109,15 @@ fn cmd_models_with(
     timeout: Duration,
     max_bytes: u64,
 ) -> Result<CmdResult, CliError> {
-    cmd_models_with_format(args, program, CatalogFormat::Pi, timeout, max_bytes)
-}
-
-#[cfg(test)]
-fn cmd_models_with_format(
-    args: &ModelsArgs,
-    program: &Path,
-    format: CatalogFormat,
-    timeout: Duration,
-    max_bytes: u64,
-) -> Result<CmdResult, CliError> {
     let bytes = match run_catalog(program, timeout, max_bytes) {
         Ok(bytes) => bytes,
         Err(message) => return Ok(failure(args, &message)),
     };
-    let all = match parse_catalog(&bytes, format) {
+    let all = match crate::provider::model_catalog::parse_pi_catalog(&bytes).map_err(|error| error.message("pi")) {
         Ok(models) => models,
         Err(message) => return Ok(failure(args, &message)),
     };
     render_catalog(args, all)
-}
-
-#[cfg(test)]
-fn parse_catalog(bytes: &[u8], format: CatalogFormat) -> Result<Vec<ModelRecord>, String> {
-    let provider = match format {
-        CatalogFormat::Pi => "pi",
-        CatalogFormat::CursorAgent => "cursor_agent",
-    };
-    let result = match format {
-        CatalogFormat::Pi => crate::provider::model_catalog::parse_pi_catalog(bytes),
-        CatalogFormat::CursorAgent => crate::provider::model_catalog::parse_cursor_catalog(bytes),
-    };
-    result.map_err(|error| error.message(provider))
-}
-
-#[cfg(test)]
-fn parse_cursor_catalog(bytes: &[u8]) -> Result<Vec<ModelRecord>, String> {
-    crate::provider::model_catalog::parse_cursor_catalog(bytes)
-        .map_err(|error| error.message("cursor_agent"))
 }
 
 #[cfg(test)]
@@ -162,25 +126,11 @@ fn model_matches(model: &ModelRecord, search: &str) -> bool {
 }
 
 #[cfg(test)]
-fn current_model_for(format: CatalogFormat, models: &[ModelRecord]) -> Option<String> {
-    match format {
-        CatalogFormat::Pi => current_role_model(
-            &models
-                .iter()
-                .map(|model| model.id.clone())
-                .collect::<Vec<_>>(),
-        ),
-        CatalogFormat::CursorAgent => None,
-    }
-}
-
-#[cfg(test)]
 fn failure(args: &ModelsArgs, message: &str) -> CmdResult {
     let action = if message.starts_with("unsupported model provider") {
-        "choose a supported provider: pi, cursor_agent, codex, claude, or claude_code".to_string()
+        "choose a supported provider: pi, codex, claude, or claude_code".to_string()
     } else {
         let executable = match args.provider.as_str() {
-            "cursor_agent" => "agent",
             "codex" => "codex",
             "claude" | "claude_code" => "claude",
             _ => "pi",
@@ -379,67 +329,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn cursor_catalog_parses_copyable_ids_and_multiword_search() {
-        let path = fixture(
-            "printf 'Available models\\ngpt-5.6-luna-high - GPT-5.6 Luna 1M High\\ncursor-grok-4.6-high - Cursor Grok 4.6\\nauto - Auto (default)\\n'",
-        );
-        let result = cmd_models_with_format(
-            &ModelsArgs {
-                provider: "cursor_agent".into(),
-                search: Some("GPT luna".into()),
-                json: true,
-            },
-            &path,
-            CatalogFormat::CursorAgent,
-            Duration::from_secs(1),
-            MAX_CATALOG_BYTES,
-        )
-        .unwrap();
-        let CmdOutput::Human(text) = result.output else {
-            panic!("expected JSON projection")
-        };
-        let value: Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(value["ok"], true, "{text}");
-        assert_eq!(value["provider"], "cursor_agent");
-        assert_eq!(value["models"].as_array().unwrap().len(), 1);
-        assert_eq!(value["models"][0]["role_model"], "gpt-5.6-luna-high");
-        assert_eq!(value["models"][0]["model_id"], "gpt-5.6-luna-high");
-        assert_eq!(value["models"][0]["display_name"], "GPT-5.6 Luna 1M High");
-        assert_eq!(value["models"][0]["current"], Value::Null);
-        cleanup_fixture(&path);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn cursor_native_tip_fixture_works_through_public_cli_once() {
-        let agent = native_cli_fixture(
-            "agent",
-            include_bytes!("../provider/testdata/cursor-list-models-native.stdout"),
-        );
-        let output = run_public_models_cli(
-            &agent.program,
-            agent.response.as_deref(),
-            &["models", "--provider", "cursor_agent", "--json"],
-        );
-        let text = public_cli_text(&output);
-        let calls =
-            std::fs::read_to_string(agent.program.with_extension("count")).unwrap_or_default();
-        drop(agent);
-        assert!(output.status.success(), "{text}");
-        assert_eq!(calls, "1:--list-models\n");
-        let value: Value = serde_json::from_str(text.trim()).unwrap();
-        assert_eq!(value["schema_version"], "models.v1");
-        assert_eq!(value["provider"], "cursor_agent");
-        let models = value["models"].as_array().unwrap();
-        for exact in ["gpt-5.6-luna-low", "gpt-5.6-luna-xhigh"] {
-            assert!(models.iter().any(|model| model["model_id"] == exact));
-        }
-        assert_eq!(models[0]["model_id"], "auto");
-        assert_eq!(models[0]["default"], true);
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn cursor_contract_catalog_uses_public_launcher_metadata_then_exact_ids() {
         let program = fixture_program("cursor-agent", r#"
 test "$#" = 1 || exit 9
@@ -450,7 +339,7 @@ case "$1" in
 esac"#);
         let mut cursor = CliFixture::new(program);
         let response = cursor.program.with_extension("stdout");
-        std::fs::write(&response, include_bytes!("../provider/testdata/cursor-list-models-native.stdout")).unwrap();
+        std::fs::write(&response, include_bytes!("../../../team-agent-contract/tests/fixtures/cursor-2026.10.01-models.txt")).unwrap();
         cursor.response = Some(response);
         let output = run_public_models_cli(&cursor.program, cursor.response.as_deref(),
             &["models", "--provider", "cursor", "--search", "gpt-5.6-luna-xhigh", "--json"]);
@@ -493,6 +382,38 @@ esac"#);
         assert_eq!(value["provider"], "grok_build");
         assert_eq!(value["source"]["executable"], grok.program.to_str().unwrap());
         assert!(value["models"].as_array().unwrap().iter().any(|row| row["model_id"] == "grok-4.7-build-fast"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn every_cursor_provider_name_reads_the_contract_catalog_through_cursor_agent() {
+        use std::os::unix::fs::PermissionsExt;
+        for name in ["cursor_agent", "cursor-agent", "agent"] {
+            let mut cursor = CliFixture::new(fixture_program("cursor-agent", r#"
+test "$#" = 1 || exit 9
+case "$1" in
+  --version) printf '%s\n' '2026.10.01-a1b2c3' ;;
+  --list-models) exec /bin/cat "$TEAM_AGENT_MODELS_FIXTURE" ;;
+  *) exit 9 ;;
+esac"#));
+            let response = cursor.program.with_extension("stdout");
+            std::fs::write(&response, include_bytes!("../../../team-agent-contract/tests/fixtures/cursor-2026.10.01-models.txt")).unwrap();
+            cursor.response = Some(response);
+            // The legacy binary name on PATH is never what runs.
+            let legacy = cursor.program.parent().unwrap().join("agent");
+            std::fs::write(&legacy, "#!/bin/sh\nprintf 'called' > \"$0.called\"\nexit 9\n").unwrap();
+            std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let output = run_public_models_cli(&cursor.program, cursor.response.as_deref(),
+                &["models", "--provider", name, "--json"]);
+            let text = public_cli_text(&output);
+            assert!(output.status.success(), "{name}: {text}");
+            assert_eq!(std::fs::read_to_string(cursor.program.with_extension("count")).unwrap(),
+                "1:--version\n1:--list-models\n", "{name}");
+            assert!(!legacy.with_extension("called").exists(), "{name}");
+            let value: Value = serde_json::from_str(text.trim()).unwrap();
+            assert_eq!(value["provider"], "cursor", "{name}");
+            assert!(value["models"].as_array().unwrap().iter().any(|row| row["model_id"] == "gpt-5.6-luna-xhigh"), "{name}");
+        }
     }
 
     #[cfg(unix)]
@@ -1417,7 +1338,7 @@ esac"#);
             ),
             ExitCode::Error
         );
-        let usage = "team-agent models [--provider pi|cursor|cursor_agent|codex|claude|claude_code|grok|kiro] [QUERY|--search TEXT] [--json]";
+        let usage = "team-agent models [--provider pi|cursor|codex|claude|claude_code|grok|kiro] [QUERY|--search TEXT] [--json]";
         assert_eq!(crate::cli::spec::command_spec("models").unwrap().usage, usage);
         assert!(crate::cli::emit::command_help(Some("models")).contains(usage));
     }

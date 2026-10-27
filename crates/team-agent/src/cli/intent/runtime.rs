@@ -481,32 +481,14 @@ fn stop_args(plan: &Plan, id: &str) -> StopAgentArgs {
         json: true,
     }
 }
-fn check_incarnation_cwd(
-    selected: &SelectedTeam,
-    id: &str,
-    row: &Value,
-    provider: crate::provider::Provider,
-) -> Result<(), CliError> {
+fn check_incarnation_cwd(selected: &SelectedTeam, row: &Value) -> Result<(), CliError> {
     if let Some(cwd) = row
         .get("spawn_cwd")
         .and_then(Value::as_str)
         .filter(|cwd| !cwd.is_empty())
     {
-        let declared_cwd = Path::new(cwd);
-        let cwd = checked(declared_cwd.canonicalize())?;
-        let inside = cwd.starts_with(&selected.run_workspace);
-        #[cfg(unix)]
-        let owned_cursor_primary = !inside
-            && provider == crate::provider::Provider::CursorAgent
-            && checked(crate::lifecycle::launch::cursor_mcp_primary_matches_scope(
-                &selected.run_workspace,
-                &selected.team_key,
-                id,
-                declared_cwd,
-            ))?;
-        #[cfg(not(unix))]
-        let owned_cursor_primary = false;
-        if !cwd.is_dir() || !(inside || owned_cursor_primary) {
+        let cwd = checked(Path::new(cwd).canonicalize())?;
+        if !cwd.is_dir() || !cwd.starts_with(&selected.run_workspace) {
             return Err(refusal("legacy incarnation cwd is outside the selected workspace; no context or scope fallback"));
         }
     }
@@ -589,7 +571,7 @@ fn preflight_start(
     {
         return Err(refusal("resume metadata lacks the scoped spawn cwd"));
     }
-    check_incarnation_cwd(selected, id, row, provider)?;
+    check_incarnation_cwd(selected, row)?;
     if row
         .get("task_prompt_delivered")
         .is_some_and(|value| !value.is_null() && !value.is_boolean())
@@ -649,29 +631,13 @@ fn add(
             {
                 return Err(usage("role creation requires explicit provider and dangerously_skip_permissions decisions"));
             }
-            let (_, compiled) = role(plan, selected, id, Some(&path))?;
-            #[cfg(unix)]
-            if crate::contract_runtime::registry::descriptor(provider(&compiled)).is_some() {
-                return Err(refusal(
-                    "native dynamic add is not admitted; no legacy fallback",
-                ));
-            }
+            role(plan, selected, id, Some(&path))?;
             path.to_string_lossy().into_owned()
         }
         None => {
             if patch.provider.is_none() || patch.bypass.is_none() {
                 return Err(usage(
                     "unknown agent: supply a complete --role-file or --provider and --bypass",
-                ));
-            }
-            #[cfg(unix)]
-            if patch
-                .provider
-                .as_deref()
-                .is_some_and(|p| crate::contract_runtime::registry::descriptor(p).is_some())
-            {
-                return Err(refusal(
-                    "native dynamic add is not admitted; no legacy fallback",
                 ));
             }
             String::new()
@@ -1215,20 +1181,6 @@ pub(super) fn recheck(plan: &Plan, step: &Step, after_stop: bool) -> Result<(), 
                     return Err(refusal("carrier replaced since planning"));
                 }
             }
-        }
-        #[cfg(unix)]
-        if !crate::contract_runtime::framework::is_contract(row)
-            && crate::provider::wire::parse_provider(provider(row))
-                == Some(crate::provider::Provider::CursorAgent)
-            && (matches!(step, Step::StartAgent(_))
-                || (plan.intent.verb == Verb::Restart && matches!(step, Step::StopAgent(_)))
-                || (matches!(step, Step::RestartTeam(_))
-                    && row.get("status").and_then(Value::as_str) == Some("running")
-                    && !crate::state::projection::agent_explicit_stop(row)))
-        {
-            // Reopen the same ownership proof at the existing execution recheck,
-            // before effects; a planning-time receipt is not a filesystem lease.
-            check_incarnation_cwd(&selected, id, row, crate::provider::Provider::CursorAgent)?;
         }
     }
     Ok(())

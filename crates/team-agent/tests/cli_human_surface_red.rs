@@ -45,7 +45,6 @@ const HUMAN: &[&str] = &[
     "claude",
     "copilot",
     "grok",
-    "cursor",
     "pi",
     "kiro",
     "leaders",
@@ -335,10 +334,7 @@ fn examples_property(command: &str) {
                 .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
         })
         .count();
-    let launcher = matches!(
-        command,
-        "pi" | "codex" | "claude" | "copilot" | "grok" | "cursor"
-    );
+    let launcher = matches!(command, "pi" | "codex" | "claude" | "copilot" | "grok");
     let minimum = if launcher && command != "pi" { 1 } else { 2 };
     assert!(
         functional >= minimum,
@@ -392,21 +388,21 @@ fn examples_property(command: &str) {
 }
 
 #[test]
-fn h1_public_catalog_is_exactly_thirty_five_human_records_and_no_machine_record() {
+fn h1_public_catalog_is_exactly_thirty_four_human_records_and_no_machine_record() {
     let actual = catalog::COMMAND_SPECS
         .iter()
         .map(|s| s.name)
         .collect::<BTreeSet<_>>();
     assert_eq!(
         catalog::COMMAND_SPECS.len(),
-        35,
+        34,
         "H1 retains the exact catalog, including four Phase1 lifecycle surfaces"
     );
     assert_eq!(actual, HUMAN.iter().copied().collect());
 }
 #[test]
 #[serial(env)]
-fn h1_root_discovers_all_thirty_five_once_in_catalog_and_zero_private_names() {
+fn h1_root_discovers_all_thirty_four_once_in_catalog_and_zero_private_names() {
     let env = HermeticTestEnv::enter("root-human");
     let cwd = env.workspace("empty");
     let out = env.run_cli(&cwd, &["--help"]);
@@ -422,7 +418,7 @@ fn h1_root_discovers_all_thirty_five_once_in_catalog_and_zero_private_names() {
         .collect::<Vec<_>>();
     assert_eq!(
         visible.len(),
-        35,
+        34,
         "H1 root command list: {visible:?}\n{help}"
     );
     assert_eq!(
@@ -572,7 +568,7 @@ human_properties! {
     remove_agent => "remove-agent", doctor => "doctor", approvals => "approvals", leaders => "leaders",
     route => "route", leader_prompt => "leader-prompt", profile => "profile", install_skill => "install-skill",
     claim_leader => "claim-leader", takeover => "takeover", attach_leader => "attach-leader",
-    pi => "pi", codex => "codex", claude => "claude", copilot => "copilot", grok => "grok", cursor => "cursor", kiro => "kiro", inbox => "inbox",
+    pi => "pi", codex => "codex", claude => "claude", copilot => "copilot", grok => "grok", kiro => "kiro", inbox => "inbox",
 }
 macro_rules! hidden_properties {
     ($($id:ident => $command:literal),+ $(,)?) => {$ (
@@ -684,6 +680,7 @@ macro_rules! retired_properties {
     )+};
 }
 retired_properties! {
+    retired_cursor_launcher => "cursor",
     r289_e2e => "e2e", r289_allow_peer_talk => "allow-peer-talk", r289_results => "results",
     r289_validate => "validate", r289_identity => "identity", r289_sessions => "sessions",
     r289_watch => "watch", r289_peek => "peek", r289_wait_ready => "wait-ready", r289_preflight => "preflight",

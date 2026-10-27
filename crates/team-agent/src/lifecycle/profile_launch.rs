@@ -47,26 +47,6 @@ const COMPATIBLE_NETWORK_ENV_KEYS: &[&str] = &[
     "REQUESTS_CA_BUNDLE",
 ];
 
-// Cursor subscription direct mode removes only proxy URL inputs. NO_PROXY is
-// deliberately retained: it is a bypass list, not a proxy endpoint, and the
-// observed catalog failure came from the GLOBAL_AGENT proxy URL settings.
-const CURSOR_DIRECT_PROXY_ENV_KEYS: &[&str] = &[
-    "HTTPS_PROXY",
-    "HTTP_PROXY",
-    "ALL_PROXY",
-    "https_proxy",
-    "http_proxy",
-    "all_proxy",
-    "GLOBAL_AGENT_HTTPS_PROXY",
-    "GLOBAL_AGENT_HTTP_PROXY",
-];
-
-pub(crate) fn cursor_subscription_direct_mode(profile_launch: &ProviderProfileLaunch) -> bool {
-    CURSOR_DIRECT_PROXY_ENV_KEYS
-        .iter()
-        .all(|key| profile_launch.env_unset.contains(*key))
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct ProfileValues {
     pub(crate) path: PathBuf,
@@ -117,6 +97,9 @@ pub(crate) fn prepare_provider_profile_launch_with_profile_dir(
     profile_dir: Option<&Path>,
     mcp_config: Option<&McpConfig>,
 ) -> Result<ProviderProfileLaunch, LifecycleError> {
+    if agent.get("provider").and_then(YamlValue::as_str).is_some_and(crate::provider::wire::is_retired_provider) {
+        return Err(LifecycleError::Provider(crate::provider::wire::RETIRED_PROVIDER_ERROR.into()));
+    }
     let input = AgentProfileInput {
         id: agent
             .get("id")
@@ -170,6 +153,9 @@ pub(crate) fn prepare_provider_profile_launch_from_json(
     agent: &serde_json::Value,
     mcp_config: Option<&McpConfig>,
 ) -> Result<ProviderProfileLaunch, LifecycleError> {
+    if agent.get("provider").and_then(serde_json::Value::as_str).is_some_and(crate::provider::wire::is_retired_provider) {
+        return Err(LifecycleError::Provider(crate::provider::wire::RETIRED_PROVIDER_ERROR.into()));
+    }
     let input = AgentProfileInput {
         id: agent
             .get("id")
@@ -261,16 +247,6 @@ fn prepare_profile_launch(
             env_overlay.remove(*key);
         }
     }
-    if agent.provider == Provider::CursorAgent
-        && agent.auth_mode == AuthMode::Subscription
-        && profile_proxy_mode(&loaded.values) == "direct"
-    {
-        for key in CURSOR_DIRECT_PROXY_ENV_KEYS {
-            env_unset.insert((*key).to_string());
-            env_overlay.remove(*key);
-        }
-    }
-
     let command_overrides = provider_command_overrides(&agent, &loaded.values);
     write_runtime_env_file(workspace, &agent.id, &env_overlay, &env_unset)?;
 
@@ -504,9 +480,8 @@ fn provider_env_exports(
                 }
             }
         }
-        // grok/cursor_agent 一期无 credential/profile exports（subscription 已登录态）。
-        // Cursor 订阅席默认继承代理；PROXY_MODE=direct 的局部清除在上方处理。
-        Provider::Grok | Provider::CursorAgent | Provider::Pi => {}
+        // Grok and Pi retain their native subscription credentials.
+        Provider::Grok | Provider::Pi => {}
         Provider::Fake => {}
     }
     exports
@@ -611,11 +586,8 @@ pub(crate) fn provider_env_unsets(provider: Provider, auth_mode: AuthMode) -> BT
         // C-7-1 cr verdict: 一期 subscription-only(已登录态),exports/unsets 空;
         // BYOK(COPILOT_PROVIDER_*)二期立项时单独 cr verdict 再开。
         Provider::Copilot => {}
-        // grok 无 env 需 unset。cursor 订阅席必须保留代理键（TUI 连云要用）；
-        // `--print` 路径会因 https:// 方案撞 GLOBAL_AGENT，但主路径是 TUI。
-        // 禁止在这里 unset 代理。
+        // Grok has no provider-specific environment to unset.
         Provider::Grok => {}
-        Provider::CursorAgent => {}
         Provider::Pi => {}
         Provider::Fake => {}
     }
@@ -1041,8 +1013,8 @@ fn required_profile_keys(provider: Provider, auth_mode: AuthMode) -> &'static [&
         // C-7-1 cr verdict: copilot 一期 subscription-only,无 BYOK required key 集合;
         // 二期 BYOK 立项时填(向后兼容字段保留)。
         Provider::Copilot => &[],
-        // 0.5.67: grok/cursor_agent 一期无 BYOK required key 集合 (同 copilot 精神)。
-        Provider::Grok | Provider::CursorAgent | Provider::Pi => &[],
+        // 0.5.67: Grok/Pi 一期无 BYOK required key 集合 (同 copilot 精神)。
+        Provider::Grok | Provider::Pi => &[],
         Provider::Fake => &[],
     }
 }

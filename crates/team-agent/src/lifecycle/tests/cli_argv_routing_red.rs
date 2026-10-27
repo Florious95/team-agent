@@ -33,7 +33,6 @@ const CANONICAL: &[(&str, Provider)] = &[
     ("copilot", Provider::Copilot),
     ("gemini_cli", Provider::GeminiCli),
     ("grok", Provider::Grok),
-    ("cursor_agent", Provider::CursorAgent),
     ("pi", Provider::Pi),
 ];
 struct Fixture {
@@ -587,7 +586,6 @@ provider_tests! {
     a06_copilot => "copilot", Copilot;
     a06_gemini_cli => "gemini_cli", GeminiCli;
     a06_grok => "grok", Grok;
-    a06_cursor_agent => "cursor_agent", CursorAgent;
     a06_pi => "pi", Pi;
 }
 
@@ -1236,7 +1234,7 @@ fn a07_attach_existing_never_opens_enabled_invalid_route_config() {
 
 #[test]
 #[serial(env)]
-fn a13_all_provider_version_auth_and_cursor_mcp_auxiliary_argv_are_native() {
+fn a13_all_provider_version_and_auth_auxiliary_argv_are_native() {
     let f = Fixture::new("argv-aux");
     let mappings = CANONICAL
         .iter()
@@ -1249,10 +1247,6 @@ fn a13_all_provider_version_auth_and_cursor_mcp_auxiliary_argv_are_native() {
     }
     let _ = crate::provider::get_adapter(Provider::ClaudeCode)
         .auth_hint(crate::model::enums::AuthMode::Subscription);
-    assert_eq!(
-        crate::lifecycle::launch::cursor_mcp_enable_argv(),
-        ["agent", "mcp", "enable", "team_orchestrator"]
-    );
     let _ = f.cold("copilot");
     let probes = fs::read_to_string(&f.probes).unwrap();
     assert!(!probes.contains("route-must-not-enter-aux"));
@@ -1399,6 +1393,43 @@ fn a15_provider_drift_and_unknown_force_remain_refused() {
         after["agents"]["worker"]["provider"],
         before["agents"]["worker"]["provider"]
     );
+}
+
+#[test]
+#[serial(env)]
+fn issue381_every_cursor_name_adds_through_the_contract_leaf_never_legacy_agent() {
+    let f = Fixture::new("cursor-contract-add");
+    f.start_team("codex", &["worker"]);
+    let before = crate::state::projection::select_runtime_state(&f.ws, Some("argvteam")).unwrap();
+    let probes_before = fs::read_to_string(&f.probes).unwrap_or_default();
+    for (index, name) in ["cursor", "cursor-agent", "agent", "cursor_agent"].into_iter().enumerate() {
+        let id = format!("cursor-{index}");
+        let added = crate::lifecycle::role_config::add_agent_from_role(
+            &f.ws,
+            &AgentId::new(&id),
+            None,
+            &crate::lifecycle::role_config::RoleConfigPatch {
+                provider: Some(name.into()),
+                model: Some("gpt-5.6-luna-xhigh".into()),
+                bypass: Some(true),
+                // An omitted --prompt still yields a valid contract role body.
+                prompt: (index > 0).then(|| "Reply to every task.".into()),
+                ..Default::default()
+            },
+            false,
+            Some("argvteam"),
+        );
+        // The fixture PATH has a fake legacy `agent` but no `cursor-agent`:
+        // the contract leaf's discovery refuses before any native effect.
+        let error = added.expect_err("no cursor-agent on PATH").to_string();
+        assert!(error.contains("cursor-agent"), "{name}: {error}");
+        assert!(!f.team.join(format!("agents/{id}.md")).exists(), "{name}: role rolled back");
+        let after = crate::state::projection::select_runtime_state(&f.ws, Some("argvteam")).unwrap();
+        assert!(after["agents"].get(&id).is_none(), "{name}: seed row rolled back");
+        assert_eq!(after["agents"]["worker"], before["agents"]["worker"], "{name}");
+    }
+    let probes = fs::read_to_string(&f.probes).unwrap_or_default();
+    assert_eq!(probes, probes_before, "no legacy `agent` probe or catalog read");
 }
 
 #[test]

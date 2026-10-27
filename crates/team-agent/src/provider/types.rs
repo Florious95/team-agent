@@ -359,7 +359,7 @@ pub struct ProviderCommandContext<'a> {
     ///   - Pi: low|medium|high|xhigh|max → `--thinking <level>`; ultra rejected
     ///   - Grok: low|medium|high|xhigh → `--effort <level>`; max/ultra rejected
     ///   - Copilot / Gemini / Fake: low..xhigh ignored with a caller warning;
-    ///     max/ultra rejected. CursorAgent rejects all effort.
+    ///     max/ultra rejected.
     pub effort: Option<crate::model::enums::ProviderEffort>,
 }
 

@@ -632,6 +632,14 @@ fn add_agent_with_transport_at_paths_reserved(
             compiled.id, agent_id
         )));
     }
+    // The compiled spec carries a contract leaf's canonical id (`agent` → `cursor`).
+    #[cfg(unix)]
+    let contract_provider = compiled
+        .agent
+        .get("provider")
+        .and_then(Value::as_str)
+        .filter(|provider| crate::contract_runtime::registry::descriptor(provider).is_some())
+        .map(str::to_owned);
     let compiled_agent = compiled.agent.clone();
     inject_agent_into_spec(&mut spec, compiled_agent.clone(), &compiled.id)?;
     // E5 spec 迁移:重编译的 spec 原子写到 .team/runtime/<team_key>/(不落用户目录 team_dir)。
@@ -666,6 +674,20 @@ fn add_agent_with_transport_at_paths_reserved(
     inject_agent_into_spec(&mut latest_spec, compiled_agent, &compiled.id)?;
     write_spec_atomic(&spec_path, &latest_spec)?;
     drop(reservation_lock);
+    #[cfg(unix)]
+    if let Some(provider) = contract_provider {
+        return add_contract_seat(
+            run_workspace,
+            team_dir,
+            &spec_path,
+            pre_spec_text.as_deref(),
+            &canonical_team_key,
+            agent_id,
+            &provider,
+            role_file_path,
+            reservation,
+        );
+    }
     let (meta, _) = crate::compiler::read_front_matter(role_file_path)
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;
     // upsert writes status="starting" (E42) — start_agent_at_paths::mark_agent_started
@@ -752,6 +774,75 @@ fn add_agent_with_transport_at_paths_reserved(
     Ok(AddAgentReport {
         env,
         start_mode,
+        role_file: role_file_path.to_path_buf(),
+    })
+}
+
+/// A contract seat starts in the native framework, never the legacy transport:
+/// the seeded row is what the framework's start/publish path projects onto.
+/// Its role must live in `<team_dir>/agents`, where the contract config reads.
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn add_contract_seat(
+    run_workspace: &Path,
+    team_dir: &Path,
+    spec_path: &Path,
+    pre_spec_text: Option<&str>,
+    team_key: &str,
+    agent_id: &AgentId,
+    provider: &str,
+    role_file_path: &Path,
+    reservation: Option<AgentReservation>,
+) -> Result<AddAgentReport, LifecycleError> {
+    let rollback = |reason: &str| {
+        rollback_add_agent_atomic(
+            run_workspace,
+            spec_path,
+            pre_spec_text,
+            None,
+            Some(team_key),
+            agent_id,
+            reason,
+        )
+    };
+    let seed = serde_json::json!({
+        "agent_id": agent_id.as_str(), "provider": provider, "runtime_family": "contract",
+        "status": "starting", "contract_instance": null, "pane_id": null,
+    });
+    if let Err(error) = upsert_agent_entry(run_workspace, team_key, agent_id, seed) {
+        rollback("state_upsert_failed");
+        return Err(error);
+    }
+    let started = team_agent_contract::contract::types::SeatId::new(agent_id.as_str())
+        .map_err(|error| error.to_string())
+        .and_then(|seat| {
+            crate::contract_runtime::framework::start_new_seat(
+                run_workspace,
+                team_dir,
+                team_key,
+                &seat,
+            )
+            .map_err(|error| error.to_string())
+        });
+    if let Err(error) = started {
+        rollback("start_agent_failed");
+        return Err(LifecycleError::Provider(error));
+    }
+    let coordinator = crate::coordinator::start_coordinator_with_team(
+        &crate::coordinator::WorkspacePath::new(run_workspace.to_path_buf()),
+        Some(team_key),
+    )
+    .map_err(|error| LifecycleError::StatePersist(error.to_string()))?;
+    if let Some(reservation) = reservation {
+        reservation.commit();
+    }
+    Ok(AddAgentReport {
+        env: AgentActionEnvelope {
+            agent_id: agent_id.clone(),
+            state_file: crate::state::persist::runtime_state_path(run_workspace),
+            coordinator_started: coordinator.ok,
+        },
+        start_mode: StartMode::Fresh,
         role_file: role_file_path.to_path_buf(),
     })
 }

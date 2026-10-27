@@ -73,6 +73,16 @@ pub(super) fn attach_mcp_handshake_wait(
     if let (MessageTarget::Single(agent), DeliveryStatus::Queued, Some(object)) =
         (target, outcome.status, value.as_object_mut())
     {
+        // A contract seat's MCP binding is the framework's own; the legacy
+        // handshake gate does not apply and must not report a wait.
+        let contract = selected
+            .state
+            .get("agents")
+            .and_then(|agents| agents.get(agent.as_str()))
+            .is_some_and(crate::contract_runtime::framework::is_contract);
+        if contract {
+            return;
+        }
         if let Err(reason) = crate::mcp_server::readiness::preflight(
             &selected.run_workspace,
             Some(selected.team_key.as_str()),

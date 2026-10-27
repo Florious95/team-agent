@@ -157,6 +157,20 @@ pub(super) fn upsert_agent_state_from_role(
     meta: &Value,
     dynamic_role_file: &Path,
 ) -> Result<(), LifecycleError> {
+    let entry = starting_agent_entry(workspace, agent_id, meta, dynamic_role_file);
+    upsert_agent_entry(workspace, canonical_team_key, agent_id, entry)
+}
+
+/// ---
+/// purpose: 把一席的 starting 行写进团队 state 并落盘
+/// errors: 读或写 runtime state 失败时返回 StatePersist
+/// ---
+pub(super) fn upsert_agent_entry(
+    workspace: &Path,
+    canonical_team_key: &str,
+    agent_id: &AgentId,
+    entry: serde_json::Value,
+) -> Result<(), LifecycleError> {
     let mut state =
         crate::state::projection::select_runtime_state(workspace, Some(canonical_team_key))
             .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
@@ -179,7 +193,6 @@ pub(super) fn upsert_agent_state_from_role(
             "runtime state agents is not an object".to_string(),
         ));
     };
-    let entry = starting_agent_entry(workspace, agent_id, meta, dynamic_role_file);
     agent_map.insert(agent_id.as_str().to_string(), entry);
     crate::lifecycle::restart::remove::clear_agent_retirement_in_state(&mut state, agent_id);
     save_launched_team_state_for_key(

@@ -304,13 +304,13 @@ fn p5_json_shape_keeps_provider_keys_unknown_and_probe_not_run() {
         .get("providers")
         .and_then(Value::as_object)
         .expect("providers object");
+    assert!(providers.get("cursor_agent").is_none());
     for key in [
         "claude",
         "claude_code",
         "codex",
         "gemini_cli",
         "grok",
-        "cursor_agent",
     ] {
         let provider = providers.get(key).expect("provider key retained");
         assert_eq!(

@@ -1,5 +1,5 @@
 //!
-//! cli · leader — `codex`/`claude`/`copilot`/`grok`/`cursor` passthrough(`cmd_leader_passthrough` + `_provider_args` /
+//! cli · leader — `codex`/`claude`/`copilot`/`grok` passthrough(`cmd_leader_passthrough` + `_provider_args` /
 //! `_leader_launcher_args`)+ leader fallback inbox 摘要(`consume_leader_inbox_summary` 及
 //! `_leader_inbox_entries` / `_leader_inbox_summary` / `_leader_inbox_entry_title`)。
 
@@ -96,7 +96,7 @@ fn without_leader_json(values: &[String]) -> Vec<String> {
 }
 
 ///
-/// `codex`/`claude`/`copilot`/`grok`/`cursor` passthrough(`parser.py:86`/`_run_leader_passthrough`):leader 早返回,
+/// `codex`/`claude`/`copilot`/`grok` passthrough(`parser.py:86`/`_run_leader_passthrough`):leader 早返回,
 /// **不**进 subparser。`-h`/`--help` 打 usage 直接返回 [`CmdResult::none`]。否则解析 attach
 /// 旗标 + `lifecycle_port::start_leader`。`command` 必须是闭集动词,禁止 command-text 回落到 ClaudeCode。
 pub fn cmd_leader_passthrough(
@@ -140,7 +140,6 @@ pub(crate) fn leader_passthrough_provider(command: &str) -> Option<crate::model:
         "claude" => Some(Provider::ClaudeCode),
         "copilot" => Some(Provider::Copilot),
         "grok" => Some(Provider::Grok),
-        "cursor" => Some(Provider::CursorAgent),
         "pi" => Some(Provider::Pi),
         _ => None,
     }

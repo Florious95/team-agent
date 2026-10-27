@@ -78,7 +78,7 @@ pub(super) const CAPTURE_HEAD_BYTES: u64 = 65_536;
 ///   - spawn_cwd 递归最深 4 层;工作区是用户代码仓，任何名含 session 的 json 都会被列进来
 ///   - .team 运行时目录一律排除，除非它就在 claude 的隔离根之下
 ///   - 超过 300 条按 mtime 由新到旧截断;被截掉的候选不产生任何信号
-///   - Copilot / Grok / CursorAgent / GeminiCli / Fake 不走 HOME 分支——它们各有专属扫描
+///   - Copilot / Grok / GeminiCli / Fake 不走 HOME 分支——它们各有专属扫描
 /// ---
 pub(super) fn candidate_session_files(
     provider: Provider,
@@ -121,7 +121,6 @@ pub(super) fn candidate_session_files(
             }
             Provider::Copilot
             | Provider::Grok
-            | Provider::CursorAgent
             | Provider::Pi
             | Provider::GeminiCli
             | Provider::Fake => {}

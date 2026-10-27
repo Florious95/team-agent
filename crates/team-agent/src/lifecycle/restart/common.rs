@@ -464,44 +464,6 @@ pub(super) fn spawn_agent_window(
             &mut env,
         )?;
     }
-    // Keep provider/native cwd distinct from the real Team workspace. Cursor
-    // changes cwd to --workspace before writing its cwd-keyed session archive.
-    let mut native_spawn_cwd = spawn_cwd.to_path_buf();
-    // 0.5.67 Cursor 方案 1 变体: role 经 workspace rules 文件注入 (不 argv)。
-    if provider == crate::provider::Provider::CursorAgent {
-        crate::lifecycle::launch::refuse_second_cursor_occupant(
-            workspace,
-            agent_id.as_str(),
-            None,
-        )?;
-        crate::lifecycle::launch::apply_cursor_agent_rules_overlay(
-            workspace,
-            agent_id.as_str(),
-            &system_prompt,
-        )?;
-        let project = crate::lifecycle::launch::prepare_cursor_seat_mcp(
-            workspace,
-            agent_id.as_str(),
-            &mcp_config,
-        )?;
-        if let Some(primary) = project.as_ref() {
-            native_spawn_cwd = primary.clone();
-        }
-        crate::lifecycle::launch::enable_cursor_workspace_mcp_with_profile(
-            workspace,
-            project.as_deref(),
-            Some(&profile_launch),
-        )?;
-        crate::lifecycle::launch::apply_cursor_spawn_workspace_pointers(
-            &mut plan.argv,
-            workspace,
-            agent_id.as_str(),
-        )?;
-        crate::lifecycle::launch::apply_cursor_subscription_proxy_env_with_profile(
-            &mut env,
-            &profile_launch,
-        );
-    }
     if provider == crate::provider::Provider::Grok {
         crate::lifecycle::launch::ensure_grok_login_and_folder_trust(workspace)?;
         crate::lifecycle::launch::apply_grok_mcp_overlay(workspace, &mcp_config)?;
@@ -702,7 +664,7 @@ pub(super) fn spawn_agent_window(
         plan,
         profile_launch,
         layout_placement: layout_placement.cloned(),
-        spawn_cwd: native_spawn_cwd,
+        spawn_cwd: spawn_cwd.to_path_buf(),
         mcp_config_path,
         owner_team_id: team_id,
     })
@@ -1539,30 +1501,6 @@ pub(super) fn resume_backing_probe_for_agent(
                 }
                 None => false,
             }
-        }
-        Provider::CursorAgent => {
-            let spawn_cwd = agent
-                .get("spawn_cwd")
-                .and_then(serde_json::Value::as_str)
-                .map(PathBuf::from)
-                .unwrap_or_else(|| workspace.to_path_buf());
-            let rollout_ok = rollout_path.is_some_and(|path| {
-                crate::provider::session_scan::cursor::cursor_session_archive_present(path.as_path())
-            });
-            let discovered = crate::provider::session_scan::cursor::cursor_session_dir_for_cwd(
-                session_id.as_str(),
-                &spawn_cwd,
-            );
-            if let Some(dir) = discovered.as_ref() {
-                checked_paths.push(dir.clone());
-            }
-            if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-                checked_paths.push(home.join(".cursor").join("chats"));
-            }
-            rollout_ok
-                || discovered.as_ref().is_some_and(|dir| {
-                    crate::provider::session_scan::cursor::cursor_session_archive_present(dir)
-                })
         }
         Provider::Pi => {
             let spawn_cwd = agent

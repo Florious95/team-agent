@@ -63,10 +63,9 @@ fn codex_does_not_get_in_window_fork_command() {
 }
 
 #[test]
-fn copilot_cursor_gemini_stay_unverified_no_slash_fork() {
+fn copilot_gemini_stay_unverified_no_slash_fork() {
     for provider in [
         Provider::Copilot,
-        Provider::CursorAgent,
         Provider::GeminiCli,
     ] {
         assert_eq!(

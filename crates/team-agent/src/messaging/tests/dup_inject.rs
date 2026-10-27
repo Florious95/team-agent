@@ -31,7 +31,7 @@ use crate::transport::{
 #[test]
 #[cfg(unix)]
 fn eager_mcp_waits_without_spending_input_attempts_then_delivers_the_same_message() {
-    let mut case = WorkerCase::new("mcp-handshake", "cursor_agent");
+    let mut case = WorkerCase::new("mcp-handshake", "grok");
     let carrier = crate::mcp_server::readiness::test_carrier_pid().unwrap();
     let config = case.workspace.join(".team/runtime/mcp/w1.json");
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
@@ -69,7 +69,7 @@ fn eager_mcp_waits_without_spending_input_attempts_then_delivers_the_same_messag
 #[test]
 #[cfg(unix)]
 fn issue372_bounded_handshake_wait_parks_notifies_once_then_publish_delivers() {
-    let mut case = WorkerCase::new("mcp-handshake-park", "cursor_agent");
+    let mut case = WorkerCase::new("mcp-handshake-park", "grok");
     let carrier = crate::mcp_server::readiness::test_carrier_pid().unwrap();
     let config = case.workspace.join(".team/runtime/mcp/w1.json");
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
@@ -131,7 +131,7 @@ fn issue372_bounded_handshake_wait_parks_notifies_once_then_publish_delivers() {
 #[test]
 #[cfg(unix)]
 fn issue345_missing_eager_config_defers_without_input_or_attempts() {
-    let mut case = WorkerCase::new("missing-mcp-config", "cursor_agent");
+    let mut case = WorkerCase::new("missing-mcp-config", "grok");
     let carrier = crate::mcp_server::readiness::test_carrier_pid().unwrap();
     case.state["team_key"] = serde_json::json!("dup-team");
     case.state["agents"]["w1"]["pane_pid"] = serde_json::json!(carrier);
@@ -226,8 +226,8 @@ fn observer_state_save_failure_after_enter_does_not_return_err() {
 }
 
 #[test]
-fn pane_token_refuses_second_inject_for_claude_grok_cursor() {
-    for provider in ["claude", "grok", "cursor_agent"] {
+fn pane_token_refuses_second_inject_for_claude_grok() {
+    for provider in ["claude", "grok"] {
         let mut case = WorkerCase::new(&format!("token-{provider}"), provider);
         #[cfg(unix)]
         let carrier = crate::mcp_server::readiness::test_carrier_pid().unwrap();

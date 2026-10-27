@@ -2,10 +2,6 @@
 use super::super::tests::Sandbox;
 use super::*;
 
-#[cfg(unix)]
-#[path = "../../../tests/support/hermetic.rs"]
-mod hermetic_guard;
-
 fn fixture(ids: &[&str]) -> (Sandbox, Intent) {
     let root = Sandbox::new();
     std::fs::create_dir(root.path().join("agents")).unwrap();
@@ -452,116 +448,6 @@ fn preserve_rejects_known_missing_backing_before_stop_auto_uses_existing_decisio
     }
 }
 
-#[cfg(unix)]
-fn cursor_scope_fixture() -> (
-    hermetic_guard::HermeticTestEnv,
-    Sandbox,
-    SelectedTeam,
-    PathBuf,
-    Value,
-) {
-    let env = hermetic_guard::HermeticTestEnv::enter("cursor-intent-scope");
-    let (root, _) = fixture(&["one"]);
-    install(root.path(), &[("one", "stopped", true)]);
-    let selected =
-        resolve_active_team_readonly(root.path(), Some("fixture"), SelectorMode::RuntimeOnly)
-            .unwrap();
-    let config = crate::provider::McpConfig {
-        raw: json!({"team_orchestrator": {
-            "command": std::env::current_exe().unwrap(),
-            "args": ["mcp-server", "--workspace", root.path()],
-            "env": {"TEAM_AGENT_WORKSPACE": root.path(), "TEAM_AGENT_ID": "one", "TEAM_AGENT_OWNER_TEAM_ID": "fixture", "TEAM_AGENT_AUTH_MODE": "subscription"}
-        }}),
-    };
-    let primary = crate::lifecycle::launch::prepare_cursor_seat_mcp(root.path(), "one", &config)
-        .unwrap()
-        .unwrap();
-    let sid = "af3ce55e-2ee9-4bc5-8dae-b628e7447286";
-    let archive = env
-        .home()
-        .join(".cursor/chats")
-        .join(format!(
-            "{:x}",
-            md5::compute(primary.to_string_lossy().as_bytes())
-        ))
-        .join(sid);
-    std::fs::create_dir_all(&archive).unwrap();
-    std::fs::write(archive.join("meta.json"), b"{}").unwrap();
-    let row = json!({"provider":"cursor_agent","status":"stopped","explicit_stop":true,"session_id":sid,"rollout_path":archive,"spawn_cwd":primary});
-    (env, root, selected, primary, row)
-}
-
-#[test]
-#[cfg(unix)]
-#[serial_test::serial(env)]
-fn issue342_cursor_owned_primary_scope_is_readonly_and_exact() {
-    let (_env, root, selected, primary, row) = cursor_scope_fixture();
-    let state = crate::state::persist::runtime_state_path(root.path());
-    let record = root
-        .path()
-        .join(".team/runtime/provider-config/one/cursor-project.json");
-    let paths = [state, record, primary.join(".cursor/mcp.json")];
-    let before: Vec<_> = paths.iter().map(|p| std::fs::read(p).unwrap()).collect();
-    assert!(!primary.starts_with(root.path()));
-    for policy in [SessionPolicy::Preserve, SessionPolicy::Auto] {
-        assert!(preflight_start(&selected, "one", &row, policy).is_ok());
-    }
-    let after: Vec<_> = paths.iter().map(|p| std::fs::read(p).unwrap()).collect();
-    assert_eq!(
-        before, after,
-        "scope preflight must not write state, record or MCP config"
-    );
-
-    let mut foreign_provider = row.clone();
-    foreign_provider["provider"] = json!("pi");
-    assert!(preflight_start(&selected, "one", &foreign_provider, SessionPolicy::Auto).is_err());
-    let mut other_team = selected.clone();
-    other_team.team_key = "foreign-team".into();
-    assert!(preflight_start(&other_team, "one", &row, SessionPolicy::Preserve).is_err());
-    assert!(preflight_start(&selected, "two", &row, SessionPolicy::Preserve).is_err());
-    let outside = Sandbox::new();
-    let mut other_workspace = selected.clone();
-    other_workspace.run_workspace = outside.path().to_owned();
-    assert!(preflight_start(&other_workspace, "one", &row, SessionPolicy::Preserve).is_err());
-    assert!(!outside.path().join(".team").exists());
-}
-
-#[test]
-#[cfg(unix)]
-#[serial_test::serial(env)]
-fn issue342_cursor_scope_refuses_unrecorded_alias_and_replaced_incarnation() {
-    use std::os::unix::fs::{symlink, DirBuilderExt};
-    let (_env, root, selected, primary, row) = cursor_scope_fixture();
-    let record = root
-        .path()
-        .join(".team/runtime/provider-config/one/cursor-project.json");
-    let bytes = std::fs::read(&record).unwrap();
-    let retained = record.with_extension("retained");
-    std::fs::rename(&record, &retained).unwrap();
-    assert!(preflight_start(&selected, "one", &row, SessionPolicy::Preserve).is_err());
-    assert!(
-        !record.exists(),
-        "a same-named external directory is not authority to create a record"
-    );
-    std::fs::rename(retained, &record).unwrap();
-    let mut forged = row.clone();
-    let arbitrary = Sandbox::new();
-    forged["spawn_cwd"] = json!(arbitrary.path());
-    assert!(preflight_start(&selected, "one", &forged, SessionPolicy::Auto).is_err());
-    let alias = root.path().join("primary-alias");
-    symlink(&primary, &alias).unwrap();
-    forged["spawn_cwd"] = json!(alias);
-    assert!(preflight_start(&selected, "one", &forged, SessionPolicy::Preserve).is_err());
-    let old = primary.with_extension("retained");
-    std::fs::rename(&primary, old).unwrap();
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&primary)
-        .unwrap();
-    assert!(preflight_start(&selected, "one", &row, SessionPolicy::Auto).is_err());
-    assert_eq!(std::fs::read(record).unwrap(), bytes);
-}
-
 #[test]
 #[serial_test::serial(env)]
 fn changed_role_and_socket_refuse_in_the_real_readonly_recheck() {
@@ -637,10 +523,6 @@ fn stopped_text_without_physical_identity_is_unknown_and_standalone_source_keeps
 
 #[test]
 fn declared_provider_aliases_do_not_create_false_drift_or_absorb_native_routes() {
-    assert!(!drift(
-        &json!({"provider":"agent"}),
-        &json!({"provider":"cursor_agent"})
-    ));
     assert!(same_provider("claude-code", "claude_code"));
     assert!(!same_provider("cursor", "cursor_agent"));
     assert!(!same_provider("grok_build", "grok"));
@@ -712,8 +594,6 @@ fn provider_argv0_is_exact_basename_not_substring() {
     for argv0 in ["2.1.309", "claude-wrapper", "team-agent", "node", ""] {
         assert!(!argv0_names(argv0, Provider::Claude), "{argv0}");
     }
-    assert!(argv0_names("agent", Provider::CursorAgent));
-    assert!(!argv0_names("team-agent", Provider::CursorAgent));
 }
 
 #[test]

@@ -374,33 +374,15 @@ pub(crate) fn run_pi_catalog_preflight(
     })
 }
 
-mod cursor_mcp_iso;
-pub(crate) use cursor_mcp_iso::cursor_mcp_primary_matches_scope;
-pub use cursor_mcp_iso::{
-    cursor_mcp_isolation_enabled, cursor_mcp_json_path, cursor_mcp_project_dir,
-    materialize_cursor_mcp_project,
-};
-mod cursor_mcp;
-pub(crate) use cursor_mcp::apply_cursor_mcp_enable_profile_env;
-pub use cursor_mcp::{
-    apply_cursor_mcp_overlay, apply_cursor_spawn_workspace_pointers,
-    apply_cursor_workspace_physical_path, cursor_mcp_enable_argv, cursor_mcp_enable_working_dir,
-    enable_cursor_workspace_mcp, enable_cursor_workspace_mcp_with_profile, physical_workspace_path,
-    prepare_cursor_seat_mcp, refuse_second_cursor_occupant,
-};
-
-mod cursor_create_chat;
-
 mod worker_env;
 pub(super) use worker_env::*;
 pub(crate) use worker_env::{
-    apply_copilot_instructions_overlay, apply_cursor_agent_rules_overlay,
-    apply_cursor_subscription_proxy_env_with_profile, apply_mcp_auto_approval_env,
+    apply_copilot_instructions_overlay,
+    apply_mcp_auto_approval_env,
     apply_profile_launch_env, auth_mode_env_value, fill_spawn_placeholders,
     fill_spawn_placeholders_full, inherited_env_with_team_overrides, persist_command_plan_state,
     spawn_timestamp,
 };
-pub use worker_env::{apply_cursor_subscription_proxy_env, CursorProxyPresence};
 
 mod identity;
 pub(super) use identity::*;

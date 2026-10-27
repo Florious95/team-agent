@@ -18,10 +18,6 @@ const COMMAND_GRAMMAR_PROVIDER_COMMANDS: &[(&str, Provider)] = &[
     ("copilot", Provider::Copilot),
     ("gemini", Provider::GeminiCli),
     ("grok", Provider::Grok),
-    // NOTE: Cursor `agent` binary is NOT added here — command-text attribution
-    // is a substring contains() match in table order; `"agent"` would also
-    // match the framework's own `team-agent` binary and mis-attribute leader
-    // panes. CursorAgent panes need env/argv-based attribution (TODO 0.5.67).
     ("fake", Provider::Fake),
 ];
 
@@ -99,9 +95,6 @@ fn provider_from_command_text(text: &str) -> Option<Provider> {
     if pi_command_text(&lower) {
         return Some(Provider::Pi);
     }
-    if cursor_agent_command_text(&lower) {
-        return Some(Provider::CursorAgent);
-    }
     COMMAND_GRAMMAR_PROVIDER_COMMANDS
         .iter()
         .find_map(|(needle, provider)| lower.contains(needle).then_some(*provider))
@@ -117,29 +110,6 @@ fn pi_command_text(lower: &str) -> bool {
                 || token.ends_with("/pi")
                 || token.ends_with("\\pi.exe")
         })
-}
-
-/// Cursor 二进制名为 `agent`，不能做 substring contains（会误伤 `team-agent`）。
-/// 认精确 token `cursor-agent` / `…/agent`，且必须带 `--sandbox` 或 `--trust`。
-fn cursor_agent_command_text(lower: &str) -> bool {
-    let tokens: Vec<&str> = lower.split_whitespace().collect();
-    if tokens.iter().any(|tok| {
-        *tok == "team-agent"
-            || tok.ends_with("/team-agent")
-            || tok.ends_with("\\team-agent")
-    }) {
-        return false;
-    }
-    let is_cursor_bin = tokens.iter().any(|tok| {
-        *tok == "cursor-agent"
-            || *tok == "agent"
-            || tok.ends_with("/cursor-agent")
-            || tok.ends_with("/agent")
-            || tok.ends_with("\\cursor-agent")
-            || tok.ends_with("\\agent")
-    });
-    let has_cursor_flag = tokens.iter().any(|tok| *tok == "--sandbox" || *tok == "--trust");
-    is_cursor_bin && has_cursor_flag
 }
 
 fn provider_from_env_text(text: &str) -> Option<Provider> {
@@ -234,28 +204,6 @@ mod tests {
             attribute_command_provider("node /tmp/not-a-provider.js"),
             None
         );
-    }
-
-    #[test]
-    fn cursor_agent_basename_with_trust_is_attributed() {
-        assert_eq!(
-            attribute_command_provider("cursor-agent --trust --sandbox disabled --workspace /ws"),
-            Some(Provider::CursorAgent)
-        );
-        assert_eq!(
-            attribute_command_provider("agent --trust --sandbox disabled --workspace /ws"),
-            Some(Provider::CursorAgent)
-        );
-    }
-
-    #[test]
-    fn team_agent_binary_is_not_cursor() {
-        assert_ne!(
-            attribute_command_provider("team-agent --trust claude"),
-            Some(Provider::CursorAgent)
-        );
-        assert_eq!(attribute_command_provider("team-agent status"), None);
-        assert_eq!(attribute_command_provider("agent"), None);
     }
 
     #[test]

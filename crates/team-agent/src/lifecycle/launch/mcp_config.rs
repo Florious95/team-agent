@@ -472,8 +472,8 @@ fn grok_trusted_folders(text: &str) -> Vec<PathBuf> {
 /// returns: 成功返回空值；写前先清 per-seat 键，已有表里的未知环境键会被保留
 /// errors: 缺条目或缺 command 时返回 StatePersist，清洗失败透传 RequirementUnmet，写文件失败返回 StatePersist
 /// ---
-/// Grok CLI 没有 `--mcp-config`。同 `apply_cursor_agent_rules_overlay`：launch
-/// 路径写一份 provider 实际会读的文件。Grok 只认项目作用域
+/// Grok CLI 没有 `--mcp-config`。launch 路径写一份 provider 实际会读的文件。
+/// Grok 只认项目作用域
 /// `<cwd>/.grok/config.toml`（`grok mcp add --scope project` 的产物）。
 ///
 /// Unique writer of `<cwd>/.grok/config.toml`. Reconcile leftover per-seat

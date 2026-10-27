@@ -377,8 +377,8 @@ fn spine_delivery_busy_recipient_is_injected_without_idle_deferral() {
 }
 
 #[test]
-fn spine_delivery_pi_cursor_uses_v113_direct_input_without_idle_scope() {
-    for provider in ["pi", "cursor_agent"] {
+fn spine_delivery_pi_uses_v113_direct_input_without_idle_scope() {
+    for provider in ["pi"] {
         let ws = tmp_ws(&format!("direct-input-{provider}"));
         let store = store_for(&ws);
         let log = EventLog::new(&ws);
@@ -404,10 +404,6 @@ fn spine_delivery_pi_cursor_uses_v113_direct_input_without_idle_scope() {
         }}});
         state["teams"] = serde_json::json!({"spine-team": state.clone()});
         crate::state::persist::save_runtime_state(&ws, &state).unwrap();
-        #[cfg(unix)]
-        if provider == "cursor_agent" {
-            crate::mcp_server::readiness::publish(&ws, "spine-team", "w1", chrono::Utc::now()).unwrap();
-        }
         let transport = DeliverOkTransport { targets: vec![PaneInfo {
             pane_id: PaneId::new("%spine"), session: SessionName::new("spine"),
             window_index: None, window_name: Some(WindowName::new("w1")), pane_index: None, tty: None,

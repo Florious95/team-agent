@@ -48,7 +48,7 @@
 | Codex | `-c` 配置、JSONL turn/fault、native catalog；leader 另有 app-server | `caps.fork=true` 不等公开 `fork-agent` 可用；普通 worker 仍走 CLI |
 | Claude / ClaudeCode | prompt/permission flags、inline/file/managed MCP、projects root、JSONL | 两个 wire 值同一 executable；native/compatible 的会话与 profile 门不同 |
 | Pi | owned extension、runtime MCP、live exact catalog、exact-path resume、完整快照新席 fork | 旧 adapter launch/resume 不适用；没有专用 semantic turn reader；单 Enter helper 未生产接线 |
-| CursorAgent | isolated project、rules、MCP 文件与 enable、archive/chatId | 所有 role effort 拒绝；输入重按有 busy guard；不得改 HOME 来隔离 |
+| Cursor（契约叶 `cursor`；`cursor-agent`/`agent`/`cursor_agent` 均为声明名） | 公开 `cursor-agent`、私有 cwd 的 owned `.cursor/mcp.json` + `--approve-mcps`、`create-chat` 精确 chatId | 旧 `cursor_agent` 引擎已移除；所有 role effort 拒绝；旧 state 行只准 stop/remove |
 | Grok | rules/session argv、目录 MCP、login/trust、原窗 `/fork`、native queue | 目录配置有独占限制；catalog 可见不是登录证明；队列收下不是新 turn |
 | GeminiCli | 最小 `gemini [--model RAW]`、共享宿主、遗留 global installer | 无公开 native leader verb / catalog / resume / fork；普通 spawn MCP 连通未证 |
 
@@ -229,7 +229,7 @@ Hook 路由唯一化：P2→H1，P3→H2，P4→H3，P6/P8 的 native UI→H6，
 
 role effort 优先 TEAM；Pi 不继承 TEAM；两者没有就 native default。parse trim 但大小写敏感。`ultra` 含 Codex client delegation，不准降成 max。支持 flag 不证明每模型支持该档。新 Provider 对六档逐项作准入决策；新接入不复制 Gemini 的历史忽略习惯作为缺省。
 
-Codex carrier 为 `-c model_reasoning_effort=LEVEL` 且在 profile config 后，Claude/Grok 为 `--effort`，Pi 为 `--thinking`；Cursor/Gemini 无该 flag。既有 inner 错误保字节：`cursor_agent does not support effort; the Cursor CLI has no --effort flag`、`effort 'ultra' is only supported by codex`、`effort 'max' is only supported by claude/claude_code/codex/pi`。各 CLI/compiler/spec/runtime wrapper、聚合顺序与 raw/trim 仍各有合同，不能只比较 inner 就声称公开错误等价。
+Codex carrier 为 `-c model_reasoning_effort=LEVEL` 且在 profile config 后，Claude/Grok 为 `--effort`，Pi 为 `--thinking`；Cursor/Gemini 无该 flag。Cursor 契约叶以模型 ID 承载 effort，任何 effort 被描述符拒绝。既有 inner 错误保字节：`effort 'ultra' is only supported by codex`、`effort 'max' is only supported by claude/claude_code/codex/pi`。各 CLI/compiler/spec/runtime wrapper、聚合顺序与 raw/trim 仍各有合同，不能只比较 inner 就声称公开错误等价。
 
 Pi 特例保留：compile shape 校验不是 launch exact membership；首次 slash 两边非空不意味着只能一个 slash；内部空格可属于 exact ID；final raw 与 trim 不等要拒绝。非 Pi `validate_model=Ok(true)` 不是强验证；`verify_started_pi_model` 有定义/测试不等生产已用。
 

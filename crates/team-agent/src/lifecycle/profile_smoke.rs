@@ -232,10 +232,9 @@ impl SmokeTarget {
             }
             // C-7-1 cr verdict: copilot 一期 subscription-only,无 BYOK HTTP smoke
             // 入口;同 GeminiCli/Fake 走 unsupported_provider_smoke_skipped。
-            // 0.5.67: grok/cursor_agent 同走 skipped (一期 subscription 已登录态)。
+            // 0.5.67: grok 同走 skipped (一期 subscription 已登录态)。
             Provider::Copilot
             | Provider::Grok
-            | Provider::CursorAgent
             | Provider::Pi
             | Provider::GeminiCli
             | Provider::Fake => {

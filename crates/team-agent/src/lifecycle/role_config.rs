@@ -115,7 +115,19 @@ fn add_at_selected(
         Some(path) => read_text(path)?,
         None => String::new(),
     };
-    let reconciled = reconcile_creation(&text, patch)?;
+    #[allow(unused_mut)]
+    let mut reconciled = reconcile_creation(&text, patch)?;
+    // A generated legacy role falls back to its id as instructions at compile
+    // time; a contract role requires a body, so give it a neutral default.
+    #[cfg(unix)]
+    if source.is_none()
+        && reconciled.prompt.is_none()
+        && crate::contract_runtime::framework::declares_contract(None, reconciled.provider.as_deref())
+    {
+        reconciled.prompt = Some(format!(
+            "You are {agent_id}. Complete the tasks assigned by the leader.\n"
+        ));
+    }
     let next = patched_role(&text, agent_id, &reconciled, source.is_none())?;
     let snapshot = RoleSnapshot::capture(selected, &role_path)?;
     let result = (|| {
@@ -330,11 +342,12 @@ fn reconcile_creation(
         .get("provider")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty());
+    let opted_in = matches!(meta.get("contract_runtime"), Some(Value::Bool(true)));
     if let Some(file_provider) = file_provider {
-        let file_provider = crate::provider::wire::parse_provider(file_provider)
+        let file_provider = declared_provider(file_provider, opted_in)
             .ok_or_else(|| LifecycleError::Compile("unknown role provider".into()))?;
         if let Some(provider) = &next.provider {
-            if crate::provider::wire::parse_provider(provider) != Some(file_provider) {
+            if declared_provider(provider, opted_in) != Some(file_provider) {
                 return Err(conflict("provider"));
             }
             next.provider = None;
@@ -398,6 +411,18 @@ fn reconcile_creation(
         }
     }
     Ok(next)
+}
+
+/// One identity per declared provider: its contract leaf id, else its legacy
+/// wire form, so `agent` in a role file and `--provider cursor` agree.
+fn declared_provider(value: &str, contract_runtime: bool) -> Option<&'static str> {
+    #[cfg(unix)]
+    if let Some(descriptor) = crate::contract_runtime::registry::declared(value, contract_runtime) {
+        return Some(descriptor.identity.id);
+    }
+    #[cfg(not(unix))]
+    let _ = contract_runtime;
+    crate::provider::wire::parse_provider(value).map(crate::provider::wire::provider_wire)
 }
 
 fn role_path(selected: &SelectedTeam, agent_id: &AgentId) -> PathBuf {
@@ -973,6 +998,20 @@ mod tests {
             let text =
                 format!("---\n{field}: true\ndangerously_skip_permissions: false\n---\nbody");
             assert!(reconcile_creation(&text, &supplied).is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cursor_names_in_a_role_file_and_cli_are_one_provider() {
+        for file in ["cursor", "cursor-agent", "agent", "cursor_agent"] {
+            let text = format!("---\nprovider: {file}\ndangerously_skip_permissions: true\n---\nbody");
+            for cli in ["cursor", "agent"] {
+                let patch = RoleConfigPatch { provider: Some(cli.into()), ..Default::default() };
+                assert_eq!(reconcile_creation(&text, &patch).unwrap(), RoleConfigPatch::default(), "{file}/{cli}");
+            }
+            let pi = RoleConfigPatch { provider: Some("pi".into()), ..Default::default() };
+            assert!(reconcile_creation(&text, &pi).is_err(), "{file}");
         }
     }
 
