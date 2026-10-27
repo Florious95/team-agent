@@ -80,12 +80,14 @@ pub fn resolve_fork(
     } else {
         ResumeMode::ExactId
     };
+    // The source is validated in its own captured cwd; `request.cwd` is the
+    // target launch cwd. A private-primary new seat never shares the parent's.
     validate_resume(
         &request.source,
         &ResumeExpectation {
             provider: &provider,
             source: &request.expected_source,
-            cwd: &request.cwd,
+            cwd: &request.source.cwd,
             native: &request.native,
             evidence_kind: request.evidence_kind,
             mode,
@@ -93,7 +95,8 @@ pub fn resolve_fork(
     )?;
     let same = request.target == request.expected_source;
     if request.target.scope != request.expected_source.scope
-        || (request.mode == ForkMode::InWindowBranch && !same)
+        || (request.mode == ForkMode::InWindowBranch
+            && (!same || request.cwd != request.source.cwd))
         || (request.mode != ForkMode::InWindowBranch
             && (request.target.seat == request.expected_source.seat
                 || request.target.instance == request.expected_source.instance))
@@ -160,6 +163,31 @@ pub fn resolve_fork(
     }
     Ok(ResolvedFork {
         request: request.clone(),
+    })
+}
+
+/// Framework policy for a distinct target seat: the provider's own native fork
+/// first, then a framework-staged full snapshot. When neither is admitted the
+/// native facet's own refusal (Unsupported/Unverified + reason) is returned
+/// before any key, seat, pane or file effect.
+pub fn select_new_seat_mode(descriptor: &ProviderDescriptor) -> Result<ForkMode, ContractError> {
+    match descriptor.fork.native_new_seat.require("native new seat") {
+        Ok(_) => Ok(ForkMode::NativeNewSeat),
+        Err(_) if descriptor.fork.full_snapshot.is_supported() => Ok(ForkMode::NewSeatFullSnapshot),
+        Err(refusal) => Err(refusal),
+    }
+}
+
+/// H7 for every leaf whose own CLI performs the fork: a pure intent with no
+/// staging I/O. The native argv itself is H2's, from the same ResolvedFork.
+pub fn native_new_seat_stage(resolved: &ResolvedFork) -> Result<NativeForkPlan, ContractError> {
+    let request = resolved.request();
+    if request.mode != ForkMode::NativeNewSeat {
+        return Err(ContractError::Mismatch("native new-seat stage mode"));
+    }
+    Ok(NativeForkPlan::NativeNewSeat {
+        source: Box::new(request.source.clone()),
+        target: request.target.clone(),
     })
 }
 

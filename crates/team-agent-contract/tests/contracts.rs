@@ -1605,3 +1605,42 @@ fn read_bounds_are_finite_and_positive() {
     .validate()
     .is_ok());
 }
+
+#[test]
+fn new_seat_fork_runs_in_its_own_cwd_and_a_preassigned_child_is_typed() {
+    let d = fork_descriptor();
+    let mut request = new_seat_fork(ForkMode::NativeNewSeat);
+    // A private-primary target never shares the parent's captured cwd.
+    request.cwd = CwdIdentity { path: "/fixture/child-primary".into(), identity: HASH };
+    let fork = resolve_fork(&d, &hooks(), &request).unwrap();
+    let mut launch = fork_launch(&fork);
+    launch.paths.cwd = request.cwd.clone();
+    assert!(matches!(
+        resolve_launch(&d, &hooks(), &launch, Some(&catalog())).unwrap().expected_session(),
+        ExpectedSession::CaptureAfterNativeFork { .. }
+    ));
+    // An in-window branch stays in the parent's own cwd.
+    let mut in_window = fork_request(ForkMode::InWindowBranch);
+    in_window.cwd = request.cwd.clone();
+    assert!(resolve_fork(&descriptor(), &hooks(), &in_window).is_err());
+    // Preassigned-session providers carry the derived child, never the parent.
+    let mut d = fork_descriptor();
+    d.session.fresh = FreshSession::Preassigned;
+    let fork = resolve_fork(&d, &hooks(), &request).unwrap();
+    let mut launch = fork_launch(&fork);
+    launch.paths.cwd = request.cwd.clone();
+    assert!(resolve_launch(&d, &hooks(), &launch, Some(&catalog())).is_err(), "a preassigned child is required");
+    let child = NativeSessionId::new("native-child").unwrap();
+    launch.preassigned_session = Some(child.clone());
+    assert_eq!(
+        resolve_launch(&d, &hooks(), &launch, Some(&catalog())).unwrap().expected_session(),
+        &ExpectedSession::PreassignedNativeFork { parent: request.source.native_session.clone(), child }
+    );
+    launch.preassigned_session = Some(request.source.native_session.clone());
+    assert!(resolve_launch(&d, &hooks(), &launch, Some(&catalog())).is_err());
+    // Mode policy: the native facet first; otherwise its own refusal reason.
+    assert_eq!(select_new_seat_mode(&d).unwrap(), ForkMode::NativeNewSeat);
+    assert!(matches!(select_new_seat_mode(&descriptor()), Err(ContractError::Unverified { .. })));
+    let stage = native_new_seat_stage(&fork).unwrap();
+    assert!(validate_native_fork_plan(&fork, &stage).is_ok());
+}

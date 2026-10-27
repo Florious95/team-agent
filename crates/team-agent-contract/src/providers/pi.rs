@@ -58,17 +58,21 @@ impl PlanHook for PiAdapter {
         if resolved.provider().as_str() != ID || r.native != runtime.native || r.paths.executable != runtime.engine
             || r.paths.launcher != runtime.launcher()
             || !interaction::PROFILES[0].matches_native(&r.native) || r.channel != Channel::Tmux || r.mode != LaunchMode::FullWorker
-            || r.auth != AuthMode::NativeSubscription || self.mcp.executable != r.paths.candidate || !matches!(r.operation, Operation::Fresh | Operation::Resume)
+            || r.auth != AuthMode::NativeSubscription || self.mcp.executable != r.paths.candidate
+            || !matches!(r.operation, Operation::Fresh | Operation::Resume | Operation::NativeNewSeat)
             || r.bypass
         { return Err(ContractError::Mismatch("Pi native launch identity")); }
         if r.paths.cwd.path == *project { return Err(ContractError::Invalid("Pi private primary required")); }
         let prompt = r.prompt.as_ref().ok_or(ContractError::Invalid("Pi worker prompt"))?;
         let mcp = self.mcp_resource(r.identity.clone(), r.paths.cwd.path.clone())?;
         let prompt = OwnedResourceRequest { owner: r.identity.clone(), path: OwnedPath::new(r.paths.cwd.path.clone(), PROMPT_FILE.into())?, kind: ResourceKind::Prompt, contents: prompt.as_bytes().to_vec() };
-        let resume = match resolved.expected_session() {
+        // `--fork <uuid>` finds the parent in Pi's session tree from any cwd and
+        // writes a new session (header `parentSession`) in this seat's own store.
+        let session = match resolved.expected_session() {
             ExpectedSession::CaptureAfterLaunch => None,
-            ExpectedSession::Resume(binding) if session_uuid(binding.native_session.as_str()) => Some(binding.native_session.as_str()),
-            _ => return Err(ContractError::Invalid("Pi fresh/current or exact resume only")),
+            ExpectedSession::Resume(binding) if session_uuid(binding.native_session.as_str()) => Some(("--session", binding.native_session.as_str())),
+            ExpectedSession::CaptureAfterNativeFork { parent } if session_uuid(parent.as_str()) => Some(("--fork", parent.as_str())),
+            _ => return Err(ContractError::Invalid("Pi fresh/current, exact resume or native fork only")),
         };
         // --no-approve decides project trust in argv, so no trust screen opens
         // and no project-local resource loads in the private cwd. The owned
@@ -84,7 +88,7 @@ impl PlanHook for PiAdapter {
         };
         // An exact ID resolves only in this cwd's own session store; a missing
         // one exits instead of starting fresh.
-        if let Some(id) = resume { arguments.extend(["--session".into(), id.into()]); }
+        if let Some((flag, id)) = session { arguments.extend([flag.into(), id.into()]); }
         // The pane execs bare `pi` through PATH, so the user's wrapper runs and
         // keeps the name. The engine is only the image that route must exec into.
         Ok(LaunchPlan { executable: runtime.engine.clone(), launcher: r.paths.launcher.clone(), arguments, executable_inputs: vec![], cwd: r.paths.cwd.path.clone(),
@@ -126,8 +130,9 @@ impl CatalogHook for PiAdapter {
         Ok(CatalogObservation { provider: request.provider.clone(), native: request.native.clone(), schema: request.source.schema.into(), models: catalog::parse_catalog(&output.stdout).map_err(ReadFailure::Error)? })
     }
 }
+/// Pi's own `--fork <uuid>` performs the copy; nothing is staged.
 impl ForkHook for PiAdapter {
-    fn stage(&self, _request: &ResolvedFork, _io: &mut dyn OwnedIo) -> Result<NativeForkPlan, PartialFailure> {
-        Err(failure(ContractError::Unverified { field: "Pi fork lineage", reason: UNVERIFIED }, vec![]))
+    fn stage(&self, request: &ResolvedFork, _io: &mut dyn OwnedIo) -> Result<NativeForkPlan, PartialFailure> {
+        native_new_seat_stage(request).map_err(|error| failure(error, vec![]))
     }
 }

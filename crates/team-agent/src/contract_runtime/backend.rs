@@ -225,7 +225,7 @@ fn workspace_socket(path: &Path) -> Result<Option<(u64, u64)>, BackendError> {
 
 /// The selected root transport is authority; ambient TMUX is never a selector.
 /// This runs only in the owning lifecycle action, after native F0 admission.
-fn workspace_tmux(
+pub(super) fn workspace_tmux(
     binding: &Binding,
     seat: &SeatId,
     claim: Option<&team_agent_contract::host::transport::TargetReceipt>,
@@ -396,7 +396,7 @@ pub(super) fn adapter(
         BTreeMap::new(),
     )?.with_launch_context(binding.workspace.path.clone(), None)?)
 }
-fn launch_adapter(
+pub(super) fn launch_adapter(
     binding: &Binding,
     identity: &InstanceIdentity,
     provider: &ProviderId,
@@ -406,7 +406,7 @@ fn launch_adapter(
         binding.workspace.path.clone(), discovered.runtime.clone(),
     )?)
 }
-fn request(
+pub(super) fn request(
     binding: &Binding,
     role: &RoleConfig,
     identity: InstanceIdentity,
@@ -482,7 +482,7 @@ fn preflight_request(
 
 /// Providers whose native config search would otherwise inherit a Git or
 /// project configuration ancestor. Metadata only; no body is read.
-fn require_private_primary(
+pub(super) fn require_private_primary(
     selected: registry::NativeProvider,
     cwd: &team_agent_contract::contract::session::CwdIdentity,
 ) -> Result<(), BackendError> {
@@ -589,7 +589,7 @@ fn existing_start(backend: &Backend, seat: &SeatId) -> Result<Option<ExistingSta
         else { ExistingStart::Committed(record) }))
 }
 
-fn require_candidate(binding: &Binding) -> Result<(), BackendError> {
+pub(super) fn require_candidate(binding: &Binding) -> Result<(), BackendError> {
     let candidate = std::env::current_exe()?.canonicalize()?;
     if candidate != binding.candidate || fingerprint_file(&candidate, 1024 * 1024 * 1024,
         Duration::from_secs(10))? != binding.candidate_sha256 { return Err(Error::Fence.into()); }
@@ -694,6 +694,59 @@ fn finish_receipt(backend: &mut Backend, record: OperationRecord) -> Result<Oper
     Ok(Lifecycle { store: &mut backend.store, host: &mut host, io: &mut NoNewIo }.recover(&record.id)?)
 }
 
+/// No creation receipt, unfinished lease or seat exists for this ID.
+pub(super) fn seat_unclaimed(backend: &Backend, seat: &SeatId) -> Result<bool, BackendError> {
+    Ok(existing_start(backend, seat)?.is_none())
+}
+
+/// Team-level forwarding peers (legacy members and the leader) that every new
+/// native seat's framework route depends on. Shared by fresh start and fork.
+pub(super) fn publish_framework_routes(backend: &mut Backend, members: &[MemberRoute]) -> Result<(), BackendError> {
+    let route = backend.binding.framework().route()?;
+    let mut peers: Vec<_> = members
+        .iter()
+        .filter(|member| member.runtime == RuntimeFamily::Legacy)
+        .map(
+            |member| team_agent_contract::orchestration::forward::FrameworkPeer {
+                recipient: member.id.clone(),
+                route: route.clone(),
+                provider: member.provider.clone(),
+            },
+        )
+        .collect();
+    peers.push(team_agent_contract::orchestration::forward::FrameworkPeer {
+        recipient: "leader".into(),
+        route: route.clone(),
+        provider: "framework".into(),
+    });
+    backend.store.set_framework_routes(&peers, Some(&route))?;
+    Ok(())
+}
+
+/// The native session ID a launch names before spawn, for the leaves whose
+/// fresh session is `Preassigned`. Shared by fresh start and a native fork's child.
+pub(super) fn preassign_session(
+    selected: registry::NativeProvider,
+    request: &mut LaunchRequest,
+    discovered: &Discovery,
+) -> Result<(), BackendError> {
+    if selected == registry::NativeProvider::Claude {
+        // `--session-id` names the new session; derived from this proposed instance.
+        request.preassigned_session = Some(team_agent_contract::providers::claude::session_id(&request.identity));
+    }
+    if let Some(registry::NativeRuntime::Cursor(runtime)) = &discovered.runtime {
+        request.preassigned_session = Some(
+            team_agent_contract::providers::cursor::native::allocate_chat(
+                runtime, &request.paths.cwd, &mut RealCommandRunner::default(),
+                team_agent_contract::contract::hooks::ReadBounds {
+                    deadline: Duration::from_secs(90), max_output_bytes: 1024 * 1024,
+                },
+            ).map_err(|error| BackendError::Discovery(DiscoveryError::Catalog(error)))?,
+        );
+    }
+    Ok(())
+}
+
 /// Fresh startup is distinct from resume. An existing generation is never
 /// silently replaced with a new native session.
 pub fn start(
@@ -782,24 +835,7 @@ pub fn start(
     if existing_start(&backend, &role.id)?.is_some() {
         return Err(Error::Conflict.into());
     }
-    let route = backend.binding.framework().route()?;
-    let mut peers: Vec<_> = members
-        .iter()
-        .filter(|member| member.runtime == RuntimeFamily::Legacy)
-        .map(
-            |member| team_agent_contract::orchestration::forward::FrameworkPeer {
-                recipient: member.id.clone(),
-                route: route.clone(),
-                provider: member.provider.clone(),
-            },
-        )
-        .collect();
-    peers.push(team_agent_contract::orchestration::forward::FrameworkPeer {
-        recipient: "leader".into(),
-        route: route.clone(),
-        provider: "framework".into(),
-    });
-    backend.store.set_framework_routes(&peers, Some(&route))?;
+    publish_framework_routes(&mut backend, members)?;
     let identity = backend.store.propose_identity(&role.id)?;
     let server_key = selected.server_key_for(&identity)?;
     write_role(&backend.binding, &identity, role)?;
@@ -810,20 +846,7 @@ pub fn start(
         request.paths.cwd = super::workspace::prepare(&backend.binding, &role.id)?;
     }
     require_private_primary(selected, &request.paths.cwd)?;
-    if selected == registry::NativeProvider::Claude {
-        // `--session-id` names the fresh session; derived from this proposed instance.
-        request.preassigned_session = Some(team_agent_contract::providers::claude::session_id(&request.identity));
-    }
-    if let Some(registry::NativeRuntime::Cursor(runtime)) = &discovered.runtime {
-        request.preassigned_session = Some(
-            team_agent_contract::providers::cursor::native::allocate_chat(
-                runtime, &request.paths.cwd, &mut RealCommandRunner::default(),
-                team_agent_contract::contract::hooks::ReadBounds {
-                    deadline: Duration::from_secs(90), max_output_bytes: 1024 * 1024,
-                },
-            ).map_err(|error| BackendError::Discovery(DiscoveryError::Catalog(error)))?,
-        );
-    }
+    preassign_session(selected, &mut request, &discovered)?;
     let resolved = resolve_launch(
         descriptor,
         &hooks,
@@ -1035,7 +1058,7 @@ fn role_path(binding: &Binding, identity: &InstanceIdentity) -> PathBuf {
         "role-{}-{}.json", identity.seat.as_str(), identity.instance.as_str(),
     ))
 }
-fn write_role(binding: &Binding, identity: &InstanceIdentity, role: &RoleConfig) -> Result<(), BackendError> {
+pub(super) fn write_role(binding: &Binding, identity: &InstanceIdentity, role: &RoleConfig) -> Result<(), BackendError> {
     use std::os::unix::fs::OpenOptionsExt;
     if identity.scope != binding.scope || identity.seat != role.id {
         return Err(BackendError::Metadata);

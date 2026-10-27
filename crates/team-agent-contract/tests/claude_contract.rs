@@ -3,7 +3,7 @@
 #![cfg(unix)]
 mod support;
 use std::{collections::BTreeMap, ffi::OsString, os::unix::fs::PermissionsExt, path::{Path, PathBuf}, time::Duration};
-use team_agent_contract::contract::{delivery::*, descriptor::*, hooks::*, plan::*, probe::*, session::*, types::*};
+use team_agent_contract::contract::{delivery::*, descriptor::*, fork::{resolve_fork, select_new_seat_mode, ForkMode, ForkRequest}, hooks::*, plan::*, probe::*, session::*, types::*};
 use team_agent_contract::host::{command::*, digest, process::resolve_cwd};
 use team_agent_contract::providers::claude::{catalog::*, interaction::*, launcher::*, *};
 
@@ -65,7 +65,11 @@ fn all_facets_and_hooks_disclose_owned_argv_server_and_preassigned_session_under
     for operation in [Operation::Catalog, Operation::Fresh, Operation::Resume, Operation::FirstBusiness, Operation::OrdinarySend, Operation::Stop] {
         validate_descriptor(&CLAUDE_DESCRIPTOR, &hooks, operation).unwrap();
     }
-    for operation in [Operation::NativeNewSeat, Operation::NewSeatFullSnapshot, Operation::InWindowBranch] {
+    // A distinct new seat forks through the provider's own CLI; snapshot and
+    // in-window branches stay closed.
+    validate_descriptor(&CLAUDE_DESCRIPTOR, &hooks, Operation::NativeNewSeat).unwrap();
+    assert_eq!(select_new_seat_mode(&CLAUDE_DESCRIPTOR).unwrap(), ForkMode::NativeNewSeat);
+    for operation in [Operation::NewSeatFullSnapshot, Operation::InWindowBranch] {
         assert!(validate_descriptor(&CLAUDE_DESCRIPTOR, &hooks, operation).is_err(), "{operation:?}");
     }
     assert_eq!(CLAUDE_DESCRIPTOR.mcp.carrier, Support::Supported(McpCarrier::Argv));
@@ -561,4 +565,47 @@ fn legacy_composer_reads_normalized_captures_without_changing_contract_admission
     assert_eq!(inspect(folded), Some((InputSurface::ComposerContainsPaste, "[Pasted text #1 +134 lines]".into())));
     assert_eq!(inspect("plain shell $ "), None);
     assert!(spinner_row("· Percolating…") && !spinner_row("✻ Worked for 3s"));
+}
+
+#[test]
+fn native_fork_reads_the_parent_transcript_by_path_into_a_new_preassigned_child() {
+    let sandbox = support::Sandbox::new();
+    let command = PublicCommand::resolve("claude", native_install(&sandbox.parent, "2.1.309").as_os_str()).unwrap();
+    let project = sandbox.parent.join("project");
+    let (a, parent, catalog, runtime) = claude_launch(&sandbox, &command, &project);
+    // The parent session was captured in the parent's own private primary.
+    let source = ResumeBinding { provider: ProviderId::new(ID).unwrap(), native_session: NativeSessionId::new(SID).unwrap(),
+        storage: SessionStorage::Local, cwd: CwdIdentity { path: "/private/tmp/ta-0123/workspaces/opus.arch_x".into(), identity: digest(b"parent cwd") },
+        native: parent.native.clone(), source: parent.identity.clone(), origin: CaptureOrigin::ExplicitResumeLaunch,
+        evidence_kind: parent.evidence_kind, evidence_sha256: digest(SID.as_bytes()), backing: None };
+    let transcript = transcript_path(runtime.home(), &source).unwrap();
+    assert_eq!(transcript, runtime.home().join(".claude/projects/-private-tmp-ta-0123-workspaces-opus-arch-x").join(format!("{SID}.jsonl")));
+    let mut r = parent.clone();
+    r.identity.seat = SeatId::new("worker-fork").unwrap();
+    r.identity.instance = InstanceId::new("fork-1").unwrap();
+    r.operation = Operation::NativeNewSeat;
+    r.preassigned_session = Some(session_id(&r.identity));
+    let request = ForkRequest { mode: ForkMode::NativeNewSeat, auth: r.auth, source: source.clone(), expected_source: parent.identity.clone(),
+        target: r.identity.clone(), target_native_session: None, target_backing: None, channel: r.channel, input_profile: r.input_profile.clone(),
+        cwd: r.paths.cwd.clone(), native: r.native.clone(), evidence_kind: r.evidence_kind, selected_turn: None,
+        operation_id: OperationId::new("fork-1").unwrap() };
+    r.fork = Some(Box::new(resolve_fork(&CLAUDE_DESCRIPTOR, &a.hooks(), &request).unwrap()));
+    let built = plan(&a, &r, &catalog).unwrap();
+    let args = strings(&built);
+    let child = session_id(&r.identity);
+    assert_eq!(&args[args.len() - 5..], ["--resume", transcript.to_str().unwrap(), "--fork-session", "--session-id", child.as_str()]);
+    // A session name is drawn inside the prompt-box border (not this profile's
+    // composer): never passed. A resumed history never opens the summary modal.
+    assert!(!args.iter().any(|arg| arg == "--name"));
+    assert!(built.environment.set.contains_key(RESUME_THRESHOLD));
+    assert!(!plan(&a, &parent, &catalog).unwrap().environment.set.contains_key(RESUME_THRESHOLD), "fresh launches are unchanged");
+    assert_eq!(built.expected_session, ExpectedSession::PreassignedNativeFork { parent: source.native_session.clone(), child });
+    // The parent's own ID as the child, or no derived child at all, never launches.
+    let mut same = r.clone(); same.preassigned_session = Some(source.native_session.clone());
+    assert!(plan(&a, &same, &catalog).is_err());
+    let mut missing = r.clone(); missing.preassigned_session = None;
+    assert!(plan(&a, &missing, &catalog).is_err());
+    // An over-long directory name is hashed natively: refused, never guessed.
+    let mut long = source.clone(); long.cwd.path = PathBuf::from(format!("/{}", "a".repeat(240)));
+    assert!(transcript_path(runtime.home(), &long).is_err());
 }

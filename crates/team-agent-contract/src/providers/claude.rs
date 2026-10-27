@@ -7,9 +7,12 @@ pub mod interaction;
 pub mod launcher;
 pub use descriptor::{CLAUDE_DESCRIPTOR, ID, UNVERIFIED};
 use std::{collections::{BTreeMap, BTreeSet}, ffi::OsString, path::{Path, PathBuf}};
-use crate::contract::{descriptor::*, fork::*, hooks::*, plan::*, session::NativeSessionId, types::*};
+use crate::contract::{descriptor::*, fork::*, hooks::*, plan::*, session::{NativeSessionId, ResumeBinding}, types::*};
 
 const PROMPT_FILE: &str = "team-agent-prompt.txt";
+/// Claude's own threshold (minutes) for its stale-resume summary modal.
+pub const RESUME_THRESHOLD: &str = "CLAUDE_CODE_RESUME_THRESHOLD_MINUTES";
+const RESUME_THRESHOLD_NEVER: &str = "1000000000";
 // Never derive Debug: argv/env/prompt values are not diagnostic payloads.
 pub struct McpStdio { pub executable: PathBuf, pub arguments: Vec<String>, pub environment: BTreeMap<String, String> }
 pub struct ClaudeAdapter { mcp: McpStdio, runtime: Option<launcher::RuntimeInstallation>, project: Option<PathBuf> }
@@ -56,6 +59,29 @@ pub fn session_id(owner: &InstanceIdentity) -> NativeSessionId {
 pub(crate) fn session_uuid(id: &str) -> bool {
     id.len() == 36 && id.bytes().enumerate().all(|(i, byte)| if [8, 13, 18, 23].contains(&i) { byte == b'-' } else { byte.is_ascii_hexdigit() })
 }
+/// The local transcript a native fork reads: `<home>/.claude/projects/<cwd
+/// with every UTF-16 unit that is not ASCII alphanumeric replaced by '-'>/
+/// <uuid>.jsonl`. `--resume <uuid>` resolves only the current cwd's directory,
+/// so a new seat in its own private primary must pass this absolute path.
+/// Pure: nothing is read. Longer names are hashed natively and are refused
+/// here rather than guessed.
+pub fn transcript_path(home: &Path, source: &ResumeBinding) -> Result<PathBuf, ContractError> {
+    if let Some(path) = &source.backing {
+        return Ok(path.clone());
+    }
+    if !session_uuid(source.native_session.as_str()) {
+        return Err(ContractError::Invalid("Claude session UUID"));
+    }
+    require_absolute(home, "Claude home")?;
+    let cwd = source.cwd.path.to_str().ok_or(ContractError::Invalid("Claude transcript cwd UTF-8"))?;
+    let directory: String = cwd.encode_utf16()
+        .map(|unit| match u8::try_from(unit) { Ok(byte) if byte.is_ascii_alphanumeric() => char::from(byte), _ => '-' })
+        .collect();
+    if directory.len() > 200 {
+        return Err(ContractError::Unverified { field: "Claude long-path transcript directory", reason: UNVERIFIED });
+    }
+    Ok(home.join(".claude").join("projects").join(directory).join(format!("{}.jsonl", source.native_session.as_str())))
+}
 impl PlanHook for ClaudeAdapter {
     fn plan(&self, resolved: &ResolvedLaunch) -> Result<LaunchPlan, ContractError> {
         let r = resolved.request();
@@ -64,16 +90,28 @@ impl PlanHook for ClaudeAdapter {
         if resolved.provider().as_str() != ID || r.native != runtime.native || r.paths.executable != runtime.engine
             || r.paths.launcher != runtime.launcher()
             || !interaction::PROFILES[0].matches_native(&r.native) || r.channel != Channel::Tmux || r.mode != LaunchMode::FullWorker
-            || r.auth != AuthMode::NativeSubscription || self.mcp.executable != r.paths.candidate || !matches!(r.operation, Operation::Fresh | Operation::Resume)
+            || r.auth != AuthMode::NativeSubscription || self.mcp.executable != r.paths.candidate
+            || !matches!(r.operation, Operation::Fresh | Operation::Resume | Operation::NativeNewSeat)
         { return Err(ContractError::Mismatch("Claude native launch identity")); }
         if r.paths.cwd.path == *project { return Err(ContractError::Invalid("Claude private primary required")); }
         let prompt = r.prompt.as_ref().ok_or(ContractError::Invalid("Claude worker prompt"))?;
         let prompt = OwnedResourceRequest { owner: r.identity.clone(), path: OwnedPath::new(r.paths.cwd.path.clone(), PROMPT_FILE.into())?, kind: ResourceKind::Prompt, contents: prompt.as_bytes().to_vec() };
-        let session = match resolved.expected_session() {
-            ExpectedSession::Preassigned(id) if *id == session_id(&r.identity) => Some(["--session-id", id.as_str()]),
-            ExpectedSession::Resume(binding) if session_uuid(binding.native_session.as_str()) => Some(["--resume", binding.native_session.as_str()]),
-            ExpectedSession::PendingAllocation => None, // pure preflight; host refuses to spawn
-            _ => return Err(ContractError::Invalid("Claude derived fresh session or exact resume only")),
+        let session: Vec<OsString> = match resolved.expected_session() {
+            ExpectedSession::Preassigned(id) if *id == session_id(&r.identity) => vec!["--session-id".into(), id.as_str().into()],
+            ExpectedSession::Resume(binding) if session_uuid(binding.native_session.as_str()) => vec!["--resume".into(), binding.native_session.as_str().into()],
+            // Native fork into this new seat: the parent transcript by absolute
+            // path and a new session under the derived child ID. The parent is
+            // only read. No `--name`: 2.1.309 draws a session name as a label
+            // inside the prompt-box border, which is not this profile's composer.
+            ExpectedSession::PreassignedNativeFork { parent, child } if *child == session_id(&r.identity) && session_uuid(parent.as_str()) => {
+                let fork = r.fork.as_ref().ok_or(ContractError::Invalid("Claude fork source"))?;
+                let source = &fork.request().source;
+                if source.native_session != *parent { return Err(ContractError::Mismatch("Claude fork parent")); }
+                vec!["--resume".into(), transcript_path(runtime.home(), source)?.into_os_string(), "--fork-session".into(),
+                    "--session-id".into(), child.as_str().into()]
+            }
+            ExpectedSession::PendingAllocation => Vec::new(), // pure preflight; host refuses to spawn
+            _ => return Err(ContractError::Invalid("Claude derived fresh session, exact resume or native fork only")),
         };
         // Several options are variadic (`--add-dir`, `--mcp-config`,
         // `--allowedTools`): each is followed by another option, never an operand.
@@ -89,12 +127,18 @@ impl PlanHook for ClaudeAdapter {
             EffortResolution::Pass(effort) => { let index = arguments.len(); arguments.extend(["--effort".into(), effort.as_str().into()]); CarrierUse::Specified(CarrierRef::Arguments(vec![index, index + 1])) },
             EffortResolution::Ignored { reason, .. } => return Err(ContractError::EffortRejected(*reason)),
         };
-        arguments.extend(session.into_iter().flatten().map(OsString::from));
+        arguments.extend(session);
+        let mut environment: BTreeMap<String, OsString> = BTreeMap::from([("HOME".into(), runtime.home().as_os_str().to_owned())]);
+        if r.operation != Operation::Fresh {
+            // 2.1.309 opens a "Resume from summary / Resume full session" modal
+            // for a resumed conversation whose last turn is 70+ minutes old and
+            // 100k+ tokens. A seat never answers a modal: keep the full history.
+            environment.insert(RESUME_THRESHOLD.into(), RESUME_THRESHOLD_NEVER.into());
+        }
         // The pane execs bare `claude` through PATH, so the user's wrapper runs and
         // keeps the name. The engine is only the image that route must exec into.
         Ok(LaunchPlan { executable: runtime.engine.clone(), launcher: r.paths.launcher.clone(), arguments, executable_inputs: vec![], cwd: r.paths.cwd.path.clone(),
-            environment: EnvironmentDelta { remove: catalog::DROPPED_ENVIRONMENT.iter().map(|key| (*key).into()).collect(),
-                set: BTreeMap::from([("HOME".into(), runtime.home().as_os_str().to_owned())]) },
+            environment: EnvironmentDelta { remove: catalog::DROPPED_ENVIRONMENT.iter().map(|key| (*key).into()).collect(), set: environment },
             expected_session: resolved.expected_session().clone(),
             carriers: CarrierReport { model: CarrierUse::Specified(CarrierRef::Arguments(vec![0, 1])), prompt: CarrierUse::Specified(CarrierRef::Resource(prompt.path.clone())), mcp, bypass, effort },
             materialization: vec![prompt] })
@@ -125,8 +169,9 @@ impl CatalogHook for ClaudeAdapter {
             models: catalog::parse_catalog(&output.stdout, &request.native.version).map_err(ReadFailure::Error)? })
     }
 }
+/// Claude's own `--resume <path> --fork-session` performs the copy; nothing is staged.
 impl ForkHook for ClaudeAdapter {
-    fn stage(&self, _request: &ResolvedFork, _io: &mut dyn OwnedIo) -> Result<NativeForkPlan, PartialFailure> {
-        Err(failure(ContractError::Unverified { field: "Claude fork lineage", reason: UNVERIFIED }, vec![]))
+    fn stage(&self, request: &ResolvedFork, _io: &mut dyn OwnedIo) -> Result<NativeForkPlan, PartialFailure> {
+        native_new_seat_stage(request).map_err(|error| failure(error, vec![]))
     }
 }

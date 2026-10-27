@@ -367,6 +367,7 @@ impl LifecycleHost for PhysicalRuntime<'_> {
             self.explicit_session = match &plan.expected_session {
                 ExpectedSession::Preassigned(id) => Some(id.clone()),
                 ExpectedSession::Resume(binding) => Some(binding.native_session.clone()),
+                ExpectedSession::PreassignedNativeFork { child, .. } => Some(child.clone()),
                 _ => return Err(Error::Invalid("explicit session launch receipt")),
             };
         }

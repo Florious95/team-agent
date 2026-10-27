@@ -436,6 +436,11 @@ impl Lifecycle<'_> {
                 {
                     return Err(Error::Fence)
                 }
+                ExpectedSession::PreassignedNativeFork { parent, child }
+                    if &binding.native_session == parent || &binding.native_session != child =>
+                {
+                    return Err(Error::Fence)
+                }
                 _ => {}
             }
             if let Some(target) = &mut operation.target.physical {

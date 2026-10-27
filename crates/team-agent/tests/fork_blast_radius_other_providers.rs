@@ -3,7 +3,7 @@
 //! contract:
 //!   provides:
 //!     - name: A9-other-providers-unchanged
-//!       what: grok+subscription=/fork；claude+subscription=/branch；其余未验证为 None
+//!       what: grok+subscription=/fork；旧 Claude 一律 None（只经 claude_tui 分身）；其余未验证为 None
 //! boundary:
 //!   - 不把「函数存在」当通过
 //!   - 不给未验证 provider 填推断斜杠命令
@@ -34,14 +34,10 @@ fn grok_compatible_api_does_not_get_slash_fork() {
 }
 
 #[test]
-fn claude_subscription_uses_branch_not_fork() {
+fn legacy_claude_never_branches_in_place() {
+    // `/branch` moved the source seat itself; Claude forks only via claude_tui.
     for provider in [Provider::Claude, Provider::ClaudeCode] {
-        assert_eq!(
-            in_window_fork_command(provider, AuthMode::Subscription),
-            Some("/branch"),
-            "{provider:?} subscription session-split is /branch (v2.1.181)"
-        );
-        for auth in [AuthMode::CompatibleApi, AuthMode::OfficialApi] {
+        for auth in [AuthMode::Subscription, AuthMode::CompatibleApi, AuthMode::OfficialApi] {
             assert_eq!(
                 in_window_fork_command(provider, auth),
                 None,

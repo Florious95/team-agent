@@ -351,7 +351,13 @@ fn resolve_launch_inner(
                     "new-seat fork requires full worker carriers",
                 ));
             }
-            if request.resume.is_some() || request.preassigned_session.is_some() {
+            // Only a native fork of a provider whose fresh session ID the framework
+            // pre-assigns may carry that child ID; it is never a restart binding.
+            let preassigned_child = request.operation == Operation::NativeNewSeat
+                && descriptor.session.fresh == FreshSession::Preassigned;
+            if request.resume.is_some()
+                || (request.preassigned_session.is_some() && !preassigned_child)
+            {
                 return Err(ContractError::Invalid(
                     "fork launch cannot be relabelled as restart or fresh",
                 ));
@@ -393,6 +399,23 @@ fn resolve_launch_inner(
                             .ok_or(ContractError::Invalid("snapshot target session"))?,
                         backing: backing.clone(),
                         parent: fork.source.native_session.clone(),
+                    }
+                }
+                ForkMode::NativeNewSeat if descriptor.session.fresh == FreshSession::Preassigned => {
+                    match request.preassigned_session.clone() {
+                        Some(child) if child == fork.source.native_session => {
+                            return Err(ContractError::Mismatch(
+                                "native fork child must differ from its parent",
+                            ))
+                        }
+                        Some(child) => ExpectedSession::PreassignedNativeFork {
+                            parent: fork.source.native_session.clone(),
+                            child,
+                        },
+                        None if preflight => ExpectedSession::PendingAllocation,
+                        None => {
+                            return Err(ContractError::Invalid("preassigned native fork child"))
+                        }
                     }
                 }
                 ForkMode::NativeNewSeat => ExpectedSession::CaptureAfterNativeFork {
@@ -492,6 +515,12 @@ pub enum ExpectedSession {
     },
     CaptureAfterNativeFork {
         parent: NativeSessionId,
+    },
+    /// A native fork whose child ID the framework pre-assigns (the provider's
+    /// fresh session is `Preassigned`). Still captured and compared after launch.
+    PreassignedNativeFork {
+        parent: NativeSessionId,
+        child: NativeSessionId,
     },
     NotApplicable,
 }

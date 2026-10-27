@@ -7,6 +7,7 @@ use team_agent_contract::contract::{
     types::InstanceIdentity,
     hooks::{PlanHook, ProviderHooks},
     plan::{CatalogObservation, LaunchEntrypoint, LaunchPlan, ResolvedLaunch},
+    session::ResumeBinding,
     types::{ContractError, NativeIdentity, Support},
 };
 use team_agent_contract::kiro::{self, KiroAdapter, KIRO_DESCRIPTOR};
@@ -183,6 +184,21 @@ impl NativeProvider {
                 field: "Claude Code native Team-tool inspector",
                 reason: claude::UNVERIFIED,
             }),
+        }
+    }
+
+    /// The exact local backing a native new-seat fork reads, for a leaf that
+    /// addresses its parent by path (Claude's transcript). None: the native
+    /// CLI resolves the parent by ID itself. Pure; the caller checks the file.
+    pub fn native_fork_source(
+        self,
+        runtime: Option<&NativeRuntime>,
+        source: &ResumeBinding,
+    ) -> Result<Option<PathBuf>, ContractError> {
+        match (self, runtime) {
+            (Self::Claude, Some(NativeRuntime::Claude(runtime))) => claude::transcript_path(runtime.home(), source).map(Some),
+            (Self::Claude, _) => Err(ContractError::Mismatch("native runtime provider")),
+            _ => Ok(None),
         }
     }
 

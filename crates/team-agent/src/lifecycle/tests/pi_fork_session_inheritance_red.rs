@@ -1244,11 +1244,10 @@ fn r12_pi_clone_and_non_pi_in_window_fork_compatibility_are_preserved() {
         Some("/fork"),
         "non-Pi Grok subscription keeps its verified in-window command"
     );
-    assert_eq!(
+    assert!(
         team_agent::lifecycle::launch::in_window_fork(Provider::ClaudeCode, AuthMode::Subscription)
-            .map(|spec| spec.command),
-        Some("/branch"),
-        "non-Pi Claude subscription keeps its verified in-window command"
+            .is_none(),
+        "legacy Claude never branches in place; it forks only as the claude_tui contract leaf"
     );
     assert!(
         team_agent::lifecycle::launch::in_window_fork(Provider::Pi, AuthMode::Subscription)
