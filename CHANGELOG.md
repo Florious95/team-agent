@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.5.127]
+
+- **Legacy Codex and Grok worker runtimes removed (#393, #396):** Codex and Grok workers run only on the unified contract leaves `codex_tui` and `grok_build`, which launch the public PATH command (`codex`, `grok`; user wrappers run). `codex`, `codex_cli`, `codex-cli` and `grok` select their leaf in role files, `add-agent --provider` and `team-agent models` without opt-in. A pre-upgrade Codex or Grok worker seat is refused before any side effect with "legacy <p> seat has no runtime in this release"; stop or remove it, then add it again. Leader launches (`team-agent codex`, `team-agent grok`) are unchanged.
+- **Codex tool search `invalid number` (#394, #395, #396):** Codex 0.164.0 defers MCP tools behind its built-in `tool_search`, whose float `limit` failed to parse with "invalid number" before any search ran. The owned team MCP server is now launched with `omit_tools_from=["deferred"]` as a per-invocation override, so the team tools stay directly callable. The user's model catalog and global config are not changed.
+- **Start / add-agent deadlock on retired seats (#391, #392, #396):** after `remove-agent`, `start <id>` re-admits the retired seat from its left-behind role file instead of refusing with a nonexistent "explicit recovery/add" command. `add-agent --force` re-adopts that role file (CLI values override its frontmatter, its body is kept); without `--force` the refusal names `--role-file` and `--force`. Team start still skips retired seats.
+- **Contract-native remove-agent and reset-agent (#396):** both commands now run on Pi, Claude, Codex, Grok and Cursor contract seats instead of failing with `contract_capability_unverified`. Neither touches a working seat: a working, quarantined or unverified seat is refused with a stop or wait hint. A retired seat identity is never resumed; a later start of the same ID is a fresh generation.
+- **Codex catalog slugs (#396):** the Codex model catalog accepts namespaced and tagged slugs containing `/`, `@` or `:` (for example `group/grok4.7`) instead of rejecting the whole catalog.
+- **Codex non-bypass workers (#396):** a Codex worker with `bypass: false` launches with `--sandbox workspace-write`, so `--add-dir` for the project root is admitted instead of exiting at spawn. Approvals keep the user's native policy; the bypass path is unchanged.
+- **Release metadata:** align the eight standard version/changelog files at 0.5.127. Installing a published package does not automatically replace a running team's binary.
+
 ## [0.5.126]
 
 - **Legacy Claude Code and Pi worker runtimes removed (#388):** Claude Code and Pi workers run only on the unified contract leaves `claude_tui` and `pi_tui`, which launch the public PATH command (user wrappers run). A pre-upgrade `claude`, `claude_code`, `claude-code` or `pi` worker seat is refused before any side effect with "legacy <p> seat has no runtime in this release"; stop or remove it, then add it again. Leader launches (`team-agent claude`, `team-agent pi`) are unchanged.
