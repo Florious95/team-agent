@@ -3,11 +3,11 @@
 //! contract:
 //!   provides:
 //!     - name: A16-capability-matrix-behavior
-//!       what: grok/claude subscription 真注入斜杠命令；compatible_api 拒；未验证 provider 拒且理由是未验证
+//!       what: grok subscription 真注入斜杠命令；旧 Claude 拒并指向 claude_tui；compatible_api 拒；未验证 provider 拒且理由是未验证
 //! boundary:
 //!   - 不把 in_window_fork_command 查表当通过
 //!   - 基线红必须是断言失败，不是 unresolved import
-//!   - claude 屏幕标记来自 2026-08-17 真机 v2.1.181，不猜 grok 的 forked from
+//!   - 旧 Claude 不再注入 /branch：它会把源席自身切到新分支且不产生新席
 //! maturity: wired
 //! ---
 
@@ -19,9 +19,6 @@ use serde_json::json;
 use team_agent::lifecycle::launch::fork_agent_with_transport;
 use team_agent::model::ids::AgentId;
 use team_agent::tmux_backend::{CommandOutput, CommandRunner, TmuxBackend};
-
-/// Empirically captured 2026-08-17 on Claude Code v2.1.181 after `/branch`.
-const CLAUDE_BRANCH_MARK: &str = "Branched conversation";
 
 fn ok(stdout: &str) -> CommandOutput {
     CommandOutput {
@@ -138,46 +135,23 @@ fn grok_subscription_injects_slash_fork_and_accepts_forked_from() {
 }
 
 #[test]
-fn claude_subscription_injects_branch_and_accepts_branched_conversation() {
-    let ws = seat_ws("claude-sub", "claude", "subscription");
-    let (result, injected) = fork_on(
-        &ws,
-        "Branched conversation. You are now in the new branch (session abc).\n",
-    );
-    assert!(
-        result.is_ok(),
-        "claude subscription must take the same in-window path: {result:?}"
-    );
-    assert!(
-        injected.iter().any(|t| t == "/branch"),
-        "claude v2.1.181 session-split command is /branch (not grok /fork); got {injected:?}"
-    );
-    assert_eq!(
-        result.as_ref().unwrap().backing_state,
-        team_agent::lifecycle::ForkBackingState::Verified,
-        "mark {CLAUDE_BRANCH_MARK:?} must verify"
-    );
-    let _ = std::fs::remove_dir_all(&ws);
-}
-
-#[test]
-fn claude_empty_conversation_is_explicit_refuse_not_ok() {
-    let ws = seat_ws("claude-empty", "claude", "subscription");
-    let (result, injected) = fork_on(
-        &ws,
-        "Failed to branch conversation: No conversation to branch\n",
-    );
-    assert!(
-        injected.iter().any(|t| t == "/branch"),
-        "empty conversation still injects /branch; got {injected:?}"
-    );
-    let err = result.expect_err("empty conversation must not look like success");
-    let text = err.to_string();
-    assert!(
-        text.contains("Failed to branch conversation: No conversation to branch"),
-        "must surface the screen refusal verbatim; got {text}"
-    );
-    let _ = std::fs::remove_dir_all(&ws);
+fn legacy_claude_subscription_refuses_in_place_branch_and_names_the_contract_leaf() {
+    // `/branch` moved the source process onto the branch while its seat kept the
+    // old session tuple, and created no seat. Claude forks via `claude_tui` only.
+    for (tag, screen) in [
+        ("claude-sub", "Branched conversation. You are now in the new branch (session abc).\n"),
+        ("claude-empty", "Failed to branch conversation: No conversation to branch\n"),
+    ] {
+        let ws = seat_ws(tag, "claude", "subscription");
+        let (result, injected) = fork_on(&ws, screen);
+        let text = result.expect_err("legacy Claude must refuse").to_string();
+        assert!(text.contains("claude_tui"), "refusal must name the contract leaf; got {text}");
+        assert!(
+            !injected.iter().any(|t| t == "/branch" || t == "/fork"),
+            "legacy Claude must not inject a slash command; got {injected:?}"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
 }
 
 #[test]

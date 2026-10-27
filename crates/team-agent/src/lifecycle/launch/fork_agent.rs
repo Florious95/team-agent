@@ -1,9 +1,9 @@
 //! ---
-//! purpose: Pi 以完整会话快照创建独立席位；已验证的其他 provider 保持窗口内分身
+//! purpose: Pi 以完整会话快照创建独立席位；Grok 保持窗口内分身；旧 Claude 运行时拒绝并指向 claude_tui
 //! contract:
 //!   provides:
 //!     - name: fork_agent_with_transport
-//!       what: Pi 走锁内快照新席位；已验证的其他 provider 保持窗口内斜杠 fork
+//!       what: Pi 走锁内快照新席位；Grok 走窗口内斜杠 fork；旧 Claude 不再原地 /branch
 //!     - name: in_window_fork
 //!       what: 已验证的 provider+subscription 给出 command+screen_mark；未验证返回 None
 //!   depends:
@@ -43,17 +43,15 @@ pub struct InWindowFork {
 /// ---
 /// Official in-window fork. None = unverified or unsupported-auth.
 /// grok `/fork` mark `forked from` (2026-08-17).
-/// claude `/branch` mark `Branched conversation` (Claude Code v2.1.181, 2026-08-17).
-/// claude `/fork` is a background-agent command (`Usage: /fork <directive>`), not the session split.
+/// Claude's `/branch` is retired here: it moves the SOURCE process onto the
+/// branch (renamed "<title> (Branch)") while the seat's captured tuple still
+/// names the old session, and creates no seat. Claude forks only through the
+/// contract leaf `claude_tui` (contract_runtime::fork, native new seat).
 pub fn in_window_fork(provider: Provider, auth: AuthMode) -> Option<InWindowFork> {
     match (provider, auth) {
         (Provider::Grok, AuthMode::Subscription) => Some(InWindowFork {
             command: "/fork",
             screen_mark: "forked from",
-        }),
-        (Provider::Claude | Provider::ClaudeCode, AuthMode::Subscription) => Some(InWindowFork {
-            command: "/branch",
-            screen_mark: "Branched conversation",
         }),
         _ => None,
     }
@@ -68,13 +66,12 @@ pub fn in_window_fork_command(provider: Provider, auth: AuthMode) -> Option<&'st
 }
 
 fn refuse_missing_in_window_fork(provider: Provider, provider_raw: &str) -> LifecycleError {
-    if matches!(
-        provider,
-        Provider::Grok
-            | Provider::Claude
-            | Provider::ClaudeCode
-            | Provider::Pi
-    ) {
+    if matches!(provider, Provider::Claude | Provider::ClaudeCode) {
+        return LifecycleError::Provider(format!(
+            "{provider_raw} legacy runtime does not support native session fork; declare `provider: claude_tui` to fork into a new seat through the contract runtime"
+        ));
+    }
+    if matches!(provider, Provider::Grok | Provider::Pi) {
         LifecycleError::Provider(format!(
             "{provider_raw} does not support native session fork"
         ))
