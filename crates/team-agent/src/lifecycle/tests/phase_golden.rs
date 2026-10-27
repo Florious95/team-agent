@@ -146,17 +146,9 @@ fn two_worker_team_dir(hermetic: &HermeticTestEnv) -> PathBuf {
     team
 }
 
-fn codex_ready_transport() -> OfflineTransport {
-    let mut transport = OfflineTransport::new();
-    for pane in 0..16 {
-        transport = transport.with_capture_for_pane(format!("%{pane}"), "OpenAI Codex");
-    }
-    transport
-}
-
 fn role_doc(id: &str) -> String {
     format!(
-        "---\nname: {id}\nrole: {id} Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{id} worker.\n"
+        "---\nname: {id}\nrole: {id} Worker\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{id} worker.\n"
     )
 }
 
@@ -183,7 +175,7 @@ fn run_diagnose_after_unbound_state_fixture() -> Value {
     let team = two_worker_team_dir(&hermetic);
     let workspace = team.parent().expect("workspace").to_path_buf();
     seed_healthy_coordinator(&workspace);
-    let launch_transport = codex_ready_transport();
+    let launch_transport = OfflineTransport::new();
     crate::lifecycle::launch::materialize_unbound_state_for_test(
         &workspace, &team, "teamdir", &launch_transport,
     ).expect("materialize the recording-only tombstone fixture, not a callerless public start");

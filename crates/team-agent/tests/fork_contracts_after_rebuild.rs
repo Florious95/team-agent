@@ -1,9 +1,9 @@
 //! ---
-//! purpose: 钉死 fork 重建后不再静默吞 --as、不再空壳审计、不再留死分支
+//! purpose: 钉死 fork 重建后不再静默吞 --as、不再留死分支
 //! contract:
 //!   provides:
 //!     - name: A13-no-silent-shells
-//!       what: --as 要么报错要么新名可寻址；成功分身写出可读审计；Pending 死臂已删
+//!       what: --as 要么报错要么新名可寻址；Pending 死臂已删
 //! boundary:
 //!   - 不改 claude/codex/copilot 能力断言
 //!   - 基线红必须是断言失败，不是 unresolved import
@@ -41,7 +41,7 @@ impl CommandRunner for ForkScreenRunner {
     }
 }
 
-fn grok_ws(tag: &str) -> PathBuf {
+fn copilot_ws(tag: &str) -> PathBuf {
     let ws = std::env::temp_dir().join(format!(
         "ta-fork-contract-{}-{}",
         tag,
@@ -58,7 +58,7 @@ fn grok_ws(tag: &str) -> PathBuf {
     .unwrap();
     std::fs::write(
         ws.join("agents").join("seer.md"),
-        "---\nname: seer\nrole: Seer\nprovider: grok\nmodel: grok-4.6\nauth_mode: subscription\ndangerously_skip_permissions: true\ntools:\n  - provider_builtin\n---\nseer.\n",
+        "---\nname: seer\nrole: Seer\nprovider: copilot\nmodel: x\nauth_mode: subscription\ndangerously_skip_permissions: true\ntools:\n  - provider_builtin\n---\nseer.\n",
     )
     .unwrap();
     let spec = team_agent::compiler::compile_team(&ws).expect("compile");
@@ -71,7 +71,7 @@ fn grok_ws(tag: &str) -> PathBuf {
             "agents": {
                 "seer": {
                     "status": "running",
-                    "provider": "grok",
+                    "provider": "copilot",
                     "auth_mode": "subscription",
                     "window": "seer",
                     "pane_id": "%7"
@@ -89,12 +89,11 @@ fn backend() -> TmuxBackend {
     }))
 }
 
-/// Choice: in-place fork must REJECT --as <other>, not swallow it and
-/// return the source name. (Registering a second addressable name is the
-/// other legal option; this crate picked reject.)
+/// A legacy seat has no in-place fork any more: `--as <other>` must be refused
+/// before any side effect, never accepted and reported under the source name.
 #[test]
 fn as_flag_is_refused_not_silently_rewritten_to_source() {
-    let ws = grok_ws("as");
+    let ws = copilot_ws("as");
     let tx = backend();
     let result = fork_agent_with_transport(
         &ws,
@@ -105,74 +104,34 @@ fn as_flag_is_refused_not_silently_rewritten_to_source() {
         None,
         &tx,
     );
-    match result {
-        Ok(report) => {
-            assert_ne!(
-                report.new_agent_id.as_str(),
-                report.source_agent_id.as_str(),
-                "must not accept --as seer2 then report new_agent_id=seer"
-            );
-            let state = team_agent::state::persist::load_runtime_state(&ws).unwrap();
-            assert!(
-                state
-                    .get("agents")
-                    .and_then(|a| a.get("seer2"))
-                    .is_some(),
-                "if --as is accepted, seer2 must be an addressable agent row"
-            );
-        }
-        Err(error) => {
-            let text = error.to_string();
-            assert!(
-                text.contains("--as")
-                    || text.contains("as_agent")
-                    || text.contains("in-place")
-                    || text.contains("in place"),
-                "refusal must name --as / in-place, not a generic error; got {text}"
-            );
-        }
-    }
-    let _ = std::fs::remove_dir_all(&ws);
-}
-
-/// Successful in-place fork must leave a readable audit row we can load back.
-#[test]
-fn successful_fork_writes_readable_audit_event() {
-    let ws = grok_ws("audit");
-    let tx = backend();
-    let result = fork_agent_with_transport(
-        &ws,
-        &AgentId::new("seer"),
-        &AgentId::new("seer"),
-        None,
-        false,
-        None,
-        &tx,
-    );
-    assert!(result.is_ok(), "same-name in-place fork must succeed: {result:?}");
-    let events = ws.join(".team").join("logs").join("events.jsonl");
-    let text = std::fs::read_to_string(&events).unwrap_or_default();
+    let text = result
+        .expect_err("--as on a legacy seat must be refused, not swallowed")
+        .to_string();
     assert!(
-        text.contains("lifecycle.fork.in_place"),
-        "success must append lifecycle.fork.in_place; events={text:?}"
+        text.contains("native session fork is unverified")
+            && text.contains("no legacy fork or fresh replacement was performed"),
+        "refusal must say no fork or replacement happened; got {text}"
     );
+    let state = team_agent::state::persist::load_runtime_state(&ws).unwrap();
     assert!(
-        text.contains("seer"),
-        "audit row must name the source seat; events={text:?}"
+        state.get("agents").and_then(|a| a.get("seer2")).is_none(),
+        "a refused fork must not register the --as name; state={state}"
     );
     let _ = std::fs::remove_dir_all(&ws);
 }
 
-/// PendingContextFork else-arm is dead (wait_for_forked_from never returns false).
-/// After the fix the token must be gone from fork_agent.rs.
+/// PendingContextFork else-arm is dead (the in-window fork it served was excised).
+/// The token must stay gone from fork_agent.rs.
 #[test]
 fn pending_context_fork_dead_arm_is_gone() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src/lifecycle/launch/fork_agent.rs");
     let src = std::fs::read_to_string(&path).expect("read fork_agent.rs (positive control)");
+    // Positive control: the in-window "forked from" screen mark left with the
+    // Grok in-window fork, so anchor on the surviving legacy entry instead.
     assert!(
-        src.contains("forked from"),
-        "positive control: fork_agent.rs must still mention the screen mark"
+        src.contains("fn fork_agent_with_transport"),
+        "positive control: fork_agent.rs must still export fork_agent_with_transport"
     );
     assert!(
         !src.contains("PendingContextFork"),

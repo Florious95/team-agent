@@ -23,7 +23,7 @@ use team_agent::tmux_backend::TmuxBackend;
 #[serial(env)]
 fn launch_writes_worker_owner_team_id_from_runtime_spec_key_not_stale_active_team() {
     let case = RealLaunchCase::new("u0b-owner-canonical");
-    let _path = install_codex_stub(&case.root);
+    let _path = install_copilot_stub(&case.root);
     seed_stale_active_multiteam_state(&case.root);
     let spec_path = write_runtime_spec(&case.root, "bravo", "worker_a");
 
@@ -212,7 +212,7 @@ leader:
 agents:
   - id: "{agent_id}"
     role: "Worker"
-    provider: "codex"
+    provider: "copilot"
     auth_mode: "subscription"
     working_directory: "{workspace}"
     system_prompt:
@@ -257,22 +257,24 @@ tasks:
     spec_path
 }
 
-fn install_codex_stub(root: &Path) -> EnvGuard {
+/// A real-CLI-shaped legacy worker binary (the spawn-time `copilot mcp list`
+/// probe reads EOF and exits cleanly).
+fn install_copilot_stub(root: &Path) -> EnvGuard {
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    let codex = bin.join("codex");
+    let copilot = bin.join("copilot");
     std::fs::write(
-        &codex,
+        &copilot,
         "#!/bin/sh\nstty -echo 2>/dev/null || true\nexec cat\n",
     )
     .unwrap();
-    let mut perms = std::fs::metadata(&codex).unwrap().permissions();
+    let mut perms = std::fs::metadata(&copilot).unwrap().permissions();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         perms.set_mode(0o755);
     }
-    std::fs::set_permissions(&codex, perms).unwrap();
+    std::fs::set_permissions(&copilot, perms).unwrap();
     let old = std::env::var("PATH").ok();
     let mut next = bin.to_string_lossy().to_string();
     if let Some(old_path) = old.as_deref().filter(|path| !path.is_empty()) {

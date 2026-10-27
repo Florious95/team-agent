@@ -19,6 +19,7 @@ use team_agent::coordinator::{
 use team_agent::db::schema::open_db;
 use team_agent::lifecycle::{
     add_agent_with_transport, fork_agent_with_transport, remove_agent_with_transport,
+    LifecycleError,
 };
 use team_agent::message_store::MessageStore;
 use team_agent::model::ids::AgentId;
@@ -91,32 +92,30 @@ fn fork_agent_rollback_cleans_spawned_window_spec_state_and_mcp_after_post_spawn
     let mcp_path = fixture.team.join(".team/runtime/mcp/newfork.json");
 
     assert!(
-        result.is_err(),
-        "in-window fork on this fixture must refuse before spawn; result={result:?}"
-    );
-    let err = format!("{result:?}");
-    assert!(
-        err.contains("unverified") || err.contains("未验证") || err.contains("refuses --as"),
-        "codex in-window fork is unverified / --as is refused; no spawn to roll back. result={result:?}"
+        matches!(
+            &result,
+            Err(LifecycleError::Provider(message)) if message == "fake native session fork is unverified (未验证); no legacy fork or fresh replacement was performed"
+        ),
+        "the legacy fork entry refuses the fake source as unverified before any spawn; no spawn to roll back. result={result:?}"
     );
     assert!(
         transport.killed().is_empty(),
-        "unverified/in-place fork must not spawn a window to kill; killed={:?} result={result:?}",
+        "refused legacy fork must not spawn a window to kill; killed={:?} result={result:?}",
         transport.killed()
     );
     assert_eq!(
         spec_after, spec_before,
-        "refused in-window fork must not mutate team.spec.yaml; result={result:?}"
+        "refused legacy fork must not mutate team.spec.yaml; result={result:?}"
     );
     assert!(
         state_after
             .pointer("/agents/newfork")
             .is_none(),
-        "refused in-window fork must not create a newfork row; state={state_after}"
+        "refused legacy fork must not create a newfork row; state={state_after}"
     );
     assert!(
         !mcp_path.exists(),
-        "refused in-window fork must not write MCP config; leaked={}",
+        "refused legacy fork must not write MCP config; leaked={}",
         mcp_path.display()
     );
 
@@ -265,61 +264,26 @@ impl RollbackFixture {
             "fixture must compile agent ids alpha/bravo before lifecycle calls; spec={yaml}"
         );
         std::fs::write(self.team.join("team.spec.yaml"), yaml).unwrap();
-        // Seed identity-complete Codex source backings so rollback tests reach
-        // their post-spawn failure injection instead of stopping at materialization.
-        let rollout_root = PathBuf::from(std::env::var_os("HOME").expect("hermetic HOME"))
-            .join(".codex/sessions/rollback-source");
-        std::fs::create_dir_all(&rollout_root).unwrap();
-        for (agent, session) in [("alpha", "sess-alpha"), ("bravo", "sess-bravo")] {
-            std::fs::write(
-                rollout_root.join(format!("rollout-{session}.jsonl")),
-                format!(
-                    "{}\n{}\n",
-                    json!({
-                        "type": "session_meta",
-                        "payload": {"id": session, "cwd": self.team}
-                    }),
-                    json!({
-                        "type": "response_item",
-                        "payload": {"content": [{
-                            "type": "input_text",
-                            "text": format!("You are Team Agent worker `{agent}` with role `fixture`.")
-                        }]}
-                    })
-                ),
-            )
-            .unwrap();
-        }
         save_runtime_state(
             &self.team,
             &json!({
                 "session_name": "team-rollbackteam",
                 "active_team_key": "rollbackteam",
-                // 0.4.6 tuple-atomic contract: fork now requires complete
-                // source tuple. Seed real rollout files + captured_at/via
-                // so the fork-source backing guard passes and the test
-                // reaches the rollback behaviour it actually asserts.
                 "agents": {
                     "alpha": {
                         "status": "stopped",
-                        "provider": "codex",
+                        "provider": "fake",
                         "auth_mode": "subscription",
                         "window": "alpha",
                         "session_id": "sess-alpha",
-                        "rollout_path": rollout_root.join("rollout-sess-alpha.jsonl").to_string_lossy(),
-                        "captured_at": "2026-06-25T10:00:00+00:00",
-                        "captured_via": "session.captured",
                         "owner_team_id": "rollbackteam"
                     },
                     "bravo": {
                         "status": "running",
-                        "provider": "codex",
+                        "provider": "fake",
                         "auth_mode": "subscription",
                         "window": "bravo",
                         "session_id": "sess-bravo",
-                        "rollout_path": rollout_root.join("rollout-sess-bravo.jsonl").to_string_lossy(),
-                        "captured_at": "2026-06-25T10:00:00+00:00",
-                        "captured_via": "session.captured",
                         "owner_team_id": "rollbackteam"
                     }
                 }
@@ -350,7 +314,7 @@ impl RollbackFixture {
                     "agents": {
                         "newfork": {
                             "status": "running",
-                            "provider": "codex",
+                            "provider": "fake",
                             "pane_id": "%sibling-newfork",
                             "owner_team_id": "sibling"
                         }
@@ -418,7 +382,7 @@ impl RollbackFixture {
 
 fn agent_doc(name: &str, role: &str) -> String {
     format!(
-        "---\nname: {name}\nrole: {role}\nprovider: codex\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{role}.\n"
+        "---\nname: {name}\nrole: {role}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{role}.\n"
     )
 }
 
@@ -470,9 +434,8 @@ impl RecordingTransport {
         &self,
         session: &SessionName,
         window: &WindowName,
-        argv: &[String],
+        _argv: &[String],
     ) -> Result<SpawnResult, TransportError> {
-        emit_codex_fork_backing(argv);
         self.windows
             .lock()
             .unwrap()
@@ -484,32 +447,6 @@ impl RecordingTransport {
             child_pid: Some(4242),
         })
     }
-}
-
-fn emit_codex_fork_backing(argv: &[String]) {
-    if !argv
-        .windows(2)
-        .any(|pair| pair[0] == "codex" && pair[1] == "fork")
-    {
-        return;
-    }
-    static SESSION_SEQ: AtomicU64 = AtomicU64::new(0);
-    let session_id = format!(
-        "rollback-fork-{}-{}",
-        std::process::id(),
-        SESSION_SEQ.fetch_add(1, Ordering::Relaxed)
-    );
-    let root = PathBuf::from(std::env::var_os("HOME").expect("hermetic HOME"))
-        .join(".codex/sessions/lifecycle-rollback-fixture");
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(
-        root.join(format!("rollout-{session_id}.jsonl")),
-        format!(
-            "{{\"session_meta\":{{\"payload\":{{\"id\":\"{session_id}\"}}}},\"created_at\":\"{}\"}}\n",
-            chrono::Utc::now().to_rfc3339()
-        ),
-    )
-    .unwrap();
 }
 
 impl Transport for RecordingTransport {

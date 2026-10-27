@@ -69,6 +69,8 @@ fn bypass(agent: &Value) -> bool {
 
 /// The compiled provider of a default/`pi` role: the Pi contract leaf on unix.
 const PI_LEAF: &str = if cfg!(unix) { "pi_tui" } else { "pi" };
+/// The compiled provider of a `codex` role: the Codex contract leaf on unix.
+const CODEX_LEAF: &str = if cfg!(unix) { "codex_tui" } else { "codex" };
 
 const VALID_ROLE: &str = "---\nname: worker\nrole: Worker\nprovider: codex\nmodel: custom-model\nauth_mode: subscription\ndangerously_skip_permissions: true\n---\nA valid role prompt.";
 
@@ -189,7 +191,7 @@ fn r08_valid_frontmatter_explicit_values_override_defaults() {
         .expect("valid historical frontmatter remains supported");
     let agent = first_agent(&spec);
     assert_eq!(string_field(agent, "id"), "explicit-worker");
-    assert_eq!(string_field(agent, "provider"), "codex");
+    assert_eq!(string_field(agent, "provider"), CODEX_LEAF);
     assert_eq!(string_field(agent, "model"), "custom-model");
     assert!(!bypass(agent), "an explicit false value overrides the default");
     assert_eq!(prompt(agent), "Explicitly configured prompt.");

@@ -380,7 +380,7 @@ fn seed_dirty_state(workspace: &Path, shape: PaneShape) {
     let worker = json!({
         "id": WORKER,
         "name": WORKER,
-        "provider": "codex",
+        "provider": "fake",
         "window": window,
         "pane_id": CALLER_PANE,
         "pane_pid": pane_pid,

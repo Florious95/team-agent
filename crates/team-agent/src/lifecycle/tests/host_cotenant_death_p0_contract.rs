@@ -12,7 +12,6 @@ fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -30,7 +29,7 @@ use team_agent::message_store::MessageStore;
 use team_agent::model::enums::{PaneLiveness, Provider};
 use team_agent::model::ids::AgentId;
 use team_agent::model::paths::{runtime_dir, runtime_spec_path};
-use team_agent::provider::{get_adapter, CaptureSessionContext, ProviderAdapter};
+use team_agent::provider::{get_adapter, ProviderAdapter};
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
@@ -458,60 +457,16 @@ fn start_agent_list_targets_failure_refuses_before_spawn() {
 }
 
 #[test]
-#[serial(env)]
-fn codex_capture_rejects_old_rollout_with_new_mtime_and_uses_typed_claim_keys() {
-    let env = hermetic_guard::HermeticTestEnv::enter("p0-capture");
-    let spawn_cwd = env.workspace("spawn-cwd");
-    let rollout = write_old_codex_rollout(env.home(), &spawn_cwd);
-    fs::OpenOptions::new()
-        .append(true)
-        .open(&rollout)
-        .unwrap()
-        .write_all(b"{\"type\":\"event\",\"payload\":{\"append\":\"after spawn\"}}\n")
-        .unwrap();
-
-    let context = CaptureSessionContext {
-        agent_id: "developer".to_string(),
-        spawn_cwd: spawn_cwd.clone(),
-        pane_id: Some("%42".to_string()),
-        pane_pid: Some(4242),
-        spawned_at: Some("2026-01-02T00:00:00+00:00".to_string()),
-        expected_session_id: None,
-        provider_projects_root: None,
-    };
-    let candidates = get_adapter(Provider::Codex)
-        .capture_session_candidates(&context, 0)
-        .expect("scan codex candidates");
-
+fn session_capture_claim_keys_are_typed_not_bare_strings() {
     let capture_src = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/provider/session/capture.rs"
     ));
-    let mut failures = Vec::new();
-    if candidates.iter().any(|candidate| {
-        candidate
-            .captured
-            .rollout_path
-            .as_ref()
-            .is_some_and(|path| path.as_path() == rollout)
-    }) {
-        failures.push(format!(
-            "old rollout was accepted as a fresh candidate: filename/created_at predate spawn, only mutable mtime is new; candidates={candidates:?}"
-        ));
-    }
-    if !capture_src.contains("SessionAttributionKey")
-        || capture_src.contains("format!(\"session:{}\"")
-        || capture_src.contains("format!(\"rollout:{}\"")
-    {
-        failures.push(
-            "claimed/captured keys must be typed by provider+team_key+agent_id(+session/rollout), not bare session:/rollout: strings".to_string(),
-        );
-    }
-
     assert!(
-        failures.is_empty(),
-        "P0 capture contract failed:\n{}",
-        failures.join("\n")
+        capture_src.contains("SessionAttributionKey")
+            && !capture_src.contains("format!(\"session:{}\"")
+            && !capture_src.contains("format!(\"rollout:{}\""),
+        "P0 capture contract: claimed/captured keys must be typed by provider+team_key+agent_id(+session/rollout), not bare session:/rollout: strings"
     );
 }
 
@@ -548,7 +503,7 @@ fn abnormal_shell_pane_with_live_delivery_is_not_dead_and_dedupe_ignores_size() 
             "agents": {
                 "architect": {
                     "status": "running",
-                    "provider": "codex",
+                    "provider": "copilot",
                     "agent_id": "architect",
                     "window": "architect",
                     "pane_id": "%old-architect",
@@ -618,10 +573,10 @@ fn abnormal_shell_pane_with_live_delivery_is_not_dead_and_dedupe_ignores_size() 
 
 #[test]
 #[serial(env)]
-fn status_model_uses_effective_codex_source_not_stale_claude_state() {
+fn status_model_uses_effective_copilot_source_not_stale_claude_state() {
     let (_env, workspace) = team_case_with_model("p0-status", &[("developer", "gpt-5.6-sol")]);
     let mut state = load_runtime_state(&workspace).unwrap();
-    state["agents"]["developer"]["provider"] = json!("codex");
+    state["agents"]["developer"]["provider"] = json!("copilot");
     state["agents"]["developer"]["model"] = json!("claude-opus-4-7");
     save_runtime_state(&workspace, &state).unwrap();
 
@@ -633,7 +588,7 @@ fn status_model_uses_effective_codex_source_not_stale_claude_state() {
     let model_source = agent.get("model_source").and_then(Value::as_str);
     assert!(
         model == Some("gpt-5.6-sol") || model_stale || model_source == Some("role"),
-        "P0 provider/model projection: Codex seat must not render stale Claude model as truth; agent={agent} status={status}"
+        "P0 provider/model projection: Copilot seat must not render stale Claude model as truth; agent={agent} status={status}"
     );
 }
 
@@ -653,6 +608,7 @@ fn team_case_with_model(
     write_team_docs(&workspace, workers);
     write_runtime_spec(&workspace);
     seed_state(&workspace, workers);
+    seed_copilot_session_store(env.home(), workers);
     seed_healthy_coordinator(&workspace);
     (env, workspace)
 }
@@ -661,7 +617,7 @@ fn write_team_docs(workspace: &Path, workers: &[(&str, &str)]) {
     fs::create_dir_all(workspace.join("agents")).unwrap();
     fs::write(workspace.join("TEAM.md"), "---\nname: current\nobjective: P0 host co-tenant contract.\nprovider: codex\n---\n").unwrap();
     for (worker, model) in workers {
-        let role = format!("---\nname: {worker}\nrole: {worker}\nprovider: codex\nmodel: {model}\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{worker}.\n");
+        let role = format!("---\nname: {worker}\nrole: {worker}\nprovider: copilot\nmodel: {model}\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{worker}.\n");
         fs::write(workspace.join("agents").join(format!("{worker}.md")), role).unwrap();
     }
 }
@@ -679,7 +635,7 @@ fn seed_state(workspace: &Path, workers: &[(&str, &str)]) {
     let agents = workers
         .iter()
         .map(|(worker, model)| ((*worker).to_string(), json!({
-            "status": "running", "provider": "codex", "agent_id": worker, "role": worker,
+            "status": "running", "provider": "copilot", "agent_id": worker, "role": worker,
             "model": model, "auth_mode": "subscription", "tools": ["mcp_team"],
             "window": worker, "pane_id": format!("%old-{worker}"), "pane_pid": 10_000,
             "owner_team_id": TEAM,
@@ -708,16 +664,23 @@ fn seed_healthy_coordinator(workspace: &Path) {
     fs::write(coordinator_pid_path(&workspace), pid.to_string()).unwrap();
 }
 
-fn write_old_codex_rollout(home: &Path, spawn_cwd: &Path) -> PathBuf {
-    let dir = home.join(".codex/sessions/2026/01/01");
-    fs::create_dir_all(&dir).unwrap();
-    let rollout = dir.join("rollout-2026-01-01T00-00-00-old.jsonl");
-    let meta = json!({"type": "session_meta", "payload": {
-        "id": "old-session-before-spawn", "cwd": spawn_cwd.to_string_lossy(),
-        "created_at": "2026-01-01T00:00:00+00:00"
-    }});
-    fs::write(&rollout, format!("{meta}\n{}\n", json!({"type": "event", "payload": {"message": "old rollout"}}))).unwrap();
-    rollout
+/// Copilot resume backing is the `sessions` row in the hermetic
+/// `$HOME/.copilot/session-store.db`.
+fn seed_copilot_session_store(home: &Path, workers: &[(&str, &str)]) {
+    let db = home.join(".copilot").join("session-store.db");
+    fs::create_dir_all(db.parent().unwrap()).unwrap();
+    let conn = rusqlite::Connection::open(db).unwrap();
+    conn.execute_batch(
+        "create table if not exists sessions (id text primary key, cwd text, created_at text);",
+    )
+    .unwrap();
+    for (worker, _) in workers {
+        conn.execute(
+            "insert or replace into sessions(id, cwd, created_at) values (?1, ?2, '2026-01-01T00:00:00Z')",
+            rusqlite::params![format!("sess-{worker}"), home.to_string_lossy()],
+        )
+        .unwrap();
+    }
 }
 
 #[derive(Clone)]

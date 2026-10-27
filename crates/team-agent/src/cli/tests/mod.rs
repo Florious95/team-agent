@@ -58,8 +58,8 @@ fn seed_send_workspace() -> std::path::PathBuf {
         "teams": {
             "teamA": {
                 "agents": {
-                    "alice": {"provider": "codex"},
-                    "drifted": {"provider": "codex", "status": "session_drift"}
+                    "alice": {"provider": "copilot"},
+                    "drifted": {"provider": "copilot", "status": "session_drift"}
                 },
                 "tasks": [{"id": "t-1"}]
             }

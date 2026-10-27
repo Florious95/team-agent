@@ -22,7 +22,7 @@ fn dirty_004_stale_session_id_missing_backing_refuses_restart() {
     );
     ws.seed_crashed_workers_for_restart(team_id, &["a"]);
     ws.mutate_agent_everywhere("a", |agent| {
-        agent.insert("provider".to_string(), json!("codex"));
+        agent.insert("provider".to_string(), json!("copilot"));
         agent.insert("session_id".to_string(), json!("sess-dirty-004"));
         agent.insert("rollout_path".to_string(), json!("/missing/dirty004.jsonl"));
         agent.insert("first_send_at".to_string(), json!("2026-01-01T00:00:00Z"));

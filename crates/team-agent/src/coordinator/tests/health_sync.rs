@@ -236,7 +236,7 @@ fn spine2_sync_health_records_last_output_at() {
 #[test]
 fn spine2_sync_health_working_status_delivers_same_tick() {
     let (coord, dir) = seeded_health_coord_with_readiness(
-        one_agent("codex"), "Working (5s · esc to interrupt)", true,
+        one_agent("fake"), "Working (5s · esc to interrupt)", true,
     );
     let store = MessageStore::open(&dir).unwrap();
     let mid = store
@@ -283,7 +283,7 @@ fn spine2_sync_health_working_status_delivers_same_tick() {
 // must be reconciled to this contract.)
 #[test]
 fn contract_working_worker_stays_alive_and_deliverable_in_real_tick() {
-    let (coord, dir) = seeded_health_coord(one_agent("codex"), "Working (5s · esc to interrupt)");
+    let (coord, dir) = seeded_health_coord(one_agent("fake"), "Working (5s · esc to interrupt)");
     let store = MessageStore::open(&dir).unwrap();
     let _mid = store
         .create_message(Some("t"), "leader", "w1", "hi", None, true, None)

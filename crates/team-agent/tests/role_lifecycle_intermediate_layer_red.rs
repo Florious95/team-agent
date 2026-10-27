@@ -21,8 +21,23 @@ impl Shims {
         fs::create_dir_all(&dir).unwrap();
         fs::create_dir_all(&capture_dir).unwrap();
         let binary = quote(&framework::ta_binary().to_string_lossy());
-        executable(&dir.join("codex"), &format!(
-            "#!/bin/sh\nset -eu\n[ -n \"${{TEAM_AGENT_AGENT_ID:-}}\" ] && [ -n \"${{TEAM_AGENT_WORKSPACE:-}}\" ] || exit 0\nprintf '%s\\0' codex \"$@\" > \"${{TEAM_AGENT_WORKSPACE}}/.role-lifecycle-launch/${{TEAM_AGENT_AGENT_ID}}.argv\"\n[ ! -f \"${{TEAM_AGENT_WORKSPACE}}/.role-lifecycle-fail-launch\" ] || exit 73\nexec {} fake-worker --workspace \"${{TEAM_AGENT_WORKSPACE}}\" --agent-id \"${{TEAM_AGENT_AGENT_ID}}\"\n", binary));
+        // Legacy Copilot worker shim: the spawn-time `copilot mcp list` probe is
+        // answered empty. A launch records argv plus the launch inputs Copilot
+        // reads outside argv (instructions file, BYOK profile env).
+        executable(&dir.join("copilot"), &format!(r#"#!/bin/sh
+set -eu
+[ "${{1:-}}" != mcp ] || exit 0
+[ -n "${{TEAM_AGENT_AGENT_ID:-}}" ] && [ -n "${{TEAM_AGENT_WORKSPACE:-}}" ] || exit 0
+capture="$TEAM_AGENT_WORKSPACE/.role-lifecycle-launch/$TEAM_AGENT_AGENT_ID.argv"
+{{
+  printf '%s\0' copilot "$@"
+  printf 'instructions=%s\0' "$(cat "${{COPILOT_CUSTOM_INSTRUCTIONS_DIRS:-/nonexistent}}/AGENTS.md" 2>/dev/null || true)"
+  printf '%s\0' "COPILOT_PROVIDER_TYPE=${{COPILOT_PROVIDER_TYPE:-}}" "COPILOT_PROVIDER_BASE_URL=${{COPILOT_PROVIDER_BASE_URL:-}}"
+}} > "$capture.tmp"
+mv "$capture.tmp" "$capture"
+[ ! -f "$TEAM_AGENT_WORKSPACE/.role-lifecycle-fail-launch" ] || exit 73
+exec {} fake-worker --workspace "$TEAM_AGENT_WORKSPACE" --agent-id "$TEAM_AGENT_AGENT_ID"
+"#, binary));
         let inherited = std::env::var("PATH").unwrap_or_default();
         let real_tmux = std::env::split_paths(&inherited).map(|p| p.join("tmux")).find(|p| p.is_file()).expect("tmux available for isolated E2E tests");
         executable(&dir.join("tmux"), &format!(
@@ -127,22 +142,22 @@ fn compiled_from(raw: &str, id: &str) -> Yaml {
 fn compiled(ws: &TestWorkspace, id: &str) -> Yaml {
     compiled_from(&fs::read_to_string(spec_path(ws)).unwrap(), id)
 }
-fn codex_profile_role(id: &str, profile: &str, prompt: &str) -> String {
-    role(id, "codex", "gpt-5.6-luna", None, false, prompt)
+fn copilot_profile_role(id: &str, profile: &str, prompt: &str) -> String {
+    role(id, "copilot", "gpt-5.6-luna", None, false, prompt)
         .replace("auth_mode: subscription\n", "auth_mode: compatible_api\n")
         .replace("tools:\n", &format!("profile: {profile}\ntools:\n"))
 }
-fn write_codex_profile(dir: &Path, name: &str, provider_id: &str, base_url: &str) {
+fn write_copilot_profile(dir: &Path, name: &str, provider_type: &str, base_url: &str) {
     fs::create_dir_all(dir).unwrap();
     fs::write(dir.join(format!("{name}.env")), format!(
-        "AUTH_MODE=compatible_api\nMODEL_PROVIDER={provider_id}\nBASE_URL={base_url}\nAPI_KEY=role-lifecycle-fake-only\nMODEL=gpt-5.6-luna\n"
+        "AUTH_MODE=compatible_api\nPROVIDER_TYPE={provider_type}\nBASE_URL={base_url}\nAPI_KEY=role-lifecycle-fake-only\nMODEL=gpt-5.6-luna\n"
     )).unwrap();
 }
-fn assert_codex_profile(argv: &[String], provider_id: &str, base_url: &str) {
-    let selector = format!("model_provider=\"{provider_id}\"");
-    let endpoint = format!("model_providers.{provider_id}.base_url=\"{base_url}\"");
-    assert!(pair(argv, "-c", &selector), "missing Codex profile selector: {argv:?}");
-    assert!(pair(argv, "-c", &endpoint), "missing self-contained Codex profile endpoint: {argv:?}");
+fn assert_copilot_profile(capture: &[String], provider_type: &str, base_url: &str) {
+    let selector = format!("COPILOT_PROVIDER_TYPE={provider_type}");
+    let endpoint = format!("COPILOT_PROVIDER_BASE_URL={base_url}");
+    assert!(capture.contains(&selector), "missing Copilot BYOK provider type: {capture:?}");
+    assert!(capture.contains(&endpoint), "missing self-contained Copilot BYOK endpoint: {capture:?}");
 }
 fn assert_config(ws: &TestWorkspace, id: &str, provider: &str, model: &str, effort: Option<&str>, bypass: bool) {
     let v = compiled(ws, id);
@@ -179,27 +194,27 @@ fn traditional_quick_start_and_add_role_file_without_cli_provider_or_bypass_regr
     // A plain-text role (no front matter) now selects the default Pi contract
     // leaf, which needs a declared model; its legacy launch half was retired
     // with the legacy Pi worker runtime.
-    let (ws, shims) = ws_seed("rolelife-traditional", "codex", "gpt-6-luna", None);
-    assert_eq!(shims.capture("seed").first().map(String::as_str), Some("codex"));
+    let (ws, shims) = ws_seed("rolelife-traditional", "copilot", "gpt-6-luna", None);
+    assert_eq!(shims.capture("seed").first().map(String::as_str), Some("copilot"));
     let source = ws.path().join("traditional.md");
-    let bytes = role("traditional", "codex", "gpt-6-luna", None, false, "Traditional role-file prompt.");
+    let bytes = role("traditional", "copilot", "gpt-6-luna", None, false, "Traditional role-file prompt.");
     fs::write(&source, &bytes).unwrap();
     let add = run(&ws, &shims, &cli(&ws, "add-agent", "traditional", &["--role-file", source.to_str().unwrap(), "--no-display"]));
     assert!(add.is_success(), "traditional role-file add: {} {}", add.stdout, add.stderr);
     assert_eq!(fs::read(&source).unwrap(), bytes.as_bytes());
-    assert_eq!(shims.capture("traditional").first().map(String::as_str), Some("codex"));
+    assert_eq!(shims.capture("traditional").first().map(String::as_str), Some("copilot"));
 }
 
 #[test]
 fn add_required_values_cli_generation_and_file_completion() {
-    let (ws, shims) = ws_seed("rolelife-add-required", "codex", "gpt-6-luna", None);
+    let (ws, shims) = ws_seed("rolelife-add-required", "copilot", "gpt-6-luna", None);
     let no_provider = ws.path().join("no-provider.md");
     fs::write(&no_provider, "---\nname: no-provider\nrole: Missing provider\ndangerously_skip_permissions: false\n---\nPrompt.\n").unwrap();
     let no_bypass = ws.path().join("no-bypass.md");
-    fs::write(&no_bypass, "---\nname: no-bypass\nrole: Missing bypass\nprovider: codex\n---\nPrompt.\n").unwrap();
+    fs::write(&no_bypass, "---\nname: no-bypass\nrole: Missing bypass\nprovider: copilot\n---\nPrompt.\n").unwrap();
     for (id, source, flags) in [
         ("no-provider", no_provider, vec!["--role-file", "", "--bypass", "false", "--prompt", "prompt"]),
-        ("no-bypass", no_bypass, vec!["--role-file", "", "--provider", "codex", "--prompt", "prompt"]),
+        ("no-bypass", no_bypass, vec!["--role-file", "", "--provider", "copilot", "--prompt", "prompt"]),
     ] {
         let mut flags = flags;
         flags[1] = source.to_str().unwrap();
@@ -207,19 +222,19 @@ fn add_required_values_cli_generation_and_file_completion() {
         let r = run(&ws, &shims, &cli(&ws, "add-agent", id, &flags)); reject(&r, "missing required add-agent field");
         assert_eq!(snapshot(&ws, &shims, id), before); assert!(!role_path(&ws, id).exists());
     }
-    let generated = run(&ws, &shims, &cli(&ws, "add-agent", "generated", &["--provider", "codex", "--bypass", "false", "--model", "gpt-5.6-luna", "--effort", "high", "--prompt", "CLI prompt.", "--no-display"]));
+    let generated = run(&ws, &shims, &cli(&ws, "add-agent", "generated", &["--provider", "copilot", "--bypass", "false", "--model", "gpt-5.6-luna", "--effort", "high", "--prompt", "CLI prompt.", "--no-display"]));
     assert!(generated.is_success(), "CLI-only add: {} {}", generated.stdout, generated.stderr);
     assert!(fs::read_to_string(role_path(&ws, "generated")).unwrap().contains("CLI prompt."));
-    assert_config(&ws, "generated", "codex", "gpt-5.6-luna", Some("high"), false);
+    assert_config(&ws, "generated", "copilot", "gpt-5.6-luna", Some("high"), false);
     let source = ws.path().join("partial.md"); fs::write(&source, "---\nname: filled\nrole: Filled\n---\nCLI body.\n").unwrap();
-    let filled = run(&ws, &shims, &cli(&ws, "add-agent", "filled", &["--role-file", source.to_str().unwrap(), "--provider", "codex", "--bypass", "false", "--model", "gpt-5.6-luna", "--prompt", "CLI body."]));
+    let filled = run(&ws, &shims, &cli(&ws, "add-agent", "filled", &["--role-file", source.to_str().unwrap(), "--provider", "copilot", "--bypass", "false", "--model", "gpt-5.6-luna", "--prompt", "CLI body."]));
     assert!(filled.is_success(), "CLI completion: {} {}", filled.stdout, filled.stderr);
-    assert_config(&ws, "filled", "codex", "gpt-5.6-luna", None, false);
+    assert_config(&ws, "filled", "copilot", "gpt-5.6-luna", None, false);
 }
 
 #[test]
 fn invalid_add_and_start_parameter_syntax_rejects_before_any_mutation() {
-    let (ws, shims) = ws_seed("rolelife-invalid-args", "codex", "gpt-6-luna", None); stop(&ws, &shims, "seed");
+    let (ws, shims) = ws_seed("rolelife-invalid-args", "copilot", "gpt-6-luna", None); stop(&ws, &shims, "seed");
     quiesce_owned_coordinator_before_rejection_snapshot(&ws);
     let add_cases: [(&str, &[&str]); 5] = [
         ("bare-bypass", &["--role-file", "", "--bypass"]),
@@ -230,7 +245,7 @@ fn invalid_add_and_start_parameter_syntax_rejects_before_any_mutation() {
     ];
     for (id, fields) in add_cases {
         let source = ws.path().join(format!("{id}-source.md"));
-        let source_bytes = role(id, "codex", "gpt-6-luna", None, false, "Valid source.");
+        let source_bytes = role(id, "copilot", "gpt-6-luna", None, false, "Valid source.");
         fs::write(&source, &source_bytes).unwrap();
         let mut flags = fields.to_vec(); flags[1] = source.to_str().unwrap();
         let before = snapshot(&ws, &shims, id); let seed_before = snapshot(&ws, &shims, "seed");
@@ -241,7 +256,7 @@ fn invalid_add_and_start_parameter_syntax_rejects_before_any_mutation() {
     }
     let start_cases: [&[&str]; 5] = [
         &["--bypass"], &["--bypass", "maybe"], &["--no-bypass"],
-        &["--provider", "imaginary"], &["--provider", "codex", "--effort", "impossible"],
+        &["--provider", "imaginary"], &["--provider", "copilot", "--effort", "impossible"],
     ];
     for fields in start_cases {
         let before = snapshot(&ws, &shims, "seed");
@@ -253,14 +268,14 @@ fn invalid_add_and_start_parameter_syntax_rejects_before_any_mutation() {
 
 #[test]
 fn add_local_role_is_in_place_and_external_template_is_imported_then_reloaded_locally() {
-    let (ws, shims) = ws_seed("rolelife-add-source", "codex", "gpt-6-luna", None);
+    let (ws, shims) = ws_seed("rolelife-add-source", "copilot", "gpt-6-luna", None);
     let local = role_path(&ws, "local");
-    let local_bytes = role("local", "codex", "gpt-5.6-luna", None, false, "Local prompt."); fs::write(&local, &local_bytes).unwrap();
+    let local_bytes = role("local", "copilot", "gpt-5.6-luna", None, false, "Local prompt."); fs::write(&local, &local_bytes).unwrap();
     let r = run(&ws, &shims, &cli(&ws, "add-agent", "local", &["--role-file", local.to_str().unwrap()]));
     assert!(r.is_success(), "canonical add: {} {}", r.stdout, r.stderr); assert_eq!(fs::read(&local).unwrap(), local_bytes.as_bytes());
     assert_eq!(fs::read_dir(ws.path().join("agents")).unwrap().filter_map(Result::ok).filter(|e| e.file_name().to_string_lossy().starts_with("local")).count(), 1, "canonical role must not be duplicated");
     let source = ws.path().join("templates/external.md"); fs::create_dir_all(source.parent().unwrap()).unwrap();
-    let bytes = role("external", "codex", "gpt-6-luna", None, false, "Imported prompt."); fs::write(&source, &bytes).unwrap();
+    let bytes = role("external", "copilot", "gpt-6-luna", None, false, "Imported prompt."); fs::write(&source, &bytes).unwrap();
     let r = run(&ws, &shims, &cli(&ws, "add-agent", "external", &["--role-file", source.to_str().unwrap()]));
     assert!(r.is_success(), "external add: {} {}", r.stdout, r.stderr);
     let canonical = role_path(&ws, "external"); assert_eq!(fs::read(&canonical).unwrap(), bytes.as_bytes());
@@ -272,36 +287,36 @@ fn add_local_role_is_in_place_and_external_template_is_imported_then_reloaded_lo
 
 #[test]
 fn add_file_cli_arbitration_accepts_equal_and_rejects_conflicting_values_atomically() {
-    let (ws, shims) = ws_seed("rolelife-arbitration", "codex", "gpt-6-luna", None);
+    let (ws, shims) = ws_seed("rolelife-arbitration", "copilot", "gpt-6-luna", None);
     for (id, fields, should_pass) in [
-        ("same", vec!["--provider", "codex", "--model", "gpt-5.6-luna", "--effort", "high", "--bypass", "false", "--prompt", "Body."], true),
+        ("same", vec!["--provider", "copilot", "--model", "gpt-5.6-luna", "--effort", "high", "--bypass", "false", "--prompt", "Body."], true),
         ("same-prompt-trim", vec!["--prompt", " \tBody.\n "], true),
-        ("conf-provider", vec!["--provider", "copilot"], false),
+        ("conf-provider", vec!["--provider", "fake"], false),
         ("conf-bypass", vec!["--bypass", "true"], false),
         ("conf-model", vec!["--model", "gpt-6-luna"], false),
         ("conf-effort", vec!["--effort", "xhigh"], false),
         ("conf-prompt", vec!["--prompt", "Different body."], false),
     ] {
         let source = ws.path().join(format!("{id}-source.md"));
-        let source_bytes = role(id, "codex", "gpt-5.6-luna", Some("high"), false, "Body.");
+        let source_bytes = role(id, "copilot", "gpt-5.6-luna", Some("high"), false, "Body.");
         fs::write(&source, &source_bytes).unwrap();
         let mut flags = vec!["--role-file", source.to_str().unwrap()]; flags.extend(fields);
         let before = snapshot(&ws, &shims, id); let r = run(&ws, &shims, &cli(&ws, "add-agent", id, &flags));
         if should_pass { assert!(r.is_success(), "equal values: {} {}", r.stdout, r.stderr); assert_eq!(fs::read(&source).unwrap(), source_bytes.as_bytes()); }
         else { reject(&r, "file/CLI conflict"); assert_eq!(snapshot(&ws, &shims, id), before); assert!(!role_path(&ws, id).exists()); assert_eq!(fs::read(&source).unwrap(), source_bytes.as_bytes()); }
     }
-    let source = ws.path().join("file-only.md"); fs::write(&source, role("file-only", "codex", "gpt-5.6-luna", None, false, "File only.")).unwrap();
+    let source = ws.path().join("file-only.md"); fs::write(&source, role("file-only", "copilot", "gpt-5.6-luna", None, false, "File only.")).unwrap();
     let r = run(&ws, &shims, &cli(&ws, "add-agent", "file-only", &["--role-file", source.to_str().unwrap()]));
     assert!(r.is_success(), "traditional file-only definition: {} {}", r.stdout, r.stderr);
 }
 
 #[test]
 fn duplicate_add_running_or_stopped_is_fail_closed_with_zero_session_side_effects() {
-    let (ws, shims) = ws_seed("rolelife-duplicate", "codex", "gpt-6-luna", None);
+    let (ws, shims) = ws_seed("rolelife-duplicate", "copilot", "gpt-6-luna", None);
     // Attribute all snapshot changes to the rejected command, not a daemon
     // tick racing the stop that removes the worker's pane binding.
     quiesce_owned_coordinator_before_rejection_snapshot(&ws);
-    let source = ws.path().join("other.md"); fs::write(&source, role("seed", "codex", "gpt-5.6-luna", None, false, "Other." )).unwrap();
+    let source = ws.path().join("other.md"); fs::write(&source, role("seed", "copilot", "gpt-5.6-luna", None, false, "Other." )).unwrap();
     for stopped in [false, true] {
         if stopped { stop(&ws, &shims, "seed"); }
         let before = snapshot(&ws, &shims, "seed");
@@ -312,7 +327,7 @@ fn duplicate_add_running_or_stopped_is_fail_closed_with_zero_session_side_effect
 
 #[test]
 fn running_start_refuses_plain_and_parameterized_calls_without_mutation() {
-    let (ws, shims) = ws_seed("rolelife-running", "codex", "gpt-6-luna", None);
+    let (ws, shims) = ws_seed("rolelife-running", "copilot", "gpt-6-luna", None);
     for flags in [&[][..], &["--model", "gpt-5.6-luna", "--effort", "high", "--bypass", "true"][..]] {
         let before = snapshot(&ws, &shims, "seed");
         let r = run(&ws, &shims, &start(&ws, "seed", flags)); reject(&r, "start already-running seat");
@@ -322,23 +337,22 @@ fn running_start_refuses_plain_and_parameterized_calls_without_mutation() {
 }
 
 #[test]
-fn s5_codex_stop_change_model_effort_restart_updates_frontmatter_spec_and_native_argv() {
-    let (ws, shims) = ws_seed("rolelife-s5-codex", "codex", "gpt-5.6-luna", Some("medium")); stop(&ws, &shims, "seed");
-    let r = run(&ws, &shims, &start(&ws, "seed", &["--provider", "codex", "--model", "gpt-6-luna", "--effort", "ultra"]));
-    assert!(r.is_success(), "Codex patch: {} {}", r.stdout, r.stderr);
-    assert!(fs::read_to_string(role_path(&ws, "seed")).unwrap().contains("effort: ultra"));
-    assert_config(&ws, "seed", "codex", "gpt-6-luna", Some("ultra"), false);
-    let argv = shims.capture("seed"); assert!(pair(&argv, "--model", "gpt-6-luna"));
-    assert!(pair(&argv, "-c", "model_reasoning_effort=ultra"), "authoritative Codex wire key: {argv:?}");
+fn s5_stop_change_model_effort_restart_updates_frontmatter_spec_and_native_argv() {
+    let (ws, shims) = ws_seed("rolelife-s5", "copilot", "gpt-5.6-luna", Some("medium")); stop(&ws, &shims, "seed");
+    let r = run(&ws, &shims, &start(&ws, "seed", &["--provider", "copilot", "--model", "gpt-6-luna", "--effort", "high"]));
+    assert!(r.is_success(), "Copilot patch: {} {}", r.stdout, r.stderr);
+    assert!(fs::read_to_string(role_path(&ws, "seed")).unwrap().contains("effort: high"));
+    assert_config(&ws, "seed", "copilot", "gpt-6-luna", Some("high"), false);
+    let argv = shims.capture("seed"); assert!(pair(&argv, "--model", "gpt-6-luna"), "patched model must reach native argv: {argv:?}");
 }
 
 #[test]
 fn stopped_start_partial_patches_bypass_and_prompt_and_preserves_omitted_values() {
-    let (ws, shims) = ws_seed("rolelife-partial", "codex", "gpt-6-luna", None); stop(&ws, &shims, "seed");
+    let (ws, shims) = ws_seed("rolelife-partial", "copilot", "gpt-6-luna", None); stop(&ws, &shims, "seed");
     for (value, expected) in [("true", true), ("false", false)] {
         let r = run(&ws, &shims, &start(&ws, "seed", &["--bypass", value, "--prompt", "Patched prompt."]));
         assert!(r.is_success(), "bypass={value}: {} {}", r.stdout, r.stderr);
-        assert_config(&ws, "seed", "codex", "gpt-6-luna", None, expected);
+        assert_config(&ws, "seed", "copilot", "gpt-6-luna", None, expected);
         assert!(fs::read_to_string(role_path(&ws, "seed")).unwrap().contains("Patched prompt."));
         assert!(shims.capture("seed").iter().any(|arg| arg.contains("Patched prompt.")));
         stop(&ws, &shims, "seed");
@@ -347,31 +361,31 @@ fn stopped_start_partial_patches_bypass_and_prompt_and_preserves_omitted_values(
 
 #[test]
 fn cross_provider_changes_are_rejected_both_ways_but_same_provider_is_allowed() {
-    for (provider, model, effort, target) in [("fake", "fake", None, "codex"), ("codex", "gpt-5.6-luna", Some("medium"), "fake")] {
+    for (provider, model, effort, target) in [("fake", "fake", None, "copilot"), ("copilot", "gpt-5.6-luna", Some("medium"), "fake")] {
         let (ws, shims) = ws_seed(&format!("rolelife-cross-{provider}"), provider, model, effort); stop(&ws, &shims, "seed");
         quiesce_owned_coordinator_before_rejection_snapshot(&ws);
         let before = snapshot(&ws, &shims, "seed"); let r = run(&ws, &shims, &start(&ws, "seed", &["--provider", target]));
         reject(&r, "cross-provider switch"); assert!(format!("{} {}", r.stdout, r.stderr).to_lowercase().contains("provider"));
         assert_eq!(snapshot(&ws, &shims, "seed"), before);
     }
-    let (ws, shims) = ws_seed("rolelife-same-provider", "codex", "gpt-6-luna", None); stop(&ws, &shims, "seed");
-    let r = run(&ws, &shims, &start(&ws, "seed", &["--provider", "codex"]));
+    let (ws, shims) = ws_seed("rolelife-same-provider", "copilot", "gpt-6-luna", None); stop(&ws, &shims, "seed");
+    let r = run(&ws, &shims, &start(&ws, "seed", &["--provider", "copilot"]));
     assert!(r.is_success(), "same provider must start: {} {}", r.stdout, r.stderr);
 }
 
 #[test]
 fn hand_edited_stopped_role_is_recompiled_and_used_by_start() {
-    let (ws, shims) = ws_seed("rolelife-manual-edit", "codex", "gpt-6-luna", None); stop(&ws, &shims, "seed");
-    let manual = role("seed", "codex", "gpt-5.6-luna", Some("high"), false, "Manual edit prompt.");
+    let (ws, shims) = ws_seed("rolelife-manual-edit", "copilot", "gpt-6-luna", None); stop(&ws, &shims, "seed");
+    let manual = role("seed", "copilot", "gpt-5.6-luna", Some("high"), false, "Manual edit prompt.");
     fs::write(role_path(&ws, "seed"), &manual).unwrap();
     let r = run(&ws, &shims, &start(&ws, "seed", &[])); assert!(r.is_success(), "manual reload: {} {}", r.stdout, r.stderr);
-    assert_config(&ws, "seed", "codex", "gpt-5.6-luna", Some("high"), false);
-    let argv = shims.capture("seed"); assert!(pair(&argv, "--model", "gpt-5.6-luna")); assert!(pair(&argv, "-c", "model_reasoning_effort=high"));
+    assert_config(&ws, "seed", "copilot", "gpt-5.6-luna", Some("high"), false);
+    let argv = shims.capture("seed"); assert!(pair(&argv, "--model", "gpt-5.6-luna"), "hand-edited model must reach native argv: {argv:?}");
 }
 
 #[test]
 fn failed_parameterized_start_restores_existing_role_and_spec_bytes() {
-    let (ws, shims) = ws_seed("rolelife-rollback-existing", "codex", "gpt-6-luna", None); stop(&ws, &shims, "seed");
+    let (ws, shims) = ws_seed("rolelife-rollback-existing", "copilot", "gpt-6-luna", None); stop(&ws, &shims, "seed");
     quiesce_owned_coordinator_before_rejection_snapshot(&ws);
     let spec = spec_path(&ws); let before = snapshot(&ws, &shims, "seed");
     fs::write(ws.path().join(".role-lifecycle-fail-launch"), b"injected tmux spawn failure").unwrap();
@@ -392,7 +406,7 @@ fn failed_parameterized_start_restores_existing_role_and_spec_bytes() {
 
 #[test]
 fn failed_prompt_bypass_start_restores_complete_existing_role_and_spec() {
-    let (ws, shims) = ws_seed("rolelife-rollback-prompt-bypass", "codex", "gpt-6-luna", None); stop(&ws, &shims, "seed");
+    let (ws, shims) = ws_seed("rolelife-rollback-prompt-bypass", "copilot", "gpt-6-luna", None); stop(&ws, &shims, "seed");
     quiesce_owned_coordinator_before_rejection_snapshot(&ws);
     let spec = spec_path(&ws); let before = snapshot(&ws, &shims, "seed");
     fs::write(ws.path().join(".role-lifecycle-fail-launch"), b"injected tmux spawn failure").unwrap();
@@ -413,38 +427,38 @@ fn failed_prompt_bypass_start_restores_complete_existing_role_and_spec() {
 
 #[test]
 fn stopped_start_profile_patch_uses_workspace_profile_values() {
-    let (ws, shims) = ws_seed("rolelife-start-profile", "codex", "gpt-5.6-luna", None); stop(&ws, &shims, "seed");
-    let role_without_profile = role("seed", "codex", "gpt-5.6-luna", None, false, "Profile patch.")
+    let (ws, shims) = ws_seed("rolelife-start-profile", "copilot", "gpt-5.6-luna", None); stop(&ws, &shims, "seed");
+    let role_without_profile = role("seed", "copilot", "gpt-5.6-luna", None, false, "Profile patch.")
         .replace("auth_mode: subscription\n", "auth_mode: compatible_api\n");
     fs::write(role_path(&ws, "seed"), role_without_profile).unwrap();
-    write_codex_profile(&ws.path().join("profiles"), "workspace-only", "workspace_local", "http://workspace.invalid/v1");
+    write_copilot_profile(&ws.path().join("profiles"), "workspace-only", "workspace_local", "http://workspace.invalid/v1");
     let r = run(&ws, &shims, &start(&ws, "seed", &["--profile", "workspace-only"]));
     assert!(r.is_success(), "start profile patch: {} {}", r.stdout, r.stderr);
     assert!(fs::read_to_string(role_path(&ws, "seed")).unwrap().contains("profile: workspace-only"));
     assert_eq!(compiled(&ws, "seed").get("profile").and_then(Yaml::as_str), Some("workspace-only"));
-    assert_codex_profile(&shims.capture("seed"), "workspace_local", "http://workspace.invalid/v1");
+    assert_copilot_profile(&shims.capture("seed"), "workspace_local", "http://workspace.invalid/v1");
 }
 
 #[test]
 fn imported_role_profile_is_workspace_local_not_an_external_template_dependency() {
-    let (ws, shims) = ws_seed("rolelife-import-profile", "codex", "gpt-6-luna", None);
+    let (ws, shims) = ws_seed("rolelife-import-profile", "copilot", "gpt-6-luna", None);
     let external_root = ws.path().join("external-template");
     let source = external_root.join("agent.md"); fs::create_dir_all(&external_root).unwrap();
-    let bytes = codex_profile_role("profiled", "workspace-only", "Imported profile role.");
+    let bytes = copilot_profile_role("profiled", "workspace-only", "Imported profile role.");
     fs::write(&source, &bytes).unwrap();
-    write_codex_profile(&ws.path().join("profiles"), "workspace-only", "workspace_local", "http://workspace.invalid/v1");
-    write_codex_profile(&external_root.join("profiles"), "workspace-only", "external_ghost", "http://external.invalid/v1");
+    write_copilot_profile(&ws.path().join("profiles"), "workspace-only", "workspace_local", "http://workspace.invalid/v1");
+    write_copilot_profile(&external_root.join("profiles"), "workspace-only", "external_ghost", "http://external.invalid/v1");
     let add = run(&ws, &shims, &cli(&ws, "add-agent", "profiled", &["--role-file", source.to_str().unwrap(), "--no-display"]));
     assert!(add.is_success(), "external profiled add: {} {}", add.stdout, add.stderr);
     assert_eq!(fs::read(&source).unwrap(), bytes.as_bytes());
     assert_eq!(fs::read(role_path(&ws, "profiled")).unwrap(), bytes.as_bytes());
-    assert_codex_profile(&shims.capture("profiled"), "workspace_local", "http://workspace.invalid/v1");
+    assert_copilot_profile(&shims.capture("profiled"), "workspace_local", "http://workspace.invalid/v1");
     assert_eq!(compiled(&ws, "profiled").get("profile").and_then(Yaml::as_str), Some("workspace-only"));
     stop(&ws, &shims, "profiled");
     fs::remove_dir_all(&external_root).unwrap();
     let restarted = run(&ws, &shims, &start(&ws, "profiled", &["--profile", "workspace-only"]));
     assert!(restarted.is_success(), "restart must remain workspace-self-contained: {} {}", restarted.stdout, restarted.stderr);
-    assert_codex_profile(&shims.capture("profiled"), "workspace_local", "http://workspace.invalid/v1");
+    assert_copilot_profile(&shims.capture("profiled"), "workspace_local", "http://workspace.invalid/v1");
 }
 
 #[test]
@@ -452,24 +466,16 @@ fn runtime_spec_and_launch_capture_are_not_substitutes_for_required_live_ui_chec
     // The final-candidate LIVE-S5 pane/UI verification is separately frozen in
     // the design document. This hermetic fake-provider contract asserts argv
     // only and intentionally makes no claim about what a real UI displays.
-    let (ws, shims) = ws_seed("rolelife-ui-boundary", "codex", "gpt-6-luna", None);
+    let (ws, shims) = ws_seed("rolelife-ui-boundary", "copilot", "gpt-6-luna", None);
     assert!(shims.capture_path("seed").starts_with(ws.path()));
     assert!(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/e2e/framework.rs").is_file());
 }
 
 #[test]
-fn codex_max_effort_uses_issue_238_authoritative_wire_key() {
-    let (ws, shims) = ws_seed("rolelife-codex-max", "codex", "gpt-5.6-luna", Some("medium")); stop(&ws, &shims, "seed");
-    let r = run(&ws, &shims, &start(&ws, "seed", &["--effort", "max"]));
-    assert!(r.is_success(), "Codex max: {} {}", r.stdout, r.stderr);
-    assert!(pair(&shims.capture("seed"), "-c", "model_reasoning_effort=max"));
-}
-
-#[test]
 fn external_role_conflict_and_duplicate_refusals_leave_canonical_files_and_spec_unchanged() {
-    let (ws, shims) = ws_seed("rolelife-zero-side-effects", "codex", "gpt-6-luna", None);
-    let source = ws.path().join("conflict.md"); fs::write(&source, role("conflict", "codex", "gpt-5.6-luna", None, false, "File body.")).unwrap();
+    let (ws, shims) = ws_seed("rolelife-zero-side-effects", "copilot", "gpt-6-luna", None);
+    let source = ws.path().join("conflict.md"); fs::write(&source, role("conflict", "copilot", "gpt-5.6-luna", None, false, "File body.")).unwrap();
     let before = snapshot(&ws, &shims, "conflict");
-    let r = run(&ws, &shims, &cli(&ws, "add-agent", "conflict", &["--role-file", source.to_str().unwrap(), "--provider", "copilot"]));
+    let r = run(&ws, &shims, &cli(&ws, "add-agent", "conflict", &["--role-file", source.to_str().unwrap(), "--provider", "fake"]));
     reject(&r, "provider conflict"); assert_eq!(snapshot(&ws, &shims, "conflict"), before); assert!(!role_path(&ws, "conflict").exists());
 }

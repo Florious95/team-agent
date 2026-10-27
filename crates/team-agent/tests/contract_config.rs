@@ -268,7 +268,7 @@ fn pre_upgrade_cursor_agent_row_admits_only_teardown_and_never_blocks_siblings()
 }
 
 #[test]
-fn pre_upgrade_claude_and_pi_rows_admit_only_teardown_and_never_block_siblings() {
+fn pre_upgrade_claude_codex_grok_and_pi_rows_admit_only_teardown_and_never_block_siblings() {
     use team_agent::contract_runtime::framework::{is_contract, require_legacy_lifecycle};
     use team_agent::state::{persist, selector};
     let (_sandbox, args) = fixture();
@@ -276,6 +276,8 @@ fn pre_upgrade_claude_and_pi_rows_admit_only_teardown_and_never_block_siblings()
         "---\nprovider: copilot\nmodel: gpt-6-luna\n---\nWorker.\n").unwrap();
     for (retired, public) in [
         ("claude", "claude"), ("claude_code", "claude"), ("claude-code", "claude"), ("Claude", "claude"),
+        ("codex", "codex"), ("codex_cli", "codex"), ("codex-cli", "codex"), ("Codex", "codex"),
+        ("grok", "grok"), ("Grok", "grok"),
         ("pi", "pi"), ("PI", "pi"),
     ] {
         // The role file now declares the contract leaf; the recorded row is legacy.
@@ -376,37 +378,52 @@ fn codex_role(args: &QuickStartArgs, name: &str, extra: &str) {
 }
 
 #[test]
-fn bare_codex_stays_legacy_and_only_an_exact_opt_in_selects_the_contract_leaf() {
+fn every_codex_and_grok_name_selects_the_contract_leaf_without_opt_in() {
     use team_agent::model::yaml::Value;
     let (_sandbox, args) = fixture();
-    codex_role(&args, "legacy-worker", "");
+    // `codex`, its CLI names and `grok` declare their leaves on their own;
+    // `contract_runtime: false` cannot keep them on an excised legacy worker engine.
+    codex_role(&args, "bare-worker", "");
     codex_role(&args, "opted-out", "contract_runtime: false\n");
-    // A team of bare/opted-out Codex roles never enters the contract path.
-    assert!(read_team(&args).unwrap().is_none());
     codex_role(&args, "native-worker", "contract_runtime: true\n");
+    for (name, provider) in [("cli-worker", "codex_cli"), ("dash-worker", "codex-cli"), ("grok-worker", "grok")] {
+        std::fs::write(args.agents_dir.join("agents").join(format!("{name}.md")), format!(
+            "---\nprovider: {provider}\nmodel: gpt-6-luna\n---\nRole body\n"
+        )).unwrap();
+    }
+    let expected = [
+        ("bare-worker", "codex_tui"), ("cli-worker", "codex_tui"), ("dash-worker", "codex_tui"),
+        ("grok-worker", "grok_build"), ("native-worker", "codex_tui"), ("opted-out", "codex_tui"),
+    ];
     let config = read_team(&args).unwrap().unwrap();
-    assert_eq!(config.roles.len(), 1);
-    assert_eq!(config.roles[0].id.as_str(), "native-worker");
-    assert_eq!(config.roles[0].provider.as_str(), "codex_tui");
-    let routes: Vec<_> = config.members.iter().map(|member| (member.id.as_str(), member.provider.as_str(), member.runtime)).collect();
-    assert_eq!(routes, [
-        ("legacy-worker", "codex", RuntimeFamily::Legacy),
-        ("native-worker", "codex_tui", RuntimeFamily::Contract),
-        ("opted-out", "codex", RuntimeFamily::Legacy),
-    ]);
-    // The compiled spec carries the leaf's distinct canonical id; legacy rows keep `codex`.
+    let mut roles: Vec<_> = config.roles.iter().map(|role| (role.id.as_str(), role.provider.as_str())).collect();
+    roles.sort();
+    assert_eq!(roles, expected);
+    let mut routes: Vec<_> = config.members.iter().map(|member| (member.id.as_str(), member.provider.as_str(), member.runtime)).collect();
+    routes.sort_by_key(|route| route.0);
+    assert_eq!(routes, expected.map(|(id, provider)| (id, provider, RuntimeFamily::Contract)));
+    // The compiled spec carries the leaf's distinct canonical id.
     let spec = team_agent::compiler::compile_team(&args.agents_dir).unwrap();
-    let providers: Vec<_> = spec.get("agents").and_then(Value::as_list).unwrap().iter()
+    let mut providers: Vec<_> = spec.get("agents").and_then(Value::as_list).unwrap().iter()
         .map(|agent| (agent.get("id").and_then(Value::as_str).unwrap(), agent.get("provider").and_then(Value::as_str).unwrap()))
         .collect();
-    assert_eq!(providers, [("legacy-worker", "codex"), ("native-worker", "codex_tui"), ("opted-out", "codex")]);
-    // Mutable lifecycle refuses only the contract declaration.
-    let native = args.agents_dir.join("agents/native-worker.md");
-    let legacy = args.agents_dir.join("agents/legacy-worker.md");
-    assert!(team_agent::contract_runtime::framework::require_legacy_role(Some(&native), None).is_err());
-    assert!(team_agent::contract_runtime::framework::require_legacy_role(Some(&legacy), None).is_ok());
-    assert!(team_agent::contract_runtime::framework::require_legacy_role(None, Some("codex")).is_ok());
-    assert!(team_agent::contract_runtime::framework::require_legacy_role(None, Some("codex_tui")).is_err());
+    providers.sort();
+    assert_eq!(providers, expected);
+    // Mutable lifecycle refuses every Codex/Grok declaration.
+    for (name, _) in expected {
+        let path = args.agents_dir.join(format!("agents/{name}.md"));
+        assert!(team_agent::contract_runtime::framework::require_legacy_role(Some(&path), None).is_err(), "{name}");
+    }
+    for provider in ["codex", "codex_cli", "codex-cli", "grok", "codex_tui", "grok_build"] {
+        assert!(team_agent::contract_runtime::framework::require_legacy_role(None, Some(provider)).is_err(), "{provider}");
+    }
+    // A persisted pre-upgrade row keeps its key and is never reclassified.
+    for provider in ["codex", "codex_cli", "codex-cli", "grok"] {
+        assert!(!team_agent::contract_runtime::framework::is_contract(&serde_json::json!({"provider":provider})), "{provider}");
+    }
+    for provider in ["codex_tui", "grok_build"] {
+        assert!(team_agent::contract_runtime::framework::is_contract(&serde_json::json!({"provider":provider})), "{provider}");
+    }
     assert!(!args.workspace.join(".team").exists());
 }
 

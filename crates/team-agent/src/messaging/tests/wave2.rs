@@ -262,8 +262,8 @@ fn u1_c_delivery_peek_uses_tail_eighty_not_full() {
         "session_name": "team-tail-range",
         "agents": {
             "w1": {
-                "provider": "codex",
-                "pane_id": "%cdx",
+                "provider": "copilot",
+                "pane_id": "%cop",
                 "window": "w1",
                 "startup_prompts": "pending",  // NOT handled — triggers peek path
             }
@@ -274,20 +274,20 @@ fn u1_c_delivery_peek_uses_tail_eighty_not_full() {
         .create_message(None, "leader", "w1", "ping", None, false, None)
         .unwrap();
 
-    // Empty capture text → classify returns KeepPolling → peek returns false → inject
+    // A ready Copilot screen → classify returns Ready → peek returns false → inject
     // proceeds. We only care about WHICH range the peek site asked for.
     let transport = OfflineTransport::new()
-        .with_targets(vec![pane_info_w("%cdx", "team-tail-range", "w1")])
+        .with_targets(vec![pane_info_w("%cop", "team-tail-range", "w1")])
         .with_session_present(true)
         .with_default_liveness(PaneLiveness::Live)
-        .with_capture_for_pane("%cdx", "OpenAI Codex\ncodex>\n");
+        .with_capture_for_pane("%cop", crate::provider::COPILOT_READY_MARKER);
 
     let _ = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &state).unwrap();
 
     let ranges = transport.capture_ranges();
     assert!(
         !ranges.is_empty(),
-        "U1-C: delivery peek must call capture() for codex worker with non-terminal \
+        "U1-C: delivery peek must call capture() for copilot worker with non-terminal \
          startup_prompts; got no capture calls"
     );
     assert!(
@@ -304,12 +304,12 @@ fn u1_c_delivery_peek_uses_tail_eighty_not_full() {
     );
 }
 
-/// **Regression guard**: a TRULY actionable codex trust modal — startup_prompts
+/// **Regression guard**: a TRULY actionable copilot trust modal — startup_prompts
 /// pending, Tail(80) capture shows the live trust modal in the visible region.
 ///
 /// **Expectation (unchanged)**: still parks as `queued_until_trust`. Wave-2 must
 /// not regress the legitimate trust-defer path: a live modal in Tail(80) is
-/// still detected by the unchanged `has_actionable_trust_shape` early-return.
+/// still detected by the Copilot trust recognizer.
 #[test]
 fn u1_c_delivery_real_trust_modal_still_parks_queued_until_trust() {
     let ws = tmp_ws("u1c-realtrust");
@@ -319,8 +319,8 @@ fn u1_c_delivery_real_trust_modal_still_parks_queued_until_trust() {
         "session_name": "team-realtrust",
         "agents": {
             "w1": {
-                "provider": "codex",
-                "pane_id": "%cdx",
+                "provider": "copilot",
+                "pane_id": "%cop",
                 "window": "w1",
                 "startup_prompts": "pending",
             }
@@ -331,19 +331,12 @@ fn u1_c_delivery_real_trust_modal_still_parks_queued_until_trust() {
         .create_message(None, "leader", "w1", "ping", None, false, None)
         .unwrap();
 
-    // Live trust modal — fits well inside Tail(80).
-    let live_trust = "\
-Loading codex...
-Do you trust the contents of this directory?
-› 1. Yes, continue
-› 2. No, exit
-";
-
+    // Live Copilot trust modal — fits well inside Tail(80).
     let transport = OfflineTransport::new()
-        .with_targets(vec![pane_info_w("%cdx", "team-realtrust", "w1")])
+        .with_targets(vec![pane_info_w("%cop", "team-realtrust", "w1")])
         .with_session_present(true)
         .with_default_liveness(PaneLiveness::Live)
-        .with_capture_for_pane("%cdx", live_trust);
+        .with_capture_for_pane("%cop", crate::provider::COPILOT_TRUST_PROMPT_MARKER);
 
     let out = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &state).unwrap();
 

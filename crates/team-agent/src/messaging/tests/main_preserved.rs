@@ -21,7 +21,7 @@ fn collect_result_file_ingests_valid_known_task_envelope_into_results() {
     .unwrap();
     std::fs::write(
         team.join("agents").join("w1.md"),
-        "---\nname: w1\nrole: Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nW1.\n",
+        "---\nname: w1\nrole: Worker\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nW1.\n",
     )
     .unwrap();
     let spec = crate::compiler::compile_team(&team).expect("compile collect team");
@@ -35,7 +35,7 @@ fn collect_result_file_ingests_valid_known_task_envelope_into_results() {
         &team,
         &serde_json::json!({
             "spec_path": team.join("team.spec.yaml").to_string_lossy(),
-            "agents": {"w1": {"status": "running", "provider": "codex"}},
+            "agents": {"w1": {"status": "running", "provider": "fake"}},
             "tasks": [{"id": "task-1", "title": "t", "type": "impl", "assignee": "w1",
                        "deps": [], "acceptance": "x", "status": "pending"}]
         }),

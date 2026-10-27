@@ -25,13 +25,13 @@ fn slice1_stopped_or_missing_agents_do_not_probe_or_emit_capture_failures() {
             "session_name": "team-energy",
             "agents": {
                 "stopped": {
-                    "provider": "codex",
+                    "provider": "copilot",
                     "status": "stopped",
                     "window": "stopped",
                     "pane_id": "%stopped"
                 },
                 "missing": {
-                    "provider": "codex",
+                    "provider": "copilot",
                     "status": "running",
                     "window": "missing",
                     "pane_id": "%missing"
@@ -306,7 +306,7 @@ fn coordinator(workspace: &Path, transport: EnergyTransport) -> Coordinator {
 
 fn running_agent(extra: Value) -> Value {
     let mut agent = json!({
-        "provider": "codex",
+        "provider": "copilot",
         "status": "running",
         "window": "w1",
         "pane_id": "%1",
@@ -337,7 +337,7 @@ fn pane(pane_id: &str, window: &str) -> PaneInfo {
         window_name: Some(WindowName::new(window)),
         pane_index: Some(0),
         tty: None,
-        current_command: Some("codex".to_string()),
+        current_command: Some("copilot".to_string()),
         current_path: None,
         active: true,
         pane_pid: Some(1001),

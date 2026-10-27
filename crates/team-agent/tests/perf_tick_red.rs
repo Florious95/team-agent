@@ -23,10 +23,8 @@
 //!    must skip unchanged files (C-P1-2/3), tail window >= Python `_TAIL_BYTES`
 //!    (idle_takeover_wiring.py:100-114) keeps late errors visible (C-P1-1/4),
 //!    truncation (size change) must still re-read (C-P1-5).
-//! P2 session capture unbounded read (adapter.rs:776-786): Python parity head-bounded
-//!    read (claude.py:432, 200 lines) and candidate cap 300 (claude.py:300) — #264
-//!    faithful-port family. Bounded read must survive a poisoned (invalid UTF-8) tail
-//!    (C-P2-4); newest candidates keep mtime priority (C-P2-3).
+//! P2 (legacy Codex rollout session-capture bounds) was retired with the legacy
+//!    Codex worker runtime: its session scanner no longer exists.
 //! P3 tick counter forces a state.json rewrite every tick (tick.rs:188, :1095+):
 //!    steady-state second tick must be a ZERO state write (C-P3-4); old states carrying
 //!    the counter field must load gracefully (C-P3-3).
@@ -57,7 +55,7 @@ use team_agent::coordinator::{
 };
 use team_agent::model::enums::Provider;
 use team_agent::model::ids::AgentId;
-use team_agent::provider::{get_adapter, CaptureSessionContext, ProviderAdapter};
+use team_agent::provider::{get_adapter, ProviderAdapter};
 use team_agent::state::persist::{load_runtime_state, runtime_state_path, save_runtime_state};
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
@@ -328,81 +326,6 @@ fn seed_tick_state_provider(ws: &Path, agents: &[(&str, Option<&PathBuf>, &str)]
         }),
     )
     .unwrap();
-}
-
-// ──────────────────────────── P2 · session capture bounds ───────────────────────────
-
-/// C-P2-4 (reverse case `p2_session_capture_tail_skips_invalid_utf8_body`): a
-/// candidate with a valid session_meta head and invalid UTF-8 bytes beyond 64KB must
-/// still be captured. Today `read_to_string` of the WHOLE file fails on the poisoned
-/// tail and silently skips the candidate (adapter.rs:783-785) — a silent miss.
-#[test]
-fn p2_session_capture_tail_skips_invalid_utf8_body() {
-    let dir = tmp_ws("p2-utf8");
-    let mut bytes = format!(
-        "{{\"session_meta\":{{\"payload\":{{\"id\":\"11111111-2222-4333-8444-555555555555\",\"cwd\":\"{}\"}}}}}}\n",
-        dir.to_string_lossy()
-    )
-    .into_bytes();
-    let pad =
-        "{\"type\":\"pad\",\"data\":\"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"}\n".as_bytes();
-    while bytes.len() < 80 * 1024 {
-        bytes.extend_from_slice(pad);
-    }
-    bytes.extend_from_slice(&[0xFF, 0xFE, 0xFD, 0xFF]); // poisoned tail, invalid UTF-8
-    std::fs::write(dir.join("rollout-w1.jsonl"), &bytes).unwrap();
-
-    let candidates = get_adapter(Provider::Codex)
-        .capture_session_candidates(&capture_context("w1", &dir), 0)
-        .expect("scan should succeed");
-    assert!(
-        candidates.iter().any(|candidate| {
-            candidate.captured.session_id.as_ref().map(|id| id.as_str())
-                == Some("11111111-2222-4333-8444-555555555555")
-        }),
-        "C-P2-4: head-bounded read (Python claude.py:432 reads 200 lines; session_meta \
-is in the file head) must capture the session despite a poisoned tail; whole-file \
-read_to_string silently skips the candidate. candidates={candidates:?}"
-    );
-}
-
-/// C-P2-3 (reverse case `p2_candidate_cap_300_mtime_priority`): with >300 stale decoy
-/// candidates, the NEWEST valid candidate must still be found (mtime-descending
-/// priority — old candidates must not crowd out new ones). Green today; locks the
-/// cap-300 fix against bad ordering. (The exclusion direction — a candidate older
-/// than the newest 300 being dropped — is deliberately NOT asserted: C-P2-2 allows
-/// raising the cap above Python's 300.)
-#[test]
-fn p2_candidate_cap_300_mtime_priority() {
-    let dir = tmp_ws("p2-cap");
-    for index in 0..320 {
-        let decoy = dir.join(format!("rollout-decoy-{index}.jsonl"));
-        std::fs::write(&decoy, "not json at all\n").unwrap();
-        std::process::Command::new("touch")
-            .args(["-t", "202001010000", &decoy.to_string_lossy()])
-            .status()
-            .unwrap();
-    }
-    std::fs::write(
-        dir.join("rollout-w1.jsonl"),
-        format!(
-            "{{\"session_meta\":{{\"payload\":{{\"id\":\"22222222-3333-4444-8555-666666666666\",\"cwd\":\"{}\"}}}}}}\n",
-            dir.to_string_lossy()
-        ),
-    )
-    .unwrap();
-
-    let candidates = get_adapter(Provider::Codex)
-        .capture_session_candidates(&capture_context("w1", &dir), 0)
-        .expect("scan should succeed");
-    assert!(
-        candidates.iter().any(|candidate| {
-            candidate.captured.session_id.as_ref().map(|id| id.as_str())
-                == Some("22222222-3333-4444-8555-666666666666")
-        }),
-        "C-P2-3: the newest valid candidate must survive a >300 stale-decoy directory \
-(mtime-descending candidate priority); candidates={candidates:?}"
-    );
 }
 
 // ───────────────────────────── P3 · steady-state zero write ─────────────────────────
@@ -767,18 +690,6 @@ fn chmod(path: &Path, mode: u32) {
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
-    }
-}
-
-fn capture_context(agent_id: &str, spawn_cwd: &Path) -> CaptureSessionContext {
-    CaptureSessionContext {
-        agent_id: agent_id.to_string(),
-        spawn_cwd: spawn_cwd.to_path_buf(),
-        pane_id: None,
-        pane_pid: None,
-        spawned_at: None,
-        expected_session_id: None,
-        provider_projects_root: None,
     }
 }
 

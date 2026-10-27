@@ -39,14 +39,14 @@ fn restart_repairs_missing_resume_session_from_events_before_resume_decision() {
             "session.captured",
             json!({
                 "agent_id": "worker_a",
-                "provider": "codex",
+                "provider": "copilot",
                 "session_id": "sess-from-events",
                 "rollout_path": rollout.to_string_lossy().to_string(),
                 "attribution_confidence": "high"
             }),
         )
         .unwrap();
-    let _env = fixture.bounded_empty_provider_home_env();
+    let _env = fixture.bounded_provider_home_env(&["sess-from-events"]);
     let transport = ResumeTransport::new();
 
     let report = restart_with_transport(&fixture.team, false, None, &transport)
@@ -101,7 +101,7 @@ fn restart_does_not_resurrect_tombstoned_event_session_and_refuses_without_allow
             "session.captured",
             json!({
                 "agent_id": "worker_a",
-                "provider": "codex",
+                "provider": "copilot",
                 "session_id": "sess-tombstoned",
                 "rollout_path": rollout.to_string_lossy().to_string(),
                 "attribution_confidence": "high"
@@ -114,7 +114,8 @@ fn restart_does_not_resurrect_tombstoned_event_session_and_refuses_without_allow
             json!({ "agent_id": "worker_a", "session_id": "sess-tombstoned" }),
         )
         .unwrap();
-    let _env = fixture.bounded_empty_provider_home_env();
+    // The tombstoned session still has copilot backing: only the tombstone may block it.
+    let _env = fixture.bounded_provider_home_env(&["sess-tombstoned"]);
     let transport = ResumeTransport::new();
 
     let report = restart_with_transport(&fixture.team, false, None, &transport)
@@ -151,7 +152,7 @@ impl ResumeFixture {
         .unwrap();
         std::fs::write(
             team.join("agents").join("worker_a.md"),
-            "---\nname: worker_a\nrole: Worker A\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n",
+            "---\nname: worker_a\nrole: Worker A\nprovider: copilot\nmodel: gpt-5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n",
         )
         .unwrap();
         let spec = team_agent::compiler::compile_team(&team).unwrap();
@@ -174,7 +175,7 @@ impl ResumeFixture {
                 "agents": {
                     "worker_a": {
                         "status": "running",
-                        "provider": "codex",
+                        "provider": "copilot",
                         "auth_mode": "subscription",
                         "role": "Worker A",
                         "tools": ["mcp_team"],
@@ -202,9 +203,25 @@ impl ResumeFixture {
         std::fs::write(coordinator_pid_path(&workspace), pid.to_string()).unwrap();
     }
 
-    fn bounded_empty_provider_home_env(&self) -> EnvGuard {
-        let home = self.root.join("empty-home");
-        std::fs::create_dir_all(&home).unwrap();
+    /// Bounded capture deadlines plus a fixture HOME whose only provider
+    /// state is the copilot resume backing (`sessions` rows in
+    /// `~/.copilot/session-store.db`) for `copilot_sessions`.
+    fn bounded_provider_home_env(&self, copilot_sessions: &[&str]) -> EnvGuard {
+        let home = self.root.join("provider-home");
+        let db = home.join(".copilot").join("session-store.db");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(db).unwrap();
+        conn.execute_batch(
+            "create table if not exists sessions (id text primary key, cwd text, created_at text);",
+        )
+        .unwrap();
+        for session_id in copilot_sessions {
+            conn.execute(
+                "insert or replace into sessions(id, cwd, created_at) values (?1, ?2, '2026-06-09T00:00:00Z')",
+                rusqlite::params![session_id, self.team.to_string_lossy()],
+            )
+            .unwrap();
+        }
         EnvGuard::set_many(vec![
             ("HOME", home.to_string_lossy().to_string()),
             (
@@ -352,7 +369,7 @@ impl Transport for ResumeTransport {
             window_name: Some(WindowName::new("worker_a")),
             pane_index: Some(0),
             tty: None,
-            current_command: Some("codex".to_string()),
+            current_command: Some("copilot".to_string()),
             current_path: None,
             active: true,
             pane_pid: Some(10_010),

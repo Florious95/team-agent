@@ -4,9 +4,12 @@
 //! - `.team/artifacts/rs-subprep-codex-trust-roundtrip-root-cause.md`
 //! - `.team/artifacts/macmini-e2e/subprep-codex-probe5-20260605T071044Z/`
 //!
-//! Real Codex subscription behavior still needs rt smoke for the provider pane/report_result parts;
-//! these cargo contracts lock the local recognizer, delivery state, command-shape, and rollout
-//! capture surfaces that caused the probe failures.
+//! Real provider subscription behavior still needs rt smoke for the provider pane/report_result
+//! parts; these cargo contracts lock the local recognizer, delivery state, and command-shape
+//! surfaces that caused the probe failures. The legacy Codex worker runtime (its rollout capture
+//! and worker trust loop) is gone: the Codex recognizer/matcher checks stay (the `team-agent codex`
+//! leader uses them), while delivery/roundtrip contracts run on a Copilot worker, the only legacy
+//! worker the delivery trust gate peeks for.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -33,7 +36,7 @@ use team_agent::messaging::delivery::deliver_pending_message;
 use team_agent::messaging::trust::attempt_trust_auto_answer;
 use team_agent::messaging::PaneWidthQuery;
 use team_agent::model::enums::{AuthMode, Provider};
-use team_agent::provider::{classify, get_adapter, ProcessLiveness, TurnState};
+use team_agent::provider::{get_adapter, COPILOT_READY_MARKER, COPILOT_TRUST_PROMPT_MARKER};
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
     InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
@@ -52,18 +55,6 @@ const PROBE5_TRUST_PANE: &str = r#"> You are in /private/tmp/ta-subprep-SUB-PROB
   2. No, quit
 
   Press enter to continue
-"#;
-
-const PROBE5_READY_AFTER_TRUST_CONSUMED: &str = r#"> You are in /private/tmp/ta-subprep-SUB-PROBE-2-send-turn-idle.uxarHT/teamdir
-
-╭─────────────────────────────────────────────╮
-│ >_ OpenAI Codex (v0.136.0)                  │
-│                                             │
-│ model:     gpt-5.5 xhigh   /model to change │
-│ directory: /private/tmp/…/teamdir           │
-╰─────────────────────────────────────────────╯
-
-› Run /review on my current changes
 "#;
 
 const SUBROOT_FULL_TRUST_PANE_AFTER_QUICKSTART: &str = r#"> You are in /private/tmp/ta-subroot-SUB-PROBE-1-trust-startup.uL9Boc/teamdir
@@ -175,181 +166,6 @@ fn contract_a_subroot_full_pane_trust_menu_still_actionable_despite_bottom_ready
 }
 
 #[test]
-fn contract_a_subroot_tick_answers_full_pane_trust_and_persists_startup_handled() {
-    use team_agent::coordinator::{Coordinator, ProviderRegistry, WorkspacePath};
-    use team_agent::provider::ProviderAdapter;
-
-    struct RealAdapterRegistry;
-
-    impl ProviderRegistry for RealAdapterRegistry {
-        fn adapter_for(&self, provider: Provider) -> Box<dyn ProviderAdapter> {
-            team_agent::provider::get_adapter(provider)
-        }
-    }
-
-    let ws = tmp_dir("a-subroot-tick-full-pane");
-    let mcp_config = ws.join(".team").join("runtime").join("mcp").join("w1.json");
-    std::fs::create_dir_all(mcp_config.parent().unwrap()).unwrap();
-    std::fs::write(&mcp_config, "{}").unwrap();
-    team_agent::state::persist::save_runtime_state(
-        &ws,
-        &json!({
-            "session_name": "team-ta-subroot-SUB-PROBE-1-trust-startup",
-            "team_dir": ws.join("teamdir").to_string_lossy().to_string(),
-            "agents": {
-                "w1": {
-                    "provider": "codex",
-                    "status": "running",
-                    "startup_prompts": "pending",
-                    "startup_prompt_status": "pending",
-                    "window": "w1",
-                    "pane_id": "%7",
-                    "mcp_config": mcp_config.to_string_lossy().to_string()
-                }
-            }
-        }),
-    )
-    .unwrap();
-
-    let transport = RecordingTransport::new(vec![
-        SUBROOT_FULL_TRUST_PANE_AFTER_QUICKSTART.to_string(),
-        SUBROOT_FULL_TRUST_PANE_AFTER_QUICKSTART.to_string(),
-    ])
-    .with_session_present(true)
-    .with_windows(vec![WindowName::new("w1")]);
-    let coord = Coordinator::new(
-        WorkspacePath::new(ws.to_path_buf()),
-        Box::new(RealAdapterRegistry),
-        Box::new(transport.clone()),
-    );
-
-    let report = coord
-        .tick()
-        .expect("coordinator tick should stay typed/fallible");
-    let state = team_agent::state::persist::load_runtime_state(&ws).unwrap();
-    let agent = &state["agents"]["w1"];
-    let events = read_events(&ws);
-
-    assert!(
-        report.ok && !report.stop,
-        "Contract A driver: startup trust handling must not stop or degrade the tick; report={report:?}"
-    );
-    assert_eq!(
-        transport.send_keys_count(),
-        1,
-        "Contract A driver: full-pane own-workspace trust prompt must send exactly one Enter"
-    );
-    assert_eq!(
-        agent["startup_prompts"],
-        json!("handled"),
-        "Contract A driver: tick must persist startup_prompts=handled after answering trust; state={state}"
-    );
-    assert_eq!(
-        agent["startup_prompt_handled"][0]["prompt"],
-        json!("codex_workspace_trust"),
-        "Contract A driver: handled prompt must identify codex workspace trust; state={state}"
-    );
-    assert_eq!(
-        agent["startup_prompt_handled"][0]["action"],
-        json!("sent_enter"),
-        "Contract A driver: handled prompt action must be sent_enter; state={state}"
-    );
-    assert!(
-        events.contains("leader_panes.trust_auto_answered")
-            || events.contains("startup_prompt_handled"),
-        "Contract A driver: trust answer must be visible in events as leader_panes.trust_auto_answered or startup_prompt_handled; events={events}"
-    );
-}
-
-#[test]
-fn contract_a_step1_trust_auto_answer_is_idempotent_across_repeated_ticks() {
-    use team_agent::coordinator::{Coordinator, ProviderRegistry, WorkspacePath};
-    use team_agent::provider::ProviderAdapter;
-
-    struct RealAdapterRegistry;
-
-    impl ProviderRegistry for RealAdapterRegistry {
-        fn adapter_for(&self, provider: Provider) -> Box<dyn ProviderAdapter> {
-            team_agent::provider::get_adapter(provider)
-        }
-    }
-
-    let ws = tmp_dir("a-subroot-tick-idempotent");
-    let mcp_config = ws.join(".team").join("runtime").join("mcp").join("w1.json");
-    std::fs::create_dir_all(mcp_config.parent().unwrap()).unwrap();
-    std::fs::write(&mcp_config, "{}").unwrap();
-    team_agent::state::persist::save_runtime_state(
-        &ws,
-        &json!({
-            "session_name": "team-ta-subroot-SUB-PROBE-1-trust-startup",
-            "team_dir": ws.join("teamdir").to_string_lossy().to_string(),
-            "agents": {
-                "w1": {
-                    "provider": "codex",
-                    "status": "running",
-                    "startup_prompts": "pending",
-                    "startup_prompt_status": "pending",
-                    "window": "w1",
-                    "pane_id": "%7",
-                    "mcp_config": mcp_config.to_string_lossy().to_string()
-                }
-            }
-        }),
-    )
-    .unwrap();
-
-    let transport = RecordingTransport::new(vec![
-        SUBROOT_FULL_TRUST_PANE_AFTER_QUICKSTART.to_string(),
-        SUBROOT_FULL_TRUST_PANE_AFTER_QUICKSTART.to_string(),
-        SUBROOT_FULL_TRUST_PANE_AFTER_QUICKSTART.to_string(),
-    ])
-    .with_session_present(true)
-    .with_windows(vec![WindowName::new("w1")]);
-    let coord = Coordinator::new(
-        WorkspacePath::new(ws.to_path_buf()),
-        Box::new(RealAdapterRegistry),
-        Box::new(transport.clone()),
-    );
-
-    coord
-        .tick()
-        .expect("first tick should answer the startup trust prompt");
-    coord
-        .tick()
-        .expect("second tick over the same pane must not answer trust again");
-
-    let state = team_agent::state::persist::load_runtime_state(&ws).unwrap();
-    let agent = &state["agents"]["w1"];
-    let events = read_events(&ws);
-    let handled_event_count = count_event(&events, "startup_prompt_handled");
-    let sent_enter_count = count_handled_action(&events, "sent_enter");
-
-    assert_eq!(
-        transport.send_keys_count(),
-        1,
-        "Contract A step1/idempotency: the same actionable trust prompt across repeated coordinator ticks must receive Enter exactly once"
-    );
-    assert_eq!(
-        handled_event_count, 1,
-        "Contract A step1/idempotency: startup_prompt_handled must be emitted exactly once after trust is answered; events={events}"
-    );
-    assert_eq!(
-        sent_enter_count, 1,
-        "Contract A step1/idempotency: sent_enter handling for codex_workspace_trust must be recorded exactly once; events={events}"
-    );
-    assert_eq!(
-        agent["startup_prompts"],
-        json!("handled"),
-        "Contract A step1/idempotency: answering trust must persist startup_prompts=handled/complete so later ticks skip re-answering; state={state}"
-    );
-    assert_eq!(
-        agent["startup_prompt_handled"].as_array().map(Vec::len),
-        Some(1),
-        "Contract A step1/idempotency: state must retain one handled prompt record, not append duplicates; state={state}"
-    );
-}
-
-#[test]
 fn contract_a_own_workspace_trust_is_actionable_not_ready_and_foreign_is_pending() {
     use team_agent::provider::{classify_codex_startup_screen, StartupScreenDecision};
 
@@ -415,12 +231,12 @@ fn contract_a_own_workspace_trust_is_actionable_not_ready_and_foreign_is_pending
 
 #[test]
 fn contract_a_runtime_readiness_is_false_while_actionable_trust_remains() {
-    use team_agent::provider::{classify_codex_startup_screen, StartupScreenDecision};
+    use team_agent::provider::{classify_copilot_startup_screen, StartupScreenDecision};
 
     assert_eq!(
-        classify_codex_startup_screen(PROBE5_TRUST_PANE),
+        classify_copilot_startup_screen(COPILOT_TRUST_PROMPT_MARKER),
         StartupScreenDecision::AnswerWorkspaceTrust,
-        "fixture sanity: probe5 pane text is an actionable own-workspace trust prompt"
+        "fixture sanity: the Copilot folder-trust pane is an actionable own-workspace trust prompt"
     );
 
     let ws = tmp_dir("a-runtime-readiness-trust");
@@ -435,7 +251,7 @@ fn contract_a_runtime_readiness_is_false_while_actionable_trust_remains() {
         "leader_receiver": {"status": "attached", "pane_id": "%9"},
         "agents": {
             "w1": {
-                "provider": "codex",
+                "provider": "copilot",
                 "status": "awaiting_trust_prompt",
                 "startup_prompt_status": "awaiting_trust_prompt",
                 "startup_prompts": "awaiting_trust_prompt",
@@ -486,7 +302,7 @@ fn contract_b_delivery_does_not_mark_delivered_or_inject_task_while_trust_prompt
         "session_name": "team-subprep",
         "agents": {
             "w1": {
-                "provider": "codex",
+                "provider": "copilot",
                 "status": "running",
                 "pane_id": "%7",
                 "window": "w1"
@@ -494,7 +310,7 @@ fn contract_b_delivery_does_not_mark_delivered_or_inject_task_while_trust_prompt
         }
     });
     team_agent::state::persist::save_runtime_state(&ws, &state).unwrap();
-    let transport = RecordingTransport::new(vec![PROBE5_TRUST_PANE.to_string()]);
+    let transport = RecordingTransport::new(vec![COPILOT_TRUST_PROMPT_MARKER.to_string()]);
     let event_log = EventLog::new(&ws);
 
     let outcome =
@@ -541,7 +357,7 @@ fn contract_b_probe5_delivered_without_result_is_rejected_as_lost_task_evidence(
         "session_name": "team-ta-subprep-SUB-PROBE-2-send-turn-idle",
         "agents": {
             "w1": {
-                "provider": "codex",
+                "provider": "copilot",
                 "status": "running",
                 "pane_id": "%7",
                 "window": "w1"
@@ -549,7 +365,7 @@ fn contract_b_probe5_delivered_without_result_is_rejected_as_lost_task_evidence(
         }
     });
     team_agent::state::persist::save_runtime_state(&ws, &state).unwrap();
-    let transport = RecordingTransport::new(vec![PROBE5_TRUST_PANE.to_string()]);
+    let transport = RecordingTransport::new(vec![COPILOT_TRUST_PROMPT_MARKER.to_string()]);
     let event_log = EventLog::new(&ws);
 
     let outcome =
@@ -598,7 +414,7 @@ fn contract_b_delivery_gate_trusts_startup_handled_state_over_pane_scrollback() 
         "session_name": "team-ta-subroot-SUB-PROBE-2-send-turn-idle",
         "agents": {
             "w1": {
-                "provider": "codex",
+                "provider": "copilot",
                 "status": "running",
                 "startup_prompts": "pending",
                 "startup_prompt_status": "pending",
@@ -609,7 +425,7 @@ fn contract_b_delivery_gate_trusts_startup_handled_state_over_pane_scrollback() 
     });
     team_agent::state::persist::save_runtime_state(&pending_ws, &pending_state).unwrap();
     let pending_transport =
-        RecordingTransport::new(vec![SUBROOT_FULL_TRUST_PANE_AFTER_QUICKSTART.to_string()]);
+        RecordingTransport::new(vec![COPILOT_TRUST_PROMPT_MARKER.to_string()]);
     let pending_log = EventLog::new(&pending_ws);
     let pending = deliver_pending_message(
         &pending_ws,
@@ -658,12 +474,12 @@ fn contract_b_delivery_gate_trusts_startup_handled_state_over_pane_scrollback() 
         "session_name": "team-ta-subroot-SUB-PROBE-2-send-turn-idle",
         "agents": {
             "w1": {
-                "provider": "codex",
+                "provider": "copilot",
                 "status": "running",
                 "startup_prompts": "handled",
                 "startup_prompt_status": "handled",
                 "startup_prompt_handled": [
-                    {"prompt": "codex_workspace_trust", "action": "sent_enter"}
+                    {"prompt": "copilot_workspace_trust", "action": "sent_enter_yes_session"}
                 ],
                 "pane_id": "%7",
                 "window": "w1"
@@ -676,7 +492,7 @@ fn contract_b_delivery_gate_trusts_startup_handled_state_over_pane_scrollback() 
     );
     team_agent::state::persist::save_runtime_state(&handled_ws, &handled_state).unwrap();
     let handled_transport =
-        RecordingTransport::new(vec![SUBROOT_FULL_TRUST_PANE_AFTER_QUICKSTART.to_string()]);
+        RecordingTransport::new(vec![COPILOT_TRUST_PROMPT_MARKER.to_string()]);
     #[cfg(unix)]
     { handled_transport.state.lock().unwrap().carrier = pane.pane_pid; }
     let handled_log = EventLog::new(&handled_ws);
@@ -692,7 +508,7 @@ fn contract_b_delivery_gate_trusts_startup_handled_state_over_pane_scrollback() 
 
     assert!(
         matches!(handled.status, team_agent::messaging::DeliveryStatus::Delivered),
-        "Contract B step2/scrollback: startup_prompts=handled must trust state and deliver, even if full pane scrollback still contains `Do you trust` and `› 1. Yes, continue`; outcome={handled:?}"
+        "Contract B step2/scrollback: startup_prompts=handled must trust state and deliver, even if the pane still contains the folder-trust menu (`Do you trust the files in this folder?` + `❯ 1. Yes`); outcome={handled:?}"
     );
     assert_eq!(
         message_status(handled_store.db_path(), &handled_message_id),
@@ -736,7 +552,7 @@ fn contract_b_step2_retry_delivers_queued_message_after_startup_trust_is_handled
         "team_dir": ws.join("teamdir").to_string_lossy().to_string(),
         "agents": {
             "w1": {
-                "provider": "codex",
+                "provider": "copilot",
                 "status": "running",
                 "startup_prompts": "pending",
                 "startup_prompt_status": "pending",
@@ -777,10 +593,10 @@ fn contract_b_step2_retry_delivers_queued_message_after_startup_trust_is_handled
         )
         .unwrap();
     let transport = RecordingTransport::new(vec![
-        PROBE5_TRUST_PANE.to_string(),
-        SUBROOT_FULL_TRUST_PANE_AFTER_QUICKSTART.to_string(),
-        PROBE5_READY_AFTER_TRUST_CONSUMED.to_string(),
-        PROBE5_READY_AFTER_TRUST_CONSUMED.to_string(),
+        COPILOT_TRUST_PROMPT_MARKER.to_string(),
+        COPILOT_TRUST_PROMPT_MARKER.to_string(),
+        COPILOT_READY_MARKER.to_string(),
+        COPILOT_READY_MARKER.to_string(),
     ])
     .with_session_present(true)
     .with_windows(vec![WindowName::new("w1")]);
@@ -871,37 +687,61 @@ fn contract_c_lifecycle_launch_command_carries_role_tools_and_real_mcp_context()
     .unwrap();
     std::fs::write(
         teamdir.join("agents").join("w1.md"),
-        "---\nname: w1\nrole: Worker must call report_result exactly once.\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nAlways use report_result for completion.\n",
+        "---\nname: w1\nrole: Worker must call report_result exactly once.\nprovider: copilot\nmodel: gpt-5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nAlways use report_result for completion.\n",
     )
     .unwrap();
     let spec = team_agent::compiler::compile_team(&teamdir).unwrap();
     let spec_path = teamdir.join("team.spec.yaml");
     std::fs::write(&spec_path, team_agent::model::yaml::dumps(&spec)).unwrap();
 
-    let transport = RecordingTransport::new(vec![PROBE5_READY_AFTER_TRUST_CONSUMED.to_string()]);
+    let transport = RecordingTransport::new(vec![COPILOT_READY_MARKER.to_string()]);
     let report = launch_with_transport(&spec_path, false, true, true, &transport)
         .expect("launch should reach transport spawn");
     assert_eq!(
         report.started.len(),
         1,
-        "fixture sanity: one Codex worker starts"
+        "fixture sanity: one Copilot worker starts"
     );
-    let argv = transport.spawn_argv().join(" ");
+    let spawn_argv = transport.spawn_argv();
+    let argv = spawn_argv.join(" ");
+    let arg_after = |flag: &str| {
+        spawn_argv
+            .windows(2)
+            .find(|pair| pair[0] == flag)
+            .map(|pair| pair[1].clone())
+            .unwrap_or_else(|| panic!("copilot worker argv must carry {flag}; argv={argv:?}"))
+    };
+    // Copilot takes role instructions via COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+    // (`<workspace>/.team/runtime/copilot-instructions/<agent>/AGENTS.md`), not argv.
+    let workspace = PathBuf::from(arg_after("-C"));
+    let instructions = std::fs::read_to_string(
+        workspace
+            .join(".team/runtime/copilot-instructions/w1/AGENTS.md"),
+    )
+    .unwrap_or_default();
+    let mcp_file = arg_after("--additional-mcp-config");
+    let mcp_text = mcp_file
+        .strip_prefix('@')
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default();
 
     assert!(
-        argv.contains("report_result") || argv.contains("Worker must call report_result"),
-        "Contract C/F6.4: lifecycle must pass resolved role/developer instructions into Codex command construction; argv={argv:?}"
+        instructions.contains("report_result"),
+        "Contract C/F6.4: lifecycle must pass resolved role/developer instructions into the Copilot worker instructions; workspace={} instructions={instructions:?} argv={argv:?}",
+        workspace.display()
     );
     assert!(
-        argv.contains("mcp") || argv.contains("team_orchestrator") || argv.contains("team-agent"),
-        "Contract C/MUST-8: Codex worker command must include a real Team Agent tool/MCP capability mechanism, not prompt-only state metadata; argv={argv:?}"
+        mcp_text.contains("team_orchestrator"),
+        "Contract C/MUST-8: Copilot worker command must include a real Team Agent tool/MCP capability mechanism, not prompt-only state metadata; mcp_config={mcp_file:?} text={mcp_text:?} argv={argv:?}"
     );
-    assert!(
-        !argv.contains("/tmp/ta-provider-ws")
-            && !argv.contains("worker1")
-            && !argv.contains("teamA"),
-        "Contract C: provider command/config must not leak placeholder MCP context; argv={argv:?}"
-    );
+    for text in [&argv, &mcp_text] {
+        assert!(
+            !text.contains("/tmp/ta-provider-ws")
+                && !text.contains("worker1")
+                && !text.contains("teamA"),
+            "Contract C: provider command/config must not leak placeholder MCP context; text={text:?}"
+        );
+    }
 }
 
 #[test]
@@ -932,7 +772,7 @@ fn contract_c_lifecycle_sources_use_context_aware_provider_builders() {
 
 #[test]
 fn contract_c_provider_mcp_config_is_parameterized_not_placeholder() {
-    let adapter = get_adapter(Provider::Codex);
+    let adapter = get_adapter(Provider::Copilot);
     let config = adapter.mcp_config(AuthMode::Subscription).unwrap();
     let raw = config.raw.to_string();
     let command = config.raw["team_orchestrator"]["command"]
@@ -956,75 +796,6 @@ fn contract_c_provider_mcp_config_is_parameterized_not_placeholder() {
     assert!(
         Path::new(command).is_absolute(),
         "Contract C step3/MCP startup: provider config command must be the current team-agent binary as an absolute path (`std::env::current_exe` semantics), not PATH-dependent; command={command:?} raw={raw}"
-    );
-}
-
-#[test]
-fn contract_d_codex_capture_rejects_team_agent_events_jsonl_as_rollout() {
-    let ws = tmp_dir("d-events-rollout");
-    let log_dir = ws.join(".team").join("logs");
-    std::fs::create_dir_all(&log_dir).unwrap();
-    let events_path = log_dir.join("events.jsonl");
-    std::fs::write(
-        &events_path,
-        r#"{"event":"coordinator.boot","workspace":"/tmp/ta-subprep"}"#,
-    )
-    .unwrap();
-
-    let adapter = get_adapter(Provider::Codex);
-    let captured = adapter.capture_session_id("w1", &ws, 0).unwrap();
-
-    assert!(
-        captured.is_none(),
-        "Contract D/F5/N11: Team Agent `.team/logs/events.jsonl` is not a Codex provider transcript and must not become rollout_path; captured={captured:?}"
-    );
-}
-
-#[test]
-fn contract_d_codex_rollout_requires_provider_lifecycle_shape_or_stays_unknown() {
-    let team_agent_events = r#"{"event":"message.delivered","message_id":"msg_1"}"#;
-    let classified = classify(
-        Provider::Codex,
-        team_agent_events,
-        ProcessLiveness::Unverifiable,
-        0.0,
-    )
-    .unwrap();
-    assert_eq!(
-        classified.state,
-        TurnState::Unknown,
-        "Contract D: Team Agent event rows do not contain Codex lifecycle facts and must classify unknown"
-    );
-    assert!(
-        !classified.state.is_idle_for_takeover(),
-        "Contract D/F5/N11: no valid Codex transcript means honest unknown, never fake idle"
-    );
-
-    let ws = tmp_dir("d-valid-rollout");
-    let valid = ws.join("codex-session.jsonl");
-    let session_meta = serde_json::json!({
-        "session_meta": {"payload": {
-            "id": "codex-contract-d",
-            "cwd": ws.to_string_lossy(),
-            "created_at": chrono::Utc::now().to_rfc3339(),
-        }}
-    });
-    std::fs::write(
-        &valid,
-        format!(
-            "{session_meta}\n{}\n",
-            r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"ct1"}}"#
-        ),
-    )
-    .unwrap();
-    let adapter = get_adapter(Provider::Codex);
-    let captured = adapter.capture_session_id("w1", &ws, 0).unwrap();
-    assert!(
-        captured
-            .as_ref()
-            .and_then(|c| c.rollout_path.as_ref())
-            .is_some_and(|p| p.as_path() == valid),
-        "Contract D: valid Codex lifecycle-shaped transcript may be persisted as rollout_path; captured={captured:?}"
     );
 }
 
@@ -1061,23 +832,11 @@ fn count_event(events: &str, event_name: &str) -> usize {
         .count()
 }
 
-fn count_handled_action(events: &str, action: &str) -> usize {
-    events
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter(|event| event["event"] == "startup_prompt_handled")
-        .filter_map(|event| event["handled"].as_array().cloned())
-        .flat_map(|handled| handled.into_iter())
-        .filter(|handled| handled["action"] == action)
-        .count()
-}
-
 #[derive(Debug, Default)]
 struct TransportState {
     captures: Vec<String>,
     capture_idx: usize,
     inject_count: usize,
-    send_keys_count: usize,
     session_present: bool,
     windows: Vec<WindowName>,
     spawn_argv: Vec<Vec<String>>,
@@ -1111,10 +870,6 @@ impl RecordingTransport {
 
     fn inject_count(&self) -> usize {
         self.state.lock().unwrap().inject_count
-    }
-
-    fn send_keys_count(&self) -> usize {
-        self.state.lock().unwrap().send_keys_count
     }
 
     fn spawn_argv(&self) -> Vec<String> {
@@ -1191,7 +946,6 @@ impl Transport for RecordingTransport {
     }
 
     fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
-        self.state.lock().unwrap().send_keys_count += 1;
         Ok(())
     }
 

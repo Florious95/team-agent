@@ -133,49 +133,6 @@ fn idle_leader_activity_never_arms_but_leader_idle_allows_ping() {
     assert_eq!(r2.reason, NoPingReason::AllIdleDebounceElapsed);
 }
 
-// ---- (c) trust-prompt recognizer (REAL fixtures, own-vs-foreign) ----
-//
-// NOTE: the own-vs-foreign trust recognizer lives in messaging/leader_panes.py
-// (step 9/10 owns it per card §42). The provider.rs skeleton exposes only
-// `status_patterns()` (idle/processing/trust regex set) — driven RED below.
-// Full own-vs-foreign realpath judgement + truncated-workspace logic deferred.
-
-// Real fixtures (mirrored into the rust workspace from team-agent-public).
-const CODEX_IDLE_FIXTURE: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../snapshot/fixtures/idle_prompts/codex_idle.txt"
-));
-const CODEX_WORKING_FIXTURE: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../snapshot/fixtures/idle_prompts/codex_working.txt"
-));
-
-fn fixture_matches(re: &regex::Regex, fixture: &str) -> bool {
-    fixture.lines().any(|l| re.is_match(l))
-}
-
-#[test]
-fn codex_status_patterns_compile() {
-    // provider_cli/codex.py:140 idle=r"(›|❯|codex>)" processing=r"•.*esc to interrupt".
-    // codex_idle.txt has a "› Find and fix a bug…" prompt → idle matches.
-    // codex_working.txt has a "• …esc to interrupt" spinner → processing matches.
-    let adapter = get_adapter(Provider::Codex);
-    let pats = adapter.status_patterns().expect("status_patterns ok");
-    assert!(
-        fixture_matches(&pats.idle, CODEX_IDLE_FIXTURE),
-        "codex idle pattern must match a '›' prompt line"
-    );
-    assert!(
-        CODEX_WORKING_FIXTURE.lines().any(|l| pats.processing.is_match(l)),
-        "codex processing pattern must match the 'esc to interrupt' spinner"
-    );
-    // The discriminator: a pure working-status footer line carries no prompt char.
-    assert!(
-        !pats.idle.is_match("  gpt-5.5 medium · /private/tmp/working"),
-        "codex idle pattern must NOT match a bare status footer"
-    );
-}
-
 // ---- (d) abnormal dedup key (signature, Option<TurnId>) ----
 //
 // NOTE: read_fault_facts lives in provider_state; not on the skeleton trait.

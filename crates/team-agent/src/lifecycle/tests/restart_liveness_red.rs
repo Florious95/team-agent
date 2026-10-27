@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
-use serial_test::file_serial;
+use serial_test::{file_serial, serial};
 use team_agent::lifecycle::{launch_with_transport, restart_with_transport};
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 use team_agent::tmux_backend::TmuxBackend;
@@ -25,9 +25,11 @@ use team_agent::transport::{
 
 #[test]
 #[ignore = "real-machine: restart/session liveness lifecycle gate"]
+#[serial(env)]
 fn restart_rechecks_session_liveness_before_spawning_second_worker() {
     let fixture = RestartFixture::new("restart-liveness-recording", &["alpha", "bravo"]);
     fixture.seed_resumable_state_with_stale_receiver();
+    let _home = HomeGuard::set(&fixture.home());
     let transport = RestartLivenessTransport::new();
 
     let result = restart_with_transport(&fixture.team, false, None, &transport);
@@ -59,9 +61,11 @@ fn restart_rechecks_session_liveness_before_spawning_second_worker() {
 
 #[test]
 #[ignore = "real-machine: restart/session liveness lifecycle gate"]
+#[serial(env)]
 fn restart_partial_failure_clears_stale_receiver_and_does_not_claim_running_without_pane() {
     let fixture = RestartFixture::new("restart-liveness-state", &["alpha", "bravo"]);
     fixture.seed_resumable_state_with_stale_receiver();
+    let _home = HomeGuard::set(&fixture.home());
     let transport = RestartLivenessTransport::new();
 
     let _ = restart_with_transport(&fixture.team, false, None, &transport);
@@ -109,13 +113,13 @@ fn launch_persists_real_pane_id_even_when_pane_pid_is_unavailable() {
 }
 
 #[test]
-#[ignore = "real-machine: needs real tmux/binary; fake codex exits first resumed worker to reproduce no-server restart"]
+#[ignore = "real-machine: needs real tmux/binary; fake copilot exits first resumed worker to reproduce no-server restart"]
 #[file_serial(tmux)]
 fn real_tmux_restart_names_first_resume_agent_when_first_resume_exits_before_second_spawn() {
     let fixture = RestartFixture::new("restart-liveness-real-tmux", &["alpha", "bravo"]);
     fixture.seed_resumable_state_with_stale_receiver();
     let _cleanup = TmuxCleanup::new(&fixture.team);
-    let fake_bin = fixture.install_fake_codex_that_exits_alpha_resume();
+    let fake_bin = fixture.install_fake_copilot_that_exits_alpha_resume();
 
     let output = Command::new(crate::lifecycle::tests::test_binary_path())
         .args([
@@ -132,7 +136,8 @@ fn real_tmux_restart_names_first_resume_agent_when_first_resume_exits_before_sec
                 std::env::var("PATH").unwrap_or_default()
             ),
         )
-        .env("CODEX_FAKE_LOG", fixture.root.join("fake-codex.log"))
+        .env("HOME", fixture.home())
+        .env("COPILOT_FAKE_LOG", fixture.root.join("fake-copilot.log"))
         .output()
         .expect("run team-agent restart");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -141,7 +146,7 @@ fn real_tmux_restart_names_first_resume_agent_when_first_resume_exits_before_sec
 
     assert!(
         !output.status.success(),
-        "fixture expects first resumed codex process to exit and restart to fail honestly; stdout={stdout} stderr={stderr}"
+        "fixture expects first resumed copilot process to exit and restart to fail honestly; stdout={stdout} stderr={stderr}"
     );
     assert!(
         combined.contains("alpha")
@@ -492,7 +497,7 @@ impl RestartFixture {
             std::fs::write(
                 team.join("agents").join(format!("{agent}.md")),
                 format!(
-                    "---\nname: {agent}\nrole: Worker {agent}\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n"
+                    "---\nname: {agent}\nrole: Worker {agent}\nprovider: copilot\nmodel: gpt-5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n"
                 ),
             )
             .unwrap();
@@ -519,7 +524,7 @@ impl RestartFixture {
                     agent.clone(),
                     json!({
                         "status": "running",
-                        "provider": "codex",
+                        "provider": "copilot",
                         "role": format!("Worker {agent}"),
                         "tools": ["mcp_team"],
                         "window": agent,
@@ -554,18 +559,43 @@ impl RestartFixture {
             }),
         )
         .unwrap();
+        self.seed_copilot_session_store();
         seed_healthy_coordinator(&self.team);
     }
 
-    fn install_fake_codex_that_exits_alpha_resume(&self) -> PathBuf {
+    /// Fixture HOME: copilot resume backing is the `sessions` row in
+    /// `$HOME/.copilot/session-store.db`.
+    fn home(&self) -> PathBuf {
+        self.root.join("home")
+    }
+
+    fn seed_copilot_session_store(&self) {
+        let db = self.home().join(".copilot").join("session-store.db");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(db).unwrap();
+        conn.execute_batch(
+            "create table if not exists sessions (id text primary key, cwd text, created_at text);",
+        )
+        .unwrap();
+        for agent in &self.agents {
+            conn.execute(
+                "insert or replace into sessions(id, cwd, created_at) values (?1, ?2, '2026-06-08T00:00:00Z')",
+                rusqlite::params![format!("session-{agent}"), self.team.to_string_lossy()],
+            )
+            .unwrap();
+        }
+    }
+
+    fn install_fake_copilot_that_exits_alpha_resume(&self) -> PathBuf {
         let bin = self.root.join("fake-bin");
         std::fs::create_dir_all(&bin).unwrap();
-        let script = bin.join("codex");
+        let script = bin.join("copilot");
         std::fs::write(
             &script,
             r#"#!/bin/sh
-echo "$@" >> "${CODEX_FAKE_LOG:-/tmp/team-agent-fake-codex.log}"
+echo "$@" >> "${COPILOT_FAKE_LOG:-/tmp/team-agent-fake-copilot.log}"
 case "$*" in
+  "mcp list") exit 0 ;;
   *session-alpha*) exit 0 ;;
   *) sleep 30 ;;
 esac
@@ -578,6 +608,25 @@ esac
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         bin
+    }
+}
+
+struct HomeGuard(Option<std::ffi::OsString>);
+
+impl HomeGuard {
+    fn set(home: &Path) -> Self {
+        let previous = std::env::var_os("HOME");
+        std::env::set_var("HOME", home);
+        Self(previous)
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(previous) => std::env::set_var("HOME", previous),
+            None => std::env::remove_var("HOME"),
+        }
     }
 }
 

@@ -38,7 +38,7 @@ use hermetic::HermeticTestEnv;
 const TEAM_MD: &str =
     "---\nname: bug7\nobjective: BUG-7 worker readiness honesty contract.\nprovider: codex\n---\n\nTeam.\n";
 
-const CODEX_ROLE: &str = "---\nname: codexer\nrole: Codex Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nCodex worker.\n";
+const FAKE_ROLE: &str = "---\nname: faker\nrole: Fake Worker\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nFake worker.\n";
 
 const COPILOT_ROLE: &str = "---\nname: copiloter\nrole: Copilot Worker\nprovider: copilot\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nCopilot worker.\n";
 
@@ -51,10 +51,10 @@ fn t1_quick_start_must_not_emit_bare_ready_when_worker_tool_load_is_unverified()
     let team = bug7_team_dir(&hermetic, "t1-pending");
     // Both agents spawn successfully (recording transport reports both windows live)
     // but the framework has no way to verify the worker MCP tool set actually
-    // loaded — codex/copilot can still reject schemas asynchronously. The report
+    // loaded — copilot can still reject schemas asynchronously. The report
     // therefore must be PendingToolLoad, not bare Ready.
     let transport = RecordingTransport::new()
-        .with_windows(vec![WindowName::new("codexer"), WindowName::new("copiloter")]);
+        .with_windows(vec![WindowName::new("faker"), WindowName::new("copiloter")]);
     let report = quick_start_with_transport(&team, None, true, None, &transport)
         .expect("quick_start_with_transport should succeed for healthy spawn");
     let QuickStartReport::Ready {
@@ -97,12 +97,12 @@ fn t2_quick_start_must_report_degraded_when_a_worker_spawn_yields_no_live_window
     hermetic.scrub_tmux();
     hermetic.assert_no_real_tmux();
     let team = bug7_team_dir(&hermetic, "t2-degraded");
-    // Recording transport simulates the Mac mini final capture: only the codex
-    // window exists after launch; the copilot window never materialized (no
+    // Recording transport simulates the Mac mini final capture: only the fake
+    // worker window exists after launch; the copilot window never materialized (no
     // `copilot` binary on PATH, etc.). BUG-2 fix already marks `copiloter` as
     // spawn_failed in runtime state; BUG-7 must surface that as a Degraded
     // verdict so quick-start cannot pretend the team is ready.
-    let transport = RecordingTransport::new().with_windows(vec![WindowName::new("codexer")]);
+    let transport = RecordingTransport::new().with_windows(vec![WindowName::new("faker")]);
     let report = quick_start_with_transport(&team, None, true, None, &transport)
         .expect("quick_start_with_transport should reach the spawn/state path even when an agent fails to spawn");
     let QuickStartReport::Ready {
@@ -144,7 +144,7 @@ fn bug7_team_dir(hermetic: &HermeticTestEnv, tag: &str) -> PathBuf {
     let team = base.join("teamdir");
     std::fs::create_dir_all(team.join("agents")).expect("mkdir teamdir/agents");
     std::fs::write(team.join("TEAM.md"), TEAM_MD).expect("write TEAM.md");
-    std::fs::write(team.join("agents").join("codexer.md"), CODEX_ROLE).expect("write codexer.md");
+    std::fs::write(team.join("agents").join("faker.md"), FAKE_ROLE).expect("write faker.md");
     std::fs::write(team.join("agents").join("copiloter.md"), COPILOT_ROLE)
         .expect("write copiloter.md");
     team

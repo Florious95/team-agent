@@ -40,7 +40,7 @@ fn launch_source() -> String {
 
 const QS_TEAM_MD: &str =
     "---\nname: quickteam\nobjective: Quick start.\nprovider: codex\n---\n\nQuick-start team.\n";
-pub(super) const QS_VALID_ROLE: &str = "---\nname: implementer\nrole: Implementation Engineer\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nImplement bounded tasks.\n";
+pub(super) const QS_VALID_ROLE: &str = "---\nname: implementer\nrole: Implementation Engineer\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nImplement bounded tasks.\n";
 
 /// A REAL team dir `<base>/teamdir/{TEAM.md, agents/implementer.md}` — already in team-dir
 /// layout, so quick_start's prepare_quick_start_team returns it as-is and writes the compiled
@@ -64,30 +64,13 @@ fn quick_start_team_dir_with_roles(role_docs: &[(&str, &str)]) -> PathBuf {
 }
 
 fn role_doc(id: &str) -> String {
-    format!(
-        "---\nname: {id}\nrole: {id} Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{id} worker.\n"
-    )
+    provider_role_doc(id, "fake", "fake")
 }
 
-fn codex_identity_rollout(
-    workspace: &std::path::Path,
-    file_name: &str,
-    session_id: &str,
-    embedded_agent_id: &str,
-) -> PathBuf {
-    let path = workspace.join(file_name);
-    std::fs::write(
-        &path,
-        format!(
-            "{{\"session_meta\":{{\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"{}\",\"created_at\":\"{}\"}}}}}}\n\
-             {{\"type\":\"turn_context\",\"payload\":{{}}}}\n\
-             {{\"type\":\"response_item\",\"payload\":{{\"content\":[{{\"type\":\"input_text\",\"text\":\"You are Team Agent worker `{embedded_agent_id}` with role `fixture`.\"}}]}}}}\n",
-            workspace.to_string_lossy(),
-            chrono::Utc::now().to_rfc3339()
-        ),
+fn provider_role_doc(id: &str, provider: &str, model: &str) -> String {
+    format!(
+        "---\nname: {id}\nrole: {id} Worker\nprovider: {provider}\nmodel: {model}\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{id} worker.\n"
     )
-    .unwrap();
-    path
 }
 
 fn layout_pane(
@@ -103,7 +86,7 @@ fn layout_pane(
         window_name: Some(crate::transport::WindowName::new(window)),
         pane_index: Some(pane_index),
         tty: None,
-        current_command: Some("codex".to_string()),
+        current_command: Some("team-agent".to_string()),
         current_path: None,
         active: pane_index == 0,
         pane_pid: None,
@@ -158,7 +141,7 @@ fn unowned_running_ws() -> PathBuf {
         &ws,
         &json!({
             "session_name": "team-x",
-            "agents": { "w1": { "provider": "codex", "role": "Worker", "model": "gpt-5.5", "auth_mode": "subscription" } },
+            "agents": { "w1": { "provider": "fake", "role": "Worker", "model": "fake", "auth_mode": "subscription" } },
         }),
     )
     .unwrap();
@@ -567,7 +550,7 @@ fn add_agent_proceeds_past_owner_gate_and_reaches_recompile() {
     let role = ws.join("w2-role.md");
     std::fs::write(
         &role,
-        "---\nname: w2\nrole: Second Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nSecond worker.\n",
+        "---\nname: w2\nrole: Second Worker\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nSecond worker.\n",
     )
     .unwrap();
     let transport = OfflineTransport::new();
@@ -712,7 +695,7 @@ fn unowned_running_ws_all_paused() -> PathBuf {
         &ws,
         &json!({
             "session_name": "team-x",
-            "agents": { "w1": { "provider": "codex", "role": "Worker", "model": "gpt-5.5", "auth_mode": "subscription", "status": "paused" } },
+            "agents": { "w1": { "provider": "fake", "role": "Worker", "model": "fake", "auth_mode": "subscription", "status": "paused" } },
         }),
     )
     .unwrap();
@@ -784,7 +767,7 @@ fn spine_add_agent_rejects_duplicate_agent_id() {
         &json!({
             "session_name": "team-quickteam",
             "agents": {
-                "implementer": {"status": "running", "provider": "codex", "window": "implementer"}
+                "implementer": {"status": "running", "provider": "fake", "window": "implementer"}
             }
         }),
     )
@@ -816,7 +799,7 @@ fn e5_add_agent_does_not_copy_role_into_platform_dir_and_injects_into_spec() {
     seed_canonical_team_identity(&team, "teamdir");
     // External role file OUTSIDE team_dir/agents, with recognizable body content.
     let role = team.parent().unwrap().join("w2-external-role.md");
-    let role_body = "---\nname: w2\nrole: Second Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nUNIQUE-E5-BUG1-MARKER body for w2.\n";
+    let role_body = "---\nname: w2\nrole: Second Worker\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nUNIQUE-E5-BUG1-MARKER body for w2.\n";
     std::fs::write(&role, role_body).unwrap();
     let transport = OfflineTransport::new();
     // The spawn may not complete under OfflineTransport; we only assert the no-copy + spec-inject
@@ -856,7 +839,7 @@ fn e5_restart_rebuilds_runtime_spec_from_role_docs() {
                                                  // Edit a role doc AFTER initial compile: change alpha's role text.
     std::fs::write(
         ws.join("agents").join("alpha.md"),
-        "---\nname: alpha\nrole: RENAMED Alpha Role\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nAlpha edited.\n",
+        "---\nname: alpha\nrole: RENAMED Alpha Role\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nAlpha edited.\n",
     )
     .unwrap();
     let transport = OfflineTransport::new();
@@ -947,7 +930,7 @@ fn red2still_entry_gate_resolves_parent_dot_team_form_a() {
         &base,
         &json!({"session_name": "team-teamdir", "team_dir": team_dir.to_string_lossy(),
                 "spec_path": runtime_spec.to_string_lossy(),
-                "agents": {"w1": {"status": "running", "provider": "codex"}}}),
+                "agents": {"w1": {"status": "running", "provider": "fake"}}}),
     )
     .unwrap();
     // Entry gate on team_dir: raw team_dir has NO .team (it's in parent), but resolved → base has it.
@@ -992,7 +975,7 @@ fn red2still_entry_gate_same_dir_dot_team_form_b() {
         &team_dir,
         &json!({"session_name": "team-tb", "team_dir": team_dir.to_string_lossy(),
                 "spec_path": runtime_spec.to_string_lossy(),
-                "agents": {"w1": {"status": "running", "provider": "codex"}}}),
+                "agents": {"w1": {"status": "running", "provider": "fake"}}}),
     )
     .unwrap();
     let transport = OfflineTransport::new();
@@ -1081,7 +1064,7 @@ fn e5_add_agent_resolves_team_dir_to_role_dir_when_runtime_spec_exists() {
     let role = team.join("w2-role.md");
     std::fs::write(
         &role,
-        "---\nname: w2\nrole: Second Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nw2.\n",
+        "---\nname: w2\nrole: Second Worker\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nw2.\n",
     )
     .unwrap();
     let transport = OfflineTransport::new();
@@ -1194,7 +1177,7 @@ fn spawn_launch_not_dry_run_is_no_longer_the_spawn_stub() {
 // real-machine test above.
 #[test]
 fn launch_with_transport_records_one_spawn_per_agent_carrying_build_command() {
-    let team = quick_start_team_dir(QS_VALID_ROLE); // one agent: implementer / provider codex
+    let team = quick_start_team_dir(QS_VALID_ROLE); // one agent: implementer / provider fake
     let spec_path = compiled_spec_path(&team);
     let transport = OfflineTransport::new();
 
@@ -1223,8 +1206,8 @@ fn launch_with_transport_records_one_spawn_per_agent_carrying_build_command() {
     assert!(
         recorded
             .iter()
-            .any(|(_, argv)| argv.iter().any(|a| a == "codex")),
-        "each spawn argv must carry the agent's provider build_command (codex); got {recorded:?}"
+            .any(|(_, argv)| argv.iter().any(|a| a == "fake-worker")),
+        "each spawn argv must carry the agent's provider build_command (fake-worker); got {recorded:?}"
     );
     assert!(
         report
@@ -1347,7 +1330,7 @@ fn seed_canonical_team_identity(workspace: &std::path::Path, team_key: &str) {
 #[serial(env)]
 fn quick_start_with_transport_spawns_workers_not_dry_run() {
     let _hermetic = hermetic_guard::HermeticTestEnv::enter_with_leader("launch-spawn-spawn-path");
-    let team = quick_start_team_dir(QS_VALID_ROLE); // one agent: implementer / provider codex
+    let team = quick_start_team_dir(QS_VALID_ROLE); // one agent: implementer / provider fake
     let workspace = team.parent().expect("team_workspace(team_dir) = parent"); // where start_coordinator runs
     seed_healthy_coordinator(workspace);
     let transport = OfflineTransport::new();
@@ -1392,8 +1375,8 @@ fn quick_start_with_transport_spawns_workers_not_dry_run() {
     assert!(
         recorded
             .iter()
-            .any(|(_, argv)| argv.iter().any(|a| a == "codex")),
-        "the spawn argv must carry the agent's provider build_command (codex); got {recorded:?}"
+            .any(|(_, argv)| argv.iter().any(|a| a == "fake-worker")),
+        "the spawn argv must carry the agent's provider build_command (fake-worker); got {recorded:?}"
     );
 }
 
@@ -1727,36 +1710,74 @@ fn quick_start_fresh_ws_spawns_resident_tmux_and_coordinator() {
 // Golden: restart/orchestration.py (Route-B resume spawn), lifecycle/start.py, lifecycle/operations.py.
 // ═════════════════════════════════════════════════════════════════════════
 
-pub(super) const DELEG_ROLE_ALPHA: &str = "---\nname: alpha\nrole: Alpha Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nAlpha.\n";
-pub(super) const DELEG_ROLE_BRAVO: &str = "---\nname: bravo\nrole: Bravo Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nBravo.\n";
-const DELEG_ROLE_WORKER2: &str = "---\nname: worker2\nrole: Second Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nSecond worker.\n";
+pub(super) const DELEG_ROLE_ALPHA: &str = "---\nname: alpha\nrole: Alpha Worker\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nAlpha.\n";
+pub(super) const DELEG_ROLE_BRAVO: &str = "---\nname: bravo\nrole: Bravo Worker\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nBravo.\n";
+const DELEG_ROLE_WORKER2: &str = "---\nname: worker2\nrole: Second Worker\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nSecond worker.\n";
 
 /// A workspace (= self-contained team dir) with a compiled 2-agent spec + state listing alpha/bravo as
-/// RESUMABLE (running, valid first_send_at, session_id) + a seeded HEALTHY coordinator.
+/// running `fake` workers that were never captured (no session_id / first_send_at), so restart and
+/// start-agent fresh-spawn them without --allow-fresh (fake has no resume) + a seeded HEALTHY
+/// coordinator. Resume-path tests use [`restart_ws_two_copilot_resumable_workers`].
 pub(super) fn restart_ws_two_resumable_workers() -> PathBuf {
+    restart_team_ws(
+        &[("alpha", DELEG_ROLE_ALPHA.to_string()), ("bravo", DELEG_ROLE_BRAVO.to_string())],
+        json!({
+            "alpha": {"status": "running", "provider": "fake"},
+            "bravo": {"status": "running", "provider": "fake"}
+        }),
+    )
+}
+
+/// Same team as [`restart_ws_two_resumable_workers`], but alpha/bravo are Copilot workers whose
+/// session ids exist in `<home>/.copilot/session-store.db` (the Copilot resume backing), so restart
+/// takes the Route-B RESUME path. The caller holds `#[serial(env)]` with `HOME=<home>`.
+pub(super) fn restart_ws_two_copilot_resumable_workers(home: &std::path::Path) -> PathBuf {
+    seed_copilot_session_store(home, &["sess-a", "sess-b"]);
+    restart_team_ws(
+        &[
+            ("alpha", provider_role_doc("alpha", "copilot", "gpt-5.5")),
+            ("bravo", provider_role_doc("bravo", "copilot", "gpt-5.5")),
+        ],
+        json!({
+            "alpha": {"status": "running", "provider": "copilot", "session_id": "sess-a", "first_send_at": "2026-05-27T10:00:00+00:00"},
+            "bravo": {"status": "running", "provider": "copilot", "session_id": "sess-b", "first_send_at": "2026-05-27T10:00:00+00:00"}
+        }),
+    )
+}
+
+/// Copilot resume backing is a `sessions` row in `$HOME/.copilot/session-store.db`.
+pub(super) fn seed_copilot_session_store(home: &std::path::Path, session_ids: &[&str]) {
+    let db = home.join(".copilot").join("session-store.db");
+    std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+    let conn = rusqlite::Connection::open(db).unwrap();
+    conn.execute_batch("create table if not exists sessions (id text primary key);").unwrap();
+    for session_id in session_ids {
+        conn.execute(
+            "insert or replace into sessions(id) values (?1)",
+            [*session_id],
+        )
+        .unwrap();
+    }
+}
+
+fn restart_team_ws(roles: &[(&str, String)], agents: serde_json::Value) -> PathBuf {
     let ws = temp_ws().join("restartteam");
     std::fs::create_dir_all(ws.join("agents")).unwrap();
-    let alpha_rollout = ws.join("alpha-rollout.jsonl");
-    let bravo_rollout = ws.join("bravo-rollout.jsonl");
-    std::fs::write(&alpha_rollout, "{}\n").unwrap();
-    std::fs::write(&bravo_rollout, "{}\n").unwrap();
     std::fs::write(
         ws.join("TEAM.md"),
         "---\nname: restartteam\nobjective: Restart probe.\nprovider: codex\n---\n\nteam.\n",
     )
     .unwrap();
-    std::fs::write(ws.join("agents").join("alpha.md"), DELEG_ROLE_ALPHA).unwrap();
-    std::fs::write(ws.join("agents").join("bravo.md"), DELEG_ROLE_BRAVO).unwrap();
+    for (id, doc) in roles {
+        std::fs::write(ws.join("agents").join(format!("{id}.md")), doc).unwrap();
+    }
     let spec = crate::compiler::compile_team(&ws).expect("compile 2-agent team");
     std::fs::write(ws.join("team.spec.yaml"), crate::model::yaml::dumps(&spec)).unwrap();
     crate::state::persist::save_runtime_state(
         &ws,
         &json!({
             "session_name": "team-restartteam",
-            "agents": {
-                "alpha": {"status": "running", "provider": "codex", "session_id": "sess-a", "rollout_path": alpha_rollout.to_string_lossy(), "first_send_at": "2026-05-27T10:00:00+00:00"},
-                "bravo": {"status": "running", "provider": "codex", "session_id": "sess-b", "rollout_path": bravo_rollout.to_string_lossy(), "first_send_at": "2026-05-27T10:00:00+00:00"}
-            }
+            "agents": agents
         }),
     )
     .unwrap();
@@ -1767,8 +1788,6 @@ pub(super) fn restart_ws_two_resumable_workers() -> PathBuf {
 fn restart_ws_one_resumable_worker() -> PathBuf {
     let ws = temp_ws().join("restartone");
     std::fs::create_dir_all(ws.join("agents")).unwrap();
-    let rollout = ws.join("alpha-rollout.jsonl");
-    std::fs::write(&rollout, "{}\n").unwrap();
     std::fs::write(
         ws.join("TEAM.md"),
         "---\nname: restartone\nobjective: Restart readiness probe.\nprovider: codex\n---\n\nteam.\n",
@@ -1782,7 +1801,7 @@ fn restart_ws_one_resumable_worker() -> PathBuf {
         &json!({
             "session_name": "team-restartone",
             "agents": {
-                "alpha": {"status": "running", "provider": "codex", "session_id": "sess-a", "rollout_path": rollout.to_string_lossy(), "first_send_at": "2026-05-27T10:00:00+00:00"}
+                "alpha": {"status": "running", "provider": "fake"}
             }
         }),
     )
@@ -1794,10 +1813,13 @@ fn restart_ws_one_resumable_worker() -> PathBuf {
 // 2 [P0] — restart_with_transport must drive the REAL Route-B resume spawn: one spawn per resumable
 // worker. The first resumed worker recreates the session with spawn_first; later workers may use
 // spawn_into only after a live-session check proves that recreated session still exists. Each spawn
-// carries the provider build_command, and the coordinator is started.
+// carries the provider resume command, and the coordinator is started. Copilot is the resumable
+// legacy provider; its backing is the hermetic HOME session store.
 #[test]
+#[serial(env)]
 fn restart_with_transport_spawns_resumable_workers_not_stub() {
-    let ws = restart_ws_two_resumable_workers();
+    let hermetic = enter_hermetic("launch-spawn-restart-resume");
+    let ws = restart_ws_two_copilot_resumable_workers(hermetic.home());
     let mut state = crate::state::persist::load_runtime_state(&ws).unwrap();
     state["generation"] = json!("old-destroyed-session-birth");
     crate::state::persist::save_runtime_state(&ws, &state).unwrap();
@@ -1821,8 +1843,9 @@ fn restart_with_transport_spawns_resumable_workers_not_stub() {
         "with has-session=true after alpha spawn, restart may add bravo with spawn_into; this is liveness-based, not index-based; got {recorded:?}"
     );
     assert!(
-        recorded.iter().all(|(_, argv)| argv.iter().any(|a| a == "codex")),
-        "each resumed worker's spawn argv must carry the provider build_command (codex); got {recorded:?}"
+        recorded.iter().all(|(_, argv)| argv.iter().any(|a| a == "copilot")
+            && argv.iter().any(|a| a == "--resume")),
+        "each resumed worker's spawn argv must carry the provider resume command (copilot --resume); got {recorded:?}"
     );
     assert!(
         matches!(result, Ok(RestartReport::Restarted { coordinator_started: true, .. })),
@@ -1842,7 +1865,7 @@ fn restart_with_transport_spawns_resumable_workers_not_stub() {
         .expect("restart.completed event for successful restart");
     assert_eq!(completed.get("rc").and_then(|v| v.as_str()), Some("ok"));
 
-    let ws = restart_ws_two_resumable_workers();
+    let ws = restart_ws_two_copilot_resumable_workers(hermetic.home());
     let dead_after_first = OfflineTransport::new().with_session_absent_after_spawn_first();
     let result = restart_with_transport_with_readiness_deadline(
         &ws,
@@ -1896,8 +1919,6 @@ fn restart_with_transport_spawns_resumable_workers_not_stub() {
 fn restart_runtime_spec_spawns_from_run_workspace_not_runtime_dir() {
     let workspace = temp_ws();
     std::fs::create_dir_all(workspace.join("agents")).unwrap();
-    let rollout = workspace.join("alpha-rollout.jsonl");
-    std::fs::write(&rollout, "{}\n").unwrap();
     std::fs::write(
         workspace.join("TEAM.md"),
         "---\nname: current\nobjective: Restart cwd probe.\nprovider: codex\n---\n\nteam.\n",
@@ -1918,10 +1939,7 @@ fn restart_runtime_spec_spawns_from_run_workspace_not_runtime_dir() {
             "agents": {
                 "alpha": {
                     "status": "running",
-                    "provider": "codex",
-                    "session_id": "sess-a",
-                    "rollout_path": rollout.to_string_lossy(),
-                    "first_send_at": "2026-05-27T10:00:00+00:00",
+                    "provider": "fake",
                     "spawn_cwd": null
                 }
             }
@@ -1935,7 +1953,7 @@ fn restart_runtime_spec_spawns_from_run_workspace_not_runtime_dir() {
 
     assert!(
         matches!(result, Ok(RestartReport::Restarted { .. })),
-        "restart should succeed for a resumable project-root team: {result:?}"
+        "restart should succeed for a never-captured project-root team: {result:?}"
     );
     assert_eq!(
         transport.spawn_cwd_records(),
@@ -1978,7 +1996,9 @@ fn restart_runtime_spec_spawns_from_run_workspace_not_runtime_dir() {
 }
 
 #[test]
+#[serial(env)]
 fn restart_allow_fresh_does_not_force_fresh_other_agents_when_one_session_capture_times_out() {
+    let hermetic = enter_hermetic("launch-spawn-restart-atomic");
     let ws = temp_ws().join("restartatomic");
     std::fs::create_dir_all(ws.join("agents")).unwrap();
     std::fs::write(
@@ -1986,18 +2006,21 @@ fn restart_allow_fresh_does_not_force_fresh_other_agents_when_one_session_captur
         "---\nname: restartatomic\nobjective: Restart atomicity probe.\nprovider: codex\n---\n\nteam.\n",
     )
     .unwrap();
-    std::fs::write(ws.join("agents").join("alpha.md"), DELEG_ROLE_ALPHA).unwrap();
-    std::fs::write(ws.join("agents").join("bravo.md"), DELEG_ROLE_BRAVO).unwrap();
-
-    let sessions_root = ws.join("codex-sessions");
-    let dated = sessions_root.join("2026").join("06").join("20");
-    std::fs::create_dir_all(&dated).unwrap();
-    let alpha_session = "019ee540-37ed-7a20-a141-1d654224d209";
     std::fs::write(
-        dated.join(format!("rollout-2026-06-20T21-37-31-{alpha_session}.jsonl")),
-        "{}\n",
+        ws.join("agents").join("alpha.md"),
+        provider_role_doc("alpha", "copilot", "gpt-5.5"),
     )
     .unwrap();
+    std::fs::write(
+        ws.join("agents").join("bravo.md"),
+        provider_role_doc("bravo", "copilot", "gpt-5.5"),
+    )
+    .unwrap();
+
+    // alpha's resume backing is its Copilot session-store row; bravo has none, so only bravo's
+    // session convergence times out.
+    let alpha_session = "019ee540-37ed-7a20-a141-1d654224d209";
+    seed_copilot_session_store(hermetic.home(), &[alpha_session]);
 
     let spec = crate::compiler::compile_team(&ws).expect("compile restart team");
     std::fs::write(ws.join("team.spec.yaml"), crate::model::yaml::dumps(&spec)).unwrap();
@@ -2008,15 +2031,13 @@ fn restart_allow_fresh_does_not_force_fresh_other_agents_when_one_session_captur
             "agents": {
                 "alpha": {
                     "status": "running",
-                    "provider": "codex",
+                    "provider": "copilot",
                     "session_id": alpha_session,
-                    "rollout_path": ws.join("stale").join("missing-alpha.jsonl").to_string_lossy(),
-                    "codex_sessions_root": sessions_root.to_string_lossy(),
                     "first_send_at": "2026-05-27T10:00:00+00:00"
                 },
                 "bravo": {
                     "status": "running",
-                    "provider": "codex",
+                    "provider": "copilot",
                     "session_id": null,
                     "spawn_cwd": ws.to_string_lossy(),
                     "first_send_at": "2026-05-27T10:00:00+00:00"
@@ -2055,7 +2076,7 @@ fn restart_allow_fresh_does_not_force_fresh_other_agents_when_one_session_captur
     assert_eq!(
         alpha.get("decision").and_then(|v| v.as_str()),
         Some("resume"),
-        "alpha has session_id plus matching codex transcript and must not be forced fresh: {alpha}"
+        "alpha has session_id plus a matching Copilot session-store row and must not be forced fresh: {alpha}"
     );
     assert!(
         alpha.get("forced_fresh").is_none(),
@@ -2074,153 +2095,6 @@ fn restart_allow_fresh_does_not_force_fresh_other_agents_when_one_session_captur
         Some(true),
         "only the missing-session agent should carry forced_fresh: {bravo}"
     );
-}
-
-#[test]
-fn restart_allow_fresh_clears_codex_identity_mismatch_tuple_before_capture() {
-    let ws = temp_ws().join("restartcrossbindallowfresh");
-    std::fs::create_dir_all(ws.join("agents")).unwrap();
-    std::fs::write(
-        ws.join("TEAM.md"),
-        "---\nname: restartcrossbindallowfresh\nobjective: Restart crossbind repair.\nprovider: codex\n---\n\nteam.\n",
-    )
-    .unwrap();
-    std::fs::write(ws.join("agents").join("alpha.md"), DELEG_ROLE_ALPHA).unwrap();
-    std::fs::write(ws.join("agents").join("bravo.md"), DELEG_ROLE_BRAVO).unwrap();
-    let alpha_session = "019f3586-6eb4-7552-8680-c833b483a289";
-    let alpha_rollout = codex_identity_rollout(&ws, "alpha-rollout.jsonl", alpha_session, "alpha");
-    let spec = crate::compiler::compile_team(&ws).expect("compile crossbind team");
-    std::fs::write(ws.join("team.spec.yaml"), crate::model::yaml::dumps(&spec)).unwrap();
-    crate::state::persist::save_runtime_state(
-        &ws,
-        &json!({
-            "session_name": "team-restartcrossbindallowfresh",
-            "agents": {
-                "alpha": {
-                    "status": "running",
-                    "provider": "codex",
-                    "window": "alpha",
-                    "first_send_at": "2026-07-06T03:45:00+00:00",
-                    "session_id": alpha_session,
-                    "rollout_path": alpha_rollout.to_string_lossy(),
-                    "captured_at": "2026-07-06T03:45:13.596763+00:00",
-                    "captured_via": "fs_watch",
-                    "attribution_confidence": "high",
-                    "spawn_cwd": ws.to_string_lossy()
-                },
-                "bravo": {
-                    "status": "running",
-                    "provider": "codex",
-                    "window": "bravo",
-                    "first_send_at": "2026-07-06T03:45:00+00:00",
-                    "session_id": alpha_session,
-                    "rollout_path": alpha_rollout.to_string_lossy(),
-                    "captured_at": "2026-07-06T03:45:13.596763+00:00",
-                    "captured_via": "fs_watch",
-                    "attribution_confidence": "high",
-                    "spawn_cwd": ws.to_string_lossy()
-                }
-            }
-        }),
-    )
-    .unwrap();
-    seed_healthy_coordinator(&ws);
-    let transport = OfflineTransport::new();
-
-    let result = restart_with_transport(&ws, true, None, &transport);
-
-    assert!(
-        matches!(result, Ok(RestartReport::Restarted { .. })),
-        "allow-fresh restart should repair by fresh-spawning only poisoned bravo; got {result:?}"
-    );
-    let windows = transport.spawn_window_records();
-    let records = transport.spawn_records();
-    let bravo_idx = windows
-        .iter()
-        .position(|(_, window)| window == "bravo")
-        .expect("bravo must spawn");
-    assert!(
-        !records[bravo_idx].1.iter().any(|arg| arg == "resume"),
-        "poisoned bravo must fresh-start without codex resume argv; records={records:?}"
-    );
-
-    let mut state = crate::state::persist::load_runtime_state(&ws).expect("load state");
-    let bravo = state.pointer("/agents/bravo").expect("bravo");
-    for field in [
-        "session_id",
-        "rollout_path",
-        "captured_at",
-        "captured_via",
-        "attribution_confidence",
-        "capture_state",
-    ] {
-        let value = bravo.get(field);
-        assert!(
-            value.is_none() || value == Some(&serde_json::Value::Null),
-            "allow-fresh must clear poisoned bravo {field}; got {value:?} in {bravo}"
-        );
-    }
-    if let Some(teams) = state.get("teams").and_then(serde_json::Value::as_object) {
-        for (team_key, team_state) in teams {
-            if let Some(team_bravo) = team_state.pointer("/agents/bravo") {
-                for field in [
-                    "session_id",
-                    "rollout_path",
-                    "captured_at",
-                    "captured_via",
-                    "attribution_confidence",
-                    "capture_state",
-                ] {
-                    let value = team_bravo.get(field);
-                    assert!(
-                        value.is_none() || value == Some(&serde_json::Value::Null),
-                        "allow-fresh must clear teams.{team_key}.agents.bravo {field}; got {value:?} in {team_bravo}"
-                    );
-                }
-            }
-        }
-    }
-
-    let fresh_session = "019f3587-bravo-fresh";
-    let fresh_rollout =
-        codex_identity_rollout(&ws, "bravo-fresh-rollout.jsonl", fresh_session, "bravo");
-    let mut adapter_for = |provider| crate::provider::adapter::get_adapter(provider);
-    crate::provider::session::capture::capture_missing_provider_sessions_once(
-        &mut state,
-        &mut adapter_for,
-        true,
-        0,
-    )
-    .expect("fresh bravo capture should run");
-    let bravo = state.pointer("/agents/bravo").expect("bravo after capture");
-    assert_eq!(
-        bravo.get("session_id").and_then(serde_json::Value::as_str),
-        Some(fresh_session),
-        "fresh bravo rollout should be capturable after allow-fresh clears poison; rollout={fresh_rollout:?} state={bravo}"
-    );
-    assert_eq!(
-        bravo
-            .get("rollout_path")
-            .and_then(serde_json::Value::as_str),
-        Some(fresh_rollout.to_string_lossy().as_ref())
-    );
-    let plan = crate::lifecycle::restart::classify_restart_plan_with_resume_validation(
-        Some(&ws),
-        &state,
-        false,
-    )
-    .expect("classify after fresh capture");
-    assert!(
-        plan.unresumable.is_empty(),
-        "next restart must not loop on session_identity_mismatch after fresh capture; got {:?}",
-        plan.unresumable
-    );
-    let bravo_decision = plan
-        .decisions
-        .iter()
-        .find(|decision| decision.agent_id.as_str() == "bravo")
-        .expect("bravo decision");
-    assert_eq!(bravo_decision.decision, ResumeDecision::Resume);
 }
 
 #[test]
@@ -2386,19 +2260,21 @@ fn restart_times_out_when_spawned_worker_pane_is_not_addressable() {
 }
 
 // 3 [P0] — start_agent_with_transport on a non-paused agent with a session_id must spawn EXACTLY ONE
-// worker (resume) carrying the provider build_command. Today the stub returns RequirementUnmet with
-// ZERO spawns -> RED at recorded.len().
+// worker (resume) carrying the provider resume command. Today the stub returns RequirementUnmet with
+// ZERO spawns -> RED at recorded.len(). Copilot is the resumable legacy provider; its backing is the
+// hermetic HOME session store.
 #[test]
+#[serial(env)]
 fn start_agent_with_transport_spawns_resume_not_stub() {
+    let hermetic = enter_hermetic("launch-spawn-start-agent-resume");
     let ws = temp_ws().join("startagentws");
     std::fs::create_dir_all(&ws).unwrap();
-    let rollout = ws.join("alpha-rollout.jsonl");
-    std::fs::write(&rollout, "{}\n").unwrap();
+    seed_copilot_session_store(hermetic.home(), &["sess-a"]);
     crate::state::persist::save_runtime_state(
         &ws,
         &json!({
             "session_name": "team-sa",
-            "agents": {"alpha": {"status": "running", "provider": "codex", "session_id": "sess-a", "rollout_path": rollout.to_string_lossy(), "first_send_at": "2026-05-27T10:00:00+00:00"}}
+            "agents": {"alpha": {"status": "running", "provider": "copilot", "session_id": "sess-a", "first_send_at": "2026-05-27T10:00:00+00:00"}}
         }),
     )
     .unwrap();
@@ -2423,8 +2299,12 @@ fn start_agent_with_transport_spawns_resume_not_stub() {
          with ZERO spawns; got {recorded:?}"
     );
     assert!(
-        recorded[0].1.iter().any(|a| a == "codex"),
-        "the resume spawn argv must carry the provider build_command (codex); got {:?}",
+        recorded[0].1.iter().any(|a| a == "copilot")
+            && recorded[0]
+                .1
+                .windows(2)
+                .any(|pair| pair[0] == "--resume" && pair[1] == "sess-a"),
+        "the resume spawn argv must carry the provider resume command (copilot --resume sess-a); got {:?}",
         recorded[0].1
     );
 }
@@ -2476,8 +2356,8 @@ fn add_agent_with_transport_spawns_new_worker_not_stub() {
          then returns RequirementUnmet with ZERO spawns; got {recorded:?}"
     );
     assert!(
-        recorded.iter().any(|(_, argv)| argv.iter().any(|a| a == "codex")),
-        "the new worker's spawn argv must carry the provider build_command (codex); got {recorded:?}"
+        recorded.iter().any(|(_, argv)| argv.iter().any(|a| a == "fake-worker")),
+        "the new worker's spawn argv must carry the provider build_command (fake-worker); got {recorded:?}"
     );
 }
 
@@ -2498,7 +2378,7 @@ fn add_agent_role_doc_exists_runtime_missing_succeeds() {
         &json!({
             "session_name": "team-addroledoc",
             "agents": {
-                "implementer": {"status": "running", "provider": "codex", "window": "implementer"}
+                "implementer": {"status": "running", "provider": "fake", "window": "implementer"}
             }
         }),
     )
@@ -2546,7 +2426,7 @@ fn start_agent_runtime_missing_role_doc_exists_no_side_effect() {
         &json!({
             "session_name": "team-startmissing",
             "agents": {
-                "implementer": {"status": "running", "provider": "codex", "window": "implementer"}
+                "implementer": {"status": "running", "provider": "fake", "window": "implementer"}
             }
         }),
     )
@@ -2787,7 +2667,7 @@ fn fork_refuses_source_with_partial_tuple() {
     .unwrap();
     std::fs::write(
         ws.join("agents").join("src.md"),
-        "---\nname: src\nrole: Source\nprovider: codex\nmodel: gpt\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nSrc.\n",
+        "---\nname: src\nrole: Source\nprovider: copilot\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nSrc.\n",
     )
     .unwrap();
     let spec = crate::compiler::compile_team(&ws).expect("compile");
@@ -2799,7 +2679,7 @@ fn fork_refuses_source_with_partial_tuple() {
             "agents": {
                 "src": {
                     "status": "running",
-                    "provider": "codex",
+                    "provider": "copilot",
                     "window": "src",
                     "first_send_at": "2026-06-25T10:00:00+00:00",
                     "session_id": "scalar-only-uuid",
@@ -2857,8 +2737,8 @@ fn stop_agent_adaptive_kills_target_pane_not_shared_layout_window() {
             "session_name": session,
             "legacy_display_key": "adaptive",
             "agents": {
-                "w1": {"status": "running", "provider": "codex", "window": "team-w1", "layout_window": "team-w1", "layout_index": 0, "pane_index": 0, "pane_id": "%1"},
-                "w2": {"status": "running", "provider": "codex", "window": "team-w1", "layout_window": "team-w1", "layout_index": 0, "pane_index": 1, "pane_id": "%2"}
+                "w1": {"status": "running", "provider": "fake", "window": "team-w1", "layout_window": "team-w1", "layout_index": 0, "pane_index": 0, "pane_id": "%1"},
+                "w2": {"status": "running", "provider": "fake", "window": "team-w1", "layout_window": "team-w1", "layout_index": 0, "pane_index": 1, "pane_id": "%2"}
             }
         }),
     )
@@ -3106,12 +2986,12 @@ fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
             "spawned_at",
             "pane_id",
         ],
-        "0.3.31 Codex capture correction: no framework _pending_session_id for Codex (CLI doesn't honor --session-id); raw={raw}"
+        "the fake worker has no pre-assigned session id, so no framework _pending_session_id; raw={raw}"
     );
     assert_eq!(agent["status"], json!("running"));
-    assert_eq!(agent["provider"], json!("codex"));
+    assert_eq!(agent["provider"], json!("fake"));
     assert_eq!(agent["agent_id"], json!("implementer"));
-    assert_eq!(agent["model"], json!("gpt-5.5"));
+    assert_eq!(agent["model"], json!("fake"));
     assert_eq!(agent["auth_mode"], json!("subscription"));
     assert!(agent["profile"].is_null());
     assert_eq!(agent["window"], json!("implementer"));
@@ -3204,9 +3084,9 @@ fn quick_start_paused_agent_state_is_paused_provider_only_and_not_spawned() {
             "team_dir": team.to_string_lossy(),
             "agents": {
                 "implementer": {
-                    "provider": "codex",
+                    "provider": "fake",
                     "role": "Implementation Engineer",
-                    "model": "gpt-5.5",
+                    "model": "fake",
                     "auth_mode": "subscription"
                 }
             },
@@ -3232,7 +3112,7 @@ fn quick_start_paused_agent_state_is_paused_provider_only_and_not_spawned() {
         "paused agent state must be exactly golden launch/core.py:171-173; raw={raw}"
     );
     assert_eq!(agent["status"], json!("paused"));
-    assert_eq!(agent["provider"], json!("codex"));
+    assert_eq!(agent["provider"], json!("fake"));
     assert!(
         transport.spawn_records().is_empty(),
         "paused agent must not spawn any terminal window; got {:?}",
@@ -3536,7 +3416,7 @@ fn e43_adaptive_placement_skips_existing_agent_whose_live_pane_window_name_diffe
         "agents": {
             "architect": {
                 "status": "running",
-                "provider": "codex",
+                "provider": "fake",
                 "window": "architect",
                 // Stale residue — placement must NOT inherit this name.
                 "layout_window": "team-w2",
@@ -3613,7 +3493,7 @@ fn e43_add_agent_does_not_split_against_phantom_layout_window() {
             "agents": {
                 "architect": {
                     "status": "running",
-                    "provider": "codex",
+                    "provider": "fake",
                     "window": "architect",
                     "layout_window": "team-w2",
                     "pane_id": "%1",
@@ -3700,7 +3580,7 @@ fn e45_adaptive_placement_returns_none_when_no_real_team_w_window_present_in_sta
         "agents": {
             "developer": {
                 "status": "running",
-                "provider": "codex",
+                "provider": "fake",
                 "window": "developer",
                 "layout_window": "developer",
                 "layout_index": 0u64,
@@ -3708,7 +3588,7 @@ fn e45_adaptive_placement_returns_none_when_no_real_team_w_window_present_in_sta
             },
             "test-engineer": {
                 "status": "running",
-                "provider": "codex",
+                "provider": "fake",
                 "window": "test-engineer",
                 "layout_window": "test-engineer",
                 "pane_id": "%521",
@@ -3762,7 +3642,7 @@ fn e45_adaptive_existing_placement_returns_none_when_claim_is_per_agent_window()
         "agents": {
             "developer": {
                 "status": "running",
-                "provider": "codex",
+                "provider": "fake",
                 "window": "developer",
                 "layout_window": "developer",
                 "layout_index": 0u64,
@@ -3822,7 +3702,7 @@ fn e45_add_agent_opens_new_window_does_not_split_into_per_agent_window() {
             "agents": {
                 "developer": {
                     "status": "running",
-                    "provider": "codex",
+                    "provider": "fake",
                     "window": "developer",
                     "layout_window": "developer",
                     "layout_index": 0u64,
@@ -3957,7 +3837,7 @@ fn e42_add_then_remove_round_trip_resolves_canonical_spec_not_legacy() {
             "session_name": "team-iso",
             "spec_path": legacy_spec_path.to_string_lossy(),
             "agents": {
-                "implementer": {"status": "running", "provider": "codex", "window": "implementer"}
+                "implementer": {"status": "running", "provider": "fake", "window": "implementer"}
             }
         }),
     )

@@ -189,10 +189,12 @@ fn human_status_detail_renders_session_missing_restart_hint() {
 #[test]
 #[serial(env)]
 fn restart_after_convergence_uses_physical_spawn_on_selected_endpoint() {
-    let case = Recovery0531Case::new("r4-physical-spawn", ProviderShape::Codex)
+    // A real-CLI legacy worker (Copilot), not the fake provider: the physical
+    // spawn path must be exercised, never the fake no-spawn harness.
+    let case = Recovery0531Case::new("r4-physical-spawn", ProviderShape::Copilot)
         .with_team_session_mode(TeamSessionMode::SpawnTracked);
-    case.seed_converged_state("codex");
-    case.write_team_spec("codex", "gpt-5");
+    case.seed_converged_state("copilot");
+    case.write_team_spec("copilot", "gpt-5");
     case.seed_healthy_coordinator();
 
     let restart = case.run_ta(&["restart", case.workspace_str(), "--team", TEAM, "--json"]);
@@ -257,7 +259,7 @@ fn restart_after_convergence_uses_physical_spawn_on_selected_endpoint() {
 #[derive(Clone, Copy)]
 enum ProviderShape {
     Fake,
-    Codex,
+    Copilot,
 }
 
 #[derive(Clone, Copy)]
@@ -731,7 +733,7 @@ fn assert_terminal_worker_registration(state: &Value, label: &str) {
 fn provider_command(provider: ProviderShape) -> &'static str {
     match provider {
         ProviderShape::Fake => "fake",
-        ProviderShape::Codex => "codex",
+        ProviderShape::Copilot => "copilot",
     }
 }
 

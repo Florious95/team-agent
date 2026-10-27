@@ -39,7 +39,7 @@ use hermetic::HermeticTestEnv;
 const TEAM_MD: &str =
     "---\nname: verify031\nobjective: Verify mixed provider windows.\nprovider: codex\n---\n\nTeam.\n";
 
-const CODEX_ROLE: &str = "---\nname: codexer\nrole: Codex Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nCodex worker.\n";
+const FAKE_ROLE: &str = "---\nname: faker\nrole: Fake Worker\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nFake worker.\n";
 
 const COPILOT_ROLE: &str = "---\nname: copiloter\nrole: Copilot Worker\nprovider: copilot\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nCopilot worker.\n";
 
@@ -50,7 +50,7 @@ fn worker_mcp_owner_team_scope_must_match_runtime_team_key_not_spec_name() {
     let team = mixed_provider_team_dir(&hermetic, "mcp-owner-scope");
     super::launch_spawn::seed_healthy_coordinator(team.parent().unwrap());
     let transport = RecordingTransport::new()
-        .with_windows(vec![WindowName::new("copiloter"), WindowName::new("codexer")]);
+        .with_windows(vec![WindowName::new("copiloter"), WindowName::new("faker")]);
     let launch = ready_launch(
         quick_start_with_transport(&team, None, true, None, &transport)
             .expect("quick-start should reach worker spawn path"),
@@ -108,7 +108,7 @@ fn quick_start_preserves_external_leader_receiver_when_worker_pane_id_collides_a
     let _tmux = hermetic.with_env("TMUX", &format!("{caller_endpoint},123,0"));
     let _pane = hermetic.with_env("TMUX_PANE", "%0");
     let _provider = hermetic.with_env("TEAM_AGENT_LEADER_PROVIDER", "codex");
-    let team = codex_only_team_dir(&hermetic, "external-pane-collision");
+    let team = fake_only_team_dir(&hermetic, "external-pane-collision");
     let workspace = team.parent().expect("teamdir has parent workspace");
     let caller = PaneInfo {
         pane_id: PaneId::new("%0"),
@@ -124,7 +124,7 @@ fn quick_start_preserves_external_leader_receiver_when_worker_pane_id_collides_a
         leader_env: Default::default(),
     };
     let transport = RecordingTransport::new()
-        .with_windows(vec![WindowName::new("codexer")])
+        .with_windows(vec![WindowName::new("faker")])
         .with_tmux_endpoint(caller_endpoint)
         .with_targets(vec![caller.clone()]);
     let live = crate::transport::test_support::OfflineTransport::default()
@@ -139,9 +139,9 @@ fn quick_start_preserves_external_leader_receiver_when_worker_pane_id_collides_a
     let worker_pane = launch
         .started
         .iter()
-        .find(|agent| agent.agent_id.as_str() == "codexer")
+        .find(|agent| agent.agent_id.as_str() == "faker")
         .map(|agent| agent.target.as_str())
-        .expect("fixture precondition: codexer spawned");
+        .expect("fixture precondition: faker spawned");
     assert_eq!(
         worker_pane, "%0",
         "fixture precondition: first worker in the product -L socket receives bare pane id %0"
@@ -194,11 +194,11 @@ fn running_worker_state_must_only_be_written_for_windows_that_exist_after_launch
     let spec_path = team.join("team.spec.yaml");
     std::fs::write(&spec_path, team_agent::model::yaml::dumps(&spec)).expect("write spec");
 
-    // Simulates the Mac mini final capture: the codex window exists, the other worker's
+    // Simulates the Mac mini final capture: the first worker's window exists, the other worker's
     // (originally Claude, here Copilot) window does not.
     // launch_with_transport currently never verifies the post-spawn window set before persisting
     // `status=running`, so this fixture pins the state/physical invariant directly.
-    let transport = RecordingTransport::new().with_windows(vec![WindowName::new("codexer")]);
+    let transport = RecordingTransport::new().with_windows(vec![WindowName::new("faker")]);
     let launch = launch_with_transport(&spec_path, false, true, true, &transport)
         .expect("launch should reach the real spawn/state path");
     assert_eq!(
@@ -270,10 +270,10 @@ fn leader_bound_delivery_must_target_bound_leader_pane_not_missing_leader_window
         },
         "owner_epoch": 1,
         "agents": {
-            "codexer": {
+            "faker": {
                 "status": "running",
-                "provider": "codex",
-                "window": "codexer"
+                "provider": "fake",
+                "window": "faker"
             }
         },
         "teams": {
@@ -292,10 +292,10 @@ fn leader_bound_delivery_must_target_bound_leader_pane_not_missing_leader_window
                     "owner_epoch": 1
                 },
                 "agents": {
-                    "codexer": {
+                    "faker": {
                         "status": "running",
-                        "provider": "codex",
-                        "window": "codexer"
+                        "provider": "fake",
+                        "window": "faker"
                     }
                 }
             }
@@ -308,7 +308,7 @@ fn leader_bound_delivery_must_target_bound_leader_pane_not_missing_leader_window
     let message_id = store
         .create_message(
             None,
-            "codexer",
+            "faker",
             "leader",
             "BUG4 worker to leader canary",
             None,
@@ -318,7 +318,7 @@ fn leader_bound_delivery_must_target_bound_leader_pane_not_missing_leader_window
         .expect("create accepted leader-bound message");
     let event_log = EventLog::new(&workspace);
     let transport = RecordingTransport::new()
-        .with_windows(vec![WindowName::new("codexer")])
+        .with_windows(vec![WindowName::new("faker")])
         .with_targets(vec![pane_info("%0", "external-leader-socket", "leader")]);
 
     let outcome = deliver_pending_message(
@@ -369,7 +369,7 @@ fn worker_to_leader_delivery_succeeds_when_attached_leader_pane_lives_on_default
             pane_info(
                 product_worker_pane.as_str(),
                 product_session.as_str(),
-                "codexer",
+                "faker",
             ),
         ]);
 
@@ -395,10 +395,10 @@ fn worker_to_leader_delivery_succeeds_when_attached_leader_pane_lives_on_default
             },
             "owner_epoch": 1,
             "agents": {
-                "codexer": {
+                "faker": {
                     "status": "running",
-                    "provider": "codex",
-                    "window": "codexer",
+                    "provider": "fake",
+                    "window": "faker",
                     "pane_id": product_worker_pane.as_str(),
                     "startup_prompts": "handled"
                 }
@@ -421,10 +421,10 @@ fn worker_to_leader_delivery_succeeds_when_attached_leader_pane_lives_on_default
                         "claimed_via": "quick-start"
                     },
                     "agents": {
-                        "codexer": {
+                        "faker": {
                             "status": "running",
-                            "provider": "codex",
-                            "window": "codexer",
+                            "provider": "fake",
+                            "window": "faker",
                             "pane_id": product_worker_pane.as_str(),
                             "startup_prompts": "handled"
                         }
@@ -440,7 +440,7 @@ fn worker_to_leader_delivery_succeeds_when_attached_leader_pane_lives_on_default
     let message_id = store
         .create_message(
             None,
-            "codexer",
+            "faker",
             "leader",
             "BUG4 worker-to-leader default socket canary",
             None,
@@ -504,10 +504,10 @@ fn assert_bound_reachable_leader_send_message_injects(
         },
         "owner_epoch": 7,
         "agents": {
-            "codexer": {
+            "faker": {
                 "status": "running",
-                "provider": "codex",
-                "window": "codexer",
+                "provider": "fake",
+                "window": "faker",
                 "pane_id": worker_pane.as_str(),
                 "startup_prompts": "handled"
             }
@@ -517,7 +517,7 @@ fn assert_bound_reachable_leader_send_message_injects(
     let transport = RecordingTransport::new()
         .with_targets(vec![
             pane_info(leader_pane.as_str(), "external-leader-socket", "leader"),
-            pane_info(worker_pane.as_str(), "team-bug4-fresh", "codexer"),
+            pane_info(worker_pane.as_str(), "team-bug4-fresh", "faker"),
         ])
         .with_liveness(vec![
             (leader_pane.as_str().to_string(), PaneLiveness::Live),
@@ -526,7 +526,7 @@ fn assert_bound_reachable_leader_send_message_injects(
     let event_log = EventLog::new(&workspace);
 
     let mut opts = SendOptions::default();
-    opts.sender = TrustedSender::from_runtime_identity(AgentId::new("codexer"));
+    opts.sender = TrustedSender::from_runtime_identity(AgentId::new("faker"));
     opts.requires_ack = false;
     opts.route_task_id = false;
     opts.team = Some(team_agent::model::ids::TeamKey::new("teamdir"));
@@ -604,7 +604,7 @@ fn unbound_or_unreachable_worker_to_leader_remains_rebind_required_without_autod
                 "session_name": "team-bug4-unbound",
                 "active_team_key": "teamdir",
                 "leader": {"id": "leader", "provider": "codex"},
-                "agents": {"codexer": {"status": "running", "provider": "codex", "window": "codexer"}}
+                "agents": {"faker": {"status": "running", "provider": "fake", "window": "faker"}}
             }),
             RecordingTransport::new(),
         ),
@@ -622,7 +622,7 @@ fn unbound_or_unreachable_worker_to_leader_remains_rebind_required_without_autod
                     "owner_epoch": 1
                 },
                 "team_owner": {"pane_id": "%missing-leader", "provider": "codex", "owner_epoch": 1},
-                "agents": {"codexer": {"status": "running", "provider": "codex", "window": "codexer"}}
+                "agents": {"faker": {"status": "running", "provider": "fake", "window": "faker"}}
             }),
             RecordingTransport::new()
                 .with_liveness(vec![("%missing-leader".to_string(), PaneLiveness::Dead)]),
@@ -635,7 +635,7 @@ fn unbound_or_unreachable_worker_to_leader_remains_rebind_required_without_autod
         save_runtime_state(&workspace, &state).expect("seed runtime state");
         let event_log = EventLog::new(&workspace);
         let mut opts = SendOptions::default();
-        opts.sender = TrustedSender::from_runtime_identity(AgentId::new("codexer"));
+        opts.sender = TrustedSender::from_runtime_identity(AgentId::new("faker"));
         opts.requires_ack = false;
         opts.route_task_id = false;
         opts.team = Some(team_agent::model::ids::TeamKey::new("teamdir"));
@@ -745,7 +745,7 @@ fn mixed_provider_team_dir(hermetic: &HermeticTestEnv, tag: &str) -> PathBuf {
     std::fs::write(team.join("TEAM.md"), TEAM_MD).expect("write TEAM.md");
     std::fs::write(team.join("agents").join("copiloter.md"), COPILOT_ROLE)
         .expect("write copiloter role");
-    std::fs::write(team.join("agents").join("codexer.md"), CODEX_ROLE).expect("write codexer role");
+    std::fs::write(team.join("agents").join("faker.md"), FAKE_ROLE).expect("write faker role");
     team
 }
 
@@ -964,11 +964,11 @@ impl Transport for RecordingTransport {
     }
 }
 
-fn codex_only_team_dir(hermetic: &HermeticTestEnv, tag: &str) -> PathBuf {
+fn fake_only_team_dir(hermetic: &HermeticTestEnv, tag: &str) -> PathBuf {
     let team = hermetic.workspace(tag).join("teamdir");
     std::fs::create_dir_all(team.join("agents")).expect("create agents dir");
     std::fs::write(team.join("TEAM.md"), TEAM_MD).expect("write TEAM.md");
-    std::fs::write(team.join("agents").join("codexer.md"), CODEX_ROLE).expect("write codex role");
+    std::fs::write(team.join("agents").join("faker.md"), FAKE_ROLE).expect("write fake role");
     team
 }
 

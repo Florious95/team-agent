@@ -61,8 +61,10 @@ fn abnormal_exit_is_reported_without_auto_recovery_intent_or_action() {
 
 #[test]
 fn first_turn_death_cannot_enter_auto_respawn_loop_and_manual_start_still_recovers() {
-    // A pre-upgrade claude_code row cannot be started any more; Codex keeps
-    // both an explicit failed-turn fact and a resumable manual start.
+    // No surviving legacy worker has both an explicit failed-turn fact and a
+    // startable runtime: a pre-upgrade codex row keeps its fault reader but
+    // has no runtime. Detection runs on that row; manual recovery re-adds the
+    // seat on a startable (fake) worker.
     let case = RecoveryCase::new("first-turn-death-no-loop", "codex");
     case.seed_agent("baseline-429");
     let transport = OfflineTransport::new().with_session_present(true);
@@ -108,6 +110,7 @@ fn first_turn_death_cannot_enter_auto_respawn_loop_and_manual_start_still_recove
     );
 
     case.seed_healthy_coordinator();
+    case.readd_as_fake_worker();
     let manual_transport = OfflineTransport::new().with_session_present(true);
     let outcome = crate::lifecycle::start_agent_with_transport(
         &case.root,
@@ -223,6 +226,18 @@ impl RecoveryCase {
         agent["process_liveness"] = serde_json::json!("dead");
         agent["last_output_at"] = serde_json::Value::Null;
         agent["first_send_at"] = serde_json::Value::Null;
+        crate::state::persist::save_runtime_state(&self.root, &state).unwrap();
+    }
+
+    fn readd_as_fake_worker(&self) {
+        let mut state = self.state();
+        let agent = &mut state["agents"]["fe-admin"];
+        agent["provider"] = serde_json::json!("fake");
+        agent["model"] = serde_json::json!("fake");
+        // A fake worker has no resume; the re-added seat starts fresh.
+        if let Some(agent) = agent.as_object_mut() {
+            agent.remove("session_id");
+        }
         crate::state::persist::save_runtime_state(&self.root, &state).unwrap();
     }
 
