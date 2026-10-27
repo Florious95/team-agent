@@ -372,6 +372,13 @@ fn clone_ok_new_seat_is_visible_in_team_status() {
         .cloned()
         .collect::<Vec<_>>();
     keys.sort();
+    // An unobserved seat also carries the paired observation_reason/next_action diagnostics.
+    assert_eq!(
+        node.get("observation_reason").is_some(),
+        node.get("next_action").is_some(),
+        "RED3: observation diagnostics must be paired; node={node}"
+    );
+    keys.retain(|key| key != "observation_reason" && key != "next_action");
     assert_eq!(
         keys,
         vec!["activity", "effort", "health", "model", "name", "provider", "runtime_status", "session_name", "tmux_command"],

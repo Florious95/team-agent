@@ -92,8 +92,9 @@ const ISOLATION_GUARD_TEST: &str = concat!(
 /// These fixtures need process-global HOME and TEAM_AGENT_* overrides, while the
 /// lib-test harness runs sibling tests in parallel. Execute each body as the sole
 /// selected test in a child process so HermeticTestEnv never mutates the parent
-/// test process. This preserves default libtest parallelism without serializing
-/// unrelated tests.
+/// test process. Fixture-caller tests still hold `serial(env)` while their child
+/// runs: the child inherits the parent's PATH, and a sibling env test may have a
+/// fake `tmux` on it that never creates the fixture caller socket.
 fn run_process_isolated(marker: &str, test_name: &str, body: impl FnOnce()) {
     if std::env::var_os(marker).is_some() {
         body();
@@ -492,6 +493,7 @@ exec sleep 3600
 /// `verifier-r8-caps-recharter-signoff.md`. The SQLite FK-table integrity and
 /// exact-nonce recall remain the GREEN half / subscription-E2E (§1.4).
 #[test]
+#[serial_test::serial(env)]
 fn r8_copilot_fork_is_no_longer_capability_refused() {
     run_process_isolated(R8_CHILD, R8_TEST, || {
         // R8 uses the LIBRARY entry `fork_agent_with_transport` (the same entry the old
@@ -549,6 +551,7 @@ fn r8_copilot_fork_is_no_longer_capability_refused() {
 /// (本 fixture = false → `source=disabled`),不再依赖 leader argv 继承。任何
 /// fork 都不得出现 `source=leader_process`(旧模型已删)或 capability 高于源。
 #[test]
+#[serial_test::serial(env)]
 fn r7_fork_effective_permissions_are_clamped_to_leader_guardrail() {
     run_process_isolated(R7_CHILD, R7_TEST, || {
         // Claude source + success-path backing shim so the fork COMPLETES and a NEW
@@ -571,6 +574,7 @@ fn r7_fork_effective_permissions_are_clamped_to_leader_guardrail() {
 /// false) must also resolve to `source=disabled` under any ancestry seam. 0.5.66
 /// 起 policy 与 leader argv 无关:source 恒 `disabled`,fork 恒不升级(MUST-16)。
 #[test]
+#[serial_test::serial(env)]
 fn r7b_fork_policy_under_restricted_leader_ancestry_is_disabled() {
     run_process_isolated(R7B_CHILD, R7B_TEST, || {
         let case = Case::start_with_ancestry("cf-r7b", RESTRICTED_LEADER_ARGV);
