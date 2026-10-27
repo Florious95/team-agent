@@ -387,6 +387,55 @@ fn conflicting_pane_or_binding_is_rejected_before_second_materialization() {
 }
 
 #[test]
+fn stopped_seat_releases_its_pane_to_a_seat_spawned_on_a_restarted_shared_server() {
+    let sandbox = Sandbox::new();
+    let mut store = sandbox.store();
+    let mut host = FakeHost::default();
+    let mut io = FakeIo::new("unused");
+    // A shared tmux server that exited with its last seat numbers its first pane %0 again.
+    host.route_after_spawn = Some(("/shared/tmux.sock".into(), "%0".into(), "binding-worker".into()));
+    let worker = start(&mut store, &mut host, &mut io, "worker").target;
+    Lifecycle {
+        store: &mut store,
+        host: &mut host,
+        io: &mut io,
+    }
+    .teardown(&worker.identity, OperationId::new("stop-worker").unwrap())
+    .unwrap();
+    host.route_after_spawn = Some(("/shared/tmux.sock".into(), "%0".into(), "binding-second".into()));
+    let second = start(&mut store, &mut host, &mut io, "second");
+    assert_eq!(second.outcome, Outcome::Committed, "{:?}", second.failure);
+    assert_eq!(host.stopped, 1, "only the torn-down worker was stopped");
+    // A live seat on that pane still fences the new route; the unpublished
+    // process is left to explicit recovery, never stopped on a guess.
+    host.route_after_spawn = Some(("/shared/tmux.sock".into(), "%0".into(), "binding-third".into()));
+    let request = request(store.root(), "third");
+    let d = descriptor();
+    let h = hooks();
+    io.operation = OperationId::new("third").unwrap();
+    assert_eq!(
+        Lifecycle {
+            store: &mut store,
+            host: &mut host,
+            io: &mut io
+        }
+        .startup(
+            &Adapter {
+                descriptor: &d,
+                hooks: &h,
+                catalog: None
+            },
+            &request,
+            routing("third"),
+            OperationId::new("third").unwrap()
+        )
+        .map(|record| record.outcome),
+        Err(Error::Fence)
+    );
+    assert_eq!(host.stopped, 1);
+}
+
+#[test]
 fn persisted_ids_and_owned_paths_revalidate_on_deserialize() {
     assert!(serde_json::from_value::<OwnedPath>(json!(["/owned", "../escape"])).is_err());
     assert!(serde_json::from_value::<ProviderId>(json!("UPPER")).is_err());

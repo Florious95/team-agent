@@ -530,8 +530,12 @@ pub(crate) fn current(
 fn route_available(connection: &Connection, target: &SeatRecord) -> Result<(), Error> {
     // Pane IDs are local to a tmux endpoint. The captured binding is globally
     // unique within this store; neither field is safe to compare on its own.
+    // A Stopped seat's pane was closed and holds no route: a restarted shared
+    // server numbers its panes from %0 again, and the new seat may draw the
+    // old ID. Every later physical action still revalidates the pane binding.
     let conflict: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM contract_seats WHERE seat<>?1 AND
+        "SELECT EXISTS(SELECT 1 FROM contract_seats WHERE seat<>?1
+         AND json_extract(record,'$.status')<>'Stopped' AND
          ((json_extract(record,'$.endpoint')=?2 AND json_extract(record,'$.pane')=?3) OR json_extract(record,'$.binding_key')=?4)
          UNION ALL SELECT 1 FROM contract_operations WHERE json_extract(record,'$.outcome') IN ('Running','NeedsRecovery')
          AND json_extract(record,'$.target.identity.seat')<>?1 AND

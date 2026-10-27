@@ -182,6 +182,33 @@ pub(crate) fn start_configured(
     super::commands::publish_at(workspace, team, seat, true)
 }
 
+/// add-agent owns a brand-new seat. If its start committed but publication
+/// failed, stop that seat before the caller rolls its row back: a refused add
+/// never leaves a running native process outside status/stop. An unpublished
+/// spawn stays with its fenced receipt for explicit recovery.
+pub(crate) fn start_new_seat(
+    workspace: &Path,
+    directory: &Path,
+    team: &str,
+    seat: &SeatId,
+) -> Result<(), crate::cli::CliError> {
+    let Err(error) = start_configured(workspace, directory, team, seat) else {
+        return Ok(());
+    };
+    let started = Backend::open_readonly(workspace, team)
+        .ok()
+        .and_then(|backend| backend.store.seat(seat).ok().flatten())
+        .is_some_and(|current| current.status != SeatStatus::Stopped && current.physical.is_some());
+    if started {
+        if let Err(stop) = backend::stop(workspace, team, seat) {
+            return Err(crate::cli::CliError::Runtime(format!(
+                "{error}; stopping the started native seat failed: {stop}"
+            )));
+        }
+    }
+    Err(error)
+}
+
 pub fn project_seat(workspace: &Path, team: &str, id: &str) -> Result<Value, BackendError> {
     let mut backend = Backend::open_readonly(workspace, team)?;
     let seat = backend

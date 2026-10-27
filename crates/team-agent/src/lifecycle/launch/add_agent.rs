@@ -816,7 +816,7 @@ fn add_contract_seat(
     let started = team_agent_contract::contract::types::SeatId::new(agent_id.as_str())
         .map_err(|error| error.to_string())
         .and_then(|seat| {
-            crate::contract_runtime::framework::start_configured(
+            crate::contract_runtime::framework::start_new_seat(
                 run_workspace,
                 team_dir,
                 team_key,
