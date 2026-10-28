@@ -93,18 +93,20 @@ pub(crate) fn list(workspace: &Path, owner: &str) -> Result<Vec<Value>, Messagin
 pub(crate) fn cancel(workspace: &Path, owner: &str, id: i64) -> Result<bool, MessagingError> {
     let store = MessageStore::open(workspace)?;
     let conn = crate::db::schema::open_db(store.db_path())?;
-    // An occurrence already enqueued for delivery is not recalled.
+    // An occurrence already fired is not recalled.
     Ok(conn.execute("update scheduled_events set status='cancelled' where id=?1 and kind='reminder' and owner_team_id=?2 and status='pending'", params![id, owner])? == 1)
 }
 
 pub(super) fn fire(
     workspace: &Path,
     id: i64,
-    event_log: &EventLog,
+    _event_log: &EventLog,
 ) -> Result<Value, MessagingError> {
     let store = MessageStore::open(workspace)?;
-    let conn = crate::db::schema::open_db(store.db_path())?;
-    let row = conn.query_row(
+    let mut conn = crate::db::schema::open_db(store.db_path())?;
+    // Serialize occurrences/cancellation, never wait for a delivery receipt.
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let row = tx.query_row(
         "select due_at, payload_json, owner_team_id from scheduled_events where id=?1 and kind='reminder' and status='pending'",
         [id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
     ).optional()?;
@@ -112,38 +114,44 @@ pub(super) fn fire(
         return Ok(json!({"ok": true, "cancelled": true}));
     };
     let reminder: Reminder = serde_json::from_str(&payload)?;
-    let selected = crate::state::selector::resolve_active_team_readonly(
-        workspace,
-        Some(&owner),
-        crate::state::selector::SelectorMode::RuntimeOnly,
-    )?;
-    // Stable per-occurrence ids make a crash between enqueue and advancing the
-    // timer safe to retry. Use the normal leader funnel (including attach deferral).
+    let directory = crate::direct_delivery::directory(workspace, Some(&owner))
+        .map_err(MessagingError::Routing)?;
+    // The inbox is durable independently of physical delivery. A stable id also
+    // makes replay after an append/before timer commit safe without ledger rows.
     let message_id = format!("reminder_{id}_{due_at}");
-    let outcome = super::leader_receiver::send_to_leader_receiver_with_message_id(
-        workspace,
-        &selected.state,
-        "leader",
-        &reminder.text,
-        None,
-        "scheduler",
-        false,
-        None,
-        Some(&message_id),
-        event_log,
-    )?;
+    let inbox = crate::inbox_store::read(workspace, "leader", usize::MAX, Some(&owner))
+        .map_err(std::io::Error::other)?;
+    if !inbox["messages"].as_array().into_iter().flatten()
+        .any(|record| record["message_id"] == message_id)
+    {
+        let mut record = crate::inbox_store::record("scheduler", "leader", &reminder.text, Some(&owner), "reminder");
+        record["message_id"] = json!(message_id);
+        crate::inbox_store::append(workspace, "leader", &record)
+            .map_err(std::io::Error::other)?;
+    }
     let next_due = reminder
         .interval_ms
         .and_then(Duration::try_milliseconds)
         .filter(|duration| *duration > Duration::zero())
         .and_then(|interval| Utc::now().checked_add_signed(interval))
         .map(|due| due.to_rfc3339_opts(SecondsFormat::Nanos, false));
-    let result = json!({"ok": true, "message_id": outcome.message_id, "next_due_at": next_due});
+    let mut result = json!({"ok": true, "message_id": message_id, "next_due_at": next_due, "delivery": "inbox"});
     // Compare due_at as well as status: concurrent ticks or cancellation cannot
     // advance the same occurrence twice, or resurrect a cancelled reminder.
-    conn.execute(
+    tx.execute(
         "update scheduled_events set status=?1, due_at=coalesce(?2, due_at), fired_at=?3, result_json=?4 where id=?5 and status='pending' and due_at=?6",
         params![if next_due.is_some() { "pending" } else { "done" }, next_due, Utc::now().to_rfc3339(), result.to_string(), id, due_at],
+    )?;
+    tx.commit()?;
+    // Once consumed, physical delivery is best effort: a crash or detached pane
+    // still leaves the reminder in the inbox, never awaiting a legacy receipt.
+    match directory.send("leader", &format!("Team Agent reminder:\n\n{}", reminder.text)) {
+        Ok(_) => result["delivery"] = json!("physical"),
+        Err(error) => result["delivery_error"] = json!(error),
+    }
+    conn.execute(
+        "update scheduled_events set result_json=?1 where id=?2 and json_extract(result_json, '$.message_id')=?3",
+        params![result.to_string(), id, message_id],
     )?;
     Ok(result)
 }
@@ -240,23 +248,25 @@ mod tests {
     }
 
     #[test]
-    fn one_shot_enqueues_once_and_uses_owner_not_active_team() {
+    fn one_shot_stores_once_and_uses_owner_not_active_team() {
         let dir = workspace();
         let added = add(dir.path(), "beta", "beta reminder", "1ms", false).unwrap();
         let id = parse_id(added["id"].as_str().unwrap()).unwrap();
         let log = EventLog::new(dir.path());
+        let result = fire(dir.path(), id, &log).unwrap();
+        assert_eq!(result["delivery"], "inbox");
+        assert!(result["delivery_error"].is_string());
         fire(dir.path(), id, &log).unwrap();
-        fire(dir.path(), id, &log).unwrap();
+        let inbox = crate::inbox_store::read(dir.path(), "leader", usize::MAX, None).unwrap();
+        let records = inbox["messages"].as_array().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["team"], "beta");
+        assert_eq!(records[0]["recipient"], "leader");
+        assert_eq!(records[0]["kind"], "reminder");
+        assert_eq!(records[0]["content"], "beta reminder");
         let store = MessageStore::open(dir.path()).unwrap();
         let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-        let rows: (i64, String, String) = conn
-            .query_row(
-                "select count(*), owner_team_id, recipient from messages",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!(rows, (1, "beta".into(), "leader".into()));
+        assert_eq!(conn.query_row("select count(*) from messages", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
         assert!(list(dir.path(), "beta").unwrap().is_empty());
     }
 
@@ -268,43 +278,39 @@ mod tests {
         let log = EventLog::new(dir.path());
         let store = MessageStore::open(dir.path()).unwrap();
         let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-        let original_due: String = conn
-            .query_row(
-                "select due_at from scheduled_events where id=?1",
-                [id],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let original_due: String = conn.query_row(
+            "select due_at from scheduled_events where id=?1", [id], |row| row.get(0),
+        ).unwrap();
+        let count = || crate::inbox_store::read(dir.path(), "leader", usize::MAX, None).unwrap()["messages"].as_array().unwrap().len();
         fire(dir.path(), id, &log).unwrap();
         assert_eq!(list(dir.path(), "alpha").unwrap().len(), 1);
-        // Simulate the crash window after enqueue, before persisting next_due_at.
-        conn.execute(
-            "update scheduled_events set due_at=?1 where id=?2",
-            params![original_due, id],
-        )
-        .unwrap();
+        // Simulate the crash window after inbox append, before timer commit.
+        conn.execute("update scheduled_events set due_at=?1 where id=?2", params![original_due, id]).unwrap();
         fire(dir.path(), id, &log).unwrap();
-        assert_eq!(
-            conn.query_row("select count(*) from messages", [], |row| row
-                .get::<_, i64>(0))
-                .unwrap(),
-            1
-        );
-        // The next occurrence has a different durable message id.
+        assert_eq!(count(), 1);
         fire(dir.path(), id, &log).unwrap();
-        assert_eq!(
-            conn.query_row("select count(*) from messages", [], |row| row
-                .get::<_, i64>(0))
-                .unwrap(),
-            2
-        );
+        assert_eq!(count(), 2);
         assert!(cancel(dir.path(), "alpha", id).unwrap());
         fire(dir.path(), id, &log).unwrap();
-        assert_eq!(
-            conn.query_row("select count(*) from messages", [], |row| row
-                .get::<_, i64>(0))
-                .unwrap(),
-            2
-        );
+        assert_eq!(count(), 2);
+        assert_eq!(conn.query_row("select count(*) from messages", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn concurrent_fires_consume_one_occurrence_and_one_inbox_record() {
+        let dir = workspace();
+        let added = add(dir.path(), "alpha", "once", "1ms", false).unwrap();
+        let id = parse_id(added["id"].as_str().unwrap()).unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..2).map(|_| scope.spawn(|| {
+                barrier.wait();
+                fire(dir.path(), id, &EventLog::new(dir.path())).unwrap()
+            })).collect();
+            let results: Vec<_> = handles.into_iter().map(|handle| handle.join().unwrap()).collect();
+            assert_eq!(results.iter().filter(|result| result["cancelled"] == true).count(), 1);
+        });
+        let inbox = crate::inbox_store::read(dir.path(), "leader", usize::MAX, None).unwrap();
+        assert_eq!(inbox["messages"].as_array().unwrap().len(), 1);
     }
 }

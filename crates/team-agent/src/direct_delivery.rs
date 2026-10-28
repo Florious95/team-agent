@@ -122,10 +122,11 @@ impl Directory {
 
     pub fn endpoint(&self, agent: &str) -> Result<Endpoint, String> {
         let info = self.recipient(agent)?;
-        let pane_id = field(info, "pane_id").ok_or_else(|| format!("{agent} has no tmux pane"))?;
-        let socket = crate::tmux_backend::runtime_tmux_endpoint_from_state_pub(Some(info))
-            .or_else(|| crate::tmux_backend::runtime_tmux_endpoint_from_state_pub(Some(&self.state)))
-            .map(|(socket, _)| socket)
+        let pane_id = field(info, "pane_id").or_else(|| field(info, "native_pane"))
+            .ok_or_else(|| format!("{agent} has no tmux pane"))?;
+        let socket = field(info, "native_endpoint").map(str::to_string)
+            .or_else(|| crate::tmux_backend::runtime_tmux_endpoint_from_state_pub(Some(info)).map(|(socket, _)| socket))
+            .or_else(|| crate::tmux_backend::runtime_tmux_endpoint_from_state_pub(Some(&self.state)).map(|(socket, _)| socket))
             .unwrap_or_else(|| crate::tmux_backend::socket_name_for_workspace(&self.workspace));
         Ok(Endpoint {
             agent: agent.to_string(),
@@ -143,7 +144,10 @@ impl Directory {
     pub fn send(&self, agent: &str, text: &str) -> Result<Value, String> {
         let endpoint = self.endpoint(agent)?;
         let info = self.recipient(agent)?;
-        let session = field(info, "session_name").or_else(|| field(&self.state, "session_name"));
+        // Native seats use a private socket, not the legacy workspace session.
+        let session = field(info, "session_name").or_else(|| {
+            field(info, "native_endpoint").is_none().then(|| field(&self.state, "session_name")).flatten()
+        });
         let window = field(info, "window").or_else(|| field(info, "window_name"));
         let pid = info.get("pane_pid").and_then(Value::as_u64);
         if session.is_some() || window.is_some() || pid.is_some() {
@@ -233,29 +237,20 @@ pub fn direct_send(socket: &str, pane_id: &str, dialect: &str, text: &str) -> Re
         return Err(error.to_string());
     }
     check_output(loaded)?;
-    let mut command = tmux(socket);
-    command.args([
-        "paste-buffer",
-        "-p",
-        "-r",
-        "-d",
-        "-b",
-        &buffer,
-        "-t",
-        pane_id,
-        ";",
-        "send-keys",
-        "-t",
-        pane_id,
-        "Enter",
-    ]);
-    if dialect == "double-enter" {
-        command.args([";", "send-keys", "-t", pane_id, "Enter"]);
-    }
-    let result = command
-        .output()
-        .map_err(|e| e.to_string())
-        .and_then(check_output);
+    let result = (|| {
+        check_output(tmux(socket)
+            .args(["paste-buffer", "-p", "-r", "-d", "-b", &buffer, "-t", pane_id])
+            .output().map_err(|e| e.to_string())?)?;
+        // A distinct input turn is required after bracketed paste. Reuse the
+        // measured Claude floor, including generic endpoints with no provider.
+        std::thread::sleep(team_agent_contract::providers::claude::interaction::PASTE_TO_SUBMIT_FLOOR);
+        let mut command = tmux(socket);
+        command.args(["send-keys", "-t", pane_id, "Enter"]);
+        if dialect == "double-enter" {
+            command.args([";", "send-keys", "-t", pane_id, "Enter"]);
+        }
+        command.output().map_err(|e| e.to_string()).and_then(check_output)
+    })();
     if result.is_err() {
         let _ = tmux(socket).args(["delete-buffer", "-b", &buffer]).output();
     }

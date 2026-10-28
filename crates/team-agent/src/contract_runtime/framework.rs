@@ -1,5 +1,5 @@
-//! Shared-framework seams. A contract seat is never projected as a legacy pane:
-//! its private socket's `%0` must not be interpreted on the workspace tmux server.
+//! Shared-framework seams. Publish a native pane only with its private endpoint:
+//! its `%0` must never be interpreted on the legacy workspace tmux server.
 use super::{
     backend::{self, Backend, BackendError},
     config,
@@ -250,7 +250,7 @@ pub fn project_seat(workspace: &Path, team: &str, id: &str) -> Result<Value, Bac
         "generation":seat.identity.generation,"owner_team_id":team,"team_key":team,
         "session_id":seat.session.map(|session| session.native_session),
         "native_endpoint":seat.endpoint,"native_pane":seat.pane,
-        "pane_id":null,"window":null,"session_name":null,
+        "pane_id":seat.pane,"tmux_endpoint":seat.endpoint,"window":null,"session_name":null,
         "mcp_binding":binding_status,"mcp_binding_source":binding_source,"mcp_tools":tools,
         "bootstrap_used":seat.bootstrap_used}),
     )

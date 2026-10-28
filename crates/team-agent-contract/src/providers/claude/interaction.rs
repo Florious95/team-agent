@@ -14,6 +14,7 @@ use crate::runtime::delivery::{ControlDefinition, ControlInputMode, ControlKind}
 use std::time::Duration;
 
 pub const PROFILE: &str = "claude-tui-v1";
+pub const PASTE_TO_SUBMIT_FLOOR: Duration = Duration::from_millis(100);
 pub const POLICY_RECIPE: &str = "claude-tui-v1/r3:runtime-native-image-or-version-named+wrapper;--session-id-derived|--resume-exact;owned-argv-server+allowedTools-ambient-coexistence;120x40;paste-bracketed;enter-once;retry-never;queue-native:token-above-composer+placeholder-Press up to edit queued messages=busy;composer:plain-or-named-column0-top-rule+last-bottom-rule,first-row-❯+U+00A0(history-turns:❯+space);busy:spinner-row-·✢✳✶✻✽-Verb…-within-6-rows-above-composer;streaming-text-hides-spinner:reads-ready;folder-trust:no-exit-default:never-keyed;fold:any-newline:[Pasted text #N +M lines]:M=newlines|single-line:[Pasted text #N]:empty-baseline+confirmed-paste+shape+attempt->confirmed-enter+empty-composer+token-in-history+busy-or-ready;inline:token-in-composer->token-in-history;exit:direct+/exit+native-exited+dead-pane-close;capture100ms;stable200ms;paste-floor100ms;deadline30s";
 pub const POLICY: Digest = Digest([178, 198, 68, 48, 51, 90, 207, 89, 169, 154, 154, 185, 201, 251, 116, 148, 231, 78, 12, 216, 74, 200, 194, 255, 254, 158, 111, 107, 50, 81, 4, 179]);
 const FOLDED: &str = "claude-owned-paste-v1:";
@@ -29,7 +30,7 @@ pub static PROFILES: &[InputProfile] = &[InputProfile {
         paste_mode: PasteMode::Bracketed, payload_trailer: PayloadTrailer::None,
         initial_submit: PhysicalKey::Enter, confirmation_steps: &[], retry_budget: RetryBudget::Never,
         queue_flush: &[], max_submit_keys: 1,
-        timing: InputTiming { capture_interval: Duration::from_millis(100), stable_window: Duration::from_millis(200), paste_to_submit_floor: Duration::from_millis(100), deadline: Duration::from_secs(30) },
+        timing: InputTiming { capture_interval: Duration::from_millis(100), stable_window: Duration::from_millis(200), paste_to_submit_floor: PASTE_TO_SUBMIT_FLOOR, deadline: Duration::from_secs(30) },
     }),
 }];
 pub static CONTROLS: &[ControlDefinition] = &[ControlDefinition {

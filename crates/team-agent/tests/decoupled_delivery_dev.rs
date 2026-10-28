@@ -89,17 +89,19 @@ with (root / 'received').open('ab', buffering=0) as out:
             std::thread::sleep(Duration::from_millis(10));
         }
     }
-    fn cli(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_team-agent"))
-            .args(args)
+    fn cli_command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_team-agent"));
+        command.args(args)
             .args(["--workspace", self.root.to_str().unwrap(), "--json"])
             .env_remove("TEAM_AGENT_ID")
             .env_remove("TEAM_AGENT_AGENT_ID")
             .env_remove("TEAM_AGENT_WORKSPACE")
             .env_remove("TEAM_AGENT_OWNER_TEAM_ID")
-            .env_remove("TEAM_AGENT_TEAM_ID")
-            .output()
-            .unwrap()
+            .env_remove("TEAM_AGENT_TEAM_ID");
+        command
+    }
+    fn cli(&self, args: &[&str]) -> Output {
+        self.cli_command(args).output().unwrap()
     }
     fn received(&self, expected: &str) {
         let expected = format!("\x1b[200~{expected}\x1b[201~\r").into_bytes();
@@ -125,6 +127,95 @@ impl Drop for Fixture {
             .output();
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+#[test]
+fn native_pane_fallback_uses_its_private_endpoint_without_rewriting_snapshot() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join(".team/runtime/state.json");
+    let mut state: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let team = &mut state["teams"]["alpha"];
+    team["tmux_socket"] = json!("unrelated-workspace-socket");
+    team["session_name"] = json!("unrelated-workspace-session");
+    team["agents"]["worker"]["pane_id"] = Value::Null;
+    team["agents"]["worker"]["native_pane"] = json!(fixture.pane);
+    team["agents"]["worker"]["native_endpoint"] = json!(fixture.socket);
+    let before = serde_json::to_vec(&state).unwrap();
+    fs::write(&path, &before).unwrap();
+    let located = fixture.cli(&["locate", "--team", "alpha"]);
+    assert!(located.status.success(), "{}", String::from_utf8_lossy(&located.stderr));
+    let located: Value = serde_json::from_slice(&located.stdout).unwrap();
+    assert_eq!(located["endpoints"][0]["agent"], "worker");
+    assert_eq!(located["endpoints"][0]["socket"], fixture.socket);
+    let sent = fixture.cli(&["send", "worker", "native fallback", "--team", "alpha"]);
+    assert!(sent.status.success(), "{}", String::from_utf8_lossy(&sent.stderr));
+    fixture.received("Team Agent message from leader:\n\nnative fallback");
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert!(!fixture.root.join(".team/db").exists());
+}
+
+#[test]
+fn bracketed_paste_and_single_enter_are_separate_paced_tmux_calls() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let wrapper_dir = fixture.root.join("wrapper");
+    fs::create_dir(&wrapper_dir).unwrap();
+    let trace = fixture.root.join("tmux-calls.jsonl");
+    let wrapper = wrapper_dir.join("tmux");
+    fs::write(&wrapper, format!(r#"#!/usr/bin/env python3
+import json, os, sys, time
+with open({trace}, 'a') as log:
+    log.write(json.dumps({{'at': time.monotonic(), 'args': sys.argv[1:]}}) + '\n')
+os.environ['PATH'] = {path}
+os.execvp('tmux', ['tmux', *sys.argv[1:]])
+"#, trace=json!(trace.to_string_lossy()), path=json!(std::env::var("PATH").unwrap()))).unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = fixture.cli_command(&[
+        "send", "--socket", &fixture.socket, "--pane", &fixture.pane,
+        "--dialect", "claude", "paced submit",
+    ]).env("PATH", format!("{}:{}", wrapper_dir.display(), std::env::var("PATH").unwrap()))
+        .output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    fixture.received("paced submit");
+    let calls: Vec<Value> = fs::read_to_string(trace).unwrap().lines()
+        .map(|line| serde_json::from_str(line).unwrap()).collect();
+    let paste = calls.iter().find(|call| call["args"].as_array().unwrap().contains(&json!("paste-buffer"))).unwrap();
+    let submits: Vec<_> = calls.iter().filter(|call| call["args"].as_array().unwrap().contains(&json!("send-keys"))).collect();
+    assert_eq!(submits.len(), 1);
+    assert!(!paste["args"].as_array().unwrap().contains(&json!("send-keys")));
+    assert_eq!(submits[0]["args"].as_array().unwrap().last(), Some(&json!("Enter")));
+    let elapsed = submits[0]["at"].as_f64().unwrap() - paste["at"].as_f64().unwrap();
+    assert!(elapsed >= team_agent_contract::providers::claude::interaction::PASTE_TO_SUBMIT_FLOOR.as_secs_f64(), "{elapsed}");
+    assert_eq!(fs::read(fixture.root.join("received")).unwrap(), b"\x1b[200~paced submit\x1b[201~\r");
+}
+
+#[test]
+fn due_reminder_reaches_physical_leader_and_inbox_without_a_receipt_source() {
+    let fixture = Fixture::new();
+    let store = team_agent::message_store::MessageStore::open(&fixture.root).unwrap();
+    let conn = rusqlite::Connection::open(store.db_path()).unwrap();
+    conn.execute(
+        "insert into scheduled_events(owner_team_id, due_at, target, kind, payload_json, status, created_at) values ('alpha', '2000-01-01T00:00:00Z', 'leader', 'reminder', ?1, 'pending', '2000-01-01T00:00:00Z')",
+        [json!({"text":"scheduled physical reminder", "trigger":"in 3s", "interval_ms":null}).to_string()],
+    ).unwrap();
+    let id = conn.last_insert_rowid();
+    // The legacy argument deliberately differs from the published private endpoint.
+    let transport = team_agent::tmux_backend::TmuxBackend::for_workspace(&fixture.root);
+    let log = team_agent::event_log::EventLog::new(&fixture.root);
+    let fired = team_agent::messaging::fire_due_scheduled_events(&fixture.root, &store, &transport, &log).unwrap();
+    assert_eq!(fired, vec![id]);
+    fixture.received("Team Agent reminder:\n\nscheduled physical reminder");
+    let inbox = team_agent::inbox_store::read(&fixture.root, "leader", 10, Some("alpha")).unwrap();
+    assert_eq!(inbox["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(inbox["messages"][0]["kind"], "reminder");
+    assert_eq!(inbox["messages"][0]["content"], "scheduled physical reminder");
+    let (status, result): (String, String) = conn.query_row("select status, result_json from scheduled_events where id=?1", [id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+    assert_eq!(status, "done");
+    assert_eq!(serde_json::from_str::<Value>(&result).unwrap()["delivery"], "physical");
+    assert_eq!(conn.query_row("select count(*) from messages", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    let before = fs::read(fixture.root.join("received")).unwrap();
+    assert!(team_agent::messaging::fire_due_scheduled_events(&fixture.root, &store, &transport, &log).unwrap().is_empty());
+    assert_eq!(fs::read(fixture.root.join("received")).unwrap(), before);
 }
 
 #[test]

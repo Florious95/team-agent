@@ -1462,6 +1462,22 @@ mod tests {
     }
 
     #[test]
+    fn native_snapshot_publishes_the_private_pane_endpoint_pair() {
+        let mut fixture = RoleFixture::new();
+        fixture.role.provider = ProviderId::new("kiro").unwrap();
+        let _backend = fixture.canonical(SeatStatus::Ready, Phase::F5Receipt, Outcome::Committed, None);
+        write_role(&fixture.binding, &fixture.identity, &fixture.role).unwrap();
+        let state = super::super::framework::project_seat(
+            &fixture.binding.workspace.path, "test", "worker",
+        ).unwrap();
+        assert_eq!(state["pane_id"], "%1");
+        assert_eq!(state["pane_id"], state["native_pane"]);
+        assert_eq!(state["tmux_endpoint"], fixture.binding.endpoint);
+        assert_eq!(state["tmux_endpoint"], state["native_endpoint"]);
+        assert!(state["session_name"].is_null());
+    }
+
+    #[test]
     fn role_snapshots_are_instance_scoped_and_exclusive() {
         let fixture = RoleFixture::new();
         write_role(&fixture.binding, &fixture.identity, &fixture.role).unwrap();
