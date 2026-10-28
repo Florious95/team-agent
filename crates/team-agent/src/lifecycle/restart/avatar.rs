@@ -293,7 +293,6 @@ pub(crate) fn fork_pi_new_seat_locked(
         }
         let captured_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let staged_file = stage_pi_session(
-            run_workspace,
             &target_paths,
             &target_session_id,
             &captured_at,
@@ -761,27 +760,20 @@ fn source_binding(
             "Pi source rollout_path is not its canonical exact path".to_string(),
         ));
     }
-    let expected_root = crate::lifecycle::launch::pi_mcp::pi_seat_paths(
+    let paths = crate::lifecycle::launch::pi_mcp::pi_seat_paths(
         &selected.run_workspace,
         &selected.team_key,
         source_agent_id.as_str(),
-    )
-    .sessions;
-    ensure_no_symlink_components(&expected_root, false)?;
-    let canonical_root = fs::canonicalize(&expected_root)
-        .map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;
-    if source
-        .get("claude_projects_root")
-        .and_then(JsonValue::as_str)
-        .map(PathBuf::from)
-        .and_then(|path| fs::canonicalize(path).ok())
-        .as_ref()
-        != Some(&canonical_root)
-    {
+    );
+    let recorded_root = PathBuf::from(required_state_string(source, "claude_projects_root")?);
+    if !crate::lifecycle::launch::pi_mcp::pi_session_root_matches(&paths, &recorded_root) {
         return Err(LifecycleError::RequirementUnmet(
             "Pi source recorded session root does not match its managed seat".to_string(),
         ));
     }
+    ensure_no_symlink_components(&recorded_root, false)?;
+    let canonical_root = fs::canonicalize(&recorded_root)
+        .map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;
     if !canonical_backing.starts_with(&canonical_root) {
         return Err(LifecycleError::RequirementUnmet(
             "Pi source backing is outside its recorded session root".to_string(),
@@ -1059,7 +1051,6 @@ fn trim_line_ending(line: &[u8]) -> &[u8] {
 }
 
 fn stage_pi_session(
-    workspace: &Path,
     paths: &crate::lifecycle::launch::pi_mcp::PiSeatPaths,
     session_id: &SessionId,
     timestamp: &str,
@@ -1084,7 +1075,7 @@ fn stage_pi_session(
     bytes.push(b'\n');
     bytes.extend_from_slice(body);
     validate_session_bytes(&bytes, session_id, cwd, Some(parent_session))?;
-    let created_dirs = create_target_session_dirs(workspace, paths)?;
+    let created_dirs = create_target_session_dirs(paths)?;
     let mut file = match OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1155,47 +1146,57 @@ fn stage_pi_session(
 }
 
 fn create_target_session_dirs(
-    workspace: &Path,
     paths: &crate::lifecycle::launch::pi_mcp::PiSeatPaths,
 ) -> Result<Vec<PathBuf>, LifecycleError> {
-    let relative = paths
-        .sessions
-        .strip_prefix(workspace)
-        .map_err(|error| LifecycleError::StatePersist(error.to_string()))?;
-    let mut current = workspace.to_path_buf();
     let mut created = Vec::new();
-    for component in relative.components() {
-        let Component::Normal(name) = component else {
+    // Wrapper metadata and native sessions have separate roots. Roll back only
+    // directories this attempt creates, never existing native session data.
+    for path in [&paths.runtime_root, &paths.sessions] {
+        let mut current = PathBuf::new();
+        if !path.is_absolute() {
             cleanup_created_dirs(&created);
             return Err(LifecycleError::StatePersist(
-                "target Pi session root contains an invalid path component".to_string(),
+                "Pi target path is not absolute".into(),
             ));
-        };
-        current.push(name);
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-                cleanup_created_dirs(&created);
-                return Err(LifecycleError::RequirementUnmet(format!(
-                    "target Pi session path is not a real directory: {}",
-                    current.display()
-                )));
+        }
+        for component in path.components() {
+            if component == Component::RootDir {
+                current.push(component);
+                continue;
             }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if let Err(error) = fs::create_dir(&current) {
+            let Component::Normal(name) = component else {
+                cleanup_created_dirs(&created);
+                return Err(LifecycleError::StatePersist(
+                    "target Pi session root contains an invalid path component".to_string(),
+                ));
+            };
+            current.push(name);
+            match fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                    cleanup_created_dirs(&created);
+                    return Err(LifecycleError::RequirementUnmet(format!(
+                        "target Pi session path is not a real directory: {}",
+                        current.display()
+                    )));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if let Err(error) = fs::create_dir(&current) {
+                        cleanup_created_dirs(&created);
+                        return Err(LifecycleError::StatePersist(error.to_string()));
+                    }
+                    created.push(current.clone());
+                    if let Err(error) =
+                        fs::set_permissions(&current, fs::Permissions::from_mode(0o700))
+                    {
+                        cleanup_created_dirs(&created);
+                        return Err(LifecycleError::StatePersist(error.to_string()));
+                    }
+                }
+                Err(error) => {
                     cleanup_created_dirs(&created);
                     return Err(LifecycleError::StatePersist(error.to_string()));
                 }
-                created.push(current.clone());
-                if let Err(error) = fs::set_permissions(&current, fs::Permissions::from_mode(0o700))
-                {
-                    cleanup_created_dirs(&created);
-                    return Err(LifecycleError::StatePersist(error.to_string()));
-                }
-            }
-            Err(error) => {
-                cleanup_created_dirs(&created);
-                return Err(LifecycleError::StatePersist(error.to_string()));
             }
         }
     }

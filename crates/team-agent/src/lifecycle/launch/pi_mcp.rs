@@ -88,11 +88,55 @@ pub(crate) fn pi_seat_paths(workspace: &Path, team_id: &str, agent_id: &str) -> 
         .join("pi")
         .join(team_id)
         .join(agent_id);
+    // Pi and token scanners enumerate sessions/<directory>/*.jsonl. Keep seats
+    // isolated in flat native-store directories, not in a shared cwd directory
+    // where concurrent workers' header-based capture would become ambiguous.
+    let workspace = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let seat = sha256(format!("{}\0{team_id}\0{agent_id}", workspace.display()).as_bytes());
+    let home = std::env::home_dir().unwrap_or_default();
+    let agent_dir = match std::env::var_os("PI_CODING_AGENT_DIR").filter(|s| !s.is_empty()) {
+        Some(value) => {
+            let path = PathBuf::from(value);
+            let path = path.strip_prefix("~").map(|p| home.join(p)).unwrap_or(path);
+            if path.is_absolute() {
+                path
+            } else {
+                workspace.join(path)
+            }
+        }
+        None => home.join(".pi/agent"),
+    };
+    // HOME may use an OS alias (e.g. /var -> /private/var). Keep persisted
+    // roots canonical, including when the native agent directory is new.
+    let agent_dir = agent_dir
+        .ancestors()
+        .filter(|_| agent_dir.is_absolute())
+        .find_map(|ancestor| {
+            ancestor
+                .canonicalize()
+                .ok()
+                .map(|base| base.join(agent_dir.strip_prefix(ancestor).expect("ancestor prefix")))
+        })
+        .unwrap_or(agent_dir);
     PiSeatPaths {
         wrapper: runtime_root.join("team-mcp.ts"),
-        sessions: runtime_root.join("sessions"),
+        sessions: agent_dir
+            .join("sessions")
+            .join(format!("--team-agent-{seat}--")),
         runtime_root,
     }
+}
+
+/// Preserve exact legacy backings and native backings after a Pi home change.
+/// Never accept another seat's root, or search for a replacement session.
+pub(crate) fn pi_session_root_matches(paths: &PiSeatPaths, root: &Path) -> bool {
+    root.is_absolute()
+        && (root == paths.runtime_root.join("sessions")
+            || (root.file_name() == paths.sessions.file_name()
+                && root.parent().and_then(Path::file_name)
+                    == Some(std::ffi::OsStr::new("sessions"))))
 }
 
 /// ---
@@ -717,7 +761,18 @@ fn materialize_pi_plan_with_session(
         .model
         .map(|model| select_exact_pi_model(&catalog, model))
         .transpose()?;
-    let paths = pi_seat_paths(request.workspace, request.team_id, request.agent_id);
+    let mut paths = pi_seat_paths(request.workspace, request.team_id, request.agent_id);
+    if let Some((_, session_path, _)) = resume {
+        paths.sessions = session_path
+            .ancestors()
+            .find(|root| pi_session_root_matches(&paths, root))
+            .ok_or_else(|| {
+                ProviderError::ResumeUnavailable(
+                    "Pi exact session backing is outside the recorded seat root".to_string(),
+                )
+            })?
+            .to_path_buf();
+    }
     let session_dir = match request.session_scope {
         PiSessionScope::Isolated => Some(paths.sessions.as_path()),
         PiSessionScope::NativeDefault => None,
@@ -751,6 +806,11 @@ fn materialize_pi_plan_with_session(
         Some((session_id, exact_path))
     } else {
         if let Some(session_dir) = session_dir {
+            if !session_dir.is_absolute() {
+                return Err(ProviderError::Io(
+                    "Pi sessions require an absolute PI_CODING_AGENT_DIR or user home".to_string(),
+                ));
+            }
             std::fs::create_dir_all(session_dir).map_err(|error| {
                 ProviderError::Io(format!("{}: {error}", session_dir.display()))
             })?;

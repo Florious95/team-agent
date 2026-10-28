@@ -516,6 +516,34 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
 
     let isolated_workspace = hermetic.workspace("isolated");
     let isolated_paths = pi_seat_paths(&isolated_workspace, "team-a", "worker-a");
+    assert_eq!(
+        isolated_paths.sessions.parent(),
+        Some(
+            hermetic
+                .home()
+                .canonicalize()
+                .unwrap()
+                .join(".pi/agent/sessions")
+                .as_path()
+        )
+    );
+    assert!(!isolated_paths.sessions.starts_with(&isolated_workspace));
+    assert!(isolated_paths
+        .wrapper
+        .starts_with(isolated_workspace.join(".team")));
+    assert_ne!(
+        isolated_paths.sessions,
+        pi_seat_paths(&isolated_workspace, "team-a", "worker-b").sessions
+    );
+    assert_ne!(
+        isolated_paths.sessions,
+        pi_seat_paths(&isolated_workspace, "team-b", "worker-a").sessions
+    );
+    assert_ne!(
+        isolated_paths.sessions,
+        pi_seat_paths(&native_workspace, "team-a", "worker-a").sessions
+    );
+    assert!(!isolated_paths.runtime_root.join("sessions").exists());
     let isolated_config = mcp_config(&candidate, &isolated_workspace, "worker-a");
     let isolated = materialize_pi_plan(PiMaterializeRequest {
         workspace: &isolated_workspace,
@@ -572,6 +600,68 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
             .windows(2)
             .any(|pair| { pair == ["--session", exact.to_string_lossy().as_ref()] })
     );
+
+    // Existing installations keep their exact backing; changing the native
+    // home must not force a new session or strand previously captured seats.
+    let legacy_root = isolated_paths.runtime_root.join("sessions");
+    let legacy_exact = legacy_root.join("legacy.jsonl");
+    std::fs::create_dir_all(&legacy_root).unwrap();
+    std::fs::write(&legacy_exact, b"{}\n").unwrap();
+    {
+        let _override = hermetic.with_env("PI_CODING_AGENT_DIR", "~/custom-pi");
+        let customized = pi_seat_paths(&isolated_workspace, "team-a", "worker-a");
+        assert_eq!(
+            customized.sessions.parent(),
+            Some(
+                hermetic
+                    .home()
+                    .canonicalize()
+                    .unwrap()
+                    .join("custom-pi/sessions")
+                    .as_path()
+            )
+        );
+        assert_eq!(
+            customized.sessions.file_name(),
+            isolated_paths.sessions.file_name()
+        );
+        for (path, root) in [
+            (&exact, &isolated_paths.sessions),
+            (&legacy_exact, &legacy_root),
+        ] {
+            let resumed = materialize_pi_resume_plan(
+                PiMaterializeRequest {
+                    workspace: &isolated_workspace,
+                    team_id: "team-a",
+                    agent_id: "worker-a",
+                    model: None,
+                    effort: None,
+                    system_prompt: "retained backing",
+                    team_mcp_tools: &["send_message"],
+                    mcp_config: &isolated_config,
+                    session_scope: PiSessionScope::Isolated,
+                },
+                &session_id,
+                path,
+                &isolated_workspace,
+            )
+            .expect("resume exact backing across native storage migration/home changes");
+            assert_eq!(resumed.provider_projects_root.as_ref(), Some(root));
+            assert_session_pair(&resumed.argv, root);
+            assert!(resumed
+                .argv
+                .windows(2)
+                .any(|pair| pair == ["--session", path.to_string_lossy().as_ref()]));
+        }
+    }
+    {
+        let _override = hermetic.with_env("PI_CODING_AGENT_DIR", "relative-pi");
+        let customized = pi_seat_paths(&isolated_workspace, "team-a", "worker-a");
+        assert_eq!(
+            customized.sessions.parent(),
+            Some(isolated_workspace.join("relative-pi/sessions").as_path())
+        );
+    }
 
     let native_resume = materialize_pi_resume_plan(
         PiMaterializeRequest {
