@@ -1,5 +1,5 @@
-//! A flushed MCP handshake is admission to first business, not client consumption.
-//! Receipts are scope- and live-process-bound; no pane input or tools/call probe.
+//! Flushed MCP handshakes are diagnostic evidence, not admission to pane input.
+//! Each server owns a receipt; foreign writers cannot replace a live server's evidence.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -136,7 +136,7 @@ fn lock(path: &Path) -> Result<ReceiptLock> {
 }
 
 /// Only the actual stdio writer calls this after initialize and tools/list flush.
-/// File publication failure stays unready; it never becomes an input bypass.
+/// Publication failure affects readiness evidence only, not message delivery.
 pub(crate) fn publish(
     workspace: &Path,
     owner: &str,
@@ -197,7 +197,7 @@ pub(crate) fn publish(
     };
     let dir = directory(&workspace, true)?;
     let before = private_metadata(&dir, true)?;
-    let name = key(owner, agent);
+    let name = format!("{}.{}", key(owner, agent), std::process::id());
     let path = dir.join(format!("{name}.json"));
     let _lock = lock(&dir.join(format!("{name}.lock")))?;
     match std::fs::symlink_metadata(&path) {
@@ -213,7 +213,9 @@ pub(crate) fn publish(
             }
             let old_started = DateTime::parse_from_rfc3339(&old.started_at)
                 .map_err(|_| "mcp_handshake_invalid")?;
-            if old_started > started_at {
+            if old.server.identity.birth_identity == receipt.server.identity.birth_identity
+                && old_started > started_at
+            {
                 return Ok(());
             }
         }
@@ -259,8 +261,7 @@ pub(crate) struct Admission {
     pane_id: String,
 }
 
-/// Observation-only preflight, before claiming a delivery attempt. Missing facts
-/// perform no input; the delivery owner releases only its exact claim for retry.
+/// Observe readiness without gating delivery. A bad candidate never hides a good one.
 pub(crate) fn preflight(
     workspace: &Path,
     owner: Option<&str>,
@@ -293,11 +294,43 @@ pub(crate) fn preflight(
         .canonicalize()
         .map_err(|_| "mcp_handshake_workspace")?;
     let dir = directory(&workspace, false)?;
-    let receipt: Handshake = serde_json::from_value(read_json(
-        &dir.join(format!("{}.json", key(owner, agent_id))),
-        true,
-    )?)
-    .map_err(|_| "mcp_handshake_invalid")?;
+    let name = key(owner, agent_id);
+    // Older servers publish one slot per seat. Keep it readable during upgrades.
+    let mut paths = vec![dir.join(format!("{name}.json"))];
+    let prefix = format!("{name}.");
+    for entry in std::fs::read_dir(&dir).map_err(|_| "mcp_handshake_directory")? {
+        let entry = entry.map_err(|_| "mcp_handshake_directory")?;
+        let filename = entry.file_name();
+        let filename = filename.to_string_lossy();
+        if filename
+            .strip_prefix(&prefix)
+            .and_then(|suffix| suffix.strip_suffix(".json"))
+            .and_then(|pid| pid.parse::<u32>().ok())
+            .is_some()
+        {
+            paths.push(entry.path());
+        }
+    }
+    let mut error = "mcp_handshake_missing";
+    for path in paths {
+        match validate_receipt(&path, &workspace, owner, agent_id, agent, config) {
+            Ok(admission) => return Ok(Some(admission)),
+            Err(reason) => error = reason,
+        }
+    }
+    Err(error)
+}
+
+fn validate_receipt(
+    path: &Path,
+    workspace: &Path,
+    owner: &str,
+    agent_id: &str,
+    agent: &Value,
+    config: &str,
+) -> Result<Admission> {
+    let receipt: Handshake =
+        serde_json::from_value(read_json(path, true)?).map_err(|_| "mcp_handshake_invalid")?;
     if receipt.schema != 1
         || receipt.workspace != workspace
         || receipt.owner != owner
@@ -358,8 +391,8 @@ pub(crate) fn preflight(
             .get("TEAM_AGENT_WORKSPACE")
             .and_then(Value::as_str)
             .and_then(|s| Path::new(s).canonicalize().ok())
-            .as_ref()
-            != Some(&workspace)
+            .as_deref()
+            != Some(workspace)
     {
         return Err("mcp_handshake_config_scope");
     }
@@ -395,12 +428,12 @@ pub(crate) fn preflight(
     if !matched || sample_process(&receipt.server) != ProcessState::Alive {
         return Err("mcp_handshake_ancestry");
     }
-    Ok(Some(Admission {
+    Ok(Admission {
         server: receipt.server,
         carrier,
         carrier_birth,
         pane_id: pane_id.to_string(),
-    }))
+    })
 }
 
 /// Recheck against the actual resolved target immediately before the input path.

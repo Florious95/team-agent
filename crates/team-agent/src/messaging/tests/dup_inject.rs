@@ -30,7 +30,7 @@ use crate::transport::{
 
 #[test]
 #[cfg(unix)]
-fn eager_mcp_waits_without_spending_input_attempts_then_delivers_the_same_message() {
+fn issue372_missing_mcp_receipt_delivers_immediately_without_duplicate_input() {
     let mut case = WorkerCase::new("mcp-handshake", "cursor_agent");
     let carrier = crate::mcp_server::readiness::test_carrier_pid().unwrap();
     let config = case.workspace.join(".team/runtime/mcp/w1.json");
@@ -44,31 +44,78 @@ fn eager_mcp_waits_without_spending_input_attempts_then_delivers_the_same_messag
     case.state["team_key"] = serde_json::json!("dup-team");
     case.state["agents"]["w1"]["mcp_config"] = serde_json::json!(config);
     case.state["agents"]["w1"]["pane_pid"] = serde_json::json!(carrier);
-    case.state["agents"]["w1"]["spawned_at"] = serde_json::json!((chrono::Utc::now() - chrono::Duration::seconds(10)).to_rfc3339());
+    case.state["agents"]["w1"]["spawned_at"] =
+        serde_json::json!((chrono::Utc::now() - chrono::Duration::seconds(10)).to_rfc3339());
     case.state["teams"] = serde_json::json!({"dup-team": case.state.clone()});
     crate::state::persist::save_runtime_state(&case.workspace, &case.state).unwrap();
-    let transport = RecordingTransport { carrier: Some(carrier), ..RecordingTransport::new("") };
-    let message_id = case.store.create_message(None, "leader", "w1", "handshake canary", None, false, Some("dup-team")).unwrap();
+    let transport = RecordingTransport {
+        carrier: Some(carrier),
+        ..RecordingTransport::new("")
+    };
+    let message_id = case
+        .store
+        .create_message(
+            None,
+            "leader",
+            "w1",
+            "handshake canary",
+            None,
+            false,
+            Some("dup-team"),
+        )
+        .unwrap();
     for _ in 0..3 {
-        let outcome = deliver_pending_message(&case.workspace, &case.store, &transport,
-            &message_id, &case.event_log, &case.state).unwrap();
-        assert!(!outcome.ok);
-        assert!(outcome.verification.as_deref().unwrap().starts_with("mcp_handshake_"));
-        assert_eq!(transport.inject_count(), 0);
+        let outcome = deliver_pending_message(
+            &case.workspace,
+            &case.store,
+            &transport,
+            &message_id,
+            &case.event_log,
+            &case.state,
+        )
+        .unwrap();
+        assert_eq!(
+            transport.inject_count(),
+            1,
+            "live pane must receive input immediately: {outcome:?}"
+        );
     }
     let connection = rusqlite::Connection::open(case.store.db_path()).unwrap();
-    let attempts: i64 = connection.query_row("select delivery_attempts from messages where message_id=?1", [&message_id], |row| row.get(0)).unwrap();
-    assert_eq!(attempts, 0, "waiting is not a physical delivery attempt");
-    crate::mcp_server::readiness::publish(&case.workspace, "dup-team", "w1", chrono::Utc::now()).unwrap();
-    let outcome = deliver_pending_message(&case.workspace, &case.store, &transport,
-        &message_id, &case.event_log, &case.state).unwrap();
+    let attempts: i64 = connection
+        .query_row(
+            "select delivery_attempts from messages where message_id=?1",
+            [&message_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        attempts, 1,
+        "readiness must not park or refund the delivery"
+    );
+    assert!(case.events().contains("delivery.mcp_handshake_warning"));
+    assert!(!case.events().contains("delivery.deferred_mcp_handshake"));
+    crate::mcp_server::readiness::publish(&case.workspace, "dup-team", "w1", chrono::Utc::now())
+        .unwrap();
+    let outcome = deliver_pending_message(
+        &case.workspace,
+        &case.store,
+        &transport,
+        &message_id,
+        &case.event_log,
+        &case.state,
+    )
+    .unwrap();
     assert_eq!(outcome.message_id.as_deref(), Some(message_id.as_str()));
-    assert_eq!(transport.inject_count(), 1, "same queued row proceeds after the real receipt");
+    assert_eq!(
+        transport.inject_count(),
+        1,
+        "late receipt must not replay an already injected row"
+    );
 }
 
 #[test]
 #[cfg(unix)]
-fn issue345_missing_eager_config_defers_without_input_or_attempts() {
+fn issue372_missing_mcp_config_is_diagnostic_not_a_delivery_gate() {
     let mut case = WorkerCase::new("missing-mcp-config", "cursor_agent");
     let carrier = crate::mcp_server::readiness::test_carrier_pid().unwrap();
     case.state["team_key"] = serde_json::json!("dup-team");
@@ -76,18 +123,127 @@ fn issue345_missing_eager_config_defers_without_input_or_attempts() {
     case.state["agents"]["w1"]["spawned_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
     case.state["teams"] = serde_json::json!({"dup-team": case.state.clone()});
     crate::state::persist::save_runtime_state(&case.workspace, &case.state).unwrap();
-    let transport = RecordingTransport { carrier: Some(carrier), ..RecordingTransport::new("") };
-    let message_id = case.store.create_message(None, "leader", "w1", "missing config canary", None, false, Some("dup-team")).unwrap();
+    let transport = RecordingTransport {
+        carrier: Some(carrier),
+        ..RecordingTransport::new("")
+    };
+    let message_id = case
+        .store
+        .create_message(
+            None,
+            "leader",
+            "w1",
+            "missing config canary",
+            None,
+            false,
+            Some("dup-team"),
+        )
+        .unwrap();
     for _ in 0..3 {
-        let outcome = deliver_pending_message(&case.workspace, &case.store, &transport,
-            &message_id, &case.event_log, &case.state).unwrap();
-        assert!(!outcome.ok);
-        assert!(outcome.verification.as_deref().unwrap().starts_with("mcp_handshake_"));
-        assert_eq!(transport.inject_count(), 0, "missing metadata must never reach input");
+        let outcome = deliver_pending_message(
+            &case.workspace,
+            &case.store,
+            &transport,
+            &message_id,
+            &case.event_log,
+            &case.state,
+        )
+        .unwrap();
+        assert_eq!(
+            transport.inject_count(),
+            1,
+            "missing metadata cannot block a live pane: {outcome:?}"
+        );
     }
     let connection = rusqlite::Connection::open(case.store.db_path()).unwrap();
-    let attempts: i64 = connection.query_row("select delivery_attempts from messages where message_id=?1", [&message_id], |row| row.get(0)).unwrap();
-    assert_eq!(attempts, 0, "metadata wait is not an input attempt");
+    let attempts: i64 = connection
+        .query_row(
+            "select delivery_attempts from messages where message_id=?1",
+            [&message_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(attempts, 1, "metadata must not suppress or duplicate input");
+    assert!(case.events().contains("mcp_handshake_config_missing"));
+}
+
+#[test]
+#[cfg(unix)]
+fn issue372_bad_receipts_never_park_live_pane_delivery() {
+    for fault in ["dead", "ancestry", "malformed"] {
+        let mut case = WorkerCase::new(fault, "cursor_agent");
+        let pane = crate::mcp_server::readiness::test_ready_worker(
+            &case.workspace,
+            &mut case.state,
+            "dup-team",
+            "w1",
+            "%w1",
+        );
+        crate::state::persist::save_runtime_state(&case.workspace, &case.state).unwrap();
+        let receipt = std::fs::read_dir(case.workspace.join(".team/runtime/mcp-handshakes"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&receipt).unwrap()).unwrap();
+        match fault {
+            "dead" => value["server"]["identity"]["pid"] = serde_json::json!(u32::MAX),
+            "ancestry" => value["ancestors"] = serde_json::json!([]),
+            _ => value = serde_json::json!("invalid receipt"),
+        }
+        std::fs::write(receipt, serde_json::to_vec(&value).unwrap()).unwrap();
+        let transport = RecordingTransport {
+            carrier: pane.pane_pid,
+            ..RecordingTransport::new("")
+        };
+        let message_id = case
+            .store
+            .create_message(
+                None,
+                "leader",
+                "w1",
+                "bad receipt canary",
+                None,
+                false,
+                Some("dup-team"),
+            )
+            .unwrap();
+        for _ in 0..2 {
+            deliver_pending_message(
+                &case.workspace,
+                &case.store,
+                &transport,
+                &message_id,
+                &case.event_log,
+                &case.state,
+            )
+            .unwrap();
+            assert_eq!(
+                transport.inject_count(),
+                1,
+                "{fault} must not block or duplicate input"
+            );
+        }
+        assert!(
+            case.events().contains("delivery.mcp_handshake_warning"),
+            "{fault}"
+        );
+        assert!(
+            !case.events().contains("delivery.deferred_mcp_handshake"),
+            "{fault}"
+        );
+        let connection = rusqlite::Connection::open(case.store.db_path()).unwrap();
+        let (status, attempts): (String, i64) = connection
+            .query_row(
+                "SELECT status,delivery_attempts FROM messages WHERE message_id=?1",
+                [&message_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_ne!(status, "target_resolved", "{fault}");
+        assert_eq!(attempts, 1, "{fault}");
+    }
 }
 
 #[test]
@@ -182,13 +338,34 @@ fn pane_token_refuses_second_inject_for_claude_grok_cursor() {
         case.state["team_key"] = serde_json::json!("dup-team");
         case.state["agents"]["w1"]["mcp_config"] = serde_json::json!(config);
         case.state["agents"]["w1"]["pane_pid"] = serde_json::json!(carrier);
-        case.state["agents"]["w1"]["spawned_at"] = serde_json::json!((chrono::Utc::now() - chrono::Duration::seconds(10)).to_rfc3339());
+        case.state["agents"]["w1"]["spawned_at"] =
+            serde_json::json!((chrono::Utc::now() - chrono::Duration::seconds(10)).to_rfc3339());
         case.state["teams"] = serde_json::json!({"dup-team": case.state.clone()});
         crate::state::persist::save_runtime_state(&case.workspace, &case.state).unwrap();
         #[cfg(unix)]
-        crate::mcp_server::readiness::publish(&case.workspace, "dup-team", "w1", chrono::Utc::now()).unwrap();
-        let transport = RecordingTransport { carrier: Some(carrier), ..RecordingTransport::new("") };
-        let message_id = case.store.create_message(None, "leader", "w1", &format!("{provider} canary"), None, false, Some("dup-team")).unwrap();
+        crate::mcp_server::readiness::publish(
+            &case.workspace,
+            "dup-team",
+            "w1",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        let transport = RecordingTransport {
+            carrier: Some(carrier),
+            ..RecordingTransport::new("")
+        };
+        let message_id = case
+            .store
+            .create_message(
+                None,
+                "leader",
+                "w1",
+                &format!("{provider} canary"),
+                None,
+                false,
+                Some("dup-team"),
+            )
+            .unwrap();
         let first = deliver_pending_message(
             &case.workspace,
             &case.store,

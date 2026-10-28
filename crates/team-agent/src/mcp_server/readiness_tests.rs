@@ -66,9 +66,11 @@ impl Case {
     }
 
     fn path(&self) -> PathBuf {
-        self.ws
-            .join(".team/runtime/mcp-handshakes")
-            .join(format!("{}.json", key("owner", "worker")))
+        self.ws.join(".team/runtime/mcp-handshakes").join(format!(
+            "{}.{}.json",
+            key("owner", "worker"),
+            std::process::id()
+        ))
     }
 
     fn publish(&self) {
@@ -118,7 +120,7 @@ fn issue345_missing_mcp_config_does_not_disable_eager_admission() {
 }
 
 #[test]
-fn missing_handshake_defers_then_a_live_scoped_receipt_admits() {
+fn missing_handshake_is_unready_then_a_live_scoped_receipt_is_recognized() {
     let case = Case::new();
     assert!(case.admission().is_err());
     case.publish();
@@ -127,6 +129,68 @@ fn missing_handshake_defers_then_a_live_scoped_receipt_admits() {
         .unwrap()
         .expect("eager client must require a receipt");
     revalidate(&admission, &case.target, &case.panes).unwrap();
+}
+
+#[test]
+#[ignore = "subprocess helper for PID-isolated publication"]
+fn issue372_child_publisher() {
+    let ws = PathBuf::from(std::env::var_os("ISSUE372_WORKSPACE").unwrap());
+    publish(&ws, "owner", "worker", Utc::now()).unwrap();
+}
+
+#[test]
+fn issue372_child_publication_and_exit_cannot_clobber_live_server() {
+    let case = Case::new();
+    case.publish();
+    let original = std::fs::read(case.path()).unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "mcp_server::readiness::tests::issue372_child_publisher",
+        ])
+        .env("ISSUE372_WORKSPACE", &case.ws)
+        .spawn()
+        .unwrap();
+    let child_path = case.path().parent().unwrap().join(format!(
+        "{}.{}.json",
+        key("owner", "worker"),
+        child.id()
+    ));
+    assert!(child.wait().unwrap().success());
+    assert!(
+        child_path.is_file(),
+        "child must really publish its own receipt"
+    );
+    assert_eq!(std::fs::read(case.path()).unwrap(), original);
+    assert_eq!(
+        case.admission().unwrap().unwrap().server.identity.pid,
+        std::process::id()
+    );
+    // A dead foreign writer in the old shared slot cannot hide the live receipt either.
+    let legacy = case
+        .path()
+        .parent()
+        .unwrap()
+        .join(format!("{}.json", key("owner", "worker")));
+    std::fs::copy(&child_path, &legacy).unwrap();
+    assert!(case.admission().unwrap().is_some());
+    std::fs::write(child_path, b"{broken").unwrap();
+    std::fs::write(legacy, b"{broken").unwrap();
+    assert!(case.admission().unwrap().is_some());
+}
+
+#[test]
+fn issue372_live_legacy_receipt_is_still_recognized() {
+    let case = Case::new();
+    case.publish();
+    let legacy = case
+        .path()
+        .parent()
+        .unwrap()
+        .join(format!("{}.json", key("owner", "worker")));
+    std::fs::rename(case.path(), &legacy).unwrap();
+    assert!(case.admission().unwrap().is_some());
 }
 
 #[test]
@@ -206,6 +270,18 @@ fn older_helper_cannot_overwrite_a_newer_handshake() {
     )
     .unwrap();
     assert_eq!(std::fs::read(case.path()).unwrap(), original);
+}
+
+#[test]
+fn issue372_reused_pid_can_replace_an_older_process_receipt() {
+    let case = Case::new();
+    case.publish();
+    let mut receipt = read_json(&case.path(), true).unwrap();
+    receipt["server"]["identity"]["birth_identity"] = json!("previous-process");
+    receipt["started_at"] = json!((Utc::now() + chrono::Duration::hours(1)).to_rfc3339());
+    std::fs::write(case.path(), serde_json::to_vec(&receipt).unwrap()).unwrap();
+    case.publish();
+    assert!(case.admission().unwrap().is_some());
 }
 
 #[test]
