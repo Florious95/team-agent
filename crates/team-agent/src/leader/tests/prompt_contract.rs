@@ -153,6 +153,7 @@ fn leader_prompt_plans_preserve_absent_baseline_append_only_leaders_and_never_ma
                 workspace: &workspace, team_id: "current", agent_id: "worker", model: None,
                 effort: None, system_prompt: "Compiled Worker contract; unchanged", team_mcp_tools: &["report_result"],
                 mcp_config: &mcp, session_scope: PiSessionScope::Isolated,
+                session_dir: None,
             }).unwrap();
             assert!(!worker.argv.iter().any(|arg| arg.contains(SENTINEL)));
             assert!(!mcp.raw.to_string().contains(SENTINEL));

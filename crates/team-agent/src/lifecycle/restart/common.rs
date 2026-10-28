@@ -418,6 +418,9 @@ pub(super) fn spawn_agent_window(
             team_mcp_tools: &["send_message", "report_result", "get_team_status"],
             mcp_config: &mcp_config,
             session_scope: crate::lifecycle::launch::pi_mcp::PiSessionScope::Isolated,
+            session_dir: resume_session_id
+                .and_then(|_| agent.get("claude_projects_root").and_then(serde_json::Value::as_str))
+                .map(Path::new),
         };
         match resume_session_id {
             Some(session_id) => {

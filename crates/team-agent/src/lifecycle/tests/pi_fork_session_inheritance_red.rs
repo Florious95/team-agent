@@ -1224,7 +1224,7 @@ fn r12_pi_clone_and_non_pi_in_window_fork_compatibility_are_preserved() {
     let clone_paths = pi_seat_paths(workspace, "team-a", TARGET);
     assert_ne!(source_paths.runtime_root, clone_paths.runtime_root);
     assert_ne!(source_paths.wrapper, clone_paths.wrapper);
-    assert_ne!(source_paths.sessions, clone_paths.sessions);
+    assert_eq!(source_paths.sessions, clone_paths.sessions);
     assert!(
         matches!(
             get_adapter(Provider::Pi).fork(
@@ -1242,11 +1242,38 @@ fn r12_pi_clone_and_non_pi_in_window_fork_compatibility_are_preserved() {
     let state = fixture.state();
     assert_eq!(state["agents"][SOURCE]["session_id"], SESSION_A);
     assert!(
-        fixture
+        !fixture
             .source_paths
             .sessions
             .starts_with(&fixture.source_paths.runtime_root)
     );
+}
+
+#[test]
+#[serial(env)]
+fn pi_fork_from_legacy_backing_creates_native_target() {
+    let fixture = Fixture::new();
+    let legacy_root = fixture.source_paths.runtime_root.join("sessions");
+    let legacy_file = legacy_root.join(
+        fixture
+            .source_file
+            .strip_prefix(&fixture.source_paths.sessions)
+            .unwrap(),
+    );
+    fs::rename(&fixture.source_paths.sessions, &legacy_root).unwrap();
+    let mut state = fixture.state();
+    state["agents"][SOURCE]["claude_projects_root"] = json!(legacy_root);
+    state["agents"][SOURCE]["rollout_path"] = json!(legacy_file);
+    fixture.save_state(&state);
+    fixture
+        .fork(TARGET, None, &fixture.transport())
+        .expect("fork legacy source");
+    let state = fixture.state();
+    let target = PathBuf::from(state["agents"][TARGET]["rollout_path"].as_str().unwrap());
+    assert!(target.starts_with(&fixture.target_paths(TARGET).sessions));
+    assert!(!target.starts_with(fixture.run_workspace.join(".team")));
+    assert_eq!(body_bytes(&target), body_bytes(&legacy_file));
+    assert_eq!(read_header(&target)["parentSession"], json!(legacy_file));
 }
 
 #[test]
