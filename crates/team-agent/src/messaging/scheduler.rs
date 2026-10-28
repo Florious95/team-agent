@@ -53,6 +53,7 @@ pub fn fire_due_scheduled_events(
         let fire_one = || -> Result<serde_json::Value, MessagingError> {
             let scheduled_kind = parse_scheduled_kind(&kind)?;
             let result = match scheduled_kind {
+                ScheduledKind::Reminder => super::reminders::fire(workspace, id, event_log)?,
                 ScheduledKind::Send => {
                     let payload: serde_json::Value = serde_json::from_str(&payload_json)?;
                     let outcome = deliver_stored_message(
@@ -132,6 +133,11 @@ pub fn fire_due_scheduled_events(
 
         let (status, result_json) = match fire_one() {
             Ok(result) => {
+                // Reminder dispatch owns recurrence advancement and cancellation.
+                if kind == "reminder" {
+                    fired.push(id);
+                    continue;
+                }
                 let ok = result
                     .get("ok")
                     .and_then(serde_json::Value::as_bool)
@@ -158,7 +164,7 @@ pub fn fire_due_scheduled_events(
         // The row-status write stays `?`: a DB write failure is a real store fault, not a
         // per-event poison, and should surface (consistent with the rest of the fn).
         conn.execute(
-            "update scheduled_events set status = ?2, fired_at = ?3, result_json = ?4 where id = ?1",
+            "update scheduled_events set status = ?2, fired_at = ?3, result_json = ?4 where id = ?1 and status = 'pending'",
             params![id, status, chrono::Utc::now().to_rfc3339(), result_json],
         )?;
         fired.push(id);

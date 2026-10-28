@@ -290,6 +290,7 @@ fn dispatch_prepared(command: &str, checked: super::arguments::CheckedArgs, cwd:
             let value = crate::direct_delivery::locate(&workspace(&parsed, cwd), parsed.team.as_deref()).map_err(CliError::Usage)?;
             Ok(emit_result(CmdResult::from_json(value, parsed.json)))
         },
+        "schedule" => super::schedule::run(args, cwd).map(emit_result),
         "status" => cmd_status_for_team(&status_args(args, cwd), parse_args(args).team.as_deref())
             .map(emit_result),
         "shutdown" => cmd_shutdown(&shutdown_args(args, cwd)?).map(emit_result),
@@ -371,7 +372,7 @@ pub(crate) fn default_help() -> String {
     append_help_section(
         &mut out,
         "Getting started",
-        &["start", "quick-start", "send", "status", "models", "inbox"],
+        &["start", "quick-start", "send", "schedule", "status", "models", "inbox"],
     );
     append_help_section(&mut out, "Team lifecycle", &["stop", "team", "restart", "shutdown"]);
     append_help_section(
@@ -473,6 +474,9 @@ pub(super) fn command_help(command: Option<&str>) -> String {
             "Acceptance is not delivery or completion. Wait for an actual reply; use team-agent inbox leader -n 3. Diagnose with status/doctor rather than repeated sends."),
         "locate" => ("Read the endpoint snapshot and list live tmux panes without starting or contacting the coordinator.",
             "team-agent locate --workspace . --json\nteam-agent locate --team help-demo", "Use the socket, pane_id and dialect for raw send, or the agent name for workspace-scoped send."),
+        "schedule" => ("add requires exactly one of --in or --every and non-empty --text. Durations are positive integers followed by ms, s, m, h or d.\nlist shows active reminders; cancel takes the sched_<hex> id returned by add.",
+            "team-agent schedule add --in 10m --text 'Check progress'\nteam-agent schedule add --every 1h --text 'Review status'\nteam-agent schedule list --json\nteam-agent schedule cancel sched_1",
+            "Uses the existing coordinator timer; schedules survive daemon restarts. Delivery has tick granularity. Cancellation stops future occurrences, not reminders already firing or queued. A stopped coordinator resumes timers when restarted, without replaying missed intervals."),
         "inbox" => ("<agent> is the recipient name; -n/--limit bounds the message count. Reading replies does not resend messages.",
             "team-agent inbox leader -n 3\nteam-agent inbox worker --limit 5\nteam-agent inbox leader --workspace . --team help-demo --json", "Wait for a natural reply, then check team-agent status if needed. Do not inspect worker terminal content."),
         "status" => ("Optional <agent> selects one agent. --summary/--detail retain compatibility and do not add fields.\nNine fields: name/provider/model/effort/runtime_status/activity/health/session_name/tmux_command.\nRuntime, activity and health are distinct. unknown means insufficient evidence; null means unset. No default model is guessed.",
@@ -2240,7 +2244,11 @@ mod tests {
         assert_eq!(
             expected.len(),
             35,
+<<<<<<< HEAD
             "the public catalog includes read-only endpoint discovery and the canonical lifecycle surfaces"
+=======
+            "the public catalog includes the scheduled leader reminders surface"
+>>>>>>> 8e2b23670f94f920637afcc431925915eae9babb
         );
         for spec_name in &expected {
             assert!(
@@ -2368,6 +2376,7 @@ mod tests {
                 &["--workspace", "--team-id", "--yes", "--json"][..],
             ),
             ("send", &["--workspace", "--team", "--json"][..]),
+            ("schedule", &["--in", "--every", "--text", "--workspace", "--team", "--json"][..]),
             (
                 "status",
                 &["--workspace", "--team", "--summary", "--json", "--detail"][..],

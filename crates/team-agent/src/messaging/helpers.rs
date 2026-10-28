@@ -105,6 +105,7 @@ pub(crate) fn validate_result_envelope(envelope: &serde_json::Value) -> Result<(
 pub(crate) fn parse_scheduled_kind(kind: &str) -> Result<ScheduledKind, MessagingError> {
     match kind {
         "send" => Ok(ScheduledKind::Send),
+        "reminder" => Ok(ScheduledKind::Reminder),
         "health_ping" => Ok(ScheduledKind::HealthPing),
         "trust_retry" => Ok(ScheduledKind::TrustRetry),
         "enter_rescue" => Ok(ScheduledKind::EnterRescue),

@@ -106,6 +106,7 @@ pub enum DeliveryStage {
 #[serde(rename_all = "snake_case")]
 pub enum ScheduledKind {
     Send,
+    Reminder,
     HealthPing,
     TrustRetry,
     EnterRescue,

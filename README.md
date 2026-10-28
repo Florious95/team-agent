@@ -36,6 +36,17 @@ team-agent claude
 
 Two steps. Everything else happens in the conversation.
 
+## Scheduled leader reminders
+
+```sh
+team-agent schedule add --in 10m --text "Check progress"
+team-agent schedule add --every 1h --text "Review status"
+team-agent schedule list --json
+team-agent schedule cancel sched_1
+```
+
+Use `--workspace PATH --team KEY` to select the leader. Durations are positive integers followed by `ms`, `s`, `m`, `h`, or `d`. Reminders share the existing coordinator timer and durable queue; there is no extra daemon. Delivery has coordinator-tick granularity. After a coordinator restart, an overdue recurring reminder fires once and resumes its interval without replaying missed occurrences. Cancellation stops future occurrences, not reminders already firing or queued for delivery. `list` shows active reminders.
+
 ## Everyday CLI: start, stop, restart
 
 Check the selected binary with `team-agent start --help` and `team-agent team --help`. If these are missing, obtain an authorized supporting build; a version string alone is not a feature guarantee. Lifecycle commands run in the authorized native **Leader's tool context**, not an ordinary worker's pane.
