@@ -1,6 +1,6 @@
 use super::store::*;
 use super::Error;
-use crate::contract::delivery::{DeliveryEffect, PersistenceState};
+use crate::contract::delivery::DeliveryEffect;
 use crate::contract::descriptor::{
     ProviderDescriptor, ResourceDisposition, ResourceKind, ResumeMode,
 };
@@ -10,6 +10,7 @@ use crate::contract::plan::*;
 use crate::contract::probe::ProcessIdentity;
 use crate::contract::session::*;
 use crate::contract::types::*;
+use crate::runtime::delivery::InjectionDisposition;
 
 /// Framework port, not an eighth adapter hook. Implementations must fence every
 /// OS action by scope/endpoint + process birth identity. Control uses K2's sole
@@ -422,15 +423,13 @@ impl Lifecycle<'_> {
                     && matches!(&error, Error::NativeControl(report)
                         if report.metadata.owner == operation.target.identity
                             && report.metadata.operation == Operation::SessionInspect
-                            && report.persistence == PersistenceState::Durable
-                            && !report.problems.is_empty()
-                            && report.problems.iter().all(|problem|
-                                problem.code == "observation-deadline" && problem.host.is_none())) =>
+                            && report.disposition == InjectionDisposition::Unresolved) =>
                 {
                     // Spawn succeeded. An inconclusive observation must not kill
                     // that process or invent a resume binding. Preserve the
-                    // diagnostic; forks, fencing and persistence failures retain
-                    // their existing fail-closed behavior.
+                    // diagnostic regardless of capture codes, host details or
+                    // observation-journal state. Launch-store/fencing failures
+                    // and fork validation retain their fail-closed behavior.
                     operation.failure = Some(format!("session observation deferred: {error}"));
                     return self.commit(operation);
                 }

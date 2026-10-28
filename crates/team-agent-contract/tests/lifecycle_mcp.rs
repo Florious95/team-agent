@@ -282,36 +282,66 @@ fn session_observation_timeout(identity: InstanceIdentity) -> Error {
 }
 
 #[test]
-fn session_observation_deadline_preserves_started_process_without_inventing_session() {
-    let sandbox = Sandbox::new();
-    let mut store = sandbox.store();
-    let mut host = FakeHost {
-        capture_error: Some(session_observation_timeout(request(store.root(), "worker").identity)),
-        ..Default::default()
-    };
-    let mut io = FakeIo::new("unused");
-    let op = start(&mut store, &mut host, &mut io, "worker");
-    assert_eq!(op.outcome, Outcome::Committed);
-    assert_eq!(op.phase, Phase::F5Receipt);
-    assert_eq!((host.spawned, host.stopped, host.removed), (1, 0, 0));
-    assert!(op.target.process.is_some());
-    assert!(op.target.session.is_none());
-    assert_eq!(op.target.status, SeatStatus::Starting);
-    assert!(op.failure.as_ref().unwrap().contains("observation-deadline"));
-    assert_eq!(store.seat(&op.target.identity.seat).unwrap(), Some(op.target.clone()));
-    assert!(store.unfinished().unwrap().is_empty());
-    // MCP attribution can still function; no synthetic session/readiness proof.
-    assert_eq!(result(handle(&mut store, &context(&op.target),
-        &call(1, "report_result", json!({"summary":"running without observed session"}))).unwrap())["status"], "persisted");
-    drop(store);
-    assert_eq!(sandbox.reopen().operation(&op.id).unwrap(), op);
+fn all_unresolved_session_inspections_retain_spawn_and_its_actual_pane() {
+    use team_agent_contract::host::{HostError, HostErrorKind};
+    use team_agent_contract::runtime::delivery::ExecutionProblem;
+    for case in 0..7 {
+        let sandbox = Sandbox::new();
+        let mut store = sandbox.store();
+        let mut error = session_observation_timeout(request(store.root(), "worker").identity);
+        let Error::NativeControl(report) = &mut error else { unreachable!() };
+        match case {
+            0 => {}
+            1 | 2 => report.problems = vec![ExecutionProblem {
+                code: "capture-failed",
+                host: Some(HostError::new("tmux capture", if case == 1 { HostErrorKind::Deadline }
+                    else { HostErrorKind::Io(std::io::ErrorKind::UnexpectedEof) })),
+            }],
+            3 => report.problems = vec![ExecutionProblem {
+                code: "future-observer-diagnostic", host: Some(HostError::new("capture", HostErrorKind::Unknown)),
+            }],
+            4 => {
+                report.persistence = PersistenceState::Failed;
+                report.problems.push(ExecutionProblem { code: "journal-write-failed", host: None });
+            }
+            5 => { report.persistence = PersistenceState::Pending; report.problems.clear(); }
+            _ => report.problems.clear(),
+        }
+        let diagnostic = error.to_string();
+        let mut host = FakeHost {
+            capture_error: Some(error),
+            route_after_spawn: Some(("isolated-endpoint".into(), "%17".into(), "native-binding".into())),
+            ..Default::default()
+        };
+        let mut io = FakeIo::new("unused");
+        let op = start(&mut store, &mut host, &mut io, "worker");
+        assert_eq!(op.outcome, Outcome::Committed, "case {case}: {diagnostic}");
+        assert_eq!(op.phase, Phase::F5Receipt);
+        assert_eq!((host.spawned, host.stopped, host.removed), (1, 0, 0));
+        assert_eq!(op.target.pane, "%17");
+        assert!(op.target.process.is_some());
+        assert!(op.target.session.is_none());
+        assert_eq!(op.target.status, SeatStatus::Starting);
+        assert!(op.failure.as_ref().unwrap().contains(&diagnostic));
+        assert_eq!(store.seat(&op.target.identity.seat).unwrap(), Some(op.target.clone()));
+        assert!(store.unfinished().unwrap().is_empty());
+        assert_eq!(result(handle(&mut store, &context(&op.target),
+            &call(1, "report_result", json!({"summary":"running without observed session"}))).unwrap())["status"], "persisted");
+        drop(store);
+        assert_eq!(sandbox.reopen().operation(&op.id).unwrap(), op);
+    }
 }
 
 #[test]
-fn session_observation_deadline_on_restart_does_not_stop_the_new_generation() {
+fn unresolved_capture_deadline_on_restart_does_not_stop_the_new_generation() {
     let (_sandbox, mut store, mut host, mut io, parent) = setup();
     let request = restart_request(&store, &parent);
-    host.capture_error = Some(session_observation_timeout(request.identity.clone()));
+    let mut error = session_observation_timeout(request.identity.clone());
+    let Error::NativeControl(report) = &mut error else { unreachable!() };
+    report.problems[0].code = "capture-failed";
+    report.problems[0].host = Some(team_agent_contract::host::HostError::new(
+        "tmux capture", team_agent_contract::host::HostErrorKind::Deadline));
+    host.capture_error = Some(error);
     let d = descriptor();
     let h = hooks();
     io.operation = OperationId::new("restart").unwrap();
@@ -322,24 +352,25 @@ fn session_observation_deadline_on_restart_does_not_stop_the_new_generation() {
     assert_eq!((host.spawned, host.stopped), (2, 1));
     assert_eq!(op.target.identity, request.identity);
     assert!(op.target.session.is_none());
-    assert!(op.failure.as_ref().unwrap().contains("observation-deadline"));
+    assert!(op.failure.as_ref().unwrap().contains("capture-failed"));
+    assert!(op.failure.as_ref().unwrap().contains("Deadline"));
     assert!(handle(&mut store, &context(&parent), &call(2, "report_result", json!({"summary":"old"}))).is_err());
 }
 
 #[test]
-fn non_observation_failures_and_foreign_or_undurable_reports_remain_fatal() {
-    use team_agent_contract::runtime::delivery::ExecutionProblem;
+fn foreign_other_operation_and_non_unresolved_reports_remain_fatal() {
+    use team_agent_contract::runtime::delivery::InjectionDisposition;
     for case in 0..5 {
         let sandbox = Sandbox::new();
         let mut store = sandbox.store();
         let mut error = session_observation_timeout(request(store.root(), "worker").identity);
         let Error::NativeControl(report) = &mut error else { unreachable!() };
         match case {
-            0 => report.problems[0].code = "capture-failed",
-            1 => report.persistence = PersistenceState::Failed,
-            2 => report.metadata.operation = Operation::OrdinarySend,
-            3 => report.metadata.owner.instance = InstanceId::new("foreign").unwrap(),
-            _ => report.problems.push(ExecutionProblem { code: "target-invalid", host: None }),
+            0 => report.metadata.operation = Operation::OrdinarySend,
+            1 => report.metadata.owner.instance = InstanceId::new("foreign").unwrap(),
+            2 => report.disposition = InjectionDisposition::Refused,
+            3 => report.disposition = InjectionDisposition::Deferred,
+            _ => { report.disposition = InjectionDisposition::NativeAccepted; report.persistence = PersistenceState::Failed; }
         }
         let mut host = FakeHost { capture_error: Some(error), ..Default::default() };
         let op = start(&mut store, &mut host, &mut FakeIo::new("unused"), "worker");

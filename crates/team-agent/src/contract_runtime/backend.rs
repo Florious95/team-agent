@@ -1468,7 +1468,7 @@ mod tests {
         let _backend = fixture.canonical(SeatStatus::Ready, Phase::F5Receipt, Outcome::Committed, None);
         let db = rusqlite::Connection::open(fixture.binding.transport_root.join("contract.db")).unwrap();
         db.execute("update contract_operations set record=json_set(record, '$.failure', ?1)",
-            ["session observation deferred: observation-deadline"]).unwrap();
+            ["session observation deferred: capture-failed; tmux capture: Deadline"]).unwrap();
         write_role(&fixture.binding, &fixture.identity, &fixture.role).unwrap();
         let state = super::super::framework::project_seat(
             &fixture.binding.workspace.path, "test", "worker",
@@ -1480,7 +1480,7 @@ mod tests {
         assert!(state["session_name"].is_null());
         assert!(state["session_id"].is_null());
         assert_eq!(state["session_observation"], "unobserved");
-        assert_eq!(state["session_warning"], "session observation deferred: observation-deadline");
+        assert_eq!(state["session_warning"], "session observation deferred: capture-failed; tmux capture: Deadline");
         assert_eq!(state["mcp_binding"], "unverified");
     }
 
