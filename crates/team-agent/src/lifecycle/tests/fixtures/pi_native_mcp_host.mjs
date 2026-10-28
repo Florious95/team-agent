@@ -65,7 +65,8 @@ const beforeAgentStart = handlers.get("before_agent_start")?.[0];
 if (typeof beforeAgentStart !== "function") throw new Error("generated wrapper omitted before_agent_start wire binding");
 const binding = await beforeAgentStart({ systemPrompt: "N1 fixture" }, context);
 const wirePrompt = binding?.systemPrompt;
-if (typeof wirePrompt !== "string" || !expectedTools.every((name) => wirePrompt.includes(name))) {
+const communicationTools = expectedTools.filter((name) => !name.endsWith("__report_result"));
+if (typeof wirePrompt !== "string" || !communicationTools.every((name) => wirePrompt.includes(name)) || wirePrompt.includes("report_result")) {
   throw new Error(`native Team tool wire binding is incomplete: ${wirePrompt}`);
 }
 await writeFile(receiptPath, `${JSON.stringify({ registrations, unregistrations, activeTools: pi.getActiveTools(), expectedTools, wirePrompt }, null, 2)}\n`, "utf8");

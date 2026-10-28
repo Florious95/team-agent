@@ -5,7 +5,7 @@
 //!     - name: WorkerCommandAgent
 //!       what: 从 YAML 或 JSON 读出的单 agent 命令上下文
 //!     - name: compile_worker_system_prompt
-//!       what: 按身份、runtime 契约、通信模式、角色正文、输出契约、权限说明拼系统提示词
+//!       what: 按身份、runtime 契约、通信模式、角色正文拼系统提示词
 //!   depends:
 //!     - crate::communication_mode
 //! boundary:
@@ -29,10 +29,9 @@ All communication must go through Team Agent MCP tools.
 
 - Teammate: {send_message}(to='<agent_id>', content='...')
 - Broadcast: {send_message}(to='*', content='...')
-- Complete: {report_result}(summary='...') — call exactly once
 - Optional roster/status: {get_team_status} — use only when useful; it is not a communication or completion prerequisite.
 
-Only these three Team Agent MCP tools are available. Lifecycle management remains on the separately authorized operator CLI.
+Use {send_message} exclusively for findings, progress, questions, and completion updates. Lifecycle management remains on the separately authorized operator CLI.
 
 ## Rules:
 
@@ -40,23 +39,12 @@ Only these three Team Agent MCP tools are available. Lifecycle management remain
 - Do not reply to pure ACKs, greetings, or unchanged status notices (such as "paused" or "waiting"); after reporting a blocker once or completing a task, remain silent until a new actionable instruction arrives.
 - On 500/529/rate limits, retry only after 1-2 minutes."#;
 
-// 0.4.11 trimmed: the runtime contract section above already covers
-// send_message signatures and report_result exactly-once. The output
-// contract now only carries the RESULT-ENVELOPE-SPECIFIC delivery
-// semantics (leader-attach dependence + fallback status) that the
-// generic runtime section deliberately leaves out.
-const RESULT_ENVELOPE_OUTPUT_CONTRACT: &str =
-    "Final completion must call {report_result} exactly once with a short summary \
-and optional status/changes/tests; the MCP runtime injects the result into the attached leader pane. \
-If no leader is attached, the tool returns a fallback/failed result instead of completion.";
-
 pub(crate) struct WorkerCommandAgent {
     id: Option<String>,
     provider: Provider,
     role: Option<String>,
     system_prompt_inline: Option<String>,
     system_prompt_file: Option<String>,
-    output_contract_format: Option<String>,
     communication_mode: CommunicationMode,
     /// Missing `dangerously_skip_permissions` defaults to false; only explicit true enables bypass.
     dangerously_skip_permissions: bool,
@@ -98,11 +86,6 @@ impl WorkerCommandAgent {
             system_prompt_file: system_prompt
                 .and_then(|prompt| prompt.get("file"))
                 .filter(|value| value.is_truthy())
-                .and_then(crate::model::yaml::Value::as_str)
-                .map(str::to_string),
-            output_contract_format: agent
-                .get("output_contract")
-                .and_then(|contract| contract.get("format"))
                 .and_then(crate::model::yaml::Value::as_str)
                 .map(str::to_string),
             communication_mode: communication_mode(
@@ -154,11 +137,6 @@ impl WorkerCommandAgent {
                 .and_then(serde_json::Value::as_str)
                 .filter(|value| !value.is_empty())
                 .map(str::to_string),
-            output_contract_format: agent
-                .get("output_contract")
-                .and_then(|contract| contract.get("format"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string),
             communication_mode: communication_mode(
                 agent
                     .get("communication_mode")
@@ -189,19 +167,14 @@ pub(crate) fn compile_worker_system_prompt(
         "{}()",
         mcp_tool_name(agent.provider, "team_orchestrator", "get_team_status")
     );
-    let report_result = mcp_tool_name(agent.provider, "team_orchestrator", "report_result");
-    let runtime_contract =
-        runtime_contract_section(&send_message, &report_result, &get_team_status);
+    let runtime_contract = runtime_contract_section(&send_message, &get_team_status);
     let communication_contract = agent.communication_mode.runtime_contract(&send_message);
-    let mut chunks = vec![
+    let chunks = [
         identity_section(agent),
         runtime_contract,
         communication_contract,
         role_body(agent)?,
     ];
-    if let Some(contract) = output_contract(agent, &report_result) {
-        chunks.push(contract);
-    }
     Ok(chunks
         .into_iter()
         .filter(|chunk| !chunk.is_empty())
@@ -234,14 +207,9 @@ fn mcp_tool_name(provider: Provider, server: &str, tool: &str) -> String {
     }
 }
 
-pub(crate) fn runtime_contract_section(
-    send_message: &str,
-    report_result: &str,
-    get_team_status: &str,
-) -> String {
+pub(crate) fn runtime_contract_section(send_message: &str, get_team_status: &str) -> String {
     RUNTIME_CONTRACT_SECTION
         .replace("{send_message}", send_message)
-        .replace("{report_result}", report_result)
         .replace("{get_team_status}", get_team_status)
 }
 
@@ -281,11 +249,6 @@ fn role_body(agent: &WorkerCommandAgent) -> Result<String, LifecycleError> {
     Ok(chunks.join("\n\n"))
 }
 
-fn output_contract(agent: &WorkerCommandAgent, report_result: &str) -> Option<String> {
-    (agent.output_contract_format.as_deref() == Some("result_envelope_v1"))
-        .then(|| RESULT_ENVELOPE_OUTPUT_CONTRACT.replace("{report_result}", report_result))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,7 +256,7 @@ mod tests {
     #[test]
     fn system_prompt_uses_identity_then_runtime_contract_python_order() {
         // #264 D6: Python truth source (prompt.py:39, live ps confirmed) builds
-        // chunks = [identity, TEAMMATE_SYSTEM_PROMPT, role_body, output].
+        // chunks = [identity, TEAMMATE_SYSTEM_PROMPT, role_body].
         // The previous assertion locked the inverted contract-first order with no
         // Python evidence; this is the corrected golden.
         // 0.3.5 union (copilot v2 C-1 / B2 MUST-4 行为层守): identity 必须 FIRST —
@@ -305,7 +268,6 @@ mod tests {
             role: Some("Runtime Developer".to_string()),
             system_prompt_inline: Some("Implement the assigned slice.".to_string()),
             system_prompt_file: None,
-            output_contract_format: Some("result_envelope_v1".to_string()),
             communication_mode: CommunicationMode::default(),
             dangerously_skip_permissions: false,
         };
@@ -320,18 +282,45 @@ mod tests {
             .find(RUNTIME_CONTRACT_SECTION.lines().next().unwrap_or(""))
             .unwrap();
         let role = prompt.find("Implement the assigned slice.").unwrap();
-        let output = prompt
-            .find("Final completion must call team_orchestrator.report_result exactly once")
-            .unwrap();
-        assert!(identity < runtime && runtime < role && role < output);
+        assert!(identity < runtime && runtime < role);
+        assert!(!prompt.contains("report_result"));
         let slowdown_phrase = format!("500/{}", 500 + 29);
         assert!(prompt.contains(&slowdown_phrase));
         assert!(prompt.contains("Runtime Developer"));
     }
 
     #[test]
+    fn output_contract_metadata_does_not_add_completion_instructions() {
+        let json = serde_json::json!({
+            "id": "worker",
+            "output_contract": { "format": "result_envelope_v1" },
+        });
+        let yaml = crate::model::yaml::loads(
+            "id: worker\noutput_contract:\n  format: result_envelope_v1\n",
+        )
+        .unwrap();
+        for agent in [
+            WorkerCommandAgent::from_json(&json, None, Provider::Codex).unwrap(),
+            WorkerCommandAgent::from_yaml(&yaml, None, Provider::Codex).unwrap(),
+        ] {
+            let prompt = compile_worker_system_prompt(&agent).unwrap();
+            assert!(!prompt.contains("report_result"));
+            assert!(prompt.contains("send_message"));
+        }
+    }
+
+    #[test]
     fn all_provider_mode_prompts_share_silence_contract_without_unconditional_replies() {
-        for provider in [Provider::Codex, Provider::Pi] {
+        for provider in [
+            Provider::Claude,
+            Provider::ClaudeCode,
+            Provider::Codex,
+            Provider::Copilot,
+            Provider::GeminiCli,
+            Provider::Grok,
+            Provider::Pi,
+            Provider::Fake,
+        ] {
             for mode in CommunicationMode::ALL.iter().copied() {
                 let agent = WorkerCommandAgent {
                     id: Some("worker".to_string()),
@@ -339,11 +328,15 @@ mod tests {
                     role: Some("developer".to_string()),
                     system_prompt_inline: Some("worker body".to_string()),
                     system_prompt_file: None,
-                    output_contract_format: Some("result_envelope_v1".to_string()),
                     communication_mode: mode,
                     dangerously_skip_permissions: false,
                 };
                 let prompt = compile_worker_system_prompt(&agent).unwrap();
+                assert!(!prompt.contains("report_result"));
+                let send = mcp_tool_name(provider, "team_orchestrator", "send_message");
+                assert!(prompt.contains(&format!(
+                    "Use {send} exclusively for findings, progress, questions, and completion updates."
+                )));
                 assert!(prompt.contains(
                     "Do not reply to pure ACKs, greetings, or unchanged status notices (such as \"paused\" or \"waiting\"); after reporting a blocker once or completing a task, remain silent until a new actionable instruction arrives."
                 ));

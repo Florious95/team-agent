@@ -77,8 +77,9 @@ fn t06_each_official_mode_selects_one_runtime_contract_in_real_spawn_prompt() {
         assert!(
             prompt.contains(&format!("ROLE BODY SENTINEL {id}"))
                 && prompt.contains("Team Agent Teammate Runtime Contract")
-                && prompt.contains("report_result exactly once"),
-            "T06/{id}: mode selection must preserve persona body and common exact-once contract"
+                && prompt.contains("send_message exclusively for findings")
+                && !prompt.contains("report_result"),
+            "T06/{id}: mode selection must preserve persona body and the send_message-only communication contract"
         );
     }
 }
@@ -167,11 +168,11 @@ fn t07_final_spawn_prompt_does_not_leak_leader_centric_obligations_into_orchestr
     for required in [
         "All communication must go through Team Agent MCP tools.",
         "Do not reply to pure ACKs, greetings, or unchanged status notices",
-        "report_result exactly once",
+        "send_message exclusively for findings",
     ] {
         assert!(
             orchestrated.contains(required),
-            "T07/orchestrated positive control: removing unconditional duties must preserve common MCP, blocked-reporting, and exact-once obligations; missing {required:?}; prompt={orchestrated:?}"
+            "T07/orchestrated positive control: removing unconditional duties must preserve common MCP, silence, and send_message obligations; missing {required:?}; prompt={orchestrated:?}"
         );
     }
 
