@@ -67,6 +67,21 @@ fn all_four_layers_retain_whole_documents_and_exact_hash_ranges() {
 }
 
 #[test]
+fn fixed_contract_prompts_use_send_message_in_all_communication_modes() {
+    let role = Source {
+        path: "role.md".into(),
+        contents: "Ordinary teammate instructions.".into(),
+    };
+    for mode in team_agent::communication_mode::CommunicationMode::ALL.iter().copied() {
+        let prompt = assemble("worker", "developer", mode, None, None, &role, &[]).unwrap();
+        assert!(!prompt.text.contains("report_result"));
+        assert!(prompt.text.contains(
+            "Use send_message exclusively for findings, progress, questions, and completion updates."
+        ));
+    }
+}
+
+#[test]
 fn no_contract_role_does_not_resolve_user_or_project_policy() {
     let sandbox = support::Sandbox::new();
     let team = sandbox.parent.join("roles");

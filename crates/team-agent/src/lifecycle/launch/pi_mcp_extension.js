@@ -175,9 +175,8 @@ export default function teamAgentMcp(pi) {
     if (stopped || !backend) throw fail(ctx, "wire-binding", new Error("No owned MCP registration"));
     if (surface === "direct" && !directBinding()) throw fail(ctx, "wire-binding", new Error("Owned MCP tools became unreachable"));
     if (surface === "proxy" && !proxyAvailable()) throw fail(ctx, "wire-binding", new Error("MCP proxy became unreachable"));
-    const examples = wanted.map((tool) => {
-      const args = tool === "send_message" ? { to: "leader", content: "..." }
-        : tool === "report_result" ? { summary: "..." } : {};
+    const examples = ["send_message", "get_team_status"].map((tool) => {
+      const args = tool === "send_message" ? { to: "leader", content: "..." } : {};
       return surface === "direct"
         ? `- ${tool}: mcp__${alias}__${tool}; arguments ${JSON.stringify(args)}`
         : `- ${tool}: mcp(${JSON.stringify({ tool: `${alias}_${tool}`, args })})`;
@@ -185,7 +184,7 @@ export default function teamAgentMcp(pi) {
     const base = wireSuffix && event.systemPrompt.endsWith(wireSuffix)
       ? event.systemPrompt.slice(0, -wireSuffix.length) : event.systemPrompt;
     wireSuffix = "\n\n# Team Agent MCP wire binding\n"
-      + "Use these actual tools for the logical Team Agent operations above. Do not pass sender, task_id or schema_version.\n"
+      + "Use send_message exclusively for communication, using the binding below. Status lookup is optional. Do not pass sender, task_id or schema_version.\n"
       + examples.join("\n");
     return { systemPrompt: base + wireSuffix };
   });

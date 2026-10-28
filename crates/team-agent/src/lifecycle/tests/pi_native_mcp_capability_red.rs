@@ -235,7 +235,11 @@ esac
     let wire_prompt = native_receipt["wirePrompt"]
         .as_str()
         .expect("Pi wrapper installs an actual tool wire binding");
-    assert!(REQUIRED_TOOLS.iter().all(|tool| wire_prompt.contains(tool)));
+    assert!(["send_message", "get_team_status"]
+        .iter()
+        .all(|tool| wire_prompt.contains(tool)));
+    assert!(wire_prompt.contains("Use send_message exclusively for communication"));
+    assert!(!wire_prompt.contains("report_result"));
     let registration = &registrations[0];
     let alias = registration["name"]
         .as_str()

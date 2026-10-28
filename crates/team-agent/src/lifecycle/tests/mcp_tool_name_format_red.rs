@@ -1,7 +1,7 @@
 //! purpose: worker 契约里的 MCP 工具名必须按 provider 实测书写形式渲染
 //! contract:
-//!   claude → mcp__team_orchestrator__send_message / mcp__team_orchestrator__report_result
-//!   grok   → team_orchestrator__send_message / team_orchestrator__report_result
+//!   claude → mcp__team_orchestrator__send_message / mcp__team_orchestrator__get_team_status
+//!   grok   → team_orchestrator__send_message / team_orchestrator__get_team_status
 //!   已验证 provider 的渲染结果不得再含 `team_orchestrator.` 点号
 //! boundary: 只钉 compile_worker_system_prompt 字面；未验证 provider 不在此猜形式
 
@@ -30,8 +30,8 @@ fn claude_runtime_contract_pins_mcp_double_underscore_literals() {
     for provider in [Provider::Claude, Provider::ClaudeCode] {
         let prompt = compiled_prompt(provider);
         assert!(
-            prompt.contains("mcp__team_orchestrator__report_result"),
-            "{provider:?} must render the claude transcript literal mcp__team_orchestrator__report_result; prompt={prompt}"
+            prompt.contains("mcp__team_orchestrator__get_team_status"),
+            "{provider:?} must render the claude transcript literal mcp__team_orchestrator__get_team_status; prompt={prompt}"
         );
         assert!(
             prompt.contains("mcp__team_orchestrator__send_message"),
@@ -44,8 +44,8 @@ fn claude_runtime_contract_pins_mcp_double_underscore_literals() {
 fn grok_runtime_contract_pins_server_double_underscore_literals() {
     let prompt = compiled_prompt(Provider::Grok);
     assert!(
-        prompt.contains("team_orchestrator__report_result"),
-        "grok must render team_orchestrator__report_result; prompt={prompt}"
+        prompt.contains("team_orchestrator__get_team_status"),
+        "grok must render team_orchestrator__get_team_status; prompt={prompt}"
     );
     assert!(
         prompt.contains("team_orchestrator__send_message"),

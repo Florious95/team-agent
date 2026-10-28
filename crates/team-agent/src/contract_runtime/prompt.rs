@@ -174,9 +174,9 @@ pub fn assemble(
 ) -> Result<Prompt, ConfigError> {
     let mut text = [
         worker_identity_section(id, role_name),
-        runtime_contract_section("send_message", "report_result", "get_team_status()"),
+        runtime_contract_section("send_message", "get_team_status()"),
         mode.runtime_contract("send_message"),
-        "The operations above are logical names. Use the bound MCP client's advertised tool names, not guessed prefixes. Original role-template metadata below does not change your bound worker identity or selected native launch parameters.\nFinal completion calls report_result exactly once. Durable storage and actual leader presentation are separate facts; do not claim delivery from registration or persistence alone.".into(),
+        "The operations above are logical names. Use the bound MCP client's advertised tool names, not guessed prefixes. Original role-template metadata below does not change your bound worker identity or selected native launch parameters.\nDurable storage and actual leader presentation are separate facts; do not claim delivery from registration or persistence alone.".into(),
     ].join("\n\n");
     let mut ordered = Vec::new();
     if let Some(source) = user {
