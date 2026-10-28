@@ -329,7 +329,7 @@ fn config_scope_and_authorized_executable_cannot_be_substituted() {
 fn fake_and_pi_keep_their_existing_non_eager_or_runtime_registry_admission() {
     assert!(!crate::provider::get_adapter(Provider::Fake).requires_worker_mcp_handshake());
     assert!(!crate::provider::get_adapter(Provider::Pi).requires_worker_mcp_handshake());
-    assert!(crate::provider::get_adapter(Provider::CursorAgent).requires_worker_mcp_handshake());
+    assert!(crate::provider::get_adapter(Provider::Copilot).requires_worker_mcp_handshake());
     let case = Case::new();
     for provider in ["fake", "pi"] {
         let mut state = case.state.clone();
