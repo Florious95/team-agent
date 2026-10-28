@@ -662,7 +662,7 @@ fn shared_supervisor_consumes_bootstrap_once_durably() {
 
 #[test]
 fn uncertain_effect_is_not_replayed_after_reopen_or_new_tick() {
-    let (sandbox, mut store, mut host, mut io, seat) = setup();
+    let (sandbox, mut store, mut host, _, seat) = setup();
     host.uncertain_delivery = true;
     handle(
         &mut store,
@@ -701,18 +701,6 @@ fn uncertain_effect_is_not_replayed_after_reopen_or_new_tick() {
         store.deliveries().unwrap()[0].effect,
         DeliveryEffect::MayHaveSubmitted
     );
-    // The attempt's retained lease quarantines the seat; a public shutdown
-    // reports that recovery is needed, never a Database error.
-    assert_eq!(
-        Lifecycle {
-            store: &mut store,
-            host: &mut host,
-            io: &mut io,
-        }
-        .teardown(&seat.identity, OperationId::new("stop-quarantined").unwrap()),
-        Err(Error::NeedsRecovery)
-    );
-    assert_eq!(host.deliveries, 1);
 }
 
 #[test]

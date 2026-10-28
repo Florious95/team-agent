@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use team_agent_contract::contract::{hooks::*, plan::CatalogObservation, types::*};
 use team_agent_contract::host::{command::{PublicCommand, RealCommandRunner}, process::resolve_cwd};
 use team_agent_contract::kiro::native as kiro;
-use team_agent_contract::providers::claude::{catalog as claude_catalog, launcher as claude};
 use team_agent_contract::providers::codex::{catalog as codex_catalog, launcher as codex};
 use team_agent_contract::providers::cursor::native as cursor;
 use team_agent_contract::providers::grok_build::native as grok;
@@ -29,8 +28,6 @@ pub enum DiscoveryError {
     CodexProbe(#[from] codex_catalog::ProbeError),
     #[error("native Pi launcher probe failed: {0}")]
     PiProbe(#[from] pi_catalog::ProbeError),
-    #[error("native Claude launcher probe failed: {0}")]
-    ClaudeProbe(#[from] claude_catalog::ProbeError),
     #[error("native discovery contract: {0:?}")]
     Contract(ContractError),
     #[error("native model discovery: {0:?}")]
@@ -87,7 +84,6 @@ pub fn discover(provider: &ProviderId, workspace: &Path) -> Result<Discovery, Di
         NativeProvider::GrokBuild => grok::probe_launcher(&command, &mut RealCommandRunner::default(), bounds)?,
         NativeProvider::Codex => codex_catalog::probe_launcher(&command, &mut RealCommandRunner::default(), bounds)?,
         NativeProvider::Pi => pi_catalog::probe_launcher(&command, &mut RealCommandRunner::default(), bounds)?,
-        NativeProvider::Claude => claude_catalog::probe_launcher(&command, &mut RealCommandRunner::default(), bounds)?,
     };
     let request = CatalogRequest {
         provider: ProviderId::new(descriptor.identity.id).map_err(DiscoveryError::Contract)?,
@@ -132,11 +128,6 @@ pub fn discover(provider: &ProviderId, workspace: &Path) -> Result<Discovery, Di
                 .map_err(DiscoveryError::Contract)?;
             catalog_hook.discover(&request, &mut host)
         }
-        NativeProvider::Claude => {
-            let mut host = claude_catalog::NativeCatalog::new(request.clone(), RealCommandRunner::default())
-                .map_err(DiscoveryError::Contract)?;
-            catalog_hook.discover(&request, &mut host)
-        }
     }.map_err(DiscoveryError::Catalog)?;
     let result = Discovery { engine: command.entry.clone(), command, native, catalog, runtime: None };
     validate_catalog(provider, &result).map_err(DiscoveryError::Contract)?;
@@ -162,8 +153,6 @@ pub(super) fn discover_runtime(provider: &ProviderId, workspace: &Path) -> Resul
             codex::probe_runtime(&discovery.command, &home()?, &mut RealCommandRunner::default(), bounds)?),
         NativeProvider::Pi => NativeRuntime::Pi(
             pi::probe_runtime(&discovery.command, &home()?, &mut RealCommandRunner::default(), bounds)?),
-        NativeProvider::Claude => NativeRuntime::Claude(
-            claude::probe_runtime(&discovery.command, &home()?, &mut RealCommandRunner::default(), bounds)?),
     };
     discovery.catalog = runtime.bind_catalog(&discovery.catalog).map_err(DiscoveryError::Contract)?;
     discovery.engine = runtime.engine().clone();
