@@ -95,8 +95,8 @@ fn batch1_migration_sites_present_in_source() {
         remove
             .matches("let transport = paths.tmux_backend()?;")
             .count(),
-        2,
-        "remove and remove-preflight must reuse the canonical SelectedTeam transport"
+        3,
+        "remove, remove-preflight, and contract remove must reuse the canonical SelectedTeam transport"
     );
     let remove_code = remove
         .lines()
