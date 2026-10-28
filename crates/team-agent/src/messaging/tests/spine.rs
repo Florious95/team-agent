@@ -852,23 +852,3 @@ fn e47_iron_law_no_signal_in_bottom_region_stays_uncertain_not_idle() {
          composer → Uncertain, never silently Idle. Got {a:?}"
     );
 }
-
-// #379: Claude Code's spinner row sits above its composer box (outside the
-// bottom five rows) while a finished turn's `✻ Worked for 3s` sits inside them.
-fn claude_379_scrollback(above: &str) -> String {
-    let rule = "─".repeat(56);
-    format!(
-        "❯ do the task\n\n⏺ Working through the files.\n\n{above}\n                                    ◐ medium · /effort\n{rule}\n❯ \n{rule}\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n"
-    )
-}
-
-#[test]
-fn issue379_claude_spinner_above_the_box_is_working_and_a_finished_turn_is_idle() {
-    let st = serde_json::json!({});
-    for spinner in ["· Waddling…", "✢ Boondoggling… (3s · thinking)"] {
-        let a = classify_agent_activity(&st, &claude_379_scrollback(spinner), false, None, None);
-        assert_eq!(a.status, ActivityStatus::Working, "{spinner}: {a:?}");
-    }
-    let a = classify_agent_activity(&st, &claude_379_scrollback("✻ Worked for 3s"), false, None, None);
-    assert_eq!(a.status, ActivityStatus::Idle, "{a:?}");
-}

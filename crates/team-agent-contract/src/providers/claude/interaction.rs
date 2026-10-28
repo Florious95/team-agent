@@ -64,29 +64,6 @@ fn spinner(line: &str) -> bool {
         && (rest.is_empty() || (rest.starts_with(" (") && rest.ends_with(')')))
 }
 fn busy(lines: &[&str], top: usize) -> bool { lines[top.saturating_sub(6)..top].iter().any(|line| spinner(line)) }
-/// A live spinner row, for legacy observers that locate it themselves.
-pub fn spinner_row(line: &str) -> bool { spinner(line.trim_end()) }
-/// Legacy `claude`/`claude_code` observation only: those captures normalize
-/// U+00A0 to a space, so the live composer is the region between the last two
-/// column-0 rules alone. Busy when the queued placeholder is shown or the last
-/// column-0 row above the composer is a live spinner (its tip/todo rows and the
-/// effort hint are indented). Returns the surface and the text a submit would
-/// send. Does not change contract surface admission, create a paste latch, or
-/// authorize any input.
-pub fn inspect_legacy_composer(text: &str) -> Option<(InputSurface, String)> {
-    let lines = rows(text);
-    let bottom = lines.iter().rposition(|line| rule(line))?;
-    let top = lines[..bottom].iter().rposition(|line| rule(line))?;
-    let region = &lines[top + 1..bottom];
-    let first = *region.first()?;
-    let first = if first == "❯" { "" } else { first.strip_prefix("❯\u{a0}").or_else(|| first.strip_prefix("❯ "))? };
-    let current = std::iter::once(first).chain(region[1..].iter().copied()).map(str::trim).collect::<Vec<_>>().join("\n");
-    let current = current.trim();
-    let status = lines[..top].iter().rev().find(|line| !line.is_empty() && !line.starts_with(' '));
-    let observed = if current == QUEUED || status.is_some_and(|line| spinner(line)) { InputSurface::Busy }
-        else if current.is_empty() { InputSurface::ComposerReady } else { InputSurface::ComposerContainsPaste };
-    Some((observed, typed(current).to_owned()))
-}
 /// The folder-trust screen (no composer). Its focus defaults to `No, exit`.
 fn trust(lines: &[&str]) -> bool {
     let trimmed: Vec<_> = lines.iter().map(|line| line.trim()).collect();
