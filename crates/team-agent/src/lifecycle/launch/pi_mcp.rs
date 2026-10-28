@@ -9,7 +9,7 @@
 //! boundary:
 //!   - 不枚举 Pi session；resume 只重验调用方给出的 exact backing
 //!   - 不投递消息、不执行 cleanup 或 doctor 判定
-//!   - 不读取 credentials 或 provider settings 值
+//!   - 仅读取 settings.json 的 sessionDir，不读取 credentials
 //! maturity: wired
 //! ---
 
@@ -102,14 +102,33 @@ pub(crate) fn pi_seat_paths(workspace: &Path, team_id: &str, agent_id: &str) -> 
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| std::env::home_dir().unwrap_or_default().join(".pi/agent"));
-        let encoded = workspace.to_string_lossy();
-        let encoded = encoded
-            .strip_prefix(['/', '\\'])
-            .unwrap_or(&encoded)
-            .replace(['/', '\\', ':'], "-");
-        resolve_pi_path(&workspace, &agent_dir)
-            .join("sessions")
-            .join(format!("--{encoded}--"))
+        let agent_dir = resolve_pi_path(&workspace, &agent_dir);
+        // Pi reads sessionDir before project trust. A present project value
+        // shadows the global value, including an empty/null value (default).
+        let setting = [
+            workspace.join(".pi/settings.json"),
+            agent_dir.join("settings.json"),
+        ]
+        .into_iter()
+        .find_map(|path| {
+            let value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+            value.get("sessionDir").cloned()
+        });
+        if let Some(path) = setting
+            .as_ref()
+            .and_then(serde_json::Value::as_str)
+            .filter(|path| !path.is_empty())
+        {
+            resolve_pi_path(&workspace, Path::new(path))
+        } else {
+            let encoded = workspace.to_string_lossy();
+            let encoded = encoded
+                .strip_prefix(['/', '\\'])
+                .unwrap_or(&encoded)
+                .replace(['/', '\\', ':'], "-");
+            agent_dir.join("sessions").join(format!("--{encoded}--"))
+        }
     };
     PiSeatPaths {
         wrapper: runtime_root.join("team-mcp.ts"),

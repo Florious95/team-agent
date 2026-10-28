@@ -696,6 +696,53 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
         );
     }
 
+    let global_settings = hermetic.home().join(".pi/agent/settings.json");
+    let project_settings = isolated_workspace.join(".pi/settings.json");
+    std::fs::create_dir_all(project_settings.parent().unwrap()).unwrap();
+    std::fs::write(&global_settings, r#"{"sessionDir":"global-sessions"}"#).unwrap();
+    for (project, expected) in [
+        ("{}", isolated_workspace.join("global-sessions")),
+        (
+            r#"{"sessionDir":"project-sessions"}"#,
+            isolated_workspace.join("project-sessions"),
+        ),
+        ("invalid JSON", isolated_workspace.join("global-sessions")),
+        (r#"{"sessionDir":""}"#, isolated_paths.sessions.clone()),
+        (r#"{"sessionDir":null}"#, isolated_paths.sessions.clone()),
+    ] {
+        std::fs::write(&project_settings, project).unwrap();
+        let plan = materialize_pi_plan(PiMaterializeRequest {
+            workspace: &isolated_workspace,
+            team_id: "team-a",
+            agent_id: "worker-a",
+            model: None,
+            effort: None,
+            system_prompt: "native settings precedence",
+            team_mcp_tools: &["send_message"],
+            mcp_config: &isolated_config,
+            session_scope: PiSessionScope::Isolated,
+            session_dir: None,
+        })
+        .expect("native settings sessionDir");
+        assert_eq!(plan.provider_projects_root.as_ref(), Some(&expected));
+        assert_session_pair(&plan.argv, &expected);
+    }
+    {
+        let custom_agent = isolated_workspace.join("custom-agent");
+        std::fs::create_dir_all(&custom_agent).unwrap();
+        std::fs::write(
+            custom_agent.join("settings.json"),
+            r#"{"sessionDir":"custom-global"}"#,
+        )
+        .unwrap();
+        std::fs::write(&project_settings, "{}").unwrap();
+        let _agent_dir = hermetic.with_env("PI_CODING_AGENT_DIR", custom_agent.to_str().unwrap());
+        assert_eq!(
+            pi_seat_paths(&isolated_workspace, "team-a", "worker-a").sessions,
+            isolated_workspace.join("custom-global")
+        );
+    }
+    std::fs::write(&project_settings, r#"{"sessionDir":"project-sessions"}"#).unwrap();
     {
         let _agent_dir = hermetic.with_env("PI_CODING_AGENT_DIR", "~/ignored-agent-dir");
         let _session_dir =
@@ -735,6 +782,9 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
             assert_ne!(plan.expected_session_id, isolated.expected_session_id);
         }
     }
+
+    std::fs::remove_file(&project_settings).unwrap();
+    std::fs::remove_file(&global_settings).unwrap();
 
     let native_resume = materialize_pi_resume_plan(
         PiMaterializeRequest {
