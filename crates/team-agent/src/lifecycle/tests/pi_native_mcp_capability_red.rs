@@ -149,6 +149,7 @@ esac
         team_mcp_tools: &REQUIRED_TOOLS,
         mcp_config: &config,
         session_scope: PiSessionScope::Isolated,
+        session_dir: None,
     });
     let pi_calls = std::fs::read_to_string(&call_log).unwrap_or_default();
     assert!(

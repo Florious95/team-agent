@@ -1224,7 +1224,7 @@ fn r12_pi_clone_and_non_pi_in_window_fork_compatibility_are_preserved() {
     let clone_paths = pi_seat_paths(workspace, "team-a", TARGET);
     assert_ne!(source_paths.runtime_root, clone_paths.runtime_root);
     assert_ne!(source_paths.wrapper, clone_paths.wrapper);
-    assert_ne!(source_paths.sessions, clone_paths.sessions);
+    assert_eq!(source_paths.sessions, clone_paths.sessions);
     assert!(
         matches!(
             get_adapter(Provider::Pi).fork(

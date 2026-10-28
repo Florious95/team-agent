@@ -88,55 +88,60 @@ pub(crate) fn pi_seat_paths(workspace: &Path, team_id: &str, agent_id: &str) -> 
         .join("pi")
         .join(team_id)
         .join(agent_id);
-    // Pi and token scanners enumerate sessions/<directory>/*.jsonl. Keep seats
-    // isolated in flat native-store directories, not in a shared cwd directory
-    // where concurrent workers' header-based capture would become ambiguous.
     let workspace = workspace
         .canonicalize()
         .unwrap_or_else(|_| workspace.to_path_buf());
-    let seat = sha256(format!("{}\0{team_id}\0{agent_id}", workspace.display()).as_bytes());
-    let home = std::env::home_dir().unwrap_or_default();
-    let agent_dir = match std::env::var_os("PI_CODING_AGENT_DIR").filter(|s| !s.is_empty()) {
-        Some(value) => {
-            let path = PathBuf::from(value);
-            let path = path.strip_prefix("~").map(|p| home.join(p)).unwrap_or(path);
-            if path.is_absolute() {
-                path
-            } else {
-                workspace.join(path)
-            }
-        }
-        None => home.join(".pi/agent"),
+    // Match Pi's getDefaultSessionDir: sessions/--<encoded absolute cwd>--.
+    // Identity comes from --session-id, not a private per-seat directory.
+    let sessions = if let Some(value) =
+        std::env::var_os("PI_CODING_AGENT_SESSION_DIR").filter(|value| !value.is_empty())
+    {
+        resolve_pi_path(&workspace, Path::new(&value))
+    } else {
+        let agent_dir = std::env::var_os("PI_CODING_AGENT_DIR")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::home_dir().unwrap_or_default().join(".pi/agent"));
+        let encoded = workspace.to_string_lossy();
+        let encoded = encoded
+            .strip_prefix(['/', '\\'])
+            .unwrap_or(&encoded)
+            .replace(['/', '\\', ':'], "-");
+        resolve_pi_path(&workspace, &agent_dir)
+            .join("sessions")
+            .join(format!("--{encoded}--"))
     };
-    // HOME may use an OS alias (e.g. /var -> /private/var). Keep persisted
-    // roots canonical, including when the native agent directory is new.
-    let agent_dir = agent_dir
-        .ancestors()
-        .filter(|_| agent_dir.is_absolute())
-        .find_map(|ancestor| {
-            ancestor
-                .canonicalize()
-                .ok()
-                .map(|base| base.join(agent_dir.strip_prefix(ancestor).expect("ancestor prefix")))
-        })
-        .unwrap_or(agent_dir);
     PiSeatPaths {
         wrapper: runtime_root.join("team-mcp.ts"),
-        sessions: agent_dir
-            .join("sessions")
-            .join(format!("--team-agent-{seat}--")),
+        sessions,
         runtime_root,
     }
 }
 
-/// Preserve exact legacy backings and native backings after a Pi home change.
-/// Never accept another seat's root, or search for a replacement session.
-pub(crate) fn pi_session_root_matches(paths: &PiSeatPaths, root: &Path) -> bool {
-    root.is_absolute()
-        && (root == paths.runtime_root.join("sessions")
-            || (root.file_name() == paths.sessions.file_name()
-                && root.parent().and_then(Path::file_name)
-                    == Some(std::ffi::OsStr::new("sessions"))))
+fn resolve_pi_path(workspace: &Path, path: &Path) -> PathBuf {
+    let home = std::env::home_dir().unwrap_or_default();
+    let path = path
+        .strip_prefix("~")
+        .map(|tail| home.join(tail))
+        .unwrap_or_else(|_| path.to_path_buf());
+    let path = if path.is_absolute() {
+        path
+    } else {
+        workspace.join(path)
+    };
+    // Canonicalize existing parents too (e.g. macOS /var), even for new roots.
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+    path.ancestors()
+        .skip(1)
+        .find_map(|ancestor| {
+            ancestor
+                .canonicalize()
+                .ok()
+                .map(|base| base.join(path.strip_prefix(ancestor).expect("ancestor prefix")))
+        })
+        .unwrap_or(path)
 }
 
 /// ---
@@ -456,17 +461,19 @@ pub(crate) fn write_pi_wrapper_with_publish(
 pub(crate) struct PiLeaderArgs {
     pub model: Option<String>,
     pub effort: Option<ProviderEffort>,
+    pub session_dir: Option<PathBuf>,
 }
 
 /// ---
-/// purpose: 解析 Pi leader 唯一允许的 model/thinking 输入
-/// returns: 仅保留调用方显式给出的 qualified model 与 effort
+/// purpose: 解析 Pi leader 的 native model/thinking/session-dir 输入
+/// returns: 调用方显式给出的 qualified model、effort 与 session directory
 /// errors: 重复、未知或 materializer-owned flag 时返回 ProviderError
 /// ---
 pub(crate) fn parse_pi_leader_args(args: &[String]) -> Result<PiLeaderArgs, ProviderError> {
     let args = args.strip_prefix(&["--".to_string()]).unwrap_or(args);
     let mut model = None;
     let mut effort = None;
+    let mut session_dir = None;
     let mut index = 0;
     while index < args.len() {
         let flag = args[index].as_str();
@@ -475,6 +482,9 @@ pub(crate) fn parse_pi_leader_args(args: &[String]) -> Result<PiLeaderArgs, Prov
         })?;
         match flag {
             "--model" if model.is_none() => model = Some(value.clone()),
+            "--session-dir" if session_dir.is_none() && !value.is_empty() => {
+                session_dir = Some(PathBuf::from(value));
+            }
             "--thinking" if effort.is_none() => {
                 let parsed = ProviderEffort::parse(value).ok_or_else(|| {
                     ProviderError::Command(format!("unknown Pi thinking effort {value:?}"))
@@ -485,7 +495,7 @@ pub(crate) fn parse_pi_leader_args(args: &[String]) -> Result<PiLeaderArgs, Prov
             }
             _ => {
                 return Err(ProviderError::Command(format!(
-                    "Pi leader accepts only one --model and one --thinking; got {flag:?}"
+                    "Pi leader accepts one --model, --thinking and --session-dir; got {flag:?}"
                 )));
             }
         }
@@ -501,7 +511,11 @@ pub(crate) fn parse_pi_leader_args(args: &[String]) -> Result<PiLeaderArgs, Prov
             "Pi leader --model must be a qualified exact id".to_string(),
         ));
     }
-    Ok(PiLeaderArgs { model, effort })
+    Ok(PiLeaderArgs {
+        model,
+        effort,
+        session_dir,
+    })
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -724,12 +738,14 @@ pub(crate) struct PiMaterializeRequest<'a> {
     pub team_mcp_tools: &'a [&'a str],
     pub mcp_config: &'a McpConfig,
     pub session_scope: PiSessionScope,
+    /// Explicit native --session-dir, or the recorded root for exact resume.
+    pub session_dir: Option<&'a Path>,
 }
 
 /// ---
 /// purpose: 共享物化 Pi leader 与 TeamMate 的 wrapper 和 CommandPlan
-/// returns: fresh Pi CommandPlan 不传 --session-id；isolated seats carry their session root, while the
-///          interactive leader preserves Pi's native default root
+/// returns: isolated seats use native --session-id for exact capture in shared native roots;
+///          the zero-argument interactive leader preserves Pi's defaults
 /// errors: resolver、exact model、wrapper 或 argv 构造失败时返回 ProviderError
 /// ---
 pub(crate) fn materialize_pi_plan(
@@ -741,7 +757,7 @@ pub(crate) fn materialize_pi_plan(
 /// ---
 /// purpose: 用上游已验证的 captured id/path 物化 Pi exact-path resume 计划
 /// returns: 与 fresh 共用 resolver/wrapper/argv builder，且不再生成 session id
-/// errors: backing 缺失或越出席位 root 时拒绝；header id/cwd 由 session scanner 在调用前验证
+/// errors: backing 缺失、越出 recorded root 或 header id/cwd 不匹配时拒绝
 /// ---
 pub(crate) fn materialize_pi_resume_plan(
     request: PiMaterializeRequest<'_>,
@@ -762,16 +778,13 @@ fn materialize_pi_plan_with_session(
         .map(|model| select_exact_pi_model(&catalog, model))
         .transpose()?;
     let mut paths = pi_seat_paths(request.workspace, request.team_id, request.agent_id);
-    if let Some((_, session_path, _)) = resume {
-        paths.sessions = session_path
-            .ancestors()
-            .find(|root| pi_session_root_matches(&paths, root))
-            .ok_or_else(|| {
-                ProviderError::ResumeUnavailable(
-                    "Pi exact session backing is outside the recorded seat root".to_string(),
-                )
-            })?
-            .to_path_buf();
+    if let Some(session_dir) = request.session_dir {
+        paths.sessions = resolve_pi_path(request.workspace, session_dir);
+    } else if resume
+        .is_some_and(|(_, path, _)| path.starts_with(paths.runtime_root.join("sessions")))
+    {
+        // Older state may still point at the original Team-owned backing.
+        paths.sessions = paths.runtime_root.join("sessions");
     }
     let session_dir = match request.session_scope {
         PiSessionScope::Isolated => Some(paths.sessions.as_path()),
@@ -802,7 +815,11 @@ fn materialize_pi_plan_with_session(
                 exact_path.display()
             )));
         }
-        let _ = spawn_cwd;
+        crate::provider::session_scan::pi::validate_exact_backing(
+            &exact_path,
+            session_id,
+            spawn_cwd,
+        )?;
         Some((session_id, exact_path))
     } else {
         if let Some(session_dir) = session_dir {
@@ -839,16 +856,20 @@ fn materialize_pi_plan_with_session(
         })?;
         (argv, None)
     } else {
+        let session_id =
+            (request.session_scope == PiSessionScope::Isolated).then(new_pi_session_id);
         let argv = build_pi_command_argv(PiCommandRequest {
             extension: &wrapper,
             model: model.as_deref(),
             effort: request.effort,
             system_prompt: request.system_prompt,
             session_dir,
-            session: PiSessionSelector::Fresh,
+            session: session_id.as_ref().map_or(PiSessionSelector::Fresh, |id| {
+                PiSessionSelector::FreshWithId { id }
+            }),
             agent_id: request.agent_id,
         })?;
-        (argv, None)
+        (argv, session_id)
     };
     Ok(CommandPlan {
         argv,

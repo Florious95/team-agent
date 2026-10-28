@@ -760,17 +760,9 @@ fn source_binding(
             "Pi source rollout_path is not its canonical exact path".to_string(),
         ));
     }
-    let paths = crate::lifecycle::launch::pi_mcp::pi_seat_paths(
-        &selected.run_workspace,
-        &selected.team_key,
-        source_agent_id.as_str(),
-    );
+    // Native cwd roots (and explicit --session-dir roots) are shared. Ownership
+    // comes from the captured header UUID/cwd tuple, not a seat directory name.
     let recorded_root = PathBuf::from(required_state_string(source, "claude_projects_root")?);
-    if !crate::lifecycle::launch::pi_mcp::pi_session_root_matches(&paths, &recorded_root) {
-        return Err(LifecycleError::RequirementUnmet(
-            "Pi source recorded session root does not match its managed seat".to_string(),
-        ));
-    }
     ensure_no_symlink_components(&recorded_root, false)?;
     let canonical_root = fs::canonicalize(&recorded_root)
         .map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;

@@ -218,7 +218,7 @@ fn pi_clone_is_fresh_and_fork_is_not_clone() {
     let clone_paths = pi_seat_paths(workspace, "team-a", "clone");
     assert_ne!(source_paths.runtime_root, clone_paths.runtime_root);
     assert_ne!(source_paths.wrapper, clone_paths.wrapper);
-    assert_ne!(source_paths.sessions, clone_paths.sessions);
+    assert_eq!(source_paths.sessions, clone_paths.sessions);
 
     let source_session = SessionId::new("652756ea-aaee-4437-a30f-40c5606826d5");
     let fork = get_adapter(Provider::Pi).fork(Some(&source_session), AuthMode::Subscription, None);

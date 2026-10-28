@@ -495,6 +495,7 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
         team_mcp_tools: &["send_message"],
         mcp_config: &native_config,
         session_scope: PiSessionScope::NativeDefault,
+        session_dir: None,
     })
     .expect("NativeDefault materializer");
     assert!(
@@ -531,13 +532,24 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
     assert!(isolated_paths
         .wrapper
         .starts_with(isolated_workspace.join(".team")));
-    assert_ne!(
+    assert_eq!(
         isolated_paths.sessions,
         pi_seat_paths(&isolated_workspace, "team-a", "worker-b").sessions
     );
-    assert_ne!(
+    assert_eq!(
         isolated_paths.sessions,
         pi_seat_paths(&isolated_workspace, "team-b", "worker-a").sessions
+    );
+    let encoded_cwd = format!(
+        "--{}--",
+        isolated_workspace
+            .to_string_lossy()
+            .trim_start_matches('/')
+            .replace(['/', '\\', ':'], "-")
+    );
+    assert_eq!(
+        isolated_paths.sessions.file_name().unwrap(),
+        encoded_cwd.as_str()
     );
     assert_ne!(
         isolated_paths.sessions,
@@ -555,6 +567,7 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
         team_mcp_tools: &["send_message"],
         mcp_config: &isolated_config,
         session_scope: PiSessionScope::Isolated,
+        session_dir: None,
     })
     .expect("Isolated materializer");
     assert_eq!(
@@ -563,6 +576,14 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
     );
     assert_eq!(isolated.argv.first().map(String::as_str), Some("pi"));
     assert_session_pair(&isolated.argv, &isolated_paths.sessions);
+    let fresh_id = isolated
+        .expected_session_id
+        .as_ref()
+        .expect("native UUID selector");
+    assert!(isolated
+        .argv
+        .windows(2)
+        .any(|pair| pair == ["--session-id", fresh_id.as_str()]));
     assert!(!isolated.argv.iter().any(|arg| arg == "--cwd"));
     assert!(!isolated.argv.iter().any(|arg| arg == "--workspace"));
 
@@ -570,7 +591,12 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
     let exact = isolated_paths.sessions.join("2026/09/exact.jsonl");
     std::fs::create_dir_all(exact.parent().expect("exact session parent"))
         .expect("create exact session parent");
-    std::fs::write(&exact, b"{}\n").expect("write exact session fixture");
+    write_pi_session_header(
+        &exact,
+        session_id.as_str(),
+        &isolated_workspace,
+        "2026-09-01T00:00:01Z",
+    );
     let resumed = materialize_pi_resume_plan(
         PiMaterializeRequest {
             workspace: &isolated_workspace,
@@ -582,6 +608,7 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
             team_mcp_tools: &["send_message"],
             mcp_config: &isolated_config,
             session_scope: PiSessionScope::Isolated,
+            session_dir: None,
         },
         &session_id,
         &exact,
@@ -606,7 +633,12 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
     let legacy_root = isolated_paths.runtime_root.join("sessions");
     let legacy_exact = legacy_root.join("legacy.jsonl");
     std::fs::create_dir_all(&legacy_root).unwrap();
-    std::fs::write(&legacy_exact, b"{}\n").unwrap();
+    write_pi_session_header(
+        &legacy_exact,
+        session_id.as_str(),
+        &isolated_workspace,
+        "2026-09-01T00:00:01Z",
+    );
     {
         let _override = hermetic.with_env("PI_CODING_AGENT_DIR", "~/custom-pi");
         let customized = pi_seat_paths(&isolated_workspace, "team-a", "worker-a");
@@ -640,6 +672,7 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
                     team_mcp_tools: &["send_message"],
                     mcp_config: &isolated_config,
                     session_scope: PiSessionScope::Isolated,
+                    session_dir: Some(root),
                 },
                 &session_id,
                 path,
@@ -663,6 +696,46 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
         );
     }
 
+    {
+        let _agent_dir = hermetic.with_env("PI_CODING_AGENT_DIR", "~/ignored-agent-dir");
+        let _session_dir =
+            hermetic.with_env("PI_CODING_AGENT_SESSION_DIR", "~/native-session-override");
+        let expected = hermetic
+            .home()
+            .canonicalize()
+            .unwrap()
+            .join("native-session-override");
+        assert_eq!(
+            pi_seat_paths(&isolated_workspace, "team-a", "worker-a").sessions,
+            expected
+        );
+        let explicit = isolated_workspace.join("explicit-sessions");
+        let parsed = crate::lifecycle::launch::pi_mcp::parse_pi_leader_args(&[
+            "--session-dir".into(),
+            explicit.to_string_lossy().into_owned(),
+        ])
+        .expect("native --session-dir accepted");
+        for root in [None, parsed.session_dir.as_deref()] {
+            let plan = materialize_pi_plan(PiMaterializeRequest {
+                workspace: &isolated_workspace,
+                team_id: "team-a",
+                agent_id: "worker-a",
+                model: None,
+                effort: None,
+                system_prompt: "native directory precedence",
+                team_mcp_tools: &["send_message"],
+                mcp_config: &isolated_config,
+                session_scope: PiSessionScope::Isolated,
+                session_dir: root,
+            })
+            .expect("native session directory override");
+            let expected_root = root.unwrap_or(&expected);
+            assert_eq!(plan.provider_projects_root.as_deref(), Some(expected_root));
+            assert_session_pair(&plan.argv, expected_root);
+            assert_ne!(plan.expected_session_id, isolated.expected_session_id);
+        }
+    }
+
     let native_resume = materialize_pi_resume_plan(
         PiMaterializeRequest {
             workspace: &native_workspace,
@@ -674,6 +747,7 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
             team_mcp_tools: &["send_message"],
             mcp_config: &native_config,
             session_scope: PiSessionScope::NativeDefault,
+            session_dir: None,
         },
         &session_id,
         &exact,
@@ -695,7 +769,12 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
     let other_candidate = other_paths.sessions.join("other.jsonl");
     std::fs::create_dir_all(other_candidate.parent().expect("other session parent"))
         .expect("create other session parent");
-    std::fs::write(&other_candidate, b"{}\n").expect("write other seat candidate");
+    write_pi_session_header(
+        &other_candidate,
+        "other-seat-session",
+        &isolated_workspace,
+        "2026-09-01T00:00:01Z",
+    );
     for (label, outside) in [("HOME", &home_candidate), ("other seat", &other_candidate)] {
         let refused = materialize_pi_resume_plan(
             PiMaterializeRequest {
@@ -708,6 +787,7 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
                 team_mcp_tools: &["send_message"],
                 mcp_config: &isolated_config,
                 session_scope: PiSessionScope::Isolated,
+                session_dir: None,
             },
             &session_id,
             &outside,
@@ -718,7 +798,7 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
                 refused,
                 Err(crate::provider::ProviderError::ResumeUnavailable(_))
             ),
-            "{label} candidate must be refused by the exact seat-root check: {refused:?}"
+            "{label} candidate must be refused by the exact root/id/cwd check: {refused:?}"
         );
     }
 
@@ -780,10 +860,14 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
                 .any(|arg| arg.as_str() == other_candidate.to_string_lossy().as_ref())
         );
 
-        assert!(
-            started_agent.pending_session_id.is_none(),
-            "fresh Pi assigns its own session id"
-        );
+        let pending_id = started_agent
+            .pending_session_id
+            .as_ref()
+            .expect("fresh Pi UUID selector");
+        assert!(record
+            .1
+            .windows(2)
+            .any(|pair| pair == ["--session-id", pending_id.as_str()]));
         let foreign_session_id = format!("{worker}-foreign");
         write_pi_session_header(
             &home_candidate,
@@ -811,7 +895,7 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
             pane_id: None,
             pane_pid: None,
             spawned_at: Some(started_agent.spawned_at.clone()),
-            expected_session_id: None,
+            expected_session_id: Some(pending_id.clone()),
             provider_projects_root: Some(paths.sessions.clone()),
         };
         let candidates = scan_session_candidates_once(Provider::Pi, &context)
@@ -824,7 +908,7 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
         let own = paths.sessions.join("own.jsonl");
         write_pi_session_header(
             &own,
-            &format!("{worker}-own"),
+            pending_id.as_str(),
             &worker_workspace,
             "2099-01-01T00:00:00Z",
         );
@@ -837,7 +921,7 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
                 .session_id
                 .as_ref()
                 .map(SessionId::as_str),
-            Some(format!("{worker}-own").as_str())
+            Some(pending_id.as_str())
         );
         std::fs::remove_file(&cross_seat).expect("clear foreign header from the other seat");
     }

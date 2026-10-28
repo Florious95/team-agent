@@ -336,6 +336,7 @@ fn leader_start_plan_with_ambient_authority(
                     external_path,
                     allow_nested_attach,
                 ),
+                session_dir: parsed.session_dir.as_deref(),
             },
         )
         .map_err(|error| LeaderError::Start(error.to_string()))?;

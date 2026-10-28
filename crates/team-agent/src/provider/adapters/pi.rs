@@ -21,6 +21,9 @@ pub(crate) enum PiSessionSelector<'a> {
     /// Pi assigns the session id. Passing `--session-id` makes Pi warn and
     /// then create, because the id is not a project session yet.
     Fresh,
+    FreshWithId {
+        id: &'a crate::provider::SessionId,
+    },
     Resume { path: &'a Path },
 }
 
@@ -77,6 +80,9 @@ pub(crate) fn build_pi_command_argv(
     // refusing a missing exact file once the recorded path's parent exists.
     match request.session {
         PiSessionSelector::Fresh => {}
+        PiSessionSelector::FreshWithId { id } => {
+            argv.extend(["--session-id".to_string(), id.as_str().to_string()]);
+        }
         PiSessionSelector::Resume { path }
             if !path.as_os_str().is_empty()
                 && (!path.parent().is_some_and(Path::is_dir) || path.is_file()) =>
