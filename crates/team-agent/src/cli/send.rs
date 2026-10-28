@@ -32,116 +32,49 @@ use resolve::{
 /// `cmd_send`(`commands.py:164`)。解析 target(`--to` fanout / 单 target / `*`)→ [`MessageTarget`],
 /// 拼 [`SendOptions`](no_ack→requires_ack 取反、no_wait→wait_visible 取反等)→ `messaging::send_message`。
 pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
-    // F1 (0.3.26, cross-team send): --pane <pane_id> direct targeting.
-    // Mutually exclusive with target / --to (agent-name routing).
-    if let Some(ref pane_id) = args.pane {
-        warn_send_alias("--pane");
-        if args.target.is_some()
-            || args.targets.is_some()
-            || args.to_name.is_some()
-            || args.to_leader.is_some()
-        {
-            let message = if args.to_name.is_some() {
-                "An agent name cannot be combined with --to-name/--pane/--to; choose one addressing mode"
-            } else {
-                "--pane cannot be combined with an agent name, --to or --to-leader"
-            };
-            return Err(CliError::Usage(message.to_string()));
-        }
-        let content = args.message.join(" ");
-        if content.is_empty() {
-            return Err(CliError::Usage(
-                "Provide a task message; --pane cannot send an empty message".to_string(),
-            ));
-        }
-        return Err(CliError::Usage(format!(
-            "--pane {pane_id} is no longer supported; use team-agent send <agent> 'task message' with --workspace/--team to select scope"
-        )));
+    if args.pane.is_some() {
+        return Err(CliError::Usage("raw pane delivery requires --socket and --dialect".into()));
     }
-    if args.targets.is_some() {
-        warn_send_alias("--targets");
-    }
-    if args.to_name.is_some() {
-        warn_send_alias("--to-name");
-    }
-    if args.to_leader.is_some() {
-        warn_send_alias("--to-leader");
-    }
-    let host_leader_alias = if let Some(name) = args.to_leader.as_deref() {
-        match resolve_host_leader_alias(name) {
-            Ok(resolved) => Some(resolved),
-            Err(value) => return Ok(cmd_send_result(value, args.json)),
-        }
-    } else {
-        None
-    };
-    let logical_to = logical_to_from_args(
-        args,
-        host_leader_alias
-            .as_ref()
-            .map(|(logical_to, _)| logical_to.as_str()),
-    )?;
+    let alias = args.to_leader.as_deref().map(resolve_host_leader_alias).transpose()
+        .map_err(|value| CliError::Usage(value.to_string()))?;
+    let logical_to = logical_to_from_args(args, alias.as_ref().map(|(to, _)| to.as_str()))?;
     let content = args.message.join(" ");
-    if !logical_to.is_empty() && logical_to != "*" && !content.is_empty() {
-        let mut value = send_to_logical_to(args, &logical_to, &content)?;
-        if let Some((_, entry)) = host_leader_alias.as_ref() {
-            decorate_host_leader_alias(&mut value, entry);
+    if content.is_empty() { return Err(CliError::Usage("send requires a nonempty message".into())); }
+    let requested = logical_to.split(',').map(str::trim).filter(|target| !target.is_empty());
+    let mut results = Vec::new();
+    let mut destinations = Vec::new();
+    for target in requested {
+        let (workspace, team, agent) = if let Some((team, agent)) = target.split_once('/') {
+            (&args.workspace, Some(team), agent)
+        } else { (&args.workspace, args.team.as_deref(), target) };
+        let directory = crate::direct_delivery::directory(workspace, team).map_err(CliError::Usage)?;
+        let agents: Vec<String> = if agent == "*" {
+            directory.agents().into_iter().filter(|agent| agent != args.sender.as_str()).collect()
+        } else { vec![agent.to_string()] };
+        for agent in agents {
+            let endpoint = directory.endpoint(&agent).map_err(CliError::Usage)?;
+            if !destinations.iter().any(|(_, existing): &(crate::direct_delivery::Directory, crate::direct_delivery::Endpoint)| existing.socket == endpoint.socket && existing.pane_id == endpoint.pane_id) {
+                destinations.push((crate::direct_delivery::Directory { workspace: directory.workspace.clone(), team: directory.team.clone(), state: serde_json::Value::Null }, endpoint));
+            }
         }
-        add_send_reminder_if_ok(&mut value);
-        return Ok(cmd_send_result(value, args.json));
     }
-    let selected = crate::state::selector::resolve_active_team(
-        &args.workspace,
-        args.team.as_deref(),
-        crate::state::selector::SelectorMode::RuntimeOnly,
-    )?;
-    let target = send_target(None, Some(logical_to.as_str()));
-    let mut opts = send_options_from_args(args);
-    // `args.team` is a selector and may be a legacy session/team-dir alias.
-    // All downstream membership and DB scope must use the canonical key that
-    // resolve_active_team returned, never the original selector spelling.
-    opts.team = Some(TeamKey::new(selected.team_key.clone()));
-    // CR-061/N27 routing-ambiguous: a single positional with no `--to`/`--targets` and an
-    // empty message body is a prompt-only invocation (`team-agent send "fix the build"`).
-    // The lone positional is CONTENT, not a target — reject with `routing_ambiguous`
-    // (NOT `target_not_in_team`, which would lie that the user did pick a target).
-    if let Some(amb) =
-        routing_ambiguous_value(&selected.run_workspace, args, &target, &content, &opts)
-    {
-        return Ok(cmd_send_result(amb, args.json));
-    }
-    if let Some(value) = dirty_topology_refusal_value(&selected, args.team.as_deref()) {
-        return Ok(cmd_send_result(value, args.json));
-    }
-    let coordinator_ensure =
-        if target_has_known_worker(&selected.state, &target, opts.sender.as_str()) {
-            loud_ensure_coordinator(&selected)?
+    if destinations.is_empty() { return Err(CliError::Usage("send has no recipients".into())); }
+    for (directory, endpoint) in destinations {
+        let mailbox = args.presentation.sink != crate::messaging::presentation::PresentationSink::Leader;
+        if mailbox || (endpoint.agent == "leader" && !matches!(args.sender.as_str(), "human" | "leader")) {
+            let record = crate::inbox_store::record(args.sender.as_str(), &endpoint.agent, &content, directory.team.as_deref(), "message");
+            crate::inbox_store::append(&directory.workspace, &endpoint.agent, &record).map_err(CliError::Usage)?;
+        }
+        let value = if mailbox {
+            serde_json::json!({"status": "stored", "recipient": endpoint.agent, "mailbox": true})
         } else {
-            None
+            let text = format!("Team Agent message from {}:\n\n{content}", args.sender.as_str());
+            crate::direct_delivery::send(&endpoint, &text).map_err(CliError::Usage)?
         };
-    let mut outcome = messaging::send_message(&selected.run_workspace, &target, &content, &opts)?;
-    if opts.watch_result {
-        outcome = observe_initial_delivery_for_watch(&selected, &target, &outcome, &opts)?;
+        results.push(value);
     }
-    let mut value = delivery_outcome_json(&outcome, &target, &content, &opts);
-    attach_mcp_handshake_wait(&mut value, &selected, &target, &outcome);
-    // 0.5.45 naming-addressing (design §3.5, RED-2/RED-3 positional):
-    // when the refusal reason is `target_not_in_team` AND the target
-    // was a Single non-special short id, attach scope-safe
-    // suggestions ranked from `selected.state.agents` — never from
-    // raw workspace `teams` (design §3.5 & risk table). Zero DB
-    // write / zero inject: the request stays refused, only the JSON
-    // envelope gains `requested_name`/`suggested_name`/`candidates`
-    // and the human `Action` gains a "Did you mean" line.
-    attach_positional_typo_suggestions(&mut value, &target, &selected.state);
-    append_loud_ensure_fields(&mut value, coordinator_ensure.as_ref());
-    if opts.watch_result && initial_delivery_allows_watch(outcome.status) {
-        if let Some(obj) = value.as_object_mut() {
-            obj.insert("watch".to_string(), watch_notice_json(&target, &opts));
-        }
-    }
-    add_send_reminder_if_ok(&mut value);
-    Ok(cmd_send_result(value, args.json))
+    let value = if results.len() == 1 { results.remove(0) } else { serde_json::json!({"status": "sent", "results": results}) };
+    Ok(CmdResult::from_json(value, args.json))
 }
 
 /// Resolve a host-leader alias, send through the canonical persisted funnel,

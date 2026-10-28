@@ -371,18 +371,8 @@ pub fn cmd_approvals(args: &ApprovalsArgs) -> Result<CmdResult, CliError> {
 
 /// `cmd_inbox`(`commands.py:137`)。
 pub fn cmd_inbox(args: &InboxArgs) -> Result<CmdResult, CliError> {
-    let selected = crate::state::selector::resolve_active_team(
-        &args.workspace,
-        args.team.as_deref(),
-        crate::state::selector::SelectorMode::RuntimeOnly,
-    )
-    .map_err(|e| CliError::Runtime(e.to_string()))?;
-    let value = status_port::inbox(
-        &selected.run_workspace,
-        &args.agent,
-        args.limit,
-        Some(&selected.team_key),
-    )?;
+    let value = crate::inbox_store::read(&args.workspace, &args.agent, args.limit, args.team.as_deref())
+        .map_err(CliError::Usage)?;
     if args.json {
         Ok(CmdResult::from_json(value, true))
     } else {
@@ -447,7 +437,7 @@ fn format_inbox_human(agent: &str, value: &Value) -> String {
                     .unwrap_or("-"),
             );
             let summary =
-                clean_inbox_field(message.get("summary").and_then(Value::as_str).unwrap_or(""));
+                clean_inbox_field(message.get("summary").or_else(|| message.get("content")).and_then(Value::as_str).unwrap_or(""));
             truncate_inbox_line(&format!(
                 "[{id}] [{sender} -> {recipient}] [{status}] [{time}] [{summary}]"
             ))
