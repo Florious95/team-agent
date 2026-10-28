@@ -332,66 +332,45 @@ fn observer_state_save_failure_after_enter_does_not_return_err() {
 }
 
 #[test]
-fn pane_token_refuses_second_inject_for_claude_grok_cursor() {
-    for provider in ["claude", "grok", "cursor_agent"] {
-        let mut case = WorkerCase::new(&format!("token-{provider}"), provider);
-        #[cfg(unix)]
-        let carrier = crate::mcp_server::readiness::test_carrier_pid().unwrap();
-        #[cfg(not(unix))]
-        let carrier = std::process::id();
-        let config = case.workspace.join(".team/runtime/mcp/w1.json");
-        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
-        std::fs::write(&config, serde_json::to_vec(&serde_json::json!({
-            "mcpServers": {"team_orchestrator": {
-                "command": std::env::current_exe().unwrap().canonicalize().unwrap(),
-                "env": {"TEAM_AGENT_WORKSPACE": case.workspace, "TEAM_AGENT_ID": "w1", "TEAM_AGENT_OWNER_TEAM_ID": "dup-team"}
-            }}
-        })).unwrap()).unwrap();
-        case.state["team_key"] = serde_json::json!("dup-team");
-        case.state["agents"]["w1"]["mcp_config"] = serde_json::json!(config);
-        case.state["agents"]["w1"]["pane_pid"] = serde_json::json!(carrier);
-        case.state["agents"]["w1"]["spawned_at"] =
-            serde_json::json!((chrono::Utc::now() - chrono::Duration::seconds(10)).to_rfc3339());
-        case.state["teams"] = serde_json::json!({"dup-team": case.state.clone()});
-        crate::state::persist::save_runtime_state(&case.workspace, &case.state).unwrap();
-        #[cfg(unix)]
-        crate::mcp_server::readiness::publish(
-            &case.workspace,
-            "dup-team",
-            "w1",
-            chrono::Utc::now(),
-        )
-        .unwrap();
-        let transport = RecordingTransport {
-            carrier: Some(carrier),
-            ..RecordingTransport::new("")
-        };
-        let message_id = case
-            .store
-            .create_message(
-                None,
-                "leader",
-                "w1",
-                &format!("{provider} canary"),
-                None,
-                false,
-                Some("dup-team"),
-            )
-            .unwrap();
-        let first = deliver_pending_message(
-            &case.workspace,
-            &case.store,
-            &transport,
-            &message_id,
-            &case.event_log,
-            &case.state,
-        )
-        .expect("first inject");
-        assert_eq!(
-            transport.inject_count(),
-            1,
-            "provider={provider} first inject failed: {first:?}"
-        );
+fn pane_token_refuses_second_inject_for_copilot() {
+    let provider = "copilot";
+    let mut case = WorkerCase::new(&format!("token-{provider}"), provider);
+    #[cfg(unix)]
+    let carrier = crate::mcp_server::readiness::test_carrier_pid().unwrap();
+    #[cfg(not(unix))]
+    let carrier = std::process::id();
+    let config = case.workspace.join(".team/runtime/mcp/w1.json");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, serde_json::to_vec(&serde_json::json!({
+        "mcpServers": {"team_orchestrator": {
+            "command": std::env::current_exe().unwrap().canonicalize().unwrap(),
+            "env": {"TEAM_AGENT_WORKSPACE": case.workspace, "TEAM_AGENT_ID": "w1", "TEAM_AGENT_OWNER_TEAM_ID": "dup-team"}
+        }}
+    })).unwrap()).unwrap();
+    case.state["team_key"] = serde_json::json!("dup-team");
+    case.state["agents"]["w1"]["mcp_config"] = serde_json::json!(config);
+    case.state["agents"]["w1"]["pane_pid"] = serde_json::json!(carrier);
+    case.state["agents"]["w1"]["spawned_at"] = serde_json::json!((chrono::Utc::now() - chrono::Duration::seconds(10)).to_rfc3339());
+    case.state["teams"] = serde_json::json!({"dup-team": case.state.clone()});
+    crate::state::persist::save_runtime_state(&case.workspace, &case.state).unwrap();
+    #[cfg(unix)]
+    crate::mcp_server::readiness::publish(&case.workspace, "dup-team", "w1", chrono::Utc::now()).unwrap();
+    let transport = RecordingTransport { carrier: Some(carrier), ..RecordingTransport::new("") };
+    let message_id = case.store.create_message(None, "leader", "w1", &format!("{provider} canary"), None, false, Some("dup-team")).unwrap();
+    let first = deliver_pending_message(
+        &case.workspace,
+        &case.store,
+        &transport,
+        &message_id,
+        &case.event_log,
+        &case.state,
+    )
+    .expect("first inject");
+    assert_eq!(
+        transport.inject_count(),
+        1,
+        "provider={provider} first inject failed: {first:?}"
+    );
 
     case.store
         .mark(&message_id, "target_resolved", Some("probe_failed"))

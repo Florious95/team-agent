@@ -87,7 +87,7 @@ pub struct NotificationClaimParams<'a> {
     pub pane_id: Option<&'a str>,
 }
 
-/// Error of a row parked by [`MessageStore::park_delivery_before_input`] (#372).
+/// Legacy #373 parked-row marker, retained only for upgrade recovery.
 pub(crate) const MCP_HANDSHAKE_TIMEOUT: &str = "mcp_handshake_timeout";
 
 /// Canonical initial message-row statuses shared by persistence, presentation,
