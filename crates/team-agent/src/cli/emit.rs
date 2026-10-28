@@ -2251,12 +2251,8 @@ mod tests {
             .collect();
         assert_eq!(
             expected.len(),
-            35,
-<<<<<<< HEAD
-            "the public catalog includes read-only endpoint discovery and the canonical lifecycle surfaces"
-=======
-            "the public catalog includes the scheduled leader reminders surface"
->>>>>>> 8e2b23670f94f920637afcc431925915eae9babb
+            36,
+            "the public catalog includes endpoint discovery and scheduled leader reminders"
         );
         for spec_name in &expected {
             assert!(
