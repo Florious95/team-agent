@@ -156,6 +156,7 @@ pub fn start_agent(
                 Some(_) => "resumed",
             }, "operation":receipt.id,
             "session_id":projection.get("session_id"),"generation":projection.get("generation"),
+            "session_observation":projection.get("session_observation"),"warning":projection.get("session_warning"),
             "coordinator":crate::lifecycle::coordinator_start_summary_value(
                 &crate::lifecycle::CoordinatorStartSummary::from_start_report(&coordinator))}))
     })

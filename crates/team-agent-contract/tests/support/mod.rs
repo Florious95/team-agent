@@ -322,6 +322,7 @@ pub struct FakeHost {
     pub deliveries: usize,
     pub fail_spawn: bool,
     pub fail_capture: bool,
+    pub capture_error: Option<Error>,
     pub fail_stop: bool,
     pub uncertain_delivery: bool,
     pub route_after_spawn: Option<(String, String, String)>,
@@ -401,6 +402,7 @@ impl LifecycleHost for FakeHost {
         Ok(DeliveryEffect::Submitted)
     }
     fn session_evidence(&mut self, seat: &SeatRecord) -> Result<ScopedSessionEvidence, Error> {
+        if let Some(error) = &self.capture_error { return Err(error.clone()); }
         if self.fail_capture {
             return Err(Error::Host("capture failed"));
         }

@@ -192,6 +192,13 @@ os.execvp('tmux', ['tmux', *sys.argv[1:]])
 #[test]
 fn due_reminder_reaches_physical_leader_and_inbox_without_a_receipt_source() {
     let fixture = Fixture::new();
+    let state_path = fixture.root.join(".team/runtime/state.json");
+    let mut state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    let leader = &mut state["teams"]["alpha"]["leader"];
+    leader["session_name"] = json!("old-leader-session");
+    leader["window"] = json!("old-leader-window");
+    leader["pane_pid"] = json!(0);
+    fs::write(state_path, serde_json::to_vec(&state).unwrap()).unwrap();
     let store = team_agent::message_store::MessageStore::open(&fixture.root).unwrap();
     let conn = rusqlite::Connection::open(store.db_path()).unwrap();
     conn.execute(
@@ -219,7 +226,7 @@ fn due_reminder_reaches_physical_leader_and_inbox_without_a_receipt_source() {
 }
 
 #[test]
-fn logical_send_refuses_stale_binding_but_not_dead_status_or_missing_mcp() {
+fn logical_send_uses_live_pane_despite_stale_metadata_dead_status_and_missing_mcp() {
     let fixture = Fixture::new();
     assert!(Command::new("tmux")
         .args(["-S", &fixture.socket, "rename-window", "-t", &fixture.pane, "worker"])
@@ -240,13 +247,16 @@ fn logical_send_refuses_stale_binding_but_not_dead_status_or_missing_mcp() {
         worker[field] = if field == "pane_pid" { json!(0) } else { json!("foreign") };
         let bytes = serde_json::to_vec(&stale).unwrap();
         fs::write(&path, &bytes).unwrap();
-        let output = fixture.cli(&["send", "worker", "must not inject", "--team", "alpha"]);
-        assert!(!output.status.success(), "stale {field} was accepted");
-        assert!(fixture.tools().send_message(
-            &MessageTarget::Single("worker".into()), "must not inject", None, None, None,
-        ).is_err());
+        let content = format!("live despite stale {field}");
+        let output = fixture.cli(&["send", "worker", &content, "--team", "alpha"]);
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        fixture.received(&format!("Team Agent message from leader:\n\n{content}"));
+        let result = fixture.tools().send_message(
+            &MessageTarget::Single("worker".into()), &content, None, None, None,
+        ).unwrap().to_value();
+        assert_eq!(result["status"], "sent");
+        fixture.received(&format!("Team Agent message from worker:\n\n{content}"));
         assert_eq!(fs::read(&path).unwrap(), bytes);
-        assert!(fs::read(fixture.root.join("received")).unwrap().is_empty());
         assert!(!fixture.root.join(".team/inbox").exists());
         assert!(!fixture.root.join(".team/db").exists());
     }
@@ -255,6 +265,9 @@ fn logical_send_refuses_stale_binding_but_not_dead_status_or_missing_mcp() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     fixture.received("Team Agent message from leader:\n\nlive despite dead status");
     assert!(!fixture.root.join(".team/db").exists());
+    assert!(Command::new("tmux").args(["-S", &fixture.socket, "kill-pane", "-t", &fixture.pane])
+        .status().unwrap().success());
+    assert!(!fixture.cli(&["send", "worker", "no live target", "--team", "alpha"]).status.success());
 }
 
 #[test]

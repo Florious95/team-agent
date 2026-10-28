@@ -223,7 +223,9 @@ pub fn project_seat(workspace: &Path, team: &str, id: &str) -> Result<Value, Bac
     // never turns send_message/get_team_status into invented discoveries.
     let mut observed = Vec::new();
     let mut binding_source = None;
-    if super::registry::provider(seat.provider.as_str())?.uses_tool_roundtrips() {
+    if super::registry::provider(seat.provider.as_str())?.uses_tool_roundtrips()
+        && seat.session.is_some()
+    {
         let protocol = super::pump::protocol(&mut backend, &seat, &team_agent_contract::host::clock::RealClock::new())?;
         if let team_agent_contract::contract::probe::ProbeOutcome::Observed(binding) = protocol.binding.outcome {
             binding_source = Some(format!("{:?}", binding.source));
@@ -243,11 +245,18 @@ pub fn project_seat(workspace: &Path, team: &str, id: &str) -> Result<Value, Bac
     } else {
         "unknown"
     };
+    let session_warning = if seat.session.is_none() {
+        backend.store.creation_receipt(&seat.identity.seat, Some(&seat.identity))?
+            .filter(|receipt| receipt.outcome == team_agent_contract::orchestration::store::Outcome::Committed)
+            .and_then(|receipt| receipt.failure)
+    } else { None };
     Ok(
         json!({"agent_id":id,"provider":seat.provider,"status":status,"model":role.model,"effort":role.effort,
         "contract_prompt_sha256":team_agent_contract::host::digest_hex(role.prompt.sha256),
         "runtime_family":"contract","contract_scope":seat.identity.scope,"contract_instance":seat.identity.instance,
         "generation":seat.identity.generation,"owner_team_id":team,"team_key":team,
+        "session_observation":if seat.session.is_some() { "observed" } else { "unobserved" },
+        "session_warning":session_warning,
         "session_id":seat.session.map(|session| session.native_session),
         "native_endpoint":seat.endpoint,"native_pane":seat.pane,
         "pane_id":seat.pane,"tmux_endpoint":seat.endpoint,"window":null,"session_name":null,

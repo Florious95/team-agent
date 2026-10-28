@@ -1,6 +1,6 @@
 use super::store::*;
 use super::Error;
-use crate::contract::delivery::DeliveryEffect;
+use crate::contract::delivery::{DeliveryEffect, PersistenceState};
 use crate::contract::descriptor::{
     ProviderDescriptor, ResourceDisposition, ResourceKind, ResumeMode,
 };
@@ -416,7 +416,26 @@ impl Lifecycle<'_> {
         if adapter.descriptor.session.fresh
             != crate::contract::descriptor::FreshSession::NotApplicable
         {
-            let binding = self.capture(adapter, &operation.target)?;
+            let binding = match self.capture(adapter, &operation.target) {
+                Ok(binding) => binding,
+                Err(error) if matches!(operation.kind, TransactionKind::Startup | TransactionKind::Restart)
+                    && matches!(&error, Error::NativeControl(report)
+                        if report.metadata.owner == operation.target.identity
+                            && report.metadata.operation == Operation::SessionInspect
+                            && report.persistence == PersistenceState::Durable
+                            && !report.problems.is_empty()
+                            && report.problems.iter().all(|problem|
+                                problem.code == "observation-deadline" && problem.host.is_none())) =>
+                {
+                    // Spawn succeeded. An inconclusive observation must not kill
+                    // that process or invent a resume binding. Preserve the
+                    // diagnostic; forks, fencing and persistence failures retain
+                    // their existing fail-closed behavior.
+                    operation.failure = Some(format!("session observation deferred: {error}"));
+                    return self.commit(operation);
+                }
+                Err(error) => return Err(error),
+            };
             match resolved.expected_session() {
                 ExpectedSession::Preassigned(id) if &binding.native_session != id => {
                     return Err(Error::Fence)

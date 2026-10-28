@@ -1464,8 +1464,11 @@ mod tests {
     #[test]
     fn native_snapshot_publishes_the_private_pane_endpoint_pair() {
         let mut fixture = RoleFixture::new();
-        fixture.role.provider = ProviderId::new("kiro").unwrap();
+        fixture.role.provider = ProviderId::new("pi_tui").unwrap();
         let _backend = fixture.canonical(SeatStatus::Ready, Phase::F5Receipt, Outcome::Committed, None);
+        let db = rusqlite::Connection::open(fixture.binding.transport_root.join("contract.db")).unwrap();
+        db.execute("update contract_operations set record=json_set(record, '$.failure', ?1)",
+            ["session observation deferred: observation-deadline"]).unwrap();
         write_role(&fixture.binding, &fixture.identity, &fixture.role).unwrap();
         let state = super::super::framework::project_seat(
             &fixture.binding.workspace.path, "test", "worker",
@@ -1475,6 +1478,10 @@ mod tests {
         assert_eq!(state["tmux_endpoint"], fixture.binding.endpoint);
         assert_eq!(state["tmux_endpoint"], state["native_endpoint"]);
         assert!(state["session_name"].is_null());
+        assert!(state["session_id"].is_null());
+        assert_eq!(state["session_observation"], "unobserved");
+        assert_eq!(state["session_warning"], "session observation deferred: observation-deadline");
+        assert_eq!(state["mcp_binding"], "unverified");
     }
 
     #[test]

@@ -139,34 +139,15 @@ impl Directory {
         })
     }
 
-    /// Validate published target identity, not MCP readiness or agent activity.
-    /// A stale logical binding is an immediate error, never a queued message.
+    /// Actuate the selected live pane; advisory session/window/PID metadata
+    /// cannot veto delivery or create a parked message.
     pub fn send(&self, agent: &str, text: &str) -> Result<Value, String> {
         let endpoint = self.endpoint(agent)?;
-        let info = self.recipient(agent)?;
-        // Native seats use a private socket, not the legacy workspace session.
-        let session = field(info, "session_name").or_else(|| {
-            field(info, "native_endpoint").is_none().then(|| field(&self.state, "session_name")).flatten()
-        });
-        let window = field(info, "window").or_else(|| field(info, "window_name"));
-        let pid = info.get("pane_pid").and_then(Value::as_u64);
-        if session.is_some() || window.is_some() || pid.is_some() {
-            let output = tmux(&endpoint.socket).args([
-                "display-message", "-p", "-t", &endpoint.pane_id,
-                "#{session_name}\t#{window_name}\t#{pane_pid}\t#{pane_dead}",
-            ]).output().map_err(|error| error.to_string())?;
-            if !output.status.success() {
-                return Err("published recipient pane is unavailable".into());
-            }
-            let observed = String::from_utf8_lossy(&output.stdout);
-            let fields: Vec<_> = observed.trim_end().split('\t').collect();
-            if fields.len() != 4 || fields[3] != "0"
-                || session.is_some_and(|expected| expected != fields[0])
-                || window.is_some_and(|expected| expected != fields[1])
-                || pid.is_some_and(|expected| fields[2].parse::<u64>().ok() != Some(expected))
-            {
-                return Err("published recipient pane binding is stale".into());
-            }
+        let output = tmux(&endpoint.socket)
+            .args(["display-message", "-p", "-t", &endpoint.pane_id, "#{pane_dead}"])
+            .output().map_err(|error| error.to_string())?;
+        if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim() != "0" {
+            return Err("recipient pane is not live on the selected socket".into());
         }
         send(&endpoint, text)
     }

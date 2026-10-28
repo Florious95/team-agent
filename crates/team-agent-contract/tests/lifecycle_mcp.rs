@@ -263,6 +263,91 @@ fn spawn_without_receipt_stays_fenced_across_recovery() {
     .is_err());
 }
 
+fn session_observation_timeout(identity: InstanceIdentity) -> Error {
+    use team_agent_contract::runtime::{delivery::*, journal::*};
+    Error::NativeControl(Box::new(InjectionReport {
+        metadata: AttemptMetadata {
+            owner: identity, attempt: AttemptId::new("inspect").unwrap(),
+            correlation: Correlation::NativeControl(OperationId::new("inspect").unwrap()),
+            operation: Operation::SessionInspect, policy_sha256: HASH,
+            payload_sha256: HASH, payload_bytes: 8,
+        },
+        disposition: InjectionDisposition::Unresolved,
+        counts: PhysicalCounts { initial: ActionCounts { issued: 1, confirmed: 1, uncertain: 0 }, ..Default::default() },
+        effect_floor: DeliveryEffect::Submitted, events: vec![],
+        problems: vec![ExecutionProblem { code: "observation-deadline", host: None }],
+        persistence: PersistenceState::Durable, bootstrap_consumed: false,
+        unreleased_buffer: None, control_paste: None,
+    }))
+}
+
+#[test]
+fn session_observation_deadline_preserves_started_process_without_inventing_session() {
+    let sandbox = Sandbox::new();
+    let mut store = sandbox.store();
+    let mut host = FakeHost {
+        capture_error: Some(session_observation_timeout(request(store.root(), "worker").identity)),
+        ..Default::default()
+    };
+    let mut io = FakeIo::new("unused");
+    let op = start(&mut store, &mut host, &mut io, "worker");
+    assert_eq!(op.outcome, Outcome::Committed);
+    assert_eq!(op.phase, Phase::F5Receipt);
+    assert_eq!((host.spawned, host.stopped, host.removed), (1, 0, 0));
+    assert!(op.target.process.is_some());
+    assert!(op.target.session.is_none());
+    assert_eq!(op.target.status, SeatStatus::Starting);
+    assert!(op.failure.as_ref().unwrap().contains("observation-deadline"));
+    assert_eq!(store.seat(&op.target.identity.seat).unwrap(), Some(op.target.clone()));
+    assert!(store.unfinished().unwrap().is_empty());
+    // MCP attribution can still function; no synthetic session/readiness proof.
+    assert_eq!(result(handle(&mut store, &context(&op.target),
+        &call(1, "report_result", json!({"summary":"running without observed session"}))).unwrap())["status"], "persisted");
+    drop(store);
+    assert_eq!(sandbox.reopen().operation(&op.id).unwrap(), op);
+}
+
+#[test]
+fn session_observation_deadline_on_restart_does_not_stop_the_new_generation() {
+    let (_sandbox, mut store, mut host, mut io, parent) = setup();
+    let request = restart_request(&store, &parent);
+    host.capture_error = Some(session_observation_timeout(request.identity.clone()));
+    let d = descriptor();
+    let h = hooks();
+    io.operation = OperationId::new("restart").unwrap();
+    let op = Lifecycle { store: &mut store, host: &mut host, io: &mut io }
+        .startup(&Adapter { descriptor: &d, hooks: &h, catalog: None },
+            &request, routing("worker"), OperationId::new("restart").unwrap()).unwrap();
+    assert_eq!(op.outcome, Outcome::Committed);
+    assert_eq!((host.spawned, host.stopped), (2, 1));
+    assert_eq!(op.target.identity, request.identity);
+    assert!(op.target.session.is_none());
+    assert!(op.failure.as_ref().unwrap().contains("observation-deadline"));
+    assert!(handle(&mut store, &context(&parent), &call(2, "report_result", json!({"summary":"old"}))).is_err());
+}
+
+#[test]
+fn non_observation_failures_and_foreign_or_undurable_reports_remain_fatal() {
+    use team_agent_contract::runtime::delivery::ExecutionProblem;
+    for case in 0..5 {
+        let sandbox = Sandbox::new();
+        let mut store = sandbox.store();
+        let mut error = session_observation_timeout(request(store.root(), "worker").identity);
+        let Error::NativeControl(report) = &mut error else { unreachable!() };
+        match case {
+            0 => report.problems[0].code = "capture-failed",
+            1 => report.persistence = PersistenceState::Failed,
+            2 => report.metadata.operation = Operation::OrdinarySend,
+            3 => report.metadata.owner.instance = InstanceId::new("foreign").unwrap(),
+            _ => report.problems.push(ExecutionProblem { code: "target-invalid", host: None }),
+        }
+        let mut host = FakeHost { capture_error: Some(error), ..Default::default() };
+        let op = start(&mut store, &mut host, &mut FakeIo::new("unused"), "worker");
+        assert_eq!(op.outcome, Outcome::Compensated, "case {case}");
+        assert_eq!(host.stopped, 1, "case {case}");
+    }
+}
+
 #[test]
 fn captured_spawn_failure_compensates_only_known_process_and_owned_resources() {
     let sandbox = Sandbox::new();
