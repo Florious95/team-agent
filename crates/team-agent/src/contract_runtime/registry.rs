@@ -11,6 +11,7 @@ use team_agent_contract::contract::{
 };
 use team_agent_contract::kiro::{self, KiroAdapter, KIRO_DESCRIPTOR};
 use team_agent_contract::providers::codex::{self, CodexAdapter, CODEX_DESCRIPTOR};
+use team_agent_contract::providers::claude::{self, ClaudeAdapter, CLAUDE_DESCRIPTOR};
 use team_agent_contract::providers::cursor::{self, CursorAdapter, CURSOR_DESCRIPTOR};
 use team_agent_contract::providers::grok_build::{self, GrokAdapter, GROK_BUILD_DESCRIPTOR};
 use team_agent_contract::providers::pi::{self, PiAdapter, PI_DESCRIPTOR};
@@ -19,7 +20,7 @@ use team_agent_contract::runtime::{
     native_panel::{NativePanelPolicy, SessionPanelPolicy},
 };
 
-const DESCRIPTORS: &[&ProviderDescriptor] = &[&KIRO_DESCRIPTOR, &CURSOR_DESCRIPTOR, &GROK_BUILD_DESCRIPTOR, &CODEX_DESCRIPTOR, &PI_DESCRIPTOR];
+const DESCRIPTORS: &[&ProviderDescriptor] = &[&KIRO_DESCRIPTOR, &CURSOR_DESCRIPTOR, &GROK_BUILD_DESCRIPTOR, &CODEX_DESCRIPTOR, &PI_DESCRIPTOR, &CLAUDE_DESCRIPTOR];
 /// Declaration names that select a leaf: Cursor's legacy key, its npm
 /// package/public command and its binary; the public names of Codex and Grok
 /// Build. The leaf's distinct id is what compiled specs and state carry. A
@@ -42,6 +43,7 @@ pub enum NativeRuntime {
     GrokBuild(grok_build::native::RuntimeInstallation),
     Codex(codex::launcher::RuntimeInstallation),
     Pi(pi::launcher::RuntimeInstallation),
+    Claude(claude::launcher::RuntimeInstallation),
 }
 
 impl NativeRuntime {
@@ -52,6 +54,7 @@ impl NativeRuntime {
             Self::GrokBuild(runtime) => runtime.launcher(),
             Self::Codex(runtime) => runtime.launcher(),
             Self::Pi(runtime) => runtime.launcher(),
+            Self::Claude(runtime) => runtime.launcher(),
         }
     }
 
@@ -62,6 +65,7 @@ impl NativeRuntime {
             Self::GrokBuild(runtime) => &runtime.engine,
             Self::Codex(runtime) => &runtime.engine,
             Self::Pi(runtime) => &runtime.engine,
+            Self::Claude(runtime) => &runtime.engine,
         }
     }
 
@@ -72,6 +76,7 @@ impl NativeRuntime {
             Self::GrokBuild(runtime) => &runtime.native,
             Self::Codex(runtime) => &runtime.native,
             Self::Pi(runtime) => &runtime.native,
+            Self::Claude(runtime) => &runtime.native,
         }
     }
 
@@ -82,6 +87,7 @@ impl NativeRuntime {
             Self::GrokBuild(runtime) => runtime.bind_catalog(catalog),
             Self::Codex(runtime) => runtime.bind_catalog(catalog),
             Self::Pi(runtime) => runtime.bind_catalog(catalog),
+            Self::Claude(runtime) => runtime.bind_catalog(catalog),
         }
     }
 }
@@ -94,6 +100,7 @@ pub(super) enum NativeProvider {
     GrokBuild,
     Codex,
     Pi,
+    Claude,
 }
 
 impl NativeProvider {
@@ -104,13 +111,14 @@ impl NativeProvider {
             Self::GrokBuild => &GROK_BUILD_DESCRIPTOR,
             Self::Codex => &CODEX_DESCRIPTOR,
             Self::Pi => &PI_DESCRIPTOR,
+            Self::Claude => &CLAUDE_DESCRIPTOR,
         }
     }
 
     pub fn action_budget(self) -> std::time::Duration {
         // Kiro's existing budget is unchanged; Cursor's measured cold-ready
         // path needs a larger finite bound, not an unbounded readiness wait.
-        std::time::Duration::from_secs(match self { Self::Kiro => 30, Self::Cursor | Self::GrokBuild | Self::Codex | Self::Pi => 90 })
+        std::time::Duration::from_secs(match self { Self::Kiro => 30, Self::Cursor | Self::GrokBuild | Self::Codex | Self::Pi | Self::Claude => 90 })
     }
 
     pub fn controls(self) -> &'static [ControlDefinition] {
@@ -120,6 +128,7 @@ impl NativeProvider {
             Self::GrokBuild => grok_build::interaction::CONTROLS,
             Self::Codex => codex::interaction::CONTROLS,
             Self::Pi => pi::interaction::CONTROLS,
+            Self::Claude => claude::interaction::CONTROLS,
         }
     }
 
@@ -134,13 +143,13 @@ impl NativeProvider {
     /// These providers use the separately fenced native tool-roundtrip ledger,
     /// never a guessed neutral tools panel or another provider's inspector.
     pub fn uses_tool_roundtrips(self) -> bool {
-        matches!(self, Self::Cursor | Self::GrokBuild | Self::Codex | Self::Pi)
+        matches!(self, Self::Cursor | Self::GrokBuild | Self::Codex | Self::Pi | Self::Claude)
     }
 
     pub fn startup(self) -> Option<&'static StartupDefinition> {
         match self {
             Self::GrokBuild => Some(&grok_build::interaction::STARTUP),
-            Self::Kiro | Self::Cursor | Self::Codex | Self::Pi => None,
+            Self::Kiro | Self::Cursor | Self::Codex | Self::Pi | Self::Claude => None,
         }
     }
 
@@ -148,7 +157,7 @@ impl NativeProvider {
         match self {
             Self::GrokBuild => Some(&grok_build::interaction::SESSION_PANEL),
             // `/status` and `/session` print history cards, not modals: nothing to close.
-            Self::Kiro | Self::Cursor | Self::Codex | Self::Pi => None,
+            Self::Kiro | Self::Cursor | Self::Codex | Self::Pi | Self::Claude => None,
         }
     }
 
@@ -171,6 +180,10 @@ impl NativeProvider {
                 field: "Pi native Team-tool inspector",
                 reason: pi::UNVERIFIED,
             }),
+            Self::Claude => Err(ContractError::Unverified {
+                field: "Claude native Team-tool inspector",
+                reason: claude::UNVERIFIED,
+            }),
         }
     }
 
@@ -179,6 +192,7 @@ impl NativeProvider {
             Self::GrokBuild => Ok(grok_build::server_key(identity)),
             Self::Codex => Ok(codex::server_key(identity)),
             Self::Pi => Ok(pi::server_key(identity)),
+            Self::Claude => Ok(claude::server_key(identity)),
             Self::Kiro | Self::Cursor => Ok(self.server_key()?.into()),
         }
     }
@@ -212,6 +226,9 @@ impl NativeProvider {
             Self::Pi => PiAdapter::new(pi::McpStdio {
                 executable, arguments, environment,
             }).map(NativeAdapter::Pi),
+            Self::Claude => ClaudeAdapter::new(claude::McpStdio {
+                executable, arguments, environment,
+            }).map(NativeAdapter::Claude),
         }
     }
 }
@@ -222,6 +239,7 @@ pub(super) enum NativeAdapter {
     GrokBuild(GrokAdapter),
     Codex(CodexAdapter),
     Pi(PiAdapter),
+    Claude(ClaudeAdapter),
 }
 
 impl NativeAdapter {
@@ -266,6 +284,14 @@ impl NativeAdapter {
                     None => adapter,
                 }))
             }
+            Self::Claude(adapter) => {
+                let adapter = adapter.with_project(project)?;
+                Ok(Self::Claude(match runtime {
+                    Some(NativeRuntime::Claude(runtime)) => adapter.with_runtime(runtime),
+                    Some(_) => return Err(ContractError::Mismatch("native runtime provider")),
+                    None => adapter,
+                }))
+            }
         }
     }
 
@@ -276,6 +302,7 @@ impl NativeAdapter {
             Self::GrokBuild(adapter) => adapter.hooks(),
             Self::Codex(adapter) => adapter.hooks(),
             Self::Pi(adapter) => adapter.hooks(),
+            Self::Claude(adapter) => adapter.hooks(),
         }
     }
 
@@ -286,6 +313,7 @@ impl NativeAdapter {
             Self::GrokBuild(adapter) => adapter.plan(request),
             Self::Codex(adapter) => adapter.plan(request),
             Self::Pi(adapter) => adapter.plan(request),
+            Self::Claude(adapter) => adapter.plan(request),
         }
     }
 }
@@ -298,6 +326,7 @@ pub(super) fn provider(key: &str) -> Result<NativeProvider, ContractError> {
         "grok_build" => Ok(NativeProvider::GrokBuild),
         "codex_tui" => Ok(NativeProvider::Codex),
         "pi_tui" => Ok(NativeProvider::Pi),
+        "claude_tui" => Ok(NativeProvider::Claude),
         _ => Err(ContractError::Invalid("contract provider dispatcher")),
     }
 }
@@ -350,6 +379,16 @@ pub fn recognizes(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_native_argv_prompt_keeps_first_business_tool_bootstrap() {
+        assert_eq!(provider("claude_tui").unwrap(), NativeProvider::Claude);
+        assert_eq!(CLAUDE_DESCRIPTOR.prompt.carrier, Support::Supported(PromptCarrier::Argv));
+        assert!(CLAUDE_DESCRIPTOR.workspace.shared_cwd);
+        assert!(NativeProvider::Claude.first_business_bootstrap());
+        assert!(NativeProvider::Claude.uses_tool_roundtrips());
+        assert!(NativeProvider::Claude.tool_panel().is_err());
+    }
 
     #[test]
     fn canonical_cursor_does_not_reclassify_legacy_names() {

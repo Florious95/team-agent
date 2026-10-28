@@ -349,6 +349,12 @@ fn native_case_with(mode: &str, content: &str, expected_keys: usize, shared_work
         );
         clock.sleep(Duration::from_millis(10));
     }
+    // Resizing the owned window must not revoke capture, restore, delivery or stop.
+    assert!(raw_tmux(&mut host, &tmux, &target.endpoint,
+        &["resize-window", "-t", &target.window, "-x", "100", "-y", "30"]).success());
+    host.capture(&target, &clock, clock.now() + Duration::from_secs(5), Duration::from_millis(500)).unwrap();
+    host = TmuxHost::restore_owned(target.clone(), tmux.clone(), limits, NoLocaleRunner::default(),
+        &clock, clock.now() + Duration::from_secs(5)).unwrap();
     assert!(raw_tmux(
         &mut host,
         &tmux,

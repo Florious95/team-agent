@@ -489,7 +489,7 @@ pub(super) fn require_private_primary(
     match selected {
         registry::NativeProvider::GrokBuild => team_agent_contract::providers::grok_build::native::require_private_primary(cwd)?,
         registry::NativeProvider::Codex => team_agent_contract::providers::codex::launcher::require_private_primary(cwd)?,
-        registry::NativeProvider::Kiro | registry::NativeProvider::Cursor | registry::NativeProvider::Pi => {}
+        registry::NativeProvider::Kiro | registry::NativeProvider::Cursor | registry::NativeProvider::Pi | registry::NativeProvider::Claude => {}
     }
     Ok(())
 }
@@ -729,6 +729,9 @@ pub(super) fn preassign_session(
     request: &mut LaunchRequest,
     discovered: &Discovery,
 ) -> Result<(), BackendError> {
+    if matches!(&discovered.runtime, Some(registry::NativeRuntime::Claude(_))) {
+        request.preassigned_session = Some(team_agent_contract::providers::claude::session_id(&request.identity));
+    }
     if let Some(registry::NativeRuntime::Cursor(runtime)) = &discovered.runtime {
         request.preassigned_session = Some(
             team_agent_contract::providers::cursor::native::allocate_chat(

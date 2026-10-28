@@ -256,8 +256,8 @@ fn resolve_launch_inner(
         descriptor.mcp.carrier.require("worker MCP")?;
         match descriptor.mcp.isolation {
             McpIsolation::AmbientExcluded => {},
-            // A scoped cwd file or this invocation's own argv: neither can reach
-            // another seat, and both still need the per-generation runtime key.
+            // A scoped cwd file, an owned runtime-root file, or invocation-local
+            // argv cannot reach another seat. All require a runtime-bound key.
             McpIsolation::OwnedServerIsolated
                 if matches!(descriptor.mcp.carrier, Support::Supported(McpCarrier::ScopedConfig | McpCarrier::Argv))
                     && ((descriptor.mcp.scope == ResourceScope::WorkingDirectory
