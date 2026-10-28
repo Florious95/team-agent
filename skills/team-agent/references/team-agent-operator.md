@@ -37,7 +37,7 @@ team-agent start --from ./my-team --workspace . --team project-team
 team-agent start --from .team/current --workspace . --team project-team
 team-agent start --help
 team-agent start --workspace . --team project-team
-team-agent start analyst --provider pi --model openai-codex/gpt-6-luna --bypass false --prompt "Analyze the proposed change"
+team-agent start analyst --provider pi --bypass false --prompt "Analyze the proposed change"
 team-agent start auditor --role-file /absolute/path/to/auditor.md
 team-agent start reviewer --effort high --bypass false
 team-agent start reviewer --effort high --bypass false --workspace . --team project-team
@@ -144,7 +144,7 @@ Creation needs complete configuration; start is not automatic template generatio
 
 Do not silently pick provider, model, effort or bypass. False preserves native permissions; it is not a read-only or sandbox guarantee. Use supported `models --provider NAME` discovery and retain exact model IDs.
 
-Traditional minimal Markdown remains accepted by the original compiler. Its compatibility interpretation is **not a default for a new user plan**: provider defaults to Pi, bypass to false, and unset effort is left to the provider. Claude, Codex, Grok and Pi workers run only through their contract leaves, which require an exact model ID from `team-agent models --provider claude|codex|grok|pi`; an unset model is refused, never guessed. Team Agent does not infer a role model from TEAM defaults. Contract leaves use only an explicit role effort; legacy explicit TEAM provider_effort remains supported for the remaining legacy roles (Copilot, Gemini); do not invent an effort for unspecified roles.
+Traditional minimal Markdown remains accepted by the original compiler. Its compatibility interpretation is **not a default for a new user plan**: provider defaults to Pi, bypass to false, and unset model/effort are left to the provider. Codex and Grok workers run only through their contract leaves, which require an exact model ID from `team-agent models --provider codex|grok`; an unset model is refused, never guessed. Team Agent does not infer a role model from TEAM defaults. Contract leaves use only an explicit role effort; legacy explicit TEAM provider_effort remains supported for non-Pi legacy roles (Claude, Copilot, Gemini); do not invent an effort for unspecified roles.
 
 Supported role metadata:
 - `agent_id` (legacy `name`) and `role` identify the seat.
@@ -159,7 +159,7 @@ A RoleOnly seat can be registered from its complete role file. A genuinely absen
 
 ```sh
 team-agent start auditor --role-file /absolute/path/to/auditor.md
-team-agent start analyst --provider pi --model openai-codex/gpt-6-luna --bypass false --prompt "Analyze the proposed change"
+team-agent start analyst --provider pi --bypass false --prompt "Analyze the proposed change"
 ```
 
 An imported external role goes into this team's `agents/ID.md`; the original stays untouched. A file already at that destination is used in place. Equal file/CLI definitions are accepted; conflicting provider/model/effort/bypass/prompt/profile values refuse before writes/startup. Omitted model, effort, profile and role body remain unchanged.

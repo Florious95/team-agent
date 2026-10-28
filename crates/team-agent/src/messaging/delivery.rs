@@ -26,7 +26,9 @@ use crate::event_log::EventLog;
 use crate::message_store::MessageStore;
 use crate::model::enums::{PaneLiveness, Provider};
 use crate::model::ids::TeamKey;
-use crate::provider::wire::parse_canonical_provider;
+use crate::provider::wire::{
+    is_claude_family, parse_canonical_provider, parse_provider, provider_wire,
+};
 use crate::transport::{
     submit_verification_wire, turn_verification_wire, BusySignalKind, CaptureRange,
     CaptureSampleOutcome, InjectPayload, InjectReport, InjectVerification, InputSurfaceProbe, Key,
@@ -836,18 +838,25 @@ fn deliver_prepared_message(
     );
     // v0.5.113 delivery: address/owner and pane serialization are authoritative;
     // composer appearance is not admission. Native CLIs buffer/queue input.
-    let inject_attempt = transport.inject_with_submit_observer(
-        &target,
-        &payload,
-        Key::Enter,
-        true,
-        Some(&submit_observer),
+    let inject_attempt = crate::tmux_backend::with_cursor_single_enter(
+        recipient_requires_single_enter(state, &message.recipient),
+        || {
+            transport.inject_with_submit_observer(
+                &target,
+                &payload,
+                Key::Enter,
+                true,
+                Some(&submit_observer),
+            )
+        },
     );
     let inject_report = match inject_attempt {
         Ok(report) => {
             // grok 忙时第一次回车只入显式队列。默认 send-now：只重按回车顶出去。
             // 无 `Enter:send now` 时零次额外按键，claude/codex 行为不变。
-            if !crate::provider::submit_now::keep_provider_queue_requested() {
+            if !crate::provider::submit_now::keep_provider_queue_requested()
+                && recipient_allows_explicit_queue_flush(state, &message.recipient)
+            {
                 match crate::provider::submit_now::flush_explicit_queue(transport, &target) {
                     Ok(flush) if flush.extra_enters > 0 => {
                         let _ = event_log.write(
@@ -987,31 +996,7 @@ fn deliver_prepared_message(
     // worker delivery both require post-submit evidence; leader additionally
     // waits for its authoritative provider transcript below.
     let native_consumed = observed_token_consumed(transport, state, &message.recipient, &target, message_id);
-    let mut verified = submit_verified && native_consumed != Some(false);
-    // #379: a pane the verifier could not read is not a failed send. The
-    // recipient's own transcript row (user turn or queued enqueue) is the
-    // provider's receipt; native observers keep their veto.
-    if !verified
-        && native_consumed.is_none()
-        && recipient_transcript_contains_within(
-            state,
-            &message.recipient,
-            &message_token_marker(message_id),
-            TRANSCRIPT_RECEIPT_TAIL_BYTES,
-        )
-    {
-        verified = true;
-        event_log.write(
-            "send.unverified_reconciled",
-            serde_json::json!({
-                "message_id": message_id,
-                "recipient": message.recipient,
-                "source": "recipient_transcript",
-                "submit_verification": submit_verification_wire(inject_report.submit_verification),
-                "attempts": inject_report.attempts,
-            }),
-        )?;
-    }
+    let verified = submit_verified && native_consumed != Some(false);
     if !verified {
         let reason = if native_consumed == Some(false) {
             "submit_unverified:current_composer_or_consumption_unknown".to_string()
@@ -1034,7 +1019,6 @@ fn deliver_prepared_message(
             "recipient": message.recipient,
             "reason": reason,
             "attempts": inject_report.attempts,
-            "delivery_attempt": attempt,
             "submit_attempts_detail": submit_attempts_detail,
         });
         merge_inject_readback_fields(
@@ -1044,8 +1028,7 @@ fn deliver_prepared_message(
             resolved.metadata.as_ref(),
         );
         event_log.write("send.unverified", unverified)?;
-        // #379: the budget is delivery attempts, not Enter presses inside one.
-        if attempt >= u32::from(SEND_RETRY_MAX_ATTEMPTS) {
+        if inject_report.attempts >= u32::from(SEND_RETRY_MAX_ATTEMPTS) {
             store.mark(message_id, "failed", Some("send_unverified_exhausted"))?;
             emit_send_failed_exhausted(
                 workspace,
@@ -1053,7 +1036,7 @@ fn deliver_prepared_message(
                 event_log,
                 message_id,
                 &message.recipient,
-                attempt,
+                inject_report.attempts,
                 "send_unverified_exhausted",
                 &reason,
                 Some(&inject_report),
@@ -1086,6 +1069,75 @@ fn deliver_prepared_message(
             ack_forced_off: false,
             turn_verification: Some(turn_verification),
         });
+    }
+    // S1-CAPTURE-001 (0.4.8, CR M4 Claude phase-1): for Claude/ClaudeCode
+    // recipients with a known authoritative rollout_path, verify the message
+    // token actually reached the worker's transcript before marking
+    // delivered. This catches the gate's mis-attribution: pane inject
+    // succeeded but the token landed in the leader/unassigned transcript,
+    // not the worker's. Budget per architect plan: 64KB tail / single
+    // per-delivery check / short grace window. Phase-1 Claude only —
+    // codex/copilot keep the pre-fix behaviour (will be addressed in
+    // phase-2 once Claude phase-1 is field-validated).
+    if let Some((rollout_path, provider_wire_str)) =
+        claude_recipient_rollout(state, &message.recipient)
+    {
+        let token_marker = format!("[team-agent-token:{message_id}]");
+        let grace = std::time::Duration::from_millis(200);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        let transcript_has_token = loop {
+            let found = rollout_tail_contains(&rollout_path, &token_marker, 64 * 1024);
+            if found || std::time::Instant::now() >= deadline {
+                break found;
+            }
+            std::thread::sleep(grace);
+        };
+        if !transcript_has_token {
+            // Loud but non-fatal: emit a mismatch event for diagnose/status
+            // observability. Do NOT mark delivered — degrade to
+            // submitted_unverified so capture is forced to re-attribute.
+            let reason = format!(
+                "transcript_missing:provider={provider_wire_str},rollout={}",
+                rollout_path.display()
+            );
+            event_log.write(
+                "provider.session.transcript_mismatch",
+                serde_json::json!({
+                    "message_id": message_id,
+                    "recipient": message.recipient,
+                    "provider": provider_wire_str,
+                    "rollout_path": rollout_path.to_string_lossy(),
+                    "pane_id": state
+                        .get("agents")
+                        .and_then(|a| a.get(&message.recipient))
+                        .and_then(|a| a.get("pane_id"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or(""),
+                    "spawn_epoch": state
+                        .get("agents")
+                        .and_then(|a| a.get(&message.recipient))
+                        .and_then(|a| a.get("spawn_epoch"))
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0),
+                    "reason": "transcript_missing",
+                }),
+            )?;
+            store.mark(message_id, "submitted_unverified", Some(&reason))?;
+            bind_enter_watchdog(store, transport, state, &target, message_id, &message,
+                canonical_owner_team_id.as_deref(), event_log)?;
+            return Ok(DeliveryOutcome {
+                ok: false,
+                status: DeliveryStatus::Failed,
+                message_status: MessageStatusShadow("submitted_unverified".to_string()),
+                message_id: Some(message_id.to_string()),
+                verification: Some(reason),
+                stage: Some(DeliveryStage::Submit),
+                reason: None,
+                channel: None,
+                ack_forced_off: false,
+                turn_verification: Some(turn_verification),
+            });
+        }
     }
     if is_leader_recipient {
         store.record_delivery_submission(message_id, readback_verified)?;
@@ -2547,15 +2599,17 @@ fn recipient_pane_has_actionable_startup_prompt(
         _ => return false,
     };
     match provider {
+        Provider::Claude | Provider::ClaudeCode => matches!(
+            crate::provider::classify_claude_startup_screen(&captured),
+            crate::provider::StartupScreenDecision::AnswerWorkspaceTrust
+        ),
         Provider::Copilot => matches!(
             crate::provider::classify_copilot_startup_screen(&captured),
             crate::provider::StartupScreenDecision::AnswerWorkspaceTrust
         ),
-        // Claude Code, Codex, Grok and Pi workers run only through their
-        // contract leaves; a legacy row was refused before this peek.
-        Provider::Claude
-        | Provider::ClaudeCode
-        | Provider::Codex
+        // Codex and Grok workers run only through their contract leaves; a
+        // legacy row was refused before this peek.
+        Provider::Codex
         | Provider::Pi
         | Provider::Grok
         | Provider::GeminiCli
@@ -2571,6 +2625,31 @@ fn recipient_provider(state: &serde_json::Value, recipient: &str) -> Option<Prov
         .and_then(|agent| agent.get("provider"))
         .and_then(serde_json::Value::as_str)
         .and_then(parse_canonical_provider)
+}
+
+/// ---
+/// purpose: 判断收件 provider 是否必须禁止 submit observer 重按 Enter
+/// returns: Pi 为 true，其余为 false
+/// ---
+pub(crate) fn recipient_requires_single_enter(state: &serde_json::Value, recipient: &str) -> bool {
+    matches!(
+        recipient_provider(state, recipient),
+        Some(Provider::Pi)
+    )
+}
+
+/// ---
+/// purpose: 判断收件 provider 是否允许 Grok send-now 显式队列 flush
+/// returns: Pi 为 false，其余为 true
+/// ---
+pub(crate) fn recipient_allows_explicit_queue_flush(
+    state: &serde_json::Value,
+    recipient: &str,
+) -> bool {
+    !matches!(
+        recipient_provider(state, recipient),
+        Some(Provider::Pi)
+    )
 }
 
 fn leader_rollout_path(state: &serde_json::Value) -> Option<std::path::PathBuf> {
@@ -3464,6 +3543,30 @@ pub fn retry_injection_after_trust_auto_answer(
     })
 }
 
+/// S1-CAPTURE-001 (0.4.8 phase-1): returns (rollout_path, provider_wire) when
+/// the recipient agent is Claude/ClaudeCode with a known authoritative
+/// rollout_path; otherwise None (skip transcript verify). Phase-1 Claude only —
+/// codex/copilot return None and keep pre-fix delivery semantics.
+fn claude_recipient_rollout(
+    state: &serde_json::Value,
+    recipient: &str,
+) -> Option<(std::path::PathBuf, &'static str)> {
+    let agent = state.get("agents")?.get(recipient)?;
+    let provider = agent
+        .get("provider")
+        .and_then(serde_json::Value::as_str)
+        .and_then(parse_provider)?;
+    if !is_claude_family(provider) {
+        return None;
+    }
+    let provider_wire_str = provider_wire(provider);
+    let rollout = agent
+        .get("rollout_path")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())?;
+    Some((std::path::PathBuf::from(rollout), provider_wire_str))
+}
+
 /// S1-CAPTURE-001 (0.4.8 phase-1): bounded tail read of the rollout file
 /// searching for `needle`. Reads up to `tail_bytes` from the end of the file
 /// (default 64KB budget). Returns true iff the needle appears in the tail.
@@ -3581,21 +3684,12 @@ pub(crate) fn token_already_visible(
 }
 
 fn recipient_transcript_contains(state: &serde_json::Value, recipient: &str, marker: &str) -> bool {
-    recipient_transcript_contains_within(state, recipient, marker, 64 * 1024)
-}
-
-/// The receipt row can sit behind seconds of tool output by verdict time.
-const TRANSCRIPT_RECEIPT_TAIL_BYTES: u64 = 1024 * 1024;
-
-fn recipient_transcript_contains_within(
-    state: &serde_json::Value,
-    recipient: &str,
-    marker: &str,
-    tail_bytes: u64,
-) -> bool {
-    recipient_transcript_paths(state, recipient)
-        .iter()
-        .any(|path| rollout_tail_contains(path, marker, tail_bytes))
+    for path in recipient_transcript_paths(state, recipient) {
+        if rollout_tail_contains(&path, marker, 64 * 1024) {
+            return true;
+        }
+    }
+    false
 }
 
 fn recipient_transcript_paths(

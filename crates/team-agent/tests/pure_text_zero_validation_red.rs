@@ -67,8 +67,6 @@ fn bypass(agent: &Value) -> bool {
     }
 }
 
-/// The compiled provider of a default/`pi` role: the Pi contract leaf on unix.
-const PI_LEAF: &str = if cfg!(unix) { "pi_tui" } else { "pi" };
 /// The compiled provider of a `codex` role: the Codex contract leaf on unix.
 const CODEX_LEAF: &str = if cfg!(unix) { "codex_tui" } else { "codex" };
 
@@ -133,8 +131,7 @@ fn r04_undeclared_provider_defaults_to_pi() {
     let spec = fixture
         .compile()
         .expect("omitting provider must use the documented default");
-    // The default `pi` declares the Pi contract leaf, whose id the spec carries.
-    assert_eq!(string_field(first_agent(&spec), "provider"), PI_LEAF);
+    assert_eq!(string_field(first_agent(&spec), "provider"), "pi");
 }
 
 #[test]
@@ -224,7 +221,7 @@ fn r09_plain_text_directory_compiles_to_valid_yaml_spec() {
     );
     let agent = first_agent(&loaded);
     assert_eq!(string_field(agent, "id"), "worker");
-    assert_eq!(string_field(agent, "provider"), PI_LEAF);
+    assert_eq!(string_field(agent, "provider"), "pi");
     assert!(matches!(agent.get("model"), None | Some(Value::Null)));
     assert!(matches!(agent.get("effort"), None | Some(Value::Null)));
     assert!(!bypass(agent));

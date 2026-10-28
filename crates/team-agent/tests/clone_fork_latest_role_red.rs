@@ -15,7 +15,7 @@
 //!   role carry the new marker; a stale compiled-spec projection must not win.
 //!   Baseline: fork clones from the compiled spec, so the new marker is absent.
 //!
-//! Offline structural RED (built-in fake provider, zero tokens): the "does the
+//! Offline structural RED (PATH-shim provider, zero tokens): the "does the
 //! forked agent REMEMBER the source nonce" semantics is a subscription-E2E
 //! concern (locate §4.5) — this batch pins the STRUCTURE (verb exists; latest
 //! role file is the source of truth), not provider context semantics.
@@ -36,6 +36,7 @@ const NEW: &str = "new_worker";
 struct Case {
     env: HermeticTestEnv,
     workspace: PathBuf,
+    shim_path: String,
     socket: Option<PathBuf>,
 }
 
@@ -44,9 +45,16 @@ impl Case {
         let env = HermeticTestEnv::for_subprocess_with_leader(tag);
         let workspace = env.workspace("ws");
         write_team_docs(&workspace, "SOURCE_ROLE_BODY_ORIGINAL");
+        let shim_dir = write_claude_shim(&workspace);
+        let shim_path = format!(
+            "{}:{}",
+            shim_dir.display(),
+            std::env::var("PATH").expect("PATH present")
+        );
         Self {
             env,
             workspace,
+            shim_path,
             socket: None,
         }
     }
@@ -62,8 +70,8 @@ impl Case {
             .join("state.json")
     }
 
-    /// Seed the SOURCE session tuple so the fork reaches its success path (the
-    /// built-in fake worker has no real captured backing). Required after the R1
+    /// Seed the SOURCE session tuple so the fork reaches its success path (a
+    /// hermetic PATH-shim has no real captured backing). Required after the R1
     /// fixture revision: the success-path shim needs a valid source to copy from,
     /// or the fork refuses with "source session backing missing" before it ever
     /// materializes a role. The RED (compiled-spec vs latest-role) is unchanged.
@@ -109,7 +117,8 @@ impl Case {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        self.env.run_cli(&self.workspace, args)
+        self.env
+            .run_cli_env(&self.workspace, args, &[("PATH", self.shim_path.as_str())])
     }
 
     fn quick_start(&mut self) {
@@ -124,7 +133,7 @@ impl Case {
             "--json",
         ]);
         // Record the team's own tmux socket (from attach_commands) for precise
-        // teardown — quick-start spawns a real tmux server for the fake worker.
+        // teardown — quick-start spawns a real tmux server under the shim.
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
             if let Some(cmd) = v
                 .get("attach_commands")
@@ -186,10 +195,46 @@ fn write_source_role(workspace: &Path, body: &str) {
     std::fs::write(
         workspace.join("agents").join(format!("{SOURCE}.md")),
         format!(
-            "---\nname: {SOURCE}\nrole: {SOURCE}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{body}\n"
+            "---\nname: {SOURCE}\nrole: {SOURCE}\nprovider: claude\nmodel: claude-sonnet-5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{body}\n"
         ),
     )
     .expect("write source role doc");
+}
+
+/// REVISION (implement interlock, 2026-07-21): the original R1 shim only spawned
+/// (`echo; exec sleep 3600`) and never produced a session transcript. During
+/// batch1/2 implement, runtime-owner surfaced a genuine contract conflict: the
+/// successor implementation, per R3/MUST-17, must obtain a `ContextForkProof`
+/// (NEW session_id + readable changed backing) or return `context_fork_unverified`
+/// and ROLL BACK the NEW managed role/spec/state/window. A shim that never emits a
+/// transcript therefore forces a rollback, so R1's "NEW materialized role exists
+/// and carries the marker" assertion would go red for the WRONG reason (the role
+/// was correctly rolled back), and keeping the role green would leave a half-seat
+/// (violating R3/R5 atomicity). Per leader ruling (L1 r2 precedent) the fix is a
+/// single-point fixture revision: the shim now writes a legitimate session
+/// backing (success path) so the fork completes without rollback and the NEW
+/// managed role is retained — while R1's RED cause is UNCHANGED: baseline does not
+/// consult backing and clones the role from the COMPILED SPEC, so the marker
+/// edited into the source role file after quick-start is still absent.
+fn write_claude_shim(workspace: &Path) -> PathBuf {
+    let bin_dir = workspace.join("shim-bin");
+    std::fs::create_dir_all(&bin_dir).expect("create shim dir");
+    let shim = bin_dir.join("claude");
+    // Success-path shim: emit a session transcript into the hermetic HOME so the
+    // implementation can capture a verified NEW backing and NOT roll back the
+    // fork (matching batch2's emit_transcript=true success shim).
+    std::fs::write(
+        &shim,
+        "#!/bin/sh\nmkdir -p \"$HOME/.claude/projects/shim\"\necho '{\"type\":\"shim\"}' > \"$HOME/.claude/projects/shim/session.jsonl\"\necho 'claude shim ready'\nexec sleep 3600\n",
+    )
+    .expect("write claude shim");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod claude shim");
+    }
+    bin_dir
 }
 
 /// R10 — `clone-agent` is a discoverable CLI verb. Baseline red: argparse has no

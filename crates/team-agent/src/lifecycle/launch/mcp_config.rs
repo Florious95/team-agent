@@ -127,7 +127,7 @@ pub(crate) fn write_worker_mcp_config_for_provider(
 /// ---
 /// purpose: 把 argv 里 provider 原生的 MCP 配置参数改指到已落盘的文件
 /// params:
-///   argv: 就地改写；copilot 改 --additional-mcp-config 并加 @ 前缀
+///   argv: 就地改写；claude 系改 --mcp-config 的值，copilot 改 --additional-mcp-config 并加 @ 前缀
 /// returns: argv 里没有对应参数时什么都不做
 /// ---
 pub(crate) fn point_native_mcp_config_at_file(
@@ -136,6 +136,14 @@ pub(crate) fn point_native_mcp_config_at_file(
     path: &Path,
 ) {
     match provider {
+        Provider::Claude | Provider::ClaudeCode => {
+            let Some(index) = argv.iter().position(|arg| arg == "--mcp-config") else {
+                return;
+            };
+            if let Some(value) = argv.get_mut(index.saturating_add(1)) {
+                *value = path.to_string_lossy().to_string();
+            }
+        }
         // §C1 note: copilot `--additional-mcp-config` 接受 `@file`,直接指向既有
         // `.team/runtime/mcp/<agent>.json`(launch 路径 write_worker_mcp_config 已写)。
         // 既避免 inline JSON 包 mcpServers wrapper 的语义错位,也更利于 ps 验法。

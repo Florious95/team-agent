@@ -174,13 +174,6 @@ fn native_fork(
     let selected = registry::provider(role.provider.as_str())?;
     let descriptor = selected.descriptor();
     let discovered = discovery::discover_runtime(&role.provider, workspace)?;
-    if let Some(path) = selected.native_fork_source(discovered.runtime.as_ref(), &session)? {
-        // The exact parent backing the native CLI reads must exist before any effect.
-        let metadata = std::fs::symlink_metadata(&path)?;
-        if !metadata.is_file() || metadata.len() == 0 {
-            return Err(ContractError::Invalid("native fork parent backing").into());
-        }
-    }
     backend::publish_framework_routes(&mut backend, members)?;
     let identity = backend.store.propose_identity(&role.id)?;
     let server_key = selected.server_key_for(&identity)?;
@@ -193,7 +186,7 @@ fn native_fork(
         launch.paths.cwd = super::workspace::prepare(&backend.binding, &role.id)?;
     }
     backend::require_private_primary(selected, &launch.paths.cwd)?;
-    backend::preassign_session(selected, &mut launch, &discovered)?;
+    backend::preassign_session(&mut launch, &discovered)?;
     let operation = OperationId::new(format!("fork-{}", launch.identity.instance.as_str()))?;
     let request = ForkRequest {
         mode: ForkMode::NativeNewSeat,

@@ -71,7 +71,7 @@ fn mutable_kiro_role_is_refused_before_legacy_fallback_or_role_writes() {
     assert!(
         team_agent::contract_runtime::framework::require_legacy_role(None, Some("kiro")).is_err()
     );
-    assert!(team_agent::contract_runtime::framework::require_legacy_role(None, Some("copilot")).is_ok());
+    assert!(team_agent::contract_runtime::framework::require_legacy_role(None, Some("pi")).is_ok());
     assert_eq!(std::fs::read(&path).unwrap(), before);
     assert!(!args.workspace.join(".team").exists());
 }
@@ -103,9 +103,9 @@ fn kiro_selection_preserves_role_bytes_and_has_no_runtime_effects() {
 fn legacy_and_leader_only_inputs_delegate_without_new_requirements() {
     let (_sandbox, args) = fixture();
     assert!(read_team(&args).unwrap().is_none());
-    role(&args, "worker", "copilot");
+    role(&args, "worker", "pi");
     assert!(read_team(&args).unwrap().is_none());
-    std::fs::write(args.agents_dir.join("agents/worker.md"), "---\nprovider: copilot\n---\n---\nprovider: kiro\n---\nExample in a role body, not a provider declaration.\n").unwrap();
+    std::fs::write(args.agents_dir.join("agents/worker.md"), "---\nprovider: pi\n---\n---\nprovider: kiro\n---\nExample in a role body, not a provider declaration.\n").unwrap();
     assert!(read_team(&args).unwrap().is_none());
     std::fs::remove_file(args.agents_dir.join("agents/worker.md")).unwrap();
     std::fs::remove_dir(args.agents_dir.join("agents")).unwrap();
@@ -117,13 +117,13 @@ fn legacy_and_leader_only_inputs_delegate_without_new_requirements() {
 fn mixed_team_routes_each_role_and_malformed_kiro_still_refuses() {
     let (_sandbox, args) = fixture();
     role(&args, "new-worker", "kiro");
-    role(&args, "old-worker", "copilot");
+    role(&args, "old-worker", "pi");
     let config = read_team(&args).unwrap().unwrap();
     assert_eq!(config.roles.len(), 1);
     assert_eq!(config.members.len(), 2);
     assert_eq!(config.members[0].runtime, RuntimeFamily::Contract);
     assert_eq!(config.members[1].runtime, RuntimeFamily::Legacy);
-    assert_eq!(config.members[1].provider, "copilot");
+    assert_eq!(config.members[1].provider, "pi");
     std::fs::remove_file(args.agents_dir.join("agents/old-worker.md")).unwrap();
     std::fs::write(
         args.agents_dir.join("agents/new-worker.md"),
@@ -197,7 +197,7 @@ fn cursor_compiler_preserves_native_id_and_does_not_inherit_team_effort() {
 fn mixed_contract_providers_route_every_cursor_name_without_migrating_state() {
     let (_sandbox, args) = fixture();
     for (name, provider) in [
-        ("a-cursor", "cursor"), ("b-kiro", "kiro"), ("c-copilot", "copilot"),
+        ("a-cursor", "cursor"), ("b-kiro", "kiro"), ("c-pi", "pi"),
         ("d-cursor-agent", "cursor_agent"), ("e-agent", "agent"), ("f-cursor-agent", "cursor-agent"),
     ] {
         role(&args, name, provider);
@@ -206,9 +206,9 @@ fn mixed_contract_providers_route_every_cursor_name_without_migrating_state() {
     assert_eq!(config.roles.len(), 5);
     assert_eq!(config.members.len(), 6);
     for member in &config.members {
-        let expected = if member.id == "c-copilot" { RuntimeFamily::Legacy } else { RuntimeFamily::Contract };
+        let expected = if member.id == "c-pi" { RuntimeFamily::Legacy } else { RuntimeFamily::Contract };
         assert_eq!(member.runtime, expected, "{}", member.id);
-        if member.id != "b-kiro" && member.id != "c-copilot" {
+        if member.id != "b-kiro" && member.id != "c-pi" {
             assert_eq!(member.provider, "cursor", "{}", member.id);
         }
     }
@@ -241,14 +241,14 @@ fn pre_upgrade_cursor_agent_row_admits_only_teardown_and_never_blocks_siblings()
     use team_agent::contract_runtime::framework::require_legacy_lifecycle;
     use team_agent::state::{persist, selector};
     let (_sandbox, args) = fixture();
-    std::fs::write(args.agents_dir.join("agents/copilot-worker.md"),
-        "---\nprovider: copilot\nmodel: gpt-6-luna\n---\nWorker.\n").unwrap();
+    std::fs::write(args.agents_dir.join("agents/pi-worker.md"),
+        "---\nprovider: pi\nmodel: openai-codex/gpt-6-luna\n---\nWorker.\n").unwrap();
     for retired in ["cursor_agent", "agent"] {
         // The role file now declares the contract leaf; the recorded row is legacy.
         role(&args, "retired", retired);
         persist::save_runtime_state(&args.workspace, &serde_json::json!({
             "team_key": "demo", "active_team_key": "demo", "team_dir": args.agents_dir,
-            "agents": {"copilot-worker": {"provider": "copilot"}, "retired": {"provider": retired}},
+            "agents": {"pi-worker": {"provider": "pi"}, "retired": {"provider": retired}},
         })).unwrap();
         selector::resolve_active_team_readonly(
             &args.workspace, None, selector::SelectorMode::RuntimeOnly,
@@ -262,23 +262,21 @@ fn pre_upgrade_cursor_agent_row_admits_only_teardown_and_never_blocks_siblings()
                 .unwrap_err().to_string();
             assert!(error.contains("legacy cursor_agent seat"), "{operation}: {error}");
         }
-        require_legacy_lifecycle(&args.workspace, None, Some("copilot-worker"), "start-agent")
+        require_legacy_lifecycle(&args.workspace, None, Some("pi-worker"), "start-agent")
             .unwrap_or_else(|error| panic!("sibling blocked by {retired}: {error}"));
     }
 }
 
 #[test]
-fn pre_upgrade_claude_codex_grok_and_pi_rows_admit_only_teardown_and_never_block_siblings() {
+fn pre_upgrade_codex_and_grok_rows_admit_only_teardown_and_never_block_siblings() {
     use team_agent::contract_runtime::framework::{is_contract, require_legacy_lifecycle};
     use team_agent::state::{persist, selector};
     let (_sandbox, args) = fixture();
     std::fs::write(args.agents_dir.join("agents/copilot-worker.md"),
         "---\nprovider: copilot\nmodel: gpt-6-luna\n---\nWorker.\n").unwrap();
     for (retired, public) in [
-        ("claude", "claude"), ("claude_code", "claude"), ("claude-code", "claude"), ("Claude", "claude"),
         ("codex", "codex"), ("codex_cli", "codex"), ("codex-cli", "codex"), ("Codex", "codex"),
         ("grok", "grok"), ("Grok", "grok"),
-        ("pi", "pi"), ("PI", "pi"),
     ] {
         // The role file now declares the contract leaf; the recorded row is legacy.
         role(&args, "retired", public);
@@ -433,9 +431,8 @@ fn malformed_or_misdirected_codex_opt_in_fails_closed() {
     for (provider, extra, field) in [
         ("codex", "contract_runtime: \"yes\"\n", "contract_runtime"),
         ("codex", "contract_runtime: 1\n", "contract_runtime"),
-        ("copilot", "contract_runtime: true\n", "provider"),
+        ("pi", "contract_runtime: true\n", "provider"),
         ("Codex", "contract_runtime: true\n", "provider"),
-        ("Claude", "contract_runtime: true\n", "provider"),
     ] {
         std::fs::write(args.agents_dir.join("agents/worker.md"), format!(
             "---\nprovider: {provider}\nmodel: gpt-6-luna\n{extra}---\nBody\n"
@@ -453,7 +450,7 @@ fn malformed_or_misdirected_codex_opt_in_fails_closed() {
 fn legacy_role_named_leader_cannot_shadow_the_framework_route_of_a_contract_team() {
     let (_sandbox, args) = fixture();
     // A legacy-only team keeps its existing behavior: no contract selection.
-    role(&args, "leader", "copilot");
+    role(&args, "leader", "pi");
     assert!(read_team(&args).unwrap().is_none());
     // With a contract seat, `leader` is the framework's own forwarding route.
     // Refuse before compile/spawn instead of a late, opaque route Conflict.
@@ -462,105 +459,5 @@ fn legacy_role_named_leader_cannot_shadow_the_framework_route_of_a_contract_team
         read_team(&args),
         Err(ConfigError::Invalid { field: "reserved worker id", .. })
     ));
-    assert!(!args.workspace.join(".team").exists());
-}
-
-fn pi_role(args: &QuickStartArgs, name: &str, extra: &str) {
-    std::fs::write(args.agents_dir.join("agents").join(format!("{name}.md")), format!(
-        "---\nprovider: pi\nmodel: openai-codex/gpt-6-luna\n{extra}---\nPi role body\n"
-    )).unwrap();
-}
-
-#[test]
-fn bare_pi_and_an_omitted_provider_select_the_contract_leaf_without_opt_in() {
-    use team_agent::model::yaml::Value;
-    let (_sandbox, args) = fixture();
-    // `pi` declares the Pi leaf on its own; `contract_runtime: false` cannot
-    // keep it on a legacy worker engine that no longer exists.
-    pi_role(&args, "bare-worker", "");
-    pi_role(&args, "opted-out", "contract_runtime: false\n");
-    pi_role(&args, "native-worker", "contract_runtime: true\neffort: high\n");
-    // An omitted provider is the default `pi`, which declares the same leaf.
-    std::fs::write(args.agents_dir.join("agents/default-worker.md"),
-        "---\nmodel: openai-codex/gpt-6-luna\n---\nDefault body\n").unwrap();
-    let config = read_team(&args).unwrap().unwrap();
-    let mut roles: Vec<_> = config.roles.iter().map(|role| (role.id.as_str(), role.provider.as_str())).collect();
-    roles.sort();
-    assert_eq!(roles, [
-        ("bare-worker", "pi_tui"), ("default-worker", "pi_tui"), ("native-worker", "pi_tui"), ("opted-out", "pi_tui"),
-    ]);
-    let mut routes: Vec<_> = config.members.iter().map(|member| (member.id.as_str(), member.provider.as_str(), member.runtime)).collect();
-    routes.sort_by_key(|route| route.0);
-    assert_eq!(routes, [
-        ("bare-worker", "pi_tui", RuntimeFamily::Contract),
-        ("default-worker", "pi_tui", RuntimeFamily::Contract),
-        ("native-worker", "pi_tui", RuntimeFamily::Contract),
-        ("opted-out", "pi_tui", RuntimeFamily::Contract),
-    ]);
-    // The compiled spec carries the leaf's distinct canonical id.
-    let spec = team_agent::compiler::compile_team(&args.agents_dir).unwrap();
-    let agents = spec.get("agents").and_then(Value::as_list).unwrap();
-    let mut providers: Vec<_> = agents.iter()
-        .map(|agent| (agent.get("id").and_then(Value::as_str).unwrap(), agent.get("provider").and_then(Value::as_str).unwrap()))
-        .collect();
-    providers.sort();
-    assert_eq!(providers, [
-        ("bare-worker", "pi_tui"), ("default-worker", "pi_tui"), ("native-worker", "pi_tui"), ("opted-out", "pi_tui"),
-    ]);
-    let native = agents.iter().find(|agent| agent.get("id").and_then(Value::as_str) == Some("native-worker")).unwrap();
-    assert_eq!(native.get("effort").and_then(Value::as_str), Some("high"));
-    // Mutable lifecycle refuses every Pi declaration, including an omitted provider.
-    for name in ["bare-worker", "default-worker", "native-worker", "opted-out"] {
-        let path = args.agents_dir.join(format!("agents/{name}.md"));
-        assert!(team_agent::contract_runtime::framework::require_legacy_role(Some(&path), None).is_err(), "{name}");
-    }
-    assert!(team_agent::contract_runtime::framework::require_legacy_role(None, Some("pi")).is_err());
-    assert!(team_agent::contract_runtime::framework::require_legacy_role(None, Some("pi_tui")).is_err());
-    // A persisted pre-upgrade `pi` row keeps its key and is never reclassified.
-    assert!(!team_agent::contract_runtime::framework::is_contract(&serde_json::json!({"provider":"pi"})));
-    assert!(team_agent::contract_runtime::framework::is_contract(&serde_json::json!({"provider":"pi_tui"})));
-    assert!(!args.workspace.join(".team").exists());
-}
-
-#[test]
-fn every_claude_name_selects_the_contract_leaf_with_or_without_opt_in() {
-    use team_agent::model::yaml::Value;
-    let (_sandbox, args) = fixture();
-    let path = args.agents_dir.join("agents/worker.md");
-    for provider in ["claude", "claude_code", "claude-code"] {
-        for extra in ["", "contract_runtime: true\n"] {
-            std::fs::write(&path, format!(
-                "---\nprovider: {provider}\nmodel: claude-opus-5-5\n{extra}---\nClaude role body\n"
-            )).unwrap();
-            let config = read_team(&args).unwrap().unwrap();
-            assert_eq!(config.roles.len(), 1, "{provider} {extra}");
-            assert_eq!(config.roles[0].provider.as_str(), "claude_tui", "{provider} {extra}");
-            assert_eq!(config.members[0].runtime, RuntimeFamily::Contract, "{provider} {extra}");
-            let spec = team_agent::compiler::compile_team(&args.agents_dir).unwrap();
-            let worker = &spec.get("agents").and_then(Value::as_list).unwrap()[0];
-            assert_eq!(worker.get("provider").and_then(Value::as_str), Some("claude_tui"), "{provider} {extra}");
-            assert!(team_agent::contract_runtime::framework::require_legacy_role(Some(&path), None).is_err(), "{provider} {extra}");
-        }
-        assert!(team_agent::contract_runtime::framework::require_legacy_role(None, Some(provider)).is_err(), "{provider}");
-        // A persisted pre-upgrade row keeps its key and is never reclassified.
-        let state = serde_json::json!({"provider":provider,"pane_id":"%0","runtime_family":"legacy"});
-        assert!(!team_agent::contract_runtime::framework::is_contract(&state), "{provider}");
-    }
-    assert!(team_agent::contract_runtime::framework::is_contract(&serde_json::json!({"provider":"claude_tui"})));
-    assert!(!args.workspace.join(".team").exists());
-}
-
-#[test]
-fn pi_refuses_effort_levels_pi_could_silently_clamp_with_or_without_opt_in() {
-    let (_sandbox, args) = fixture();
-    for opt_in in ["", "contract_runtime: true\n"] {
-        for effort in ["xhigh", "max", "ultra"] {
-            pi_role(&args, "worker", &format!("{opt_in}effort: {effort}\n"));
-            let error = team_agent::compiler::compile_team(&args.agents_dir).unwrap_err().to_string();
-            assert!(error.contains("Pi"), "{opt_in}{effort}: {error}");
-        }
-        pi_role(&args, "worker", &format!("{opt_in}effort: medium\n"));
-        assert!(team_agent::compiler::compile_team(&args.agents_dir).is_ok(), "{opt_in}");
-    }
     assert!(!args.workspace.join(".team").exists());
 }

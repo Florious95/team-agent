@@ -470,7 +470,7 @@ fn preflight_request(
     discovered: &Discovery,
 ) -> Result<LaunchRequest, BackendError> {
     let mut request = request(binding, role, identity, discovered)?;
-    if matches!(registry::provider(role.provider.as_str())?, registry::NativeProvider::GrokBuild | registry::NativeProvider::Codex | registry::NativeProvider::Pi | registry::NativeProvider::Claude) {
+    if matches!(registry::provider(role.provider.as_str())?, registry::NativeProvider::GrokBuild | registry::NativeProvider::Codex) {
         // Pure H2 only: this is a proposed private path, not a filesystem receipt.
         request.paths.cwd = team_agent_contract::contract::session::CwdIdentity {
             path: binding.transport_root.join("workspaces").join(role.id.as_str()),
@@ -489,8 +489,6 @@ pub(super) fn require_private_primary(
     match selected {
         registry::NativeProvider::GrokBuild => team_agent_contract::providers::grok_build::native::require_private_primary(cwd)?,
         registry::NativeProvider::Codex => team_agent_contract::providers::codex::launcher::require_private_primary(cwd)?,
-        registry::NativeProvider::Pi => team_agent_contract::providers::pi::launcher::require_private_primary(cwd)?,
-        registry::NativeProvider::Claude => team_agent_contract::providers::claude::launcher::require_private_primary(cwd)?,
         registry::NativeProvider::Kiro | registry::NativeProvider::Cursor => {}
     }
     Ok(())
@@ -728,14 +726,9 @@ pub(super) fn publish_framework_routes(backend: &mut Backend, members: &[MemberR
 /// The native session ID a launch names before spawn, for the leaves whose
 /// fresh session is `Preassigned`. Shared by fresh start and a native fork's child.
 pub(super) fn preassign_session(
-    selected: registry::NativeProvider,
     request: &mut LaunchRequest,
     discovered: &Discovery,
 ) -> Result<(), BackendError> {
-    if selected == registry::NativeProvider::Claude {
-        // `--session-id` names the new session; derived from this proposed instance.
-        request.preassigned_session = Some(team_agent_contract::providers::claude::session_id(&request.identity));
-    }
     if let Some(registry::NativeRuntime::Cursor(runtime)) = &discovered.runtime {
         request.preassigned_session = Some(
             team_agent_contract::providers::cursor::native::allocate_chat(
@@ -848,7 +841,7 @@ pub fn start(
         request.paths.cwd = super::workspace::prepare(&backend.binding, &role.id)?;
     }
     require_private_primary(selected, &request.paths.cwd)?;
-    preassign_session(selected, &mut request, &discovered)?;
+    preassign_session(&mut request, &discovered)?;
     let resolved = resolve_launch(
         descriptor,
         &hooks,

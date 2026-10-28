@@ -622,29 +622,11 @@ fn lifecycle_unleased(connection: &Connection, seat: &SeatId) -> Result<(), Erro
     let Some(held) = held else {
         return Ok(());
     };
-    let raw: Option<String> = connection
-        .query_row(
-            "SELECT record FROM contract_operations WHERE id=?1",
-            [&held],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(raw) = raw else {
-        // A delivery attempt holds the seat: busy while in flight; after an
-        // uncertain native input effect it stays quarantined until recovery.
-        let state: Option<String> = connection
-            .query_row(
-                "SELECT state FROM contract_outbox WHERE attempt=?1",
-                [&held],
-                |row| row.get(0),
-            )
-            .optional()?;
-        return Err(if state.as_deref() == Some("in_flight") {
-            Error::Conflict
-        } else {
-            Error::NeedsRecovery
-        });
-    };
+    let raw: String = connection.query_row(
+        "SELECT record FROM contract_operations WHERE id=?1",
+        [held],
+        |row| row.get(0),
+    )?;
     let operation: OperationRecord = serde_json::from_str(&raw)?;
     Err(if operation.outcome == Outcome::NeedsRecovery {
         Error::NeedsRecovery

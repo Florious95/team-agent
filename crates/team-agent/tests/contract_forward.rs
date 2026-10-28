@@ -30,7 +30,7 @@ fn missing_framework_team_refuses_without_claiming_or_creating_a_legacy_runtime(
             &[FrameworkPeer {
                 recipient: "legacy".into(),
                 route: framework.route().unwrap(),
-                provider: "copilot".into(),
+                provider: "pi".into(),
             }],
             None,
         )

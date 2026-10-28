@@ -133,6 +133,43 @@ fn idle_leader_activity_never_arms_but_leader_idle_allows_ping() {
     assert_eq!(r2.reason, NoPingReason::AllIdleDebounceElapsed);
 }
 
+// ---- (c) trust-prompt recognizer (REAL fixtures, own-vs-foreign) ----
+//
+// NOTE: the own-vs-foreign trust recognizer lives in messaging/leader_panes.py
+// (step 9/10 owns it per card §42). The provider.rs skeleton exposes only
+// `status_patterns()` (idle/processing/trust regex set) — driven RED below.
+// Full own-vs-foreign realpath judgement + truncated-workspace logic deferred.
+
+// Real fixtures (mirrored into the rust workspace from team-agent-public).
+const CLAUDE_IDLE_FIXTURE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../snapshot/fixtures/idle_prompts/claude_code_idle.txt"
+));
+fn fixture_matches(re: &regex::Regex, fixture: &str) -> bool {
+    fixture.lines().any(|l| re.is_match(l))
+}
+
+#[test]
+fn claude_status_patterns_compile() {
+    // provider_cli/claude.py:225 status_patterns idle=r"[>❯]\s".
+    // The real fixture has prompt lines like "❯ /compact" → idle MUST match.
+    // The processing pattern r"[✶✢✽✻✳·].*…" must NOT match those idle prompt lines.
+    let adapter = get_adapter(Provider::ClaudeCode);
+    let pats = adapter.status_patterns().expect("status_patterns ok");
+    assert!(
+        fixture_matches(&pats.idle, CLAUDE_IDLE_FIXTURE),
+        "claude idle pattern must match a '❯ ' prompt line in the idle fixture"
+    );
+    assert!(
+        pats.idle.is_match("❯ /compact"),
+        "claude idle pattern matches the canonical prompt line"
+    );
+    assert!(
+        !pats.processing.is_match("❯ /compact"),
+        "claude processing pattern must NOT match an idle prompt line"
+    );
+}
+
 // ---- (d) abnormal dedup key (signature, Option<TurnId>) ----
 //
 // NOTE: read_fault_facts lives in provider_state; not on the skeleton trait.

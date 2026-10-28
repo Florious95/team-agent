@@ -2730,7 +2730,7 @@ mod tests {
             &json!({
                 "session_name": "team-a",
                 "active_team_key": "team-a",
-                "agents": {"f1": {"provider": "copilot", "status": "starting"}}
+                "agents": {"f1": {"provider": "claude", "status": "starting"}}
             }),
         );
         // f2 loaded before f1's reservation. Persist carries the still-unspawned
@@ -2738,7 +2738,7 @@ mod tests {
         let incoming = json!({
             "session_name": "team-a",
             "active_team_key": "team-a",
-            "agents": {"f2": {"provider": "copilot", "status": "starting"}}
+            "agents": {"f2": {"provider": "claude", "status": "starting"}}
         });
         save_runtime_state_with_lifecycle_topology_authority(&ws, &incoming, "team-a", &["f2"])
             .unwrap();
@@ -2749,7 +2749,7 @@ mod tests {
         // f1 starts after f2 takes its snapshot; capture is not complete yet.
         let mut started = stale.clone();
         started["agents"]["f1"] = json!({
-            "provider": "copilot",
+            "provider": "claude",
             "status": "running",
             "pane_id": "%1",
             "pane_pid": 101,
@@ -2763,7 +2763,7 @@ mod tests {
             .unwrap();
         let latest = read_state(&ws);
         stale["agents"]["f2"] = json!({
-            "provider": "copilot",
+            "provider": "claude",
             "status": "running",
             "pane_id": "%2",
             "pane_pid": 102,
@@ -3410,7 +3410,7 @@ mod tests {
             "agents": {
                 "alpha": {
                     "status": "stopped",
-                    "provider": "copilot",
+                    "provider": "claude",
                     "session_id": "stale-poisoned-uuid",
                     "rollout_path": Value::Null,
                     "captured_at": Value::Null,
@@ -3427,7 +3427,7 @@ mod tests {
             "agents": {
                 "alpha": {
                     "status": "running",
-                    "provider": "copilot",
+                    "provider": "claude",
                     "session_id": Value::Null,
                     "rollout_path": Value::Null,
                     "captured_at": Value::Null,

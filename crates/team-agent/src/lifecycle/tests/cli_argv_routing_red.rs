@@ -210,7 +210,12 @@ fn executable(path: &Path, script: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 fn role(provider: &str, id: &str) -> String {
-    format!("---\nname: {id}\nrole: {id} Worker\nprovider: {provider}\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nLiteral route worker.\n")
+    let model = if provider == "pi" {
+        "team-agent/qwen3.8-27b"
+    } else {
+        "gpt-5.5"
+    };
+    format!("---\nname: {id}\nrole: {id} Worker\nprovider: {provider}\nmodel: {model}\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nLiteral route worker.\n")
 }
 fn seed_coordinator(ws: &Path) {
     let workspace = crate::coordinator::WorkspacePath::new(ws.to_path_buf());
@@ -556,7 +561,9 @@ fn provider_property(key: &str, provider: Provider) {
     f.switch(None);
     let actual = f.cold(wire);
     f.seed(true, json!({"pi":["pi-must-not-leak"]}));
-    assert_eq!(normalized(&f.cold(wire)), normalized(&base));
+    if provider != Provider::Pi {
+        assert_eq!(normalized(&f.cold(wire)), normalized(&base));
+    }
     injected(&base, &[format!("route-only-{key}")], &actual);
     assert_eq!(
         actual
@@ -568,8 +575,11 @@ fn provider_property(key: &str, provider: Provider) {
 }
 macro_rules! provider_tests { ($($name:ident => $key:literal, $provider:ident;)*) => { $(#[test] #[serial(env)] fn $name() { provider_property($key, Provider::$provider); })* }; }
 provider_tests! {
+    a06_claude => "claude", Claude;
+    a06_claude_code => "claude", ClaudeCode;
     a06_copilot => "copilot", Copilot;
     a06_gemini_cli => "gemini_cli", GeminiCli;
+    a06_pi => "pi", Pi;
 }
 
 #[test]
@@ -817,6 +827,78 @@ fn a09_start_fresh_missing_backing_reset_and_add_use_new_route_once() {
 
 #[test]
 #[serial(env)]
+fn a09_resume_retains_session_metadata_while_routes_change() {
+    let f = Fixture::new("argv-resume");
+    f.start_team("pi", &["worker"]);
+    let selected = crate::state::projection::select_runtime_state(&f.ws, Some("argvteam")).unwrap();
+    // Fresh Pi assigns its own session id; capture records it afterwards.
+    assert!(selected["agents"]["worker"]["_pending_session_id"].is_null());
+    let session_id = "8d6c1f2e-4a5b-4c7d-9e0f-a09000000001";
+    let session = crate::lifecycle::launch::pi_mcp::pi_seat_paths(&f.ws, "argvteam", "worker")
+        .sessions
+        .join("valid.jsonl");
+    fs::create_dir_all(session.parent().unwrap()).unwrap();
+    fs::write(&session, format!("{}\n{}\n", json!({"type":"session","version":3,"id":session_id,"cwd":f.ws,"timestamp":"2026-01-01T00:00:00Z"}), json!({"type":"message","id":"a","parentId":null,"timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":[{"type":"text","text":"seed"}]}}))).unwrap();
+    f.mutate_agent("worker", |a| {
+        a["status"] = json!("stopped");
+        a["session_id"] = json!(session_id);
+        a["rollout_path"] = json!(session);
+        a["captured_at"] = json!("2026-01-01T00:00:01Z");
+        a["captured_via"] = json!("session_scan");
+        a["capture_state"] = json!("captured");
+        a["first_send_at"] = json!("2026-01-01T00:00:01Z");
+    });
+    f.seed(true, json!({"pi":["resume-route"]}));
+    f.switch(None);
+    let t = offline();
+    start_agent_with_transport(
+        &f.ws,
+        &AgentId::new("worker"),
+        false,
+        false,
+        false,
+        Some("argvteam"),
+        &t,
+    )
+    .unwrap();
+    assert_eq!(t.spawn_records().len(), 1);
+    let argv = t.spawn_records()[0].1.clone();
+    assert!(argv
+        .windows(2)
+        .any(|p| p[0] == "--session" && Path::new(&p[1]) == session));
+    assert!(!argv.iter().any(|v| v == "--session-id"));
+    let retained = offline().with_session_present(true);
+    let reset = reset_agent_with_transport(
+        &f.ws,
+        &AgentId::new("worker"),
+        false,
+        false,
+        Some("argvteam"),
+        &retained,
+    );
+    // Existing reset policy requires discard-session even with a valid tuple.
+    // Protect refusal; routing must not invent a retain-session reset branch.
+    assert!(matches!(
+        reset,
+        Ok(crate::lifecycle::ResetAgentOutcome::Refused { .. })
+    ));
+    assert!(retained.spawn_records().is_empty());
+    let restarted = offline()
+        .with_session_present(true)
+        .with_default_liveness(crate::transport::PaneLiveness::Dead);
+    let report = restart_with_transport(&f.ws, false, Some("argvteam"), &restarted);
+    assert!(report.is_ok(), "in-session resume fixture: {report:?}");
+    assert_eq!(restarted.spawn_records().len(), 1);
+    let restart_argv = restarted.spawn_records()[0].1.clone();
+    assert!(restart_argv
+        .windows(2)
+        .any(|p| p[0] == "--session" && Path::new(&p[1]) == session));
+    assert_route(&argv, &["resume-route"]);
+    assert_route(&restart_argv, &["resume-route"]);
+}
+
+#[test]
+#[serial(env)]
 fn a09_remove_rollback_respawns_original_seat_with_route_once() {
     let f = Fixture::new("argv-rollback");
     f.start_team("copilot", &["worker", "mate"]);
@@ -852,6 +934,151 @@ fn a09_remove_rollback_respawns_original_seat_with_route_once() {
     assert!(
         state["agents"]["worker"].is_object(),
         "rollback must restore original seat"
+    );
+}
+
+#[test]
+#[serial(env)]
+fn a09_pi_fork_inherits_session_and_routes_only_new_native_spawn() {
+    let f = Fixture::new("argv-fork");
+    f.start_team("pi", &["worker"]);
+    let session = crate::lifecycle::launch::pi_mcp::pi_seat_paths(&f.ws, "argvteam", "worker")
+        .sessions
+        .join("source.jsonl");
+    fs::create_dir_all(session.parent().unwrap()).unwrap();
+    let id = "fc317e54-bdbb-4ce5-8c1a-2b1bf33a9700";
+    fs::write(&session, format!("{}\n{}\n", json!({"type":"session","version":3,"id":id,"cwd":f.ws,"timestamp":"2026-01-01T00:00:00Z"}), json!({"type":"message","id":"seed01","parentId":null,"timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":[{"type":"text","text":"fork seed"}]}}))).unwrap();
+    f.mutate_agent("worker", |a| {
+        a["session_id"] = json!(id);
+        a["rollout_path"] = json!(session);
+        a["captured_at"] = json!("2026-01-01T00:00:01Z");
+        a["captured_via"] = json!("session_scan");
+        a["capture_state"] = json!("captured");
+    });
+    let original = fs::read(&session).unwrap();
+    f.seed(true, json!({"pi":["fork-route"]}));
+    f.switch(None);
+    let t = offline().with_session_present(true);
+    let report = fork_agent_with_transport(
+        &f.ws,
+        &AgentId::new("worker"),
+        &AgentId::new("forked"),
+        None,
+        false,
+        Some("argvteam"),
+        &t,
+    );
+    assert!(
+        report.is_ok(),
+        "valid v3 Pi fork must reach native spawn: {report:?}"
+    );
+    assert_eq!(t.spawn_records().len(), 1);
+    assert_route(&t.spawn_records()[0].1, &["fork-route"]);
+    assert_eq!(fs::read(session).unwrap(), original);
+}
+
+#[test]
+#[serial(env)]
+fn a09_claude_fork_spawns_native_fork_seat_and_leaves_source_unchanged() {
+    let f = Fixture::new("argv-claude-fork");
+    f.start_team("claude", &["worker"]);
+    let parent = "11111111-2222-4333-8444-555555555555";
+    let transcript = f.ws.join("parent-transcript.jsonl");
+    fs::write(&transcript, "{\"type\":\"user\"}\n").unwrap();
+    f.mutate_agent("worker", |a| {
+        a["session_id"] = json!(parent);
+        a["rollout_path"] = json!(transcript);
+        a["captured_at"] = json!("2026-01-01T00:00:01Z");
+        a["captured_via"] = json!("session_scan");
+        a["capture_state"] = json!("captured");
+    });
+    let tuple = |state: &Value| {
+        ["session_id", "rollout_path", "captured_at", "captured_via"]
+            .map(|key| state["agents"]["worker"][key].clone())
+    };
+    let before =
+        tuple(&crate::state::projection::select_runtime_state(&f.ws, Some("argvteam")).unwrap());
+
+    // No in-place branch: the same id is refused before any key or spawn.
+    let same = offline().with_session_present(true);
+    let refused = fork_agent_with_transport(
+        &f.ws,
+        &AgentId::new("worker"),
+        &AgentId::new("worker"),
+        None,
+        false,
+        Some("argvteam"),
+        &same,
+    );
+    assert!(format!("{refused:?}").contains("new seat"), "{refused:?}");
+    assert!(same.spawn_records().is_empty() && same.inject_payloads().is_empty());
+
+    let t = offline().with_session_present(true);
+    let report = fork_agent_with_transport(
+        &f.ws,
+        &AgentId::new("worker"),
+        &AgentId::new("forked"),
+        None,
+        false,
+        Some("argvteam"),
+        &t,
+    )
+    .expect("a legacy Claude seat forks into a new seat in one call");
+    assert_eq!(report.new_agent_id.as_str(), "forked");
+    // The shim never writes the child transcript: pending, never a fabricated id.
+    assert_eq!(
+        report.backing_state,
+        crate::lifecycle::ForkBackingState::PendingContextFork
+    );
+    assert!(report.session_id.is_none());
+    let spawns = t.spawn_records();
+    assert_eq!(spawns.len(), 1);
+    let argv = &spawns[0].1;
+    let after = |flag: &str| {
+        argv.iter()
+            .position(|value| value == flag)
+            .and_then(|index| argv.get(index + 1))
+            .cloned()
+    };
+    assert_eq!(after("--resume").as_deref(), Some(parent), "{argv:?}");
+    assert!(
+        argv.iter().any(|value| value == "--fork-session"),
+        "{argv:?}"
+    );
+    let child = after("--session-id").expect("preassigned child session");
+    assert_ne!(child, parent);
+
+    let state = crate::state::projection::select_runtime_state(&f.ws, Some("argvteam")).unwrap();
+    let row = &state["agents"]["forked"];
+    assert_eq!(row["provider"], "claude", "{row}");
+    assert_eq!(row["status"], "running", "{row}");
+    assert_eq!(row["_pending_session_id"], json!(child), "{row}");
+    assert!(
+        row.get("_fork_parent_session_id").is_none(),
+        "one-shot fork instruction: {row}"
+    );
+    assert!(
+        row.get("forked_from").is_none(),
+        "capture must own the new row: {row}"
+    );
+    assert_eq!(tuple(&state), before, "the parent tuple is only read");
+    assert_eq!(
+        fs::read_to_string(&transcript).unwrap(),
+        "{\"type\":\"user\"}\n"
+    );
+    let events = crate::event_log::EventLog::new(&f.ws).tail(0).unwrap();
+    let spawn = events
+        .iter()
+        .rev()
+        .find(|event| {
+            event["event"] == "provider.worker.spawn_argv" && event["agent_id"] == "forked"
+        })
+        .expect("fork spawn argv event");
+    assert!(
+        spawn["env_overlay_keys"].as_array().is_some_and(|keys| keys
+            .iter()
+            .any(|key| key == "CLAUDE_CODE_RESUME_THRESHOLD_MINUTES")),
+        "a fork never stops on the stale-resume modal: {spawn}"
     );
 }
 
@@ -1073,14 +1300,8 @@ fn a13_materializer_version_catalog_and_nonagent_command_builders_are_not_routed
         json!({"pi":["--mode","rpc"],"copilot":["must-not-pollute-probe"]}),
     );
     f.switch(None);
-    unsafe {
-        std::env::set_var("TMUX", "fixture,1,0");
-    }
-    // The Pi leader plan is the remaining Pi materializer (version + catalog probes).
-    let plan = f.leader(Provider::Pi, true, false).unwrap();
-    unsafe {
-        std::env::remove_var("TMUX");
-    }
+    let base = f.cold("pi");
+    let _ = crate::lifecycle::launch::pi_mcp::pi_model_candidates("team-agent/qwen3.8-27b");
     let probes = fs::read_to_string(&f.probes).unwrap();
     assert!(probes.contains("--version"));
     assert!(probes.contains("--list-models"));
@@ -1091,7 +1312,7 @@ fn a13_materializer_version_catalog_and_nonagent_command_builders_are_not_routed
         !f.native_file().exists(),
         "plan/materializer must not execute native provider session"
     );
-    assert_route(&plan.provider_argv, &["--mode", "rpc"]);
+    assert_route(&base, &["--mode", "rpc"]);
 }
 
 #[test]

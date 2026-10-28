@@ -626,7 +626,7 @@ pub fn incomplete_resumable_agent_ids(state: &Value) -> Vec<String> {
 /// params:
 ///   workspace: event log 所在工作区
 ///   agent_id: 目标席位;事件的 agent_id 或 worker_id 命中即算该席位
-///   previous: 修复前的 agent 行
+///   previous: 修复前的 agent 行;provider 字段决定要不要套 claude leader-marker 过滤
 ///   adapter: 用于二次确认候选会话确实可 resume
 ///   auth_mode: 传给 session_is_resumable 的鉴权模式
 ///   exclude_session_ids: 调用方给出的黑名单(例如刚被判为不可用的会话)
@@ -640,7 +640,7 @@ pub fn incomplete_resumable_agent_ids(state: &Value) -> Vec<String> {
 ///   - 只读 event log 与 rollout 路径存在性，不扫 provider 存档、不调分配器
 ///   - 不走分配器的 claimed-key 冲突检查，只看 exclude_session_ids 与 tombstone
 ///   - rollout_path 存在性用 exists()——对目录型 backing(grok)只要目录在就为真
-///   - 遗留 claude/pi worker 行由 adapter 判为不可 resume，修复不会落到它们身上
+///   - claude 家族额外过滤 leader-marker transcript;其它 provider 无等价归属过滤
 ///   - 修复成功会清掉 attribution_ambiguous 标记
 /// ---
 pub fn recover_resume_session_from_events(
@@ -651,6 +651,13 @@ pub fn recover_resume_session_from_events(
     auth_mode: crate::provider::AuthMode,
     exclude_session_ids: &BTreeSet<String>,
 ) -> Result<Option<Value>, ProviderError> {
+    // E57 postflight: read the agent's provider once; needed for the Claude
+    // leader-marker filter below. Falls back to None on non-string / missing,
+    // in which case the marker filter is skipped (only meaningful for Claude).
+    let provider = previous
+        .get("provider")
+        .and_then(Value::as_str)
+        .and_then(parse_provider);
     let events = crate::event_log::EventLog::new(workspace)
         .tail(0)
         .map_err(|e| ProviderError::Io(e.to_string()))?;
@@ -680,6 +687,23 @@ pub fn recover_resume_session_from_events(
         let Some(rollout_path) = event_rollout_path(event).filter(|path| path.exists()) else {
             continue;
         };
+        // E57 postflight (lane-046-capture-gap): the capture allocator already
+        // refuses Claude leader transcripts (P0 d39b5104,
+        // provider/session_scan/claude.rs leader marker). Event-log
+        // repair must apply the SAME filter — otherwise a stale `session.captured`
+        // event from a pre-fix run (or from a window where the allocator was
+        // bypassed) still pulls the 590MB leader transcript onto a worker on the
+        // next restart (Mac mini repro: session_id=ea059b82 reassigned to
+        // release-engineer via captured_via=event_log_repair). The check is
+        // a no-op for non-Claude providers.
+        if let Some(p) = provider {
+            if crate::provider::session_scan::rollout_path_has_claude_leader_marker(
+                p,
+                &rollout_path,
+            ) {
+                continue;
+            }
+        }
         let session = SessionId::new(session_id.to_string());
         if !adapter.session_is_resumable(Some(&session), auth_mode)? {
             continue;
@@ -876,15 +900,15 @@ mod stopped_capture_tests {
     #[test]
     fn explicit_stop_is_checked_before_adapter_or_backing_probes() {
         for row in [
-            serde_json::json!({"status":"stopped","provider":"copilot","spawn_cwd":"/controlled"}),
-            serde_json::json!({"status":"running","explicit_stop":true,"provider":"copilot","spawn_cwd":"/controlled"}),
-            serde_json::json!({"status":"running","explicit_stop":"false","provider":"copilot","spawn_cwd":"/controlled"}),
+            serde_json::json!({"status":"stopped","provider":"pi","spawn_cwd":"/controlled"}),
+            serde_json::json!({"status":"running","explicit_stop":true,"provider":"pi","spawn_cwd":"/controlled"}),
+            serde_json::json!({"status":"running","explicit_stop":"false","provider":"pi","spawn_cwd":"/controlled"}),
         ] {
             assert!(incomplete_resumable_provider(&row, &mut |_| panic!("held seat reached adapter lookup")).is_none());
         }
         let mut calls = 0;
         let _ = incomplete_resumable_provider(
-            &serde_json::json!({"status":"running","explicit_stop":false,"provider":"copilot","spawn_cwd":"/controlled"}),
+            &serde_json::json!({"status":"running","explicit_stop":false,"provider":"pi","spawn_cwd":"/controlled"}),
             &mut |provider| { calls += 1; crate::provider::get_adapter(provider) },
         );
         assert_eq!(calls, 1, "active control must still be eligible for capture");
@@ -2548,6 +2572,82 @@ mod u1_tests {
             "11111111-1111-4111-8111-111111111111"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// E57 RED postflight (lane-046-capture-gap): `recover_resume_session_from_events`
+    /// must refuse to repair a worker's session from a stale `session.captured`
+    /// event whose rollout file is a Claude LEADER transcript
+    /// (`customTitle == "claude leader"`). Without this filter, a fresh restart
+    /// after a pre-fix run still pulls the leader transcript onto a worker via
+    /// captured_via=event_log_repair (Mac mini evidence:
+    /// resume.session_repaired session_id=ea059b82 → release-engineer).
+    #[test]
+    fn e57_recover_resume_refuses_claude_leader_marker_rollout() {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let uniq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let workspace =
+            std::env::temp_dir().join(format!("ta-e57-recover-{}-{}", std::process::id(), uniq));
+        let _ = std::fs::remove_dir_all(&workspace);
+        std::fs::create_dir_all(&workspace).expect("workspace");
+
+        // Write a leader-marker rollout file (claude TUI leader transcript).
+        let rollout = workspace.join("ea059b82-leader.jsonl");
+        let mut f = std::fs::File::create(&rollout).expect("rollout");
+        writeln!(
+            f,
+            "{{\"customTitle\":\"claude leader\",\"sessionId\":\"ea059b82-c53e-4654-9590-9f3e6d46f0ca\",\"cwd\":\"/tmp/e57\"}}"
+        )
+        .unwrap();
+        writeln!(f, "{{\"role\":\"user\",\"content\":\"hi\"}}").unwrap();
+        drop(f);
+
+        // Write a `session.captured` event into events.jsonl pointing
+        // release-engineer at the leader rollout — simulates the stale
+        // pre-fix event that triggered the bug.
+        let event_log = crate::event_log::EventLog::new(&workspace);
+        event_log
+            .write(
+                "session.captured",
+                serde_json::json!({
+                    "agent_id": "release-engineer",
+                    "provider": "claude",
+                    "session_id": "ea059b82-c53e-4654-9590-9f3e6d46f0ca",
+                    "rollout_path": rollout.to_string_lossy().to_string(),
+                    "captured_via": "fs_watch",
+                }),
+            )
+            .expect("event write");
+
+        let previous = serde_json::json!({
+            "provider": "claude",
+            "session_id": null,
+            "rollout_path": null,
+        });
+        let adapter = test_support::CaptureCandidatesAdapter::new(Provider::Claude, None, "");
+        let exclude = BTreeSet::new();
+        let result = recover_resume_session_from_events(
+            &workspace,
+            "release-engineer",
+            &previous,
+            &adapter,
+            crate::provider::AuthMode::Subscription,
+            &exclude,
+        )
+        .expect("recover call ok");
+
+        assert!(
+            result.is_none(),
+            "E57 postflight: recover_resume_session_from_events must REFUSE \
+             to repair from a Claude leader-marker rollout (event_log_repair \
+             cannot resurrect a stale leader-to-worker assignment); got {result:?}"
+        );
+
+        let _ = std::fs::remove_file(&rollout);
+        let _ = std::fs::remove_file(workspace.join(".team/logs/events.jsonl"));
+        let _ = std::fs::remove_dir_all(workspace.join(".team"));
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 
     /// S1-CAPTURE-001 (0.4.8): pending mismatch guard. When fresh-start has

@@ -7,34 +7,29 @@ use team_agent_contract::contract::{
     types::InstanceIdentity,
     hooks::{PlanHook, ProviderHooks},
     plan::{CatalogObservation, LaunchEntrypoint, LaunchPlan, ResolvedLaunch},
-    session::ResumeBinding,
     types::{ContractError, NativeIdentity, Support},
 };
 use team_agent_contract::kiro::{self, KiroAdapter, KIRO_DESCRIPTOR};
-use team_agent_contract::providers::claude::{self, ClaudeAdapter, CLAUDE_DESCRIPTOR};
 use team_agent_contract::providers::codex::{self, CodexAdapter, CODEX_DESCRIPTOR};
 use team_agent_contract::providers::cursor::{self, CursorAdapter, CURSOR_DESCRIPTOR};
 use team_agent_contract::providers::grok_build::{self, GrokAdapter, GROK_BUILD_DESCRIPTOR};
-use team_agent_contract::providers::pi::{self, PiAdapter, PI_DESCRIPTOR};
 use team_agent_contract::runtime::{
     delivery::{ControlDefinition, StartupDefinition},
     native_panel::{NativePanelPolicy, SessionPanelPolicy},
 };
 
-const DESCRIPTORS: &[&ProviderDescriptor] = &[&KIRO_DESCRIPTOR, &CURSOR_DESCRIPTOR, &GROK_BUILD_DESCRIPTOR, &CODEX_DESCRIPTOR, &PI_DESCRIPTOR, &CLAUDE_DESCRIPTOR];
+const DESCRIPTORS: &[&ProviderDescriptor] = &[&KIRO_DESCRIPTOR, &CURSOR_DESCRIPTOR, &GROK_BUILD_DESCRIPTOR, &CODEX_DESCRIPTOR];
 /// Declaration names that select a leaf: Cursor's legacy key, its npm
-/// package/public command and its binary; the public names of Claude Code,
-/// Codex, Grok Build and Pi (`pi` is also the default role provider). The
-/// leaf's distinct id is what compiled specs and state carry. A persisted
-/// legacy state row keeps its key and is never reclassified ([`descriptor`]
-/// does not match it). Leaders are not leaves: `team-agent codex|grok|claude|pi`
-/// keep their own launchers.
+/// package/public command and its binary; the public names of Codex and Grok
+/// Build. The leaf's distinct id is what compiled specs and state carry. A
+/// persisted legacy state row keeps its key and is never reclassified
+/// ([`descriptor`] does not match it). Leaders are not leaves: `team-agent
+/// codex|grok` keep their own launchers. Claude Code and Pi names keep their
+/// legacy runtimes and select no leaf.
 const TRANSITION: &[(&str, &ProviderDescriptor)] = &[
     ("cursor_agent", &CURSOR_DESCRIPTOR), ("cursor-agent", &CURSOR_DESCRIPTOR), ("agent", &CURSOR_DESCRIPTOR),
-    ("claude", &CLAUDE_DESCRIPTOR), ("claude_code", &CLAUDE_DESCRIPTOR), ("claude-code", &CLAUDE_DESCRIPTOR),
     ("codex", &CODEX_DESCRIPTOR), ("codex_cli", &CODEX_DESCRIPTOR), ("codex-cli", &CODEX_DESCRIPTOR),
     ("grok", &GROK_BUILD_DESCRIPTOR),
-    ("pi", &PI_DESCRIPTOR),
 ];
 
 /// One provider's public command route: the PATH-selected entry the pane execs
@@ -45,8 +40,6 @@ pub enum NativeRuntime {
     Cursor(cursor::native::RuntimeInstallation),
     GrokBuild(grok_build::native::RuntimeInstallation),
     Codex(codex::launcher::RuntimeInstallation),
-    Pi(pi::launcher::RuntimeInstallation),
-    Claude(claude::launcher::RuntimeInstallation),
 }
 
 impl NativeRuntime {
@@ -56,8 +49,6 @@ impl NativeRuntime {
             Self::Cursor(runtime) => runtime.launcher(),
             Self::GrokBuild(runtime) => runtime.launcher(),
             Self::Codex(runtime) => runtime.launcher(),
-            Self::Pi(runtime) => runtime.launcher(),
-            Self::Claude(runtime) => runtime.launcher(),
         }
     }
 
@@ -67,8 +58,6 @@ impl NativeRuntime {
             Self::Cursor(runtime) => &runtime.engine,
             Self::GrokBuild(runtime) => &runtime.engine,
             Self::Codex(runtime) => &runtime.engine,
-            Self::Pi(runtime) => &runtime.engine,
-            Self::Claude(runtime) => &runtime.engine,
         }
     }
 
@@ -78,8 +67,6 @@ impl NativeRuntime {
             Self::Cursor(runtime) => &runtime.native,
             Self::GrokBuild(runtime) => &runtime.native,
             Self::Codex(runtime) => &runtime.native,
-            Self::Pi(runtime) => &runtime.native,
-            Self::Claude(runtime) => &runtime.native,
         }
     }
 
@@ -89,8 +76,6 @@ impl NativeRuntime {
             Self::Cursor(runtime) => runtime.bind_catalog(catalog),
             Self::GrokBuild(runtime) => runtime.bind_catalog(catalog),
             Self::Codex(runtime) => runtime.bind_catalog(catalog),
-            Self::Pi(runtime) => runtime.bind_catalog(catalog),
-            Self::Claude(runtime) => runtime.bind_catalog(catalog),
         }
     }
 }
@@ -102,8 +87,6 @@ pub(super) enum NativeProvider {
     Cursor,
     GrokBuild,
     Codex,
-    Pi,
-    Claude,
 }
 
 impl NativeProvider {
@@ -113,15 +96,13 @@ impl NativeProvider {
             Self::Cursor => &CURSOR_DESCRIPTOR,
             Self::GrokBuild => &GROK_BUILD_DESCRIPTOR,
             Self::Codex => &CODEX_DESCRIPTOR,
-            Self::Pi => &PI_DESCRIPTOR,
-            Self::Claude => &CLAUDE_DESCRIPTOR,
         }
     }
 
     pub fn action_budget(self) -> std::time::Duration {
         // Kiro's existing budget is unchanged; Cursor's measured cold-ready
         // path needs a larger finite bound, not an unbounded readiness wait.
-        std::time::Duration::from_secs(match self { Self::Kiro => 30, Self::Cursor | Self::GrokBuild | Self::Codex | Self::Pi | Self::Claude => 90 })
+        std::time::Duration::from_secs(match self { Self::Kiro => 30, Self::Cursor | Self::GrokBuild | Self::Codex => 90 })
     }
 
     pub fn controls(self) -> &'static [ControlDefinition] {
@@ -130,8 +111,6 @@ impl NativeProvider {
             Self::Cursor => cursor::interaction::CONTROLS,
             Self::GrokBuild => grok_build::interaction::CONTROLS,
             Self::Codex => codex::interaction::CONTROLS,
-            Self::Pi => pi::interaction::CONTROLS,
-            Self::Claude => claude::interaction::CONTROLS,
         }
     }
 
@@ -144,23 +123,21 @@ impl NativeProvider {
     /// These providers use the separately fenced native tool-roundtrip ledger,
     /// never a guessed neutral tools panel or another provider's inspector.
     pub fn uses_tool_roundtrips(self) -> bool {
-        matches!(self, Self::Cursor | Self::GrokBuild | Self::Codex | Self::Pi | Self::Claude)
+        matches!(self, Self::Cursor | Self::GrokBuild | Self::Codex)
     }
 
     pub fn startup(self) -> Option<&'static StartupDefinition> {
         match self {
             Self::GrokBuild => Some(&grok_build::interaction::STARTUP),
-            // Claude's folder-trust screen is never answered (focus: No, exit).
-            Self::Kiro | Self::Cursor | Self::Codex | Self::Pi | Self::Claude => None,
+            Self::Kiro | Self::Cursor | Self::Codex => None,
         }
     }
 
     pub fn session_panel(self) -> Option<&'static SessionPanelPolicy> {
         match self {
             Self::GrokBuild => Some(&grok_build::interaction::SESSION_PANEL),
-            // `/status` and `/session` print history cards, not modals: nothing to close.
-            // Claude's fresh session ID is preassigned by argv; nothing to close.
-            Self::Kiro | Self::Cursor | Self::Codex | Self::Pi | Self::Claude => None,
+            // `/status` prints a history card, not a modal: nothing to close.
+            Self::Kiro | Self::Cursor | Self::Codex => None,
         }
     }
 
@@ -179,29 +156,6 @@ impl NativeProvider {
                 field: "Codex native Team-tool inspector",
                 reason: codex::UNVERIFIED,
             }),
-            Self::Pi => Err(ContractError::Unverified {
-                field: "Pi native Team-tool inspector",
-                reason: pi::UNVERIFIED,
-            }),
-            Self::Claude => Err(ContractError::Unverified {
-                field: "Claude Code native Team-tool inspector",
-                reason: claude::UNVERIFIED,
-            }),
-        }
-    }
-
-    /// The exact local backing a native new-seat fork reads, for a leaf that
-    /// addresses its parent by path (Claude's transcript). None: the native
-    /// CLI resolves the parent by ID itself. Pure; the caller checks the file.
-    pub fn native_fork_source(
-        self,
-        runtime: Option<&NativeRuntime>,
-        source: &ResumeBinding,
-    ) -> Result<Option<PathBuf>, ContractError> {
-        match (self, runtime) {
-            (Self::Claude, Some(NativeRuntime::Claude(runtime))) => claude::transcript_path(runtime.home(), source).map(Some),
-            (Self::Claude, _) => Err(ContractError::Mismatch("native runtime provider")),
-            _ => Ok(None),
         }
     }
 
@@ -209,8 +163,6 @@ impl NativeProvider {
         match self {
             Self::GrokBuild => Ok(grok_build::server_key(identity)),
             Self::Codex => Ok(codex::server_key(identity)),
-            Self::Pi => Ok(pi::server_key(identity)),
-            Self::Claude => Ok(claude::server_key(identity)),
             Self::Kiro | Self::Cursor => Ok(self.server_key()?.into()),
         }
     }
@@ -241,12 +193,6 @@ impl NativeProvider {
             Self::Codex => CodexAdapter::new(codex::McpStdio {
                 executable, arguments, environment,
             }).map(NativeAdapter::Codex),
-            Self::Pi => PiAdapter::new(pi::McpStdio {
-                executable, arguments, environment,
-            }).map(NativeAdapter::Pi),
-            Self::Claude => ClaudeAdapter::new(claude::McpStdio {
-                executable, arguments, environment,
-            }).map(NativeAdapter::Claude),
         }
     }
 }
@@ -256,8 +202,6 @@ pub(super) enum NativeAdapter {
     Cursor(CursorAdapter),
     GrokBuild(GrokAdapter),
     Codex(CodexAdapter),
-    Pi(PiAdapter),
-    Claude(ClaudeAdapter),
 }
 
 impl NativeAdapter {
@@ -294,22 +238,6 @@ impl NativeAdapter {
                     None => adapter,
                 }))
             }
-            Self::Pi(adapter) => {
-                let adapter = adapter.with_project(project)?;
-                Ok(Self::Pi(match runtime {
-                    Some(NativeRuntime::Pi(runtime)) => adapter.with_runtime(runtime),
-                    Some(_) => return Err(ContractError::Mismatch("native runtime provider")),
-                    None => adapter,
-                }))
-            }
-            Self::Claude(adapter) => {
-                let adapter = adapter.with_project(project)?;
-                Ok(Self::Claude(match runtime {
-                    Some(NativeRuntime::Claude(runtime)) => adapter.with_runtime(runtime),
-                    Some(_) => return Err(ContractError::Mismatch("native runtime provider")),
-                    None => adapter,
-                }))
-            }
         }
     }
 
@@ -319,8 +247,6 @@ impl NativeAdapter {
             Self::Cursor(adapter) => adapter.hooks(),
             Self::GrokBuild(adapter) => adapter.hooks(),
             Self::Codex(adapter) => adapter.hooks(),
-            Self::Pi(adapter) => adapter.hooks(),
-            Self::Claude(adapter) => adapter.hooks(),
         }
     }
 
@@ -330,8 +256,6 @@ impl NativeAdapter {
             Self::Cursor(adapter) => adapter.plan(request),
             Self::GrokBuild(adapter) => adapter.plan(request),
             Self::Codex(adapter) => adapter.plan(request),
-            Self::Pi(adapter) => adapter.plan(request),
-            Self::Claude(adapter) => adapter.plan(request),
         }
     }
 }
@@ -343,8 +267,6 @@ pub(super) fn provider(key: &str) -> Result<NativeProvider, ContractError> {
         "cursor" => Ok(NativeProvider::Cursor),
         "grok_build" => Ok(NativeProvider::GrokBuild),
         "codex_tui" => Ok(NativeProvider::Codex),
-        "pi_tui" => Ok(NativeProvider::Pi),
-        "claude_tui" => Ok(NativeProvider::Claude),
         _ => Err(ContractError::Invalid("contract provider dispatcher")),
     }
 }
@@ -360,23 +282,21 @@ pub fn descriptor(key: &str) -> Option<&'static ProviderDescriptor> {
 }
 
 /// The leaf a role document or CLI value selects: a canonical contract key or
-/// a transition name (Cursor, Claude Code, Codex, Grok Build, Pi). No flag is
-/// needed; `contract_runtime: true` is accepted but selects nothing extra.
+/// a transition name (Cursor, Codex, Grok Build). No flag is needed;
+/// `contract_runtime: true` is accepted but selects nothing extra.
 pub fn declared(key: &str) -> Option<&'static ProviderDescriptor> {
     TRANSITION.iter().find(|(retired, _)| *retired == key)
         .map(|(_, descriptor)| *descriptor)
         .or_else(|| descriptor(key))
 }
 
-/// The provider name a generated role document records for a leaf. Claude
-/// Code, Codex, Grok Build and Pi keep their public command names, which
-/// declare the leaf; every other leaf is named by its canonical id.
+/// The provider name a generated role document records for a leaf. Codex and
+/// Grok Build keep their public command names, which declare the leaf; every
+/// other leaf is named by its canonical id.
 pub fn public_name(descriptor: &ProviderDescriptor) -> &'static str {
     match descriptor.identity.id {
-        "claude_tui" => "claude",
         "codex_tui" => "codex",
         "grok_build" => "grok",
-        "pi_tui" => "pi",
         id => id,
     }
 }
@@ -404,6 +324,13 @@ mod tests {
     fn canonical_cursor_does_not_reclassify_legacy_names() {
         assert_eq!(provider("cursor").unwrap(), NativeProvider::Cursor);
         assert_eq!(provider("kiro").unwrap(), NativeProvider::Kiro);
+        // Claude Code and Pi names keep their legacy runtimes: no leaf, no recognition.
+        for legacy in ["pi", "claude", "claude_code", "claude-code"] {
+            assert!(descriptor(legacy).is_none(), "{legacy}");
+            assert!(declared(legacy).is_none(), "{legacy}");
+            assert!(!recognizes(legacy), "{legacy}");
+            assert!(provider(legacy).is_err(), "{legacy}");
+        }
         // Every Cursor name declares the leaf; a persisted legacy row is never reclassified.
         for name in ["cursor", "cursor_agent", "cursor-agent", "agent"] {
             assert_eq!(declared(name).unwrap().identity.id, "cursor");
@@ -446,7 +373,9 @@ mod tests {
         assert!(declared("Codex").is_none());
         assert_eq!(public_name(&CODEX_DESCRIPTOR), "codex");
         assert_eq!(declared(public_name(&CODEX_DESCRIPTOR)), Some(&CODEX_DESCRIPTOR));
-        assert_eq!(declared("claude"), Some(&CLAUDE_DESCRIPTOR));
+        assert!(declared("claude").is_none());
+        assert!(declared("pi").is_none());
+        assert_eq!(public_name(&CURSOR_DESCRIPTOR), "cursor");
         assert_eq!(declared("grok_build"), Some(&GROK_BUILD_DESCRIPTOR));
         let mut identity = InstanceIdentity {
             scope: team_agent_contract::contract::types::ScopeId::new("scope").unwrap(),
@@ -466,85 +395,6 @@ mod tests {
         assert!(NativeProvider::Codex.first_business_bootstrap());
         let kinds: Vec<_> = NativeProvider::Codex.controls().iter().map(|control| control.command).collect();
         assert_eq!(kinds, ["/status", "/exit"]);
-    }
-
-    #[test]
-    fn claude_leaf_has_a_distinct_key_and_no_startup_or_panel_fallback() {
-        use team_agent_contract::contract::types::{Generation, InstanceId, ScopeId, SeatId};
-        assert_eq!(CLAUDE_DESCRIPTOR.identity.id, "claude_tui");
-        assert_eq!(CLAUDE_DESCRIPTOR.identity.binary, "claude");
-        assert_eq!(provider("claude_tui").unwrap(), NativeProvider::Claude);
-        assert_eq!(declared("claude_tui"), Some(&CLAUDE_DESCRIPTOR));
-        // Every public Claude name declares the leaf; a persisted legacy row
-        // keeps its key and is never reclassified.
-        for name in ["claude", "claude_code", "claude-code"] {
-            assert_eq!(declared(name), Some(&CLAUDE_DESCRIPTOR), "{name}");
-            assert!(recognizes(name), "{name}");
-            assert!(descriptor(name).is_none(), "{name}");
-            assert!(provider(name).is_err(), "{name}");
-        }
-        assert!(declared("Claude").is_none());
-        assert_eq!(public_name(&CLAUDE_DESCRIPTOR), "claude");
-        assert_eq!(declared(public_name(&CLAUDE_DESCRIPTOR)), Some(&CLAUDE_DESCRIPTOR));
-        assert!(recognizes(" Claude "));
-        assert!(recognizes(" Claude_TUI "));
-        let mut identity = InstanceIdentity {
-            scope: ScopeId::new("scope").unwrap(), seat: SeatId::new("worker").unwrap(),
-            instance: InstanceId::new("instance").unwrap(), generation: Generation(1),
-        };
-        let first = NativeProvider::Claude.server_key_for(&identity).unwrap();
-        assert_eq!(first, claude::server_key(&identity));
-        assert_ne!(first, grok_build::server_key(&identity));
-        assert_ne!(first, codex::server_key(&identity));
-        assert_ne!(first, pi::server_key(&identity));
-        identity.generation = Generation(2);
-        assert_ne!(first, NativeProvider::Claude.server_key_for(&identity).unwrap());
-        assert!(NativeProvider::Claude.server_key().is_err());
-        assert!(NativeProvider::Claude.tool_panel().is_err());
-        assert!(NativeProvider::Claude.startup().is_none(), "folder trust is never keyed");
-        assert!(NativeProvider::Claude.session_panel().is_none());
-        assert!(NativeProvider::Claude.uses_tool_roundtrips());
-        assert!(NativeProvider::Claude.first_business_bootstrap());
-        let kinds: Vec<_> = NativeProvider::Claude.controls().iter().map(|control| control.command).collect();
-        assert_eq!(kinds, ["/exit"]);
-    }
-
-    #[test]
-    fn bare_pi_selects_the_leaf_and_a_legacy_row_is_never_reclassified() {
-        use team_agent_contract::contract::types::{Generation, InstanceId, ScopeId, SeatId};
-        assert_eq!(PI_DESCRIPTOR.identity.id, "pi_tui");
-        assert_eq!(PI_DESCRIPTOR.identity.binary, "pi");
-        assert_eq!(provider("pi_tui").unwrap(), NativeProvider::Pi);
-        // `pi` (also the default role provider) declares the leaf; a
-        // persisted legacy `pi` row is never reclassified.
-        assert!(descriptor("pi").is_none());
-        assert!(provider("pi").is_err());
-        assert_eq!(declared("pi"), Some(&PI_DESCRIPTOR));
-        assert_eq!(declared("pi_tui"), Some(&PI_DESCRIPTOR));
-        for spelling in ["pi", " Pi ", "PI"] {
-            assert!(recognizes(spelling), "{spelling:?}");
-        }
-        assert!(declared("Pi").is_none());
-        assert_eq!(public_name(&PI_DESCRIPTOR), "pi");
-        assert_eq!(public_name(&CURSOR_DESCRIPTOR), "cursor");
-        let mut identity = InstanceIdentity {
-            scope: ScopeId::new("scope").unwrap(), seat: SeatId::new("worker").unwrap(),
-            instance: InstanceId::new("instance").unwrap(), generation: Generation(1),
-        };
-        let first = NativeProvider::Pi.server_key_for(&identity).unwrap();
-        assert_eq!(first, pi::server_key(&identity));
-        assert_ne!(first, codex::server_key(&identity));
-        // Pi rejects a tool name over 64 characters.
-        assert!(format!("mcp__{first}__report_result").len() <= 64);
-        identity.generation = Generation(2);
-        assert_ne!(first, NativeProvider::Pi.server_key_for(&identity).unwrap());
-        assert!(NativeProvider::Pi.tool_panel().is_err());
-        assert!(NativeProvider::Pi.startup().is_none());
-        assert!(NativeProvider::Pi.session_panel().is_none());
-        assert!(NativeProvider::Pi.uses_tool_roundtrips());
-        assert!(NativeProvider::Pi.first_business_bootstrap());
-        let kinds: Vec<_> = NativeProvider::Pi.controls().iter().map(|control| control.command).collect();
-        assert_eq!(kinds, ["/session", "/quit"]);
     }
 
     #[test]

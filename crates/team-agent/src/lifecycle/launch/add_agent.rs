@@ -274,6 +274,7 @@ pub fn add_agent(
         &transport,
         Some(reservation),
         false,
+        None,
     )
 }
 
@@ -364,6 +365,7 @@ pub(crate) fn add_agent_with_transport(
         transport,
         Some(reservation),
         false,
+        None,
     )
 }
 
@@ -542,6 +544,7 @@ pub(super) fn add_agent_with_transport_at_paths(
         transport,
         None,
         false,
+        None,
     )
 }
 
@@ -565,6 +568,34 @@ pub(crate) fn add_agent_with_transport_at_paths_locked(
         transport,
         None,
         true,
+        None,
+    )
+}
+
+/// fork-agent's new seat under the held lifecycle lock: the ordinary add-agent
+/// transaction (and rollback), whose first spawn natively forks `parent`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn add_forked_agent_locked(
+    run_workspace: &Path,
+    team_dir: &Path,
+    agent_id: &AgentId,
+    role_file_path: &Path,
+    open_display: bool,
+    team: Option<&str>,
+    transport: &dyn Transport,
+    parent: &crate::provider::SessionId,
+) -> Result<AddAgentReport, LifecycleError> {
+    add_agent_with_transport_at_paths_reserved(
+        run_workspace,
+        team_dir,
+        agent_id,
+        role_file_path,
+        open_display,
+        team,
+        transport,
+        None,
+        true,
+        Some(parent),
     )
 }
 
@@ -579,6 +610,7 @@ fn add_agent_with_transport_at_paths_reserved(
     transport: &dyn Transport,
     reservation: Option<AgentReservation>,
     lifecycle_lock_held: bool,
+    fork_parent: Option<&crate::provider::SessionId>,
 ) -> Result<AddAgentReport, LifecycleError> {
     let runtime_state = crate::state::persist::load_runtime_state(run_workspace)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
@@ -699,6 +731,7 @@ fn add_agent_with_transport_at_paths_reserved(
         agent_id,
         &meta,
         role_file_path,
+        fork_parent,
     ) {
         rollback_add_agent_atomic(
             run_workspace,

@@ -1,9 +1,10 @@
 //! Provider model discovery, bounded native catalog queries, and shared fuzzy search.
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -12,6 +13,8 @@ use crate::provider::wire::{parse_canonical_provider, provider_wire};
 
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CATALOG_BYTES: u64 = 1024 * 1024;
+const CLAUDE_REQUEST_ID: &str = "team-agent-model-catalog";
+static TEMP_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelRecord {
@@ -127,23 +130,20 @@ pub fn parse_catalog_provider(name: &str) -> Option<Provider> {
 
 #[derive(Clone, Copy)]
 enum CatalogSource {
+    Pi,
     Codex,
     Grok,
+    Claude,
 }
 
 // Exhaustive by design: a new Provider variant must make an explicit catalog decision.
-// `team-agent models --provider claude|claude_code|pi` reads the contract
-// leaf's catalog (contract_runtime::discovery) before reaching this table.
 fn catalog_source(provider: Provider) -> Option<CatalogSource> {
     match provider {
+        Provider::Pi => Some(CatalogSource::Pi),
         Provider::Codex => Some(CatalogSource::Codex),
+        Provider::Claude | Provider::ClaudeCode => Some(CatalogSource::Claude),
         Provider::Grok => Some(CatalogSource::Grok),
-        Provider::Claude
-        | Provider::ClaudeCode
-        | Provider::Pi
-        | Provider::Copilot
-        | Provider::GeminiCli
-        | Provider::Fake => None,
+        Provider::Copilot | Provider::GeminiCli | Provider::Fake => None,
     }
 }
 
@@ -152,6 +152,10 @@ pub fn discover_model_catalog(provider_name: &str) -> Result<Vec<ModelRecord>, C
     let source = catalog_source(provider).ok_or(CatalogError::UnsupportedProvider)?;
     let requested_provider = provider_wire(provider);
     let records = match source {
+        CatalogSource::Pi => {
+            let bytes = run_native("pi", &["--list-models"], None, None, &[], CATALOG_TIMEOUT, MAX_CATALOG_BYTES, &mut NoopObserver)?;
+            parse_pi_catalog(&bytes)?
+        }
         CatalogSource::Codex => {
             let bytes = run_native("codex", &["debug", "models"], None, None, &[], CATALOG_TIMEOUT, MAX_CATALOG_BYTES, &mut NoopObserver)?;
             parse_codex_catalog(&bytes, requested_provider)?
@@ -160,6 +164,7 @@ pub fn discover_model_catalog(provider_name: &str) -> Result<Vec<ModelRecord>, C
             let bytes = run_native("grok", &["models"], None, None, &[], CATALOG_TIMEOUT, MAX_CATALOG_BYTES, &mut NoopObserver)?;
             parse_grok_catalog(&bytes)?
         }
+        CatalogSource::Claude => discover_claude_catalog(requested_provider)?,
     };
     Ok(records)
 }
@@ -350,6 +355,90 @@ fn parse_codex_catalog(bytes: &[u8], provider: &str) -> Result<Vec<ModelRecord>,
     Ok(visible)
 }
 
+fn discover_claude_catalog(provider: &str) -> Result<Vec<ModelRecord>, CatalogError> {
+    let cwd = OwnedTempDir::create()?;
+    let args = [
+        "--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+        "--no-session-persistence", "--strict-mcp-config", "--mcp-config", r#"{"mcpServers":{}}"#,
+        "--setting-sources", "", "--settings", r#"{"disableAllHooks":true}"#, "--tools", "", "--no-chrome",
+    ];
+    let request = serde_json::json!({"type":"control_request","request_id":CLAUDE_REQUEST_ID,"request":{"subtype":"initialize","hooks":{},"agents":{},"skills":[]}});
+    let mut input = serde_json::to_vec(&request).map_err(|_| CatalogError::InvalidProtocol)?;
+    input.push(b'\n');
+    let bytes = run_native("claude", &args, Some(&input), Some(&cwd.0), &["CLAUDECODE"], CATALOG_TIMEOUT, MAX_CATALOG_BYTES, &mut NoopObserver)?;
+    parse_claude_catalog(&bytes, provider)
+}
+
+fn parse_claude_catalog(bytes: &[u8], provider: &str) -> Result<Vec<ModelRecord>, CatalogError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| CatalogError::InvalidUtf8)?;
+    let mut response = None;
+    for line in text.lines() {
+        if line.is_empty() { return Err(CatalogError::InvalidProtocol); }
+        let frame: serde_json::Value = serde_json::from_str(line).map_err(|_| CatalogError::InvalidProtocol)?;
+        let frame_type = frame
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .filter(|frame_type| !frame_type.is_empty())
+            .ok_or(CatalogError::InvalidProtocol)?;
+        if frame_type != "control_response" {
+            continue;
+        }
+        if response.is_some() {
+            return Err(CatalogError::InvalidProtocol);
+        }
+        let result = frame.get("response").ok_or(CatalogError::UnsupportedSchema)?;
+        let outer_request_id = frame.get("request_id").and_then(serde_json::Value::as_str);
+        let inner_request_id = result.get("request_id").and_then(serde_json::Value::as_str);
+        if (outer_request_id != Some(CLAUDE_REQUEST_ID) && inner_request_id != Some(CLAUDE_REQUEST_ID))
+            || frame.get("request_id").is_some_and(|id| id.as_str() != Some(CLAUDE_REQUEST_ID))
+            || result.get("request_id").is_some_and(|id| id.as_str() != Some(CLAUDE_REQUEST_ID))
+        {
+            return Err(CatalogError::InvalidProtocol);
+        }
+        if result.get("subtype").and_then(serde_json::Value::as_str) != Some("success") { return Err(CatalogError::InvalidProtocol); }
+        let rows = result.get("response").and_then(|v| v.get("models")).and_then(serde_json::Value::as_array).ok_or(CatalogError::UnsupportedSchema)?;
+        response = Some(rows.clone());
+    }
+    let rows = response.ok_or(CatalogError::InvalidProtocol)?;
+    if rows.is_empty() { return Err(CatalogError::Empty); }
+    let mut source_values = HashSet::new();
+    let mut by_id = HashMap::<String, usize>::new();
+    let mut records: Vec<ModelRecord> = Vec::new();
+    let mut group_defaults = Vec::<bool>::new();
+    let mut group_has_non_default_display = Vec::<bool>::new();
+    let mut any_default = false;
+    for row in rows {
+        let row = row.as_object().ok_or(CatalogError::Malformed)?;
+        let value = required_string(row.get("value"))?;
+        let resolved = required_string(row.get("resolvedModel")).map_err(|_| CatalogError::UnsupportedSchema)?;
+        let display = required_string(row.get("displayName")).map_err(|_| CatalogError::UnsupportedSchema)?;
+        validate_identity(value)?;
+        validate_identity(resolved)?;
+        validate_display(display)?;
+        if !source_values.insert(value.to_string()) { return Err(CatalogError::DuplicateIdentity(value.into())); }
+        let is_default = value == "default";
+        any_default |= is_default;
+        if let Some(index) = by_id.get(resolved).copied() {
+            let record = &mut records[index];
+            record.aliases.push(value.into());
+            if !is_default && !group_has_non_default_display[index] {
+                record.display_name = display.into();
+                group_has_non_default_display[index] = true;
+            }
+            group_defaults[index] |= is_default;
+        } else {
+            by_id.insert(resolved.into(), records.len());
+            records.push(ModelRecord { provider: provider.into(), vendor: "anthropic".into(), id: resolved.into(), display_name: display.into(), default: None, aliases: vec![value.into()] });
+            group_defaults.push(is_default);
+            group_has_non_default_display.push(!is_default);
+        }
+    }
+    for (record, is_default) in records.iter_mut().zip(group_defaults) {
+        record.default = any_default.then_some(is_default);
+    }
+    Ok(records)
+}
+
 fn required_string(value: Option<&serde_json::Value>) -> Result<&str, CatalogError> {
     let value = value.and_then(serde_json::Value::as_str).ok_or(CatalogError::UnsupportedSchema)?;
     if value.trim().is_empty() { return Err(CatalogError::UnsupportedSchema); }
@@ -532,6 +621,54 @@ fn terminate(child: &mut Child, pid: u32) {
     let _ = child.wait();
 }
 
+pub(crate) fn finish_stdout_after_exit(
+    stdout: std::process::ChildStdout,
+    status: ExitStatus,
+    timeout: Duration,
+    max_bytes: u64,
+    observer: &mut dyn CatalogObserver,
+) -> Result<Vec<u8>, CatalogError> {
+    if !status.success() { observer.exited(&status); return Err(CatalogError::CommandFailed); }
+    observer.exited(&status);
+    let (tx, rx) = mpsc::channel();
+    let reader = std::thread::Builder::new().name("model-catalog-reader".into()).spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout.take(max_bytes.saturating_add(1)).read_to_end(&mut bytes);
+        let _ = tx.send(result.map(|_| bytes));
+    }).map_err(|_| CatalogError::OutputReadFailed)?;
+    let result = match rx.recv_timeout(timeout) {
+        Ok(Ok(bytes)) if bytes.len() as u64 <= max_bytes => Ok(bytes),
+        Ok(Ok(_)) => Err(CatalogError::OutputTooLarge),
+        Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => Err(CatalogError::OutputReadFailed),
+        Err(mpsc::RecvTimeoutError::Timeout) => { observer.output_timeout(); Err(CatalogError::Timeout) }
+    };
+    if !matches!(&result, Err(CatalogError::Timeout)) { let _ = reader.join(); }
+    result
+}
+
+struct OwnedTempDir(PathBuf);
+impl OwnedTempDir {
+    fn create() -> Result<Self, CatalogError> {
+        use std::os::unix::fs::DirBuilderExt;
+        let root = std::env::temp_dir();
+        for _ in 0..8 {
+            let id = TEMP_DIR_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let path = root.join(format!("team-agent-claude-models-{}-{id}", std::process::id()));
+            let mut builder = std::fs::DirBuilder::new();
+            builder.mode(0o700);
+            match builder.create(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return Err(CatalogError::TemporaryDirectoryUnavailable),
+            }
+        }
+        Err(CatalogError::TemporaryDirectoryUnavailable)
+    }
+}
+impl Drop for OwnedTempDir {
+    fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+}
+
 #[cfg(all(test, unix))]
 mod command_wait_regressions {
     use super::*;
@@ -684,18 +821,20 @@ mod tests {
     #[test]
     fn provider_capability_is_explicit_and_exact() {
         for (name, provider) in [
+            ("pi", Provider::Pi),
             ("codex", Provider::Codex),
+            ("claude", Provider::Claude),
+            ("claude_code", Provider::ClaudeCode),
             ("grok", Provider::Grok),
         ] {
             assert_eq!(parse_catalog_provider(name), Some(provider));
             assert_eq!(provider_wire(provider), name);
             assert!(catalog_source(provider).is_some());
         }
-        // Claude Code and Pi catalogs are read through their contract leaves.
-        for name in ["", "cloud", "pi", "claude", "claude_code", "cursor", "cursor_agent", "agent", "claude-code", "copilot", "gemini_cli", "fake", "Pi", "CODEX", " pi", "pi ", "pi/model", "codex:model", "claude_code_extra"] {
+        for name in ["", "cloud", "cursor", "cursor_agent", "agent", "claude-code", "copilot", "gemini_cli", "fake", "Pi", "CODEX", " pi", "pi ", "pi/model", "codex:model", "claude_code_extra"] {
             assert_eq!(parse_catalog_provider(name), None);
         }
-        for provider in [Provider::Claude, Provider::ClaudeCode, Provider::Pi, Provider::Copilot, Provider::GeminiCli, Provider::Fake] {
+        for provider in [Provider::Copilot, Provider::GeminiCli, Provider::Fake] {
             assert!(catalog_source(provider).is_none());
         }
     }
@@ -709,6 +848,55 @@ mod tests {
         assert_eq!(rows[0].vendor, "openai");
         let duplicate = br#"{"models":[{"slug":"x","display_name":"X","visibility":"hide"},{"slug":"x","display_name":"X","visibility":"list"}]}"#;
         assert!(matches!(parse_codex_catalog(duplicate, "codex"), Err(CatalogError::DuplicateIdentity(_))));
+    }
+
+    #[test]
+    fn claude_selectors_group_by_exact_resolved_id() {
+        let response = serde_json::json!({"type":"control_response","request_id":CLAUDE_REQUEST_ID,"response":{"subtype":"success","response":{"models":[
+            {"value":"default","resolvedModel":"claude-opus-5-5[1m]","displayName":"Default"},
+            {"value":"opus[1m]","resolvedModel":"claude-opus-5-5[1m]","displayName":"Opus 1M"},
+            {"value":"opus-alt","resolvedModel":"claude-opus-5-5[1m]","displayName":"Alternate display"},
+            {"value":"sonnet","resolvedModel":"claude-sonnet-5","displayName":"Sonnet"}
+        ]}}});
+        let bytes = format!("{}\n", response).into_bytes();
+        let rows = parse_claude_catalog(&bytes, "claude_code").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].provider, "claude_code");
+        assert_eq!(rows[0].id, "claude-opus-5-5[1m]");
+        assert_eq!(rows[0].display_name, "Opus 1M");
+        assert_eq!(rows[0].aliases, vec!["default", "opus[1m]", "opus-alt"]);
+        assert_eq!(rows[0].default, Some(true));
+        assert_eq!(rows[1].default, Some(false));
+        assert!(model_matches(&rows[0], "OPUS 1M"));
+    }
+
+    #[test]
+    fn claude_ignores_other_stream_frames_and_matches_nested_request_id() {
+        let models = serde_json::json!([{"value":"default","resolvedModel":"claude-sonnet-5","displayName":"Sonnet"}]);
+        let frames = [
+            serde_json::json!({"type":"system","subtype":"hook_started"}),
+            serde_json::json!({"type":"system","subtype":"hook_response"}),
+            serde_json::json!({"type":"stream_event","event":{"type":"message_start"}}),
+            serde_json::json!({"type":"control_response","response":{"subtype":"success","request_id":CLAUDE_REQUEST_ID,"response":{"models":models}}}),
+        ];
+        let bytes = frames.iter().map(serde_json::Value::to_string).collect::<Vec<_>>().join("\n");
+        let rows = parse_claude_catalog(bytes.as_bytes(), "claude_code").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "claude-sonnet-5");
+
+        let conflicting = serde_json::json!({"type":"control_response","request_id":CLAUDE_REQUEST_ID,"response":{"subtype":"success","request_id":"wrong-id","response":{"models":[{"value":"default","resolvedModel":"claude-sonnet-5","displayName":"Sonnet"}]}}});
+        assert!(matches!(parse_claude_catalog(format!("{}\n", conflicting).as_bytes(), "claude_code"), Err(CatalogError::InvalidProtocol)));
+    }
+
+    #[test]
+    fn claude_missing_canonical_id_and_duplicate_selectors_fail_closed() {
+        let missing = serde_json::json!({"type":"control_response","request_id":CLAUDE_REQUEST_ID,"response":{"subtype":"success","response":{"models":[{"value":"default","displayName":"Default"}]}}});
+        assert!(matches!(parse_claude_catalog(format!("{}\n", missing).as_bytes(), "claude"), Err(CatalogError::UnsupportedSchema)));
+        let duplicate = serde_json::json!({"type":"control_response","request_id":CLAUDE_REQUEST_ID,"response":{"subtype":"success","response":{"models":[
+            {"value":"opus","resolvedModel":"claude-opus","displayName":"Opus"},
+            {"value":"opus","resolvedModel":"claude-opus[1m]","displayName":"Opus 1M"}
+        ]}}});
+        assert!(matches!(parse_claude_catalog(format!("{}\n", duplicate).as_bytes(), "claude"), Err(CatalogError::DuplicateIdentity(_))));
     }
 
     #[test]

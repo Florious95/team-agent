@@ -102,7 +102,7 @@ fn abnormal_dedup_key_uses_signature_and_optional_turn_id() {
 
 #[test]
 fn capture_session_id_success_payload_fields() {
-    // Shared spawn_cwd scan success → CapturedSession high confidence, fs_watch,
+    // claude.py:73-106 success → CapturedSession high confidence, fs_watch,
     // session_id Some, rollout_path Some. Drive the real fn against a temp cwd
     // that contains a discoverable transcript; assert ALL 5 typed fields.
     let dir = std::env::temp_dir().join(format!(
@@ -115,7 +115,7 @@ fn capture_session_id_success_payload_fields() {
         &transcript,
         r#"{"type":"user","sessionId":"sess-1","cwd":"PLACEHOLDER","message":{"content":"hi"}}"#,
     );
-    let adapter = get_adapter(Provider::Fake);
+    let adapter = get_adapter(Provider::ClaudeCode);
     let cs = adapter
         .capture_session_id("agentX", &dir, 3)
         .expect("capture ok")
@@ -129,7 +129,7 @@ fn capture_session_id_success_payload_fields() {
 
 #[test]
 fn capture_session_id_bug085_compatible_api_fallback_is_low_confidence_none_session() {
-    // probe(shared scan fallback): transcript w/o a session_id →
+    // probe(claude fallback): compatible_api transcript w/o a session_id →
     // session_id=None, captured_via=fs_mtime_fallback, confidence=low,
     // rollout_path SET. The half-state is LEGAL and must not panic (bug-085).
     let dir = std::env::temp_dir().join(format!(
@@ -139,7 +139,7 @@ fn capture_session_id_bug085_compatible_api_fallback_is_low_confidence_none_sess
     let _ = std::fs::create_dir_all(&dir);
     let transcript = dir.join("nosession.jsonl");
     let _ = std::fs::write(&transcript, r#"{"type":"user","message":{"content":"hi"}}"#);
-    let adapter = get_adapter(Provider::Fake);
+    let adapter = get_adapter(Provider::ClaudeCode);
     let cs = adapter
         .capture_session_id("agentX", &dir, 3)
         .expect("capture ok")
@@ -153,10 +153,10 @@ fn capture_session_id_bug085_compatible_api_fallback_is_low_confidence_none_sess
 
 #[test]
 fn capture_session_id_no_match_returns_none() {
-    // Deadline with no match → Ok(None), explicitly NOT Err.
+    // claude.py:111-113 deadline with no match → Ok(None), explicitly NOT Err.
     let empty = std::env::temp_dir().join(format!("ta-cap-empty-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&empty);
-    let adapter = get_adapter(Provider::Fake);
+    let adapter = get_adapter(Provider::ClaudeCode);
     let res = adapter.capture_session_id("agentX", &empty, 0);
     // ProviderError 非 PartialEq(携 Io)→ 用 matches! 而非 ==。
     assert!(matches!(res, Ok(None)), "no transcript + timeout 0 → Ok(None), never Err");
@@ -167,10 +167,9 @@ fn capture_session_id_no_match_returns_none() {
 
 #[test]
 fn retired_worker_caps_are_neither_resumable_nor_forkable() {
-    // Claude Code, Codex and Grok workers run only through their contract
-    // leaves; a pre-upgrade legacy row must never become capture-pending or
-    // resumable.
-    for provider in [Provider::Claude, Provider::ClaudeCode, Provider::Codex, Provider::Grok] {
+    // Codex and Grok workers run only through their contract leaves; a
+    // pre-upgrade legacy row must never become capture-pending or resumable.
+    for provider in [Provider::Codex, Provider::Grok] {
         let adapter = get_adapter(provider);
         assert_eq!(
             adapter.caps(),
@@ -223,6 +222,23 @@ fn retired_worker_caps_are_neither_resumable_nor_forkable() {
 }
 
 #[test]
+fn claude_caps_resume_and_fork_and_native_mcp() {
+    // doc §59 + claude.py: claude supports resume + fork (static cap true,
+    // runtime auth-gated) + native --mcp-config; does NOT write a global settings file.
+    let adapter = get_adapter(Provider::ClaudeCode);
+    let caps = adapter.caps();
+    assert_eq!(
+        caps,
+        ProviderCaps {
+            resume: true,
+            fork: true,
+            native_mcp_config: true,
+            writes_global_settings: false,
+        }
+    );
+}
+
+#[test]
 fn gemini_writes_global_settings_cap() {
     // gemini.py:40-78 — install_mcp writes ~/.gemini/settings.json →
     // caps.writes_global_settings=true, native_mcp_config=false.
@@ -233,9 +249,25 @@ fn gemini_writes_global_settings_cap() {
 }
 
 #[test]
+fn claude_fork_blocked_under_compatible_api() {
+    // claude.py:54 supports_session_fork == (auth_mode != compatible_api).
+    // fork under CompatibleApi must Err (never silently empty) — capability path.
+    let adapter = get_adapter(Provider::ClaudeCode);
+    let sid = SessionId::new("src-1");
+    let res = adapter.fork(Some(&sid), AuthMode::CompatibleApi, None);
+    assert!(
+        matches!(
+            res,
+            Err(ProviderError::CapabilityUnsupported(_)) | Err(ProviderError::ResumeUnavailable(_))
+        ),
+        "fork under compatible_api must Err, got {res:?}"
+    );
+}
+
+#[test]
 fn build_resume_command_without_session_id_is_resume_unavailable() {
-    // No session_id → ResumeUnavailable, never a bare crash.
-    let adapter = get_adapter(Provider::Copilot);
+    // claude.py:41-42 — no session_id → ResumeUnavailable, never a bare crash.
+    let adapter = get_adapter(Provider::ClaudeCode);
     let res = adapter.build_resume_command(None, AuthMode::Subscription, None);
     assert!(
         matches!(res, Err(ProviderError::ResumeUnavailable(_))),
@@ -245,10 +277,66 @@ fn build_resume_command_without_session_id_is_resume_unavailable() {
 
 #[test]
 fn session_is_resumable_none_session_is_false_not_panic() {
-    // session_id falsy → not resumable; bug-085 None穿透.
-    let adapter = get_adapter(Provider::Copilot);
+    // claude.py:116-118 — session_id falsy → not resumable; bug-085 None穿透.
+    let adapter = get_adapter(Provider::ClaudeCode);
     let res = adapter.session_is_resumable(None, AuthMode::CompatibleApi);
     assert!(matches!(res, Ok(false)), "None session → Ok(false), never panic (bug-085)");
+}
+
+fn argv_contains_adjacent(hay: &[String], needle: &[&str]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    hay.windows(needle.len())
+        .any(|w| w.iter().zip(needle).all(|(a, b)| a == b))
+}
+
+#[test]
+fn build_command_includes_model_and_system_prompt() {
+    // claude.py:175-199 — _base_command appends --model <m> + --append-system-prompt <p>;
+    // --strict-mcp-config only appears when mcp_config is present. With mcp_config=None,
+    // assert both flag pairs present adjacently AND --strict-mcp-config ABSENT.
+    let adapter = get_adapter(Provider::ClaudeCode);
+    let argv = adapter
+        .build_command(AuthMode::Subscription, None, Some("be helpful"), Some("opus"))
+        .expect("build_command ok");
+    assert!(
+        argv_contains_adjacent(&argv, &["--model", "opus"]),
+        "argv must contain `--model opus` adjacency: {argv:?}"
+    );
+    assert!(
+        argv_contains_adjacent(&argv, &["--append-system-prompt", "be helpful"]),
+        "argv must contain `--append-system-prompt 'be helpful'`: {argv:?}"
+    );
+    assert!(
+        !argv.iter().any(|a| a == "--strict-mcp-config"),
+        "no mcp_config → --strict-mcp-config must be absent: {argv:?}"
+    );
+}
+
+#[test]
+fn claude_mcp_config_does_not_enable_strict_mode() {
+    let adapter = get_adapter(Provider::ClaudeCode);
+    let config = adapter
+        .mcp_config(AuthMode::Subscription)
+        .expect("mcp config");
+    let argv = adapter
+        .build_command(
+            AuthMode::Subscription,
+            Some(&config),
+            Some("worker"),
+            Some("opus"),
+        )
+        .expect("build command with mcp config");
+
+    assert!(
+        argv_contains_adjacent(&argv, &["--mcp-config"]),
+        "Claude worker argv must still pass Team Agent MCP config: {argv:?}"
+    );
+    assert!(
+        !argv.iter().any(|arg| arg == "--strict-mcp-config"),
+        "--mcp-config must merge with user-level Claude MCP; strict mode hides user MCP: {argv:?}"
+    );
 }
 
 #[test]
@@ -290,13 +378,12 @@ fn pi_wire_roundtrip_requires_backing() {
 }
 
 #[test]
-fn pi_caps_resume_false_fork_false_native_mcp_false_auth_unknown() {
-    // Pi workers run only through the contract leaf; a legacy row is not resumable.
+fn pi_caps_resume_true_fork_false_native_mcp_false_auth_unknown() {
     let adapter = get_adapter(Provider::Pi);
     assert_eq!(
         adapter.caps(),
         ProviderCaps {
-            resume: false,
+            resume: true,
             fork: false,
             native_mcp_config: false,
             writes_global_settings: false,

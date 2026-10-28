@@ -18,7 +18,7 @@
 //!
 //! The "preserve never-silently-fresh guard" path (session_id=null +
 //! first_send_at=Valid → still Refuse) is tested in
-//! `upgrade_compat_0211_red::restart_refuses_interacted_copilot_worker_without_session_id_partial_resume_preserves_guard`.
+//! `upgrade_compat_0211_red::restart_refuses_interacted_claude_worker_without_session_id_partial_resume_preserves_guard`.
 
 use crate::framework::*;
 

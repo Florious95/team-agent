@@ -10,8 +10,8 @@
 //!    leave a stale .tmp on a failed replace. The contracts assert the original data
 //!    survives / no residue.
 //! T3 (false green = unrecognized/failed input silently maps to a success value,
-//!    MUST-NOT-13): normalize_result_status unrecognized -> Success; schema_diagnosis
-//!    missing db -> ok:true; tmux fabricated
+//!    MUST-NOT-13): normalize_result_status unrecognized -> Success; claude_auth_hint
+//!    parse failure -> Present; schema_diagnosis missing db -> ok:true; tmux fabricated
 //!    `%0` pane id; packaging install/update constant DoctorStatus::Ok.
 //! T5: stop_coordinator_bounded spawns a thread + recv_timeout and never joins it —
 //!    a timed-out stop leaves a detached thread. Source grep guard (the bounded-stop
@@ -23,7 +23,7 @@
 #[allow(dead_code)]
 mod mcp_sim_harness;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use mcp_sim_harness::McpSimHarness;
@@ -419,6 +419,45 @@ check behind it = false green); it must reflect an actual doctor result"
     );
 }
 
+/// T3-2 (claude_auth_hint parse failure): when `claude auth status` output is
+/// unparseable / unsuccessful, the hint must not default to Present (auth misreported
+/// as available). PATH-shims a `claude` that prints garbage and exits non-zero.
+/// Mutates the process-global PATH/HOME — must not race host_cotenant's ps/tmux
+/// shims (P0 pid-probe isolation) or other env-mutating tests, hence
+/// `#[serial(env, pid_probe)]`.
+#[test]
+#[serial(env, pid_probe)]
+fn t3_claude_auth_hint_parse_failure_is_not_present() {
+    let home = tmp_ws("t3-auth-home");
+    let shim_dir = home.join("bin");
+    std::fs::create_dir_all(&shim_dir).unwrap();
+    // claude shim: garbage stdout + non-zero exit (auth status unparseable / failed).
+    write_shim(
+        &shim_dir.join("claude"),
+        "#!/bin/sh\nprintf 'not json at all\\n'\nexit 7\n",
+    );
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    let old_home = std::env::var("HOME").ok();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("PATH", format!("{}:{old_path}", shim_dir.to_string_lossy()));
+
+    let status = team_agent::provider::get_adapter(team_agent::provider::Provider::Claude)
+        .auth_hint(team_agent::provider::AuthMode::Subscription);
+
+    std::env::set_var("PATH", &old_path);
+    match old_home {
+        Some(home) => std::env::set_var("HOME", home),
+        None => std::env::remove_var("HOME"),
+    }
+
+    assert_ne!(
+        format!("{status:?}"),
+        "Present",
+        "T3-2: a `claude auth status` that prints unparseable output and exits non-zero \
+must NOT report Present (auth misreported as available is a false green); got {status:?}"
+    );
+}
+
 // ───────────────────────────────── T5 · thread leak ─────────────────────────────────
 
 /// T5 (A2 shutdown thread leak): stop_coordinator_bounded spawns a worker thread and
@@ -444,6 +483,15 @@ stop; body={body}"
 }
 
 // ───────────────────────────────────── helpers ─────────────────────────────────────
+
+fn write_shim(path: &Path, body: &str) {
+    std::fs::write(path, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
 
 /// Crude single-function body extractor: from the `fn name` line to the next
 /// same-indent `    fn ` (good enough for grep-guard scoping).

@@ -9,6 +9,74 @@ use crate::model::pane_authority_refusal::{
 use crate::provider::wire::{command_name, parse_provider, provider_wire};
 use crate::transport::Transport;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PiBackingStatus {
+    Pending,
+    Captured,
+    Missing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PiMcpStatus {
+    Unavailable,
+    ConfiguredLazy,
+    RoundtripVerified,
+}
+
+pub(crate) struct PiDoctorInput {
+    pub executable_chain_verified: bool,
+    pub pi_version: Option<String>,
+    pub adapter_version: Option<String>,
+    pub catalog_sha256: Option<String>,
+    pub selected_model: Option<String>,
+    pub candidate_executable: Option<std::path::PathBuf>,
+    pub wrapper: Option<std::path::PathBuf>,
+    pub mcp_roundtrip_at: Option<String>,
+    pub backing: PiBackingStatus,
+    pub activity: crate::provider::TurnState,
+    pub activity_source: crate::provider::ClassifySource,
+    pub env_key_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct PiDoctorFacts {
+    pub mcp: PiMcpStatus,
+    pub mcp_connected: bool,
+    pub backing: PiBackingStatus,
+    pub activity: crate::provider::TurnState,
+    pub activity_source: crate::provider::ClassifySource,
+    pub auth_hint: crate::provider::AuthHintStatus,
+}
+
+pub(crate) fn pi_doctor_facts(input: PiDoctorInput) -> PiDoctorFacts {
+    let mcp = if input.mcp_roundtrip_at.is_some() {
+        PiMcpStatus::RoundtripVerified
+    } else if input.wrapper.is_some() {
+        PiMcpStatus::ConfiguredLazy
+    } else {
+        PiMcpStatus::Unavailable
+    };
+    let _ = (
+        input.executable_chain_verified,
+        input.pi_version,
+        input.adapter_version,
+        input.catalog_sha256,
+        input.selected_model,
+        input.candidate_executable,
+        input.env_key_names,
+    );
+    PiDoctorFacts {
+        mcp,
+        mcp_connected: mcp == PiMcpStatus::RoundtripVerified,
+        backing: input.backing,
+        activity: input.activity,
+        activity_source: input.activity_source,
+        auth_hint: crate::provider::AuthHintStatus::Unknown,
+    }
+}
+
 /// 0.5.39 Slice 1 (tmux-server-death-locate §11.1 B): classify a tmux
 /// transport error string into a diagnose issue id. When the underlying
 /// tmux subprocess stderr contains `server exited unexpectedly`, the
@@ -52,18 +120,6 @@ fn is_public_window_name(provider: &str, window: &str) -> bool {
     // An npm-installed Codex runs its vendor launcher under PATH's `node`, so
     // tmux names the pane after that process instead of `codex`.
     if provider == "codex_tui" && matches!(window, "codex" | "node") {
-        return true;
-    }
-    // The same holds for npm-installed Pi; legacy `pi` keeps its own rule.
-    if provider == "pi_tui" && matches!(window, "pi" | "node") {
-        return true;
-    }
-    // tmux names a Claude pane after the image its `claude` route execs: an npm
-    // `claude.exe`, or the native installer's version-named `<semver>` file.
-    if provider == "claude_tui"
-        && (matches!(window, "claude" | "claude.exe")
-            || team_agent_contract::providers::claude::catalog::semver(window))
-    {
         return true;
     }
     parse_provider(provider).is_some_and(|parsed| {
@@ -1331,20 +1387,6 @@ mod tests {
         assert!(is_public_window_name("codex_tui", "node"));
         assert!(!is_public_window_name("codex_tui", "grok"));
         assert!(!is_public_window_name("grok_build", "node"));
-        assert!(is_public_window_name("pi_tui", "pi"));
-        assert!(is_public_window_name("pi_tui", "node"));
-        assert!(!is_public_window_name("pi_tui", "codex"));
-    }
-
-    #[test]
-    fn claude_contract_window_may_carry_its_npm_or_version_named_image() {
-        for window in ["claude", "claude.exe", "2.1.309", "2.1.282"] {
-            assert!(is_public_window_name("claude_tui", window), "{window}");
-        }
-        for window in ["2.1", "claude-wrapper", "node", "grok"] {
-            assert!(!is_public_window_name("claude_tui", window), "{window}");
-        }
-        assert!(!is_public_window_name("grok_build", "2.1.309"));
     }
 
     #[test]

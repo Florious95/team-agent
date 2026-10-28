@@ -25,46 +25,31 @@
 use crate::model::enums::Provider;
 
 /// A state row written by a release that still ran a legacy worker engine:
-/// Cursor's `cursor_agent`/`agent`, Claude Code's `claude`/`claude_code`,
-/// Codex's `codex`/`codex_cli`, Grok's `grok` or Pi's `pi`. No legacy worker
-/// runtime exists for it now; it must never fall back to another provider.
-/// Role and CLI declarations of these names select the contract leaf, whose
-/// state row carries the leaf id instead. A leader is not an `agents` row, so
-/// its own provider key is unaffected.
+/// Cursor's `cursor_agent`/`agent`, Codex's `codex`/`codex_cli` or Grok's
+/// `grok`. No legacy worker runtime exists for it now; it must never fall back
+/// to another provider. Role and CLI declarations of these names select the
+/// contract leaf, whose state row carries the leaf id instead. A leader is not
+/// an `agents` row, so its own provider key is unaffected. Claude Code
+/// (`claude`/`claude_code`) and Pi (`pi`) rows keep their legacy runtimes.
 pub(crate) const RETIRED_PROVIDER_ERROR: &str =
     "legacy cursor_agent seat has no runtime in this release; stop or remove it, then add it again (provider: cursor)";
-const RETIRED_CLAUDE_ERROR: &str =
-    "legacy claude seat has no runtime in this release; stop or remove it, then add it again (provider: claude)";
 const RETIRED_CODEX_ERROR: &str =
     "legacy codex seat has no runtime in this release; stop or remove it, then add it again (provider: codex)";
 const RETIRED_GROK_ERROR: &str =
     "legacy grok seat has no runtime in this release; stop or remove it, then add it again (provider: grok)";
-const RETIRED_PI_ERROR: &str =
-    "legacy pi seat has no runtime in this release; stop or remove it, then add it again (provider: pi)";
 
 pub(crate) fn is_retired_provider(raw: &str) -> bool {
     matches!(
         raw.trim().to_ascii_lowercase().as_str(),
-        "cursor_agent"
-            | "agent"
-            | "claude"
-            | "claude_code"
-            | "claude-code"
-            | "codex"
-            | "codex_cli"
-            | "codex-cli"
-            | "grok"
-            | "pi"
+        "cursor_agent" | "agent" | "codex" | "codex_cli" | "codex-cli" | "grok"
     )
 }
 
 /// The refusal for a retired state row, naming the provider to re-add it with.
 pub(crate) fn retired_provider_error(raw: &str) -> &'static str {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "claude" | "claude_code" | "claude-code" => RETIRED_CLAUDE_ERROR,
         "codex" | "codex_cli" | "codex-cli" => RETIRED_CODEX_ERROR,
         "grok" => RETIRED_GROK_ERROR,
-        "pi" => RETIRED_PI_ERROR,
         _ => RETIRED_PROVIDER_ERROR,
     }
 }
@@ -274,7 +259,9 @@ mod tests {
             "compiler must validate providers through typed helpers"
         );
         assert!(
-            delivery_rs.contains("parse_canonical_provider"),
+            delivery_rs.contains("parse_canonical_provider")
+                && delivery_rs.contains("parse_provider")
+                && delivery_rs.contains("provider_wire"),
             "message delivery provider dispatch must use wire helpers"
         );
         for (path, source) in [
@@ -350,12 +337,11 @@ mod tests {
     #[test]
     fn retired_state_guard_is_scoped_to_the_addressed_seat() {
         let state = serde_json::json!({"agents": {
-            "pi": {"provider": "pi_tui"},
-            "claude": {"provider": "claude_tui"},
+            "pi": {"provider": "pi"},
+            "claude": {"provider": "claude"},
+            "claude_code": {"provider": "claude_code"},
             "copilot": {"provider": "copilot"},
             "retired": {"provider": "cursor_agent"},
-            "legacy_claude": {"provider": "claude_code"},
-            "legacy_pi": {"provider": "pi"},
             "codex": {"provider": "codex_tui"},
             "grok": {"provider": "grok_build"},
             "legacy_codex": {"provider": "codex"},
@@ -364,12 +350,11 @@ mod tests {
         }});
         assert!(require_active_state_providers(&state, Some("pi")).is_ok());
         assert!(require_active_state_providers(&state, Some("claude")).is_ok());
+        assert!(require_active_state_providers(&state, Some("claude_code")).is_ok());
         assert!(require_active_state_providers(&state, Some("copilot")).is_ok());
         assert!(require_active_state_providers(&state, Some("codex")).is_ok());
         assert!(require_active_state_providers(&state, Some("grok")).is_ok());
         assert_eq!(require_active_state_providers(&state, Some("retired")), Err(RETIRED_PROVIDER_ERROR));
-        assert_eq!(require_active_state_providers(&state, Some("legacy_claude")), Err(RETIRED_CLAUDE_ERROR));
-        assert_eq!(require_active_state_providers(&state, Some("legacy_pi")), Err(RETIRED_PI_ERROR));
         assert_eq!(require_active_state_providers(&state, Some("legacy_codex")), Err(RETIRED_CODEX_ERROR));
         assert_eq!(require_active_state_providers(&state, Some("legacy_codex_cli")), Err(RETIRED_CODEX_ERROR));
         assert_eq!(require_active_state_providers(&state, Some("legacy_grok")), Err(RETIRED_GROK_ERROR));
@@ -378,9 +363,14 @@ mod tests {
             assert_eq!(parse_provider(retired), None, "no legacy engine to parse into");
         }
         // The leader keys still parse: a leader is never an `agents` row.
-        for leader in ["claude", "claude_code", "codex", "grok", "pi"] {
+        for leader in ["codex", "grok"] {
             assert!(is_retired_provider(leader), "{leader}");
             assert!(parse_provider(leader).is_some(), "{leader}");
+        }
+        // Claude Code and Pi keep their legacy worker runtimes.
+        for legacy in ["claude", "claude_code", "claude-code", "pi"] {
+            assert!(!is_retired_provider(legacy), "{legacy}");
+            assert!(parse_provider(legacy).is_some(), "{legacy}");
         }
     }
 

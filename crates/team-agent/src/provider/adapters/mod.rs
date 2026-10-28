@@ -8,21 +8,23 @@
 //! dispatches into these helpers exactly as the inline forms did.
 //!
 //! Per-file scope:
+//!   * `claude` — Claude/ClaudeCode argv, bypass flag, auth hint, model passthrough.
 //!   * `copilot` — Copilot argv (no-color/no-remote/disable-builtin-mcps),
 //!     MCP `type→transport` translation, resume base, weak auth hint.
 //!   * `fake`   — Built-in scripted worker exec path.
 //!
-//! Claude Code, Codex, Grok and Pi workers run only through their contract
-//! leaves (`claude_tui`, `codex_tui`, `grok_build`, `pi_tui`); their legacy
-//! worker builders were excised. The Pi leader's fresh launch lives in
-//! `lifecycle/launch/pi_mcp.rs`; the Codex and Grok leaders exec their bare
-//! public command (`leader/start.rs`).
+//! Codex and Grok workers run only through their contract leaves
+//! (`codex_tui`, `grok_build`); their legacy worker builders were excised. The
+//! Codex and Grok leaders exec their bare public command (`leader/start.rs`).
 //!
 //! Behavior is byte-identical to pre-split. Future steps may move
 //! `pre_spawn_adjust_plan`, `profile_env`, `session_backing_probe`, and
 //! `session_candidates` into provider-owned hooks following the same
 //! per-file layout.
 
+pub(crate) mod claude;
+pub(crate) mod claude_fork;
 pub(crate) mod copilot;
 pub(crate) mod copilot_fork;
 pub(crate) mod fake;
+pub(crate) mod pi;

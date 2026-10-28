@@ -294,7 +294,7 @@ fn pane_token_refuses_second_inject_for_copilot() {
 
 #[test]
 fn transcript_token_refuses_second_inject() {
-    let case = WorkerCase::new("transcript", "copilot");
+    let case = WorkerCase::new("transcript", "claude");
     let message_id = case.seed_leader_to_worker("transcript canary");
     std::fs::write(
         &case.rollout,

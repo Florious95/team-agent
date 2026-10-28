@@ -1,7 +1,7 @@
-//! purpose: copilot 席位角色文件缺 model 时仍能正常启动
-//! contract: 缺 model 的 copilot 角色启动成功并真的 spawn worker
+//! purpose: claude 席位角色文件缺 model 时仍能正常启动
+//! contract: 缺 model 的 claude 角色启动成功并真的 spawn worker
 //! boundary: legacy Grok worker runtime 已移除（grok 角色现走 grok_build 合约叶），
-//!   本文件只保留 copilot 缺 model 的回归钉子
+//!   本文件只保留 claude 缺 model 的回归钉子
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -21,20 +21,20 @@ use serial_test::serial;
 use team_agent::lifecycle::quick_start_with_transport_in_workspace;
 use team_agent::transport::test_support::OfflineTransport;
 
-/// copilot 角色缺 model ⇒ 行为不变（仍能启动）。
+/// claude 角色缺 model ⇒ 行为不变（仍能启动）。
 #[test]
 #[serial(env)]
-fn copilot_role_missing_model_still_starts() {
-    let _hermetic = enter_hermetic("grok-copilot-missing-model");
-    let ws = tmp_dir("copilot-no-model");
+fn claude_role_missing_model_still_starts() {
+    let _hermetic = enter_hermetic("grok-claude-missing-model");
+    let ws = tmp_dir("claude-no-model");
     super::launch_spawn::seed_healthy_coordinator(&ws);
     let team = write_role_team(
         &ws,
-        "copilotteam",
-        "copiloter",
-        "copilot",
+        "claudeteam",
+        "clauder",
+        "claude",
         None,
-        "Copilot Worker",
+        "Claude Worker",
     );
     let transport = OfflineTransport::new();
 
@@ -43,17 +43,17 @@ fn copilot_role_missing_model_still_starts() {
         &team,
         None,
         true,
-        Some("copilotteam"),
+        Some("claudeteam"),
         &transport,
     );
     assert!(
         result.is_ok(),
-        "copilot role without model must keep starting; err={result:?}"
+        "claude role without model must keep starting; err={result:?}"
     );
     let argv = first_spawn_argv(&transport);
     assert!(
         !argv.is_empty(),
-        "copilot seat must still spawn; argv={argv:?}"
+        "claude seat must still spawn; argv={argv:?}"
     );
 }
 

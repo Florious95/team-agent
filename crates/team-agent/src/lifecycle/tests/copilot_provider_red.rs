@@ -1101,14 +1101,14 @@ fn rules_t02_inline_server_map_preserves_unknown_and_non_object_values() {
 fn rules_t02_non_copilot_writer_keeps_canonical_schema() {
     let hermetic = enter_hermetic("rules-t02-canonical");
     let ws = hermetic.workspace("canonical");
-    let config = team_agent::provider::get_adapter(Provider::GeminiCli)
+    let config = team_agent::provider::get_adapter(Provider::ClaudeCode)
         .mcp_config(team_agent::provider::AuthMode::Subscription)
         .unwrap();
     let path = team_agent::lifecycle::launch::write_worker_mcp_config_for_provider(
         &ws,
         "synthetic",
         &config,
-        Some(Provider::GeminiCli),
+        Some(Provider::ClaudeCode),
     )
     .unwrap();
     let written: serde_json::Value =
