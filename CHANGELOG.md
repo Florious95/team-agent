@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.5.128]
+
+- **Claude and Pi legacy runtimes restored (#399):** reverts the Claude and Pi contract adaptations (#377, #378), the Claude delivery/status live-turn change (#379, #380), and the legacy Claude/Pi excision (#388). `claude`, `claude_code`, `claude-code` and `pi` worker seats use the legacy runtimes again instead of being forced onto `claude_tui` / `pi_tui` or refused as legacy seats. Codex and Grok stay on the 0.5.127 contract leaves. Leader launches are unchanged.
+- **Release metadata:** align the eight standard version/changelog files at 0.5.128. Installing a published package does not automatically replace a running team's binary.
+
 ## [0.5.127]
 
 - **Legacy Codex and Grok worker runtimes removed (#393, #396):** Codex and Grok workers run only on the unified contract leaves `codex_tui` and `grok_build`, which launch the public PATH command (`codex`, `grok`; user wrappers run). `codex`, `codex_cli`, `codex-cli` and `grok` select their leaf in role files, `add-agent --provider` and `team-agent models` without opt-in. A pre-upgrade Codex or Grok worker seat is refused before any side effect with "legacy <p> seat has no runtime in this release"; stop or remove it, then add it again. Leader launches (`team-agent codex`, `team-agent grok`) are unchanged.
