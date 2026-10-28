@@ -1,0 +1,40 @@
+  Role line 118: a realistic instruction row of moderate width so wrapping and folding behave like a Team bootstrap
+  packet.
+  Role line 119: a realistic instruction row of moderate width so wrapping and folding behave like a Team bootstrap
+  packet.
+  Role line 120: a realistic instruction row of moderate width so wrapping and folding behave like a Team bootstrap
+  packet.
+  Role line 121: a realistic instruction row of moderate width so wrapping and folding behave like a Team bootstrap
+  packet.
+  Role line 122: a realistic instruction row of moderate width so wrapping and folding behave like a Team bootstrap
+  packet.
+  Role line 123: a realistic instruction row of moderate width so wrapping and folding behave like a Team bootstrap
+  packet.
+  Role line 124: a realistic instruction row of moderate width so wrapping and folding behave like a Team bootstrap
+  packet.
+  Role line 125: a realistic instruction row of moderate width so wrapping and folding behave like a Team bootstrap
+  packet.
+  Role line 126: a realistic instruction row of moderate width so wrapping and folding behave like a Team bootstrap
+  packet.
+  Role line 127: a realistic instruction row of moderate width so wrapping and folding behave like a Team bootstrap
+  packet.
+  Role line 128: a realistic instruction row of moderate width so wrapping and folding behave like a Team bootstrap
+  packet.
+  Role line 129: a realistic instruction row of moderate width so wrapping and folding behave like a Team bootstrap
+  packet.
+  Role line 130: a realistic instruction row of moderate width so wrapping and folding behave like a Team bootstrap
+  packet.
+  Role line 131: a realistic instruction row of moderate width so wrapping and folding behave like a Team bootstrap
+  packet.
+  Role line 132: a realistic instruction row of moderate width so wrapping and folding behave like a Team bootstrap
+  packet.
+  Reply with exactly: PONG-BIG
+  [team-agent-token:msg_probe0000135]
+
+✳ Moseying…
+                                                                                                    ◐ medium · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Ctx: n/a | Haiku 5.5 | f
+  paste again to expand

@@ -400,8 +400,6 @@ impl<R: CommandRunner> TmuxHost<R> {
             target.shared_endpoint.then_some(target.endpoint.as_path()), target.created_session);
         if target.endpoint != host.endpoint
             || target.binding != binding
-            || target.columns != limits.columns
-            || target.rows != limits.rows
             || resolve_cwd(&target.cwd.path)? != target.cwd
         {
             return Err(HostError::new(
@@ -572,9 +570,8 @@ impl<R: CommandRunner> TmuxHost<R> {
             || pane.address.window != target.window
             || pane.address.pane != target.pane
             || pane.address.pid != target.process.identity.pid
+            // Geometry is an observation, not part of the owned pane identity.
             || pane.binding != target.binding
-            || pane.columns != target.columns
-            || pane.rows != target.rows
         {
             return Err(HostError::new(
                 "tmux target changed",
@@ -833,7 +830,6 @@ impl<R: CommandRunner> TmuxHost<R> {
         if initial.address.session_name != session_name
             || initial.address.window.is_empty()
             || self.shared.as_ref().and_then(|shared| shared.session.as_ref()).is_some_and(|session| session != &initial.address.session)
-            || (self.shared.is_none() && (initial.columns != self.limits.columns || initial.rows != self.limits.rows))
         {
             return Err(HostError::new(
                 "returned spawn target",
@@ -894,10 +890,6 @@ impl<R: CommandRunner> TmuxHost<R> {
                         "native identity deadline",
                         HostErrorKind::Deadline,
                     ));
-                }
-                if pane.columns != self.limits.columns || pane.rows != self.limits.rows {
-                    clock.sleep(self.limits.poll_interval.min(remaining(clock, deadline).unwrap_or_default()));
-                    continue;
                 }
                 verify_executable_inputs(&inputs)?;
                 process.inputs = inputs;
