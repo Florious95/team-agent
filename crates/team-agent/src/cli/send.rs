@@ -35,16 +35,18 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
     if args.pane.is_some() {
         return Err(CliError::Usage("raw pane delivery requires --socket and --dialect".into()));
     }
-    let alias = args.to_leader.as_deref().map(resolve_host_leader_alias).transpose()
-        .map_err(|value| CliError::Usage(value.to_string()))?;
-    let logical_to = logical_to_from_args(args, alias.as_ref().map(|(to, _)| to.as_str()))?;
+    let alias = args.to_leader.as_deref().map(read_host_leader_alias).transpose()?;
+    let logical_to = logical_to_from_args(args, alias.as_ref().map(|_| "leader"))?;
     let content = args.message.join(" ");
     if content.is_empty() { return Err(CliError::Usage("send requires a nonempty message".into())); }
     let requested = logical_to.split(',').map(str::trim).filter(|target| !target.is_empty());
+    let mailbox = args.presentation.sink != crate::messaging::presentation::PresentationSink::Leader;
     let mut results = Vec::new();
     let mut destinations = Vec::new();
     for target in requested {
-        let (workspace, team, agent) = if let Some((team, agent)) = target.split_once('/') {
+        let (workspace, team, agent) = if let Some(entry) = &alias {
+            (&entry.workspace, Some(entry.team_key.as_str()), "leader")
+        } else if let Some((team, agent)) = target.split_once('/') {
             (&args.workspace, Some(team), agent)
         } else { (&args.workspace, args.team.as_deref(), target) };
         let directory = crate::direct_delivery::directory(workspace, team).map_err(CliError::Usage)?;
@@ -52,24 +54,28 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
             directory.agents().into_iter().filter(|agent| agent != args.sender.as_str()).collect()
         } else { vec![agent.to_string()] };
         for agent in agents {
-            let endpoint = directory.endpoint(&agent).map_err(CliError::Usage)?;
-            if !destinations.iter().any(|(_, existing): &(crate::direct_delivery::Directory, crate::direct_delivery::Endpoint)| existing.socket == endpoint.socket && existing.pane_id == endpoint.pane_id) {
-                destinations.push((crate::direct_delivery::Directory { workspace: directory.workspace.clone(), team: directory.team.clone(), state: serde_json::Value::Null }, endpoint));
+            if agent != "leader" && !directory.agents().contains(&agent) {
+                return Err(CliError::Usage(format!("unknown recipient: {agent}")));
+            }
+            let endpoint = directory.endpoint(&agent);
+            if !mailbox { endpoint.as_ref().map_err(|e| CliError::Usage(e.clone()))?; }
+            let key = (directory.workspace.clone(), directory.team.clone(), agent);
+            if !destinations.iter().any(|(existing, _)| existing == &key) {
+                destinations.push((key, endpoint));
             }
         }
     }
     if destinations.is_empty() { return Err(CliError::Usage("send has no recipients".into())); }
-    for (directory, endpoint) in destinations {
-        let mailbox = args.presentation.sink != crate::messaging::presentation::PresentationSink::Leader;
-        if mailbox || (endpoint.agent == "leader" && !matches!(args.sender.as_str(), "human" | "leader")) {
-            let record = crate::inbox_store::record(args.sender.as_str(), &endpoint.agent, &content, directory.team.as_deref(), "message");
-            crate::inbox_store::append(&directory.workspace, &endpoint.agent, &record).map_err(CliError::Usage)?;
+    for ((workspace, team, agent), endpoint) in destinations {
+        if mailbox || (agent == "leader" && !matches!(args.sender.as_str(), "human" | "leader")) {
+            let record = crate::inbox_store::record(args.sender.as_str(), &agent, &content, team.as_deref(), "message");
+            crate::inbox_store::append(&workspace, &agent, &record).map_err(CliError::Usage)?;
         }
         let value = if mailbox {
-            serde_json::json!({"status": "stored", "recipient": endpoint.agent, "mailbox": true})
+            serde_json::json!({"status": "stored", "recipient": agent, "mailbox": true})
         } else {
             let text = format!("Team Agent message from {}:\n\n{content}", args.sender.as_str());
-            crate::direct_delivery::send(&endpoint, &text).map_err(CliError::Usage)?
+            crate::direct_delivery::send(&endpoint.map_err(CliError::Usage)?, &text).map_err(CliError::Usage)?
         };
         results.push(value);
     }
@@ -77,25 +83,32 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
     Ok(CmdResult::from_json(value, args.json))
 }
 
+fn read_host_leader_alias(name: &str) -> Result<crate::leader::registry::LeaderRegistryEntry, CliError> {
+    let candidates: Vec<_> = crate::leader::registry::snapshots().into_iter()
+        .filter(|entry| entry.delivery_name == name || entry.qualified_name == name
+            || entry.stable_qualified_name == name || entry.aliases.iter().any(|alias| alias == name)).collect();
+    if candidates.len() != 1 {
+        return Err(CliError::Usage(format!("leader name is unknown or ambiguous: {name}")));
+    }
+    Ok(candidates.into_iter().next().unwrap())
+}
+
 /// Resolve a host-leader alias, send through the canonical persisted funnel,
 /// then decorate the already-produced result for the host-leader surface.
 pub fn send_to_canonical_leader_target(
-    sender_workspace: &std::path::Path,
+    _sender_workspace: &std::path::Path,
     name: &str,
     content: &str,
     sender: &TrustedSender,
     task_id: Option<&str>,
 ) -> Result<serde_json::Value, CliError> {
-    let (logical_to, entry) = match resolve_host_leader_alias(name) {
-        Ok(resolved) => resolved,
-        Err(value) => return Ok(value),
-    };
+    let entry = read_host_leader_alias(name)?;
     let args = SendArgs {
-        target: Some(logical_to.clone()),
+        target: Some("leader".to_string()),
         message: vec![content.to_string()],
         targets: None,
-        workspace: sender_workspace.to_path_buf(),
-        team: None,
+        workspace: entry.workspace.clone(),
+        team: Some(entry.team_key.clone()),
         task: task_id.map(str::to_string),
         sender: sender.clone(),
         no_ack: false,
@@ -110,7 +123,10 @@ pub fn send_to_canonical_leader_target(
         to_name: None,
         to_leader: None,
     };
-    let mut value = send_to_logical_to(&args, &logical_to, content)?;
+    let mut value = match cmd_send(&args)?.output {
+        CmdOutput::Json(value) => value,
+        _ => unreachable!("JSON send requested"),
+    };
     decorate_host_leader_alias(&mut value, &entry);
     Ok(value)
 }

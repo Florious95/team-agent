@@ -79,6 +79,12 @@ pub fn directory(workspace: &Path, team: Option<&str>) -> Result<Directory, Stri
     let mut state = selected.clone();
     if let Some(object) = state.as_object_mut() {
         for name in ["tmux_socket", "leader"] {
+            if name == "leader"
+                && teams.len() > 1
+                && field(&snapshot, "active_team_key") != Some(key.as_str())
+            {
+                continue;
+            }
             if !object.contains_key(name) {
                 if let Some(value) = snapshot.get(name) {
                     object.insert(name.into(), value.clone());

@@ -248,6 +248,62 @@ fn replies_and_results_append_to_inbox_without_database_or_receipt_state() {
 }
 
 #[test]
+fn detached_leader_replies_and_offline_mailbox_are_still_stored() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join(".team/runtime/state.json");
+    let mut state: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    state["teams"]["alpha"]
+        .as_object_mut()
+        .unwrap()
+        .remove("leader");
+    state["teams"]["alpha"]["agents"]["worker"]
+        .as_object_mut()
+        .unwrap()
+        .remove("pane_id");
+    fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+    let tools = fixture.tools();
+    let reply = tools
+        .send_message(
+            &MessageTarget::Single("leader".into()),
+            "detached reply",
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .to_value();
+    assert_eq!(reply["status"], "stored");
+    assert!(reply["delivery_error"].is_string());
+    let mailbox = tools
+        .send_message_with_presentation(
+            &MessageTarget::Single("worker".into()),
+            "offline MCP",
+            None,
+            None,
+            None,
+            Some(&Value::Bool(true)),
+            None,
+        )
+        .unwrap()
+        .to_value();
+    assert_eq!(mailbox["status"], "stored");
+    let cli = fixture.cli(&["send", "worker", "offline CLI", "--mailbox"]);
+    assert!(
+        cli.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cli.stdout)
+    );
+    assert_eq!(
+        team_agent::inbox_store::read(&fixture.root, "worker", 10, None).unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(!fixture.root.join(".team/runtime/team.db").exists());
+}
+
+#[test]
 fn inbox_concurrent_append_and_partial_tail_are_independent_of_state() {
     let fixture = Fixture::new();
     let writers: Vec<_> = (0..8)

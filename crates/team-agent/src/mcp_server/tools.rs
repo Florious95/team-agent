@@ -237,29 +237,36 @@ impl TeamOrchestratorTools {
             MessageTarget::Broadcast => directory.agents().into_iter().filter(|agent| agent != sender).collect(),
         };
         if targets.is_empty() { return Err(tool_runtime_error("no recipients")); }
-        let mut endpoints = Vec::new();
+        let stored_only = normalized.request.sink != crate::messaging::presentation::PresentationSink::Leader;
+        let mut destinations = Vec::new();
         for target in targets {
-            let endpoint = directory.endpoint(&target).map_err(tool_runtime_error)?;
-            if !endpoints.iter().any(|existing: &crate::direct_delivery::Endpoint| existing.agent == endpoint.agent) {
-                endpoints.push(endpoint);
+            if target != "leader" && !directory.agents().contains(&target) {
+                return Err(ToolError::new(ToolErrorReason::PeerNotInScope,
+                    format!("recipient is not in the captured team: {target}"), "ScopeError"));
+            }
+            let endpoint = directory.endpoint(&target);
+            if !stored_only && target != "leader" {
+                endpoint.as_ref().map_err(tool_runtime_error)?;
+            }
+            if !destinations.iter().any(|(agent, _)| agent == &target) {
+                destinations.push((target, endpoint));
             }
         }
-        let stored_only = normalized.request.sink != crate::messaging::presentation::PresentationSink::Leader;
         let mut results = Vec::new();
-        for endpoint in endpoints {
+        for (agent, endpoint) in destinations {
             let mut message_id = None;
-            if stored_only || endpoint.agent == "leader" {
-                let record = crate::inbox_store::record(sender, &endpoint.agent, content, directory.team.as_deref(), "message");
+            if stored_only || agent == "leader" {
+                let record = crate::inbox_store::record(sender, &agent, content, directory.team.as_deref(), "message");
                 message_id = record.get("message_id").cloned();
-                crate::inbox_store::append(&directory.workspace, &endpoint.agent, &record).map_err(tool_runtime_error)?;
+                crate::inbox_store::append(&directory.workspace, &agent, &record).map_err(tool_runtime_error)?;
             }
             let mut value = if stored_only {
-                serde_json::json!({"status": "stored", "recipient": endpoint.agent, "mailbox": true})
+                serde_json::json!({"status": "stored", "recipient": agent, "mailbox": true})
             } else {
                 let text = format!("Team Agent message from {sender}:\n\n{content}");
-                match crate::direct_delivery::send(&endpoint, &text) {
+                match endpoint.and_then(|endpoint| crate::direct_delivery::send(&endpoint, &text)) {
                     Ok(value) => value,
-                    Err(error) if message_id.is_some() => serde_json::json!({"status": "stored", "recipient": endpoint.agent, "delivery_error": error}),
+                    Err(error) if message_id.is_some() => serde_json::json!({"status": "stored", "recipient": agent, "delivery_error": error}),
                     Err(error) => return Err(tool_runtime_error(error)),
                 }
             };

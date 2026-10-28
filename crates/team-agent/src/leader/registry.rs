@@ -621,6 +621,11 @@ fn read_all_entries() -> Vec<(PathBuf, LeaderRegistryEntry)> {
         .collect()
 }
 
+/// Read discovery records without classifying or mutating canonical runtime state.
+pub(crate) fn snapshots() -> Vec<LeaderRegistryEntry> {
+    read_all_entries().into_iter().map(|(_, entry)| entry).collect()
+}
+
 /// Validate a registry entry against its canonical workspace state.
 /// Returns the wire status label — LIVE when canonical `leader_receiver`
 /// matches, STALE otherwise. This is the pruning gate for GC and the

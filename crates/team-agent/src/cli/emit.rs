@@ -2239,8 +2239,8 @@ mod tests {
             .collect();
         assert_eq!(
             expected.len(),
-            34,
-            "the public catalog adds the four canonical lifecycle surfaces and retires the Cursor launcher"
+            35,
+            "the public catalog includes read-only endpoint discovery and the canonical lifecycle surfaces"
         );
         for spec_name in &expected {
             assert!(
