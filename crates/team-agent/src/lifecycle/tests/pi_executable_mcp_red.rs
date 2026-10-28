@@ -2,15 +2,19 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use crate::lifecycle::launch::launch_with_transport_in_workspace;
 use crate::lifecycle::launch::pi_mcp::{
     PiExecutableChain, PiMaterializeRequest, PiSessionScope,
-    PiWrapperRequest, materialize_pi_plan,
+    PiWrapperRequest, materialize_pi_plan, materialize_pi_resume_plan,
     parse_pi_list_models_table, pi_seat_paths, resolve_pi_executable_chain,
     validate_pi_executable_chain, validate_pi_wrapper_source, write_pi_wrapper,
     write_pi_wrapper_with_publish,
 };
+use crate::lifecycle::start_agent_with_transport;
 use crate::model::enums::ProviderEffort;
-use crate::provider::McpConfig;
+use crate::provider::session_scan::{CaptureSessionContext, scan_session_candidates_once};
+use crate::provider::{McpConfig, Provider, SessionId};
+use crate::transport::test_support::OfflineTransport;
 
 #[path = "../../../tests/support/hermetic.rs"]
 mod hermetic_guard;
@@ -37,7 +41,7 @@ const PI_SYMLINK_TEST: &str = concat!(
 const PI_MATERIALIZER_CHILD: &str = "TEAM_AGENT_TEST_PI_MATERIALIZER_CHILD";
 const PI_MATERIALIZER_TEST: &str = concat!(
     "lifecycle::tests::pi_executable_mcp_red::",
-    "pi_leader_materializer_uses_the_recorded_scope"
+    "pi_materializer_and_worker_routes_use_the_recorded_scope"
 );
 
 fn run_process_isolated(marker: &str, test_name: &str, body: impl FnOnce()) {
@@ -448,15 +452,15 @@ fn pi_wrapper_import_failure_body(hermetic: &HermeticTestEnv) {
 }
 
 #[test]
-fn pi_leader_materializer_uses_the_recorded_scope() {
+fn pi_materializer_and_worker_routes_use_the_recorded_scope() {
     run_process_isolated(PI_MATERIALIZER_CHILD, PI_MATERIALIZER_TEST, || {
         let hermetic = HermeticTestEnv::enter("pi-materializer-scope");
         assert_isolated_child();
-        pi_leader_materializer_body(&hermetic);
+        pi_materializer_and_worker_routes_body(&hermetic);
     });
 }
 
-fn pi_leader_materializer_body(hermetic: &HermeticTestEnv) {
+fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
     let fixture_root = hermetic.root().join("materializer-fixture");
     let bin = fixture_root.join("bin");
     let candidate = fixture_root.join("candidate/team-agent");
@@ -511,15 +515,15 @@ fn pi_leader_materializer_body(hermetic: &HermeticTestEnv) {
     }
 
     let isolated_workspace = hermetic.workspace("isolated");
-    let isolated_paths = pi_seat_paths(&isolated_workspace, "team-a", "leader");
-    let isolated_config = mcp_config(&candidate, &isolated_workspace, "leader");
+    let isolated_paths = pi_seat_paths(&isolated_workspace, "team-a", "worker-a");
+    let isolated_config = mcp_config(&candidate, &isolated_workspace, "worker-a");
     let isolated = materialize_pi_plan(PiMaterializeRequest {
         workspace: &isolated_workspace,
         team_id: "team-a",
-        agent_id: "leader",
+        agent_id: "worker-a",
         model: Some("team-agent/qwen3.8-27b"),
         effort: Some(ProviderEffort::Medium),
-        system_prompt: "isolated leader fixture",
+        system_prompt: "isolated worker fixture",
         team_mcp_tools: &["send_message"],
         mcp_config: &isolated_config,
         session_scope: PiSessionScope::Isolated,
@@ -533,6 +537,282 @@ fn pi_leader_materializer_body(hermetic: &HermeticTestEnv) {
     assert_session_pair(&isolated.argv, &isolated_paths.sessions);
     assert!(!isolated.argv.iter().any(|arg| arg == "--cwd"));
     assert!(!isolated.argv.iter().any(|arg| arg == "--workspace"));
+
+    let session_id = SessionId::new("pi-materializer-resume");
+    let exact = isolated_paths.sessions.join("2026/09/exact.jsonl");
+    std::fs::create_dir_all(exact.parent().expect("exact session parent"))
+        .expect("create exact session parent");
+    std::fs::write(&exact, b"{}\n").expect("write exact session fixture");
+    let resumed = materialize_pi_resume_plan(
+        PiMaterializeRequest {
+            workspace: &isolated_workspace,
+            team_id: "team-a",
+            agent_id: "worker-a",
+            model: None,
+            effort: None,
+            system_prompt: "isolated resume fixture",
+            team_mcp_tools: &["send_message"],
+            mcp_config: &isolated_config,
+            session_scope: PiSessionScope::Isolated,
+        },
+        &session_id,
+        &exact,
+        &isolated_workspace,
+    )
+    .expect("Isolated exact-path resume materializer");
+    assert_eq!(
+        resumed.provider_projects_root.as_deref(),
+        Some(isolated_paths.sessions.as_path())
+    );
+    assert_eq!(resumed.argv.first().map(String::as_str), Some("pi"));
+    assert_session_pair(&resumed.argv, &isolated_paths.sessions);
+    assert!(
+        resumed
+            .argv
+            .windows(2)
+            .any(|pair| { pair == ["--session", exact.to_string_lossy().as_ref()] })
+    );
+
+    let native_resume = materialize_pi_resume_plan(
+        PiMaterializeRequest {
+            workspace: &native_workspace,
+            team_id: "team-a",
+            agent_id: "leader",
+            model: None,
+            effort: None,
+            system_prompt: "native resume fixture",
+            team_mcp_tools: &["send_message"],
+            mcp_config: &native_config,
+            session_scope: PiSessionScope::NativeDefault,
+        },
+        &session_id,
+        &exact,
+        &native_workspace,
+    );
+    assert!(
+        matches!(
+            native_resume,
+            Err(crate::provider::ProviderError::ResumeUnavailable(_))
+        ),
+        "NativeDefault resume must fail closed before emitting a native HOME path: {native_resume:?}"
+    );
+
+    let home_candidate = hermetic.home().join(".pi/agent/sessions/home.jsonl");
+    std::fs::create_dir_all(home_candidate.parent().expect("home session parent"))
+        .expect("create home session parent");
+    std::fs::write(&home_candidate, b"{}\n").expect("write home candidate");
+    let other_paths = pi_seat_paths(&isolated_workspace, "team-a", "worker-b");
+    let other_candidate = other_paths.sessions.join("other.jsonl");
+    std::fs::create_dir_all(other_candidate.parent().expect("other session parent"))
+        .expect("create other session parent");
+    std::fs::write(&other_candidate, b"{}\n").expect("write other seat candidate");
+    for (label, outside) in [("HOME", &home_candidate), ("other seat", &other_candidate)] {
+        let refused = materialize_pi_resume_plan(
+            PiMaterializeRequest {
+                workspace: &isolated_workspace,
+                team_id: "team-a",
+                agent_id: "worker-a",
+                model: None,
+                effort: None,
+                system_prompt: "isolated negative resume fixture",
+                team_mcp_tools: &["send_message"],
+                mcp_config: &isolated_config,
+                session_scope: PiSessionScope::Isolated,
+            },
+            &session_id,
+            &outside,
+            &isolated_workspace,
+        );
+        assert!(
+            matches!(
+                refused,
+                Err(crate::provider::ProviderError::ResumeUnavailable(_))
+            ),
+            "{label} candidate must be refused by the exact seat-root check: {refused:?}"
+        );
+    }
+
+    let worker_workspace = hermetic.workspace("worker-spawn");
+    let spec_path = worker_workspace
+        .join(".team")
+        .join("team-a")
+        .join("team.spec.yaml");
+    std::fs::create_dir_all(spec_path.parent().expect("worker Pi spec parent"))
+        .expect("create worker Pi spec parent");
+    let spec = crate::model::yaml::loads(
+        "team:\n  name: team-a\nruntime:\n  session_name: team-workers\nagents:\n  - id: worker-a\n    role: Worker A\n    provider: pi\n    model: team-agent/qwen3.8-27b\n    auth_mode: subscription\n    dangerously_skip_permissions: false\n    tools:\n      - mcp_team\n  - id: worker-b\n    role: Worker B\n    provider: pi\n    model: team-agent/qwen3.8-27b\n    auth_mode: subscription\n    dangerously_skip_permissions: false\n    tools:\n      - mcp_team\n",
+    )
+    .expect("parse worker Pi spec");
+    std::fs::write(&spec_path, crate::model::yaml::dumps(&spec)).expect("write worker Pi spec");
+    let transport = OfflineTransport::new();
+    let started = launch_with_transport_in_workspace(
+        &worker_workspace,
+        &spec_path,
+        false,
+        true,
+        true,
+        &transport,
+    )
+    .expect("worker fresh spawn construction")
+    .started;
+    assert_eq!(started.len(), 2, "both Pi worker seats must be spawned");
+    for worker in ["worker-a", "worker-b"] {
+        let paths = pi_seat_paths(&worker_workspace, "team-a", worker);
+        let started_agent = started
+            .iter()
+            .find(|entry| entry.agent_id.as_str() == worker)
+            .expect("started worker entry");
+        assert_eq!(
+            started_agent.provider_projects_root.as_deref(),
+            Some(paths.sessions.as_path()),
+            "fresh worker must expose its exact seat capture root"
+        );
+        let record = transport
+            .spawn_records()
+            .into_iter()
+            .find(|(_, argv)| {
+                argv.iter()
+                    .any(|arg| arg.as_str() == paths.wrapper.to_string_lossy().as_ref())
+            })
+            .expect("transport spawn record for worker seat");
+        assert_eq!(record.1.first().map(String::as_str), Some("pi"));
+        assert_session_pair(&record.1, &paths.sessions);
+        assert!(
+            !record
+                .1
+                .iter()
+                .any(|arg| arg.as_str() == home_candidate.to_string_lossy().as_ref())
+        );
+        assert!(
+            !record
+                .1
+                .iter()
+                .any(|arg| arg.as_str() == other_candidate.to_string_lossy().as_ref())
+        );
+
+        assert!(
+            started_agent.pending_session_id.is_none(),
+            "fresh Pi assigns its own session id"
+        );
+        let foreign_session_id = format!("{worker}-foreign");
+        write_pi_session_header(
+            &home_candidate,
+            &foreign_session_id,
+            &worker_workspace,
+            "2099-01-01T00:00:00Z",
+        );
+        let other_worker = if worker == "worker-a" {
+            "worker-b"
+        } else {
+            "worker-a"
+        };
+        let cross_seat = pi_seat_paths(&worker_workspace, "team-a", other_worker)
+            .sessions
+            .join("foreign.jsonl");
+        write_pi_session_header(
+            &cross_seat,
+            &foreign_session_id,
+            &worker_workspace,
+            "2099-01-01T00:00:00Z",
+        );
+        let context = CaptureSessionContext {
+            agent_id: worker.to_string(),
+            spawn_cwd: worker_workspace.clone(),
+            pane_id: None,
+            pane_pid: None,
+            spawned_at: Some(started_agent.spawned_at.clone()),
+            expected_session_id: None,
+            provider_projects_root: Some(paths.sessions.clone()),
+        };
+        let candidates = scan_session_candidates_once(Provider::Pi, &context)
+            .expect("scan the recorded worker seat only");
+        assert!(
+            candidates.is_empty(),
+            "HOME and another worker seat must not become capture candidates: {candidates:?}"
+        );
+        // Positive control: Pi's own header inside the recorded seat is captured.
+        let own = paths.sessions.join("own.jsonl");
+        write_pi_session_header(
+            &own,
+            &format!("{worker}-own"),
+            &worker_workspace,
+            "2099-01-01T00:00:00Z",
+        );
+        let candidates = scan_session_candidates_once(Provider::Pi, &context)
+            .expect("scan the recorded worker seat only");
+        assert_eq!(candidates.len(), 1, "{candidates:?}");
+        assert_eq!(
+            candidates[0]
+                .captured
+                .session_id
+                .as_ref()
+                .map(SessionId::as_str),
+            Some(format!("{worker}-own").as_str())
+        );
+        std::fs::remove_file(&cross_seat).expect("clear foreign header from the other seat");
+    }
+
+    let restart_workspace = hermetic.workspace("worker-restart");
+    let restart_paths = pi_seat_paths(&restart_workspace, "team-a", "worker-a");
+    let restart_exact = restart_paths.sessions.join("2026/09/restart.jsonl");
+    write_pi_session_header(
+        &restart_exact,
+        "pi-restart-session",
+        &restart_workspace,
+        "2026-09-01T00:00:01Z",
+    );
+    crate::state::persist::save_runtime_state(
+        &restart_workspace,
+        &serde_json::json!({
+            "session_name": "team-workers",
+            "active_team_key": "team-a",
+            "agents": {
+                "worker-a": {
+                    "id": "worker-a",
+                    "status": "running",
+                    "provider": "pi",
+                    "role": "Worker A",
+                    "model": "team-agent/qwen3.8-27b",
+                    "auth_mode": "subscription",
+                    "tools": ["mcp_team"],
+                    "session_id": "pi-restart-session",
+                    "rollout_path": restart_exact.to_string_lossy(),
+                    "spawn_cwd": restart_workspace.to_string_lossy(),
+                    "first_send_at": "2026-09-01T00:00:00Z"
+                }
+            }
+        }),
+    )
+    .expect("write restart state");
+    let restart_transport = OfflineTransport::new();
+    let _ = start_agent_with_transport(
+        &restart_workspace,
+        &crate::model::ids::AgentId::new("worker-a"),
+        false,
+        false,
+        false,
+        None,
+        &restart_transport,
+    );
+    let restart_record = restart_transport
+        .spawn_records()
+        .into_iter()
+        .next()
+        .expect("restart must reach the worker spawn construction");
+    assert_eq!(restart_record.1.first().map(String::as_str), Some("pi"));
+    assert_session_pair(&restart_record.1, &restart_paths.sessions);
+    assert!(
+        restart_record
+            .1
+            .windows(2)
+            .any(|pair| { pair == ["--session", restart_exact.to_string_lossy().as_ref()] })
+    );
+    assert!(
+        !restart_record
+            .1
+            .iter()
+            .any(|arg| arg.as_str() == home_candidate.to_string_lossy().as_ref())
+    );
 }
 
 fn assert_session_pair(argv: &[String], session_root: &Path) {
@@ -543,4 +823,16 @@ fn assert_session_pair(argv: &[String], session_root: &Path) {
         "argv must contain exact --session-dir pair for {}: {argv:?}",
         session_root.display()
     );
+}
+
+fn write_pi_session_header(path: &Path, id: &str, cwd: &Path, timestamp: &str) {
+    std::fs::create_dir_all(path.parent().expect("session parent")).expect("create session parent");
+    let header = serde_json::json!({
+        "type": "session",
+        "version": 3,
+        "id": id,
+        "cwd": cwd,
+        "timestamp": timestamp,
+    });
+    std::fs::write(path, format!("{header}\n")).expect("write Pi session header");
 }

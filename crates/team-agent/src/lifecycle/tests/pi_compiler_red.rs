@@ -1,0 +1,210 @@
+use std::path::Path;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use crate::compiler::{compile_role_agent, CompiledRole};
+use crate::lifecycle::launch::pi_mcp::{parse_pi_list_models_table, select_exact_pi_model};
+use crate::model::enums::ProviderEffort;
+use crate::model::yaml::Value;
+use crate::model::ModelError;
+use crate::provider::adapters::pi::{build_pi_command_argv, PiCommandRequest, PiSessionSelector};
+
+const CATALOG: &[u8] = include_bytes!("fixtures/pi_list_models_g0.stdout.txt");
+static NEXT_ROLE: AtomicU32 = AtomicU32::new(0);
+
+fn compile_pi_role(front_matter: &str) -> Result<CompiledRole, ModelError> {
+    compile_pi_role_with_team(front_matter, &Value::Map(Vec::new()))
+}
+
+fn compile_pi_role_with_team(
+    front_matter: &str,
+    team_meta: &Value,
+) -> Result<CompiledRole, ModelError> {
+    let seq = NEXT_ROLE.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "team-agent-pi-compiler-{}-{seq}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).expect("create role fixture root");
+    let role = root.join("pi-worker.md");
+    std::fs::write(
+        &role,
+        format!("---\n{front_matter}\n---\nPi worker contract.\n"),
+    )
+    .expect("write role fixture");
+    let result = compile_role_agent(&role, team_meta, "/workspace");
+    std::fs::remove_dir_all(root).expect("remove role fixture root");
+    result
+}
+
+fn valid_role_with(extra: &str) -> String {
+    format!(
+        "name: pi-worker\nrole: developer\nprovider: pi\nmodel: team-agent/qwen3.8-27b\nauth_mode: subscription\neffort: medium\ntools:\n  - mcp_team\n  - fs_read\n  - fs_list\n  - fs_write\n  - execute_bash\ndangerously_skip_permissions: true\n{extra}"
+    )
+}
+
+fn compile_error(result: Result<CompiledRole, ModelError>) -> ModelError {
+    match result {
+        Err(error) => error,
+        Ok(_) => panic!("incomplete Pi role must refuse"),
+    }
+}
+
+fn command(_tools: &[&str], effort: ProviderEffort, model: &str) -> Result<Vec<String>, String> {
+    build_pi_command_argv(PiCommandRequest {
+        extension: Path::new("/workspace/.team/runtime/pi/t1/pi-worker/team-mcp.ts"),
+        model: Some(model),
+        effort: Some(effort),
+        system_prompt: "Pi worker contract.",
+        session_dir: Some(Path::new(
+            "/workspace/.team/runtime/pi/t1/pi-worker/sessions",
+        )),
+        session: PiSessionSelector::Fresh,
+        agent_id: "pi-worker",
+    })
+    .map_err(|error| error.to_string())
+}
+
+#[test]
+fn pi_role_ignores_tools_and_preserves_provider_defaults() {
+    let positive = compile_pi_role(&valid_role_with(""));
+    assert!(positive.is_ok(), "fully explicit Pi role must compile");
+
+    let missing_tools = valid_role_with("").replace(
+        "tools:\n  - mcp_team\n  - fs_read\n  - fs_list\n  - fs_write\n  - execute_bash\n",
+        "",
+    );
+    compile_pi_role(&missing_tools).expect("omitted tools metadata must compile");
+    let unqualified =
+        valid_role_with("").replace("model: team-agent/qwen3.8-27b", "model: qwen3.8-27b");
+    let error = compile_error(compile_pi_role(&unqualified));
+    assert!(
+        error.to_string().to_ascii_lowercase().contains("qualified exact model"),
+        "error must name qualified model; got {error}"
+    );
+
+    let defaults = valid_role_with("")
+        .replace("model: team-agent/qwen3.8-27b\n", "")
+        .replace("effort: medium\n", "")
+        .replace("dangerously_skip_permissions: true\n", "");
+    let team_meta = Value::Map(vec![
+        (
+            "provider_models".to_string(),
+            Value::Map(vec![(
+                "pi".to_string(),
+                Value::Str("team-default/forced-model".to_string()),
+            )]),
+        ),
+        (
+            "default_model".to_string(),
+            Value::Str("global-default/forced-model".to_string()),
+        ),
+        (
+            "provider_effort".to_string(),
+            Value::Str("high".to_string()),
+        ),
+    ]);
+    let compiled = compile_pi_role_with_team(&defaults, &team_meta)
+        .expect("omitted model and effort preserve provider-native defaults");
+    assert_eq!(
+        compiled.agent.get("model"),
+        Some(&Value::Null),
+        "omitted Pi model stays unset rather than using team metadata"
+    );
+    assert_eq!(
+        compiled.agent.get("effort"),
+        None,
+        "omitted Pi effort stays unset rather than using team metadata"
+    );
+    assert_eq!(
+        compiled.agent.get("dangerously_skip_permissions"),
+        Some(&Value::Bool(false)),
+        "omitted Pi bypass defaults to safe false"
+    );
+
+    let models = parse_pi_list_models_table(CATALOG).expect("catalog fixture");
+    assert!(select_exact_pi_model(&models, "team-agent/qwen3.8-27b").is_ok());
+    assert!(select_exact_pi_model(&models, "foo/bar").is_err());
+}
+
+#[test]
+fn pi_role_uses_standard_bypass_field_without_fabricating_argv() {
+    let compiled = compile_pi_role(&valid_role_with("")).expect("true acknowledgement");
+    assert_eq!(
+        compiled.agent.get("dangerously_skip_permissions"),
+        Some(&Value::Bool(true))
+    );
+
+    let argv = command(
+        &["mcp_team"],
+        ProviderEffort::Medium,
+        "team-agent/qwen3.8-27b",
+    )
+    .expect("true acknowledgement maps to intrinsic unrestricted mode");
+    for forbidden in [
+        "--approve",
+        "--always-approve",
+        "--force",
+        "--trust",
+        "--sandbox",
+        "dangerous_auto_approve",
+    ] {
+        assert!(
+            !argv.iter().any(|arg| arg == forbidden),
+            "Pi acknowledgement must not fabricate a bypass flag {forbidden}: {argv:?}"
+        );
+    }
+
+    let false_ack = valid_role_with("").replace(
+        "dangerously_skip_permissions: true",
+        "dangerously_skip_permissions: false",
+    );
+    let compiled = compile_pi_role(&false_ack).expect("standard false bypass value");
+    assert_eq!(
+        compiled.agent.get("dangerously_skip_permissions"),
+        Some(&Value::Bool(false))
+    );
+
+    let missing_ack = valid_role_with("").replace("dangerously_skip_permissions: true\n", "");
+    let compiled = compile_pi_role(&missing_ack)
+        .expect("omitted bypass metadata defaults to false");
+    assert_eq!(
+        compiled.agent.get("dangerously_skip_permissions"),
+        Some(&Value::Bool(false))
+    );
+}
+
+#[test]
+fn pi_max_effort_is_supported_without_model_suffix() {
+    let max_role = valid_role_with("").replace("effort: medium", "effort: max");
+    compile_pi_role(&max_role).expect("Pi supports explicit max effort");
+
+    let argv =
+        command(&["mcp_team"], ProviderEffort::Max, "team-agent/qwen3.8-27b").expect("max Pi argv");
+    assert!(
+        argv.windows(2).any(|pair| pair == ["--thinking", "max"]),
+        "max must map to --thinking max: {argv:?}"
+    );
+    assert!(
+        argv.windows(2)
+            .any(|pair| pair == ["--model", "team-agent/qwen3.8-27b"]),
+        "model must remain exact and unsuffixed: {argv:?}"
+    );
+    assert!(!argv.iter().any(|arg| arg.ends_with(":max")));
+
+    let models = parse_pi_list_models_table(CATALOG).expect("catalog fixture");
+    assert!(select_exact_pi_model(&models, "team-agent/qwen3.8-27b:max").is_err());
+}
+
+#[test]
+fn pi_role_command_ignores_legacy_tool_metadata() {
+    let argv = command(
+        &["mcp_team", "fs_write", "fs_read", "fs_list", "execute_bash"],
+        ProviderEffort::Medium,
+        "team-agent/qwen3.8-27b",
+    )
+    .expect("known standard role tools");
+    assert!(
+        !argv.iter().any(|arg| arg == "--tools"),
+        "role tools validate Team Agent capabilities but must not replace direct Pi tools: {argv:?}"
+    );
+}

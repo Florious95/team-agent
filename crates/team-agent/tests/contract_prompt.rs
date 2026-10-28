@@ -73,7 +73,7 @@ fn no_contract_role_does_not_resolve_user_or_project_policy() {
     std::fs::create_dir_all(team.join("agents")).unwrap();
     std::fs::write(
         team.join("agents/worker.md"),
-        "---\nprovider: copilot\n---\nUnchanged legacy role\n",
+        "---\nprovider: pi\n---\nUnchanged legacy role\n",
     )
     .unwrap();
     let args = QuickStartArgs {

@@ -3,13 +3,12 @@ use super::*;
 use crate::transport::test_support::OfflineTransport;
 
 // Removal contract for the retired abnormal-exit automatic recovery path.
-// Abnormal exits remain visible with a manual recovery hint (a pre-upgrade
-// legacy row is told to stop/remove and add again, since start-agent refuses
-// it), but coordinator ticks must never schedule or execute lifecycle work.
+// Abnormal exits remain visible and keep a copyable manual start-agent hint,
+// but coordinator ticks must never schedule or execute lifecycle work.
 
 #[test]
 fn abnormal_exit_is_reported_without_auto_recovery_intent_or_action() {
-    let case = RecoveryCase::new("reported-no-auto", "claude_code");
+    let case = RecoveryCase::new("reported-no-auto");
     case.seed_agent("baseline-429");
     let transport = OfflineTransport::new().with_session_present(true);
     let coord = case.coord(transport.clone());
@@ -48,26 +47,21 @@ fn abnormal_exit_is_reported_without_auto_recovery_intent_or_action() {
         transport.spawn_records()
     );
 
-    // The claude_code row is a pre-upgrade legacy seat: start-agent would be
-    // refused, so the hint names the stop/remove + re-add recovery instead.
     let content = case.latest_leader_notification();
     assert!(
         content.contains("No automatic restart was performed.")
-            && content.contains(
-                "legacy claude seat has no runtime in this release; stop or remove it, then add it again (provider: claude)"
-            )
-            && !content.contains("start-agent"),
-        "abnormal notification must remain visible and never suggest a refused start-agent; content={content}"
+            && content.contains("To recover manually, run: team-agent start-agent fe-admin")
+            && content.contains("--workspace")
+            && content.contains("--team research")
+            && content.contains("--force")
+            && content.contains("--json"),
+        "abnormal notification must remain visible and keep the copyable manual recovery command; content={content}"
     );
 }
 
 #[test]
 fn first_turn_death_cannot_enter_auto_respawn_loop_and_manual_start_still_recovers() {
-    // No surviving legacy worker has both an explicit failed-turn fact and a
-    // startable runtime: a pre-upgrade codex row keeps its fault reader but
-    // has no runtime. Detection runs on that row; manual recovery re-adds the
-    // seat on a startable (fake) worker.
-    let case = RecoveryCase::new("first-turn-death-no-loop", "codex");
+    let case = RecoveryCase::new("first-turn-death-no-loop");
     case.seed_agent("baseline-429");
     let transport = OfflineTransport::new().with_session_present(true);
     let coord = case.coord(transport.clone());
@@ -112,7 +106,6 @@ fn first_turn_death_cannot_enter_auto_respawn_loop_and_manual_start_still_recove
     );
 
     case.seed_healthy_coordinator();
-    case.readd_as_fake_worker();
     let manual_transport = OfflineTransport::new().with_session_present(true);
     let outcome = crate::lifecycle::start_agent_with_transport(
         &case.root,
@@ -138,11 +131,10 @@ fn first_turn_death_cannot_enter_auto_respawn_loop_and_manual_start_still_recove
 
 struct RecoveryCase {
     root: std::path::PathBuf,
-    provider: &'static str,
 }
 
 impl RecoveryCase {
-    fn new(tag: &str, provider: &'static str) -> Self {
+    fn new(tag: &str) -> Self {
         let base = std::env::var_os("TEAM_AGENT_TEST_TMP")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
@@ -156,7 +148,7 @@ impl RecoveryCase {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        Self { root, provider }
+        Self { root }
     }
 
     fn coord(&self, transport: OfflineTransport) -> Coordinator {
@@ -171,8 +163,7 @@ impl RecoveryCase {
 
     fn seed_agent(&self, uuid: &str) {
         let rollout = self.rollout();
-        std::fs::write(&rollout, self.error_line(uuid)).unwrap();
-        let model = if self.provider == "codex" { "gpt-5.5" } else { "sonnet" };
+        std::fs::write(&rollout, claude_api_error_line(uuid)).unwrap();
         let state = serde_json::json!({
             "active_team_key": "research",
             "team_key": "research",
@@ -188,8 +179,8 @@ impl RecoveryCase {
                 "fe-admin": {
                     "agent_id": "fe-admin",
                     "id": "fe-admin",
-                    "provider": self.provider,
-                    "model": model,
+                    "provider": "claude_code",
+                    "model": "sonnet",
                     "status": "running",
                     "window": "fe-admin",
                     "rollout_path": rollout,
@@ -231,18 +222,6 @@ impl RecoveryCase {
         crate::state::persist::save_runtime_state(&self.root, &state).unwrap();
     }
 
-    fn readd_as_fake_worker(&self) {
-        let mut state = self.state();
-        let agent = &mut state["agents"]["fe-admin"];
-        agent["provider"] = serde_json::json!("fake");
-        agent["model"] = serde_json::json!("fake");
-        // A fake worker has no resume; the re-added seat starts fresh.
-        if let Some(agent) = agent.as_object_mut() {
-            agent.remove("session_id");
-        }
-        crate::state::persist::save_runtime_state(&self.root, &state).unwrap();
-    }
-
     fn seed_healthy_coordinator(&self) {
         let workspace = WorkspacePath::new(self.root.clone());
         let _ = crate::message_store::MessageStore::open(&self.root).unwrap();
@@ -257,15 +236,8 @@ impl RecoveryCase {
             .append(true)
             .open(self.rollout())
             .unwrap();
-        file.write_all(self.error_line(uuid).as_bytes())
+        file.write_all(claude_api_error_line(uuid).as_bytes())
             .unwrap();
-    }
-
-    fn error_line(&self, uuid: &str) -> String {
-        match self.provider {
-            "codex" => codex_failed_turn_line(uuid),
-            _ => claude_api_error_line(uuid),
-        }
     }
 
     fn rollout(&self) -> std::path::PathBuf {
@@ -316,16 +288,6 @@ fn claude_api_error_line(uuid: &str) -> String {
             "apiErrorStatus": 429,
             "sessionId": "session-supermarket",
             "version": "2.1.181"
-        })
-    )
-}
-
-fn codex_failed_turn_line(turn_id: &str) -> String {
-    format!(
-        "{}\n",
-        serde_json::json!({
-            "method": "turn/completed",
-            "params": {"turn": {"id": turn_id, "status": "failed"}}
         })
     )
 }

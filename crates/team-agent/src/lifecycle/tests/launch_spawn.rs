@@ -41,6 +41,7 @@ fn launch_source() -> String {
 const QS_TEAM_MD: &str =
     "---\nname: quickteam\nobjective: Quick start.\nprovider: codex\n---\n\nQuick-start team.\n";
 pub(super) const QS_VALID_ROLE: &str = "---\nname: implementer\nrole: Implementation Engineer\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nImplement bounded tasks.\n";
+const QS_ROLE_NO_PROVIDER: &str = "---\nname: implementer\nrole: Implementation Engineer\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nImplement bounded tasks.\n";
 
 /// A REAL team dir `<base>/teamdir/{TEAM.md, agents/implementer.md}` — already in team-dir
 /// layout, so quick_start's prepare_quick_start_team returns it as-is and writes the compiled
@@ -458,23 +459,25 @@ fn quick_start_default_workspace_compiled_spec_uses_project_root() {
     );
 }
 
-// An omitted role `provider` is the default `pi`, which declares the Pi contract leaf: the
-// compiled spec carries the leaf id, so quick-start never produces a legacy `pi` worker row.
-#[cfg(unix)]
+// P0 — quick_start over an INVALID role doc (missing `provider`) must surface the REAL compile
+// error, distinct from the stub's hardcoded "no role docs found". Golden: compile_team raises
+// "missing front matter field provider" (compiler.py:_validate_role_doc), before preflight.
 #[test]
-fn quick_start_role_without_provider_compiles_to_the_pi_leaf() {
-    let team = quick_start_team_dir(
-        "---\nname: implementer\nrole: Implementation Engineer\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nImplement bounded tasks.\n",
+fn quick_start_invalid_role_doc_surfaces_real_compile_error() {
+    let team = quick_start_team_dir(QS_ROLE_NO_PROVIDER);
+    let transport = OfflineTransport::new();
+    let result = quick_start_with_transport(&team, None, true, None, &transport);
+
+    let text = format!("{result:?}");
+    assert!(
+        text.contains("provider"),
+        "an invalid role doc (missing provider) must surface the real compile error mentioning \
+         'provider'; got {text}"
     );
-    let spec = crate::compiler::compile_team(&team).expect("an omitted provider is the default pi");
-    let providers = spec
-        .get("agents")
-        .and_then(crate::model::yaml::Value::as_list)
-        .expect("compiled agents")
-        .iter()
-        .map(|agent| agent.get("provider").and_then(crate::model::yaml::Value::as_str))
-        .collect::<Vec<_>>();
-    assert_eq!(providers, vec![Some("pi_tui")]);
+    assert!(
+        !text.contains("no role docs found"),
+        "must NOT be the hardcoded stub blocker — real preflight/compile distinguishes the cause"
+    );
 }
 
 // P0 — launch (dry_run) over a real compiled spec must resolve the REAL route/permission plan
@@ -2581,22 +2584,21 @@ fn restart_allow_fresh_copilot_keeps_session_id_null_until_capture_confirms() {
     let _ = plan; // shape verified above; details depend on classifier internals.
 }
 
-/// 0.4.6 tuple-atomic contract (audit, line 268): a fresh restart of a
-/// preassigned-session worker (Copilot) leaves session_id=null even when the
-/// input row had a stale session_id.
+/// 0.4.6 tuple-atomic contract (audit, line 268): Claude fresh restart
+/// leaves session_id=null even when input row had a stale session_id.
 /// The poisoned-row scenario (Bug 045 release-engineer state).
 #[test]
-fn restart_allow_fresh_copilot_clears_poisoned_session_id() {
-    let ws = temp_ws().join("restartcopilot046");
+fn restart_allow_fresh_claude_clears_poisoned_session_id() {
+    let ws = temp_ws().join("restartclaude046");
     std::fs::create_dir_all(ws.join("agents")).unwrap();
     std::fs::write(
         ws.join("TEAM.md"),
-        "---\nname: restartcopilot046\nobjective: 0.4.6 contract.\nprovider: claude\n---\n\nteam.\n",
+        "---\nname: restartclaude046\nobjective: 0.4.6 contract.\nprovider: claude\n---\n\nteam.\n",
     )
     .unwrap();
     std::fs::write(
         ws.join("agents").join("alpha.md"),
-        "---\nname: alpha\nrole: Alpha\nprovider: copilot\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nAlpha.\n",
+        "---\nname: alpha\nrole: Alpha\nprovider: claude\nmodel: sonnet\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nAlpha.\n",
     )
     .unwrap();
     let spec = crate::compiler::compile_team(&ws).expect("compile");
@@ -2605,11 +2607,11 @@ fn restart_allow_fresh_copilot_clears_poisoned_session_id() {
     crate::state::persist::save_runtime_state(
         &ws,
         &json!({
-            "session_name": "team-restartcopilot046",
+            "session_name": "team-restartclaude046",
             "agents": {
                 "alpha": {
                     "status": "running",
-                    "provider": "copilot",
+                    "provider": "claude",
                     "window": "alpha",
                     "first_send_at": "2026-06-23T10:00:00+00:00",
                     "session_id": stale_uuid,
@@ -2627,7 +2629,7 @@ fn restart_allow_fresh_copilot_clears_poisoned_session_id() {
     let result = restart_with_transport(&ws, true, None, &transport);
     assert!(
         matches!(result, Ok(RestartReport::Restarted { .. })),
-        "allow-fresh restart should fresh-spawn the copilot worker; got {result:?}"
+        "allow-fresh restart should fresh-spawn the claude worker; got {result:?}"
     );
 
     let state = crate::state::persist::load_runtime_state(&ws).expect("load state");
@@ -2635,7 +2637,7 @@ fn restart_allow_fresh_copilot_clears_poisoned_session_id() {
     assert_eq!(
         agent.get("session_id"),
         Some(&serde_json::Value::Null),
-        "0.4.6 contract: fresh restart must clear stale session_id; agent={agent}"
+        "0.4.6 contract: Claude fresh restart must clear stale session_id; agent={agent}"
     );
     // C1 dual-projection: teams.<key>.agents.alpha.session_id must also be null.
     if let Some(teams) = state.get("teams").and_then(serde_json::Value::as_object) {

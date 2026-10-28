@@ -278,6 +278,12 @@ impl ProviderAdapter for BasicProviderAdapter {
 
     fn caps(&self) -> ProviderCaps {
         match self.provider {
+            Provider::Claude | Provider::ClaudeCode => ProviderCaps {
+                resume: true,
+                fork: true,
+                native_mcp_config: true,
+                writes_global_settings: false,
+            },
             // Copilot resume 走 --resume <sid>;store fork 在隔离 COPILOT_HOME
             // 复制并重键 session backing 后以 --resume <new sid> 启动。
             // native_mcp_config=true(`--additional-mcp-config` 接 inline JSON 或 @file);
@@ -295,15 +301,16 @@ impl ProviderAdapter for BasicProviderAdapter {
                 native_mcp_config: false,
                 writes_global_settings: true,
             },
-            // Claude Code, Codex, Grok and Pi workers run only through their
-            // contract leaves. A persisted legacy row is neither resumable nor
-            // capture-pending.
-            Provider::Claude
-            | Provider::ClaudeCode
-            | Provider::Codex
-            | Provider::Grok
-            | Provider::Pi => ProviderCaps {
+            // Codex and Grok workers run only through their contract leaves. A
+            // persisted legacy row is neither resumable nor capture-pending.
+            Provider::Codex | Provider::Grok => ProviderCaps {
                 resume: false,
+                fork: false,
+                native_mcp_config: false,
+                writes_global_settings: false,
+            },
+            Provider::Pi => ProviderCaps {
+                resume: true,
                 fork: false,
                 native_mcp_config: false,
                 writes_global_settings: false,
@@ -347,6 +354,7 @@ impl ProviderAdapter for BasicProviderAdapter {
 
     fn auth_hint(&self, auth_mode: AuthMode) -> AuthHintStatus {
         match self.provider {
+            Provider::Claude | Provider::ClaudeCode => claude_auth_hint(auth_mode),
             // C-A-5 cr verdict v2(诚实 MUST-NOT-13) — copilot 无 auth status 子命令
             // (main-help Commands 节仅 completion/help/init/login/mcp/plugin/update/
             // version)。framework 只能弱检测(命令在 PATH + ~/.copilot/config.json
@@ -354,12 +362,8 @@ impl ProviderAdapter for BasicProviderAdapter {
             // 标"weak / no auth-status command available";Compatible/Official 走 BYOK
             // 路径,有 COPILOT_PROVIDER_BASE_URL 时已脱离 GitHub 登录通道。
             Provider::Copilot => copilot_auth_hint(auth_mode),
-            // No legacy worker probe remains for Claude Code, Codex, Grok or Pi.
-            Provider::Claude
-            | Provider::ClaudeCode
-            | Provider::Codex
-            | Provider::Grok
-            | Provider::Pi => AuthHintStatus::Unknown,
+            // No legacy worker probe remains for Codex or Grok.
+            Provider::Codex | Provider::Grok | Provider::Pi => AuthHintStatus::Unknown,
             _ => match auth_mode {
                 AuthMode::Subscription => AuthHintStatus::Present,
                 AuthMode::OfficialApi | AuthMode::CompatibleApi => AuthHintStatus::MissingOrUnknown,
@@ -386,6 +390,14 @@ impl ProviderAdapter for BasicProviderAdapter {
         dangerously_skip_permissions: bool,
     ) -> Result<Vec<String>, ProviderError> {
         match self.provider {
+            Provider::Claude | Provider::ClaudeCode => Ok(claude_launch_command(
+                self,
+                auth_mode,
+                mcp_config,
+                system_prompt,
+                model,
+                dangerously_skip_permissions,
+            )?),
             // §C1 worker argv 形态 + C-1/C-5/C-6 cr verdict:
             //   copilot --no-color --no-auto-update [<dangerous|granular>] [--model]
             //          --additional-mcp-config <inline json> --session-id <expected_uuid> -C <cwd>
@@ -407,11 +419,12 @@ impl ProviderAdapter for BasicProviderAdapter {
                 }
                 Ok(argv)
             }
-            Provider::Claude
-            | Provider::ClaudeCode
-            | Provider::Codex
-            | Provider::Grok
-            | Provider::Pi => Err(ProviderError::Command(retired_worker(self.provider))),
+            Provider::Codex | Provider::Grok => {
+                Err(ProviderError::Command(retired_worker(self.provider)))
+            }
+            Provider::Pi => Err(ProviderError::Command(
+                "Pi commands require the shared lifecycle materializer".to_string(),
+            )),
             Provider::Fake => Ok(fake_worker_command()),
         }
     }
@@ -421,6 +434,61 @@ impl ProviderAdapter for BasicProviderAdapter {
         ctx: ProviderCommandContext<'_>,
     ) -> Result<CommandPlan, ProviderError> {
         match self.provider {
+            Provider::Claude | Provider::ClaudeCode => {
+                // 0.4.7 (B1 verified, restart partial resume): RESTORE
+                // `--session-id <uuid>` on Claude fresh spawn. B1 confirmed
+                // Claude ≥ 2.1.185 honours the framework-supplied --session-id
+                // and creates a transcript at that id. The earlier 0.4.6
+                // P0 removal (commit 9feafc31) is reverted; the actual issue
+                // it tried to fix (leader-marker pollution) is addressed
+                // separately in commit d39b5104 (leader session exclusion
+                // in capture/repair).
+                //
+                // Fresh path: --session-id <expected> → Claude writes
+                // transcript at that id → capture/restart restore use the
+                // SAME id we predicted, so apply-time backing-store check
+                // passes immediately (no cwd+spawned_at attribution race).
+                //
+                // Resume path unchanged — `build_resume_command_plan` uses
+                // `--resume <existing_id>` on a session id that already has
+                // a real transcript.
+                let expected = next_session_token();
+                let managed = ctx
+                    .profile_launch
+                    .is_some_and(|profile| profile.managed_mcp_config);
+                let projects_root = ctx
+                    .profile_launch
+                    .and_then(|profile| profile.claude_projects_root.clone());
+                let model = claude_context_model(ctx);
+                let mut argv = claude_base_command(
+                    self,
+                    ctx.auth_mode,
+                    ctx.mcp_config,
+                    ctx.system_prompt,
+                    model,
+                    ctx.dangerously_skip_permissions,
+                    managed,
+                    ctx.effort,
+                )?;
+                argv.push("--session-id".to_string());
+                argv.push(expected.clone());
+                // Layer 1 self-healing (architect probe 2026-06-22, claude help
+                // `-n, --name <name>`): pass `--name <agent_id>` so the
+                // resume picker and on-disk `~/.claude/sessions/*.json name`
+                // field carry our role label.
+                if let Some(agent_id) = ctx.agent_id_hint {
+                    if !agent_id.is_empty() {
+                        argv.push("--name".to_string());
+                        argv.push(agent_id.to_string());
+                    }
+                }
+                Ok(CommandPlan {
+                    argv,
+                    expected_session_id: Some(SessionId::new(expected)),
+                    provider_projects_root: projects_root,
+                    managed_mcp_config: managed,
+                })
+            }
             // §C1 + §C4 cr verdict — copilot plan 端预定 UUID + workspace `-C` 双保险:
             //   * `--session-id <uuid>`(claude 同法,捕获免目录扫描,sqlite 仅校验)
             //   * `-C <workspace>`(双保险,即便 spawn cwd 漂移也能锚定)
@@ -444,11 +512,12 @@ impl ProviderAdapter for BasicProviderAdapter {
                     managed_mcp_config: false,
                 })
             }
-            Provider::Claude
-            | Provider::ClaudeCode
-            | Provider::Codex
-            | Provider::Grok
-            | Provider::Pi => Err(ProviderError::Command(retired_worker(self.provider))),
+            Provider::Codex | Provider::Grok => {
+                Err(ProviderError::Command(retired_worker(self.provider)))
+            }
+            Provider::Pi => Err(ProviderError::Command(
+                "Pi commands require the shared lifecycle materializer".to_string(),
+            )),
             _ => self
                 .build_command_with_permissions(
                     ctx.auth_mode,
@@ -552,6 +621,21 @@ impl ProviderAdapter for BasicProviderAdapter {
             ));
         };
         match self.provider {
+            Provider::Claude | Provider::ClaudeCode => {
+                let mut argv = claude_base_command(
+                    self,
+                    auth_mode,
+                    mcp_config,
+                    system_prompt,
+                    model,
+                    dangerously_skip_permissions,
+                    false,
+                    None,
+                )?;
+                argv.push("--resume".to_string());
+                argv.push(session_id.as_str().to_string());
+                Ok(argv)
+            }
             // §C1 cr verdict:resume 同 base + `--resume <sid>`(去 --session-id,
             // copilot --resume 接受 id|name)。
             Provider::Copilot => {
@@ -561,15 +645,73 @@ impl ProviderAdapter for BasicProviderAdapter {
                 argv.push(session_id.as_str().to_string());
                 Ok(argv)
             }
-            Provider::Claude
-            | Provider::ClaudeCode
-            | Provider::Codex
-            | Provider::Grok
-            | Provider::Pi => Err(ProviderError::ResumeUnavailable(retired_worker(self.provider))),
+            Provider::Codex | Provider::Grok => {
+                Err(ProviderError::ResumeUnavailable(retired_worker(self.provider)))
+            }
+            Provider::Pi => Err(ProviderError::ResumeUnavailable(
+                "pi resume requires the captured exact session path".to_string(),
+            )),
             Provider::GeminiCli | Provider::Fake => Err(ProviderError::ResumeUnavailable(format!(
                 "{} resume requires session_id",
                 provider_wire(self.provider)
             ))),
+        }
+    }
+
+    fn build_resume_command_plan(
+        &self,
+        session_id: Option<&SessionId>,
+        ctx: ProviderCommandContext<'_>,
+    ) -> Result<CommandPlan, ProviderError> {
+        match self.provider {
+            Provider::Claude | Provider::ClaudeCode => {
+                let Some(session_id) = session_id else {
+                    return Err(ProviderError::ResumeUnavailable(
+                        "resume requires session_id".to_string(),
+                    ));
+                };
+                let managed = ctx
+                    .profile_launch
+                    .is_some_and(|profile| profile.managed_mcp_config);
+                let model = claude_context_model(ctx);
+                let mut argv = claude_base_command(
+                    self,
+                    ctx.auth_mode,
+                    ctx.mcp_config,
+                    ctx.system_prompt,
+                    model,
+                    ctx.dangerously_skip_permissions,
+                    managed,
+                    ctx.effort,
+                )?;
+                argv.push("--resume".to_string());
+                argv.push(session_id.as_str().to_string());
+                // Layer 1 self-healing: keep the role name on resume too —
+                // makes resumed sessions findable in the picker by agent_id
+                // when state.json drifts.
+                if let Some(agent_id) = ctx.agent_id_hint {
+                    if !agent_id.is_empty() {
+                        argv.push("--name".to_string());
+                        argv.push(agent_id.to_string());
+                    }
+                }
+                let mut plan = CommandPlan::argv_only(argv);
+                plan.provider_projects_root = ctx
+                    .profile_launch
+                    .and_then(|profile| profile.claude_projects_root.clone());
+                plan.managed_mcp_config = managed;
+                Ok(plan)
+            }
+            _ => self
+                .build_resume_command_with_context(
+                    session_id,
+                    ctx.auth_mode,
+                    ctx.mcp_config,
+                    ctx.system_prompt,
+                    ctx.model,
+                    ctx.dangerously_skip_permissions,
+                )
+                .map(CommandPlan::argv_only),
         }
     }
 
@@ -586,10 +728,10 @@ impl ProviderAdapter for BasicProviderAdapter {
         &self,
         session_id: Option<&SessionId>,
         auth_mode: AuthMode,
-        _mcp_config: Option<&McpConfig>,
-        _system_prompt: Option<&str>,
-        _model: Option<&str>,
-        _dangerously_skip_permissions: bool,
+        mcp_config: Option<&McpConfig>,
+        system_prompt: Option<&str>,
+        model: Option<&str>,
+        dangerously_skip_permissions: bool,
     ) -> Result<Vec<String>, ProviderError> {
         if !self.caps().fork || auth_mode == AuthMode::CompatibleApi {
             return Err(ProviderError::CapabilityUnsupported(format!(
@@ -597,24 +739,40 @@ impl ProviderAdapter for BasicProviderAdapter {
                 provider_wire(self.provider)
             )));
         }
-        if session_id.is_none() {
+        let Some(session_id) = session_id else {
             return Err(ProviderError::ResumeUnavailable(
                 "fork requires session_id".to_string(),
             ));
-        }
+        };
         match self.provider {
+            Provider::Claude | Provider::ClaudeCode => {
+                let mut argv = claude_base_command(
+                    self,
+                    auth_mode,
+                    mcp_config,
+                    system_prompt,
+                    model,
+                    dangerously_skip_permissions,
+                    false,
+                    None,
+                )?;
+                argv.push("--session-id".to_string());
+                argv.push(next_session_token());
+                argv.push("--resume".to_string());
+                argv.push(session_id.as_str().to_string());
+                argv.push("--fork-session".to_string());
+                Ok(argv)
+            }
             // Context-free adapter calls cannot materialize the Copilot store fork.
             // The lifecycle path uses `fork_plan`, which receives the prepared isolated
             // backing; never degrade this context-free call to a fresh spawn.
             Provider::Copilot => Err(ProviderError::CapabilityUnsupported(
                 "copilot CLI 无 fork 旗标,session-store 不支持 branched continuation".to_string(),
             )),
-            Provider::Claude
-            | Provider::ClaudeCode
-            | Provider::Codex
-            | Provider::Grok
-            | Provider::Pi => Err(ProviderError::CapabilityUnsupported(retired_worker(self.provider))),
-            Provider::GeminiCli | Provider::Fake => {
+            Provider::Codex | Provider::Grok => {
+                Err(ProviderError::CapabilityUnsupported(retired_worker(self.provider)))
+            }
+            Provider::Pi | Provider::GeminiCli | Provider::Fake => {
                 Err(ProviderError::CapabilityUnsupported(format!(
                     "{} does not support native session fork",
                     provider_wire(self.provider)
@@ -629,6 +787,58 @@ impl ProviderAdapter for BasicProviderAdapter {
         ctx: ProviderCommandContext<'_>,
     ) -> Result<CommandPlan, ProviderError> {
         match self.provider {
+            Provider::Claude | Provider::ClaudeCode => {
+                if !self.caps().fork || ctx.auth_mode == AuthMode::CompatibleApi {
+                    return Err(ProviderError::CapabilityUnsupported(format!(
+                        "{} does not support native session fork",
+                        provider_wire(self.provider)
+                    )));
+                }
+                let Some(session_id) = session_id else {
+                    return Err(ProviderError::ResumeUnavailable(
+                        "fork requires session_id".to_string(),
+                    ));
+                };
+                let expected = next_session_token();
+                let managed = ctx
+                    .profile_launch
+                    .is_some_and(|profile| profile.managed_mcp_config);
+                let projects_root = ctx
+                    .profile_launch
+                    .and_then(|profile| profile.claude_projects_root.clone());
+                let model = claude_context_model(ctx);
+                let mut argv = claude_base_command(
+                    self,
+                    ctx.auth_mode,
+                    ctx.mcp_config,
+                    ctx.system_prompt,
+                    model,
+                    ctx.dangerously_skip_permissions,
+                    managed,
+                    ctx.effort,
+                )?;
+                // Native new-seat fork: Claude copies the parent (only read)
+                // into the preassigned child, so capture binds the child
+                // exactly as a fresh spawn. `--session-id` with `--resume` is
+                // admitted only together with `--fork-session`.
+                argv.push("--session-id".to_string());
+                argv.push(expected.clone());
+                argv.push("--resume".to_string());
+                argv.push(session_id.as_str().to_string());
+                argv.push("--fork-session".to_string());
+                if let Some(agent_id) = ctx.agent_id_hint {
+                    if !agent_id.is_empty() {
+                        argv.push("--name".to_string());
+                        argv.push(agent_id.to_string());
+                    }
+                }
+                Ok(CommandPlan {
+                    argv,
+                    expected_session_id: Some(SessionId::new(expected)),
+                    provider_projects_root: projects_root,
+                    managed_mcp_config: managed,
+                })
+            }
             Provider::Copilot => {
                 if ctx.auth_mode == AuthMode::CompatibleApi {
                     return Err(ProviderError::CapabilityUnsupported(
@@ -716,21 +926,26 @@ impl ProviderAdapter for BasicProviderAdapter {
 
     fn status_patterns(&self) -> Result<StatusPatterns, ProviderError> {
         match self.provider {
+            Provider::Claude | Provider::ClaudeCode => {
+                patterns(r"[>❯]\s", r"[✶✢✽✻✳·].*…", r"Error|Traceback")
+            }
             Provider::Copilot => patterns(
                 r"(?m)^\s*❯\s*$| / commands · \? help",
                 r"working|processing",
                 r"Error|panic",
             ),
-            // Claude Code, Codex, Grok and Pi workers run only through their
-            // contract leaves; these placeholders never match real pane chrome.
-            Provider::Claude
-            | Provider::ClaudeCode
-            | Provider::Codex
-            | Provider::Grok
-            | Provider::Pi => patterns(
+            // Codex and Grok workers run only through their contract leaves;
+            // these placeholders never match real pane chrome.
+            Provider::Codex | Provider::Grok => patterns(
                 r"legacy-worker-idle-retired",
                 r"legacy-worker-busy-retired",
                 r"legacy-worker-error-retired",
+            ),
+            // Pi: 无已验证 turn-state 检测；占位串不会匹配真实 pane chrome。
+            Provider::Pi => patterns(
+                r"pi-idle-unset-until-turn-state",
+                r"pi-busy-unset-until-turn-state",
+                r"pi-error-unset-until-turn-state",
             ),
             Provider::GeminiCli | Provider::Fake => {
                 patterns(r">", r"working|processing", r"Error|Traceback")
@@ -749,9 +964,9 @@ impl ProviderAdapter for BasicProviderAdapter {
 
 use crate::provider::wire::{command_name, provider_wire};
 
-/// Claude Code, Codex, Grok and Pi workers run only through their contract
-/// leaves (`provider: claude|codex|grok|pi`); their legacy worker builders were
-/// excised. Only a pre-upgrade state row can still name the legacy key.
+/// Codex and Grok workers run only through their contract leaves
+/// (`provider: codex|grok`); their legacy worker builders were excised. Only a
+/// pre-upgrade state row can still name the legacy key.
 fn retired_worker(provider: Provider) -> String {
     format!(
         "legacy {} worker runtime was excised; workers run only through the contract leaf",
@@ -788,6 +1003,38 @@ fn copilot_auth_hint(auth_mode: AuthMode) -> AuthHintStatus {
     }
 }
 
+fn claude_auth_hint(auth_mode: AuthMode) -> AuthHintStatus {
+    if auth_mode != AuthMode::Subscription {
+        return AuthHintStatus::MissingOrUnknown;
+    }
+    if !command_on_path("claude") {
+        return AuthHintStatus::Missing;
+    }
+    let output = match Command::new("claude").args(["auth", "status"]).output() {
+        Ok(output) => output,
+        Err(_) => return AuthHintStatus::MissingOrUnknown,
+    };
+    let text = if output.stdout.is_empty() {
+        String::from_utf8_lossy(&output.stderr).to_string()
+    } else {
+        String::from_utf8_lossy(&output.stdout).to_string()
+    };
+    let status = serde_json::from_str::<serde_json::Value>(text.trim()).unwrap_or_default();
+    if status.get("loggedIn").and_then(serde_json::Value::as_bool) == Some(true)
+        || output.status.success()
+    {
+        AuthHintStatus::Present
+    } else {
+        AuthHintStatus::Missing
+    }
+}
+
+fn claude_context_model(ctx: ProviderCommandContext<'_>) -> Option<&str> {
+    ctx.profile_launch
+        .and_then(|profile| profile.command_overrides.model.as_deref())
+        .or(ctx.model)
+}
+
 fn command_on_path(name: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;
@@ -795,10 +1042,15 @@ fn command_on_path(name: &str) -> bool {
     std::env::split_paths(&path).any(|dir| dir.join(name).is_file())
 }
 
+pub(crate) fn prompt_needs_native_mcp(prompt: &str) -> bool {
+    prompt.contains('\n') || prompt.contains('"')
+}
+
 // 0.4.x decoupling step 2: provider-local command builders moved to provider/adapters/.
 // Only the entry points the trait impl actually calls are re-imported here;
 // The per-provider command helpers and MCP renderers are called from within
 // the extracted base-command functions, not directly by this file.
+use super::adapters::claude::{claude_base_command, claude_launch_command};
 use super::adapters::copilot::copilot_base_command;
 use super::adapters::fake::fake_worker_command;
 

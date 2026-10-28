@@ -34,6 +34,7 @@ const SOURCE_TOOLS: &[&str] = &[
 struct Case {
     env: HermeticTestEnv,
     workspace: PathBuf,
+    shim_path: String,
     socket: Option<PathBuf>,
 }
 
@@ -42,9 +43,16 @@ impl Case {
         let env = HermeticTestEnv::for_subprocess_with_leader(tag);
         let workspace = env.workspace("ws");
         write_team_docs(&workspace);
+        let shim_dir = write_claude_shim(&workspace);
+        let shim_path = format!(
+            "{}:{}",
+            shim_dir.display(),
+            std::env::var("PATH").expect("PATH present")
+        );
         Self {
             env,
             workspace,
+            shim_path,
             socket: None,
         }
     }
@@ -60,8 +68,8 @@ impl Case {
             .join("state.json")
     }
 
-    /// Seed the SOURCE session tuple so the clone reaches its success path (the
-    /// built-in fake worker has no real captured backing). Same fixture as the
+    /// Seed the SOURCE session tuple so the clone reaches its success path (a
+    /// hermetic PATH-shim has no real captured backing). Same fixture as the
     /// R1 latest-role test.
     fn seed_source_session_tuple(&self) {
         let rollout = self.workspace.join("fixture-source-rollout.jsonl");
@@ -105,7 +113,8 @@ impl Case {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        self.env.run_cli(&self.workspace, args)
+        self.env
+            .run_cli_env(&self.workspace, args, &[("PATH", self.shim_path.as_str())])
     }
 
     fn quick_start(&mut self) {
@@ -120,7 +129,7 @@ impl Case {
             "--json",
         ]);
         // Record the team's own tmux socket (from attach_commands) for precise
-        // teardown — quick-start spawns a real tmux server for the fake worker.
+        // teardown — quick-start spawns a real tmux server under the shim.
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
             if let Some(cmd) = v
                 .get("attach_commands")
@@ -183,10 +192,31 @@ fn write_team_docs(workspace: &Path) {
     std::fs::write(
         workspace.join("agents").join(format!("{SOURCE}.md")),
         format!(
-            "---\nname: {SOURCE}\nrole: {SOURCE}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n{tools_yaml}\n---\n\n{SOURCE} body.\n"
+            "---\nname: {SOURCE}\nrole: {SOURCE}\nprovider: claude\nmodel: claude-sonnet-5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n{tools_yaml}\n---\n\n{SOURCE} body.\n"
         ),
     )
     .expect("write source role doc");
+}
+
+/// Success-path shim: emit a session transcript into the hermetic HOME so the
+/// clone's spawn does not hang and the NEW seat registers (same mechanism as
+/// the R1 latest-role test).
+fn write_claude_shim(workspace: &Path) -> PathBuf {
+    let bin_dir = workspace.join("shim-bin");
+    std::fs::create_dir_all(&bin_dir).expect("create shim dir");
+    let shim = bin_dir.join("claude");
+    std::fs::write(
+        &shim,
+        "#!/bin/sh\nmkdir -p \"$HOME/.claude/projects/shim\"\necho '{\"type\":\"shim\"}' > \"$HOME/.claude/projects/shim/session.jsonl\"\necho 'claude shim ready'\nexec sleep 3600\n",
+    )
+    .expect("write claude shim");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod claude shim");
+    }
+    bin_dir
 }
 
 /// Parse the `tools` front-matter list of a role doc as a set.

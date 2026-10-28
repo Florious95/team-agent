@@ -3,11 +3,10 @@
 //! These tests intentionally use only the public CLI. The expected results are fixed by
 //! the fixture rows below; no production matcher is called to calculate an oracle.
 //!
-//! `models --provider claude|claude_code|codex|codex_cli|codex-cli|grok|pi` (and the default
-//! `pi`) now read the contract-leaf catalogs; the legacy Claude/Pi/Codex catalog contracts
-//! (fuzzy search, display names, visibility/priority projection, bounded legacy reads and
-//! the Codex launch builders) left with those engines. The fake `claude`/`pi` shims stay on
-//! PATH only to prove source isolation.
+//! `models --provider codex|codex_cli|codex-cli|grok` now read the contract-leaf catalogs;
+//! the legacy Codex catalog contracts (fuzzy search, visibility/priority projection, bounded
+//! legacy reads and the Codex launch builders) left with that engine. `claude`/`claude_code`
+//! and `pi` (the default) keep their legacy catalogs; the Claude catalog contracts below stay.
 
 #[cfg(unix)]
 mod unix_tests {
@@ -20,6 +19,7 @@ mod unix_tests {
     use std::process::{Command, Output};
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    const REQUEST_LINE: &str = "{\"type\":\"control_request\",\"request_id\":\"team-agent-model-catalog\",\"request\":{\"subtype\":\"initialize\",\"hooks\":{},\"agents\":{},\"skills\":[]}}\n";
     const REQUEST_ID: &str = "team-agent-model-catalog";
     const RAW_SENTINEL: &str = "RAW_CATALOG_SECRET_SENTINEL";
     static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -131,6 +131,22 @@ exit 77
 
         fn set_claude(&self, text: &str) {
             fs::write(&self.claude_catalog, text).expect("write fake Claude catalog");
+        }
+
+        fn set_claude_bytes(&self, bytes: &[u8]) {
+            fs::write(&self.claude_catalog, bytes).expect("write fake Claude catalog bytes");
+        }
+
+        fn argv(&self, executable: &str) -> Vec<String> {
+            let bytes = fs::read(self.trace.join(format!("{executable}.argv"))).unwrap_or_default();
+            let mut parts = bytes.split(|byte| *byte == 0).collect::<Vec<_>>();
+            if parts.last().is_some_and(|part| part.is_empty()) {
+                parts.pop();
+            }
+            parts
+                .into_iter()
+                .map(|part| String::from_utf8_lossy(part).into_owned())
+                .collect()
         }
 
         fn set_pi(&self, text: &str) {
@@ -432,5 +448,302 @@ exit 77
             "F20 required reusable Provider discovery standard is absent: {doc:?}"
         );
         assert!(fs::metadata(doc).expect("stat onboarding doc").len() > 0);
+    }
+
+    // Legacy Claude Code catalog contracts (restored with the legacy Claude worker runtime).
+    fn invoke_search(fixture: &Fixture, provider: &str, query: &str) -> Value {
+        let output = fixture.run(&[
+            "models",
+            "--provider",
+            provider,
+            "--search",
+            query,
+            "--json",
+        ]);
+        successful_json(&output, &format!("{provider} search {query:?}"))
+    }
+
+    fn record<'a>(value: &'a Value, id: &str) -> &'a Value {
+        value["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["model_id"] == id)
+            .unwrap_or_else(|| panic!("missing canonical record {id:?}: {value}"))
+    }
+
+    fn claude_ids(value: &Value) -> Vec<String> {
+        codex_ids(value)
+    }
+
+    fn successful_json(output: &Output, label: &str) -> Value {
+        assert!(
+            output.status.success(),
+            "{label}: expected successful CLI result, status={:?}, stdout={}, stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|error| panic!("{label}: invalid JSON stdout: {error}"));
+        assert_eq!(value["schema_version"], "models.v1", "{label}");
+        assert_eq!(value["ok"], true, "{label}");
+        assert_eq!(value["auth"], "ok", "{label}");
+        value
+    }
+
+    fn write_claude_rows(fixture: &Fixture, rows: &[Value]) {
+        fixture.set_claude(&claude_catalog_text(rows));
+    }
+
+    fn claude_response(request_id: &str, subtype: &str, body: Value) -> String {
+        format!(
+            "{}\n",
+            json!({
+                "type": "control_response",
+                "request_id": request_id,
+                "response": { "subtype": subtype, "response": body }
+            })
+        )
+    }
+
+    fn fixture_for_claude_case(failures: &mut Vec<String>, label: &str, bytes: String) {
+        let fixture = Fixture::new();
+        fixture.set_claude_bytes(bytes.as_bytes());
+        let output = fixture.run(&["models", "--provider", "claude", "--json"]);
+        match serde_json::from_slice::<Value>(&output.stdout) {
+            Ok(value) if !output.status.success() => {
+                if value["ok"] != false
+                    || value["models"] != json!([])
+                    || value["error"]
+                        .as_str()
+                        .is_none_or(|text| text.contains("unsupported model provider"))
+                {
+                    failures.push(format!("{label}: wrong failure result {value}"));
+                }
+                let rendered = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                if rendered.contains(RAW_SENTINEL) {
+                    failures.push(format!("{label}: provider metadata leaked"));
+                }
+            }
+            other => failures.push(format!("{label}: expected fail-closed JSON, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn f02_claude_spellings_use_one_exact_initialize_and_canonical_projection() {
+        for provider in ["claude", "claude_code"] {
+            let fixture = Fixture::new();
+            write_claude_rows(&fixture, &claude_rows());
+            let output = fixture.run(&["models", "--provider", provider, "--json"]);
+            let value = successful_json(&output, &format!("F02 {provider} discovery"));
+            assert_single_provider_call(&fixture, "claude", 1);
+            assert_eq!(
+                fixture.argv("claude"),
+                [
+                    "--print",
+                    "--input-format",
+                    "stream-json",
+                    "--output-format",
+                    "stream-json",
+                    "--verbose",
+                    "--no-session-persistence",
+                    "--strict-mcp-config",
+                    "--mcp-config",
+                    "{\"mcpServers\":{}}",
+                    "--setting-sources",
+                    "",
+                    "--settings",
+                    "{\"disableAllHooks\":true}",
+                    "--tools",
+                    "",
+                    "--no-chrome",
+                ]
+            );
+            assert_eq!(fixture.call_count("claude"), 1);
+            assert_eq!(
+                fs::read(fixture.trace.join("claude.stdin")).expect("captured initialize"),
+                REQUEST_LINE.as_bytes(),
+                "the initialize request is the only stdin payload"
+            );
+            assert_eq!(
+                fs::read_to_string(fixture.trace.join("claudecode"))
+                    .expect("env observation")
+                    .trim(),
+                "absent",
+                "only the nested-session marker is removed for Claude"
+            );
+            assert_eq!(value["provider"], provider);
+            assert_eq!(value["current_role_model"], Value::Null);
+            let expected_ids = [
+                "claude-opus-5-5[1m]",
+                "claude-fable-5",
+                "claude-sonnet-5",
+                "claude-haiku-4-5-20251001",
+                "claude-opus-5-5",
+                "claude-sonnet-6",
+            ];
+            assert_eq!(claude_ids(&value), expected_ids);
+            for item in value["models"].as_array().expect("model rows") {
+                assert_eq!(item["provider"], provider);
+                assert_eq!(item["vendor"], "anthropic");
+                assert_eq!(item["model_id"], item["role_model"]);
+                assert_eq!(item["current"], Value::Null);
+                assert_eq!(item["aliases"].as_array().is_some(), true);
+            }
+            assert!(!String::from_utf8_lossy(&output.stdout).contains(RAW_SENTINEL));
+        }
+    }
+
+    #[test]
+    fn f11_claude_protocol_failures_and_metadata_projection_are_fail_closed() {
+        let rows = claude_rows();
+        let valid_response = json!({ "models": rows, "account": {"token": RAW_SENTINEL} });
+        let mut cases = vec![
+            (
+                "wrong request id",
+                format!(
+                    "{}\n",
+                    claude_response("wrong-request", "success", valid_response.clone())
+                ),
+            ),
+            (
+                "error response",
+                claude_response(REQUEST_ID, "error", json!({"message": RAW_SENTINEL})),
+            ),
+            (
+                "missing response",
+                format!("{}\n", json!({"type":"system", "message":RAW_SENTINEL})),
+            ),
+            (
+                "interactive control request",
+                format!(
+                    "{}\n",
+                    json!({"type":"control_request", "request_id":"unexpected", "request":{"subtype":"permission"}})
+                ),
+            ),
+            (
+                "assistant frame",
+                format!("{}\n", json!({"type":"assistant", "message":RAW_SENTINEL})),
+            ),
+            (
+                "result frame",
+                format!("{}\n", json!({"type":"result", "result":RAW_SENTINEL})),
+            ),
+            (
+                "missing models",
+                claude_response(REQUEST_ID, "success", json!({"account":RAW_SENTINEL})),
+            ),
+            (
+                "wrong models type",
+                claude_response(REQUEST_ID, "success", json!({"models":"not-array"})),
+            ),
+            (
+                "resolvedModel missing",
+                claude_response(
+                    REQUEST_ID,
+                    "success",
+                    json!({"models":[{"value":"sonnet", "displayName":"Sonnet"}]}),
+                ),
+            ),
+            (
+                "resolvedModel wrong type",
+                claude_response(
+                    REQUEST_ID,
+                    "success",
+                    json!({"models":[{"value":"sonnet", "resolvedModel":4, "displayName":"Sonnet"}]}),
+                ),
+            ),
+            (
+                "duplicate success response",
+                format!(
+                    "{}\n{}\n",
+                    claude_response(REQUEST_ID, "success", valid_response.clone()),
+                    claude_response(REQUEST_ID, "success", valid_response.clone())
+                ),
+            ),
+        ];
+        cases.push((
+            "success response followed by bad JSONL",
+            format!(
+                "{}\n{{bad}}\n",
+                claude_response(REQUEST_ID, "success", valid_response)
+            ),
+        ));
+        let mut failures = Vec::new();
+        for (label, bytes) in cases {
+            fixture_for_claude_case(&mut failures, label, bytes);
+        }
+        assert!(
+            failures.is_empty(),
+            "F11 Claude protocol failures: {failures:#?}"
+        );
+    }
+
+    #[test]
+    fn f16_models_are_read_only_and_claude_runs_isolated_without_session_or_tools() {
+        let fixture = Fixture::new();
+        let output = fixture.run_with(
+            &["models", "--provider", "claude", "--json"],
+            &[("CLAUDECODE", "outer-session-sentinel")],
+        );
+        successful_json(&output, "F16 isolated Claude lookup");
+        assert_single_provider_call(&fixture, "claude", 1);
+        let cwd = fs::read_to_string(fixture.trace.join("claude.pwd")).expect("Claude cwd capture");
+        let cwd = PathBuf::from(cwd.trim());
+        assert!(
+            cwd.starts_with(&fixture.temp),
+            "Claude cwd must be owned temp: {cwd:?}"
+        );
+        assert_ne!(cwd, fixture.workspace);
+        assert!(
+            !cwd.exists(),
+            "owned Claude temp directory must be removed after completion"
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.trace.join("claudecode"))
+                .expect("Claude env capture")
+                .trim(),
+            "absent"
+        );
+        assert!(!fixture.workspace.join(".team").exists());
+        assert!(!fixture.home.join(".team-agent").exists());
+        assert!(!fixture.home.join(".claude").exists());
+        assert!(!fixture.root.join("coordinator.sqlite").exists());
+    }
+
+    #[test]
+    fn f19_claude_alias_default_and_display_names_share_and_search_without_guessing() {
+        let fixture = Fixture::new();
+        let sonnet = invoke_search(&fixture, "claude", "SoNNet");
+        assert_eq!(claude_ids(&sonnet), ["claude-sonnet-5", "claude-sonnet-6"]);
+        let opus = invoke_search(&fixture, "claude", "default opus");
+        assert_eq!(claude_ids(&opus), ["claude-opus-5-5[1m]"]);
+        let context = invoke_search(&fixture, "claude", "1M context");
+        assert_eq!(claude_ids(&context), ["claude-opus-5-5[1m]"]);
+        let haiku = invoke_search(&fixture, "claude_code", "HAIKU");
+        assert_eq!(claude_ids(&haiku), ["claude-haiku-4-5-20251001"]);
+        assert_eq!(
+            record(&haiku, "claude-haiku-4-5-20251001")["aliases"],
+            json!(["haiku"])
+        );
+
+        let no_match = fixture.run(&[
+            "models",
+            "--provider",
+            "claude",
+            "--search",
+            "gpt-6-luna",
+            "--json",
+        ]);
+        let value = successful_json(
+            &no_match,
+            "missing model is determined by current Claude catalog",
+        );
+        assert!(value["models"].as_array().expect("rows").is_empty());
     }
 }

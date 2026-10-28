@@ -135,6 +135,10 @@ mod tests {
 
     #[test]
     fn convergence_deadlines_are_bounded_for_every_provider() {
+        assert_eq!(
+            context_fork_convergence_deadline(Provider::Claude),
+            Duration::from_secs(45)
+        );
         for provider in [Provider::Codex, Provider::Copilot, Provider::Grok] {
             assert_eq!(context_fork_convergence_deadline(provider), Duration::from_secs(5));
         }

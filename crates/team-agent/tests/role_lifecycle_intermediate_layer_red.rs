@@ -6,7 +6,7 @@ mod framework;
 use framework::{quick_start_workers_available, run_ta_env, TestWorkspace};
 use serde_json::Value as Json;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -38,6 +38,12 @@ mv "$capture.tmp" "$capture"
 [ ! -f "$TEAM_AGENT_WORKSPACE/.role-lifecycle-fail-launch" ] || exit 73
 exec {} fake-worker --workspace "$TEAM_AGENT_WORKSPACE" --agent-id "$TEAM_AGENT_AGENT_ID"
 "#, binary));
+        // Legacy Pi worker shim behind a symlink: version/catalog probes answer
+        // locally; a launch records argv like the Copilot shim.
+        let pi_target = dir.join("pi-test-target");
+        executable(&pi_target, &format!(
+            "#!/bin/sh\nset -eu\ncase \"${{1:-}}\" in\n--version) exit 0;;\n--list-models) printf 'provider model\\nopenai-codex gpt-6-luna\\nopenai-codex gpt-5.6-luna\\n'; exit 0;;\nlist) exit 64;;\nesac\n[ -n \"${{TEAM_AGENT_AGENT_ID:-}}\" ] && [ -n \"${{TEAM_AGENT_WORKSPACE:-}}\" ] || exit 0\nprintf '%s\\0' pi \"$@\" > \"${{TEAM_AGENT_WORKSPACE}}/.role-lifecycle-launch/${{TEAM_AGENT_AGENT_ID}}.argv\"\n[ ! -f \"${{TEAM_AGENT_WORKSPACE}}/.role-lifecycle-fail-launch\" ] || exit 73\nexec {} fake-worker --workspace \"${{TEAM_AGENT_WORKSPACE}}\" --agent-id \"${{TEAM_AGENT_AGENT_ID}}\"\n", binary));
+        symlink(&pi_target, dir.join("pi")).unwrap();
         let inherited = std::env::var("PATH").unwrap_or_default();
         let real_tmux = std::env::split_paths(&inherited).map(|p| p.join("tmux")).find(|p| p.is_file()).expect("tmux available for isolated E2E tests");
         executable(&dir.join("tmux"), &format!(
@@ -67,6 +73,7 @@ fn executable(path: &Path, body: &str) {
     fs::set_permissions(path, mode).unwrap();
 }
 fn role(id: &str, provider: &str, model: &str, effort: Option<&str>, bypass: bool, prompt: &str) -> String {
+    let model = if provider == "pi" && !model.contains('/') { format!("openai-codex/{model}") } else { model.to_string() };
     let mut s = format!("---\nname: {id}\nrole: Lifecycle worker\nprovider: {provider}\nmodel: {model}\nauth_mode: subscription\ndangerously_skip_permissions: {bypass}\ntools:\n  - mcp_team\n");
     if let Some(e) = effort { s.push_str(&format!("effort: {e}\n")); }
     s.push_str(&format!("---\n{prompt}\n")); s
@@ -162,7 +169,8 @@ fn assert_copilot_profile(capture: &[String], provider_type: &str, base_url: &st
 fn assert_config(ws: &TestWorkspace, id: &str, provider: &str, model: &str, effort: Option<&str>, bypass: bool) {
     let v = compiled(ws, id);
     assert_eq!(v.get("provider").and_then(Yaml::as_str), Some(provider), "{v:?}");
-    assert_eq!(v.get("model").and_then(Yaml::as_str), Some(model), "{v:?}");
+    let expected_model = if provider == "pi" && !model.contains('/') { format!("openai-codex/{model}") } else { model.to_string() };
+    assert_eq!(v.get("model").and_then(Yaml::as_str), Some(expected_model.as_str()), "{v:?}");
     assert_eq!(v.get("effort").and_then(Yaml::as_str), effort, "{v:?}");
     assert!(matches!(v.get("dangerously_skip_permissions"), Some(Yaml::Bool(actual)) if *actual == bypass), "{v:?}");
 }
@@ -293,7 +301,7 @@ fn add_file_cli_arbitration_accepts_equal_and_rejects_conflicting_values_atomica
         ("same-prompt-trim", vec!["--prompt", " \tBody.\n "], true),
         ("conf-provider", vec!["--provider", "fake"], false),
         ("conf-bypass", vec!["--bypass", "true"], false),
-        ("conf-model", vec!["--model", "gpt-6-luna"], false),
+        ("conf-model", vec!["--model", "openai-codex/gpt-6-luna"], false),
         ("conf-effort", vec!["--effort", "xhigh"], false),
         ("conf-prompt", vec!["--prompt", "Different body."], false),
     ] {
@@ -347,6 +355,16 @@ fn s5_stop_change_model_effort_restart_updates_frontmatter_spec_and_native_argv(
 }
 
 #[test]
+fn s5_pi_stop_change_model_effort_restart_updates_frontmatter_spec_and_thinking_argv() {
+    let (ws, shims) = ws_seed("rolelife-s5-pi", "pi", "gpt-6-luna", None); stop(&ws, &shims, "seed");
+    let r = run(&ws, &shims, &start(&ws, "seed", &["--provider", "pi", "--model", "openai-codex/gpt-5.6-luna", "--effort", "xhigh"]));
+    assert!(r.is_success(), "Pi patch: {} {}", r.stdout, r.stderr);
+    let text = fs::read_to_string(role_path(&ws, "seed")).unwrap(); assert!(text.contains("effort: xhigh"));
+    assert_config(&ws, "seed", "pi", "gpt-5.6-luna", Some("xhigh"), false);
+    let argv = shims.capture("seed"); assert!(pair(&argv, "--model", "openai-codex/gpt-5.6-luna")); assert!(pair(&argv, "--thinking", "xhigh"));
+}
+
+#[test]
 fn stopped_start_partial_patches_bypass_and_prompt_and_preserves_omitted_values() {
     let (ws, shims) = ws_seed("rolelife-partial", "copilot", "gpt-6-luna", None); stop(&ws, &shims, "seed");
     for (value, expected) in [("true", true), ("false", false)] {
@@ -389,7 +407,7 @@ fn failed_parameterized_start_restores_existing_role_and_spec_bytes() {
     quiesce_owned_coordinator_before_rejection_snapshot(&ws);
     let spec = spec_path(&ws); let before = snapshot(&ws, &shims, "seed");
     fs::write(ws.path().join(".role-lifecycle-fail-launch"), b"injected tmux spawn failure").unwrap();
-    let r = run(&ws, &shims, &start(&ws, "seed", &["--model", "gpt-5.6-luna", "--effort", "high"]));
+    let r = run(&ws, &shims, &start(&ws, "seed", &["--model", "openai-codex/gpt-5.6-luna", "--effort", "high"]));
     assert!(!r.is_success(), "injected spawn failure must surface: {} {}", r.stdout, r.stderr);
     let failed_argv = fs::read(&shims.tmux_capture).expect("tmux wrapper proves spawn failure").split(|b| *b == 0).filter(|b| !b.is_empty()).map(|b| String::from_utf8(b.to_vec()).unwrap()).collect::<Vec<_>>();
     assert!(failed_argv.iter().any(|arg| ["new-session", "new-window", "split-window"].contains(&arg.as_str())), "failure must reach tmux creation: {failed_argv:?}");
@@ -399,8 +417,8 @@ fn failed_parameterized_start_restores_existing_role_and_spec_bytes() {
     assert_eq!(snapshot(&ws, &shims, "seed"), before, "failed start must restore files, runtime binding, and pane topology");
     assert!(spec.exists());
     assert!(!ws.path().join("agents/seed.md.tmp").exists()); assert!(!ws.path().join("agents/seed.md.bak").exists());
-    assert!(staged_role.contains("model: gpt-5.6-luna") && staged_role.contains("effort: high"), "new role config must reach failure boundary: {staged_role}");
-    assert_eq!(staged_agent.get("model").and_then(Yaml::as_str), Some("gpt-5.6-luna"));
+    assert!(staged_role.contains("model: openai-codex/gpt-5.6-luna") && staged_role.contains("effort: high"), "new role config must reach failure boundary: {staged_role}");
+    assert_eq!(staged_agent.get("model").and_then(Yaml::as_str), Some("openai-codex/gpt-5.6-luna"));
     assert_eq!(staged_agent.get("effort").and_then(Yaml::as_str), Some("high"));
 }
 

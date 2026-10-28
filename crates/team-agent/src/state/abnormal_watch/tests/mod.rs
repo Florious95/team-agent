@@ -102,7 +102,7 @@ fn observation_identity_separates_same_name_team_path_and_spawn_generation() {
         ("/active_team_key", json!("b")),
         ("/agents/w/rollout_path", json!("/fixture/other.jsonl")),
         ("/agents/w/spawn_epoch", json!(2)),
-        ("/agents/w/provider", json!("copilot")),
+        ("/agents/w/provider", json!("claude")),
         ("/agents/w/spawned_at", json!("new-incarnation")),
     ] {
         let mut changed = initial.clone();

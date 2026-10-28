@@ -275,8 +275,8 @@ pub(super) fn spawn_agent_window(
     // (agent row → active_team_key) for back-compat with non-restart callers.
     owner_team_id_override: Option<&str>,
 ) -> Result<SpawnedAgentWindow, LifecycleError> {
-    // A pre-upgrade Claude Code, Codex, Grok or Pi worker row has no legacy
-    // runtime left; refuse before any MCP file, profile or pane side effect.
+    // A pre-upgrade Codex or Grok worker row has no legacy runtime left;
+    // refuse before any MCP file, profile or pane side effect.
     if let Some(retired) = agent
         .get("provider")
         .and_then(serde_json::Value::as_str)
@@ -295,6 +295,11 @@ pub(super) fn spawn_agent_window(
     } else {
         None
     };
+    let fork_parent = agent
+        .get(crate::lifecycle::launch::add_agent_state::FORK_PARENT_SESSION_ID)
+        .and_then(serde_json::Value::as_str)
+        .filter(|parent| !parent.is_empty())
+        .map(SessionId::new);
     // Contract C / F6.4: thread compiled role/tools/MCP context through restart as well —
     // a restarted worker must come back up with the SAME callable MCP capability + role
     // prompt as a fresh launch, else `report_result` becomes unreachable after every restart.
@@ -348,12 +353,16 @@ pub(super) fn spawn_agent_window(
         agent_id.as_str(),
         team_id.as_deref().unwrap_or(""),
     );
-    let mcp_config_path = crate::lifecycle::launch::write_worker_mcp_config_for_provider(
-        workspace,
-        agent_id.as_str(),
-        &mcp_config,
-        Some(provider),
-    )?;
+    let mcp_config_path = if provider == crate::provider::Provider::Pi {
+        None
+    } else {
+        Some(crate::lifecycle::launch::write_worker_mcp_config_for_provider(
+            workspace,
+            agent_id.as_str(),
+            &mcp_config,
+            Some(provider),
+        )?)
+    };
     let profile_launch =
         crate::lifecycle::profile_launch::prepare_provider_profile_launch_from_json(
             workspace,
@@ -386,18 +395,63 @@ pub(super) fn spawn_agent_window(
         agent_id_hint: Some(agent_id.as_str()),
         effort: restart_effort,
     };
-    let spawn_cwd = spawn_cwd_override.unwrap_or(workspace);
-    let mut plan = match resume_session_id {
-        Some(session_id) => adapter.build_resume_command_plan(Some(session_id), context),
-        None => adapter.build_command_plan(context),
-    }
-    .map_err(|e| LifecycleError::Provider(e.to_string()))?;
+    let pi_spawn_cwd = (provider == crate::provider::Provider::Pi)
+        .then(|| {
+            agent
+                .get("spawn_cwd")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(std::path::PathBuf::from)
+        })
+        .flatten();
+    let spawn_cwd = spawn_cwd_override
+        .or(pi_spawn_cwd.as_deref())
+        .unwrap_or(workspace);
+    let mut plan = if provider == crate::provider::Provider::Pi {
+        let request = crate::lifecycle::launch::pi_mcp::PiMaterializeRequest {
+            workspace,
+            team_id: team_id.as_deref().unwrap_or(""),
+            agent_id: agent_id.as_str(),
+            model: command_model,
+            effort: restart_effort,
+            system_prompt: &system_prompt,
+            team_mcp_tools: &["send_message", "report_result", "get_team_status"],
+            mcp_config: &mcp_config,
+            session_scope: crate::lifecycle::launch::pi_mcp::PiSessionScope::Isolated,
+        };
+        match resume_session_id {
+            Some(session_id) => {
+                let rollout_path = agent_rollout_path(agent).ok_or_else(|| {
+                    LifecycleError::RequirementUnmet(
+                        "Pi resume requires the persisted exact session path".to_string(),
+                    )
+                })?;
+                crate::lifecycle::launch::pi_mcp::materialize_pi_resume_plan(
+                    request,
+                    session_id,
+                    rollout_path.as_path(),
+                    spawn_cwd,
+                )
+            }
+            None => crate::lifecycle::launch::pi_mcp::materialize_pi_plan(request),
+        }
+        .map_err(|e| LifecycleError::Provider(e.to_string()))?
+    } else {
+        match (resume_session_id, fork_parent.as_ref()) {
+            (Some(session_id), _) => adapter.build_resume_command_plan(Some(session_id), context),
+            (None, Some(parent)) => adapter.fork_plan(Some(parent), context),
+            (None, None) => adapter.build_command_plan(context),
+        }
+        .map_err(|e| LifecycleError::Provider(e.to_string()))?
+    };
     if !plan.managed_mcp_config && !profile_launch.managed_mcp_config {
-        crate::lifecycle::launch::point_native_mcp_config_at_file(
-            &mut plan.argv,
-            provider,
-            &mcp_config_path,
-        );
+        if let Some(mcp_config_path) = mcp_config_path.as_ref() {
+            crate::lifecycle::launch::point_native_mcp_config_at_file(
+                &mut plan.argv,
+                provider,
+                mcp_config_path,
+            );
+        }
     }
     crate::lifecycle::launch::fill_spawn_placeholders_full(
         &mut plan.argv,
@@ -416,6 +470,20 @@ pub(super) fn spawn_agent_window(
     );
     crate::lifecycle::launch::apply_profile_launch_env(&mut env, &profile_launch);
     crate::lifecycle::launch::apply_mcp_auto_approval_env(&mut env, safety);
+    if resume_session_id.is_none()
+        && fork_parent.is_some()
+        && matches!(
+            provider,
+            crate::provider::Provider::Claude | crate::provider::Provider::ClaudeCode
+        )
+    {
+        // A fork keeps the whole parent history: a new seat never stops on
+        // Claude's stale-resume "summary or full session" modal.
+        env.insert(
+            "CLAUDE_CODE_RESUME_THRESHOLD_MINUTES".to_string(),
+            "1000000000".to_string(),
+        );
+    }
     if provider == crate::provider::Provider::Copilot {
         crate::lifecycle::launch::apply_copilot_instructions_overlay(
             workspace,
@@ -424,8 +492,12 @@ pub(super) fn spawn_agent_window(
             &mut env,
         )?;
     }
-    // Spawn cwd is override-or-workspace (E56: ignore drifted state
-    // `.team/runtime/<team_key>/`).
+    // Non-Pi spawn cwd is override-or-workspace (E56: ignore drifted state
+    // `.team/runtime/<team_key>/`). Pi resume uses captured agent.spawn_cwd
+    // already resolved above so exact-path header checks match capture.
+    // 0.4.x provider effort MVP step 9: scrub CLAUDE_EFFORT for Claude
+    // worker spawn so a parent shell env cannot silently override the
+    // framework's effort decision.
     let env_unset = crate::layout::worker_env::isolate_worker_spawn_env(
         provider,
         &mut env,
@@ -617,7 +689,7 @@ pub(super) fn spawn_agent_window(
         profile_launch,
         layout_placement: layout_placement.cloned(),
         spawn_cwd: spawn_cwd.to_path_buf(),
-        mcp_config_path: Some(mcp_config_path),
+        mcp_config_path,
         owner_team_id: team_id,
     })
 }
@@ -1270,11 +1342,11 @@ pub(crate) fn session_identity_probe_for_agent(
 }
 
 /// ---
-/// purpose: 共享会话身份判定（Pi fork 血统随遗留 Pi worker 运行时一并移除）
+/// purpose: 将合法 Pi fork 血统纳入共享会话身份判定
 /// params:
-///   workspace/state/agent: 保留调用形状
+///   workspace/state/agent: 当前被验证席位及同队来源记录
 ///   rollout_path: 当前席位的精确 backing
-/// returns: 字面身份判定结果
+/// returns: 字面身份一致，或经独立 Pi backing 与 fork 血统验证后合法继承时为 true
 /// ---
 pub(crate) fn session_identity_probe_for_agent_with_fork_ancestry(
     workspace: &Path,
@@ -1284,8 +1356,102 @@ pub(crate) fn session_identity_probe_for_agent_with_fork_ancestry(
     provider: Provider,
     rollout_path: Option<&RolloutPath>,
 ) -> SessionIdentityProbeResult {
-    let _ = (workspace, state, agent);
-    session_identity_probe_for_agent(agent_id, provider, rollout_path)
+    let mut probe = session_identity_probe_for_agent(agent_id, provider, rollout_path);
+    if probe.identity_ok != Some(false)
+        || !pi_fork_ancestor_identity_is_valid(
+            workspace,
+            state,
+            agent_id,
+            agent,
+            provider,
+            rollout_path,
+            probe.embedded_agent_id.as_deref(),
+        )
+    {
+        return probe;
+    }
+    probe.identity_ok = Some(true);
+    probe
+}
+
+fn pi_fork_ancestor_identity_is_valid(
+    workspace: &Path,
+    state: &serde_json::Value,
+    agent_id: &AgentId,
+    agent: &serde_json::Value,
+    provider: Provider,
+    rollout_path: Option<&RolloutPath>,
+    embedded_agent_id: Option<&str>,
+) -> bool {
+    if provider != Provider::Pi
+        || agent.get("attribution_ambiguous").and_then(serde_json::Value::as_bool) == Some(true)
+        || agent.get("capture_state").and_then(serde_json::Value::as_str)
+            == Some("attribution_ambiguous")
+        || !matches!(
+            agent
+                .get("attribution_confidence")
+                .and_then(serde_json::Value::as_str),
+            Some("high" | "medium")
+        )
+    {
+        return false;
+    }
+    let (Some(embedded_agent_id), Some(forked_from), Some(target_path)) = (
+        embedded_agent_id,
+        agent
+            .get("forked_from")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty()),
+        rollout_path.map(RolloutPath::as_path),
+    ) else {
+        return false;
+    };
+    if forked_from != embedded_agent_id || forked_from == agent_id.as_str() {
+        return false;
+    }
+    let Some(source_agent) = state
+        .get("agents")
+        .and_then(|agents| agents.get(forked_from))
+        .filter(|source| agent_provider(source) == Provider::Pi)
+    else {
+        return false;
+    };
+    let Some(source_path) = agent_rollout_path(source_agent) else {
+        return false;
+    };
+    if source_path.as_path() == target_path {
+        return false;
+    }
+    let (Some(session_id), Ok(target_path), Some(target_root)) = (
+        agent_session_id(agent),
+        std::fs::canonicalize(target_path),
+        agent
+            .get("claude_projects_root")
+            .and_then(serde_json::Value::as_str)
+            .filter(|path| !path.is_empty())
+            .map(std::path::PathBuf::from),
+    ) else {
+        return false;
+    };
+    let Ok(target_root) = std::fs::canonicalize(target_root) else {
+        return false;
+    };
+    if !target_path.starts_with(target_root)
+        || std::fs::canonicalize(source_path.as_path())
+            .is_ok_and(|source_path| source_path == target_path)
+        || !resume_backing_probe_for_agent(
+            workspace,
+            agent_id,
+            agent,
+            provider,
+            &session_id,
+            rollout_path,
+        )
+        .exists
+    {
+        return false;
+    }
+    true
 }
 
 /// ---
@@ -1314,20 +1480,44 @@ pub(super) fn resume_backing_probe_for_agent(
             let _ = (workspace, agent_id, agent, session_id, rollout_path);
             false
         }
+        Provider::Claude | Provider::ClaudeCode => {
+            let rollout_ok = rollout_path_exists(rollout_path);
+            let projects_root = claude_projects_root_for_agent(agent);
+            if let Some(root) = projects_root.as_ref() {
+                checked_paths.push(root.clone());
+            }
+            let event_log_path = workspace.join(".team/logs/events.jsonl");
+            checked_paths.push(event_log_path);
+            rollout_ok
+                || event_log_transcript_exists(workspace, agent_id.as_str(), session_id.as_str())
+                || projects_root.is_some_and(|root| {
+                    claude_project_transcript_exists_under(&root, session_id.as_str())
+                })
+        }
         Provider::Copilot => {
             if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
                 checked_paths.push(home.join(".copilot/session-store.db"));
             }
             copilot_session_store_has_session(session_id.as_str())
         }
-        // Claude Code, Codex, Grok and Pi workers run only through their contract leaves.
-        Provider::Claude
-        | Provider::ClaudeCode
-        | Provider::Codex
-        | Provider::Grok
-        | Provider::Pi
-        | Provider::GeminiCli
-        | Provider::Fake => false,
+        Provider::Pi => {
+            let spawn_cwd = agent
+                .get("spawn_cwd")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| workspace.to_path_buf());
+            rollout_path.is_some_and(|path| {
+                crate::provider::session_scan::pi::validate_exact_backing(
+                    path.as_path(),
+                    session_id,
+                    &spawn_cwd,
+                )
+                .is_ok()
+            })
+        }
+        // Codex and Grok workers run only through their contract leaves.
+        Provider::Codex | Provider::Grok | Provider::GeminiCli | Provider::Fake => false,
     };
 
     // Deduplicate while preserving order (HashSet would lose deterministic
@@ -1359,6 +1549,79 @@ pub(super) fn provider_wire_supports_resume(provider: &str) -> bool {
     parse_provider(provider)
         .map(provider_supports_resume)
         .unwrap_or(false)
+}
+
+fn rollout_path_exists(rollout_path: Option<&RolloutPath>) -> bool {
+    rollout_path
+        .as_ref()
+        .is_some_and(|path| path.as_path().exists())
+}
+
+fn event_log_transcript_exists(workspace: &Path, agent_id: &str, session_id: &str) -> bool {
+    let Ok(events) = crate::event_log::EventLog::new(workspace).tail(0) else {
+        return false;
+    };
+    events.iter().rev().any(|event| {
+        event.get("event").and_then(serde_json::Value::as_str) == Some("session.captured")
+            && ["agent_id", "worker_id"]
+                .iter()
+                .any(|key| event.get(*key).and_then(serde_json::Value::as_str) == Some(agent_id))
+            && event.get("session_id").and_then(serde_json::Value::as_str) == Some(session_id)
+            && event_transcript_path(event).is_some_and(|path| path.exists())
+    })
+}
+
+fn event_transcript_path(event: &serde_json::Value) -> Option<PathBuf> {
+    event
+        .get("rollout_path")
+        .or_else(|| event.get("transcript_path"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
+/// E36 fix-B: a real Claude worker writes its session transcript to
+/// `<claude_projects_root>/<workspace-slug>/<session_id>.jsonl` even when neither
+/// `rollout_path` was persisted to state nor a `session.captured` event was logged.
+/// That landed transcript is itself a valid resume backing — restart was wrongly
+/// refusing resumable workers because it only checked the two paths above. Scan the
+/// projects root recursively for `<session_id>.jsonl` (session_id is a unique UUID,
+/// so we avoid recomputing the project-dir slug, which is brittle for non-ASCII
+/// workspace paths).
+fn claude_project_transcript_exists(agent: &serde_json::Value, session_id: &str) -> bool {
+    let Some(root) = claude_projects_root_for_agent(agent) else {
+        return false;
+    };
+    claude_project_transcript_exists_under(&root, session_id)
+}
+
+fn claude_projects_root_for_agent(agent: &serde_json::Value) -> Option<PathBuf> {
+    agent
+        .get("claude_projects_root")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|home| PathBuf::from(home).join(".claude").join("projects"))
+        })
+}
+
+fn claude_project_transcript_exists_under(projects_root: &Path, session_id: &str) -> bool {
+    if session_id.is_empty() {
+        return false;
+    }
+    if !projects_root.is_dir() {
+        return false;
+    }
+    let transcript_name = format!("{session_id}.jsonl");
+    let Ok(project_dirs) = std::fs::read_dir(projects_root) else {
+        return false;
+    };
+    project_dirs
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .any(|entry| entry.path().join(&transcript_name).is_file())
 }
 
 fn copilot_session_store_has_session(session_id: &str) -> bool {
@@ -2048,5 +2311,48 @@ mod e36_transcript_backing_tests {
             serde_json::json!({"pending_agent_ids": ["worker"]}),
         )
         .is_err());
+    }
+
+    // E36 fix-B RED→GREEN: a real Claude worker that sent a message has its session
+    // transcript landed at <projects_root>/<slug>/<session_id>.jsonl, but neither
+    // rollout_path was persisted to state nor a session.captured event was logged.
+    // Before the fix, claude_project_transcript_exists did not exist and restart
+    // refused such a worker. This asserts the landed transcript is recognized.
+    #[test]
+    fn claude_project_transcript_is_recognized_without_rollout_or_capture_event() {
+        let scratch = ScratchDir::new("recognized");
+        let projects_root = scratch.path().join("projects");
+        let slug_dir = projects_root.join("-Users-alauda-Documents-code---rust---9");
+        std::fs::create_dir_all(&slug_dir).expect("mkdir slug");
+        let session_id = "87742d3f-0b4e-4fc1-ad35-447ac2340b65";
+        std::fs::write(slug_dir.join(format!("{session_id}.jsonl")), b"{}\n").expect("transcript");
+
+        let agent = serde_json::json!({
+            "claude_projects_root": projects_root.to_string_lossy(),
+        });
+        assert!(
+            claude_project_transcript_exists(&agent, session_id),
+            "landed claude transcript must count as resume backing (E36 fix-B)"
+        );
+    }
+
+    #[test]
+    fn missing_claude_transcript_is_not_backing() {
+        let scratch = ScratchDir::new("missing");
+        let projects_root = scratch.path().join("projects");
+        std::fs::create_dir_all(&projects_root).expect("mkdir");
+        let agent = serde_json::json!({
+            "claude_projects_root": projects_root.to_string_lossy(),
+        });
+        assert!(
+            !claude_project_transcript_exists(&agent, "deadbeef-0000-0000-0000-000000000000"),
+            "no transcript file => no backing"
+        );
+    }
+
+    #[test]
+    fn empty_session_id_is_not_backing() {
+        let agent = serde_json::json!({});
+        assert!(!claude_project_transcript_exists(&agent, ""));
     }
 }

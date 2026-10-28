@@ -1,6 +1,5 @@
-//! Claude Code contract leaf, canonical key `claude_tui`. It is the only
-//! Claude Code worker runtime: a role declaring `claude`, `claude_code` or
-//! `claude-code` selects it. The `team-agent claude` leader keeps its own path.
+//! Claude Code contract leaf, canonical key `claude_tui`. The legacy `claude`
+//! and `claude_code` worker, leader and fork paths keep their own runtime.
 //! Measured recipes do not themselves constitute Team G1–G5 acceptance.
 pub mod catalog;
 pub mod descriptor;

@@ -5,7 +5,7 @@
 //!     - name: candidate_session_files
 //!       what: 枚举候选文件(隔离根 + spawn_cwd 递归)，去重排序并按 mtime 截到 300 条
 //!     - name: parse_candidate_files
-//!       what: 逐个读头 64KB 解析成 CapturedSessionCandidate，途中套 cwd 匹配与 embedded 身份两道排除
+//!       what: 逐个读头 64KB 解析成 CapturedSessionCandidate，途中套 cwd 匹配、embedded 身份、claude cwd 字段与 leader marker 四道排除
 //!     - name: apply_spawned_at_filter
 //!       what: 剔除早于席位进程世代边界(spawned_at)的存档;spawned_at 存在但解析不了则清空候选
 //!     - name: apply_spawn_time_window_if_unique
@@ -29,10 +29,12 @@
 //!   requires:
 //!     - name: crate::provider::helpers
 //!       what: find_session_id 与 parse_jsonl_records
+//!     - name: super::claude
+//!       what: claude 家族的 projects 目录推导、cwd 字段判据与 leader marker 判据
 //! boundary:
 //!   - 一律只读:不写盘、不改 state、不发事件
 //!   - 只产出候选与事实;归属最终由上游分配器裁定，本文件不写会话
-//!   - spawn_cwd 递归最深 4 层，且跳过 .team 运行时目录
+//!   - spawn_cwd 递归最深 4 层，且跳过 .team 运行时目录(claude 的隔离根例外)
 //!   - 候选上限 300 条，超出按 mtime 由新到旧截断——截掉的部分不留痕迹
 //!   - "看起来像会话文件"的判据很宽(.json/.jsonl 后缀，或名字含 session/rollout/席位 id)，收窄靠后续 provider 专属过滤
 //! maturity: wired
@@ -62,7 +64,7 @@ pub(super) const CAPTURE_HEAD_BYTES: u64 = 65_536;
 /// ---
 /// purpose: 枚举本席位可能对应的会话文件，产出待解析的候选路径表
 /// params:
-///   _provider: 保留调用形状;不再有 provider HOME 目录分支
+///   provider: 决定要不要去 ~/.claude/projects 找
 ///   context: provider_projects_root(隔离根)、spawn_cwd(必扫)、agent_id(参与文件名匹配)
 /// returns: 去重并排序后的候选;requires_cwd_match=false 的排前面，同组按路径字典序
 /// errors: 只有 spawn_cwd 这一层根目录读不开才上抛 Io;隔离根读失败静默跳过
@@ -77,12 +79,14 @@ pub(super) const CAPTURE_HEAD_BYTES: u64 = 65_536;
 ///   - 任何 provider 都不走 HOME 分支——Copilot / Pi 各有专属扫描，退役的 legacy 席位不扫描
 /// ---
 pub(super) fn candidate_session_files(
-    _provider: Provider,
+    provider: Provider,
     context: &CaptureSessionContext,
 ) -> Result<Vec<SessionCandidate>, ProviderError> {
     let mut out = Vec::new();
     if let Some(root) = context.provider_projects_root.as_ref() {
-        collect_optional_candidate_files(root, &context.agent_id, None, &mut out)?;
+        let allowed_team_root =
+            matches!(provider, Provider::Claude | Provider::ClaudeCode).then_some(root.as_path());
+        collect_optional_candidate_files(root, &context.agent_id, allowed_team_root, &mut out)?;
     }
     collect_candidate_files(
         &context.spawn_cwd,
@@ -92,6 +96,27 @@ pub(super) fn candidate_session_files(
         None,
         &mut out,
     )?;
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        match provider {
+            Provider::Claude | Provider::ClaudeCode => {
+                if let Some(dir) = super::claude::projects_dir_for_cwd(&home, &context.spawn_cwd) {
+                    collect_optional_candidate_files(&dir, &context.agent_id, None, &mut out)?;
+                }
+                collect_optional_candidate_files(
+                    &home.join(".claude").join("projects"),
+                    &context.agent_id,
+                    None,
+                    &mut out,
+                )?;
+            }
+            Provider::Codex
+            | Provider::Copilot
+            | Provider::Grok
+            | Provider::Pi
+            | Provider::GeminiCli
+            | Provider::Fake => {}
+        }
+    }
     out.sort_by(|a, b| {
         a.requires_cwd_match
             .cmp(&b.requires_cwd_match)
@@ -105,7 +130,7 @@ pub(super) fn candidate_session_files(
 /// ---
 /// purpose: 把候选路径读头解析成结构化候选，并在解析途中就滤掉明显不属于本席位的
 /// params:
-///   _provider: 保留调用形状;不再有 provider 专属排除
+///   provider: 决定是否套用 claude 专属的两道排除
 ///   context: 提供 spawn_cwd 与 agent_id 两个比对基准
 ///   candidates: candidate_session_files 的产物
 /// returns: 通过全部排除的候选;每条带 embedded 身份、positive_agent_id_match 与 agent_path_match
@@ -114,12 +139,12 @@ pub(super) fn candidate_session_files(
 ///     - name: parse_candidate_files
 ///       what: 每个文件只读头 64KB，且只取到最后一个完整行
 /// boundary:
-///   - 三道排除:读不出头 / 解析不出记录 → 跳过;requires_cwd_match 的候选 cwd 对不上 → 跳过;embedded 身份存在且不等于本席位 → 跳过
+///   - 四道排除:读不出头 / 解析不出记录 → 跳过;requires_cwd_match 的候选 cwd 对不上 → 跳过;embedded 身份存在且不等于本席位 → 跳过;claude 家族有 session id 却无 cwd 字段、或含 leader marker → 跳过
 ///   - 无 session id 的候选不丢弃，降级为 FsMtimeFallback + Confidence::Low
 ///   - 身份判定用两套文本:正文 text 判 TEAM_AGENT_ID，未截行的原始字节判 embedded worker id
 /// ---
 pub(super) fn parse_candidate_files(
-    _provider: Provider,
+    provider: Provider,
     context: &CaptureSessionContext,
     candidates: Vec<SessionCandidate>,
 ) -> Vec<CapturedSessionCandidate> {
@@ -141,6 +166,12 @@ pub(super) fn parse_candidate_files(
             continue;
         }
         let session_id = records.iter().find_map(find_session_id);
+        if matches!(provider, Provider::Claude | Provider::ClaudeCode)
+            && session_id.is_some()
+            && !records.iter().any(super::claude::has_cwd_field)
+        {
+            continue;
+        }
         let captured_via = if session_id.is_some() {
             CaptureVia::FsWatch
         } else {
@@ -161,6 +192,11 @@ pub(super) fn parse_candidate_files(
         let positive_agent_id_match = candidate_text_has_team_agent_id(&text, context)
             || embedded_agent_id.as_deref() == Some(context.agent_id.as_str());
         let agent_path_match = candidate_path_matches_agent_id(&path, context);
+        if matches!(provider, Provider::Claude | Provider::ClaudeCode)
+            && super::claude::records_have_leader_marker(&records)
+        {
+            continue;
+        }
         out.push(CapturedSessionCandidate {
             captured: CapturedSession {
                 session_id: session_id.map(SessionId::new),

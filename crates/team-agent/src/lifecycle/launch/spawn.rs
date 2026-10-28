@@ -107,9 +107,8 @@ pub(super) fn spawn_agents(
             // persist_spawn_agent_state projects the actual K3 seat separately.
             continue;
         }
-        // A pre-upgrade Claude Code, Codex, Grok or Pi worker spec has no
-        // legacy runtime left; refuse before any MCP file, profile or pane
-        // side effect.
+        // A pre-upgrade Codex or Grok worker spec has no legacy runtime left;
+        // refuse before any MCP file, profile or pane side effect.
         if let Some(retired) = agent
             .get("provider")
             .and_then(Value::as_str)
@@ -152,12 +151,16 @@ pub(super) fn spawn_agents(
             .mcp_config(auth_mode)
             .map_err(|e| LifecycleError::Provider(e.to_string()))?;
         let mcp_config = resolve_mcp_config(mcp_config, workspace, agent_id_raw, &mcp_team_id);
-        let mcp_config_path = write_worker_mcp_config_for_provider(
-            workspace,
-            agent_id_raw,
-            &mcp_config,
-            Some(provider),
-        )?;
+        let mcp_config_path = if provider == Provider::Pi {
+            None
+        } else {
+            Some(write_worker_mcp_config_for_provider(
+                workspace,
+                agent_id_raw,
+                &mcp_config,
+                Some(provider),
+            )?)
+        };
         let profile_dir = team_dir.join("profiles");
         let profile_launch =
             crate::lifecycle::profile_launch::prepare_provider_profile_launch_with_profile_dir(
@@ -193,11 +196,30 @@ pub(super) fn spawn_agents(
             agent_id_hint: Some(agent_id_raw),
             effort: agent_effort,
         };
-        let mut plan = adapter
-            .build_command_plan(command_context)
-            .map_err(|e| LifecycleError::Provider(e.to_string()))?;
+        let mut plan = if provider == Provider::Pi {
+            crate::lifecycle::launch::pi_mcp::materialize_pi_plan(
+                crate::lifecycle::launch::pi_mcp::PiMaterializeRequest {
+                    workspace,
+                    team_id: &mcp_team_id,
+                    agent_id: agent_id_raw,
+                    model: command_model,
+                    effort: agent_effort,
+                    system_prompt: &system_prompt,
+                    team_mcp_tools: &["send_message", "report_result", "get_team_status"],
+                    mcp_config: &mcp_config,
+                    session_scope: crate::lifecycle::launch::pi_mcp::PiSessionScope::Isolated,
+                },
+            )
+            .map_err(|e| LifecycleError::Provider(e.to_string()))?
+        } else {
+            adapter
+                .build_command_plan(command_context)
+                .map_err(|e| LifecycleError::Provider(e.to_string()))?
+        };
         if !plan.managed_mcp_config && !profile_launch.managed_mcp_config {
-            point_native_mcp_config_at_file(&mut plan.argv, provider, &mcp_config_path);
+            if let Some(mcp_config_path) = mcp_config_path.as_ref() {
+                point_native_mcp_config_at_file(&mut plan.argv, provider, mcp_config_path);
+            }
         }
         // C-A-4 cr verdict v2 — Copilot BYOK(compatible_api)硬性校验:
         // "A model is required for BYOK"(help-providers 原文)。检查 agent

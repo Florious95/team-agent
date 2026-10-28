@@ -17,7 +17,8 @@ use std::path::Path;
 
 use team_agent::provider::{
     approval_choice_keys, awaiting_human_confirm_reason, choose_internal_mcp_approval_choice,
-    extract_approval_prompt, runtime_approval_decision, ApprovalKind, RuntimeApprovalDecision,
+    extract_approval_prompt, get_adapter, runtime_approval_decision, ApprovalKind, AuthMode,
+    Provider, RuntimeApprovalDecision, SessionId,
 };
 
 const TEAM_ORCHESTRATOR_MCP_TOOLS: [&str; 3] = [
@@ -25,6 +26,9 @@ const TEAM_ORCHESTRATOR_MCP_TOOLS: [&str; 3] = [
     "report_result",
     "get_team_status",
 ];
+const CLAUDE_DANGEROUS: &str = "--dangerously-skip-permissions";
+const CLAUDE_PERMISSION_MODE: &str = "--permission-mode";
+const CLAUDE_PERMISSION_DEFAULT: &str = "default";
 
 #[ignore = "red-by-design: pending contract, tracked in private backlog"]
 #[test]
@@ -230,6 +234,79 @@ fn command_approval_is_never_auto_approved_even_under_dangerous_policy() {
         runtime_approval_decision(&prompt, true),
         RuntimeApprovalDecision::AwaitingHumanConfirm,
         "C5: command approval must stay on the awaiting-human path under dangerous policy"
+    );
+}
+
+#[test]
+fn claude_argv_three_state_and_mutual_exclusion_cover_launch_resume_and_fork() {
+    let source_session = SessionId::new("11111111-2222-4333-8444-555555555555");
+    let mut failures = Vec::new();
+
+    for provider in [Provider::Claude, Provider::ClaudeCode] {
+        let adapter = get_adapter(provider);
+        let disabled_launch = adapter
+            .build_command_with_permissions(
+                AuthMode::Subscription,
+                None,
+                Some("Worker"),
+                Some("claude-sonnet-4-6"),
+                false,
+            )
+            .expect("disabled Claude launch argv");
+        failures.extend(claude_default_failures(
+            &disabled_launch,
+            &format!("{provider:?} disabled fresh launch"),
+        ));
+
+        let dangerous_launch = adapter
+            .build_command_with_permissions(
+                AuthMode::Subscription,
+                None,
+                Some("Worker"),
+                Some("claude-sonnet-4-6"),
+                true,
+            )
+            .expect("dangerous Claude launch argv");
+        failures.extend(claude_dangerous_failures(
+            &dangerous_launch,
+            &format!("{provider:?} runtime_config --yes fresh launch"),
+        ));
+
+        let dangerous_resume = adapter
+            .build_resume_command_with_context(
+                Some(&source_session),
+                AuthMode::Subscription,
+                None,
+                Some("Worker"),
+                Some("claude-sonnet-4-6"),
+                true,
+            )
+            .expect("dangerous Claude resume argv");
+        failures.extend(claude_dangerous_failures(
+            &dangerous_resume,
+            &format!("{provider:?} dangerous restart/resume"),
+        ));
+
+        let dangerous_fork = adapter
+            .fork_with_context(
+                Some(&source_session),
+                AuthMode::Subscription,
+                None,
+                Some("Worker"),
+                Some("claude-sonnet-4-6"),
+                true,
+            )
+            .expect("dangerous Claude fork argv");
+        failures.extend(claude_dangerous_failures(
+            &dangerous_fork,
+            &format!("{provider:?} dangerous fork"),
+        ));
+    }
+
+    assert!(
+        failures.is_empty(),
+        "C14-C16: Claude argv must mirror Codex approval parity across launch/restart/start-agent/add-agent/fork command construction:\n{}",
+        failures.join("\n")
     );
 }
 
@@ -581,6 +658,41 @@ fn source_section(source: &str, start: &str, end: &str) -> String {
     let tail = &source[start_idx..];
     let end_idx = tail.find(end).unwrap_or(tail.len());
     tail[..end_idx].to_string()
+}
+
+fn has_adjacent(argv: &[String], needle: &[&str]) -> bool {
+    argv.windows(needle.len())
+        .any(|window| window.iter().map(String::as_str).eq(needle.iter().copied()))
+}
+
+fn claude_dangerous_failures(argv: &[String], label: &str) -> Vec<String> {
+    let mut failures = Vec::new();
+    if !argv.iter().any(|arg| arg == CLAUDE_DANGEROUS) {
+        failures.push(format!(
+            "{label}: Claude dangerous worker argv must contain {CLAUDE_DANGEROUS}; argv={argv:?}"
+        ));
+    }
+    if has_adjacent(argv, &[CLAUDE_PERMISSION_MODE, CLAUDE_PERMISSION_DEFAULT]) {
+        failures.push(format!(
+            "{label}: Claude dangerous worker argv must not also contain --permission-mode default; argv={argv:?}"
+        ));
+    }
+    failures
+}
+
+fn claude_default_failures(argv: &[String], label: &str) -> Vec<String> {
+    let mut failures = Vec::new();
+    if argv.iter().any(|arg| arg == CLAUDE_DANGEROUS) {
+        failures.push(format!(
+            "{label}: bypass flag must only be emitted when dangerously_skip_permissions is true; argv={argv:?}"
+        ));
+    }
+    if !has_adjacent(argv, &[CLAUDE_PERMISSION_MODE, CLAUDE_PERMISSION_DEFAULT]) {
+        failures.push(format!(
+            "{label}: non-bypass Claude worker must use --permission-mode default; argv={argv:?}"
+        ));
+    }
+    failures
 }
 
 fn append_rs_sources(path: &Path, out: &mut String) {
