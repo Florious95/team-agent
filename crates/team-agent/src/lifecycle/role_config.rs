@@ -340,7 +340,7 @@ fn start_at_selected(
     }
 }
 
-// A file is an explicit configuration source, not a template to silently override.
+// Keep role-file values authoritative except for explicit CLI bypass intent.
 // Equal supplied values are omitted from the patch to preserve existing file bytes.
 fn reconcile_creation(
     text: &str,
@@ -383,21 +383,13 @@ fn reconcile_creation(
     }
     match meta.get("dangerously_skip_permissions") {
         Some(Value::Bool(value)) => {
-            if let Some(bypass) = next.bypass {
-                if bypass != *value {
-                    return Err(conflict("bypass"));
-                }
+            if next.bypass == Some(*value) {
                 next.bypass = None;
             }
         }
         Some(_) => {
             return Err(LifecycleError::Compile(
                 "role dangerously_skip_permissions must be a boolean".into(),
-            ))
-        }
-        None if next.bypass.is_none() => {
-            return Err(LifecycleError::RequirementUnmet(
-                "add-agent requires bypass in --role-file or --bypass <true|false>".into(),
             ))
         }
         None => {}
@@ -991,10 +983,6 @@ mod tests {
                 ..Default::default()
             },
             RoleConfigPatch {
-                bypass: Some(true),
-                ..Default::default()
-            },
-            RoleConfigPatch {
                 model: Some("other".into()),
                 ..Default::default()
             },
@@ -1040,6 +1028,43 @@ mod tests {
             let pi = RoleConfigPatch { provider: Some("pi".into()), ..Default::default() };
             assert!(reconcile_creation(&text, &pi).is_err(), "{file}");
         }
+    }
+
+    #[test]
+    fn explicit_bypass_overrides_role_file_in_both_directions() {
+        for &provider in crate::provider::wire::all_providers() {
+            let provider = crate::provider::wire::provider_wire(provider);
+            for declared in [true, false] {
+                let text = format!("---\nprovider: {provider}\ndangerously_skip_permissions: {declared}\n---\nbody");
+                let patch = RoleConfigPatch {
+                    bypass: Some(!declared),
+                    ..Default::default()
+                };
+                let reconciled = reconcile_creation(&text, &patch).unwrap();
+                let next = patched_role(&text, &AgentId::new("w"), &reconciled, false).unwrap();
+                assert_eq!(
+                    role_parts(&next).unwrap().0.get("dangerously_skip_permissions"),
+                    Some(&Value::Bool(!declared))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn omitted_bypass_preserves_native_default_and_invalid_boolean_is_rejected() {
+        let patch = RoleConfigPatch {
+            provider: Some("pi".into()),
+            ..Default::default()
+        };
+        assert_eq!(reconcile_creation("", &patch).unwrap().bypass, None);
+        assert_eq!(
+            reconcile_creation("---\nprovider: pi\n---\n", &RoleConfigPatch::default())
+                .unwrap().bypass,
+            None
+        );
+        assert!(reconcile_creation(
+            "---\nprovider: pi\ndangerously_skip_permissions: yes\n---\n", &patch
+        ).is_err());
     }
 
     #[test]

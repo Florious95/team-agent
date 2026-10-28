@@ -110,7 +110,7 @@ fn emit_cli_error_for_command(
     cwd: &Path,
     error: &CliError,
 ) -> ExitCode {
-    let missing_input = matches!(error, CliError::Usage(message) if message.starts_with("missing ") || message.starts_with("Provide ") || matches!(message.as_str(), "add-agent requires --provider <name>" | "add-agent requires --bypass <true|false>" | "--source is required unless --uninstall"));
+    let missing_input = matches!(error, CliError::Usage(message) if message.starts_with("missing ") || message.starts_with("Provide ") || matches!(message.as_str(), "add-agent requires --provider <name>" | "--source is required unless --uninstall"));
     if command_spec(command).is_some() && missing_input {
         let help = command_help(Some(command));
         let explanation = match error {
@@ -122,9 +122,6 @@ fn emit_cli_error_for_command(
                 "missing profile name" => "Provide an authentication/proxy profile name.".to_string(),
                 "add-agent requires --provider <name>" => {
                     "Select a provider with --provider, or supply a role file with --role-file.".to_string()
-                }
-                "add-agent requires --bypass <true|false>" => {
-                    "Explicitly retain permission prompts with --bypass false, or declare bypass in the role file.".to_string()
                 }
                 other => other
                     .strip_prefix("missing ")
@@ -1715,11 +1712,6 @@ fn role_agent_args(
                 "add-agent requires --provider <name>".into(),
             ));
         }
-        if role.bypass.is_none() {
-            return Err(CliError::Usage(
-                "add-agent requires --bypass <true|false>".into(),
-            ));
-        }
     }
     if parsed.positionals.len() != 1 {
         return Err(CliError::Usage(
@@ -1742,10 +1734,9 @@ mod role_cli_tests {
     }
 
     #[test]
-    fn add_requires_decisions_without_a_template_but_accepts_file_input() {
+    fn add_requires_provider_without_a_template_but_accepts_file_input() {
         for args in [
             vec!["w"],
-            vec!["w", "--provider", "pi"],
             vec!["w", "--bypass", "false"],
         ] {
             assert!(role_agent_args(&strings(&args), true).is_err());
@@ -1787,6 +1778,23 @@ mod role_cli_tests {
             assert_eq!(patch.provider.as_deref(), Some(leaf), "{name}");
         }
         assert!(role_agent_args(&strings(&["w", "--provider", "Cursor", "--bypass", "true"]), true).is_err());
+    }
+
+    #[test]
+    fn add_accepts_bypass_true_false_or_omission_for_every_provider() {
+        for &provider in crate::provider::wire::all_providers() {
+            let provider = crate::provider::wire::provider_wire(provider);
+            let (_, patch) = role_agent_args(&strings(&["w", "--provider", provider]), true).unwrap();
+            assert_eq!(patch.bypass, None);
+            for bypass in ["true", "false"] {
+                let (_, patch) = role_agent_args(
+                    &strings(&["w", "--provider", provider, "--bypass", bypass]),
+                    true,
+                )
+                .unwrap();
+                assert_eq!(patch.bypass, Some(bypass == "true"));
+            }
+        }
     }
 
     #[test]

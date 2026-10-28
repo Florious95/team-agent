@@ -65,7 +65,7 @@ pub static KIRO_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     bypass: BypassFacet {
         intent: Support::Supported(BypassPolicy {
             enabled_arguments: &["--trust-all-tools"],
-            requires_startup_consent: true,
+            requires_startup_consent: false,
         }),
     },
     prompt: PromptFacet {
@@ -183,10 +183,10 @@ impl PlanHook for KiroAdapter {
             return Err(ContractError::UnknownProvider);
         }
         if request.evidence_kind == EvidenceKind::Native
-            && (!interaction::PROFILES[0].matches_native(&request.native) || request.bypass)
+            && !interaction::PROFILES[0].matches_native(&request.native)
         {
             return Err(ContractError::Unverified {
-                field: "Kiro native identity or startup consent",
+                field: "Kiro native identity",
                 reason: NATIVE_UNVERIFIED,
             });
         }
@@ -214,7 +214,7 @@ impl PlanHook for KiroAdapter {
             "tools":["@builtin","@team/send_message","@team/report_result","@team/get_team_status"],
             // Only the three scoped collaboration tools request unattended use.
             // Built-in shell/files stay under native approval unless the caller
-            // explicitly requested a separately admitted bypass policy.
+            // explicitly requested bypass.
             "allowedTools":["@team/send_message","@team/report_result","@team/get_team_status"],
             "includeMcpJson":false,"includePowers":false,
             "mcpServers":{"team":{"command":self.mcp.executable.to_str().ok_or(ContractError::Invalid("MCP path utf8"))?,"args":self.mcp.arguments,"env":self.mcp.environment}}
@@ -258,7 +258,7 @@ impl PlanHook for KiroAdapter {
             arguments.push("--resume-id".into());
             arguments.push(binding.native_session.as_str().into());
         }
-        // No positional INPUT, blanket trust, HOME/XDG override, global settings,
+        // No positional INPUT, implicit blanket trust, HOME/XDG override, global settings,
         // --resume/picker, catalog substitution, first-message newline or key loop.
         let environment = EnvironmentDelta {
             remove: BTreeSet::from(["KIRO_CHAT_UI".into()]),

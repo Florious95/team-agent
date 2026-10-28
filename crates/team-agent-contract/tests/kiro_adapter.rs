@@ -28,10 +28,7 @@ fn fixture_descriptor() -> ProviderDescriptor {
     d.mcp.scope = ResourceScope::WorkingDirectory;
     d.effort.admission = [const { EffortAdmission::Pass }; 6];
     d.effort.carrier = Support::Supported(ValueCarrier::Flag("--effort"));
-    d.bypass.intent = Support::Supported(BypassPolicy {
-        enabled_arguments: &["--trust-all-tools"],
-        requires_startup_consent: false,
-    });
+    d.bypass = KIRO_DESCRIPTOR.bypass.clone();
     d
 }
 fn fixture_request() -> LaunchRequest {
@@ -68,6 +65,20 @@ fn fixture_resolution(mut r: LaunchRequest) -> Result<ResolvedLaunch, ContractEr
     d.input.profiles = Support::Supported(profiles);
     r.mode = LaunchMode::FullWorker;
     resolve_launch(&d, &hooks(), &r, None)
+}
+
+#[test]
+fn kiro_explicit_bypass_uses_native_flag_without_extra_consent() {
+    let policy = KIRO_DESCRIPTOR.bypass.intent.require("bypass").unwrap();
+    assert_eq!(policy.enabled_arguments, &["--trust-all-tools"]);
+    assert!(!policy.requires_startup_consent);
+    for bypass in [true, false] {
+        let mut request = fixture_request();
+        request.bypass = bypass;
+        let plan = adapter().plan(&fixture_resolved(request)).unwrap();
+        assert_eq!(plan.arguments.iter().any(|arg| arg == "--trust-all-tools"), bypass);
+        assert_eq!(matches!(plan.carriers.bypass, CarrierUse::Specified(CarrierRef::Arguments(_))), bypass);
+    }
 }
 
 #[test]
@@ -301,8 +312,9 @@ fn malformed_version_or_unknown_harness_or_ui_is_not_a_default_fallback() {
 #[test]
 fn runtime_bound_native_plan_fixture_accepts_new_releases_but_fences_catalog_identity() {
     // Controlled planning only: these are not live probes of these releases.
-    for version in ["2.28.0", "2.29.0", "3.0.0"] {
+    for (version, bypass) in ["2.28.0", "2.29.0", "3.0.0"].into_iter().flat_map(|version| [false, true].map(|bypass| (version, bypass))) {
         let mut request = fixture_request();
+        request.bypass = bypass;
         request.native.version = version.into();
         request.native.platform = Platform::MacOs;
         request.native.executable_sha256 = team_agent_contract::host::digest(version.as_bytes());
@@ -323,6 +335,7 @@ fn runtime_bound_native_plan_fixture_accepts_new_releases_but_fences_catalog_ide
         let resolved = resolve_launch(&KIRO_DESCRIPTOR, &hooks, &request, Some(&catalog)).unwrap();
         let plan = adapter.plan(&resolved).unwrap();
         validate_launch_plan(&KIRO_DESCRIPTOR, &resolved, &plan).unwrap();
+        assert_eq!(plan.arguments.iter().any(|arg| arg == "--trust-all-tools"), bypass);
         assert_eq!(resolved.request().native, request.native);
         catalog.native.executable_sha256 = Digest([99; 32]);
         assert!(matches!(

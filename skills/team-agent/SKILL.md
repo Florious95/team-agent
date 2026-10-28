@@ -13,7 +13,7 @@ Check `team-agent --version`, `team-agent start --help` and `team-agent team --h
 
 ## User decisions come first
 
-**The user decides each worker's provider and permission bypass. Do not silently choose Pi, true, or false.** Reuse an explicit user policy when it covers the worker; otherwise explain the choices and ask before starting.
+**Honor the user's provider and permission-bypass choices.** Reuse an explicit user policy when it covers the worker. Omitted bypass retains the role or native default; it does not require another permission decision. Pi has no built-in tool approval gate, so `--bypass true` is accepted without inventing a native flag.
 
 Use existing resources rather than establishing accounts. `team-agent doctor --workspace . --json` reports discovered tools; installed is not authenticated, and an unknown probe is not proof of unavailability. Use `team-agent models --provider NAME` where supported for exact model IDs. Do not inspect credentials, automatically log in, or silently substitute providers.
 

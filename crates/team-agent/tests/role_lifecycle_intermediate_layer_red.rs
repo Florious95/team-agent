@@ -222,7 +222,6 @@ fn add_required_values_cli_generation_and_file_completion() {
     fs::write(&no_bypass, "---\nname: no-bypass\nrole: Missing bypass\nprovider: copilot\n---\nPrompt.\n").unwrap();
     for (id, source, flags) in [
         ("no-provider", no_provider, vec!["--role-file", "", "--bypass", "false", "--prompt", "prompt"]),
-        ("no-bypass", no_bypass, vec!["--role-file", "", "--provider", "copilot", "--prompt", "prompt"]),
     ] {
         let mut flags = flags;
         flags[1] = source.to_str().unwrap();
@@ -230,6 +229,9 @@ fn add_required_values_cli_generation_and_file_completion() {
         let r = run(&ws, &shims, &cli(&ws, "add-agent", id, &flags)); reject(&r, "missing required add-agent field");
         assert_eq!(snapshot(&ws, &shims, id), before); assert!(!role_path(&ws, id).exists());
     }
+    let native_default = run(&ws, &shims, &cli(&ws, "add-agent", "no-bypass", &["--role-file", no_bypass.to_str().unwrap(), "--model", "gpt-5.6-luna"]));
+    assert!(native_default.is_success(), "omitted bypass: {} {}", native_default.stdout, native_default.stderr);
+    assert_config(&ws, "no-bypass", "copilot", "gpt-5.6-luna", None, false);
     let generated = run(&ws, &shims, &cli(&ws, "add-agent", "generated", &["--provider", "copilot", "--bypass", "false", "--model", "gpt-5.6-luna", "--effort", "high", "--prompt", "CLI prompt.", "--no-display"]));
     assert!(generated.is_success(), "CLI-only add: {} {}", generated.stdout, generated.stderr);
     assert!(fs::read_to_string(role_path(&ws, "generated")).unwrap().contains("CLI prompt."));
@@ -300,7 +302,7 @@ fn add_file_cli_arbitration_accepts_equal_and_rejects_conflicting_values_atomica
         ("same", vec!["--provider", "copilot", "--model", "gpt-5.6-luna", "--effort", "high", "--bypass", "false", "--prompt", "Body."], true),
         ("same-prompt-trim", vec!["--prompt", " \tBody.\n "], true),
         ("conf-provider", vec!["--provider", "fake"], false),
-        ("conf-bypass", vec!["--bypass", "true"], false),
+        ("override-bypass", vec!["--bypass", "true"], true),
         ("conf-model", vec!["--model", "openai-codex/gpt-6-luna"], false),
         ("conf-effort", vec!["--effort", "xhigh"], false),
         ("conf-prompt", vec!["--prompt", "Different body."], false),
@@ -310,7 +312,13 @@ fn add_file_cli_arbitration_accepts_equal_and_rejects_conflicting_values_atomica
         fs::write(&source, &source_bytes).unwrap();
         let mut flags = vec!["--role-file", source.to_str().unwrap()]; flags.extend(fields);
         let before = snapshot(&ws, &shims, id); let r = run(&ws, &shims, &cli(&ws, "add-agent", id, &flags));
-        if should_pass { assert!(r.is_success(), "equal values: {} {}", r.stdout, r.stderr); assert_eq!(fs::read(&source).unwrap(), source_bytes.as_bytes()); }
+        if should_pass {
+            assert!(r.is_success(), "accepted values: {} {}", r.stdout, r.stderr);
+            assert_eq!(fs::read(&source).unwrap(), source_bytes.as_bytes());
+            if id == "override-bypass" {
+                assert_config(&ws, id, "copilot", "gpt-5.6-luna", Some("high"), true);
+            }
+        }
         else { reject(&r, "file/CLI conflict"); assert_eq!(snapshot(&ws, &shims, id), before); assert!(!role_path(&ws, id).exists()); assert_eq!(fs::read(&source).unwrap(), source_bytes.as_bytes()); }
     }
     let source = ws.path().join("file-only.md"); fs::write(&source, role("file-only", "copilot", "gpt-5.6-luna", None, false, "File only.")).unwrap();
