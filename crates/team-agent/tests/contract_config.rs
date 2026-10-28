@@ -431,7 +431,7 @@ fn malformed_or_misdirected_codex_opt_in_fails_closed() {
     for (provider, extra, field) in [
         ("codex", "contract_runtime: \"yes\"\n", "contract_runtime"),
         ("codex", "contract_runtime: 1\n", "contract_runtime"),
-        ("claude", "contract_runtime: true\n", "provider"),
+        ("pi", "contract_runtime: true\n", "provider"),
         ("Codex", "contract_runtime: true\n", "provider"),
     ] {
         std::fs::write(args.agents_dir.join("agents/worker.md"), format!(
@@ -459,67 +459,5 @@ fn legacy_role_named_leader_cannot_shadow_the_framework_route_of_a_contract_team
         read_team(&args),
         Err(ConfigError::Invalid { field: "reserved worker id", .. })
     ));
-    assert!(!args.workspace.join(".team").exists());
-}
-
-fn pi_role(args: &QuickStartArgs, name: &str, extra: &str) {
-    std::fs::write(args.agents_dir.join("agents").join(format!("{name}.md")), format!(
-        "---\nprovider: pi\nmodel: openai-codex/gpt-6-luna\n{extra}---\nPi role body\n"
-    )).unwrap();
-}
-
-#[test]
-fn bare_pi_stays_legacy_and_only_an_exact_opt_in_selects_the_contract_leaf() {
-    use team_agent::model::yaml::Value;
-    let (_sandbox, args) = fixture();
-    pi_role(&args, "legacy-worker", "");
-    pi_role(&args, "opted-out", "contract_runtime: false\n");
-    // Pi is the default provider and the leader: bare roles never move.
-    assert!(read_team(&args).unwrap().is_none());
-    pi_role(&args, "native-worker", "contract_runtime: true\neffort: high\n");
-    // An omitted provider is the default `pi` and opts in the same way.
-    std::fs::write(args.agents_dir.join("agents/default-worker.md"),
-        "---\nmodel: openai-codex/gpt-6-luna\ncontract_runtime: true\n---\nDefault body\n").unwrap();
-    let config = read_team(&args).unwrap().unwrap();
-    let mut roles: Vec<_> = config.roles.iter().map(|role| (role.id.as_str(), role.provider.as_str())).collect();
-    roles.sort();
-    assert_eq!(roles, [("default-worker", "pi_tui"), ("native-worker", "pi_tui")]);
-    let mut routes: Vec<_> = config.members.iter().map(|member| (member.id.as_str(), member.provider.as_str(), member.runtime)).collect();
-    routes.sort_by_key(|route| route.0);
-    assert_eq!(routes, [
-        ("default-worker", "pi_tui", RuntimeFamily::Contract),
-        ("legacy-worker", "pi", RuntimeFamily::Legacy),
-        ("native-worker", "pi_tui", RuntimeFamily::Contract),
-        ("opted-out", "pi", RuntimeFamily::Legacy),
-    ]);
-    // The compiled spec carries the leaf's distinct canonical id; legacy rows keep `pi`.
-    let spec = team_agent::compiler::compile_team(&args.agents_dir).unwrap();
-    let agents = spec.get("agents").and_then(Value::as_list).unwrap();
-    let mut providers: Vec<_> = agents.iter()
-        .map(|agent| (agent.get("id").and_then(Value::as_str).unwrap(), agent.get("provider").and_then(Value::as_str).unwrap()))
-        .collect();
-    providers.sort();
-    assert_eq!(providers, [("default-worker", "pi_tui"), ("legacy-worker", "pi"), ("native-worker", "pi_tui"), ("opted-out", "pi")]);
-    let native = agents.iter().find(|agent| agent.get("id").and_then(Value::as_str) == Some("native-worker")).unwrap();
-    assert_eq!(native.get("effort").and_then(Value::as_str), Some("high"));
-    let native = args.agents_dir.join("agents/native-worker.md");
-    let legacy = args.agents_dir.join("agents/legacy-worker.md");
-    assert!(team_agent::contract_runtime::framework::require_legacy_role(Some(&native), None).is_err());
-    assert!(team_agent::contract_runtime::framework::require_legacy_role(Some(&legacy), None).is_ok());
-    assert!(team_agent::contract_runtime::framework::require_legacy_role(None, Some("pi")).is_ok());
-    assert!(team_agent::contract_runtime::framework::require_legacy_role(None, Some("pi_tui")).is_err());
-    assert!(!args.workspace.join(".team").exists());
-}
-
-#[test]
-fn pi_opt_in_refuses_effort_levels_pi_could_silently_clamp() {
-    let (_sandbox, args) = fixture();
-    for effort in ["xhigh", "max", "ultra"] {
-        pi_role(&args, "worker", &format!("contract_runtime: true\neffort: {effort}\n"));
-        let error = team_agent::compiler::compile_team(&args.agents_dir).unwrap_err().to_string();
-        assert!(error.contains("Pi"), "{effort}: {error}");
-    }
-    pi_role(&args, "worker", "contract_runtime: true\neffort: medium\n");
-    assert!(team_agent::compiler::compile_team(&args.agents_dir).is_ok());
     assert!(!args.workspace.join(".team").exists());
 }
