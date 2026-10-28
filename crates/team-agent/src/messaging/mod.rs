@@ -72,6 +72,7 @@ pub mod persist;
 pub mod presentation;
 pub mod results;
 pub mod scheduler;
+pub(crate) mod reminders;
 pub mod selftest;
 pub mod send;
 pub mod trust;

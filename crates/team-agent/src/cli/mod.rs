@@ -73,6 +73,7 @@ pub mod profile;
 pub(crate) mod leader_prompt;
 pub(crate) mod route;
 pub mod send;
+mod schedule;
 pub(crate) mod spec;
 pub mod status;
 pub(crate) mod triage;
