@@ -540,7 +540,7 @@ fn send_args_fixture() -> SendArgs {
         confirm_human: false,
         json: false,
         message_id: None,
-        presentation: crate::messaging::presentation::PresentationRequest::default(),
+        presentation: crate::messaging::presentation::PresentationRequest { sink: crate::messaging::presentation::PresentationSink::Silent, ..Default::default() },
         pane: None,
         to_name: None,
         to_leader: None,
@@ -625,194 +625,68 @@ fn send_options_default_flags_are_acked_and_waited() {
 
 #[test]
 fn cmd_send_joins_message_with_single_space() {
-    // golden (commands.py:169): " ".join(["hello","world","foo"]) == "hello world foo".
-    // Drive cmd_send; the joined content must reach send_message (RED until ported).
-    let args = SendArgs {
-        json: true,
-        ..send_args_fixture()
-    };
-    let r = cmd_send(&args).expect("cmd_send returns CmdResult");
-    // The delegate's DeliveryOutcome -> Json must carry an `ok` key feeding exit-code.
-    match r.output {
-        CmdOutput::Json(ref v) => {
-            assert!(v.get("ok").is_some(), "send result Json must carry `ok`");
-            if v.get("ok").and_then(|ok| ok.as_bool()) == Some(true) {
-                let delivered = v.get("delivered").and_then(|x| x.as_bool()) == Some(true);
-                // hermetic tier 假设：此 fixture 无法产生真实 tmux Delivered。
-                // 若 delivered=true 命中说明 tier 前提变了（例如 seed 开了 Delivered 通路），
-                // 应立即失败以强制重新审视，而不是悄悄跑一条从未验过的分支。
-                assert!(
-                    !delivered,
-                    "hermetic seed must not produce delivered=true; the fixture assumption changed"
-                );
-                assert_eq!(
-                    v.get("reminder").and_then(|reminder| reminder.as_str()),
-                    Some("Task accepted, but delivery is unconfirmed. Check team-agent status/doctor; wait for an actual reply without repeated sends.")
-                );
-            }
-        }
-        other => panic!("cmd_send must emit Json DeliveryOutcome, got {other:?}"),
-    }
+    let args = send_args_fixture();
+    let result = cmd_send(&args).expect("mailbox append");
+    assert_eq!(result.exit, ExitCode::Ok);
+    let inbox = crate::inbox_store::read(&args.workspace, "alice", 3, None).unwrap();
+    assert_eq!(inbox["messages"][0]["content"], "hello world foo");
+    assert_eq!(inbox["messages"][0]["sender"], "leader");
+    let conn = rusqlite::Connection::open(args.workspace.join(".team/runtime/team.db")).unwrap();
+    let count: i64 = conn.query_row("SELECT count(*) FROM messages", [], |row| row.get(0)).unwrap();
+    assert_eq!(count, 0, "public send must not enter the coordinator queue");
 }
 
 #[test]
-fn cmd_send_default_human_output_is_brief_without_false_delivered() {
-    let r = cmd_send(&queued_send_args_fixture(false)).expect("cmd_send returns CmdResult");
-    assert!(!r.as_json);
-    let text = emit(&r.output, r.as_json).expect("send should render human text");
-    let lines: Vec<_> = text.lines().collect();
-    assert_eq!(
-        lines.len(),
-        2,
-        "send must separate outcome and next action: {text}"
-    );
-    assert!(
-        lines[0].contains("Task accepted") && lines[0].contains("delivery to the agent's conversation is still pending"),
-        "queued send must report its true pending outcome: {text}"
-    );
-    assert!(
-        lines[1].contains("Next:")
-            && lines[1].contains("team-agent status")
-            && lines[1].contains("doctor")
-            && lines[1].contains("wait for an actual reply")
-            && lines[1].contains("without repeated sends"),
-        "queued send must give honest next steps: {text}"
-    );
-    assert!(
-        !text.contains("delivered"),
-        "queued send output must not claim or mention delivered; got {text}"
-    );
-    for hidden in [
-        "agent_id:",
-        "sender:",
-        "message_status:",
-        "verification:",
-        "stage:",
-        "reason:",
-        "channel:",
-        "reminder:",
-    ] {
-        // 字段级匹配，⛔ 不用裸 contains：人类输出以 " " 连接 `"{key}: {value}"`
-        // （send/presentation.rs 的 `parts.join(" ")` / `send_human_field`），
-        // 所以一个字段只可能出现在行首或某个空格之后。裸子串会让
-        // `turn_verification:` 误命中名单里的 `verification:`（该键由 ab2134c0
-        // 有意加进人类输出名单）——那是判据误伤，不是产品缺陷。
-        let present = text.starts_with(hidden) || text.contains(&format!(" {hidden}"));
-        assert!(
-            !present,
-            "default send output should hide {hidden} unless needed; got {text}"
-        );
-    }
+fn cmd_send_mailbox_output_names_storage_without_claiming_delivery() {
+    let args = queued_send_args_fixture(false);
+    let result = cmd_send(&args).expect("mailbox append without a live pane");
+    let text = emit(&result.output, result.as_json).unwrap();
+    assert!(text.contains("stored") && text.contains("w1"), "{text}");
+    assert!(!text.contains("Delivered") && !text.contains("parked") && !text.contains("still pending"), "{text}");
 }
 
 #[test]
 #[cfg(unix)]
-fn issue372_queued_send_names_the_mcp_handshake_it_waits_on() {
-    let r = cmd_send(&queued_send_args_fixture(true)).expect("cmd_send returns CmdResult");
-    let CmdOutput::Json(v) = r.output else {
-        panic!("--json send must emit Json");
-    };
-    assert_eq!(v["deferred_reason"], json!("mcp_handshake_config_missing"), "{v}");
-    let r = cmd_send(&queued_send_args_fixture(false)).expect("cmd_send returns CmdResult");
-    let text = emit(&r.output, r.as_json).expect("send should render human text");
-    assert!(
-        text.contains("w1's MCP server has not completed its handshake (mcp_handshake_config_missing)")
-            && text.contains("after 5 minutes the message is parked"),
-        "{text}"
-    );
-}
-
-#[test]
-fn cmd_send_json_shape_keeps_056_fields() {
+fn issue372_send_never_reports_a_handshake_parking_gate() {
     let args = queued_send_args_fixture(true);
-    let r = cmd_send(&args).expect("cmd_send returns CmdResult");
-    let v = match r.output {
-        CmdOutput::Json(v) => v,
-        other => panic!("--json send must emit Json, got {other:?}"),
-    };
-    let obj = v.as_object().expect("--json send output must be object");
-    for key in [
-        "ok",
-        "status",
-        "delivery_status",
-        "delivered",
-        "target",
-        "agent_id",
-        "content_length_bytes",
-        "sender",
-        "message_id",
-        "message_status",
-        "verification",
-        "stage",
-        "reason",
-        "channel",
-        "reminder",
-    ] {
-        assert!(obj.contains_key(key), "--json send shape lost {key}: {v}");
-    }
-    assert_eq!(v.get("verification"), Some(&serde_json::Value::Null));
-    assert_eq!(v.get("stage"), Some(&serde_json::Value::Null));
-    assert_eq!(v.get("reason"), Some(&serde_json::Value::Null));
-    assert_eq!(v.get("channel"), Some(&serde_json::Value::Null));
-    assert_eq!(v.get("delivered").and_then(|d| d.as_bool()), Some(false));
-    assert!(
-        !v.get("reminder")
-            .and_then(|reminder| reminder.as_str())
-            .unwrap_or_default()
-            .contains("Message delivered."),
-        "queued JSON reminder must not contradict delivered:false: {v}"
-    );
+    let result = cmd_send(&args).unwrap();
+    let CmdOutput::Json(value) = result.output else { panic!("JSON result expected") };
+    assert_eq!(value["status"], "stored");
+    assert!(value.get("deferred_reason").is_none());
+    let direct = SendArgs { presentation: crate::messaging::presentation::PresentationRequest::default(), ..args };
+    let error = cmd_send(&direct).expect_err("a missing physical endpoint fails immediately").to_string();
+    assert!(!error.contains("mcp_handshake") && !error.contains("parked"), "{error}");
 }
 
 #[test]
-fn cmd_send_watch_result_does_not_register_before_delivery() {
-    // 0.5.x send contract: --watch-result may only advertise a watcher after
-    // initial worker delivery is physically proven.
-    let args = SendArgs {
-        json: true,
-        ..send_args_fixture()
-    };
-    let r = cmd_send(&args).expect("cmd_send returns CmdResult");
-    let v = match r.output {
-        CmdOutput::Json(v) => v,
-        other => panic!("expected Json, got {other:?}"),
-    };
-    assert!(
-        v.get("delivery_status").and_then(|s| s.as_str()).is_some(),
-        "send output must expose delivery_status; got {v}"
-    );
-    assert_eq!(
-        v.get("delivered").and_then(|s| s.as_bool()),
-        Some(false),
-        "undelivered send outcome must not look delivered"
-    );
-    assert!(
-        !v.as_object().unwrap().contains_key("watch"),
-        "watch_result:true must not attach result['watch'] before delivery; got {v}"
-    );
+fn cmd_send_json_shape_describes_the_decoupled_operation() {
+    let args = queued_send_args_fixture(true);
+    let result = cmd_send(&args).unwrap();
+    let CmdOutput::Json(value) = result.output else { panic!("JSON result expected") };
+    assert_eq!(value, json!({"status": "stored", "recipient": "w1", "mailbox": true}));
+    for key in ["delivery_attempts", "message_status", "verification", "watch", "deferred_reason"] {
+        assert!(value.get(key).is_none(), "no coordinator delivery fiction: {value}");
+    }
 }
 
 #[test]
-fn cmd_send_failed_outcome_yields_error_exit() {
-    // DeliveryOutcome ok=false (e.g. refused) -> from_json -> ExitCode::Error (parser.py:507).
-    // A failed send to a target must propagate non-zero exit reporting through CmdResult.
-    let args = SendArgs {
-        target: Some("drifted".into()),
-        no_ack: false,
-        no_wait: false,
-        watch_result: false,
-        ..send_args_fixture()
-    };
-    let r = cmd_send(&args).expect("cmd_send returns CmdResult even on delivery failure");
-    if let CmdOutput::Json(ref v) = r.output {
-        if v.get("ok").and_then(|b| b.as_bool()) == Some(false) {
-            assert_eq!(
-                r.exit,
-                ExitCode::Error,
-                "ok:false DeliveryOutcome MUST derive ExitCode::Error (non-zero exit)"
-            );
-        }
-    }
+fn cmd_send_legacy_watch_flag_does_not_create_a_watcher_or_delivery_row() {
+    let args = SendArgs { json: true, ..send_args_fixture() };
+    let db = args.workspace.join(".team/runtime/team.db");
+    let before = std::fs::read(&db).unwrap();
+    let result = cmd_send(&args).unwrap();
+    let CmdOutput::Json(value) = result.output else { panic!("JSON result expected") };
+    assert_eq!(value["status"], "stored");
+    assert!(value.get("watch").is_none());
+    assert_eq!(std::fs::read(db).unwrap(), before, "send must not mutate the coordinator database");
+}
+
+#[test]
+fn cmd_send_unknown_recipient_is_an_immediate_error_without_queueing() {
+    let args = SendArgs { target: Some("absent-worker".into()), ..send_args_fixture() };
+    let error = cmd_send(&args).expect_err("no recipient means no claimed delivery");
+    assert!(error.to_string().contains("unknown recipient"), "{error}");
+    assert!(crate::inbox_store::read(&args.workspace, "absent-worker", 3, None).unwrap()["messages"].as_array().unwrap().is_empty());
 }
 
 #[test]
@@ -922,109 +796,26 @@ fn status_compact_omits_coordinator_entirely() {
 //   gate, so agents/tasks must live under `teams[<key>].*` to be visible at projection
 //   time. The "unknown task -> golden envelope" behavior being asserted is unchanged.
 #[test]
-fn cmd_send_unknown_task_surfaces_golden_error_envelope_not_silent() {
-    let ws = std::env::temp_dir().join(format!(
-        "ta-cli-sendunk-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(ws.join(".team").join("runtime")).unwrap();
-    std::fs::write(
-        ws.join(".team").join("runtime").join("state.json"),
-        serde_json::to_vec_pretty(&json!({
-            "session_name": "team-x",
-            "active_team_key": "current",
-            "teams": {"current": {
-                "session_name": "team-x",
-                "agents": { "w1": { "status": "running" } },
-                "tasks": []
-            }}
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    let _ = crate::message_store::MessageStore::open(&ws);
-    let args = SendArgs {
-        target: Some("w1".into()),
-        targets: None,
-        task: Some("t-unknown".into()),
-        message: vec!["go".into()],
-        workspace: ws.clone(),
-        team: None,
-        watch_result: false,
-        json: true,
-        ..send_args_fixture()
-    };
-    // route_task_id defaults true (CLI routing path) → the error MUST surface, not silently swallow.
-    let err = cmd_send(&args).expect_err(
-        "CLI send --task <unknown> must surface an error (route_task_id=true routing), not a silent 0-byte send"
-    );
-    let payload = err.to_payload(std::path::Path::new("/tmp/ta-cli-err.log"), "send");
-    assert!(!payload.ok, "error envelope ok must be false");
-    assert_eq!(
-        payload.error, "unknown task id: t-unknown",
-        "CLI error field == golden bare message (golden runtime.py:1032 str(exc)); NO 'validation:' prefix"
-    );
-    assert_eq!(
-        payload.action,
-        "Run team-agent doctor --workspace . for the selected team, or inspect the error log shown here."
-    );
-    let _ = std::fs::remove_dir_all(&ws);
+fn cmd_send_legacy_task_flag_does_not_require_a_coordinator_task() {
+    let args = SendArgs { task: Some("t-unknown".into()), ..send_args_fixture() };
+    let result = cmd_send(&args).expect("legacy task metadata cannot gate physical/inbox delivery");
+    assert_eq!(result.exit, ExitCode::Ok);
+    let inbox = crate::inbox_store::read(&args.workspace, "alice", 3, None).unwrap();
+    assert_eq!(inbox["messages"][0]["content"], "hello world foo");
+    assert!(inbox["messages"][0].get("task_id").is_none());
 }
 
 #[test]
-fn run_send_legacy_task_flag_is_internalized_before_persistence() {
-    let ws = std::env::temp_dir().join(format!(
-        "ta-run-sendunk-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(ws.join(".team").join("runtime")).unwrap();
-    std::fs::write(
-        ws.join(".team").join("runtime").join("state.json"),
-        serde_json::to_vec_pretty(&json!({
-            "session_name": "team-x",
-            "active_team_key": "current",
-            "teams": {"current": {
-                "session_name": "team-x",
-                "agents": { "w1": { "status": "running" } },
-                "tasks": []
-            }}
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    let _ = crate::message_store::MessageStore::open(&ws);
-    let argv: Vec<String> = ["send", "w1", "--task", "t-unknown", "go", "--json"]
-        .iter()
-        .map(ToString::to_string)
-        .collect();
-    let code = run(&argv, &ws);
-    assert_eq!(
-        code,
-        ExitCode::Ok,
-        "legacy --task is sunset-noticed and ignored; public send persists without caller binding"
-    );
-    let connection =
-        rusqlite::Connection::open(ws.join(".team").join("runtime").join("team.db")).unwrap();
-    let task_id: Option<String> = connection
-        .query_row(
-            "SELECT task_id FROM messages WHERE content = 'go' ORDER BY rowid DESC LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        task_id, None,
-        "caller-supplied task ids must not reach storage"
-    );
-    let _ = std::fs::remove_dir_all(&ws);
+fn run_send_legacy_task_flag_is_not_persisted_in_the_delivery_database() {
+    let args = send_args_fixture();
+    let argv = ["send", "alice", "--team", "teamA", "--task", "t-unknown", "go", "--mailbox", "--json"].map(str::to_string);
+    assert_eq!(run(&argv, &args.workspace), ExitCode::Ok);
+    let inbox = crate::inbox_store::read(&args.workspace, "alice", 3, None).unwrap();
+    assert_eq!(inbox["messages"][0]["content"], "go");
+    assert!(inbox["messages"][0].get("task_id").is_none());
+    let conn = rusqlite::Connection::open(args.workspace.join(".team/runtime/team.db")).unwrap();
+    let count: i64 = conn.query_row("SELECT count(*) FROM messages", [], |row| row.get(0)).unwrap();
+    assert_eq!(count, 0);
 }
 
 #[test]

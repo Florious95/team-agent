@@ -2298,11 +2298,11 @@ pub fn deliver_pending_messages(
              where status in (
                  'pending', 'accepted', 'target_resolved',
                  'submitted_pending_acceptance', 'queued_until_leader_attach', ?1
-             ) or (status = 'queued_until_start' and error = 'mcp_handshake.timeout')
+             ) or (status = 'queued_until_start' and error = ?2)
              order by created_at, message_id",
         )?;
         let rows = stmt.query_map(
-            [crate::message_store::MessageRowStatus::QueuedCoordinatorUnavailable.as_str()],
+            [crate::message_store::MessageRowStatus::QueuedCoordinatorUnavailable.as_str(), crate::message_store::MCP_HANDSHAKE_TIMEOUT],
             |row| row.get::<_, String>(0),
         )?;
         rows.collect::<Result<Vec<_>, _>>()?

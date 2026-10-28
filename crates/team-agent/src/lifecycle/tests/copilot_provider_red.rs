@@ -348,7 +348,7 @@ with the identity section FIRST; head={:?}",
         for marker in [
             "# Team Agent Teammate Runtime Contract",
             "COPILOT ROLE BODY SENTINEL",
-            "report_result exactly once",
+            "exclusively for findings, progress, questions, and completion updates",
         ] {
             if !agents_md.contains(marker) {
                 failures.push(format!(
@@ -2028,12 +2028,8 @@ fn copilot_tmp_pid_from_name(name: &str) -> Option<u32> {
 }
 
 fn pid_is_live(pid: u32) -> bool {
-    Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    !matches!(
+        crate::platform::process::pid_liveness(pid),
+        Ok(crate::platform::process::ProcessLiveness::Dead)
+    )
 }

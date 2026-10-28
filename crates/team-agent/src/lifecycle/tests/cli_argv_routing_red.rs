@@ -831,8 +831,9 @@ fn a09_resume_retains_session_metadata_while_routes_change() {
     let f = Fixture::new("argv-resume");
     f.start_team("pi", &["worker"]);
     let selected = crate::state::projection::select_runtime_state(&f.ws, Some("argvteam")).unwrap();
-    // Fresh Pi assigns its own session id; capture records it afterwards.
-    assert!(selected["agents"]["worker"]["_pending_session_id"].is_null());
+    // Native --session-id pins fresh seats in Pi\'s shared project session root.
+    assert!(selected["agents"]["worker"]["_pending_session_id"].as_str().is_some_and(|id| !id.is_empty()));
+    assert!(selected["agents"]["worker"]["session_id"].is_null(), "a pending native id is not a captured session");
     let session_id = "8d6c1f2e-4a5b-4c7d-9e0f-a09000000001";
     let session = crate::lifecycle::launch::pi_mcp::pi_seat_paths(&f.ws, "argvteam", "worker")
         .sessions

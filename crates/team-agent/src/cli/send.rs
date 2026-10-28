@@ -33,12 +33,19 @@ use resolve::{
 /// 拼 [`SendOptions`](no_ack→requires_ack 取反、no_wait→wait_visible 取反等)→ `messaging::send_message`。
 pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
     if args.pane.is_some() {
+        if args.target.is_some() || args.targets.is_some() || args.to_name.is_some() || args.to_leader.is_some() {
+            return Err(CliError::Usage("An agent name cannot be combined with --to-name/--pane/--to/--to-leader/--targets; choose one addressing mode".into()));
+        }
+        if args.message.join(" ").trim().is_empty() {
+            return Err(CliError::Usage("Provide a task message; --pane cannot send an empty message".into()));
+        }
         return Err(CliError::Usage("raw pane delivery requires --socket and --dialect".into()));
     }
+    logical_to_from_args(args, args.to_leader.as_deref())?;
     let alias = args.to_leader.as_deref().map(read_host_leader_alias).transpose()?;
     let logical_to = logical_to_from_args(args, alias.as_ref().map(|_| "leader"))?;
     let content = args.message.join(" ");
-    if content.is_empty() { return Err(CliError::Usage("send requires a nonempty message".into())); }
+    if content.is_empty() { return Err(CliError::Usage("empty_message: send requires a nonempty message".into())); }
     let requested = logical_to.split(',').map(str::trim).filter(|target| !target.is_empty());
     let mailbox = args.presentation.sink != crate::messaging::presentation::PresentationSink::Leader;
     let mut results = Vec::new();
@@ -66,7 +73,7 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
         }
     }
     if destinations.is_empty() { return Err(CliError::Usage("send has no recipients".into())); }
-    for ((workspace, team, agent), endpoint) in destinations {
+    for ((workspace, team, agent), _endpoint) in destinations {
         if mailbox || (agent == "leader" && !matches!(args.sender.as_str(), "human" | "leader")) {
             let record = crate::inbox_store::record(args.sender.as_str(), &agent, &content, team.as_deref(), "message");
             crate::inbox_store::append(&workspace, &agent, &record).map_err(CliError::Usage)?;
@@ -75,7 +82,8 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
             serde_json::json!({"status": "stored", "recipient": agent, "mailbox": true})
         } else {
             let text = format!("Team Agent message from {}:\n\n{content}", args.sender.as_str());
-            crate::direct_delivery::send(&endpoint.map_err(CliError::Usage)?, &text).map_err(CliError::Usage)?
+            crate::direct_delivery::directory(&workspace, team.as_deref())
+                .and_then(|directory| directory.send(&agent, &text)).map_err(CliError::Usage)?
         };
         results.push(value);
     }

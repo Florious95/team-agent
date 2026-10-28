@@ -1,14 +1,5 @@
-//! 0.5.16 RED contract: result attribution must follow the physical submit boundary.
-//!
-//! References:
-//! - `.team/artifacts/result-attribution-race-locate.md` §9 RED Contract.
-//! - Locate §7.3 SubmitObserver / split-phase is an implementation suggestion only;
-//!   these tests assert externally visible attribution behavior, not API shape.
-//!
-//! User story: when a worker receives a direct leader message and reports immediately
-//! without a task_id, the result belongs to that message, not to stale startup task
-//! state. A message row that only reached target_resolved, with no physical submit,
-//! is not enough to claim that worker's next no-task report.
+//! Decoupled reports require explicit task attribution, even during a legacy submit.
+//! Physical delivery and coordinator pointers cannot assign a result to a task.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
@@ -22,7 +13,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use rusqlite::params;
 use serde_json::{json, Value};
 use team_agent::event_log::EventLog;
 use team_agent::mcp_server::TeamOrchestratorTools;
@@ -40,7 +30,7 @@ const MSG_RACE: &str = "msg_race";
 const MSG_TARGET_ONLY: &str = "msg_target_only";
 
 #[test]
-fn physical_submit_window_report_result_without_task_id_belongs_to_direct_message() {
+fn physical_submit_window_does_not_infer_report_task_attribution() {
     let case = RaceCase::new("physical-submit-window");
     case.seed_state_with_task_initial();
     let store = MessageStore::open(case.path()).unwrap();
@@ -88,8 +78,8 @@ fn physical_submit_window_report_result_without_task_id_belongs_to_direct_messag
         "RED setup: exactly one worker result should be persisted for {summary}; rows={rows:?}"
     );
     assert_eq!(
-        rows[0].task_id, MSG_RACE,
-        "0.5.16 RED: no-task report_result emitted after physical submit but before delivery verification returns must attribute to the direct message id, not stale {TASK_INITIAL}; rows={rows:?}"
+        rows[0].task_id, "manual",
+        "no-task report_result stays manual even inside the physical submit window; rows={rows:?}"
     );
     assert!(
         result_rows_for_task(case.path(), TASK_INITIAL, summary).is_empty(),
@@ -101,14 +91,9 @@ fn physical_submit_window_report_result_without_task_id_belongs_to_direct_messag
     let armed = first_event_index(&events, "turn_open.armed_after_inject").unwrap_or_else(|| {
         panic!("0.5.16 RED: current_turn must be recorded at physical submit; events={events}")
     });
-    let report = first_event_index(&events, "mcp.report_result")
-        .unwrap_or_else(|| panic!("RED setup: report_result event missing; events={events}"));
     let delivered = first_event_index(&events, "message.delivered")
-        .unwrap_or_else(|| panic!("RED setup: message.delivered event missing; events={events}"));
-    assert!(
-        armed < report && report < delivered,
-        "0.5.16 RED: physical-submit current_turn must be armed before a worker report emitted during post-submit verification, and before message.delivered; indexes armed={armed} report={report} delivered={delivered}; events={events}"
-    );
+        .unwrap_or_else(|| panic!("legacy delivery event missing; events={events}"));
+    assert!(armed < delivered, "legacy physical-submit ordering remains intact");
 }
 
 #[test]
@@ -154,6 +139,9 @@ fn target_resolved_without_physical_submit_does_not_steal_no_task_report() {
         )
         .unwrap();
     let out = Value::Object(out.fields);
+    let records = result_rows(case.path(), summary);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].task_id, "manual");
     assert_ne!(
         out.get("task_id").and_then(Value::as_str),
         Some(MSG_TARGET_ONLY),
@@ -358,28 +346,11 @@ struct ResultRow {
 }
 
 fn result_rows(workspace: &Path, summary: &str) -> Vec<ResultRow> {
-    let store = MessageStore::open(workspace).unwrap();
-    let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
-    let mut stmt = conn
-        .prepare(
-            "select task_id, envelope from results
-             where agent_id = ?1
-             order by created_at asc, result_id asc",
-        )
-        .unwrap();
-    stmt.query_map(params![WORKER], |row| {
-        let task_id: String = row.get(0)?;
-        let envelope_text: String = row.get(1)?;
-        Ok((task_id, envelope_text))
-    })
-    .unwrap()
-    .filter_map(Result::ok)
-    .filter_map(|(task_id, envelope_text)| {
-        let envelope: Value = serde_json::from_str(&envelope_text).ok()?;
-        (envelope.get("summary").and_then(Value::as_str) == Some(summary))
-            .then_some(ResultRow { task_id })
-    })
-    .collect()
+    let text = std::fs::read_to_string(workspace.join(".team/inbox/leader.jsonl")).unwrap();
+    text.lines().map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|record| record["sender"] == WORKER && record["content"] == summary)
+        .map(|record| ResultRow { task_id: record["envelope"]["task_id"].as_str().unwrap().into() })
+        .collect()
 }
 
 fn result_rows_for_task(workspace: &Path, task_id: &str, summary: &str) -> Vec<ResultRow> {

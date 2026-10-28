@@ -246,23 +246,15 @@ fn t3_unknown_business_status_is_preserved_without_normalized_event() {
         "T3-1 ingress: an opaque business status must be accepted; body={} raw={}",
         call.body, call.raw
     );
-    let result_id = call.body["result_id"]
-        .as_str()
-        .expect("T3-1 ingress must return the durable result_id");
-    let row = harness
-        .result_row(result_id)
-        .unwrap_or_else(|| panic!("T3-1 ingress missing durable result {result_id}"));
-    let envelope: serde_json::Value =
-        serde_json::from_str(&row.envelope).expect("T3-1 durable envelope JSON");
-    assert_eq!(
-        row.status, "collected",
-        "T3-1 ingress: report_result auto-finalization must mark the durable row collected"
-    );
-    assert_eq!(
-        envelope["status"],
-        serde_json::json!(status),
-        "T3-1 ingress: canonical envelope status must preserve the same value"
-    );
+    let message_id = call.body["message_id"].as_str().expect("durable inbound receipt id");
+    let inbox = crate::inbox_store::read(harness.workspace_path(), "leader", 10, Some("teamA")).unwrap();
+    let record = inbox["messages"].as_array().unwrap().iter()
+        .find(|record| record["message_id"] == message_id).expect("durable inbox record");
+    let envelope = &record["envelope"];
+    assert_eq!(record["content"], "did a thing");
+    assert_eq!(record["kind"], "result");
+    assert_eq!(envelope["status"], status, "opaque business status must not be normalized");
+    assert!(harness.result_row(message_id).is_none(), "no coordinator result row");
     let events = harness.events_text();
     assert!(
         !events.contains("provider.result.unknown_status_normalized"),

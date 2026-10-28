@@ -1,55 +1,72 @@
-//! Send RED: stdout failure after persistence must not turn one obligation into a retryable lie.
+//! Closing stdout must not undo or repeat physical delivery / inbox append.
+#![cfg(unix)]
+#![allow(clippy::unwrap_used)]
 
-#![allow(clippy::expect_used)]
+#[path = "support/direct_fixture.rs"]
+mod direct_fixture;
+use direct_fixture::DirectFixture;
+use std::os::fd::OwnedFd;
+use std::os::unix::net::UnixStream;
+use std::process::{Command, Stdio};
 
-#[path = "support/hermetic.rs"]
-mod hermetic_guard;
-
-use std::fs;
-
-fn cli_output_sources() -> String {
-    [
-        fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli/emit.rs"))
-            .expect("read CLI emitter"),
-        fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
-            .expect("read binary entry"),
-    ]
-    .join("\n")
+fn send_with_closed_stdout(fixture: &DirectFixture, mailbox: bool) {
+    let (reader, writer) = UnixStream::pair().unwrap();
+    drop(reader); // EPIPE is guaranteed before the CLI begins, not a scheduling race.
+    let writer: OwnedFd = writer.into();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_team-agent"));
+    command
+        .args([
+            "send",
+            "worker-1",
+            "closed stdout token",
+            "--json",
+            "--workspace",
+            fixture.root.to_str().unwrap(),
+        ])
+        .env_remove("TEAM_AGENT_ID")
+        .env_remove("TEAM_AGENT_AGENT_ID")
+        .env_remove("TEAM_AGENT_WORKSPACE")
+        .env_remove("TEAM_AGENT_OWNER_TEAM_ID")
+        .env_remove("TEAM_AGENT_TEAM_ID")
+        .stdout(Stdio::from(writer))
+        .stderr(Stdio::piped());
+    if mailbox {
+        command.arg("--mailbox");
+    }
+    let output = command.spawn().unwrap().wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "stdout failure must not imply send failure: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("panicked"));
 }
 
 #[test]
-fn cli_output_handles_broken_pipe_without_println_panic() {
-    let source = cli_output_sources();
-    assert!(
-        source.contains("ErrorKind::BrokenPipe") && source.contains("write_all"),
-        "send output RED: CLI must use fallible writes and handle ErrorKind::BrokenPipe; println! panic hides the durable send fact"
+fn physical_send_completes_once_when_stdout_is_closed() {
+    let fixture = DirectFixture::new();
+    send_with_closed_stdout(&fixture, false);
+    fixture.received("Team Agent message from leader:\n\nclosed stdout token");
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("received"))
+            .unwrap()
+            .matches("closed stdout token")
+            .count(),
+        1
     );
+    assert!(!fixture.root.join(".team/inbox").exists());
+    assert!(!fixture.root.join(".team/runtime/team.db").exists());
 }
 
 #[test]
-fn persisted_send_has_a_recoverable_message_id_when_stdout_fails() {
-    let source = cli_output_sources();
-    assert!(
-        source.contains("persisted_message_id") && source.contains("stderr"),
-        "send output RED: after persistence, an output failure must retain/report the canonical message_id so the sender does not retry blindly"
-    );
+fn mailbox_remains_pullable_once_when_stdout_is_closed() {
+    let fixture = DirectFixture::new();
+    send_with_closed_stdout(&fixture, true);
+    let records = fixture.inbox("worker-1");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["content"], "closed stdout token");
+    assert!(std::fs::read(fixture.root.join("received"))
+        .unwrap()
+        .is_empty());
+    assert!(!fixture.root.join(".team/runtime/team.db").exists());
 }
-
-#[test]
-fn positive_control_send_persists_before_cli_emission() {
-    let send = fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/cli/send/resolve.rs"
-    ))
-    .expect("read send funnel");
-    let emit = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli/emit.rs"))
-        .expect("read emitter");
-    assert!(
-        send.contains("persist_resolved_target(args")
-            && emit.contains("cmd_send(&send_args(args, cwd)?).map(emit_result)"),
-        "positive control: send must persist its obligation before the top-level emitter runs"
-    );
-}
-
-#[allow(dead_code)]
-fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}

@@ -1,67 +1,49 @@
+//! Real MCP reports persist losslessly in the append-only inbox, not SQLite.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+#[path = "support/direct_fixture.rs"]
+mod direct_fixture;
 #[path = "support/mcp_sim_harness.rs"]
 #[allow(dead_code)]
 mod mcp_sim_harness;
 
-use mcp_sim_harness::McpSimHarness;
+use direct_fixture::DirectFixture;
 use serde_json::json;
 
 #[test]
-fn mcp_stdio_report_result_persists_result_row_in_same_workspace_db() {
-    let harness = McpSimHarness::new();
-    let mut worker = harness.spawn_mcp_client("worker_a", "teamA");
-    let canary = "MCP_STDIO_DB_PROBE_CANARY";
-    let worker_status = "red_gate/等待复核";
+fn mcp_stdio_report_result_appends_envelope_without_creating_database() {
+    let fixture = DirectFixture::new();
+    let mut worker = mcp_sim_harness::spawn_mcp_client(&fixture.root, "worker-1", "current");
+    let canary = "CANARY_MCP_STDIO_RESULT_9d0a58f7e9d842a9b6b78a5ec2ed4e31";
+    let worker_status = "triage/needs-review#β";
     let artifacts = json!([{
-        "path": "artifact://nested/证据",
-        "metadata": {"attempt": 2, "passed": true, "optional": null},
-        "details": ["line one\nline two", {"count": 3}]
+        "kind": "custom_evidence_bundle", "uri": "artifact://nested/raw",
+        "nested": {"items": [{"n": 7, "ok": true, "tags": ["alpha", "beta"]},
+            {"payload": {"key": "value", "count": 42}}], "meta": {"verified": true}}
     }]);
-
-    let call = worker.call_tool(
+    let report = worker.call_tool(
         "report_result",
         json!({
-            "task_id": "task_mcp",
-            "agent_id": "worker_a",
-            "status": worker_status,
-            "summary": canary,
-            "artifacts": artifacts.clone()
+            "task_id": "task_mcp", "status": worker_status, "summary": canary,
+            "artifacts": artifacts
         }),
     );
-
-    assert!(
-        !call.is_error,
-        "true MCP stdio tools/call report_result must not return isError; body={} raw={}",
-        call.body, call.raw
-    );
-    let result_id = call.body["result_id"]
-        .as_str()
-        .expect("MCP stdio report_result must return the DB result_id");
-    let row = harness
-        .result_row(result_id)
-        .unwrap_or_else(|| panic!("true MCP stdio report_result did not persist result row {result_id} in the same workspace DB; body={} trace={:?}", call.body, worker.trace_entries()));
-
+    assert!(!report.is_error, "{}", report.body);
+    assert_eq!(report.body["status"], "reported");
+    let records = fixture.inbox("leader");
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+    assert_eq!(record["message_id"], report.body["message_id"]);
+    assert_eq!(record["sender"], "worker-1");
+    assert_eq!(record["team"], "current");
+    assert_eq!(record["kind"], "result");
+    assert_eq!(record["envelope"]["task_id"], "task_mcp");
+    assert_eq!(record["envelope"]["summary"], canary);
+    assert_eq!(record["envelope"]["status"], worker_status);
     assert_eq!(
-        row.task_id, "task_mcp",
-        "DB result row must preserve task_id; row={row:?}"
+        serde_json::to_vec(&record["envelope"]["artifacts"]).unwrap(),
+        serde_json::to_vec(&artifacts).unwrap()
     );
-    assert_eq!(
-        row.agent_id, "worker_a",
-        "DB result row must preserve MCP worker identity; row={row:?}"
-    );
-    assert_eq!(
-        row.owner_team_id.as_deref(),
-        Some("teamA"),
-        "DB result row must preserve spawn-time TEAM_AGENT_OWNER_TEAM_ID scope; row={row:?}"
-    );
-    let envelope: serde_json::Value = serde_json::from_str(&row.envelope).unwrap();
-    assert_eq!(envelope["summary"], canary);
-    assert_eq!(
-        serde_json::to_vec(&envelope["artifacts"]).unwrap(),
-        serde_json::to_vec(&artifacts).unwrap(),
-        "nested artifacts must survive the real MCP ingress and SQLite persistence unchanged"
-    );
-    assert_eq!(envelope["status"], worker_status);
-    assert_eq!(row.status, "collected", "auto-finalization remains active");
+    fixture.received(&format!("Team Agent result from worker-1:\n\n{canary}"));
+    assert!(!fixture.root.join(".team/runtime/team.db").exists());
 }

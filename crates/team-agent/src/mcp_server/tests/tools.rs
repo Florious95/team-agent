@@ -2,7 +2,7 @@
     fn report_result_infers_agent_from_env_when_not_explicit() {
         // env identity present, no explicit agent_id → envelope.agent_id == env id.
         let tools = TeamOrchestratorTools::with_identity(
-            &unique_ws("report-env"),
+            &seed_state_ws("report-env", &json!({"teams": {"teamA": {"agents": {}}}})),
             Some(AgentId::new("worker-7")),
             Some(TeamKey::new("teamA")),
         );
@@ -47,7 +47,7 @@
     #[test]
     fn report_result_accepts_explicit_captured_agent() {
         let tools = TeamOrchestratorTools::with_identity(
-            &unique_ws("report-explicit-match"),
+            &seed_state_ws("report-explicit-match", &json!({"teams": {"teamA": {"agents": {}}}})),
             Some(AgentId::new("worker-7")),
             Some(TeamKey::new("teamA")),
         );
@@ -130,7 +130,7 @@
     }
 
     #[test]
-    fn report_result_prefers_current_turn_message_over_old_delivered_fallback() {
+    fn report_result_ignores_current_turn_and_old_delivered_attribution() {
         let ws = unique_ws("report-current-message");
         seed_report_message(
             &ws,
@@ -153,9 +153,7 @@
             "target_resolved",
             "2026-07-06T13:27:35.000000+00:00",
         );
-        // 0.5.16 result-attribution-race-locate.md §4/§7.7:
-        // target_resolved alone is not physical-submit proof. Current-turn
-        // attribution comes from the state pointer armed at physical submit.
+        // Even an armed legacy coordinator pointer must not determine attribution.
         seed_report_scope_state(
             &ws,
             &json!({
@@ -194,13 +192,13 @@
         let v = serde_json::to_value(&ok).unwrap();
         assert_eq!(
             v.get("task_id"),
-            Some(&json!("msg_new")),
-            "current-turn message must beat stale delivered fallback"
+            Some(&json!("manual")),
+            "decoupled reports do not infer attribution from delivery or coordinator state"
         );
     }
 
     #[test]
-    fn report_result_target_resolved_without_current_turn_uses_task_fallback() {
+    fn report_result_ignores_target_resolved_and_assigned_task_fallback() {
         let ws = unique_ws("report-target-resolved-no-current");
         seed_report_message(
             &ws,
@@ -249,14 +247,14 @@
         );
         assert_eq!(
             v.get("task_id"),
-            Some(&json!("task_initial")),
-            "without a current-turn pointer, no-task report_result falls through to task fallback"
+            Some(&json!("manual")),
+            "only explicit task attribution is retained in the decoupled inbox"
         );
     }
 
     #[test]
     fn report_result_does_not_backfill_old_delivered_message_after_latest_result() {
-        let ws = unique_ws("report-no-old-backfill");
+        let ws = seed_state_ws("report-no-old-backfill", &json!({"teams": {"gate055": {"agents": {}}}}));
         seed_report_message(
             &ws,
             "msg_old",

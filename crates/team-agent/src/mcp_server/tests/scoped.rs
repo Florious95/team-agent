@@ -1,35 +1,24 @@
 /// Scoped retained-tool contracts exercise owner binding and team isolation.
 
     #[test]
-    fn dispatch_send_message_worker_accepted_returned_verbatim() {
-        // A-7: accepted requires a REAL stored message_id (no fabricated ids), so the
-        // workspace seeds a running worker-1 the delivery layer can actually queue for.
-        let ws = unique_ws("dispatch-accepted");
-        crate::state::persist::save_runtime_state(
-            &ws,
-            &serde_json::json!({
-                "session_name": "team-x",
-                "agents": {
-                    "worker-1": {"status": "running", "agent_id": "worker-1", "window": "worker-1"},
-                },
-            }),
-        )
-        .unwrap();
+    fn dispatch_send_message_worker_returns_physical_receipt_verbatim() {
+        let fixture = direct_fixture::DirectFixture::new();
         let tools = TeamOrchestratorTools::with_identity(
-            &ws,
-            Some(AgentId::new("leader")), // legacy single-team bypasses cross-team refusal
-            None,
+            &fixture.root, Some(AgentId::new("leader")), Some(TeamKey::new("current")),
         );
         let ok = dispatch_tool(&tools, McpTool::SendMessage, &json!({
             "to": "worker-1", "content": "do it"
         })).expect("send ok");
-        let v = serde_json::to_value(&ok).unwrap();
-        assert_eq!(keys(&v), vec!["status", "delivery_pending", "poll_via", "message_id"],
-            "worker-accepted dict returned verbatim (NOT re-compacted)");
-        assert_eq!(v.get("status"), Some(&json!("accepted")));
-        assert_eq!(v.get("delivery_pending"), Some(&json!(true)));
-        let mid = v.get("message_id").and_then(Value::as_str).unwrap();
-        assert_eq!(v.get("poll_via"), Some(&json!(format!("team-agent inbox {mid}"))));
+        let value = serde_json::to_value(&ok).unwrap();
+        assert_eq!(value["status"], "sent");
+        assert_eq!(value["delivery"], "physical");
+        assert_eq!(value["recipient"], "worker-1");
+        assert_eq!(value["pane_id"], fixture.pane);
+        assert_eq!(value["accepted"], Value::Null);
+        assert!(value.get("message_id").is_none());
+        assert!(value.get("poll_via").is_none());
+        fixture.received("Team Agent message from leader:\n\ndo it");
+        assert!(!fixture.root.join(".team/runtime/team.db").exists());
     }
 
     // ── #36 report_result identity: neither envelope nor args can override capture ─
@@ -56,12 +45,9 @@
         assert_eq!(error.extra.get("expected_agent_id"), Some(&json!("env-id")));
     }
 
-    // ── #44 report_result task_id inference from state (_latest_task_for_assignee)
-    // GOLDEN (probe_report evidence): env agent worker-7, state tasks=[{id:t-42,
-    // assignee:worker-7,status:pending}], report with NO task_id → task_id "t-42".
-    // Rust has no _latest_task_for_assignee; hard-codes "manual".
+    // Decoupled reports never infer task attribution from coordinator state.
     #[test]
-    fn report_result_infers_task_id_from_latest_assigned_task() {
+    fn report_result_defaults_to_manual_despite_latest_assigned_task() {
         let cws = seed_state_ws("report-infer-task", &json!({
             "agents": {}, "active_team_key": null,
             "tasks": [{"id": "t-42", "assignee": "worker-7", "status": "pending"}]
@@ -73,8 +59,12 @@
             None, None,
         ).expect("report ok");
         let v = serde_json::to_value(&ok).unwrap();
-        assert_eq!(v.get("task_id"), Some(&json!("t-42")),
-            "task_id inferred from latest non-terminal assigned task, not 'manual'");
+        assert_eq!(v.get("task_id"), Some(&json!("manual")));
+        let inbox = crate::inbox_store::read(&cws, "leader", 10, None).unwrap();
+        assert_eq!(inbox["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(inbox["messages"][0]["envelope"]["task_id"], "manual");
+        assert_eq!(inbox["messages"][0]["content"], "done it");
+        assert!(!cws.join(".team/runtime/team.db").exists());
     }
 
     // ── #42 get_visible_peers reads seeded state (sorted live peers) ────────────

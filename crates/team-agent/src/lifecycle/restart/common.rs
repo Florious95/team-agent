@@ -473,20 +473,6 @@ pub(super) fn spawn_agent_window(
     );
     crate::lifecycle::launch::apply_profile_launch_env(&mut env, &profile_launch);
     crate::lifecycle::launch::apply_mcp_auto_approval_env(&mut env, safety);
-    if resume_session_id.is_none()
-        && fork_parent.is_some()
-        && matches!(
-            provider,
-            crate::provider::Provider::Claude | crate::provider::Provider::ClaudeCode
-        )
-    {
-        // A fork keeps the whole parent history: a new seat never stops on
-        // Claude's stale-resume "summary or full session" modal.
-        env.insert(
-            "CLAUDE_CODE_RESUME_THRESHOLD_MINUTES".to_string(),
-            "1000000000".to_string(),
-        );
-    }
     if provider == crate::provider::Provider::Copilot {
         crate::lifecycle::launch::apply_copilot_instructions_overlay(
             workspace,
@@ -510,6 +496,21 @@ pub(super) fn spawn_agent_window(
             restart_effort.is_some(),
         ),
     );
+    // Apply this owned fork policy after inherited Claude identity is scrubbed.
+    if resume_session_id.is_none()
+        && fork_parent.is_some()
+        && matches!(
+            provider,
+            crate::provider::Provider::Claude | crate::provider::Provider::ClaudeCode
+        )
+    {
+        // A fork keeps the whole parent history: a new seat never stops on
+        // Claude's stale-resume "summary or full session" modal.
+        env.insert(
+            "CLAUDE_CODE_RESUME_THRESHOLD_MINUTES".to_string(),
+            "1000000000".to_string(),
+        );
+    }
     // Keep the launcher-known typed provider independent from inherited
     // LEADER_* identity. The tmux wrapper binds pane/socket at invocation time.
     crate::layout::worker_env::inject_current_caller_provider(&mut env, provider);

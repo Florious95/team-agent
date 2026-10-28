@@ -44,7 +44,9 @@ pub fn directory(workspace: &Path, team: Option<&str>) -> Result<Directory, Stri
         .filter(|teams| !teams.is_empty())
     else {
         if let Some(requested) = team {
-            let matches = ["team_id", "team_name", "tmux_session", "team_dir"]
+            let matches = crate::state::projection::team_selector_matches(
+                requested, field(&snapshot, "team_key").or_else(|| field(&snapshot, "active_team_key")).unwrap_or(""), &snapshot,
+            ) || ["team_id", "team_name", "tmux_session", "team_dir"]
                 .iter()
                 .any(|key| field(&snapshot, key) == Some(requested));
             if !matches {
@@ -62,7 +64,7 @@ pub fn directory(workspace: &Path, team: Option<&str>) -> Result<Directory, Stri
         .iter()
         .filter(|(key, value)| {
             requested.map_or(teams.len() == 1, |requested| {
-                key.as_str() == requested
+                crate::state::projection::team_selector_matches(requested, key, value)
                     || ["team_id", "team_name", "tmux_session", "team_dir"]
                         .iter()
                         .any(|field_name| field(value, field_name) == Some(requested))
@@ -78,8 +80,8 @@ pub fn directory(workspace: &Path, team: Option<&str>) -> Result<Directory, Stri
     let (key, selected) = matches[0];
     let mut state = selected.clone();
     if let Some(object) = state.as_object_mut() {
-        for name in ["tmux_socket", "leader"] {
-            if name == "leader"
+        for name in ["tmux_socket", "tmux_endpoint", "leader", "leader_receiver"] {
+            if matches!(name, "leader" | "leader_receiver")
                 && teams.len() > 1
                 && field(&snapshot, "active_team_key") != Some(key.as_str())
             {
@@ -107,28 +109,62 @@ fn field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 impl Directory {
-    pub fn endpoint(&self, agent: &str) -> Result<Endpoint, String> {
-        let info = if agent == "leader" {
-            self.state.get("leader")
+    fn recipient(&self, agent: &str) -> Result<&Value, String> {
+        if agent == "leader" {
+            self.state.get("leader_receiver").or_else(|| self.state.get("leader"))
         } else {
             self.state
                 .get("agents")
                 .and_then(|agents| agents.get(agent))
         }
-        .ok_or_else(|| format!("unknown recipient: {agent}"))?;
+        .ok_or_else(|| format!("unknown recipient: {agent}"))
+    }
+
+    pub fn endpoint(&self, agent: &str) -> Result<Endpoint, String> {
+        let info = self.recipient(agent)?;
         let pane_id = field(info, "pane_id").ok_or_else(|| format!("{agent} has no tmux pane"))?;
-        let socket = field(info, "tmux_socket")
-            .or_else(|| field(&self.state, "tmux_socket"))
-            .unwrap_or("default");
+        let socket = crate::tmux_backend::runtime_tmux_endpoint_from_state_pub(Some(info))
+            .or_else(|| crate::tmux_backend::runtime_tmux_endpoint_from_state_pub(Some(&self.state)))
+            .map(|(socket, _)| socket)
+            .unwrap_or_else(|| crate::tmux_backend::socket_name_for_workspace(&self.workspace));
         Ok(Endpoint {
             agent: agent.to_string(),
-            socket: socket.to_string(),
+            socket,
             pane_id: pane_id.to_string(),
             dialect: field(info, "dialect")
                 .or_else(|| field(info, "provider"))
                 .unwrap_or("enter")
                 .to_string(),
         })
+    }
+
+    /// Validate published target identity, not MCP readiness or agent activity.
+    /// A stale logical binding is an immediate error, never a queued message.
+    pub fn send(&self, agent: &str, text: &str) -> Result<Value, String> {
+        let endpoint = self.endpoint(agent)?;
+        let info = self.recipient(agent)?;
+        let session = field(info, "session_name").or_else(|| field(&self.state, "session_name"));
+        let window = field(info, "window").or_else(|| field(info, "window_name"));
+        let pid = info.get("pane_pid").and_then(Value::as_u64);
+        if session.is_some() || window.is_some() || pid.is_some() {
+            let output = tmux(&endpoint.socket).args([
+                "display-message", "-p", "-t", &endpoint.pane_id,
+                "#{session_name}\t#{window_name}\t#{pane_pid}\t#{pane_dead}",
+            ]).output().map_err(|error| error.to_string())?;
+            if !output.status.success() {
+                return Err("published recipient pane is unavailable".into());
+            }
+            let observed = String::from_utf8_lossy(&output.stdout);
+            let fields: Vec<_> = observed.trim_end().split('\t').collect();
+            if fields.len() != 4 || fields[3] != "0"
+                || session.is_some_and(|expected| expected != fields[0])
+                || window.is_some_and(|expected| expected != fields[1])
+                || pid.is_some_and(|expected| fields[2].parse::<u64>().ok() != Some(expected))
+            {
+                return Err("published recipient pane binding is stale".into());
+            }
+        }
+        send(&endpoint, text)
     }
 
     pub fn agents(&self) -> Vec<String> {
@@ -275,4 +311,30 @@ pub fn locate(workspace: &Path, team: Option<&str>) -> Result<Value, String> {
         }
     }
     Ok(json!({"endpoints": endpoints}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authoritative_leader_receiver_and_endpoint_take_precedence() {
+        let directory = Directory { workspace: PathBuf::from("/controlled-workspace"), team: Some("a".into()), state: json!({
+            "leader": {"pane_id": "%1", "tmux_socket": "stale"},
+            "leader_receiver": {"pane_id": "%2", "tmux_endpoint": "/tmp/owned-socket", "tmux_socket": "older"}
+        }) };
+        let endpoint = directory.endpoint("leader").unwrap();
+        assert_eq!(endpoint.pane_id, "%2");
+        assert_eq!(endpoint.socket, "/tmp/owned-socket");
+    }
+
+    #[test]
+    fn missing_socket_uses_the_existing_workspace_namespace_not_the_default_server() {
+        let mut directory = Directory { workspace: PathBuf::from("/controlled-workspace"), team: Some("a".into()), state: json!({
+            "agents": {"worker": {"pane_id": "%3"}}
+        }) };
+        assert_eq!(directory.endpoint("worker").unwrap().socket, crate::tmux_backend::socket_name_for_workspace(&directory.workspace));
+        directory.state["tmux_socket"] = json!("default");
+        assert_eq!(directory.endpoint("worker").unwrap().socket, "default");
+    }
 }

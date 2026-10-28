@@ -1593,7 +1593,11 @@ mod native_ps_batch_regressions {
     #[test]
     fn native_ps_partial_selection_preserves_a_live_pid() {
         let pid = std::process::id();
-        let requested = BTreeSet::from([pid, i32::MAX as u32]);
+        // Darwin ps rejects i32::MAX as invalid syntax; use a real exited PID.
+        let mut exited = Command::new("/bin/sh").args(["-c", "exit 0"]).spawn().unwrap();
+        let dead_pid = exited.id();
+        assert!(exited.wait().unwrap().success());
+        let requested = BTreeSet::from([pid, dead_pid]);
         let command = process_snapshot_command(&requested);
         // Absolute ps avoids unrelated PATH-fixture mutation in parallel unit tests.
         let output = Command::new("/bin/ps")

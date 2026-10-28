@@ -592,7 +592,7 @@ fn resolve_app_server_leader_name_fails_closed_on_transport_conflict() {
 
 #[cfg(unix)]
 #[test]
-fn send_to_name_app_server_leader_persists_before_async_delivery() {
+fn send_to_name_app_server_leader_requires_explicit_mailbox_without_a_tmux_endpoint() {
     let ws = named_ws("appserver-leader-send");
     let fake = crate::app_server_test_support::FakeAppServer::start(
         "named-send",
@@ -608,22 +608,23 @@ fn send_to_name_app_server_leader_persists_before_async_delivery() {
             "alpha": app_server_leader_team(&ws, fake.endpoint(), "thread-live", "session-live")
         })),
     );
-    let args = named_send_args(&ws, Some("alpha/leader"), None, None, &["hello appserver"]);
-
-    let result = cmd_send(&args).expect("named app-server send should succeed");
+    let mut args = named_send_args(&ws, Some("alpha/leader"), None, None, &["hello appserver"]);
+    cmd_send(&args).expect_err("a direct send cannot pretend an app-server is a tmux pane");
+    assert!(!ws.join(".team/runtime/team.db").exists());
+    args.presentation.sink = crate::messaging::presentation::PresentationSink::Silent;
+    let result = cmd_send(&args).expect("explicit mailbox needs no physical endpoint");
     let value = match result.output {
         CmdOutput::Json(value) => value,
         other => panic!("expected json output, got {other:?}"),
     };
 
-    assert_eq!(value["ok"], json!(true));
-    let message_id = value["message_id"].as_str().expect("persisted message id");
-    assert!(message_id.starts_with("msg_"));
-    let store = crate::message_store::MessageStore::open(&ws).unwrap();
-    assert!(store.message_exists(message_id).unwrap());
+    assert_eq!(value["status"], json!("stored"));
+    let inbox = crate::inbox_store::read(&ws, "leader", 3, Some("alpha")).unwrap();
+    assert_eq!(inbox["messages"][0]["content"], "hello appserver");
+    assert!(!ws.join(".team/runtime/team.db").exists());
     assert!(
         fake.received_turns().is_empty(),
-        "send returns after persistence; coordinator owns physical delivery"
+        "mailbox is storage only and must not invoke any provider transport"
     );
     let _ = std::fs::remove_dir_all(&ws);
 }

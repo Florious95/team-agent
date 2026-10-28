@@ -115,14 +115,16 @@ fn run_dispatches_send_to_handler_returns_ok() {
         "send".to_string(),
         "w1".to_string(),
         "hello".to_string(),
+        "--mailbox".to_string(),
         "--workspace".to_string(),
         ws.to_string_lossy().to_string(),
     ];
     assert_eq!(
         run(&argv, Path::new(".")),
         ExitCode::Ok,
-        "run must dispatch `send` to cmd_send and derive ExitCode::Ok from the delivery outcome"
+        "run must dispatch an explicit mailbox send without a coordinator"
     );
+    assert_eq!(crate::inbox_store::read(&ws, "w1", 3, None).unwrap()["messages"][0]["content"], "hello");
 }
 
 #[test]

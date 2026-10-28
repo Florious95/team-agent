@@ -338,16 +338,15 @@ esac
         "report_result stdio call: {}",
         report.body
     );
-    let result_id = report.body["result_id"]
-        .as_str()
-        .expect("durable result id");
-    let result_row = harness
-        .result_row(result_id)
-        .expect("report_result persists result");
-    assert_eq!(result_row.owner_team_id.as_deref(), Some("teamA"));
-    assert_eq!(result_row.agent_id, "worker_a");
-    assert_eq!(result_row.task_id, "task_mcp");
-    harness.drive_delivery_twice();
+    let message_id = report.body["message_id"].as_str().expect("durable inbound receipt id");
+    let inbox = crate::inbox_store::read(harness.workspace_path(), "leader", 10, Some("teamA")).unwrap();
+    let record = inbox["messages"].as_array().unwrap().iter()
+        .find(|record| record["message_id"] == message_id).expect("report persisted in the inbox");
+    assert_eq!(record["team"], "teamA");
+    assert_eq!(record["sender"], "worker_a");
+    assert_eq!(record["envelope"]["task_id"], "task_mcp");
+    assert!(harness.result_row(message_id).is_none(), "no result-ledger coupling");
+    assert!(harness.message_rows_containing(&result_marker).is_empty(), "no coordinator outbox");
     assert!(harness.pane_text("leader").contains(&marker));
     assert!(harness.pane_text("leader").contains(&result_marker));
 

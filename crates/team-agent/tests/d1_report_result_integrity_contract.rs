@@ -7,8 +7,8 @@
 //!   warnings are diagnostic/advisory and must not become task attribution authority.
 //!
 //! Contract: in D1, low-evidence `success` reports remain accepted but return an
-//! explicit structured `warnings[]` array. Partial/blocked reports with not-run
-//! tests are accepted and honestly marked as unverified.
+//! explicit structured `warnings[]` array in the durable envelope. Partial/blocked
+//! reports with not-run tests are stored and honestly marked as unverified.
 
 #![allow(clippy::expect_used)]
 
@@ -44,8 +44,6 @@ fn d1_success_with_all_not_run_tests_returns_ok_true_with_warning() {
         "artifacts": [],
         "next_actions": []
     }));
-
-    assert_eq!(out.get("ok").and_then(Value::as_bool), Some(true));
     assert_warning(
         &out,
         "result_success_without_executed_tests",
@@ -69,8 +67,6 @@ fn d1_success_with_scalar_tests_normalized_to_not_run_warns() {
         "artifacts": [],
         "next_actions": []
     }));
-
-    assert_eq!(out.get("ok").and_then(Value::as_bool), Some(true));
     assert_warning(
         &out,
         "result_success_without_executed_tests",
@@ -94,8 +90,6 @@ fn d1_success_with_change_path_missing_description_warns() {
         "artifacts": [],
         "next_actions": []
     }));
-
-    assert_eq!(out.get("ok").and_then(Value::as_bool), Some(true));
     assert_warning(
         &out,
         "result_change_missing_description",
@@ -124,11 +118,6 @@ fn d1_partial_or_blocked_with_not_run_tests_is_accepted_but_marked_unverified() 
             "next_actions": []
         }));
 
-        assert_eq!(
-            out.get("ok").and_then(Value::as_bool),
-            Some(true),
-            "D1 RED: {status}+not_run remains accepted in warning-only mode; got {out}"
-        );
         assert_warning(
             &out,
             "result_not_verified",
@@ -205,6 +194,9 @@ fn d1_collect_preserves_warning_envelope_without_verified_upgrade() {
 
 fn report(envelope: Value) -> Value {
     let ws = temp_workspace("d1");
+    std::fs::create_dir_all(ws.join(".team/runtime")).unwrap();
+    std::fs::write(ws.join(".team/runtime/state.json"),
+        serde_json::to_vec(&json!({"teams": {"current": {"agents": {"worker-d1": {}}}}})).unwrap()).unwrap();
     let tools = TeamOrchestratorTools::with_identity(
         &ws,
         Some(AgentId::new("worker-d1")),
@@ -224,7 +216,16 @@ fn report(envelope: Value) -> Value {
             None,
         )
         .expect("D1 contract setup: report_result should accept the envelope");
-    Value::Object(ok.fields)
+    assert_eq!(ok.fields["ok"], true);
+    assert_eq!(ok.fields["status"], "stored");
+    let records = std::fs::read_to_string(ws.join(".team/inbox/leader.jsonl")).unwrap();
+    let records: Vec<Value> = records.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["message_id"], ok.fields["message_id"]);
+    assert!(!ws.join(".team/runtime/team.db").exists());
+    let envelope = records[0]["envelope"].clone();
+    std::fs::remove_dir_all(ws).unwrap();
+    envelope
 }
 
 fn assert_warning(out: &Value, code: &str, field: &str, red_reason: &str) {

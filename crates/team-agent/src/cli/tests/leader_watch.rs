@@ -4,72 +4,22 @@ use super::*;
 // (DELEGATION sweep, rt-host-a loop #2) — cmd_send persistence + shutdown teardown.
 // =========================================================================
 
-// 1 [P0, CONFIRMED BUG] — cmd_send (cli/send.rs) returns delivery_json synthetic (true,"delivered")
-// and NEVER calls messaging::send_message, so NO `messages` row is persisted. RED: after cmd_send to
-// a worker on a seeded ws (real MessageStore), assert a messages row was PERSISTED (query by
-// recipient+content) — proving the real messaging::send_message -> MessageStore.create_message path.
-// DB-persist is observable without a transport. (messaging::send_message is ALSO a stub today, so the
-// porter wires BOTH cmd_send->send_message AND send_message->persist.)
-//
-// OLD seed: flat `{"agents": {"w1": ...}}` worked because send_message read agents
-// directly off the raw runtime state.
-// NEW seed (Bug 1/2 — team-in-team state scope, see tests/team_in_team_state_scope_red.rs):
-//   cmd_send → resolve_active_team yields a team_key, send_message projects the
-//   raw state through `project_top_level_view(team_key)` which reads agents off
-//   `teams[team_key].agents`. The seed therefore lives under `teams.current.agents`
-//   with `active_team_key=current`; the delegation + persistence behavior under test
-//   is unchanged — only the shape of "an in-team recipient" is now nested.
+// Public mailbox delivery is durable in the inbound log, never the coordinator queue.
 #[test]
-fn cli_send_persists_real_message_row() {
+fn cli_send_mailbox_appends_an_inbox_record_without_a_delivery_row() {
     let ws = deleg_uniq_dir("send");
-    let _ = crate::message_store::MessageStore::open(&ws).unwrap(); // real store at the workspace
-                                                                    // w1 must be a known team agent — golden send.py refuses non-team targets
-                                                                    // (target_not_in_team); an in-team recipient is the one that persists. Bug 1/2
-                                                                    // scopes agents under teams[<key>].agents (NEW shape).
-    crate::state::persist::save_runtime_state(
-        &ws,
-        &serde_json::json!({
-            "active_team_key": "current",
-            "teams": {"current": {"agents": {"w1": {"provider": "copilot"}}}}
-        }),
-    )
-    .unwrap();
-    let args = SendArgs {
-        target: Some("w1".to_string()),
-        message: vec!["hello-real-delegation".to_string()],
-        targets: None,
-        workspace: ws.clone(),
-        team: None,
-        task: None,
-        sender: TrustedSender::leader(),
-        no_ack: false,
-        no_wait: true,
-        watch_result: false,
-        timeout: 0.0,
-        confirm_human: false,
-        json: true,
-        message_id: None,
-        presentation: crate::messaging::presentation::PresentationRequest::default(),
-        pane: None,
-        to_name: None,
-        to_leader: None,
-    };
-    let _ = cmd_send(&args);
-
     let store = crate::message_store::MessageStore::open(&ws).unwrap();
+    crate::state::persist::save_runtime_state(&ws, &serde_json::json!({
+        "active_team_key": "current",
+        "teams": {"current": {"agents": {"w1": {"provider": "copilot"}}}}
+    })).unwrap();
+    let argv = ["send", "w1", "hello-real-delegation", "--mailbox", "--json"].map(str::to_string);
+    assert_eq!(run(&argv, &ws), ExitCode::Ok);
+    let inbox = crate::inbox_store::read(&ws, "w1", 3, None).unwrap();
+    assert_eq!(inbox["messages"][0]["content"], "hello-real-delegation");
     let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-    let count: i64 = conn
-            .query_row(
-                "select count(*) from messages where recipient = 'w1' and content = 'hello-real-delegation'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-    assert!(
-            count >= 1,
-            "cmd_send must delegate to messaging::send_message and PERSIST a `messages` row (recipient=w1); \
-             the synthetic delivery_json writes NO DB row -> count={count}"
-        );
+    let count: i64 = conn.query_row("select count(*) from messages", [], |row| row.get(0)).unwrap();
+    assert_eq!(count, 0);
 }
 
 // 5 [P1, CONFIRMED PARTIAL] — shutdown stops the coordinator but NEVER kills the team tmux session

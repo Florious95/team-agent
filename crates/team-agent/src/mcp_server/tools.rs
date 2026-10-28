@@ -264,7 +264,7 @@ impl TeamOrchestratorTools {
                 serde_json::json!({"status": "stored", "recipient": agent, "mailbox": true})
             } else {
                 let text = format!("Team Agent message from {sender}:\n\n{content}");
-                match endpoint.and_then(|endpoint| crate::direct_delivery::send(&endpoint, &text)) {
+                match endpoint.and_then(|_| directory.send(&agent, &text)) {
                     Ok(value) => value,
                     Err(error) if message_id.is_some() => serde_json::json!({"status": "stored", "recipient": agent, "delivery_error": error}),
                     Err(error) => return Err(tool_runtime_error(error)),
@@ -491,8 +491,7 @@ impl TeamOrchestratorTools {
             "task_id": env_value["task_id"], "agent_id": sender});
         if normalized.presentation.sink == crate::messaging::presentation::PresentationSink::Leader {
             let delivery = crate::direct_delivery::directory(&self.workspace, team)
-                .and_then(|directory| directory.endpoint("leader"))
-                .and_then(|endpoint| crate::direct_delivery::send(&endpoint, &format!("Team Agent result from {sender}:\n\n{summary}")));
+                .and_then(|directory| directory.send("leader", &format!("Team Agent result from {sender}:\n\n{summary}")));
             match delivery {
                 Ok(_) => { value["status"] = Value::String("reported".into()); }
                 Err(error) => { value["delivery_error"] = Value::String(error); }

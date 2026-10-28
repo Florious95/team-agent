@@ -17,10 +17,12 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
-            "ta-direct-dev-{}-{}",
+            "ta-direct-dev-{}-{}-{}",
             std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+            chrono::Utc::now().timestamp_nanos_opt().unwrap(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         fs::create_dir_all(root.join(".team/runtime")).unwrap();
         let socket = root.join("tmux.sock").to_string_lossy().into_owned();
@@ -33,8 +35,8 @@ from pathlib import Path
 tty.setraw(0)
 os.write(1, b'\x1b[?2004h')
 root = Path({root:?})
-(root / 'ready').touch()
 with (root / 'received').open('ab', buffering=0) as out:
+    (root / 'ready').touch()
     while True:
         out.write(os.read(0, 65536))
 "#,
@@ -123,6 +125,45 @@ impl Drop for Fixture {
             .output();
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+#[test]
+fn logical_send_refuses_stale_binding_but_not_dead_status_or_missing_mcp() {
+    let fixture = Fixture::new();
+    assert!(Command::new("tmux")
+        .args(["-S", &fixture.socket, "rename-window", "-t", &fixture.pane, "worker"])
+        .status().unwrap().success());
+    let output = Command::new("tmux")
+        .args(["-S", &fixture.socket, "display-message", "-p", "-t", &fixture.pane, "#{pane_pid}"])
+        .output().unwrap();
+    assert!(output.status.success());
+    let pid: u64 = String::from_utf8(output.stdout).unwrap().trim().parse().unwrap();
+    let path = fixture.root.join(".team/runtime/state.json");
+    let mut valid: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    valid["teams"]["alpha"]["session_name"] = json!("direct-test");
+    valid["teams"]["alpha"]["agents"]["worker"]["window"] = json!("worker");
+    valid["teams"]["alpha"]["agents"]["worker"]["pane_pid"] = json!(pid);
+    for field in ["session_name", "window", "pane_pid"] {
+        let mut stale = valid.clone();
+        let worker = &mut stale["teams"]["alpha"]["agents"]["worker"];
+        worker[field] = if field == "pane_pid" { json!(0) } else { json!("foreign") };
+        let bytes = serde_json::to_vec(&stale).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        let output = fixture.cli(&["send", "worker", "must not inject", "--team", "alpha"]);
+        assert!(!output.status.success(), "stale {field} was accepted");
+        assert!(fixture.tools().send_message(
+            &MessageTarget::Single("worker".into()), "must not inject", None, None, None,
+        ).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert!(fs::read(fixture.root.join("received")).unwrap().is_empty());
+        assert!(!fixture.root.join(".team/inbox").exists());
+        assert!(!fixture.root.join(".team/db").exists());
+    }
+    fs::write(&path, serde_json::to_vec(&valid).unwrap()).unwrap();
+    let output = fixture.cli(&["send", "worker", "live despite dead status", "--team", "alpha"]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    fixture.received("Team Agent message from leader:\n\nlive despite dead status");
+    assert!(!fixture.root.join(".team/db").exists());
 }
 
 #[test]

@@ -712,7 +712,7 @@ pub fn select_runtime_state(workspace: &Path, team: Option<&str>) -> Result<Valu
     resolve_runtime_team_scope(workspace, team).map(|resolved| resolved.state)
 }
 
-fn team_selector_matches(team: &str, key: &str, value: &Value) -> bool {
+pub(crate) fn team_selector_matches(team: &str, key: &str, value: &Value) -> bool {
     if team == key {
         return true;
     }

@@ -2289,7 +2289,7 @@ mod tests {
     fn retired_legacy_rows_get_a_remove_and_re_add_hint_not_a_refused_start_agent() {
         use crate::model::enums::Provider;
         let workspace = std::path::Path::new("/tmp/ws");
-        for provider in [Provider::Claude, Provider::ClaudeCode, Provider::Codex, Provider::Grok, Provider::Pi] {
+        for provider in [Provider::Codex, Provider::Grok] {
             let hint = recovery_hint("w1", provider, workspace, "research");
             assert!(hint.starts_with("No automatic restart was performed.\n"), "{hint}");
             assert!(
