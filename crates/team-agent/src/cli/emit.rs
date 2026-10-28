@@ -234,7 +234,8 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
 
 fn prepare_control_args(command: &str, args: &[String], cwd: &Path) -> Result<super::arguments::CheckedArgs, CliError> {
     let mut checked = super::arguments::parse(command, args)?;
-    if !checked.help { checked.tokens = resolve_command_scope(command, checked.tokens, cwd)?; }
+    let raw_send = command == "send" && checked.tokens.iter().any(|token| token == "--socket");
+    if !checked.help && !raw_send { checked.tokens = resolve_command_scope(command, checked.tokens, cwd)?; }
     Ok(checked)
 }
 
@@ -271,7 +272,24 @@ fn dispatch_prepared(command: &str, checked: super::arguments::CheckedArgs, cwd:
     }
     match command {
         "quick-start" => cmd_quick_start(&quick_start_args(args, cwd)?).map(emit_result),
-        "send" => cmd_send(&send_args(args, cwd)?).map(emit_result),
+        "send" => {
+            let parsed = parse_args(args);
+            if parsed.socket.is_some() || parsed.dialect.is_some() {
+                let socket = parsed.socket.as_deref().ok_or_else(|| CliError::Usage("raw send requires --socket".into()))?;
+                let pane = parsed.pane.as_deref().ok_or_else(|| CliError::Usage("raw send requires --pane".into()))?;
+                let dialect = parsed.dialect.as_deref().ok_or_else(|| CliError::Usage("raw send requires --dialect".into()))?;
+                if parsed.targets.is_some() || parsed.to_name.is_some() || parsed.to_leader.is_some() || parsed.mailbox {
+                    return Err(CliError::Usage("raw send cannot be combined with semantic addressing or --mailbox".into()));
+                }
+                crate::direct_delivery::direct_send(socket, pane, dialect, &parsed.positionals.join(" ")).map_err(CliError::Usage)?;
+                Ok(emit_result(CmdResult::from_json(serde_json::json!({"status": "sent", "delivery": "physical", "pane_id": pane}), parsed.json)))
+            } else { cmd_send(&send_args(args, cwd)?).map(emit_result) }
+        },
+        "locate" => {
+            let parsed = parse_args(args);
+            let value = crate::direct_delivery::locate(&workspace(&parsed, cwd), parsed.team.as_deref()).map_err(CliError::Usage)?;
+            Ok(emit_result(CmdResult::from_json(value, parsed.json)))
+        },
         "status" => cmd_status_for_team(&status_args(args, cwd), parse_args(args).team.as_deref())
             .map(emit_result),
         "shutdown" => cmd_shutdown(&shutdown_args(args, cwd)?).map(emit_result),
@@ -373,7 +391,7 @@ pub(crate) fn default_help() -> String {
     append_help_section(
         &mut out,
         "Observation and collaboration",
-        &["leaders", "doctor", "approvals"],
+        &["locate", "leaders", "doctor", "approvals"],
     );
     append_help_section(
         &mut out,
@@ -450,9 +468,11 @@ pub(super) fn command_help(command: Option<&str>) -> String {
             "TEAMDIR contains TEAM.md and agents/; --workspace selects the runtime project.\n--name sets the team name; --team/--team-id selects the team; --yes retains compatibility; --detail includes full diagnostics.\nProviders must be installed and signed in. Declare provider/model/effort in role files; permission bypass defaults to false.\n--backend tmux is for POSIX; conpty requires a Windows host and an installed ConPTY shim.",
             "team-agent quick-start\nteam-agent quick-start ./roles --workspace ./project\nteam-agent quick-start . --json",
             "Compatibility bridge only. In the authorized Leader context, prefer team-agent start --from TEAMDIR for complete new configuration and team-agent start for later activation. Check models and native sign-in first; inspect status and actual replies after starting."),
-        "send" => ("<agent> is an agent name from status; MESSAGE is the task text.\n--mailbox stores a message without injecting it into the current conversation; default delivery targets the agent conversation.",
+        "send" => ("<agent> is an agent name from the read-only endpoint snapshot; MESSAGE is the task text.\nPaste + Enter completes synchronously without coordinator queues or SQLite writes. Physical success is not provider acceptance.\n--socket SOCKET --pane %N --dialect enter sends directly without a workspace snapshot; double-enter submits twice.\n--mailbox appends to the independent inbox without injecting into the conversation.",
             "team-agent send worker 'Calculate 245 * 37 and reply to the leader.'\nteam-agent send worker 'Review the changes' --workspace . --team help-demo\nteam-agent send worker 'Read this when next available' --mailbox",
             "Acceptance is not delivery or completion. Wait for an actual reply; use team-agent inbox leader -n 3. Diagnose with status/doctor rather than repeated sends."),
+        "locate" => ("Read the endpoint snapshot and list live tmux panes without starting or contacting the coordinator.",
+            "team-agent locate --workspace . --json\nteam-agent locate --team help-demo", "Use the socket, pane_id and dialect for raw send, or the agent name for workspace-scoped send."),
         "inbox" => ("<agent> is the recipient name; -n/--limit bounds the message count. Reading replies does not resend messages.",
             "team-agent inbox leader -n 3\nteam-agent inbox worker --limit 5\nteam-agent inbox leader --workspace . --team help-demo --json", "Wait for a natural reply, then check team-agent status if needed. Do not inspect worker terminal content."),
         "status" => ("Optional <agent> selects one agent. --summary/--detail retain compatibility and do not add fields.\nNine fields: name/provider/model/effort/runtime_status/activity/health/session_name/tmux_command.\nRuntime, activity and health are distinct. unknown means insufficient evidence; null means unset. No default model is guessed.",
@@ -904,6 +924,7 @@ struct ParsedArgs {
     to_leader: Option<String>,
     provider: Option<String>,
     socket: Option<String>,
+    dialect: Option<String>,
     thread_id: Option<String>,
     message_id: Option<String>,
     mailbox: bool,
@@ -1006,6 +1027,7 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             "--to-leader" => parsed.to_leader = next_arg(args, &mut i),
             "--provider" => parsed.provider = next_arg(args, &mut i),
             "--socket" => parsed.socket = next_arg(args, &mut i),
+            "--dialect" => parsed.dialect = next_arg(args, &mut i),
             "--thread-id" => parsed.thread_id = next_arg(args, &mut i),
             "--message-id" => parsed.message_id = next_arg(args, &mut i),
             "--mailbox" => parsed.mailbox = true,
@@ -2217,8 +2239,8 @@ mod tests {
             .collect();
         assert_eq!(
             expected.len(),
-            34,
-            "the public catalog adds the four canonical lifecycle surfaces and retires the Cursor launcher"
+            35,
+            "the public catalog includes read-only endpoint discovery and the canonical lifecycle surfaces"
         );
         for spec_name in &expected {
             assert!(

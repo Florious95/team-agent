@@ -66,6 +66,8 @@ fn schema(command: &str) -> Option<Schema> {
         ),
         "send" => (
             &[
+                ("--socket", Token),
+                ("--dialect", Token),
                 ("--targets", Token),
                 ("--pane", Token),
                 ("--to-name", Token),
@@ -91,6 +93,7 @@ fn schema(command: &str) -> Option<Schema> {
         "status" => (&[("--detail", Switch), ("--summary", Switch)], 1),
         "models" => (&[("--provider", Token), ("--search", Query)], usize::MAX),
         "inbox" => (&[("--limit", Count)], 1),
+        "locate" => (&[], 0),
         "shutdown" => (&[("--keep-logs", Switch)], 0),
         "restart" => (
             &[

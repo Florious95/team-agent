@@ -13,7 +13,7 @@ use crate::model::ids::{AgentId, TaskId, TeamKey};
 use crate::event_log::EventLog;
 
 // ── REUSE: step 5 state persist / projection ────────────────────────────────
-use crate::state::persist::load_runtime_state;
+use crate::direct_delivery::snapshot as load_runtime_state;
 
 // ── REUSE: step 11 messaging delegate surface ───────────────────────────────
 use crate::messaging::{self, DeliveryStatus, MessageTarget, SendOptions, TrustedSender};
@@ -219,124 +219,66 @@ impl TeamOrchestratorTools {
         mailbox: Option<&Value>,
         presentation: Option<&Value>,
     ) -> Result<SendOutcome, ToolError> {
-        // A worker without a spawn-time identity cannot safely emit a message.
         self.require_captured_identity("send_message")?;
-        let normalized =
-            crate::messaging::presentation::normalize_send_presentation(mailbox, presentation)
-                .map_err(|error| {
-                    ToolError::new(
-                        ToolErrorReason::InvalidToolArguments,
-                        format!("invalid send routing: {error}"),
-                        "PresentationError",
-                    )
-                })?;
-        let presentation = normalized.request;
-        let deprecation = normalized.deprecation;
-        let canonical_owner_team = self.canonical_owner_team_key()?;
+        let _ = (task_id, requires_ack);
         if matches!(scope_override, Some(Scope::Workspace)) {
-            return Err(self.rpc_scope_refused(
-                "send_message",
-                None,
-                scope_override.and_then(scope_override_name),
-            ));
+            return Err(self.rpc_scope_refused("send_message", None, Some("workspace")));
         }
-        if let Some(err) = self.refuse_cross_team_peer(to, None) {
-            return Err(err);
-        }
-        let sender = self.agent_id.clone().ok_or_else(|| {
-            ToolError::new(
-                ToolErrorReason::McpScopeRefused,
-                "send_message requires framework-injected TEAM_AGENT_ID",
-                "IdentityError",
-            )
-        })?;
-        let sender = TrustedSender::from_runtime_identity(sender);
-        let ack = requires_ack.unwrap_or_else(|| requires_ack_for_target(to));
-        // C14/C15/C17 scope audit (#230 I-2/I-6 contract): emit mcp.scope_resolved
-        // for every worker-origin send before any routing/delivery — the funnel
-        // assertions grep this event to verify the worker call was scoped under the
-        // spawn-time owner-team env, not a back-inferred default.
-        EventLog::new(&self.workspace)
-            .write(
-                "mcp.scope_resolved",
-                serde_json::json!({
-                    "tool": "send_message",
-                    "sender": sender.as_str(),
-                    "owner_team_id": canonical_owner_team.as_ref().map(TeamKey::as_str),
-                    "to": match to {
-                        MessageTarget::Single(t) => serde_json::Value::String(t.clone()),
-                        MessageTarget::Broadcast => serde_json::Value::String("*".to_string()),
-                        MessageTarget::Fanout(list) => serde_json::Value::Array(
-                            list.iter().map(|s| serde_json::Value::String(s.clone())).collect(),
-                        ),
-                    },
-                    "requires_ack": ack,
-                }),
-            )
+        let normalized = crate::messaging::presentation::normalize_send_presentation(mailbox, presentation)
             .map_err(tool_runtime_error)?;
-        let opts = SendOptions {
-            origin: crate::messaging::SendOrigin::Mcp,
-            task_id: task_id.map(TaskId::new),
-            route_task_id: true,
-            sender,
-            requires_ack: ack,
-            team: canonical_owner_team,
-            presentation,
-            ..SendOptions::default()
+        let owner_team = self.canonical_owner_team_key()?;
+        let directory = crate::direct_delivery::directory(&self.workspace, owner_team.as_ref().map(TeamKey::as_str))
+            .map_err(tool_runtime_error)?;
+        let sender = self.require_captured_identity("send_message")?.as_str();
+        let targets = match to {
+            MessageTarget::Single(target) if target == "*" => directory.agents().into_iter().filter(|agent| agent != sender).collect(),
+            MessageTarget::Single(target) => vec![target.clone()],
+            MessageTarget::Fanout(targets) => targets.clone(),
+            MessageTarget::Broadcast => directory.agents().into_iter().filter(|agent| agent != sender).collect(),
         };
-        if is_worker_recipient(to) {
-            let out = messaging::send_message(&self.workspace, to, content, &opts)
-                .map_err(tool_runtime_error)?;
-            if matches!(out.status, DeliveryStatus::StoredOnly) {
-                let value = delivery_outcome_value(&out);
-                let mut ok = compact_tool_result(&value)?;
-                if let Some(verification) = out.verification.as_deref() {
-                    ok.fields.insert(
-                        "verification".to_string(),
-                        Value::String(verification.to_string()),
-                    );
-                }
-                if let Some(deprecation) = deprecation {
-                    ok.fields
-                        .insert("warning".to_string(), Value::String(deprecation));
-                }
-                return Ok(SendOutcome::Direct(ok));
+        if targets.is_empty() { return Err(tool_runtime_error("no recipients")); }
+        let stored_only = normalized.request.sink != crate::messaging::presentation::PresentationSink::Leader;
+        let mut destinations = Vec::new();
+        for target in targets {
+            if target != "leader" && !directory.agents().contains(&target) {
+                return Err(ToolError::new(ToolErrorReason::PeerNotInScope,
+                    format!("recipient is not in the captured team: {target}"), "ScopeError"));
             }
-            // tools.py:175-181 — accepted+poll_via ONLY for a REAL message_id; any other
-            // outcome falls back to the compacted direct result. Never invent an
-            // `mcp_<timestamp>` id: it does not exist in the store and makes the
-            // advertised `team-agent inbox <id>` poll a dead end.
-            let message_id = match out.message_id {
-                Some(message_id) if out.ok => message_id,
-                _ => {
-                    let value = delivery_outcome_value(&out);
-                    let ok = compact_tool_result(&value)?;
-                    return Ok(SendOutcome::Direct(ok));
+            let endpoint = directory.endpoint(&target);
+            if !stored_only && target != "leader" {
+                endpoint.as_ref().map_err(tool_runtime_error)?;
+            }
+            if !destinations.iter().any(|(agent, _)| agent == &target) {
+                destinations.push((target, endpoint));
+            }
+        }
+        let mut results = Vec::new();
+        for (agent, endpoint) in destinations {
+            let mut message_id = None;
+            if stored_only || agent == "leader" {
+                let record = crate::inbox_store::record(sender, &agent, content, directory.team.as_deref(), "message");
+                message_id = record.get("message_id").cloned();
+                crate::inbox_store::append(&directory.workspace, &agent, &record).map_err(tool_runtime_error)?;
+            }
+            let mut value = if stored_only {
+                serde_json::json!({"status": "stored", "recipient": agent, "mailbox": true})
+            } else {
+                let text = format!("Team Agent message from {sender}:\n\n{content}");
+                match endpoint.and_then(|endpoint| crate::direct_delivery::send(&endpoint, &text)) {
+                    Ok(value) => value,
+                    Err(error) if message_id.is_some() => serde_json::json!({"status": "stored", "recipient": agent, "delivery_error": error}),
+                    Err(error) => return Err(tool_runtime_error(error)),
                 }
             };
-            return Ok(SendOutcome::WorkerAccepted {
-                poll_via: format!("team-agent inbox {message_id}"),
-                message_id,
-                warning: deprecation,
-            });
+            if let Some(id) = message_id { value["message_id"] = id; }
+            results.push(value);
         }
-        let out = messaging::send_message(&self.workspace, to, content, &opts)
-            .map_err(tool_runtime_error)?;
-        let value = delivery_outcome_value(&out);
-        let mut ok = compact_tool_result(&value)?;
-        if matches!(out.status, DeliveryStatus::StoredOnly) {
-            if let Some(verification) = out.verification.as_deref() {
-                ok.fields.insert(
-                    "verification".to_string(),
-                    Value::String(verification.to_string()),
-                );
-            }
-        }
-        if let Some(deprecation) = deprecation {
-            ok.fields
-                .insert("warning".to_string(), Value::String(deprecation));
-        }
-        Ok(SendOutcome::Direct(ok))
+        let mut value = if results.len() == 1 { results.remove(0) } else {
+            serde_json::json!({"status": "sent", "results": results})
+        };
+        value["ok"] = Value::Bool(true);
+        if let Some(warning) = normalized.deprecation { value["warning"] = Value::String(warning); }
+        Ok(SendOutcome::Direct(ToolOk { fields: object_fields(value) }))
     }
 
     pub(crate) fn refuse_scope_override(&self) -> ToolError {
@@ -467,85 +409,7 @@ impl TeamOrchestratorTools {
                 );
             }
             if !obj.contains_key("task_id") {
-                // Blocker-1 (prerelease 0.4.0): scoped-team task inference +
-                // message-scoped fallback, before defaulting to "manual".
-                //   1. explicit arg
-                //   2. current physical direct turn for this agent
-                //   3. bounded latest reportable direct message with no result yet
-                //   4. latest nonterminal assigned task in teams.<owner>.tasks,
-                //      only when no newer failed/refused/blocked direct turn blocks fallback
-                //   5. "manual" — truly uncorrelated; collect still rejects
-                let owner_team_id_str = self.owner_team_id.as_ref().map(|t| t.as_str().to_string());
-                let mut attributed_message_id = None;
-                let mut attribution_scope = None;
-                let mut task_id_source = None;
-                let resolved = if let Some(task_id) = task_id {
-                    task_id.to_string()
-                } else if let Some(agent) = self.agent_id.as_ref() {
-                    if let Some(message_id) = current_reportable_message_for(
-                        &self.workspace,
-                        agent.as_str(),
-                        owner_team_id_str.as_deref(),
-                    ) {
-                        attributed_message_id = Some(message_id.clone());
-                        attribution_scope = Some("message");
-                        task_id_source = Some("current_turn_message");
-                        message_id
-                    } else {
-                        match direct_message_attribution_for(
-                            &self.workspace,
-                            agent.as_str(),
-                            owner_team_id_str.as_deref(),
-                        ) {
-                            DirectMessageAttribution::Reportable(message_id) => {
-                                attributed_message_id = Some(message_id.clone());
-                                attribution_scope = Some("message");
-                                task_id_source = Some("direct_message");
-                                message_id
-                            }
-                            DirectMessageAttribution::BlockedByNewer {
-                                message_id,
-                                status,
-                                error,
-                            } => {
-                                push_report_warning(
-                                    obj,
-                                    serde_json::json!({
-                                        "code": "result_attribution_blocked_by_newer_direct_message",
-                                        "field": "task_id",
-                                        "severity": "warning",
-                                        "advisory": true,
-                                        "message_id": message_id,
-                                        "message_status": status,
-                                        "message_error": error,
-                                    }),
-                                );
-                                "manual".to_string()
-                            }
-                            DirectMessageAttribution::None => latest_task_for_assignee(
-                                &self.workspace,
-                                agent.as_str(),
-                                owner_team_id_str.as_deref(),
-                            )
-                            .unwrap_or_else(|| "manual".to_string()),
-                        }
-                    }
-                } else {
-                    "manual".to_string()
-                };
-                obj.insert("task_id".to_string(), Value::String(resolved));
-                if let Some(message_id) = attributed_message_id {
-                    obj.entry("attributed_message_id")
-                        .or_insert(Value::String(message_id));
-                }
-                if let Some(scope) = attribution_scope {
-                    obj.entry("attribution_scope")
-                        .or_insert(Value::String(scope.to_string()));
-                }
-                if let Some(source) = task_id_source {
-                    obj.entry("task_id_source")
-                        .or_insert(Value::String(source.to_string()));
-                }
+                obj.insert("task_id".to_string(), Value::String(task_id.unwrap_or("manual").to_string()));
             }
             // The framework capture is authoritative even when a matching request
             // value was supplied; this also canonicalizes surrounding whitespace.
@@ -617,13 +481,24 @@ impl TeamOrchestratorTools {
             }
         }
         let owner_team = self.canonical_owner_team_key()?;
-        messaging::report_result_for_owner_team(
-            &self.workspace,
-            &env_value,
-            owner_team.as_ref().map(TeamKey::as_str),
-        )
-        .map_err(tool_runtime_error)
-        .and_then(|value| compact_tool_result(&value))
+        let team = owner_team.as_ref().map(TeamKey::as_str);
+        let sender = self.require_captured_identity("report_result")?.as_str();
+        let summary = env_value.get("summary").and_then(Value::as_str).unwrap_or("");
+        let mut record = crate::inbox_store::record(sender, "leader", summary, team, "result");
+        record["envelope"] = env_value.clone();
+        crate::inbox_store::append(&self.workspace, "leader", &record).map_err(tool_runtime_error)?;
+        let mut value = serde_json::json!({"ok": true, "status": "stored", "message_id": record["message_id"],
+            "task_id": env_value["task_id"], "agent_id": sender});
+        if normalized.presentation.sink == crate::messaging::presentation::PresentationSink::Leader {
+            let delivery = crate::direct_delivery::directory(&self.workspace, team)
+                .and_then(|directory| directory.endpoint("leader"))
+                .and_then(|endpoint| crate::direct_delivery::send(&endpoint, &format!("Team Agent result from {sender}:\n\n{summary}")));
+            match delivery {
+                Ok(_) => { value["status"] = Value::String("reported".into()); }
+                Err(error) => { value["delivery_error"] = Value::String(error); }
+            }
+        }
+        Ok(ToolOk { fields: object_fields(value) })
     }
 
     /// `get_team_status`: return the owner-team-scoped machine-readable status.
