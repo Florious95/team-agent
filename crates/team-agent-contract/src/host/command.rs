@@ -354,12 +354,43 @@ impl PublicCommand {
         Err(HostError::new("native image not on PATH after its wrappers", HostErrorKind::Unsupported))
     }
 
+    /// Like [`Self::native_image`], but a route that first reaches a vendor
+    /// `#!<abs>/env <interpreter>` launcher script (an npm install) execs into
+    /// the same PATH's native `interpreter`: `env` re-resolves it through the
+    /// PATH this route exports. Any other `#!` script is a user wrapper.
+    pub fn env_launcher_image(&self, interpreter: &str) -> Result<PathBuf, super::HostError> {
+        use super::{HostError, HostErrorKind};
+        for candidate in self.route() {
+            let image = candidate.canonicalize().map_err(|error| HostError::io("public command route", error))?;
+            let mut head = Vec::with_capacity(256);
+            std::fs::File::open(&image).and_then(|file| file.take(256).read_to_end(&mut head))
+                .map_err(|error| HostError::io("public command route image", error))?;
+            if !head.starts_with(b"#!") {
+                return Ok(image);
+            }
+            if env_shebang(&head, interpreter) {
+                return Self::resolve(interpreter, &self.search_path)?.native_image();
+            }
+        }
+        Err(HostError::new("native image not on PATH after its wrappers", HostErrorKind::Unsupported))
+    }
+
     /// The pane entrypoint for this command, fencing the bytes PATH selected.
     pub fn launch_entrypoint(&self, sha256: crate::contract::types::Digest) -> crate::contract::plan::LaunchEntrypoint {
         crate::contract::plan::LaunchEntrypoint {
             command: self.name.clone(), search_path: self.search_path.clone(), executable: self.entry.clone(), sha256,
         }
     }
+}
+
+/// Exactly `#!<abs>/env <interpreter>`, no options: only then does `env`
+/// look the interpreter up on PATH rather than run a fixed one.
+fn env_shebang(head: &[u8], interpreter: &str) -> bool {
+    let line = head.split(|byte| *byte == b'\n').next().unwrap_or_default();
+    let Some(line) = std::str::from_utf8(line).ok().and_then(|line| line.trim_end().strip_prefix("#!")) else { return false };
+    let mut words = line.split_whitespace();
+    matches!((words.next(), words.next(), words.next()), (Some(env), Some(name), None)
+        if name == interpreter && env.starts_with('/') && std::path::Path::new(env).file_name().is_some_and(|file| file == "env"))
 }
 
 fn path_matches(name: &str, search_path: &std::ffi::OsStr) -> Vec<PathBuf> {

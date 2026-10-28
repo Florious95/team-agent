@@ -43,6 +43,34 @@ fn role(args: &QuickStartArgs, name: &str, provider: &str) {
 }
 
 #[test]
+fn pi_contract_keeps_all_instruction_layers_at_launch_and_preserves_legacy_pi() {
+    use team_agent::contract_runtime::prompt::{Layer, Source};
+    use team_agent::model::yaml::Value;
+    let (_sandbox, args) = fixture();
+    std::fs::write(args.workspace.join("AGENTS.md"), "project instructions").unwrap();
+    let role = "---\nprovider: pi_tui\nmodel: openai-codex/gpt-6-luna\neffort: ultra\n---\nPi role instructions\n";
+    std::fs::write(args.agents_dir.join("agents/worker.md"), role).unwrap();
+    let config = read_team_with_user_source(&args, || Ok(Some(Source {
+        path: args.workspace.join("global.md"), contents: "global instructions".into(),
+    }))).unwrap().unwrap();
+    let worker = &config.roles[0];
+    assert_eq!(worker.provider.as_str(), "pi_tui");
+    assert_eq!(worker.effort.as_deref(), Some("ultra"));
+    assert!(!worker.bypass);
+    assert_eq!(worker.prompt.sources.iter().map(|source| source.layer).collect::<Vec<_>>(),
+        [Layer::UserGlobal, Layer::Project, Layer::Role, Layer::TeamExplicit]);
+    for content in ["global instructions", "project instructions", role, "A bounded task."] {
+        assert!(worker.prompt.text.contains(content));
+    }
+    let spec = team_agent::compiler::compile_team(&args.agents_dir).unwrap();
+    let compiled = &spec.get("agents").and_then(Value::as_list).unwrap()[0];
+    assert_eq!(compiled.get("provider").and_then(Value::as_str), Some("pi_tui"));
+    assert!(!args.workspace.join(".team").exists());
+    std::fs::write(args.agents_dir.join("agents/worker.md"), role.replace("pi_tui", "pi")).unwrap();
+    assert!(read_team(&args).unwrap().is_none());
+}
+
+#[test]
 fn public_compiler_accepts_kiro_without_legacy_effort_inheritance() {
     use team_agent::model::yaml::Value;
     let (_sandbox, args) = fixture();

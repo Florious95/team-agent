@@ -260,8 +260,10 @@ fn resolve_launch_inner(
             // another seat, and both still need the per-generation runtime key.
             McpIsolation::OwnedServerIsolated
                 if matches!(descriptor.mcp.carrier, Support::Supported(McpCarrier::ScopedConfig | McpCarrier::Argv))
-                    && descriptor.mcp.scope == ResourceScope::WorkingDirectory
-                    && !descriptor.workspace.shared_cwd
+                    && ((descriptor.mcp.scope == ResourceScope::WorkingDirectory
+                            && !descriptor.workspace.shared_cwd)
+                        || (descriptor.mcp.scope == ResourceScope::RuntimeRoot
+                            && descriptor.mcp.carrier == Support::Supported(McpCarrier::Argv)))
                     && descriptor.workspace.requires_materialization_lease
                     && descriptor.tool_names.naming == Support::Supported(ToolNaming::RuntimeBound)
                     && descriptor.probe_sources.server == Support::Supported(ProbeSource::ServerLifecycle)

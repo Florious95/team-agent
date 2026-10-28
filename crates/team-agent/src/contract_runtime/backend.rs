@@ -489,7 +489,7 @@ pub(super) fn require_private_primary(
     match selected {
         registry::NativeProvider::GrokBuild => team_agent_contract::providers::grok_build::native::require_private_primary(cwd)?,
         registry::NativeProvider::Codex => team_agent_contract::providers::codex::launcher::require_private_primary(cwd)?,
-        registry::NativeProvider::Kiro | registry::NativeProvider::Cursor => {}
+        registry::NativeProvider::Kiro | registry::NativeProvider::Cursor | registry::NativeProvider::Pi => {}
     }
     Ok(())
 }
