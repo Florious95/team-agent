@@ -66,27 +66,11 @@ impl Case {
     }
 
     fn path(&self) -> PathBuf {
-        self.sibling(&std::process::id().to_string())
-    }
-
-    /// `<key>.<suffix>.json`; an empty suffix names the pre-#372 single slot.
-    fn sibling(&self, suffix: &str) -> PathBuf {
-        let name = key("owner", "worker");
-        let file = if suffix.is_empty() {
-            format!("{name}.json")
-        } else {
-            format!("{name}.{suffix}.json")
-        };
-        self.ws.join(".team/runtime/mcp-handshakes").join(file)
-    }
-
-    fn write_private(&self, path: &Path, value: &Value) {
-        std::fs::write(path, serde_json::to_vec(value).unwrap()).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
-    }
-
-    fn receipt(&self) -> Value {
-        serde_json::from_slice(&std::fs::read(self.path()).unwrap()).unwrap()
+        self.ws.join(".team/runtime/mcp-handshakes").join(format!(
+            "{}.{}.json",
+            key("owner", "worker"),
+            std::process::id()
+        ))
     }
 
     fn publish(&self) {
@@ -114,27 +98,29 @@ impl Drop for Case {
 
 #[test]
 fn issue345_missing_mcp_config_does_not_disable_eager_admission() {
-    // The Case seat is Copilot, the surviving eager-handshake legacy worker.
-    let mut case = Case::new();
-    case.state["agents"]["worker"]
-        .as_object_mut()
-        .unwrap()
-        .remove("mcp_config");
-    assert!(
-        case.admission().is_err(),
-        "missing config cannot disable copilot admission"
-    );
-    for value in [Value::Null, json!(false), json!(""), json!(" ")] {
-        case.state["agents"]["worker"]["mcp_config"] = value;
+    for provider in ["copilot"] {
+        let mut case = Case::new();
+        case.state["agents"]["worker"]["provider"] = json!(provider);
+        case.state["agents"]["worker"]
+            .as_object_mut()
+            .unwrap()
+            .remove("mcp_config");
         assert!(
             case.admission().is_err(),
-            "invalid config cannot disable copilot admission"
+            "missing config cannot disable {provider} admission"
         );
+        for value in [Value::Null, json!(false), json!(""), json!(" ")] {
+            case.state["agents"]["worker"]["mcp_config"] = value;
+            assert!(
+                case.admission().is_err(),
+                "invalid config cannot disable {provider} admission"
+            );
+        }
     }
 }
 
 #[test]
-fn missing_handshake_defers_then_a_live_scoped_receipt_admits() {
+fn missing_handshake_is_unready_then_a_live_scoped_receipt_is_recognized() {
     let case = Case::new();
     assert!(case.admission().is_err());
     case.publish();
@@ -143,6 +129,68 @@ fn missing_handshake_defers_then_a_live_scoped_receipt_admits() {
         .unwrap()
         .expect("eager client must require a receipt");
     revalidate(&admission, &case.target, &case.panes).unwrap();
+}
+
+#[test]
+#[ignore = "subprocess helper for PID-isolated publication"]
+fn issue372_child_publisher() {
+    let ws = PathBuf::from(std::env::var_os("ISSUE372_WORKSPACE").unwrap());
+    publish(&ws, "owner", "worker", Utc::now()).unwrap();
+}
+
+#[test]
+fn issue372_child_publication_and_exit_cannot_clobber_live_server() {
+    let case = Case::new();
+    case.publish();
+    let original = std::fs::read(case.path()).unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "mcp_server::readiness::tests::issue372_child_publisher",
+        ])
+        .env("ISSUE372_WORKSPACE", &case.ws)
+        .spawn()
+        .unwrap();
+    let child_path = case.path().parent().unwrap().join(format!(
+        "{}.{}.json",
+        key("owner", "worker"),
+        child.id()
+    ));
+    assert!(child.wait().unwrap().success());
+    assert!(
+        child_path.is_file(),
+        "child must really publish its own receipt"
+    );
+    assert_eq!(std::fs::read(case.path()).unwrap(), original);
+    assert_eq!(
+        case.admission().unwrap().unwrap().server.identity.pid,
+        std::process::id()
+    );
+    // A dead foreign writer in the old shared slot cannot hide the live receipt either.
+    let legacy = case
+        .path()
+        .parent()
+        .unwrap()
+        .join(format!("{}.json", key("owner", "worker")));
+    std::fs::copy(&child_path, &legacy).unwrap();
+    assert!(case.admission().unwrap().is_some());
+    std::fs::write(child_path, b"{broken").unwrap();
+    std::fs::write(legacy, b"{broken").unwrap();
+    assert!(case.admission().unwrap().is_some());
+}
+
+#[test]
+fn issue372_live_legacy_receipt_is_still_recognized() {
+    let case = Case::new();
+    case.publish();
+    let legacy = case
+        .path()
+        .parent()
+        .unwrap()
+        .join(format!("{}.json", key("owner", "worker")));
+    std::fs::rename(case.path(), &legacy).unwrap();
+    assert!(case.admission().unwrap().is_some());
 }
 
 #[test]
@@ -209,100 +257,31 @@ fn changed_current_target_and_new_spawn_do_not_reuse_a_handshake() {
     assert!(case.admission().is_err());
 }
 
-// Receipt pids beyond any real pid_max, so they never collide with this test.
-const EXITED: &str = "4000000001";
-const FOREIGN: &str = "4000000002";
-
-/// A server outside the seat pane (inherited TEAM_AGENT_ID) or an exited one
-/// may hold a newer receipt; neither can mask the seat's live server (#372).
-fn foreign_and_exited(case: &Case) -> (Value, Value) {
-    let newer = (case.started + chrono::Duration::seconds(5)).to_rfc3339();
-    let mut foreign = case.receipt();
-    foreign["started_at"] = json!(newer);
-    foreign["flushed_at"] = json!(newer);
-    foreign["ancestors"] = json!([{"pid": 1_000_000_001_u32, "birth": "fixture-tmux"}]);
-    let mut exited = case.receipt();
-    exited["started_at"] = json!(newer);
-    exited["flushed_at"] = json!(newer);
-    exited["server"]["identity"]["birth_identity"] = json!("exited-server");
-    (foreign, exited)
+#[test]
+fn older_helper_cannot_overwrite_a_newer_handshake() {
+    let case = Case::new();
+    case.publish();
+    let original = std::fs::read(case.path()).unwrap();
+    publish(
+        &case.ws,
+        "owner",
+        "worker",
+        case.started - chrono::Duration::seconds(1),
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(case.path()).unwrap(), original);
 }
 
 #[test]
-fn issue372_foreign_or_exited_receipts_cannot_mask_the_live_seat_server() {
+fn issue372_reused_pid_can_replace_an_older_process_receipt() {
     let case = Case::new();
     case.publish();
-    let (foreign, exited) = foreign_and_exited(&case);
-    case.write_private(&case.sibling(EXITED), &exited);
-    case.write_private(&case.sibling(FOREIGN), &foreign);
-    let admission = case.admission().unwrap().expect("live seat receipt admits");
-    assert_eq!(admission.server.identity.pid, std::process::id());
-    revalidate(&admission, &case.target, &case.panes).unwrap();
-
-    std::fs::remove_file(case.path()).unwrap();
-    assert_eq!(case.admission().unwrap_err(), "mcp_handshake_server_not_live");
-    std::fs::remove_file(case.sibling(EXITED)).unwrap();
-    assert_eq!(case.admission().unwrap_err(), "mcp_handshake_ancestry");
-    std::fs::remove_file(case.sibling(FOREIGN)).unwrap();
-    assert_eq!(case.admission().unwrap_err(), "mcp_handshake_missing");
-}
-
-#[test]
-fn issue372_pre_upgrade_single_slot_receipt_still_admits() {
-    let case = Case::new();
+    let mut receipt = read_json(&case.path(), true).unwrap();
+    receipt["server"]["identity"]["birth_identity"] = json!("previous-process");
+    receipt["started_at"] = json!((Utc::now() + chrono::Duration::hours(1)).to_rfc3339());
+    std::fs::write(case.path(), serde_json::to_vec(&receipt).unwrap()).unwrap();
     case.publish();
-    std::fs::rename(case.path(), case.sibling("")).unwrap();
     assert!(case.admission().unwrap().is_some());
-}
-
-#[test]
-fn issue372_publish_prunes_exited_receipts_and_keeps_live_ones() {
-    let case = Case::new();
-    case.publish();
-    let (foreign, exited) = foreign_and_exited(&case);
-    case.write_private(&case.sibling(""), &exited);
-    case.write_private(&case.sibling(EXITED), &exited);
-    case.write_private(&case.sibling(FOREIGN), &foreign);
-    case.publish();
-    assert!(!case.sibling("").exists());
-    assert!(!case.sibling(EXITED).exists());
-    assert!(case.sibling(FOREIGN).exists(), "a live foreign receipt is only ignored");
-    assert!(case.admission().unwrap().is_some());
-}
-
-#[test]
-fn issue372_publish_resumes_only_this_seats_parked_messages() {
-    let case = Case::new();
-    let store = crate::message_store::MessageStore::open(&case.ws).unwrap();
-    let parked = store
-        .create_message(None, "leader", "worker", "parked", None, false, Some("owner"))
-        .unwrap();
-    let other = store
-        .create_message(None, "leader", "worker", "other team", None, false, Some("other"))
-        .unwrap();
-    for id in [&parked, &other] {
-        assert!(store.claim_for_delivery(id).unwrap());
-        assert!(store.park_delivery_before_input(id, 1).unwrap());
-    }
-    case.publish();
-    let row = |id: &str| -> (String, Option<String>) {
-        rusqlite::Connection::open(store.db_path())
-            .unwrap()
-            .query_row(
-                "select status, error from messages where message_id = ?1",
-                [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap()
-    };
-    assert_eq!(row(parked.as_str()), ("accepted".to_string(), None));
-    assert_eq!(
-        row(other.as_str()),
-        (
-            "queued_until_start".to_string(),
-            Some("mcp_handshake_timeout".to_string())
-        )
-    );
 }
 
 #[test]
@@ -350,7 +329,7 @@ fn config_scope_and_authorized_executable_cannot_be_substituted() {
 fn fake_and_pi_keep_their_existing_non_eager_or_runtime_registry_admission() {
     assert!(!crate::provider::get_adapter(Provider::Fake).requires_worker_mcp_handshake());
     assert!(!crate::provider::get_adapter(Provider::Pi).requires_worker_mcp_handshake());
-    assert!(crate::provider::get_adapter(Provider::Copilot).requires_worker_mcp_handshake());
+    assert!(crate::provider::get_adapter(Provider::CursorAgent).requires_worker_mcp_handshake());
     let case = Case::new();
     for provider in ["fake", "pi"] {
         let mut state = case.state.clone();

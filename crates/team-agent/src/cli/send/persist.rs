@@ -56,44 +56,8 @@ pub(super) fn persist_resolved_target(
         };
     let outcome = messaging::send_message(&selected.run_workspace, target, content, &opts)?;
     let mut value = delivery_outcome_json(&outcome, target, content, &opts);
-    attach_mcp_handshake_wait(&mut value, &selected, target, &outcome);
     append_loud_ensure_fields(&mut value, coordinator_ensure.as_ref());
     Ok(value)
-}
-
-/// #372: name the readiness gate a queued worker message is waiting on.
-/// Observation only; the coordinator owns retry, parking, and notice.
-pub(super) fn attach_mcp_handshake_wait(
-    value: &mut Value,
-    selected: &crate::state::selector::SelectedTeam,
-    target: &MessageTarget,
-    outcome: &DeliveryOutcome,
-) {
-    #[cfg(unix)]
-    if let (MessageTarget::Single(agent), DeliveryStatus::Queued, Some(object)) =
-        (target, outcome.status, value.as_object_mut())
-    {
-        // A contract seat's MCP binding is the framework's own; the legacy
-        // handshake gate does not apply and must not report a wait.
-        let contract = selected
-            .state
-            .get("agents")
-            .and_then(|agents| agents.get(agent.as_str()))
-            .is_some_and(crate::contract_runtime::framework::is_contract);
-        if contract {
-            return;
-        }
-        if let Err(reason) = crate::mcp_server::readiness::preflight(
-            &selected.run_workspace,
-            Some(selected.team_key.as_str()),
-            agent,
-            &selected.state,
-        ) {
-            object.insert("deferred_reason".to_string(), json!(reason));
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = (value, selected, target, outcome);
 }
 
 pub(super) fn routing_ambiguous_value(

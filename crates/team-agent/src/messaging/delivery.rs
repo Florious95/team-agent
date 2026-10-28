@@ -301,156 +301,6 @@ fn prepare_message_state(
     Ok(Ok(prepared))
 }
 
-/// #372: how long a seat may wait for its MCP handshake, counted from its
-/// spawn or the message's creation (whichever is later), before the message
-/// parks instead of re-polling every tick.
-#[cfg(unix)]
-const MCP_HANDSHAKE_WAIT_LIMIT_SECS: i64 = 300;
-
-#[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
-fn mcp_handshake_pending_outcome(
-    workspace: &Path,
-    store: &MessageStore,
-    event_log: &EventLog,
-    state: &serde_json::Value,
-    owner: Option<&str>,
-    message_id: &str,
-    message: &PendingMessage,
-    attempt: u32,
-    reason: &str,
-) -> Result<DeliveryOutcome, MessagingError> {
-    let already_claimed = || DeliveryOutcome {
-        ok: false,
-        status: DeliveryStatus::Refused,
-        message_status: MessageStatusShadow("target_resolved".to_string()),
-        message_id: Some(message_id.to_string()),
-        verification: None,
-        stage: None,
-        reason: Some(DeliveryRefusal::MessageAlreadyClaimed),
-        channel: None,
-        ack_forced_off: false,
-        turn_verification: None,
-    };
-    let spawned_at = state["agents"][message.recipient.as_str()]["spawned_at"].as_str();
-    let waited_s = [spawned_at, message.created_at.as_deref()]
-        .into_iter()
-        .flatten()
-        .filter_map(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
-        .max()
-        .map_or(0, |since| {
-            (chrono::Utc::now() - since.with_timezone(&chrono::Utc)).num_seconds()
-        });
-    if waited_s >= MCP_HANDSHAKE_WAIT_LIMIT_SECS {
-        if !store.park_delivery_before_input(message_id, attempt)? {
-            return Ok(already_claimed());
-        }
-        // A receipt published between this preflight and the park found no
-        // parked row to resume; one re-check keeps that publication from being lost.
-        let published_meanwhile = owner.is_some_and(|owner| {
-            crate::mcp_server::readiness::preflight(workspace, Some(owner), &message.recipient, state)
-                .is_ok()
-        });
-        if published_meanwhile {
-            store.requeue_parked_deliveries(&message.recipient, owner.unwrap_or_default())?;
-        } else {
-            event_log.write("delivery.mcp_handshake_parked", serde_json::json!({
-                "message_id": message_id,
-                "recipient": message.recipient,
-                "reason": reason,
-                "waited_s": waited_s,
-            }))?;
-            notify_mcp_handshake_parked(workspace, store, event_log, state, &message.recipient, reason, waited_s)?;
-        }
-        return Ok(DeliveryOutcome {
-            ok: false,
-            status: DeliveryStatus::Blocked,
-            message_status: MessageStatusShadow(
-                if published_meanwhile { "accepted" } else { "queued_until_start" }.to_string(),
-            ),
-            message_id: Some(message_id.to_string()),
-            verification: Some(format!("{}:{reason}", crate::message_store::MCP_HANDSHAKE_TIMEOUT)),
-            stage: None,
-            reason: None,
-            channel: None,
-            ack_forced_off: false,
-            turn_verification: None,
-        });
-    }
-    // No paste/key has occurred. Only this exact claim may be released; a
-    // concurrent cancellation or newer delivery must never be overwritten.
-    if !store.release_delivery_before_input(message_id, attempt, reason)? {
-        return Ok(already_claimed());
-    }
-    event_log.write("delivery.deferred_mcp_handshake", serde_json::json!({
-        "message_id": message_id,
-        "recipient": message.recipient,
-        "reason": reason,
-        "waited_s": waited_s,
-        "effect": "none",
-    }))?;
-    Ok(DeliveryOutcome {
-        ok: false,
-        status: DeliveryStatus::Degraded,
-        message_status: MessageStatusShadow("target_resolved".to_string()),
-        message_id: Some(message_id.to_string()),
-        verification: Some(reason.to_string()),
-        stage: None,
-        reason: None,
-        channel: None,
-        ack_forced_off: false,
-        turn_verification: None,
-    })
-}
-
-/// One leader notice per seat spawn; later parks of the same spawn stay quiet.
-#[cfg(unix)]
-fn notify_mcp_handshake_parked(
-    workspace: &Path,
-    store: &MessageStore,
-    event_log: &EventLog,
-    state: &serde_json::Value,
-    recipient: &str,
-    reason: &str,
-    waited_s: i64,
-) -> Result<(), MessagingError> {
-    let agent = &state["agents"][recipient];
-    let result_id = format!(
-        "mcp_handshake.timeout:{recipient}:{}",
-        agent["spawned_at"].as_str().unwrap_or("unknown")
-    );
-    let notified = crate::db::schema::open_db(store.db_path())?
-        .query_row(
-            "select 1 from leader_notification_log where result_id = ?1 limit 1",
-            params![result_id],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some();
-    if notified {
-        return Ok(());
-    }
-    let live = agent["pane_pid"]
-        .as_u64()
-        .and_then(|pid| u32::try_from(pid).ok())
-        .map(crate::mcp_server::readiness::live_servers_under)
-        .unwrap_or_default();
-    let live = if live.is_empty() { "none".to_string() } else { format!("{live:?}") };
-    let content = format!(
-        "mcp_handshake.timeout\nerror: messages to {recipient} are parked after waiting {waited_s}s for its MCP handshake ({reason}); live mcp-server pids under its pane: {live}\naction: run team-agent restart {recipient}; parked messages resume automatically once its MCP server publishes a handshake\nlog: .team/logs/events.jsonl"
-    );
-    let outcome = crate::messaging::send_to_leader_receiver(
-        workspace, state, "leader", &content, None, "coordinator", false, Some(&result_id), event_log,
-    );
-    event_log.write("delivery.mcp_handshake_parked_notification", serde_json::json!({
-        "recipient": recipient,
-        "result_id": result_id,
-        "live_mcp_servers": live,
-        "error": outcome.err().map(|error| error.to_string()),
-    }))?;
-    Ok(())
-}
-
 fn deliver_prepared_message(
     workspace: &Path,
     store: &MessageStore,
@@ -793,11 +643,8 @@ fn deliver_prepared_message(
             turn_verification: None,
         });
     }
-    // Startup control must remain reachable before protocol admission: some
-    // clients cannot initialize MCP until their trust prompt is answered.
-    // No business input is allowed before the current tools/list flush. A
-    // readiness-only refusal releases this exact claim without spending an
-    // input attempt; it never holds a pane-input lock or sleeps for startup.
+    // MCP readiness is diagnostic, not permission to type into a live pane.
+    // Missing/foreign evidence never releases the claim or parks this message.
     #[cfg(unix)]
     {
         let admission = crate::mcp_server::readiness::preflight(
@@ -809,10 +656,11 @@ fn deliver_prepared_message(
             Ok(())
         });
         if let Err(reason) = admission {
-            return mcp_handshake_pending_outcome(
-                workspace, store, event_log, state, canonical_owner_team_id.as_deref(),
-                message_id, &message, attempt, reason,
-            );
+            let _ = event_log.write("delivery.mcp_handshake_warning", serde_json::json!({
+                "message_id": message_id,
+                "reason": reason,
+                "delivery_blocked": false,
+            }));
         }
     }
     let rendered = render_message(
@@ -2450,7 +2298,7 @@ pub fn deliver_pending_messages(
              where status in (
                  'pending', 'accepted', 'target_resolved',
                  'submitted_pending_acceptance', 'queued_until_leader_attach', ?1
-             )
+             ) or (status = 'queued_until_start' and error = 'mcp_handshake.timeout')
              order by created_at, message_id",
         )?;
         let rows = stmt.query_map(

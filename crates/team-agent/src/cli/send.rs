@@ -17,7 +17,7 @@ use coordinator::{
 };
 pub use persist::send_options_from_args;
 use persist::{
-    attach_mcp_handshake_wait, initial_delivery_allows_watch, observe_initial_delivery_for_watch,
+    initial_delivery_allows_watch, observe_initial_delivery_for_watch,
     routing_ambiguous_value,
 };
 use presentation::{
