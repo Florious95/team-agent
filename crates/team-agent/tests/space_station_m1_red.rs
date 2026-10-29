@@ -342,14 +342,24 @@ fn stdout_json(output: &Output) -> Value {
     })
 }
 
-/// Messages in an inbox CLI result whose JSON mentions `needle`.
+/// Messages with at least one decoded string value containing `needle`. Matching decoded values
+/// (not serialized JSON text) matters for control characters: serde_json writes ESC as `\u001b`,
+/// so a raw-ESC needle never occurs in `to_string()`.
 fn inbox_hits(inbox: &Value, needle: &str) -> Vec<Value> {
+    fn any_string_contains(value: &Value, needle: &str) -> bool {
+        match value {
+            Value::String(text) => text.contains(needle),
+            Value::Array(items) => items.iter().any(|item| any_string_contains(item, needle)),
+            Value::Object(map) => map.values().any(|child| any_string_contains(child, needle)),
+            _ => false,
+        }
+    }
     inbox["messages"]
         .as_array()
         .cloned()
         .unwrap_or_default()
         .into_iter()
-        .filter(|message| message.to_string().contains(needle))
+        .filter(|message| any_string_contains(message, needle))
         .collect()
 }
 
