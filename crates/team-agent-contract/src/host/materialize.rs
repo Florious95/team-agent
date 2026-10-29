@@ -563,6 +563,32 @@ pub fn shared_entry_key(owner: &InstanceIdentity) -> String {
     format!("team_{}", &super::digest_hex(digest(text.as_bytes()))[..32])
 }
 
+/// Verify only this generation's entry, not mutable user/sibling configuration.
+/// Uses the same no-follow, owner-checked directory lock as merge and removal.
+pub fn verify_shared_entry(request: &OwnedResourceRequest) -> Result<(), HostError> {
+    let root = resolve_cwd(request.path.root())?;
+    let key = shared_entry_key(&request.owner);
+    update_shared(&root, &request.path, false, |current| {
+        let valid = current.is_some_and(|bytes| match request.path.relative().extension().and_then(|extension| extension.to_str()) {
+            Some("toml") => {
+                let mut expected = format!("# >>> team-agent seat entry {key} (removed when the seat stops)\n").into_bytes();
+                expected.extend_from_slice(&request.contents);
+                expected.extend_from_slice(format!("# <<< team-agent seat entry {key}\n").as_bytes());
+                bytes.windows(expected.len()).filter(|window| *window == expected).count() == 1
+            }
+            Some("json") => {
+                let actual = serde_json::from_slice::<serde_json::Value>(bytes).ok();
+                let expected = serde_json::from_slice::<serde_json::Value>(&request.contents).ok();
+                let entry = |document: &serde_json::Value| document.get("mcpServers").and_then(|servers| servers.get(&key)).cloned();
+                expected.as_ref().and_then(entry).is_some_and(|expected| actual.as_ref().and_then(entry) == Some(expected))
+            }
+            _ => false,
+        });
+        if !valid { return Err(HostError::new("shared materialized entry changed", HostErrorKind::Conflict)); }
+        Ok(SharedEdit::Unchanged)
+    }).map(|_| ())
+}
+
 enum SharedEdit {
     Unchanged,
     Write(Vec<u8>),

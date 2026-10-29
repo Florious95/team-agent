@@ -208,6 +208,23 @@ fn failed_postwrite_materialization_preserves_uncertain_receipt() {
 }
 
 #[test]
+fn positive_no_spawn_receipt_compensates_without_stopping_or_replaying() {
+    let sandbox = Sandbox::new();
+    let mut store = sandbox.store();
+    let mut host = FakeHost { spawn_error: Some(Error::SpawnNotStarted(team_agent_contract::host::HostError::new(
+        "materialization receipt", team_agent_contract::host::HostErrorKind::Ownership))), ..Default::default() };
+    let mut io = FakeIo::new("unused");
+    let op = start(&mut store, &mut host, &mut io, "worker");
+    assert_eq!(op.outcome, Outcome::Compensated);
+    assert!(op.pending.is_none());
+    assert_eq!(host.spawned, 0);
+    assert_eq!(host.stopped, 0);
+    assert_eq!(host.removed, 1);
+    assert!(store.seat(&op.target.identity.seat).unwrap().is_none());
+    assert!(sandbox.reopen().unfinished().unwrap().is_empty());
+}
+
+#[test]
 fn spawn_without_receipt_stays_fenced_across_recovery() {
     let sandbox = Sandbox::new();
     let mut store = sandbox.store();

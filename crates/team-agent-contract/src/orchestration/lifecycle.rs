@@ -374,9 +374,13 @@ impl Lifecycle<'_> {
         operation.phase = Phase::F3Spawn;
         operation.pending = Some("spawn".into());
         self.store.save(operation, true)?;
-        let spawned = self
-            .host
-            .spawn(adapter.descriptor, resolved, &operation.target, plan)?;
+        let spawned = match self.host.spawn(adapter.descriptor, resolved, &operation.target, plan) {
+            Err(error @ Error::SpawnNotStarted(_)) => {
+                operation.pending = None;
+                return Err(error);
+            }
+            result => result?,
+        };
         if spawned.process.pid == 0
             || spawned.process.birth_identity.trim().is_empty()
             || spawned.process.executable != plan.executable

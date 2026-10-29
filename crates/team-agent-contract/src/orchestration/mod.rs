@@ -25,6 +25,8 @@ pub enum Error {
     Io(std::io::ErrorKind),
     Host(&'static str),
     HostDiagnostic(crate::host::HostError),
+    /// The physical spawn receipt proves no process launch was attempted.
+    SpawnNotStarted(crate::host::HostError),
     NativeControl(Box<crate::runtime::delivery::InjectionReport>),
     NativeClose(Box<crate::host::tmux::CloseReceipt>),
     NeedsRecovery,

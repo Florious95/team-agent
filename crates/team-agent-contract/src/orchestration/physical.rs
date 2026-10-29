@@ -368,9 +368,12 @@ impl LifecycleHost for PhysicalRuntime<'_> {
             self.clock,
             self.deadline()?,
         );
-        // Missing/partial spawn remains K3 pending+fenced; never guess a PID or replay.
+        // Only the host's positive no-spawn receipt permits compensation.
+        // Missing/partial process effects remain pending+fenced.
         if let Some(error) = spawned.problem {
-            return Err(host_error(error));
+            return Err(if !spawned.may_have_spawned && spawned.target.is_none() && spawned.pane.is_none() {
+                Error::SpawnNotStarted(error)
+            } else { host_error(error) });
         }
         let target = spawned
             .target

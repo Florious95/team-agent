@@ -321,6 +321,7 @@ pub struct FakeHost {
     pub removed: usize,
     pub deliveries: usize,
     pub fail_spawn: bool,
+    pub spawn_error: Option<Error>,
     pub fail_capture: bool,
     pub capture_error: Option<Error>,
     pub fail_stop: bool,
@@ -336,6 +337,7 @@ impl LifecycleHost for FakeHost {
         seat: &SeatRecord,
         plan: &LaunchPlan,
     ) -> Result<SpawnedProcess, Error> {
+        if let Some(error) = &self.spawn_error { return Err(error.clone()); }
         self.spawned += 1;
         if self.fail_spawn {
             return Err(Error::Host("spawn response lost"));

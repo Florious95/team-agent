@@ -716,12 +716,15 @@ impl<R: CommandRunner> TmuxHost<R> {
             ));
         }
         for request in &plan.materialization {
+            let shared = descriptor.teardown.resources.iter().any(|policy| policy.kind == request.kind
+                && policy.disposition == crate::contract::descriptor::ResourceDisposition::SharedEntry);
             let expected = digest(&request.contents);
             let found = materialized.resources.iter().find(|resource| {
                 resource.path == request.path
                     && resource.kind == request.kind
                     && resource.owner == request.owner
-                    && resource.exclusive
+                    && resource.exclusive != shared
+                    && (resource.disposition == crate::contract::descriptor::ResourceDisposition::SharedEntry) == shared
                     && resource.write_effect
                         == (ResourceWriteEffect::Written {
                             bytes_sha256: expected,
@@ -735,7 +738,9 @@ impl<R: CommandRunner> TmuxHost<R> {
             }
             let budget = remaining(clock, deadline)
                 .ok_or_else(|| HostError::new("spawn deadline", HostErrorKind::Deadline))?;
-            if fingerprint_materialized(&request.path, self.limits.max_script_bytes as u64, budget)?
+            if shared {
+                super::materialize::verify_shared_entry(request)?;
+            } else if fingerprint_materialized(&request.path, self.limits.max_script_bytes as u64, budget)?
                 != expected
             {
                 return Err(HostError::new(

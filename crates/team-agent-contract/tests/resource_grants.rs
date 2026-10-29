@@ -408,6 +408,8 @@ fn seat_entries_join_and_leave_a_shared_json_file_without_touching_the_users() {
     let receipt_b = b.merge_shared_entry(&entry_b).unwrap();
     assert_eq!(receipt_a.disposition, ResourceDisposition::SharedEntry);
     assert!(!receipt_a.exclusive);
+    team_agent_contract::host::materialize::verify_shared_entry(&entry_a).unwrap();
+    team_agent_contract::host::materialize::verify_shared_entry(&entry_b).unwrap();
     // A seat is granted only its own planned entry.
     assert!(a.merge_shared_entry(&entry_b).is_err());
     assert!(a.create_exclusive(&entry_a).is_err());
@@ -426,6 +428,8 @@ fn seat_entries_join_and_leave_a_shared_json_file_without_touching_the_users() {
     assert!(!remove_quiescent(&root, &entry_a.owner, &receipt_b).unwrap());
     let value = read();
     assert!(value["mcpServers"].get(&key_a).is_none());
+    assert!(team_agent_contract::host::materialize::verify_shared_entry(&entry_a).is_err());
+    team_agent_contract::host::materialize::verify_shared_entry(&entry_b).unwrap();
     assert_eq!(value["mcpServers"][&key_b]["command"], "/candidate");
     assert!(remove_quiescent(&root, &entry_b.owner, &receipt_b).unwrap());
     assert_eq!(read(), serde_json::json!({"mcpServers": {"user": {"command": "mine"}}, "other": 1}));
@@ -478,6 +482,11 @@ fn seat_entries_join_and_leave_a_shared_toml_file_byte_for_byte() {
     // Merging the same entry again does not duplicate it.
     a.merge_shared_entry(&entry_a).unwrap();
     let text = std::fs::read_to_string(&file).unwrap();
+    team_agent_contract::host::materialize::verify_shared_entry(&entry_a).unwrap();
+    team_agent_contract::host::materialize::verify_shared_entry(&entry_b).unwrap();
+    let mut tampered = entry_a.clone();
+    tampered.contents = b"changed\n".to_vec();
+    assert!(team_agent_contract::host::materialize::verify_shared_entry(&tampered).is_err());
     assert!(text.starts_with(&format!("{user}\n")));
     let key_a = shared_entry_key(&entry_a.owner);
     assert_eq!(text.matches(&format!("[mcp_servers.{key_a}]")).count(), 1);
