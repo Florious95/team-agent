@@ -1598,10 +1598,11 @@ fn a15_route_does_not_relax_running_start_reset_discard_or_unsupported_fork() {
 fn a16_cold_spawn_refuses_retired_or_missing_worker_provider_before_any_pane() {
     use crate::model::yaml::Value as Yaml;
     // A pre-upgrade spec agent naming a retired legacy key, or naming no
-    // provider at all, never falls back to a legacy engine.
+    // provider at all, never falls back to a legacy engine. `grok` is a
+    // runtime alias of grok_build, so it takes the native route instead.
     for (tag, provider, expected) in [
         ("argv-retired-codex", Some("codex"), "legacy codex seat has no runtime in this release"),
-        ("argv-retired-grok", Some("grok"), "legacy grok seat has no runtime in this release"),
+        ("argv-native-grok", Some("grok"), "no legacy fallback"),
         ("argv-missing-provider", None, "unknown worker provider \"\""),
     ] {
         let f = Fixture::new(tag);

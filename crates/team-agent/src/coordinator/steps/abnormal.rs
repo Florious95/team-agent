@@ -2289,21 +2289,21 @@ mod tests {
     fn retired_legacy_rows_get_a_remove_and_re_add_hint_not_a_refused_start_agent() {
         use crate::model::enums::Provider;
         let workspace = std::path::Path::new("/tmp/ws");
-        for provider in [Provider::Codex, Provider::Grok] {
-            let hint = recovery_hint("w1", provider, workspace, "research");
-            assert!(hint.starts_with("No automatic restart was performed.\n"), "{hint}");
-            assert!(
-                hint.contains("seat has no runtime in this release; stop or remove it, then add it again"),
-                "{hint}"
-            );
-            assert!(!hint.contains("start-agent"), "{hint}");
-        }
-        assert!(recovery_hint("w1", Provider::Codex, workspace, "research").ends_with("(provider: codex)"));
-        assert!(recovery_hint("w1", Provider::Grok, workspace, "research").ends_with("(provider: grok)"));
-        let hint = recovery_hint("w1", Provider::Copilot, workspace, "research");
+        let hint = recovery_hint("w1", Provider::Codex, workspace, "research");
+        assert!(hint.starts_with("No automatic restart was performed.\n"), "{hint}");
         assert!(
-            hint.ends_with("To recover manually, run: team-agent start-agent w1 --workspace '/tmp/ws' --team research --force --json"),
+            hint.contains("seat has no runtime in this release; stop or remove it, then add it again"),
             "{hint}"
         );
+        assert!(!hint.contains("start-agent"), "{hint}");
+        assert!(hint.ends_with("(provider: codex)"), "{hint}");
+        // `grok` rows are a runtime alias of grok_build, so they restart like any live provider.
+        for provider in [Provider::Grok, Provider::Copilot] {
+            let hint = recovery_hint("w1", provider, workspace, "research");
+            assert!(
+                hint.ends_with("To recover manually, run: team-agent start-agent w1 --workspace '/tmp/ws' --team research --force --json"),
+                "{hint}"
+            );
+        }
     }
 }

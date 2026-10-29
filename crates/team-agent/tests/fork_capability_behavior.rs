@@ -3,7 +3,7 @@
 //! contract:
 //!   provides:
 //!     - name: A16-capability-matrix-behavior
-//!       what: 升级前遗留的 codex/grok worker 行在注入前即拒；Claude 同名就地分身拒并要求新席位；compatible_api 拒；未验证 provider 拒且理由是未验证
+//!       what: 升级前遗留的 codex worker 行在注入前即拒；grok 行走 grok_build 原生管道；Claude 同名就地分身拒并要求新席位；compatible_api 拒；未验证 provider 拒且理由是未验证
 //! boundary:
 //!   - 不把能力查表当通过
 //!   - 基线红必须是断言失败，不是 unresolved import
@@ -135,8 +135,6 @@ fn legacy_worker_rows_are_refused_as_retired_before_any_injection() {
         ("codex-sub", "codex", "subscription", "codex"),
         ("codex_cli-sub", "codex_cli", "subscription", "codex"),
         ("codex-cli-sub", "codex-cli", "subscription", "codex"),
-        ("grok-sub", "grok", "subscription", "grok"),
-        ("grok-compat", "grok", "compatible_api", "grok"),
     ] {
         let ws = seat_ws(tag, provider, auth);
         let (result, injected) = fork_on(&ws, "Branched conversation. (forked from old-id)\n");
@@ -156,6 +154,27 @@ fn legacy_worker_rows_are_refused_as_retired_before_any_injection() {
         assert!(
             !injected.iter().any(|t| t == "/branch" || t == "/fork"),
             "a retired row must not inject a slash command; got {injected:?}"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+}
+
+#[test]
+fn grok_rows_take_the_native_route_and_refuse_an_unverified_fork_before_any_injection() {
+    // `grok` is a runtime alias of grok_build: the row is not retired, and its
+    // fork refusal comes from the contract pipeline, never a legacy fallback.
+    for (tag, auth) in [("grok-sub", "subscription"), ("grok-compat", "compatible_api")] {
+        let ws = seat_ws(tag, "grok", auth);
+        let (result, injected) = fork_on(&ws, "Branched conversation. (forked from old-id)\n");
+        let text = result.expect_err("an unverified native fork must refuse").to_string();
+        assert!(!text.contains("has no runtime in this release"), "{tag}: grok is not retired; got {text}");
+        assert!(
+            text.contains("no legacy fork or fresh replacement was performed"),
+            "{tag}: refusal must come from the native route; got {text}"
+        );
+        assert!(
+            !injected.iter().any(|t| t == "/branch" || t == "/fork"),
+            "{tag}: a refused native fork must not inject a slash command; got {injected:?}"
         );
         let _ = std::fs::remove_dir_all(&ws);
     }

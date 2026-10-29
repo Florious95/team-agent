@@ -154,151 +154,37 @@ fn tooth_1_existing_launch_smoke_runs_documented_quick_start_verbatim() {
         send.stdout,
         send.stderr
     );
-    let message_id = send.json()["message_id"]
-        .as_str()
-        .expect("TOOTH-1: send must return message_id")
-        .to_string();
-    wait_for_delivery_or_panic(
-        &ws,
-        &message_id,
-        "coder",
-        "documented-path message delivered to coder",
-        || {
-            message_truth(ws.path(), &message_id)
-                .is_some_and(|truth| truth.recipient == "coder" && truth.delivered())
-        },
-        DELIVERY_OBSERVATION_TIMEOUT,
-    );
+    crate::framework::assert_physical_input(&ws, &send.json(), &canary);
 
     shutdown(&ws);
 }
 
 #[test]
-fn tooth_2_existing_send_smoke_proves_worker_receive_report_and_collect() {
-    assert_worker_truth_negative_canary();
-    assert_original_result_collect_negative_canary();
-
+fn tooth_2_existing_send_smoke_proves_physical_receive_and_inbox_report() {
     let code = source_tree(&["tests/e2e/cases/send_001_fake_worker.rs"]);
-    assert!(
-        code.contains(&format!("fn {SEND_CASE}(")),
-        "TOOTH-2 RED: existing send hard-smoke test `{SEND_CASE}` is missing"
-    );
-    for required in [
-        "recipient",
-        "delivered_at",
-        "report_result",
-        "auto-finalization",
-        "collected",
-        "result_id",
-        "task_id",
-        "agent_id",
-        "auto-finalized",
-        "Fake worker handled message",
-    ] {
-        assert!(
-            code.contains(required),
-            "TOOTH-2 RED: `{SEND_CASE}` still stops at accepted/DB existence; missing \
-             worker-receive→report_result→collect evidence token {required:?}. Delivery truth \
-             must use recipient + delivered fields, not a presentation view."
-        );
+    assert!(code.contains(&format!("fn {SEND_CASE}(")));
+    for required in ["assert_physical_input", "report_result", "inbox", "content", "task_id", "agent_id"] {
+        assert!(code.contains(required), "send smoke must retain physical/result evidence: {required}");
     }
-
-    // Independent real-CLI closure canary. The built-in fake worker is a real
-    // spawned `team-agent fake-worker` process: it parses the injected token,
-    // reports a result, and the leader consumes it through the public collect
-    // command.
     let ws = TestWorkspace::new("gate061-send").with_fake_spec(&["a"]);
-    let qs = quick_start_fake(&ws, "gate061-send");
-    assert!(
-        quick_start_workers_available(&qs),
-        "TOOTH-2 setup quick-start failed: stdout={} stderr={}",
-        qs.stdout,
-        qs.stderr
-    );
+    assert!(quick_start_workers_available(&quick_start_fake(&ws, "gate061-send")));
     let canary = format!("gate061-worker-canary-{}", std::process::id());
-    let send = run_ta(
-        &ws,
-        &[
-            "send",
-            "a",
-            &canary,
-            "--workspace",
-            ws.path().to_str().expect("workspace utf8"),
-            "--json",
-        ],
-    );
-    assert!(
-        send.is_success(),
-        "TOOTH-2 send failed: stdout={} stderr={}",
-        send.stdout,
-        send.stderr
-    );
-    let send_json = send.json();
-    let message_id = send_json["message_id"]
-        .as_str()
-        .expect("TOOTH-2 send must return message_id")
-        .to_string();
-    let fake_worker_summary = format!("Fake worker handled message {message_id}");
-
-    wait_for_delivery_or_panic(
-        &ws,
-        &message_id,
-        "a",
-        "message row recipient=a with delivered truth",
-        || {
-            message_truth(ws.path(), &message_id)
-                .is_some_and(|truth| truth.recipient == "a" && truth.delivered())
-        },
-        DELIVERY_OBSERVATION_TIMEOUT,
-    );
-    wait_for_delivery_or_panic(
-        &ws,
-        &message_id,
-        "a",
-        "fake worker received message token and reported a result",
-        || {
-            result_truth_for_message(ws.path(), &message_id).is_some_and(|truth| {
-                truth.task_id == message_id
-                    && truth.agent_id == "a"
-                    && truth.summary == fake_worker_summary
-            })
-        },
-        Duration::from_secs(10),
-    );
-    let fake_worker_result = result_truth_for_message(ws.path(), &message_id)
-        .expect("TOOTH-2 spawned fake-worker result must remain queryable before collect");
-    let owner_team_id = ws.read_state()["active_team_key"]
-        .as_str()
-        .expect("TOOTH-2 active team key")
-        .to_string();
-    let report_summary = format!("worker a MCP received {message_id}: {canary}");
-    run_worker_mcp_report_result(ws.path(), "a", &owner_team_id, &report_summary);
-
-    let conn = Connection::open(ws.path().join(".team/runtime/team.db"))
-        .expect("TOOTH-2 open durable result store");
-    let stored_status: String = conn
-        .query_row(
-            "select status from results where result_id = ?1",
-            [&fake_worker_result.result_id],
-            |row| row.get(0),
-        )
-        .expect("TOOTH-2 spawned fake-worker result remains durable");
-    assert_eq!(
-        stored_status, "collected",
-        "TOOTH-2 auto-finalization must close the spawned fake-worker result"
-    );
-    let supplemental_count: i64 = conn
-        .query_row(
-            "select count(*) from results where envelope like ?1",
-            [format!("%{report_summary}%")],
-            |row| row.get(0),
-        )
-        .expect("TOOTH-2 count supplemental MCP result");
-    assert_eq!(
-        supplemental_count, 1,
-        "TOOTH-2 explicit MCP report must remain a separate durable auto-finalized result"
-    );
-
+    let path = ws.path().to_str().unwrap();
+    let send = run_ta(&ws, &["send", "a", &canary, "--workspace", path, "--json"]);
+    assert!(send.is_success(), "{} {}", send.stdout, send.stderr);
+    crate::framework::assert_physical_input(&ws, &send.json(), &canary);
+    let state = ws.read_state();
+    let owner = state["active_team_key"].as_str().unwrap();
+    run_worker_mcp_report_result(ws.path(), "a", owner, &canary);
+    let inbox = run_ta(&ws, &["inbox", "leader", "--workspace", path, "--json"]);
+    assert!(inbox.is_success());
+    let value = inbox.json();
+    let records = value["messages"].as_array().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["envelope"]["summary"], canary);
+    assert_eq!(records[0]["envelope"]["agent_id"], "a");
+    assert_eq!(records[0]["envelope"]["task_id"], "manual");
+    assert_eq!(run_ta(&ws, &["inbox", "leader", "--workspace", path, "--json"]).stdout, inbox.stdout);
     shutdown(&ws);
 }
 

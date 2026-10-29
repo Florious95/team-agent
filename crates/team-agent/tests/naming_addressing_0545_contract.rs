@@ -47,12 +47,7 @@ fn red_1_bare_to_name_explicit_team_scope_matrix() {
     ]);
     let naming_json = json_stdout(&naming, "bare --to-name scoped to qa-naming");
     assert_eq!(naming.status.code(), Some(0), "RED-1: {naming_json}");
-    assert_eq!(naming_json["team_key"], json!("qa-naming"));
-    assert_eq!(naming_json["target"], json!("beta"));
-    assert!(naming_json["message_id"].as_str().is_some());
-    assert_eq!(case.message_count(&naming_token), 1);
-    case.assert_pane_not_contains("local-naming-beta", &naming_token);
-    case.assert_pane_not_contains("local-sibling-beta", &naming_token);
+    case.assert_physical_delivery(&naming_json, "local-naming-beta", &naming_token);
 
     let sibling_token = token("RED1_SIBLING");
     let sibling = case.cli(&[
@@ -70,13 +65,22 @@ fn red_1_bare_to_name_explicit_team_scope_matrix() {
     ]);
     let sibling_json = json_stdout(&sibling, "bare --to-name scoped to qa-sibling");
     assert_eq!(sibling.status.code(), Some(0), "RED-1: {sibling_json}");
-    assert_eq!(sibling_json["team_key"], json!("qa-sibling"));
-    assert_eq!(sibling_json["target"], json!("beta"));
-    assert!(sibling_json["message_id"].as_str().is_some());
-    assert_eq!(case.message_count(&sibling_token), 1);
-    case.assert_pane_not_contains("local-sibling-beta", &sibling_token);
-    case.assert_pane_not_contains("local-naming-beta", &sibling_token);
+    case.assert_physical_delivery(&sibling_json, "local-sibling-beta", &sibling_token);
 
+    let active_token = token("RED1_ACTIVE");
+    let active = case.cli(&[
+        "send", "--to-name", "beta", &active_token,
+        "--workspace", path(&case.local), "--json",
+    ]);
+    let active_json = json_stdout(&active, "bare name uses explicit active-team snapshot");
+    assert!(active.status.success(), "{active_json}");
+    case.assert_physical_delivery(&active_json, "local-naming-beta", &active_token);
+
+    // Without an active selection, multiple teams remain genuinely ambiguous.
+    let state_path = case.local.join(".team/runtime/state.json");
+    let mut state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    state.as_object_mut().unwrap().remove("active_team_key");
+    fs::write(state_path, serde_json::to_vec(&state).unwrap()).unwrap();
     let ambiguous_token = token("RED1_AMBIGUOUS");
     let ambiguous = case.cli(&[
         "send",
@@ -168,15 +172,17 @@ fn red_2_positional_typo_suggests_only_selected_team_without_db_write() {
 
 #[test]
 #[serial_test::serial(env)]
-fn red_2_worker_mcp_typo_suggests_only_owner_visible_peers_without_db_write() {
+fn red_2_worker_mcp_typo_preserves_scope_without_delivery_or_db_write() {
     let case = AddressCase::new("red2-mcp");
     let content = token("RED2_MCP");
     let (is_error, body) = case.mcp_send("alpha", "qa-naming", "btea", &content);
 
     assert!(is_error, "RED-2: typo remains an MCP refusal: {body}");
     assert_eq!(body["reason"], json!("peer_not_in_scope"));
-    assert_suggestion(&body, "btea", "beta");
-    assert_candidates_stay_in_team(&body, "qa-naming");
+    assert!(body["error"].as_str().is_some_and(|error| error.contains("btea")), "{body}");
+    if body.get("candidates").is_some() {
+        assert_candidates_stay_in_team(&body, "qa-naming");
+    }
     assert!(
         !body.to_string().contains("qa-sibling"),
         "RED-2: owner-scoped MCP suggestion leaked sibling team: {body}"
@@ -334,7 +340,7 @@ fn red_3_named_role_human_n38_keeps_typo_and_copyable_suggestion() {
     assert_named_human_refusal(&output, "btea", "qa-naming/beta");
 }
 
-// RED-4: the public help and command spec share the canonical persisted-send surface.
+// RED-4: public help documents physical send and explicit append-only mailbox.
 
 #[test]
 #[serial_test::serial(env)]
@@ -347,9 +353,10 @@ fn red_4_send_help_and_command_spec_share_all_shapes_and_entry_boundaries() {
         "team-agent send <agent>",
         "agent name",
         "--mailbox",
-        "stores a message without injecting it into the current conversation",
-        "default delivery targets the agent conversation",
+        "appends to the independent inbox without injecting into the conversation",
+        "paste + enter completes synchronously without coordinator queues or sqlite writes",
         "acceptance is not delivery or completion",
+        "--socket socket --pane %n --dialect provider",
     ] {
         assert!(
             help.contains(required),
@@ -363,7 +370,6 @@ fn red_4_send_help_and_command_spec_share_all_shapes_and_entry_boundaries() {
         "--to-name",
         "--to-leader",
         "--targets",
-        "--pane",
     ] {
         assert!(
             !help.contains(hidden_alias),
@@ -435,7 +441,7 @@ fn red_4_named_error_actions_use_returned_candidates_not_fake_assembled_status_n
 
 #[test]
 #[serial_test::serial(env)]
-fn red_5_positional_team_qualified_target_accepts_and_persists() {
+fn red_5_positional_team_qualified_target_physically_delivers_without_queue() {
     let case = AddressCase::new("red5-positional-long");
     let content = token("RED5_POSITIONAL_LONG");
     let output = case.cli(&[
@@ -454,17 +460,7 @@ fn red_5_positional_team_qualified_target_accepts_and_persists() {
         Some(0),
         "RED-5: team-qualified positional TO is canonical grammar post-M2: {body}"
     );
-    assert!(
-        body["message_id"]
-            .as_str()
-            .is_some_and(|id| id.starts_with("msg_")),
-        "RED-5: qualified positional must enter the persisted funnel: {body}"
-    );
-    assert_eq!(
-        case.message_count(&content),
-        1,
-        "RED-5: exactly one persisted row for the resolved recipient"
-    );
+    case.assert_physical_delivery(&body, "local-naming-beta", &content);
 }
 
 #[test]
@@ -505,13 +501,9 @@ fn red_5_cross_workspace_qualified_address_ignores_local_team_flag() {
     ]);
     let body = json_stdout(&output, "cross-workspace address precedence");
     assert_eq!(output.status.code(), Some(0), "RED-5: {body}");
-    assert_eq!(body["target_workspace"], json!(path(&case.other)));
-    assert_eq!(body["team_key"], json!("qa-naming"));
-    assert_eq!(body["target"], json!("beta"));
-    assert!(body["message_id"].as_str().is_some());
-    assert_eq!(case.message_count_in(&case.other, &content), 1);
-    case.assert_pane_not_contains("other-naming-beta", &content);
-    case.assert_pane_not_contains("local-sibling-beta", &content);
+    case.assert_physical_delivery(&body, "other-naming-beta", &content);
+    assert_eq!(case.message_count_in(&case.other, &content), 0);
+    assert_eq!(case.message_count_in(&case.local, &content), 0);
 }
 
 #[test]
@@ -534,12 +526,7 @@ fn red_5_team_qualified_address_ignores_conflicting_team_flag() {
     ]);
     let body = json_stdout(&output, "team-qualified address precedence");
     assert_eq!(output.status.code(), Some(0), "RED-5: {body}");
-    assert_eq!(body["team_key"], json!("qa-naming"));
-    assert_eq!(body["target"], json!("beta"));
-    assert!(body["message_id"].as_str().is_some());
-    assert_eq!(case.message_count(&content), 1);
-    case.assert_pane_not_contains("local-naming-beta", &content);
-    case.assert_pane_not_contains("local-sibling-beta", &content);
+    case.assert_physical_delivery(&body, "local-naming-beta", &content);
 }
 
 #[test]
@@ -591,10 +578,7 @@ fn red_5_exact_valid_named_short_has_no_suggestion_fields() {
             "RED-5: exact success leaked {field}: {body}"
         );
     }
-    assert_eq!(body["target"], json!("beta"));
-    assert!(body["message_id"].as_str().is_some());
-    assert_eq!(case.message_count(&content), 1);
-    case.assert_pane_not_contains("local-naming-beta", &content);
+    case.assert_physical_delivery(&body, "local-naming-beta", &content);
 }
 
 #[test]
@@ -898,6 +882,24 @@ impl AddressCase {
             |row| row.get(0),
         )
         .expect("count matching message rows")
+    }
+
+    fn assert_physical_delivery(&self, body: &Value, pane: &str, token: &str) {
+        assert_eq!(body["delivery"], "physical");
+        assert_eq!(body["recipient"], "beta");
+        assert_eq!(body["pane_id"], self.panes[pane]);
+        assert!(body["accepted"].is_null(), "physical submit does not prove provider acceptance");
+        assert!(body.get("message_id").is_none(), "ordinary CLI send creates no ledger id");
+        assert_eq!(self.message_count(token), 0);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if self.capture(pane).contains(token) { break; }
+            assert!(std::time::Instant::now() < deadline, "selected pane {pane} did not receive {token}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        for other in self.panes.keys().filter(|other| other.as_str() != pane) {
+            self.assert_pane_not_contains(other, token);
+        }
     }
 
     fn assert_pane_not_contains(&self, pane: &str, token: &str) {

@@ -654,7 +654,8 @@ fn issue372_send_never_reports_a_handshake_parking_gate() {
     assert_eq!(value["status"], "stored");
     assert!(value.get("deferred_reason").is_none());
     let direct = SendArgs { presentation: crate::messaging::presentation::PresentationRequest::default(), ..args };
-    let error = cmd_send(&direct).expect_err("a missing physical endpoint fails immediately").to_string();
+    let error = cmd_send(&direct).unwrap_err().to_string();
+    assert!(error.contains("no tmux pane"), "{error}");
     assert!(!error.contains("mcp_handshake") && !error.contains("parked"), "{error}");
 }
 
@@ -663,7 +664,9 @@ fn cmd_send_json_shape_describes_the_decoupled_operation() {
     let args = queued_send_args_fixture(true);
     let result = cmd_send(&args).unwrap();
     let CmdOutput::Json(value) = result.output else { panic!("JSON result expected") };
-    assert_eq!(value, json!({"status": "stored", "recipient": "w1", "mailbox": true}));
+    let inbox = crate::inbox_store::read(&args.workspace, "w1", 10, None).unwrap();
+    assert_eq!(inbox["messages"][0]["message_id"], value["message_id"]);
+    assert_eq!(value, json!({"ok": true, "status": "stored", "recipient": "w1", "mailbox": true, "message_id": inbox["messages"][0]["message_id"]}));
     for key in ["delivery_attempts", "message_status", "verification", "watch", "deferred_reason"] {
         assert!(value.get(key).is_none(), "no coordinator delivery fiction: {value}");
     }
@@ -683,9 +686,12 @@ fn cmd_send_legacy_watch_flag_does_not_create_a_watcher_or_delivery_row() {
 
 #[test]
 fn cmd_send_unknown_recipient_is_an_immediate_error_without_queueing() {
-    let args = SendArgs { target: Some("absent-worker".into()), ..send_args_fixture() };
-    let error = cmd_send(&args).expect_err("no recipient means no claimed delivery");
-    assert!(error.to_string().contains("unknown recipient"), "{error}");
+    let args = SendArgs { target: Some("absent-worker".into()), json: true, ..send_args_fixture() };
+    let refusal = cmd_send(&args).unwrap();
+    assert_eq!(refusal.exit, ExitCode::Error);
+    let CmdOutput::Json(value) = refusal.output else { panic!("JSON refusal expected") };
+    assert_eq!(value["ok"], false);
+    assert!(value.to_string().contains("absent-worker"), "{value}");
     assert!(crate::inbox_store::read(&args.workspace, "absent-worker", 3, None).unwrap()["messages"].as_array().unwrap().is_empty());
 }
 

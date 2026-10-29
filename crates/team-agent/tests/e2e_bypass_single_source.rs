@@ -1,273 +1,173 @@
-//! 0.5.66 bypass 单源统一 — 端到端(E2E)。
-//!
-//! 覆盖 §4.3:
-//!   1. 起 mini team(1 leader + 2 worker:true/false 各一)→ 断言各 worker 的
-//!      运行面 `as_launched_dangerously_skip_permissions` + `effective_approval_policy`
-//!      与角色字段对齐(用 copilot 角色,spawn 尝试不依赖 API key 就绪)。
-//!   2. 改 md 的 dangerously_skip_permissions 值 → restart → 断言 Noop drift 拒。
-//!   3. restart --force → 断言 fresh spawn 反映新值。
-//!   4. argv 含 bypass flag:用 copilot adapter 的 command-plan 断言(hermetic,
-//!      不起真实 copilot 进程)——覆盖"provider_bypass_flag 进 argv"。
-//!
-//! 独立 tmux socket:每个 TestWorkspace 由框架分配独立 socket 并在 Drop 清理。
-
+//! Bypass single-source security, using public-PATH Copilot wrappers to capture
+//! actual launch argv without installed-provider, authentication, or model costs.
+#![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use serde_json::Value;
-
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
+use std::time::Duration;
 #[path = "e2e/framework.rs"]
 mod framework;
-
 use framework::*;
 
-/// 建 mini team:1 leader(codex)+ 2 worker(copilot true / copilot false)。
-/// worker 用 legacy copilot provider(true 角色才有 bypass flag,避免 fail-loud;
-/// `provider: codex` 角色现在走 codex_tui contract leaf);
-/// 断言基于 state 落盘(运行面),不依赖真实 copilot 进程就绪。
-fn mini_team_ws(tag: &str) -> TestWorkspace {
-    let ws = TestWorkspace::new(tag).with_owned_caller();
-    let team = ws.path();
-    std::fs::create_dir_all(team.join(".team/current/agents")).unwrap();
-    std::fs::write(
-        team.join(".team/current/TEAM.md"),
-        "---\nname: bypass-e2e\nobjective: bypass single source e2e.\nprovider: codex\ndisplay_backend: none\n---\n\nTeam.\n",
-    )
-    .unwrap();
-    std::fs::write(
-        team.join(".team/current/agents/worker_true.md"),
-        "---\nname: worker_true\nrole: True Worker\nprovider: copilot\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: true\ntools:\n  - mcp_team\n---\n\nTrue worker.\n",
-    )
-    .unwrap();
-    std::fs::write(
-        team.join(".team/current/agents/worker_false.md"),
-        "---\nname: worker_false\nrole: False Worker\nprovider: copilot\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nFalse worker.\n",
-    )
-    .unwrap();
-    ws
+struct Fixture {
+    ws: TestWorkspace,
+    path: String,
 }
-
-/// 该测试的 quick-start 用 `provider: copilot` 角色,spawn 需要真实 copilot 二进制
-/// 才能把 `as_launched_dangerously_skip_permissions` / `effective_approval_policy`
-/// 写进 state。CI runner 不安装 copilot,spawn 更早失败导致字段为 null → 断言红。
-/// 这里自检可用性,不可用则说明并提前返回(保覆盖、诚实、不 panic)。
-fn require_copilot_binary() -> bool {
-    let found = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).any(|dir| dir.join("copilot").exists()))
-        .unwrap_or(false);
-    if !found {
-        eprintln!("skipping: requires copilot binary on PATH (provider: copilot roles need it to populate as_launched state); CI runner does not install copilot");
-    }
-    found
-}
-
-fn state_agent<'a>(state: &'a Value, agent_id: &str) -> &'a Value {
-    state
-        .get("agents")
-        .and_then(|a| a.get(agent_id))
-        .unwrap_or_else(|| panic!("agent {agent_id} missing from state"))
-}
-
-/// E2E-1:quick-start 后,true worker 的运行面 bypass + policy 与角色字段对齐。
-#[test]
-fn e2e_mini_team_true_false_policy_alignment() {
-    if !require_copilot_binary() {
-        return;
-    }
-    let ws = mini_team_ws("bypass-e2e-mini");
-    let out = run_ta(
-        &ws,
-        &["quick-start", ".team/current", "--yes", "--no-display", "--json"],
-    );
-    // quick-start 在无 leader receiver 时 ok=false(launch readiness 要求 attach),
-    // 但 state 已落盘——断言 state 写入即可,不 assert 退出码。
-    let _ = out;
-    let state = ws.read_state();
-    // true worker:as_launched=true + policy enabled/runtime_config。
-    let true_agent = state_agent(&state, "worker_true");
-    assert_eq!(
-        true_agent["as_launched_dangerously_skip_permissions"],
-        serde_json::json!(true),
-        "true role must launch with as_launched_dangerously_skip_permissions=true; agent={true_agent:?}"
-    );
-    assert_eq!(
-        true_agent["effective_approval_policy"]["enabled"],
-        serde_json::json!(true),
-        "true role must persist enabled policy; agent={true_agent:?}"
-    );
-    // false worker:as_launched=false + policy disabled。
-    let false_agent = state_agent(&state, "worker_false");
-    assert_eq!(
-        false_agent["as_launched_dangerously_skip_permissions"],
-        serde_json::json!(false),
-        "false role must launch with as_launched=false; agent={false_agent:?}"
-    );
-    assert_eq!(
-        false_agent["effective_approval_policy"]["enabled"],
-        serde_json::json!(false),
-        "false role must persist disabled policy; agent={false_agent:?}"
-    );
-}
-
-/// E2E-2:改 md 的 bypass 值 → restart → Noop drift 拒。
-#[test]
-fn e2e_edit_role_restart_drift_denied() {
-    let ws = mini_team_ws("bypass-e2e-drift");
-    let out = run_ta(
-        &ws,
-        &["quick-start", ".team/current", "--yes", "--no-display", "--json"],
-    );
-    let _ = out;
-    // Retain this contract's original unattached-leader precondition after
-    // the positive startup has satisfied caller admission.
-    seed_unattached_leader(&ws);
-
-    // 把 worker_true 的 dangerously_skip_permissions 从 true 改成 false(声明面)。
-    let role_path = ws
-        .path()
-        .join(".team/current/agents/worker_true.md");
-    let body = std::fs::read_to_string(&role_path).unwrap();
-    let body = body.replace(
-        "dangerously_skip_permissions: true",
-        "dangerously_skip_permissions: false",
-    );
-    std::fs::write(&role_path, body).unwrap();
-
-    // restart(不带 --force):若 worker pane 仍活 → Noop → drift 拒。
-    let restart = run_ta(&ws, &["restart", "--json"]);
-    // 允许两种结果:若 quick-start 后 pane 已死(计时),restart 走 fresh spawn(不拒);
-    // 若 pane 活,restart 走 Noop → 必须报 drift。断言:报 drift 时错误消息明确。
-    if !restart.is_success() {
-        let msg = format!("{}{}", restart.stdout, restart.stderr);
-        let restart_json = serde_json::from_str::<serde_json::Value>(&restart.stdout)
-            .unwrap_or_else(|_| serde_json::json!({}));
-        let drift = msg.contains("dangerously_skip_permissions drift for agent worker_true");
-        let incomplete = restart_json.get("status").and_then(|v| v.as_str())
-            == Some("restarted_binding_incomplete")
-            && restart_json.get("reason").and_then(|v| v.as_str())
-                == Some("leader_receiver_unbound");
-        assert!(
-            drift || incomplete,
-            "restart must report role drift or the exact no-caller incomplete bind; got {msg}"
-        );
-    }
-    // 无论走哪条路,events.jsonl 里若发生 drift 拒,必须有 drift_denied 事件。
-    let events = EventLogReader::read(&ws);
-    if events.iter().any(|e| {
-        e.get("event").and_then(Value::as_str)
-            == Some("worker.spawn_dangerously_skip_permissions_drift_denied")
-    }) {
-        // 事件在则断言内容正确。
-        let drift_events: Vec<&Value> = events
-            .iter()
-            .filter(|e| {
-                e.get("event").and_then(Value::as_str)
-                    == Some("worker.spawn_dangerously_skip_permissions_drift_denied")
-            })
-            .collect();
-        assert!(!drift_events.is_empty());
-    }
-}
-
-/// E2E-3: ordinary restart reapplies the edited role; removed --force is not an authority.
-#[test]
-fn e2e_edit_role_restart_applies_edited_bypass() {
-    let ws = mini_team_ws("bypass-e2e-force");
-    let out = run_ta(
-        &ws,
-        &["quick-start", ".team/current", "--yes", "--no-display", "--json"],
-    );
-    let _ = out;
-    seed_unattached_leader(&ws);
-
-    // worker_false:false → true。
-    let role_path = ws
-        .path()
-        .join(".team/current/agents/worker_false.md");
-    let body = std::fs::read_to_string(&role_path).unwrap();
-    let body = body.replace(
-        "dangerously_skip_permissions: false",
-        "dangerously_skip_permissions: true",
-    );
-    std::fs::write(&role_path, body).unwrap();
-
-    // The former --force was ignored; assert its new safe rejection before
-    // exercising the same ordinary restart behavior and original bypass checks.
-    let rejected = run_ta(&ws, &["restart", "--force", "--json"]);
-    assert_eq!(rejected.exit_code, 2, "removed --force must not trigger restart");
-    let force = run_ta(&ws, &["restart", "--json"]);
-    let force_json = serde_json::from_str::<serde_json::Value>(&force.stdout)
-        .unwrap_or_else(|_| serde_json::json!({}));
-    let state = ws.read_state();
-    let false_agent = state_agent(&state, "worker_false");
-    if force.is_success() || force_json.get("ok").and_then(|v| v.as_bool()) == Some(true) {
-        assert_eq!(
-            false_agent["as_launched_dangerously_skip_permissions"],
-            serde_json::json!(true),
-            "restart --force must fresh-spawn worker_false with as_launched=true; agent={false_agent:?}"
-        );
-    } else {
-        assert_eq!(
-            force_json.get("status").and_then(|v| v.as_str()),
-            Some("restarted_binding_incomplete"),
-            "no-caller force restart must keep the incomplete-bind status; stdout={} stderr={}",
-            force.stdout,
-            force.stderr
-        );
-        assert_eq!(
-            force_json.get("reason").and_then(|v| v.as_str()),
-            Some("leader_receiver_unbound"),
-            "no-caller force restart must keep the unbound-leader reason; stdout={}",
-            force.stdout
-        );
-        assert_eq!(
-            false_agent["as_launched_dangerously_skip_permissions"],
-            serde_json::json!(true),
-            "force spawn must still apply the edited bypass even when leader bind is incomplete; agent={false_agent:?} stdout={}",
-            force.stdout
-        );
-    }
-}
-
-/// E2E-4:true 角色的 `effective_approval_policy.flag` = provider 的 bypass 参数
-/// (provider_bypass_flag 进 policy → 进 spawn argv 的哨兵消费点)。hermetic:不
-/// 起真实 copilot 进程,断言 policy 落盘即 argv 决策的输入已就位。
-#[test]
-fn e2e_true_role_policy_flag_matches_provider_bypass() {
-    if !require_copilot_binary() {
-        return;
-    }
-    let ws = mini_team_ws("bypass-e2e-flag");
-    let out = run_ta(
-        &ws,
-        &["quick-start", ".team/current", "--yes", "--no-display", "--json"],
-    );
-    let _ = out;
-    let state = ws.read_state();
-    let true_agent = state_agent(&state, "worker_true");
-    // copilot true 角色 → policy enabled=true + flag = copilot bypass 参数。
-    assert_eq!(
-        true_agent["effective_approval_policy"]["enabled"],
-        serde_json::json!(true)
-    );
-    assert_eq!(
-        true_agent["effective_approval_policy"]["flag"],
-        serde_json::json!("--allow-all"),
-        "provider_bypass_flag must reach the persisted policy (argv decision input); agent={true_agent:?}"
-    );
-}
-
-/// events.jsonl 读取器(framework 无现成,直接读文件)。
-struct EventLogReader;
-
-impl EventLogReader {
-    fn read(ws: &TestWorkspace) -> Vec<Value> {
-        let path = ws.path().join(".team/logs/events.jsonl");
-        if !path.exists() {
-            return Vec::new();
+impl Fixture {
+    fn new(tag: &str) -> Self {
+        let ws = TestWorkspace::new(tag).with_owned_caller();
+        let root = ws.path();
+        fs::create_dir_all(root.join("agents")).unwrap();
+        fs::write(root.join("TEAM.md"), "Coordinate the controlled team.\n").unwrap();
+        for (name, enabled) in [("worker_true", true), ("worker_false", false)] {
+            fs::write(root.join(format!("agents/{name}.md")), role(enabled)).unwrap();
         }
-        let text = std::fs::read_to_string(&path).unwrap_or_default();
-        text.lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .collect()
+        let bin = root.join("test-bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(root.join(".role-config-launch")).unwrap();
+        let script = format!("#!/usr/bin/env bash\nset -eu\ncase \"${{1:-}}\" in\n --version) echo 'copilot-test-target 1.0.0'; exit 0 ;;\n --list-models) printf 'gpt-5.5\\n'; exit 0 ;;\nesac\nif [ -z \"${{TEAM_AGENT_AGENT_ID:-}}\" ] || [ -z \"${{TEAM_AGENT_WORKSPACE:-}}\" ]; then exit 0; fi\nprintf '%s\\0' 'copilot' \"$@\" > \"${{TEAM_AGENT_WORKSPACE}}/.role-config-launch/${{TEAM_AGENT_AGENT_ID}}.argv\"\nexec -a copilot {} fake-worker --workspace \"${{TEAM_AGENT_WORKSPACE}}\" --agent-id \"${{TEAM_AGENT_AGENT_ID}}\"\n", quote(&ta_binary()));
+        let executable = bin.join("copilot");
+        fs::write(&executable, script).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        Self { ws, path }
     }
+    fn run(&self, args: &[&str]) -> TaResult {
+        run_ta_env(&self.ws, args, &[("PATH", &self.path)])
+    }
+    fn launch(&self) {
+        let root = self.ws.path().to_str().unwrap();
+        let team = self.ws.path().file_name().unwrap().to_str().unwrap();
+        let output = self.run(&[
+            "quick-start",
+            root,
+            "--workspace",
+            root,
+            "--team-id",
+            team,
+            "--yes",
+            "--no-display",
+            "--json",
+        ]);
+        assert!(
+            quick_start_workers_available(&output),
+            "{} {}",
+            output.stdout,
+            output.stderr
+        );
+        self.assert_policy("worker_true", true);
+        self.assert_policy("worker_false", false);
+    }
+    fn argv_path(&self, agent: &str) -> std::path::PathBuf {
+        self.ws
+            .path()
+            .join(format!(".role-config-launch/{agent}.argv"))
+    }
+    fn assert_policy(&self, agent: &str, enabled: bool) {
+        let path = self.argv_path(agent);
+        wait_for_or_panic(
+            "public Copilot wrapper captured actual startup argv",
+            || path.is_file(),
+            Duration::from_secs(12),
+        );
+        let bytes = fs::read(path).unwrap();
+        let args: Vec<_> = bytes
+            .split(|byte| *byte == 0)
+            .filter(|arg| !arg.is_empty())
+            .map(|arg| String::from_utf8(arg.to_vec()).unwrap())
+            .collect();
+        assert_eq!(args[0], "copilot");
+        assert_eq!(
+            args.iter().filter(|arg| *arg == "--allow-all").count(),
+            usize::from(enabled),
+            "launch argv: {args:?}"
+        );
+        let state = self.ws.read_state();
+        let row = &state["agents"][agent];
+        assert_eq!(row["provider"], "copilot");
+        assert_eq!(row["as_launched_dangerously_skip_permissions"], enabled);
+        assert_eq!(row["effective_approval_policy"]["enabled"], enabled);
+        if enabled {
+            assert_eq!(row["effective_approval_policy"]["source"], "runtime_config");
+            assert_eq!(row["effective_approval_policy"]["flag"], "--allow-all");
+        }
+    }
+    fn edit_true_role(&self, enabled: bool) {
+        fs::write(self.ws.path().join("agents/worker_true.md"), role(enabled)).unwrap();
+    }
+}
+fn quote(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+}
+fn role(enabled: bool) -> String {
+    format!("---\nprovider: copilot\nmodel: gpt-5.5\ndangerously_skip_permissions: {enabled}\ntools: [mcp_team]\n---\nHandle the assigned message.\n")
+}
+
+#[test]
+fn true_and_false_roles_match_real_launch_argv_and_recorded_policy() {
+    let fixture = Fixture::new("bypass-alignment");
+    fixture.launch();
+}
+
+#[test]
+fn editing_role_text_does_not_rewrite_the_live_process_policy() {
+    let fixture = Fixture::new("bypass-live-drift");
+    fixture.launch();
+    let argv = fs::read(fixture.argv_path("worker_true")).unwrap();
+    fixture.edit_true_role(false);
+    fixture.assert_policy("worker_true", true);
+    assert_eq!(fs::read(fixture.argv_path("worker_true")).unwrap(), argv);
+    // A read-only start plan must reject changed launch policy, without a respawn.
+    let plan = fixture.run(&["start", "worker_true", "--dry-run", "--json"]);
+    assert!(
+        !plan.is_success(),
+        "changed policy must not be silently adopted: {}",
+        plan.stdout
+    );
+    assert!(format!("{}{}", plan.stdout, plan.stderr).contains("drift"));
+    assert_eq!(fs::read(fixture.argv_path("worker_true")).unwrap(), argv);
+    fixture.assert_policy("worker_true", true);
+}
+
+#[test]
+fn explicit_stop_then_start_reapplies_the_edited_role_policy() {
+    let fixture = Fixture::new("bypass-reapply");
+    fixture.launch();
+    fixture.edit_true_role(false);
+    let stopped = fixture.run(&["stop", "worker_true", "--json"]);
+    assert!(
+        stopped.is_success(),
+        "{} {}",
+        stopped.stdout,
+        stopped.stderr
+    );
+    fs::remove_file(fixture.argv_path("worker_true")).unwrap();
+    let started = fixture.run(&["start", "worker_true", "--session", "auto", "--json"]);
+    assert!(
+        started.is_success(),
+        "{} {}",
+        started.stdout,
+        started.stderr
+    );
+    fixture.assert_policy("worker_true", false);
+}
+
+#[test]
+fn removed_force_flag_cannot_bypass_restart_admission() {
+    let fixture = Fixture::new("bypass-force-refusal");
+    fixture.launch();
+    fixture.edit_true_role(false);
+    let before = fs::read(fixture.ws.state_json_path()).unwrap();
+    let argv = fs::read(fixture.argv_path("worker_true")).unwrap();
+    let refused = fixture.run(&["restart", "--force", "--json"]);
+    assert_eq!(refused.exit_code, 2);
+    assert_eq!(fs::read(fixture.ws.state_json_path()).unwrap(), before);
+    assert_eq!(fs::read(fixture.argv_path("worker_true")).unwrap(), argv);
+    fixture.assert_policy("worker_true", true);
 }

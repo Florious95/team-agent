@@ -1272,6 +1272,7 @@ mod tests {
             let root = std::env::temp_dir().join(format!("contract-role-{}-{}", std::process::id(),
                 std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
             std::fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+            let root = root.canonicalize().unwrap();
             let cwd = resolve_cwd(&root).unwrap();
             let scope = scope_for(&cwd, "test").unwrap();
             std::fs::create_dir_all(root_for(&cwd.path, &scope)).unwrap();

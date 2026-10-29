@@ -449,73 +449,73 @@ fn m04_send_message_single_leader_broadcast_and_mailbox_close_the_team_scope_loo
     let _hermetic = HermeticTestEnv::enter("mcp-3-m04");
     let harness = sim::McpSimHarness::new();
     let mut worker = sim::spawn_mcp_client_without_catalog_check(harness.workspace_path(), "worker_b", "teamA");
-    for (target, marker) in [
-        ("worker_a", "M04_PEER"),
-        ("leader", "M04_LEADER"),
-        ("*", "M04_BROADCAST"),
-    ] {
+    for (target, marker) in [("worker_a", "M04_PEER"), ("leader", "M04_LEADER"), ("*", "M04_BROADCAST")] {
         let call = worker.call_tool("send_message", json!({"to":target,"content":marker}));
         assert!(!call.is_error, "send {target}: {}", call.body);
-        if target == "worker_a" {
-            assert_eq!(call.body["status"], json!("accepted"));
-            assert_eq!(call.body["delivery_pending"], json!(true));
-            let message_id = call.body["message_id"].as_str().expect("accepted async peer send returns real message id");
-            assert_eq!(call.body["poll_via"], json!(format!("team-agent inbox {message_id}")));
+        assert_eq!(call.body["status"], "sent");
+        if target == "*" {
+            let results = call.body["results"].as_array().unwrap();
+            let recipients = results.iter().map(|row| row["recipient"].as_str().unwrap()).collect::<BTreeSet<_>>();
+            assert_eq!(recipients, BTreeSet::from(["worker_a", "worker_c"]));
+            for row in results { assert_eq!(row["delivery"], "physical"); }
+        } else {
+            assert_eq!(call.body["delivery"], "physical");
+            assert_eq!(call.body["recipient"], target);
         }
+        assert!(harness.message_rows_containing(marker).is_empty(), "physical send must not create a queue row");
     }
     let mailbox = worker.call_tool("send_message", json!({"to":"worker_a","content":"M04_MAILBOX","mailbox":true}));
     assert!(!mailbox.is_error, "mailbox send: {}", mailbox.body);
-    harness.drive_delivery_twice();
-
-    for marker in ["M04_PEER", "M04_LEADER", "M04_BROADCAST", "M04_MAILBOX"] {
-        let rows = harness.message_rows_containing(marker);
-        assert!(!rows.is_empty(), "durable row(s) for {marker}");
-        assert!(rows.iter().all(|row| row.owner_team_id.as_deref() == Some("teamA")), "wrong owner scope for {marker}: {rows:?}");
+    assert_eq!(mailbox.body["status"], "stored");
+    let inbox = team_agent::inbox_store::read(harness.workspace_path(), "worker_a", 16, Some("teamA")).unwrap();
+    let records = inbox["messages"].as_array().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["content"], "M04_MAILBOX");
+    assert_eq!(records[0]["message_id"], mailbox.body["message_id"]);
+    assert_eq!(records[0]["sender"], "worker_b");
+    assert_eq!(records[0]["team"], "teamA");
+    assert!(harness.pane_text("worker_a").contains("M04_PEER"));
+    assert!(harness.pane_text("leader").contains("M04_LEADER"));
+    assert!(!harness.pane_text("leader").contains("M04_BROADCAST"), "peer broadcast must not create a leader mirror");
+    assert!(!harness.pane_text("leader").contains("M04_MAILBOX"));
+    for recipient in ["worker_a", "worker_c"] {
+        assert!(harness.pane_text(recipient).contains("M04_BROADCAST"));
+        assert!(!harness.pane_text(recipient).contains("M04_MAILBOX"));
     }
-    assert_eq!(harness.message_rows_containing("M04_PEER").len(), 1, "single peer send must create one target row");
-    assert_eq!(harness.message_rows_containing("M04_LEADER")[0].recipient, "leader");
-    let broadcast = harness.message_rows_containing("M04_BROADCAST");
-    let broadcast_recipients = broadcast.iter().map(|row| row.recipient.as_str()).collect::<BTreeSet<_>>();
-    assert_eq!(broadcast_recipients, BTreeSet::from(["leader", "worker_a", "worker_c"]));
-    assert!(broadcast.iter().all(|row| row.recipient != "worker_x"), "broadcast escaped teamA: {broadcast:?}");
-    assert!(harness.pane_text("leader").contains("M04_LEADER"), "direct leader message was not delivered");
-    assert!(!harness.pane_text("worker_a").contains("M04_MAILBOX"), "mailbox=true must remain stored-only");
-    let mailbox_row = &harness.message_rows_containing("M04_MAILBOX")[0];
-    assert_ne!(mailbox_row.status, "delivered", "mailbox message must not be injected: {mailbox_row:?}");
+    assert!(!harness.pane_text("worker_b").contains("M04_"));
+    assert!(!harness.pane_text("team_b_leader").contains("M04_"));
+}
+
+fn inbox_report(harness: &sim::McpSimHarness, id: &str) -> Value {
+    let inbox = team_agent::inbox_store::read(harness.workspace_path(), "leader", 64, Some("teamA")).unwrap();
+    inbox["messages"].as_array().unwrap().iter()
+        .find(|record| record["message_id"] == id).cloned().expect("durable result inbox record")
 }
 
 fn assert_report_delivery_state(harness: &sim::McpSimHarness, body: &Value, marker: &str) {
-    let status = body["notification_status"].as_str().expect("report_result exposes notification status");
-    assert!(matches!(status, "delivered" | "queued"), "report notification must report a live delivery or truthful queue state: {body}");
-    assert!(body["notification_message_id"].as_str().is_some(), "leader handoff must retain its message id: {body}");
-    match status {
-        "delivered" => {
-            assert_eq!(body["leader_notified"], json!(true));
-            assert!(harness.pane_text("leader").contains(marker), "delivered result notification missing on leader pane");
-        }
-        "queued" => assert_eq!(body["leader_notified"], json!(false), "queued status must not claim leader delivery"),
-        _ => unreachable!(),
+    assert!(body["message_id"].as_str().is_some(), "durable inbox identity: {body}");
+    match body["status"].as_str() {
+        Some("reported") => assert!(harness.pane_text("leader").contains(marker)),
+        Some("stored") => assert!(!harness.pane_text("leader").contains(marker)),
+        other => panic!("no queued notification handoff: {other:?}; {body}"),
     }
+    assert_eq!(harness.scheduled_event_count(), 0);
 }
 
-fn send_cli_input(harness: &sim::McpSimHarness, worker_id: &str, marker: &str) -> sim::MessageRow {
+fn send_cli_input(harness: &sim::McpSimHarness, worker_id: &str, marker: &str) {
     let output = Command::new(env!("CARGO_BIN_EXE_team-agent"))
-        .args(["send", worker_id, marker, "--workspace"])
-        .arg(harness.workspace_path())
+        .args(["send", worker_id, marker, "--workspace"]).arg(harness.workspace_path())
         .args(["--team", "teamA", "--json"])
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE")
-        .output()
-        .expect("run existing CLI send to create attributable worker input");
-    assert!(output.status.success(), "CLI send failed: stdout={} stderr={}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-    let response: Value = serde_json::from_slice(&output.stdout).expect("CLI send returns JSON");
-    assert_eq!(response["ok"], json!(true), "CLI send must persist/deliver input: {response}");
-    harness.drive_delivery_twice();
-    let rows = harness.message_rows_containing(marker);
-    assert_eq!(rows.len(), 1, "one CLI input row for {marker}: {rows:?}");
-    assert_eq!(rows[0].owner_team_id.as_deref(), Some("teamA"));
-    assert_eq!(rows[0].recipient, worker_id);
-    rows[0].clone()
+        .env_remove("TMUX").env_remove("TMUX_PANE")
+        .output().expect("run physical CLI input");
+    assert!(output.status.success(), "CLI send failed: {:?} {:?}", output.stdout, output.stderr);
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["delivery"], "physical");
+    assert_eq!(response["recipient"], worker_id);
+    assert!(response.get("message_id").is_none(), "no ledger ID for physical input");
+    assert!(harness.message_rows_containing(marker).is_empty());
+    assert!(harness.pane_text(worker_id).contains(marker));
+    assert!(!harness.pane_text("team_b_leader").contains(marker));
 }
 
 #[test]
@@ -523,22 +523,19 @@ fn send_cli_input(harness: &sim::McpSimHarness, worker_id: &str, marker: &str) -
 fn m05_direct_input_and_full_envelope_reports_persist_and_reach_the_leader_without_assignment() {
     let _hermetic = HermeticTestEnv::enter("mcp-3-m05");
     let first = sim::McpSimHarness::new();
-    let inbound = send_cli_input(&first, "worker_a", "M05_MINIMAL_INPUT");
+    send_cli_input(&first, "worker_a", "M05_MINIMAL_INPUT");
     let mut worker = sim::spawn_mcp_client_without_catalog_check(first.workspace_path(), "worker_a", "teamA");
     let minimal = worker.call_tool("report_result", json!({"task_id":"task_mcp","summary":"M05_MINIMAL_RESULT"}));
     assert!(!minimal.is_error, "minimal report_result: {}", minimal.body);
-    let id = minimal.body["result_id"].as_str().expect("minimal report returns durable result id");
-    let row = first.result_row(id).expect("minimal report persists result without assign_task");
-    assert_eq!(row.owner_team_id.as_deref(), Some("teamA"));
-    assert_eq!(row.agent_id, "worker_a");
-    assert_eq!(inbound.sender, "leader", "the direct input must retain its trusted sender");
-    assert_eq!(row.task_id, "task_mcp", "minimal result must remain associated with the existing task");
-    assert!(row.envelope.contains("M05_MINIMAL_RESULT"));
-    first.drive_delivery_twice();
+    let record = inbox_report(&first, minimal.body["message_id"].as_str().unwrap());
+    assert_eq!(record["team"], "teamA");
+    assert_eq!(record["sender"], "worker_a");
+    assert_eq!(record["envelope"]["task_id"], "task_mcp");
+    assert_eq!(record["envelope"]["summary"], "M05_MINIMAL_RESULT");
     assert_report_delivery_state(&first, &minimal.body, "M05_MINIMAL_RESULT");
 
     let second = sim::McpSimHarness::new();
-    let _envelope_input = send_cli_input(&second, "worker_a", "M05_ENVELOPE_INPUT");
+    send_cli_input(&second, "worker_a", "M05_ENVELOPE_INPUT");
     let mut worker = sim::spawn_mcp_client_without_catalog_check(second.workspace_path(), "worker_a", "teamA");
     let envelope = json!({
         "schema_version":"result_envelope_v1", "task_id":"task_mcp", "agent_id":"worker_a",
@@ -549,16 +546,15 @@ fn m05_direct_input_and_full_envelope_reports_persist_and_reach_the_leader_witho
     });
     let full = worker.call_tool("report_result", json!({"envelope":envelope}));
     assert!(!full.is_error, "full-envelope report_result: {}", full.body);
-    let id = full.body["result_id"].as_str().expect("full envelope returns result id");
-    let row = second.result_row(id).expect("full envelope report persists");
-    let stored: Value = serde_json::from_str(&row.envelope).unwrap();
-    assert_eq!(stored["summary"], json!("M05_FULL_ENVELOPE"));
-    assert_eq!(stored["tests"][0]["status"], json!("passed"));
-    assert_eq!(stored["presentation"]["case_id"], json!("m05"));
-    assert_eq!(row.owner_team_id.as_deref(), Some("teamA"));
-    assert_eq!(row.agent_id, "worker_a");
-    assert_eq!(row.task_id, "task_mcp");
-    second.drive_delivery_twice();
+    let record = inbox_report(&second, full.body["message_id"].as_str().unwrap());
+    let stored = &record["envelope"];
+    for field in ["summary", "changes", "tests", "risks", "artifacts", "next_actions"] {
+        assert_eq!(stored[field], envelope[field], "lossless result field {field}");
+    }
+    assert_eq!(stored["presentation"]["case_id"], "m05");
+    assert_eq!(record["team"], "teamA");
+    assert_eq!(stored["agent_id"], "worker_a");
+    assert_eq!(stored["task_id"], "task_mcp");
     assert_report_delivery_state(&second, &full.body, "M05_FULL_ENVELOPE");
 }
 

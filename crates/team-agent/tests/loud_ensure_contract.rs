@@ -32,6 +32,8 @@
 
 #[path = "support/hermetic.rs"]
 mod hermetic_guard;
+#[path = "support/direct_fixture.rs"]
+mod direct_fixture;
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -57,129 +59,47 @@ const OLD_CALLER_VERSION: &str = "0.5.21";
 
 #[test]
 #[serial(env)]
-fn r1_mutating_send_loudly_ensures_missing_active_coordinator() {
+fn r1_physical_send_ignores_missing_coordinator() {
     let fixture = LoudEnsureFixture::active("r1-missing");
-
-    let body = fixture.send_worker_json("R1_LOUD_MISSING");
-
-    assert_loud_ensure_response(
-        &body,
-        "missing",
-        None,
-        "R1 RED: missing active coordinator on mutating send must auto-start loudly",
-    );
-    assert_not_reported_delivered(&body, "R1 RED");
-    assert_no_delivered_rows(&fixture.root, "R1 RED");
-    let ensured_pid = response_coordinator_pid(&body, "R1 RED");
-    assert_ensure_event(&fixture.root, "missing", None, Some(ensured_pid), "R1 RED");
-    append_failure_facts(
-        &fixture,
-        "readiness_race",
-        ensured_pid,
-        json!({
-            "decision": "stable_same_pid",
-            "samples_required": 3,
-            "health": health_facts(&coordinator_health(&fixture.workspace)),
-        }),
-    );
-    let health = coordinator_health(&fixture.workspace);
-    assert!(
-        health.ok,
-        "R1 RED: successful loud ensure must leave current coordinator healthy; body={body}"
-    );
-    assert_eq!(
-        health.pid.map(|pid| pid.get()),
-        Some(ensured_pid),
-        "R1 RED: readiness must still describe the coordinator started by this ensure; body={body}"
-    );
-    assert!(
-        health.process_running
-            && health.metadata_ok
-            && health.wire_metadata_ok
-            && health.binary_identity_ok
-            && health.service_available
-            && health.schema.ok,
-        "R1 RED: same-PID coordinator must satisfy every readiness component; health={health:?} body={body}"
-    );
+    let before = fixture.snapshot_runtime_files();
+    let body = fixture.send_worker_json("R1_MISSING_COORDINATOR");
+    assert_eq!(body["status"], "sent");
+    assert_eq!(body["delivery"], "physical");
+    assert!(body.get("coordinator_auto_restarted").is_none());
+    fixture.receiver.received("Team Agent message from leader:\n\nR1_MISSING_COORDINATOR");
+    fixture.assert_runtime_files_unchanged(before, "physical send");
 }
 
 #[test]
 #[serial(env)]
-fn r2_current_caller_mutating_send_loudly_rotates_older_identity_coordinator() {
-    let mut fixture = LoudEnsureFixture::active("r2-stale-identity");
-    let previous_pid = fixture.spawn_stale_identity_process();
-
-    let body = fixture.send_worker_json("R2_LOUD_ROTATION");
-
-    assert_loud_ensure_response(
-        &body,
-        "running",
-        Some("started_after_rotation"),
-        "R2 RED: live daemon with stale binary identity must rotate loudly",
-    );
-    assert_eq!(
-        body.pointer("/coordinator/rotation_reason")
-            .and_then(Value::as_str),
-        Some("binary_version_mismatch"),
-        "R2 RED: stale identity rotation must name binary_version_mismatch; body={body}"
-    );
-    assert_not_reported_delivered(&body, "R2 RED");
-    assert_no_delivered_rows(&fixture.root, "R2 RED");
-    let ensured_pid = response_coordinator_pid(&body, "R2 RED");
-    assert_ne!(
-        ensured_pid, previous_pid,
-        "R2 RED: rotation must replace the stale daemon pid; body={body}"
-    );
-    assert_ensure_event(
-        &fixture.root,
-        "running",
-        Some("started_after_rotation"),
-        Some(ensured_pid),
-        "R2 RED",
-    );
-    assert!(
-        coordinator_health(&fixture.workspace).ok,
-        "R2 RED: rotated coordinator must be healthy after send; body={body}"
-    );
+fn r2_physical_send_preserves_older_coordinator() {
+    let mut fixture = LoudEnsureFixture::active("r2-old-identity");
+    let pid = fixture.spawn_stale_identity_process();
+    let before = fixture.snapshot_runtime_files();
+    let body = fixture.send_worker_json("R2_OLD_IDENTITY");
+    assert_eq!(body["status"], "sent");
+    assert_eq!(body["delivery"], "physical");
+    assert!(body.get("coordinator_auto_restarted").is_none());
+    fixture.receiver.received("Team Agent message from leader:\n\nR2_OLD_IDENTITY");
+    fixture.assert_runtime_files_unchanged(before, "physical send");
+    assert_eq!(fixture.coordinator_pid_file(), Some(pid));
+    assert!(fixture.pid_alive(pid));
 }
 
 #[test]
 #[serial(env)]
 fn r2_old_caller_must_not_rotate_newer_compatible_coordinator_guard() {
     let mut fixture = LoudEnsureFixture::active("r2-old-caller-new-daemon");
-    let daemon_pid = fixture.spawn_daemon_identity_process(&current_version());
-
+    let pid = fixture.spawn_daemon_identity_process(&current_version());
+    let before = fixture.snapshot_runtime_files();
     let body = fixture.send_worker_json_as_caller("R2_OLD_CALLER_NEW_DAEMON", OLD_CALLER_VERSION);
-
-    assert!(
-        body.get("coordinator_auto_restarted").is_none(),
-        "R2 direction guard: old caller seeing a newer compatible daemon must not loud-ensure/rotate it; body={body}"
-    );
-    assert_eq!(
-        fixture.coordinator_pid_file(),
-        Some(daemon_pid),
-        "R2 direction guard: old caller must preserve newer daemon pid; body={body} events={:?}",
-        EventLog::new(&fixture.root).tail(100).expect("tail events")
-    );
-    assert!(
-        fixture.pid_alive(daemon_pid),
-        "R2 direction guard: newer daemon process must remain alive; body={body}"
-    );
-    assert!(
-        !fixture.has_event("coordinator.ensure_restarted")
-            && !fixture.has_event("coordinator.rotation_required"),
-        "R2 direction guard: old caller must not enter rotation/ensure path; events={:?}",
-        EventLog::new(&fixture.root).tail(100).expect("tail events")
-    );
-    assert!(
-        fixture.has_event("send.coordinator_binary_identity_drift_ignored")
-            || body
-                .pointer("/coordinator_binary_relation")
-                .and_then(Value::as_str)
-                == Some("daemon_newer_than_caller"),
-        "R2 direction guard: binary drift must be explicit as daemon_newer_than_caller, not silent; body={body} events={:?}",
-        EventLog::new(&fixture.root).tail(100).expect("tail events")
-    );
+    assert_eq!(body["status"], "sent");
+    assert_eq!(body["delivery"], "physical");
+    assert!(body.get("coordinator_auto_restarted").is_none());
+    fixture.receiver.received("Team Agent message from leader:\n\nR2_OLD_CALLER_NEW_DAEMON");
+    fixture.assert_runtime_files_unchanged(before, "physical send");
+    assert_eq!(fixture.coordinator_pid_file(), Some(pid));
+    assert!(fixture.pid_alive(pid));
 }
 
 #[test]
@@ -224,39 +144,15 @@ fn r3_read_only_commands_report_dead_coordinator_without_spawning() {
 
 #[test]
 #[serial(env)]
-fn r4_loud_ensure_does_not_bypass_dirty_topology_refusal() {
+fn r4_physical_send_ignores_advisory_dirty_topology() {
     let fixture = LoudEnsureFixture::dirty_topology("r4-dirty");
-
+    let before = fixture.snapshot_runtime_files();
     let body = fixture.send_worker_json("R4_DIRTY_TOPOLOGY");
-
-    assert_eq!(
-        body.get("ok").and_then(Value::as_bool),
-        Some(false),
-        "R4 RED: dirty topology must fail closed before send ensure starts a daemon; body={body}"
-    );
-    assert_eq!(
-        body.get("status").and_then(Value::as_str),
-        Some("refused_dirty_topology"),
-        "R4 RED: dirty topology refusal must preserve status=refused_dirty_topology; body={body}"
-    );
-    assert!(
-        issue(&body, "tmux_endpoint_socket_conflict").is_some()
-            || body
-                .pointer("/issues/0/id")
-                .and_then(Value::as_str)
-                == Some("tmux_endpoint_socket_conflict"),
-        "R4 RED: refusal must name tmux_endpoint_socket_conflict, not hide behind coordinator ensure; body={body}"
-    );
-    assert!(
-        body.get("coordinator_auto_restarted").is_none(),
-        "R4 RED: dirty-topology refusal must not include loud ensure success fields; body={body}"
-    );
-    assert!(
-        !fixture.has_event("coordinator.ensure_restarted")
-            && !coordinator_pid_path(&fixture.workspace).exists(),
-        "R4 RED: dirty topology must not spawn a coordinator as a side-effect; events={:?}",
-        EventLog::new(&fixture.root).tail(50).expect("tail events")
-    );
+    assert_eq!(body["status"], "sent");
+    assert_eq!(body["delivery"], "physical");
+    assert!(body.get("coordinator_auto_restarted").is_none());
+    fixture.receiver.received("Team Agent message from leader:\n\nR4_DIRTY_TOPOLOGY");
+    fixture.assert_runtime_files_unchanged(before, "physical send");
 }
 
 #[test]
@@ -289,6 +185,7 @@ struct LoudEnsureFixture {
     root: PathBuf,
     workspace: WorkspacePath,
     fixture_children: Vec<Child>,
+    receiver: direct_fixture::DirectFixture,
 }
 
 impl LoudEnsureFixture {
@@ -350,6 +247,10 @@ impl LoudEnsureFixture {
             runtime_state["tmux_endpoint"] = json!(socket_text);
             runtime_state["tmux_socket"] = json!(socket_text);
         }
+        let receiver = direct_fixture::DirectFixture::new();
+        runtime_state["agents"][WORKER]["pane_id"] = json!(receiver.pane);
+        runtime_state["agents"][WORKER]["tmux_socket"] = json!(receiver.socket);
+        runtime_state["teams"][TEAM]["agents"][WORKER] = runtime_state["agents"][WORKER].clone();
         save_runtime_state(&root, &runtime_state).expect("save runtime state");
         Self {
             _env: env,
@@ -357,6 +258,7 @@ impl LoudEnsureFixture {
             workspace: WorkspacePath::new(root.clone()),
             root,
             fixture_children: Vec::new(),
+            receiver,
         }
     }
 

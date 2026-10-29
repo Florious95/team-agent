@@ -34,29 +34,12 @@ fn send_002_send_to_stopped_worker_does_not_falsely_deliver() {
             "--json",
         ],
     );
-    let j = out.json();
-    let status = j.pointer("/status").and_then(|v| v.as_str()).unwrap_or("");
-    let ok = j.pointer("/ok").and_then(|v| v.as_bool()).unwrap_or(false);
-
-    // The forbidden combination.
-    let false_positive = ok && status == "delivered";
-    assert!(
-        !false_positive,
-        "send to stopped worker must not report ok:true,status:'delivered' (E55 regression); got {j}"
-    );
-
-    let allowed = [
-        "queued",
-        "accepted",
-        "submitted_unverified",
-        "queued_pane_missing",
-        "tmux_target_missing",
-        "failed",
-    ];
-    assert!(
-        allowed.contains(&status),
-        "send-to-stopped status {status:?} should be one of {allowed:?}; json={j}"
-    );
+    let value = out.json();
+    assert!(!out.is_success(), "missing physical endpoint must refuse: {value}");
+    assert_eq!(value["ok"], false);
+    assert!(value.get("message_id").is_none(), "refusal must not queue work: {value}");
+    assert!(value.get("delivery_pending").is_none());
+    assert!(value["error"].is_string());
 
     let _ = run_ta(
         &ws,

@@ -22,7 +22,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
-// Named Phase1 catalog migration: four canonical lifecycle surfaces are public.
+// Named Phase1 catalog migration: four canonical lifecycle surfaces are public,
+// plus read-only endpoint discovery (locate) and durable leader reminders (schedule).
 const HUMAN: &[&str] = &[
     "start",
     "stop",
@@ -30,6 +31,7 @@ const HUMAN: &[&str] = &[
     "agent",
     "quick-start",
     "send",
+    "schedule",
     "status",
     "models",
     "restart",
@@ -47,6 +49,7 @@ const HUMAN: &[&str] = &[
     "grok",
     "pi",
     "kiro",
+    "locate",
     "leaders",
     "doctor",
     "remove-agent",
@@ -388,21 +391,21 @@ fn examples_property(command: &str) {
 }
 
 #[test]
-fn h1_public_catalog_is_exactly_thirty_four_human_records_and_no_machine_record() {
+fn h1_public_catalog_is_exactly_thirty_six_human_records_and_no_machine_record() {
     let actual = catalog::COMMAND_SPECS
         .iter()
         .map(|s| s.name)
         .collect::<BTreeSet<_>>();
     assert_eq!(
         catalog::COMMAND_SPECS.len(),
-        34,
-        "H1 retains the exact catalog, including four Phase1 lifecycle surfaces"
+        36,
+        "H1 retains the exact catalog, including four Phase1 lifecycle surfaces, locate and schedule"
     );
     assert_eq!(actual, HUMAN.iter().copied().collect());
 }
 #[test]
 #[serial(env)]
-fn h1_root_discovers_all_thirty_four_once_in_catalog_and_zero_private_names() {
+fn h1_root_discovers_all_thirty_six_once_in_catalog_and_zero_private_names() {
     let env = HermeticTestEnv::enter("root-human");
     let cwd = env.workspace("empty");
     let out = env.run_cli(&cwd, &["--help"]);
@@ -418,7 +421,7 @@ fn h1_root_discovers_all_thirty_four_once_in_catalog_and_zero_private_names() {
         .collect::<Vec<_>>();
     assert_eq!(
         visible.len(),
-        34,
+        36,
         "H1 root command list: {visible:?}\n{help}"
     );
     assert_eq!(

@@ -109,7 +109,7 @@ fn r1_explicit_missing_team_fails_and_nested_team_resolves_runtime() {
             assert_eq!(out.status.code(), Some(1), "unhealthy runtime: {value}");
             assert_eq!(value["runtime"]["status"], "present");
             assert_eq!(value["runtime"]["team_key"], "alpha");
-            assert_eq!(value["runtime"]["run_workspace"], f.workspace.to_string_lossy().as_ref());
+            assert_eq!(value["runtime"]["run_workspace"], f.workspace.canonicalize().unwrap().to_string_lossy().as_ref());
         }
         assert_eq!(fs::read(runtime.join("state.json")).unwrap(), before);
     }

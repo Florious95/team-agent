@@ -23,8 +23,8 @@ fn attach_leader_errors_when_pane_not_resolvable() {
                 "Validation 错误须含目标 pane id,got {msg}"
             );
             assert!(
-                msg.contains("not found"),
-                "须是 pane-not-found 形态,got {msg}"
+                msg.contains("not found") || msg.contains("leader pane validation failed"),
+                "missing pane must fail physical validation, got {msg}"
             );
         }
         Err(other) => panic!("期望 Validation(pane not found),got {other:?}"),

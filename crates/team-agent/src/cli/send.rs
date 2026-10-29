@@ -52,43 +52,82 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
     let mut destinations = Vec::new();
     for target in requested {
         let (workspace, team, agent) = if let Some(entry) = &alias {
-            (&entry.workspace, Some(entry.team_key.as_str()), "leader")
-        } else if let Some((team, agent)) = target.split_once('/') {
-            (&args.workspace, Some(team), agent)
-        } else { (&args.workspace, args.team.as_deref(), target) };
-        let directory = crate::direct_delivery::directory(workspace, team).map_err(CliError::Usage)?;
+            (entry.workspace.clone(), Some(entry.team_key.clone()), "leader".to_string())
+        } else if target == "*" {
+            (args.workspace.clone(), args.team.clone(), target.to_string())
+        } else {
+            // A qualified address carries its own scope; only a bare name consumes --team.
+            let Ok(address) = crate::messaging::parse_logical_address(target) else {
+                return refuse(args, target, format!("invalid recipient name: {target}"));
+            };
+            let team = if address.workspace.is_some() { None } else { args.team.clone() };
+            let workspace = address.workspace.unwrap_or_else(|| args.workspace.clone());
+            match address.target {
+                crate::messaging::LogicalAddressTarget::Worker(agent) => (workspace, team, agent),
+                crate::messaging::LogicalAddressTarget::TeamEntity { team, entity } => (workspace, Some(team), entity),
+                crate::messaging::LogicalAddressTarget::SessionWindow { .. } => return Err(CliError::Usage(
+                    "Terminal-window addressing is no longer supported; use an agent name or leader, with --workspace/--team to select scope".into(),
+                )),
+            }
+        };
+        let directory = match crate::direct_delivery::directory(&workspace, team.as_deref()) {
+            Ok(directory) => directory,
+            Err(error) => return refuse(args, target, error),
+        };
         let agents: Vec<String> = if agent == "*" {
             directory.agents().into_iter().filter(|agent| agent != args.sender.as_str()).collect()
-        } else { vec![agent.to_string()] };
+        } else { vec![agent] };
         for agent in agents {
+            let raw = if target == "*" { agent.as_str() } else { target };
             if agent != "leader" && !directory.agents().contains(&agent) {
-                return Err(CliError::Usage(format!("unknown recipient: {agent}")));
+                return refuse(args, raw, format!("unknown recipient: {agent}"));
             }
             let endpoint = directory.endpoint(&agent);
-            if !mailbox { endpoint.as_ref().map_err(|e| CliError::Usage(e.clone()))?; }
+            if let (false, Err(error)) = (mailbox, &endpoint) {
+                if alias.is_some() { return Err(CliError::Runtime(error.clone())); }
+                return refuse(args, raw, error.clone());
+            }
             let key = (directory.workspace.clone(), directory.team.clone(), agent);
             if !destinations.iter().any(|(existing, _)| existing == &key) {
                 destinations.push((key, endpoint));
             }
         }
     }
-    if destinations.is_empty() { return Err(CliError::Usage("send has no recipients".into())); }
+    if destinations.is_empty() { return Err(CliError::Runtime("send has no recipients".into())); }
     for ((workspace, team, agent), _endpoint) in destinations {
+        let mut inbox_id = None;
         if mailbox || (agent == "leader" && !matches!(args.sender.as_str(), "human" | "leader")) {
             let record = crate::inbox_store::record(args.sender.as_str(), &agent, &content, team.as_deref(), "message");
-            crate::inbox_store::append(&workspace, &agent, &record).map_err(CliError::Usage)?;
+            crate::inbox_store::append(&workspace, &agent, &record).map_err(CliError::Runtime)?;
+            inbox_id = Some(record["message_id"].clone());
         }
-        let value = if mailbox {
+        let mut value = if mailbox {
             serde_json::json!({"status": "stored", "recipient": agent, "mailbox": true})
         } else {
             let text = format!("Team Agent message from {}:\n\n{content}", args.sender.as_str());
             crate::direct_delivery::directory(&workspace, team.as_deref())
-                .and_then(|directory| directory.send(&agent, &text)).map_err(CliError::Usage)?
+                .and_then(|directory| directory.send(&agent, &text)).map_err(CliError::Runtime)?
         };
+        if let Some(id) = inbox_id { value["message_id"] = id; }
         results.push(value);
     }
-    let value = if results.len() == 1 { results.remove(0) } else { serde_json::json!({"status": "sent", "results": results}) };
+    let mut value = if results.len() == 1 { results.remove(0) } else { serde_json::json!({"status": "sent", "results": results}) };
+    value["ok"] = serde_json::json!(true);
     Ok(CmdResult::from_json(value, args.json))
+}
+
+/// Refuse an unroutable recipient. The read-only named-address diagnosis only
+/// explains the refusal (reason, scoped spelling suggestions); it never routes.
+fn refuse(args: &SendArgs, raw: &str, cause: String) -> Result<CmdResult, CliError> {
+    let Err(mut error) = crate::cli::named_address::resolve_name_for_cli(&args.workspace, raw, args.team.as_deref()) else {
+        return Err(CliError::Runtime(cause));
+    };
+    resolve::adapt_positional_bare_error(args, raw, &mut error);
+    if args.json {
+        return Ok(CmdResult::from_json(error.to_json(), true));
+    }
+    let (message, action) = error.human_guidance(raw);
+    Err(CliError::AddressRefusal { audit: error.n38_message(), error: message, action })
 }
 
 fn read_host_leader_alias(name: &str) -> Result<crate::leader::registry::LeaderRegistryEntry, CliError> {
@@ -96,7 +135,9 @@ fn read_host_leader_alias(name: &str) -> Result<crate::leader::registry::LeaderR
         .filter(|entry| entry.delivery_name == name || entry.qualified_name == name
             || entry.stable_qualified_name == name || entry.aliases.iter().any(|alias| alias == name)).collect();
     if candidates.len() != 1 {
-        return Err(CliError::Usage(format!("leader name is unknown or ambiguous: {name}")));
+        return Err(CliError::Runtime(format!(
+            "leader name is unknown or ambiguous: {name}; refused, nothing was sent. List attached leader names with team-agent leaders; to leave the message for later, resend with --mailbox and read it with team-agent inbox leader"
+        )));
     }
     Ok(candidates.into_iter().next().unwrap())
 }

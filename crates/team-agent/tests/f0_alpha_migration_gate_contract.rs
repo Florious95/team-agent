@@ -179,7 +179,7 @@ fn stale_legacy_snapshot_is_marked_or_reported_and_never_consumed_by_product_rea
 
 #[test]
 #[serial(env)]
-fn a0_transition_response_names_message_identity_distinctly_from_task_identity() {
+fn append_only_result_identity_does_not_inherit_a_legacy_current_turn() {
     let case = AlphaCase::new("a0-response-naming");
     save_runtime_state(&case.workspace, &case.a0_state()).expect("seed A0 state");
     let store = MessageStore::open(&case.workspace).expect("open message store");
@@ -220,26 +220,18 @@ fn a0_transition_response_names_message_identity_distinctly_from_task_identity()
         .map(|ok| Value::Object(ok.fields))
         .unwrap_or_else(|err| err.to_envelope());
 
-    assert_eq!(
-        body.get("task_id").and_then(Value::as_str),
-        Some(MSG_ALPHA),
-        "F0-4 RED3 setup: A0 transition still allows task_id == message_id for the current direct turn; body={body}"
-    );
-    assert_eq!(
-        body.get("attributed_message_id").and_then(Value::as_str),
-        Some(MSG_ALPHA),
-        "F0-4 RED3: response shape must expose the message identity under a distinct field, not only echo it as task_id; body={body}"
-    );
-    assert_eq!(
-        body.get("attribution_scope").and_then(Value::as_str),
-        Some("message"),
-        "F0-4 RED3: response/docs fields must name this as message-scoped attribution so clients do not learn that task_id and message_id are permanently identical; body={body}"
-    );
-    assert_eq!(
-        body.get("task_id_source").and_then(Value::as_str),
-        Some("current_turn_message"),
-        "F0-4 RED3: task_id provenance must be structured during the A0 bridge; body={body}"
-    );
+    assert_eq!(body["ok"], true, "{body}");
+    assert_eq!(body["task_id"], "manual", "retired turn rows are not task authority");
+    let id = body["message_id"].as_str().expect("append-only record identity");
+    assert_ne!(id, MSG_ALPHA);
+    let inbox = team_agent::inbox_store::read(&case.workspace, "leader", 16, Some(TEAM)).unwrap();
+    let records = inbox["messages"].as_array().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["message_id"], id);
+    assert_eq!(records[0]["sender"], WORKER);
+    assert_eq!(records[0]["team"], TEAM);
+    assert_eq!(records[0]["envelope"]["task_id"], "manual");
+    assert_eq!(records[0]["envelope"]["summary"], "F0_ALPHA_A0_NAMING");
 }
 
 #[ignore = "red-by-design: pending contract, tracked in private backlog"]

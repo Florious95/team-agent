@@ -104,7 +104,9 @@ fn is_allowed_probe(window: &str) -> bool {
 }
 
 fn is_socketed_raw_call(window: &str) -> bool {
-    window.contains(".arg(\"-L\")")
+    window.contains(".arg(\"-S\")")
+        || window.contains(".args([\"-S\"")
+        || window.contains(".arg(\"-L\")")
         || window.contains(".args([\"-L\"")
         || window.contains(".arg(flag)")
 }

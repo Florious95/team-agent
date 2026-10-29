@@ -422,7 +422,6 @@ fn spine_delivery_refuses_retired_legacy_rows_before_input() {
         ("codex", "legacy codex seat has no runtime in this release"),
         ("codex_cli", "legacy codex seat has no runtime in this release"),
         ("codex-cli", "legacy codex seat has no runtime in this release"),
-        ("grok", "legacy grok seat has no runtime in this release"),
     ] {
         let ws = tmp_ws(&format!("retired-{provider}"));
         let store = store_for(&ws);

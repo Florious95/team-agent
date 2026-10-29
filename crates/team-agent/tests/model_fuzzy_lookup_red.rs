@@ -696,7 +696,7 @@ exit 77
         let cwd = fs::read_to_string(fixture.trace.join("claude.pwd")).expect("Claude cwd capture");
         let cwd = PathBuf::from(cwd.trim());
         assert!(
-            cwd.starts_with(&fixture.temp),
+            cwd.starts_with(fixture.temp.canonicalize().expect("canonical owned temp")),
             "Claude cwd must be owned temp: {cwd:?}"
         );
         assert_ne!(cwd, fixture.workspace);

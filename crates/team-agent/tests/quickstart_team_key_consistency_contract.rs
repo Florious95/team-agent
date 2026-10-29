@@ -207,6 +207,11 @@ impl ConsistencyCase {
              send / qualified --to-name (all accept or all refuse); status={status_ok} \
              send={send_ok} name={name_ok}\nstatus={status_value}\nsend={send_value}\nname={name_value}"
         );
+        if send_ok {
+            assert_eq!(send_value["delivery"], "physical");
+            assert_eq!(name_value["delivery"], "physical");
+            assert_eq!(send_value["pane_id"], name_value["pane_id"]);
+        }
         status_ok
     }
 
@@ -234,8 +239,8 @@ impl ConsistencyCase {
              display alias leaking into owner scope poisons DB scoping; owners={owners:?}"
         );
         assert!(
-            !owners.is_empty(),
-            "{context}: at least one accepted send must have produced a message row"
+            owners.is_empty(),
+            "{context}: direct sends must not persist coordinator queue rows"
         );
     }
 

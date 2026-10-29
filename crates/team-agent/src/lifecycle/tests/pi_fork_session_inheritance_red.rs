@@ -105,7 +105,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let caller = hermetic_guard::HermeticTestEnv::enter_with_leader("pi-fork-owned-caller");
-        let root = super::temp_ws();
+        let root = super::temp_ws().canonicalize().expect("canonical fixture root");
         #[cfg(unix)]
         let path_guard = PathEnvGuard::with_fake_pi(&root);
         let team_dir = root.join("teamdir");

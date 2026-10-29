@@ -1,13 +1,5 @@
-//! Foundation-0 F0-1 RED contract: A0 current-turn result attribution.
-//!
-//! References:
-//! - `.team/artifacts/foundation-0-slice-design.md` §3 A0 target semantics.
-//! - `.team/artifacts/foundation-0-slice-design.md` §5 F0-1 RED design.
-//!
-//! User story: when a worker reports without an explicit task_id, Team Agent
-//! attributes that result to the worker's current physical turn/message, not to a
-//! stale startup task or another team's similarly named worker. If physical submit
-//! never happened, the current turn is not armed and historical fallback is bounded.
+//! Reports retain explicit attribution only; coordinator turns cannot assign tasks.
+//! Legacy message fixtures prove they cannot redirect append-only results.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
@@ -41,7 +33,7 @@ const EXPLICIT_TASK: &str = "task_explicit_override";
 
 #[test]
 #[serial(env)]
-fn old_task_initial_loses_to_current_direct_message_without_explicit_task_id() {
+fn assigned_tasks_and_current_turns_cannot_attribute_an_implicit_report() {
     let case = A0Case::new("old-task-initial-current-direct");
     case.seed_team(TEAM_A, Some(MSG_CURRENT), &[pending_task(TASK_INITIAL)]);
     case.insert_direct_message(TEAM_A, MSG_CURRENT, "delivered", 10);
@@ -50,8 +42,8 @@ fn old_task_initial_loses_to_current_direct_message_without_explicit_task_id() {
 
     assert_eq!(
         body.get("task_id").and_then(Value::as_str),
-        Some(MSG_CURRENT),
-        "F0-1 RED1: old nonterminal task_initial must not steal a no-task report when the worker has a newer current physical direct turn; body={body} rows={:?}",
+        Some("manual"),
+        "implicit reports must ignore coordinator task attribution; body={body} rows={:?}",
         case.result_rows("A0_CURRENT_BEATS_TASK_INITIAL")
     );
     assert!(
@@ -64,7 +56,7 @@ fn old_task_initial_loses_to_current_direct_message_without_explicit_task_id() {
 
 #[test]
 #[serial(env)]
-fn physical_submit_before_delayed_verification_arms_current_turn_for_fast_report() {
+fn physical_submit_does_not_attribute_a_fast_report_without_explicit_task_id() {
     let case = A0Case::new("physical-submit-before-verification");
     case.seed_team(TEAM_A, Some(MSG_SUBMITTED), &[pending_task(TASK_INITIAL)]);
     case.insert_direct_message(TEAM_A, MSG_SUBMITTED, "submitted", 20);
@@ -73,8 +65,8 @@ fn physical_submit_before_delayed_verification_arms_current_turn_for_fast_report
 
     assert_eq!(
         body.get("task_id").and_then(Value::as_str),
-        Some(MSG_SUBMITTED),
-        "F0-1 RED2: physical submit is the current-turn boundary; a fast report emitted before delayed verification returns must attach to the submitted message, not stale task_initial; body={body} rows={:?}",
+        Some("manual"),
+        "implicit reports must ignore coordinator task attribution; body={body} rows={:?}",
         case.result_rows("A0_SUBMITTED_BEFORE_VERIFIED")
     );
 }
@@ -133,8 +125,8 @@ fn sibling_team_same_worker_name_does_not_cross_owner_team_id() {
 
     assert_eq!(
         body.get("task_id").and_then(Value::as_str),
-        Some(MSG_ALPHA),
-        "F0-1 RED4: owner_team_id=team-a must read team-a current turn even when sibling team-b has the same worker name and a newer delivered message; body={body} rows={:?}",
+        Some("manual"),
+        "implicit reports must ignore coordinator task attribution; body={body} rows={:?}",
         case.result_rows("A0_OWNER_SCOPE_ALPHA")
     );
     assert!(
@@ -290,35 +282,21 @@ impl A0Case {
             )
             .map(|ok| Value::Object(ok.fields))
             .unwrap_or_else(|err| err.to_envelope());
-        assert!(
-            !out.is_null(),
-            "F0-1 RED setup: report_result must return a structured body"
-        );
+        assert_eq!(out["ok"], true, "report_result failed: {out}");
+        let records = team_agent::inbox_store::read(&self.workspace, "leader", 100, Some(owner_team_id)).unwrap();
+        assert!(records["messages"].as_array().unwrap().iter().any(|record|
+            record["message_id"] == out["message_id"] && record["content"] == summary));
         out
     }
 
     fn result_rows(&self, summary: &str) -> Vec<ResultRow> {
-        let store = MessageStore::open(&self.workspace).expect("open message store");
-        let conn = open_db(store.db_path()).expect("open db");
-        let mut stmt = conn
-            .prepare(
-                "select owner_team_id, task_id, envelope
-                 from results
-                 where agent_id = ?1
-                 order by created_at asc, result_id asc",
-            )
-            .expect("prepare result query");
-        stmt.query_map(params![WORKER], |row| {
-            Ok(ResultRow {
-                owner_team_id: row.get(0)?,
-                task_id: row.get(1)?,
-                envelope: row.get(2)?,
-            })
-        })
-        .expect("query results")
-        .filter_map(Result::ok)
-        .filter(|row| row.summary().as_deref() == Some(summary))
-        .collect()
+        team_agent::inbox_store::read(&self.workspace, "leader", 100, None).unwrap()["messages"]
+            .as_array().unwrap().iter()
+            .filter(|record| record["sender"] == WORKER && record["content"] == summary)
+            .map(|record| ResultRow {
+                owner_team_id: record["team"].as_str().map(str::to_string),
+                task_id: record["envelope"]["task_id"].as_str().unwrap().into(),
+            }).collect()
     }
 
     fn result_rows_for_task(&self, task_id: &str, summary: &str) -> Vec<ResultRow> {
@@ -333,17 +311,6 @@ impl A0Case {
 struct ResultRow {
     owner_team_id: Option<String>,
     task_id: String,
-    envelope: String,
-}
-
-impl ResultRow {
-    fn summary(&self) -> Option<String> {
-        let value: Value = serde_json::from_str(&self.envelope).ok()?;
-        value
-            .get("summary")
-            .and_then(Value::as_str)
-            .map(ToString::to_string)
-    }
 }
 
 fn team_state(team: &str, current_turn: Option<&str>, tasks: &[Value]) -> Value {

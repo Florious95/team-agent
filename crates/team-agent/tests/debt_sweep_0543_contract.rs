@@ -134,25 +134,11 @@ fn e2e_workspace_drop_cleans_exact_tmux_before_removing_workspace() {
 #[test]
 fn e6_fixture_uses_unique_team_identity_and_exact_socket_fallback() {
     let source = read_repo("crates/team-agent/tests/e6_offline_mailbox_toname_e2e_contract.rs");
-    let constructor = function_block_after(&source, "fn new(tag: &str) -> Self");
-    let normalized = normalize(&constructor);
-    assert!(
-        normalized.contains("teamkey:format")
-            && normalized.contains("stdprocessid")
-            && normalized.contains("n"),
-        "RED: E6 team_key/session must include pid+counter; constructor={constructor}"
-    );
-    assert!(
-        !constructor.contains("team_key: \"mail059\".to_string()"),
-        "fixed E6 team key can collide with host fixtures"
-    );
-
-    let drop_body = function_block_after(&source, "impl Drop for E6Case");
-    assert!(
-        (drop_body.contains("kill-server") && drop_body.contains("\"-S\""))
-            || drop_body.contains("cleanup_exact_tmux_socket"),
-        "RED: shutdown failure needs exact -S socket fallback; drop={drop_body}"
-    );
+    assert!(source.contains("support/direct_fixture.rs"));
+    let fixture = read_repo("crates/team-agent/tests/support/direct_fixture.rs");
+    assert!(fixture.contains("std::process::id()") && fixture.contains("NEXT.fetch_add"));
+    assert!(fixture.contains("kill-server") && fixture.contains("\"-S\""));
+    assert!(fixture.contains("impl Drop for DirectFixture"));
 }
 
 #[test]
@@ -254,15 +240,12 @@ fn coordinator_debug_eprintlns_are_deleted_but_inject_report_shape_remains() {
 }
 
 #[test]
-fn send_pane_compat_surface_has_no_direct_inject_path() {
+fn send_pane_requires_explicit_socket_and_dialect() {
     let source = composite_source::composite_source("src/cli/send.rs");
     assert!(!source.contains("fn send_to_pane_direct"));
     assert!(!source.contains("send.pane_direct"));
-    assert!(source.contains("--pane {pane_id} is no longer supported"));
-    assert!(source.contains("warn_send_alias(\"--pane\")"));
-    assert!(source.contains(
-        "use team-agent send <agent> 'task message' with --workspace/--team to select scope"
-    ));
+    assert!(source.contains("raw pane delivery requires --socket and --dialect"));
+    assert!(source.contains("crate::direct_delivery::directory"));
 }
 
 include!("support/debt_sweep_0543.rs");

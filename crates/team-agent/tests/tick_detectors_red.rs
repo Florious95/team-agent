@@ -2,6 +2,8 @@
 
 #[path = "support/hermetic.rs"]
 mod hermetic_guard;
+#[path = "support/direct_fixture.rs"]
+mod direct_fixture;
 #[allow(dead_code)]
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
@@ -63,14 +65,16 @@ fn tick_reports_compaction_from_real_worker_capture_not_empty_placeholder() {
 }
 
 #[test]
-fn tick_marks_codex_session_drift_and_send_refuses_drifted_worker() {
+#[serial_test::serial(env)]
+fn tick_marks_codex_session_drift_without_vetoing_physical_send() {
+    let _env = hermetic_guard::HermeticTestEnv::enter("drift-direct");
     let worker_capture =
         "Codex resumed. Switched to thread 22222222-2222-4222-8222-222222222222\n❯\n";
     // The session-drift detector reads only Codex rows (its Codex TUI thread
     // marker), so this pre-upgrade worker row stays `codex`.
     let fixture = TickFixture::new("drift", "codex", worker_capture, "");
     let report = fixture.coord.tick().expect("tick should complete");
-    let state = load_runtime_state(&fixture.workspace).expect("load post-tick state");
+    let mut state = load_runtime_state(&fixture.workspace).expect("load post-tick state");
 
     assert!(
         !report.session_drift.is_empty(),
@@ -90,6 +94,12 @@ fn tick_marks_codex_session_drift_and_send_refuses_drifted_worker() {
         "session_drift payload must retain stored_session_id for operator diagnosis; state={state}"
     );
 
+    let receiver = direct_fixture::DirectFixture::new();
+    state["agents"]["w1"]["pane_id"] = json!(receiver.pane);
+    state["agents"]["w1"]["tmux_socket"] = json!(receiver.socket);
+    state["teams"]["current"]["agents"]["w1"] = state["agents"]["w1"].clone();
+    std::fs::write(team_agent::state::persist::runtime_state_path(&fixture.workspace), serde_json::to_vec(&state).unwrap()).unwrap();
+    let before = std::fs::read(team_agent::state::persist::runtime_state_path(&fixture.workspace)).unwrap();
     let out = Command::new(bin())
         .args([
             "send",
@@ -105,14 +115,10 @@ fn tick_marks_codex_session_drift_and_send_refuses_drifted_worker() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     let value = serde_json::from_slice::<Value>(&out.stdout).unwrap_or(Value::Null);
-    assert!(
-        !out.status.success()
-            && value.get("ok").and_then(Value::as_bool) == Some(false)
-            && serde_json::to_string(&value).unwrap_or_default().contains("session_drift"),
-        "after tick marks drift, `team-agent send --to w1` must refuse with session_drift instead \
-         of injecting into the wrong provider thread. code={:?} stdout={stdout:?} stderr={stderr:?}",
-        out.status.code()
-    );
+    assert!(out.status.success(), "physical send failed: {stdout} {stderr}");
+    assert_eq!(value["delivery"], "physical");
+    receiver.received("Team Agent message from leader:\n\nhello");
+    assert_eq!(std::fs::read(team_agent::state::persist::runtime_state_path(&fixture.workspace)).unwrap(), before);
 }
 
 #[test]

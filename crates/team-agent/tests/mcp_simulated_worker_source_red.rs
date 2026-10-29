@@ -25,6 +25,12 @@ use team_agent::model::ids::TaskId;
 // is intentionally no-op and must not be a leader delivery caller. Keep funnel coverage for
 // report_result / send_to_leader / broadcast-to-leader / peer_mirror below.
 
+fn leader_inbox_record(harness: &McpSimHarness, id: &str) -> serde_json::Value {
+    let inbox = team_agent::inbox_store::read(harness.workspace_path(), "leader", 64, Some("teamA")).unwrap();
+    inbox["messages"].as_array().unwrap().iter()
+        .find(|record| record["message_id"] == id).cloned().expect("durable scoped inbox record")
+}
+
 fn assert_mcp_tool_success(call: &McpToolCall, context: &str) {
     assert!(
         !call.is_error,
@@ -56,12 +62,6 @@ fn assert_no_queued_only_or_fallback_success(events: &str, context: &str) {
     );
 }
 
-fn assert_scope_resolved_event(events: &str, context: &str) {
-    assert!(
-        events.contains("mcp.scope_resolved"),
-        "{context}: worker-origin MCP call must emit mcp.scope_resolved for N12/N18/N30 scope audit; events={events}"
-    );
-}
 
 #[test]
 fn mcp_harness_uses_same_binary_env_jsonrpc_trace_and_no_cli_fallback() {
@@ -214,56 +214,18 @@ fn n31_n32_source_guard_has_no_report_result_queue_or_fallback_success_path() {
 fn mcp_worker_send_to_leader_uses_live_leader_receiver_not_refusal_or_fallback() {
     let harness = McpSimHarness::new();
     let mut worker_a = harness.spawn_mcp_client("worker_a", "teamA");
-    let canary = "MCP_SIM_WORKER_TO_LEADER_CANARY";
-
-    let call = worker_a.call_tool(
-        "send_message",
-        json!({
-            "to": "leader",
-            "content": canary
-        }),
-    );
-
-    assert_mcp_tool_success(&call, "send_message(to=leader) with a live leader_receiver");
-    harness.drive_delivery_twice();
-
-    let rows = harness.message_rows_containing(canary);
-    // 0.3.28-final E55 truth source: MCP sim uses a bare-shell pane that
-    // echoes the canary but never clears the composer (no real provider
-    // TUI). The strict E55 gate (consumed=false → SubmitConsumptionUnverified
-    // → store mark failed) is the CORRECT behaviour: paste landed (canary
-    // visible) but consumption was not observed.
-    assert!(
-        rows.iter().any(|row| {
-            row.sender == "worker_a"
-                && row.recipient == "leader"
-                && row.owner_team_id.as_deref() == Some("teamA")
-                && !matches!(row.status.as_str(), "refused")
-        }),
-        "send_message(to=leader) must persist a team-scoped worker->leader \
-         message row (status may be `failed` / `submitted_unverified` in MCP \
-         sim's bare-shell pane — that is the correct E55-strict outcome); \
-         rows={rows:?}"
-    );
-    // The canary still reaches the leader pane visually (paste-buffer
-    // pastes the text; only the post-Enter consumption gate failed).
-    // 0.3.28-final E55: bare-shell pane → unverified retries → count >= 1.
-    assert!(
-        harness.pane_contains_count("leader", canary) >= 1,
-        "leader pane must receive the worker progress canary at least once"
-    );
-    assert_eq!(
-        harness.pane_contains_count("worker_a", canary),
-        0,
-        "sender pane must not receive its own leader-bound message"
-    );
-    assert_eq!(
-        harness.pane_contains_count("team_b_leader", canary),
-        0,
-        "wrong-team leader pane must not receive teamA worker traffic"
-    );
-    assert_scope_resolved_event(&harness.events_text(), "send_message(to=leader)");
-    assert_deliver_to_leader_submit(&harness.events_text(), "send_message(to=leader)");
+    let canary = "MCP_SIM_SEND_MESSAGE_CANARY";
+    let call = worker_a.call_tool("send_message", json!({"to": "leader", "content": canary}));
+    assert_mcp_tool_success(&call, "send_message(to=leader)");
+    assert_eq!(call.body["delivery"], "physical", "{}", call.body);
+    let record = leader_inbox_record(&harness, call.body["message_id"].as_str().unwrap());
+    assert_eq!(record["sender"], "worker_a");
+    assert_eq!(record["team"], "teamA");
+    assert_eq!(record["content"], canary);
+    assert!(harness.message_rows_containing(canary).is_empty(), "no coordinator queue");
+    assert!(harness.pane_contains_count("leader", canary) >= 1);
+    assert_eq!(harness.pane_contains_count("worker_a", canary), 0);
+    assert_eq!(harness.pane_contains_count("team_b_leader", canary), 0);
 }
 
 #[test]
@@ -271,154 +233,51 @@ fn mcp_worker_report_result_is_leader_visible_once_not_queued_only() {
     let harness = McpSimHarness::new();
     let mut worker_a = harness.spawn_mcp_client("worker_a", "teamA");
     let canary = "MCP_SIM_REPORT_RESULT_CANARY";
-
-    let call = worker_a.call_tool(
-        "report_result",
-        json!({
-            "task_id": "task_mcp",
-            "agent_id": "worker_a",
-            "status": "success",
-            "summary": canary,
-            "tests": [
-                {"command": "mcp-sim", "status": "passed"}
-            ]
-        }),
-    );
-
+    let call = worker_a.call_tool("report_result", json!({
+        "task_id": "task_mcp", "agent_id": "worker_a", "status": "success", "summary": canary
+    }));
     assert_mcp_tool_success(&call, "report_result");
-    // The shared leader receiver may queue a compact stage notification when
-    // the hermetic harness has no bound physical leader pane. `queued` is a
-    // truthful accepted handoff; the deleted `queued_only` side channel is not.
-    assert_ne!(
-        call.body["notification_status"],
-        json!("queued_only"),
-        "report_result must not return the removed queued_only side channel; body={}",
-        call.body
-    );
-    assert_eq!(
-        harness.scheduled_event_count(),
-        0,
-        "report_result must not rely on a queued scheduled_events notification as its only leader path"
-    );
-
-    let result_id = call.body["result_id"]
-        .as_str()
-        .expect("report_result must return result_id");
-    let row = harness
-        .result_row(result_id)
-        .unwrap_or_else(|| panic!("missing result row for {result_id}"));
-    assert_eq!(row.task_id, "task_mcp", "result row must preserve task_id");
-    assert_eq!(
-        row.agent_id, "worker_a",
-        "result row must preserve MCP worker identity"
-    );
-    assert_eq!(
-        row.owner_team_id.as_deref(),
-        Some("teamA"),
-        "result row must preserve MCP owner team scope; row={row:?}"
-    );
-    assert!(
-        row.envelope.contains(canary),
-        "result envelope must preserve the worker summary canary; row={row:?}"
-    );
-
-    harness.drive_delivery_twice();
-    // 0.3.28-final E55: bare-shell pane fails the strict consumption gate,
-    // so each delivery tick retries (the unverified status means the
-    // framework hasn't observed delivery and tries again). Count is >= 1
-    // (paste landed at least once); upper bound is the retry cap. Real
-    // provider TUIs clear the composer on consumption, so the retry loop
-    // exits early and the count is 1.
-    let notification_status = call.body["notification_status"].as_str().unwrap_or("");
-    if notification_status == "delivered" {
-        assert!(
-            harness.pane_contains_count("leader", canary) >= 1,
-            "a delivered result notification must reach the leader pane"
-        );
+    let record = leader_inbox_record(&harness, call.body["message_id"].as_str().unwrap());
+    assert_eq!(record["sender"], "worker_a");
+    assert_eq!(record["team"], "teamA");
+    assert_eq!(record["kind"], "result");
+    assert_eq!(record["envelope"]["task_id"], "task_mcp");
+    assert_eq!(record["envelope"]["agent_id"], "worker_a");
+    assert_eq!(record["envelope"]["summary"], canary);
+    assert_eq!(harness.scheduled_event_count(), 0);
+    assert!(harness.message_rows_containing(canary).is_empty());
+    if call.body["status"] == "reported" {
+        assert!(harness.pane_contains_count("leader", canary) >= 1);
     } else {
-        assert_eq!(
-            notification_status, "queued",
-            "without a bound physical leader, report_result must expose a queued handoff; body={}",
-            call.body
-        );
-        assert_eq!(
-            harness.pane_contains_count("leader", canary),
-            0,
-            "a queued handoff must not claim that the hermetic harness leader pane saw it"
-        );
+        assert_eq!(call.body["status"], "stored");
+        assert!(call.body["delivery_error"].as_str().is_some());
+        assert_eq!(harness.pane_contains_count("leader", canary), 0);
     }
-    assert_eq!(
-        harness.pane_contains_count("worker_a", canary),
-        0,
-        "report_result must not echo the result notification back to the reporting worker"
-    );
-    assert_deliver_to_leader_submit(&harness.events_text(), "report_result");
+    assert_eq!(harness.pane_contains_count("worker_a", canary), 0);
+    assert_eq!(harness.pane_contains_count("team_b_leader", canary), 0);
 }
 
 #[test]
-fn mcp_worker_broadcast_fans_out_to_team_peers_and_leader_excluding_sender() {
+fn mcp_worker_broadcast_fans_out_to_team_peers_without_sender_or_leader_mirror() {
     let harness = McpSimHarness::new();
     let mut worker_a = harness.spawn_mcp_client("worker_a", "teamA");
     let canary = "MCP_SIM_BROADCAST_CANARY";
-
-    let call = worker_a.call_tool(
-        "send_message",
-        json!({
-            "to": "*",
-            "content": canary
-        }),
-    );
-
-    assert_mcp_tool_success(&call, "send_message(to=*) broadcast");
-    harness.drive_delivery_twice();
-
-    let rows = harness.message_rows_containing(canary);
-    let recipients = rows
-        .iter()
-        .map(|row| row.recipient.as_str())
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        recipients,
-        ["leader", "worker_b", "worker_c"].into_iter().collect(),
-        "broadcast from worker_a must reach all other teamA participants plus leader, and exclude sender; rows={rows:?}"
-    );
-    for row in &rows {
-        assert_eq!(
-            row.sender, "worker_a",
-            "broadcast row sender must be MCP worker; row={row:?}"
-        );
-        assert_eq!(
-            row.owner_team_id.as_deref(),
-            Some("teamA"),
-            "broadcast rows must stay scoped to owner teamA; row={row:?}"
-        );
-        // 0.3.28-final E55: MCP sim's bare-shell pane fails the strict
-        // E55 consumption gate (status may be `failed` with
-        // `send_unverified_exhausted` reason — paste landed but bare-shell
-        // shell never clears the composer). Accept that; what matters is
-        // the row is not `refused` (= business reject) and the canary
-        // visually reaches the receiving pane (asserted below).
-        assert!(
-            !matches!(row.status.as_str(), "refused"),
-            "broadcast rows must not be refused stubs; row={row:?}"
-        );
+    let call = worker_a.call_tool("send_message", json!({"to": "*", "content": canary}));
+    assert_mcp_tool_success(&call, "broadcast");
+    let results = call.body["results"].as_array().expect("per-recipient physical outcomes");
+    let recipients = results.iter().map(|row| row["recipient"].as_str().unwrap()).collect::<BTreeSet<_>>();
+    assert_eq!(recipients, ["worker_b", "worker_c"].into_iter().collect());
+    for row in results { assert_eq!(row["delivery"], "physical", "{row}"); }
+    assert!(harness.message_rows_containing(canary).is_empty());
+    let inbox = team_agent::inbox_store::read(harness.workspace_path(), "leader", 64, Some("teamA")).unwrap();
+    let records = inbox["messages"].as_array().unwrap();
+    assert!(records.is_empty(), "peer broadcast must not create a leader mirror");
+    assert_eq!(harness.pane_contains_count("leader", canary), 0);
+    for recipient in ["worker_b", "worker_c"] {
+        assert!(harness.pane_contains_count(recipient, canary) >= 1);
     }
-    // 0.3.28-final E55: bare-shell pane retries on unverified → >=1.
-    assert!(harness.pane_contains_count("leader", canary) >= 1);
-    assert!(harness.pane_contains_count("worker_b", canary) >= 1);
-    assert!(harness.pane_contains_count("worker_c", canary) >= 1);
-    assert_eq!(
-        harness.pane_contains_count("worker_a", canary),
-        0,
-        "broadcast must exclude sender"
-    );
-    assert_eq!(
-        harness.pane_contains_count("team_b_leader", canary),
-        0,
-        "broadcast must not leak to another team"
-    );
-    assert_scope_resolved_event(&harness.events_text(), "send_message(to=*) broadcast");
-    assert_deliver_to_leader_submit(&harness.events_text(), "send_message(to=*) broadcast");
+    assert_eq!(harness.pane_contains_count("worker_a", canary), 0);
+    assert_eq!(harness.pane_contains_count("team_b_leader", canary), 0);
 }
 
 #[test]

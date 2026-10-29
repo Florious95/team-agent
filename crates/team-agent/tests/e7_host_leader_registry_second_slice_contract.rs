@@ -368,31 +368,23 @@ fn e7_send_to_leader_resolves_unique_refuses_ambiguous_and_never_misroutes_stale
         &live_json,
         "send --to-leader unique short name should persist",
     );
-    assert_eq!(
-        live_json.get("resolved_via").and_then(Value::as_str),
-        Some("host_leader_registry"),
-        "E7 RED: send --to-leader must report registry resolution before canonical delivery; output={live_json}"
-    );
-    assert_eq!(
-        live_json.get("delivered").and_then(Value::as_bool),
-        Some(false),
-        "E7 RED: unique live leader send returns after persistence, before coordinator delivery; output={live_json}"
-    );
-    assert_eq!(
-        live_json.get("message_status").and_then(Value::as_str),
-        Some("accepted"),
-        "E7 RED: unique live leader send must persist an accepted row; output={live_json}"
-    );
-    assert!(live_json
-        .get("message_id")
-        .and_then(Value::as_str)
-        .is_some());
-    assert_pane_not_contains(
-        &target.tmux_socket,
-        &pane,
-        &live_token,
-        "unique live --to-leader must not bypass coordinator delivery",
-    );
+    assert_eq!(live_json["delivery"], "physical");
+    assert_eq!(live_json["pane_id"], pane);
+    assert_eq!(live_json["recipient"], "leader");
+    assert!(live_json["accepted"].is_null());
+    let inbox = team_agent::inbox_store::read(&target.workspace, "leader", 16, Some("alpha")).unwrap();
+    let records = inbox["messages"].as_array().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["message_id"], live_json["message_id"], "receipt identifies the inbox record, not a ledger row");
+    assert_eq!(records[0]["content"], live_token);
+    assert_eq!(records[0]["sender"], "e7-test");
+    assert_eq!(records[0]["team"], "alpha");
+    assert_eq!(message_count(&target.workspace, &live_token), 0);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !capture_pane(&target.tmux_socket, &pane).contains(&live_token) {
+        assert!(std::time::Instant::now() < deadline, "selected registry endpoint did not receive {live_token}");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 
     let duplicate = RuntimeCase::with_home(&env, "send-live-duplicate", "alpha", home.clone());
     let duplicate_pane = duplicate.start_leader_pane("leader");
@@ -424,18 +416,8 @@ fn e7_send_to_leader_resolves_unique_refuses_ambiguous_and_never_misroutes_stale
         ambiguous_json.get("ok").and_then(Value::as_bool),
         Some(false)
     );
-    assert_eq!(
-        ambiguous_json.get("reason").and_then(Value::as_str),
-        Some("name_ambiguous"),
-        "E7 RED: short-name collision must refuse with reason=name_ambiguous and candidates; output={ambiguous_json}"
-    );
-    assert!(
-        ambiguous_json
-            .get("candidates")
-            .and_then(Value::as_array)
-            .is_some_and(|items| items.len() >= 2),
-        "E7 RED: ambiguous refusal must list candidates; output={ambiguous_json}"
-    );
+    assert!(ambiguous_json["error"].as_str().is_some_and(|error| error.contains("ambiguous") && error.contains("alpha")),
+        "short-name collision must truthfully refuse without choosing a destination: {ambiguous_json}");
     assert_pane_not_contains(
         &target.tmux_socket,
         &pane,
@@ -483,11 +465,8 @@ fn e7_send_to_leader_resolves_unique_refuses_ambiguous_and_never_misroutes_stale
     );
     let stale_json = json_output(&stale_out, "send --to-leader stale --json");
     assert_eq!(stale_json.get("ok").and_then(Value::as_bool), Some(false));
-    assert_eq!(
-        stale_json.get("reason").and_then(Value::as_str),
-        Some("registry_stale"),
-        "E7 RED: dead/down registry target must fail closed as registry_stale; output={stale_json}"
-    );
+    assert!(stale_json["error"].as_str().is_some_and(|error| error.contains("not live")),
+        "dead physical endpoint must refuse without falling back: {stale_json}");
     assert_pane_not_contains(
         &target.tmux_socket,
         &pane,
@@ -503,7 +482,7 @@ fn e7_send_to_leader_resolves_unique_refuses_ambiguous_and_never_misroutes_stale
 
 #[test]
 #[serial(env)]
-fn e7_send_to_leader_queues_e6_mailbox_when_team_live_but_leader_unattached() {
+fn e7_send_to_leader_appends_explicit_offline_inbox_without_queue() {
     let env = HermeticTestEnv::enter("e7-send-to-leader-mailbox");
     let home = env.home().to_path_buf();
     let sender = RuntimeCase::with_home(&env, "sender-mailbox", "sender", home.clone());
@@ -523,57 +502,25 @@ fn e7_send_to_leader_queues_e6_mailbox_when_team_live_but_leader_unattached() {
     let token = unique_token("E7_TO_LEADER_MAILBOX");
     let output = sender.run_cli_with_env(
         vec![
-            "send".into(),
-            "--workspace".into(),
-            sender.workspace_arg(),
-            "--to-leader".into(),
-            "mailbox".into(),
-            token.clone(),
-            "--json".into(),
+            "send".into(), "--workspace".into(), sender.workspace_arg(),
+            "--to-leader".into(), "mailbox".into(), token.clone(),
+            "--mailbox".into(), "--json".into(),
         ],
         &[("TEAM_AGENT_ID", "e7-test".to_string())],
     );
-    let body = json_output(&output, "send --to-leader mailbox --json");
-    assert_json_ok(
-        &output,
-        &body,
-        "leader-unattached target should queue, not hard fail",
-    );
-    assert_eq!(
-        body.get("status").and_then(Value::as_str),
-        Some("deferred"),
-        "E7 RED: team live + leader never attached must report deferred presenter status; output={body}"
-    );
-    assert_eq!(
-        body.get("deferred_reason").and_then(Value::as_str),
-        Some("never_attached"),
-        "E7 RED: deferred presenter status must explain the never-attached reason; output={body}"
-    );
-    assert_eq!(
-        body.get("message_status").and_then(Value::as_str),
-        Some("queued_until_leader_attach"),
-        "E7 RED: durable message status must remain queued until leader attach; output={body}"
-    );
-    assert_eq!(
-        body.get("delivered").and_then(Value::as_bool),
-        Some(false),
-        "E7 RED: mailbox queue is not physical delivery; delivered must be false; output={body}"
-    );
-    let message_id = body
-        .get("message_id")
-        .and_then(Value::as_str)
-        .filter(|message_id| !message_id.is_empty())
-        .expect("E7 RED: mailbox response must include a durable message_id");
-    assert_eq!(
-        message_count(&target.workspace, &token),
-        1,
-        "E7 RED: mailbox path must write exactly one target team.db message row"
-    );
-    assert_eq!(
-        message_status(&target.workspace, message_id).as_deref(),
-        Some("queued_until_leader_attach"),
-        "E7 RED: mailbox row must remain queued until leader attach; message_id={message_id} body={body}"
-    );
+    let body = json_output(&output, "explicit registry mailbox");
+    assert_json_ok(&output, &body, "offline mailbox is independent of leader attachment");
+    assert_eq!(body["status"], "stored");
+    assert_eq!(body["mailbox"], true);
+    let inbox = team_agent::inbox_store::read(&target.workspace, "leader", 8, Some("mailbox")).expect("read target inbox");
+    let records = inbox["messages"].as_array().expect("inbox records");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["message_id"], body["message_id"]);
+    assert_eq!(records[0]["content"], token);
+    assert_eq!(records[0]["team"], "mailbox");
+    assert_eq!(records[0]["recipient"], "leader");
+    assert!(!sender.workspace.join(".team/inbox/leader.jsonl").exists());
+    assert_eq!(message_count(&target.workspace, &token), 0);
 }
 
 #[test]
@@ -1164,16 +1111,6 @@ fn message_count(workspace: &Path, token: &str) -> i64 {
     .unwrap_or(0)
 }
 
-fn message_status(workspace: &Path, message_id: &str) -> Option<String> {
-    let db = workspace.join(".team/runtime/team.db");
-    let conn = Connection::open(db).ok()?;
-    conn.query_row(
-        "select status from messages where message_id = ?1",
-        [message_id],
-        |row| row.get(0),
-    )
-    .ok()
-}
 
 fn channel_for_pane(case: &RuntimeCase, pane: &str) -> Value {
     json!({

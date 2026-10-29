@@ -263,7 +263,7 @@ fn m1b_unknown_flag_fails_closed_with_zero_side_effects() {
 /// create-message funnel: store-backed `msg_*` id per recipient.
 #[test]
 #[serial(env)]
-fn m2a_all_logical_address_forms_share_the_persisted_create_message_funnel() {
+fn m2a_all_logical_address_forms_share_physical_delivery() {
     let case = TargetCase::start("mt-m2a");
     let probes: Vec<(&str, Vec<&str>, usize)> = vec![
         (
@@ -317,22 +317,14 @@ fn m2a_all_logical_address_forms_share_the_persisted_create_message_funnel() {
             "M2a ({label}): the canonical logical form must be accepted; got: {text}"
         );
         let value = parsed.expect("accepted implies JSON");
-        let message_id = value
-            .get("message_id")
-            .and_then(Value::as_str)
-            .unwrap_or("<absent>");
-        assert!(
-            message_id.starts_with("msg_"),
-            "M2a ({label}): every logical address form must return a store-backed msg_* \
-             correlation id (no named_send_*/synthetic ids); got {message_id}: {value}"
-        );
-        let rows = case.db_rows(needle);
-        assert_eq!(
-            rows.len(),
-            expected_rows,
-            "M2a ({label}): the message must be persisted before delivery (one row per \
-             recipient); rows={rows:?}"
-        );
+        let receipts = value.get("results").and_then(Value::as_array).cloned().unwrap_or_else(|| vec![value.clone()]);
+        assert_eq!(receipts.len(), expected_rows, "one physical receipt per recipient");
+        for receipt in receipts {
+            assert_eq!(receipt["delivery"], "physical");
+            assert_eq!(receipt["status"], "sent");
+            assert!(receipt.get("message_id").is_none());
+        }
+        assert!(case.db_rows(needle).is_empty(), "direct delivery must not enter the queue");
     }
     case.shutdown();
 }
@@ -396,7 +388,7 @@ fn m2b_pane_form_has_no_direct_inject_bypass() {
 /// M3a — bare send: persistence IS the return contract.
 #[test]
 #[serial(env)]
-fn m3a_bare_send_returns_persisted_correlation_id() {
+fn m3a_bare_send_returns_physical_receipt_without_queue_identity() {
     let case = TargetCase::start("mt-m3a");
     let (parsed, text, exit_ok) = case.send_raw(&["w1", "m3a bare send probe", "--team", TEAM]);
     assert!(
@@ -404,19 +396,10 @@ fn m3a_bare_send_returns_persisted_correlation_id() {
         "M3a: a bare send (no delivery flags) must be accepted; got: {text}"
     );
     let value = parsed.expect("accepted implies JSON");
-    let message_id = value
-        .get("message_id")
-        .and_then(Value::as_str)
-        .unwrap_or("<absent>");
-    assert!(
-        message_id.starts_with("msg_"),
-        "M3a: the bare send must return a stable store-backed correlation id; got {message_id}"
-    );
-    assert_eq!(
-        case.db_rows("m3a bare send probe").len(),
-        1,
-        "M3a: persisted row is the return contract"
-    );
+    assert_eq!(value["delivery"], "physical");
+    assert_eq!(value["recipient"], "w1");
+    assert!(value.get("message_id").is_none());
+    assert!(case.db_rows("m3a bare send probe").is_empty());
     case.shutdown();
 }
 

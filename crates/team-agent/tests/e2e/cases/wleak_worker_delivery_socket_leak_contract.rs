@@ -40,531 +40,102 @@ const CONTROLLED_COORDINATOR_TICK_INTERVAL_SECS: &str = "30";
 const POST_MUTATION_COORDINATOR_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[test]
-fn wleak_cached_pane_owned_by_other_window_never_receives_worker_message() {
-    let team_id = "wleak001";
-    let ws = TestWorkspace::new(team_id).with_fake_spec(&["a", "b"]);
-    let ws_path = ws.path().to_str().unwrap();
-    let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
-    let _guard = TmuxServerGuard::for_workspace(&ws);
-
-    let session = worker_session_name(team_id);
-    let pane_a = pane_for_window(&ws, &session, "a");
-    let pane_b = pane_for_window(&ws, &session, "b");
-    wait_for_fake_workers_ready(&ws, &[(&pane_a, "a"), (&pane_b, "b")]);
-    stop_quick_start_coordinator(&ws);
-    let mut controlled_coordinator = start_controlled_background_coordinator(&ws, team_id);
-    let coordinator_before_mutation =
-        wait_for_coordinator_tick_finished(&ws, controlled_coordinator.id());
-    write_agent_pane_tuple(&ws, "a", &pane_b);
-    let tuple_readback = agent_tuple_readback(&ws, "a");
-    assert_stale_tuple_readback(&tuple_readback, &pane_b);
-
-    let token = "WLEAK_WRONG_WINDOW_TOKEN_001";
-    let out = run_ta(&ws, &["send", "a", token, "--workspace", ws_path, "--json"]);
-    assert!(
-        out.is_success(),
-        "send should complete before target ownership assertions; stdout={} stderr={}",
-        out.stdout,
-        out.stderr
-    );
-    let out_json = out.json();
-    let mid = out_json
-        .pointer("/message_id")
-        .and_then(Value::as_str)
-        .expect("generated message id");
-    let drain_started = Instant::now();
-    let drain = start_post_mutation_coordinator_tick(&ws, team_id);
-    let (drain_succeeded, drain_result) = wait_for_post_mutation_coordinator_tick(drain);
-    let row = message_row(&ws, mid);
-    let outcome = if drain_succeeded && row.as_ref().is_some_and(|row| row.status == "delivered") {
-        "terminal_observed"
-    } else if drain_succeeded {
-        "terminal_missing_after_drain"
-    } else {
-        "drain_failed"
-    };
-    let receipt = write_f16_routing_receipt(
-        &ws,
-        mid,
-        outcome,
-        &coordinator_before_mutation,
-        &tuple_readback,
-        &pane_a,
-        &pane_b,
-        drain_started.elapsed(),
-        drain_result,
-    );
-    eprintln!("F16 durable routing evidence={}", receipt.display());
-    assert!(
-        drain_succeeded,
-        "post-mutation coordinator --once failed; evidence={}",
-        receipt.display()
-    );
-
-    let row = row.expect("post-mutation drain must leave the same message row");
-    assert_eq!(row.status, "delivered", "F16 receipt={}", receipt.display());
-    assert_eq!(row.error, None, "F16 receipt={}", receipt.display());
-    assert_eq!(
-        row.delivery_attempts,
-        1,
-        "the post-mutation drain must claim this message exactly once; F16 receipt={}",
-        receipt.display()
-    );
-    assert!(
-        row.delivered_at.is_some(),
-        "delivered row must persist delivered_at; F16 receipt={}",
-        receipt.display()
-    );
-
-    let stale_events = message_events(&ws, mid, WORKER_PANE_BINDING_STALE);
-    assert_eq!(
-        stale_events.len(),
-        1,
-        "the same message must emit one stale-binding event; events={stale_events:?}; F16 receipt={}",
-        receipt.display()
-    );
-    let stale = &stale_events[0];
-    assert_eq!(
-        stale.get("cached_pane_id").and_then(Value::as_str),
-        Some(pane_b.pane_id.as_str()),
-        "stale event must name b's cached pane; event={stale}; F16 receipt={}",
-        receipt.display()
-    );
-    assert_eq!(
-        stale.get("expected_session").and_then(Value::as_str),
-        Some(session.as_str()),
-        "stale event must name the intended session; event={stale}; F16 receipt={}",
-        receipt.display()
-    );
-    assert_eq!(
-        stale.get("expected_window").and_then(Value::as_str),
-        Some("a"),
-        "stale event must name worker a's intended window; event={stale}; F16 receipt={}",
-        receipt.display()
-    );
-
-    let a_capture = capture_pane(&ws, pane_a.pane_id.as_str());
-    let b_capture = capture_pane(&ws, pane_b.pane_id.as_str());
-    assert!(
-        a_capture.contains(token),
-        "WLEAK RED: stale cached pane must be ignored when the intended session/window is live; expected token in worker a pane {} but capture was:\n{}",
-        pane_a.pane_id,
-        a_capture
-    );
-    assert!(
-        !b_capture.contains(token),
-        "WLEAK RED: delivery selected cached pane {} owned by window b instead of resolving {}:a; wrong pane capture:\n{}",
-        pane_b.pane_id,
-        session,
-        b_capture
-    );
-    let event = delivered_event(&ws, mid).expect("message.delivered event");
-    assert_eq!(
-        event.get("target_window").and_then(Value::as_str),
-        Some("a"),
-        "WLEAK RED: even when delivery reaches the intended worker, the delivered event must prove the physical target window instead of hiding stale-cache provenance; event={event}"
-    );
-    assert_eq!(
-        event.get("resolved_from").and_then(Value::as_str),
-        Some("session_window_lookup"),
-        "WLEAK RED: stale cached pane should be bypassed and the event should record resolved_from=session_window_lookup; event={event}"
-    );
-    assert_target_tuple(&event, &state_socket(&ws), &session, "a", &pane_a, "W1/W2");
-    stop_controlled_background_coordinator(&ws, &mut controlled_coordinator);
+fn wleak_published_endpoint_wins_over_advisory_window_names() {
+    let fixture = direct_fixture::DirectFixture::new();
+    let foreign = direct_fixture::DirectFixture::new();
+    let mut state = direct_state(&fixture);
+    state["teams"]["current"]["agents"]["worker-1"]["window"] = json!("foreign-window");
+    state["teams"]["current"]["session_name"] = json!("stale-session-name");
+    fixture.set_state(&state);
+    let value = direct_cli(&fixture, &["worker-1", "endpoint-authority"]);
+    assert_eq!(value["delivery"], "physical");
+    fixture.received("Team Agent message from leader:\n\nendpoint-authority");
+    assert!(std::fs::read(foreign.root.join("received")).unwrap().is_empty());
+    assert!(!fixture.root.join(".team/runtime/team.db").exists());
 }
 
 #[test]
-fn wleak_wrong_cached_pane_and_missing_intended_window_blocks_not_delivers() {
-    let team_id = "wleak002";
-    let ws = TestWorkspace::new(team_id).with_fake_spec(&["a", "b"]);
-    let ws_path = ws.path().to_str().unwrap();
-    let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
-    let _guard = TmuxServerGuard::for_workspace(&ws);
-
-    let session = worker_session_name(team_id);
-    let pane_b = pane_for_window(&ws, &session, "b");
-    kill_window(&ws, &session, "a");
-    write_agent_pane_tuple(&ws, "a", &pane_b);
-
-    let token = "WLEAK_MISSING_TARGET_TOKEN_002";
-    let out = run_ta(&ws, &["send", "a", token, "--workspace", ws_path, "--json"]);
-    let body = out.json();
-    assert_eq!(
-        body.pointer("/ok").and_then(Value::as_bool),
-        Some(false),
-        "WLEAK RED: missing intended worker window with wrong live cached pane must fail closed, not report delivered; json={body}"
-    );
-    assert_eq!(
-        body.pointer("/message_status").and_then(Value::as_str),
-        Some(STATUS_QUEUED_PANE_MISSING),
-        "WLEAK RED: wrong cached pane must route to the existing missing-target blocker; json={body}"
-    );
-    assert!(
-        !capture_pane(&ws, pane_b.pane_id.as_str()).contains(token),
-        "WLEAK RED: when a's intended window is absent, delivery must not inject into b via stale cached pane"
-    );
+fn wleak_unreachable_selected_socket_never_falls_back_to_another_socket() {
+    let fixture = direct_fixture::DirectFixture::new();
+    let foreign = direct_fixture::DirectFixture::new();
+    let mut state = direct_state(&fixture);
+    state["teams"]["current"]["tmux_socket"] = json!(fixture.root.join("absent.sock"));
+    state["teams"]["current"]["agents"]["worker-1"]["pane_id"] = json!(foreign.pane);
+    fixture.set_state(&state);
+    let value = direct_cli(&fixture, &["worker-1", "must-not-cross-sockets"]);
+    assert_eq!(value["ok"], false);
+    assert!(value.get("message_id").is_none());
+    assert!(std::fs::read(fixture.root.join("received")).unwrap().is_empty());
+    assert!(std::fs::read(foreign.root.join("received")).unwrap().is_empty());
+    assert!(!fixture.root.join(".team/runtime/team.db").exists());
 }
 
 #[test]
-fn wleak_stale_worker_block_persists_row_inbox_and_replays_after_start_agent() {
-    let team_id = "wleak009";
-    let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
-    let ws_path = ws.path().to_str().unwrap();
-    let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
-    let _guard = TmuxServerGuard::for_workspace(&ws);
-
-    let socket = state_socket(&ws);
-    let intended_session = worker_session_name(team_id);
-    kill_window(&ws, &intended_session, "a");
-    let foreign_ws = TestWorkspace::new("wleak009-foreign").with_fake_spec(&["worker"]);
-    let foreign = create_foreign_worker_session(
-        &socket,
-        "foreign-team-wleak009",
-        "foreign-worker",
-        foreign_ws.path().to_path_buf(),
-    );
-    write_agent_pane_tuple(&ws, "a", &foreign);
-
-    let token = "WLEAK_STALE_REPLAY_TOKEN_009";
-    let out = run_ta(&ws, &["send", "a", token, "--workspace", ws_path, "--json"]);
-    let body = out.json();
-    let mid = body
-        .pointer("/message_id")
-        .and_then(Value::as_str)
-        .expect("B replay RED: stale target blocker must return the accepted message id");
-    let initial_status = body.pointer("/message_status").and_then(Value::as_str);
-    if initial_status == Some("target_resolved") {
-        assert_eq!(
-            capture_pane(&ws, &foreign.pane_id).matches(token).count(),
-            0,
-            "a concurrently resolved target must still never inject into the foreign pane; json={body}"
-        );
-        return;
-    }
-    assert_eq!(
-        initial_status,
-        Some(STATUS_QUEUED_PANE_MISSING),
-        "B replay RED: stale target must use the repairable queued_pane_missing status; json={body}"
-    );
-    assert_eq!(
-        capture_pane(&ws, &foreign.pane_id).matches(token).count(),
-        0,
-        "B replay RED: stale target blocker must not inject into the reused foreign pane"
-    );
-
-    let before = message_row(&ws, mid).expect("B replay RED: blocked message row exists");
-    if before.status != STATUS_QUEUED_PANE_MISSING {
-        assert_eq!(
-            capture_pane(&ws, &foreign.pane_id).matches(token).count(),
-            0,
-            "a concurrently resolved row must still never inject into the foreign pane; status={}",
-            before.status
-        );
-        return;
-    }
-    assert_eq!(before.error.as_deref(), Some("tmux_target_missing"));
-
-    let inbox_json = run_ta(&ws, &["inbox", "a", "--workspace", ws_path, "--json"]);
-    assert!(
-        inbox_json.is_success(),
-        "B replay RED: blocked row must be visible in inbox; stdout={} stderr={}",
-        inbox_json.stdout,
-        inbox_json.stderr
-    );
-    let inbox = inbox_json.json();
-    assert_eq!(
-        inbox
-            .pointer("/messages/0/message_id")
-            .and_then(Value::as_str),
-        Some(mid),
-        "B replay RED: inbox must show the blocked message row; json={inbox}"
-    );
-    assert_eq!(
-        inbox.pointer("/messages/0/status").and_then(Value::as_str),
-        Some(STATUS_QUEUED_PANE_MISSING),
-        "B replay RED: inbox must preserve the repairable status; json={inbox}"
-    );
-
-    let start = run_ta(
-        &ws,
-        &[
-            "start-agent",
-            "a",
-            "--workspace",
-            ws_path,
-            "--allow-fresh",
-            "--no-display",
-            "--json",
-        ],
-    );
-    assert!(
-        start.is_success(),
-        "start-agent exit {}; stdout={} stderr={}",
-        start.exit_code,
-        start.stdout,
-        start.stderr
-    );
-
-    wait_for_or_panic(
-        "same stale-blocked message id delivered after worker repair",
-        || message_status(&ws, mid).as_deref() == Some("delivered"),
-        Duration::from_secs(8),
-    );
-    std::thread::sleep(Duration::from_millis(700));
-    let after = message_row(&ws, mid).expect("delivered message row exists");
-    assert_eq!(after.status, "delivered");
-    assert_eq!(
-        after.delivery_attempts,
-        before.delivery_attempts + 1,
-        "B replay RED: start-agent repair must replay the same row exactly once"
-    );
-    assert_eq!(delivered_event_count(&ws, mid), 1);
-    assert_eq!(event_count(&ws, "turn_open.armed_after_delivery", mid), 1);
-    assert_eq!(
-        capture_pane(&ws, &foreign.pane_id).matches(token).count(),
-        0,
-        "B replay RED: repaired replay must still never inject into the reused foreign pane"
-    );
+fn wleak_failed_send_does_not_replay_after_endpoint_repair() {
+    let fixture = direct_fixture::DirectFixture::new();
+    let original = direct_state(&fixture);
+    let mut state = original.clone();
+    state["teams"]["current"]["agents"]["worker-1"]["pane_id"] = json!("%999999");
+    fixture.set_state(&state);
+    let failed = direct_cli(&fixture, &["worker-1", "manual-retry"]);
+    assert_eq!(failed["ok"], false);
+    assert!(!fixture.root.join(".team/inbox").exists());
+    fixture.set_state(&original);
+    let sent = direct_cli(&fixture, &["worker-1", "manual-retry"]);
+    assert_eq!(sent["delivery"], "physical");
+    fixture.received("Team Agent message from leader:\n\nmanual-retry");
+    assert_eq!(std::fs::read_to_string(fixture.root.join("received")).unwrap().matches("manual-retry").count(), 1);
+    assert!(!fixture.root.join(".team/runtime/team.db").exists());
 }
 
 #[test]
-fn wleak_message_delivered_event_records_physical_target_metadata() {
-    let team_id = "wleak003";
-    let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
-    let ws_path = ws.path().to_str().unwrap();
-    let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
-    let _guard = TmuxServerGuard::for_workspace(&ws);
-    let session = worker_session_name(team_id);
-    let pane_a = pane_for_window(&ws, &session, "a");
-    wait_for_fake_workers_ready(&ws, &[(&pane_a, "a")]);
-    stop_quick_start_coordinator(&ws);
-    let mut controlled_coordinator = start_controlled_background_coordinator(&ws, team_id);
-    let coordinator_before_delivery =
-        wait_for_coordinator_tick_finished(&ws, controlled_coordinator.id());
-
-    let out = run_ta(
-        &ws,
-        &[
-            "send",
-            "a",
-            "WLEAK_EVENT_METADATA_TOKEN_003",
-            "--workspace",
-            ws_path,
-            "--json",
-        ],
-    );
-    assert!(
-        out.is_success(),
-        "send stdout={} stderr={}",
-        out.stdout,
-        out.stderr
-    );
-    let out_json = out.json();
-    let mid = out_json
-        .pointer("/message_id")
-        .and_then(Value::as_str)
-        .expect("generated message id");
-    let drain = start_post_mutation_coordinator_tick(&ws, team_id);
-    let (drain_succeeded, drain_result) = wait_for_post_mutation_coordinator_tick(drain);
-    let event = delivered_event(&ws, mid);
-    let receipt = write_f17_delivery_receipt(
-        &ws,
-        mid,
-        &coordinator_before_delivery,
-        drain_succeeded,
-        drain_result,
-        event.as_ref(),
-        &session,
-        &pane_a,
-    );
-    eprintln!("F17 durable delivery evidence={}", receipt.display());
-    assert!(
-        drain_succeeded,
-        "delivery coordinator --once failed; F17 receipt={}",
-        receipt.display()
-    );
-    let event = event.unwrap_or_else(|| {
-        panic!(
-            "message.delivered event missing after exact drain; F17 receipt={}",
-            receipt.display()
-        )
-    });
-    let missing = [
-        "target_kind",
-        "tmux_endpoint",
-        "target_session",
-        "target_window",
-        "target_pane_id",
-        "target_pane_pid",
-        "resolved_from",
-    ]
-    .into_iter()
-    .filter(|key| event.get(*key).is_none())
-    .collect::<Vec<_>>();
-    assert!(
-        missing.is_empty(),
-        "WLEAK RED: message.delivered must include physical target provenance; missing={missing:?}; event={event}"
-    );
-    assert_target_tuple(&event, &state_socket(&ws), &session, "a", &pane_a, "W1");
-    stop_controlled_background_coordinator(&ws, &mut controlled_coordinator);
+fn wleak_send_receipt_records_physical_target_without_coordinator_events() {
+    let fixture = direct_fixture::DirectFixture::new();
+    let value = direct_cli(&fixture, &["worker-1", "physical-receipt"]);
+    assert_eq!(value["status"], "sent");
+    assert_eq!(value["pane_id"], fixture.pane);
+    assert_eq!(value["recipient"], "worker-1");
+    assert_eq!(value["delivery"], "physical");
+    assert_eq!(value["accepted"], Value::Null);
+    assert!(value.get("message_id").is_none());
+    fixture.received("Team Agent message from leader:\n\nphysical-receipt");
+    assert!(!fixture.root.join(".team/logs/events.jsonl").exists());
 }
 
 #[test]
-fn wleak_unvalidated_cached_pane_never_marks_delivered() {
-    let team_id = "wleak006";
-    let ws = TestWorkspace::new(team_id).with_fake_spec(&["a", "b"]);
-    let ws_path = ws.path().to_str().unwrap();
-    let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
-    let _guard = TmuxServerGuard::for_workspace(&ws);
-
-    let session = worker_session_name(team_id);
-    let pane_b = pane_for_window(&ws, &session, "b");
-    kill_window(&ws, &session, "a");
-    write_agent_pane_tuple(&ws, "a", &pane_b);
-
-    let out = run_ta(
-        &ws,
-        &[
-            "send",
-            "a",
-            "WLEAK_UNVALIDATED_TOKEN_006",
-            "--workspace",
-            ws_path,
-            "--json",
-        ],
-    );
-    let body = out.json();
-    assert_ne!(
-        body.pointer("/reason").and_then(Value::as_str),
-        Some("coordinator_unavailable"),
-        "W3 RED: unvalidated-pane provenance contract must reach delivery, not pass because coordinator gate rejected the send; json={body}"
-    );
-    assert_eq!(
-        body.pointer("/delivered").and_then(Value::as_bool),
-        Some(false),
-        "W3 RED: unvalidated cached pane must not surface delivered=true; json={body}"
-    );
-    let mid = body
-        .pointer("/message_id")
-        .and_then(Value::as_str)
-        .expect("generated message id");
-    let delivered_count = delivered_event_count(&ws, mid);
-    assert_eq!(
-        delivered_count, 0,
-        "W3 RED: unvalidated cached pane must not emit message.delivered target provenance; count={delivered_count}"
-    );
-    assert_ne!(
-        message_status(&ws, mid).as_deref(),
-        Some("delivered"),
-        "W3 RED: unvalidated cached pane must not mark the DB row delivered"
-    );
+fn wleak_nonlive_published_pane_never_reports_physical_success() {
+    let fixture = direct_fixture::DirectFixture::new();
+    let mut state = direct_state(&fixture);
+    state["teams"]["current"]["agents"]["worker-1"]["pane_id"] = json!("%999999");
+    fixture.set_state(&state);
+    let value = direct_cli(&fixture, &["worker-1", "nonlive-pane"]);
+    assert_eq!(value["ok"], false);
+    assert!(value.get("delivery").is_none());
+    assert!(value.get("message_id").is_none());
+    assert!(std::fs::read(fixture.root.join("received")).unwrap().is_empty());
 }
 
 #[test]
-fn wleak_cross_session_multi_pane_window_missing_fails_closed() {
-    let team_id = "wleak007";
-    let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
-    let ws_path = ws.path().to_str().unwrap();
-    let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
-    let _guard = TmuxServerGuard::for_workspace(&ws);
-
-    let socket = state_socket(&ws);
-    let intended_session = worker_session_name(team_id);
-    kill_window(&ws, &intended_session, "a");
-    let foreign = create_foreign_multi_pane_session(
-        &socket,
-        "team-wleak007-foreign",
-        "a",
-        ws.path().to_path_buf(),
-    );
-    write_agent_pane_tuple(&ws, "a", &foreign);
-
-    let token = "WLEAK_CROSS_SESSION_TOKEN_007";
-    let out = run_ta(&ws, &["send", "a", token, "--workspace", ws_path, "--json"]);
-    let body = out.json();
-    assert_eq!(
-        body.pointer("/message_status").and_then(Value::as_str),
-        Some(STATUS_QUEUED_PANE_MISSING),
-        "W4/W5 RED: cached pane in another session/team, even with multiple panes and matching window name, must fail closed as window missing; json={body}"
-    );
-    assert!(
-        !capture_pane(&ws, &foreign.pane_id).contains(token),
-        "W4/W5 RED: cross-session/cross-team cached pane must not receive window-missing worker traffic"
-    );
+fn wleak_stale_session_and_window_do_not_veto_an_explicit_live_pane() {
+    let fixture = direct_fixture::DirectFixture::new();
+    let mut state = direct_state(&fixture);
+    state["teams"]["current"]["session_name"] = json!("missing-session");
+    state["teams"]["current"]["agents"]["worker-1"]["window"] = json!("missing-window");
+    fixture.set_state(&state);
+    let value = direct_cli(&fixture, &["worker-1", "no-session-gate"]);
+    assert_eq!(value["delivery"], "physical");
+    fixture.received("Team Agent message from leader:\n\nno-session-gate");
 }
 
 #[test]
-fn wleak_to_name_leader_reused_pane_id_must_not_inject_foreign_worker() {
-    let team_id = "wleak008";
-    let target_ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
-    let target_ws_path = target_ws.path().to_str().unwrap();
-    let qs = quick_start_fake(&target_ws, team_id);
-    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
-    let _guard = TmuxServerGuard::for_workspace(&target_ws);
-
-    let foreign_ws = TestWorkspace::new("wleak008-foreign").with_fake_spec(&["worker"]);
-    let socket = state_socket(&target_ws);
-    let foreign_session = "team-wleak008-foreign";
-    let foreign_window = "foreign-worker";
-    let foreign = create_foreign_worker_session(
-        &socket,
-        foreign_session,
-        foreign_window,
-        foreign_ws.path().to_path_buf(),
-    );
-    // This stale-receiver control must not retain the separate healthy owner
-    // established by the now-admitted positive launch fixture.
-    seed_unattached_leader(&target_ws);
-    write_leader_receiver_tuple(
-        &target_ws,
-        team_id,
-        json!({
-            "mode": "direct_tmux",
-            "transport_kind": "direct_tmux",
-            "status": "attached",
-            "pane_id": foreign.pane_id,
-            "pane_pid": 1,
-            "session_name": "team-wleak008-dead-leader",
-            "window_name": "dead-leader",
-            "tmux_socket": socket,
-            "pane_current_path": target_ws_path,
-        }),
-    );
-
-    let token = "WLEAK_TONAME_REUSED_LEADER_TOKEN_008";
-    let to_name = format!("{target_ws_path}::{team_id}/leader");
-    let foreign_ws_path = foreign_ws.path().to_str().unwrap();
-    let out = run_ta_env(
-        &foreign_ws,
-        &[
-            "send",
-            "--to-name",
-            &to_name,
-            token,
-            "--workspace",
-            foreign_ws_path,
-            "--json",
-        ],
-        &[("TEAM_AGENT_ID", "third-party")],
-    );
-    let body = out.json();
-    let foreign_capture = capture_pane(&target_ws, &foreign.pane_id);
-    let leaked_count = foreign_capture.matches(token).count();
-    let acceptable = named_leader_stale_or_mailbox_outcome(&target_ws, &body);
-    assert!(
-        acceptable && leaked_count == 0,
-        "WLEAK fifth-case RED: --to-name {to_name} must stale-refuse or E6-queue when \
-         state leader_receiver pane_id is live only as another workspace's worker \
-         ({foreign_session}:{foreign_window}); it must never report delivered or inject into \
-         the reused pane. acceptable={acceptable} reused_pane_token_count={leaked_count} \
-         json={body} reused_pane_capture=\n{foreign_capture}"
-    );
+fn wleak_named_leader_uses_published_socket_without_cross_socket_fallback() {
+    let fixture = direct_fixture::DirectFixture::new();
+    let foreign = direct_fixture::DirectFixture::new();
+    let value = direct_cli(&fixture, &["--to-name", "current/leader", "named-leader"]);
+    assert_eq!(value["delivery"], "physical");
+    assert_eq!(value["recipient"], "leader");
+    fixture.received("Team Agent message from leader:\n\nnamed-leader");
+    assert!(std::fs::read(foreign.root.join("received")).unwrap().is_empty());
 }
 
 #[test]
@@ -696,6 +267,24 @@ fn wleak_source_guard_keeps_send_status_semantics_honest() {
         !delivery_surface.contains(&stale_to_queued),
         "W7 guard: stale worker pane binding must not be weakened to queued/accepted success copy"
     );
+}
+
+#[path = "../../support/direct_fixture.rs"]
+mod direct_fixture;
+
+fn direct_state(fixture: &direct_fixture::DirectFixture) -> Value {
+    serde_json::from_slice(&std::fs::read(fixture.root.join(".team/runtime/state.json")).unwrap()).unwrap()
+}
+
+fn direct_cli(fixture: &direct_fixture::DirectFixture, args: &[&str]) -> Value {
+    let output = Command::new(env!("CARGO_BIN_EXE_team-agent"))
+        .arg("send").args(args).args(["--workspace", fixture.root.to_str().unwrap(), "--json"])
+        .env_remove("TEAM_AGENT_ID").env_remove("TEAM_AGENT_AGENT_ID")
+        .env_remove("TEAM_AGENT_WORKSPACE").env_remove("TEAM_AGENT_OWNER_TEAM_ID")
+        .env_remove("TEAM_AGENT_TEAM_ID").output().unwrap();
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(output.status.success(), value["ok"] == true, "{} {}", value, String::from_utf8_lossy(&output.stderr));
+    value
 }
 
 #[derive(Debug, Clone)]

@@ -278,8 +278,8 @@ fn dispatch_prepared(command: &str, checked: super::arguments::CheckedArgs, cwd:
                 if parsed.targets.is_some() || parsed.to_name.is_some() || parsed.to_leader.is_some() || parsed.mailbox {
                     return Err(CliError::Usage("raw send cannot be combined with semantic addressing or --mailbox".into()));
                 }
-                crate::direct_delivery::direct_send(socket, pane, dialect, &parsed.positionals.join(" ")).map_err(CliError::Usage)?;
-                Ok(emit_result(CmdResult::from_json(serde_json::json!({"status": "sent", "delivery": "physical", "pane_id": pane}), parsed.json)))
+                crate::direct_delivery::direct_send(socket, pane, dialect, &parsed.positionals.join(" ")).map_err(CliError::Runtime)?;
+                Ok(emit_result(CmdResult::from_json(serde_json::json!({"ok": true, "status": "sent", "delivery": "physical", "pane_id": pane, "accepted": null}), parsed.json)))
             } else { cmd_send(&send_args(args, cwd)?).map(emit_result) }
         },
         "locate" => {

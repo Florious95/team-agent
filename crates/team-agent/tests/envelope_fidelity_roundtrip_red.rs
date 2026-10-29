@@ -1,11 +1,11 @@
 //! 0.5.61 RED: a worker's structured `report_result.envelope` remains canonical
-//! through the real MCP stdio ingress, SQLite persistence, and first collect.
+//! through real MCP stdio ingress and the append-only leader inbox.
 //!
 //! Requirements:
 //! - `result_route` B03: the worker reports facts once and the result is durable first.
 //! - `result_route` B06/F6: the framework transports result facts; it does not silently
 //!   reinterpret or discard accepted structured content.
-//! - F6 result atomicity: rejected input must not partially create a result row.
+//! - Rejected input must not append a partial or cross-scope inbox record.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -43,7 +43,7 @@ const FRAMEWORK_KEYS: [&str; 14] = [
 
 #[test]
 #[serial(envelope_fidelity)]
-fn tooth1_mcp_report_result_preserves_nested_extension_fields_in_sqlite() {
+fn tooth1_mcp_report_result_preserves_nested_extension_fields_in_inbox() {
     let _hermetic = HermeticTestEnv::enter("envelope-fidelity-ingress");
     let harness = McpSimHarness::new();
     let mut worker = harness.spawn_mcp_client("worker_a", "teamA");
@@ -55,27 +55,21 @@ fn tooth1_mcp_report_result_preserves_nested_extension_fields_in_sqlite() {
         "tooth1 setup: the documented nested envelope input must be accepted; body={} raw={}",
         call.body, call.raw
     );
-    let result_id = call.body["result_id"]
+    let message_id = call.body["message_id"]
         .as_str()
-        .expect("tooth1 backing: accepted report_result must return result_id");
-    let row = harness.result_row(result_id).unwrap_or_else(|| {
-        panic!(
-            "tooth1 backing: accepted report_result must create results row {result_id}; body={}",
-            call.body
-        )
-    });
-    let stored: Value =
-        serde_json::from_str(&row.envelope).expect("tooth1 backing: results.envelope is JSON");
+        .expect("accepted report_result must name its appended inbox record");
+    let row = inbox_record(&harness, message_id);
+    assert_eq!(row["sender"], "worker_a");
+    assert_eq!(row["recipient"], "leader");
+    assert_eq!(row["team"], "teamA");
+    assert_eq!(row["kind"], "result");
+    let stored = row["envelope"].clone();
 
     assert_eq!(
         stored["summary"], submitted["summary"],
-        "tooth1 backing: canonical summary proves the submitted result reached SQLite"
+        "canonical summary proves the submitted result reached the inbox"
     );
-    assert_eq!(
-        stored["result_id"],
-        json!(result_id),
-        "tooth1 backing: SQLite envelope and returned result_id must name the same result"
-    );
+    assert_eq!(row["message_id"], json!(message_id));
 
     let mut failures = Vec::new();
     for field in EXTENSION_KEYS {
@@ -112,7 +106,7 @@ fn tooth1_mcp_report_result_preserves_nested_extension_fields_in_sqlite() {
 
 #[test]
 #[serial(envelope_fidelity)]
-fn tooth2_auto_finalization_preserves_the_same_full_envelope_that_sqlite_persisted() {
+fn tooth2_repeated_reports_append_without_collect_or_narrowing_the_envelopes() {
     let _hermetic = HermeticTestEnv::enter("envelope-fidelity-collect");
     let harness = McpSimHarness::new();
     harness.prepare_collect();
@@ -125,37 +119,44 @@ fn tooth2_auto_finalization_preserves_the_same_full_envelope_that_sqlite_persist
         "tooth2 setup: report_result must reach persistence; body={} raw={}",
         call.body, call.raw
     );
-    let result_id = call.body["result_id"]
-        .as_str()
-        .expect("tooth2 backing: report_result returns result_id");
-    let row = harness
-        .result_row(result_id)
-        .expect("tooth2 backing: persisted result row exists");
-    let persisted: Value =
-        serde_json::from_str(&row.envelope).expect("tooth2 backing: persisted envelope is JSON");
-
-    assert_eq!(
-        row.status, "collected",
-        "tooth2 auto-finalization must mark the durable result collected"
-    );
+    let message_id = call.body["message_id"].as_str().expect("inbox message id");
+    let first = inbox_record(&harness, message_id);
+    let persisted = first["envelope"].clone();
+    let inbox = harness.workspace_path().join(".team/inbox/leader.jsonl");
+    let before = std::fs::read(&inbox).expect("durable inbox");
     let mut expected = submitted.clone();
     let expected_object = expected
         .as_object_mut()
         .expect("tooth2 submitted envelope object");
-    expected_object.insert("result_id".to_string(), json!(result_id));
     expected_object.insert(
         "presentation".to_string(),
         persisted["presentation"].clone(),
     );
     assert_eq!(
         persisted, expected,
-        "tooth2 regression point: auto-finalization must preserve the exact canonical SQLite envelope without a second projection or narrowing"
+        "the inbox must retain the full accepted envelope without collect-time projection"
     );
+    assert_eq!(inbox_record(&harness, message_id), first);
+    assert_eq!(std::fs::read(&inbox).unwrap(), before, "reading does not collect or consume");
+
+    let next = fidelity_envelope("APPENDED");
+    let call = worker.call_tool("report_result", json!({"envelope": next}));
+    assert!(!call.is_error, "{}", call.body);
+    let next_id = call.body["message_id"].as_str().expect("second inbox message id");
+    assert_ne!(next_id, message_id);
+    let second = inbox_record(&harness, next_id);
+    for field in EXTENSION_KEYS {
+        assert_eq!(second["envelope"][field], next[field]);
+    }
+    assert_eq!(inbox_record(&harness, message_id), first, "append must not rewrite prior records");
+    let after = std::fs::read(&inbox).unwrap();
+    assert!(after.starts_with(&before));
+    assert_eq!(std::str::from_utf8(&after).unwrap().lines().count(), 2);
 }
 
 #[test]
 #[serial(envelope_fidelity)]
-fn reverse_control_reserved_owner_scope_conflict_is_rejected_without_result_row() {
+fn reverse_control_reserved_owner_scope_conflict_does_not_append() {
     let _hermetic = HermeticTestEnv::enter("envelope-fidelity-reverse");
     let harness = McpSimHarness::new();
     let mut worker = harness.spawn_mcp_client("worker_a", "teamA");
@@ -165,6 +166,8 @@ fn reverse_control_reserved_owner_scope_conflict_is_rejected_without_result_row(
     object.insert("result_id".to_string(), json!(result_id));
     object.insert("owner_team_id".to_string(), json!("teamB"));
 
+    let inbox = harness.workspace_path().join(".team/inbox/leader.jsonl");
+    let before = std::fs::read(&inbox).unwrap_or_default();
     let call = worker.call_tool("report_result", json!({"envelope": submitted}));
     let refusal = call.body.to_string();
     assert!(
@@ -173,10 +176,16 @@ fn reverse_control_reserved_owner_scope_conflict_is_rejected_without_result_row(
         call.body,
         call.raw
     );
-    assert!(
-        harness.result_row(result_id).is_none(),
-        "reverse control atomicity: rejected reserved-key conflict must not partially persist result_id={result_id}"
-    );
+    assert_eq!(std::fs::read(&inbox).unwrap_or_default(), before,
+        "rejected cross-scope input must not append an inbox record");
+}
+
+fn inbox_record(harness: &McpSimHarness, message_id: &str) -> Value {
+    let inbox = team_agent::inbox_store::read(harness.workspace_path(), "leader", 64, Some("teamA"))
+        .expect("read append-only inbox");
+    inbox["messages"].as_array().unwrap().iter()
+        .find(|record| record["message_id"] == message_id)
+        .cloned().expect("returned message id names a durable inbox record")
 }
 
 fn fidelity_envelope(tag: &str) -> Value {

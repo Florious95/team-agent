@@ -12,6 +12,8 @@
 
 #[path = "support/hermetic.rs"]
 mod hermetic_guard;
+#[path = "support/direct_fixture.rs"]
+mod direct_fixture;
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -39,89 +41,38 @@ const CALLER_IDENTITY_ENV: &str = "TEAM_AGENT_TEST_CALLER_BINARY_IDENTITY";
 
 #[test]
 #[serial(env)]
-fn mcp_send_binary_newer_daemon_is_service_compatible() {
-    let mut fixture = CompatFixture::old_mcp_caller("red1-service-compatible");
-    let daemon_pid = fixture.spawn_daemon_metadata(
-        CURRENT_DAEMON_VERSION,
-        PROTOCOL_VERSION,
-        team_agent::db::schema::SCHEMA_VERSION,
-    );
-
-    let outcome = fixture.mcp_send("RED1_CROSS_VERSION");
-
-    let message_id = match outcome {
-        SendOutcome::WorkerAccepted { message_id, .. } => message_id,
-        other => panic!(
-            "RED1: old MCP caller talking to newer compatible daemon must return WorkerAccepted/queued, not unavailable; outcome={other:?} events={:?}",
-            fixture.events_tail()
-        ),
-    };
-    assert_eq!(
-        fixture.message_rows_for("RED1_CROSS_VERSION"),
-        1,
-        "RED1: compatible binary drift must still create exactly one DB row; message_id={message_id} events={:?}",
-        fixture.events_tail()
-    );
-    assert!(
-        !fixture.has_event("send.coordinator_unavailable"),
-        "RED1: binary-only drift must not be reported as coordinator_unavailable; events={:?}",
-        fixture.events_tail()
-    );
-    assert!(
-        fixture.has_event("send.coordinator_binary_identity_drift_ignored"),
-        "RED1: service-compatible binary drift must be explicit via send.coordinator_binary_identity_drift_ignored with caller=0.5.21 daemon=0.5.22; events={:?}",
-        fixture.events_tail()
-    );
-    assert_eq!(
-        fixture.pid_file_value(),
-        Some(daemon_pid),
-        "RED1: MCP send must not rotate/replace the newer daemon; events={:?}",
-        fixture.events_tail()
-    );
+fn mcp_send_ignores_coordinator_binary_version() {
+    let mut fixture = CompatFixture::old_mcp_caller("RED1_CROSS_VERSION");
+    let pid = fixture.spawn_daemon_metadata(CURRENT_DAEMON_VERSION, PROTOCOL_VERSION, team_agent::db::schema::SCHEMA_VERSION);
+    let before = std::fs::read(team_agent::state::persist::runtime_state_path(&fixture.root)).unwrap();
+    let outcome = fixture.mcp_send("RED1_CROSS_VERSION").to_value();
+    assert_eq!(outcome["status"], "sent");
+    assert_eq!(outcome["delivery"], "physical");
+    assert!(outcome.get("message_id").is_none());
+    assert_eq!(fixture.message_rows_for("RED1_CROSS_VERSION"), 0);
+    assert_eq!(fixture.pid_file_value(), Some(pid));
+    assert!(fixture.pid_alive(pid));
+    assert!(!fixture.has_event("send.coordinator_unavailable"));
+    assert_eq!(std::fs::read(team_agent::state::persist::runtime_state_path(&fixture.root)).unwrap(), before);
+    fixture.receiver.received("Team Agent message from backend:\n\nRED1_CROSS_VERSION");
 }
 
 #[test]
 #[serial(env)]
-fn mcp_send_protocol_mismatch_fails_closed_without_row_or_side_effects() {
-    let mut fixture = CompatFixture::old_mcp_caller("red2-protocol-mismatch");
-    let daemon_pid = fixture.spawn_daemon_metadata(
-        CURRENT_DAEMON_VERSION,
-        PROTOCOL_VERSION + 1,
-        team_agent::db::schema::SCHEMA_VERSION,
-    );
-
-    let outcome = fixture.mcp_send("RED2_PROTOCOL_MISMATCH");
-
-    assert!(
-        !matches!(outcome, SendOutcome::WorkerAccepted { .. }),
-        "RED2: incompatible protocol/schema must fail closed, never WorkerAccepted; outcome={outcome:?}"
-    );
-    assert_eq!(
-        fixture.message_rows_for("RED2_PROTOCOL_MISMATCH"),
-        0,
-        "RED2: protocol/schema-incompatible daemon must not create a DB row; events={:?}",
-        fixture.events_tail()
-    );
-    assert_eq!(
-        fixture.pid_file_value(),
-        Some(daemon_pid),
-        "RED2: protocol/schema refusal must not stop or replace the daemon"
-    );
-    assert!(
-        fixture.event_field_equals(
-            "send.coordinator_unavailable",
-            "metadata_mismatch_reason",
-            "protocol_version_mismatch"
-        ),
-        "RED2: fail-closed response/event must name protocol_version_mismatch rather than a generic unavailable; events={:?}",
-        fixture.events_tail()
-    );
-    assert!(
-        !fixture.has_event("coordinator.rotation_required")
-            && !fixture.has_event("coordinator.ensure_restarted"),
-        "RED2: incompatible old caller must not start/stop/ensure the daemon; events={:?}",
-        fixture.events_tail()
-    );
+fn mcp_send_ignores_coordinator_protocol_without_queue_side_effects() {
+    let mut fixture = CompatFixture::old_mcp_caller("RED2_PROTOCOL_MISMATCH");
+    let pid = fixture.spawn_daemon_metadata(CURRENT_DAEMON_VERSION, PROTOCOL_VERSION + 1, team_agent::db::schema::SCHEMA_VERSION);
+    let before = std::fs::read(team_agent::state::persist::runtime_state_path(&fixture.root)).unwrap();
+    let outcome = fixture.mcp_send("RED2_PROTOCOL_MISMATCH").to_value();
+    assert_eq!(outcome["status"], "sent");
+    assert_eq!(outcome["delivery"], "physical");
+    assert!(outcome.get("message_id").is_none());
+    assert_eq!(fixture.message_rows_for("RED2_PROTOCOL_MISMATCH"), 0);
+    assert_eq!(fixture.pid_file_value(), Some(pid));
+    assert!(fixture.pid_alive(pid));
+    assert!(!fixture.has_event("send.coordinator_unavailable"));
+    assert_eq!(std::fs::read(team_agent::state::persist::runtime_state_path(&fixture.root)).unwrap(), before);
+    fixture.receiver.received("Team Agent message from backend:\n\nRED2_PROTOCOL_MISMATCH");
 }
 
 #[test]
@@ -170,6 +121,7 @@ struct CompatFixture {
     root: PathBuf,
     workspace: WorkspacePath,
     children: Vec<Child>,
+    receiver: direct_fixture::DirectFixture,
 }
 
 impl CompatFixture {
@@ -196,7 +148,12 @@ impl CompatFixture {
         std::fs::create_dir_all(team_agent::model::paths::runtime_dir(&root))
             .expect("create runtime dir");
         let _ = MessageStore::open(&root).expect("create message store");
-        save_runtime_state(&root, &runtime_state(&root)).expect("save runtime state");
+        let receiver = direct_fixture::DirectFixture::new();
+        let mut state = runtime_state(&root);
+        state["agents"][WORKER]["pane_id"] = json!(receiver.pane);
+        state["agents"][WORKER]["tmux_socket"] = json!(receiver.socket);
+        state["teams"][TEAM]["agents"][WORKER] = state["agents"][WORKER].clone();
+        save_runtime_state(&root, &state).expect("save runtime state");
         Self {
             _env: env,
             _binary_match_env: binary_match_env,
@@ -204,6 +161,7 @@ impl CompatFixture {
             workspace: WorkspacePath::new(root.clone()),
             root,
             children: Vec::new(),
+            receiver,
         }
     }
 

@@ -59,57 +59,17 @@ fn idle_stuck_deadlock_nag_paths_are_not_generated_by_coordinator_tick() {
 }
 
 #[test]
-fn product_delivery_notifications_stay_on_n31_n32_funnel() {
-    let results = source("src/messaging/results.rs");
-    let send = source("src/messaging/send.rs");
-    let leader_receiver = source("src/messaging/leader_receiver.rs");
+fn product_delivery_notifications_use_physical_delivery_and_append_only_inbox() {
     let tools = source("src/mcp_server/tools.rs");
-    let mut failures = Vec::new();
-
-    if !leader_receiver.contains("deliver_to_leader.submit")
-        || !leader_receiver.contains("leader_notification_log")
-    {
-        failures.push(
-            "N31/N32 leader delivery primitive must keep deliver_to_leader.submit and leader_notification_log"
-                .to_string(),
-        );
-    }
-    if !results.contains("send_to_leader_receiver") || !results.contains("mcp.report_result") {
-        failures
-            .push("report_result notification must remain on send_to_leader_receiver".to_string());
-    }
-    if !tools.contains("messaging::send_message(")
-        || !tools.contains("messaging::report_result_for_owner_team(")
-        || !send.contains("send_to_leader_receiver_with_presentation")
-        || !results.contains("send_to_leader_receiver_with_presentation")
-    {
-        failures.push(
-            "retained MCP send/report_result facades must delegate to messaging paths that share the leader-delivery primitive".to_string(),
-        );
-    }
-    if !send.contains("send_to_leader_receiver") || !send.contains("MessageTarget::Broadcast") {
-        failures.push(
-            "send(to=leader)/broadcast-to-leader must remain on N31/N32 delivery".to_string(),
-        );
-    }
-    for forbidden in [
-        "notification_status\", \"queued\"",
-        "notification_status=queued_only",
-        "queued_only",
-    ] {
-        if results.contains(forbidden) || leader_receiver.contains(forbidden) {
-            failures.push(format!(
-                "delivery notifications must not regress to queued-only fake success: `{forbidden}`"
-            ));
-        }
-    }
-
-    assert!(
-        failures.is_empty(),
-        "product delivery notifications must be preserved:\n{}",
-        failures.join("\n")
-    );
+    assert!(tools.contains("crate::inbox_store::append"));
+    assert!(tools.contains("crate::direct_delivery::directory"));
+    assert!(tools.contains("Team Agent message from {sender}"));
+    assert!(tools.contains("Team Agent result from {sender}"));
+    assert!(tools.contains("delivery_error"), "failed physical delivery must remain visible");
+    let direct = source("src/direct_delivery.rs");
+    assert!(direct.contains("paste-buffer") && direct.contains("send-keys"));
 }
+
 
 fn source(rel: &str) -> String {
     std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)).expect("read source")

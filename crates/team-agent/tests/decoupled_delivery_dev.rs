@@ -295,6 +295,11 @@ fn raw_send_needs_no_snapshot_and_preserves_bracketed_multiline_payload() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    let receipt: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(receipt["ok"], true);
+    assert_eq!(receipt["delivery"], "physical");
+    assert!(receipt["accepted"].is_null());
+    assert!(receipt.get("message_id").is_none());
     fixture.received(text);
     assert!(!fixture.root.join(".team/inbox").exists());
     assert!(!fixture.root.join(".team/db").exists());

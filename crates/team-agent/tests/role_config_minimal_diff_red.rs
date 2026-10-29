@@ -4,7 +4,6 @@
 mod framework;
 
 use framework::{quick_start_workers_available, run_ta_env, TestWorkspace};
-use rusqlite::Connection;
 use serde_json::Value as JsonValue;
 use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
@@ -53,7 +52,7 @@ impl ProviderShims {
         [("PATH", &self.path)]
     }
 
-    fn assert_pi_submit_receipt(&self, ws: &TestWorkspace, agent_id: &str, message_id: &str) {
+    fn assert_pi_submit_receipt(&self, ws: &TestWorkspace, agent_id: &str, canary: &str) {
         let path = ws.path().join(".role-config-launch").join(format!("{agent_id}.tty.jsonl"));
         let deadline = Instant::now() + Duration::from_secs(2);
         let events = loop {
@@ -61,27 +60,27 @@ impl ProviderShims {
             let events: Vec<JsonValue> = raw.lines()
                 .map(|line| serde_json::from_str(line).expect("Pi TTY receipt is JSON"))
                 .collect();
-            if events.iter().any(|event| event["event"] == "fake_result") {
+            if events.iter().any(|event| event["event"] == "mcp_result") {
                 break events;
             }
-            assert!(Instant::now() < deadline, "fake result receipt missing: {events:?}");
+            assert!(Instant::now() < deadline, "MCP result receipt missing: {events:?}");
             thread::sleep(Duration::from_millis(20));
         };
         let submit: Vec<_> = events.iter().filter(|event| event["event"] != "ready").collect();
-        assert_eq!(submit.len(), 4, "exactly one paste/Enter/turn/result: {events:?}");
+        assert_eq!(submit.len(), 3, "exactly one paste/Enter/MCP report: {events:?}");
         for (event, kind) in submit.iter().zip([
-            "paste_received", "enter_received", "turn_observed", "fake_result",
+            "paste_received", "enter_received", "mcp_result",
         ]) {
             assert_eq!(event["event"], kind, "physical submit ordering: {events:?}");
         }
         assert!(submit[0]["input_bytes"].as_u64().is_some_and(|bytes| bytes > 0));
-        assert_eq!(submit[0]["editor_lines"], 5, "full rendered message keeps native newline semantics");
+        let payload = submit[1]["payload"].as_str().expect("actual submitted text");
+        assert!(payload.ends_with(canary), "lossless submitted canary: {payload:?}");
+        assert!(!payload.contains("[team-agent-token:"), "physical delivery has no ledger token");
+        assert_eq!(submit[0]["editor_lines"], payload.lines().count());
         assert_eq!(submit[0]["input_sha256"], submit[1]["input_sha256"]);
         assert_eq!(submit[1]["key"], 13, "one logical Enter, not a paste newline");
-        for event in &submit[1..] {
-            assert_eq!(event["message_id"], message_id);
-        }
-        assert_eq!(submit[3]["exit_code"], 0, "existing fake-worker must report normally");
+        assert_eq!(submit[2]["exit_code"], 0, "controlled worker must report over real MCP stdio");
     }
 
     fn capture(&self, ws: &TestWorkspace, agent_id: &str) -> Vec<String> {
@@ -345,24 +344,13 @@ fn assert_launch_identity_and_prompt(plan: &[String], agent_id: &str, prompt: &s
     assert_eq!(plan.get(name_index + 1).map(String::as_str), Some(agent_id));
 }
 
-fn correlated_reply_exists(db: &Path, message_id: &str) -> bool {
-    let Ok(conn) = Connection::open(db) else {
-        return false;
-    };
-    let Ok(mut stmt) = conn.prepare("select task_id, envelope from results order by created_at desc") else {
-        return false;
-    };
-    let Ok(rows) = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))) else {
-        return false;
-    };
-    let found = rows.filter_map(Result::ok).any(|(task_id, raw)| {
-        task_id == message_id
-            && serde_json::from_str::<JsonValue>(&raw)
-                .ok()
-                .and_then(|envelope| envelope["summary"].as_str().map(str::to_string))
-                .is_some_and(|summary| summary.contains(message_id))
-    });
-    found
+fn inbox_reply_exists(workspace: &Path, canary: &str) -> bool {
+    let inbox = team_agent::inbox_store::read(workspace, "leader", 16, None)
+        .expect("read append-only worker reply");
+    inbox["messages"].as_array().unwrap().iter().any(|record| {
+        record["sender"] == "legacy" && record["kind"] == "result"
+            && record["envelope"]["summary"].as_str().is_some_and(|summary| summary.contains(canary))
+    })
 }
 
 #[test]
@@ -391,6 +379,14 @@ fn f1_legacy_fields_are_silently_tolerated_by_public_add_and_worker_replies() {
         "Handle the assigned message and return a concise result.",
     );
 
+    // Launch argv exists before the controlled TTY enters raw mode. Wait for
+    // the fixture's real readiness receipt, not a production delivery gate.
+    let receipt_path = ws.path().join(".role-config-launch/legacy.tty.jsonl");
+    let ready_deadline = Instant::now() + Duration::from_secs(10);
+    while !fs::read_to_string(&receipt_path).unwrap_or_default().contains("\"event\": \"ready\"") {
+        assert!(Instant::now() < ready_deadline, "controlled Pi TTY did not become ready");
+        thread::sleep(Duration::from_millis(10));
+    }
     let canary = format!("legacy-config-natural-reply-{}", std::process::id());
     let send = run_ta_env(
         &ws,
@@ -405,24 +401,19 @@ fn f1_legacy_fields_are_silently_tolerated_by_public_add_and_worker_replies() {
         &shims.env(),
     );
     assert!(send.is_success(), "send failed: {} {}", send.stdout, send.stderr);
-    let message_id = send
-        .json()
-        .get("message_id")
-        .and_then(JsonValue::as_str)
-        .expect("send returns message id")
-        .to_string();
-    let db = ws.path().join(".team/runtime/team.db");
+    assert_eq!(send.json()["delivery"], "physical");
+    assert!(send.json().get("message_id").is_none(), "physical send creates no ledger row");
     let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < deadline && !correlated_reply_exists(&db, &message_id) {
+    while Instant::now() < deadline && !inbox_reply_exists(ws.path(), &canary) {
         thread::sleep(Duration::from_millis(50));
     }
     assert!(
-        correlated_reply_exists(&db, &message_id),
-        "started worker must naturally reply to message {message_id}; controlled Pi TTY receipt: {}",
+        inbox_reply_exists(ws.path(), &canary),
+        "controlled worker must report submitted payload {canary}; Pi TTY receipt: {}",
         fs::read_to_string(ws.path().join(".role-config-launch/legacy.tty.jsonl"))
             .unwrap_or_else(|error| format!("receipt unavailable: {error}"))
     );
-    shims.assert_pi_submit_receipt(&ws, "legacy", &message_id);
+    shims.assert_pi_submit_receipt(&ws, "legacy", &canary);
     assert!(matches!(
         legacy.get("dangerously_skip_permissions"),
         Some(YamlValue::Bool(false))

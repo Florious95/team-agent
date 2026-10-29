@@ -26,29 +26,12 @@ fn send_008_watch_result_missing_worker_window_blocks_before_watch() {
             "--json",
         ],
     );
-    let j = out.json();
-    assert!(j.pointer("/message_id").and_then(|v| v.as_str()).is_some());
-    assert_json_field_eq_bool(&j, "/ok", true);
-    assert_json_field_eq_str(&j, "/status", "queued");
-    assert_json_field_eq_str(&j, "/message_status", "accepted");
-    assert_json_field_eq_str(&j, "/delivery_status", "pending");
-    assert_json_field_eq_bool(&j, "/delivered", false);
-    assert!(
-        j.pointer("/watch").is_none(),
-        "watch-result must not register a result watcher before delivery; got {j}"
-    );
-    wait_for_or_panic(
-        "missing worker becomes a blocked inbox row",
-        || {
-            let inbox = run_ta(&ws, &["inbox", "a", "--workspace", ws_path, "--json"]);
-            inbox
-                .json()
-                .pointer("/messages/0/status")
-                .and_then(|value| value.as_str())
-                == Some("queued_pane_missing")
-        },
-        Duration::from_secs(6),
-    );
+    let value = out.json();
+    assert!(!out.is_success(), "missing physical endpoint must refuse: {value}");
+    assert_eq!(value["ok"], false);
+    assert!(value.get("message_id").is_none(), "refusal must not queue work: {value}");
+    assert!(value.get("delivery_pending").is_none());
+    assert!(value["error"].is_string());
 
     let _ = run_ta(
         &ws,

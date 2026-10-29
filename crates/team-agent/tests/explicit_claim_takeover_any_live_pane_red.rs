@@ -552,14 +552,14 @@ fn shared_pane_after_external_and_internal_claims_repeats_mcp_send_and_report_re
     }
 
     for token in round1.iter().chain(round2.iter()) {
-        let in_a = db_contains_token(&workspace_a, token);
-        let in_b = db_contains_token(&workspace_b, token);
+        let in_a = inbox_contains_token(&workspace_a, token);
+        let in_b = inbox_contains_token(&workspace_b, token);
         if token.contains("CANARY_A") {
-            assert!(in_a, "workspace A db missing own token {token}");
-            assert!(!in_b, "workspace B db leaked workspace A token {token}");
+            assert!(in_a, "workspace A inbox missing own token {token}");
+            assert!(!in_b, "workspace B inbox leaked workspace A token {token}");
         } else {
-            assert!(in_b, "workspace B db missing own token {token}");
-            assert!(!in_a, "workspace A db leaked workspace B token {token}");
+            assert!(in_b, "workspace B inbox missing own token {token}");
+            assert!(!in_a, "workspace A inbox leaked workspace B token {token}");
         }
     }
     hermetic.assert_real_registry_unchanged(real_registry);
@@ -1388,28 +1388,14 @@ fn capture_fixture_pane(socket: &str, pane: &str) -> String {
 }
 
 #[cfg(unix)]
-fn db_contains_token(workspace: &Path, token: &str) -> bool {
-    let db = workspace.join(".team/runtime/team.db");
-    if !db.exists() {
-        return false;
-    }
-    let conn = rusqlite::Connection::open(&db).unwrap();
-    let like = format!("%{token}%");
-    let messages = conn
-        .query_row(
-            "select count(*) from messages where content like ?1",
-            [&like],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap_or(0);
-    let results = conn
-        .query_row(
-            "select count(*) from results where envelope like ?1",
-            [&like],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap_or(0);
-    messages + results > 0
+fn inbox_contains_token(workspace: &Path, token: &str) -> bool {
+    let inbox = team_agent::inbox_store::read(workspace, "leader", 64, Some("current"))
+        .expect("read scoped append-only leader inbox");
+    inbox["messages"].as_array().expect("inbox messages").iter().any(|record| {
+        assert_eq!(record["team"], "current");
+        assert_eq!(record["recipient"], "leader");
+        record["content"].as_str().is_some_and(|content| content.contains(token))
+    })
 }
 
 #[cfg(unix)]

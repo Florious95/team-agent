@@ -1,6 +1,9 @@
 //! Track 3 entrypoint parity: physical send does not persist or recover a queue.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
+#[path = "support/hermetic.rs"]
+mod hermetic;
+
 #[path = "support/direct_fixture.rs"]
 mod direct_fixture;
 #[path = "support/mcp_sim_harness.rs"]
@@ -42,7 +45,9 @@ fn sent(output: Output) -> Value {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn c1_dead_coordinator_is_ignored_and_snapshot_is_immutable() {
+    let _env = hermetic::HermeticTestEnv::enter("c1_dead_coordinator_is_ignored_and_snapshot_is_immutable");
     let fixture = DirectFixture::new();
     let ws = team_agent::coordinator::WorkspacePath::new(fixture.root.clone());
     let pid = team_agent::coordinator::Pid::new(99_999_999);
@@ -65,7 +70,9 @@ fn c1_dead_coordinator_is_ignored_and_snapshot_is_immutable() {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn c2_positional_alias_and_real_mcp_share_physical_delivery() {
+    let _env = hermetic::HermeticTestEnv::enter("c2_positional_alias_and_real_mcp_share_physical_delivery");
     let fixture = DirectFixture::new();
     sent(cli(&fixture, &["worker-1", "positional"]));
     sent(cli(&fixture, &["--to-name", "worker-1", "alias"]));
@@ -89,7 +96,9 @@ fn c2_positional_alias_and_real_mcp_share_physical_delivery() {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn c3_unresolved_recipients_refuse_without_delivery_or_persistence() {
+    let _env = hermetic::HermeticTestEnv::enter("c3_unresolved_recipients_refuse_without_delivery_or_persistence");
     let fixture = DirectFixture::new();
     for args in [
         vec!["unknown", "must not arrive"],
@@ -113,7 +122,9 @@ fn c3_unresolved_recipients_refuse_without_delivery_or_persistence() {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn c4_failed_physical_send_is_not_queued_and_explicit_retry_delivers_once() {
+    let _env = hermetic::HermeticTestEnv::enter("c4_failed_physical_send_is_not_queued_and_explicit_retry_delivers_once");
     let fixture = DirectFixture::new();
     let original = std::fs::read(fixture.root.join(".team/runtime/state.json")).unwrap();
     let mut state: Value = serde_json::from_slice(&original).unwrap();
@@ -121,7 +132,7 @@ fn c4_failed_physical_send_is_not_queued_and_explicit_retry_delivers_once() {
     fixture.set_state(&state);
     let failed = cli(&fixture, &["worker-1", "retry payload"]);
     assert!(!failed.status.success());
-    assert!(String::from_utf8_lossy(&failed.stdout).contains("tmux delivery failed"));
+    assert!(String::from_utf8_lossy(&failed.stdout).contains("recipient pane is not live on the selected socket"));
     std::fs::write(fixture.root.join(".team/runtime/state.json"), original).unwrap();
     sent(cli(&fixture, &["worker-1", "retry payload"]));
     fixture.received("Team Agent message from leader:\n\nretry payload");
@@ -137,7 +148,9 @@ fn c4_failed_physical_send_is_not_queued_and_explicit_retry_delivers_once() {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn c5_fanout_reports_physical_failure_without_manufacturing_queued_obligations() {
+    let _env = hermetic::HermeticTestEnv::enter("c5_fanout_reports_physical_failure_without_manufacturing_queued_obligations");
     let fixture = DirectFixture::new();
     fixture.set_state(&json!({"teams": {"current": {
         "tmux_socket": fixture.socket, "agents": {

@@ -860,12 +860,8 @@ pub fn run_ta_env(ws: &TestWorkspace, args: &[&str], extra_env: &[(&str, &str)])
         stderr: String::from_utf8_lossy(&stderr).into_owned(),
     };
     record_last_command_observation(ws, &result, extra_env);
-    if args.first() == Some(&"quick-start")
-        && fake_delivery_fixture_needs_real_tui_noecho(ws)
-        && quick_start_spawned_workers(&result)
-    {
-        disable_fake_worker_tty_echo(ws);
-    }
+    // Direct-delivery tests observe PTY input, not provider acceptance. Keep the
+    // fake terminal's echo enabled; report_result is exercised separately via MCP.
     result
 }
 
@@ -1112,6 +1108,28 @@ pub fn wait_for_or_panic<F: FnMut() -> bool>(description: &str, predicate: F, ti
 ///   - Test-only timeout evidence; it does not alter delivery state
 /// maturity: wired
 /// ---
+/// Observe actual input on the physical endpoint returned by the public locate command.
+pub fn assert_physical_input(ws: &TestWorkspace, receipt: &Value, content: &str) {
+    assert_eq!(receipt["status"], "sent");
+    assert_eq!(receipt["delivery"], "physical");
+    assert!(receipt["accepted"].is_null(), "physical receipt must not claim provider acceptance");
+    assert!(receipt.get("message_id").is_none());
+    let located = run_ta(ws, &["locate", "--workspace", ws.path().to_str().unwrap(), "--json"]);
+    assert!(located.is_success(), "locate failed: {}", located.stdout);
+    let located = located.json();
+    let endpoint = located["endpoints"].as_array().unwrap().iter()
+        .find(|endpoint| endpoint["agent"] == receipt["recipient"] && endpoint["pane_id"] == receipt["pane_id"])
+        .expect("physical receipt must identify a published live endpoint");
+    let socket = endpoint["socket"].as_str().unwrap();
+    let pane = receipt["pane_id"].as_str().unwrap();
+    wait_for_or_panic("physical input is visible on the selected pane", || {
+        let output = Command::new("tmux")
+            .args([if socket.contains('/') { "-S" } else { "-L" }, socket,
+                "capture-pane", "-p", "-S", "-100", "-t", pane]).output().unwrap();
+        output.status.success() && String::from_utf8_lossy(&output.stdout).contains(content)
+    }, Duration::from_secs(5));
+}
+
 pub fn wait_for_delivery_or_panic<F: FnMut() -> bool>(
     ws: &TestWorkspace,
     message_id: &str,

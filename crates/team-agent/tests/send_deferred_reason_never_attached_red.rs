@@ -1,6 +1,9 @@
 //! Detached leader replies are stored, never represented as queued delivery.
 #![allow(clippy::unwrap_used)]
 
+#[path = "support/hermetic.rs"]
+mod hermetic;
+
 #[path = "support/direct_fixture.rs"]
 mod direct_fixture;
 use direct_fixture::DirectFixture;
@@ -10,7 +13,9 @@ use team_agent::messaging::MessageTarget;
 use team_agent::model::ids::{AgentId, TeamKey};
 
 #[test]
+#[serial_test::serial(env)]
 fn never_attached_leader_reply_is_stored_with_honest_physical_failure() {
+    let _env = hermetic::HermeticTestEnv::enter("never_attached_leader_reply_is_stored_with_honest_physical_failure");
     let fixture = DirectFixture::new();
     fixture.set_state(&json!({"teams": {"current": {"agents": {"worker-1": {}}}}}));
     let tools = TeamOrchestratorTools::with_identity(
@@ -49,7 +54,9 @@ fn never_attached_leader_reply_is_stored_with_honest_physical_failure() {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn explicit_mailbox_needs_no_leader_endpoint_and_does_not_attempt_delivery() {
+    let _env = hermetic::HermeticTestEnv::enter("explicit_mailbox_needs_no_leader_endpoint_and_does_not_attempt_delivery");
     let fixture = DirectFixture::new();
     fixture.set_state(&json!({"teams": {"current": {"agents": {"worker-1": {}}}}}));
     let tools = TeamOrchestratorTools::with_identity(
@@ -83,7 +90,9 @@ fn explicit_mailbox_needs_no_leader_endpoint_and_does_not_attempt_delivery() {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn attaching_a_leader_does_not_replay_old_inbox_records() {
+    let _env = hermetic::HermeticTestEnv::enter("attaching_a_leader_does_not_replay_old_inbox_records");
     let fixture = DirectFixture::new();
     let original: Value = serde_json::from_slice(
         &std::fs::read(fixture.root.join(".team/runtime/state.json")).unwrap(),

@@ -355,31 +355,31 @@ fn worker_mcp_send_ignores_or_refuses_scope_arg_and_cannot_self_route_to_sibling
 }
 
 #[test]
-fn worker_recipient_mcp_uses_messaging_send_message_not_direct_store_write() {
+fn worker_recipient_mcp_uses_physical_directory_not_sqlite_delivery() {
     let tools = source("src/mcp_server/tools.rs");
-    let worker_path = source_section(
-        &tools,
-        "if is_worker_recipient(to)",
-        "let opts = SendOptions",
-    );
-    assert!(
-        !worker_path.contains("MessageStore::open")
-            && !worker_path.contains(".create_message(")
-            && worker_path.contains("messaging::send_message"),
-        "MCP worker-recipient path must delegate to messaging::send_message so it inherits target validation, owner gates, and #235 rebind behavior; source={worker_path}"
-    );
+    let send = source_section(&tools, "pub fn send_message", "/// `report_result`");
+    assert!(send.contains("direct_delivery::directory") && send.contains("directory.send("));
+    assert!(!send.contains("MessageStore::open") && !send.contains(".create_message("));
+    assert!(!send.contains("messaging::send_message"), "physical worker delivery must not re-enter the retired queue");
 }
 
 #[test]
-fn mcp_send_inherits_target_validation_and_owner_gate() {
-    let tools = source("src/mcp_server/tools.rs");
-    let send = source_section(&tools, "pub fn send_message", "/// `report_result`");
-    assert!(
-        send.contains("messaging::send_message")
-            && !send.contains("MessageStore::open")
-            && !send.contains(".create_message("),
-        "all MCP send targets, including worker recipients, must enter messaging::send_message instead of bypassing target_not_in_team/rebind_required/owner-gate logic; source={send}"
-    );
+fn mcp_physical_send_uses_captured_scope_not_stale_owner_control_plane() {
+    let harness = McpSimHarness::new();
+    let mut state = harness.state_value();
+    state["active_team_key"] = json!("teamB");
+    state["teams"]["teamA"]["team_owner"] = json!({"pane_id":"%stale", "leader_session_uuid":"stale-control-plane"});
+    save_runtime_state(harness.workspace_path(), &state).unwrap();
+    let mut worker = harness.spawn_mcp_client("worker_a", "teamA");
+    let token = "CAPTURED_SCOPE_PHYSICAL_CANARY";
+    let call = worker.call_tool("send_message", json!({"to":"worker_b", "content":token}));
+    assert!(!call.is_error, "{}", call.body);
+    assert_eq!(call.body["delivery"], "physical");
+    assert_eq!(call.body["recipient"], "worker_b");
+    assert!(harness.pane_contains_count("worker_b", token) >= 1);
+    assert_eq!(harness.pane_contains_count("team_b_leader", token), 0);
+    assert_eq!(harness.pane_contains_count("worker_a", token), 0);
+    assert!(harness.message_rows_containing(token).is_empty());
 }
 
 #[test]
@@ -431,7 +431,7 @@ fn mcp_send_canonicalize_owner_team_id_no_fallback() {
 }
 
 #[test]
-fn mcp_send_same_team_owner_still_creates_team_scoped_message() {
+fn mcp_send_same_team_owner_delivers_physically_without_a_queue_row() {
     let harness = McpSimHarness::new();
     let mut worker_a = harness.spawn_mcp_client("worker_a", "teamA");
     let canary = "MCP_SAME_TEAM_OWNER_MUST_SEND";
@@ -449,23 +449,15 @@ fn mcp_send_same_team_owner_still_creates_team_scoped_message() {
         call.body,
         call.raw
     );
-    assert!(
-        call.body["message_id"]
-            .as_str()
-            .is_some_and(|id| !id.is_empty())
-            || call.body["status"] == json!("accepted")
-            || call.body["status"] == json!("delivered"),
-        "same-team worker MCP send must return an accepted/delivered message shape; body={} raw={}",
-        call.body,
-        call.raw
-    );
-    let rows = harness.message_rows_containing(canary);
-    assert!(
-        rows.iter().any(|row| {
-            row.owner_team_id.as_deref() == Some("teamA") && row.recipient == "worker_b"
-        }),
-        "same-team worker MCP send must create a message row scoped to teamA for worker_b; rows={rows:?}"
-    );
+    assert_eq!(call.body["status"], "sent");
+    assert_eq!(call.body["delivery"], "physical");
+    assert_eq!(call.body["recipient"], "worker_b");
+    assert!(call.body["accepted"].is_null(), "physical submit does not prove provider acceptance");
+    assert!(call.body.get("message_id").is_none(), "ordinary peer send creates no ledger id");
+    assert!(harness.message_rows_containing(canary).is_empty());
+    assert!(harness.pane_contains_count("worker_b", canary) >= 1);
+    assert_eq!(harness.pane_contains_count("worker_a", canary), 0);
+    assert_eq!(harness.pane_contains_count("team_b_leader", canary), 0);
 }
 
 fn repairs_induce_claim_command(repairs: &Value) -> bool {

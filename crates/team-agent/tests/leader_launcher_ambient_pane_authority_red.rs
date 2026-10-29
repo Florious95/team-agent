@@ -809,7 +809,7 @@ fn a3_foreign_live_tuple_leaves_state_and_leader_registry_byte_stable() {
 
 #[test]
 #[serial(env)]
-fn b1_send_surfaces_typed_workspace_mismatch_and_recovery_action() {
+fn b1_send_reports_the_physical_endpoint_failure_without_rebinding() {
     let case = Case::new("b1-send");
     case.seed_foreign_attached_state();
     case.set_mode("foreign");
@@ -828,16 +828,10 @@ fn b1_send_surfaces_typed_workspace_mismatch_and_recovery_action() {
         None,
     );
     let value = json_stdout_even_on_error("B1 send refusal", &output);
-
-    assert!(
-        has_typed_reason(&value, "PaneWorkspaceMismatch"),
-        "B1 RED signature: send must preserve the known typed cause instead of collapsing it \
-         to leader_not_attached; output={value}"
-    );
-    assert!(
-        has_copyable_recovery_action(&value),
-        "B1 RED signature: send must carry a copyable attach-leader/takeover action; output={value}"
-    );
+    assert!(!output.status.success(), "a missing selected PTY cannot be reported as sent");
+    assert!(value["error"].as_str().is_some_and(|error| error.contains("pane") && error.contains("not live")), "{value}");
+    assert!(value["action"].as_str().is_some_and(|action| action.contains("doctor")), "{value}");
+    assert!(!has_typed_reason(&value, "PaneWorkspaceMismatch"), "send must not substitute a retired owner gate for physical endpoint evidence");
 }
 
 #[test]
@@ -1057,11 +1051,12 @@ fn b2_matching_workspace_is_not_misdiagnosed_by_doctor() {
 
 #[test]
 #[serial(env)]
-fn b3_recovery_action_removes_the_same_typed_error() {
+fn b3_launcher_recovery_action_removes_the_same_typed_error() {
     let case = Case::new("b3-action");
     case.seed_foreign_attached_state();
     case.set_mode("foreign");
-    let before = case.send_canary("before recovery");
+    let before_output = RecoverySurface::Launcher.invoke(&case, AMBIENT_PANE);
+    let before = json_stdout_even_on_error("launcher before recovery", &before_output);
     assert!(
         has_copyable_recovery_action(&before),
         "positive-control precondition: mismatch output must advertise a supported recovery action; \
@@ -1924,22 +1919,6 @@ impl Case {
             .expect("seed existing durable row");
     }
 
-    fn send_canary(&self, suffix: &str) -> Value {
-        let output = self.run(
-            &[
-                "send",
-                "leader",
-                suffix,
-                "--workspace",
-                self.workspace_str(),
-                "--team",
-                TEAM,
-                "--json",
-            ],
-            None,
-        );
-        json_stdout_even_on_error("send canary", &output)
-    }
 
     fn seed_attach_window_failures(&self) -> Vec<String> {
         let store = MessageStore::open(&self.workspace).expect("open message store");

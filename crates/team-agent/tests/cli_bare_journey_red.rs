@@ -436,8 +436,8 @@ fn h8_plain_fq_and_legacy_address_forms_remain_functional_machine_json() {
                 "--json",
             ],
         ));
-        assert!(v["message_id"].is_string());
-        assert_eq!(v["status"], "stored_only");
+        assert_eq!(v["status"], "stored");
+        assert_eq!(v["mailbox"], true);
     }
     let v = ok(&env.run_cli(
         &ws,
@@ -454,7 +454,12 @@ fn h8_plain_fq_and_legacy_address_forms_remain_functional_machine_json() {
             "--json",
         ],
     ));
-    assert!(v["message_id"].is_string());
+    assert_eq!(v["status"], "stored");
+    let records = team_agent::inbox_store::read(&ws, "worker", 10, Some("alpha")).unwrap();
+    assert_eq!(records["messages"].as_array().unwrap().len(), 3);
+    assert_eq!(records["messages"][0]["content"], "ADDRESS_COMPAT_286");
+    assert_eq!(records["messages"][1]["content"], "ADDRESS_COMPAT_286");
+    assert_eq!(records["messages"][2]["content"], "ADDRESS_LEGACY_286");
 }
 #[test]
 #[serial(env)]

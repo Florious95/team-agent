@@ -1,18 +1,16 @@
 """Controlled Pi composer fixture; no provider/model and no synthetic delivery receipt.
 
 The real injection must finish bracketed paste and deliver a separate Enter.
-Only then does the existing fake-worker consume the original bytes and report.
+Only then does the controlled worker report the original bytes over real MCP stdio.
 """
 
 import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
 import sys
 import termios
-import time
 import tty
 
 BEGIN = b"\x1b[200~"
@@ -50,36 +48,34 @@ def main():
 
     def submit(key):
         payload = editor_text()
-        matches = re.findall(r"^\[team-agent-token:([^\]\n]+)\]$", payload, re.M)
-        if len(matches) != 1:
-            raise RuntimeError("controlled submit requires one standalone message token")
-        message_id = matches[0]
-        record("enter_received", key=key, message_id=message_id,
+        record("enter_received", key=key, payload=payload,
                input_sha256=hashlib.sha256(bytes(draft)).hexdigest())
         transcript.extend(payload.split("\n"))
         draft.clear()
         render()
-        # The normal submit observer must arm this exact turn before the fake
-        # worker can complete it; do not write state or bypass that observer.
-        deadline = time.monotonic() + 5
-        while True:
-            state = json.loads((workspace / ".team/runtime/state.json").read_text())
-            owner = os.environ.get("TEAM_AGENT_OWNER_TEAM_ID")
-            scoped = state.get("teams", {}).get(owner, state)
-            current = scoped.get("agents", {}).get(agent, {}).get("current_turn_message_id")
-            if current == message_id:
-                break
-            if time.monotonic() >= deadline:
-                raise RuntimeError("controlled submit observer did not arm this message")
-            time.sleep(0.01)
-        record("turn_observed", message_id=message_id)
+        requests = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2024-11-05", "capabilities": {},
+                "clientInfo": {"name": "controlled-pi-tty", "version": "1"}}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+                "name": "report_result", "arguments": {"summary": payload, "status": "completed"}}},
+        ]
+        env = os.environ.copy()
+        env["TEAM_AGENT_ID"] = agent
+        env.pop("TMUX", None)
+        env.pop("TMUX_PANE", None)
         child = subprocess.run(
-            [binary, "fake-worker", "--workspace", str(workspace), "--agent-id", agent],
-            input=(payload + "\n").encode("utf-8"), capture_output=True, timeout=5,
+            [binary, "mcp-server", "--workspace", str(workspace)],
+            input="".join(json.dumps(request) + "\n" for request in requests),
+            capture_output=True, text=True, env=env, timeout=10,
         )
-        record("fake_result", message_id=message_id, exit_code=child.returncode)
-        if child.returncode != 0:
-            raise RuntimeError("controlled fake-worker failed")
+        replies = [json.loads(line) for line in child.stdout.splitlines() if line.strip()]
+        reply = next((reply for reply in replies if reply.get("id") == 2), {})
+        result = reply.get("result", {})
+        record("mcp_result", exit_code=child.returncode, response=reply)
+        if child.returncode != 0 or "error" in reply or result.get("isError") or not result:
+            raise RuntimeError(f"controlled MCP report failed: {reply!r} {child.stderr}")
 
     try:
         tty.setraw(0)

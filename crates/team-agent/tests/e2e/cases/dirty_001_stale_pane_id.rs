@@ -25,14 +25,12 @@ fn dirty_001_stale_pane_id_is_not_reported_delivered() {
             "--json",
         ],
     );
-    assert!(out.is_success(), "send stderr={}", out.stderr);
-    let j = out.json();
-    let status = j.pointer("/status").and_then(|v| v.as_str()).unwrap_or("");
-    assert_ne!(
-        status, "delivered",
-        "stale pane must not be reported delivered: {j}"
-    );
-    assert_json_field_eq_str(&j, "/message_status", "accepted");
+    let value = out.json();
+    assert!(!out.is_success(), "missing physical endpoint must refuse: {value}");
+    assert_eq!(value["ok"], false);
+    assert!(value.get("message_id").is_none(), "refusal must not queue work: {value}");
+    assert!(value.get("delivery_pending").is_none());
+    assert!(value["error"].is_string());
 
     let _ = run_ta(
         &ws,

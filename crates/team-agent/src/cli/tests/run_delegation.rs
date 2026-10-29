@@ -92,7 +92,9 @@ fn run_dispatches_status_to_handler_returns_ok() {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn run_dispatches_send_to_handler_returns_ok() {
+    let _env = hermetic_guard::HermeticTestEnv::enter("send-dispatch");
     // run([send w1 hello --workspace <seeded>]) -> cmd_send -> messaging::send_message
     // -> ok (w1 is an in-team agent) -> ExitCode::Ok. w1 must be seeded: golden refuses non-team targets.
     //

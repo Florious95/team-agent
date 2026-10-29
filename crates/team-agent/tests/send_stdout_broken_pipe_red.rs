@@ -2,6 +2,9 @@
 #![cfg(unix)]
 #![allow(clippy::unwrap_used)]
 
+#[path = "support/hermetic.rs"]
+mod hermetic;
+
 #[path = "support/direct_fixture.rs"]
 mod direct_fixture;
 use direct_fixture::DirectFixture;
@@ -43,7 +46,9 @@ fn send_with_closed_stdout(fixture: &DirectFixture, mailbox: bool) {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn physical_send_completes_once_when_stdout_is_closed() {
+    let _env = hermetic::HermeticTestEnv::enter("physical_send_completes_once_when_stdout_is_closed");
     let fixture = DirectFixture::new();
     send_with_closed_stdout(&fixture, false);
     fixture.received("Team Agent message from leader:\n\nclosed stdout token");
@@ -59,7 +64,9 @@ fn physical_send_completes_once_when_stdout_is_closed() {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn mailbox_remains_pullable_once_when_stdout_is_closed() {
+    let _env = hermetic::HermeticTestEnv::enter("mailbox_remains_pullable_once_when_stdout_is_closed");
     let fixture = DirectFixture::new();
     send_with_closed_stdout(&fixture, true);
     let records = fixture.inbox("worker-1");

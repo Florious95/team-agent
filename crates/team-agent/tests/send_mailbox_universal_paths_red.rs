@@ -2,6 +2,9 @@
 //! Ordinary sends use the same addressing but deliver directly to the PTY.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
+#[path = "support/hermetic.rs"]
+mod hermetic;
+
 #[path = "support/direct_fixture.rs"]
 mod direct_fixture;
 
@@ -20,7 +23,9 @@ fn tools(fixture: &DirectFixture) -> TeamOrchestratorTools {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn mailbox_to_worker_is_pullable_but_never_physically_injected() {
+    let _env = hermetic::HermeticTestEnv::enter("mailbox_to_worker_is_pullable_but_never_physically_injected");
     let fixture = DirectFixture::new();
     let tools = tools(&fixture);
     let mailbox = tools
@@ -78,7 +83,9 @@ fn mailbox_to_worker_is_pullable_but_never_physically_injected() {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn mailbox_broadcast_appends_to_every_published_worker_except_sender() {
+    let _env = hermetic::HermeticTestEnv::enter("mailbox_broadcast_appends_to_every_published_worker_except_sender");
     let fixture = DirectFixture::new();
     fixture.set_state(&json!({"teams": {"current": {
         "tmux_socket": fixture.socket,

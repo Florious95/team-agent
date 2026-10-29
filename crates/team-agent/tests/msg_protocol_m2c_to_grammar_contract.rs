@@ -195,26 +195,19 @@ fn assert_persisted(
         "M2c ({label}): the canonical positional TO grammar must accept this logical form; \
          got: {combined}"
     );
-    let message_id = value
-        .get("message_id")
-        .and_then(Value::as_str)
-        .unwrap_or("<absent>");
-    assert!(
-        message_id.starts_with("msg_"),
-        "M2c ({label}): positional TO must return a store-backed msg_* id; got {message_id}"
-    );
-    let mut recipients: Vec<&str> = rows
-        .iter()
-        .map(|(_, recipient)| recipient.as_str())
-        .collect();
+    assert!(rows.is_empty(), "physical delivery must not write queue rows");
+    let receipts = value.get("results").and_then(Value::as_array).cloned().unwrap_or_else(|| vec![value.clone()]);
+    let mut recipients = Vec::new();
+    for receipt in &receipts {
+        assert_eq!(receipt["delivery"], "physical");
+        assert_eq!(receipt["status"], "sent");
+        assert!(receipt.get("message_id").is_none());
+        recipients.push(receipt["recipient"].as_str().unwrap());
+    }
     recipients.sort_unstable();
     let mut expected = expected_recipients.to_vec();
     expected.sort_unstable();
-    assert_eq!(
-        recipients, expected,
-        "M2c ({label}): one persisted row per recipient with the resolved recipient column; \
-         rows={rows:?}"
-    );
+    assert_eq!(recipients, expected, "address forms must resolve the same physical recipients");
 }
 
 /// Invariant 1 — the four accept-forms of the positional TO grammar all enter

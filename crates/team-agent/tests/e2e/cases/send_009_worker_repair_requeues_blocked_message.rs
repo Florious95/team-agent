@@ -1,120 +1,68 @@
-//! E2E-SEND-009 start-agent repair replays the same repair-safe blocked
-//! worker-bound message id.
-
+//! Repair restores addressing; failed physical sends are never queued for replay.
 use crate::framework::*;
-use std::time::Duration;
 
 #[test]
-fn send_009_worker_repair_requeues_blocked_message() {
-    let team_id = "send009";
-    let ws = TestWorkspace::new(team_id).with_fake_spec(&["a", "b"]);
-    let ws_path = ws.path().to_str().unwrap();
-    let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
-
-    let stop = run_ta(&ws, &["stop-agent", "a", "--workspace", ws_path, "--json"]);
-    assert!(stop.is_success(), "stop-agent: {}", stop.stdout);
-
-    let out = run_ta(
+fn send_009_worker_repair_requires_an_explicit_retry() {
+    let ws = TestWorkspace::new("send009").with_fake_spec(&["a", "b"]);
+    let path = ws.path().to_str().unwrap();
+    assert!(quick_start_workers_available(&quick_start_fake(
+        &ws, "send009"
+    )));
+    assert!(run_ta(&ws, &["stop-agent", "a", "--workspace", path, "--json"]).is_success());
+    let failed = run_ta(
         &ws,
         &[
             "send",
             "a",
-            "repair should replay this same row",
+            "repair-retry-token",
             "--workspace",
-            ws_path,
+            path,
             "--json",
         ],
     );
-    let j = out.json();
-    let mid = j
-        .pointer("/message_id")
-        .and_then(|value| value.as_str())
-        .expect("generated message id");
-    assert_json_field_eq_str(&j, "/message_status", "accepted");
-    wait_for_or_panic(
-        "accepted message reaches repairable blocked state",
-        || message_status(&ws, mid).as_deref() == Some("queued_pane_missing"),
-        Duration::from_secs(6),
-    );
-    let before = message_row(&ws, mid).expect("blocked message row exists");
-    assert_eq!(before.status, "queued_pane_missing");
-
+    assert!(!failed.is_success());
+    assert!(failed.json().get("message_id").is_none());
     let start = run_ta(
         &ws,
         &[
             "start-agent",
             "a",
             "--workspace",
-            ws_path,
+            path,
             "--allow-fresh",
             "--no-display",
             "--json",
         ],
     );
-    assert!(
-        start.is_success(),
-        "start-agent exit {}; stdout={} stderr={}",
-        start.exit_code,
-        start.stdout,
-        start.stderr
-    );
-
-    wait_for_or_panic(
-        "same blocked message id delivered after worker repair",
-        || message_status(&ws, mid).as_deref() == Some("delivered"),
-        Duration::from_secs(8),
-    );
-    std::thread::sleep(Duration::from_millis(700));
-    let after = message_row(&ws, mid).expect("delivered message row exists");
-    assert_eq!(after.status, "delivered");
+    assert!(start.is_success(), "{} {}", start.stdout, start.stderr);
+    let db = rusqlite::Connection::open(ws.path().join(".team/runtime/team.db")).unwrap();
+    let queued: i64 = db
+        .query_row(
+            "select count(*) from messages where content = 'repair-retry-token'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(
-        after.delivery_attempts,
-        before.delivery_attempts + 1,
-        "repair replay must add exactly one delivery attempt"
+        queued, 0,
+        "failed direct send must not create a replay obligation"
     );
-    assert_eq!(event_count(&ws, "message.delivered", mid), 1);
-    assert_eq!(event_count(&ws, "turn_open.armed_after_delivery", mid), 1);
-
+    assert!(!ws.path().join(".team/inbox/a.jsonl").exists());
+    let retry = run_ta(
+        &ws,
+        &[
+            "send",
+            "a",
+            "repair-retry-token",
+            "--workspace",
+            path,
+            "--json",
+        ],
+    );
+    assert!(retry.is_success(), "{} {}", retry.stdout, retry.stderr);
+    assert_physical_input(&ws, &retry.json(), "repair-retry-token");
     let _ = run_ta(
         &ws,
-        &["shutdown", "--workspace", ws_path, "--keep-logs", "--json"],
+        &["shutdown", "--workspace", path, "--keep-logs", "--json"],
     );
-}
-
-struct MessageRow {
-    status: String,
-    delivery_attempts: i64,
-}
-
-fn message_status(ws: &TestWorkspace, message_id: &str) -> Option<String> {
-    message_row(ws, message_id).map(|row| row.status)
-}
-
-fn message_row(ws: &TestWorkspace, message_id: &str) -> Option<MessageRow> {
-    let db = ws.path().join(".team/runtime/team.db");
-    let conn = rusqlite::Connection::open(db).ok()?;
-    conn.query_row(
-        "select status, delivery_attempts from messages where message_id = ?1",
-        [message_id],
-        |row| {
-            Ok(MessageRow {
-                status: row.get(0)?,
-                delivery_attempts: row.get(1)?,
-            })
-        },
-    )
-    .ok()
-}
-
-fn event_count(ws: &TestWorkspace, event: &str, message_id: &str) -> usize {
-    std::fs::read_to_string(ws.events_jsonl_path())
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter(|entry| {
-            entry.get("event").and_then(serde_json::Value::as_str) == Some(event)
-                && entry.get("message_id").and_then(serde_json::Value::as_str) == Some(message_id)
-        })
-        .count()
 }

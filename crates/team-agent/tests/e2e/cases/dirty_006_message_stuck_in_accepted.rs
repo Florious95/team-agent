@@ -32,16 +32,12 @@ fn dirty_006_message_stuck_in_accepted_is_not_false_delivered() {
             "--json",
         ],
     );
-    assert!(out.is_success(), "send stderr={}", out.stderr);
-    let j = out.json();
-    assert!(j.pointer("/message_id").and_then(|v| v.as_str()).is_some());
-    assert_json_field_eq_str(&j, "/message_status", "accepted");
-    assert_ne!(
-        j.pointer("/status").and_then(|v| v.as_str()),
-        Some("delivered"),
-        "accepted message must not be reported delivered: {j}"
-    );
-    assert_file_exists(&ws.path().join(".team/runtime/team.db"));
+    let value = out.json();
+    assert!(!out.is_success(), "missing physical endpoint must refuse: {value}");
+    assert_eq!(value["ok"], false);
+    assert!(value.get("message_id").is_none(), "refusal must not queue work: {value}");
+    assert!(value.get("delivery_pending").is_none());
+    assert!(value["error"].is_string());
 
     let _ = run_ta(
         &ws,
