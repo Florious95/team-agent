@@ -30,7 +30,7 @@
 use super::common::*;
 use super::selection::classify_restart_plan_with_resume_validation;
 use super::*;
-use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
+use crate::lifecycle::lock::{acquire_seat_lifecycle_lock, LifecycleLockRequest};
 
 // ── 0.5.38 startup latency instrumentation ──────────────────────────────────
 //
@@ -353,7 +353,7 @@ fn restart_with_selected_team_and_transport(
     // `elapsed_ms` for at-a-glance latency triage.
     let phase_timer = RestartPhaseTimer::start();
     phase_timer.emit(&selected.run_workspace, "restart.phase", LifecyclePhase::ResolveContext);
-    let lifecycle_lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let lifecycle_lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &selected.run_workspace,
         operation: "restart",
         team: Some(selected.team_key.as_str()),
@@ -2655,7 +2655,7 @@ fn mark_fake_harness_agent_respawned(
 
 fn same_role_cohort_targets_from_decisions(
     state: &serde_json::Value,
-    spec_workspace: &Path,
+    _spec_workspace: &Path,
     agents: &[RestartedAgent],
 ) -> Vec<SameRoleCohortTarget> {
     let mut targets = Vec::new();
@@ -2664,17 +2664,6 @@ fn same_role_cohort_targets_from_decisions(
         let raw_agent = state
             .get("agents")
             .and_then(|agents| agents.get(agent_id.as_str()));
-        let effective_agent = raw_agent.map(|agent| {
-            rehydrate_agent_command_context_from_spec(spec_workspace, agent_id, agent)
-        });
-        if effective_agent
-            .as_ref()
-            .and_then(|agent| agent.get("provider"))
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|provider| provider.eq_ignore_ascii_case("fake"))
-        {
-            continue;
-        }
         let window = raw_agent
             .and_then(|agent| agent.get("window"))
             .and_then(serde_json::Value::as_str)
@@ -3787,7 +3776,7 @@ pub(crate) fn restore_missing_runtime_spec(
 ) -> Result<std::path::PathBuf, LifecycleError> {
     let run_workspace = crate::model::paths::canonical_run_workspace(workspace)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &run_workspace, operation: "restore-runtime-spec", team: Some(team), agent_id: None,
     })?;
     let selected = crate::state::selector::resolve_active_team_readonly(

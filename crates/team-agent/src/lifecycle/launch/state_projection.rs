@@ -32,7 +32,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
+use crate::lifecycle::lock::{acquire_seat_lifecycle_lock, LifecycleLockRequest};
 use crate::lifecycle::profile_launch::parse_provider;
 use crate::lifecycle::*;
 use crate::model::enums::{AuthMode, PaneLiveness, Provider, ProviderEffort};

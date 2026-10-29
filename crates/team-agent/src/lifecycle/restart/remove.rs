@@ -28,7 +28,7 @@ use super::agent::{resolve_team_scoped_state_or_refuse, start_agent_at_paths};
 use super::common::*;
 use super::team_state::write_team_state;
 use super::*;
-use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
+use crate::lifecycle::lock::{acquire_seat_lifecycle_lock, LifecycleLockRequest};
 
 /// ---
 /// purpose: 摘掉一席的对外入口，取生命周期锁后走实体实现
@@ -55,7 +55,7 @@ pub fn remove_agent(
     let paths = lifecycle_paths(workspace, team)?;
     let canonical_team = paths.canonical_team(team).map(str::to_string);
     let team = canonical_team.as_deref();
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &paths.run_workspace,
         operation: "remove-agent",
         team,
@@ -90,7 +90,7 @@ pub(crate) fn remove_agent_with_transport(
     let paths = lifecycle_paths(workspace, team)?;
     let canonical_team = paths.canonical_team(team).map(str::to_string);
     let team = canonical_team.as_deref();
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &paths.run_workspace,
         operation: "remove-agent",
         team,

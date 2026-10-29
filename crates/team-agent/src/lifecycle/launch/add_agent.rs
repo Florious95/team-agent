@@ -35,7 +35,7 @@ use crate::model::yaml::{self, Value};
 use crate::state::persist::load_runtime_state;
 use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
 
-use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
+use crate::lifecycle::lock::{acquire_seat_lifecycle_lock, LifecycleLockRequest};
 
 use super::*;
 
@@ -64,7 +64,7 @@ impl Drop for AgentReservation {
             team: Some(self.team_key.as_str()),
             agent_id: Some(&self.agent_id),
         };
-        let Ok(_lock) = acquire_agent_lifecycle_lock(request) else {
+        let Ok(_lock) = acquire_seat_lifecycle_lock(request) else {
             let _ = crate::event_log::EventLog::new(&self.workspace).write(
                 "lifecycle.clone_reservation_rollback_failed",
                 serde_json::json!({
@@ -239,7 +239,7 @@ pub fn add_agent(
         }
         Err(error) => return Err(LifecycleError::TeamSelect(error.to_string())),
     };
-    let lifecycle_lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let lifecycle_lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &selected.run_workspace,
         operation: "add-agent",
         team: Some(selected.team_key.as_str()),
@@ -307,7 +307,7 @@ pub fn add_agent_force(
     )
     .map_err(|error| LifecycleError::TeamSelect(error.to_string()))?;
     let canonical_team_key = selected.team_key.clone();
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &selected.run_workspace,
         operation: "add-agent-force",
         team: Some(canonical_team_key.as_str()),
@@ -347,7 +347,7 @@ pub(crate) fn add_agent_with_transport(
 ) -> Result<AddAgentReport, LifecycleError> {
     let run_workspace = crate::model::paths::canonical_run_workspace(workspace)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    let lifecycle_lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let lifecycle_lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &run_workspace,
         operation: "add-agent",
         team,
@@ -398,7 +398,7 @@ pub(crate) fn add_agent_with_transport_force(
     }
     let run_workspace = crate::model::paths::canonical_run_workspace(workspace)
         .map_err(|error| LifecycleError::StatePersist(error.to_string()))?;
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &run_workspace,
         operation: "add-agent-force",
         team,
@@ -644,8 +644,17 @@ fn add_agent_with_transport_at_paths_reserved(
     }
     // E5 Bug1:不再 copy role 文件进 <team_dir>/agents(自拷贝 O_TRUNC 截断反模式)。
     // 就地读外部 role 文档编译,注入 base team spec 的 agents/routing。role 文件留在原处。
-    let mut spec = crate::compiler::compile_team(team_dir)
-        .map_err(|e| LifecycleError::Compile(e.to_string()))?;
+    // Adding one seat validates that role only. Recompiling every sibling's
+    // source lets an unrelated broken role veto this otherwise valid action.
+    let base_spec_path = crate::model::paths::runtime_spec_path(run_workspace, &canonical_team_key);
+    let mut spec = match std::fs::read_to_string(&base_spec_path) {
+        Ok(text) => crate::model::yaml::loads(&text)
+            .map_err(|e| LifecycleError::Compile(e.to_string()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound =>
+            crate::compiler::compile_team(team_dir)
+                .map_err(|e| LifecycleError::Compile(e.to_string()))?,
+        Err(error) => return Err(LifecycleError::StatePersist(error.to_string())),
+    };
     override_spec_workspace(&mut spec, run_workspace);
     let workspace_s = spec
         .get("team")
@@ -683,7 +692,7 @@ fn add_agent_with_transport_at_paths_reserved(
     let reservation_lock = if lifecycle_lock_held {
         None
     } else {
-        Some(acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        Some(acquire_seat_lifecycle_lock(LifecycleLockRequest {
             workspace: run_workspace,
             operation: "add-agent",
             team,

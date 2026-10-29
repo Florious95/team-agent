@@ -35,7 +35,7 @@ use super::common::*;
 use super::selection::decide_start_mode;
 use super::team_state::write_team_state;
 use super::*;
-use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
+use crate::lifecycle::lock::{acquire_seat_lifecycle_lock, LifecycleLockRequest};
 
 /// CLI start is orthogonal to stop: refuse any live target before editing its role.
 /// Transport uncertainty is a refusal, not permission to spawn a duplicate.
@@ -94,7 +94,7 @@ pub fn start_agent(
     let paths = lifecycle_paths(workspace, team)?;
     let canonical_team = paths.canonical_team(team).map(str::to_string);
     let team = canonical_team.as_deref();
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &paths.run_workspace,
         operation: "start-agent",
         team,
@@ -142,7 +142,7 @@ pub(crate) fn start_agent_with_transport(
     };
     let canonical_team = paths.canonical_team(team).map(str::to_string);
     let team = canonical_team.as_deref();
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &paths.run_workspace,
         operation: "start-agent",
         team,
@@ -1039,7 +1039,7 @@ pub fn stop_agent(
     let paths = lifecycle_paths(workspace, team)?;
     let canonical_team = paths.canonical_team(team).map(str::to_string);
     let team = canonical_team.as_deref();
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &paths.run_workspace,
         operation: "stop-agent",
         team,
@@ -1070,7 +1070,7 @@ pub(crate) fn stop_agent_with_transport(
     let paths = lifecycle_paths(workspace, team)?;
     let canonical_team = paths.canonical_team(team).map(str::to_string);
     let team = canonical_team.as_deref();
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &paths.run_workspace,
         operation: "stop-agent",
         team,
@@ -1483,7 +1483,7 @@ pub fn reset_agent(
     let paths = lifecycle_paths(workspace, team)?;
     let canonical_team = paths.canonical_team(team).map(str::to_string);
     let team = canonical_team.as_deref();
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &paths.run_workspace,
         operation: "reset-agent",
         team,
@@ -1525,7 +1525,7 @@ pub(crate) fn reset_agent_with_transport(
     let paths = lifecycle_paths(workspace, team)?;
     let canonical_team = paths.canonical_team(team).map(str::to_string);
     let team = canonical_team.as_deref();
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &paths.run_workspace,
         operation: "reset-agent",
         team,

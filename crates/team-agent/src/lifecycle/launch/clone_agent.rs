@@ -170,7 +170,7 @@ fn persist_clone_session(
     session_id: &SessionId,
     backing_path: &Path,
 ) -> Result<(), LifecycleError> {
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace,
         operation: "clone-session-bind",
         team: Some(team_key),

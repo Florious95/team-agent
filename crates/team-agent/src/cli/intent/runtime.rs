@@ -973,7 +973,8 @@ fn plan_with_observer(
             }
         }
         let explicit = crate::state::projection::agent_explicit_stop(row);
-        let obs = if paused(row) || (team && plan.intent.verb == Verb::Restart && explicit) {
+        let preserve_stop = team && explicit && matches!(plan.intent.verb, Verb::Start | Verb::Restart);
+        let obs = if paused(row) || preserve_stop {
             Observation::Unstarted
         } else {
             observe(&selected, &id, row)?
@@ -999,7 +1000,7 @@ fn plan_with_observer(
                     )));
                 }
             }
-            plan.skipped.push(json!({"agent":id,"reason":if paused(row){"paused"}else if team&&plan.intent.verb==Verb::Restart&&explicit{"explicit_stop"}else if obs==Observation::Live{"already_running"}else{"already_stopped"},"observation":obs}));
+            plan.skipped.push(json!({"agent":id,"reason":if paused(row){"paused"}else if preserve_stop{"explicit_stop"}else if obs==Observation::Live{"already_running"}else{"already_stopped"},"observation":obs}));
         } else {
             if plan.intent.verb != Verb::Stop {
                 let (_, compiled) = role(&mut plan, &selected, &id, None)?;

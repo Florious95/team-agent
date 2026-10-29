@@ -12,7 +12,7 @@ use crate::state::repository::{StateRepository, StateWriteIntent};
 use crate::state::selector::{SelectedTeam, SelectorMode};
 use crate::transport::Transport;
 
-use super::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
+use super::lock::{acquire_seat_lifecycle_lock, LifecycleLockRequest};
 use super::{AddAgentReport, LifecycleError, StartAgentOutcome};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -95,7 +95,7 @@ fn with_selected<T>(
     operation: impl FnOnce(&SelectedTeam) -> Result<T, LifecycleError>,
 ) -> Result<T, LifecycleError> {
     validate_id(agent_id)?;
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &selected.run_workspace,
         operation: "role-config",
         team: Some(&selected.team_key),
@@ -235,6 +235,21 @@ fn start_at_selected(
         .get("agents")
         .and_then(|agents| agents.get(agent_id.as_str()))
         .ok_or_else(|| LifecycleError::RequirementUnmet(format!("agent {agent_id} not found")))?;
+    // A plain start is convergence, not a role-document edit. In particular,
+    // recover a pane created before the previous caller died publishing state.
+    // The native start path verifies the live cohort and refreshes its binding.
+    if patch == &RoleConfigPatch::default() {
+        return super::restart::start_agent_at_paths(
+            &selected.run_workspace,
+            selected.spec_workspace.as_deref().unwrap_or(&selected.team_dir),
+            agent_id,
+            false,
+            true,
+            allow_fresh,
+            Some(&selected.team_key),
+            transport,
+        );
+    }
     super::restart::ensure_agent_not_running(&selected.state, agent_id, transport)?;
     if old_agent.get("paused").and_then(serde_json::Value::as_bool) == Some(true) {
         return Err(LifecycleError::RequirementUnmet(format!(

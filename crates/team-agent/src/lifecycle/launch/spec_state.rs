@@ -66,7 +66,7 @@ use crate::model::yaml::{self, Value};
 use crate::state::persist::load_runtime_state;
 use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
 
-use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
+use crate::lifecycle::lock::{acquire_seat_lifecycle_lock, LifecycleLockRequest};
 
 use super::leader_context::{caller_provider_for_seed_with_lookup, seed_unbound_launched_owner};
 use super::worker_env::spawn_timestamp;
