@@ -658,7 +658,7 @@ fn seat_actions(
             "restart requires a registered, previously started agent",
         )),
         (Verb::Stop, Observation::StoppedVerified | Observation::Unstarted) => Ok(vec![]),
-        (Verb::Stop, Observation::Live) => Ok(vec!["stop"]),
+        (Verb::Stop, Observation::Live | Observation::NativeReconcile) => Ok(vec!["stop"]),
         _ => Err(refusal("unsupported lifecycle observation")),
     }
 }
