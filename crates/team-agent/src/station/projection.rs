@@ -9,14 +9,18 @@ use std::path::Path;
 const INSTANCE: &str = "station_instance_id";
 
 fn binding(workspace: &Path, create: bool) -> Result<Option<String>, String> {
+    if !create && !workspace.join(".team/station-v1/workspace.json").exists() {
+        return Ok(None);
+    }
     let canonical = workspace.canonicalize().map_err(|e| e.to_string())?;
+    let canonical_text = canonical.to_str().ok_or("non_utf8_workspace_path")?;
     let root = canonical.join(".team/station-v1");
     let path = root.join("workspace.json");
     if !path.exists() && create {
         seat_store::private_dir(&root)?;
         let id = seat_store::random_instance()?;
         let temp = root.join(format!(".workspace-{id}.json"));
-        let value = json!({"v":1,"kind":"workspace","workspace_id":id,"canonical_path":canonical});
+        let value = json!({"v":1,"kind":"workspace","workspace_id":id,"canonical_path":canonical_text});
         seat_store::write_json(&temp, &value, 16 * 1024)?;
         let installed = fs::hard_link(&temp, &path);
         let _ = fs::remove_file(&temp);
@@ -26,17 +30,26 @@ fn binding(workspace: &Path, create: bool) -> Result<Option<String>, String> {
             Err(e) => return Err(e.to_string()),
         }
     }
-    let text = match fs::read(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e.to_string()),
-    };
-    let value = codec::read(&text)?;
+    let Some(value) = seat_store::read_json(&path, 16 * 1024)? else { return Ok(None); };
     codec::authorize_mutation(&value, &[])?;
-    if value["canonical_path"].as_str() != canonical.to_str() {
+    if value["canonical_path"].as_str() != Some(canonical_text) {
         return Err("workspace_copy_requires_rebind".into());
     }
-    value["workspace_id"].as_str().map(|s| Some(s.to_string())).ok_or("invalid workspace binding".into())
+    let id = value["workspace_id"].as_str().ok_or("invalid workspace binding")?;
+    if value["kind"] != "workspace" || id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("invalid workspace binding".into());
+    }
+    // A concurrent initializer may have linked the anchor but not synced its
+    // directory yet. Mutators establish durability before publishing seat data.
+    if create { seat_store::sync_directory(&root)?; }
+    Ok(Some(id.to_string()))
+}
+
+pub(crate) fn check_target(workspace: &Path, team: &str, id: &str) -> Result<(), String> {
+    let Some(workspace_id) = binding(workspace, false)? else { return Ok(()); };
+    let store = SeatStore::new(workspace, SeatScope { workspace: workspace_id, team: team.into(), seat: id.into() })?;
+    if let Some(seat) = store.read()? { super::lifecycle::validate_manifest(&seat)?; }
+    Ok(())
 }
 
 /// Publish only seats for which the lifecycle caller has write authority. Peer
@@ -48,6 +61,7 @@ pub(crate) fn publish(
     ids: &[&str],
 ) -> Result<(), String> {
     seat_store::component(team)?;
+    if ids.is_empty() { return Ok(()); }
     let workspace_id = binding(workspace, true)?.ok_or("workspace identity missing")?;
     let mut context = state.clone();
     let object = context.as_object_mut().ok_or("invalid team projection")?;
@@ -67,16 +81,23 @@ pub(crate) fn publish(
         }
         let row = state.get("agents").and_then(|agents| agents.get(*id)).cloned();
         let Some(mut row) = row else {
-            if let Some(mut seat) = previous {
-                seat.instance_id = seat_store::random_instance()?;
-                seat.generation = seat.generation.saturating_add(1);
-                seat.desired = "removed".into();
-                seat.phase = "removed".into();
-                seat.endpoint = None;
-                seat.updated_at = now();
-                seat.extra.insert("legacy_context".into(), context.clone());
-                lock.publish(&seat)?;
-            }
+            if state.get("agent_lifecycle").and_then(|rows| rows.get(*id))
+                .and_then(|row| row.get("state")).and_then(Value::as_str) != Some("retired")
+            { return Err("authoritative seat row missing".into()); }
+            let mut seat = previous.unwrap_or_else(|| SeatManifest {
+                v: 1, kind: "seat_manifest".into(), requires: Vec::new(), scope: store.scope.clone(),
+                instance_id: String::new(), generation: 0, desired: "removed".into(), phase: "removed".into(),
+                launch: json!({}), endpoint: None, last_operation_id: String::new(), updated_at: String::new(),
+                extra: Default::default(),
+            });
+            seat.instance_id = seat_store::random_instance()?;
+            seat.generation = seat.generation.saturating_add(1).min(9_007_199_254_740_991);
+            seat.desired = "removed".into();
+            seat.phase = "removed".into();
+            seat.endpoint = None;
+            seat.updated_at = now();
+            seat.extra.insert("legacy_context".into(), context.clone());
+            lock.publish(&seat)?;
             continue;
         };
         if let Some(previous) = &previous {
@@ -92,15 +113,16 @@ pub(crate) fn publish(
             }
         }
         let explicitly_stopped = row.get("explicit_stop").and_then(Value::as_bool) == Some(true);
-        let desired = if explicitly_stopped { "stopped" } else { "running" };
-        let status = row.get("status").and_then(Value::as_str).unwrap_or("stopped");
+        let status = row.get("status").and_then(Value::as_str).unwrap_or("unknown");
+        let desired = if status == "removed" { "removed" } else if explicitly_stopped { "stopped" } else { "running" };
         let phase = match status {
-            "running" => "ready", "starting" => "starting", "removed" => "removed",
-            "failed" => "failed", _ => "stopped",
+            "running" if explicitly_stopped => "stopping",
+            "running" => "ready", "starting" => "starting", "stopping" => "stopping",
+            "removed" => "removed", "stopped" | "paused" => "stopped", _ => "failed",
         };
         let old_row = previous.as_ref().and_then(|seat| seat.extra.get("legacy_row"));
         let changed_cohort = old_row.is_some_and(|old| {
-            ["pane_id", "pane_pid", "spawned_at"].iter().any(|key| old.get(*key) != row.get(*key))
+            ["pane_id", "pane_pid", "spawned_at", "contract_instance"].iter().any(|key| old.get(*key) != row.get(*key))
         });
         let change_instance = previous.as_ref().is_none_or(|seat| seat.desired != desired || changed_cohort);
         let instance = if change_instance { seat_store::random_instance()? } else {
@@ -109,8 +131,8 @@ pub(crate) fn publish(
         row[INSTANCE] = json!(instance);
         let endpoint = if phase == "ready" {
             Some(json!({"pane_id":row.get("pane_id"),"pane_pid":row.get("pane_pid"),
-                "session_name":context.get("session_name"),"tmux_endpoint":context.get("tmux_endpoint"),
-                "binding":instance}))
+                "session_name":context.get("session_name"),"tmux_endpoint":row.get("tmux_endpoint").or_else(|| context.get("tmux_endpoint")),
+                "binding":instance,"binding_provenance":"legacy_projection"}))
         } else { None };
         let mut extra = previous.as_ref().map(|seat| seat.extra.clone()).unwrap_or_default();
         extra.insert("legacy_context".into(), context.clone());
@@ -118,7 +140,7 @@ pub(crate) fn publish(
         let seat = SeatManifest {
             v: 1, kind: "seat_manifest".into(), requires: Vec::new(), scope: store.scope.clone(),
             instance_id: instance, generation: previous.as_ref().map_or(1, |seat|
-                seat.generation.saturating_add(u64::from(change_instance))),
+                seat.generation.saturating_add(u64::from(change_instance)).min(9_007_199_254_740_991)),
             desired: desired.into(), phase: phase.into(), launch: row.clone(), endpoint,
             last_operation_id: previous.as_ref().map(|seat| seat.last_operation_id.clone()).unwrap_or_default(),
             updated_at: now(), extra,

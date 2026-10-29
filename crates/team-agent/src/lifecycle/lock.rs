@@ -138,18 +138,21 @@ fn acquire_agent_lifecycle_lock_with_deadlines(
         return Ok(LifecycleLockGuard { _lock: None });
     };
     if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent)
+        crate::station::seat_store::private_dir(parent)
             .map_err(|e| LifecycleError::StatePersist(format!("create lifecycle lock dir: {e}")))?;
     }
     if let Some(lock) = crate::platform::entity_lock::EntityLock::current(&lock_path) {
+        check_seat_manifest(&request)?;
         return Ok(LifecycleLockGuard { _lock: Some(lock) });
     }
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).read(true).write(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let mut file = options.open(&lock_path)
         .map_err(|e| LifecycleError::StatePersist(format!("open lifecycle lock: {e}")))?;
     let started = Instant::now();
     let mut long_event_written = false;
@@ -160,6 +163,7 @@ fn acquire_agent_lifecycle_lock_with_deadlines(
                 write_lock_metadata(&mut file, &request, &lock_path)?;
                 let lock = crate::platform::entity_lock::EntityLock::acquired(&lock_path, file)
                     .map_err(|error| LifecycleError::StatePersist(error.to_string()))?;
+                check_seat_manifest(&request)?;
                 return Ok(LifecycleLockGuard { _lock: Some(lock) });
             }
             Ok(false) => {}
@@ -199,12 +203,22 @@ pub(crate) fn agent_lifecycle_lock_path(workspace: &Path) -> PathBuf {
     crate::model::paths::runtime_dir(workspace).join(format!("{AGENT_LIFECYCLE_LOCK_NAME}.lock"))
 }
 
+fn check_seat_manifest(request: &LifecycleLockRequest<'_>) -> Result<(), LifecycleError> {
+    if let Some(agent) = request.agent_id {
+        crate::station::projection::check_target(
+            request.workspace, request.team.unwrap_or("default"), agent.as_str(),
+        ).map_err(LifecycleError::StatePersist)?;
+    }
+    Ok(())
+
 fn seat_lifecycle_lock_path(request: &LifecycleLockRequest<'_>) -> Result<Option<PathBuf>, LifecycleError> {
     let Some(agent) = request.agent_id else { return Ok(None); };
     let team = request.team.unwrap_or("default");
     crate::station::seat_store::component(team).map_err(LifecycleError::StatePersist)?;
     crate::station::seat_store::component(agent.as_str()).map_err(LifecycleError::StatePersist)?;
-    Ok(Some(request.workspace.join(".team/station-v1").join(team)
+    let workspace = request.workspace.canonicalize()
+        .map_err(|error| LifecycleError::StatePersist(error.to_string()))?;
+    Ok(Some(workspace.join(".team/station-v1").join(team)
         .join("locks").join(format!("seat.{}.lock", agent.as_str()))))
 }
 
@@ -214,6 +228,8 @@ fn write_lock_metadata(
     lock_path: &Path,
 ) -> Result<(), LifecycleError> {
     let metadata = serde_json::json!({
+        "v": 1,
+        "kind": "seat_lock",
         "lock_name": AGENT_LIFECYCLE_LOCK_NAME,
         "pid": std::process::id(),
         "operation": request.operation,

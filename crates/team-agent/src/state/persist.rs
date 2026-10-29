@@ -1775,18 +1775,24 @@ fn migrate_team_key_to_match_active_team(state: &mut Value) -> bool {
     true
 }
 
+fn recover_runtime_projection(workspace: &Path) -> Result<Option<Value>, StateError> {
+    crate::station::projection::read_workspace(workspace)
+        .map_err(|message| StateError::Io(io::Error::other(message)))
+}
+
 fn decode_runtime_projection(workspace: &Path, text: &str) -> Result<Value, StateError> {
     match serde_json::from_str(text) {
         Ok(state) => Ok(state),
-        Err(error) => crate::station::projection::read_workspace(workspace)
-            .map_err(|message| StateError::Io(io::Error::other(message)))?
-            .ok_or(StateError::Json(error)),
+        Err(error) => recover_runtime_projection(workspace)?.ok_or(StateError::Json(error)),
     }
 }
 
 pub fn load_runtime_state(workspace: &Path) -> Result<Value, StateError> {
     let path = runtime_state_path(workspace);
     if !path.exists() {
+        if let Some(projected) = recover_runtime_projection(workspace)? {
+            return Ok(projected);
+        }
         if let Some(cached) = cache_get(&path) {
             return Ok(cached);
         }
@@ -1822,6 +1828,9 @@ pub fn load_runtime_state(workspace: &Path) -> Result<Value, StateError> {
 pub(crate) fn load_runtime_state_without_migrations(workspace: &Path) -> Result<Value, StateError> {
     let path = runtime_state_path(workspace);
     if !path.exists() {
+        if let Some(projected) = recover_runtime_projection(workspace)? {
+            return Ok(projected);
+        }
         return Ok(
             json!({"agents": {}, "tasks": [], "session_name": null, "active_team_key": null}),
         );

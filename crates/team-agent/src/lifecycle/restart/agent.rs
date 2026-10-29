@@ -1246,6 +1246,8 @@ pub(super) fn stop_agent_at_paths(
     mark_agent_stopped(&mut state, agent_id, agent, &window)?;
     state["agents"][agent_id.as_str()]["explicit_stop"] = serde_json::Value::Bool(true);
     let team_key = restart_projection_team_key(&state, team);
+    crate::station::projection::publish(workspace, &mut state, &team_key, &[agent_id.as_str()])
+        .map_err(LifecycleError::StatePersist)?;
     // golden operations.py:95: save_team_scoped_state (team projection) — NOT a raw save, so a
     // multi-team workspace keeps the other teams' persisted runtime state instead of being clobbered.
     crate::state::repository::StateRepository::new(workspace).save(
@@ -1736,6 +1738,8 @@ fn reset_agent_at_paths(
         obj.insert("explicit_stop".to_string(), serde_json::Value::Bool(false));
     }
     let team_key = restart_projection_team_key(&state, team);
+    crate::station::projection::publish(workspace, &mut state, &team_key, &[agent_id.as_str()])
+        .map_err(LifecycleError::StatePersist)?;
     sync_restart_team_projections(&mut state, &team_key);
     // golden operations.py (reset): save_team_scoped_state on the team projection — same multi-team
     // preservation as stop, not a raw save_runtime_state.

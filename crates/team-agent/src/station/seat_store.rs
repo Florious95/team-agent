@@ -107,6 +107,8 @@ impl SeatStore {
 }
 
 impl SeatLock {
+    pub(crate) fn scope(&self) -> &SeatScope { &self.store.scope }
+
     pub fn read(&self) -> Result<Option<SeatManifest>, String> {
         self.store.read()
     }
@@ -115,6 +117,12 @@ impl SeatLock {
         if manifest.scope != self.store.scope {
             return Err("seat_scope_mismatch".into());
         }
+        let reserved = ["v", "kind", "requires", "scope", "instance_id", "generation", "desired",
+            "phase", "launch", "endpoint", "last_operation_id", "updated_at"];
+        if manifest.extra.keys().any(|key| reserved.contains(&key.as_str())) {
+            return Err("reserved_manifest_field_in_extra".into());
+        }
+        super::lifecycle::validate_manifest(manifest)?;
         let value = serde_json::to_value(manifest).map_err(|e| e.to_string())?;
         codec::authorize_mutation(&value, &[])?;
         write_json(&self.store.path(), &value, MAX_MANIFEST_BYTES)
@@ -125,8 +133,49 @@ impl SeatLock {
     }
 
     pub fn publish_operation(&self, id: &str, value: &Value) -> Result<(), String> {
-        codec::authorize_mutation(value, &[])?;
+        codec::authorize_mutation(value, super::lifecycle::OPERATION_CAPABILITIES)?;
         write_json(&self.operation_path(id)?, value, MAX_MANIFEST_BYTES * 3)
+    }
+
+    /// Retain the last 16 operations, pinning interrupted work. Unknown/corrupt
+    /// records are never guessed at or deleted to satisfy a storage budget.
+    pub(crate) fn prune_operations(&self) -> Result<(), String> {
+        let directory = self.store.root.join("operations").join(&self.store.scope.seat);
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.to_string()),
+        };
+        let expected_scope = serde_json::to_value(&self.store.scope).map_err(|e| e.to_string())?;
+        let pinned = self.read()?.map(|seat| seat.last_operation_id);
+        let mut closed = Vec::new();
+        let mut interrupted = 0usize;
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") { continue; }
+            let Ok(Some(value)) = read_json(&path, MAX_MANIFEST_BYTES * 3) else { continue; };
+            if value.get("kind").and_then(Value::as_str) != Some("seat_operation")
+                || value.pointer("/request/operation_id").and_then(Value::as_str) != path.file_stem().and_then(|s| s.to_str())
+                || value.pointer("/after/scope") != Some(&expected_scope)
+                || codec::authorize_mutation(&value, super::lifecycle::OPERATION_CAPABILITIES).is_err()
+            { continue; }
+            if !matches!(value.get("phase").and_then(Value::as_str), Some("completed" | "cancelled")) {
+                interrupted += 1;
+                continue;
+            }
+            let generation = value.pointer("/after/generation").and_then(Value::as_u64).unwrap_or(0);
+            let modified = entry.metadata().and_then(|metadata| metadata.modified()).map_err(|e| e.to_string())?;
+            let is_pinned = path.file_stem().and_then(|s| s.to_str()) == pinned.as_deref();
+            closed.push((is_pinned, generation, modified, path));
+        }
+        closed.sort();
+        let count = closed.len().saturating_sub(16usize.saturating_sub(interrupted));
+        for (pinned, _, _, path) in closed.into_iter().take(count) {
+            if !pinned { fs::remove_file(path).map_err(|e| e.to_string())?; }
+        }
+        if count > 0 { sync_directory(&directory)?; }
+        Ok(())
     }
 
     fn operation_path(&self, id: &str) -> Result<PathBuf, String> {
@@ -144,7 +193,7 @@ pub(crate) fn component(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn private_dir(path: &Path) -> Result<(), String> {
+pub(crate) fn private_dir(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
         Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => return Ok(()),
         Ok(_) => return Err(format!("unsafe_directory: {}", path.display())),
@@ -183,7 +232,7 @@ fn open_file(path: &Path, exclusive: bool) -> Result<File, String> {
     options.open(path).map_err(|e| e.to_string())
 }
 
-fn read_json(path: &Path, limit: u64) -> Result<Option<Value>, String> {
+pub(super) fn read_json(path: &Path, limit: u64) -> Result<Option<Value>, String> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
