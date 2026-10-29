@@ -11,7 +11,7 @@ impl Drop for Fixture {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
-fn check_late_modal(mode: &str, expected_pastes: usize) {
+fn check_guard(mode: &str, expected_pastes: usize) {
     let root = std::env::temp_dir().join(format!(
         "station-surface-{}-{}-{}",
         std::process::id(),
@@ -38,7 +38,9 @@ if action == 'display-message':
     # This is a synthetic transport identity, not native-process evidence.
     print('0|1|2|' + str(root / 'tmux.sock'))
 elif action == 'capture-pane':
-    if (root / 'blocked').exists():
+    if mode == 'named-draft':
+        print('── w-claude ──\n❯ HUMAN-DRAFT-A\n' + '─' * 40)
+    elif (root / 'blocked').exists():
         print(os.environ['STATION_SURFACE_MODAL'])
     else:
         print('─' * 40 + '\n❯\u00a0\n' + '─' * 40)
@@ -56,8 +58,15 @@ elif action == 'paste-buffer':
             .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
     )
     .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_team-agent"))
-        .args([
+    let mut command = Command::new(env!("CARGO_BIN_EXE_team-agent"));
+    if mode == "named-draft" {
+        fs::create_dir_all(fixture.0.join(".team/runtime")).unwrap();
+        fs::write(fixture.0.join(".team/runtime/state.json"), serde_json::to_vec(&serde_json::json!({
+            "team_key":"alpha", "agents":{"worker":{"provider":"claude","pane_id":"%7","native_endpoint":"synthetic-surface"}}
+        })).unwrap()).unwrap();
+        command.args(["send", "worker", "hello", "--team", "alpha", "--json"]);
+    } else {
+        command.args([
             "send",
             "--socket",
             "synthetic-surface",
@@ -66,7 +75,9 @@ elif action == 'paste-buffer':
             "--dialect",
             "enter",
             "hello",
-        ])
+        ]);
+    }
+    command
         .current_dir(&fixture.0)
         .env("PATH", path)
         .env_remove("TEAM_AGENT_ID")
@@ -77,17 +88,41 @@ elif action == 'paste-buffer':
         .env("STATION_SURFACE_ROOT", &fixture.0)
         .env("STATION_SURFACE_MODE", mode)
         .env("STATION_SURFACE_MODAL", TRUST)
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let started = std::time::Instant::now();
+    let mut child = command.spawn().unwrap();
+    while child.try_wait().unwrap().is_none() {
+        if started.elapsed() > std::time::Duration::from_secs(75) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("surface guard exceeded 75s");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let output = child.wait_with_output().unwrap();
     let diagnostic = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(diagnostic.contains("non_composer"), "{diagnostic}");
-    if expected_pastes > 0 {
-        assert!(diagnostic.contains("uncertain"), "{diagnostic}");
+    if mode == "named-draft" {
+        assert!(output.status.success(), "{diagnostic}");
+        assert!((55.0..75.0).contains(&started.elapsed().as_secs_f64()));
+        let receipt: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(receipt["status"], "stored");
+        assert!(receipt["delivery_error"]
+            .as_str()
+            .unwrap()
+            .contains("composer_contention_timeout"));
+        let inbox = team_agent::inbox_store::read(&fixture.0, "worker", 10, Some("alpha")).unwrap();
+        assert_eq!(inbox["messages"][0]["content"], "hello");
+    } else {
+        assert!(!output.status.success());
+        assert!(diagnostic.contains("non_composer"), "{diagnostic}");
+        if expected_pastes > 0 {
+            assert!(diagnostic.contains("uncertain"), "{diagnostic}");
+        }
     }
     let actions: Vec<String> = fs::read_to_string(fixture.0.join("trace.jsonl"))
         .unwrap()
@@ -103,7 +138,9 @@ elif action == 'paste-buffer':
         "{actions:?}"
     );
     assert!(!actions.iter().any(|s| s == "send-keys"), "{actions:?}");
-    if expected_pastes == 0 {
+    if mode == "named-draft" {
+        assert!(!actions.iter().any(|s| s == "load-buffer"), "{actions:?}");
+    } else if expected_pastes == 0 {
         assert!(actions.iter().any(|s| s == "delete-buffer"), "{actions:?}");
     }
 }
@@ -138,10 +175,54 @@ fn trust_dialog_is_not_confused_with_quoted_text_or_a_stale_composer() {
 }
 
 #[test]
+fn named_composer_borders_preserve_native_and_normalized_draft_detection() {
+    use team_agent_contract::{
+        contract::delivery::InputSurface,
+        providers::claude::interaction::{inspect_legacy_composer, surface},
+    };
+    let bottom = "─".repeat(40);
+    for top in [
+        "─ w-claude ─",
+        "── w-claude ──",
+        "─── w-claude ───────────────────────────────────────",
+    ] {
+        let empty = format!("{top}\n❯\n{bottom}");
+        assert_eq!(
+            inspect_legacy_composer(&empty),
+            Some((InputSurface::ComposerReady, String::new()))
+        );
+        assert_eq!(surface(&empty), InputSurface::ComposerReady);
+        for space in [" ", "\u{00a0}"] {
+            let text = format!("{top}\n❯{space}HUMAN-DRAFT-A\n{bottom}");
+            assert_eq!(
+                inspect_legacy_composer(&text),
+                Some((InputSurface::ComposerContainsPaste, "HUMAN-DRAFT-A".into())),
+                "{text}"
+            );
+            if space == "\u{00a0}" {
+                assert_eq!(surface(&text), InputSurface::ComposerContainsPaste);
+            }
+        }
+    }
+    for top in ["  ── w-claude ──", "──w-claude──", "── w-claude", "── ──"]
+    {
+        assert!(
+            inspect_legacy_composer(&format!("{top}\n❯ HUMAN-DRAFT-A\n{bottom}")).is_none(),
+            "{top}"
+        );
+    }
+}
+
+#[test]
 fn modal_appearing_after_staging_gets_no_paste_or_enter_even_with_raw_dialect_override() {
-    check_late_modal("before-paste", 0);
+    check_guard("before-paste", 0);
 }
 #[test]
 fn modal_appearing_after_paste_withholds_enter_and_reports_uncertainty() {
-    check_late_modal("before-enter", 1);
+    check_guard("before-enter", 1);
+}
+
+#[test]
+fn named_draft_is_held_for_60_seconds_without_input_and_message_stays_durable() {
+    check_guard("named-draft", 0);
 }
