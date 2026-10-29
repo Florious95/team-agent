@@ -93,6 +93,32 @@ with (root / f'received-{name}').open('ab', buffering=0) as out:
             out.write(data)
 "#;
 
+/// Claude Code 2.1.3xx folder-trust modal, copied from a live capture (2026-10-29). Focus is on
+/// `No, exit`. Like the real CLI, an Enter here exits the process, so the pane dies.
+const CLAUDE_TRUST_FAKE: &str = r#"import os, sys, tty, select
+from pathlib import Path
+name, root = sys.argv[1], Path(sys.argv[2])
+tty.setraw(0)
+rule = '─' * 100
+lines = [rule, ' Accessing workspace:', ' ' + str(root), '',
+ ' Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source',
+ ' project, or work from your team). If not, take a moment to review what\'s in this folder first.', '',
+ " Claude Code'll be able to read, edit, and execute files here.", '', ' Security guide', '',
+ ' ❯ No, exit', '   Yes, I trust this folder', '', ' Enter to confirm · Esc to cancel']
+os.write(1, b'\x1b[?2004h\x1b[2J\x1b[H' + '\r\n'.join(lines).encode())
+with (root / f'received-{name}').open('ab', buffering=0) as out:
+    (root / f'ready-{name}').touch()
+    while True:
+        readable, _, _ = select.select([0], [], [], 0.05)
+        if readable:
+            data = os.read(0, 65536)
+            if not data:
+                break
+            out.write(data)
+            if b'\r' in data or b'\n' in data:
+                sys.exit(0)  # "No, exit" confirmed
+"#;
+
 impl Station {
     fn new(label: &str) -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -105,6 +131,7 @@ impl Station {
         fs::create_dir_all(root.join(".team/runtime")).unwrap();
         fs::write(root.join("receiver.py"), RECEIVER).unwrap();
         fs::write(root.join("claude_fake.py"), CLAUDE_FAKE).unwrap();
+        fs::write(root.join("claude_trust_fake.py"), CLAUDE_TRUST_FAKE).unwrap();
         let socket = root.join("tmux.sock").to_string_lossy().into_owned();
         Self { root, socket, started: false }
     }
@@ -886,6 +913,46 @@ fn red_m1_r12_report_result_is_attributed_to_the_last_submitted_task() {
     let mut task_ids = Vec::new();
     find_string_field(&hits[0], "task_id", &mut task_ids);
     assert!(task_ids.contains(&"T-42"), "result must carry task T-42, found {task_ids:?}");
+}
+
+// ───────────────────── R-17 startup modal (field defect 2026-10-29) ─────────────────────
+
+/// Field defect from the Stage 1 Haiku runs: a Claude worker in a fresh sandbox folder sits on the
+/// folder-trust modal (`❯ No, exit` focused). The direct actuator pasted and pressed Enter, which
+/// confirmed `No, exit` and killed the worker. A startup modal is not a composer: zero keys, the
+/// message stays durable, and the receipt is not `sent`. The pane must still be alive afterwards.
+#[test]
+fn red_m1_r17_claude_trust_modal_receives_zero_keys_and_keeps_the_worker_alive() {
+    let mut s = Station::new("r17");
+    let modal = s.spawn("claude-trust", "claude_trust_fake.py");
+    std::thread::sleep(Duration::from_millis(300));
+    let leader = s.receiver("leader");
+    s.write_state(&snapshot(
+        &s,
+        &[("alpha", team(&s, "alpha", Some(&leader), &[("trusting", Some(&modal), "claude")]))],
+    ));
+    let output = s.cli(&["send", "trusting", "must not confirm the modal", "--team", "alpha"], &[]);
+    s.assert_quiet("claude-trust", "a startup modal is not a composer");
+    let alive = s
+        .tmux()
+        .args(["display-message", "-p", "-t", &modal.id, "#{pane_dead}"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&alive.stdout).trim(),
+        "0",
+        "the worker must still be alive after the send attempt"
+    );
+    assert_ne!(
+        stdout_json(&output)["status"], "sent",
+        "the receipt must not claim delivery: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(
+        inbox_hits(&s.inbox("trusting", "alpha"), "must not confirm the modal").len(),
+        1,
+        "the message must stay durable for later delivery"
+    );
 }
 
 // ───────────────────── R-13..15 excision ratchets (M1.7) ─────────────────────
