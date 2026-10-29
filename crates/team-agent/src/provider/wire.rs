@@ -25,8 +25,8 @@
 use crate::model::enums::Provider;
 
 /// A state row written by a release that still ran a legacy worker engine:
-/// Cursor's `cursor_agent`/`agent`, Codex's `codex`/`codex_cli` or Grok's
-/// `grok`. No legacy worker runtime exists for it now; it must never fall back
+/// Cursor's `cursor_agent`/`agent` or Codex's `codex`/`codex_cli`.
+/// No legacy worker runtime exists for it now; it must never fall back
 /// to another provider. Role and CLI declarations of these names select the
 /// contract leaf, whose state row carries the leaf id instead. A leader is not
 /// an `agents` row, so its own provider key is unaffected. Claude Code
@@ -35,13 +35,11 @@ pub(crate) const RETIRED_PROVIDER_ERROR: &str =
     "legacy cursor_agent seat has no runtime in this release; stop or remove it, then add it again (provider: cursor)";
 const RETIRED_CODEX_ERROR: &str =
     "legacy codex seat has no runtime in this release; stop or remove it, then add it again (provider: codex)";
-const RETIRED_GROK_ERROR: &str =
-    "legacy grok seat has no runtime in this release; stop or remove it, then add it again (provider: grok)";
 
 pub(crate) fn is_retired_provider(raw: &str) -> bool {
     matches!(
         raw.trim().to_ascii_lowercase().as_str(),
-        "cursor_agent" | "agent" | "codex" | "codex_cli" | "codex-cli" | "grok"
+        "cursor_agent" | "agent" | "codex" | "codex_cli" | "codex-cli"
     )
 }
 
@@ -49,7 +47,6 @@ pub(crate) fn is_retired_provider(raw: &str) -> bool {
 pub(crate) fn retired_provider_error(raw: &str) -> &'static str {
     match raw.trim().to_ascii_lowercase().as_str() {
         "codex" | "codex_cli" | "codex-cli" => RETIRED_CODEX_ERROR,
-        "grok" => RETIRED_GROK_ERROR,
         _ => RETIRED_PROVIDER_ERROR,
     }
 }
@@ -357,13 +354,14 @@ mod tests {
         assert_eq!(require_active_state_providers(&state, Some("retired")), Err(RETIRED_PROVIDER_ERROR));
         assert_eq!(require_active_state_providers(&state, Some("legacy_codex")), Err(RETIRED_CODEX_ERROR));
         assert_eq!(require_active_state_providers(&state, Some("legacy_codex_cli")), Err(RETIRED_CODEX_ERROR));
-        assert_eq!(require_active_state_providers(&state, Some("legacy_grok")), Err(RETIRED_GROK_ERROR));
+        assert!(require_active_state_providers(&state, Some("legacy_grok")).is_ok());
+        assert!(!is_retired_provider("grok"));
         assert!(require_active_state_providers(&state, None).is_err());
         for retired in ["cursor_agent", "agent"] {
             assert_eq!(parse_provider(retired), None, "no legacy engine to parse into");
         }
         // The leader keys still parse: a leader is never an `agents` row.
-        for leader in ["codex", "grok"] {
+        for leader in ["codex"] {
             assert!(is_retired_provider(leader), "{leader}");
             assert!(parse_provider(leader).is_some(), "{leader}");
         }

@@ -66,7 +66,7 @@ fn session_evidence(text: String) -> ScopedSessionEvidence {
 fn all_facets_and_hooks_disclose_owned_server_coexistence_without_legacy_migration() {
     let a = adapter(); let hooks = a.hooks();
     assert_eq!(GROK_BUILD_DESCRIPTOR.identity.id, "grok_build");
-    assert!(GROK_BUILD_DESCRIPTOR.identity.aliases.is_empty());
+    assert_eq!(GROK_BUILD_DESCRIPTOR.identity.aliases, &["grok"]);
     for operation in [Operation::Catalog, Operation::Fresh, Operation::Resume, Operation::FirstBusiness, Operation::Stop] {
         validate_descriptor(&GROK_BUILD_DESCRIPTOR, &hooks, operation).unwrap();
     }
@@ -477,6 +477,12 @@ fn runtime_catalog_and_launch_identity_fence_exact_native_without_release_pins()
     let r = resolved.request().clone();
     assert_eq!(plan.materialization[1].contents, r.prompt.as_ref().unwrap().as_bytes());
     let catalog = CatalogObservation { provider: ProviderId::new("grok_build").unwrap(), native: runtime.native.clone(), schema: CATALOG_SOURCE.schema.into(), models: parse_catalog(CATALOG.as_bytes()).unwrap() };
+    for bypass in [false, true] {
+        let mut request = r.clone(); request.bypass = bypass;
+        let resolved = resolve_launch(&GROK_BUILD_DESCRIPTOR, &a.hooks(), &request, Some(&catalog)).unwrap();
+        let plan = a.plan(&resolved).unwrap();
+        assert_eq!(plan.arguments.iter().any(|arg| arg == "--always-approve"), bypass);
+    }
     let mut descriptor = GROK_BUILD_DESCRIPTOR.clone(); descriptor.tool_names.naming = Support::Supported(ToolNaming::StaticServer { key: "team" });
     assert!(resolve_launch(&descriptor, &a.hooks(), &r, Some(&catalog)).is_err());
     descriptor = GROK_BUILD_DESCRIPTOR.clone(); descriptor.workspace.shared_cwd = true;

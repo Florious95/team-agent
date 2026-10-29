@@ -567,10 +567,74 @@ fn stopped_text_without_physical_identity_is_unknown_and_standalone_source_keeps
 }
 
 #[test]
+#[cfg(unix)]
+#[serial_test::serial(env)]
+fn shell_supervised_claude_is_live_for_both_team_start_spellings() {
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+    let (root, _) = fixture(&["one"]);
+    std::fs::write(root.path().join("agents/one.md"),
+        "---\nprovider: claude\nmodel: claude-opus-4.6\n---\nFixture\n").unwrap();
+    install(root.path(), &[("one", "running", false)]);
+    let sleep = Command::new("which").arg("sleep").output().unwrap();
+    assert!(sleep.status.success());
+    std::os::unix::fs::symlink(String::from_utf8(sleep.stdout).unwrap().trim(), root.path().join("claude")).unwrap();
+    let socket = root.path().join("t.sock");
+    struct Server(std::path::PathBuf);
+    impl Drop for Server {
+        fn drop(&mut self) { let _ = Command::new("tmux").arg("-S").arg(&self.0).arg("kill-server").output(); }
+    }
+    let _server = Server(socket.clone());
+    let output = Command::new("tmux").arg("-S").arg(&socket)
+        .args(["new-session", "-d", "-P", "-F", "#{pane_id} #{pane_pid}", "-s", "team-fixture", "-n", "one"])
+        .arg(format!("sh -c '{} 60 & wait'", root.path().join("claude").display()))
+        .output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let pane = String::from_utf8(output.stdout).unwrap();
+    let fields: Vec<_> = pane.split_whitespace().collect();
+    let pid: u32 = fields[1].parse().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !launched_as_provider(pid, crate::provider::Provider::Claude) {
+        assert!(Instant::now() < deadline, "controlled Claude child did not start");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let state = crate::state::persist::runtime_state_path(root.path());
+    let mut raw: Value = serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+    raw["tmux_socket"] = json!(socket);
+    raw["teams"]["fixture"]["tmux_socket"] = json!(socket);
+    raw["teams"]["fixture"]["generation"] = json!("fixture-generation");
+    raw["teams"]["fixture"]["agents"]["one"] = json!({
+        "provider":"claude", "status":"running", "pane_id":fields[0], "pane_pid":pid, "window":"one"
+    });
+    std::fs::write(&state, serde_json::to_vec(&raw).unwrap()).unwrap();
+    let before = std::fs::read(&state).unwrap();
+    let selected = resolve_active_team_readonly(root.path(), Some("fixture"), SelectorMode::RuntimeOnly).unwrap();
+    let backend = crate::lifecycle::restart::lifecycle_worker_tmux_backend_selection_for_state(
+        &selected.run_workspace, &selected.state).unwrap().backend;
+    backend.set_session_owner_with_generation(&crate::transport::SessionName::new("team-fixture"),
+        &selected.run_workspace, "fixture", "fixture-generation").unwrap();
+    let row = &selected.state["agents"]["one"];
+    assert_eq!(observe(&selected, "one", row).unwrap(), Observation::Live);
+    for (command, values) in [
+        ("team", vec!["start".into(), root.path().to_string_lossy().into_owned(), "--dry-run".into(), "--json".into()]),
+        ("start", vec!["--team".into(), "fixture".into(), "--dry-run".into(), "--json".into()]),
+    ] {
+        let output = super::super::run(command, &values, root.path()).unwrap().unwrap();
+        let CmdOutput::Json(value) = output.output else { panic!() };
+        assert_eq!(value["ok"], true, "{value}");
+        assert!(value["skipped"].as_array().unwrap().iter().any(|row| row["reason"] == "already_running"), "{value}");
+    }
+    let mut wrong = row.clone();
+    wrong["provider"] = json!("copilot");
+    assert_eq!(observe(&selected, "one", &wrong).unwrap(), Observation::Unknown);
+    assert_eq!(std::fs::read(state).unwrap(), before);
+}
+
+#[test]
 fn declared_provider_aliases_do_not_create_false_drift_or_absorb_native_routes() {
     assert!(same_provider("claude-code", "claude_code"));
     assert!(!same_provider("cursor", "cursor_agent"));
-    assert!(!same_provider("grok_build", "grok"));
+    assert!(same_provider("grok_build", "grok"));
 }
 
 #[test]

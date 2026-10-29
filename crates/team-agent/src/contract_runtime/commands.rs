@@ -118,7 +118,7 @@ pub fn start_agent(
         let config = config::read_team_with_role_override(&args, &source, &next).map_err(error)?.ok_or(BackendError::Metadata).map_err(error)?;
         let role = config.roles.iter().find(|role| &role.id == id).ok_or(BackendError::Metadata).map_err(error)?;
         let row = selected.state.get("agents").and_then(|agents| agents.get(agent)).ok_or(BackendError::Metadata).map_err(error)?;
-        if row.get("provider").and_then(Value::as_str) != Some(role.provider.as_str()) {
+        if !registry::same_provider(row.get("provider").and_then(Value::as_str).unwrap_or(""), role.provider.as_str()) {
             return Err(error("provider change requires a new seat identity"));
         }
         if role.paused {
@@ -463,7 +463,7 @@ pub fn reset_agent(
             .map_err(error)?.ok_or_else(|| error("contract role no longer configured"))?;
         let role = config.roles.iter().find(|role| &role.id == id)
             .ok_or_else(|| error("contract role no longer configured"))?;
-        if row.get("provider").and_then(Value::as_str) != Some(role.provider.as_str()) {
+        if !registry::same_provider(row.get("provider").and_then(Value::as_str).unwrap_or(""), role.provider.as_str()) {
             return Err(error("provider change requires a new seat identity"));
         }
         if role.paused {

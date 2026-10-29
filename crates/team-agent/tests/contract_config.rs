@@ -296,7 +296,7 @@ fn pre_upgrade_cursor_agent_row_admits_only_teardown_and_never_blocks_siblings()
 }
 
 #[test]
-fn pre_upgrade_codex_and_grok_rows_admit_only_teardown_and_never_block_siblings() {
+fn pre_upgrade_codex_rows_admit_only_teardown_and_never_block_siblings() {
     use team_agent::contract_runtime::framework::{is_contract, require_legacy_lifecycle};
     use team_agent::state::{persist, selector};
     let (_sandbox, args) = fixture();
@@ -304,7 +304,6 @@ fn pre_upgrade_codex_and_grok_rows_admit_only_teardown_and_never_block_siblings(
         "---\nprovider: copilot\nmodel: gpt-6-luna\n---\nWorker.\n").unwrap();
     for (retired, public) in [
         ("codex", "codex"), ("codex_cli", "codex"), ("codex-cli", "codex"), ("Codex", "codex"),
-        ("grok", "grok"), ("Grok", "grok"),
     ] {
         // The role file now declares the contract leaf; the recorded row is legacy.
         role(&args, "retired", public);
@@ -404,6 +403,30 @@ fn codex_role(args: &QuickStartArgs, name: &str, extra: &str) {
 }
 
 #[test]
+fn grok_alias_and_native_subscription_preserve_safe_defaults_and_bypass() {
+    use team_agent::contract_runtime::{framework, registry};
+    let (_sandbox, args) = fixture();
+    for name in ["grok", "grok_build"] {
+        assert_eq!(registry::descriptor(name).unwrap().identity.id, "grok_build");
+        assert!(framework::is_contract(&serde_json::json!({"provider":name})));
+        for bypass in [false, true] {
+            std::fs::write(args.agents_dir.join("agents/worker.md"), format!(
+                "---\nprovider: {name}\nmodel: grok-4.7\nauth_mode: subscription\ndangerously_skip_permissions: {bypass}\n---\nRole body\n"
+            )).unwrap();
+            let config = read_team(&args).unwrap().unwrap();
+            assert_eq!(config.roles[0].provider.as_str(), "grok_build");
+            assert_eq!(config.roles[0].bypass, bypass);
+        }
+        for auth in ["auth_mode: compatible_api", "auth_mode: api", "profile: inherited"] {
+            std::fs::write(args.agents_dir.join("agents/worker.md"), format!(
+                "---\nprovider: {name}\nmodel: grok-4.7\n{auth}\n---\nRole body\n"
+            )).unwrap();
+            assert!(read_team(&args).is_err(), "{name}: {auth}");
+        }
+    }
+}
+
+#[test]
 fn every_codex_and_grok_name_selects_the_contract_leaf_without_opt_in() {
     use team_agent::model::yaml::Value;
     let (_sandbox, args) = fixture();
@@ -444,10 +467,10 @@ fn every_codex_and_grok_name_selects_the_contract_leaf_without_opt_in() {
         assert!(team_agent::contract_runtime::framework::require_legacy_role(None, Some(provider)).is_err(), "{provider}");
     }
     // A persisted pre-upgrade row keeps its key and is never reclassified.
-    for provider in ["codex", "codex_cli", "codex-cli", "grok"] {
+    for provider in ["codex", "codex_cli", "codex-cli"] {
         assert!(!team_agent::contract_runtime::framework::is_contract(&serde_json::json!({"provider":provider})), "{provider}");
     }
-    for provider in ["codex_tui", "grok_build"] {
+    for provider in ["codex_tui", "grok_build", "grok"] {
         assert!(team_agent::contract_runtime::framework::is_contract(&serde_json::json!({"provider":provider})), "{provider}");
     }
     assert!(!args.workspace.join(".team").exists());

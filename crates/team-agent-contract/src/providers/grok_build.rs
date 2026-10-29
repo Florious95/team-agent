@@ -1,5 +1,4 @@
-//! Grok Build contract leaf. Legacy `grok` remains a separate provider/state
-//! family. Measured recipes do not themselves constitute Team G1–G5 acceptance.
+//! Grok Build contract leaf, also selected by the public `grok` runtime alias. Measured recipes do not themselves constitute Team G1–G5 acceptance.
 pub mod interaction;
 pub mod native;
 use std::{collections::{BTreeMap, BTreeSet}, ffi::OsString, path::{Path, PathBuf}};
@@ -8,7 +7,7 @@ use crate::contract::{descriptor::*, fork::*, hooks::*, plan::*, types::*};
 pub const UNVERIFIED: Reason = Reason { code: "grok-build-native-admission-missing", message: "This Grok capability lacks scoped native evidence; no legacy or other-provider fallback is allowed" };
 const EFFORT: Reason = Reason { code: "grok-build-effort-not-native", message: "Native Grok accepts low, medium, high, xhigh; never clamp or silently drop effort" };
 pub static GROK_BUILD_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
-    identity: IdentityFacet { id: "grok_build", display_name: "Grok Build (contract)", binary: "grok", aliases: &[], leader: Support::Unverified(UNVERIFIED) },
+    identity: IdentityFacet { id: "grok_build", display_name: "Grok Build (contract)", binary: "grok", aliases: &["grok"], leader: Support::Unverified(UNVERIFIED) },
     model: ModelFacet { selection: Support::Supported(ModelSelection::ExactCatalogId), omitted: OmittedModel::Reject, catalog: Support::Supported(native::CATALOG_SOURCE) },
     effort: EffortFacet { admission: [EffortAdmission::Pass, EffortAdmission::Pass, EffortAdmission::Pass, EffortAdmission::Pass, EffortAdmission::Reject(EFFORT), EffortAdmission::Reject(EFFORT)], carrier: Support::Supported(ValueCarrier::Flag("--effort")), inherit_team_default: false, model_dependent: false },
     auth: AuthFacet { subscription: Support::Supported(AuthMechanism::NativeExistingSession), official_api: Support::Unverified(UNVERIFIED), compatible_api: Support::Unverified(UNVERIFIED) },

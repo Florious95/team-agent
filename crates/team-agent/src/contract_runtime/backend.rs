@@ -626,7 +626,7 @@ pub(crate) fn start_needs_reconciliation(workspace: &Path, team: &str, seat: &Se
     require_candidate(&backend.binding)?;
     let class = existing_start(&backend, seat)?;
     let current = backend.store.seat(seat)?;
-    if current.as_ref().is_some_and(|seat| row.get("provider").and_then(serde_json::Value::as_str) != Some(seat.provider.as_str())) {
+    if current.as_ref().is_some_and(|seat| !registry::same_provider(row.get("provider").and_then(serde_json::Value::as_str).unwrap_or(""), seat.provider.as_str())) {
         return Err(Error::Fence.into());
     }
     let matches = |identity: &InstanceIdentity| {

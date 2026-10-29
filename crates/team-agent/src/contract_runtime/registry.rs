@@ -22,16 +22,16 @@ use team_agent_contract::runtime::{
 
 const DESCRIPTORS: &[&ProviderDescriptor] = &[&KIRO_DESCRIPTOR, &CURSOR_DESCRIPTOR, &GROK_BUILD_DESCRIPTOR, &CODEX_DESCRIPTOR, &PI_DESCRIPTOR, &CLAUDE_DESCRIPTOR];
 /// Declaration names that select a leaf: Cursor's legacy key, its npm
-/// package/public command and its binary; the public names of Codex and Grok
-/// Build. The leaf's distinct id is what compiled specs and state carry. A
-/// persisted legacy state row keeps its key and is never reclassified
-/// ([`descriptor`] does not match it). Leaders are not leaves: `team-agent
+/// package/public command and its binary; the public names of Codex.
+/// Grok is a runtime alias of grok_build. Compiled specs and new state carry
+/// canonical ids. Persisted legacy Cursor/Codex rows keep their keys and are
+/// never reclassified ([`descriptor`] does not match them). Leaders are not
+/// leaves: `team-agent
 /// codex|grok` keep their own launchers. Claude Code and Pi names keep their
 /// legacy runtimes and select no leaf.
 const TRANSITION: &[(&str, &ProviderDescriptor)] = &[
     ("cursor_agent", &CURSOR_DESCRIPTOR), ("cursor-agent", &CURSOR_DESCRIPTOR), ("agent", &CURSOR_DESCRIPTOR),
     ("codex", &CODEX_DESCRIPTOR), ("codex_cli", &CODEX_DESCRIPTOR), ("codex-cli", &CODEX_DESCRIPTOR),
-    ("grok", &GROK_BUILD_DESCRIPTOR),
 ];
 
 /// One provider's public command route: the PATH-selected entry the pane execs
@@ -341,6 +341,12 @@ pub fn descriptor(key: &str) -> Option<&'static ProviderDescriptor> {
     })
 }
 
+/// Compare exact runtime aliases without adopting declaration-only transitions.
+pub fn same_provider(left: &str, right: &str) -> bool {
+    left == right || descriptor(left).zip(descriptor(right))
+        .is_some_and(|(left, right)| left.identity.id == right.identity.id)
+}
+
 /// The leaf a role document or CLI value selects: a canonical contract key or
 /// a transition name (Cursor, Codex, Grok Build). No flag is needed;
 /// `contract_runtime: true` is accepted but selects nothing extra.
@@ -414,7 +420,7 @@ mod tests {
         assert_eq!(provider("grok_build").unwrap(), NativeProvider::GrokBuild);
         assert!(recognizes(" Grok_Build "));
         assert!(descriptor("Grok_Build").is_none());
-        assert!(GROK_BUILD_DESCRIPTOR.identity.aliases.is_empty());
+        assert_eq!(GROK_BUILD_DESCRIPTOR.identity.aliases, &["grok"]);
         assert!(recognizes(" Cursor "));
         assert!(descriptor("Cursor").is_none());
         for descriptor in descriptors() {
@@ -505,12 +511,15 @@ mod tests {
     #[test]
     fn grok_server_key_is_generation_bound_and_has_no_inspector_fallback() {
         use team_agent_contract::contract::types::{Generation, InstanceId, ScopeId, SeatId};
-        // The public `grok` name declares the leaf; a legacy `grok` row is never reclassified.
+        // The public command is also an exact runtime alias, including persisted rows.
         assert_eq!(declared("grok"), Some(&GROK_BUILD_DESCRIPTOR));
         assert!(recognizes(" Grok "));
         assert!(declared("Grok").is_none());
-        assert!(descriptor("grok").is_none());
-        assert!(provider("grok").is_err());
+        assert_eq!(descriptor("grok"), Some(&GROK_BUILD_DESCRIPTOR));
+        assert_eq!(provider("grok").unwrap(), NativeProvider::GrokBuild);
+        assert!(same_provider("grok", "grok_build"));
+        assert!(same_provider("grok_build", "grok"));
+        assert!(!same_provider("Grok", "grok_build"));
         assert_eq!(public_name(&GROK_BUILD_DESCRIPTOR), "grok");
         let mut identity = InstanceIdentity {
             scope: ScopeId::new("scope").unwrap(), seat: SeatId::new("worker").unwrap(),

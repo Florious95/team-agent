@@ -171,7 +171,7 @@ fn same_provider(left: &str, right: &str) -> bool {
         crate::provider::wire::parse_provider(right),
     ) {
         (Some(left), Some(right)) => left == right,
-        _ => left == right,
+        _ => crate::contract_runtime::registry::same_provider(left, right),
     }
 }
 fn drift(row: &Value, compiled: &Value) -> bool {
@@ -338,7 +338,7 @@ fn observe(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation
         ))?;
         let seat = checked(backend.store.seat(&checked(SeatId::new(id))?))?
             .ok_or_else(|| refusal("missing canonical native seat"))?;
-        if provider(row) != seat.provider.as_str()
+        if !same_provider(provider(row), seat.provider.as_str())
             || row.get("contract_scope").and_then(Value::as_str)
                 != Some(seat.identity.scope.as_str())
             || row.get("contract_instance").and_then(Value::as_str)
@@ -425,7 +425,9 @@ fn observe(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation
     let command = matches[0].current_command.as_deref().unwrap_or("");
     let positive_command = command == crate::provider::wire::command_name(native)
         || crate::leader::provider_attribution::command_matches_provider(native, command)
-        || (!command.is_empty() && !shell_carrier(command) && launched_as_provider(pid, native));
+        // A shell-supervised worker retains its native argv[0] in this exact
+        // pane's live process tree; shell-only/stale-screen carriers still fail.
+        || (!command.is_empty() && launched_as_provider(pid, native));
     let positive_surface = if !positive_command && !command.is_empty() {
         let frame = checked(
             backend.observe_native_input(&Target::Pane(PaneId::new(pane.unwrap_or(""))), native),
