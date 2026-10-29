@@ -63,21 +63,34 @@ with (root / f'received-{name}').open('ab', buffering=0) as out:
 /// `❯` + U+00A0 + draft. The layout follows the release grammar in
 /// `team-agent-contract/src/providers/claude/interaction.rs`: rules at column 0,
 /// composer between the last two rules, and no spinner. It never echoes input.
-const CLAUDE_FAKE: &str = r#"import os, sys, tty
+const CLAUDE_FAKE: &str = r#"import os, sys, tty, select
 from pathlib import Path
 name, root = sys.argv[1], Path(sys.argv[2])
 draft = (root / f'draft-{name}').read_text()
 tty.setraw(0)
 rule = '─' * 100
-lines = ['', ' ✻ Welcome to Claude Code', '', rule, '❯\u00a0' + draft, rule, '  ? for shortcuts']
-os.write(1, b'\x1b[?2004h\x1b[2J\x1b[H' + '\r\n'.join(lines).encode())
+def draw(text):
+    lines = ['', ' ✻ Welcome to Claude Code', '', rule, '❯\u00a0' + text, rule, '  ? for shortcuts']
+    os.write(1, b'\x1b[2J\x1b[H' + '\r\n'.join(lines).encode())
+os.write(1, b'\x1b[?2004h')
+draw(draft)
+cleared = False
+received = 0
 with (root / f'received-{name}').open('ab', buffering=0) as out:
     (root / f'ready-{name}').touch()
     while True:
-        data = os.read(0, 65536)
-        if not data:
-            break
-        out.write(data)
+        readable, _, _ = select.select([0], [], [], 0.05)
+        if not cleared and (root / f'clear-{name}').exists():
+            draw('')
+            cleared = True
+            # How many bytes arrived while the draft was still in the composer.
+            (root / f'cleared-{name}').write_text(str(received))
+        if readable:
+            data = os.read(0, 65536)
+            if not data:
+                break
+            received += len(data)
+            out.write(data)
 "#;
 
 impl Station {
@@ -473,13 +486,42 @@ fn red_m1_r4_stale_pane_id_after_server_restart_receives_zero_bytes() {
     );
 }
 
-// ───────────────────── R-5 composer protection ─────────────────────
+// ───────────────────── R-5 composer protection (bounded at 60 s) ─────────────────────
+//
+// Commander mandate `DECISION_M1_60S_BOUNDED_DRAFT` + Universal Canon 1. A composer that holds
+// someone else's draft is never typed into. The wait for it to clear is bounded at 60 s. On
+// timeout the message is already in the recipient's durable inbox and a `composer_contention_timeout`
+// diagnostic is reported; nothing hangs. Whether the sender waits inline or a courier waits is
+// the implementer's choice. The oracles observe only bytes, the inbox, the diagnostic and wall time.
 
-/// Blueprint: G8 / F2. Never type into a composer that holds someone else's draft. The positive
-/// control proves the fake screen is a valid ready Claude composer.
+const COMPOSER_CEILING: Duration = Duration::from_secs(60);
+const CEILING_SLACK: Duration = Duration::from_secs(15);
+const CEILING_FLOOR: Duration = Duration::from_secs(55);
+const TIMEOUT_DIAGNOSTIC: &str = "composer_contention_timeout";
+
+impl Station {
+    fn clear_draft(&self, name: &str) -> usize {
+        fs::write(self.root.join(format!("clear-{name}")), b"").unwrap();
+        let marker = self.root.join(format!("cleared-{name}"));
+        self.wait_for("fake composer cleared", || marker.exists());
+        fs::read_to_string(marker).unwrap().trim().parse().unwrap()
+    }
+
+    fn diagnostic_on_disk(&self) -> bool {
+        !self.files_containing(TIMEOUT_DIAGNOSTIC).is_empty()
+    }
+}
+
+fn occurrences(haystack: &[u8], needle: &[u8]) -> usize {
+    haystack.windows(needle.len()).filter(|window| *window == needle).count()
+}
+
+/// Draft cleared inside the window: nothing is typed while the draft exists, and the message is
+/// delivered exactly once after the composer becomes empty. The positive control proves the fake
+/// is a valid ready Claude composer, so refusing every Claude pane cannot pass.
 #[test]
-fn red_m1_r5_claude_composer_with_a_draft_receives_zero_bytes() {
-    let mut s = Station::new("r5");
+fn red_m1_r5a_draft_cleared_within_the_window_is_delivered_once_after_clear() {
+    let mut s = Station::new("r5a");
     let ready = s.claude_fake("claude-ready", "");
     let busy = s.claude_fake("claude-draft", "half typed human draft");
     let leader = s.receiver("leader");
@@ -494,13 +536,141 @@ fn red_m1_r5_claude_composer_with_a_draft_receives_zero_bytes() {
     assert!(control.status.success(), "positive control: {}", String::from_utf8_lossy(&control.stdout));
     s.wait_received("claude-ready", b"composer was empty");
 
-    let output = s.cli(&["send", "drafting", "must not clobber the draft", "--team", "alpha"], &[]);
-    s.assert_quiet("claude-draft", "a non-empty composer belongs to someone else");
-    assert_ne!(
-        stdout_json(&output)["status"], "sent",
-        "the receipt must say deferred/busy, not sent: {}",
-        String::from_utf8_lossy(&output.stdout)
+    let started = Instant::now();
+    let mut child = s
+        .command(&["send", "drafting", "delivered after the draft cleared", "--team", "alpha"], &[])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(5));
+    assert!(
+        s.received("claude-draft").is_empty(),
+        "nothing may be typed while the draft is in the composer: {:?}",
+        String::from_utf8_lossy(&s.received("claude-draft"))
     );
+    assert_eq!(s.clear_draft("claude-draft"), 0, "bytes arrived before the draft was cleared");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !contains(&s.received("claude-draft"), b"delivered after the draft cleared") {
+        assert!(Instant::now() < deadline, "message not delivered within 20 s after the draft cleared");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    while child.try_wait().unwrap().is_none() {
+        assert!(started.elapsed() < COMPOSER_CEILING + CEILING_SLACK, "sender must not hang");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        occurrences(&s.received("claude-draft"), b"delivered after the draft cleared"),
+        1,
+        "exactly one delivery after the clear"
+    );
+}
+
+/// Draft never cleared: zero bytes for the whole window. The message is durable in the
+/// recipient's inbox while the wait is still running (a sender crash mid-wait loses nothing).
+/// `composer_contention_timeout` is reported at about 60 s (not before 55 s, not after 75 s), and
+/// the sender process has finished by then.
+#[test]
+fn red_m1_r5b_uncleared_draft_times_out_at_60s_keeps_the_message_and_never_types() {
+    let mut s = Station::new("r5b");
+    let busy = s.claude_fake("claude-draft", "stray characters nobody clears");
+    let leader = s.receiver("leader");
+    s.write_state(&snapshot(
+        &s,
+        &[("alpha", team(&s, "alpha", Some(&leader), &[("drafting", Some(&busy), "claude")]))],
+    ));
+    let started = Instant::now();
+    let child = s
+        .command(&["send", "drafting", "bounded wait payload", "--team", "alpha"], &[])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(5));
+    assert!(
+        s.received("claude-draft").is_empty(),
+        "nothing may be typed into a contended composer: {:?}",
+        String::from_utf8_lossy(&s.received("claude-draft"))
+    );
+    assert_eq!(
+        inbox_hits(&s.inbox("drafting", "alpha"), "bounded wait payload").len(),
+        1,
+        "the message must already be durable in the recipient inbox while the wait runs"
+    );
+
+    let waiter = std::thread::spawn(move || child.wait_with_output().unwrap());
+    let deadline = started + COMPOSER_CEILING + CEILING_SLACK;
+    while !waiter.is_finished() {
+        assert!(Instant::now() < deadline, "the sender process must not hang past the ceiling");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let output = waiter.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    // Inline-wait model: the diagnostic is in stdout. Courier model: the sender returned early
+    // (`deferred`), and the diagnostic must appear on disk at the ceiling.
+    while !(stdout.contains(TIMEOUT_DIAGNOSTIC) || s.diagnostic_on_disk()) {
+        assert!(
+            Instant::now() < deadline,
+            "`{TIMEOUT_DIAGNOSTIC}` must be reported by the ceiling; sender said {stdout}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let reported_at = started.elapsed();
+    assert!(
+        reported_at >= CEILING_FLOOR,
+        "the 1-minute window must be honored; timeout reported after {reported_at:?} (and stdout {stdout})"
+    );
+    assert!(
+        s.received("claude-draft").is_empty(),
+        "zero bytes for the whole window: {:?}",
+        String::from_utf8_lossy(&s.received("claude-draft"))
+    );
+    assert_eq!(inbox_hits(&s.inbox("drafting", "alpha"), "bounded wait payload").len(), 1);
+}
+
+/// The leader-side case the mandate was written for: stray characters in the leader's composer.
+/// A worker's report is stored first, never typed into the draft, and the MCP call is bounded.
+#[test]
+fn red_m1_r5c_worker_report_to_a_drafting_leader_is_stored_first_and_bounded() {
+    let mut s = Station::new("r5c");
+    let leader = s.claude_fake("leader-draft", "stray leader characters");
+    let worker = s.receiver("worker");
+    let mut state = snapshot(&s, &[("alpha", team(&s, "alpha", Some(&leader), &[("worker", Some(&worker), "pi")]))]);
+    state["teams"]["alpha"]["leader"]["provider"] = json!("claude");
+    s.write_state(&state);
+    let root = s.root.clone();
+    let started = Instant::now();
+    let call = std::thread::spawn(move || {
+        let tools = TeamOrchestratorTools::with_identity(&root, Some(AgentId::new("worker")), Some(TeamKey::new("alpha")));
+        tools
+            .report_result(None, Some("report into a drafting leader"), ResultStatus::Success, None, None, None, None, None, None, None)
+            .map(|ok| Value::Object(ok.fields))
+            .map_err(|error| format!("{error:?}"))
+    });
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(
+        s.received("leader-draft").is_empty(),
+        "a worker report must never be typed into the leader's draft: {:?}",
+        String::from_utf8_lossy(&s.received("leader-draft"))
+    );
+    assert_eq!(
+        inbox_hits(&s.inbox("leader", "alpha"), "report into a drafting leader").len(),
+        1,
+        "the result must be durable in the leader inbox before any wait"
+    );
+    let deadline = started + COMPOSER_CEILING + CEILING_SLACK;
+    while !call.is_finished() {
+        assert!(Instant::now() < deadline, "report_result must return within the ceiling");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let result = call.join().unwrap().expect("a contended leader composer is not a report failure");
+    while !(result.to_string().contains(TIMEOUT_DIAGNOSTIC) || s.diagnostic_on_disk()) {
+        assert!(Instant::now() < deadline, "`{TIMEOUT_DIAGNOSTIC}` must be reported by the ceiling: {result}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(started.elapsed() >= CEILING_FLOOR, "the 1-minute window must be honored: {:?}", started.elapsed());
+    assert!(s.received("leader-draft").is_empty(), "zero bytes into the leader draft");
 }
 
 // ───────────────────── R-6/7 content handling (F14) ─────────────────────
