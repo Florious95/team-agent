@@ -174,7 +174,7 @@ pub(super) fn discover_runtime(provider: &ProviderId, workspace: &Path) -> Resul
 
 fn validate_catalog(provider: &ProviderId, discovery: &Discovery) -> Result<(), ContractError> {
     let descriptor = registry::provider(provider.as_str())?.descriptor();
-    if discovery.catalog.provider != *provider
+    if discovery.catalog.provider.as_str() != descriptor.identity.id
         || discovery.catalog.native != discovery.native
         || discovery.catalog.schema != descriptor.model.catalog.require("native catalog source")?.schema
     {
@@ -379,6 +379,17 @@ mod tests {
         assert!(json["models"].as_array().unwrap().iter().all(|row|
             row["efforts"]["state"] == "unverified" && row["aliases"] == serde_json::json!([])));
         assert!(json["current_role_model"].is_null());
+    }
+
+    #[test]
+    fn grok_catalog_alias_uses_the_same_canonical_identity() {
+        for provider in ["grok", "grok_build"] {
+            let mut discovery = cursor_catalog();
+            discovery.catalog.provider = ProviderId::new("grok_build").unwrap();
+            discovery.catalog.schema = grok::CATALOG_SOURCE.schema.into();
+            let args = ModelsArgs { provider: provider.into(), search: None, json: true };
+            assert_eq!(render_models(&args, Ok(discovery)).unwrap().exit, ExitCode::Ok);
+        }
     }
 
     #[test]
