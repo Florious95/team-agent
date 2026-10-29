@@ -60,8 +60,7 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
         presentation: &args.presentation,
         mailbox: args.presentation.sink != crate::messaging::presentation::PresentationSink::Leader,
         envelope: None,
-    }, crate::station::send::Authority::Operator { sender: args.sender.as_str() })
-    ;
+    }, crate::station::send::Authority::Operator { sender: args.sender.as_str() });
     let value = match outcome {
         Ok(value) => value,
         Err(error) if alias.is_some() => return Err(CliError::Runtime(error)),

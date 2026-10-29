@@ -69,7 +69,7 @@ pub fn execute(req: Request<'_>, authority: Authority<'_>) -> Result<Value, Stri
     if addresses.is_empty() {
         return Err("send requires at least one recipient".into());
     }
-    let batch = addresses.len() > 1 || addresses.iter().any(|address| address.ends_with('*'));
+    let mut batch = addresses.len() > 1;
     let mut results = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for address in addresses {
@@ -91,12 +91,14 @@ pub fn execute(req: Request<'_>, authority: Authority<'_>) -> Result<Value, Stri
                     return Err("seat cannot send across workspace or team scope".into());
                 }
             }
-            let recipients = if recipient == "*" {
+            let broadcast = recipient == "*";
+            let recipients = if broadcast {
                 directory.agents().into_iter().filter(|id| id != authority.sender()).collect()
             } else { vec![recipient] };
             if recipients.is_empty() {
                 return Err("send requires at least one recipient".into());
             }
+            batch |= broadcast;
             let mut values = Vec::new();
             for recipient in recipients {
                 if !seen.insert((directory.workspace.clone(), directory.team.clone(), recipient.clone())) {
