@@ -139,8 +139,19 @@ fn report_fake_result(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     let _ = source_content;
-    crate::messaging::report_result_for_owner_team(workspace, &envelope, owner_team.as_deref())
-        .map_err(|e| FakeWorkerError::Report(e.to_string()))?;
+    let presentation = crate::messaging::presentation::PresentationRequest {
+        class: crate::messaging::presentation::PresentationClass::StageResult,
+        ..Default::default()
+    };
+    let authority = owner_team.as_deref().map_or(
+        crate::station::send::Authority::Operator { sender: agent_id },
+        |team| crate::station::send::Authority::Seat { sender: agent_id, team });
+    crate::station::send::execute(crate::station::send::Request {
+        workspace, team: owner_team.as_deref(), to: "leader",
+        content: envelope["summary"].as_str().unwrap_or(""),
+        task_id: envelope["task_id"].as_str(), message_id: None,
+        presentation: &presentation, mailbox: false, envelope: Some(&envelope),
+    }, authority).map_err(FakeWorkerError::Report)?;
     writeln!(output, "{}", serde_json::to_string(&envelope)?)?;
     Ok(())
 }

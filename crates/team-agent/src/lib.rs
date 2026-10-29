@@ -88,6 +88,7 @@ pub mod leader;
 pub mod messaging;
 pub mod direct_delivery;
 pub mod inbox_store;
+pub mod station;
 
 // step 13-15 (lifecycle/mcp_server/cli/packaging) — ROUND-0.5b behavioral-rich 骨架(entry-fn 签名 +
 // 富返回类型,fn body unimplemented!(),P2 porter 落实现)。lifecycle=quick-start/restart/display;

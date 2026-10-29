@@ -37,27 +37,19 @@ pub(super) fn persist_resolved_target(
     target: &MessageTarget,
     content: &str,
 ) -> Result<Value, CliError> {
-    let selected = crate::state::selector::resolve_active_team(
-        &resolved.target_workspace,
-        resolved.team_key.as_deref(),
-        crate::state::selector::SelectorMode::RuntimeOnly,
-    )?;
-    if let Some(value) = dirty_topology_refusal_value(&selected, resolved.team_key.as_deref()) {
-        return Ok(value);
-    }
-    let mut opts = send_options_from_args(args);
-    opts.route_task_id = args.to_name.is_none() && args.to_leader.is_none();
-    opts.team = Some(TeamKey::new(selected.team_key.clone()));
-    let coordinator_ensure =
-        if target_has_known_worker(&selected.state, target, opts.sender.as_str()) {
-            loud_ensure_coordinator(&selected)?
-        } else {
-            None
-        };
-    let outcome = messaging::send_message(&selected.run_workspace, target, content, &opts)?;
-    let mut value = delivery_outcome_json(&outcome, target, content, &opts);
-    append_loud_ensure_fields(&mut value, coordinator_ensure.as_ref());
-    Ok(value)
+    let to = match target {
+        MessageTarget::Single(target) => target.clone(),
+        MessageTarget::Fanout(targets) => targets.join(","),
+        MessageTarget::Broadcast => "*".into(),
+    };
+    crate::station::send::execute(crate::station::send::Request {
+        workspace: &resolved.target_workspace, team: resolved.team_key.as_deref(),
+        to: &to, content, task_id: args.task.as_deref(), message_id: args.message_id.as_deref(),
+        presentation: &args.presentation,
+        mailbox: args.presentation.sink != crate::messaging::presentation::PresentationSink::Leader,
+        envelope: None,
+    }, crate::station::send::Authority::Operator { sender: args.sender.as_str() })
+        .map_err(CliError::Usage)
 }
 
 pub(super) fn routing_ambiguous_value(

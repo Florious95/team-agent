@@ -1,0 +1,25 @@
+{
+  "v": 1,
+  "kind": "agenda_acceptance",
+  "requires": [
+    "station.agenda-supervised.v1"
+  ],
+  "job_id": "5e8c9902207afaeb7120430c585a445f",
+  "spec_revision": 1,
+  "durability": "os_synced",
+  "activation": {
+    "kind": "supervised",
+    "manager": "systemd_user",
+    "service_id": "22cd59eacaf772316d3fff7274241ad8",
+    "runner_instance": "527aa9f431539da8e151d5434d1d5e61",
+    "owner": {
+      "pid": 4242,
+      "birth": {
+        "clock": "linux_start_ticks",
+        "boot_id": "example-boot-identifier",
+        "value": "12345678"
+      }
+    }
+  },
+  "accepted_at": "2026-10-29T12:00:00.000Z"
+}

@@ -1,0 +1,91 @@
+{
+  "v": 1,
+  "kind": "actuation_request",
+  "requires": [
+    "station.identity.v1",
+    "station.inbox-commit.v1",
+    "station.input-policy.v1"
+  ],
+  "request_id": "1f58b9145b24d108d7ac38887338b3ea",
+  "message_id": "ab530a13e45914982b79f9b7e3fba994",
+  "attempt_id": "c7ce66d0fb14e3c2d4d920918cc6cc7e",
+  "authority": {
+    "kind": "operator",
+    "uid": 501,
+    "invocation_id": "40493fe6739aee8019fcd0c22c87b581"
+  },
+  "endpoint": {
+    "v": 1,
+    "kind": "endpoint",
+    "requires": [
+      "station.identity.v1",
+      "station.input-policy.v1"
+    ],
+    "scope": {
+      "workspace": "21a3230e03772a58aff1b3709a9e2328",
+      "team": "ca8b22d0db83a22db163b560b3e4e515",
+      "seat": "worker-a"
+    },
+    "instance_id": "5e8c03a94c7835b87dd82c690f9f85c0",
+    "generation": 7,
+    "transport": {
+      "kind": "tmux",
+      "socket": {
+        "kind": "name",
+        "name": "example-station"
+      },
+      "session_id": "$4",
+      "window_id": "@5",
+      "pane_id": "%9",
+      "server": {
+        "pid": 4242,
+        "birth": {
+          "clock": "linux_start_ticks",
+          "boot_id": "example-boot-identifier",
+          "value": "12345678"
+        }
+      }
+    },
+    "identity": {
+      "pid": 4243,
+      "birth": {
+        "clock": "linux_start_ticks",
+        "boot_id": "example-boot-identifier",
+        "value": "12345678"
+      },
+      "pane_process": {
+        "pid": 4242,
+        "birth": {
+          "clock": "linux_start_ticks",
+          "boot_id": "example-boot-identifier",
+          "value": "12345678"
+        }
+      },
+      "binding": "80f70afeef3caa57646fd20afb95be9c",
+      "launch_id": "abfc412ce6e530df63b0dc9bf4e02bb3"
+    },
+    "profile": {
+      "profile_id": "pi-tui-v1",
+      "policy_sha256": "e628419d1e05c5f1a2683fee7c8e1ad29debb741298c8c8487f8ac84ee35986c",
+      "provider": "pi",
+      "native_version": "example-version",
+      "native_executable_sha256": "c87656d00f46387f91002a2f3d1d4f6ff793f88912515b38d4536196290d5a60"
+    },
+    "input_ownership": "exclusive",
+    "published_at": "2026-10-29T12:00:00.000Z"
+  },
+  "message_ref": {
+    "scope": {
+      "workspace": "21a3230e03772a58aff1b3709a9e2328",
+      "team": "ca8b22d0db83a22db163b560b3e4e515",
+      "seat": "worker-a"
+    },
+    "segment_id": "03e71c6d7dc6bd4e89ceaf32f6488ca0",
+    "seq": 2,
+    "record_id": "70ce871f8a3d3fb449bc3c3ace6547ce",
+    "checksum": "803786d7efb1f8031566d833497fcaeca4e3778eb573f8630540c1d0afcab34f"
+  },
+  "text": "Review scoped lifecycle.",
+  "deadline_ms": 30000,
+  "mode": "managed"
+}

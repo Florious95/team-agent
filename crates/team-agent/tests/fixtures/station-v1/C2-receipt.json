@@ -1,0 +1,38 @@
+{
+  "v": 1,
+  "kind": "actuation_receipt",
+  "requires": [
+    "station.input-policy.v1"
+  ],
+  "request_id": "1f58b9145b24d108d7ac38887338b3ea",
+  "message_id": "ab530a13e45914982b79f9b7e3fba994",
+  "attempt_id": "c7ce66d0fb14e3c2d4d920918cc6cc7e",
+  "scope": {
+    "workspace": "21a3230e03772a58aff1b3709a9e2328",
+    "team": "ca8b22d0db83a22db163b560b3e4e515",
+    "seat": "worker-a"
+  },
+  "generation": 7,
+  "policy_sha256": "e628419d1e05c5f1a2683fee7c8e1ad29debb741298c8c8487f8ac84ee35986c",
+  "outcome": {
+    "state": "submitted",
+    "finished_at": "2026-10-29T12:00:00.000Z",
+    "steps": [
+      {
+        "operation": "paste",
+        "elapsed_ms": 200,
+        "bytes": 24,
+        "keys": 0
+      },
+      {
+        "operation": "initial_submit",
+        "elapsed_ms": 300,
+        "bytes": 0,
+        "keys": 1
+      }
+    ]
+  },
+  "recipient_acceptance": "unknown",
+  "elapsed_ms": 320,
+  "recorded_at": "2026-10-29T12:00:00.000Z"
+}

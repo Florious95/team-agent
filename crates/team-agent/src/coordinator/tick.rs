@@ -507,15 +507,9 @@ impl Coordinator {
         }
 
         self.record_step(TickStepGroup::Delivery, "deliver_pending");
-        let delivered = crate::messaging::deliver_pending_messages(
-            self.workspace.as_path(),
-            &state,
-            self.transport.as_ref(),
-            &event_log,
-        )?
-        .into_iter()
-        .map(|message_id| DeliveredMessage { message_id })
-        .collect::<Vec<_>>();
+        // Messaging is now synchronous through station::send. Historical queue
+        // rows are not permission to replay a message after an ambiguous effect.
+        let delivered: Vec<DeliveredMessage> = Vec::new();
 
         self.record_step(TickStepGroup::Delivery, "fire_scheduled");
         let scheduled = crate::messaging::fire_due_scheduled_events(

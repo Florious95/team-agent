@@ -1,0 +1,28 @@
+{
+  "v": 1,
+  "kind": "message_index",
+  "requires": [
+    "station.inbox-commit.v1"
+  ],
+  "scope": {
+    "workspace": "21a3230e03772a58aff1b3709a9e2328",
+    "team": "ca8b22d0db83a22db163b560b3e4e515",
+    "seat": "worker-a"
+  },
+  "message_id": "ab530a13e45914982b79f9b7e3fba994",
+  "request_id": "1f58b9145b24d108d7ac38887338b3ea",
+  "request_sha256": "12d80bbe902b2266e1d36d16e3ab677e666db03e7f9ea6c3a4c4e72680bccfe0",
+  "record": {
+    "scope": {
+      "workspace": "21a3230e03772a58aff1b3709a9e2328",
+      "team": "ca8b22d0db83a22db163b560b3e4e515",
+      "seat": "worker-a"
+    },
+    "segment_id": "03e71c6d7dc6bd4e89ceaf32f6488ca0",
+    "seq": 2,
+    "record_id": "70ce871f8a3d3fb449bc3c3ace6547ce",
+    "checksum": "803786d7efb1f8031566d833497fcaeca4e3778eb573f8630540c1d0afcab34f"
+  },
+  "last_attempt": null,
+  "disposition": "stored"
+}

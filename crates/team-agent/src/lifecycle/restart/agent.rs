@@ -572,29 +572,14 @@ fn rollback_spawned_pane_keep_error(
 }
 
 fn replay_worker_target_missing_messages(
-    workspace: &Path,
-    agent_id: &AgentId,
-    team_key: &str,
-    state: &serde_json::Value,
-    transport: &dyn crate::transport::Transport,
+    _workspace: &Path,
+    _agent_id: &AgentId,
+    _team_key: &str,
+    _state: &serde_json::Value,
+    _transport: &dyn crate::transport::Transport,
 ) -> Result<(), LifecycleError> {
-    let store = crate::message_store::MessageStore::open(workspace)
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    let event_log = crate::event_log::EventLog::new(workspace);
-    let ids = crate::messaging::delivery::requeue_worker_target_missing_messages(
-        workspace,
-        &store,
-        &event_log,
-        agent_id.as_str(),
-        Some(team_key),
-    )
-    .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    if !ids.is_empty() {
-        crate::messaging::delivery::deliver_pending_messages(
-            workspace, state, transport, &event_log,
-        )
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    }
+    // A new seat generation does not authorize replay of historical SQL rows.
+    // Stored messages remain available in the inbox; explicit new sends use station.
     Ok(())
 }
 

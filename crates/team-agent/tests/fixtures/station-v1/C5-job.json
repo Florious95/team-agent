@@ -1,0 +1,53 @@
+{
+  "v": 1,
+  "kind": "agenda_job",
+  "requires": [
+    "station.agenda-supervised.v1"
+  ],
+  "job_id": "5e8c9902207afaeb7120430c585a445f",
+  "spec_revision": 1,
+  "state_revision": 0,
+  "spec": {
+    "scope": {
+      "workspace": "21a3230e03772a58aff1b3709a9e2328",
+      "team": "ca8b22d0db83a22db163b560b3e4e515",
+      "seat": "worker-a"
+    },
+    "issuer": {
+      "authority": {
+        "kind": "operator",
+        "uid": 501,
+        "invocation_id": "40493fe6739aee8019fcd0c22c87b581"
+      },
+      "source": "cli",
+      "invocation_id": "40493fe6739aee8019fcd0c22c87b581",
+      "release": "example-only",
+      "build_sha256": "fa9ecb9d1863e39da496bd58aafaa99621900bdec7e8b4ffcb935adbe070a1c2",
+      "provider_call_id": null,
+      "provenance": "framework_bound"
+    },
+    "created_at": "2026-10-29T12:00:00.000Z",
+    "due_at": "2026-10-29T12:10:00.000Z",
+    "every_ms": null,
+    "misfire": "skip_missed",
+    "payload": {
+      "kind": "reminder",
+      "text": "Review progress.",
+      "target": {
+        "kind": "current_at_fire"
+      },
+      "presentation": {
+        "mode": "live",
+        "sink": "leader"
+      }
+    }
+  },
+  "runtime": {
+    "state": "pending",
+    "accepted_spec_revision": 0,
+    "occurrence": 0,
+    "claim": null,
+    "last_message_id": null,
+    "last_outcome": null
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "v": 1,
+  "kind": "seat_operation",
+  "requires": [
+    "station.lifecycle-fence.v1"
+  ],
+  "scope": {
+    "workspace": "21a3230e03772a58aff1b3709a9e2328",
+    "team": "ca8b22d0db83a22db163b560b3e4e515",
+    "seat": "worker-a"
+  },
+  "operation_id": "9bf5a24e4aa779981ac41f1a0f8713ec",
+  "action": "start",
+  "expected_generation": 6,
+  "intended_generation": 7,
+  "phase": "completed",
+  "old_endpoint": null,
+  "created_process": {
+    "pid": 4243,
+    "birth": {
+      "clock": "linux_start_ticks",
+      "boot_id": "example-boot-identifier",
+      "value": "12345678"
+    }
+  },
+  "error": null,
+  "updated_at": "2026-10-29T12:00:00.000Z"
+}

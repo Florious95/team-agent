@@ -1,6 +1,5 @@
 //! Three logical MCP tools. Transport-injected identity is never read from arguments.
-use super::operator::{write_message, MessageWrite, MESSAGE_PRESENTATION};
-use super::store::{current, next_id, unleased, ContractStore, SeatStatus};
+use super::store::{current, unleased, ContractStore, SeatStatus};
 use super::Error;
 use crate::contract::types::*;
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
@@ -83,6 +82,11 @@ fn call(
     tool: &str,
     args: &Value,
 ) -> Result<Value, Error> {
+    // Business tools require the host's unified station handler. Never silently
+    // fall back to SQLite messages/outbox when a handler was not installed.
+    if matches!(tool, "send_message" | "report_result") {
+        return Err(Error::Invalid("direct business handler required"));
+    }
     validate_arguments(tool, args)?;
     let scope = store.scope().clone();
     let tx = store
@@ -115,111 +119,6 @@ fn call(
         params![caller, key],
     )?;
     let response = match tool {
-        "send_message" => {
-            let to = string(args, "to")?;
-            let content = string(args, "content")?;
-            let mailbox = args
-                .get("mailbox")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let recipients = if to == "*" {
-                let mut stmt =
-                    tx.prepare("SELECT seat FROM contract_seats WHERE seat<>?1 UNION SELECT recipient FROM contract_framework_peers WHERE recipient<>?1 ORDER BY 1")?;
-                let rows =
-                    stmt.query_map([context.identity.seat.as_str()], |r| r.get::<_, String>(0))?;
-                rows.collect::<Result<Vec<_>, _>>()?
-            } else {
-                vec![to.to_string()]
-            };
-            let mut ids = vec![];
-            let mut forwarded = false;
-            for recipient in recipients {
-                forwarded |= super::forward::peer(&tx, &recipient)?.is_some();
-                ids.push(write_message(
-                    &tx,
-                    &scope,
-                    MessageWrite {
-                        id: None,
-                        source: Some(&context.identity),
-                        task: Some(&context.task_id),
-                        sender: context.identity.seat.as_str(),
-                        recipient: &recipient,
-                        content,
-                        presentation: MESSAGE_PRESENTATION,
-                        mailbox,
-                    },
-                )?);
-            }
-            json!({"ok":true,"status":if forwarded {"forward_pending"} else if mailbox {"stored_only"} else {"queued"},"message_ids":ids})
-        }
-        "report_result" => {
-            let envelope = normalize_result(context, args)?;
-            let encoded = envelope.to_string();
-            let previous: Option<(String,String)> = tx.query_row("SELECT result_id,envelope FROM results WHERE owner_team_id=?1 AND task_id=?2 AND agent_id=?3",
-                params![scope.as_str(),context.task_id,context.identity.seat.as_str()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-            if let Some((id, original)) = previous {
-                if serde_json::from_str::<Value>(&original)? != envelope {
-                    return Err(Error::Conflict);
-                }
-                json!({"ok":true,"status":"persisted","result_id":id,"leader_notified":false})
-            } else {
-                let id = next_id(&tx, "result")?;
-                tx.execute(
-                    "INSERT INTO results VALUES(?1,?2,?3,?4,?5,?6)",
-                    params![
-                        id,
-                        scope.as_str(),
-                        context.task_id,
-                        context.identity.seat.as_str(),
-                        encoded,
-                        envelope
-                            .get("status")
-                            .and_then(Value::as_str)
-                            .unwrap_or("completed")
-                    ],
-                )?;
-                let result_route: Option<String> =
-                    tx.query_row("SELECT result_route FROM contract_meta", [], |row| {
-                        row.get(0)
-                    })?;
-                if let Some(route) = result_route {
-                    super::forward::insert(
-                        &tx,
-                        &super::forward::ForwardIntent {
-                            id: id.clone(),
-                            source: context.identity.clone(),
-                            route,
-                            payload: super::forward::ForwardPayload::Result {
-                                result_id: id.clone(),
-                                envelope: envelope.clone(),
-                            },
-                            state: super::forward::ForwardState::Pending,
-                            receipt: None,
-                        },
-                    )?;
-                } else if envelope
-                    .pointer("/presentation/sink")
-                    .and_then(Value::as_str)
-                    == Some("leader")
-                {
-                    write_message(
-                        &tx,
-                        &scope,
-                        MessageWrite {
-                            id: None,
-                            source: Some(&context.identity),
-                            task: Some(&context.task_id),
-                            sender: context.identity.seat.as_str(),
-                            recipient: "leader",
-                            content: &encoded,
-                            presentation: &envelope["presentation"].to_string(),
-                            mailbox: false,
-                        },
-                    )?;
-                }
-                json!({"ok":true,"status":"persisted","result_id":id,"leader_notified":false})
-            }
-        }
         "get_team_status" => {
             let mut statement = tx.prepare("SELECT record FROM contract_seats ORDER BY seat")?;
             let rows = statement.query_map([], |r| r.get::<_, String>(0))?;
@@ -406,16 +305,11 @@ pub fn response_written(
 /// writing a message/outbox row. The observation records actual transport input.
 pub fn authorize_direct_call(store: &mut ContractStore, context: &CallContext, request: &Value) -> Result<(), Error> {
     if request.get("jsonrpc").and_then(Value::as_str) != Some("2.0") { return Err(Error::Invalid("jsonrpc")); }
-    let id = request.get("id").filter(|id| id.is_string() || id.is_i64() || id.is_u64()).ok_or(Error::Invalid("rpc id"))?;
-    let scope = store.scope().clone();
-    let tx = store.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let seat = current(&tx, &scope, &context.identity)?;
+    request.get("id").filter(|id| id.is_string() || id.is_i64() || id.is_u64()).ok_or(Error::Invalid("rpc id"))?;
+    let seat = current(&store.connection, store.scope(), &context.identity)?;
     if seat.binding_key != context.binding_key || matches!(seat.status, SeatStatus::Stopped | SeatStatus::Unknown) {
         return Err(Error::Fence);
     }
-    tx.execute("INSERT OR IGNORE INTO contract_facts VALUES(?1,?2,'invocation_received')",
-        params![serde_json::to_string(&context.identity)?, format!("{}:{}", context.connection_id.as_str(), id)])?;
-    tx.commit()?;
     Ok(())
 }
 
@@ -512,7 +406,10 @@ where
             serde_json::to_writer(&mut writer, &response)?;
             writer.write_all(b"\n")?;
             writer.flush()?;
-            if success {
+            // Direct business tools have durable inbox receipts. A response must
+            // not reacquire a SQLite write transaction after physical delivery.
+            if success && !matches!(request.pointer("/params/name").and_then(Value::as_str),
+                Some("send_message" | "report_result")) {
                 response_written(store, &context?, &request)?;
             }
         }

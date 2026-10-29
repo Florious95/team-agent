@@ -1,0 +1,26 @@
+{
+  "v": 1,
+  "kind": "inbox_cursor",
+  "requires": [
+    "station.inbox-commit.v1"
+  ],
+  "scope": {
+    "workspace": "21a3230e03772a58aff1b3709a9e2328",
+    "team": "ca8b22d0db83a22db163b560b3e4e515",
+    "seat": "worker-a"
+  },
+  "consumer_id": "leader-primary",
+  "revision": 1,
+  "through": {
+    "scope": {
+      "workspace": "21a3230e03772a58aff1b3709a9e2328",
+      "team": "ca8b22d0db83a22db163b560b3e4e515",
+      "seat": "worker-a"
+    },
+    "segment_id": "03e71c6d7dc6bd4e89ceaf32f6488ca0",
+    "seq": 2,
+    "record_id": "70ce871f8a3d3fb449bc3c3ace6547ce",
+    "checksum": "803786d7efb1f8031566d833497fcaeca4e3778eb573f8630540c1d0afcab34f"
+  },
+  "acked_at": "2026-10-29T12:00:00.000Z"
+}

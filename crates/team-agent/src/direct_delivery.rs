@@ -1,10 +1,11 @@
 //! Read-only addressing and a synchronous tmux actuator. No coordinator, ledger or receipts.
 
 use std::io::Write;
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -54,11 +55,13 @@ pub fn directory(workspace: &Path, team: Option<&str>) -> Result<Directory, Stri
                 return Err(format!("unknown team: {requested}"));
             }
         }
-        return Ok(Directory {
-            workspace,
-            team: team.map(str::to_string),
-            state: snapshot,
-        });
+        let derived = crate::state::projection::team_state_key(&snapshot);
+        let canonical = field(&snapshot, "active_team_key")
+            .or_else(|| (derived != "current").then_some(derived.as_str()))
+            .or_else(|| field(&snapshot, "team_id"))
+            .or_else(|| field(&snapshot, "team_name"))
+            .or(team).map(str::to_string);
+        return Ok(Directory { workspace, team: canonical, state: snapshot });
     };
     let requested = team.or_else(|| field(&snapshot, "active_team_key"));
     let matches: Vec<_> = teams
@@ -137,17 +140,20 @@ impl Directory {
         })
     }
 
-    /// Actuate the selected live pane; advisory session/window/PID metadata
-    /// cannot veto delivery or create a parked message.
+    /// Check the selected physical identity while holding only its input lock.
     pub fn send(&self, agent: &str, text: &str) -> Result<Value, String> {
+        self.send_with_receipt(agent, text, || Ok(()))
+    }
+
+    pub(crate) fn send_with_receipt(&self, agent: &str, text: &str, submitted: impl FnOnce() -> Result<(), String>) -> Result<Value, String> {
         let endpoint = self.endpoint(agent)?;
-        let output = tmux(&endpoint.socket)
-            .args(["display-message", "-p", "-t", &endpoint.pane_id, "#{pane_dead}"])
-            .output().map_err(|error| error.to_string())?;
-        if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim() != "0" {
-            return Err("recipient pane is not live on the selected socket".into());
-        }
-        send(&endpoint, text)
+        let info = self.recipient(agent)?;
+        let expected_pid = info.get("pane_pid").or_else(|| info.get("pid")).or_else(|| info.get("native_pid"))
+            .and_then(|value| value.as_u64().or_else(|| value.as_str().and_then(|s| s.parse().ok())))
+            .and_then(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 0);
+        direct_send_checked(&endpoint.socket, &endpoint.pane_id, &endpoint.dialect, text, expected_pid, true, submitted)?;
+        Ok(json!({"status":"sent","recipient":endpoint.agent,"pane_id":endpoint.pane_id,
+            "dialect":endpoint.dialect,"delivery":"physical","accepted":null}))
     }
 
     pub fn agents(&self) -> Vec<String> {
@@ -224,6 +230,10 @@ fn check_output(output: std::process::Output) -> Result<(), String> {
 /// Provider names/aliases select their native paste floor and one Enter. Only an explicit
 /// double-enter dialect adds a second key; there is no observation-driven retry or third Enter.
 pub fn direct_send(socket: &str, pane_id: &str, dialect: &str, text: &str) -> Result<(), String> {
+    direct_send_checked(socket, pane_id, dialect, text, None, false, || Ok(()))
+}
+
+fn direct_send_checked(socket: &str, pane_id: &str, dialect: &str, text: &str, expected_pid: Option<u32>, managed: bool, submitted: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
     if !pane_id
         .strip_prefix('%')
         .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
@@ -237,6 +247,14 @@ pub fn direct_send(socket: &str, pane_id: &str, dialect: &str, text: &str) -> Re
     if text.contains('\x1b') || text.contains('\0') {
         return Err("message must not contain ESC or NUL bytes".into());
     }
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let observed = pane_identity(socket, pane_id, deadline)?;
+    let _input_lock = input_lock(&observed, pane_id, deadline)?;
+    verify_identity(socket, pane_id, &observed, expected_pid, deadline)?;
+    if managed && canonical_dialect(dialect) == "claude" {
+        wait_for_draft(socket, pane_id, deadline)?;
+    }
+    let deadline = Instant::now() + Duration::from_secs(30);
     static NEXT_BUFFER: AtomicU64 = AtomicU64::new(0);
     let buffer = format!(
         "team-agent-direct-{}-{}",
@@ -257,6 +275,10 @@ pub fn direct_send(socket: &str, pane_id: &str, dialect: &str, text: &str) -> Re
         return Err(error.to_string());
     }
     check_output(loaded)?;
+    if let Err(error) = verify_identity(socket, pane_id, &observed, expected_pid, deadline) {
+        let _ = tmux(socket).args(["delete-buffer", "-b", &buffer]).output();
+        return Err(error);
+    }
     let pasted = tmux(socket)
         .args([
             "paste-buffer",
@@ -273,21 +295,105 @@ pub fn direct_send(socket: &str, pane_id: &str, dialect: &str, text: &str) -> Re
         .and_then(check_output);
     if let Err(error) = pasted {
         let _ = tmux(socket).args(["delete-buffer", "-b", &buffer]).output();
-        return Err(error);
+        return Err(format!("uncertain: paste was issued: {error}; do not replay"));
     }
     let (floor, enter_count) = submit_sequence(dialect);
     if !floor.is_zero() {
         std::thread::sleep(floor);
     }
+    verify_identity(socket, pane_id, &observed, expected_pid, deadline)
+        .map_err(|error| format!("uncertain: identity changed after paste: {error}; do not replay"))?;
     let mut command = tmux(socket);
     command.args(["send-keys", "-t", pane_id, "Enter"]);
     if enter_count == 2 {
         command.args([";", "send-keys", "-t", pane_id, "Enter"]);
     }
-    command
-        .output()
-        .map_err(|e| e.to_string())
-        .and_then(check_output)
+    command.output().map_err(|e| e.to_string()).and_then(check_output)
+        .map_err(|error| format!("uncertain: submit was issued: {error}; do not replay"))?;
+    // The submission receipt/task hint is published before releasing the input
+    // lock, so concurrent assignments cannot reverse their attribution order.
+    submitted().map_err(|error| format!("uncertain: submission receipt failed: {error}; do not replay"))
+}
+
+fn native_output(command: &Command, deadline: Instant) -> Result<crate::tmux_backend::CommandOutput, String> {
+    let argv: Vec<String> = std::iter::once(command.get_program()).chain(command.get_args())
+        .map(|s| s.to_string_lossy().into_owned()).collect();
+    let budget = deadline.saturating_duration_since(Instant::now());
+    if budget.is_zero() { return Err("native_observation_timeout".into()); }
+    crate::tmux_backend::RealCommandRunner.run_with_budget(&argv, budget).map_err(|e| e.to_string())
+}
+
+fn pane_identity(socket: &str, pane: &str, deadline: Instant) -> Result<String, String> {
+    let output = native_output(tmux(socket).args(["display-message", "-p", "-t", pane,
+        "#{pane_dead}|#{pane_pid}|#{pid}|#{socket_path}"]), deadline)?;
+    if !output.success { return Err("pane_gone".into()); }
+    let identity = output.stdout.trim().to_owned();
+    let fields: Vec<_> = identity.splitn(4, '|').collect();
+    if fields.len() != 4 || fields[0] != "0" || fields[1].parse::<u32>().ok().filter(|p| *p > 0).is_none() {
+        return Err("pane_gone: no live physical identity".into());
+    }
+    Ok(identity)
+}
+
+fn verify_identity(socket: &str, pane: &str, observed: &str, expected_pid: Option<u32>, deadline: Instant) -> Result<(), String> {
+    if pane_identity(socket, pane, deadline)? != observed { return Err("identity_mismatch: pane changed".into()); }
+    if let Some(mut pid) = expected_pid {
+        let pane_pid = observed.split('|').nth(1).and_then(|s| s.parse::<u32>().ok()).ok_or("invalid pane pid")?;
+        // A wrapper shell may own the PTY while the registered provider is its
+        // descendant. Never accept merely another live PID elsewhere on the host.
+        for _ in 0..32 {
+            if pid == pane_pid { return Ok(()); }
+            let output = native_output(Command::new("ps").args(["-o", "ppid=", "-p", &pid.to_string()]), deadline)?;
+            let Some(parent) = output.stdout.trim().parse::<u32>().ok().filter(|p| *p > 0 && *p != pid) else { break; };
+            pid = parent;
+        }
+        return Err("identity_mismatch: registered process no longer owns this pane".into());
+    }
+    Ok(())
+}
+
+fn wait_for_draft(socket: &str, pane: &str, deadline: Instant) -> Result<(), String> {
+    let mut observed_draft = false;
+    loop {
+        if Instant::now() >= deadline {
+            return Err("composer_contention_timeout: draft remained for 60s; message is safe in inbox; clear the draft before an explicit new send".into());
+        }
+        let capture = native_output(tmux(socket).args(["capture-pane", "-p", "-t", pane, "-S", "-80"]), deadline);
+        let draft = match capture {
+            Ok(output) if output.success => team_agent_contract::providers::claude::interaction::inspect_legacy_composer(&output.stdout)
+                .is_some_and(|(_, text)| !text.is_empty()),
+            _ if observed_draft => true, // a failed observation is not evidence that a known draft cleared
+            _ => false, // Canon 1: no proven draft means direct delivery, including raw PTYs.
+        };
+        if !draft { return Ok(()); }
+        observed_draft = true;
+        std::thread::sleep(Duration::from_millis(250).min(deadline.saturating_duration_since(Instant::now())));
+    }
+}
+
+fn input_lock(identity: &str, pane: &str, deadline: Instant) -> Result<std::fs::File, String> {
+    #[cfg(unix)] let uid = unsafe { libc::geteuid() };
+    #[cfg(not(unix))] let uid = 0;
+    let root = std::env::temp_dir().join(format!("team-agent-input-{uid}"));
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)] { use std::os::unix::fs::DirBuilderExt; builder.mode(0o700); }
+    builder.create(&root).map_err(|e| e.to_string())?;
+    let key = format!("{:x}.lock", Sha256::digest(format!("{identity}\0{pane}").as_bytes()));
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600).custom_flags(libc::O_NOFOLLOW); }
+    let file = options.open(root.join(key)).map_err(|e| e.to_string())?;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10).min(deadline.saturating_duration_since(Instant::now())));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => return Err("input_contention_timeout: 60s; message is safe in inbox".into()),
+            Err(error) => return Err(error.to_string()),
+        }
+    }
 }
 
 pub fn send(endpoint: &Endpoint, text: &str) -> Result<Value, String> {

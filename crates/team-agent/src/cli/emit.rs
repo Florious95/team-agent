@@ -1316,7 +1316,7 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
         targets: parsed.targets,
         workspace,
         team: parsed.team,
-        task: None,
+        task: parsed.task,
         sender,
         no_ack: false,
         no_wait: true,
@@ -1324,7 +1324,7 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
         timeout: 0.0,
         confirm_human: false,
         json: parsed.json,
-        message_id: None,
+        message_id: parsed.message_id,
         presentation: normalized.request,
         pane: parsed.pane.clone(),
         to_name: parsed.to_name.clone(),
@@ -1372,14 +1372,12 @@ fn trusted_cli_sender(workspace: &Path, team: Option<&str>) -> Result<TrustedSen
 
 fn warn_send_legacy_delivery_flags(args: &[String]) {
     const FLAGS: &[&str] = &[
-        "--task",
         "--watch-result",
         "--requires-ack",
         "--no-ack",
         "--no-wait",
         "--timeout",
         "--confirm-human",
-        "--message-id",
     ];
     let spec = command_spec("send");
     let sunset = spec

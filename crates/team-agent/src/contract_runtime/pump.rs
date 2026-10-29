@@ -2,7 +2,7 @@
 //! implicit business retry, queue flush, or replay of uncertain messages.
 use super::{
     backend::{self, Backend, BackendError},
-    forward, framework, registry,
+    framework, registry,
 };
 use serde_json::Value;
 use std::path::Path;
@@ -116,111 +116,8 @@ pub(super) fn protocol(
     ))
 }
 
-fn deliver_one(backend: &mut Backend, seat: &SeatRecord) -> Result<(), BackendError> {
-    if matches!(seat.status, SeatStatus::Stopped | SeatStatus::Unknown)
-        || !backend.store.has_queued_for(&seat.identity)?
-    {
-        return Ok(());
-    }
-    let selected = registry::provider(seat.provider.as_str())?;
-    let bootstrap_allowed = selected.first_business_bootstrap() && !seat.bootstrap_used;
-    let profiles = selected.descriptor().input.profiles.require("native input profiles")?;
-    let profile = profiles.iter().find(|profile| profile.id == seat.profile && profile.matches_native(&seat.native))
-        .ok_or(ContractError::ProfileUnavailable)?;
-    profile.policy.require("native submit policy")?;
-    let role = backend::read_role(&backend.binding, &seat.identity)?;
-    if role.provider != seat.provider {
-        return Err(BackendError::Metadata);
-    }
-    let clock = RealClock::new();
-    let adapter = backend::adapter(&backend.binding, &seat.identity, &seat.provider)?;
-    let hooks = adapter.hooks();
-    let operation = OperationId::new(format!(
-        "deliver-{}",
-        backend
-            .store
-            .propose_identity(&seat.identity.seat)?
-            .instance
-            .as_str()
-    ))?;
-    let mut physical = PhysicalRuntime::new(
-        Registration {
-            descriptor: selected.descriptor(),
-            hooks: &hooks,
-            controls: selected.controls(),
-            startup: selected.startup(),
-            session_panel: selected.session_panel(),
-        },
-        backend::settings(&backend.binding, selected),
-        operation.clone(),
-        &clock,
-    )?;
-    physical.evidence = backend::policy_evidence(
-        &seat.provider, &seat.native, backend.binding.candidate_sha256,
-    )?;
-    physical.protocol = Some(protocol(backend, seat, &clock)?);
-    let sample = physical.readiness(seat)?;
-    if !matches!(sample.pane.outcome, ProbeOutcome::Observed(ref pane) if pane.surface == InputSurface::ComposerReady)
-        || !matches!(sample.server.outcome, ProbeOutcome::Observed(ref server) if server.initialize_response_written && server.tools_list_response_written)
-    {
-        return Ok(());
-    }
-    // A roundtrip provider consumes only its captured protocol evidence. An
-    // Unknown/partial binding is left to the typed readiness gate; it never
-    // triggers a guessed TUI /tools command or a Kiro inspector fallback.
-    if !bootstrap_allowed && !selected.uses_tool_roundtrips() {
-        let panel = selected.tool_panel()?;
-        if panel.profile_id != seat.profile || panel.server_key != seat.server_key
-            || panel.policy_sha256 != profile.policy_sha256
-        {
-            return Err(ContractError::Mismatch("native inspector seat binding").into());
-        }
-        backend.store.begin_observation(&seat.identity, &operation)?;
-        // Uncertain inspection quarantines the seat without an orphan lease.
-        // No replay or blind Escape clears an unrelated composer/approval.
-        let binding = match physical.client_binding(seat, panel) {
-            Ok(binding) => binding,
-            Err(error) => {
-                backend.store.fail_observation(&seat.identity, &operation)?;
-                return Err(error.into());
-            }
-        };
-        backend.store.finish_observation(&seat.identity, &operation)?;
-        if !matches!(binding.outcome, ProbeOutcome::Observed(_)) {
-            return Ok(());
-        }
-        let mut current_protocol = protocol(backend, seat, &clock)?;
-        current_protocol.binding = binding;
-        physical.protocol = Some(current_protocol);
-    }
-    // H3's owned prompt receipt is independently checked by PhysicalRuntime;
-    // only the one durable first-business claim can carry this instruction.
-    if bootstrap_allowed {
-        physical.initial_prompt = Some(role.prompt.text.clone());
-    }
-    let mut bootstrap = OutboxBootstrap::new(ContractStore::open(
-        &backend.binding.transport_root,
-        backend.binding.scope.clone(),
-        &backend.binding.endpoint,
-    )?);
-    physical.bootstrap = Some(&mut bootstrap);
-    let sample = physical.readiness(seat)?;
-    let authorization = DeliveryAuthorization {
-        allow_first_business_bootstrap: bootstrap_allowed,
-        require_server_handshake: true,
-        channel: Channel::Tmux,
-        policy_sha256: profile.policy_sha256,
-    };
-    let _ = team_agent_contract::orchestration::supervisor::tick(
-        &mut backend.store,
-        &seat.identity,
-        &sample,
-        &authorization,
-        &mut physical,
-    )?;
-    Ok(())
-}
-
+// Messaging and result presentation are owned by station::send, not this
+// lifecycle observer. No historical outbox item is replayed on a tick.
 pub fn tick(workspace: &Path, state: &mut Value) -> Result<(), BackendError> {
     if !framework::has_contract(state) {
         return Ok(());
@@ -243,9 +140,6 @@ pub fn tick(workspace: &Path, state: &mut Value) -> Result<(), BackendError> {
         let Some(seat) = backend.store.seat(&SeatId::new(&id)?)? else {
             continue;
         };
-        if let Err(error) = deliver_one(&mut backend, &seat) {
-            failure = Some(error);
-        }
         if let Some(agent) = state
             .get_mut("agents")
             .and_then(|agents| agents.get_mut(&id))
@@ -261,9 +155,6 @@ pub fn tick(workspace: &Path, state: &mut Value) -> Result<(), BackendError> {
             }
         }
     }
-    // One blocked seat must not prevent already committed results from reaching
-    // the shared framework task-finalization/leader-presentation path.
-    forward::drain(&backend.binding.framework(), &mut backend.store, 32)?;
     match failure {
         Some(error) => Err(error),
         None => Ok(()),
