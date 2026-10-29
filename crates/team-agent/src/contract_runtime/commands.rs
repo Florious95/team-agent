@@ -12,7 +12,7 @@ use team_agent_contract::orchestration::physical::{PhysicalRuntime, Registration
 use team_agent_contract::orchestration::store::{Outcome, SeatStatus};
 
 use crate::cli::CliError;
-use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
+use crate::lifecycle::lock::{acquire_seat_lifecycle_lock, LifecycleLockRequest};
 use crate::model::ids::AgentId;
 use crate::state::repository::{StateRepository, StateWriteIntent};
 use crate::state::selector::{resolve_active_team_readonly, SelectedTeam, SelectorMode};
@@ -39,7 +39,7 @@ pub(super) fn with_agent(
         return Ok(None);
     }
     let agent_id = AgentId::new(agent);
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &selected.run_workspace,
         operation,
         team: Some(&selected.team_key),
@@ -198,7 +198,7 @@ pub fn restart(workspace: &Path, team: Option<&str>) -> Result<Option<Value>, Cl
         return Ok(None);
     };
     if !framework::only_contract(&selected.state) { return Ok(None); }
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &selected.run_workspace, operation: "restart",
         team: Some(&selected.team_key), agent_id: None,
     }).map_err(error)?;
