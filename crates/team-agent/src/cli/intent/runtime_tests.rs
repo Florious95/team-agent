@@ -44,6 +44,27 @@ fn actions(plan: &Plan) -> Vec<(&str, Option<&str>)> {
 }
 #[test]
 #[serial_test::serial(env)]
+fn team_start_skips_bad_native_preflight_but_explicit_target_still_refuses() {
+    let (root, intent) = fixture(&["healthy", "invalid"]);
+    std::fs::write(root.path().join("agents/invalid.md"),
+        "---\nprovider: codex\nmodel: native-model\nprofile: codex-default\n---\nInvalid native profile\n").unwrap();
+    install(root.path(), &[("healthy", "stopped", true), ("invalid", "stopped", true)]);
+    let state = crate::state::persist::runtime_state_path(root.path());
+    let mut raw: Value = serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+    raw["teams"]["fixture"]["agents"]["invalid"]["provider"] = json!("codex_tui");
+    std::fs::write(&state, serde_json::to_vec(&raw).unwrap()).unwrap();
+    let before = std::fs::read(&state).unwrap();
+    let plan = plan_with_observer(intent.clone(), |_, _, _| Ok(Observation::StoppedVerified)).unwrap();
+    assert_eq!(actions(&plan), [("start_agent", Some("healthy"))]);
+    assert!(plan.skipped.iter().any(|entry| entry["agent"] == "invalid" && entry["reason"] == "preflight_blocked"));
+    let mut single = intent;
+    single.subject = Subject::Agent("invalid".into());
+    assert!(plan_with_observer(single, |_, _, _| Ok(Observation::StoppedVerified)).is_err());
+    assert_eq!(std::fs::read(&state).unwrap(), before);
+}
+
+#[test]
+#[serial_test::serial(env)]
 fn absent_source_is_one_original_create_not_restart_or_probe() {
     let (root, intent) = fixture(&["one", "two"]);
     let plan = plan_with_observer(intent, |_, _, _| panic!("fresh team probed")).unwrap();

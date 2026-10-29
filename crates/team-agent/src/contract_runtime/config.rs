@@ -135,7 +135,13 @@ pub fn read_team_with_user_source(
     args: &QuickStartArgs,
     user_source: impl FnOnce() -> Result<Option<Source>, ConfigError>,
 ) -> Result<Option<TeamConfig>, ConfigError> {
-    read_team_inner(args, user_source, None)
+    read_team_inner(args, user_source, None, None)
+}
+
+/// Admit only the addressed seat's native capabilities; retain sibling routing
+/// metadata without validating their model/auth/permission launch settings.
+pub fn read_seat(args: &QuickStartArgs, seat: &str) -> Result<Option<TeamConfig>, ConfigError> {
+    read_team_inner(args, prompt::user_source, None, Some(seat))
 }
 
 /// Compile an admitted role-document change without first writing any file.
@@ -143,14 +149,16 @@ pub(crate) fn read_team_with_role_override(
     args: &QuickStartArgs,
     path: &Path,
     contents: &str,
+    seat: &str,
 ) -> Result<Option<TeamConfig>, ConfigError> {
-    read_team_inner(args, prompt::user_source, Some((path, contents)))
+    read_team_inner(args, prompt::user_source, Some((path, contents)), Some(seat))
 }
 
 fn read_team_inner(
     args: &QuickStartArgs,
     user_source: impl FnOnce() -> Result<Option<Source>, ConfigError>,
     role_override: Option<(&Path, &str)>,
+    seat: Option<&str>,
 ) -> Result<Option<TeamConfig>, ConfigError> {
     let agents = args.agents_dir.join("agents");
     let entries = match std::fs::read_dir(&agents) {
@@ -186,12 +194,15 @@ fn read_team_inner(
         {
             return Err(invalid(&path, "front matter"));
         }
-        let opted = opted_in(&meta, &path)?;
-        if opted
+        let addressed = seat.is_none_or(|seat| {
+            meta.get("agent_id").or_else(|| meta.get("name")).and_then(Value::as_str)
+                .or_else(|| path.file_stem().and_then(|name| name.to_str())) == Some(seat)
+        });
+        if addressed && (opted_in(&meta, &path)?
             || meta
                 .get("provider")
                 .and_then(Value::as_str)
-                .is_some_and(super::registry::recognizes)
+                .is_some_and(super::registry::recognizes))
         {
             selected = true;
         }
@@ -261,11 +272,7 @@ fn read_team_inner(
             return Err(invalid(&source, "reserved worker id"));
         }
         let provider = text(&meta, "provider", &source)?.unwrap_or_else(|| "pi".into());
-        let opted = opted_in(&meta, &source)?;
         let registration = super::registry::declared(&provider);
-        if registration.is_none() && (opted || super::registry::recognizes(&provider)) {
-            return Err(invalid(&source, "provider"));
-        }
         let runtime = if registration.is_some() {
             RuntimeFamily::Contract
         } else {
@@ -273,10 +280,16 @@ fn read_team_inner(
         };
         members.push(MemberRoute {
             id: id.clone(),
-            provider: registration.map_or(provider, |descriptor| descriptor.identity.id.into()),
+            provider: registration.map_or_else(|| provider.clone(), |descriptor| descriptor.identity.id.into()),
             source: source.canonicalize()?,
             runtime,
         });
+        if seat.is_some_and(|seat| seat != id) {
+            continue;
+        }
+        if registration.is_none() && (opted_in(&meta, &source)? || super::registry::recognizes(&provider)) {
+            return Err(invalid(&source, "provider"));
+        }
         let Some(registration) = registration else {
             continue;
         };

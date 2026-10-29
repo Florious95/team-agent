@@ -96,7 +96,7 @@ fn fork_locked(
     if std::fs::symlink_metadata(&role_path).is_ok() {
         return Err(error(format!("role file already exists: {}", role_path.display())));
     }
-    let config = framework::team_config(workspace, &selected.team_dir, team).map_err(error)?
+    let config = framework::team_config(workspace, &selected.team_dir, team, Some(source_id.as_str())).map_err(error)?
         .ok_or_else(|| error("contract team configuration is unavailable"))?;
     let source_role = config.roles.iter().find(|role| &role.id == source_id)
         .ok_or_else(|| error("contract source role is no longer configured"))?;
@@ -116,7 +116,7 @@ fn fork_locked(
         role_path: role_path.clone(), role_bytes: role_text.into_bytes(), spec_path: spec_path.clone(), pre_spec,
     };
     let result = (|| -> Result<Value, CliError> {
-        let config = framework::team_config(workspace, &selected.team_dir, team).map_err(error)?
+        let config = framework::team_config(workspace, &selected.team_dir, team, Some(target_id.as_str())).map_err(error)?
             .ok_or_else(|| error("contract team configuration is unavailable"))?;
         let role = config.roles.iter().find(|role| role.id == target_id)
             .ok_or_else(|| error("forked contract role was not configured"))?;

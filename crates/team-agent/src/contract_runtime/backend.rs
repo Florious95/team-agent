@@ -921,7 +921,7 @@ pub(crate) fn prepare_restart(
     directory: &Path,
     state: &serde_json::Value,
 ) -> Result<Vec<PreparedResume>, BackendError> {
-    let config = super::framework::team_config(workspace, directory, team)?.ok_or(BackendError::Metadata)?;
+    let config = super::framework::team_config(workspace, directory, team, None)?.ok_or(BackendError::Metadata)?;
     let mut prepared = Vec::new();
     let agents = state.get("agents").and_then(serde_json::Value::as_object).ok_or(BackendError::Metadata)?;
     for (id, _) in agents.iter().filter(|(_, row)| {

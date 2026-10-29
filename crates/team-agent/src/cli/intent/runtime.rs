@@ -231,6 +231,7 @@ fn check_native_noop_settings(
             &selected.run_workspace,
             &selected.team_dir,
             &selected.team_key,
+            Some(id),
         ))?
         .ok_or_else(|| refusal("missing native configuration"))?;
         let current = config
@@ -496,6 +497,18 @@ fn check_incarnation_cwd(selected: &SelectedTeam, row: &Value) -> Result<(), Cli
     }
     Ok(())
 }
+fn admit_seat_preflight(plan: &mut Plan, id: &str, team: bool, result: Result<(), CliError>) -> Result<bool, CliError> {
+    match result {
+        Ok(()) => Ok(true),
+        Err(error) if team && plan.intent.verb == Verb::Start => {
+            plan.skipped.push(json!({"agent":id,"reason":"preflight_blocked",
+                "error":crate::redaction::redact_external_text(&error.to_string())}));
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn preflight_start(
     selected: &SelectedTeam,
     id: &str,
@@ -508,6 +521,7 @@ fn preflight_start(
             &selected.run_workspace,
             &selected.team_dir,
             &selected.team_key,
+            Some(id),
         ))?
         .ok_or_else(|| refusal("missing native role config"))?;
         let role = config
@@ -939,6 +953,11 @@ fn plan_with_observer(
                 let p = selected.team_dir.join("agents").join(format!("{id}.md"));
                 p.is_file().then_some(p)
             });
+            let admission = checked(crate::contract_runtime::framework::team_config(
+                &selected.run_workspace, &selected.team_dir, &selected.team_key, Some(&id))).map(|_| ());
+            if !admit_seat_preflight(&mut plan, &id, team, admission)? {
+                continue;
+            }
             add(&mut plan, &selected, &id, source)?;
             continue;
         };
@@ -970,7 +989,10 @@ fn plan_with_observer(
         if actions.is_empty() {
             if obs == Observation::Live && plan.intent.verb == Verb::Start {
                 let (_, compiled) = role(&mut plan, &selected, &id, None)?;
-                check_native_noop_settings(&selected, &id, row)?;
+                let admission = check_native_noop_settings(&selected, &id, row);
+                if !admit_seat_preflight(&mut plan, &id, team, admission)? {
+                    continue;
+                }
                 if drift(row, &compiled) {
                     return Err(refusal(format!(
                         "known launch configuration drift for running {id}; stop before applying"
@@ -984,7 +1006,10 @@ fn plan_with_observer(
                 if !same_provider(provider(row), provider(&compiled)) {
                     return Err(refusal("registered provider cannot change"));
                 }
-                preflight_start(&selected, &id, row, plan.intent.session)?;
+                let admission = preflight_start(&selected, &id, row, plan.intent.session);
+                if !admit_seat_preflight(&mut plan, &id, team, admission)? {
+                    continue;
+                }
             }
             for action in actions {
                 match action {

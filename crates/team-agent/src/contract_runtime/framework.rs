@@ -82,6 +82,7 @@ pub fn require_legacy_lifecycle(
                 &selected.run_workspace,
                 Path::new(directory),
                 &selected.team_key,
+                agent,
             )
             .ok()
             .flatten()
@@ -122,8 +123,9 @@ pub fn team_config(
     workspace: &Path,
     directory: &Path,
     team: &str,
+    seat: Option<&str>,
 ) -> Result<Option<config::TeamConfig>, config::ConfigError> {
-    config::read_team(&crate::cli::QuickStartArgs {
+    let args = crate::cli::QuickStartArgs {
         workspace: workspace.into(),
         agents_dir: directory.into(),
         name: None,
@@ -132,7 +134,11 @@ pub fn team_config(
         json: false,
         detail: false,
         backend: Some("tmux".into()),
-    })
+    };
+    match seat {
+        Some(seat) => config::read_seat(&args, seat),
+        None => config::read_team(&args),
+    }
 }
 pub fn start_role(
     workspace: &Path,
@@ -162,7 +168,7 @@ pub(crate) fn start_configured(
     seat: &SeatId,
 ) -> Result<Value, crate::cli::CliError> {
     let error = |error: String| crate::cli::CliError::Runtime(error);
-    let config = team_config(workspace, directory, team)
+    let config = team_config(workspace, directory, team, Some(seat.as_str()))
         .map_err(|e| error(e.to_string()))?
         .ok_or_else(|| error("contract role no longer configured".into()))?;
     let role = config.roles.iter().find(|role| &role.id == seat)

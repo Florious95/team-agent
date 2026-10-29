@@ -110,12 +110,12 @@ pub fn start_agent(
         };
         // Contract configuration, not a stale legacy dynamic_role_file, is the
         // authoritative source. Never patch an unrelated external role file.
-        let original = config::read_team(&args).map_err(error)?.ok_or(BackendError::Metadata).map_err(error)?;
+        let original = config::read_seat(&args, agent).map_err(error)?.ok_or(BackendError::Metadata).map_err(error)?;
         let source = original.roles.iter().find(|role| &role.id == id)
             .ok_or(BackendError::Metadata).map_err(error)?.source.clone();
         let previous = std::fs::read_to_string(&source).map_err(error)?;
         let next = crate::lifecycle::role_config::patched_role(&previous, &AgentId::new(agent), patch, false).map_err(error)?;
-        let config = config::read_team_with_role_override(&args, &source, &next).map_err(error)?.ok_or(BackendError::Metadata).map_err(error)?;
+        let config = config::read_team_with_role_override(&args, &source, &next, agent).map_err(error)?.ok_or(BackendError::Metadata).map_err(error)?;
         let role = config.roles.iter().find(|role| &role.id == id).ok_or(BackendError::Metadata).map_err(error)?;
         let row = selected.state.get("agents").and_then(|agents| agents.get(agent)).ok_or(BackendError::Metadata).map_err(error)?;
         if !registry::same_provider(row.get("provider").and_then(Value::as_str).unwrap_or(""), role.provider.as_str()) {
@@ -459,7 +459,7 @@ pub fn reset_agent(
         }
         let row = selected.state.get("agents").and_then(|agents| agents.get(agent))
             .ok_or(BackendError::Metadata).map_err(error)?;
-        let config = framework::team_config(&selected.run_workspace, &selected.team_dir, &selected.team_key)
+        let config = framework::team_config(&selected.run_workspace, &selected.team_dir, &selected.team_key, Some(agent))
             .map_err(error)?.ok_or_else(|| error("contract role no longer configured"))?;
         let role = config.roles.iter().find(|role| &role.id == id)
             .ok_or_else(|| error("contract role no longer configured"))?;
