@@ -4,6 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -132,10 +133,7 @@ impl Directory {
             agent: agent.to_string(),
             socket,
             pane_id: pane_id.to_string(),
-            dialect: field(info, "dialect")
-                .or_else(|| field(info, "provider"))
-                .unwrap_or("enter")
-                .to_string(),
+            dialect: endpoint_dialect(field(info, "provider"), field(info, "dialect")),
         })
     }
 
@@ -161,6 +159,46 @@ impl Directory {
     }
 }
 
+fn canonical_dialect(name: &str) -> String {
+    let normalized = name.trim().to_ascii_lowercase().replace('-', "_");
+    match normalized.as_str() {
+        "claude" | "claude_code" | "claudecode" | "claude_tui" => "claude".into(),
+        "pi" | "pi_tui" => "pi".into(),
+        "cursor" | "cursor_agent" | "agent" => "cursor".into(),
+        "codex" | "codex_cli" => "codex".into(),
+        "grok" | "grok_build" => "grok".into(),
+        "double_enter" => "double-enter".into(),
+        "cursor_double_enter" => "cursor-double-enter".into(),
+        _ => name.trim().to_string(),
+    }
+}
+
+fn endpoint_dialect(provider: Option<&str>, configured: Option<&str>) -> String {
+    let provider = canonical_dialect(provider.unwrap_or("enter"));
+    match configured.map(canonical_dialect).as_deref() {
+        // A key-count override must not discard Cursor's native paste floor. The resolved
+        // dialect is self-contained, so `locate` -> raw `send` preserves the same sequence.
+        Some("double-enter") if provider == "cursor" => "cursor-double-enter".into(),
+        Some("enter") | None => provider,
+        Some(dialect) => dialect.to_string(),
+    }
+}
+
+fn submit_sequence(dialect: &str) -> (Duration, usize) {
+    // Keep the legacy tmux executor's ordering: completed paste -> native floor -> Enter.
+    // Cursor's in-tree interaction profile and ac30977b's Claude profile specify 100ms,
+    // one Enter, and retry-never. The approved direct-actuator map intentionally uses
+    // Pi/Codex=0 and Grok=150ms; Grok's contract uses 150ms for *queue flush*, not its
+    // 100ms paste floor. Do not copy receipt/queue keys or claim these maps are identical.
+    match canonical_dialect(dialect).as_str() {
+        "claude" | "cursor" => (Duration::from_millis(100), 1),
+        "grok" => (Duration::from_millis(150), 1),
+        "cursor-double-enter" => (Duration::from_millis(100), 2),
+        "double-enter" => (Duration::ZERO, 2),
+        _ => (Duration::ZERO, 1),
+    }
+}
+
 fn tmux(socket: &str) -> Command {
     let mut command = Command::new("tmux");
     if socket != "default" && !socket.is_empty() {
@@ -183,7 +221,8 @@ fn check_output(output: std::process::Output) -> Result<(), String> {
 }
 
 /// Physical success means paste + submit only, never provider acceptance or task completion.
-/// Provider names use the normal Enter dialect; double-enter is an explicit primitive dialect.
+/// Provider names/aliases select their native paste floor and one Enter. Only an explicit
+/// double-enter dialect adds a second key; there is no observation-driven retry or third Enter.
 pub fn direct_send(socket: &str, pane_id: &str, dialect: &str, text: &str) -> Result<(), String> {
     if !pane_id
         .strip_prefix('%')
@@ -218,31 +257,44 @@ pub fn direct_send(socket: &str, pane_id: &str, dialect: &str, text: &str) -> Re
         return Err(error.to_string());
     }
     check_output(loaded)?;
-    let result = (|| {
-        check_output(tmux(socket)
-            .args(["paste-buffer", "-p", "-r", "-d", "-b", &buffer, "-t", pane_id])
-            .output().map_err(|e| e.to_string())?)?;
-        // A distinct input turn is required after bracketed paste. Reuse the
-        // measured Claude floor, including generic endpoints with no provider.
-        std::thread::sleep(team_agent_contract::providers::claude::interaction::PASTE_TO_SUBMIT_FLOOR);
-        let mut command = tmux(socket);
-        command.args(["send-keys", "-t", pane_id, "Enter"]);
-        if dialect == "double-enter" {
-            command.args([";", "send-keys", "-t", pane_id, "Enter"]);
-        }
-        command.output().map_err(|e| e.to_string()).and_then(check_output)
-    })();
-    if result.is_err() {
+    let pasted = tmux(socket)
+        .args([
+            "paste-buffer",
+            "-p",
+            "-r",
+            "-d",
+            "-b",
+            &buffer,
+            "-t",
+            pane_id,
+        ])
+        .output()
+        .map_err(|e| e.to_string())
+        .and_then(check_output);
+    if let Err(error) = pasted {
         let _ = tmux(socket).args(["delete-buffer", "-b", &buffer]).output();
+        return Err(error);
     }
-    result
+    let (floor, enter_count) = submit_sequence(dialect);
+    if !floor.is_zero() {
+        std::thread::sleep(floor);
+    }
+    let mut command = tmux(socket);
+    command.args(["send-keys", "-t", pane_id, "Enter"]);
+    if enter_count == 2 {
+        command.args([";", "send-keys", "-t", pane_id, "Enter"]);
+    }
+    command
+        .output()
+        .map_err(|e| e.to_string())
+        .and_then(check_output)
 }
 
 pub fn send(endpoint: &Endpoint, text: &str) -> Result<Value, String> {
     direct_send(&endpoint.socket, &endpoint.pane_id, &endpoint.dialect, text)?;
     Ok(
         json!({"status": "sent", "recipient": endpoint.agent, "pane_id": endpoint.pane_id,
-        "delivery": "physical", "accepted": null}),
+        "dialect": endpoint.dialect, "delivery": "physical", "accepted": null}),
     )
 }
 

@@ -89,9 +89,16 @@ with (root / 'received').open('ab', buffering=0) as out:
             std::thread::sleep(Duration::from_millis(10));
         }
     }
+    fn cli(&self, args: &[&str]) -> Output {
+        self.command(args).output().unwrap()
+    }
     fn cli_command(&self, args: &[&str]) -> Command {
+        self.command(args)
+    }
+    fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_team-agent"));
-        command.args(args)
+        command
+            .args(args)
             .args(["--workspace", self.root.to_str().unwrap(), "--json"])
             .env_remove("TEAM_AGENT_ID")
             .env_remove("TEAM_AGENT_AGENT_ID")
@@ -99,9 +106,6 @@ with (root / 'received').open('ab', buffering=0) as out:
             .env_remove("TEAM_AGENT_OWNER_TEAM_ID")
             .env_remove("TEAM_AGENT_TEAM_ID");
         command
-    }
-    fn cli(&self, args: &[&str]) -> Output {
-        self.cli_command(args).output().unwrap()
     }
     fn received(&self, expected: &str) {
         let expected = format!("\x1b[200~{expected}\x1b[201~\r").into_bytes();
@@ -445,6 +449,189 @@ fn detached_leader_replies_and_offline_mailbox_are_still_stored() {
             .len(),
         2
     );
+    assert!(!fixture.root.join(".team/runtime/team.db").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn automatic_provider_dialects_preserve_native_floors_and_key_budgets() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let bin = fixture.root.join("fake-bin");
+    fs::create_dir(&bin).unwrap();
+    let wrapper = bin.join("tmux");
+    fs::write(
+        &wrapper,
+        r#"#!/usr/bin/env python3
+import json, os, sys, time
+args = sys.argv[1:]
+action = args[2] if args[0] in ('-S', '-L') else args[0]
+started = time.monotonic_ns()
+if action == 'load-buffer':
+    sys.stdin.buffer.read()
+if action == 'paste-buffer':
+    time.sleep(0.02)
+with open(os.environ['TMUX_TEST_TRACE'], 'a') as log:
+    log.write(json.dumps({'args': args, 'action': action, 'started': started,
+                          'finished': time.monotonic_ns()}) + '\n')
+if action == 'paste-buffer' and os.environ.get('TMUX_TEST_FAIL_PASTE'):
+    sys.exit(7)
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let trace = fixture.root.join("tmux-trace.jsonl");
+    let state_path = fixture.root.join(".team/runtime/state.json");
+    let mut state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    let database = fixture.root.join(".team/runtime/team.db");
+    fs::write(&database, b"must remain unopened").unwrap();
+
+    // Approved direct-actuator policy, including historical wire synonyms.
+    let cases = [
+        ("cursor", None, "cursor", 100, 1),
+        ("cursor_agent", None, "cursor", 100, 1),
+        ("cursor-agent", None, "cursor", 100, 1),
+        ("agent", None, "cursor", 100, 1),
+        ("claude", None, "claude", 100, 1),
+        ("claude_tui", None, "claude", 100, 1),
+        ("claude-code", None, "claude", 100, 1),
+        ("pi", None, "pi", 0, 1),
+        ("pi_tui", None, "pi", 0, 1),
+        ("codex", None, "codex", 0, 1),
+        ("codex_cli", None, "codex", 0, 1),
+        ("grok", None, "grok", 150, 1),
+        ("grok_build", None, "grok", 150, 1),
+        (
+            "cursor_agent",
+            Some("double-enter"),
+            "cursor-double-enter",
+            100,
+            2,
+        ),
+        ("cursor", Some("enter"), "cursor", 100, 1),
+        ("retired-provider", None, "retired-provider", 0, 1),
+    ];
+    for (provider, configured, expected, floor_ms, enter_count) in cases {
+        let worker = state["teams"]["alpha"]["agents"]["worker"]
+            .as_object_mut()
+            .unwrap();
+        worker.insert("provider".into(), json!(provider));
+        worker.remove("dialect");
+        if let Some(dialect) = configured {
+            worker.insert("dialect".into(), json!(dialect));
+        }
+        let snapshot = serde_json::to_vec(&state).unwrap();
+        fs::write(&state_path, &snapshot).unwrap();
+        let endpoint = team_agent::direct_delivery::directory(&fixture.root, Some("alpha"))
+            .unwrap()
+            .endpoint("worker")
+            .unwrap();
+        assert_eq!(endpoint.dialect, expected, "{provider}");
+
+        // Both semantic addressing and raw locator output must select the same policy.
+        for args in [
+            vec!["send", "worker", "policy test"],
+            vec![
+                "send",
+                "--socket",
+                &endpoint.socket,
+                "--pane",
+                &endpoint.pane_id,
+                "--dialect",
+                &endpoint.dialect,
+                "policy test",
+            ],
+        ] {
+            fs::write(&trace, b"").unwrap();
+            let output = fixture
+                .command(&args)
+                .env("PATH", &path)
+                .env("TMUX_TEST_TRACE", &trace)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{provider}: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            let calls: Vec<Value> = fs::read_to_string(&trace)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(calls.len(), 3, "{provider}: {calls:?}");
+            assert_eq!(calls[0]["action"], "load-buffer");
+            assert_eq!(calls[1]["action"], "paste-buffer");
+            assert_eq!(calls[2]["action"], "send-keys");
+            let paste_args = calls[1]["args"].as_array().unwrap();
+            assert!(paste_args.contains(&json!("-p")) && paste_args.contains(&json!("-r")));
+            let elapsed_ns =
+                calls[2]["started"].as_u64().unwrap() - calls[1]["finished"].as_u64().unwrap();
+            assert!(
+                elapsed_ns >= floor_ms * 1_000_000,
+                "{provider}: floor not honored: {elapsed_ns}"
+            );
+            assert_eq!(
+                calls[2]["args"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|arg| **arg == json!("Enter"))
+                    .count(),
+                enter_count,
+                "{provider}"
+            );
+            assert_eq!(fs::read(&state_path).unwrap(), snapshot);
+            assert_eq!(fs::read(&database).unwrap(), b"must remain unopened");
+        }
+    }
+    fs::write(&trace, b"").unwrap();
+    let failed = fixture
+        .command(&["send", "worker", "must not submit"])
+        .env("PATH", path)
+        .env("TMUX_TEST_TRACE", &trace)
+        .env("TMUX_TEST_FAIL_PASTE", "1")
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    assert!(!fs::read_to_string(trace).unwrap().contains("send-keys"));
+    assert!(!fixture.root.join(".team/inbox").exists());
+}
+
+#[test]
+fn cursor_opt_in_confirmation_is_two_enters_and_never_a_third() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join(".team/runtime/state.json");
+    let mut state: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    state["teams"]["alpha"]["agents"]["worker"]["provider"] = json!("cursor_agent");
+    state["teams"]["alpha"]["agents"]["worker"]["dialect"] = json!("double-enter");
+    fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+    let started = Instant::now();
+    let result = fixture
+        .tools()
+        .send_message(
+            &MessageTarget::Single("worker".into()),
+            "cursor confirmation",
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .to_value();
+    assert!(started.elapsed() >= Duration::from_millis(100));
+    assert_eq!(result["dialect"], "cursor-double-enter");
+    let expected = b"\x1b[200~Team Agent message from worker:\n\ncursor confirmation\x1b[201~\r\r";
+    fixture.wait_for(|| {
+        fs::read(fixture.root.join("received"))
+            .unwrap_or_default()
+            .len()
+            >= expected.len()
+    });
+    assert_eq!(fs::read(fixture.root.join("received")).unwrap(), expected);
     assert!(!fixture.root.join(".team/runtime/team.db").exists());
 }
 
