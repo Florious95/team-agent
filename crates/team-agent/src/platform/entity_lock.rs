@@ -24,15 +24,22 @@ impl EntityLock {
     /// Caller has successfully acquired the OS lock on this exact file.
     pub(crate) fn acquired(path: &Path, file: File) -> std::io::Result<Rc<Self>> {
         let key = path.canonicalize()?;
-        let lock = Rc::new(Self { file, key: key.clone() });
-        HELD.with(|held| { held.borrow_mut().insert(key, Rc::downgrade(&lock)); });
+        let lock = Rc::new(Self {
+            file,
+            key: key.clone(),
+        });
+        HELD.with(|held| {
+            held.borrow_mut().insert(key, Rc::downgrade(&lock));
+        });
         Ok(lock)
     }
 }
 
 impl Drop for EntityLock {
     fn drop(&mut self) {
-        HELD.with(|held| { held.borrow_mut().remove(&self.key); });
+        HELD.with(|held| {
+            held.borrow_mut().remove(&self.key);
+        });
         let _ = super::file_lock::unlock(&self.file);
         // File closure also releases the lock if explicit unlock fails.
     }

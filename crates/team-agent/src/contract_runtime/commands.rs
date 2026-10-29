@@ -45,9 +45,14 @@ pub(super) fn with_agent(
         team: Some(&selected.team_key),
         agent_id: Some(&agent_id),
     }).map_err(error)?;
-    let latest = resolve_active_team_readonly(
+    let mut latest = resolve_active_team_readonly(
         &selected.run_workspace, Some(&selected.team_key), SelectorMode::RuntimeOnly,
     ).map_err(error)?;
+    if let Some(current) = crate::station::projection::target(&selected.run_workspace, &selected.team_key, agent).map_err(error)? {
+        if let Some(row) = latest.state.get_mut("agents").and_then(|agents| agents.get_mut(agent)).and_then(Value::as_object_mut) {
+            row.insert("station_instance_id".into(), json!(current.instance_id));
+        }
+    }
     crate::lifecycle::launch::ensure_owner_allowed_for_state(&latest.state, Some(&agent_id)).map_err(error)?;
     if !latest.state.get("agents").and_then(|agents| agents.get(agent)).is_some_and(framework::is_contract) {
         return Err(CliError::Runtime("contract seat changed while acquiring lifecycle ownership".into()));
@@ -56,18 +61,26 @@ pub(super) fn with_agent(
 }
 
 pub(super) fn publish_at(workspace: &Path, team: &str, id: &SeatId, clear_stop: bool) -> Result<Value, CliError> {
-    let projected = framework::project_seat(workspace, team, id.as_str()).map_err(error)?;
+    let mut projected = framework::project_seat(workspace, team, id.as_str()).map_err(error)?;
+    let mut fields = projected.as_object().ok_or(BackendError::Metadata).map_err(error)?.clone();
+    fields.insert("paused".into(), Value::Bool(false));
+    if clear_stop { fields.insert("explicit_stop".into(), Value::Bool(false)); }
+    let mut preview = resolve_active_team_readonly(workspace, Some(team), SelectorMode::RuntimeOnly)
+        .map_err(error)?.state;
+    preview.get_mut("agents").and_then(|agents| agents.get_mut(id.as_str()))
+        .and_then(Value::as_object_mut).ok_or(BackendError::Metadata).map_err(error)?.extend(fields.clone());
+    if let Some(current) = crate::station::projection::target(workspace, team, id.as_str()).map_err(error)? {
+        preview["agents"][id.as_str()]["station_instance_id"] = json!(current.instance_id);
+    }
+    crate::station::projection::publish(workspace, &mut preview, team, &[id.as_str()]).map_err(error)?;
+    let instance = preview["agents"][id.as_str()]["station_instance_id"].clone();
+    fields.insert("station_instance_id".into(), instance.clone());
+    projected["station_instance_id"] = instance;
     StateRepository::new(workspace).commit(
         StateWriteIntent::StartAgent { team_key: team, agent_id: id.as_str() },
         |state| {
             if let Some(row) = state.get_mut("agents").and_then(|agents| agents.get_mut(id.as_str())).and_then(Value::as_object_mut) {
-                for (key, value) in projected.as_object().expect("native projection object") {
-                    row.insert(key.clone(), value.clone());
-                }
-                row.insert("paused".into(), Value::Bool(false));
-                if clear_stop {
-                    row.insert("explicit_stop".into(), Value::Bool(false));
-                }
+                row.extend(fields);
             }
         },
     ).map_err(error)?;
@@ -168,8 +181,8 @@ pub(crate) struct NativeRestartResult {
     pub outcome: Result<(), String>,
 }
 
-/// Called with the ordinary workspace lifecycle lock already held. Native
-/// panes never enter legacy transport spawn, backing scan or shared teardown.
+/// Each native seat owns its lock through resume and publication. Native panes
+/// never enter legacy transport spawn, backing scan or shared teardown.
 pub(crate) fn restart_prepared(
     workspace: &Path,
     team: &str,
@@ -180,6 +193,18 @@ pub(crate) fn restart_prepared(
         let id = prepared.seat().clone();
         let session_id = prepared.session().map(str::to_owned);
         let outcome = (|| {
+            let agent = AgentId::new(id.as_str());
+            let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
+                workspace, operation: "restart", team: Some(team), agent_id: Some(&agent),
+            }).map_err(error)?;
+            if crate::station::projection::target(workspace, team, id.as_str()).map_err(error)?
+                .is_some_and(|seat| seat.desired != "running")
+            { return Err(error("seat stopped or removed during restart preparation")); }
+            let latest = Backend::open_readonly(workspace, team).map_err(error)?;
+            if latest.store.seat(&id).map_err(error)?.is_none_or(|seat| seat.status == SeatStatus::Stopped) {
+                return Err(error("seat stopped or removed during restart preparation"));
+            }
+            drop(latest);
             let receipt = backend::resume(prepared).map_err(error)?;
             let projection = checked_projection(&receipt, || publish_at(workspace, team, &id, false))?;
             if let Some(row) = state.get_mut("agents").and_then(|agents| agents.get_mut(id.as_str())).and_then(Value::as_object_mut) {
@@ -255,6 +280,8 @@ pub fn stop_agent(
             row.insert(key.clone(), value.clone());
         }
         row.insert("explicit_stop".into(), Value::Bool(true));
+        crate::station::projection::publish(&selected.run_workspace, &mut state, &selected.team_key, &[agent])
+            .map_err(error)?;
         StateRepository::new(&selected.run_workspace).save(
             StateWriteIntent::StopAgent { team_key: &selected.team_key, agent_id: agent }, &state,
         ).map_err(error)?;
