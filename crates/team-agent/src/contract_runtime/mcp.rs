@@ -239,10 +239,13 @@ fn run_observed(args: &[String], diagnostics: &mut Diagnostics) -> Result<(), Ba
     })?;
     // Registration is not an initialize/tools-list/client-consumption fact.
     // Those continue to be recorded only at the existing protocol boundaries.
+    let tools = crate::mcp_server::TeamOrchestratorTools::with_identity(
+        &backend.binding.workspace.path, Some(crate::model::ids::AgentId::new(identity.seat.as_str())),
+        Some(crate::model::ids::TeamKey::new(&team)));
     let result = diagnostics.step("serve", || {
-        serve_with_diagnostics(
+        serve_with_handler(
             &mut backend.store,
-            |store, request| {
+            |store, _request| {
                 if verify_native_ancestry(&record.process, &record.native_process).is_err() {
                     return Err(Error::Fence);
                 }
@@ -256,27 +259,6 @@ fn run_observed(args: &[String], diagnostics: &mut Diagnostics) -> Result<(), Ba
                 {
                     return Err(Error::Fence);
                 }
-                let business =
-                    request.get("method").and_then(serde_json::Value::as_str) == Some("tools/call");
-                let mut task = String::new();
-                if business {
-                    // A native callback can race the physical receipt's DB commit. Wait
-                    // for that exact generation's submitted turn, never a queued row.
-                    let deadline = Instant::now() + Duration::from_secs(5);
-                    loop {
-                        match store.submitted_task(&identity) {
-                            Ok(Some(bound)) => {
-                                task = bound;
-                                break;
-                            }
-                            Ok(None) | Err(Error::Conflict) if Instant::now() < deadline => {
-                                std::thread::sleep(Duration::from_millis(20))
-                            }
-                            Ok(None) => return Err(Error::Invalid("no submitted native turn")),
-                            Err(error) => return Err(error),
-                        }
-                    }
-                }
                 if verify_native_ancestry(&record.process, &record.native_process).is_err() {
                     return Err(Error::Fence);
                 }
@@ -284,7 +266,7 @@ fn run_observed(args: &[String], diagnostics: &mut Diagnostics) -> Result<(), Ba
                     identity: identity.clone(),
                     binding_key: record.binding_key.clone(),
                     connection_id: connection.clone(),
-                    task_id: task,
+                    task_id: String::new(),
                 })
             },
             std::io::stdin().lock(),
@@ -299,6 +281,7 @@ fn run_observed(args: &[String], diagnostics: &mut Diagnostics) -> Result<(), Ba
                     Some(error),
                 );
             },
+            |store, context, request| direct_request(store, context, request, &tools),
         )
     });
     let closed = diagnostics.step("close_connection", || {
@@ -307,6 +290,18 @@ fn run_observed(args: &[String], diagnostics: &mut Diagnostics) -> Result<(), Ba
     result?;
     closed?;
     Ok(())
+}
+
+pub(super) fn direct_request(
+    store: &mut ContractStore, context: &CallContext, request: &Value,
+    tools: &crate::mcp_server::TeamOrchestratorTools,
+) -> Result<Option<Value>, Error> {
+    if request.get("method").and_then(Value::as_str) == Some("tools/call") {
+        authorize_direct_call(store, context, request)?;
+    }
+    crate::mcp_server::handle_mcp(tools, request)
+        .map_err(|_| Error::Invalid("framework MCP request"))?
+        .map(|response| serde_json::to_value(response).map_err(Error::from)).transpose()
 }
 
 #[cfg(test)]

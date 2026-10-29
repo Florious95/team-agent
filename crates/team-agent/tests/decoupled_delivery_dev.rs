@@ -466,6 +466,10 @@ fn automatic_provider_dialects_preserve_native_floors_and_key_budgets() {
 import json, os, sys, time
 args = sys.argv[1:]
 action = args[2] if args[0] in ('-S', '-L') else args[0]
+# Named sends retain the selected-pane liveness guard; this fixture measures input framing.
+if action == 'display-message':
+    print('0')
+    sys.exit(0)
 started = time.monotonic_ns()
 if action == 'load-buffer':
     sys.stdin.buffer.read()

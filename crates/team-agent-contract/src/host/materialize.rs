@@ -196,6 +196,40 @@ impl<R: CommandRunner> OwnedIo for ScopedMaterializer<R> {
             Ok(receipt)
         }
     }
+    fn merge_shared_entry(
+        &mut self,
+        request: &OwnedResourceRequest,
+    ) -> Result<OwnedResourceReceipt, PartialFailure> {
+        let refuse = |error| PartialFailure { error, receipt: MaterializeReceipt { resources: vec![] } };
+        if !self.requests.contains(request) {
+            return Err(refuse(ContractError::Mismatch("captured write grant")));
+        }
+        let root = self.roots.get(request.path.root()).ok_or_else(|| refuse(ContractError::Mismatch("captured root")))?;
+        if request.kind != ResourceKind::McpConfig
+            || !self.policies.contains(&ResourcePolicy { kind: request.kind, disposition: ResourceDisposition::SharedEntry })
+        {
+            return Err(refuse(ContractError::Invalid("resource policy")));
+        }
+        let mut receipt = OwnedResourceReceipt {
+            path: request.path.clone(),
+            owner: request.owner.clone(),
+            operation: self.operation.clone(),
+            kind: request.kind,
+            disposition: ResourceDisposition::SharedEntry,
+            write_effect: ResourceWriteEffect::MayHaveWritten,
+            exclusive: false,
+            creation_identity: None,
+        };
+        let key = shared_entry_key(&request.owner);
+        // Only static operation names reach the error; never file contents.
+        update_shared(root, &request.path, true, |current| edit_shared(&request.path, current, &key, Some(&request.contents)))
+            .map_err(|error| PartialFailure {
+                error: ContractError::Invalid(error.operation),
+                receipt: MaterializeReceipt { resources: vec![receipt.clone()] },
+            })?;
+        receipt.write_effect = ResourceWriteEffect::Written { bytes_sha256: digest(&request.contents) };
+        Ok(receipt)
+    }
     fn read_bound_session(
         &mut self,
         _: &ResumeBinding,
@@ -473,6 +507,17 @@ pub fn remove_quiescent(
     owner: &InstanceIdentity,
     receipt: &OwnedResourceReceipt,
 ) -> Result<bool, HostError> {
+    if receipt.disposition == ResourceDisposition::SharedEntry {
+        if &receipt.owner != owner || receipt.kind != ResourceKind::McpConfig {
+            return Ok(false);
+        }
+        let key = shared_entry_key(owner);
+        // A missing file or directory holds no entry of this owner.
+        return match update_shared(root, &receipt.path, false, |current| edit_shared(&receipt.path, current, &key, None)) {
+            Err(HostError { kind: HostErrorKind::Io(std::io::ErrorKind::NotFound), .. }) => Ok(true),
+            result => result.map(|_| true),
+        };
+    }
     if &receipt.owner != owner
         || receipt.disposition != ResourceDisposition::OwnedRemovable
         || matches!(
@@ -504,6 +549,177 @@ pub fn remove_quiescent(
         parent
             .sync_all()
             .map_err(|e| HostError::io("config directory sync", e))?;
+        Ok(true)
+    }
+}
+
+/// Name of a seat's own entry inside a shared configuration file: one per
+/// scope/seat/instance/generation, recomputed from a receipt's owner at removal.
+pub fn shared_entry_key(owner: &InstanceIdentity) -> String {
+    let text = format!(
+        "team-entry-v1\0{}\0{}\0{}\0{}",
+        owner.scope.as_str(), owner.seat.as_str(), owner.instance.as_str(), owner.generation.0
+    );
+    format!("team_{}", &super::digest_hex(digest(text.as_bytes()))[..32])
+}
+
+enum SharedEdit {
+    Unchanged,
+    Write(Vec<u8>),
+    Remove,
+}
+
+/// Merges (`entry` Some) or removes (None) exactly one owner entry. JSON keeps
+/// every other key; TOML keeps every other byte and holds the entry between
+/// marker lines. A file left with nothing else in it is removed.
+fn edit_shared(path: &OwnedPath, current: Option<&[u8]>, key: &str, entry: Option<&[u8]>) -> Result<SharedEdit, HostError> {
+    let invalid = |operation| HostError::new(operation, HostErrorKind::Invalid);
+    match path.relative().extension().and_then(|extension| extension.to_str()) {
+        Some("json") => {
+            let mut document = match current {
+                Some(bytes) => serde_json::from_slice(bytes)
+                    .map_err(|_| invalid("project MCP configuration is not valid JSON; fix or remove it"))?,
+                None => serde_json::json!({}),
+            };
+            let servers = document.as_object_mut()
+                .ok_or_else(|| invalid("project MCP configuration is not a JSON object"))?
+                .entry("mcpServers").or_insert_with(|| serde_json::json!({}))
+                .as_object_mut().ok_or_else(|| invalid("project MCP configuration mcpServers is not an object"))?;
+            let removal = match entry {
+                Some(fragment) => {
+                    let fragment: serde_json::Value = serde_json::from_slice(fragment).map_err(|_| invalid("seat MCP entry"))?;
+                    let value = fragment.as_object().filter(|root| root.len() == 1)
+                        .and_then(|root| root.get("mcpServers")).and_then(serde_json::Value::as_object)
+                        .filter(|entries| entries.len() == 1).and_then(|entries| entries.get(key))
+                        .filter(|value| value.is_object()).ok_or_else(|| invalid("seat MCP entry"))?;
+                    servers.insert(key.into(), value.clone());
+                    false
+                }
+                None if servers.remove(key).is_none() => return Ok(SharedEdit::Unchanged),
+                None => true,
+            };
+            if removal && document == serde_json::json!({"mcpServers": {}}) {
+                return Ok(SharedEdit::Remove);
+            }
+            let mut bytes = serde_json::to_vec_pretty(&document).map_err(|_| invalid("project MCP configuration encoding"))?;
+            bytes.push(b'\n');
+            Ok(SharedEdit::Write(bytes))
+        }
+        Some("toml") => {
+            let mut text = match current {
+                Some(bytes) => std::str::from_utf8(bytes)
+                    .map_err(|_| invalid("project MCP configuration is not UTF-8 TOML; fix or remove it"))?.to_owned(),
+                None => String::new(),
+            };
+            let begin = format!("# >>> team-agent seat entry {key} (removed when the seat stops)\n");
+            let end = format!("# <<< team-agent seat entry {key}\n");
+            let found = match text.find(&begin) {
+                Some(start) => {
+                    let stop = text[start..].find(&end).map(|offset| start + offset + end.len())
+                        .ok_or_else(|| invalid("project MCP configuration has an unterminated team-agent entry"))?;
+                    text.replace_range(start..stop, "");
+                    true
+                }
+                None => false,
+            };
+            match entry {
+                Some(fragment) => {
+                    let fragment = std::str::from_utf8(fragment).ok().filter(|fragment| fragment.ends_with('\n'))
+                        .ok_or_else(|| invalid("seat MCP entry"))?;
+                    if !text.is_empty() && !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                    text.push_str(&begin);
+                    text.push_str(fragment);
+                    text.push_str(&end);
+                }
+                None if !found => return Ok(SharedEdit::Unchanged),
+                None if text.trim().is_empty() => return Ok(SharedEdit::Remove),
+                None => {}
+            }
+            Ok(SharedEdit::Write(text.into_bytes()))
+        }
+        _ => Err(HostError::new("shared configuration format", HostErrorKind::Unsupported)),
+    }
+}
+
+/// Read-edit-replace under an exclusive lock on the containing directory, so
+/// concurrent seats never lose each other's entries. The file is replaced by an
+/// atomic rename and keeps its mode; a symlink or foreign-owned file is refused.
+fn update_shared(
+    root: &CwdIdentity,
+    path: &OwnedPath,
+    create: bool,
+    edit: impl FnOnce(Option<&[u8]>) -> Result<SharedEdit, HostError>,
+) -> Result<bool, HostError> {
+    let (parent, name) = open_parent(root, path, create)?;
+    #[cfg(not(unix))]
+    {
+        let _ = (parent, name, edit);
+        Err(HostError::new("shared configuration", HostErrorKind::Unsupported))
+    }
+    #[cfg(unix)]
+    {
+        use nix::fcntl::{openat, renameat, Flock, FlockArg, OFlag};
+        use nix::sys::stat::{fchmod, Mode};
+        use nix::unistd::{unlinkat, UnlinkatFlags};
+        use std::os::unix::fs::MetadataExt;
+        let parent = Flock::lock(parent, FlockArg::LockExclusive)
+            .map_err(|(_, error)| HostError::io("shared configuration lock", error.into()))?;
+        let current = match openat(
+            &*parent,
+            name.as_str(),
+            OFlag::O_RDONLY | OFlag::O_NONBLOCK | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => {
+                let file = File::from(fd);
+                let metadata = file.metadata().map_err(|e| HostError::io("shared configuration metadata", e))?;
+                if !metadata.is_file() || metadata.uid() != nix::unistd::geteuid().as_raw() {
+                    return Err(HostError::new("project MCP configuration is not a regular file owned by this user", HostErrorKind::Ownership));
+                }
+                let mut bytes = vec![];
+                (&file).take(16 * 1024 * 1024 + 1).read_to_end(&mut bytes)
+                    .map_err(|e| HostError::io("shared configuration read", e))?;
+                if bytes.len() > 16 * 1024 * 1024 {
+                    return Err(HostError::new("shared configuration size", HostErrorKind::Invalid));
+                }
+                Some((bytes, metadata.mode() & 0o7777))
+            }
+            Err(nix::errno::Errno::ENOENT) => None,
+            Err(error) => return Err(HostError::io("shared configuration open", error.into())),
+        };
+        let bytes = match edit(current.as_ref().map(|(bytes, _)| bytes.as_slice()))? {
+            SharedEdit::Unchanged => return Ok(false),
+            SharedEdit::Remove => {
+                unlinkat(&*parent, name.as_str(), UnlinkatFlags::NoRemoveDir)
+                    .map_err(|e| HostError::io("shared configuration remove", e.into()))?;
+                parent.sync_all().map_err(|e| HostError::io("shared configuration directory sync", e))?;
+                return Ok(true);
+            }
+            SharedEdit::Write(bytes) => bytes,
+        };
+        let mode = current.map_or(0o644, |(_, mode)| mode);
+        let temporary = format!(".{name}.team-agent-{}", std::process::id());
+        // Only a crashed earlier holder of this pid can have left it; we hold the lock.
+        let _ = unlinkat(&*parent, temporary.as_str(), UnlinkatFlags::NoRemoveDir);
+        let fd = openat(
+            &*parent,
+            temporary.as_str(),
+            OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::from_bits_truncate(0o600),
+        )
+        .map_err(|e| HostError::io("shared configuration temporary", e.into()))?;
+        let mut file = File::from(fd);
+        let written = file.write_all(&bytes)
+            .and_then(|_| fchmod(&file, Mode::from_bits_truncate(mode as _)).map_err(std::io::Error::from))
+            .and_then(|_| file.sync_all())
+            .and_then(|_| renameat(&*parent, temporary.as_str(), &*parent, name.as_str()).map_err(std::io::Error::from))
+            .and_then(|_| parent.sync_all());
+        if let Err(error) = written {
+            let _ = unlinkat(&*parent, temporary.as_str(), UnlinkatFlags::NoRemoveDir);
+            return Err(HostError::io("shared configuration write", error));
+        }
         Ok(true)
     }
 }

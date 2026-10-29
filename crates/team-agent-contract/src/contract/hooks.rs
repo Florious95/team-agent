@@ -79,6 +79,17 @@ pub trait OwnedIo {
         &mut self,
         request: &OwnedResourceRequest,
     ) -> Result<OwnedResourceReceipt, PartialFailure>;
+    /// Adds the owner's entry to a shared configuration file (SharedEntry);
+    /// every other entry and the file itself are left as they are.
+    fn merge_shared_entry(
+        &mut self,
+        _request: &OwnedResourceRequest,
+    ) -> Result<OwnedResourceReceipt, PartialFailure> {
+        Err(PartialFailure {
+            error: ContractError::Invalid("shared configuration entries are not granted"),
+            receipt: MaterializeReceipt { resources: vec![] },
+        })
+    }
     fn read_bound_session(
         &mut self,
         binding: &ResumeBinding,

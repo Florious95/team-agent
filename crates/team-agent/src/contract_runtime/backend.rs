@@ -470,7 +470,7 @@ fn preflight_request(
     discovered: &Discovery,
 ) -> Result<LaunchRequest, BackendError> {
     let mut request = request(binding, role, identity, discovered)?;
-    if matches!(registry::provider(role.provider.as_str())?, registry::NativeProvider::GrokBuild | registry::NativeProvider::Codex) {
+    if matches!(registry::provider(role.provider.as_str())?, registry::NativeProvider::Codex) {
         // Pure H2 only: this is a proposed private path, not a filesystem receipt.
         request.paths.cwd = team_agent_contract::contract::session::CwdIdentity {
             path: binding.transport_root.join("workspaces").join(role.id.as_str()),
@@ -487,9 +487,8 @@ pub(super) fn require_private_primary(
     cwd: &team_agent_contract::contract::session::CwdIdentity,
 ) -> Result<(), BackendError> {
     match selected {
-        registry::NativeProvider::GrokBuild => team_agent_contract::providers::grok_build::native::require_private_primary(cwd)?,
         registry::NativeProvider::Codex => team_agent_contract::providers::codex::launcher::require_private_primary(cwd)?,
-        registry::NativeProvider::Kiro | registry::NativeProvider::Cursor | registry::NativeProvider::Pi | registry::NativeProvider::Claude => {}
+        registry::NativeProvider::GrokBuild | registry::NativeProvider::Kiro | registry::NativeProvider::Cursor | registry::NativeProvider::Pi | registry::NativeProvider::Claude => {}
     }
     Ok(())
 }
@@ -594,6 +593,49 @@ pub(super) fn require_candidate(binding: &Binding) -> Result<(), BackendError> {
     if candidate != binding.candidate || fingerprint_file(&candidate, 1024 * 1024 * 1024,
         Duration::from_secs(10))? != binding.candidate_sha256 { return Err(Error::Fence.into()); }
     Ok(())
+}
+
+/// Explicit discard-session may adopt an upgraded binary at the SAME installed
+/// path, but only while every native seat is stopped and all operations ended.
+/// Ordinary start/resume/MCP calls retain the exact candidate fingerprint fence.
+pub(super) fn refresh_quiescent_candidate(workspace: &Path, team: &str, seat: &SeatId) -> Result<(), BackendError> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let mut backend = Backend::open(workspace, team)?;
+    let candidate = std::env::current_exe()?.canonicalize()?;
+    if candidate != backend.binding.candidate { return Err(Error::Fence.into()); }
+    let fingerprint = fingerprint_file(&candidate, 1024 * 1024 * 1024, Duration::from_secs(10))?;
+    if fingerprint == backend.binding.candidate_sha256 { return Ok(()); }
+    let root = root_for(workspace, &backend.binding.scope);
+    if root.canonicalize()? != root { return Err(Error::Fence.into()); }
+    let directory = std::fs::File::open(&root)?;
+    if !crate::platform::file_lock::try_lock_once_nonblocking(&directory)? { return Err(Error::Conflict.into()); }
+    if !backend.store.unfinished()?.is_empty() { return Err(Error::Conflict.into()); }
+    for current in backend.store.seats()? {
+        if current.status != SeatStatus::Stopped || backend.store.leased(&current.identity.seat)?
+            || current.physical.as_ref().is_some_and(|target| !matches!(
+                team_agent_contract::host::process::sample_process(&target.process),
+                team_agent_contract::host::process::ProcessState::Exited | team_agent_contract::host::process::ProcessState::Replaced)) {
+            return Err(Error::Invalid("stop the native cohort before upgrading its candidate binding").into());
+        }
+    }
+    let path = root.join("framework-binding.json");
+    let metadata = std::fs::symlink_metadata(&path)?;
+    if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.nlink() != 1 || metadata.mode() & 0o022 != 0 { return Err(Error::Fence.into()); }
+    let before = std::fs::read(&path)?;
+    backend.binding.candidate_sha256 = fingerprint;
+    let temporary = root.join(format!("binding-{}.tmp", backend.store.propose_identity(seat)?.instance.as_str()));
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(metadata.mode() & 0o777).open(&temporary)?;
+    let result = (|| -> Result<(), BackendError> {
+        file.write_all(&serde_json::to_vec(&backend.binding).map_err(|_| BackendError::Metadata)?)?;
+        file.sync_all()?;
+        if std::fs::read(&path)? != before { return Err(Error::Fence.into()); }
+        std::fs::rename(&temporary, &path)?;
+        directory.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() { let _ = std::fs::remove_file(&temporary); }
+    result
 }
 
 fn validate_existing(backend: &Backend, role: &RoleConfig, record: &OperationRecord) -> Result<SeatRecord, BackendError> {
@@ -1459,6 +1501,78 @@ mod tests {
             assert_eq!(store.seat(&fixture.identity.seat).unwrap(), Some(seat));
             assert_eq!(store.propose_identity(&fixture.identity.seat).unwrap().generation, Generation(2));
         }
+    }
+
+    #[test]
+    fn explicit_discard_can_refresh_only_a_quiescent_same_path_candidate() {
+        for status in [SeatStatus::Ready, SeatStatus::Stopped] {
+            let mut fixture = RoleFixture::new();
+            fixture.binding.candidate = std::env::current_exe().unwrap().canonicalize().unwrap();
+            fixture.binding.candidate_sha256 = Digest([0; 32]);
+            let _backend = fixture.canonical(status, Phase::F5Receipt, Outcome::Committed, None);
+            let path = root_for(&fixture.root, &fixture.binding.scope).join("framework-binding.json");
+            let before = std::fs::read(&path).unwrap();
+            assert!(require_candidate(&fixture.binding).is_err());
+            let result = refresh_quiescent_candidate(&fixture.root, "test", &fixture.identity.seat);
+            if status == SeatStatus::Ready {
+                assert!(result.is_err());
+                assert_eq!(std::fs::read(&path).unwrap(), before);
+            } else {
+                result.unwrap();
+                require_candidate(&Backend::open_readonly(&fixture.root, "test").unwrap().binding).unwrap();
+                fixture.binding.candidate = fixture.root.join("foreign-candidate");
+                std::fs::write(&path, serde_json::to_vec(&fixture.binding).unwrap()).unwrap();
+                assert!(refresh_quiescent_candidate(&fixture.root, "test", &fixture.identity.seat).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn native_business_tools_use_independent_inbox_without_submitted_tasks() {
+        use team_agent_contract::orchestration::mcp::CallContext;
+        let mut fixture = RoleFixture::new();
+        fixture.role.provider = ProviderId::new("grok_build").unwrap();
+        let _backend = fixture.canonical(SeatStatus::Ready, Phase::F5Receipt, Outcome::Committed, None);
+        let mut backend = Backend::open(&fixture.root, "test").unwrap();
+        let state = serde_json::json!({"active_team_key":"test", "teams":{"test":{
+            "team_key":"test", "team_dir":fixture.root, "agents":{"worker":{"provider":"grok","status":"running"}}
+        }}});
+        let state_file = crate::state::persist::runtime_state_path(&fixture.root);
+        std::fs::write(state_file, serde_json::to_vec(&state).unwrap()).unwrap();
+        let tools = crate::mcp_server::TeamOrchestratorTools::with_identity(
+            &fixture.root, Some(crate::model::ids::AgentId::new("worker")),
+            Some(crate::model::ids::TeamKey::new("test")));
+        let context = CallContext { identity: fixture.identity.clone(), binding_key:"controlled".into(),
+            connection_id:InstanceId::new("direct-callback").unwrap(), task_id:String::new() };
+        assert!(backend.store.submitted_task(&fixture.identity).unwrap().is_none());
+        for (id, name, arguments) in [
+            (1, "send_message", serde_json::json!({"to":"leader","content":"unbound native callback","mailbox":true})),
+            (2, "get_team_status", serde_json::json!({})),
+            (3, "report_result", serde_json::json!({"summary":"independent native result"})),
+        ] {
+            let request = serde_json::json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":arguments}});
+            let result = super::super::mcp::direct_request(&mut backend.store, &context, &request, &tools).unwrap().unwrap();
+            assert_eq!(result["result"]["isError"], false, "{result}");
+        }
+        let inbox = crate::inbox_store::read(&fixture.root, "leader", 10, Some("test")).unwrap();
+        assert_eq!(inbox["messages"].as_array().unwrap().len(), 2);
+        let db = rusqlite::Connection::open(fixture.binding.transport_root.join("contract.db")).unwrap();
+        let outbox: i64 = db.query_row("select count(*) from contract_outbox", [], |row| row.get(0)).unwrap();
+        assert_eq!(outbox, 0, "no synthetic task or message-delivery ledger row");
+        let mut foreign = context.clone(); foreign.identity.generation = Generation(2);
+        let request = serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"send_message","arguments":{"to":"leader","content":"must not arrive","mailbox":true}}});
+        assert!(super::super::mcp::direct_request(&mut backend.store, &foreign, &request, &tools).is_err());
+    }
+
+    #[test]
+    fn grok_projection_exposes_public_provider_and_keeps_internal_contract_id() {
+        let mut fixture = RoleFixture::new();
+        fixture.role.provider = ProviderId::new("grok_build").unwrap();
+        let _backend = fixture.canonical(SeatStatus::Ready, Phase::F5Receipt, Outcome::Committed, None);
+        write_role(&fixture.binding, &fixture.identity, &fixture.role).unwrap();
+        let projected = super::super::framework::project_seat(&fixture.root, "test", fixture.identity.seat.as_str()).unwrap();
+        assert_eq!(projected["provider"], "grok");
+        assert_eq!(projected["contract_provider"], "grok_build");
     }
 
     #[test]

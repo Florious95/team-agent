@@ -488,8 +488,7 @@ pub fn reset_agent(
         if live {
             // The fresh start below must not fail its candidate fence after the
             // old seat is already gone.
-            backend::require_candidate(&Backend::open_readonly(&selected.run_workspace, &selected.team_key)
-                .map_err(error)?.binding).map_err(error)?;
+            backend::refresh_quiescent_candidate(&selected.run_workspace, &selected.team_key, id).map_err(error)?;
             match reset_guard(activity(&selected.run_workspace, &selected.team_key, id)?, agent) {
                 Err(refusal) => return Ok(refusal),
                 Ok(Activity::Stopped) => {}

@@ -112,10 +112,7 @@ impl Lifecycle<'_> {
                     }) {
                         if resource.owner != parent.identity
                             || resource.path.root() != granted_root(&parent, resource.kind, self.store.root())
-                            || resource.disposition != ResourceDisposition::OwnedRemovable
-                            || !resource.exclusive
-                            || !matches!(resource.write_effect, ResourceWriteEffect::Written { .. })
-                            || matches!(resource.kind, ResourceKind::SessionBacking | ResourceKind::GlobalSettings | ResourceKind::NativeDatabase)
+                            || !removable(resource)
                         { return Err(Error::Fence); }
                         operation.pending = Some("cleanup-parent".into());
                         self.store.save(&operation, false)?;
@@ -323,6 +320,7 @@ impl Lifecycle<'_> {
                             policy.disposition,
                             ResourceDisposition::OwnedRemovable
                                 | ResourceDisposition::OwnedPreserved
+                                | ResourceDisposition::SharedEntry
                         )
                 })
                 .map(|policy| policy.kind)
@@ -568,15 +566,7 @@ impl Lifecycle<'_> {
             let removable = resource.owner == operation.target.identity
                 && resource.path.root()
                     == granted_root(&operation.target, resource.kind, self.store.root())
-                && resource.exclusive
-                && matches!(resource.write_effect, ResourceWriteEffect::Written { .. })
-                && resource.disposition == ResourceDisposition::OwnedRemovable
-                && !matches!(
-                    resource.kind,
-                    ResourceKind::SessionBacking
-                        | ResourceKind::GlobalSettings
-                        | ResourceKind::NativeDatabase
-                );
+                && removable(&resource);
             operation.pending = Some("cleanup".into());
             self.store.save(operation, false)?;
             let removed = removable && self.host.remove_owned(&resource)?;
@@ -631,6 +621,24 @@ fn granted_root<'a>(
     }
 }
 
+/// An exclusively created owned file, or this seat's entry in a shared file.
+/// The entry is addressed by its owner's key, so even a may-have-written merge
+/// is removed without touching anything else in the file.
+fn removable(resource: &OwnedResourceReceipt) -> bool {
+    match resource.disposition {
+        ResourceDisposition::OwnedRemovable => {
+            resource.exclusive
+                && matches!(resource.write_effect, ResourceWriteEffect::Written { .. })
+                && !matches!(
+                    resource.kind,
+                    ResourceKind::SessionBacking | ResourceKind::GlobalSettings | ResourceKind::NativeDatabase
+                )
+        }
+        ResourceDisposition::SharedEntry => resource.kind == ResourceKind::McpConfig,
+        _ => false,
+    }
+}
+
 /// Interposes at the *actual* owned-I/O boundary. Even an H3/H7 error with an
 /// empty receipt cannot erase effects already journaled through this port.
 struct JournaledIo<'a> {
@@ -640,10 +648,11 @@ struct JournaledIo<'a> {
     descriptor: &'a ProviderDescriptor,
     allowed_requests: Option<&'a [OwnedResourceRequest]>,
 }
-impl OwnedIo for JournaledIo<'_> {
-    fn create_exclusive(
+impl JournaledIo<'_> {
+    fn journal(
         &mut self,
         request: &OwnedResourceRequest,
+        shared: bool,
     ) -> Result<OwnedResourceReceipt, PartialFailure> {
         let fail = |error| PartialFailure {
             error,
@@ -666,10 +675,14 @@ impl OwnedIo for JournaledIo<'_> {
                 .contains(&request.kind)
                 != (materialization_scope(self.descriptor, request.kind)
                     == crate::contract::descriptor::ResourceScope::WorkingDirectory))
-            || !matches!(
-                disposition,
-                Some(ResourceDisposition::OwnedRemovable | ResourceDisposition::OwnedPreserved)
-            )
+            || if shared {
+                disposition != Some(ResourceDisposition::SharedEntry)
+            } else {
+                !matches!(
+                    disposition,
+                    Some(ResourceDisposition::OwnedRemovable | ResourceDisposition::OwnedPreserved)
+                )
+            }
             || matches!(
                 request.kind,
                 ResourceKind::GlobalSettings | ResourceKind::NativeDatabase
@@ -702,7 +715,11 @@ impl OwnedIo for JournaledIo<'_> {
         self.store
             .save(self.operation, false)
             .map_err(|_| fail(ContractError::Invalid("journal unavailable")))?;
-        let result = self.inner.create_exclusive(request);
+        let result = if shared {
+            self.inner.merge_shared_entry(request)
+        } else {
+            self.inner.create_exclusive(request)
+        };
         match &result {
             Ok(receipt) => {
                 if receipt.path != request.path
@@ -710,7 +727,7 @@ impl OwnedIo for JournaledIo<'_> {
                     || receipt.operation != self.operation.id
                     || receipt.kind != request.kind
                     || Some(receipt.disposition) != disposition
-                    || !receipt.exclusive
+                    || receipt.exclusive == shared
                     || !matches!(receipt.write_effect, ResourceWriteEffect::Written { .. })
                 {
                     return Err(fail(ContractError::Mismatch("owned write receipt")));
@@ -733,6 +750,20 @@ impl OwnedIo for JournaledIo<'_> {
             .save(self.operation, false)
             .map_err(|_| fail(ContractError::Invalid("journal unavailable after write")))?;
         result
+    }
+}
+impl OwnedIo for JournaledIo<'_> {
+    fn create_exclusive(
+        &mut self,
+        request: &OwnedResourceRequest,
+    ) -> Result<OwnedResourceReceipt, PartialFailure> {
+        self.journal(request, false)
+    }
+    fn merge_shared_entry(
+        &mut self,
+        request: &OwnedResourceRequest,
+    ) -> Result<OwnedResourceReceipt, PartialFailure> {
+        self.journal(request, true)
     }
     fn read_bound_session(
         &mut self,

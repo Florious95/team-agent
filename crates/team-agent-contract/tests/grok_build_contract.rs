@@ -451,9 +451,12 @@ fn grok_launch(sandbox: &support::Sandbox, command: &PublicCommand) -> (GrokAdap
     let mut runtime = probe_runtime(command, &sandbox.parent, &mut Runner, bounds).unwrap(); runtime.native.platform = Platform::MacOs;
     let catalog = CatalogObservation { provider: ProviderId::new("grok_build").unwrap(), native: metadata, schema: CATALOG_SOURCE.schema.into(), models: parse_catalog(CATALOG.as_bytes()).unwrap() };
     let catalog = runtime.bind_catalog(&catalog).unwrap();
-    let a = adapter().with_runtime(runtime.clone()).with_project("/actual/project".into()).unwrap();
+    let project = sandbox.parent.join("actual-project");
+    std::fs::create_dir_all(project.join(".git")).unwrap();
+    let a = adapter().with_runtime(runtime.clone()).with_project(project.clone()).unwrap();
     std::fs::create_dir_all(&sandbox.root).unwrap();
     let mut r = support::request(&sandbox.root, "worker"); r.provider = "grok_build".into(); r.native = runtime.native.clone();
+    r.paths.cwd = resolve_cwd(&project).unwrap();
     r.paths.launcher = runtime.launcher(); r.paths.executable = runtime.engine.clone(); r.paths.candidate = "/fake/candidate".into(); r.model = Some("grok-4.7".into());
     r.prompt = Some("user\nproject\nrole\nTEAM".into()); r.input_profile = Some(PROFILE.into()); r.bypass = true;
     let resolved = resolve_launch(&GROK_BUILD_DESCRIPTOR, &a.hooks(), &r, Some(&catalog)).unwrap();
@@ -468,6 +471,11 @@ fn runtime_catalog_and_launch_identity_fence_exact_native_without_release_pins()
     let (a, resolved, plan, runtime) = grok_launch(&sandbox, &command);
     // The vendor symlink is the entry as found; the inner image is only the fence.
     assert_eq!(plan.launcher.command, "grok");
+    assert_eq!(plan.cwd, sandbox.parent.join("actual-project"));
+    assert!(plan.arguments.windows(2).any(|args| args[0] == "--cwd" && args[1] == plan.cwd.as_os_str()));
+    assert!(plan.arguments.windows(2).any(|args| args[0] == "--leader-socket" && std::path::Path::new(&args[1]).starts_with(&sandbox.root)));
+    assert_eq!(plan.materialization[0].path.root(), plan.cwd);
+    assert_eq!(plan.materialization[1].path.root(), sandbox.root);
     assert_eq!(plan.launcher.executable, bin.join("grok"));
     assert_eq!(plan.executable, image);
     assert_eq!(runtime.native.executable_sha256, digest(b"controlled final native"));
@@ -485,10 +493,14 @@ fn runtime_catalog_and_launch_identity_fence_exact_native_without_release_pins()
     }
     let mut descriptor = GROK_BUILD_DESCRIPTOR.clone(); descriptor.tool_names.naming = Support::Supported(ToolNaming::StaticServer { key: "team" });
     assert!(resolve_launch(&descriptor, &a.hooks(), &r, Some(&catalog)).is_err());
-    descriptor = GROK_BUILD_DESCRIPTOR.clone(); descriptor.workspace.shared_cwd = true;
+    descriptor = GROK_BUILD_DESCRIPTOR.clone(); descriptor.teardown.resources = &[];
     assert!(resolve_launch(&descriptor, &a.hooks(), &r, Some(&catalog)).is_err());
     let mut wrong = r.clone(); wrong.model = Some("luna-invented".into());
     assert!(resolve_launch(&GROK_BUILD_DESCRIPTOR, &a.hooks(), &wrong, Some(&catalog)).is_err());
+    // Even an otherwise valid request may not redirect this project into a private cwd.
+    let mut redirected = r.clone(); redirected.paths.cwd = resolve_cwd(&sandbox.root).unwrap();
+    let redirected = resolve_launch(&GROK_BUILD_DESCRIPTOR, &a.hooks(), &redirected, Some(&catalog)).unwrap();
+    assert!(a.plan(&redirected).is_err());
     // A launcher other than the probed PATH route can never be planned.
     let mut wrong = r.clone(); wrong.paths.launcher.sha256 = digest(b"another entry");
     let resolved = resolve_launch(&GROK_BUILD_DESCRIPTOR, &a.hooks(), &wrong, Some(&catalog)).unwrap();

@@ -257,7 +257,8 @@ pub fn project_seat(workspace: &Path, team: &str, id: &str) -> Result<Value, Bac
             .and_then(|receipt| receipt.failure)
     } else { None };
     Ok(
-        json!({"agent_id":id,"provider":seat.provider,"status":status,"model":role.model,"effort":role.effort,
+        json!({"agent_id":id,"provider":if seat.provider.as_str() == "grok_build" { "grok" } else { seat.provider.as_str() },
+         "contract_provider":seat.provider,"status":status,"model":role.model,"effort":role.effort,
         "contract_prompt_sha256":team_agent_contract::host::digest_hex(role.prompt.sha256),
         "runtime_family":"contract","contract_scope":seat.identity.scope,"contract_instance":seat.identity.instance,
         "generation":seat.identity.generation,"owner_team_id":team,"team_key":team,

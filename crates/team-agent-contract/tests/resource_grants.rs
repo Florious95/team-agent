@@ -355,3 +355,204 @@ fn shared_writable_directory_is_not_silently_chmoded_or_adopted() {
     );
     std::fs::set_permissions(&request.paths.cwd.path, original).unwrap();
 }
+
+/// One seat's grant to merge its entry into `<project>/<file>`.
+fn shared_entry_seat(
+    sandbox: &Sandbox,
+    project: &std::path::Path,
+    seat: &str,
+    file: &str,
+    contents: impl Fn(&str) -> Vec<u8>,
+) -> (ScopedMaterializer<NoCommands>, OwnedResourceRequest) {
+    let mut d = descriptor();
+    d.mcp.scope = ResourceScope::WorkingDirectory;
+    d.workspace.shared_cwd = true;
+    d.teardown.resources = &[
+        ResourcePolicy { kind: ResourceKind::Prompt, disposition: ResourceDisposition::OwnedRemovable },
+        ResourcePolicy { kind: ResourceKind::SessionBacking, disposition: ResourceDisposition::OwnedPreserved },
+        ResourcePolicy { kind: ResourceKind::McpConfig, disposition: ResourceDisposition::SharedEntry },
+    ];
+    let mut request = request(&sandbox.root, seat);
+    request.paths.cwd = resolve_cwd(project).unwrap();
+    let resolved = resolve_launch(&d, &hooks(), &request, None).unwrap();
+    let mut plan = Fake.plan(&resolved).unwrap();
+    let entry = OwnedResourceRequest {
+        path: OwnedPath::new(project.into(), file.into()).unwrap(),
+        owner: request.identity.clone(),
+        kind: ResourceKind::McpConfig,
+        contents: contents(&shared_entry_key(&request.identity)),
+    };
+    plan.materialization.push(entry.clone());
+    let io = ScopedMaterializer::new(&d, &resolved, &plan, OperationId::new(format!("start-{seat}")).unwrap(), NoCommands).unwrap();
+    (io, entry)
+}
+
+fn json_entry(key: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({"mcpServers": {key: {"command": "/candidate", "args": [key], "env": {}}}})).unwrap()
+}
+
+#[test]
+fn seat_entries_join_and_leave_a_shared_json_file_without_touching_the_users() {
+    use std::os::unix::fs::PermissionsExt;
+    let sandbox = Sandbox::new();
+    std::fs::create_dir(&sandbox.root).unwrap();
+    let project = sandbox.parent.join("project");
+    std::fs::create_dir_all(project.join(".cursor")).unwrap();
+    let file = project.join(".cursor/mcp.json");
+    std::fs::write(&file, br#"{"mcpServers":{"user":{"command":"mine"}},"other":1}"#).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let root = resolve_cwd(&project).unwrap();
+    let (mut a, entry_a) = shared_entry_seat(&sandbox, &project, "alpha", ".cursor/mcp.json", json_entry);
+    let (mut b, entry_b) = shared_entry_seat(&sandbox, &project, "beta", ".cursor/mcp.json", json_entry);
+    let receipt_a = a.merge_shared_entry(&entry_a).unwrap();
+    let receipt_b = b.merge_shared_entry(&entry_b).unwrap();
+    assert_eq!(receipt_a.disposition, ResourceDisposition::SharedEntry);
+    assert!(!receipt_a.exclusive);
+    // A seat is granted only its own planned entry.
+    assert!(a.merge_shared_entry(&entry_b).is_err());
+    assert!(a.create_exclusive(&entry_a).is_err());
+    let key_a = shared_entry_key(&entry_a.owner);
+    let key_b = shared_entry_key(&entry_b.owner);
+    let read = || serde_json::from_slice::<serde_json::Value>(&std::fs::read(&file).unwrap()).unwrap();
+    let value = read();
+    assert_eq!(value["other"], 1);
+    assert_eq!(value["mcpServers"]["user"]["command"], "mine");
+    assert_eq!(value["mcpServers"][&key_a]["args"][0], key_a.as_str());
+    assert_eq!(value["mcpServers"][&key_b]["args"][0], key_b.as_str());
+    assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o640);
+    assert!(remove_quiescent(&root, &entry_a.owner, &receipt_a).unwrap());
+    assert!(remove_quiescent(&root, &entry_a.owner, &receipt_a).unwrap(), "already gone is removed");
+    // Another owner's receipt never removes anything.
+    assert!(!remove_quiescent(&root, &entry_a.owner, &receipt_b).unwrap());
+    let value = read();
+    assert!(value["mcpServers"].get(&key_a).is_none());
+    assert_eq!(value["mcpServers"][&key_b]["command"], "/candidate");
+    assert!(remove_quiescent(&root, &entry_b.owner, &receipt_b).unwrap());
+    assert_eq!(read(), serde_json::json!({"mcpServers": {"user": {"command": "mine"}}, "other": 1}));
+    // No temporary file is left behind.
+    assert_eq!(std::fs::read_dir(project.join(".cursor")).unwrap().count(), 1);
+}
+
+#[test]
+fn a_file_created_for_a_seat_entry_is_removed_with_it_and_invalid_user_files_are_kept() {
+    let sandbox = Sandbox::new();
+    std::fs::create_dir(&sandbox.root).unwrap();
+    let project = sandbox.parent.join("project");
+    std::fs::create_dir(&project).unwrap();
+    let root = resolve_cwd(&project).unwrap();
+    let file = project.join(".cursor/mcp.json");
+    let (mut seat, entry) = shared_entry_seat(&sandbox, &project, "alpha", ".cursor/mcp.json", json_entry);
+    let receipt = seat.merge_shared_entry(&entry).unwrap();
+    assert!(file.is_file());
+    assert!(remove_quiescent(&root, &entry.owner, &receipt).unwrap());
+    assert!(!file.exists());
+    // A user's file that is not valid JSON is never rewritten.
+    std::fs::write(&file, b"{ not json").unwrap();
+    let (mut seat, entry) = shared_entry_seat(&sandbox, &project, "beta", ".cursor/mcp.json", json_entry);
+    let failure = seat.merge_shared_entry(&entry).unwrap_err();
+    assert!(matches!(failure.error, ContractError::Invalid(message) if message.contains("not valid JSON")));
+    assert_eq!(std::fs::read(&file).unwrap(), b"{ not json");
+    // A symlinked configuration file is refused, not followed.
+    std::fs::remove_file(&file).unwrap();
+    std::fs::write(project.join("elsewhere.json"), b"{}").unwrap();
+    std::os::unix::fs::symlink(project.join("elsewhere.json"), &file).unwrap();
+    assert!(seat.merge_shared_entry(&entry).is_err());
+    assert_eq!(std::fs::read(project.join("elsewhere.json")).unwrap(), b"{}");
+}
+
+#[test]
+fn seat_entries_join_and_leave_a_shared_toml_file_byte_for_byte() {
+    let sandbox = Sandbox::new();
+    std::fs::create_dir(&sandbox.root).unwrap();
+    let project = sandbox.parent.join("project");
+    std::fs::create_dir_all(project.join(".grok")).unwrap();
+    let file = project.join(".grok/config.toml");
+    let user = "# user settings\n[mcp_servers.user]\ncommand = \"mine\"\nargs = [\"a\"]";
+    std::fs::write(&file, user).unwrap();
+    let root = resolve_cwd(&project).unwrap();
+    let toml = |key: &str| format!("[mcp_servers.{key}]\ncommand = \"/candidate\"\n").into_bytes();
+    let (mut a, entry_a) = shared_entry_seat(&sandbox, &project, "alpha", ".grok/config.toml", toml);
+    let (mut b, entry_b) = shared_entry_seat(&sandbox, &project, "beta", ".grok/config.toml", toml);
+    let receipt_a = a.merge_shared_entry(&entry_a).unwrap();
+    let receipt_b = b.merge_shared_entry(&entry_b).unwrap();
+    // Merging the same entry again does not duplicate it.
+    a.merge_shared_entry(&entry_a).unwrap();
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.starts_with(&format!("{user}\n")));
+    let key_a = shared_entry_key(&entry_a.owner);
+    assert_eq!(text.matches(&format!("[mcp_servers.{key_a}]")).count(), 1);
+    assert!(text.contains(&format!("[mcp_servers.{}]", shared_entry_key(&entry_b.owner))));
+    assert!(remove_quiescent(&root, &entry_a.owner, &receipt_a).unwrap());
+    assert!(remove_quiescent(&root, &entry_b.owner, &receipt_b).unwrap());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), format!("{user}\n"));
+}
+
+struct SharedEntryPlan;
+impl PlanHook for SharedEntryPlan {
+    fn plan(&self, resolved: &ResolvedLaunch) -> Result<LaunchPlan, ContractError> {
+        let r = resolved.request();
+        let mut plan = Fake.plan(resolved)?;
+        plan.materialization.push(OwnedResourceRequest {
+            path: OwnedPath::new(r.paths.cwd.path.clone(), ".cursor/mcp.json".into())?,
+            owner: r.identity.clone(),
+            kind: ResourceKind::McpConfig,
+            contents: json_entry(&shared_entry_key(&r.identity)),
+        });
+        Ok(plan)
+    }
+}
+impl MaterializeHook for SharedEntryPlan {
+    fn materialize(&self, requests: &[OwnedResourceRequest], io: &mut dyn OwnedIo) -> Result<MaterializeReceipt, PartialFailure> {
+        let mut resources = vec![];
+        for request in requests {
+            resources.push(if request.kind == ResourceKind::McpConfig {
+                io.merge_shared_entry(request)?
+            } else {
+                io.create_exclusive(request)?
+            });
+        }
+        Ok(MaterializeReceipt { resources })
+    }
+}
+
+#[test]
+fn lifecycle_journals_a_shared_entry_in_the_project_and_teardown_removes_it() {
+    let sandbox = Sandbox::new();
+    let project = sandbox.parent.join("project");
+    std::fs::create_dir(&project).unwrap();
+    let mut store = sandbox.store();
+    let mut d = descriptor();
+    d.mcp.scope = ResourceScope::WorkingDirectory;
+    d.workspace.shared_cwd = true;
+    d.teardown.resources = &[
+        ResourcePolicy { kind: ResourceKind::Prompt, disposition: ResourceDisposition::OwnedRemovable },
+        ResourcePolicy { kind: ResourceKind::SessionBacking, disposition: ResourceDisposition::OwnedPreserved },
+        ResourcePolicy { kind: ResourceKind::McpConfig, disposition: ResourceDisposition::SharedEntry },
+    ];
+    let mut h = hooks();
+    h.plan = HookBinding::Bound(&SharedEntryPlan);
+    h.materialize = HookBinding::Bound(&SharedEntryPlan);
+    let mut req = request(&sandbox.root, "worker");
+    req.paths.cwd = resolve_cwd(&project).unwrap();
+    let resolved = resolve_launch(&d, &h, &req, None).unwrap();
+    let plan = SharedEntryPlan.plan(&resolved).unwrap();
+    let mut io = ScopedMaterializer::new(&d, &resolved, &plan, OperationId::new("shared-start").unwrap(), NoCommands).unwrap();
+    let mut host = FakeHost::default();
+    let operation = Lifecycle { store: &mut store, host: &mut host, io: &mut io }
+        .startup(&Adapter { descriptor: &d, hooks: &h, catalog: None }, &req, routing("worker"),
+            OperationId::new("shared-start").unwrap())
+        .unwrap();
+    assert_eq!(operation.outcome, Outcome::Committed, "{:?}", operation.failure);
+    assert_eq!(operation.target.workspace_resources, vec![ResourceKind::McpConfig]);
+    let entry = operation.resources.iter().find(|r| r.kind == ResourceKind::McpConfig).unwrap();
+    assert_eq!(entry.disposition, ResourceDisposition::SharedEntry);
+    assert_eq!(entry.path.root(), project);
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(project.join(".cursor/mcp.json")).unwrap()).unwrap();
+    assert!(value["mcpServers"].get(shared_entry_key(&req.identity)).is_some());
+    let stop = Lifecycle { store: &mut store, host: &mut host, io: &mut io }
+        .teardown(&operation.target.identity, OperationId::new("shared-stop").unwrap())
+        .unwrap();
+    assert_eq!(stop.outcome, Outcome::Committed);
+    assert_eq!(host.removed, 2, "prompt file and project entry");
+    assert!(stop.preserved.is_empty());
+}

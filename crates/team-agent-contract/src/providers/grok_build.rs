@@ -15,8 +15,10 @@ pub static GROK_BUILD_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     prompt: PromptFacet { carrier: Support::Supported(PromptCarrier::RuntimeBridge) },
     mcp: McpFacet { carrier: Support::Supported(McpCarrier::ScopedConfig), scope: ResourceScope::WorkingDirectory,
         tools: &TEAM_TOOLS,
-        // Account/native tools coexist. Only this generation's owned server and
-        // same-connection facts confer Team identity; ambient facts never do.
+        // Grok reads the project's .grok/config.toml, so this seat's entry lives
+        // there beside the user's and other seats'. Account/native tools coexist;
+        // only this generation's owned server and same-connection facts confer
+        // Team identity, and every other seat's server fails its ancestry fence.
         isolation: McpIsolation::OwnedServerIsolated },
     tool_names: ToolNameFacet { naming: Support::Supported(ToolNaming::RuntimeBound) },
     session: SessionFacet { fresh: FreshSession::CaptureAfterLaunch, resume: Support::Supported(ResumeMode::ExactId) },
@@ -24,15 +26,16 @@ pub static GROK_BUILD_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     input: InputFacet { profiles: Support::Supported(interaction::PROFILES) },
     startup: StartupFacet { interactive: true, authorized_consent: Support::Supported(()) },
     probe_sources: ProbeSourcesFacet { process: Support::Supported(ProbeSource::Host), pane: Support::Supported(ProbeSource::NativeSurface), server: Support::Supported(ProbeSource::ServerLifecycle), client_binding: Support::Supported(ProbeSource::NativeRuntime), round_trip: Support::Supported(ProbeSource::NativeRuntime), semantic: Support::Supported(ProbeSource::NativeSurface) },
-    workspace: WorkspaceFacet { config_scope: ResourceScope::WorkingDirectory, shared_cwd: false, requires_materialization_lease: true },
+    workspace: WorkspaceFacet { config_scope: ResourceScope::RuntimeRoot, shared_cwd: true, requires_materialization_lease: true },
     teardown: TeardownFacet { resources: &[
-        ResourcePolicy { kind: ResourceKind::McpConfig, disposition: ResourceDisposition::OwnedRemovable },
+        ResourcePolicy { kind: ResourceKind::McpConfig, disposition: ResourceDisposition::SharedEntry },
         ResourcePolicy { kind: ResourceKind::Prompt, disposition: ResourceDisposition::OwnedRemovable },
         ResourcePolicy { kind: ResourceKind::SessionBacking, disposition: ResourceDisposition::OwnedPreserved },
         ResourcePolicy { kind: ResourceKind::GlobalSettings, disposition: ResourceDisposition::Forbidden },
         ResourcePolicy { kind: ResourceKind::NativeDatabase, disposition: ResourceDisposition::Forbidden },
     ] },
 };
+const PROMPT_FILE: &str = "team-agent-prompt.txt";
 // Never derive Debug: argv/env/prompt values are not diagnostic payloads.
 pub struct McpStdio { pub executable: PathBuf, pub arguments: Vec<String>, pub environment: BTreeMap<String, String> }
 pub struct GrokAdapter { mcp: McpStdio, runtime: Option<native::RuntimeInstallation>, project: Option<PathBuf> }
@@ -85,16 +88,16 @@ impl PlanHook for GrokAdapter {
             || !interaction::PROFILES[0].matches_native(&r.native) || r.channel != Channel::Tmux || r.mode != LaunchMode::FullWorker
             || r.auth != AuthMode::NativeSubscription || self.mcp.executable != r.paths.candidate || !matches!(r.operation, Operation::Fresh | Operation::Resume)
         { return Err(ContractError::Mismatch("Grok native launch identity")); }
-        if r.paths.cwd.path == *project { return Err(ContractError::Invalid("Grok private primary required")); }
+        if r.paths.cwd.path != *project { return Err(ContractError::Mismatch("Grok authentic project cwd")); }
+        // The process runs in the project; the owned prompt stays in the seat's
+        // runtime directory and only the MCP entry joins the project file.
         let prompt = r.prompt.as_ref().ok_or(ContractError::Invalid("Grok worker prompt"))?;
         let mcp = self.mcp_resource(r.identity.clone(), r.paths.cwd.path.clone())?;
-        let prompt = OwnedResourceRequest { owner: r.identity.clone(), path: OwnedPath::new(r.paths.cwd.path.clone(), ".grok/team-agent-prompt.txt".into())?, kind: ResourceKind::Prompt, contents: prompt.as_bytes().to_vec() };
-        // Grok has no --add-dir. An explicit project instruction does not claim
-        // relative-cwd, project AGENTS or permissions equivalence with --cwd.
+        let prompt = OwnedResourceRequest { owner: r.identity.clone(), path: OwnedPath::new(r.paths.runtime_root.clone(), super::owned_file(&r.identity, PROMPT_FILE))?, kind: ResourceKind::Prompt, contents: prompt.as_bytes().to_vec() };
         let mut arguments: Vec<OsString> = vec!["--model".into(), resolved.model().ok_or(ContractError::Invalid("Grok exact model"))?.into(),
-            "--cwd".into(), r.paths.cwd.path.as_os_str().to_owned(), "--rules".into(),
-            format!("The actual task project is {}. Use explicit absolute paths into that project. The process working directory is private Team transport state, not the task repository.", project.display()).into(),
-            "--leader-socket".into(), r.paths.cwd.path.join("grok-leader.sock").into_os_string()];
+            "--cwd".into(), r.paths.cwd.path.as_os_str().to_owned()];
+        // Never the shared default ~/.grok/leader.sock; short enough for sun_path.
+        arguments.extend(["--leader-socket".into(), r.paths.runtime_root.join(format!("grok-{}.sock", &server_key(&r.identity)[5..21])).into_os_string()]);
         let bypass = if r.bypass { let index = arguments.len(); arguments.push("--always-approve".into()); CarrierUse::Specified(CarrierRef::Arguments(vec![index])) } else { CarrierUse::NotRequested };
         let effort = match resolved.effort() {
             EffortResolution::Unspecified => CarrierUse::NotRequested,
@@ -121,15 +124,17 @@ impl MaterializeHook for GrokAdapter {
         let first = requests.first().ok_or_else(|| failure(ContractError::Invalid("Grok owned resources"), vec![]))?;
         let expected = self.mcp_contents(&first.owner).map_err(|error| failure(error, vec![]))?;
         if requests.len() != 2 || requests[0].kind != ResourceKind::McpConfig || requests[0].path.relative() != Path::new(".grok/config.toml") || requests[0].contents != expected
-            || requests[1].kind != ResourceKind::Prompt || requests[1].path.relative() != Path::new(".grok/team-agent-prompt.txt")
-            || requests[1].owner != requests[0].owner || requests[1].path.root() != requests[0].path.root()
+            || requests[1].kind != ResourceKind::Prompt || requests[1].path.relative() != super::owned_file(&requests[1].owner, PROMPT_FILE)
+            || requests[1].owner != requests[0].owner
             || !std::str::from_utf8(&requests[1].contents).is_ok_and(nonblank)
         { return Err(failure(ContractError::Invalid("exact Grok owned MCP/prompt required"), vec![])); }
         let mut resources = vec![];
         for request in requests {
-            let receipt = match io.create_exclusive(request) { Ok(receipt) => receipt, Err(error) => { resources.extend(error.receipt.resources); return Err(failure(error.error, resources)); } };
-            let valid = receipt.path == request.path && receipt.owner == request.owner && receipt.kind == request.kind && receipt.exclusive
-                && receipt.disposition == ResourceDisposition::OwnedRemovable
+            let shared = request.kind == ResourceKind::McpConfig;
+            let result = if shared { io.merge_shared_entry(request) } else { io.create_exclusive(request) };
+            let receipt = match result { Ok(receipt) => receipt, Err(error) => { resources.extend(error.receipt.resources); return Err(failure(error.error, resources)); } };
+            let valid = receipt.path == request.path && receipt.owner == request.owner && receipt.kind == request.kind && receipt.exclusive != shared
+                && receipt.disposition == if shared { ResourceDisposition::SharedEntry } else { ResourceDisposition::OwnedRemovable }
                 && matches!(receipt.write_effect, ResourceWriteEffect::Written { bytes_sha256 } if bytes_sha256 == crate::host::digest(&request.contents));
             resources.push(receipt);
             if !valid { return Err(failure(ContractError::Mismatch("Grok materialization receipt"), resources)); }

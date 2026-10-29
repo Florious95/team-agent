@@ -313,6 +313,10 @@ pub enum ResourceDisposition {
     OwnedRemovable,
     OwnedPreserved,
     Shared,
+    /// This seat's own entry inside a configuration file the user and other
+    /// seats share. The entry is merged in and removed again; the file is never
+    /// owned, replaced wholesale or deleted while it holds anything else.
+    SharedEntry,
     Forbidden,
 }
 
@@ -494,6 +498,8 @@ pub fn validate_descriptor(
                         | ResourceKind::GlobalSettings
                         | ResourceKind::NativeDatabase
                 ))
+            || (resource.disposition == ResourceDisposition::SharedEntry
+                && resource.kind != ResourceKind::McpConfig)
         {
             return Err(ContractError::Invalid("resource disposition"));
         }

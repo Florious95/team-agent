@@ -84,9 +84,6 @@ fn call(
     args: &Value,
 ) -> Result<Value, Error> {
     validate_arguments(tool, args)?;
-    if context.task_id.trim().is_empty() {
-        return Err(Error::Invalid("bound task"));
-    }
     let scope = store.scope().clone();
     let tx = store
         .connection
@@ -405,6 +402,23 @@ pub fn response_written(
     Ok(())
 }
 
+/// Authenticate a direct business call without requiring a scheduler turn or
+/// writing a message/outbox row. The observation records actual transport input.
+pub fn authorize_direct_call(store: &mut ContractStore, context: &CallContext, request: &Value) -> Result<(), Error> {
+    if request.get("jsonrpc").and_then(Value::as_str) != Some("2.0") { return Err(Error::Invalid("jsonrpc")); }
+    let id = request.get("id").filter(|id| id.is_string() || id.is_i64() || id.is_u64()).ok_or(Error::Invalid("rpc id"))?;
+    let scope = store.scope().clone();
+    let tx = store.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let seat = current(&tx, &scope, &context.identity)?;
+    if seat.binding_key != context.binding_key || matches!(seat.status, SeatStatus::Stopped | SeatStatus::Unknown) {
+        return Err(Error::Fence);
+    }
+    tx.execute("INSERT OR IGNORE INTO contract_facts VALUES(?1,?2,'invocation_received')",
+        params![serde_json::to_string(&context.identity)?, format!("{}:{}", context.connection_id.as_str(), id)])?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Bounded newline-delimited stdio transport. A failed/partial write preserves
 /// durable results but cannot produce ResponseWritten. No implicit retry loop.
 pub fn serve<R: BufRead, W: Write>(
@@ -443,14 +457,27 @@ where
 /// request's real error to the host's bounded diagnostic sink.
 pub fn serve_with_diagnostics<R: BufRead, W: Write, F, D>(
     store: &mut ContractStore,
-    mut resolve_context: F,
-    mut reader: R,
-    mut writer: W,
-    mut rejected: D,
+    resolve_context: F,
+    reader: R,
+    writer: W,
+    rejected: D,
 ) -> Result<(), Error>
 where
     F: FnMut(&mut ContractStore, &Value) -> Result<CallContext, Error>,
     D: FnMut(RequestRejectionStage, &Error),
+{
+    serve_with_handler(store, resolve_context, reader, writer, rejected, handle)
+}
+
+/// Share framing and identity fences while the host supplies its business plane.
+pub fn serve_with_handler<R: BufRead, W: Write, F, D, H>(
+    store: &mut ContractStore, mut resolve_context: F, mut reader: R, mut writer: W,
+    mut rejected: D, mut handler: H,
+) -> Result<(), Error>
+where
+    F: FnMut(&mut ContractStore, &Value) -> Result<CallContext, Error>,
+    D: FnMut(RequestRejectionStage, &Error),
+    H: FnMut(&mut ContractStore, &CallContext, &Value) -> Result<Option<Value>, Error>,
 {
     loop {
         let mut frame = vec![];
@@ -465,7 +492,7 @@ where
         let request: Value = serde_json::from_slice(&frame)?;
         let context = resolve_context(store, &request);
         let (handled, stage) = match &context {
-            Ok(context) => (handle(store, context, &request), RequestRejectionStage::Handler),
+            Ok(context) => (handler(store, context, &request), RequestRejectionStage::Handler),
             Err(error) => (Err(error.clone()), RequestRejectionStage::Context),
         };
         let (response, success) = match handled {
