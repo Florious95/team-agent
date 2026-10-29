@@ -299,6 +299,14 @@ pub(super) fn save_launched_team_state_for_key(
     preserve_existing_leader_topology(&existing, &launched_key, &mut launched);
     drop_foreign_seeded_owner(&existing, &launched_key, &mut launched);
     drop_bare_worker_seeded_owner(&mut launched, &launched_key);
+    let published_ids: Vec<String> = match added_agent_id {
+        Some(id) => vec![id.to_string()],
+        None => launched.get("agents").and_then(serde_json::Value::as_object)
+            .map(|agents| agents.keys().cloned().collect()).unwrap_or_default(),
+    };
+    let published_refs: Vec<&str> = published_ids.iter().map(String::as_str).collect();
+    crate::station::projection::publish(workspace, &mut launched, &launched_key, &published_refs)
+        .map_err(LifecycleError::StatePersist)?;
     let merged = if team_key.is_some() {
         merge_workspace_team_state_with_key(&existing, &launched, &launched_key)
     } else {

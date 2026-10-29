@@ -642,7 +642,7 @@ pub(super) fn update_runtime_state_with_lifecycle_target(
     let _lock = RuntimeLock::acquire(workspace, "state-save", 2.0)?;
     // Malformed/unreadable state is an error, never an empty store.
     let mut latest = match std::fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text)?,
+        Ok(text) => decode_runtime_projection(workspace, &text)?,
         Err(error) if error.kind() == io::ErrorKind::NotFound => json!({}),
         Err(error) => return Err(error.into()),
     };
@@ -1775,6 +1775,15 @@ fn migrate_team_key_to_match_active_team(state: &mut Value) -> bool {
     true
 }
 
+fn decode_runtime_projection(workspace: &Path, text: &str) -> Result<Value, StateError> {
+    match serde_json::from_str(text) {
+        Ok(state) => Ok(state),
+        Err(error) => crate::station::projection::read_workspace(workspace)
+            .map_err(|message| StateError::Io(io::Error::other(message)))?
+            .ok_or(StateError::Json(error)),
+    }
+}
+
 pub fn load_runtime_state(workspace: &Path) -> Result<Value, StateError> {
     let path = runtime_state_path(workspace);
     if !path.exists() {
@@ -1786,8 +1795,12 @@ pub fn load_runtime_state(workspace: &Path) -> Result<Value, StateError> {
         );
     }
     let text = std::fs::read_to_string(&path)?;
-    let mut state: Value = serde_json::from_str(&text)?;
+    let mut state = decode_runtime_projection(workspace, &text)?;
     normalize_agent_session_state(&mut state);
+    if state.get("station_projection").and_then(Value::as_bool) == Some(true) {
+        // Reads do not repair a torn compatibility file or migrate C4 records.
+        return Ok(state);
+    }
     let mut changed = migrate_state_identity(&mut state, &SystemEnv, workspace)?;
     if migrate_active_team_key(&mut state) {
         changed = true;
@@ -1814,7 +1827,7 @@ pub(crate) fn load_runtime_state_without_migrations(workspace: &Path) -> Result<
         );
     }
     let text = std::fs::read_to_string(&path)?;
-    let mut state: Value = serde_json::from_str(&text)?;
+    let mut state = decode_runtime_projection(workspace, &text)?;
     normalize_agent_session_state(&mut state);
     Ok(state)
 }
@@ -1833,7 +1846,7 @@ pub(crate) fn with_runtime_state_lock_without_migrations<T>(
     }
     let _lock = RuntimeLock::acquire(workspace, "state-save", 2.0)?;
     let state = match std::fs::read_to_string(&path) {
-        Ok(text) => Some(serde_json::from_str::<Value>(&text)?),
+        Ok(text) => Some(decode_runtime_projection(workspace, &text)?),
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };

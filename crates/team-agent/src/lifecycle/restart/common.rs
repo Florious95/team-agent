@@ -1026,6 +1026,8 @@ pub(super) fn save_restart_projected_state_with_capture_backfill_skip(
     skip_capture_backfill_agent_ids: &[&str],
     topology_authority_agent_ids: &[&str],
 ) -> Result<(), LifecycleError> {
+    crate::station::projection::publish(workspace, state, team_key, topology_authority_agent_ids)
+        .map_err(LifecycleError::StatePersist)?;
     sync_restart_team_projections(state, team_key);
     crate::state::repository::StateRepository::new(workspace)
         .save(

@@ -818,6 +818,8 @@ fn remove_agent_inner(
     let mut removed_state = working_state;
     remove_agent_from_state(&mut removed_state, agent_id)?;
     mark_agent_retired_in_state(&mut removed_state, agent_id)?;
+    crate::station::projection::publish(paths.run_workspace, &mut removed_state, team_key, &[agent_id.as_str()])
+        .map_err(LifecycleError::StatePersist)?;
     crate::state::repository::StateRepository::new(paths.run_workspace)
         .save(
             crate::state::repository::StateWriteIntent::RemoveAgent {

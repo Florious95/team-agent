@@ -46,7 +46,7 @@ pub struct SeatStore {
 }
 
 pub struct SeatLock {
-    file: File,
+    _lock: std::rc::Rc<crate::platform::entity_lock::EntityLock>,
     store: SeatStore,
 }
 
@@ -84,11 +84,18 @@ impl SeatStore {
         let directory = self.root.join("locks");
         private_dir(&directory)?;
         let path = directory.join(format!("seat.{}.lock", self.scope.seat));
+        if let Some(lock) = crate::platform::entity_lock::EntityLock::current(&path) {
+            return Ok(SeatLock { _lock: lock, store: self.clone() });
+        }
         let file = open_file(&path, false)?;
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             match file_lock::try_lock_once_nonblocking(&file) {
-                Ok(true) => return Ok(SeatLock { file, store: self.clone() }),
+                Ok(true) => {
+                    let lock = crate::platform::entity_lock::EntityLock::acquired(&path, file)
+                        .map_err(|error| error.to_string())?;
+                    return Ok(SeatLock { _lock: lock, store: self.clone() });
+                }
                 Ok(false) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(10));
                 }
@@ -128,13 +135,6 @@ impl SeatLock {
     }
 }
 
-impl Drop for SeatLock {
-    fn drop(&mut self) {
-        let _ = file_lock::unlock(&self.file);
-        // Never unlink this lock: waiting processes may already hold its inode.
-    }
-}
-
 pub(crate) fn component(value: &str) -> Result<(), String> {
     if value.is_empty() || value.len() > 128 || matches!(value, "." | "..")
         || !value.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
@@ -144,7 +144,7 @@ pub(crate) fn component(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn private_dir(path: &Path) -> Result<(), String> {
+pub(super) fn private_dir(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
         Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => return Ok(()),
         Ok(_) => return Err(format!("unsafe_directory: {}", path.display())),
@@ -205,7 +205,7 @@ fn read_json(path: &Path, limit: u64) -> Result<Option<Value>, String> {
     codec::read(&bytes).map(Some)
 }
 
-fn write_json(path: &Path, value: &Value, limit: u64) -> Result<(), String> {
+pub(super) fn write_json(path: &Path, value: &Value, limit: u64) -> Result<(), String> {
     let bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
     if bytes.len() as u64 > limit { return Err("seat document too large".into()); }
     let parent = path.parent().ok_or("document has no parent")?;
@@ -223,7 +223,7 @@ fn write_json(path: &Path, value: &Value, limit: u64) -> Result<(), String> {
     result
 }
 
-fn sync_directory(path: &Path) -> Result<(), String> {
+pub(super) fn sync_directory(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     { File::open(path).and_then(|file| file.sync_all()).map_err(|e| e.to_string()) }
     #[cfg(not(unix))]

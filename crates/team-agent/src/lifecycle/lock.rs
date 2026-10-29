@@ -36,7 +36,7 @@ pub(crate) struct LifecycleLockRequest<'a> {
 }
 
 pub(crate) struct LifecycleLockGuard {
-    file: Option<std::fs::File>,
+    _lock: Option<std::rc::Rc<crate::platform::entity_lock::EntityLock>>,
 }
 
 /// ---
@@ -135,11 +135,14 @@ fn acquire_agent_lifecycle_lock_with_deadlines(
     let Some(lock_path) = seat_lifecycle_lock_path(&request)? else {
         // A roster is not an exclusion domain. Batch callers lock each seat
         // at its physical operation, not the entire team or workspace.
-        return Ok(LifecycleLockGuard { file: None });
+        return Ok(LifecycleLockGuard { _lock: None });
     };
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| LifecycleError::StatePersist(format!("create lifecycle lock dir: {e}")))?;
+    }
+    if let Some(lock) = crate::platform::entity_lock::EntityLock::current(&lock_path) {
+        return Ok(LifecycleLockGuard { _lock: Some(lock) });
     }
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -155,7 +158,9 @@ fn acquire_agent_lifecycle_lock_with_deadlines(
         match crate::platform::file_lock::try_lock_once_nonblocking(&file) {
             Ok(true) => {
                 write_lock_metadata(&mut file, &request, &lock_path)?;
-                return Ok(LifecycleLockGuard { file: Some(file) });
+                let lock = crate::platform::entity_lock::EntityLock::acquired(&lock_path, file)
+                    .map_err(|error| LifecycleError::StatePersist(error.to_string()))?;
+                return Ok(LifecycleLockGuard { _lock: Some(lock) });
             }
             Ok(false) => {}
             Err(e) => {
@@ -351,16 +356,5 @@ impl WaiterFile {
 impl Drop for WaiterFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-impl Drop for LifecycleLockGuard {
-    fn drop(&mut self) {
-        // Batch 2: unlock via platform primitive. Best-effort — OS
-        // releases when the file handle closes anyway. Uniform on
-        // both `flock(LOCK_UN)` (unix) and `UnlockFileEx` (windows).
-        if let Some(file) = &self.file {
-            let _ = crate::platform::file_lock::unlock(file);
-        }
     }
 }

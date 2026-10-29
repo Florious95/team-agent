@@ -2327,16 +2327,9 @@ fn save_restart_state_with_lifecycle_topology_authority_and_capture_backfill_ski
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    sync_restart_team_projections(state, team_key);
-    crate::state::repository::StateRepository::new(workspace).save(
-        crate::state::repository::StateWriteIntent::RestartTeam {
-            team_key,
-            topology_authority_agent_ids: &topology_agent_ids,
-            skip_capture_backfill_agent_ids: &skip_capture_backfill_agent_ids,
-        },
-        state,
+    save_restart_projected_state_with_capture_backfill_skip(
+        workspace, state, team_key, &skip_capture_backfill_agent_ids, &topology_agent_ids,
     )
-    .map_err(|e| LifecycleError::StatePersist(e.to_string()))
 }
 
 fn save_restart_session_repairs(
