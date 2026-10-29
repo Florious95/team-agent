@@ -104,8 +104,18 @@ fn trust(lines: &[&str]) -> bool {
 }
 pub fn surface(text: &str) -> InputSurface {
     let lines = rows(text);
-    if trust(&lines) { return InputSurface::StartupRiskWarning; }
-    let Some((top, current)) = composer(&lines) else { return InputSurface::ShellOrUnknown; };
+    let current_composer = composer(&lines);
+    if trust(&lines) {
+        // Quoted dialogs in transcript/input are not active modals. A current
+        // composer ends below their footer; an actual later modal ends below
+        // any stale composer left on the screen by an earlier session.
+        let composer_after_footer = current_composer.is_some() && matches!(
+            (lines.iter().rposition(|line| rule(line)), lines.iter().rposition(|line| line.trim() == "Enter to confirm · Esc to cancel")),
+            (Some(bottom), Some(footer)) if bottom > footer
+        );
+        if !composer_after_footer { return InputSurface::StartupRiskWarning; }
+    }
+    let Some((top, current)) = current_composer else { return InputSurface::ShellOrUnknown; };
     if current == QUEUED { return InputSurface::Busy; }
     if !current.is_empty() { return InputSurface::ComposerContainsPaste; }
     if busy(&lines, top) { InputSurface::Busy } else { InputSurface::ComposerReady }

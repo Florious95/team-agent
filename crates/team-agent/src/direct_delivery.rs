@@ -253,6 +253,8 @@ fn direct_send_checked(socket: &str, pane_id: &str, dialect: &str, text: &str, e
     verify_identity(socket, pane_id, &observed, expected_pid, deadline)?;
     if managed && canonical_dialect(dialect) == "claude" {
         wait_for_draft(socket, pane_id, deadline)?;
+    } else {
+        guard_non_composer(socket, pane_id, deadline)?;
     }
     let deadline = Instant::now() + Duration::from_secs(30);
     static NEXT_BUFFER: AtomicU64 = AtomicU64::new(0);
@@ -275,7 +277,8 @@ fn direct_send_checked(socket: &str, pane_id: &str, dialect: &str, text: &str, e
         return Err(error.to_string());
     }
     check_output(loaded)?;
-    if let Err(error) = verify_identity(socket, pane_id, &observed, expected_pid, deadline) {
+    if let Err(error) = verify_identity(socket, pane_id, &observed, expected_pid, deadline)
+        .and_then(|()| guard_non_composer(socket, pane_id, deadline)) {
         let _ = tmux(socket).args(["delete-buffer", "-b", &buffer]).output();
         return Err(error);
     }
@@ -303,6 +306,8 @@ fn direct_send_checked(socket: &str, pane_id: &str, dialect: &str, text: &str, e
     }
     verify_identity(socket, pane_id, &observed, expected_pid, deadline)
         .map_err(|error| format!("uncertain: identity changed after paste: {error}; do not replay"))?;
+    guard_non_composer(socket, pane_id, deadline)
+        .map_err(|error| format!("uncertain: surface changed after paste: {error}; no Enter issued; do not replay"))?;
     let mut command = tmux(socket);
     command.args(["send-keys", "-t", pane_id, "Enter"]);
     if enter_count == 2 {
@@ -352,16 +357,38 @@ fn verify_identity(socket: &str, pane: &str, observed: &str, expected_pid: Optio
     Ok(())
 }
 
+fn reject_non_composer(text: &str) -> Result<(), String> {
+    use team_agent_contract::contract::delivery::InputSurface;
+    let surface = team_agent_contract::providers::claude::interaction::surface(text);
+    if matches!(surface, InputSurface::StartupRiskWarning | InputSurface::Starting | InputSurface::Fault) {
+        // A trust decision is not text input. Never select, cancel, or confirm it
+        // on the caller's behalf; the durable sender can return immediately.
+        return Err(format!("non_composer: {surface:?}; input withheld; resolve the surface manually before a new send"));
+    }
+    Ok(())
+}
+
+fn guard_non_composer(socket: &str, pane: &str, deadline: Instant) -> Result<(), String> {
+    let capture = native_output(tmux(socket).args(["capture-pane", "-p", "-t", pane, "-S", "0"]), deadline)?;
+    if !capture.success { return Err("composer_surface_observation_failed: input withheld".into()); }
+    // Inspect the current screen, not historical startup dialogs in scrollback.
+    // This guard also covers raw addressing and dialect/key-count overrides.
+    reject_non_composer(&capture.stdout)
+}
+
 fn wait_for_draft(socket: &str, pane: &str, deadline: Instant) -> Result<(), String> {
     let mut observed_draft = false;
     loop {
         if Instant::now() >= deadline {
             return Err("composer_contention_timeout: draft remained for 60s; message is safe in inbox; clear the draft before an explicit new send".into());
         }
-        let capture = native_output(tmux(socket).args(["capture-pane", "-p", "-t", pane, "-S", "-80"]), deadline);
+        let capture = native_output(tmux(socket).args(["capture-pane", "-p", "-t", pane, "-S", "0"]), deadline);
         let draft = match capture {
-            Ok(output) if output.success => team_agent_contract::providers::claude::interaction::inspect_legacy_composer(&output.stdout)
-                .is_some_and(|(_, text)| !text.is_empty()),
+            Ok(output) if output.success => {
+                reject_non_composer(&output.stdout)?;
+                team_agent_contract::providers::claude::interaction::inspect_legacy_composer(&output.stdout)
+                    .is_some_and(|(_, text)| !text.is_empty())
+            },
             _ if observed_draft => true, // a failed observation is not evidence that a known draft cleared
             _ => false, // Canon 1: no proven draft means direct delivery, including raw PTYs.
         };
