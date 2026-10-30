@@ -170,63 +170,6 @@ impl DeliveryHost for BootstrapHost {
     }
 }
 #[test]
-fn physical_bootstrap_confirms_only_the_first_durable_scoped_claim_once() {
-    let sandbox = Sandbox::new();
-    let mut store = sandbox.store();
-    let mut fake = FakeHost::default();
-    let mut io = FakeIo::new("unused");
-    let leader = support::start(&mut store, &mut fake, &mut io, "leader").target;
-    let worker = support::start(&mut store, &mut fake, &mut io, "worker").target;
-    let mut host = BootstrapHost {
-        port: OutboxBootstrap::new(sandbox.reopen()),
-        fake: FakeHost::default(),
-        confirmed: 0,
-    };
-    let clock = RealClock::new();
-    assert!(host
-        .port
-        .consume(
-            &worker.identity,
-            &AttemptId::new("not-claimed").unwrap(),
-            &clock,
-            clock.now() + Duration::from_secs(1)
-        )
-        .is_err());
-    send(&mut store, &leader, "worker", 1);
-    assert!(matches!(
-        tick(
-            &mut store,
-            &worker.identity,
-            &support::readiness(&worker, false),
-            &support::authorization(),
-            &mut host
-        )
-        .unwrap(),
-        Tick::Recorded {
-            uncertain: false,
-            ..
-        }
-    ));
-    let current = store.assert_current(&worker.identity).unwrap();
-    send(&mut store, &leader, "worker", 2);
-    assert!(matches!(
-        tick(
-            &mut store,
-            &worker.identity,
-            &support::readiness(&current, true),
-            &support::authorization(),
-            &mut host
-        )
-        .unwrap(),
-        Tick::Recorded {
-            uncertain: false,
-            ..
-        }
-    ));
-    assert_eq!(host.confirmed, 1);
-    assert_eq!(host.fake.deliveries, 2);
-}
-#[test]
 fn shared_renderer_keeps_the_protocol_task_header_and_authoritative_final_token() {
     let logical = LogicalEnvelope {
         message: MessageId::new("real-id").unwrap(),
@@ -459,52 +402,12 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
         &target,
         Operation::FirstBusiness,
     ));
-    let sample = ReadinessSample {
-        process: collect_process(&target, &clock, Duration::from_secs(2)),
-        pane,
-        binding: protocol.binding,
-        server: protocol.server,
-        minimum_sequence: 0,
-        now: clock.now(),
-    };
-    let mut fake = FakeHost::default();
-    let leader = support::start(&mut store, &mut fake, &mut io, "leader").target;
-    send(&mut store, &leader, "worker", 1);
-    let authorization = DeliveryAuthorization {
-        allow_first_business_bootstrap: false,
-        require_server_handshake: true,
-        channel: Channel::Tmux,
-        policy_sha256: physical_support::POLICY,
-    };
-    assert!(matches!(
-        tick(
-            &mut store,
-            &seat.identity,
-            &sample,
-            &authorization,
-            &mut runtime
-        )
-        .unwrap(),
-        Tick::Recorded {
-            effect: DeliveryEffect::Submitted,
-            uncertain: false,
-            ..
-        }
-    ));
-    let delivery = store.deliveries().unwrap().remove(0);
-    assert_eq!(delivery.state, "submitted");
+    // M4: the supervisor-tick delivery of a queued business message through the
+    // retired SQL outbox was excised here (supervisor::tick fails closed). Business
+    // delivery is the station send core's; the readiness, teardown, socket cleanup
+    // and compensation properties of this physical lifecycle remain below.
     let events_path =
         root.join(physical_support::native_terminal::event_log_name(&request.identity));
-    let events = std::fs::read_to_string(&events_path).unwrap();
-    assert_eq!(
-        events
-            .lines()
-            .filter(
-                |line| serde_json::from_str::<serde_json::Value>(line).unwrap()["kind"] == "paste"
-            )
-            .count(),
-        1
-    );
     let stopped = Lifecycle {
         store: &mut store,
         host: &mut runtime,
@@ -529,7 +432,7 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
     std::fs::write(
         root.join("physical-lifecycle-receipt.json"),
         serde_json::to_vec_pretty(
-            &json!({"fixture":"not-kiro","root":root,"target":target,"delivery":delivery.state,
+            &json!({"fixture":"not-kiro","root":root,"target":target,
         "native_exited":true,"private_tmux_exited":true,"socket_absent":true,"journals_preserved":true}),
         )
         .unwrap(),
@@ -577,7 +480,7 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
 
     // Reproduce a restart after losing the final spawn result, both with the
     // exact native still alive and after a positively receipt-owned close.
-    for mode in ["live-spawn", "absent-spawn", "no-effect-stop", "recover-stop", "fresh-restart"] {
+    for mode in ["no-effect-stop", "recover-stop", "fresh-restart"] {
         let mut pending_request = request.clone();
         pending_request.identity.seat = SeatId::new(format!("pending-{mode}")).unwrap();
         pending_request.identity.instance = InstanceId::new(format!("pending-instance-{mode}")).unwrap();
@@ -648,27 +551,10 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
             assert_eq!(sample_process(&physical.process), ProcessState::Exited);
             continue;
         }
-        if mode == "absent-spawn" {
-            let stopped = Lifecycle { store: &mut store, host: &mut pending_runtime, io: &mut io }
-                .teardown(&pending.target.identity, OperationId::new("close-before-recovery").unwrap()).unwrap();
-            assert_eq!(stopped.outcome, Outcome::Committed);
-        }
-        pending.outcome = Outcome::NeedsRecovery;
-        pending.phase = Phase::F3Spawn;
-        pending.pending = Some("spawn".into());
-        pending.target.process = None;
-        pending.target.physical = None;
-        pending.target.status = SeatStatus::Starting;
-        let db = rusqlite::Connection::open(root.join("contract.db")).unwrap();
-        db.execute("UPDATE contract_operations SET record=?1 WHERE id=?2", rusqlite::params![serde_json::to_string(&pending).unwrap(), op.as_str()]).unwrap();
-        db.execute("INSERT INTO contract_leases VALUES(?1,?2)", rusqlite::params![pending.target.identity.seat.as_str(), op.as_str()]).unwrap();
-        let mut reopened = PhysicalRuntime::new(Registration {
-            descriptor: &d, hooks: &h, controls: &[], startup: None, session_panel: None,
-        }, settings(&tmux), op.clone(), &clock).unwrap();
-        let recovered = Lifecycle { store: &mut store, host: &mut reopened, io: &mut io }.recover(&op).unwrap();
-        assert_eq!(recovered.outcome, Outcome::Compensated, "{recovered:?}");
-        assert_eq!(sample_process(&physical.process), ProcessState::Exited);
-        assert!(!store.leased(&pending.target.identity.seat).unwrap());
-        assert_eq!(Lifecycle { store: &mut store, host: &mut reopened, io: &mut io }.recover(&op).unwrap(), recovered);
+        // M4: the "live-spawn" and "absent-spawn" modes forged a pending spawn by
+        // rewriting contract_operations/contract_leases SQL rows and then recovered it.
+        // That fault injection has no public file-projection equivalent in this crate; the
+        // crash-recovery invariant is carried over to Track A (excision classification, I).
+        unreachable!("every remaining mode continues above: {mode}");
     }
 }

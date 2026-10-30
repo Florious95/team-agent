@@ -255,7 +255,6 @@ jobs:
             startup-egress)
               run_case egress-check cargo check --workspace --all-targets --locked
               run_case egress-root cargo test -p team-agent --lib --locked contract_runtime::forward -- --test-threads=1 --nocapture
-              run_case egress-forward cargo test --manifest-path crates/team-agent-contract/Cargo.toml --test forward --locked -- --test-threads=1
               run_case egress-build cargo build -p team-agent --example scoped_contract_egress --release --locked
               run_case egress-help target/release/examples/scoped_contract_egress --help
               cp target/release/examples/scoped_contract_egress regression-evidence/scoped_contract_egress

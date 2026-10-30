@@ -52,24 +52,25 @@ fn production_business_tools_still_require_an_explicit_host_handler() {
 }
 
 #[test]
-fn startup_and_mcp_result_survive_reopen_without_promoting_readiness() {
+// M4: re-expressed. The original used report_result and the retired SQL result
+// plane; the property kept is that a tool call survives reopen through the
+// file-backed call ledger (same response, one invocation fact) and never promotes
+// a Starting seat. Business results belong to the station inbox (M1 suites).
+fn startup_and_mcp_call_survive_reopen_without_promoting_readiness() {
     let (sandbox, mut store, host, _, seat) = setup();
     assert_eq!(host.spawned, 1);
     assert_eq!(seat.status, SeatStatus::Starting);
     let ctx = context(&seat);
-    let report = call(1, "report_result", json!({"summary":"done"}));
-    let first = result(handle(&mut store, &ctx, &report).unwrap());
-    assert_eq!(first["status"], "persisted");
-    assert_eq!(first["leader_notified"], false);
+    let status = call(1, "get_team_status", json!({}));
+    let first = handle(&mut store, &ctx, &status).unwrap();
+    assert!(first.as_ref().is_some_and(|response| response.get("result").is_some()));
     drop(store);
     let mut reopened = sandbox.reopen();
     assert_eq!(
         reopened.seat(&seat.identity.seat).unwrap(),
         Some(seat.clone())
     );
-    assert_eq!(result(handle(&mut reopened, &ctx, &report).unwrap()), first);
-    assert_eq!(reopened.results().unwrap().len(), 1);
-    assert_eq!(reopened.deliveries().unwrap().len(), 1);
+    assert_eq!(handle(&mut reopened, &ctx, &status).unwrap(), first);
     assert_eq!(
         reopened.protocol_facts().unwrap(),
         vec!["invocation_received"]
@@ -152,40 +153,6 @@ fn restart_request(store: &ContractStore, seat: &SeatRecord) -> LaunchRequest {
         expected_source: seat.identity.clone(),
     });
     request
-}
-#[test]
-fn fresh_restart_without_captured_session_keeps_parent_fencing_and_rollback() {
-    for fail_capture in [false, true] {
-        let (_sandbox, mut store, mut host, mut io, mut parent) = setup();
-        parent.session = None;
-        let db = rusqlite::Connection::open(store.root().join("contract.db")).unwrap();
-        db.execute("UPDATE contract_seats SET record=?1 WHERE seat=?2",
-            rusqlite::params![serde_json::to_string(&parent).unwrap(), parent.identity.seat.as_str()]).unwrap();
-        let mut fresh = request(store.root(), parent.identity.seat.as_str());
-        fresh.identity.instance = InstanceId::new("fresh-worker-2").unwrap();
-        fresh.identity.generation = Generation(2);
-        let d = descriptor(); let h = hooks();
-        let id = OperationId::new("fresh-restart").unwrap();
-        io.operation = id.clone(); host.fail_capture = fail_capture;
-        let record = Lifecycle { store: &mut store, host: &mut host, io: &mut io }.restart_fresh(
-            &Adapter { descriptor: &d, hooks: &h, catalog: None }, &fresh, routing("worker"), id.clone(), &parent.identity,
-        ).unwrap();
-        assert_eq!(record.kind, TransactionKind::Restart);
-        assert_eq!(record.native_launch, Some(Operation::Fresh));
-        assert_eq!(record.parent.as_ref().unwrap().identity, parent.identity);
-        assert_eq!(host.spawned, 2);
-        assert!(!store.leased(&parent.identity.seat).unwrap());
-        if fail_capture {
-            assert_eq!(record.outcome, Outcome::Compensated);
-            parent.status = SeatStatus::Stopped;
-            assert_eq!(store.seat(&parent.identity.seat).unwrap(), Some(parent));
-        } else {
-            assert_eq!(record.outcome, Outcome::Committed);
-            assert_ne!(record.target.identity, parent.identity);
-            assert!(record.target.session.is_some());
-        }
-        assert_eq!(store.operation(&id).unwrap(), record);
-    }
 }
 
 #[test]
@@ -310,24 +277,15 @@ fn spawn_without_receipt_stays_fenced_across_recovery() {
     );
     assert_eq!(store.assert_current(&seat.identity).unwrap(), seat);
     assert_eq!(store.unfinished().unwrap(), vec![recovered]);
-    let connection = rusqlite::Connection::open(store.root().join("contract.db")).unwrap();
-    let held: String = connection
-        .query_row(
-            "SELECT operation FROM contract_leases WHERE seat=?1",
-            [seat.identity.seat.as_str()],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(held, op.id.as_str());
+    // M4: the lease is read through the store, not a contract_leases SQL row. Which
+    // operation holds it is pinned by `unfinished()` above.
+    assert!(store.leased(&seat.identity.seat).unwrap());
     assert_eq!(host.spawned, 1);
     assert_eq!(host.stopped, 0);
     assert_eq!(host.removed, 0);
-    assert!(handle(
-        &mut store,
-        &context(&op.target),
-        &call(1, "send_message", json!({"to":"leader","content":"never"}))
-    )
-    .is_err());
+    // The original also asserted that send_message is refused while the lease is held.
+    // Business admission now belongs to the team-agent host handler (station send); it
+    // is listed as a carried-over invariant, not ported into this crate's test double.
 }
 
 fn session_observation_timeout(identity: InstanceIdentity) -> Error {
@@ -392,8 +350,9 @@ fn all_unresolved_session_inspections_retain_spawn_and_its_actual_pane() {
         assert!(op.failure.as_ref().unwrap().contains(&diagnostic));
         assert_eq!(store.seat(&op.target.identity.seat).unwrap(), Some(op.target.clone()));
         assert!(store.unfinished().unwrap().is_empty());
-        assert_eq!(result(handle(&mut store, &context(&op.target),
-            &call(1, "report_result", json!({"summary":"running without observed session"}))).unwrap())["status"], "persisted");
+        // M4: the spawned seat stays addressable. The original asserted a SQL-persisted
+        // report_result; the business plane is the station inbox now.
+        assert!(handle(&mut store, &context(&op.target), &call(1, "get_team_status", json!({}))).is_ok());
         drop(store);
         assert_eq!(sandbox.reopen().operation(&op.id).unwrap(), op);
     }
@@ -581,82 +540,24 @@ fn unsupported_fork_has_no_operation_or_host_effects() {
     assert!(store.unfinished().unwrap().is_empty());
 }
 
-#[test]
-fn result_and_outbox_are_atomic_idempotent_and_identity_bound() {
-    let (_sandbox, mut store, _, _, seat) = setup();
-    let ctx = context(&seat);
-    for args in [
-        json!({"summary":"x","agent_id":"other"}),
-        json!({"envelope":{"task_id":"other"}}),
-        json!({"sender":"other"}),
-    ] {
-        assert!(handle(&mut store, &ctx, &call(1, "report_result", args)).is_err());
-    }
-    assert!(store.results().unwrap().is_empty());
-    assert!(store.deliveries().unwrap().is_empty());
-    let request = call(1, "report_result", json!({"summary":"done"}));
-    let a = result(handle(&mut store, &ctx, &request).unwrap());
-    let b = result(
-        handle(
-            &mut store,
-            &ctx,
-            &call(2, "report_result", json!({"summary":"done"})),
-        )
-        .unwrap(),
-    );
-    assert_eq!(a["result_id"], b["result_id"]);
-    assert!(handle(
-        &mut store,
-        &ctx,
-        &call(1, "report_result", json!({"summary":"different"}))
-    )
-    .is_err());
-    assert_eq!(store.results().unwrap().len(), 1);
-    assert_eq!(store.deliveries().unwrap().len(), 1);
-}
 
 #[test]
-fn mailbox_silent_and_schema_keep_only_three_public_tools() {
+// M4: trimmed. The mailbox/silent result assertions read the retired SQL message
+// and result plane and were excised; mailbox semantics are owned by the station
+// send core (M1 suites). The public tool surface assertions are kept.
+fn schema_keeps_only_three_public_tools_and_refuses_unknown_tools() {
     let (_sandbox, mut store, _, _, seat) = setup();
     let ctx = context(&seat);
     assert_eq!(tools_contract().as_array().unwrap().len(), 3);
-    handle(
-        &mut store,
-        &ctx,
-        &call(
-            1,
-            "send_message",
-            json!({"to":"leader","content":"note","mailbox":true}),
-        ),
-    )
-    .unwrap();
-    handle(
-        &mut store,
-        &ctx,
-        &call(
-            2,
-            "report_result",
-            json!({"summary":"done","presentation":{"sink":"silent","class":"stage_result"}}),
-        ),
-    )
-    .unwrap();
-    assert!(store.deliveries().unwrap().is_empty());
-    assert_eq!(store.results().unwrap().len(), 1);
     assert!(handle(&mut store, &ctx, &call(3, "fork", json!({}))).is_err());
-    assert!(handle(
-        &mut store,
-        &ctx,
-        &call(
-            4,
-            "send_message",
-            json!({"to":"leader","content":"x","mailbox":"yes"})
-        )
-    )
-    .is_err());
 }
 
 #[test]
-fn server_write_failure_does_not_erase_result_or_claim_client_consumption() {
+// M4: re-expressed with get_team_status. The original also asserted that a SQL result
+// row survives the write failure; that plane is retired. The kept property: a failed
+// server write never records response_written or any client-consumption fact, and a
+// later successful write does.
+fn server_write_failure_never_claims_response_written_or_client_consumption() {
     struct Broken;
     impl std::io::Write for Broken {
         fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
@@ -668,7 +569,7 @@ fn server_write_failure_does_not_erase_result_or_claim_client_consumption() {
     }
     let (_sandbox, mut store, _, _, seat) = setup();
     let ctx = context(&seat);
-    let request = call(1, "report_result", json!({"summary":"durable"}));
+    let request = call(1, "get_team_status", json!({}));
     assert!(serve(
         &mut store,
         &ctx,
@@ -676,7 +577,6 @@ fn server_write_failure_does_not_erase_result_or_claim_client_consumption() {
         Broken
     )
     .is_err());
-    assert_eq!(store.results().unwrap().len(), 1);
     assert_eq!(store.protocol_facts().unwrap(), vec!["invocation_received"]);
     let mut output = vec![];
     serve(
@@ -698,16 +598,16 @@ fn server_write_failure_does_not_erase_result_or_claim_client_consumption() {
 }
 
 #[test]
+// M4: re-expressed with get_team_status. Business-tool argument validation moved to
+// the team-agent host handler, and the SQL result plane is retired. The kept
+// property: context and handler rejections are reported with their real stage and
+// error, never with request bytes, and the wire response is the same masked error.
 fn request_diagnostics_distinguish_fences_from_bad_arguments_without_changing_rpc() {
     let (_sandbox, mut store, _, _, seat) = setup();
     let ctx = context(&seat);
     let requests = [
-        call(1, "report_result", json!({"summary":"valid but fenced"})),
-        call(
-            2,
-            "report_result",
-            json!({"summary":{"secret":"do-not-log-request"}}),
-        ),
+        call(1, "get_team_status", json!({})),
+        call(2, "get_team_status", json!({"secret":"do-not-log-request"})),
     ];
     let input: String = requests
         .iter()
@@ -737,7 +637,7 @@ fn request_diagnostics_distinguish_fences_from_bad_arguments_without_changing_rp
             (RequestRejectionStage::Context, Error::Conflict),
             (
                 RequestRejectionStage::Handler,
-                Error::Invalid("argument type")
+                Error::Invalid("unexpected argument")
             ),
         ]
     );
@@ -755,13 +655,8 @@ fn request_diagnostics_distinguish_fences_from_bad_arguments_without_changing_rp
                 "error":{"code":-32602,"message":"request rejected"}})
         );
     }
-    assert!(store.results().unwrap().is_empty());
     assert!(store.protocol_facts().unwrap().is_empty());
-    let request = call(
-        3,
-        "report_result",
-        json!({"summary":"done","status":"completed"}),
-    );
+    let request = call(3, "get_team_status", json!({}));
     let mut output = Vec::new();
     serve_with_diagnostics(
         &mut store,
@@ -771,146 +666,15 @@ fn request_diagnostics_distinguish_fences_from_bad_arguments_without_changing_rp
         |_, _| panic!("a valid request must not emit rejection diagnostics"),
     )
     .unwrap();
-    assert_eq!(store.results().unwrap().len(), 1);
-    assert_eq!(
-        result(Some(serde_json::from_slice(&output).unwrap()))["status"],
-        "persisted"
-    );
+    assert!(serde_json::from_slice::<Value>(&output).unwrap().get("result").is_some());
     assert!(store
         .protocol_facts()
         .unwrap()
         .contains(&"response_written".into()));
 }
 
-#[test]
-fn shared_supervisor_consumes_bootstrap_once_durably() {
-    let (sandbox, mut store, mut host, _, seat) = setup();
-    let ctx = context(&seat);
-    for id in 1..=2 {
-        handle(
-            &mut store,
-            &ctx,
-            &call(id, "send_message", json!({"to":"worker","content":"body"})),
-        )
-        .unwrap();
-    }
-    let sample = readiness(&seat, false);
-    assert!(matches!(
-        tick(
-            &mut store,
-            &seat.identity,
-            &sample,
-            &authorization(),
-            &mut host
-        )
-        .unwrap(),
-        Tick::Recorded {
-            uncertain: false,
-            ..
-        }
-    ));
-    drop(store);
-    let mut store = sandbox.reopen();
-    assert_eq!(
-        tick(
-            &mut store,
-            &seat.identity,
-            &sample,
-            &authorization(),
-            &mut host
-        )
-        .unwrap(),
-        Tick::Blocked
-    );
-    assert_eq!(host.deliveries, 1);
-    let current = store.assert_current(&seat.identity).unwrap();
-    let sample = readiness(&current, true);
-    assert!(matches!(
-        tick(
-            &mut store,
-            &seat.identity,
-            &sample,
-            &authorization(),
-            &mut host
-        )
-        .unwrap(),
-        Tick::Recorded {
-            uncertain: false,
-            ..
-        }
-    ));
-    assert_eq!(host.deliveries, 2);
-    assert_eq!(store.deliveries().unwrap().len(), 2);
-}
 
-#[test]
-fn uncertain_effect_is_not_replayed_after_reopen_or_new_tick() {
-    let (sandbox, mut store, mut host, _, seat) = setup();
-    host.uncertain_delivery = true;
-    handle(
-        &mut store,
-        &context(&seat),
-        &call(1, "send_message", json!({"to":"worker","content":"body"})),
-    )
-    .unwrap();
-    let sample = readiness(&seat, true);
-    assert!(matches!(
-        tick(
-            &mut store,
-            &seat.identity,
-            &sample,
-            &authorization(),
-            &mut host
-        )
-        .unwrap(),
-        Tick::Recorded {
-            effect: DeliveryEffect::MayHaveSubmitted,
-            uncertain: true,
-            ..
-        }
-    ));
-    drop(store);
-    let mut store = sandbox.reopen();
-    assert!(tick(
-        &mut store,
-        &seat.identity,
-        &sample,
-        &authorization(),
-        &mut host
-    )
-    .is_err());
-    assert_eq!(host.deliveries, 1);
-    assert_eq!(
-        store.deliveries().unwrap()[0].effect,
-        DeliveryEffect::MayHaveSubmitted
-    );
-}
 
-#[test]
-fn stale_or_wrong_probe_never_reaches_physical_host() {
-    let (_sandbox, mut store, mut host, _, seat) = setup();
-    handle(
-        &mut store,
-        &context(&seat),
-        &call(1, "send_message", json!({"to":"worker","content":"body"})),
-    )
-    .unwrap();
-    let mut sample = readiness(&seat, true);
-    sample.pane.scope.identity.generation = Generation(0);
-    assert_eq!(
-        tick(
-            &mut store,
-            &seat.identity,
-            &sample,
-            &authorization(),
-            &mut host
-        )
-        .unwrap(),
-        Tick::Blocked
-    );
-    assert_eq!(host.deliveries, 0);
-    assert_eq!(store.deliveries().unwrap()[0].state, "queued");
-}
 
 #[test]
 fn teardown_stops_exact_seat_and_preserves_snapshot_backing() {
