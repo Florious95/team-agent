@@ -106,37 +106,6 @@ fn stop(ws: &TestWorkspace, shims: &Shims, id: &str) {
     let r = run(ws, shims, &cli(ws, "stop-agent", id, &[]));
     assert!(r.is_success(), "stop-agent: {} {}", r.stdout, r.stderr);
 }
-fn quiesce_owned_coordinator_before_rejection_snapshot(ws: &TestWorkspace) {
-    use team_agent::coordinator::{pid_is_running, stop_coordinator, Pid, WorkspacePath};
-
-    // Require this fixture's PID/ownership before using the workspace stop API.
-    // Never fall back to host discovery or pretend PID-file deletion means exit.
-    let pid_path = ws.coordinator_pid_file();
-    let pid = fs::read_to_string(&pid_path)
-        .expect("read fixture coordinator pid")
-        .trim()
-        .parse::<u32>()
-        .expect("parse fixture coordinator pid");
-    assert!(
-        ws.pid_is_owned_coordinator(pid),
-        "refusing non-owned coordinator {pid}"
-    );
-    assert!(pid_path.exists(), "fixture coordinator pid file disappeared");
-    let pid = Pid::new(pid);
-    let report = stop_coordinator(&WorkspacePath::new(ws.path().to_path_buf()))
-        .expect("stop fixture-owned coordinator");
-    assert!(report.ok, "fixture coordinator stop failed: {report:?}");
-    assert_eq!(report.pid, Some(pid), "stop must address exact owned PID");
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while pid_is_running(pid).expect("probe exact fixture coordinator") {
-        assert!(Instant::now() < deadline, "fixture coordinator did not exit");
-        thread::sleep(Duration::from_millis(10));
-    }
-    eprintln!(
-        "REJECTION_WINDOW_COORDINATOR_QUIESCED pid={} running=false",
-        pid.get()
-    );
-}
 fn role_path(ws: &TestWorkspace, id: &str) -> PathBuf { ws.path().join("agents").join(format!("{id}.md")) }
 fn spec_path(ws: &TestWorkspace) -> PathBuf {
     let state = ws.read_state(); let key = state["active_team_key"].as_str().unwrap();
@@ -245,7 +214,6 @@ fn add_required_values_cli_generation_and_file_completion() {
 #[test]
 fn invalid_add_and_start_parameter_syntax_rejects_before_any_mutation() {
     let (ws, shims) = ws_seed("rolelife-invalid-args", "copilot", "gpt-6-luna", None); stop(&ws, &shims, "seed");
-    quiesce_owned_coordinator_before_rejection_snapshot(&ws);
     let add_cases: [(&str, &[&str]); 5] = [
         ("bare-bypass", &["--role-file", "", "--bypass"]),
         ("invalid-bypass", &["--role-file", "", "--bypass", "maybe"]),
@@ -331,7 +299,6 @@ fn duplicate_add_running_or_stopped_is_fail_closed_with_zero_session_side_effect
     let (ws, shims) = ws_seed("rolelife-duplicate", "copilot", "gpt-6-luna", None);
     // Attribute all snapshot changes to the rejected command, not a daemon
     // tick racing the stop that removes the worker's pane binding.
-    quiesce_owned_coordinator_before_rejection_snapshot(&ws);
     let source = ws.path().join("other.md"); fs::write(&source, role("seed", "copilot", "gpt-5.6-luna", None, false, "Other." )).unwrap();
     for stopped in [false, true] {
         if stopped { stop(&ws, &shims, "seed"); }
@@ -389,7 +356,6 @@ fn stopped_start_partial_patches_bypass_and_prompt_and_preserves_omitted_values(
 fn cross_provider_changes_are_rejected_both_ways_but_same_provider_is_allowed() {
     for (provider, model, effort, target) in [("fake", "fake", None, "copilot"), ("copilot", "gpt-5.6-luna", Some("medium"), "fake")] {
         let (ws, shims) = ws_seed(&format!("rolelife-cross-{provider}"), provider, model, effort); stop(&ws, &shims, "seed");
-        quiesce_owned_coordinator_before_rejection_snapshot(&ws);
         let before = snapshot(&ws, &shims, "seed"); let r = run(&ws, &shims, &start(&ws, "seed", &["--provider", target]));
         reject(&r, "cross-provider switch"); assert!(format!("{} {}", r.stdout, r.stderr).to_lowercase().contains("provider"));
         assert_eq!(snapshot(&ws, &shims, "seed"), before);
@@ -412,7 +378,6 @@ fn hand_edited_stopped_role_is_recompiled_and_used_by_start() {
 #[test]
 fn failed_parameterized_start_restores_existing_role_and_spec_bytes() {
     let (ws, shims) = ws_seed("rolelife-rollback-existing", "copilot", "gpt-6-luna", None); stop(&ws, &shims, "seed");
-    quiesce_owned_coordinator_before_rejection_snapshot(&ws);
     let spec = spec_path(&ws); let before = snapshot(&ws, &shims, "seed");
     fs::write(ws.path().join(".role-lifecycle-fail-launch"), b"injected tmux spawn failure").unwrap();
     let r = run(&ws, &shims, &start(&ws, "seed", &["--model", "openai-codex/gpt-5.6-luna", "--effort", "high"]));
@@ -433,7 +398,6 @@ fn failed_parameterized_start_restores_existing_role_and_spec_bytes() {
 #[test]
 fn failed_prompt_bypass_start_restores_complete_existing_role_and_spec() {
     let (ws, shims) = ws_seed("rolelife-rollback-prompt-bypass", "copilot", "gpt-6-luna", None); stop(&ws, &shims, "seed");
-    quiesce_owned_coordinator_before_rejection_snapshot(&ws);
     let spec = spec_path(&ws); let before = snapshot(&ws, &shims, "seed");
     fs::write(ws.path().join(".role-lifecycle-fail-launch"), b"injected tmux spawn failure").unwrap();
     let r = run(&ws, &shims, &start(&ws, "seed", &["--bypass", "true", "--prompt", "F2 rollback prompt."]));

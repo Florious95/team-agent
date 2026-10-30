@@ -166,7 +166,7 @@ fn d1_collect_preserves_warning_envelope_without_verified_upgrade() {
     });
 
     messaging::report_result(&ws, &envelope).expect("store warning result");
-    let out = messaging::collect(&ws, None, false).expect("collect warning result");
+    let out = messaging::collect(&ws, None).expect("collect warning result");
     assert_eq!(
         out.get("ok").and_then(Value::as_bool),
         Some(true),

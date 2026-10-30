@@ -254,15 +254,14 @@ fn r2_lifecycle_lock_exists_precondition() {
     let rebuild = read_src("lifecycle/restart/rebuild.rs");
     assert_public_operation(&rebuild, "restart");
     let drop_idx = rebuild.find("drop(lifecycle_lock);").unwrap();
-    let coordinator_idx = rebuild
-        .find("start_coordinator_for_workspace(&selected.run_workspace, Some(&selected.team_key))")
-        .unwrap();
     let readiness_idx = rebuild.find("wait_restart_readiness_or_timeout(").unwrap();
+    // M3 excision: restart no longer starts a coordinator between the two (the former anchor);
+    // the lock must still be released before the readiness wait.
     assert!(
         rebuild.contains("let lifecycle_lock = acquire_seat_lifecycle_lock")
-            && drop_idx < coordinator_idx
-            && coordinator_idx < readiness_idx,
-        "restart must release lifecycle lock before coordinator readiness wait"
+            && drop_idx < readiness_idx
+            && !rebuild.contains("start_coordinator_for_workspace("),
+        "restart must release lifecycle lock before the readiness wait and must not start a coordinator"
     );
 }
 
