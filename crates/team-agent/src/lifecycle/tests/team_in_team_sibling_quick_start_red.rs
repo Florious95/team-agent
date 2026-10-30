@@ -585,13 +585,9 @@ fn delivery_grep_guard_no_owner_mutation() {
         "/src/messaging/scheduler.rs"
     ))
     .unwrap_or_default();
-    let tick = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/coordinator/tick.rs"
-    ))
-    .unwrap();
+    // M3 excision: coordinator/tick.rs is retired; the remaining delivery paths stay guarded.
     let global_delivery_guard =
-        format!("{delivery}\n{send_to_leader_body}\n{send}\n{scheduler}\n{tick}");
+        format!("{delivery}\n{send_to_leader_body}\n{send}\n{scheduler}");
     for forbidden in [
         "seed_launched_owner",
         "seed_unbound_launched_owner",

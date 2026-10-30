@@ -333,7 +333,7 @@ fn s2_process_collector() {
         }))
     });
     let path = dir.join("result.json");
-    let result = match collect_for_team(&dir, file.then_some(path.as_path()), false, Some("T1")) {
+    let result = match collect_for_team(&dir, file.then_some(path.as_path()), Some("T1")) {
         Ok(value) => json!({"response": value}),
         Err(error) => json!({"error": error.to_string()}),
     };

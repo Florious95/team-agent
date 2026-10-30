@@ -52,7 +52,7 @@ fn launch_writes_worker_owner_team_id_from_runtime_spec_key_not_stale_active_tea
     );
 
     insert_result_with_owner(&case.root, "res-u0b-bravo", owner.as_deref().unwrap());
-    collect_for_team(&case.root, None, false, Some("bravo"))
+    collect_for_team(&case.root, None, Some("bravo"))
         .expect("collect scoped by canonical bravo should see the worker result");
     assert_eq!(
         result_status(&case.root, "res-u0b-bravo").as_deref(),

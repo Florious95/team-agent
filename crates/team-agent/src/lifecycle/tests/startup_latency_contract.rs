@@ -229,7 +229,7 @@ fn restart_failure_aggregation_matches_serial_semantics_without_early_abort() {
 
 #[test]
 #[serial(env)]
-fn restart_readiness_timeout_keeps_three_truth_booleans_and_no_false_restarted() {
+fn restart_readiness_timeout_keeps_native_truth_booleans_and_no_false_restarted() {
     let case = RestartLatencyCase::new("r3-readiness-timeout", 1);
     let transport = StartupLatencyTransport::new().with_session_missing_for_readiness();
 
@@ -269,10 +269,10 @@ fn restart_readiness_timeout_keeps_three_truth_booleans_and_no_false_restarted()
         Some(true),
         "R3: timeout must expose worker_pane_addressable=true for the spawned pane; event={timeout}"
     );
-    assert_eq!(
-        timeout.get("coordinator_alive").and_then(Value::as_bool),
-        Some(false),
-        "R3: coordinator_alive must be false when the team session is not live; event={timeout}"
+    // M3: readiness has two native truth gates (session, panes); the coordinator gate is retired.
+    assert!(
+        timeout.get("coordinator_alive").is_none(),
+        "R3 (M3): the timeout must not report a coordinator gate; event={timeout}"
     );
     assert!(
         !events.iter().any(|event| {
@@ -354,7 +354,6 @@ fn restart_and_launch_emit_structured_latency_events_without_fake_ready() {
             "teardown",
             "spawn_all",
             "save_state",
-            "coordinator_start",
             "readiness_wait",
             "completed",
         ],
@@ -384,7 +383,6 @@ fn restart_and_launch_emit_structured_latency_events_without_fake_ready() {
         &[
             "compile_spec",
             "spawn_all",
-            "coordinator_start",
             "readiness_wait",
             "completed",
         ],

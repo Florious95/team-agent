@@ -49,7 +49,7 @@ fn collect_result_file_ingests_valid_known_task_envelope_into_results() {
     });
     let rf = team.join("result.json");
     std::fs::write(&rf, serde_json::to_string(&envelope).unwrap()).unwrap();
-    let out = collect(&team, Some(rf.as_path()), false)
+    let out = collect(&team, Some(rf.as_path()))
         .expect("collect with a valid --result-file must not error");
     // golden: a valid standalone envelope is ingested + collected, ok=true (NOT a silent exit-1).
     assert_eq!(

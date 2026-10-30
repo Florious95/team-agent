@@ -930,7 +930,7 @@ fn collect_without_spec_surfaces_validation_error() {
     // (this file may not edit them). seed_result() exists for the retry path that
     // does NOT need a spec; the collect happy-path needs an integration fixture.
     let ws = tmp_ws("collect");
-    let err = collect(&ws, None, false).unwrap_err();
+    let err = collect(&ws, None).unwrap_err();
     assert!(
         matches!(err, MessagingError::Validation(_)),
         "collect without a team spec must surface Validation, got {err:?}"
@@ -947,7 +947,7 @@ fn collect_accepts_message_scoped_result_for_matching_recipient() {
         .unwrap();
     seed_result(&store, "res_msg_ok", &message_id, "w1", "success");
 
-    let out = collect(&ws, None, false).unwrap();
+    let out = collect(&ws, None).unwrap();
     assert_eq!(out.get("ok").and_then(|v| v.as_bool()), Some(true));
     let collected = out
         .get("collected_results")
@@ -998,7 +998,7 @@ fn collect_rejects_message_scoped_result_without_matching_recipient() {
         .unwrap();
     seed_result(&store, "res_msg_bad", &message_id, "w2", "success");
 
-    let out = collect(&ws, None, false).unwrap();
+    let out = collect(&ws, None).unwrap();
     assert_eq!(out.get("ok").and_then(|v| v.as_bool()), Some(false));
     assert!(
         out.get("collected_results")
@@ -2333,7 +2333,7 @@ fn collect_task_scoped_result_collects_and_marks_task_done() {
     let store = store_for(&ws);
     seed_result(&store, "res_t2", "t2", "w1", "success");
 
-    let out = collect(&ws, None, false).unwrap();
+    let out = collect(&ws, None).unwrap();
     assert_eq!(
         out.get("ok").and_then(|v| v.as_bool()),
         Some(true),
@@ -2396,7 +2396,7 @@ fn collect_output_matches_golden_collected_shape() {
     let store = store_for(&ws);
     seed_result(&store, "res_t2s", "t2", "w1", "success");
 
-    let out = collect(&ws, None, false).unwrap();
+    let out = collect(&ws, None).unwrap();
     let cr = out
         .get("collected_results")
         .and_then(|v| v.as_array())

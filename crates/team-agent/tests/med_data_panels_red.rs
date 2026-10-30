@@ -40,36 +40,9 @@ use serde_json::{json, Value};
 use team_agent::message_store::MessageStore;
 use team_agent::state::persist::save_runtime_state;
 
-/// A-1: with a live coordinator and a session-bearing state, `collect(.., ensure=true)`
-/// must report the REAL ensure outcome (Python: start_coordinator -> already-running =>
-/// ok:true), not the constant `{ok:false,status:"not_required"}`.
-#[test]
-fn a1_collect_ensure_coordinator_reports_real_status() {
-    let ws = tmp_ws("a1-ensure");
-    std::fs::write(ws.join("team.spec.yaml"), "version: 1\n").unwrap();
-    save_runtime_state(&ws, &json!({"session_name": "team-x"})).unwrap();
-    seed_healthy_coordinator(&ws);
-
-    let out =
-        team_agent::messaging::results::collect(&ws, None, true).expect("collect should succeed");
-    let coordinator = out.get("coordinator").cloned().unwrap_or(Value::Null);
-    assert_ne!(
-        coordinator,
-        json!({"ok": false, "status": "not_required"}),
-        "A-1: ensure_coordinator=true with a session-bearing state must run the real \
-ensure step (Python results.py:157 -> _ensure_coordinator_after_collect), not return \
-the not_required constant; out={out}"
-    );
-    assert_eq!(
-        coordinator.get("ok"),
-        Some(&json!(true)),
-        "A-1: with a healthy coordinator the ensure result must report ok:true \
-(Python start_coordinator no-op on healthy); coordinator={coordinator}"
-    );
-}
-
-/// A-1 (Python literal lock, green today): ensure_coordinator=false returns exactly
-/// `{ok:false,status:"not_required"}` (results.py:157 right-hand branch).
+/// A-1 (M3 oracle update): collect never starts a background service. The retired
+/// `ensure_coordinator` switch is gone, and the compatibility receipt is always
+/// `{ok:true,status:"not_required"}`.
 #[test]
 fn a1_collect_without_ensure_returns_not_required_literal() {
     let ws = tmp_ws("a1-noensure");
@@ -77,11 +50,11 @@ fn a1_collect_without_ensure_returns_not_required_literal() {
     save_runtime_state(&ws, &json!({"session_name": "team-x"})).unwrap();
 
     let out =
-        team_agent::messaging::results::collect(&ws, None, false).expect("collect should succeed");
+        team_agent::messaging::results::collect(&ws, None).expect("collect should succeed");
     assert_eq!(
         out.get("coordinator"),
-        Some(&json!({"ok": false, "status": "not_required"})),
-        "A-1 literal lock: ensure_coordinator=false must return the Python literal; out={out}"
+        Some(&json!({"ok": true, "status": "not_required"})),
+        "A-1: collect must report that no coordinator is required; out={out}"
     );
 }
 
@@ -225,28 +198,6 @@ fn insert_result(store: &MessageStore, result_id: &str, team: &str, agent: &str,
         params![result_id, team, agent, envelope.to_string()],
     )
     .unwrap();
-}
-
-fn seed_healthy_coordinator(workspace: &Path) {
-    let workspace = team_agent::coordinator::WorkspacePath::new(workspace.to_path_buf());
-    let pid = team_agent::coordinator::Pid::new(std::process::id());
-    std::fs::create_dir_all(
-        team_agent::coordinator::coordinator_pid_path(&workspace)
-            .parent()
-            .unwrap(),
-    )
-    .unwrap();
-    team_agent::coordinator::write_coordinator_metadata(
-        &workspace,
-        pid,
-        team_agent::coordinator::MetadataSource::Boot,
-    )
-    .expect("write coordinator metadata");
-    std::fs::write(
-        team_agent::coordinator::coordinator_pid_path(&workspace),
-        pid.to_string(),
-    )
-    .expect("write coordinator pid");
 }
 
 fn tmp_ws(tag: &str) -> PathBuf {

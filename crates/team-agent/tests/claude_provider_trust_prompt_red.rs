@@ -21,13 +21,11 @@ use std::sync::Mutex;
 
 use rusqlite::params;
 use serde_json::{json, Value};
-use team_agent::coordinator::{Coordinator, ProviderRegistry, WorkspacePath};
 use team_agent::event_log::EventLog;
 use team_agent::message_store::MessageStore;
 use team_agent::messaging::deliver_pending_messages;
 use team_agent::model::enums::{PaneLiveness, Provider};
-use team_agent::provider::{get_adapter, ProviderAdapter};
-use team_agent::state::persist::{load_runtime_state, save_runtime_state};
+use team_agent::provider::get_adapter;
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
     InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
@@ -153,51 +151,6 @@ fn claude_ready_idle_shape_is_not_confused_with_numbered_trust_menu() {
 }
 
 #[test]
-fn coordinator_tick_handles_claude_startup_trust_and_persists_state() {
-    let ws = tmp_dir("claude-tick-trust");
-    seed_runtime_state(&ws, "clauder", "claude", "pending");
-    let transport = ScriptedTransport::new([CLAUDE_TRUST_YES_ACTIVE, CLAUDE_READY_IDLE])
-        .with_session_present(true)
-        .with_windows([WindowName::new("clauder")]);
-    let coord = Coordinator::new(
-        WorkspacePath::new(ws.clone()),
-        Box::new(RealAdapterRegistry),
-        Box::new(transport.clone()),
-    );
-
-    let report = coord
-        .tick()
-        .expect("coordinator tick should stay typed/fallible");
-    let state = load_runtime_state(&ws).unwrap();
-    let agent = &state["agents"]["clauder"];
-    let events = read_events(&ws);
-
-    assert!(
-        report.ok && !report.stop,
-        "startup trust handling must not stop coordinator tick; report={report:?}"
-    );
-    assert_eq!(
-        agent["startup_prompts"],
-        json!("handled"),
-        "provider=claude pending startup prompt must persist startup_prompts=handled; state={state}"
-    );
-    assert_eq!(
-        agent["startup_prompt_handled"][0]["prompt"],
-        json!("claude_workspace_trust"),
-        "handled prompt must identify Claude workspace trust; state={state}"
-    );
-    assert!(
-        events.contains("startup_prompt_handled") && events.contains("claude_workspace_trust"),
-        "coordinator tick must emit startup_prompt_handled for Claude trust; events={events}"
-    );
-    assert_eq!(
-        transport.sent_keys(),
-        vec![vec![Key::Enter]],
-        "coordinator should send exactly Enter through the Claude provider handler"
-    );
-}
-
-#[test]
 fn delivery_defers_claude_trust_prompt_then_replays_same_message_after_handled() {
     let ws = tmp_dir("claude-delivery-gate");
     let store = MessageStore::open(&ws).unwrap();
@@ -257,14 +210,6 @@ fn delivery_defers_claude_trust_prompt_then_replays_same_message_after_handled()
     );
 }
 
-struct RealAdapterRegistry;
-
-impl ProviderRegistry for RealAdapterRegistry {
-    fn adapter_for(&self, provider: Provider) -> Box<dyn ProviderAdapter> {
-        get_adapter(provider)
-    }
-}
-
 #[derive(Debug, Default)]
 struct ScriptedTransport {
     screens: std::sync::Arc<Mutex<Vec<String>>>,
@@ -300,16 +245,6 @@ impl ScriptedTransport {
             windows: std::sync::Arc::new(Mutex::new(Vec::new())),
             targets: std::sync::Arc::new(Mutex::new(Vec::new())),
         }
-    }
-
-    fn with_session_present(mut self, present: bool) -> Self {
-        self.session_present = present;
-        self
-    }
-
-    fn with_windows<const N: usize>(self, windows: [WindowName; N]) -> Self {
-        *self.windows.lock().unwrap() = windows.into_iter().collect();
-        self
     }
 
     fn sent_keys(&self) -> Vec<Vec<Key>> {
@@ -445,30 +380,6 @@ fn spawn_result(session: &SessionName, window: &WindowName) -> SpawnResult {
     }
 }
 
-fn seed_runtime_state(workspace: &Path, agent_id: &str, provider: &str, startup_prompts: &str) {
-    save_runtime_state(
-        workspace,
-        &json!({
-            "active_team_key": "ctxteam",
-            "session_name": "team-ctxteam",
-            "team_dir": workspace.to_string_lossy().to_string(),
-            "agents": {
-                agent_id: {
-                    "provider": provider,
-                    "status": "running",
-                    "startup_prompts": startup_prompts,
-                    "startup_prompt_status": startup_prompts,
-                    "window": agent_id,
-                    "pane_id": "%1",
-                    "mcp_ready": true,
-                    "owner_team_id": "ctxteam"
-                }
-            }
-        }),
-    )
-    .unwrap();
-}
-
 fn delivery_state(startup_prompts: &str) -> Value {
     json!({
         "active_team_key": "ctxteam",
@@ -510,10 +421,6 @@ fn message_status(workspace: &Path, message_id: &str) -> Option<String> {
         |row| row.get(0),
     )
     .ok()
-}
-
-fn read_events(workspace: &Path) -> String {
-    std::fs::read_to_string(workspace.join(".team/logs/events.jsonl")).unwrap_or_default()
 }
 
 fn source(path: &str) -> String {

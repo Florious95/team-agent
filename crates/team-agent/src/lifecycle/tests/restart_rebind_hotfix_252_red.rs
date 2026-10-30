@@ -22,7 +22,7 @@ use std::time::Instant;
 
 use serde_json::{json, Value};
 use serial_test::serial;
-use team_agent::coordinator::{Coordinator, ProviderRegistry, WorkspacePath};
+use team_agent::coordinator::WorkspacePath;
 use team_agent::db::schema::{initialize_schema, open_db};
 use team_agent::event_log::EventLog;
 use team_agent::lifecycle::{launch_with_transport_in_workspace, restart_with_transport};
@@ -149,36 +149,6 @@ fn report_result_respects_mcp_owner_team_env_when_active_team_differs() {
 
 #[test]
 #[serial(env)]
-fn coordinator_tick_saves_captured_session_into_nested_active_team() {
-    let case = HotfixCase::new("tick-nested-session");
-    case.seed_dual_team_state(SUB, false);
-    let rollout = case.workspace.join("sub-rollout.jsonl");
-    std::fs::write(&rollout, "{}").unwrap();
-    let registry = StaticCaptureRegistry {
-        session_id: "sess-sub-captured".to_string(),
-        rollout_path: rollout,
-    };
-    let transport = RecordingTransport::new()
-        .with_session_present(true)
-        .with_windows(vec![WindowName::new("subgreeter")]);
-    let coord = Coordinator::new(
-        WorkspacePath::new(case.workspace.clone()),
-        Box::new(registry),
-        Box::new(transport),
-    );
-
-    coord.tick().expect("coordinator tick");
-    let state = load_runtime_state(&case.workspace).expect("state after tick");
-
-    assert_eq!(
-        state.pointer("/teams/sub/agents/subgreeter/session_id").and_then(Value::as_str),
-        Some("sess-sub-captured"),
-        "RC1: coordinator tick must write captured provider session into the nested active team, not only the top-level projection; state={state}"
-    );
-}
-
-#[test]
-#[serial(env)]
 fn launch_persists_agent_pane_id_and_pid() {
     let case = HotfixCase::new("launch-pane-id");
     case.write_team(CURRENT, "greeter", Provider::Fake);
@@ -276,36 +246,6 @@ fn sqlite_open_retries_under_concurrent_writer() {
         result.is_ok(),
         "RC5: opening/initializing team.db under a concurrent writer must retry/idempotently survive instead of surfacing database-is-locked. elapsed={elapsed:?} error={:?}",
         result.err()
-    );
-}
-
-#[test]
-#[ignore = "real-machine: coordinator pidfile SIGTERM process gate"]
-#[serial(env)]
-fn shutdown_pidfile_sigterm_waits_and_normalizes() {
-    let case = HotfixCase::new("shutdown-pidfile");
-    let mut child = Command::new("sh")
-        .arg("-c")
-        .arg("trap 'sleep 2; exit 0' TERM; while true; do sleep 1; done")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn delayed SIGTERM child");
-    case.write_coordinator_pid(child.id());
-
-    let report =
-        team_agent::coordinator::stop_coordinator(&WorkspacePath::new(case.workspace.clone()))
-            .expect("stop coordinator");
-    let still_running = process_running(child.id());
-    if still_running {
-        let _ = child.kill();
-    }
-    let _ = child.wait();
-
-    assert!(
-        report.ok && !still_running,
-        "RC6: pidfile coordinator stop must wait until the SIGTERM target really exits before reporting ok/stopped and removing metadata. report={report:?} still_running={still_running}"
     );
 }
 
@@ -863,21 +803,6 @@ impl Transport for RecordingTransport {
 
     fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
         Ok(AttachOutcome::Attached)
-    }
-}
-
-struct StaticCaptureRegistry {
-    session_id: String,
-    rollout_path: PathBuf,
-}
-
-impl ProviderRegistry for StaticCaptureRegistry {
-    fn adapter_for(&self, provider: Provider) -> Box<dyn ProviderAdapter> {
-        Box::new(StaticCaptureAdapter {
-            provider,
-            session_id: self.session_id.clone(),
-            rollout_path: self.rollout_path.clone(),
-        })
     }
 }
 

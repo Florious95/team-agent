@@ -452,28 +452,6 @@ must NOT report Present (auth misreported as available is a false green); got {s
 
 // ───────────────────────────────── T5 · thread leak ─────────────────────────────────
 
-/// T5 (A2 shutdown thread leak): stop_coordinator_bounded spawns a worker thread and
-/// recv_timeouts on it, but never joins — on timeout the thread is detached and leaks
-/// (repeated shutdowns re-enter and race). The fix is a join+timeout reclaim (or a
-/// cancellable synchronous stop). Source grep guard: the bounded-stop path must not
-/// drop a detached thread handle.
-#[test]
-fn t5_stop_coordinator_bounded_must_not_leak_detached_thread() {
-    let src =
-        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli/mod.rs")).unwrap();
-    let body = fn_body(&src, "fn stop_coordinator_bounded");
-    let spawns = body.contains("thread::spawn") || body.contains("std::thread::spawn");
-    let reclaims =
-        body.contains(".join(") || body.contains("JoinHandle") || body.contains("join_timeout");
-    assert!(
-        !spawns || reclaims,
-        "T5: stop_coordinator_bounded spawns a thread but never joins it — a timed-out \
-stop leaves a detached, leaking thread (and repeated shutdowns race). It must retain \
-the JoinHandle and reclaim it (join with timeout), or use a cancellable synchronous \
-stop; body={body}"
-    );
-}
-
 // ───────────────────────────────────── helpers ─────────────────────────────────────
 
 fn write_shim(path: &Path, body: &str) {

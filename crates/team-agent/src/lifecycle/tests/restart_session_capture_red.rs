@@ -79,11 +79,6 @@ fn attribution_ambiguous_is_final_only_after_convergence_deadline() {
         "/src/lifecycle/restart/common.rs"
     ))
     .unwrap();
-    let tick = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/coordinator/tick.rs"
-    ))
-    .unwrap();
 
     assert!(
         !common.contains(r#""attribution_ambiguous""#)
@@ -91,26 +86,9 @@ fn attribution_ambiguous_is_final_only_after_convergence_deadline() {
             || common.contains("final_ambiguous"),
         "C9-C11/C16: restart capture must not durably write attribution_ambiguous during an in-window poll; final ambiguous is allowed only after deadline with unallocatable candidates"
     );
-    assert!(
-        tick.contains("provider.session.attribution_ambiguous"),
-        "C16 guard: opportunistic coordinator tick may still record final attribution ambiguity when it is not the restart convergence gate; tick capture must not be deleted"
-    );
-}
-
-#[test]
-fn coordinator_tick_session_capture_stays_opportunistic_not_restart_barrier() {
-    let tick = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/coordinator/tick.rs"
-    ))
-    .unwrap();
-
-    assert!(
-        !tick.contains("session_converge_deadline")
-            && !tick.contains("provider.session.converging")
-            && !tick.contains("resume_not_ready"),
-        "C15/C16: only destructive lifecycle restart uses the convergence barrier; coordinator tick capture remains opportunistic and must not block on restart resume readiness"
-    );
+    // M3 excision: the coordinator tick and its opportunistic capture are retired (duty 8 moved to
+    // the spawn receipt plus lazy capture), so the former "tick capture must not be deleted" clause
+    // has no subject.
 }
 
 #[test]
@@ -118,11 +96,6 @@ fn session_capture_enumerates_candidates_and_carries_per_agent_context_grep_guar
     let adapter = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/provider/adapter.rs"
-    ))
-    .unwrap();
-    let tick = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/coordinator/tick.rs"
     ))
     .unwrap();
     let restart = std::fs::read_to_string(concat!(
@@ -139,8 +112,8 @@ fn session_capture_enumerates_candidates_and_carries_per_agent_context_grep_guar
         "C9: provider capture must expose/enumerate all cwd-matching session candidates instead of returning only the first path-ordered candidate"
     );
     assert!(
-        !tick.contains(".capture_session_id(") && !restart.contains(".capture_session_id("),
-        "C9/C10: coordinator tick and restart refresh must allocate across all candidates with per-agent context, not call capture_session_id(agent,cwd) one agent at a time"
+        !restart.contains(".capture_session_id("),
+        "C9/C10 (M3: the coordinator tick is retired): restart refresh must allocate across all candidates with per-agent context, not call capture_session_id(agent,cwd) one agent at a time"
     );
     assert!(
         adapter.contains("pane_pid") && adapter.contains("spawned_at") && adapter.contains("TEAM_AGENT_ID"),

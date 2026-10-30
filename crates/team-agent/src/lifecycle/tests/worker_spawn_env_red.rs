@@ -262,38 +262,6 @@ fn worker_spawn_legacy_fork_reports_unverified_not_unsupported() {
     );
 }
 
-#[test]
-#[serial(env)]
-fn worker_spawn_stays_out_of_coordinator_tick_and_daemon_preserves_parent_env() {
-    let tick = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/coordinator/tick.rs"
-    ))
-    .unwrap();
-    assert!(
-        !tick.contains("transport.spawn_first") && !tick.contains("transport.spawn_into"),
-        "coordinator tick must never spawn worker panes; worker spawn belongs to user-invoked lifecycle paths so it inherits the user's shell env"
-    );
-
-    let health = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/coordinator/health.rs"
-    ))
-    .unwrap();
-    let start = health
-        .find("pub fn start_coordinator")
-        .map(|idx| &health[idx..])
-        .unwrap_or(&health);
-    let start = start
-        .find("pub fn stop_coordinator")
-        .map(|idx| &start[..idx])
-        .unwrap_or(start);
-    assert!(
-        !start.contains(".env_clear(") && !start.contains(".env("),
-        "start_coordinator must inherit the parent environment and must not clear/override daemon env; source={start}"
-    );
-}
-
 fn spawn_env_has_tmux_control_assignment(spawn: &RecordedSpawn) -> bool {
     spawn.env.contains_key("TMUX")
         || spawn.env.contains_key("TMUX_PANE")

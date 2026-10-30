@@ -13,7 +13,7 @@ use crate::framework::*;
 use crate::support::source_walker::source_tree;
 use crate::support::topology_issue_ids::{
     LEADER_PANE_ID_COLLIDES_WITH_AGENT, LEADER_RECEIVER_SOCKET_MISMATCH,
-    ORPHAN_TEAM_SESSION_ON_IGNORED_SOCKET, RECENT_COORDINATOR_SESSION_MISSING,
+    ORPHAN_TEAM_SESSION_ON_IGNORED_SOCKET,
     TEAM_SESSION_MISSING_ON_CANONICAL_SOCKET, TMUX_ENDPOINT_SOCKET_CONFLICT,
 };
 use serde_json::{json, Value};
@@ -116,7 +116,7 @@ fn rfs_diagnose_reports_endpoint_socket_conflict_and_canonical_readiness() {
     assert_issue_id(&body, TMUX_ENDPOINT_SOCKET_CONFLICT, "R3 RED");
     assert_issue_id(&body, LEADER_RECEIVER_SOCKET_MISMATCH, "R3 RED");
     assert_issue_id(&body, TEAM_SESSION_MISSING_ON_CANONICAL_SOCKET, "R3 RED");
-    assert_issue_id(&body, RECENT_COORDINATOR_SESSION_MISSING, "R3 RED");
+    // M3 excision: RECENT_COORDINATOR_SESSION_MISSING needs the retired tick's session_missing events.
 }
 
 #[test]
@@ -126,30 +126,8 @@ fn rfs_diagnose_orphan_issue_requires_live_same_team_session_on_old_endpoint() {
     let ws_path = ws.path().to_str().unwrap();
     let qs = quick_start_fake(&ws, team_id);
     assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
-    // This synthetic topology fixture must not race a background state writer.
-    {
-        use std::thread;
-        use std::time::{Duration, Instant};
-        use team_agent::coordinator::{pid_is_running, stop_coordinator, Pid, WorkspacePath};
-
-        let raw_pid = fs::read_to_string(ws.coordinator_pid_file())
-            .expect("read RFS fixture coordinator PID")
-            .trim()
-            .parse::<u32>()
-            .expect("parse RFS fixture coordinator PID");
-        assert!(ws.pid_is_owned_coordinator(raw_pid), "refusing non-owned coordinator {raw_pid}");
-        let pid = Pid::new(raw_pid);
-        let stopped = stop_coordinator(&WorkspacePath::new(ws.path().to_path_buf()))
-            .expect("stop RFS fixture-owned coordinator");
-        assert!(stopped.ok, "RFS coordinator stop failed: {stopped:?}");
-        assert_eq!(stopped.pid, Some(pid), "stop must address exact owned PID");
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while pid_is_running(pid).expect("probe exact RFS coordinator") {
-            assert!(Instant::now() < deadline, "RFS coordinator did not exit");
-            thread::sleep(Duration::from_millis(10));
-        }
-        eprintln!("RFS_FIXTURE_COORDINATOR_QUIESCED pid={} running=false", pid.get());
-    }
+    // M3 excision: quick-start no longer starts a resident coordinator, so there is no
+    // background state writer to quiesce before the synthetic topology is written.
     let old_socket = unique_socket("rfs008-old");
     let new_socket = unique_socket("rfs008-new");
     let _guard = TmuxSocketGuard::new(vec![old_socket.clone(), new_socket.clone()]);
@@ -191,11 +169,8 @@ fn rfs_diagnose_orphan_issue_requires_live_same_team_session_on_old_endpoint() {
         TEAM_SESSION_MISSING_ON_CANONICAL_SOCKET,
         "RFS orphan positive control",
     );
-    assert_issue_id(
-        &body,
-        RECENT_COORDINATOR_SESSION_MISSING,
-        "RFS orphan positive control",
-    );
+    // M3 excision: RECENT_COORDINATOR_SESSION_MISSING was derived from the retired tick's
+    // `coordinator.session_missing` events; with no tick it has no source.
 }
 
 #[test]

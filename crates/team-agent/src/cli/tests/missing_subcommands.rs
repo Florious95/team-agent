@@ -193,7 +193,7 @@ fn dispatch_routes_diagnose_checks_runtime_beyond_healthy_leader() {
             &cli_argv(&["doctor", "--workspace", &ws.to_string_lossy(), "--json"]),
             &ws,
         );
-        assert_eq!(code, ExitCode::Error, "healthy binding alone cannot hide missing coordinator");
+        assert_eq!(code, ExitCode::Ok, "M3: a healthy binding with no runtime fault is healthy; no coordinator is required");
         let result = cmd_doctor(&DoctorArgs {
             workspace: ws.clone(), json: true, team: None,
             spec: None, gate: None, comms: false, fix: false,
@@ -202,8 +202,8 @@ fn dispatch_routes_diagnose_checks_runtime_beyond_healthy_leader() {
         let CmdOutput::Json(report) = result.output else {
             panic!("expected JSON diagnostic report");
         };
-        assert_eq!(report["coordinator"]["ok"], false, "{report}");
         let issues = report["issues"].to_string();
+        assert!(!issues.contains("coordinator"), "M3: doctor must not demand a coordinator: {report}");
         for binding_failure in ["leader_not_attached", "leader_receiver_unbound", "leader_workspace_mismatch"] {
             assert!(!issues.contains(binding_failure), "healthy binding regressed: {report}");
         }

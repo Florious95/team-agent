@@ -1730,46 +1730,6 @@ mod fresh_quick_start_leader_binding_tests {
     }
 
     #[test]
-    fn coordinator_negative_report_retains_actual_details_and_does_not_become_ready() {
-        let mut report = crate::coordinator::StartReport {
-            ok: false,
-            pid: None,
-            status: crate::coordinator::StartOutcome::SchemaIncompatible,
-            previous_pid: Some(crate::coordinator::Pid(17)),
-            binary_path: Some("/tmp/candidate/team-agent".to_string()),
-            binary_version: Some("0.5.112".to_string()),
-            rotation_reason: Some("original rotation reason".to_string()),
-            binary_identity_relation:
-                crate::coordinator::CoordinatorBinaryIdentityRelation::Unknown,
-            log: Some(PathBuf::from("/tmp/current/.team/runtime/coordinator.log")),
-            schema_error: Some(crate::coordinator::SchemaError::InitFailed {
-                message: "original database permission denied".to_string(),
-            }),
-            action: Some("repair the exact database permissions".to_string()),
-        };
-        let error = require_quick_start_coordinator_started(&report, Path::new("/tmp/current"))
-            .unwrap_err()
-            .to_string();
-        for detail in [
-            "schema_incompatible",
-            "original database permission denied",
-            "repair the exact database permissions",
-            "/tmp/candidate/team-agent",
-            "/tmp/current/.team/runtime/coordinator.log",
-            "workers may already be started",
-        ] {
-            assert!(error.contains(detail), "lost {detail}: {error}");
-        }
-        report.ok = true;
-        report.status = crate::coordinator::StartOutcome::AlreadyRunning;
-        report.binary_identity_relation =
-            crate::coordinator::CoordinatorBinaryIdentityRelation::DaemonNewerThanCaller;
-        assert!(
-            require_quick_start_coordinator_started(&report, Path::new("/tmp/current")).is_ok()
-        );
-    }
-
-    #[test]
     #[serial_test::serial(env)]
     fn same_current_leader_bootstrap_reaches_fresh_preflight_without_mutating_seed() {
         let env = HermeticTestEnv::enter("current-bootstrap-preflight");

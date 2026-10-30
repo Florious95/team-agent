@@ -356,31 +356,6 @@ fn h8_wait_retains_real_completed_result_fifo_semantics() {
 
 #[test]
 #[serial(env)]
-fn h8_coordinator_retains_real_single_tick_function() {
-    let env = HermeticTestEnv::enter("compat-coordinator");
-    let ws = seeded(&env);
-    let out = env.run_cli(
-        &ws,
-        &[
-            "coordinator",
-            "--once",
-            "--workspace",
-            ws.to_str().unwrap(),
-            "--team",
-            "alpha",
-        ],
-    );
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "H8 coordinator --once: {}",
-        text(&out)
-    );
-    assert!(load_runtime_state(&ws).unwrap().is_object());
-}
-
-#[test]
-#[serial(env)]
 fn h8_app_server_binding_retains_real_probe_and_owner_write() {
     let env = HermeticTestEnv::enter("compat-app-server");
     let ws = seeded(&env);
@@ -734,24 +709,6 @@ fn h7_native_delimiter_help_preserves_existing_provider_rules_and_raw_order() {
         );
     }
 }
-fn quiesce(ws: &framework::TestWorkspace) {
-    use team_agent::coordinator::{pid_is_running, stop_coordinator, Pid, WorkspacePath};
-    let raw = fs::read_to_string(ws.coordinator_pid_file())
-        .unwrap()
-        .trim()
-        .parse::<u32>()
-        .unwrap();
-    assert!(ws.pid_is_owned_coordinator(raw));
-    let pid = Pid::new(raw);
-    let stopped = stop_coordinator(&WorkspacePath::new(ws.path().to_path_buf())).unwrap();
-    assert!(stopped.ok);
-    assert_eq!(stopped.pid, Some(pid));
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while pid_is_running(pid).unwrap() {
-        assert!(Instant::now() < deadline);
-        thread::sleep(Duration::from_millis(10));
-    }
-}
 #[test]
 #[serial(env)]
 fn h9_actual_worker_stop_start_and_refusal_guards_keep_owned_resources_and_roles() {
@@ -765,7 +722,6 @@ fn h9_actual_worker_stop_start_and_refusal_guards_keep_owned_resources_and_roles
         started.stderr
     );
     ws.retain_owned_session_placeholder_window("hold");
-    quiesce(&ws);
     let state = ws.read_state();
     let role = fs::read(ws.path().join("agents/worker.md")).unwrap();
     for args in [
