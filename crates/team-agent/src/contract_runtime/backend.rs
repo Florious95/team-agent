@@ -50,6 +50,10 @@ pub enum BackendError {
     Io(#[from] std::io::Error),
     #[error("native runtime metadata is invalid")]
     Metadata,
+    #[error("native lifecycle fence: {reason}")]
+    Fence { reason: &'static str },
+    #[error("native stop refused (NoEffect) operation={operation:?} reason={reason:?}")]
+    StopRefused { operation: OperationId, reason: Option<String> },
     #[error("native shutdown operation={operation:?} phase={phase:?} outcome={outcome:?} failure={failure:?}")]
     Shutdown {
         operation: OperationId,
@@ -235,7 +239,7 @@ pub(super) fn workspace_tmux(
         &binding.workspace.path, Some(&binding.team), crate::state::selector::SelectorMode::RuntimeOnly,
     ).map_err(|_| ContractError::Mismatch("workspace topology scope"))?;
     if selected.run_workspace != binding.workspace.path || selected.team_key != binding.team {
-        return Err(Error::Fence.into());
+        return Err(BackendError::Fence { reason: "workspace_topology_scope" });
     }
     crate::lifecycle::launch::ensure_owner_allowed_for_state(&selected.state,
         Some(&crate::model::ids::AgentId::new(seat.as_str())))
@@ -285,13 +289,13 @@ pub(super) fn workspace_tmux(
                     return Err(ContractError::Invalid("workspace session ID").into());
                 }
                 if name == session_name {
-                    if session.replace(id.to_owned()).is_some() { return Err(Error::Fence.into()); }
+                    if session.replace(id.to_owned()).is_some() { return Err(BackendError::Fence { reason: "workspace_session_ambiguous" }); }
                 }
             }
         } else if !(result.end == CommandEnd::Exited && result.exit_code == Some(1) && result.child_reaped
             && result.stdout.is_empty() && result.stderr == format!("no server running on {}\n", endpoint.display()).as_bytes())
         { return Err(ContractError::Mismatch("workspace server observation unavailable").into()); }
-        if workspace_socket(&endpoint)? != socket { return Err(Error::Fence.into()); }
+        if workspace_socket(&endpoint)? != socket { return Err(BackendError::Fence { reason: "workspace_socket_changed" }); }
     }
     if let Some(id) = &session {
         let owner = transport.session_owner(&crate::transport::SessionName::new(&session_name))
@@ -331,7 +335,7 @@ pub(super) fn bind_workspace_session(workspace: &Path, team: &str, seat: &SeatId
     let owner = transport.session_owner(&session).map_err(|_| ContractError::Mismatch("workspace session owner readback"))?;
     if !owner.is_some_and(|owner| Path::new(&owner.workspace) == backend.binding.workspace.path
         && owner.team == team && owner.generation == generation)
-    { return Err(Error::Fence.into()); }
+    { return Err(BackendError::Fence { reason: "workspace_session_owner_changed" }); }
     host.validate_target(target, &clock, deadline)?;
     Ok(())
 }
@@ -557,9 +561,9 @@ enum ExistingStart {
 // to replay an unfinished host effect. Check parent leases before old success.
 fn existing_start(backend: &Backend, seat: &SeatId) -> Result<Option<ExistingStart>, BackendError> {
     let unfinished: Vec<_> = backend.store.unfinished()?.into_iter().filter(|record| involves_seat(record, seat)).collect();
-    if unfinished.len() > 1 { return Err(Error::Fence.into()); }
+    if unfinished.len() > 1 { return Err(BackendError::Fence { reason: "unfinished_operation_ambiguous" }); }
     if let Some(record) = unfinished.into_iter().next() {
-        if record.target.identity.scope != backend.binding.scope { return Err(Error::Fence.into()); }
+        if record.target.identity.scope != backend.binding.scope { return Err(BackendError::Fence { reason: "unfinished_scope_mismatch" }); }
         return Ok(Some(if record.phase == Phase::F4Commit && record.pending.is_none()
             && matches!(record.kind, TransactionKind::Startup | TransactionKind::Restart
                 | TransactionKind::NewSeatFullSnapshot | TransactionKind::NativeNewSeat)
@@ -573,11 +577,11 @@ fn existing_start(backend: &Backend, seat: &SeatId) -> Result<Option<ExistingSta
             Some(record) if record.outcome == Outcome::Compensated => Ok(None),
             // remove/reset ended this identity explicitly; the next start is fresh.
             Some(record) if backend.store.retired(&record.target.identity)? => Ok(None),
-            Some(_) => Err(Error::Fence.into()),
+            Some(_) => Err(BackendError::Fence { reason: "creation_receipt_without_current_seat" }),
         };
     };
-    if current.identity.scope != backend.binding.scope { return Err(Error::Fence.into()); }
-    let record = backend.store.creation_receipt(seat, Some(&current.identity))?.ok_or(Error::Fence)?;
+    if current.identity.scope != backend.binding.scope { return Err(BackendError::Fence { reason: "current_scope_mismatch" }); }
+    let record = backend.store.creation_receipt(seat, Some(&current.identity))?.ok_or(BackendError::Fence { reason: "creation_receipt_missing" })?;
     if record.outcome != Outcome::Committed || record.phase != Phase::F5Receipt || record.pending.is_some() {
         return Ok(Some(ExistingStart::Blocked(record)));
     }
@@ -588,7 +592,7 @@ fn existing_start(backend: &Backend, seat: &SeatId) -> Result<Option<ExistingSta
 pub(super) fn require_candidate(binding: &Binding) -> Result<(), BackendError> {
     let candidate = std::env::current_exe()?.canonicalize()?;
     if candidate != binding.candidate || fingerprint_file(&candidate, 1024 * 1024 * 1024,
-        Duration::from_secs(10))? != binding.candidate_sha256 { return Err(Error::Fence.into()); }
+        Duration::from_secs(10))? != binding.candidate_sha256 { return Err(BackendError::Fence { reason: "candidate_path_or_fingerprint_mismatch" }); }
     Ok(())
 }
 
@@ -599,11 +603,11 @@ pub(super) fn refresh_quiescent_candidate(workspace: &Path, team: &str, seat: &S
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let mut backend = Backend::open(workspace, team)?;
     let candidate = std::env::current_exe()?.canonicalize()?;
-    if candidate != backend.binding.candidate { return Err(Error::Fence.into()); }
+    if candidate != backend.binding.candidate { return Err(BackendError::Fence { reason: "candidate_rebind_path_mismatch" }); }
     let fingerprint = fingerprint_file(&candidate, 1024 * 1024 * 1024, Duration::from_secs(10))?;
     if fingerprint == backend.binding.candidate_sha256 { return Ok(()); }
     let root = root_for(workspace, &backend.binding.scope);
-    if root.canonicalize()? != root { return Err(Error::Fence.into()); }
+    if root.canonicalize()? != root { return Err(BackendError::Fence { reason: "candidate_rebind_root_alias" }); }
     let directory = std::fs::File::open(&root)?;
     if !crate::platform::file_lock::try_lock_once_nonblocking(&directory)? { return Err(Error::Conflict.into()); }
     if !backend.store.unfinished()?.is_empty() { return Err(Error::Conflict.into()); }
@@ -618,7 +622,7 @@ pub(super) fn refresh_quiescent_candidate(workspace: &Path, team: &str, seat: &S
     let path = root.join("framework-binding.json");
     let metadata = std::fs::symlink_metadata(&path)?;
     if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.nlink() != 1 || metadata.mode() & 0o022 != 0 { return Err(Error::Fence.into()); }
+        || metadata.nlink() != 1 || metadata.mode() & 0o022 != 0 { return Err(BackendError::Fence { reason: "candidate_rebind_file_ownership" }); }
     let before = std::fs::read(&path)?;
     backend.binding.candidate_sha256 = fingerprint;
     let temporary = root.join(format!("binding-{}.tmp", backend.store.propose_identity(seat)?.instance.as_str()));
@@ -626,7 +630,7 @@ pub(super) fn refresh_quiescent_candidate(workspace: &Path, team: &str, seat: &S
     let result = (|| -> Result<(), BackendError> {
         file.write_all(&serde_json::to_vec(&backend.binding).map_err(|_| BackendError::Metadata)?)?;
         file.sync_all()?;
-        if std::fs::read(&path)? != before { return Err(Error::Fence.into()); }
+        if std::fs::read(&path)? != before { return Err(BackendError::Fence { reason: "candidate_rebind_concurrent_write" }); }
         std::fs::rename(&temporary, &path)?;
         directory.sync_all()?;
         Ok(())
@@ -657,6 +661,17 @@ fn receipt_error(record: OperationRecord) -> BackendError {
         outcome: record.outcome, failure: record.failure.or(record.pending) }
 }
 
+pub(super) fn require_stopped(record: &OperationRecord) -> Result<(), BackendError> {
+    if matches!(record.outcome, Outcome::Committed | Outcome::Compensated) && record.target.status == SeatStatus::Stopped {
+        return Ok(());
+    }
+    if record.kind == TransactionKind::Teardown && record.phase == Phase::F0Preflight
+        && record.outcome == Outcome::Compensated && record.effect == team_agent_contract::contract::delivery::DeliveryEffect::NoEffect {
+        return Err(BackendError::StopRefused { operation: record.id.clone(), reason: record.failure.clone() });
+    }
+    Err(receipt_error(record.clone()))
+}
+
 /// Plan only against this selected store and exact row (or an unbound seed).
 /// A stale parent can be repaired only by its actual creation receipt, never
 /// by selecting the greatest generation or adopting a discovered process.
@@ -666,7 +681,7 @@ pub(crate) fn start_needs_reconciliation(workspace: &Path, team: &str, seat: &Se
     let class = existing_start(&backend, seat)?;
     let current = backend.store.seat(seat)?;
     if current.as_ref().is_some_and(|seat| !registry::same_provider(row.get("provider").and_then(serde_json::Value::as_str).unwrap_or(""), seat.provider.as_str())) {
-        return Err(Error::Fence.into());
+        return Err(BackendError::Fence { reason: "planner_provider_mismatch" });
     }
     let matches = |identity: &InstanceIdentity| {
         row.get("contract_scope").and_then(serde_json::Value::as_str) == Some(identity.scope.as_str())
@@ -685,7 +700,7 @@ pub(crate) fn start_needs_reconciliation(workspace: &Path, team: &str, seat: &Se
         && !record.and_then(|record| record.parent.as_ref()).is_some_and(|parent| matches(&parent.identity)
             && row.get("session_id").and_then(serde_json::Value::as_str)
                 == parent.session.as_ref().map(|session| session.native_session.as_str()))
-    { return Err(Error::Fence.into()); }
+    { return Err(BackendError::Fence { reason: "planner_identity_mismatch" }); }
     let needs_projection = seed || current.as_ref().is_some_and(|seat| !matches(&seat.identity)
         || seat.status == SeatStatus::Starting
         || row.get("session_id").and_then(serde_json::Value::as_str) != seat.session.as_ref().map(|session| session.native_session.as_str())
@@ -746,9 +761,13 @@ fn involves_seat(operation: &OperationRecord, seat: &SeatId) -> bool {
 }
 
 fn recover_incomplete(backend: &mut Backend, seat: &SeatId) -> Result<Option<OperationRecord>, BackendError> {
+    recover_incomplete_until(backend, seat, None)
+}
+
+fn recover_incomplete_until(backend: &mut Backend, seat: &SeatId, deadline: Option<std::time::Instant>) -> Result<Option<OperationRecord>, BackendError> {
     for pending in backend.store.unfinished()?.into_iter().filter(|operation| involves_seat(operation, seat)
         && matches!(operation.outcome, Outcome::Running | Outcome::NeedsRecovery)) {
-        let recovered = finish_receipt(backend, pending)?;
+        let recovered = finish_receipt_until(backend, pending, deadline)?;
         if matches!(recovered.outcome, Outcome::Running | Outcome::NeedsRecovery) { return Ok(Some(recovered)); }
     }
     Ok(None)
@@ -762,9 +781,13 @@ fn reconcile_start(backend: &mut Backend, seat: &SeatId) -> Result<(), BackendEr
 }
 
 fn finish_receipt(backend: &mut Backend, record: OperationRecord) -> Result<OperationRecord, BackendError> {
+    finish_receipt_until(backend, record, None)
+}
+
+fn finish_receipt_until(backend: &mut Backend, record: OperationRecord, deadline: Option<std::time::Instant>) -> Result<OperationRecord, BackendError> {
     if record.target.identity.scope != backend.binding.scope
         || record.parent.as_ref().is_some_and(|parent| parent.identity.scope != backend.binding.scope) {
-        return Err(Error::Fence.into());
+        return Err(BackendError::Fence { reason: "recovery_scope_mismatch" });
     }
     let _target = native_seat_lock(&backend.binding.workspace.path, &backend.binding.team, &record.target.identity.seat, true)?;
     let _parent = record.parent.as_ref().filter(|parent| parent.identity.seat != record.target.identity.seat)
@@ -776,6 +799,7 @@ fn finish_receipt(backend: &mut Backend, record: OperationRecord) -> Result<Oper
     let mut host = PhysicalRuntime::new(Registration { descriptor: selected.descriptor(), hooks: &hooks,
         controls: selected.controls(), startup: selected.startup(), session_panel: selected.session_panel() },
         settings(&backend.binding, selected), record.id.clone(), &clock)?;
+    if let Some(deadline) = deadline { host.cap_budget(remaining_stop_budget(deadline)?)?; }
     Ok(Lifecycle { store: &mut backend.store, host: &mut host, io: &mut NoNewIo }.recover(&record.id)?)
 }
 
@@ -862,7 +886,7 @@ pub fn start(
                 return Ok((backend.binding, record));
             },
             Some(ExistingStart::Resume(current)) => {
-                if current.provider != role.provider { return Err(Error::Fence.into()); }
+                if current.provider != role.provider { return Err(BackendError::Fence { reason: "resume_provider_mismatch" }); }
                 let prepared = prepare_resume(workspace, team, &role.id, Some(role))?;
                 return Ok((backend.binding, resume(prepared)?));
             },
@@ -915,7 +939,7 @@ pub fn start(
     if backend.binding.candidate != provisional.candidate
         || backend.binding.candidate_sha256 != candidate_sha256
     {
-        return Err(Error::Fence.into());
+        return Err(BackendError::Fence { reason: "startup_candidate_changed" });
     }
     if existing_start(&backend, &role.id)?.is_some() {
         return Err(Error::Conflict.into());
@@ -1039,7 +1063,7 @@ pub fn prepare_resume(
     let backend = Backend::open_readonly(workspace, team)?;
     let parent = backend.store.seat(seat)?.ok_or(BackendError::Metadata)?;
     if parent.status == SeatStatus::Unknown {
-        return Err(Error::Fence.into());
+        return Err(BackendError::Fence { reason: "resume_parent_unknown" });
     }
     let role = match role {
         Some(role) => role.clone(),
@@ -1055,7 +1079,7 @@ pub fn prepare_resume(
     let candidate = std::env::current_exe()?.canonicalize()?;
     let candidate_sha256 = fingerprint_file(&candidate, 1024 * 1024 * 1024, Duration::from_secs(10))?;
     if backend.binding.candidate != candidate || backend.binding.candidate_sha256 != candidate_sha256 {
-        return Err(Error::Fence.into());
+        return Err(BackendError::Fence { reason: "resume_candidate_changed" });
     }
     let discovered = discovery::discover_runtime(&role.provider, workspace)?;
     let identity = backend.store.propose_identity(seat)?;
@@ -1080,12 +1104,12 @@ pub fn resume(prepared: PreparedResume) -> Result<OperationRecord, BackendError>
     if serde_json::to_vec(&backend.binding).map_err(|_| BackendError::Metadata)?
         != serde_json::to_vec(&prepared.binding).map_err(|_| BackendError::Metadata)?
     {
-        return Err(Error::Fence.into());
+        return Err(BackendError::Fence { reason: "resume_scope_binding_changed" });
     }
     let source = prepared.request.resume.as_ref().ok_or(BackendError::Metadata)?;
     let parent = backend.store.assert_current(&source.expected_source)?;
     if parent.session.as_ref() != Some(&source.binding) {
-        return Err(Error::Fence.into());
+        return Err(BackendError::Fence { reason: "resume_session_changed" });
     }
     let selected = registry::provider(prepared.role.provider.as_str())?;
     let descriptor = selected.descriptor();
@@ -1275,9 +1299,21 @@ pub(crate) fn retire(workspace: &Path, team: &str, seat: &SeatId) -> Result<Opti
 }
 
 pub fn stop(workspace: &Path, team: &str, seat: &SeatId) -> Result<OperationRecord, BackendError> {
+    stop_with_budget(workspace, team, seat, Duration::from_secs(20))
+}
+
+fn remaining_stop_budget(deadline: std::time::Instant) -> Result<Duration, BackendError> {
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() { return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "native stop deadline exhausted").into()); }
+    Ok(remaining)
+}
+
+pub(super) fn stop_with_budget(workspace: &Path, team: &str, seat: &SeatId, budget: Duration) -> Result<OperationRecord, BackendError> {
+    let deadline = std::time::Instant::now() + budget;
+    remaining_stop_budget(deadline)?;
     let _ownership = native_seat_lock(workspace, team, seat, false)?;
     let mut backend = Backend::open(workspace, team)?;
-    if let Some(record) = recover_incomplete(&mut backend, seat)? { return Ok(record); }
+    if let Some(record) = recover_incomplete_until(&mut backend, seat, Some(deadline))? { return Ok(record); }
     let Some(target) = backend.store.seat(seat)? else {
         // Compensation can remove an interrupted startup's provisional seat.
         // Its durable cleanup receipt is an honest already-absent stop result.
@@ -1304,6 +1340,7 @@ pub fn stop(workspace: &Path, team: &str, seat: &SeatId) -> Result<OperationReco
         &clock,
     )?;
     physical.evidence = policy_evidence(&target.provider, &target.native, backend.binding.candidate_sha256)?;
+    physical.cap_budget(remaining_stop_budget(deadline)?)?;
     Ok(Lifecycle {
         store: &mut backend.store,
         host: &mut physical,
@@ -1441,6 +1478,24 @@ mod tests {
     }
 
     #[test]
+    fn stop_budget_and_no_effect_refusal_never_claim_a_live_seat_stopped() {
+        let mut fixture = RoleFixture::new();
+        let backend = fixture.canonical(SeatStatus::Starting, Phase::F4Commit, Outcome::Committed, None);
+        let original = backend.store.operation(&OperationId::new("controlled-start").unwrap()).unwrap();
+        assert!(stop_with_budget(&fixture.root, "test", &fixture.identity.seat, Duration::ZERO)
+            .unwrap_err().to_string().contains("native stop deadline exhausted"));
+        assert_eq!(backend.store.operation(&original.id).unwrap(), original);
+        let mut refused = original;
+        refused.kind = TransactionKind::Teardown;
+        refused.phase = Phase::F0Preflight;
+        refused.outcome = Outcome::Compensated;
+        refused.failure = Some("read-only preflight NoEffect".into());
+        assert!(matches!(require_stopped(&refused), Err(BackendError::StopRefused { .. })));
+        refused.target.status = SeatStatus::Stopped;
+        assert!(require_stopped(&refused).is_ok());
+    }
+
+    #[test]
     fn unfinished_restart_parent_routes_to_locked_reconciliation_without_planner_writes() {
         for outcome in [Outcome::Running, Outcome::NeedsRecovery] {
             let mut fixture = RoleFixture::new();
@@ -1464,7 +1519,8 @@ mod tests {
             for (key, value) in [("contract_instance", serde_json::json!("foreign")),
                 ("generation", serde_json::json!(3)), ("session_id", serde_json::json!("foreign"))] {
                 let mut forged = row.clone(); forged[key] = value;
-                assert!(start_needs_reconciliation(&fixture.root, "test", &fixture.identity.seat, &forged).is_err(), "{key}");
+                assert!(matches!(start_needs_reconciliation(&fixture.root, "test", &fixture.identity.seat, &forged),
+                    Err(BackendError::Fence { reason: "planner_identity_mismatch" })), "{key}");
             }
         }
     }

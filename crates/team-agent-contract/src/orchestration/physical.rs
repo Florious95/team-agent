@@ -43,6 +43,7 @@ pub struct PhysicalRuntime<'a> {
     settings: PhysicalSettings,
     operation: OperationId,
     clock: &'a dyn Clock,
+    budget_end: Option<Duration>,
     quiescent: Option<SeatRecord>,
     explicit_session: Option<crate::contract::session::NativeSessionId>,
     startup_consent: Option<StartupConsent>,
@@ -95,6 +96,7 @@ impl<'a> PhysicalRuntime<'a> {
             settings,
             operation,
             clock,
+            budget_end: None,
             quiescent: None,
             explicit_session: None,
             startup_consent: None,
@@ -242,11 +244,15 @@ impl<'a> PhysicalRuntime<'a> {
         { return Err(Error::NativeControl(Box::new(report))); }
         Ok(())
     }
+    pub fn cap_budget(&mut self, budget: Duration) -> Result<(), Error> {
+        let end = self.clock.now().checked_add(budget).ok_or(Error::Invalid("physical deadline"))?;
+        self.budget_end = Some(self.budget_end.map_or(end, |old| old.min(end)));
+        Ok(())
+    }
     fn deadline(&self) -> Result<Duration, Error> {
-        self.clock
-            .now()
-            .checked_add(self.settings.action_budget)
-            .ok_or(Error::Invalid("physical deadline"))
+        let end = self.clock.now().checked_add(self.settings.action_budget)
+            .ok_or(Error::Invalid("physical deadline"))?;
+        Ok(self.budget_end.map_or(end, |budget| budget.min(end)))
     }
     fn target<'b>(&self, seat: &'b SeatRecord) -> Result<&'b TargetReceipt, Error> {
         let target = seat
@@ -437,9 +443,9 @@ impl LifecycleHost for PhysicalRuntime<'_> {
             // Wait read-only for the registered control surface; never type an
             // exit command into a busy/queued composer or add an interrupt key.
             while crate::host::process::sample_process(&target.process) != ProcessState::Exited {
-                let ready = self.readiness(seat)?;
+                if self.clock.now() >= deadline { return Err(Error::StopNoEffect("graceful exit composer not ready".into())); }
+                let ready = self.readiness(seat).map_err(|error| Error::StopNoEffect(format!("graceful exit read-only preflight: {error}")))?;
                 if matches!(ready.pane.outcome, crate::contract::probe::ProbeOutcome::Observed(ref pane) if pane.surface == InputSurface::ComposerReady) { break; }
-                if self.clock.now() >= deadline { return Err(Error::Host("graceful exit composer not ready")); }
                 self.clock.sleep(self.settings.limits.poll_interval);
             }
             let result = if crate::host::process::sample_process(&target.process) == ProcessState::Exited {

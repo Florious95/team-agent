@@ -21,6 +21,30 @@ use team_agent_contract::orchestration::{
 };
 use team_agent_contract::runtime::{delivery::*, probes::*};
 
+// The process/PTY are real; only the pre-stop refusal is injected. This keeps
+// no-effect and live recovery tests independent of a provider subscription.
+struct FaultedPhysicalStop<'a> {
+    inner: PhysicalRuntime<'a>,
+    refusal: Option<Error>,
+}
+impl LifecycleHost for FaultedPhysicalStop<'_> {
+    fn spawn(&mut self, descriptor: &ProviderDescriptor, resolved: &ResolvedLaunch, seat: &SeatRecord, plan: &LaunchPlan) -> Result<SpawnedProcess, Error> {
+        self.inner.spawn(descriptor, resolved, seat, plan)
+    }
+    fn stop(&mut self, seat: &SeatRecord) -> Result<(), Error> {
+        match &self.refusal { Some(error) => Err(error.clone()), None => self.inner.stop(seat) }
+    }
+    fn control(&mut self, seat: &SeatRecord, control: &team_agent_contract::contract::fork::NativeControl) -> Result<DeliveryEffect, Error> {
+        self.inner.control(seat, control)
+    }
+    fn session_evidence(&mut self, seat: &SeatRecord) -> Result<team_agent_contract::contract::session::ScopedSessionEvidence, Error> {
+        self.inner.session_evidence(seat)
+    }
+    fn remove_owned(&mut self, resource: &OwnedResourceReceipt) -> Result<bool, Error> {
+        self.inner.remove_owned(resource)
+    }
+}
+
 fn context(seat: &SeatRecord) -> CallContext {
     CallContext {
         identity: seat.identity.clone(),
@@ -545,21 +569,53 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
 
     // Reproduce a restart after losing the final spawn result, both with the
     // exact native still alive and after a positively receipt-owned close.
-    for live in [true, false] {
+    for mode in ["live-spawn", "absent-spawn", "no-effect-stop", "recover-stop"] {
         let mut pending_request = request.clone();
-        pending_request.identity.seat = SeatId::new(format!("pending-{live}")).unwrap();
-        pending_request.identity.instance = InstanceId::new(format!("pending-instance-{live}")).unwrap();
-        let op = OperationId::new(format!("pending-spawn-{live}")).unwrap();
+        pending_request.identity.seat = SeatId::new(format!("pending-{mode}")).unwrap();
+        pending_request.identity.instance = InstanceId::new(format!("pending-instance-{mode}")).unwrap();
+        let op = OperationId::new(format!("pending-{mode}")).unwrap();
         let mut pending_runtime = PhysicalRuntime::new(Registration {
             descriptor: &d, hooks: &h, controls: &[], startup: None, session_panel: None,
         }, settings(&tmux), op.clone(), &clock).unwrap();
         let mut pending = Lifecycle { store: &mut store, host: &mut pending_runtime, io: &mut io }.startup(
             &Adapter { descriptor: &d, hooks: &h, catalog: None }, &pending_request,
-            Routing { pane: "unpublished".into(), binding_key: "pending-binding".into(), server_key: format!("pending-server-{live}") }, op.clone(),
+            Routing { pane: "unpublished".into(), binding_key: "pending-binding".into(), server_key: format!("pending-server-{mode}") }, op.clone(),
         ).unwrap();
         assert_eq!(pending.outcome, Outcome::Committed, "{pending:?}");
         let physical = pending.target.physical.clone().unwrap();
-        if !live {
+        if mode.ends_with("stop") {
+            let no_effect = mode == "no-effect-stop";
+            let mut host = FaultedPhysicalStop { inner: pending_runtime, refusal: Some(if no_effect {
+                Error::StopNoEffect("controlled read-only composer refusal".into())
+            } else { Error::Host("first recovery blocker") }) };
+            let stop_id = OperationId::new(format!("stop-{mode}")).unwrap();
+            let stopped = Lifecycle { store: &mut store, host: &mut host, io: &mut io }
+                .teardown(&pending.target.identity, stop_id.clone()).unwrap();
+            assert_eq!(sample_process(&physical.process), ProcessState::Alive);
+            assert_eq!(stopped.effect, DeliveryEffect::NoEffect);
+            if no_effect {
+                assert_eq!(stopped.outcome, Outcome::Compensated);
+                assert_ne!(stopped.target.status, SeatStatus::Stopped);
+                assert!(!store.leased(&pending.target.identity.seat).unwrap());
+                host.refusal = None;
+                let retry = Lifecycle { store: &mut store, host: &mut host, io: &mut io }
+                    .teardown(&pending.target.identity, OperationId::new("retry-no-effect-stop").unwrap()).unwrap();
+                assert_eq!(retry.outcome, Outcome::Committed);
+            } else {
+                assert_eq!(stopped.outcome, Outcome::NeedsRecovery);
+                host.refusal = Some(Error::Host("new recovery blocker"));
+                let retry = Lifecycle { store: &mut store, host: &mut host, io: &mut io }.recover(&stop_id).unwrap();
+                assert!(retry.failure.as_deref().unwrap().contains("new recovery blocker"));
+                assert_eq!(store.operation(&stop_id).unwrap(), retry);
+                host.refusal = None;
+                let retry = Lifecycle { store: &mut store, host: &mut host, io: &mut io }.recover(&stop_id).unwrap();
+                assert_eq!(retry.outcome, Outcome::Compensated);
+                assert!(!store.leased(&pending.target.identity.seat).unwrap());
+            }
+            assert_eq!(sample_process(&physical.process), ProcessState::Exited);
+            continue;
+        }
+        if mode == "absent-spawn" {
             let stopped = Lifecycle { store: &mut store, host: &mut pending_runtime, io: &mut io }
                 .teardown(&pending.target.identity, OperationId::new("close-before-recovery").unwrap()).unwrap();
             assert_eq!(stopped.outcome, Outcome::Committed);

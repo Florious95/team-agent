@@ -1439,6 +1439,27 @@ pub mod lifecycle_port {
         shutdown_with_transport_and_state(workspace, keep_logs, team, transport, None)
     }
 
+    fn retain_native_shutdown_receipts(result: Result<Value, CliError>, receipts: &[Value]) -> Result<Value, CliError> {
+        match result {
+            Err(error) if !receipts.is_empty() => Ok(json!({
+                "ok":false,"status":"failed","phase":"shutdown","error":error.to_string(),
+                "native_receipts":receipts,
+            })),
+            other => other,
+        }
+    }
+
+    #[test]
+    fn native_failure_receipts_survive_later_shutdown_timeout() {
+        let receipts = vec![json!({"agent_id":"healthy","status":"stopped","outcome":"Committed"}),
+            json!({"agent_id":"draft","status":"failed","effect":"NoEffect","needs_recovery":false})];
+        let result = retain_native_shutdown_receipts(Err(CliError::Runtime("shutdown timeout: refresh_provider_sessions".into())), &receipts).unwrap();
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["native_receipts"], json!(receipts));
+        assert!(result["error"].as_str().unwrap().contains("refresh_provider_sessions"));
+        assert!(retain_native_shutdown_receipts(Err(CliError::Runtime("legacy timeout".into())), &[]).is_err());
+    }
+
     #[test]
     fn native_failure_panes_do_not_alias_other_sockets_or_successful_seats() {
         let transport = crate::tmux_backend::TmuxBackend::for_tmux_endpoint("/tmp/native-stop-a.sock");
@@ -1551,11 +1572,14 @@ pub mod lifecycle_port {
         };
         #[cfg(unix)]
         let native_receipts = if crate::contract_runtime::framework::has_contract(&state) {
-            crate::contract_runtime::framework::stop_selected(&run_workspace, &state)
+            crate::contract_runtime::framework::stop_selected_with_budget(&run_workspace, &state,
+                deadline.timeout.saturating_sub(deadline.start.elapsed()))
                 .map_err(|error| CliError::Runtime(error.to_string()))?
         } else { Vec::new() };
         #[cfg(not(unix))]
         let native_receipts: Vec<Value> = Vec::new();
+        let retained_native_receipts = native_receipts.clone();
+        let result = (|| -> Result<Value, CliError> {
         let native_failed_rows: Vec<_> = native_receipts.iter()
             .filter(|receipt| receipt["status"] == "failed")
             .filter_map(|receipt| receipt["agent_id"].as_str())
@@ -2044,6 +2068,8 @@ pub mod lifecycle_port {
                 crate::cli::leader_port::unregister_after_shutdown_success(&run_workspace, team);
         }
         Ok(response)
+        })();
+        retain_native_shutdown_receipts(result, &retained_native_receipts)
     }
 
     /// Remove legacy adaptive display windows without reopening a display backend.

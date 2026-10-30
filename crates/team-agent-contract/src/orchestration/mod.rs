@@ -24,6 +24,8 @@ pub enum Error {
     Corrupt,
     Io(std::io::ErrorKind),
     Host(&'static str),
+    /// A read-only stop preflight refused before issuing any native mutation.
+    StopNoEffect(String),
     HostDiagnostic(crate::host::HostError),
     /// The physical spawn receipt proves no process launch was attempted.
     SpawnNotStarted(crate::host::HostError),

@@ -269,11 +269,7 @@ pub fn stop_agent(
             None
         } else {
             let receipt = backend::stop(&selected.run_workspace, &selected.team_key, id).map_err(error)?;
-            if !matches!(receipt.outcome, Outcome::Committed | Outcome::Compensated) {
-                return Err(error(BackendError::Shutdown {
-                    operation: receipt.id, phase: receipt.phase, outcome: receipt.outcome, failure: receipt.failure,
-                }));
-            }
+            backend::require_stopped(&receipt).map_err(error)?;
             absent = receipt.outcome == Outcome::Compensated;
             Some(receipt.id)
         };
@@ -414,7 +410,7 @@ fn refused(agent: &str, reason: &str, error: &str, evidence: Option<String>, act
 
 fn stop_seat(selected: &SelectedTeam, id: &SeatId) -> Result<OperationId, CliError> {
     let receipt = backend::stop(&selected.run_workspace, &selected.team_key, id).map_err(error)?;
-    if receipt.outcome != Outcome::Compensated { check_record(&receipt)?; }
+    backend::require_stopped(&receipt).map_err(error)?;
     Ok(receipt.id)
 }
 

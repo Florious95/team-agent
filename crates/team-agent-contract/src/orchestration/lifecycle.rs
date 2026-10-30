@@ -548,6 +548,16 @@ impl Lifecycle<'_> {
     ) -> Result<OperationRecord, Error> {
         if let Err(error) = result {
             operation.failure = Some(error.to_string());
+            if matches!(error, Error::StopNoEffect(_)) && operation.kind == TransactionKind::Teardown
+                && operation.phase == Phase::F0Preflight && operation.pending.as_deref() == Some("stop") {
+                // No native mutation occurred: retain the live seat and close
+                // this attempt, rather than leasing it forever as uncertain.
+                operation.pending = None;
+                operation.outcome = Outcome::Compensated;
+                operation.effect = DeliveryEffect::NoEffect;
+                self.store.save(&operation, false)?;
+                return Ok(operation);
+            }
             // If persistence itself failed, no further host effects are safe.
             if error == Error::Database {
                 return Err(error);
@@ -601,7 +611,9 @@ impl Lifecycle<'_> {
         if operation.target.process.is_some() && operation.target.status != SeatStatus::Stopped {
             operation.pending = Some("compensating-stop".into());
             self.store.save(operation, true)?;
-            if self.host.stop(&operation.target).is_err() {
+            if let Err(error) = self.host.stop(&operation.target) {
+                operation.failure = Some(format!("recovery stop: {error}"));
+                self.store.save(operation, false)?;
                 return Ok(());
             }
         }

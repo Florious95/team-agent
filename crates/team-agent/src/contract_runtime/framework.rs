@@ -333,10 +333,19 @@ pub fn enqueue(
 }
 
 pub fn stop_selected(workspace: &Path, state: &Value) -> Result<Vec<Value>, BackendError> {
+    stop_selected_with_budget(workspace, state, std::time::Duration::from_secs(20))
+}
+
+pub fn stop_selected_with_budget(workspace: &Path, state: &Value, budget: std::time::Duration) -> Result<Vec<Value>, BackendError> {
+    let deadline = std::time::Instant::now() + budget;
     let team = crate::state::projection::team_state_key(state);
     let mut receipts = Vec::new();
     if let Some(agents) = state.get("agents").and_then(Value::as_object) {
-        for (id, agent) in agents.iter().filter(|(_, agent)| is_contract(agent)) {
+        let agents: Vec<_> = agents.iter().filter(|(_, agent)| is_contract(agent)).collect();
+        for (index, &(id, agent)) in agents.iter().enumerate() {
+            // Leave time for siblings rather than giving the first seat the entire budget.
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let seat_budget = remaining / u32::try_from(agents.len() - index).unwrap_or(u32::MAX);
             if is_paused_unstarted(agent) {
                 receipts.push(json!({"agent_id":id,"status":"paused","stopped":false}));
                 continue;
@@ -344,27 +353,24 @@ pub fn stop_selected(workspace: &Path, state: &Value) -> Result<Vec<Value>, Back
             let mut physical = None;
             let result = (|| -> Result<Value, BackendError> {
                 let agent_id = crate::model::ids::AgentId::new(id);
-                let _ownership = crate::lifecycle::lock::acquire_seat_lifecycle_lock(crate::lifecycle::lock::LifecycleLockRequest {
+                let _ownership = crate::lifecycle::lock::try_acquire_seat_lifecycle_lock(crate::lifecycle::lock::LifecycleLockRequest {
                     workspace, operation: "native-team-stop", team: Some(&team), agent_id: Some(&agent_id),
                 }).map_err(|error| std::io::Error::other(error.to_string()))?;
-                let backend = Backend::open(workspace, &team)?;
-                let seat_id = SeatId::new(id)?;
+                let backend = Backend::open_readonly(workspace, &team)?;
+                let seat_id = SeatId::new(id.as_str())?;
                 let seat = backend.store.seat(&seat_id)?;
                 physical = seat.as_ref().and_then(|seat| seat.physical.clone());
                 if seat.as_ref().is_some_and(|seat| seat.status == SeatStatus::Stopped) && !backend.store.leased(&seat_id)? {
                     return Ok(json!({"agent_id":id,"status":"already_stopped"}));
                 }
-                let receipt = backend::stop(workspace, &team, &seat_id)?;
-                if !matches!(receipt.outcome, Outcome::Committed | Outcome::Compensated) {
-                    return Err(BackendError::Shutdown {
-                        operation: receipt.id, phase: receipt.phase,
-                        outcome: receipt.outcome, failure: receipt.failure,
-                    });
-                }
+                let receipt = backend::stop_with_budget(workspace, &team, &seat_id, seat_budget)?;
+                backend::require_stopped(&receipt)?;
                 Ok(json!({"agent_id":id,"status":"stopped","operation":receipt.id,"outcome":receipt.outcome}))
             })();
             receipts.push(result.unwrap_or_else(|error| json!({
                 "agent_id":id,"status":"failed","error":error.to_string(),
+                "effect":if matches!(&error, BackendError::StopRefused { .. }) { "NoEffect" } else { "Unknown" },
+                "needs_recovery":!matches!(&error, BackendError::StopRefused { .. }),
                 "pane_id":physical.as_ref().map(|target| json!(target.pane)).unwrap_or_else(|| agent.get("pane_id").cloned().unwrap_or(Value::Null)),
                 "session_name":physical.as_ref().map(|target| &target.session),
                 "shared_endpoint":physical.as_ref().map(|target| target.shared_endpoint),
