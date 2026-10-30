@@ -210,6 +210,7 @@ fn check_seat_manifest(request: &LifecycleLockRequest<'_>) -> Result<(), Lifecyc
         ).map_err(LifecycleError::StatePersist)?;
     }
     Ok(())
+}
 
 fn seat_lifecycle_lock_path(request: &LifecycleLockRequest<'_>) -> Result<Option<PathBuf>, LifecycleError> {
     let Some(agent) = request.agent_id else { return Ok(None); };
