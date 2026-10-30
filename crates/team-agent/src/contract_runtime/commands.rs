@@ -157,10 +157,7 @@ pub fn start_agent(
         // An uncertain operation never rolls the authoritative native store back
         // to the old generation. The receipt remains available for recovery.
         let projection = checked_projection(&receipt, || publish_at(&selected.run_workspace, &selected.team_key, id, true))?;
-        let coordinator = crate::coordinator::start_coordinator_with_team(
-            &crate::coordinator::WorkspacePath::new(selected.run_workspace.clone()), Some(&selected.team_key),
-        ).map_err(error)?;
-        Ok(json!({"ok":coordinator.ok,"agent_id":agent,"status":"running","runtime":"contract",
+        Ok(json!({"ok":true,"agent_id":agent,"status":"running","runtime":"contract",
             "start_mode":match before {
                 None => "fresh",
                 Some(ref original) if original.outcome == Outcome::Compensated => "fresh",
@@ -170,9 +167,7 @@ pub fn start_agent(
                 Some(_) => "resumed",
             }, "native_launch":receipt.native_launch, "operation":receipt.id,
             "session_id":projection.get("session_id"),"generation":projection.get("generation"),
-            "session_observation":projection.get("session_observation"),"warning":projection.get("session_warning"),
-            "coordinator":crate::lifecycle::coordinator_start_summary_value(
-                &crate::lifecycle::CoordinatorStartSummary::from_start_report(&coordinator))}))
+            "session_observation":projection.get("session_observation"),"warning":projection.get("session_warning")}))
     })
 }
 
@@ -243,14 +238,9 @@ pub fn restart(workspace: &Path, team: Option<&str>) -> Result<Option<Value>, Cl
     let failed: Vec<_> = results.iter().filter_map(|result| result.outcome.as_ref().err().map(|error| json!({
         "agent_id":result.agent_id,"phase":"native_resume","error":error,
     }))).collect();
-    let coordinator = crate::coordinator::start_coordinator_with_team(
-        &crate::coordinator::WorkspacePath::new(latest.run_workspace.clone()), Some(&latest.team_key),
-    ).map_err(error)?;
-    Ok(Some(json!({"ok":failed.is_empty() && coordinator.ok,"runtime":"contract",
+    Ok(Some(json!({"ok":failed.is_empty(),"runtime":"contract",
         "status":if failed.is_empty() {"restarted"} else if succeeded.is_empty() {"failed"} else {"partial"},
-        "team_id":latest.team_key,"agents":succeeded,"failed_agents":failed,
-        "coordinator":crate::lifecycle::coordinator_start_summary_value(
-            &crate::lifecycle::CoordinatorStartSummary::from_start_report(&coordinator))})))
+        "team_id":latest.team_key,"agents":succeeded,"failed_agents":failed})))
 }
 
 pub fn stop_agent(
@@ -546,15 +536,10 @@ pub fn reset_agent(
             },
         ).map_err(error)?;
         let projection = framework::start_configured(&selected.run_workspace, &selected.team_dir, &selected.team_key, id)?;
-        let coordinator = crate::coordinator::start_coordinator_with_team(
-            &crate::coordinator::WorkspacePath::new(selected.run_workspace.clone()), Some(&selected.team_key),
-        ).map_err(error)?;
-        Ok(json!({"ok":coordinator.ok,"agent_id":agent,"status":"reset","runtime":"contract",
+        Ok(json!({"ok":true,"agent_id":agent,"status":"reset","runtime":"contract",
             "start_mode":"fresh","stopped":stopped.is_some(),"operation":stopped,
             "discarded_session_id":discarded,"session_id":projection.get("session_id"),
-            "new_session_id":projection.get("session_id"),"generation":projection.get("generation"),
-            "coordinator":crate::lifecycle::coordinator_start_summary_value(
-                &crate::lifecycle::CoordinatorStartSummary::from_start_report(&coordinator))}))
+            "new_session_id":projection.get("session_id"),"generation":projection.get("generation")}))
     })
 }
 

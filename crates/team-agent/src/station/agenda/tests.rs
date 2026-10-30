@@ -174,7 +174,8 @@ fn one_shot_uses_shared_durable_send_and_never_creates_sqlite() {
     store.write(&fixture.job("sched_a")).unwrap();
     let receipt = store.fire("sched_a").unwrap();
     assert_eq!(receipt["status"], "done");
-    assert_eq!(receipt["result"]["delivery"], "inbox");
+    assert_eq!(receipt["result"]["status"], "stored");
+    assert_eq!(receipt["result"]["live"], false);
     assert!(store.fire("sched_a").unwrap()["cancelled"] == true);
     let inbox = crate::inbox_store::read(&fixture.0, "leader", 20, Some("alpha")).unwrap();
     assert_eq!(inbox["messages"].as_array().unwrap().len(), 1);

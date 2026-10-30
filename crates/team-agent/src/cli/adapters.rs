@@ -683,16 +683,11 @@ fn unified_default_doctor_report(args: &DoctorArgs, mut value: Value) -> Value {
     let db_present = crate::model::paths::runtime_dir(&run_workspace)
         .join("team.db")
         .exists();
-    // One read-only observation supplies both issue classification and details.
-    // A physical database must be checked even before state.json is created.
-    let health = (runtime_present || db_present).then(|| {
-        crate::coordinator::coordinator_health_read_only(&crate::coordinator::WorkspacePath::new(
-            run_workspace.clone(),
-        ))
-    });
+    // Legacy storage can still be inspected without requiring a resident service.
+    let database = db_present.then(|| crate::db::migration::schema_diagnosis_workspace_read_only(&run_workspace));
     match selected {
         Ok(selected) => {
-            if let Some(health) = health.as_ref().filter(|_| runtime_present) {
+            if runtime_present {
                 let state = selected.state;
                 let backend: Box<dyn crate::transport::Transport> =
                     match crate::transport_factory::resolve_read_only_transport(
@@ -710,7 +705,6 @@ fn unified_default_doctor_report(args: &DoctorArgs, mut value: Value) -> Value {
                     &state,
                     backend.as_ref(),
                     Some(selected.team_key.as_str()),
-                    health,
                 );
                 merge_report_array(&mut value, "issues", &issues);
                 merge_report_array(&mut value, "suggested_repairs", &repairs);
@@ -748,15 +742,16 @@ fn unified_default_doctor_report(args: &DoctorArgs, mut value: Value) -> Value {
             );
         }
     }
-    if let Some(health) = health {
-        if db_present && !health.schema.ok {
-            append_issue_repair(
-                &mut value,
-                "coordinator_schema_incompatible",
-                "team-agent doctor --fix-schema --json".to_string(),
-            );
+    if let Some(database) = database {
+        let diagnostic = match database {
+            Ok(diagnosis) => json!(diagnosis),
+            Err(error) => json!({"ok":false,"error":error.to_string()}),
+        };
+        if diagnostic["ok"] != true {
+            append_issue_repair(&mut value, "legacy_database_schema_incompatible",
+                "team-agent doctor --fix-schema --json".into());
         }
-        value["coordinator"] = diagnose_port::coordinator_health_value(health);
+        value["legacy_database"] = diagnostic;
     }
     if let Some(object) = value.as_object_mut() {
         object.insert("runtime".to_string(), runtime);

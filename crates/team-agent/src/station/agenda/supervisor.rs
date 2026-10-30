@@ -89,15 +89,17 @@ pub(super) fn activate(store: &Store) -> Result<(), String> {
     .iter()
     .map(|s| format!("<string>{}</string>", xml(s)))
     .collect::<String>();
-    let config = format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>{}</string><key>ProgramArguments</key><array>{argv}</array><key>WorkingDirectory</key><string>{}</string><key>EnvironmentVariables</key><dict><key>PATH</key><string>{}</string></dict><key>KeepAlive</key><dict><key>PathState</key><dict><key>{}</key><true/></dict></dict><key>ThrottleInterval</key><integer>1</integer></dict></plist>\n",
+    let config = format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>{}</string><key>ProgramArguments</key><array>{argv}</array><key>WorkingDirectory</key><string>{}</string><key>EnvironmentVariables</key><dict><key>PATH</key><string>{}</string></dict><key>KeepAlive</key><dict><key>PathState</key><dict><key>{}</key><true/></dict></dict></dict></plist>\n",
         xml(&label), xml(&store.workspace.to_string_lossy()), xml(&std::env::var("PATH").unwrap_or_default()),
         xml(&store.root.join("pending.json").to_string_lossy()));
     let path = home()?
         .join("Library/LaunchAgents")
         .join(format!("{label}.plist"));
-    publish(&path, config.as_bytes())?;
     let uid = user_id();
     let domain = format!("gui/{uid}");
+    // A refused public manager must not overwrite a previously valid registration.
+    checked(Command::new("launchctl").args(["print", &domain]))?;
+    publish(&path, config.as_bytes())?;
     let service = format!("{domain}/{label}");
     if !Command::new("launchctl")
         .args(["print", &service])
@@ -147,6 +149,46 @@ pub(super) fn activate(store: &Store) -> Result<(), String> {
         &format!("{label}.path"),
     ]))?;
     checked(Command::new("systemctl").args(["--user", "start", &format!("{label}.service")]))
+}
+
+fn remove_registration(path: &std::path::Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => seat_store::sync_directory(path.parent().ok_or("missing registration parent")?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Called under the activation lock after an empty-job rescan. Native unregister
+/// may terminate this process; kernel lock release then admits the next producer.
+#[cfg(target_os = "macos")]
+pub(super) fn retire(store: &Store) -> Result<(), String> {
+    let label = label(store);
+    remove_registration(
+        &home()?
+            .join("Library/LaunchAgents")
+            .join(format!("{label}.plist")),
+    )?;
+    checked(Command::new("launchctl").args(["bootout", &format!("gui/{}/{label}", user_id())]))
+}
+#[cfg(target_os = "linux")]
+pub(super) fn retire(store: &Store) -> Result<(), String> {
+    let label = label(store);
+    checked(Command::new("systemctl").args([
+        "--user",
+        "disable",
+        "--now",
+        &format!("{label}.path"),
+    ]))?;
+    let directory = home()?.join(".config/systemd/user");
+    remove_registration(&directory.join(format!("{label}.path")))?;
+    remove_registration(&directory.join(format!("{label}.service")))?;
+    checked(Command::new("systemctl").args(["--user", "daemon-reload"]))?;
+    checked(Command::new("systemctl").args(["--user", "stop", &format!("{label}.service")]))
+}
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub(super) fn retire(_store: &Store) -> Result<(), String> {
+    Ok(())
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]

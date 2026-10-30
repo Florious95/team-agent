@@ -137,16 +137,11 @@ fn fork_locked(
             "status": "starting", "contract_instance": null, "pane_id": null, "forked_from": source_id.as_str(),
         })).map_err(error)?;
         let projection = commands::publish_at(workspace, team, &target_id, true)?;
-        let coordinator = crate::coordinator::start_coordinator_with_team(
-            &crate::coordinator::WorkspacePath::new(workspace.to_path_buf()), Some(team),
-        ).map_err(error)?;
-        Ok(json!({"ok":coordinator.ok,"status":"forked","runtime":"contract","mode":"native_new_seat",
+        Ok(json!({"ok":true,"status":"forked","runtime":"contract","mode":"native_new_seat",
             "provider":provider,"source_agent_id":source_id.as_str(),"new_agent_id":target,"target":target,
             "agent_id":target,"operation":record.id,"source_session_id":source_session,
             "session_id":projection.get("session_id"),"new_session_id":projection.get("session_id"),
-            "generation":projection.get("generation"),"backing_state":"verified",
-            "coordinator":crate::lifecycle::coordinator_start_summary_value(
-                &crate::lifecycle::CoordinatorStartSummary::from_start_report(&coordinator))}))
+            "generation":projection.get("generation"),"backing_state":"verified"}))
     })();
     result.map_err(|failure| undo.run(failure))
 }

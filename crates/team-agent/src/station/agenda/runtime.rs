@@ -18,7 +18,9 @@ mod unix {
     const WORKERS: usize = 4;
     fn socket_dir() -> Result<PathBuf, String> {
         // sockaddr_un is only 104 bytes on macOS; its normal TMPDIR can be longer.
-        let dir = PathBuf::from("/tmp").join(format!("ta-agenda-{}", supervisor::user_id()));
+        let dir = std::fs::canonicalize("/tmp")
+            .map_err(|e| e.to_string())?
+            .join(format!("ta-agenda-{}", supervisor::user_id()));
         seat_store::private_dir(&dir)?;
         Ok(dir)
     }
@@ -204,6 +206,7 @@ mod unix {
                             })
                         }) {
                             supervisor::clear_pending(&store)?;
+                            supervisor::retire(&store)?;
                             return Ok(());
                         }
                     }

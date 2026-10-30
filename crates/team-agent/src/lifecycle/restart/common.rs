@@ -810,23 +810,6 @@ fn window_present_in_live(
 }
 
 /// ---
-/// purpose: 起该 workspace 的 coordinator
-/// params:
-///   team_key: 传给 coordinator 的团队键
-/// returns: 启动摘要
-/// errors: 启动失败时返回 StatePersist
-/// ---
-pub(super) fn start_coordinator_for_workspace(
-    workspace: &Path,
-    team_key: Option<&str>,
-) -> Result<crate::lifecycle::CoordinatorStartSummary, LifecycleError> {
-    let workspace = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
-    crate::coordinator::health::start_coordinator_with_team(&workspace, team_key)
-        .map(|report| crate::lifecycle::CoordinatorStartSummary::from_start_report(&report))
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))
-}
-
-/// ---
 /// purpose: 按团队持久化的 tmux endpoint 解析出后端，让 restart、add 与 fork 落在同一 socket
 /// params:
 ///   team: 目标团队，None 时按唯一性选

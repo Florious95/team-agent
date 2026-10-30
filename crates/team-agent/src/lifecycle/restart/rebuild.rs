@@ -1349,14 +1349,8 @@ fn restart_with_selected_team_and_transport(
         });
     }
     drop(lifecycle_lock);
-    let coordinator =
-        start_coordinator_for_workspace(&selected.run_workspace, Some(&selected.team_key))?;
-    phase_timer.emit(
-        &selected.run_workspace,
-        "restart.phase",
-        LifecyclePhase::CoordinatorStart,
-    );
-    let coordinator_started = coordinator.ok;
+    let coordinator = crate::lifecycle::CoordinatorStartSummary::not_required();
+    let coordinator_started = false;
     phase_timer.emit(&selected.run_workspace, "restart.phase", LifecyclePhase::ReadinessWait);
     if !legacy_successful_agents.is_empty() {
         wait_restart_readiness_or_timeout(

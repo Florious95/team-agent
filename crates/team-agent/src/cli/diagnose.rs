@@ -397,7 +397,6 @@ pub(crate) fn diagnose_runtime_for_workspace(
     state: &Value,
     backend: &dyn Transport,
     selected_team_key: Option<&str>,
-    coordinator_health: &crate::coordinator::HealthReport,
 ) -> (Value, Value) {
     let (mut issues, mut repairs) =
         diagnose_runtime_with_workspace(Some(workspace), state, backend);
@@ -416,13 +415,6 @@ pub(crate) fn diagnose_runtime_for_workspace(
         &mut repairs,
     );
     append_legacy_snapshot_issue(workspace, state, &mut issues);
-    append_coordinator_health_issue(
-        workspace,
-        state,
-        coordinator_health,
-        &mut issues,
-        &mut repairs,
-    );
     append_runtime_bindings_stale_after_boot_issue(workspace, state, &mut issues, &mut repairs);
     (issues, repairs)
 }

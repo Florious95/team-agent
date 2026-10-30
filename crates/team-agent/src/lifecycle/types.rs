@@ -125,6 +125,11 @@ pub struct CoordinatorStartSummary {
 }
 
 impl CoordinatorStartSummary {
+    /// Compatibility receipt only: no process was requested or started.
+    pub fn not_required() -> Self {
+        Self { ok: true, status: "not_required".into(), pid: None, binary_path: None,
+            binary_version: None, rotation_reason: None, binary_identity_relation: "not_applicable".into() }
+    }
 /// ---
 /// purpose: 把 coordinator 的 StartReport 投影成 lifecycle 报告用的摘要
 /// params:

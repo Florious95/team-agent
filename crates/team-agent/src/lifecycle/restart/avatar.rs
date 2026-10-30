@@ -546,15 +546,6 @@ pub(crate) fn fork_pi_new_seat_locked(
             team_key,
             target_agent_id,
         );
-        let coordinator =
-            super::common::start_coordinator_for_workspace(run_workspace, Some(team_key))?;
-        if !coordinator.ok {
-            return Err(LifecycleError::StatePersist(format!(
-                "coordinator did not become available after Pi fork: {}",
-                coordinator.status
-            )));
-        }
-
         phase = "p5_receipt";
         let staged_file = staged.as_ref().ok_or_else(|| {
             LifecycleError::StatePersist("Pi fork snapshot staging was lost".to_string())
@@ -565,7 +556,7 @@ pub(crate) fn fork_pi_new_seat_locked(
             env: AgentActionEnvelope {
                 agent_id: target_agent_id.clone(),
                 state_file: crate::state::persist::runtime_state_path(run_workspace),
-                coordinator_started: coordinator.ok,
+                coordinator_started: false,
             },
             session_id: Some(staged_file.session_id.clone()),
             backing_state: ForkBackingState::Verified,

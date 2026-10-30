@@ -1116,67 +1116,24 @@ pub fn quick_start_in_workspace_with_backend(
         ))
     })?;
     let team_key_for_factory = team_id;
-    // 0.5.x Windows portability Batch 8 F7 (leader msg_590b4dce0f68):
-    // shim ownership moves to the coordinator. quick-start no longer
-    // calls `spawn_shim_and_handshake` directly. Instead we ensure
-    // the coordinator daemon is running; the coordinator's boot
-    // path calls `conpty_shim::ensure_shim_running` (idempotent —
-    // spawns if no live shim, reconnects if one is recorded).
-    //
-    // Rationale (from Batch 7 gate report F7): quick-start is a
-    // one-shot process; if it owns the shim, the shim dies when
-    // quick-start exits. Moving ownership to the coord daemon
-    // gives us the "coord can die, shim survives" invariant the
-    // design's §Shim Lifecycle chapter requires.
-    //
-    // The `ensure_coordinator_running` call is idempotent per
-    // `coordinator/health.rs::start_coordinator`. On non-Windows
-    // this whole block is cfg'd out.
+    // The PTY host is a native transport obligation, not a coordination base.
+    // Its verified handshake publishes readiness; detach preserves the host
+    // after this one-shot CLI exits, without an unrelated timer process.
     #[cfg(windows)]
-    if matches!(
-        requested,
-        crate::transport_factory::RequestedTransportBackend::ConPty
-    ) {
+    if matches!(requested, crate::transport_factory::RequestedTransportBackend::ConPty) {
         let team_key_str = team_key_for_factory.ok_or_else(|| {
-            LifecycleError::TeamSelect(
-                "team_key required for --backend conpty on Windows (Batch 9 F8)".to_string(),
-            )
+            LifecycleError::TeamSelect("team_key required for --backend conpty on Windows".into())
         })?;
-        // 0.5.x Windows portability Batch 9 F8 (leader msg_2a4cc1fa54c0):
-        // Batch 8's seed-state pattern (writing active_team_key +
-        // transport.kind to state.json before start_coordinator)
-        // caused downstream launch code to see "existing runtime, use
-        // restart" and skip spec compile. F8 fix: pass `--team`
-        // directly to the coord daemon via `start_coordinator_with_team`
-        // so state doesn't need pre-seeding.
-        //
-        // The coord daemon's `run_daemon_with_coordinator_and_boot_tmux`
-        // then calls `ensure_shim_running` with the CLI-supplied
-        // team_key. When quick-start's downstream code runs, state.json
-        // still has whatever it had before (empty on fresh launch), so
-        // the spec-compile + worker-spawn path runs normally.
         let caller_transport = quick_start_tmux_backend(&workspace);
         if let Some((summary, blockers, next_actions)) = preflight_fresh_leader_identity(&caller_transport) {
             return Ok(QuickStartReport::PreflightBlocked {
                 summary, blockers, next_actions, attach_commands: Vec::new(),
             });
         }
-        let run_ws = crate::coordinator::WorkspacePath::new(workspace.clone());
-        let start_report =
-            crate::coordinator::health::start_coordinator_with_team(&run_ws, Some(team_key_str))
-                .map_err(|e| LifecycleError::TeamSelect(format!("coordinator start: {e}")))?;
-        if !start_report.ok {
-            return Err(LifecycleError::TeamSelect(format!(
-                "coordinator start failed: schema_error={:?}, action={:?}",
-                start_report.schema_error, start_report.action
-            )));
-        }
-        // Give the coordinator a beat to write its transport.shim
-        // block so the factory's `pipe_ready` gate opens on the
-        // next resolve. The coordinator's `run_daemon` calls
-        // `ensure_shim_running` inside its boot code path (see
-        // `coordinator::backoff::run_daemon`).
-        std::thread::sleep(std::time::Duration::from_millis(2500));
+        let workspace_hash = crate::tmux_backend::workspace_short_hash_pub(&workspace);
+        crate::coordinator::conpty_shim::ensure_shim_running(&workspace, team_key_str, &workspace_hash)
+            .map_err(|error| LifecycleError::TeamSelect(format!("PTY host unavailable: {error}")))?
+            .detach();
     }
     let input = crate::transport_factory::TransportFactoryInput::new(
         &workspace,
@@ -1518,7 +1475,7 @@ pub(crate) fn quick_start_with_transport_in_workspace_pi_preflight(
     let quick_start_phase_timer = crate::lifecycle::restart::RestartPhaseTimer::start();
     let mut launch =
         launch_with_transport_in_workspace(&workspace, &spec_path, false, yes, true, transport)?;
-    let mut coordinator_state = "not_attempted";
+    let coordinator_state = "not_required";
     let completion = (|| -> Result<(), LifecycleError> {
         annotate_persisted_team_depth(
             &workspace, &state_team_key,
@@ -1543,20 +1500,6 @@ pub(crate) fn quick_start_with_transport_in_workspace_pi_preflight(
         }
         launch.session_capture_incomplete_agents =
             quick_start_session_capture_incomplete_agents(&workspace, &state_team_key);
-        let coordinator_workspace = crate::coordinator::WorkspacePath::new(workspace.clone());
-        coordinator_state = "attempted_unknown";
-        let coordinator_report = crate::coordinator::start_coordinator(&coordinator_workspace)
-            .map_err(|error| LifecycleError::StatePersist(format!(
-                "coordinator start failed for {}: {error}; inspect {} before retrying",
-                workspace.display(),
-                crate::coordinator::coordinator_log_path(&coordinator_workspace).display()
-            )))?;
-        quick_start_phase_timer.emit(
-            &workspace, "launch.phase",
-            crate::lifecycle::restart::LifecyclePhase::CoordinatorStart,
-        );
-        require_quick_start_coordinator_started(&coordinator_report, &workspace)?;
-        coordinator_state = "running_confirmed";
         Ok(())
     })();
     if let Err(error) = completion {

@@ -879,11 +879,6 @@ fn add_contract_seat(
         rollback("start_agent_failed");
         return Err(LifecycleError::Provider(error));
     }
-    let coordinator = crate::coordinator::start_coordinator_with_team(
-        &crate::coordinator::WorkspacePath::new(run_workspace.to_path_buf()),
-        Some(team_key),
-    )
-    .map_err(|error| LifecycleError::StatePersist(error.to_string()))?;
     if let Some(reservation) = reservation {
         reservation.commit();
     }
@@ -891,7 +886,7 @@ fn add_contract_seat(
         env: AgentActionEnvelope {
             agent_id: agent_id.clone(),
             state_file: crate::state::persist::runtime_state_path(run_workspace),
-            coordinator_started: coordinator.ok,
+            coordinator_started: false,
         },
         start_mode: StartMode::Fresh,
         role_file: role_file_path.to_path_buf(),
