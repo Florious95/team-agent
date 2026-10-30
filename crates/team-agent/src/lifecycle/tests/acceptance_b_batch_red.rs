@@ -30,7 +30,7 @@ use std::sync::Mutex;
 
 use serde_json::{json, Value};
 use serial_test::serial;
-use team_agent::coordinator::{Coordinator, ProviderRegistry, WorkspacePath};
+use team_agent::coordinator::WorkspacePath;
 use team_agent::lifecycle::QuickStartReport;
 use team_agent::message_store::MessageStore;
 use team_agent::model::enums::Provider;
@@ -47,57 +47,6 @@ const ANCESTRY_KEY: &str = "TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON";
 const NEUTRAL_ANCESTRY: &str = "[\"/bin/zsh\"]";
 
 // ───────────────────────────── B-4 · monitor step isolation ─────────────────────────
-
-/// B-4 main reverse (cr `monitor_step_failure_does_not_block_deliver_pending`): a
-/// monitor step (here: the runtime-approval pane capture, made to hard-fail) must NOT
-/// abort the tick. The tick must (1) not enter backoff and (2) log a step-failure event.
-/// M1 retired tick delivery (coordinator/tick.rs), so the former delivery clauses are gone.
-#[test]
-#[serial(env)]
-fn b4_monitor_step_failure_does_not_abort_the_tick() {
-    let _g = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
-    let ws = tmp_ws("b4-monitor");
-    seed_copilot_team_state(&ws, "cp1", true);
-    let mut state = team_agent::state::persist::load_runtime_state(&ws).unwrap();
-    #[cfg(unix)]
-    let targets = vec![crate::mcp_server::readiness::test_ready_worker(
-        &ws, &mut state, "team-b4", "cp1", "%41",
-    )];
-    #[cfg(not(unix))]
-    let targets = Vec::new();
-    save_runtime_state(&ws, &state).unwrap();
-
-    let coord = Coordinator::new(
-        WorkspacePath::new(ws.clone()),
-        Box::new(RealRegistry),
-        Box::new(MonitorFailTransport {
-            targets,
-            ..MonitorFailTransport::new()
-        }),
-    );
-    let report = coord.tick();
-
-    let mut failures = Vec::new();
-    if let Err(e) = &report {
-        failures.push(format!(
-            "B-4: a monitor-step failure must not propagate as a tick Err (it must degrade \
-+ continue, bug-084 philosophy); got Err({e})"
-        ));
-    }
-    let events = events_text(&ws);
-    if !(events.contains("_failed") && events.contains("tick")) {
-        failures.push(format!(
-            "B-4: the degraded monitor step must log a coordinator.tick.<step>_failed event \
-(observable, not silent); events tail={}",
-            events.lines().rev().take(3).collect::<Vec<_>>().join(" | ")
-        ));
-    }
-    assert!(
-        failures.is_empty(),
-        "B-4 monitor isolation contract failed:\n{}",
-        failures.join("\n")
-    );
-}
 
 /// B-4 reverse (cr `force_paste_flag_not_in_argv`): the --force-paste flag (REJECTed —
 /// a back-door on a gate that does not exist) must never be introduced into the
@@ -423,13 +372,6 @@ fn grep_tree(root: &Path, needle: &str) -> usize {
         }
     }
     count
-}
-
-struct RealRegistry;
-impl ProviderRegistry for RealRegistry {
-    fn adapter_for(&self, provider: Provider) -> Box<dyn ProviderAdapter> {
-        get_adapter(provider)
-    }
 }
 
 struct EnvGuard {

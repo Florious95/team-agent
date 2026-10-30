@@ -87,7 +87,6 @@ use crate::model::enums::Provider;
 use crate::provider::{ProviderAdapter, TurnId, TurnState};
 use serde_json::Value;
 
-pub mod backoff;
 // 0.5.x Windows portability Batch 6 Option A: shim lifecycle
 // manager. Windows-only per design §Shim Lifecycle (the shim binary
 // exists only on Windows; Unix uses tmux). Cfg-gated at the module
@@ -102,7 +101,6 @@ pub mod orphan;
 pub mod runtime_detectors;
 pub mod runtime_observation;
 pub mod steps;
-pub mod tick;
 pub mod types;
 
 // ── Re-export the full module-root surface (RE-EXPORT INVARIANT) ──────────────

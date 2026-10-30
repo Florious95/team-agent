@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 use serial_test::serial;
 use team_agent::coordinator::{
-    coordinator_pid_path, Coordinator, MetadataSource, Pid, ProviderRegistry, WorkspacePath,
+    coordinator_pid_path, MetadataSource, Pid, WorkspacePath,
 };
 use team_agent::lifecycle::{
     reset_agent_with_transport, restart_with_transport_with_readiness_deadline,
@@ -303,13 +303,8 @@ exec "$TEAM_AGENT_TEST_REAL_PS" "$@"
             "start-agent --force: seeded coordinator pid must remain the integration-test self pid; expected={self_pid}; actual={start_force_coordinator_pid:?}"
         ));
     }
-    let recorded_ps = fs::read_to_string(&recorder).unwrap_or_default();
-    let expected_probe = format!("-p\t{self_pid}\t-o\tstat=");
-    if !recorded_ps.lines().any(|line| line == expected_probe) {
-        failures.push(format!(
-            "fixture ps shim must observe the exact self-pid coordinator health probe {expected_probe:?}; recorded={recorded_ps:?}"
-        ));
-    }
+    // M3 (71f20a90): restart and start no longer probe coordinator health, so the former fixture
+    // self-check "the ps shim observed the coordinator health probe" has no subject.
     assert!(
         failures.is_empty(),
         "P0 fixture1: lifecycle fresh/force paths must retire/swap/refuse so each (team_key, agent_id) has exactly one live tuple:\n{}",
@@ -484,90 +479,6 @@ fn reset_stopped_true_still_rechecks_same_role_residue_before_start() {
             || error_text.contains("same-role"),
         "P0 reset: stop.stopped=true is not proof when the same-role pane remains visible; reset must return a named residue proof error (stop_not_proven/residue/same-role) before spawning; result={result:?} error={error_text:?} panes={:?}",
         transport.pane_summary()
-    );
-}
-
-#[test]
-#[serial(env)]
-fn abnormal_shell_pane_with_live_delivery_is_not_dead_and_dedupe_ignores_size() {
-    let env = hermetic_guard::HermeticTestEnv::enter("p0-abnormal");
-    let workspace = env.workspace("abnormal");
-    let rollout = workspace.join("architect-rollout.jsonl");
-    fs::write(&rollout, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"sess-arch\",\"cwd\":\"/tmp\"}}\n").unwrap();
-    seed_healthy_coordinator(&workspace);
-    save_runtime_state(
-        &workspace,
-        &json!({
-            "active_team_key": TEAM,
-            "session_name": SESSION,
-            "agents": {
-                "architect": {
-                    "status": "running",
-                    "provider": "copilot",
-                    "agent_id": "architect",
-                    "window": "architect",
-                    "pane_id": "%old-architect",
-                    "session_id": "sess-arch",
-                    "rollout_path": rollout.to_string_lossy(),
-                    "spawn_epoch": 7,
-                    "spawn_cwd": workspace.to_string_lossy()
-                }
-            }
-        }),
-    )
-    .unwrap();
-    let transport = CohortTransport::with_old_panes(&["architect"]).with_current_command("bash");
-    transport
-        .inject(
-            &Target::Pane(PaneId::new("%old-architect")),
-            &InjectPayload::Text("ping live tuple".to_string()),
-            Key::Enter,
-            false,
-        )
-        .expect("fixture proves the same physical tuple can receive a message");
-    let coord = Coordinator::new(
-        WorkspacePath::new(workspace.clone()),
-        Box::new(RealAdapterRegistry),
-        Box::new(transport.clone()),
-    );
-    let tick = coord.tick();
-
-    let state = load_runtime_state(&workspace).unwrap();
-    let watch = state
-        .pointer("/coordinator/abnormal_exit_watch/architect")
-        .cloned()
-        .unwrap_or(Value::Null);
-    let src = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/coordinator/steps/abnormal.rs"
-    ));
-    let mut failures = Vec::new();
-    if let Err(error) = tick { failures.push(format!("coordinator tick failed before abnormal fixture could be evaluated: {error}")); }
-    if watch.is_null() { failures.push("coordinator tick did not write abnormal_exit_watch for the live shell fixture".to_string()); }
-    if watch.pointer("/last_liveness").and_then(Value::as_str) == Some("dead")
-        || watch
-            .pointer("/last_liveness_detail")
-            .and_then(Value::as_str)
-            .is_some_and(|detail| detail.contains("provider_not_foreground:bash"))
-    {
-        failures.push(format!(
-            "live wrapper shell with no exit marker was classified dead; watch={watch}"
-        ));
-    }
-    for needle in [
-        "fn abnormal_dedupe_key(\n    agent: &AbnormalWatchAgent,\n    fact: &crate::provider::FaultFact,\n    size: u64",
-        "fn abnormal_suppression_key(\n    agent: &AbnormalWatchAgent,\n    liveness: &ProcessCheck,\n    reason: &str,\n    size: u64",
-        "fn abnormal_check_key(\n    agent: &AbnormalWatchAgent,\n    liveness: &ProcessCheck,\n    fact: Option<&crate::provider::FaultFact>,\n    error_recency: ErrorRecency,\n    error_observation_key: Option<&str>,\n    size: u64",
-        "unwrap_or_else(|| size.to_string())",
-    ] {
-        if src.contains(needle) {
-            failures.push(format!("abnormal dedupe/check identity still includes mutable rollout size marker `{needle}`"));
-        }
-    }
-    assert!(
-        failures.is_empty(),
-        "P0 abnormal contract failed:\n{}",
-        failures.join("\n")
     );
 }
 
@@ -909,13 +820,5 @@ fn pane_info_with_pid(window: &str, pane: &str, current_command: &str, pane_pid:
         current_command: Some(current_command.to_string()),
         current_path: None, active: true, pane_pid: Some(pane_pid),
         leader_env: BTreeMap::new(),
-    }
-}
-
-struct RealAdapterRegistry;
-
-impl ProviderRegistry for RealAdapterRegistry {
-    fn adapter_for(&self, provider: Provider) -> Box<dyn ProviderAdapter> {
-        get_adapter(provider)
     }
 }

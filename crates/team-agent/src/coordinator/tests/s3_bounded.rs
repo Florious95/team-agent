@@ -107,7 +107,7 @@ fn s3_process_worker() {
     }
     match action.as_str() {
         "collect" => {
-            let output = crate::messaging::results::collect_for_team(&dir, Some(&dir.join("result.json")), false, team).unwrap();
+            let output = crate::messaging::results::collect_for_team(&dir, Some(&dir.join("result.json")), team).unwrap();
             assert_eq!(output["ok"], true);
             println!("S3 collect={output}");
         }
@@ -133,43 +133,6 @@ fn s3_process_worker() {
     println!("S3_COMMITTED {action}");
 }
 
-fn coordinator(dir: &Path, hook: SaveHook) -> Coordinator {
-    let transport = OfflineTransport::new().with_session_present(true)
-        .with_windows(vec![WindowName::new("live-peer")]);
-    Coordinator::for_test(WorkspacePath::new(dir.to_path_buf()),
-        Box::new(MockRegistry::new(&[], &[])), Box::new(transport), None, None)
-        .with_before_save_hook(hook)
-}
-
-#[test]
-fn s3_tick_preserves_tasks_notes_and_siblings() {
-    isolated("s3_tick_preserves_tasks_notes_and_siblings", |dir| {
-        seed(dir, false);
-        let hook: SaveHook = Box::new(|ws, observed| {
-            assert_eq!(observed["agents"]["w1"]["worker_state"], "DEAD", "tick must produce a real observation delta");
-            write(ws.as_path(), "collect", Some("T1"), Value::Null);
-            write(ws.as_path(), "sibling", None, Value::Null);
-            let latest = disk(ws.as_path());
-            assert_eq!(latest["teams"]["T1"]["agents"]["w1"]["pane_id"], observed["agents"]["w1"]["pane_id"]);
-            println!("S3 before tick save topology unchanged; committed business={}", latest["teams"]);
-            Ok(())
-        });
-        let report = coordinator(dir, hook).tick().unwrap();
-        assert!(report.ok, "tick must save its observation: {report:?}");
-        let state = disk(dir);
-        let team = &state["teams"]["T1"];
-        assert_eq!(team["tasks"][0]["id"], "original");
-        assert_eq!(team["tasks"][0]["accepted_result_id"], "result-original");
-        assert_eq!(team["notes"], json!(["original note"]));
-        assert_eq!(team["agents"]["w1"]["worker_state"], "DEAD");
-        assert_eq!(state["teams"]["T2"]["notes"], json!(["original note"]));
-        assert_eq!(state["teams"]["T3"]["notes"], json!(["third"]));
-        assert_eq!(state["tasks"], team["tasks"]);
-        assert_eq!(StateRepository::new(dir).load_team(Some("T1")).unwrap()["tasks"], team["tasks"]);
-        println!("S3 after tick save={state}");
-    });
-}
-
 #[test]
 fn s3_result_collection_commit_preserves_concurrent_sibling() {
     isolated("s3_result_collection_commit_preserves_concurrent_sibling", |dir| {
@@ -192,16 +155,5 @@ fn s3_legacy_result_collection_preserves_root_shape() {
         let state = disk(dir);
         assert_eq!(state["tasks"][0]["accepted_result_id"], "result-original");
         assert!(state.get("teams").is_none(), "legacy single Team shape remains valid");
-    });
-}
-
-#[test]
-fn s3_observation_keeps_live_topology_conflict() {
-    isolated("s3_observation_keeps_live_topology_conflict", |dir| {
-        seed(dir, false);
-        let hook: SaveHook = Box::new(|ws, _| { write(ws.as_path(), "topology", Some("T1"), Value::Null); Ok(()) });
-        let report = coordinator(dir, hook).tick().unwrap();
-        assert_eq!(report.reason, Some(TickStopReason::PersistenceDegraded));
-        assert_eq!(disk(dir)["teams"]["T1"]["agents"]["w1"]["pane_id"], "%22");
     });
 }
