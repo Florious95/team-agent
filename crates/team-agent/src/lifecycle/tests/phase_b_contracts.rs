@@ -208,7 +208,8 @@ fn add_fork_remove_share_lifecycle_lock_behavior() {
     let fork_spec_before = std::fs::read_to_string(fork_workspace.join("team.spec.yaml")).unwrap();
     let fork_state_before = crate::state::persist::load_runtime_state(&fork_workspace).unwrap();
     let fork_agent = aid("newfork");
-    let held = hold_lifecycle_lock(&fork_workspace, "fork-agent", Some(&fork_agent));
+    // M2: the legacy fork entry owns the source seat while it reads the source row.
+    let held = hold_lifecycle_lock(&fork_workspace, "fork-agent", Some(&aid("alpha")));
     let override_guard = override_agent_lifecycle_lock_deadlines_for_test(
         Duration::from_millis(120),
         Duration::from_secs(5),
@@ -574,22 +575,60 @@ fn copilot_ready_transport() -> OfflineTransport {
     transport
 }
 
+/// Holds the seat lock from another thread: M2 seat locks are reentrant per
+/// thread (`EntityLock`), so a same-thread holder can never exclude the caller.
+struct HeldSeatLock {
+    release: Option<std::sync::mpsc::Sender<()>>,
+    holder: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for HeldSeatLock {
+    fn drop(&mut self) {
+        drop(self.release.take());
+        if let Some(holder) = self.holder.take() {
+            holder.join().expect("seat lock holder thread");
+        }
+    }
+}
+
 fn hold_lifecycle_lock(
     workspace: &std::path::Path,
     operation: &'static str,
     agent_id: Option<&AgentId>,
-) -> crate::lifecycle::lock::LifecycleLockGuard {
-    acquire_agent_lifecycle_lock_for_test(
-        LifecycleLockRequest {
-            workspace,
-            operation,
-            team: None,
-            agent_id,
-        },
-        Duration::from_millis(200),
-        Duration::from_secs(5),
+) -> HeldSeatLock {
+    // M2: lifecycle locks are per seat in the seat's canonical team domain.
+    let selected = crate::state::selector::resolve_active_team_readonly(
+        workspace,
+        None,
+        crate::state::selector::SelectorMode::RuntimeOnly,
     )
-    .expect("hold lifecycle lock")
+    .expect("resolve canonical team for held seat lock");
+    let run_workspace = selected.run_workspace.clone();
+    let team = selected.team_key.clone();
+    let agent_id = agent_id.cloned();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let guard = acquire_agent_lifecycle_lock_for_test(
+            LifecycleLockRequest {
+                workspace: &run_workspace,
+                operation,
+                team: Some(team.as_str()),
+                agent_id: agent_id.as_ref(),
+            },
+            Duration::from_millis(200),
+            Duration::from_secs(5),
+        )
+        .expect("hold lifecycle lock");
+        ready_tx.send(()).unwrap();
+        let _ = release_rx.recv();
+        drop(guard);
+    });
+    ready_rx.recv().expect("seat lock holder ready");
+    HeldSeatLock {
+        release: Some(release_tx),
+        holder: Some(holder),
+    }
 }
 
 fn assert_lock_timeout<T: std::fmt::Debug>(
