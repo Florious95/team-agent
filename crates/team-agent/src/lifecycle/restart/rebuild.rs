@@ -1761,12 +1761,11 @@ fn restart_readiness_poll_interval() -> std::time::Duration {
 struct RestartReadiness {
     session_created: bool,
     worker_pane_addressable: bool,
-    coordinator_alive: bool,
 }
 
 impl RestartReadiness {
     fn ready(self) -> bool {
-        self.session_created && self.worker_pane_addressable && self.coordinator_alive
+        self.session_created && self.worker_pane_addressable
     }
 }
 
@@ -1800,7 +1799,7 @@ fn wait_restart_readiness_or_timeout(
 }
 
 fn restart_readiness(
-    workspace: &Path,
+    _workspace: &Path,
     state: &serde_json::Value,
     session_name: &SessionName,
     decisions: &[RestartedAgent],
@@ -1808,19 +1807,9 @@ fn restart_readiness(
 ) -> RestartReadiness {
     let session_created = session_live_or_default(transport, session_name, false);
     let worker_pane_addressable = restart_worker_panes_addressable(state, decisions, transport);
-    let coordinator_workspace = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
-    let health = crate::coordinator::coordinator_health(&coordinator_workspace);
-    let coordinator_accepted = health.ok
-        || (health.service_available
-            && matches!(
-                health.binary_identity_relation,
-                crate::coordinator::CoordinatorBinaryIdentityRelation::DaemonNewerThanCaller
-            ));
-    let coordinator_alive = coordinator_accepted && session_created;
     RestartReadiness {
         session_created,
         worker_pane_addressable,
-        coordinator_alive,
     }
 }
 
@@ -1890,16 +1879,9 @@ fn write_restart_readiness_timeout_event(
             serde_json::json!({
                 "tmux_session_created": readiness.session_created,
                 "worker_pane_addressable": readiness.worker_pane_addressable,
-                "coordinator_alive": readiness.coordinator_alive,
                 "deadline_ms": deadline.as_millis(),
                 "elapsed_ms": elapsed.as_millis(),
-                "coordinator_log": crate::coordinator::coordinator_log_path(
-                    &crate::coordinator::WorkspacePath::new(workspace.to_path_buf())
-                ).display().to_string(),
                 "state_path": crate::state::persist::runtime_state_path(workspace).display().to_string(),
-                "pid_path": crate::coordinator::coordinator_pid_path(
-                    &crate::coordinator::WorkspacePath::new(workspace.to_path_buf())
-                ).display().to_string(),
             }),
         )
         .map(|_| ())
@@ -1911,23 +1893,18 @@ fn restart_readiness_timeout_message(
     readiness: RestartReadiness,
     deadline: std::time::Duration,
 ) -> String {
-    let coordinator_workspace = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
     let deadline_s = deadline.as_secs_f64();
     format!(
         "restart not ready within {deadline_s:.1}s: {missing}\n\
          - tmux session created: {session}\n\
          - worker pane addressable: {pane}\n\
-         - coordinator alive: {coordinator}\n\
-         Action: check coordinator log {log}, then inspect this workspace with `team-agent doctor --workspace '{workspace}'`\n\
-         Log: coordinator_log={log} state={state} pid_file={pid}",
+         Action: inspect this workspace with `team-agent doctor --workspace '{workspace}'`\n\
+         State: {state}",
         missing = restart_readiness_missing_summary(readiness),
         session = yes_no(readiness.session_created),
         pane = yes_no(readiness.worker_pane_addressable),
-        coordinator = yes_no(readiness.coordinator_alive),
-        log = crate::coordinator::coordinator_log_path(&coordinator_workspace).display(),
         workspace = workspace.display(),
         state = crate::state::persist::runtime_state_path(workspace).display(),
-        pid = crate::coordinator::coordinator_pid_path(&coordinator_workspace).display(),
     )
 }
 
@@ -1938,9 +1915,6 @@ fn restart_readiness_missing_summary(readiness: RestartReadiness) -> String {
     }
     if !readiness.worker_pane_addressable {
         missing.push("worker pane addressable");
-    }
-    if !readiness.coordinator_alive {
-        missing.push("coordinator alive");
     }
     missing.join(", ")
 }
