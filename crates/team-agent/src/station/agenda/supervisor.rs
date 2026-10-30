@@ -10,6 +10,24 @@ pub(super) fn user_id() -> u32 {
     // SAFETY: geteuid reads this process's credentials and takes no pointers.
     unsafe { libc::geteuid() }
 }
+#[cfg(unix)]
+pub(super) fn runtime_dir() -> Result<PathBuf, String> {
+    // Short, stable across sessions, and outside a workspace that may disappear.
+    let dir = std::fs::canonicalize("/tmp").map_err(|e| e.to_string())?
+        .join(format!("ta-agenda-{}", user_id()));
+    seat_store::private_dir(&dir)?;
+    Ok(dir)
+}
+pub(super) fn activation_lock_path(store: &Store) -> Result<PathBuf, String> {
+    #[cfg(unix)]
+    { Ok(runtime_dir()?.join(format!("{}.lock", label(store)))) }
+    #[cfg(not(unix))]
+    {
+        let dir = store.root.join("locks");
+        seat_store::private_dir(&dir)?;
+        Ok(dir.join("activation.lock"))
+    }
+}
 pub(super) fn label(store: &Store) -> String {
     let digest = Sha256::digest(store.root.to_string_lossy().as_bytes());
     format!("team-agent.agenda.{digest:x}")

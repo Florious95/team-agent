@@ -16,14 +16,7 @@ mod unix {
 
     const IDLE: Duration = Duration::from_secs(60);
     const WORKERS: usize = 4;
-    fn socket_dir() -> Result<PathBuf, String> {
-        // sockaddr_un is only 104 bytes on macOS; its normal TMPDIR can be longer.
-        let dir = std::fs::canonicalize("/tmp")
-            .map_err(|e| e.to_string())?
-            .join(format!("ta-agenda-{}", supervisor::user_id()));
-        seat_store::private_dir(&dir)?;
-        Ok(dir)
-    }
+    use supervisor::runtime_dir as socket_dir;
     fn socket_path(store: &Store) -> Result<PathBuf, String> {
         let label = supervisor::label(store);
         let digest = label.rsplit('.').next().ok_or("invalid agenda label")?;
@@ -116,6 +109,8 @@ mod unix {
         }
         let socket = UnixDatagram::bind(&address).map_err(|e| e.to_string())?;
         let _cleanup = SocketFile(address.clone());
+        let wait = super::super::wait::Wait::new(&store, &socket)?;
+        socket.set_nonblocking(true).map_err(|e| e.to_string())?;
         let (completed_tx, completed_rx) = mpsc::channel();
         let mut active = HashSet::new();
         let mut blocked = HashSet::new();
@@ -217,9 +212,16 @@ mod unix {
             } else {
                 idle_since = None;
             }
-            socket
-                .set_read_timeout(next.map(|d| d.max(Duration::from_millis(1))))
-                .map_err(|e| e.to_string())?;
+            if !wait.ready(&socket, next.map(|d| d.max(Duration::from_millis(1))))? {
+                let _activation = store.lock("activation")?;
+                if store.workspace.is_dir() && store.root.is_dir() {
+                    // A replacement scope may have a new publisher. Preserve its registration;
+                    // the OS manager restarts us against its current files instead.
+                    return Err("agenda storage scope was replaced".into());
+                }
+                supervisor::retire(&store)?;
+                return Ok(());
+            }
             match socket.recv_from(&mut buffer) {
                 Ok((size, peer)) => {
                     let Ok(request) = serde_json::from_slice::<Value>(&buffer[..size]) else {

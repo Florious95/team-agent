@@ -1,6 +1,8 @@
 //! C5: durable, team-scoped jobs. Readers never create files or open SQLite.
 //! The runner owns only outstanding work and exits after sixty idle seconds.
 mod runtime;
+#[cfg(unix)]
+mod wait;
 mod supervisor;
 
 use super::{codec, seat_store};
@@ -110,9 +112,14 @@ impl Store {
     }
     pub(crate) fn lock(&self, key: &str) -> Result<Lock, String> {
         seat_store::component(key)?;
-        let dir = self.root.join("locks");
-        seat_store::private_dir(&dir)?;
-        let file = seat_store::open_file(&dir.join(format!("{key}.lock")), false)?;
+        let path = if key == "activation" {
+            supervisor::activation_lock_path(self)?
+        } else {
+            let dir = self.root.join("locks");
+            seat_store::private_dir(&dir)?;
+            dir.join(format!("{key}.lock"))
+        };
+        let file = seat_store::open_file(&path, false)?;
         let deadline = std::time::Instant::now() + StdDuration::from_secs(10);
         loop {
             match crate::platform::file_lock::try_lock_once_nonblocking(&file)
@@ -127,7 +134,7 @@ impl Store {
         }
     }
     pub(crate) fn try_activation_lock(&self) -> Result<Option<Lock>, String> {
-        let file = seat_store::open_file(&self.root.join("locks/activation.lock"), false)?;
+        let file = seat_store::open_file(&supervisor::activation_lock_path(self)?, false)?;
         match crate::platform::file_lock::try_lock_once_nonblocking(&file)
             .map_err(|e| e.to_string())?
         {
@@ -238,6 +245,9 @@ impl Store {
         };
         // The activation entity serializes the last-job exit/new-job publication race.
         let _activation = self.lock("activation")?;
+        if !self.workspace.is_dir() {
+            return Err("agenda workspace disappeared before publication".into());
+        }
         self.write(&job)?;
         supervisor::mark_pending(self)?;
         let activation =

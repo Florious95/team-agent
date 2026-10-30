@@ -167,6 +167,35 @@ fn interrupted_recurrence_skips_the_ambiguous_occurrence() {
     assert!(recovered.due().unwrap() > Utc::now());
     assert_eq!(recovered.result.unwrap()["submission"], "unknown");
 }
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn native_wait_detects_moved_storage_ancestors_without_a_tick() {
+    for relative in ["", ".team", ".team/agenda", ".team/agenda/alpha"] {
+        let fixture = Fixture::new();
+        let store = fixture.store("alpha");
+        store.write(&fixture.job("sched_a")).unwrap();
+        let socket = std::os::unix::net::UnixDatagram::unbound().unwrap();
+        let waiter = wait::Wait::new(&store, &socket).unwrap();
+        let path = if relative.is_empty() { fixture.0.clone() } else { fixture.0.join(relative) };
+        let moved = path.with_extension("moved");
+        fs::rename(&path, &moved).unwrap();
+        let ready = waiter.ready(&socket, Some(StdDuration::from_secs(1)));
+        fs::rename(&moved, &path).unwrap();
+        assert!(!ready.unwrap(), "ancestor {relative:?} disappeared without a wake");
+    }
+}
+#[cfg(unix)]
+#[test]
+fn activation_lock_survives_workspace_disappearance() {
+    let fixture = Fixture::new();
+    let store = fixture.store("alpha");
+    let _activation = store.lock("activation").unwrap();
+    let moved = fixture.0.with_extension("moved");
+    fs::rename(&fixture.0, &moved).unwrap();
+    let contender = store.try_activation_lock();
+    fs::rename(&moved, &fixture.0).unwrap();
+    assert!(contender.unwrap().is_none());
+}
 #[test]
 fn one_shot_uses_shared_durable_send_and_never_creates_sqlite() {
     let fixture = Fixture::new();
