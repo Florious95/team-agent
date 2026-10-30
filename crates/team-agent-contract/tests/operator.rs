@@ -1,5 +1,6 @@
 //! Public operator ingress shares K3's existing queue; no native provider runs.
 mod support;
+use support::direct_business::{serve_with_context, handle};
 use serde_json::json;
 use support::*;
 use team_agent_contract::contract::{delivery::*, types::*};

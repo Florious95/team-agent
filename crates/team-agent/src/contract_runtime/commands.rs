@@ -260,7 +260,7 @@ pub fn stop_agent(
         }
         let backend = Backend::open_readonly(&selected.run_workspace, &selected.team_key).map_err(error)?;
         let seat = backend.store.seat(id).map_err(error)?.ok_or(BackendError::Metadata).map_err(error)?;
-        let already_stopped = seat.status == SeatStatus::Stopped;
+        let already_stopped = seat.status == SeatStatus::Stopped && !backend.store.leased(id).map_err(error)?;
         drop(backend);
         let operation = if already_stopped {
             None

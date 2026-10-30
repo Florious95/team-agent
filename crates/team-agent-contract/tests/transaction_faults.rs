@@ -3,6 +3,7 @@
 #[path = "support/legacy_wire.rs"]
 mod legacy_wire;
 mod support;
+use support::direct_business::{handle};
 use serde_json::{json, Value};
 use support::*;
 use team_agent_contract::contract::{plan::*, types::*};

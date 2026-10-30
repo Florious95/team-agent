@@ -1229,7 +1229,20 @@ pub(crate) fn retire(workspace: &Path, team: &str, seat: &SeatId) -> Result<Opti
 }
 
 pub fn stop(workspace: &Path, team: &str, seat: &SeatId) -> Result<OperationRecord, BackendError> {
+    let agent = crate::model::ids::AgentId::new(seat.as_str());
+    let _ownership = crate::lifecycle::lock::acquire_seat_lifecycle_lock(crate::lifecycle::lock::LifecycleLockRequest {
+        workspace, operation: "native-stop", team: Some(team), agent_id: Some(&agent),
+    }).map_err(|error| std::io::Error::other(error.to_string()))?;
     let mut backend = Backend::open(workspace, team)?;
+    for pending in backend.store.unfinished()?.into_iter().filter(|operation|
+        operation.target.identity.seat == *seat && operation.kind == TransactionKind::Teardown
+            && operation.outcome == Outcome::NeedsRecovery)
+    {
+        let recovered = finish_receipt(&mut backend, pending)?;
+        if matches!(recovered.outcome, Outcome::Running | Outcome::NeedsRecovery) {
+            return Ok(recovered);
+        }
+    }
     let target = backend
         .store
         .seat(seat)?
@@ -1289,6 +1302,16 @@ mod tests {
             Self { root, binding, role, identity }
         }
 
+        fn recovering_teardown(&mut self, pending: Option<&str>) -> Backend {
+            let backend = self.canonical(SeatStatus::Stopped, Phase::F2Register, Outcome::NeedsRecovery, pending);
+            let mut operation = backend.store.operation(&OperationId::new("controlled-start").unwrap()).unwrap();
+            operation.kind = TransactionKind::Teardown;
+            let db = rusqlite::Connection::open(self.binding.transport_root.join("contract.db")).unwrap();
+            db.execute("UPDATE contract_operations SET record=?1 WHERE id=?2", rusqlite::params![
+                serde_json::to_string(&operation).unwrap(), operation.id.as_str()]).unwrap();
+            backend
+        }
+
         // Receipt-only fixtures never authorize a native action; the runtime
         // must separately revalidate candidate, role, socket and process birth.
         fn canonical(&mut self, status: SeatStatus, phase: Phase, outcome: Outcome, pending: Option<&str>) -> Backend {
@@ -1341,6 +1364,36 @@ mod tests {
                 None => false,
             };
             assert!(matches, "wrong receipt class for {expected}");
+    }
+
+    #[test]
+    fn stop_recovers_a_stopped_teardown_before_beginning_the_next_operation() {
+        let mut fixture = RoleFixture::new();
+        let backend = fixture.recovering_teardown(None);
+        let receipt = stop(&fixture.root, "test", &fixture.identity.seat).unwrap();
+        assert_eq!(receipt.outcome, Outcome::Committed);
+        assert_eq!(backend.store.operation(&OperationId::new("controlled-start").unwrap()).unwrap().outcome, Outcome::Compensated);
+        assert!(!backend.store.leased(&fixture.identity.seat).unwrap());
+        assert_eq!(backend.store.seat(&fixture.identity.seat).unwrap().unwrap().status, SeatStatus::Stopped);
+    }
+
+    #[test]
+    fn stop_preserves_uncertain_recovery_but_does_not_block_a_sibling() {
+        let mut fixture = RoleFixture::new();
+        let backend = fixture.recovering_teardown(Some("native-control"));
+        let mut sibling = backend.store.seat(&fixture.identity.seat).unwrap().unwrap();
+        sibling.identity.seat = SeatId::new("sibling").unwrap();
+        sibling.identity.instance = InstanceId::new("sibling-instance").unwrap();
+        let db = rusqlite::Connection::open(fixture.binding.transport_root.join("contract.db")).unwrap();
+        db.execute("INSERT INTO contract_seats VALUES(?1,?2)", rusqlite::params![
+            sibling.identity.seat.as_str(), serde_json::to_string(&sibling).unwrap()]).unwrap();
+        let receipt = stop(&fixture.root, "test", &fixture.identity.seat).unwrap();
+        assert_eq!(receipt.id.as_str(), "controlled-start");
+        assert_eq!(receipt.outcome, Outcome::NeedsRecovery);
+        assert!(backend.store.leased(&fixture.identity.seat).unwrap());
+        let sibling_receipt = stop(&fixture.root, "test", &sibling.identity.seat).unwrap();
+        assert_eq!(sibling_receipt.outcome, Outcome::Committed);
+        assert_eq!(backend.store.unfinished().unwrap().len(), 1);
     }
 
     #[test]

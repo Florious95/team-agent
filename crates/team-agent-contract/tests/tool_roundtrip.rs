@@ -1,5 +1,6 @@
 //! Controlled server-journal fixtures, not native liveness or consumption proof.
 mod support;
+use support::direct_business::{serve, handle};
 use std::io::{Cursor, Write};
 use serde_json::{json, Value};
 use support::*;

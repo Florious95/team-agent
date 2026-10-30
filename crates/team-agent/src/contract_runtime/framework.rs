@@ -341,27 +341,61 @@ pub fn stop_selected(workspace: &Path, state: &Value) -> Result<Vec<Value>, Back
                 receipts.push(json!({"agent_id":id,"status":"paused","stopped":false}));
                 continue;
             }
-            let backend = Backend::open(workspace, &team)?;
-            let seat = backend
-                .store
-                .seat(&SeatId::new(id)?)?
-                .ok_or(BackendError::Metadata)?;
-            if seat.status == SeatStatus::Stopped {
-                receipts.push(json!({"agent_id":id,"status":"already_stopped"}));
-                continue;
-            }
-            let _ = agent;
-            let receipt = backend::stop(workspace, &team, &SeatId::new(id)?)?;
-            if receipt.outcome != Outcome::Committed {
-                return Err(BackendError::Shutdown {
-                    operation: receipt.id,
-                    phase: receipt.phase,
-                    outcome: receipt.outcome,
-                    failure: receipt.failure,
-                });
-            }
-            receipts.push(json!({"agent_id":id,"status":"stopped","operation":receipt.id}));
+            let mut physical = None;
+            let result = (|| -> Result<Value, BackendError> {
+                let agent_id = crate::model::ids::AgentId::new(id);
+                let _ownership = crate::lifecycle::lock::acquire_seat_lifecycle_lock(crate::lifecycle::lock::LifecycleLockRequest {
+                    workspace, operation: "native-team-stop", team: Some(&team), agent_id: Some(&agent_id),
+                }).map_err(|error| std::io::Error::other(error.to_string()))?;
+                let backend = Backend::open(workspace, &team)?;
+                let seat = backend.store.seat(&SeatId::new(id)?)?.ok_or(BackendError::Metadata)?;
+                physical = seat.physical.clone();
+                if seat.status == SeatStatus::Stopped && !backend.store.leased(&seat.identity.seat)? {
+                    return Ok(json!({"agent_id":id,"status":"already_stopped"}));
+                }
+                let receipt = backend::stop(workspace, &team, &SeatId::new(id)?)?;
+                if receipt.outcome != Outcome::Committed {
+                    return Err(BackendError::Shutdown {
+                        operation: receipt.id, phase: receipt.phase,
+                        outcome: receipt.outcome, failure: receipt.failure,
+                    });
+                }
+                Ok(json!({"agent_id":id,"status":"stopped","operation":receipt.id}))
+            })();
+            receipts.push(result.unwrap_or_else(|error| json!({
+                "agent_id":id,"status":"failed","error":error.to_string(),
+                "pane_id":physical.as_ref().map(|target| json!(target.pane)).unwrap_or_else(|| agent.get("pane_id").cloned().unwrap_or(Value::Null)),
+                "session_name":physical.as_ref().map(|target| &target.session),
+                "shared_endpoint":physical.as_ref().map(|target| target.shared_endpoint),
+                "endpoint":physical.as_ref().map(|target| json!(target.endpoint)).unwrap_or_else(|| agent.get("tmux_endpoint").cloned().unwrap_or(Value::Null)),
+                "process_pid":physical.as_ref().map(|target| target.process.identity.pid),
+            })));
         }
     }
     Ok(receipts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_shutdown_collects_failures_and_continues_to_other_seats() {
+        let root = std::env::temp_dir().join(format!("native-stop-selected-{}-{}",
+            std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&root).unwrap();
+        let state = json!({"team_key":"test","agents":{
+            "a":{"provider":"cursor","status":"running","pane_id":"%1","tmux_endpoint":"/tmp/fixture.sock"},
+            "b":{"provider":"claude","status":"running"},
+            "z":{"provider":"cursor","status":"paused"}
+        }});
+        let receipts = stop_selected(&root, &state).unwrap();
+        assert_eq!(receipts.len(), 3);
+        assert_eq!(receipts[0]["status"], "failed");
+        assert!(receipts[0]["error"].as_str().is_some_and(|error| !error.is_empty()));
+        assert_eq!(receipts[0]["pane_id"], "%1");
+        assert_eq!(receipts[1]["status"], "failed");
+        assert_eq!(receipts[2]["status"], "paused");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

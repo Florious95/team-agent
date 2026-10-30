@@ -1,5 +1,6 @@
 //! Controlled fake-provider integration tests; no native/Kiro acceptance claims.
 mod support;
+use support::direct_business::{handle, serve, serve_with_diagnostics};
 use serde_json::{json, Value};
 use support::*;
 use team_agent_contract::contract::{delivery::*, descriptor::*, fork::*, plan::*, types::*};
@@ -34,6 +35,20 @@ fn setup() -> (Sandbox, ContractStore, FakeHost, FakeIo, SeatRecord) {
     assert_eq!(operation.phase, Phase::F5Receipt);
     let seat = operation.target;
     (sandbox, store, host, io, seat)
+}
+
+#[test]
+fn production_business_tools_still_require_an_explicit_host_handler() {
+    let (_sandbox, mut store, _, _, seat) = setup();
+    let ctx = context(&seat);
+    for request in [call(1, "report_result", json!({"summary":"done"})),
+        call(2, "send_message", json!({"to":"leader","content":"hello"}))] {
+        assert_eq!(team_agent_contract::orchestration::mcp::handle(&mut store, &ctx, &request),
+            Err(Error::Invalid("direct business handler required")));
+    }
+    assert!(store.results().unwrap().is_empty());
+    assert!(store.deliveries().unwrap().is_empty());
+    assert!(store.protocol_facts().unwrap().is_empty());
 }
 
 #[test]

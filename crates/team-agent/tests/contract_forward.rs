@@ -4,6 +4,7 @@
 mod support;
 use serde_json::json;
 use support::*;
+use support::direct_business::handle;
 use team_agent::contract_runtime::forward::{drain, FrameworkContext};
 use team_agent_contract::contract::types::*;
 use team_agent_contract::host::process::resolve_cwd;

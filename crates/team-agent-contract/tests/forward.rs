@@ -1,5 +1,6 @@
 //! Cross-runtime forwarding never creates a second native delivery queue.
 mod support;
+use support::direct_business::{handle};
 use serde_json::{json, Value};
 use support::*;
 use team_agent_contract::contract::types::*;
