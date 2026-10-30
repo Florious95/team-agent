@@ -1468,7 +1468,7 @@ mod tests {
         parent.identity.instance = InstanceId::new("parent-instance").unwrap();
         parent.pane = "parent-pane".into(); parent.binding_key = "parent-binding".into();
         parent.status = SeatStatus::Stopped;
-        parent.session = Some(ResumeBinding { provider: parent.provider.clone(), native_session: NativeSessionId::new("parent-session").unwrap(),
+        parent.session = Some(ResumeBinding { provider: parent.provider.clone(), native_session: team_agent_contract::contract::session::NativeSessionId::new("parent-session").unwrap(),
             storage: team_agent_contract::contract::session::SessionStorage::Local, cwd: parent.cwd.clone(), native: parent.native.clone(), source: parent.identity.clone(),
             origin: team_agent_contract::contract::session::CaptureOrigin::OwnedExitHint, evidence_kind: EvidenceKind::Fixture, evidence_sha256: digest(b"parent-session"), backing: None });
         operation.parent = Some(parent.clone());
