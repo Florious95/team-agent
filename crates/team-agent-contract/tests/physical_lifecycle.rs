@@ -496,7 +496,9 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
                 assert_eq!(stopped.outcome, Outcome::NeedsRecovery);
                 host.refusal = Some(Error::Host("new recovery blocker"));
                 let retry = Lifecycle { store: &mut store, host: &mut host, io: &mut io }.recover(&stop_id).unwrap();
-                assert!(retry.failure.as_deref().unwrap().contains("new recovery blocker"));
+                // The first cause is kept; a later recovery error is recorded separately.
+                assert!(retry.recovery_failure.as_deref().unwrap().contains("new recovery blocker"));
+                assert!(!retry.failure.as_deref().unwrap_or_default().contains("new recovery blocker"));
                 assert_eq!(store.operation(&stop_id).unwrap(), retry);
                 host.refusal = None;
                 let retry = Lifecycle { store: &mut store, host: &mut host, io: &mut io }.recover(&stop_id).unwrap();
