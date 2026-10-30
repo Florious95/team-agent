@@ -426,7 +426,7 @@ fn running_agent(id: &str, pane: &str, session_id: &str) -> Value {
 fn seed_healthy_coordinator(workspace: &Path) {
     let workspace = team_agent::coordinator::WorkspacePath::new(workspace.to_path_buf());
     std::fs::create_dir_all(team_agent::model::paths::runtime_dir(workspace.as_path())).unwrap();
-    let _ = team_agent::message_store::MessageStore::open(workspace.as_path()).unwrap();
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
     let pid = team_agent::coordinator::Pid::new(std::process::id());
     team_agent::coordinator::write_coordinator_metadata(
         &workspace,

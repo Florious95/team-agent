@@ -394,7 +394,7 @@ tasks: []
 
     fn seed_healthy_coordinator(&self) {
         let workspace = team_agent::coordinator::WorkspacePath::new(self.workspace.clone());
-        let _ = MessageStore::open(&self.workspace).expect("initialize message store");
+        // M4: no SQLite message store fixture (MessageStore::open is retired).
         let identity = json!({
             "binary_path": cli_binary_path(),
             "binary_version": env!("CARGO_PKG_VERSION")

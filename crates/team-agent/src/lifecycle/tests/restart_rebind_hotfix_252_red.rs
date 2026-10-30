@@ -366,7 +366,7 @@ impl HotfixCase {
         obj.insert("active_team_key".to_string(), json!(active));
         obj.insert("teams".to_string(), json!({CURRENT: current, SUB: sub}));
         save_runtime_state(&self.workspace, &state).unwrap();
-        let _ = MessageStore::open(&self.workspace).unwrap();
+        // M4: no SQLite message store fixture (MessageStore::open is retired).
     }
 
     fn seed_unbound_leader_state(&self) {
@@ -418,7 +418,7 @@ impl HotfixCase {
 
     fn seed_healthy_coordinator(&self) {
         let workspace = WorkspacePath::new(self.workspace.clone());
-        let _ = MessageStore::open(workspace.as_path()).unwrap();
+        // M4: no SQLite message store fixture (MessageStore::open is retired).
         let pid = team_agent::coordinator::Pid::new(std::process::id());
         team_agent::coordinator::write_coordinator_metadata(
             &workspace,

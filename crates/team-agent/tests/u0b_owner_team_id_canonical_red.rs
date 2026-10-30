@@ -163,7 +163,7 @@ fn seed_stale_active_multiteam_state(root: &Path) {
         }
     });
     save_runtime_state(root, &state).unwrap();
-    let _ = MessageStore::open(root).unwrap();
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
 }
 
 fn seed_unambiguous_alias_state(root: &Path) {

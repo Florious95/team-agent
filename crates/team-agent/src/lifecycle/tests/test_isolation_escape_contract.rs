@@ -863,7 +863,7 @@ fn json_output(output: &Output, label: &str) -> Value {
 fn seed_healthy_coordinator(workspace: &Path) {
     let workspace_path = team_agent::coordinator::WorkspacePath::new(workspace.to_path_buf());
     std::fs::create_dir_all(team_agent::model::paths::runtime_dir(workspace)).unwrap();
-    let _ = team_agent::message_store::MessageStore::open(workspace).unwrap();
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
     let pid = team_agent::coordinator::Pid::new(std::process::id());
     team_agent::coordinator::write_coordinator_metadata(
         &workspace_path,

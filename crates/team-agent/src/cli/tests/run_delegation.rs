@@ -104,7 +104,7 @@ fn run_dispatches_send_to_handler_returns_ok() {
     // through the active team_key, so the in-team agent now lives under
     // `teams[<key>].agents`. Behavior under test (dispatch + ok exit) unchanged.
     let ws = deleg_uniq_dir("run-send");
-    let _ = crate::message_store::MessageStore::open(&ws).unwrap();
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
     crate::state::persist::save_runtime_state(
         &ws,
         &serde_json::json!({

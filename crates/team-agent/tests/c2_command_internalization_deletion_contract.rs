@@ -573,7 +573,7 @@ impl Case {
             }]
         });
         save_runtime_state(&self.workspace, &state).expect("seed collect state");
-        let _ = MessageStore::open(&self.workspace).expect("open message store");
+        // M4: no SQLite message store fixture (MessageStore::open is retired).
     }
 
     fn write_rebind_required_state(&self) {
@@ -594,7 +594,7 @@ impl Case {
             }
         });
         save_runtime_state(&self.workspace, &state).expect("write rebind state");
-        let _ = MessageStore::open(&self.workspace).expect("open message store");
+        // M4: no SQLite message store fixture (MessageStore::open is retired).
     }
 
     fn write_schema_issue_state(&self) {

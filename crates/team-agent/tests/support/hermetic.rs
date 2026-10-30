@@ -159,7 +159,7 @@ pub fn spawn_owned_coordinator(workspace: &Path) -> Child {
 pub fn seed_in_process_coordinator(workspace: &Path) {
     let scope = team_agent::coordinator::WorkspacePath::new(workspace.to_path_buf());
     std::fs::create_dir_all(team_agent::model::paths::runtime_dir(workspace)).unwrap();
-    let _store = team_agent::message_store::MessageStore::open(workspace).unwrap();
+    // M4: no SQLite message store is created any more (MessageStore::open is retired).
     let pid = team_agent::coordinator::Pid::new(std::process::id());
     team_agent::coordinator::write_coordinator_metadata(
         &scope, pid, team_agent::coordinator::MetadataSource::Boot,

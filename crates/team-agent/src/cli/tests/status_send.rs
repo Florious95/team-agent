@@ -524,7 +524,7 @@ fn status_port_status_detail_full_keeps_uncompacted_events() {
 
 fn send_args_fixture() -> SendArgs {
     let workspace = seed_send_workspace();
-    let _ = crate::message_store::MessageStore::open(&workspace).unwrap();
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
     SendArgs {
         target: Some("alice".into()),
         message: vec!["hello".into(), "world".into(), "foo".into()],
@@ -549,7 +549,7 @@ fn send_args_fixture() -> SendArgs {
 
 fn queued_send_args_fixture(json: bool) -> SendArgs {
     let ws = deleg_uniq_dir("send-human");
-    let _ = crate::message_store::MessageStore::open(&ws).unwrap();
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
     crate::state::persist::save_runtime_state(
         &ws,
         &json!({
@@ -706,7 +706,7 @@ fn cmd_send_unknown_recipient_is_an_immediate_error_without_queueing() {
 #[test]
 fn cmd_send_canonicalizes_legacy_session_alias_before_membership_projection() {
     let ws = deleg_uniq_dir("send-team-alias");
-    let _ = crate::message_store::MessageStore::open(&ws).unwrap();
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
     crate::state::persist::save_runtime_state(
         &ws,
         &json!({

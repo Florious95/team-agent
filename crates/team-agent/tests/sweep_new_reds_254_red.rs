@@ -518,7 +518,7 @@ fn role_doc(agent: &str, role: &str) -> String {
 
 fn seed_selected_team_state(root: &Path, team_key: &str, team_dir: &Path, attached: bool) {
     std::fs::create_dir_all(root.join(".team").join("runtime")).unwrap();
-    let _ = MessageStore::open(root).unwrap();
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
     let receiver = if attached {
         json!({
             "mode": "direct_tmux",

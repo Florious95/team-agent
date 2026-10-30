@@ -861,7 +861,7 @@ fn seed_canonical_state(root: &Path, entries: Vec<(&'static str, Value)>, active
     root_state.insert("active_team_key".to_string(), json!(active));
     root_state.insert("teams".to_string(), Value::Object(teams));
     save_runtime_state(root, &Value::Object(root_state)).unwrap();
-    let _ = team_agent::message_store::MessageStore::open(root).unwrap();
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
 }
 
 fn team_entry(

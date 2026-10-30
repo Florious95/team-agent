@@ -306,7 +306,7 @@ fn seed_copilot_team_state(ws: &Path, agent: &str, accepted_msg: bool) {
         }),
     )
     .unwrap();
-    let _ = MessageStore::open(ws).unwrap();
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
 }
 
 fn write_min_team(ws: &Path, name: &str) -> PathBuf {

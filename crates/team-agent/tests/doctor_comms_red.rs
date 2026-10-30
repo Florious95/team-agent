@@ -179,7 +179,7 @@ impl DoctorFixture {
     }
 
     fn seed_runtime(&self) {
-        let _ = MessageStore::open(&self.workspace).unwrap();
+        // M4: no SQLite message store fixture (MessageStore::open is retired).
         save_runtime_state(
             &self.workspace,
             &json!({

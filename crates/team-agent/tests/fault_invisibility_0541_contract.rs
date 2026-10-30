@@ -138,7 +138,7 @@ impl CliCase {
         let fake_bin = env.root().join(format!("fake-bin-{tag}"));
         fs::create_dir_all(&fake_bin).expect("create fake bin");
         fs::create_dir_all(runtime_dir(&workspace)).expect("create runtime dir");
-        let _ = MessageStore::open(&workspace).expect("create message store");
+        // M4: no SQLite message store fixture (MessageStore::open is retired).
         Self {
             env,
             workspace,

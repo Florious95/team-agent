@@ -28,7 +28,7 @@ impl TestWorkspace {
         let path =
             std::env::temp_dir().join(format!("ta-ds01-{label}-{}-{serial}", std::process::id()));
         std::fs::create_dir_all(&path).expect("create DS-01 workspace");
-        let _ = MessageStore::open(&path).expect("initialize team.db");
+        // M4: no SQLite message store fixture (MessageStore::open is retired).
         Self(path)
     }
 

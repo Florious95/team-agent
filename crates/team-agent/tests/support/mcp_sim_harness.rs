@@ -79,7 +79,7 @@ impl McpSimHarness {
         harness.spawn_pane("worker_c", false);
         harness.spawn_pane("team_b_leader", false);
         harness.seed_state();
-        let _ = MessageStore::open(&harness.workspace).unwrap();
+        // M4: no SQLite message store fixture (MessageStore::open is retired).
         harness
     }
 
