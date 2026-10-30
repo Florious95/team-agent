@@ -1595,7 +1595,7 @@ mod tests {
                 resources: vec![], workspace_resources: vec![], bootstrap_used: false };
             let operation = OperationRecord { id: OperationId::new("controlled-start").unwrap(), kind: TransactionKind::Startup,
                 target: target.clone(), parent: None, phase, pending: pending.map(str::to_owned), spawn_observation: None, native_launch: None, resources: vec![],
-                effect: team_agent_contract::contract::delivery::DeliveryEffect::NoEffect, outcome, preserved: vec![], failure: None };
+                effect: team_agent_contract::contract::delivery::DeliveryEffect::NoEffect, outcome, preserved: vec![], failure: None, recovery_failure: None, stop_receipt: None };
             store.fixture_put_seat(&target).unwrap();
             store.fixture_put_operation(&operation).unwrap();
             if matches!(outcome, Outcome::Running | Outcome::NeedsRecovery) {
