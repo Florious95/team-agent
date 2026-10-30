@@ -54,7 +54,7 @@ fn team_start_skips_bad_native_preflight_but_explicit_target_still_refuses() {
     let (root, intent) = fixture(&["healthy", "invalid"]);
     std::fs::write(root.path().join("agents/invalid.md"),
         "---\nprovider: codex\nmodel: native-model\nprofile: codex-default\n---\nInvalid native profile\n").unwrap();
-    install(root.path(), &[("healthy", "stopped", true), ("invalid", "stopped", true)]);
+    install(root.path(), &[("healthy", "stopped", false), ("invalid", "stopped", false)]);
     let state = crate::state::persist::runtime_state_path(root.path());
     let mut raw: Value = serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
     raw["teams"]["fixture"]["agents"]["invalid"]["provider"] = json!("codex_tui");
@@ -83,7 +83,7 @@ fn startup_spec_red_stopped_team_uses_start_without_restart_or_planning_writes()
     let (root, intent) = fixture(&["one", "two"]);
     install(
         root.path(),
-        &[("one", "stopped", true), ("two", "stopped", false)],
+        &[("one", "stopped", false), ("two", "stopped", false)],
     );
     let spec = crate::model::paths::runtime_spec_path(root.path(), "fixture");
     std::fs::remove_file(&spec).unwrap();
@@ -139,7 +139,8 @@ fn startup_spec_red_live_team_recovers_metadata_without_process_restart() {
 #[test]
 #[serial_test::serial(env)]
 fn startup_spec_repair_executes_only_metadata_and_preserves_seat_identity() {
-    let (root, intent) = fixture(&["one"]);
+    let (root, mut intent) = fixture(&["one"]);
+    intent.subject = Subject::Agent("one".into());
     install(root.path(), &[("one", "stopped", true)]);
     let spec = crate::model::paths::runtime_spec_path(root.path(), "fixture");
     std::fs::remove_file(&spec).unwrap();
@@ -172,7 +173,7 @@ fn startup_spec_repair_executes_only_metadata_and_preserves_seat_identity() {
 #[serial_test::serial(env)]
 fn startup_spec_repair_rechecks_source_under_lock_and_unknown_stays_blocked() {
     let (root, intent) = fixture(&["one"]);
-    install(root.path(), &[("one", "stopped", true)]);
+    install(root.path(), &[("one", "stopped", false)]);
     let spec = crate::model::paths::runtime_spec_path(root.path(), "fixture");
     std::fs::remove_file(&spec).unwrap();
     assert!(plan_with_observer(intent.clone(), |_, _, _| Ok(Observation::Unknown)).is_err());
@@ -220,7 +221,7 @@ fn stopped_team_starts_both_and_mixed_start_leaves_live_peer_untouched() {
     let (root, intent) = fixture(&["one", "two"]);
     install(
         root.path(),
-        &[("one", "stopped", true), ("two", "stopped", false)],
+        &[("one", "stopped", false), ("two", "stopped", false)],
     );
     let plan =
         plan_with_observer(intent.clone(), |_, _, _| Ok(Observation::StoppedVerified)).unwrap();
@@ -429,7 +430,7 @@ fn spec_only_state_only_and_missing_spec_do_not_fallback_to_creation() {
 #[serial_test::serial(env)]
 fn runtime_files_and_source_are_unchanged_by_dry_planning() {
     let (root, intent) = fixture(&["one"]);
-    install(root.path(), &[("one", "stopped", true)]);
+    install(root.path(), &[("one", "stopped", false)]);
     let state = crate::state::persist::runtime_state_path(root.path());
     let before = std::fs::read(&state).unwrap();
     let plan = plan_with_observer(intent, |_, _, _| Ok(Observation::StoppedVerified)).unwrap();
