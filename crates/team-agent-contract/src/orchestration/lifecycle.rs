@@ -31,6 +31,18 @@ pub trait LifecycleHost {
         seat: &SeatRecord,
         plan: &LaunchPlan,
     ) -> Result<SpawnedProcess, Error>;
+    fn spawn_observed(
+        &mut self, descriptor: &ProviderDescriptor, resolved: &ResolvedLaunch,
+        seat: &SeatRecord, plan: &LaunchPlan,
+        _observe: &mut dyn FnMut(&crate::host::transport::SpawnObservation) -> Result<(), Error>,
+    ) -> Result<SpawnedProcess, Error> {
+        self.spawn(descriptor, resolved, seat, plan)
+    }
+    fn reconcile_spawn(
+        &mut self, _seat: &SeatRecord, _observation: &crate::host::transport::SpawnObservation,
+    ) -> Result<Option<SpawnedProcess>, Error> {
+        Err(Error::Host("physical spawn reconciliation unavailable"))
+    }
     fn stop(&mut self, seat: &SeatRecord) -> Result<(), Error>;
     fn control(
         &mut self,
@@ -374,7 +386,19 @@ impl Lifecycle<'_> {
         operation.phase = Phase::F3Spawn;
         operation.pending = Some("spawn".into());
         self.store.save(operation, true)?;
-        let spawned = match self.host.spawn(adapter.descriptor, resolved, &operation.target, plan) {
+        let target = operation.target.clone();
+        let store = &mut self.store;
+        let mut observe = |observation: &crate::host::transport::SpawnObservation| {
+            if observation.directory.owner != target.identity || observation.provider != target.provider
+                || observation.native != target.native || observation.cwd != target.cwd
+                || observation.evidence_kind != target.evidence_kind || observation.executable != plan.executable
+                || !observation.directory.path.starts_with(store.root()) {
+                return Err(Error::Fence);
+            }
+            operation.spawn_observation = Some(observation.clone());
+            store.save(operation, false)
+        };
+        let spawned = match self.host.spawn_observed(adapter.descriptor, resolved, &target, plan, &mut observe) {
             Err(error @ Error::SpawnNotStarted(_)) => {
                 operation.pending = None;
                 return Err(error);
@@ -535,9 +559,38 @@ impl Lifecycle<'_> {
     fn compensate(&mut self, operation: &mut OperationRecord) -> Result<(), Error> {
         operation.outcome = Outcome::NeedsRecovery;
         self.store.save(operation, false)?;
+        if operation.pending.as_deref() == Some("spawn") {
+            let Some(observation) = operation.spawn_observation.as_ref() else { return Ok(()); };
+            if observation.directory.owner != operation.target.identity
+                || !observation.directory.path.starts_with(self.store.root()) {
+                return Err(Error::Fence);
+            }
+            match self.host.reconcile_spawn(&operation.target, observation) {
+                Ok(Some(spawned)) => {
+                    if spawned.physical.as_ref().is_none_or(|target| target.identity() != &operation.target.identity
+                        || target.process.identity != spawned.process || target.pane != observation.pane
+                        || target.binding != observation.binding) {
+                        return Err(Error::Fence);
+                    }
+                    operation.target.process = Some(spawned.process);
+                    operation.target.endpoint = spawned.endpoint;
+                    operation.target.pane = spawned.pane;
+                    operation.target.binding_key = spawned.binding_key;
+                    operation.target.physical = spawned.physical;
+                }
+                Ok(None) => operation.target.status = SeatStatus::Stopped,
+                Err(error) => {
+                    operation.failure = Some(format!("spawn recovery: {error}"));
+                    self.store.save(operation, false)?;
+                    return Ok(());
+                }
+            }
+            operation.pending = None;
+            self.store.save(operation, true)?;
+        }
         if matches!(
             operation.pending.as_deref(),
-            Some("spawn" | "native-control" | "stop-parent" | "cleanup-parent")
+            Some("native-control" | "stop-parent" | "cleanup-parent")
         ) {
             // Cannot infer absence of process/input effects from a missing receipt.
             return Ok(());
@@ -605,6 +658,7 @@ fn new_operation(
         parent,
         phase: Phase::F0Preflight,
         pending: None,
+        spawn_observation: None,
         resources: vec![],
         effect: DeliveryEffect::NoEffect,
         outcome: Outcome::Running,

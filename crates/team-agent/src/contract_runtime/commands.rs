@@ -598,7 +598,7 @@ mod tests {
                 status: SeatStatus::Starting, process: None, physical: None, session: None,
                 resources: vec![], workspace_resources: vec![], bootstrap_used: false,
             },
-            parent: None, phase: Phase::F3Spawn, pending: Some("compensating-stop".into()),
+            parent: None, phase: Phase::F3Spawn, pending: Some("compensating-stop".into()), spawn_observation: None,
             resources: vec![], effect: DeliveryEffect::NoEffect, outcome, preserved: vec![],
             failure: Some("native control SessionInspect guard-deadline".into()),
         }

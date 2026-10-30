@@ -40,6 +40,48 @@ pub struct TargetReceipt {
     pub native_session: Option<NativeSessionId>,
 }
 
+/// Durable partial spawn observation. A pane PID is not a native executable
+/// receipt: live recovery additionally requires its captured birth and image.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SpawnObservation {
+    pub directory: DirectoryReceipt,
+    pub endpoint: PathBuf,
+    pub socket_device: u64,
+    pub socket_inode: u64,
+    pub shared_endpoint: bool,
+    pub created_session: bool,
+    pub session: String,
+    pub window: String,
+    pub pane: String,
+    pub pane_pid: u32,
+    pub birth_identity: Option<String>,
+    pub columns: u16,
+    pub rows: u16,
+    pub binding: String,
+    pub executable: PathBuf,
+    pub inputs: Vec<super::process::ExecutableInputStamp>,
+    pub provider: ProviderId,
+    pub cwd: CwdIdentity,
+    pub native: NativeIdentity,
+    pub evidence_kind: EvidenceKind,
+    pub candidate_sha256: Digest,
+}
+
+impl SpawnObservation {
+    pub(crate) fn target(&self, process: ProcessStamp) -> TargetReceipt {
+        TargetReceipt {
+            directory: self.directory.clone(), endpoint: self.endpoint.clone(),
+            socket_device: self.socket_device, socket_inode: self.socket_inode,
+            shared_endpoint: self.shared_endpoint, created_session: self.created_session,
+            session: self.session.clone(), window: self.window.clone(), pane: self.pane.clone(),
+            columns: self.columns, rows: self.rows, binding: self.binding.clone(), process,
+            provider: self.provider.clone(), cwd: self.cwd.clone(), native: self.native.clone(),
+            evidence_kind: self.evidence_kind, candidate_sha256: self.candidate_sha256,
+            native_session: None,
+        }
+    }
+}
+
 impl TargetReceipt {
     pub fn identity(&self) -> &InstanceIdentity {
         &self.directory.owner

@@ -117,6 +117,8 @@ pub struct OperationRecord {
     pub parent: Option<SeatRecord>,
     pub phase: Phase,
     pub pending: Option<String>,
+    #[serde(default)]
+    pub spawn_observation: Option<crate::host::transport::SpawnObservation>,
     pub resources: Vec<OwnedResourceReceipt>,
     pub effect: DeliveryEffect,
     pub outcome: Outcome,

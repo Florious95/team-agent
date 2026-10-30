@@ -348,6 +348,7 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
     )
     .unwrap();
     assert_eq!(started.outcome, Outcome::Committed, "{started:?}");
+    assert!(started.spawn_observation.is_some(), "partial spawn attribution is durable before completion");
     let seat = started.target;
     let target = seat.physical.clone().unwrap();
     assert_eq!(seat.endpoint, target.endpoint.to_str().unwrap());
@@ -541,4 +542,44 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
     assert_eq!(sample_process(&target.process), ProcessState::Exited);
     assert_eq!(std::fs::symlink_metadata(&target.endpoint).unwrap_err().kind(), std::io::ErrorKind::NotFound);
     assert_eq!(std::fs::read(&events_path).unwrap(), preserved_events);
+
+    // Reproduce a restart after losing the final spawn result, both with the
+    // exact native still alive and after a positively receipt-owned close.
+    for live in [true, false] {
+        let mut pending_request = request.clone();
+        pending_request.identity.seat = SeatId::new(format!("pending-{live}")).unwrap();
+        pending_request.identity.instance = InstanceId::new(format!("pending-instance-{live}")).unwrap();
+        let op = OperationId::new(format!("pending-spawn-{live}")).unwrap();
+        let mut pending_runtime = PhysicalRuntime::new(Registration {
+            descriptor: &d, hooks: &h, controls: &[], startup: None, session_panel: None,
+        }, settings(&tmux), op.clone(), &clock).unwrap();
+        let mut pending = Lifecycle { store: &mut store, host: &mut pending_runtime, io: &mut io }.startup(
+            &Adapter { descriptor: &d, hooks: &h, catalog: None }, &pending_request,
+            Routing { pane: "unpublished".into(), binding_key: "pending-binding".into(), server_key: format!("pending-server-{live}") }, op.clone(),
+        ).unwrap();
+        assert_eq!(pending.outcome, Outcome::Committed, "{pending:?}");
+        let physical = pending.target.physical.clone().unwrap();
+        if !live {
+            let stopped = Lifecycle { store: &mut store, host: &mut pending_runtime, io: &mut io }
+                .teardown(&pending.target.identity, OperationId::new("close-before-recovery").unwrap()).unwrap();
+            assert_eq!(stopped.outcome, Outcome::Committed);
+        }
+        pending.outcome = Outcome::NeedsRecovery;
+        pending.phase = Phase::F3Spawn;
+        pending.pending = Some("spawn".into());
+        pending.target.process = None;
+        pending.target.physical = None;
+        pending.target.status = SeatStatus::Starting;
+        let db = rusqlite::Connection::open(root.join("contract.db")).unwrap();
+        db.execute("UPDATE contract_operations SET record=?1 WHERE id=?2", rusqlite::params![serde_json::to_string(&pending).unwrap(), op.as_str()]).unwrap();
+        db.execute("INSERT INTO contract_leases VALUES(?1,?2)", rusqlite::params![pending.target.identity.seat.as_str(), op.as_str()]).unwrap();
+        let mut reopened = PhysicalRuntime::new(Registration {
+            descriptor: &d, hooks: &h, controls: &[], startup: None, session_panel: None,
+        }, settings(&tmux), op.clone(), &clock).unwrap();
+        let recovered = Lifecycle { store: &mut store, host: &mut reopened, io: &mut io }.recover(&op).unwrap();
+        assert_eq!(recovered.outcome, Outcome::Compensated, "{recovered:?}");
+        assert_eq!(sample_process(&physical.process), ProcessState::Exited);
+        assert!(!store.leased(&pending.target.identity.seat).unwrap());
+        assert_eq!(Lifecycle { store: &mut store, host: &mut reopened, io: &mut io }.recover(&op).unwrap(), recovered);
+    }
 }

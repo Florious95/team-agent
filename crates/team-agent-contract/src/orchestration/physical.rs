@@ -329,6 +329,16 @@ impl LifecycleHost for PhysicalRuntime<'_> {
         seat: &SeatRecord,
         plan: &LaunchPlan,
     ) -> Result<SpawnedProcess, Error> {
+        self.spawn_observed(descriptor, resolved, seat, plan, &mut |_| Ok(()))
+    }
+    fn spawn_observed(
+        &mut self,
+        descriptor: &ProviderDescriptor,
+        resolved: &ResolvedLaunch,
+        seat: &SeatRecord,
+        plan: &LaunchPlan,
+        observe: &mut dyn FnMut(&crate::host::transport::SpawnObservation) -> Result<(), Error>,
+    ) -> Result<SpawnedProcess, Error> {
         if descriptor != self.registration.descriptor
             || resolved.request().identity != seat.identity
             || resolved.provider() != &seat.provider
@@ -358,7 +368,8 @@ impl LifecycleHost for PhysicalRuntime<'_> {
             None => TmuxHost::new(directory, self.settings.tmux.clone(),
                 self.settings.limits, RealCommandRunner::default()),
         }.map_err(host_error)?;
-        let spawned = host.spawn_owned(
+        let mut observation_error = None;
+        let spawned = host.spawn_owned_observed(
             descriptor,
             resolved,
             plan,
@@ -367,7 +378,12 @@ impl LifecycleHost for PhysicalRuntime<'_> {
             },
             self.clock,
             self.deadline()?,
+            &mut |receipt| observe(receipt).map_err(|error| {
+                observation_error = Some(error);
+                HostError::new("spawn observation persistence", crate::host::HostErrorKind::Unknown)
+            }),
         );
+        if let Some(error) = observation_error { return Err(error); }
         // Only the host's positive no-spawn receipt permits compensation.
         // Missing/partial process effects remain pending+fenced.
         if let Some(error) = spawned.problem {
@@ -397,6 +413,21 @@ impl LifecycleHost for PhysicalRuntime<'_> {
             binding_key: target.binding.clone(),
             physical: Some(target),
         })
+    }
+    fn reconcile_spawn(
+        &mut self, seat: &SeatRecord, observation: &crate::host::transport::SpawnObservation,
+    ) -> Result<Option<SpawnedProcess>, Error> {
+        if observation.directory.owner != seat.identity || observation.provider != seat.provider
+            || observation.native != seat.native || observation.cwd != seat.cwd
+            || observation.evidence_kind != seat.evidence_kind {
+            return Err(Error::Fence);
+        }
+        let target = TmuxHost::recover_spawn(observation, self.settings.tmux.clone(), self.settings.limits,
+            RealCommandRunner::default(), self.clock, self.deadline()?).map_err(host_error)?;
+        Ok(target.map(|target| SpawnedProcess {
+            process: target.process.identity.clone(), endpoint: target.endpoint.to_string_lossy().into_owned(),
+            pane: target.pane.clone(), binding_key: target.binding.clone(), physical: Some(target),
+        }))
     }
     fn stop(&mut self, seat: &SeatRecord) -> Result<(), Error> {
         let target = self.target(seat)?.clone();

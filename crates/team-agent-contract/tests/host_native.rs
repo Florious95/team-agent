@@ -144,10 +144,10 @@ fn native_case(mode: &str, content: &str, expected_keys: usize) {
 }
 
 fn native_case_on(mode: &str, content: &str, expected_keys: usize, shared_workspace: bool, new_session: bool) {
-    native_case_with(mode, content, expected_keys, shared_workspace, new_session, false);
+    native_case_with(mode, content, expected_keys, shared_workspace, new_session, false, false);
 }
 
-fn native_case_with(mode: &str, content: &str, expected_keys: usize, shared_workspace: bool, new_session: bool, user_wrapper: bool) {
+fn native_case_with(mode: &str, content: &str, expected_keys: usize, shared_workspace: bool, new_session: bool, user_wrapper: bool, interrupt_spawn: bool) {
     let tmux = configured_binary("CONTRACT_TMUX");
     assert_eq!(
         std::env::var("CONTRACT_OLD_SCOPE").as_deref(),
@@ -278,23 +278,48 @@ fn native_case_with(mode: &str, content: &str, expected_keys: usize, shared_work
         Some(shared) => TmuxHost::new_shared(directory, tmux.clone(), limits, NoLocaleRunner::default(), shared),
         None => TmuxHost::new(directory, tmux.clone(), limits, NoLocaleRunner::default()),
     }.unwrap();
-    let spawn = host.spawn_owned(
+    assert!(!interrupt_spawn || shared_workspace && !new_session);
+    let mut spawn_observation = None;
+    let spawn = host.spawn_owned_observed(
         &d,
         &launch,
         &plan,
         &MaterializeReceipt { resources: vec![] },
         &clock,
         clock.now() + Duration::from_secs(20),
+        &mut |observation| {
+            spawn_observation = Some(observation.clone());
+            if interrupt_spawn {
+                Err(team_agent_contract::host::HostError::new("controlled interruption after spawn observation",
+                    team_agent_contract::host::HostErrorKind::Unknown))
+            } else { Ok(()) }
+        },
     );
     assert!(
-        spawn.problem.is_none(),
+        spawn.problem.is_none() || interrupt_spawn,
         "spawn receipt: {spawn:?}; owned process: {:?}",
         spawn
             .pane
             .as_ref()
             .map(|pane| owned_process_diagnostic(pane.pid, &executable, native_hash))
     );
-    let target = spawn.target.unwrap();
+    let observation = spawn_observation.expect("physical attribution precedes native polling");
+    let recovery_deadline = clock.now() + Duration::from_secs(5);
+    let recovered = loop {
+        match TmuxHost::recover_spawn(&observation, tmux.clone(), limits, NoLocaleRunner::default(), &clock, recovery_deadline) {
+            Ok(Some(target)) => break target,
+            result if clock.now() >= recovery_deadline => panic!("live spawn recovery: {result:?}"),
+            _ => clock.sleep(Duration::from_millis(10)),
+        }
+    };
+    let target = match spawn.target {
+        Some(target) => { assert_eq!(target, recovered); target },
+        None => { assert!(interrupt_spawn); recovered },
+    };
+    let mut forged = observation.clone(); forged.birth_identity = Some("foreign-birth".into());
+    assert!(TmuxHost::recover_spawn(&forged, tmux.clone(), limits, NoLocaleRunner::default(), &clock, recovery_deadline).is_err());
+    let mut forged = observation.clone(); forged.socket_inode += 1;
+    assert!(TmuxHost::recover_spawn(&forged, tmux.clone(), limits, NoLocaleRunner::default(), &clock, recovery_deadline).is_err());
     if let Some(marker) = &wrapper_marker {
         // The pane's bare `fixture` resolved to the user wrapper first on PATH;
         // it ran exactly once in the pane PID and exec'd the image in place.
@@ -516,6 +541,8 @@ fn native_case_with(mode: &str, content: &str, expected_keys: usize, shared_work
     assert_eq!(close.socket_cleanup.outcome, StepOutcome::Confirmed, "{close:?}");
     assert!(close.socket_cleanup.error.is_none());
     assert_eq!(close.shared_endpoint, shared_workspace);
+    assert!(TmuxHost::recover_spawn(&observation, tmux.clone(), limits, NoLocaleRunner::default(),
+        &clock, clock.now() + Duration::from_secs(5)).unwrap().is_none(), "positive absence after exact owned close");
     if let Some((mut peer, peer_target, global_before)) = anchor {
         assert!(close.socket_preserved, "borrowed socket must remain: {close:?}");
         assert_eq!(sample_process(&peer_target.process), ProcessState::Alive);
@@ -587,8 +614,13 @@ fn real_tmux_new_team_session_uses_existing_workspace_server_and_preserves_other
 }
 
 #[test]
+fn interrupted_native_spawn_recovers_only_its_recorded_process_and_preserves_sibling() {
+    native_case_with("single", "recovered native spawn without replay", 1, true, false, false, true);
+}
+
+#[test]
 fn real_tmux_pane_runs_the_user_wrapper_prepended_to_path() {
-    native_case_with("single", "user wrapper on PATH\nexec through to the native image", 1, false, false, true);
+    native_case_with("single", "user wrapper on PATH\nexec through to the native image", 1, false, false, true, false);
 }
 
 #[test]

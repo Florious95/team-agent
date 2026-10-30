@@ -596,6 +596,20 @@ impl<R: CommandRunner> TmuxHost<R> {
         clock: &dyn Clock,
         deadline: Duration,
     ) -> SpawnReceipt {
+        self.spawn_owned_observed(descriptor, resolved, plan, materialized, clock, deadline, &mut |_| Ok(()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_owned_observed(
+        &mut self,
+        descriptor: &ProviderDescriptor,
+        resolved: &ResolvedLaunch,
+        plan: &LaunchPlan,
+        materialized: &MaterializeReceipt,
+        clock: &dyn Clock,
+        deadline: Duration,
+        observe: &mut dyn FnMut(&SpawnObservation) -> Result<(), HostError>,
+    ) -> SpawnReceipt {
         let mut receipt = SpawnReceipt {
             target: None,
             pane: None,
@@ -612,6 +626,7 @@ impl<R: CommandRunner> TmuxHost<R> {
             clock,
             deadline,
             &mut receipt,
+            observe,
         ) {
             Ok(target) => {
                 self.target = Some(target.clone());
@@ -632,6 +647,7 @@ impl<R: CommandRunner> TmuxHost<R> {
         clock: &dyn Clock,
         deadline: Duration,
         receipt: &mut SpawnReceipt,
+        observe: &mut dyn FnMut(&SpawnObservation) -> Result<(), HostError>,
     ) -> Result<TargetReceipt, HostError> {
         validate_launch_plan(descriptor, resolved, plan)
             .map_err(|_| HostError::new("launch contract", HostErrorKind::Invalid))?;
@@ -861,6 +877,21 @@ impl<R: CommandRunner> TmuxHost<R> {
         if !set.success() {
             return Err(command_error(&set, "tmux owner binding"));
         }
+        let observation = SpawnObservation {
+            directory: self.directory.receipt().clone(), endpoint: self.endpoint.clone(),
+            socket_device: device, socket_inode: inode, shared_endpoint: self.shared.is_some(),
+            created_session, session: initial.address.session.clone(), window: initial.address.window.clone(),
+            pane: initial.address.pane.clone(), pane_pid: initial.address.pid,
+            birth_identity: super::process::process_birth_identity(initial.address.pid).ok(),
+            columns: initial.columns, rows: initial.rows, binding: binding.clone(),
+            executable: plan.executable.clone(), inputs: inputs.clone(),
+            provider: resolved.provider().clone(), cwd: resolved.request().paths.cwd.clone(),
+            native: resolved.request().native.clone(), evidence_kind: resolved.request().evidence_kind,
+            candidate_sha256,
+        };
+        // Persist attribution before native identity polling. A callback failure
+        // stops all further effects; it never authorizes replay of the spawn.
+        observe(&observation)?;
         loop {
             let pane = self.query_pane(&initial.address.pane, clock, deadline)?;
             if pane.address.session != initial.address.session
@@ -898,33 +929,104 @@ impl<R: CommandRunner> TmuxHost<R> {
                 }
                 verify_executable_inputs(&inputs)?;
                 process.inputs = inputs;
-                return Ok(TargetReceipt {
-                    directory: self.directory.receipt().clone(),
-                    endpoint: self.endpoint.clone(),
-                    socket_device: device,
-                    socket_inode: inode,
-                    shared_endpoint: self.shared.is_some(),
-                    created_session,
-                    session: pane.address.session,
-                    window: pane.address.window,
-                    pane: pane.address.pane,
-                    columns: pane.columns,
-                    rows: pane.rows,
-                    binding,
-                    process,
-                    provider: resolved.provider().clone(),
-                    cwd: resolved.request().paths.cwd.clone(),
-                    native: resolved.request().native.clone(),
-                    evidence_kind: resolved.request().evidence_kind,
-                    candidate_sha256,
-                    native_session: None,
-                });
+                return Ok(observation.target(process));
             }
             clock.sleep(
                 self.limits
                     .poll_interval
                     .min(remaining(clock, deadline).unwrap_or_default()),
             );
+        }
+    }
+
+    /// Reconcile a journaled partial spawn, never rediscover or replay one.
+    /// None is positive process absence plus an absent/receipt-owned dead pane.
+    pub fn recover_spawn(
+        observation: &SpawnObservation,
+        executable: PathBuf,
+        limits: HostLimits,
+        runner: R,
+        clock: &dyn Clock,
+        deadline: Duration,
+    ) -> Result<Option<TargetReceipt>, HostError> {
+        let directory = ScopedDirectory::reopen(observation.directory.clone())?;
+        let expected_binding = target_binding(&observation.directory, observation.socket_device,
+            observation.socket_inode, observation.shared_endpoint.then_some(observation.endpoint.as_path()),
+            observation.created_session);
+        if observation.binding != expected_binding || resolve_cwd(&observation.cwd.path)? != observation.cwd {
+            return Err(HostError::new("spawn recovery binding", HostErrorKind::Ownership));
+        }
+        let missing = match std::fs::symlink_metadata(&observation.endpoint) {
+            Ok(_) => false,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => return Err(HostError::io("spawn recovery endpoint", error)),
+        };
+        let mut host = if observation.shared_endpoint {
+            Self::new_shared(directory, executable, limits, runner, SharedTmux {
+                endpoint: observation.endpoint.clone(),
+                socket: (!missing).then_some((observation.socket_device, observation.socket_inode)),
+                session_name: "recovering".into(), session: (!missing).then_some(observation.session.clone()),
+            })?
+        } else { Self::new(directory, executable, limits, runner)? };
+        if host.endpoint != observation.endpoint || (!missing
+            && host.socket_identity()? != (observation.socket_device, observation.socket_inode)) {
+            return Err(HostError::new("spawn recovery socket incarnation", HostErrorKind::Ownership));
+        }
+        let state = super::process::sample_spawn_birth(observation.pane_pid, observation.birth_identity.as_deref());
+        if missing {
+            return if state == ProcessState::Exited { Ok(None) }
+                else { Err(HostError::new("spawn recovery absent socket with unresolved process", HostErrorKind::Ownership)) };
+        }
+        let panes = host.command(vec!["list-panes".into(), "-a".into(), "-F".into(), "#{pane_id}".into()], None, clock, deadline)?;
+        if !panes.success() { return Err(command_error(&panes, "spawn recovery pane inventory")); }
+        let inventory = std::str::from_utf8(&panes.stdout)
+            .map_err(|_| HostError::new("spawn recovery inventory encoding", HostErrorKind::Unknown))?;
+        if inventory.lines().any(|pane| !numbered(pane, '%')) {
+            return Err(HostError::new("spawn recovery inventory format", HostErrorKind::Unknown));
+        }
+        if !inventory.lines().any(|pane| pane == observation.pane) {
+            return if state == ProcessState::Exited { Ok(None) }
+                else { Err(HostError::new("spawn recovery absent pane with unresolved process", HostErrorKind::Ownership)) };
+        }
+        let pane = host.query_pane(&observation.pane, clock, deadline)?;
+        if pane.address.pid != observation.pane_pid || pane.address.session != observation.session
+            || pane.address.window != observation.window || pane.binding != observation.binding {
+            return Err(HostError::new("spawn recovery pane incarnation", HostErrorKind::Ownership));
+        }
+        match state {
+            ProcessState::Exited if pane.dead => {
+                let close = host.command(vec!["kill-pane".into(), "-t".into(), observation.pane.clone().into()], None, clock, deadline)?;
+                if !close.success() { return Err(command_error(&close, "spawn recovery dead pane cleanup")); }
+                // Do not claim absence from a successful write alone.
+                let socket_gone = matches!(std::fs::symlink_metadata(&observation.endpoint),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound);
+                if !socket_gone {
+                    if host.socket_identity()? != (observation.socket_device, observation.socket_inode) {
+                        return Err(HostError::new("spawn recovery cleanup socket changed", HostErrorKind::Ownership));
+                    }
+                    let after = host.command(vec!["list-panes".into(), "-a".into(), "-F".into(), "#{pane_id}".into()], None, clock, deadline)?;
+                    let panes = std::str::from_utf8(&after.stdout).ok();
+                    if !after.success() || panes.is_none_or(|panes| panes.lines()
+                        .any(|pane| !numbered(pane, '%') || pane == observation.pane)) {
+                        return Err(HostError::new("spawn recovery pane absence unconfirmed", HostErrorKind::Unknown));
+                    }
+                }
+                if super::process::sample_spawn_birth(observation.pane_pid, observation.birth_identity.as_deref()) != ProcessState::Exited {
+                    return Err(HostError::new("spawn recovery cleanup not confirmed", HostErrorKind::Unknown));
+                }
+                Ok(None)
+            }
+            ProcessState::Alive if !pane.dead => {
+                let mut process = capture_process(observation.pane_pid, &observation.executable,
+                    observation.native.executable_sha256, remaining(clock, deadline).unwrap_or_default())?;
+                if Some(process.identity.birth_identity.as_str()) != observation.birth_identity.as_deref() {
+                    return Err(HostError::new("spawn recovery process incarnation", HostErrorKind::Ownership));
+                }
+                verify_executable_inputs(&observation.inputs)?;
+                process.inputs = observation.inputs.clone();
+                Ok(Some(observation.target(process)))
+            }
+            _ => Err(HostError::new("spawn recovery process unresolved", HostErrorKind::Ownership)),
         }
     }
 

@@ -677,6 +677,8 @@ pub(crate) fn start_needs_reconciliation(workspace: &Path, team: &str, seat: &Se
         .all(|key| row.get(*key).is_none_or(serde_json::Value::is_null));
     let record = match &class {
         Some(ExistingStart::Committed(record) | ExistingStart::FinishReceipt(record)) => Some(record),
+        Some(ExistingStart::Pending(record) | ExistingStart::Blocked(record))
+            if matches!(record.outcome, Outcome::Running | Outcome::NeedsRecovery) => Some(record),
         _ => None,
     };
     if !seed && !current.as_ref().is_some_and(|seat| matches(&seat.identity))
@@ -1366,7 +1368,7 @@ mod tests {
                 evidence_kind: EvidenceKind::Fixture, status, process: None, physical: None, session: None,
                 resources: vec![], workspace_resources: vec![], bootstrap_used: false };
             let operation = OperationRecord { id: OperationId::new("controlled-start").unwrap(), kind: TransactionKind::Startup,
-                target: target.clone(), parent: None, phase, pending: pending.map(str::to_owned), resources: vec![],
+                target: target.clone(), parent: None, phase, pending: pending.map(str::to_owned), spawn_observation: None, resources: vec![],
                 effect: team_agent_contract::contract::delivery::DeliveryEffect::NoEffect, outcome, preserved: vec![], failure: None };
             let db = rusqlite::Connection::open(self.binding.transport_root.join("contract.db")).unwrap();
             db.execute("INSERT INTO contract_seats VALUES(?1,?2)", rusqlite::params![self.identity.seat.as_str(), serde_json::to_string(&target).unwrap()]).unwrap();
@@ -1435,6 +1437,35 @@ mod tests {
             let stopped = stop(&fixture.root, "test", &fixture.identity.seat).unwrap();
             assert_eq!(stopped.outcome, Outcome::Compensated);
             assert_eq!(stop(&fixture.root, "test", &fixture.identity.seat).unwrap().id, stopped.id);
+        }
+    }
+
+    #[test]
+    fn unfinished_restart_parent_routes_to_locked_reconciliation_without_planner_writes() {
+        for outcome in [Outcome::Running, Outcome::NeedsRecovery] {
+            let mut fixture = RoleFixture::new();
+            fixture.identity.generation = Generation(2);
+            fixture.binding.candidate = std::env::current_exe().unwrap().canonicalize().unwrap();
+            fixture.binding.candidate_sha256 = fingerprint_file(&fixture.binding.candidate, 1024 * 1024 * 1024, Duration::from_secs(10)).unwrap();
+            let backend = fixture.canonical(SeatStatus::Starting, Phase::F2Register, outcome, Some("spawn"));
+            let mut operation = backend.store.operation(&OperationId::new("controlled-start").unwrap()).unwrap();
+            operation.kind = TransactionKind::Restart;
+            let mut parent = operation.target.clone();
+            parent.identity.instance = InstanceId::new("previous-instance").unwrap();
+            parent.identity.generation = Generation(1);
+            parent.status = SeatStatus::Stopped;
+            operation.parent = Some(parent.clone());
+            fixture.save_operation(&operation);
+            let row = serde_json::json!({"provider":"cursor", "status":"stopped",
+                "contract_scope":parent.identity.scope, "contract_instance":parent.identity.instance,
+                "generation":parent.identity.generation});
+            assert!(start_needs_reconciliation(&fixture.root, "test", &fixture.identity.seat, &row).unwrap());
+            assert_eq!(backend.store.operation(&operation.id).unwrap(), operation);
+            for (key, value) in [("contract_instance", serde_json::json!("foreign")),
+                ("generation", serde_json::json!(3)), ("session_id", serde_json::json!("foreign"))] {
+                let mut forged = row.clone(); forged[key] = value;
+                assert!(start_needs_reconciliation(&fixture.root, "test", &fixture.identity.seat, &forged).is_err(), "{key}");
+            }
         }
     }
 
