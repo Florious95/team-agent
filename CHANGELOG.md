@@ -4,6 +4,14 @@
 
 - **Explicit-stop persistence:** team start preserves explicitly stopped seats instead of resurrecting them. Use `team-agent start <agent>` to wake an individual stopped seat.
 
+## [0.5.129]
+
+- **Space Station runtime:** shared durable messaging, per-seat lifecycle fences, on-demand agenda jobs, and file-projection authority replace the resident coordination path. Legacy SQLite import remains available for migration.
+- **Legacy upgrade safety:** read both historical inbox layouts without crossing team scope; current lifecycle, send, migration, and status commands retire positively identified legacy coordinators. Doctor reports surviving daemons without stopping them.
+- **Migration and receipts:** workspaces without native contract authority receive an explicit idempotent no-op; existing incomplete authority is retained rather than reset. Quick-start no longer claims a coordinator was started.
+- **Messaging contracts:** restore C23 `PeerNotInScope` refusals and preserve qualified cross-workspace sender identities.
+- **Release packaging:** align installer/platform versions, remove committed executable artifacts, ship installer assets rather than incomplete Rust sources, and test every publication platform before publishing.
+
 ## [0.5.128]
 
 - **Claude and Pi legacy runtimes restored (#399):** reverts the Claude and Pi contract adaptations (#377, #378), the Claude delivery/status live-turn change (#379, #380), and the legacy Claude/Pi excision (#388). `claude`, `claude_code`, `claude-code` and `pi` worker seats use the legacy runtimes again instead of being forced onto `claude_tui` / `pi_tui` or refused as legacy seats. Codex and Grok stay on the 0.5.127 contract leaves. Leader launches are unchanged.
