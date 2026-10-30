@@ -206,101 +206,7 @@ mod tests {
         path
     }
 
-    #[test]
-    fn coordinator_blocker_is_durable_and_not_delivered() {
-        let workspace = workspace("coordinator-blocker");
-        let mut intent = ResolvedSendIntent::accepted(
-            SendOrigin::Cli,
-            &workspace,
-            Some(TeamKey::new("carc")),
-            LogicalRecipient::from_resolved("w1"),
-            TrustedSender::leader(),
-            None,
-            "probe",
-            None,
-            true,
-            None,
-        );
-        intent.initial_disposition =
-            InitialDisposition::Blocked(DeliveryBlocker::CoordinatorUnavailable);
-        let PersistResolution::Persisted(persisted) = persist_resolved_send(&intent).unwrap()
-        else {
-            panic!("fresh intent must persist")
-        };
-        assert_eq!(
-            persisted.row_status,
-            MessageRowStatus::QueuedCoordinatorUnavailable
-        );
-        assert_eq!(
-            persisted.blocker,
-            Some(DeliveryBlocker::CoordinatorUnavailable)
-        );
-        let store = MessageStore::open(&workspace).unwrap();
-        let connection = crate::db::schema::open_db(store.db_path()).unwrap();
-        let (status, delivered_at, error): (String, Option<String>, Option<String>) = connection
-            .query_row(
-                "select status, delivered_at, error from messages where message_id = ?1",
-                [&persisted.message_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!(status, "queued_coordinator_unavailable");
-        assert_eq!(delivered_at, None);
-        assert_eq!(error.as_deref(), Some("coordinator_unavailable"));
-    }
 
-    #[test]
-    fn stored_only_persists_requested_presentation_without_delivery_eligibility() {
-        let workspace = workspace("stored-only");
-        let mut intent = ResolvedSendIntent::accepted(
-            SendOrigin::Mcp,
-            &workspace,
-            Some(TeamKey::new("team-a")),
-            LogicalRecipient::Leader,
-            TrustedSender::from_runtime_identity(AgentId::new("worker_a")),
-            None,
-            "stage evidence",
-            None,
-            false,
-            None,
-        );
-        intent.initial_disposition = InitialDisposition::StoredOnly;
-        intent.presentation = super::super::presentation::decide_presentation(
-            &super::super::presentation::PresentationRequest {
-                sink: super::super::presentation::PresentationSink::Casefile,
-                class: super::super::presentation::PresentationClass::StageResult,
-                case_id: Some("case-7".to_string()),
-            },
-            super::super::presentation::PresentationSource::Send,
-        );
-        let PersistResolution::Persisted(persisted) = persist_resolved_send(&intent).unwrap()
-        else {
-            panic!("fresh intent must persist")
-        };
-        assert_eq!(persisted.row_status, MessageRowStatus::StoredOnly);
-        let store = MessageStore::open(&workspace).unwrap();
-        let connection = crate::db::schema::open_db(store.db_path()).unwrap();
-        let (status, presentation): (String, String) = connection
-            .query_row(
-                "select status, presentation from messages where message_id = ?1",
-                [&persisted.message_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(status, "stored_only");
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&presentation).unwrap(),
-            serde_json::json!({
-                "sink": "casefile",
-                "class": "stage_result",
-                "case_id": "case-7",
-                "requested_sink": "casefile",
-                "effective_sink": "casefile",
-                "policy_reason": "requested_sink:casefile",
-                "policy_version": "team-presentation-v1"
-            })
-        );
-    }
 
     #[test]
     fn production_row_creation_is_owned_by_persisted_primitive() {
@@ -321,25 +227,4 @@ mod tests {
     }
 
     // M1: send.rs is a station::send shim and persists nothing, so it is no longer a consumer.
-    #[test]
-    fn persisted_truth_and_workspace_identity_have_forward_consumers() {
-        for (name, source) in [
-            ("delivery", include_str!("delivery.rs")),
-            ("leader_receiver", include_str!("leader_receiver.rs")),
-        ] {
-            assert!(
-                source.contains("persisted.row_status"),
-                "{name} rebuilds wire truth instead of consuming PersistedSend"
-            );
-        }
-        let watchers = include_str!("watchers.rs");
-        assert!(
-            !watchers.contains(".and_then(std::path::Path::parent)"),
-            "watcher identity must not be derived from the team.db layout"
-        );
-        assert!(
-            watchers.contains("deliver_primary_watcher(\n                    workspace,"),
-            "watcher must forward the caller's canonical workspace"
-        );
-    }
 }

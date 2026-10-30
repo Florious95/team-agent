@@ -186,68 +186,7 @@ fn launch_persists_agent_pane_id_and_pid() {
     );
 }
 
-#[test]
-#[serial(env)]
-fn unbound_leader_receiver_is_not_attached_and_delivery_never_injects_sentinel() {
-    let case = HotfixCase::new("unbound-leader");
-    case.seed_unbound_leader_state();
-    let store = MessageStore::open(&case.workspace).unwrap();
-    let message_id = store
-        .create_message(
-            None,
-            "subgreeter",
-            "leader",
-            "sentinel canary",
-            None,
-            false,
-            Some(SUB),
-        )
-        .unwrap();
-    let state = load_runtime_state(&case.workspace).unwrap();
-    let transport = RecordingTransport::new().with_default_liveness(PaneLiveness::Live);
 
-    let out = deliver_pending_message(
-        &case.workspace,
-        &store,
-        &transport,
-        &message_id,
-        &EventLog::new(&case.workspace),
-        &state,
-    )
-    .expect("delivery should return an explicit rebind outcome");
-
-    assert!(
-        !out.ok && out.channel.as_deref() == Some("rebind_required") && transport.inject_targets().is_empty(),
-        "RC3: __team_agent_unbound__ is not an attached leader receiver; delivery must return rebind_required and never inject; outcome={out:?} targets={:?}",
-        transport.inject_targets()
-    );
-    assert!(
-        transport.inject_targets().is_empty(),
-        "RC3: delivery must never physically inject/paste to the sentinel __team_agent_unbound__; outcome={out:?} targets={:?}",
-        transport.inject_targets()
-    );
-}
-
-#[test]
-#[serial(env)]
-fn sqlite_open_retries_under_concurrent_writer() {
-    let case = HotfixCase::new("sqlite-lock");
-    std::fs::create_dir_all(case.db_path().parent().unwrap()).unwrap();
-    let holder = rusqlite::Connection::open(case.db_path()).unwrap();
-    initialize_schema(&holder, Some(&case.db_path())).unwrap();
-    holder.execute_batch("BEGIN EXCLUSIVE;").unwrap();
-
-    let start = Instant::now();
-    let result = MessageStore::open(&case.workspace);
-    let elapsed = start.elapsed();
-    holder.execute_batch("ROLLBACK;").unwrap();
-
-    assert!(
-        result.is_ok(),
-        "RC5: opening/initializing team.db under a concurrent writer must retry/idempotently survive instead of surfacing database-is-locked. elapsed={elapsed:?} error={:?}",
-        result.err()
-    );
-}
 
 #[derive(Debug)]
 struct HotfixCase {

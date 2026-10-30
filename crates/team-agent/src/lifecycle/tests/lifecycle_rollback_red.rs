@@ -35,36 +35,6 @@ const FAIL_REMOVE_AFTER_HEALTH_DELETE: &str =
     "TEAM_AGENT_TEST_FAIL_REMOVE_AFTER_AGENT_HEALTH_DELETE";
 const FAIL_FORK_AFTER_SPAWN: &str = "TEAM_AGENT_TEST_FAIL_FORK_AFTER_SPAWN";
 
-#[test]
-#[serial(env)]
-fn remove_agent_rollback_restores_agent_health_after_post_delete_failure() {
-    let _env = EnvGuard::set(FAIL_REMOVE_AFTER_HEALTH_DELETE, "rollback-contract");
-    let fixture = RollbackFixture::new("remove-health");
-    fixture.seed_team();
-    fixture.seed_agent_health(
-        "rollbackteam",
-        "alpha",
-        "BUSY",
-        Some("2026-06-09T01:02:03Z"),
-        Some(77),
-        Some("task-alpha"),
-    );
-    let before = fixture.agent_health_row("alpha");
-    let transport = RecordingTransport::new("team-rollbackteam", &["bravo"]);
-
-    let result =
-        remove_agent_with_transport(&fixture.team, &aid("alpha"), true, false, None, &transport);
-    let after = fixture.agent_health_row("alpha");
-
-    assert!(
-        result.is_err(),
-        "failure-injection hook {FAIL_REMOVE_AFTER_HEALTH_DELETE}=rollback-contract must fail after deleting agent_health so rollback is exercised; result={result:?} before={before:?} after={after:?}"
-    );
-    assert_eq!(
-        after, before,
-        "remove-agent rollback must restore the exact pre-operation agent_health row, including owner_team_id/status/last_output/context/task; result={result:?}"
-    );
-}
 
 #[test]
 #[serial(env)]

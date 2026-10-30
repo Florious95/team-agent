@@ -623,18 +623,6 @@ fn send_options_default_flags_are_acked_and_waited() {
 // RED: cmd_send is unimplemented!() so it panics until ported.
 // =========================================================================
 
-#[test]
-fn cmd_send_joins_message_with_single_space() {
-    let args = send_args_fixture();
-    let result = cmd_send(&args).expect("mailbox append");
-    assert_eq!(result.exit, ExitCode::Ok);
-    let inbox = crate::inbox_store::read(&args.workspace, "alice", 3, None).unwrap();
-    assert_eq!(inbox["messages"][0]["content"], "hello world foo");
-    assert_eq!(inbox["messages"][0]["sender"], "leader");
-    let conn = rusqlite::Connection::open(args.workspace.join(".team/runtime/team.db")).unwrap();
-    let count: i64 = conn.query_row("SELECT count(*) FROM messages", [], |row| row.get(0)).unwrap();
-    assert_eq!(count, 0, "public send must not enter the coordinator queue");
-}
 
 #[test]
 fn cmd_send_mailbox_output_names_storage_without_claiming_delivery() {
@@ -680,17 +668,6 @@ fn cmd_send_json_shape_describes_the_decoupled_operation() {
     }
 }
 
-#[test]
-fn cmd_send_legacy_watch_flag_does_not_create_a_watcher_or_delivery_row() {
-    let args = SendArgs { json: true, ..send_args_fixture() };
-    let db = args.workspace.join(".team/runtime/team.db");
-    let before = std::fs::read(&db).unwrap();
-    let result = cmd_send(&args).unwrap();
-    let CmdOutput::Json(value) = result.output else { panic!("JSON result expected") };
-    assert_eq!(value["status"], "stored");
-    assert!(value.get("watch").is_none());
-    assert_eq!(std::fs::read(db).unwrap(), before, "send must not mutate the coordinator database");
-}
 
 #[test]
 fn cmd_send_unknown_recipient_is_an_immediate_error_without_queueing() {
@@ -820,19 +797,6 @@ fn cmd_send_legacy_task_flag_does_not_require_a_coordinator_task() {
     assert_eq!(inbox["messages"][0]["task_id"], "t-unknown");
 }
 
-#[test]
-fn run_send_legacy_task_flag_is_not_persisted_in_the_delivery_database() {
-    let args = send_args_fixture();
-    let argv = ["send", "alice", "--team", "teamA", "--task", "t-unknown", "go", "--mailbox", "--json"].map(str::to_string);
-    assert_eq!(run(&argv, &args.workspace), ExitCode::Ok);
-    let inbox = crate::inbox_store::read(&args.workspace, "alice", 3, None).unwrap();
-    assert_eq!(inbox["messages"][0]["content"], "go");
-    // M1: the label rides on the inbox record, never in the delivery database.
-    assert_eq!(inbox["messages"][0]["task_id"], "t-unknown");
-    let conn = rusqlite::Connection::open(args.workspace.join(".team/runtime/team.db")).unwrap();
-    let count: i64 = conn.query_row("SELECT count(*) FROM messages", [], |row| row.get(0)).unwrap();
-    assert_eq!(count, 0);
-}
 
 #[test]
 fn run_leader_passthrough_flag_after_dashdash_renders_error_not_silent_swallow() {

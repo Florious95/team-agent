@@ -174,9 +174,20 @@ impl McpSimHarness {
         team_agent::state::persist::save_runtime_state(&self.workspace, &state).unwrap();
     }
 
+
+    /// M4: the SQLite message store is retired and never created. These helpers keep their
+    /// negative oracles honest: with no legacy `team.db` there are no rows; if one exists
+    /// (a planted or historical file) it is read read-only, never initialized.
+    fn legacy_db(&self) -> Option<rusqlite::Connection> {
+        let path = team_agent::model::paths::runtime_dir(&self.workspace).join("team.db");
+        if !path.exists() {
+            return None;
+        }
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()
+    }
+
     pub fn message_rows_containing(&self, needle: &str) -> Vec<MessageRow> {
-        let store = MessageStore::open(&self.workspace).unwrap();
-        let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
+        let Some(conn) = self.legacy_db() else { return Vec::new() };
         let mut stmt = conn
             .prepare(
                 "select message_id, owner_team_id, sender, recipient, status, content
@@ -204,8 +215,7 @@ impl McpSimHarness {
     }
 
     pub fn result_row(&self, result_id: &str) -> Option<ResultRow> {
-        let store = MessageStore::open(&self.workspace).unwrap();
-        let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
+        let conn = self.legacy_db()?;
         conn.query_row(
             "select result_id, owner_team_id, task_id, agent_id, envelope, status
              from results where result_id = ?1",
@@ -226,8 +236,7 @@ impl McpSimHarness {
     }
 
     pub fn scheduled_event_count(&self) -> i64 {
-        let store = MessageStore::open(&self.workspace).unwrap();
-        let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
+        let Some(conn) = self.legacy_db() else { return 0 };
         conn.query_row("select count(*) from scheduled_events", [], |row| {
             row.get(0)
         })

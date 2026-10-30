@@ -192,81 +192,16 @@ impl TermCase {
 // Tooth 1 — delivered row is byte-stable across claim (invariant lock)
 // ---------------------------------------------------------------------------
 
-#[test]
-#[serial(env)]
-fn delivered_row_immutable_under_any_transition() {
-    let case = TermCase::new("delivered-lock");
-    let mid = case.seed(
-        "delivered canary",
-        "delivered",
-        Some("2026-07-21T12:00:00Z"),
-    );
-    let before = case.full(&mid);
-    let _ = case.claim_and_requeue();
-    let after = case.full(&mid);
-    assert_eq!(
-        before, after,
-        "delivered row must be byte-stable across any typed-state transition; \
-         a re-enqueue would create a second physical submit for a message the \
-         framework already saw succeed. §3.3#5 + storm proof."
-    );
-}
 
 // ---------------------------------------------------------------------------
 // Tooth 2 — acknowledged row cannot be regressed by generic mark
 // ---------------------------------------------------------------------------
 
-#[test]
-#[serial(env)]
-fn acknowledged_row_immutable_under_generic_mark() {
-    let case = TermCase::new("ack-lock");
-    let mid = case.seed("acked canary", "acknowledged", Some("2026-07-21T12:00:00Z"));
-    let before = case.full(&mid);
-    // Baseline weakness (distillation §1.2 acknowledged note): a generic
-    // `store.mark(mid, "target_resolved", None)` currently succeeds and
-    // silently regresses the row. Typed refactor MUST make this a
-    // hard-refused transition (typed error).
-    let mark_result = case.store.mark(&mid, "target_resolved", None);
-    let after = case.full(&mid);
-    assert!(
-        mark_result.is_err() || after == before,
-        "acknowledged row was regressed by a generic mark call: before={:?} \
-         after={:?} mark_result={:?}. §1.2 requires terminal states to refuse \
-         any downgrade from a non-ack API; typed refactor must return a typed \
-         error rather than silently overwrite.",
-        before,
-        after,
-        mark_result
-    );
-}
 
 // ---------------------------------------------------------------------------
 // Tooth 3 — consumed row is untouchable by any recovery arm
 // ---------------------------------------------------------------------------
 
-#[test]
-#[serial(env)]
-fn consumed_row_immutable_under_any_transition() {
-    let case = TermCase::new("consumed-lock");
-    let mid = case.seed("consumed canary", "consumed", None);
-    let before = case.full(&mid);
-    // A generic mark attempt should also refuse to regress a `consumed`
-    // row. Baseline: the same generic mark path applies, distillation
-    // §1.2 already flags this. Also verify claim/requeue does not touch
-    // it.
-    let mark_result = case.store.mark(&mid, "accepted", None);
-    let _ = case.claim_and_requeue();
-    let after = case.full(&mid);
-    assert!(
-        (mark_result.is_err() || after.0 == "consumed") && after.0 == "consumed",
-        "consumed row was affected: before={:?} after={:?} mark_result={:?}. \
-         §1.2 consumed is a terminal disposition; typed refactor must refuse \
-         any downgrade or requeue.",
-        before,
-        after,
-        mark_result
-    );
-}
 
 // ---------------------------------------------------------------------------
 // Tooth 4 — typed event carries framework_replay vs provider_rerender kind
@@ -374,44 +309,8 @@ fn restart_never_marks_delivered_as_accepted() {
 // Tooth 6 — positive control: delivered→acknowledged is still supported
 // ---------------------------------------------------------------------------
 
-#[test]
-#[serial(env)]
-fn delivered_to_acknowledged_transition_still_allowed() {
-    let case = TermCase::new("pos-ack");
-    let mid = case.seed("business ack", "delivered", Some("2026-07-24T00:01:00Z"));
-    // Business ack path: mark the row acknowledged via the store API.
-    let r = case.store.mark(&mid, "acknowledged", None);
-    let (status, _, _) = case.full(&mid);
-    assert!(
-        r.is_ok() && status == "acknowledged",
-        "delivered → acknowledged legitimate business transition must remain \
-         functional (mark_result={:?}, status={})",
-        r,
-        status
-    );
-}
 
 // ---------------------------------------------------------------------------
 // Tooth 7 — negative control: stray ack cannot leapfrog delivery
 // ---------------------------------------------------------------------------
 
-#[test]
-#[serial(env)]
-fn stray_ack_call_does_not_promote_pending_row_to_acknowledged() {
-    let case = TermCase::new("neg-stray-ack");
-    let mid = case.seed("pending row", "accepted", None);
-    let mark_result = case.store.mark(&mid, "acknowledged", None);
-    let (status, _, _) = case.full(&mid);
-    // Baseline weakness: generic mark permits a jump. Typed refactor
-    // must refuse. If mark succeeds today, this tooth is red; if it
-    // refuses, tooth stays green.
-    assert!(
-        mark_result.is_err() || status != "acknowledged",
-        "generic mark leap-frogged an accepted row directly to acknowledged \
-         (mark_result={:?}, status={}). §1.2 acknowledged transition must be \
-         enforced through the ack API's lifecycle guard, not permitted by \
-         any writer.",
-        mark_result,
-        status
-    );
-}

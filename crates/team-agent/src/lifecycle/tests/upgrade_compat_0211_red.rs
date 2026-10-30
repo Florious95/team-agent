@@ -87,106 +87,8 @@ fn upgrade_0211_state_team_key_runtime_key_not_spec_name() {
     );
 }
 
-#[test]
-#[serial(env)]
-fn upgrade_0211_db_schema_v3_reads_and_preserves_rows() {
-    let fixture = UpgradeFixture::new("db-v3");
-    fixture.seed_python_v3_db();
-    let before = fixture.table_counts(&["messages", "results", "agent_health"]);
 
-    let store = MessageStore::open(&fixture.workspace).expect("Rust must open Python schema v3 DB");
-    let after = fixture.table_counts(&["messages", "results", "agent_health"]);
 
-    assert_eq!(before, after, "opening Python schema v3 must not drop rows");
-    assert_eq!(
-        pragma_user_version(store.db_path()),
-        SCHEMA_VERSION,
-        "schema version must remain readable as v3"
-    );
-}
-
-#[test]
-#[serial(env)]
-fn upgrade_legacy_owner_team_id_delivery_projects_state_team() {
-    let fixture = UpgradeFixture::new("delivery-runtime-key");
-    fixture.seed_dual_team_state(SIBLING_KEY);
-    let store = MessageStore::open(&fixture.workspace).unwrap();
-    let message_id = store
-        .create_message(None, "leader", "w1", "ping", None, false, Some(TEAM_KEY))
-        .unwrap();
-    let transport = RecordingTransport::new();
-    let state = team_agent::state::persist::load_runtime_state(&fixture.workspace).unwrap();
-
-    let outcome = deliver_pending_message(
-        &fixture.workspace,
-        &store,
-        &transport,
-        &message_id,
-        &EventLog::new(&fixture.workspace),
-        &state,
-    )
-    .expect("delivery should run");
-
-    assert!(
-        outcome.ok,
-        "runtime-key owner row should deliver; outcome={outcome:?}"
-    );
-    assert_eq!(
-        transport.injected_windows(),
-        vec![(format!("team-{TEAM_KEY}"), "upgrade-window".to_string())],
-        "owner_team_id=upgrade-key must project state.teams[upgrade-key], not active sibling"
-    );
-}
-
-#[test]
-#[serial(env)]
-fn upgrade_spec_name_owner_team_id_projects_without_read_side_migration() {
-    let fixture = UpgradeFixture::new("delivery-legacy-name");
-    fixture.seed_dual_team_state(SIBLING_KEY);
-    let store = MessageStore::open(&fixture.workspace).unwrap();
-    let message_id = store
-        .create_message(None, "leader", "w1", "ping", None, false, Some(LEGACY_NAME))
-        .unwrap();
-    let transport = RecordingTransport::new();
-    let state = team_agent::state::persist::load_runtime_state(&fixture.workspace).unwrap();
-
-    let outcome = deliver_pending_message(
-        &fixture.workspace,
-        &store,
-        &transport,
-        &message_id,
-        &EventLog::new(&fixture.workspace),
-        &state,
-    )
-    .expect("delivery should return an explicit outcome");
-    let owner_after = owner_team_id_for_message(&fixture.workspace, &message_id);
-    let status_after = message_status(&fixture.workspace, &message_id);
-
-    assert!(
-        outcome.ok,
-        "legacy alias must still project to canonical state; outcome={outcome:?}"
-    );
-    assert_eq!(
-        owner_after.as_deref(),
-        Some(LEGACY_NAME),
-        "U0-B: read-side compatibility must not UPDATE owner_team_id rows; owner_after={owner_after:?}"
-    );
-    assert_eq!(
-        status_after.as_deref(),
-        Some("delivered"),
-        "legacy alias delivery should be explicit, not silently dropped; status_after={status_after:?}"
-    );
-    assert_eq!(
-        transport.injected_windows(),
-        vec![(format!("team-{TEAM_KEY}"), "upgrade-window".to_string())],
-        "owner_team_id=legacy-name must project to upgrade-key without mutating the DB row"
-    );
-    assert!(
-        events_text(&fixture.workspace).contains("owner_team_id.compatibility_alias_detected"),
-        "legacy alias projection must leave a read-only audit event; events={}",
-        events_text(&fixture.workspace)
-    );
-}
 
 #[test]
 #[serial(env)]
@@ -408,27 +310,6 @@ fn upgrade_rust_mcp_config_uses_current_binary_and_runtime_key() {
     );
 }
 
-#[test]
-#[serial(env)]
-fn upgrade_db_layout_rebuild_preserves_owner_team_id() {
-    let fixture = UpgradeFixture::new("db-rebuild-owner");
-    fixture.seed_legacy_drift_db_owner_last();
-
-    let before = distinct_owner_ids(&fixture.db_path(), "messages");
-    let store = MessageStore::open(&fixture.workspace).expect("open drifted legacy DB");
-    let after = distinct_owner_ids(store.db_path(), "messages");
-
-    assert_eq!(before, vec![TEAM_KEY.to_string()]);
-    assert_eq!(
-        after, before,
-        "layout rebuild must preserve owner_team_id values"
-    );
-    assert_eq!(
-        table_layout(&open_db(store.db_path()).unwrap(), "messages").unwrap()[..2],
-        ["message_id".to_string(), "owner_team_id".to_string()],
-        "messages layout must rebuild to canonical owner_team_id position"
-    );
-}
 
 struct UpgradeFixture {
     workspace: PathBuf,
