@@ -144,10 +144,13 @@ fn topology(state: &Value) -> Value {
     }
     json!({"tmux_socket": state.get("tmux_socket"), "transport": state.get("transport"), "owner": owner, "owner_epoch": state.get("owner_epoch")})
 }
+fn has_native_incarnation(row: &Value) -> bool {
+    crate::contract_runtime::registry::descriptor(provider(row)).is_some()
+        && row.get("contract_instance").and_then(Value::as_str).is_some_and(|id| !id.is_empty())
+}
 fn relevant(row: &Value) -> Value {
     let mut object = serde_json::Map::new();
-    let native_identity = crate::contract_runtime::registry::is_contract(provider(row))
-        && row.get("contract_instance").and_then(Value::as_str).is_some_and(|id| !id.is_empty());
+    let native_identity = has_native_incarnation(row);
     for key in [
         "provider",
         "status",
@@ -1033,7 +1036,7 @@ fn plan_with_observer(
         }
         let mut expected = relevant(row);
         #[cfg(unix)]
-        if obs == Observation::Live {
+        if obs == Observation::Live && !has_native_incarnation(row) {
             if let Some(pid) = row
                 .get("pane_pid")
                 .and_then(Value::as_u64)
