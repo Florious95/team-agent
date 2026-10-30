@@ -259,21 +259,28 @@ pub fn stop_agent(
             return Ok(json!({"ok":true,"agent_id":agent,"stopped":false,"status":"paused","runtime":"contract"}));
         }
         let backend = Backend::open_readonly(&selected.run_workspace, &selected.team_key).map_err(error)?;
-        let seat = backend.store.seat(id).map_err(error)?.ok_or(BackendError::Metadata).map_err(error)?;
-        let already_stopped = seat.status == SeatStatus::Stopped && !backend.store.leased(id).map_err(error)?;
+        let seat = backend.store.seat(id).map_err(error)?;
+        let mut absent = seat.is_none() && backend.store.creation_receipt(id, None).map_err(error)?
+            .is_some_and(|record| record.outcome == Outcome::Compensated && record.target.status == SeatStatus::Stopped);
+        let already_stopped = (absent || seat.as_ref().is_some_and(|seat| seat.status == SeatStatus::Stopped))
+            && !backend.store.leased(id).map_err(error)?;
         drop(backend);
         let operation = if already_stopped {
             None
         } else {
             let receipt = backend::stop(&selected.run_workspace, &selected.team_key, id).map_err(error)?;
-            if receipt.outcome != Outcome::Committed {
+            if !matches!(receipt.outcome, Outcome::Committed | Outcome::Compensated) {
                 return Err(error(BackendError::Shutdown {
                     operation: receipt.id, phase: receipt.phase, outcome: receipt.outcome, failure: receipt.failure,
                 }));
             }
+            absent = receipt.outcome == Outcome::Compensated;
             Some(receipt.id)
         };
-        let projected = framework::project_seat(&selected.run_workspace, &selected.team_key, id.as_str()).map_err(error)?;
+        let projected = if absent {
+            json!({"status":"stopped","contract_instance":null,"pane_id":null,"pane_pid":null,
+                "native_pane":null,"native_endpoint":null,"tmux_endpoint":null,"session_id":null})
+        } else { framework::project_seat(&selected.run_workspace, &selected.team_key, id.as_str()).map_err(error)? };
         let mut state = selected.state.clone();
         let row = state.get_mut("agents").and_then(|agents| agents.get_mut(agent)).and_then(Value::as_object_mut).ok_or(BackendError::Metadata).map_err(error)?;
         for (key, value) in projected.as_object().expect("native projection object") {
@@ -407,7 +414,7 @@ fn refused(agent: &str, reason: &str, error: &str, evidence: Option<String>, act
 
 fn stop_seat(selected: &SelectedTeam, id: &SeatId) -> Result<OperationId, CliError> {
     let receipt = backend::stop(&selected.run_workspace, &selected.team_key, id).map_err(error)?;
-    check_record(&receipt)?;
+    if receipt.outcome != Outcome::Compensated { check_record(&receipt)?; }
     Ok(receipt.id)
 }
 

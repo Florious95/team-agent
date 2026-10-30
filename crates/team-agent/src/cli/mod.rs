@@ -1464,13 +1464,34 @@ pub mod lifecycle_port {
         assert!(!protected.contains_pid(30));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn native_failure_panes_preserve_the_same_socket_through_a_path_alias() {
+        let root = std::env::temp_dir().join(format!("native-stop-alias-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("alias")).unwrap();
+        let socket = root.join("real/owned.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let transport = crate::tmux_backend::TmuxBackend::for_tmux_endpoint(root.join("alias/owned.sock").to_str().unwrap());
+        assert_eq!(native_failure_panes(&[json!({"status":"failed","endpoint":socket,"pane_id":"%4"})], &transport),
+            std::collections::BTreeSet::from(["%4".to_string()]));
+        drop(listener);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     fn native_failure_panes(
         receipts: &[Value],
         transport: &dyn crate::transport::Transport,
     ) -> std::collections::BTreeSet<String> {
-        let endpoint = transport.tmux_endpoint();
+        let normalize = |endpoint: &str| {
+            let backend = crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint);
+            let resolved = crate::transport::Transport::tmux_endpoint(&backend).unwrap_or_else(|| endpoint.to_string());
+            Path::new(&resolved).canonicalize().map(|path| path.to_string_lossy().into_owned()).unwrap_or(resolved)
+        };
+        let endpoint = transport.tmux_endpoint().map(|endpoint| normalize(&endpoint));
         receipts.iter().filter(|receipt| receipt["status"] == "failed")
-            .filter(|receipt| endpoint.is_some() && receipt["endpoint"].as_str() == endpoint.as_deref())
+            .filter(|receipt| endpoint.is_some() && receipt["endpoint"].as_str().map(normalize) == endpoint)
             .filter_map(|receipt| receipt["pane_id"].as_str().map(str::to_owned)).collect()
     }
 

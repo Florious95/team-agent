@@ -556,10 +556,7 @@ enum ExistingStart {
 // Receipt classification is read-only, never native admission or permission
 // to replay an unfinished host effect. Check parent leases before old success.
 fn existing_start(backend: &Backend, seat: &SeatId) -> Result<Option<ExistingStart>, BackendError> {
-    let unfinished: Vec<_> = backend.store.unfinished()?.into_iter().filter(|record| {
-        &record.target.identity.seat == seat
-            || record.parent.as_ref().is_some_and(|parent| &parent.identity.seat == seat)
-    }).collect();
+    let unfinished: Vec<_> = backend.store.unfinished()?.into_iter().filter(|record| involves_seat(record, seat)).collect();
     if unfinished.len() > 1 { return Err(Error::Fence.into()); }
     if let Some(record) = unfinished.into_iter().next() {
         if record.target.identity.scope != backend.binding.scope { return Err(Error::Fence.into()); }
@@ -717,15 +714,59 @@ pub(crate) fn preflight_start_role(workspace: &Path, team: &str, role: &RoleConf
                 team_agent_contract::host::process::sample_process(&target.process) == team_agent_contract::host::process::ProcessState::Exited) => {
             prepare_resume(workspace, team, &role.id, Some(role))?;
         },
+        Some(ExistingStart::FinishReceipt(record)) if record.target.identity.seat != role.id => return Ok(false),
         Some(ExistingStart::Committed(record) | ExistingStart::FinishReceipt(record)) => { validate_existing(&backend, role, &record)?; },
         Some(ExistingStart::Resume(_)) => { prepare_resume(workspace, team, &role.id, Some(role))?; },
-        Some(ExistingStart::Pending(record) | ExistingStart::Blocked(record)) => return Err(receipt_error(record)),
+        // The mutating start reconciles interrupted work under the seat flock.
+        // Read-only preflight must not wedge that path.
+        Some(ExistingStart::Pending(_)) => return Ok(false),
+        Some(ExistingStart::Blocked(record)) if matches!(record.outcome, Outcome::Running | Outcome::NeedsRecovery) => return Ok(false),
+        Some(ExistingStart::Blocked(record)) => return Err(receipt_error(record)),
         None => return Ok(true), // Caller must run full-team fresh preflight before writes.
     }
     Ok(false)
 }
 
+pub(super) fn native_seat_lock(workspace: &Path, team: &str, seat: &SeatId, additional: bool)
+    -> Result<crate::lifecycle::lock::LifecycleLockGuard, BackendError>
+{
+    let agent = crate::model::ids::AgentId::new(seat.as_str());
+    let request = crate::lifecycle::lock::LifecycleLockRequest {
+        workspace, operation: "native-lifecycle", team: Some(team), agent_id: Some(&agent),
+    };
+    let guard = if additional { crate::lifecycle::lock::try_acquire_seat_lifecycle_lock(request) }
+        else { crate::lifecycle::lock::acquire_seat_lifecycle_lock(request) };
+    guard.map_err(|error| std::io::Error::other(error.to_string()).into())
+}
+
+fn involves_seat(operation: &OperationRecord, seat: &SeatId) -> bool {
+    operation.target.identity.seat == *seat || operation.parent.as_ref().is_some_and(|parent| parent.identity.seat == *seat)
+}
+
+fn recover_incomplete(backend: &mut Backend, seat: &SeatId) -> Result<Option<OperationRecord>, BackendError> {
+    for pending in backend.store.unfinished()?.into_iter().filter(|operation| involves_seat(operation, seat)
+        && matches!(operation.outcome, Outcome::Running | Outcome::NeedsRecovery)) {
+        let recovered = finish_receipt(backend, pending)?;
+        if matches!(recovered.outcome, Outcome::Running | Outcome::NeedsRecovery) { return Ok(Some(recovered)); }
+    }
+    Ok(None)
+}
+
+fn reconcile_start(backend: &mut Backend, seat: &SeatId) -> Result<(), BackendError> {
+    if let Some(record) = recover_incomplete(backend, seat)? { return Err(receipt_error(record)); }
+    // ContractStore compensation already restores a restart's parent or removes
+    // a failed new seat. Re-classify that authority; never synthesize a resume.
+    Ok(())
+}
+
 fn finish_receipt(backend: &mut Backend, record: OperationRecord) -> Result<OperationRecord, BackendError> {
+    if record.target.identity.scope != backend.binding.scope
+        || record.parent.as_ref().is_some_and(|parent| parent.identity.scope != backend.binding.scope) {
+        return Err(Error::Fence.into());
+    }
+    let _target = native_seat_lock(&backend.binding.workspace.path, &backend.binding.team, &record.target.identity.seat, true)?;
+    let _parent = record.parent.as_ref().filter(|parent| parent.identity.seat != record.target.identity.seat)
+        .map(|parent| native_seat_lock(&backend.binding.workspace.path, &backend.binding.team, &parent.identity.seat, true)).transpose()?;
     let selected = registry::provider(record.target.provider.as_str())?;
     let adapter = adapter(&backend.binding, &record.target.identity, &record.target.provider)?;
     let hooks = adapter.hooks();
@@ -795,11 +836,13 @@ pub fn start(
     role: &RoleConfig,
     members: &[MemberRoute],
 ) -> Result<(Binding, OperationRecord), BackendError> {
+    let _ownership = native_seat_lock(workspace, team, &role.id, false)?;
     let cwd = resolve_cwd(workspace)?;
     let scope = scope_for(&cwd, team)?;
     if root_for(&cwd.path, &scope).exists() {
         let mut backend = Backend::open(&cwd.path, team)?;
         require_candidate(&backend.binding)?;
+        reconcile_start(&mut backend, &role.id)?;
         match existing_start(&backend, &role.id)? {
             Some(ExistingStart::Committed(record)) => {
                 let current = backend.store.assert_current(&record.target.identity)?;
@@ -1030,6 +1073,7 @@ pub fn prepare_resume(
 }
 
 pub fn resume(prepared: PreparedResume) -> Result<OperationRecord, BackendError> {
+    let _ownership = native_seat_lock(&prepared.binding.workspace.path, &prepared.binding.team, &prepared.role.id, false)?;
     let mut backend = Backend::open(&prepared.binding.workspace.path, &prepared.binding.team)?;
     if serde_json::to_vec(&backend.binding).map_err(|_| BackendError::Metadata)?
         != serde_json::to_vec(&prepared.binding).map_err(|_| BackendError::Metadata)?
@@ -1229,24 +1273,16 @@ pub(crate) fn retire(workspace: &Path, team: &str, seat: &SeatId) -> Result<Opti
 }
 
 pub fn stop(workspace: &Path, team: &str, seat: &SeatId) -> Result<OperationRecord, BackendError> {
-    let agent = crate::model::ids::AgentId::new(seat.as_str());
-    let _ownership = crate::lifecycle::lock::acquire_seat_lifecycle_lock(crate::lifecycle::lock::LifecycleLockRequest {
-        workspace, operation: "native-stop", team: Some(team), agent_id: Some(&agent),
-    }).map_err(|error| std::io::Error::other(error.to_string()))?;
+    let _ownership = native_seat_lock(workspace, team, seat, false)?;
     let mut backend = Backend::open(workspace, team)?;
-    for pending in backend.store.unfinished()?.into_iter().filter(|operation|
-        operation.target.identity.seat == *seat && operation.kind == TransactionKind::Teardown
-            && operation.outcome == Outcome::NeedsRecovery)
-    {
-        let recovered = finish_receipt(&mut backend, pending)?;
-        if matches!(recovered.outcome, Outcome::Running | Outcome::NeedsRecovery) {
-            return Ok(recovered);
-        }
-    }
-    let target = backend
-        .store
-        .seat(seat)?
-        .ok_or(Error::Invalid("unknown native seat"))?;
+    if let Some(record) = recover_incomplete(&mut backend, seat)? { return Ok(record); }
+    let Some(target) = backend.store.seat(seat)? else {
+        // Compensation can remove an interrupted startup's provisional seat.
+        // Its durable cleanup receipt is an honest already-absent stop result.
+        return backend.store.creation_receipt(seat, None)?
+            .filter(|record| record.outcome == Outcome::Compensated && record.target.status == SeatStatus::Stopped)
+            .ok_or_else(|| Error::Invalid("unknown native seat").into());
+    };
     let nonce = backend.store.propose_identity(seat)?.instance;
     let operation = OperationId::new(format!("stop-{}", nonce.as_str()))?;
     let selected = registry::provider(target.provider.as_str())?;
@@ -1302,13 +1338,17 @@ mod tests {
             Self { root, binding, role, identity }
         }
 
+        fn save_operation(&self, operation: &OperationRecord) {
+            let db = rusqlite::Connection::open(self.binding.transport_root.join("contract.db")).unwrap();
+            db.execute("UPDATE contract_operations SET record=?1 WHERE id=?2", rusqlite::params![
+                serde_json::to_string(operation).unwrap(), operation.id.as_str()]).unwrap();
+        }
+
         fn recovering_teardown(&mut self, pending: Option<&str>) -> Backend {
             let backend = self.canonical(SeatStatus::Stopped, Phase::F2Register, Outcome::NeedsRecovery, pending);
             let mut operation = backend.store.operation(&OperationId::new("controlled-start").unwrap()).unwrap();
             operation.kind = TransactionKind::Teardown;
-            let db = rusqlite::Connection::open(self.binding.transport_root.join("contract.db")).unwrap();
-            db.execute("UPDATE contract_operations SET record=?1 WHERE id=?2", rusqlite::params![
-                serde_json::to_string(&operation).unwrap(), operation.id.as_str()]).unwrap();
+            self.save_operation(&operation);
             backend
         }
 
@@ -1364,6 +1404,97 @@ mod tests {
                 None => false,
             };
             assert!(matches, "wrong receipt class for {expected}");
+    }
+
+    #[test]
+    fn native_lifecycle_construction_is_guarded_in_every_production_entrypoint() {
+        // Assembly guard supplements the real flock/recovery tests; it does not
+        // claim physical provider acceptance.
+        let source = include_str!("backend.rs").split("#[cfg(test)]\nmod tests").next().unwrap();
+        assert_eq!(source.matches("Lifecycle {").count(), 4);
+        for entry in ["fn finish_receipt(", "pub fn start(", "pub fn resume(", "pub fn stop("] {
+            let before_effect = source.split_once(entry).unwrap().1.split_once("Lifecycle {").unwrap().0;
+            assert!(before_effect.contains("native_seat_lock("), "{entry}");
+        }
+        let fork = include_str!("fork.rs").split_once("fn native_fork(").unwrap().1.split_once("Lifecycle {").unwrap().0;
+        assert!(fork.contains("_source_ownership = backend::native_seat_lock"));
+        assert!(fork.contains("_target_ownership = backend::native_seat_lock"));
+    }
+
+    #[test]
+    fn start_reconciliation_recovers_running_and_needs_recovery_startups_without_replay() {
+        for outcome in [Outcome::Running, Outcome::NeedsRecovery] {
+            let mut fixture = RoleFixture::new();
+            let mut backend = fixture.canonical(SeatStatus::Starting, Phase::F2Register, outcome, None);
+            let _ownership = native_seat_lock(&fixture.root, "test", &fixture.identity.seat, false).unwrap();
+            reconcile_start(&mut backend, &fixture.identity.seat).unwrap();
+            assert!(existing_start(&backend, &fixture.identity.seat).unwrap().is_none());
+            assert!(backend.store.seat(&fixture.identity.seat).unwrap().is_none());
+            assert!(backend.store.unfinished().unwrap().is_empty());
+            let stopped = stop(&fixture.root, "test", &fixture.identity.seat).unwrap();
+            assert_eq!(stopped.outcome, Outcome::Compensated);
+            assert_eq!(stop(&fixture.root, "test", &fixture.identity.seat).unwrap().id, stopped.id);
+        }
+    }
+
+    #[test]
+    fn stop_recovers_running_restart_and_stops_the_restored_parent() {
+        let mut fixture = RoleFixture::new();
+        fixture.identity.generation = Generation(2);
+        let backend = fixture.canonical(SeatStatus::Starting, Phase::F2Register, Outcome::Running, None);
+        let mut operation = backend.store.operation(&OperationId::new("controlled-start").unwrap()).unwrap();
+        operation.kind = TransactionKind::Restart;
+        let mut parent = operation.target.clone();
+        parent.identity.instance = InstanceId::new("previous-instance").unwrap();
+        parent.identity.generation = Generation(1);
+        parent.status = SeatStatus::Stopped;
+        operation.parent = Some(parent.clone());
+        fixture.save_operation(&operation);
+        let stopped = stop(&fixture.root, "test", &fixture.identity.seat).unwrap();
+        assert_eq!(stopped.outcome, Outcome::Committed);
+        assert_eq!(stopped.target.identity, parent.identity);
+        assert!(backend.store.unfinished().unwrap().is_empty());
+        assert_eq!(backend.store.operation(&operation.id).unwrap().outcome, Outcome::Compensated);
+    }
+
+    #[test]
+    fn parent_recovery_fences_both_seats_without_waiting_in_reverse_lock_order() {
+        let mut fixture = RoleFixture::new();
+        let mut backend = fixture.canonical(SeatStatus::Starting, Phase::F2Register, Outcome::Running, None);
+        let mut operation = backend.store.operation(&OperationId::new("controlled-start").unwrap()).unwrap();
+        operation.kind = TransactionKind::NewSeatFullSnapshot;
+        let mut parent = operation.target.clone();
+        parent.identity.seat = SeatId::new("parent").unwrap();
+        parent.identity.instance = InstanceId::new("parent-instance").unwrap();
+        parent.pane = "parent-pane".into(); parent.binding_key = "parent-binding".into();
+        parent.status = SeatStatus::Stopped;
+        parent.session = Some(ResumeBinding { provider: parent.provider.clone(), native_session: NativeSessionId::new("parent-session").unwrap(),
+            storage: team_agent_contract::contract::session::SessionStorage::Local, cwd: parent.cwd.clone(), native: parent.native.clone(), source: parent.identity.clone(),
+            origin: team_agent_contract::contract::session::CaptureOrigin::OwnedExitHint, evidence_kind: EvidenceKind::Fixture, evidence_sha256: digest(b"parent-session"), backing: None });
+        operation.parent = Some(parent.clone());
+        fixture.save_operation(&operation);
+        let db = rusqlite::Connection::open(fixture.binding.transport_root.join("contract.db")).unwrap();
+        db.execute("INSERT INTO contract_seats VALUES(?1,?2)", rusqlite::params![parent.identity.seat.as_str(), serde_json::to_string(&parent).unwrap()]).unwrap();
+        db.execute("INSERT INTO contract_leases VALUES(?1,?2)", rusqlite::params![parent.identity.seat.as_str(), operation.id.as_str()]).unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let root = fixture.root.clone(); let child = fixture.identity.seat.clone();
+        let holder = std::thread::spawn(move || {
+            let _guard = native_seat_lock(&root, "test", &child, false).unwrap();
+            ready_tx.send(()).unwrap(); let _ = release_rx.recv();
+        });
+        ready_rx.recv().unwrap();
+        let _parent = native_seat_lock(&fixture.root, "test", &parent.identity.seat, false).unwrap();
+        let began = std::time::Instant::now();
+        let blocked = recover_incomplete(&mut backend, &parent.identity.seat);
+        let elapsed = began.elapsed();
+        release_tx.send(()).unwrap(); holder.join().unwrap();
+        assert!(blocked.is_err()); assert!(elapsed < Duration::from_secs(1));
+        assert!(backend.store.leased(&parent.identity.seat).unwrap());
+        assert!(recover_incomplete(&mut backend, &parent.identity.seat).unwrap().is_none());
+        assert!(backend.store.seat(&fixture.identity.seat).unwrap().is_none());
+        assert_eq!(backend.store.seat(&parent.identity.seat).unwrap(), Some(parent));
+        assert!(backend.store.unfinished().unwrap().is_empty());
     }
 
     #[test]

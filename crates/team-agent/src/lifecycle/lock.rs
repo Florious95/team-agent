@@ -60,6 +60,14 @@ pub(crate) fn acquire_seat_lifecycle_lock(
     )
 }
 
+/// Recovery may need a second seat while the caller owns the first. Never wait
+/// in the opposite lock order: a busy peer remains a typed, retryable refusal.
+pub(crate) fn try_acquire_seat_lifecycle_lock(
+    request: LifecycleLockRequest<'_>,
+) -> Result<LifecycleLockGuard, LifecycleError> {
+    acquire_agent_lifecycle_lock_with_deadlines(request, Duration::ZERO, Duration::ZERO)
+}
+
 /// ---
 /// purpose: 以显式超时与告警阈值抢同一把锁，仅测试构建可见
 /// params:

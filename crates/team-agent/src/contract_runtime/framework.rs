@@ -348,19 +348,20 @@ pub fn stop_selected(workspace: &Path, state: &Value) -> Result<Vec<Value>, Back
                     workspace, operation: "native-team-stop", team: Some(&team), agent_id: Some(&agent_id),
                 }).map_err(|error| std::io::Error::other(error.to_string()))?;
                 let backend = Backend::open(workspace, &team)?;
-                let seat = backend.store.seat(&SeatId::new(id)?)?.ok_or(BackendError::Metadata)?;
-                physical = seat.physical.clone();
-                if seat.status == SeatStatus::Stopped && !backend.store.leased(&seat.identity.seat)? {
+                let seat_id = SeatId::new(id)?;
+                let seat = backend.store.seat(&seat_id)?;
+                physical = seat.as_ref().and_then(|seat| seat.physical.clone());
+                if seat.as_ref().is_some_and(|seat| seat.status == SeatStatus::Stopped) && !backend.store.leased(&seat_id)? {
                     return Ok(json!({"agent_id":id,"status":"already_stopped"}));
                 }
-                let receipt = backend::stop(workspace, &team, &SeatId::new(id)?)?;
-                if receipt.outcome != Outcome::Committed {
+                let receipt = backend::stop(workspace, &team, &seat_id)?;
+                if !matches!(receipt.outcome, Outcome::Committed | Outcome::Compensated) {
                     return Err(BackendError::Shutdown {
                         operation: receipt.id, phase: receipt.phase,
                         outcome: receipt.outcome, failure: receipt.failure,
                     });
                 }
-                Ok(json!({"agent_id":id,"status":"stopped","operation":receipt.id}))
+                Ok(json!({"agent_id":id,"status":"stopped","operation":receipt.id,"outcome":receipt.outcome}))
             })();
             receipts.push(result.unwrap_or_else(|error| json!({
                 "agent_id":id,"status":"failed","error":error.to_string(),
