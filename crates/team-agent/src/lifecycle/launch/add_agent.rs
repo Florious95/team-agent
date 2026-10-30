@@ -347,6 +347,15 @@ pub(crate) fn add_agent_with_transport(
 ) -> Result<AddAgentReport, LifecycleError> {
     let run_workspace = crate::model::paths::canonical_run_workspace(workspace)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    // The seat lock lives in the seat's canonical team domain, never `default`.
+    let canonical_team = crate::state::selector::resolve_active_team_readonly(
+        &run_workspace,
+        team,
+        crate::state::selector::SelectorMode::RuntimeOnly,
+    )
+    .ok()
+    .map(|selected| selected.team_key);
+    let team = canonical_team.as_deref().or(team);
     let lifecycle_lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &run_workspace,
         operation: "add-agent",
