@@ -12,13 +12,16 @@ use team_agent::{
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
+        // macOS clocks tick in microseconds; the counter keeps parallel roots unique.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
-            "station-address-{}-{}",
+            "station-address-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         ));
         fs::create_dir_all(&root).unwrap();
         Self(root)
