@@ -260,22 +260,8 @@ impl<'a> PhysicalRuntime<'a> {
         Ok(self.budget_end.map_or(end, |budget| budget.min(end)))
     }
     fn target<'b>(&self, seat: &'b SeatRecord) -> Result<&'b TargetReceipt, Error> {
-        let target = seat
-            .physical
-            .as_ref()
-            .ok_or(Error::Invalid("physical target missing"))?;
-        if target.identity() != &seat.identity
-            || target.provider != seat.provider
-            || target.native != seat.native
-            || target.cwd != seat.cwd
-            || target.evidence_kind != seat.evidence_kind
-            || seat.process.as_ref() != Some(&target.process.identity)
-            || target.endpoint.to_str() != Some(seat.endpoint.as_str())
-            || target.pane != seat.pane
-            || target.binding != seat.binding_key
-            || target.native_session.as_ref() != seat.session.as_ref().map(|s| &s.native_session)
-            || seat.provider.as_str() != self.registration.descriptor.identity.id
-        {
+        let target = seat.physical_target()?;
+        if seat.provider.as_str() != self.registration.descriptor.identity.id {
             return Err(Error::Fence);
         }
         Ok(target)
@@ -305,7 +291,7 @@ impl<'a> PhysicalRuntime<'a> {
         operation: Operation,
     ) -> Result<ResolvedSubmitPolicy<'_>, Error> {
         if self.foreign(target) {
-            return Err(Error::Invalid("foreign candidate requires input-free teardown and restart"));
+            return Err(Error::Invalid("seat_requires_restart"));
         }
         let mut matching = self.evidence.iter().filter(|e| {
             e.provider == target.provider
@@ -457,6 +443,8 @@ impl LifecycleHost for PhysicalRuntime<'_> {
             }
             let mut absent = false;
             let mut replaced = false;
+            let replacement = |error: &HostError| error.kind == HostErrorKind::Ownership
+                && matches!(error.operation, "tmux target binding" | "tmux target changed");
             match crate::host::process::sample_process(&target.process) {
                 ProcessState::Exited | ProcessState::Replaced => absent = true,
                 ProcessState::Unknown(error) => return Err(host_error(error)),
@@ -465,10 +453,17 @@ impl LifecycleHost for PhysicalRuntime<'_> {
                         self.settings.limits, RealCommandRunner::default(), self.clock, deadline) {
                         Ok(mut host) => {
                             let receipt = host.close_owned_pane(&target, self.clock, deadline);
-                            confirm_close(receipt, target.shared_endpoint)?;
+                            if receipt.pane_close.outcome == StepOutcome::NoEffect
+                                && receipt.pane_close.error.as_ref().is_some_and(replacement) {
+                                replaced = true;
+                            } else if receipt.pane_close.outcome == StepOutcome::NoEffect
+                                && matches!(receipt.native, ProcessState::Exited | ProcessState::Replaced) {
+                                absent = true;
+                            } else {
+                                confirm_close(receipt, target.shared_endpoint)?;
+                            }
                         }
-                        Err(error) if error.kind == HostErrorKind::Ownership
-                            && matches!(error.operation, "tmux target binding" | "tmux target changed") => replaced = true,
+                        Err(error) if replacement(&error) => replaced = true,
                         Err(error) => return Err(host_error(error)),
                     }
                 }
@@ -521,6 +516,7 @@ impl LifecycleHost for PhysicalRuntime<'_> {
         control: &NativeControl,
     ) -> Result<DeliveryEffect, Error> {
         let target = self.target(seat)?.clone();
+        if self.foreign(&target) { return Err(Error::Invalid("seat_requires_restart")); }
         let kind = match control {
             NativeControl::InspectSession => ControlKind::InspectSession,
             NativeControl::InspectTools => ControlKind::InspectTools,

@@ -54,6 +54,23 @@ pub struct SeatRecord {
     pub bootstrap_used: bool,
 }
 
+impl SeatRecord {
+    /// A receipt must describe this complete authority record before a live
+    /// host check can authorize any transport or teardown.
+    pub fn physical_target(&self) -> Result<&crate::host::transport::TargetReceipt, Error> {
+        let target = self.physical.as_ref().ok_or(Error::Invalid("physical target missing"))?;
+        if target.identity() != &self.identity || target.provider != self.provider || target.native != self.native
+            || target.cwd != self.cwd || target.evidence_kind != self.evidence_kind
+            || self.process.as_ref() != Some(&target.process.identity)
+            || target.endpoint.to_str() != Some(self.endpoint.as_str()) || target.pane != self.pane
+            || target.binding != self.binding_key
+            || target.native_session.as_ref() != self.session.as_ref().map(|s| &s.native_session) {
+            return Err(Error::Fence);
+        }
+        Ok(target)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Phase {
     F0Preflight,

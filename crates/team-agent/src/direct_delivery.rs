@@ -112,6 +112,12 @@ fn field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
+#[cfg(unix)]
+fn native_recipient(info: &Value) -> bool {
+    crate::contract_runtime::framework::is_contract(info)
+        || field(info, "runtime_family") == Some("contract") || field(info, "contract_scope").is_some()
+}
+
 impl Directory {
     fn recipient(&self, agent: &str) -> Result<&Value, String> {
         if agent == "leader" {
@@ -127,17 +133,18 @@ impl Directory {
     #[cfg(unix)]
     fn native_seat(&self, agent: &str) -> Result<Option<(crate::contract_runtime::backend::Binding, team_agent_contract::orchestration::store::SeatRecord)>, String> {
         use team_agent_contract::{contract::types::SeatId, orchestration::store::SeatStatus};
-        if agent == "leader" || !crate::contract_runtime::framework::is_contract(self.recipient(agent)?) { return Ok(None); }
+        if agent == "leader" || !native_recipient(self.recipient(agent)?) { return Ok(None); }
         let team = self.team.as_deref().ok_or("native recipient has no team scope")?;
         let backend = crate::contract_runtime::backend::Backend::open_readonly(&self.workspace, team).map_err(|e| e.to_string())?;
-        crate::contract_runtime::backend::require_candidate(&backend.binding).map_err(|e| e.to_string())?;
         let id = SeatId::new(agent).map_err(|e| e.to_string())?;
         let seat = backend.store.seat(&id).map_err(|e| e.to_string())?.ok_or("native recipient missing")?;
-        if matches!(seat.status, SeatStatus::Stopped | SeatStatus::Unknown) || backend.store.leased(&id).map_err(|e| e.to_string())? {
-            return Err("recipient_not_running: native lifecycle not settled".into());
+        let target = seat.physical.as_ref().ok_or("native_target_missing")?;
+        if target.candidate_sha256 != crate::contract_runtime::backend::executing_candidate_sha().map_err(|e| e.to_string())? {
+            return Err("seat_requires_restart".into());
         }
-        if seat.physical.as_ref().is_none_or(|target| target.candidate_sha256 != backend.binding.candidate_sha256) {
-            return Err("foreign_or_missing_native_target: stop and restart before sending".into());
+        crate::contract_runtime::backend::require_candidate(&backend.binding).map_err(|e| e.to_string())?;
+        if seat.status != SeatStatus::Ready || backend.store.leased(&id).map_err(|e| e.to_string())? {
+            return Err("recipient_not_running: native lifecycle not settled".into());
         }
         Ok(Some((backend.binding, seat)))
     }
@@ -158,8 +165,7 @@ impl Directory {
     pub fn endpoint(&self, agent: &str) -> Result<Endpoint, String> {
         let info = self.recipient(agent)?;
         if agent != "leader" && (info.get("paused").and_then(Value::as_bool) == Some(true)
-            || info.get("explicit_stop").and_then(Value::as_bool) == Some(true)
-            || matches!(field(info, "status"), Some("stopped" | "removed" | "paused" | "unknown" | "foreign"))) {
+            || info.get("explicit_stop").and_then(Value::as_bool) == Some(true)) {
             return Err(format!("recipient_not_running: {agent}"));
         }
         #[cfg(unix)]
@@ -191,7 +197,7 @@ impl Directory {
 
     pub(crate) fn send_with_receipt(&self, agent: &str, text: &str, submitted: impl FnOnce() -> Result<(), String>) -> Result<Value, String> {
         #[cfg(unix)]
-        let _lifecycle = if agent != "leader" && crate::contract_runtime::framework::is_contract(self.recipient(agent)?) {
+        let _lifecycle = if agent != "leader" && native_recipient(self.recipient(agent)?) {
             let id = crate::model::ids::AgentId::new(agent);
             Some(crate::lifecycle::lock::try_acquire_seat_lifecycle_lock(crate::lifecycle::lock::LifecycleLockRequest {
                 workspace: &self.workspace, operation: "native-send", team: self.team.as_deref(), agent_id: Some(&id),
@@ -502,11 +508,21 @@ pub fn locate(workspace: &Path, team: Option<&str>) -> Result<Value, String> {
         vec![None]
     };
     let mut endpoints = Vec::new();
+    let mut unavailable: Vec<Value> = Vec::new();
     for team in selectors {
         let directory = directory(workspace, team.as_deref())?;
         for agent in std::iter::once("leader".to_string()).chain(directory.agents()) {
-            let Ok(endpoint) = directory.endpoint(&agent) else {
-                continue;
+            let endpoint = match directory.endpoint(&agent) {
+                Ok(endpoint) => endpoint,
+                Err(error) => {
+                    #[cfg(unix)]
+                    if error == "seat_requires_restart" {
+                        unavailable.push(json!({"workspace":directory.workspace,"team":directory.team,"agent":agent,
+                            "candidate":"foreign","delivery_error":error,
+                            "action":crate::contract_runtime::backend::restart_command(&directory.workspace, directory.team.as_deref().unwrap_or(""), &agent)}));
+                    }
+                    continue;
+                }
             };
             let output = tmux(&endpoint.socket)
                 .args([
@@ -527,7 +543,7 @@ pub fn locate(workspace: &Path, team: Option<&str>) -> Result<Value, String> {
             }
         }
     }
-    Ok(json!({"endpoints": endpoints}))
+    Ok(json!({"endpoints": endpoints, "unavailable":unavailable}))
 }
 
 #[cfg(test)]

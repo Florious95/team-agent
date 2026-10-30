@@ -342,7 +342,7 @@ fn observe(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation
         if checked(authority.store.seat(&checked(SeatId::new(id))?))?
             .is_some_and(|seat| seat.status != team_agent_contract::orchestration::store::SeatStatus::Stopped
                 && seat.physical.as_ref().is_some_and(|target| target.candidate_sha256 != executing)) {
-            return Ok(Observation::NativeReconcile);
+            return Ok(Observation::Foreign);
         }
         if checked(
             crate::contract_runtime::backend::start_needs_reconciliation(

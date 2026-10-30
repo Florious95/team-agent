@@ -582,11 +582,6 @@ enum ExistingStart {
 // Receipt classification is read-only, never native admission or permission
 // to replay an unfinished host effect. Check parent leases before old success.
 fn existing_start(backend: &Backend, seat: &SeatId) -> Result<Option<ExistingStart>, BackendError> {
-    let executing_candidate = executing_candidate_sha()?;
-    if backend.store.seat(seat)?.is_some_and(|record| record.status != SeatStatus::Stopped
-        && record.physical.as_ref().is_some_and(|target| target.candidate_sha256 != executing_candidate)) {
-        return Err(BackendError::Fence { reason: "foreign_candidate_requires_input_free_stop_then_start" });
-    }
     let unfinished: Vec<_> = backend.store.unfinished()?.into_iter().filter(|record| involves_seat(record, seat)).collect();
     if unfinished.len() > 1 { return Err(BackendError::Fence { reason: "unfinished_operation_ambiguous" }); }
     if let Some(record) = unfinished.into_iter().next() {
@@ -627,8 +622,7 @@ pub(crate) fn executing_candidate_sha() -> Result<Digest, BackendError> {
 
 pub(crate) fn require_candidate(binding: &Binding) -> Result<(), BackendError> {
     let candidate = std::env::current_exe()?.canonicalize()?;
-    if candidate != binding.candidate || fingerprint_file(&candidate, 1024 * 1024 * 1024,
-        Duration::from_secs(10))? != binding.candidate_sha256 { return Err(BackendError::Fence { reason: "candidate_path_or_fingerprint_mismatch" }); }
+    if candidate != binding.candidate || executing_candidate_sha()? != binding.candidate_sha256 { return Err(BackendError::Fence { reason: "candidate_path_or_fingerprint_mismatch" }); }
     Ok(())
 }
 
@@ -676,9 +670,9 @@ pub(super) fn refresh_quiescent_candidate(workspace: &Path, team: &str, seat: &S
 }
 
 pub(crate) fn validate_delivery_target(binding: &Binding, seat: &SeatRecord, budget: Duration) -> Result<(), BackendError> {
-    let target = seat.physical.as_ref().ok_or(BackendError::Metadata)?;
-    if target.identity() != &seat.identity || target.candidate_sha256 != binding.candidate_sha256
-        || seat.evidence_kind != EvidenceKind::Native || matches!(seat.status, SeatStatus::Stopped | SeatStatus::Unknown) {
+    let target = seat.physical_target()?;
+    if target.candidate_sha256 != binding.candidate_sha256
+        || seat.evidence_kind != EvidenceKind::Native || seat.status != SeatStatus::Ready {
         return Err(BackendError::Fence { reason: "delivery_target_not_current_native_owner" });
     }
     let clock = RealClock::new();
@@ -783,7 +777,7 @@ pub(crate) fn preflight_start_role(workspace: &Path, team: &str, role: &RoleConf
     match existing_start(&backend, &role.id)? {
         Some(ExistingStart::Committed(record))
             if backend.store.assert_current(&record.target.identity)?.physical.as_ref().is_some_and(|target|
-                team_agent_contract::host::process::sample_process(&target.process) == team_agent_contract::host::process::ProcessState::Exited) => {
+                target.candidate_sha256 != backend.binding.candidate_sha256 || team_agent_contract::host::process::sample_process(&target.process) == team_agent_contract::host::process::ProcessState::Exited) => {
             prepare_resume(workspace, team, &role.id, Some(role))?;
         },
         Some(ExistingStart::FinishReceipt(record)) if record.target.identity.seat != role.id => return Ok(false),
@@ -931,7 +925,7 @@ pub fn start(
             Some(ExistingStart::Committed(record)) => {
                 let current = backend.store.assert_current(&record.target.identity)?;
                 if current.physical.as_ref().is_some_and(|target|
-                    team_agent_contract::host::process::sample_process(&target.process) == team_agent_contract::host::process::ProcessState::Exited) {
+                    target.candidate_sha256 != backend.binding.candidate_sha256 || team_agent_contract::host::process::sample_process(&target.process) == team_agent_contract::host::process::ProcessState::Exited) {
                     let prepared = prepare_resume(workspace, team, &role.id, Some(role))?;
                     return Ok((backend.binding, resume(prepared)?));
                 }
@@ -1150,6 +1144,7 @@ pub fn prepare_resume(
     role: Option<&RoleConfig>,
 ) -> Result<PreparedResume, BackendError> {
     let backend = Backend::open_readonly(workspace, team)?;
+    require_candidate(&backend.binding)?;
     let parent = backend.store.seat(seat)?.ok_or(BackendError::Metadata)?;
     if parent.status == SeatStatus::Unknown {
         return Err(BackendError::Fence { reason: "resume_parent_unknown" });
@@ -1249,8 +1244,9 @@ pub fn resume(prepared: PreparedResume) -> Result<OperationRecord, BackendError>
         },
         settings(&backend.binding, selected), operation.clone(), &clock,
     )?;
-    physical.executing_candidate = Some(backend.binding.candidate_sha256);
-    physical.evidence = policy_evidence(&prepared.role.provider, &prepared.request.native, backend.binding.candidate_sha256)?;
+    let executing_candidate = executing_candidate_sha()?;
+    physical.executing_candidate = Some(executing_candidate);
+    physical.evidence = policy_evidence(&prepared.role.provider, &prepared.request.native, executing_candidate)?;
     physical.workspace_tmux = workspace_topology;
     let mut lifecycle = Lifecycle { store: &mut backend.store, host: &mut physical, io: &mut io };
     let adapter = Adapter { descriptor, hooks: &hooks, catalog: Some(&prepared.discovered.catalog) };
@@ -1464,10 +1460,23 @@ pub fn migrate(workspace: &Path, team: &str) -> Result<serde_json::Value, Backen
         if written.is_err() { let _ = std::fs::remove_file(&temporary); }
         written?;
     }
+    let authority = Backend::open_readonly(&binding.workspace.path, team)?;
+    result["seat_status"] = serde_json::json!(authority.store.seats()?.into_iter().map(|seat| {
+        let foreign = seat.physical.as_ref().is_some_and(|target| target.candidate_sha256 != binding.candidate_sha256);
+        let live_foreign = foreign && seat.physical.as_ref().is_some_and(|target|
+            team_agent_contract::host::process::sample_process(&target.process) == team_agent_contract::host::process::ProcessState::Alive);
+        serde_json::json!({"seat":seat.identity.seat,"candidate":if foreign { "foreign" } else { "current" },
+            "live_foreign":live_foreign,"next_command":if foreign { Some(restart_command(&binding.workspace.path, team, seat.identity.seat.as_str())) } else { None }})
+    }).collect::<Vec<_>>());
     result["team"] = serde_json::json!(team);
     result["candidate"] = serde_json::json!(binding.candidate);
     result["maintenance"] = serde_json::json!("Use only this release for subsequent lifecycle operations");
     Ok(result)
+}
+
+pub(crate) fn restart_command(workspace: &Path, team: &str, seat: &str) -> String {
+    format!("team-agent restart {} --workspace {} --team {}", crate::cli::shell_quote(seat),
+        crate::cli::shell_quote(&workspace.to_string_lossy()), crate::cli::shell_quote(team))
 }
 
 pub fn stop(workspace: &Path, team: &str, seat: &SeatId) -> Result<OperationRecord, BackendError> {

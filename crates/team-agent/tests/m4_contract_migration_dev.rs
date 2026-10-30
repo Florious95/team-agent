@@ -257,6 +257,19 @@ fn native_addresses_never_fall_back_to_stale_snapshot_without_authority() {
 }
 
 #[test]
+fn public_provider_aliases_cannot_bypass_native_authority() {
+    let fixture = Fixture::new();
+    for marker in [json!({"runtime_family":"contract"}), json!({"contract_scope":"native-scope"})] {
+        let mut worker = json!({"provider":"grok","status":"running","pane_id":"%0","native_endpoint":"/nonexistent-p7-socket"});
+        worker.as_object_mut().unwrap().extend(marker.as_object().unwrap().clone());
+        let directory = team_agent::direct_delivery::Directory { workspace: fixture.root.clone(), team: Some("test".into()),
+            state: json!({"agents":{"worker":worker}}) };
+        assert!(directory.endpoint("worker").is_err());
+    }
+    assert!(!fixture.root.join(".team").exists());
+}
+
+#[test]
 fn an_existing_published_pane_cannot_be_claimed_by_another_seat() {
     let fixture = Fixture::new(); fixture.migrate(); let mut store = fixture.store();
     let mut target = fixture.seat.clone();
