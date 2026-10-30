@@ -30,90 +30,7 @@ pub fn detect_idle_fallbacks(
     store: &MessageStore,
     event_log: &EventLog,
 ) -> Result<Vec<serde_json::Value>, MessagingError> {
-    let team = active_team_key(workspace, state);
-    if team_idle_acknowledged(state, &team) {
-        return Ok(Vec::new());
-    }
-    if team_idle_fallback_debounced(state, &team) {
-        return Ok(Vec::new());
-    }
-    let workers = state
-        .get("agents")
-        .and_then(Value::as_object)
-        .map(|agents| agents.keys().cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
-    if workers.is_empty() {
-        return Ok(Vec::new());
-    }
-    let conn = crate::db::schema::open_db(store.db_path())?;
-    let obligation_count = team_undelivered_obligations(&conn, &team, &workers)?;
-    if obligation_count == 0 {
-        return Ok(Vec::new());
-    }
-    let mut stmt = conn.prepare(
-        "select agent_id
-           from agent_health
-          where (owner_team_id = ?1 or owner_team_id is null)
-            and upper(status) = 'IDLE'
-          order by agent_id",
-    )?;
-    let idle_workers = stmt
-        .query_map(params![team.as_str()], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    let worker_set = workers
-        .iter()
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
-    let idle_set = idle_workers
-        .iter()
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
-    if worker_set != idle_set {
-        return Ok(Vec::new());
-    }
-    for agent_id in &idle_workers {
-        if idle_fallback_suppressed(state, store, &team, agent_id)? {
-            return Ok(Vec::new());
-        }
-    }
-    let now = chrono::Utc::now().to_rfc3339();
-    let mut next_state = state.clone();
-    let suppression_snapshots =
-        idle_fallback_suppression_snapshots(&next_state, store, &team, &idle_workers)?;
-    register_idle_fallback_suppression(&mut next_state, &team, &now, &suppression_snapshots);
-    crate::state::repository::StateRepository::new(workspace).save_reapplying(
-        crate::state::repository::StateWriteIntent::MessagingTurnArm {
-            owner_team_id: Some(&team),
-        },
-        &next_state,
-        |latest| {
-            register_idle_fallback_suppression(latest, &team, &now, &suppression_snapshots);
-        },
-    )?;
-    let alert_count = idle_workers.len();
-    let content = format!(
-        "Idle fallback: all workers idle while {obligation_count} undelivered obligation(s) remain."
-    );
-    let team_key = TeamKey::new(team.clone());
-    let _ = deliver_stored_message(
-        workspace,
-        Some("leader"),
-        &content,
-        None,
-        "coordinator",
-        false,
-        false,
-        30.0,
-        Some(&team_key),
-    )?;
-    let alert = serde_json::json!({
-        "team": team,
-        "idle_workers": idle_workers,
-        "obligation_count": obligation_count,
-        "alert_count": alert_count,
-    });
-    event_log.write("coordinator.idle_fallback", alert.clone())?;
-    Ok(vec![alert])
+    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
 }
 
 /// `detect_cross_worker_deadlocks` (`idle_alerts.py:373`):跨 worker 死锁检测。coordinator tick 调。
@@ -123,38 +40,7 @@ pub fn detect_cross_worker_deadlocks(
     store: &MessageStore,
     event_log: &EventLog,
 ) -> Result<Vec<serde_json::Value>, MessagingError> {
-    let _ = (workspace, event_log);
-    let team = crate::state::projection::team_state_key(state);
-    let conn = crate::db::schema::open_db(store.db_path())?;
-    let mut stmt = conn.prepare(
-        "select distinct h.agent_id
-           from agent_health h
-          where h.owner_team_id = ?1
-            and upper(h.status) = 'IDLE'
-            and exists (
-                select 1 from messages m
-                 where m.recipient = h.agent_id
-                   and m.status in (
-                       'pending', 'accepted', 'queued_until_idle', 'queued_until_start',
-                       'queued_stopped', 'queued_pane_missing', 'target_resolved',
-                       'injected', 'visible', 'submitted', 'submitted_unverified', 'delivered'
-                   )
-            )
-          order by h.agent_id",
-    )?;
-    let rows = stmt.query_map(params![team], |row| row.get::<_, String>(0))?;
-    let mut alerts = Vec::new();
-    for row in rows {
-        let agent_id = row?;
-        let alert = serde_json::json!({
-            "alert_type": "cross_worker_deadlock",
-            "agent_id": agent_id,
-            "reason": "idle_recipient_with_undelivered_message",
-        });
-        event_log.write("cross_worker_deadlock", alert.clone())?;
-        alerts.push(alert);
-    }
-    Ok(alerts)
+    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
 }
 
 // ===========================================================================
@@ -448,14 +334,5 @@ fn delivered_message_ids(
     team: &str,
     agent_id: &str,
 ) -> Result<Vec<String>, MessagingError> {
-    let conn = crate::db::schema::open_db(store.db_path())?;
-    let mut stmt = conn.prepare(
-        "select message_id from messages
-         where (owner_team_id = ?1 or owner_team_id is null)
-           and recipient = ?2
-           and status in ('visible', 'submitted', 'delivered', 'acknowledged')
-         order by message_id",
-    )?;
-    let rows = stmt.query_map(params![team, agent_id], |row| row.get::<_, String>(0))?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
 }

@@ -1410,12 +1410,6 @@ pub(crate) fn quick_start_with_transport_in_workspace_pi_preflight(
     // Bug2:原子写(tmp+rename),避免半截 spec。
     let spec_path = crate::model::paths::runtime_spec_path(&workspace, &state_team_key);
     write_spec_atomic(&spec_path, &spec)?;
-    let _store = crate::message_store::MessageStore::open(&workspace).map_err(|error| {
-        LifecycleError::StatePersist(format!(
-            "database initialization failed at {}: {error}; coordinator start was not attempted",
-            workspace.join(".team/team.db").display()
-        ))
-    })?;
     let resolved_spec_path =
         std::fs::canonicalize(&spec_path).unwrap_or_else(|_| spec_path.clone());
     let scoped_endpoint = transport.tmux_endpoint();

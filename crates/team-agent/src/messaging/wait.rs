@@ -74,29 +74,13 @@ mod unix {
 
     impl RegistrationCleanup {
         fn cleanup(&mut self) -> Result<(), MessagingError> {
-            if self.active {
-                let conn = crate::db::schema::open_db(&self.db_path)?;
-                conn.execute(
-                    "delete from result_watchers where watcher_id = ?1",
-                    params![self.watcher_id],
-                )?;
-                self.active = false;
-            }
-            Ok(())
-        }
+        self.active = false;
+        Ok(())
+    }
     }
 
     impl Drop for RegistrationCleanup {
-        fn drop(&mut self) {
-            if self.active {
-                if let Ok(conn) = crate::db::schema::open_db(&self.db_path) {
-                    let _ = conn.execute(
-                        "delete from result_watchers where watcher_id = ?1",
-                        params![self.watcher_id],
-                    );
-                }
-            }
-        }
+        fn drop(&mut self) {}
     }
 
     struct SignalGuard {
@@ -143,48 +127,8 @@ mod unix {
     }
 
     pub fn wait_for_result(workspace: &Path, task_id: &str) -> Result<WaitResult, MessagingError> {
-        if task_id.trim().is_empty() {
-            return Err(MessagingError::Validation(
-                "wait --task requires a non-empty task id".to_string(),
-            ));
-        }
-        let _signals = SignalGuard::install()?;
-        let store = MessageStore::open(workspace)?;
-        let workspace = std::fs::canonicalize(workspace)?;
-        let watcher_id = format!("wait-{}", random_suffix()?);
-        let fifo_path = fifo_path(&workspace, task_id, &watcher_id)?;
-        let fifo = create_fifo(&fifo_path)?;
-        let conn = crate::db::schema::open_db(store.db_path())?;
-        let registration = register(&conn, &watcher_id, task_id, &fifo_path)?;
-        if let Registration::Completed(result_id) = registration {
-            return Ok(WaitResult {
-                task_id: task_id.to_string(),
-                result_id,
-                waited: false,
-            });
-        }
-
-        let mut cleanup = RegistrationCleanup {
-            db_path: store.db_path().to_path_buf(),
-            watcher_id: watcher_id.clone(),
-            active: true,
-        };
-        EventLog::new(&workspace).write(
-            "result_wake.registered",
-            serde_json::json!({
-                "task_id": task_id,
-                "watcher_id": watcher_id,
-                "recipient": fifo_path,
-            }),
-        )?;
-        let result_id = read_wake_line(fifo.reader.as_raw_fd())?;
-        cleanup.cleanup()?;
-        Ok(WaitResult {
-            task_id: task_id.to_string(),
-            result_id,
-            waited: true,
-        })
-    }
+    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
+}
 
     fn register(
         conn: &rusqlite::Connection,

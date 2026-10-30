@@ -84,7 +84,7 @@ pub fn format_status_scoped(
     match agent {
         Some(agent) => {
             ensure_agent_known(snapshot.full(), agent)?;
-            let recent_messages = recent_agent_messages(workspace, agent)?;
+            let recent_messages = recent_agent_messages(workspace, agent, owner_team_id)?;
             format_agent_status(snapshot.full(), agent, &recent_messages)
         }
         None => Ok(crate::cli::format_status_csv(snapshot.full())),

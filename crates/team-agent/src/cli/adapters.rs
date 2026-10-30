@@ -680,11 +680,6 @@ fn unified_default_doctor_report(args: &DoctorArgs, mut value: Value) -> Value {
             &selected.team_key,
         )
     });
-    let db_present = crate::model::paths::runtime_dir(&run_workspace)
-        .join("team.db")
-        .exists();
-    // Legacy storage can still be inspected without requiring a resident service.
-    let database = db_present.then(|| crate::db::migration::schema_diagnosis_workspace_read_only(&run_workspace));
     match selected {
         Ok(selected) => {
             if runtime_present {
@@ -741,17 +736,6 @@ fn unified_default_doctor_report(args: &DoctorArgs, mut value: Value) -> Value {
                 format!("unable to select runtime team: {error}"),
             );
         }
-    }
-    if let Some(database) = database {
-        let diagnostic = match database {
-            Ok(diagnosis) => json!(diagnosis),
-            Err(error) => json!({"ok":false,"error":error.to_string()}),
-        };
-        if diagnostic["ok"] != true {
-            append_issue_repair(&mut value, "legacy_database_schema_incompatible",
-                "team-agent doctor --fix-schema --json".into());
-        }
-        value["legacy_database"] = diagnostic;
     }
     if let Some(object) = value.as_object_mut() {
         object.insert("runtime".to_string(), runtime);

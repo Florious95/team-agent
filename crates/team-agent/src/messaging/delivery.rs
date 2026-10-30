@@ -103,8 +103,7 @@ pub fn deliver_persisted_message(
     event_log: &EventLog,
     state: &serde_json::Value,
 ) -> Result<DeliveryOutcome, MessagingError> {
-    let store = MessageStore::open(workspace)?;
-    deliver_pending_message(workspace, &store, transport, message_id, event_log, state)
+    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
 }
 
 // ===========================================================================
@@ -2289,68 +2288,7 @@ pub fn deliver_pending_messages(
     transport: &dyn Transport,
     event_log: &EventLog,
 ) -> Result<Vec<String>, MessagingError> {
-    let store = MessageStore::open(workspace)?;
-    let message_ids = {
-        let conn = crate::db::schema::open_db(store.db_path())?;
-        // `stored_only` is intentionally absent: C6 chose durable presentation without C5.
-        let mut stmt = conn.prepare(
-            "select message_id from messages
-             where status in (
-                 'pending', 'accepted', 'target_resolved',
-                 'submitted_pending_acceptance', 'queued_until_leader_attach', ?1
-             ) or (status = 'queued_until_start' and error = ?2)
-             order by created_at, message_id",
-        )?;
-        let rows = stmt.query_map(
-            [crate::message_store::MessageRowStatus::QueuedCoordinatorUnavailable.as_str(), crate::message_store::MCP_HANDSHAKE_TIMEOUT],
-            |row| row.get::<_, String>(0),
-        )?;
-        rows.collect::<Result<Vec<_>, _>>()?
-    };
-    let mut delivered = Vec::new();
-    for message_id in message_ids {
-        let Some(message) = message_for_delivery(&store, &message_id)? else {
-            continue;
-        };
-        let prepared = match prepare_message_state(
-            workspace,
-            &store,
-            &message_id,
-            event_log,
-            state,
-            &message,
-            true,
-        )? {
-            Ok(prepared) => prepared,
-            Err(_) => continue,
-        };
-        let outcome = match deliver_prepared_message(
-            workspace,
-            &store,
-            transport,
-            &message_id,
-            event_log,
-            state,
-            message,
-            prepared,
-        ) {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                let _ = event_log.write(
-                    "delivery.item_blocked",
-                    serde_json::json!({
-                        "message_id": message_id.as_str(),
-                        "error": error.to_string(),
-                    }),
-                );
-                continue;
-            }
-        };
-        if matches!(outcome.status, DeliveryStatus::Delivered) {
-            delivered.push(message_id);
-        }
-    }
-    Ok(delivered)
+    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
 }
 
 struct PendingMessage {
@@ -2369,27 +2307,7 @@ fn message_for_delivery(
     store: &MessageStore,
     message_id: &str,
 ) -> Result<Option<PendingMessage>, MessagingError> {
-    let conn = crate::db::schema::open_db(store.db_path())?;
-    let message = conn
-        .query_row(
-            "select sender, recipient, content, task_id, owner_team_id, status, error, delivery_attempts, created_at from messages where message_id = ?1",
-            params![message_id],
-            |row| {
-                Ok(PendingMessage {
-                    sender: row.get::<_, String>(0)?,
-                    recipient: row.get::<_, String>(1)?,
-                    content: row.get::<_, String>(2)?,
-                    task_id: row.get::<_, Option<String>>(3)?,
-                    owner_team_id: row.get::<_, Option<String>>(4)?,
-                    status: row.get::<_, String>(5)?,
-                    error: row.get::<_, Option<String>>(6)?,
-                    delivery_attempts: row.get::<_, i64>(7)?.max(0) as u32,
-                    created_at: row.get::<_, Option<String>>(8)?,
-                })
-            },
-        )
-        .optional()?;
-    Ok(message)
+    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
 }
 
 /// Pre-inject gate (Contract B): peek the recipient pane and answer "is there an
@@ -2672,69 +2590,7 @@ pub fn handle_trust_retry_needed(
     payload: &TrustRetryPayload,
     event_log: &EventLog,
 ) -> Result<DeliveryOutcome, MessagingError> {
-    if payload.attempt >= payload.max_attempts {
-        let _ = store.mark(
-            &payload.message_id,
-            "failed",
-            Some("trust_auto_answer_exhausted"),
-        );
-        event_log.write(
-            "leader_panes.trust_auto_answer_exhausted",
-            serde_json::json!({"message_id": payload.message_id, "attempt": payload.attempt}),
-        )?;
-        return Ok(DeliveryOutcome {
-            ok: false,
-            status: DeliveryStatus::TrustAutoAnswerExhausted,
-            message_status: MessageStatusShadow("failed".to_string()),
-            message_id: Some(payload.message_id.clone()),
-            verification: None,
-            stage: Some(DeliveryStage::TrustAutoAnswerDismissalWait),
-            reason: None,
-            channel: None,
-            ack_forced_off: false,
-            turn_verification: None,
-        });
-    }
-    let next_attempt = payload.attempt.saturating_add(1);
-    let backoff = super::TRUST_RETRY_BACKOFF_SECONDS
-        .iter()
-        .find_map(|(attempt, seconds)| (*attempt == next_attempt).then_some(*seconds))
-        .unwrap_or(30);
-    let due_at = (chrono::Utc::now() + chrono::Duration::seconds(i64::from(backoff))).to_rfc3339();
-    let conn = crate::db::schema::open_db(store.db_path())?;
-    conn.execute(
-        "insert into scheduled_events(owner_team_id, due_at, target, kind, payload_json, status, created_at)
-         values (null, ?1, ?2, 'trust_retry', ?3, 'pending', ?4)",
-        params![
-            due_at,
-            payload.first_target.as_str(),
-            serde_json::json!({
-                "message_id": payload.message_id,
-                "attempt": next_attempt,
-                "max_attempts": payload.max_attempts,
-                "first_target": payload.first_target.as_str(),
-            })
-            .to_string(),
-            chrono::Utc::now().to_rfc3339(),
-        ],
-    )?;
-    let _ = store.mark(&payload.message_id, "queued_until_trust", None);
-    event_log.write(
-        "leader_panes.trust_auto_answer_retry_scheduled",
-        serde_json::json!({"message_id": payload.message_id, "attempt": next_attempt, "due_at": due_at}),
-    )?;
-    Ok(DeliveryOutcome {
-        ok: false,
-        status: DeliveryStatus::RetryScheduled,
-        message_status: MessageStatusShadow("queued_until_trust".to_string()),
-        message_id: Some(payload.message_id.clone()),
-        verification: None,
-        stage: Some(DeliveryStage::TrustAutoAnswerDismissalWait),
-        reason: None,
-        channel: None,
-        ack_forced_off: false,
-        turn_verification: None,
-    })
+    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
 }
 
 /// `_execute_trust_retry` (`delivery.py:330`):trust_retry scheduled event 的消费者 ——
@@ -2785,31 +2641,7 @@ pub(super) fn with_rescue_submit_observer<R>(
     event_log: &EventLog,
     execute: impl FnOnce(&dyn SubmitObserver) -> Result<R, MessagingError>,
 ) -> Result<R, MessagingError> {
-    let request = context;
-    let binding = context.target.as_ref().filter(|target| target.bound())
-        .ok_or_else(|| MessagingError::Validation("enter_rescue: original binding missing".into()))?;
-    let conn = crate::db::schema::open_db(store.db_path())?;
-    let sender: String = conn.query_row(
-        "select sender from messages where message_id=?1 and owner_team_id=?2 and recipient=?3 and status='submitted_unverified'",
-        params![request.message_id, request.owner_team_id, request.recipient],
-        |row| row.get(0),
-    )?;
-    let metadata = TargetMetadata {
-        tmux_endpoint: Some(binding.endpoint.clone()),
-        target_session: binding.session.clone(),
-        target_window: binding.window.clone(),
-        target_pane_id: binding.pane_id.clone(),
-        target_pane_pid: Some(binding.pane_pid),
-        resolved_from: "enter_rescue_owned_binding",
-    };
-    let mut observer = CurrentTurnSubmitObserver::new(
-        workspace, &sender, &request.recipient, &request.message_id, event_log,
-        Some(&request.owner_team_id), Some(&metadata),
-    );
-    observer.rescue_context = Some(context);
-    let result = execute(&observer)?;
-    if let Some(error) = observer.take_error() { return Err(error); }
-    Ok(result)
+    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
 }
 
 struct CurrentTurnSubmitObserver<'a> {

@@ -42,6 +42,7 @@ pub mod model;
 
 // step 3 (db) — team.db SQLite schema/migration(rusqlite bundled)。
 pub mod db;
+pub mod importer;
 
 // step 4 (event_log) — events.jsonl 唯一审计流(append/tail/rotation + 稳定事件名)。
 pub mod event_log;

@@ -4,10 +4,6 @@ use super::runtime::{
     build_runtime_status_block, compute_runtime_freshness, coordinator_health_value,
     coordinator_status_running,
 };
-use super::store::{
-    agent_health, count_undelivered_backlog, latest_result_summaries, message_counts,
-    pending_leader_notifications, queued_messages, result_counts,
-};
 use crate::cli::CliError;
 use crate::state::projection::OwnerTeamResolution;
 use serde_json::{json, Value};
@@ -28,15 +24,15 @@ impl RuntimeSnapshot {
         let health = crate::coordinator::coordinator_health(
             &crate::coordinator::WorkspacePath::new(workspace.to_path_buf()),
         );
-        let store = crate::message_store::MessageStore::open(workspace)
-            .map_err(|e| CliError::Runtime(e.to_string()))?;
-        let conn = crate::db::schema::open_db(store.db_path())
-            .map_err(|e| CliError::Runtime(e.to_string()))?;
+        let inbox = crate::inbox_store::read(workspace, "leader", 100, owner_team_id)
+            .map_err(CliError::Runtime)?;
+        let latest_results: Vec<Value> = inbox["messages"].as_array().into_iter().flatten()
+            .rev().filter(|record| record["kind"] == "result").take(5).cloned().collect();
         // B-5 / 036b N38 explicable — status 出口 runtime 块:把 coordinator_health
         // (现状)+ undelivered backlog count 一起暴露;coordinator not running ∧
         // backlog>0 才挂 down-hint(anti-nag)。auto-recovery 不做(user 已裁)。
         let coordinator_running = coordinator_status_running(&health);
-        let undelivered_backlog = count_undelivered_backlog(&conn, owner_team_id)?;
+        let undelivered_backlog = 0; // The retired coordinator queue has no backlog.
         let session_name = state.get("session_name").cloned().unwrap_or(Value::Null);
         let tmux_present = tmux_session_present(workspace, state, session_name.as_str());
         // 0.5.41 Slice 3 (fault-invisibility-locate.md §5/§6.3): resolve
@@ -135,13 +131,15 @@ impl RuntimeSnapshot {
             "leader_receiver": leader_receiver,
             "teams": state.get("teams").cloned().unwrap_or_else(|| json!({})),
             "agents": agents,
-            "agent_health": agent_health(&conn, owner_team_id)?,
+            "agent_health": {},
             "tasks": tasks,
-            "messages": message_counts(&conn, owner_team_id)?,
-            "queued_messages": queued_messages(&conn, owner_team_id, 8)?,
-            "pending_leader_notifications": pending_leader_notifications(&conn, owner_team_id, 8)?,
-            "results": result_counts(&conn, owner_team_id)?,
-            "latest_results": latest_result_summaries(&store, owner_team_id)?,
+            "messages": {"total": null, "by_status": {}},
+            "queued_messages": [],
+            "pending_leader_notifications": [],
+            "results": {"total": null, "by_status": {}},
+            "latest_results": latest_results,
+            "legacy_delivery_queue": "retired",
+            "message_projection": "C3 scoped inbox; aggregate SQL counters unavailable",
             "readiness": readiness,
             "coordinator": coordinator_health_value(health),
             "runtime": runtime_block,

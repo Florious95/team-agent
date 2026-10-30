@@ -15,11 +15,14 @@ resolver = "2"
 path = "src/lib.rs"
 
 [dependencies]
-rusqlite = { version = "=0.32.1", features = ["bundled"] }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.149"
 sha2 = "=0.10.9"
 unicode-width = "=0.2.2"
+
+[dev-dependencies]
+# Frozen legacy fixtures only; the production contract runtime is file-backed.
+rusqlite = { version = "=0.32.1", features = ["bundled"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "=0.30.1", default-features = false, features = ["fs", "process", "signal", "user"] }

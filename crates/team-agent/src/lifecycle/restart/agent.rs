@@ -499,9 +499,6 @@ pub(crate) fn start_agent_at_paths(
     // so five-line status summary and status --json do not surface a stale
     // WORKING row from the pre-shutdown process. Best-effort: DB failure
     // must not fail the start-agent path.
-    let _ = crate::db::agent_health_capture::clear_agent_health_observation(
-        workspace, &team_key, agent_id,
-    );
     let skip_capture_backfill = if matches!(
         start_mode,
         StartMode::Fresh | StartMode::FreshAfterMissingRollout

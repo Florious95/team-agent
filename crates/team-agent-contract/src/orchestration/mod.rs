@@ -6,6 +6,7 @@ pub mod mcp;
 pub mod operator;
 pub mod physical;
 pub mod protocol;
+mod projection;
 pub mod store;
 pub mod supervisor;
 
@@ -67,11 +68,6 @@ impl std::error::Error for Error {}
 impl From<ContractError> for Error {
     fn from(value: ContractError) -> Self {
         Self::Contract(value)
-    }
-}
-impl From<rusqlite::Error> for Error {
-    fn from(_: rusqlite::Error) -> Self {
-        Self::Database
     }
 }
 impl From<serde_json::Error> for Error {

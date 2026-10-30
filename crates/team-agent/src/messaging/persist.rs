@@ -158,39 +158,7 @@ pub enum PersistResolution {
 pub fn persist_resolved_send(
     intent: &ResolvedSendIntent,
 ) -> Result<PersistResolution, MessagingError> {
-    let store = MessageStore::open(&intent.target_workspace)?;
-    if let Some(requested) = intent.requested_message_id.as_deref() {
-        if store.message_exists(requested)? {
-            return Ok(PersistResolution::Duplicate(requested.to_string()));
-        }
-    }
-    let status = intent.initial_disposition.row_status();
-    let presentation = serde_json::to_string(&intent.presentation)?;
-    let message_id = store.persist_message(PersistMessageInput {
-        message_id: intent.requested_message_id.as_deref(),
-        owner_team_id: intent.owner_team_id.as_ref().map(TeamKey::as_str),
-        task_id: intent.task_id.as_ref().map(TaskId::as_str),
-        sender: intent.sender.display_name(),
-        recipient: intent.recipient.as_str(),
-        reply_to: intent.reply_to.as_deref(),
-        requires_ack: intent.requires_ack,
-        status,
-        content: &intent.content,
-        presentation: &presentation,
-        error: intent.initial_disposition.error(),
-    })?;
-    Ok(PersistResolution::Persisted(PersistedSend {
-        message_id,
-        owner_team_id: intent.owner_team_id.clone(),
-        recipient: intent.recipient.clone(),
-        row_status: status,
-        blocker: match intent.initial_disposition {
-            InitialDisposition::Blocked(blocker) => Some(blocker),
-            InitialDisposition::Accepted
-            | InitialDisposition::StoredOnly
-            | InitialDisposition::QueuedUntilLeaderAttach => None,
-        },
-    }))
+    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
 }
 
 #[allow(clippy::too_many_arguments)]

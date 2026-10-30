@@ -9,7 +9,6 @@ use std::path::Path;
 use team_agent_contract::contract::types::SeatId;
 use team_agent_contract::host::process::{sample_process, ProcessState};
 use team_agent_contract::orchestration::{
-    operator::OperatorSend,
     store::{Outcome, SeatStatus},
 };
 
@@ -270,66 +269,6 @@ pub fn project_seat(workspace: &Path, team: &str, id: &str) -> Result<Value, Bac
         "mcp_binding":binding_status,"mcp_binding_source":binding_source,"mcp_tools":tools,
         "bootstrap_used":seat.bootstrap_used}),
     )
-}
-
-pub fn enqueue(
-    workspace: &Path,
-    state: &Value,
-    recipient: &str,
-    content: &str,
-    options: &crate::messaging::SendOptions,
-) -> Result<crate::messaging::DeliveryOutcome, crate::messaging::MessagingError> {
-    use crate::messaging::{DeliveryOutcome, DeliveryStatus, MessagingError};
-    let error = |error: String| MessagingError::Validation(error);
-    let team = crate::state::projection::team_state_key(state);
-    let mut backend = Backend::open(workspace, &team).map_err(|e| error(e.to_string()))?;
-    let request = OperatorSend {
-        recipient: SeatId::new(recipient).map_err(|e| error(e.to_string()))?,
-        content: content.into(),
-        task: options.task_id.as_ref().map(|task| task.as_str().into()),
-        message: options
-            .message_id
-            .clone()
-            .map(team_agent_contract::contract::types::MessageId::new)
-            .transpose()
-            .map_err(|e| error(e.to_string()))?,
-        mailbox: options.presentation.sink
-            == crate::messaging::presentation::PresentationSink::Casefile,
-    };
-    let sender = SeatId::new(options.sender.as_str()).map_err(|e| error(e.to_string()))?;
-    let receipt = backend
-        .store
-        .send_from_framework(&request, &sender)
-        .map_err(|e| error(e.to_string()))?;
-    // Queued is durable admission only. The coordinator consumes this outbox;
-    // CLI send never performs its own paste or repeats an uncertain attempt.
-    Ok(DeliveryOutcome {
-        ok: true,
-        status: if receipt.mailbox {
-            DeliveryStatus::StoredOnly
-        } else {
-            DeliveryStatus::Queued
-        },
-        message_status: crate::messaging::helpers::MessageStatusShadow(
-            if receipt.mailbox {
-                "stored_only"
-            } else {
-                "accepted"
-            }
-            .into(),
-        ),
-        message_id: Some(receipt.message.as_str().into()),
-        verification: Some(
-            json!({"runtime":"contract","task_id":receipt.task,
-            "target":receipt.target,"native_submission":"not_observed"})
-            .to_string(),
-        ),
-        stage: None,
-        reason: None,
-        channel: None,
-        ack_forced_off: false,
-        turn_verification: None,
-    })
 }
 
 pub fn stop_selected(workspace: &Path, state: &Value) -> Result<Vec<Value>, BackendError> {

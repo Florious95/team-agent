@@ -541,11 +541,6 @@ pub(crate) fn fork_pi_new_seat_locked(
                 &updated_target,
             )
             .map_err(|error| LifecycleError::StatePersist(error.to_string()))?;
-        let _ = crate::db::agent_health_capture::clear_agent_health_observation(
-            run_workspace,
-            team_key,
-            target_agent_id,
-        );
         phase = "p5_receipt";
         let staged_file = staged.as_ref().ok_or_else(|| {
             LifecycleError::StatePersist("Pi fork snapshot staging was lost".to_string())

@@ -1,51 +1,20 @@
-use std::path::{Path, PathBuf};
-use std::time::Duration;
-
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
+use super::{
+    projection::{self, Key, Projections, ReadRecords, WriteBatch},
+    Error,
+};
+use crate::contract::{
+    delivery::DeliveryEffect,
+    plan::OwnedResourceReceipt,
+    probe::ProcessIdentity,
+    session::{CwdIdentity, ResumeBinding},
+    types::*,
+};
 use serde::{Deserialize, Serialize};
-
-use super::Error;
-use crate::contract::delivery::DeliveryEffect;
-use crate::contract::plan::OwnedResourceReceipt;
-use crate::contract::probe::ProcessIdentity;
-use crate::contract::session::{CwdIdentity, ResumeBinding};
-use crate::contract::types::*;
-
-const APPLICATION_ID: i64 = 0x54414333;
-const SCHEMA: &str = "
-PRAGMA application_id=1413563187;
-PRAGMA user_version=4;
-CREATE TABLE contract_meta(scope TEXT NOT NULL, endpoint TEXT NOT NULL, root TEXT NOT NULL,
- incarnation TEXT NOT NULL, result_route TEXT);
-CREATE TABLE contract_framework_peers(recipient TEXT PRIMARY KEY, record TEXT NOT NULL);
-CREATE TABLE contract_forwards(id TEXT PRIMARY KEY, state TEXT NOT NULL, record TEXT NOT NULL);
-CREATE TABLE contract_connections(connection TEXT PRIMARY KEY, identity TEXT NOT NULL, record TEXT NOT NULL);
-CREATE TABLE contract_seats(seat TEXT PRIMARY KEY, record TEXT NOT NULL);
-CREATE TABLE contract_generations(seat TEXT PRIMARY KEY, generation INTEGER NOT NULL);
-CREATE TABLE contract_instances(instance TEXT PRIMARY KEY, seat TEXT NOT NULL, generation INTEGER NOT NULL);
-CREATE TABLE contract_operations(id TEXT PRIMARY KEY, record TEXT NOT NULL);
-CREATE TABLE contract_leases(seat TEXT PRIMARY KEY, operation TEXT NOT NULL);
-CREATE TABLE contract_bootstrap(owner TEXT PRIMARY KEY, attempt TEXT NOT NULL UNIQUE,
- confirmed INTEGER NOT NULL CHECK(confirmed IN (0,1)));
-CREATE TABLE contract_calls(caller TEXT NOT NULL, call_key TEXT NOT NULL, request TEXT NOT NULL, response TEXT NOT NULL,
- PRIMARY KEY(caller,call_key));
-CREATE TABLE contract_facts(caller TEXT NOT NULL, call_key TEXT NOT NULL, fact TEXT NOT NULL,
- PRIMARY KEY(caller,call_key,fact));
-CREATE TABLE contract_sequence(id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL);
-INSERT INTO contract_sequence VALUES(1,0);
-CREATE TABLE messages(message_id TEXT PRIMARY KEY, owner_team_id TEXT NOT NULL, task_id TEXT,
- sender TEXT NOT NULL, recipient TEXT NOT NULL, status TEXT NOT NULL, content TEXT NOT NULL,
- presentation TEXT NOT NULL, delivery_attempts INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE results(result_id TEXT PRIMARY KEY, owner_team_id TEXT NOT NULL, task_id TEXT NOT NULL,
- agent_id TEXT NOT NULL, envelope TEXT NOT NULL, status TEXT NOT NULL,
- UNIQUE(owner_team_id,task_id,agent_id));
-CREATE TABLE contract_outbox(message_id TEXT PRIMARY KEY REFERENCES messages(message_id), target TEXT NOT NULL,
- state TEXT NOT NULL, attempt TEXT, effect TEXT NOT NULL);
-";
-/// Additive and created on first retirement: user_version 4 stores stay
-/// readable by binaries that never query it.
-const RETIREMENTS: &str = "CREATE TABLE IF NOT EXISTS contract_retirements(instance TEXT PRIMARY KEY,
- seat TEXT NOT NULL, record TEXT NOT NULL);";
+use std::{
+    cell::RefCell,
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SeatStatus {
@@ -129,17 +98,25 @@ pub struct OperationRecord {
     pub failure: Option<String>,
 }
 
-pub struct ContractStore {
-    pub(crate) connection: Connection,
+/// Compatibility spelling; all implementation and runtime admission use file projections.
+pub type ContractStore = ProjectionStore;
+
+#[derive(Serialize, Deserialize)]
+struct Manifest {
+    v: u8,
+    kind: String,
     scope: ScopeId,
     root: PathBuf,
     endpoint: String,
 }
-
-/// Lifecycle authority, separate from protocol connections/calls/facts. A C4
-/// implementation must borrow the held target seat lock; it must not be enabled
-/// until every admission reader uses the same authority. ContractStore remains
-/// the default implementation, so extracting this port does not switch writers.
+pub struct ProjectionStore {
+    pub(crate) files: Projections,
+    scope: ScopeId,
+    root: PathBuf,
+    endpoint: String,
+    // Optimistic write tokens, not cached authority. Every save rechecks under locks.
+    revisions: RefCell<BTreeMap<String, u64>>,
+}
 pub trait SeatAuthority {
     fn scope(&self) -> &ScopeId;
     fn root(&self) -> &Path;
@@ -149,7 +126,11 @@ pub trait SeatAuthority {
     fn propose_identity(&self, seat: &SeatId) -> Result<InstanceIdentity, Error>;
     fn assert_current(&self, identity: &InstanceIdentity) -> Result<SeatRecord, Error>;
     fn operation(&self, id: &OperationId) -> Result<OperationRecord, Error>;
-    fn creation_receipt(&self, seat: &SeatId, identity: Option<&InstanceIdentity>) -> Result<Option<OperationRecord>, Error>;
+    fn creation_receipt(
+        &self,
+        seat: &SeatId,
+        identity: Option<&InstanceIdentity>,
+    ) -> Result<Option<OperationRecord>, Error>;
     fn unfinished(&self) -> Result<Vec<OperationRecord>, Error>;
     fn leased(&self, seat: &SeatId) -> Result<bool, Error>;
     fn retire(&mut self, identity: &InstanceIdentity) -> Result<SeatRecord, Error>;
@@ -158,65 +139,91 @@ pub trait SeatAuthority {
     fn save(&mut self, operation: &OperationRecord, publish: bool) -> Result<(), Error>;
 }
 
-impl SeatAuthority for ContractStore {
-    fn scope(&self) -> &ScopeId { ContractStore::scope(self) }
-    fn root(&self) -> &Path { ContractStore::root(self) }
-    fn endpoint(&self) -> &str { ContractStore::endpoint(self) }
-    fn seat(&self, seat: &SeatId) -> Result<Option<SeatRecord>, Error> { ContractStore::seat(self, seat) }
-    fn seats(&self) -> Result<Vec<SeatRecord>, Error> { ContractStore::seats(self) }
-    fn propose_identity(&self, seat: &SeatId) -> Result<InstanceIdentity, Error> { ContractStore::propose_identity(self, seat) }
-    fn assert_current(&self, identity: &InstanceIdentity) -> Result<SeatRecord, Error> { ContractStore::assert_current(self, identity) }
-    fn operation(&self, id: &OperationId) -> Result<OperationRecord, Error> { ContractStore::operation(self, id) }
-    fn creation_receipt(&self, seat: &SeatId, identity: Option<&InstanceIdentity>) -> Result<Option<OperationRecord>, Error> { ContractStore::creation_receipt(self, seat, identity) }
-    fn unfinished(&self) -> Result<Vec<OperationRecord>, Error> { ContractStore::unfinished(self) }
-    fn leased(&self, seat: &SeatId) -> Result<bool, Error> { ContractStore::leased(self, seat) }
-    fn retire(&mut self, identity: &InstanceIdentity) -> Result<SeatRecord, Error> { ContractStore::retire(self, identity) }
-    fn retired(&self, identity: &InstanceIdentity) -> Result<bool, Error> { ContractStore::retired(self, identity) }
-    fn begin(&mut self, operation: &OperationRecord) -> Result<(), Error> { ContractStore::begin(self, operation) }
-    fn save(&mut self, operation: &OperationRecord, publish: bool) -> Result<(), Error> { ContractStore::save(self, operation, publish) }
+impl SeatAuthority for ProjectionStore {
+    fn scope(&self) -> &ScopeId {
+        ProjectionStore::scope(self)
+    }
+    fn root(&self) -> &Path {
+        ProjectionStore::root(self)
+    }
+    fn endpoint(&self) -> &str {
+        ProjectionStore::endpoint(self)
+    }
+    fn seat(&self, seat: &SeatId) -> Result<Option<SeatRecord>, Error> {
+        ProjectionStore::seat(self, seat)
+    }
+    fn seats(&self) -> Result<Vec<SeatRecord>, Error> {
+        ProjectionStore::seats(self)
+    }
+    fn propose_identity(&self, seat: &SeatId) -> Result<InstanceIdentity, Error> {
+        ProjectionStore::propose_identity(self, seat)
+    }
+    fn assert_current(&self, identity: &InstanceIdentity) -> Result<SeatRecord, Error> {
+        ProjectionStore::assert_current(self, identity)
+    }
+    fn operation(&self, id: &OperationId) -> Result<OperationRecord, Error> {
+        ProjectionStore::operation(self, id)
+    }
+    fn creation_receipt(
+        &self,
+        seat: &SeatId,
+        identity: Option<&InstanceIdentity>,
+    ) -> Result<Option<OperationRecord>, Error> {
+        ProjectionStore::creation_receipt(self, seat, identity)
+    }
+    fn unfinished(&self) -> Result<Vec<OperationRecord>, Error> {
+        ProjectionStore::unfinished(self)
+    }
+    fn leased(&self, seat: &SeatId) -> Result<bool, Error> {
+        ProjectionStore::leased(self, seat)
+    }
+    fn retire(&mut self, identity: &InstanceIdentity) -> Result<SeatRecord, Error> {
+        ProjectionStore::retire(self, identity)
+    }
+    fn retired(&self, identity: &InstanceIdentity) -> Result<bool, Error> {
+        ProjectionStore::retired(self, identity)
+    }
+    fn begin(&mut self, operation: &OperationRecord) -> Result<(), Error> {
+        ProjectionStore::begin(self, operation)
+    }
+    fn save(&mut self, operation: &OperationRecord, publish: bool) -> Result<(), Error> {
+        ProjectionStore::save(self, operation, publish)
+    }
 }
 
-/// The root is an exclusive, private framework directory. It must not be an old
-/// workspace. No migration/adoption path exists. Same-user hostile writers are
-/// outside this DB boundary; host owned-I/O must still enforce fresh ownership.
-impl ContractStore {
+impl ProjectionStore {
     pub fn create(root: &Path, scope: ScopeId, endpoint: &str) -> Result<Self, Error> {
-        require_absolute(root, "store root")?;
-        if endpoint.trim().is_empty() {
-            return Err(Error::Invalid("endpoint"));
+        if !root.is_absolute() || !nonblank(endpoint) {
+            return Err(Error::Invalid("store identity"));
         }
-        validate_ancestors(root.parent().ok_or(Error::Invalid("root parent"))?)?;
+        projection::validate_ancestors(root.parent().ok_or(Error::Fence)?)?;
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
             builder.mode(0o700);
         }
-        builder.create(root)?; // exclusive: even an empty pre-existing root is refused
-        let connection = Connection::open_with_flags(
-            root.join("contract.db"),
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_CREATE
-                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )?;
-        configure(&connection)?;
-        connection.execute_batch(SCHEMA)?;
-        connection.execute(
-            "INSERT INTO contract_meta VALUES(?1,?2,?3,lower(hex(randomblob(16))),NULL)",
-            params![
-                scope.as_str(),
-                endpoint,
-                root.to_str().ok_or(Error::Invalid("root utf8"))?
-            ],
+        builder.create(root)?;
+        let files = Projections::new(root, false);
+        files.initialize()?;
+        projection::immutable_json(
+            &root.join("contract.json"),
+            &Manifest {
+                v: 1,
+                kind: "contract_projection".into(),
+                scope: scope.clone(),
+                root: root.into(),
+                endpoint: endpoint.into(),
+            },
         )?;
         Ok(Self {
-            connection,
+            files,
             scope,
-            root: root.to_path_buf(),
+            root: root.into(),
             endpoint: endpoint.into(),
+            revisions: RefCell::new(BTreeMap::new()),
         })
     }
-
     pub fn open(root: &Path, scope: ScopeId, endpoint: &str) -> Result<Self, Error> {
         Self::open_mode(root, scope, endpoint, false)
     }
@@ -229,8 +236,7 @@ impl ContractStore {
         endpoint: &str,
         readonly: bool,
     ) -> Result<Self, Error> {
-        require_absolute(root, "store root")?;
-        validate_ancestors(root)?;
+        projection::validate_ancestors(root)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -238,49 +244,25 @@ impl ContractStore {
                 return Err(Error::Fence);
             }
         }
-        let path = root.join("contract.db");
-        let meta = std::fs::symlink_metadata(&path)?;
-        if !meta.is_file() || meta.file_type().is_symlink() {
-            return Err(Error::Fence);
-        }
-        let connection = Connection::open_with_flags(
-            path,
-            (if readonly {
-                OpenFlags::SQLITE_OPEN_READ_ONLY
-            } else {
-                OpenFlags::SQLITE_OPEN_READ_WRITE
-            }) | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        let manifest: Manifest = projection::read_json(&root.join("contract.json"))?.ok_or(
+            Error::Invalid("legacy contract store requires explicit migration"),
         )?;
-        // Verify identity before pragmas, migrations, or writes.
-        let app: i64 = connection.query_row("PRAGMA application_id", [], |r| r.get(0))?;
-        let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if app != APPLICATION_ID || version != 4 {
-            return Err(Error::Fence);
-        }
-        let stored: (String, String, String) =
-            connection.query_row("SELECT scope,endpoint,root FROM contract_meta", [], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-            })?;
-        if stored
-            != (
-                scope.as_str().into(),
-                endpoint.into(),
-                root.to_str().ok_or(Error::Fence)?.into(),
-            )
+        if manifest.v != 1
+            || manifest.kind != "contract_projection"
+            || manifest.scope != scope
+            || manifest.root != root
+            || manifest.endpoint != endpoint
         {
             return Err(Error::Fence);
         }
-        if !readonly {
-            configure(&connection)?;
-        }
         Ok(Self {
-            connection,
+            files: Projections::new(root, readonly),
             scope,
             root: root.into(),
             endpoint: endpoint.into(),
+            revisions: RefCell::new(BTreeMap::new()),
         })
     }
-
     pub fn scope(&self) -> &ScopeId {
         &self.scope
     }
@@ -291,121 +273,103 @@ impl ContractStore {
         &self.endpoint
     }
     pub fn seat(&self, seat: &SeatId) -> Result<Option<SeatRecord>, Error> {
-        load_seat(&self.connection, seat)
+        load_seat(&self.files, seat)
     }
-    /// Read-only allocation proposal. Lifecycle::begin still atomically fences
-    /// the generation and unique instance; concurrent proposals cannot both win.
+    pub fn seats(&self) -> Result<Vec<SeatRecord>, Error> {
+        let mut seats: Vec<SeatRecord> = self.files.list("seats")?;
+        if seats.iter().any(|s| s.identity.scope != self.scope) {
+            return Err(Error::Fence);
+        }
+        seats.sort_by(|a, b| a.identity.seat.as_str().cmp(b.identity.seat.as_str()));
+        Ok(seats)
+    }
     pub fn propose_identity(&self, seat: &SeatId) -> Result<InstanceIdentity, Error> {
-        let previous: Option<u64> = self
-            .connection
-            .query_row(
-                "SELECT generation FROM contract_generations WHERE seat=?1",
-                [seat.as_str()],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let generation = previous
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or(Error::Invalid("generation overflow"))?;
-        let instance: String =
-            self.connection
-                .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+        let generation: u64 = self
+            .files
+            .get(&Key::new("generations", seat.as_str()))?
+            .unwrap_or(0);
         Ok(InstanceIdentity {
             scope: self.scope.clone(),
             seat: seat.clone(),
-            instance: InstanceId::new(format!("instance-{instance}"))?,
-            generation: Generation(generation),
+            generation: Generation(
+                generation
+                    .checked_add(1)
+                    .ok_or(Error::Invalid("generation overflow"))?,
+            ),
+            instance: InstanceId::new(format!("instance-{}", projection::nonce()))?,
         })
     }
-    pub fn seats(&self) -> Result<Vec<SeatRecord>, Error> {
-        let mut statement = self
-            .connection
-            .prepare("SELECT record FROM contract_seats ORDER BY seat")?;
-        let rows = statement.query_map([], |r| r.get::<_, String>(0))?;
-        rows.map(|r| Ok(serde_json::from_str(&r?)?)).collect()
-    }
     pub fn operation(&self, id: &OperationId) -> Result<OperationRecord, Error> {
-        let raw: String = self.connection.query_row(
-            "SELECT record FROM contract_operations WHERE id=?1",
-            [id.as_str()],
-            |r| r.get(0),
-        )?;
-        Ok(serde_json::from_str(&raw)?)
-    }
-    /// Bounded read-only creation receipt lookup. An exact identity never falls
-    /// back to another generation; None selects the last creation for this seat.
-    pub fn creation_receipt(&self, seat: &SeatId, identity: Option<&InstanceIdentity>) -> Result<Option<OperationRecord>, Error> {
-        if identity.is_some_and(|id| id.scope != self.scope || &id.seat != seat) { return Err(Error::Fence); }
-        let raw: Option<String> = self.connection.query_row(
-            "SELECT record FROM contract_operations WHERE json_extract(record,'$.target.identity.scope')=?1
-             AND json_extract(record,'$.target.identity.seat')=?2
-             AND json_extract(record,'$.kind') IN ('Startup','Restart','NewSeatFullSnapshot','NativeNewSeat')
-             AND (?3 IS NULL OR json_extract(record,'$.target.identity.instance')=?3)
-             ORDER BY json_extract(record,'$.target.identity.generation') DESC,rowid DESC LIMIT 1",
-            params![self.scope.as_str(), seat.as_str(), identity.map(|id| id.instance.as_str())],
-            |row| row.get(0),
-        ).optional()?;
-        let receipt: Option<OperationRecord> = raw.map(|raw| serde_json::from_str(&raw)).transpose()?;
-        if receipt.as_ref().is_some_and(|record| identity.is_some_and(|id| &record.target.identity != id)) {
+        let (revision, operation) = self
+            .files
+            .versioned::<OperationRecord>(&Key::new("operations", id.as_str()))?;
+        let operation = operation.ok_or(Error::Fence)?;
+        if operation.target.identity.scope != self.scope {
             return Err(Error::Fence);
         }
-        Ok(receipt)
+        self.revisions
+            .borrow_mut()
+            .insert(id.as_str().into(), revision);
+        Ok(operation)
     }
-
+    pub fn creation_receipt(
+        &self,
+        seat: &SeatId,
+        identity: Option<&InstanceIdentity>,
+    ) -> Result<Option<OperationRecord>, Error> {
+        if identity.is_some_and(|i| i.scope != self.scope || i.seat != *seat) {
+            return Err(Error::Fence);
+        }
+        let key = identity
+            .map(|i| Key::new("creation_instances", i.instance.as_str()))
+            .unwrap_or_else(|| Key::new("creation", seat.as_str()));
+        let Some(id) = self.files.get::<OperationId>(&key)? else {
+            return Ok(None);
+        };
+        let record = self.operation(&id)?;
+        if record.target.identity.seat != *seat
+            || identity.is_some_and(|i| i != &record.target.identity)
+        {
+            return Err(Error::Fence);
+        }
+        Ok(Some(record))
+    }
     pub fn unfinished(&self) -> Result<Vec<OperationRecord>, Error> {
-        let mut statement = self
-            .connection
-            .prepare("SELECT record FROM contract_operations ORDER BY id")?;
-        let rows = statement.query_map([], |r| r.get::<_, String>(0))?;
-        let all: Vec<OperationRecord> = rows
-            .map(|r| Ok(serde_json::from_str(&r?)?))
-            .collect::<Result<_, Error>>()?;
-        Ok(all
+        Ok(self
+            .files
+            .list::<OperationRecord>("operations")?
             .into_iter()
             .filter(|r| matches!(r.outcome, Outcome::Running | Outcome::NeedsRecovery))
             .collect())
     }
     pub fn assert_current(&self, identity: &InstanceIdentity) -> Result<SeatRecord, Error> {
-        current(&self.connection, &self.scope, identity)
+        current(&self.files, &self.scope, identity)
     }
-    /// A held lease is an in-flight lifecycle operation, registry inspection or
-    /// delivery attempt. Observation only; it never takes or releases one.
     pub fn leased(&self, seat: &SeatId) -> Result<bool, Error> {
-        Ok(self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM contract_leases WHERE seat=?1)",
-            [seat.as_str()],
-            |r| r.get(0),
-        )?)
+        Ok(self
+            .files
+            .get::<String>(&Key::new("leases", seat.as_str()))?
+            .is_some())
     }
-    /// Explicit end of a seat identity (remove-agent / reset-agent). Only the
-    /// exact current, positively Stopped and unleased seat may retire. Creation
-    /// receipts and the generation counter stay as history, so a later start
-    /// of this ID allocates the next generation fresh and never resumes the
-    /// retired native session. Stores created before this table get it here.
     pub fn retire(&mut self, identity: &InstanceIdentity) -> Result<SeatRecord, Error> {
-        let scope = self.scope.clone();
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute_batch(RETIREMENTS)?;
-        let seat = current(&tx, &scope, identity)?;
+        let current_seat = self.assert_current(identity)?;
+        let mut keys = route_keys(&current_seat);
+        keys.extend([
+            Key::new("seats", identity.seat.as_str()),
+            Key::new("leases", identity.seat.as_str()),
+            Key::new("retirements", identity.instance.as_str()),
+        ]);
+        let mut tx = self.files.write(keys)?;
+        let seat = current(&tx, &self.scope, identity)?;
+        if seat != current_seat {
+            return Err(Error::Conflict);
+        }
         if seat.status != SeatStatus::Stopped {
             return Err(Error::Invalid("only a stopped seat can retire"));
         }
         lifecycle_unleased(&tx, &identity.seat)?;
-        tx.execute(
-            "INSERT INTO contract_retirements VALUES(?1,?2,?3)",
-            params![
-                identity.instance.as_str(),
-                identity.seat.as_str(),
-                serde_json::to_string(&seat)?
-            ],
-        )?;
-        tx.execute(
-            "DELETE FROM contract_seats WHERE seat=?1",
-            [identity.seat.as_str()],
-        )?;
+        tx.put(Key::new("retirements", identity.instance.as_str()), &seat)?;
+        tx.delete(Key::new("seats", identity.seat.as_str()))?;
         tx.commit()?;
         Ok(seat)
     }
@@ -413,33 +377,41 @@ impl ContractStore {
         if identity.scope != self.scope {
             return Err(Error::Fence);
         }
-        let table: bool = self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='contract_retirements')",
-            [],
-            |r| r.get(0),
-        )?;
-        Ok(table
-            && self.connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM contract_retirements WHERE instance=?1 AND seat=?2)",
-                params![identity.instance.as_str(), identity.seat.as_str()],
-                |r| r.get(0),
-            )?)
+        Ok(self
+            .files
+            .get::<SeatRecord>(&Key::new("retirements", identity.instance.as_str()))?
+            .is_some_and(|s| s.identity == *identity))
     }
-
     pub(crate) fn begin(&mut self, operation: &OperationRecord) -> Result<(), Error> {
-        if operation.target.identity.scope != self.scope
-            || (!matches!(
-                operation.kind,
-                TransactionKind::InWindowBranch | TransactionKind::Teardown
-            ) && operation.target.endpoint != self.endpoint)
-        {
+        let target = &operation.target.identity;
+        let creates = !matches!(
+            operation.kind,
+            TransactionKind::InWindowBranch | TransactionKind::Teardown
+        );
+        if target.scope != self.scope || (creates && operation.target.endpoint != self.endpoint) {
             return Err(Error::Fence);
         }
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let target = &operation.target.identity;
-        route_available(&tx, &operation.target)?;
+        let mut keys = operation_keys(operation);
+        keys.extend([
+            Key::new("generations", target.seat.as_str()),
+            Key::new("instances", target.instance.as_str()),
+            Key::new("creation", target.seat.as_str()),
+            Key::new("creation_instances", target.instance.as_str()),
+            Key::new("peers", target.seat.as_str()),
+        ]);
+        let mut tx = self.files.write(keys)?;
+        if tx
+            .get::<OperationRecord>(&Key::new("operations", operation.id.as_str()))?
+            .is_some()
+        {
+            return Err(Error::Conflict);
+        }
+        if tx
+            .get::<serde_json::Value>(&Key::new("peers", target.seat.as_str()))?
+            .is_some()
+        {
+            return Err(Error::Conflict);
+        }
         let old = load_seat(&tx, &target.seat)?;
         match operation.kind {
             TransactionKind::Startup
@@ -474,64 +446,68 @@ impl ContractStore {
                 lifecycle_unleased(&tx, &parent.identity.seat)?;
             }
         }
-        if !matches!(
-            operation.kind,
-            TransactionKind::InWindowBranch | TransactionKind::Teardown
-        ) {
-            let previous: Option<u64> = tx
-                .query_row(
-                    "SELECT generation FROM contract_generations WHERE seat=?1",
-                    [target.seat.as_str()],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            if previous.unwrap_or(0).checked_add(1) != Some(target.generation.0) {
+        claim_routes(&mut tx, operation)?;
+        if creates {
+            let previous: u64 = tx
+                .get(&Key::new("generations", target.seat.as_str()))?
+                .unwrap_or(0);
+            if previous.checked_add(1) != Some(target.generation.0)
+                || tx
+                    .get::<InstanceIdentity>(&Key::new("instances", target.instance.as_str()))?
+                    .is_some()
+            {
                 return Err(Error::Fence);
             }
-            tx.execute(
-                "INSERT INTO contract_instances VALUES(?1,?2,?3)",
-                params![
-                    target.instance.as_str(),
-                    target.seat.as_str(),
-                    target.generation.0
-                ],
+            tx.put(
+                Key::new("generations", target.seat.as_str()),
+                &target.generation.0,
             )?;
-            tx.execute("INSERT INTO contract_generations VALUES(?1,?2) ON CONFLICT(seat) DO UPDATE SET generation=excluded.generation", params![target.seat.as_str(),target.generation.0])?;
+            tx.put(Key::new("instances", target.instance.as_str()), target)?;
+            tx.put(Key::new("creation", target.seat.as_str()), &operation.id)?;
+            tx.put(
+                Key::new("creation_instances", target.instance.as_str()),
+                &operation.id,
+            )?;
         }
-        tx.execute(
-            "INSERT INTO contract_leases VALUES(?1,?2)",
-            params![target.seat.as_str(), operation.id.as_str()],
-        )?;
+        tx.put(Key::new("leases", target.seat.as_str()), &operation.id)?;
         if let Some(parent) = &operation.parent {
             if parent.identity.seat != target.seat {
-                tx.execute(
-                    "INSERT INTO contract_leases VALUES(?1,?2)",
-                    params![parent.identity.seat.as_str(), operation.id.as_str()],
+                tx.put(
+                    Key::new("leases", parent.identity.seat.as_str()),
+                    &operation.id,
                 )?;
             }
         }
-        tx.execute(
-            "INSERT INTO contract_operations VALUES(?1,?2)",
-            params![operation.id.as_str(), serde_json::to_string(operation)?],
-        )?;
+        tx.put(Key::new("operations", operation.id.as_str()), operation)?;
         tx.commit()?;
+        self.revisions
+            .borrow_mut()
+            .insert(operation.id.as_str().into(), 1);
         Ok(())
     }
-
-    /// Lease-CAS protects every phase and registration update. Record + seat +
-    /// lease release share a single transaction, including failure compensation.
     pub(crate) fn save(&mut self, operation: &OperationRecord, publish: bool) -> Result<(), Error> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let lease: Option<String> = tx
-            .query_row(
-                "SELECT operation FROM contract_leases WHERE seat=?1",
-                [operation.target.identity.seat.as_str()],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if lease.as_deref() != Some(operation.id.as_str()) {
+        let op_key = Key::new("operations", operation.id.as_str());
+        let expected = *self
+            .revisions
+            .borrow()
+            .get(operation.id.as_str())
+            .ok_or(Error::Fence)?;
+        let previous: OperationRecord = self.files.get(&op_key)?.ok_or(Error::Fence)?;
+        if previous.target.identity != operation.target.identity
+            || previous.kind != operation.kind
+            || operation.target.identity.scope != self.scope
+        {
+            return Err(Error::Fence);
+        }
+        let mut keys = operation_keys(operation);
+        keys.extend(operation_keys(&previous));
+        let mut tx = self.files.write(keys)?;
+        tx.expect_revision(&op_key, expected)?;
+        if tx
+            .get::<String>(&Key::new("leases", operation.target.identity.seat.as_str()))?
+            .as_deref()
+            != Some(operation.id.as_str())
+        {
             return Err(Error::Fence);
         }
         let rollback = operation.outcome == Outcome::Compensated;
@@ -540,13 +516,7 @@ impl ContractStore {
                 || (!publish && matches!(operation.phase, Phase::F0Preflight | Phase::F1Stage)))
         {
             if let Some(parent) = &operation.parent {
-                tx.execute(
-                    "UPDATE contract_seats SET record=?1 WHERE seat=?2",
-                    params![
-                        serde_json::to_string(parent)?,
-                        parent.identity.seat.as_str()
-                    ],
-                )?;
+                tx.put(Key::new("seats", parent.identity.seat.as_str()), parent)?;
             }
         }
         if rollback
@@ -561,149 +531,138 @@ impl ContractStore {
                 if current.identity != operation.target.identity {
                     return Err(Error::Fence);
                 }
-                tx.execute(
-                    "DELETE FROM contract_seats WHERE seat=?1",
-                    [operation.target.identity.seat.as_str()],
-                )?;
+                tx.delete(Key::new("seats", operation.target.identity.seat.as_str()))?;
             }
         } else if publish && !(rollback && operation.kind == TransactionKind::Restart) {
-            route_available(&tx, &operation.target)?;
-            tx.execute("INSERT INTO contract_seats VALUES(?1,?2) ON CONFLICT(seat) DO UPDATE SET record=excluded.record",
-                params![operation.target.identity.seat.as_str(),serde_json::to_string(&operation.target)?])?;
-        }
-        let n = tx.execute(
-            "UPDATE contract_operations SET record=?1 WHERE id=?2",
-            params![serde_json::to_string(operation)?, operation.id.as_str()],
-        )?;
-        if n != 1 {
-            return Err(Error::Fence);
-        }
-        if matches!(operation.outcome, Outcome::Committed | Outcome::Compensated) {
-            tx.execute(
-                "DELETE FROM contract_leases WHERE operation=?1",
-                [operation.id.as_str()],
+            claim_routes(&mut tx, operation)?;
+            tx.put(
+                Key::new("seats", operation.target.identity.seat.as_str()),
+                &operation.target,
             )?;
         }
+        tx.put(op_key, operation)?;
+        if matches!(operation.outcome, Outcome::Committed | Outcome::Compensated) {
+            for seat in std::iter::once(&operation.target.identity.seat).chain(
+                operation
+                    .parent
+                    .iter()
+                    .filter(|p| p.identity.seat != operation.target.identity.seat)
+                    .map(|p| &p.identity.seat),
+            ) {
+                let key = Key::new("leases", seat.as_str());
+                if tx.get::<String>(&key)?.as_deref() != Some(operation.id.as_str()) {
+                    return Err(Error::Fence);
+                }
+                tx.delete(key)?;
+            }
+        }
         tx.commit()?;
+        self.revisions.borrow_mut().insert(
+            operation.id.as_str().into(),
+            expected.checked_add(1).ok_or(Error::Corrupt)?,
+        );
         Ok(())
     }
 }
-
-fn configure(connection: &Connection) -> Result<(), Error> {
-    connection.busy_timeout(Duration::from_secs(5))?;
-    connection.execute_batch(
-        "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
-    )?;
-    Ok(())
-}
-fn validate_ancestors(path: &Path) -> Result<(), Error> {
-    for ancestor in path.ancestors() {
-        let meta = std::fs::symlink_metadata(ancestor)?;
-        if !meta.is_dir() || meta.file_type().is_symlink() {
-            return Err(Error::Fence);
-        }
-    }
-    Ok(())
-}
 pub(crate) fn load_seat(
-    connection: &Connection,
+    store: &impl ReadRecords,
     seat: &SeatId,
 ) -> Result<Option<SeatRecord>, Error> {
-    let raw: Option<String> = connection
-        .query_row(
-            "SELECT record FROM contract_seats WHERE seat=?1",
-            [seat.as_str()],
-            |r| r.get(0),
-        )
-        .optional()?;
-    raw.map(|v| Ok(serde_json::from_str(&v)?)).transpose()
+    store.get(&Key::new("seats", seat.as_str()))
 }
 pub(crate) fn current(
-    connection: &Connection,
+    store: &impl ReadRecords,
     scope: &ScopeId,
     identity: &InstanceIdentity,
 ) -> Result<SeatRecord, Error> {
     if &identity.scope != scope {
         return Err(Error::Fence);
     }
-    let record = load_seat(connection, &identity.seat)?.ok_or(Error::Fence)?;
+    let record = load_seat(store, &identity.seat)?.ok_or(Error::Fence)?;
     if record.identity != *identity {
         return Err(Error::Fence);
     }
     Ok(record)
 }
-fn route_available(connection: &Connection, target: &SeatRecord) -> Result<(), Error> {
-    // Pane IDs are local to a tmux endpoint. The captured binding is globally
-    // unique within this store; neither field is safe to compare on its own.
-    // A Stopped seat's pane was closed and holds no route: a restarted shared
-    // server numbers its panes from %0 again, and the new seat may draw the
-    // old ID. Every later physical action still revalidates the pane binding.
-    let conflict: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM contract_seats WHERE seat<>?1
-         AND json_extract(record,'$.status')<>'Stopped' AND
-         ((json_extract(record,'$.endpoint')=?2 AND json_extract(record,'$.pane')=?3) OR json_extract(record,'$.binding_key')=?4)
-         UNION ALL SELECT 1 FROM contract_operations WHERE json_extract(record,'$.outcome') IN ('Running','NeedsRecovery')
-         AND json_extract(record,'$.target.identity.seat')<>?1 AND
-         ((json_extract(record,'$.target.endpoint')=?2 AND json_extract(record,'$.target.pane')=?3) OR json_extract(record,'$.target.binding_key')=?4))",
-        params![target.identity.seat.as_str(), target.endpoint, target.pane, target.binding_key], |r| r.get(0))?;
-    if conflict {
-        Err(Error::Fence)
-    } else {
-        Ok(())
-    }
-}
-
-/// A retained lifecycle lease is authority, not a broken database connection.
-/// Check it inside begin's write transaction before allocating a new operation;
-/// never overwrite an uncertain spawn/control lease to make teardown succeed.
-fn lifecycle_unleased(connection: &Connection, seat: &SeatId) -> Result<(), Error> {
-    let held: Option<String> = connection
-        .query_row(
-            "SELECT operation FROM contract_leases WHERE seat=?1",
-            [seat.as_str()],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(held) = held else {
+fn lifecycle_unleased(store: &impl ReadRecords, seat: &SeatId) -> Result<(), Error> {
+    let Some(held) = store.get::<String>(&Key::new("leases", seat.as_str()))? else {
         return Ok(());
     };
-    let raw: String = connection.query_row(
-        "SELECT record FROM contract_operations WHERE id=?1",
-        [held],
-        |row| row.get(0),
-    )?;
-    let operation: OperationRecord = serde_json::from_str(&raw)?;
-    Err(if operation.outcome == Outcome::NeedsRecovery {
-        Error::NeedsRecovery
-    } else {
-        Error::Conflict
-    })
+    let operation: Option<OperationRecord> = store.get(&Key::new("operations", held))?;
+    Err(
+        if operation.is_some_and(|op| op.outcome == Outcome::NeedsRecovery) {
+            Error::NeedsRecovery
+        } else {
+            Error::Conflict
+        },
+    )
 }
-
-pub(crate) fn unleased(connection: &Connection, seat: &SeatId) -> Result<(), Error> {
-    let exists: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM contract_leases WHERE seat=?1)",
-        [seat.as_str()],
-        |r| r.get(0),
-    )?;
-    if exists {
+pub(crate) fn unleased(store: &impl ReadRecords, seat: &SeatId) -> Result<(), Error> {
+    if store
+        .get::<String>(&Key::new("leases", seat.as_str()))?
+        .is_some()
+    {
         Err(Error::Conflict)
     } else {
         Ok(())
     }
 }
-pub(crate) fn next_id(connection: &Connection, prefix: &str) -> Result<String, Error> {
-    let n: i64 = connection.query_row(
-        "UPDATE contract_sequence SET value=value+1 WHERE id=1 RETURNING value",
-        [],
-        |r| r.get(0),
-    )?;
-    // Shared-framework forwarding may cross native stores or reopen a logical
-    // scope after teardown. A local counter alone is not a global message key.
-    let incarnation: String =
-        connection.query_row("SELECT incarnation FROM contract_meta", [], |r| r.get(0))?;
-    if incarnation.len() != 32 || !incarnation.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(Error::Corrupt);
+pub(crate) fn next_id(_store: &impl ReadRecords, prefix: &str) -> Result<String, Error> {
+    Ok(format!("{prefix}_{}", projection::nonce()))
+}
+fn route_keys(seat: &SeatRecord) -> Vec<Key> {
+    vec![
+        Key::new("routes", format!("{}\0{}", seat.endpoint, seat.pane)),
+        Key::new("bindings", &seat.binding_key),
+    ]
+}
+fn operation_keys(operation: &OperationRecord) -> Vec<Key> {
+    let mut keys = route_keys(&operation.target);
+    keys.extend([
+        Key::new("operations", operation.id.as_str()),
+        Key::new("seats", operation.target.identity.seat.as_str()),
+        Key::new("leases", operation.target.identity.seat.as_str()),
+    ]);
+    if let Some(parent) = &operation.parent {
+        keys.extend(route_keys(parent));
+        keys.extend([
+            Key::new("seats", parent.identity.seat.as_str()),
+            Key::new("leases", parent.identity.seat.as_str()),
+        ]);
     }
-    Ok(format!("{prefix}_{incarnation}_{n}"))
+    keys
+}
+#[derive(Serialize, Deserialize)]
+struct RouteClaim {
+    seat: SeatId,
+    operation: OperationId,
+}
+fn claim_routes(tx: &mut WriteBatch<'_>, operation: &OperationRecord) -> Result<(), Error> {
+    let target = &operation.target;
+    for key in route_keys(target) {
+        if let Some(owner) = tx.get::<RouteClaim>(&key)? {
+            if owner.seat != target.identity.seat {
+                let live = load_seat(tx, &owner.seat)?.is_some_and(|s| {
+                    s.status != SeatStatus::Stopped && route_keys(&s).contains(&key)
+                });
+                let pending = tx
+                    .get::<OperationRecord>(&Key::new("operations", owner.operation.as_str()))?
+                    .is_some_and(|o| {
+                        matches!(o.outcome, Outcome::Running | Outcome::NeedsRecovery)
+                            && route_keys(&o.target).contains(&key)
+                    });
+                if live || pending {
+                    return Err(Error::Fence);
+                }
+            }
+        }
+        tx.put(
+            key,
+            &RouteClaim {
+                seat: target.identity.seat.clone(),
+                operation: operation.id.clone(),
+            },
+        )?;
+    }
+    Ok(())
 }

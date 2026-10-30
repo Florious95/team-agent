@@ -20,19 +20,7 @@ pub fn inbox(
     limit: usize,
     owner_team_id: Option<&str>,
 ) -> Result<Value, CliError> {
-    let store = crate::message_store::MessageStore::open(workspace)
-        .map_err(|e| CliError::Runtime(e.to_string()))?;
-    let messages = store
-        .inbox(agent, limit, owner_team_id)
-        .map_err(|e| CliError::Runtime(e.to_string()))?
-        .into_iter()
-        .map(compact_message)
-        .collect::<Vec<_>>();
-    Ok(json!({
-        "ok": true,
-        "agent_id": agent,
-        "messages": messages,
-    }))
+    crate::inbox_store::read(workspace, agent, limit, owner_team_id).map_err(CliError::Runtime)
 }
 
 fn compact_message(message: Value) -> Value {

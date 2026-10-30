@@ -277,10 +277,8 @@ pub(crate) fn current_reportable_message_for(
     agent_id: &str,
     owner_team_id: Option<&str>,
 ) -> Option<String> {
-    use crate::db::message_store::MessageStore;
-    let store = MessageStore::open(workspace).ok()?;
-    let conn = crate::db::schema::open_db(store.db_path()).ok()?;
-    current_turn_message_for(workspace, &conn, agent_id, owner_team_id)
+    // SQL turn attribution is retired; MCP uses station::send::submitted_task.
+    None
 }
 
 pub(crate) fn latest_delivered_direct_message_for(
@@ -288,10 +286,7 @@ pub(crate) fn latest_delivered_direct_message_for(
     agent_id: &str,
     owner_team_id: Option<&str>,
 ) -> Option<String> {
-    use crate::db::message_store::MessageStore;
-    let store = MessageStore::open(workspace).ok()?;
-    let conn = crate::db::schema::open_db(store.db_path()).ok()?;
-    latest_reportable_message_from_db(&conn, agent_id, owner_team_id)
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -310,31 +305,7 @@ pub(crate) fn direct_message_attribution_for(
     agent_id: &str,
     owner_team_id: Option<&str>,
 ) -> DirectMessageAttribution {
-    use crate::db::message_store::MessageStore;
-    let Ok(store) = MessageStore::open(workspace) else {
-        return DirectMessageAttribution::None;
-    };
-    let Ok(conn) = crate::db::schema::open_db(store.db_path()) else {
-        return DirectMessageAttribution::None;
-    };
-    if let Some(message_id) = current_turn_message_for(workspace, &conn, agent_id, owner_team_id) {
-        return DirectMessageAttribution::Reportable(message_id);
-    }
-    match latest_direct_message_from_db(&conn, agent_id, owner_team_id) {
-        Some(candidate)
-            if reportable_message_status(&candidate.status, candidate.error.as_deref()) =>
-        {
-            DirectMessageAttribution::Reportable(candidate.message_id)
-        }
-        Some(candidate) if blocks_historical_fallback(&candidate.status) => {
-            DirectMessageAttribution::BlockedByNewer {
-                message_id: candidate.message_id,
-                status: candidate.status,
-                error: candidate.error,
-            }
-        }
-        Some(_) | None => DirectMessageAttribution::None,
-    }
+    DirectMessageAttribution::None
 }
 
 fn current_turn_message_for(

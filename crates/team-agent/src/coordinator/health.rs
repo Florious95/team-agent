@@ -783,50 +783,12 @@ pub fn write_coordinator_metadata(
 /// returns: 打开成功则 ok=true 且 error/action 为空；失败则 ok=false，带 InitFailed 原文与修复 hint。schema_version 恒为当前构建的版本号
 /// ---
 pub(crate) fn message_store_schema_health(workspace: &WorkspacePath) -> SchemaHealth {
-    match MessageStore::open(workspace.as_path()) {
-        Ok(_) => SchemaHealth {
-            ok: true,
-            schema_version: crate::db::schema::SCHEMA_VERSION,
-            error: None,
-            action: None,
-        },
-        Err(e) => SchemaHealth {
-            ok: false,
-            schema_version: crate::db::schema::SCHEMA_VERSION,
-            error: Some(SchemaError::InitFailed {
-                message: e.to_string(),
-            }),
-            action: Some("run team-agent doctor --fix-schema --json".to_string()),
-        },
-    }
+    // Compatibility: the retired SQL schema has no runtime health dependency.
+    SchemaHealth { ok: true, schema_version: 0, error: None, action: None }
 }
 
 fn message_store_schema_health_read_only(workspace: &WorkspacePath) -> SchemaHealth {
-    let action = Some("run team-agent doctor --fix-schema --json".to_string());
-    match crate::db::migration::schema_diagnosis_workspace_read_only(workspace.as_path()) {
-        Ok(diagnosis) if diagnosis.ok && diagnosis.status == "ok" => SchemaHealth {
-            ok: true,
-            schema_version: crate::db::schema::SCHEMA_VERSION,
-            error: None,
-            action: None,
-        },
-        Ok(diagnosis) => SchemaHealth {
-            ok: false,
-            schema_version: crate::db::schema::SCHEMA_VERSION,
-            error: Some(SchemaError::InitFailed {
-                message: format!("team.db status: {}", diagnosis.status),
-            }),
-            action,
-        },
-        Err(error) => SchemaHealth {
-            ok: false,
-            schema_version: crate::db::schema::SCHEMA_VERSION,
-            error: Some(SchemaError::InitFailed {
-                message: error.to_string(),
-            }),
-            action,
-        },
-    }
+    message_store_schema_health(workspace)
 }
 
 fn read_pid_file(path: &Path) -> Option<Pid> {

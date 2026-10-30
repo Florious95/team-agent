@@ -87,7 +87,7 @@ impl Binding {
 }
 
 pub struct Backend {
-    pub store: ContractStore,
+    pub store: ProjectionStore,
     pub binding: Binding,
 }
 
@@ -144,9 +144,9 @@ impl Backend {
             return Err(BackendError::Metadata);
         }
         let store = if readonly {
-            ContractStore::open_readonly(&binding.transport_root, scope, &binding.endpoint)?
+            ProjectionStore::open_readonly(&binding.transport_root, scope, &binding.endpoint)?
         } else {
-            ContractStore::open(&binding.transport_root, scope, &binding.endpoint)?
+            ProjectionStore::open(&binding.transport_root, scope, &binding.endpoint)?
         };
         Ok(Self { store, binding })
     }
@@ -188,7 +188,7 @@ impl Backend {
         // K3 and K2 share the same owned short root. Keeping only the pointer
         // under the project avoids macOS sockaddr_un limits without weakening
         // lifecycle's store-root fence or adopting an existing transport.
-        let store = ContractStore::create(&transport_root, scope.clone(), &endpoint(&scope))?;
+        let store = ProjectionStore::create(&transport_root, scope.clone(), &endpoint(&scope))?;
         let binding = Binding {
             version: 1,
             workspace,

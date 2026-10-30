@@ -795,11 +795,6 @@ fn restart_with_selected_team_and_transport(
             );
             // 0.5.32: fake harness respawn shares the same spawn cohort
             // boundary — clear the matching `agent_health` observation.
-            let _ = crate::db::agent_health_capture::clear_agent_health_observation(
-                &selected.run_workspace,
-                &selected.team_key,
-                &decision.agent_id,
-            );
             successful_agents.push(decision.clone());
             continue;
         }
@@ -971,11 +966,6 @@ fn restart_with_selected_team_and_transport(
         // pair the state-side activity clear with a DB `agent_health` clear so
         // status --json's health projection does not surface the pre-restart
         // WORKING row. Best-effort: DB failure must not fail the restart loop.
-        let _ = crate::db::agent_health_capture::clear_agent_health_observation(
-            &selected.run_workspace,
-            &selected.team_key,
-            &decision.agent_id,
-        );
     }
     // END_B5_RESTART_ISOLATION_LOOP
     if live_worker_session_deferred_teardown {
@@ -2083,56 +2073,16 @@ pub fn restart_leader_public_bind(
 fn maintain_live_binding_index(
     workspace: &std::path::Path,
     team: Option<&str>,
-    state: &serde_json::Value,
+    _state: &serde_json::Value,
 ) -> Option<serde_json::Value> {
-    let team_key = team.unwrap_or("");
     let register = crate::leader::registry::register_binding_from_state_best_effort(
-        workspace,
-        team,
-        "restart-live-index",
+        workspace, team, "restart-live-index",
     );
     let mut report = serde_json::Map::new();
-    if !register
-        .as_ref()
-        .is_some_and(|outcome| outcome.status == "registered")
-    {
-        report.insert("registry_maintain_failed".to_string(), serde_json::json!(true));
+    if !register.as_ref().is_some_and(|outcome| outcome.status == "registered") {
+        report.insert("registry_maintain_failed".into(), serde_json::json!(true));
     }
-    let Some(receiver) = selected_team_receiver(state, team_key) else {
-        return Some(serde_json::Value::Object(report));
-    };
-    let Some(pane) = receiver
-        .get("pane_id")
-        .and_then(serde_json::Value::as_str)
-        .filter(|pane| !pane.is_empty())
-    else {
-        report.insert("debt_maintain_failed".to_string(), serde_json::json!(true));
-        return Some(serde_json::Value::Object(report));
-    };
-    let store = match crate::message_store::MessageStore::open(workspace) {
-        Ok(store) => store,
-        Err(_) => {
-            report.insert("debt_maintain_failed".to_string(), serde_json::json!(true));
-            return Some(serde_json::Value::Object(report));
-        }
-    };
-    let event_log = crate::event_log::EventLog::new(workspace);
-    let team_id = crate::model::ids::TeamKey::new(team_key.to_string());
-    let pane_id = crate::transport::PaneId::new(pane);
-    match crate::messaging::watchers::requeue_delivery_exhausted_watchers(
-        workspace,
-        &store,
-        &event_log,
-        &team_id,
-        &pane_id,
-    ) {
-        Ok(notices) => {
-            report.insert("notices".to_string(), serde_json::json!(notices.len()));
-        }
-        Err(_) => {
-            report.insert("debt_maintain_failed".to_string(), serde_json::json!(true));
-        }
-    }
+    // C3 history is immutable. Binding a leader never replays an old SQL debt.
     Some(serde_json::Value::Object(report))
 }
 
@@ -3221,11 +3171,6 @@ fn apply_marked_respawn(
             agent_provider,
         );
     }
-    let _ = crate::db::agent_health_capture::clear_agent_health_observation(
-        run_workspace,
-        team_key,
-        &decision.agent_id,
-    );
 }
 
 /// ---

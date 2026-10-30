@@ -878,21 +878,12 @@ fn remove_agent_inner(
         recorded_role_file.as_deref(),
         &mut cleared_locations,
     )?;
-    let agent_health_deleted = delete_agent_health(paths.run_workspace, team_key, agent_id)?;
-    cleared_locations.push(serde_json::json!("agent_health"));
-    write_remove_step_event(
-        paths.run_workspace,
-        agent_id,
-        "agent_health",
-        "agent_health",
-        None,
-    )?;
-    maybe_fail_remove_after_agent_health_delete()?;
+    maybe_fail_remove_after_projection_cleanup()?;
     Ok(RemoveSuccess {
         outcome: RemoveAgentOutcome::Removed {
             agent_id: agent_id.clone(),
             state_file: team_state_path,
-            agent_health_deleted: agent_health_deleted || role_file_removed,
+            agent_health_deleted: false,
         },
         removed_state,
         stopped,
@@ -1319,53 +1310,7 @@ fn task_without_agent_assignee(task: &YamlValue, agent_id: &AgentId) -> YamlValu
     )
 }
 
-fn delete_agent_health(
-    workspace: &Path,
-    owner_team_id: &str,
-    agent_id: &AgentId,
-) -> Result<bool, LifecycleError> {
-    let store = crate::message_store::MessageStore::open(workspace)
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    let conn = crate::db::schema::open_db(store.db_path())
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    let changed = conn
-        .execute(
-            "delete from agent_health where owner_team_id = ?1 and agent_id = ?2",
-            rusqlite::params![owner_team_id, agent_id.as_str()],
-        )
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    Ok(changed > 0)
-}
-
-// Phase-DX E2: `select_agent_health` / `restore_agent_health` / `CapturedHealth` moved to
-// `db::agent_health_capture` so the SQL column references (agent_health backup columns)
-// live in the persistence layer (whitelisted by the E2 grep guard) rather than lifecycle
-// policy code. The wrappers below preserve the existing `LifecycleError` surface.
-use crate::db::agent_health_capture::{
-    restore_agent_health as capture_restore_agent_health,
-    select_agent_health as capture_select_agent_health, CapturedHealth,
-};
-
-fn select_agent_health(
-    workspace: &Path,
-    owner_team_id: &str,
-    agent_id: &AgentId,
-) -> Result<Option<CapturedHealth>, LifecycleError> {
-    capture_select_agent_health(workspace, owner_team_id, agent_id)
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))
-}
-
-fn restore_agent_health(
-    workspace: &Path,
-    owner_team_id: &str,
-    agent_id: &AgentId,
-    row: &Option<CapturedHealth>,
-) -> Result<(), LifecycleError> {
-    capture_restore_agent_health(workspace, owner_team_id, agent_id, row)
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))
-}
-
-fn maybe_fail_remove_after_agent_health_delete() -> Result<(), LifecycleError> {
+fn maybe_fail_remove_after_projection_cleanup() -> Result<(), LifecycleError> {
     let Ok(reason) = std::env::var("TEAM_AGENT_TEST_FAIL_REMOVE_AFTER_AGENT_HEALTH_DELETE") else {
         return Ok(());
     };
@@ -1384,8 +1329,6 @@ struct RemoveRollback {
     state: serde_json::Value,
     team_state_text: Option<String>,
     team_state_path: std::path::PathBuf,
-    /// golden agents.py:185: the agent_health row captured BEFORE delete, re-upserted on rollback.
-    health: Option<CapturedHealth>,
     restore_running: bool,
 }
 
@@ -1419,7 +1362,6 @@ impl RemoveRollback {
                 )))
             }
         };
-        let health = select_agent_health(workspace, team_key, agent_id)?;
         Ok(Self {
             agent_id: agent_id.clone(),
             team_key: team_key.to_string(),
@@ -1427,13 +1369,12 @@ impl RemoveRollback {
             state: state.clone(),
             team_state_text,
             team_state_path,
-            health,
             restore_running: false,
         })
     }
 
     /// golden agents.py:189-227 `_RemoveRollback.restore`: BEST-EFFORT — wrap EACH artifact restore
-    /// (spec → workspace_state → team_state → agent_health) in its own try/except, append
+    /// (spec → workspace_state → team_state) in its own try/except, append
     /// per-artifact failures to `errors`, and NEVER short-circuit on the first failure. The worker is
     /// only re-started when restore_running AND no errors. Returns the collected error strings (empty
     /// == ok); the caller re-raises the ORIGINAL operation error annotated with rollback_ok.
@@ -1493,13 +1434,6 @@ impl RemoveRollback {
             ) {
                 errors.push(format!("worker_restore:{e}"));
             }
-        }
-        // Starting a replacement cohort intentionally clears stale health, so
-        // rollback must restore the captured row after the old seat is back.
-        if let Err(e) =
-            restore_agent_health(workspace, &self.team_key, &self.agent_id, &self.health)
-        {
-            errors.push(format!("agent_health:{e}"));
         }
         errors
     }
