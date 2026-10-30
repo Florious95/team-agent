@@ -1422,18 +1422,24 @@ fn recovery_manual_command(agent_id: &str, workspace: &Path, team: &str) -> Stri
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::coordinator::tick::Coordinator;
-    use crate::coordinator::types::{ProviderRegistry, WorkspacePath};
     use std::io::Write as _;
 
-    struct NormalRegistry;
+    /// The abnormal-exit step that the retired coordinator tick used to run, driven directly
+    /// (M3 excision): load state, run `detect_abnormal_exits` over the pane snapshot, save.
+    /// The detection contracts below are unchanged; only the tick harness is gone.
+    struct AbnormalStep {
+        dir: std::path::PathBuf,
+        transport: crate::transport::test_support::OfflineTransport,
+    }
 
-    impl ProviderRegistry for NormalRegistry {
-        fn adapter_for(
-            &self,
-            provider: crate::provider::Provider,
-        ) -> Box<dyn crate::provider::ProviderAdapter> {
-            crate::provider::get_adapter(provider)
+    impl AbnormalStep {
+        fn tick(&self) -> Result<(), TickError> {
+            let mut state = crate::state::persist::load_runtime_state(&self.dir).expect("load state");
+            let targets =
+                crate::transport::Transport::list_targets(&self.transport).unwrap_or_default();
+            detect_abnormal_exits(&self.dir, &self.transport, &mut state, &EventLog::new(&self.dir), &targets)?;
+            crate::state::persist::save_runtime_state(&self.dir, &state).expect("save state");
+            Ok(())
         }
     }
     #[test]
@@ -2101,16 +2107,11 @@ mod tests {
         );
     }
 
-    fn abnormal_test_coordinator(dir: &std::path::Path) -> Coordinator {
-        Coordinator::for_test(
-            WorkspacePath::new(dir.to_path_buf()),
-            Box::new(NormalRegistry),
-            Box::new(
-                crate::transport::test_support::OfflineTransport::new().with_session_present(true),
-            ),
-            None,
-            None,
-        )
+    fn abnormal_test_coordinator(dir: &std::path::Path) -> AbnormalStep {
+        AbnormalStep {
+            dir: dir.to_path_buf(),
+            transport: crate::transport::test_support::OfflineTransport::new().with_session_present(true),
+        }
     }
 
     fn seed_abnormal_state(
