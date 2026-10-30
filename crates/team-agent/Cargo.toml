@@ -51,6 +51,8 @@ features = [
 ]
 
 [target.'cfg(unix)'.dev-dependencies]
+# Reuse the contract crate's real, controlled TTY fixture; test-only termios.
+nix = { version = "=0.30.1", default-features = false, features = ["term"] }
 team-agent-contract = { path = "../team-agent-contract", features = ["fixtures"] }
 
 [dev-dependencies]

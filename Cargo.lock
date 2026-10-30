@@ -727,6 +727,7 @@ dependencies = [
  "chrono",
  "conpty-transport",
  "libc",
+ "nix",
  "regex",
  "rusqlite",
  "serde",

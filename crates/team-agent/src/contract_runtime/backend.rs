@@ -672,7 +672,7 @@ pub(super) fn refresh_quiescent_candidate(workspace: &Path, team: &str, seat: &S
 pub(crate) fn validate_delivery_target(binding: &Binding, seat: &SeatRecord, budget: Duration) -> Result<(), BackendError> {
     let target = seat.physical_target()?;
     if target.candidate_sha256 != binding.candidate_sha256
-        || seat.evidence_kind != EvidenceKind::Native || seat.status != SeatStatus::Ready {
+        || seat.evidence_kind != EvidenceKind::Native || !matches!(seat.status, SeatStatus::Starting | SeatStatus::Ready) {
         return Err(BackendError::Fence { reason: "delivery_target_not_current_native_owner" });
     }
     let clock = RealClock::new();
@@ -805,7 +805,7 @@ pub(super) fn native_seat_lock(workspace: &Path, team: &str, seat: &SeatId, addi
     guard.map_err(|error| std::io::Error::other(error.to_string()).into())
 }
 
-fn involves_seat(operation: &OperationRecord, seat: &SeatId) -> bool {
+pub(crate) fn involves_seat(operation: &OperationRecord, seat: &SeatId) -> bool {
     operation.target.identity.seat == *seat || operation.parent.as_ref().is_some_and(|parent| parent.identity.seat == *seat)
 }
 

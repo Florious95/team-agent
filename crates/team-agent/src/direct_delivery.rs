@@ -138,12 +138,16 @@ impl Directory {
         let backend = crate::contract_runtime::backend::Backend::open_readonly(&self.workspace, team).map_err(|e| e.to_string())?;
         let id = SeatId::new(agent).map_err(|e| e.to_string())?;
         let seat = backend.store.seat(&id).map_err(|e| e.to_string())?.ok_or("native recipient missing")?;
-        let target = seat.physical.as_ref().ok_or("native_target_missing")?;
+        let target = seat.physical_target().map_err(|e| e.to_string())?;
         if target.candidate_sha256 != crate::contract_runtime::backend::executing_candidate_sha().map_err(|e| e.to_string())? {
             return Err("seat_requires_restart".into());
         }
         crate::contract_runtime::backend::require_candidate(&backend.binding).map_err(|e| e.to_string())?;
-        if seat.status != SeatStatus::Ready || backend.store.leased(&id).map_err(|e| e.to_string())? {
+        // Committed native seats can remain Starting; Ready is not a commit flag.
+        if !matches!(seat.status, SeatStatus::Starting | SeatStatus::Ready)
+            || backend.store.leased(&id).map_err(|e| e.to_string())?
+            || backend.store.unfinished().map_err(|e| e.to_string())?.iter()
+                .any(|operation| crate::contract_runtime::backend::involves_seat(operation, &id)) {
             return Err("recipient_not_running: native lifecycle not settled".into());
         }
         Ok(Some((backend.binding, seat)))
@@ -493,7 +497,7 @@ pub fn send(endpoint: &Endpoint, text: &str) -> Result<Value, String> {
     )
 }
 
-/// Enumerate each published team, retaining only physically live panes.
+/// List proven live endpoints and explain unavailable worker addresses.
 pub fn locate(workspace: &Path, team: Option<&str>) -> Result<Value, String> {
     let snapshot = snapshot(workspace)?;
     let selectors: Vec<Option<String>> = if let Some(team) = team {
@@ -512,34 +516,31 @@ pub fn locate(workspace: &Path, team: Option<&str>) -> Result<Value, String> {
     for team in selectors {
         let directory = directory(workspace, team.as_deref())?;
         for agent in std::iter::once("leader".to_string()).chain(directory.agents()) {
-            let endpoint = match directory.endpoint(&agent) {
-                Ok(endpoint) => endpoint,
-                Err(error) => {
-                    #[cfg(unix)]
-                    if error == "seat_requires_restart" {
-                        unavailable.push(json!({"workspace":directory.workspace,"team":directory.team,"agent":agent,
-                            "candidate":"foreign","delivery_error":error,
-                            "action":crate::contract_runtime::backend::restart_command(&directory.workspace, directory.team.as_deref().unwrap_or(""), &agent)}));
-                    }
-                    continue;
+            let live = (|| {
+                let endpoint = directory.endpoint(&agent)?;
+                directory.verify_endpoint(&agent, &endpoint, Instant::now() + Duration::from_secs(5))?;
+                let output = tmux(&endpoint.socket)
+                    .args(["display-message", "-p", "-t", &endpoint.pane_id, "#{pane_dead}"])
+                    .output().map_err(|e| e.to_string())?;
+                if !output.status.success() {
+                    return Err(format!("tmux observation failed: {}", String::from_utf8_lossy(&output.stderr).trim()));
                 }
-            };
-            let output = tmux(&endpoint.socket)
-                .args([
-                    "display-message",
-                    "-p",
-                    "-t",
-                    &endpoint.pane_id,
-                    "#{pane_dead}",
-                ])
-                .output()
-                .map_err(|e| e.to_string())?;
-            if output.status.success() && output.stdout == b"0\n" {
-                endpoints.push(
-                    json!({"workspace": directory.workspace, "team": directory.team,
-                    "agent": endpoint.agent, "socket": endpoint.socket,
-                    "pane_id": endpoint.pane_id, "dialect": endpoint.dialect}),
-                );
+                if output.stdout != b"0\n" { return Err("pane_not_live".into()); }
+                Ok(endpoint)
+            })();
+            match live {
+                Ok(endpoint) => endpoints.push(json!({"workspace":directory.workspace,"team":directory.team,
+                    "agent":endpoint.agent,"socket":endpoint.socket,"pane_id":endpoint.pane_id,"dialect":endpoint.dialect})),
+                Err(error) if agent != "leader" => {
+                    #[cfg(unix)]
+                    let action = (error == "seat_requires_restart").then(||
+                        crate::contract_runtime::backend::restart_command(&directory.workspace, directory.team.as_deref().unwrap_or(""), &agent));
+                    #[cfg(not(unix))]
+                    let action: Option<String> = None;
+                    unavailable.push(json!({"workspace":directory.workspace,"team":directory.team,"agent":agent,
+                        "candidate":(error == "seat_requires_restart").then_some("foreign"),"delivery_error":error,"action":action}));
+                }
+                Err(_) => {}
             }
         }
     }
