@@ -90,7 +90,7 @@ impl<W: Write> Write for ObservedWriter<W> {
         self.writer.flush()?;
         if let Some((context, request)) = self.pending.borrow_mut().take() {
             let mut store =
-                ContractStore::open(&self.root, self.scope.clone(), self.endpoint.clone())
+                ContractStore::open(&self.root, self.scope.clone(), &self.endpoint)
                     .map_err(std::io::Error::other)?;
             mcp::response_written(&mut store, &context, &request).map_err(std::io::Error::other)?;
         }

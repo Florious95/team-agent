@@ -1384,6 +1384,9 @@ mod tests {
         let mut sibling = backend.store.seat(&fixture.identity.seat).unwrap().unwrap();
         sibling.identity.seat = SeatId::new("sibling").unwrap();
         sibling.identity.instance = InstanceId::new("sibling-instance").unwrap();
+        sibling.pane = "sibling-pane".into();
+        sibling.binding_key = "sibling-binding".into();
+        sibling.server_key = "sibling-server".into();
         let db = rusqlite::Connection::open(fixture.binding.transport_root.join("contract.db")).unwrap();
         db.execute("INSERT INTO contract_seats VALUES(?1,?2)", rusqlite::params![
             sibling.identity.seat.as_str(), serde_json::to_string(&sibling).unwrap()]).unwrap();

@@ -386,7 +386,7 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         let state = json!({"team_key":"test","agents":{
             "a":{"provider":"cursor","status":"running","pane_id":"%1","tmux_endpoint":"/tmp/fixture.sock"},
-            "b":{"provider":"claude","status":"running"},
+            "b":{"provider":"cursor","status":"running"},
             "z":{"provider":"cursor","status":"paused"}
         }});
         let receipts = stop_selected(&root, &state).unwrap();
