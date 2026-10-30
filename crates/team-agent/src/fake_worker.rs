@@ -191,9 +191,6 @@ mod tests {
     use std::io::Cursor;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use crate::db::schema::open_db;
-    use crate::message_store::MessageStore;
-
     fn fake_ws() -> std::path::PathBuf {
         static N: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
@@ -202,37 +199,37 @@ mod tests {
             N.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        // M1 routes every report through station::send, which resolves the team state.
+        crate::state::persist::save_runtime_state(
+            &dir,
+            &serde_json::json!({"session_name": "team-fake", "agents": {"w1": {"provider": "fake"}}}),
+        )
+        .unwrap();
         dir
     }
 
-    /// Read back the single result the fake worker stored via `messaging::report_result`.
-    fn stored_result(ws: &std::path::Path) -> (String, String, String, serde_json::Value) {
-        let store = MessageStore::open(ws).unwrap();
-        let conn = open_db(store.db_path()).unwrap();
-        let mut stmt = conn
-            .prepare("select task_id, agent_id, status, envelope from results")
-            .unwrap();
-        let row = stmt
-            .query_row([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                ))
-            })
-            .expect("exactly one stored fake-worker result");
-        let envelope: serde_json::Value = serde_json::from_str(&row.3).unwrap();
-        (row.0, row.1, row.2, envelope)
+    /// Read back the single result the fake worker stored for the leader. M1 retired the
+    /// SQLite `results` funnel (red_m1_r14); the leader inbox record carries the envelope.
+    fn stored_result(ws: &std::path::Path) -> (String, String, serde_json::Value) {
+        let inbox = crate::inbox_store::read(ws, "leader", 10, None).unwrap();
+        let records = inbox["messages"].as_array().unwrap();
+        assert_eq!(records.len(), 1, "exactly one stored fake-worker result: {inbox}");
+        assert_eq!(records[0]["kind"], "result", "{inbox}");
+        let envelope = records[0]["envelope"].clone();
+        (
+            envelope["task_id"].as_str().unwrap_or_default().to_string(),
+            envelope["agent_id"].as_str().unwrap_or_default().to_string(),
+            envelope,
+        )
     }
 
     /// Assert the stored envelope matches the captured Python golden (message_id m1, task_id t1).
     fn assert_golden_envelope(ws: &std::path::Path) {
-        let (task_id, agent_id, status, env) = stored_result(ws);
+        let (task_id, agent_id, env) = stored_result(ws);
         assert_eq!(
-            (task_id.as_str(), agent_id.as_str(), status.as_str()),
-            ("t1", "w1", "collected"),
-            "stored result row must be task_id=t1 agent_id=w1 status=collected"
+            (task_id.as_str(), agent_id.as_str()),
+            ("t1", "w1"),
+            "stored result must be task_id=t1 agent_id=w1"
         );
         assert_eq!(
             env["schema_version"],
@@ -299,10 +296,10 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         run(&ws, "w1", Cursor::new(input.as_bytes()), &mut out).expect("fake worker run");
 
-        let (task_id, agent_id, status, envelope) = stored_result(&ws);
+        let (task_id, agent_id, envelope) = stored_result(&ws);
         assert_eq!(
-            (task_id.as_str(), agent_id.as_str(), status.as_str()),
-            ("m1", "w1", "collected"),
+            (task_id.as_str(), agent_id.as_str()),
+            ("m1", "w1"),
             "a direct-message result must use its message id for message-scope auto-finalization"
         );
         assert_ne!(
