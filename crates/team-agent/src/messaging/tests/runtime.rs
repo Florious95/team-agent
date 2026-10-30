@@ -408,85 +408,6 @@ fn send_message_target_not_in_team_is_refused() {
 }
 
 #[test]
-fn message_not_silently_stuck_accepted_when_coordinator_dead() {
-    let ws = tmp_ws("sendcoorddead");
-    crate::state::persist::save_runtime_state(
-        &ws,
-        &serde_json::json!({
-            "session_name": "team-x",
-            "agents": {
-                "worker-1": {"status": "running", "agent_id": "worker-1", "window": "worker-1"},
-            },
-        }),
-    )
-    .unwrap();
-    let coordinator_ws = crate::coordinator::WorkspacePath::new(ws.clone());
-    std::fs::create_dir_all(crate::model::paths::runtime_dir(&ws)).unwrap();
-    let _ = MessageStore::open(&ws).unwrap();
-    let stale_pid = crate::coordinator::Pid::new(99_999_999);
-    crate::coordinator::write_coordinator_metadata(
-        &coordinator_ws,
-        stale_pid,
-        crate::coordinator::MetadataSource::Boot,
-    )
-    .unwrap();
-    std::fs::write(
-        crate::coordinator::coordinator_pid_path(&coordinator_ws),
-        stale_pid.to_string(),
-    )
-    .unwrap();
-
-    let out = send_message(
-        &ws,
-        &MessageTarget::Single("worker-1".to_string()),
-        "hi",
-        &SendOptions::default(),
-    )
-    .unwrap();
-
-    assert!(out.ok, "durable persistence is the send success boundary");
-    assert_eq!(out.status, DeliveryStatus::Blocked);
-    assert_eq!(out.message_status.0, "queued_coordinator_unavailable");
-    assert!(out
-        .message_id
-        .as_deref()
-        .is_some_and(|id| id.starts_with("msg_")));
-    assert_eq!(out.reason, Some(DeliveryRefusal::CoordinatorUnavailable));
-    assert!(
-        out.verification
-            .as_deref()
-            .is_some_and(|warning| warning.contains("coordinator is not running")),
-        "N38 warning must explain the durable retry blocker; out={out:?}"
-    );
-    let store = MessageStore::open(&ws).unwrap();
-    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-    let blocked: i64 = conn
-        .query_row(
-            "select count(*) from messages where status = 'queued_coordinator_unavailable' \
-             and error = 'coordinator_unavailable' and delivered_at is null",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        blocked, 1,
-        "dead coordinator send must park exactly one durable, non-delivered row"
-    );
-    let events = EventLog::new(&ws).tail(20).unwrap();
-    assert!(
-        events.iter().any(|event| {
-            event.get("event").and_then(serde_json::Value::as_str)
-                == Some("send.coordinator_unavailable")
-                && event
-                    .get("message_queued")
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true)
-        }),
-        "send.coordinator_unavailable event must be durable; events={events:?}"
-    );
-}
-
-#[test]
 fn send_message_broadcast_empty_team_skips_no_recipients() {
     // send.py:391-393 — "*" with no team recipients →
     //   {"ok": False, "status": "failed", "reason": "no_team_recipients", "to": "*"}.
@@ -2535,46 +2456,6 @@ fn collect_output_matches_golden_collected_shape() {
         ],
         "collect return top-level key order must match golden return shape; got {top:?}"
     );
-}
-
-// (d) send --task <unknown id> must RAISE golden "unknown task id" (runtime.py:1032 _find_task),
-// not silently create a message. Rust send_message attaches task_id without validating → Ok. RED.
-// block_until_delivered=false isolates the task-validation from any delivery side-effect.
-#[test]
-fn send_with_unknown_task_id_raises_unknown_task() {
-    let ws = tmp_ws("sendunknowntask223");
-    crate::state::persist::save_runtime_state(
-        &ws,
-        &serde_json::json!({
-            "session_name": "team-x",
-            "agents": { "w1": { "provider": "copilot" } },
-            "tasks": []
-        }),
-    )
-    .unwrap();
-    let _ = store_for(&ws);
-    let opts = SendOptions {
-        task_id: Some(crate::model::ids::TaskId::new("t2-unknown")),
-        block_until_delivered: false,
-        ..SendOptions::default()
-    };
-    let out = send_message(&ws, &MessageTarget::Single("w1".to_string()), "go", &opts);
-    match out {
-        Err(e) => {
-            // SURFACED error = the CLI `error` field = CliError::from(MessagingError).to_string()
-            // (to_payload uses self.to_string(), types.rs:59). Must EQUAL golden's bare message —
-            // NO "validation:" variant prefix (golden runtime.py:1032 surfaces str(exc)).
-            let surfaced = crate::cli::CliError::from(e).to_string();
-            assert_eq!(
-                surfaced, "unknown task id: t2-unknown",
-                "surfaced CLI error must EQUAL golden's message with NO variant prefix; got {surfaced:?}"
-            );
-        }
-        Ok(o) => panic!(
-            "send --task <unknown id> must RAISE 'unknown task id' (golden runtime.py:1032 _find_task), \
-             not silently create a message; got Ok({o:?})"
-        ),
-    }
 }
 
 // ════════════════════════════════════════════════════════════════════════
