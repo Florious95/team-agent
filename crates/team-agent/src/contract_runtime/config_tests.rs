@@ -4,8 +4,11 @@ use std::os::unix::fs::DirBuilderExt;
 struct Fixture { root: PathBuf, args: QuickStartArgs, role: PathBuf }
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("contract-override-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        // Parallel tests can read the same clock tick; the counter keeps roots unique.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!("contract-override-{}-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         std::fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
         let directory = root.join("roles");
         std::fs::create_dir_all(directory.join("agents")).unwrap();
