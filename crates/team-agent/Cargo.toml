@@ -50,6 +50,9 @@ features = [
     "Win32_System_Diagnostics_ToolHelp",
 ]
 
+[target.'cfg(unix)'.dev-dependencies]
+team-agent-contract = { path = "../team-agent-contract", features = ["fixtures"] }
+
 [dev-dependencies]
 serial_test = { version = "3", features = ["file_locks"] }
 

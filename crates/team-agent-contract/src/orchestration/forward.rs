@@ -66,6 +66,9 @@ impl ContractStore {
         {
             return Err(Error::Invalid("framework route"));
         }
+        let mut tx = self
+            .files
+            .write([Key::new("framework_config", "result_route")])?;
         let previous: Vec<FrameworkPeer> = self.files.list("peers")?;
         if previous == peers
             && self
@@ -75,22 +78,25 @@ impl ContractStore {
         {
             return Ok(());
         }
-        let mut keys = vec![Key::new("framework_config", "result_route")];
-        for peer in previous.iter().chain(peers) {
-            keys.extend([
-                Key::new("peers", &peer.recipient),
-                Key::new("seats", &peer.recipient),
-            ]);
-        }
-        let mut tx = self.files.write(keys)?;
+        tx.lock_additional(
+            previous
+                .iter()
+                .chain(peers)
+                .map(|peer| Key::new("peers", &peer.recipient)),
+        )?;
         let mut names = std::collections::BTreeSet::new();
         for peer in peers {
             if !names.insert(&peer.recipient) {
                 return Err(Error::Conflict);
             }
             if let Ok(id) = SeatId::new(&peer.recipient) {
-                if load_seat(&tx, &id)?.is_some() {
-                    return Err(Error::Conflict);
+                if load_seat(&tx, &id)?.is_some()
+                    || tx
+                        .get::<String>(&Key::new("leases", id.as_str()))?
+                        .is_some()
+                {
+                    return Err(Key::new("peers", id.as_str())
+                        .fence("framework_peer_conflicts_with_native_seat_or_reservation"));
                 }
             }
         }

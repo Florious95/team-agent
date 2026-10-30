@@ -36,6 +36,8 @@ use super::{
 
 #[derive(Debug, ThisError)]
 pub enum BackendError {
+    #[error("native migration: {0}")]
+    Migration(String),
     #[error("native configuration: {0}")]
     Configuration(#[from] super::config::ConfigError),
     #[error("native discovery: {0}")]
@@ -110,14 +112,7 @@ fn endpoint(scope: &ScopeId) -> String {
     format!("framework:{}", scope.as_str())
 }
 
-impl Backend {
-    pub fn open(workspace: &Path, team: &str) -> Result<Self, BackendError> {
-        Self::open_mode(workspace, team, false)
-    }
-    pub fn open_readonly(workspace: &Path, team: &str) -> Result<Self, BackendError> {
-        Self::open_mode(workspace, team, true)
-    }
-    fn open_mode(workspace: &Path, team: &str, readonly: bool) -> Result<Self, BackendError> {
+pub fn read_binding(workspace: &Path, team: &str) -> Result<Binding, BackendError> {
         let workspace = resolve_cwd(workspace)?;
         let scope = scope_for(&workspace, team)?;
         let root = root_for(&workspace.path, &scope);
@@ -143,11 +138,29 @@ impl Backend {
         {
             return Err(BackendError::Metadata);
         }
+        Ok(binding)
+}
+
+impl Backend {
+    pub fn open(workspace: &Path, team: &str) -> Result<Self, BackendError> {
+        Self::open_mode(workspace, team, false)
+    }
+    pub fn open_readonly(workspace: &Path, team: &str) -> Result<Self, BackendError> {
+        Self::open_mode(workspace, team, true)
+    }
+    fn open_mode(workspace: &Path, team: &str, readonly: bool) -> Result<Self, BackendError> {
+        let binding = read_binding(workspace, team)?;
+        let scope = binding.scope.clone();
         let store = if readonly {
-            ProjectionStore::open_readonly(&binding.transport_root, scope, &binding.endpoint)?
+            ProjectionStore::open_readonly(&binding.transport_root, scope, &binding.endpoint)
         } else {
-            ProjectionStore::open(&binding.transport_root, scope, &binding.endpoint)?
-        };
+            ProjectionStore::open(&binding.transport_root, scope, &binding.endpoint)
+        }.map_err(|error| match error {
+            Error::Invalid("legacy contract store requires explicit migration") => BackendError::Migration(format!(
+                "legacy contract store requires explicit migration; run team-agent migrate --workspace {} --team {}",
+                crate::cli::shell_quote(&binding.workspace.path.to_string_lossy()), crate::cli::shell_quote(team))),
+            error => BackendError::Runtime(error),
+        })?;
         Ok(Self { store, binding })
     }
 
@@ -1337,6 +1350,72 @@ pub(crate) fn retire(workspace: &Path, team: &str, seat: &SeatId) -> Result<Opti
     Ok(Some(backend.store.retire(&current.identity)?))
 }
 
+pub fn migrate_if_required(workspace: &Path, team: &str) -> Result<bool, BackendError> {
+    let binding = match read_binding(workspace, team) {
+        Ok(binding) => binding,
+        Err(BackendError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if !binding.transport_root.join("contract.json").exists() {
+        migrate(workspace, team)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Explicit, scoped release cutover. Existing physical receipts remain intact;
+/// future launches use the invoking candidate. No native body is replayed.
+pub fn migrate(workspace: &Path, team: &str) -> Result<serde_json::Value, BackendError> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let selected = crate::state::selector::resolve_active_team_readonly(workspace, Some(team), crate::state::selector::SelectorMode::RuntimeOnly)
+        .map_err(|error| BackendError::Migration(error.to_string()))?;
+    crate::lifecycle::launch::ensure_owner_allowed_for_state(&selected.state, None)
+        .map_err(|error| BackendError::Migration(error.to_string()))?;
+    let workspace = selected.run_workspace.as_path();
+    let team = selected.team_key.as_str();
+    let mut binding = read_binding(workspace, team)?;
+    let root = root_for(&binding.workspace.path, &binding.scope);
+    if root.canonicalize()? != root { return Err(BackendError::Fence { reason: "migration_root_alias" }); }
+    let directory = std::fs::File::open(&root)?;
+    directory.lock()?;
+    // Re-read after acquiring the cutover lock so a concurrent invocation is
+    // idempotent and cannot restore an older candidate binding.
+    binding = read_binding(workspace, team)?;
+    let mut result = crate::importer::contract::migrate(&binding.transport_root, binding.scope.clone(), &binding.endpoint)
+        .map_err(|error| BackendError::Migration(error.to_string()))?;
+    let candidate = std::env::current_exe()?.canonicalize()?;
+    let fingerprint = fingerprint_file(&candidate, 1024 * 1024 * 1024, Duration::from_secs(10))?;
+    if binding.candidate != candidate || binding.candidate_sha256 != fingerprint {
+        if !binding.transport_root.join("legacy-import.json").is_file() {
+            return Err(BackendError::Fence { reason: "migration_requires_legacy_provenance_for_candidate_rebind" });
+        }
+        let path = root.join("framework-binding.json");
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.nlink() != 1 || metadata.mode() & 0o022 != 0 { return Err(BackendError::Fence { reason: "migration_binding_ownership" }); }
+        let before = std::fs::read(&path)?;
+        binding.candidate = candidate;
+        binding.candidate_sha256 = fingerprint;
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| BackendError::Metadata)?.as_nanos();
+        let temporary = root.join(format!("migration-binding-{}-{nonce}.tmp", std::process::id()));
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary)?;
+        let written = (|| -> Result<(), BackendError> {
+            file.write_all(&serde_json::to_vec(&binding).map_err(|_| BackendError::Metadata)?)?;
+            file.sync_all()?;
+            if std::fs::read(&path)? != before { return Err(BackendError::Fence { reason: "migration_binding_changed" }); }
+            std::fs::rename(&temporary, &path)?;
+            directory.sync_all()?;
+            Ok(())
+        })();
+        if written.is_err() { let _ = std::fs::remove_file(&temporary); }
+        written?;
+    }
+    result["team"] = serde_json::json!(team);
+    result["candidate"] = serde_json::json!(binding.candidate);
+    result["maintenance"] = serde_json::json!("Use only this release for subsequent lifecycle operations");
+    Ok(result)
+}
+
 pub fn stop(workspace: &Path, team: &str, seat: &SeatId) -> Result<OperationRecord, BackendError> {
     stop_with_budget(workspace, team, seat, Duration::from_secs(20))
 }
@@ -1350,6 +1429,7 @@ fn remaining_stop_budget(deadline: std::time::Instant) -> Result<Duration, Backe
 pub(super) fn stop_with_budget(workspace: &Path, team: &str, seat: &SeatId, budget: Duration) -> Result<OperationRecord, BackendError> {
     let deadline = std::time::Instant::now() + budget;
     remaining_stop_budget(deadline)?;
+    migrate_if_required(workspace, team)?;
     let _ownership = native_seat_lock(workspace, team, seat, false)?;
     let mut backend = Backend::open(workspace, team)?;
     if let Some(record) = recover_incomplete_until(&mut backend, seat, Some(deadline))? { return Ok(record); }

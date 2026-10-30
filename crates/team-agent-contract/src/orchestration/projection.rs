@@ -32,6 +32,12 @@ impl Key {
     fn name(&self) -> String {
         digest(self.id.as_bytes())
     }
+    pub(crate) fn fence(&self, check: &'static str) -> Error {
+        Error::FenceAt {
+            check,
+            entity: Some(format!("{}/{}", self.collection, self.name())),
+        }
+    }
     fn validate(&self) -> Result<(), Error> {
         if self.collection.is_empty()
             || !self
@@ -63,6 +69,30 @@ impl Stored {
 struct Previous {
     revision: u64,
     value: Stored,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checksum: Option<String>,
+}
+impl Previous {
+    fn new(key: &Key, revision: u64, value: Stored) -> Result<Self, Error> {
+        let checksum = digest(&serde_json::to_vec(&(key, revision, &value))?);
+        Ok(Self {
+            revision,
+            value,
+            checksum: Some(checksum),
+        })
+    }
+    fn verify(&self, key: &Key) -> Result<(), Error> {
+        if self.checksum.as_deref()
+            == Some(digest(&serde_json::to_vec(&(key, self.revision, &self.value))?).as_str())
+            || (self.checksum.is_none()
+                && self.revision == 0
+                && matches!(self.value, Stored::Deleted))
+        {
+            Ok(())
+        } else {
+            Err(Error::Corrupt)
+        }
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Cell {
@@ -134,10 +164,7 @@ impl Projections {
     }
     fn committed(&self, key: &Key) -> Result<Previous, Error> {
         let Some(cell) = read_json::<Cell>(&self.path(key)?)? else {
-            return Ok(Previous {
-                revision: 0,
-                value: Stored::Deleted,
-            });
+            return Previous::new(key, 0, Stored::Deleted);
         };
         if cell.v != 1
             || cell.key != *key
@@ -158,7 +185,10 @@ impl Projections {
                 .join(format!("{}.json", cell.transaction)),
         )?;
         match commit {
-            None => Ok(cell.previous),
+            None => {
+                cell.previous.verify(key)?;
+                Ok(cell.previous)
+            }
             Some(commit) => {
                 let address = format!("{}/{}", key.collection, key.name());
                 if commit.v != 1
@@ -167,10 +197,7 @@ impl Projections {
                 {
                     return Err(Error::Corrupt);
                 }
-                Ok(Previous {
-                    revision: cell.revision,
-                    value: cell.value,
-                })
+                Previous::new(key, cell.revision, cell.value)
             }
         }
     }
@@ -254,6 +281,28 @@ impl Projections {
     }
 }
 impl WriteBatch<'_> {
+    /// Extend a configuration transaction without dropping its publication lock.
+    /// Only forward lock order is legal; ordinary seat transactions stay local.
+    pub(crate) fn lock_additional(
+        &mut self,
+        keys: impl IntoIterator<Item = Key>,
+    ) -> Result<(), Error> {
+        let keys: BTreeSet<_> = keys
+            .into_iter()
+            .filter(|key| !self.allowed.contains(key))
+            .collect();
+        if keys
+            .first()
+            .zip(self.allowed.last())
+            .is_some_and(|(next, held)| next < held)
+        {
+            return Err(Error::fence("projection_lock_extension_order"));
+        }
+        let additional = self.store.write(keys.clone())?;
+        self._locks.extend(additional._locks);
+        self.allowed.extend(keys);
+        Ok(())
+    }
     pub(crate) fn expect_revision(&self, key: &Key, expected: u64) -> Result<(), Error> {
         if !self.allowed.contains(key) || self.store.committed(key)?.revision != expected {
             return Err(Error::Conflict);
@@ -276,7 +325,7 @@ impl WriteBatch<'_> {
     }
     pub(crate) fn put<T: Serialize>(&mut self, key: Key, value: &T) -> Result<(), Error> {
         if !self.allowed.contains(&key) {
-            return Err(Error::Fence);
+            return Err(key.fence("projection_put_without_entity_lock"));
         }
         self.writes
             .insert(key, Stored::Present(serde_json::to_value(value)?));
@@ -284,7 +333,7 @@ impl WriteBatch<'_> {
     }
     pub(crate) fn delete(&mut self, key: Key) -> Result<(), Error> {
         if !self.allowed.contains(&key) {
-            return Err(Error::Fence);
+            return Err(key.fence("projection_delete_without_entity_lock"));
         }
         self.writes.insert(key, Stored::Deleted);
         Ok(())
@@ -342,10 +391,13 @@ fn digest(bytes: &[u8]) -> String {
 }
 
 pub(crate) fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, Error> {
+    validate_ancestors(
+        path.parent()
+            .ok_or_else(|| Error::fence("projection_parent_missing"))?,
+    )?;
     if !regular_or_absent(path)? {
         return Ok(None);
     }
-    validate_ancestors(path.parent().ok_or(Error::Fence)?)?;
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -368,11 +420,41 @@ pub(crate) fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, E
 pub(crate) fn immutable_json(path: &Path, value: &impl Serialize) -> Result<(), Error> {
     let bytes = serde_json::to_vec(value)?;
     let temp = write_temp(path, &bytes)?;
-    let result = std::fs::hard_link(&temp, path)
-        .map_err(Error::from)
-        .and_then(|_| sync_dir(path.parent().ok_or(Error::Fence)?));
+    // Serialize publication at this immutable record only. Exclusive creation
+    // establishes its lock file; rename publishes complete bytes, never a
+    // partially written commit marker. Existing records are never replaced.
+    let result = (|| {
+        let _lock = lock_file(&path.with_extension("publish.lock"))?;
+        if regular_or_absent(path)? {
+            return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists).into());
+        }
+        std::fs::rename(&temp, path)?;
+        sync_dir(path.parent().ok_or(Error::Fence)?)
+    })();
     let _ = std::fs::remove_file(temp);
     result
+}
+pub(crate) fn lock_file(path: &Path) -> Result<File, Error> {
+    validate_ancestors(path.parent().ok_or(Error::Fence)?)?;
+    regular_or_absent(path)?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o600)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            options.create_new(false).open(path)?
+        }
+        Err(error) => return Err(error.into()),
+    };
+    file.lock()?;
+    Ok(file)
 }
 fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     regular_or_absent(path)?;
@@ -418,9 +500,13 @@ fn regular_or_absent(path: &Path) -> Result<bool, Error> {
 }
 pub(crate) fn validate_ancestors(path: &Path) -> Result<(), Error> {
     for ancestor in path.ancestors() {
-        let meta = std::fs::symlink_metadata(ancestor)?;
+        let meta = match std::fs::symlink_metadata(ancestor) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
         if !meta.is_dir() || meta.file_type().is_symlink() {
-            return Err(Error::Fence);
+            return Err(Error::fence("projection_ancestor_not_a_real_directory"));
         }
     }
     Ok(())

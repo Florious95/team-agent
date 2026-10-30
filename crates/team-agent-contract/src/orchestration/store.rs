@@ -16,6 +16,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(any(test, feature = "fixtures"))]
+#[path = "store_fixtures.rs"]
+mod fixtures;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SeatStatus {
     Starting,
@@ -97,6 +101,10 @@ pub struct OperationRecord {
     pub preserved: Vec<OwnedPath>,
     pub failure: Option<String>,
 }
+
+#[path = "store_import.rs"]
+mod import;
+pub use import::LegacySnapshot;
 
 /// Compatibility spelling; all implementation and runtime admission use file projections.
 pub type ContractStore = ProjectionStore;
@@ -355,6 +363,7 @@ impl ProjectionStore {
         let current_seat = self.assert_current(identity)?;
         let mut keys = route_keys(&current_seat);
         keys.extend([
+            Key::new("peers", identity.seat.as_str()),
             Key::new("seats", identity.seat.as_str()),
             Key::new("leases", identity.seat.as_str()),
             Key::new("retirements", identity.instance.as_str()),
@@ -389,7 +398,7 @@ impl ProjectionStore {
             TransactionKind::InWindowBranch | TransactionKind::Teardown
         );
         if target.scope != self.scope || (creates && operation.target.endpoint != self.endpoint) {
-            return Err(Error::Fence);
+            return Err(Error::fence("operation_begin_scope_or_endpoint_mismatch"));
         }
         let mut keys = operation_keys(operation);
         keys.extend([
@@ -422,25 +431,25 @@ impl ProjectionStore {
                 }
             }
             TransactionKind::Restart => {
-                let parent = operation.parent.as_ref().ok_or(Error::Fence)?;
+                let parent = operation.parent.as_ref().ok_or_else(|| Error::fence("restart_parent_missing"))?;
                 if old.as_ref() != Some(parent)
                     || target.seat != parent.identity.seat
                     || target.instance == parent.identity.instance
                     || target.generation <= parent.identity.generation
                 {
-                    return Err(Error::Fence);
+                    return Err(Error::fence("restart_parent_or_new_generation_invalid"));
                 }
             }
             TransactionKind::InWindowBranch | TransactionKind::Teardown => {
                 if old.as_ref() != Some(&operation.target) {
-                    return Err(Error::Fence);
+                    return Err(Error::fence("operation_begin_target_changed"));
                 }
             }
         }
         lifecycle_unleased(&tx, &target.seat)?;
         if let Some(parent) = &operation.parent {
             if current(&tx, &self.scope, &parent.identity)? != *parent {
-                return Err(Error::Fence);
+                return Err(Error::fence("operation_begin_parent_changed"));
             }
             if parent.identity.seat != target.seat {
                 lifecycle_unleased(&tx, &parent.identity.seat)?;
@@ -456,7 +465,7 @@ impl ProjectionStore {
                     .get::<InstanceIdentity>(&Key::new("instances", target.instance.as_str()))?
                     .is_some()
             {
-                return Err(Error::Fence);
+                return Err(Error::fence("operation_begin_generation_stale_or_instance_reused"));
             }
             tx.put(
                 Key::new("generations", target.seat.as_str()),
@@ -491,13 +500,13 @@ impl ProjectionStore {
             .revisions
             .borrow()
             .get(operation.id.as_str())
-            .ok_or(Error::Fence)?;
-        let previous: OperationRecord = self.files.get(&op_key)?.ok_or(Error::Fence)?;
+            .ok_or_else(|| Error::fence("operation_save_revision_token_missing"))?;
+        let previous: OperationRecord = self.files.get(&op_key)?.ok_or_else(|| op_key.fence("operation_save_record_missing"))?;
         if previous.target.identity != operation.target.identity
             || previous.kind != operation.kind
             || operation.target.identity.scope != self.scope
         {
-            return Err(Error::Fence);
+            return Err(op_key.fence("operation_save_identity_or_kind_changed"));
         }
         let mut keys = operation_keys(operation);
         keys.extend(operation_keys(&previous));
@@ -508,7 +517,7 @@ impl ProjectionStore {
             .as_deref()
             != Some(operation.id.as_str())
         {
-            return Err(Error::Fence);
+            return Err(op_key.fence("operation_save_target_lease_not_owned"));
         }
         let rollback = operation.outcome == Outcome::Compensated;
         if operation.kind == TransactionKind::Restart
@@ -529,7 +538,7 @@ impl ProjectionStore {
         {
             if let Some(current) = load_seat(&tx, &operation.target.identity.seat)? {
                 if current.identity != operation.target.identity {
-                    return Err(Error::Fence);
+                    return Err(op_key.fence("operation_rollback_target_replaced"));
                 }
                 tx.delete(Key::new("seats", operation.target.identity.seat.as_str()))?;
             }
@@ -551,7 +560,7 @@ impl ProjectionStore {
             ) {
                 let key = Key::new("leases", seat.as_str());
                 if tx.get::<String>(&key)?.as_deref() != Some(operation.id.as_str()) {
-                    return Err(Error::Fence);
+                    return Err(key.fence("operation_completion_lease_not_owned"));
                 }
                 tx.delete(key)?;
             }
@@ -576,11 +585,11 @@ pub(crate) fn current(
     identity: &InstanceIdentity,
 ) -> Result<SeatRecord, Error> {
     if &identity.scope != scope {
-        return Err(Error::Fence);
+        return Err(Error::fence("current_identity_scope_mismatch"));
     }
-    let record = load_seat(store, &identity.seat)?.ok_or(Error::Fence)?;
+    let record = load_seat(store, &identity.seat)?.ok_or_else(|| Error::fence("current_seat_missing"))?;
     if record.identity != *identity {
-        return Err(Error::Fence);
+        return Err(Error::fence("current_instance_or_generation_replaced"));
     }
     Ok(record)
 }
@@ -611,21 +620,26 @@ pub(crate) fn next_id(_store: &impl ReadRecords, prefix: &str) -> Result<String,
     Ok(format!("{prefix}_{}", projection::nonce()))
 }
 fn route_keys(seat: &SeatRecord) -> Vec<Key> {
-    vec![
-        Key::new("routes", format!("{}\0{}", seat.endpoint, seat.pane)),
-        Key::new("bindings", &seat.binding_key),
-    ]
+    let mut keys = vec![Key::new("bindings", &seat.binding_key)];
+    // F0 reserves a unique binding, not the shared pre-spawn placeholder.
+    // Published panes still have exclusive ownership, including fixture routes.
+    if seat.pane != "unpublished" || seat.process.is_some() || seat.physical.is_some() {
+        keys.push(Key::new("routes", format!("{}\0{}", seat.endpoint, seat.pane)));
+    }
+    keys
 }
 fn operation_keys(operation: &OperationRecord) -> Vec<Key> {
     let mut keys = route_keys(&operation.target);
     keys.extend([
         Key::new("operations", operation.id.as_str()),
+        Key::new("peers", operation.target.identity.seat.as_str()),
         Key::new("seats", operation.target.identity.seat.as_str()),
         Key::new("leases", operation.target.identity.seat.as_str()),
     ]);
     if let Some(parent) = &operation.parent {
         keys.extend(route_keys(parent));
         keys.extend([
+            Key::new("peers", parent.identity.seat.as_str()),
             Key::new("seats", parent.identity.seat.as_str()),
             Key::new("leases", parent.identity.seat.as_str()),
         ]);
@@ -652,7 +666,7 @@ fn claim_routes(tx: &mut WriteBatch<'_>, operation: &OperationRecord) -> Result<
                             && route_keys(&o.target).contains(&key)
                     });
                 if live || pending {
-                    return Err(Error::Fence);
+                    return Err(key.fence("physical_route_owned_by_another_seat"));
                 }
             }
         }

@@ -19,6 +19,7 @@ use crate::contract::types::ContractError;
 pub enum Error {
     Contract(ContractError),
     Fence,
+    FenceAt { check: &'static str, entity: Option<String> },
     Conflict,
     Invalid(&'static str),
     Database,
@@ -33,6 +34,10 @@ pub enum Error {
     NativeControl(Box<crate::runtime::delivery::InjectionReport>),
     NativeClose(Box<crate::host::tmux::CloseReceipt>),
     NeedsRecovery,
+}
+impl Error {
+    pub fn is_fence(&self) -> bool { matches!(self, Self::Fence | Self::FenceAt { .. }) }
+    pub(crate) fn fence(check: &'static str) -> Self { Self::FenceAt { check, entity: None } }
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

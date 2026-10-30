@@ -319,7 +319,16 @@ fn run_canonical(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult
         explicit_agent,
         explicit_team,
     )?;
-    let plan = runtime::plan(intent)?;
+    let mut plan = runtime::plan(intent)?;
+    #[cfg(unix)]
+    if plan.intent.verb == Verb::Stop && !plan.intent.dry_run && plan.no_eligible.is_none() {
+        if let Some(team) = plan.scope.team.as_deref() {
+            if crate::contract_runtime::backend::migrate_if_required(&plan.scope.workspace, team)
+                .map_err(|error| refusal(error.to_string()))? {
+                plan = runtime::plan(plan.intent)?;
+            }
+        }
+    }
     execute_plan(plan, &mut |step| step.execute(), &mut runtime::recheck)
 }
 

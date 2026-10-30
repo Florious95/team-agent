@@ -80,9 +80,11 @@ impl ContractStore {
         if matches!(seat.status, SeatStatus::Stopped | SeatStatus::Unknown) {
             return Err(Error::Fence);
         }
-        let Some(evidence) = self
-            .files
-            .get::<super::mcp::ToolEvidence>(&Key::new("tool_evidence", connection.as_str()))?
+        let Some(evidence) =
+            self.files
+                .get::<super::mcp::ToolEvidence>(&super::mcp::ToolEvidence::key(
+                    identity, connection,
+                )?)?
         else {
             return Ok(Vec::new());
         };

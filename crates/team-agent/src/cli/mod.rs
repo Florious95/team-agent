@@ -57,6 +57,7 @@ pub(crate) const STATUS_REMINDER: &str =
     "Next: use team-agent inbox leader -n 3 for replies. Status is not proof of task completion; do not inspect worker terminal content.";
 
 pub mod adapters;
+pub(crate) use adapters::shell_quote;
 mod arguments;
 mod intent;
 #[cfg(unix)]

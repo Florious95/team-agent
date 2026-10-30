@@ -290,6 +290,18 @@ fn dispatch_prepared(command: &str, checked: super::arguments::CheckedArgs, cwd:
             let value = crate::direct_delivery::locate(&workspace(&parsed, cwd), parsed.team.as_deref()).map_err(CliError::Usage)?;
             Ok(emit_result(CmdResult::from_json(value, parsed.json)))
         },
+        "migrate" => {
+            #[cfg(unix)] {
+                let parsed = parse_args(args);
+                let team = parsed.team.as_deref().ok_or_else(|| CliError::Usage("migrate requires --team TEAM".into()))?;
+                let value = crate::contract_runtime::backend::migrate(&workspace(&parsed, cwd), team)
+                    .map_err(|error| CliError::Runtime(error.to_string()))?;
+                Ok(emit_result(CmdResult::from_json(value, parsed.json)))
+            }
+            #[cfg(not(unix))] {
+                Err(CliError::Usage("native contract migration requires Unix".into()))
+            }
+        },
         "schedule" => super::schedule::run(args, cwd).map(emit_result),
         "status" => cmd_status_for_team(&status_args(args, cwd), parse_args(args).team.as_deref())
             .map(emit_result),
@@ -479,6 +491,8 @@ pub(super) fn command_help(command: Option<&str>) -> String {
         "schedule" => ("add requires exactly one of --in or --every and non-empty --text. Durations are positive integers followed by ms, s, m, h or d.\nlist shows active reminders; cancel takes the sched_<hex> id returned by add.",
             "team-agent schedule add --in 10m --text 'Check progress'\nteam-agent schedule add --every 1h --text 'Review status'\nteam-agent schedule list --json\nteam-agent schedule cancel sched_1",
             "Uses durable job files and an on-demand OS-supervised agenda. A stored job with activation: inactive is not reliably scheduled. The runner exits after 60 idle seconds. Cancellation stops unclaimed jobs; already-running attempts are not revoked. Recurring work skips missed intervals rather than replaying a burst."),
+        "migrate" => ("Explicit maintenance-window M3 native contract import. Stop old-release lifecycle commands first. Retains the read-only source and a scoped logical snapshot; preserves identities, generations and session ownership; never replays the retired outbox. Repeating the command is safe. Unmigrated team teardown imports before stopping.",
+            "team-agent migrate --workspace . --team help-demo --json", "Use only the new release afterward. Verify status; stop/start the selected seats to refresh their native helpers."),
         "inbox" => ("<agent> is the recipient name; -n/--limit bounds the message count. Reading replies does not resend messages.",
             "team-agent inbox leader -n 3\nteam-agent inbox worker --limit 5\nteam-agent inbox leader --workspace . --team help-demo --json", "Wait for a natural reply, then check team-agent status if needed. Do not inspect worker terminal content."),
         "status" => ("Optional <agent> selects one agent. --summary/--detail retain compatibility and do not add fields.\nNine fields: name/provider/model/effort/runtime_status/activity/health/session_name/tmux_command.\nRuntime, activity and health are distinct. unknown means insufficient evidence; null means unset. No default model is guessed.",
@@ -767,6 +781,11 @@ fn emit_cli_error(command: &str, args: &[String], cwd: &Path, error: &CliError) 
         if let Some(message) = super::named_address::human_address_reason(reason) {
             payload.error = message.to_string();
             payload.action = "Run team-agent status and use an agent name from the list. Select scope with --workspace/--team; diagnose channel issues with doctor.".to_string();
+        }
+    }
+    if payload.error.contains("legacy contract store requires explicit migration") {
+        if let Some((_, command)) = payload.error.split_once("; run ") {
+            payload.action = format!("Run {command} during a maintenance window, then retry the selected operation.");
         }
     }
     if command_spec(command).is_some()

@@ -26,6 +26,14 @@ pub(crate) struct ToolEvidence {
     pub calls: std::collections::BTreeMap<String, String>,
     pub facts: BTreeSet<String>,
 }
+impl ToolEvidence {
+    pub(crate) fn key(identity: &InstanceIdentity, connection: &InstanceId) -> Result<Key, Error> {
+        Ok(Key::new(
+            "tool_evidence",
+            call_address(identity, connection.as_str())?,
+        ))
+    }
+}
 pub(crate) fn call_address(identity: &InstanceIdentity, key: &str) -> Result<String, Error> {
     Ok(format!("{}\n{key}", serde_json::to_string(identity)?))
 }
@@ -310,7 +318,7 @@ pub fn response_written(
     let address = call_address(&context.identity, &key)?;
     let fact_key = Key::new("facts", &address);
     let call_key = Key::new("calls", address);
-    let evidence_key = Key::new("tool_evidence", context.connection_id.as_str());
+    let evidence_key = ToolEvidence::key(&context.identity, &context.connection_id)?;
     let mut tx = store.files.write([
         fact_key.clone(),
         call_key.clone(),
