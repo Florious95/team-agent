@@ -139,9 +139,12 @@ fn report_fake_result(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     let _ = source_content;
+    // Same result route as MCP report_result: the envelope decides its presentation.
+    let normalized = crate::mcp_server::normalize::normalize_report_envelope(&envelope);
     let presentation = crate::messaging::presentation::PresentationRequest {
-        class: crate::messaging::presentation::PresentationClass::StageResult,
-        ..Default::default()
+        sink: normalized.presentation.sink,
+        class: normalized.presentation.class,
+        case_id: normalized.presentation.case_id.clone(),
     };
     let authority = owner_team.as_deref().map_or(
         crate::station::send::Authority::Operator { sender: agent_id },
