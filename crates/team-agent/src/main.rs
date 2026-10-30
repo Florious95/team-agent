@@ -5,6 +5,24 @@ fn main() -> anyhow::Result<()> {
         .skip(1)
         .map(|arg| arg.to_string_lossy().into_owned());
     let command = args.next();
+    if matches!(command.as_deref(), Some("agenda-run")) {
+        let mut workspace = None;
+        let mut team = None;
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--workspace" if workspace.is_none() => {
+                    workspace = args.next().map(std::path::PathBuf::from)
+                }
+                "--team" if team.is_none() => team = args.next(),
+                other => return Err(anyhow::anyhow!("unknown agenda-run argument: {other}")),
+            }
+        }
+        let workspace =
+            workspace.ok_or_else(|| anyhow::anyhow!("agenda-run requires --workspace"))?;
+        let team = team.ok_or_else(|| anyhow::anyhow!("agenda-run requires --team"))?;
+        team_agent::station::agenda::run(&workspace, &team).map_err(anyhow::Error::msg)?;
+        return Ok(());
+    }
     #[cfg(unix)]
     if matches!(command.as_deref(), Some("contract-mcp")) {
         team_agent::contract_runtime::mcp::run(&args.collect::<Vec<_>>())

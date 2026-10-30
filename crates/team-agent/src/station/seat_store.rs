@@ -300,7 +300,7 @@ pub(crate) fn private_dir(path: &Path) -> Result<(), String> {
     sync_directory(parent)
 }
 
-fn open_file(path: &Path, exclusive: bool) -> Result<File, String> {
+pub(super) fn open_file(path: &Path, exclusive: bool) -> Result<File, String> {
     let mut options = OpenOptions::new();
     options.read(true).write(true);
     if exclusive {
