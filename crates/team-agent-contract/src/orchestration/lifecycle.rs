@@ -55,7 +55,7 @@ pub struct Routing {
 }
 
 pub struct Lifecycle<'a> {
-    pub store: &'a mut ContractStore,
+    pub store: &'a mut dyn SeatAuthority,
     pub host: &'a mut dyn LifecycleHost,
     pub io: &'a mut dyn OwnedIo,
 }
@@ -646,7 +646,7 @@ fn removable(resource: &OwnedResourceReceipt) -> bool {
 /// Interposes at the *actual* owned-I/O boundary. Even an H3/H7 error with an
 /// empty receipt cannot erase effects already journaled through this port.
 struct JournaledIo<'a> {
-    store: &'a mut ContractStore,
+    store: &'a mut dyn SeatAuthority,
     operation: &'a mut OperationRecord,
     inner: &'a mut dyn OwnedIo,
     descriptor: &'a ProviderDescriptor,

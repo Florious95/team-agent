@@ -131,6 +131,46 @@ pub struct ContractStore {
     endpoint: String,
 }
 
+/// Lifecycle authority, separate from protocol connections/calls/facts. A C4
+/// implementation must borrow the held target seat lock; it must not be enabled
+/// until every admission reader uses the same authority. ContractStore remains
+/// the default implementation, so extracting this port does not switch writers.
+pub trait SeatAuthority {
+    fn scope(&self) -> &ScopeId;
+    fn root(&self) -> &Path;
+    fn endpoint(&self) -> &str;
+    fn seat(&self, seat: &SeatId) -> Result<Option<SeatRecord>, Error>;
+    fn seats(&self) -> Result<Vec<SeatRecord>, Error>;
+    fn propose_identity(&self, seat: &SeatId) -> Result<InstanceIdentity, Error>;
+    fn assert_current(&self, identity: &InstanceIdentity) -> Result<SeatRecord, Error>;
+    fn operation(&self, id: &OperationId) -> Result<OperationRecord, Error>;
+    fn creation_receipt(&self, seat: &SeatId, identity: Option<&InstanceIdentity>) -> Result<Option<OperationRecord>, Error>;
+    fn unfinished(&self) -> Result<Vec<OperationRecord>, Error>;
+    fn leased(&self, seat: &SeatId) -> Result<bool, Error>;
+    fn retire(&mut self, identity: &InstanceIdentity) -> Result<SeatRecord, Error>;
+    fn retired(&self, identity: &InstanceIdentity) -> Result<bool, Error>;
+    fn begin(&mut self, operation: &OperationRecord) -> Result<(), Error>;
+    fn save(&mut self, operation: &OperationRecord, publish: bool) -> Result<(), Error>;
+}
+
+impl SeatAuthority for ContractStore {
+    fn scope(&self) -> &ScopeId { ContractStore::scope(self) }
+    fn root(&self) -> &Path { ContractStore::root(self) }
+    fn endpoint(&self) -> &str { ContractStore::endpoint(self) }
+    fn seat(&self, seat: &SeatId) -> Result<Option<SeatRecord>, Error> { ContractStore::seat(self, seat) }
+    fn seats(&self) -> Result<Vec<SeatRecord>, Error> { ContractStore::seats(self) }
+    fn propose_identity(&self, seat: &SeatId) -> Result<InstanceIdentity, Error> { ContractStore::propose_identity(self, seat) }
+    fn assert_current(&self, identity: &InstanceIdentity) -> Result<SeatRecord, Error> { ContractStore::assert_current(self, identity) }
+    fn operation(&self, id: &OperationId) -> Result<OperationRecord, Error> { ContractStore::operation(self, id) }
+    fn creation_receipt(&self, seat: &SeatId, identity: Option<&InstanceIdentity>) -> Result<Option<OperationRecord>, Error> { ContractStore::creation_receipt(self, seat, identity) }
+    fn unfinished(&self) -> Result<Vec<OperationRecord>, Error> { ContractStore::unfinished(self) }
+    fn leased(&self, seat: &SeatId) -> Result<bool, Error> { ContractStore::leased(self, seat) }
+    fn retire(&mut self, identity: &InstanceIdentity) -> Result<SeatRecord, Error> { ContractStore::retire(self, identity) }
+    fn retired(&self, identity: &InstanceIdentity) -> Result<bool, Error> { ContractStore::retired(self, identity) }
+    fn begin(&mut self, operation: &OperationRecord) -> Result<(), Error> { ContractStore::begin(self, operation) }
+    fn save(&mut self, operation: &OperationRecord, publish: bool) -> Result<(), Error> { ContractStore::save(self, operation, publish) }
+}
+
 /// The root is an exclusive, private framework directory. It must not be an old
 /// workspace. No migration/adoption path exists. Same-user hostile writers are
 /// outside this DB boundary; host owned-I/O must still enforce fresh ownership.

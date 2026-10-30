@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use super::*;
 use crate::lifecycle::lock::{
-    acquire_agent_lifecycle_lock, acquire_agent_lifecycle_lock_for_test, LifecycleLockRequest,
+    acquire_seat_lifecycle_lock, acquire_agent_lifecycle_lock_for_test, LifecycleLockRequest,
     AGENT_LIFECYCLE_LOCK_NAME, LIFECYCLE_LOCK_HELD_LONG, LIFECYCLE_LOCK_TIMEOUT,
 };
 
@@ -33,7 +33,7 @@ fn lifecycle_lock_timeout_error_contract_and_constants() {
 fn lifecycle_lock_lifecycle_rollback_releases_after_timeout() {
     let ws = temp_ws();
     let agent = aid("alpha");
-    let held = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let held = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &ws,
         operation: "reset-agent",
         team: Some("alpha"),
@@ -42,7 +42,7 @@ fn lifecycle_lock_lifecycle_rollback_releases_after_timeout() {
     .expect("hold lifecycle lock");
 
     let waiter_ws = ws.clone();
-    let waiter_agent = aid("beta");
+    let waiter_agent = aid("alpha");
     let result = std::thread::spawn(move || {
         acquire_agent_lifecycle_lock_for_test(
             LifecycleLockRequest {
@@ -53,7 +53,7 @@ fn lifecycle_lock_lifecycle_rollback_releases_after_timeout() {
             },
             Duration::from_millis(200),
             Duration::from_secs(5),
-        )
+        ).map(|_guard| ())
     })
     .join()
     .expect("waiter thread");
@@ -78,11 +78,29 @@ fn lifecycle_lock_lifecycle_rollback_releases_after_timeout() {
 }
 
 #[test]
+fn lifecycle_lock_does_not_exclude_sibling_seats_or_other_teams() {
+    let ws = temp_ws();
+    let agent = aid("alpha");
+    let _held = acquire_seat_lifecycle_lock(LifecycleLockRequest {
+        workspace: &ws, operation: "reset-agent", team: Some("alpha"), agent_id: Some(&agent),
+    }).unwrap();
+    for (team, id) in [("alpha", "beta"), ("beta", "alpha")] {
+        let workspace = ws.clone();
+        std::thread::spawn(move || {
+            let agent = aid(id);
+            acquire_agent_lifecycle_lock_for_test(LifecycleLockRequest {
+                workspace: &workspace, operation: "stop-agent", team: Some(team), agent_id: Some(&agent),
+            }, Duration::from_millis(200), Duration::from_secs(5)).map(|_guard| ())
+        }).join().unwrap().expect("another seat must remain independently operable");
+    }
+}
+
+#[test]
 fn lifecycle_lock_long_held_event_records_holder_and_waiter() {
     let ws = temp_ws();
     let holder_agent = aid("holder");
-    let waiter_agent = aid("waiter");
-    let _held = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let waiter_agent = aid("holder");
+    let _held = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &ws,
         operation: "restart",
         team: Some("alpha"),
@@ -101,7 +119,7 @@ fn lifecycle_lock_long_held_event_records_holder_and_waiter() {
             },
             Duration::from_millis(220),
             Duration::from_millis(50),
-        )
+        ).map(|_guard| ())
     })
     .join()
     .expect("waiter thread");
@@ -164,7 +182,7 @@ fn r2_lifecycle_lock_exists_precondition() {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(
             !text.contains("LifecycleLock")
-                && !text.contains("acquire_agent_lifecycle_lock")
+                && !text.contains("acquire_seat_lifecycle_lock")
                 && !text.contains("agent-lifecycle"),
             "state module must not acquire or know lifecycle lock: {}",
             path.display()
@@ -174,7 +192,7 @@ fn r2_lifecycle_lock_exists_precondition() {
     for path in source_files(&src.join("coordinator")) {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(
-            !text.contains("acquire_agent_lifecycle_lock") && !text.contains("agent-lifecycle"),
+            !text.contains("acquire_seat_lifecycle_lock") && !text.contains("agent-lifecycle"),
             "coordinator tick path must not block on lifecycle lock: {}",
             path.display()
         );
@@ -241,7 +259,7 @@ fn r2_lifecycle_lock_exists_precondition() {
         .unwrap();
     let readiness_idx = rebuild.find("wait_restart_readiness_or_timeout(").unwrap();
     assert!(
-        rebuild.contains("let lifecycle_lock = acquire_agent_lifecycle_lock")
+        rebuild.contains("let lifecycle_lock = acquire_seat_lifecycle_lock")
             && drop_idx < coordinator_idx
             && coordinator_idx < readiness_idx,
         "restart must release lifecycle lock before coordinator readiness wait"
@@ -317,7 +335,7 @@ fn collect_rs_files(root: &Path, out: &mut Vec<PathBuf>) {
 
 fn assert_public_operation(source: &str, operation: &str) {
     assert!(
-        source.contains("acquire_agent_lifecycle_lock")
+        source.contains("acquire_seat_lifecycle_lock")
             && source.contains(&format!("operation: \"{operation}\"")),
         "public lifecycle entry must acquire lifecycle lock for {operation}"
     );
@@ -333,7 +351,7 @@ fn assert_body_is_unlocked(source: &str, signature: &str) {
         .map(|(body, _)| body)
         .unwrap_or(body);
     assert!(
-        !body.contains("acquire_agent_lifecycle_lock"),
+        !body.contains("acquire_seat_lifecycle_lock"),
         "{signature} must remain lock-free to avoid nested reset deadlocks"
     );
 }
