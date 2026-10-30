@@ -1118,6 +1118,10 @@ pub fn prepare_resume(
     if let Some(source) = source {
         request.operation = Operation::Resume;
         request.resume = Some(ResumeRequest { binding: source, expected_source: parent.identity.clone() });
+    } else if matches!(&discovered.runtime, Some(registry::NativeRuntime::Claude(_))) {
+        // Pure identity-derived allocation, as in normal Fresh startup. Never run
+        // Cursor's native allocation command during this read-only preflight.
+        preassign_session(&mut request, &discovered)?;
     }
     let selected = registry::provider(role.provider.as_str())?;
     require_private_primary(selected, &request.paths.cwd)?;

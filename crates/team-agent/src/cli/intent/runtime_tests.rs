@@ -522,6 +522,50 @@ fn preserve_rejects_known_missing_backing_before_stop_auto_uses_existing_decisio
 
 #[test]
 #[serial_test::serial(env)]
+fn native_stop_recheck_accepts_dead_carrier_observations_but_fences_identity_and_intent() {
+    let (root, mut intent) = fixture(&["one"]);
+    install(root.path(), &[("one", "running", false)]);
+    intent.verb = Verb::Stop;
+    intent.subject = Subject::Agent("one".into());
+    let state = crate::state::persist::runtime_state_path(root.path());
+    let mut raw: Value = serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+    let original = json!({"provider":"claude_tui", "contract_instance":"instance-original",
+        "generation":1, "owner_team_id":"fixture", "spawn_epoch":1,
+        "status":"running", "pane_pid":std::process::id(), "pane_id":"%0", "window":"worker",
+        "session_id":"observed-session", "spawned_at":"original-observation", "explicit_stop":false});
+    let mut publish = |row: &Value| {
+        raw["agents"]["one"] = row.clone();
+        raw["teams"]["fixture"]["agents"]["one"] = row.clone();
+        std::fs::write(&state, serde_json::to_vec(&raw).unwrap()).unwrap();
+    };
+    publish(&original);
+    let plan = plan_with_observer(intent, |_, _, _| Ok(Observation::Live)).unwrap();
+    let step = &plan.steps[0];
+    assert!(matches!(step, Step::StopAgent(_)));
+    let mut observed = original.clone();
+    observed["status"] = json!("unknown");
+    for key in ["pane_pid", "pane_id", "window", "session_id", "spawned_at"] { observed[key] = Value::Null; }
+    publish(&observed);
+    recheck(&plan, step, false).unwrap();
+    for (key, value) in [
+        ("contract_instance", json!("instance-replacement")), ("generation", json!(2)),
+        ("provider", json!("pi_tui")), ("owner_team_id", json!("other-team")),
+        ("spawn_epoch", json!(2)), ("explicit_stop", json!(true)),
+        ("dynamic_role_file", json!("replacement-role.md")),
+    ] {
+        let mut changed = observed.clone(); changed[key] = value;
+        publish(&changed);
+        assert!(recheck(&plan, step, false).is_err(), "{key} must remain fenced");
+    }
+    let mut unresolved = original.clone(); unresolved.as_object_mut().unwrap().remove("contract_instance");
+    let mut dead = unresolved.clone(); dead["pane_pid"] = Value::Null;
+    assert_ne!(relevant(&unresolved), relevant(&dead), "unresolved native identity remains strict");
+    unresolved["provider"] = json!("pi"); dead["provider"] = json!("pi");
+    assert_ne!(relevant(&unresolved), relevant(&dead), "legacy carrier fencing remains strict");
+}
+
+#[test]
+#[serial_test::serial(env)]
 fn changed_role_and_socket_refuse_in_the_real_readonly_recheck() {
     let (root, intent) = fixture(&["one"]);
     install(root.path(), &[("one", "stopped", false)]);

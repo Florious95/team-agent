@@ -146,6 +146,8 @@ fn topology(state: &Value) -> Value {
 }
 fn relevant(row: &Value) -> Value {
     let mut object = serde_json::Map::new();
+    let native_identity = crate::contract_runtime::registry::is_contract(provider(row))
+        && row.get("contract_instance").and_then(Value::as_str).is_some_and(|id| !id.is_empty());
     for key in [
         "provider",
         "status",
@@ -161,6 +163,12 @@ fn relevant(row: &Value) -> Value {
         "spawn_epoch",
         "spawned_at",
     ] {
+        // Native incarnation is authoritative even after its carrier dies. Keep
+        // intent/config fences; the mutator separately validates native sessions
+        // and physical receipts. Legacy seats still need carrier observations.
+        if native_identity && matches!(key, "status" | "pane_id" | "pane_pid" | "window" | "session_id" | "spawned_at") {
+            continue;
+        }
         object.insert(key.into(), row.get(key).cloned().unwrap_or(Value::Null));
     }
     Value::Object(object)
