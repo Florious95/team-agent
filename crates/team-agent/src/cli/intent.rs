@@ -321,6 +321,11 @@ fn run_canonical(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult
         explicit_team,
     )?;
     let mut plan = runtime::plan(intent)?;
+    let upgrade_workspace = plan.scope.workspace.clone();
+    let upgrade = !plan.intent.dry_run && plan.no_eligible.is_none();
+    if upgrade && crate::coordinator::retire_legacy_coordinator(&upgrade_workspace).map_err(CliError::Runtime)? {
+        plan = runtime::plan(plan.intent)?;
+    }
     #[cfg(unix)]
     if plan.intent.verb == Verb::Stop && !plan.intent.dry_run && plan.no_eligible.is_none() {
         if let Some(team) = plan.scope.team.as_deref() {
@@ -330,7 +335,19 @@ fn run_canonical(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult
             }
         }
     }
-    execute_plan(plan, &mut |step| step.execute(), &mut runtime::recheck)
+    let mut result = execute_plan(plan, &mut |step| step.execute(), &mut runtime::recheck)?;
+    if upgrade {
+        if let Err(error) = crate::coordinator::retire_legacy_coordinator(&upgrade_workspace) {
+            if let CmdOutput::Json(value) = &mut result.output {
+                value["ok"] = json!(false);
+                value["status"] = json!("partial");
+                value["upgrade_error"] = json!(error);
+                value["current_state"] = json!("legacy_coordinator_not_retired");
+            }
+            result.exit = ExitCode::Error;
+        }
+    }
+    Ok(result)
 }
 
 fn lifecycle_intent(

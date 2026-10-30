@@ -4266,7 +4266,7 @@ pub mod lifecycle_port {
                     "reminder": crate::cli::QUICK_START_REMINDER,
                     "readiness": readiness_json.clone(),
                     "worker_readiness": readiness_json,
-                    "effects": {"worker_panes_started": agent_ids, "coordinator_start": "running_confirmed"},
+                    "effects": {"worker_panes_started": agent_ids, "coordinator_start": "not_required"},
                 })
             }
             crate::lifecycle::QuickStartReport::Partial {
@@ -5699,7 +5699,8 @@ pub mod diagnose_port {
             },
             "secret_scan": secret_scan(workspace),
             "profile_smoke": profile_smoke_value,
-            "coordinator": coordinator_not_required_value(),
+            "coordinator": crate::coordinator::legacy_coordinator_value(workspace)
+                .unwrap_or_else(coordinator_not_required_value),
             "grok_slot": grok_slot,
             "ok": ok,
             "error": if ok {

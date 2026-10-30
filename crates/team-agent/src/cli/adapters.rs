@@ -5,19 +5,35 @@
 
 use super::*;
 
+fn with_legacy_retired(
+    workspace: &Path,
+    action: impl FnOnce() -> Result<Value, CliError>,
+) -> Result<Value, CliError> {
+    crate::coordinator::retire_legacy_coordinator(workspace).map_err(CliError::Runtime)?;
+    let result = action();
+    let retired = crate::coordinator::retire_legacy_coordinator(workspace);
+    let mut value = result?;
+    if let Err(error) = retired {
+        value["ok"] = json!(false);
+        value["status"] = json!("partial");
+        value["upgrade_error"] = json!(error);
+    }
+    Ok(value)
+}
+
 /// `cmd_quick_start`(`commands.py:18`)。`--json` 或 `!ok` → 整 dict;否则 `result["summary"]`。
 pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
     #[cfg(unix)]
     crate::contract_runtime::config::read_team(args)
         .map_err(|error| CliError::Runtime(error.to_string()))?;
-    let mut value = lifecycle_port::quick_start(
+    let mut value = with_legacy_retired(&args.workspace, || lifecycle_port::quick_start(
         &args.workspace,
         &args.agents_dir,
         args.name.as_deref(),
         args.team_id.as_deref(),
         args.yes,
         args.backend.as_deref(),
-    )?;
+    ))?;
     if let Some(result) = quick_start_config_guidance(&mut value, args) {
         return Ok(result);
     }
@@ -322,6 +338,15 @@ pub fn cmd_status_for_team(args: &StatusArgs, team: Option<&str>) -> Result<CmdR
             return Err(CliError::Runtime(format!("unknown agent id: {agent}")));
         }
     }
+    // The first current-release status is also an explicit upgrade quiescence
+    // point. Doctor uses the read-only observation port instead.
+    let selected = if crate::coordinator::retire_legacy_coordinator(&selected.run_workspace)
+        .map_err(CliError::Runtime)? {
+        crate::state::selector::resolve_active_team_readonly(
+            &selected.run_workspace, Some(&selected.team_key),
+            crate::state::selector::SelectorMode::RuntimeOnly,
+        )?
+    } else { selected };
     // Status brief is deliberately independent of the legacy RuntimeSnapshot:
     // it performs one native tmux/process sample and exposes exactly nine
     // fields. `--summary` and `--detail` remain parser-compatible but do not
@@ -466,19 +491,19 @@ pub fn cmd_claim_leader(args: &ClaimLeaderArgs) -> Result<CmdResult, CliError> {
 /// `cmd_shutdown`(`commands.py:340`)。
 pub fn cmd_shutdown(args: &ShutdownArgs) -> Result<CmdResult, CliError> {
     Ok(CmdResult::from_json(
-        lifecycle_port::shutdown(&args.workspace, args.keep_logs, args.team.as_deref())?,
+        with_legacy_retired(&args.workspace, || lifecycle_port::shutdown(&args.workspace, args.keep_logs, args.team.as_deref()))?,
         args.json,
     ))
 }
 
 /// `cmd_restart`(`commands.py:344`)。
 pub fn cmd_restart(args: &RestartArgs) -> Result<CmdResult, CliError> {
-    let mut value = lifecycle_port::restart(
+    let mut value = with_legacy_retired(&args.workspace, || lifecycle_port::restart(
         &args.workspace,
         args.allow_fresh,
         args.team.as_deref(),
         args.session_converge_deadline_ms,
-    )?;
+    ))?;
     if !args.detail {
         lifecycle_port::compact_restart_value(&mut value);
     }
@@ -487,14 +512,14 @@ pub fn cmd_restart(args: &RestartArgs) -> Result<CmdResult, CliError> {
 
 /// `cmd_start_agent`(`commands.py:348`)。
 pub fn cmd_start_agent(args: &StartAgentArgs) -> Result<CmdResult, CliError> {
-    let mut value = lifecycle_port::start_agent(
+    let mut value = with_legacy_retired(&args.workspace, || lifecycle_port::start_agent(
         &args.workspace,
         &args.agent,
         args.force,
         args.allow_fresh,
         args.team.as_deref(),
         &args.role_config,
-    )?;
+    ))?;
     if value.get("agent_ids").is_none() {
         if let Some(object) = value.as_object_mut() {
             object.insert("agent_ids".to_string(), json!([args.agent.as_str()]));
@@ -507,7 +532,7 @@ pub fn cmd_start_agent(args: &StartAgentArgs) -> Result<CmdResult, CliError> {
 /// `cmd_stop_agent`(`commands.py:359`)。
 pub fn cmd_stop_agent(args: &StopAgentArgs) -> Result<CmdResult, CliError> {
     Ok(CmdResult::from_json(
-        lifecycle_port::stop_agent(&args.workspace, &args.agent, args.team.as_deref())?,
+        with_legacy_retired(&args.workspace, || lifecycle_port::stop_agent(&args.workspace, &args.agent, args.team.as_deref()))?,
         args.json,
     ))
 }
@@ -515,26 +540,26 @@ pub fn cmd_stop_agent(args: &StopAgentArgs) -> Result<CmdResult, CliError> {
 /// `cmd_reset_agent`(`commands.py:363`)。
 pub fn cmd_reset_agent(args: &ResetAgentArgs) -> Result<CmdResult, CliError> {
     Ok(CmdResult::from_json(
-        lifecycle_port::reset_agent(
+        with_legacy_retired(&args.workspace, || lifecycle_port::reset_agent(
             &args.workspace,
             &args.agent,
             args.discard_session,
             args.team.as_deref(),
-        )?,
+        ))?,
         args.json,
     ))
 }
 
 /// `cmd_add_agent`(`commands.py:373`)。
 pub fn cmd_add_agent(args: &AddAgentArgs) -> Result<CmdResult, CliError> {
-    let mut value = lifecycle_port::add_agent(
+    let mut value = with_legacy_retired(&args.workspace, || lifecycle_port::add_agent(
         &args.workspace,
         &args.agent,
         &args.role_file,
         args.team.as_deref(),
         args.force,
         &args.role_config,
-    )?;
+    ))?;
     if value.get("agent_ids").is_none() {
         if let Some(object) = value.as_object_mut() {
             object.insert("agent_ids".to_string(), json!([args.agent.as_str()]));
@@ -547,26 +572,26 @@ pub fn cmd_add_agent(args: &AddAgentArgs) -> Result<CmdResult, CliError> {
 /// `cmd_fork_agent`(`commands.py:383`)。
 pub fn cmd_fork_agent(args: &ForkAgentArgs) -> Result<CmdResult, CliError> {
     Ok(CmdResult::from_json(
-        lifecycle_port::fork_agent(
+        with_legacy_retired(&args.workspace, || lifecycle_port::fork_agent(
             &args.workspace,
             &args.source_agent,
             &args.as_agent,
             args.label.as_deref(),
             args.team.as_deref(),
-        )?,
+        ))?,
         args.json,
     ))
 }
 
 pub fn cmd_clone_agent(args: &CloneAgentArgs) -> Result<CmdResult, CliError> {
     Ok(CmdResult::from_json(
-        lifecycle_port::clone_agent(
+        with_legacy_retired(&args.workspace, || lifecycle_port::clone_agent(
             &args.workspace,
             &args.source_agent,
             &args.as_agent,
             args.label.as_deref(),
             args.team.as_deref(),
-        )?,
+        ))?,
         args.json,
     ))
 }
@@ -574,14 +599,14 @@ pub fn cmd_clone_agent(args: &CloneAgentArgs) -> Result<CmdResult, CliError> {
 /// `cmd_remove_agent`(`commands.py:394`)。
 pub fn cmd_remove_agent(args: &RemoveAgentArgs) -> Result<CmdResult, CliError> {
     Ok(CmdResult::from_json(
-        lifecycle_port::remove_agent(
+        with_legacy_retired(&args.workspace, || lifecycle_port::remove_agent(
             &args.workspace,
             &args.agent,
             args.from_spec,
             args.confirm,
             args.force,
             args.team.as_deref(),
-        )?,
+        ))?,
         args.json,
     ))
 }

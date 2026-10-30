@@ -46,7 +46,7 @@ jobs:
           const root = JSON.parse(fs.readFileSync("package.json", "utf8"));
           const cargo = fs.readFileSync("Cargo.toml", "utf8");
           const expected = {
-            version: "0.5.128",
+            version: "0.5.129",
             license: "AGPL-3.0",
             platforms: [
               ["cli-darwin-arm64", "@team-agent/cli-darwin-arm64", "darwin", "arm64"],
@@ -102,6 +102,16 @@ jobs:
             (cd "$package_dir" && npm pack --dry-run)
           done
 
+      - name: Verify installer package boundary
+        run: |
+          npm pack --ignore-scripts --dry-run --json > "$RUNNER_TEMP/team-agent-pack.json"
+          node <<'NODE'
+          const fs = require("node:fs");
+          const [{files}] = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/team-agent-pack.json`, "utf8"));
+          const unexpected = files.filter(({path}) => path.startsWith("crates/") || /^Cargo\.(toml|lock)$/.test(path));
+          if (unexpected.length) throw new Error("Installer must not ship unused or incomplete Rust workspaces");
+          NODE
+
   build-platform:
     name: Build ${{ matrix.package_name }}
     needs: verify
@@ -150,6 +160,9 @@ jobs:
           rustc --version
           cargo --version
 
+      - name: Run native Rust tests
+        run: cargo test --workspace --locked --no-fail-fast
+
       - name: Build binary
         run: cargo build --release --bin team-agent --target "${{ matrix.target }}" --locked
 
@@ -187,6 +200,8 @@ jobs:
           test -x "$binary"
           cp "$binary" "$package_bin"
           chmod 755 "$package_bin"
+          version="$(node -p "require('./package.json').version")"
+          test "$("$package_bin" --version)" = "team-agent $version"
           "$package_bin" --help >/tmp/team-agent-help.txt
           (cd "npm/platform-packages/${{ matrix.package_dir }}" && npm pack --dry-run)
 

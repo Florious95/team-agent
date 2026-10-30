@@ -87,6 +87,9 @@ pub(super) fn run(args: &[String], cwd: &Path) -> Result<CmdResult, CliError> {
     )?;
     let workspace = &selected.run_workspace;
     let owner = selected.team_key.as_str();
+    if positional[0] != "list" {
+        crate::coordinator::retire_legacy_coordinator(workspace).map_err(CliError::Runtime)?;
+    }
     let store = agenda::Store::new(workspace, owner).map_err(CliError::Runtime)?;
     let value = if let Some(duration) = duration {
         store

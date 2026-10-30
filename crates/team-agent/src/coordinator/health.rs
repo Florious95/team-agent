@@ -55,13 +55,48 @@ use super::types::{
 // the actual spawn is the #[ignore] real-machine boundary, the idempotent decision is testable.
 // ===========================================================================
 
-/// `coordinator_health`(`lifecycle.py:38-46`):`running ∧ metadata_ok ∧ schema_ok` → typed report.
-/// ---
-/// purpose: 一次性判定本 workspace 的 coordinator daemon 是否健康
-/// params:
-///   workspace: workspace 根；pid/metadata 路径与 message store 都由它派生
-/// returns: HealthReport。ok = 进程在跑 ∧ metadata 三元全等 ∧ 二进制身份一致 ∧ schema 兼容；service_available 刻意排除二进制身份，表示「这个 daemon 还能处理本队队列」；status 区分 Missing / InvalidPid / Running / Stale
-/// ---
+/// Bounded upgrade cleanup, never a daemon startup. Normal station workspaces
+/// take only the two path checks; existing shutdown retains its ownership fence.
+pub fn retire_legacy_coordinator(workspace: &Path) -> Result<bool, String> {
+    let workspace = WorkspacePath::new(crate::model::paths::canonical_run_workspace(workspace)
+        .unwrap_or_else(|_| workspace.to_path_buf()));
+    if !coordinator_pid_path(&workspace).exists() && !coordinator_meta_path(&workspace).exists() {
+        return Ok(false);
+    }
+    let report = stop_coordinator(&workspace).map_err(|error| error.to_string())?;
+    if !report.ok {
+        return Err(format!("legacy coordinator retirement refused: {:?} (pid {:?})", report.status, report.pid));
+    }
+    Ok(matches!(report.status, StopOutcome::Stopped))
+}
+
+/// Presence/ownership observation only: no SQL open, cleanup, or process signal.
+pub fn legacy_coordinator_value(workspace: &Path) -> Option<serde_json::Value> {
+    let workspace = WorkspacePath::new(crate::model::paths::canonical_run_workspace(workspace)
+        .unwrap_or_else(|_| workspace.to_path_buf()));
+    let metadata = read_coordinator_metadata(&workspace);
+    let pid = read_pid_file(&coordinator_pid_path(&workspace)).or_else(|| metadata.as_ref().map(|m| m.pid))?;
+    if pid_is_running(pid).ok() != Some(true) { return None; }
+    let owned = metadata.as_ref().is_some_and(|m| m.pid == pid)
+        && coordinator_pid_owned_by_workspace(&workspace, pid);
+    Some(serde_json::json!({
+        "ok": false,
+        "status": if owned { "legacy_running" } else { "legacy_pid_unverified" },
+        "pid": pid.get(), "process_running": true, "metadata_ok": owned,
+        "metadata_mismatch_reason": if owned { "legacy_coordinator_running" } else { "legacy_coordinator_identity_unverified" },
+        "binary_path": metadata.as_ref().and_then(|m| m.binary_path.as_deref()),
+        "binary_version": metadata.as_ref().and_then(|m| m.binary_version.as_deref()),
+        "metadata": metadata,
+        "action": if owned {
+            "Run current-release team-agent status in this workspace to retire the legacy daemon; doctor is read-only."
+        } else {
+            "Verify the legacy PID metadata and workspace ownership; no process was stopped."
+        }
+    }))
+}
+
+/// Legacy full health inspection; station presence checks use the read-only
+/// `legacy_coordinator_value` above and do not open the message database.
 pub fn coordinator_health(workspace: &WorkspacePath) -> HealthReport {
     coordinator_health_with_schema(workspace, message_store_schema_health(workspace))
 }

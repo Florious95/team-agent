@@ -49,13 +49,14 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
     }
     let (workspace, team) = alias.as_ref().map_or((&args.workspace, args.team.as_deref()),
         |entry| (&entry.workspace, Some(entry.team_key.as_str())));
+    crate::coordinator::retire_legacy_coordinator(workspace).map_err(CliError::Runtime)?;
     let outcome = crate::station::send::execute(crate::station::send::Request {
         workspace, team, to: &logical_to, content: &content,
         task_id: args.task.as_deref(), message_id: args.message_id.as_deref(),
         presentation: &args.presentation,
         mailbox: args.presentation.sink != crate::messaging::presentation::PresentationSink::Leader,
         envelope: None,
-    }, crate::station::send::Authority::Operator { sender: args.sender.as_str() });
+    }, crate::station::send::Authority::Operator { sender: args.sender.display_name() });
     let value = match outcome {
         Ok(value) => value,
         Err(error) if alias.is_some() => return Err(CliError::Runtime(error)),

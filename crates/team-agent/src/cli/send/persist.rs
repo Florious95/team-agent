@@ -38,13 +38,14 @@ pub(super) fn persist_resolved_target(
         MessageTarget::Fanout(targets) => targets.join(","),
         MessageTarget::Broadcast => "*".into(),
     };
+    crate::coordinator::retire_legacy_coordinator(&resolved.target_workspace).map_err(CliError::Runtime)?;
     crate::station::send::execute(crate::station::send::Request {
         workspace: &resolved.target_workspace, team: resolved.team_key.as_deref(),
         to: &to, content, task_id: args.task.as_deref(), message_id: args.message_id.as_deref(),
         presentation: &args.presentation,
         mailbox: args.presentation.sink != crate::messaging::presentation::PresentationSink::Leader,
         envelope: None,
-    }, crate::station::send::Authority::Operator { sender: args.sender.as_str() })
+    }, crate::station::send::Authority::Operator { sender: args.sender.display_name() })
         .map_err(CliError::Usage)
 }
 

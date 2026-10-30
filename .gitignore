@@ -19,6 +19,8 @@ node_modules/
 *.tgz
 target/
 crates/**/target/
+/npm/platform-packages/*/bin/team-agent
+/npm/platform-packages/*/bin/team-agent.exe
 
 .team/
 team.spec.yaml

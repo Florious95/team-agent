@@ -224,6 +224,9 @@ impl TeamOrchestratorTools {
         if matches!(scope_override, Some(Scope::Workspace)) {
             return Err(self.rpc_scope_refused("send_message", None, Some("workspace")));
         }
+        if let Some(error) = self.refuse_cross_team_peer(to, scope_override) {
+            return Err(error);
+        }
         let normalized = crate::messaging::presentation::normalize_send_presentation(mailbox, presentation)
             .map_err(tool_runtime_error)?;
         let owner_team = self.canonical_owner_team_key()?;
@@ -234,6 +237,7 @@ impl TeamOrchestratorTools {
             MessageTarget::Fanout(targets) => targets.join(","),
             MessageTarget::Broadcast => "*".to_string(),
         };
+        crate::coordinator::retire_legacy_coordinator(&self.workspace).map_err(tool_runtime_error)?;
         let mut value = crate::station::send::execute(crate::station::send::Request {
             workspace: &self.workspace, team: Some(team), to: &targets, content,
             task_id, message_id: None, presentation: &normalized.request,
@@ -453,6 +457,7 @@ impl TeamOrchestratorTools {
             sink: normalized.presentation.sink, class: normalized.presentation.class,
             case_id: normalized.presentation.case_id.clone(),
         };
+        crate::coordinator::retire_legacy_coordinator(&self.workspace).map_err(tool_runtime_error)?;
         let value = crate::station::send::execute(crate::station::send::Request {
             workspace: &self.workspace, team: Some(team), to: "leader", content: summary,
             task_id: env_value["task_id"].as_str(), message_id: None,

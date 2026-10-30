@@ -456,13 +456,11 @@ pub fn read(
             .and_then(|d| d.team)
     });
     let root = root(workspace, recipient, selected.as_deref())?;
-    let mut paths = segments(&root)?;
-    let legacy = root.parent().unwrap().join(format!("{recipient}.jsonl"));
-    if legacy.is_file() {
-        paths.insert(0, (0, legacy));
-    }
+    let paths = segments(&root)?;
+    let scoped_legacy = root.parent().unwrap().join(format!("{recipient}.jsonl"));
+    let global_legacy = workspace.join(".team/inbox").join(format!("{recipient}.jsonl"));
     let mut messages = VecDeque::new();
-    let malformed = if limit == 0 {
+    let mut malformed = if limit == 0 {
         0
     } else {
         scan_recent(&paths, limit, |value, _| {
@@ -492,7 +490,51 @@ pub fn read(
             previous = Some(seq);
         }
     }
+    // Old helpers can keep writing either flat file after the new segments exist.
+    // Filter before limiting each legacy stream; never assign unscoped rows in a
+    // multi-team workspace merely because the caller selected one team.
+    let single_team = crate::direct_delivery::snapshot(workspace).ok().is_some_and(|state| {
+        let matches = |key: &str, team: &Value| selected.as_deref().is_none_or(|selected|
+            crate::state::projection::team_selector_matches(selected, key, team));
+        match state.get("teams").and_then(Value::as_object).filter(|teams| !teams.is_empty()) {
+            Some(teams) => teams.len() == 1 && teams.iter().any(|(key, team)| matches(key, team)),
+            None => ["team_key", "active_team_key", "team_id"].iter()
+                .filter_map(|key| state.get(key).and_then(Value::as_str))
+                .any(|key| !key.is_empty() && matches(key, &state)),
+        }
+    });
+    let mut legacy_paths = vec![scoped_legacy];
+    if legacy_paths[0] != global_legacy { legacy_paths.push(global_legacy); }
+    let mut unattributed = 0;
+    let mut merged_legacy = false;
+    for path in legacy_paths.into_iter().filter(|path| path.is_file()) {
+        if limit == 0 { break; }
+        let mut tail = VecDeque::new();
+        malformed += scan_recent(&[(0, path)], usize::MAX, |record, _| {
+            let record_team = record.get("team").and_then(Value::as_str);
+            if record["opaque"] == true || (!single_team && (record_team.is_none() || selected.is_none())) {
+                unattributed += 1;
+                return Ok(true);
+            }
+            if selected.as_deref().is_none_or(|team| record_team.is_none_or(|owner| owner == team)) {
+                tail.push_front(record);
+            }
+            Ok(tail.len() < limit)
+        })?;
+        for record in tail {
+            let duplicate = record.get("message_id").and_then(Value::as_str).is_some_and(|id|
+                messages.iter().any(|message| message.get("message_id").and_then(Value::as_str) == Some(id)));
+            if !duplicate { messages.push_back(record); merged_legacy = true; }
+        }
+    }
+    if merged_legacy {
+        messages.make_contiguous().sort_by_cached_key(|message|
+            message.get("created_at").and_then(Value::as_str)
+                .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok()));
+    }
+    while messages.len() > limit { messages.pop_front(); }
     let mut value = json!({"recipient":recipient,"messages":messages});
+    if unattributed > 0 { value["unattributed_legacy_records"] = json!(unattributed); }
     if malformed > 0 {
         value["malformed_records"] = json!(malformed);
     }

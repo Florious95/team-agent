@@ -1423,7 +1423,22 @@ pub fn migrate(workspace: &Path, team: &str) -> Result<serde_json::Value, Backen
         .map_err(|error| BackendError::Migration(error.to_string()))?;
     let workspace = selected.run_workspace.as_path();
     let team = selected.team_key.as_str();
-    let mut binding = read_binding(workspace, team)?;
+    crate::coordinator::retire_legacy_coordinator(workspace).map_err(BackendError::Migration)?;
+    let mut binding = match read_binding(workspace, team) {
+        Ok(binding) => binding,
+        Err(BackendError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            let cwd = resolve_cwd(workspace)?;
+            let root = root_for(&cwd.path, &scope_for(&cwd, team)?);
+            if root.try_exists()? {
+                return Err(BackendError::Migration(
+                    "native binding is missing; existing authority was retained, not reset".into(),
+                ));
+            }
+            return Ok(serde_json::json!({"ok":true,"status":"not_required", "team":team,
+                "reason":"no_native_contract_state", "legacy_state_preserved":true,"replayed":0}));
+        }
+        Err(error) => return Err(error),
+    };
     let root = root_for(&binding.workspace.path, &binding.scope);
     if root.canonicalize()? != root { return Err(BackendError::Fence { reason: "migration_root_alias" }); }
     let directory = std::fs::File::open(&root)?;
