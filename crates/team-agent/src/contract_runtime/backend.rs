@@ -1396,8 +1396,11 @@ mod tests {
     impl RoleFixture {
         fn new() -> Self {
             use std::os::unix::fs::DirBuilderExt;
-            let root = std::env::temp_dir().join(format!("contract-role-{}-{}", std::process::id(),
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            // Parallel tests can read the same clock tick; the counter keeps roots unique.
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let root = std::env::temp_dir().join(format!("contract-role-{}-{}-{}", std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
             std::fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
             let root = root.canonicalize().unwrap();
             let cwd = resolve_cwd(&root).unwrap();

@@ -257,7 +257,8 @@ mod tests {
         assert_eq!(result["delivery"], "inbox");
         assert!(result["delivery_error"].is_string());
         fire(dir.path(), id, &log).unwrap();
-        let inbox = crate::inbox_store::read(dir.path(), "leader", usize::MAX, None).unwrap();
+        // M1 inboxes are team-scoped (red_m1_r10): the owner team's inbox holds the record.
+        let inbox = crate::inbox_store::read(dir.path(), "leader", usize::MAX, Some("beta")).unwrap();
         let records = inbox["messages"].as_array().unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0]["team"], "beta");

@@ -393,97 +393,27 @@ fn handle_trust_retry_at_max_is_exhausted_terminal() {
 
 #[test]
 fn send_message_target_not_in_team_is_refused() {
-    // send.py:259-261 — non-leader, non-team target → refused/target_not_in_team.
+    // send.py:259-261 — non-leader, non-team target → refused. M1 (station::send) refuses
+    // before storing anything.
     let ws = tmp_ws("sendrefuse");
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &serde_json::json!({"session_name": "team-x", "agents": {"w1": {"provider": "copilot"}}}),
+    )
+    .unwrap();
     let opts = SendOptions::default();
     let out = send_message(
         &ws,
         &MessageTarget::Single("ghost".to_string()),
         "hi",
         &opts,
-    )
-    .unwrap();
-    assert_eq!(out.status, DeliveryStatus::Refused);
-    assert_eq!(out.reason, Some(DeliveryRefusal::TargetNotInTeam));
-}
-
-#[test]
-fn message_not_silently_stuck_accepted_when_coordinator_dead() {
-    let ws = tmp_ws("sendcoorddead");
-    crate::state::persist::save_runtime_state(
-        &ws,
-        &serde_json::json!({
-            "session_name": "team-x",
-            "agents": {
-                "worker-1": {"status": "running", "agent_id": "worker-1", "window": "worker-1"},
-            },
-        }),
-    )
-    .unwrap();
-    let coordinator_ws = crate::coordinator::WorkspacePath::new(ws.clone());
-    std::fs::create_dir_all(crate::model::paths::runtime_dir(&ws)).unwrap();
-    let _ = MessageStore::open(&ws).unwrap();
-    let stale_pid = crate::coordinator::Pid::new(99_999_999);
-    crate::coordinator::write_coordinator_metadata(
-        &coordinator_ws,
-        stale_pid,
-        crate::coordinator::MetadataSource::Boot,
-    )
-    .unwrap();
-    std::fs::write(
-        crate::coordinator::coordinator_pid_path(&coordinator_ws),
-        stale_pid.to_string(),
-    )
-    .unwrap();
-
-    let out = send_message(
-        &ws,
-        &MessageTarget::Single("worker-1".to_string()),
-        "hi",
-        &SendOptions::default(),
-    )
-    .unwrap();
-
-    assert!(out.ok, "durable persistence is the send success boundary");
-    assert_eq!(out.status, DeliveryStatus::Blocked);
-    assert_eq!(out.message_status.0, "queued_coordinator_unavailable");
-    assert!(out
-        .message_id
-        .as_deref()
-        .is_some_and(|id| id.starts_with("msg_")));
-    assert_eq!(out.reason, Some(DeliveryRefusal::CoordinatorUnavailable));
+    );
     assert!(
-        out.verification
-            .as_deref()
-            .is_some_and(|warning| warning.contains("coordinator is not running")),
-        "N38 warning must explain the durable retry blocker; out={out:?}"
+        matches!(&out, Err(MessagingError::Routing(reason)) if reason.contains("unknown recipient: ghost")),
+        "{out:?}"
     );
-    let store = MessageStore::open(&ws).unwrap();
-    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-    let blocked: i64 = conn
-        .query_row(
-            "select count(*) from messages where status = 'queued_coordinator_unavailable' \
-             and error = 'coordinator_unavailable' and delivered_at is null",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        blocked, 1,
-        "dead coordinator send must park exactly one durable, non-delivered row"
-    );
-    let events = EventLog::new(&ws).tail(20).unwrap();
-    assert!(
-        events.iter().any(|event| {
-            event.get("event").and_then(serde_json::Value::as_str)
-                == Some("send.coordinator_unavailable")
-                && event
-                    .get("message_queued")
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true)
-        }),
-        "send.coordinator_unavailable event must be durable; events={events:?}"
-    );
+    let inbox = crate::inbox_store::read(&ws, "ghost", 10, None).unwrap();
+    assert!(inbox["messages"].as_array().unwrap().is_empty(), "a refused send stores nothing");
 }
 
 #[test]
@@ -498,19 +428,18 @@ fn send_message_broadcast_empty_team_skips_no_recipients() {
     // list — outcome is Failed/no-recipients with channel="*". The "*" channel label
     // is preserved through the new `fanout_send(..., channel_label="*")` parameter so
     // legacy consumers can still tell broadcast (`*`) apart from explicit fanout list.
+    // M1 (station::send): a broadcast that expands to no recipient fails before storing.
     let ws = tmp_ws("sendbcast");
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &serde_json::json!({"session_name": "team-x", "agents": {}}),
+    )
+    .unwrap();
     let opts = SendOptions::default();
-    let out = send_message(&ws, &MessageTarget::Broadcast, "hi", &opts).unwrap();
-    assert!(!out.ok);
-    assert_eq!(out.status, DeliveryStatus::Failed);
-    assert_eq!(
-        out.reason, None,
-        "no_team_recipients is a failed-status terminal, not a typed refusal reason"
-    );
-    assert_eq!(
-        out.channel.as_deref(),
-        Some("*"),
-        "broadcast outcome must carry the '*' channel (send.py to='*'); fanout_send(channel_label=\"*\") preserves this"
+    let out = send_message(&ws, &MessageTarget::Broadcast, "hi", &opts);
+    assert!(
+        matches!(&out, Err(MessagingError::Routing(reason)) if reason == "send requires at least one recipient"),
+        "{out:?}"
     );
 }
 
@@ -520,9 +449,11 @@ fn send_message_fanout_empty_recipients_fails() {
     // no_fanout_recipients. (Dedup-then-deliver happy path needs team fixtures.)
     let ws = tmp_ws("sendfanout");
     let opts = SendOptions::default();
-    let out = send_message(&ws, &MessageTarget::Fanout(vec![]), "hi", &opts).unwrap();
-    assert!(!out.ok);
-    assert_eq!(out.status, DeliveryStatus::Failed);
+    let out = send_message(&ws, &MessageTarget::Fanout(vec![]), "hi", &opts);
+    assert!(
+        matches!(&out, Err(MessagingError::Routing(reason)) if reason == "send requires at least one recipient"),
+        "{out:?}"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -2250,22 +2181,19 @@ fn u1_multi_team_send_does_not_backfill_top_level_leader_binding() {
     )
     .unwrap();
 
-    assert_eq!(
-        out.status,
-        DeliveryStatus::Queued,
-        "team-b leader send must not inherit team-a/top-level unbound leader binding"
+    assert!(out.ok, "{out:?}");
+    let message_id = out.message_id.expect("stored leader message id");
+    // M1 inboxes are team-scoped (red_m1_r10): the record belongs to team-b only.
+    let team_b = crate::inbox_store::read(&ws, "leader", 10, Some("team-b")).unwrap();
+    let records = team_b["messages"].as_array().unwrap();
+    assert_eq!(records.len(), 1, "team-b leader send must land in team-b's inbox: {team_b}");
+    assert_eq!(records[0]["message_id"], message_id.as_str());
+    assert_eq!(records[0]["team"], "team-b");
+    let team_a = crate::inbox_store::read(&ws, "leader", 10, Some("team-a")).unwrap();
+    assert!(
+        team_a["messages"].as_array().unwrap().is_empty(),
+        "team-b leader send must not inherit team-a/top-level unbound leader binding: {team_a}"
     );
-    let message_id = out.message_id.expect("queued leader message id");
-    let store = store_for(&ws);
-    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-    let owner_team_id: Option<String> = conn
-        .query_row(
-            "select owner_team_id from messages where message_id = ?1",
-            [&message_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(owner_team_id.as_deref(), Some("team-b"));
 }
 
 #[test]
@@ -2298,21 +2226,16 @@ fn casefile_leader_send_is_durable_without_entering_leader_funnel() {
     )
     .unwrap();
     assert_eq!(out.status, DeliveryStatus::StoredOnly);
-    assert_eq!(out.message_status.0, "stored_only");
-    let store = store_for(&ws);
-    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-    let (status, presentation): (String, String) = conn
-        .query_row(
-            "select status, presentation from messages where message_id = ?1",
-            [out.message_id.as_deref().unwrap()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(status, "stored_only");
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&presentation).unwrap()["effective_sink"],
-        "casefile"
-    );
+    assert_eq!(out.message_status.0, "stored");
+    // M1: the durable record is the inbox; a casefile send never attempts submission.
+    let receipt: serde_json::Value =
+        serde_json::from_str(out.verification.as_deref().unwrap()).unwrap();
+    assert_eq!(receipt["live"], false);
+    assert!(receipt.get("submission").is_none(), "{receipt}");
+    let inbox = crate::inbox_store::read(&ws, "leader", 10, Some("team-a")).unwrap();
+    let record = &inbox["messages"][0];
+    assert_eq!(record["message_id"], out.message_id.as_deref().unwrap());
+    assert_eq!(record["presentation"]["sink"], "casefile");
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -2537,46 +2460,6 @@ fn collect_output_matches_golden_collected_shape() {
     );
 }
 
-// (d) send --task <unknown id> must RAISE golden "unknown task id" (runtime.py:1032 _find_task),
-// not silently create a message. Rust send_message attaches task_id without validating → Ok. RED.
-// block_until_delivered=false isolates the task-validation from any delivery side-effect.
-#[test]
-fn send_with_unknown_task_id_raises_unknown_task() {
-    let ws = tmp_ws("sendunknowntask223");
-    crate::state::persist::save_runtime_state(
-        &ws,
-        &serde_json::json!({
-            "session_name": "team-x",
-            "agents": { "w1": { "provider": "copilot" } },
-            "tasks": []
-        }),
-    )
-    .unwrap();
-    let _ = store_for(&ws);
-    let opts = SendOptions {
-        task_id: Some(crate::model::ids::TaskId::new("t2-unknown")),
-        block_until_delivered: false,
-        ..SendOptions::default()
-    };
-    let out = send_message(&ws, &MessageTarget::Single("w1".to_string()), "go", &opts);
-    match out {
-        Err(e) => {
-            // SURFACED error = the CLI `error` field = CliError::from(MessagingError).to_string()
-            // (to_payload uses self.to_string(), types.rs:59). Must EQUAL golden's bare message —
-            // NO "validation:" variant prefix (golden runtime.py:1032 surfaces str(exc)).
-            let surfaced = crate::cli::CliError::from(e).to_string();
-            assert_eq!(
-                surfaced, "unknown task id: t2-unknown",
-                "surfaced CLI error must EQUAL golden's message with NO variant prefix; got {surfaced:?}"
-            );
-        }
-        Ok(o) => panic!(
-            "send --task <unknown id> must RAISE 'unknown task id' (golden runtime.py:1032 _find_task), \
-             not silently create a message; got Ok({o:?})"
-        ),
-    }
-}
-
 // ════════════════════════════════════════════════════════════════════════
 // P0 REGRESSION (0700cff "send 0 bytes, nothing queued" / coordinator never delivers).
 // golden gates the unknown-task RAISE on route_task_id (send.py:204 `if task_id and route_task_id`);
@@ -2607,12 +2490,15 @@ fn send_route_task_id_false_skips_task_validation_and_queues() {
         out.message_id.is_some(),
         "the message must be CREATED (message_id present) on the route_task_id=false path; got {out:?}"
     );
-    // real queue verification (not an Ok shell): the message landed in w1's inbox.
-    let inbox = store_for(&ws).inbox("w1", 10, None).expect("inbox");
+    // real storage verification (not an Ok shell): the message landed in w1's M1 inbox,
+    // still carrying its task label.
+    let inbox = crate::inbox_store::read(&ws, "w1", 10, None).expect("inbox");
+    let records = inbox["messages"].as_array().unwrap();
     assert!(
-        !inbox.is_empty(),
-        "the task-tagged message must be QUEUED for w1 on the delivery/internal path; inbox empty (0 bytes queued = the P0)"
+        !records.is_empty(),
+        "the task-tagged message must be STORED for w1 on the delivery/internal path; inbox empty (0 bytes stored = the P0)"
     );
+    assert_eq!(records[0]["task_id"], "t-not-seeded");
 }
 
 // (c) [LOCK] route_task_id=true + task_id IN state.tasks → send SUCCEEDS (routing happy-path).

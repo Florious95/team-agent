@@ -654,9 +654,12 @@ fn issue372_send_never_reports_a_handshake_parking_gate() {
     assert_eq!(value["status"], "stored");
     assert!(value.get("deferred_reason").is_none());
     let direct = SendArgs { presentation: crate::messaging::presentation::PresentationRequest::default(), ..args };
-    let error = cmd_send(&direct).unwrap_err().to_string();
-    assert!(error.contains("no tmux pane"), "{error}");
-    assert!(!error.contains("mcp_handshake") && !error.contains("parked"), "{error}");
+    // M1 stores first; a missing pane is reported on the receipt, not as an error.
+    let CmdOutput::Json(direct) = cmd_send(&direct).unwrap().output else { panic!("JSON result expected") };
+    let text = direct.to_string();
+    assert_eq!(direct["submission"], "not_attempted", "{text}");
+    assert!(direct["delivery_error"].as_str().is_some_and(|e| e.contains("no tmux pane")), "{text}");
+    assert!(!text.contains("mcp_handshake") && !text.contains("parked"), "{text}");
 }
 
 #[test]
@@ -666,8 +669,13 @@ fn cmd_send_json_shape_describes_the_decoupled_operation() {
     let CmdOutput::Json(value) = result.output else { panic!("JSON result expected") };
     let inbox = crate::inbox_store::read(&args.workspace, "w1", 10, None).unwrap();
     assert_eq!(inbox["messages"][0]["message_id"], value["message_id"]);
-    assert_eq!(value, json!({"ok": true, "status": "stored", "recipient": "w1", "mailbox": true, "message_id": inbox["messages"][0]["message_id"]}));
-    for key in ["delivery_attempts", "message_status", "verification", "watch", "deferred_reason"] {
+    // M1 receipt: durable storage facts only; a mailbox send never attempts submission.
+    let mut keys = value.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+    keys.sort();
+    assert_eq!(keys, ["accepted", "anonymous_dedupe_window", "dedupe_key", "duplicate", "live", "message_id", "ok", "recipient", "record_ref", "status", "stored"], "{value}");
+    assert_eq!((value["ok"].clone(), value["status"].clone(), value["stored"].clone(), value["live"].clone(), value["recipient"].clone()),
+        (json!(true), json!("stored"), json!(true), json!(false), json!("w1")), "{value}");
+    for key in ["delivery_attempts", "message_status", "verification", "watch", "deferred_reason", "submission"] {
         assert!(value.get(key).is_none(), "no coordinator delivery fiction: {value}");
     }
 }
@@ -808,7 +816,8 @@ fn cmd_send_legacy_task_flag_does_not_require_a_coordinator_task() {
     assert_eq!(result.exit, ExitCode::Ok);
     let inbox = crate::inbox_store::read(&args.workspace, "alice", 3, None).unwrap();
     assert_eq!(inbox["messages"][0]["content"], "hello world foo");
-    assert!(inbox["messages"][0].get("task_id").is_none());
+    // M1: the task id is an advisory label kept for result attribution (red_m1_r12).
+    assert_eq!(inbox["messages"][0]["task_id"], "t-unknown");
 }
 
 #[test]
@@ -818,7 +827,8 @@ fn run_send_legacy_task_flag_is_not_persisted_in_the_delivery_database() {
     assert_eq!(run(&argv, &args.workspace), ExitCode::Ok);
     let inbox = crate::inbox_store::read(&args.workspace, "alice", 3, None).unwrap();
     assert_eq!(inbox["messages"][0]["content"], "go");
-    assert!(inbox["messages"][0].get("task_id").is_none());
+    // M1: the label rides on the inbox record, never in the delivery database.
+    assert_eq!(inbox["messages"][0]["task_id"], "t-unknown");
     let conn = rusqlite::Connection::open(args.workspace.join(".team/runtime/team.db")).unwrap();
     let count: i64 = conn.query_row("SELECT count(*) FROM messages", [], |row| row.get(0)).unwrap();
     assert_eq!(count, 0);

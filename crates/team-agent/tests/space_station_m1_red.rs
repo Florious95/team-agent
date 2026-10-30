@@ -23,6 +23,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+#[path = "support/hermetic.rs"]
+mod hermetic;
+
+use hermetic::HermeticTestEnv;
 use serde_json::{json, Value};
 use team_agent::mcp_server::TeamOrchestratorTools;
 use team_agent::messaging::MessageTarget;
@@ -43,6 +47,9 @@ struct Station {
     root: PathBuf,
     socket: String,
     started: bool,
+    // CLI subprocesses get a private HOME and an owned fixture caller; the test
+    // runner's TMUX/TEAM_AGENT_* identity never reaches them.
+    hermetic: HermeticTestEnv,
 }
 
 const RECEIVER: &str = r#"import os, sys, tty
@@ -133,7 +140,8 @@ impl Station {
         fs::write(root.join("claude_fake.py"), CLAUDE_FAKE).unwrap();
         fs::write(root.join("claude_trust_fake.py"), CLAUDE_TRUST_FAKE).unwrap();
         let socket = root.join("tmux.sock").to_string_lossy().into_owned();
-        Self { root, socket, started: false }
+        let hermetic = HermeticTestEnv::for_subprocess_with_leader(&format!("m1red-{label}"));
+        Self { root, socket, started: false, hermetic }
     }
 
     fn tmux(&self) -> Command {
@@ -262,12 +270,8 @@ impl Station {
         command
             .args(args)
             .args(["--workspace", self.root.to_str().unwrap(), "--json"])
-            .env_remove("TEAM_AGENT_ID")
-            .env_remove("TEAM_AGENT_AGENT_ID")
-            .env_remove("TEAM_AGENT_WORKSPACE")
-            .env_remove("TEAM_AGENT_OWNER_TEAM_ID")
-            .env_remove("TEAM_AGENT_TEAM_ID")
             .stdin(Stdio::null());
+        self.hermetic.configure_command(&mut command);
         for (key, value) in env {
             command.env(key, value);
         }

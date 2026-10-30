@@ -272,46 +272,6 @@ fn spine2_capture_missing_captures_session_id_for_missing_agent() {
     );
 }
 
-// CONTRACT — sync_health runs BEFORE deliver_pending, but turn-level WORKING state must not make an
-// alive worker undeliverable. Busy delivery deferral is lifecycle-only (`state.agents[id].status=="busy"`);
-// activity/agent_health WORKING remains diagnostic turn state.
-#[test]
-fn spine2_sync_health_working_status_delivers_same_tick() {
-    let (coord, dir) = seeded_health_coord_with_readiness(
-        one_agent("fake"), "Working (5s · esc to interrupt)", true,
-    );
-    let store = MessageStore::open(&dir).unwrap();
-    let mid = store
-        .create_message(Some("t"), "leader", "w1", "hi", None, true, Some("current"))
-        .unwrap();
-    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-    conn.execute(
-        "insert into agent_health(owner_team_id, agent_id, status, updated_at)
-         values (?1, ?2, ?3, ?4)
-         on conflict(owner_team_id, agent_id) do update set
-             status = excluded.status,
-             updated_at = excluded.updated_at",
-        rusqlite::params!["current", "w1", "WORKING", chrono::Utc::now().to_rfc3339()],
-    )
-    .unwrap();
-    drop(store);
-    coord.tick().expect("tick");
-    let events = read_event_log_dir(&dir);
-    assert!(
-        !events
-            .iter()
-            .any(|e| e.get("event").and_then(|v| v.as_str()) == Some("send.deferred_busy")),
-        "turn-level WORKING must not trigger lifecycle busy deferral; got {events:?}"
-    );
-    assert!(
-        events.iter().any(|e| {
-            e.get("event").and_then(|v| v.as_str()) == Some("message.delivered")
-                && e.get("message_id").and_then(|v| v.as_str()) == Some(mid.as_str())
-        }),
-        "alive worker with WORKING turn state must still receive the pending message; got {events:?}"
-    );
-}
-
 // ADVERSARIAL (real-machine-driven; catches porter fix 1f97163 re-coupling): a worker classified WORKING
 // by sync_health is STILL ALIVE (lifecycle status running) and MUST remain deliverable. golden never maps
 // turn activity to lifecycle status (status is only running/stopped; the status=="busy" gate is vestigial/

@@ -80,7 +80,11 @@ fn real_tmux_restart_failure_keeps_original_session_windows_and_panes_injectable
         assert_restart_did_not_succeed(report);
     }
     tmux.assert_original_windows_present(&["w1", "w2", "w3"]);
-    tmux.assert_original_panes_injectable("TA0540_ORIGINAL_PANE_STILL_INJECTABLE");
+    // Seat-granular build-before-destroy (M2 r6: one pane per seat): the failed
+    // seat keeps its original pane; replaced seats keep exactly their verified
+    // replacement pane.
+    tmux.assert_original_panes_injectable_for(&["w1"], "TA0540_ORIGINAL_PANE_STILL_INJECTABLE");
+    tmux.assert_one_live_pane_per_window(&["w1", "w2", "w3"]);
     assert_no_original_session_kill(
         &transport.ops(),
         "R2: even with real tmux, a failed replacement spawn must leave the original session untouched",
@@ -548,7 +552,24 @@ impl BuildBeforeDestroyTransport {
                 });
             }
         }
-        let pane_id = PaneId::new(format!("%new-{}", state.next_pane));
+        // Real-tmux mode must spawn physically: restart verifies every claimed
+        // replacement pane against the live server (M2 uniform spawn identity).
+        let pane_id = if let Some(socket) = self.real_socket.as_ref() {
+            let output = tmux_command()
+                .arg("-S")
+                .arg(socket)
+                .args(["new-window", "-d", "-P", "-F", "#{pane_id}", "-t"])
+                .arg(format!("{}:", session.as_str()))
+                .args(["-n", window.as_str(), "-c"])
+                .arg(cwd)
+                .arg("while :; do sleep 60; done")
+                .output()
+                .expect("spawn real replacement window");
+            assert!(output.status.success(), "real replacement spawn failed: {}", String::from_utf8_lossy(&output.stderr));
+            PaneId::new(String::from_utf8_lossy(&output.stdout).trim())
+        } else {
+            PaneId::new(format!("%new-{}", state.next_pane))
+        };
         state.next_pane += 1;
         state.session_present = true;
         let mut pane = pane_info(session.clone(), window.clone(), pane_id.clone());
@@ -575,7 +596,7 @@ impl BuildBeforeDestroyTransport {
                 state.panes.values().any(|pane| pane.session == *session)
             });
         };
-        Ok(Command::new("tmux")
+        Ok(tmux_command()
             .args([
                 "-S",
                 socket.to_str().unwrap(),
@@ -596,7 +617,7 @@ impl BuildBeforeDestroyTransport {
         let Some(socket) = self.real_socket.as_ref() else {
             return Ok(self.state.lock().unwrap().panes.values().cloned().collect());
         };
-        let output = Command::new("tmux")
+        let output = tmux_command()
             .args([
                 "-S",
                 socket.to_str().unwrap(),
@@ -810,7 +831,7 @@ impl Transport for BuildBeforeDestroyTransport {
             self.state.lock().unwrap().session_present = false;
             self.state.lock().unwrap().panes.retain(|_, pane| pane.session != *session);
             if let Some(socket) = self.real_socket.as_ref() {
-                let status = Command::new("tmux")
+                let status = tmux_command()
                     .args([
                         "-S",
                         socket.to_str().unwrap(),
@@ -845,6 +866,13 @@ impl Transport for BuildBeforeDestroyTransport {
     fn kill_window(&self, target: &Target) -> Result<(), TransportError> {
         if let Target::Pane(pane) = target {
             self.state.lock().unwrap().panes.remove(pane.as_str());
+            if let Some(socket) = self.real_socket.as_ref() {
+                let _ = tmux_command()
+                    .arg("-S")
+                    .arg(socket)
+                    .args(["kill-pane", "-t", pane.as_str()])
+                    .output();
+            }
         }
         Ok(())
     }
@@ -911,7 +939,7 @@ impl RealTmuxTeam {
         // /private/tmp/ta43-*.sock and its Drop cleans it up.
         let _ = root;
         let socket = hermetic_guard::short_tmux_socket("0540-real-tmux");
-        let _ = Command::new("tmux")
+        let _ = tmux_command()
             .args(["-S", socket.to_str().unwrap(), "kill-server"])
             .output();
         let mut iter = workers.into_iter();
@@ -950,7 +978,7 @@ impl RealTmuxTeam {
     }
 
     fn assert_original_windows_present(&self, expected: &[&str]) {
-        let output = Command::new("tmux")
+        let output = tmux_command()
             .args([
                 "-S",
                 self.socket.to_str().unwrap(),
@@ -979,9 +1007,18 @@ impl RealTmuxTeam {
         }
     }
 
-    fn assert_original_panes_injectable(&self, token: &str) {
-        for (worker, pane) in &self.panes {
-            let status = Command::new("tmux")
+    fn assert_one_live_pane_per_window(&self, windows: &[&str]) {
+        let live = list_tmux_panes(&self.socket);
+        for window in windows {
+            let panes = live.iter().filter(|(name, _)| name == window).collect::<Vec<_>>();
+            assert_eq!(panes.len(), 1, "window `{window}` must have exactly one live pane after restart; live={live:?}");
+        }
+    }
+
+    fn assert_original_panes_injectable_for(&self, workers: &[&str], token: &str) {
+        assert!(!self.panes.is_empty(), "fixture must observe its original panes");
+        for (worker, pane) in self.panes.iter().filter(|(worker, _)| workers.contains(&worker.as_str())) {
+            let status = tmux_command()
                 .args([
                     "-S",
                     self.socket.to_str().unwrap(),
@@ -1003,15 +1040,23 @@ impl RealTmuxTeam {
 
 impl Drop for RealTmuxTeam {
     fn drop(&mut self) {
-        let _ = Command::new("tmux")
+        let _ = tmux_command()
             .args(["-S", self.socket.to_str().unwrap(), "kill-server"])
             .output();
         let _ = fs::remove_file(&self.socket);
     }
 }
 
+/// tmux sanitizes TAB to '_' in -F output without a UTF-8 locale; the
+/// hermetic env has none, so every fixture call forces the UTF-8 protocol.
+fn tmux_command() -> Command {
+    let mut command = Command::new("tmux");
+    command.arg("-u");
+    command
+}
+
 fn run_tmux(socket: &Path, args: &[&str]) {
-    let output = Command::new("tmux")
+    let output = tmux_command()
         .arg("-S")
         .arg(socket)
         .args(args)
@@ -1026,8 +1071,19 @@ fn run_tmux(socket: &Path, args: &[&str]) {
     );
 }
 
+fn list_tmux_panes(socket: &Path) -> Vec<(String, String)> {
+    let output = tmux_command()
+        .args(["-S", socket.to_str().unwrap(), "list-panes", "-a", "-F", "#{window_name}\t#{pane_id}"])
+        .output()
+        .expect("list tmux panes");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split_once('\t').map(|(w, p)| (w.to_string(), p.to_string())))
+        .collect()
+}
+
 fn list_tmux_panes_by_worker(socket: &Path) -> BTreeMap<String, String> {
-    let output = Command::new("tmux")
+    let output = tmux_command()
         .args([
             "-S",
             socket.to_str().unwrap(),

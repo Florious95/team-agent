@@ -15,7 +15,9 @@
         assert_eq!(value["recipient"], "worker-1");
         assert_eq!(value["pane_id"], fixture.pane);
         assert_eq!(value["accepted"], Value::Null);
-        assert!(value.get("message_id").is_none());
+        // M1 stores before submitting, so the physical receipt names its inbox record.
+        let inbox = crate::inbox_store::read(&fixture.root, "worker-1", 10, Some("current")).unwrap();
+        assert_eq!(inbox["messages"][0]["message_id"], value["message_id"]);
         assert!(value.get("poll_via").is_none());
         fixture.received("Team Agent message from leader:\n\ndo it");
         assert!(!fixture.root.join(".team/runtime/team.db").exists());
@@ -48,11 +50,14 @@
     // Decoupled reports never infer task attribution from coordinator state.
     #[test]
     fn report_result_defaults_to_manual_despite_latest_assigned_task() {
+        // M1 binds every report to the seat's captured team; the coordinator task list
+        // must still not leak into attribution.
         let cws = seed_state_ws("report-infer-task", &json!({
-            "agents": {}, "active_team_key": null,
+            "agents": {}, "active_team_key": "teamA",
+            "teams": {"teamA": {"status": "alive", "agents": {"worker-7": {"status": "running"}}}},
             "tasks": [{"id": "t-42", "assignee": "worker-7", "status": "pending"}]
         }));
-        let tools = TeamOrchestratorTools::with_identity(&cws, Some(AgentId::new("worker-7")), None);
+        let tools = TeamOrchestratorTools::with_identity(&cws, Some(AgentId::new("worker-7")), Some(TeamKey::new("teamA")));
         let ok = tools.report_result(
             None, Some("done it"), ResultStatus::Success,
             None, None, None, None, None,
@@ -60,7 +65,7 @@
         ).expect("report ok");
         let v = serde_json::to_value(&ok).unwrap();
         assert_eq!(v.get("task_id"), Some(&json!("manual")));
-        let inbox = crate::inbox_store::read(&cws, "leader", 10, None).unwrap();
+        let inbox = crate::inbox_store::read(&cws, "leader", 10, Some("teamA")).unwrap();
         assert_eq!(inbox["messages"].as_array().unwrap().len(), 1);
         assert_eq!(inbox["messages"][0]["envelope"]["task_id"], "manual");
         assert_eq!(inbox["messages"][0]["content"], "done it");

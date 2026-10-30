@@ -2987,8 +2987,14 @@ fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
             "spawn_cwd",
             "spawned_at",
             "pane_id",
+            // M2 C4: every published seat row carries its per-seat manifest CAS token.
+            "station_instance_id",
         ],
         "the fake worker has no pre-assigned session id, so no framework _pending_session_id; raw={raw}"
+    );
+    assert!(
+        agent["station_instance_id"].as_str().is_some_and(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())),
+        "station_instance_id must be a 32-hex seat manifest instance; raw={raw}"
     );
     assert_eq!(agent["status"], json!("running"));
     assert_eq!(agent["provider"], json!("fake"));
@@ -3110,8 +3116,12 @@ fn quick_start_paused_agent_state_is_paused_provider_only_and_not_spawned() {
         .collect::<Vec<_>>();
     assert_eq!(
         keys,
-        vec!["status", "provider"],
-        "paused agent state must be exactly golden launch/core.py:171-173; raw={raw}"
+        vec!["status", "provider", "station_instance_id"],
+        "paused agent state must be exactly golden launch/core.py:171-173 plus the M2 C4 seat manifest token; raw={raw}"
+    );
+    assert!(
+        agent["station_instance_id"].as_str().is_some_and(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())),
+        "station_instance_id must be a 32-hex seat manifest instance; raw={raw}"
     );
     assert_eq!(agent["status"], json!("paused"));
     assert_eq!(agent["provider"], json!("fake"));

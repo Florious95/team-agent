@@ -236,13 +236,11 @@ fn spine_tick_save_failure_still_persists_real_scheduled_mutation() {
     );
 }
 
-// P0 — tick must DELIVER a pending message against the REAL team.db (deliver_pending_messages,
-// lifecycle.py:285). Observable: report.delivered carries the id OR the message row advances past
-// its created 'accepted' state (claimed/delivered). NOTE: this also needs deliver_pending_messages
-// (messaging/delivery.rs:126, currently a stub returning []) to be implemented — it is RED both
-// because tick does not call it AND because the fn is a stub; it greens when both land.
+// M1 — the tick is not a delivery path. Messaging is synchronous through station::send,
+// and a historical queue row is not permission to replay a message after an ambiguous
+// effect (coordinator/tick.rs). A pre-M1 'accepted' row must stay untouched by the tick.
 #[test]
-fn spine_tick_delivers_pending_message_drives_real_db_or_report() {
+fn spine_tick_never_replays_a_historical_queue_row() {
     let (coord, dir) = seeded_spine_coord(Box::new(DeliveringTransport::new()), None);
     let store = MessageStore::open(&dir).unwrap();
     let mid = store
@@ -265,14 +263,15 @@ fn spine_tick_delivers_pending_message_drives_real_db_or_report() {
 
     let report = coord.tick().expect("tick returns a typed report");
 
-    let delivered_reported = report.delivered.iter().any(|d| d.message_id == mid);
-    let db_advanced = message_status(&dir, &mid) != "accepted";
     assert!(
-        delivered_reported || db_advanced,
-        "tick must deliver the pending message: report.delivered should carry {mid} OR its db status \
-         must advance past 'accepted' (claimed/delivered). report.delivered={:?} db_status={}",
-        report.delivered,
-        message_status(&dir, &mid)
+        report.delivered.is_empty(),
+        "the tick must not deliver queue rows; report.delivered={:?}",
+        report.delivered
+    );
+    assert_eq!(
+        message_status(&dir, &mid),
+        "accepted",
+        "the tick must not claim or replay a historical queue row"
     );
 }
 

@@ -50,12 +50,11 @@ const NEUTRAL_ANCESTRY: &str = "[\"/bin/zsh\"]";
 
 /// B-4 main reverse (cr `monitor_step_failure_does_not_block_deliver_pending`): a
 /// monitor step (here: the runtime-approval pane capture, made to hard-fail) must NOT
-/// abort the tick before deliver_pending. The tick must (1) not enter backoff, (2) log
-/// a step-failure event, (3) still run deliver_pending, (4) push the accepted message
-/// to delivered. Today the `?` on the monitor step aborts before delivery → RED.
+/// abort the tick. The tick must (1) not enter backoff and (2) log a step-failure event.
+/// M1 retired tick delivery (coordinator/tick.rs), so the former delivery clauses are gone.
 #[test]
 #[serial(env)]
-fn b4_monitor_step_failure_does_not_block_deliver_pending() {
+fn b4_monitor_step_failure_does_not_abort_the_tick() {
     let _g = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
     let ws = tmp_ws("b4-monitor");
     seed_copilot_team_state(&ws, "cp1", true);
@@ -67,18 +66,6 @@ fn b4_monitor_step_failure_does_not_block_deliver_pending() {
     #[cfg(not(unix))]
     let targets = Vec::new();
     save_runtime_state(&ws, &state).unwrap();
-    let store = MessageStore::open(&ws).unwrap();
-    store
-        .create_message(
-            Some("task_mcp"),
-            "leader",
-            "cp1",
-            "do the thing",
-            None,
-            false,
-            Some("team-b4"),
-        )
-        .unwrap();
 
     let coord = Coordinator::new(
         WorkspacePath::new(ws.clone()),
@@ -91,20 +78,11 @@ fn b4_monitor_step_failure_does_not_block_deliver_pending() {
     let report = coord.tick();
 
     let mut failures = Vec::new();
-    match &report {
-        Err(e) => failures.push(format!(
+    if let Err(e) = &report {
+        failures.push(format!(
             "B-4: a monitor-step failure must not propagate as a tick Err (it must degrade \
 + continue, bug-084 philosophy); got Err({e})"
-        )),
-        Ok(report) => {
-            if report.delivered.is_empty() {
-                failures.push(
-                    "B-4: deliver_pending must still run after a monitor-step failure — the \
-delivery trunk does not depend on the monitor face (N36 three-way availability); 0 delivered"
-                        .to_string(),
-                );
-            }
-        }
+        ));
     }
     let events = events_text(&ws);
     if !(events.contains("_failed") && events.contains("tick")) {
@@ -113,19 +91,6 @@ delivery trunk does not depend on the monitor face (N36 three-way availability);
 (observable, not silent); events tail={}",
             events.lines().rev().take(3).collect::<Vec<_>>().join(" | ")
         ));
-    }
-    let status: Option<String> = MessageStore::open(&ws)
-        .unwrap()
-        .inbox("cp1", 10, None)
-        .ok()
-        .and_then(|rows| {
-            rows.first()
-                .and_then(|r| r.get("status").and_then(Value::as_str).map(String::from))
-        });
-    if status.as_deref() == Some("accepted") {
-        failures.push(
-            "B-4: the accepted message must leave the 'accepted' state after the tick".to_string(),
-        );
     }
     assert!(
         failures.is_empty(),
