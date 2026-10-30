@@ -5,17 +5,11 @@ mod hermetic_guard;
 #[allow(dead_code)]
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use rusqlite::params;
 use serde_json::{json, Value};
 use serial_test::serial;
-use team_agent::event_log::EventLog;
-use team_agent::message_store::MessageStore;
-use team_agent::messaging::deliver_pending_message;
-use team_agent::messaging::results::collect_for_team;
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 use team_agent::tmux_backend::TmuxBackend;
 
@@ -50,60 +44,8 @@ fn launch_writes_worker_owner_team_id_from_runtime_spec_key_not_stale_active_tea
         Some("bravo"),
         "worker MCP env must use the launched runtime team key, not stale active_team_key=alpha; state={state}"
     );
-
-    insert_result_with_owner(&case.root, "res-u0b-bravo", owner.as_deref().unwrap());
-    collect_for_team(&case.root, None, Some("bravo"))
-        .expect("collect scoped by canonical bravo should see the worker result");
-    assert_eq!(
-        result_status(&case.root, "res-u0b-bravo").as_deref(),
-        Some("collected"),
-        "result written through worker MCP owner_team_id must be collectible by canonical key"
-    );
 }
 
-#[test]
-fn legacy_alias_projection_is_read_only_and_does_not_rewrite_owner_team_rows() {
-    let root = tmp_dir("u0b-readonly-alias");
-    seed_unambiguous_alias_state(&root);
-    let store = MessageStore::open(&root).unwrap();
-    let message_id = store
-        .create_message(
-            None,
-            "leader",
-            "worker_a",
-            "alias ping",
-            None,
-            false,
-            Some("legacy-name"),
-        )
-        .unwrap();
-    let transport = AliasDeliveryTransport;
-    let state = load_runtime_state(&root).unwrap();
-
-    let outcome = deliver_pending_message(
-        &root,
-        &store,
-        &transport,
-        &message_id,
-        &EventLog::new(&root),
-        &state,
-    )
-    .expect("legacy alias delivery should return an explicit outcome");
-
-    assert!(
-        outcome.ok,
-        "legacy alias should still project to its canonical team; outcome={outcome:?}"
-    );
-    assert_eq!(
-        message_owner_team_id(&root, &message_id).as_deref(),
-        Some("legacy-name"),
-        "read-side compatibility must not UPDATE owner_team_id rows; the write side is the canonical source"
-    );
-    assert!(
-        events_text(&root).contains("owner_team_id.compatibility_alias_detected"),
-        "read-only alias handling must leave an audit event instead of silently mutating DB rows"
-    );
-}
 
 struct RealLaunchCase {
     root: PathBuf,
@@ -166,29 +108,6 @@ fn seed_stale_active_multiteam_state(root: &Path) {
     // M4: no SQLite message store fixture (MessageStore::open is retired).
 }
 
-fn seed_unambiguous_alias_state(root: &Path) {
-    let state = json!({
-        "active_team_key": "teamA",
-        "session_name": "team-teamA",
-        "agents": {
-            "worker_a": {"status": "running", "provider": "fake", "window": "worker_a"}
-        },
-        "tasks": [],
-        "teams": {
-            "teamA": {
-                "status": "alive",
-                "session_name": "team-teamA",
-                "spec_name": "legacy-name",
-                "legacy_aliases": ["legacy-name"],
-                "agents": {
-                    "worker_a": {"status": "running", "provider": "fake", "window": "worker_a"}
-                },
-                "tasks": []
-            }
-        }
-    });
-    save_runtime_state(root, &state).unwrap();
-}
 
 fn write_runtime_spec(root: &Path, team_key: &str, agent_id: &str) -> PathBuf {
     let spec_path = root
@@ -308,197 +227,9 @@ fn worker_mcp_owner_team_id(path: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
-fn insert_result_with_owner(root: &Path, result_id: &str, owner_team_id: &str) {
-    let store = MessageStore::open(root).unwrap();
-    let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
-    let envelope = json!({
-        "schema_version": "result_envelope_v1",
-        "result_id": result_id,
-        "task_id": "task_initial",
-        "agent_id": "worker_a",
-        "status": "success",
-        "summary": "done",
-        "changes": [],
-        "tests": [],
-        "risks": [],
-        "artifacts": [],
-        "next_actions": []
-    });
-    conn.execute(
-        "insert into results(result_id, owner_team_id, task_id, agent_id, envelope, status, created_at)
-         values (?1, ?2, 'task_initial', 'worker_a', ?3, 'success', ?4)",
-        params![result_id, owner_team_id, envelope.to_string(), chrono::Utc::now().to_rfc3339()],
-    )
-    .unwrap();
-}
 
-fn result_status(root: &Path, result_id: &str) -> Option<String> {
-    let store = MessageStore::open(root).unwrap();
-    let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
-    conn.query_row(
-        "select status from results where result_id = ?1",
-        [result_id],
-        |row| row.get(0),
-    )
-    .ok()
-}
 
-fn message_owner_team_id(root: &Path, message_id: &str) -> Option<String> {
-    let store = MessageStore::open(root).unwrap();
-    let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
-    conn.query_row(
-        "select owner_team_id from messages where message_id = ?1",
-        [message_id],
-        |row| row.get(0),
-    )
-    .ok()
-}
 
-fn events_text(root: &Path) -> String {
-    std::fs::read_to_string(root.join(".team").join("logs").join("events.jsonl"))
-        .unwrap_or_default()
-}
 
-struct AliasDeliveryTransport;
 
-impl team_agent::transport::Transport for AliasDeliveryTransport {
-    fn kind(&self) -> team_agent::transport::BackendKind {
-        team_agent::transport::BackendKind::Tmux
-    }
 
-    fn spawn_first(
-        &self,
-        _session: &team_agent::transport::SessionName,
-        _window: &team_agent::transport::WindowName,
-        _argv: &[String],
-        _cwd: &Path,
-        _env: &BTreeMap<String, String>,
-    ) -> Result<team_agent::transport::SpawnResult, team_agent::transport::TransportError> {
-        unreachable!("alias delivery test does not spawn")
-    }
-
-    fn spawn_into(
-        &self,
-        _session: &team_agent::transport::SessionName,
-        _window: &team_agent::transport::WindowName,
-        _argv: &[String],
-        _cwd: &Path,
-        _env: &BTreeMap<String, String>,
-    ) -> Result<team_agent::transport::SpawnResult, team_agent::transport::TransportError> {
-        unreachable!("alias delivery test does not spawn")
-    }
-
-    fn inject(
-        &self,
-        _target: &team_agent::transport::Target,
-        _payload: &team_agent::transport::InjectPayload,
-        _submit: team_agent::transport::Key,
-        _bracketed: bool,
-    ) -> Result<team_agent::transport::InjectReport, team_agent::transport::TransportError> {
-        Ok(team_agent::transport::InjectReport {
-            stage_reached: team_agent::transport::InjectStage::Submit,
-            inject_verification: team_agent::transport::InjectVerification::CaptureContainsToken,
-            submit_verification:
-                team_agent::transport::SubmitVerification::EnterSentWithoutPlaceholderCheck,
-            turn_verification: team_agent::transport::TurnVerification::NotYetObserved,
-            attempts: 1,
-            submit_diagnostics: None,
-        })
-    }
-
-    fn send_keys(
-        &self,
-        _target: &team_agent::transport::Target,
-        _keys: &[team_agent::transport::Key],
-    ) -> Result<(), team_agent::transport::TransportError> {
-        Ok(())
-    }
-
-    fn capture(
-        &self,
-        _target: &team_agent::transport::Target,
-        range: team_agent::transport::CaptureRange,
-    ) -> Result<team_agent::transport::CapturedText, team_agent::transport::TransportError> {
-        Ok(team_agent::transport::CapturedText {
-            text: String::new(),
-            range,
-        })
-    }
-
-    fn query(
-        &self,
-        _target: &team_agent::transport::Target,
-        _field: team_agent::transport::PaneField,
-    ) -> Result<Option<String>, team_agent::transport::TransportError> {
-        Ok(None)
-    }
-
-    fn liveness(
-        &self,
-        _pane: &team_agent::transport::PaneId,
-    ) -> Result<team_agent::transport::PaneLiveness, team_agent::transport::TransportError> {
-        Ok(team_agent::transport::PaneLiveness::Live)
-    }
-
-    fn has_session(
-        &self,
-        _session: &team_agent::transport::SessionName,
-    ) -> Result<bool, team_agent::transport::TransportError> {
-        Ok(true)
-    }
-
-    fn list_targets(
-        &self,
-    ) -> Result<Vec<team_agent::transport::PaneInfo>, team_agent::transport::TransportError> {
-        Ok(vec![team_agent::transport::PaneInfo {
-            pane_id: team_agent::transport::PaneId::new("%u0b"),
-            pane_pid: Some(std::process::id()),
-            session: team_agent::transport::SessionName::new("team-teamA"),
-            window_index: Some(0),
-            window_name: Some(team_agent::transport::WindowName::new("worker_a")),
-            pane_index: Some(0),
-            tty: None,
-            current_command: Some("fake".to_string()),
-            current_path: None,
-            active: true,
-            leader_env: BTreeMap::new(),
-        }])
-    }
-
-    fn list_windows(
-        &self,
-        _session: &team_agent::transport::SessionName,
-    ) -> Result<Vec<team_agent::transport::WindowName>, team_agent::transport::TransportError> {
-        Ok(vec![team_agent::transport::WindowName::new("worker_a")])
-    }
-
-    fn set_session_env(
-        &self,
-        _session: &team_agent::transport::SessionName,
-        _key: &str,
-        _value: &str,
-    ) -> Result<team_agent::transport::SetEnvOutcome, team_agent::transport::TransportError> {
-        Ok(team_agent::transport::SetEnvOutcome::Applied)
-    }
-
-    fn kill_session(
-        &self,
-        _session: &team_agent::transport::SessionName,
-    ) -> Result<(), team_agent::transport::TransportError> {
-        Ok(())
-    }
-
-    fn kill_window(
-        &self,
-        _target: &team_agent::transport::Target,
-    ) -> Result<(), team_agent::transport::TransportError> {
-        Ok(())
-    }
-
-    fn attach_session(
-        &self,
-        _session: &team_agent::transport::SessionName,
-    ) -> Result<team_agent::transport::AttachOutcome, team_agent::transport::TransportError> {
-        Ok(team_agent::transport::AttachOutcome::Attached)
-    }
-}

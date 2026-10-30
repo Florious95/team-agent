@@ -150,65 +150,6 @@ fn claude_ready_idle_shape_is_not_confused_with_numbered_trust_menu() {
     );
 }
 
-#[test]
-fn delivery_defers_claude_trust_prompt_then_replays_same_message_after_handled() {
-    let ws = tmp_dir("claude-delivery-gate");
-    let store = MessageStore::open(&ws).unwrap();
-    let log = EventLog::new(&ws);
-    let message_id = store
-        .create_message(
-            Some("task_1"),
-            "leader",
-            "clauder",
-            "do not paste this task into the trust menu",
-            None,
-            false,
-            Some("ctxteam"),
-        )
-        .unwrap();
-    let state = delivery_state("pending");
-    let transport = ScriptedTransport::new([CLAUDE_TRUST_YES_ACTIVE]);
-
-    let delivered = deliver_pending_messages(&ws, &state, &transport, &log)
-        .expect("delivery should inspect startup prompt before injection");
-
-    assert!(
-        delivered.is_empty(),
-        "Claude trust prompt must defer delivery; task text must not be injected into the trust menu"
-    );
-    assert_eq!(
-        message_status(&ws, &message_id).as_deref(),
-        Some("queued_until_trust"),
-        "provider=claude trust prompt should queue the same row until trust is handled"
-    );
-    assert!(
-        transport.injects().is_empty(),
-        "delivery gate must not physically inject task text while Claude trust prompt is active"
-    );
-
-    store.mark(&message_id, "accepted", None).unwrap();
-    let mut handled_state = delivery_state("handled");
-    let (_mcp, pane) = mcp_sim_harness::ready_delivery_worker(
-        &ws, &mut handled_state, "ctxteam", "clauder", "%1",
-    );
-    *transport.targets.lock().unwrap() = vec![pane];
-    let delivered = deliver_pending_messages(&ws, &handled_state, &transport, &log)
-        .expect("handled Claude trust prompt should allow replay through the normal delivery path");
-    assert_eq!(
-        delivered,
-        vec![message_id.clone()],
-        "same message_id must replay and deliver after startup_prompts=handled"
-    );
-    assert_eq!(
-        message_status(&ws, &message_id).as_deref(),
-        Some("delivered")
-    );
-    assert_eq!(
-        transport.injects().len(),
-        1,
-        "after handled state, the same queued row should inject exactly once"
-    );
-}
 
 #[derive(Debug, Default)]
 struct ScriptedTransport {

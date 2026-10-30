@@ -47,10 +47,11 @@ fn report_result_requires_framework_identity_before_delegate() {
         team_agent::mcp_server::ToolErrorReason::McpScopeRefused
     );
     assert!(error.message.contains("identity_mismatch"));
-    let store = team_agent::message_store::MessageStore::open(&ws).unwrap();
-    let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
-    let count: i64 = conn
-        .query_row("select count(*) from results", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(count, 0, "identity rejection must precede result persistence");
+    // M4: no station record and no retired store may exist after the rejection.
+    assert!(!ws.join(".team/runtime/team.db").exists());
+    let inbox = team_agent::inbox_store::read(&ws, "leader", 10, None);
+    assert!(
+        inbox.map_or(true, |v| v["messages"].as_array().map_or(true, Vec::is_empty)),
+        "identity rejection must precede result persistence"
+    );
 }

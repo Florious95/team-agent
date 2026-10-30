@@ -141,56 +141,6 @@ fn d1_report_result_integrity_does_not_parse_model_prose_for_evidence() {
     );
 }
 
-#[test]
-fn d1_collect_preserves_warning_envelope_without_verified_upgrade() {
-    let ws = temp_workspace("d1-collect");
-    seed_collect_workspace(&ws);
-    let envelope = json!({
-        "schema_version": "result_envelope_v1",
-        "result_id": "res_d1_collect_warning",
-        "task_id": "task_d1_collect",
-        "agent_id": "worker-d1",
-        "status": "success",
-        "summary": "success with warning-only evidence",
-        "changes": [],
-        "tests": [{"command": "cargo test --tests", "status": "not_run"}],
-        "warnings": [{
-            "code": "result_success_without_executed_tests",
-            "field": "tests",
-            "severity": "warning",
-            "advisory": true
-        }],
-        "risks": [],
-        "artifacts": [],
-        "next_actions": []
-    });
-
-    messaging::report_result(&ws, &envelope).expect("store warning result");
-    let out = messaging::collect(&ws, None).expect("collect warning result");
-    assert_eq!(
-        out.get("ok").and_then(Value::as_bool),
-        Some(true),
-        "D1 RED setup: collect should process the warning-only result fixture; got {out}"
-    );
-
-    let (status, stored_envelope) = stored_result(&ws, "res_d1_collect_warning");
-    assert_eq!(
-        status, "collected",
-        "D1 RED setup: collect marks the result collected while preserving envelope evidence"
-    );
-    assert_warning(
-        &stored_envelope,
-        "result_success_without_executed_tests",
-        "tests",
-        "D1 RED: collect must not rewrite warning-only result evidence into verified/success-without-warning",
-    );
-    assert!(
-        stored_envelope.get("verified").is_none()
-            && stored_envelope.get("verification_status").and_then(Value::as_str) != Some("verified")
-            && stored_envelope.get("evidence_status").and_then(Value::as_str) != Some("verified"),
-        "D1 RED: collect must not upgrade warning-only evidence into verified authority; stored envelope: {stored_envelope}"
-    );
-}
 
 fn report(envelope: Value) -> Value {
     let ws = temp_workspace("d1");

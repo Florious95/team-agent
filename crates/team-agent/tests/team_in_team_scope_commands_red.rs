@@ -19,10 +19,8 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use rusqlite::params;
 use serde_json::{json, Value};
 use serial_test::serial;
-use team_agent::message_store::MessageStore;
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
@@ -50,7 +48,7 @@ fn status_advertises_team_selector_and_collect_is_absent() {
 
 #[test]
 #[serial(env)]
-fn status_team_selector_filters_agents_tasks_messages_and_results_to_that_team() {
+fn status_team_selector_filters_agents_and_tasks_to_that_team() {
     let _env = EnvGuard::unset();
     let fixture = MultiTeamFixture::new("status-scope");
 
@@ -109,34 +107,7 @@ fn status_team_selector_filters_agents_tasks_messages_and_results_to_that_team()
         !task_ids_from(root_tasks).contains(&"task_b".to_string()),
         "selected teamA root task projection must exclude sibling task_b: {scoped}"
     );
-    let messages = scoped
-        .get("messages")
-        .and_then(Value::as_object)
-        .expect("scoped messages projection");
-    assert_eq!(status_count_total(messages), 1);
-    assert_eq!(messages.get("delivered").and_then(Value::as_i64), Some(1));
-    assert!(messages.get("accepted").is_none());
-    let results = scoped
-        .get("results")
-        .and_then(Value::as_object)
-        .expect("scoped results projection");
-    assert_eq!(results.get("total").and_then(Value::as_i64), Some(1));
-    let latest = scoped
-        .get("latest_results")
-        .and_then(Value::as_array)
-        .expect("scoped latest result projection");
-    assert_eq!(latest_result_ids(latest), vec!["res_team_a".to_string()]);
-    assert!(
-        !latest_result_ids(latest).contains(&"res_team_b".to_string()),
-        "teamA scoped latest results must exclude sibling res_team_b: {scoped}"
-    );
-    let health = scoped
-        .get("agent_health")
-        .and_then(Value::as_object)
-        .expect("scoped health projection");
-    assert_eq!(health.len(), 1);
-    assert!(health.contains_key("worker_a"));
-    assert!(!health.contains_key("worker_b"));
+    // M4: messages, results and agent_health were SQL projections; they are retired.
 }
 
 #[test]
@@ -359,16 +330,7 @@ fn task_ids_from(tasks: &[Value]) -> Vec<String> {
         .collect()
 }
 
-fn latest_result_ids(results: &[Value]) -> Vec<String> {
-    results
-        .iter()
-        .filter_map(|result| result.get("result_id").and_then(Value::as_str).map(str::to_string))
-        .collect()
-}
 
-fn status_count_total(counts: &serde_json::Map<String, Value>) -> i64 {
-    counts.values().filter_map(Value::as_i64).sum()
-}
 
 fn collected_result_ids(value: &Value) -> Vec<String> {
     value
@@ -426,7 +388,6 @@ impl MultiTeamFixture {
             }
         });
         save_runtime_state(&root, &state).expect("seed state");
-        seed_db(&root);
         let root_str = root.to_string_lossy().to_string();
         Self { root, root_str }
     }
@@ -529,108 +490,9 @@ fn write_team_dir(root: &Path, team: &str, agent: &str) -> PathBuf {
     dir
 }
 
-fn seed_db(root: &Path) {
-    let store = MessageStore::open(root).expect("open team.db");
-    let message_a = store
-        .create_message(
-            Some("task_a"),
-            "leader",
-            "worker_a",
-            "teamA message",
-            None,
-            true,
-            Some("teamA"),
-        )
-        .unwrap();
-    store.mark(&message_a, "delivered", None).unwrap();
-    store
-        .create_message(
-            Some("task_b"),
-            "leader",
-            "worker_b",
-            "teamB message",
-            None,
-            true,
-            Some("teamB"),
-        )
-        .unwrap();
-    let conn = db_conn(root);
-    insert_result(
-        &conn,
-        "res_team_a",
-        "teamA",
-        "task_a",
-        "worker_a",
-        "team A done",
-        "2026-06-07T00:00:00Z",
-    );
-    insert_result(
-        &conn,
-        "res_team_b",
-        "teamB",
-        "task_b",
-        "worker_b",
-        "team B done",
-        "2026-06-07T00:00:01Z",
-    );
-    conn.execute(
-        "insert into agent_health(owner_team_id, agent_id, status, updated_at)
-         values (?1, ?2, 'idle', ?3), (?4, ?5, 'idle', ?6)",
-        params![
-            "teamA",
-            "worker_a",
-            "2026-06-07T00:00:00Z",
-            "teamB",
-            "worker_b",
-            "2026-06-07T00:00:00Z"
-        ],
-    )
-    .unwrap();
-}
 
-fn insert_result(
-    conn: &rusqlite::Connection,
-    result_id: &str,
-    team: &str,
-    task_id: &str,
-    agent: &str,
-    summary: &str,
-    created_at: &str,
-) {
-    let envelope = json!({
-        "schema_version": "result_envelope_v1",
-        "result_id": result_id,
-        "task_id": task_id,
-        "agent_id": agent,
-        "status": "success",
-        "summary": summary,
-        "artifacts": [],
-        "changes": [],
-        "tests": [],
-        "risks": [],
-        "next_actions": []
-    });
-    conn.execute(
-        "insert into results(result_id, owner_team_id, task_id, agent_id, envelope, status, created_at)
-         values (?1, ?2, ?3, ?4, ?5, 'success', ?6)",
-        params![result_id, team, task_id, agent, envelope.to_string(), created_at],
-    )
-    .unwrap();
-}
 
-fn db_conn(root: &Path) -> rusqlite::Connection {
-    let store = MessageStore::open(root).expect("open team.db");
-    team_agent::db::schema::open_db(store.db_path()).expect("open sqlite")
-}
 
-fn result_status(conn: &rusqlite::Connection, result_id: &str) -> Option<String> {
-    conn.query_row(
-        "select status from results where result_id = ?1",
-        params![result_id],
-        |row| row.get(0),
-    )
-    .ok()
-}
 
 fn task_status(state: &Value, team: &str, task_id: &str) -> Option<String> {
     state

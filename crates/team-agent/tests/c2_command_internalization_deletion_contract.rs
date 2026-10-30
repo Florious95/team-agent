@@ -24,7 +24,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rusqlite::params;
 use serde_json::{json, Value};
 use team_agent::message_store::MessageStore;
-use team_agent::messaging::report_result;
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 
 const DELETED_COMMANDS: &[&str] = &[
@@ -277,40 +276,6 @@ fn red5_result_validation_is_in_normal_ingestion() {
         ));
     }
 
-    let invalid = report_result(
-        case.workspace(),
-        &json!({
-            "schema_version": "result_envelope_v1",
-            "result_id": "res_c2_invalid",
-            "task_id": "task_c2",
-            "agent_id": "worker",
-            "summary": "missing status is invalid"
-        }),
-    );
-    if invalid.is_ok() {
-        failures.push("report_result must reject an envelope missing status".to_string());
-    }
-
-    let valid = report_result(
-        case.workspace(),
-        &json!({
-            "schema_version": "result_envelope_v1",
-            "result_id": "res_c2_valid",
-            "task_id": "task_c2",
-            "agent_id": "worker",
-            "status": "success",
-            "summary": "valid result auto-finalizes",
-            "changes": [],
-            "tests": [{"command": "cargo test", "status": "passed"}],
-            "risks": [],
-            "artifacts": [],
-            "next_actions": []
-        }),
-    );
-    if valid.is_err() {
-        failures.push(format!("valid report_result must be accepted: {valid:?}"));
-    }
-
     assert!(
         failures.is_empty(),
         "RED5: result validation must live in report_result/collect ingestion, not a standalone validate-result CLI.\n{}",
@@ -345,7 +310,8 @@ fn red6_repair_state_daily_path_removed_and_schema_hint_points_to_doctor() {
                 "{path} still suggests nonexistent schema repair via `repair-state --schema`"
             ));
         }
-        if !text.contains("doctor --fix-schema") {
+        // M4: health.rs no longer probes the retired SQL schema, so it carries no hint.
+        if path.ends_with("diagnose.rs") && !text.contains("doctor --fix-schema") {
             failures.push(format!(
                 "{path} must redirect schema repair hints to `team-agent doctor --fix-schema --json`"
             ));

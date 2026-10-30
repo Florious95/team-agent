@@ -187,33 +187,6 @@ fn e6_mailbox_paths_do_not_spawn_provider_or_worker_processes() {
     );
 }
 
-#[test]
-fn e6_mailbox_does_not_create_parallel_inbox_or_message_store() {
-    assert!(
-        !is_approved_ds01_fifo_notification(
-            "src/messaging/watchers.rs",
-            163,
-            "let mut mailbox = OpenOptions::new()",
-        ) && !is_approved_ds01_fifo_notification(
-            "src/messaging/watchers.rs",
-            999,
-            "let mut fifo = OpenOptions::new()",
-        ),
-        "E6 guard: the DS-01 exception must not exempt a new file-backed mailbox in watchers.rs"
-    );
-    let offenders = parallel_store_offenders(&[
-        "src/cli/send.rs",
-        "src/cli/named_address.rs",
-        "src/messaging/leader_receiver.rs",
-        "src/messaging/watchers.rs",
-        "src/messaging/results.rs",
-    ]);
-
-    assert!(
-        offenders.is_empty(),
-        "E6 RED guard: offline mailbox must reuse target team.db messages rows, not leader-inbox.log, .team/messages, File::create/OpenOptions/write_all, or another message store. Offenders: {offenders:#?}"
-    );
-}
 
 #[test]
 fn e6_third_party_copy_never_suggests_target_takeover() {

@@ -215,32 +215,14 @@ impl ConsistencyCase {
         status_ok
     }
 
-    /// Message DB owner scope must only ever contain the canonical key.
-    fn assert_db_owner_scope_only(&self, canonical: &str, context: &str) {
+    /// M4: accepted direct sends never create the retired message DB, so no
+    /// owner scope (canonical or display alias) can be persisted there.
+    fn assert_db_owner_scope_only(&self, _canonical: &str, context: &str) {
         let db_path = self.workspace.join(".team").join("runtime").join("team.db");
-        if !db_path.exists() {
-            panic!(
-                "{context}: message DB must exist after accepted sends: {}",
-                db_path.display()
-            );
-        }
-        let connection = rusqlite::Connection::open(&db_path).expect("open team.db");
-        let mut statement = connection
-            .prepare("SELECT DISTINCT owner_team_id FROM messages WHERE owner_team_id IS NOT NULL")
-            .expect("prepare owner_team_id query");
-        let owners: Vec<String> = statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .expect("query owner_team_id")
-            .filter_map(Result::ok)
-            .collect();
         assert!(
-            owners.iter().all(|owner| owner == canonical),
-            "{context}: every messages.owner_team_id must be the canonical key `{canonical}` — a \
-             display alias leaking into owner scope poisons DB scoping; owners={owners:?}"
-        );
-        assert!(
-            owners.is_empty(),
-            "{context}: direct sends must not persist coordinator queue rows"
+            !db_path.exists(),
+            "{context}: accepted sends must not create the retired message DB: {}",
+            db_path.display()
         );
     }
 

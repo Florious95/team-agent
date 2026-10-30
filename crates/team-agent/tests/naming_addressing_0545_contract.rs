@@ -872,10 +872,14 @@ impl AddressCase {
     }
 
     fn message_count_in(&self, workspace: &Path, content: &str) -> i64 {
-        let store = team_agent::message_store::MessageStore::open(workspace)
-            .expect("open hermetic message store");
-        self.env.assert_store_under_root(&store);
-        let conn = Connection::open(store.db_path()).expect("open team.db");
+        // M4: the retired store is never created; an absent team.db holds no rows.
+        let db = workspace.join(".team/runtime/team.db");
+        self.env.assert_path_under_root(&db);
+        if !db.exists() {
+            return 0;
+        }
+        let conn = Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open team.db");
         conn.query_row(
             "SELECT COUNT(*) FROM messages WHERE content = ?1",
             [content],

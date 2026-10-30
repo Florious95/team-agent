@@ -11,8 +11,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use team_agent::event_log::EventLog;
-use team_agent::message_store::MessageStore;
-use team_agent::messaging::{deliver_pending_messages, fire_due_scheduled_events};
 use team_agent::tmux_backend::TmuxBackend;
 use team_agent::transport::{CaptureRange, PaneId, SessionName, Target, Transport, WindowName};
 
@@ -107,14 +105,8 @@ impl McpSimHarness {
         team_agent::state::persist::load_runtime_state(&self.workspace).unwrap()
     }
 
+    /// M4: station send delivers synchronously; there is no legacy pump to drive.
     pub fn drive_delivery_once(&self) {
-        let store = MessageStore::open(&self.workspace).unwrap();
-        let event_log = EventLog::new(&self.workspace);
-        let _ =
-            fire_due_scheduled_events(&self.workspace, &store, &self.backend, &event_log).unwrap();
-        let state = team_agent::state::persist::load_runtime_state(&self.workspace).unwrap();
-        let _ =
-            deliver_pending_messages(&self.workspace, &state, &self.backend, &event_log).unwrap();
         std::thread::sleep(Duration::from_millis(150));
     }
 
