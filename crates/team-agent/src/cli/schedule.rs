@@ -6,7 +6,20 @@ use serde_json::json;
 use super::{CliError, CmdOutput, CmdResult};
 use crate::station::agenda;
 
-pub(super) fn run(args: &[String], cwd: &Path) -> Result<CmdResult, CliError> {
+struct Parsed<'a> {
+    workspace: std::path::PathBuf,
+    team: Option<&'a str>,
+    duration: Option<&'a str>,
+    every: Option<&'a str>,
+    text: Option<&'a str>,
+    positional: Vec<&'a str>,
+}
+
+pub(super) fn validate(args: &[String], cwd: &Path) -> Result<(), CliError> {
+    parse(args, cwd).map(|_| ())
+}
+
+fn parse<'a>(args: &'a [String], cwd: &Path) -> Result<Parsed<'a>, CliError> {
     let mut workspace = cwd.to_path_buf();
     let (mut team, mut after, mut every, mut text) = (None, None, None, None);
     let mut positional = Vec::new();
@@ -24,7 +37,7 @@ pub(super) fn run(args: &[String], cwd: &Path) -> Result<CmdResult, CliError> {
             _ => positional.push(token.as_str()),
         }
     }
-    // Validate the full request before touching the workspace or starting a daemon.
+    // Syntax validation must precede workspace access and agenda activation.
     let duration = if positional.as_slice() == ["add"] {
         let duration = match (after, every) {
             (Some(value), None) | (None, Some(value)) => value,
@@ -62,6 +75,11 @@ pub(super) fn run(args: &[String], cwd: &Path) -> Result<CmdResult, CliError> {
         }
         None
     };
+    Ok(Parsed { workspace, team, duration, every, text, positional })
+}
+
+pub(super) fn run(args: &[String], cwd: &Path) -> Result<CmdResult, CliError> {
+    let Parsed { workspace, team, duration, every, text, positional } = parse(args, cwd)?;
     let selected = crate::state::selector::resolve_active_team_readonly(
         &workspace,
         team,

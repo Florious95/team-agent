@@ -231,6 +231,9 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
 
 fn prepare_control_args(command: &str, args: &[String], cwd: &Path) -> Result<super::arguments::CheckedArgs, CliError> {
     let mut checked = super::arguments::parse(command, args)?;
+    if !checked.help && command == "schedule" {
+        super::schedule::validate(&checked.tokens, cwd)?;
+    }
     let raw_send = command == "send" && checked.tokens.iter().any(|token| token == "--socket");
     if !checked.help && !raw_send { checked.tokens = resolve_command_scope(command, checked.tokens, cwd)?; }
     Ok(checked)
@@ -475,7 +478,7 @@ pub(super) fn command_help(command: Option<&str>) -> String {
             "team-agent locate --workspace . --json\nteam-agent locate --team help-demo", "Use the socket, pane_id and dialect for raw send, or the agent name for workspace-scoped send."),
         "schedule" => ("add requires exactly one of --in or --every and non-empty --text. Durations are positive integers followed by ms, s, m, h or d.\nlist shows active reminders; cancel takes the sched_<hex> id returned by add.",
             "team-agent schedule add --in 10m --text 'Check progress'\nteam-agent schedule add --every 1h --text 'Review status'\nteam-agent schedule list --json\nteam-agent schedule cancel sched_1",
-            "Uses the existing coordinator timer; schedules survive daemon restarts. Delivery has tick granularity. Cancellation stops future occurrences, not reminders already firing or queued. A stopped coordinator resumes timers when restarted, without replaying missed intervals."),
+            "Uses durable job files and an on-demand OS-supervised agenda. A stored job with activation: inactive is not reliably scheduled. The runner exits after 60 idle seconds. Cancellation stops unclaimed jobs; already-running attempts are not revoked. Recurring work skips missed intervals rather than replaying a burst."),
         "inbox" => ("<agent> is the recipient name; -n/--limit bounds the message count. Reading replies does not resend messages.",
             "team-agent inbox leader -n 3\nteam-agent inbox worker --limit 5\nteam-agent inbox leader --workspace . --team help-demo --json", "Wait for a natural reply, then check team-agent status if needed. Do not inspect worker terminal content."),
         "status" => ("Optional <agent> selects one agent. --summary/--detail retain compatibility and do not add fields.\nNine fields: name/provider/model/effort/runtime_status/activity/health/session_name/tmux_command.\nRuntime, activity and health are distinct. unknown means insufficient evidence; null means unset. No default model is guessed.",
