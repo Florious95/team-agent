@@ -62,6 +62,8 @@ const HUMAN: &[&str] = &[
     "install-skill",
     "inbox",
 ];
+/// M4 maintenance command: in the catalog and its own help, hidden from root help.
+const MAINTENANCE: &[&str] = &["migrate"];
 const MACHINE: &[&str] = &["wait", "attach-app-server-leader", "coordinator"];
 const JARGON: &[&str] = &[
     "fully-qualified",
@@ -391,17 +393,17 @@ fn examples_property(command: &str) {
 }
 
 #[test]
-fn h1_public_catalog_is_exactly_thirty_six_human_records_and_no_machine_record() {
+fn h1_public_catalog_is_exactly_thirty_six_human_records_plus_explicit_migrate_and_no_machine_record() {
     let actual = catalog::COMMAND_SPECS
         .iter()
         .map(|s| s.name)
         .collect::<BTreeSet<_>>();
     assert_eq!(
         catalog::COMMAND_SPECS.len(),
-        36,
-        "H1 retains the exact catalog, including four Phase1 lifecycle surfaces, locate and schedule"
+        37,
+        "H1 retains the exact catalog, including four Phase1 lifecycle surfaces, locate, schedule and the M4 explicit migrate"
     );
-    assert_eq!(actual, HUMAN.iter().copied().collect());
+    assert_eq!(actual, HUMAN.iter().chain(MAINTENANCE).copied().collect());
 }
 #[test]
 #[serial(env)]
