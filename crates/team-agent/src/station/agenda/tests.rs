@@ -2,9 +2,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use super::*;
 
-struct Fixture(PathBuf);
+pub(super) struct Fixture(PathBuf);
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let root = std::env::temp_dir().join(format!(
             "station-agenda-test-{}",
             seat_store::random_instance().unwrap()
@@ -22,10 +22,10 @@ impl Fixture {
         .unwrap();
         Self(root)
     }
-    fn store(&self, team: &str) -> Store {
+    pub(super) fn store(&self, team: &str) -> Store {
         Store::new(&self.0, team).unwrap()
     }
-    fn job(&self, id: &str) -> Job {
+    pub(super) fn job(&self, id: &str) -> Job {
         let now = Utc::now().to_rfc3339();
         Job {
             v: 1,

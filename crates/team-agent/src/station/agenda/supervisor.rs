@@ -13,14 +13,17 @@ pub(super) fn user_id() -> u32 {
 #[cfg(unix)]
 pub(super) fn runtime_dir() -> Result<PathBuf, String> {
     // Short, stable across sessions, and outside a workspace that may disappear.
-    let dir = std::fs::canonicalize("/tmp").map_err(|e| e.to_string())?
+    let dir = std::fs::canonicalize("/tmp")
+        .map_err(|e| e.to_string())?
         .join(format!("ta-agenda-{}", user_id()));
     seat_store::private_dir(&dir)?;
     Ok(dir)
 }
 pub(super) fn activation_lock_path(store: &Store) -> Result<PathBuf, String> {
     #[cfg(unix)]
-    { Ok(runtime_dir()?.join(format!("{}.lock", label(store)))) }
+    {
+        Ok(runtime_dir()?.join(format!("{}.lock", label(store))))
+    }
     #[cfg(not(unix))]
     {
         let dir = store.root.join("locks");
@@ -47,11 +50,14 @@ pub(super) fn clear_pending(store: &Store) -> Result<(), String> {
     }
 }
 fn checked(command: &mut Command) -> Result<(), String> {
+    checked_output(command).map(|_| ())
+}
+fn checked_output(command: &mut Command) -> Result<Vec<u8>, String> {
     let output = command
         .output()
         .map_err(|e| format!("agenda activation unavailable: {e}"))?;
     if output.status.success() {
-        Ok(())
+        Ok(output.stdout)
     } else {
         Err(format!(
             "agenda activation failed: {}",
@@ -86,6 +92,139 @@ fn publish(path: &std::path::Path, bytes: &[u8]) -> Result<bool, String> {
 }
 
 #[cfg(target_os = "macos")]
+struct Registration {
+    store: Store,
+    plist: PathBuf,
+}
+#[cfg(target_os = "macos")]
+fn agenda_labels(snapshot: &str) -> std::collections::BTreeSet<&str> {
+    snapshot
+        .lines()
+        .filter_map(|line| line.split_whitespace().last())
+        .filter(|label| {
+            label
+                .strip_prefix("team-agent.agenda.")
+                .is_some_and(|id| id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        })
+        .collect()
+}
+#[cfg(target_os = "macos")]
+fn registration(expected_label: &str, snapshot: &str) -> Option<Registration> {
+    // launchctl's loaded definition survives deletion of the source plist. Parse only
+    // our exact argv contract and verify its scope hash; unfamiliar definitions stay intact.
+    let field = |name: &str| {
+        snapshot
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(&format!("{name} = ")))
+    };
+    let arguments = snapshot
+        .split_once("arguments = {\n")?
+        .1
+        .lines()
+        .map(str::trim)
+        .take_while(|line| *line != "}")
+        .collect::<Vec<_>>();
+    if arguments.len() != 6
+        || arguments[1] != "agenda-run"
+        || arguments[2] != "--workspace"
+        || arguments[4] != "--team"
+        || field("working directory")? != arguments[3]
+    {
+        return None;
+    }
+    seat_store::component(arguments[5]).ok()?;
+    let workspace = PathBuf::from(arguments[3]);
+    let plist = PathBuf::from(field("path")?);
+    if !workspace.is_absolute()
+        || !plist.is_absolute()
+        || !plist.ends_with(
+            PathBuf::from("Library/LaunchAgents").join(format!("{expected_label}.plist")),
+        )
+    {
+        return None;
+    }
+    let store = Store {
+        root: workspace.join(".team/agenda").join(arguments[5]),
+        workspace,
+        team: arguments[5].into(),
+    };
+    (label(&store) == expected_label).then_some(Registration { store, plist })
+}
+#[cfg(target_os = "macos")]
+fn missing_directory(path: &std::path::Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(metadata) => !metadata.is_dir(),
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+#[cfg(target_os = "macos")]
+fn orphaned(registration: &Registration) -> bool {
+    if missing_directory(&registration.store.workspace)
+        || missing_directory(&registration.store.root)
+    {
+        return true;
+    }
+    // A missing plist alone does not invalidate a live, loaded timer. Preserve
+    // pending/unknown work; only an idle registration is disposable in this case.
+    matches!(std::fs::symlink_metadata(&registration.plist),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+        && registration.store.entries().is_ok_and(|entries| {
+            entries.iter().all(|(_, job)| {
+                job.as_ref()
+                    .is_ok_and(|job| matches!(job.status.as_str(), "done" | "cancelled" | "failed"))
+            })
+        })
+}
+#[cfg(target_os = "macos")]
+fn unregister(domain: &str, name: &str, plist: &std::path::Path) -> Result<(), String> {
+    // Remove the source first: self-bootout may terminate us before it returns.
+    // A later activation can recover a loaded-only registration from launchctl.
+    let removal = remove_registration(plist);
+    let unload = checked(Command::new("launchctl").args(["bootout", &format!("{domain}/{name}")]));
+    if let Err(error) = unload {
+        // Another observer may already have removed it. Absence must be proved
+        // by a successful domain query, never inferred from a refused command.
+        let snapshot = checked_output(Command::new("launchctl").args(["print", domain]))?;
+        if agenda_labels(&String::from_utf8_lossy(&snapshot)).contains(name) {
+            return Err(error);
+        }
+    }
+    removal
+}
+#[cfg(target_os = "macos")]
+fn sweep(current: &Store, domain: &str, snapshot: &[u8]) {
+    let snapshot = String::from_utf8_lossy(snapshot);
+    let current_label = label(current);
+    for name in agenda_labels(&snapshot) {
+        if name == current_label {
+            continue;
+        }
+        let attempt = (|| {
+            let data = checked_output(
+                Command::new("launchctl").args(["print", &format!("{domain}/{name}")]),
+            )?;
+            let Some(registration) = registration(name, &String::from_utf8_lossy(&data)) else {
+                return Ok(());
+            };
+            if !orphaned(&registration) {
+                return Ok(());
+            }
+            // Never wait while holding another scope's activation lock.
+            let Some(_lock) = registration.store.try_activation_lock()? else {
+                return Ok(());
+            };
+            if orphaned(&registration) {
+                unregister(domain, name, &registration.plist)?;
+            }
+            Ok::<(), String>(())
+        })();
+        if let Err(error) = attempt {
+            eprintln!("agenda orphan sweep {name}: {error}");
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 pub(super) fn activate(store: &Store) -> Result<(), String> {
     fn xml(text: &str) -> String {
         text.replace('&', "&amp;")
@@ -116,7 +255,8 @@ pub(super) fn activate(store: &Store) -> Result<(), String> {
     let uid = user_id();
     let domain = format!("gui/{uid}");
     // A refused public manager must not overwrite a previously valid registration.
-    checked(Command::new("launchctl").args(["print", &domain]))?;
+    let snapshot = checked_output(Command::new("launchctl").args(["print", &domain]))?;
+    sweep(store, &domain, &snapshot);
     publish(&path, config.as_bytes())?;
     let service = format!("{domain}/{label}");
     if !Command::new("launchctl")
@@ -182,12 +322,18 @@ fn remove_registration(path: &std::path::Path) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 pub(super) fn retire(store: &Store) -> Result<(), String> {
     let label = label(store);
-    remove_registration(
-        &home()?
+    let domain = format!("gui/{}", user_id());
+    let loaded =
+        checked_output(Command::new("launchctl").args(["print", &format!("{domain}/{label}")]))
+            .ok()
+            .and_then(|snapshot| registration(&label, &String::from_utf8_lossy(&snapshot)));
+    let plist = match loaded {
+        Some(registration) => registration.plist,
+        None => home()?
             .join("Library/LaunchAgents")
             .join(format!("{label}.plist")),
-    )?;
-    checked(Command::new("launchctl").args(["bootout", &format!("gui/{}/{label}", user_id())]))
+    };
+    unregister(&domain, &label, &plist)
 }
 #[cfg(target_os = "linux")]
 pub(super) fn retire(store: &Store) -> Result<(), String> {
@@ -212,4 +358,79 @@ pub(super) fn retire(_store: &Store) -> Result<(), String> {
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub(super) fn activate(_store: &Store) -> Result<(), String> {
     Err("reliable agenda activation is unsupported on this platform; job remains stored".into())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::super::tests::Fixture;
+    use super::*;
+
+    fn snapshot(store: &Store, plist: &std::path::Path) -> String {
+        format!("path = {}\narguments = {{\n/candidate/team-agent\nagenda-run\n--workspace\n{}\n--team\n{}\n}}\nworking directory = {}\n",
+            plist.display(), store.workspace.display(), store.team, store.workspace.display())
+    }
+
+    #[test]
+    fn loaded_definition_is_owned_even_after_its_plist_disappears() {
+        let fixture = Fixture::new();
+        let store = fixture.store("alpha");
+        let name = label(&store);
+        let plist = store
+            .workspace
+            .join("Library/LaunchAgents")
+            .join(format!("{name}.plist"));
+        let printed = snapshot(&store, &plist);
+        let registration = registration(&name, &printed).expect("owned definition");
+        assert!(orphaned(&registration), "the agenda root does not exist");
+        assert!(super::registration("team-agent.agenda.wrong", &printed).is_none());
+        assert!(
+            super::registration(&name, &printed.replace("agenda-run", "unrelated-service"))
+                .is_none()
+        );
+        assert!(super::registration(
+            &name,
+            &printed.replace("working directory = ", "unknown = ")
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn missing_plist_never_discards_live_or_unreadable_work() {
+        let fixture = Fixture::new();
+        let store = fixture.store("alpha");
+        store.write(&fixture.job("sched_a")).unwrap();
+        let name = label(&store);
+        let plist = store
+            .workspace
+            .join("Library/LaunchAgents")
+            .join(format!("{name}.plist"));
+        let registration = registration(&name, &snapshot(&store, &plist)).unwrap();
+        assert!(!orphaned(&registration));
+        std::fs::write(store.path("sched_a").unwrap(), b"{broken").unwrap();
+        assert!(!orphaned(&registration));
+        std::fs::remove_file(store.path("sched_a").unwrap()).unwrap();
+        assert!(
+            orphaned(&registration),
+            "missing plist with no obligations is disposable"
+        );
+        seat_store::private_dir(plist.parent().unwrap()).unwrap();
+        std::fs::write(&plist, b"fixture").unwrap();
+        assert!(!orphaned(&registration));
+        std::fs::remove_dir_all(&store.root).unwrap();
+        assert!(
+            orphaned(&registration),
+            "a vanished scope is orphaned even if the plist survives"
+        );
+    }
+
+    #[test]
+    fn domain_scan_uses_only_complete_agenda_labels() {
+        let name = format!("team-agent.agenda.{}", "a".repeat(64));
+        let data =
+            format!("0 78 {name}\n1 0 unrelated-service\nteam-agent.agenda.bad\n0 0 {name}\n");
+        assert_eq!(
+            agenda_labels(&data).into_iter().collect::<Vec<_>>(),
+            vec![name.as_str()]
+        );
+    }
 }
