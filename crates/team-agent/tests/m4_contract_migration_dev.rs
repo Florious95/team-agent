@@ -144,6 +144,8 @@ fn operation(seat: &SeatRecord, id: &str, kind: TransactionKind) -> OperationRec
         outcome: Outcome::Committed,
         preserved: vec![],
         failure: None,
+        recovery_failure: None,
+        stop_receipt: None,
     }
 }
 fn cycle(store: &mut ProjectionStore, current: &SeatRecord) -> SeatRecord {
@@ -234,6 +236,26 @@ fn importer_reads_committed_wal_without_mutating_the_legacy_database() {
         before
     );
 }
+#[test]
+fn stale_nonrunning_addresses_are_rejected_before_any_tmux_input() {
+    let fixture = Fixture::new();
+    for status in ["stopped", "unknown", "removed", "foreign", "paused"] {
+        let directory = team_agent::direct_delivery::Directory { workspace: fixture.root.clone(), team: Some("test".into()),
+            state: json!({"agents":{"worker":{"provider":"legacy-fixture","status":status,"pane_id":"%0","native_endpoint":"/nonexistent-p7-socket"}}}) };
+        assert!(directory.send("worker", "MUST NOT TYPE").unwrap_err().contains("recipient_not_running"));
+    }
+    assert!(!fixture.root.join(".team").exists());
+}
+
+#[test]
+fn native_addresses_never_fall_back_to_stale_snapshot_without_authority() {
+    let fixture = Fixture::new();
+    let directory = team_agent::direct_delivery::Directory { workspace: fixture.root.clone(), team: Some("test".into()),
+        state: json!({"agents":{"worker":{"provider":"pi_tui","status":"running","pane_id":"%0","native_endpoint":"/nonexistent-p7-socket"}}}) };
+    assert!(directory.endpoint("worker").is_err());
+    assert!(!fixture.root.join(".team").exists());
+}
+
 #[test]
 fn an_existing_published_pane_cannot_be_claimed_by_another_seat() {
     let fixture = Fixture::new(); fixture.migrate(); let mut store = fixture.store();

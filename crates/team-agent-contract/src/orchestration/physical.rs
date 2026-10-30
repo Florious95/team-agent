@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use super::{lifecycle::*, store::SeatRecord, supervisor::*, Error};
+use super::{lifecycle::*, store::{SeatRecord, StopReceipt}, supervisor::*, Error};
 use crate::contract::{
     delivery::*, descriptor::*, fork::NativeControl, hooks::*, plan::*, session::CaptureOrigin,
     types::*,
@@ -18,7 +18,7 @@ use crate::host::{
     process::{resolve_cwd, ProcessState},
     tmux::{CloseReceipt, HostLimits, SharedTmux, TmuxHost},
     transport::*,
-    HostError,
+    HostError, HostErrorKind,
 };
 use crate::runtime::{delivery::*, journal::FileJournal, probes::*};
 
@@ -47,6 +47,9 @@ pub struct PhysicalRuntime<'a> {
     quiescent: Option<SeatRecord>,
     explicit_session: Option<crate::contract::session::NativeSessionId>,
     startup_consent: Option<StartupConsent>,
+    /// Executing framework artifact, never borrowed from a saved target receipt.
+    pub executing_candidate: Option<Digest>,
+    stop_receipt: Option<StopReceipt>,
     pub evidence: Vec<CapabilityEvidence>,
     pub protocol: Option<ProtocolSnapshot>,
     pub bootstrap: Option<&'a mut dyn BootstrapCommit>,
@@ -100,6 +103,8 @@ impl<'a> PhysicalRuntime<'a> {
             quiescent: None,
             explicit_session: None,
             startup_consent: None,
+            executing_candidate: None,
+            stop_receipt: None,
             evidence: vec![],
             protocol: None,
             bootstrap: None,
@@ -290,12 +295,18 @@ impl<'a> PhysicalRuntime<'a> {
         )
         .map_err(host_error)
     }
+    fn foreign(&self, target: &TargetReceipt) -> bool {
+        self.executing_candidate.is_some_and(|candidate| candidate != target.candidate_sha256)
+    }
     fn policy(
         &self,
         target: &TargetReceipt,
         profile: &str,
         operation: Operation,
     ) -> Result<ResolvedSubmitPolicy<'_>, Error> {
+        if self.foreign(target) {
+            return Err(Error::Invalid("foreign candidate requires input-free teardown and restart"));
+        }
         let mut matching = self.evidence.iter().filter(|e| {
             e.provider == target.provider
                 && e.native == target.native
@@ -435,9 +446,38 @@ impl LifecycleHost for PhysicalRuntime<'_> {
             pane: target.pane.clone(), binding_key: target.binding.clone(), physical: Some(target),
         }))
     }
+    fn stop_receipt(&self) -> Option<StopReceipt> { self.stop_receipt.clone() }
     fn stop(&mut self, seat: &SeatRecord) -> Result<(), Error> {
+        self.stop_receipt = None;
         let target = self.target(seat)?.clone();
         let deadline = self.deadline()?;
+        if self.foreign(&target) {
+            if target.evidence_kind != EvidenceKind::Native {
+                return Err(Error::Invalid("foreign close requires a native physical receipt"));
+            }
+            let mut absent = false;
+            let mut replaced = false;
+            match crate::host::process::sample_process(&target.process) {
+                ProcessState::Exited | ProcessState::Replaced => absent = true,
+                ProcessState::Unknown(error) => return Err(host_error(error)),
+                ProcessState::Alive => {
+                    match TmuxHost::restore_owned(target.clone(), self.settings.tmux.clone(),
+                        self.settings.limits, RealCommandRunner::default(), self.clock, deadline) {
+                        Ok(mut host) => {
+                            let receipt = host.close_owned_pane(&target, self.clock, deadline);
+                            confirm_close(receipt, target.shared_endpoint)?;
+                        }
+                        Err(error) if error.kind == HostErrorKind::Ownership
+                            && matches!(error.operation, "tmux target binding" | "tmux target changed") => replaced = true,
+                        Err(error) => return Err(host_error(error)),
+                    }
+                }
+            }
+            self.stop_receipt = Some(StopReceipt { method: "receipt_close_foreign_candidate".into(),
+                owned_process_absent: absent, owned_target_replaced: replaced });
+            self.quiescent = Some(seat.clone());
+            return Ok(());
+        }
         if self.registration.controls.iter().any(|definition| definition.profile_id == seat.profile && definition.kind == ControlKind::Exit) {
             // A just-written tool result may precede the last native render.
             // Wait read-only for the registered control surface; never type an
@@ -501,7 +541,8 @@ impl LifecycleHost for PhysicalRuntime<'_> {
         }
         let input = PreparedInput::control(self.operation.clone(), control, definition)?;
         let policy = self.policy(&target, &seat.profile, definition.operation)?;
-        let attempt = AttemptId::new(format!("control-{}", self.operation.as_str()))?;
+        // Distinct actions cannot alias; the same uncertain action cannot replay.
+        let attempt = AttemptId::new(format!("control-{}-{kind:?}", self.operation.as_str()))?;
         let deadline = self.deadline()?;
         let mut host = self.reopen(&target, deadline)?;
         let mut journal = FileJournal::new(

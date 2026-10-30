@@ -259,12 +259,14 @@ pub fn stop_agent(
         let already_stopped = (absent || seat.as_ref().is_some_and(|seat| seat.status == SeatStatus::Stopped))
             && !backend.store.leased(id).map_err(error)?;
         drop(backend);
+        let mut stop_receipt = None;
         let operation = if already_stopped {
             None
         } else {
             let receipt = backend::stop(&selected.run_workspace, &selected.team_key, id).map_err(error)?;
             backend::require_stopped(&receipt).map_err(error)?;
             absent = receipt.outcome == Outcome::Compensated;
+            stop_receipt = receipt.stop_receipt;
             Some(receipt.id)
         };
         let projected = if absent {
@@ -284,7 +286,7 @@ pub fn stop_agent(
         ).map_err(error)?;
         Ok(json!({"ok":true,"agent_id":agent,"stopped":!already_stopped,
             "status":if already_stopped {"already_stopped"} else {"stopped"},
-            "runtime":"contract","operation":operation}))
+            "runtime":"contract","operation":operation,"stop_receipt":stop_receipt}))
     })
 }
 

@@ -124,8 +124,52 @@ impl Directory {
         .ok_or_else(|| format!("unknown recipient: {agent}"))
     }
 
+    #[cfg(unix)]
+    fn native_seat(&self, agent: &str) -> Result<Option<(crate::contract_runtime::backend::Binding, team_agent_contract::orchestration::store::SeatRecord)>, String> {
+        use team_agent_contract::{contract::types::SeatId, orchestration::store::SeatStatus};
+        if agent == "leader" || !crate::contract_runtime::framework::is_contract(self.recipient(agent)?) { return Ok(None); }
+        let team = self.team.as_deref().ok_or("native recipient has no team scope")?;
+        let backend = crate::contract_runtime::backend::Backend::open_readonly(&self.workspace, team).map_err(|e| e.to_string())?;
+        crate::contract_runtime::backend::require_candidate(&backend.binding).map_err(|e| e.to_string())?;
+        let id = SeatId::new(agent).map_err(|e| e.to_string())?;
+        let seat = backend.store.seat(&id).map_err(|e| e.to_string())?.ok_or("native recipient missing")?;
+        if matches!(seat.status, SeatStatus::Stopped | SeatStatus::Unknown) || backend.store.leased(&id).map_err(|e| e.to_string())? {
+            return Err("recipient_not_running: native lifecycle not settled".into());
+        }
+        if seat.physical.as_ref().is_none_or(|target| target.candidate_sha256 != backend.binding.candidate_sha256) {
+            return Err("foreign_or_missing_native_target: stop and restart before sending".into());
+        }
+        Ok(Some((backend.binding, seat)))
+    }
+
+    fn verify_endpoint(&self, agent: &str, expected: &Endpoint, deadline: Instant) -> Result<(), String> {
+        let current = self.endpoint(agent)?;
+        if current.socket != expected.socket || current.pane_id != expected.pane_id || current.dialect != expected.dialect {
+            return Err("identity_mismatch: recipient address changed".into());
+        }
+        #[cfg(unix)]
+        if let Some((binding, seat)) = self.native_seat(agent)? {
+            crate::contract_runtime::backend::validate_delivery_target(&binding, &seat, deadline.saturating_duration_since(Instant::now()))
+                .map_err(|e| format!("identity_mismatch: {e}"))?;
+        }
+        Ok(())
+    }
+
     pub fn endpoint(&self, agent: &str) -> Result<Endpoint, String> {
         let info = self.recipient(agent)?;
+        if agent != "leader" && (info.get("paused").and_then(Value::as_bool) == Some(true)
+            || info.get("explicit_stop").and_then(Value::as_bool) == Some(true)
+            || matches!(field(info, "status"), Some("stopped" | "removed" | "paused" | "unknown" | "foreign"))) {
+            return Err(format!("recipient_not_running: {agent}"));
+        }
+        #[cfg(unix)]
+        if let Some((_binding, seat)) = self.native_seat(agent)? {
+            return Ok(Endpoint { agent: agent.into(), socket: seat.endpoint, pane_id: seat.pane,
+                dialect: endpoint_dialect(Some(seat.provider.as_str()), None) });
+        }
+        if agent != "leader" && field(info, "status") != Some("running") {
+            return Err(format!("recipient_not_running: {agent}"));
+        }
         let pane_id = field(info, "pane_id").or_else(|| field(info, "native_pane"))
             .ok_or_else(|| format!("{agent} has no tmux pane"))?;
         let socket = field(info, "native_endpoint").map(str::to_string)
@@ -146,12 +190,20 @@ impl Directory {
     }
 
     pub(crate) fn send_with_receipt(&self, agent: &str, text: &str, submitted: impl FnOnce() -> Result<(), String>) -> Result<Value, String> {
+        #[cfg(unix)]
+        let _lifecycle = if agent != "leader" && crate::contract_runtime::framework::is_contract(self.recipient(agent)?) {
+            let id = crate::model::ids::AgentId::new(agent);
+            Some(crate::lifecycle::lock::try_acquire_seat_lifecycle_lock(crate::lifecycle::lock::LifecycleLockRequest {
+                workspace: &self.workspace, operation: "native-send", team: self.team.as_deref(), agent_id: Some(&id),
+            }).map_err(|e| format!("recipient_lifecycle_busy: {e}"))?)
+        } else { None };
         let endpoint = self.endpoint(agent)?;
         let info = self.recipient(agent)?;
         let expected_pid = info.get("pane_pid").or_else(|| info.get("pid")).or_else(|| info.get("native_pid"))
             .and_then(|value| value.as_u64().or_else(|| value.as_str().and_then(|s| s.parse().ok())))
             .and_then(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 0);
-        direct_send_checked(&endpoint.socket, &endpoint.pane_id, &endpoint.dialect, text, expected_pid, true, submitted)?;
+        direct_send_checked(&endpoint.socket, &endpoint.pane_id, &endpoint.dialect, text, expected_pid, true, submitted,
+            |deadline| self.verify_endpoint(agent, &endpoint, deadline))?;
         Ok(json!({"status":"sent","recipient":endpoint.agent,"pane_id":endpoint.pane_id,
             "dialect":endpoint.dialect,"delivery":"physical","accepted":null}))
     }
@@ -230,10 +282,10 @@ fn check_output(output: std::process::Output) -> Result<(), String> {
 /// Provider names/aliases select their native paste floor and one Enter. Only an explicit
 /// double-enter dialect adds a second key; there is no observation-driven retry or third Enter.
 pub fn direct_send(socket: &str, pane_id: &str, dialect: &str, text: &str) -> Result<(), String> {
-    direct_send_checked(socket, pane_id, dialect, text, None, false, || Ok(()))
+    direct_send_checked(socket, pane_id, dialect, text, None, false, || Ok(()), |_| Ok(()))
 }
 
-fn direct_send_checked(socket: &str, pane_id: &str, dialect: &str, text: &str, expected_pid: Option<u32>, managed: bool, submitted: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+fn direct_send_checked(socket: &str, pane_id: &str, dialect: &str, text: &str, expected_pid: Option<u32>, managed: bool, submitted: impl FnOnce() -> Result<(), String>, mut verify_owner: impl FnMut(Instant) -> Result<(), String>) -> Result<(), String> {
     if !pane_id
         .strip_prefix('%')
         .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
@@ -251,6 +303,7 @@ fn direct_send_checked(socket: &str, pane_id: &str, dialect: &str, text: &str, e
     let observed = pane_identity(socket, pane_id, deadline)?;
     let _input_lock = input_lock(&observed, pane_id, deadline)?;
     verify_identity(socket, pane_id, &observed, expected_pid, deadline)?;
+    verify_owner(deadline)?;
     if managed && canonical_dialect(dialect) == "claude" {
         wait_for_draft(socket, pane_id, deadline)?;
     } else {
@@ -278,7 +331,8 @@ fn direct_send_checked(socket: &str, pane_id: &str, dialect: &str, text: &str, e
     }
     check_output(loaded)?;
     if let Err(error) = verify_identity(socket, pane_id, &observed, expected_pid, deadline)
-        .and_then(|()| guard_non_composer(socket, pane_id, deadline)) {
+        .and_then(|()| guard_non_composer(socket, pane_id, deadline))
+        .and_then(|()| verify_owner(deadline)) {
         let _ = tmux(socket).args(["delete-buffer", "-b", &buffer]).output();
         return Err(error);
     }
@@ -308,6 +362,8 @@ fn direct_send_checked(socket: &str, pane_id: &str, dialect: &str, text: &str, e
         .map_err(|error| format!("uncertain: identity changed after paste: {error}; do not replay"))?;
     guard_non_composer(socket, pane_id, deadline)
         .map_err(|error| format!("uncertain: surface changed after paste: {error}; no Enter issued; do not replay"))?;
+    verify_owner(deadline)
+        .map_err(|error| format!("uncertain: ownership changed after paste: {error}; no Enter issued; do not replay"))?;
     let mut command = tmux(socket);
     command.args(["send-keys", "-t", pane_id, "Enter"]);
     if enter_count == 2 {

@@ -242,6 +242,15 @@ fn workspace_socket(path: &Path) -> Result<Option<(u64, u64)>, BackendError> {
 
 /// The selected root transport is authority; ambient TMUX is never a selector.
 /// This runs only in the owning lifecycle action, after native F0 admission.
+pub(super) fn workspace_session_lock(binding: &Binding) -> Result<std::fs::File, BackendError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false)
+        .mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(root_for(&binding.workspace.path, &binding.scope).join("workspace-session.lock"))?;
+    file.lock()?;
+    Ok(file)
+}
+
 pub(super) fn workspace_tmux(
     binding: &Binding,
     seat: &SeatId,
@@ -328,7 +337,7 @@ pub(super) fn workspace_tmux(
     Ok((SharedTmux { endpoint, socket, session_name, session }, transport, generation))
 }
 
-/// Projection is saved first by the caller. Only an exact current target that
+/// The canonical seat is saved first. Only an exact current target that
 /// actually created this shared session may seed a missing root owner marker.
 pub(super) fn bind_workspace_session(workspace: &Path, team: &str, seat: &SeatId) -> Result<(), BackendError> {
     let backend = Backend::open_readonly(workspace, team)?;
@@ -573,6 +582,11 @@ enum ExistingStart {
 // Receipt classification is read-only, never native admission or permission
 // to replay an unfinished host effect. Check parent leases before old success.
 fn existing_start(backend: &Backend, seat: &SeatId) -> Result<Option<ExistingStart>, BackendError> {
+    let executing_candidate = executing_candidate_sha()?;
+    if backend.store.seat(seat)?.is_some_and(|record| record.status != SeatStatus::Stopped
+        && record.physical.as_ref().is_some_and(|target| target.candidate_sha256 != executing_candidate)) {
+        return Err(BackendError::Fence { reason: "foreign_candidate_requires_input_free_stop_then_start" });
+    }
     let unfinished: Vec<_> = backend.store.unfinished()?.into_iter().filter(|record| involves_seat(record, seat)).collect();
     if unfinished.len() > 1 { return Err(BackendError::Fence { reason: "unfinished_operation_ambiguous" }); }
     if let Some(record) = unfinished.into_iter().next() {
@@ -602,7 +616,16 @@ fn existing_start(backend: &Backend, seat: &SeatId) -> Result<Option<ExistingSta
         else { ExistingStart::Committed(record) }))
 }
 
-pub(super) fn require_candidate(binding: &Binding) -> Result<(), BackendError> {
+pub(crate) fn executing_candidate_sha() -> Result<Digest, BackendError> {
+    static SHA: std::sync::OnceLock<Digest> = std::sync::OnceLock::new();
+    if let Some(sha) = SHA.get() { return Ok(*sha); }
+    let path = std::env::current_exe()?.canonicalize()?;
+    let sha = fingerprint_file(&path, 1024 * 1024 * 1024, Duration::from_secs(10))?;
+    let _ = SHA.set(sha);
+    Ok(sha)
+}
+
+pub(crate) fn require_candidate(binding: &Binding) -> Result<(), BackendError> {
     let candidate = std::env::current_exe()?.canonicalize()?;
     if candidate != binding.candidate || fingerprint_file(&candidate, 1024 * 1024 * 1024,
         Duration::from_secs(10))? != binding.candidate_sha256 { return Err(BackendError::Fence { reason: "candidate_path_or_fingerprint_mismatch" }); }
@@ -652,6 +675,20 @@ pub(super) fn refresh_quiescent_candidate(workspace: &Path, team: &str, seat: &S
     result
 }
 
+pub(crate) fn validate_delivery_target(binding: &Binding, seat: &SeatRecord, budget: Duration) -> Result<(), BackendError> {
+    let target = seat.physical.as_ref().ok_or(BackendError::Metadata)?;
+    if target.identity() != &seat.identity || target.candidate_sha256 != binding.candidate_sha256
+        || seat.evidence_kind != EvidenceKind::Native || matches!(seat.status, SeatStatus::Stopped | SeatStatus::Unknown) {
+        return Err(BackendError::Fence { reason: "delivery_target_not_current_native_owner" });
+    }
+    let clock = RealClock::new();
+    let mut host = TmuxHost::restore_owned(target.clone(), binding.tmux.clone(),
+        settings(binding, registry::provider(seat.provider.as_str())?).limits,
+        RealCommandRunner::default(), &clock, budget)?;
+    host.validate_target(target, &clock, budget)?;
+    Ok(())
+}
+
 fn validate_existing(backend: &Backend, role: &RoleConfig, record: &OperationRecord) -> Result<SeatRecord, BackendError> {
     let current = backend.store.assert_current(&record.target.identity)?;
     if current.evidence_kind != EvidenceKind::Native || current.provider != role.provider
@@ -670,8 +707,13 @@ fn validate_existing(backend: &Backend, role: &RoleConfig, record: &OperationRec
 }
 
 fn receipt_error(record: OperationRecord) -> BackendError {
+    let failure = match (record.failure, record.recovery_failure) {
+        (Some(first), Some(recovery)) => Some(format!("{first}; recovery_failure={recovery}")),
+        (None, Some(recovery)) => Some(format!("recovery_failure={recovery}")),
+        (first, None) => first,
+    };
     BackendError::Shutdown { operation: record.id, phase: record.phase,
-        outcome: record.outcome, failure: record.failure.or(record.pending) }
+        outcome: record.outcome, failure: failure.or(record.pending) }
 }
 
 pub(super) fn require_stopped(record: &OperationRecord) -> Result<(), BackendError> {
@@ -812,6 +854,9 @@ fn finish_receipt_until(backend: &mut Backend, record: OperationRecord, deadline
     let mut host = PhysicalRuntime::new(Registration { descriptor: selected.descriptor(), hooks: &hooks,
         controls: selected.controls(), startup: selected.startup(), session_panel: selected.session_panel() },
         settings(&backend.binding, selected), record.id.clone(), &clock)?;
+    let executing_candidate = executing_candidate_sha()?;
+    host.executing_candidate = Some(executing_candidate);
+    host.evidence = policy_evidence(&record.target.provider, &record.target.native, executing_candidate)?;
     if let Some(deadline) = deadline { host.cap_budget(remaining_stop_budget(deadline)?)?; }
     Ok(Lifecycle { store: &mut backend.store, host: &mut host, io: &mut NoNewIo }.recover(&record.id)?)
 }
@@ -977,6 +1022,7 @@ pub fn start(
     )?;
     let plan = adapter.plan(&resolved)?;
     validate_launch_plan(descriptor, &resolved, &plan)?;
+    let _session_creation = workspace_session_lock(&backend.binding)?;
     let (workspace_topology, _, _) = workspace_tmux(&backend.binding, &role.id, None)?;
     let operation = OperationId::new(format!("start-{}", request.identity.instance.as_str()))?;
     let mut io = ScopedMaterializer::new(
@@ -999,6 +1045,7 @@ pub fn start(
         operation.clone(),
         &clock,
     )?;
+    physical.executing_candidate = Some(candidate_sha256);
     physical.evidence = policy_evidence(&role.provider, &request.native, candidate_sha256)?;
     physical.workspace_tmux = Some(workspace_topology);
     let record = Lifecycle {
@@ -1020,6 +1067,9 @@ pub fn start(
         },
         operation,
     )?;
+    if record.outcome == Outcome::Committed && record.target.physical.is_some() {
+        bind_workspace_session(&backend.binding.workspace.path, &backend.binding.team, &record.target.identity.seat)?;
+    }
     Ok((backend.binding, record))
 }
 
@@ -1172,6 +1222,7 @@ pub fn resume(prepared: PreparedResume) -> Result<OperationRecord, BackendError>
     validate_launch_plan(descriptor, &resolved, &plan)?;
     write_role(&backend.binding, &prepared.request.identity, &prepared.role)?;
     let shared_parent = parent.physical.as_ref().is_some_and(|target| target.shared_endpoint);
+    let _session_creation = workspace_session_lock(&backend.binding)?;
     let workspace_topology = if shared_parent {
         // Validate root topology before stopping. Capture again only after the
         // authorized stop, since its last pane may destroy the old session ID.
@@ -1183,8 +1234,7 @@ pub fn resume(prepared: PreparedResume) -> Result<OperationRecord, BackendError>
             }
             let stopped = stop(&backend.binding.workspace.path, &backend.binding.team, &prepared.role.id)?;
             if stopped.outcome != Outcome::Committed {
-                return Err(BackendError::Shutdown { operation: stopped.id, phase: stopped.phase,
-                    outcome: stopped.outcome, failure: stopped.failure });
+                return Err(receipt_error(stopped));
             }
         }
         Some(workspace_tmux(&backend.binding, &prepared.role.id, None)?.0)
@@ -1199,6 +1249,7 @@ pub fn resume(prepared: PreparedResume) -> Result<OperationRecord, BackendError>
         },
         settings(&backend.binding, selected), operation.clone(), &clock,
     )?;
+    physical.executing_candidate = Some(backend.binding.candidate_sha256);
     physical.evidence = policy_evidence(&prepared.role.provider, &prepared.request.native, backend.binding.candidate_sha256)?;
     physical.workspace_tmux = workspace_topology;
     let mut lifecycle = Lifecycle { store: &mut backend.store, host: &mut physical, io: &mut io };
@@ -1212,6 +1263,9 @@ pub fn resume(prepared: PreparedResume) -> Result<OperationRecord, BackendError>
     } else {
         lifecycle.startup(&adapter, &prepared.request, routing, operation)?
     };
+    if record.outcome == Outcome::Committed && record.target.physical.is_some() {
+        bind_workspace_session(&backend.binding.workspace.path, &backend.binding.team, &record.target.identity.seat)?;
+    }
     Ok(record)
 }
 
@@ -1458,7 +1512,9 @@ pub(super) fn stop_with_budget(workspace: &Path, team: &str, seat: &SeatId, budg
         operation.clone(),
         &clock,
     )?;
-    physical.evidence = policy_evidence(&target.provider, &target.native, backend.binding.candidate_sha256)?;
+    let executing_candidate = executing_candidate_sha()?;
+    physical.executing_candidate = Some(executing_candidate);
+    physical.evidence = policy_evidence(&target.provider, &target.native, executing_candidate)?;
     physical.cap_budget(remaining_stop_budget(deadline)?)?;
     Ok(Lifecycle {
         store: &mut backend.store,

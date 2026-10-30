@@ -220,6 +220,8 @@ pub fn project_seat(workspace: &Path, team: &str, id: &str) -> Result<Value, Bac
     if role.provider != seat.provider {
         return Err(BackendError::Metadata);
     }
+    let executing_candidate = backend::executing_candidate_sha()?;
+    let foreign = seat.physical.as_ref().is_some_and(|target| target.candidate_sha256 != executing_candidate);
     let alive = seat
         .physical
         .as_ref()
@@ -229,7 +231,7 @@ pub fn project_seat(workspace: &Path, team: &str, id: &str) -> Result<Value, Bac
     let mut observed = Vec::new();
     let mut binding_source = None;
     if super::registry::provider(seat.provider.as_str())?.uses_tool_roundtrips()
-        && seat.session.is_some()
+        && seat.session.is_some() && !foreign
     {
         let protocol = super::pump::protocol(&mut backend, &seat, &team_agent_contract::host::clock::RealClock::new())?;
         if let team_agent_contract::contract::probe::ProbeOutcome::Observed(binding) = protocol.binding.outcome {
@@ -245,6 +247,8 @@ pub fn project_seat(workspace: &Path, team: &str, id: &str) -> Result<Value, Bac
     let binding_status = if observed.len() == 3 { "observed" } else if observed.is_empty() { "unverified" } else { "partial" };
     let status = if seat.status == SeatStatus::Stopped {
         "stopped"
+    } else if foreign {
+        "foreign"
     } else if seat.status != SeatStatus::Unknown && alive {
         "running"
     } else {
@@ -257,7 +261,7 @@ pub fn project_seat(workspace: &Path, team: &str, id: &str) -> Result<Value, Bac
     } else { None };
     Ok(
         json!({"agent_id":id,"provider":if seat.provider.as_str() == "grok_build" { "grok" } else { seat.provider.as_str() },
-         "contract_provider":seat.provider,"status":status,"model":role.model,"effort":role.effort,
+         "contract_provider":seat.provider,"status":status,"foreign_candidate":foreign,"model":role.model,"effort":role.effort,
         "contract_prompt_sha256":team_agent_contract::host::digest_hex(role.prompt.sha256),
         "runtime_family":"contract","contract_scope":seat.identity.scope,"contract_instance":seat.identity.instance,
         "generation":seat.identity.generation,"owner_team_id":team,"team_key":team,
@@ -304,7 +308,7 @@ pub fn stop_selected_with_budget(workspace: &Path, state: &Value, budget: std::t
                 }
                 let receipt = backend::stop_with_budget(workspace, &team, &seat_id, seat_budget)?;
                 backend::require_stopped(&receipt)?;
-                Ok(json!({"agent_id":id,"status":"stopped","operation":receipt.id,"outcome":receipt.outcome}))
+                Ok(json!({"agent_id":id,"status":"stopped","operation":receipt.id,"outcome":receipt.outcome,"stop_receipt":receipt.stop_receipt}))
             })();
             receipts.push(result.unwrap_or_else(|error| json!({
                 "agent_id":id,"status":"failed","error":error.to_string(),

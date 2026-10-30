@@ -334,6 +334,16 @@ fn observe(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation
         if crate::contract_runtime::framework::is_paused_unstarted(row) {
             return Ok(Observation::Unstarted);
         }
+        // A foreign seat can be stopped without input even though ordinary
+        // startup admission must reject its old executable binding.
+        let authority = checked(crate::contract_runtime::backend::Backend::open_readonly(
+            &selected.run_workspace, &selected.team_key))?;
+        let executing = checked(crate::contract_runtime::backend::executing_candidate_sha())?;
+        if checked(authority.store.seat(&checked(SeatId::new(id))?))?
+            .is_some_and(|seat| seat.status != team_agent_contract::orchestration::store::SeatStatus::Stopped
+                && seat.physical.as_ref().is_some_and(|target| target.candidate_sha256 != executing)) {
+            return Ok(Observation::NativeReconcile);
+        }
         if checked(
             crate::contract_runtime::backend::start_needs_reconciliation(
                 &selected.run_workspace,

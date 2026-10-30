@@ -44,6 +44,7 @@ pub trait LifecycleHost {
         Err(Error::Host("physical spawn reconciliation unavailable"))
     }
     fn stop(&mut self, seat: &SeatRecord) -> Result<(), Error>;
+    fn stop_receipt(&self) -> Option<StopReceipt> { None }
     fn control(
         &mut self,
         seat: &SeatRecord,
@@ -134,6 +135,7 @@ impl Lifecycle<'_> {
                     self.store.save(&operation, false)?;
                     self.host
                         .stop(operation.parent.as_ref().ok_or(Error::Fence)?)?;
+                    operation.stop_receipt = self.host.stop_receipt();
                     operation.parent.as_mut().ok_or(Error::Fence)?.status = SeatStatus::Stopped;
                     operation.pending = None;
                     self.store.save(&operation, false)?;
@@ -284,6 +286,7 @@ impl Lifecycle<'_> {
                 operation.pending = Some("stop".into());
                 self.store.save(&operation, false)?;
                 self.host.stop(&operation.target)?;
+                operation.stop_receipt = self.host.stop_receipt();
             }
             operation.target.status = SeatStatus::Stopped;
             operation.pending = None;
@@ -471,7 +474,11 @@ impl Lifecycle<'_> {
                     && matches!(&error, Error::NativeControl(report)
                         if report.metadata.owner == operation.target.identity
                             && report.metadata.operation == Operation::SessionInspect
-                            && report.disposition == InjectionDisposition::Unresolved) =>
+                            && (report.disposition == InjectionDisposition::Unresolved
+                                || (report.effect_floor == DeliveryEffect::NoEffect
+                                    && report.persistence == crate::contract::delivery::PersistenceState::Durable
+                                    && !report.problems.is_empty()
+                                    && report.problems.iter().all(|problem| problem.code == "input-not-ready")))) =>
                 {
                     // Spawn succeeded. An inconclusive observation must not kill
                     // that process or invent a resume binding. Preserve the
@@ -612,7 +619,7 @@ impl Lifecycle<'_> {
                 }
                 Ok(None) => operation.target.status = SeatStatus::Stopped,
                 Err(error) => {
-                    operation.failure = Some(format!("spawn recovery: {error}"));
+                    operation.recovery_failure = Some(format!("spawn recovery: {error}"));
                     self.store.save(operation, false)?;
                     return Ok(());
                 }
@@ -634,11 +641,12 @@ impl Lifecycle<'_> {
             operation.pending = Some("compensating-stop".into());
             self.store.save(operation, true)?;
             if let Err(error) = self.host.stop(&operation.target) {
-                operation.failure = Some(format!("recovery stop: {error}"));
+                operation.recovery_failure = Some(format!("recovery stop: {error}"));
                 self.store.save(operation, false)?;
                 return Ok(());
             }
         }
+        operation.stop_receipt = self.host.stop_receipt();
         operation.target.status = SeatStatus::Stopped;
         operation.pending = None;
         if self.cleanup(operation).is_err() {
@@ -699,6 +707,8 @@ fn new_operation(
         outcome: Outcome::Running,
         preserved,
         failure: None,
+        recovery_failure: None,
+        stop_receipt: None,
     }
 }
 

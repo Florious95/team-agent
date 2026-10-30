@@ -205,6 +205,7 @@ fn native_fork(
     let resolved = resolve_launch(descriptor, &hooks, &launch, Some(&discovered.catalog))?;
     let plan = adapter.plan(&resolved)?;
     validate_launch_plan(descriptor, &resolved, &plan)?;
+    let _session_creation = backend::workspace_session_lock(&backend.binding)?;
     let (workspace_topology, _, _) = backend::workspace_tmux(&backend.binding, &role.id, None)?;
     let mut io = ScopedMaterializer::new(descriptor, &resolved, &plan, operation.clone(), RealCommandRunner::default())?;
     let clock = RealClock::new();
@@ -220,6 +221,7 @@ fn native_fork(
         operation.clone(),
         &clock,
     )?;
+    physical.executing_candidate = Some(backend.binding.candidate_sha256);
     physical.evidence = backend::policy_evidence(&role.provider, &launch.native, backend.binding.candidate_sha256)?;
     physical.workspace_tmux = Some(workspace_topology);
     let routing = Routing {
@@ -232,6 +234,9 @@ fn native_fork(
         &request,
         Some((&launch, routing)),
     )?;
+    if record.outcome == Outcome::Committed && record.target.physical.is_some() {
+        backend::bind_workspace_session(&backend.binding.workspace.path, &backend.binding.team, &record.target.identity.seat)?;
+    }
     Ok(record)
 }
 

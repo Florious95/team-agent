@@ -83,6 +83,13 @@ pub enum Outcome {
 /// Write-ahead `pending` is durable BEFORE invoking a side-effecting host/hook.
 /// On recovery it means uncertainty, never permission to replay the action.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StopReceipt {
+    pub method: String,
+    pub owned_process_absent: bool,
+    pub owned_target_replaced: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationRecord {
     pub id: OperationId,
     pub kind: TransactionKind,
@@ -100,6 +107,10 @@ pub struct OperationRecord {
     pub outcome: Outcome,
     pub preserved: Vec<OwnedPath>,
     pub failure: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_failure: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_receipt: Option<StopReceipt>,
 }
 
 #[path = "store_import.rs"]
