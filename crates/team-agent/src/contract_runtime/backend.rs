@@ -1425,7 +1425,8 @@ mod tests {
     fn start_reconciliation_recovers_running_and_needs_recovery_startups_without_replay() {
         for outcome in [Outcome::Running, Outcome::NeedsRecovery] {
             let mut fixture = RoleFixture::new();
-            let mut backend = fixture.canonical(SeatStatus::Starting, Phase::F2Register, outcome, None);
+            drop(fixture.canonical(SeatStatus::Starting, Phase::F2Register, outcome, None));
+            let mut backend = Backend::open(&fixture.root, "test").unwrap();
             let _ownership = native_seat_lock(&fixture.root, "test", &fixture.identity.seat, false).unwrap();
             reconcile_start(&mut backend, &fixture.identity.seat).unwrap();
             assert!(existing_start(&backend, &fixture.identity.seat).unwrap().is_none());
@@ -1460,7 +1461,8 @@ mod tests {
     #[test]
     fn parent_recovery_fences_both_seats_without_waiting_in_reverse_lock_order() {
         let mut fixture = RoleFixture::new();
-        let mut backend = fixture.canonical(SeatStatus::Starting, Phase::F2Register, Outcome::Running, None);
+        drop(fixture.canonical(SeatStatus::Starting, Phase::F2Register, Outcome::Running, None));
+        let mut backend = Backend::open(&fixture.root, "test").unwrap();
         let mut operation = backend.store.operation(&OperationId::new("controlled-start").unwrap()).unwrap();
         operation.kind = TransactionKind::NewSeatFullSnapshot;
         let mut parent = operation.target.clone();

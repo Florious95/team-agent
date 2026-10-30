@@ -1467,7 +1467,7 @@ pub mod lifecycle_port {
     #[cfg(unix)]
     #[test]
     fn native_failure_panes_preserve_the_same_socket_through_a_path_alias() {
-        let root = std::env::temp_dir().join(format!("native-stop-alias-{}-{}", std::process::id(),
+        let root = Path::new("/tmp").join(format!("native-stop-alias-{}-{}", std::process::id(),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::create_dir_all(root.join("real")).unwrap();
         std::os::unix::fs::symlink(root.join("real"), root.join("alias")).unwrap();
