@@ -34,6 +34,8 @@ impl Action {
 pub struct Request {
     pub operation_id: String,
     pub action: Action,
+    /// None is an unfenced operator intent. Hooks must bind the captured instance.
+    /// Operation-id replay is bounded by the retained 16-record window.
     pub expected_instance: Option<String>,
     /// None retains the seat's existing native launch specification.
     pub launch: Option<Value>,
@@ -372,14 +374,23 @@ fn resume(
             save_operation(lock, op)?;
         }
         if op.phase == "native_done" {
-            if lock
+            let current = lock
                 .read()?
+                .filter(|current| current.instance_id == op.after.instance_id)
+                .ok_or("stale_instance_after_native_effect")?;
+            validate_manifest(&current)?;
+            let predecessor = op
+                .before
                 .as_ref()
-                .is_none_or(|current| current.instance_id != op.after.instance_id)
-            {
-                return Err("stale_instance_after_native_effect".into());
+                .is_some_and(|before| before.last_operation_id == current.last_operation_id);
+            if current.last_operation_id != op.request.operation_id && !predecessor {
+                // An already-published result can be followed by same-instance
+                // no-ops before its receipt is finalized. Never roll those back.
+                op.after = current;
+            } else {
+                op.after.extra = current.extra;
+                lock.publish(&op.after)?;
             }
-            lock.publish(&op.after)?;
             op.phase = "completed".into();
             op.error = None;
             save_operation(lock, op)?;
@@ -399,6 +410,15 @@ fn resume(
 
 fn validate_operation(op: &Operation, scope: &super::seat_store::SeatScope) -> Result<(), String> {
     component(&op.request.operation_id)?;
+    if let Some(parent) = &op.supersedes {
+        component(parent)?;
+    }
+    if !matches!(
+        op.phase.as_str(),
+        "reserved" | "old_stopped" | "native_done" | "completed" | "cancelled"
+    ) {
+        return Err("unsupported_operation_phase".into());
+    }
     codec::authorize_mutation(
         &serde_json::to_value(op).map_err(|e| e.to_string())?,
         OPERATION_CAPABILITIES,
@@ -454,6 +474,10 @@ fn same_intent(left: &Request, right: &Request) -> bool {
         && left.launch == right.launch
         && left.discard_session == right.discard_session
 }
+pub(super) fn understood_operation(value: &Value, scope: &super::seat_store::SeatScope) -> bool {
+    serde_json::from_value(value.clone()).is_ok_and(|op| validate_operation(&op, scope).is_ok())
+}
+
 fn save_operation(lock: &SeatLock, op: &Operation) -> Result<(), String> {
     let mut value = serde_json::to_value(op).map_err(|e| e.to_string())?;
     value["kind"] = json!("seat_operation");
@@ -461,7 +485,7 @@ fn save_operation(lock: &SeatLock, op: &Operation) -> Result<(), String> {
         value["requires"] = json!(OPERATION_CAPABILITIES);
     }
     lock.publish_operation(&op.request.operation_id, &value)?;
-    lock.prune_operations()
+    lock.prune_operations(&op.request.operation_id)
 }
 fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)

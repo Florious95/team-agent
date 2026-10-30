@@ -169,9 +169,10 @@ impl SeatLock {
         write_json(&self.operation_path(id)?, value, MAX_MANIFEST_BYTES * 3)
     }
 
-    /// Retain the last 16 operations, pinning interrupted work. Unknown/corrupt
-    /// records are never guessed at or deleted to satisfy a storage budget.
-    pub(crate) fn prune_operations(&self) -> Result<(), String> {
+    /// Keep 16 understood operations, pinning both published and newly reserved
+    /// authority. Orphan reservations are not immortal. Unknown/corrupt records
+    /// are never guessed at or deleted to satisfy a storage budget.
+    pub(crate) fn prune_operations(&self, reserved: &str) -> Result<(), String> {
         let directory = self
             .store
             .root
@@ -182,10 +183,27 @@ impl SeatLock {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e.to_string()),
         };
-        let expected_scope = serde_json::to_value(&self.store.scope).map_err(|e| e.to_string())?;
-        let pinned = self.read()?.map(|seat| seat.last_operation_id);
-        let mut closed = Vec::new();
-        let mut interrupted = 0usize;
+        let mut pinned: std::collections::BTreeSet<String> = self
+            .read()?
+            .map(|seat| seat.last_operation_id)
+            .into_iter()
+            .chain(std::iter::once(reserved.to_owned()))
+            .filter(|id| !id.is_empty())
+            .collect();
+        // Cancellation still needs its immediate predecessor until cleanup has
+        // begun. Protect that dependency even if the display counter saturates.
+        for id in pinned.clone() {
+            if let Some(value) = self.operation(&id)? {
+                if value["phase"] == "reserved"
+                    && super::lifecycle::understood_operation(&value, &self.store.scope)
+                {
+                    if let Some(parent) = value.get("supersedes").and_then(Value::as_str) {
+                        pinned.insert(parent.to_owned());
+                    }
+                }
+            }
+        }
+        let mut understood = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|e| e.to_string())?;
             let path = entry.path();
@@ -200,17 +218,8 @@ impl SeatLock {
                     .pointer("/request/operation_id")
                     .and_then(Value::as_str)
                     != path.file_stem().and_then(|s| s.to_str())
-                || value.pointer("/after/scope") != Some(&expected_scope)
-                || codec::authorize_mutation(&value, super::lifecycle::OPERATION_CAPABILITIES)
-                    .is_err()
+                || !super::lifecycle::understood_operation(&value, &self.store.scope)
             {
-                continue;
-            }
-            if !matches!(
-                value.get("phase").and_then(Value::as_str),
-                Some("completed" | "cancelled")
-            ) {
-                interrupted += 1;
                 continue;
             }
             let generation = value
@@ -221,14 +230,15 @@ impl SeatLock {
                 .metadata()
                 .and_then(|metadata| metadata.modified())
                 .map_err(|e| e.to_string())?;
-            let is_pinned = path.file_stem().and_then(|s| s.to_str()) == pinned.as_deref();
-            closed.push((is_pinned, generation, modified, path));
+            let is_pinned = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .is_some_and(|id| pinned.contains(id));
+            understood.push((is_pinned, generation, modified, path));
         }
-        closed.sort();
-        let count = closed
-            .len()
-            .saturating_sub(16usize.saturating_sub(interrupted));
-        for (pinned, _, _, path) in closed.into_iter().take(count) {
+        understood.sort();
+        let count = understood.len().saturating_sub(16);
+        for (pinned, _, _, path) in understood.into_iter().take(count) {
             if !pinned {
                 fs::remove_file(path).map_err(|e| e.to_string())?;
             }
