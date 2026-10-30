@@ -3,23 +3,11 @@
 #[path = "support/legacy_wire.rs"]
 mod legacy_wire;
 mod support;
-use support::direct_business::{handle};
-use serde_json::{json, Value};
+use serde_json::json;
 use support::*;
 use team_agent_contract::contract::{plan::*, types::*};
-use team_agent_contract::orchestration::{lifecycle::*, mcp::*, store::*, supervisor::*, Error};
+use team_agent_contract::orchestration::{lifecycle::*, mcp::*, store::*};
 
-fn context(seat: &SeatRecord) -> CallContext {
-    CallContext {
-        identity: seat.identity.clone(),
-        binding_key: seat.binding_key.clone(),
-        connection_id: InstanceId::new("connection").unwrap(),
-        task_id: "task".into(),
-    }
-}
-fn send() -> Value {
-    json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"send_message","arguments":{"to":"worker","content":"once"}}})
-}
 
 #[test]
 fn wire_snapshot_matches_the_unchanged_legacy_pure_contract() {
@@ -96,7 +84,7 @@ fn failed_restart_restores_stopped_parent_and_never_reuses_generation() {
     host.fail_capture = false;
     io.operation = OperationId::new("restart-next").unwrap();
     request.identity.instance = InstanceId::new("worker-3").unwrap();
-    assert_eq!(
+    assert_fenced(
         Lifecycle {
             store: &mut store,
             host: &mut host,
@@ -112,7 +100,7 @@ fn failed_restart_restores_stopped_parent_and_never_reuses_generation() {
             routing("worker"),
             OperationId::new("restart-next").unwrap()
         ),
-        Err(Error::Fence)
+        "operation_begin_generation_stale_or_instance_reused"
     );
     request.identity.generation = Generation(3);
     let successful = Lifecycle {
@@ -146,7 +134,7 @@ fn conflicting_pane_or_binding_is_rejected_before_second_materialization() {
     let d = descriptor();
     let h = hooks();
     io.operation = OperationId::new("second").unwrap();
-    assert_eq!(
+    assert_fenced(
         Lifecycle {
             store: &mut store,
             host: &mut host,
@@ -162,7 +150,7 @@ fn conflicting_pane_or_binding_is_rejected_before_second_materialization() {
             routing("worker"),
             OperationId::new("second").unwrap()
         ),
-        Err(Error::Fence)
+        "physical_route_owned_by_another_seat"
     );
     assert_eq!(host.spawned, 1);
     assert_eq!(io.writes, 1);
@@ -196,7 +184,7 @@ fn stopped_seat_releases_its_pane_to_a_seat_spawned_on_a_restarted_shared_server
     let d = descriptor();
     let h = hooks();
     io.operation = OperationId::new("third").unwrap();
-    assert_eq!(
+    assert_fenced(
         Lifecycle {
             store: &mut store,
             host: &mut host,
@@ -213,7 +201,7 @@ fn stopped_seat_releases_its_pane_to_a_seat_spawned_on_a_restarted_shared_server
             OperationId::new("third").unwrap()
         )
         .map(|record| record.outcome),
-        Err(Error::Fence)
+        "physical_route_owned_by_another_seat"
     );
     assert_eq!(host.stopped, 1);
 }

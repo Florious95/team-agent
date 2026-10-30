@@ -4,7 +4,7 @@ use support::direct_business::{handle, serve, serve_with_diagnostics};
 use serde_json::{json, Value};
 use support::*;
 use team_agent_contract::contract::{delivery::*, descriptor::*, fork::*, plan::*, types::*};
-use team_agent_contract::orchestration::{lifecycle::*, mcp::*, store::*, supervisor::*, Error};
+use team_agent_contract::orchestration::{lifecycle::*, mcp::*, store::*, Error};
 
 fn context(seat: &SeatRecord) -> CallContext {
     CallContext {
@@ -16,14 +16,6 @@ fn context(seat: &SeatRecord) -> CallContext {
 }
 fn call(id: u32, tool: &str, args: Value) -> Value {
     json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":tool,"arguments":args}})
-}
-fn result(response: Option<Value>) -> Value {
-    serde_json::from_str(
-        response.unwrap()["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap(),
-    )
-    .unwrap()
 }
 fn setup() -> (Sandbox, ContractStore, FakeHost, FakeIo, SeatRecord) {
     let sandbox = Sandbox::new();
@@ -184,14 +176,14 @@ fn restart_preserves_sid_and_fences_old_generation_and_mcp() {
         op.target.session.as_ref().unwrap().native_session,
         seat.session.as_ref().unwrap().native_session
     );
-    assert_eq!(store.assert_current(&seat.identity), Err(Error::Fence));
-    assert_eq!(
+    assert_fenced(store.assert_current(&seat.identity), "current_instance_or_generation_replaced");
+    assert_fenced(
         handle(
             &mut store,
             &context(&seat),
             &call(1, "get_team_status", json!({}))
         ),
-        Err(Error::Fence)
+        "current_instance_or_generation_replaced"
     );
     assert!(handle(
         &mut store,

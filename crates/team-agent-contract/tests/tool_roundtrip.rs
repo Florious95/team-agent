@@ -11,7 +11,7 @@ use std::io::{Cursor, Write};
 use serde_json::{json, Value};
 use support::*;
 use team_agent_contract::contract::{plan::*, types::*};
-use team_agent_contract::orchestration::{lifecycle::*, mcp::*, store::*, Error};
+use team_agent_contract::orchestration::{lifecycle::*, mcp::*, store::*};
 
 fn setup() -> (Sandbox, ContractStore, SeatRecord) {
     let sandbox = Sandbox::new();
@@ -108,6 +108,6 @@ fn tool_pairs_are_not_combined_across_connections_prefixes_or_generations() {
         .startup(&Adapter { descriptor: &descriptor, hooks: &hooks, catalog: None }, &request,
             routing("worker"), OperationId::new("restart").unwrap()).unwrap();
     assert_eq!(next.outcome, Outcome::Committed);
-    assert_eq!(store.completed_connection_tools(&first.identity, &first.connection_id), Err(Error::Fence));
+    assert_fenced(store.completed_connection_tools(&first.identity, &first.connection_id), "current_instance_or_generation_replaced");
     assert!(tools(&mut store, &context(&next.target, "connection")).is_empty());
 }
