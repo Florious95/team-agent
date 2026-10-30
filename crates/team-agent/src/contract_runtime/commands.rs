@@ -6,7 +6,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use team_agent_contract::contract::delivery::InputSurface;
 use team_agent_contract::contract::probe::{PaneReadyEvidence, Probe, ProbeOutcome};
-use team_agent_contract::contract::types::{Digest, OperationId, SeatId};
+use team_agent_contract::contract::types::{Digest, Operation, OperationId, SeatId};
 use team_agent_contract::host::{clock::RealClock, process::{sample_process, ProcessState}};
 use team_agent_contract::orchestration::physical::{PhysicalRuntime, Registration};
 use team_agent_contract::orchestration::store::{Outcome, SeatStatus};
@@ -166,8 +166,9 @@ pub fn start_agent(
                 Some(ref original) if original.outcome == Outcome::Compensated => "fresh",
                 Some(ref original) if original.id == receipt.id && original.outcome != Outcome::Committed => "receipt_completed",
                 Some(ref original) if original.id == receipt.id => "reused",
+                Some(_) if receipt.native_launch == Some(Operation::Fresh) => "fresh",
                 Some(_) => "resumed",
-            }, "operation":receipt.id,
+            }, "native_launch":receipt.native_launch, "operation":receipt.id,
             "session_id":projection.get("session_id"),"generation":projection.get("generation"),
             "session_observation":projection.get("session_observation"),"warning":projection.get("session_warning"),
             "coordinator":crate::lifecycle::coordinator_start_summary_value(
@@ -178,6 +179,7 @@ pub fn start_agent(
 pub(crate) struct NativeRestartResult {
     pub agent_id: String,
     pub session_id: Option<String>,
+    pub native_launch: Operation,
     pub outcome: Result<(), String>,
 }
 
@@ -191,7 +193,8 @@ pub(crate) fn restart_prepared(
 ) -> Vec<NativeRestartResult> {
     prepared.into_iter().map(|prepared| {
         let id = prepared.seat().clone();
-        let session_id = prepared.session().map(str::to_owned);
+        let mut session_id = prepared.session().map(str::to_owned);
+        let native_launch = prepared.native_launch();
         let outcome = (|| {
             let agent = AgentId::new(id.as_str());
             let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
@@ -207,6 +210,7 @@ pub(crate) fn restart_prepared(
             drop(latest);
             let receipt = backend::resume(prepared).map_err(error)?;
             let projection = checked_projection(&receipt, || publish_at(workspace, team, &id, false))?;
+            session_id = projection.get("session_id").and_then(Value::as_str).map(str::to_owned);
             if let Some(row) = state.get_mut("agents").and_then(|agents| agents.get_mut(id.as_str())).and_then(Value::as_object_mut) {
                 for (key, value) in projection.as_object().expect("native projection object") {
                     row.insert(key.clone(), value.clone());
@@ -214,7 +218,7 @@ pub(crate) fn restart_prepared(
             }
             Ok::<(), CliError>(())
         })().map_err(|error| error.to_string());
-        NativeRestartResult { agent_id: id.as_str().into(), session_id, outcome }
+        NativeRestartResult { agent_id: id.as_str().into(), session_id, native_launch, outcome }
     }).collect()
 }
 
@@ -234,7 +238,7 @@ pub fn restart(workspace: &Path, team: Option<&str>) -> Result<Option<Value>, Cl
     let mut state = latest.state.clone();
     let results = restart_prepared(&latest.run_workspace, &latest.team_key, &mut state, prepared);
     let succeeded: Vec<_> = results.iter().filter(|result| result.outcome.is_ok()).map(|result| json!({
-        "agent_id":result.agent_id,"restart_mode":"resumed","session_id":result.session_id,
+        "agent_id":result.agent_id,"restart_mode":if result.native_launch == Operation::Fresh { "fresh" } else { "resumed" },"session_id":result.session_id,
     })).collect();
     let failed: Vec<_> = results.iter().filter_map(|result| result.outcome.as_ref().err().map(|error| json!({
         "agent_id":result.agent_id,"phase":"native_resume","error":error,
@@ -594,7 +598,7 @@ mod tests {
                 status: SeatStatus::Starting, process: None, physical: None, session: None,
                 resources: vec![], workspace_resources: vec![], bootstrap_used: false,
             },
-            parent: None, phase: Phase::F3Spawn, pending: Some("compensating-stop".into()), spawn_observation: None,
+            parent: None, phase: Phase::F3Spawn, pending: Some("compensating-stop".into()), spawn_observation: None, native_launch: None,
             resources: vec![], effect: DeliveryEffect::NoEffect, outcome, preserved: vec![],
             failure: Some("native control SessionInspect guard-deadline".into()),
         }

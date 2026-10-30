@@ -1707,8 +1707,10 @@ fn append_native_restart_results(
 ) {
     for result in restart() {
         let decision = RestartedAgent {
-            agent_id: AgentId::new(result.agent_id), restart_mode: StartMode::Resumed,
-            decision: ResumeDecision::Resume, session_id: result.session_id.map(SessionId::new),
+            agent_id: AgentId::new(result.agent_id),
+            restart_mode: if result.native_launch == team_agent_contract::contract::types::Operation::Fresh { StartMode::Fresh } else { StartMode::Resumed },
+            decision: if result.native_launch == team_agent_contract::contract::types::Operation::Fresh { ResumeDecision::FreshStart } else { ResumeDecision::Resume },
+            session_id: result.session_id.map(SessionId::new),
         };
         match result.outcome {
             Ok(()) => successful.push(decision),
@@ -1740,6 +1742,7 @@ mod mixed_native_restart_tests {
                 append_native_restart_results(&mut successful, &mut failed, || {
                     attempts += 1;
                     vec![NativeRestartResult { agent_id: "native".into(), session_id: Some("same-session".into()),
+                        native_launch: team_agent_contract::contract::types::Operation::Resume,
                         outcome: if native_failed { Err("native failed".into()) } else { Ok(()) } }]
                 });
                 assert_eq!(attempts, 1, "no legacy survivor must not short-circuit native execution");

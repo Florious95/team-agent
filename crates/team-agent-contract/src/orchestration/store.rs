@@ -119,6 +119,9 @@ pub struct OperationRecord {
     pub pending: Option<String>,
     #[serde(default)]
     pub spawn_observation: Option<crate::host::transport::SpawnObservation>,
+    /// Native Fresh/Resume is separate from the authority Restart transaction.
+    #[serde(default)]
+    pub native_launch: Option<Operation>,
     pub resources: Vec<OwnedResourceReceipt>,
     pub effect: DeliveryEffect,
     pub outcome: Outcome,

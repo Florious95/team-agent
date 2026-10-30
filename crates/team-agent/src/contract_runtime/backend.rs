@@ -1017,6 +1017,8 @@ pub struct PreparedResume {
     role: RoleConfig,
     discovered: Discovery,
     request: LaunchRequest,
+    parent: InstanceIdentity,
+    original_session: Option<ResumeBinding>,
 }
 
 impl PreparedResume {
@@ -1024,6 +1026,7 @@ impl PreparedResume {
     pub(crate) fn session(&self) -> Option<&str> {
         self.request.resume.as_ref().map(|resume| resume.binding.native_session.as_str())
     }
+    pub(crate) fn native_launch(&self) -> Operation { self.request.operation }
 }
 
 pub(crate) fn prepare_restart(
@@ -1054,6 +1057,29 @@ pub(crate) fn prepare_restart(
     Ok(prepared)
 }
 
+/// Metadata-only availability check: missing/empty is not resumable; an I/O or
+/// identity error is not evidence of absence. Never read private transcript text.
+fn resumable_session(parent: &SeatRecord, home: Option<&Path>) -> Result<Option<ResumeBinding>, BackendError> {
+    let Some(source) = parent.session.as_ref() else { return Ok(None); };
+    team_agent_contract::contract::session::validate_resume(source,
+        &team_agent_contract::contract::session::ResumeExpectation {
+            provider: &parent.provider, source: &parent.identity, cwd: &parent.cwd, native: &parent.native,
+            evidence_kind: parent.evidence_kind, mode: team_agent_contract::contract::descriptor::ResumeMode::ExactId,
+        })?;
+    if parent.provider.as_str() == "claude_tui" {
+        let path = team_agent_contract::providers::claude::transcript_path(
+            home.ok_or(ContractError::Invalid("Claude native home unavailable"))?, source)?;
+        match std::fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() && metadata.len() > 0 => {},
+            Ok(metadata) if metadata.is_file() => return Ok(None),
+            Ok(_) => return Err(ContractError::Invalid("Claude transcript is not a file").into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(Some(source.clone()))
+}
+
 pub fn prepare_resume(
     workspace: &Path,
     team: &str,
@@ -1072,8 +1098,7 @@ pub fn prepare_resume(
     if role.id != parent.identity.seat || role.provider != parent.provider {
         return Err(ContractError::Mismatch("resume role provider").into());
     }
-    let source = parent.session.clone().ok_or(ContractError::Invalid("native resume binding required"))?;
-    if resolve_cwd(&source.cwd.path)? != source.cwd {
+    if resolve_cwd(&parent.cwd.path)? != parent.cwd {
         return Err(ContractError::Mismatch("resume cwd incarnation").into());
     }
     let candidate = std::env::current_exe()?.canonicalize()?;
@@ -1085,17 +1110,21 @@ pub fn prepare_resume(
     let identity = backend.store.propose_identity(seat)?;
     let adapter = launch_adapter(&backend.binding, &identity, &role.provider, &discovered)?;
     let hooks = adapter.hooks();
+    let source = resumable_session(&parent, discovered.runtime.as_ref().and_then(|runtime| match runtime {
+        registry::NativeRuntime::Claude(runtime) => Some(runtime.home()), _ => None,
+    }))?;
     let mut request = request(&backend.binding, &role, identity, &discovered)?;
-    request.operation = Operation::Resume;
-    request.paths.cwd = source.cwd.clone();
-    request.resume = Some(ResumeRequest {
-        binding: source, expected_source: parent.identity,
-    });
+    request.paths.cwd = parent.cwd.clone();
+    if let Some(source) = source {
+        request.operation = Operation::Resume;
+        request.resume = Some(ResumeRequest { binding: source, expected_source: parent.identity.clone() });
+    }
     let selected = registry::provider(role.provider.as_str())?;
     require_private_primary(selected, &request.paths.cwd)?;
     let resolved = resolve_launch(selected.descriptor(), &hooks, &request, Some(&discovered.catalog))?;
     validate_launch_plan(selected.descriptor(), &resolved, &adapter.plan(&resolved)?)?;
-    Ok(PreparedResume { binding: backend.binding, role, discovered, request })
+    Ok(PreparedResume { binding: backend.binding, role, discovered, request,
+        parent: parent.identity, original_session: parent.session })
 }
 
 pub fn resume(prepared: PreparedResume) -> Result<OperationRecord, BackendError> {
@@ -1106,10 +1135,15 @@ pub fn resume(prepared: PreparedResume) -> Result<OperationRecord, BackendError>
     {
         return Err(BackendError::Fence { reason: "resume_scope_binding_changed" });
     }
-    let source = prepared.request.resume.as_ref().ok_or(BackendError::Metadata)?;
-    let parent = backend.store.assert_current(&source.expected_source)?;
-    if parent.session.as_ref() != Some(&source.binding) {
+    let parent = backend.store.assert_current(&prepared.parent)?;
+    if parent.session != prepared.original_session {
         return Err(BackendError::Fence { reason: "resume_session_changed" });
+    }
+    if resumable_session(&parent, prepared.discovered.runtime.as_ref().and_then(|runtime| match runtime {
+        registry::NativeRuntime::Claude(runtime) => Some(runtime.home()), _ => None,
+    }))?
+        != prepared.request.resume.as_ref().map(|resume| resume.binding.clone()) {
+        return Err(BackendError::Fence { reason: "resume_availability_changed" });
     }
     let selected = registry::provider(prepared.role.provider.as_str())?;
     let descriptor = selected.descriptor();
@@ -1150,16 +1184,17 @@ pub fn resume(prepared: PreparedResume) -> Result<OperationRecord, BackendError>
     )?;
     physical.evidence = policy_evidence(&prepared.role.provider, &prepared.request.native, backend.binding.candidate_sha256)?;
     physical.workspace_tmux = workspace_topology;
-    let record = Lifecycle { store: &mut backend.store, host: &mut physical, io: &mut io }.startup(
-        &Adapter { descriptor, hooks: &hooks, catalog: Some(&prepared.discovered.catalog) },
-        &prepared.request,
-        Routing {
-            pane: "unpublished".into(),
-            binding_key: format!("binding-{}", prepared.request.identity.instance.as_str()),
-            server_key: selected.server_key_for(&prepared.request.identity)?,
-        },
-        operation,
-    )?;
+    let mut lifecycle = Lifecycle { store: &mut backend.store, host: &mut physical, io: &mut io };
+    let adapter = Adapter { descriptor, hooks: &hooks, catalog: Some(&prepared.discovered.catalog) };
+    let routing = Routing {
+        pane: "unpublished".into(), binding_key: format!("binding-{}", prepared.request.identity.instance.as_str()),
+        server_key: selected.server_key_for(&prepared.request.identity)?,
+    };
+    let record = if prepared.request.operation == Operation::Fresh {
+        lifecycle.restart_fresh(&adapter, &prepared.request, routing, operation, &prepared.parent)?
+    } else {
+        lifecycle.startup(&adapter, &prepared.request, routing, operation)?
+    };
     Ok(record)
 }
 
@@ -1405,7 +1440,7 @@ mod tests {
                 evidence_kind: EvidenceKind::Fixture, status, process: None, physical: None, session: None,
                 resources: vec![], workspace_resources: vec![], bootstrap_used: false };
             let operation = OperationRecord { id: OperationId::new("controlled-start").unwrap(), kind: TransactionKind::Startup,
-                target: target.clone(), parent: None, phase, pending: pending.map(str::to_owned), spawn_observation: None, resources: vec![],
+                target: target.clone(), parent: None, phase, pending: pending.map(str::to_owned), spawn_observation: None, native_launch: None, resources: vec![],
                 effect: team_agent_contract::contract::delivery::DeliveryEffect::NoEffect, outcome, preserved: vec![], failure: None };
             let db = rusqlite::Connection::open(self.binding.transport_root.join("contract.db")).unwrap();
             db.execute("INSERT INTO contract_seats VALUES(?1,?2)", rusqlite::params![self.identity.seat.as_str(), serde_json::to_string(&target).unwrap()]).unwrap();
@@ -1475,6 +1510,33 @@ mod tests {
             assert_eq!(stopped.outcome, Outcome::Compensated);
             assert_eq!(stop(&fixture.root, "test", &fixture.identity.seat).unwrap().id, stopped.id);
         }
+    }
+
+    #[test]
+    fn unresolved_pi_and_absent_or_empty_claude_transcripts_select_fresh_without_reading_content() {
+        let mut fixture = RoleFixture::new();
+        let backend = fixture.canonical(SeatStatus::Stopped, Phase::F5Receipt, Outcome::Committed, None);
+        let mut parent = backend.store.seat(&fixture.identity.seat).unwrap().unwrap();
+        parent.provider = ProviderId::new("pi_tui").unwrap();
+        assert_eq!(resumable_session(&parent, None).unwrap(), None);
+        parent.provider = ProviderId::new("claude_tui").unwrap();
+        parent.session = Some(ResumeBinding {
+            provider: parent.provider.clone(), native_session: team_agent_contract::contract::session::NativeSessionId::new("76156673-0000-4000-8000-000000000001").unwrap(),
+            storage: team_agent_contract::contract::session::SessionStorage::Local, cwd: parent.cwd.clone(),
+            native: parent.native.clone(), source: parent.identity.clone(),
+            origin: team_agent_contract::contract::session::CaptureOrigin::OwnedExitHint,
+            evidence_kind: parent.evidence_kind, evidence_sha256: digest(b"session-observation"), backing: None,
+        });
+        let path = team_agent_contract::providers::claude::transcript_path(&fixture.root, parent.session.as_ref().unwrap()).unwrap();
+        assert_eq!(resumable_session(&parent, Some(&fixture.root)).unwrap(), None);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"").unwrap();
+        assert_eq!(resumable_session(&parent, Some(&fixture.root)).unwrap(), None);
+        std::fs::write(&path, b"controlled fixture transcript\n").unwrap();
+        assert_eq!(resumable_session(&parent, Some(&fixture.root)).unwrap(), parent.session);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(resumable_session(&parent, Some(&fixture.root)).is_err());
     }
 
     #[test]

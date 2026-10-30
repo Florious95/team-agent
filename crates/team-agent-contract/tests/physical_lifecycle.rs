@@ -37,7 +37,7 @@ impl LifecycleHost for FaultedPhysicalStop<'_> {
     fn control(&mut self, seat: &SeatRecord, control: &team_agent_contract::contract::fork::NativeControl) -> Result<DeliveryEffect, Error> {
         self.inner.control(seat, control)
     }
-    fn session_evidence(&mut self, seat: &SeatRecord) -> Result<team_agent_contract::contract::session::ScopedSessionEvidence, Error> {
+    fn session_evidence(&mut self, seat: &SeatRecord) -> Result<team_agent_contract::contract::hooks::ScopedSessionEvidence, Error> {
         self.inner.session_evidence(seat)
     }
     fn remove_owned(&mut self, resource: &OwnedResourceReceipt) -> Result<bool, Error> {
@@ -375,6 +375,14 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
     assert!(started.spawn_observation.is_some(), "partial spawn attribution is durable before completion");
     let seat = started.target;
     let target = seat.physical.clone().unwrap();
+    let mut bounded = PhysicalRuntime::new(Registration {
+        descriptor: &d, hooks: &h, controls: &[], startup: None, session_panel: None,
+    }, settings(&tmux), OperationId::new("bounded-observation").unwrap(), &clock).unwrap();
+    bounded.cap_budget(Duration::ZERO).unwrap();
+    assert!(bounded.readiness(&seat).is_err());
+    bounded.cap_budget(Duration::from_secs(10)).unwrap();
+    assert!(bounded.readiness(&seat).is_err(), "nested calls cannot renew an expired outer budget");
+    assert_eq!(sample_process(&target.process), ProcessState::Alive);
     assert_eq!(seat.endpoint, target.endpoint.to_str().unwrap());
     assert_eq!(seat.pane, "%0");
     assert_ne!(seat.binding_key, "unbound-worker");
@@ -569,7 +577,7 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
 
     // Reproduce a restart after losing the final spawn result, both with the
     // exact native still alive and after a positively receipt-owned close.
-    for mode in ["live-spawn", "absent-spawn", "no-effect-stop", "recover-stop"] {
+    for mode in ["live-spawn", "absent-spawn", "no-effect-stop", "recover-stop", "fresh-restart"] {
         let mut pending_request = request.clone();
         pending_request.identity.seat = SeatId::new(format!("pending-{mode}")).unwrap();
         pending_request.identity.instance = InstanceId::new(format!("pending-instance-{mode}")).unwrap();
@@ -583,6 +591,31 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
         ).unwrap();
         assert_eq!(pending.outcome, Outcome::Committed, "{pending:?}");
         let physical = pending.target.physical.clone().unwrap();
+        if mode == "fresh-restart" {
+            assert!(pending.target.session.is_none(), "fixture has no resumable session");
+            let mut fresh = pending_request.clone();
+            fresh.identity = store.propose_identity(&pending.target.identity.seat).unwrap();
+            let fresh_id = OperationId::new("native-fresh-restart").unwrap();
+            let mut fresh_runtime = PhysicalRuntime::new(Registration {
+                descriptor: &d, hooks: &h, controls: &[], startup: None, session_panel: None,
+            }, settings(&tmux), fresh_id.clone(), &clock).unwrap();
+            let replaced = Lifecycle { store: &mut store, host: &mut fresh_runtime, io: &mut io }.restart_fresh(
+                &Adapter { descriptor: &d, hooks: &h, catalog: None }, &fresh,
+                Routing { pane: "unpublished".into(), binding_key: "fresh-restart-binding".into(), server_key: "fresh-restart-server".into() },
+                fresh_id, &pending.target.identity,
+            ).unwrap();
+            assert_eq!(replaced.outcome, Outcome::Committed, "{replaced:?}");
+            assert_eq!(replaced.kind, TransactionKind::Restart);
+            assert_eq!(replaced.native_launch, Some(Operation::Fresh));
+            assert_eq!(sample_process(&physical.process), ProcessState::Exited);
+            let replacement = replaced.target.physical.as_ref().unwrap();
+            assert_eq!(sample_process(&replacement.process), ProcessState::Alive);
+            let stopped = Lifecycle { store: &mut store, host: &mut fresh_runtime, io: &mut io }
+                .teardown(&replaced.target.identity, OperationId::new("stop-fresh-restart").unwrap()).unwrap();
+            assert_eq!(stopped.outcome, Outcome::Committed);
+            assert_eq!(sample_process(&replacement.process), ProcessState::Exited);
+            continue;
+        }
         if mode.ends_with("stop") {
             let no_effect = mode == "no-effect-stop";
             let mut host = FaultedPhysicalStop { inner: pending_runtime, refusal: Some(if no_effect {

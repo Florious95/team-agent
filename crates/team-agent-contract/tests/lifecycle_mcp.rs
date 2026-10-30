@@ -154,6 +154,41 @@ fn restart_request(store: &ContractStore, seat: &SeatRecord) -> LaunchRequest {
     request
 }
 #[test]
+fn fresh_restart_without_captured_session_keeps_parent_fencing_and_rollback() {
+    for fail_capture in [false, true] {
+        let (_sandbox, mut store, mut host, mut io, mut parent) = setup();
+        parent.session = None;
+        let db = rusqlite::Connection::open(store.root().join("contract.db")).unwrap();
+        db.execute("UPDATE contract_seats SET record=?1 WHERE seat=?2",
+            rusqlite::params![serde_json::to_string(&parent).unwrap(), parent.identity.seat.as_str()]).unwrap();
+        let mut fresh = request(store.root(), parent.identity.seat.as_str());
+        fresh.identity.instance = InstanceId::new("fresh-worker-2").unwrap();
+        fresh.identity.generation = Generation(2);
+        let d = descriptor(); let h = hooks();
+        let id = OperationId::new("fresh-restart").unwrap();
+        io.operation = id.clone(); host.fail_capture = fail_capture;
+        let record = Lifecycle { store: &mut store, host: &mut host, io: &mut io }.restart_fresh(
+            &Adapter { descriptor: &d, hooks: &h, catalog: None }, &fresh, routing("worker"), id.clone(), &parent.identity,
+        ).unwrap();
+        assert_eq!(record.kind, TransactionKind::Restart);
+        assert_eq!(record.native_launch, Some(Operation::Fresh));
+        assert_eq!(record.parent.as_ref().unwrap().identity, parent.identity);
+        assert_eq!(host.spawned, 2);
+        assert!(!store.leased(&parent.identity.seat).unwrap());
+        if fail_capture {
+            assert_eq!(record.outcome, Outcome::Compensated);
+            parent.status = SeatStatus::Stopped;
+            assert_eq!(store.seat(&parent.identity.seat).unwrap(), Some(parent));
+        } else {
+            assert_eq!(record.outcome, Outcome::Committed);
+            assert_ne!(record.target.identity, parent.identity);
+            assert!(record.target.session.is_some());
+        }
+        assert_eq!(store.operation(&id).unwrap(), record);
+    }
+}
+
+#[test]
 fn restart_preserves_sid_and_fences_old_generation_and_mcp() {
     let (_sandbox, mut store, mut host, mut io, seat) = setup();
     let request = restart_request(&store, &seat);

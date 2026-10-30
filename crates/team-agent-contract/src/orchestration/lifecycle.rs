@@ -81,13 +81,34 @@ impl Lifecycle<'_> {
         routing: Routing,
         id: OperationId,
     ) -> Result<OperationRecord, Error> {
+        self.startup_with_parent(adapter, request, routing, id, None)
+    }
+
+    /// Replace the exact parent with a fresh native session when no resumable
+    /// binding exists. This is still a Restart transaction with parent rollback.
+    pub fn restart_fresh(
+        &mut self, adapter: &Adapter<'_>, request: &LaunchRequest, routing: Routing,
+        id: OperationId, parent: &InstanceIdentity,
+    ) -> Result<OperationRecord, Error> {
+        if request.operation != Operation::Fresh || request.resume.is_some() {
+            return Err(Error::Invalid("fresh restart request"));
+        }
+        self.startup_with_parent(adapter, request, routing, id, Some(parent))
+    }
+
+    fn startup_with_parent(
+        &mut self, adapter: &Adapter<'_>, request: &LaunchRequest, routing: Routing,
+        id: OperationId, fresh_parent: Option<&InstanceIdentity>,
+    ) -> Result<OperationRecord, Error> {
         if !matches!(request.operation, Operation::Fresh | Operation::Resume) {
             return Err(Error::Invalid("startup operation"));
         }
         let resolved = resolve_launch(adapter.descriptor, adapter.hooks, request, adapter.catalog)?;
         let plan = adapter.hooks.plan.require("H2")?.plan(&resolved)?;
         validate_launch_plan(adapter.descriptor, &resolved, &plan)?;
-        let parent = if request.operation == Operation::Resume {
+        let parent = if let Some(parent) = fresh_parent {
+            Some(self.store.assert_current(parent)?)
+        } else if request.operation == Operation::Resume {
             let resume = request.resume.as_ref().ok_or(Error::Fence)?;
             let parent = self.store.assert_current(&resume.expected_source)?;
             if parent.session.as_ref() != Some(&resume.binding) {
@@ -104,6 +125,7 @@ impl Lifecycle<'_> {
         };
         let target = self.target(adapter.descriptor, request, routing)?;
         let mut operation = new_operation(id, kind, target, parent);
+        operation.native_launch = Some(request.operation);
         self.store.begin(&operation)?;
         let result = (|| {
             if let Some(parent) = operation.parent.as_ref() {
@@ -671,6 +693,7 @@ fn new_operation(
         phase: Phase::F0Preflight,
         pending: None,
         spawn_observation: None,
+        native_launch: None,
         resources: vec![],
         effect: DeliveryEffect::NoEffect,
         outcome: Outcome::Running,

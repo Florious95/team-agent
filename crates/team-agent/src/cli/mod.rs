@@ -1648,7 +1648,7 @@ pub mod lifecycle_port {
         );
 
         let mut kill_error = (!native_failed_rows.is_empty())
-            .then(|| "native seats require recovery; see native_receipts".to_string());
+            .then(|| "native seats not stopped; see native_receipts".to_string());
         let mut killed_sessions = Vec::new();
         let mut spared_sessions = Vec::new();
         deadline.check("kill_session")?;
