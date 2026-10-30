@@ -51,7 +51,8 @@ pub(super) fn run(args: &[String], cwd: &Path) -> Result<CmdResult, CliError> {
             ["list"] => {}
             ["cancel", id]
                 if id.strip_prefix("sched_").is_some_and(|hex| {
-                    !hex.is_empty() && hex.bytes().all(|c| c.is_ascii_hexdigit())
+                    hex.bytes().any(|c| c != b'0')
+                        && hex.bytes().all(|c| c.is_ascii_hexdigit())
                 }) => {}
             _ => {
                 return Err(CliError::Usage(
