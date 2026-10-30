@@ -1606,35 +1606,6 @@ fn preserve_quick_start_bootstrap_binding(
     }
 }
 
-fn require_quick_start_coordinator_started(
-    report: &crate::coordinator::StartReport,
-    workspace: &Path,
-) -> Result<(), LifecycleError> {
-    if report.ok {
-        return Ok(());
-    }
-    let details = serde_json::json!({
-        "ok": report.ok,
-        "status": report.status,
-        "pid": report.pid,
-        "previous_pid": report.previous_pid,
-        "binary_path": report.binary_path,
-        "binary_version": report.binary_version,
-        "rotation_reason": report.rotation_reason,
-        "binary_identity_relation": report.binary_identity_relation,
-        "log": report.log,
-        "schema_error": report.schema_error.as_ref().map(|error| format!("{error:?}")),
-        "action": report.action,
-        "workspace": workspace,
-        "coordinator_log_path": crate::coordinator::coordinator_log_path(
-            &crate::coordinator::WorkspacePath::new(workspace.to_path_buf())
-        ),
-    });
-    Err(LifecycleError::StatePersist(format!(
-        "coordinator start refused: {details}; workers may already be started; inspect the report before retrying quick-start"
-    )))
-}
-
 #[cfg(test)]
 mod fresh_quick_start_leader_binding_tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

@@ -41,7 +41,7 @@ use crate::provider::wire::{parse_provider, provider_wire};
 use crate::provider::ProcessLiveness;
 
 use super::super::health::pid_is_running;
-use super::super::tick::TickError;
+use super::super::types::TickError;
 use super::super::types::Pid;
 
 ///

@@ -5,16 +5,11 @@
 use super::*;
 use crate::messaging::{DeliveryOutcome, DeliveryRefusal, DeliveryStage, DeliveryStatus};
 
-mod coordinator;
 mod mailbox;
 mod persist;
 mod presentation;
 mod resolve;
 
-use coordinator::{
-    append_loud_ensure_fields, dirty_topology_refusal_value, loud_ensure_coordinator,
-    target_has_known_worker,
-};
 pub use persist::send_options_from_args;
 use persist::{
     initial_delivery_allows_watch, observe_initial_delivery_for_watch,

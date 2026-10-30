@@ -1,8 +1,4 @@
 //!
-use super::coordinator::{
-    append_loud_ensure_fields, dirty_topology_refusal_value, loud_ensure_coordinator,
-    target_has_known_worker,
-};
 use super::presentation::delivery_outcome_json;
 use crate::cli::{CliError, SendArgs};
 use crate::messaging::{

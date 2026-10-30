@@ -45,29 +45,25 @@ impl Default for ResultRoute {
     }
 }
 
-/// `collect` (`results.py:45`):投递 pending、捞 uncollected results、校验 envelope、更新任务态、
-/// 写 team_state、ensure coordinator。CLI `collect` + coordinator tick 调。
+/// Collect legacy persisted results synchronously without starting a background service.
 pub fn collect(
     workspace: &Path,
     result_file: Option<&Path>,
-    ensure_coordinator: bool,
 ) -> Result<serde_json::Value, MessagingError> {
-    collect_scoped(workspace, result_file, ensure_coordinator, None)
+    collect_scoped(workspace, result_file, None)
 }
 
 pub fn collect_for_team(
     workspace: &Path,
     result_file: Option<&Path>,
-    ensure_coordinator: bool,
     owner_team_id: Option<&str>,
 ) -> Result<serde_json::Value, MessagingError> {
-    collect_scoped(workspace, result_file, ensure_coordinator, owner_team_id)
+    collect_scoped(workspace, result_file, owner_team_id)
 }
 
 fn collect_scoped(
     workspace: &Path,
     result_file: Option<&Path>,
-    ensure_coordinator: bool,
     owner_team_id: Option<&str>,
 ) -> Result<serde_json::Value, MessagingError> {
     let paths = collect_paths(workspace)?;
@@ -312,13 +308,7 @@ fn collect_scoped(
     }
     let counts = result_counts(&conn, owner_team_id)?;
     drop(collection_lock);
-    // results.py:157 — ensure_coordinator=true runs the REAL ensure step; the
-    // `{ok:false,status:"not_required"}` literal is ONLY the ensure=false branch.
-    let coordinator = if ensure_coordinator {
-        ensure_coordinator_after_collect(&paths.run_workspace, &state, &log)
-    } else {
-        serde_json::json!({"ok": false, "status": "not_required"})
-    };
+    let coordinator = serde_json::json!({"ok": true, "status": "not_required"});
     Ok(serde_json::json!({
         "ok": fatal_invalid_results == 0,
         "collected": collected,
@@ -329,93 +319,6 @@ fn collect_scoped(
         "state_file": spec_workspace.join("team_state.md").to_string_lossy().to_string(),
         "coordinator": coordinator,
     }))
-}
-
-/// `_ensure_coordinator_after_collect`(`results.py:176-184`)。
-fn ensure_coordinator_after_collect(
-    workspace: &Path,
-    state: &serde_json::Value,
-    log: &EventLog,
-) -> serde_json::Value {
-    if !coordinator_should_run(state) {
-        return serde_json::json!({"ok": false, "status": "not_required"});
-    }
-    let workspace_path = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
-    let coordinator = match crate::coordinator::start_coordinator(&workspace_path) {
-        Ok(report) => start_report_value(&report),
-        Err(e) => {
-            serde_json::json!({"ok": false, "status": "start_failed", "error": e.to_string()})
-        }
-    };
-    let _ = log.write(
-        "collect.coordinator_checked",
-        serde_json::json!({"coordinator": coordinator.clone()}),
-    );
-    coordinator
-}
-
-/// `_coordinator_should_run`(`results.py:187-188`)。
-///
-/// The top-level `state.leader_receiver` read below is a coordinator-scope
-/// legacy compat bridge (pre-teams-map single-team layout) — deliberately
-/// NOT team-scoped because this predicate answers "is a coordinator worth
-/// starting for this workspace at all?" and does not itself route any
-/// message. The `ALLOWED-LEGACY-READ` marker documents the exception and
-/// keeps grep sweeps honest; delete once B1 canonical layout lands and
-/// every state carries a `teams` map
-/// (`.team/artifacts/next-version-staged-plan.md §5 Phase-Foundation-1`).
-fn coordinator_should_run(state: &serde_json::Value) -> bool {
-    let has_session = state
-        .get("session_name")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|s| !s.is_empty());
-    // ALLOWED-LEGACY-READ: pre-teams-map coordinator-scope existence probe; never used for routing.
-    has_session || leader_receiver_is_direct(state.get("leader_receiver"))
-}
-
-/// `_leader_receiver_is_direct`(`messaging/leader.py:449-450`)。
-fn leader_receiver_is_direct(receiver: Option<&serde_json::Value>) -> bool {
-    receiver.is_some_and(|receiver| {
-        receiver.get("mode").and_then(serde_json::Value::as_str) == Some("direct_tmux")
-            && receiver
-                .get("pane_id")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|pane| !pane.is_empty())
-    })
-}
-
-/// `start_coordinator` dict 形(`lifecycle.py:54/86/121` 的 JSON 面)。
-fn start_report_value(report: &crate::coordinator::StartReport) -> serde_json::Value {
-    let status = match report.status {
-        crate::coordinator::StartOutcome::AlreadyRunning => "already_running",
-        crate::coordinator::StartOutcome::RestartIncompatibleStopFailed => {
-            "restart_incompatible_stop_failed"
-        }
-        crate::coordinator::StartOutcome::SchemaIncompatible => "schema_incompatible",
-        crate::coordinator::StartOutcome::Started => "started",
-        crate::coordinator::StartOutcome::StartedAfterRotation => "started_after_rotation",
-    };
-    let mut value = serde_json::json!({
-        "ok": report.ok,
-        "pid": report.pid.map(|p| p.get()),
-        "status": status,
-        "binary_path": report.binary_path.clone(),
-        "binary_version": report.binary_version.clone(),
-        "rotation_reason": report.rotation_reason.clone(),
-    });
-    if let Some(previous_pid) = report.previous_pid {
-        value["previous_pid"] = serde_json::json!(previous_pid.get());
-    }
-    if let Some(log) = &report.log {
-        value["log"] = serde_json::json!(log.to_string_lossy().to_string());
-    }
-    if let Some(error) = &report.schema_error {
-        value["schema_error"] = serde_json::json!(format!("{error:?}"));
-    }
-    if let Some(action) = &report.action {
-        value["action"] = serde_json::json!(action);
-    }
-    value
 }
 
 fn resolve_owner_team_for_read(

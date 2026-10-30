@@ -334,7 +334,9 @@ fn is_machine_command(command: &str) -> bool {
 fn dispatch_machine(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliError> {
     match command {
         "wait" => cmd_wait(&wait_args(args, cwd)?).map(emit_result),
-        "coordinator" => run_coordinator(args, cwd),
+        "coordinator" => Err(CliError::Usage(
+            "coordinator is retired; use schedule for on-demand timed work".into(),
+        )),
         "attach-app-server-leader" => {
             cmd_attach_app_server_leader(&attach_app_server_leader_args(args, cwd)?)
                 .map(emit_result)
@@ -2059,23 +2061,6 @@ fn profile_args(args: &[String], cwd: &Path) -> Result<ProfileArgs, CliError> {
         proxy_mode: parsed.proxy_mode,
         json: parsed.json,
     })
-}
-
-fn run_coordinator(args: &[String], cwd: &Path) -> Result<ExitCode, CliError> {
-    let parsed = parse_args(args);
-    let workspace = crate::coordinator::WorkspacePath::new(workspace(&parsed, cwd));
-    // 0.5.x Windows portability Batch 9 F8: pass `--team` through
-    // to the daemon so it doesn't have to derive from state at
-    // boot time. `parse_args` already recognizes `--team`; we just
-    // thread the value into `DaemonArgs::team_key`.
-    crate::coordinator::run_daemon(crate::coordinator::DaemonArgs {
-        workspace,
-        once: parsed.once,
-        tick_interval_sec: parsed.tick_interval,
-        team_key: parsed.team.clone(),
-    })
-    .map(|()| ExitCode::Ok)
-    .map_err(|e| CliError::Runtime(e.to_string()))
 }
 
 fn human_value(value: &Value) -> String {
