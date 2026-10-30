@@ -33,6 +33,14 @@ impl ProjectionStore {
     }
 
     #[doc(hidden)]
+    pub fn fixture_delete_seat(&mut self, seat: &SeatId) -> Result<(), Error> {
+        let key = Key::new("seats", seat.as_str());
+        let mut tx = self.files.write([key.clone()])?;
+        tx.delete(key)?;
+        tx.commit()
+    }
+
+    #[doc(hidden)]
     pub fn fixture_set_lease(&mut self, seat: &SeatId, operation: Option<&OperationId>) -> Result<(), Error> {
         let key = Key::new("leases", seat.as_str());
         let mut tx = self.files.write([key.clone()])?;
