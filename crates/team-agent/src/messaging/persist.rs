@@ -352,10 +352,10 @@ mod tests {
         }
     }
 
+    // M1: send.rs is a station::send shim and persists nothing, so it is no longer a consumer.
     #[test]
     fn persisted_truth_and_workspace_identity_have_forward_consumers() {
         for (name, source) in [
-            ("send", include_str!("send.rs")),
             ("delivery", include_str!("delivery.rs")),
             ("leader_receiver", include_str!("leader_receiver.rs")),
         ] {

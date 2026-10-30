@@ -129,12 +129,14 @@ fn send_message_worker_recipient_returns_physical_receipt_without_poll_hint() {
     assert_eq!(value["status"], "sent");
     assert_eq!(value["delivery"], "physical");
     assert_eq!(value["accepted"], Value::Null);
-    assert!(value.get("message_id").is_none());
     assert!(value.get("poll_via").is_none());
     assert!(value.get("delivery_pending").is_none());
     fixture.received("Team Agent message from leader:\n\ndo the thing");
     assert!(!fixture.root.join(".team/runtime/team.db").exists());
-    assert!(!fixture.root.join(".team/inbox").exists());
+    // M1 stores before submitting: the receipt names the durable inbox record.
+    let inbox = crate::inbox_store::read(&fixture.root, "worker-1", 10, Some("current")).unwrap();
+    assert_eq!(inbox["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(inbox["messages"][0]["message_id"], value["message_id"]);
 }
 
 #[test]
@@ -237,7 +239,9 @@ fn send_message_mailbox_is_durable_without_live_injection() {
         .expect("mailbox send persists");
     let value = outcome.to_value();
     assert_eq!(value.get("status"), Some(&json!("stored")));
-    assert_eq!(value["mailbox"], true);
+    // M1 receipt: a mailbox send is stored, not live, and never attempts submission.
+    assert_eq!(value["live"], false);
+    assert!(value.get("submission").is_none(), "{value}");
     let inbox = crate::inbox_store::read(&ws, "leader", 10, Some("teamA")).unwrap();
     assert_eq!(inbox["messages"].as_array().unwrap().len(), 1);
     assert_eq!(inbox["messages"][0]["message_id"], value["message_id"]);

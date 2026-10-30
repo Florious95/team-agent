@@ -210,19 +210,17 @@ mod tests {
             assert!(drain_scoped_pending_egress(std::path::Path::new(workspace), team, scope, true).is_err());
         }
     }
+    /// M1: the inbox retains the original envelope (station::send); only the
+    /// normalized presentation and the result id are attached for routing.
     #[test]
-    fn compact_native_result_becomes_the_existing_framework_business_schema() {
+    fn compact_native_result_keeps_its_original_envelope_with_routing_fields() {
         let compact = json!({"schema_version":1,"agent_id":"worker","task_id":"msg-bound","status":"completed","summary":"5535"});
         let result = framework_result("result-fixed", "worker", &compact).unwrap();
-        assert_eq!(result["schema_version"], "result_envelope_v1");
-        assert_eq!(result["status"], "success");
-        assert_eq!(result["task_id"], "msg-bound");
-        assert_eq!(result["summary"], "5535");
-        assert_eq!(result["result_id"], "result-fixed");
-        for field in ["changes", "tests", "risks", "artifacts", "next_actions"] {
-            assert!(result[field].is_array());
+        for field in ["schema_version", "agent_id", "task_id", "status", "summary"] {
+            assert_eq!(result[field], compact[field], "{field} must be forwarded verbatim");
         }
-        crate::messaging::helpers::validate_result_envelope(&result).unwrap();
+        assert_eq!(result["result_id"], "result-fixed");
+        assert!(result["presentation"].is_object(), "{result}");
         assert!(framework_result("result-fixed", "other", &compact).is_err());
     }
 }

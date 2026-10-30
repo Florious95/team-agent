@@ -111,8 +111,9 @@ impl Transport for CaptureFailsDeliverTransport {
         self.inner.attach_session(s)
     }
 }
+// M1: the tick no longer delivers messages, so only the capture-failure isolation remains.
 #[test]
-fn tick_swallows_capture_failure_and_still_delivers_to_other_agent() {
+fn tick_swallows_capture_failure_of_a_stopped_agent() {
     let dir = std::env::temp_dir().join(format!(
         "team-agent-coord-stopreg-{}-{}",
         std::process::id(),
@@ -134,27 +135,9 @@ fn tick_swallows_capture_failure_and_still_delivers_to_other_agent() {
         }),
     )
     .unwrap();
-    let store = MessageStore::open(&dir).unwrap();
-    let mid = store
-        .create_message(
-            Some("task-1"),
-            "leader",
-            "w2",
-            "after stop",
-            None,
-            true,
-            None,
-        )
-        .unwrap();
-    drop(store);
-    assert_eq!(
-        message_status(&dir, &mid),
-        "accepted",
-        "precondition: a fresh message is 'accepted'"
-    );
     let ws = WorkspacePath::new(dir.clone());
     let reg: Box<dyn ProviderRegistry> = Box::new(MockRegistry::new(&[], &[]));
-    // capture() ERRORS (window gone) but inject delivers + session present.
+    // capture() ERRORS (window gone) while the session stays present.
     let coord = Coordinator::for_test(
         ws,
         reg,
@@ -168,19 +151,5 @@ fn tick_swallows_capture_failure_and_still_delivers_to_other_agent() {
         result.is_ok(),
         "P0: sync_agent_health's per-agent `capture?` must be SWALLOWED (log + continue), not propagated — \
          the tick must NOT early-return Err when a stopped agent's window-capture fails; got {result:?}"
-    );
-    let report = result.unwrap();
-    // (b) the deliver loop must still run for the active w2.
-    let attempts = message_delivery_attempts(&dir, &mid);
-    let delivered_reported = report.delivered.iter().any(|d| d.message_id == mid);
-    let advanced = message_status(&dir, &mid) != "accepted";
-    assert!(
-        attempts >= 1 || delivered_reported || advanced,
-        "P0: after swallowing w1's capture failure, the tick MUST still deliver to the active w2 — its \
-         message must advance past 'accepted' (delivery_attempts +1 / claimed / delivered). The regression \
-         halts before deliver_pending_messages and leaves it at delivery_attempts=0. attempts={attempts} \
-         status={} delivered={:?}",
-        message_status(&dir, &mid),
-        report.delivered
     );
 }

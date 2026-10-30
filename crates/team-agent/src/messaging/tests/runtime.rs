@@ -393,18 +393,27 @@ fn handle_trust_retry_at_max_is_exhausted_terminal() {
 
 #[test]
 fn send_message_target_not_in_team_is_refused() {
-    // send.py:259-261 — non-leader, non-team target → refused/target_not_in_team.
+    // send.py:259-261 — non-leader, non-team target → refused. M1 (station::send) refuses
+    // before storing anything.
     let ws = tmp_ws("sendrefuse");
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &serde_json::json!({"session_name": "team-x", "agents": {"w1": {"provider": "copilot"}}}),
+    )
+    .unwrap();
     let opts = SendOptions::default();
     let out = send_message(
         &ws,
         &MessageTarget::Single("ghost".to_string()),
         "hi",
         &opts,
-    )
-    .unwrap();
-    assert_eq!(out.status, DeliveryStatus::Refused);
-    assert_eq!(out.reason, Some(DeliveryRefusal::TargetNotInTeam));
+    );
+    assert!(
+        matches!(&out, Err(MessagingError::Routing(reason)) if reason.contains("unknown recipient: ghost")),
+        "{out:?}"
+    );
+    let inbox = crate::inbox_store::read(&ws, "ghost", 10, None).unwrap();
+    assert!(inbox["messages"].as_array().unwrap().is_empty(), "a refused send stores nothing");
 }
 
 #[test]
@@ -419,19 +428,18 @@ fn send_message_broadcast_empty_team_skips_no_recipients() {
     // list — outcome is Failed/no-recipients with channel="*". The "*" channel label
     // is preserved through the new `fanout_send(..., channel_label="*")` parameter so
     // legacy consumers can still tell broadcast (`*`) apart from explicit fanout list.
+    // M1 (station::send): a broadcast that expands to no recipient fails before storing.
     let ws = tmp_ws("sendbcast");
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &serde_json::json!({"session_name": "team-x", "agents": {}}),
+    )
+    .unwrap();
     let opts = SendOptions::default();
-    let out = send_message(&ws, &MessageTarget::Broadcast, "hi", &opts).unwrap();
-    assert!(!out.ok);
-    assert_eq!(out.status, DeliveryStatus::Failed);
-    assert_eq!(
-        out.reason, None,
-        "no_team_recipients is a failed-status terminal, not a typed refusal reason"
-    );
-    assert_eq!(
-        out.channel.as_deref(),
-        Some("*"),
-        "broadcast outcome must carry the '*' channel (send.py to='*'); fanout_send(channel_label=\"*\") preserves this"
+    let out = send_message(&ws, &MessageTarget::Broadcast, "hi", &opts);
+    assert!(
+        matches!(&out, Err(MessagingError::Routing(reason)) if reason == "send requires at least one recipient"),
+        "{out:?}"
     );
 }
 
@@ -441,9 +449,11 @@ fn send_message_fanout_empty_recipients_fails() {
     // no_fanout_recipients. (Dedup-then-deliver happy path needs team fixtures.)
     let ws = tmp_ws("sendfanout");
     let opts = SendOptions::default();
-    let out = send_message(&ws, &MessageTarget::Fanout(vec![]), "hi", &opts).unwrap();
-    assert!(!out.ok);
-    assert_eq!(out.status, DeliveryStatus::Failed);
+    let out = send_message(&ws, &MessageTarget::Fanout(vec![]), "hi", &opts);
+    assert!(
+        matches!(&out, Err(MessagingError::Routing(reason)) if reason == "send requires at least one recipient"),
+        "{out:?}"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -2171,22 +2181,19 @@ fn u1_multi_team_send_does_not_backfill_top_level_leader_binding() {
     )
     .unwrap();
 
-    assert_eq!(
-        out.status,
-        DeliveryStatus::Queued,
-        "team-b leader send must not inherit team-a/top-level unbound leader binding"
+    assert!(out.ok, "{out:?}");
+    let message_id = out.message_id.expect("stored leader message id");
+    // M1 inboxes are team-scoped (red_m1_r10): the record belongs to team-b only.
+    let team_b = crate::inbox_store::read(&ws, "leader", 10, Some("team-b")).unwrap();
+    let records = team_b["messages"].as_array().unwrap();
+    assert_eq!(records.len(), 1, "team-b leader send must land in team-b's inbox: {team_b}");
+    assert_eq!(records[0]["message_id"], message_id.as_str());
+    assert_eq!(records[0]["team"], "team-b");
+    let team_a = crate::inbox_store::read(&ws, "leader", 10, Some("team-a")).unwrap();
+    assert!(
+        team_a["messages"].as_array().unwrap().is_empty(),
+        "team-b leader send must not inherit team-a/top-level unbound leader binding: {team_a}"
     );
-    let message_id = out.message_id.expect("queued leader message id");
-    let store = store_for(&ws);
-    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-    let owner_team_id: Option<String> = conn
-        .query_row(
-            "select owner_team_id from messages where message_id = ?1",
-            [&message_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(owner_team_id.as_deref(), Some("team-b"));
 }
 
 #[test]
@@ -2219,21 +2226,16 @@ fn casefile_leader_send_is_durable_without_entering_leader_funnel() {
     )
     .unwrap();
     assert_eq!(out.status, DeliveryStatus::StoredOnly);
-    assert_eq!(out.message_status.0, "stored_only");
-    let store = store_for(&ws);
-    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-    let (status, presentation): (String, String) = conn
-        .query_row(
-            "select status, presentation from messages where message_id = ?1",
-            [out.message_id.as_deref().unwrap()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(status, "stored_only");
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&presentation).unwrap()["effective_sink"],
-        "casefile"
-    );
+    assert_eq!(out.message_status.0, "stored");
+    // M1: the durable record is the inbox; a casefile send never attempts submission.
+    let receipt: serde_json::Value =
+        serde_json::from_str(out.verification.as_deref().unwrap()).unwrap();
+    assert_eq!(receipt["live"], false);
+    assert!(receipt.get("submission").is_none(), "{receipt}");
+    let inbox = crate::inbox_store::read(&ws, "leader", 10, Some("team-a")).unwrap();
+    let record = &inbox["messages"][0];
+    assert_eq!(record["message_id"], out.message_id.as_deref().unwrap());
+    assert_eq!(record["presentation"]["sink"], "casefile");
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -2488,12 +2490,15 @@ fn send_route_task_id_false_skips_task_validation_and_queues() {
         out.message_id.is_some(),
         "the message must be CREATED (message_id present) on the route_task_id=false path; got {out:?}"
     );
-    // real queue verification (not an Ok shell): the message landed in w1's inbox.
-    let inbox = store_for(&ws).inbox("w1", 10, None).expect("inbox");
+    // real storage verification (not an Ok shell): the message landed in w1's M1 inbox,
+    // still carrying its task label.
+    let inbox = crate::inbox_store::read(&ws, "w1", 10, None).expect("inbox");
+    let records = inbox["messages"].as_array().unwrap();
     assert!(
-        !inbox.is_empty(),
-        "the task-tagged message must be QUEUED for w1 on the delivery/internal path; inbox empty (0 bytes queued = the P0)"
+        !records.is_empty(),
+        "the task-tagged message must be STORED for w1 on the delivery/internal path; inbox empty (0 bytes stored = the P0)"
     );
+    assert_eq!(records[0]["task_id"], "t-not-seeded");
 }
 
 // (c) [LOCK] route_task_id=true + task_id IN state.tasks → send SUCCEEDS (routing happy-path).
