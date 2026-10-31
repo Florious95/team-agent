@@ -32,12 +32,8 @@ fn dirty_006_message_stuck_in_accepted_is_not_false_delivered() {
             "--json",
         ],
     );
-    let value = out.json();
-    assert!(!out.is_success(), "missing physical endpoint must refuse: {value}");
-    assert_eq!(value["ok"], false);
-    assert!(value.get("message_id").is_none(), "refusal must not queue work: {value}");
-    assert!(value.get("delivery_pending").is_none());
-    assert!(value["error"].is_string());
+    // R-M1b (M1 store-first): no live endpoint -> stored with an explained delivery_error, never delivered.
+    assert_stored_not_delivered(&ws, &out);
 
     let _ = run_ta(
         &ws,

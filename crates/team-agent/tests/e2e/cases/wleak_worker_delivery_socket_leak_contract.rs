@@ -63,8 +63,8 @@ fn wleak_unreachable_selected_socket_never_falls_back_to_another_socket() {
     state["teams"]["current"]["agents"]["worker-1"]["pane_id"] = json!(foreign.pane);
     fixture.set_state(&state);
     let value = direct_cli(&fixture, &["worker-1", "must-not-cross-sockets"]);
-    assert_eq!(value["ok"], false);
-    assert!(value.get("message_id").is_none());
+    // R-M1b (M1 store-first): the unreachable selected socket yields a stored, undelivered record.
+    assert_direct_stored_not_delivered(&fixture, &value);
     assert!(std::fs::read(fixture.root.join("received")).unwrap().is_empty());
     assert!(std::fs::read(foreign.root.join("received")).unwrap().is_empty());
     assert!(!fixture.root.join(".team/runtime/team.db").exists());
@@ -78,8 +78,8 @@ fn wleak_failed_send_does_not_replay_after_endpoint_repair() {
     state["teams"]["current"]["agents"]["worker-1"]["pane_id"] = json!("%999999");
     fixture.set_state(&state);
     let failed = direct_cli(&fixture, &["worker-1", "manual-retry"]);
-    assert_eq!(failed["ok"], false);
-    assert!(!fixture.root.join(".team/inbox").exists());
+    // R-M1b (M1 store-first): stored, not delivered; repair must not replay it (counted below).
+    assert_direct_stored_not_delivered(&fixture, &failed);
     fixture.set_state(&original);
     let sent = direct_cli(&fixture, &["worker-1", "manual-retry"]);
     assert_eq!(sent["delivery"], "physical");
@@ -97,7 +97,8 @@ fn wleak_send_receipt_records_physical_target_without_coordinator_events() {
     assert_eq!(value["recipient"], "worker-1");
     assert_eq!(value["delivery"], "physical");
     assert_eq!(value["accepted"], Value::Null);
-    assert!(value.get("message_id").is_none());
+    // R-M1a (M1 store-first): the physical receipt names its durable inbox record.
+    assert!(fixture.inbox("worker-1").iter().any(|record| record["message_id"] == value["message_id"]), "{value}");
     fixture.received("Team Agent message from leader:\n\nphysical-receipt");
     assert!(!fixture.root.join(".team/logs/events.jsonl").exists());
 }
@@ -109,9 +110,8 @@ fn wleak_nonlive_published_pane_never_reports_physical_success() {
     state["teams"]["current"]["agents"]["worker-1"]["pane_id"] = json!("%999999");
     fixture.set_state(&state);
     let value = direct_cli(&fixture, &["worker-1", "nonlive-pane"]);
-    assert_eq!(value["ok"], false);
-    assert!(value.get("delivery").is_none());
-    assert!(value.get("message_id").is_none());
+    // R-M1b (M1 store-first): a non-live pane never reports physical success; the record is stored.
+    assert_direct_stored_not_delivered(&fixture, &value);
     assert!(std::fs::read(fixture.root.join("received")).unwrap().is_empty());
 }
 
@@ -271,6 +271,18 @@ fn wleak_source_guard_keeps_send_status_semantics_honest() {
 
 #[path = "../../support/direct_fixture.rs"]
 mod direct_fixture;
+
+/// R-M1b (M1 store-first): exit 0 / ok:true, stored with an explained delivery_error, nothing typed,
+/// no physical delivery claimed, and the record is in worker-1's durable inbox.
+fn assert_direct_stored_not_delivered(fixture: &direct_fixture::DirectFixture, value: &Value) {
+    assert_eq!(value["ok"], true, "{value}");
+    assert_eq!(value["status"], "stored", "{value}");
+    assert_eq!(value["live"], false, "{value}");
+    assert_eq!(value["submission"], "not_attempted", "{value}");
+    assert!(value["delivery_error"].as_str().is_some_and(|error| !error.is_empty()), "{value}");
+    assert!(value.get("delivery").is_none(), "{value}");
+    assert!(fixture.inbox("worker-1").iter().any(|record| record["message_id"] == value["message_id"]), "{value}");
+}
 
 fn direct_state(fixture: &direct_fixture::DirectFixture) -> Value {
     serde_json::from_slice(&std::fs::read(fixture.root.join(".team/runtime/state.json")).unwrap()).unwrap()
