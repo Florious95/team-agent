@@ -690,9 +690,9 @@ pub fn claim_leader(
         })
     });
     if let (Some(candidate), Some(target)) = (caller_candidate, caller_target.as_mut()) {
-        if candidate.info.current_path.as_deref().is_some_and(|path| {
-            !crate::messaging::leader_channel::path_is_in_workspace(path, workspace)
-        }) {
+        // Every explicit claim stamps the observed pane lifetime, including
+        // same-workspace claims; a socket/pane pair alone can be recycled.
+        if candidate.info.current_path.is_some() {
             let endpoint = target.endpoint.as_deref().ok_or_else(|| {
                 LeaderError::Validation(
                     "explicit cross-workspace claim requires a canonical tmux endpoint".to_string(),
@@ -882,7 +882,10 @@ fn claim_lease_no_incident_with_target(
     }
     let non_empty_caller_pane = NonEmptyPaneId::try_from_pane(caller_pane)?;
     let bound_endpoint_matches_caller = bound_endpoint_matches_current_process(state);
-    if bound_pane_id.as_deref() == Some(caller_pane.as_str()) && bound_endpoint_matches_caller {
+    let caller_is_worker = caller_target.as_deref().and_then(|target| target.endpoint.as_deref())
+        .zip(caller_pane_info).is_some_and(|(endpoint, observed)|
+            crate::topology::registered_worker_on_endpoint(state, endpoint, observed).is_some());
+    if bound_pane_id.as_deref() == Some(caller_pane.as_str()) && bound_endpoint_matches_caller && !caller_is_worker {
         if let Some(target) = caller_target.as_deref_mut() {
             write_claim_target_pane_nonce(target)?;
         }
@@ -961,12 +964,15 @@ fn claim_lease_no_incident_with_target(
             attach_window_failures: None,
         });
     }
-    let owner_live = bound_pane_id.as_deref().is_some_and(|pane| {
-        if pane == caller_pane.as_str() && !bound_endpoint_matches_caller {
-            return false;
-        }
-        liveness.liveness(pane) == PaneLiveness::Live
-    });
+    let owner_live = if caller_target.as_deref().and_then(|target| target.endpoint.as_ref()).is_some() {
+        observed_bound_leader_live(state)?.unwrap_or_else(|| bound_pane_id.as_deref()
+            .is_some_and(|pane| liveness.liveness(pane) == PaneLiveness::Live))
+    } else {
+        bound_pane_id.as_deref().is_some_and(|pane| {
+            if pane == caller_pane.as_str() && !bound_endpoint_matches_caller { return false; }
+            liveness.liveness(pane) == PaneLiveness::Live
+        })
+    };
     if owner_live && !confirm {
         emit_lease_refusal(
             event_log,
@@ -1002,9 +1008,14 @@ fn claim_lease_no_incident_with_target(
             ));
         }
         let locked_bound_pane = bound_pane(&locked);
-        let locked_owner_live = locked_bound_pane.as_deref().is_some_and(|pane| {
-            pane != caller_pane.as_str() && liveness.liveness(pane) == PaneLiveness::Live
-        });
+        let locked_owner_live = if caller_target.as_deref().and_then(|target| target.endpoint.as_ref()).is_some() {
+            observed_bound_leader_live(&locked)?.unwrap_or_else(|| locked_bound_pane.as_deref()
+                .is_some_and(|pane| liveness.liveness(pane) == PaneLiveness::Live))
+        } else {
+            locked_bound_pane.as_deref().is_some_and(|pane| {
+                pane != caller_pane.as_str() && liveness.liveness(pane) == PaneLiveness::Live
+            })
+        };
         if locked_owner_live && !confirm {
             emit_lease_refusal(
                 event_log,
@@ -1027,7 +1038,11 @@ fn claim_lease_no_incident_with_target(
     // worker's tmux pane overwrites leader_receiver.pane_id with the worker's
     // pane → delivery routes worker messages to itself (loop) and the leader
     // loses its handle (the macmini "hand-handle mapping 灾难" truth source).
-    if let Some(caller_pane_info) = caller_pane_info {
+    if let Some(caller_pane_info) = caller_pane_info.filter(|_| {
+        caller_target.as_deref().and_then(|target| target.endpoint.as_deref())
+            .zip(crate::tmux_backend::runtime_tmux_endpoint_from_state_pub(Some(state)))
+            .map_or(true, |(observed, (recorded, _))| tmux_endpoints_match(observed, &recorded))
+    }) {
         match crate::topology::classify_registered_worker_for_observed_pane(state, caller_pane_info)
         {
             crate::topology::WorkerPaneBindingMatch::LiveSameWorker { agent_id } => {
@@ -1533,7 +1548,39 @@ fn bound_endpoint_matches_current_process(state: &Value) -> bool {
 }
 
 fn tmux_endpoints_match(bound: &str, current: &str) -> bool {
-    bound == current
+    crate::topology::same_endpoint(bound, current)
+}
+
+/// Observe the recorded owner's socket, never a same-numbered caller pane on
+/// another server. A proven worker or changed nonce is not a live old leader.
+fn observed_bound_leader_live(state: &Value) -> Result<Option<bool>, LeaderError> {
+    let Some(pane) = bound_pane(state) else { return Ok(Some(false)); };
+    let receiver = state.get("leader_receiver").unwrap_or(&Value::Null);
+    let Some((endpoint, _)) = crate::tmux_backend::runtime_tmux_endpoint_from_state_pub(Some(receiver))
+        .or_else(|| crate::tmux_backend::runtime_tmux_endpoint_from_state_pub(Some(state))) else {
+        return Ok(None);
+    };
+    let targets = match tmux_backend_for_endpoint(&endpoint).list_targets() {
+        Ok(targets) => targets,
+        Err(crate::transport::TransportError::Subprocess { code: Some(1), stderr, .. })
+            if stderr.starts_with("no server running on ")
+                || (stderr.starts_with("error connecting to ")
+                    && (stderr.contains("No such file or directory") || stderr.contains("Connection refused"))) => {
+            return Ok(Some(false));
+        }
+        Err(error) => return Err(LeaderError::Tmux(error.to_string())),
+    };
+    let Some(target) = targets.iter().find(|target| target.pane_id.as_str() == pane) else {
+        return Ok(Some(false));
+    };
+    if crate::topology::leader_anchor_occupied_by_worker(state, &endpoint, target) {
+        return Ok(Some(false));
+    }
+    if let Some(nonce) = receiver.get("binding_nonce").and_then(Value::as_str).filter(|v| !v.is_empty()) {
+        return Ok(Some(target.leader_env.get(crate::tmux_backend::PANE_BINDING_NONCE_METADATA_KEY)
+            .is_some_and(|live| live == nonce)));
+    }
+    Ok(Some(true))
 }
 
 fn prior_provider(state: &Value) -> Provider {
@@ -1567,10 +1614,13 @@ fn select_claim_authority<'a>(
     targets: &'a [ClaimLeaderTargetCandidate],
     caller: &str,
 ) -> Option<&'a ClaimLeaderTargetCandidate> {
+    let caller_endpoint = crate::tmux_backend::socket_name_from_tmux_env();
     targets
         .iter()
         .filter(|target| {
             target.info.pane_id.as_str() == caller
+                && caller_endpoint.as_deref().map_or(true, |endpoint| target.endpoint.as_deref()
+                    .is_some_and(|observed| tmux_endpoints_match(endpoint, observed)))
                 && target.info.active
                 && super::attribute_pane_provider(&target.info).is_some()
         })
@@ -2195,10 +2245,7 @@ fn authorize_fresh_caller_receiver(
             "fresh caller pane observation does not match the bound pane".to_string(),
         ));
     }
-    let Some(current_path) = target.current_path.as_deref() else {
-        return Ok(());
-    };
-    if crate::messaging::leader_channel::path_is_in_workspace(current_path, workspace) {
+    if target.current_path.is_none() {
         return Ok(());
     }
     let Some(endpoint) = receiver

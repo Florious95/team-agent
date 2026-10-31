@@ -178,6 +178,21 @@ impl Directory {
         if current.socket != expected.socket || current.pane_id != expected.pane_id || current.dialect != expected.dialect {
             return Err("identity_mismatch: recipient address changed".into());
         }
+        if agent == "leader" {
+            let receiver = self.recipient(agent)?;
+            if field(receiver, "status") != Some("attached") {
+                return Err("leader_identity_unverified: receiver is not attached".into());
+            }
+            let nonce = field(receiver, "binding_nonce")
+                .ok_or("leader_identity_unverified: explicit leader rebind required")?;
+            let output = native_output(tmux(&expected.socket).args([
+                "display-message", "-p", "-t", &expected.pane_id,
+                "#{@team_agent_pane_binding_nonce}",
+            ]), deadline)?;
+            if !output.success || output.stdout.trim() != nonce {
+                return Err("leader_identity_mismatch: pane binding changed; explicit leader rebind required".into());
+            }
+        }
         #[cfg(unix)]
         if let Some((binding, seat)) = self.native_seat(agent)? {
             crate::contract_runtime::backend::validate_delivery_target(&binding, &seat, deadline.saturating_duration_since(Instant::now()))
@@ -187,6 +202,11 @@ impl Directory {
     }
 
     pub(crate) fn recovery_action(&self, agent: &str, error: &str) -> Option<String> {
+        if agent == "leader" && error.starts_with("leader_identity_") {
+            return Some(format!("team-agent claim-leader --workspace {}{}",
+                crate::cli::shell_quote(&self.workspace.to_string_lossy()),
+                self.team.as_deref().map(|team| format!(" --team {}", crate::cli::shell_quote(team))).unwrap_or_default()));
+        }
         #[cfg(unix)]
         if error.starts_with("native_authority_missing:") {
             return self.team.as_deref().map(|team|
@@ -562,7 +582,7 @@ pub fn locate(workspace: &Path, team: Option<&str>) -> Result<Value, String> {
             match live {
                 Ok(endpoint) => endpoints.push(json!({"workspace":directory.workspace,"team":directory.team,
                     "agent":endpoint.agent,"socket":endpoint.socket,"pane_id":endpoint.pane_id,"dialect":endpoint.dialect})),
-                Err(error) if agent != "leader" => {
+                Err(error) if agent != "leader" || error.starts_with("leader_identity_") => {
                     #[cfg(unix)]
                     let action = (error == "seat_requires_restart").then(||
                         crate::contract_runtime::backend::restart_command(&directory.workspace, directory.team.as_deref().unwrap_or(""), &agent));

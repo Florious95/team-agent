@@ -552,7 +552,7 @@ pub mod lifecycle_port {
         pane_targets: &[crate::transport::PaneInfo],
         event_log: &crate::event_log::EventLog,
     ) -> std::collections::BTreeSet<String> {
-        let anchor_pane_ids = collect_state_leader_anchor_pane_ids(state, endpoint);
+        let anchor_pane_ids = observed_leader_anchor_pane_ids(state, endpoint, pane_targets);
         if anchor_pane_ids.is_empty() {
             // 无锚(state 损坏/未记)→ 退纯命名前缀判据(下游 sessions_to_kill 仍 spare 前缀)。
             let _ = event_log.write(
@@ -1667,8 +1667,6 @@ pub mod lifecycle_port {
             // External and managed leaders both pass the same positive ownership
             // gate; topology only decides whether a verified session is reduced
             // to worker panes or removed as a whole.
-            let leader_anchor_ids =
-                collect_state_leader_anchor_pane_ids(&state, transport.tmux_endpoint().as_deref());
             let (live_targets_now, live_targets_known) = match transport.list_targets() {
                 Ok(targets) => (targets, true),
                 Err(error) => {
@@ -1678,6 +1676,8 @@ pub mod lifecycle_port {
                     (Vec::new(), false)
                 }
             };
+            let leader_anchor_ids = observed_leader_anchor_pane_ids(
+                &state, transport.tmux_endpoint().as_deref(), &live_targets_now);
             let ownership = if live_targets_known {
                 session_ownership(
                     &run_workspace,
@@ -2897,6 +2897,17 @@ pub mod lifecycle_port {
     /// - E4b team-in-team:子 team state 的 team_owner.pane_id 指父 team worker pane;
     ///   父 team state 的 teams.<child>.team_owner.pane_id 同义(若有该字段)
     ///   → 任一 team 的 shutdown 都不杀任何 team 的 leader 锚 pane
+    fn observed_leader_anchor_pane_ids(
+        state: &Value,
+        endpoint: Option<&str>,
+        panes: &[crate::transport::PaneInfo],
+    ) -> std::collections::BTreeSet<String> {
+        let mut anchors = collect_state_leader_anchor_pane_ids(state, endpoint);
+        anchors.retain(|id| !panes.iter().any(|pane| pane.pane_id.as_str() == id.as_str()
+            && crate::topology::leader_anchor_occupied_by_worker(state, endpoint.unwrap_or("default"), pane)));
+        anchors
+    }
+
     pub fn collect_state_leader_anchor_pane_ids(
         state: &Value,
         endpoint: Option<&str>,
@@ -3183,8 +3194,8 @@ pub mod lifecycle_port {
         );
         // Source 2: state.json team_owner / leader_receiver 真锚 pane_id(top-level +
         // teams[*]),per-workspace socket 命中。
-        let anchor_pane_ids =
-            collect_state_leader_anchor_pane_ids(state, transport.tmux_endpoint().as_deref());
+        let anchor_pane_ids = observed_leader_anchor_pane_ids(
+            state, transport.tmux_endpoint().as_deref(), &pane_targets);
         leader_pane_pids.extend(
             pane_targets
                 .iter()
@@ -3200,8 +3211,6 @@ pub mod lifecycle_port {
         // 的 list_targets 找 anchor pane_id → pane_pid → 进入 process_tree 保护。
         // 不在 state 中的 socket 不查(MUST-17 不撒宽 / 不主动枚举全机器 sockets)。
         for socket_endpoint in collect_state_recorded_tmux_sockets(state) {
-            let anchor_pane_ids =
-                collect_state_leader_anchor_pane_ids(state, Some(&socket_endpoint));
             let cross_backend =
                 crate::tmux_backend::TmuxBackend::for_tmux_endpoint(&socket_endpoint);
             let cross_panes =
@@ -3209,6 +3218,8 @@ pub mod lifecycle_port {
                     &cross_backend,
                 )
                 .unwrap_or_default();
+            let anchor_pane_ids = observed_leader_anchor_pane_ids(
+                state, Some(&socket_endpoint), &cross_panes);
             leader_pane_pids.extend(
                 cross_panes
                     .iter()

@@ -307,6 +307,49 @@ pub fn classify_worker_pane_binding(
     }
 }
 
+/// Positive worker ownership requires the socket and recorded live PID, not
+/// just a pane number that another tmux server can reuse.
+pub(crate) fn registered_worker_on_endpoint(
+    state: &Value,
+    endpoint: &str,
+    observed: &PaneInfo,
+) -> Option<String> {
+    let agents = state.get("agents")?.as_object()?;
+    agents.iter().find_map(|(agent_id, agent)| {
+        let recorded_endpoint = non_empty_str(agent, "native_endpoint").map(str::to_string)
+            .or_else(|| crate::tmux_backend::runtime_tmux_endpoint_from_state_pub(Some(agent)).map(|v| v.0))
+            .or_else(|| crate::tmux_backend::runtime_tmux_endpoint_from_state_pub(Some(state)).map(|v| v.0))?;
+        let pid = agent_pane_pid(agent).filter(|pid| *pid > 0)?;
+        if !same_endpoint(&recorded_endpoint, endpoint) || observed.pane_pid != Some(pid) {
+            return None;
+        }
+        matches!(classify_worker_pane_binding(agent_id, agent,
+            non_empty_str(state, "session_name").unwrap_or_default(), observed),
+            WorkerPaneBindingMatch::LiveSameWorker { .. }).then(|| agent_id.clone())
+    })
+}
+
+/// Retire only anchors contradicted by a live worker of their own team.
+/// Unknown anchors and parent-worker/child-leader nesting remain protected.
+pub(crate) fn leader_anchor_occupied_by_worker(
+    state: &Value,
+    endpoint: &str,
+    observed: &PaneInfo,
+) -> bool {
+    std::iter::once(state)
+        .chain(state.get("teams").and_then(Value::as_object).into_iter().flat_map(|t| t.values()))
+        .any(|scope| {
+            let Some(anchor) = scope.get("leader_receiver").or_else(|| scope.get("team_owner")) else {
+                return false;
+            };
+            let anchor_endpoint = crate::tmux_backend::runtime_tmux_endpoint_from_state_pub(Some(anchor))
+                .or_else(|| crate::tmux_backend::runtime_tmux_endpoint_from_state_pub(Some(scope)));
+            non_empty_str(anchor, "pane_id") == Some(observed.pane_id.as_str())
+                && anchor_endpoint.is_some_and(|v| same_endpoint(&v.0, endpoint))
+                && registered_worker_on_endpoint(scope, endpoint, observed).is_some()
+        })
+}
+
 pub fn classify_registered_worker_for_observed_pane(
     state: &Value,
     observed: &PaneInfo,
@@ -515,18 +558,19 @@ fn endpoint_server_alive(endpoint: &str) -> Option<bool> {
     }
 }
 
-fn same_endpoint(left: &str, right: &str) -> bool {
+pub(crate) fn same_endpoint(left: &str, right: &str) -> bool {
     normalize_endpoint(left) == normalize_endpoint(right)
 }
 
 fn normalize_endpoint(value: &str) -> String {
-    if std::path::Path::new(value).is_absolute() {
-        value.to_string()
+    let path = if std::path::Path::new(value).is_absolute() {
+        std::path::PathBuf::from(value)
     } else if let Some(path) = crate::tmux_backend::socket_path_for_name(value) {
-        path.to_string_lossy().into_owned()
+        path
     } else {
-        value.to_string()
-    }
+        return value.to_string();
+    };
+    path.canonicalize().unwrap_or(path).to_string_lossy().into_owned()
 }
 
 fn non_empty_str<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
@@ -534,4 +578,53 @@ fn non_empty_str<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
         .get(key)
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
+}
+
+#[cfg(test)]
+mod leader_identity_tests {
+    use super::*;
+
+    fn pane() -> PaneInfo {
+        PaneInfo {
+            pane_id: crate::transport::PaneId::new("%0"),
+            session: SessionName::new("team-a"), window_index: Some(0),
+            window_name: Some(crate::transport::WindowName::new("worker")),
+            pane_index: Some(0), tty: None, current_command: None,
+            current_path: None, active: true, pane_pid: Some(4321),
+            leader_env: Default::default(),
+        }
+    }
+
+    fn state() -> Value {
+        json!({"session_name":"team-a", "tmux_socket":"/tmp/identity-a.sock",
+            "leader_receiver":{"pane_id":"%0","tmux_socket":"/tmp/identity-a.sock"},
+            "agents":{"worker":{"pane_id":"%0","pane_pid":4321,"window":"worker"}}})
+    }
+
+    #[test]
+    fn worker_occupancy_is_socket_and_pid_qualified() {
+        let state = state();
+        let mut pane = pane();
+        assert!(leader_anchor_occupied_by_worker(&state, "/tmp/identity-a.sock", &pane));
+        assert!(!leader_anchor_occupied_by_worker(&state, "/tmp/identity-b.sock", &pane));
+        pane.pane_pid = Some(4322);
+        assert!(!leader_anchor_occupied_by_worker(&state, "/tmp/identity-a.sock", &pane));
+    }
+
+    #[test]
+    fn unknown_pid_does_not_remove_leader_protection() {
+        let mut state = state();
+        state["agents"]["worker"].as_object_mut().unwrap().remove("pane_pid");
+        assert!(!leader_anchor_occupied_by_worker(&state, "/tmp/identity-a.sock", &pane()));
+    }
+
+    #[test]
+    fn parent_worker_can_be_child_team_leader() {
+        let mut state = state();
+        state["leader_receiver"]["pane_id"] = json!("%9");
+        state["teams"] = json!({"child":{"tmux_socket":"/tmp/identity-a.sock",
+            "leader_receiver":{"pane_id":"%0","tmux_socket":"/tmp/identity-a.sock"},
+            "agents":{}}});
+        assert!(!leader_anchor_occupied_by_worker(&state, "/tmp/identity-a.sock", &pane()));
+    }
 }
