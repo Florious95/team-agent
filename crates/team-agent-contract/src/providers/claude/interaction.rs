@@ -43,8 +43,9 @@ fn rows(text: &str) -> Vec<&str> { text.lines().map(str::trim_end).collect() }
 fn rule(line: &str) -> bool { line.chars().count() >= 40 && line.chars().all(|ch| ch == '─') }
 /// Native `--name` decorates only the top composer border.
 fn top_rule(line: &str) -> bool {
-    rule(line) || (line.starts_with("─── ") && line.ends_with("───")
-        && !line.trim_matches('─').trim().is_empty())
+    let name = line.trim_matches('─');
+    rule(line) || (line.starts_with('─') && line.ends_with('─')
+        && name.starts_with(' ') && name.ends_with(' ') && !name.trim().is_empty())
 }
 /// The live composer is the region between the last two rules; its first row
 /// is `❯` + U+00A0 (2.1.282 and 2.1.309 alike). History user turns start with
@@ -82,7 +83,7 @@ pub fn spinner_row(line: &str) -> bool { spinner(line.trim_end()) }
 pub fn inspect_legacy_composer(text: &str) -> Option<(InputSurface, String)> {
     let lines = rows(text);
     let bottom = lines.iter().rposition(|line| rule(line))?;
-    let top = lines[..bottom].iter().rposition(|line| rule(line))?;
+    let top = lines[..bottom].iter().rposition(|line| top_rule(line))?;
     let region = &lines[top + 1..bottom];
     let first = *region.first()?;
     let first = if first == "❯" { "" } else { first.strip_prefix("❯\u{a0}").or_else(|| first.strip_prefix("❯ "))? };
@@ -104,8 +105,18 @@ fn trust(lines: &[&str]) -> bool {
 }
 pub fn surface(text: &str) -> InputSurface {
     let lines = rows(text);
-    if trust(&lines) { return InputSurface::StartupRiskWarning; }
-    let Some((top, current)) = composer(&lines) else { return InputSurface::ShellOrUnknown; };
+    let current_composer = composer(&lines);
+    if trust(&lines) {
+        // Quoted dialogs in transcript/input are not active modals. A current
+        // composer ends below their footer; an actual later modal ends below
+        // any stale composer left on the screen by an earlier session.
+        let composer_after_footer = current_composer.is_some() && matches!(
+            (lines.iter().rposition(|line| rule(line)), lines.iter().rposition(|line| line.trim() == "Enter to confirm · Esc to cancel")),
+            (Some(bottom), Some(footer)) if bottom > footer
+        );
+        if !composer_after_footer { return InputSurface::StartupRiskWarning; }
+    }
+    let Some((top, current)) = current_composer else { return InputSurface::ShellOrUnknown; };
     if current == QUEUED { return InputSurface::Busy; }
     if !current.is_empty() { return InputSurface::ComposerContainsPaste; }
     if busy(&lines, top) { InputSurface::Busy } else { InputSurface::ComposerReady }

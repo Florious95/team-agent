@@ -219,7 +219,7 @@ impl NativeIdentity {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Operation {
     Catalog,
     Fresh,

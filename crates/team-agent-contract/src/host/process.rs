@@ -523,6 +523,31 @@ fn verify_ancestry_with(
     ))
 }
 
+/// Partial-spawn recovery may observe absence without a native image receipt.
+/// A live PID requires its previously captured birth; it never grants image authority.
+pub fn sample_spawn_birth(pid: u32, expected_birth: Option<&str>) -> ProcessState {
+    #[cfg(unix)]
+    {
+        let Some(raw) = i32::try_from(pid).ok().filter(|pid| *pid > 1) else {
+            return ProcessState::Unknown(HostError::new("spawn pid", HostErrorKind::Invalid));
+        };
+        match nix::sys::signal::kill(nix::unistd::Pid::from_raw(raw), None) {
+            Err(nix::errno::Errno::ESRCH) => return ProcessState::Exited,
+            Err(error) => return ProcessState::Unknown(HostError::io("spawn existence", error.into())),
+            Ok(()) => {}
+        }
+    }
+    match identity_parts(pid) {
+        Ok((_, _, _, _, true)) => ProcessState::Exited,
+        Ok((_, birth, _, _, false)) => match expected_birth {
+            Some(expected) if expected == birth => ProcessState::Alive,
+            Some(_) => ProcessState::Replaced,
+            None => ProcessState::Unknown(HostError::new("spawn birth not captured", HostErrorKind::Ownership)),
+        },
+        Err(error) => ProcessState::Unknown(error),
+    }
+}
+
 pub fn sample_process(expected: &ProcessStamp) -> ProcessState {
     #[cfg(unix)]
     {
@@ -582,6 +607,16 @@ pub fn sample_process(expected: &ProcessStamp) -> ProcessState {
 #[cfg(test)]
 mod ancestry_tests {
     use super::*;
+
+    #[test]
+    fn partial_spawn_birth_never_adopts_live_missing_or_reused_identity() {
+        let pid = std::process::id();
+        let birth = process_birth_identity(pid).unwrap();
+        assert_eq!(sample_spawn_birth(pid, Some(&birth)), ProcessState::Alive);
+        assert_eq!(sample_spawn_birth(pid, Some("foreign-birth")), ProcessState::Replaced);
+        assert!(matches!(sample_spawn_birth(pid, None), ProcessState::Unknown(_)));
+        assert!(matches!(sample_spawn_birth(0, None), ProcessState::Unknown(_)));
+    }
 
     #[test]
     fn process_birth_identity_is_readonly_and_rejects_invalid_or_dead_pid() {

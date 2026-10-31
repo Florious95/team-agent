@@ -31,7 +31,20 @@ pub trait LifecycleHost {
         seat: &SeatRecord,
         plan: &LaunchPlan,
     ) -> Result<SpawnedProcess, Error>;
+    fn spawn_observed(
+        &mut self, descriptor: &ProviderDescriptor, resolved: &ResolvedLaunch,
+        seat: &SeatRecord, plan: &LaunchPlan,
+        _observe: &mut dyn FnMut(&crate::host::transport::SpawnObservation) -> Result<(), Error>,
+    ) -> Result<SpawnedProcess, Error> {
+        self.spawn(descriptor, resolved, seat, plan)
+    }
+    fn reconcile_spawn(
+        &mut self, _seat: &SeatRecord, _observation: &crate::host::transport::SpawnObservation,
+    ) -> Result<Option<SpawnedProcess>, Error> {
+        Err(Error::Host("physical spawn reconciliation unavailable"))
+    }
     fn stop(&mut self, seat: &SeatRecord) -> Result<(), Error>;
+    fn stop_receipt(&self) -> Option<StopReceipt> { None }
     fn control(
         &mut self,
         seat: &SeatRecord,
@@ -55,7 +68,7 @@ pub struct Routing {
 }
 
 pub struct Lifecycle<'a> {
-    pub store: &'a mut ContractStore,
+    pub store: &'a mut dyn SeatAuthority,
     pub host: &'a mut dyn LifecycleHost,
     pub io: &'a mut dyn OwnedIo,
 }
@@ -69,13 +82,34 @@ impl Lifecycle<'_> {
         routing: Routing,
         id: OperationId,
     ) -> Result<OperationRecord, Error> {
+        self.startup_with_parent(adapter, request, routing, id, None)
+    }
+
+    /// Replace the exact parent with a fresh native session when no resumable
+    /// binding exists. This is still a Restart transaction with parent rollback.
+    pub fn restart_fresh(
+        &mut self, adapter: &Adapter<'_>, request: &LaunchRequest, routing: Routing,
+        id: OperationId, parent: &InstanceIdentity,
+    ) -> Result<OperationRecord, Error> {
+        if request.operation != Operation::Fresh || request.resume.is_some() {
+            return Err(Error::Invalid("fresh restart request"));
+        }
+        self.startup_with_parent(adapter, request, routing, id, Some(parent))
+    }
+
+    fn startup_with_parent(
+        &mut self, adapter: &Adapter<'_>, request: &LaunchRequest, routing: Routing,
+        id: OperationId, fresh_parent: Option<&InstanceIdentity>,
+    ) -> Result<OperationRecord, Error> {
         if !matches!(request.operation, Operation::Fresh | Operation::Resume) {
             return Err(Error::Invalid("startup operation"));
         }
         let resolved = resolve_launch(adapter.descriptor, adapter.hooks, request, adapter.catalog)?;
         let plan = adapter.hooks.plan.require("H2")?.plan(&resolved)?;
         validate_launch_plan(adapter.descriptor, &resolved, &plan)?;
-        let parent = if request.operation == Operation::Resume {
+        let parent = if let Some(parent) = fresh_parent {
+            Some(self.store.assert_current(parent)?)
+        } else if request.operation == Operation::Resume {
             let resume = request.resume.as_ref().ok_or(Error::Fence)?;
             let parent = self.store.assert_current(&resume.expected_source)?;
             if parent.session.as_ref() != Some(&resume.binding) {
@@ -92,6 +126,7 @@ impl Lifecycle<'_> {
         };
         let target = self.target(adapter.descriptor, request, routing)?;
         let mut operation = new_operation(id, kind, target, parent);
+        operation.native_launch = Some(request.operation);
         self.store.begin(&operation)?;
         let result = (|| {
             if let Some(parent) = operation.parent.as_ref() {
@@ -100,6 +135,7 @@ impl Lifecycle<'_> {
                     self.store.save(&operation, false)?;
                     self.host
                         .stop(operation.parent.as_ref().ok_or(Error::Fence)?)?;
+                    operation.stop_receipt = self.host.stop_receipt();
                     operation.parent.as_mut().ok_or(Error::Fence)?.status = SeatStatus::Stopped;
                     operation.pending = None;
                     self.store.save(&operation, false)?;
@@ -250,6 +286,7 @@ impl Lifecycle<'_> {
                 operation.pending = Some("stop".into());
                 self.store.save(&operation, false)?;
                 self.host.stop(&operation.target)?;
+                operation.stop_receipt = self.host.stop_receipt();
             }
             operation.target.status = SeatStatus::Stopped;
             operation.pending = None;
@@ -374,7 +411,19 @@ impl Lifecycle<'_> {
         operation.phase = Phase::F3Spawn;
         operation.pending = Some("spawn".into());
         self.store.save(operation, true)?;
-        let spawned = match self.host.spawn(adapter.descriptor, resolved, &operation.target, plan) {
+        let target = operation.target.clone();
+        let store = &mut self.store;
+        let mut observe = |observation: &crate::host::transport::SpawnObservation| {
+            if observation.directory.owner != target.identity || observation.provider != target.provider
+                || observation.native != target.native || observation.cwd != target.cwd
+                || observation.evidence_kind != target.evidence_kind || observation.executable != plan.executable
+                || !observation.directory.path.starts_with(store.root()) {
+                return Err(Error::Fence);
+            }
+            operation.spawn_observation = Some(observation.clone());
+            store.save(operation, false)
+        };
+        let spawned = match self.host.spawn_observed(adapter.descriptor, resolved, &target, plan, &mut observe) {
             Err(error @ Error::SpawnNotStarted(_)) => {
                 operation.pending = None;
                 return Err(error);
@@ -425,7 +474,11 @@ impl Lifecycle<'_> {
                     && matches!(&error, Error::NativeControl(report)
                         if report.metadata.owner == operation.target.identity
                             && report.metadata.operation == Operation::SessionInspect
-                            && report.disposition == InjectionDisposition::Unresolved) =>
+                            && (report.disposition == InjectionDisposition::Unresolved
+                                || (report.effect_floor == DeliveryEffect::NoEffect
+                                    && report.persistence == crate::contract::delivery::PersistenceState::Durable
+                                    && !report.problems.is_empty()
+                                    && report.problems.iter().all(|problem| problem.code == "input-not-ready")))) =>
                 {
                     // Spawn succeeded. An inconclusive observation must not kill
                     // that process or invent a resume binding. Preserve the
@@ -524,6 +577,16 @@ impl Lifecycle<'_> {
     ) -> Result<OperationRecord, Error> {
         if let Err(error) = result {
             operation.failure = Some(error.to_string());
+            if matches!(error, Error::StopNoEffect(_)) && operation.kind == TransactionKind::Teardown
+                && operation.phase == Phase::F0Preflight && operation.pending.as_deref() == Some("stop") {
+                // No native mutation occurred: retain the live seat and close
+                // this attempt, rather than leasing it forever as uncertain.
+                operation.pending = None;
+                operation.outcome = Outcome::Compensated;
+                operation.effect = DeliveryEffect::NoEffect;
+                self.store.save(&operation, false)?;
+                return Ok(operation);
+            }
             // If persistence itself failed, no further host effects are safe.
             if error == Error::Database {
                 return Err(error);
@@ -535,9 +598,38 @@ impl Lifecycle<'_> {
     fn compensate(&mut self, operation: &mut OperationRecord) -> Result<(), Error> {
         operation.outcome = Outcome::NeedsRecovery;
         self.store.save(operation, false)?;
+        if operation.pending.as_deref() == Some("spawn") {
+            let Some(observation) = operation.spawn_observation.as_ref() else { return Ok(()); };
+            if observation.directory.owner != operation.target.identity
+                || !observation.directory.path.starts_with(self.store.root()) {
+                return Err(Error::Fence);
+            }
+            match self.host.reconcile_spawn(&operation.target, observation) {
+                Ok(Some(spawned)) => {
+                    if spawned.physical.as_ref().is_none_or(|target| target.identity() != &operation.target.identity
+                        || target.process.identity != spawned.process || target.pane != observation.pane
+                        || target.binding != observation.binding) {
+                        return Err(Error::Fence);
+                    }
+                    operation.target.process = Some(spawned.process);
+                    operation.target.endpoint = spawned.endpoint;
+                    operation.target.pane = spawned.pane;
+                    operation.target.binding_key = spawned.binding_key;
+                    operation.target.physical = spawned.physical;
+                }
+                Ok(None) => operation.target.status = SeatStatus::Stopped,
+                Err(error) => {
+                    operation.recovery_failure = Some(format!("spawn recovery: {error}"));
+                    self.store.save(operation, false)?;
+                    return Ok(());
+                }
+            }
+            operation.pending = None;
+            self.store.save(operation, true)?;
+        }
         if matches!(
             operation.pending.as_deref(),
-            Some("spawn" | "native-control" | "stop-parent" | "cleanup-parent")
+            Some("native-control" | "stop-parent" | "cleanup-parent")
         ) {
             // Cannot infer absence of process/input effects from a missing receipt.
             return Ok(());
@@ -548,10 +640,13 @@ impl Lifecycle<'_> {
         if operation.target.process.is_some() && operation.target.status != SeatStatus::Stopped {
             operation.pending = Some("compensating-stop".into());
             self.store.save(operation, true)?;
-            if self.host.stop(&operation.target).is_err() {
+            if let Err(error) = self.host.stop(&operation.target) {
+                operation.recovery_failure = Some(format!("recovery stop: {error}"));
+                self.store.save(operation, false)?;
                 return Ok(());
             }
         }
+        operation.stop_receipt = self.host.stop_receipt();
         operation.target.status = SeatStatus::Stopped;
         operation.pending = None;
         if self.cleanup(operation).is_err() {
@@ -605,11 +700,15 @@ fn new_operation(
         parent,
         phase: Phase::F0Preflight,
         pending: None,
+        spawn_observation: None,
+        native_launch: None,
         resources: vec![],
         effect: DeliveryEffect::NoEffect,
         outcome: Outcome::Running,
         preserved,
         failure: None,
+        recovery_failure: None,
+        stop_receipt: None,
     }
 }
 
@@ -646,7 +745,7 @@ fn removable(resource: &OwnedResourceReceipt) -> bool {
 /// Interposes at the *actual* owned-I/O boundary. Even an H3/H7 error with an
 /// empty receipt cannot erase effects already journaled through this port.
 struct JournaledIo<'a> {
-    store: &'a mut ContractStore,
+    store: &'a mut dyn SeatAuthority,
     operation: &'a mut OperationRecord,
     inner: &'a mut dyn OwnedIo,
     descriptor: &'a ProviderDescriptor,

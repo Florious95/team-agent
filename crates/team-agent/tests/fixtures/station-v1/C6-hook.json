@@ -1,0 +1,38 @@
+{
+  "v": 1,
+  "kind": "hook_event",
+  "requires": [
+    "station.hook-event.v1"
+  ],
+  "event_id": "0648298b48be031996277ae472115a46",
+  "scope": {
+    "workspace": "21a3230e03772a58aff1b3709a9e2328",
+    "team": "ca8b22d0db83a22db163b560b3e4e515",
+    "seat": "worker-a"
+  },
+  "instance_id": "5e8c03a94c7835b87dd82c690f9f85c0",
+  "generation": 7,
+  "binding": "80f70afeef3caa57646fd20afb95be9c",
+  "transport": {
+    "kind": "tmux",
+    "socket": {
+      "kind": "name",
+      "name": "example-station"
+    },
+    "session_id": "$4",
+    "window_id": "@5",
+    "pane_id": "%9",
+    "server": {
+      "pid": 4242,
+      "birth": {
+        "clock": "linux_start_ticks",
+        "boot_id": "example-boot-identifier",
+        "value": "12345678"
+      }
+    }
+  },
+  "event": "pane_died",
+  "observed_at": "2026-10-29T12:00:00.000Z",
+  "exit_code": 1,
+  "authority": "observation_only"
+}

@@ -585,13 +585,9 @@ fn delivery_grep_guard_no_owner_mutation() {
         "/src/messaging/scheduler.rs"
     ))
     .unwrap_or_default();
-    let tick = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/coordinator/tick.rs"
-    ))
-    .unwrap();
+    // M3 excision: coordinator/tick.rs is retired; the remaining delivery paths stay guarded.
     let global_delivery_guard =
-        format!("{delivery}\n{send_to_leader_body}\n{send}\n{scheduler}\n{tick}");
+        format!("{delivery}\n{send_to_leader_body}\n{send}\n{scheduler}");
     for forbidden in [
         "seed_launched_owner",
         "seed_unbound_launched_owner",
@@ -888,7 +884,7 @@ fn role_doc(name: &str) -> String {
 fn seed_healthy_coordinator(workspace: &Path) {
     let workspace = team_agent::coordinator::WorkspacePath::new(workspace.to_path_buf());
     std::fs::create_dir_all(team_agent::model::paths::runtime_dir(workspace.as_path())).unwrap();
-    let _ = team_agent::message_store::MessageStore::open(workspace.as_path()).unwrap();
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
     let pid = team_agent::coordinator::Pid::new(std::process::id());
     team_agent::coordinator::write_coordinator_metadata(
         &workspace,

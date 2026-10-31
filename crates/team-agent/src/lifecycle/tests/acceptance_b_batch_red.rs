@@ -30,7 +30,7 @@ use std::sync::Mutex;
 
 use serde_json::{json, Value};
 use serial_test::serial;
-use team_agent::coordinator::{Coordinator, ProviderRegistry, WorkspacePath};
+use team_agent::coordinator::WorkspacePath;
 use team_agent::lifecycle::QuickStartReport;
 use team_agent::message_store::MessageStore;
 use team_agent::model::enums::Provider;
@@ -47,92 +47,6 @@ const ANCESTRY_KEY: &str = "TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON";
 const NEUTRAL_ANCESTRY: &str = "[\"/bin/zsh\"]";
 
 // ───────────────────────────── B-4 · monitor step isolation ─────────────────────────
-
-/// B-4 main reverse (cr `monitor_step_failure_does_not_block_deliver_pending`): a
-/// monitor step (here: the runtime-approval pane capture, made to hard-fail) must NOT
-/// abort the tick before deliver_pending. The tick must (1) not enter backoff, (2) log
-/// a step-failure event, (3) still run deliver_pending, (4) push the accepted message
-/// to delivered. Today the `?` on the monitor step aborts before delivery → RED.
-#[test]
-#[serial(env)]
-fn b4_monitor_step_failure_does_not_block_deliver_pending() {
-    let _g = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
-    let ws = tmp_ws("b4-monitor");
-    seed_copilot_team_state(&ws, "cp1", true);
-    let mut state = team_agent::state::persist::load_runtime_state(&ws).unwrap();
-    #[cfg(unix)]
-    let targets = vec![crate::mcp_server::readiness::test_ready_worker(
-        &ws, &mut state, "team-b4", "cp1", "%41",
-    )];
-    #[cfg(not(unix))]
-    let targets = Vec::new();
-    save_runtime_state(&ws, &state).unwrap();
-    let store = MessageStore::open(&ws).unwrap();
-    store
-        .create_message(
-            Some("task_mcp"),
-            "leader",
-            "cp1",
-            "do the thing",
-            None,
-            false,
-            Some("team-b4"),
-        )
-        .unwrap();
-
-    let coord = Coordinator::new(
-        WorkspacePath::new(ws.clone()),
-        Box::new(RealRegistry),
-        Box::new(MonitorFailTransport {
-            targets,
-            ..MonitorFailTransport::new()
-        }),
-    );
-    let report = coord.tick();
-
-    let mut failures = Vec::new();
-    match &report {
-        Err(e) => failures.push(format!(
-            "B-4: a monitor-step failure must not propagate as a tick Err (it must degrade \
-+ continue, bug-084 philosophy); got Err({e})"
-        )),
-        Ok(report) => {
-            if report.delivered.is_empty() {
-                failures.push(
-                    "B-4: deliver_pending must still run after a monitor-step failure — the \
-delivery trunk does not depend on the monitor face (N36 three-way availability); 0 delivered"
-                        .to_string(),
-                );
-            }
-        }
-    }
-    let events = events_text(&ws);
-    if !(events.contains("_failed") && events.contains("tick")) {
-        failures.push(format!(
-            "B-4: the degraded monitor step must log a coordinator.tick.<step>_failed event \
-(observable, not silent); events tail={}",
-            events.lines().rev().take(3).collect::<Vec<_>>().join(" | ")
-        ));
-    }
-    let status: Option<String> = MessageStore::open(&ws)
-        .unwrap()
-        .inbox("cp1", 10, None)
-        .ok()
-        .and_then(|rows| {
-            rows.first()
-                .and_then(|r| r.get("status").and_then(Value::as_str).map(String::from))
-        });
-    if status.as_deref() == Some("accepted") {
-        failures.push(
-            "B-4: the accepted message must leave the 'accepted' state after the tick".to_string(),
-        );
-    }
-    assert!(
-        failures.is_empty(),
-        "B-4 monitor isolation contract failed:\n{}",
-        failures.join("\n")
-    );
-}
 
 /// B-4 reverse (cr `force_paste_flag_not_in_argv`): the --force-paste flag (REJECTed —
 /// a back-door on a gate that does not exist) must never be introduced into the
@@ -221,86 +135,7 @@ fn b2_quick_start_ready_has_attach_commands_and_socket_miss_is_observable() {
 
 // ───────────────────────────── B-5 · status runtime block ─────────────────────────
 
-/// B-5 (N38): when there is NO coordinator pid AND accepted backlog exists, status must
-/// surface a runtime block (coordinator.ok==false) and a hint mentioning the coordinator
-/// + restart. Driven through the public status entry.
-#[test]
-#[serial(env)]
-fn b5_status_surfaces_runtime_hint_on_stale_coordinator_with_backlog() {
-    let _g = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
-    let ws = tmp_ws("b5-stale");
-    save_runtime_state(
-        &ws,
-        &json!({"session_name": "team-b5", "active_team_key": "team-b5", "agents": {
-            "w1": {"status": "running", "provider": "codex", "agent_id": "w1", "window": "w1"}
-        }}),
-    )
-    .unwrap();
-    // NO coordinator pid file written (stale/dead). Two accepted messages backlog.
-    let store = MessageStore::open(&ws).unwrap();
-    store
-        .create_message(Some("t1"), "leader", "w1", "m1", None, false, None)
-        .unwrap();
-    store
-        .create_message(Some("t1"), "leader", "w1", "m2", None, false, None)
-        .unwrap();
 
-    let status = team_agent::cli::status_port::status(&ws, false, false).expect("status");
-    let text = status.to_string();
-    let mut failures = Vec::new();
-
-    let runtime_ok = status
-        .pointer("/runtime/coordinator/ok")
-        .and_then(Value::as_bool);
-    if runtime_ok != Some(false) {
-        failures.push(format!(
-            "B-5: status must carry a runtime block with coordinator.ok==false when the \
-coordinator is not running (consume coordinator_health); got runtime/coordinator/ok={runtime_ok:?}"
-        ));
-    }
-    let has_hint = text.contains("undelivered")
-        || (text.to_lowercase().contains("coordinator") && text.contains("restart"));
-    if !has_hint {
-        failures.push(format!(
-            "B-5: status must add a hint naming the coordinator + restart when it is down \
-AND there is accepted backlog (N38 explicable, no auto-recovery); status={text}"
-        ));
-    }
-    assert!(
-        failures.is_empty(),
-        "B-5 status runtime-hint contract failed:\n{}",
-        failures.join("\n")
-    );
-}
-
-/// B-5 anti-nag: a HEALTHY coordinator with backlog must NOT show the down-hint.
-#[test]
-#[serial(env)]
-fn b5_status_no_hint_when_coordinator_healthy() {
-    let _g = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
-    let ws = tmp_ws("b5-healthy");
-    let live_session = LiveTmuxSession::start(&ws, "team-b5h");
-    let socket = live_session.socket.display().to_string();
-    save_runtime_state(
-        &ws,
-        &json!({"session_name": "team-b5h", "active_team_key": "team-b5h", "agents": {
-            "w1": {"status": "running", "provider": "codex", "agent_id": "w1", "window": "w1"}
-        }, "tmux_endpoint": socket, "tmux_socket": socket}),
-    )
-    .unwrap();
-    seed_healthy_coordinator(&ws);
-    let store = MessageStore::open(&ws).unwrap();
-    store
-        .create_message(Some("t1"), "leader", "w1", "m1", None, false, None)
-        .unwrap();
-
-    let status = team_agent::cli::status_port::status(&ws, false, false).expect("status");
-    let text = status.to_string().to_lowercase();
-    assert!(
-        !(text.contains("coordinator not running") || text.contains("run team-agent restart")),
-        "B-5 anti-nag: a healthy coordinator must not show the down-hint (no nag); status={text}"
-    );
-}
 
 // ───────────────────────────── B-7 · leader pane env fail-fast ─────────────────────
 
@@ -392,7 +227,7 @@ fn seed_copilot_team_state(ws: &Path, agent: &str, accepted_msg: bool) {
         }),
     )
     .unwrap();
-    let _ = MessageStore::open(ws).unwrap();
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
 }
 
 fn write_min_team(ws: &Path, name: &str) -> PathBuf {
@@ -458,13 +293,6 @@ fn grep_tree(root: &Path, needle: &str) -> usize {
         }
     }
     count
-}
-
-struct RealRegistry;
-impl ProviderRegistry for RealRegistry {
-    fn adapter_for(&self, provider: Provider) -> Box<dyn ProviderAdapter> {
-        get_adapter(provider)
-    }
 }
 
 struct EnvGuard {

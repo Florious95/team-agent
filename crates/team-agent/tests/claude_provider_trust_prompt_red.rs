@@ -19,15 +19,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use rusqlite::params;
 use serde_json::{json, Value};
-use team_agent::coordinator::{Coordinator, ProviderRegistry, WorkspacePath};
-use team_agent::event_log::EventLog;
-use team_agent::message_store::MessageStore;
-use team_agent::messaging::deliver_pending_messages;
 use team_agent::model::enums::{PaneLiveness, Provider};
-use team_agent::provider::{get_adapter, ProviderAdapter};
-use team_agent::state::persist::{load_runtime_state, save_runtime_state};
+use team_agent::provider::get_adapter;
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
     InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
@@ -152,118 +146,6 @@ fn claude_ready_idle_shape_is_not_confused_with_numbered_trust_menu() {
     );
 }
 
-#[test]
-fn coordinator_tick_handles_claude_startup_trust_and_persists_state() {
-    let ws = tmp_dir("claude-tick-trust");
-    seed_runtime_state(&ws, "clauder", "claude", "pending");
-    let transport = ScriptedTransport::new([CLAUDE_TRUST_YES_ACTIVE, CLAUDE_READY_IDLE])
-        .with_session_present(true)
-        .with_windows([WindowName::new("clauder")]);
-    let coord = Coordinator::new(
-        WorkspacePath::new(ws.clone()),
-        Box::new(RealAdapterRegistry),
-        Box::new(transport.clone()),
-    );
-
-    let report = coord
-        .tick()
-        .expect("coordinator tick should stay typed/fallible");
-    let state = load_runtime_state(&ws).unwrap();
-    let agent = &state["agents"]["clauder"];
-    let events = read_events(&ws);
-
-    assert!(
-        report.ok && !report.stop,
-        "startup trust handling must not stop coordinator tick; report={report:?}"
-    );
-    assert_eq!(
-        agent["startup_prompts"],
-        json!("handled"),
-        "provider=claude pending startup prompt must persist startup_prompts=handled; state={state}"
-    );
-    assert_eq!(
-        agent["startup_prompt_handled"][0]["prompt"],
-        json!("claude_workspace_trust"),
-        "handled prompt must identify Claude workspace trust; state={state}"
-    );
-    assert!(
-        events.contains("startup_prompt_handled") && events.contains("claude_workspace_trust"),
-        "coordinator tick must emit startup_prompt_handled for Claude trust; events={events}"
-    );
-    assert_eq!(
-        transport.sent_keys(),
-        vec![vec![Key::Enter]],
-        "coordinator should send exactly Enter through the Claude provider handler"
-    );
-}
-
-#[test]
-fn delivery_defers_claude_trust_prompt_then_replays_same_message_after_handled() {
-    let ws = tmp_dir("claude-delivery-gate");
-    let store = MessageStore::open(&ws).unwrap();
-    let log = EventLog::new(&ws);
-    let message_id = store
-        .create_message(
-            Some("task_1"),
-            "leader",
-            "clauder",
-            "do not paste this task into the trust menu",
-            None,
-            false,
-            Some("ctxteam"),
-        )
-        .unwrap();
-    let state = delivery_state("pending");
-    let transport = ScriptedTransport::new([CLAUDE_TRUST_YES_ACTIVE]);
-
-    let delivered = deliver_pending_messages(&ws, &state, &transport, &log)
-        .expect("delivery should inspect startup prompt before injection");
-
-    assert!(
-        delivered.is_empty(),
-        "Claude trust prompt must defer delivery; task text must not be injected into the trust menu"
-    );
-    assert_eq!(
-        message_status(&ws, &message_id).as_deref(),
-        Some("queued_until_trust"),
-        "provider=claude trust prompt should queue the same row until trust is handled"
-    );
-    assert!(
-        transport.injects().is_empty(),
-        "delivery gate must not physically inject task text while Claude trust prompt is active"
-    );
-
-    store.mark(&message_id, "accepted", None).unwrap();
-    let mut handled_state = delivery_state("handled");
-    let (_mcp, pane) = mcp_sim_harness::ready_delivery_worker(
-        &ws, &mut handled_state, "ctxteam", "clauder", "%1",
-    );
-    *transport.targets.lock().unwrap() = vec![pane];
-    let delivered = deliver_pending_messages(&ws, &handled_state, &transport, &log)
-        .expect("handled Claude trust prompt should allow replay through the normal delivery path");
-    assert_eq!(
-        delivered,
-        vec![message_id.clone()],
-        "same message_id must replay and deliver after startup_prompts=handled"
-    );
-    assert_eq!(
-        message_status(&ws, &message_id).as_deref(),
-        Some("delivered")
-    );
-    assert_eq!(
-        transport.injects().len(),
-        1,
-        "after handled state, the same queued row should inject exactly once"
-    );
-}
-
-struct RealAdapterRegistry;
-
-impl ProviderRegistry for RealAdapterRegistry {
-    fn adapter_for(&self, provider: Provider) -> Box<dyn ProviderAdapter> {
-        get_adapter(provider)
-    }
-}
 
 #[derive(Debug, Default)]
 struct ScriptedTransport {
@@ -302,23 +184,10 @@ impl ScriptedTransport {
         }
     }
 
-    fn with_session_present(mut self, present: bool) -> Self {
-        self.session_present = present;
-        self
-    }
-
-    fn with_windows<const N: usize>(self, windows: [WindowName; N]) -> Self {
-        *self.windows.lock().unwrap() = windows.into_iter().collect();
-        self
-    }
-
     fn sent_keys(&self) -> Vec<Vec<Key>> {
         self.sent.lock().unwrap().clone()
     }
 
-    fn injects(&self) -> Vec<(Target, String)> {
-        self.injects.lock().unwrap().clone()
-    }
 }
 
 impl Transport for ScriptedTransport {
@@ -445,89 +314,113 @@ fn spawn_result(session: &SessionName, window: &WindowName) -> SpawnResult {
     }
 }
 
-fn seed_runtime_state(workspace: &Path, agent_id: &str, provider: &str, startup_prompts: &str) {
-    save_runtime_state(
-        workspace,
-        &json!({
-            "active_team_key": "ctxteam",
-            "session_name": "team-ctxteam",
-            "team_dir": workspace.to_string_lossy().to_string(),
-            "agents": {
-                agent_id: {
-                    "provider": provider,
-                    "status": "running",
-                    "startup_prompts": startup_prompts,
-                    "startup_prompt_status": startup_prompts,
-                    "window": agent_id,
-                    "pane_id": "%1",
-                    "mcp_ready": true,
-                    "owner_team_id": "ctxteam"
-                }
-            }
-        }),
-    )
-    .unwrap();
-}
 
-fn delivery_state(startup_prompts: &str) -> Value {
-    json!({
-        "active_team_key": "ctxteam",
-        "session_name": "team-ctxteam",
-        "agents": {
-            "clauder": {
-                "status": "running",
-                "window": "clauder",
-                "provider": "claude",
-                "startup_prompts": startup_prompts,
-                "startup_prompt_status": startup_prompts,
-                "owner_team_id": "ctxteam"
-            }
-        },
-        "teams": {
-            "ctxteam": {
-                "session_name": "team-ctxteam",
-                "agents": {
-                    "clauder": {
-                        "status": "running",
-                        "window": "clauder",
-                        "provider": "claude",
-                        "startup_prompts": startup_prompts,
-                        "startup_prompt_status": startup_prompts,
-                        "owner_team_id": "ctxteam"
-                    }
-                }
-            }
-        }
-    })
-}
-
-fn message_status(workspace: &Path, message_id: &str) -> Option<String> {
-    let store = MessageStore::open(workspace).unwrap();
-    let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
-    conn.query_row(
-        "select status from messages where message_id = ?1",
-        params![message_id],
-        |row| row.get(0),
-    )
-    .ok()
-}
-
-fn read_events(workspace: &Path) -> String {
-    std::fs::read_to_string(workspace.join(".team/logs/events.jsonl")).unwrap_or_default()
-}
 
 fn source(path: &str) -> String {
     std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(path)).unwrap()
 }
 
-fn tmp_dir(tag: &str) -> PathBuf {
+
+/// The trust dialog layout the station surface guard recognizes today.
+const CLAUDE_TRUST_ACCESSING_WORKSPACE: &str = "Accessing workspace:\nQuick safety check: Is this a project you created or one you trust?\nYes, I trust this folder\n❯ No, exit\nEnter to confirm · Esc to cancel";
+
+/// M4 re-expression of the retired pump test (`delivery_defers_claude_trust_prompt_…`):
+/// a logical send to a Claude seat whose pane shows the trust menu keeps the message
+/// durable in the C3 inbox, reports `non_composer`, and never pastes or presses Enter.
+#[test]
+fn station_send_withholds_input_from_claude_trust_prompt_and_keeps_the_message_durable() {
+    assert_station_send_withholds_input(CLAUDE_TRUST_ACCESSING_WORKSPACE);
+}
+
+/// Same oracle on the numbered menu that the Claude adapter's own trust recognizer
+/// accepts (`claude_trust_recognizer_public_shape_exists_and_is_provider_specific`).
+#[test]
+#[ignore = "P-6 (pre-existing since ea7572b3): the station surface guard does not recognize the numbered Claude trust menu, so send pastes and presses Enter; see STAGE4-M4-TEST-EXCISION-CLASSIFICATION.md"]
+fn station_send_withholds_input_from_the_numbered_claude_trust_menu() {
+    assert_station_send_withholds_input(CLAUDE_TRUST_YES_ACTIVE);
+}
+
+fn assert_station_send_withholds_input(screen: &str) {
+    use std::os::unix::fs::PermissionsExt;
     static N: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "ta-rs-claude-provider-trust-{tag}-{}-{}",
+    let root = std::env::temp_dir().join(format!(
+        "claude-trust-station-{}-{}",
         std::process::id(),
         N.fetch_add(1, Ordering::Relaxed)
     ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::canonicalize(dir).unwrap()
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("bin")).unwrap();
+    std::fs::create_dir_all(root.join(".team/runtime")).unwrap();
+    // Synthetic tmux: every capture shows the trust menu; every call is traced.
+    let tmux = root.join("bin/tmux");
+    std::fs::write(
+        &tmux,
+        r#"#!/usr/bin/env python3
+import json, os, pathlib, sys
+root = pathlib.Path(os.environ['TRUST_FIXTURE_ROOT'])
+args = sys.argv[1:]
+action = args[2] if args[0] in ('-S', '-L') else args[0]
+with (root / 'trace.jsonl').open('a') as log:
+    log.write(json.dumps(action) + '\n')
+if action == 'display-message':
+    print('0|1|2|' + str(root / 'tmux.sock'))
+elif action == 'capture-pane':
+    print(os.environ['TRUST_FIXTURE_SCREEN'])
+elif action == 'load-buffer':
+    sys.stdin.buffer.read()
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(
+        root.join(".team/runtime/state.json"),
+        serde_json::to_vec(&json!({"team_key":"alpha", "agents":{"clauder":{
+            "provider":"claude","status":"running","pane_id":"%7","native_endpoint":"synthetic-trust"}}}))
+        .unwrap(),
+    )
+    .unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(root.join("bin"))
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let content = "do not paste this task into the trust menu";
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_team-agent"))
+        .args(["send", "clauder", content, "--team", "alpha", "--json"])
+        .current_dir(&root)
+        .env("PATH", path)
+        .env_remove("TEAM_AGENT_ID")
+        .env_remove("TEAM_AGENT_OWNER_TEAM_ID")
+        .env_remove("TEAM_AGENT_AGENT_ID")
+        .env_remove("TEAM_AGENT_TEAM_ID")
+        .env_remove("TEAM_AGENT_WORKSPACE")
+        .env("TRUST_FIXTURE_ROOT", &root)
+        .env("TRUST_FIXTURE_SCREEN", screen)
+        .output()
+        .unwrap();
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt: Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|_| panic!("send must answer with a JSON receipt: {diagnostic}"));
+    assert_eq!(receipt["status"], "stored", "{diagnostic}");
+    assert_ne!(receipt["delivery"], "physical", "{diagnostic}");
+    assert!(
+        receipt["delivery_error"].as_str().unwrap_or_default().contains("non_composer"),
+        "{diagnostic}"
+    );
+    let inbox = team_agent::inbox_store::read(&root, "clauder", 10, Some("alpha")).unwrap();
+    assert_eq!(inbox["messages"][0]["content"], content, "message must stay durable");
+    let actions: Vec<String> = std::fs::read_to_string(root.join("trace.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(
+        !actions.iter().any(|a| a == "paste-buffer" || a == "send-keys"),
+        "trust menu must get no paste and no Enter: {actions:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }

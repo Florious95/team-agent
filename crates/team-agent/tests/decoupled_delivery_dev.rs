@@ -70,7 +70,7 @@ with (root / 'received').open('ab', buffering=0) as out:
         let state = json!({"active_team_key": "alpha", "tmux_socket": fixture.socket,
             "teams": {"alpha": {"team_id": "alpha", "team_name": "friendly", "status": "stopped",
                 "tmux_socket": fixture.socket, "leader": {"pane_id": fixture.pane, "provider": "retired-provider"},
-                "agents": {"worker": {"pane_id": fixture.pane, "provider": "retired-provider", "status": "dead"}}}}});
+                "agents": {"worker": {"pane_id": fixture.pane, "provider": "retired-provider", "status": "running"}}}}});
         fs::write(
             fixture.root.join(".team/runtime/state.json"),
             serde_json::to_vec(&state).unwrap(),
@@ -120,6 +120,16 @@ with (root / 'received').open('ab', buffering=0) as out:
         TeamOrchestratorTools::with_identity(
             &self.root,
             Some(AgentId::new("worker")),
+            Some(TeamKey::new("alpha")),
+        )
+    }
+
+    /// M5 admission ruling: an explicit self-target is refused before any effect, so MCP sends
+    /// addressed to `worker` come from the leader seat (the fixture's leader and worker share one pane).
+    fn leader_tools(&self) -> TeamOrchestratorTools {
+        TeamOrchestratorTools::with_identity(
+            &self.root,
+            Some(AgentId::new("leader")),
             Some(TeamKey::new("alpha")),
         )
     }
@@ -193,41 +203,6 @@ os.execvp('tmux', ['tmux', *sys.argv[1:]])
     assert_eq!(fs::read(fixture.root.join("received")).unwrap(), b"\x1b[200~paced submit\x1b[201~\r");
 }
 
-#[test]
-fn due_reminder_reaches_physical_leader_and_inbox_without_a_receipt_source() {
-    let fixture = Fixture::new();
-    let state_path = fixture.root.join(".team/runtime/state.json");
-    let mut state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
-    let leader = &mut state["teams"]["alpha"]["leader"];
-    leader["session_name"] = json!("old-leader-session");
-    leader["window"] = json!("old-leader-window");
-    leader["pane_pid"] = json!(0);
-    fs::write(state_path, serde_json::to_vec(&state).unwrap()).unwrap();
-    let store = team_agent::message_store::MessageStore::open(&fixture.root).unwrap();
-    let conn = rusqlite::Connection::open(store.db_path()).unwrap();
-    conn.execute(
-        "insert into scheduled_events(owner_team_id, due_at, target, kind, payload_json, status, created_at) values ('alpha', '2000-01-01T00:00:00Z', 'leader', 'reminder', ?1, 'pending', '2000-01-01T00:00:00Z')",
-        [json!({"text":"scheduled physical reminder", "trigger":"in 3s", "interval_ms":null}).to_string()],
-    ).unwrap();
-    let id = conn.last_insert_rowid();
-    // The legacy argument deliberately differs from the published private endpoint.
-    let transport = team_agent::tmux_backend::TmuxBackend::for_workspace(&fixture.root);
-    let log = team_agent::event_log::EventLog::new(&fixture.root);
-    let fired = team_agent::messaging::fire_due_scheduled_events(&fixture.root, &store, &transport, &log).unwrap();
-    assert_eq!(fired, vec![id]);
-    fixture.received("Team Agent reminder:\n\nscheduled physical reminder");
-    let inbox = team_agent::inbox_store::read(&fixture.root, "leader", 10, Some("alpha")).unwrap();
-    assert_eq!(inbox["messages"].as_array().unwrap().len(), 1);
-    assert_eq!(inbox["messages"][0]["kind"], "reminder");
-    assert_eq!(inbox["messages"][0]["content"], "scheduled physical reminder");
-    let (status, result): (String, String) = conn.query_row("select status, result_json from scheduled_events where id=?1", [id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
-    assert_eq!(status, "done");
-    assert_eq!(serde_json::from_str::<Value>(&result).unwrap()["delivery"], "physical");
-    assert_eq!(conn.query_row("select count(*) from messages", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
-    let before = fs::read(fixture.root.join("received")).unwrap();
-    assert!(team_agent::messaging::fire_due_scheduled_events(&fixture.root, &store, &transport, &log).unwrap().is_empty());
-    assert_eq!(fs::read(fixture.root.join("received")).unwrap(), before);
-}
 
 #[test]
 fn logical_send_uses_live_pane_despite_stale_metadata_dead_status_and_missing_mcp() {
@@ -255,13 +230,14 @@ fn logical_send_uses_live_pane_despite_stale_metadata_dead_status_and_missing_mc
         let output = fixture.cli(&["send", "worker", &content, "--team", "alpha"]);
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         fixture.received(&format!("Team Agent message from leader:\n\n{content}"));
-        let result = fixture.tools().send_message(
+        let result = fixture.leader_tools().send_message(
             &MessageTarget::Single("worker".into()), &content, None, None, None,
         ).unwrap().to_value();
         assert_eq!(result["status"], "sent");
-        fixture.received(&format!("Team Agent message from worker:\n\n{content}"));
+        fixture.received(&format!("Team Agent message from leader:\n\n{content}"));
         assert_eq!(fs::read(&path).unwrap(), bytes);
-        assert!(!fixture.root.join(".team/inbox").exists());
+        // R-M1a (M1 store-first): both entrypoints stored one record each for this content.
+        assert_eq!(worker_inbox_hits(&fixture, &content), 2, "{content}");
         assert!(!fixture.root.join(".team/db").exists());
     }
     fs::write(&path, serde_json::to_vec(&valid).unwrap()).unwrap();
@@ -271,7 +247,19 @@ fn logical_send_uses_live_pane_despite_stale_metadata_dead_status_and_missing_mc
     assert!(!fixture.root.join(".team/db").exists());
     assert!(Command::new("tmux").args(["-S", &fixture.socket, "kill-pane", "-t", &fixture.pane])
         .status().unwrap().success());
-    assert!(!fixture.cli(&["send", "worker", "no live target", "--team", "alpha"]).status.success());
+    // R-M1b: a missing pane stores the message with an explanatory delivery_error and types nothing.
+    let gone = fixture.cli(&["send", "worker", "no live target", "--team", "alpha"]);
+    assert!(gone.status.success(), "{}", String::from_utf8_lossy(&gone.stdout));
+    let receipt: Value = serde_json::from_slice(&gone.stdout).unwrap();
+    assert_eq!((receipt["status"].clone(), receipt["live"].clone()), (json!("stored"), json!(false)), "{receipt}");
+    assert!(receipt["delivery_error"].as_str().is_some_and(|e| !e.is_empty()), "{receipt}");
+    assert!(!fs::read_to_string(fixture.root.join("received")).unwrap_or_default().contains("no live target"));
+}
+
+/// Inbox records of `worker` (team `alpha`) whose JSON mentions `text`.
+fn worker_inbox_hits(fixture: &Fixture, text: &str) -> usize {
+    team_agent::inbox_store::read(&fixture.root, "worker", 10_000, Some("alpha")).unwrap()["messages"]
+        .as_array().cloned().unwrap_or_default().iter().filter(|r| r.to_string().contains(text)).count()
 }
 
 #[test]
@@ -322,7 +310,7 @@ fn cli_and_mcp_send_ignore_dead_coordinator_and_never_modify_runtime_or_database
     );
     fixture.received("Team Agent message from leader:\n\ndirect CLI");
     let result = fixture
-        .tools()
+        .leader_tools()
         .send_message(
             &MessageTarget::Single("worker".into()),
             "direct MCP",
@@ -333,13 +321,15 @@ fn cli_and_mcp_send_ignore_dead_coordinator_and_never_modify_runtime_or_database
         .unwrap()
         .to_value();
     assert_eq!(result["status"], "sent");
-    fixture.received("Team Agent message from worker:\n\ndirect MCP");
+    fixture.received("Team Agent message from leader:\n\ndirect MCP");
     assert_eq!(fs::read(state_path).unwrap(), before);
     assert_eq!(
         fs::read(db_path).unwrap(),
         b"poisoned database must never be opened"
     );
-    assert!(!fixture.root.join(".team/inbox").exists());
+    // R-M1a (M1 store-first): the CLI and MCP sends are each stored once; nothing else changed.
+    assert_eq!(worker_inbox_hits(&fixture, "direct CLI"), 1);
+    assert_eq!(worker_inbox_hits(&fixture, "direct MCP"), 1);
     let located = fixture.cli(&["locate"]);
     assert!(
         located.status.success(),
@@ -387,7 +377,8 @@ fn replies_and_results_append_to_inbox_without_database_or_receipt_state() {
         b"invalid JSON",
     )
     .unwrap();
-    let output = fixture.cli(&["inbox", "leader", "-n", "1"]);
+    // R-M5 (team-scoped inbox): with the snapshot unreadable the caller names the team explicitly.
+    let output = fixture.cli(&["inbox", "leader", "-n", "1", "--team", "alpha"]);
     assert!(
         output.status.success(),
         "{} {}",
@@ -397,7 +388,7 @@ fn replies_and_results_append_to_inbox_without_database_or_receipt_state() {
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["messages"].as_array().unwrap().len(), 1);
     assert_eq!(value["messages"][0]["content"], "completed");
-    let repeated = fixture.cli(&["inbox", "leader", "-n", "1"]);
+    let repeated = fixture.cli(&["inbox", "leader", "-n", "1", "--team", "alpha"]);
     assert_eq!(output.stdout, repeated.stdout);
 }
 
@@ -428,7 +419,8 @@ fn detached_leader_replies_and_offline_mailbox_are_still_stored() {
         .to_value();
     assert_eq!(reply["status"], "stored");
     assert!(reply["delivery_error"].is_string());
-    let mailbox = tools
+    let mailbox = fixture
+        .leader_tools()
         .send_message_with_presentation(
             &MessageTarget::Single("worker".into()),
             "offline MCP",
@@ -472,8 +464,12 @@ import json, os, sys, time
 args = sys.argv[1:]
 action = args[2] if args[0] in ('-S', '-L') else args[0]
 # Named sends retain the selected-pane liveness guard; this fixture measures input framing.
+# The physical identity probe (S5) asks for `#{pane_dead}|#{pane_pid}|#{pid}|#{socket_path}`:
+# answer with the live test process so the identity is stable across the pre/post-paste checks.
 if action == 'display-message':
-    print('0')
+    fmt = args[-1]
+    live = os.environ.get('TMUX_TEST_LIVE_PID', '1')
+    print(f"0|{live}|{live}|/fake-tmux-socket" if '#{pane_pid}' in fmt else '0')
     sys.exit(0)
 started = time.monotonic_ns()
 if action == 'load-buffer':
@@ -535,6 +531,18 @@ if action == 'paste-buffer' and os.environ.get('TMUX_TEST_FAIL_PASTE'):
         }
         let snapshot = serde_json::to_vec(&state).unwrap();
         fs::write(&state_path, &snapshot).unwrap();
+        // M4 (m4_contract_migration_dev::native_addresses_never_fall_back_to_stale_snapshot_without_authority):
+        // a row whose provider is a contract leaf id is a native address. With no native authority in
+        // this workspace it gets the typed refusal and never falls back to the snapshot pane (M5 D-M5-3 B).
+        if team_agent::contract_runtime::framework::is_contract(&json!({"provider": provider})) {
+            let error = team_agent::direct_delivery::directory(&fixture.root, Some("alpha"))
+                .unwrap()
+                .endpoint("worker")
+                .unwrap_err();
+            assert!(error.contains("native_authority_missing"), "{provider}: {error}");
+            assert!(!error.contains("No such file or directory"), "{provider}: {error}");
+            continue;
+        }
         let endpoint = team_agent::direct_delivery::directory(&fixture.root, Some("alpha"))
             .unwrap()
             .endpoint("worker")
@@ -559,6 +567,7 @@ if action == 'paste-buffer' and os.environ.get('TMUX_TEST_FAIL_PASTE'):
             let output = fixture
                 .command(&args)
                 .env("PATH", &path)
+                .env("TMUX_TEST_LIVE_PID", std::process::id().to_string())
                 .env("TMUX_TEST_TRACE", &trace)
                 .output()
                 .unwrap();
@@ -567,10 +576,13 @@ if action == 'paste-buffer' and os.environ.get('TMUX_TEST_FAIL_PASTE'):
                 "{provider}: {}",
                 String::from_utf8_lossy(&output.stdout)
             );
+            // M1 adds read-only observation calls (composer capture, identity probe) around the
+            // input; the framing oracle is about the input calls only.
             let calls: Vec<Value> = fs::read_to_string(&trace)
                 .unwrap()
                 .lines()
-                .map(|line| serde_json::from_str(line).unwrap())
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .filter(|call| matches!(call["action"].as_str(), Some("load-buffer" | "paste-buffer" | "send-keys")))
                 .collect();
             assert_eq!(calls.len(), 3, "{provider}: {calls:?}");
             assert_eq!(calls[0]["action"], "load-buffer");
@@ -602,13 +614,21 @@ if action == 'paste-buffer' and os.environ.get('TMUX_TEST_FAIL_PASTE'):
     let failed = fixture
         .command(&["send", "worker", "must not submit"])
         .env("PATH", path)
+        .env("TMUX_TEST_LIVE_PID", std::process::id().to_string())
         .env("TMUX_TEST_TRACE", &trace)
         .env("TMUX_TEST_FAIL_PASTE", "1")
         .output()
         .unwrap();
-    assert!(!failed.status.success());
+    // R-M1b: the message is stored first; a failed paste is never followed by a submit key and is
+    // reported on the receipt (not live, with a delivery error) instead of replaying.
+    let receipt: Value = serde_json::from_slice(&failed.stdout).unwrap_or(Value::Null);
+    assert_eq!(receipt["live"], false, "{receipt}");
+    assert!(receipt["delivery_error"].as_str().is_some_and(|error| !error.is_empty()), "{receipt}");
     assert!(!fs::read_to_string(trace).unwrap().contains("send-keys"));
-    assert!(!fixture.root.join(".team/inbox").exists());
+    let stored = team_agent::inbox_store::read(&fixture.root, "worker", 50, Some("alpha")).unwrap();
+    let copies = stored["messages"].as_array().unwrap().iter()
+        .filter(|record| record.to_string().contains("must not submit")).count();
+    assert_eq!(copies, 1, "stored exactly once: {stored}");
 }
 
 #[test]
@@ -621,7 +641,7 @@ fn cursor_opt_in_confirmation_is_two_enters_and_never_a_third() {
     fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
     let started = Instant::now();
     let result = fixture
-        .tools()
+        .leader_tools()
         .send_message(
             &MessageTarget::Single("worker".into()),
             "cursor confirmation",
@@ -633,7 +653,7 @@ fn cursor_opt_in_confirmation_is_two_enters_and_never_a_third() {
         .to_value();
     assert!(started.elapsed() >= Duration::from_millis(100));
     assert_eq!(result["dialect"], "cursor-double-enter");
-    let expected = b"\x1b[200~Team Agent message from worker:\n\ncursor confirmation\x1b[201~\r\r";
+    let expected = b"\x1b[200~Team Agent message from leader:\n\ncursor confirmation\x1b[201~\r\r";
     fixture.wait_for(|| {
         fs::read(fixture.root.join("received"))
             .unwrap_or_default()

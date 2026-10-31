@@ -49,7 +49,7 @@ fn only_a_stopped_unleased_seat_retires_and_its_id_then_starts_on_a_fresh_genera
             .identity,
         worker.identity
     );
-    assert_eq!(store.retire(&worker.identity), Err(Error::Fence));
+    assert_fenced(store.retire(&worker.identity), "current_seat_missing");
     drop(store);
     assert!(ContractStore::open_readonly(
         &sandbox.root,

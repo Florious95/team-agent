@@ -3,6 +3,7 @@
 #![cfg(unix)]
 mod physical_support;
 mod support;
+use support::direct_business::{handle};
 use serde_json::json;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -16,9 +17,33 @@ use team_agent_contract::host::{
     transport::*,
 };
 use team_agent_contract::orchestration::{
-    lifecycle::*, mcp::*, physical::*, store::*, supervisor::*, Error,
+    lifecycle::*, mcp::*, physical::*, store::*, Error,
 };
 use team_agent_contract::runtime::{delivery::*, probes::*};
+
+// The process/PTY are real; only the pre-stop refusal is injected. This keeps
+// no-effect and live recovery tests independent of a provider subscription.
+struct FaultedPhysicalStop<'a> {
+    inner: PhysicalRuntime<'a>,
+    refusal: Option<Error>,
+}
+impl LifecycleHost for FaultedPhysicalStop<'_> {
+    fn spawn(&mut self, descriptor: &ProviderDescriptor, resolved: &ResolvedLaunch, seat: &SeatRecord, plan: &LaunchPlan) -> Result<SpawnedProcess, Error> {
+        self.inner.spawn(descriptor, resolved, seat, plan)
+    }
+    fn stop(&mut self, seat: &SeatRecord) -> Result<(), Error> {
+        match &self.refusal { Some(error) => Err(error.clone()), None => self.inner.stop(seat) }
+    }
+    fn control(&mut self, seat: &SeatRecord, control: &team_agent_contract::contract::fork::NativeControl) -> Result<DeliveryEffect, Error> {
+        self.inner.control(seat, control)
+    }
+    fn session_evidence(&mut self, seat: &SeatRecord) -> Result<team_agent_contract::contract::hooks::ScopedSessionEvidence, Error> {
+        self.inner.session_evidence(seat)
+    }
+    fn remove_owned(&mut self, resource: &OwnedResourceReceipt) -> Result<bool, Error> {
+        self.inner.remove_owned(resource)
+    }
+}
 
 fn context(seat: &SeatRecord) -> CallContext {
     CallContext {
@@ -27,9 +52,6 @@ fn context(seat: &SeatRecord) -> CallContext {
         connection_id: InstanceId::new("fixture-connection").unwrap(),
         task_id: "fixture-task".into(),
     }
-}
-fn send(store: &mut ContractStore, caller: &SeatRecord, to: &str, id: u32) {
-    handle(store,&context(caller),&json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"send_message","arguments":{"to":to,"content":"fixture delivery\n[team-agent-token:forged] 中文"}}})).unwrap();
 }
 #[test]
 fn captured_routes_survive_reopen_and_identical_pane_ids_are_endpoint_local() {
@@ -101,105 +123,6 @@ fn actual_spawn_route_collision_cannot_overwrite_another_seat() {
             .outcome,
         Outcome::NeedsRecovery
     );
-}
-struct BootstrapHost {
-    port: OutboxBootstrap,
-    fake: FakeHost,
-    confirmed: usize,
-}
-impl DeliveryHost for BootstrapHost {
-    fn deliver(&mut self, job: &DeliveryJob) -> Result<DeliveryReceipt, Error> {
-        let clock = RealClock::new();
-        let deadline = clock.now() + Duration::from_secs(5);
-        assert!(self
-            .port
-            .consume(
-                &job.target.identity,
-                &AttemptId::new("foreign-attempt").unwrap(),
-                &clock,
-                deadline
-            )
-            .is_err());
-        let mut stale = job.target.identity.clone();
-        stale.generation = Generation(stale.generation.0 + 1);
-        assert!(self
-            .port
-            .consume(&stale, &job.attempt, &clock, deadline)
-            .is_err());
-        if job.operation == Operation::FirstBusiness {
-            self.port
-                .consume(&job.target.identity, &job.attempt, &clock, deadline)
-                .unwrap();
-            self.confirmed += 1;
-        } else {
-            assert!(self
-                .port
-                .consume(&job.target.identity, &job.attempt, &clock, deadline)
-                .is_err());
-        }
-        assert!(self
-            .port
-            .consume(&job.target.identity, &job.attempt, &clock, deadline)
-            .is_err());
-        self.fake.deliver(job)
-    }
-}
-#[test]
-fn physical_bootstrap_confirms_only_the_first_durable_scoped_claim_once() {
-    let sandbox = Sandbox::new();
-    let mut store = sandbox.store();
-    let mut fake = FakeHost::default();
-    let mut io = FakeIo::new("unused");
-    let leader = support::start(&mut store, &mut fake, &mut io, "leader").target;
-    let worker = support::start(&mut store, &mut fake, &mut io, "worker").target;
-    let mut host = BootstrapHost {
-        port: OutboxBootstrap::new(sandbox.reopen()),
-        fake: FakeHost::default(),
-        confirmed: 0,
-    };
-    let clock = RealClock::new();
-    assert!(host
-        .port
-        .consume(
-            &worker.identity,
-            &AttemptId::new("not-claimed").unwrap(),
-            &clock,
-            clock.now() + Duration::from_secs(1)
-        )
-        .is_err());
-    send(&mut store, &leader, "worker", 1);
-    assert!(matches!(
-        tick(
-            &mut store,
-            &worker.identity,
-            &support::readiness(&worker, false),
-            &support::authorization(),
-            &mut host
-        )
-        .unwrap(),
-        Tick::Recorded {
-            uncertain: false,
-            ..
-        }
-    ));
-    let current = store.assert_current(&worker.identity).unwrap();
-    send(&mut store, &leader, "worker", 2);
-    assert!(matches!(
-        tick(
-            &mut store,
-            &worker.identity,
-            &support::readiness(&current, true),
-            &support::authorization(),
-            &mut host
-        )
-        .unwrap(),
-        Tick::Recorded {
-            uncertain: false,
-            ..
-        }
-    ));
-    assert_eq!(host.confirmed, 1);
-    assert_eq!(host.fake.deliveries, 2);
 }
 #[test]
 fn shared_renderer_keeps_the_protocol_task_header_and_authoritative_final_token() {
@@ -347,8 +270,17 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
     )
     .unwrap();
     assert_eq!(started.outcome, Outcome::Committed, "{started:?}");
+    assert!(started.spawn_observation.is_some(), "partial spawn attribution is durable before completion");
     let seat = started.target;
     let target = seat.physical.clone().unwrap();
+    let mut bounded = PhysicalRuntime::new(Registration {
+        descriptor: &d, hooks: &h, controls: &[], startup: None, session_panel: None,
+    }, settings(&tmux), OperationId::new("bounded-observation").unwrap(), &clock).unwrap();
+    bounded.cap_budget(Duration::ZERO).unwrap();
+    assert!(bounded.readiness(&seat).is_err());
+    bounded.cap_budget(Duration::from_secs(10)).unwrap();
+    assert!(bounded.readiness(&seat).is_err(), "nested calls cannot renew an expired outer budget");
+    assert_eq!(sample_process(&target.process), ProcessState::Alive);
     assert_eq!(seat.endpoint, target.endpoint.to_str().unwrap());
     assert_eq!(seat.pane, "%0");
     assert_ne!(seat.binding_key, "unbound-worker");
@@ -391,7 +323,7 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
         deadline,
     )
     .unwrap();
-    let pane = loop {
+    let _pane = loop {
         let captured = transport
             .capture(&target, &clock, deadline, Duration::from_secs(2))
             .unwrap();
@@ -425,52 +357,12 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
         &target,
         Operation::FirstBusiness,
     ));
-    let sample = ReadinessSample {
-        process: collect_process(&target, &clock, Duration::from_secs(2)),
-        pane,
-        binding: protocol.binding,
-        server: protocol.server,
-        minimum_sequence: 0,
-        now: clock.now(),
-    };
-    let mut fake = FakeHost::default();
-    let leader = support::start(&mut store, &mut fake, &mut io, "leader").target;
-    send(&mut store, &leader, "worker", 1);
-    let authorization = DeliveryAuthorization {
-        allow_first_business_bootstrap: false,
-        require_server_handshake: true,
-        channel: Channel::Tmux,
-        policy_sha256: physical_support::POLICY,
-    };
-    assert!(matches!(
-        tick(
-            &mut store,
-            &seat.identity,
-            &sample,
-            &authorization,
-            &mut runtime
-        )
-        .unwrap(),
-        Tick::Recorded {
-            effect: DeliveryEffect::Submitted,
-            uncertain: false,
-            ..
-        }
-    ));
-    let delivery = store.deliveries().unwrap().remove(0);
-    assert_eq!(delivery.state, "submitted");
+    // M4: the supervisor-tick delivery of a queued business message through the
+    // retired SQL outbox was excised here (supervisor::tick fails closed). Business
+    // delivery is the station send core's; the readiness, teardown, socket cleanup
+    // and compensation properties of this physical lifecycle remain below.
     let events_path =
         root.join(physical_support::native_terminal::event_log_name(&request.identity));
-    let events = std::fs::read_to_string(&events_path).unwrap();
-    assert_eq!(
-        events
-            .lines()
-            .filter(
-                |line| serde_json::from_str::<serde_json::Value>(line).unwrap()["kind"] == "paste"
-            )
-            .count(),
-        1
-    );
     let stopped = Lifecycle {
         store: &mut store,
         host: &mut runtime,
@@ -495,7 +387,7 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
     std::fs::write(
         root.join("physical-lifecycle-receipt.json"),
         serde_json::to_vec_pretty(
-            &json!({"fixture":"not-kiro","root":root,"target":target,"delivery":delivery.state,
+            &json!({"fixture":"not-kiro","root":root,"target":target,
         "native_exited":true,"private_tmux_exited":true,"socket_absent":true,"journals_preserved":true}),
         )
         .unwrap(),
@@ -540,4 +432,86 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
     assert_eq!(sample_process(&target.process), ProcessState::Exited);
     assert_eq!(std::fs::symlink_metadata(&target.endpoint).unwrap_err().kind(), std::io::ErrorKind::NotFound);
     assert_eq!(std::fs::read(&events_path).unwrap(), preserved_events);
+
+    // Reproduce a restart after losing the final spawn result, both with the
+    // exact native still alive and after a positively receipt-owned close.
+    for mode in ["no-effect-stop", "recover-stop", "fresh-restart"] {
+        let mut pending_request = request.clone();
+        pending_request.identity.seat = SeatId::new(format!("pending-{mode}")).unwrap();
+        pending_request.identity.instance = InstanceId::new(format!("pending-instance-{mode}")).unwrap();
+        let op = OperationId::new(format!("pending-{mode}")).unwrap();
+        let mut pending_runtime = PhysicalRuntime::new(Registration {
+            descriptor: &d, hooks: &h, controls: &[], startup: None, session_panel: None,
+        }, settings(&tmux), op.clone(), &clock).unwrap();
+        let pending = Lifecycle { store: &mut store, host: &mut pending_runtime, io: &mut io }.startup(
+            &Adapter { descriptor: &d, hooks: &h, catalog: None }, &pending_request,
+            Routing { pane: "unpublished".into(), binding_key: "pending-binding".into(), server_key: format!("pending-server-{mode}") }, op.clone(),
+        ).unwrap();
+        assert_eq!(pending.outcome, Outcome::Committed, "{pending:?}");
+        let physical = pending.target.physical.clone().unwrap();
+        if mode == "fresh-restart" {
+            assert!(pending.target.session.is_none(), "fixture has no resumable session");
+            let mut fresh = pending_request.clone();
+            fresh.identity = store.propose_identity(&pending.target.identity.seat).unwrap();
+            let fresh_id = OperationId::new("native-fresh-restart").unwrap();
+            let mut fresh_runtime = PhysicalRuntime::new(Registration {
+                descriptor: &d, hooks: &h, controls: &[], startup: None, session_panel: None,
+            }, settings(&tmux), fresh_id.clone(), &clock).unwrap();
+            let replaced = Lifecycle { store: &mut store, host: &mut fresh_runtime, io: &mut io }.restart_fresh(
+                &Adapter { descriptor: &d, hooks: &h, catalog: None }, &fresh,
+                Routing { pane: "unpublished".into(), binding_key: "fresh-restart-binding".into(), server_key: "fresh-restart-server".into() },
+                fresh_id, &pending.target.identity,
+            ).unwrap();
+            assert_eq!(replaced.outcome, Outcome::Committed, "{replaced:?}");
+            assert_eq!(replaced.kind, TransactionKind::Restart);
+            assert_eq!(replaced.native_launch, Some(Operation::Fresh));
+            assert_eq!(sample_process(&physical.process), ProcessState::Exited);
+            let replacement = replaced.target.physical.as_ref().unwrap();
+            assert_eq!(sample_process(&replacement.process), ProcessState::Alive);
+            let stopped = Lifecycle { store: &mut store, host: &mut fresh_runtime, io: &mut io }
+                .teardown(&replaced.target.identity, OperationId::new("stop-fresh-restart").unwrap()).unwrap();
+            assert_eq!(stopped.outcome, Outcome::Committed);
+            assert_eq!(sample_process(&replacement.process), ProcessState::Exited);
+            continue;
+        }
+        if mode.ends_with("stop") {
+            let no_effect = mode == "no-effect-stop";
+            let mut host = FaultedPhysicalStop { inner: pending_runtime, refusal: Some(if no_effect {
+                Error::StopNoEffect("controlled read-only composer refusal".into())
+            } else { Error::Host("first recovery blocker") }) };
+            let stop_id = OperationId::new(format!("stop-{mode}")).unwrap();
+            let stopped = Lifecycle { store: &mut store, host: &mut host, io: &mut io }
+                .teardown(&pending.target.identity, stop_id.clone()).unwrap();
+            assert_eq!(sample_process(&physical.process), ProcessState::Alive);
+            assert_eq!(stopped.effect, DeliveryEffect::NoEffect);
+            if no_effect {
+                assert_eq!(stopped.outcome, Outcome::Compensated);
+                assert_ne!(stopped.target.status, SeatStatus::Stopped);
+                assert!(!store.leased(&pending.target.identity.seat).unwrap());
+                host.refusal = None;
+                let retry = Lifecycle { store: &mut store, host: &mut host, io: &mut io }
+                    .teardown(&pending.target.identity, OperationId::new("retry-no-effect-stop").unwrap()).unwrap();
+                assert_eq!(retry.outcome, Outcome::Committed);
+            } else {
+                assert_eq!(stopped.outcome, Outcome::NeedsRecovery);
+                host.refusal = Some(Error::Host("new recovery blocker"));
+                let retry = Lifecycle { store: &mut store, host: &mut host, io: &mut io }.recover(&stop_id).unwrap();
+                // The first cause is kept; a later recovery error is recorded separately.
+                assert!(retry.recovery_failure.as_deref().unwrap().contains("new recovery blocker"));
+                assert!(!retry.failure.as_deref().unwrap_or_default().contains("new recovery blocker"));
+                assert_eq!(store.operation(&stop_id).unwrap(), retry);
+                host.refusal = None;
+                let retry = Lifecycle { store: &mut store, host: &mut host, io: &mut io }.recover(&stop_id).unwrap();
+                assert_eq!(retry.outcome, Outcome::Compensated);
+                assert!(!store.leased(&pending.target.identity.seat).unwrap());
+            }
+            assert_eq!(sample_process(&physical.process), ProcessState::Exited);
+            continue;
+        }
+        // M4: the "live-spawn" and "absent-spawn" modes forged a pending spawn by
+        // rewriting contract_operations/contract_leases SQL rows and then recovered it.
+        // That fault injection has no public file-projection equivalent in this crate; the
+        // crash-recovery invariant is carried over to Track A (excision classification, I).
+        unreachable!("every remaining mode continues above: {mode}");
+    }
 }

@@ -1,0 +1,620 @@
+#![cfg(unix)]
+
+use serde_json::{json, Value};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+struct TestRoot(PathBuf);
+impl TestRoot {
+    fn new() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "ta-m5-scope-{}-{nonce}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&path).unwrap();
+        Self(path)
+    }
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+impl Drop for TestRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn workspace(root: &Path, name: &str, team: &str) -> PathBuf {
+    let path = root.join(name);
+    std::fs::create_dir_all(path.join(".team/runtime")).unwrap();
+    let team_state = json!({
+        "team_key": team, "team_id": team,
+        "agents": {
+            "worker-a": {"owner_team_id": team, "status": "running"},
+            "peer-c": {"owner_team_id": team, "status": "running"}
+        }
+    });
+    std::fs::write(
+        path.join(".team/runtime/state.json"),
+        serde_json::to_vec(&json!({
+            "active_team_key": team, "teams": {team: team_state}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    path
+}
+
+fn command(source: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_team-agent"));
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("TEAM_AGENT_") {
+            command.env_remove(key);
+        }
+    }
+    command
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env("HOME", source)
+        .env("TEAM_AGENT_ID", "worker-a")
+        .env("TEAM_AGENT_OWNER_TEAM_ID", "alpha")
+        .env("TEAM_AGENT_WORKSPACE", source)
+        .current_dir(source);
+    command
+}
+
+fn cli_output(source: &Path, target: &Path, team: &str, args: &[&str]) -> std::process::Output {
+    command(source)
+        .args(args)
+        .arg("--workspace")
+        .arg(target)
+        .args(["--team", team, "--json"])
+        .output()
+        .unwrap()
+}
+
+fn cli(source: &Path, target: &Path, team: &str, args: &[&str]) -> Value {
+    let output = cli_output(source, target, team, args);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn qualified_sender_excludes_only_its_actual_seat_from_broadcast() {
+    let root = TestRoot::new();
+    let source = workspace(root.path(), "source", "alpha");
+    let target = workspace(root.path(), "target", "beta");
+    for (workspace, team, expected) in [
+        (&source, "alpha", vec!["peer-c"]),
+        (&target, "beta", vec!["peer-c", "worker-a"]),
+    ] {
+        let result = cli(
+            &source,
+            workspace,
+            team,
+            &["send", "*", "identity probe", "--mailbox"],
+        );
+        let mut recipients: Vec<_> = result["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["recipient"].as_str().unwrap())
+            .collect();
+        recipients.sort_unstable();
+        assert_eq!(recipients, expected);
+        let inbox = cli(&source, workspace, team, &["inbox", "peer-c", "-n", "1"]);
+        assert_eq!(
+            inbox["messages"][0]["sender"],
+            format!("{}::alpha/worker-a", source.display())
+        );
+    }
+}
+
+fn mcp(source: &Path, targets: &[Value]) -> Vec<Value> {
+    let calls: Vec<_> = targets
+        .iter()
+        .map(|target| {
+            (
+                "send_message",
+                json!({
+                    "to":target,"content":"scope probe","mailbox":true
+                }),
+            )
+        })
+        .collect();
+    mcp_calls(source, &calls)
+}
+
+fn mcp_calls(source: &Path, calls: &[(&str, Value)]) -> Vec<Value> {
+    let mut child = command(source)
+        .args(["mcp-server", "--workspace"])
+        .arg(source)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    for (index, (name, arguments)) in calls.iter().enumerate() {
+        writeln!(
+            input,
+            "{}",
+            json!({
+                "jsonrpc": "2.0", "id": index + 1, "method": "tools/call",
+                "params": {"name": name, "arguments": arguments}
+            })
+        )
+        .unwrap();
+    }
+    drop(input);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let responses: Vec<Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(responses.len(), calls.len());
+    responses
+        .into_iter()
+        .map(|response| {
+            let body: Value =
+                serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            if body["status"] == "refused" {
+                assert_eq!(response["result"]["isError"], true);
+            }
+            body
+        })
+        .collect()
+}
+
+#[test]
+fn mcp_admission_rejects_all_targets_before_any_effect() {
+    let root = TestRoot::new();
+    let source = workspace(root.path(), "source", "alpha");
+    let pid = source.join(".team/runtime/coordinator.pid");
+    let stale = std::process::id().to_string();
+    std::fs::write(&pid, &stale).unwrap();
+    let foreign = workspace(root.path(), "elsewhere", "alpha");
+    for (bad, code, exception) in [
+        (
+            format!("{}::alpha/peer-c", foreign.display()),
+            "peer_not_in_scope",
+            "PeerNotInScope",
+        ),
+        (
+            "beta/worker-a".into(),
+            "name_not_resolvable",
+            "NameNotResolvable",
+        ),
+        (
+            "unknown-peer".into(),
+            "name_not_resolvable",
+            "NameNotResolvable",
+        ),
+        ("worker-a".into(), "self_target", "SelfTarget"),
+        ("".into(), "name_invalid", "NameInvalid"),
+        ("bad\nname".into(), "name_invalid", "NameInvalid"),
+    ] {
+        let bodies = mcp(&source, &[json!(["peer-c", bad])]);
+        assert_eq!(bodies[0]["error_code"], code);
+        assert_eq!(bodies[0]["exc_type"], exception);
+        assert_eq!(bodies[0]["invalid_details"][0]["reason"], code);
+        assert_eq!(bodies[0]["invalid_targets"], json!([bad]));
+        assert_eq!(bodies[0]["not_attempted"], json!(["peer-c"]));
+        assert_eq!(std::fs::read_to_string(&pid).unwrap(), stale);
+    }
+    let inbox = cli(&source, &source, "alpha", &["inbox", "peer-c", "-n", "10"]);
+    assert_eq!(inbox["messages"], json!([]));
+}
+
+#[test]
+fn cli_admission_rejects_all_targets_before_any_effect() {
+    let root = TestRoot::new();
+    let source = workspace(root.path(), "source", "alpha");
+    let pid = source.join(".team/runtime/coordinator.pid");
+    let stale = std::process::id().to_string();
+    std::fs::write(&pid, &stale).unwrap();
+    for (bad, code) in [
+        ("bogus", "name_not_resolvable"),
+        ("worker-a", "self_target"),
+        ("", "name_invalid"),
+        ("bad\nname", "name_invalid"),
+    ] {
+        let to = format!("peer-c,{bad}");
+        let positional = ["send", to.as_str(), "admission probe", "--mailbox"];
+        let named = ["send", "--to", to.as_str(), "admission probe", "--mailbox"];
+        for args in [positional.as_slice(), named.as_slice()] {
+            let output = cli_output(&source, &source, "alpha", args);
+            assert!(!output.status.success());
+            let body: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(body["error_code"], code);
+            assert_eq!(body["invalid_targets"], json!([bad]));
+            assert_eq!(body["not_attempted"], json!(["peer-c"]));
+            assert_eq!(std::fs::read_to_string(&pid).unwrap(), stale);
+        }
+    }
+    let inbox = cli(&source, &source, "alpha", &["inbox", "peer-c", "-n", "10"]);
+    assert_eq!(inbox["messages"], json!([]));
+}
+
+#[test]
+fn admission_retains_suggestions_empty_lists_and_ambiguous_team_reasons() {
+    let root = TestRoot::new();
+    let source = workspace(root.path(), "source", "alpha");
+    let results = mcp(
+        &source,
+        &[
+            json!("peer-x"),
+            json!([]),
+            json!(["peer-c", "peer-x", "worker-a"]),
+            json!("alhpa/leader"),
+        ],
+    );
+    assert_eq!(results[0]["error_code"], "name_not_resolvable");
+    assert_eq!(results[0]["candidates"][0]["agent_id"], "peer-c");
+    assert!(results[0]["action"]
+        .as_str()
+        .unwrap()
+        .contains("Did you mean"));
+    assert_eq!(results[1]["error_code"], "empty_target_list");
+    assert_eq!(
+        results[2]["invalid_details"][0]["reason"],
+        "name_not_resolvable"
+    );
+    assert_eq!(results[2]["invalid_details"][1]["reason"], "self_target");
+    assert_eq!(results[2]["not_attempted"], json!(["peer-c"]));
+    assert_eq!(results[3]["error_code"], "name_not_resolvable");
+    assert_eq!(results[3]["suggested_name"], "alpha/leader");
+    let path = source.join(".team/runtime/state.json");
+    let mut state: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    state["teams"]["alpha"]["team_name"] = json!("shared");
+    state["teams"]["beta"] = json!({"team_key":"beta", "team_name":"shared", "agents":{"hidden-only":{"status":"running"}}});
+    std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+    for refusal in mcp(&source, &[json!("betx/leader"), json!("hidden-onlx")]) {
+        assert_eq!(refusal["error_code"], "name_not_resolvable");
+        assert!(refusal["candidates"].as_array().unwrap().iter().all(|candidate| candidate["team_key"] == "alpha"));
+        assert!(!refusal.to_string().contains("hidden-only"));
+        assert!(!refusal["available_team_keys"].to_string().contains("beta"));
+    }
+    let output = cli_output(
+        &source,
+        &source,
+        "shared",
+        &["send", "peer-c", "ambiguous", "--mailbox"],
+    );
+    assert!(!output.status.success());
+    let body: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(body["error_code"], "name_ambiguous");
+    let inbox = cli(&source, &source, "alpha", &["inbox", "peer-c", "-n", "10"]);
+    assert_eq!(inbox["messages"], json!([]));
+}
+
+#[test]
+fn refusal_diagnostics_do_not_read_foreign_scope_when_selected_team_is_invalid() {
+    let root = TestRoot::new();
+    let source = workspace(root.path(), "source", "alpha");
+    let foreign = workspace(root.path(), "foreign", "alpha");
+    let path = foreign.join(".team/runtime/state.json");
+    let mut state: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    state["teams"]["alpha"]["agents"]["hidden-only"] = json!({"status":"running"});
+    std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+    let target = format!("{}::alpha/hidden-onlx", foreign.display());
+    let result = team_agent::station::send::execute(team_agent::station::send::Request {
+        workspace: &source, team: Some("alhpa"), to: &target, content: "denied",
+        task_id: None, message_id: None, presentation: &Default::default(), mailbox: true, envelope: None,
+    }, team_agent::station::send::Authority::Seat { sender: "worker-a", team: "alpha" }).unwrap();
+    assert!(!result.to_string().contains("hidden-only"), "unexpected foreign naming candidate: {result}");
+    assert_eq!(result["reason"], "peer_not_in_scope");
+    assert!(!source.join(".team/inbox").exists());
+    assert!(!foreign.join(".team/inbox").exists());
+}
+
+#[test]
+fn single_refusal_contract_is_preserved_in_batches_without_snapshot_writes() {
+    let root = TestRoot::new();
+    let source = workspace(root.path(), "source", "alpha");
+    let target = workspace(root.path(), "target", "current");
+    let before = std::fs::read(source.join(".team/runtime/state.json")).unwrap();
+    let target_before = std::fs::read(target.join(".team/runtime/state.json")).unwrap();
+    let cross = format!("{}::missing/leader", target.display());
+    for (raw, reason, suggestion) in [
+        ("peer-x", "name_not_resolvable", Some("alpha/peer-c")),
+        ("alhpa/leader", "name_not_resolvable", Some("alpha/leader")),
+        ("zzzzzzzzzz", "name_not_resolvable", None),
+        (cross.as_str(), "team_key_not_found", None),
+    ] {
+        let single: Value = serde_json::from_slice(&cli_output(&source, &source, "alpha",
+            &["send", "--to-name", raw, "refusal probe", "--mailbox"]).stdout).unwrap();
+        let batch: Value = serde_json::from_slice(&cli_output(&source, &source, "alpha",
+            &["send", "--to", &format!("peer-c,{raw}"), "refusal probe", "--mailbox"]).stdout).unwrap();
+        assert_eq!(single["reason"], reason);
+        for key in ["ok", "status", "reason", "error", "action", "log", "candidates", "requested_name", "suggested_name", "requested_team", "available_team_keys"] {
+            assert_eq!(single.get(key), batch.get(key), "{raw}: {key}");
+            assert_eq!(single.get(key), batch["invalid_details"][0].get(key), "detail {raw}: {key}");
+        }
+        assert_eq!(batch["not_attempted"], json!(["peer-c"]));
+        if let Some(suggested) = suggestion { assert_eq!(single["suggested_name"], suggested); }
+        if raw == "zzzzzzzzzz" {
+            assert!(single.get("suggested_name").is_none());
+            for word in ["status --json", "team_key", "agent", "--to-name"] {
+                assert!(single["action"].as_str().unwrap().contains(word));
+            }
+        }
+        if reason == "team_key_not_found" {
+            assert!(single["suggested_name"].as_str().unwrap().ends_with("::current/leader"));
+        }
+    }
+    let positional: Value = serde_json::from_slice(&cli_output(&source, &source, "alpha",
+        &["send", "peer-x", "positional probe", "--mailbox"]).stdout).unwrap();
+    assert_eq!(positional["suggested_name"], "peer-c");
+    let human = command(&source).args(["send", "peer-x", "human probe", "--mailbox", "--team", "alpha"])
+        .arg("--workspace").arg(&source).output().unwrap();
+    assert!(!human.status.success());
+    let text = format!("{}{}", String::from_utf8_lossy(&human.stdout), String::from_utf8_lossy(&human.stderr));
+    for fragment in ["error:", "action:", "log:", "Did you mean", "Nothing was sent", "team-agent status"] {
+        assert!(text.contains(fragment), "missing {fragment}: {text}");
+    }
+    assert_eq!(std::fs::read(source.join(".team/runtime/state.json")).unwrap(), before);
+    assert_eq!(std::fs::read(target.join(".team/runtime/state.json")).unwrap(), target_before);
+    assert!(!source.join(".team/inbox").exists());
+    assert!(!target.join(".team/inbox").exists());
+}
+
+#[test]
+fn duplicate_admitted_targets_have_one_receipt_and_record() {
+    let root = TestRoot::new();
+    let source = workspace(root.path(), "source", "alpha");
+    let bodies = mcp(&source, &[json!(["peer-c", "peer-c"])]);
+    assert_eq!(bodies[0]["results"].as_array().unwrap().len(), 1);
+    assert_eq!(bodies[0]["messages"], bodies[0]["results"]);
+    let inbox = cli(&source, &source, "alpha", &["inbox", "peer-c", "-n", "10"]);
+    assert_eq!(inbox["messages"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn stale_pid_reuse_is_nonblocking_and_status_does_not_clean_it() {
+    let root = TestRoot::new();
+    let source = workspace(root.path(), "source", "alpha");
+    let pid = source.join(".team/runtime/coordinator.pid");
+    let meta = source.join(".team/runtime/coordinator.json");
+    let stale = std::process::id().to_string();
+    std::fs::write(&pid, &stale).unwrap();
+    std::fs::write(&meta, format!("{{\"pid\":{stale}}}")).unwrap();
+    let observed = team_agent::coordinator::legacy_coordinator_value(&source).unwrap();
+    assert_eq!(observed["status"], "legacy_pid_unverified");
+    assert!(!team_agent::coordinator::retire_legacy_coordinator_for_status(&source).unwrap());
+    assert_eq!(std::fs::read_to_string(&pid).unwrap(), stale);
+    assert!(meta.exists());
+    assert!(!team_agent::coordinator::retire_legacy_coordinator(&source).unwrap());
+    assert!(!pid.exists());
+    assert!(!meta.exists());
+    assert!(!source.join(".team/runtime/team.db").exists());
+}
+
+#[test]
+fn report_result_accepts_advertised_classes_and_resolves_sink_policy() {
+    let root = TestRoot::new();
+    let source = workspace(root.path(), "source", "alpha");
+    let mut calls = Vec::new();
+    for class in [
+        "message",
+        "progress",
+        "stage_result",
+        "stage_pass",
+        "bounce",
+        "blocking",
+        "final_review",
+        "timeout",
+    ] {
+        for sink in ["leader", "casefile", "silent"] {
+            calls.push((
+                "report_result",
+                json!({
+                    "status":"completed", "summary":format!("{class}-{sink}"),
+                    "task_id":format!("{class}-{sink}"),
+                    "presentation":{"sink":sink,"class":class,"case_id":"report-policy"}
+                }),
+            ));
+        }
+    }
+    let results = mcp_calls(&source, &calls);
+    for ((_, args), result) in calls.iter().zip(&results) {
+        assert_eq!(result["stored"], true, "{result}");
+        let intentionally_quiet = args["presentation"]["class"] == "stage_result"
+            && args["presentation"]["sink"] != "leader";
+        assert_eq!(
+            result.get("delivery_error").is_none(),
+            intentionally_quiet,
+            "{result}"
+        );
+    }
+    let inbox = cli(&source, &source, "alpha", &["inbox", "leader", "-n", "50"]);
+    assert_eq!(inbox["messages"].as_array().unwrap().len(), calls.len());
+}
+
+#[test]
+fn native_leaf_names_never_fall_back_to_snapshot_panes() {
+    let root = TestRoot::new();
+    let source = workspace(root.path(), "source", "alpha");
+    let state_path = source.join(".team/runtime/state.json");
+    let mut state: Value = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    for provider in ["grok", "claude_tui", "pi_tui", "claude", "pi"] {
+        state["teams"]["alpha"]["agents"]["peer-c"] = json!({
+            "provider":provider,"pane_id":"%0","tmux_socket":"owned-fixture-no-server","status":"running"
+        });
+        std::fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        let directory = team_agent::direct_delivery::directory(&source, Some("alpha")).unwrap();
+        if matches!(provider, "claude" | "pi") {
+            assert_eq!(directory.endpoint("peer-c").unwrap().dialect, provider);
+        } else {
+            assert!(directory
+                .endpoint("peer-c")
+                .unwrap_err()
+                .starts_with("native_authority_missing:"));
+        }
+    }
+}
+
+#[test]
+fn missing_native_authority_has_typed_receipts_and_recovery_actions() {
+    let root = TestRoot::new();
+    let source = workspace(root.path(), "source", "alpha");
+    let state_path = source.join(".team/runtime/state.json");
+    let mut state: Value = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    state["teams"]["alpha"]["agents"]["peer-c"] = json!({
+        "provider":"claude_tui","runtime_family":"contract","status":"running"
+    });
+    std::fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+    let sent = cli(
+        &source,
+        &source,
+        "alpha",
+        &["send", "peer-c", "native authority probe"],
+    );
+    assert_eq!(sent["stored"], true);
+    assert_eq!(sent["live"], false);
+    assert_eq!(sent["submission"], "not_attempted");
+    assert!(sent["delivery_error"]
+        .as_str()
+        .unwrap()
+        .starts_with("native_authority_missing:"));
+    assert!(sent["action"].as_str().unwrap().contains("restart peer-c"));
+    let located = cli(&source, &source, "alpha", &["locate"]);
+    let entry = located["unavailable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["agent"] == "peer-c")
+        .unwrap();
+    assert_eq!(entry["delivery_error"], sent["delivery_error"]);
+    assert_eq!(entry["action"], sent["action"]);
+    let status = cli(&source, &source, "alpha", &["status"]);
+    let node = status["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == "peer-c")
+        .unwrap();
+    assert_eq!(node["observation_reason"], "native_authority_missing");
+    assert_eq!(node["next_action"], sent["action"]);
+    for value in [&sent, &located, &status] {
+        assert!(!value.to_string().contains("No such file or directory"));
+    }
+}
+
+#[test]
+fn lifecycle_target_save_preserves_peer_capture_and_reservation() {
+    use team_agent::state::repository::{StateRepository, StateWriteIntent};
+    let root = TestRoot::new();
+    let source = workspace(root.path(), "source", "alpha");
+    let team = json!({"team_key":"alpha", "team_id":"alpha", "session_name":"fixture", "agents":{
+        "a":{"provider":"claude","status":"running","pane_id":"%1","spawn_epoch":1,
+            "session_id":null,"_pending_session_id":"a-new"},
+        "b":{"provider":"claude","status":"starting","pane_id":"%2","spawn_epoch":1,
+            "session_id":null,"_pending_session_id":"b-new"}
+    }});
+    let mut initial = team.clone();
+    initial["active_team_key"] = json!("alpha");
+    initial["teams"] = json!({"alpha":team});
+    let repository = StateRepository::new(&source);
+    repository
+        .save(StateWriteIntent::LaunchTeam { team_key: "alpha" }, &initial)
+        .unwrap();
+    let load = || team_agent::state::persist::load_runtime_state(&source).unwrap();
+    let mut stale = load();
+    let mut completed = stale.clone();
+    let mut captured = completed["teams"]["alpha"]["agents"]["a"].clone();
+    captured
+        .as_object_mut()
+        .unwrap()
+        .remove("_pending_session_id");
+    captured["session_id"] = json!("a-new");
+    captured["rollout_path"] = json!(source.join("a.jsonl"));
+    captured["captured_at"] = json!("2026-10-31T00:00:00Z");
+    captured["captured_via"] = json!("owned-capture");
+    completed["agents"]["a"] = captured.clone();
+    completed["teams"]["alpha"]["agents"]["a"] = captured;
+    repository
+        .save(
+            StateWriteIntent::StartAgent {
+                team_key: "alpha",
+                agent_id: "a",
+            },
+            &completed,
+        )
+        .unwrap();
+    let mut reserved = load();
+    let reservation =
+        json!({"provider":"claude","status":"reserved","reservation_token":"owned-reservation"});
+    reserved["agents"]["c"] = reservation.clone();
+    reserved["teams"]["alpha"]["agents"]["c"] = reservation;
+    repository
+        .save(
+            StateWriteIntent::AddAgent {
+                team_key: "alpha",
+                agent_id: "c",
+            },
+            &reserved,
+        )
+        .unwrap();
+    let reserved = load()["teams"]["alpha"]["agents"]["c"].clone();
+    stale["agents"]["b"]["status"] = json!("running");
+    stale["teams"]["alpha"]["agents"]["b"]["status"] = json!("running");
+    repository
+        .save(
+            StateWriteIntent::AddAgent {
+                team_key: "alpha",
+                agent_id: "b",
+            },
+            &stale,
+        )
+        .unwrap();
+    let latest = load();
+    assert_eq!(
+        latest["teams"]["alpha"]["agents"]["a"]["session_id"],
+        "a-new"
+    );
+    assert_eq!(latest["teams"]["alpha"]["agents"]["c"], reserved);
+}
+
+#[test]
+fn execution_failure_does_not_abort_an_admitted_sibling() {
+    let root = TestRoot::new();
+    let source = workspace(root.path(), "source", "alpha");
+    let state_path = source.join(".team/runtime/state.json");
+    let mut state: Value = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    state["teams"]["alpha"]["agents"]["peer-d"] =
+        json!({"owner_team_id":"alpha", "status":"running"});
+    std::fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+    let inbox = source.join(".team/inbox/alpha");
+    std::fs::create_dir_all(&inbox).unwrap();
+    std::fs::write(inbox.join("peer-c"), b"injected append-path obstruction").unwrap();
+    let result = cli(
+        &source,
+        &source,
+        "alpha",
+        &["send", "peer-c,peer-d", "runtime probe", "--mailbox"],
+    );
+    assert_eq!(result["status"], "partial");
+    assert_eq!(result["messages"][0]["ok"], false);
+    assert_eq!(result["messages"][1]["recipient"], "peer-d");
+    assert_eq!(result["messages"][1]["stored"], true);
+}

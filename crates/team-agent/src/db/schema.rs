@@ -122,17 +122,9 @@ const LEADER_NOTIFICATION_LOG_COLUMNS: &[&str] = &[
 ];
 
 /// 打开 `team.db` 并设 pragmas(`core.py:60-61`:busy_timeout=30000 + WAL)。
-pub fn open_db(path: &std::path::Path) -> Result<Connection, DbError> {
-    let existed = path.exists();
-    let conn = retry_sqlite(|| Connection::open(path))?;
-    conn.busy_timeout(Duration::from_millis(30_000))?;
-    if !existed {
-        retry_sqlite(|| conn.execute_batch("PRAGMA journal_mode=WAL;"))?;
-    }
-    Ok(conn)
-}
+pub use crate::importer::legacy_schema::open_db;
 
-fn retry_sqlite<T>(mut op: impl FnMut() -> rusqlite::Result<T>) -> Result<T, DbError> {
+pub(crate) fn retry_sqlite<T>(mut op: impl FnMut() -> rusqlite::Result<T>) -> Result<T, DbError> {
     let mut last_error = None;
     for attempt in 0..8 {
         match op() {

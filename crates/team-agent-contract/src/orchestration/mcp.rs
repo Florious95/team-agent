@@ -1,9 +1,43 @@
 //! Three logical MCP tools. Transport-injected identity is never read from arguments.
-use super::operator::{write_message, MessageWrite, MESSAGE_PRESENTATION};
-use super::store::{current, next_id, unleased, ContractStore, SeatStatus};
+use super::projection::Key;
+use super::store::{current, unleased, ContractStore, SeatStatus};
 use super::Error;
 use crate::contract::types::*;
-use rusqlite::{params, OptionalExtension, TransactionBehavior};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct CallRecord {
+    pub caller: InstanceIdentity,
+    pub key: String,
+    pub request: Value,
+    pub response: Value,
+}
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct FactRecord {
+    pub caller: InstanceIdentity,
+    pub key: String,
+    pub facts: BTreeSet<String>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct ToolEvidence {
+    pub caller: InstanceIdentity,
+    pub connection: InstanceId,
+    pub calls: std::collections::BTreeMap<String, String>,
+    pub facts: BTreeSet<String>,
+}
+impl ToolEvidence {
+    pub(crate) fn key(identity: &InstanceIdentity, connection: &InstanceId) -> Result<Key, Error> {
+        Ok(Key::new(
+            "tool_evidence",
+            call_address(identity, connection.as_str())?,
+        ))
+    }
+}
+pub(crate) fn call_address(identity: &InstanceIdentity, key: &str) -> Result<String, Error> {
+    Ok(format!("{}\n{key}", serde_json::to_string(identity)?))
+}
+
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 
@@ -83,165 +117,63 @@ fn call(
     tool: &str,
     args: &Value,
 ) -> Result<Value, Error> {
+    if matches!(tool, "send_message" | "report_result") {
+        return Err(Error::Invalid("direct business handler required"));
+    }
     validate_arguments(tool, args)?;
-    let scope = store.scope().clone();
-    let tx = store
-        .connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let seat = current(&tx, &scope, &context.identity)?;
+    let address = call_address(&context.identity, key)?;
+    let call_key = Key::new("calls", &address);
+    let fact_key = Key::new("facts", &address);
+    let mut tx = store.files.write([
+        call_key.clone(),
+        fact_key.clone(),
+        Key::new("seats", context.identity.seat.as_str()),
+        Key::new("leases", context.identity.seat.as_str()),
+    ])?;
+    let seat = current(&tx, store.scope(), &context.identity)?;
     if seat.binding_key != context.binding_key
         || matches!(seat.status, SeatStatus::Stopped | SeatStatus::Unknown)
     {
         return Err(Error::Fence);
     }
     unleased(&tx, &context.identity.seat)?;
-    let caller = serde_json::to_string(&context.identity)?;
-    let request = json!({"name":tool,"arguments":args}).to_string();
-    let previous: Option<(String, String)> = tx
-        .query_row(
-            "SELECT request,response FROM contract_calls WHERE caller=?1 AND call_key=?2",
-            params![caller, key],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    if let Some((original, response)) = previous {
-        if serde_json::from_str::<Value>(&request)? != serde_json::from_str::<Value>(&original)? {
+    let request = json!({"name":tool,"arguments":args});
+    if let Some(previous) = tx.get::<CallRecord>(&call_key)? {
+        if previous.caller != context.identity || previous.key != key || previous.request != request
+        {
             return Err(Error::Conflict);
         }
-        return Ok(serde_json::from_str(&response)?);
+        return Ok(previous.response);
     }
-    tx.execute(
-        "INSERT OR IGNORE INTO contract_facts VALUES(?1,?2,'invocation_received')",
-        params![caller, key],
-    )?;
     let response = match tool {
-        "send_message" => {
-            let to = string(args, "to")?;
-            let content = string(args, "content")?;
-            let mailbox = args
-                .get("mailbox")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let recipients = if to == "*" {
-                let mut stmt =
-                    tx.prepare("SELECT seat FROM contract_seats WHERE seat<>?1 UNION SELECT recipient FROM contract_framework_peers WHERE recipient<>?1 ORDER BY 1")?;
-                let rows =
-                    stmt.query_map([context.identity.seat.as_str()], |r| r.get::<_, String>(0))?;
-                rows.collect::<Result<Vec<_>, _>>()?
-            } else {
-                vec![to.to_string()]
-            };
-            let mut ids = vec![];
-            let mut forwarded = false;
-            for recipient in recipients {
-                forwarded |= super::forward::peer(&tx, &recipient)?.is_some();
-                ids.push(write_message(
-                    &tx,
-                    &scope,
-                    MessageWrite {
-                        id: None,
-                        source: Some(&context.identity),
-                        task: Some(&context.task_id),
-                        sender: context.identity.seat.as_str(),
-                        recipient: &recipient,
-                        content,
-                        presentation: MESSAGE_PRESENTATION,
-                        mailbox,
-                    },
-                )?);
-            }
-            json!({"ok":true,"status":if forwarded {"forward_pending"} else if mailbox {"stored_only"} else {"queued"},"message_ids":ids})
-        }
-        "report_result" => {
-            let envelope = normalize_result(context, args)?;
-            let encoded = envelope.to_string();
-            let previous: Option<(String,String)> = tx.query_row("SELECT result_id,envelope FROM results WHERE owner_team_id=?1 AND task_id=?2 AND agent_id=?3",
-                params![scope.as_str(),context.task_id,context.identity.seat.as_str()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-            if let Some((id, original)) = previous {
-                if serde_json::from_str::<Value>(&original)? != envelope {
-                    return Err(Error::Conflict);
-                }
-                json!({"ok":true,"status":"persisted","result_id":id,"leader_notified":false})
-            } else {
-                let id = next_id(&tx, "result")?;
-                tx.execute(
-                    "INSERT INTO results VALUES(?1,?2,?3,?4,?5,?6)",
-                    params![
-                        id,
-                        scope.as_str(),
-                        context.task_id,
-                        context.identity.seat.as_str(),
-                        encoded,
-                        envelope
-                            .get("status")
-                            .and_then(Value::as_str)
-                            .unwrap_or("completed")
-                    ],
-                )?;
-                let result_route: Option<String> =
-                    tx.query_row("SELECT result_route FROM contract_meta", [], |row| {
-                        row.get(0)
-                    })?;
-                if let Some(route) = result_route {
-                    super::forward::insert(
-                        &tx,
-                        &super::forward::ForwardIntent {
-                            id: id.clone(),
-                            source: context.identity.clone(),
-                            route,
-                            payload: super::forward::ForwardPayload::Result {
-                                result_id: id.clone(),
-                                envelope: envelope.clone(),
-                            },
-                            state: super::forward::ForwardState::Pending,
-                            receipt: None,
-                        },
-                    )?;
-                } else if envelope
-                    .pointer("/presentation/sink")
-                    .and_then(Value::as_str)
-                    == Some("leader")
-                {
-                    write_message(
-                        &tx,
-                        &scope,
-                        MessageWrite {
-                            id: None,
-                            source: Some(&context.identity),
-                            task: Some(&context.task_id),
-                            sender: context.identity.seat.as_str(),
-                            recipient: "leader",
-                            content: &encoded,
-                            presentation: &envelope["presentation"].to_string(),
-                            mailbox: false,
-                        },
-                    )?;
-                }
-                json!({"ok":true,"status":"persisted","result_id":id,"leader_notified":false})
-            }
-        }
         "get_team_status" => {
-            let mut statement = tx.prepare("SELECT record FROM contract_seats ORDER BY seat")?;
-            let rows = statement.query_map([], |r| r.get::<_, String>(0))?;
-            let mut seats = vec![];
-            for row in rows {
-                let record: super::store::SeatRecord = serde_json::from_str(&row?)?;
-                seats.push(json!({"identity":record.identity,"provider":record.provider,"status":record.status}));
-            }
-            let mut statement =
-                tx.prepare("SELECT record FROM contract_framework_peers ORDER BY recipient")?;
-            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-            for row in rows {
-                let peer: super::forward::FrameworkPeer = serde_json::from_str(&row?)?;
+            let mut seats: Vec<Value> = tx
+                .list::<super::store::SeatRecord>("seats")?
+                .into_iter()
+                .map(|s| json!({"identity":s.identity,"provider":s.provider,"status":s.status}))
+                .collect();
+            for peer in tx.list::<super::forward::FrameworkPeer>("peers")? {
                 seats.push(json!({"id":peer.recipient,"provider":peer.provider,"status":"delegated_to_framework"}));
             }
-            json!({"ok":true,"scope":scope,"agents":seats})
+            json!({"ok":true,"scope":store.scope(),"agents":seats})
         }
         _ => return Err(Error::Invalid("unknown tool")),
     };
-    tx.execute(
-        "INSERT INTO contract_calls VALUES(?1,?2,?3,?4)",
-        params![caller, key, request, response.to_string()],
+    let mut facts = tx.get::<FactRecord>(&fact_key)?.unwrap_or(FactRecord {
+        caller: context.identity.clone(),
+        key: key.into(),
+        facts: BTreeSet::new(),
+    });
+    facts.facts.insert("invocation_received".into());
+    tx.put(fact_key, &facts)?;
+    tx.put(
+        call_key,
+        &CallRecord {
+            caller: context.identity.clone(),
+            key: key.into(),
+            request,
+            response: response.clone(),
+        },
     )?;
     tx.commit()?;
     Ok(response)
@@ -376,46 +308,81 @@ pub fn response_written(
         .get("method")
         .and_then(Value::as_str)
         .ok_or(Error::Invalid("method"))?;
-    let scope = store.scope().clone();
-    let tx = store
-        .connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let seat = current(&tx, &scope, &context.identity)?;
-    if seat.binding_key != context.binding_key {
-        return Err(Error::Fence);
-    }
     let fact = match method {
         "initialize" => "initialize_response_written",
         "tools/list" => "tools_list_response_written",
         "tools/call" => "response_written",
         _ => return Ok(()),
     };
-    tx.execute(
-        "INSERT OR IGNORE INTO contract_facts VALUES(?1,?2,?3)",
-        params![
-            serde_json::to_string(&context.identity)?,
-            format!("{}:{}", context.connection_id.as_str(), id),
-            fact
-        ],
-    )?;
-    tx.commit()?;
-    Ok(())
+    let key = format!("{}:{}", context.connection_id.as_str(), id);
+    let address = call_address(&context.identity, &key)?;
+    let fact_key = Key::new("facts", &address);
+    let call_key = Key::new("calls", address);
+    let evidence_key = ToolEvidence::key(&context.identity, &context.connection_id)?;
+    let mut tx = store.files.write([
+        fact_key.clone(),
+        call_key.clone(),
+        evidence_key.clone(),
+        Key::new("seats", context.identity.seat.as_str()),
+    ])?;
+    let seat = current(&tx, store.scope(), &context.identity)?;
+    if seat.binding_key != context.binding_key {
+        return Err(Error::Fence);
+    }
+    let mut record = tx.get::<FactRecord>(&fact_key)?.unwrap_or(FactRecord {
+        caller: context.identity.clone(),
+        key,
+        facts: BTreeSet::new(),
+    });
+    record.facts.insert(fact.into());
+    let mut evidence = tx
+        .get::<ToolEvidence>(&evidence_key)?
+        .unwrap_or(ToolEvidence {
+            caller: context.identity.clone(),
+            connection: context.connection_id.clone(),
+            calls: Default::default(),
+            facts: Default::default(),
+        });
+    if evidence.caller != context.identity || evidence.connection != context.connection_id {
+        return Err(Error::Fence);
+    }
+    evidence.facts.insert(fact.into());
+    if fact == "response_written" && record.facts.contains("invocation_received") {
+        let call: CallRecord = tx.get(&call_key)?.ok_or(Error::Corrupt)?;
+        if call.caller != context.identity || call.key != record.key {
+            return Err(Error::Fence);
+        }
+        let name = call.request["name"].as_str().ok_or(Error::Corrupt)?;
+        if !matches!(name, "send_message" | "report_result" | "get_team_status") {
+            return Err(Error::Corrupt);
+        }
+        evidence.calls.insert(name.into(), record.key.clone());
+    }
+    tx.put(evidence_key, &evidence)?;
+    tx.put(fact_key, &record)?;
+    tx.commit()
 }
 
 /// Authenticate a direct business call without requiring a scheduler turn or
 /// writing a message/outbox row. The observation records actual transport input.
-pub fn authorize_direct_call(store: &mut ContractStore, context: &CallContext, request: &Value) -> Result<(), Error> {
-    if request.get("jsonrpc").and_then(Value::as_str) != Some("2.0") { return Err(Error::Invalid("jsonrpc")); }
-    let id = request.get("id").filter(|id| id.is_string() || id.is_i64() || id.is_u64()).ok_or(Error::Invalid("rpc id"))?;
-    let scope = store.scope().clone();
-    let tx = store.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let seat = current(&tx, &scope, &context.identity)?;
-    if seat.binding_key != context.binding_key || matches!(seat.status, SeatStatus::Stopped | SeatStatus::Unknown) {
+pub fn authorize_direct_call(
+    store: &mut ContractStore,
+    context: &CallContext,
+    request: &Value,
+) -> Result<(), Error> {
+    if request.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return Err(Error::Invalid("jsonrpc"));
+    }
+    request
+        .get("id")
+        .filter(|id| id.is_string() || id.is_i64() || id.is_u64())
+        .ok_or(Error::Invalid("rpc id"))?;
+    let seat = current(&store.files, store.scope(), &context.identity)?;
+    if seat.binding_key != context.binding_key
+        || matches!(seat.status, SeatStatus::Stopped | SeatStatus::Unknown)
+    {
         return Err(Error::Fence);
     }
-    tx.execute("INSERT OR IGNORE INTO contract_facts VALUES(?1,?2,'invocation_received')",
-        params![serde_json::to_string(&context.identity)?, format!("{}:{}", context.connection_id.as_str(), id)])?;
-    tx.commit()?;
     Ok(())
 }
 
@@ -471,8 +438,12 @@ where
 
 /// Share framing and identity fences while the host supplies its business plane.
 pub fn serve_with_handler<R: BufRead, W: Write, F, D, H>(
-    store: &mut ContractStore, mut resolve_context: F, mut reader: R, mut writer: W,
-    mut rejected: D, mut handler: H,
+    store: &mut ContractStore,
+    mut resolve_context: F,
+    mut reader: R,
+    mut writer: W,
+    mut rejected: D,
+    mut handler: H,
 ) -> Result<(), Error>
 where
     F: FnMut(&mut ContractStore, &Value) -> Result<CallContext, Error>,
@@ -492,7 +463,10 @@ where
         let request: Value = serde_json::from_slice(&frame)?;
         let context = resolve_context(store, &request);
         let (handled, stage) = match &context {
-            Ok(context) => (handler(store, context, &request), RequestRejectionStage::Handler),
+            Ok(context) => (
+                handler(store, context, &request),
+                RequestRejectionStage::Handler,
+            ),
             Err(error) => (Err(error.clone()), RequestRejectionStage::Context),
         };
         let (response, success) = match handled {
@@ -512,7 +486,14 @@ where
             serde_json::to_writer(&mut writer, &response)?;
             writer.write_all(b"\n")?;
             writer.flush()?;
-            if success {
+            // Direct business tools have durable inbox receipts. A response must
+            // not reacquire a SQLite write transaction after physical delivery.
+            if success
+                && !matches!(
+                    request.pointer("/params/name").and_then(Value::as_str),
+                    Some("send_message" | "report_result")
+                )
+            {
                 response_written(store, &context?, &request)?;
             }
         }

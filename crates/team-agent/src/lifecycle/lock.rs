@@ -1,8 +1,8 @@
 //! ---
-//! purpose: workspace 级 agent-lifecycle 互斥锁，让同一 workspace 的席位增删起停串行
+//! purpose: 按 team + seat 隔离生命周期锁；批量操作在逐席执行时获取目标锁
 //! contract:
 //!   provides:
-//!     - name: acquire_agent_lifecycle_lock
+//!     - name: acquire_seat_lifecycle_lock
 //!       what: 轮询抢锁，成功返回持有到 Drop 的 guard，超时返回 LifecycleLockTimeout
 //!     - name: agent_lifecycle_lock_path
 //!       what: 给出该 workspace 的锁文件路径
@@ -36,7 +36,7 @@ pub(crate) struct LifecycleLockRequest<'a> {
 }
 
 pub(crate) struct LifecycleLockGuard {
-    file: std::fs::File,
+    _lock: Option<std::rc::Rc<crate::platform::entity_lock::EntityLock>>,
 }
 
 /// ---
@@ -46,7 +46,7 @@ pub(crate) struct LifecycleLockGuard {
 /// returns: 持有锁的 guard，Drop 时解锁
 /// errors: 建目录或打开锁文件失败返回 StatePersist，等待超时返回 LifecycleLockTimeout
 /// ---
-pub(crate) fn acquire_agent_lifecycle_lock(
+pub(crate) fn acquire_seat_lifecycle_lock(
     request: LifecycleLockRequest<'_>,
 ) -> Result<LifecycleLockGuard, LifecycleError> {
     #[cfg(test)]
@@ -60,13 +60,21 @@ pub(crate) fn acquire_agent_lifecycle_lock(
     )
 }
 
+/// Recovery may need a second seat while the caller owns the first. Never wait
+/// in the opposite lock order: a busy peer remains a typed, retryable refusal.
+pub(crate) fn try_acquire_seat_lifecycle_lock(
+    request: LifecycleLockRequest<'_>,
+) -> Result<LifecycleLockGuard, LifecycleError> {
+    acquire_agent_lifecycle_lock_with_deadlines(request, Duration::ZERO, Duration::ZERO)
+}
+
 /// ---
 /// purpose: 以显式超时与告警阈值抢同一把锁，仅测试构建可见
 /// params:
 ///   timeout: 放弃等待的上限
 ///   held_long: 超过它写一次 lock_held_long 事件
 /// returns: 持有锁的 guard
-/// errors: 同 acquire_agent_lifecycle_lock
+/// errors: 同 acquire_seat_lifecycle_lock
 /// ---
 #[cfg(test)]
 pub(crate) fn acquire_agent_lifecycle_lock_for_test(
@@ -132,17 +140,27 @@ fn acquire_agent_lifecycle_lock_with_deadlines(
     // the polling cadence, waiter file writes, `lock_held_long_event`
     // emission, and error shape are all unchanged relative to the
     // pre-Batch-2 unix branch.
-    let lock_path = agent_lifecycle_lock_path(request.workspace);
+    let Some(lock_path) = seat_lifecycle_lock_path(&request)? else {
+        // A roster is not an exclusion domain. Batch callers lock each seat
+        // at its physical operation, not the entire team or workspace.
+        return Ok(LifecycleLockGuard { _lock: None });
+    };
     if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent)
+        crate::station::seat_store::private_dir(parent)
             .map_err(|e| LifecycleError::StatePersist(format!("create lifecycle lock dir: {e}")))?;
     }
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)
+    if let Some(lock) = crate::platform::entity_lock::EntityLock::current(&lock_path) {
+        check_seat_manifest(&request)?;
+        return Ok(LifecycleLockGuard { _lock: Some(lock) });
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).read(true).write(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let mut file = options.open(&lock_path)
         .map_err(|e| LifecycleError::StatePersist(format!("open lifecycle lock: {e}")))?;
     let started = Instant::now();
     let mut long_event_written = false;
@@ -151,7 +169,10 @@ fn acquire_agent_lifecycle_lock_with_deadlines(
         match crate::platform::file_lock::try_lock_once_nonblocking(&file) {
             Ok(true) => {
                 write_lock_metadata(&mut file, &request, &lock_path)?;
-                return Ok(LifecycleLockGuard { file });
+                let lock = crate::platform::entity_lock::EntityLock::acquired(&lock_path, file)
+                    .map_err(|error| LifecycleError::StatePersist(error.to_string()))?;
+                check_seat_manifest(&request)?;
+                return Ok(LifecycleLockGuard { _lock: Some(lock) });
             }
             Ok(false) => {}
             Err(e) => {
@@ -190,12 +211,34 @@ pub(crate) fn agent_lifecycle_lock_path(workspace: &Path) -> PathBuf {
     crate::model::paths::runtime_dir(workspace).join(format!("{AGENT_LIFECYCLE_LOCK_NAME}.lock"))
 }
 
+fn check_seat_manifest(request: &LifecycleLockRequest<'_>) -> Result<(), LifecycleError> {
+    if let Some(agent) = request.agent_id {
+        crate::station::projection::check_target(
+            request.workspace, request.team.unwrap_or("default"), agent.as_str(),
+        ).map_err(LifecycleError::StatePersist)?;
+    }
+    Ok(())
+}
+
+fn seat_lifecycle_lock_path(request: &LifecycleLockRequest<'_>) -> Result<Option<PathBuf>, LifecycleError> {
+    let Some(agent) = request.agent_id else { return Ok(None); };
+    let team = request.team.unwrap_or("default");
+    crate::station::seat_store::component(team).map_err(LifecycleError::StatePersist)?;
+    crate::station::seat_store::component(agent.as_str()).map_err(LifecycleError::StatePersist)?;
+    let workspace = request.workspace.canonicalize()
+        .map_err(|error| LifecycleError::StatePersist(error.to_string()))?;
+    Ok(Some(workspace.join(".team/station-v1").join(team)
+        .join("locks").join(format!("seat.{}.lock", agent.as_str()))))
+}
+
 fn write_lock_metadata(
     file: &mut std::fs::File,
     request: &LifecycleLockRequest<'_>,
     lock_path: &Path,
 ) -> Result<(), LifecycleError> {
     let metadata = serde_json::json!({
+        "v": 1,
+        "kind": "seat_lock",
         "lock_name": AGENT_LIFECYCLE_LOCK_NAME,
         "pid": std::process::id(),
         "operation": request.operation,
@@ -293,6 +336,7 @@ fn blocked_queue_len(workspace: &Path) -> Option<usize> {
 
 struct WaiterFile {
     path: PathBuf,
+    lock_path: PathBuf,
 }
 
 impl WaiterFile {
@@ -300,7 +344,7 @@ impl WaiterFile {
         let dir = waiter_dir(request.workspace);
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{}.json", std::process::id()));
-        let file = Self { path };
+        let file = Self { path, lock_path: lock_path.to_path_buf() };
         file.write_with_lock(request, lock_path, Duration::from_millis(0))?;
         Ok(file)
     }
@@ -308,7 +352,7 @@ impl WaiterFile {
     fn write(&self, request: &LifecycleLockRequest<'_>, elapsed: Duration) -> std::io::Result<()> {
         self.write_with_lock(
             request,
-            &agent_lifecycle_lock_path(request.workspace),
+            &self.lock_path,
             elapsed,
         )
     }
@@ -337,14 +381,5 @@ impl WaiterFile {
 impl Drop for WaiterFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-impl Drop for LifecycleLockGuard {
-    fn drop(&mut self) {
-        // Batch 2: unlock via platform primitive. Best-effort — OS
-        // releases when the file handle closes anyway. Uniform on
-        // both `flock(LOCK_UN)` (unix) and `UnlockFileEx` (windows).
-        let _ = crate::platform::file_lock::unlock(&self.file);
     }
 }

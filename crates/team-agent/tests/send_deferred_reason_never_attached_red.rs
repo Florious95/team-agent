@@ -77,7 +77,10 @@ fn explicit_mailbox_needs_no_leader_endpoint_and_does_not_attempt_delivery() {
         .unwrap()
         .to_value();
     assert_eq!(value["status"], "stored");
-    assert_eq!(value["mailbox"], true);
+    // R-M1a/M1b: a mailbox send is a durable record that never attempts live delivery
+    // (`stored: true`, `live: false`); the receipt has no separate `mailbox` key.
+    assert_eq!(value["stored"], true, "{value}");
+    assert_eq!(value["live"], false, "{value}");
     assert!(value.get("delivery_error").is_none());
     assert_eq!(
         fixture.inbox("leader")[0]["message_id"],
@@ -113,8 +116,9 @@ fn attaching_a_leader_does_not_replay_old_inbox_records() {
             None,
         )
         .unwrap();
-    let path = fixture.root.join(".team/inbox/leader.jsonl");
-    let before = std::fs::read(&path).unwrap();
+    // R-M1c: compare every inbox file (segment layout is the store's choice).
+    let before = fixture.inbox_bytes();
+    assert!(!before.is_empty());
     fixture.set_state(&original);
     let live = tools
         .send_message(
@@ -131,7 +135,9 @@ fn attaching_a_leader_does_not_replay_old_inbox_records() {
     assert!(!std::fs::read_to_string(fixture.root.join("received"))
         .unwrap()
         .contains("old offline reply"));
-    assert!(std::fs::read(path).unwrap().starts_with(&before));
+    let after = fixture.inbox_bytes();
+    assert!(before.iter().all(|(path, bytes)| after.get(path).is_some_and(|later| later.starts_with(bytes))),
+        "attaching must not rewrite or replay earlier inbox records");
     assert_eq!(fixture.inbox("leader").len(), 2);
     assert!(!fixture.root.join(".team/runtime/team.db").exists());
 }

@@ -106,168 +106,36 @@ fn run_contract_suite(
     team: Option<&TeamKey>,
     run_id: &str,
 ) -> Vec<ContractSuiteCheck> {
-    let scratch =
-        std::env::temp_dir().join(format!("ta-comms-contract-{run_id}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&scratch);
+    let scratch = std::env::temp_dir().join(format!("ta-comms-contract-{run_id}-{}", std::process::id()));
     let mut checks = Vec::new();
-    let mut scratch_store = match MessageStore::open(&scratch) {
-        Ok(store) => {
-            checks.push(contract_check(
-                "message_store_schema",
-                CheckStatus::Pass,
-                None,
-            ));
-            Some(store)
+    let probe = (|| -> Result<(), String> {
+        let record = crate::inbox_store::record("doctor", "worker", "C3 probe", Some("contract-a"), "message");
+        crate::inbox_store::store(&scratch, "worker", &record)?;
+        crate::inbox_store::store(&scratch, "worker", &record)?;
+        let own = crate::inbox_store::read(&scratch, "worker", 10, Some("contract-a"))?;
+        let other = crate::inbox_store::read(&scratch, "worker", 10, Some("contract-b"))?;
+        if own["messages"].as_array().map(Vec::len) != Some(1)
+            || other["messages"].as_array().map(Vec::len) != Some(0) {
+            return Err("C3 idempotency or team isolation failed".into());
         }
-        Err(error) => {
-            checks.push(contract_check(
-                "message_store_schema",
-                CheckStatus::Fail,
-                Some(error.to_string()),
-            ));
-            None
+        let mut conflict = record;
+        conflict["content"] = serde_json::json!("conflicting body");
+        if crate::inbox_store::store(&scratch, "worker", &conflict).is_ok() {
+            return Err("C3 accepted a conflicting message id".into());
         }
-    };
-
-    match scratch_store.as_ref().and_then(|_| {
-        match super::persist::persist_internal_send(
-            &scratch,
-            super::InternalSendKind::Selftest,
-            Some("contract-team"),
-            None,
-            "doctor",
-            "worker",
-            "comms contract probe",
-            None,
-            false,
-            None,
-            super::InitialDisposition::Accepted,
-            None,
-        )
-        .ok()?
-        {
-            super::PersistResolution::Persisted(persisted) => Some(persisted.message_id),
-            super::PersistResolution::Duplicate(_) => None,
-        }
-    }) {
-        Some(message_id) if message_id.starts_with("msg_") && message_id.len() > 4 => {
-            let rendered = format!(
-                "Team Agent message from doctor:\n\ncomms contract probe\n\n[team-agent-token:{message_id}]"
-            );
-            let token = format!("[team-agent-token:{message_id}]");
-            checks.push(contract_check(
-                "message_token_shape",
-                if rendered.ends_with(&token) {
-                    CheckStatus::Pass
-                } else {
-                    CheckStatus::Fail
-                },
-                (!rendered.ends_with(&token)).then(|| "rendered token suffix missing".to_string()),
-            ));
-        }
-        Some(_) => checks.push(contract_check(
-            "message_token_shape",
-            CheckStatus::Fail,
-            Some("message id did not use msg_ prefix".to_string()),
-        )),
-        None => checks.push(contract_check(
-            "message_token_shape",
-            CheckStatus::Fail,
-            Some("could not create scratch message".to_string()),
-        )),
-    }
-
+        Ok(())
+    })();
+    checks.push(contract_check("c3_scope_and_idempotency",
+        if probe.is_ok() { CheckStatus::Pass } else { CheckStatus::Fail }, probe.err()));
     let result_id = format!("res-comms-{run_id}");
-    let result_content = super::watchers::format_result_watcher_notification(&serde_json::json!({
-        "result_id": result_id,
-        "task_id": "comms-contract",
-        "agent_id": "doctor",
-        "status": "success",
-        "summary": "contract suite probe",
+    let rendered = super::watchers::format_result_watcher_notification(&serde_json::json!({
+        "result_id": result_id, "task_id": "comms-contract", "agent_id": "doctor",
+        "status": "success", "summary": "contract suite probe"
     }));
-    let parsed_result_id = super::watchers::result_id_from_text(&result_content);
-    checks.push(contract_check(
-        "result_notification_render",
-        if parsed_result_id.as_deref() == Some(result_id.as_str()) {
-            CheckStatus::Pass
-        } else {
-            CheckStatus::Fail
-        },
-        (parsed_result_id.as_deref() != Some(result_id.as_str()))
-            .then(|| "result notification did not round-trip result_id".to_string()),
-    ));
-
-    let selected = crate::state::selector::resolve_active_team(
-        workspace,
-        team.map(TeamKey::as_str),
-        crate::state::selector::SelectorMode::RuntimeOnly,
-    );
-    match (scratch_store.take(), selected) {
-        (Some(store), Ok(selected)) => {
-            let owner_team = selected.team_key;
-            let mut state = selected.state;
-            if !state.is_object() {
-                state = serde_json::json!({});
-            }
-            if let Some(obj) = state.as_object_mut() {
-                obj.insert(
-                    "active_team_key".to_string(),
-                    serde_json::json!(owner_team.clone()),
-                );
-            }
-            let event_log = crate::event_log::EventLog::new(&scratch);
-            let outcome = super::leader_receiver::send_to_leader_receiver(
-                &scratch,
-                &state,
-                "leader",
-                "comms contract leader projection",
-                None,
-                "doctor",
-                false,
-                Some("comms-contract-result"),
-                &event_log,
-            );
-            match outcome {
-                Ok(outcome) => {
-                    let actual_owner = outcome.message_id.as_deref().and_then(|message_id| {
-                        message_owner_team(store.db_path(), message_id)
-                            .ok()
-                            .flatten()
-                    });
-                    checks.push(contract_check(
-                        "leader_projection_owner_team",
-                        if actual_owner.as_deref() == Some(owner_team.as_str()) {
-                            CheckStatus::Pass
-                        } else {
-                            CheckStatus::Fail
-                        },
-                        (actual_owner.as_deref() != Some(owner_team.as_str())).then(|| {
-                            format!(
-                                "leader-bound message owner_team_id={:?}, expected={owner_team}",
-                                actual_owner
-                            )
-                        }),
-                    ));
-                }
-                Err(error) => checks.push(contract_check(
-                    "leader_projection_owner_team",
-                    CheckStatus::Fail,
-                    Some(error.to_string()),
-                )),
-            }
-        }
-        (_, Err(error)) => checks.push(contract_check(
-            "leader_projection_owner_team",
-            CheckStatus::Fail,
-            Some(error.to_string()),
-        )),
-        (None, _) => checks.push(contract_check(
-            "leader_projection_owner_team",
-            CheckStatus::Fail,
-            Some("message store schema unavailable".to_string()),
-        )),
-    }
-
+    let valid = super::watchers::result_id_from_text(&rendered).as_deref() == Some(result_id.as_str());
+    checks.push(contract_check("result_notification_render",
+        if valid { CheckStatus::Pass } else { CheckStatus::Fail },
+        (!valid).then(|| "result notification did not round-trip result_id".into())));
     let _ = std::fs::remove_dir_all(&scratch);
     checks
 }
@@ -281,13 +149,7 @@ fn contract_check(name: &str, status: CheckStatus, reason: Option<String>) -> Co
 }
 
 fn message_owner_team(db_path: &Path, message_id: &str) -> Result<Option<String>, MessagingError> {
-    let conn = crate::db::schema::open_db(db_path)?;
-    let owner = conn.query_row(
-        "select owner_team_id from messages where message_id = ?1",
-        rusqlite::params![message_id],
-        |row| row.get::<_, Option<String>>(0),
-    )?;
-    Ok(owner)
+    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
 }
 
 /// `evaluate_idle_behavior` (`diagnose/comms.py:50`):idle 分类准确性评估。零 token,走 driver。

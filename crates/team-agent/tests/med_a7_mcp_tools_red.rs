@@ -19,9 +19,6 @@ use serial_test::serial;
 fn a7_send_must_not_fabricate_message_id() {
     let _hermetic = HermeticTestEnv::enter("med-a7-mcp-tools");
     let harness = McpSimHarness::new();
-    let _coordinator_guard = CoordinatorStopGuard {
-        ws: harness.workspace_path().to_path_buf(),
-    };
     let mut state = harness.state_value();
     for pointer in [
         "/agents/worker_a/status",
@@ -53,19 +50,6 @@ fn a7_send_must_not_fabricate_message_id() {
         call.body,
         call.raw
     );
-}
-
-/// The MCP fixture may start a workspace coordinator; stop it on drop.
-struct CoordinatorStopGuard {
-    ws: std::path::PathBuf,
-}
-
-impl Drop for CoordinatorStopGuard {
-    fn drop(&mut self) {
-        let _ = team_agent::coordinator::stop_coordinator(
-            &team_agent::coordinator::WorkspacePath::new(self.ws.clone()),
-        );
-    }
 }
 
 fn extract_strings(value: &Value) -> Vec<String> {

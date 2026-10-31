@@ -30,7 +30,7 @@
 use super::common::*;
 use super::selection::classify_restart_plan_with_resume_validation;
 use super::*;
-use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
+use crate::lifecycle::lock::{acquire_seat_lifecycle_lock, LifecycleLockRequest};
 
 // ── 0.5.38 startup latency instrumentation ──────────────────────────────────
 //
@@ -353,7 +353,7 @@ fn restart_with_selected_team_and_transport(
     // `elapsed_ms` for at-a-glance latency triage.
     let phase_timer = RestartPhaseTimer::start();
     phase_timer.emit(&selected.run_workspace, "restart.phase", LifecyclePhase::ResolveContext);
-    let lifecycle_lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let lifecycle_lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &selected.run_workspace,
         operation: "restart",
         team: Some(selected.team_key.as_str()),
@@ -795,11 +795,6 @@ fn restart_with_selected_team_and_transport(
             );
             // 0.5.32: fake harness respawn shares the same spawn cohort
             // boundary — clear the matching `agent_health` observation.
-            let _ = crate::db::agent_health_capture::clear_agent_health_observation(
-                &selected.run_workspace,
-                &selected.team_key,
-                &decision.agent_id,
-            );
             successful_agents.push(decision.clone());
             continue;
         }
@@ -971,11 +966,6 @@ fn restart_with_selected_team_and_transport(
         // pair the state-side activity clear with a DB `agent_health` clear so
         // status --json's health projection does not surface the pre-restart
         // WORKING row. Best-effort: DB failure must not fail the restart loop.
-        let _ = crate::db::agent_health_capture::clear_agent_health_observation(
-            &selected.run_workspace,
-            &selected.team_key,
-            &decision.agent_id,
-        );
     }
     // END_B5_RESTART_ISOLATION_LOOP
     if live_worker_session_deferred_teardown {
@@ -1349,14 +1339,8 @@ fn restart_with_selected_team_and_transport(
         });
     }
     drop(lifecycle_lock);
-    let coordinator =
-        start_coordinator_for_workspace(&selected.run_workspace, Some(&selected.team_key))?;
-    phase_timer.emit(
-        &selected.run_workspace,
-        "restart.phase",
-        LifecyclePhase::CoordinatorStart,
-    );
-    let coordinator_started = coordinator.ok;
+    let coordinator = crate::lifecycle::CoordinatorStartSummary::not_required();
+    let coordinator_started = false;
     phase_timer.emit(&selected.run_workspace, "restart.phase", LifecyclePhase::ReadinessWait);
     if !legacy_successful_agents.is_empty() {
         wait_restart_readiness_or_timeout(
@@ -1707,8 +1691,10 @@ fn append_native_restart_results(
 ) {
     for result in restart() {
         let decision = RestartedAgent {
-            agent_id: AgentId::new(result.agent_id), restart_mode: StartMode::Resumed,
-            decision: ResumeDecision::Resume, session_id: result.session_id.map(SessionId::new),
+            agent_id: AgentId::new(result.agent_id),
+            restart_mode: if result.native_launch == team_agent_contract::contract::types::Operation::Fresh { StartMode::Fresh } else { StartMode::Resumed },
+            decision: if result.native_launch == team_agent_contract::contract::types::Operation::Fresh { ResumeDecision::FreshStart } else { ResumeDecision::Resume },
+            session_id: result.session_id.map(SessionId::new),
         };
         match result.outcome {
             Ok(()) => successful.push(decision),
@@ -1740,6 +1726,7 @@ mod mixed_native_restart_tests {
                 append_native_restart_results(&mut successful, &mut failed, || {
                     attempts += 1;
                     vec![NativeRestartResult { agent_id: "native".into(), session_id: Some("same-session".into()),
+                        native_launch: team_agent_contract::contract::types::Operation::Resume,
                         outcome: if native_failed { Err("native failed".into()) } else { Ok(()) } }]
                 });
                 assert_eq!(attempts, 1, "no legacy survivor must not short-circuit native execution");
@@ -1764,12 +1751,11 @@ fn restart_readiness_poll_interval() -> std::time::Duration {
 struct RestartReadiness {
     session_created: bool,
     worker_pane_addressable: bool,
-    coordinator_alive: bool,
 }
 
 impl RestartReadiness {
     fn ready(self) -> bool {
-        self.session_created && self.worker_pane_addressable && self.coordinator_alive
+        self.session_created && self.worker_pane_addressable
     }
 }
 
@@ -1803,7 +1789,7 @@ fn wait_restart_readiness_or_timeout(
 }
 
 fn restart_readiness(
-    workspace: &Path,
+    _workspace: &Path,
     state: &serde_json::Value,
     session_name: &SessionName,
     decisions: &[RestartedAgent],
@@ -1811,19 +1797,9 @@ fn restart_readiness(
 ) -> RestartReadiness {
     let session_created = session_live_or_default(transport, session_name, false);
     let worker_pane_addressable = restart_worker_panes_addressable(state, decisions, transport);
-    let coordinator_workspace = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
-    let health = crate::coordinator::coordinator_health(&coordinator_workspace);
-    let coordinator_accepted = health.ok
-        || (health.service_available
-            && matches!(
-                health.binary_identity_relation,
-                crate::coordinator::CoordinatorBinaryIdentityRelation::DaemonNewerThanCaller
-            ));
-    let coordinator_alive = coordinator_accepted && session_created;
     RestartReadiness {
         session_created,
         worker_pane_addressable,
-        coordinator_alive,
     }
 }
 
@@ -1893,16 +1869,9 @@ fn write_restart_readiness_timeout_event(
             serde_json::json!({
                 "tmux_session_created": readiness.session_created,
                 "worker_pane_addressable": readiness.worker_pane_addressable,
-                "coordinator_alive": readiness.coordinator_alive,
                 "deadline_ms": deadline.as_millis(),
                 "elapsed_ms": elapsed.as_millis(),
-                "coordinator_log": crate::coordinator::coordinator_log_path(
-                    &crate::coordinator::WorkspacePath::new(workspace.to_path_buf())
-                ).display().to_string(),
                 "state_path": crate::state::persist::runtime_state_path(workspace).display().to_string(),
-                "pid_path": crate::coordinator::coordinator_pid_path(
-                    &crate::coordinator::WorkspacePath::new(workspace.to_path_buf())
-                ).display().to_string(),
             }),
         )
         .map(|_| ())
@@ -1914,23 +1883,18 @@ fn restart_readiness_timeout_message(
     readiness: RestartReadiness,
     deadline: std::time::Duration,
 ) -> String {
-    let coordinator_workspace = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
     let deadline_s = deadline.as_secs_f64();
     format!(
         "restart not ready within {deadline_s:.1}s: {missing}\n\
          - tmux session created: {session}\n\
          - worker pane addressable: {pane}\n\
-         - coordinator alive: {coordinator}\n\
-         Action: check coordinator log {log}, then inspect this workspace with `team-agent doctor --workspace '{workspace}'`\n\
-         Log: coordinator_log={log} state={state} pid_file={pid}",
+         Action: inspect this workspace with `team-agent doctor --workspace '{workspace}'`\n\
+         State: {state}",
         missing = restart_readiness_missing_summary(readiness),
         session = yes_no(readiness.session_created),
         pane = yes_no(readiness.worker_pane_addressable),
-        coordinator = yes_no(readiness.coordinator_alive),
-        log = crate::coordinator::coordinator_log_path(&coordinator_workspace).display(),
         workspace = workspace.display(),
         state = crate::state::persist::runtime_state_path(workspace).display(),
-        pid = crate::coordinator::coordinator_pid_path(&coordinator_workspace).display(),
     )
 }
 
@@ -1941,9 +1905,6 @@ fn restart_readiness_missing_summary(readiness: RestartReadiness) -> String {
     }
     if !readiness.worker_pane_addressable {
         missing.push("worker pane addressable");
-    }
-    if !readiness.coordinator_alive {
-        missing.push("coordinator alive");
     }
     missing.join(", ")
 }
@@ -2112,56 +2073,16 @@ pub fn restart_leader_public_bind(
 fn maintain_live_binding_index(
     workspace: &std::path::Path,
     team: Option<&str>,
-    state: &serde_json::Value,
+    _state: &serde_json::Value,
 ) -> Option<serde_json::Value> {
-    let team_key = team.unwrap_or("");
     let register = crate::leader::registry::register_binding_from_state_best_effort(
-        workspace,
-        team,
-        "restart-live-index",
+        workspace, team, "restart-live-index",
     );
     let mut report = serde_json::Map::new();
-    if !register
-        .as_ref()
-        .is_some_and(|outcome| outcome.status == "registered")
-    {
-        report.insert("registry_maintain_failed".to_string(), serde_json::json!(true));
+    if !register.as_ref().is_some_and(|outcome| outcome.status == "registered") {
+        report.insert("registry_maintain_failed".into(), serde_json::json!(true));
     }
-    let Some(receiver) = selected_team_receiver(state, team_key) else {
-        return Some(serde_json::Value::Object(report));
-    };
-    let Some(pane) = receiver
-        .get("pane_id")
-        .and_then(serde_json::Value::as_str)
-        .filter(|pane| !pane.is_empty())
-    else {
-        report.insert("debt_maintain_failed".to_string(), serde_json::json!(true));
-        return Some(serde_json::Value::Object(report));
-    };
-    let store = match crate::message_store::MessageStore::open(workspace) {
-        Ok(store) => store,
-        Err(_) => {
-            report.insert("debt_maintain_failed".to_string(), serde_json::json!(true));
-            return Some(serde_json::Value::Object(report));
-        }
-    };
-    let event_log = crate::event_log::EventLog::new(workspace);
-    let team_id = crate::model::ids::TeamKey::new(team_key.to_string());
-    let pane_id = crate::transport::PaneId::new(pane);
-    match crate::messaging::watchers::requeue_delivery_exhausted_watchers(
-        workspace,
-        &store,
-        &event_log,
-        &team_id,
-        &pane_id,
-    ) {
-        Ok(notices) => {
-            report.insert("notices".to_string(), serde_json::json!(notices.len()));
-        }
-        Err(_) => {
-            report.insert("debt_maintain_failed".to_string(), serde_json::json!(true));
-        }
-    }
+    // C3 history is immutable. Binding a leader never replays an old SQL debt.
     Some(serde_json::Value::Object(report))
 }
 
@@ -2327,16 +2248,9 @@ fn save_restart_state_with_lifecycle_topology_authority_and_capture_backfill_ski
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    sync_restart_team_projections(state, team_key);
-    crate::state::repository::StateRepository::new(workspace).save(
-        crate::state::repository::StateWriteIntent::RestartTeam {
-            team_key,
-            topology_authority_agent_ids: &topology_agent_ids,
-            skip_capture_backfill_agent_ids: &skip_capture_backfill_agent_ids,
-        },
-        state,
+    save_restart_projected_state_with_capture_backfill_skip(
+        workspace, state, team_key, &skip_capture_backfill_agent_ids, &topology_agent_ids,
     )
-    .map_err(|e| LifecycleError::StatePersist(e.to_string()))
 }
 
 fn save_restart_session_repairs(
@@ -2655,7 +2569,7 @@ fn mark_fake_harness_agent_respawned(
 
 fn same_role_cohort_targets_from_decisions(
     state: &serde_json::Value,
-    spec_workspace: &Path,
+    _spec_workspace: &Path,
     agents: &[RestartedAgent],
 ) -> Vec<SameRoleCohortTarget> {
     let mut targets = Vec::new();
@@ -2664,17 +2578,6 @@ fn same_role_cohort_targets_from_decisions(
         let raw_agent = state
             .get("agents")
             .and_then(|agents| agents.get(agent_id.as_str()));
-        let effective_agent = raw_agent.map(|agent| {
-            rehydrate_agent_command_context_from_spec(spec_workspace, agent_id, agent)
-        });
-        if effective_agent
-            .as_ref()
-            .and_then(|agent| agent.get("provider"))
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|provider| provider.eq_ignore_ascii_case("fake"))
-        {
-            continue;
-        }
         let window = raw_agent
             .and_then(|agent| agent.get("window"))
             .and_then(serde_json::Value::as_str)
@@ -3268,11 +3171,6 @@ fn apply_marked_respawn(
             agent_provider,
         );
     }
-    let _ = crate::db::agent_health_capture::clear_agent_health_observation(
-        run_workspace,
-        team_key,
-        &decision.agent_id,
-    );
 }
 
 /// ---
@@ -3787,7 +3685,7 @@ pub(crate) fn restore_missing_runtime_spec(
 ) -> Result<std::path::PathBuf, LifecycleError> {
     let run_workspace = crate::model::paths::canonical_run_workspace(workspace)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &run_workspace, operation: "restore-runtime-spec", team: Some(team), agent_id: None,
     })?;
     let selected = crate::state::selector::resolve_active_team_readonly(
@@ -4972,109 +4870,34 @@ tasks:
         );
     }
 
+    /// M3 (replaces the daemon-health readiness matrix): team restart readiness depends only on
+    /// the native tmux session and the worker panes. No coordinator metadata exists, and none is
+    /// required.
     #[test]
     #[serial_test::serial(env)]
-    fn restart_readiness_accepts_only_healthy_or_newer_daemon() {
-        let identity = crate::coordinator::current_coordinator_binary_identity();
-        let cases = vec![
-            (
-                "same",
-                std::process::id(),
-                crate::coordinator::PROTOCOL_VERSION,
-                true,
-                identity.binary_version.clone(),
-                identity.binary_path.clone(),
-                true,
-            ),
-            (
-                "newer",
-                std::process::id(),
-                crate::coordinator::PROTOCOL_VERSION,
-                true,
-                "999.0.0".to_string(),
-                identity.binary_path.clone(),
-                true,
-            ),
-            (
-                "caller-newer",
-                std::process::id(),
-                crate::coordinator::PROTOCOL_VERSION,
-                true,
-                "0.0.1".to_string(),
-                identity.binary_path.clone(),
-                false,
-            ),
-            (
-                "same-version-path-mismatch",
-                std::process::id(),
-                crate::coordinator::PROTOCOL_VERSION,
-                true,
-                identity.binary_version.clone(),
-                "/tmp/team-agent-other-binary".to_string(),
-                false,
-            ),
-            (
-                "unknown-identity",
-                std::process::id(),
-                crate::coordinator::PROTOCOL_VERSION,
-                true,
-                "not-a-version".to_string(),
-                identity.binary_path.clone(),
-                false,
-            ),
-            (
-                "dead-process",
-                u32::MAX,
-                crate::coordinator::PROTOCOL_VERSION,
-                true,
-                "999.0.0".to_string(),
-                identity.binary_path.clone(),
-                false,
-            ),
-            (
-                "protocol-mismatch",
-                std::process::id(),
-                crate::coordinator::PROTOCOL_VERSION + 1,
-                true,
-                "999.0.0".to_string(),
-                identity.binary_path.clone(),
-                false,
-            ),
-            (
-                "schema-mismatch",
-                std::process::id(),
-                crate::coordinator::PROTOCOL_VERSION,
-                false,
-                "999.0.0".to_string(),
-                identity.binary_path.clone(),
-                false,
-            ),
-        ];
-
-        for (tag, pid, protocol, schema_ok, version, path, expected) in cases {
-            let workspace = std::env::temp_dir().join(format!(
-                "ta-restart-readiness-002-{tag}-{}",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_dir_all(&workspace);
-            seed_restart_readiness_health(&workspace, pid, protocol, schema_ok, &version, &path);
-            let transport = crate::transport::test_support::OfflineTransport::new()
-                .with_session_present(true);
-            let readiness = restart_readiness(
-                &workspace,
-                &serde_json::json!({}),
-                &SessionName::new("team-current"),
-                &[],
-                &transport,
-            );
-            assert_eq!(
-                readiness.coordinator_alive, expected,
-                "{tag}: coordinator readiness mismatch; readiness={readiness:?}"
-            );
-            assert!(readiness.session_created, "{tag}: session gate changed");
-            assert!(readiness.worker_pane_addressable, "{tag}: pane gate changed");
-            let _ = std::fs::remove_dir_all(&workspace);
-        }
+    fn restart_readiness_needs_no_coordinator() {
+        let workspace = std::env::temp_dir().join(format!(
+            "ta-restart-readiness-m3-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&workspace);
+        std::fs::create_dir_all(crate::model::paths::runtime_dir(&workspace)).expect("runtime dir");
+        assert!(
+            !crate::coordinator::coordinator_pid_path(&crate::coordinator::WorkspacePath::new(workspace.clone())).exists(),
+            "fixture: no coordinator metadata"
+        );
+        let transport = crate::transport::test_support::OfflineTransport::new().with_session_present(true);
+        let readiness = restart_readiness(
+            &workspace,
+            &serde_json::json!({}),
+            &SessionName::new("team-current"),
+            &[],
+            &transport,
+        );
+        assert!(readiness.session_created, "session gate changed: {readiness:?}");
+        assert!(readiness.worker_pane_addressable, "pane gate changed: {readiness:?}");
+        assert!(readiness.ready(), "M3: restart must be ready without any coordinator: {readiness:?}");
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 
     #[test]
@@ -5084,8 +4907,7 @@ tasks:
             workspace,
             RestartReadiness {
                 session_created: true,
-                worker_pane_addressable: true,
-                coordinator_alive: false,
+                worker_pane_addressable: false,
             },
             std::time::Duration::from_secs(30),
         );
@@ -5095,41 +4917,4 @@ tasks:
         assert!(!message.contains("restart <agent>"));
     }
 
-    fn seed_restart_readiness_health(
-        workspace: &Path,
-        pid: u32,
-        protocol: u32,
-        schema_ok: bool,
-        binary_version: &str,
-        binary_path: &str,
-    ) {
-        let runtime = crate::model::paths::runtime_dir(workspace);
-        std::fs::create_dir_all(&runtime).expect("create readiness runtime");
-        if schema_ok {
-            crate::message_store::MessageStore::open(workspace)
-                .expect("create readiness message store");
-        } else {
-            std::fs::create_dir(runtime.join("team.db")).expect("corrupt readiness schema");
-        }
-        let wp = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
-        let metadata = serde_json::json!({
-            "pid": pid,
-            "protocol_version": protocol,
-            "message_store_schema_version": crate::db::schema::SCHEMA_VERSION,
-            "binary_path": binary_path,
-            "binary_version": binary_version,
-            "source": "boot",
-            "updated_at": "2026-09-10T00:00:00Z",
-        });
-        std::fs::write(
-            crate::coordinator::coordinator_meta_path(&wp),
-            serde_json::to_vec_pretty(&metadata).expect("serialize readiness metadata"),
-        )
-        .expect("write readiness metadata");
-        std::fs::write(
-            crate::coordinator::coordinator_pid_path(&wp),
-            pid.to_string(),
-        )
-        .expect("write readiness pid");
-    }
 }

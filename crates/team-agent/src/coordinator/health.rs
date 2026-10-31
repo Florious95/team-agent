@@ -55,13 +55,75 @@ use super::types::{
 // the actual spawn is the #[ignore] real-machine boundary, the idempotent decision is testable.
 // ===========================================================================
 
-/// `coordinator_health`(`lifecycle.py:38-46`):`running ∧ metadata_ok ∧ schema_ok` → typed report.
-/// ---
-/// purpose: 一次性判定本 workspace 的 coordinator daemon 是否健康
-/// params:
-///   workspace: workspace 根；pid/metadata 路径与 message store 都由它派生
-/// returns: HealthReport。ok = 进程在跑 ∧ metadata 三元全等 ∧ 二进制身份一致 ∧ schema 兼容；service_available 刻意排除二进制身份，表示「这个 daemon 还能处理本队队列」；status 区分 Missing / InvalidPid / Running / Stale
-/// ---
+/// Bounded upgrade cleanup, never a daemon startup. Normal station workspaces
+/// take only the two path checks; existing shutdown retains its ownership fence.
+pub fn retire_legacy_coordinator(workspace: &Path) -> Result<bool, String> {
+    retire_legacy_coordinator_with_cleanup(workspace, true)
+}
+
+/// Status may retire a verified legacy writer, but never edits stale PID metadata.
+pub fn retire_legacy_coordinator_for_status(workspace: &Path) -> Result<bool, String> {
+    retire_legacy_coordinator_with_cleanup(workspace, false)
+}
+
+fn retire_legacy_coordinator_with_cleanup(workspace: &Path, cleanup_stale: bool) -> Result<bool, String> {
+    let workspace = WorkspacePath::new(crate::model::paths::canonical_run_workspace(workspace)
+        .unwrap_or_else(|_| workspace.to_path_buf()));
+    if !coordinator_pid_path(&workspace).exists() && !coordinator_meta_path(&workspace).exists() {
+        return Ok(false);
+    }
+    if !cleanup_stale && !legacy_coordinator_value(workspace.as_path())
+        .is_some_and(|value| value["metadata_ok"] == true) {
+        return Ok(false);
+    }
+    let stale_files = [coordinator_pid_path(&workspace), coordinator_meta_path(&workspace)]
+        .map(|path| { let bytes = std::fs::read(&path).ok(); (path, bytes) });
+    let report = stop_coordinator(&workspace).map_err(|error| error.to_string())?;
+    if matches!(report.status, StopOutcome::NotOwned) {
+        // PID reuse is stale bookkeeping, not a reason to block current operations.
+        // Never signal that process, or unlink a file replaced since inspection.
+        if cleanup_stale {
+            for (path, before) in stale_files {
+                if before.is_some() && std::fs::read(&path).ok() == before {
+                    let _ = remove_file_if_exists(&path);
+                }
+            }
+        }
+        return Ok(false);
+    }
+    if !report.ok {
+        return Err(format!("legacy coordinator retirement refused: {:?} (pid {:?})", report.status, report.pid));
+    }
+    Ok(matches!(report.status, StopOutcome::Stopped))
+}
+
+/// Presence/ownership observation only: no SQL open, cleanup, or process signal.
+pub fn legacy_coordinator_value(workspace: &Path) -> Option<serde_json::Value> {
+    let workspace = WorkspacePath::new(crate::model::paths::canonical_run_workspace(workspace)
+        .unwrap_or_else(|_| workspace.to_path_buf()));
+    let metadata = read_coordinator_metadata(&workspace);
+    let pid = read_pid_file(&coordinator_pid_path(&workspace)).or_else(|| metadata.as_ref().map(|m| m.pid))?;
+    if pid_is_running(pid).ok() != Some(true) { return None; }
+    let owned = metadata.as_ref().is_some_and(|m| m.pid == pid)
+        && coordinator_pid_owned_by_workspace(&workspace, pid);
+    Some(serde_json::json!({
+        "ok": false,
+        "status": if owned { "legacy_running" } else { "legacy_pid_unverified" },
+        "pid": pid.get(), "process_running": true, "metadata_ok": owned,
+        "metadata_mismatch_reason": if owned { "legacy_coordinator_running" } else { "legacy_coordinator_identity_unverified" },
+        "binary_path": metadata.as_ref().and_then(|m| m.binary_path.as_deref()),
+        "binary_version": metadata.as_ref().and_then(|m| m.binary_version.as_deref()),
+        "metadata": metadata,
+        "action": if owned {
+            "Run current-release team-agent status in this workspace to retire the legacy daemon; doctor is read-only."
+        } else {
+            "Verify the legacy PID metadata and workspace ownership; no process was stopped."
+        }
+    }))
+}
+
+/// Legacy full health inspection; station presence checks use the read-only
+/// `legacy_coordinator_value` above and do not open the message database.
 pub fn coordinator_health(workspace: &WorkspacePath) -> HealthReport {
     coordinator_health_with_schema(workspace, message_store_schema_health(workspace))
 }
@@ -117,272 +179,6 @@ fn coordinator_health_with_schema(
         schema,
     }
 }
-
-/// `start_coordinator`(`lifecycle.py:49-121`):幂等 — 已健康 no-op(AlreadyRunning);metadata 不兼容
-/// 先 stop 再起;schema 不兼容拒启 + hint;否则 spawn `team-agent coordinator --workspace <ws>`。
-/// ---
-/// purpose: 不带 team_key 的幂等启动入口
-/// params:
-///   workspace: workspace 根
-/// returns: 与 start_coordinator_with_team(workspace, None) 完全一致
-/// errors: 同 start_coordinator_with_team
-/// ---
-pub fn start_coordinator(workspace: &WorkspacePath) -> Result<StartReport, StartError> {
-    start_coordinator_with_team(workspace, None)
-}
-
-/// 0.5.x Windows portability Batch 9 F8 (leader msg_2a4cc1fa54c0):
-/// forward `--team` to the spawned coord daemon so it doesn't have
-/// to derive team_key from `state.active_team_key` at boot. The
-/// derivation stays as fallback (see `coordinator::backoff::run_daemon`),
-/// so Unix daemons and pre-existing test harnesses are byte-preserving.
-///
-/// Callers that CAN pass team_key (Batch 9 quick-start Windows path)
-/// SHOULD — that avoids Batch 8's F8 seed-state trap.
-/// ---
-/// purpose: 幂等启动 coordinator daemon 子进程，并把不兼容/需轮换的情形分成互不折叠的结局
-/// params:
-///   workspace: workspace 根
-///   team_key: 传给子进程的 --team；None 或空串时子进程回落到 state.active_team_key
-/// returns: StartReport。已健康 → AlreadyRunning（含「daemon 比调用方新，保留不动」这一支，rotation_reason=daemon_newer_than_caller）；schema 不兼容 → SchemaIncompatible 且 ok=false 并带修复 hint；在跑但 wire metadata 不兼容、或 metadata 指向调用方自身、或先停失败 → RestartIncompatibleStopFailed；成功 spawn → Started，因身份轮换而重起则为 StartedAfterRotation
-/// errors: 建目录、开日志、spawn、写 pid/metadata 或写事件失败时返回 StartError；「拒启」不是 Err，而是 ok=false 的报告
-/// ---
-pub fn start_coordinator_with_team(
-    workspace: &WorkspacePath,
-    team_key: Option<&str>,
-) -> Result<StartReport, StartError> {
-    let health = coordinator_health(workspace);
-    let identity = health.current_binary_identity.clone();
-    if health.ok {
-        return Ok(StartReport {
-            ok: true,
-            pid: health.pid,
-            status: StartOutcome::AlreadyRunning,
-            previous_pid: None,
-            binary_path: Some(identity.binary_path),
-            binary_version: Some(identity.binary_version),
-            rotation_reason: None,
-            binary_identity_relation: health.binary_identity_relation,
-            log: Some(coordinator_log_path(workspace)),
-            schema_error: None,
-            action: None,
-        });
-    }
-    if !health.schema.ok {
-        return Ok(StartReport {
-            ok: false,
-            pid: health.pid,
-            status: StartOutcome::SchemaIncompatible,
-            previous_pid: None,
-            binary_path: Some(identity.binary_path),
-            binary_version: Some(identity.binary_version),
-            rotation_reason: health.metadata_mismatch_reason,
-            binary_identity_relation: health.binary_identity_relation,
-            log: None,
-            schema_error: health.schema.error,
-            action: health.schema.action,
-        });
-    }
-    if matches!(health.status, CoordinatorHealthStatus::Running) && !health.wire_metadata_ok {
-        return Ok(StartReport {
-            ok: false,
-            pid: health.pid,
-            status: StartOutcome::RestartIncompatibleStopFailed,
-            previous_pid: health.pid,
-            binary_path: Some(identity.binary_path),
-            binary_version: Some(identity.binary_version),
-            rotation_reason: health.metadata_mismatch_reason,
-            binary_identity_relation: health.binary_identity_relation,
-            log: None,
-            schema_error: None,
-            action: Some(
-                "refusing to rotate a coordinator with incompatible protocol or schema metadata"
-                    .to_string(),
-            ),
-        });
-    }
-    if matches!(health.status, CoordinatorHealthStatus::Running)
-        && health.wire_metadata_ok
-        && !health.binary_identity_ok
-        && matches!(
-            health.binary_identity_relation,
-            CoordinatorBinaryIdentityRelation::DaemonNewerThanCaller
-        )
-    {
-        crate::event_log::EventLog::new(workspace.as_path()).write(
-            "coordinator.newer_daemon_preserved",
-            serde_json::json!({
-                "pid": health.pid.map(|pid| pid.get()),
-                "binary_identity_relation": health.binary_identity_relation.as_str(),
-                "reason": "daemon_newer_than_caller",
-                "daemon_binary_path": health
-                    .metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.binary_path.clone()),
-                "daemon_binary_version": health
-                    .metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.binary_version.clone()),
-                "caller_binary_path": identity.binary_path.clone(),
-                "caller_binary_version": identity.binary_version.clone(),
-            }),
-        )?;
-        return Ok(StartReport {
-            ok: true,
-            pid: health.pid,
-            status: StartOutcome::AlreadyRunning,
-            previous_pid: None,
-            binary_path: Some(identity.binary_path),
-            binary_version: Some(identity.binary_version),
-            rotation_reason: Some("daemon_newer_than_caller".to_string()),
-            binary_identity_relation: health.binary_identity_relation,
-            log: Some(coordinator_log_path(workspace)),
-            schema_error: None,
-            action: None,
-        });
-    }
-    let rotation_reason =
-        if matches!(health.status, CoordinatorHealthStatus::Running) && !health.metadata_ok {
-            health.metadata_mismatch_reason.clone()
-        } else {
-            None
-        };
-    if matches!(health.status, CoordinatorHealthStatus::Running) && !health.metadata_ok {
-        crate::event_log::EventLog::new(workspace.as_path()).write(
-            "coordinator.rotation_required",
-            serde_json::json!({
-                "old_pid": health.pid.map(|pid| pid.get()),
-                "reason": rotation_reason.clone(),
-                "old_binary_path": health
-                    .metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.binary_path.clone()),
-                "old_binary_version": health
-                    .metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.binary_version.clone()),
-                "current_binary_path": identity.binary_path.clone(),
-                "current_binary_version": identity.binary_version.clone(),
-            }),
-        )?;
-        if health.pid.map(|pid| pid.get()) == Some(std::process::id()) {
-            return Ok(StartReport {
-                ok: false,
-                pid: health.pid,
-                status: StartOutcome::RestartIncompatibleStopFailed,
-                previous_pid: health.pid,
-                binary_path: Some(identity.binary_path),
-                binary_version: Some(identity.binary_version),
-                rotation_reason,
-                binary_identity_relation: health.binary_identity_relation,
-                log: None,
-                schema_error: None,
-                action: Some(
-                    "refusing to rotate coordinator metadata that points at the caller process"
-                        .to_string(),
-                ),
-            });
-        }
-        match stop_coordinator(workspace) {
-            Ok(stop) if stop.ok => {}
-            Ok(_) | Err(_) => {
-                return Ok(StartReport {
-                    ok: false,
-                    pid: health.pid,
-                    status: StartOutcome::RestartIncompatibleStopFailed,
-                    previous_pid: health.pid,
-                    binary_path: Some(identity.binary_path),
-                    binary_version: Some(identity.binary_version),
-                    rotation_reason,
-                    binary_identity_relation: health.binary_identity_relation,
-                    log: None,
-                    schema_error: None,
-                    action: None,
-                });
-            }
-        }
-    }
-
-    let runtime_dir = crate::model::paths::runtime_dir(workspace.as_path());
-    std::fs::create_dir_all(&runtime_dir)?;
-    let log_path = coordinator_log_path(workspace);
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)?;
-    let log_err = log.try_clone()?;
-    let mut command = Command::new(std::env::current_exe()?);
-    command
-        .args(["coordinator", "--workspace"])
-        .arg(workspace.as_path());
-    if let Some(tk) = team_key {
-        if !tk.is_empty() {
-            command.args(["--team", tk]);
-        }
-    }
-    command
-        .current_dir(workspace.as_path())
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err));
-    detach_daemon_child(&mut command);
-    let child = command.spawn()?;
-    let pid = Pid::new(child.id());
-    std::fs::write(coordinator_pid_path(workspace), pid.to_string())?;
-    write_coordinator_metadata(workspace, pid, MetadataSource::Start)?;
-    let status = if rotation_reason.is_some() {
-        StartOutcome::StartedAfterRotation
-    } else {
-        StartOutcome::Started
-    };
-    Ok(StartReport {
-        ok: true,
-        pid: Some(pid),
-        status,
-        previous_pid: health.pid,
-        binary_path: Some(identity.binary_path),
-        binary_version: Some(identity.binary_version),
-        rotation_reason,
-        binary_identity_relation: health.binary_identity_relation,
-        log: Some(log_path),
-        schema_error: None,
-        action: None,
-    })
-}
-
-#[cfg(unix)]
-fn detach_daemon_child(command: &mut Command) {
-    // The coordinator is a daemon: it must not remain in the launcher's process
-    // group, otherwise bare SSH command teardown can SIGHUP it after quick-start exits.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                Err(std::io::Error::last_os_error())
-            } else {
-                Ok(())
-            }
-        });
-    }
-}
-
-#[cfg(windows)]
-fn detach_daemon_child(command: &mut Command) {
-    // 0.5.x Windows portability Batch 8 F7 (leader msg_590b4dce0f68):
-    // detach the coordinator daemon on Windows via
-    // `DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB` creation flags,
-    // matching what `coordinator::conpty_shim::spawn_shim_and_handshake`
-    // does for the shim. Without these flags, an SSH-launched
-    // quick-start blocks waiting for the coord daemon's process
-    // tree to exit (never happens — daemon runs forever), and the
-    // quick-start caller sees a hung command.
-    use std::os::windows::process::CommandExt;
-    const DETACHED_PROCESS: u32 = 0x00000008;
-    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
-    command.creation_flags(DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB);
-}
-
-#[cfg(not(any(unix, windows)))]
-fn detach_daemon_child(_command: &mut Command) {}
 
 /// `stop_coordinator`(`lifecycle.py:228-247`):SIGTERM pid + 清 pid/meta → typed report。
 /// ---
@@ -1049,50 +845,12 @@ pub fn write_coordinator_metadata(
 /// returns: 打开成功则 ok=true 且 error/action 为空；失败则 ok=false，带 InitFailed 原文与修复 hint。schema_version 恒为当前构建的版本号
 /// ---
 pub(crate) fn message_store_schema_health(workspace: &WorkspacePath) -> SchemaHealth {
-    match MessageStore::open(workspace.as_path()) {
-        Ok(_) => SchemaHealth {
-            ok: true,
-            schema_version: crate::db::schema::SCHEMA_VERSION,
-            error: None,
-            action: None,
-        },
-        Err(e) => SchemaHealth {
-            ok: false,
-            schema_version: crate::db::schema::SCHEMA_VERSION,
-            error: Some(SchemaError::InitFailed {
-                message: e.to_string(),
-            }),
-            action: Some("run team-agent doctor --fix-schema --json".to_string()),
-        },
-    }
+    // Compatibility: the retired SQL schema has no runtime health dependency.
+    SchemaHealth { ok: true, schema_version: 0, error: None, action: None }
 }
 
 fn message_store_schema_health_read_only(workspace: &WorkspacePath) -> SchemaHealth {
-    let action = Some("run team-agent doctor --fix-schema --json".to_string());
-    match crate::db::migration::schema_diagnosis_workspace_read_only(workspace.as_path()) {
-        Ok(diagnosis) if diagnosis.ok && diagnosis.status == "ok" => SchemaHealth {
-            ok: true,
-            schema_version: crate::db::schema::SCHEMA_VERSION,
-            error: None,
-            action: None,
-        },
-        Ok(diagnosis) => SchemaHealth {
-            ok: false,
-            schema_version: crate::db::schema::SCHEMA_VERSION,
-            error: Some(SchemaError::InitFailed {
-                message: format!("team.db status: {}", diagnosis.status),
-            }),
-            action,
-        },
-        Err(error) => SchemaHealth {
-            ok: false,
-            schema_version: crate::db::schema::SCHEMA_VERSION,
-            error: Some(SchemaError::InitFailed {
-                message: error.to_string(),
-            }),
-            action,
-        },
-    }
+    message_store_schema_health(workspace)
 }
 
 fn read_pid_file(path: &Path) -> Option<Pid> {
@@ -1144,42 +902,4 @@ pub fn coordinator_meta_path(workspace: &WorkspacePath) -> PathBuf {
 /// ---
 pub fn coordinator_log_path(workspace: &WorkspacePath) -> PathBuf {
     crate::model::paths::runtime_dir(workspace.as_path()).join("coordinator.log")
-}
-
-#[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-
-    struct ChildGuard(std::process::Child);
-
-    impl Drop for ChildGuard {
-        fn drop(&mut self) {
-            unsafe {
-                libc::kill(self.0.id() as libc::pid_t, libc::SIGTERM);
-            }
-            let _ = self.0.wait();
-        }
-    }
-
-    #[test]
-    fn coordinator_daemon_spawn_helper_detaches_session() {
-        let mut command = Command::new("/bin/sleep");
-        command
-            .arg("30")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        detach_daemon_child(&mut command);
-
-        let child = command.spawn().expect("spawn detached child");
-        let guard = ChildGuard(child);
-        let pid = guard.0.id() as libc::pid_t;
-        let sid = unsafe { libc::getsid(pid) };
-
-        assert_ne!(sid, -1, "getsid({pid}) failed");
-        assert_eq!(
-            sid, pid,
-            "detached coordinator children must become session leaders so launcher SIGHUP does not reach them"
-        );
-    }
 }

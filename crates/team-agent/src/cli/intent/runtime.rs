@@ -144,8 +144,13 @@ fn topology(state: &Value) -> Value {
     }
     json!({"tmux_socket": state.get("tmux_socket"), "transport": state.get("transport"), "owner": owner, "owner_epoch": state.get("owner_epoch")})
 }
+fn has_native_incarnation(row: &Value) -> bool {
+    crate::contract_runtime::registry::descriptor(provider(row)).is_some()
+        && row.get("contract_instance").and_then(Value::as_str).is_some_and(|id| !id.is_empty())
+}
 fn relevant(row: &Value) -> Value {
     let mut object = serde_json::Map::new();
+    let native_identity = has_native_incarnation(row);
     for key in [
         "provider",
         "status",
@@ -161,6 +166,12 @@ fn relevant(row: &Value) -> Value {
         "spawn_epoch",
         "spawned_at",
     ] {
+        // Native incarnation is authoritative even after its carrier dies. Keep
+        // intent/config fences; the mutator separately validates native sessions
+        // and physical receipts. Legacy seats still need carrier observations.
+        if native_identity && matches!(key, "status" | "pane_id" | "pane_pid" | "window" | "session_id" | "spawned_at") {
+            continue;
+        }
         object.insert(key.into(), row.get(key).cloned().unwrap_or(Value::Null));
     }
     Value::Object(object)
@@ -322,6 +333,16 @@ fn observe(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation
         use team_agent_contract::{contract::types::SeatId, host::process::sample_process};
         if crate::contract_runtime::framework::is_paused_unstarted(row) {
             return Ok(Observation::Unstarted);
+        }
+        // A foreign seat can be stopped without input even though ordinary
+        // startup admission must reject its old executable binding.
+        let authority = checked(crate::contract_runtime::backend::Backend::open_readonly(
+            &selected.run_workspace, &selected.team_key))?;
+        let executing = checked(crate::contract_runtime::backend::executing_candidate_sha())?;
+        if checked(authority.store.seat(&checked(SeatId::new(id))?))?
+            .is_some_and(|seat| seat.status != team_agent_contract::orchestration::store::SeatStatus::Stopped
+                && seat.physical.as_ref().is_some_and(|target| target.candidate_sha256 != executing)) {
+            return Ok(Observation::Foreign);
         }
         if checked(
             crate::contract_runtime::backend::start_needs_reconciliation(
@@ -973,7 +994,8 @@ fn plan_with_observer(
             }
         }
         let explicit = crate::state::projection::agent_explicit_stop(row);
-        let obs = if paused(row) || (team && plan.intent.verb == Verb::Restart && explicit) {
+        let preserve_stop = team && explicit && matches!(plan.intent.verb, Verb::Start | Verb::Restart);
+        let obs = if paused(row) || preserve_stop {
             Observation::Unstarted
         } else {
             observe(&selected, &id, row)?
@@ -999,7 +1021,7 @@ fn plan_with_observer(
                     )));
                 }
             }
-            plan.skipped.push(json!({"agent":id,"reason":if paused(row){"paused"}else if team&&plan.intent.verb==Verb::Restart&&explicit{"explicit_stop"}else if obs==Observation::Live{"already_running"}else{"already_stopped"},"observation":obs}));
+            plan.skipped.push(json!({"agent":id,"reason":if paused(row){"paused"}else if preserve_stop{"explicit_stop"}else if obs==Observation::Live{"already_running"}else{"already_stopped"},"observation":obs}));
         } else {
             if plan.intent.verb != Verb::Stop {
                 let (_, compiled) = role(&mut plan, &selected, &id, None)?;
@@ -1024,7 +1046,7 @@ fn plan_with_observer(
         }
         let mut expected = relevant(row);
         #[cfg(unix)]
-        if obs == Observation::Live {
+        if obs == Observation::Live && !has_native_incarnation(row) {
             if let Some(pid) = row
                 .get("pane_pid")
                 .and_then(Value::as_u64)

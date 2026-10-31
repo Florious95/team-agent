@@ -21,7 +21,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::thread;
 use std::time::{Duration, Instant};
-use team_agent::message_store::MessageStore;
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 
 fn text(out: &Output) -> String {
@@ -104,10 +103,6 @@ fn seeded(env: &HermeticTestEnv) -> PathBuf {
         json!({"worker":{"status":"stopped","provider":"fake","model":"fake","session_id":null}});
     let tasks = json!([{"id":"task-286","title":"case-286","case_id":"case-286","assignee":"worker","status":"done"}]);
     save_runtime_state(&ws,&json!({"active_team_key":"alpha","session_name":"team-alpha","agents":agents,"tasks":tasks,"teams":{"alpha":{"status":"alive","session_name":"team-alpha","agents":agents,"tasks":tasks}}})).unwrap();
-    let store = MessageStore::open(&ws).unwrap();
-    let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
-    let envelope = json!({"schema_version":"result_envelope_v1","result_id":"res-286","task_id":"task-286","agent_id":"worker","status":"success","summary":"RESULT_COMPAT_286","presentation":{"case_id":"case-286"},"artifacts":[{"path":"artifact://286","nested":{"preserve":true}}]});
-    conn.execute("insert into results(result_id,owner_team_id,task_id,agent_id,envelope,status,created_at) values (?1,?2,?3,?4,?5,?6,?7)",rusqlite::params!["res-286","alpha","task-286","worker",envelope.to_string(),"success","2026-10-06T00:00:00Z"]).unwrap();
     ws
 }
 
@@ -333,51 +328,6 @@ fn h6_other_compile_errors_do_not_claim_empty_project_or_overwrite_inputs() {
     );
 }
 
-#[test]
-#[serial(env)]
-fn h8_wait_retains_real_completed_result_fifo_semantics() {
-    let env = HermeticTestEnv::enter("compat-wait");
-    let ws = seeded(&env);
-    let v = body(&env.run_cli(
-        &ws,
-        &[
-            "wait",
-            "--task",
-            "task-286",
-            "--workspace",
-            ws.to_str().unwrap(),
-            "--json",
-        ],
-    ));
-    assert_eq!(v["task_id"], "task-286");
-    assert_eq!(v["result_id"], "res-286");
-    assert_eq!(v["waited"], false);
-}
-
-#[test]
-#[serial(env)]
-fn h8_coordinator_retains_real_single_tick_function() {
-    let env = HermeticTestEnv::enter("compat-coordinator");
-    let ws = seeded(&env);
-    let out = env.run_cli(
-        &ws,
-        &[
-            "coordinator",
-            "--once",
-            "--workspace",
-            ws.to_str().unwrap(),
-            "--team",
-            "alpha",
-        ],
-    );
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "H8 coordinator --once: {}",
-        text(&out)
-    );
-    assert!(load_runtime_state(&ws).unwrap().is_object());
-}
 
 #[test]
 #[serial(env)]
@@ -437,7 +387,8 @@ fn h8_plain_fq_and_legacy_address_forms_remain_functional_machine_json() {
             ],
         ));
         assert_eq!(v["status"], "stored");
-        assert_eq!(v["mailbox"], true);
+        // R-M1a receipt shape: a mailbox send is stored and never live (no separate `mailbox` key).
+        assert_eq!((v["stored"].clone(), v["live"].clone()), (serde_json::json!(true), serde_json::json!(false)), "{v}");
     }
     let v = ok(&env.run_cli(
         &ws,
@@ -734,24 +685,6 @@ fn h7_native_delimiter_help_preserves_existing_provider_rules_and_raw_order() {
         );
     }
 }
-fn quiesce(ws: &framework::TestWorkspace) {
-    use team_agent::coordinator::{pid_is_running, stop_coordinator, Pid, WorkspacePath};
-    let raw = fs::read_to_string(ws.coordinator_pid_file())
-        .unwrap()
-        .trim()
-        .parse::<u32>()
-        .unwrap();
-    assert!(ws.pid_is_owned_coordinator(raw));
-    let pid = Pid::new(raw);
-    let stopped = stop_coordinator(&WorkspacePath::new(ws.path().to_path_buf())).unwrap();
-    assert!(stopped.ok);
-    assert_eq!(stopped.pid, Some(pid));
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while pid_is_running(pid).unwrap() {
-        assert!(Instant::now() < deadline);
-        thread::sleep(Duration::from_millis(10));
-    }
-}
 #[test]
 #[serial(env)]
 fn h9_actual_worker_stop_start_and_refusal_guards_keep_owned_resources_and_roles() {
@@ -765,7 +698,6 @@ fn h9_actual_worker_stop_start_and_refusal_guards_keep_owned_resources_and_roles
         started.stderr
     );
     ws.retain_owned_session_placeholder_window("hold");
-    quiesce(&ws);
     let state = ws.read_state();
     let role = fs::read(ws.path().join("agents/worker.md")).unwrap();
     for args in [

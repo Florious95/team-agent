@@ -22,7 +22,7 @@ use std::time::Instant;
 
 use serde_json::{json, Value};
 use serial_test::serial;
-use team_agent::coordinator::{Coordinator, ProviderRegistry, WorkspacePath};
+use team_agent::coordinator::WorkspacePath;
 use team_agent::db::schema::{initialize_schema, open_db};
 use team_agent::event_log::EventLog;
 use team_agent::lifecycle::{launch_with_transport_in_workspace, restart_with_transport};
@@ -149,36 +149,6 @@ fn report_result_respects_mcp_owner_team_env_when_active_team_differs() {
 
 #[test]
 #[serial(env)]
-fn coordinator_tick_saves_captured_session_into_nested_active_team() {
-    let case = HotfixCase::new("tick-nested-session");
-    case.seed_dual_team_state(SUB, false);
-    let rollout = case.workspace.join("sub-rollout.jsonl");
-    std::fs::write(&rollout, "{}").unwrap();
-    let registry = StaticCaptureRegistry {
-        session_id: "sess-sub-captured".to_string(),
-        rollout_path: rollout,
-    };
-    let transport = RecordingTransport::new()
-        .with_session_present(true)
-        .with_windows(vec![WindowName::new("subgreeter")]);
-    let coord = Coordinator::new(
-        WorkspacePath::new(case.workspace.clone()),
-        Box::new(registry),
-        Box::new(transport),
-    );
-
-    coord.tick().expect("coordinator tick");
-    let state = load_runtime_state(&case.workspace).expect("state after tick");
-
-    assert_eq!(
-        state.pointer("/teams/sub/agents/subgreeter/session_id").and_then(Value::as_str),
-        Some("sess-sub-captured"),
-        "RC1: coordinator tick must write captured provider session into the nested active team, not only the top-level projection; state={state}"
-    );
-}
-
-#[test]
-#[serial(env)]
 fn launch_persists_agent_pane_id_and_pid() {
     let case = HotfixCase::new("launch-pane-id");
     case.write_team(CURRENT, "greeter", Provider::Fake);
@@ -216,98 +186,7 @@ fn launch_persists_agent_pane_id_and_pid() {
     );
 }
 
-#[test]
-#[serial(env)]
-fn unbound_leader_receiver_is_not_attached_and_delivery_never_injects_sentinel() {
-    let case = HotfixCase::new("unbound-leader");
-    case.seed_unbound_leader_state();
-    let store = MessageStore::open(&case.workspace).unwrap();
-    let message_id = store
-        .create_message(
-            None,
-            "subgreeter",
-            "leader",
-            "sentinel canary",
-            None,
-            false,
-            Some(SUB),
-        )
-        .unwrap();
-    let state = load_runtime_state(&case.workspace).unwrap();
-    let transport = RecordingTransport::new().with_default_liveness(PaneLiveness::Live);
 
-    let out = deliver_pending_message(
-        &case.workspace,
-        &store,
-        &transport,
-        &message_id,
-        &EventLog::new(&case.workspace),
-        &state,
-    )
-    .expect("delivery should return an explicit rebind outcome");
-
-    assert!(
-        !out.ok && out.channel.as_deref() == Some("rebind_required") && transport.inject_targets().is_empty(),
-        "RC3: __team_agent_unbound__ is not an attached leader receiver; delivery must return rebind_required and never inject; outcome={out:?} targets={:?}",
-        transport.inject_targets()
-    );
-    assert!(
-        transport.inject_targets().is_empty(),
-        "RC3: delivery must never physically inject/paste to the sentinel __team_agent_unbound__; outcome={out:?} targets={:?}",
-        transport.inject_targets()
-    );
-}
-
-#[test]
-#[serial(env)]
-fn sqlite_open_retries_under_concurrent_writer() {
-    let case = HotfixCase::new("sqlite-lock");
-    std::fs::create_dir_all(case.db_path().parent().unwrap()).unwrap();
-    let holder = rusqlite::Connection::open(case.db_path()).unwrap();
-    initialize_schema(&holder, Some(&case.db_path())).unwrap();
-    holder.execute_batch("BEGIN EXCLUSIVE;").unwrap();
-
-    let start = Instant::now();
-    let result = MessageStore::open(&case.workspace);
-    let elapsed = start.elapsed();
-    holder.execute_batch("ROLLBACK;").unwrap();
-
-    assert!(
-        result.is_ok(),
-        "RC5: opening/initializing team.db under a concurrent writer must retry/idempotently survive instead of surfacing database-is-locked. elapsed={elapsed:?} error={:?}",
-        result.err()
-    );
-}
-
-#[test]
-#[ignore = "real-machine: coordinator pidfile SIGTERM process gate"]
-#[serial(env)]
-fn shutdown_pidfile_sigterm_waits_and_normalizes() {
-    let case = HotfixCase::new("shutdown-pidfile");
-    let mut child = Command::new("sh")
-        .arg("-c")
-        .arg("trap 'sleep 2; exit 0' TERM; while true; do sleep 1; done")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn delayed SIGTERM child");
-    case.write_coordinator_pid(child.id());
-
-    let report =
-        team_agent::coordinator::stop_coordinator(&WorkspacePath::new(case.workspace.clone()))
-            .expect("stop coordinator");
-    let still_running = process_running(child.id());
-    if still_running {
-        let _ = child.kill();
-    }
-    let _ = child.wait();
-
-    assert!(
-        report.ok && !still_running,
-        "RC6: pidfile coordinator stop must wait until the SIGTERM target really exits before reporting ok/stopped and removing metadata. report={report:?} still_running={still_running}"
-    );
-}
 
 #[derive(Debug)]
 struct HotfixCase {
@@ -426,7 +305,7 @@ impl HotfixCase {
         obj.insert("active_team_key".to_string(), json!(active));
         obj.insert("teams".to_string(), json!({CURRENT: current, SUB: sub}));
         save_runtime_state(&self.workspace, &state).unwrap();
-        let _ = MessageStore::open(&self.workspace).unwrap();
+        // M4: no SQLite message store fixture (MessageStore::open is retired).
     }
 
     fn seed_unbound_leader_state(&self) {
@@ -478,7 +357,7 @@ impl HotfixCase {
 
     fn seed_healthy_coordinator(&self) {
         let workspace = WorkspacePath::new(self.workspace.clone());
-        let _ = MessageStore::open(workspace.as_path()).unwrap();
+        // M4: no SQLite message store fixture (MessageStore::open is retired).
         let pid = team_agent::coordinator::Pid::new(std::process::id());
         team_agent::coordinator::write_coordinator_metadata(
             &workspace,
@@ -863,21 +742,6 @@ impl Transport for RecordingTransport {
 
     fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
         Ok(AttachOutcome::Attached)
-    }
-}
-
-struct StaticCaptureRegistry {
-    session_id: String,
-    rollout_path: PathBuf,
-}
-
-impl ProviderRegistry for StaticCaptureRegistry {
-    fn adapter_for(&self, provider: Provider) -> Box<dyn ProviderAdapter> {
-        Box::new(StaticCaptureAdapter {
-            provider,
-            session_id: self.session_id.clone(),
-            rollout_path: self.rollout_path.clone(),
-        })
     }
 }
 

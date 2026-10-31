@@ -66,17 +66,10 @@ pub(super) fn enrich_agents(
                 // would land it in the Stopped bucket instead of Unknown).
                 // Host-boot mismatch and provider-exited marker are
                 // stronger, more specific signals and still win.
-                let canonical_unknown = agent_canonical_worker_state_is_unknown(obj);
                 let new_reason = if freshness.host_boot_stale && has_pane_binding {
                     freshness.host_boot_stale_reason()
                 } else if freshness.provider_exited_agents.contains(agent_id) {
                     Some("worker_provider_exited")
-                } else if !freshness.coordinator_service_available
-                    && has_pane_binding
-                    && !provider_command_positive_proof
-                    && !canonical_unknown
-                {
-                    Some("coordinator_unavailable")
                 } else {
                     None
                 };
@@ -99,7 +92,7 @@ pub(super) fn enrich_agents(
                     // exit / coord-unavailable stale rows keep raw=running.
                     let is_new_signal = matches!(
                         reason,
-                        "host_boot_mismatch" | "worker_provider_exited" | "coordinator_unavailable"
+                        "host_boot_mismatch" | "worker_provider_exited"
                     );
                     if !tmux_session_present || is_new_signal {
                         downgrade_stale_agent(&mut enriched);

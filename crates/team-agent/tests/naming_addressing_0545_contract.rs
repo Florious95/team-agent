@@ -178,7 +178,10 @@ fn red_2_worker_mcp_typo_preserves_scope_without_delivery_or_db_write() {
     let (is_error, body) = case.mcp_send("alpha", "qa-naming", "btea", &content);
 
     assert!(is_error, "RED-2: typo remains an MCP refusal: {body}");
-    assert_eq!(body["reason"], json!("peer_not_in_scope"));
+    // M5 (homomorphic send, admission ruling 1b): an in-scope typo carries the same
+    // name_not_resolvable reason as the CLI; peer_not_in_scope is only for real
+    // cross-scope targets (red_5_worker_mcp_qualified_targets_stay_in_scope).
+    assert_eq!(body["reason"], json!("name_not_resolvable"));
     assert!(body["error"].as_str().is_some_and(|error| error.contains("btea")), "{body}");
     if body.get("candidates").is_some() {
         assert_candidates_stay_in_team(&body, "qa-naming");
@@ -465,19 +468,23 @@ fn red_5_positional_team_qualified_target_physically_delivers_without_queue() {
 
 #[test]
 #[serial_test::serial(env)]
-fn red_5_worker_mcp_team_and_workspace_qualified_targets_still_refuse() {
+fn red_5_worker_mcp_qualified_targets_stay_in_scope() {
+    // M5: seat authority is scoped by workspace and team, not by address syntax. Qualified forms that
+    // name the sender's own workspace and team resolve to its own peer; a qualified form that leaves
+    // the workspace is still refused before any effect.
     let case = AddressCase::new("red5-mcp-long");
     for target in [
         "qa-naming/beta".to_string(),
         format!("{}::qa-naming/beta", case.local.display()),
     ] {
         let (is_error, body) = case.mcp_send("alpha", "qa-naming", &target, "RED5_MCP_LONG");
-        assert!(
-            is_error,
-            "RED-5: long MCP target unexpectedly accepted: {body}"
-        );
-        assert_eq!(body["reason"], json!("peer_not_in_scope"));
+        assert!(!is_error, "RED-5: in-scope qualified MCP target refused: {body}");
+        assert_eq!(body["recipient"], json!("beta"), "{body}");
     }
+    let escape = format!("{}::qa-naming/beta", case.other.display());
+    let (is_error, body) = case.mcp_send("alpha", "qa-naming", &escape, "RED5_MCP_ESCAPE");
+    assert!(is_error, "RED-5: cross-workspace MCP target unexpectedly accepted: {body}");
+    assert_eq!(body["reason"], json!("peer_not_in_scope"));
 }
 
 #[test]
@@ -872,10 +879,14 @@ impl AddressCase {
     }
 
     fn message_count_in(&self, workspace: &Path, content: &str) -> i64 {
-        let store = team_agent::message_store::MessageStore::open(workspace)
-            .expect("open hermetic message store");
-        self.env.assert_store_under_root(&store);
-        let conn = Connection::open(store.db_path()).expect("open team.db");
+        // M4: the retired store is never created; an absent team.db holds no rows.
+        let db = workspace.join(".team/runtime/team.db");
+        self.env.assert_path_under_root(&db);
+        if !db.exists() {
+            return 0;
+        }
+        let conn = Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open team.db");
         conn.query_row(
             "SELECT COUNT(*) FROM messages WHERE content = ?1",
             [content],
@@ -889,7 +900,9 @@ impl AddressCase {
         assert_eq!(body["recipient"], "beta");
         assert_eq!(body["pane_id"], self.panes[pane]);
         assert!(body["accepted"].is_null(), "physical submit does not prove provider acceptance");
-        assert!(body.get("message_id").is_none(), "ordinary CLI send creates no ledger id");
+        // R-M1a (M1 store-first): the physical receipt names its durable inbox record.
+        assert!(body["message_id"].as_str().is_some_and(|id| !id.is_empty()), "receipt names its inbox record: {body}");
+        assert_eq!(body["stored"], true, "M1 stores before submitting: {body}");
         assert_eq!(self.message_count(token), 0);
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {

@@ -1,15 +1,12 @@
-//! Captured native stdio connections. A row is not liveness or discovery:
-//! producers/consumers must freshly verify the captured processes and bounded
-//! native ancestry before use; a previously accepted chain is not cached authority.
-use rusqlite::{params, TransactionBehavior};
-use serde::{Deserialize, Serialize};
-
+//! Captured native connections are observations, never process-liveness authority.
 use super::{
+    projection::Key,
     store::{current, ContractStore, SeatStatus},
     Error,
 };
 use crate::contract::types::*;
 use crate::host::process::{verify_native_ancestry, ProcessStamp};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectionRecord {
@@ -22,15 +19,15 @@ pub struct ConnectionRecord {
     pub closed: bool,
 }
 impl ContractStore {
-    /// The stdio entry captures its actual executable/birth/parent. Tools cannot
-    /// supply this record. Registration permits protocol setup during F3 but
-    /// never produces a client-consumed/tool-discovery fact.
     pub fn register_connection(&mut self, record: &ConnectionRecord) -> Result<(), Error> {
-        let scope = self.scope().clone();
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let seat = current(&tx, &scope, &record.identity)?;
+        let key = Key::new("connections", record.connection.as_str());
+        let index = Key::new("connection_index", record.identity.instance.as_str());
+        let mut tx = self.files.write([
+            key.clone(),
+            index.clone(),
+            Key::new("seats", record.identity.seat.as_str()),
+        ])?;
+        let seat = current(&tx, self.scope(), &record.identity)?;
         let target = seat
             .physical
             .as_ref()
@@ -46,99 +43,105 @@ impl ContractStore {
         {
             return Err(Error::Fence);
         }
-        tx.execute(
-            "INSERT INTO contract_connections VALUES(?1,?2,?3)",
-            params![
-                record.connection.as_str(),
-                serde_json::to_string(&record.identity)?,
-                serde_json::to_string(record)?
-            ],
-        )?;
-        tx.commit()?;
-        Ok(())
+        if tx.get::<ConnectionRecord>(&key)?.is_some() {
+            return Err(Error::Conflict);
+        }
+        let mut ids: Vec<InstanceId> = tx.get(&index)?.unwrap_or_default();
+        ids.push(record.connection.clone());
+        tx.put(key, record)?;
+        tx.put(index, &ids)?;
+        tx.commit()
     }
-
     pub fn connections(&self, identity: &InstanceIdentity) -> Result<Vec<ConnectionRecord>, Error> {
         self.assert_current(identity)?;
-        let mut statement = self
-            .connection
-            .prepare("SELECT record FROM contract_connections WHERE identity=?1 ORDER BY rowid")?;
-        let rows = statement.query_map([serde_json::to_string(identity)?], |row| {
-            row.get::<_, String>(0)
-        })?;
-        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+        let ids: Vec<InstanceId> = self
+            .files
+            .get(&Key::new("connection_index", identity.instance.as_str()))?
+            .unwrap_or_default();
+        ids.into_iter()
+            .map(|id| {
+                let record: ConnectionRecord = self
+                    .files
+                    .get(&Key::new("connections", id.as_str()))?
+                    .ok_or(Error::Corrupt)?;
+                if record.identity != *identity || record.connection != id {
+                    return Err(Error::Fence);
+                }
+                Ok(record)
+            })
+            .collect()
     }
-
-    /// Historical successful tool-call pairs on exactly one connection and
-    /// generation. This is NOT liveness or client consumption: the root must
-    /// freshly verify the captured native ancestry, SID and open connection
-    /// before using these names as NativeToolRoundtrip binding evidence.
     pub fn completed_connection_tools(
         &mut self,
         identity: &InstanceIdentity,
         connection: &InstanceId,
     ) -> Result<Vec<LogicalTool>, Error> {
-        let scope = self.scope().clone();
-        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
-        let seat = current(&tx, &scope, identity)?;
+        let seat = self.assert_current(identity)?;
         if matches!(seat.status, SeatStatus::Stopped | SeatStatus::Unknown) {
             return Err(Error::Fence);
         }
-        let caller = serde_json::to_string(identity)?;
-        let prefix = format!("{}:", connection.as_str());
-        let tools = {
-            // Both facts must pair with the SAME completed invocation; a bare
-            // response write, error, other call ID or tools/list cannot qualify.
-            // The suffix is one serialized RPC ID, preventing an opaque
-            // connection such as `a:child` from being accumulated into `a`.
-            // Only names leave SQL; arguments/results are not diagnostics.
-            let mut statement = tx.prepare(
-                "SELECT DISTINCT json_extract(c.request,'$.name') FROM contract_calls c
-                 JOIN contract_facts i ON i.caller=c.caller AND i.call_key=c.call_key AND i.fact='invocation_received'
-                 JOIN contract_facts w ON w.caller=c.caller AND w.call_key=c.call_key AND w.fact='response_written'
-                 WHERE c.caller=?1 AND substr(c.call_key,1,length(?2))=?2
-                 AND json_valid(substr(c.call_key,length(?2)+1)) ORDER BY 1",
-            )?;
-            let rows = statement.query_map(params![caller, prefix], |row| row.get::<_, String>(0))?;
-            rows.map(|row| match row?.as_str() {
-                "send_message" => Ok(LogicalTool::SendMessage),
-                "report_result" => Ok(LogicalTool::ReportResult),
-                "get_team_status" => Ok(LogicalTool::GetTeamStatus),
-                _ => Err(Error::Corrupt),
-            }).collect::<Result<Vec<_>, Error>>()?
+        let Some(evidence) =
+            self.files
+                .get::<super::mcp::ToolEvidence>(&super::mcp::ToolEvidence::key(
+                    identity, connection,
+                )?)?
+        else {
+            return Ok(Vec::new());
         };
-        tx.commit()?;
-        Ok(tools)
+        if evidence.caller != *identity || evidence.connection != *connection {
+            return Err(Error::Fence);
+        }
+        let prefix = format!("{}:", connection.as_str());
+        evidence
+            .calls
+            .into_iter()
+            .map(|(name, key)| {
+                let suffix = key.strip_prefix(&prefix).ok_or(Error::Fence)?;
+                serde_json::from_str::<serde_json::Value>(suffix)?;
+                let address = super::mcp::call_address(identity, &key)?;
+                let call: super::mcp::CallRecord = self
+                    .files
+                    .get(&Key::new("calls", &address))?
+                    .ok_or(Error::Corrupt)?;
+                let facts: super::mcp::FactRecord = self
+                    .files
+                    .get(&Key::new("facts", address))?
+                    .ok_or(Error::Corrupt)?;
+                if call.caller != *identity
+                    || call.key != key
+                    || facts.caller != *identity
+                    || facts.key != key
+                    || call.request["name"].as_str() != Some(&name)
+                    || !facts.facts.contains("invocation_received")
+                    || !facts.facts.contains("response_written")
+                {
+                    return Err(Error::Fence);
+                }
+                match name.as_str() {
+                    "send_message" => Ok(LogicalTool::SendMessage),
+                    "report_result" => Ok(LogicalTool::ReportResult),
+                    "get_team_status" => Ok(LogicalTool::GetTeamStatus),
+                    _ => Err(Error::Corrupt),
+                }
+            })
+            .collect()
     }
-
     pub fn close_connection(
         &mut self,
         identity: &InstanceIdentity,
         connection: &InstanceId,
     ) -> Result<(), Error> {
-        // Closing an already accepted connection remains possible after a seat
-        // transitions; it cannot publish a fact for the replacement generation.
-        if &identity.scope != self.scope() {
+        if identity.scope != *self.scope() {
             return Err(Error::Fence);
         }
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let raw: String = tx.query_row(
-            "SELECT record FROM contract_connections WHERE connection=?1 AND identity=?2",
-            params![connection.as_str(), serde_json::to_string(identity)?],
-            |row| row.get(0),
-        )?;
-        let mut record: ConnectionRecord = serde_json::from_str(&raw)?;
+        let key = Key::new("connections", connection.as_str());
+        let mut tx = self.files.write([key.clone()])?;
+        let mut record: ConnectionRecord = tx.get(&key)?.ok_or(Error::Fence)?;
         if record.identity != *identity || record.connection != *connection {
             return Err(Error::Fence);
         }
         record.closed = true;
-        tx.execute(
-            "UPDATE contract_connections SET record=?1 WHERE connection=?2",
-            params![serde_json::to_string(&record)?, connection.as_str()],
-        )?;
-        tx.commit()?;
-        Ok(())
+        tx.put(key, &record)?;
+        tx.commit()
     }
 }

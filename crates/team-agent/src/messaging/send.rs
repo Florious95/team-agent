@@ -142,230 +142,40 @@ pub fn send_message(
     content: &str,
     opts: &SendOptions,
 ) -> Result<DeliveryOutcome, MessagingError> {
-    // N31/N32 funnel: leader / `*` broadcast / fanout-list dispatch sits HERE in send.py:
-    // single recipient falls through to the legacy worker path; `to=leader` routes to
-    // `send_to_leader_receiver` (the shared leader-delivery primitive); broadcast/fanout
-    // expand the recipient set and re-enter `send_message` per recipient so leader/peer
-    // each go through their own (same) primitive — no parallel BroadcastEngine.
-    let event_log = EventLog::new(workspace);
-    let raw_state = crate::state::persist::load_runtime_state(workspace)?;
-    let mut state = opts
-        .team
-        .as_ref()
-        .map(|team| crate::state::projection::project_top_level_view(&raw_state, team.as_str()))
-        .unwrap_or_else(|| raw_state.clone());
-    backfill_leader_binding_for_delivery_view(&mut state, &raw_state);
-    let recipient = match target {
-        MessageTarget::Single(target) if target == "leader" => {
-            let presentation = decide_presentation(&opts.presentation, PresentationSource::Send);
-            if presentation.effective_sink != PresentationSink::Leader {
-                return persist_stored_only_send(
-                    workspace,
-                    LogicalRecipient::Leader,
-                    content,
-                    opts,
-                    &presentation,
-                    &event_log,
-                );
-            }
-            let outcome = send_to_leader_receiver_with_presentation(
-                workspace,
-                &state,
-                "leader",
-                content,
-                opts.task_id.as_ref(),
-                opts.sender.display_name(),
-                opts.requires_ack,
-                None,
-                opts.message_id.as_deref(),
-                &presentation,
-                &event_log,
-            )?;
-            if matches!(outcome.status, DeliveryStatus::Queued) && owner_pane_is_dead(&state) {
-                if let Some(message_id) = outcome.message_id.clone() {
-                    let team_key = owner_gate_hint_team_key(&state);
-                    if !explicit_claim_applied(workspace, &team_key, "") {
-                        return Ok(rebind_required_outcome_with_verification(
-                            Some(message_id),
-                            format!("team-agent claim-leader --team {team_key}"),
-                        ));
-                    }
-                }
-            }
-            return Ok(outcome);
-        }
-        MessageTarget::Single(target) if target.is_empty() => {
-            return Ok(refused_outcome(DeliveryRefusal::UnknownRecipient));
-        }
-        MessageTarget::Single(target) => target,
-        MessageTarget::Broadcast => {
-            let recipients = broadcast_recipients(&state, opts.sender.as_str(), opts.team.as_ref());
-            return fanout_send(workspace, &recipients, content, opts, "*");
-        }
-        MessageTarget::Fanout(recipients) if recipients.is_empty() => {
-            // swallow batch 3 ②: a failed send carries its reason (Python send error
-            // reason style) — "failed with no reason" is an unexplained exit.
-            return Ok(DeliveryOutcome {
-                ok: false,
-                status: DeliveryStatus::Failed,
-                message_status: MessageStatusShadow("failed".to_string()),
-                message_id: None,
-                verification: None,
-                stage: None,
-                reason: Some(crate::messaging::DeliveryRefusal::EmptyTargetList),
-                channel: None,
-                ack_forced_off: false,
-                turn_verification: None,
-            });
-        }
-        MessageTarget::Fanout(recipients) => {
-            return fanout_send(workspace, recipients, content, opts, "fanout");
-        }
+    let to = match target {
+        MessageTarget::Single(target) => target.clone(),
+        MessageTarget::Fanout(targets) => targets.join(","),
+        MessageTarget::Broadcast => "*".into(),
     };
-    // send.py:259-261 — a non-leader target that is NOT a known team agent is refused
-    // (target_not_in_team), NOT persisted. Membership = the runtime state's `agents` map.
-    let in_team = state
-        .get("agents")
-        .and_then(|a| a.as_object())
-        .is_some_and(|a| a.contains_key(recipient.as_str()));
-    if !in_team {
-        return Ok(refused_outcome(DeliveryRefusal::TargetNotInTeam));
-    }
-    let presentation = decide_presentation(&opts.presentation, PresentationSource::Send);
-    if presentation.effective_sink != PresentationSink::Leader {
-        return persist_stored_only_send(
-            workspace,
-            LogicalRecipient::from_resolved(recipient),
-            content,
-            opts,
-            &presentation,
-            &event_log,
-        );
-    }
-    if let Some(outcome) = session_drift_refusal(
-        &state,
-        recipient,
-        "leader",
-        opts.sender.as_str(),
-        opts.task_id.as_ref(),
-        &event_log,
-    )? {
-        return Ok(outcome);
-    }
-    if let Some(outcome) = send_owner_gate_refusal(workspace, &state, opts.sender.as_str())? {
-        return Ok(outcome);
-    }
-    if opts.route_task_id {
-        if let Some(task_id) = opts.task_id.as_ref() {
-            if !task_exists(&state, task_id) {
-                return Err(MessagingError::Validation(format!(
-                    "unknown task id: {}",
-                    task_id.as_str()
-                )));
-            }
+    let team = opts.team.as_ref().map(TeamKey::as_str);
+    let authority = if opts.origin == SendOrigin::Mcp {
+        crate::station::send::Authority::Seat {
+            sender: opts.sender.as_str(),
+            team: team.ok_or_else(|| MessagingError::Routing("MCP send requires captured team scope".into()))?,
         }
-    }
-    #[cfg(unix)]
-    if state
-        .get("agents")
-        .and_then(|agents| agents.get(recipient))
-        .is_some_and(crate::contract_runtime::framework::is_contract)
-    {
-        return crate::contract_runtime::framework::enqueue(
-            workspace, &state, recipient, content, opts,
-        );
-    }
-    let stale_worker_target_missing =
-        stale_worker_target_missing_preflight(workspace, &state, recipient)?;
-    let coordinator_unavailable = if stale_worker_target_missing {
-        None
     } else {
-        coordinator_unavailable_outcome(workspace, recipient, opts, &event_log)?
+        crate::station::send::Authority::Operator { sender: opts.sender.display_name() }
     };
-    if let Some(gate) = coordinator_unavailable
-        .as_ref()
-        .filter(|gate| !gate.persist)
-    {
-        return Ok(gate.outcome.clone());
-    }
-    let mut intent = ResolvedSendIntent::accepted(
-        opts.origin,
-        workspace,
-        opts.team.clone(),
-        LogicalRecipient::from_resolved(recipient),
-        opts.sender.clone(),
-        opts.task_id.clone(),
-        content,
-        None,
-        opts.requires_ack,
-        opts.message_id.clone(),
-    );
-    if coordinator_unavailable
-        .as_ref()
-        .is_some_and(|gate| gate.persist)
-    {
-        intent.initial_disposition =
-            InitialDisposition::Blocked(DeliveryBlocker::CoordinatorUnavailable);
-    }
-    let persisted = match persist_resolved_send(&intent)? {
-        PersistResolution::Persisted(persisted) => persisted,
-        PersistResolution::Duplicate(message_id) => {
-            return Ok(refused_outcome_with_id(
-                DeliveryRefusal::Duplicate,
-                Some(message_id),
-            ));
-        }
-    };
-    let message_id = persisted.message_id.clone();
-    let store = crate::message_store::MessageStore::open(workspace)?;
-    if stale_worker_target_missing {
-        return super::delivery::mark_worker_target_missing(
-            &store,
-            &event_log,
-            &message_id,
-            recipient,
-            None,
-        );
-    }
-    capture_missing_sessions_after_send(workspace);
-    if let Some(CoordinatorUnavailableGate {
-        mut outcome,
-        persist: true,
-    }) = coordinator_unavailable
-    {
-        let Some(blocker) = persisted.blocker else {
-            return Err(MessagingError::Validation(
-                "coordinator-blocked persistence returned no blocker".to_string(),
-            ));
-        };
-        let message_status = persisted.row_status.as_str();
-        event_log.write(
-            "send.message_queued",
-            serde_json::json!({
-                "message_id": message_id,
-                "recipient": recipient,
-                "sender": opts.sender,
-                "message_status": message_status,
-                "blocker": blocker.as_str(),
-            }),
-        )?;
-        outcome.ok = true;
-        outcome.status = DeliveryStatus::Blocked;
-        outcome.message_status = MessageStatusShadow(message_status.to_string());
-        outcome.message_id = Some(message_id);
-        return Ok(outcome);
-    }
+    let value = crate::station::send::execute(crate::station::send::Request {
+        workspace, team, to: &to, content,
+        task_id: opts.task_id.as_ref().map(TaskId::as_str),
+        message_id: opts.message_id.as_deref(), presentation: &opts.presentation,
+        mailbox: opts.presentation.sink != PresentationSink::Leader, envelope: None,
+    }, authority).map_err(MessagingError::Routing)?;
+    let refused = value["status"] == "refused";
+    let physical = value["delivery"] == "physical" || value["sent"].as_u64().is_some_and(|n| n > 0);
+    let status = if refused { DeliveryStatus::Refused }
+        else if value["status"] == "partial" { DeliveryStatus::FanoutPartial }
+        else if physical { DeliveryStatus::Delivered } else { DeliveryStatus::StoredOnly };
     Ok(DeliveryOutcome {
-        ok: true,
-        status: DeliveryStatus::Queued,
-        message_status: MessageStatusShadow(persisted.row_status.as_str().to_string()),
-        message_id: Some(message_id),
-        verification: None,
-        stage: None,
-        reason: None,
-        channel: None,
-        ack_forced_off: false,
-        turn_verification: None,
+        ok: value["ok"].as_bool().unwrap_or(false), ack_forced_off: opts.requires_ack,
+        status, message_status: MessageStatusShadow(if refused { "refused" } else if physical { "submitted" } else { "stored" }.into()),
+        message_id: value["message_id"].as_str().map(str::to_string),
+        verification: Some(value.to_string()), stage: None,
+        reason: if !refused { None }
+            else if value["reason"] == "peer_not_in_scope" { Some(DeliveryRefusal::TargetNotInTeam) }
+            else { serde_json::from_value(value["reason"].clone()).ok() },
+        channel: Some("station".into()), turn_verification: None,
     })
 }
 

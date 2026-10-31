@@ -6,13 +6,13 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use team_agent_contract::contract::delivery::InputSurface;
 use team_agent_contract::contract::probe::{PaneReadyEvidence, Probe, ProbeOutcome};
-use team_agent_contract::contract::types::{Digest, OperationId, SeatId};
+use team_agent_contract::contract::types::{Digest, Operation, OperationId, SeatId};
 use team_agent_contract::host::{clock::RealClock, process::{sample_process, ProcessState}};
 use team_agent_contract::orchestration::physical::{PhysicalRuntime, Registration};
 use team_agent_contract::orchestration::store::{Outcome, SeatStatus};
 
 use crate::cli::CliError;
-use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
+use crate::lifecycle::lock::{acquire_seat_lifecycle_lock, LifecycleLockRequest};
 use crate::model::ids::AgentId;
 use crate::state::repository::{StateRepository, StateWriteIntent};
 use crate::state::selector::{resolve_active_team_readonly, SelectedTeam, SelectorMode};
@@ -39,15 +39,20 @@ pub(super) fn with_agent(
         return Ok(None);
     }
     let agent_id = AgentId::new(agent);
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &selected.run_workspace,
         operation,
         team: Some(&selected.team_key),
         agent_id: Some(&agent_id),
     }).map_err(error)?;
-    let latest = resolve_active_team_readonly(
+    let mut latest = resolve_active_team_readonly(
         &selected.run_workspace, Some(&selected.team_key), SelectorMode::RuntimeOnly,
     ).map_err(error)?;
+    if let Some(current) = crate::station::projection::target(&selected.run_workspace, &selected.team_key, agent).map_err(error)? {
+        if let Some(row) = latest.state.get_mut("agents").and_then(|agents| agents.get_mut(agent)).and_then(Value::as_object_mut) {
+            row.insert("station_instance_id".into(), json!(current.instance_id));
+        }
+    }
     crate::lifecycle::launch::ensure_owner_allowed_for_state(&latest.state, Some(&agent_id)).map_err(error)?;
     if !latest.state.get("agents").and_then(|agents| agents.get(agent)).is_some_and(framework::is_contract) {
         return Err(CliError::Runtime("contract seat changed while acquiring lifecycle ownership".into()));
@@ -56,18 +61,26 @@ pub(super) fn with_agent(
 }
 
 pub(super) fn publish_at(workspace: &Path, team: &str, id: &SeatId, clear_stop: bool) -> Result<Value, CliError> {
-    let projected = framework::project_seat(workspace, team, id.as_str()).map_err(error)?;
+    let mut projected = framework::project_seat(workspace, team, id.as_str()).map_err(error)?;
+    let mut fields = projected.as_object().ok_or(BackendError::Metadata).map_err(error)?.clone();
+    fields.insert("paused".into(), Value::Bool(false));
+    if clear_stop { fields.insert("explicit_stop".into(), Value::Bool(false)); }
+    let mut preview = resolve_active_team_readonly(workspace, Some(team), SelectorMode::RuntimeOnly)
+        .map_err(error)?.state;
+    preview.get_mut("agents").and_then(|agents| agents.get_mut(id.as_str()))
+        .and_then(Value::as_object_mut).ok_or(BackendError::Metadata).map_err(error)?.extend(fields.clone());
+    if let Some(current) = crate::station::projection::target(workspace, team, id.as_str()).map_err(error)? {
+        preview["agents"][id.as_str()]["station_instance_id"] = json!(current.instance_id);
+    }
+    crate::station::projection::publish(workspace, &mut preview, team, &[id.as_str()]).map_err(error)?;
+    let instance = preview["agents"][id.as_str()]["station_instance_id"].clone();
+    fields.insert("station_instance_id".into(), instance.clone());
+    projected["station_instance_id"] = instance;
     StateRepository::new(workspace).commit(
         StateWriteIntent::StartAgent { team_key: team, agent_id: id.as_str() },
         |state| {
             if let Some(row) = state.get_mut("agents").and_then(|agents| agents.get_mut(id.as_str())).and_then(Value::as_object_mut) {
-                for (key, value) in projected.as_object().expect("native projection object") {
-                    row.insert(key.clone(), value.clone());
-                }
-                row.insert("paused".into(), Value::Bool(false));
-                if clear_stop {
-                    row.insert("explicit_stop".into(), Value::Bool(false));
-                }
+                row.extend(fields);
             }
         },
     ).map_err(error)?;
@@ -144,32 +157,29 @@ pub fn start_agent(
         // An uncertain operation never rolls the authoritative native store back
         // to the old generation. The receipt remains available for recovery.
         let projection = checked_projection(&receipt, || publish_at(&selected.run_workspace, &selected.team_key, id, true))?;
-        let coordinator = crate::coordinator::start_coordinator_with_team(
-            &crate::coordinator::WorkspacePath::new(selected.run_workspace.clone()), Some(&selected.team_key),
-        ).map_err(error)?;
-        Ok(json!({"ok":coordinator.ok,"agent_id":agent,"status":"running","runtime":"contract",
+        Ok(json!({"ok":true,"agent_id":agent,"status":"running","runtime":"contract",
             "start_mode":match before {
                 None => "fresh",
                 Some(ref original) if original.outcome == Outcome::Compensated => "fresh",
                 Some(ref original) if original.id == receipt.id && original.outcome != Outcome::Committed => "receipt_completed",
                 Some(ref original) if original.id == receipt.id => "reused",
+                Some(_) if receipt.native_launch == Some(Operation::Fresh) => "fresh",
                 Some(_) => "resumed",
-            }, "operation":receipt.id,
+            }, "native_launch":receipt.native_launch, "operation":receipt.id,
             "session_id":projection.get("session_id"),"generation":projection.get("generation"),
-            "session_observation":projection.get("session_observation"),"warning":projection.get("session_warning"),
-            "coordinator":crate::lifecycle::coordinator_start_summary_value(
-                &crate::lifecycle::CoordinatorStartSummary::from_start_report(&coordinator))}))
+            "session_observation":projection.get("session_observation"),"warning":projection.get("session_warning")}))
     })
 }
 
 pub(crate) struct NativeRestartResult {
     pub agent_id: String,
     pub session_id: Option<String>,
+    pub native_launch: Operation,
     pub outcome: Result<(), String>,
 }
 
-/// Called with the ordinary workspace lifecycle lock already held. Native
-/// panes never enter legacy transport spawn, backing scan or shared teardown.
+/// Each native seat owns its lock through resume and publication. Native panes
+/// never enter legacy transport spawn, backing scan or shared teardown.
 pub(crate) fn restart_prepared(
     workspace: &Path,
     team: &str,
@@ -178,10 +188,24 @@ pub(crate) fn restart_prepared(
 ) -> Vec<NativeRestartResult> {
     prepared.into_iter().map(|prepared| {
         let id = prepared.seat().clone();
-        let session_id = prepared.session().map(str::to_owned);
+        let mut session_id = prepared.session().map(str::to_owned);
+        let native_launch = prepared.native_launch();
         let outcome = (|| {
+            let agent = AgentId::new(id.as_str());
+            let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
+                workspace, operation: "restart", team: Some(team), agent_id: Some(&agent),
+            }).map_err(error)?;
+            if crate::station::projection::target(workspace, team, id.as_str()).map_err(error)?
+                .is_some_and(|seat| seat.desired != "running")
+            { return Err(error("seat stopped or removed during restart preparation")); }
+            let latest = Backend::open_readonly(workspace, team).map_err(error)?;
+            if latest.store.seat(&id).map_err(error)?.is_none_or(|seat| seat.status == SeatStatus::Stopped) {
+                return Err(error("seat stopped or removed during restart preparation"));
+            }
+            drop(latest);
             let receipt = backend::resume(prepared).map_err(error)?;
             let projection = checked_projection(&receipt, || publish_at(workspace, team, &id, false))?;
+            session_id = projection.get("session_id").and_then(Value::as_str).map(str::to_owned);
             if let Some(row) = state.get_mut("agents").and_then(|agents| agents.get_mut(id.as_str())).and_then(Value::as_object_mut) {
                 for (key, value) in projection.as_object().expect("native projection object") {
                     row.insert(key.clone(), value.clone());
@@ -189,7 +213,7 @@ pub(crate) fn restart_prepared(
             }
             Ok::<(), CliError>(())
         })().map_err(|error| error.to_string());
-        NativeRestartResult { agent_id: id.as_str().into(), session_id, outcome }
+        NativeRestartResult { agent_id: id.as_str().into(), session_id, native_launch, outcome }
     }).collect()
 }
 
@@ -198,7 +222,7 @@ pub fn restart(workspace: &Path, team: Option<&str>) -> Result<Option<Value>, Cl
         return Ok(None);
     };
     if !framework::only_contract(&selected.state) { return Ok(None); }
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &selected.run_workspace, operation: "restart",
         team: Some(&selected.team_key), agent_id: None,
     }).map_err(error)?;
@@ -209,19 +233,14 @@ pub fn restart(workspace: &Path, team: Option<&str>) -> Result<Option<Value>, Cl
     let mut state = latest.state.clone();
     let results = restart_prepared(&latest.run_workspace, &latest.team_key, &mut state, prepared);
     let succeeded: Vec<_> = results.iter().filter(|result| result.outcome.is_ok()).map(|result| json!({
-        "agent_id":result.agent_id,"restart_mode":"resumed","session_id":result.session_id,
+        "agent_id":result.agent_id,"restart_mode":if result.native_launch == Operation::Fresh { "fresh" } else { "resumed" },"session_id":result.session_id,
     })).collect();
     let failed: Vec<_> = results.iter().filter_map(|result| result.outcome.as_ref().err().map(|error| json!({
         "agent_id":result.agent_id,"phase":"native_resume","error":error,
     }))).collect();
-    let coordinator = crate::coordinator::start_coordinator_with_team(
-        &crate::coordinator::WorkspacePath::new(latest.run_workspace.clone()), Some(&latest.team_key),
-    ).map_err(error)?;
-    Ok(Some(json!({"ok":failed.is_empty() && coordinator.ok,"runtime":"contract",
+    Ok(Some(json!({"ok":failed.is_empty(),"runtime":"contract",
         "status":if failed.is_empty() {"restarted"} else if succeeded.is_empty() {"failed"} else {"partial"},
-        "team_id":latest.team_key,"agents":succeeded,"failed_agents":failed,
-        "coordinator":crate::lifecycle::coordinator_start_summary_value(
-            &crate::lifecycle::CoordinatorStartSummary::from_start_report(&coordinator))})))
+        "team_id":latest.team_key,"agents":succeeded,"failed_agents":failed})))
 }
 
 pub fn stop_agent(
@@ -234,33 +253,40 @@ pub fn stop_agent(
             return Ok(json!({"ok":true,"agent_id":agent,"stopped":false,"status":"paused","runtime":"contract"}));
         }
         let backend = Backend::open_readonly(&selected.run_workspace, &selected.team_key).map_err(error)?;
-        let seat = backend.store.seat(id).map_err(error)?.ok_or(BackendError::Metadata).map_err(error)?;
-        let already_stopped = seat.status == SeatStatus::Stopped;
+        let seat = backend.store.seat(id).map_err(error)?;
+        let mut absent = seat.is_none() && backend.store.creation_receipt(id, None).map_err(error)?
+            .is_some_and(|record| record.outcome == Outcome::Compensated && record.target.status == SeatStatus::Stopped);
+        let already_stopped = (absent || seat.as_ref().is_some_and(|seat| seat.status == SeatStatus::Stopped))
+            && !backend.store.leased(id).map_err(error)?;
         drop(backend);
+        let mut stop_receipt = None;
         let operation = if already_stopped {
             None
         } else {
             let receipt = backend::stop(&selected.run_workspace, &selected.team_key, id).map_err(error)?;
-            if receipt.outcome != Outcome::Committed {
-                return Err(error(BackendError::Shutdown {
-                    operation: receipt.id, phase: receipt.phase, outcome: receipt.outcome, failure: receipt.failure,
-                }));
-            }
+            backend::require_stopped(&receipt).map_err(error)?;
+            absent = receipt.outcome == Outcome::Compensated;
+            stop_receipt = receipt.stop_receipt;
             Some(receipt.id)
         };
-        let projected = framework::project_seat(&selected.run_workspace, &selected.team_key, id.as_str()).map_err(error)?;
+        let projected = if absent {
+            json!({"status":"stopped","contract_instance":null,"pane_id":null,"pane_pid":null,
+                "native_pane":null,"native_endpoint":null,"tmux_endpoint":null,"session_id":null})
+        } else { framework::project_seat(&selected.run_workspace, &selected.team_key, id.as_str()).map_err(error)? };
         let mut state = selected.state.clone();
         let row = state.get_mut("agents").and_then(|agents| agents.get_mut(agent)).and_then(Value::as_object_mut).ok_or(BackendError::Metadata).map_err(error)?;
         for (key, value) in projected.as_object().expect("native projection object") {
             row.insert(key.clone(), value.clone());
         }
         row.insert("explicit_stop".into(), Value::Bool(true));
+        crate::station::projection::publish(&selected.run_workspace, &mut state, &selected.team_key, &[agent])
+            .map_err(error)?;
         StateRepository::new(&selected.run_workspace).save(
             StateWriteIntent::StopAgent { team_key: &selected.team_key, agent_id: agent }, &state,
         ).map_err(error)?;
         Ok(json!({"ok":true,"agent_id":agent,"stopped":!already_stopped,
             "status":if already_stopped {"already_stopped"} else {"stopped"},
-            "runtime":"contract","operation":operation}))
+            "runtime":"contract","operation":operation,"stop_receipt":stop_receipt}))
     })
 }
 
@@ -380,7 +406,7 @@ fn refused(agent: &str, reason: &str, error: &str, evidence: Option<String>, act
 
 fn stop_seat(selected: &SelectedTeam, id: &SeatId) -> Result<OperationId, CliError> {
     let receipt = backend::stop(&selected.run_workspace, &selected.team_key, id).map_err(error)?;
-    check_record(&receipt)?;
+    backend::require_stopped(&receipt).map_err(error)?;
     Ok(receipt.id)
 }
 
@@ -512,15 +538,10 @@ pub fn reset_agent(
             },
         ).map_err(error)?;
         let projection = framework::start_configured(&selected.run_workspace, &selected.team_dir, &selected.team_key, id)?;
-        let coordinator = crate::coordinator::start_coordinator_with_team(
-            &crate::coordinator::WorkspacePath::new(selected.run_workspace.clone()), Some(&selected.team_key),
-        ).map_err(error)?;
-        Ok(json!({"ok":coordinator.ok,"agent_id":agent,"status":"reset","runtime":"contract",
+        Ok(json!({"ok":true,"agent_id":agent,"status":"reset","runtime":"contract",
             "start_mode":"fresh","stopped":stopped.is_some(),"operation":stopped,
             "discarded_session_id":discarded,"session_id":projection.get("session_id"),
-            "new_session_id":projection.get("session_id"),"generation":projection.get("generation"),
-            "coordinator":crate::lifecycle::coordinator_start_summary_value(
-                &crate::lifecycle::CoordinatorStartSummary::from_start_report(&coordinator))}))
+            "new_session_id":projection.get("session_id"),"generation":projection.get("generation")}))
     })
 }
 
@@ -564,9 +585,10 @@ mod tests {
                 status: SeatStatus::Starting, process: None, physical: None, session: None,
                 resources: vec![], workspace_resources: vec![], bootstrap_used: false,
             },
-            parent: None, phase: Phase::F3Spawn, pending: Some("compensating-stop".into()),
+            parent: None, phase: Phase::F3Spawn, pending: Some("compensating-stop".into()), spawn_observation: None, native_launch: None,
             resources: vec![], effect: DeliveryEffect::NoEffect, outcome, preserved: vec![],
             failure: Some("native control SessionInspect guard-deadline".into()),
+            recovery_failure: None, stop_receipt: None,
         }
     }
 

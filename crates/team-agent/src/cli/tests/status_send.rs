@@ -524,7 +524,7 @@ fn status_port_status_detail_full_keeps_uncompacted_events() {
 
 fn send_args_fixture() -> SendArgs {
     let workspace = seed_send_workspace();
-    let _ = crate::message_store::MessageStore::open(&workspace).unwrap();
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
     SendArgs {
         target: Some("alice".into()),
         message: vec!["hello".into(), "world".into(), "foo".into()],
@@ -549,12 +549,12 @@ fn send_args_fixture() -> SendArgs {
 
 fn queued_send_args_fixture(json: bool) -> SendArgs {
     let ws = deleg_uniq_dir("send-human");
-    let _ = crate::message_store::MessageStore::open(&ws).unwrap();
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
     crate::state::persist::save_runtime_state(
         &ws,
         &json!({
             "active_team_key": "current",
-            "teams": {"current": {"agents": {"w1": {"provider": "copilot"}}}}
+            "teams": {"current": {"agents": {"w1": {"provider": "copilot", "status": "running"}}}}
         }),
     )
     .unwrap();
@@ -623,18 +623,6 @@ fn send_options_default_flags_are_acked_and_waited() {
 // RED: cmd_send is unimplemented!() so it panics until ported.
 // =========================================================================
 
-#[test]
-fn cmd_send_joins_message_with_single_space() {
-    let args = send_args_fixture();
-    let result = cmd_send(&args).expect("mailbox append");
-    assert_eq!(result.exit, ExitCode::Ok);
-    let inbox = crate::inbox_store::read(&args.workspace, "alice", 3, None).unwrap();
-    assert_eq!(inbox["messages"][0]["content"], "hello world foo");
-    assert_eq!(inbox["messages"][0]["sender"], "leader");
-    let conn = rusqlite::Connection::open(args.workspace.join(".team/runtime/team.db")).unwrap();
-    let count: i64 = conn.query_row("SELECT count(*) FROM messages", [], |row| row.get(0)).unwrap();
-    assert_eq!(count, 0, "public send must not enter the coordinator queue");
-}
 
 #[test]
 fn cmd_send_mailbox_output_names_storage_without_claiming_delivery() {
@@ -654,9 +642,12 @@ fn issue372_send_never_reports_a_handshake_parking_gate() {
     assert_eq!(value["status"], "stored");
     assert!(value.get("deferred_reason").is_none());
     let direct = SendArgs { presentation: crate::messaging::presentation::PresentationRequest::default(), ..args };
-    let error = cmd_send(&direct).unwrap_err().to_string();
-    assert!(error.contains("no tmux pane"), "{error}");
-    assert!(!error.contains("mcp_handshake") && !error.contains("parked"), "{error}");
+    // M1 stores first; a missing pane is reported on the receipt, not as an error.
+    let CmdOutput::Json(direct) = cmd_send(&direct).unwrap().output else { panic!("JSON result expected") };
+    let text = direct.to_string();
+    assert_eq!(direct["submission"], "not_attempted", "{text}");
+    assert!(direct["delivery_error"].as_str().is_some_and(|e| e.contains("no tmux pane")), "{text}");
+    assert!(!text.contains("mcp_handshake") && !text.contains("parked"), "{text}");
 }
 
 #[test]
@@ -666,23 +657,17 @@ fn cmd_send_json_shape_describes_the_decoupled_operation() {
     let CmdOutput::Json(value) = result.output else { panic!("JSON result expected") };
     let inbox = crate::inbox_store::read(&args.workspace, "w1", 10, None).unwrap();
     assert_eq!(inbox["messages"][0]["message_id"], value["message_id"]);
-    assert_eq!(value, json!({"ok": true, "status": "stored", "recipient": "w1", "mailbox": true, "message_id": inbox["messages"][0]["message_id"]}));
-    for key in ["delivery_attempts", "message_status", "verification", "watch", "deferred_reason"] {
+    // M1 receipt: durable storage facts only; a mailbox send never attempts submission.
+    let mut keys = value.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+    keys.sort();
+    assert_eq!(keys, ["accepted", "anonymous_dedupe_window", "dedupe_key", "duplicate", "live", "message_id", "ok", "recipient", "record_ref", "status", "stored"], "{value}");
+    assert_eq!((value["ok"].clone(), value["status"].clone(), value["stored"].clone(), value["live"].clone(), value["recipient"].clone()),
+        (json!(true), json!("stored"), json!(true), json!(false), json!("w1")), "{value}");
+    for key in ["delivery_attempts", "message_status", "verification", "watch", "deferred_reason", "submission"] {
         assert!(value.get(key).is_none(), "no coordinator delivery fiction: {value}");
     }
 }
 
-#[test]
-fn cmd_send_legacy_watch_flag_does_not_create_a_watcher_or_delivery_row() {
-    let args = SendArgs { json: true, ..send_args_fixture() };
-    let db = args.workspace.join(".team/runtime/team.db");
-    let before = std::fs::read(&db).unwrap();
-    let result = cmd_send(&args).unwrap();
-    let CmdOutput::Json(value) = result.output else { panic!("JSON result expected") };
-    assert_eq!(value["status"], "stored");
-    assert!(value.get("watch").is_none());
-    assert_eq!(std::fs::read(db).unwrap(), before, "send must not mutate the coordinator database");
-}
 
 #[test]
 fn cmd_send_unknown_recipient_is_an_immediate_error_without_queueing() {
@@ -698,7 +683,7 @@ fn cmd_send_unknown_recipient_is_an_immediate_error_without_queueing() {
 #[test]
 fn cmd_send_canonicalizes_legacy_session_alias_before_membership_projection() {
     let ws = deleg_uniq_dir("send-team-alias");
-    let _ = crate::message_store::MessageStore::open(&ws).unwrap();
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
     crate::state::persist::save_runtime_state(
         &ws,
         &json!({
@@ -808,21 +793,10 @@ fn cmd_send_legacy_task_flag_does_not_require_a_coordinator_task() {
     assert_eq!(result.exit, ExitCode::Ok);
     let inbox = crate::inbox_store::read(&args.workspace, "alice", 3, None).unwrap();
     assert_eq!(inbox["messages"][0]["content"], "hello world foo");
-    assert!(inbox["messages"][0].get("task_id").is_none());
+    // M1: the task id is an advisory label kept for result attribution (red_m1_r12).
+    assert_eq!(inbox["messages"][0]["task_id"], "t-unknown");
 }
 
-#[test]
-fn run_send_legacy_task_flag_is_not_persisted_in_the_delivery_database() {
-    let args = send_args_fixture();
-    let argv = ["send", "alice", "--team", "teamA", "--task", "t-unknown", "go", "--mailbox", "--json"].map(str::to_string);
-    assert_eq!(run(&argv, &args.workspace), ExitCode::Ok);
-    let inbox = crate::inbox_store::read(&args.workspace, "alice", 3, None).unwrap();
-    assert_eq!(inbox["messages"][0]["content"], "go");
-    assert!(inbox["messages"][0].get("task_id").is_none());
-    let conn = rusqlite::Connection::open(args.workspace.join(".team/runtime/team.db")).unwrap();
-    let count: i64 = conn.query_row("SELECT count(*) FROM messages", [], |row| row.get(0)).unwrap();
-    assert_eq!(count, 0);
-}
 
 #[test]
 fn run_leader_passthrough_flag_after_dashdash_renders_error_not_silent_swallow() {

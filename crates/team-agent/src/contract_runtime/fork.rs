@@ -137,16 +137,11 @@ fn fork_locked(
             "status": "starting", "contract_instance": null, "pane_id": null, "forked_from": source_id.as_str(),
         })).map_err(error)?;
         let projection = commands::publish_at(workspace, team, &target_id, true)?;
-        let coordinator = crate::coordinator::start_coordinator_with_team(
-            &crate::coordinator::WorkspacePath::new(workspace.to_path_buf()), Some(team),
-        ).map_err(error)?;
-        Ok(json!({"ok":coordinator.ok,"status":"forked","runtime":"contract","mode":"native_new_seat",
+        Ok(json!({"ok":true,"status":"forked","runtime":"contract","mode":"native_new_seat",
             "provider":provider,"source_agent_id":source_id.as_str(),"new_agent_id":target,"target":target,
             "agent_id":target,"operation":record.id,"source_session_id":source_session,
             "session_id":projection.get("session_id"),"new_session_id":projection.get("session_id"),
-            "generation":projection.get("generation"),"backing_state":"verified",
-            "coordinator":crate::lifecycle::coordinator_start_summary_value(
-                &crate::lifecycle::CoordinatorStartSummary::from_start_report(&coordinator))}))
+            "generation":projection.get("generation"),"backing_state":"verified"}))
     })();
     result.map_err(|failure| undo.run(failure))
 }
@@ -161,6 +156,8 @@ fn native_fork(
     role: &RoleConfig,
     members: &[MemberRoute],
 ) -> Result<OperationRecord, BackendError> {
+    let _source_ownership = backend::native_seat_lock(workspace, team, source, false)?;
+    let _target_ownership = backend::native_seat_lock(workspace, team, &role.id, true)?;
     let mut backend = Backend::open(workspace, team)?;
     backend::require_candidate(&backend.binding)?;
     if !backend::seat_unclaimed(&backend, &role.id)? {
@@ -208,6 +205,7 @@ fn native_fork(
     let resolved = resolve_launch(descriptor, &hooks, &launch, Some(&discovered.catalog))?;
     let plan = adapter.plan(&resolved)?;
     validate_launch_plan(descriptor, &resolved, &plan)?;
+    let _session_creation = backend::workspace_session_lock(&backend.binding)?;
     let (workspace_topology, _, _) = backend::workspace_tmux(&backend.binding, &role.id, None)?;
     let mut io = ScopedMaterializer::new(descriptor, &resolved, &plan, operation.clone(), RealCommandRunner::default())?;
     let clock = RealClock::new();
@@ -223,6 +221,7 @@ fn native_fork(
         operation.clone(),
         &clock,
     )?;
+    physical.executing_candidate = Some(backend.binding.candidate_sha256);
     physical.evidence = backend::policy_evidence(&role.provider, &launch.native, backend.binding.candidate_sha256)?;
     physical.workspace_tmux = Some(workspace_topology);
     let routing = Routing {
@@ -235,6 +234,9 @@ fn native_fork(
         &request,
         Some((&launch, routing)),
     )?;
+    if record.outcome == Outcome::Committed && record.target.physical.is_some() {
+        backend::bind_workspace_session(&backend.binding.workspace.path, &backend.binding.team, &record.target.identity.seat)?;
+    }
     Ok(record)
 }
 

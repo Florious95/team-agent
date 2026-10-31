@@ -5,16 +5,11 @@
 use super::*;
 use crate::messaging::{DeliveryOutcome, DeliveryRefusal, DeliveryStage, DeliveryStatus};
 
-mod coordinator;
 mod mailbox;
 mod persist;
 mod presentation;
 mod resolve;
 
-use coordinator::{
-    append_loud_ensure_fields, dirty_topology_refusal_value, loud_ensure_coordinator,
-    target_has_known_worker,
-};
 pub use persist::send_options_from_args;
 use persist::{
     initial_delivery_allows_watch, observe_initial_delivery_for_watch,
@@ -46,73 +41,59 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
     let logical_to = logical_to_from_args(args, alias.as_ref().map(|_| "leader"))?;
     let content = args.message.join(" ");
     if content.is_empty() { return Err(CliError::Usage("empty_message: send requires a nonempty message".into())); }
-    let requested = logical_to.split(',').map(str::trim).filter(|target| !target.is_empty());
-    let mailbox = args.presentation.sink != crate::messaging::presentation::PresentationSink::Leader;
-    let mut results = Vec::new();
-    let mut destinations = Vec::new();
-    for target in requested {
-        let (workspace, team, agent) = if let Some(entry) = &alias {
-            (entry.workspace.clone(), Some(entry.team_key.clone()), "leader".to_string())
-        } else if target == "*" {
-            (args.workspace.clone(), args.team.clone(), target.to_string())
-        } else {
-            // A qualified address carries its own scope; only a bare name consumes --team.
-            let Ok(address) = crate::messaging::parse_logical_address(target) else {
-                return refuse(args, target, format!("invalid recipient name: {target}"));
-            };
-            let team = if address.workspace.is_some() { None } else { args.team.clone() };
-            let workspace = address.workspace.unwrap_or_else(|| args.workspace.clone());
-            match address.target {
-                crate::messaging::LogicalAddressTarget::Worker(agent) => (workspace, team, agent),
-                crate::messaging::LogicalAddressTarget::TeamEntity { team, entity } => (workspace, Some(team), entity),
-                crate::messaging::LogicalAddressTarget::SessionWindow { .. } => return Err(CliError::Usage(
-                    "Terminal-window addressing is no longer supported; use an agent name or leader, with --workspace/--team to select scope".into(),
-                )),
+    let (workspace, team) = alias.as_ref().map_or((&args.workspace, args.team.as_deref()),
+        |entry| (&entry.workspace, Some(entry.team_key.as_str())));
+    let outcome = crate::station::send::execute(crate::station::send::Request {
+        workspace, team, to: &logical_to, content: &content,
+        task_id: args.task.as_deref(), message_id: args.message_id.as_deref(),
+        presentation: &args.presentation,
+        mailbox: args.presentation.sink != crate::messaging::presentation::PresentationSink::Leader,
+        envelope: None,
+    }, crate::station::send::Authority::Operator { sender: args.sender.display_name() });
+    let value = match outcome {
+        Ok(value) if value["status"] == "refused" => return refused_outcome(args, workspace, team, value),
+        Ok(value) => value,
+        Err(error) if alias.is_some() => return Err(CliError::Runtime(error)),
+        Err(error) => return refuse(args, &logical_to, error),
+    };
+    Ok(CmdResult::from_json(value, args.json))
+}
+
+fn refused_outcome(
+    args: &SendArgs,
+    workspace: &std::path::Path,
+    team: Option<&str>,
+    mut value: serde_json::Value,
+) -> Result<CmdResult, CliError> {
+    let mut first_error = None;
+    for (index, detail) in value["invalid_details"].as_array_mut().into_iter().flatten().enumerate() {
+        let raw = detail["target"].as_str().unwrap_or_default().to_string();
+        if let Err(mut error) = crate::cli::named_address::resolve_name_for_cli(workspace, &raw, team) {
+            if error.kind.as_str() != detail["reason"].as_str().unwrap_or_default() { continue; }
+            resolve::adapt_positional_bare_error(args, &raw, &mut error);
+            for (key, field) in error.to_json().as_object().unwrap() {
+                detail[key] = field.clone();
             }
-        };
-        let directory = match crate::direct_delivery::directory(&workspace, team.as_deref()) {
-            Ok(directory) => directory,
-            Err(error) => return refuse(args, target, error),
-        };
-        let agents: Vec<String> = if agent == "*" {
-            directory.agents().into_iter().filter(|agent| agent != args.sender.as_str()).collect()
-        } else { vec![agent] };
-        for agent in agents {
-            let raw = if target == "*" { agent.as_str() } else { target };
-            if agent != "leader" && !directory.agents().contains(&agent) {
-                return refuse(args, raw, format!("unknown recipient: {agent}"));
-            }
-            let endpoint = directory.endpoint(&agent);
-            if let (false, Err(error)) = (mailbox, &endpoint) {
-                if alias.is_some() { return Err(CliError::Runtime(error.clone())); }
-                return refuse(args, raw, error.clone());
-            }
-            let key = (directory.workspace.clone(), directory.team.clone(), agent);
-            if !destinations.iter().any(|(existing, _)| existing == &key) {
-                destinations.push((key, endpoint));
-            }
+            if index == 0 { first_error = Some((raw, error)); }
         }
     }
-    if destinations.is_empty() { return Err(CliError::Runtime("send has no recipients".into())); }
-    for ((workspace, team, agent), _endpoint) in destinations {
-        let mut inbox_id = None;
-        if mailbox || (agent == "leader" && !matches!(args.sender.as_str(), "human" | "leader")) {
-            let record = crate::inbox_store::record(args.sender.as_str(), &agent, &content, team.as_deref(), "message");
-            crate::inbox_store::append(&workspace, &agent, &record).map_err(CliError::Runtime)?;
-            inbox_id = Some(record["message_id"].clone());
+    if let Some((raw, error)) = first_error {
+        if !args.json {
+            let (message, action) = error.human_guidance(&raw);
+            return Err(CliError::AddressRefusal { audit: error.n38_message(), error: message, action });
         }
-        let mut value = if mailbox {
-            serde_json::json!({"status": "stored", "recipient": agent, "mailbox": true})
-        } else {
-            let text = format!("Team Agent message from {}:\n\n{content}", args.sender.as_str());
-            crate::direct_delivery::directory(&workspace, team.as_deref())
-                .and_then(|directory| directory.send(&agent, &text)).map_err(CliError::Runtime)?
-        };
-        if let Some(id) = inbox_id { value["message_id"] = id; }
-        results.push(value);
+        for (key, field) in error.to_json().as_object().unwrap() {
+            value[key] = field.clone();
+        }
+    } else if !args.json {
+        let message = value["error"].as_str().unwrap_or("recipient refused").to_string();
+        let action = value["action"].as_str().unwrap_or_default().to_string();
+        return Err(CliError::AddressRefusal {
+            audit: format!("Error: {}: {message}\nAction: {action}\nLog: no targets attempted", value["reason"].as_str().unwrap_or("refused")),
+            error: message,
+            action,
+        });
     }
-    let mut value = if results.len() == 1 { results.remove(0) } else { serde_json::json!({"status": "sent", "results": results}) };
-    value["ok"] = serde_json::json!(true);
     Ok(CmdResult::from_json(value, args.json))
 }
 

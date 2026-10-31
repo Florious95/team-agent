@@ -66,7 +66,7 @@ use crate::model::yaml::{self, Value};
 use crate::state::persist::load_runtime_state;
 use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
 
-use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
+use crate::lifecycle::lock::{acquire_seat_lifecycle_lock, LifecycleLockRequest};
 
 use super::leader_context::{caller_provider_for_seed_with_lookup, seed_unbound_launched_owner};
 use super::worker_env::spawn_timestamp;
@@ -109,6 +109,11 @@ pub(super) fn initial_runtime_state(
             if let Some(auth_mode) = auth_mode {
                 obj.insert("auth_mode".to_string(), serde_json::json!(auth_mode));
             }
+        }
+        // New native intent is explicit before startup; an old provider label is not authority.
+        #[cfg(unix)]
+        if crate::contract_runtime::registry::descriptor(provider).is_some() {
+            value["runtime_family"] = serde_json::json!("contract");
         }
         agents.insert(id.to_string(), value);
     }

@@ -49,7 +49,7 @@ pub fn fork_agent_with_transport(
     .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
     let lock_workspace = selected.run_workspace.clone();
     let lock_team_key = selected.team_key.clone();
-    let _lifecycle_lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let _lifecycle_lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &lock_workspace,
         operation: "fork-agent",
         team: Some(lock_team_key.as_str()),

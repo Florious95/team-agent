@@ -220,65 +220,28 @@ impl TeamOrchestratorTools {
         presentation: Option<&Value>,
     ) -> Result<SendOutcome, ToolError> {
         self.require_captured_identity("send_message")?;
-        let _ = (task_id, requires_ack);
+        let _ = requires_ack;
         if matches!(scope_override, Some(Scope::Workspace)) {
             return Err(self.rpc_scope_refused("send_message", None, Some("workspace")));
         }
         let normalized = crate::messaging::presentation::normalize_send_presentation(mailbox, presentation)
             .map_err(tool_runtime_error)?;
         let owner_team = self.canonical_owner_team_key()?;
-        let directory = crate::direct_delivery::directory(&self.workspace, owner_team.as_ref().map(TeamKey::as_str))
-            .map_err(tool_runtime_error)?;
+        let team = owner_team.as_ref().ok_or_else(|| tool_runtime_error("captured team is unavailable"))?.as_str();
         let sender = self.require_captured_identity("send_message")?.as_str();
         let targets = match to {
-            MessageTarget::Single(target) if target == "*" => directory.agents().into_iter().filter(|agent| agent != sender).collect(),
-            MessageTarget::Single(target) => vec![target.clone()],
-            MessageTarget::Fanout(targets) => targets.clone(),
-            MessageTarget::Broadcast => directory.agents().into_iter().filter(|agent| agent != sender).collect(),
+            MessageTarget::Single(target) => target.clone(),
+            MessageTarget::Fanout(targets) => targets.join(","),
+            MessageTarget::Broadcast => "*".to_string(),
         };
-        if targets.is_empty() { return Err(tool_runtime_error("no recipients")); }
-        let stored_only = normalized.request.sink != crate::messaging::presentation::PresentationSink::Leader;
-        let mut destinations = Vec::new();
-        for target in targets {
-            if target != "leader" && !directory.agents().contains(&target) {
-                return Err(ToolError::new(ToolErrorReason::PeerNotInScope,
-                    format!("recipient is not in the captured team: {target}"), "ScopeError"));
-            }
-            let endpoint = directory.endpoint(&target);
-            if !stored_only && target != "leader" {
-                endpoint.as_ref().map_err(tool_runtime_error)?;
-            }
-            if !destinations.iter().any(|(agent, _)| agent == &target) {
-                destinations.push((target, endpoint));
-            }
-        }
-        let mut results = Vec::new();
-        for (agent, endpoint) in destinations {
-            let mut message_id = None;
-            if stored_only || agent == "leader" {
-                let record = crate::inbox_store::record(sender, &agent, content, directory.team.as_deref(), "message");
-                message_id = record.get("message_id").cloned();
-                crate::inbox_store::append(&directory.workspace, &agent, &record).map_err(tool_runtime_error)?;
-            }
-            let mut value = if stored_only {
-                serde_json::json!({"status": "stored", "recipient": agent, "mailbox": true})
-            } else {
-                let text = format!("Team Agent message from {sender}:\n\n{content}");
-                match endpoint.and_then(|_| directory.send(&agent, &text)) {
-                    Ok(value) => value,
-                    Err(error) if message_id.is_some() => serde_json::json!({"status": "stored", "recipient": agent, "delivery_error": error}),
-                    Err(error) => return Err(tool_runtime_error(error)),
-                }
-            };
-            if let Some(id) = message_id { value["message_id"] = id; }
-            results.push(value);
-        }
-        let mut value = if results.len() == 1 { results.remove(0) } else {
-            serde_json::json!({"status": "sent", "results": results})
-        };
-        value["ok"] = Value::Bool(true);
+        let mut value = crate::station::send::execute(crate::station::send::Request {
+            workspace: &self.workspace, team: Some(team), to: &targets, content,
+            task_id, message_id: None, presentation: &normalized.request,
+            mailbox: normalized.request.sink != crate::messaging::presentation::PresentationSink::Leader,
+            envelope: None,
+        }, crate::station::send::Authority::Seat { sender, team }).map_err(tool_runtime_error)?;
         if let Some(warning) = normalized.deprecation { value["warning"] = Value::String(warning); }
-        Ok(SendOutcome::Direct(ToolOk { fields: object_fields(value) }))
+        Ok(SendOutcome::Direct(Self::station_result(value)?))
     }
 
     pub(crate) fn refuse_scope_override(&self) -> ToolError {
@@ -384,6 +347,11 @@ impl TeamOrchestratorTools {
         if let Some(envelope) = envelope {
             self.validate_rpc_scope_args("report_result", envelope)?;
         }
+        let owner_team = self.canonical_owner_team_key()?;
+        let team = owner_team.as_ref().ok_or_else(|| tool_runtime_error("captured team is unavailable"))?.as_str();
+        let sender = self.require_captured_identity("report_result")?.as_str();
+        let submitted_task = crate::station::send::submitted_task(&self.workspace, team, sender);
+        let task_id = task_id.filter(|task| !task.is_empty()).or(submitted_task.as_deref());
         let mut base = envelope
             .cloned()
             .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
@@ -480,24 +448,32 @@ impl TeamOrchestratorTools {
                 obj.insert("warnings".to_string(), Value::Array(warnings));
             }
         }
-        let owner_team = self.canonical_owner_team_key()?;
-        let team = owner_team.as_ref().map(TeamKey::as_str);
-        let sender = self.require_captured_identity("report_result")?.as_str();
         let summary = env_value.get("summary").and_then(Value::as_str).unwrap_or("");
-        let mut record = crate::inbox_store::record(sender, "leader", summary, team, "result");
-        record["envelope"] = env_value.clone();
-        crate::inbox_store::append(&self.workspace, "leader", &record).map_err(tool_runtime_error)?;
-        let mut value = serde_json::json!({"ok": true, "status": "stored", "message_id": record["message_id"],
-            "task_id": env_value["task_id"], "agent_id": sender});
-        if normalized.presentation.sink == crate::messaging::presentation::PresentationSink::Leader {
-            let delivery = crate::direct_delivery::directory(&self.workspace, team)
-                .and_then(|directory| directory.send("leader", &format!("Team Agent result from {sender}:\n\n{summary}")));
-            match delivery {
-                Ok(_) => { value["status"] = Value::String("reported".into()); }
-                Err(error) => { value["delivery_error"] = Value::String(error); }
-            }
+        let presentation = crate::messaging::presentation::PresentationRequest {
+            sink: normalized.presentation.sink, class: normalized.presentation.class,
+            case_id: normalized.presentation.case_id.clone(),
+        };
+        let value = crate::station::send::execute(crate::station::send::Request {
+            workspace: &self.workspace, team: Some(team), to: "leader", content: summary,
+            task_id: env_value["task_id"].as_str(), message_id: None,
+            presentation: &presentation,
+            mailbox: normalized.presentation.sink != crate::messaging::presentation::PresentationSink::Leader,
+            envelope: Some(&env_value),
+        }, crate::station::send::Authority::Seat { sender, team }).map_err(tool_runtime_error)?;
+        Self::station_result(value)
+    }
+
+    fn station_result(value: Value) -> ToolResult {
+        if value["status"] == "refused" {
+            let reason = serde_json::from_value(value["error_code"].clone())
+                .unwrap_or(ToolErrorReason::InternalRuntimeError);
+            let mut error = ToolError::new(reason,
+                value["message"].as_str().unwrap_or("request refused"), format!("{reason:?}"));
+            error.extra = object_fields(value);
+            Err(error)
+        } else {
+            Ok(ToolOk { fields: object_fields(value) })
         }
-        Ok(ToolOk { fields: object_fields(value) })
     }
 
     /// `get_team_status`: return the owner-team-scoped machine-readable status.

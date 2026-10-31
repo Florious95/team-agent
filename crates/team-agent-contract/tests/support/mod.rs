@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+pub mod direct_business;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -630,5 +631,15 @@ pub fn authorization() -> DeliveryAuthorization {
         require_server_handshake: true,
         channel: Channel::Tmux,
         policy_sha256: HASH,
+    }
+}
+
+/// M4 fences name the failed check (`FenceAt`); a bare `Fence` no longer proves which
+/// check fired. Assert the reason, not only that some fence fired.
+#[track_caller]
+pub fn assert_fenced<T: std::fmt::Debug>(result: Result<T, Error>, check: &str) {
+    match &result {
+        Err(Error::FenceAt { check: actual, .. }) if *actual == check => {}
+        _ => panic!("expected FenceAt {{ check: {check:?} }}, got {result:?}"),
     }
 }

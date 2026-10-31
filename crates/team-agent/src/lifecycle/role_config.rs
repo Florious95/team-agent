@@ -12,7 +12,7 @@ use crate::state::repository::{StateRepository, StateWriteIntent};
 use crate::state::selector::{SelectedTeam, SelectorMode};
 use crate::transport::Transport;
 
-use super::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
+use super::lock::{acquire_seat_lifecycle_lock, LifecycleLockRequest};
 use super::{AddAgentReport, LifecycleError, StartAgentOutcome};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -95,7 +95,7 @@ fn with_selected<T>(
     operation: impl FnOnce(&SelectedTeam) -> Result<T, LifecycleError>,
 ) -> Result<T, LifecycleError> {
     validate_id(agent_id)?;
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &selected.run_workspace,
         operation: "role-config",
         team: Some(&selected.team_key),
@@ -235,7 +235,30 @@ fn start_at_selected(
         .get("agents")
         .and_then(|agents| agents.get(agent_id.as_str()))
         .ok_or_else(|| LifecycleError::RequirementUnmet(format!("agent {agent_id} not found")))?;
-    super::restart::ensure_agent_not_running(&selected.state, agent_id, transport)?;
+    // A plain start converges a live or interrupted launch without editing its
+    // role. An explicitly stopped seat must instead compile today's role policy.
+    if patch == &RoleConfigPatch::default()
+        && !crate::state::projection::agent_stopped_for_restart(old_agent)
+    {
+        return super::restart::start_agent_at_paths(
+            &selected.run_workspace,
+            selected.spec_workspace.as_deref().unwrap_or(&selected.team_dir),
+            agent_id,
+            false,
+            true,
+            allow_fresh,
+            Some(&selected.team_key),
+            transport,
+        );
+    }
+    let replace_orphan = if patch == &RoleConfigPatch::default()
+        && crate::state::projection::agent_stopped_for_restart(old_agent)
+    {
+        super::restart::live_agent_target(&selected.state, agent_id, transport)?.is_some()
+    } else {
+        super::restart::ensure_agent_not_running(&selected.state, agent_id, transport)?;
+        false
+    };
     if old_agent.get("paused").and_then(serde_json::Value::as_bool) == Some(true) {
         return Err(LifecycleError::RequirementUnmet(format!(
             "agent {agent_id} is paused"
@@ -313,6 +336,17 @@ fn start_at_selected(
         crate::model::spec::validate_spec(&spec, &selected.run_workspace)
             .map_err(|error| LifecycleError::Compile(error.to_string()))?;
         atomic_write(&snapshot.spec.path, yaml::dumps(&spec).as_bytes())?;
+        if replace_orphan {
+            // Compile first, then reuse the ownership-fenced stop/drain path.
+            // Adopting the orphan could retain policy from before a role edit.
+            super::restart::stop_agent_at_paths(
+                &selected.run_workspace,
+                snapshot.spec.path.parent().unwrap_or(&selected.team_dir),
+                agent_id,
+                Some(&selected.team_key),
+                transport,
+            )?;
+        }
         update_agent_config(selected, agent_id, &compiled.agent, &role_path)?;
         let outcome = super::restart::start_agent_at_paths(
             &selected.run_workspace,

@@ -11,7 +11,7 @@ exclude = ["crates/team-agent-contract"]
 
 [workspace.package]
 edition = "2021"
-version = "0.5.128"
+version = "0.5.129"
 license = "AGPL-3.0"
 rust-version = "1.95"
 
@@ -23,7 +23,7 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 # preserve_order: Value 用 IndexMap(插入序),匹配 Python dict/json.loads 迭代序 —— 校验
 # 错误顺序、序列化字段序与 Python 字节一致(§7)。indexmap 已缓存,离线 OK。
-serde_json = { version = "1", features = ["preserve_order"] }
+serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
 sha2 = "0.10"              # derive_leader_session_uuid 身份公式(§3)
 regex = "1"                # routing 的 when 表达式 + fnmatch.translate 忠实复刻 Python re
 chrono = "0.4"             # UTC 时间戳(events.jsonl ts / db created_at / 备份名戳 等)

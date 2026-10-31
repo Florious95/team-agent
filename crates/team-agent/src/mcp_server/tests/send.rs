@@ -129,12 +129,14 @@ fn send_message_worker_recipient_returns_physical_receipt_without_poll_hint() {
     assert_eq!(value["status"], "sent");
     assert_eq!(value["delivery"], "physical");
     assert_eq!(value["accepted"], Value::Null);
-    assert!(value.get("message_id").is_none());
     assert!(value.get("poll_via").is_none());
     assert!(value.get("delivery_pending").is_none());
     fixture.received("Team Agent message from leader:\n\ndo the thing");
     assert!(!fixture.root.join(".team/runtime/team.db").exists());
-    assert!(!fixture.root.join(".team/inbox").exists());
+    // M1 stores before submitting: the receipt names the durable inbox record.
+    let inbox = crate::inbox_store::read(&fixture.root, "worker-1", 10, Some("current")).unwrap();
+    assert_eq!(inbox["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(inbox["messages"][0]["message_id"], value["message_id"]);
 }
 
 #[test]
@@ -237,7 +239,9 @@ fn send_message_mailbox_is_durable_without_live_injection() {
         .expect("mailbox send persists");
     let value = outcome.to_value();
     assert_eq!(value.get("status"), Some(&json!("stored")));
-    assert_eq!(value["mailbox"], true);
+    // M1 receipt: a mailbox send is stored, not live, and never attempts submission.
+    assert_eq!(value["live"], false);
+    assert!(value.get("submission").is_none(), "{value}");
     let inbox = crate::inbox_store::read(&ws, "leader", 10, Some("teamA")).unwrap();
     assert_eq!(inbox["messages"].as_array().unwrap().len(), 1);
     assert_eq!(inbox["messages"][0]["message_id"], value["message_id"]);
@@ -321,28 +325,35 @@ fn refuse_cross_team_peer_no_owner_team_is_legacy_passthrough() {
 fn send_message_cross_team_peer_surfaces_peer_not_in_scope_error() {
     // End-to-end: send_message to an out-of-scope peer → Err(ToolError{PeerNotInScope})
     // BEFORE any runtime delivery (server-side guard, no peer-name leak).
-    // A real published snapshot distinguishes unknown peers from an unreadable scope.
+    // M5 (homomorphic send, admission ruling 1b): a name that exists nowhere is
+    // name_not_resolvable exactly as on the CLI; peer_not_in_scope is kept for a real
+    // peer in another team. Neither refusal names the other team's roster.
     let workspace = unique_ws("direct-peer-scope");
     std::fs::create_dir_all(workspace.join(".team/runtime")).unwrap();
     std::fs::write(workspace.join(".team/runtime/state.json"), serde_json::to_vec(&serde_json::json!({
         "active_team_key": "teamA",
-        "teams": {"teamA": {"team_id": "teamA", "agents": {"worker-1": {}}}}
+        "teams": {
+            "teamA": {"team_id": "teamA", "agents": {"worker-1": {}}},
+            "teamB": {"team_id": "teamB", "agents": {"bob": {}}}
+        }
     })).unwrap()).unwrap();
     let tools = TeamOrchestratorTools::with_identity(
         &workspace,
         Some(AgentId::new("worker-1")),
         Some(TeamKey::new("teamA")),
     );
-    let err = tools
-        .send_message(
-            &MessageTarget::Single("other-team-bob".to_string()),
-            "leak attempt",
-            None,
-            None,
-            None,
-        )
-        .expect_err("out-of-scope peer must be refused");
-    assert_eq!(err.reason, ToolErrorReason::PeerNotInScope);
+    for (target, reason) in [
+        ("other-team-bob", ToolErrorReason::NameNotResolvable),
+        ("teamB/bob", ToolErrorReason::PeerNotInScope),
+    ] {
+        let err = tools
+            .send_message(&MessageTarget::Single(target.to_string()), "leak attempt", None, None, None)
+            .expect_err("out-of-scope peer must be refused");
+        assert_eq!(err.reason, reason, "{target}: {err:?}");
+        let candidates = err.extra.get("candidates").and_then(|value| value.as_array()).cloned().unwrap_or_default();
+        assert!(candidates.iter().all(|c| c["team_key"] == "teamA"), "{target} leaked the other roster: {err:?}");
+    }
+    assert!(!workspace.join(".team/inbox").exists(), "a refused send stores nothing");
     assert!(!workspace.join(".team/runtime/team.db").exists());
     std::fs::remove_dir_all(workspace).unwrap();
 }

@@ -11,7 +11,7 @@
 //!   - Does not run full workspace verification or complete GitHub workflows
 //! maturity: wired
 //! ---
-//! E2E-REC-002 Doctor emits provider/coordinator/tmux health checks.
+//! E2E-REC-002 Doctor emits provider/tmux health checks; the retired coordinator reports not_required.
 
 use crate::framework::*;
 
@@ -41,7 +41,8 @@ fn rec_002_doctor_checks() {
     let j = out.json();
     assert_json_field_eq_bool(&j, "/ok", false);
     assert_json_field(&j, "/error", &serde_json::Value::Null);
-    assert_json_field_eq_str(&j, "/coordinator/status", "running");
+    // R-M3: the resident coordinator is retired; doctor reports it as not required.
+    assert_json_field_eq_str(&j, "/coordinator/status", "not_required");
     assert_json_field_eq_bool(&j, "/coordinator/schema_ok", true);
     assert_json_field_eq_bool(&j, "/tmux/installed", true);
     assert_json_field_eq_bool(&j, "/profile_smoke/ok", true);
@@ -62,30 +63,8 @@ fn rec_002_doctor_checks() {
         "unattached host doctor must retain the attachment repair: {j}"
     );
 
-    std::fs::remove_file(ws.path().join(".team/runtime/coordinator.json"))
-        .expect("remove coordinator metadata for destruction test");
-    let missing_metadata = run_ta(
-        &ws,
-        &[
-            "doctor",
-            "--workspace",
-            ws.path().to_str().unwrap(),
-            "--json",
-        ],
-    );
-    assert!(
-        !missing_metadata.is_success(),
-        "missing coordinator metadata must fail host doctor: {missing_metadata:?}"
-    );
-    let missing_metadata_json = missing_metadata.json();
-    assert_json_field_eq_bool(&missing_metadata_json, "/ok", false);
-    assert_json_field_eq_str(
-        &missing_metadata_json,
-        "/coordinator/metadata_mismatch_reason",
-        "metadata_missing",
-    );
-    assert_json_field_eq_bool(&missing_metadata_json, "/coordinator/ok", false);
-
+    // R-M3: the coordinator-metadata destruction case is gone with the coordinator (nothing writes
+    // coordinator.json any more); the comms gate below keeps the attachment contract.
     let comms = run_ta(
         &ws,
         &[

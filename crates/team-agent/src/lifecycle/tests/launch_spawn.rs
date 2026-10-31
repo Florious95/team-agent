@@ -146,7 +146,7 @@ fn unowned_running_ws() -> PathBuf {
         }),
     )
     .unwrap();
-    let _ = crate::message_store::MessageStore::open(&ws).unwrap();
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
     ws
 }
 
@@ -702,7 +702,7 @@ fn unowned_running_ws_all_paused() -> PathBuf {
         }),
     )
     .unwrap();
-    let _ = crate::message_store::MessageStore::open(&ws).unwrap();
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
     ws
 }
 
@@ -1680,31 +1680,6 @@ fn attach_window_names_for_state_agents_include_managed_leader_and_layout_window
     assert_eq!(windows, vec!["leader", "team-w1", "team-w2"]);
 }
 
-// REAL-MACHINE residency boundary (acceptance framework): the PUBLIC quick_start (real TmuxBackend +
-// real start_coordinator) on a fresh ws must leave a LIVE tmux session AND a ps-verifiable resident
-// coordinator daemon (start_coordinator -> live pid). The framework verifies residency via ps; here we
-// only assert the in-report spawn observable. #[ignore] — spawns real tmux + a real daemon subprocess.
-#[test]
-#[ignore = "real-machine: live tmux session + resident coordinator daemon (framework verifies via ps)"]
-fn quick_start_fresh_ws_spawns_resident_tmux_and_coordinator() {
-    let team = quick_start_team_dir(QS_VALID_ROLE);
-    let report = quick_start(&team, None, true, None).expect("quick_start");
-    match report {
-        QuickStartReport::Ready { launch, .. } => {
-            assert!(
-                !launch.dry_run,
-                "a real quick_start must spawn (not dry-run)"
-            );
-            assert!(
-                !launch.started.is_empty(),
-                "a real quick_start must spawn >=1 worker into a live tmux session; got {:?}",
-                launch.started
-            );
-        }
-        other => panic!("a fresh quick_start must reach Ready; got {other:?}"),
-    }
-}
-
 // ═════════════════════════════════════════════════════════════════════════
 // rt-host-a LOOP #2 — cli-handler DELEGATION sweep (same-class stub): restart / start_agent /
 // add_agent return RequirementUnmet at the spawn boundary and NEVER drive the transport (zero spawns)
@@ -1851,8 +1826,8 @@ fn restart_with_transport_spawns_resumable_workers_not_stub() {
         "each resumed worker's spawn argv must carry the provider resume command (copilot --resume); got {recorded:?}"
     );
     assert!(
-        matches!(result, Ok(RestartReport::Restarted { coordinator_started: true, .. })),
-        "restart must reach RestartReport::Restarted with coordinator_started=true (AlreadyRunning, seeded); got {result:?}"
+        matches!(result, Ok(RestartReport::Restarted { coordinator_started: false, .. })),
+        "restart must reach RestartReport::Restarted and, in M3, start no coordinator; got {result:?}"
     );
     let state = crate::state::persist::load_runtime_state(&ws).unwrap();
     let generation = state["agents"]["alpha"]["spawned_at"].as_str().unwrap();
@@ -2118,8 +2093,8 @@ fn restart_spawn_failure_isolated_to_partial_report() {
         panic!("single worker failure must return RestartReport::Partial; got {report:?}");
     };
     assert!(
-        coordinator_started,
-        "partial restart still starts coordinator for successful agents"
+        !coordinator_started,
+        "M3: a partial restart never starts a coordinator (successful agents are still restarted)"
     );
     assert_eq!(
         agents
@@ -2238,8 +2213,7 @@ fn restart_times_out_when_spawned_worker_pane_is_not_addressable() {
     assert!(
         text.contains("restart not ready")
             && text.contains("worker pane addressable: no")
-            && text.contains("Action:")
-            && text.contains("Log:"),
+            && text.contains("Action:"),
         "restart must refuse with N38 readiness timeout details, not return ok; got {text}"
     );
     assert!(
@@ -2987,8 +2961,14 @@ fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
             "spawn_cwd",
             "spawned_at",
             "pane_id",
+            // M2 C4: every published seat row carries its per-seat manifest CAS token.
+            "station_instance_id",
         ],
         "the fake worker has no pre-assigned session id, so no framework _pending_session_id; raw={raw}"
+    );
+    assert!(
+        agent["station_instance_id"].as_str().is_some_and(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())),
+        "station_instance_id must be a 32-hex seat manifest instance; raw={raw}"
     );
     assert_eq!(agent["status"], json!("running"));
     assert_eq!(agent["provider"], json!("fake"));
@@ -3110,8 +3090,12 @@ fn quick_start_paused_agent_state_is_paused_provider_only_and_not_spawned() {
         .collect::<Vec<_>>();
     assert_eq!(
         keys,
-        vec!["status", "provider"],
-        "paused agent state must be exactly golden launch/core.py:171-173; raw={raw}"
+        vec!["status", "provider", "station_instance_id"],
+        "paused agent state must be exactly golden launch/core.py:171-173 plus the M2 C4 seat manifest token; raw={raw}"
+    );
+    assert!(
+        agent["station_instance_id"].as_str().is_some_and(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())),
+        "station_instance_id must be a 32-hex seat manifest instance; raw={raw}"
     );
     assert_eq!(agent["status"], json!("paused"));
     assert_eq!(agent["provider"], json!("fake"));

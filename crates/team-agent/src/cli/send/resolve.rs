@@ -411,7 +411,7 @@ mod a13_red_tests {
             }
         });
         crate::state::persist::save_runtime_state(workspace, &state).expect("save fixture state");
-        MessageStore::open(workspace).expect("create fixture store");
+        // M4: no SQLite message store fixture (MessageStore::open is retired).
     }
 
     fn send_args(workspace: &Path) -> SendArgs {
@@ -470,44 +470,17 @@ mod a13_red_tests {
             .expect("count fixture messages")
     }
 
-    #[test]
-    fn a13_worker_cross_workspace_leader_send_preserves_target_scope() {
-        let sender_workspace = fresh_workspace("sender");
-        let target_workspace = fresh_workspace("target");
-        seed_team(&target_workspace, "other-team");
-        let mut args = send_args(&sender_workspace);
-        let to_name = format!("{}::other-team/leader", target_workspace.display());
-        args.to_name = Some(to_name.clone());
-        let value = super::send_to_logical_to(&args, &to_name, "payload")
-            .expect("cross-workspace leader send must preserve a structured outcome");
-        assert_eq!(
-            value["to_name"],
-            json!(to_name),
-            "cross-workspace receipt must retain the original target: {value}"
-        );
-        assert_eq!(
-            value["sender"],
-            json!(format!(
-                "{}::sender-team/worker-1",
-                sender_workspace.display()
-            )),
-            "cross-workspace receipt must retain the full sender: {value}"
-        );
-        assert_eq!(
-            message_count(&sender_workspace),
-            0,
-            "cross-workspace send must not fold into the sender workspace"
-        );
-        assert_eq!(
-            message_count(&target_workspace),
-            1,
-            "cross-workspace send must persist in the target workspace"
-        );
 
-        let _ = std::fs::remove_dir_all(sender_workspace);
-        let _ = std::fs::remove_dir_all(target_workspace);
+    /// Leader inbox records for `team` in `workspace` (M1: the inbox is the durable store).
+    fn leader_records(workspace: &Path, team: &str) -> Vec<Value> {
+        crate::inbox_store::read(workspace, "leader", 100, Some(team)).expect("read leader inbox")
+            ["messages"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
     }
 
+    /// M1: the public send path is `cmd_send` -> `station::send`; SQLite rows are retired.
     #[test]
     fn a13_worker_cross_workspace_identity_is_preserved_in_row_and_render() {
         let sender_workspace = fresh_workspace("identity-sender");
@@ -515,26 +488,18 @@ mod a13_red_tests {
         seed_team(&target_workspace, "other-team");
         let mut args = send_args(&sender_workspace);
         args.to_name = Some(format!("{}::other-team/leader", target_workspace.display()));
-        let resolved = leader_address(&sender_workspace, &target_workspace);
+        args.message = vec!["identity payload".to_string()];
 
-        send_to_resolved_name(&args, &resolved, "identity payload")
-            .expect("cross-workspace identity send must persist");
-        let store = MessageStore::open(&target_workspace).expect("open target store");
-        let connection = crate::db::schema::open_db(store.db_path()).expect("open target db");
-        let sender: String = connection
-            .query_row("select sender from messages limit 1", [], |row| row.get(0))
-            .expect("read sender");
+        crate::cli::send::cmd_send(&args).expect("cross-workspace identity send must persist");
+        let records = leader_records(&target_workspace, "other-team");
+        assert_eq!(records.len(), 1, "cross-workspace send must store once in the target: {records:?}");
+        let sender = records[0]["sender"].as_str().unwrap_or_default().to_string();
         let expected = format!("{}::sender-team/worker-1", sender_workspace.display());
         assert_eq!(
             sender, expected,
-            "durable row must retain the full sender identity"
+            "durable record must retain the full sender identity"
         );
-        let rendered = crate::messaging::delivery::render_message(
-            &sender,
-            None,
-            "identity payload",
-            "msg-a13",
-        );
+        let rendered = crate::station::send::render(&sender, "identity payload", "msg-a13", false);
         assert!(
             rendered.contains(&expected),
             "rendered pane must show full sender: {rendered}"
@@ -552,18 +517,21 @@ mod a13_red_tests {
     fn a13_worker_in_workspace_leader_send_remains_allowed() {
         let workspace = fresh_workspace("in-workspace");
         seed_team(&workspace, "other-team");
-        let args = send_args(&workspace);
-        let resolved = leader_address(&workspace, &workspace);
+        let mut args = send_args(&workspace);
+        args.to_name = Some(format!("{}::other-team/leader", workspace.display()));
 
-        let value = send_to_resolved_name(&args, &resolved, "payload")
+        let result = crate::cli::send::cmd_send(&args)
             .expect("in-workspace leader send should preserve the existing path");
+        let crate::cli::CmdOutput::Json(value) = result.output else {
+            panic!("JSON send outcome expected")
+        };
         assert_ne!(
             value["reason"],
             Value::String("target_out_of_scope".to_string()),
             "in-workspace send must not be classified as cross-workspace: {value}"
         );
         assert_eq!(
-            message_count(&workspace),
+            leader_records(&workspace, "other-team").len(),
             1,
             "allowed send must persist once"
         );

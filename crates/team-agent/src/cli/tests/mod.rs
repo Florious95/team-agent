@@ -99,7 +99,7 @@ fn deleg_team_dir_with_healthy_coordinator() -> std::path::PathBuf {
     std::fs::write(team.join("agents").join("implementer.md"), DELEG_VALID_ROLE).unwrap();
     let wp = crate::coordinator::WorkspacePath::new(base.clone());
     std::fs::create_dir_all(crate::model::paths::runtime_dir(&base)).unwrap();
-    let _ = crate::message_store::MessageStore::open(&base).unwrap();
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
     let me = crate::coordinator::Pid::new(std::process::id());
     crate::coordinator::write_coordinator_metadata(
         &wp,

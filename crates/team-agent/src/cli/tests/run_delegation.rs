@@ -104,7 +104,7 @@ fn run_dispatches_send_to_handler_returns_ok() {
     // through the active team_key, so the in-team agent now lives under
     // `teams[<key>].agents`. Behavior under test (dispatch + ok exit) unchanged.
     let ws = deleg_uniq_dir("run-send");
-    let _ = crate::message_store::MessageStore::open(&ws).unwrap();
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
     crate::state::persist::save_runtime_state(
         &ws,
         &serde_json::json!({
@@ -145,25 +145,6 @@ fn run_unknown_subcommand_is_error_not_usage() {
 #[test]
 #[ignore = "real-machine: `coordinator --once` dispatches to run_daemon which drives a real \
                 Coordinator (TmuxBackend); in-process needs a run_daemon_with_coordinator seam"]
-fn run_dispatches_coordinator_once_writes_meta() {
-    // run([coordinator --workspace <ws> --once]) -> run_daemon(DaemonArgs{once:true}) -> writes the
-    // coordinator boot metadata + ExitCode::Ok. (real machine — drives a real backend.)
-    let ws = seed_status_workspace();
-    let argv = vec![
-        "coordinator".to_string(),
-        "--workspace".to_string(),
-        ws.to_string_lossy().to_string(),
-        "--once".to_string(),
-    ];
-    let exit = run(&argv, Path::new("."));
-    let wp = crate::coordinator::WorkspacePath::new(ws);
-    assert!(
-        crate::coordinator::coordinator_meta_path(&wp).exists(),
-        "coordinator --once must dispatch to run_daemon and write the coordinator metadata"
-    );
-    assert_eq!(exit, ExitCode::Ok);
-}
-
 #[test]
 #[ignore = "real-machine: quick-start --yes spawns a real team (tmux) + coordinator daemon"]
 fn run_dispatches_quick_start_compiles_spec() {
@@ -352,21 +333,8 @@ fn cli_add_agent_duplicate_id_surfaces_real_error() {
 #[test]
 fn cli_status_emits_brief_with_scoped_unknown_diagnostics() {
     let ws = seed_status_workspace(); // writes .team/runtime/state.json
-    let store = crate::message_store::MessageStore::open(&ws).unwrap();
-    let _ = store
-        .create_message(Some("t1"), "leader", "a1", "hi", None, true, None)
-        .unwrap();
-    let _ = store
-        .create_message(Some("t1"), "leader", "a1", "again", None, true, None)
-        .unwrap();
-    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-    conn.execute(
-            "insert into results(result_id, owner_team_id, task_id, agent_id, envelope, status, created_at) \
-             values ('r1', null, 't1', 'a1', '{}', 'success', '2026-01-01T00:00:00Z')",
-            [],
-        )
-        .unwrap();
-    drop(store);
+    // M4: the SQL message/result seeding that proved "no db data enters the node" is gone
+    // with the store itself; the brief shape below is still asserted.
     // a HEALTHY coordinator at the status workspace (this process's pid + matching metadata).
     let wp = crate::coordinator::WorkspacePath::new(ws.clone());
     let me = crate::coordinator::Pid::new(std::process::id());
@@ -458,27 +426,4 @@ fn issue338_doctor_reports_same_scope_unknown_observations_without_state_writes(
     assert!(action.contains("--team 'current'"));
     assert!(action.contains(&*workspace.to_string_lossy()));
     assert_eq!(std::fs::read(state_path).unwrap(), before);
-}
-
-// 6 [P1] — cmd_shutdown delegates to the REAL crate::coordinator::stop_coordinator (+ tmux
-// kill-session). The placeholder lifecycle_port::shutdown returns only {ok:true, keep_logs, team}.
-// #[ignore] real-machine: the real shutdown spawns `tmux kill-session` (and SIGTERMs the coordinator);
-// on a no-coordinator workspace the real stop_coordinator outcome (stopped/missing) must surface.
-#[test]
-#[ignore = "real-machine: cmd_shutdown runs the real tmux kill-session + SIGTERMs the coordinator daemon"]
-fn cli_shutdown_invokes_real_stop_coordinator() {
-    let ws = seed_status_workspace();
-    let args = ShutdownArgs {
-        workspace: ws,
-        team: None,
-        keep_logs: true,
-        json: true,
-    };
-    let text = outcome_text(cmd_shutdown(&args));
-    let lower = text.to_lowercase();
-    assert!(
-            lower.contains("coordinator") || lower.contains("stopped") || lower.contains("missing"),
-            "cmd_shutdown must delegate to the real coordinator::stop_coordinator and surface its outcome \
-             (no coordinator -> stopped/missing); the placeholder returns only {{ok,keep_logs,team}}; got {text}"
-        );
 }

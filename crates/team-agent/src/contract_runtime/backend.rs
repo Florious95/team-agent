@@ -36,6 +36,8 @@ use super::{
 
 #[derive(Debug, ThisError)]
 pub enum BackendError {
+    #[error("native migration: {0}")]
+    Migration(String),
     #[error("native configuration: {0}")]
     Configuration(#[from] super::config::ConfigError),
     #[error("native discovery: {0}")]
@@ -50,6 +52,10 @@ pub enum BackendError {
     Io(#[from] std::io::Error),
     #[error("native runtime metadata is invalid")]
     Metadata,
+    #[error("native lifecycle fence: {reason}")]
+    Fence { reason: &'static str },
+    #[error("native stop refused (NoEffect) operation={operation:?} reason={reason:?}")]
+    StopRefused { operation: OperationId, reason: Option<String> },
     #[error("native shutdown operation={operation:?} phase={phase:?} outcome={outcome:?} failure={failure:?}")]
     Shutdown {
         operation: OperationId,
@@ -83,7 +89,7 @@ impl Binding {
 }
 
 pub struct Backend {
-    pub store: ContractStore,
+    pub store: ProjectionStore,
     pub binding: Binding,
 }
 
@@ -106,14 +112,7 @@ fn endpoint(scope: &ScopeId) -> String {
     format!("framework:{}", scope.as_str())
 }
 
-impl Backend {
-    pub fn open(workspace: &Path, team: &str) -> Result<Self, BackendError> {
-        Self::open_mode(workspace, team, false)
-    }
-    pub fn open_readonly(workspace: &Path, team: &str) -> Result<Self, BackendError> {
-        Self::open_mode(workspace, team, true)
-    }
-    fn open_mode(workspace: &Path, team: &str, readonly: bool) -> Result<Self, BackendError> {
+pub fn read_binding(workspace: &Path, team: &str) -> Result<Binding, BackendError> {
         let workspace = resolve_cwd(workspace)?;
         let scope = scope_for(&workspace, team)?;
         let root = root_for(&workspace.path, &scope);
@@ -139,11 +138,55 @@ impl Backend {
         {
             return Err(BackendError::Metadata);
         }
+        Ok(binding)
+}
+
+pub fn authority_is_missing(error: &BackendError) -> bool {
+    matches!(error, BackendError::Io(error) if error.kind() == std::io::ErrorKind::NotFound)
+        || matches!(error, BackendError::Runtime(Error::Io(std::io::ErrorKind::NotFound)))
+        || matches!(error, BackendError::Migration(message) if message.starts_with("legacy contract store requires explicit migration"))
+}
+
+pub fn observation_error(team: &str, seat: &str, error: &BackendError) -> String {
+    if authority_is_missing(error) {
+        format!("native_authority_missing: {seat} has no native contract binding for team {team} in this workspace")
+    } else {
+        error.to_string()
+    }
+}
+
+pub fn authority_recovery_action(workspace: &Path, team: &str, seat: &str) -> String {
+    let legacy = read_binding(workspace, team)
+        .is_ok_and(|binding| binding.transport_root.join("contract.db").is_file());
+    let workspace = crate::cli::shell_quote(&workspace.to_string_lossy());
+    let team = crate::cli::shell_quote(team);
+    if legacy {
+        format!("run team-agent migrate --workspace {workspace} --team {team}")
+    } else {
+        format!("run team-agent restart {} --workspace {workspace} --team {team} to respawn it under this release", crate::cli::shell_quote(seat))
+    }
+}
+
+impl Backend {
+    pub fn open(workspace: &Path, team: &str) -> Result<Self, BackendError> {
+        Self::open_mode(workspace, team, false)
+    }
+    pub fn open_readonly(workspace: &Path, team: &str) -> Result<Self, BackendError> {
+        Self::open_mode(workspace, team, true)
+    }
+    fn open_mode(workspace: &Path, team: &str, readonly: bool) -> Result<Self, BackendError> {
+        let binding = read_binding(workspace, team)?;
+        let scope = binding.scope.clone();
         let store = if readonly {
-            ContractStore::open_readonly(&binding.transport_root, scope, &binding.endpoint)?
+            ProjectionStore::open_readonly(&binding.transport_root, scope, &binding.endpoint)
         } else {
-            ContractStore::open(&binding.transport_root, scope, &binding.endpoint)?
-        };
+            ProjectionStore::open(&binding.transport_root, scope, &binding.endpoint)
+        }.map_err(|error| match error {
+            Error::Invalid("legacy contract store requires explicit migration") => BackendError::Migration(format!(
+                "legacy contract store requires explicit migration; run team-agent migrate --workspace {} --team {}",
+                crate::cli::shell_quote(&binding.workspace.path.to_string_lossy()), crate::cli::shell_quote(team))),
+            error => BackendError::Runtime(error),
+        })?;
         Ok(Self { store, binding })
     }
 
@@ -184,7 +227,7 @@ impl Backend {
         // K3 and K2 share the same owned short root. Keeping only the pointer
         // under the project avoids macOS sockaddr_un limits without weakening
         // lifecycle's store-root fence or adopting an existing transport.
-        let store = ContractStore::create(&transport_root, scope.clone(), &endpoint(&scope))?;
+        let store = ProjectionStore::create(&transport_root, scope.clone(), &endpoint(&scope))?;
         let binding = Binding {
             version: 1,
             workspace,
@@ -225,6 +268,15 @@ fn workspace_socket(path: &Path) -> Result<Option<(u64, u64)>, BackendError> {
 
 /// The selected root transport is authority; ambient TMUX is never a selector.
 /// This runs only in the owning lifecycle action, after native F0 admission.
+pub(super) fn workspace_session_lock(binding: &Binding) -> Result<std::fs::File, BackendError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false)
+        .mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(root_for(&binding.workspace.path, &binding.scope).join("workspace-session.lock"))?;
+    file.lock()?;
+    Ok(file)
+}
+
 pub(super) fn workspace_tmux(
     binding: &Binding,
     seat: &SeatId,
@@ -235,7 +287,7 @@ pub(super) fn workspace_tmux(
         &binding.workspace.path, Some(&binding.team), crate::state::selector::SelectorMode::RuntimeOnly,
     ).map_err(|_| ContractError::Mismatch("workspace topology scope"))?;
     if selected.run_workspace != binding.workspace.path || selected.team_key != binding.team {
-        return Err(Error::Fence.into());
+        return Err(BackendError::Fence { reason: "workspace_topology_scope" });
     }
     crate::lifecycle::launch::ensure_owner_allowed_for_state(&selected.state,
         Some(&crate::model::ids::AgentId::new(seat.as_str())))
@@ -285,13 +337,13 @@ pub(super) fn workspace_tmux(
                     return Err(ContractError::Invalid("workspace session ID").into());
                 }
                 if name == session_name {
-                    if session.replace(id.to_owned()).is_some() { return Err(Error::Fence.into()); }
+                    if session.replace(id.to_owned()).is_some() { return Err(BackendError::Fence { reason: "workspace_session_ambiguous" }); }
                 }
             }
         } else if !(result.end == CommandEnd::Exited && result.exit_code == Some(1) && result.child_reaped
             && result.stdout.is_empty() && result.stderr == format!("no server running on {}\n", endpoint.display()).as_bytes())
         { return Err(ContractError::Mismatch("workspace server observation unavailable").into()); }
-        if workspace_socket(&endpoint)? != socket { return Err(Error::Fence.into()); }
+        if workspace_socket(&endpoint)? != socket { return Err(BackendError::Fence { reason: "workspace_socket_changed" }); }
     }
     if let Some(id) = &session {
         let owner = transport.session_owner(&crate::transport::SessionName::new(&session_name))
@@ -311,7 +363,7 @@ pub(super) fn workspace_tmux(
     Ok((SharedTmux { endpoint, socket, session_name, session }, transport, generation))
 }
 
-/// Projection is saved first by the caller. Only an exact current target that
+/// The canonical seat is saved first. Only an exact current target that
 /// actually created this shared session may seed a missing root owner marker.
 pub(super) fn bind_workspace_session(workspace: &Path, team: &str, seat: &SeatId) -> Result<(), BackendError> {
     let backend = Backend::open_readonly(workspace, team)?;
@@ -331,7 +383,7 @@ pub(super) fn bind_workspace_session(workspace: &Path, team: &str, seat: &SeatId
     let owner = transport.session_owner(&session).map_err(|_| ContractError::Mismatch("workspace session owner readback"))?;
     if !owner.is_some_and(|owner| Path::new(&owner.workspace) == backend.binding.workspace.path
         && owner.team == team && owner.generation == generation)
-    { return Err(Error::Fence.into()); }
+    { return Err(BackendError::Fence { reason: "workspace_session_owner_changed" }); }
     host.validate_target(target, &clock, deadline)?;
     Ok(())
 }
@@ -556,13 +608,10 @@ enum ExistingStart {
 // Receipt classification is read-only, never native admission or permission
 // to replay an unfinished host effect. Check parent leases before old success.
 fn existing_start(backend: &Backend, seat: &SeatId) -> Result<Option<ExistingStart>, BackendError> {
-    let unfinished: Vec<_> = backend.store.unfinished()?.into_iter().filter(|record| {
-        &record.target.identity.seat == seat
-            || record.parent.as_ref().is_some_and(|parent| &parent.identity.seat == seat)
-    }).collect();
-    if unfinished.len() > 1 { return Err(Error::Fence.into()); }
+    let unfinished: Vec<_> = backend.store.unfinished()?.into_iter().filter(|record| involves_seat(record, seat)).collect();
+    if unfinished.len() > 1 { return Err(BackendError::Fence { reason: "unfinished_operation_ambiguous" }); }
     if let Some(record) = unfinished.into_iter().next() {
-        if record.target.identity.scope != backend.binding.scope { return Err(Error::Fence.into()); }
+        if record.target.identity.scope != backend.binding.scope { return Err(BackendError::Fence { reason: "unfinished_scope_mismatch" }); }
         return Ok(Some(if record.phase == Phase::F4Commit && record.pending.is_none()
             && matches!(record.kind, TransactionKind::Startup | TransactionKind::Restart
                 | TransactionKind::NewSeatFullSnapshot | TransactionKind::NativeNewSeat)
@@ -576,11 +625,11 @@ fn existing_start(backend: &Backend, seat: &SeatId) -> Result<Option<ExistingSta
             Some(record) if record.outcome == Outcome::Compensated => Ok(None),
             // remove/reset ended this identity explicitly; the next start is fresh.
             Some(record) if backend.store.retired(&record.target.identity)? => Ok(None),
-            Some(_) => Err(Error::Fence.into()),
+            Some(_) => Err(BackendError::Fence { reason: "creation_receipt_without_current_seat" }),
         };
     };
-    if current.identity.scope != backend.binding.scope { return Err(Error::Fence.into()); }
-    let record = backend.store.creation_receipt(seat, Some(&current.identity))?.ok_or(Error::Fence)?;
+    if current.identity.scope != backend.binding.scope { return Err(BackendError::Fence { reason: "current_scope_mismatch" }); }
+    let record = backend.store.creation_receipt(seat, Some(&current.identity))?.ok_or(BackendError::Fence { reason: "creation_receipt_missing" })?;
     if record.outcome != Outcome::Committed || record.phase != Phase::F5Receipt || record.pending.is_some() {
         return Ok(Some(ExistingStart::Blocked(record)));
     }
@@ -588,10 +637,18 @@ fn existing_start(backend: &Backend, seat: &SeatId) -> Result<Option<ExistingSta
         else { ExistingStart::Committed(record) }))
 }
 
-pub(super) fn require_candidate(binding: &Binding) -> Result<(), BackendError> {
+pub(crate) fn executing_candidate_sha() -> Result<Digest, BackendError> {
+    static SHA: std::sync::OnceLock<Digest> = std::sync::OnceLock::new();
+    if let Some(sha) = SHA.get() { return Ok(*sha); }
+    let path = std::env::current_exe()?.canonicalize()?;
+    let sha = fingerprint_file(&path, 1024 * 1024 * 1024, Duration::from_secs(10))?;
+    let _ = SHA.set(sha);
+    Ok(sha)
+}
+
+pub(crate) fn require_candidate(binding: &Binding) -> Result<(), BackendError> {
     let candidate = std::env::current_exe()?.canonicalize()?;
-    if candidate != binding.candidate || fingerprint_file(&candidate, 1024 * 1024 * 1024,
-        Duration::from_secs(10))? != binding.candidate_sha256 { return Err(Error::Fence.into()); }
+    if candidate != binding.candidate || executing_candidate_sha()? != binding.candidate_sha256 { return Err(BackendError::Fence { reason: "candidate_path_or_fingerprint_mismatch" }); }
     Ok(())
 }
 
@@ -602,11 +659,11 @@ pub(super) fn refresh_quiescent_candidate(workspace: &Path, team: &str, seat: &S
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let mut backend = Backend::open(workspace, team)?;
     let candidate = std::env::current_exe()?.canonicalize()?;
-    if candidate != backend.binding.candidate { return Err(Error::Fence.into()); }
+    if candidate != backend.binding.candidate { return Err(BackendError::Fence { reason: "candidate_rebind_path_mismatch" }); }
     let fingerprint = fingerprint_file(&candidate, 1024 * 1024 * 1024, Duration::from_secs(10))?;
     if fingerprint == backend.binding.candidate_sha256 { return Ok(()); }
     let root = root_for(workspace, &backend.binding.scope);
-    if root.canonicalize()? != root { return Err(Error::Fence.into()); }
+    if root.canonicalize()? != root { return Err(BackendError::Fence { reason: "candidate_rebind_root_alias" }); }
     let directory = std::fs::File::open(&root)?;
     if !crate::platform::file_lock::try_lock_once_nonblocking(&directory)? { return Err(Error::Conflict.into()); }
     if !backend.store.unfinished()?.is_empty() { return Err(Error::Conflict.into()); }
@@ -621,7 +678,7 @@ pub(super) fn refresh_quiescent_candidate(workspace: &Path, team: &str, seat: &S
     let path = root.join("framework-binding.json");
     let metadata = std::fs::symlink_metadata(&path)?;
     if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.nlink() != 1 || metadata.mode() & 0o022 != 0 { return Err(Error::Fence.into()); }
+        || metadata.nlink() != 1 || metadata.mode() & 0o022 != 0 { return Err(BackendError::Fence { reason: "candidate_rebind_file_ownership" }); }
     let before = std::fs::read(&path)?;
     backend.binding.candidate_sha256 = fingerprint;
     let temporary = root.join(format!("binding-{}.tmp", backend.store.propose_identity(seat)?.instance.as_str()));
@@ -629,13 +686,27 @@ pub(super) fn refresh_quiescent_candidate(workspace: &Path, team: &str, seat: &S
     let result = (|| -> Result<(), BackendError> {
         file.write_all(&serde_json::to_vec(&backend.binding).map_err(|_| BackendError::Metadata)?)?;
         file.sync_all()?;
-        if std::fs::read(&path)? != before { return Err(Error::Fence.into()); }
+        if std::fs::read(&path)? != before { return Err(BackendError::Fence { reason: "candidate_rebind_concurrent_write" }); }
         std::fs::rename(&temporary, &path)?;
         directory.sync_all()?;
         Ok(())
     })();
     if result.is_err() { let _ = std::fs::remove_file(&temporary); }
     result
+}
+
+pub(crate) fn validate_delivery_target(binding: &Binding, seat: &SeatRecord, budget: Duration) -> Result<(), BackendError> {
+    let target = seat.physical_target()?;
+    if target.candidate_sha256 != binding.candidate_sha256
+        || seat.evidence_kind != EvidenceKind::Native || !matches!(seat.status, SeatStatus::Starting | SeatStatus::Ready) {
+        return Err(BackendError::Fence { reason: "delivery_target_not_current_native_owner" });
+    }
+    let clock = RealClock::new();
+    let mut host = TmuxHost::restore_owned(target.clone(), binding.tmux.clone(),
+        settings(binding, registry::provider(seat.provider.as_str())?).limits,
+        RealCommandRunner::default(), &clock, budget)?;
+    host.validate_target(target, &clock, budget)?;
+    Ok(())
 }
 
 fn validate_existing(backend: &Backend, role: &RoleConfig, record: &OperationRecord) -> Result<SeatRecord, BackendError> {
@@ -656,8 +727,24 @@ fn validate_existing(backend: &Backend, role: &RoleConfig, record: &OperationRec
 }
 
 fn receipt_error(record: OperationRecord) -> BackendError {
+    let failure = match (record.failure, record.recovery_failure) {
+        (Some(first), Some(recovery)) => Some(format!("{first}; recovery_failure={recovery}")),
+        (None, Some(recovery)) => Some(format!("recovery_failure={recovery}")),
+        (first, None) => first,
+    };
     BackendError::Shutdown { operation: record.id, phase: record.phase,
-        outcome: record.outcome, failure: record.failure.or(record.pending) }
+        outcome: record.outcome, failure: failure.or(record.pending) }
+}
+
+pub(super) fn require_stopped(record: &OperationRecord) -> Result<(), BackendError> {
+    if matches!(record.outcome, Outcome::Committed | Outcome::Compensated) && record.target.status == SeatStatus::Stopped {
+        return Ok(());
+    }
+    if record.kind == TransactionKind::Teardown && record.phase == Phase::F0Preflight
+        && record.outcome == Outcome::Compensated && record.effect == team_agent_contract::contract::delivery::DeliveryEffect::NoEffect {
+        return Err(BackendError::StopRefused { operation: record.id.clone(), reason: record.failure.clone() });
+    }
+    Err(receipt_error(record.clone()))
 }
 
 /// Plan only against this selected store and exact row (or an unbound seed).
@@ -669,7 +756,7 @@ pub(crate) fn start_needs_reconciliation(workspace: &Path, team: &str, seat: &Se
     let class = existing_start(&backend, seat)?;
     let current = backend.store.seat(seat)?;
     if current.as_ref().is_some_and(|seat| !registry::same_provider(row.get("provider").and_then(serde_json::Value::as_str).unwrap_or(""), seat.provider.as_str())) {
-        return Err(Error::Fence.into());
+        return Err(BackendError::Fence { reason: "planner_provider_mismatch" });
     }
     let matches = |identity: &InstanceIdentity| {
         row.get("contract_scope").and_then(serde_json::Value::as_str) == Some(identity.scope.as_str())
@@ -680,13 +767,15 @@ pub(crate) fn start_needs_reconciliation(workspace: &Path, team: &str, seat: &Se
         .all(|key| row.get(*key).is_none_or(serde_json::Value::is_null));
     let record = match &class {
         Some(ExistingStart::Committed(record) | ExistingStart::FinishReceipt(record)) => Some(record),
+        Some(ExistingStart::Pending(record) | ExistingStart::Blocked(record))
+            if matches!(record.outcome, Outcome::Running | Outcome::NeedsRecovery) => Some(record),
         _ => None,
     };
     if !seed && !current.as_ref().is_some_and(|seat| matches(&seat.identity))
         && !record.and_then(|record| record.parent.as_ref()).is_some_and(|parent| matches(&parent.identity)
             && row.get("session_id").and_then(serde_json::Value::as_str)
                 == parent.session.as_ref().map(|session| session.native_session.as_str()))
-    { return Err(Error::Fence.into()); }
+    { return Err(BackendError::Fence { reason: "planner_identity_mismatch" }); }
     let needs_projection = seed || current.as_ref().is_some_and(|seat| !matches(&seat.identity)
         || seat.status == SeatStatus::Starting
         || row.get("session_id").and_then(serde_json::Value::as_str) != seat.session.as_ref().map(|session| session.native_session.as_str())
@@ -714,18 +803,70 @@ pub(crate) fn preflight_start_role(workspace: &Path, team: &str, role: &RoleConf
     match existing_start(&backend, &role.id)? {
         Some(ExistingStart::Committed(record))
             if backend.store.assert_current(&record.target.identity)?.physical.as_ref().is_some_and(|target|
-                team_agent_contract::host::process::sample_process(&target.process) == team_agent_contract::host::process::ProcessState::Exited) => {
+                target.candidate_sha256 != backend.binding.candidate_sha256 || team_agent_contract::host::process::sample_process(&target.process) == team_agent_contract::host::process::ProcessState::Exited) => {
             prepare_resume(workspace, team, &role.id, Some(role))?;
         },
+        Some(ExistingStart::FinishReceipt(record)) if record.target.identity.seat != role.id => return Ok(false),
         Some(ExistingStart::Committed(record) | ExistingStart::FinishReceipt(record)) => { validate_existing(&backend, role, &record)?; },
         Some(ExistingStart::Resume(_)) => { prepare_resume(workspace, team, &role.id, Some(role))?; },
-        Some(ExistingStart::Pending(record) | ExistingStart::Blocked(record)) => return Err(receipt_error(record)),
+        // The mutating start reconciles interrupted work under the seat flock.
+        // Read-only preflight must not wedge that path.
+        Some(ExistingStart::Pending(_)) => return Ok(false),
+        Some(ExistingStart::Blocked(record)) if matches!(record.outcome, Outcome::Running | Outcome::NeedsRecovery) => return Ok(false),
+        Some(ExistingStart::Blocked(record)) => return Err(receipt_error(record)),
         None => return Ok(true), // Caller must run full-team fresh preflight before writes.
     }
     Ok(false)
 }
 
+pub(super) fn native_seat_lock(workspace: &Path, team: &str, seat: &SeatId, additional: bool)
+    -> Result<crate::lifecycle::lock::LifecycleLockGuard, BackendError>
+{
+    let agent = crate::model::ids::AgentId::new(seat.as_str());
+    let request = crate::lifecycle::lock::LifecycleLockRequest {
+        workspace, operation: "native-lifecycle", team: Some(team), agent_id: Some(&agent),
+    };
+    let guard = if additional { crate::lifecycle::lock::try_acquire_seat_lifecycle_lock(request) }
+        else { crate::lifecycle::lock::acquire_seat_lifecycle_lock(request) };
+    guard.map_err(|error| std::io::Error::other(error.to_string()).into())
+}
+
+pub(crate) fn involves_seat(operation: &OperationRecord, seat: &SeatId) -> bool {
+    operation.target.identity.seat == *seat || operation.parent.as_ref().is_some_and(|parent| parent.identity.seat == *seat)
+}
+
+fn recover_incomplete(backend: &mut Backend, seat: &SeatId) -> Result<Option<OperationRecord>, BackendError> {
+    recover_incomplete_until(backend, seat, None)
+}
+
+fn recover_incomplete_until(backend: &mut Backend, seat: &SeatId, deadline: Option<std::time::Instant>) -> Result<Option<OperationRecord>, BackendError> {
+    for pending in backend.store.unfinished()?.into_iter().filter(|operation| involves_seat(operation, seat)
+        && matches!(operation.outcome, Outcome::Running | Outcome::NeedsRecovery)) {
+        let recovered = finish_receipt_until(backend, pending, deadline)?;
+        if matches!(recovered.outcome, Outcome::Running | Outcome::NeedsRecovery) { return Ok(Some(recovered)); }
+    }
+    Ok(None)
+}
+
+fn reconcile_start(backend: &mut Backend, seat: &SeatId) -> Result<(), BackendError> {
+    if let Some(record) = recover_incomplete(backend, seat)? { return Err(receipt_error(record)); }
+    // ContractStore compensation already restores a restart's parent or removes
+    // a failed new seat. Re-classify that authority; never synthesize a resume.
+    Ok(())
+}
+
 fn finish_receipt(backend: &mut Backend, record: OperationRecord) -> Result<OperationRecord, BackendError> {
+    finish_receipt_until(backend, record, None)
+}
+
+fn finish_receipt_until(backend: &mut Backend, record: OperationRecord, deadline: Option<std::time::Instant>) -> Result<OperationRecord, BackendError> {
+    if record.target.identity.scope != backend.binding.scope
+        || record.parent.as_ref().is_some_and(|parent| parent.identity.scope != backend.binding.scope) {
+        return Err(BackendError::Fence { reason: "recovery_scope_mismatch" });
+    }
+    let _target = native_seat_lock(&backend.binding.workspace.path, &backend.binding.team, &record.target.identity.seat, true)?;
+    let _parent = record.parent.as_ref().filter(|parent| parent.identity.seat != record.target.identity.seat)
+        .map(|parent| native_seat_lock(&backend.binding.workspace.path, &backend.binding.team, &parent.identity.seat, true)).transpose()?;
     let selected = registry::provider(record.target.provider.as_str())?;
     let adapter = adapter(&backend.binding, &record.target.identity, &record.target.provider)?;
     let hooks = adapter.hooks();
@@ -733,6 +874,10 @@ fn finish_receipt(backend: &mut Backend, record: OperationRecord) -> Result<Oper
     let mut host = PhysicalRuntime::new(Registration { descriptor: selected.descriptor(), hooks: &hooks,
         controls: selected.controls(), startup: selected.startup(), session_panel: selected.session_panel() },
         settings(&backend.binding, selected), record.id.clone(), &clock)?;
+    let executing_candidate = executing_candidate_sha()?;
+    host.executing_candidate = Some(executing_candidate);
+    host.evidence = policy_evidence(&record.target.provider, &record.target.native, executing_candidate)?;
+    if let Some(deadline) = deadline { host.cap_budget(remaining_stop_budget(deadline)?)?; }
     Ok(Lifecycle { store: &mut backend.store, host: &mut host, io: &mut NoNewIo }.recover(&record.id)?)
 }
 
@@ -795,16 +940,18 @@ pub fn start(
     role: &RoleConfig,
     members: &[MemberRoute],
 ) -> Result<(Binding, OperationRecord), BackendError> {
+    let _ownership = native_seat_lock(workspace, team, &role.id, false)?;
     let cwd = resolve_cwd(workspace)?;
     let scope = scope_for(&cwd, team)?;
     if root_for(&cwd.path, &scope).exists() {
         let mut backend = Backend::open(&cwd.path, team)?;
         require_candidate(&backend.binding)?;
+        reconcile_start(&mut backend, &role.id)?;
         match existing_start(&backend, &role.id)? {
             Some(ExistingStart::Committed(record)) => {
                 let current = backend.store.assert_current(&record.target.identity)?;
                 if current.physical.as_ref().is_some_and(|target|
-                    team_agent_contract::host::process::sample_process(&target.process) == team_agent_contract::host::process::ProcessState::Exited) {
+                    target.candidate_sha256 != backend.binding.candidate_sha256 || team_agent_contract::host::process::sample_process(&target.process) == team_agent_contract::host::process::ProcessState::Exited) {
                     let prepared = prepare_resume(workspace, team, &role.id, Some(role))?;
                     return Ok((backend.binding, resume(prepared)?));
                 }
@@ -817,7 +964,7 @@ pub fn start(
                 return Ok((backend.binding, record));
             },
             Some(ExistingStart::Resume(current)) => {
-                if current.provider != role.provider { return Err(Error::Fence.into()); }
+                if current.provider != role.provider { return Err(BackendError::Fence { reason: "resume_provider_mismatch" }); }
                 let prepared = prepare_resume(workspace, team, &role.id, Some(role))?;
                 return Ok((backend.binding, resume(prepared)?));
             },
@@ -870,7 +1017,7 @@ pub fn start(
     if backend.binding.candidate != provisional.candidate
         || backend.binding.candidate_sha256 != candidate_sha256
     {
-        return Err(Error::Fence.into());
+        return Err(BackendError::Fence { reason: "startup_candidate_changed" });
     }
     if existing_start(&backend, &role.id)?.is_some() {
         return Err(Error::Conflict.into());
@@ -895,6 +1042,7 @@ pub fn start(
     )?;
     let plan = adapter.plan(&resolved)?;
     validate_launch_plan(descriptor, &resolved, &plan)?;
+    let _session_creation = workspace_session_lock(&backend.binding)?;
     let (workspace_topology, _, _) = workspace_tmux(&backend.binding, &role.id, None)?;
     let operation = OperationId::new(format!("start-{}", request.identity.instance.as_str()))?;
     let mut io = ScopedMaterializer::new(
@@ -917,6 +1065,7 @@ pub fn start(
         operation.clone(),
         &clock,
     )?;
+    physical.executing_candidate = Some(candidate_sha256);
     physical.evidence = policy_evidence(&role.provider, &request.native, candidate_sha256)?;
     physical.workspace_tmux = Some(workspace_topology);
     let record = Lifecycle {
@@ -938,6 +1087,9 @@ pub fn start(
         },
         operation,
     )?;
+    if record.outcome == Outcome::Committed && record.target.physical.is_some() {
+        bind_workspace_session(&backend.binding.workspace.path, &backend.binding.team, &record.target.identity.seat)?;
+    }
     Ok((backend.binding, record))
 }
 
@@ -948,6 +1100,8 @@ pub struct PreparedResume {
     role: RoleConfig,
     discovered: Discovery,
     request: LaunchRequest,
+    parent: InstanceIdentity,
+    original_session: Option<ResumeBinding>,
 }
 
 impl PreparedResume {
@@ -955,6 +1109,7 @@ impl PreparedResume {
     pub(crate) fn session(&self) -> Option<&str> {
         self.request.resume.as_ref().map(|resume| resume.binding.native_session.as_str())
     }
+    pub(crate) fn native_launch(&self) -> Operation { self.request.operation }
 }
 
 pub(crate) fn prepare_restart(
@@ -985,6 +1140,29 @@ pub(crate) fn prepare_restart(
     Ok(prepared)
 }
 
+/// Metadata-only availability check: missing/empty is not resumable; an I/O or
+/// identity error is not evidence of absence. Never read private transcript text.
+fn resumable_session(parent: &SeatRecord, home: Option<&Path>) -> Result<Option<ResumeBinding>, BackendError> {
+    let Some(source) = parent.session.as_ref() else { return Ok(None); };
+    team_agent_contract::contract::session::validate_resume(source,
+        &team_agent_contract::contract::session::ResumeExpectation {
+            provider: &parent.provider, source: &parent.identity, cwd: &parent.cwd, native: &parent.native,
+            evidence_kind: parent.evidence_kind, mode: team_agent_contract::contract::descriptor::ResumeMode::ExactId,
+        })?;
+    if parent.provider.as_str() == "claude_tui" {
+        let path = team_agent_contract::providers::claude::transcript_path(
+            home.ok_or(ContractError::Invalid("Claude native home unavailable"))?, source)?;
+        match std::fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() && metadata.len() > 0 => {},
+            Ok(metadata) if metadata.is_file() => return Ok(None),
+            Ok(_) => return Err(ContractError::Invalid("Claude transcript is not a file").into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(Some(source.clone()))
+}
+
 pub fn prepare_resume(
     workspace: &Path,
     team: &str,
@@ -992,9 +1170,10 @@ pub fn prepare_resume(
     role: Option<&RoleConfig>,
 ) -> Result<PreparedResume, BackendError> {
     let backend = Backend::open_readonly(workspace, team)?;
+    require_candidate(&backend.binding)?;
     let parent = backend.store.seat(seat)?.ok_or(BackendError::Metadata)?;
     if parent.status == SeatStatus::Unknown {
-        return Err(Error::Fence.into());
+        return Err(BackendError::Fence { reason: "resume_parent_unknown" });
     }
     let role = match role {
         Some(role) => role.clone(),
@@ -1003,43 +1182,56 @@ pub fn prepare_resume(
     if role.id != parent.identity.seat || role.provider != parent.provider {
         return Err(ContractError::Mismatch("resume role provider").into());
     }
-    let source = parent.session.clone().ok_or(ContractError::Invalid("native resume binding required"))?;
-    if resolve_cwd(&source.cwd.path)? != source.cwd {
+    if resolve_cwd(&parent.cwd.path)? != parent.cwd {
         return Err(ContractError::Mismatch("resume cwd incarnation").into());
     }
     let candidate = std::env::current_exe()?.canonicalize()?;
     let candidate_sha256 = fingerprint_file(&candidate, 1024 * 1024 * 1024, Duration::from_secs(10))?;
     if backend.binding.candidate != candidate || backend.binding.candidate_sha256 != candidate_sha256 {
-        return Err(Error::Fence.into());
+        return Err(BackendError::Fence { reason: "resume_candidate_changed" });
     }
     let discovered = discovery::discover_runtime(&role.provider, workspace)?;
     let identity = backend.store.propose_identity(seat)?;
     let adapter = launch_adapter(&backend.binding, &identity, &role.provider, &discovered)?;
     let hooks = adapter.hooks();
+    let source = resumable_session(&parent, discovered.runtime.as_ref().and_then(|runtime| match runtime {
+        registry::NativeRuntime::Claude(runtime) => Some(runtime.home()), _ => None,
+    }))?;
     let mut request = request(&backend.binding, &role, identity, &discovered)?;
-    request.operation = Operation::Resume;
-    request.paths.cwd = source.cwd.clone();
-    request.resume = Some(ResumeRequest {
-        binding: source, expected_source: parent.identity,
-    });
+    request.paths.cwd = parent.cwd.clone();
+    if let Some(source) = source {
+        request.operation = Operation::Resume;
+        request.resume = Some(ResumeRequest { binding: source, expected_source: parent.identity.clone() });
+    } else if matches!(&discovered.runtime, Some(registry::NativeRuntime::Claude(_))) {
+        // Pure identity-derived allocation, as in normal Fresh startup. Never run
+        // Cursor's native allocation command during this read-only preflight.
+        preassign_session(&mut request, &discovered)?;
+    }
     let selected = registry::provider(role.provider.as_str())?;
     require_private_primary(selected, &request.paths.cwd)?;
     let resolved = resolve_launch(selected.descriptor(), &hooks, &request, Some(&discovered.catalog))?;
     validate_launch_plan(selected.descriptor(), &resolved, &adapter.plan(&resolved)?)?;
-    Ok(PreparedResume { binding: backend.binding, role, discovered, request })
+    Ok(PreparedResume { binding: backend.binding, role, discovered, request,
+        parent: parent.identity, original_session: parent.session })
 }
 
 pub fn resume(prepared: PreparedResume) -> Result<OperationRecord, BackendError> {
+    let _ownership = native_seat_lock(&prepared.binding.workspace.path, &prepared.binding.team, &prepared.role.id, false)?;
     let mut backend = Backend::open(&prepared.binding.workspace.path, &prepared.binding.team)?;
     if serde_json::to_vec(&backend.binding).map_err(|_| BackendError::Metadata)?
         != serde_json::to_vec(&prepared.binding).map_err(|_| BackendError::Metadata)?
     {
-        return Err(Error::Fence.into());
+        return Err(BackendError::Fence { reason: "resume_scope_binding_changed" });
     }
-    let source = prepared.request.resume.as_ref().ok_or(BackendError::Metadata)?;
-    let parent = backend.store.assert_current(&source.expected_source)?;
-    if parent.session.as_ref() != Some(&source.binding) {
-        return Err(Error::Fence.into());
+    let parent = backend.store.assert_current(&prepared.parent)?;
+    if parent.session != prepared.original_session {
+        return Err(BackendError::Fence { reason: "resume_session_changed" });
+    }
+    if resumable_session(&parent, prepared.discovered.runtime.as_ref().and_then(|runtime| match runtime {
+        registry::NativeRuntime::Claude(runtime) => Some(runtime.home()), _ => None,
+    }))?
+        != prepared.request.resume.as_ref().map(|resume| resume.binding.clone()) {
+        return Err(BackendError::Fence { reason: "resume_availability_changed" });
     }
     let selected = registry::provider(prepared.role.provider.as_str())?;
     let descriptor = selected.descriptor();
@@ -1051,6 +1243,7 @@ pub fn resume(prepared: PreparedResume) -> Result<OperationRecord, BackendError>
     validate_launch_plan(descriptor, &resolved, &plan)?;
     write_role(&backend.binding, &prepared.request.identity, &prepared.role)?;
     let shared_parent = parent.physical.as_ref().is_some_and(|target| target.shared_endpoint);
+    let _session_creation = workspace_session_lock(&backend.binding)?;
     let workspace_topology = if shared_parent {
         // Validate root topology before stopping. Capture again only after the
         // authorized stop, since its last pane may destroy the old session ID.
@@ -1062,8 +1255,7 @@ pub fn resume(prepared: PreparedResume) -> Result<OperationRecord, BackendError>
             }
             let stopped = stop(&backend.binding.workspace.path, &backend.binding.team, &prepared.role.id)?;
             if stopped.outcome != Outcome::Committed {
-                return Err(BackendError::Shutdown { operation: stopped.id, phase: stopped.phase,
-                    outcome: stopped.outcome, failure: stopped.failure });
+                return Err(receipt_error(stopped));
             }
         }
         Some(workspace_tmux(&backend.binding, &prepared.role.id, None)?.0)
@@ -1078,18 +1270,24 @@ pub fn resume(prepared: PreparedResume) -> Result<OperationRecord, BackendError>
         },
         settings(&backend.binding, selected), operation.clone(), &clock,
     )?;
-    physical.evidence = policy_evidence(&prepared.role.provider, &prepared.request.native, backend.binding.candidate_sha256)?;
+    let executing_candidate = executing_candidate_sha()?;
+    physical.executing_candidate = Some(executing_candidate);
+    physical.evidence = policy_evidence(&prepared.role.provider, &prepared.request.native, executing_candidate)?;
     physical.workspace_tmux = workspace_topology;
-    let record = Lifecycle { store: &mut backend.store, host: &mut physical, io: &mut io }.startup(
-        &Adapter { descriptor, hooks: &hooks, catalog: Some(&prepared.discovered.catalog) },
-        &prepared.request,
-        Routing {
-            pane: "unpublished".into(),
-            binding_key: format!("binding-{}", prepared.request.identity.instance.as_str()),
-            server_key: selected.server_key_for(&prepared.request.identity)?,
-        },
-        operation,
-    )?;
+    let mut lifecycle = Lifecycle { store: &mut backend.store, host: &mut physical, io: &mut io };
+    let adapter = Adapter { descriptor, hooks: &hooks, catalog: Some(&prepared.discovered.catalog) };
+    let routing = Routing {
+        pane: "unpublished".into(), binding_key: format!("binding-{}", prepared.request.identity.instance.as_str()),
+        server_key: selected.server_key_for(&prepared.request.identity)?,
+    };
+    let record = if prepared.request.operation == Operation::Fresh {
+        lifecycle.restart_fresh(&adapter, &prepared.request, routing, operation, &prepared.parent)?
+    } else {
+        lifecycle.startup(&adapter, &prepared.request, routing, operation)?
+    };
+    if record.outcome == Outcome::Committed && record.target.physical.is_some() {
+        bind_workspace_session(&backend.binding.workspace.path, &backend.binding.team, &record.target.identity.seat)?;
+    }
     Ok(record)
 }
 
@@ -1228,12 +1426,124 @@ pub(crate) fn retire(workspace: &Path, team: &str, seat: &SeatId) -> Result<Opti
     Ok(Some(backend.store.retire(&current.identity)?))
 }
 
+pub fn migrate_if_required(workspace: &Path, team: &str) -> Result<bool, BackendError> {
+    let binding = match read_binding(workspace, team) {
+        Ok(binding) => binding,
+        Err(BackendError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if !binding.transport_root.join("contract.json").exists() {
+        migrate(workspace, team)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Explicit, scoped release cutover. Existing physical receipts remain intact;
+/// future launches use the invoking candidate. No native body is replayed.
+pub fn migrate(workspace: &Path, team: &str) -> Result<serde_json::Value, BackendError> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let selected = crate::state::selector::resolve_active_team_readonly(workspace, Some(team), crate::state::selector::SelectorMode::RuntimeOnly)
+        .map_err(|error| BackendError::Migration(error.to_string()))?;
+    crate::lifecycle::launch::ensure_owner_allowed_for_state(&selected.state, None)
+        .map_err(|error| BackendError::Migration(error.to_string()))?;
+    let workspace = selected.run_workspace.as_path();
+    let team = selected.team_key.as_str();
+    crate::coordinator::retire_legacy_coordinator(workspace).map_err(BackendError::Migration)?;
+    let mut binding = match read_binding(workspace, team) {
+        Ok(binding) => binding,
+        Err(BackendError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            let cwd = resolve_cwd(workspace)?;
+            let root = root_for(&cwd.path, &scope_for(&cwd, team)?);
+            if root.try_exists()? {
+                return Err(BackendError::Migration(
+                    "native binding is missing; existing authority was retained, not reset".into(),
+                ));
+            }
+            return Ok(serde_json::json!({"ok":true,"status":"not_required", "team":team,
+                "reason":"no_native_contract_state", "legacy_state_preserved":true,"replayed":0}));
+        }
+        Err(error) => return Err(error),
+    };
+    let root = root_for(&binding.workspace.path, &binding.scope);
+    if root.canonicalize()? != root { return Err(BackendError::Fence { reason: "migration_root_alias" }); }
+    let directory = std::fs::File::open(&root)?;
+    directory.lock()?;
+    // Re-read after acquiring the cutover lock so a concurrent invocation is
+    // idempotent and cannot restore an older candidate binding.
+    binding = read_binding(workspace, team)?;
+    let mut result = crate::importer::contract::migrate(&binding.transport_root, binding.scope.clone(), &binding.endpoint)
+        .map_err(|error| BackendError::Migration(error.to_string()))?;
+    let candidate = std::env::current_exe()?.canonicalize()?;
+    let fingerprint = fingerprint_file(&candidate, 1024 * 1024 * 1024, Duration::from_secs(10))?;
+    if binding.candidate != candidate || binding.candidate_sha256 != fingerprint {
+        if !binding.transport_root.join("legacy-import.json").is_file() {
+            return Err(BackendError::Fence { reason: "migration_requires_legacy_provenance_for_candidate_rebind" });
+        }
+        let path = root.join("framework-binding.json");
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.nlink() != 1 || metadata.mode() & 0o022 != 0 { return Err(BackendError::Fence { reason: "migration_binding_ownership" }); }
+        let before = std::fs::read(&path)?;
+        binding.candidate = candidate;
+        binding.candidate_sha256 = fingerprint;
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| BackendError::Metadata)?.as_nanos();
+        let temporary = root.join(format!("migration-binding-{}-{nonce}.tmp", std::process::id()));
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary)?;
+        let written = (|| -> Result<(), BackendError> {
+            file.write_all(&serde_json::to_vec(&binding).map_err(|_| BackendError::Metadata)?)?;
+            file.sync_all()?;
+            if std::fs::read(&path)? != before { return Err(BackendError::Fence { reason: "migration_binding_changed" }); }
+            std::fs::rename(&temporary, &path)?;
+            directory.sync_all()?;
+            Ok(())
+        })();
+        if written.is_err() { let _ = std::fs::remove_file(&temporary); }
+        written?;
+    }
+    let authority = Backend::open_readonly(&binding.workspace.path, team)?;
+    result["seat_status"] = serde_json::json!(authority.store.seats()?.into_iter().map(|seat| {
+        let foreign = seat.physical.as_ref().is_some_and(|target| target.candidate_sha256 != binding.candidate_sha256);
+        let live_foreign = foreign && seat.physical.as_ref().is_some_and(|target|
+            team_agent_contract::host::process::sample_process(&target.process) == team_agent_contract::host::process::ProcessState::Alive);
+        serde_json::json!({"seat":seat.identity.seat,"candidate":if foreign { "foreign" } else { "current" },
+            "live_foreign":live_foreign,"next_command":if foreign { Some(restart_command(&binding.workspace.path, team, seat.identity.seat.as_str())) } else { None }})
+    }).collect::<Vec<_>>());
+    result["team"] = serde_json::json!(team);
+    result["candidate"] = serde_json::json!(binding.candidate);
+    result["maintenance"] = serde_json::json!("Use only this release for subsequent lifecycle operations");
+    Ok(result)
+}
+
+pub(crate) fn restart_command(workspace: &Path, team: &str, seat: &str) -> String {
+    format!("team-agent restart {} --workspace {} --team {}", crate::cli::shell_quote(seat),
+        crate::cli::shell_quote(&workspace.to_string_lossy()), crate::cli::shell_quote(team))
+}
+
 pub fn stop(workspace: &Path, team: &str, seat: &SeatId) -> Result<OperationRecord, BackendError> {
+    stop_with_budget(workspace, team, seat, Duration::from_secs(20))
+}
+
+fn remaining_stop_budget(deadline: std::time::Instant) -> Result<Duration, BackendError> {
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() { return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "native stop deadline exhausted").into()); }
+    Ok(remaining)
+}
+
+pub(super) fn stop_with_budget(workspace: &Path, team: &str, seat: &SeatId, budget: Duration) -> Result<OperationRecord, BackendError> {
+    let deadline = std::time::Instant::now() + budget;
+    remaining_stop_budget(deadline)?;
+    migrate_if_required(workspace, team)?;
+    let _ownership = native_seat_lock(workspace, team, seat, false)?;
     let mut backend = Backend::open(workspace, team)?;
-    let target = backend
-        .store
-        .seat(seat)?
-        .ok_or(Error::Invalid("unknown native seat"))?;
+    if let Some(record) = recover_incomplete_until(&mut backend, seat, Some(deadline))? { return Ok(record); }
+    let Some(target) = backend.store.seat(seat)? else {
+        // Compensation can remove an interrupted startup's provisional seat.
+        // Its durable cleanup receipt is an honest already-absent stop result.
+        return backend.store.creation_receipt(seat, None)?
+            .filter(|record| record.outcome == Outcome::Compensated && record.target.status == SeatStatus::Stopped)
+            .ok_or_else(|| Error::Invalid("unknown native seat").into());
+    };
     let nonce = backend.store.propose_identity(seat)?.instance;
     let operation = OperationId::new(format!("stop-{}", nonce.as_str()))?;
     let selected = registry::provider(target.provider.as_str())?;
@@ -1252,7 +1562,10 @@ pub fn stop(workspace: &Path, team: &str, seat: &SeatId) -> Result<OperationReco
         operation.clone(),
         &clock,
     )?;
-    physical.evidence = policy_evidence(&target.provider, &target.native, backend.binding.candidate_sha256)?;
+    let executing_candidate = executing_candidate_sha()?;
+    physical.executing_candidate = Some(executing_candidate);
+    physical.evidence = policy_evidence(&target.provider, &target.native, executing_candidate)?;
+    physical.cap_budget(remaining_stop_budget(deadline)?)?;
     Ok(Lifecycle {
         store: &mut backend.store,
         host: &mut physical,
@@ -1269,8 +1582,11 @@ mod tests {
     impl RoleFixture {
         fn new() -> Self {
             use std::os::unix::fs::DirBuilderExt;
-            let root = std::env::temp_dir().join(format!("contract-role-{}-{}", std::process::id(),
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            // Parallel tests can read the same clock tick; the counter keeps roots unique.
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let root = std::env::temp_dir().join(format!("contract-role-{}-{}-{}", std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
             std::fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
             let root = root.canonicalize().unwrap();
             let cwd = resolve_cwd(&root).unwrap();
@@ -1289,12 +1605,28 @@ mod tests {
             Self { root, binding, role, identity }
         }
 
+        fn store(&self) -> ContractStore {
+            ContractStore::open(&self.binding.transport_root, self.binding.scope.clone(), &self.binding.endpoint).unwrap()
+        }
+
+        fn save_operation(&self, operation: &OperationRecord) {
+            self.store().fixture_put_operation(operation).unwrap();
+        }
+
+        fn recovering_teardown(&mut self, pending: Option<&str>) -> Backend {
+            let backend = self.canonical(SeatStatus::Stopped, Phase::F2Register, Outcome::NeedsRecovery, pending);
+            let mut operation = backend.store.operation(&OperationId::new("controlled-start").unwrap()).unwrap();
+            operation.kind = TransactionKind::Teardown;
+            self.save_operation(&operation);
+            backend
+        }
+
         // Receipt-only fixtures never authorize a native action; the runtime
         // must separately revalidate candidate, role, socket and process birth.
         fn canonical(&mut self, status: SeatStatus, phase: Phase, outcome: Outcome, pending: Option<&str>) -> Backend {
             self.binding.transport_root = self.binding.workspace.path.join("native-store");
             self.binding.endpoint = endpoint(&self.binding.scope);
-            let store = ContractStore::create(&self.binding.transport_root, self.binding.scope.clone(), &self.binding.endpoint).unwrap();
+            let mut store = ContractStore::create(&self.binding.transport_root, self.binding.scope.clone(), &self.binding.endpoint).unwrap();
             let target = SeatRecord { identity: self.identity.clone(), provider: self.role.provider.clone(),
                 native: NativeIdentity { version: "fixture".into(), harness: "fixture".into(), ui: "controlled".into(),
                     platform: Platform::MacOs, executable_sha256: digest(b"fixture") },
@@ -1303,19 +1635,16 @@ mod tests {
                 evidence_kind: EvidenceKind::Fixture, status, process: None, physical: None, session: None,
                 resources: vec![], workspace_resources: vec![], bootstrap_used: false };
             let operation = OperationRecord { id: OperationId::new("controlled-start").unwrap(), kind: TransactionKind::Startup,
-                target: target.clone(), parent: None, phase, pending: pending.map(str::to_owned), resources: vec![],
-                effect: team_agent_contract::contract::delivery::DeliveryEffect::NoEffect, outcome, preserved: vec![], failure: None };
-            let db = rusqlite::Connection::open(self.binding.transport_root.join("contract.db")).unwrap();
-            db.execute("INSERT INTO contract_seats VALUES(?1,?2)", rusqlite::params![self.identity.seat.as_str(), serde_json::to_string(&target).unwrap()]).unwrap();
-            db.execute("INSERT INTO contract_generations VALUES(?1,?2)", rusqlite::params![self.identity.seat.as_str(), self.identity.generation.0]).unwrap();
-            db.execute("INSERT INTO contract_instances VALUES(?1,?2,?3)", rusqlite::params![self.identity.instance.as_str(), self.identity.seat.as_str(), self.identity.generation.0]).unwrap();
-            db.execute("INSERT INTO contract_operations VALUES(?1,?2)", rusqlite::params![operation.id.as_str(), serde_json::to_string(&operation).unwrap()]).unwrap();
+                target: target.clone(), parent: None, phase, pending: pending.map(str::to_owned), spawn_observation: None, native_launch: None, resources: vec![],
+                effect: team_agent_contract::contract::delivery::DeliveryEffect::NoEffect, outcome, preserved: vec![], failure: None, recovery_failure: None, stop_receipt: None };
+            store.fixture_put_seat(&target).unwrap();
+            store.fixture_put_operation(&operation).unwrap();
             if matches!(outcome, Outcome::Running | Outcome::NeedsRecovery) {
-                db.execute("INSERT INTO contract_leases VALUES(?1,?2)", rusqlite::params![self.identity.seat.as_str(), operation.id.as_str()]).unwrap();
+                store.fixture_set_lease(&self.identity.seat, Some(&operation.id)).unwrap();
             }
             std::fs::write(root_for(&self.binding.workspace.path, &self.binding.scope).join("framework-binding.json"),
                 serde_json::to_vec(&self.binding).unwrap()).unwrap();
-            drop(db); drop(store);
+            drop(store);
             Backend::open_readonly(&self.binding.workspace.path, "test").unwrap()
         }
     }
@@ -1341,6 +1670,206 @@ mod tests {
                 None => false,
             };
             assert!(matches, "wrong receipt class for {expected}");
+    }
+
+    #[test]
+    fn native_lifecycle_construction_is_guarded_in_every_production_entrypoint() {
+        // Assembly guard supplements the real flock/recovery tests; it does not
+        // claim physical provider acceptance.
+        let source = include_str!("backend.rs").split("#[cfg(test)]\nmod tests").next().unwrap();
+        assert_eq!(source.matches("Lifecycle {").count(), 4);
+        for entry in ["fn finish_receipt(", "pub fn start(", "pub fn resume(", "pub fn stop("] {
+            let before_effect = source.split_once(entry).unwrap().1.split_once("Lifecycle {").unwrap().0;
+            assert!(before_effect.contains("native_seat_lock("), "{entry}");
+        }
+        let fork = include_str!("fork.rs").split_once("fn native_fork(").unwrap().1.split_once("Lifecycle {").unwrap().0;
+        assert!(fork.contains("_source_ownership = backend::native_seat_lock"));
+        assert!(fork.contains("_target_ownership = backend::native_seat_lock"));
+    }
+
+    #[test]
+    fn start_reconciliation_recovers_running_and_needs_recovery_startups_without_replay() {
+        for outcome in [Outcome::Running, Outcome::NeedsRecovery] {
+            let mut fixture = RoleFixture::new();
+            drop(fixture.canonical(SeatStatus::Starting, Phase::F2Register, outcome, None));
+            let mut backend = Backend::open(&fixture.root, "test").unwrap();
+            let _ownership = native_seat_lock(&fixture.root, "test", &fixture.identity.seat, false).unwrap();
+            reconcile_start(&mut backend, &fixture.identity.seat).unwrap();
+            assert!(existing_start(&backend, &fixture.identity.seat).unwrap().is_none());
+            assert!(backend.store.seat(&fixture.identity.seat).unwrap().is_none());
+            assert!(backend.store.unfinished().unwrap().is_empty());
+            let stopped = stop(&fixture.root, "test", &fixture.identity.seat).unwrap();
+            assert_eq!(stopped.outcome, Outcome::Compensated);
+            assert_eq!(stop(&fixture.root, "test", &fixture.identity.seat).unwrap().id, stopped.id);
+        }
+    }
+
+    #[test]
+    fn unresolved_pi_and_absent_or_empty_claude_transcripts_select_fresh_without_reading_content() {
+        let mut fixture = RoleFixture::new();
+        let backend = fixture.canonical(SeatStatus::Stopped, Phase::F5Receipt, Outcome::Committed, None);
+        let mut parent = backend.store.seat(&fixture.identity.seat).unwrap().unwrap();
+        parent.provider = ProviderId::new("pi_tui").unwrap();
+        assert_eq!(resumable_session(&parent, None).unwrap(), None);
+        parent.provider = ProviderId::new("claude_tui").unwrap();
+        parent.session = Some(ResumeBinding {
+            provider: parent.provider.clone(), native_session: team_agent_contract::contract::session::NativeSessionId::new("76156673-0000-4000-8000-000000000001").unwrap(),
+            storage: team_agent_contract::contract::session::SessionStorage::Local, cwd: parent.cwd.clone(),
+            native: parent.native.clone(), source: parent.identity.clone(),
+            origin: team_agent_contract::contract::session::CaptureOrigin::OwnedExitHint,
+            evidence_kind: parent.evidence_kind, evidence_sha256: digest(b"session-observation"), backing: None,
+        });
+        let path = team_agent_contract::providers::claude::transcript_path(&fixture.root, parent.session.as_ref().unwrap()).unwrap();
+        assert_eq!(resumable_session(&parent, Some(&fixture.root)).unwrap(), None);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"").unwrap();
+        assert_eq!(resumable_session(&parent, Some(&fixture.root)).unwrap(), None);
+        std::fs::write(&path, b"controlled fixture transcript\n").unwrap();
+        assert_eq!(resumable_session(&parent, Some(&fixture.root)).unwrap(), parent.session);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(resumable_session(&parent, Some(&fixture.root)).is_err());
+    }
+
+    #[test]
+    fn stop_budget_and_no_effect_refusal_never_claim_a_live_seat_stopped() {
+        let mut fixture = RoleFixture::new();
+        let backend = fixture.canonical(SeatStatus::Starting, Phase::F4Commit, Outcome::Committed, None);
+        let original = backend.store.operation(&OperationId::new("controlled-start").unwrap()).unwrap();
+        assert!(stop_with_budget(&fixture.root, "test", &fixture.identity.seat, Duration::ZERO)
+            .unwrap_err().to_string().contains("native stop deadline exhausted"));
+        assert_eq!(backend.store.operation(&original.id).unwrap(), original);
+        let mut refused = original;
+        refused.kind = TransactionKind::Teardown;
+        refused.phase = Phase::F0Preflight;
+        refused.outcome = Outcome::Compensated;
+        refused.failure = Some("read-only preflight NoEffect".into());
+        assert!(matches!(require_stopped(&refused), Err(BackendError::StopRefused { .. })));
+        refused.target.status = SeatStatus::Stopped;
+        assert!(require_stopped(&refused).is_ok());
+    }
+
+    #[test]
+    fn unfinished_restart_parent_routes_to_locked_reconciliation_without_planner_writes() {
+        for outcome in [Outcome::Running, Outcome::NeedsRecovery] {
+            let mut fixture = RoleFixture::new();
+            fixture.identity.generation = Generation(2);
+            fixture.binding.candidate = std::env::current_exe().unwrap().canonicalize().unwrap();
+            fixture.binding.candidate_sha256 = fingerprint_file(&fixture.binding.candidate, 1024 * 1024 * 1024, Duration::from_secs(10)).unwrap();
+            let backend = fixture.canonical(SeatStatus::Starting, Phase::F2Register, outcome, Some("spawn"));
+            let mut operation = backend.store.operation(&OperationId::new("controlled-start").unwrap()).unwrap();
+            operation.kind = TransactionKind::Restart;
+            let mut parent = operation.target.clone();
+            parent.identity.instance = InstanceId::new("previous-instance").unwrap();
+            parent.identity.generation = Generation(1);
+            parent.status = SeatStatus::Stopped;
+            operation.parent = Some(parent.clone());
+            fixture.save_operation(&operation);
+            let row = serde_json::json!({"provider":"cursor", "status":"stopped",
+                "contract_scope":parent.identity.scope, "contract_instance":parent.identity.instance,
+                "generation":parent.identity.generation});
+            assert!(start_needs_reconciliation(&fixture.root, "test", &fixture.identity.seat, &row).unwrap());
+            assert_eq!(backend.store.operation(&operation.id).unwrap(), operation);
+            for (key, value) in [("contract_instance", serde_json::json!("foreign")),
+                ("generation", serde_json::json!(3)), ("session_id", serde_json::json!("foreign"))] {
+                let mut forged = row.clone(); forged[key] = value;
+                assert!(matches!(start_needs_reconciliation(&fixture.root, "test", &fixture.identity.seat, &forged),
+                    Err(BackendError::Fence { reason: "planner_identity_mismatch" })), "{key}");
+            }
+        }
+    }
+
+    #[test]
+    fn stop_recovers_running_restart_and_stops_the_restored_parent() {
+        let mut fixture = RoleFixture::new();
+        fixture.identity.generation = Generation(2);
+        let backend = fixture.canonical(SeatStatus::Starting, Phase::F2Register, Outcome::Running, None);
+        let mut operation = backend.store.operation(&OperationId::new("controlled-start").unwrap()).unwrap();
+        operation.kind = TransactionKind::Restart;
+        let mut parent = operation.target.clone();
+        parent.identity.instance = InstanceId::new("previous-instance").unwrap();
+        parent.identity.generation = Generation(1);
+        parent.status = SeatStatus::Stopped;
+        operation.parent = Some(parent.clone());
+        fixture.save_operation(&operation);
+        let stopped = stop(&fixture.root, "test", &fixture.identity.seat).unwrap();
+        assert_eq!(stopped.outcome, Outcome::Committed);
+        assert_eq!(stopped.target.identity, parent.identity);
+        assert!(backend.store.unfinished().unwrap().is_empty());
+        assert_eq!(backend.store.operation(&operation.id).unwrap().outcome, Outcome::Compensated);
+    }
+
+    #[test]
+    fn parent_recovery_fences_both_seats_without_waiting_in_reverse_lock_order() {
+        let mut fixture = RoleFixture::new();
+        drop(fixture.canonical(SeatStatus::Starting, Phase::F2Register, Outcome::Running, None));
+        let mut backend = Backend::open(&fixture.root, "test").unwrap();
+        let mut operation = backend.store.operation(&OperationId::new("controlled-start").unwrap()).unwrap();
+        operation.kind = TransactionKind::NewSeatFullSnapshot;
+        let mut parent = operation.target.clone();
+        parent.identity.seat = SeatId::new("parent").unwrap();
+        parent.identity.instance = InstanceId::new("parent-instance").unwrap();
+        parent.pane = "parent-pane".into(); parent.binding_key = "parent-binding".into();
+        parent.status = SeatStatus::Stopped;
+        parent.session = Some(ResumeBinding { provider: parent.provider.clone(), native_session: team_agent_contract::contract::session::NativeSessionId::new("parent-session").unwrap(),
+            storage: team_agent_contract::contract::session::SessionStorage::Local, cwd: parent.cwd.clone(), native: parent.native.clone(), source: parent.identity.clone(),
+            origin: team_agent_contract::contract::session::CaptureOrigin::OwnedExitHint, evidence_kind: EvidenceKind::Fixture, evidence_sha256: digest(b"parent-session"), backing: None });
+        operation.parent = Some(parent.clone());
+        fixture.save_operation(&operation);
+        let mut store = fixture.store();
+        store.fixture_put_seat(&parent).unwrap();
+        store.fixture_set_lease(&parent.identity.seat, Some(&operation.id)).unwrap();
+        drop(store);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let root = fixture.root.clone(); let child = fixture.identity.seat.clone();
+        let holder = std::thread::spawn(move || {
+            let _guard = native_seat_lock(&root, "test", &child, false).unwrap();
+            ready_tx.send(()).unwrap(); let _ = release_rx.recv();
+        });
+        ready_rx.recv().unwrap();
+        let _parent = native_seat_lock(&fixture.root, "test", &parent.identity.seat, false).unwrap();
+        let began = std::time::Instant::now();
+        let blocked = recover_incomplete(&mut backend, &parent.identity.seat);
+        let elapsed = began.elapsed();
+        release_tx.send(()).unwrap(); holder.join().unwrap();
+        assert!(blocked.is_err()); assert!(elapsed < Duration::from_secs(1));
+        assert!(backend.store.leased(&parent.identity.seat).unwrap());
+        assert!(recover_incomplete(&mut backend, &parent.identity.seat).unwrap().is_none());
+        assert!(backend.store.seat(&fixture.identity.seat).unwrap().is_none());
+        assert_eq!(backend.store.seat(&parent.identity.seat).unwrap(), Some(parent));
+        assert!(backend.store.unfinished().unwrap().is_empty());
+    }
+
+    #[test]
+    fn stop_recovers_a_stopped_teardown_before_beginning_the_next_operation() {
+        let mut fixture = RoleFixture::new();
+        let backend = fixture.recovering_teardown(None);
+        let receipt = stop(&fixture.root, "test", &fixture.identity.seat).unwrap();
+        assert_eq!(receipt.outcome, Outcome::Committed);
+        assert_eq!(backend.store.operation(&OperationId::new("controlled-start").unwrap()).unwrap().outcome, Outcome::Compensated);
+        assert!(!backend.store.leased(&fixture.identity.seat).unwrap());
+        assert_eq!(backend.store.seat(&fixture.identity.seat).unwrap().unwrap().status, SeatStatus::Stopped);
+    }
+
+    #[test]
+    fn stop_preserves_uncertain_recovery_but_does_not_block_a_sibling() {
+        let mut fixture = RoleFixture::new();
+        let backend = fixture.recovering_teardown(Some("native-control"));
+        let mut sibling = backend.store.seat(&fixture.identity.seat).unwrap().unwrap();
+        sibling.identity.seat = SeatId::new("sibling").unwrap();
+        sibling.identity.instance = InstanceId::new("sibling-instance").unwrap();
+        sibling.pane = "sibling-pane".into();
+        sibling.binding_key = "sibling-binding".into();
+        sibling.server_key = "sibling-server".into();
+        fixture.store().fixture_put_seat(&sibling).unwrap();
+        let receipt = stop(&fixture.root, "test", &fixture.identity.seat).unwrap();
+        assert_eq!(receipt.id.as_str(), "controlled-start");
+        assert_eq!(receipt.outcome, Outcome::NeedsRecovery);
+        assert!(backend.store.leased(&fixture.identity.seat).unwrap());
+        let sibling_receipt = stop(&fixture.root, "test", &sibling.identity.seat).unwrap();
+        assert_eq!(sibling_receipt.outcome, Outcome::Committed);
+        assert_eq!(backend.store.unfinished().unwrap().len(), 1);
     }
 
     #[test]
@@ -1407,8 +1936,7 @@ mod tests {
         interrupted.phase = Phase::F3Spawn;
         interrupted.pending = Some("spawn".into());
         interrupted.outcome = Outcome::NeedsRecovery;
-        let db = rusqlite::Connection::open(fixture.binding.transport_root.join("contract.db")).unwrap();
-        db.execute("INSERT INTO contract_operations VALUES(?1,?2)", rusqlite::params![interrupted.id.as_str(), serde_json::to_string(&interrupted).unwrap()]).unwrap();
+        fixture.save_operation(&interrupted);
         assert!(matches!(existing_start(&backend, &fixture.identity.seat).unwrap(),
             Some(ExistingStart::Blocked(record)) if record == interrupted));
         assert_eq!(backend.store.seat(&fixture.identity.seat).unwrap().unwrap().identity, fixture.identity);
@@ -1419,8 +1947,7 @@ mod tests {
         for outcome in [Outcome::Committed, Outcome::Compensated] {
             let mut fixture = RoleFixture::new();
             let backend = fixture.canonical(SeatStatus::Stopped, Phase::F5Receipt, outcome, None);
-            let db = rusqlite::Connection::open(fixture.binding.transport_root.join("contract.db")).unwrap();
-            db.execute("DELETE FROM contract_seats", []).unwrap();
+            fixture.store().fixture_delete_seat(&fixture.identity.seat).unwrap();
             let result = existing_start(&backend, &fixture.identity.seat);
             if outcome == Outcome::Committed { assert!(result.is_err()); }
             else { assert!(result.unwrap().is_none()); }
@@ -1479,7 +2006,7 @@ mod tests {
 
             fixture.binding.transport_root = fixture.binding.workspace.path.join("native-store");
             fixture.binding.endpoint = endpoint(&fixture.binding.scope);
-            let store = ContractStore::create(&fixture.binding.transport_root, fixture.binding.scope.clone(), &fixture.binding.endpoint).unwrap();
+            let mut store = ContractStore::create(&fixture.binding.transport_root, fixture.binding.scope.clone(), &fixture.binding.endpoint).unwrap();
             let native = NativeIdentity { version: "fixture".into(), harness: "unavailable".into(), ui: "tui".into(),
                 platform: Platform::MacOs, executable_sha256: digest(b"fixture") };
             let seat = SeatRecord {
@@ -1490,11 +2017,7 @@ mod tests {
                 session: None, resources: vec![], workspace_resources: vec![], bootstrap_used: false,
             };
             // Test-only canonical fixture, never a live-store recovery shortcut.
-            let db = rusqlite::Connection::open(fixture.binding.transport_root.join("contract.db")).unwrap();
-            db.execute("INSERT INTO contract_seats(seat,record) VALUES(?1,?2)",
-                rusqlite::params![fixture.identity.seat.as_str(), serde_json::to_string(&seat).unwrap()]).unwrap();
-            db.execute("INSERT INTO contract_generations(seat,generation) VALUES(?1,1)", [fixture.identity.seat.as_str()]).unwrap();
-            drop(db);
+            store.fixture_put_seat(&seat).unwrap();
             std::fs::write(root_for(&fixture.binding.workspace.path, &fixture.binding.scope).join("framework-binding.json"),
                 serde_json::to_vec(&fixture.binding).unwrap()).unwrap();
             let stale_running = serde_json::json!({"agents":{"worker":{"provider":provider,"status":"running"}}});
@@ -1557,9 +2080,7 @@ mod tests {
         }
         let inbox = crate::inbox_store::read(&fixture.root, "leader", 10, Some("test")).unwrap();
         assert_eq!(inbox["messages"].as_array().unwrap().len(), 2);
-        let db = rusqlite::Connection::open(fixture.binding.transport_root.join("contract.db")).unwrap();
-        let outbox: i64 = db.query_row("select count(*) from contract_outbox", [], |row| row.get(0)).unwrap();
-        assert_eq!(outbox, 0, "no synthetic task or message-delivery ledger row");
+        assert!(!fixture.binding.transport_root.join("contract.db").exists(), "no SQLite ledger at all");
         let mut foreign = context.clone(); foreign.identity.generation = Generation(2);
         let request = serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"send_message","arguments":{"to":"leader","content":"must not arrive","mailbox":true}}});
         assert!(super::super::mcp::direct_request(&mut backend.store, &foreign, &request, &tools).is_err());
@@ -1581,9 +2102,9 @@ mod tests {
         let mut fixture = RoleFixture::new();
         fixture.role.provider = ProviderId::new("pi_tui").unwrap();
         let _backend = fixture.canonical(SeatStatus::Ready, Phase::F5Receipt, Outcome::Committed, None);
-        let db = rusqlite::Connection::open(fixture.binding.transport_root.join("contract.db")).unwrap();
-        db.execute("update contract_operations set record=json_set(record, '$.failure', ?1)",
-            ["session observation deferred: capture-failed; tmux capture: Deadline"]).unwrap();
+        let mut operation = fixture.store().operation(&OperationId::new("controlled-start").unwrap()).unwrap();
+        operation.failure = Some("session observation deferred: capture-failed; tmux capture: Deadline".into());
+        fixture.save_operation(&operation);
         write_role(&fixture.binding, &fixture.identity, &fixture.role).unwrap();
         let state = super::super::framework::project_seat(
             &fixture.binding.workspace.path, "test", "worker",

@@ -17,22 +17,12 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use serde_json::json;
-use team_agent::coordinator::{Coordinator, ProviderRegistry, WorkspacePath};
-use team_agent::model::enums::Provider;
-use team_agent::provider::{get_adapter, ProviderAdapter};
-use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 use team_agent::tmux_backend::{CommandOutput, CommandRunner, TmuxBackend};
 use team_agent::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
-    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
-    WindowName,
-};
+    Transport, };
 
 /// Batch 2 ①: one pane's display-message pane_pid probe erroring must not fail the
 /// whole list_targets — the other panes must survive with their pids, the failed pane
@@ -92,81 +82,6 @@ fn b2_list_targets_survives_single_pane_pid_query_failure() {
     );
 }
 
-/// Batch 2 ② (A1 proper): when the startup-prompt pass cannot even capture the pane,
-/// the tick must surface a startup-prompt failure event (non-null error) and must not
-/// fake-green the agent's startup prompt state.
-#[test]
-fn b2_startup_prompt_capture_failure_is_observable_not_silent() {
-    let ws = tmp_ws("b2-startup");
-    save_runtime_state(
-        &ws,
-        &json!({
-            "active_team_key": "ctxteam",
-            "session_name": "team-ctxteam",
-            "team_dir": ws.to_string_lossy(),
-            "agents": {
-                "clauder": {
-                    "provider": "claude",
-                    "status": "running",
-                    "startup_prompts": "pending",
-                    "startup_prompt_status": "pending",
-                    "window": "clauder",
-                    "pane_id": "%1",
-                    "mcp_ready": true,
-                    "owner_team_id": "ctxteam",
-                    "session_id": "55555555-6666-4777-8888-999999999999",
-                    "rollout_path": seed_rollout(&ws),
-                }
-            }
-        }),
-    )
-    .unwrap();
-    let coord = Coordinator::new(
-        WorkspacePath::new(ws.clone()),
-        Box::new(RealAdapterRegistry),
-        Box::new(CaptureFailsTransport),
-    );
-
-    let _ = coord.tick();
-
-    let events = events_text(&ws);
-    let state = load_runtime_state(&ws).unwrap();
-    let startup = state
-        .pointer("/agents/clauder/startup_prompts")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let mut failures = Vec::new();
-    let failure_line = events
-        .lines()
-        .find(|line| line.contains("startup_prompt") && line.contains("fail"));
-    match failure_line {
-        None => failures.push(
-            "②: a capture failure during startup-prompt handling must write a \
-startup-prompt failure event (A1 structured outcome: handled/failed/skipped + target); \
-today the failure is swallowed (`let _ =` family)"
-                .to_string(),
-        ),
-        Some(line) => {
-            if line.contains("\"error\":null") || line.contains("\"error\": null") {
-                failures.push(format!(
-                    "②: the failure event must carry a non-null error; line={line}"
-                ));
-            }
-        }
-    }
-    if startup == "handled" || startup == "complete" {
-        failures.push(format!(
-            "②: an unobservable pane must not fake-green startup_prompts={startup:?}"
-        ));
-    }
-    assert!(
-        failures.is_empty(),
-        "batch2 ② startup-prompt observability contract failed:\n{}\nevents={events}",
-        failures.join("\n")
-    );
-}
-
 // ───────────────────────────────────── fixtures ─────────────────────────────────────
 
 /// list-panes yields two panes (format string carries no pane_pid, forcing the
@@ -205,133 +120,6 @@ impl CommandRunner for PanePidFailRunner {
             stderr: String::new(),
         })
     }
-}
-
-/// Transport whose pane captures always fail (dead/unreadable pane).
-struct CaptureFailsTransport;
-
-impl Transport for CaptureFailsTransport {
-    fn kind(&self) -> BackendKind {
-        BackendKind::Tmux
-    }
-
-    fn spawn_first(
-        &self,
-        session: &SessionName,
-        window: &WindowName,
-        _argv: &[String],
-        _cwd: &Path,
-        _env: &BTreeMap<String, String>,
-    ) -> Result<SpawnResult, TransportError> {
-        Ok(SpawnResult {
-            pane_id: PaneId::new("%1"),
-            session: session.clone(),
-            window: window.clone(),
-            child_pid: None,
-        })
-    }
-
-    fn spawn_into(
-        &self,
-        session: &SessionName,
-        window: &WindowName,
-        argv: &[String],
-        cwd: &Path,
-        env: &BTreeMap<String, String>,
-    ) -> Result<SpawnResult, TransportError> {
-        self.spawn_first(session, window, argv, cwd, env)
-    }
-
-    fn inject(
-        &self,
-        _target: &Target,
-        _payload: &InjectPayload,
-        _submit: Key,
-        _bracketed: bool,
-    ) -> Result<InjectReport, TransportError> {
-        Ok(InjectReport {
-            stage_reached: InjectStage::Submit,
-            inject_verification: InjectVerification::CaptureContainsToken,
-            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
-            turn_verification: TurnVerification::NotYetObserved,
-            attempts: 1,
-            submit_diagnostics: None,
-        })
-    }
-
-    fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
-        Ok(())
-    }
-
-    fn capture(
-        &self,
-        _target: &Target,
-        _range: CaptureRange,
-    ) -> Result<CapturedText, TransportError> {
-        Err(TransportError::Subprocess {
-            argv: vec!["tmux".to_string(), "capture-pane".to_string()],
-            code: Some(1),
-            stderr: "injected capture failure (dead pane)".to_string(),
-        })
-    }
-
-    fn query(&self, _target: &Target, _field: PaneField) -> Result<Option<String>, TransportError> {
-        Ok(None)
-    }
-
-    fn liveness(
-        &self,
-        _pane: &PaneId,
-    ) -> Result<team_agent::transport::PaneLiveness, TransportError> {
-        Ok(team_agent::transport::PaneLiveness::Live)
-    }
-
-    fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
-        Ok(Vec::new())
-    }
-
-    fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {
-        Ok(true)
-    }
-
-    fn list_windows(&self, _session: &SessionName) -> Result<Vec<WindowName>, TransportError> {
-        Ok(vec![WindowName::new("clauder")])
-    }
-
-    fn set_session_env(
-        &self,
-        _session: &SessionName,
-        _key: &str,
-        _value: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        Ok(SetEnvOutcome::Applied)
-    }
-
-    fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
-        Ok(())
-    }
-
-    fn kill_window(&self, _target: &Target) -> Result<(), TransportError> {
-        Ok(())
-    }
-
-    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
-        Ok(AttachOutcome::Attached)
-    }
-}
-
-struct RealAdapterRegistry;
-
-impl ProviderRegistry for RealAdapterRegistry {
-    fn adapter_for(&self, provider: Provider) -> Box<dyn ProviderAdapter> {
-        get_adapter(provider)
-    }
-}
-
-fn seed_rollout(ws: &Path) -> String {
-    let rollout = ws.join("rollout-clauder.jsonl");
-    std::fs::write(&rollout, "{\"type\":\"system\",\"subtype\":\"boot\"}\n").unwrap();
-    rollout.to_string_lossy().to_string()
 }
 
 fn events_text(ws: &Path) -> String {

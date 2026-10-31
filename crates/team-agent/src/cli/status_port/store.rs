@@ -6,11 +6,10 @@ use std::path::Path;
 pub(super) fn recent_agent_messages(
     workspace: &Path,
     agent_id: &str,
+    owner_team_id: Option<&str>,
 ) -> Result<Vec<Value>, CliError> {
-    crate::message_store::MessageStore::open(workspace)
-        .map_err(|e| CliError::Runtime(e.to_string()))?
-        .inbox(agent_id, 3, None)
-        .map_err(|e| CliError::Runtime(e.to_string()))
+    let inbox = crate::inbox_store::read(workspace, agent_id, 5, owner_team_id).map_err(CliError::Runtime)?;
+    Ok(inbox["messages"].as_array().cloned().unwrap_or_default())
 }
 
 /// `latest_result_summaries`(`queries.py:83-89`)。

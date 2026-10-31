@@ -6,6 +6,7 @@ pub mod mcp;
 pub mod operator;
 pub mod physical;
 pub mod protocol;
+mod projection;
 pub mod store;
 pub mod supervisor;
 
@@ -18,18 +19,25 @@ use crate::contract::types::ContractError;
 pub enum Error {
     Contract(ContractError),
     Fence,
+    FenceAt { check: &'static str, entity: Option<String> },
     Conflict,
     Invalid(&'static str),
     Database,
     Corrupt,
     Io(std::io::ErrorKind),
     Host(&'static str),
+    /// A read-only stop preflight refused before issuing any native mutation.
+    StopNoEffect(String),
     HostDiagnostic(crate::host::HostError),
     /// The physical spawn receipt proves no process launch was attempted.
     SpawnNotStarted(crate::host::HostError),
     NativeControl(Box<crate::runtime::delivery::InjectionReport>),
     NativeClose(Box<crate::host::tmux::CloseReceipt>),
     NeedsRecovery,
+}
+impl Error {
+    pub fn is_fence(&self) -> bool { matches!(self, Self::Fence | Self::FenceAt { .. }) }
+    pub(crate) fn fence(check: &'static str) -> Self { Self::FenceAt { check, entity: None } }
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -65,11 +73,6 @@ impl std::error::Error for Error {}
 impl From<ContractError> for Error {
     fn from(value: ContractError) -> Self {
         Self::Contract(value)
-    }
-}
-impl From<rusqlite::Error> for Error {
-    fn from(_: rusqlite::Error) -> Self {
-        Self::Database
     }
 }
 impl From<serde_json::Error> for Error {

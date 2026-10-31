@@ -31,7 +31,6 @@ mod brief_probe;
 #[allow(dead_code)]
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -40,18 +39,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rusqlite::params;
 use serde_json::{json, Value};
 use serial_test::serial;
-use team_agent::coordinator::{Coordinator, ProviderRegistry, WorkspacePath};
-use team_agent::db::schema::open_db;
-use team_agent::message_store::MessageStore;
-use team_agent::model::enums::Provider;
-use team_agent::provider::{get_adapter, ProviderAdapter};
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
-use team_agent::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
-    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
-    WindowName,
-};
 
 const TEAM: &str = "current";
 const WORKER: &str = "helper";
@@ -73,7 +61,6 @@ fn restart_clears_stale_working_activity_and_health_after_shutdown_keep_logs() {
     case.write_fake_tmux();
     case.write_team_spec();
     case.seed_running_state_with_stale_activity();
-    case.seed_agent_health("WORKING", Some(OLD_MESSAGE_ID));
 
     let shutdown = case.run_ta(&[
         "shutdown",
@@ -205,265 +192,6 @@ fn restart_clears_stale_working_activity_and_health_after_shutdown_keep_logs() {
             && human_text.contains("activity: working")
             && !human_text.contains("activity: idle"),
         "R1: human status must render the same accepted English seven-field projection after restart; output={human_text}; status_json={status_json}"
-    );
-}
-
-#[test]
-#[serial(env)]
-fn coordinator_tick_ignores_working_transcript_older_than_spawned_at() {
-    let case = TickCase::new("r2-stale-jsonl");
-    let rollout = case.workspace.join("stale-rollout.jsonl");
-    fs::write(&rollout, codex_open_turn()).expect("write stale codex transcript");
-    set_mtime_before_spawned_at(&rollout);
-    case.seed_tick_state(json!({
-        "status": "running",
-        "provider": "codex",
-        "agent_id": WORKER,
-        "window": WORKER,
-        "pane_id": WORKER_PANE,
-        "session_id": "0532-stale-session",
-        "rollout_path": rollout.to_string_lossy(),
-        "spawned_at": "2026-07-12T12:00:00+00:00",
-        "spawn_cwd": case.workspace.to_string_lossy(),
-        "process_liveness": "alive"
-    }));
-
-    case.coordinator(PrecisionTransport::empty_capture())
-        .tick()
-        .expect("coordinator tick");
-    let state = case.read_state();
-    let worker = &state["agents"][WORKER];
-
-    assert_ne!(
-        worker.pointer("/activity/status").and_then(Value::as_str),
-        Some("working"),
-        "R2: a transcript whose mtime is older than spawned_at must not replay Working into a fresh cohort; worker={worker}; state={state}"
-    );
-    assert_ne!(
-        worker.get("worker_state").and_then(Value::as_str),
-        Some("BUSY"),
-        "R2: stale pre-spawn JSONL must not repopulate worker_state=BUSY; worker={worker}; state={state}"
-    );
-}
-
-#[test]
-#[serial(env)]
-fn cleared_activity_stays_unknown_not_idle_until_post_spawn_evidence_exists() {
-    let case = TickCase::new("r3-unknown-not-idle");
-    case.seed_tick_state(json!({
-        "status": "running",
-        "provider": "codex",
-        "agent_id": WORKER,
-        "window": WORKER,
-        "pane_id": WORKER_PANE,
-        "session_id": "0532-unknown-session",
-        "spawned_at": "2026-07-12T12:00:00+00:00",
-        "spawn_cwd": case.workspace.to_string_lossy(),
-        "process_liveness": "alive"
-    }));
-
-    case.coordinator(PrecisionTransport::empty_capture())
-        .tick()
-        .expect("coordinator tick");
-    let state = case.read_state();
-    let worker = &state["agents"][WORKER];
-    assert!(
-        !matches!(
-            worker.get("worker_state").and_then(Value::as_str),
-            Some("PROBABLY_IDLE" | "IDLE" | "idle" | "probably_idle")
-        ),
-        "R3 guard: absence of post-spawn evidence is UNKNOWN/empty, not synthesized idle; worker={worker}; state={state}"
-    );
-}
-
-#[test]
-#[serial(env)]
-fn fake_ready_startup_capture_does_not_recreate_busy_after_restart_clear() {
-    let case = TickCase::new("r1-ready-capture");
-    case.seed_tick_state(fresh_respawned_worker("fake"));
-
-    case.coordinator(PrecisionTransport::with_capture_text(
-        "TEAM_AGENT_FAKE_READY agent=helper\n",
-    ))
-    .tick()
-    .expect("coordinator tick");
-    let state = case.read_state();
-    let worker = &state["agents"][WORKER];
-    let health = case.agent_health_row();
-
-    assert_not_busy_from_pane_startup(
-        worker,
-        health.as_ref(),
-        "R1 READY capture: fake worker startup READY is a structural non-busy marker, not recent_provider_output",
-        &state,
-    );
-    assert_ready_is_not_idle(
-        worker,
-        health.as_ref(),
-        "R1 READY capture: fake worker startup READY is liveness/startup-only, not idle evidence",
-        &state,
-    );
-}
-
-#[test]
-#[serial(env)]
-fn fake_working_startup_capture_still_classifies_busy() {
-    let case = TickCase::new("r1-fake-working");
-    case.seed_tick_state(fresh_respawned_worker("fake"));
-
-    case.coordinator(PrecisionTransport::with_capture_text(
-        "TEAM_AGENT_FAKE_WORKING agent=helper\n",
-    ))
-    .tick()
-    .expect("coordinator tick");
-    let state = case.read_state();
-    let worker = &state["agents"][WORKER];
-    let health = case.agent_health_row();
-
-    assert_eq!(
-        worker.pointer("/activity/status").and_then(Value::as_str),
-        Some("working"),
-        "R1 guard: fake WORKING marker must remain a structural busy signal; worker={worker}; state={state}"
-    );
-    assert_eq!(
-        worker.get("worker_state").and_then(Value::as_str),
-        Some("BUSY"),
-        "R1 guard: fake WORKING marker must still map to worker_state=BUSY; worker={worker}; state={state}"
-    );
-    assert_eq!(
-        health.as_ref().and_then(|row| row.status.as_deref()),
-        Some("WORKING"),
-        "R1 guard: fake WORKING marker must still update agent_health.WORKING; health={health:?}; state={state}"
-    );
-}
-
-#[test]
-#[serial(env)]
-fn non_structural_startup_capture_stays_unknown_not_busy_or_idle() {
-    let case = TickCase::new("r1-startup-banner");
-    case.seed_tick_state(fresh_respawned_worker("codex"));
-
-    case.coordinator(PrecisionTransport::with_capture_text(
-        "provider startup banner\n",
-    ))
-    .tick()
-    .expect("coordinator tick");
-    let state = case.read_state();
-    let worker = &state["agents"][WORKER];
-    let health = case.agent_health_row();
-
-    assert_not_busy_from_pane_startup(
-        worker,
-        health.as_ref(),
-        "R1 startup banner: non-structural first capture must stay unknown, not recent_provider_output",
-        &state,
-    );
-    assert!(
-        !matches!(
-            worker.get("worker_state").and_then(Value::as_str),
-            Some("PROBABLY_IDLE" | "IDLE" | "idle" | "probably_idle")
-        ),
-        "R1 startup banner guard: generic no-signal output is UNKNOWN/empty, not synthesized idle; worker={worker}; state={state}"
-    );
-}
-
-#[test]
-#[serial(env)]
-fn real_provider_idle_prompt_still_classifies_idle() {
-    let case = TickCase::new("r1-real-idle-prompt");
-    case.seed_tick_state(fresh_respawned_worker("codex"));
-
-    case.coordinator(PrecisionTransport::with_capture_text("OpenAI Codex\n❯ \n"))
-        .tick()
-        .expect("coordinator tick");
-    let state = case.read_state();
-    let worker = &state["agents"][WORKER];
-    let health = case.agent_health_row();
-
-    assert_eq!(
-        worker.pointer("/activity/status").and_then(Value::as_str),
-        Some("idle"),
-        "R1 guard: real provider idle prompt must still classify as idle; worker={worker}; state={state}"
-    );
-    assert_eq!(
-        worker.get("worker_state").and_then(Value::as_str),
-        Some("PROBABLY_IDLE"),
-        "R1 guard: real provider idle prompt must still map to worker_state=PROBABLY_IDLE; worker={worker}; state={state}"
-    );
-    assert_eq!(
-        health.as_ref().and_then(|row| row.status.as_deref()),
-        Some("IDLE"),
-        "R1 guard: real provider idle prompt must still update agent_health.IDLE; health={health:?}; state={state}"
-    );
-}
-
-#[test]
-#[serial(env)]
-fn structural_working_capture_still_classifies_busy() {
-    let case = TickCase::new("r1-structural-working");
-    case.seed_tick_state(fresh_respawned_worker("codex"));
-
-    case.coordinator(PrecisionTransport::with_capture_text(
-        "tool output\n• Working (5s · esc to interrupt)\n",
-    ))
-    .tick()
-    .expect("coordinator tick");
-    let state = case.read_state();
-    let worker = &state["agents"][WORKER];
-    let health = case.agent_health_row();
-
-    assert_eq!(
-        worker.pointer("/activity/status").and_then(Value::as_str),
-        Some("working"),
-        "R1 guard: structural pane Working signal must still classify as working; worker={worker}; state={state}"
-    );
-    assert_eq!(
-        worker.get("worker_state").and_then(Value::as_str),
-        Some("BUSY"),
-        "R1 guard: structural pane Working signal must still map to worker_state=BUSY; worker={worker}; state={state}"
-    );
-    assert_eq!(
-        health.as_ref().and_then(|row| row.status.as_deref()),
-        Some("WORKING"),
-        "R1 guard: structural pane Working signal must still update agent_health.WORKING; health={health:?}; state={state}"
-    );
-}
-
-#[test]
-#[serial(env)]
-fn fresh_post_spawn_working_transcript_still_classifies_busy() {
-    let case = TickCase::new("r3-fresh-working");
-    let rollout = case.workspace.join("fresh-rollout.jsonl");
-    fs::write(&rollout, codex_open_turn()).expect("write fresh codex transcript");
-    set_mtime_after_spawned_at(&rollout);
-    case.seed_tick_state(json!({
-        "status": "running",
-        "provider": "codex",
-        "agent_id": WORKER,
-        "window": WORKER,
-        "pane_id": WORKER_PANE,
-        "session_id": "0532-fresh-session",
-        "rollout_path": rollout.to_string_lossy(),
-        "spawned_at": "2026-07-12T12:00:00+00:00",
-        "spawn_cwd": case.workspace.to_string_lossy(),
-        "process_liveness": "alive"
-    }));
-
-    case.coordinator(PrecisionTransport::empty_capture())
-        .tick()
-        .expect("coordinator tick");
-    let state = case.read_state();
-    let worker = &state["agents"][WORKER];
-
-    assert_eq!(
-        worker.pointer("/activity/status").and_then(Value::as_str),
-        Some("working"),
-        "R3 guard: fresh post-spawn JSONL Working remains authoritative; worker={worker}; state={state}"
-    );
-    assert_eq!(
-        worker.get("worker_state").and_then(Value::as_str),
-        Some("BUSY"),
-        "R3 guard: fresh post-spawn Working still maps to worker_state=BUSY; worker={worker}; state={state}"
     );
 }
 
@@ -642,28 +370,10 @@ tasks: []
         save_runtime_state(&self.workspace, &state).expect("seed old endpoint state");
     }
 
-    fn seed_agent_health(&self, status: &str, current_task_id: Option<&str>) {
-        let store = MessageStore::open(&self.workspace).expect("open message store");
-        let conn = open_db(store.db_path()).expect("open team db");
-        conn.execute(
-            "insert or replace into agent_health(owner_team_id, agent_id, status, last_output_at, context_usage_pct, current_task_id, updated_at)
-             values (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                TEAM,
-                WORKER,
-                status,
-                "2026-07-12T10:00:00Z",
-                42_i64,
-                current_task_id,
-                "2026-07-12T10:00:00Z"
-            ],
-        )
-        .expect("seed agent_health");
-    }
 
     fn seed_healthy_coordinator(&self) {
         let workspace = team_agent::coordinator::WorkspacePath::new(self.workspace.clone());
-        let _ = MessageStore::open(&self.workspace).expect("initialize message store");
+        // M4: no SQLite message store fixture (MessageStore::open is retired).
         let identity = json!({
             "binary_path": cli_binary_path(),
             "binary_version": env!("CARGO_PKG_VERSION")
@@ -687,8 +397,13 @@ tasks: []
     }
 
     fn agent_health_row(&self) -> Option<HealthRow> {
-        let store = MessageStore::open(&self.workspace).expect("open message store");
-        let conn = open_db(store.db_path()).expect("open team db");
+        // M4: the retired store is never created; an absent team.db has no health row.
+        let db = self.workspace.join(".team/runtime/team.db");
+        if !db.exists() {
+            return None;
+        }
+        let conn = rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open team db");
         conn.query_row(
             "select status, current_task_id from agent_health where owner_team_id = ?1 and agent_id = ?2",
             params![TEAM, WORKER],
@@ -895,206 +610,6 @@ struct HealthRow {
     current_task_id: Option<String>,
 }
 
-struct TickCase {
-    env: hermetic_guard::HermeticTestEnv,
-    workspace: PathBuf,
-}
-
-impl TickCase {
-    fn new(tag: &str) -> Self {
-        let seq = CASE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let env = hermetic_guard::HermeticTestEnv::enter(tag);
-        let workspace = env.workspace(&format!("{tag}-{seq}"));
-        fs::create_dir_all(workspace.join(".team/runtime")).expect("create runtime dir");
-        Self { env, workspace }
-    }
-
-    fn seed_tick_state(&self, agent: Value) {
-        let _ = &self.env;
-        let _ = MessageStore::open(&self.workspace).expect("create message store");
-        save_runtime_state(
-            &self.workspace,
-            &json!({
-                "session_name": TEAM_SESSION,
-                "active_team_key": TEAM,
-                "team_key": TEAM,
-                "team_dir": self.workspace.to_string_lossy(),
-                "agents": {
-                    WORKER: agent
-                }
-            }),
-        )
-        .expect("seed tick state");
-    }
-
-    fn coordinator(&self, transport: PrecisionTransport) -> Coordinator {
-        Coordinator::new(
-            WorkspacePath::new(self.workspace.clone()),
-            Box::new(RealAdapterRegistry),
-            Box::new(transport),
-        )
-    }
-
-    fn read_state(&self) -> Value {
-        load_runtime_state(&self.workspace).expect("read runtime state")
-    }
-
-    fn agent_health_row(&self) -> Option<HealthRow> {
-        let store = MessageStore::open(&self.workspace).expect("open message store");
-        let conn = open_db(store.db_path()).expect("open team db");
-        conn.query_row(
-            "select status, current_task_id from agent_health where owner_team_id = ?1 and agent_id = ?2",
-            params![TEAM, WORKER],
-            |row| {
-                Ok(HealthRow {
-                    status: row.get(0)?,
-                    current_task_id: row.get(1)?,
-                })
-            },
-        )
-        .ok()
-    }
-}
-
-struct RealAdapterRegistry;
-
-impl ProviderRegistry for RealAdapterRegistry {
-    fn adapter_for(&self, provider: Provider) -> Box<dyn ProviderAdapter> {
-        get_adapter(provider)
-    }
-}
-
-#[derive(Clone)]
-struct PrecisionTransport {
-    capture_text: String,
-}
-
-impl PrecisionTransport {
-    fn empty_capture() -> Self {
-        Self {
-            capture_text: String::new(),
-        }
-    }
-
-    fn with_capture_text(text: &str) -> Self {
-        Self {
-            capture_text: text.to_string(),
-        }
-    }
-}
-
-impl Transport for PrecisionTransport {
-    fn kind(&self) -> BackendKind {
-        BackendKind::Tmux
-    }
-
-    fn spawn_first(
-        &self,
-        session: &SessionName,
-        window: &WindowName,
-        _argv: &[String],
-        _cwd: &Path,
-        _env: &BTreeMap<String, String>,
-    ) -> Result<SpawnResult, TransportError> {
-        Ok(SpawnResult {
-            pane_id: PaneId::new(WORKER_PANE),
-            session: session.clone(),
-            window: window.clone(),
-            child_pid: Some(WORKER_PID),
-        })
-    }
-
-    fn spawn_into(
-        &self,
-        session: &SessionName,
-        window: &WindowName,
-        argv: &[String],
-        cwd: &Path,
-        env: &BTreeMap<String, String>,
-    ) -> Result<SpawnResult, TransportError> {
-        self.spawn_first(session, window, argv, cwd, env)
-    }
-
-    fn inject(
-        &self,
-        _target: &Target,
-        _payload: &InjectPayload,
-        _submit: Key,
-        _bracketed: bool,
-    ) -> Result<InjectReport, TransportError> {
-        Ok(InjectReport {
-            stage_reached: InjectStage::Submit,
-            inject_verification: InjectVerification::CaptureContainsToken,
-            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
-            turn_verification: TurnVerification::NotYetObserved,
-            attempts: 1,
-            submit_diagnostics: None,
-        })
-    }
-
-    fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
-        Ok(())
-    }
-
-    fn capture(
-        &self,
-        _target: &Target,
-        range: CaptureRange,
-    ) -> Result<CapturedText, TransportError> {
-        Ok(CapturedText {
-            text: self.capture_text.clone(),
-            range,
-        })
-    }
-
-    fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
-        match field {
-            PaneField::PaneWidth => Ok(Some("120".to_string())),
-            _ => Ok(None),
-        }
-    }
-
-    fn liveness(
-        &self,
-        _pane: &PaneId,
-    ) -> Result<team_agent::transport::PaneLiveness, TransportError> {
-        Ok(team_agent::transport::PaneLiveness::Live)
-    }
-
-    fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
-        Ok(Vec::new())
-    }
-
-    fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {
-        Ok(true)
-    }
-
-    fn list_windows(&self, _session: &SessionName) -> Result<Vec<WindowName>, TransportError> {
-        Ok(vec![WindowName::new(WORKER)])
-    }
-
-    fn set_session_env(
-        &self,
-        _session: &SessionName,
-        _key: &str,
-        _value: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        Ok(SetEnvOutcome::Applied)
-    }
-
-    fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
-        Ok(())
-    }
-
-    fn kill_window(&self, _target: &Target) -> Result<(), TransportError> {
-        Ok(())
-    }
-
-    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
-        Ok(AttachOutcome::Attached)
-    }
-}
-
 fn base_state(workspace: &Path, endpoint: &str, worker: Value) -> Value {
     let receiver = json!({
         "mode": "direct_tmux",
@@ -1175,60 +690,6 @@ fn running_worker() -> Value {
     })
 }
 
-fn fresh_respawned_worker(provider: &str) -> Value {
-    json!({
-        "id": WORKER,
-        "name": WORKER,
-        "provider": provider,
-        "model": provider,
-        "window": WORKER,
-        "status": "running",
-        "pane_id": WORKER_PANE,
-        "pane_pid": WORKER_PID,
-        "pid": WORKER_PID,
-        "process_started": true,
-        "session_id": "0532-fresh-session",
-        "spawned_at": "2026-07-12T12:00:00+00:00",
-        "spawn_cwd": ""
-    })
-}
-
-fn assert_not_busy_from_pane_startup(
-    worker: &Value,
-    health: Option<&HealthRow>,
-    context: &str,
-    state: &Value,
-) {
-    assert_ne!(
-        worker.pointer("/activity/status").and_then(Value::as_str),
-        Some("working"),
-        "{context}; worker={worker}; health={health:?}; state={state}"
-    );
-    assert_ne!(
-        worker.get("worker_state").and_then(Value::as_str),
-        Some("BUSY"),
-        "{context}; worker={worker}; health={health:?}; state={state}"
-    );
-    assert_ne!(
-        worker
-            .pointer("/activity/rationale")
-            .and_then(Value::as_str),
-        Some("recent_provider_output"),
-        "{context}; worker={worker}; health={health:?}; state={state}"
-    );
-    assert_ne!(
-        health.and_then(|row| row.status.as_deref()),
-        Some("WORKING"),
-        "{context}; worker={worker}; health={health:?}; state={state}"
-    );
-    assert!(
-        worker.get("current_task_id").is_none()
-            && worker.get("current_turn_message_id").is_none()
-            && health.and_then(|row| row.current_task_id.as_deref()).is_none(),
-        "{context}: fresh startup capture must not invent or retain current task identity; worker={worker}; health={health:?}; state={state}"
-    );
-}
-
 fn assert_ready_is_not_idle(
     worker: &Value,
     health: Option<&HealthRow>,
@@ -1282,33 +743,6 @@ fn role_doc() -> String {
     format!(
         "---\nname: {WORKER}\nrole: Fake helper\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nFake helper.\n"
     )
-}
-
-fn codex_open_turn() -> &'static str {
-    "{\"jsonrpc\":\"2.0\",\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"ct-0532\",\"status\":\"inProgress\"}}}\n"
-}
-
-fn set_mtime_before_spawned_at(path: &Path) {
-    set_mtime(path, "202607121159.00");
-}
-
-fn set_mtime_after_spawned_at(path: &Path) {
-    set_mtime(path, "202607121200.01");
-}
-
-fn set_mtime(path: &Path, stamp: &str) {
-    let status = Command::new("touch")
-        // Keep these fixtures aligned with spawned_at's explicit +00:00 timestamp.
-        .env("TZ", "UTC")
-        .args(["-t", stamp])
-        .arg(path)
-        .status()
-        .expect("run touch -t");
-    assert!(
-        status.success(),
-        "touch -t {stamp} {} must succeed",
-        path.display()
-    );
 }
 
 fn cli_binary_path() -> String {

@@ -59,7 +59,11 @@ fn physical_send_completes_once_when_stdout_is_closed() {
             .count(),
         1
     );
-    assert!(!fixture.root.join(".team/inbox").exists());
+    // R-M1a: M1 stores before submitting, so a physical send leaves exactly one durable record
+    // (exactly-once holds for both the keystrokes and the inbox).
+    let records = fixture.inbox("worker-1");
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0]["content"], "closed stdout token");
     assert!(!fixture.root.join(".team/runtime/team.db").exists());
 }
 

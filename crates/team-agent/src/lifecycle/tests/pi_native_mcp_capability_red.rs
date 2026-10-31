@@ -281,18 +281,7 @@ esac
         );
     }
 
-    let store = MessageStore::open(workspace).expect("open isolated MCP store");
-    store
-        .create_message(
-            Some("task_mcp"),
-            "leader",
-            "worker_a",
-            "N1_NATIVE_MCP_INPUT",
-            None,
-            false,
-            Some("teamA"),
-        )
-        .expect("seed attributable task input");
+    // M4: the SQL task-input seed is gone with the store; report_result names task_mcp explicitly.
     let mut client = RawMcpClient::spawn(native_config, &system_path, hermetic.home());
     let initialize = client.rpc("initialize", json!({"protocolVersion":"2024-11-05"}));
     assert_eq!(

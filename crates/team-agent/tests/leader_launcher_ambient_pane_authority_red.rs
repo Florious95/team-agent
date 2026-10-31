@@ -32,11 +32,10 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 use serial_test::serial;
 use sha2::{Digest, Sha256};
-use team_agent::message_store::MessageStore;
 use team_agent::model::pane_authority_refusal as refusal_catalog;
 use team_agent::state::persist::save_runtime_state;
 use team_agent::transport::Transport;
@@ -153,16 +152,6 @@ fn a3_redirected_stdin_tty_cannot_impersonate_the_controlling_tty() {
     let case = Case::new("a3-stdin-cannot-impersonate");
     case.seed_preexisting_state_registry_and_store();
     let durable_before = case.durable_snapshot();
-    assert!(
-        durable_before.db.as_ref().is_some_and(|db| {
-            db.user_version > 0
-                && db
-                    .row_counts
-                    .iter()
-                    .any(|(table, count)| table == "messages" && *count >= 1)
-        }),
-        "existing-store positive control: schema and at least one durable message row must exist"
-    );
     case.set_mode("matching");
 
     let probe = case.run_with_distinct_controlling_and_stdin_ttys(
@@ -827,10 +816,13 @@ fn b1_send_reports_the_physical_endpoint_failure_without_rebinding() {
         ],
         None,
     );
-    let value = json_stdout_even_on_error("B1 send refusal", &output);
-    assert!(!output.status.success(), "a missing selected PTY cannot be reported as sent");
-    assert!(value["error"].as_str().is_some_and(|error| error.contains("pane") && error.contains("not live")), "{value}");
-    assert!(value["action"].as_str().is_some_and(|action| action.contains("doctor")), "{value}");
+    let value = json_stdout_even_on_error("B1 send receipt", &output);
+    // R-M1b (M1 store-first): a leader message to a missing selected PTY is stored, never reported
+    // as sent; the receipt carries the physical endpoint failure, and the binding is not rewritten.
+    assert!(output.status.success(), "{value}");
+    assert_eq!((value["status"].clone(), value["live"].clone()), (json!("stored"), json!(false)), "{value}");
+    assert!(value.get("delivery").is_none(), "a missing selected PTY cannot be reported as delivered: {value}");
+    assert!(value["delivery_error"].as_str().is_some_and(|error| error.contains("pane")), "{value}");
     assert!(!has_typed_reason(&value, "PaneWorkspaceMismatch"), "send must not substitute a retired owner gate for physical endpoint evidence");
 }
 
@@ -1240,123 +1232,6 @@ fn b3_each_public_surface_recovery_action_closes_its_original_refusal() {
     }
 }
 
-#[test]
-#[serial(env)]
-fn c_attach_window_failures_are_retried_or_remain_user_visible() {
-    let case = Case::new("c-attach-window");
-    case.seed_foreign_attached_state();
-    let message_ids = case.seed_attach_window_failures();
-    let attempts_before = message_ids
-        .iter()
-        .map(|id| case.message_attempts(id))
-        .collect::<Vec<_>>();
-
-    case.set_mode("recovery");
-    let attach = case.run(
-        &[
-            "attach-leader",
-            "--workspace",
-            case.workspace_str(),
-            "--team",
-            TEAM,
-            "--pane",
-            GOOD_PANE,
-            "--provider",
-            "codex",
-            "--confirm",
-            "--json",
-        ],
-        Some(GOOD_PANE),
-    );
-    let attach_value = json_stdout_even_on_error("C attach", &attach);
-    assert_eq!(
-        attach_value["ok"],
-        json!(true),
-        "C precondition: leader attach must complete; output={attach_value}"
-    );
-
-    let physically_retried = message_ids.iter().enumerate().all(|(index, id)| {
-        let row = case.message_row(id);
-        row.attempts > attempts_before[index]
-            && matches!(
-                row.status.as_str(),
-                "submitted_pending_acceptance"
-                    | "submitted_awaiting_receipt"
-                    | "submitted_unverified"
-                    | "visible"
-                    | "delivered"
-                    | "acknowledged"
-            )
-    });
-    let status = case.run(
-        &[
-            "status",
-            "--workspace",
-            case.workspace_str(),
-            "--team",
-            TEAM,
-            "--json",
-            "--detail",
-        ],
-        Some(GOOD_PANE),
-    );
-    let diagnose = case.run(
-        &[
-            "doctor",
-            "--workspace",
-            case.workspace_str(),
-            "--team",
-            TEAM,
-            "--json",
-        ],
-        Some(GOOD_PANE),
-    );
-    let status_value = json_stdout_even_on_error("C status", &status);
-    let diagnose_value = json_stdout_even_on_error("C diagnose", &diagnose);
-    let visible_debt = attach_window_debt_visible(
-        &[&attach_value, &status_value, &diagnose_value],
-        &message_ids,
-    );
-    if !physically_retried {
-        let debt = attach_value
-            .get("attach_window_failures")
-            .expect("attach must return typed attach-window debt when physical retry did not happen");
-        assert_eq!(
-            debt.get("team_id").and_then(Value::as_str),
-            Some(TEAM),
-            "attach-window debt must bind the current team operation; debt={debt}"
-        );
-        assert_eq!(
-            debt.get("pane_id").and_then(Value::as_str),
-            Some(GOOD_PANE),
-            "attach-window debt must bind the attached pane; debt={debt}"
-        );
-        assert_eq!(
-            debt.get("reason").and_then(Value::as_str),
-            Some("leader_not_attached")
-        );
-        assert_eq!(
-            debt.get("status").and_then(Value::as_str),
-            Some("requeued_pending_physical_retry")
-        );
-        assert_eq!(
-            debt.get("count").and_then(Value::as_u64),
-            Some(message_ids.len() as u64),
-            "typed debt count must come from the owner-team requeue result; debt={debt}"
-        );
-    }
-
-    assert!(
-        physically_retried || visible_debt,
-        "C RED signature: after attach, messages that failed in the attach window must either \
-         cross a new physical-attempt boundary or remain user-visible as N=2 attach-window debt; \
-         rows={:?} attach={attach_value} status={status_value} diagnose={diagnose_value}",
-        message_ids
-            .iter()
-            .map(|id| case.message_row(id))
-            .collect::<Vec<_>>()
-    );
-}
 
 #[derive(Clone, Copy)]
 enum RecoverySurface {
@@ -1869,7 +1744,6 @@ impl Case {
             "agents": {}
         });
         save_runtime_state(&self.workspace, &state).expect("seed foreign attached state");
-        MessageStore::open(&self.workspace).expect("initialize message store");
     }
 
     fn declare_external_topology(&self) {
@@ -1905,83 +1779,11 @@ impl Case {
 
     fn seed_preexisting_state_registry_and_store(&self) {
         self.seed_preexisting_state_and_registry();
-        let store = MessageStore::open(&self.workspace).expect("seed existing message store");
-        store
-            .create_message(
-                None,
-                "existing-worker",
-                "leader",
-                "existing durable inventory canary",
-                None,
-                false,
-                Some("preexisting"),
-            )
-            .expect("seed existing durable row");
     }
 
 
-    fn seed_attach_window_failures(&self) -> Vec<String> {
-        let store = MessageStore::open(&self.workspace).expect("open message store");
-        [2_i64, 4_i64]
-            .into_iter()
-            .enumerate()
-            .map(|(index, attempts)| {
-                let id = store
-                    .create_message(
-                        None,
-                        "worker",
-                        "leader",
-                        &format!("attach-window canary {index}"),
-                        None,
-                        false,
-                        Some(TEAM),
-                    )
-                    .expect("create attach-window message");
-                let conn = team_agent::db::schema::open_db(store.db_path()).expect("open team db");
-                conn.execute(
-                    "update messages
-                     set status = 'failed',
-                         error = 'leader_not_attached',
-                         delivery_attempts = ?2,
-                         created_at = ?3,
-                         updated_at = ?3
-                     where message_id = ?1",
-                    params![
-                        id,
-                        attempts,
-                        if index == 0 {
-                            "2026-07-27T14:35:09+08:00"
-                        } else {
-                            "2026-07-27T14:35:22+08:00"
-                        }
-                    ],
-                )
-                .expect("shape attach-window failure");
-                id
-            })
-            .collect()
-    }
 
-    fn message_attempts(&self, message_id: &str) -> i64 {
-        self.message_row(message_id).attempts
-    }
 
-    fn message_row(&self, message_id: &str) -> MessageRow {
-        let store = MessageStore::open(&self.workspace).expect("open message store");
-        let conn = team_agent::db::schema::open_db(store.db_path()).expect("open team db");
-        conn.query_row(
-            "select status, delivery_attempts, error from messages where message_id = ?1",
-            params![message_id],
-            |row| {
-                Ok(MessageRow {
-                    status: row.get(0)?,
-                    attempts: row.get(1)?,
-                    error: row.get(2)?,
-                })
-            },
-        )
-        .expect("read message row")
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -2410,14 +2212,6 @@ impl Drop for UnixSocketFixture {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
     }
-}
-
-#[derive(Debug)]
-struct MessageRow {
-    status: String,
-    attempts: i64,
-    #[allow(dead_code)]
-    error: Option<String>,
 }
 
 fn open_pty() -> io::Result<(File, File, String)> {
@@ -2983,40 +2777,7 @@ fn json_contains_string(value: &Value, expected: &str) -> bool {
     }
 }
 
-fn attach_window_debt_visible(values: &[&Value], message_ids: &[String]) -> bool {
-    values
-        .iter()
-        .any(|value| value_names_attach_window_debt(value, message_ids.len() as u64))
-}
 
-fn value_names_attach_window_debt(value: &Value, expected_count: u64) -> bool {
-    match value {
-        Value::String(text) => {
-            let text = text.to_ascii_lowercase();
-            (text.contains("leader_not_attached") || text.contains("attach window"))
-                && text.contains(&expected_count.to_string())
-        }
-        Value::Array(values) => values
-            .iter()
-            .any(|value| value_names_attach_window_debt(value, expected_count)),
-        Value::Object(object) => {
-            let local_text = Value::Object(object.clone())
-                .to_string()
-                .to_ascii_lowercase();
-            let names_cause =
-                local_text.contains("leader_not_attached") || local_text.contains("attach_window");
-            let names_count = object.iter().any(|(key, value)| {
-                (key == "count" || key == "failed_count" || key == "message_count")
-                    && value.as_u64() == Some(expected_count)
-            });
-            (names_cause && names_count)
-                || object
-                    .values()
-                    .any(|value| value_names_attach_window_debt(value, expected_count))
-        }
-        _ => false,
-    }
-}
 
 // Discovery only: a managed tmux recorder must never execute a real provider.
 const PI_DISCOVERY_SHIM: &str = r#"#!/bin/sh

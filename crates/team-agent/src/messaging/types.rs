@@ -46,6 +46,14 @@ pub enum DeliveryStatus {
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryRefusal {
     TargetNotInTeam,
+    /// Admission failures are not all cross-scope membership failures.
+    SelfTarget,
+    NameNotResolvable,
+    NameAmbiguous,
+    NameInvalid,
+    NameNotLive,
+    TeamKeyNotFound,
+    InternalRuntimeError,
     HumanConfirmationRequired,
     MissingPermissions,
     RecipientBusy,

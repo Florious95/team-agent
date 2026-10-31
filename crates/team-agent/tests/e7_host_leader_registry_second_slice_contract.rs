@@ -377,7 +377,12 @@ fn e7_send_to_leader_resolves_unique_refuses_ambiguous_and_never_misroutes_stale
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["message_id"], live_json["message_id"], "receipt identifies the inbox record, not a ledger row");
     assert_eq!(records[0]["content"], live_token);
-    assert_eq!(records[0]["sender"], "e7-test");
+    // R-M5 (D-A13-ID): a cross-workspace sender is recorded qualified as
+    // `<sender workspace>::<team>/<agent>`. The team segment is not pinned here (see the M5
+    // excision report: it renders `unknown` although the sender workspace has team `sender`).
+    let qualified = records[0]["sender"].as_str().unwrap_or_default();
+    let sender_root = sender.workspace.canonicalize().unwrap();
+    assert!(qualified.starts_with(&format!("{}::", sender_root.display())) && qualified.ends_with("/e7-test"), "{qualified}");
     assert_eq!(records[0]["team"], "alpha");
     assert_eq!(message_count(&target.workspace, &live_token), 0);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -464,9 +469,12 @@ fn e7_send_to_leader_resolves_unique_refuses_ambiguous_and_never_misroutes_stale
         &[("TEAM_AGENT_ID", "e7-test".to_string())],
     );
     let stale_json = json_output(&stale_out, "send --to-leader stale --json");
-    assert_eq!(stale_json.get("ok").and_then(Value::as_bool), Some(false));
-    assert!(stale_json["error"].as_str().is_some_and(|error| error.contains("not live")),
-        "dead physical endpoint must refuse without falling back: {stale_json}");
+    // R-M1b (M1 store-first): a dead registry endpoint stores the message in that target's inbox and
+    // reports the physical failure; it never falls back to another live leader.
+    assert_eq!((stale_json["status"].clone(), stale_json["live"].clone()), (json!("stored"), json!(false)),
+        "dead physical endpoint must not be reported live: {stale_json}");
+    assert!(stale_json.get("delivery").is_none(), "{stale_json}");
+    assert!(stale_json["delivery_error"].as_str().is_some_and(|error| !error.is_empty()), "{stale_json}");
     assert_pane_not_contains(
         &target.tmux_socket,
         &pane,
@@ -511,7 +519,8 @@ fn e7_send_to_leader_appends_explicit_offline_inbox_without_queue() {
     let body = json_output(&output, "explicit registry mailbox");
     assert_json_ok(&output, &body, "offline mailbox is independent of leader attachment");
     assert_eq!(body["status"], "stored");
-    assert_eq!(body["mailbox"], true);
+    // R-M1a receipt shape: a mailbox send is stored and never live (no separate `mailbox` key).
+    assert_eq!(body["live"], false, "{body}");
     let inbox = team_agent::inbox_store::read(&target.workspace, "leader", 8, Some("mailbox")).expect("read target inbox");
     let records = inbox["messages"].as_array().expect("inbox records");
     assert_eq!(records.len(), 1);
@@ -519,7 +528,8 @@ fn e7_send_to_leader_appends_explicit_offline_inbox_without_queue() {
     assert_eq!(records[0]["content"], token);
     assert_eq!(records[0]["team"], "mailbox");
     assert_eq!(records[0]["recipient"], "leader");
-    assert!(!sender.workspace.join(".team/inbox/leader.jsonl").exists());
+    // R-M1c: no inbox file of any layout leaks into the sender workspace.
+    assert!(!sender.workspace.join(".team/inbox").exists(), "no sender-workspace leak");
     assert_eq!(message_count(&target.workspace, &token), 0);
 }
 

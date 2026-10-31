@@ -5,22 +5,6 @@ use super::*;
 // =========================================================================
 
 // Public mailbox delivery is durable in the inbound log, never the coordinator queue.
-#[test]
-fn cli_send_mailbox_appends_an_inbox_record_without_a_delivery_row() {
-    let ws = deleg_uniq_dir("send");
-    let store = crate::message_store::MessageStore::open(&ws).unwrap();
-    crate::state::persist::save_runtime_state(&ws, &serde_json::json!({
-        "active_team_key": "current",
-        "teams": {"current": {"agents": {"w1": {"provider": "copilot"}}}}
-    })).unwrap();
-    let argv = ["send", "w1", "hello-real-delegation", "--mailbox", "--json"].map(str::to_string);
-    assert_eq!(run(&argv, &ws), ExitCode::Ok);
-    let inbox = crate::inbox_store::read(&ws, "w1", 3, None).unwrap();
-    assert_eq!(inbox["messages"][0]["content"], "hello-real-delegation");
-    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-    let count: i64 = conn.query_row("select count(*) from messages", [], |row| row.get(0)).unwrap();
-    assert_eq!(count, 0);
-}
 
 // 5 [P1, CONFIRMED PARTIAL] — shutdown stops the coordinator but NEVER kills the team tmux session
 // (-> orphan worker panes). #[ignore] real-machine: the wired shutdown kills the real tmux session.

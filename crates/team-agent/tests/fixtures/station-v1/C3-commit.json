@@ -1,0 +1,17 @@
+{
+  "v": 1,
+  "kind": "inbox_commit",
+  "requires": [
+    "station.inbox-commit.v1"
+  ],
+  "scope": {
+    "workspace": "21a3230e03772a58aff1b3709a9e2328",
+    "team": "ca8b22d0db83a22db163b560b3e4e515",
+    "seat": "worker-a"
+  },
+  "revision": 2,
+  "segment_id": "03e71c6d7dc6bd4e89ceaf32f6488ca0",
+  "committed_bytes": 4096,
+  "committed_seq": 2,
+  "last_checksum": "803786d7efb1f8031566d833497fcaeca4e3778eb573f8630540c1d0afcab34f"
+}

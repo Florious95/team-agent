@@ -35,77 +35,7 @@ pub(crate) fn notify_result_watchers(
     watchers: Option<&[serde_json::Value]>,
     dedupe_reason: Option<&str>,
 ) -> Result<Vec<WatcherNotice>, MessagingError> {
-    let _ = dedupe_reason;
-    let Some(watchers) = watchers else {
-        return Ok(Vec::new());
-    };
-    let store = MessageStore::open(workspace)?;
-    let conn = crate::db::schema::open_db(store.db_path())?;
-    let result_task = result.get("task_id").and_then(|v| v.as_str());
-    let result_agent = result.get("agent_id").and_then(|v| v.as_str());
-    let result_id = result
-        .get("result_id")
-        .and_then(|v| v.as_str())
-        .map(ToString::to_string);
-    let mut matched: Vec<&serde_json::Value> = watchers
-        .iter()
-        .filter(|w| watcher_matches(w, result_task, result_agent))
-        .collect();
-    matched.sort_by(|a, b| {
-        let ac = a.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
-        let bc = b.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
-        ac.cmp(bc)
-    });
-    let mut notices = Vec::new();
-    let mut primary_watcher_id = None;
-    for (idx, watcher) in matched.iter().enumerate() {
-        if let Some(watcher_id) = watcher.get("watcher_id").and_then(|v| v.as_str()) {
-            if idx == 0 {
-                primary_watcher_id = Some(watcher_id.to_string());
-                notices.push(deliver_primary_watcher(
-                    workspace,
-                    &conn,
-                    &store,
-                    event_log,
-                    watcher,
-                    result,
-                    result_id.as_deref(),
-                    result_task,
-                )?);
-            } else {
-                let primary = primary_watcher_id.clone().unwrap_or_default();
-                let error = "superseded by earlier watcher for same (task_id, agent_id, result_id)";
-                let now = chrono::Utc::now().to_rfc3339();
-                conn.execute(
-                    "update result_watchers
-                     set status = 'superseded', completed_at = ?2, result_id = ?3, error = ?4
-                     where watcher_id = ?1",
-                    params![watcher_id, now, result_id, error],
-                )?;
-                event_log.write(
-                    "result_watcher.superseded",
-                    serde_json::json!({
-                        "watcher_id": watcher_id,
-                        "result_id": result_id,
-                        "task_id": result_task,
-                        "agent_id": result_agent,
-                        "primary_watcher_id": primary,
-                    }),
-                )?;
-                notices.push(WatcherNotice {
-                    watcher_id: watcher_id.to_string(),
-                    result_id: result_id.clone(),
-                    ok: false,
-                    status: Some("superseded".to_string()),
-                    notified_message_id: None,
-                    primary_watcher_id: Some(primary),
-                    prior_state: None,
-                    error: Some(error.to_string()),
-                });
-            }
-        }
-    }
-    Ok(notices)
+    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
 }
 
 fn watcher_matches(
@@ -472,68 +402,7 @@ pub fn retry_result_deliveries(
     workspace: &Path,
     event_log: &EventLog,
 ) -> Result<Vec<WatcherNotice>, MessagingError> {
-    let store = MessageStore::open(workspace)?;
-    let conn = crate::db::schema::open_db(store.db_path())?;
-    // result_delivery.py:19-35 — retries route through notify_result_watchers (the REAL
-    // delivery path with dedupe/attempt bounds); a watcher is never flipped to
-    // `notified` without a delivery. Missing result rows are skipped (still retryable).
-    let mut stmt = conn.prepare(
-        "select watcher_id, owner_team_id, task_id, agent_id, leader_id, recipient, status, created_at,
-                result_id, notified_message_id
-         from result_watchers
-         where status in ('pending', 'notify_failed')
-         order by created_at, watcher_id",
-    )?;
-    let watchers = stmt
-        .query_map([], |row| {
-            Ok(serde_json::json!({
-                "watcher_id": row.get::<_, String>(0)?,
-                "owner_team_id": row.get::<_, Option<String>>(1)?,
-                "task_id": row.get::<_, Option<String>>(2)?,
-                "agent_id": row.get::<_, Option<String>>(3)?,
-                "leader_id": row.get::<_, Option<String>>(4)?,
-                "recipient": row.get::<_, Option<String>>(5)?,
-                "status": row.get::<_, Option<String>>(6)?,
-                "created_at": row.get::<_, Option<String>>(7)?,
-                "result_id": row.get::<_, Option<String>>(8)?,
-                "notified_message_id": row.get::<_, Option<String>>(9)?,
-            }))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    drop(stmt);
-    let mut notices = Vec::new();
-    for watcher in watchers {
-        if watcher.get("status").and_then(|v| v.as_str()) != Some("notify_failed") {
-            continue;
-        }
-        let Some(result_id) = watcher
-            .get("result_id")
-            .and_then(|v| v.as_str())
-            .filter(|id| !id.is_empty())
-            .map(ToString::to_string)
-        else {
-            continue;
-        };
-        let row: Option<(String, Option<String>)> = conn
-            .query_row(
-                "select envelope, created_at from results where result_id = ?1",
-                params![result_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        let Some((envelope, created_at)) = row else {
-            continue;
-        };
-        let result = result_entry_from_row(&result_id, &envelope, created_at.as_deref())?;
-        notices.extend(notify_result_watchers(
-            workspace,
-            &result,
-            event_log,
-            Some(std::slice::from_ref(&watcher)),
-            Some("rebind_retry"),
-        )?);
-    }
-    Ok(notices)
+    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
 }
 
 /// `_result_entry_from_row`(`result_delivery.py:365-377`)。
@@ -566,59 +435,7 @@ pub fn requeue_after_claim_leader(
     claimed_pane_id: &PaneId,
     incident_ts: Option<&str>,
 ) -> Result<Vec<WatcherNotice>, MessagingError> {
-    let conn = crate::db::schema::open_db(store.db_path())?;
-    let mut stmt = conn.prepare(
-        "select watcher_id, result_id, status, coalesce(completed_at, created_at) from result_watchers
-         where owner_team_id = ?1 and result_id is not null and notified_message_id is null
-         order by created_at, watcher_id",
-    )?;
-    let rows = stmt.query_map(params![owner_team_id.as_str()], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, Option<String>>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-        ))
-    })?;
-    let mut out = Vec::new();
-    for row in rows {
-        let (watcher_id, result_id, prior_state, latest_ts) = row?;
-        if incident_ts.is_some_and(|incident| latest_ts.as_str() < incident) {
-            continue;
-        }
-        let requeued_at = chrono::Utc::now().to_rfc3339();
-        conn.execute(
-            "update result_watchers set status = 'notify_failed', completed_at = ?2 where watcher_id = ?1",
-            params![watcher_id.as_str(), requeued_at.as_str()],
-        )?;
-        out.push(WatcherNotice {
-            watcher_id: watcher_id.clone(),
-            result_id: result_id.clone(),
-            ok: true,
-            status: Some("notify_failed".to_string()),
-            notified_message_id: None,
-            primary_watcher_id: None,
-            prior_state: Some(prior_state.clone()),
-            error: None,
-        });
-        event_log.write(
-            "leader_receiver.claim_requeue",
-            serde_json::json!({
-                "result_id": result_id,
-                "watcher_id": watcher_id,
-                "prior_state": prior_state,
-                "requeued_at": requeued_at,
-                "claimed_pane_id": claimed_pane_id.as_str(),
-                "team_id": owner_team_id.as_str(),
-            }),
-        )?;
-    }
-    let requeued_blocked =
-        requeue_blocked_leader_messages(store, event_log, owner_team_id, claimed_pane_id)?;
-    if !out.is_empty() || requeued_blocked > 0 {
-        let _ = retry_result_deliveries(workspace, event_log)?;
-    }
-    Ok(out)
+    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
 }
 
 pub fn recover_watchers_for_incident(
@@ -628,20 +445,7 @@ pub fn recover_watchers_for_incident(
     claimed_pane_id: &PaneId,
     incident: LeaderIncident,
 ) -> Result<Vec<WatcherNotice>, MessagingError> {
-    match incident {
-        LeaderIncident::LeaderAttached => Ok(Vec::new()),
-        LeaderIncident::LeaderClaimed => {
-            let store = MessageStore::open(workspace)?;
-            requeue_after_claim_leader(
-                workspace,
-                &store,
-                event_log,
-                owner_team_id,
-                claimed_pane_id,
-                None,
-            )
-        }
-    }
+    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
 }
 
 /// 0.5.5 gate054 round-2: attach-leader (and claim-leader) requeue for leader messages
@@ -747,53 +551,7 @@ pub(crate) fn requeue_delivery_exhausted_watchers_with_counts(
     owner_team_id: &TeamKey,
     claimed_pane_id: &PaneId,
 ) -> Result<(Vec<WatcherNotice>, crate::message_store::BlockedLeaderRequeueCounts), MessagingError> {
-    let conn = crate::db::schema::open_db(store.db_path())?;
-    let mut stmt = conn.prepare(
-        "select watcher_id, result_id, status from result_watchers
-         where owner_team_id = ?1 and status = 'delivery_exhausted' and notified_message_id is null
-         order by created_at, watcher_id",
-    )?;
-    let rows = stmt.query_map(params![owner_team_id.as_str()], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, Option<String>>(1)?,
-            row.get::<_, String>(2)?,
-        ))
-    })?;
-    let mut out = Vec::new();
-    for row in rows {
-        let (watcher_id, result_id, prior_state) = row?;
-        conn.execute(
-            "update result_watchers set status = 'notify_failed', completed_at = null, error = null where watcher_id = ?1",
-            params![watcher_id.as_str()],
-        )?;
-        out.push(WatcherNotice {
-            watcher_id: watcher_id.clone(),
-            result_id: result_id.clone(),
-            ok: true,
-            status: Some("notify_failed".to_string()),
-            notified_message_id: None,
-            primary_watcher_id: None,
-            prior_state: Some(prior_state.clone()),
-            error: None,
-        });
-        event_log.write(
-            "result_watcher.requeued",
-            serde_json::json!({
-                "watcher_id": watcher_id,
-                "trigger": "attach_leader",
-                "new_pane_id": claimed_pane_id.as_str(),
-            }),
-        )?;
-    }
-    drop(stmt);
-    let counts = requeue_blocked_leader_messages_with_counts(
-        store,
-        event_log,
-        owner_team_id,
-        claimed_pane_id,
-    )?;
-    Ok((out, counts))
+    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
 }
 
 /// `delivered_result_message` (`result_delivery.py:394`):内容级去重 —— 查某 result_id 是否已有
@@ -804,48 +562,7 @@ pub(crate) fn delivered_result_message(
     task_id: Option<&TaskId>,
     owner_team_id: Option<&TeamKey>,
 ) -> Result<Option<serde_json::Value>, MessagingError> {
-    if result_id.trim().is_empty() {
-        return Ok(None);
-    }
-    let conn = crate::db::schema::open_db(store.db_path())?;
-    let mut sql = "select message_id, content from messages
-         where recipient = 'leader'
-           and status in ('visible', 'submitted', 'submitted_unverified', 'delivered', 'acknowledged')"
-        .to_string();
-    if task_id.is_some() {
-        sql.push_str(" and task_id = ?1");
-    }
-    if owner_team_id.is_some() {
-        sql.push_str(if task_id.is_some() {
-            " and owner_team_id = ?2"
-        } else {
-            " and owner_team_id = ?1"
-        });
-    }
-    let mut stmt = conn.prepare(&sql)?;
-    let rows: Vec<(String, String)> = match (task_id, owner_team_id) {
-        (Some(task), Some(team)) => stmt
-            .query_map(params![task.as_str(), team.as_str()], message_content_row)?
-            .collect::<Result<Vec<_>, _>>()?,
-        (Some(task), None) => stmt
-            .query_map(params![task.as_str()], message_content_row)?
-            .collect::<Result<Vec<_>, _>>()?,
-        (None, Some(team)) => stmt
-            .query_map(params![team.as_str()], message_content_row)?
-            .collect::<Result<Vec<_>, _>>()?,
-        (None, None) => stmt
-            .query_map([], message_content_row)?
-            .collect::<Result<Vec<_>, _>>()?,
-    };
-    for row in rows.into_iter().rev() {
-        let (message_id, content) = row;
-        if result_id_from_text(&content).as_deref() == Some(result_id) {
-            return Ok(Some(
-                serde_json::json!({"message_id": message_id, "content": content}),
-            ));
-        }
-    }
-    Ok(None)
+    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
 }
 
 fn message_content_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, String)> {

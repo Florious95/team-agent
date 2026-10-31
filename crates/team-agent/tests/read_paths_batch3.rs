@@ -26,11 +26,7 @@ use std::path::PathBuf;
 fn batch3_all_five_migration_sites_route_through_factory() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let sites = [
-        (
-            "coordinator/backoff.rs",
-            "resolve_transport",
-            "coordinator boot",
-        ),
+        // R-M3: the `coordinator/backoff.rs` boot site was retired with the coordinator daemon.
         (
             "cli/status_port.rs",
             "resolve_read_only_transport",

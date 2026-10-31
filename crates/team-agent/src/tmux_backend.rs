@@ -147,7 +147,7 @@ pub const TMUX_SPAWN_COMMAND_LIMIT_BYTES: usize = 16_000;
 
 impl CommandRunner for RealCommandRunner {
     fn run(&self, argv: &[String]) -> Result<CommandOutput, std::io::Error> {
-        self.run_inner(argv, None)
+        self.run_inner(argv, None, COMMAND_TIMEOUT)
     }
 
     fn run_with_stdin(
@@ -155,15 +155,21 @@ impl CommandRunner for RealCommandRunner {
         argv: &[String],
         stdin: &str,
     ) -> Result<CommandOutput, std::io::Error> {
-        self.run_inner(argv, Some(stdin))
+        self.run_inner(argv, Some(stdin), COMMAND_TIMEOUT)
     }
 }
 
 impl RealCommandRunner {
+    /// Callers with an end-to-end deadline may shorten, never extend, the native budget.
+    pub(crate) fn run_with_budget(&self, argv: &[String], budget: Duration) -> Result<CommandOutput, std::io::Error> {
+        self.run_inner(argv, None, budget.min(COMMAND_TIMEOUT))
+    }
+
     fn run_inner(
         &self,
         argv: &[String],
         stdin_text: Option<&str>,
+        budget: Duration,
     ) -> Result<CommandOutput, std::io::Error> {
         let Some(program) = argv.first() else {
             return Err(std::io::Error::new(
@@ -198,7 +204,7 @@ impl RealCommandRunner {
             .ok_or_else(|| std::io::Error::other("stderr pipe missing"))?;
         let stdout_thread = std::thread::spawn(move || read_pipe(stdout));
         let stderr_thread = std::thread::spawn(move || read_pipe(stderr));
-        let deadline = Instant::now() + COMMAND_TIMEOUT;
+        let deadline = Instant::now() + budget;
         // Observe short-lived commands promptly; retain the old cadence for long ones.
         let mut poll_interval = Duration::from_millis(1);
         let status = loop {
@@ -213,7 +219,7 @@ impl RealCommandRunner {
                 let _ = join_pipe_reader(stderr_thread)?;
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
-                    format!("{program} exceeded 5s timeout"),
+                    format!("{program} exceeded {budget:?} timeout"),
                 ));
             }
             std::thread::sleep(poll_interval.min(deadline.saturating_duration_since(now)));

@@ -61,6 +61,7 @@ pub(super) enum Observation {
     Live,
     StoppedVerified,
     Unstarted,
+    Foreign,
     NativeReconcile,
     Unknown,
 }
@@ -141,7 +142,7 @@ pub(super) fn help(command: &str) -> String {
         "start" => (
             "Start a team or one agent without replacing verified running processes.",
             "[AGENT|./TEAMDIR] [--from TEAMDIR] [--workspace PATH] [--team KEY] [--session preserve|auto] [--dry-run] [--json]",
-            "--from selects TEAM.md and agents/; all relative paths use the calling directory.\nAgent IDs such as reviewer.v2 stay agent IDs even when a same-named directory exists.\nTeam start activates the non-paused roster, including explicitly stopped seats.\n--role-file or explicit --provider and --bypass true|false provide new-agent decisions.\n--model, --effort, --prompt and --profile update a stopped agent; stop a running agent first.\nSession defaults to preserve; auto only permits the original legal fresh fallback.\n--dry-run performs no lifecycle action; final locked admission remains deferred.\nAlready running does not claim role-file synchronization or business readiness.",
+            "--from selects TEAM.md and agents/; all relative paths use the calling directory.\nAgent IDs such as reviewer.v2 stay agent IDs even when a same-named directory exists.\nTeam start preserves explicitly stopped seats; use agent start ID to reactivate one seat.\n--role-file or explicit --provider and --bypass true|false provide new-agent decisions.\n--model, --effort, --prompt and --profile update a stopped agent; stop a running agent first.\nSession defaults to preserve; auto only permits the original legal fresh fallback.\n--dry-run performs no lifecycle action; final locked admission remains deferred.\nAlready running does not claim role-file synchronization or business readiness.",
             "  team-agent start --from . --dry-run --json\n  team-agent start reviewer --dry-run --json",
             "Use team-agent status and team-agent inbox leader -n 3 for actual replies.",
         ),
@@ -150,14 +151,14 @@ pub(super) fn help(command: &str) -> String {
             "[AGENT] [--workspace PATH] [--team KEY] [--json]",
             "Without an agent, use the original team shutdown and its residual-resource checks.\nAn agent target uses the original single-agent stop.\nUse --workspace for another directory; a positional path is rejected.\nNo reset, force, role edits or automatic takeover is performed.",
             "  team-agent stop --workspace . --json\n  team-agent stop reviewer --workspace . --json",
-            "Use team-agent start to explicitly activate the stopped non-paused roster.",
+            "Use team-agent agent start ID to explicitly reactivate a stopped seat.",
         ),
         "team" => (
             "Select a team lifecycle operation explicitly.",
             "<start|stop|restart|status> [OPTIONS]",
             "start [TEAMDIR] or --from TEAMDIR creates once or starts stopped members.\nstop delegates to the original team shutdown; status keeps the original read-only output.\nrestart defaults to --session auto and preserves paused or explicitly stopped seats.\nLegacy bare or explicit-path restart still defaults to preserve and keeps its old receipt.\n--workspace PATH and --team KEY select the team; no ambiguous directory is guessed.\n--dry-run on start/restart is read-only; native refusals never fall back to legacy.\nauto is not reset and cannot invent an unsupported fresh capability.",
             "  team-agent team start . --dry-run --json\n  team-agent team restart --workspace . --dry-run --json",
-            "Use team-agent team status; start, rather than restart, deliberately activates stopped members.",
+            "Use team-agent team status; only an explicit agent start clears that seat's stop intent.",
         ),
         "agent" => (
             "Select an agent lifecycle operation explicitly without guessing a team directory.",
@@ -319,8 +320,34 @@ fn run_canonical(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult
         explicit_agent,
         explicit_team,
     )?;
-    let plan = runtime::plan(intent)?;
-    execute_plan(plan, &mut |step| step.execute(), &mut runtime::recheck)
+    let mut plan = runtime::plan(intent)?;
+    let upgrade_workspace = plan.scope.workspace.clone();
+    let upgrade = !plan.intent.dry_run && plan.no_eligible.is_none();
+    if upgrade && crate::coordinator::retire_legacy_coordinator(&upgrade_workspace).map_err(CliError::Runtime)? {
+        plan = runtime::plan(plan.intent)?;
+    }
+    #[cfg(unix)]
+    if plan.intent.verb == Verb::Stop && !plan.intent.dry_run && plan.no_eligible.is_none() {
+        if let Some(team) = plan.scope.team.as_deref() {
+            if crate::contract_runtime::backend::migrate_if_required(&plan.scope.workspace, team)
+                .map_err(|error| refusal(error.to_string()))? {
+                plan = runtime::plan(plan.intent)?;
+            }
+        }
+    }
+    let mut result = execute_plan(plan, &mut |step| step.execute(), &mut runtime::recheck)?;
+    if upgrade {
+        if let Err(error) = crate::coordinator::retire_legacy_coordinator(&upgrade_workspace) {
+            if let CmdOutput::Json(value) = &mut result.output {
+                value["ok"] = json!(false);
+                value["status"] = json!("partial");
+                value["upgrade_error"] = json!(error);
+                value["current_state"] = json!("legacy_coordinator_not_retired");
+            }
+            result.exit = ExitCode::Error;
+        }
+    }
+    Ok(result)
 }
 
 fn lifecycle_intent(
@@ -635,7 +662,7 @@ fn seat_actions(
             Err(refusal("paused agent: start/restart does not unpause"))
         };
     }
-    if team && verb == Verb::Restart && explicit_stop {
+    if team && matches!(verb, Verb::Start | Verb::Restart) && explicit_stop {
         return Ok(vec![]);
     }
     if verb == Verb::Start && observation == Observation::Live && explicit_stop {
@@ -651,6 +678,7 @@ fn seat_actions(
             "running agent: stop it before applying role settings",
         )),
         (Verb::Start, Observation::Live) => Ok(vec![]),
+        (Verb::Start | Verb::Restart, Observation::Foreign) => Ok(vec!["stop", "start"]),
         (Verb::Start, _) => Ok(vec!["start"]),
         (Verb::Restart, Observation::Live) => Ok(vec!["stop", "start"]),
         (Verb::Restart, Observation::StoppedVerified) => Ok(vec!["start"]),
@@ -658,7 +686,7 @@ fn seat_actions(
             "restart requires a registered, previously started agent",
         )),
         (Verb::Stop, Observation::StoppedVerified | Observation::Unstarted) => Ok(vec![]),
-        (Verb::Stop, Observation::Live | Observation::NativeReconcile) => Ok(vec!["stop"]),
+        (Verb::Stop, Observation::Live | Observation::Foreign | Observation::NativeReconcile) => Ok(vec!["stop"]),
         _ => Err(refusal("unsupported lifecycle observation")),
     }
 }

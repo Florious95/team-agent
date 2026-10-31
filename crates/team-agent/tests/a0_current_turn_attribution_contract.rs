@@ -1,5 +1,5 @@
 //! Reports retain explicit attribution only; coordinator turns cannot assign tasks.
-//! Legacy message fixtures prove they cannot redirect append-only results.
+//! State-file turn fixtures prove they cannot redirect append-only results.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
@@ -9,12 +9,9 @@ mod hermetic_guard;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use rusqlite::params;
 use serde_json::{json, Value};
 use serial_test::serial;
-use team_agent::db::schema::open_db;
 use team_agent::mcp_server::TeamOrchestratorTools;
-use team_agent::message_store::MessageStore;
 use team_agent::model::enums::ResultStatus;
 use team_agent::model::ids::{AgentId, TeamKey};
 use team_agent::state::persist::save_runtime_state;
@@ -36,7 +33,6 @@ const EXPLICIT_TASK: &str = "task_explicit_override";
 fn assigned_tasks_and_current_turns_cannot_attribute_an_implicit_report() {
     let case = A0Case::new("old-task-initial-current-direct");
     case.seed_team(TEAM_A, Some(MSG_CURRENT), &[pending_task(TASK_INITIAL)]);
-    case.insert_direct_message(TEAM_A, MSG_CURRENT, "delivered", 10);
 
     let body = case.report_without_task(TEAM_A, "A0_CURRENT_BEATS_TASK_INITIAL");
 
@@ -59,7 +55,6 @@ fn assigned_tasks_and_current_turns_cannot_attribute_an_implicit_report() {
 fn physical_submit_does_not_attribute_a_fast_report_without_explicit_task_id() {
     let case = A0Case::new("physical-submit-before-verification");
     case.seed_team(TEAM_A, Some(MSG_SUBMITTED), &[pending_task(TASK_INITIAL)]);
-    case.insert_direct_message(TEAM_A, MSG_SUBMITTED, "submitted", 20);
 
     let body = case.report_without_task(TEAM_A, "A0_SUBMITTED_BEFORE_VERIFIED");
 
@@ -76,8 +71,6 @@ fn physical_submit_does_not_attribute_a_fast_report_without_explicit_task_id() {
 fn failed_inject_before_physical_submit_does_not_arm_current_turn_or_cross_to_stale_fallback() {
     let case = A0Case::new("failed-before-physical-submit");
     case.seed_team(TEAM_A, None, &[pending_task(TASK_INITIAL)]);
-    case.insert_direct_message(TEAM_A, MSG_OLD_DELIVERED, "delivered", 10);
-    case.insert_direct_message(TEAM_A, MSG_FAILED_BEFORE_SUBMIT, "failed", 30);
 
     let body = case.report_without_task(TEAM_A, "A0_FAILED_BEFORE_SUBMIT");
 
@@ -118,8 +111,6 @@ fn sibling_team_same_worker_name_does_not_cross_owner_team_id() {
         &[pending_task(TASK_INITIAL)],
         &[pending_task("task_initial_sibling")],
     );
-    case.insert_direct_message(TEAM_A, MSG_ALPHA, "delivered", 10);
-    case.insert_direct_message(TEAM_B, MSG_BETA, "delivered", 30);
 
     let body = case.report_without_task(TEAM_A, "A0_OWNER_SCOPE_ALPHA");
 
@@ -149,7 +140,6 @@ fn sibling_team_same_worker_name_does_not_cross_owner_team_id() {
 fn explicit_task_id_wins_over_current_turn_inference() {
     let case = A0Case::new("explicit-task-id");
     case.seed_team(TEAM_A, Some(MSG_CURRENT), &[pending_task(TASK_INITIAL)]);
-    case.insert_direct_message(TEAM_A, MSG_CURRENT, "delivered", 10);
 
     let body = case.report_with_task(TEAM_A, "A0_EXPLICIT_TASK_WINS", EXPLICIT_TASK);
 
@@ -179,7 +169,6 @@ impl A0Case {
             "a0-current-turn-{tag}-{}",
             N.fetch_add(1, Ordering::Relaxed)
         ));
-        MessageStore::open(&workspace).expect("initialize message store");
         Self {
             _env: env,
             workspace,
@@ -217,41 +206,6 @@ impl A0Case {
         save_runtime_state(&self.workspace, &state).expect("save runtime state");
     }
 
-    fn insert_direct_message(
-        &self,
-        owner_team_id: &str,
-        message_id: &str,
-        status: &str,
-        created_offset_sec: i64,
-    ) {
-        let store = MessageStore::open(&self.workspace).expect("open message store");
-        store
-            .create_message_with_id(
-                message_id,
-                None,
-                "leader",
-                WORKER,
-                &format!("direct message {message_id}"),
-                None,
-                false,
-                Some(owner_team_id),
-            )
-            .expect("insert direct message");
-        store
-            .mark(
-                message_id,
-                status,
-                (status == "failed").then_some("inject_failed_before_physical_submit"),
-            )
-            .expect("mark message");
-        let conn = open_db(store.db_path()).expect("open db");
-        let ts = format!("2026-07-10T12:00:{created_offset_sec:02}Z");
-        conn.execute(
-            "update messages set created_at = ?2, updated_at = ?2 where message_id = ?1",
-            params![message_id, ts],
-        )
-        .expect("set message timestamp");
-    }
 
     fn report_without_task(&self, owner_team_id: &str, summary: &str) -> Value {
         self.report(owner_team_id, summary, None)

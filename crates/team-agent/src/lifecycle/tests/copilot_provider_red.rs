@@ -479,121 +479,6 @@ fn copilot_fork_is_supported_but_missing_backing_never_falls_back_fresh() {
     );
 }
 
-/// Face 5 (B12 + C-3-1/4 + N11): copilot startup trust/ready recognition is
-/// supported from the fixture-backed recognizer, so a real tick over a copilot
-/// worker must no longer emit the old `provider.classify.unsupported` event or
-/// disturb an attached leader receiver. Turn-state facts remain absent for phase
-/// 1, and an unknown copilot node still blocks idle take-over (unknown ≠ idle).
-#[test]
-#[serial(env)]
-fn copilot_phase1_classify_is_explicit_unknown_and_never_idles() {
-    let _guard = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
-    let mut failures = Vec::new();
-
-    // C-3-1: no turn-state facts for copilot, even over an error-shaped record.
-    let fact = team_agent::provider::latest_explicit_error_fact(
-        Provider::Copilot,
-        "{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"t1\",\"status\":\"failed\"}}}\n",
-    );
-    if fact.is_some() {
-        failures.push(format!(
-            "C-3-1: phase-1 copilot must not claim turn-state facts (classify -> None/Unknown); got {fact:?}"
-        ));
-    }
-
-    if team_agent::provider::classify_copilot_startup_screen(
-        team_agent::provider::COPILOT_TRUST_PROMPT_MARKER,
-    ) != team_agent::provider::StartupScreenDecision::AnswerWorkspaceTrust
-    {
-        failures.push("B12: copilot trust fixture must be recognized as actionable".to_string());
-    }
-    if team_agent::provider::classify_copilot_startup_screen(
-        team_agent::provider::COPILOT_READY_MARKER,
-    ) != team_agent::provider::StartupScreenDecision::Ready
-    {
-        failures.push("B12: copilot ready fixture must be recognized as ready".to_string());
-    }
-
-    // C-3-4/B12: the old unsupported event was a phase-1 placeholder. Once the
-    // fixture-backed recognizer exists, a real tick over a copilot worker must
-    // not re-emit it or poison leader receiver attachment.
-    let ws = tmp_ws("classify");
-    let rollout = ws.join("rollout-cp1.jsonl");
-    std::fs::write(&rollout, "{\"junk\":true}\n").unwrap();
-    team_agent::state::persist::save_runtime_state(
-        &ws,
-        &serde_json::json!({
-            "session_name": "team-cp",
-            "active_team_key": "team-cp",
-            "agents": {
-                "cp1": {
-                    "status": "running", "provider": "copilot", "agent_id": "cp1",
-                    "window": "cp1", "pane_id": "%41",
-                    "session_id": "88888888-9999-4aaa-8bbb-cccccccccccc",
-                    "rollout_path": rollout.to_string_lossy(),
-                    "spawn_cwd": ws.to_string_lossy(),
-                },
-            },
-            "leader_receiver": {
-                "status": "attached",
-                "mode": "direct_tmux",
-                "pane_id": "%leader",
-                "provider": "copilot",
-                "tmux_socket": "default",
-            },
-        }),
-    )
-    .unwrap();
-    let coord = team_agent::coordinator::Coordinator::new(
-        team_agent::coordinator::WorkspacePath::new(ws.to_path_buf()),
-        Box::new(RealAdapterRegistry),
-        Box::new(RecordingTransport::with_session_present()),
-    );
-    let _ = coord.tick();
-    let events = std::fs::read_to_string(ws.join(".team/logs/events.jsonl")).unwrap_or_default();
-    let unsupported_line = events
-        .lines()
-        .find(|line| line.contains("classify") && line.contains("unsupported"));
-    if let Some(line) = unsupported_line {
-        failures.push(format!(
-            "B12/C-3-4: copilot startup classify is supported; tick must not emit the old \
-provider.classify.unsupported placeholder event; line={line}"
-        ));
-    }
-    let after = team_agent::state::persist::load_runtime_state(&ws).unwrap();
-    if after
-        .pointer("/leader_receiver/status")
-        .and_then(serde_json::Value::as_str)
-        != Some("attached")
-    {
-        failures.push(format!(
-            "B12: copilot leader_receiver must remain attached after tick; events tail={} state={after}",
-            events.lines().rev().take(4).collect::<Vec<_>>().join(" | ")
-        ));
-    }
-
-    // N11: an unknown copilot node must BLOCK the take-over ping.
-    let nodes = vec![serde_json::json!({"node_id": "cp1", "role": "worker", "state": "unknown"})];
-    let reminder = team_agent::provider::evaluate_takeover_reminder(&nodes, None, 100.0, 60.0)
-        .expect("evaluate ok");
-    if reminder.should_ping {
-        failures.push("N11: an Unknown copilot worker must never be counted as idle".to_string());
-    }
-    assert!(
-        failures.is_empty(),
-        "copilot phase-1 classify contract failed:\n{}",
-        failures.join("\n")
-    );
-}
-
-struct RealAdapterRegistry;
-
-impl team_agent::coordinator::ProviderRegistry for RealAdapterRegistry {
-    fn adapter_for(&self, provider: Provider) -> Box<dyn team_agent::provider::ProviderAdapter> {
-        team_agent::provider::get_adapter(provider)
-    }
-}
-
 /// Face 6 (verdict `copilot_leader_session_name_prefix_protected_by_b5`): the
 /// `team-agent copilot` leader entry derives its session from the REAL
 /// leader_session_name generator, so the name carries the `team-agent-leader-` prefix
@@ -1009,14 +894,8 @@ fn rules_t02_final_mcp_across_fresh_start_restart_and_add() {
     let _guard = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
     let ws = hermetic.workspace("mcp");
     let team_dir = write_copilot_team(&ws, "cp-resume", &["mcp_team"], false);
-    seed_healthy_coordinator(&ws);
-    let health = team_agent::coordinator::coordinator_health(
-        &team_agent::coordinator::WorkspacePath::new(ws.clone()),
-    );
-    assert!(
-        health.ok,
-        "seeded coordinator must prevent daemon spawn: {health:?}"
-    );
+    // M3 excision: quick-start/restart/add no longer start a coordinator, so the former
+    // "seeded coordinator must prevent daemon spawn" precondition has no subject.
     let fresh = RecordingTransport::new();
     quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cpresume"), &fresh)
         .expect("fresh entry");

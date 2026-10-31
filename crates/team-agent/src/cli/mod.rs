@@ -57,6 +57,7 @@ pub(crate) const STATUS_REMINDER: &str =
     "Next: use team-agent inbox leader -n 3 for replies. Status is not proof of task completion; do not inspect worker terminal content.";
 
 pub mod adapters;
+pub(crate) use adapters::shell_quote;
 mod arguments;
 mod intent;
 #[cfg(unix)]
@@ -645,6 +646,7 @@ pub mod lifecycle_port {
         transport: &dyn crate::transport::Transport,
         state: &Value,
         event_log: &crate::event_log::EventLog,
+        native_failed_panes: &std::collections::BTreeSet<String>,
     ) -> ShutdownSocketCleanup {
         // A bare shutdown is scoped to sessions registered in state.  Never turn a
         // socket-wide enumeration into an authorization decision: a shared/default
@@ -689,7 +691,8 @@ pub mod lifecycle_port {
         );
         let mut result = ShutdownSocketCleanup::default();
         for session in candidates {
-            if protected_sessions.contains(session.as_str()) {
+            if protected_sessions.contains(session.as_str()) || targets.iter().any(|target|
+                target.session == session && native_failed_panes.contains(target.pane_id.as_str())) {
                 push_unique_session(&mut result.spared_sessions, session);
                 continue;
             }
@@ -1182,6 +1185,7 @@ pub mod lifecycle_port {
                     "session_name": "team-audit-fail",
                 }),
                 &event_log,
+                &Default::default(),
             );
 
             assert!(
@@ -1436,6 +1440,113 @@ pub mod lifecycle_port {
         shutdown_with_transport_and_state(workspace, keep_logs, team, transport, None)
     }
 
+    fn retain_native_shutdown_receipts(result: Result<Value, CliError>, receipts: &[Value]) -> Result<Value, CliError> {
+        match result {
+            Err(error) if !receipts.is_empty() => Ok(json!({
+                "ok":false,"status":"failed","phase":"shutdown","error":error.to_string(),
+                "native_receipts":receipts,
+            })),
+            other => other,
+        }
+    }
+
+    #[test]
+    fn native_failure_receipts_survive_later_shutdown_timeout() {
+        let receipts = vec![json!({"agent_id":"healthy","status":"stopped","outcome":"Committed"}),
+            json!({"agent_id":"draft","status":"failed","effect":"NoEffect","needs_recovery":false})];
+        let result = retain_native_shutdown_receipts(Err(CliError::Runtime("shutdown timeout: refresh_provider_sessions".into())), &receipts).unwrap();
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["native_receipts"], json!(receipts));
+        assert!(result["error"].as_str().unwrap().contains("refresh_provider_sessions"));
+        assert!(retain_native_shutdown_receipts(Err(CliError::Runtime("legacy timeout".into())), &[]).is_err());
+    }
+
+    #[test]
+    fn native_failure_panes_do_not_alias_other_sockets_or_successful_seats() {
+        let transport = crate::tmux_backend::TmuxBackend::for_tmux_endpoint("/tmp/native-stop-a.sock");
+        let receipts = vec![
+            json!({"status":"failed","endpoint":"/tmp/native-stop-a.sock","pane_id":"%1"}),
+            json!({"status":"failed","endpoint":"/tmp/native-stop-b.sock","pane_id":"%2"}),
+            json!({"status":"stopped","endpoint":"/tmp/native-stop-a.sock","pane_id":"%3"}),
+        ];
+        assert_eq!(native_failure_panes(&receipts, &transport),
+            std::collections::BTreeSet::from(["%1".to_string()]));
+    }
+
+    #[test]
+    fn native_failure_process_protection_preserves_server_but_not_sibling_tree() {
+        let transport = crate::tmux_backend::TmuxBackend::for_tmux_endpoint("/tmp/native-stop-a.sock");
+        let table = [(10, 1), (20, 10), (21, 20), (30, 10)].into_iter()
+            .map(|(pid, ppid)| ProcessInfo { pid, ppid, pgid: None, session: None, command: String::new() }).collect::<Vec<_>>();
+        let mut protected = ShutdownProtection::default();
+        extend_protection_with_native_failures(&mut protected,
+            &[json!({"status":"failed","process_pid":20}), json!({"status":"stopped","process_pid":30})],
+            &transport, &table);
+        for pid in [10, 20, 21] { assert!(protected.contains_pid(pid)); }
+        assert!(!protected.contains_pid(30));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_failure_panes_preserve_the_same_socket_through_a_path_alias() {
+        let root = Path::new("/tmp").join(format!("native-stop-alias-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("alias")).unwrap();
+        let socket = root.join("real/owned.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let transport = crate::tmux_backend::TmuxBackend::for_tmux_endpoint(root.join("alias/owned.sock").to_str().unwrap());
+        assert_eq!(native_failure_panes(&[json!({"status":"failed","endpoint":socket,"pane_id":"%4"})], &transport),
+            std::collections::BTreeSet::from(["%4".to_string()]));
+        drop(listener);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn native_failure_panes(
+        receipts: &[Value],
+        transport: &dyn crate::transport::Transport,
+    ) -> std::collections::BTreeSet<String> {
+        let normalize = |endpoint: &str| {
+            let backend = crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint);
+            let resolved = crate::transport::Transport::tmux_endpoint(&backend).unwrap_or_else(|| endpoint.to_string());
+            Path::new(&resolved).canonicalize().map(|path| path.to_string_lossy().into_owned()).unwrap_or(resolved)
+        };
+        let endpoint = transport.tmux_endpoint().map(|endpoint| normalize(&endpoint));
+        receipts.iter().filter(|receipt| receipt["status"] == "failed")
+            .filter(|receipt| endpoint.is_some() && receipt["endpoint"].as_str().map(normalize) == endpoint)
+            .filter_map(|receipt| receipt["pane_id"].as_str().map(str::to_owned)).collect()
+    }
+
+    fn extend_protection_with_native_failures(
+        protected: &mut ShutdownProtection,
+        receipts: &[Value],
+        transport: &dyn crate::transport::Transport,
+        table: &[ProcessInfo],
+    ) {
+        let panes = native_failure_panes(receipts, transport);
+        let mut roots: Vec<u32> = receipts.iter().filter(|receipt| receipt["status"] == "failed")
+            .filter_map(|receipt| receipt["process_pid"].as_u64().and_then(|pid| u32::try_from(pid).ok())).collect();
+        if !panes.is_empty() {
+            roots.extend(transport.list_targets().unwrap_or_default().iter()
+                .filter(|pane| panes.contains(pane.pane_id.as_str())).filter_map(|pane| pane.pane_pid));
+        }
+        for root in roots {
+            protected.pids.extend(process_tree_from_table(root, table));
+            // Preserve the containing server, not its tree: healthy sibling panes
+            // must remain independently stoppable.
+            let mut current = root;
+            let mut ancestors = std::collections::BTreeSet::new();
+            while current > 1 && ancestors.insert(current) {
+                protected.pids.insert(current);
+                let Some(process) = table.iter().find(|process| process.pid == current) else { break };
+                current = process.ppid;
+            }
+        }
+        for process in table.iter().filter(|process| protected.pids.contains(&process.pid)) {
+            if let Some(pgid) = process.pgid { protected.pgids.insert(pgid); }
+        }
+    }
+
     fn shutdown_with_transport_and_state(
         workspace: &Path,
         keep_logs: bool,
@@ -1461,15 +1572,30 @@ pub mod lifecycle_port {
             None => shutdown_state_for_team(&run_workspace, team)?,
         };
         #[cfg(unix)]
-        if crate::contract_runtime::framework::has_contract(&state) {
-            crate::contract_runtime::framework::stop_selected(&run_workspace, &state).map_err(
-                |error| {
-                    CliError::Runtime(format!(
-                        "native shutdown failed; owned resources preserved: {error}"
-                    ))
-                },
-            )?;
-        }
+        let native_receipts = if crate::contract_runtime::framework::has_contract(&state) {
+            crate::contract_runtime::framework::stop_selected_with_budget(&run_workspace, &state,
+                deadline.timeout.saturating_sub(deadline.start.elapsed()))
+                .map_err(|error| CliError::Runtime(error.to_string()))?
+        } else { Vec::new() };
+        #[cfg(not(unix))]
+        let native_receipts: Vec<Value> = Vec::new();
+        let retained_native_receipts = native_receipts.clone();
+        let result = (|| -> Result<Value, CliError> {
+        let native_failed_rows: Vec<_> = native_receipts.iter()
+            .filter(|receipt| receipt["status"] == "failed")
+            .filter_map(|receipt| receipt["agent_id"].as_str())
+            .filter_map(|id| state.get("agents")?.get(id).map(|row| (id.to_owned(), row.clone())))
+            .collect();
+        let native_team = crate::state::projection::team_state_key(&state);
+        let restore_native_rows = |state: &mut Value| {
+            for (id, row) in &native_failed_rows {
+                state["agents"][id.as_str()] = row.clone();
+                if let Some(team) = state.get_mut("teams").and_then(|teams| teams.get_mut(&native_team)) {
+                    team["agents"][id.as_str()] = row.clone();
+                }
+            }
+        };
+        let native_failed_panes = native_failure_panes(&native_receipts, transport);
         deadline.check("refresh_provider_sessions")?;
         let captured_missing_sessions =
             crate::lifecycle::restart::refresh_missing_provider_sessions(&mut state)
@@ -1486,6 +1612,7 @@ pub mod lifecycle_port {
         let entry_table = shutdown_table_snapshot(&run_workspace, &mut probe_degraded, "entry");
         let mut protected = shutdown_protection_set(&entry_table);
         extend_protection_with_leader_panes(&mut protected, transport, &state, &entry_table);
+        extend_protection_with_native_failures(&mut protected, &native_receipts, transport, &entry_table);
         let protected = protected;
         let reap_scope = if team.is_some() {
             ShutdownReapScope::ScopedTeam
@@ -1521,7 +1648,8 @@ pub mod lifecycle_port {
             &process_event_log,
         );
 
-        let mut kill_error: Option<String> = None;
+        let mut kill_error = (!native_failed_rows.is_empty())
+            .then(|| "native seats not stopped; see native_receipts".to_string());
         let mut killed_sessions = Vec::new();
         let mut spared_sessions = Vec::new();
         deadline.check("kill_session")?;
@@ -1573,16 +1701,19 @@ pub mod lifecycle_port {
                     target.session.as_str() == session.as_str()
                         && leader_anchor_ids.contains(target.pane_id.as_str())
                 });
-                if crate::state::projection::state_is_managed_leader(&state)
-                    && session_has_leader_anchor
+                let session_has_native_failure = live_targets_now.iter().any(|target|
+                    target.session == *session && native_failed_panes.contains(target.pane_id.as_str()));
+                if (crate::state::projection::state_is_managed_leader(&state)
+                    && session_has_leader_anchor) || session_has_native_failure
                 {
                     let _ =
                         event_log_write_session_spared(&run_workspace, session, &leader_anchor_ids);
                     push_unique_session(&mut spared_sessions, session.clone());
+                    let protected_panes = leader_anchor_ids.union(&native_failed_panes).cloned().collect();
                     let worker_panes = collect_session_worker_panes(
                         &state,
                         session.as_str(),
-                        &leader_anchor_ids,
+                        &protected_panes,
                         &live_targets_now,
                     );
                     let event_log = crate::event_log::EventLog::new(&run_workspace);
@@ -1613,7 +1744,7 @@ pub mod lifecycle_port {
                             }
                         }
                     }
-                    cleanup_owned_team_windows(&run_workspace, transport, &state, session);
+                    cleanup_owned_team_windows(&run_workspace, transport, &state, session, &native_failed_panes);
                 } else {
                     let targets = vec![session.as_str().to_string()];
                     let event_log = crate::event_log::EventLog::new(&run_workspace);
@@ -1640,7 +1771,7 @@ pub mod lifecycle_port {
                     } else {
                         push_unique_session(&mut killed_sessions, session.clone());
                     }
-                    cleanup_owned_team_windows(&run_workspace, transport, &state, session);
+                    cleanup_owned_team_windows(&run_workspace, transport, &state, session, &native_failed_panes);
                 }
             }
         }
@@ -1652,12 +1783,13 @@ pub mod lifecycle_port {
             transport,
             reap_scope,
             &mut probe_degraded,
+            &native_receipts,
         );
         if team.is_none() {
             deadline.check("shared_socket_cleanup")?;
             let event_log = crate::event_log::EventLog::new(&run_workspace);
             let cleanup =
-                bare_shutdown_socket_cleanup(&run_workspace, transport, &state, &event_log);
+                bare_shutdown_socket_cleanup(&run_workspace, transport, &state, &event_log, &native_failed_panes);
             for session in cleanup.killed_sessions {
                 push_unique_session(&mut killed_sessions, session);
             }
@@ -1774,6 +1906,7 @@ pub mod lifecycle_port {
         // "shutdown";degraded/false-green shutdown 保留 null,由 diagnose
         // 走 dirty state 排查通道。
         mark_agents_stopped(&mut state);
+        restore_native_rows(&mut state);
         let team_shutdown_status = "shutdown";
         deadline.check("save_state")?;
         if team.is_some() {
@@ -1795,6 +1928,7 @@ pub mod lifecycle_port {
                 session_killed && !verification_degraded,
                 team_shutdown_status,
             );
+            restore_native_rows(&mut state);
             crate::state::repository::StateRepository::new(&run_workspace).save(
                 crate::state::repository::StateWriteIntent::ShutdownTeam {
                     team_key: None,
@@ -1882,7 +2016,7 @@ pub mod lifecycle_port {
         // byte-preserving. The Unix behavior is a no-op (no shim
         // concept there); adding a placeholder key would just noise
         // up the fixtures.
-        let response = json!({
+        let mut response = json!({
             "ok": ok,
             "status": status,
             "phase": phase,
@@ -1909,8 +2043,9 @@ pub mod lifecycle_port {
                 "stop_reason": coordinator_stop_reason,
             },
         });
-        #[cfg(windows)]
-        let mut response = response;
+        if !native_receipts.is_empty() {
+            response["native_receipts"] = json!(native_receipts);
+        }
         #[cfg(windows)]
         {
             if let Some(obj) = response.as_object_mut() {
@@ -1934,6 +2069,8 @@ pub mod lifecycle_port {
                 crate::cli::leader_port::unregister_after_shutdown_success(&run_workspace, team);
         }
         Ok(response)
+        })();
+        retain_native_shutdown_receipts(result, &retained_native_receipts)
     }
 
     /// Remove legacy adaptive display windows without reopening a display backend.
@@ -1945,6 +2082,7 @@ pub mod lifecycle_port {
         transport: &dyn crate::transport::Transport,
         state: &Value,
         session: &crate::transport::SessionName,
+        native_failed_panes: &std::collections::BTreeSet<String>,
     ) {
         let Some(agents) = state.get("agents").and_then(Value::as_object) else {
             return;
@@ -2011,6 +2149,10 @@ pub mod lifecycle_port {
                 }
             }
         }
+        panes.retain(|pane| !native_failed_panes.contains(pane));
+        windows.retain(|window| !live_targets.iter().any(|target|
+            native_failed_panes.contains(target.pane_id.as_str()) && target.window_name.as_ref()
+                .is_some_and(|name| *window == format!("{}:{}", target.session.as_str(), name.as_str()))));
         for target in windows {
             let Some((target_session, target_window)) = target.split_once(':') else {
                 continue;
@@ -2555,11 +2697,13 @@ pub mod lifecycle_port {
         transport: &dyn crate::transport::Transport,
         scope: ShutdownReapScope,
         probe_degraded: &mut bool,
+        native_receipts: &[Value],
     ) {
         for _ in 0..5 {
             let round_table = shutdown_table_snapshot(workspace, probe_degraded, "residual_round");
             let mut protected = shutdown_protection_set(&round_table);
             extend_protection_with_leader_panes(&mut protected, transport, state, &round_table);
+            extend_protection_with_native_failures(&mut protected, native_receipts, transport, &round_table);
             let residuals =
                 matched_processes(workspace, state, root_pids, &protected, scope, &round_table);
             if residuals.is_empty() {
@@ -4122,7 +4266,7 @@ pub mod lifecycle_port {
                     "reminder": crate::cli::QUICK_START_REMINDER,
                     "readiness": readiness_json.clone(),
                     "worker_readiness": readiness_json,
-                    "effects": {"worker_panes_started": agent_ids, "coordinator_start": "running_confirmed"},
+                    "effects": {"worker_panes_started": agent_ids, "coordinator_start": "not_required"},
                 })
             }
             crate::lifecycle::QuickStartReport::Partial {
@@ -5555,7 +5699,8 @@ pub mod diagnose_port {
             },
             "secret_scan": secret_scan(workspace),
             "profile_smoke": profile_smoke_value,
-            "coordinator": coordinator_not_required_value(),
+            "coordinator": crate::coordinator::legacy_coordinator_value(workspace)
+                .unwrap_or_else(coordinator_not_required_value),
             "grok_slot": grok_slot,
             "ok": ok,
             "error": if ok {

@@ -30,10 +30,6 @@ pub(crate) struct AppliedLeaderGrant {
     pub(crate) receiver: Value,
 }
 
-#[derive(Debug, Default)]
-struct AttachRecovery {
-    blocked_counts: crate::message_store::BlockedLeaderRequeueCounts,
-}
 
 #[derive(Debug)]
 pub(crate) struct AttachLeaderError {
@@ -162,11 +158,7 @@ pub fn attach_leader(
             if let Some(endpoint) = target.endpoint.as_deref() {
                 quiet_fake_leader_pane_echo(provider, &target.info, endpoint);
             }
-            let recovery =
-                requeue_exhausted_watchers_after_attach(workspace, &state, &event_log, &pane_id)?;
-            let team_id = TeamKey::new(crate::state::projection::team_state_key(&state));
-            let attach_window_failures =
-                attach_window_failure_value(recovery.blocked_counts, &team_id, &pane_id);
+            let attach_window_failures = None;
             return Ok(LeaseResult {
                 ok: true,
                 status: LeaseStatus::Claimed,
@@ -205,10 +197,7 @@ pub fn attach_leader(
         if let Some(endpoint) = target.endpoint.as_deref() {
             quiet_fake_leader_pane_echo(provider, &target.info, endpoint);
         }
-        let recovery = requeue_exhausted_watchers_after_attach(workspace, &state, &event_log, &pane_id)?;
-        let team_id = TeamKey::new(crate::state::projection::team_state_key(&state));
-        let attach_window_failures =
-            attach_window_failure_value(recovery.blocked_counts, &team_id, &pane_id);
+        let attach_window_failures = None;
         return Ok(LeaseResult {
             ok: true,
             status: LeaseStatus::AlreadyBound,
@@ -236,10 +225,7 @@ pub fn attach_leader(
     if let Some(endpoint) = target.endpoint.as_deref() {
         quiet_fake_leader_pane_echo(provider, &target.info, endpoint);
     }
-    let recovery = requeue_exhausted_watchers_after_attach(workspace, &state, &event_log, &pane_id)?;
-    let team_id = TeamKey::new(crate::state::projection::team_state_key(&state));
-    let attach_window_failures =
-        attach_window_failure_value(recovery.blocked_counts, &team_id, &pane_id);
+    let attach_window_failures = None;
     Ok(LeaseResult {
         ok: true,
         status: LeaseStatus::Claimed,
@@ -482,25 +468,6 @@ fn state_records_pane_endpoint(state: &Value, pane_id: &str, endpoint: &str) -> 
             })
 }
 
-fn requeue_exhausted_watchers_after_attach(
-    workspace: &Path,
-    state: &Value,
-    event_log: &crate::event_log::EventLog,
-    pane_id: &PaneId,
-) -> Result<AttachRecovery, LeaderError> {
-    let store = MessageStore::open(workspace)?;
-    let team_id = TeamKey::new(crate::state::projection::team_state_key(state));
-    let (notices, blocked_counts) =
-        crate::messaging::watchers::requeue_delivery_exhausted_watchers_with_counts(
-            workspace, &store, event_log, &team_id, pane_id,
-        )?;
-    event_log.write(
-        super::LeaderEvent::ReceiverRequeuedExhaustedWatchers.name(),
-        requeued_exhausted_watchers_event_payload(pane_id, &team_id, &notices),
-    )?;
-    Ok(AttachRecovery { blocked_counts })
-}
-
 fn attach_window_failure_value(
     counts: crate::message_store::BlockedLeaderRequeueCounts,
     team_id: &TeamKey,
@@ -676,16 +643,6 @@ pub(crate) fn attach_leader_to_state_with_target_and_controls(
             applied_grant.clone(),
         ));
     }
-    let team_id = TeamKey::new(crate::state::projection::team_state_key(state));
-    if let Err(error) = crate::messaging::watchers::recover_watchers_for_incident(
-        workspace,
-        event_log,
-        &team_id,
-        &pane_id,
-        LeaderIncident::LeaderAttached,
-    ) {
-        return Err(AttachLeaderError::with_applied(error.into(), applied_grant));
-    }
     Ok((receiver, json!({"ok": true})))
 }
 
@@ -807,17 +764,6 @@ pub fn claim_leader(
         caller_pane_info,
         scoped_team.map(|_| team_id.as_str()),
     )?;
-    if result.ok {
-        if let Some(pane) = result.bound_pane_id.as_ref() {
-            crate::messaging::watchers::recover_watchers_for_incident(
-                workspace,
-                &event_log,
-                &team_id,
-                pane,
-                LeaderIncident::LeaderClaimed,
-            )?;
-        }
-    }
     Ok(result)
 }
 

@@ -231,6 +231,9 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
 
 fn prepare_control_args(command: &str, args: &[String], cwd: &Path) -> Result<super::arguments::CheckedArgs, CliError> {
     let mut checked = super::arguments::parse(command, args)?;
+    if !checked.help && command == "schedule" {
+        super::schedule::validate(&checked.tokens, cwd)?;
+    }
     let raw_send = command == "send" && checked.tokens.iter().any(|token| token == "--socket");
     if !checked.help && !raw_send { checked.tokens = resolve_command_scope(command, checked.tokens, cwd)?; }
     Ok(checked)
@@ -287,6 +290,18 @@ fn dispatch_prepared(command: &str, checked: super::arguments::CheckedArgs, cwd:
             let value = crate::direct_delivery::locate(&workspace(&parsed, cwd), parsed.team.as_deref()).map_err(CliError::Usage)?;
             Ok(emit_result(CmdResult::from_json(value, parsed.json)))
         },
+        "migrate" => {
+            #[cfg(unix)] {
+                let parsed = parse_args(args);
+                let team = parsed.team.as_deref().ok_or_else(|| CliError::Usage("migrate requires --team TEAM".into()))?;
+                let value = crate::contract_runtime::backend::migrate(&workspace(&parsed, cwd), team)
+                    .map_err(|error| CliError::Runtime(error.to_string()))?;
+                Ok(emit_result(CmdResult::from_json(value, parsed.json)))
+            }
+            #[cfg(not(unix))] {
+                Err(CliError::Usage("native contract migration requires Unix".into()))
+            }
+        },
         "schedule" => super::schedule::run(args, cwd).map(emit_result),
         "status" => cmd_status_for_team(&status_args(args, cwd), parse_args(args).team.as_deref())
             .map(emit_result),
@@ -334,7 +349,9 @@ fn is_machine_command(command: &str) -> bool {
 fn dispatch_machine(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliError> {
     match command {
         "wait" => cmd_wait(&wait_args(args, cwd)?).map(emit_result),
-        "coordinator" => run_coordinator(args, cwd),
+        "coordinator" => Err(CliError::Usage(
+            "coordinator is retired; use schedule for on-demand timed work".into(),
+        )),
         "attach-app-server-leader" => {
             cmd_attach_app_server_leader(&attach_app_server_leader_args(args, cwd)?)
                 .map(emit_result)
@@ -473,7 +490,9 @@ pub(super) fn command_help(command: Option<&str>) -> String {
             "team-agent locate --workspace . --json\nteam-agent locate --team help-demo", "Use the socket, pane_id and dialect for raw send, or the agent name for workspace-scoped send."),
         "schedule" => ("add requires exactly one of --in or --every and non-empty --text. Durations are positive integers followed by ms, s, m, h or d.\nlist shows active reminders; cancel takes the sched_<hex> id returned by add.",
             "team-agent schedule add --in 10m --text 'Check progress'\nteam-agent schedule add --every 1h --text 'Review status'\nteam-agent schedule list --json\nteam-agent schedule cancel sched_1",
-            "Uses the existing coordinator timer; schedules survive daemon restarts. Delivery has tick granularity. Cancellation stops future occurrences, not reminders already firing or queued. A stopped coordinator resumes timers when restarted, without replaying missed intervals."),
+            "Uses durable job files and an on-demand OS-supervised agenda. A stored job with activation: inactive is not reliably scheduled. The runner exits after 60 idle seconds. Cancellation stops unclaimed jobs; already-running attempts are not revoked. Recurring work skips missed intervals rather than replaying a burst."),
+        "migrate" => ("Explicit maintenance-window M3 native contract import. Stop old-release lifecycle commands first. Retains the read-only source and a scoped logical snapshot; preserves identities, generations and session ownership; never replays the retired outbox. Repeating the command is safe. Unmigrated team teardown imports before stopping.",
+            "team-agent migrate --workspace . --team help-demo --json", "Use only the new release afterward. Verify status; stop/start the selected seats to refresh their native helpers."),
         "inbox" => ("<agent> is the recipient name; -n/--limit bounds the message count. Reading replies does not resend messages.",
             "team-agent inbox leader -n 3\nteam-agent inbox worker --limit 5\nteam-agent inbox leader --workspace . --team help-demo --json", "Wait for a natural reply, then check team-agent status if needed. Do not inspect worker terminal content."),
         "status" => ("Optional <agent> selects one agent. --summary/--detail retain compatibility and do not add fields.\nNine fields: name/provider/model/effort/runtime_status/activity/health/session_name/tmux_command.\nRuntime, activity and health are distinct. unknown means insufficient evidence; null means unset. No default model is guessed.",
@@ -762,6 +781,11 @@ fn emit_cli_error(command: &str, args: &[String], cwd: &Path, error: &CliError) 
         if let Some(message) = super::named_address::human_address_reason(reason) {
             payload.error = message.to_string();
             payload.action = "Run team-agent status and use an agent name from the list. Select scope with --workspace/--team; diagnose channel issues with doctor.".to_string();
+        }
+    }
+    if payload.error.contains("legacy contract store requires explicit migration") {
+        if let Some((_, command)) = payload.error.split_once("; run ") {
+            payload.action = format!("Run {command} during a maintenance window, then retry the selected operation.");
         }
     }
     if command_spec(command).is_some()
@@ -1316,7 +1340,7 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
         targets: parsed.targets,
         workspace,
         team: parsed.team,
-        task: None,
+        task: parsed.task,
         sender,
         no_ack: false,
         no_wait: true,
@@ -1324,7 +1348,7 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
         timeout: 0.0,
         confirm_human: false,
         json: parsed.json,
-        message_id: None,
+        message_id: parsed.message_id,
         presentation: normalized.request,
         pane: parsed.pane.clone(),
         to_name: parsed.to_name.clone(),
@@ -1372,14 +1396,12 @@ fn trusted_cli_sender(workspace: &Path, team: Option<&str>) -> Result<TrustedSen
 
 fn warn_send_legacy_delivery_flags(args: &[String]) {
     const FLAGS: &[&str] = &[
-        "--task",
         "--watch-result",
         "--requires-ack",
         "--no-ack",
         "--no-wait",
         "--timeout",
         "--confirm-human",
-        "--message-id",
     ];
     let spec = command_spec("send");
     let sunset = spec
@@ -2061,23 +2083,6 @@ fn profile_args(args: &[String], cwd: &Path) -> Result<ProfileArgs, CliError> {
         proxy_mode: parsed.proxy_mode,
         json: parsed.json,
     })
-}
-
-fn run_coordinator(args: &[String], cwd: &Path) -> Result<ExitCode, CliError> {
-    let parsed = parse_args(args);
-    let workspace = crate::coordinator::WorkspacePath::new(workspace(&parsed, cwd));
-    // 0.5.x Windows portability Batch 9 F8: pass `--team` through
-    // to the daemon so it doesn't have to derive from state at
-    // boot time. `parse_args` already recognizes `--team`; we just
-    // thread the value into `DaemonArgs::team_key`.
-    crate::coordinator::run_daemon(crate::coordinator::DaemonArgs {
-        workspace,
-        once: parsed.once,
-        tick_interval_sec: parsed.tick_interval,
-        team_key: parsed.team.clone(),
-    })
-    .map(|()| ExitCode::Ok)
-    .map_err(|e| CliError::Runtime(e.to_string()))
 }
 
 fn human_value(value: &Value) -> String {

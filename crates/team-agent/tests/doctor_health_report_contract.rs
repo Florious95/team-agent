@@ -474,10 +474,13 @@ fn p11_dead_coordinator_short_circuits_without_repeated_failure_entries() {
         .into_iter()
         .filter(|issue| issue.to_string().contains("coordinator"))
         .count();
-    assert_eq!(
-        coordinator_issues, 1,
+    // R-M3: the coordinator is retired, so a dead legacy pid file is stale metadata, not a
+    // failure. It must still never be probed into repeated entries.
+    assert!(
+        coordinator_issues <= 1,
         "P11 dead coordinator was probed repeatedly: {value}"
     );
+    assert_eq!(value["coordinator"]["status"], "not_required", "{value}");
     assert_eq!(value.get("ok").and_then(Value::as_bool), Some(false));
 }
 
@@ -650,8 +653,12 @@ fn p16_base_failures_are_not_overwritten_by_schema_or_receiver_failures() {
     let output = run("doctor", &["--json"], &fixture);
     let value = report(&output);
     assert_eq!(output.status.code(), Some(1));
-    assert!(
-        contains_issue_fragment(&value, "coordinator") || contains_issue_fragment(&value, "schema")
+    // R-M3/R-M4: a stale legacy pid and a corrupt retired store are no longer doctor failures
+    // (the store is never opened and must stay byte-unchanged); the receiver failure must still
+    // surface on its own.
+    assert_eq!(
+        fs::read(fixture.workspace.join(".team/team.db")).expect("legacy store kept"),
+        b"not sqlite"
     );
     assert!(
         contains_issue_fragment(&value, "leader")

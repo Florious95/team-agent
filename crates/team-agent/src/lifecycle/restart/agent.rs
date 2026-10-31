@@ -35,7 +35,7 @@ use super::common::*;
 use super::selection::decide_start_mode;
 use super::team_state::write_team_state;
 use super::*;
-use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
+use crate::lifecycle::lock::{acquire_seat_lifecycle_lock, LifecycleLockRequest};
 
 /// CLI start is orthogonal to stop: refuse any live target before editing its role.
 /// Transport uncertainty is a refusal, not permission to spawn a duplicate.
@@ -44,6 +44,24 @@ pub(crate) fn ensure_agent_not_running(
     agent_id: &AgentId,
     transport: &dyn crate::transport::Transport,
 ) -> Result<(), LifecycleError> {
+    if let Some(target) = live_agent_target(state, agent_id, transport)? {
+        let session = target.session.as_str();
+        let window = target.window_name.as_ref().map(|name| name.as_str()).unwrap_or_default();
+        Err(LifecycleError::RequirementUnmet(format!(
+            "agent {agent_id} is already running (duplicate / active cohort); use restart for changed settings, or stop-agent before replacement; cohort proof: session={} window={window} pane={}",
+            session, target.pane_id.as_str(),
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+/// Observe the same seat/window cohort used by the duplicate-start guard.
+pub(crate) fn live_agent_target(
+    state: &serde_json::Value,
+    agent_id: &AgentId,
+    transport: &dyn crate::transport::Transport,
+) -> Result<Option<crate::transport::PaneInfo>, LifecycleError> {
     let agent = state.get("agents").and_then(|agents| agents.get(agent_id.as_str()))
         .ok_or_else(|| LifecycleError::RequirementUnmet(format!("agent {agent_id} not found")))?;
     let session = state_session_name(state);
@@ -51,21 +69,13 @@ pub(crate) fn ensure_agent_not_running(
     let pane = agent.get("pane_id").and_then(serde_json::Value::as_str);
     let targets = transport.list_targets()
         .map_err(|error| LifecycleError::Transport(error.to_string()))?;
-    let live = targets.iter().find(|target| {
+    Ok(targets.into_iter().find(|target| {
         target.session == session
             && target.window_name.as_ref().is_some_and(|name| name.as_str() == window)
             && (pane == Some(target.pane_id.as_str())
                 || !crate::lifecycle::launch::state_uses_adaptive_layout(state))
             && agent_pane_live_by_id(transport, &target.pane_id)
-    });
-    if let Some(target) = live {
-        Err(LifecycleError::RequirementUnmet(format!(
-            "agent {agent_id} is already running (duplicate / active cohort); use stop-agent first; cohort proof: session={} window={window} pane={}",
-            session.as_str(), target.pane_id.as_str(),
-        )))
-    } else {
-        Ok(())
-    }
+    }))
 }
 
 /// ---
@@ -94,7 +104,7 @@ pub fn start_agent(
     let paths = lifecycle_paths(workspace, team)?;
     let canonical_team = paths.canonical_team(team).map(str::to_string);
     let team = canonical_team.as_deref();
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &paths.run_workspace,
         operation: "start-agent",
         team,
@@ -142,7 +152,7 @@ pub(crate) fn start_agent_with_transport(
     };
     let canonical_team = paths.canonical_team(team).map(str::to_string);
     let team = canonical_team.as_deref();
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &paths.run_workspace,
         operation: "start-agent",
         team,
@@ -314,8 +324,7 @@ pub(crate) fn start_agent_at_paths(
             write_team_state(spec_workspace, &spec, &state)?;
         }
         replay_worker_target_missing_messages(workspace, agent_id, &team_key, &state, transport)?;
-        let coordinator = start_coordinator_for_workspace(workspace, Some(&team_key))?;
-        let coordinator_started = coordinator.ok;
+        let coordinator_started = false;
         let target = format!("{}:{window}", session_name.as_str());
         if let Some(new_binding) = refreshed_binding.as_ref() {
             if old_binding.as_ref() != Some(new_binding) {
@@ -500,9 +509,6 @@ pub(crate) fn start_agent_at_paths(
     // so five-line status summary and status --json do not surface a stale
     // WORKING row from the pre-shutdown process. Best-effort: DB failure
     // must not fail the start-agent path.
-    let _ = crate::db::agent_health_capture::clear_agent_health_observation(
-        workspace, &team_key, agent_id,
-    );
     let skip_capture_backfill = if matches!(
         start_mode,
         StartMode::Fresh | StartMode::FreshAfterMissingRollout
@@ -532,8 +538,7 @@ pub(crate) fn start_agent_at_paths(
         tmux_start_mode_for_spawn(&spawn, into_existing_session),
     )?;
     replay_worker_target_missing_messages(workspace, agent_id, &team_key, &state, transport)?;
-    let coordinator = start_coordinator_for_workspace(workspace, Some(&team_key))?;
-    let coordinator_started = coordinator.ok;
+    let coordinator_started = false;
     Ok(StartAgentOutcome::Running {
         env: AgentActionEnvelope {
             agent_id: agent_id.clone(),
@@ -572,29 +577,14 @@ fn rollback_spawned_pane_keep_error(
 }
 
 fn replay_worker_target_missing_messages(
-    workspace: &Path,
-    agent_id: &AgentId,
-    team_key: &str,
-    state: &serde_json::Value,
-    transport: &dyn crate::transport::Transport,
+    _workspace: &Path,
+    _agent_id: &AgentId,
+    _team_key: &str,
+    _state: &serde_json::Value,
+    _transport: &dyn crate::transport::Transport,
 ) -> Result<(), LifecycleError> {
-    let store = crate::message_store::MessageStore::open(workspace)
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    let event_log = crate::event_log::EventLog::new(workspace);
-    let ids = crate::messaging::delivery::requeue_worker_target_missing_messages(
-        workspace,
-        &store,
-        &event_log,
-        agent_id.as_str(),
-        Some(team_key),
-    )
-    .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    if !ids.is_empty() {
-        crate::messaging::delivery::deliver_pending_messages(
-            workspace, state, transport, &event_log,
-        )
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    }
+    // A new seat generation does not authorize replay of historical SQL rows.
+    // Stored messages remain available in the inbox; explicit new sends use station.
     Ok(())
 }
 
@@ -744,13 +734,22 @@ fn pane_conflicts_with_pane_id(
 ) -> bool {
     let state_socket = runtime_tmux_socket(state);
     let agent_socket = tmux_socket_field(agent).or(state_socket);
-    // Check leader anchor.
+    // The owner record historically omitted the socket. It may inherit one only
+    // from the same fully identified leader binding, never from a bare pane ID.
     for key in ["leader_receiver", "team_owner"] {
-        if state
-            .get(key)
-            .and_then(pane_socket_binding)
-            .is_some_and(|leader| pane_conflicts_on_same_socket(pane_id, agent_socket, leader))
-        {
+        let Some(value) = state.get(key) else { continue };
+        let Some(mut leader) = pane_socket_binding(value) else { continue };
+        if key == "team_owner" && leader.tmux_socket.is_none() {
+            if let Some(receiver) = state.get("leader_receiver") {
+                let same_anchor = value["pane_id"] == receiver["pane_id"]
+                    && value["leader_session_uuid"].as_str().filter(|id| !id.trim().is_empty())
+                        .is_some_and(|id| receiver["leader_session_uuid"].as_str() == Some(id))
+                    && value["owner_epoch"].as_u64()
+                        .is_some_and(|epoch| receiver["owner_epoch"].as_u64() == Some(epoch));
+                if same_anchor { leader.tmux_socket = tmux_socket_field(receiver); }
+            }
+        }
+        if pane_conflicts_on_same_socket(pane_id, agent_socket, leader) {
             return true;
         }
     }
@@ -802,6 +801,43 @@ fn tmux_sockets_known_different(left: Option<&str>, right: Option<&str>) -> bool
         return false;
     }
     std::path::Path::new(left).is_absolute() && std::path::Path::new(right).is_absolute()
+}
+
+#[cfg(test)]
+mod m5_owner_anchor_regressions {
+    use super::*;
+    fn state() -> serde_json::Value {
+        serde_json::json!({
+            "tmux_socket":"/fixture/workers.sock",
+            "agents":{"w1":{"pane_id":"%0","status":"running"}},
+            "leader_receiver":{"pane_id":"%0","tmux_socket":"/fixture/leader.sock",
+                "leader_session_uuid":"leader-fixture","owner_epoch":1},
+            "team_owner":{"pane_id":"%0","leader_session_uuid":"leader-fixture","owner_epoch":1}
+        })
+    }
+    fn collides(state: &serde_json::Value) -> bool {
+        pane_conflicts_with_leader_or_other(state, &AgentId::new("w1"), &state["agents"]["w1"])
+    }
+    #[test]
+    fn matching_owner_inherits_only_its_identified_receiver_socket() {
+        let mut state = state();
+        assert!(!collides(&state));
+        state["leader_receiver"]["tmux_socket"] = serde_json::json!("/fixture/workers.sock");
+        assert!(collides(&state));
+    }
+    #[test]
+    fn incomplete_or_conflicting_owner_identity_never_inherits_a_socket() {
+        for (field, value) in [
+            ("leader_session_uuid", serde_json::json!("other-leader")),
+            ("owner_epoch", serde_json::json!(2)),
+            ("owner_epoch", serde_json::Value::Null),
+            ("tmux_socket", serde_json::json!("/fixture/workers.sock")),
+        ] {
+            let mut state = state();
+            state["team_owner"][field] = value;
+            assert!(collides(&state));
+        }
+    }
 }
 
 fn runtime_tmux_socket(state: &serde_json::Value) -> Option<&str> {
@@ -1054,7 +1090,7 @@ pub fn stop_agent(
     let paths = lifecycle_paths(workspace, team)?;
     let canonical_team = paths.canonical_team(team).map(str::to_string);
     let team = canonical_team.as_deref();
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &paths.run_workspace,
         operation: "stop-agent",
         team,
@@ -1085,7 +1121,7 @@ pub(crate) fn stop_agent_with_transport(
     let paths = lifecycle_paths(workspace, team)?;
     let canonical_team = paths.canonical_team(team).map(str::to_string);
     let team = canonical_team.as_deref();
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &paths.run_workspace,
         operation: "stop-agent",
         team,
@@ -1105,7 +1141,7 @@ pub(crate) fn stop_agent_with_transport(
 /// returns: 停止报告；注意报告里的显示已关闭字段恒为真，不反映实际关显示结果
 /// errors: 席位解析不到实体返回 RequirementUnmet，写 state 失败返回 StatePersist
 /// ---
-pub(super) fn stop_agent_at_paths(
+pub(crate) fn stop_agent_at_paths(
     workspace: &Path,
     spec_workspace: &Path,
     agent_id: &AgentId,
@@ -1261,6 +1297,8 @@ pub(super) fn stop_agent_at_paths(
     mark_agent_stopped(&mut state, agent_id, agent, &window)?;
     state["agents"][agent_id.as_str()]["explicit_stop"] = serde_json::Value::Bool(true);
     let team_key = restart_projection_team_key(&state, team);
+    crate::station::projection::publish(workspace, &mut state, &team_key, &[agent_id.as_str()])
+        .map_err(LifecycleError::StatePersist)?;
     // golden operations.py:95: save_team_scoped_state (team projection) — NOT a raw save, so a
     // multi-team workspace keeps the other teams' persisted runtime state instead of being clobbered.
     crate::state::repository::StateRepository::new(workspace).save(
@@ -1498,7 +1536,7 @@ pub fn reset_agent(
     let paths = lifecycle_paths(workspace, team)?;
     let canonical_team = paths.canonical_team(team).map(str::to_string);
     let team = canonical_team.as_deref();
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &paths.run_workspace,
         operation: "reset-agent",
         team,
@@ -1540,7 +1578,7 @@ pub(crate) fn reset_agent_with_transport(
     let paths = lifecycle_paths(workspace, team)?;
     let canonical_team = paths.canonical_team(team).map(str::to_string);
     let team = canonical_team.as_deref();
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+    let _lock = acquire_seat_lifecycle_lock(LifecycleLockRequest {
         workspace: &paths.run_workspace,
         operation: "reset-agent",
         team,
@@ -1751,6 +1789,8 @@ fn reset_agent_at_paths(
         obj.insert("explicit_stop".to_string(), serde_json::Value::Bool(false));
     }
     let team_key = restart_projection_team_key(&state, team);
+    crate::station::projection::publish(workspace, &mut state, &team_key, &[agent_id.as_str()])
+        .map_err(LifecycleError::StatePersist)?;
     sync_restart_team_projections(&mut state, &team_key);
     // golden operations.py (reset): save_team_scoped_state on the team projection — same multi-team
     // preservation as stop, not a raw save_runtime_state.

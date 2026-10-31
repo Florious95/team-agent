@@ -16,14 +16,11 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{json, Value};
-use team_agent::event_log::EventLog;
-use team_agent::message_store::MessageStore;
 use team_agent::mcp_server::{
     handle_mcp, McpTool, TeamOrchestratorTools, ToolErrorReason,
 };
 use team_agent::model::ids::{AgentId, TeamKey};
 use team_agent::tmux_backend::TmuxBackend;
-use team_agent::{db, messaging};
 
 const RETAINED: [&str; 3] = ["send_message", "report_result", "get_team_status"];
 const RETIRED: [&str; 10] = [
@@ -179,9 +176,13 @@ fn old_tool_args(name: &str, shape: usize) -> Value {
     }
 }
 
+/// M4: a retired `team.db` is never created; when absent there are no business rows.
 fn business_counts(path: &Path) -> (i64, i64) {
-    let store = MessageStore::open(path).unwrap();
-    let conn = db::schema::open_db(store.db_path()).unwrap();
+    let db = path.join(".team/runtime/team.db");
+    if !db.exists() {
+        return (0, 0);
+    }
+    let conn = rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
     let messages = conn.query_row("select count(*) from messages", [], |row| row.get(0)).unwrap();
     let results = conn.query_row("select count(*) from results", [], |row| row.get(0)).unwrap();
     (messages, results)
@@ -469,11 +470,13 @@ fn m04_send_message_single_leader_broadcast_and_mailbox_close_the_team_scope_loo
     assert_eq!(mailbox.body["status"], "stored");
     let inbox = team_agent::inbox_store::read(harness.workspace_path(), "worker_a", 16, Some("teamA")).unwrap();
     let records = inbox["messages"].as_array().unwrap();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0]["content"], "M04_MAILBOX");
-    assert_eq!(records[0]["message_id"], mailbox.body["message_id"]);
-    assert_eq!(records[0]["sender"], "worker_b");
-    assert_eq!(records[0]["team"], "teamA");
+    // R-M1a (M1 store-first): the physical peer and broadcast sends were stored before submit too.
+    let contents = records.iter().map(|record| record["content"].as_str().unwrap()).collect::<Vec<_>>();
+    assert_eq!(contents, ["M04_PEER", "M04_BROADCAST", "M04_MAILBOX"], "{inbox}");
+    let record = &records[2];
+    assert_eq!(record["message_id"], mailbox.body["message_id"]);
+    assert_eq!(record["sender"], "worker_b");
+    assert_eq!(record["team"], "teamA");
     assert!(harness.pane_text("worker_a").contains("M04_PEER"));
     assert!(harness.pane_text("leader").contains("M04_LEADER"));
     assert!(!harness.pane_text("leader").contains("M04_BROADCAST"), "peer broadcast must not create a leader mirror");
@@ -512,7 +515,8 @@ fn send_cli_input(harness: &sim::McpSimHarness, worker_id: &str, marker: &str) {
     let response: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(response["delivery"], "physical");
     assert_eq!(response["recipient"], worker_id);
-    assert!(response.get("message_id").is_none(), "no ledger ID for physical input");
+    // R-M1a (M1 store-first): the physical receipt names its durable inbox record; no queue row.
+    assert!(response["message_id"].as_str().is_some_and(|id| !id.is_empty()), "{response}");
     assert!(harness.message_rows_containing(marker).is_empty());
     assert!(harness.pane_text(worker_id).contains(marker));
     assert!(!harness.pane_text("team_b_leader").contains(marker));
@@ -682,36 +686,8 @@ fn m08_native_cli_lifecycle_commands_still_dispatch_and_preserve_source_and_scop
 
 #[test]
 #[serial_test::serial(env)]
-fn m09_due_scheduler_idle_suppression_and_retained_rpc_stream_remain_live() {
+fn m09_retained_rpc_stream_remains_live_after_status() {
     let _hermetic = HermeticTestEnv::enter("mcp-3-m09");
-    let case = TempCase::new("m09-scheduler");
-    let store = MessageStore::open(case.path()).unwrap();
-    let conn = db::schema::open_db(store.db_path()).unwrap();
-    conn.execute(
-        "insert into scheduled_events(owner_team_id,due_at,target,kind,payload_json,status,created_at) values(null,'2000-01-01T00:00:00+00:00','leader','health_ping','{}','pending','2000-01-01T00:00:00+00:00')",
-        [],
-    ).unwrap();
-    let backend = TmuxBackend::for_workspace(case.path());
-    let fired = messaging::fire_due_scheduled_events(case.path(), &store, &backend, &EventLog::new(case.path())).unwrap();
-    assert_eq!(fired.len(), 1, "one due shared-engine event must be consumed");
-    let row: (String, String) = conn.query_row("select status,result_json from scheduled_events", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
-    assert_eq!(row.0, "done");
-    assert!(row.1.contains("logged"));
-
-    let idle = TempCase::new("m09-idle");
-    let store = MessageStore::open(idle.path()).unwrap();
-    let state = json!({"active_team_key":"idleTeam","session_name":"team-idleTeam","agents":{"worker_a":{"status":"running"}},"tasks":[]});
-    team_agent::state::persist::save_runtime_state(idle.path(), &state).unwrap();
-    store.create_message(Some("idle-task"), "leader", "worker_a", "idle obligation", None, false, Some("idleTeam")).unwrap();
-    let conn = db::schema::open_db(store.db_path()).unwrap();
-    conn.execute("insert into agent_health(owner_team_id,agent_id,status,updated_at) values('idleTeam','worker_a','IDLE','now')", []).unwrap();
-    let event_log = EventLog::new(idle.path());
-    let first = messaging::detect_idle_fallbacks(idle.path(), &state, &store, &event_log).unwrap();
-    assert_eq!(first.len(), 1, "eligible idle fallback should fire once");
-    let saved = team_agent::state::persist::load_runtime_state(idle.path()).unwrap();
-    let second = messaging::detect_idle_fallbacks(idle.path(), &saved, &store, &event_log).unwrap();
-    assert!(second.is_empty(), "matching suppression snapshot must prevent repeated idle fallback");
-
     let rpc_root = TempCase::new("m09-rpc");
     let tools = tools_at(rpc_root.path(), "worker_a", "teamA");
     let initialized = handle_mcp(&tools, &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}})).unwrap().unwrap();

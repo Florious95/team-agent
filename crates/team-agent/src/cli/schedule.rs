@@ -1,12 +1,25 @@
-//! Leader reminders use the existing coordinator timer and durable event queue.
+//! Leader reminders are per-job files activated by an ephemeral, supervised agenda.
 use std::path::Path;
 
 use serde_json::json;
 
 use super::{CliError, CmdOutput, CmdResult};
-use crate::messaging::reminders;
+use crate::station::agenda;
 
-pub(super) fn run(args: &[String], cwd: &Path) -> Result<CmdResult, CliError> {
+struct Parsed<'a> {
+    workspace: std::path::PathBuf,
+    team: Option<&'a str>,
+    duration: Option<&'a str>,
+    every: Option<&'a str>,
+    text: Option<&'a str>,
+    positional: Vec<&'a str>,
+}
+
+pub(super) fn validate(args: &[String], cwd: &Path) -> Result<(), CliError> {
+    parse(args, cwd).map(|_| ())
+}
+
+fn parse<'a>(args: &'a [String], cwd: &Path) -> Result<Parsed<'a>, CliError> {
     let mut workspace = cwd.to_path_buf();
     let (mut team, mut after, mut every, mut text) = (None, None, None, None);
     let mut positional = Vec::new();
@@ -24,7 +37,7 @@ pub(super) fn run(args: &[String], cwd: &Path) -> Result<CmdResult, CliError> {
             _ => positional.push(token.as_str()),
         }
     }
-    // Validate the full request before touching the workspace or starting a daemon.
+    // Syntax validation must precede workspace access and agenda activation.
     let duration = if positional.as_slice() == ["add"] {
         let duration = match (after, every) {
             (Some(value), None) | (None, Some(value)) => value,
@@ -39,7 +52,7 @@ pub(super) fn run(args: &[String], cwd: &Path) -> Result<CmdResult, CliError> {
                 "schedule add requires non-empty --text".into(),
             ));
         }
-        reminders::parse_duration(duration).map_err(|error| CliError::Usage(error.to_string()))?;
+        agenda::parse_duration(duration).map_err(CliError::Usage)?;
         Some(duration)
     } else {
         if after.is_some() || every.is_some() || text.is_some() {
@@ -49,7 +62,11 @@ pub(super) fn run(args: &[String], cwd: &Path) -> Result<CmdResult, CliError> {
         }
         match positional.as_slice() {
             ["list"] => {}
-            ["cancel", id] if reminders::parse_id(id).is_some() => {}
+            ["cancel", id]
+                if id.strip_prefix("sched_").is_some_and(|hex| {
+                    hex.bytes().any(|c| c != b'0')
+                        && hex.bytes().all(|c| c.is_ascii_hexdigit())
+                }) => {}
             _ => {
                 return Err(CliError::Usage(
                     "expected schedule add, schedule list or schedule cancel sched_<hex>".into(),
@@ -58,6 +75,11 @@ pub(super) fn run(args: &[String], cwd: &Path) -> Result<CmdResult, CliError> {
         }
         None
     };
+    Ok(Parsed { workspace, team, duration, every, text, positional })
+}
+
+pub(super) fn run(args: &[String], cwd: &Path) -> Result<CmdResult, CliError> {
+    let Parsed { workspace, team, duration, every, text, positional } = parse(args, cwd)?;
     let selected = crate::state::selector::resolve_active_team_readonly(
         &workspace,
         team,
@@ -65,31 +87,18 @@ pub(super) fn run(args: &[String], cwd: &Path) -> Result<CmdResult, CliError> {
     )?;
     let workspace = &selected.run_workspace;
     let owner = selected.team_key.as_str();
+    if positional[0] != "list" {
+        crate::coordinator::retire_legacy_coordinator(workspace).map_err(CliError::Runtime)?;
+    }
+    let store = agenda::Store::new(workspace, owner).map_err(CliError::Runtime)?;
     let value = if let Some(duration) = duration {
-        let start = crate::coordinator::start_coordinator_with_team(
-            &crate::coordinator::WorkspacePath::new(workspace.clone()),
-            Some(owner),
-        )
-        .map_err(|error| CliError::Runtime(error.to_string()))?;
-        if !start.ok {
-            return Err(CliError::Runtime(format!(
-                "reminder timer unavailable: {:?}",
-                start.status
-            )));
-        }
-        reminders::add(
-            workspace,
-            owner,
-            text.unwrap_or_default(),
-            duration,
-            every.is_some(),
-        )?
+        store
+            .add(text.unwrap_or_default(), duration, every.is_some())
+            .map_err(CliError::Runtime)?
     } else if positional[0] == "list" {
-        json!({"ok": true, "schedules": reminders::list(workspace, owner)?})
+        json!({"ok": true, "schedules": store.list().map_err(CliError::Runtime)?})
     } else {
-        let id = reminders::parse_id(positional[1])
-            .ok_or_else(|| CliError::Usage("invalid reminder id".into()))?;
-        if !reminders::cancel(workspace, owner, id)? {
+        if !store.cancel(positional[1]).map_err(CliError::Runtime)? {
             return Err(CliError::Usage(format!(
                 "active reminder {} not found in team {owner}",
                 positional[1]
@@ -100,16 +109,22 @@ pub(super) fn run(args: &[String], cwd: &Path) -> Result<CmdResult, CliError> {
     let as_json = args.iter().any(|arg| arg == "--json");
     let mut result = CmdResult::from_json(value.clone(), as_json);
     if !as_json {
-        let human = if let Some(id) = value["cancelled"].as_str() {
+        let human = if value["ok"] == false {
+            format!(
+                "Reminder {} stored but not activated: {}",
+                value["id"], value["error"]
+            )
+        } else if let Some(id) = value["cancelled"].as_str() {
             format!("Cancelled scheduled reminder {id}.")
         } else if let Some(schedules) = value["schedules"].as_array() {
             let mut rows = vec!["ID\tTRIGGER\tTEXT\tSTATUS".to_string()];
             rows.extend(schedules.iter().map(|row| {
                 format!(
-                    "{}\t{}\t{}\tactive",
+                    "{}\t{}\t{}\t{}",
                     row["id"].as_str().unwrap_or_default(),
                     row["trigger"].as_str().unwrap_or_default(),
-                    row["text"].as_str().unwrap_or_default()
+                    row["text"].as_str().unwrap_or_default(),
+                    row["status"].as_str().unwrap_or_default()
                 )
             }));
             rows.join("\n")

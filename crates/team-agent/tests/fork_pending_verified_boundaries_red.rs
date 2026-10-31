@@ -383,13 +383,21 @@ fn pending_fork_finalize_shell_is_gone_and_capture_falls_through() {
         "apply_captured_session must still write the captured tuple on the happy path"
     );
 
-    let tick = read_src("coordinator/tick.rs");
-    assert!(
-        tick.contains("fn capture_missing_sessions"),
-        "positive control: tick.rs still captures missing sessions"
-    );
-    assert!(
-        !tick.contains("write_audit") && !tick.contains("ContextForkFinalized"),
-        "tick.rs must not call write_audit / carry ContextForkFinalized after the shell was removed"
-    );
+    // R-M3: `coordinator/tick.rs` (and its capture_missing_sessions step) was retired with the
+    // coordinator; the shell must not reappear anywhere in the runtime sources instead.
+    fn walk(dir: &std::path::Path, hits: &mut Vec<String>) {
+        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, hits);
+            } else if path.extension().and_then(|s| s.to_str()) == Some("rs")
+                && fs::read_to_string(&path).is_ok_and(|text| text.contains("ContextForkFinalized"))
+            {
+                hits.push(path.display().to_string());
+            }
+        }
+    }
+    let mut hits = Vec::new();
+    walk(&crate_src(), &mut hits);
+    assert!(hits.is_empty(), "ContextForkFinalized must not come back after the shell was removed: {hits:?}");
 }

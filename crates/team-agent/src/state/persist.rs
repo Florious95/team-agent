@@ -642,7 +642,7 @@ pub(super) fn update_runtime_state_with_lifecycle_target(
     let _lock = RuntimeLock::acquire(workspace, "state-save", 2.0)?;
     // Malformed/unreadable state is an error, never an empty store.
     let mut latest = match std::fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text)?,
+        Ok(text) => decode_runtime_projection(workspace, &text)?,
         Err(error) if error.kind() == io::ErrorKind::NotFound => json!({}),
         Err(error) => return Err(error.into()),
     };
@@ -1271,6 +1271,13 @@ fn merge_agent_projection(
         if deleted_agent_ids.contains(agent_id) {
             continue;
         }
+        // A bounded lifecycle writer owns only its declared seats. Peer
+        // snapshots cannot replace newer captures or pending reservations,
+        // even when their physical topology has not changed.
+        if !topology_update_agent_ids.is_empty() && !topology_update_agent_ids.contains(agent_id) {
+            incoming_map.insert(agent_id.clone(), latest_agent.clone());
+            continue;
+        }
         let tombstoned_for_projection =
             skip_capture_backfill && skip_capture_backfill_agent_ids.contains(agent_id);
         let fork_target = preserve_latest_fork_targets
@@ -1775,9 +1782,24 @@ fn migrate_team_key_to_match_active_team(state: &mut Value) -> bool {
     true
 }
 
+fn recover_runtime_projection(workspace: &Path) -> Result<Option<Value>, StateError> {
+    crate::station::projection::read_workspace(workspace)
+        .map_err(|message| StateError::Io(io::Error::other(message)))
+}
+
+fn decode_runtime_projection(workspace: &Path, text: &str) -> Result<Value, StateError> {
+    match serde_json::from_str(text) {
+        Ok(state) => Ok(state),
+        Err(error) => recover_runtime_projection(workspace)?.ok_or(StateError::Json(error)),
+    }
+}
+
 pub fn load_runtime_state(workspace: &Path) -> Result<Value, StateError> {
     let path = runtime_state_path(workspace);
     if !path.exists() {
+        if let Some(projected) = recover_runtime_projection(workspace)? {
+            return Ok(projected);
+        }
         if let Some(cached) = cache_get(&path) {
             return Ok(cached);
         }
@@ -1786,8 +1808,12 @@ pub fn load_runtime_state(workspace: &Path) -> Result<Value, StateError> {
         );
     }
     let text = std::fs::read_to_string(&path)?;
-    let mut state: Value = serde_json::from_str(&text)?;
+    let mut state = decode_runtime_projection(workspace, &text)?;
     normalize_agent_session_state(&mut state);
+    if state.get("station_projection").and_then(Value::as_bool) == Some(true) {
+        // Reads do not repair a torn compatibility file or migrate C4 records.
+        return Ok(state);
+    }
     let mut changed = migrate_state_identity(&mut state, &SystemEnv, workspace)?;
     if migrate_active_team_key(&mut state) {
         changed = true;
@@ -1809,12 +1835,15 @@ pub fn load_runtime_state(workspace: &Path) -> Result<Value, StateError> {
 pub(crate) fn load_runtime_state_without_migrations(workspace: &Path) -> Result<Value, StateError> {
     let path = runtime_state_path(workspace);
     if !path.exists() {
+        if let Some(projected) = recover_runtime_projection(workspace)? {
+            return Ok(projected);
+        }
         return Ok(
             json!({"agents": {}, "tasks": [], "session_name": null, "active_team_key": null}),
         );
     }
     let text = std::fs::read_to_string(&path)?;
-    let mut state: Value = serde_json::from_str(&text)?;
+    let mut state = decode_runtime_projection(workspace, &text)?;
     normalize_agent_session_state(&mut state);
     Ok(state)
 }
@@ -1833,7 +1862,7 @@ pub(crate) fn with_runtime_state_lock_without_migrations<T>(
     }
     let _lock = RuntimeLock::acquire(workspace, "state-save", 2.0)?;
     let state = match std::fs::read_to_string(&path) {
-        Ok(text) => Some(serde_json::from_str::<Value>(&text)?),
+        Ok(text) => Some(decode_runtime_projection(workspace, &text)?),
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };
@@ -2543,15 +2572,19 @@ mod tests {
                 "other": {"agent_id": "other", "provider": "codex", "window": "old-other", "pane_id": "%old", "spawn_epoch": 1}
             },
         });
-        let err = save_runtime_state_with_lifecycle_topology_authority(
-            &ws,
-            &incoming,
-            "team-a",
-            &["target"],
-        )
-        .expect_err("authorized target must not hide other agent conflict");
-        assert!(matches!(err, StateError::SaveConflict(_)));
-        assert!(err.to_string().contains("agent_id=other"));
+        // Entity-scoped writers (M5, D-M5-8): the ordinary writer still refuses the stale
+        // peer view, but a writer bounded to `target` never writes `other`, so its stale copy
+        // of `other` is ignored instead of conflicting, and the newer row on disk survives.
+        let before = read_state(&ws);
+        assert!(matches!(save_runtime_state(&ws, &incoming), Err(StateError::SaveConflict(_))));
+        assert_eq!(read_state(&ws), before);
+        save_runtime_state_with_lifecycle_topology_authority(&ws, &incoming, "team-a", &["target"])
+            .unwrap();
+        let saved = read_state(&ws);
+        for field in ["window", "pane_id", "spawn_epoch"] {
+            assert_eq!(saved["agents"]["other"][field], before["agents"]["other"][field], "{field}");
+        }
+        assert_eq!(saved["agents"]["target"]["status"], json!("stopped"));
     }
 
     #[test]
@@ -2743,7 +2776,9 @@ mod tests {
         save_runtime_state_with_lifecycle_topology_authority(&ws, &incoming, "team-a", &["f2"])
             .unwrap();
         let mut stale = read_state(&ws);
-        assert!(stale["agents"]["f1"].get("status").is_none());
+        // M5 (D-M5-8): the undeclared peer's pending reservation is kept verbatim rather than
+        // stripped to a roster stub.
+        assert_eq!(stale["agents"]["f1"]["status"], json!("starting"));
         assert!(live_topology_fields(&stale["agents"]["f1"]).is_empty());
 
         // f1 starts after f2 takes its snapshot; capture is not complete yet.
@@ -2773,12 +2808,14 @@ mod tests {
             "_pending_session_id": "session-f2"
         });
 
-        // Ordinary writers still cannot overwrite the live peer from a stub.
-        assert!(matches!(
-            save_runtime_state(&ws, &stale),
-            Err(StateError::SaveConflict(_))
-        ));
-        assert_eq!(read_state(&ws), latest);
+        // Ordinary writers still cannot overwrite the live peer from a stale snapshot. Now that
+        // the snapshot carries f1's reservation rather than a stub, the writer may conflict or
+        // merge, but f1's newer capture must survive either way.
+        match save_runtime_state(&ws, &stale) {
+            Ok(()) | Err(StateError::SaveConflict(_)) => {}
+            other => panic!("unexpected ordinary save outcome: {other:?}"),
+        }
+        assert_eq!(read_state(&ws)["agents"]["f1"], latest["agents"]["f1"]);
         save_runtime_state_with_lifecycle_topology_authority(&ws, &stale, "team-a", &["f2"])
             .unwrap();
         let saved = read_state(&ws);
@@ -2867,11 +2904,20 @@ mod tests {
                 "f2": {"agent_id": "f2", "status": "running"}
             }
         });
-        let err =
-            save_runtime_state_with_lifecycle_topology_authority(&ws, &incoming, "team-a", &["f2"])
-                .expect_err("two completed topologies for f1 must conflict");
+        let err = save_runtime_state(&ws, &incoming)
+            .expect_err("two completed topologies for f1 must conflict");
         assert!(matches!(err, StateError::SaveConflict(_)));
         assert!(err.to_string().contains("agent_id=f1"));
+        // M5 (D-M5-8): a writer bounded to f2 does not write f1, so it neither conflicts on
+        // nor replaces f1's completed topology.
+        let before = read_state(&ws);
+        save_runtime_state_with_lifecycle_topology_authority(&ws, &incoming, "team-a", &["f2"])
+            .unwrap();
+        let saved = read_state(&ws);
+        for field in ["status", "pane_id", "pane_pid", "window", "spawned_at", "spawn_epoch"] {
+            assert_eq!(saved["agents"]["f1"][field], before["agents"]["f1"][field], "{field}");
+        }
+        assert_eq!(saved["agents"]["f2"]["status"], json!("running"));
     }
 
     #[test]

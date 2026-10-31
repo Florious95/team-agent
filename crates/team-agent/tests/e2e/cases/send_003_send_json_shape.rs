@@ -17,8 +17,9 @@ fn send_003_send_json_shape_locks_public_keys() {
     assert_eq!(receipt["accepted"], Value::Null);
     assert_eq!(receipt["recipient"], "a");
     assert!(receipt["pane_id"].as_str().unwrap().starts_with('%'));
+    // R-M1a (M1 store-first): `message_id` names the durable inbox record (checked by
+    // assert_physical_input); queue-era keys stay retired.
     for retired in [
-        "message_id",
         "result_id",
         "delivery_pending",
         "poll_via",

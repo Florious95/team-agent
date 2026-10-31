@@ -47,15 +47,7 @@ pub(crate) fn message_exists(
     store: &MessageStore,
     message_id: &str,
 ) -> Result<bool, MessagingError> {
-    let conn = crate::db::schema::open_db(store.db_path())?;
-    let found: Option<String> = conn
-        .query_row(
-            "select message_id from messages where message_id = ?1",
-            params![message_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    Ok(found.is_some())
+    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
 }
 
 pub(crate) fn next_result_id() -> String {
@@ -277,46 +269,7 @@ pub(crate) fn fail_leader_delivery(
     reason: DeliveryRefusal,
     error: Option<&str>,
 ) -> Result<DeliveryOutcome, MessagingError> {
-    let store = MessageStore::open(workspace)?;
-    let Some(message_id) = payload
-        .get("message_id")
-        .and_then(serde_json::Value::as_str)
-        .map(ToOwned::to_owned)
-    else {
-        crate::event_log::EventLog::new(workspace).write(
-            "leader_receiver.delivery_failed_without_message",
-            serde_json::json!({"reason": serde_json::to_value(reason).ok(), "error": error}),
-        )?;
-        return Ok(DeliveryOutcome {
-            ok: false,
-            status: DeliveryStatus::FallbackLog,
-            message_status: MessageStatusShadow("failed".to_string()),
-            message_id: None,
-            verification: None,
-            stage: None,
-            reason: Some(reason),
-            channel: Some("fallback_log".to_string()),
-            ack_forced_off: false,
-            turn_verification: None,
-        });
-    };
-    store.mark(&message_id, "failed", error)?;
-    crate::event_log::EventLog::new(workspace).write(
-        "leader_receiver.delivery_failed",
-        serde_json::json!({"message_id": message_id, "reason": serde_json::to_value(reason).ok(), "error": error}),
-    )?;
-    Ok(DeliveryOutcome {
-        ok: true,
-        status: DeliveryStatus::FallbackLog,
-        message_status: MessageStatusShadow("failed".to_string()),
-        message_id: Some(message_id),
-        verification: None,
-        stage: None,
-        reason: Some(reason),
-        channel: Some("fallback_inbox".to_string()),
-        ack_forced_off: false,
-        turn_verification: None,
-    })
+    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
 }
 
 pub(crate) fn recent_rfc3339(ts: &str, max_age_seconds: i64) -> bool {

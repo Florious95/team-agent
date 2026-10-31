@@ -317,12 +317,14 @@ fn m2a_all_logical_address_forms_share_physical_delivery() {
             "M2a ({label}): the canonical logical form must be accepted; got: {text}"
         );
         let value = parsed.expect("accepted implies JSON");
-        let receipts = value.get("results").and_then(Value::as_array).cloned().unwrap_or_else(|| vec![value.clone()]);
+        // Fan-out receipts: the list key is pinned by the D-M5-2b oracles, not by this test.
+        let receipts = value.get("results").or_else(|| value.get("messages")).and_then(Value::as_array).cloned().unwrap_or_else(|| vec![value.clone()]);
         assert_eq!(receipts.len(), expected_rows, "one physical receipt per recipient");
         for receipt in receipts {
             assert_eq!(receipt["delivery"], "physical");
             assert_eq!(receipt["status"], "sent");
-            assert!(receipt.get("message_id").is_none());
+            // R-M1a (M1 store-first): every physical receipt names its durable inbox record.
+            assert!(receipt["message_id"].as_str().is_some_and(|id| !id.is_empty()), "{receipt}");
         }
         assert!(case.db_rows(needle).is_empty(), "direct delivery must not enter the queue");
     }
@@ -398,7 +400,8 @@ fn m3a_bare_send_returns_physical_receipt_without_queue_identity() {
     let value = parsed.expect("accepted implies JSON");
     assert_eq!(value["delivery"], "physical");
     assert_eq!(value["recipient"], "w1");
-    assert!(value.get("message_id").is_none());
+    // R-M1a (M1 store-first): the bare receipt names its durable inbox record, never a queue row.
+    assert!(value["message_id"].as_str().is_some_and(|id| !id.is_empty()), "{value}");
     assert!(case.db_rows("m3a bare send probe").is_empty());
     case.shutdown();
 }

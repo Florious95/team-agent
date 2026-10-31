@@ -94,7 +94,7 @@ fn schema(command: &str) -> Option<Schema> {
         "status" => (&[("--detail", Switch), ("--summary", Switch)], 1),
         "models" => (&[("--provider", Token), ("--search", Query)], usize::MAX),
         "inbox" => (&[("--limit", Count)], 1),
-        "locate" => (&[], 0),
+        "locate" | "migrate" => (&[], 0),
         "shutdown" => (&[("--keep-logs", Switch)], 0),
         "restart" => (
             &[

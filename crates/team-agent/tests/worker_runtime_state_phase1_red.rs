@@ -106,59 +106,45 @@ fn from_activity_maps_stuck_and_uncertain_to_unknown() {
     );
 }
 
-/// CR R5 grep guard: sync_agent_health code path must NEVER write
-/// `agent["status"] = "busy"`. Lifecycle status is launch/stop-owned
-/// (running/paused/stopped); turn-level Busy is a separate field.
-/// Historically merging the two caused delivery deferral when the worker
-/// was actively turning (delivery.rs:1284-1291 keys on lifecycle status).
+/// CR R5 grep guard, re-pointed after M3 (R-M3: the coordinator's `sync_agent_health` in
+/// `src/coordinator/tick.rs` was retired, so the guard now covers every runtime source): no
+/// production path may write `status = "busy"`. Lifecycle status is launch/stop-owned
+/// (running/paused/stopped), and the M4 send authority delivers only to `running` seats, so a
+/// turn-level busy written into `status` would silently block delivery.
 #[test]
-fn sync_agent_health_does_not_write_lifecycle_busy_grep_guard() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let tick_rs = manifest.join("src").join("coordinator").join("tick.rs");
-    let contents = std::fs::read_to_string(&tick_rs).expect("read tick.rs");
-    // Locate sync_agent_health and its enclosing function body.
-    let start = contents
-        .find("fn sync_agent_health(")
-        .expect("sync_agent_health must exist");
-    // End at the start of the NEXT top-level fn definition.
-    let body_end = contents[start + 1..]
-        .find("\n    fn ")
-        .or_else(|| contents[start + 1..].find("\nfn "))
-        .map(|p| start + 1 + p)
-        .unwrap_or(contents.len());
-    let body = &contents[start..body_end];
-    // Forbidden patterns: any write of "busy" into lifecycle agent["status"].
+fn no_runtime_path_writes_lifecycle_busy_grep_guard() {
+    fn sources(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if path.is_dir() {
+                if name != "tests" && name != "test_support" {
+                    sources(&path, out);
+                }
+            } else if name.ends_with(".rs") && name != "tests.rs" && !name.ends_with("_tests.rs") {
+                out.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+    assert!(files.len() > 50, "FIXTURE: runtime source surface missing: {}", files.len());
     let forbidden_patterns = [
         r#""status".to_string(), serde_json::json!("busy")"#,
         r#"insert("status".to_string(), Value::String("busy""#,
         r#"agent_obj.insert("status".to_string(), json!("busy"#,
+        r#"insert("status".to_string(), json!("busy")"#,
     ];
-    for pattern in forbidden_patterns {
-        assert!(
-            !body.contains(pattern),
-            "sync_agent_health body must NOT write lifecycle status=busy \
-             (CR R5). Found forbidden pattern: {pattern}\nBody excerpt: {body}"
-        );
+    for file in files {
+        let contents = std::fs::read_to_string(&file).unwrap();
+        // Runtime code only: stop at a trailing `#[cfg(test)]` module.
+        let runtime = contents.split("#[cfg(test)]\nmod ").next().unwrap_or(&contents);
+        for pattern in forbidden_patterns {
+            assert!(
+                !runtime.contains(pattern),
+                "{} must NOT write lifecycle status=busy (CR R5). Found forbidden pattern: {pattern}",
+                file.display()
+            );
+        }
     }
-}
-
-/// CR R3 same-source: the resolver function is reachable from the
-/// coordinator tick module under the documented name. Verifies the
-/// resolver wiring (R3 — derive worker_state from the SAME agent JSON +
-/// activity classifier, not a parallel store).
-#[test]
-fn resolver_function_is_present_grep_guard() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let tick_rs = manifest.join("src").join("coordinator").join("tick.rs");
-    let contents = std::fs::read_to_string(&tick_rs).expect("read tick.rs");
-    assert!(
-        contents.contains("fn resolve_worker_runtime_state_with_fg_pgrp"),
-        "resolver function `resolve_worker_runtime_state_with_fg_pgrp` must \
-         exist in coordinator/tick.rs (Phase 1 §4)"
-    );
-    assert!(
-        contents.contains("worker_state"),
-        "tick.rs must write the worker_state field into agent state \
-         (Phase 1 §5)"
-    );
 }

@@ -402,7 +402,8 @@ fn f1_legacy_fields_are_silently_tolerated_by_public_add_and_worker_replies() {
     );
     assert!(send.is_success(), "send failed: {} {}", send.stdout, send.stderr);
     assert_eq!(send.json()["delivery"], "physical");
-    assert!(send.json().get("message_id").is_none(), "physical send creates no ledger row");
+    // R-M1a (M1 store-first): the physical receipt names its durable inbox record.
+    assert!(send.json()["message_id"].as_str().is_some_and(|id| !id.is_empty()), "{}", send.stdout);
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline && !inbox_reply_exists(ws.path(), &canary) {
         thread::sleep(Duration::from_millis(50));

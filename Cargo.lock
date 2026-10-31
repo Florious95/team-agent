@@ -721,12 +721,13 @@ dependencies = [
 
 [[package]]
 name = "team-agent"
-version = "0.5.128"
+version = "0.5.129"
 dependencies = [
  "anyhow",
  "chrono",
  "conpty-transport",
  "libc",
+ "nix",
  "regex",
  "rusqlite",
  "serde",
@@ -744,7 +745,6 @@ version = "0.1.0"
 dependencies = [
  "libproc",
  "nix",
- "rusqlite",
  "serde",
  "serde_json",
  "sha2",

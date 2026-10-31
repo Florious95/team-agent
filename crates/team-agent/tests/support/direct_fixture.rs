@@ -72,7 +72,7 @@ with (root / 'received').open('ab', buffering=0) as out:
             "teams": {"current": {
                 "team_id": "current", "status": "stopped", "tmux_socket": fixture.socket,
                 "leader": {"pane_id": fixture.pane},
-                "agents": {"worker-1": {"status": "dead", "pane_id": fixture.pane}}
+                "agents": {"worker-1": {"status": "running", "pane_id": fixture.pane}}
             }}
         }));
         fixture
@@ -108,12 +108,31 @@ with (root / 'received').open('ab', buffering=0) as out:
         });
     }
 
+    /// Durable inbox records of `recipient` in this fixture's team, read through the store's public
+    /// reader: the C3 segment layout (`.team/inbox/<team>/<recipient>/NNNNNNNN.jsonl`) is the
+    /// implementation's choice, not part of these oracles.
     pub fn inbox(&self, recipient: &str) -> Vec<Value> {
-        std::fs::read_to_string(self.root.join(format!(".team/inbox/{recipient}.jsonl")))
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect()
+        team_agent::inbox_store::read(&self.root, recipient, 10_000, Some("current"))
+            .unwrap()["messages"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Every inbox file's bytes, keyed by path. Append-only means each earlier value is a prefix
+    /// of the later one.
+    pub fn inbox_bytes(&self) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        fn walk(dir: &std::path::Path, out: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>) {
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() { walk(&path, out); } else if path.extension().is_some_and(|e| e == "jsonl") {
+                    out.insert(path.clone(), std::fs::read(&path).unwrap_or_default());
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(&self.root.join(".team/inbox"), &mut out);
+        out
     }
 }
 

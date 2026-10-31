@@ -149,6 +149,10 @@ fn registered_truth_table_keeps_physics_configuration_and_intent_separate() {
         .is_empty());
     assert_eq!(
         seat_actions(Start, StoppedVerified, false, true, false, true).unwrap(),
+        Vec::<&str>::new()
+    );
+    assert_eq!(
+        seat_actions(Start, StoppedVerified, false, true, false, false).unwrap(),
         ["start"]
     );
 }

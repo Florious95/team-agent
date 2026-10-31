@@ -64,7 +64,8 @@ fn framework_result(result_id: &str, source: &str, envelope: &Value) -> Result<V
     if normalized.presentation_error.is_some() {
         return Err(Error::Invalid("result presentation"));
     }
-    let mut value = serde_json::to_value(normalized)?;
+    let mut value = envelope.clone();
+    value["presentation"] = serde_json::to_value(normalized.presentation)?;
     value["result_id"] = json!(result_id);
     Ok(value)
 }
@@ -72,108 +73,47 @@ fn framework_result(result_id: &str, source: &str, envelope: &Value) -> Result<V
 /// Reuses the common root send/result operations. No provider implementation is
 /// selected here; the common per-recipient dispatcher remains authoritative.
 fn forward_one(context: &FrameworkContext, intent: &ForwardIntent) -> (ForwardState, Value) {
-    match &intent.payload {
-        ForwardPayload::Message {
-            message,
-            task,
-            sender,
-            recipient,
-            content,
-            mailbox,
-        } => {
-            if sender != intent.source.seat.as_str() {
-                return (
-                    ForwardState::Refused,
-                    json!({"code":"sender_binding_mismatch"}),
-                );
-            }
-            let mut options = SendOptions {
-                origin: SendOrigin::Mcp,
-                task_id: task.as_ref().map(|task| TaskId::new(task.clone())),
-                route_task_id: false,
-                sender: TrustedSender::from_runtime_identity(AgentId::new(sender)),
-                team: Some(TeamKey::new(&context.team)),
-                message_id: Some(message.as_str().into()),
-                wait_visible: false,
-                block_until_delivered: false,
-                timeout: 2.0,
-                ..Default::default()
-            };
-            if *mailbox {
-                options.presentation.sink = messaging::presentation::PresentationSink::Casefile;
-            }
-            match messaging::send_message(
-                &context.workspace.path,
-                &MessageTarget::Single(recipient.clone()),
-                content,
-                &options,
-            ) {
-                Ok(outcome) => {
-                    let accepted = outcome.message_id.as_deref() == Some(message.as_str())
-                        && matches!(
-                            outcome.status,
-                            messaging::DeliveryStatus::Queued
-                                | messaging::DeliveryStatus::StoredOnly
-                                | messaging::DeliveryStatus::Delivered
-                                | messaging::DeliveryStatus::AlreadyDelivered
-                                | messaging::DeliveryStatus::RetryScheduled
-                                | messaging::DeliveryStatus::FallbackLog
-                        );
-                    let state = if accepted {
-                        ForwardState::Accepted
-                    } else if outcome.message_id.is_none()
-                        && matches!(outcome.status, messaging::DeliveryStatus::Refused)
-                    {
-                        ForwardState::Refused
-                    } else {
-                        ForwardState::Unknown
-                    };
-                    (
-                        state,
-                        json!({"ok":outcome.ok,"message_id":outcome.message_id,
-                        "status":outcome.status,"message_status":outcome.message_status.0,
-                        "reason":outcome.reason,"verification":outcome.verification}),
-                    )
+    let run = || -> Result<Value, String> {
+        let sender = intent.source.seat.as_str();
+        match &intent.payload {
+            ForwardPayload::Message { message, task, sender: claimed, recipient, content, mailbox } => {
+                if claimed != sender { return Err("sender_binding_mismatch".into()); }
+                let mut presentation = crate::messaging::presentation::PresentationRequest::default();
+                if *mailbox {
+                    presentation.sink = crate::messaging::presentation::PresentationSink::Casefile;
+                    presentation.case_id = Some(message.as_str().into());
                 }
-                // Error alone is not proof that no destination row was written.
-                Err(_) => (
-                    ForwardState::Unknown,
-                    json!({"code":"framework_send_outcome_unknown"}),
-                ),
+                crate::station::send::execute(crate::station::send::Request {
+                    workspace: &context.workspace.path, team: Some(&context.team),
+                    to: recipient.as_str(), content, task_id: task.as_ref().map(|id| id.as_str()),
+                    message_id: Some(message.as_str()), presentation: &presentation,
+                    mailbox: *mailbox, envelope: None,
+                }, crate::station::send::Authority::Seat { sender, team: &context.team })
+            }
+            ForwardPayload::Result { result_id, envelope, .. } => {
+                let value = framework_result(result_id.as_str(), sender, envelope).map_err(|e| e.to_string())?;
+                let normalized = crate::mcp_server::normalize::normalize_report_envelope(&value);
+                let presentation = crate::messaging::presentation::PresentationRequest {
+                    sink: normalized.presentation.sink, class: normalized.presentation.class,
+                    case_id: normalized.presentation.case_id.clone(),
+                };
+                crate::station::send::execute(crate::station::send::Request {
+                    workspace: &context.workspace.path, team: Some(&context.team), to: "leader",
+                    content: value["summary"].as_str().unwrap_or(""),
+                    task_id: value["task_id"].as_str(), message_id: None,
+                    presentation: &presentation,
+                    mailbox: presentation.sink != crate::messaging::presentation::PresentationSink::Leader,
+                    envelope: Some(&value),
+                }, crate::station::send::Authority::Seat { sender, team: &context.team })
             }
         }
-        ForwardPayload::Result {
-            result_id,
-            envelope,
-        } => {
-            let envelope = match framework_result(result_id, intent.source.seat.as_str(), envelope)
-            {
-                Ok(envelope) => envelope,
-                Err(_) => {
-                    return (
-                        ForwardState::Refused,
-                        json!({"code":"invalid_result_envelope"}),
-                    )
-                }
-            };
-            match messaging::results::report_result_for_owner_team(
-                &context.workspace.path,
-                &envelope,
-                Some(&context.team),
-            ) {
-                Ok(receipt) => (ForwardState::Accepted, receipt),
-                Err(_) => (
-                    ForwardState::Unknown,
-                    json!({"code":"framework_result_outcome_unknown"}),
-                ),
-            }
-        }
+    };
+    match run() {
+        Ok(value) => (ForwardState::Accepted, value),
+        Err(error) => (ForwardState::Refused, json!({"code":"station_refused","error":error})),
     }
 }
 
-/// The root coordinator owns this consumer. Claim commits before the delegate
-/// is called, so no K3 transaction is held across root framework locks/writes.
-/// InFlight/Unknown items require explicit exact-ID reconciliation, not replay.
 pub fn drain(
     context: &FrameworkContext,
     store: &mut ContractStore,
@@ -270,19 +210,17 @@ mod tests {
             assert!(drain_scoped_pending_egress(std::path::Path::new(workspace), team, scope, true).is_err());
         }
     }
+    /// M1: the inbox retains the original envelope (station::send); only the
+    /// normalized presentation and the result id are attached for routing.
     #[test]
-    fn compact_native_result_becomes_the_existing_framework_business_schema() {
+    fn compact_native_result_keeps_its_original_envelope_with_routing_fields() {
         let compact = json!({"schema_version":1,"agent_id":"worker","task_id":"msg-bound","status":"completed","summary":"5535"});
         let result = framework_result("result-fixed", "worker", &compact).unwrap();
-        assert_eq!(result["schema_version"], "result_envelope_v1");
-        assert_eq!(result["status"], "success");
-        assert_eq!(result["task_id"], "msg-bound");
-        assert_eq!(result["summary"], "5535");
-        assert_eq!(result["result_id"], "result-fixed");
-        for field in ["changes", "tests", "risks", "artifacts", "next_actions"] {
-            assert!(result[field].is_array());
+        for field in ["schema_version", "agent_id", "task_id", "status", "summary"] {
+            assert_eq!(result[field], compact[field], "{field} must be forwarded verbatim");
         }
-        crate::messaging::helpers::validate_result_envelope(&result).unwrap();
+        assert_eq!(result["result_id"], "result-fixed");
+        assert!(result["presentation"].is_object(), "{result}");
         assert!(framework_result("result-fixed", "other", &compact).is_err());
     }
 }

@@ -9,7 +9,6 @@ use std::path::Path;
 use team_agent_contract::contract::types::SeatId;
 use team_agent_contract::host::process::{sample_process, ProcessState};
 use team_agent_contract::orchestration::{
-    operator::OperatorSend,
     store::{Outcome, SeatStatus},
 };
 
@@ -221,6 +220,8 @@ pub fn project_seat(workspace: &Path, team: &str, id: &str) -> Result<Value, Bac
     if role.provider != seat.provider {
         return Err(BackendError::Metadata);
     }
+    let executing_candidate = backend::executing_candidate_sha()?;
+    let foreign = seat.physical.as_ref().is_some_and(|target| target.candidate_sha256 != executing_candidate);
     let alive = seat
         .physical
         .as_ref()
@@ -230,7 +231,7 @@ pub fn project_seat(workspace: &Path, team: &str, id: &str) -> Result<Value, Bac
     let mut observed = Vec::new();
     let mut binding_source = None;
     if super::registry::provider(seat.provider.as_str())?.uses_tool_roundtrips()
-        && seat.session.is_some()
+        && seat.session.is_some() && !foreign
     {
         let protocol = super::pump::protocol(&mut backend, &seat, &team_agent_contract::host::clock::RealClock::new())?;
         if let team_agent_contract::contract::probe::ProbeOutcome::Observed(binding) = protocol.binding.outcome {
@@ -246,6 +247,8 @@ pub fn project_seat(workspace: &Path, team: &str, id: &str) -> Result<Value, Bac
     let binding_status = if observed.len() == 3 { "observed" } else if observed.is_empty() { "unverified" } else { "partial" };
     let status = if seat.status == SeatStatus::Stopped {
         "stopped"
+    } else if foreign {
+        "foreign"
     } else if seat.status != SeatStatus::Unknown && alive {
         "running"
     } else {
@@ -258,7 +261,9 @@ pub fn project_seat(workspace: &Path, team: &str, id: &str) -> Result<Value, Bac
     } else { None };
     Ok(
         json!({"agent_id":id,"provider":if seat.provider.as_str() == "grok_build" { "grok" } else { seat.provider.as_str() },
-         "contract_provider":seat.provider,"status":status,"model":role.model,"effort":role.effort,
+         "contract_provider":seat.provider,"status":status,"foreign_candidate":foreign,
+         "candidate":if foreign { "foreign" } else { "current" },
+         "action":if foreign { Some(backend::restart_command(workspace, team, id)) } else { None }, "model":role.model,"effort":role.effort,
         "contract_prompt_sha256":team_agent_contract::host::digest_hex(role.prompt.sha256),
         "runtime_family":"contract","contract_scope":seat.identity.scope,"contract_instance":seat.identity.instance,
         "generation":seat.identity.generation,"owner_team_id":team,"team_key":team,
@@ -272,96 +277,77 @@ pub fn project_seat(workspace: &Path, team: &str, id: &str) -> Result<Value, Bac
     )
 }
 
-pub fn enqueue(
-    workspace: &Path,
-    state: &Value,
-    recipient: &str,
-    content: &str,
-    options: &crate::messaging::SendOptions,
-) -> Result<crate::messaging::DeliveryOutcome, crate::messaging::MessagingError> {
-    use crate::messaging::{DeliveryOutcome, DeliveryStatus, MessagingError};
-    let error = |error: String| MessagingError::Validation(error);
-    let team = crate::state::projection::team_state_key(state);
-    let mut backend = Backend::open(workspace, &team).map_err(|e| error(e.to_string()))?;
-    let request = OperatorSend {
-        recipient: SeatId::new(recipient).map_err(|e| error(e.to_string()))?,
-        content: content.into(),
-        task: options.task_id.as_ref().map(|task| task.as_str().into()),
-        message: options
-            .message_id
-            .clone()
-            .map(team_agent_contract::contract::types::MessageId::new)
-            .transpose()
-            .map_err(|e| error(e.to_string()))?,
-        mailbox: options.presentation.sink
-            == crate::messaging::presentation::PresentationSink::Casefile,
-    };
-    let sender = SeatId::new(options.sender.as_str()).map_err(|e| error(e.to_string()))?;
-    let receipt = backend
-        .store
-        .send_from_framework(&request, &sender)
-        .map_err(|e| error(e.to_string()))?;
-    // Queued is durable admission only. The coordinator consumes this outbox;
-    // CLI send never performs its own paste or repeats an uncertain attempt.
-    Ok(DeliveryOutcome {
-        ok: true,
-        status: if receipt.mailbox {
-            DeliveryStatus::StoredOnly
-        } else {
-            DeliveryStatus::Queued
-        },
-        message_status: crate::messaging::helpers::MessageStatusShadow(
-            if receipt.mailbox {
-                "stored_only"
-            } else {
-                "accepted"
-            }
-            .into(),
-        ),
-        message_id: Some(receipt.message.as_str().into()),
-        verification: Some(
-            json!({"runtime":"contract","task_id":receipt.task,
-            "target":receipt.target,"native_submission":"not_observed"})
-            .to_string(),
-        ),
-        stage: None,
-        reason: None,
-        channel: None,
-        ack_forced_off: false,
-        turn_verification: None,
-    })
+pub fn stop_selected(workspace: &Path, state: &Value) -> Result<Vec<Value>, BackendError> {
+    stop_selected_with_budget(workspace, state, std::time::Duration::from_secs(20))
 }
 
-pub fn stop_selected(workspace: &Path, state: &Value) -> Result<Vec<Value>, BackendError> {
+pub fn stop_selected_with_budget(workspace: &Path, state: &Value, budget: std::time::Duration) -> Result<Vec<Value>, BackendError> {
+    let deadline = std::time::Instant::now() + budget;
     let team = crate::state::projection::team_state_key(state);
     let mut receipts = Vec::new();
     if let Some(agents) = state.get("agents").and_then(Value::as_object) {
-        for (id, agent) in agents.iter().filter(|(_, agent)| is_contract(agent)) {
+        let agents: Vec<_> = agents.iter().filter(|(_, agent)| is_contract(agent)).collect();
+        for (index, &(id, agent)) in agents.iter().enumerate() {
+            // Leave time for siblings rather than giving the first seat the entire budget.
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let seat_budget = remaining / u32::try_from(agents.len() - index).unwrap_or(u32::MAX);
             if is_paused_unstarted(agent) {
                 receipts.push(json!({"agent_id":id,"status":"paused","stopped":false}));
                 continue;
             }
-            let backend = Backend::open(workspace, &team)?;
-            let seat = backend
-                .store
-                .seat(&SeatId::new(id)?)?
-                .ok_or(BackendError::Metadata)?;
-            if seat.status == SeatStatus::Stopped {
-                receipts.push(json!({"agent_id":id,"status":"already_stopped"}));
-                continue;
-            }
-            let _ = agent;
-            let receipt = backend::stop(workspace, &team, &SeatId::new(id)?)?;
-            if receipt.outcome != Outcome::Committed {
-                return Err(BackendError::Shutdown {
-                    operation: receipt.id,
-                    phase: receipt.phase,
-                    outcome: receipt.outcome,
-                    failure: receipt.failure,
-                });
-            }
-            receipts.push(json!({"agent_id":id,"status":"stopped","operation":receipt.id}));
+            let mut physical = None;
+            let result = (|| -> Result<Value, BackendError> {
+                let agent_id = crate::model::ids::AgentId::new(id);
+                let _ownership = crate::lifecycle::lock::try_acquire_seat_lifecycle_lock(crate::lifecycle::lock::LifecycleLockRequest {
+                    workspace, operation: "native-team-stop", team: Some(&team), agent_id: Some(&agent_id),
+                }).map_err(|error| std::io::Error::other(error.to_string()))?;
+                let backend = Backend::open_readonly(workspace, &team)?;
+                let seat_id = SeatId::new(id.as_str())?;
+                let seat = backend.store.seat(&seat_id)?;
+                physical = seat.as_ref().and_then(|seat| seat.physical.clone());
+                if seat.as_ref().is_some_and(|seat| seat.status == SeatStatus::Stopped) && !backend.store.leased(&seat_id)? {
+                    return Ok(json!({"agent_id":id,"status":"already_stopped"}));
+                }
+                let receipt = backend::stop_with_budget(workspace, &team, &seat_id, seat_budget)?;
+                backend::require_stopped(&receipt)?;
+                Ok(json!({"agent_id":id,"status":"stopped","operation":receipt.id,"outcome":receipt.outcome,"stop_receipt":receipt.stop_receipt}))
+            })();
+            receipts.push(result.unwrap_or_else(|error| json!({
+                "agent_id":id,"status":"failed","error":error.to_string(),
+                "effect":if matches!(&error, BackendError::StopRefused { .. }) { "NoEffect" } else { "Unknown" },
+                "needs_recovery":!matches!(&error, BackendError::StopRefused { .. }),
+                "pane_id":physical.as_ref().map(|target| json!(target.pane)).unwrap_or_else(|| agent.get("pane_id").cloned().unwrap_or(Value::Null)),
+                "session_name":physical.as_ref().map(|target| &target.session),
+                "shared_endpoint":physical.as_ref().map(|target| target.shared_endpoint),
+                "endpoint":physical.as_ref().map(|target| json!(target.endpoint)).unwrap_or_else(|| agent.get("tmux_endpoint").cloned().unwrap_or(Value::Null)),
+                "process_pid":physical.as_ref().map(|target| target.process.identity.pid),
+            })));
         }
     }
     Ok(receipts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_shutdown_collects_failures_and_continues_to_other_seats() {
+        let root = std::env::temp_dir().join(format!("native-stop-selected-{}-{}",
+            std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&root).unwrap();
+        let state = json!({"team_key":"test","agents":{
+            "a":{"provider":"cursor","status":"running","pane_id":"%1","tmux_endpoint":"/tmp/fixture.sock"},
+            "b":{"provider":"cursor","status":"running"},
+            "z":{"provider":"cursor","status":"paused"}
+        }});
+        let receipts = stop_selected(&root, &state).unwrap();
+        assert_eq!(receipts.len(), 3);
+        assert_eq!(receipts[0]["status"], "failed");
+        assert!(receipts[0]["error"].as_str().is_some_and(|error| !error.is_empty()));
+        assert_eq!(receipts[0]["pane_id"], "%1");
+        assert_eq!(receipts[1]["status"], "failed");
+        assert_eq!(receipts[2]["status"], "paused");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

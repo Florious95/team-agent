@@ -35,7 +35,7 @@ use crate::model::yaml::{self, Value};
 use crate::state::persist::load_runtime_state;
 use crate::transport::{PaneField, PaneId, SessionName, Target, Transport, WindowName};
 
-use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
+use crate::lifecycle::lock::{acquire_seat_lifecycle_lock, LifecycleLockRequest};
 
 use super::*;
 
@@ -1116,67 +1116,24 @@ pub fn quick_start_in_workspace_with_backend(
         ))
     })?;
     let team_key_for_factory = team_id;
-    // 0.5.x Windows portability Batch 8 F7 (leader msg_590b4dce0f68):
-    // shim ownership moves to the coordinator. quick-start no longer
-    // calls `spawn_shim_and_handshake` directly. Instead we ensure
-    // the coordinator daemon is running; the coordinator's boot
-    // path calls `conpty_shim::ensure_shim_running` (idempotent —
-    // spawns if no live shim, reconnects if one is recorded).
-    //
-    // Rationale (from Batch 7 gate report F7): quick-start is a
-    // one-shot process; if it owns the shim, the shim dies when
-    // quick-start exits. Moving ownership to the coord daemon
-    // gives us the "coord can die, shim survives" invariant the
-    // design's §Shim Lifecycle chapter requires.
-    //
-    // The `ensure_coordinator_running` call is idempotent per
-    // `coordinator/health.rs::start_coordinator`. On non-Windows
-    // this whole block is cfg'd out.
+    // The PTY host is a native transport obligation, not a coordination base.
+    // Its verified handshake publishes readiness; detach preserves the host
+    // after this one-shot CLI exits, without an unrelated timer process.
     #[cfg(windows)]
-    if matches!(
-        requested,
-        crate::transport_factory::RequestedTransportBackend::ConPty
-    ) {
+    if matches!(requested, crate::transport_factory::RequestedTransportBackend::ConPty) {
         let team_key_str = team_key_for_factory.ok_or_else(|| {
-            LifecycleError::TeamSelect(
-                "team_key required for --backend conpty on Windows (Batch 9 F8)".to_string(),
-            )
+            LifecycleError::TeamSelect("team_key required for --backend conpty on Windows".into())
         })?;
-        // 0.5.x Windows portability Batch 9 F8 (leader msg_2a4cc1fa54c0):
-        // Batch 8's seed-state pattern (writing active_team_key +
-        // transport.kind to state.json before start_coordinator)
-        // caused downstream launch code to see "existing runtime, use
-        // restart" and skip spec compile. F8 fix: pass `--team`
-        // directly to the coord daemon via `start_coordinator_with_team`
-        // so state doesn't need pre-seeding.
-        //
-        // The coord daemon's `run_daemon_with_coordinator_and_boot_tmux`
-        // then calls `ensure_shim_running` with the CLI-supplied
-        // team_key. When quick-start's downstream code runs, state.json
-        // still has whatever it had before (empty on fresh launch), so
-        // the spec-compile + worker-spawn path runs normally.
         let caller_transport = quick_start_tmux_backend(&workspace);
         if let Some((summary, blockers, next_actions)) = preflight_fresh_leader_identity(&caller_transport) {
             return Ok(QuickStartReport::PreflightBlocked {
                 summary, blockers, next_actions, attach_commands: Vec::new(),
             });
         }
-        let run_ws = crate::coordinator::WorkspacePath::new(workspace.clone());
-        let start_report =
-            crate::coordinator::health::start_coordinator_with_team(&run_ws, Some(team_key_str))
-                .map_err(|e| LifecycleError::TeamSelect(format!("coordinator start: {e}")))?;
-        if !start_report.ok {
-            return Err(LifecycleError::TeamSelect(format!(
-                "coordinator start failed: schema_error={:?}, action={:?}",
-                start_report.schema_error, start_report.action
-            )));
-        }
-        // Give the coordinator a beat to write its transport.shim
-        // block so the factory's `pipe_ready` gate opens on the
-        // next resolve. The coordinator's `run_daemon` calls
-        // `ensure_shim_running` inside its boot code path (see
-        // `coordinator::backoff::run_daemon`).
-        std::thread::sleep(std::time::Duration::from_millis(2500));
+        let workspace_hash = crate::tmux_backend::workspace_short_hash_pub(&workspace);
+        crate::coordinator::conpty_shim::ensure_shim_running(&workspace, team_key_str, &workspace_hash)
+            .map_err(|error| LifecycleError::TeamSelect(format!("PTY host unavailable: {error}")))?
+            .detach();
     }
     let input = crate::transport_factory::TransportFactoryInput::new(
         &workspace,
@@ -1453,12 +1410,6 @@ pub(crate) fn quick_start_with_transport_in_workspace_pi_preflight(
     // Bug2:原子写(tmp+rename),避免半截 spec。
     let spec_path = crate::model::paths::runtime_spec_path(&workspace, &state_team_key);
     write_spec_atomic(&spec_path, &spec)?;
-    let _store = crate::message_store::MessageStore::open(&workspace).map_err(|error| {
-        LifecycleError::StatePersist(format!(
-            "database initialization failed at {}: {error}; coordinator start was not attempted",
-            workspace.join(".team/team.db").display()
-        ))
-    })?;
     let resolved_spec_path =
         std::fs::canonicalize(&spec_path).unwrap_or_else(|_| spec_path.clone());
     let scoped_endpoint = transport.tmux_endpoint();
@@ -1518,7 +1469,7 @@ pub(crate) fn quick_start_with_transport_in_workspace_pi_preflight(
     let quick_start_phase_timer = crate::lifecycle::restart::RestartPhaseTimer::start();
     let mut launch =
         launch_with_transport_in_workspace(&workspace, &spec_path, false, yes, true, transport)?;
-    let mut coordinator_state = "not_attempted";
+    let coordinator_state = "not_required";
     let completion = (|| -> Result<(), LifecycleError> {
         annotate_persisted_team_depth(
             &workspace, &state_team_key,
@@ -1543,20 +1494,6 @@ pub(crate) fn quick_start_with_transport_in_workspace_pi_preflight(
         }
         launch.session_capture_incomplete_agents =
             quick_start_session_capture_incomplete_agents(&workspace, &state_team_key);
-        let coordinator_workspace = crate::coordinator::WorkspacePath::new(workspace.clone());
-        coordinator_state = "attempted_unknown";
-        let coordinator_report = crate::coordinator::start_coordinator(&coordinator_workspace)
-            .map_err(|error| LifecycleError::StatePersist(format!(
-                "coordinator start failed for {}: {error}; inspect {} before retrying",
-                workspace.display(),
-                crate::coordinator::coordinator_log_path(&coordinator_workspace).display()
-            )))?;
-        quick_start_phase_timer.emit(
-            &workspace, "launch.phase",
-            crate::lifecycle::restart::LifecyclePhase::CoordinatorStart,
-        );
-        require_quick_start_coordinator_started(&coordinator_report, &workspace)?;
-        coordinator_state = "running_confirmed";
         Ok(())
     })();
     if let Err(error) = completion {
@@ -1661,35 +1598,6 @@ fn preserve_quick_start_bootstrap_binding(
             state[key] = value.clone();
         }
     }
-}
-
-fn require_quick_start_coordinator_started(
-    report: &crate::coordinator::StartReport,
-    workspace: &Path,
-) -> Result<(), LifecycleError> {
-    if report.ok {
-        return Ok(());
-    }
-    let details = serde_json::json!({
-        "ok": report.ok,
-        "status": report.status,
-        "pid": report.pid,
-        "previous_pid": report.previous_pid,
-        "binary_path": report.binary_path,
-        "binary_version": report.binary_version,
-        "rotation_reason": report.rotation_reason,
-        "binary_identity_relation": report.binary_identity_relation,
-        "log": report.log,
-        "schema_error": report.schema_error.as_ref().map(|error| format!("{error:?}")),
-        "action": report.action,
-        "workspace": workspace,
-        "coordinator_log_path": crate::coordinator::coordinator_log_path(
-            &crate::coordinator::WorkspacePath::new(workspace.to_path_buf())
-        ),
-    });
-    Err(LifecycleError::StatePersist(format!(
-        "coordinator start refused: {details}; workers may already be started; inspect the report before retrying quick-start"
-    )))
 }
 
 #[cfg(test)]
@@ -1813,46 +1721,6 @@ mod fresh_quick_start_leader_binding_tests {
             bootstrap["team_owner"]
         );
         assert_eq!(merged["teams"]["current"]["owner_epoch"], json!(7));
-    }
-
-    #[test]
-    fn coordinator_negative_report_retains_actual_details_and_does_not_become_ready() {
-        let mut report = crate::coordinator::StartReport {
-            ok: false,
-            pid: None,
-            status: crate::coordinator::StartOutcome::SchemaIncompatible,
-            previous_pid: Some(crate::coordinator::Pid(17)),
-            binary_path: Some("/tmp/candidate/team-agent".to_string()),
-            binary_version: Some("0.5.112".to_string()),
-            rotation_reason: Some("original rotation reason".to_string()),
-            binary_identity_relation:
-                crate::coordinator::CoordinatorBinaryIdentityRelation::Unknown,
-            log: Some(PathBuf::from("/tmp/current/.team/runtime/coordinator.log")),
-            schema_error: Some(crate::coordinator::SchemaError::InitFailed {
-                message: "original database permission denied".to_string(),
-            }),
-            action: Some("repair the exact database permissions".to_string()),
-        };
-        let error = require_quick_start_coordinator_started(&report, Path::new("/tmp/current"))
-            .unwrap_err()
-            .to_string();
-        for detail in [
-            "schema_incompatible",
-            "original database permission denied",
-            "repair the exact database permissions",
-            "/tmp/candidate/team-agent",
-            "/tmp/current/.team/runtime/coordinator.log",
-            "workers may already be started",
-        ] {
-            assert!(error.contains(detail), "lost {detail}: {error}");
-        }
-        report.ok = true;
-        report.status = crate::coordinator::StartOutcome::AlreadyRunning;
-        report.binary_identity_relation =
-            crate::coordinator::CoordinatorBinaryIdentityRelation::DaemonNewerThanCaller;
-        assert!(
-            require_quick_start_coordinator_started(&report, Path::new("/tmp/current")).is_ok()
-        );
     }
 
     #[test]
