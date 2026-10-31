@@ -1108,12 +1108,45 @@ pub fn wait_for_or_panic<F: FnMut() -> bool>(description: &str, predicate: F, ti
 ///   - Test-only timeout evidence; it does not alter delivery state
 /// maturity: wired
 /// ---
+/// R-M1a (M1 store-first): every send stores before it submits, so a receipt's `message_id` is a
+/// record in the recipient's inbox (read through the store reader; the segment layout is not an oracle).
+pub fn assert_receipt_names_inbox_record(ws: &TestWorkspace, receipt: &Value) {
+    let message_id = receipt["message_id"].as_str()
+        .unwrap_or_else(|| panic!("a store-first receipt must name its inbox record: {receipt}"));
+    let recipient = receipt["recipient"].as_str()
+        .unwrap_or_else(|| panic!("receipt must name its recipient: {receipt}"));
+    let inbox = team_agent::inbox_store::read(ws.path(), recipient, 10_000, None).unwrap();
+    assert!(
+        inbox["messages"].as_array().unwrap().iter().any(|record| record["message_id"] == message_id),
+        "receipt {message_id} is not a durable record of {recipient}'s inbox: {inbox}"
+    );
+}
+
+/// R-M1b (M1 store-first): a send to a target without a live physical endpoint (stale pane, stopped
+/// worker, missing window) exits 0 with a durable inbox record and an explained `delivery_error`.
+/// It never claims physical delivery, types nothing, and creates no queued obligation.
+pub fn assert_stored_not_delivered(ws: &TestWorkspace, result: &TaResult) -> Value {
+    let value = result.json();
+    assert!(result.is_success(), "a store-first send exits 0: stdout={} stderr={}", result.stdout, result.stderr);
+    assert_eq!(value["ok"], true, "{value}");
+    assert_eq!(value["status"], "stored", "{value}");
+    assert_eq!(value["stored"], true, "{value}");
+    assert_eq!(value["live"], false, "a non-live target must not be reported live: {value}");
+    assert_eq!(value["submission"], "not_attempted", "nothing may be typed: {value}");
+    assert!(value["delivery_error"].as_str().is_some_and(|error| !error.is_empty()), "the receipt must explain why nothing was typed: {value}");
+    assert!(value.get("delivery").is_none(), "no physical delivery may be claimed: {value}");
+    assert!(value.get("delivery_pending").is_none(), "no queued obligation: {value}");
+    assert_receipt_names_inbox_record(ws, &value);
+    value
+}
+
 /// Observe actual input on the physical endpoint returned by the public locate command.
 pub fn assert_physical_input(ws: &TestWorkspace, receipt: &Value, content: &str) {
     assert_eq!(receipt["status"], "sent");
     assert_eq!(receipt["delivery"], "physical");
     assert!(receipt["accepted"].is_null(), "physical receipt must not claim provider acceptance");
-    assert!(receipt.get("message_id").is_none());
+    // R-M1a (M1 store-first): the physical receipt names the durable inbox record written before submission.
+    assert_receipt_names_inbox_record(ws, receipt);
     let located = run_ta(ws, &["locate", "--workspace", ws.path().to_str().unwrap(), "--json"]);
     assert!(located.is_success(), "locate failed: {}", located.stdout);
     let located = located.json();

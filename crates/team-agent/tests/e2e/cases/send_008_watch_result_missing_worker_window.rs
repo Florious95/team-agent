@@ -26,12 +26,10 @@ fn send_008_watch_result_missing_worker_window_blocks_before_watch() {
             "--json",
         ],
     );
-    let value = out.json();
-    assert!(!out.is_success(), "missing physical endpoint must refuse: {value}");
-    assert_eq!(value["ok"], false);
-    assert!(value.get("message_id").is_none(), "refusal must not queue work: {value}");
-    assert!(value.get("delivery_pending").is_none());
-    assert!(value["error"].is_string());
+    // R-M1b (M1 store-first): stored with an explained delivery_error, never delivered, and no
+    // result watcher is advertised for a message that was not typed.
+    let value = assert_stored_not_delivered(&ws, &out);
+    assert!(value.get("watch").is_none() && value.get("poll_via").is_none(), "{value}");
 
     let _ = run_ta(
         &ws,

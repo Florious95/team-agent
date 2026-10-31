@@ -579,16 +579,20 @@ mod tests {
     #[test]
     fn tails_records_and_does_not_consume_them() {
         let ws = TempWorkspace::new("direct-inbox-tail");
+        // R-M5: legacy inbox reads are team-scoped (unversioned rows with no team context are
+        // hidden as unattributed), so the tail/non-consuming oracle uses team-tagged rows.
         for n in 0..5 {
-            append(ws.path(), "leader", &json!({"content": n})).unwrap();
+            append(ws.path(), "leader", &json!({"content": n, "team": "alpha"})).unwrap();
         }
-        let expected = json!([{"content": 2}, {"content": 3}, {"content": 4}]);
+        let expected = json!([
+            {"content": 2, "team": "alpha"}, {"content": 3, "team": "alpha"}, {"content": 4, "team": "alpha"}
+        ]);
         assert_eq!(
-            read(ws.path(), "leader", 3, None).unwrap()["messages"],
+            read(ws.path(), "leader", 3, Some("alpha")).unwrap()["messages"],
             expected
         );
         assert_eq!(
-            read(ws.path(), "leader", 3, None).unwrap()["messages"],
+            read(ws.path(), "leader", 3, Some("alpha")).unwrap()["messages"],
             expected
         );
     }

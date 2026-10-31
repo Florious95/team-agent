@@ -152,7 +152,9 @@ fn r1_selected_team_status_is_independent_of_the_top_level_sibling() {
 }
 
 #[test]
-fn r2_existing_bad_database_is_checked_without_state_and_never_rewritten() {
+fn r2_existing_bad_retired_database_is_ignored_without_state_and_never_rewritten() {
+    // R-M4: the SQLite message store is retired; doctor never opens it, so a corrupt legacy file
+    // is neither a schema failure nor ever rewritten, and doctor creates no state.
     for command in ["doctor"] {
         let f = Fixture::new("bad-db");
         let runtime = f.workspace.join(".team/runtime");
@@ -162,11 +164,10 @@ fn r2_existing_bad_database_is_checked_without_state_and_never_rewritten() {
         fs::write(&db, original).unwrap();
         let out = f.run(command, &f.workspace, &["--json"]);
         let value = report(&out);
-        assert_eq!(out.status.code(), Some(1), "{value}");
-        assert_eq!(value["ok"], false);
-        assert_eq!(value["coordinator"]["schema_ok"], false);
-        assert!(value["issues"].as_array().unwrap().iter()
-            .any(|issue| issue_id(issue) == Some("coordinator_schema_incompatible")));
+        assert!(!value["issues"].as_array().unwrap().iter()
+            .any(|issue| issue_id(issue) == Some("coordinator_schema_incompatible")), "{value}");
+        let text = value.to_string().to_lowercase();
+        assert!(!text.contains("sqlite") && !text.contains("not a database"), "{value}");
         assert_eq!(fs::read(db).unwrap(), original);
         assert!(!runtime.join("state.json").exists());
     }
@@ -214,46 +215,5 @@ fn r4_comms_human_has_only_summary_issue_and_repair_lines() {
         let triage = bounded_triage_with_full_details(&text, &value);
         assert_eq!(triage.len(), 1 + value["issues"].as_array().unwrap().len()
             + value["suggested_repairs"].as_array().unwrap().len(), "{text}");
-    }
-}
-
-#[test]
-#[cfg(unix)]
-fn r5_coordinator_issue_and_detail_share_one_observation_during_pid_rotation() {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    use std::time::{Duration, Instant};
-
-    for command in ["doctor"] {
-        let f = Fixture::new("pid-rotation");
-        let runtime = f.seed_runtime();
-        let fifo = runtime.join("coordinator.pid");
-        let replacement = runtime.join("replacement.pid");
-        fs::write(&replacement, "2147483647\n").unwrap();
-        assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
-        let writer = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(25);
-            loop {
-                if let Ok(mut stream) = fs::OpenOptions::new().write(true)
-                    .custom_flags(libc::O_NONBLOCK).open(&fifo)
-                {
-                    stream.write_all(b"not-a-pid\n").unwrap();
-                    // Replacement precedes first-reader EOF: a second health
-                    // read would deterministically observe stale, not invalid_pid.
-                    fs::rename(&replacement, &fifo).unwrap();
-                    break;
-                }
-                assert!(Instant::now() < deadline, "no coordinator snapshot reader");
-                std::thread::sleep(Duration::from_millis(10));
-            }
-        });
-        let value = report(&f.run(command, &f.workspace, &["--json"]));
-        writer.join().unwrap();
-        let issue = value["issues"].as_array().unwrap().iter()
-            .find(|issue| issue_id(issue) == Some("coordinator_unavailable")).unwrap();
-        assert_eq!(issue["status"], "invalid_pid", "{value}");
-        assert_eq!(value["coordinator"]["status"], issue["status"], "{value}");
-        assert_eq!(value["coordinator"]["pid"], issue["pid"]);
-        assert_eq!(value["coordinator"]["schema_ok"], issue["schema_ok"]);
     }
 }

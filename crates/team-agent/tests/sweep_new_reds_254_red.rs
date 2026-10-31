@@ -358,9 +358,14 @@ fn worker_mcp_send_ignores_or_refuses_scope_arg_and_cannot_self_route_to_sibling
 fn worker_recipient_mcp_uses_physical_directory_not_sqlite_delivery() {
     let tools = source("src/mcp_server/tools.rs");
     let send = source_section(&tools, "pub fn send_message", "/// `report_result`");
-    assert!(send.contains("direct_delivery::directory") && send.contains("directory.send("));
+    // R-M5: MCP send_message is a thin adapter over the shared station send core (seat authority),
+    // which resolves the physical directory and stores in the inbox; no retired queue anywhere.
+    assert!(send.contains("crate::station::send::execute") && send.contains("Authority::Seat"));
     assert!(!send.contains("MessageStore::open") && !send.contains(".create_message("));
     assert!(!send.contains("messaging::send_message"), "physical worker delivery must not re-enter the retired queue");
+    let core = source("src/station/send.rs");
+    assert!(core.contains("direct_delivery::directory") && core.contains("inbox_store::store("));
+    assert!(!core.contains("MessageStore::open") && !core.contains(".create_message(") && !core.contains("messaging::send_message"));
 }
 
 #[test]
@@ -453,7 +458,8 @@ fn mcp_send_same_team_owner_delivers_physically_without_a_queue_row() {
     assert_eq!(call.body["delivery"], "physical");
     assert_eq!(call.body["recipient"], "worker_b");
     assert!(call.body["accepted"].is_null(), "physical submit does not prove provider acceptance");
-    assert!(call.body.get("message_id").is_none(), "ordinary peer send creates no ledger id");
+    // R-M1a (M1 store-first): the receipt names its durable inbox record; still no queue row.
+    assert!(call.body["message_id"].as_str().is_some_and(|id| !id.is_empty()), "{}", call.body);
     assert!(harness.message_rows_containing(canary).is_empty());
     assert!(harness.pane_contains_count("worker_b", canary) >= 1);
     assert_eq!(harness.pane_contains_count("worker_a", canary), 0);

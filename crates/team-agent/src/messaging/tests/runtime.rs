@@ -345,10 +345,10 @@ fn send_message_target_not_in_team_is_refused() {
         "hi",
         &opts,
     );
-    assert!(
-        matches!(&out, Err(MessagingError::Routing(reason)) if reason.contains("unknown recipient: ghost")),
-        "{out:?}"
-    );
+    // M5 two-phase admission: an unresolvable target is one typed refusal, not a routing error.
+    let refusal = typed_refusal(&out);
+    assert_eq!(refusal["reason"], "name_not_resolvable", "{refusal}");
+    assert_eq!(refusal["invalid_targets"], serde_json::json!(["ghost"]), "{refusal}");
     let inbox = crate::inbox_store::read(&ws, "ghost", 10, None).unwrap();
     assert!(inbox["messages"].as_array().unwrap().is_empty(), "a refused send stores nothing");
 }
@@ -374,10 +374,9 @@ fn send_message_broadcast_empty_team_skips_no_recipients() {
     .unwrap();
     let opts = SendOptions::default();
     let out = send_message(&ws, &MessageTarget::Broadcast, "hi", &opts);
-    assert!(
-        matches!(&out, Err(MessagingError::Routing(reason)) if reason == "send requires at least one recipient"),
-        "{out:?}"
-    );
+    let refusal = typed_refusal(&out);
+    assert_eq!(refusal["reason"], "empty_target_list", "{refusal}");
+    assert_eq!(refusal["invalid_targets"], serde_json::json!(["*"]), "{refusal}");
 }
 
 #[test]
@@ -387,10 +386,21 @@ fn send_message_fanout_empty_recipients_fails() {
     let ws = tmp_ws("sendfanout");
     let opts = SendOptions::default();
     let out = send_message(&ws, &MessageTarget::Fanout(vec![]), "hi", &opts);
-    assert!(
-        matches!(&out, Err(MessagingError::Routing(reason)) if reason == "send requires at least one recipient"),
-        "{out:?}"
-    );
+    assert_eq!(typed_refusal(&out)["reason"], "empty_target_list");
+}
+
+/// M5 phase 1: a refused send is `Ok` with `ok:false`, status `refused`, no message id, and the
+/// typed refusal (reason, invalid_targets, not_attempted) in its verification payload.
+fn typed_refusal(out: &Result<DeliveryOutcome, MessagingError>) -> serde_json::Value {
+    let out = out.as_ref().expect("an admission refusal is a typed outcome");
+    assert!(!out.ok, "{out:?}");
+    assert_eq!(out.status, DeliveryStatus::Refused, "{out:?}");
+    assert!(out.message_id.is_none(), "a refused send stores nothing: {out:?}");
+    let refusal: serde_json::Value =
+        serde_json::from_str(out.verification.as_deref().expect("typed refusal payload")).unwrap();
+    assert_eq!(refusal["stored"], false, "{refusal}");
+    assert_eq!(refusal["not_attempted"], serde_json::json!([]), "{refusal}");
+    refusal
 }
 
 // ════════════════════════════════════════════════════════════════════════

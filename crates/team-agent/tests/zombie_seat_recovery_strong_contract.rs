@@ -171,31 +171,6 @@ impl SeatCase {
             .cloned()
     }
 
-    fn wait_for_terminal_registration(&self, agent: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let state = team_agent::state::projection::select_runtime_state(
-                &self.workspace,
-                Some(&self.team),
-            )
-            .expect("select canonical team state");
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for canonical terminal registration of {agent}"
-            );
-            let worker = state
-                .pointer(&format!("/agents/{agent}"))
-                .expect("selected canonical worker");
-            if worker.get("status").and_then(Value::as_str) == Some("stopped")
-                && worker.get("worker_state").and_then(Value::as_str) == Some("DEAD")
-                && worker.get("stale") == Some(&json!(true))
-                && worker.get("stale_reason").and_then(Value::as_str) == Some("pane_dead")
-            {
-                return state;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
 
     /// Quick-start a SECOND team in the SAME workspace (shares the tmux
     /// endpoint). Used to build the shared-surface fixture Z5 needs.
@@ -369,57 +344,22 @@ fn z1_dead_seat_force_remove_is_idempotent_with_exit_ok_pinned() {
 #[test]
 #[serial(env)]
 fn z2_dead_pane_projection_pins_all_death_fields() {
+    // M3 retired the coordinator that persisted a dead pane as a terminal registration
+    // (status=stopped, worker_state=DEAD, stale_reason=pane_dead). Death is now observed only at query
+    // time and readers never write. The surviving oracle: after a worker pane dies, the public status
+    // never reports it running (no false green), its live peer stays running, and reads leave the
+    // canonical state untouched.
     let case = SeatCase::start("zsr2-z2", "zsr", &["w1", "w2"]);
     case.kill_pane("w1");
     assert!(
         case.pane_live("w2").is_some(),
         "Z2 setup: live peer w2 must remain on the shared team session"
     );
-    let canonical_before_full = case.wait_for_terminal_registration("w1");
-    let agent = case
-        .status_agent("w1")
-        .expect("w1 present in status projection");
-    assert_eq!(
-        agent.get("worker_state").and_then(Value::as_str),
-        Some("DEAD"),
-        "Z2: a dead pane must project worker_state=DEAD (missing/other = false green); agent={agent}"
-    );
-    assert_eq!(
-        agent.get("stale"),
-        Some(&json!(true)),
-        "Z2: death must set stale=true; agent={agent}"
-    );
-    assert_eq!(
-        agent.get("stale_reason").and_then(Value::as_str),
-        Some("pane_dead"),
-        "Z2: death must set stale_reason=pane_dead; agent={agent}"
-    );
-    assert_eq!(
-        agent.get("status").and_then(Value::as_str),
-        Some("stopped"),
-        "Z2: a dead pane must project the exact status=stopped (not merely non-running); agent={agent}"
-    );
-    let canonical_after_full = team_agent::state::projection::select_runtime_state(
-        &case.workspace,
-        Some(&case.team),
-    )
-    .expect("select canonical team state");
-    assert_eq!(
-        terminal_worker_signature(&canonical_before_full, "w1"),
-        terminal_worker_signature(&canonical_after_full, "w1"),
-        "Z2: full status enrichment must not alter canonical terminal registration"
-    );
-
     let canonical_before_public = team_agent::state::projection::select_runtime_state(
         &case.workspace,
         Some(&case.team),
     )
     .expect("select canonical team state");
-    assert_eq!(
-        terminal_worker_signature(&canonical_after_full, "w1"),
-        terminal_worker_signature(&canonical_before_public, "w1"),
-        "Z2: public status prerequisite must retain canonical terminal registration"
-    );
     let public = case.run_cli(&[
         "status",
         "--workspace",
@@ -435,29 +375,37 @@ fn z2_dead_pane_projection_pins_all_death_fields() {
         String::from_utf8_lossy(&public.stderr)
     );
     let public_json = json_stdout(&public, "Z2 public status");
-    let node = public_json
+    let node_of = |name: &str| public_json
         .get("nodes")
         .and_then(Value::as_array)
-        .and_then(|nodes| nodes.iter().find(|node| {
-            node.get("name").and_then(Value::as_str) == Some("w1")
-        }))
-        .expect("Z2 public status w1 node");
-    let mut keys = node
-        .as_object()
-        .expect("Z2 public status node object")
-        .keys()
+        .and_then(|nodes| nodes.iter().find(|node| node.get("name").and_then(Value::as_str) == Some(name)))
         .cloned()
-        .collect::<Vec<_>>();
-    keys.sort();
-    assert_eq!(
-        keys,
-        vec!["activity", "effort", "health", "model", "name", "provider", "runtime_status", "session_name", "tmux_command"],
-        "Z2: public status must expose exactly the nine-field node projection; node={node}"
+        .unwrap_or_else(|| panic!("Z2 public status {name} node: {public_json}"));
+    let node = node_of("w1");
+    // The brief keeps its nine fields; an unobserved node adds only its scoped diagnosis.
+    let keys = node.as_object().expect("Z2 public status node object");
+    for field in ["activity", "effort", "health", "model", "name", "provider", "runtime_status", "session_name", "tmux_command"] {
+        assert!(keys.contains_key(field), "Z2: public status node lacks {field}; node={node}");
+    }
+    assert!(
+        keys.keys().all(|key| ["activity", "effort", "health", "model", "name", "provider", "runtime_status",
+            "session_name", "tmux_command", "observation_reason", "next_action"].contains(&key.as_str())),
+        "Z2: unexpected public status fields; node={node}"
+    );
+    assert!(
+        node.get("observation_reason").and_then(Value::as_str).is_some()
+            && node.get("next_action").and_then(Value::as_str).is_some_and(|action| action.contains("doctor")),
+        "Z2: an unobserved dead pane must carry its scoped diagnosis and a doctor action; node={node}"
+    );
+    assert_ne!(
+        node.get("runtime_status").and_then(Value::as_str),
+        Some("running"),
+        "Z2: a dead pane must never be reported running (false green); node={node}"
     );
     assert_eq!(
-        node.get("runtime_status").and_then(Value::as_str),
-        Some("stopped"),
-        "Z2: canonical terminal registration must produce a strict stopped public brief node; node={node}"
+        node_of("w2").get("runtime_status").and_then(Value::as_str),
+        Some("running"),
+        "Z2: the live peer must stay running"
     );
     let canonical_after_public = team_agent::state::projection::select_runtime_state(
         &case.workspace,
@@ -465,9 +413,9 @@ fn z2_dead_pane_projection_pins_all_death_fields() {
     )
     .expect("select canonical team state");
     assert_eq!(
-        terminal_worker_signature(&canonical_before_public, "w1"),
-        terminal_worker_signature(&canonical_after_public, "w1"),
-        "Z2: public brief read must not alter canonical terminal registration"
+        canonical_before_public.pointer("/agents/w1"),
+        canonical_after_public.pointer("/agents/w1"),
+        "Z2: a public status read must not alter the canonical worker record"
     );
     case.shutdown();
 }

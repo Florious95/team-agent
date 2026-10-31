@@ -816,10 +816,13 @@ fn b1_send_reports_the_physical_endpoint_failure_without_rebinding() {
         ],
         None,
     );
-    let value = json_stdout_even_on_error("B1 send refusal", &output);
-    assert!(!output.status.success(), "a missing selected PTY cannot be reported as sent");
-    assert!(value["error"].as_str().is_some_and(|error| error.contains("pane") && error.contains("not live")), "{value}");
-    assert!(value["action"].as_str().is_some_and(|action| action.contains("doctor")), "{value}");
+    let value = json_stdout_even_on_error("B1 send receipt", &output);
+    // R-M1b (M1 store-first): a leader message to a missing selected PTY is stored, never reported
+    // as sent; the receipt carries the physical endpoint failure, and the binding is not rewritten.
+    assert!(output.status.success(), "{value}");
+    assert_eq!((value["status"].clone(), value["live"].clone()), (json!("stored"), json!(false)), "{value}");
+    assert!(value.get("delivery").is_none(), "a missing selected PTY cannot be reported as delivered: {value}");
+    assert!(value["delivery_error"].as_str().is_some_and(|error| error.contains("pane")), "{value}");
     assert!(!has_typed_reason(&value, "PaneWorkspaceMismatch"), "send must not substitute a retired owner gate for physical endpoint evidence");
 }
 

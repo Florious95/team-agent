@@ -3,7 +3,6 @@
 use crate::framework::*;
 use serde_json::Value;
 use std::fs;
-use std::time::Duration;
 
 fn collect_reminders(value: &Value, command: &str, reminders: &mut Vec<(String, String)>) {
     match value {
@@ -28,14 +27,6 @@ fn collect_reminders(value: &Value, command: &str, reminders: &mut Vec<(String, 
         }
         _ => {}
     }
-}
-
-fn coordinator_tick_count(ws: &TestWorkspace) -> u64 {
-    fs::read_to_string(ws.path().join(".team/runtime/coordinator_tick.json"))
-        .ok()
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .and_then(|value| value.get("coordinator_tick_iteration_count").and_then(Value::as_u64))
-        .unwrap_or(0)
 }
 
 fn session_missing_events(ws: &TestWorkspace) -> Vec<Value> {
@@ -104,7 +95,7 @@ fn every_command_reminder_is_free_of_collect() {
 }
 
 #[test]
-fn stopping_the_only_worker_keeps_session_coordinator_and_restartability() {
+fn stopping_the_only_worker_keeps_session_and_restartability() {
     let team_id = "stoponlyred";
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
     let ws_path = ws.path().to_str().expect("workspace path UTF-8");
@@ -127,21 +118,15 @@ fn stopping_the_only_worker_keeps_session_coordinator_and_restartability() {
     assert!(stop.is_success(), "stop-agent: {}", stop.stderr);
     assert_json_field_eq_bool(&stop.json(), "/stopped", true);
 
-    let ticks_at_stop_return = coordinator_tick_count(&ws);
-    let coordinator_ticked_after_stop = wait_for(
-        || coordinator_tick_count(&ws) > ticks_at_stop_return,
-        Duration::from_secs(8),
-        Duration::from_millis(50),
-    );
+    // R-M3: there is no resident coordinator to keep ticking; the contract is the session and restartability.
     let session_preserved = tmux_session_exists_on_socket(&socket, &session);
     let missing_events = session_missing_events(&ws);
 
     let doctor = run_ta(&ws, &["doctor", "--workspace", ws_path, "--json"]);
     let doctor_json = serde_json::from_str::<Value>(&doctor.stdout).unwrap_or(Value::Null);
-    let coordinator_healthy = doctor_json.pointer("/coordinator/ok").and_then(Value::as_bool)
-        == Some(true)
-        && doctor_json.pointer("/coordinator/status").and_then(Value::as_str) == Some("running")
-        && doctor_json.pointer("/coordinator/schema_ok").and_then(Value::as_bool) == Some(true);
+    // R-M3: doctor reports the retired coordinator as not required.
+    let coordinator_not_required =
+        doctor_json.pointer("/coordinator/status").and_then(Value::as_str) == Some("not_required");
 
     let start = run_ta(
         &ws,
@@ -171,13 +156,12 @@ fn stopping_the_only_worker_keeps_session_coordinator_and_restartability() {
     );
 
     assert!(
-        coordinator_ticked_after_stop
-            && session_preserved
-            && coordinator_healthy
+        session_preserved
+            && coordinator_not_required
             && missing_events.is_empty()
             && woke_worker,
-        "single-worker stop contract failed: coordinator_ticked_after_stop={coordinator_ticked_after_stop}, \
-         session_preserved={session_preserved} ({session}@{socket}), coordinator_healthy={coordinator_healthy}, \
+        "single-worker stop contract failed: \
+         session_preserved={session_preserved} ({session}@{socket}), coordinator_not_required={coordinator_not_required}, \
          coordinator.session_missing={missing_events:?}, woke_worker={woke_worker}; \
          doctor={doctor_json}, start_stdout={}, start_stderr={}, events={}",
         start.stdout,

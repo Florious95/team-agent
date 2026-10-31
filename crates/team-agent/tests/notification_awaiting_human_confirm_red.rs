@@ -60,12 +60,11 @@ fn awaiting_human_confirm_uses_active_tail_structural_prompt_and_dedupes_per_fin
                 .to_string(),
         );
     }
-    if !src.contains("ApprovalFingerprint")
-        || !src.contains("fingerprint")
-        || !src.contains("awaiting_human_confirm_seen")
-    {
+    // R-M3: the cross-tick seen-set (`awaiting_human_confirm_seen`) belonged to the retired
+    // coordinator tick; the (team, agent_id, fingerprint) identity itself is still required.
+    if !src.contains("ApprovalFingerprint") || !src.contains("fingerprint") {
         failures.push(
-            "same prompt across ticks must dedupe by (team, agent_id, fingerprint)".to_string(),
+            "awaiting_human_confirm prompts must keep a (team, agent_id, fingerprint) identity".to_string(),
         );
     }
     if !src.contains("send_to_leader_receiver") || !src.contains("deliver_to_leader.submit") {

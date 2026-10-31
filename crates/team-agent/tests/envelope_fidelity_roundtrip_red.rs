@@ -122,8 +122,9 @@ fn tooth2_repeated_reports_append_without_collect_or_narrowing_the_envelopes() {
     let message_id = call.body["message_id"].as_str().expect("inbox message id");
     let first = inbox_record(&harness, message_id);
     let persisted = first["envelope"].clone();
-    let inbox = harness.workspace_path().join(".team/inbox/leader.jsonl");
-    let before = std::fs::read(&inbox).expect("durable inbox");
+    // R-M1c: the segment layout is the store's choice; byte checks cover every inbox file.
+    let before = inbox_bytes(harness.workspace_path());
+    assert!(!before.is_empty(), "durable inbox");
     let mut expected = submitted.clone();
     let expected_object = expected
         .as_object_mut()
@@ -137,7 +138,7 @@ fn tooth2_repeated_reports_append_without_collect_or_narrowing_the_envelopes() {
         "the inbox must retain the full accepted envelope without collect-time projection"
     );
     assert_eq!(inbox_record(&harness, message_id), first);
-    assert_eq!(std::fs::read(&inbox).unwrap(), before, "reading does not collect or consume");
+    assert_eq!(inbox_bytes(harness.workspace_path()), before, "reading does not collect or consume");
 
     let next = fidelity_envelope("APPENDED");
     let call = worker.call_tool("report_result", json!({"envelope": next}));
@@ -149,9 +150,10 @@ fn tooth2_repeated_reports_append_without_collect_or_narrowing_the_envelopes() {
         assert_eq!(second["envelope"][field], next[field]);
     }
     assert_eq!(inbox_record(&harness, message_id), first, "append must not rewrite prior records");
-    let after = std::fs::read(&inbox).unwrap();
-    assert!(after.starts_with(&before));
-    assert_eq!(std::str::from_utf8(&after).unwrap().lines().count(), 2);
+    let after = inbox_bytes(harness.workspace_path());
+    assert!(appended_only(&before, &after), "append must not rewrite or shrink any inbox file");
+    let records = team_agent::inbox_store::read(harness.workspace_path(), "leader", 64, Some("teamA")).unwrap();
+    assert_eq!(records["messages"].as_array().unwrap().len(), 2);
 }
 
 #[test]
@@ -166,8 +168,8 @@ fn reverse_control_reserved_owner_scope_conflict_does_not_append() {
     object.insert("result_id".to_string(), json!(result_id));
     object.insert("owner_team_id".to_string(), json!("teamB"));
 
-    let inbox = harness.workspace_path().join(".team/inbox/leader.jsonl");
-    let before = std::fs::read(&inbox).unwrap_or_default();
+    // R-M1c: compare every inbox file, so the oracle stays meaningful under segmented layouts.
+    let before = inbox_bytes(harness.workspace_path());
     let call = worker.call_tool("report_result", json!({"envelope": submitted}));
     let refusal = call.body.to_string();
     assert!(
@@ -176,8 +178,31 @@ fn reverse_control_reserved_owner_scope_conflict_does_not_append() {
         call.body,
         call.raw
     );
-    assert_eq!(std::fs::read(&inbox).unwrap_or_default(), before,
+    assert_eq!(inbox_bytes(harness.workspace_path()), before,
         "rejected cross-scope input must not append an inbox record");
+}
+
+/// Every inbox `.jsonl` file's bytes, keyed by path (layout-agnostic).
+fn inbox_bytes(workspace: &std::path::Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    fn walk(dir: &std::path::Path, out: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>) {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() { walk(&path, out); } else if path.extension().is_some_and(|e| e == "jsonl") {
+                out.insert(path.clone(), std::fs::read(&path).unwrap_or_default());
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(&workspace.join(".team/inbox"), &mut out);
+    out
+}
+
+/// Append-only: every earlier file still exists and its earlier bytes are a prefix of its later bytes.
+fn appended_only(
+    before: &std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+    after: &std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+) -> bool {
+    before.iter().all(|(path, bytes)| after.get(path).is_some_and(|later| later.starts_with(bytes)))
 }
 
 fn inbox_record(harness: &McpSimHarness, message_id: &str) -> Value {

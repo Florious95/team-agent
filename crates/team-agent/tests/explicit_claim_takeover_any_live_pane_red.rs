@@ -18,8 +18,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-#[cfg(unix)]
-use sha2::{Digest, Sha256};
 use team_agent::messaging::leader_channel::{
     resolve_live_leader_channel, LeaderChannelResolution,
 };
@@ -445,7 +443,6 @@ fn shared_pane_after_external_and_internal_claims_repeats_mcp_send_and_report_re
     let candidate = PathBuf::from(env!("CARGO_BIN_EXE_team-agent"))
         .canonicalize()
         .expect("canonicalize candidate team-agent");
-    let candidate_sha = sha256_file(&candidate);
     let tmux = format!("{},12345,0", fixture.socket.display());
     let claim_env = [
         ("TMUX", tmux.as_str()),
@@ -479,20 +476,8 @@ fn shared_pane_after_external_and_internal_claims_repeats_mcp_send_and_report_re
     assert_canonical_current_team_receiver(&workspace_a, "after external A claim");
     assert_canonical_current_team_receiver(&workspace_b, "after external B claim");
 
-    let mut coord_a = spawn_candidate_coordinator(&hermetic, &candidate, &workspace_a);
-    let mut coord_b = spawn_candidate_coordinator(&hermetic, &candidate, &workspace_b);
-    let receipt = coordinator_identity_receipt(
-        &candidate,
-        &candidate_sha,
-        &workspace_a,
-        coord_a.pid(),
-        &workspace_b,
-        coord_b.pid(),
-    );
-    eprintln!("{receipt}");
-    coord_a.assert_running("workspace A");
-    coord_b.assert_running("workspace B");
-
+    // R-M3: no per-workspace coordinator is spawned any more (the daemon was retired; M1 send and
+    // report are direct). The shared-pane claim, delivery and inbox-isolation oracles are unchanged.
     let mut mcp_a = spawn_worker_mcp(&hermetic, &candidate, &workspace_a);
     let mut mcp_b = spawn_worker_mcp(&hermetic, &candidate, &workspace_b);
     let pid = std::process::id();
@@ -896,15 +881,6 @@ fn receiver_nonce(workspace: &Path) -> String {
 }
 
 #[cfg(unix)]
-fn sha256_file(path: &Path) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(std::fs::read(path).unwrap_or_else(|error| {
-        panic!("read {} for sha256: {error}", path.display())
-    }));
-    format!("{:x}", hasher.finalize())
-}
-
-#[cfg(unix)]
 struct SharedLeaderPane {
     session: String,
     socket: PathBuf,
@@ -1000,166 +976,6 @@ fn start_shared_leader_pane(hermetic: &HermeticTestEnv, cwd: &Path) -> SharedLea
         socket,
         pane,
     }
-}
-
-#[cfg(unix)]
-struct OwnedChild {
-    child: Child,
-}
-
-#[cfg(unix)]
-impl OwnedChild {
-    fn pid(&self) -> u32 {
-        self.child.id()
-    }
-
-    fn assert_running(&mut self, label: &str) {
-        assert!(
-            self.child.try_wait().unwrap().is_none(),
-            "{label} candidate coordinator exited before identity receipt"
-        );
-    }
-}
-
-#[cfg(unix)]
-impl Drop for OwnedChild {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-#[cfg(unix)]
-fn spawn_candidate_coordinator(
-    hermetic: &HermeticTestEnv,
-    candidate: &Path,
-    workspace: &Path,
-) -> OwnedChild {
-    let runtime = workspace.join(".team/runtime");
-    std::fs::create_dir_all(&runtime).unwrap();
-    let log = std::fs::File::create(runtime.join("coordinator-stdio.log")).unwrap();
-    let mut command = Command::new(candidate);
-    command
-        .args([
-            "coordinator",
-            "--workspace",
-            workspace.to_str().unwrap(),
-            "--tick-interval",
-            "0.25",
-        ])
-        .current_dir(workspace)
-        .env("HOME", hermetic.home())
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log.try_clone().unwrap()))
-        .stderr(Stdio::from(log));
-    for key in hermetic::CALLER_IDENTITY_ENVS {
-        command.env_remove(key);
-    }
-    let child = command.spawn().expect("spawn candidate coordinator");
-    OwnedChild { child }
-}
-
-#[cfg(unix)]
-fn coordinator_identity_receipt(
-    candidate: &Path,
-    candidate_sha: &str,
-    workspace_a: &Path,
-    pid_a: u32,
-    workspace_b: &Path,
-    pid_b: u32,
-) -> Value {
-    let meta_a = wait_coordinator_metadata(workspace_a);
-    let meta_b = wait_coordinator_metadata(workspace_b);
-    assert_eq!(
-        meta_a.get("pid").and_then(Value::as_u64),
-        Some(u64::from(pid_a)),
-        "workspace A coordinator.json pid must be the spawned candidate process; metadata={meta_a}"
-    );
-    assert_eq!(
-        meta_b.get("pid").and_then(Value::as_u64),
-        Some(u64::from(pid_b)),
-        "workspace B coordinator.json pid must be the spawned candidate process; metadata={meta_b}"
-    );
-    let path_a = coordinator_binary_path(&meta_a, workspace_a);
-    let path_b = coordinator_binary_path(&meta_b, workspace_b);
-    let sha_a = sha256_file(&path_a);
-    let sha_b = sha256_file(&path_b);
-    assert_eq!(
-        sha_a, candidate_sha,
-        "workspace A coordinator binary_path bytes must match candidate; candidate={} meta={}",
-        candidate.display(),
-        path_a.display()
-    );
-    assert_eq!(
-        sha_b, candidate_sha,
-        "workspace B coordinator binary_path bytes must match candidate; candidate={} meta={}",
-        candidate.display(),
-        path_b.display()
-    );
-    json!({
-        "candidate_binary": {
-            "path": candidate.to_string_lossy(),
-            "sha256": candidate_sha,
-        },
-        "coordinators": [
-            {
-                "workspace": workspace_a.to_string_lossy(),
-                "pid": meta_a.get("pid"),
-                "binary_path": path_a.to_string_lossy(),
-                "sha256": sha_a,
-                "metadata_path": workspace_a.join(".team/runtime/coordinator.json").to_string_lossy(),
-            },
-            {
-                "workspace": workspace_b.to_string_lossy(),
-                "pid": meta_b.get("pid"),
-                "binary_path": path_b.to_string_lossy(),
-                "sha256": sha_b,
-                "metadata_path": workspace_b.join(".team/runtime/coordinator.json").to_string_lossy(),
-            }
-        ]
-    })
-}
-
-#[cfg(unix)]
-fn wait_coordinator_metadata(workspace: &Path) -> Value {
-    let path = workspace.join(".team/runtime/coordinator.json");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut last = String::new();
-    while Instant::now() < deadline {
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            last = text;
-            if let Ok(value) = serde_json::from_str::<Value>(&last) {
-                if value
-                    .get("binary_path")
-                    .and_then(Value::as_str)
-                    .is_some_and(|path| !path.is_empty())
-                {
-                    return value;
-                }
-            }
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    panic!(
-        "coordinator.json missing usable binary_path for {}; last={last:?}",
-        workspace.display()
-    );
-}
-
-#[cfg(unix)]
-fn coordinator_binary_path(metadata: &Value, workspace: &Path) -> PathBuf {
-    let raw = metadata
-        .get("binary_path")
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| {
-            panic!(
-                "coordinator.json binary_path field missing for {}; metadata={metadata}",
-                workspace.display()
-            )
-        });
-    PathBuf::from(raw)
-        .canonicalize()
-        .unwrap_or_else(|_| PathBuf::from(raw))
 }
 
 #[cfg(unix)]

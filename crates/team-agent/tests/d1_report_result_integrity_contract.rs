@@ -168,8 +168,11 @@ fn report(envelope: Value) -> Value {
         .expect("D1 contract setup: report_result should accept the envelope");
     assert_eq!(ok.fields["ok"], true);
     assert_eq!(ok.fields["status"], "stored");
-    let records = std::fs::read_to_string(ws.join(".team/inbox/leader.jsonl")).unwrap();
-    let records: Vec<Value> = records.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    // R-M1c: the inbox layout (team-scoped segments) is the store's choice; read through its reader.
+    let records = team_agent::inbox_store::read(&ws, "leader", 10_000, Some("current")).unwrap()["messages"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["message_id"], ok.fields["message_id"]);
     assert!(!ws.join(".team/runtime/team.db").exists());

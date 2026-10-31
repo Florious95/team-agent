@@ -26,17 +26,6 @@ fn result_writes_do_not_use_insert_or_replace() {
     );
 }
 
-#[test]
-fn coordinator_tick_iteration_count_is_observable() {
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let tick_rs = manifest.join("src/coordinator/tick.rs");
-    let source = std::fs::read_to_string(tick_rs).expect("read coordinator tick source");
-    assert!(
-        source.contains("coordinator_tick_iteration_count"),
-        "N21 requires an observable coordinator_tick_iteration_count increment so a non-exiting coordinator proves progress"
-    );
-}
-
 fn envelope(result_id: &str, status: &str, summary: &str) -> serde_json::Value {
     json!({
         "schema_version": "result_envelope_v1",

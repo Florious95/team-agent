@@ -196,12 +196,14 @@ fn assert_persisted(
          got: {combined}"
     );
     assert!(rows.is_empty(), "physical delivery must not write queue rows");
-    let receipts = value.get("results").and_then(Value::as_array).cloned().unwrap_or_else(|| vec![value.clone()]);
+    // Fan-out receipts: the list key is pinned by the D-M5-2b oracles, not by this grammar test.
+    let receipts = value.get("results").or_else(|| value.get("messages")).and_then(Value::as_array).cloned().unwrap_or_else(|| vec![value.clone()]);
     let mut recipients = Vec::new();
     for receipt in &receipts {
         assert_eq!(receipt["delivery"], "physical");
         assert_eq!(receipt["status"], "sent");
-        assert!(receipt.get("message_id").is_none());
+        // R-M1a (M1 store-first): every physical receipt names its durable inbox record.
+        assert!(receipt["message_id"].as_str().is_some_and(|id| !id.is_empty()), "{receipt}");
         recipients.push(receipt["recipient"].as_str().unwrap());
     }
     recipients.sort_unstable();
@@ -249,20 +251,17 @@ fn positional_to_leader_form_refuses_canonically_when_unbound() {
     let value = parsed.as_ref().unwrap_or_else(|| {
         panic!("M2c (leader): the leader form must parse and emit JSON; got: {combined}")
     });
-    assert_eq!(
-        value.get("ok").and_then(Value::as_bool),
-        Some(false),
-        "M2c (leader): unbound leader must refuse: {combined}"
-    );
-    assert_eq!(
-        value.get("reason").and_then(Value::as_str),
-        Some("leader_not_attached"),
-        "M2c (leader): the refusal must be the canonical leader_not_attached shape (grammar \
-         resolved, binding absent) — never an unknown-target/parse error; got: {combined}"
-    );
+    // R-M1b (M1 store-first): the leader form resolves through the same grammar; an unbound
+    // leader stores the message with an explanatory delivery_error and types nothing. It is never
+    // an unknown-target or parse error.
+    assert_eq!(value.get("ok").and_then(Value::as_bool), Some(true), "M2c (leader): {combined}");
+    assert_eq!(value["status"], "stored", "M2c (leader): {combined}");
+    assert_eq!(value["live"], false, "M2c (leader): {combined}");
+    assert_eq!(value["recipient"], "leader", "M2c (leader): {combined}");
+    assert!(value["delivery_error"].as_str().is_some_and(|e| !e.is_empty()), "M2c (leader): {combined}");
     assert!(
         case.db_rows("m2c leader probe").is_empty(),
-        "M2c (leader): a refused leader send must have zero side effects"
+        "M2c (leader): an unbound leader send writes no queue rows"
     );
     case.shutdown();
 }

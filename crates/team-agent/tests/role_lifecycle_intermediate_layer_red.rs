@@ -311,12 +311,18 @@ fn duplicate_add_running_or_stopped_is_fail_closed_with_zero_session_side_effect
 #[test]
 fn running_start_refuses_plain_and_parameterized_calls_without_mutation() {
     let (ws, shims) = ws_seed("rolelife-running", "copilot", "gpt-6-luna", None);
-    for flags in [&[][..], &["--model", "gpt-5.6-luna", "--effort", "high", "--bypass", "true"][..]] {
-        let before = snapshot(&ws, &shims, "seed");
-        let r = run(&ws, &shims, &start(&ws, "seed", flags)); reject(&r, "start already-running seat");
-        let text = format!("{} {}", r.stdout, r.stderr).to_lowercase(); assert!(text.contains("running") || text.contains("already"));
-        assert_eq!(snapshot(&ws, &shims, "seed"), before);
-    }
+    // R-M2: `start` of a verified-live seat is idempotent — no error and the live instance (pane,
+    // session, role, spec) is unchanged.
+    let before = snapshot(&ws, &shims, "seed");
+    let r = run(&ws, &shims, &start(&ws, "seed", &[]));
+    assert!(r.is_success(), "plain start of a live seat is idempotent: {} {}", r.stdout, r.stderr);
+    assert_eq!(snapshot(&ws, &shims, "seed"), before, "plain start must not replace the live instance: {}", r.stdout);
+    // A configuration change cannot be applied to a running process: refused, nothing mutated.
+    let before = snapshot(&ws, &shims, "seed");
+    let r = run(&ws, &shims, &start(&ws, "seed", &["--model", "gpt-5.6-luna", "--effort", "high", "--bypass", "true"]));
+    reject(&r, "parameterized start of an already-running seat");
+    let text = format!("{} {}", r.stdout, r.stderr).to_lowercase(); assert!(text.contains("running") || text.contains("already"));
+    assert_eq!(snapshot(&ws, &shims, "seed"), before);
 }
 
 #[test]

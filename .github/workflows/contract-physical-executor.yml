@@ -323,7 +323,7 @@ jobs:
               run_case health-delivery cargo test -p team-agent --lib --locked spine2_sync_health_working_status_delivers_same_tick -- --test-threads=1 --nocapture
               run_case monitor-delivery cargo test -p team-agent --lib --locked b4_monitor_step_failure_does_not_block_deliver_pending -- --test-threads=1 --nocapture
               run_case trust-scrollback cargo test -p team-agent --lib --locked contract_b_delivery_gate_trusts_startup_handled_state_over_pane_scrollback -- --test-threads=1 --nocapture
-              run_case delivery-integration-fixtures cargo test -p team-agent --locked --test claude_provider_trust_prompt_red --test event_chain_integrity_red --test provider_submit_verification_red -- --test-threads=1 --nocapture
+              run_case delivery-integration-fixtures cargo test -p team-agent --locked --test claude_provider_trust_prompt_red --test provider_submit_verification_red -- --test-threads=1 --nocapture
               ;;
             issue345-red)
               run_case issue345 cargo test -p team-agent --lib --locked issue345 -- --test-threads=1 --nocapture

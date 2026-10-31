@@ -84,7 +84,6 @@ mod cases {
 mod framework_tests {
     use super::framework::*;
     use serde_json::json;
-    use std::time::Duration;
 
     #[test]
     fn owned_coordinator_predicate_requires_debug_binary_and_e2e_workspace() {
@@ -218,9 +217,11 @@ mod framework_tests {
     }
 
     #[test]
-    fn drop_stops_owned_coordinator_after_worker_is_stopped() {
+    fn drop_removes_workspace_and_exact_session_after_worker_is_stopped() {
+        // R-M3: the coordinator is retired, so Drop has no daemon to stop; it must still remove the
+        // workspace and clear exactly the owned session after the only worker was stopped.
         let team_id = format!("cleanup{}", std::process::id());
-        let (workspace, coordinator_pid, tmux_socket, session_name) = {
+        let (workspace, tmux_socket, session_name) = {
             let ws = TestWorkspace::new("cleanup-drop").with_fake_spec(&["a"]);
             let qs = quick_start_fake(&ws, &team_id);
             assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
@@ -244,28 +245,17 @@ mod framework_tests {
                 stop.stdout,
                 stop.stderr
             );
-
-            wait_for_or_panic(
-                "coordinator pid file",
-                || read_pid(&ws.coordinator_pid_file()).is_some(),
-                Duration::from_secs(3),
-            );
-            let pid = read_pid(&ws.coordinator_pid_file()).expect("coordinator pid");
             assert!(
-                ws.pid_is_owned_coordinator(pid),
-                "pid {pid} should be the workspace-owned debug coordinator"
+                read_pid(&ws.coordinator_pid_file()).is_none(),
+                "no coordinator may be started by quick-start or stop-agent"
             );
             assert!(
-                pid_is_running(pid),
-                "coordinator pid {pid} should be live before Drop"
+                tmux_session_exists_on_socket(&tmux_socket, &session_name),
+                "the owned session must survive stopping the only worker"
             );
-            (ws.path().to_path_buf(), pid, tmux_socket, session_name)
+            (ws.path().to_path_buf(), tmux_socket, session_name)
         };
 
-        assert!(
-            wait_until_pid_exits(coordinator_pid, Duration::from_secs(3)),
-            "coordinator pid {coordinator_pid} should be stopped by TestWorkspace::Drop"
-        );
         assert!(
             !workspace.exists(),
             "workspace {} should be removed by TestWorkspace::Drop",

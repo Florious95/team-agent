@@ -17,9 +17,9 @@ use std::path::Path;
 
 #[test]
 fn e1_status_json_exposes_structured_stale_reason_from_physical_liveness() {
-    let status_port = source("src/cli/status_port.rs");
-    let tick = source("src/coordinator/tick.rs");
-    let combined = format!("{status_port}\n{tick}");
+    // R-M3: the coordinator tick (`src/coordinator/tick.rs`) was retired; status computes stale
+    // facts at query time, so the status port is the whole surface now.
+    let combined = source("src/cli/status_port.rs");
 
     let mut missing = Vec::new();
     for required in [
@@ -45,7 +45,7 @@ fn e1_stale_detection_must_not_write_lifecycle_agent_status() {
     for rel in [
         "src/cli/status_port.rs",
         "src/cli/diagnose.rs",
-        "src/coordinator/tick.rs",
+        // R-M3: `src/coordinator/tick.rs` (the retired observation writer) is no longer a surface.
     ] {
         let text = source(rel);
         assert!(
