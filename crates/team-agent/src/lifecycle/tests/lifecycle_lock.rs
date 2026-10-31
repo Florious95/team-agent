@@ -235,7 +235,8 @@ fn r2_lifecycle_lock_exists_precondition() {
     assert_public_operation(&agent, "stop-agent");
     assert_public_operation(&agent, "reset-agent");
     assert_body_is_unlocked(&agent, "pub(crate) fn start_agent_at_paths");
-    assert_body_is_unlocked(&agent, "pub(super) fn stop_agent_at_paths");
+    // D-M5-9: role_config's locked start path reuses this lock-free stop for orphan replacement.
+    assert_body_is_unlocked(&agent, "pub(crate) fn stop_agent_at_paths");
     assert_body_is_unlocked(&agent, "fn reset_agent_at_paths");
 
     let remove = read_src("lifecycle/restart/remove.rs");
