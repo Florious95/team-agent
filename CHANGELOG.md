@@ -12,6 +12,9 @@
 - **Migration and receipts:** workspaces without native contract authority receive an explicit idempotent no-op; existing incomplete authority is retained rather than reset. Quick-start no longer claims a coordinator was started.
 - **Messaging contracts:** restore C23 `PeerNotInScope` refusals and preserve qualified cross-workspace sender identities.
 - **Release packaging:** align installer/platform versions, remove committed executable artifacts, ship installer assets rather than incomplete Rust sources, and test every publication platform before publishing.
+- **Known upgrade/diagnostic limits:** status may omit migration/restart guidance; some native seats remain below `Ready` and refuse restart (use explicit `stop-agent`/`start-agent`, respecting session-preservation checks). Native-seat doctor may report `worker_pane_binding_stale`.
+- **Known delivery/UI limits:** unexpected worker exits are not automatically announced to the leader. Distinct reports with identical summaries may deduplicate; use unique summary nonces. Complete Claude numbered trust prompts manually before dispatch; the station guard does not yet recognize that menu.
+- **Reminder lifetime:** stopping a team does not cancel its pending reminders. Its agenda can remain active until those reminders fire or are explicitly cancelled.
 
 ## [0.5.128]
 
