@@ -95,9 +95,10 @@ fn mailbox_broadcast_appends_to_every_published_worker_except_sender() {
     fixture.set_state(&json!({"teams": {"current": {
         "tmux_socket": fixture.socket,
         "leader": {"pane_id": fixture.pane},
+        // R-M4: the send authority admits only published `running` rows as live.
         "agents": {
-            "sender": {}, "worker-1": {"pane_id": fixture.pane},
-            "worker-2": {"pane_id": fixture.pane}
+            "sender": {}, "worker-1": {"status": "running", "pane_id": fixture.pane},
+            "worker-2": {"status": "running", "pane_id": fixture.pane}
         }
     }}}));
     let tools = TeamOrchestratorTools::with_identity(
@@ -122,7 +123,9 @@ fn mailbox_broadcast_appends_to_every_published_worker_except_sender() {
     assert_ne!(receipts[0]["message_id"], receipts[1]["message_id"]);
     for receipt in receipts {
         assert_eq!(receipt["status"], "stored");
-        assert_eq!(receipt["mailbox"], true);
+        // R-M1a/M1b: a mailbox receipt is stored and never live (no separate `mailbox` key).
+        assert_eq!(receipt["stored"], true, "{receipt}");
+        assert_eq!(receipt["live"], false, "{receipt}");
         let recipient = receipt["recipient"].as_str().unwrap();
         let records = fixture.inbox(recipient);
         assert_eq!(records.len(), 1);
@@ -146,15 +149,18 @@ fn mailbox_broadcast_appends_to_every_published_worker_except_sender() {
         .to_value();
     let results = ordinary["results"].as_array().unwrap();
     assert_eq!(results.len(), 2);
-    assert!(results
-        .iter()
-        .all(|receipt| receipt["delivery"] == "physical" && receipt.get("message_id").is_none()));
+    // R-M1a: each physical receipt names its own new inbox record.
+    assert!(results.iter().all(|receipt| receipt["delivery"] == "physical"
+        && receipt["message_id"].as_str().is_some_and(|id| !id.is_empty())), "{ordinary}");
     fixture.received("Team Agent message from sender:\n\nbroadcast physical control");
     assert!(!std::fs::read_to_string(fixture.root.join("received"))
         .unwrap()
         .contains("broadcast mailbox token"));
-    for recipient in ["worker-1", "worker-2"] {
-        assert_eq!(fixture.inbox(recipient).len(), 1);
+    for receipt in results {
+        let records = fixture.inbox(receipt["recipient"].as_str().unwrap());
+        assert_eq!(records.len(), 2, "mailbox record plus the stored physical send: {records:?}");
+        assert_eq!(records[0]["content"], "broadcast mailbox token");
+        assert_eq!(records[1]["message_id"], receipt["message_id"]);
     }
     assert!(!fixture.root.join(".team/runtime/team.db").exists());
 }

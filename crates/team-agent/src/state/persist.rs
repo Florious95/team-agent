@@ -2572,15 +2572,19 @@ mod tests {
                 "other": {"agent_id": "other", "provider": "codex", "window": "old-other", "pane_id": "%old", "spawn_epoch": 1}
             },
         });
-        let err = save_runtime_state_with_lifecycle_topology_authority(
-            &ws,
-            &incoming,
-            "team-a",
-            &["target"],
-        )
-        .expect_err("authorized target must not hide other agent conflict");
-        assert!(matches!(err, StateError::SaveConflict(_)));
-        assert!(err.to_string().contains("agent_id=other"));
+        // Entity-scoped writers (M5, D-M5-8): the ordinary writer still refuses the stale
+        // peer view, but a writer bounded to `target` never writes `other`, so its stale copy
+        // of `other` is ignored instead of conflicting, and the newer row on disk survives.
+        let before = read_state(&ws);
+        assert!(matches!(save_runtime_state(&ws, &incoming), Err(StateError::SaveConflict(_))));
+        assert_eq!(read_state(&ws), before);
+        save_runtime_state_with_lifecycle_topology_authority(&ws, &incoming, "team-a", &["target"])
+            .unwrap();
+        let saved = read_state(&ws);
+        for field in ["window", "pane_id", "spawn_epoch"] {
+            assert_eq!(saved["agents"]["other"][field], before["agents"]["other"][field], "{field}");
+        }
+        assert_eq!(saved["agents"]["target"]["status"], json!("stopped"));
     }
 
     #[test]
@@ -2772,7 +2776,9 @@ mod tests {
         save_runtime_state_with_lifecycle_topology_authority(&ws, &incoming, "team-a", &["f2"])
             .unwrap();
         let mut stale = read_state(&ws);
-        assert!(stale["agents"]["f1"].get("status").is_none());
+        // M5 (D-M5-8): the undeclared peer's pending reservation is kept verbatim rather than
+        // stripped to a roster stub.
+        assert_eq!(stale["agents"]["f1"]["status"], json!("starting"));
         assert!(live_topology_fields(&stale["agents"]["f1"]).is_empty());
 
         // f1 starts after f2 takes its snapshot; capture is not complete yet.
@@ -2802,12 +2808,14 @@ mod tests {
             "_pending_session_id": "session-f2"
         });
 
-        // Ordinary writers still cannot overwrite the live peer from a stub.
-        assert!(matches!(
-            save_runtime_state(&ws, &stale),
-            Err(StateError::SaveConflict(_))
-        ));
-        assert_eq!(read_state(&ws), latest);
+        // Ordinary writers still cannot overwrite the live peer from a stale snapshot. Now that
+        // the snapshot carries f1's reservation rather than a stub, the writer may conflict or
+        // merge, but f1's newer capture must survive either way.
+        match save_runtime_state(&ws, &stale) {
+            Ok(()) | Err(StateError::SaveConflict(_)) => {}
+            other => panic!("unexpected ordinary save outcome: {other:?}"),
+        }
+        assert_eq!(read_state(&ws)["agents"]["f1"], latest["agents"]["f1"]);
         save_runtime_state_with_lifecycle_topology_authority(&ws, &stale, "team-a", &["f2"])
             .unwrap();
         let saved = read_state(&ws);
@@ -2896,11 +2904,20 @@ mod tests {
                 "f2": {"agent_id": "f2", "status": "running"}
             }
         });
-        let err =
-            save_runtime_state_with_lifecycle_topology_authority(&ws, &incoming, "team-a", &["f2"])
-                .expect_err("two completed topologies for f1 must conflict");
+        let err = save_runtime_state(&ws, &incoming)
+            .expect_err("two completed topologies for f1 must conflict");
         assert!(matches!(err, StateError::SaveConflict(_)));
         assert!(err.to_string().contains("agent_id=f1"));
+        // M5 (D-M5-8): a writer bounded to f2 does not write f1, so it neither conflicts on
+        // nor replaces f1's completed topology.
+        let before = read_state(&ws);
+        save_runtime_state_with_lifecycle_topology_authority(&ws, &incoming, "team-a", &["f2"])
+            .unwrap();
+        let saved = read_state(&ws);
+        for field in ["status", "pane_id", "pane_pid", "window", "spawned_at", "spawn_epoch"] {
+            assert_eq!(saved["agents"]["f1"][field], before["agents"]["f1"][field], "{field}");
+        }
+        assert_eq!(saved["agents"]["f2"]["status"], json!("running"));
     }
 
     #[test]

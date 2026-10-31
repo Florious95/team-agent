@@ -178,7 +178,10 @@ fn red_2_worker_mcp_typo_preserves_scope_without_delivery_or_db_write() {
     let (is_error, body) = case.mcp_send("alpha", "qa-naming", "btea", &content);
 
     assert!(is_error, "RED-2: typo remains an MCP refusal: {body}");
-    assert_eq!(body["reason"], json!("peer_not_in_scope"));
+    // M5 (homomorphic send, admission ruling 1b): an in-scope typo carries the same
+    // name_not_resolvable reason as the CLI; peer_not_in_scope is only for real
+    // cross-scope targets (red_5_worker_mcp_qualified_targets_stay_in_scope).
+    assert_eq!(body["reason"], json!("name_not_resolvable"));
     assert!(body["error"].as_str().is_some_and(|error| error.contains("btea")), "{body}");
     if body.get("candidates").is_some() {
         assert_candidates_stay_in_team(&body, "qa-naming");

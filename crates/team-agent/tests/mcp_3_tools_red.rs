@@ -470,11 +470,13 @@ fn m04_send_message_single_leader_broadcast_and_mailbox_close_the_team_scope_loo
     assert_eq!(mailbox.body["status"], "stored");
     let inbox = team_agent::inbox_store::read(harness.workspace_path(), "worker_a", 16, Some("teamA")).unwrap();
     let records = inbox["messages"].as_array().unwrap();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0]["content"], "M04_MAILBOX");
-    assert_eq!(records[0]["message_id"], mailbox.body["message_id"]);
-    assert_eq!(records[0]["sender"], "worker_b");
-    assert_eq!(records[0]["team"], "teamA");
+    // R-M1a (M1 store-first): the physical peer and broadcast sends were stored before submit too.
+    let contents = records.iter().map(|record| record["content"].as_str().unwrap()).collect::<Vec<_>>();
+    assert_eq!(contents, ["M04_PEER", "M04_BROADCAST", "M04_MAILBOX"], "{inbox}");
+    let record = &records[2];
+    assert_eq!(record["message_id"], mailbox.body["message_id"]);
+    assert_eq!(record["sender"], "worker_b");
+    assert_eq!(record["team"], "teamA");
     assert!(harness.pane_text("worker_a").contains("M04_PEER"));
     assert!(harness.pane_text("leader").contains("M04_LEADER"));
     assert!(!harness.pane_text("leader").contains("M04_BROADCAST"), "peer broadcast must not create a leader mirror");
