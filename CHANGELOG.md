@@ -8,6 +8,7 @@
 
 - **Space Station runtime:** shared durable messaging, per-seat lifecycle fences, on-demand agenda jobs, and file-projection authority replace the resident coordination path. Legacy SQLite import remains available for migration.
 - **Legacy upgrade safety:** read both historical inbox layouts without crossing team scope; current lifecycle, send, migration, and status commands retire positively identified legacy coordinators. Doctor reports surviving daemons without stopping them.
+- **Upgrade operating rule:** do not operate the same workspace concurrently with legacy (<0.5.129) and 0.5.129 CLI versions; competing legacy launches can cause daemon flapping. Quiesce legacy commands before cutover.
 - **Migration and receipts:** workspaces without native contract authority receive an explicit idempotent no-op; existing incomplete authority is retained rather than reset. Quick-start no longer claims a coordinator was started.
 - **Messaging contracts:** restore C23 `PeerNotInScope` refusals and preserve qualified cross-workspace sender identities.
 - **Release packaging:** align installer/platform versions, remove committed executable artifacts, ship installer assets rather than incomplete Rust sources, and test every publication platform before publishing.
