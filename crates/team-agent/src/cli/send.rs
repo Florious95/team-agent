@@ -41,15 +41,8 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
     let logical_to = logical_to_from_args(args, alias.as_ref().map(|_| "leader"))?;
     let content = args.message.join(" ");
     if content.is_empty() { return Err(CliError::Usage("empty_message: send requires a nonempty message".into())); }
-    if logical_to.split(',').any(|target| matches!(
-        crate::messaging::parse_logical_address(target),
-        Ok(crate::messaging::LogicalAddress { target: crate::messaging::LogicalAddressTarget::SessionWindow { .. }, .. })
-    )) {
-        return Err(CliError::Usage("Terminal-window addressing is no longer supported; use an agent name or leader, with --workspace/--team to select scope".into()));
-    }
     let (workspace, team) = alias.as_ref().map_or((&args.workspace, args.team.as_deref()),
         |entry| (&entry.workspace, Some(entry.team_key.as_str())));
-    crate::coordinator::retire_legacy_coordinator(workspace).map_err(CliError::Runtime)?;
     let outcome = crate::station::send::execute(crate::station::send::Request {
         workspace, team, to: &logical_to, content: &content,
         task_id: args.task.as_deref(), message_id: args.message_id.as_deref(),

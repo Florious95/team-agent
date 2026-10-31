@@ -154,7 +154,7 @@ pub fn send_message(
             team: team.ok_or_else(|| MessagingError::Routing("MCP send requires captured team scope".into()))?,
         }
     } else {
-        crate::station::send::Authority::Operator { sender: opts.sender.as_str() }
+        crate::station::send::Authority::Operator { sender: opts.sender.display_name() }
     };
     let value = crate::station::send::execute(crate::station::send::Request {
         workspace, team, to: &to, content,
@@ -162,14 +162,17 @@ pub fn send_message(
         message_id: opts.message_id.as_deref(), presentation: &opts.presentation,
         mailbox: opts.presentation.sink != PresentationSink::Leader, envelope: None,
     }, authority).map_err(MessagingError::Routing)?;
+    let refused = value["status"] == "refused";
     let physical = value["delivery"] == "physical" || value["sent"].as_u64().is_some_and(|n| n > 0);
-    let status = if value["status"] == "partial" { DeliveryStatus::FanoutPartial }
+    let status = if refused { DeliveryStatus::Refused }
+        else if value["status"] == "partial" { DeliveryStatus::FanoutPartial }
         else if physical { DeliveryStatus::Delivered } else { DeliveryStatus::StoredOnly };
     Ok(DeliveryOutcome {
         ok: value["ok"].as_bool().unwrap_or(false), ack_forced_off: opts.requires_ack,
-        status, message_status: MessageStatusShadow(if physical { "submitted" } else { "stored" }.into()),
+        status, message_status: MessageStatusShadow(if refused { "refused" } else if physical { "submitted" } else { "stored" }.into()),
         message_id: value["message_id"].as_str().map(str::to_string),
-        verification: Some(value.to_string()), stage: None, reason: None,
+        verification: Some(value.to_string()), stage: None,
+        reason: refused.then_some(DeliveryRefusal::TargetNotInTeam),
         channel: Some("station".into()), turn_verification: None,
     })
 }

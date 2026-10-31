@@ -58,12 +58,39 @@ use super::types::{
 /// Bounded upgrade cleanup, never a daemon startup. Normal station workspaces
 /// take only the two path checks; existing shutdown retains its ownership fence.
 pub fn retire_legacy_coordinator(workspace: &Path) -> Result<bool, String> {
+    retire_legacy_coordinator_with_cleanup(workspace, true)
+}
+
+/// Status may retire a verified legacy writer, but never edits stale PID metadata.
+pub fn retire_legacy_coordinator_for_status(workspace: &Path) -> Result<bool, String> {
+    retire_legacy_coordinator_with_cleanup(workspace, false)
+}
+
+fn retire_legacy_coordinator_with_cleanup(workspace: &Path, cleanup_stale: bool) -> Result<bool, String> {
     let workspace = WorkspacePath::new(crate::model::paths::canonical_run_workspace(workspace)
         .unwrap_or_else(|_| workspace.to_path_buf()));
     if !coordinator_pid_path(&workspace).exists() && !coordinator_meta_path(&workspace).exists() {
         return Ok(false);
     }
+    if !cleanup_stale && !legacy_coordinator_value(workspace.as_path())
+        .is_some_and(|value| value["metadata_ok"] == true) {
+        return Ok(false);
+    }
+    let stale_files = [coordinator_pid_path(&workspace), coordinator_meta_path(&workspace)]
+        .map(|path| { let bytes = std::fs::read(&path).ok(); (path, bytes) });
     let report = stop_coordinator(&workspace).map_err(|error| error.to_string())?;
+    if matches!(report.status, StopOutcome::NotOwned) {
+        // PID reuse is stale bookkeeping, not a reason to block current operations.
+        // Never signal that process, or unlink a file replaced since inspection.
+        if cleanup_stale {
+            for (path, before) in stale_files {
+                if before.is_some() && std::fs::read(&path).ok() == before {
+                    let _ = remove_file_if_exists(&path);
+                }
+            }
+        }
+        return Ok(false);
+    }
     if !report.ok {
         return Err(format!("legacy coordinator retirement refused: {:?} (pid {:?})", report.status, report.pid));
     }

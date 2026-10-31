@@ -340,7 +340,7 @@ pub fn cmd_status_for_team(args: &StatusArgs, team: Option<&str>) -> Result<CmdR
     }
     // The first current-release status is also an explicit upgrade quiescence
     // point. Doctor uses the read-only observation port instead.
-    let selected = if crate::coordinator::retire_legacy_coordinator(&selected.run_workspace)
+    let selected = if crate::coordinator::retire_legacy_coordinator_for_status(&selected.run_workspace)
         .map_err(CliError::Runtime)? {
         crate::state::selector::resolve_active_team_readonly(
             &selected.run_workspace, Some(&selected.team_key),

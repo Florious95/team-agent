@@ -49,6 +49,26 @@ pub fn render(sender: &str, content: &str, message_id: &str, result: bool) -> St
     text
 }
 
+fn sender_in_directory(authority: Authority<'_>, directory: &crate::direct_delivery::Directory) -> String {
+    match crate::messaging::parse_logical_address(authority.sender()) {
+        Ok(crate::messaging::LogicalAddress {
+            workspace: Some(workspace),
+            target: crate::messaging::LogicalAddressTarget::TeamEntity { team, entity },
+            ..
+        }) if directory.team.as_deref() == Some(team.as_str())
+            && crate::model::paths::canonical_run_workspace(&workspace)
+                .is_ok_and(|workspace| workspace == directory.workspace) => entity,
+        _ => authority.sender().to_string(),
+    }
+}
+
+fn permitted_peer(authority: Authority<'_>, directory: &crate::direct_delivery::Directory, recipient: &str) -> bool {
+    if recipient == "leader" { return true; }
+    let Some(info) = directory.state.get("agents").and_then(|agents| agents.get(recipient)) else { return false; };
+    !matches!(authority, Authority::Seat { .. })
+        || !matches!(info["status"].as_str().unwrap_or("").to_ascii_lowercase().as_str(), "dead" | "stopped")
+}
+
 pub fn execute(req: Request<'_>, authority: Authority<'_>) -> Result<Value, String> {
     let presentation = serde_json::to_value(req.presentation).map_err(|e| e.to_string())?;
     crate::messaging::presentation::normalize_send_presentation(None, Some(&presentation))?;
@@ -60,74 +80,104 @@ pub fn execute(req: Request<'_>, authority: Authority<'_>) -> Result<Value, Stri
     let authorized = bound_team
         .map(|team| crate::direct_delivery::directory(req.workspace, Some(team)))
         .transpose()?;
-    if let Some(bound) = &authorized {
-        if crate::direct_delivery::directory(req.workspace, selected)?.team != bound.team {
-            return Err("seat cannot send across team scope".into());
-        }
-    }
-    let addresses: Vec<_> = req.to.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
-    if addresses.is_empty() {
-        return Err("send requires at least one recipient".into());
-    }
+    let scope_allowed = authorized.as_ref().is_none_or(|bound| {
+        crate::direct_delivery::directory(req.workspace, selected).is_ok_and(|directory| directory.team == bound.team)
+    });
+    let addresses: Vec<_> = req.to.split(',').map(str::trim).collect();
     let mut batch = addresses.len() > 1;
-    let mut results = Vec::new();
+    let mut admitted = Vec::new();
+    let mut invalid = Vec::new();
+    let mut invalid_reasons = Vec::new();
+    let mut not_attempted = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    // Admission is read-only and completes for the entire request before cleanup,
+    // inbox append or physical submission. Never resolve an address again later.
     for address in addresses {
-        let outcome = (|| -> Result<Vec<Value>, String> {
-            let parsed = crate::messaging::parse_logical_address(address)
-                .map_err(|reason| format!("invalid recipient name: {address}: {reason}"))?;
+        let outcome = (|| -> Result<(crate::direct_delivery::Directory, Vec<String>, bool), String> {
+            if !scope_allowed { return Err("seat cannot widen team scope".into()); }
+            let parsed = crate::messaging::parse_logical_address(address).map_err(|e| e.to_string())?;
             let team = if parsed.workspace.is_some() { None } else { selected };
             let workspace = parsed.workspace.as_deref().unwrap_or(req.workspace);
+            if let Some(bound) = &authorized {
+                if crate::model::paths::canonical_run_workspace(workspace).map_err(|e| e.to_string())? != bound.workspace {
+                    return Err("seat cannot widen workspace scope".into());
+                }
+            }
             let (directory, recipient) = match parsed.target {
                 crate::messaging::LogicalAddressTarget::Worker(agent) =>
                     (crate::direct_delivery::directory(workspace, team)?, agent),
                 crate::messaging::LogicalAddressTarget::TeamEntity { team, entity } =>
                     (crate::direct_delivery::directory(workspace, Some(&team))?, entity),
                 crate::messaging::LogicalAddressTarget::SessionWindow { .. } =>
-                    return Err("Terminal-window addressing is no longer supported; use an agent name or leader, with --workspace/--team to select scope".into()),
+                    return Err("terminal-window addressing is unsupported".into()),
             };
-            if let Some(bound) = &authorized {
-                if directory.workspace != bound.workspace || directory.team != bound.team {
-                    return Err("seat cannot send across workspace or team scope".into());
-                }
+            if authorized.as_ref().is_some_and(|bound| directory.team != bound.team) {
+                return Err("seat cannot widen team scope".into());
             }
             let broadcast = recipient == "*";
+            let sender = sender_in_directory(authority, &directory);
             let recipients = if broadcast {
-                // Attribution is qualified across workspace boundaries; self-exclusion
-                // compares the originating seat only inside its actual directory.
-                let sender = match crate::messaging::parse_logical_address(authority.sender()) {
-                    Ok(crate::messaging::LogicalAddress {
-                        workspace: Some(workspace),
-                        target: crate::messaging::LogicalAddressTarget::TeamEntity { team, entity },
-                        ..
-                    }) if directory.team.as_deref() == Some(team.as_str())
-                        && crate::model::paths::canonical_run_workspace(&workspace)
-                            .is_ok_and(|workspace| workspace == directory.workspace) => entity,
-                    _ => authority.sender().to_string(),
-                };
-                directory.agents().into_iter().filter(|id| id != &sender).collect()
+                directory.agents().into_iter().filter(|id| id != &sender && permitted_peer(authority, &directory, id)).collect()
             } else { vec![recipient] };
-            if recipients.is_empty() {
-                return Err("send requires at least one recipient".into());
-            }
-            batch |= broadcast;
-            let mut values = Vec::new();
-            for recipient in recipients {
-                if !seen.insert((directory.workspace.clone(), directory.team.clone(), recipient.clone())) {
-                    continue;
+            if recipients.is_empty() { return Err("no eligible recipients".into()); }
+            for recipient in &recipients {
+                if !permitted_peer(authority, &directory, recipient) {
+                    return Err("peer is not in scope".into());
                 }
-                match send_one(&req, authority, &directory, &recipient) {
-                    Ok(value) => values.push(value),
-                    Err(error) if batch => values.push(json!({"recipient":recipient,"ok":false,"error":error})),
-                    Err(error) => return Err(error),
+                // An unbound operator's default label is not a seat identity.
+                // report_result routes implicitly to the leader, rather than
+                // accepting an explicit user-selected self target.
+                if !broadcast && !(req.envelope.is_some() && recipient == "leader") && recipient == &sender
+                    && !matches!(authority, Authority::Operator { sender: "leader" }) {
+                    return Err("explicit self target".into());
                 }
             }
-            Ok(values)
+            Ok((directory, recipients, broadcast))
         })();
         match outcome {
-            Ok(values) => results.extend(values),
-            Err(error) if batch => results.push(json!({"recipient":address,"ok":false,"error":error})),
-            Err(error) => return Err(error),
+            Ok((directory, mut recipients, broadcast)) => {
+                batch |= broadcast;
+                recipients.retain(|recipient| seen.insert((directory.workspace.clone(), directory.team.clone(), recipient.clone())));
+                not_attempted.extend(recipients.iter().map(|recipient| if broadcast { recipient.clone() } else { address.to_string() }));
+                admitted.push((directory, recipients));
+            }
+            Err(error) => {
+                invalid.push(address.to_string());
+                invalid_reasons.push(error);
+            }
+        }
+    }
+    if !invalid.is_empty() {
+        let message = format!("peer '{}' is not in scope", invalid[0]);
+        let mut candidates = Vec::new();
+        if !invalid[0].contains('/') && !invalid[0].contains("::") {
+            if let Ok(directory) = crate::direct_delivery::directory(req.workspace, bound_team.or(selected)) {
+                use crate::model::name_similarity::{rank, Candidate};
+                let sender = sender_in_directory(authority, &directory);
+                let peers: Vec<_> = directory.agents().into_iter()
+                    .filter(|id| id != &sender && permitted_peer(authority, &directory, id))
+                    .map(|id| Candidate { match_key: id.clone(), stable_key: id.clone(), payload: id }).collect();
+                candidates = rank(&invalid[0], &peers).into_iter().map(|id| json!({
+                    "name": id, "team_key": directory.team, "agent_id": id, "advisory": true
+                })).collect();
+            }
+        }
+        return Ok(json!({"ok":false,"status":"refused","reason":"peer_not_in_scope",
+            "error_code":"peer_not_in_scope","exc_type":"PeerNotInScope",
+            "message":message,"error":message,"requested_name":invalid[0],
+            "invalid_targets":invalid,"invalid_reasons":invalid_reasons,"not_attempted":not_attempted,"candidates":candidates,
+            "stored":false,"accepted":null,"hint":"No targets were attempted; correct invalid_targets and retry."}));
+    }
+    // Execution faults belong to their recipient. Already-admitted siblings run
+    // independently, with the existing durability and native submission receipts.
+    let mut results = Vec::new();
+    for (directory, recipients) in admitted {
+        for recipient in recipients {
+            match send_one(&req, authority, &directory, &recipient) {
+                Ok(value) => results.push(value),
+                Err(error) if batch => results.push(json!({"recipient":recipient,"ok":false,"error":error})),
+                Err(error) => return Err(error),
+            }
         }
     }
     if !batch {
@@ -156,6 +206,7 @@ fn send_one(
     if recipient != "leader" && !directory.agents().iter().any(|id| id == recipient) {
         return Err(format!("unknown recipient: {recipient}"));
     }
+    crate::coordinator::retire_legacy_coordinator(&directory.workspace)?;
     let sender = authority.sender();
     let kind = if req.envelope.is_some() {
         "result"

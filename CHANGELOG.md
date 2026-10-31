@@ -7,10 +7,10 @@
 ## [0.5.129]
 
 - **Space Station runtime:** shared durable messaging, per-seat lifecycle fences, on-demand agenda jobs, and file-projection authority replace the resident coordination path. Legacy SQLite import remains available for migration.
-- **Legacy upgrade safety:** read both historical inbox layouts without crossing team scope; current lifecycle, send, migration, and status commands retire positively identified legacy coordinators. Doctor reports surviving daemons without stopping them.
+- **Legacy upgrade safety:** read both historical inbox layouts without crossing team scope; current lifecycle, send, migration, and status commands retire positively identified legacy coordinators. Doctor reports surviving daemons without stopping them. Reused/unowned PIDs never block commands or receive signals; status preserves their stale metadata, while mutating commands may remove it.
 - **Upgrade operating rule:** do not operate the same workspace concurrently with legacy (<0.5.129) and 0.5.129 CLI versions; competing legacy launches can cause daemon flapping. Quiesce legacy commands before cutover.
 - **Migration and receipts:** workspaces without native contract authority receive an explicit idempotent no-op; existing incomplete authority is retained rather than reset. Quick-start no longer claims a coordinator was started.
-- **Messaging contracts:** restore C23 `PeerNotInScope` refusals and preserve qualified cross-workspace sender identities.
+- **Messaging contracts:** restore C23 `PeerNotInScope` refusals and qualified sender identities. CLI/MCP fanout resolves and deduplicates all targets before any effect, then isolates per-recipient execution failures. Broadcast excludes only the originating seat in its actual workspace/team.
 - **Release packaging:** align installer/platform versions, remove committed executable artifacts, ship installer assets rather than incomplete Rust sources, and test every publication platform before publishing.
 - **Known upgrade/diagnostic limits:** status may omit migration/restart guidance; some native seats remain below `Ready` and refuse restart (use explicit `stop-agent`/`start-agent`, respecting session-preservation checks). Native-seat doctor may report `worker_pane_binding_stale`.
 - **Known delivery/UI limits:** unexpected worker exits are not automatically announced to the leader. Distinct reports with identical summaries may deduplicate; use unique summary nonces. Complete Claude numbered trust prompts manually before dispatch; the station guard does not yet recognize that menu.

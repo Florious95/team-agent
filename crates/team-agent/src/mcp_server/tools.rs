@@ -224,9 +224,6 @@ impl TeamOrchestratorTools {
         if matches!(scope_override, Some(Scope::Workspace)) {
             return Err(self.rpc_scope_refused("send_message", None, Some("workspace")));
         }
-        if let Some(error) = self.refuse_cross_team_peer(to, scope_override) {
-            return Err(error);
-        }
         let normalized = crate::messaging::presentation::normalize_send_presentation(mailbox, presentation)
             .map_err(tool_runtime_error)?;
         let owner_team = self.canonical_owner_team_key()?;
@@ -237,7 +234,6 @@ impl TeamOrchestratorTools {
             MessageTarget::Fanout(targets) => targets.join(","),
             MessageTarget::Broadcast => "*".to_string(),
         };
-        crate::coordinator::retire_legacy_coordinator(&self.workspace).map_err(tool_runtime_error)?;
         let mut value = crate::station::send::execute(crate::station::send::Request {
             workspace: &self.workspace, team: Some(team), to: &targets, content,
             task_id, message_id: None, presentation: &normalized.request,
@@ -245,7 +241,7 @@ impl TeamOrchestratorTools {
             envelope: None,
         }, crate::station::send::Authority::Seat { sender, team }).map_err(tool_runtime_error)?;
         if let Some(warning) = normalized.deprecation { value["warning"] = Value::String(warning); }
-        Ok(SendOutcome::Direct(ToolOk { fields: object_fields(value) }))
+        Ok(SendOutcome::Direct(Self::station_result(value)?))
     }
 
     pub(crate) fn refuse_scope_override(&self) -> ToolError {
@@ -457,7 +453,6 @@ impl TeamOrchestratorTools {
             sink: normalized.presentation.sink, class: normalized.presentation.class,
             case_id: normalized.presentation.case_id.clone(),
         };
-        crate::coordinator::retire_legacy_coordinator(&self.workspace).map_err(tool_runtime_error)?;
         let value = crate::station::send::execute(crate::station::send::Request {
             workspace: &self.workspace, team: Some(team), to: "leader", content: summary,
             task_id: env_value["task_id"].as_str(), message_id: None,
@@ -465,7 +460,18 @@ impl TeamOrchestratorTools {
             mailbox: normalized.presentation.sink != crate::messaging::presentation::PresentationSink::Leader,
             envelope: Some(&env_value),
         }, crate::station::send::Authority::Seat { sender, team }).map_err(tool_runtime_error)?;
-        Ok(ToolOk { fields: object_fields(value) })
+        Self::station_result(value)
+    }
+
+    fn station_result(value: Value) -> ToolResult {
+        if value["error_code"] == "peer_not_in_scope" {
+            let mut error = ToolError::new(ToolErrorReason::PeerNotInScope,
+                value["message"].as_str().unwrap_or("peer is not in scope"), "PeerNotInScope");
+            error.extra = object_fields(value);
+            Err(error)
+        } else {
+            Ok(ToolOk { fields: object_fields(value) })
+        }
     }
 
     /// `get_team_status`: return the owner-team-scoped machine-readable status.
@@ -510,7 +516,7 @@ impl TeamOrchestratorTools {
     }
 
     /// `_refuse_cross_team_peer` (`tools.py:185-213`): server-side C23 pre-refusal. A
-    /// non-`*`/non-leader target (including each fanout member) outside visible peers and not the
+    /// non-`*`/non-leader string target NOT in the visible-peer scope and not the
     /// sender itself, with `scope != workspace`, → `Some(ToolError{PeerNotInScope})`
     /// (also writes `mcp.send_message_refused`). `None` = allowed to proceed.
     pub fn refuse_cross_team_peer(
@@ -532,17 +538,20 @@ impl TeamOrchestratorTools {
         if owner_team.is_none() {
             return None;
         }
-        let targets = match to {
-            MessageTarget::Single(target) => std::slice::from_ref(target),
-            MessageTarget::Fanout(targets) => targets.as_slice(),
-            MessageTarget::Broadcast => return None,
+        let MessageTarget::Single(target) = to else {
+            return None;
         };
-        let mut targets = targets.iter().filter(|target| {
-            !target.is_empty()
-                && !matches!(target.as_str(), "*" | "leader" | "Leader")
-                && !self.agent_id.as_ref().is_some_and(|id| id.as_str() == target.as_str())
-        }).peekable();
-        targets.peek()?;
+        if target.is_empty()
+            || target == "*"
+            || target == "leader"
+            || target == "Leader"
+            || self
+                .agent_id
+                .as_ref()
+                .is_some_and(|id| id.as_str() == target)
+        {
+            return None;
+        }
         // 0.5.45 naming-addressing (design §3.6, RED-2 MCP): compute
         // the visible peers ONCE and reuse for both exact-match check
         // AND scope-safe candidate ranking. Peers come from
@@ -558,7 +567,9 @@ impl TeamOrchestratorTools {
                     .collect()
             })
             .unwrap_or_default();
-        let target = targets.find(|target| !visible_peers.contains(*target))?;
+        if visible_peers.iter().any(|peer| peer == target) {
+            return None;
+        }
         let owner_team_key = owner_team
             .as_ref()
             .map(TeamKey::as_str)
