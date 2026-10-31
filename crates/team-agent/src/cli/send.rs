@@ -51,10 +51,49 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
         envelope: None,
     }, crate::station::send::Authority::Operator { sender: args.sender.display_name() });
     let value = match outcome {
+        Ok(value) if value["status"] == "refused" => return refused_outcome(args, workspace, team, value),
         Ok(value) => value,
         Err(error) if alias.is_some() => return Err(CliError::Runtime(error)),
         Err(error) => return refuse(args, &logical_to, error),
     };
+    Ok(CmdResult::from_json(value, args.json))
+}
+
+fn refused_outcome(
+    args: &SendArgs,
+    workspace: &std::path::Path,
+    team: Option<&str>,
+    mut value: serde_json::Value,
+) -> Result<CmdResult, CliError> {
+    let mut first_error = None;
+    for (index, detail) in value["invalid_details"].as_array_mut().into_iter().flatten().enumerate() {
+        let raw = detail["target"].as_str().unwrap_or_default().to_string();
+        if let Err(mut error) = crate::cli::named_address::resolve_name_for_cli(workspace, &raw, team) {
+            if error.kind.as_str() != detail["reason"].as_str().unwrap_or_default() { continue; }
+            resolve::adapt_positional_bare_error(args, &raw, &mut error);
+            for (key, field) in error.to_json().as_object().unwrap() {
+                detail[key] = field.clone();
+            }
+            if index == 0 { first_error = Some((raw, error)); }
+        }
+    }
+    if let Some((raw, error)) = first_error {
+        if !args.json {
+            let (message, action) = error.human_guidance(&raw);
+            return Err(CliError::AddressRefusal { audit: error.n38_message(), error: message, action });
+        }
+        for (key, field) in error.to_json().as_object().unwrap() {
+            value[key] = field.clone();
+        }
+    } else if !args.json {
+        let message = value["error"].as_str().unwrap_or("recipient refused").to_string();
+        let action = value["action"].as_str().unwrap_or_default().to_string();
+        return Err(CliError::AddressRefusal {
+            audit: format!("Error: {}: {message}\nAction: {action}\nLog: no targets attempted", value["reason"].as_str().unwrap_or("refused")),
+            error: message,
+            action,
+        });
+    }
     Ok(CmdResult::from_json(value, args.json))
 }
 

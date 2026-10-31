@@ -110,7 +110,6 @@ pub fn execute(req: Request<'_>, authority: Authority<'_>) -> Result<Value, Stri
     // inbox append or physical submission. Never resolve an address again later.
     for address in addresses {
         let outcome = (|| -> Result<(crate::direct_delivery::Directory, Vec<String>, bool), AddressError> {
-            scope_check.clone()?;
             let parsed = crate::messaging::parse_logical_address(address).map_err(|e| AddressError::new(
                 if req.to.trim().is_empty() { "empty_target_list" } else { "name_invalid" }, e))?;
             let team = if parsed.workspace.is_some() { None } else { selected };
@@ -121,6 +120,8 @@ pub fn execute(req: Request<'_>, authority: Authority<'_>) -> Result<Value, Stri
                     return Err(AddressError::new("peer_not_in_scope", "seat cannot widen workspace scope"));
                 }
             }
+            // Workspace authority precedes team diagnostics, including a bad selected team.
+            scope_check.clone()?;
             let (directory, recipient) = match parsed.target {
                 crate::messaging::LogicalAddressTarget::Worker(agent) =>
                     (crate::direct_delivery::directory_with_reason(workspace, team)?, agent),
@@ -206,11 +207,29 @@ pub fn execute(req: Request<'_>, authority: Authority<'_>) -> Result<Value, Stri
                         error.message.push_str(&format!("; did you mean {name:?}?"));
                     }
                 }
-                invalid.push(address.to_string());
-                invalid_reasons.push(error.message.clone());
-                invalid_details.push(json!({"target":address,"reason":error.code,"error_code":error.code,
+                let mut detail = json!({"target":address,"requested_name":address,"reason":error.code,"error_code":error.code,
                     "message":error.message,"candidates":error.candidates,"requested_team":requested_team,
-                    "available_team_keys":available}));
+                    "available_team_keys":available});
+                if matches!(error.code, "name_not_resolvable" | "name_invalid" | "name_ambiguous" | "team_key_not_found") {
+                    // Preserve the pre-batch refusal contract, never the resolver's route.
+                    if let Err(legacy) = crate::cli::named_address::resolve_name_for_cli_scoped(
+                        req.workspace, address, selected, authorized.as_ref().and_then(|bound| bound.team.as_deref()),
+                    ) {
+                        let code = legacy.kind.as_str();
+                        if code == error.code || (error.code == "team_key_not_found" && code == "name_not_resolvable") {
+                            let mut value = legacy.to_json();
+                            for (key, field) in detail.as_object().unwrap() {
+                                value.as_object_mut().unwrap().entry(key.clone()).or_insert_with(|| field.clone());
+                            }
+                            value["error_code"] = json!(code);
+                            value["message"] = json!(legacy.message);
+                            detail = value;
+                        }
+                    }
+                }
+                invalid.push(address.to_string());
+                invalid_reasons.push(detail["message"].as_str().unwrap_or_default().to_string());
+                invalid_details.push(detail);
             }
         }
     }
@@ -222,12 +241,15 @@ pub fn execute(req: Request<'_>, authority: Authority<'_>) -> Result<Value, Stri
         }).collect();
         let message = &first["message"];
         let hint = format!("No targets were attempted. {} Correct invalid_targets before retrying.", message.as_str().unwrap());
-        return Ok(json!({"ok":false,"status":"refused","reason":code,
+        let mut value = json!({"ok":false,"status":"refused","reason":code,
             "error_code":code,"exc_type":exception,"message":message,"error":message,"requested_name":invalid[0],
             "invalid_targets":invalid,"invalid_reasons":invalid_reasons,"invalid_details":invalid_details,
-            "not_attempted":not_attempted,"candidates":first["candidates"],"suggested_name":first["candidates"][0]["name"],
-            "requested_team":first["requested_team"],"available_team_keys":first["available_team_keys"],
-            "stored":false,"accepted":null,"hint":hint,"action":hint}));
+            "not_attempted":not_attempted,"stored":false,"accepted":null,"hint":hint,"action":hint});
+        // The first single-target envelope is unchanged; batch fields are additive.
+        for (key, field) in first.as_object().unwrap().iter().filter(|(key, _)| *key != "target") {
+            value[key] = field.clone();
+        }
+        return Ok(value);
     }
     // Execution faults belong to their recipient. Already-admitted siblings run
     // independently, with the existing durability and native submission receipts.

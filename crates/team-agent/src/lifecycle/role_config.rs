@@ -251,7 +251,14 @@ fn start_at_selected(
             transport,
         );
     }
-    super::restart::ensure_agent_not_running(&selected.state, agent_id, transport)?;
+    let replace_orphan = if patch == &RoleConfigPatch::default()
+        && crate::state::projection::agent_stopped_for_restart(old_agent)
+    {
+        super::restart::live_agent_target(&selected.state, agent_id, transport)?.is_some()
+    } else {
+        super::restart::ensure_agent_not_running(&selected.state, agent_id, transport)?;
+        false
+    };
     if old_agent.get("paused").and_then(serde_json::Value::as_bool) == Some(true) {
         return Err(LifecycleError::RequirementUnmet(format!(
             "agent {agent_id} is paused"
@@ -329,6 +336,17 @@ fn start_at_selected(
         crate::model::spec::validate_spec(&spec, &selected.run_workspace)
             .map_err(|error| LifecycleError::Compile(error.to_string()))?;
         atomic_write(&snapshot.spec.path, yaml::dumps(&spec).as_bytes())?;
+        if replace_orphan {
+            // Compile first, then reuse the ownership-fenced stop/drain path.
+            // Adopting the orphan could retain policy from before a role edit.
+            super::restart::stop_agent_at_paths(
+                &selected.run_workspace,
+                snapshot.spec.path.parent().unwrap_or(&selected.team_dir),
+                agent_id,
+                Some(&selected.team_key),
+                transport,
+            )?;
+        }
         update_agent_config(selected, agent_id, &compiled.agent, &role_path)?;
         let outcome = super::restart::start_agent_at_paths(
             &selected.run_workspace,

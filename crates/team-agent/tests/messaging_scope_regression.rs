@@ -201,8 +201,8 @@ fn mcp_admission_rejects_all_targets_before_any_effect() {
         ),
         (
             "beta/worker-a".into(),
-            "team_key_not_found",
-            "TeamKeyNotFound",
+            "name_not_resolvable",
+            "NameNotResolvable",
         ),
         (
             "unknown-peer".into(),
@@ -270,10 +270,10 @@ fn admission_retains_suggestions_empty_lists_and_ambiguous_team_reasons() {
     );
     assert_eq!(results[0]["error_code"], "name_not_resolvable");
     assert_eq!(results[0]["candidates"][0]["agent_id"], "peer-c");
-    assert!(results[0]["message"]
+    assert!(results[0]["action"]
         .as_str()
         .unwrap()
-        .contains("did you mean"));
+        .contains("Did you mean"));
     assert_eq!(results[1]["error_code"], "empty_target_list");
     assert_eq!(
         results[2]["invalid_details"][0]["reason"],
@@ -281,13 +281,19 @@ fn admission_retains_suggestions_empty_lists_and_ambiguous_team_reasons() {
     );
     assert_eq!(results[2]["invalid_details"][1]["reason"], "self_target");
     assert_eq!(results[2]["not_attempted"], json!(["peer-c"]));
-    assert_eq!(results[3]["error_code"], "team_key_not_found");
+    assert_eq!(results[3]["error_code"], "name_not_resolvable");
     assert_eq!(results[3]["suggested_name"], "alpha/leader");
     let path = source.join(".team/runtime/state.json");
     let mut state: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     state["teams"]["alpha"]["team_name"] = json!("shared");
-    state["teams"]["beta"] = json!({"team_key":"beta", "team_name":"shared", "agents":{}});
+    state["teams"]["beta"] = json!({"team_key":"beta", "team_name":"shared", "agents":{"hidden-only":{"status":"running"}}});
     std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+    for refusal in mcp(&source, &[json!("betx/leader"), json!("hidden-onlx")]) {
+        assert_eq!(refusal["error_code"], "name_not_resolvable");
+        assert!(refusal["candidates"].as_array().unwrap().iter().all(|candidate| candidate["team_key"] == "alpha"));
+        assert!(!refusal.to_string().contains("hidden-only"));
+        assert!(!refusal["available_team_keys"].to_string().contains("beta"));
+    }
     let output = cli_output(
         &source,
         &source,
@@ -299,6 +305,77 @@ fn admission_retains_suggestions_empty_lists_and_ambiguous_team_reasons() {
     assert_eq!(body["error_code"], "name_ambiguous");
     let inbox = cli(&source, &source, "alpha", &["inbox", "peer-c", "-n", "10"]);
     assert_eq!(inbox["messages"], json!([]));
+}
+
+#[test]
+fn refusal_diagnostics_do_not_read_foreign_scope_when_selected_team_is_invalid() {
+    let root = TestRoot::new();
+    let source = workspace(root.path(), "source", "alpha");
+    let foreign = workspace(root.path(), "foreign", "alpha");
+    let path = foreign.join(".team/runtime/state.json");
+    let mut state: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    state["teams"]["alpha"]["agents"]["hidden-only"] = json!({"status":"running"});
+    std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+    let target = format!("{}::alpha/hidden-onlx", foreign.display());
+    let result = team_agent::station::send::execute(team_agent::station::send::Request {
+        workspace: &source, team: Some("alhpa"), to: &target, content: "denied",
+        task_id: None, message_id: None, presentation: &Default::default(), mailbox: true, envelope: None,
+    }, team_agent::station::send::Authority::Seat { sender: "worker-a", team: "alpha" }).unwrap();
+    assert!(!result.to_string().contains("hidden-only"), "unexpected foreign naming candidate: {result}");
+    assert_eq!(result["reason"], "peer_not_in_scope");
+    assert!(!source.join(".team/inbox").exists());
+    assert!(!foreign.join(".team/inbox").exists());
+}
+
+#[test]
+fn single_refusal_contract_is_preserved_in_batches_without_snapshot_writes() {
+    let root = TestRoot::new();
+    let source = workspace(root.path(), "source", "alpha");
+    let target = workspace(root.path(), "target", "current");
+    let before = std::fs::read(source.join(".team/runtime/state.json")).unwrap();
+    let target_before = std::fs::read(target.join(".team/runtime/state.json")).unwrap();
+    let cross = format!("{}::missing/leader", target.display());
+    for (raw, reason, suggestion) in [
+        ("peer-x", "name_not_resolvable", Some("alpha/peer-c")),
+        ("alhpa/leader", "name_not_resolvable", Some("alpha/leader")),
+        ("zzzzzzzzzz", "name_not_resolvable", None),
+        (cross.as_str(), "team_key_not_found", None),
+    ] {
+        let single: Value = serde_json::from_slice(&cli_output(&source, &source, "alpha",
+            &["send", "--to-name", raw, "refusal probe", "--mailbox"]).stdout).unwrap();
+        let batch: Value = serde_json::from_slice(&cli_output(&source, &source, "alpha",
+            &["send", "--to", &format!("peer-c,{raw}"), "refusal probe", "--mailbox"]).stdout).unwrap();
+        assert_eq!(single["reason"], reason);
+        for key in ["ok", "status", "reason", "error", "action", "log", "candidates", "requested_name", "suggested_name", "requested_team", "available_team_keys"] {
+            assert_eq!(single.get(key), batch.get(key), "{raw}: {key}");
+            assert_eq!(single.get(key), batch["invalid_details"][0].get(key), "detail {raw}: {key}");
+        }
+        assert_eq!(batch["not_attempted"], json!(["peer-c"]));
+        if let Some(suggested) = suggestion { assert_eq!(single["suggested_name"], suggested); }
+        if raw == "zzzzzzzzzz" {
+            assert!(single.get("suggested_name").is_none());
+            for word in ["status --json", "team_key", "agent", "--to-name"] {
+                assert!(single["action"].as_str().unwrap().contains(word));
+            }
+        }
+        if reason == "team_key_not_found" {
+            assert!(single["suggested_name"].as_str().unwrap().ends_with("::current/leader"));
+        }
+    }
+    let positional: Value = serde_json::from_slice(&cli_output(&source, &source, "alpha",
+        &["send", "peer-x", "positional probe", "--mailbox"]).stdout).unwrap();
+    assert_eq!(positional["suggested_name"], "peer-c");
+    let human = command(&source).args(["send", "peer-x", "human probe", "--mailbox", "--team", "alpha"])
+        .arg("--workspace").arg(&source).output().unwrap();
+    assert!(!human.status.success());
+    let text = format!("{}{}", String::from_utf8_lossy(&human.stdout), String::from_utf8_lossy(&human.stderr));
+    for fragment in ["error:", "action:", "log:", "Did you mean", "Nothing was sent", "team-agent status"] {
+        assert!(text.contains(fragment), "missing {fragment}: {text}");
+    }
+    assert_eq!(std::fs::read(source.join(".team/runtime/state.json")).unwrap(), before);
+    assert_eq!(std::fs::read(target.join(".team/runtime/state.json")).unwrap(), target_before);
+    assert!(!source.join(".team/inbox").exists());
+    assert!(!target.join(".team/inbox").exists());
 }
 
 #[test]

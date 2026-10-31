@@ -44,6 +44,24 @@ pub(crate) fn ensure_agent_not_running(
     agent_id: &AgentId,
     transport: &dyn crate::transport::Transport,
 ) -> Result<(), LifecycleError> {
+    if let Some(target) = live_agent_target(state, agent_id, transport)? {
+        let session = target.session.as_str();
+        let window = target.window_name.as_ref().map(|name| name.as_str()).unwrap_or_default();
+        Err(LifecycleError::RequirementUnmet(format!(
+            "agent {agent_id} is already running (duplicate / active cohort); use restart for changed settings, or stop-agent before replacement; cohort proof: session={} window={window} pane={}",
+            session, target.pane_id.as_str(),
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+/// Observe the same seat/window cohort used by the duplicate-start guard.
+pub(crate) fn live_agent_target(
+    state: &serde_json::Value,
+    agent_id: &AgentId,
+    transport: &dyn crate::transport::Transport,
+) -> Result<Option<crate::transport::PaneInfo>, LifecycleError> {
     let agent = state.get("agents").and_then(|agents| agents.get(agent_id.as_str()))
         .ok_or_else(|| LifecycleError::RequirementUnmet(format!("agent {agent_id} not found")))?;
     let session = state_session_name(state);
@@ -51,21 +69,13 @@ pub(crate) fn ensure_agent_not_running(
     let pane = agent.get("pane_id").and_then(serde_json::Value::as_str);
     let targets = transport.list_targets()
         .map_err(|error| LifecycleError::Transport(error.to_string()))?;
-    let live = targets.iter().find(|target| {
+    Ok(targets.into_iter().find(|target| {
         target.session == session
             && target.window_name.as_ref().is_some_and(|name| name.as_str() == window)
             && (pane == Some(target.pane_id.as_str())
                 || !crate::lifecycle::launch::state_uses_adaptive_layout(state))
             && agent_pane_live_by_id(transport, &target.pane_id)
-    });
-    if let Some(target) = live {
-        Err(LifecycleError::RequirementUnmet(format!(
-            "agent {agent_id} is already running (duplicate / active cohort); use restart for changed settings, or stop-agent before replacement; cohort proof: session={} window={window} pane={}",
-            session.as_str(), target.pane_id.as_str(),
-        )))
-    } else {
-        Ok(())
-    }
+    }))
 }
 
 /// ---
@@ -1131,7 +1141,7 @@ pub(crate) fn stop_agent_with_transport(
 /// returns: 停止报告；注意报告里的显示已关闭字段恒为真，不反映实际关显示结果
 /// errors: 席位解析不到实体返回 RequirementUnmet，写 state 失败返回 StatePersist
 /// ---
-pub(super) fn stop_agent_at_paths(
+pub(crate) fn stop_agent_at_paths(
     workspace: &Path,
     spec_workspace: &Path,
     agent_id: &AgentId,

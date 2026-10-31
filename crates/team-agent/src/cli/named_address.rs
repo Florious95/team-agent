@@ -504,6 +504,16 @@ pub(crate) fn resolve_name_for_cli(
     raw_name: &str,
     bare_team_scope: Option<&str>,
 ) -> Result<(ResolvedNamedAddress, Box<dyn Transport>), NamedAddressError> {
+    resolve_name_for_cli_scoped(sender_workspace, raw_name, bare_team_scope, None)
+}
+
+/// The caller must admit workspace scope first; suggestions see only its authorized team.
+pub(crate) fn resolve_name_for_cli_scoped(
+    sender_workspace: &Path,
+    raw_name: &str,
+    bare_team_scope: Option<&str>,
+    authorized_team: Option<&str>,
+) -> Result<(ResolvedNamedAddress, Box<dyn Transport>), NamedAddressError> {
     let parsed = parse_named_address(raw_name)?;
     // 0.5.45 naming-addressing (design §3.1, RED-1): bare `--to-name`
     // + explicit `--team` normalizes to `ParsedTarget::TeamEntity`
@@ -522,8 +532,14 @@ pub(crate) fn resolve_name_for_cli(
     };
     let target_workspace = resolve_workspace(sender_workspace, parsed.workspace.as_deref())
         .map_err(|error| error.with_human_scope(None, requested_team))?;
-    let state = load_state_checked(&target_workspace)
+    let mut state = load_state_checked(&target_workspace)
         .map_err(|error| error.with_human_scope(Some(&target_workspace), requested_team))?;
+    if let Some(team) = authorized_team {
+        if let Some(teams) = state.get_mut("teams").and_then(Value::as_object_mut) {
+            teams.retain(|key, _| key == team);
+        }
+        state["active_team_key"] = json!(team);
+    }
     let transport = transport_for_cli_target(&target_workspace, &state, &parsed);
     let resolved = resolve_in_workspace(
         sender_workspace,
@@ -662,7 +678,7 @@ fn load_state_checked(workspace: &Path) -> Result<Value, NamedAddressError> {
         err.log = format!("state_path={}", path.display());
         return Err(err);
     }
-    crate::state::persist::load_runtime_state(workspace).map_err(|error| {
+    crate::state::persist::load_runtime_state_without_migrations(workspace).map_err(|error| {
         let mut err = NamedAddressError::new(
             NamedAddressErrorKind::StateNotFound,
             format!("target runtime state cannot be loaded: {error}"),
@@ -687,6 +703,13 @@ fn resolve_in_workspace(
         ParsedTarget::TeamEntity { team, entity } => {
             let canonical = canonical_named_team_key(target_workspace, state, team)
                 .unwrap_or_else(|| team.clone());
+            if team_entry(state, &canonical).is_none() && !is_legacy_single_team_active(state, &canonical) {
+                return Err(if parsed.workspace.is_some() {
+                    team_key_not_found(target_workspace, state, team)
+                } else {
+                    name_not_resolvable_team(team).with_scoped_suggestions_for_team(state, team, entity, parsed)
+                });
+            }
             let result = if entity == "leader" {
                 resolve_leader(
                     sender_workspace,
@@ -1398,8 +1421,9 @@ fn canonical_named_team_key(
     if team_entry(state, requested).is_some() || is_legacy_single_team_active(state, requested) {
         return Some(requested.to_string());
     }
-    let selected =
-        crate::state::projection::select_runtime_state(target_workspace, Some(requested)).ok()?;
+    let selected = crate::state::projection::resolve_runtime_team_scope_readonly(
+        target_workspace, Some(requested),
+    ).ok()?.state;
     let canonical = selected
         .get("active_team_key")
         .and_then(Value::as_str)
