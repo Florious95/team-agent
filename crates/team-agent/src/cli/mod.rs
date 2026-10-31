@@ -891,20 +891,49 @@ pub mod lifecycle_port {
         }
 
         #[test]
-        fn leader_anchor_cross_scope_unknown_lifetimes_remain_protected() {
+        fn leader_anchor_missing_time_requires_current_worker_without_nonce() {
             let socket = "/tmp/identity-a.sock";
             let mut pane = ownership_pane(&SessionName::new("team-research"), "%0", "researcher", None);
             pane.pane_pid = Some(4321);
-            for (bound_at, spawned_at) in [
-                (json!(null), json!("2026-10-31T00:00:00Z")),
-                (json!("invalid"), json!("2026-10-31T00:00:00Z")),
-                (json!("2026-09-19T00:00:00Z"), json!(null)),
-                (json!("2026-10-31T00:00:00Z"), json!("2026-10-31T00:00:00Z")),
+            let mut state = json!({"session_name":"team-research", "tmux_socket":socket,
+                "leader_receiver":{"pane_id":"%0", "tmux_socket":"/tmp/identity-b.sock"},
+                "agents":{"researcher":{"pane_id":"%0", "pane_pid":4321}},
+                "teams":{"current":{"session_name":null, "agents":{},
+                    "leader_receiver":{"pane_id":"%0", "tmux_socket":socket,
+                        "session_name":"old-leader-session"},
+                    "team_owner":{"pane_id":"%0", "epoch":1}}}});
+            assert!(observed_leader_anchor_pane_ids(&state, Some(socket), std::slice::from_ref(&pane)).is_empty());
+            assert!(observed_leader_anchor_pane_ids(&state, Some("/tmp/identity-b.sock"), std::slice::from_ref(&pane)).contains("%0"));
+            state["teams"]["current"]["leader_receiver"]["binding_nonce"] = json!("child-binding");
+            assert!(observed_leader_anchor_pane_ids(&state, Some(socket), std::slice::from_ref(&pane)).contains("%0"));
+            state["teams"]["current"]["leader_receiver"].as_object_mut().unwrap().remove("binding_nonce");
+            for pid in [None, Some(4322)] {
+                pane.pane_pid = pid;
+                assert!(observed_leader_anchor_pane_ids(&state, Some(socket), std::slice::from_ref(&pane)).contains("%0"));
+            }
+            pane.pane_pid = Some(4321);
+            pane.session = SessionName::new("other-team");
+            assert!(observed_leader_anchor_pane_ids(&state, Some(socket), std::slice::from_ref(&pane)).contains("%0"));
+            pane.session = SessionName::new("team-research");
+            pane.window_name = Some(WindowName::new("other-worker"));
+            assert!(observed_leader_anchor_pane_ids(&state, Some(socket), std::slice::from_ref(&pane)).contains("%0"));
+        }
+
+        #[test]
+        fn leader_anchor_cross_scope_uncertain_records_remain_protected() {
+            let socket = "/tmp/identity-a.sock";
+            let mut pane = ownership_pane(&SessionName::new("team-research"), "%0", "researcher", None);
+            pane.pane_pid = Some(4321);
+            for (bound_at, spawned_at, nonce) in [
+                (json!(null), json!("2026-10-31T00:00:00Z"), json!("child-binding")),
+                (json!("invalid"), json!("2026-10-31T00:00:00Z"), json!(null)),
+                (json!("2026-09-19T00:00:00Z"), json!(null), json!(null)),
+                (json!("2026-10-31T00:00:00Z"), json!("2026-10-31T00:00:00Z"), json!(null)),
             ] {
                 let state = json!({"session_name":"team-research", "tmux_socket":socket,
                     "agents":{"researcher":{"pane_id":"%0", "pane_pid":4321, "spawned_at":spawned_at}},
                     "teams":{"child":{"leader_receiver":{"pane_id":"%0", "tmux_socket":socket,
-                        "attached_at":bound_at}}}});
+                        "attached_at":bound_at, "binding_nonce":nonce}}}});
                 assert!(observed_leader_anchor_pane_ids(&state, Some(socket), std::slice::from_ref(&pane)).contains("%0"));
             }
         }

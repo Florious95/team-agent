@@ -330,8 +330,9 @@ pub(crate) fn registered_worker_on_endpoint(
 }
 
 /// Check one team's anchor against the live directory. A worker can also lead
-/// a child team, so cross-team contradictions require a binding older than the
-/// worker's current spawn. Unknown or newer sibling bindings stay protected.
+/// a child team: preserve nonce-backed or newer sibling bindings. A sibling
+/// with neither a nonce nor a binding time cannot override positive worker
+/// ownership; older bindings are also contradicted by the current spawn.
 pub(crate) fn leader_anchor_occupied_by_worker(
     scope: &Value,
     state: &Value,
@@ -357,6 +358,15 @@ pub(crate) fn leader_anchor_occupied_by_worker(
         }
         found = true;
         if registered_worker_on_endpoint(scope, endpoint, observed).is_some() {
+            continue;
+        }
+        let nonce = non_empty_str(anchor, "binding_nonce").or_else(|| scope.get(peer_key)
+            .filter(|peer| peer.get("pane_id") == anchor.get("pane_id"))
+            .and_then(|peer| non_empty_str(peer, "binding_nonce")));
+        if nonce.is_none() && anchor.get(timestamp).is_none_or(Value::is_null)
+            && std::iter::once(state)
+                .chain(state.get("teams").and_then(Value::as_object).into_iter().flat_map(|t| t.values()))
+                .any(|worker_scope| registered_worker_on_endpoint(worker_scope, endpoint, observed).is_some()) {
             continue;
         }
         let Some(bound_at) = anchor.get(timestamp).and_then(Value::as_str)
@@ -647,11 +657,11 @@ mod leader_identity_tests {
     }
 
     #[test]
-    fn parent_worker_can_be_child_team_leader() {
+    fn nonce_backed_parent_worker_can_be_child_team_leader() {
         let mut state = state();
         state["leader_receiver"]["pane_id"] = json!("%9");
         state["teams"] = json!({"child":{"tmux_socket":"/tmp/identity-a.sock",
-            "leader_receiver":{"pane_id":"%0","tmux_socket":"/tmp/identity-a.sock"},
+            "leader_receiver":{"pane_id":"%0","tmux_socket":"/tmp/identity-a.sock", "binding_nonce":"child-binding"},
             "agents":{}}});
         assert!(!leader_anchor_occupied_by_worker(&state["teams"]["child"], &state, "/tmp/identity-a.sock", &pane()));
     }
