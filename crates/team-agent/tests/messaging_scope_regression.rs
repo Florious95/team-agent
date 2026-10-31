@@ -5,6 +5,33 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+struct TestRoot(PathBuf);
+impl TestRoot {
+    fn new() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "ta-m5-scope-{}-{nonce}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&path).unwrap();
+        Self(path)
+    }
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+impl Drop for TestRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 fn workspace(root: &Path, name: &str, team: &str) -> PathBuf {
     let path = root.join(name);
     std::fs::create_dir_all(path.join(".team/runtime")).unwrap();
@@ -66,7 +93,7 @@ fn cli(source: &Path, target: &Path, team: &str, args: &[&str]) -> Value {
 
 #[test]
 fn qualified_sender_excludes_only_its_actual_seat_from_broadcast() {
-    let root = tempfile::tempdir().unwrap();
+    let root = TestRoot::new();
     let source = workspace(root.path(), "source", "alpha");
     let target = workspace(root.path(), "target", "beta");
     for (workspace, team, expected) in [
@@ -145,7 +172,7 @@ fn mcp(source: &Path, targets: &[Value]) -> Vec<Value> {
 
 #[test]
 fn mcp_admission_rejects_all_targets_before_any_effect() {
-    let root = tempfile::tempdir().unwrap();
+    let root = TestRoot::new();
     let source = workspace(root.path(), "source", "alpha");
     let pid = source.join(".team/runtime/coordinator.pid");
     let stale = std::process::id().to_string();
@@ -164,7 +191,7 @@ fn mcp_admission_rejects_all_targets_before_any_effect() {
 
 #[test]
 fn cli_admission_rejects_all_targets_before_any_effect() {
-    let root = tempfile::tempdir().unwrap();
+    let root = TestRoot::new();
     let source = workspace(root.path(), "source", "alpha");
     let pid = source.join(".team/runtime/coordinator.pid");
     let stale = std::process::id().to_string();
@@ -189,7 +216,7 @@ fn cli_admission_rejects_all_targets_before_any_effect() {
 
 #[test]
 fn duplicate_admitted_targets_have_one_receipt_and_record() {
-    let root = tempfile::tempdir().unwrap();
+    let root = TestRoot::new();
     let source = workspace(root.path(), "source", "alpha");
     let bodies = mcp(&source, &[json!(["peer-c", "peer-c"])]);
     assert_eq!(bodies[0]["messages"].as_array().unwrap().len(), 1);
@@ -199,7 +226,7 @@ fn duplicate_admitted_targets_have_one_receipt_and_record() {
 
 #[test]
 fn stale_pid_reuse_is_nonblocking_and_status_does_not_clean_it() {
-    let root = tempfile::tempdir().unwrap();
+    let root = TestRoot::new();
     let source = workspace(root.path(), "source", "alpha");
     let pid = source.join(".team/runtime/coordinator.pid");
     let meta = source.join(".team/runtime/coordinator.json");
@@ -219,7 +246,7 @@ fn stale_pid_reuse_is_nonblocking_and_status_does_not_clean_it() {
 
 #[test]
 fn execution_failure_does_not_abort_an_admitted_sibling() {
-    let root = tempfile::tempdir().unwrap();
+    let root = TestRoot::new();
     let source = workspace(root.path(), "source", "alpha");
     let state_path = source.join(".team/runtime/state.json");
     let mut state: Value = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
