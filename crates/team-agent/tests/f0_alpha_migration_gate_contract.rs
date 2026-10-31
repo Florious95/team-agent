@@ -228,7 +228,7 @@ fn alpha_gate_keeps_a0_b0_contract_families_present_and_ci_executed() {
 
     for file in [
         "a0_current_turn_attribution_contract.rs",
-        "result_attribution_race_contract.rs",
+        // R-M4: result_attribution_race_contract.rs was retired with the SQLite message store.
         "b0_legacy_snapshot_nonauthority_contract.rs",
         "b0_reader_hideone_audit_contract.rs",
         "f0_alpha_migration_gate_contract.rs",

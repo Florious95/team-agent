@@ -200,7 +200,10 @@ fn leader_bypass_worker_runtime_approvals_mirror_auto_approve_scope() {
                 .to_string(),
         );
     }
-    if !all_sources.contains("runtime_approval.command_approval_requires_human") {
+    // R-M3: the `runtime_approval.command_approval_requires_human` event was emitted by the retired
+    // coordinator tick. The decision itself lives in the provider approval table; its behaviour is
+    // pinned by `command_approval_is_never_auto_approved_even_under_dangerous_policy`.
+    if !all_sources.contains("ApprovalKind::Command => Some(\"command_approval_requires_human\")") {
         failures.push(
             "C5: command approval must always require human confirmation, even under dangerous policy"
                 .to_string(),
@@ -430,74 +433,6 @@ fn running_agent_state_persists_effective_policy_schema_and_single_helper_across
     assert!(
         failures.is_empty(),
         "effective approval policy persistence contract failed:\n{}",
-        failures.join("\n")
-    );
-}
-
-#[test]
-fn coordinator_auto_approval_reads_state_not_process_ancestry_and_emits_audit_payload() {
-    let tick = source("src/coordinator/tick.rs");
-    let handler = source_section(
-        &tick,
-        "fn handle_runtime_approval_prompts",
-        "fn coordinator_status",
-    );
-    let auto_event = source_section(
-        &handler,
-        "\"runtime_approval.auto_approved\"",
-        "RuntimeApprovalDecision::AwaitingHumanConfirm",
-    );
-    let mcp_event = source_section(
-        &handler,
-        "\"mcp.tool.auto_approved\"",
-        "RuntimeApprovalDecision::AwaitingHumanConfirm",
-    );
-    let mut failures = Vec::new();
-
-    if handler.contains("detect_dangerous_approval")
-        || tick.contains("fn runtime_approval_auto_answer_allowed()")
-    {
-        failures.push(
-            "C8/C11: coordinator runtime approval must read per-agent effective_approval_policy from state, not recompute dangerous approval from coordinator process ancestry"
-                .to_string(),
-        );
-    }
-    if !handler.contains("effective_approval_policy") {
-        failures.push(
-            "C8/C11: handle_runtime_approval_prompts must use state.agents[*].effective_approval_policy as the single approval truth source"
-                .to_string(),
-        );
-    }
-    for field in [
-        "policy_source",
-        "inherited",
-        "explicit_yes_confirmed",
-        "worker_capability_above_leader",
-    ] {
-        if !auto_event.contains(field) {
-            failures.push(format!(
-                "C9/C12: runtime_approval.auto_approved event must include {field} from persisted policy; event_source={auto_event}"
-            ));
-        }
-    }
-    for field in [
-        "inherit_reason",
-        "bypass_source",
-        "server",
-        "tool",
-        "provider",
-        "flag",
-    ] {
-        if !mcp_event.contains(field) {
-            failures.push(format!(
-                "B/#232: mcp.tool.auto_approved event must include {field} from persisted policy; event_source={mcp_event}"
-            ));
-        }
-    }
-
-    assert!(
-        failures.is_empty(),
-        "coordinator persisted-policy approval contract failed:\n{}",
         failures.join("\n")
     );
 }
