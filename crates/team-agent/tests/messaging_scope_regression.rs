@@ -119,7 +119,7 @@ fn qualified_sender_excludes_only_its_actual_seat_from_broadcast() {
             inbox["messages"][0]["sender"],
             format!(
                 "{}::alpha/worker-a",
-                source.canonicalize().unwrap().display()
+                source.display()
             )
         );
     }

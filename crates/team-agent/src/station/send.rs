@@ -49,6 +49,11 @@ pub fn render(sender: &str, content: &str, message_id: &str, result: bool) -> St
     text
 }
 
+fn same_workspace(left: &Path, right: &Path) -> bool {
+    left == right || left.canonicalize().ok().zip(right.canonicalize().ok())
+        .is_some_and(|(left, right)| left == right)
+}
+
 fn sender_in_directory(authority: Authority<'_>, directory: &crate::direct_delivery::Directory) -> String {
     match crate::messaging::parse_logical_address(authority.sender()) {
         Ok(crate::messaging::LogicalAddress {
@@ -57,7 +62,7 @@ fn sender_in_directory(authority: Authority<'_>, directory: &crate::direct_deliv
             ..
         }) if directory.team.as_deref() == Some(team.as_str())
             && crate::model::paths::canonical_run_workspace(&workspace)
-                .is_ok_and(|workspace| workspace == directory.workspace) => entity,
+                .is_ok_and(|workspace| same_workspace(&workspace, &directory.workspace)) => entity,
         _ => authority.sender().to_string(),
     }
 }
@@ -99,7 +104,7 @@ pub fn execute(req: Request<'_>, authority: Authority<'_>) -> Result<Value, Stri
             let team = if parsed.workspace.is_some() { None } else { selected };
             let workspace = parsed.workspace.as_deref().unwrap_or(req.workspace);
             if let Some(bound) = &authorized {
-                if crate::model::paths::canonical_run_workspace(workspace).map_err(|e| e.to_string())? != bound.workspace {
+                if !same_workspace(&crate::model::paths::canonical_run_workspace(workspace).map_err(|e| e.to_string())?, &bound.workspace) {
                     return Err("seat cannot widen workspace scope".into());
                 }
             }
@@ -137,7 +142,8 @@ pub fn execute(req: Request<'_>, authority: Authority<'_>) -> Result<Value, Stri
         match outcome {
             Ok((directory, mut recipients, broadcast)) => {
                 batch |= broadcast;
-                recipients.retain(|recipient| seen.insert((directory.workspace.clone(), directory.team.clone(), recipient.clone())));
+                let workspace_key = directory.workspace.canonicalize().unwrap_or_else(|_| directory.workspace.clone());
+                recipients.retain(|recipient| seen.insert((workspace_key.clone(), directory.team.clone(), recipient.clone())));
                 not_attempted.extend(recipients.iter().map(|recipient| if broadcast { recipient.clone() } else { address.to_string() }));
                 admitted.push((directory, recipients));
             }
