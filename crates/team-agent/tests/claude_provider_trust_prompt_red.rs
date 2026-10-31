@@ -375,7 +375,7 @@ elif action == 'load-buffer':
     std::fs::write(
         root.join(".team/runtime/state.json"),
         serde_json::to_vec(&json!({"team_key":"alpha", "agents":{"clauder":{
-            "provider":"claude","pane_id":"%7","native_endpoint":"synthetic-trust"}}}))
+            "provider":"claude","status":"running","pane_id":"%7","native_endpoint":"synthetic-trust"}}}))
         .unwrap(),
     )
     .unwrap();

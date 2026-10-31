@@ -62,7 +62,7 @@ elif action == 'paste-buffer':
     if mode == "named-draft" {
         fs::create_dir_all(fixture.0.join(".team/runtime")).unwrap();
         fs::write(fixture.0.join(".team/runtime/state.json"), serde_json::to_vec(&serde_json::json!({
-            "team_key":"alpha", "agents":{"worker":{"provider":"claude","pane_id":"%7","native_endpoint":"synthetic-surface"}}
+            "team_key":"alpha", "agents":{"worker":{"provider":"claude","status":"running","pane_id":"%7","native_endpoint":"synthetic-surface"}}
         })).unwrap()).unwrap();
         command.args(["send", "worker", "hello", "--team", "alpha", "--json"]);
     } else {

@@ -554,7 +554,7 @@ fn queued_send_args_fixture(json: bool) -> SendArgs {
         &ws,
         &json!({
             "active_team_key": "current",
-            "teams": {"current": {"agents": {"w1": {"provider": "copilot"}}}}
+            "teams": {"current": {"agents": {"w1": {"provider": "copilot", "status": "running"}}}}
         }),
     )
     .unwrap();

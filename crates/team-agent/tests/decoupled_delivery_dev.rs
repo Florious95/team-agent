@@ -70,7 +70,7 @@ with (root / 'received').open('ab', buffering=0) as out:
         let state = json!({"active_team_key": "alpha", "tmux_socket": fixture.socket,
             "teams": {"alpha": {"team_id": "alpha", "team_name": "friendly", "status": "stopped",
                 "tmux_socket": fixture.socket, "leader": {"pane_id": fixture.pane, "provider": "retired-provider"},
-                "agents": {"worker": {"pane_id": fixture.pane, "provider": "retired-provider", "status": "dead"}}}}});
+                "agents": {"worker": {"pane_id": fixture.pane, "provider": "retired-provider", "status": "running"}}}}});
         fs::write(
             fixture.root.join(".team/runtime/state.json"),
             serde_json::to_vec(&state).unwrap(),

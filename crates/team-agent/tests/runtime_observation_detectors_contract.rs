@@ -97,7 +97,9 @@ fn observe_marks_codex_session_drift_without_vetoing_physical_send() {
     let receiver = direct_fixture::DirectFixture::new();
     state["agents"]["w1"]["pane_id"] = json!(receiver.pane);
     state["agents"]["w1"]["tmux_socket"] = json!(receiver.socket);
-    state["agents"]["w1"]["status"] = json!("session_drift");
+    // Since M3 retired the observing coordinator, `status` is the lifecycle status (M4 send authority
+    // admits only `running`); the drift marker lives in `session_drift`, which must not veto a send.
+    state["agents"]["w1"]["status"] = json!("running");
     state["teams"]["current"]["agents"]["w1"] = state["agents"]["w1"].clone();
     std::fs::write(
         team_agent::state::persist::runtime_state_path(&fixture.workspace),
