@@ -172,7 +172,9 @@ pub fn send_message(
         status, message_status: MessageStatusShadow(if refused { "refused" } else if physical { "submitted" } else { "stored" }.into()),
         message_id: value["message_id"].as_str().map(str::to_string),
         verification: Some(value.to_string()), stage: None,
-        reason: refused.then_some(DeliveryRefusal::TargetNotInTeam),
+        reason: if !refused { None }
+            else if value["reason"] == "peer_not_in_scope" { Some(DeliveryRefusal::TargetNotInTeam) }
+            else { serde_json::from_value(value["reason"].clone()).ok() },
         channel: Some("station".into()), turn_verification: None,
     })
 }

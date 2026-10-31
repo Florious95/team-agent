@@ -126,6 +126,13 @@ pub enum ToolErrorReason {
     InternalRuntimeError,
     /// Cross-team peer addressed outside the worker's spawn-time owner scope.
     PeerNotInScope,
+    SelfTarget,
+    NameNotResolvable,
+    NameAmbiguous,
+    NameInvalid,
+    NameNotLive,
+    TeamKeyNotFound,
+    EmptyTargetList,
     /// Worker-origin RPC attempted to widen spawn-time owner scope.
     #[serde(rename = "mcp.scope_refused")]
     McpScopeRefused,

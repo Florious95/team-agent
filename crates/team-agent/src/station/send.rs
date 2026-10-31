@@ -1,4 +1,5 @@
 //! Shared CLI/MCP send semantics. Durable storage precedes optional physical delivery.
+use crate::direct_delivery::AddressError;
 use crate::messaging::presentation::{PresentationRequest, PresentationSink};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -91,56 +92,75 @@ pub fn execute(req: Request<'_>, authority: Authority<'_>) -> Result<Value, Stri
     let authorized = bound_team
         .map(|team| crate::direct_delivery::directory(req.workspace, Some(team)))
         .transpose()?;
-    let scope_allowed = authorized.as_ref().is_none_or(|bound| {
-        crate::direct_delivery::directory(req.workspace, selected).is_ok_and(|directory| directory.team == bound.team)
+    let scope_check = authorized.as_ref().map_or(Ok(()), |bound| {
+        crate::direct_delivery::directory_with_reason(req.workspace, selected).and_then(|directory| {
+            if directory.team == bound.team { Ok(()) }
+            else { Err(AddressError::new("peer_not_in_scope", "seat cannot widen team scope")) }
+        })
     });
     let addresses: Vec<_> = req.to.split(',').map(str::trim).collect();
     let mut batch = addresses.len() > 1;
     let mut admitted = Vec::new();
     let mut invalid = Vec::new();
     let mut invalid_reasons = Vec::new();
+    let mut invalid_details = Vec::new();
     let mut not_attempted = Vec::new();
     let mut seen = std::collections::HashSet::new();
     // Admission is read-only and completes for the entire request before cleanup,
     // inbox append or physical submission. Never resolve an address again later.
     for address in addresses {
-        let outcome = (|| -> Result<(crate::direct_delivery::Directory, Vec<String>, bool), String> {
-            if !scope_allowed { return Err("seat cannot widen team scope".into()); }
-            let parsed = crate::messaging::parse_logical_address(address).map_err(|e| e.to_string())?;
+        let outcome = (|| -> Result<(crate::direct_delivery::Directory, Vec<String>, bool), AddressError> {
+            scope_check.clone()?;
+            let parsed = crate::messaging::parse_logical_address(address).map_err(|e| AddressError::new(
+                if req.to.trim().is_empty() { "empty_target_list" } else { "name_invalid" }, e))?;
             let team = if parsed.workspace.is_some() { None } else { selected };
             let workspace = parsed.workspace.as_deref().unwrap_or(req.workspace);
             if let Some(bound) = &authorized {
-                if !same_workspace(&crate::model::paths::canonical_run_workspace(workspace).map_err(|e| e.to_string())?, &bound.workspace) {
-                    return Err("seat cannot widen workspace scope".into());
+                if !same_workspace(&crate::model::paths::canonical_run_workspace(workspace)
+                    .map_err(|e| AddressError::new("internal_runtime_error", e.to_string()))?, &bound.workspace) {
+                    return Err(AddressError::new("peer_not_in_scope", "seat cannot widen workspace scope"));
                 }
             }
             let (directory, recipient) = match parsed.target {
                 crate::messaging::LogicalAddressTarget::Worker(agent) =>
-                    (crate::direct_delivery::directory(workspace, team)?, agent),
+                    (crate::direct_delivery::directory_with_reason(workspace, team)?, agent),
                 crate::messaging::LogicalAddressTarget::TeamEntity { team, entity } =>
-                    (crate::direct_delivery::directory(workspace, Some(&team))?, entity),
+                    (crate::direct_delivery::directory_with_reason(workspace, Some(&team))?, entity),
                 crate::messaging::LogicalAddressTarget::SessionWindow { .. } =>
-                    return Err("terminal-window addressing is unsupported".into()),
+                    return Err(AddressError::new("name_invalid", "terminal-window addressing is unsupported")),
             };
             if authorized.as_ref().is_some_and(|bound| directory.team != bound.team) {
-                return Err("seat cannot widen team scope".into());
+                return Err(AddressError::new("peer_not_in_scope", "seat cannot widen team scope"));
             }
             let broadcast = recipient == "*";
             let sender = sender_in_directory(authority, &directory);
             let recipients = if broadcast {
                 directory.agents().into_iter().filter(|id| id != &sender && permitted_peer(authority, &directory, id)).collect()
             } else { vec![recipient] };
-            if recipients.is_empty() { return Err("no eligible recipients".into()); }
+            if recipients.is_empty() { return Err(AddressError::new("empty_target_list", "no eligible recipients")); }
             for recipient in &recipients {
-                if !permitted_peer(authority, &directory, recipient) {
-                    return Err("peer is not in scope".into());
+                if recipient != "leader" && directory.state.get("agents").and_then(|agents| agents.get(recipient)).is_none() {
+                    use crate::model::name_similarity::{rank, Candidate};
+                    let mut error = AddressError::new("name_not_resolvable", format!("recipient {recipient:?} is not resolvable"));
+                    let peers: Vec<_> = directory.agents().into_iter()
+                        .filter(|id| id != &sender && permitted_peer(authority, &directory, id))
+                        .map(|id| Candidate { match_key: id.clone(), stable_key: id.clone(), payload: id }).collect();
+                    error.candidates = rank(recipient, &peers).into_iter().map(|id| {
+                        let name = directory.team.as_ref().map_or_else(|| id.clone(), |team| format!("{team}/{id}"));
+                        let name = if parsed.workspace.is_some() { format!("{}::{name}", directory.workspace.display()) } else { name };
+                        json!({"name":name,"team_key":directory.team,"agent_id":id,"advisory":true})
+                    }).collect();
+                    return Err(error);
                 }
                 // An unbound operator's default label is not a seat identity.
                 // report_result routes implicitly to the leader, rather than
                 // accepting an explicit user-selected self target.
                 if !broadcast && !(req.envelope.is_some() && recipient == "leader") && recipient == &sender
                     && !matches!(authority, Authority::Operator { sender: "leader" }) {
-                    return Err("explicit self target".into());
+                    return Err(AddressError::new("self_target", "explicit self target"));
+                }
+                if !permitted_peer(authority, &directory, recipient) {
+                    return Err(AddressError::new("name_not_live", format!("recipient {recipient:?} is stopped or dead")));
                 }
             }
             Ok((directory, recipients, broadcast))
@@ -153,32 +173,61 @@ pub fn execute(req: Request<'_>, authority: Authority<'_>) -> Result<Value, Stri
                 not_attempted.extend(recipients.iter().map(|recipient| if broadcast { recipient.clone() } else { address.to_string() }));
                 admitted.push((directory, recipients));
             }
-            Err(error) => {
+            Err(mut error) => {
+                if let Some(bound) = &authorized {
+                    error.candidates.retain(|candidate| candidate["team_key"].as_str() == bound.team.as_deref());
+                }
+                let available: Vec<_> = error.candidates.iter().filter_map(|candidate| candidate["team_key"].as_str().map(str::to_string)).collect();
+                let mut requested_team = None;
+                if matches!(error.code, "team_key_not_found" | "name_ambiguous") {
+                    if let Ok(parsed) = crate::messaging::parse_logical_address(address) {
+                        let entity = match parsed.target {
+                            crate::messaging::LogicalAddressTarget::TeamEntity { team, entity } => { requested_team = Some(team); entity },
+                            crate::messaging::LogicalAddressTarget::Worker(entity) => { requested_team = selected.map(str::to_string); entity },
+                            _ => String::new(),
+                        };
+                        if error.code == "team_key_not_found" {
+                            use crate::model::name_similarity::{rank, Candidate};
+                            let teams: Vec<_> = error.candidates.into_iter().map(|value| {
+                                let key = value["team_key"].as_str().unwrap_or("").to_string();
+                                Candidate { match_key: key.clone(), stable_key: key, payload: value }
+                            }).collect();
+                            error.candidates = rank(requested_team.as_deref().unwrap_or(""), &teams);
+                        }
+                        for candidate in &mut error.candidates {
+                            let name = format!("{}/{entity}", candidate["team_key"].as_str().unwrap_or(""));
+                            candidate["name"] = json!(parsed.workspace.as_ref().map_or_else(|| name.clone(), |workspace| format!("{}::{name}", workspace.display())));
+                            candidate["agent_id"] = json!(entity);
+                        }
+                    }
+                }
+                if error.code != "name_ambiguous" {
+                    if let Some(name) = error.candidates.first().and_then(|candidate| candidate["name"].as_str()) {
+                        error.message.push_str(&format!("; did you mean {name:?}?"));
+                    }
+                }
                 invalid.push(address.to_string());
-                invalid_reasons.push(error);
+                invalid_reasons.push(error.message.clone());
+                invalid_details.push(json!({"target":address,"reason":error.code,"error_code":error.code,
+                    "message":error.message,"candidates":error.candidates,"requested_team":requested_team,
+                    "available_team_keys":available}));
             }
         }
     }
-    if !invalid.is_empty() {
-        let message = format!("peer '{}' is not in scope", invalid[0]);
-        let mut candidates = Vec::new();
-        if !invalid[0].contains('/') && !invalid[0].contains("::") {
-            if let Ok(directory) = crate::direct_delivery::directory(req.workspace, bound_team.or(selected)) {
-                use crate::model::name_similarity::{rank, Candidate};
-                let sender = sender_in_directory(authority, &directory);
-                let peers: Vec<_> = directory.agents().into_iter()
-                    .filter(|id| id != &sender && permitted_peer(authority, &directory, id))
-                    .map(|id| Candidate { match_key: id.clone(), stable_key: id.clone(), payload: id }).collect();
-                candidates = rank(&invalid[0], &peers).into_iter().map(|id| json!({
-                    "name": id, "team_key": directory.team, "agent_id": id, "advisory": true
-                })).collect();
-            }
-        }
-        return Ok(json!({"ok":false,"status":"refused","reason":"peer_not_in_scope",
-            "error_code":"peer_not_in_scope","exc_type":"PeerNotInScope",
-            "message":message,"error":message,"requested_name":invalid[0],
-            "invalid_targets":invalid,"invalid_reasons":invalid_reasons,"not_attempted":not_attempted,"candidates":candidates,
-            "stored":false,"accepted":null,"hint":"No targets were attempted; correct invalid_targets and retry."}));
+    if let Some(first) = invalid_details.first() {
+        let code = first["reason"].as_str().unwrap();
+        let exception: String = code.split('_').map(|word| {
+            let mut chars = word.chars();
+            chars.next().map(|first| first.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
+        }).collect();
+        let message = &first["message"];
+        let hint = format!("No targets were attempted. {} Correct invalid_targets before retrying.", message.as_str().unwrap());
+        return Ok(json!({"ok":false,"status":"refused","reason":code,
+            "error_code":code,"exc_type":exception,"message":message,"error":message,"requested_name":invalid[0],
+            "invalid_targets":invalid,"invalid_reasons":invalid_reasons,"invalid_details":invalid_details,
+            "not_attempted":not_attempted,"candidates":first["candidates"],"suggested_name":first["candidates"][0]["name"],
+            "requested_team":first["requested_team"],"available_team_keys":first["available_team_keys"],
+            "stored":false,"accepted":null,"hint":hint,"action":hint}));
     }
     // Execution faults belong to their recipient. Already-admitted siblings run
     // independently, with the existing durability and native submission receipts.

@@ -36,10 +36,27 @@ pub fn snapshot(workspace: &Path) -> Result<Value, String> {
     serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct AddressError {
+    pub code: &'static str,
+    pub message: String,
+    pub candidates: Vec<Value>,
+}
+impl AddressError {
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self { code, message: message.into(), candidates: Vec::new() }
+    }
+}
+
 pub fn directory(workspace: &Path, team: Option<&str>) -> Result<Directory, String> {
-    let workspace =
-        crate::model::paths::canonical_run_workspace(workspace).map_err(|e| e.to_string())?;
-    let snapshot = snapshot(&workspace)?;
+    directory_with_reason(workspace, team).map_err(|error| error.message)
+}
+
+pub(crate) fn directory_with_reason(workspace: &Path, team: Option<&str>) -> Result<Directory, AddressError> {
+    let workspace = crate::model::paths::canonical_run_workspace(workspace)
+        .map_err(|e| AddressError::new("internal_runtime_error", e.to_string()))?;
+    let snapshot = snapshot(&workspace)
+        .map_err(|e| AddressError::new("internal_runtime_error", e))?;
     let Some(teams) = snapshot
         .get("teams")
         .and_then(Value::as_object)
@@ -52,7 +69,7 @@ pub fn directory(workspace: &Path, team: Option<&str>) -> Result<Directory, Stri
                 .iter()
                 .any(|key| field(&snapshot, key) == Some(requested));
             if !matches {
-                return Err(format!("unknown team: {requested}"));
+                return Err(AddressError::new("team_key_not_found", format!("unknown team: {requested}")));
             }
         }
         let derived = crate::state::projection::team_state_key(&snapshot);
@@ -76,10 +93,13 @@ pub fn directory(workspace: &Path, team: Option<&str>) -> Result<Directory, Stri
         })
         .collect();
     if matches.len() != 1 {
-        return Err(format!(
-            "team selection is unknown or ambiguous: {}",
-            requested.unwrap_or("(none)")
+        let code = if matches.is_empty() && requested.is_some() { "team_key_not_found" } else { "name_ambiguous" };
+        let mut error = AddressError::new(code, format!(
+            "team selection is unknown or ambiguous: {}", requested.unwrap_or("(none)")
         ));
+        error.candidates = teams.keys().filter(|key| matches.is_empty() || matches.iter().any(|(candidate, _)| *candidate == *key))
+            .map(|key| json!({"team_key":key,"advisory":true})).collect();
+        return Err(error);
     }
     let (key, selected) = matches[0];
     let mut state = selected.clone();

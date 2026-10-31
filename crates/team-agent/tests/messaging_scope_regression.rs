@@ -174,8 +174,13 @@ fn mcp_calls(source: &Path, calls: &[(&str, Value)]) -> Vec<Value> {
     responses
         .into_iter()
         .map(|response| {
-            serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
-                .unwrap()
+            let body: Value =
+                serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            if body["status"] == "refused" {
+                assert_eq!(response["result"]["isError"], true);
+            }
+            body
         })
         .collect()
 }
@@ -187,10 +192,31 @@ fn mcp_admission_rejects_all_targets_before_any_effect() {
     let pid = source.join(".team/runtime/coordinator.pid");
     let stale = std::process::id().to_string();
     std::fs::write(&pid, &stale).unwrap();
-    for bad in ["beta/worker-a", "unknown-peer", "worker-a", "", "bad\nname"] {
+    let foreign = workspace(root.path(), "elsewhere", "alpha");
+    for (bad, code, exception) in [
+        (
+            format!("{}::alpha/peer-c", foreign.display()),
+            "peer_not_in_scope",
+            "PeerNotInScope",
+        ),
+        (
+            "beta/worker-a".into(),
+            "team_key_not_found",
+            "TeamKeyNotFound",
+        ),
+        (
+            "unknown-peer".into(),
+            "name_not_resolvable",
+            "NameNotResolvable",
+        ),
+        ("worker-a".into(), "self_target", "SelfTarget"),
+        ("".into(), "name_invalid", "NameInvalid"),
+        ("bad\nname".into(), "name_invalid", "NameInvalid"),
+    ] {
         let bodies = mcp(&source, &[json!(["peer-c", bad])]);
-        assert_eq!(bodies[0]["error_code"], "peer_not_in_scope");
-        assert_eq!(bodies[0]["exc_type"], "PeerNotInScope");
+        assert_eq!(bodies[0]["error_code"], code);
+        assert_eq!(bodies[0]["exc_type"], exception);
+        assert_eq!(bodies[0]["invalid_details"][0]["reason"], code);
         assert_eq!(bodies[0]["invalid_targets"], json!([bad]));
         assert_eq!(bodies[0]["not_attempted"], json!(["peer-c"]));
         assert_eq!(std::fs::read_to_string(&pid).unwrap(), stale);
@@ -206,7 +232,12 @@ fn cli_admission_rejects_all_targets_before_any_effect() {
     let pid = source.join(".team/runtime/coordinator.pid");
     let stale = std::process::id().to_string();
     std::fs::write(&pid, &stale).unwrap();
-    for bad in ["bogus", "worker-a", "", "bad\nname"] {
+    for (bad, code) in [
+        ("bogus", "name_not_resolvable"),
+        ("worker-a", "self_target"),
+        ("", "name_invalid"),
+        ("bad\nname", "name_invalid"),
+    ] {
         let to = format!("peer-c,{bad}");
         let positional = ["send", to.as_str(), "admission probe", "--mailbox"];
         let named = ["send", "--to", to.as_str(), "admission probe", "--mailbox"];
@@ -214,12 +245,58 @@ fn cli_admission_rejects_all_targets_before_any_effect() {
             let output = cli_output(&source, &source, "alpha", args);
             assert!(!output.status.success());
             let body: Value = serde_json::from_slice(&output.stdout).unwrap();
-            assert_eq!(body["error_code"], "peer_not_in_scope");
+            assert_eq!(body["error_code"], code);
             assert_eq!(body["invalid_targets"], json!([bad]));
             assert_eq!(body["not_attempted"], json!(["peer-c"]));
             assert_eq!(std::fs::read_to_string(&pid).unwrap(), stale);
         }
     }
+    let inbox = cli(&source, &source, "alpha", &["inbox", "peer-c", "-n", "10"]);
+    assert_eq!(inbox["messages"], json!([]));
+}
+
+#[test]
+fn admission_retains_suggestions_empty_lists_and_ambiguous_team_reasons() {
+    let root = TestRoot::new();
+    let source = workspace(root.path(), "source", "alpha");
+    let results = mcp(
+        &source,
+        &[
+            json!("peer-x"),
+            json!([]),
+            json!(["peer-c", "peer-x", "worker-a"]),
+            json!("alhpa/leader"),
+        ],
+    );
+    assert_eq!(results[0]["error_code"], "name_not_resolvable");
+    assert_eq!(results[0]["candidates"][0]["agent_id"], "peer-c");
+    assert!(results[0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("did you mean"));
+    assert_eq!(results[1]["error_code"], "empty_target_list");
+    assert_eq!(
+        results[2]["invalid_details"][0]["reason"],
+        "name_not_resolvable"
+    );
+    assert_eq!(results[2]["invalid_details"][1]["reason"], "self_target");
+    assert_eq!(results[2]["not_attempted"], json!(["peer-c"]));
+    assert_eq!(results[3]["error_code"], "team_key_not_found");
+    assert_eq!(results[3]["suggested_name"], "alpha/leader");
+    let path = source.join(".team/runtime/state.json");
+    let mut state: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    state["teams"]["alpha"]["team_name"] = json!("shared");
+    state["teams"]["beta"] = json!({"team_key":"beta", "team_name":"shared", "agents":{}});
+    std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+    let output = cli_output(
+        &source,
+        &source,
+        "shared",
+        &["send", "peer-c", "ambiguous", "--mailbox"],
+    );
+    assert!(!output.status.success());
+    let body: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(body["error_code"], "name_ambiguous");
     let inbox = cli(&source, &source, "alpha", &["inbox", "peer-c", "-n", "10"]);
     assert_eq!(inbox["messages"], json!([]));
 }
@@ -297,18 +374,25 @@ fn report_result_accepts_advertised_classes_and_resolves_sink_policy() {
 }
 
 #[test]
-fn legacy_leaf_provider_names_do_not_claim_native_authority() {
+fn native_leaf_names_never_fall_back_to_snapshot_panes() {
     let root = TestRoot::new();
     let source = workspace(root.path(), "source", "alpha");
     let state_path = source.join(".team/runtime/state.json");
     let mut state: Value = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
-    for (provider, dialect) in [("grok", "grok"), ("claude_tui", "claude")] {
+    for provider in ["grok", "claude_tui", "pi_tui", "claude", "pi"] {
         state["teams"]["alpha"]["agents"]["peer-c"] = json!({
             "provider":provider,"pane_id":"%0","tmux_socket":"owned-fixture-no-server","status":"running"
         });
         std::fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
         let directory = team_agent::direct_delivery::directory(&source, Some("alpha")).unwrap();
-        assert_eq!(directory.endpoint("peer-c").unwrap().dialect, dialect);
+        if matches!(provider, "claude" | "pi") {
+            assert_eq!(directory.endpoint("peer-c").unwrap().dialect, provider);
+        } else {
+            assert!(directory
+                .endpoint("peer-c")
+                .unwrap_err()
+                .starts_with("native_authority_missing:"));
+        }
     }
 }
 

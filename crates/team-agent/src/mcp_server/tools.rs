@@ -464,9 +464,11 @@ impl TeamOrchestratorTools {
     }
 
     fn station_result(value: Value) -> ToolResult {
-        if value["error_code"] == "peer_not_in_scope" {
-            let mut error = ToolError::new(ToolErrorReason::PeerNotInScope,
-                value["message"].as_str().unwrap_or("peer is not in scope"), "PeerNotInScope");
+        if value["status"] == "refused" {
+            let reason = serde_json::from_value(value["error_code"].clone())
+                .unwrap_or(ToolErrorReason::InternalRuntimeError);
+            let mut error = ToolError::new(reason,
+                value["message"].as_str().unwrap_or("request refused"), format!("{reason:?}"));
             error.extra = object_fields(value);
             Err(error)
         } else {

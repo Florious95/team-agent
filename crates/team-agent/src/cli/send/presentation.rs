@@ -340,6 +340,13 @@ pub(super) fn delivery_status_wire(status: DeliveryStatus) -> &'static str {
 pub(super) fn delivery_refusal_wire(reason: DeliveryRefusal) -> &'static str {
     match reason {
         DeliveryRefusal::TargetNotInTeam => "target_not_in_team",
+        DeliveryRefusal::SelfTarget => "self_target",
+        DeliveryRefusal::NameNotResolvable => "name_not_resolvable",
+        DeliveryRefusal::NameAmbiguous => "name_ambiguous",
+        DeliveryRefusal::NameInvalid => "name_invalid",
+        DeliveryRefusal::NameNotLive => "name_not_live",
+        DeliveryRefusal::TeamKeyNotFound => "team_key_not_found",
+        DeliveryRefusal::InternalRuntimeError => "internal_runtime_error",
         DeliveryRefusal::HumanConfirmationRequired => "human_confirmation_required",
         DeliveryRefusal::MissingPermissions => "missing_permissions",
         DeliveryRefusal::RecipientBusy => "recipient_busy",

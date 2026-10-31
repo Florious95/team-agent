@@ -46,6 +46,13 @@ pub(crate) fn tool_error_reason_wire(reason: ToolErrorReason) -> &'static str {
         ToolErrorReason::InvalidToolArguments => "invalid_tool_arguments",
         ToolErrorReason::InternalRuntimeError => "internal_runtime_error",
         ToolErrorReason::PeerNotInScope => "peer_not_in_scope",
+        ToolErrorReason::SelfTarget => "self_target",
+        ToolErrorReason::NameNotResolvable => "name_not_resolvable",
+        ToolErrorReason::NameAmbiguous => "name_ambiguous",
+        ToolErrorReason::NameInvalid => "name_invalid",
+        ToolErrorReason::NameNotLive => "name_not_live",
+        ToolErrorReason::TeamKeyNotFound => "team_key_not_found",
+        ToolErrorReason::EmptyTargetList => "empty_target_list",
         ToolErrorReason::McpScopeRefused => "mcp.scope_refused",
     }
 }
