@@ -76,7 +76,13 @@ fn permitted_peer(authority: Authority<'_>, directory: &crate::direct_delivery::
 
 pub fn execute(req: Request<'_>, authority: Authority<'_>) -> Result<Value, String> {
     let presentation = serde_json::to_value(req.presentation).map_err(|e| e.to_string())?;
-    crate::messaging::presentation::normalize_send_presentation(None, Some(&presentation))?;
+    if req.envelope.is_some() {
+        if let Some(error) = crate::messaging::presentation::normalize_report_presentation(Some(&presentation)).1 {
+            return Err(error);
+        }
+    } else {
+        crate::messaging::presentation::normalize_send_presentation(None, Some(&presentation))?;
+    }
     let bound_team = match authority {
         Authority::Seat { team, .. } => Some(team),
         _ => None,
@@ -278,7 +284,11 @@ fn send_one(
         result["agent_id"] = envelope["agent_id"].clone();
         result["presentation"] = record["presentation"].clone();
     }
-    if stored.duplicate || req.mailbox || req.presentation.sink != PresentationSink::Leader {
+    let sink = if req.envelope.is_some() {
+        crate::messaging::presentation::decide_presentation(req.presentation,
+            crate::messaging::presentation::PresentationSource::ReportResult).effective_sink
+    } else { req.presentation.sink };
+    if stored.duplicate || (req.envelope.is_none() && req.mailbox) || sink != PresentationSink::Leader {
         return Ok(result);
     }
     let text = render(sender, req.content, id, req.envelope.is_some());

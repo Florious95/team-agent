@@ -123,6 +123,21 @@ fn qualified_sender_excludes_only_its_actual_seat_from_broadcast() {
 }
 
 fn mcp(source: &Path, targets: &[Value]) -> Vec<Value> {
+    let calls: Vec<_> = targets
+        .iter()
+        .map(|target| {
+            (
+                "send_message",
+                json!({
+                    "to":target,"content":"scope probe","mailbox":true
+                }),
+            )
+        })
+        .collect();
+    mcp_calls(source, &calls)
+}
+
+fn mcp_calls(source: &Path, calls: &[(&str, Value)]) -> Vec<Value> {
     let mut child = command(source)
         .args(["mcp-server", "--workspace"])
         .arg(source)
@@ -132,15 +147,13 @@ fn mcp(source: &Path, targets: &[Value]) -> Vec<Value> {
         .spawn()
         .unwrap();
     let mut input = child.stdin.take().unwrap();
-    for (index, target) in targets.iter().enumerate() {
+    for (index, (name, arguments)) in calls.iter().enumerate() {
         writeln!(
             input,
             "{}",
             json!({
                 "jsonrpc": "2.0", "id": index + 1, "method": "tools/call",
-                "params": {"name": "send_message", "arguments": {
-                    "to": target, "content": "scope probe", "mailbox": true
-                }}
+                "params": {"name": name, "arguments": arguments}
             })
         )
         .unwrap();
@@ -157,7 +170,7 @@ fn mcp(source: &Path, targets: &[Value]) -> Vec<Value> {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(responses.len(), targets.len());
+    assert_eq!(responses.len(), calls.len());
     responses
         .into_iter()
         .map(|response| {
@@ -240,6 +253,47 @@ fn stale_pid_reuse_is_nonblocking_and_status_does_not_clean_it() {
     assert!(!pid.exists());
     assert!(!meta.exists());
     assert!(!source.join(".team/runtime/team.db").exists());
+}
+
+#[test]
+fn report_result_accepts_advertised_classes_and_resolves_sink_policy() {
+    let root = TestRoot::new();
+    let source = workspace(root.path(), "source", "alpha");
+    let mut calls = Vec::new();
+    for class in [
+        "message",
+        "progress",
+        "stage_result",
+        "stage_pass",
+        "bounce",
+        "blocking",
+        "final_review",
+        "timeout",
+    ] {
+        for sink in ["leader", "casefile", "silent"] {
+            calls.push((
+                "report_result",
+                json!({
+                    "status":"completed", "summary":format!("{class}-{sink}"),
+                    "task_id":format!("{class}-{sink}"),
+                    "presentation":{"sink":sink,"class":class,"case_id":"report-policy"}
+                }),
+            ));
+        }
+    }
+    let results = mcp_calls(&source, &calls);
+    for ((_, args), result) in calls.iter().zip(&results) {
+        assert_eq!(result["stored"], true, "{result}");
+        let intentionally_quiet = args["presentation"]["class"] == "stage_result"
+            && args["presentation"]["sink"] != "leader";
+        assert_eq!(
+            result.get("delivery_error").is_none(),
+            intentionally_quiet,
+            "{result}"
+        );
+    }
+    let inbox = cli(&source, &source, "alpha", &["inbox", "leader", "-n", "50"]);
+    assert_eq!(inbox["messages"].as_array().unwrap().len(), calls.len());
 }
 
 #[test]

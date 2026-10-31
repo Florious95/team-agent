@@ -60,7 +60,7 @@ pub(crate) fn ensure_agent_not_running(
     });
     if let Some(target) = live {
         Err(LifecycleError::RequirementUnmet(format!(
-            "agent {agent_id} is already running (duplicate / active cohort); use stop-agent first; cohort proof: session={} window={window} pane={}",
+            "agent {agent_id} is already running (duplicate / active cohort); use restart for changed settings, or stop-agent before replacement; cohort proof: session={} window={window} pane={}",
             session.as_str(), target.pane_id.as_str(),
         )))
     } else {
@@ -724,13 +724,22 @@ fn pane_conflicts_with_pane_id(
 ) -> bool {
     let state_socket = runtime_tmux_socket(state);
     let agent_socket = tmux_socket_field(agent).or(state_socket);
-    // Check leader anchor.
+    // The owner record historically omitted the socket. It may inherit one only
+    // from the same fully identified leader binding, never from a bare pane ID.
     for key in ["leader_receiver", "team_owner"] {
-        if state
-            .get(key)
-            .and_then(pane_socket_binding)
-            .is_some_and(|leader| pane_conflicts_on_same_socket(pane_id, agent_socket, leader))
-        {
+        let Some(value) = state.get(key) else { continue };
+        let Some(mut leader) = pane_socket_binding(value) else { continue };
+        if key == "team_owner" && leader.tmux_socket.is_none() {
+            if let Some(receiver) = state.get("leader_receiver") {
+                let same_anchor = value["pane_id"] == receiver["pane_id"]
+                    && value["leader_session_uuid"].as_str().filter(|id| !id.trim().is_empty())
+                        .is_some_and(|id| receiver["leader_session_uuid"].as_str() == Some(id))
+                    && value["owner_epoch"].as_u64()
+                        .is_some_and(|epoch| receiver["owner_epoch"].as_u64() == Some(epoch));
+                if same_anchor { leader.tmux_socket = tmux_socket_field(receiver); }
+            }
+        }
+        if pane_conflicts_on_same_socket(pane_id, agent_socket, leader) {
             return true;
         }
     }
@@ -782,6 +791,43 @@ fn tmux_sockets_known_different(left: Option<&str>, right: Option<&str>) -> bool
         return false;
     }
     std::path::Path::new(left).is_absolute() && std::path::Path::new(right).is_absolute()
+}
+
+#[cfg(test)]
+mod m5_owner_anchor_regressions {
+    use super::*;
+    fn state() -> serde_json::Value {
+        serde_json::json!({
+            "tmux_socket":"/fixture/workers.sock",
+            "agents":{"w1":{"pane_id":"%0","status":"running"}},
+            "leader_receiver":{"pane_id":"%0","tmux_socket":"/fixture/leader.sock",
+                "leader_session_uuid":"leader-fixture","owner_epoch":1},
+            "team_owner":{"pane_id":"%0","leader_session_uuid":"leader-fixture","owner_epoch":1}
+        })
+    }
+    fn collides(state: &serde_json::Value) -> bool {
+        pane_conflicts_with_leader_or_other(state, &AgentId::new("w1"), &state["agents"]["w1"])
+    }
+    #[test]
+    fn matching_owner_inherits_only_its_identified_receiver_socket() {
+        let mut state = state();
+        assert!(!collides(&state));
+        state["leader_receiver"]["tmux_socket"] = serde_json::json!("/fixture/workers.sock");
+        assert!(collides(&state));
+    }
+    #[test]
+    fn incomplete_or_conflicting_owner_identity_never_inherits_a_socket() {
+        for (field, value) in [
+            ("leader_session_uuid", serde_json::json!("other-leader")),
+            ("owner_epoch", serde_json::json!(2)),
+            ("owner_epoch", serde_json::Value::Null),
+            ("tmux_socket", serde_json::json!("/fixture/workers.sock")),
+        ] {
+            let mut state = state();
+            state["team_owner"][field] = value;
+            assert!(collides(&state));
+        }
+    }
 }
 
 fn runtime_tmux_socket(state: &serde_json::Value) -> Option<&str> {
