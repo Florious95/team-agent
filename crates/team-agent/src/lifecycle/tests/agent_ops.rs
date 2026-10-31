@@ -847,7 +847,9 @@ fn remove_agent_emits_golden_lifecycle_event_payloads() {
         .iter()
         .filter_map(|e| e.get("step").and_then(|v| v.as_str()))
         .collect();
-    assert!(steps.contains(&"workspace_state") && steps.contains(&"agent_health"),
+    // M4: the golden `agent_health` step removed rows from the retired SQLite agent_health
+    // table; it no longer exists. The workspace_state step is still required.
+    assert!(steps.contains(&"workspace_state"),
         "remove_agent must write lifecycle.remove_step_completed for each step (golden agents.py:86,109); got steps {steps:?}");
     let ws_step = step_events
         .iter()

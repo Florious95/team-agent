@@ -22,7 +22,6 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 use serial_test::serial;
 use team_agent::mcp_server::TeamOrchestratorTools;
-use team_agent::message_store::MessageStore;
 use team_agent::model::enums::ResultStatus;
 use team_agent::model::ids::{AgentId, TeamKey};
 use team_agent::state::persist::{runtime_state_path, save_runtime_state};
@@ -182,22 +181,6 @@ fn stale_legacy_snapshot_is_marked_or_reported_and_never_consumed_by_product_rea
 fn append_only_result_identity_does_not_inherit_a_legacy_current_turn() {
     let case = AlphaCase::new("a0-response-naming");
     save_runtime_state(&case.workspace, &case.a0_state()).expect("seed A0 state");
-    let store = MessageStore::open(&case.workspace).expect("open message store");
-    store
-        .create_message_with_id(
-            MSG_ALPHA,
-            None,
-            "leader",
-            WORKER,
-            "alpha current-turn report",
-            None,
-            false,
-            Some(TEAM),
-        )
-        .expect("insert current-turn message");
-    store
-        .mark(MSG_ALPHA, "delivered", None)
-        .expect("mark current-turn message delivered");
 
     let tools = TeamOrchestratorTools::with_identity(
         &case.workspace,

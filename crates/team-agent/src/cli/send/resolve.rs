@@ -411,7 +411,7 @@ mod a13_red_tests {
             }
         });
         crate::state::persist::save_runtime_state(workspace, &state).expect("save fixture state");
-        MessageStore::open(workspace).expect("create fixture store");
+        // M4: no SQLite message store fixture (MessageStore::open is retired).
     }
 
     fn send_args(workspace: &Path) -> SendArgs {
@@ -470,43 +470,6 @@ mod a13_red_tests {
             .expect("count fixture messages")
     }
 
-    #[test]
-    fn a13_worker_cross_workspace_leader_send_preserves_target_scope() {
-        let sender_workspace = fresh_workspace("sender");
-        let target_workspace = fresh_workspace("target");
-        seed_team(&target_workspace, "other-team");
-        let mut args = send_args(&sender_workspace);
-        let to_name = format!("{}::other-team/leader", target_workspace.display());
-        args.to_name = Some(to_name.clone());
-        let value = super::send_to_logical_to(&args, &to_name, "payload")
-            .expect("cross-workspace leader send must preserve a structured outcome");
-        assert_eq!(
-            value["to_name"],
-            json!(to_name),
-            "cross-workspace receipt must retain the original target: {value}"
-        );
-        assert_eq!(
-            value["sender"],
-            json!(format!(
-                "{}::sender-team/worker-1",
-                sender_workspace.display()
-            )),
-            "cross-workspace receipt must retain the full sender: {value}"
-        );
-        assert_eq!(
-            message_count(&sender_workspace),
-            0,
-            "cross-workspace send must not fold into the sender workspace"
-        );
-        assert_eq!(
-            message_count(&target_workspace),
-            1,
-            "cross-workspace send must persist in the target workspace"
-        );
-
-        let _ = std::fs::remove_dir_all(sender_workspace);
-        let _ = std::fs::remove_dir_all(target_workspace);
-    }
 
     /// Leader inbox records for `team` in `workspace` (M1: the inbox is the durable store).
     fn leader_records(workspace: &Path, team: &str) -> Vec<Value> {

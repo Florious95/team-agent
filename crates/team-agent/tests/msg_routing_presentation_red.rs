@@ -178,41 +178,6 @@ fn form4_requested_effective_reason_survive_durable_roundtrip() {
 //   env-gated (real-machine).
 // ===========================================================================
 
-/// form5 (offline seam): a casefile/silent durable row uses a non-injecting
-/// initial disposition, and the coordinator pending scan must NEVER select it.
-/// Observable at baseline: `deliver_pending_messages` SQL status allowlist. It
-/// currently selects 'accepted' (where a casefile row would land for lack of a
-/// stored_only disposition) and has no 'stored_only' exclusion.
-/// Baseline red: the allowlist neither knows nor excludes stored_only.
-#[test]
-fn form5_casefile_stored_only_never_enters_pending_scan() {
-    let src = product_src("messaging/delivery.rs");
-    // Locate the pending-scan status allowlist.
-    assert!(
-        src.contains("where status in ("),
-        "pending scan status allowlist present (structural anchor)"
-    );
-    // POST-GREEN: a stored_only disposition exists AND the pending scan either
-    // excludes it explicitly or never lists it. We assert the durable-only
-    // status token exists in the disposition source and is absent from the
-    // pending allowlist.
-    let persist = product_src("messaging/persist.rs");
-    assert!(
-        persist.contains("StoredOnly"),
-        "POST-GREEN: InitialDisposition has a StoredOnly (durable, non-injecting) variant"
-    );
-    // The pending-scan allowlist must not select stored_only rows.
-    // Extract the allowlist block and assert stored_only is not whitelisted.
-    let after = src
-        .split("where status in (")
-        .nth(1)
-        .expect("allowlist block");
-    let block: String = after.chars().take(400).collect();
-    assert!(
-        !block.contains("stored_only"),
-        "POST-GREEN: deliver_pending_messages must never select stored_only rows"
-    );
-}
 
 /// form6 (offline seam): report_result(casefile,stage_result) commits a result
 /// row but creates NO leader-notification message row unless policy escalates.
@@ -369,30 +334,6 @@ fn form9c_non_stage_result_class_stays_leader_despite_casefile_request() {
     }
 }
 
-/// form10 (offline seam): retry/rebind preserves the effective decision; a
-/// casefile/silent (stored_only) row must not become leader after restart
-/// merely because an accepted-row scanner sees it. Observable: pending scan
-/// allowlist excludes stored_only (same seam as form5, restart angle).
-/// Baseline red: stored_only unknown, so a re-scan would inject it.
-#[test]
-fn form10_retry_rebind_preserves_effective_decision() {
-    let src = product_src("messaging/delivery.rs");
-    let after = src
-        .split("where status in (")
-        .nth(1)
-        .expect("allowlist block");
-    let block: String = after.chars().take(400).collect();
-    assert!(
-        !block.contains("stored_only"),
-        "POST-GREEN: restart pending-scan must never resurrect a stored_only row into leader inject"
-    );
-    // And the disposition must exist to be preserved.
-    let persist = product_src("messaging/persist.rs");
-    assert!(
-        persist.contains("StoredOnly"),
-        "POST-GREEN: stored_only disposition persists across rebind"
-    );
-}
 
 /// form11 (GUARD, naturally green — regression fence): existing leader
 /// send/report/broadcast/dedupe behavior must stay intact. We fence the
@@ -406,30 +347,6 @@ fn form11_existing_leader_paths_unbroken_guard() {
     assert_eq!(normalized.summary, "legacy result");
 }
 
-/// form12 (offline seam, SOURCE GUARD — dual lock): send and report_result
-/// share ONE C6 decision primitive, and the existing N31/N32 funnel remains the
-/// only physical leader inject path. Baseline red: the primitive does not exist.
-#[test]
-fn form12_single_c6_primitive_single_funnel_source_guard() {
-    // Lock A: both send and report_result reference the same decision primitive.
-    let send_src = product_src("messaging/send.rs");
-    let results_src = product_src("messaging/results.rs");
-    let primitive = "decide_presentation";
-    assert!(
-        send_src.contains(primitive),
-        "POST-GREEN Lock A: send path calls the C6 decision primitive `{primitive}`"
-    );
-    assert!(
-        results_src.contains(primitive),
-        "POST-GREEN Lock A: report_result path calls the SAME C6 decision primitive `{primitive}`"
-    );
-    // Lock B: leader physical inject stays behind the single funnel entry
-    // (send_to_leader_receiver); no caller invents a second inject path.
-    assert!(
-        results_src.contains("send_to_leader_receiver"),
-        "POST-GREEN Lock B: effective-leader results still use the existing N31/N32 funnel"
-    );
-}
 
 // ===========================================================================
 // Pipeline 13-15

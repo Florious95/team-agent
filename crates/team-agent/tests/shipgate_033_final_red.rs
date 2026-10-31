@@ -524,7 +524,7 @@ fn seed_stored_result(
     task_id: &str,
     agent_id: &str,
 ) {
-    let _ = MessageStore::open(root).expect("open message store");
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
     let db_path = root.join(".team").join("runtime").join("team.db");
     let conn = open_db(&db_path).expect("open team.db");
     let envelope = json!({

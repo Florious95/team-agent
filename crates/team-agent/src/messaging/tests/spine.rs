@@ -132,34 +132,6 @@ fn p2_classify_activity_reads_command_stale_and_prompts() {
 
 // P1 — scheduler dispatch must be exhaustive: an unknown kind surfaces an error, not a
 // silent {ok:false} (scheduler.py: 'unknown scheduled event kind: <kind>').
-#[test]
-fn p2_scheduler_unknown_kind_surfaces_error() {
-    let ws = tmp_ws("schedunknown");
-    let store = store_for(&ws);
-    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-    conn.execute(
-        "insert into scheduled_events(owner_team_id, due_at, target, kind, payload_json, status, created_at) \
-         values (null, '2000-01-01T00:00:00+00:00', 't', 'bogus_kind', '{}', 'pending', '2000-01-01T00:00:00+00:00')",
-        [],
-    )
-    .unwrap();
-    let log = EventLog::new(&ws);
-    // U1 #5: unknown kind is isolated to its own row (marked terminal 'failed' +
-    // scheduler.event_failed), NOT propagated as a pass-level Err that would halt the
-    // batch. Failure stays loud (evented) but does not take the whole scheduler down.
-    let fired = fire_due_scheduled_events(&ws, &store, &NoopTransport, &log)
-        .expect("an unknown scheduled event kind must be isolated to its row, not halt the pass");
-    assert_eq!(fired.len(), 1);
-    assert_eq!(scheduled_status_of(&store, fired[0]), "failed");
-    let events = log.tail(0).unwrap();
-    assert!(
-        events.iter().any(|event| {
-            event.get("event").and_then(serde_json::Value::as_str) == Some("scheduler.event_failed")
-                && event.get("event_id").and_then(serde_json::Value::as_i64) == Some(fired[0])
-        }),
-        "unknown scheduled event kind must leave scheduler.event_failed; events={events:?}"
-    );
-}
 
 // ═════════════════════════════════════════════════════════════════════════
 // SPINE-WIRING (③ review→fix) RED — deliver_pending_messages + scheduler divergences
@@ -320,135 +292,11 @@ fn read_event_log(ws: &Path) -> Vec<serde_json::Value> {
 
 // #1 — deliver_pending_messages delivers ONLY {pending,accepted}; queued_* rows are scheduler-owned
 // and must be left untouched (golden delivery.py:484 `if row["status"] not in {"pending","accepted"}: continue`).
-#[test]
-fn spine_delivery_skips_queued_statuses() {
-    let ws = tmp_ws("deliver-queued");
-    let store = store_for(&ws);
-    let log = EventLog::new(&ws);
-    let _acc = store
-        .create_message(Some("t"), "leader", "w1", "hi", None, true, None)
-        .unwrap();
-    let qidle = store
-        .create_message(Some("t"), "leader", "w1", "hi", None, true, None)
-        .unwrap();
-    let qstart = store
-        .create_message(Some("t"), "leader", "w1", "hi", None, true, None)
-        .unwrap();
-    set_message_status(&store, &qidle, "queued_until_idle");
-    set_message_status(&store, &qstart, "queued_until_start");
-    let state = serde_json::json!({"agents": {"w1": {"provider": "fake"}}});
-
-    let _ = deliver_pending_messages(&ws, &state, &DeliverOkTransport::default(), &log).unwrap();
-
-    assert_eq!(
-        message_status_of(&store, &qidle),
-        "queued_until_idle",
-        "queued_until_idle must NOT be claimed/injected/marked by deliver_pending"
-    );
-    assert_eq!(
-        message_status_of(&store, &qstart),
-        "queued_until_start",
-        "queued_until_start must NOT be touched by deliver_pending"
-    );
-}
 
 // Input is unconditional: native CLIs queue messages while working. Activity
 // metadata must not prevent a pending message from reaching paste + Enter.
-#[test]
-fn spine_delivery_busy_recipient_is_injected_without_idle_deferral() {
-    let ws = tmp_ws("deliver-busy");
-    let store = store_for(&ws);
-    let log = EventLog::new(&ws);
-    let mid = store
-        .create_message(Some("t"), "leader", "w1", "hi", None, true, None)
-        .unwrap();
-    let state = serde_json::json!({"agents": {"w1": {"provider": "fake", "status": "busy"}}});
 
-    let delivered = deliver_pending_messages(&ws, &state, &DeliverOkTransport::default(), &log).unwrap();
 
-    assert!(delivered.contains(&mid));
-    assert_eq!(message_status_of(&store, &mid), "delivered");
-    let events = read_event_log(&ws);
-    let deferred: Vec<_> = events
-        .iter()
-        .filter(|e| e.get("event").and_then(|v| v.as_str()) == Some("send.deferred_busy"))
-        .collect();
-    assert!(deferred.is_empty());
-}
-
-#[test]
-fn spine_delivery_pi_uses_v113_direct_input_without_idle_scope() {
-    for provider in ["pi"] {
-        let ws = tmp_ws(&format!("direct-input-{provider}"));
-        let store = store_for(&ws);
-        let log = EventLog::new(&ws);
-        let mid = store
-            .create_message(Some("t"), "leader", "w1", "hi", None, true, Some("spine-team"))
-            .unwrap();
-        #[cfg(unix)]
-        let carrier = crate::mcp_server::readiness::test_carrier_pid().unwrap();
-        #[cfg(not(unix))]
-        let carrier = std::process::id();
-        let config = ws.join(".team/runtime/mcp/w1.json");
-        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
-        std::fs::write(&config, serde_json::to_vec(&serde_json::json!({
-            "mcpServers": {"team_orchestrator": {
-                "command": std::env::current_exe().unwrap().canonicalize().unwrap(),
-                "env": {"TEAM_AGENT_WORKSPACE": ws, "TEAM_AGENT_ID": "w1", "TEAM_AGENT_OWNER_TEAM_ID": "spine-team"}
-            }}
-        })).unwrap()).unwrap();
-        let mut state = serde_json::json!({"team_key": "spine-team", "active_team_key": "spine-team", "session_name": "spine", "agents": {"w1": {
-            "provider": provider, "status": "running", "window": "w1", "mcp_config": config,
-            "spawned_at": (chrono::Utc::now() - chrono::Duration::seconds(10)).to_rfc3339(),
-            "pane_id": "%spine", "pane_pid": carrier
-        }}});
-        state["teams"] = serde_json::json!({"spine-team": state.clone()});
-        crate::state::persist::save_runtime_state(&ws, &state).unwrap();
-        let transport = DeliverOkTransport { targets: vec![PaneInfo {
-            pane_id: PaneId::new("%spine"), session: SessionName::new("spine"),
-            window_index: None, window_name: Some(WindowName::new("w1")), pane_index: None, tty: None,
-            current_command: None, current_path: None, active: true,
-            pane_pid: Some(carrier), leader_env: BTreeMap::new(),
-        }] };
-        let delivered = deliver_pending_messages(&ws, &state, &transport, &log).unwrap();
-        assert!(delivered.contains(&mid), "{provider}: {:?}", read_event_log(&ws));
-        assert_eq!(message_status_of(&store, &mid), "delivered");
-    }
-}
-
-#[test]
-fn spine_delivery_refuses_retired_legacy_rows_before_input() {
-    for (provider, expected) in [
-        ("codex", "legacy codex seat has no runtime in this release"),
-        ("codex_cli", "legacy codex seat has no runtime in this release"),
-        ("codex-cli", "legacy codex seat has no runtime in this release"),
-    ] {
-        let ws = tmp_ws(&format!("retired-{provider}"));
-        let store = store_for(&ws);
-        let log = EventLog::new(&ws);
-        let mid = store
-            .create_message(Some("t"), "leader", "w1", "hi", None, true, None)
-            .unwrap();
-        let state = serde_json::json!({"agents": {"w1": {"provider": provider, "status": "running"}}});
-
-        // NoopTransport panics on any call: the refusal precedes every pane effect.
-        let delivered = deliver_pending_messages(&ws, &state, &NoopTransport, &log).unwrap();
-
-        assert!(delivered.is_empty(), "{provider}");
-        assert_ne!(message_status_of(&store, &mid), "delivered", "{provider}");
-        let blocked = read_event_log(&ws)
-            .into_iter()
-            .find(|e| e.get("event").and_then(|v| v.as_str()) == Some("delivery.item_blocked"));
-        assert!(
-            blocked
-                .as_ref()
-                .and_then(|e| e.get("error"))
-                .and_then(|v| v.as_str())
-                .is_some_and(|error| error.contains(expected)),
-            "{provider}: {blocked:?}"
-        );
-    }
-}
 
 // CONTRACT (shared-root, real-machine-driven; golden = correct-behavior baseline): an ALIVE worker
 // (lifecycle status="running") must be DELIVERABLE even when its turn-level agent_health=WORKING.
@@ -457,115 +305,16 @@ fn spine_delivery_refuses_retired_legacy_rows_before_input() {
 // recipient_is_busy (delivery.rs:291) reads `agent_health WHERE status='WORKING'` — turn-level
 // idle-detection state — and defers. This is the Stage-B / stop-reset deferred_busy regression root:
 // turn-level agent_health must NOT gate delivery; lifecycle status (alive) does.
-#[test]
-fn contract_alive_worker_with_working_health_is_deliverable_not_deferred() {
-    let ws = tmp_ws("deliver-alive-working");
-    let store = store_for(&ws);
-    let log = EventLog::new(&ws);
-    let mid = store
-        .create_message(Some("t"), "leader", "w1", "hi", None, true, None)
-        .unwrap();
-    seed_agent_health(&store, "w1", "WORKING"); // turn-level state — must NOT gate delivery
-    let state = serde_json::json!({"agents": {"w1": {"provider": "fake", "status": "running"}}}); // lifecycle: alive
-
-    let delivered = deliver_pending_messages(&ws, &state, &DeliverOkTransport::default(), &log).unwrap();
-
-    let events = read_event_log(&ws);
-    let deferred: Vec<_> = events
-        .iter()
-        .filter(|e| e.get("event").and_then(|v| v.as_str()) == Some("send.deferred_busy"))
-        .collect();
-    assert!(
-        deferred.is_empty(),
-        "CONTRACT: an alive worker (lifecycle status=running) must NOT be deferred_busy on agent_health=WORKING; \
-         golden busy gate is lifecycle status=='busy' (never set for alive workers). got {deferred:?}"
-    );
-    assert!(
-        delivered.contains(&mid),
-        "the message to an alive worker must be delivered (round-trip), not deferred. delivered={delivered:?}"
-    );
-}
 
 // #6a — fire_due_scheduled_events marks 'done' if result.ok else 'failed' (scheduler.py:117).
 // An EXHAUSTED trust_retry (attempt>=max) → handle_trust_retry_needed returns ok:false → 'failed'.
-#[test]
-fn spine_scheduler_marks_failed_when_result_not_ok() {
-    let ws = tmp_ws("sched-failed");
-    let store = store_for(&ws);
-    let log = EventLog::new(&ws);
-    let payload = serde_json::json!({"message_id": "msg_x", "attempt": 5, "max_attempts": 5, "first_target": "%1"}).to_string();
-    let id = seed_event_due(&store, "trust_retry", "2000-01-01T00:00:00+00:00", &payload);
-
-    let _ = fire_due_scheduled_events(&ws, &store, &NoopTransport, &log).unwrap();
-
-    assert_eq!(
-        scheduled_status_of(&store, id),
-        "failed",
-        "a not-ok result (exhausted trust_retry) must mark the scheduled event 'failed', not unconditional 'done'"
-    );
-}
 
 // U1 #5 (RED) — a single poison scheduled event (malformed payload_json that errors at
 // `serde_json::from_str?`) must NOT halt the whole pass: it must be marked terminal 'failed'
 // + emit `scheduler.event_failed`, and a healthy event seeded AFTER it must still fire.
 // Today the bare `?` aborts `fire_due_scheduled_events`, the healthy event never fires → RED.
-#[test]
-fn spine_scheduler_poison_event_does_not_halt_batch() {
-    let ws = tmp_ws("sched-poison");
-    let store = store_for(&ws);
-    let log = EventLog::new(&ws);
-    // earlier due_at → selected first; malformed JSON payload errors at from_str.
-    let poison = seed_event_due(
-        &store,
-        "send",
-        "2000-01-01T00:00:00+00:00",
-        "{not valid json",
-    );
-    // later due_at → selected after poison; healthy.
-    let healthy = seed_event_due(&store, "health_ping", "2000-01-02T00:00:00+00:00", "{}");
-
-    let fired = fire_due_scheduled_events(&ws, &store, &NoopTransport, &log)
-        .expect("a poison event must not propagate as a pass-level Err (must isolate + continue)");
-
-    // poison marked terminal failed (not re-fired every tick).
-    assert_eq!(
-        scheduled_status_of(&store, poison),
-        "failed",
-        "U1 #5: a poison scheduled event must be marked terminal 'failed', not halt the pass"
-    );
-    // healthy event AFTER the poison still fired.
-    assert!(
-        fired.contains(&healthy),
-        "U1 #5: a healthy event after a poison one must still fire (batch not halted); fired={fired:?}"
-    );
-    // failure is loud: scheduler.event_failed event emitted for the poison.
-    let events = read_event_log(&ws);
-    assert!(
-        events
-            .iter()
-            .any(|e| e.get("event").and_then(|v| v.as_str()) == Some("scheduler.event_failed")),
-        "U1 #5: a poison event must emit scheduler.event_failed (failure must be loud, not silent)"
-    );
-}
 
 // #6b — due events fire in (due_at, id) order (core.py due_scheduled_events), not id order.
-#[test]
-fn spine_scheduler_orders_due_events_by_due_at_then_id() {
-    let ws = tmp_ws("sched-order");
-    let store = store_for(&ws);
-    let log = EventLog::new(&ws);
-    // smaller id is due LATER → due_at order must reverse the id order.
-    let a_late = seed_event_due(&store, "health_ping", "2000-01-02T00:00:00+00:00", "{}");
-    let b_early = seed_event_due(&store, "health_ping", "2000-01-01T00:00:00+00:00", "{}");
-
-    let fired = fire_due_scheduled_events(&ws, &store, &NoopTransport, &log).unwrap();
-
-    assert_eq!(
-        fired,
-        vec![b_early, a_late],
-        "fire order must be by (due_at, id) — earlier-due fires first; current orders by id only. got {fired:?}"
-    );
-}
 
 // ═════════════════════════════════════════════════════════════════════════
 // rt-host-a LOOP #3 — coordinator deliver tick injects to the AGENT ID treated as a bare PANE-ID.
@@ -580,50 +329,6 @@ fn spine_scheduler_orders_due_events_by_due_at_then_id() {
 // RED — deliver_pending_messages must inject to a RESOLVABLE target (session-qualified or a real
 // pane-id), NOT the bare agent-id treated as a pane. Today delivery.rs:127 records
 // Target::Pane(PaneId("w1")) -> a non-attached coordinator can't resolve it -> RED at assert_ne!.
-#[test]
-fn spine_delivery_injects_resolvable_target_not_bare_agent_pane() {
-    let ws = tmp_ws("deliver-target");
-    let store = store_for(&ws);
-    let log = EventLog::new(&ws);
-    let _mid = store
-        .create_message(Some("t"), "leader", "w1", "hi", None, true, None)
-        .unwrap();
-    // in-team, non-busy agent -> deliver proceeds; the session-qualified resolution uses session_name + window.
-    let state = serde_json::json!({
-        "session_name": "team-x",
-        "agents": {"w1": {"provider": "fake", "status": "idle", "window": "w1"}}
-    });
-    let transport = OfflineTransport::new();
-
-    let _ = deliver_pending_messages(&ws, &state, &transport, &log).unwrap();
-
-    let recorded = transport.inject_targets();
-    assert_eq!(
-        recorded.len(),
-        1,
-        "deliver must inject the one pending message exactly once; got {recorded:?}"
-    );
-    let target = recorded[0].clone();
-    // THE BUG (rt-host-a #3): deliver builds Target::Pane(PaneId(message.recipient)) — the agent id as a
-    // BARE pane, which a non-attached coordinator can't resolve ("can't find pane: w1").
-    assert_ne!(
-        target,
-        Target::Pane(PaneId::new("w1")),
-        "deliver must NOT inject to the bare agent-id as a pane-id (a non-attached coordinator can't \
-         resolve it -> 'can't find pane: w1'); expected a SESSION-QUALIFIED target \
-         (SessionWindow{{session: team-x, window: w1}}) or the persisted pane-id, got {target:?}"
-    );
-    // ...and it must be a genuinely resolvable target: session-qualified (session=team-x) or a real
-    // pane-id (anything but the bare agent name).
-    let resolvable = match &target {
-        Target::SessionWindow { session, .. } => session.as_str() == "team-x",
-        Target::Pane(pane) => pane.as_str() != "w1",
-    };
-    assert!(
-        resolvable,
-        "deliver must resolve recipient 'w1' to session=team-x (session-qualified) or a real pane-id; got {target:?}"
-    );
-}
 
 // ═════════════════════════════════════════════════════════════════════════
 // rt-host-a LOOP #4 — coordinator injects the RAW message content, but the worker only builds a
@@ -636,52 +341,6 @@ fn spine_delivery_injects_resolvable_target_not_bare_agent_pane() {
 
 // RED — deliver must inject the RENDERED protocol block (header + content + [team-agent-token:<id>]),
 // NOT the raw content. Today the payload is the bare "do the thing" (no header, no token) -> RED.
-#[test]
-fn spine_delivery_injects_rendered_protocol_block_not_raw_content() {
-    let ws = tmp_ws("deliver-render");
-    let store = store_for(&ws);
-    let log = EventLog::new(&ws);
-    let mid = store
-        .create_message(Some("t1"), "leader", "w1", "do the thing", None, true, None)
-        .unwrap();
-    let state = serde_json::json!({
-        "session_name": "team-x",
-        "agents": {"w1": {"provider": "fake", "status": "idle", "window": "w1"}}
-    });
-    let transport = OfflineTransport::new();
-
-    let _ = deliver_pending_messages(&ws, &state, &transport, &log).unwrap();
-
-    let recorded = transport.inject_payloads();
-    assert_eq!(
-        recorded.len(),
-        1,
-        "deliver must inject the one pending message exactly once; got {recorded:?}"
-    );
-    let payload = recorded[0].clone();
-    // THE BUG (rt-host-a #4): deliver injects the RAW content -> the worker never reports (it only builds
-    // a result_envelope on the rendered block with the token).
-    assert_ne!(
-        payload, "do the thing",
-        "deliver must NOT inject the bare content; the worker only reports on the rendered protocol block \
-         (with [team-agent-token:<id>]) — bare text -> WORKING but never reports -> results=0; got {payload:?}"
-    );
-    assert!(
-        payload.contains("Team Agent message from leader for t1:"),
-        "the injected payload must be the rendered protocol header (sender + task): 'Team Agent message \
-         from leader for t1:'; got {payload:?}"
-    );
-    assert!(
-        payload.contains("do the thing"),
-        "the rendered block must carry the content; got {payload:?}"
-    );
-    let token_line = format!("[team-agent-token:{mid}]");
-    assert!(
-        payload.contains(&token_line),
-        "the rendered block must end with the token line {token_line:?} (token == message_id) so the \
-         worker builds a result_envelope; got {payload:?}"
-    );
-}
 
 // ═════════════════════════════════════════════════════════════════════════════
 // E47 (0.3.24 P0, idle/busy 假阳) — TUI keyword grep is structurally bounded.

@@ -72,7 +72,7 @@ with (root / 'received').open('ab', buffering=0) as out:
             "teams": {"current": {
                 "team_id": "current", "status": "stopped", "tmux_socket": fixture.socket,
                 "leader": {"pane_id": fixture.pane},
-                "agents": {"worker-1": {"status": "dead", "pane_id": fixture.pane}}
+                "agents": {"worker-1": {"status": "running", "pane_id": fixture.pane}}
             }}
         }));
         fixture

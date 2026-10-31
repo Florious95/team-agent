@@ -107,20 +107,6 @@ fn batch4_leader_channel_uses_factory_helpers_not_direct_tmux_backend() {
     }
 }
 
-#[test]
-fn batch4_results_report_uses_the_single_leader_notification_funnel() {
-    let body = read("messaging/results.rs");
-    let code = non_comment_body(&body);
-    assert!(
-        code.contains("send_to_leader_receiver_with_presentation"),
-        "report_result must use the shared leader receiver notification funnel"
-    );
-    assert!(
-        !code.contains("resolve_read_only_transport")
-            && !code.contains("if let Some(message_id) = outcome.message_id.clone()"),
-        "the removed collect-era retry block must not reintroduce a second transport path"
-    );
-}
 
 #[test]
 fn batch4_c4_compact_status_guard_still_green() {

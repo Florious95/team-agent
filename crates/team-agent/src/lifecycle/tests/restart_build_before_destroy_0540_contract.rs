@@ -429,7 +429,7 @@ fn seed_copilot_session_store(home: &Path, workers: &[String]) {
 
 fn seed_healthy_coordinator(workspace: &Path) {
     fs::create_dir_all(runtime_dir(workspace)).expect("create runtime dir");
-    let _store = MessageStore::open(workspace).expect("create message store schema");
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
     let wp = WorkspacePath::new(workspace.to_path_buf());
     let pid = Pid::new(std::process::id());
     team_agent::coordinator::write_coordinator_metadata(&wp, pid, MetadataSource::Boot)

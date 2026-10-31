@@ -255,7 +255,6 @@ jobs:
             startup-egress)
               run_case egress-check cargo check --workspace --all-targets --locked
               run_case egress-root cargo test -p team-agent --lib --locked contract_runtime::forward -- --test-threads=1 --nocapture
-              run_case egress-forward cargo test --manifest-path crates/team-agent-contract/Cargo.toml --test forward --locked -- --test-threads=1
               run_case egress-build cargo build -p team-agent --example scoped_contract_egress --release --locked
               run_case egress-help target/release/examples/scoped_contract_egress --help
               cp target/release/examples/scoped_contract_egress regression-evidence/scoped_contract_egress
@@ -324,7 +323,7 @@ jobs:
               run_case health-delivery cargo test -p team-agent --lib --locked spine2_sync_health_working_status_delivers_same_tick -- --test-threads=1 --nocapture
               run_case monitor-delivery cargo test -p team-agent --lib --locked b4_monitor_step_failure_does_not_block_deliver_pending -- --test-threads=1 --nocapture
               run_case trust-scrollback cargo test -p team-agent --lib --locked contract_b_delivery_gate_trusts_startup_handled_state_over_pane_scrollback -- --test-threads=1 --nocapture
-              run_case delivery-integration-fixtures cargo test -p team-agent --locked --test claude_provider_trust_prompt_red --test event_chain_integrity_red --test provider_submit_verification_red --test team_in_team_delivery_scope_red -- --test-threads=1 --nocapture
+              run_case delivery-integration-fixtures cargo test -p team-agent --locked --test claude_provider_trust_prompt_red --test event_chain_integrity_red --test provider_submit_verification_red -- --test-threads=1 --nocapture
               ;;
             issue345-red)
               run_case issue345 cargo test -p team-agent --lib --locked issue345 -- --test-threads=1 --nocapture

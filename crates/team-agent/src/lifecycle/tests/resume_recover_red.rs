@@ -197,7 +197,7 @@ impl ResumeFixture {
         let workspace = WorkspacePath::new(self.team.clone());
         std::fs::create_dir_all(team_agent::model::paths::runtime_dir(workspace.as_path()))
             .unwrap();
-        let _ = MessageStore::open(workspace.as_path()).unwrap();
+        // M4: no SQLite message store fixture (MessageStore::open is retired).
         let pid = Pid::new(std::process::id());
         write_coordinator_metadata(&workspace, pid, MetadataSource::Boot).unwrap();
         std::fs::write(coordinator_pid_path(&workspace), pid.to_string()).unwrap();

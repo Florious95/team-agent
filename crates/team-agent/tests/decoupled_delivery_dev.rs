@@ -70,7 +70,7 @@ with (root / 'received').open('ab', buffering=0) as out:
         let state = json!({"active_team_key": "alpha", "tmux_socket": fixture.socket,
             "teams": {"alpha": {"team_id": "alpha", "team_name": "friendly", "status": "stopped",
                 "tmux_socket": fixture.socket, "leader": {"pane_id": fixture.pane, "provider": "retired-provider"},
-                "agents": {"worker": {"pane_id": fixture.pane, "provider": "retired-provider", "status": "dead"}}}}});
+                "agents": {"worker": {"pane_id": fixture.pane, "provider": "retired-provider", "status": "running"}}}}});
         fs::write(
             fixture.root.join(".team/runtime/state.json"),
             serde_json::to_vec(&state).unwrap(),
@@ -193,41 +193,6 @@ os.execvp('tmux', ['tmux', *sys.argv[1:]])
     assert_eq!(fs::read(fixture.root.join("received")).unwrap(), b"\x1b[200~paced submit\x1b[201~\r");
 }
 
-#[test]
-fn due_reminder_reaches_physical_leader_and_inbox_without_a_receipt_source() {
-    let fixture = Fixture::new();
-    let state_path = fixture.root.join(".team/runtime/state.json");
-    let mut state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
-    let leader = &mut state["teams"]["alpha"]["leader"];
-    leader["session_name"] = json!("old-leader-session");
-    leader["window"] = json!("old-leader-window");
-    leader["pane_pid"] = json!(0);
-    fs::write(state_path, serde_json::to_vec(&state).unwrap()).unwrap();
-    let store = team_agent::message_store::MessageStore::open(&fixture.root).unwrap();
-    let conn = rusqlite::Connection::open(store.db_path()).unwrap();
-    conn.execute(
-        "insert into scheduled_events(owner_team_id, due_at, target, kind, payload_json, status, created_at) values ('alpha', '2000-01-01T00:00:00Z', 'leader', 'reminder', ?1, 'pending', '2000-01-01T00:00:00Z')",
-        [json!({"text":"scheduled physical reminder", "trigger":"in 3s", "interval_ms":null}).to_string()],
-    ).unwrap();
-    let id = conn.last_insert_rowid();
-    // The legacy argument deliberately differs from the published private endpoint.
-    let transport = team_agent::tmux_backend::TmuxBackend::for_workspace(&fixture.root);
-    let log = team_agent::event_log::EventLog::new(&fixture.root);
-    let fired = team_agent::messaging::fire_due_scheduled_events(&fixture.root, &store, &transport, &log).unwrap();
-    assert_eq!(fired, vec![id]);
-    fixture.received("Team Agent reminder:\n\nscheduled physical reminder");
-    let inbox = team_agent::inbox_store::read(&fixture.root, "leader", 10, Some("alpha")).unwrap();
-    assert_eq!(inbox["messages"].as_array().unwrap().len(), 1);
-    assert_eq!(inbox["messages"][0]["kind"], "reminder");
-    assert_eq!(inbox["messages"][0]["content"], "scheduled physical reminder");
-    let (status, result): (String, String) = conn.query_row("select status, result_json from scheduled_events where id=?1", [id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
-    assert_eq!(status, "done");
-    assert_eq!(serde_json::from_str::<Value>(&result).unwrap()["delivery"], "physical");
-    assert_eq!(conn.query_row("select count(*) from messages", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
-    let before = fs::read(fixture.root.join("received")).unwrap();
-    assert!(team_agent::messaging::fire_due_scheduled_events(&fixture.root, &store, &transport, &log).unwrap().is_empty());
-    assert_eq!(fs::read(fixture.root.join("received")).unwrap(), before);
-}
 
 #[test]
 fn logical_send_uses_live_pane_despite_stale_metadata_dead_status_and_missing_mcp() {

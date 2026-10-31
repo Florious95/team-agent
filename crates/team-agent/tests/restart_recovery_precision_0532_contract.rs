@@ -39,8 +39,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rusqlite::params;
 use serde_json::{json, Value};
 use serial_test::serial;
-use team_agent::db::schema::open_db;
-use team_agent::message_store::MessageStore;
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 
 const TEAM: &str = "current";
@@ -63,7 +61,6 @@ fn restart_clears_stale_working_activity_and_health_after_shutdown_keep_logs() {
     case.write_fake_tmux();
     case.write_team_spec();
     case.seed_running_state_with_stale_activity();
-    case.seed_agent_health("WORKING", Some(OLD_MESSAGE_ID));
 
     let shutdown = case.run_ta(&[
         "shutdown",
@@ -373,28 +370,10 @@ tasks: []
         save_runtime_state(&self.workspace, &state).expect("seed old endpoint state");
     }
 
-    fn seed_agent_health(&self, status: &str, current_task_id: Option<&str>) {
-        let store = MessageStore::open(&self.workspace).expect("open message store");
-        let conn = open_db(store.db_path()).expect("open team db");
-        conn.execute(
-            "insert or replace into agent_health(owner_team_id, agent_id, status, last_output_at, context_usage_pct, current_task_id, updated_at)
-             values (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                TEAM,
-                WORKER,
-                status,
-                "2026-07-12T10:00:00Z",
-                42_i64,
-                current_task_id,
-                "2026-07-12T10:00:00Z"
-            ],
-        )
-        .expect("seed agent_health");
-    }
 
     fn seed_healthy_coordinator(&self) {
         let workspace = team_agent::coordinator::WorkspacePath::new(self.workspace.clone());
-        let _ = MessageStore::open(&self.workspace).expect("initialize message store");
+        // M4: no SQLite message store fixture (MessageStore::open is retired).
         let identity = json!({
             "binary_path": cli_binary_path(),
             "binary_version": env!("CARGO_PKG_VERSION")
@@ -418,8 +397,13 @@ tasks: []
     }
 
     fn agent_health_row(&self) -> Option<HealthRow> {
-        let store = MessageStore::open(&self.workspace).expect("open message store");
-        let conn = open_db(store.db_path()).expect("open team db");
+        // M4: the retired store is never created; an absent team.db has no health row.
+        let db = self.workspace.join(".team/runtime/team.db");
+        if !db.exists() {
+            return None;
+        }
+        let conn = rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open team db");
         conn.query_row(
             "select status, current_task_id from agent_health where owner_team_id = ?1 and agent_id = ?2",
             params![TEAM, WORKER],

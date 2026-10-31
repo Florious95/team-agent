@@ -128,26 +128,6 @@ fn pane_available_incident_type_exists() {
 // Tooth 2 — worker pane recovery scoped by agent
 // ---------------------------------------------------------------------------
 
-#[test]
-#[serial(env)]
-fn worker_pane_missing_recovery_scoped_by_agent() {
-    // A recovery helper must exist whose name references pane_available
-    // and whose body filters `where recipient = ?` or `where agent_id = ?`
-    // — not a bare status-only sweep.
-    let hit = any_file_contains(|t| {
-        (t.contains("fn recover_worker_pane_available")
-            || t.contains("fn requeue_worker_pane_available")
-            || (t.contains("fn ") && t.contains("pane_available") && t.contains("agent_id")))
-            && t.contains("queued_pane_missing")
-            && (t.contains("recipient = ?") || t.contains("agent_id = ?"))
-    });
-    assert!(
-        hit.is_some(),
-        "no agent-scoped worker pane recovery helper found. §3.2 requires \
-         BlockedWorkerPaneMissing recovery keyed on the specific pane_available \
-         incident (recipient/agent scoped), not a bare status sweep."
-    );
-}
 
 // ---------------------------------------------------------------------------
 // Tooth 3 — coordinator pending scan does NOT include queued_pane_missing
@@ -217,21 +197,6 @@ fn watcher_recovery_scoped_by_incident_id() {
 // Tooth 5 — 0.5.56 result_id-null-guard invariant lock (green)
 // ---------------------------------------------------------------------------
 
-#[test]
-#[serial(env)]
-fn watcher_recovery_result_id_not_null_lock() {
-    let watchers =
-        fs::read_to_string(crate_src().join("messaging/watchers.rs")).expect("read watchers.rs");
-    // Any function that mentions requeue_after_claim_leader body OR
-    // the claim watcher sweep must contain the `result_id is not null`
-    // predicate literal exactly (0.5.56 fix).
-    let ok = watchers.contains("result_id is not null");
-    assert!(
-        ok,
-        "regression: `result_id is not null` guard missing from watchers.rs — \
-         the 0.5.56 fix that closed the 108-row write amplification is gone."
-    );
-}
 
 // ---------------------------------------------------------------------------
 // Tooth 6 — positive control: legitimate watcher retry is reachable

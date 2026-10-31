@@ -83,48 +83,6 @@ fn a2_green_lock_blocking_node_still_blocks() {
     );
 }
 
-/// A-6 watchers: a notify_failed watcher must NOT flip to `notified` without a real
-/// delivery (Python: notify_result_watchers really delivers; failure keeps it
-/// retryable). Today retry_result_deliveries updates status='notified' unconditionally
-/// and never delivers anything.
-#[test]
-fn a6_watcher_must_not_mark_notified_without_delivery() {
-    let ws = tmp_ws("a6-watchers");
-    // No leader_receiver in state => no delivery route exists at all.
-    save_runtime_state(&ws, &json!({"session_name": "team-x", "agents": {}})).unwrap();
-    let store = MessageStore::open(&ws).unwrap();
-    let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
-    conn.execute(
-        "insert into results(result_id, owner_team_id, task_id, agent_id, envelope, status, created_at)
-         values ('res-1', 'team-x', 't1', 'w1', ?1, 'stored', '2026-06-10T00:00:00+00:00')",
-        params![json!({"task_id":"t1","agent_id":"w1","status":"success","summary":"s"}).to_string()],
-    )
-    .unwrap();
-    conn.execute(
-        "insert into result_watchers(watcher_id, owner_team_id, task_id, agent_id, leader_id, status, created_at, result_id)
-         values ('wat-1', 'team-x', 't1', 'w1', 'leader', 'notify_failed', '2026-06-10T00:00:00+00:00', 'res-1')",
-        [],
-    )
-    .unwrap();
-    let event_log = EventLog::new(&ws);
-
-    let _ = team_agent::messaging::watchers::retry_result_deliveries(&ws, &event_log)
-        .expect("retry should not error");
-
-    let (status, notified_message_id): (String, Option<String>) = conn
-        .query_row(
-            "select status, notified_message_id from result_watchers where watcher_id = 'wat-1'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    assert!(
-        !(status == "notified" && notified_message_id.is_none()),
-        "A-6: watcher flipped to `notified` with no notified_message_id and no delivery \
-performed — Python only records notified after notify_result_watchers really delivers \
-(result_delivery.py:19-35); status={status} notified_message_id={notified_message_id:?}"
-    );
-}
 
 // ---------------------------------------------------------------------------
 // fixtures

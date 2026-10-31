@@ -17,7 +17,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use rusqlite::params;
 use serde_json::{json, Value};
 use serial_test::serial;
 
@@ -25,8 +24,6 @@ use team_agent::coordinator::{
     coordinator_meta_path, coordinator_pid_path, MetadataSource, Pid, WorkspacePath,
     PROTOCOL_VERSION,
 };
-use team_agent::db::schema::open_db;
-use team_agent::message_store::MessageStore;
 use team_agent::model::paths::runtime_dir;
 use team_agent::state::persist::{runtime_state_path, save_runtime_state};
 
@@ -52,7 +49,6 @@ fn cross_boot_stale_bindings_are_visible_in_status_and_diagnose_without_mutation
     let case = CliCase::new("red1-boot-stale");
     case.write_fake_tmux("codex", "");
     case.seed_active_state(stale_busy_worker());
-    case.seed_agent_health("WORKING");
     case.write_coordinator_metadata(
         std::process::id(),
         Some(cli_binary_path()),
@@ -138,7 +134,7 @@ impl CliCase {
         let fake_bin = env.root().join(format!("fake-bin-{tag}"));
         fs::create_dir_all(&fake_bin).expect("create fake bin");
         fs::create_dir_all(runtime_dir(&workspace)).expect("create runtime dir");
-        let _ = MessageStore::open(&workspace).expect("create message store");
+        // M4: no SQLite message store fixture (MessageStore::open is retired).
         Self {
             env,
             workspace,
@@ -151,9 +147,6 @@ impl CliCase {
             .expect("save active state");
     }
 
-    fn seed_agent_health(&self, status: &str) {
-        seed_agent_health(&self.workspace, status);
-    }
 
     fn write_fake_tmux(&self, worker_command: &str, capture_text: &str) {
         write_fake_tmux(
@@ -366,24 +359,6 @@ fn running_worker() -> Value {
     })
 }
 
-fn seed_agent_health(workspace: &Path, status: &str) {
-    let store = MessageStore::open(workspace).expect("open message store");
-    let conn = open_db(store.db_path()).expect("open team db");
-    conn.execute(
-        "insert or replace into agent_health(owner_team_id, agent_id, status, last_output_at, context_usage_pct, current_task_id, updated_at)
-         values (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            TEAM,
-            WORKER,
-            status,
-            "2026-07-14T00:00:00Z",
-            50_i64,
-            "msg-stale",
-            "2026-07-14T00:00:00Z"
-        ],
-    )
-    .expect("seed agent_health");
-}
 
 fn write_raw_coordinator_metadata(
     workspace: &WorkspacePath,

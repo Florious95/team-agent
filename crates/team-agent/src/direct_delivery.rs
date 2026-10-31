@@ -565,7 +565,7 @@ mod tests {
     #[test]
     fn missing_socket_uses_the_existing_workspace_namespace_not_the_default_server() {
         let mut directory = Directory { workspace: PathBuf::from("/controlled-workspace"), team: Some("a".into()), state: json!({
-            "agents": {"worker": {"pane_id": "%3"}}
+            "agents": {"worker": {"pane_id": "%3", "status": "running"}}
         }) };
         assert_eq!(directory.endpoint("worker").unwrap().socket, crate::tmux_backend::socket_name_for_workspace(&directory.workspace));
         directory.state["tmux_socket"] = json!("default");

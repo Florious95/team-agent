@@ -146,7 +146,7 @@ fn unowned_running_ws() -> PathBuf {
         }),
     )
     .unwrap();
-    let _ = crate::message_store::MessageStore::open(&ws).unwrap();
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
     ws
 }
 
@@ -702,7 +702,7 @@ fn unowned_running_ws_all_paused() -> PathBuf {
         }),
     )
     .unwrap();
-    let _ = crate::message_store::MessageStore::open(&ws).unwrap();
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
     ws
 }
 
