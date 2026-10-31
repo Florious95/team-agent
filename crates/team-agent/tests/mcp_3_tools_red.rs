@@ -513,7 +513,8 @@ fn send_cli_input(harness: &sim::McpSimHarness, worker_id: &str, marker: &str) {
     let response: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(response["delivery"], "physical");
     assert_eq!(response["recipient"], worker_id);
-    assert!(response.get("message_id").is_none(), "no ledger ID for physical input");
+    // R-M1a (M1 store-first): the physical receipt names its durable inbox record; no queue row.
+    assert!(response["message_id"].as_str().is_some_and(|id| !id.is_empty()), "{response}");
     assert!(harness.message_rows_containing(marker).is_empty());
     assert!(harness.pane_text(worker_id).contains(marker));
     assert!(!harness.pane_text("team_b_leader").contains(marker));

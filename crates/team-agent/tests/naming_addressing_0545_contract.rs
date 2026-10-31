@@ -893,7 +893,9 @@ impl AddressCase {
         assert_eq!(body["recipient"], "beta");
         assert_eq!(body["pane_id"], self.panes[pane]);
         assert!(body["accepted"].is_null(), "physical submit does not prove provider acceptance");
-        assert!(body.get("message_id").is_none(), "ordinary CLI send creates no ledger id");
+        // R-M1a (M1 store-first): the physical receipt names its durable inbox record.
+        assert!(body["message_id"].as_str().is_some_and(|id| !id.is_empty()), "receipt names its inbox record: {body}");
+        assert_eq!(body["stored"], true, "M1 stores before submitting: {body}");
         assert_eq!(self.message_count(token), 0);
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {

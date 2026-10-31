@@ -44,26 +44,35 @@ fn explicit_cross_workspace_mailbox_is_lossless_and_does_not_replay_on_attach() 
     let before_state = fs::read(&state_path).unwrap();
     let payload = format!("OFFLINE_MAILBOX_{}\n中文 🚀\n{}", std::process::id(), "lossless-αβγ-".repeat(64));
 
+    // R-M1b (M1 store-first): an ordinary send to an unbound leader is stored durably and reports
+    // the missing endpoint; it never claims delivery and types nothing.
     let ordinary = send(&sender, &target, &payload, false);
-    assert!(!ordinary.status.success(), "unbound ordinary send must not claim delivery: {}", body(&ordinary));
-    assert!(!target.root.join(".team/inbox/leader.jsonl").exists(), "no implicit mailbox fallback");
+    let stored_only = body(&ordinary);
+    assert!(ordinary.status.success(), "{stored_only}");
+    assert_eq!((stored_only["status"].clone(), stored_only["live"].clone()), (json!("stored"), json!(false)), "{stored_only}");
+    assert!(stored_only.get("delivery").is_none(), "unbound ordinary send must not claim delivery: {stored_only}");
+    assert!(stored_only["delivery_error"].as_str().is_some_and(|e| !e.is_empty()), "{stored_only}");
     assert!(fs::read(target.root.join("received")).unwrap().is_empty());
 
     let mailbox = send(&sender, &target, &payload, true);
     let accepted = body(&mailbox);
     assert!(mailbox.status.success(), "explicit mailbox: {accepted}");
     assert_eq!(accepted["status"], "stored");
-    assert_eq!(accepted["mailbox"], true);
+    // R-M1a receipt shape: a mailbox send is stored and never live (no separate `mailbox` key).
+    assert_eq!(accepted["live"], false, "{accepted}");
     let records = target.inbox("leader");
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0]["message_id"], accepted["message_id"]);
-    assert_eq!(records[0]["content"], payload);
-    assert_eq!(records[0]["recipient"], "leader");
-    assert_eq!(records[0]["team"], "current");
-    assert_eq!(records[0]["kind"], "message");
-    assert!(!sender.root.join(".team/inbox/leader.jsonl").exists(), "no sender-workspace leak");
-    let inbox_path = target.root.join(".team/inbox/leader.jsonl");
-    let inbox_bytes = fs::read(&inbox_path).unwrap();
+    assert_eq!(records.len(), 2, "the ordinary and the mailbox send are each stored once");
+    assert_eq!(records[0]["message_id"], stored_only["message_id"]);
+    assert_eq!(records[1]["message_id"], accepted["message_id"]);
+    for record in &records {
+        assert_eq!(record["content"], payload);
+        assert_eq!(record["recipient"], "leader");
+        assert_eq!(record["team"], "current");
+        assert_eq!(record["kind"], "message");
+    }
+    assert!(sender.inbox_bytes().is_empty(), "no sender-workspace leak");
+    // R-M1c: inbox files are compared as a whole; the segment layout is the implementation's choice.
+    let inbox_bytes = target.inbox_bytes();
     for _ in 0..2 {
         let read = Command::new(env!("CARGO_BIN_EXE_team-agent"))
             .args(["inbox", "leader", "--workspace"]).arg(&target.root)
@@ -71,7 +80,7 @@ fn explicit_cross_workspace_mailbox_is_lossless_and_does_not_replay_on_attach() 
         assert!(read.status.success(), "{}", body(&read));
         assert_eq!(body(&read)["messages"], json!(records));
     }
-    assert_eq!(fs::read(&inbox_path).unwrap(), inbox_bytes, "inbox reads do not consume");
+    assert_eq!(target.inbox_bytes(), inbox_bytes, "inbox reads do not consume");
     assert_eq!(fs::read(&state_path).unwrap(), before_state, "send/read do not mutate runtime state");
 
     // Publish the existing owned PTY as the leader endpoint. No coordinator runs,
@@ -79,7 +88,7 @@ fn explicit_cross_workspace_mailbox_is_lossless_and_does_not_replay_on_attach() 
     state["teams"]["current"]["leader"]["pane_id"] = json!(target.pane);
     team_agent::state::persist::save_runtime_state(&target.root, &state).unwrap();
     assert!(fs::read(target.root.join("received")).unwrap().is_empty());
-    assert_eq!(fs::read(&inbox_path).unwrap(), inbox_bytes);
+    assert_eq!(target.inbox_bytes(), inbox_bytes, "publishing the endpoint replays nothing");
     assert!(!target.root.join(".team/runtime/team.db").exists());
     assert!(!target.root.join(".team/runtime/coordinator.pid").exists());
 
@@ -96,5 +105,13 @@ fn explicit_cross_workspace_mailbox_is_lossless_and_does_not_replay_on_attach() 
     assert_eq!(bytes.windows(6).filter(|window| *window == b"\x1b[200~").count(), 1);
     assert!(bytes.ends_with(b"\x1b[201~\r"), "exactly one physical paste and Enter: {bytes:?}");
     assert!(fs::read(sender.root.join("received")).unwrap().is_empty());
-    assert_eq!(fs::read(&inbox_path).unwrap(), inbox_bytes, "ordinary send does not replay or append mailbox records");
+    // R-M1a: the live send stores exactly one new record; earlier records are untouched (append-only)
+    // and none of them was replayed into the pane (single paste above).
+    let after = target.inbox_bytes();
+    for (path, earlier) in &inbox_bytes {
+        assert!(after.get(path).is_some_and(|now| now.starts_with(earlier)), "inbox rewritten: {}", path.display());
+    }
+    let records_after = target.inbox("leader");
+    assert_eq!(records_after.len(), 3);
+    assert_eq!(records_after[2]["message_id"], submitted["message_id"]);
 }

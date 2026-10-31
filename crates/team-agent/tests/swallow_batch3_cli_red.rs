@@ -63,9 +63,12 @@ fn b3_exit_layer_failures_are_explained_not_fake_green() {
             }
         }
         Err(error) => {
-            if !error.to_string().contains("empty_target_list") {
+            // R-M1 (shared send core): the refusal must name the empty recipient list explicitly;
+            // the Python-era token `empty_target_list` and the core's wording are both explicit.
+            let text = error.to_string();
+            if !text.contains("empty_target_list") && !text.contains("at least one recipient") {
                 failures.push(format!(
-                    "②: the empty-target failure must name `empty_target_list`; got Err({error})"
+                    "②: the empty-target failure must name the empty recipient list; got Err({error})"
                 ));
             }
         }

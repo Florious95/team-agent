@@ -245,7 +245,8 @@ fn send_pane_requires_explicit_socket_and_dialect() {
     assert!(!source.contains("fn send_to_pane_direct"));
     assert!(!source.contains("send.pane_direct"));
     assert!(source.contains("raw pane delivery requires --socket and --dialect"));
-    assert!(source.contains("crate::direct_delivery::directory"));
+    // R-M5: semantic send goes through the shared station send core (operator authority).
+    assert!(source.contains("crate::station::send::execute"));
 }
 
 include!("support/debt_sweep_0543.rs");

@@ -387,7 +387,8 @@ fn h8_plain_fq_and_legacy_address_forms_remain_functional_machine_json() {
             ],
         ));
         assert_eq!(v["status"], "stored");
-        assert_eq!(v["mailbox"], true);
+        // R-M1a receipt shape: a mailbox send is stored and never live (no separate `mailbox` key).
+        assert_eq!((v["stored"].clone(), v["live"].clone()), (serde_json::json!(true), serde_json::json!(false)), "{v}");
     }
     let v = ok(&env.run_cli(
         &ws,

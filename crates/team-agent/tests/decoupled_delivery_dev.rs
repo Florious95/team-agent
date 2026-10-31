@@ -226,7 +226,8 @@ fn logical_send_uses_live_pane_despite_stale_metadata_dead_status_and_missing_mc
         assert_eq!(result["status"], "sent");
         fixture.received(&format!("Team Agent message from worker:\n\n{content}"));
         assert_eq!(fs::read(&path).unwrap(), bytes);
-        assert!(!fixture.root.join(".team/inbox").exists());
+        // R-M1a (M1 store-first): both entrypoints stored one record each for this content.
+        assert_eq!(worker_inbox_hits(&fixture, &content), 2, "{content}");
         assert!(!fixture.root.join(".team/db").exists());
     }
     fs::write(&path, serde_json::to_vec(&valid).unwrap()).unwrap();
@@ -236,7 +237,19 @@ fn logical_send_uses_live_pane_despite_stale_metadata_dead_status_and_missing_mc
     assert!(!fixture.root.join(".team/db").exists());
     assert!(Command::new("tmux").args(["-S", &fixture.socket, "kill-pane", "-t", &fixture.pane])
         .status().unwrap().success());
-    assert!(!fixture.cli(&["send", "worker", "no live target", "--team", "alpha"]).status.success());
+    // R-M1b: a missing pane stores the message with an explanatory delivery_error and types nothing.
+    let gone = fixture.cli(&["send", "worker", "no live target", "--team", "alpha"]);
+    assert!(gone.status.success(), "{}", String::from_utf8_lossy(&gone.stdout));
+    let receipt: Value = serde_json::from_slice(&gone.stdout).unwrap();
+    assert_eq!((receipt["status"].clone(), receipt["live"].clone()), (json!("stored"), json!(false)), "{receipt}");
+    assert!(receipt["delivery_error"].as_str().is_some_and(|e| !e.is_empty()), "{receipt}");
+    assert!(!fs::read_to_string(fixture.root.join("received")).unwrap_or_default().contains("no live target"));
+}
+
+/// Inbox records of `worker` (team `alpha`) whose JSON mentions `text`.
+fn worker_inbox_hits(fixture: &Fixture, text: &str) -> usize {
+    team_agent::inbox_store::read(&fixture.root, "worker", 10_000, Some("alpha")).unwrap()["messages"]
+        .as_array().cloned().unwrap_or_default().iter().filter(|r| r.to_string().contains(text)).count()
 }
 
 #[test]
@@ -304,7 +317,9 @@ fn cli_and_mcp_send_ignore_dead_coordinator_and_never_modify_runtime_or_database
         fs::read(db_path).unwrap(),
         b"poisoned database must never be opened"
     );
-    assert!(!fixture.root.join(".team/inbox").exists());
+    // R-M1a (M1 store-first): the CLI and MCP sends are each stored once; nothing else changed.
+    assert_eq!(worker_inbox_hits(&fixture, "direct CLI"), 1);
+    assert_eq!(worker_inbox_hits(&fixture, "direct MCP"), 1);
     let located = fixture.cli(&["locate"]);
     assert!(
         located.status.success(),
@@ -352,7 +367,8 @@ fn replies_and_results_append_to_inbox_without_database_or_receipt_state() {
         b"invalid JSON",
     )
     .unwrap();
-    let output = fixture.cli(&["inbox", "leader", "-n", "1"]);
+    // R-M5 (team-scoped inbox): with the snapshot unreadable the caller names the team explicitly.
+    let output = fixture.cli(&["inbox", "leader", "-n", "1", "--team", "alpha"]);
     assert!(
         output.status.success(),
         "{} {}",
@@ -362,7 +378,7 @@ fn replies_and_results_append_to_inbox_without_database_or_receipt_state() {
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["messages"].as_array().unwrap().len(), 1);
     assert_eq!(value["messages"][0]["content"], "completed");
-    let repeated = fixture.cli(&["inbox", "leader", "-n", "1"]);
+    let repeated = fixture.cli(&["inbox", "leader", "-n", "1", "--team", "alpha"]);
     assert_eq!(output.stdout, repeated.stdout);
 }
 
