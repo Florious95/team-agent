@@ -329,25 +329,53 @@ pub(crate) fn registered_worker_on_endpoint(
     })
 }
 
-/// Retire only anchors contradicted by a live worker of their own team.
-/// Unknown anchors and parent-worker/child-leader nesting remain protected.
+/// Check one team's anchor against the live directory. A worker can also lead
+/// a child team, so cross-team contradictions require a binding older than the
+/// worker's current spawn. Unknown or newer sibling bindings stay protected.
 pub(crate) fn leader_anchor_occupied_by_worker(
+    scope: &Value,
     state: &Value,
     endpoint: &str,
     observed: &PaneInfo,
 ) -> bool {
-    std::iter::once(state)
-        .chain(state.get("teams").and_then(Value::as_object).into_iter().flat_map(|t| t.values()))
-        .any(|scope| {
-            let Some(anchor) = scope.get("leader_receiver").or_else(|| scope.get("team_owner")) else {
-                return false;
-            };
-            let anchor_endpoint = crate::tmux_backend::runtime_tmux_endpoint_from_state_pub(Some(anchor))
-                .or_else(|| crate::tmux_backend::runtime_tmux_endpoint_from_state_pub(Some(scope)));
-            non_empty_str(anchor, "pane_id") == Some(observed.pane_id.as_str())
-                && anchor_endpoint.is_some_and(|v| same_endpoint(&v.0, endpoint))
-                && registered_worker_on_endpoint(scope, endpoint, observed).is_some()
-        })
+    let mut found = false;
+    for (key, peer_key, timestamp) in [
+        ("leader_receiver", "team_owner", "attached_at"),
+        ("team_owner", "leader_receiver", "claimed_at"),
+    ] {
+        let Some(anchor) = scope.get(key)
+            .filter(|anchor| non_empty_str(anchor, "pane_id") == Some(observed.pane_id.as_str())) else {
+            continue;
+        };
+        let anchor_endpoint = crate::tmux_backend::runtime_tmux_endpoint_from_state_pub(Some(anchor))
+            .or_else(|| scope.get(peer_key)
+                .filter(|peer| peer.get("pane_id") == anchor.get("pane_id"))
+                .and_then(|peer| crate::tmux_backend::runtime_tmux_endpoint_from_state_pub(Some(peer))));
+        let Some((anchor_endpoint, _)) = anchor_endpoint else { return false; };
+        if !same_endpoint(&anchor_endpoint, endpoint) {
+            continue;
+        }
+        found = true;
+        if registered_worker_on_endpoint(scope, endpoint, observed).is_some() {
+            continue;
+        }
+        let Some(bound_at) = anchor.get(timestamp).and_then(Value::as_str)
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok()) else {
+            return false;
+        };
+        let predates_worker = std::iter::once(state)
+            .chain(state.get("teams").and_then(Value::as_object).into_iter().flat_map(|t| t.values()))
+            .filter_map(|worker_scope| {
+                let id = registered_worker_on_endpoint(worker_scope, endpoint, observed)?;
+                let spawned_at = worker_scope.get("agents")?.get(id)?.get("spawned_at")?.as_str()?;
+                chrono::DateTime::parse_from_rfc3339(spawned_at).ok()
+            })
+            .any(|spawned_at| bound_at < spawned_at);
+        if !predates_worker {
+            return false;
+        }
+    }
+    found
 }
 
 pub fn classify_registered_worker_for_observed_pane(
@@ -605,17 +633,17 @@ mod leader_identity_tests {
     fn worker_occupancy_is_socket_and_pid_qualified() {
         let state = state();
         let mut pane = pane();
-        assert!(leader_anchor_occupied_by_worker(&state, "/tmp/identity-a.sock", &pane));
-        assert!(!leader_anchor_occupied_by_worker(&state, "/tmp/identity-b.sock", &pane));
+        assert!(leader_anchor_occupied_by_worker(&state, &state, "/tmp/identity-a.sock", &pane));
+        assert!(!leader_anchor_occupied_by_worker(&state, &state, "/tmp/identity-b.sock", &pane));
         pane.pane_pid = Some(4322);
-        assert!(!leader_anchor_occupied_by_worker(&state, "/tmp/identity-a.sock", &pane));
+        assert!(!leader_anchor_occupied_by_worker(&state, &state, "/tmp/identity-a.sock", &pane));
     }
 
     #[test]
     fn unknown_pid_does_not_remove_leader_protection() {
         let mut state = state();
         state["agents"]["worker"].as_object_mut().unwrap().remove("pane_pid");
-        assert!(!leader_anchor_occupied_by_worker(&state, "/tmp/identity-a.sock", &pane()));
+        assert!(!leader_anchor_occupied_by_worker(&state, &state, "/tmp/identity-a.sock", &pane()));
     }
 
     #[test]
@@ -625,6 +653,6 @@ mod leader_identity_tests {
         state["teams"] = json!({"child":{"tmux_socket":"/tmp/identity-a.sock",
             "leader_receiver":{"pane_id":"%0","tmux_socket":"/tmp/identity-a.sock"},
             "agents":{}}});
-        assert!(!leader_anchor_occupied_by_worker(&state, "/tmp/identity-a.sock", &pane()));
+        assert!(!leader_anchor_occupied_by_worker(&state["teams"]["child"], &state, "/tmp/identity-a.sock", &pane()));
     }
 }

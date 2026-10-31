@@ -866,6 +866,50 @@ pub mod lifecycle_port {
         }
 
         #[test]
+        fn leader_anchor_mixed_scopes_require_individual_lifetime_proof() {
+            let socket = "/tmp/identity-a.sock";
+            let mut pane = ownership_pane(&SessionName::new("team-research"), "%0", "researcher", None);
+            pane.pane_pid = Some(4321);
+            let mut state = json!({"session_name":"team-research", "tmux_socket":socket,
+                "leader_receiver":{"pane_id":"%0", "tmux_socket":"/tmp/identity-b.sock"},
+                "agents":{"researcher":{"pane_id":"%0", "pane_pid":4321,
+                    "spawned_at":"2026-10-31T00:00:00Z"}},
+                "teams":{"current":{"leader_receiver":{"pane_id":"%0", "tmux_socket":socket,
+                    "attached_at":"2026-09-19T00:00:00Z"}}}});
+            let panes = [pane];
+            assert!(observed_leader_anchor_pane_ids(&state, Some(socket), &panes).is_empty());
+            assert!(observed_leader_anchor_pane_ids(&state, Some("/tmp/identity-b.sock"), &[]).contains("%0"));
+            // A child claim after this worker's spawn is a real protection,
+            // even when another scope has a positively stale anchor at %0.
+            state["leader_receiver"]["tmux_socket"] = json!(socket);
+            state["teams"]["current"]["leader_receiver"]["attached_at"] = json!("2026-10-31T00:01:00Z");
+            assert!(observed_leader_anchor_pane_ids(&state, Some(socket), &panes).contains("%0"));
+            state["teams"]["current"]["leader_receiver"]["attached_at"] = json!("2026-09-19T00:00:00Z");
+            state["teams"]["current"]["team_owner"] = json!({"pane_id":"%0", "tmux_socket":socket,
+                "claimed_at":"2026-10-31T00:01:00Z"});
+            assert!(observed_leader_anchor_pane_ids(&state, Some(socket), &panes).contains("%0"));
+        }
+
+        #[test]
+        fn leader_anchor_cross_scope_unknown_lifetimes_remain_protected() {
+            let socket = "/tmp/identity-a.sock";
+            let mut pane = ownership_pane(&SessionName::new("team-research"), "%0", "researcher", None);
+            pane.pane_pid = Some(4321);
+            for (bound_at, spawned_at) in [
+                (json!(null), json!("2026-10-31T00:00:00Z")),
+                (json!("invalid"), json!("2026-10-31T00:00:00Z")),
+                (json!("2026-09-19T00:00:00Z"), json!(null)),
+                (json!("2026-10-31T00:00:00Z"), json!("2026-10-31T00:00:00Z")),
+            ] {
+                let state = json!({"session_name":"team-research", "tmux_socket":socket,
+                    "agents":{"researcher":{"pane_id":"%0", "pane_pid":4321, "spawned_at":spawned_at}},
+                    "teams":{"child":{"leader_receiver":{"pane_id":"%0", "tmux_socket":socket,
+                        "attached_at":bound_at}}}});
+                assert!(observed_leader_anchor_pane_ids(&state, Some(socket), std::slice::from_ref(&pane)).contains("%0"));
+            }
+        }
+
+        #[test]
         fn dead_anchor_ownership_requires_native_dead_proof_and_all_owner_markers() {
             let workspace = std::env::temp_dir().canonicalize().unwrap();
             let session = SessionName::new("owned");
@@ -2902,9 +2946,15 @@ pub mod lifecycle_port {
         endpoint: Option<&str>,
         panes: &[crate::transport::PaneInfo],
     ) -> std::collections::BTreeSet<String> {
-        let mut anchors = collect_state_leader_anchor_pane_ids(state, endpoint);
-        anchors.retain(|id| !panes.iter().any(|pane| pane.pane_id.as_str() == id.as_str()
-            && crate::topology::leader_anchor_occupied_by_worker(state, endpoint.unwrap_or("default"), pane)));
+        let mut anchors = std::collections::BTreeSet::new();
+        for scope in std::iter::once(state)
+            .chain(state.get("teams").and_then(Value::as_object).into_iter().flat_map(|t| t.values())) {
+            let mut scoped_anchors = std::collections::BTreeSet::new();
+            push_anchor_pane_id(scope, endpoint, &mut scoped_anchors);
+            scoped_anchors.retain(|id| !panes.iter().any(|pane| pane.pane_id.as_str() == id.as_str()
+                && crate::topology::leader_anchor_occupied_by_worker(scope, state, endpoint.unwrap_or("default"), pane)));
+            anchors.extend(scoped_anchors);
+        }
         anchors
     }
 

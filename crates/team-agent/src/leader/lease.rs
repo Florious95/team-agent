@@ -1573,7 +1573,7 @@ fn observed_bound_leader_live(state: &Value) -> Result<Option<bool>, LeaderError
     let Some(target) = targets.iter().find(|target| target.pane_id.as_str() == pane) else {
         return Ok(Some(false));
     };
-    if crate::topology::leader_anchor_occupied_by_worker(state, &endpoint, target) {
+    if crate::topology::leader_anchor_occupied_by_worker(state, state, &endpoint, target) {
         return Ok(Some(false));
     }
     if let Some(nonce) = receiver.get("binding_nonce").and_then(Value::as_str).filter(|v| !v.is_empty()) {
