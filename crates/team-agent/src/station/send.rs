@@ -93,7 +93,19 @@ pub fn execute(req: Request<'_>, authority: Authority<'_>) -> Result<Value, Stri
             }
             let broadcast = recipient == "*";
             let recipients = if broadcast {
-                directory.agents().into_iter().filter(|id| id != authority.sender()).collect()
+                // Attribution is qualified across workspace boundaries; self-exclusion
+                // compares the originating seat only inside its actual directory.
+                let sender = match crate::messaging::parse_logical_address(authority.sender()) {
+                    Ok(crate::messaging::LogicalAddress {
+                        workspace: Some(workspace),
+                        target: crate::messaging::LogicalAddressTarget::TeamEntity { team, entity },
+                        ..
+                    }) if directory.team.as_deref() == Some(team.as_str())
+                        && crate::model::paths::canonical_run_workspace(&workspace)
+                            .is_ok_and(|workspace| workspace == directory.workspace) => entity,
+                    _ => authority.sender().to_string(),
+                };
+                directory.agents().into_iter().filter(|id| id != &sender).collect()
             } else { vec![recipient] };
             if recipients.is_empty() {
                 return Err("send requires at least one recipient".into());
