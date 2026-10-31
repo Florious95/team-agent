@@ -298,7 +298,7 @@ impl RollbackFixture {
             }),
         )
         .unwrap();
-        let _ = MessageStore::open(&self.team).unwrap();
+        // M4: no SQLite message store fixture (MessageStore::open is retired).
     }
 
     fn seed_healthy_coordinator(&self) {

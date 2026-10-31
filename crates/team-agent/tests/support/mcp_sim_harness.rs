@@ -11,8 +11,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use team_agent::event_log::EventLog;
-use team_agent::message_store::MessageStore;
-use team_agent::messaging::{deliver_pending_messages, fire_due_scheduled_events};
 use team_agent::tmux_backend::TmuxBackend;
 use team_agent::transport::{CaptureRange, PaneId, SessionName, Target, Transport, WindowName};
 
@@ -79,7 +77,7 @@ impl McpSimHarness {
         harness.spawn_pane("worker_c", false);
         harness.spawn_pane("team_b_leader", false);
         harness.seed_state();
-        let _ = MessageStore::open(&harness.workspace).unwrap();
+        // M4: no SQLite message store fixture (MessageStore::open is retired).
         harness
     }
 
@@ -107,14 +105,8 @@ impl McpSimHarness {
         team_agent::state::persist::load_runtime_state(&self.workspace).unwrap()
     }
 
+    /// M4: station send delivers synchronously; there is no legacy pump to drive.
     pub fn drive_delivery_once(&self) {
-        let store = MessageStore::open(&self.workspace).unwrap();
-        let event_log = EventLog::new(&self.workspace);
-        let _ =
-            fire_due_scheduled_events(&self.workspace, &store, &self.backend, &event_log).unwrap();
-        let state = team_agent::state::persist::load_runtime_state(&self.workspace).unwrap();
-        let _ =
-            deliver_pending_messages(&self.workspace, &state, &self.backend, &event_log).unwrap();
         std::thread::sleep(Duration::from_millis(150));
     }
 
@@ -174,9 +166,20 @@ impl McpSimHarness {
         team_agent::state::persist::save_runtime_state(&self.workspace, &state).unwrap();
     }
 
+
+    /// M4: the SQLite message store is retired and never created. These helpers keep their
+    /// negative oracles honest: with no legacy `team.db` there are no rows; if one exists
+    /// (a planted or historical file) it is read read-only, never initialized.
+    fn legacy_db(&self) -> Option<rusqlite::Connection> {
+        let path = team_agent::model::paths::runtime_dir(&self.workspace).join("team.db");
+        if !path.exists() {
+            return None;
+        }
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()
+    }
+
     pub fn message_rows_containing(&self, needle: &str) -> Vec<MessageRow> {
-        let store = MessageStore::open(&self.workspace).unwrap();
-        let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
+        let Some(conn) = self.legacy_db() else { return Vec::new() };
         let mut stmt = conn
             .prepare(
                 "select message_id, owner_team_id, sender, recipient, status, content
@@ -204,8 +207,7 @@ impl McpSimHarness {
     }
 
     pub fn result_row(&self, result_id: &str) -> Option<ResultRow> {
-        let store = MessageStore::open(&self.workspace).unwrap();
-        let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
+        let conn = self.legacy_db()?;
         conn.query_row(
             "select result_id, owner_team_id, task_id, agent_id, envelope, status
              from results where result_id = ?1",
@@ -226,8 +228,7 @@ impl McpSimHarness {
     }
 
     pub fn scheduled_event_count(&self) -> i64 {
-        let store = MessageStore::open(&self.workspace).unwrap();
-        let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
+        let Some(conn) = self.legacy_db() else { return 0 };
         conn.query_row("select count(*) from scheduled_events", [], |row| {
             row.get(0)
         })

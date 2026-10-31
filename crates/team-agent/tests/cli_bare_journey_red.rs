@@ -21,7 +21,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::thread;
 use std::time::{Duration, Instant};
-use team_agent::message_store::MessageStore;
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 
 fn text(out: &Output) -> String {
@@ -104,10 +103,6 @@ fn seeded(env: &HermeticTestEnv) -> PathBuf {
         json!({"worker":{"status":"stopped","provider":"fake","model":"fake","session_id":null}});
     let tasks = json!([{"id":"task-286","title":"case-286","case_id":"case-286","assignee":"worker","status":"done"}]);
     save_runtime_state(&ws,&json!({"active_team_key":"alpha","session_name":"team-alpha","agents":agents,"tasks":tasks,"teams":{"alpha":{"status":"alive","session_name":"team-alpha","agents":agents,"tasks":tasks}}})).unwrap();
-    let store = MessageStore::open(&ws).unwrap();
-    let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
-    let envelope = json!({"schema_version":"result_envelope_v1","result_id":"res-286","task_id":"task-286","agent_id":"worker","status":"success","summary":"RESULT_COMPAT_286","presentation":{"case_id":"case-286"},"artifacts":[{"path":"artifact://286","nested":{"preserve":true}}]});
-    conn.execute("insert into results(result_id,owner_team_id,task_id,agent_id,envelope,status,created_at) values (?1,?2,?3,?4,?5,?6,?7)",rusqlite::params!["res-286","alpha","task-286","worker",envelope.to_string(),"success","2026-10-06T00:00:00Z"]).unwrap();
     ws
 }
 
@@ -333,26 +328,6 @@ fn h6_other_compile_errors_do_not_claim_empty_project_or_overwrite_inputs() {
     );
 }
 
-#[test]
-#[serial(env)]
-fn h8_wait_retains_real_completed_result_fifo_semantics() {
-    let env = HermeticTestEnv::enter("compat-wait");
-    let ws = seeded(&env);
-    let v = body(&env.run_cli(
-        &ws,
-        &[
-            "wait",
-            "--task",
-            "task-286",
-            "--workspace",
-            ws.to_str().unwrap(),
-            "--json",
-        ],
-    ));
-    assert_eq!(v["task_id"], "task-286");
-    assert_eq!(v["result_id"], "res-286");
-    assert_eq!(v["waited"], false);
-}
 
 #[test]
 #[serial(env)]

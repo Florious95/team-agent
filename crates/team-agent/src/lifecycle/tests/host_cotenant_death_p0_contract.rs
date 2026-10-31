@@ -567,7 +567,7 @@ fn seed_state(workspace: &Path, workers: &[(&str, &str)]) {
 
 fn seed_healthy_coordinator(workspace: &Path) {
     fs::create_dir_all(runtime_dir(workspace)).unwrap();
-    let _ = MessageStore::open(workspace).unwrap();
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
     let workspace = WorkspacePath::new(workspace.to_path_buf());
     let pid = Pid::new(std::process::id());
     team_agent::coordinator::write_coordinator_metadata(&workspace, pid, MetadataSource::Boot)

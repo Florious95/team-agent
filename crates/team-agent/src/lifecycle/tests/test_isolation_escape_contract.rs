@@ -58,29 +58,6 @@ fn r1_claim_takeover_contracts_must_enter_hermetic_home_boundary() {
     );
 }
 
-#[test]
-fn r2_bug4_canary_contract_must_not_observe_hostile_workspace_or_real_tmux() {
-    let source = read_repo_file(
-        "crates/team-agent/src/lifecycle/tests/verify_rs031_window_consistency_red.rs",
-    );
-    assert_contains_all(
-        "R2",
-        &source,
-        &[
-            "HermeticTestEnv",
-            "TEAM_AGENT_WORKSPACE",
-            "assert_store_under_root",
-            "assert_path_under_root",
-            "RecordingTransport",
-            "BUG4 worker to leader canary",
-        ],
-        "BUG4 delivery contracts use MessageStore/send/deliver primitives; hostile TEAM_AGENT_* and TMUX inputs must be scrubbed, fixture DB rows must stay under the hermetic root, and delivery must use RecordingTransport only",
-    );
-    assert!(
-        !source.contains("fn temp_ws("),
-        "R2: verify_rs031_window_consistency_red.rs must not keep a standalone temp_ws helper; workspace allocation must come from HermeticTestEnv"
-    );
-}
 
 #[test]
 fn r3_socket_escape_contract_requires_declared_offline_or_recording_transport() {
@@ -863,7 +840,7 @@ fn json_output(output: &Output, label: &str) -> Value {
 fn seed_healthy_coordinator(workspace: &Path) {
     let workspace_path = team_agent::coordinator::WorkspacePath::new(workspace.to_path_buf());
     std::fs::create_dir_all(team_agent::model::paths::runtime_dir(workspace)).unwrap();
-    let _ = team_agent::message_store::MessageStore::open(workspace).unwrap();
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
     let pid = team_agent::coordinator::Pid::new(std::process::id());
     team_agent::coordinator::write_coordinator_metadata(
         &workspace_path,

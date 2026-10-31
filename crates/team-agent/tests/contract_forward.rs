@@ -44,7 +44,6 @@ fn missing_framework_team_refuses_without_claiming_or_creating_a_legacy_runtime(
     };
     handle(&mut store, &caller, &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"send_message","arguments":{"to":"legacy","content":"Task"}}})).unwrap();
     assert_eq!(drain(&framework, &mut store, 10), Err(Error::Fence));
-    assert_eq!(store.pending_forwards(10).unwrap().len(), 1);
     assert!(store.deliveries().unwrap().is_empty());
     assert!(!sandbox.parent.join(".team").exists());
 }

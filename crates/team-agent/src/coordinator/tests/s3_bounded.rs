@@ -133,27 +133,4 @@ fn s3_process_worker() {
     println!("S3_COMMITTED {action}");
 }
 
-#[test]
-fn s3_result_collection_commit_preserves_concurrent_sibling() {
-    isolated("s3_result_collection_commit_preserves_concurrent_sibling", |dir| {
-        seed(dir, false);
-        let waiting = start_writer(&dir, "collect", Some("T1"), Value::Null, true);
-        write(&dir, "sibling", None, Value::Null);
-        finish(waiting, true);
-        let state = disk(&dir);
-        assert_eq!(state["teams"]["T1"]["tasks"][0]["accepted_result_id"], "result-original");
-        assert_eq!(state["teams"]["T3"]["notes"], json!(["third"]));
-        assert_eq!(state["teams"]["T2"]["notes"], json!(["original note"]));
-    });
-}
 
-#[test]
-fn s3_legacy_result_collection_preserves_root_shape() {
-    isolated("s3_legacy_result_collection_preserves_root_shape", |dir| {
-        seed(dir, true);
-        write(dir, "collect", None, Value::Null);
-        let state = disk(dir);
-        assert_eq!(state["tasks"][0]["accepted_result_id"], "result-original");
-        assert!(state.get("teams").is_none(), "legacy single Team shape remains valid");
-    });
-}

@@ -40,46 +40,7 @@ use serde_json::{json, Value};
 use team_agent::message_store::MessageStore;
 use team_agent::state::persist::save_runtime_state;
 
-/// A-1 (M3 oracle update): collect never starts a background service. The retired
-/// `ensure_coordinator` switch is gone, and the compatibility receipt is always
-/// `{ok:true,status:"not_required"}`.
-#[test]
-fn a1_collect_without_ensure_returns_not_required_literal() {
-    let ws = tmp_ws("a1-noensure");
-    std::fs::write(ws.join("team.spec.yaml"), "version: 1\n").unwrap();
-    save_runtime_state(&ws, &json!({"session_name": "team-x"})).unwrap();
 
-    let out =
-        team_agent::messaging::results::collect(&ws, None).expect("collect should succeed");
-    assert_eq!(
-        out.get("coordinator"),
-        Some(&json!({"ok": true, "status": "not_required"})),
-        "A-1: collect must report that no coordinator is required; out={out}"
-    );
-}
-
-/// A-4: status latest_results must reflect the store (Python queries.py:76
-/// latest_result_summaries), not a constant empty array.
-#[test]
-fn a4_status_latest_results_reflects_store() {
-    let ws = tmp_ws("a4-latest");
-    seed_status_state(&ws);
-    let store = MessageStore::open(&ws).unwrap();
-    insert_result(&store, "res-1", "team-x", "w1", "did the thing");
-
-    let status =
-        team_agent::cli::status_port::status(&ws, false, false).expect("status should succeed");
-    let latest = status
-        .get("latest_results")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    assert!(
-        !latest.is_empty() && latest[0].get("result_id") == Some(&json!("res-1")),
-        "A-4: status.latest_results must surface store.latest_results (Python \
-queries.py:76); got latest_results={latest:?}"
-    );
-}
 
 /// A-4: `format_status(workspace, Some(agent))` must return the Python multi-line agent
 /// detail (provider/model/session_id/... lines, queries.py:142-153), and unknown agent

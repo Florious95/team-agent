@@ -114,67 +114,9 @@ fn seed_team_spec(ws: &std::path::Path) {
 //   in `inbox w1`. Rust mod.rs:144 is a stub: `let _=(workspace,limit,as_json); "messages":[]`. So
 //   the row is in team.db but inbox always returns [] -> RED. The shape test above only proves the
 //   empty-state envelope; THIS proves the message actually surfaces.
-#[test]
-fn inbox_returns_stored_message_for_recipient() {
-    let ws = tmp_workspace();
-    let store = crate::message_store::MessageStore::open(&ws).unwrap();
-    let mid = store
-        .create_message(None, "leader", "w1", "hello w1", None, true, None)
-        .unwrap();
-    let v = status_port::inbox(&ws, "w1", 20, None).expect("inbox");
-    let messages = v["messages"].as_array().expect("messages array");
-    assert_eq!(
-            messages.len(),
-            1,
-            "golden inbox(w1) must return the stored recipient=w1 row; the stub returns [] -> RED. got {v}"
-        );
-    let m = &messages[0];
-    assert_eq!(
-        m["message_id"],
-        json!(mid),
-        "the returned row is the message we stored"
-    );
-    assert_eq!(m["recipient"], json!("w1"));
-    assert_eq!(m["sender"], json!("leader"));
-    assert_eq!(m["summary"], json!("hello w1"));
-    assert_eq!(
-        m["status"],
-        json!("accepted"),
-        "create_message persists status='accepted'"
-    );
-    let _ = std::fs::remove_dir_all(&ws);
-}
 // ── BUG-2 (match scope) — inbox(agent) returns rows where sender==agent OR recipient==agent, and
 // EXCLUDES messages for other agents. Membership+exclusion form (not strict index order) so the
 // test is deterministic regardless of created_at sub-second ties; golden order is chronological asc. ─
-#[test]
-fn inbox_matches_sender_or_recipient_and_excludes_others() {
-    let ws = tmp_workspace();
-    let store = crate::message_store::MessageStore::open(&ws).unwrap();
-    store
-        .create_message(None, "leader", "w1", "to w1", None, true, None)
-        .unwrap();
-    store
-        .create_message(None, "w1", "leader", "from w1", None, true, None)
-        .unwrap();
-    store
-        .create_message(None, "leader", "w2", "unrelated to w2", None, true, None)
-        .unwrap();
-    let v = status_port::inbox(&ws, "w1", 20, None).expect("inbox");
-    let messages = v["messages"].as_array().expect("messages array");
-    let mut contents: Vec<String> = messages
-        .iter()
-        .map(|m| m["summary"].as_str().unwrap().to_string())
-        .collect();
-    contents.sort();
-    assert_eq!(
-            contents,
-            vec!["from w1".to_string(), "to w1".to_string()],
-            "inbox(w1) must return BOTH the recipient=w1 and sender=w1 rows and EXCLUDE the w2 message; \
-             the stub returns [] -> RED. got {contents:?}"
-        );
-    let _ = std::fs::remove_dir_all(&ws);
-}
 
 #[test]
 fn ux_doctor_secret_scan_is_present_and_non_triggering_for_normal_paths() {

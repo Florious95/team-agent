@@ -1579,10 +1579,12 @@ mod tests {
             Self { root, binding, role, identity }
         }
 
+        fn store(&self) -> ContractStore {
+            ContractStore::open(&self.binding.transport_root, self.binding.scope.clone(), &self.binding.endpoint).unwrap()
+        }
+
         fn save_operation(&self, operation: &OperationRecord) {
-            let db = rusqlite::Connection::open(self.binding.transport_root.join("contract.db")).unwrap();
-            db.execute("UPDATE contract_operations SET record=?1 WHERE id=?2", rusqlite::params![
-                serde_json::to_string(operation).unwrap(), operation.id.as_str()]).unwrap();
+            self.store().fixture_put_operation(operation).unwrap();
         }
 
         fn recovering_teardown(&mut self, pending: Option<&str>) -> Backend {
@@ -1598,7 +1600,7 @@ mod tests {
         fn canonical(&mut self, status: SeatStatus, phase: Phase, outcome: Outcome, pending: Option<&str>) -> Backend {
             self.binding.transport_root = self.binding.workspace.path.join("native-store");
             self.binding.endpoint = endpoint(&self.binding.scope);
-            let store = ContractStore::create(&self.binding.transport_root, self.binding.scope.clone(), &self.binding.endpoint).unwrap();
+            let mut store = ContractStore::create(&self.binding.transport_root, self.binding.scope.clone(), &self.binding.endpoint).unwrap();
             let target = SeatRecord { identity: self.identity.clone(), provider: self.role.provider.clone(),
                 native: NativeIdentity { version: "fixture".into(), harness: "fixture".into(), ui: "controlled".into(),
                     platform: Platform::MacOs, executable_sha256: digest(b"fixture") },
@@ -1608,18 +1610,15 @@ mod tests {
                 resources: vec![], workspace_resources: vec![], bootstrap_used: false };
             let operation = OperationRecord { id: OperationId::new("controlled-start").unwrap(), kind: TransactionKind::Startup,
                 target: target.clone(), parent: None, phase, pending: pending.map(str::to_owned), spawn_observation: None, native_launch: None, resources: vec![],
-                effect: team_agent_contract::contract::delivery::DeliveryEffect::NoEffect, outcome, preserved: vec![], failure: None };
-            let db = rusqlite::Connection::open(self.binding.transport_root.join("contract.db")).unwrap();
-            db.execute("INSERT INTO contract_seats VALUES(?1,?2)", rusqlite::params![self.identity.seat.as_str(), serde_json::to_string(&target).unwrap()]).unwrap();
-            db.execute("INSERT INTO contract_generations VALUES(?1,?2)", rusqlite::params![self.identity.seat.as_str(), self.identity.generation.0]).unwrap();
-            db.execute("INSERT INTO contract_instances VALUES(?1,?2,?3)", rusqlite::params![self.identity.instance.as_str(), self.identity.seat.as_str(), self.identity.generation.0]).unwrap();
-            db.execute("INSERT INTO contract_operations VALUES(?1,?2)", rusqlite::params![operation.id.as_str(), serde_json::to_string(&operation).unwrap()]).unwrap();
+                effect: team_agent_contract::contract::delivery::DeliveryEffect::NoEffect, outcome, preserved: vec![], failure: None, recovery_failure: None, stop_receipt: None };
+            store.fixture_put_seat(&target).unwrap();
+            store.fixture_put_operation(&operation).unwrap();
             if matches!(outcome, Outcome::Running | Outcome::NeedsRecovery) {
-                db.execute("INSERT INTO contract_leases VALUES(?1,?2)", rusqlite::params![self.identity.seat.as_str(), operation.id.as_str()]).unwrap();
+                store.fixture_set_lease(&self.identity.seat, Some(&operation.id)).unwrap();
             }
             std::fs::write(root_for(&self.binding.workspace.path, &self.binding.scope).join("framework-binding.json"),
                 serde_json::to_vec(&self.binding).unwrap()).unwrap();
-            drop(db); drop(store);
+            drop(store);
             Backend::open_readonly(&self.binding.workspace.path, "test").unwrap()
         }
     }
@@ -1791,9 +1790,10 @@ mod tests {
             origin: team_agent_contract::contract::session::CaptureOrigin::OwnedExitHint, evidence_kind: EvidenceKind::Fixture, evidence_sha256: digest(b"parent-session"), backing: None });
         operation.parent = Some(parent.clone());
         fixture.save_operation(&operation);
-        let db = rusqlite::Connection::open(fixture.binding.transport_root.join("contract.db")).unwrap();
-        db.execute("INSERT INTO contract_seats VALUES(?1,?2)", rusqlite::params![parent.identity.seat.as_str(), serde_json::to_string(&parent).unwrap()]).unwrap();
-        db.execute("INSERT INTO contract_leases VALUES(?1,?2)", rusqlite::params![parent.identity.seat.as_str(), operation.id.as_str()]).unwrap();
+        let mut store = fixture.store();
+        store.fixture_put_seat(&parent).unwrap();
+        store.fixture_set_lease(&parent.identity.seat, Some(&operation.id)).unwrap();
+        drop(store);
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let root = fixture.root.clone(); let child = fixture.identity.seat.clone();
@@ -1836,9 +1836,7 @@ mod tests {
         sibling.pane = "sibling-pane".into();
         sibling.binding_key = "sibling-binding".into();
         sibling.server_key = "sibling-server".into();
-        let db = rusqlite::Connection::open(fixture.binding.transport_root.join("contract.db")).unwrap();
-        db.execute("INSERT INTO contract_seats VALUES(?1,?2)", rusqlite::params![
-            sibling.identity.seat.as_str(), serde_json::to_string(&sibling).unwrap()]).unwrap();
+        fixture.store().fixture_put_seat(&sibling).unwrap();
         let receipt = stop(&fixture.root, "test", &fixture.identity.seat).unwrap();
         assert_eq!(receipt.id.as_str(), "controlled-start");
         assert_eq!(receipt.outcome, Outcome::NeedsRecovery);
@@ -1912,8 +1910,7 @@ mod tests {
         interrupted.phase = Phase::F3Spawn;
         interrupted.pending = Some("spawn".into());
         interrupted.outcome = Outcome::NeedsRecovery;
-        let db = rusqlite::Connection::open(fixture.binding.transport_root.join("contract.db")).unwrap();
-        db.execute("INSERT INTO contract_operations VALUES(?1,?2)", rusqlite::params![interrupted.id.as_str(), serde_json::to_string(&interrupted).unwrap()]).unwrap();
+        fixture.save_operation(&interrupted);
         assert!(matches!(existing_start(&backend, &fixture.identity.seat).unwrap(),
             Some(ExistingStart::Blocked(record)) if record == interrupted));
         assert_eq!(backend.store.seat(&fixture.identity.seat).unwrap().unwrap().identity, fixture.identity);
@@ -1924,8 +1921,7 @@ mod tests {
         for outcome in [Outcome::Committed, Outcome::Compensated] {
             let mut fixture = RoleFixture::new();
             let backend = fixture.canonical(SeatStatus::Stopped, Phase::F5Receipt, outcome, None);
-            let db = rusqlite::Connection::open(fixture.binding.transport_root.join("contract.db")).unwrap();
-            db.execute("DELETE FROM contract_seats", []).unwrap();
+            fixture.store().fixture_delete_seat(&fixture.identity.seat).unwrap();
             let result = existing_start(&backend, &fixture.identity.seat);
             if outcome == Outcome::Committed { assert!(result.is_err()); }
             else { assert!(result.unwrap().is_none()); }
@@ -1984,7 +1980,7 @@ mod tests {
 
             fixture.binding.transport_root = fixture.binding.workspace.path.join("native-store");
             fixture.binding.endpoint = endpoint(&fixture.binding.scope);
-            let store = ContractStore::create(&fixture.binding.transport_root, fixture.binding.scope.clone(), &fixture.binding.endpoint).unwrap();
+            let mut store = ContractStore::create(&fixture.binding.transport_root, fixture.binding.scope.clone(), &fixture.binding.endpoint).unwrap();
             let native = NativeIdentity { version: "fixture".into(), harness: "unavailable".into(), ui: "tui".into(),
                 platform: Platform::MacOs, executable_sha256: digest(b"fixture") };
             let seat = SeatRecord {
@@ -1995,11 +1991,7 @@ mod tests {
                 session: None, resources: vec![], workspace_resources: vec![], bootstrap_used: false,
             };
             // Test-only canonical fixture, never a live-store recovery shortcut.
-            let db = rusqlite::Connection::open(fixture.binding.transport_root.join("contract.db")).unwrap();
-            db.execute("INSERT INTO contract_seats(seat,record) VALUES(?1,?2)",
-                rusqlite::params![fixture.identity.seat.as_str(), serde_json::to_string(&seat).unwrap()]).unwrap();
-            db.execute("INSERT INTO contract_generations(seat,generation) VALUES(?1,1)", [fixture.identity.seat.as_str()]).unwrap();
-            drop(db);
+            store.fixture_put_seat(&seat).unwrap();
             std::fs::write(root_for(&fixture.binding.workspace.path, &fixture.binding.scope).join("framework-binding.json"),
                 serde_json::to_vec(&fixture.binding).unwrap()).unwrap();
             let stale_running = serde_json::json!({"agents":{"worker":{"provider":provider,"status":"running"}}});
@@ -2062,9 +2054,7 @@ mod tests {
         }
         let inbox = crate::inbox_store::read(&fixture.root, "leader", 10, Some("test")).unwrap();
         assert_eq!(inbox["messages"].as_array().unwrap().len(), 2);
-        let db = rusqlite::Connection::open(fixture.binding.transport_root.join("contract.db")).unwrap();
-        let outbox: i64 = db.query_row("select count(*) from contract_outbox", [], |row| row.get(0)).unwrap();
-        assert_eq!(outbox, 0, "no synthetic task or message-delivery ledger row");
+        assert!(!fixture.binding.transport_root.join("contract.db").exists(), "no SQLite ledger at all");
         let mut foreign = context.clone(); foreign.identity.generation = Generation(2);
         let request = serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"send_message","arguments":{"to":"leader","content":"must not arrive","mailbox":true}}});
         assert!(super::super::mcp::direct_request(&mut backend.store, &foreign, &request, &tools).is_err());
@@ -2086,9 +2076,9 @@ mod tests {
         let mut fixture = RoleFixture::new();
         fixture.role.provider = ProviderId::new("pi_tui").unwrap();
         let _backend = fixture.canonical(SeatStatus::Ready, Phase::F5Receipt, Outcome::Committed, None);
-        let db = rusqlite::Connection::open(fixture.binding.transport_root.join("contract.db")).unwrap();
-        db.execute("update contract_operations set record=json_set(record, '$.failure', ?1)",
-            ["session observation deferred: capture-failed; tmux capture: Deadline"]).unwrap();
+        let mut operation = fixture.store().operation(&OperationId::new("controlled-start").unwrap()).unwrap();
+        operation.failure = Some("session observation deferred: capture-failed; tmux capture: Deadline".into());
+        fixture.save_operation(&operation);
         write_role(&fixture.binding, &fixture.identity, &fixture.role).unwrap();
         let state = super::super::framework::project_seat(
             &fixture.binding.workspace.path, "test", "worker",

@@ -283,54 +283,6 @@ fn t3_normalize_missing_summary_defaults_to_completed_python_parity() {
     );
 }
 
-/// T3-3 (db schema_diagnosis) — RE-SCOPED per cr 2026-06-10 to a layered-parity lock
-/// (N38 + MUST-NOT-13 layered-truth, NOT a swallow): a missing db legitimately reports
-/// `ok:true` (ok = legal for the next step) WITH `status:"missing"` (explicit state
-/// axis) AND a `recommended_action` carrying initialize_schema guidance (Python
-/// schema_migration.py missing branch). The truth is fully laid out — not a silent
-/// fake-green. The reverse cases below catch the REAL fake-greens this layering must not
-/// hide.
-#[test]
-fn t3_schema_diagnosis_missing_is_layered_parity_not_swallow() {
-    let ws = tmp_ws("t3-schema-missing");
-    let diag = schema_diagnosis_workspace(&ws)
-        .expect("diagnosis should not error on a missing workspace db");
-    let mut failures = Vec::new();
-
-    // Value axes (compile-safe struct fields): ok=true + status="missing" are the parity
-    // GREEN part — the missing state is legal for the next step and explicitly named.
-    if !diag.ok {
-        failures.push(format!(
-            "T3-3 parity: missing db must report ok=true (legal next step); diag={diag:?}"
-        ));
-    }
-    if diag.status != "missing" {
-        failures.push(format!(
-            "T3-3 parity: missing db must carry status=\"missing\" (explicit state axis); got {:?}",
-            diag.status
-        ));
-    }
-    // recommended_action axis: Python's missing branch carries an initialize_schema
-    // guidance string; RS's Diagnosis omits the field entirely (parity gap). Grep guard
-    // the missing branch so the layered guidance is surfaced (the field is part of the
-    // honest layering — without it the ok:true is bare). Turns green when dev adds it.
-    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/db/migration.rs"))
-        .unwrap();
-    if !src.contains("recommended_action") || !src.contains("initialize_schema") {
-        failures.push(
-            "T3-3 parity: the missing-db diagnosis must carry a recommended_action with \
-initialize_schema guidance (Python schema_migration.py missing branch: 'initialize_schema \
-will create it on first use'); RS Diagnosis currently omits the field — the ok:true is \
-bare without the layered guidance"
-                .to_string(),
-        );
-    }
-    assert!(
-        failures.is_empty(),
-        "T3-3 layered-parity contract failed:\n{}",
-        failures.join("\n")
-    );
-}
 
 /// T3-3 reverse cases (cr): the layered missing-state must not become a cover for a
 /// REAL fake-green. A non-existent db can't carry layout drift, so we drive these as

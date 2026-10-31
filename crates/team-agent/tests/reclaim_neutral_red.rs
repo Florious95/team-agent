@@ -686,7 +686,7 @@ fn seed_parent_child_state(workspace: &Path, parent_owner: &str, child_owner: &s
         "child": child,
     });
     team_agent::state::persist::save_runtime_state(workspace, &state).unwrap();
-    let _ = MessageStore::open(workspace).unwrap();
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
 }
 
 fn team_state(
@@ -844,7 +844,7 @@ fn seed_state(workspace: &Path, receiver_pane: Option<&str>, epoch: u64, agents:
         state["teams"]["team-a"]["team_owner"] = owner;
     }
     team_agent::state::persist::save_runtime_state(workspace, &state).unwrap();
-    let _ = MessageStore::open(workspace).unwrap();
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

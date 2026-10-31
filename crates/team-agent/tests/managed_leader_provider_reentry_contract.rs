@@ -34,12 +34,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 use serial_test::serial;
 use sha2::{Digest, Sha256};
-use team_agent::db::schema::open_db;
-use team_agent::message_store::MessageStore;
 use team_agent::model::pane_authority_refusal as refusal_catalog;
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 
@@ -214,7 +212,6 @@ fn different_pane_does_not_silently_steal_managed_leader_binding() {
 fn status_human_and_summary_render_canonical_unknown_over_legacy_working_health() {
     let case = ReentryCase::new("status-unknown-renderer");
     case.seed_status_unknown_renderer_state();
-    case.seed_agent_health(RENDERER_WORKER, "WORKING");
 
     let workspace = case.workspace_str();
     let human = case.run_ta(
@@ -395,18 +392,6 @@ impl ReentryCase {
     }
 
     fn seed_refusal_durable_canaries(&self) {
-        let store = MessageStore::open(&self.workspace).expect("seed refusal message store");
-        store
-            .create_message(
-                None,
-                "existing-worker",
-                "leader",
-                "reentry refusal durable canary",
-                None,
-                false,
-                Some(TEAM),
-            )
-            .expect("seed refusal durable message row");
         let registry_path = self
             ._env
             .home()
@@ -500,24 +485,6 @@ impl ReentryCase {
         save_runtime_state(&self.workspace, &state).expect("seed renderer runtime state");
     }
 
-    fn seed_agent_health(&self, agent_id: &str, status: &str) {
-        let store = MessageStore::open(&self.workspace).expect("open message store");
-        let conn = open_db(store.db_path()).expect("open team db");
-        conn.execute(
-            "insert or replace into agent_health(owner_team_id, agent_id, status, last_output_at, context_usage_pct, current_task_id, updated_at)
-             values (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                TEAM,
-                agent_id,
-                status,
-                "2026-07-13T00:00:00Z",
-                42_i64,
-                Option::<String>::None,
-                "2026-07-13T00:00:00Z"
-            ],
-        )
-        .expect("seed agent_health");
-    }
 
     fn run_leader_provider(&self, pane: &str, uuid_override: Option<&str>) -> Output {
         self.run_ta_with_controlling_tty(

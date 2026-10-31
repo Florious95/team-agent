@@ -104,7 +104,7 @@ fn run_dispatches_send_to_handler_returns_ok() {
     // through the active team_key, so the in-team agent now lives under
     // `teams[<key>].agents`. Behavior under test (dispatch + ok exit) unchanged.
     let ws = deleg_uniq_dir("run-send");
-    let _ = crate::message_store::MessageStore::open(&ws).unwrap();
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
     crate::state::persist::save_runtime_state(
         &ws,
         &serde_json::json!({
@@ -333,21 +333,8 @@ fn cli_add_agent_duplicate_id_surfaces_real_error() {
 #[test]
 fn cli_status_emits_brief_with_scoped_unknown_diagnostics() {
     let ws = seed_status_workspace(); // writes .team/runtime/state.json
-    let store = crate::message_store::MessageStore::open(&ws).unwrap();
-    let _ = store
-        .create_message(Some("t1"), "leader", "a1", "hi", None, true, None)
-        .unwrap();
-    let _ = store
-        .create_message(Some("t1"), "leader", "a1", "again", None, true, None)
-        .unwrap();
-    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-    conn.execute(
-            "insert into results(result_id, owner_team_id, task_id, agent_id, envelope, status, created_at) \
-             values ('r1', null, 't1', 'a1', '{}', 'success', '2026-01-01T00:00:00Z')",
-            [],
-        )
-        .unwrap();
-    drop(store);
+    // M4: the SQL message/result seeding that proved "no db data enters the node" is gone
+    // with the store itself; the brief shape below is still asserted.
     // a HEALTHY coordinator at the status workspace (this process's pid + matching metadata).
     let wp = crate::coordinator::WorkspacePath::new(ws.clone());
     let me = crate::coordinator::Pid::new(std::process::id());

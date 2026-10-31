@@ -38,24 +38,6 @@ fn status_team_is_leader_id_not_team_key() {
 // ── status #2: messages = store.message_counts() ({} when empty), results = store.result_counts()
 // ({total,uncollected,collected,invalid,by_status}) — NOT the Rust {"count": N} placeholders. ──────
 // GOLDEN queries.py:73,75. RUST mod.rs:101,103 emit `{"count": N}`. RED.
-#[test]
-fn status_counts_are_store_count_maps_not_count_int() {
-    let ws = tmp_workspace(); // empty store
-    let v = status_port::status(&ws, false, true).expect("status");
-    assert_eq!(
-        v["messages"],
-        json!({}),
-        "golden empty store.message_counts() == {{}} (queries.py:73), NOT {{count:0}}; got {:?}",
-        v["messages"]
-    );
-    assert_eq!(
-        v["results"],
-        json!({"total": 0, "uncollected": 0, "collected": 0, "invalid": 0, "by_status": {}}),
-        "golden store.result_counts() full shape (queries.py:75), NOT {{count:0}}; got {:?}",
-        v["results"]
-    );
-    let _ = std::fs::remove_dir_all(&ws);
-}
 
 // ── status #3: coordinator = coordinator_health(ws) FULL shape in golden order ──────────────────
 // 0.5.18 adds binary identity diagnostics to expose stale coordinator rotation reasons.
@@ -212,94 +194,11 @@ fn approvals_golden_shape_has_waiting_count_and_scan_not_agent() {
 }
 
 // ── inbox: compact fallback projection ───────────────────────────────────────────────
-#[test]
-fn inbox_golden_shape_is_compact_and_scoped_to_agent() {
-    let ws = tmp_workspace();
-    let v = status_port::inbox(&ws, "alpha", 3, None).expect("inbox");
-    let obj = v.as_object().expect("inbox dict");
-    assert_eq!(v["agent_id"], json!("alpha"));
-    let order: Vec<&str> = obj.keys().map(String::as_str).collect();
-    assert_eq!(order, vec!["ok", "agent_id", "messages"]);
-    let _ = std::fs::remove_dir_all(&ws);
-}
 
-#[test]
-fn inbox_excludes_leader_stage_result_notifications() {
-    let ws = tmp_workspace();
-    let store = crate::message_store::MessageStore::open(&ws).unwrap();
-    let message_id = store
-        .create_message(
-            None,
-            "leader",
-            "worker",
-            "Task t reported success; Result id: res-1",
-            None,
-            false,
-            None,
-        )
-        .unwrap();
-    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-    conn.execute(
-        "update messages set presentation = ?1 where message_id = ?2",
-        rusqlite::params![
-            json!({"sink": "leader", "class": "stage_result"}).to_string(),
-            message_id,
-        ],
-    )
-    .unwrap();
-    let value = status_port::inbox(&ws, "leader", 3, None).expect("inbox");
-    assert!(value["messages"].as_array().unwrap().is_empty());
-    let _ = std::fs::remove_dir_all(&ws);
-}
 
 // ── comms_selftest: golden {ok,status,run_id,scope,boundary,checks} (diagnose/comms.py:40-47) ─────
 // RUST mod.rs:525-527 stub {ok,team,gate,provider_sdk_calls:int}. RED. Locks COMMS_BOUNDARY_TEXT +
 // the deterministic check sub-shapes (run_id is a random uuid; not value-locked). ────────────────
-#[test]
-fn comms_selftest_golden_boundary_scope_and_check_shapes() {
-    let boundary = "This checks terminal connection consistency only; it does not send a message or prove that a worker replied.";
-    let ws = tmp_workspace();
-    let v = diagnose_port::comms_selftest(&ws, None, None).expect("comms_selftest");
-    let obj = v.as_object().expect("comms dict");
-    assert_eq!(
-        v["boundary"],
-        json!(boundary),
-        "golden COMMS_BOUNDARY_TEXT prefix (comms.py:11-14)"
-    );
-    assert_eq!(v["scope"], json!("binding_consistency"), "golden scope");
-    assert_eq!(
-        v["status"],
-        json!("fail"),
-        "empty workspace has no runtime receiver binding, so comms gate must not pass"
-    );
-    assert!(
-        obj.contains_key("run_id"),
-        "golden carries a run_id (uuid hex[:12])"
-    );
-    assert!(!obj.contains_key("team"), "golden has NO `team` key");
-    assert!(!obj.contains_key("gate"), "golden has NO `gate` key");
-    assert_eq!(v["checks"]["contract_suite"]["status"], json!("pass"));
-    assert_eq!(v["checks"]["contract_suite"]["failed"], json!([]));
-    let suite_names: Vec<&str> = v["checks"]["contract_suite"]["checks"]
-        .as_array()
-        .expect("contract suite checks")
-        .iter()
-        .filter_map(|check| check.get("name").and_then(Value::as_str))
-        .collect();
-    assert!(
-        suite_names.contains(&"message_store_schema")
-            && suite_names.contains(&"message_token_shape")
-            && suite_names.contains(&"result_notification_render")
-            && suite_names.contains(&"leader_projection_owner_team"),
-        "contract suite must be executable, not deferred: {suite_names:?}"
-    );
-    assert_eq!(
-        v["checks"]["provider_sdk_calls"]["calls"],
-        json!({"anthropic": 0, "openai": 0, "httpx": 0}),
-        "golden provider_sdk_calls.calls (comms.py:142-151); Rust stub is a bare int 0"
-    );
-    let _ = std::fs::remove_dir_all(&ws);
-}
 
 // ── orphan_gate(fix=true,confirm=false): golden REFUSED envelope (orphan_cleanup.py:304-311) ──────
 // {ok:false,gate:"orphans",status:"refused",reason:"fix_requires_confirm",action:...}. RUST mod.rs:

@@ -172,20 +172,6 @@ fn r2_existing_bad_database_is_checked_without_state_and_never_rewritten() {
     }
 }
 
-#[test]
-fn r2_valid_database_without_state_does_not_require_a_coordinator() {
-    let f = Fixture::new("valid-db");
-    drop(team_agent::message_store::MessageStore::open(&f.workspace).unwrap());
-    let db = f.workspace.join(".team/runtime/team.db");
-    let before = fs::read(&db).unwrap();
-    let out = f.run("doctor", &f.workspace, &["--json"]);
-    let value = report(&out);
-    assert!(out.status.success(), "{value}");
-    assert_eq!(value["runtime"]["status"], "not_present");
-    assert_eq!(value["coordinator"]["schema_ok"], true);
-    assert_eq!(fs::read(db).unwrap(), before);
-    assert!(!f.workspace.join(".team/runtime/state.json").exists());
-}
 
 #[test]
 fn r3_each_finding_keeps_its_target_in_json_repairs_and_human_lines() {

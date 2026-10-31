@@ -588,6 +588,7 @@ mod tests {
             parent: None, phase: Phase::F3Spawn, pending: Some("compensating-stop".into()), spawn_observation: None, native_launch: None,
             resources: vec![], effect: DeliveryEffect::NoEffect, outcome, preserved: vec![],
             failure: Some("native control SessionInspect guard-deadline".into()),
+            recovery_failure: None, stop_receipt: None,
         }
     }
 

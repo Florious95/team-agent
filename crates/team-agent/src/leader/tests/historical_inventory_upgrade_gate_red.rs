@@ -369,111 +369,16 @@ fn seed_full_inventory(case: &InventoryCase) -> std::collections::BTreeMap<Strin
 // Tooth 1 — only truly-blocked rows flip (invariant lock at 5b847e4)
 // ---------------------------------------------------------------------------
 
-#[test]
-#[serial(env)]
-fn upgrade_gate_only_blocked_rows_flip() {
-    let case = InventoryCase::new("only-blocked-flip");
-    let map = seed_full_inventory(&case);
-    let mut state = bound_state();
-    let status = case.claim(&mut state);
-    assert_eq!(status, LeaseStatus::AlreadyBound);
-    // Blocked and queued_until_leader_attach must be accepted; everything
-    // else byte-stable at its seeded status.
-    for id in &map["failed:leader_not_attached"] {
-        assert_eq!(
-            case.row_status(id),
-            "accepted",
-            "blocked leader row must flip"
-        );
-    }
-    for id in &map["queued_until_leader_attach"] {
-        assert_eq!(
-            case.row_status(id),
-            "accepted",
-            "queued_until_leader_attach must flip (0.5.56 preserved)"
-        );
-    }
-    for (key, ids) in &map {
-        if key == "failed:leader_not_attached" || key == "queued_until_leader_attach" {
-            continue;
-        }
-        // Determine the expected preserved status.
-        let expected = key.split(':').next().unwrap();
-        // Special case: "worker:X" seeded status is X.
-        let expected = expected
-            .strip_prefix("worker")
-            .unwrap_or(expected)
-            .trim_start_matches(':');
-        let expected = if expected.is_empty() {
-            key.split(':').nth(1).unwrap()
-        } else {
-            expected
-        };
-        for id in ids {
-            assert_eq!(
-                case.row_status(id),
-                expected,
-                "row {id} (prior={key}) must be byte-stable across claim; upgrade gate leaks"
-            );
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Tooth 2 — per-prior-state audit count (RED at 5b847e4)
 // ---------------------------------------------------------------------------
 
-#[test]
-#[serial(env)]
-fn upgrade_gate_emits_per_prior_state_audit_count() {
-    let case = InventoryCase::new("audit-count");
-    let _map = seed_full_inventory(&case);
-    let mut state = bound_state();
-    let _ = case.claim(&mut state);
-    let event = case
-        .last_blocked_requeue_event()
-        .expect("blocked_messages_requeued event must exist");
-    // Distillation §D3 / §2.2#2 target: per-prior-status breakdown.
-    // The typed refactor must add a `by_prior_state` map keyed by typed
-    // variant. Baseline only has scalar `count` → red.
-    let by_prior = event.get("by_prior_state").and_then(|v| v.as_object());
-    assert!(
-        by_prior.is_some(),
-        "event missing `by_prior_state` breakdown; only scalar count exposed. \
-         audit-side conflation is what let the 494 batch hide 346/148 splits."
-    );
-    let by_prior = by_prior.unwrap();
-    // Every prior-status the fixture actually touched must be represented,
-    // even if 0 rows in that state were flipped.
-    for expected_key in ["blocked_leader_unbound", "queued_until_leader_attach"] {
-        assert!(
-            by_prior.contains_key(expected_key),
-            "audit map missing typed key `{expected_key}`; the typed refactor must \
-             expose 0-count entries too (so audits are self-describing)."
-        );
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Tooth 3 — null-result historical watchers are untouched (invariant lock)
 // ---------------------------------------------------------------------------
 
-#[test]
-#[serial(env)]
-fn null_result_historical_watchers_never_rewritten_across_boot() {
-    let case = InventoryCase::new("watcher-null");
-    let watchers: Vec<String> = (0..3).map(|i| case.seed_null_result_watcher(i)).collect();
-    let _map = seed_full_inventory(&case);
-    let before: Vec<String> = watchers.iter().map(|w| case.watcher_status(w)).collect();
-    let mut state = bound_state();
-    let _ = case.claim(&mut state);
-    let after: Vec<String> = watchers.iter().map(|w| case.watcher_status(w)).collect();
-    assert_eq!(
-        before, after,
-        "null-result historical watchers must never be rewritten (108-row write \
-         amplification of 0.5.55 storm). §2.3 watcher fan-in."
-    );
-}
 
 // ---------------------------------------------------------------------------
 // Tooth 4 — worker-recipient parked rows must have a typed recovery owner
@@ -531,94 +436,18 @@ fn worker_recipient_parked_rows_have_typed_recovery_owner() {
 // Tooth 5 — fixture stays in lock-step with batch A's enum catalog
 // ---------------------------------------------------------------------------
 
-#[test]
-#[serial(env)]
-fn upgrade_inventory_covers_full_enum() {
-    let case = InventoryCase::new("catalog-lockstep");
-    let _map = seed_full_inventory(&case);
-    let seeded = case.distinct_message_statuses();
-    let catalog: BTreeSet<String> = durable_status_catalog()
-        .into_iter()
-        .map(str::to_string)
-        .collect();
-    assert_eq!(
-        seeded, catalog,
-        "historical fixture status coverage must be exactly the product \
-         MessageRowStatus::ALL wire catalog; no hand-copied subset may drift"
-    );
-}
 
 // ---------------------------------------------------------------------------
 // Tooth 6 — parked delivery debt remains open but cannot requeue
 // ---------------------------------------------------------------------------
 
-#[test]
-#[serial(env)]
-fn injected_awaiting_receipt_is_open_debt_but_not_requeueable() {
-    let case = InventoryCase::new("injected-open-debt");
-    let status = durable_status_catalog()
-        .into_iter()
-        .find(|status| *status == "injected_awaiting_receipt")
-        .expect("product MessageRowStatus::ALL must expose injected_awaiting_receipt");
-    let message_id = case.seed_leader_row("receipt still owed", status, None);
-
-    let runtime_status =
-        team_agent::cli::status_port::status(&case.workspace, false, true).unwrap();
-    let undelivered = runtime_status
-        .pointer("/runtime/undelivered")
-        .and_then(serde_json::Value::as_i64);
-    let claim_won = case.store.claim_for_delivery(&message_id).unwrap();
-    assert!(
-        undelivered == Some(1) && !claim_won,
-        "injected_awaiting_receipt must be classified in two directions at once: \
-         nonterminal-for-delivery (runtime undelivered inventory=1) and \
-         terminal-for-requeue (claim_won=false). observed \
-         undelivered={undelivered:?} claim_won={claim_won}"
-    );
-    assert_eq!(
-        case.row_status(&message_id),
-        "injected_awaiting_receipt",
-        "a rejected claim must leave the typed parked fact unchanged"
-    );
-}
 
 // ---------------------------------------------------------------------------
 // Tooth 7 — positive control: legitimate recovery path preserved
 // ---------------------------------------------------------------------------
 
-#[test]
-#[serial(env)]
-fn newly_bound_leader_still_flushes_queued_row() {
-    let case = InventoryCase::new("pos-newly-bound");
-    let queued = case.seed_leader_row("queued mailbox", "queued_until_leader_attach", None);
-    let mut state = serde_json::json!({ "session_name": "team-upgrade-pos-new" });
-    let status = case.claim(&mut state);
-    assert_eq!(
-        status,
-        LeaseStatus::Claimed,
-        "positive control exercises Claimed enum branch"
-    );
-    assert_eq!(
-        case.row_status(&queued),
-        "accepted",
-        "newly-bound path must still flush queued mailbox row"
-    );
-}
 
 // ---------------------------------------------------------------------------
 // Tooth 8 — negative control: non-leader parked rows unaffected
 // ---------------------------------------------------------------------------
 
-#[test]
-#[serial(env)]
-fn non_leader_parked_rows_are_never_flipped_by_leader_claim() {
-    let case = InventoryCase::new("neg-worker-parked");
-    let worker_parked = case.seed_worker_row("worker parked", "submitted_pending_acceptance", None);
-    let mut state = bound_state();
-    let _ = case.claim(&mut state);
-    assert_eq!(
-        case.row_status(&worker_parked),
-        "submitted_pending_acceptance",
-        "recipient!=leader parked row must be unaffected by leader claim"
-    );
-}

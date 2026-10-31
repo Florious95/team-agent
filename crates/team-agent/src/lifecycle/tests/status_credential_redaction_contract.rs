@@ -479,7 +479,7 @@ fn seed_redaction_state(workspace: &Path, marker: &str, team_key: &str) {
         }),
     )
     .unwrap();
-    let _ = MessageStore::open(workspace).unwrap();
+    // M4: no SQLite message store fixture (MessageStore::open is retired).
 }
 
 fn mixed_sensitive_value(marker: &str) -> Value {
