@@ -41,7 +41,9 @@ fn mailbox_to_worker_is_pullable_but_never_physically_injected() {
         .unwrap()
         .to_value();
     assert_eq!(mailbox["status"], "stored");
-    assert_eq!(mailbox["mailbox"], true);
+    // R-M1a/M1b: a mailbox send is stored and never attempts live delivery (`live: false`).
+    assert_eq!(mailbox["stored"], true, "{mailbox}");
+    assert_eq!(mailbox["live"], false, "{mailbox}");
     assert!(mailbox.get("delivery").is_none());
     let records = fixture.inbox("worker-1");
     assert_eq!(records.len(), 1);
@@ -50,13 +52,14 @@ fn mailbox_to_worker_is_pullable_but_never_physically_injected() {
     assert_eq!(records[0]["sender"], "leader");
     assert_eq!(records[0]["team"], "current");
 
-    let path = fixture.root.join(".team/inbox/worker-1.jsonl");
-    let before = std::fs::read(&path).unwrap();
+    // R-M1c: compare every inbox file (segment layout is the store's choice).
+    let before = fixture.inbox_bytes();
     for _ in 0..2 {
         let pulled =
             team_agent::inbox_store::read(&fixture.root, "worker-1", 20, Some("current")).unwrap();
         assert_eq!(pulled["messages"], json!(records));
     }
+    assert_eq!(fixture.inbox_bytes(), before, "reads cannot mutate the inbox");
     let ordinary = tools
         .send_message(
             &MessageTarget::Single("worker-1".into()),
@@ -69,16 +72,18 @@ fn mailbox_to_worker_is_pullable_but_never_physically_injected() {
         .to_value();
     assert_eq!(ordinary["status"], "sent");
     assert_eq!(ordinary["delivery"], "physical");
-    assert!(ordinary.get("message_id").is_none());
+    // R-M1a: M1 stores before submitting, so the ordinary send's receipt names its own new record.
+    let after_records = fixture.inbox("worker-1");
+    assert_eq!(after_records.len(), 2);
+    assert_eq!(after_records[0], records[0], "the mailbox record is not rewritten");
+    assert_eq!(after_records[1]["message_id"], ordinary["message_id"]);
     fixture.received("Team Agent message from leader:\n\nordinary positive control");
     assert!(!std::fs::read_to_string(fixture.root.join("received"))
         .unwrap()
         .contains("worker mailbox token"));
-    assert_eq!(
-        std::fs::read(path).unwrap(),
-        before,
-        "reads and ordinary sends cannot mutate the inbox"
-    );
+    let after = fixture.inbox_bytes();
+    assert!(before.iter().all(|(path, bytes)| after.get(path).is_some_and(|later| later.starts_with(bytes))),
+        "an ordinary send only appends; it cannot rewrite earlier inbox records");
     assert!(!fixture.root.join(".team/runtime/team.db").exists());
 }
 
