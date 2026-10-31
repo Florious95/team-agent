@@ -510,7 +510,7 @@ impl TeamOrchestratorTools {
     }
 
     /// `_refuse_cross_team_peer` (`tools.py:185-213`): server-side C23 pre-refusal. A
-    /// non-`*`/non-leader string target NOT in the visible-peer scope and not the
+    /// non-`*`/non-leader target (including each fanout member) outside visible peers and not the
     /// sender itself, with `scope != workspace`, → `Some(ToolError{PeerNotInScope})`
     /// (also writes `mcp.send_message_refused`). `None` = allowed to proceed.
     pub fn refuse_cross_team_peer(
@@ -532,20 +532,17 @@ impl TeamOrchestratorTools {
         if owner_team.is_none() {
             return None;
         }
-        let MessageTarget::Single(target) = to else {
-            return None;
+        let targets = match to {
+            MessageTarget::Single(target) => std::slice::from_ref(target),
+            MessageTarget::Fanout(targets) => targets.as_slice(),
+            MessageTarget::Broadcast => return None,
         };
-        if target.is_empty()
-            || target == "*"
-            || target == "leader"
-            || target == "Leader"
-            || self
-                .agent_id
-                .as_ref()
-                .is_some_and(|id| id.as_str() == target)
-        {
-            return None;
-        }
+        let mut targets = targets.iter().filter(|target| {
+            !target.is_empty()
+                && !matches!(target.as_str(), "*" | "leader" | "Leader")
+                && !self.agent_id.as_ref().is_some_and(|id| id.as_str() == target.as_str())
+        }).peekable();
+        targets.peek()?;
         // 0.5.45 naming-addressing (design §3.6, RED-2 MCP): compute
         // the visible peers ONCE and reuse for both exact-match check
         // AND scope-safe candidate ranking. Peers come from
@@ -561,9 +558,7 @@ impl TeamOrchestratorTools {
                     .collect()
             })
             .unwrap_or_default();
-        if visible_peers.iter().any(|peer| peer == target) {
-            return None;
-        }
+        let target = targets.find(|target| !visible_peers.contains(*target))?;
         let owner_team_key = owner_team
             .as_ref()
             .map(TeamKey::as_str)
