@@ -199,7 +199,7 @@ pub fn execute(req: Request<'_>, authority: Authority<'_>) -> Result<Value, Stri
         .any(|r| r["ok"] == false || r.get("delivery_error").is_some());
     Ok(
         json!({"ok":stored > 0,"status":if failed {"partial"} else if sent > 0 {"sent"} else {"stored"},
-        "sent":sent,"stored":stored,"messages":results}),
+        "sent":sent,"stored":stored,"results":results,"messages":results}),
     )
 }
 
@@ -310,6 +310,9 @@ fn send_one(
             } else {
                 "not_attempted"
             });
+            if let Some(action) = directory.recovery_action(recipient, &error) {
+                result["action"] = json!(action);
+            }
             result["delivery_error"] = json!(error);
         }
     }

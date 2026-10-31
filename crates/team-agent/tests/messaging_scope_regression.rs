@@ -117,10 +117,7 @@ fn qualified_sender_excludes_only_its_actual_seat_from_broadcast() {
         let inbox = cli(&source, workspace, team, &["inbox", "peer-c", "-n", "1"]);
         assert_eq!(
             inbox["messages"][0]["sender"],
-            format!(
-                "{}::alpha/worker-a",
-                source.display()
-            )
+            format!("{}::alpha/worker-a", source.display())
         );
     }
 }
@@ -219,7 +216,8 @@ fn duplicate_admitted_targets_have_one_receipt_and_record() {
     let root = TestRoot::new();
     let source = workspace(root.path(), "source", "alpha");
     let bodies = mcp(&source, &[json!(["peer-c", "peer-c"])]);
-    assert_eq!(bodies[0]["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(bodies[0]["results"].as_array().unwrap().len(), 1);
+    assert_eq!(bodies[0]["messages"], bodies[0]["results"]);
     let inbox = cli(&source, &source, "alpha", &["inbox", "peer-c", "-n", "10"]);
     assert_eq!(inbox["messages"].as_array().unwrap().len(), 1);
 }
@@ -242,6 +240,69 @@ fn stale_pid_reuse_is_nonblocking_and_status_does_not_clean_it() {
     assert!(!pid.exists());
     assert!(!meta.exists());
     assert!(!source.join(".team/runtime/team.db").exists());
+}
+
+#[test]
+fn legacy_leaf_provider_names_do_not_claim_native_authority() {
+    let root = TestRoot::new();
+    let source = workspace(root.path(), "source", "alpha");
+    let state_path = source.join(".team/runtime/state.json");
+    let mut state: Value = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    for (provider, dialect) in [("grok", "grok"), ("claude_tui", "claude")] {
+        state["teams"]["alpha"]["agents"]["peer-c"] = json!({
+            "provider":provider,"pane_id":"%0","tmux_socket":"owned-fixture-no-server","status":"running"
+        });
+        std::fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        let directory = team_agent::direct_delivery::directory(&source, Some("alpha")).unwrap();
+        assert_eq!(directory.endpoint("peer-c").unwrap().dialect, dialect);
+    }
+}
+
+#[test]
+fn missing_native_authority_has_typed_receipts_and_recovery_actions() {
+    let root = TestRoot::new();
+    let source = workspace(root.path(), "source", "alpha");
+    let state_path = source.join(".team/runtime/state.json");
+    let mut state: Value = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    state["teams"]["alpha"]["agents"]["peer-c"] = json!({
+        "provider":"claude_tui","runtime_family":"contract","status":"running"
+    });
+    std::fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+    let sent = cli(
+        &source,
+        &source,
+        "alpha",
+        &["send", "peer-c", "native authority probe"],
+    );
+    assert_eq!(sent["stored"], true);
+    assert_eq!(sent["live"], false);
+    assert_eq!(sent["submission"], "not_attempted");
+    assert!(sent["delivery_error"]
+        .as_str()
+        .unwrap()
+        .starts_with("native_authority_missing:"));
+    assert!(sent["action"].as_str().unwrap().contains("restart peer-c"));
+    let located = cli(&source, &source, "alpha", &["locate"]);
+    let entry = located["unavailable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["agent"] == "peer-c")
+        .unwrap();
+    assert_eq!(entry["delivery_error"], sent["delivery_error"]);
+    assert_eq!(entry["action"], sent["action"]);
+    let status = cli(&source, &source, "alpha", &["status"]);
+    let node = status["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == "peer-c")
+        .unwrap();
+    assert_eq!(node["observation_reason"], "native_authority_missing");
+    assert_eq!(node["next_action"], sent["action"]);
+    for value in [&sent, &located, &status] {
+        assert!(!value.to_string().contains("No such file or directory"));
+    }
 }
 
 #[test]

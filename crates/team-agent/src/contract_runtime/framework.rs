@@ -13,10 +13,7 @@ use team_agent_contract::orchestration::{
 };
 
 pub fn is_contract(agent: &Value) -> bool {
-    agent
-        .get("provider")
-        .and_then(Value::as_str)
-        .is_some_and(|provider| super::registry::descriptor(provider).is_some())
+    agent["runtime_family"] == "contract" || agent.get("contract_scope").is_some()
 }
 /// Published paused roles without an instance never crossed native startup.
 /// A bound instance is never skipped, even if a stale row says paused.

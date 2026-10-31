@@ -193,11 +193,14 @@ fn project_status_nodes(
     agent: Option<&str>,
 ) -> Vec<(BriefNode, Option<AttachContext>)> {
     let registered = registered_nodes(state, agent);
+    #[cfg(unix)]
+    let is_native = |node: &RegisteredNode| registered_scope(state).get("agents")
+        .and_then(|agents| agents.get(&node.name)).is_some_and(crate::contract_runtime::framework::is_contract);
     let legacy: Vec<_> = registered
         .iter()
         .filter(|_node| {
             #[cfg(unix)]
-            if crate::contract_runtime::registry::descriptor(&_node.provider).is_some() {
+            if is_native(_node) {
                 return false;
             }
             true
@@ -209,13 +212,14 @@ fn project_status_nodes(
         .iter()
         .map(|node| {
             #[cfg(unix)]
-            if crate::contract_runtime::registry::descriptor(&node.provider).is_some() {
+            if is_native(node) {
                 let mut brief = BriefNode::unknown(node).with_reason("native_runtime_projection_unavailable");
-                if let Ok(native) = crate::contract_runtime::framework::project_seat(
+                let native = crate::contract_runtime::framework::project_seat(
                     _workspace,
                     &crate::state::projection::team_state_key(state),
                     &node.name,
-                ) {
+                );
+                if let Ok(native) = &native {
                     brief.runtime_status = native["status"].as_str().unwrap_or("unknown").into();
                     brief.observation_reason = match brief.runtime_status.as_str() {
                         "running" => Some("activity_or_health_not_observed"),
@@ -229,6 +233,8 @@ fn project_status_nodes(
                             format!("tmux -S {} attach-session", shell_quote(endpoint))
                         });
                     }
+                } else if native.as_ref().err().is_some_and(crate::contract_runtime::backend::authority_is_missing) {
+                    brief.observation_reason = Some("native_authority_missing");
                 }
                 // Process alive is T1 only: activity/health remain unknown until
                 // independently observed. Never probe a private %0 on old tmux.
@@ -467,26 +473,16 @@ fn display_optional(value: &Value) -> String {
         .unwrap_or_else(|| "null".to_string())
 }
 
+// A selected canonical team never falls back to stale top-level agents.
+fn registered_scope(state: &Value) -> &Value {
+    state.get("active_team_key").and_then(Value::as_str)
+        .and_then(|key| state.get("teams").and_then(|teams| teams.get(key))).unwrap_or(state)
+}
+
 fn registered_nodes(state: &Value, selected: Option<&str>) -> Vec<RegisteredNode> {
-    // A projected state can still carry stale top-level agents. Once the
-    // selector identified a canonical team entry, that entry is authoritative;
-    // an empty/missing nested roster must not fall back to the stale projection.
-    let canonical_team = state
-        .get("active_team_key")
-        .and_then(Value::as_str)
-        .and_then(|key| state.get("teams").and_then(|teams| teams.get(key)));
-    let (agents, lifecycle, defaults) = match canonical_team {
-        Some(team) => (
-            team.get("agents").and_then(Value::as_object),
-            team.get("agent_lifecycle").and_then(Value::as_object),
-            team,
-        ),
-        None => (
-            state.get("agents").and_then(Value::as_object),
-            state.get("agent_lifecycle").and_then(Value::as_object),
-            state,
-        ),
-    };
+    let defaults = registered_scope(state);
+    let agents = defaults.get("agents").and_then(Value::as_object);
+    let lifecycle = defaults.get("agent_lifecycle").and_then(Value::as_object);
     let Some(agents) = agents else {
         return Vec::new();
     };
@@ -1475,6 +1471,12 @@ impl BriefNode {
 
 fn scoped_node_json(node: BriefNode, workspace: &Path, state: &Value) -> Value {
     let mut value = node.into_json();
+    #[cfg(unix)]
+    if value["observation_reason"] == "native_authority_missing" {
+        value["next_action"] = json!(crate::contract_runtime::backend::authority_recovery_action(
+            workspace, &crate::state::projection::team_state_key(state), value["name"].as_str().unwrap_or_default()));
+        return value;
+    }
     if let Some(reason) = value["observation_reason"].as_str() {
         let guidance = match reason {
             "pane_process_exited" => "pane process exit confirmed; inspect saved session and Leader binding before explicit start",

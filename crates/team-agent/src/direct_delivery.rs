@@ -115,7 +115,6 @@ fn field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
 #[cfg(unix)]
 fn native_recipient(info: &Value) -> bool {
     crate::contract_runtime::framework::is_contract(info)
-        || field(info, "runtime_family") == Some("contract") || field(info, "contract_scope").is_some()
 }
 
 impl Directory {
@@ -135,7 +134,8 @@ impl Directory {
         use team_agent_contract::{contract::types::SeatId, orchestration::store::SeatStatus};
         if agent == "leader" || !native_recipient(self.recipient(agent)?) { return Ok(None); }
         let team = self.team.as_deref().ok_or("native recipient has no team scope")?;
-        let backend = crate::contract_runtime::backend::Backend::open_readonly(&self.workspace, team).map_err(|e| e.to_string())?;
+        let backend = crate::contract_runtime::backend::Backend::open_readonly(&self.workspace, team)
+            .map_err(|e| crate::contract_runtime::backend::observation_error(team, agent, &e))?;
         let id = SeatId::new(agent).map_err(|e| e.to_string())?;
         let seat = backend.store.seat(&id).map_err(|e| e.to_string())?.ok_or("native recipient missing")?;
         let target = seat.physical_target().map_err(|e| e.to_string())?;
@@ -164,6 +164,17 @@ impl Directory {
                 .map_err(|e| format!("identity_mismatch: {e}"))?;
         }
         Ok(())
+    }
+
+    pub(crate) fn recovery_action(&self, agent: &str, error: &str) -> Option<String> {
+        #[cfg(unix)]
+        if error.starts_with("native_authority_missing:") {
+            return self.team.as_deref().map(|team|
+                crate::contract_runtime::backend::authority_recovery_action(&self.workspace, team, agent));
+        }
+        #[cfg(not(unix))]
+        let _ = (agent, error);
+        None
     }
 
     pub fn endpoint(&self, agent: &str) -> Result<Endpoint, String> {
@@ -537,6 +548,7 @@ pub fn locate(workspace: &Path, team: Option<&str>) -> Result<Value, String> {
                         crate::contract_runtime::backend::restart_command(&directory.workspace, directory.team.as_deref().unwrap_or(""), &agent));
                     #[cfg(not(unix))]
                     let action: Option<String> = None;
+                    let action = directory.recovery_action(&agent, &error).or(action);
                     unavailable.push(json!({"workspace":directory.workspace,"team":directory.team,"agent":agent,
                         "candidate":(error == "seat_requires_restart").then_some("foreign"),"delivery_error":error,"action":action}));
                 }

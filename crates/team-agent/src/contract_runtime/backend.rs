@@ -141,6 +141,32 @@ pub fn read_binding(workspace: &Path, team: &str) -> Result<Binding, BackendErro
         Ok(binding)
 }
 
+pub fn authority_is_missing(error: &BackendError) -> bool {
+    matches!(error, BackendError::Io(error) if error.kind() == std::io::ErrorKind::NotFound)
+        || matches!(error, BackendError::Runtime(Error::Io(std::io::ErrorKind::NotFound)))
+        || matches!(error, BackendError::Migration(message) if message.starts_with("legacy contract store requires explicit migration"))
+}
+
+pub fn observation_error(team: &str, seat: &str, error: &BackendError) -> String {
+    if authority_is_missing(error) {
+        format!("native_authority_missing: {seat} has no native contract binding for team {team} in this workspace")
+    } else {
+        error.to_string()
+    }
+}
+
+pub fn authority_recovery_action(workspace: &Path, team: &str, seat: &str) -> String {
+    let legacy = read_binding(workspace, team)
+        .is_ok_and(|binding| binding.transport_root.join("contract.db").is_file());
+    let workspace = crate::cli::shell_quote(&workspace.to_string_lossy());
+    let team = crate::cli::shell_quote(team);
+    if legacy {
+        format!("run team-agent migrate --workspace {workspace} --team {team}")
+    } else {
+        format!("run team-agent restart {} --workspace {workspace} --team {team} to respawn it under this release", crate::cli::shell_quote(seat))
+    }
+}
+
 impl Backend {
     pub fn open(workspace: &Path, team: &str) -> Result<Self, BackendError> {
         Self::open_mode(workspace, team, false)

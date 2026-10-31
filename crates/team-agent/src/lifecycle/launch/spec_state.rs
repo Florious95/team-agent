@@ -110,6 +110,11 @@ pub(super) fn initial_runtime_state(
                 obj.insert("auth_mode".to_string(), serde_json::json!(auth_mode));
             }
         }
+        // New native intent is explicit before startup; an old provider label is not authority.
+        #[cfg(unix)]
+        if crate::contract_runtime::registry::descriptor(provider).is_some() {
+            value["runtime_family"] = serde_json::json!("contract");
+        }
         agents.insert(id.to_string(), value);
     }
     let mut state = serde_json::Map::new();
