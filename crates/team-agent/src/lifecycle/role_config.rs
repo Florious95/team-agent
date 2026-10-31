@@ -235,10 +235,11 @@ fn start_at_selected(
         .get("agents")
         .and_then(|agents| agents.get(agent_id.as_str()))
         .ok_or_else(|| LifecycleError::RequirementUnmet(format!("agent {agent_id} not found")))?;
-    // A plain start is convergence, not a role-document edit. In particular,
-    // recover a pane created before the previous caller died publishing state.
-    // The native start path verifies the live cohort and refreshes its binding.
-    if patch == &RoleConfigPatch::default() {
+    // A plain start converges a live or interrupted launch without editing its
+    // role. An explicitly stopped seat must instead compile today's role policy.
+    if patch == &RoleConfigPatch::default()
+        && !crate::state::projection::agent_stopped_for_restart(old_agent)
+    {
         return super::restart::start_agent_at_paths(
             &selected.run_workspace,
             selected.spec_workspace.as_deref().unwrap_or(&selected.team_dir),

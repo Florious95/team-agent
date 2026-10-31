@@ -1271,6 +1271,13 @@ fn merge_agent_projection(
         if deleted_agent_ids.contains(agent_id) {
             continue;
         }
+        // A bounded lifecycle writer owns only its declared seats. Peer
+        // snapshots cannot replace newer captures or pending reservations,
+        // even when their physical topology has not changed.
+        if !topology_update_agent_ids.is_empty() && !topology_update_agent_ids.contains(agent_id) {
+            incoming_map.insert(agent_id.clone(), latest_agent.clone());
+            continue;
+        }
         let tombstoned_for_projection =
             skip_capture_backfill && skip_capture_backfill_agent_ids.contains(agent_id);
         let fork_target = preserve_latest_fork_targets

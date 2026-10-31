@@ -360,6 +360,81 @@ fn missing_native_authority_has_typed_receipts_and_recovery_actions() {
 }
 
 #[test]
+fn lifecycle_target_save_preserves_peer_capture_and_reservation() {
+    use team_agent::state::repository::{StateRepository, StateWriteIntent};
+    let root = TestRoot::new();
+    let source = workspace(root.path(), "source", "alpha");
+    let team = json!({"team_key":"alpha", "team_id":"alpha", "session_name":"fixture", "agents":{
+        "a":{"provider":"claude","status":"running","pane_id":"%1","spawn_epoch":1,
+            "session_id":null,"_pending_session_id":"a-new"},
+        "b":{"provider":"claude","status":"starting","pane_id":"%2","spawn_epoch":1,
+            "session_id":null,"_pending_session_id":"b-new"}
+    }});
+    let mut initial = team.clone();
+    initial["active_team_key"] = json!("alpha");
+    initial["teams"] = json!({"alpha":team});
+    let repository = StateRepository::new(&source);
+    repository
+        .save(StateWriteIntent::LaunchTeam { team_key: "alpha" }, &initial)
+        .unwrap();
+    let load = || team_agent::state::persist::load_runtime_state(&source).unwrap();
+    let mut stale = load();
+    let mut completed = stale.clone();
+    let mut captured = completed["teams"]["alpha"]["agents"]["a"].clone();
+    captured
+        .as_object_mut()
+        .unwrap()
+        .remove("_pending_session_id");
+    captured["session_id"] = json!("a-new");
+    captured["rollout_path"] = json!(source.join("a.jsonl"));
+    captured["captured_at"] = json!("2026-10-31T00:00:00Z");
+    captured["captured_via"] = json!("owned-capture");
+    completed["agents"]["a"] = captured.clone();
+    completed["teams"]["alpha"]["agents"]["a"] = captured;
+    repository
+        .save(
+            StateWriteIntent::StartAgent {
+                team_key: "alpha",
+                agent_id: "a",
+            },
+            &completed,
+        )
+        .unwrap();
+    let mut reserved = load();
+    let reservation =
+        json!({"provider":"claude","status":"reserved","reservation_token":"owned-reservation"});
+    reserved["agents"]["c"] = reservation.clone();
+    reserved["teams"]["alpha"]["agents"]["c"] = reservation;
+    repository
+        .save(
+            StateWriteIntent::AddAgent {
+                team_key: "alpha",
+                agent_id: "c",
+            },
+            &reserved,
+        )
+        .unwrap();
+    let reserved = load()["teams"]["alpha"]["agents"]["c"].clone();
+    stale["agents"]["b"]["status"] = json!("running");
+    stale["teams"]["alpha"]["agents"]["b"]["status"] = json!("running");
+    repository
+        .save(
+            StateWriteIntent::AddAgent {
+                team_key: "alpha",
+                agent_id: "b",
+            },
+            &stale,
+        )
+        .unwrap();
+    let latest = load();
+    assert_eq!(
+        latest["teams"]["alpha"]["agents"]["a"]["session_id"],
+        "a-new"
+    );
+    assert_eq!(latest["teams"]["alpha"]["agents"]["c"], reserved);
+}
+
+#[test]
 fn execution_failure_does_not_abort_an_admitted_sibling() {
     let root = TestRoot::new();
     let source = workspace(root.path(), "source", "alpha");
