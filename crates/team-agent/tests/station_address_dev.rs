@@ -114,14 +114,15 @@ fn seats_cannot_use_qualified_addresses_to_escape_workspace_or_team_scope() {
         sender: "leader",
         team: "alpha",
     };
-    assert!(send(
+    // M5 admission returns a typed `ok:false` refusal (or an Err) before any effect.
+    let refused = |result: Result<Value, String>| result.as_ref().map_or(true, |value| value["ok"] == false);
+    assert!(refused(send(
         &here,
         &format!("{}::alpha/w1", elsewhere.display()),
         None,
         seat
-    )
-    .is_err());
-    assert!(send(&here, "beta/w1", None, seat).is_err());
+    )));
+    assert!(refused(send(&here, "beta/w1", None, seat)));
     assert!(!elsewhere.join(".team/inbox").exists());
     assert!(!here.join(".team/inbox").exists());
     assert_eq!(
@@ -140,12 +141,23 @@ fn mixed_broadcast_and_aliases_deduplicate_canonical_destinations() {
 }
 
 #[test]
-fn bad_batch_addresses_do_not_abort_good_recipients() {
+fn bad_batch_addresses_refuse_the_whole_batch_before_any_effect() {
+    // M5 two-phase admission ruling: phase 1 resolves every target before any effect, so one
+    // structurally invalid address refuses the whole request and the valid recipient gets nothing
+    // (a partial effect would be duplicated by the caller's corrected retry).
     let fixture = Fixture::new();
     let root = fixture.workspace("here");
-    let result = send(&root, "beta//w1,alpha/w1", None, OPERATOR).unwrap();
-    assert_eq!(result["status"], "partial");
-    assert_eq!(result["stored"], 1);
-    assert_eq!(result["messages"][0]["ok"], false);
-    assert!(send(&root, "session:window", None, OPERATOR).is_err());
+    let result = send(&root, "beta//w1,alpha/w1", None, OPERATOR);
+    let value = match result {
+        Ok(value) => value,
+        Err(error) => json!({"ok": false, "status": "refused", "error": error}),
+    };
+    assert_eq!(value["ok"], false, "{value}");
+    assert_eq!(value["status"], "refused", "{value}");
+    assert!(value.to_string().contains("beta//w1"), "the refusal names the invalid target: {value}");
+    let stored = team_agent::inbox_store::read(&root, "w1", 10, Some("alpha")).unwrap();
+    assert_eq!(stored["messages"], json!([]), "no partial effect on the valid recipient");
+    // The retired tmux `session:window` form is still refused (an Err or a typed ok:false refusal).
+    let legacy = send(&root, "session:window", None, OPERATOR);
+    assert!(legacy.as_ref().map_or(true, |value| value["ok"] == false), "{legacy:?}");
 }

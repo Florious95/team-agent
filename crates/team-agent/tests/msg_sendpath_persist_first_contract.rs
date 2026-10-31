@@ -87,7 +87,9 @@ fn c2_positional_alias_and_real_mcp_share_physical_delivery() {
     let fixture = DirectFixture::new();
     sent(cli(&fixture, &["worker-1", "positional"]));
     sent(cli(&fixture, &["--to-name", "worker-1", "alias"]));
-    let mut worker = mcp_sim_harness::spawn_mcp_client(&fixture.root, "worker-1", "current");
+    // M5 admission ruling: an explicit self-target is refused before any effect, so the MCP sender is
+    // the leader seat (the fixture's leader and worker share one pane).
+    let mut worker = mcp_sim_harness::spawn_mcp_client(&fixture.root, "leader", "current");
     let report = worker.call_tool(
         "send_message",
         json!({"to": "worker-1", "content": "MCP physical"}),
@@ -99,7 +101,7 @@ fn c2_positional_alias_and_real_mcp_share_physical_delivery() {
     for (sender, content) in [
         ("leader", "positional"),
         ("leader", "alias"),
-        ("worker-1", "MCP physical"),
+        ("leader", "MCP physical"),
     ] {
         fixture.received(&format!("Team Agent message from {sender}:\n\n{content}"));
         // R-M1a: every entrypoint stores exactly one record for its message.
@@ -131,7 +133,10 @@ fn c3_unresolved_recipients_refuse_without_delivery_or_persistence() {
         .unwrap()
         .contains("must not arrive"));
     assert!(!fixture.root.join(".team/runtime/team.db").exists());
-    assert!(!fixture.root.join(".team/inbox").exists());
+    // R-M1a: the positive barrier is stored first (the inbox exists); the refused requests stored
+    // nothing for any recipient (M5 phase-1 admission: zero effects).
+    assert_eq!(inbox_hits(&fixture, "worker-1", "positive barrier"), 1);
+    assert_eq!(inbox_hits(&fixture, "worker-1", "must not arrive"), 0);
 }
 
 #[test]

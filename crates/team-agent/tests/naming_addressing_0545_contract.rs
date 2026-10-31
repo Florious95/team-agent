@@ -465,19 +465,23 @@ fn red_5_positional_team_qualified_target_physically_delivers_without_queue() {
 
 #[test]
 #[serial_test::serial(env)]
-fn red_5_worker_mcp_team_and_workspace_qualified_targets_still_refuse() {
+fn red_5_worker_mcp_qualified_targets_stay_in_scope() {
+    // M5: seat authority is scoped by workspace and team, not by address syntax. Qualified forms that
+    // name the sender's own workspace and team resolve to its own peer; a qualified form that leaves
+    // the workspace is still refused before any effect.
     let case = AddressCase::new("red5-mcp-long");
     for target in [
         "qa-naming/beta".to_string(),
         format!("{}::qa-naming/beta", case.local.display()),
     ] {
         let (is_error, body) = case.mcp_send("alpha", "qa-naming", &target, "RED5_MCP_LONG");
-        assert!(
-            is_error,
-            "RED-5: long MCP target unexpectedly accepted: {body}"
-        );
-        assert_eq!(body["reason"], json!("peer_not_in_scope"));
+        assert!(!is_error, "RED-5: in-scope qualified MCP target refused: {body}");
+        assert_eq!(body["recipient"], json!("beta"), "{body}");
     }
+    let escape = format!("{}::qa-naming/beta", case.other.display());
+    let (is_error, body) = case.mcp_send("alpha", "qa-naming", &escape, "RED5_MCP_ESCAPE");
+    assert!(is_error, "RED-5: cross-workspace MCP target unexpectedly accepted: {body}");
+    assert_eq!(body["reason"], json!("peer_not_in_scope"));
 }
 
 #[test]
