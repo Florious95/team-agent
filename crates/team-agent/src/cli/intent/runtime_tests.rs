@@ -572,6 +572,7 @@ fn foreign_start_and_restart_recheck_accept_their_verified_stop() {
     for verb in [Verb::Start, Verb::Restart] {
         let (root, mut intent) = fixture(&["one"]);
         intent.verb = verb;
+        intent.subject = Subject::Agent("one".into());
         install(root.path(), &[("one", "running", false)]);
         let plan = plan_with_observer(intent, |_, _, _| Ok(Observation::Foreign)).unwrap();
         let step = plan.steps.iter().find(|step| matches!(step, Step::StartAgent(_))).unwrap();
