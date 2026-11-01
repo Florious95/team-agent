@@ -24,10 +24,18 @@ fn fixture(ids: &[&str]) -> (Sandbox, Intent) {
 fn batch_start_does_not_adopt_an_unrelated_owner_change_as_recovery() {
     let (root, intent) = fixture(&["one", "two"]);
     install(root.path(), &[("one", "stopped", false), ("two", "stopped", false)]);
-    let mut planned = plan(intent).unwrap();
-    let step = planned.steps.iter().find(|step| matches!(step, Step::StartAgent(_))).unwrap().clone();
     let path = crate::state::persist::runtime_state_path(root.path());
     let mut state: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    let stopped_pid = child.id();
+    assert!(child.wait().unwrap().success());
+    for id in ["one", "two"] {
+        state["agents"][id]["pane_pid"] = json!(stopped_pid);
+        state["teams"]["fixture"]["agents"][id]["pane_pid"] = json!(stopped_pid);
+    }
+    std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+    let mut planned = plan(intent).unwrap();
+    let step = planned.steps.iter().find(|step| matches!(step, Step::StartAgent(_))).unwrap().clone();
     state["teams"]["fixture"]["team_owner"] = json!({"pane_id":"%foreign", "owner_epoch":2});
     std::fs::write(path, serde_json::to_vec(&state).unwrap()).unwrap();
     let baseline = planned.topology.clone();
