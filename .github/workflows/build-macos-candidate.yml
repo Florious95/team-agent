@@ -18,6 +18,10 @@ on:
         required: false
         type: boolean
         default: false
+      scoped_test_suites:
+        description: "Optional newline-separated package|--lib or --test|selector rows; defaults to the integrated lifecycle matrix"
+        required: false
+        type: string
       incremental_base_sha:
         description: "Optional exact baseline commit to compile first in the same target directory"
         required: false
@@ -41,6 +45,7 @@ jobs:
       TARGET: "aarch64-apple-darwin"
       INCREMENTAL_BASE_SHA: ${{ inputs.incremental_base_sha }}
       INCREMENTAL_BASE_TREE: ${{ inputs.incremental_base_tree }}
+      SCOPED_TEST_SUITES: ${{ inputs.scoped_test_suites }}
 
     steps:
       - name: Validate dispatch inputs and runner
@@ -212,10 +217,24 @@ jobs:
             'team-agent|--test|messaging_scope_regression'
             'team-agent-contract|--test|codex_contract'
           )
+          if [[ -n "$SCOPED_TEST_SUITES" ]]; then
+            cases=()
+            while IFS= read -r item; do
+              if [[ -n "$item" ]]; then cases+=("$item"); fi
+            done <<< "$SCOPED_TEST_SUITES"
+          fi
+          test "${#cases[@]}" -gt 0
           failed=0
           index=0
           for item in "${cases[@]}"; do
             IFS='|' read -r package kind selector <<< "$item"
+            case "$package:$kind" in
+              team-agent:--lib|team-agent:--test|team-agent-contract:--lib|team-agent-contract:--test) ;;
+              *) echo "::error::invalid scoped test package/target: $item"; exit 2 ;;
+            esac
+            if [[ ! "$selector" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_:-]*$ ]]; then
+              echo "::error::invalid scoped test selector: $selector"; exit 2
+            fi
             label="$(printf '%02d' "$index")"
             printf '%s\n' "$item" > "$receipts/$label.command"
             set +e

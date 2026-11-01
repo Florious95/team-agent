@@ -358,7 +358,7 @@ mod tests {
             "custom_context": {"preserve": true},
             "agents": {"test-opus-m5": {"provider": "fake", "status": "stopped"}},
         });
-        publish(&workspace, "codex-effort-fix", &mut state, &["test-opus-m5"]).unwrap();
+        publish(&workspace, &mut state, "codex-effort-fix", &["test-opus-m5"]).unwrap();
         let projected = read_workspace(&workspace).unwrap().unwrap();
         let team = &projected["teams"]["codex-effort-fix"];
         assert!(team.get("coordinator").is_none());
