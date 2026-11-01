@@ -1162,7 +1162,7 @@ pub(super) fn recover_missing_legacy_session(
         return Ok(());
     };
     for agent in agents.values() {
-        if agent.get("runtime_family").and_then(serde_json::Value::as_str) == Some("contract") {
+        if crate::contract_runtime::framework::is_contract(agent) {
             continue;
         }
         let pid = agent.get("pane_pid").and_then(serde_json::Value::as_u64)
@@ -1191,7 +1191,7 @@ pub(super) fn recover_missing_legacy_session(
     state["session_name"] = serde_json::json!(session.as_str());
     if let Some(agents) = state.get_mut("agents").and_then(serde_json::Value::as_object_mut) {
         for agent in agents.values_mut() {
-            if agent.get("runtime_family").and_then(serde_json::Value::as_str) != Some("contract") {
+            if !crate::contract_runtime::framework::is_contract(agent) {
                 if let Some(agent) = agent.as_object_mut() { agent.remove("pane_id"); }
             }
         }

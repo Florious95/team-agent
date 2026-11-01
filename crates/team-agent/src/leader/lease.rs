@@ -1354,7 +1354,7 @@ fn invalidate_worker_endpoint_bindings(state: &mut Value, workspace: &Path, team
         for agent in agents.values_mut() {
             // Native seats own independent endpoints; only legacy tmux bindings
             // belong to the workspace endpoint that just changed.
-            if agent.get("runtime_family").and_then(Value::as_str) != Some("contract") {
+            if !crate::contract_runtime::framework::is_contract(agent) {
                 if let Some(agent) = agent.as_object_mut() { agent.remove("pane_id"); }
             }
         }

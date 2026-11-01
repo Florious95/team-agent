@@ -80,7 +80,7 @@ pub(crate) fn live_agent_target(
         target.session == session
             && target.window_name.as_ref().is_some_and(|name| name.as_str() == window)
             && (pane == Some(target.pane_id.as_str())
-                || !crate::lifecycle::launch::state_uses_adaptive_layout(state))
+                || !crate::lifecycle::launch::state_uses_adaptive_layout(&state))
             && agent_pane_live_by_id(transport, &target.pane_id)
     }))
 }

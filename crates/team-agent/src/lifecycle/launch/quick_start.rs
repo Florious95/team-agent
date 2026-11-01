@@ -1388,7 +1388,7 @@ pub(crate) fn quick_start_with_transport_in_workspace_pi_preflight(
     // so launch_with_transport (which reads runtime.session_name) spawns into an
     // isolated session per requested team.
     if let Some(requested) = explicit_team_key.as_deref() {
-        override_spec_session_name(&mut spec, &crate::compiler::default_session_name(run_workspace, requested));
+        override_spec_session_name(&mut spec, &crate::compiler::default_session_name(workspace.as_path(), requested));
     }
     let session_name = spec_session_name(&spec);
     // team_key 已在入口由显式 id/name 或 compiled spec identity 单次确定。

@@ -946,7 +946,7 @@ fn endpoint_convergence_invalidated_agents(incoming: &Value, latest: &Value, aut
         .filter_map(|(id, row)| {
             let old = latest.get("agents")?.get(id)?;
             let pid = old.get("pane_pid")?.as_u64().and_then(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 1)?;
-            (row.get("runtime_family").and_then(Value::as_str) != Some("contract")
+            (!crate::contract_runtime::framework::is_contract(row)
                 && row.get("pane_id").is_none() && old.get("pane_id").is_some()
                 && ["pane_pid", "spawn_epoch", "spawned_at"].iter().all(|key| row.get(key) == old.get(key))
                 && matches!(crate::platform::process::pid_liveness(pid), Ok(crate::platform::process::ProcessLiveness::Dead)))
