@@ -154,6 +154,14 @@ fn identity_parts(_: u32) -> Result<(u32, String, PathBuf, PathBuf, bool), HostE
     ))
 }
 
+/// Kernel-reported executable pathname, not proof of the currently loaded bytes.
+/// In particular, atomic replacement may leave a different image mapped in memory.
+pub fn process_executable_path(pid: u32) -> Result<PathBuf, HostError> {
+    let (_, _, path, _, exited) = identity_parts(pid)?;
+    if exited { return Err(HostError::new("process image", HostErrorKind::Unknown)); }
+    Ok(path)
+}
+
 /// Observe the kernel birth of one live PID without authorizing its executable.
 /// Callers must separately bind ownership/image; this is only a PID-reuse fence.
 pub fn process_birth_identity(pid: u32) -> Result<String, HostError> {

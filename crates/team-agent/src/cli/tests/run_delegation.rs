@@ -419,11 +419,15 @@ fn issue338_doctor_reports_same_scope_unknown_observations_without_state_writes(
         cleanup_orphans: false, confirm: false, json: true,
     }).unwrap();
     let CmdOutput::Json(value) = result.output else { panic!() };
-    let node = &value["runtime"]["observations"][0];
-    assert_eq!(node["name"], "worker");
-    assert_eq!(node["observation_reason"], "endpoint_unregistered");
-    let action = node["next_action"].as_str().unwrap();
-    assert!(action.contains("--team 'current'"));
+    assert_eq!(value["team"], "current");
+    let links = value["links"].as_array().unwrap();
+    assert_eq!(links.len(), 6);
+    assert_ne!(links[1]["status"], "PASS", "unknown host cannot be called healthy");
+    assert_eq!(links[2]["status"], "FAIL", "the mock host responds, but the worker has no registered endpoint");
+    assert!(links[2]["message"].as_str().unwrap().contains("worker"));
+    assert_eq!(links[3]["status"], "PASS", "storage is independent of the unavailable worker host");
+    let action = value["next_action"].as_str().unwrap();
+    assert!(action.contains("--team current"));
     assert!(action.contains(&*workspace.to_string_lossy()));
     assert_eq!(std::fs::read(state_path).unwrap(), before);
 }

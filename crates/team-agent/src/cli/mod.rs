@@ -71,6 +71,7 @@ mod intent;
 mod shutdown_socket;
 pub mod attach_app_server_leader;
 pub mod diagnose;
+mod doctor_probe;
 pub mod emit;
 pub mod helpers;
 pub mod leader;

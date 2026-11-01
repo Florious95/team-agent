@@ -28,6 +28,9 @@ fn emit_with_json_order(
         CmdOutput::Json(value) => {
             let value = crate::redaction::redact_external_value(value);
             if as_json {
+                if value.get("schema").and_then(Value::as_str) == Some("team-agent.doctor.v1") {
+                    return serde_json::to_string(&value).ok();
+                }
                 return if preserve_json_order {
                     serde_json::to_string_pretty(&value).ok()
                 } else {
@@ -1147,10 +1150,18 @@ fn checked_workspace(path: &Path, cwd: &Path) -> Result<PathBuf, CliError> {
 
 fn resolve_command_scope(command: &str, mut args: Vec<String>, cwd: &Path) -> Result<Vec<String>, CliError> {
     let mut selected = None;
+    // An invalid diagnostic target is an L1 result, not a parser self-loop.
+    // Explicit mutation/gate paths retain the existing workspace admission.
+    let probe = command == "doctor" && !args.iter().any(|arg| {
+        ["--fix", "--cleanup-orphans", "--gate", "--comms"].iter().any(|flag| arg.starts_with(flag))
+    });
     for argument in &mut args {
         if argument == "--" { break; }
         if let Some(path) = argument.strip_prefix("--workspace=") {
-            let canonical = checked_workspace(Path::new(path), cwd)?;
+            let canonical = if probe {
+                let target = resolve_cli_path(cwd, Path::new(path));
+                target.canonicalize().unwrap_or(target)
+            } else { checked_workspace(Path::new(path), cwd)? };
             *argument = format!("--workspace={}", canonical.display());
             selected = Some(canonical);
         }

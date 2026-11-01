@@ -53,8 +53,9 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
     let value = match outcome {
         Ok(value) if value["status"] == "refused" => return refused_outcome(args, workspace, team, value),
         Ok(value) => value,
-        Err(error) if alias.is_some() => return Err(CliError::Runtime(error)),
-        Err(error) => return refuse(args, &logical_to, error),
+        // Addressing refusals already carry a typed envelope above. Storage/I/O
+        // errors must not be replaced by a second, unrelated name lookup.
+        Err(error) => return Err(CliError::Runtime(error)),
     };
     Ok(CmdResult::from_json(value, args.json))
 }
@@ -95,20 +96,6 @@ fn refused_outcome(
         });
     }
     Ok(CmdResult::from_json(value, args.json))
-}
-
-/// Refuse an unroutable recipient. The read-only named-address diagnosis only
-/// explains the refusal (reason, scoped spelling suggestions); it never routes.
-fn refuse(args: &SendArgs, raw: &str, cause: String) -> Result<CmdResult, CliError> {
-    let Err(mut error) = crate::cli::named_address::resolve_name_for_cli(&args.workspace, raw, args.team.as_deref()) else {
-        return Err(CliError::Runtime(cause));
-    };
-    resolve::adapt_positional_bare_error(args, raw, &mut error);
-    if args.json {
-        return Ok(CmdResult::from_json(error.to_json(), true));
-    }
-    let (message, action) = error.human_guidance(raw);
-    Err(CliError::AddressRefusal { audit: error.n38_message(), error: message, action })
 }
 
 fn read_host_leader_alias(name: &str) -> Result<crate::leader::registry::LeaderRegistryEntry, CliError> {

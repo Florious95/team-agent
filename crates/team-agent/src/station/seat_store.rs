@@ -42,6 +42,7 @@ pub struct SeatManifest {
 #[derive(Clone, Debug)]
 pub struct SeatStore {
     root: PathBuf,
+    seat_component: String,
     pub scope: SeatScope,
 }
 
@@ -53,8 +54,8 @@ pub struct SeatLock {
 impl SeatStore {
     /// `workspace_id` comes from the immutable workspace binding, not a PID or version.
     pub fn new(workspace: &Path, scope: SeatScope) -> Result<Self, String> {
-        component(&scope.team)?;
-        component(&scope.seat)?;
+        let team_component = component(&scope.team)?;
+        let seat_component = component(&scope.seat)?;
         if scope.workspace.is_empty() {
             return Err("missing workspace identity".into());
         }
@@ -63,7 +64,8 @@ impl SeatStore {
                 .canonicalize()
                 .map_err(|e| e.to_string())?
                 .join(".team/station-v1")
-                .join(&scope.team),
+                .join(team_component),
+            seat_component,
             scope,
         })
     }
@@ -71,7 +73,7 @@ impl SeatStore {
     pub fn path(&self) -> PathBuf {
         self.root
             .join("seats")
-            .join(format!("{}.json", self.scope.seat))
+            .join(format!("{}.json", self.seat_component))
     }
 
     pub fn read(&self) -> Result<Option<SeatManifest>, String> {
@@ -88,10 +90,14 @@ impl SeatStore {
         Ok(Some(manifest))
     }
 
+    pub(crate) fn lock_path(&self) -> PathBuf {
+        self.root.join("locks").join(format!("seat.{}.lock", self.seat_component))
+    }
+
     pub fn lock(&self) -> Result<SeatLock, String> {
         let directory = self.root.join("locks");
         private_dir(&directory)?;
-        let path = directory.join(format!("seat.{}.lock", self.scope.seat));
+        let path = self.lock_path();
         if let Some(lock) = crate::platform::entity_lock::EntityLock::current(&path) {
             return Ok(SeatLock {
                 _lock: lock,
@@ -177,7 +183,7 @@ impl SeatLock {
             .store
             .root
             .join("operations")
-            .join(&self.store.scope.seat);
+            .join(&self.store.seat_component);
         let entries = match fs::read_dir(&directory) {
             Ok(entries) => entries,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -213,11 +219,13 @@ impl SeatLock {
             let Ok(Some(value)) = read_json(&path, MAX_MANIFEST_BYTES * 3) else {
                 continue;
             };
+            let stored_id = path.file_stem().and_then(|s| s.to_str())
+                .and_then(|s| crate::model::paths::decode_scope_component(s).ok());
             if value.get("kind").and_then(Value::as_str) != Some("seat_operation")
                 || value
                     .pointer("/request/operation_id")
                     .and_then(Value::as_str)
-                    != path.file_stem().and_then(|s| s.to_str())
+                    != stored_id.as_deref()
                 || !super::lifecycle::understood_operation(&value, &self.store.scope)
             {
                 continue;
@@ -230,10 +238,7 @@ impl SeatLock {
                 .metadata()
                 .and_then(|metadata| metadata.modified())
                 .map_err(|e| e.to_string())?;
-            let is_pinned = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .is_some_and(|id| pinned.contains(id));
+            let is_pinned = stored_id.as_ref().is_some_and(|id| pinned.contains(id));
             understood.push((is_pinned, generation, modified, path));
         }
         understood.sort();
@@ -250,27 +255,19 @@ impl SeatLock {
     }
 
     fn operation_path(&self, id: &str) -> Result<PathBuf, String> {
-        component(id)?;
+        let id = component(id)?;
         Ok(self
             .store
             .root
             .join("operations")
-            .join(&self.store.scope.seat)
+            .join(&self.store.seat_component)
             .join(format!("{id}.json")))
     }
 }
 
-pub(crate) fn component(value: &str) -> Result<(), String> {
-    if value.is_empty()
-        || value.len() > 128
-        || matches!(value, "." | "..")
-        || !value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
-    {
-        return Err("invalid seat path component".into());
-    }
-    Ok(())
+pub(crate) fn component(value: &str) -> Result<String, String> {
+    if value.len() > 128 { return Err("invalid seat path component".into()); }
+    crate::model::paths::encode_scope_component(value).map_err(|_| "invalid seat path component".into())
 }
 
 pub(crate) fn private_dir(path: &Path) -> Result<(), String> {

@@ -177,8 +177,12 @@ impl RealCommandRunner {
                 "empty argv",
             ));
         };
-        let mut child = std::process::Command::new(program)
-            .args(argv.iter().skip(1))
+        let mut command = std::process::Command::new(program);
+        #[cfg(unix)] {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let mut child = command.args(argv.iter().skip(1))
             .stdin(if stdin_text.is_some() {
                 Stdio::piped()
             } else {
@@ -202,21 +206,28 @@ impl RealCommandRunner {
             .stderr
             .take()
             .ok_or_else(|| std::io::Error::other("stderr pipe missing"))?;
-        let stdout_thread = std::thread::spawn(move || read_pipe(stdout));
-        let stderr_thread = std::thread::spawn(move || read_pipe(stderr));
+        let stdout = pipe_reader(stdout);
+        let stderr = pipe_reader(stderr);
         let deadline = Instant::now() + budget;
+        let mut stdout_text = None;
+        let mut stderr_text = None;
         // Observe short-lived commands promptly; retain the old cadence for long ones.
         let mut poll_interval = Duration::from_millis(1);
         let status = loop {
-            if let Some(status) = child.try_wait()? {
-                break status;
+            if stdout_text.is_none() { stdout_text = poll_pipe(&stdout); }
+            if stderr_text.is_none() { stderr_text = poll_pipe(&stderr); }
+            // Do not reap the group leader while descendants still hold pipes:
+            // keeping its PID reserved makes deadline cancellation ownership-safe.
+            if stdout_text.is_some() && stderr_text.is_some() {
+                if let Some(status) = child.try_wait()? { break status; }
             }
             let now = Instant::now();
             if now >= deadline {
-                child.kill()?;
+                // The unreaped child owns a fresh process group. Cancel its
+                // wrapper descendants too; inherited pipes must not defeat the deadline.
+                #[cfg(unix)] unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
+                #[cfg(not(unix))] child.kill()?;
                 child.wait()?;
-                let _ = join_pipe_reader(stdout_thread)?;
-                let _ = join_pipe_reader(stderr_thread)?;
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     format!("{program} exceeded {budget:?} timeout"),
@@ -225,8 +236,8 @@ impl RealCommandRunner {
             std::thread::sleep(poll_interval.min(deadline.saturating_duration_since(now)));
             poll_interval = (poll_interval * 2).min(Duration::from_millis(25));
         };
-        let stdout = join_pipe_reader(stdout_thread)?;
-        let stderr = join_pipe_reader(stderr_thread)?;
+        let stdout = stdout_text.ok_or_else(|| std::io::Error::other("stdout result missing"))??;
+        let stderr = stderr_text.ok_or_else(|| std::io::Error::other("stderr result missing"))??;
         Ok(CommandOutput {
             success: status.success(),
             code: status.code(),
@@ -242,12 +253,18 @@ fn read_pipe<R: Read>(mut reader: R) -> Result<String, std::io::Error> {
     Ok(String::from_utf8_lossy(&bytes).to_string())
 }
 
-fn join_pipe_reader(
-    handle: std::thread::JoinHandle<Result<String, std::io::Error>>,
-) -> Result<String, std::io::Error> {
-    handle
-        .join()
-        .map_err(|_| std::io::Error::other("pipe reader thread panicked"))?
+fn pipe_reader<R: Read + Send + 'static>(reader: R) -> std::sync::mpsc::Receiver<std::io::Result<String>> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || { let _ = sender.send(read_pipe(reader)); });
+    receiver
+}
+
+fn poll_pipe(receiver: &std::sync::mpsc::Receiver<std::io::Result<String>>) -> Option<std::io::Result<String>> {
+    match receiver.try_recv() {
+        Ok(result) => Some(result),
+        Err(std::sync::mpsc::TryRecvError::Empty) => None,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Err(std::io::Error::other("native pipe reader disconnected"))),
+    }
 }
 
 /// Concrete tmux backend: builds argv via the `transport::tmux_*_argv` builders, runs them through

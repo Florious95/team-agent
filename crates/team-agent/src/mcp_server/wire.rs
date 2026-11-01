@@ -354,6 +354,7 @@ impl McpServerLifecycleMarker {
                 "owner_team_id": self.owner_team_id.as_deref(),
                 "workspace": self.workspace.display().to_string(),
                 "pid": self.pid,
+                "birth_identity": team_agent_contract::host::process::process_birth_identity(self.pid).ok(),
                 "ppid": self.ppid,
                 "reason": reason,
                 "error": error,

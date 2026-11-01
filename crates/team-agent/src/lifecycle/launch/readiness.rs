@@ -172,7 +172,7 @@ fn owner_record<'a>(state: &'a serde_json::Value, team_key: &str) -> Option<&'a 
     owner.as_object().map(|_| owner)
 }
 
-fn canonical_identity_aligned(
+pub(crate) fn canonical_identity_aligned(
     workspace: &Path,
     team_key: &str,
     state: &serde_json::Value,

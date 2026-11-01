@@ -271,7 +271,7 @@ pub(crate) fn read_workspace(workspace: &Path) -> Result<Option<Value>, String> 
         if !entry.file_type().map_err(|e| e.to_string())?.is_dir() {
             continue;
         }
-        let team = entry.file_name().to_string_lossy().into_owned();
+        let team = crate::model::paths::decode_scope_component(&entry.file_name().to_string_lossy())?;
         let seats = entry.path().join("seats");
         let entries = match fs::read_dir(seats) {
             Ok(entries) => entries,
@@ -290,12 +290,13 @@ pub(crate) fn read_workspace(workspace: &Path) -> Result<Option<Value>, String> 
             let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
+            let id = crate::model::paths::decode_scope_component(id)?;
             let store = SeatStore::new(
                 workspace,
                 SeatScope {
                     workspace: workspace_id.clone(),
                     team: team.clone(),
-                    seat: id.into(),
+                    seat: id.clone(),
                 },
             )?;
             let Some(seat) = store.read()? else {

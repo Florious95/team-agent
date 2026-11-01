@@ -126,21 +126,8 @@ fn ux_doctor_secret_scan_is_present_and_non_triggering_for_normal_paths() {
         "---\nname: worker\nprovider: codex\n---\nUse /tmp/team-agent.\n",
     )
     .unwrap();
-    let value = json_output(
-        cmd_doctor(&DoctorArgs {
-            spec: None,
-            workspace: ws.clone(),
-            gate: None,
-            comms: false,
-            team: None,
-            fix: false,
-            fix_schema: false,
-            cleanup_orphans: false,
-            confirm: false,
-            json: true,
-        })
-        .expect("doctor"),
-    );
+    // Static preflight retains secret scanning; the default doctor is now a six-link runtime probe.
+    let value = diagnose_port::doctor(&ws, None).expect("static preflight");
     assert_eq!(value.pointer("/secret_scan/ok"), Some(&json!(true)));
     assert_eq!(value.pointer("/secret_scan/findings"), Some(&json!([])));
     let _ = std::fs::remove_dir_all(&ws);
@@ -153,21 +140,8 @@ fn ux_doctor_secret_scan_findings_name_the_exact_trigger() {
         "OPENAI_API_KEY=sk-test-red-contract\n",
     )
     .unwrap();
-    let value = json_output(
-        cmd_doctor(&DoctorArgs {
-            spec: None,
-            workspace: ws.clone(),
-            gate: None,
-            comms: false,
-            team: None,
-            fix: false,
-            fix_schema: false,
-            cleanup_orphans: false,
-            confirm: false,
-            json: true,
-        })
-        .expect("doctor"),
-    );
+    // Static preflight retains secret scanning; the default doctor is now a six-link runtime probe.
+    let value = diagnose_port::doctor(&ws, None).expect("static preflight");
     let finding = value
         .pointer("/secret_scan/findings/0")
         .and_then(serde_json::Value::as_object)

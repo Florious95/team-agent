@@ -611,6 +611,9 @@ pub fn cmd_remove_agent(args: &RemoveAgentArgs) -> Result<CmdResult, CliError> {
 
 /// `doctor` is the single health/diagnostic pipeline.
 pub fn cmd_doctor(args: &DoctorArgs) -> Result<CmdResult, CliError> {
+    if args.gate.is_none() && !args.comms && !args.fix && !args.fix_schema && !args.cleanup_orphans {
+        return Ok(crate::cli::doctor_probe::run(args));
+    }
     if let Some(DoctorGate::Unknown(raw)) = &args.gate {
         let value = json!({
             "ok": false,

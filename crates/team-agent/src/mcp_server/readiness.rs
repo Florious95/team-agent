@@ -261,6 +261,11 @@ pub(crate) struct Admission {
     pane_id: String,
 }
 
+impl Admission {
+    /// Validated birth/image evidence; not a claim of current tool responsiveness.
+    pub(crate) fn server(&self) -> &ProcessStamp { &self.server }
+}
+
 /// Observe readiness without gating delivery. A bad candidate never hides a good one.
 pub(crate) fn preflight(
     workspace: &Path,

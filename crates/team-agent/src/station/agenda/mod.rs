@@ -57,9 +57,9 @@ pub struct Store {
 }
 impl Store {
     pub fn new(workspace: &Path, team: &str) -> Result<Self, String> {
-        seat_store::component(team)?;
+        let component = seat_store::component(team)?;
         let workspace = fs::canonicalize(workspace).map_err(|e| e.to_string())?;
-        let root = workspace.join(".team/agenda").join(team);
+        let root = workspace.join(".team/agenda").join(component);
         Ok(Self {
             workspace,
             team: team.into(),

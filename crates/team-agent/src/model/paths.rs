@@ -13,6 +13,44 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::model::errors::ModelError;
 
+/// Injective storage spelling; metadata retains the original UTF-8 scope name.
+/// Existing ASCII identifiers keep their paths. Percent itself is escaped.
+pub(crate) fn encode_scope_component(value: &str) -> Result<String, &'static str> {
+    if value.trim().is_empty() || matches!(value, "." | "..")
+        || value.chars().any(|c| c.is_control() || matches!(c, '/' | '\\')) {
+        return Err("invalid path component");
+    }
+    if value.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')) {
+        return Ok(value.to_owned());
+    }
+    // Escape the entire new spelling, also preserving case/normalization
+    // distinctions on case-insensitive or Unicode-normalizing filesystems.
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        use std::fmt::Write;
+        write!(encoded, "%{byte:02X}").map_err(|_| "path encoding failed")?;
+    }
+    Ok(encoded)
+}
+
+pub(crate) fn decode_scope_component(encoded: &str) -> Result<String, &'static str> {
+    let mut bytes = Vec::new();
+    let mut rest = encoded.as_bytes();
+    while !rest.is_empty() {
+        if rest[0] == b'%' {
+            let hex = rest.get(1..3).and_then(|b| std::str::from_utf8(b).ok()).ok_or("invalid path escape")?;
+            bytes.push(u8::from_str_radix(hex, 16).map_err(|_| "invalid path escape")?);
+            rest = &rest[3..];
+        } else {
+            bytes.push(rest[0]);
+            rest = &rest[1..];
+        }
+    }
+    let value = String::from_utf8(bytes).map_err(|_| "invalid path UTF-8")?;
+    if encode_scope_component(&value)? != encoded { return Err("noncanonical path component"); }
+    Ok(value)
+}
+
 /// `<workspace>/.team/runtime`。
 pub fn runtime_dir(workspace: &Path) -> PathBuf {
     team_subdir(workspace, "runtime")
