@@ -179,18 +179,20 @@ impl Directory {
             return Err("identity_mismatch: recipient address changed".into());
         }
         if agent == "leader" {
-            let receiver = self.recipient(agent)?;
-            if field(receiver, "status") != Some("attached") {
-                return Err("leader_identity_unverified: receiver is not attached".into());
+            // Local legacy leaders need no nonce. Re-read worker ownership instead of
+            // trusting the addressing snapshot captured before the input lock.
+            let latest = directory(&self.workspace, self.team.as_deref())?;
+            let address = latest.endpoint(agent)?;
+            if !crate::topology::same_endpoint(&address.socket, &expected.socket)
+                || address.pane_id != expected.pane_id || address.dialect != expected.dialect {
+                return Err("leader_identity_mismatch: recipient address changed".into());
             }
-            let nonce = field(receiver, "binding_nonce")
-                .ok_or("leader_identity_unverified: explicit leader rebind required")?;
-            let output = native_output(tmux(&expected.socket).args([
-                "display-message", "-p", "-t", &expected.pane_id,
-                "#{@team_agent_pane_binding_nonce}",
-            ]), deadline)?;
-            if !output.success || output.stdout.trim() != nonce {
-                return Err("leader_identity_mismatch: pane binding changed; explicit leader rebind required".into());
+            let transport = crate::transport_factory::leader_endpoint_transport(&expected.socket);
+            let observed = transport.list_targets().map_err(|error| error.to_string())?
+                .into_iter().find(|pane| pane.pane_id.as_str() == expected.pane_id)
+                .ok_or("leader_identity_unavailable: registered pane is not live")?;
+            if let Some(worker) = crate::topology::active_worker_on_endpoint(&latest.state, &expected.socket, &observed) {
+                return Err(format!("leader_identity_worker_collision: registered pane belongs to active worker {worker}"));
             }
         }
         #[cfg(unix)]
@@ -260,11 +262,18 @@ impl Directory {
         } else { None };
         let endpoint = self.endpoint(agent)?;
         let info = self.recipient(agent)?;
-        let expected_pid = info.get("pane_pid").or_else(|| info.get("pid")).or_else(|| info.get("native_pid"))
-            .and_then(|value| value.as_u64().or_else(|| value.as_str().and_then(|s| s.parse().ok())))
+        let expected_pid = (agent != "leader").then(|| info.get("pane_pid").or_else(|| info.get("pid")).or_else(|| info.get("native_pid")))
+            .flatten().and_then(|value| value.as_u64().or_else(|| value.as_str().and_then(|s| s.parse().ok())))
             .and_then(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 0);
         direct_send_checked(&endpoint.socket, &endpoint.pane_id, &endpoint.dialect, text, expected_pid, true, submitted,
-            |deadline| self.verify_endpoint(agent, &endpoint, deadline))?;
+            |deadline| {
+                if agent == "leader" && leader_target_is_sender(&endpoint,
+                    crate::tmux_backend::socket_name_from_tmux_env().as_deref(),
+                    std::env::var("TMUX_PANE").ok().as_deref()) {
+                    return Err("leader_identity_self_collision: target is the sender's own pane".into());
+                }
+                self.verify_endpoint(agent, &endpoint, deadline)
+            })?;
         Ok(json!({"status":"sent","recipient":endpoint.agent,"pane_id":endpoint.pane_id,
             "dialect":endpoint.dialect,"delivery":"physical","accepted":null}))
     }
@@ -276,6 +285,11 @@ impl Directory {
             .map(|agents| agents.keys().cloned().collect())
             .unwrap_or_default()
     }
+}
+
+fn leader_target_is_sender(target: &Endpoint, sender_socket: Option<&str>, sender_pane: Option<&str>) -> bool {
+    sender_pane == Some(target.pane_id.as_str())
+        && sender_socket.is_some_and(|socket| crate::topology::same_endpoint(socket, &target.socket))
 }
 
 fn canonical_dialect(name: &str) -> String {
@@ -602,6 +616,55 @@ pub fn locate(workspace: &Path, team: Option<&str>) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn legacy_leader_delivery_needs_live_non_worker_not_nonce() {
+        let root = std::env::temp_dir().join(format!("ta-local-leader-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(root.join(".team/runtime")).unwrap();
+        let endpoint = root.join("leader.sock").to_string_lossy().into_owned();
+        let pane = crate::transport::PaneInfo {
+            pane_id: crate::transport::PaneId::new("%0"), session: crate::transport::SessionName::new("leader"),
+            window_index: None, window_name: None, pane_index: None, tty: None,
+            current_command: Some("bash".into()), current_path: Some(root.clone()),
+            active: false, pane_pid: Some(123), leader_env: Default::default(),
+        };
+        let mut state = json!({"team_key":"a", "tmux_socket":endpoint, "agents":{},
+            "leader_receiver":{"pane_id":"%0","provider":"pi","pane_pid":999}});
+        let mut outcomes = Vec::new();
+        for case in 0..5 {
+            match case {
+                1 => state["leader_receiver"]["binding_nonce"] = json!("obsolete"),
+                2 => state["agents"]["worker"] = json!({"pane_id":"%0","pane_pid":123,"status":"running"}),
+                3 => { state["agents"]["worker"].as_object_mut().unwrap().remove("pane_pid"); },
+                4 => state["agents"]["worker"]["tmux_socket"] = json!("/tmp/another-leader-server"),
+                _ => {}
+            }
+            std::fs::write(root.join(".team/runtime/state.json"), serde_json::to_vec(&state).unwrap()).unwrap();
+            let transport = crate::transport::test_support::OfflineTransport::default()
+                .with_tmux_endpoint(&endpoint).with_targets(vec![pane.clone()]);
+            let result = crate::transport_factory::with_leader_endpoint_transport(&endpoint, transport, || {
+                let directory = directory(&root, Some("a")).unwrap();
+                directory.verify_endpoint("leader", &directory.endpoint("leader").unwrap(), Instant::now()+Duration::from_secs(1))
+            });
+            outcomes.push(result);
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(outcomes[0].is_ok() && outcomes[1].is_ok());
+        assert!(outcomes[2].as_ref().unwrap_err().contains("worker_collision"));
+        assert!(outcomes[3].as_ref().unwrap_err().contains("worker_collision"));
+        assert!(outcomes[4].is_ok());
+    }
+
+    #[test]
+    fn leader_self_exclusion_is_socket_qualified() {
+        let target = Endpoint { agent: "leader".into(), socket: "/tmp/leader-a.sock".into(), pane_id: "%0".into(), dialect: "pi".into() };
+        assert!(leader_target_is_sender(&target, Some("/tmp/leader-a.sock"), Some("%0")));
+        assert!(!leader_target_is_sender(&target, Some("/tmp/leader-b.sock"), Some("%0")));
+        assert!(!leader_target_is_sender(&target, Some("/tmp/leader-a.sock"), Some("%1")));
+        assert!(!leader_target_is_sender(&target, None, Some("%0")));
+    }
 
     #[test]
     fn authoritative_leader_receiver_and_endpoint_take_precedence() {

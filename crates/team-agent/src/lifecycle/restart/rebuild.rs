@@ -1972,53 +1972,6 @@ pub fn restart_bind_status(
     }
 }
 
-fn owner_conflicts_with_caller(
-    workspace: &std::path::Path,
-    state: &serde_json::Value,
-    team_key: &str,
-) -> bool {
-    let Some(receiver) = selected_team_receiver(state, team_key) else {
-        return false;
-    };
-    let Some(owner_pane) = state
-        .get("teams")
-        .and_then(|teams| teams.get(team_key))
-        .and_then(|team| team.pointer("/team_owner/pane_id"))
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| receiver.get("pane_id").and_then(serde_json::Value::as_str))
-    else {
-        return false;
-    };
-    let Some(caller) = std::env::var("TMUX_PANE")
-        .ok()
-        .filter(|pane| !pane.is_empty())
-    else {
-        return false;
-    };
-    let owner_socket = receiver
-        .get("tmux_socket")
-        .and_then(serde_json::Value::as_str);
-    let caller_socket = crate::tmux_backend::socket_name_from_tmux_env();
-    let same_socket = match (owner_socket, caller_socket.as_deref()) {
-        (Some(owner), Some(caller)) => owner == caller,
-        _ => false,
-    };
-    if owner_pane == caller && same_socket {
-        return false;
-    }
-    let Some(transport) = transport_for_receiver(workspace, receiver) else {
-        return false;
-    };
-    matches!(
-        crate::messaging::leader_channel::resolve_live_leader_channel(
-            workspace,
-            receiver,
-            transport.as_ref(),
-        ),
-        crate::messaging::leader_channel::LeaderChannelResolution::Live(_)
-    )
-}
-
 fn binding_maintain_failed(value: &serde_json::Value) -> bool {
     value
         .get("registry_maintain_failed")
@@ -2106,7 +2059,14 @@ fn try_autobind_leader_after_restart(
     let team_key = team.unwrap_or("");
     let persisted = load_restart_bind_state(workspace, team_key);
     let state = persisted.as_ref().unwrap_or(state);
-    if restart_bind_status(workspace, team_key, state).0 {
+    let (bound, reason) = restart_bind_status(workspace, team_key, state);
+    let caller_socket = crate::tmux_backend::socket_name_from_tmux_env();
+    let caller_pane = std::env::var("TMUX_PANE").ok();
+    let caller_is_recorded = selected_team_receiver(state, team_key).is_some_and(|receiver|
+        receiver.get("pane_id").and_then(serde_json::Value::as_str) == caller_pane.as_deref()
+        && receiver.get("tmux_socket").and_then(serde_json::Value::as_str)
+            .zip(caller_socket.as_deref()).is_some_and(|(a, b)| crate::topology::same_endpoint(a, b)));
+    if !caller_is_recorded && (bound || reason.as_deref() == Some("leader_registry_index_missing")) {
         return Ok(maintain_live_binding_index(workspace, team, state));
     }
     if std::env::var_os("TMUX_PANE").is_none() {
@@ -2115,30 +2075,9 @@ fn try_autobind_leader_after_restart(
             error: "run claim-leader from the actual leader's tmux pane".into(),
         });
     }
-    if owner_conflicts_with_caller(workspace, state, team_key) {
-        return Err(RestartAttachFailure {
-            reason: "owner_conflict".into(),
-            error: "the recorded live leader is owned by another caller".into(),
-        });
-    }
-    let Some(provider) = state
-        .get("teams")
-        .and_then(|teams| teams.get(team_key))
-        .and_then(|team| team.pointer("/team_owner/provider"))
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| {
-            selected_team_receiver(state, team_key)
-                .and_then(|receiver| receiver.get("provider"))
-                .and_then(serde_json::Value::as_str)
-        })
-        .and_then(crate::provider::wire::parse_provider)
-    else {
-        return Err(RestartAttachFailure {
-            reason: "leader_provider_unresolved".into(),
-            error: "the caller's leader provider could not be identified".into(),
-        });
-    };
-    match crate::leader::attach_leader(workspace, team, None, provider) {
+    // An authorized lifecycle operation also renews its caller's leader lease.
+    // The shared claim primitive excludes workers and never forces a live owner.
+    match crate::leader::claim_leader(workspace, team, false) {
         Ok(result) if result.ok => {
             let mut debt = result
                 .attach_window_failures
@@ -4679,7 +4618,7 @@ tasks:
 
     #[test]
     #[serial_test::serial(env)]
-    fn restart_index_missing_refuses_dead_and_wrong_identity() {
+    fn restart_recovers_live_caller_but_rejects_dead_or_worker_caller() {
         let root = std::env::temp_dir().join(format!(
             "ta-r14-idx-neg-{}-{}",
             std::process::id(),
@@ -4752,6 +4691,18 @@ tasks:
                 "bash",
             )],
         );
+        let mut collision = state.clone();
+        collision["teams"]["alpha"]["agents"] = serde_json::json!({"worker": {
+            "pane_id":"%0", "pane_pid":42, "native_endpoint":endpoint,
+            "status":"running", "provider":"pi"
+        }});
+        crate::state::persist::save_runtime_state(&workspace, &collision).unwrap();
+        let before_worker = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        let (worker, _) = restart_index_bind_after_unregister(&workspace, endpoint, "%0",
+            vec![restart_index_wrapper_pane(&workspace, "%0", Some(uuid), true, "bash")]);
+        let after_worker = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        assert_eq!(before_worker["teams"]["alpha"]["team_owner"], after_worker["teams"]["alpha"]["team_owner"],
+            "an active worker must not be promoted to leader");
         match previous_home {
             Some(home) => std::env::set_var("HOME", home),
             None => std::env::remove_var("HOME"),
@@ -4766,13 +4717,13 @@ tasks:
         }
         let _ = std::fs::remove_dir_all(&root);
         assert!(!dead.0);
-        assert_eq!(dead.1.as_deref(), Some("leader_pane_validation_failed"));
-        assert!(!wrong_pane.0);
-        assert_eq!(wrong_pane.1.as_deref(), Some("leader_pane_validation_failed"));
-        assert!(!wrong_socket.0);
-        assert_eq!(wrong_socket.1.as_deref(), Some("leader_pane_validation_failed"));
-        assert!(!wrong_uuid.0);
-        assert_eq!(wrong_uuid.1.as_deref(), Some("leader_pane_validation_failed"));
+        assert_eq!(dead.1.as_deref(), Some("caller_pane_not_live"));
+        // The old owner is absent in each case. A new live caller is now
+        // automatically claimed, rather than refused for legacy pane/UUID drift.
+        assert_eq!(wrong_pane, (true, None));
+        assert_eq!(wrong_socket, (true, None));
+        assert_eq!(wrong_uuid, (true, None));
+        assert_eq!(worker, (false, Some("caller_not_leader_shaped".into())));
     }
 
     #[test]

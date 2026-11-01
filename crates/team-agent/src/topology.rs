@@ -307,6 +307,23 @@ pub fn classify_worker_pane_binding(
     }
 }
 
+/// Local delivery/claim excludes a registered worker address. Legacy running
+/// rows may lack a PID; shutdown still uses the stricter lifetime proof below.
+pub(crate) fn active_worker_on_endpoint(state: &Value, endpoint: &str, observed: &PaneInfo) -> Option<String> {
+    state.get("agents")?.as_object()?.iter().find_map(|(id, agent)| {
+        let recorded = non_empty_str(agent, "native_endpoint").map(str::to_string)
+            .or_else(|| crate::tmux_backend::runtime_tmux_endpoint_from_state_pub(Some(agent)).map(|v| v.0))
+            .or_else(|| crate::tmux_backend::runtime_tmux_endpoint_from_state_pub(Some(state)).map(|v| v.0))?;
+        let pane = non_empty_str(agent, "pane_id").or_else(|| non_empty_str(agent, "native_pane"));
+        let active = match agent_pane_pid(agent).filter(|pid| *pid > 0) {
+            Some(pid) => observed.pane_pid == Some(pid),
+            None => matches!(non_empty_str(agent, "status"), Some("running" | "starting")),
+        };
+        (active && pane == Some(observed.pane_id.as_str()) && same_endpoint(&recorded, endpoint))
+            .then(|| id.clone())
+    })
+}
+
 /// Positive worker ownership requires the socket and recorded live PID, not
 /// just a pane number that another tmux server can reuse.
 pub(crate) fn registered_worker_on_endpoint(

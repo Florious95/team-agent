@@ -683,12 +683,43 @@ pub fn claim_leader(
     let observed_endpoint = caller_candidate.and_then(|candidate| {
         authoritative_observed_endpoint(workspace, &raw_state, &targets, candidate)
     });
+    let claim_state = raw_state.get("teams").and_then(|teams| teams.get(team_id.as_str())).unwrap_or(&raw_state);
+    // Keep legacy worker rows visible even when a projected seat manifest is absent.
+    if let Some(worker) = observed_endpoint.as_deref().zip(caller_pane_info)
+        .and_then(|(endpoint, observed)| crate::topology::active_worker_on_endpoint(claim_state, endpoint, observed)) {
+        emit_lease_refusal(&event_log, LeaseReason::CallerNotLeaderShaped, claim_state,
+            bound_pane(claim_state).as_deref(), Some(&caller), &team_id)?;
+        return Ok(refused(LeaseReason::CallerNotLeaderShaped,
+            &format!("pane {caller} is registered as active worker {worker}; use the actual leader pane"),
+            None, bound_pane(claim_state).map(PaneId::new)));
+    }
     let mut caller_target = caller_candidate.and_then(|target| {
-        claim_target_from_pane_info(&target.info).map(|mut claim_target| {
+        // Actual callers may be in inactive/background windows. A registered
+        // leader can retain its known provider through a shell wrapper.
+        claim_target_from_observed_pane(&target.info).or_else(|| {
+            let same_binding = claim_state.pointer("/leader_receiver/pane_id").and_then(Value::as_str) == Some(caller.as_str())
+                && observed_endpoint.as_deref().is_some_and(|endpoint|
+                    state_records_pane_endpoint(claim_state, &caller, endpoint));
+            let provider = claim_state.pointer("/leader_receiver/provider")
+                .or_else(|| claim_state.pointer("/team_owner/provider"))
+                .and_then(Value::as_str).and_then(crate::provider::wire::parse_provider)?;
+            let leader_marker = target.info.leader_env.get("TEAM_AGENT_LEADER_SESSION_UUID")
+                .is_some_and(|uuid| !uuid.is_empty());
+            (same_binding || leader_marker).then(|| claim_target_with_provider(&target.info, provider))
+        }).map(|mut claim_target| {
             claim_target.endpoint.clone_from(&observed_endpoint);
             claim_target
         })
     });
+    if caller_target.is_none() {
+        let reason = if caller.is_empty() { LeaseReason::NotInTmuxPane }
+            else if caller_candidate.is_none() { LeaseReason::CallerPaneNotLive }
+            else { LeaseReason::CallerNotLeaderShaped };
+        emit_lease_refusal(&event_log, reason.clone(), claim_state,
+            bound_pane(claim_state).as_deref(), Some(&caller), &team_id)?;
+        return Ok(refused(reason, "run claim-leader from the actual leader's live tmux pane",
+            None, bound_pane(claim_state).map(PaneId::new)));
+    }
     if let (Some(candidate), Some(target)) = (caller_candidate, caller_target.as_mut()) {
         // Every explicit claim stamps the observed pane lifetime, including
         // same-workspace claims; a socket/pane pair alone can be recycled.
@@ -884,8 +915,15 @@ fn claim_lease_no_incident_with_target(
     let bound_endpoint_matches_caller = bound_endpoint_matches_current_process(state);
     let caller_is_worker = caller_target.as_deref().and_then(|target| target.endpoint.as_deref())
         .zip(caller_pane_info).is_some_and(|(endpoint, observed)|
-            crate::topology::registered_worker_on_endpoint(state, endpoint, observed).is_some());
-    if bound_pane_id.as_deref() == Some(caller_pane.as_str()) && bound_endpoint_matches_caller && !caller_is_worker {
+            crate::topology::active_worker_on_endpoint(state, endpoint, observed).is_some());
+    if caller_is_worker {
+        emit_lease_refusal(event_log, LeaseReason::CallerNotLeaderShaped, state,
+            bound_pane_id.as_deref(), Some(caller_pane.as_str()), team_id)?;
+        return Ok(refused(LeaseReason::CallerNotLeaderShaped,
+            "the caller's socket/pane is an active worker; run from the actual leader pane",
+            None, bound_pane_id.clone().map(PaneId::new)));
+    }
+    if bound_pane_id.as_deref() == Some(caller_pane.as_str()) && bound_endpoint_matches_caller {
         if let Some(target) = caller_target.as_deref_mut() {
             write_claim_target_pane_nonce(target)?;
         }
@@ -1552,7 +1590,7 @@ fn tmux_endpoints_match(bound: &str, current: &str) -> bool {
 }
 
 /// Observe the recorded owner's socket, never a same-numbered caller pane on
-/// another server. A proven worker or changed nonce is not a live old leader.
+/// another server. A proven worker is not a live old leader; a nonce is optional.
 fn observed_bound_leader_live(state: &Value) -> Result<Option<bool>, LeaderError> {
     let Some(pane) = bound_pane(state) else { return Ok(Some(false)); };
     let receiver = state.get("leader_receiver").unwrap_or(&Value::Null);
@@ -1560,7 +1598,7 @@ fn observed_bound_leader_live(state: &Value) -> Result<Option<bool>, LeaderError
         .or_else(|| crate::tmux_backend::runtime_tmux_endpoint_from_state_pub(Some(state))) else {
         return Ok(None);
     };
-    let targets = match tmux_backend_for_endpoint(&endpoint).list_targets() {
+    let targets = match crate::transport_factory::leader_endpoint_transport(&endpoint).list_targets() {
         Ok(targets) => targets,
         Err(crate::transport::TransportError::Subprocess { code: Some(1), stderr, .. })
             if stderr.starts_with("no server running on ")
@@ -1573,12 +1611,8 @@ fn observed_bound_leader_live(state: &Value) -> Result<Option<bool>, LeaderError
     let Some(target) = targets.iter().find(|target| target.pane_id.as_str() == pane) else {
         return Ok(Some(false));
     };
-    if crate::topology::leader_anchor_occupied_by_worker(state, state, &endpoint, target) {
+    if crate::topology::active_worker_on_endpoint(state, &endpoint, target).is_some() {
         return Ok(Some(false));
-    }
-    if let Some(nonce) = receiver.get("binding_nonce").and_then(Value::as_str).filter(|v| !v.is_empty()) {
-        return Ok(Some(target.leader_env.get(crate::tmux_backend::PANE_BINDING_NONCE_METADATA_KEY)
-            .is_some_and(|live| live == nonce)));
     }
     Ok(Some(true))
 }
@@ -1621,8 +1655,6 @@ fn select_claim_authority<'a>(
             target.info.pane_id.as_str() == caller
                 && caller_endpoint.as_deref().map_or(true, |endpoint| target.endpoint.as_deref()
                     .is_some_and(|observed| tmux_endpoints_match(endpoint, observed)))
-                && target.info.active
-                && super::attribute_pane_provider(&target.info).is_some()
         })
         .min_by_key(|target| {
             let recorded = target
@@ -1661,6 +1693,9 @@ fn authoritative_observed_endpoint(
     targets: &[ClaimLeaderTargetCandidate],
     authority: &ClaimLeaderTargetCandidate,
 ) -> Option<String> {
+    if crate::tmux_backend::socket_name_from_tmux_env().is_some() {
+        return authority.endpoint.clone();
+    }
     let recorded = state_recorded_tmux_endpoints(state);
     let workspace_name = crate::tmux_backend::socket_name_for_workspace(workspace);
     let workspace_path = crate::tmux_backend::socket_path_for_workspace(workspace);
@@ -1687,7 +1722,7 @@ fn authoritative_observed_endpoint(
 fn claim_leader_targets(workspace: &Path, state: &Value) -> Vec<ClaimLeaderTargetCandidate> {
     let mut targets = Vec::new();
     if let Some(endpoint) = crate::tmux_backend::socket_name_from_tmux_env() {
-        let backend = tmux_backend_for_endpoint(&endpoint);
+        let backend = crate::transport_factory::leader_endpoint_transport(&endpoint);
         let resolved_endpoint = backend.tmux_endpoint();
         targets.extend(
             backend
@@ -1701,7 +1736,7 @@ fn claim_leader_targets(workspace: &Path, state: &Value) -> Vec<ClaimLeaderTarge
         );
     }
     for endpoint in state_recorded_tmux_endpoints(state) {
-        let backend = tmux_backend_for_endpoint(&endpoint);
+        let backend = crate::transport_factory::leader_endpoint_transport(&endpoint);
         let resolved_endpoint = backend.tmux_endpoint();
         targets.extend(
             backend
@@ -1739,13 +1774,6 @@ fn claim_leader_targets(workspace: &Path, state: &Value) -> Vec<ClaimLeaderTarge
             }),
     );
     targets
-}
-
-fn claim_target_from_pane_info(target: &PaneInfo) -> Option<LeaderClaimTarget> {
-    if !target.active {
-        return None;
-    }
-    claim_target_from_observed_pane(target)
 }
 
 fn claim_target_from_observed_pane(target: &PaneInfo) -> Option<LeaderClaimTarget> {
@@ -1795,9 +1823,7 @@ fn write_claim_target_pane_nonce(target: &mut LeaderClaimTarget) -> Result<(), L
         .ok_or_else(|| {
             LeaderError::Validation("explicit claim is missing its pane observation".to_string())
         })?;
-    let nonce = target.binding_nonce.as_deref().ok_or_else(|| {
-        LeaderError::Validation("explicit claim is missing its pane binding nonce".to_string())
-    })?;
+    let Some(nonce) = target.binding_nonce.as_deref() else { return Ok(()); };
     let live_nonce = target
         .pane_info
         .as_ref()
@@ -1812,13 +1838,15 @@ fn write_claim_target_pane_nonce(target: &mut LeaderClaimTarget) -> Result<(), L
     let effective_nonce = if let Some(live_nonce) = live_nonce {
         live_nonce.to_string()
     } else {
-        tmux_backend_for_endpoint(endpoint)
-            .set_pane_binding_nonce_if_unset(pane, nonce)
-            .map_err(|error| {
-                LeaderError::Validation(format!(
-                    "failed to bind the explicit leader pane instance: {error}"
-                ))
-            })?
+        match tmux_backend_for_endpoint(endpoint).set_pane_binding_nonce_if_unset(pane, nonce) {
+            Ok(nonce) => nonce,
+            Err(error) => {
+                // Compatibility metadata for older helpers, never a delivery gate.
+                eprintln!("team_agent::leader optional nonce refresh unavailable: {error}");
+                target.binding_nonce = None;
+                return Ok(());
+            }
+        }
     };
     target.binding_nonce = Some(effective_nonce);
     Ok(())
@@ -1963,17 +1991,6 @@ pub(crate) fn grant_allows_attach_target(
     if !crate::state::owner_gate::workspace_paths_match(Path::new(authorized), workspace) {
         return false;
     }
-    let Some(recorded_nonce) = receiver
-        .get("binding_nonce")
-        .and_then(Value::as_str)
-        .filter(|raw| !raw.is_empty())
-    else {
-        return false;
-    };
-    let live_nonce = target
-        .leader_env
-        .get(crate::tmux_backend::PANE_BINDING_NONCE_METADATA_KEY)
-        .map(String::as_str);
     let pane_ok = receiver.get("pane_id").and_then(Value::as_str) == Some(target.pane_id.as_str());
     let socket_ok = match (receiver.get("tmux_socket").and_then(Value::as_str), endpoint) {
         (Some(recorded), Some(actual)) => recorded == actual,
@@ -1991,7 +2008,7 @@ pub(crate) fn grant_allows_attach_target(
         (Some(owner), Some(recv)) => owner == recv && owner > 0,
         _ => false,
     };
-    pane_ok && socket_ok && live_nonce == Some(recorded_nonce) && provider_ok && epoch_ok
+    pane_ok && socket_ok && provider_ok && epoch_ok
 }
 
 fn recorded_owner_live_facts_match(
@@ -2386,6 +2403,11 @@ fn refresh_receiver_observation(
     claim_target: Option<&LeaderClaimTarget>,
 ) -> bool {
     let before = Value::Object(receiver.clone());
+    receiver.insert("status".to_string(), json!("attached"));
+    receiver.insert("pane_pid".to_string(), json!(observed.pane_pid));
+    if let Some(target) = claim_target {
+        receiver.insert("provider".to_string(), json!(target.provider));
+    }
     receiver.insert(
         "session_name".to_string(),
         Value::String(observed.session.as_str().to_string()),
@@ -3221,15 +3243,23 @@ mod tests {
     }
 
     #[test]
-    fn claim_leader_discovery_still_requires_focus() {
+    #[serial_test::serial(env)]
+    fn actual_claim_caller_does_not_require_window_focus() {
         let mut pane = grant_pane("n1");
         pane.active = false;
-        pane.current_command = Some("codex".to_string());
-        assert!(
-            claim_target_from_pane_info(&pane).is_none(),
-            "claim-leader discovery must keep pane_active; attach validation uses observed pane"
-        );
         assert!(claim_target_from_observed_pane(&pane).is_some());
+        let workspace = Path::new("/tmp/grant-ws");
+        let state = grant_state("/tmp/other.sock", "n1", 2, "codex");
+        let targets = vec![
+            ClaimLeaderTargetCandidate {info: pane.clone(), endpoint: Some("/tmp/actual.sock".into())},
+            ClaimLeaderTargetCandidate {info: pane, endpoint: Some("/tmp/other.sock".into())},
+        ];
+        let previous = std::env::var("TMUX").ok();
+        std::env::set_var("TMUX", "/tmp/actual.sock,1,0");
+        let endpoint = select_claim_authority(workspace, &state, "alpha", &targets, "%1")
+            .and_then(|target| authoritative_observed_endpoint(workspace, &state, &targets, target));
+        match previous { Some(value) => std::env::set_var("TMUX", value), None => std::env::remove_var("TMUX") }
+        assert_eq!(endpoint.as_deref(), Some("/tmp/actual.sock"));
     }
 
     #[test]
@@ -3265,11 +3295,11 @@ mod tests {
     }
 
     #[test]
-    fn grant_rejects_wrong_nonce_and_provider() {
+    fn grant_nonce_is_optional_but_provider_must_match() {
         let workspace = PathBuf::from("/tmp/grant-ws");
         let state = grant_state("/tmp/leader.sock", "n1", 2, "codex");
         let pane = grant_pane("other-nonce");
-        assert!(!grant_allows_attach_target(
+        assert!(grant_allows_attach_target(
             &workspace,
             &state,
             &pane,

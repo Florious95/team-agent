@@ -4989,6 +4989,14 @@ pub mod lifecycle_port {
         }
     }
 
+    pub(crate) fn heal_leader_after_lifecycle(value: &mut Value, workspace: &Path, team: Option<&str>) {
+        if value.get("ok").and_then(Value::as_bool) != Some(true) { return; }
+        let (_detail, bound, reason) = crate::lifecycle::restart_leader_public_bind(workspace, team, &json!({}));
+        value["leader_bind_ok"] = json!(bound);
+        if let Some(reason) = reason { value["leader_bind_reason"] = json!(reason); }
+        if !bound { append_restart_binding_guidance(value, workspace, team); }
+    }
+
     fn append_restart_binding_guidance(value: &mut Value, workspace: &Path, team: Option<&str>) {
         if value.get("leader_bind_ok").and_then(Value::as_bool) != Some(false) { return; }
         let action = crate::cli::leader_claim_action(workspace, team);

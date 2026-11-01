@@ -37,6 +37,7 @@ pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
     if let Some(result) = quick_start_config_guidance(&mut value, args) {
         return Ok(result);
     }
+    lifecycle_port::heal_leader_after_lifecycle(&mut value, &args.workspace, args.team_id.as_deref());
     append_send_guidance(&mut value, &args.workspace, args.team_id.as_deref());
     finish_quick_start(value, args)
 }
@@ -525,6 +526,7 @@ pub fn cmd_start_agent(args: &StartAgentArgs) -> Result<CmdResult, CliError> {
             object.insert("agent_ids".to_string(), json!([args.agent.as_str()]));
         }
     }
+    lifecycle_port::heal_leader_after_lifecycle(&mut value, &args.workspace, args.team.as_deref());
     append_send_guidance(&mut value, &args.workspace, args.team.as_deref());
     Ok(CmdResult::from_json(value, args.json))
 }
@@ -539,15 +541,11 @@ pub fn cmd_stop_agent(args: &StopAgentArgs) -> Result<CmdResult, CliError> {
 
 /// `cmd_reset_agent`(`commands.py:363`)。
 pub fn cmd_reset_agent(args: &ResetAgentArgs) -> Result<CmdResult, CliError> {
-    Ok(CmdResult::from_json(
-        with_legacy_retired(&args.workspace, || lifecycle_port::reset_agent(
-            &args.workspace,
-            &args.agent,
-            args.discard_session,
-            args.team.as_deref(),
-        ))?,
-        args.json,
-    ))
+    let mut value = with_legacy_retired(&args.workspace, || lifecycle_port::reset_agent(
+        &args.workspace, &args.agent, args.discard_session, args.team.as_deref(),
+    ))?;
+    lifecycle_port::heal_leader_after_lifecycle(&mut value, &args.workspace, args.team.as_deref());
+    Ok(CmdResult::from_json(value, args.json))
 }
 
 /// `cmd_add_agent`(`commands.py:373`)。

@@ -244,6 +244,16 @@ pub(crate) fn classify_leader_binding_at(
         .and_then(serde_json::Value::as_str)
         == Some("attached");
     let has_owner = owner_record(state, team_key).is_some();
+    if let Some((receiver, transport)) = receiver.zip(transport) {
+        let scoped = state.get("teams").and_then(|teams| teams.get(team_key)).unwrap_or(state);
+        if let (Some(endpoint), Ok(targets)) = (transport.tmux_endpoint(), transport.list_targets()) {
+            if targets.iter().any(|target|
+                receiver.get("pane_id").and_then(serde_json::Value::as_str) == Some(target.pane_id.as_str())
+                && crate::topology::active_worker_on_endpoint(scoped, &endpoint, target).is_some()) {
+                return LeaderBindingClass::Unbound;
+            }
+        }
+    }
     match registry {
         RegistryDeliverability::Undecidable => LeaderBindingClass::Unknown,
         RegistryDeliverability::Attached => {
