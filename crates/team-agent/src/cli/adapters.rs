@@ -482,7 +482,8 @@ pub fn cmd_takeover(args: &TakeoverArgs) -> Result<CmdResult, CliError> {
 
 /// `cmd_claim_leader`(`commands.py:156`)。
 pub fn cmd_claim_leader(args: &ClaimLeaderArgs) -> Result<CmdResult, CliError> {
-    let mut value = leader_port::claim_leader(&args.workspace, args.team.as_deref(), args.confirm)?;
+    let mut value = with_legacy_retired(&args.workspace, ||
+        leader_port::claim_leader(&args.workspace, args.team.as_deref(), args.confirm))?;
     if !args.detail {
         leader_port::compact_lease_value(&mut value);
     }
@@ -1023,6 +1024,32 @@ mod tests {
     use crate::cli::{CmdOutput, ExitCode, QuickStartArgs};
     use serde_json::{json, Value};
     use std::path::{Path, PathBuf};
+
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial(env)]
+    fn claim_retires_legacy_writer_before_reading_or_publishing_a_binding() {
+        let root = std::env::temp_dir().join(format!("claim-retire-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let runtime = root.join(".team/runtime");
+        std::fs::create_dir_all(&runtime).unwrap();
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        assert!(child.wait().unwrap().success());
+        let stale_pid = runtime.join("coordinator.pid");
+        std::fs::write(&stale_pid, pid.to_string()).unwrap();
+        // An invalid binding state must still fail, but only after the legacy
+        // delivery writer has been retired; no new receiver can be published.
+        std::fs::write(runtime.join("state.json"), b"{").unwrap();
+        let result = super::cmd_claim_leader(&crate::cli::ClaimLeaderArgs {
+            workspace: root.clone(), team: Some("missing".into()), confirm: true,
+            json: true, detail: true,
+        });
+        assert!(result.is_err());
+        assert!(!stale_pid.exists(), "legacy retirement must precede leader binding");
+        assert_eq!(std::fs::read(runtime.join("state.json")).unwrap(), b"{");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn inbox_human_output_sanitizes_controls_and_caps_each_line() {
