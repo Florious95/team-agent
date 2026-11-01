@@ -80,17 +80,18 @@ pub(crate) fn directory_with_reason(workspace: &Path, team: Option<&str>) -> Res
             .or(team).map(str::to_string);
         return Ok(Directory { workspace, team: canonical, state: snapshot });
     };
-    let requested = team.or_else(|| field(&snapshot, "active_team_key"));
+    let matches_selector = |requested: &str, key: &str, value: &Value| {
+        crate::state::projection::team_selector_matches(requested, key, value)
+            || ["team_id", "team_name", "tmux_session", "team_dir"].iter()
+                .any(|name| field(value, name) == Some(requested))
+    };
+    // A stale default pointer cannot make the sole remaining team ambiguous.
+    // Explicit selectors and genuinely multi-team workspaces still fail closed.
+    let requested = team.or_else(|| field(&snapshot, "active_team_key")
+        .filter(|active| teams.iter().any(|(key, value)| matches_selector(active, key, value))));
     let matches: Vec<_> = teams
         .iter()
-        .filter(|(key, value)| {
-            requested.map_or(teams.len() == 1, |requested| {
-                crate::state::projection::team_selector_matches(requested, key, value)
-                    || ["team_id", "team_name", "tmux_session", "team_dir"]
-                        .iter()
-                        .any(|field_name| field(value, field_name) == Some(requested))
-            })
-        })
+        .filter(|(key, value)| requested.map_or(teams.len() == 1, |requested| matches_selector(requested, key, value)))
         .collect();
     if matches.len() != 1 {
         let code = if matches.is_empty() && requested.is_some() { "team_key_not_found" } else { "name_ambiguous" };
@@ -187,7 +188,7 @@ impl Directory {
                 || address.pane_id != expected.pane_id || address.dialect != expected.dialect {
                 return Err("leader_identity_mismatch: recipient address changed".into());
             }
-            let transport = crate::transport_factory::leader_endpoint_transport(&expected.socket);
+            let transport = crate::transport_factory::bounded_endpoint_transport(&expected.socket, deadline);
             let observed = transport.list_targets().map_err(|error| error.to_string())?
                 .into_iter().find(|pane| pane.pane_id.as_str() == expected.pane_id)
                 .ok_or("leader_identity_unavailable: registered pane is not live")?;
@@ -248,6 +249,27 @@ impl Directory {
     }
 
     /// Check the selected physical identity while holding only its input lock.
+    /// Execute normal addressing/identity/composer guards without committing or submitting input.
+    pub(crate) fn probe(&self, agent: &str, deadline: Instant) -> Result<Endpoint, String> {
+        let endpoint = self.endpoint(agent)?;
+        self.verify_endpoint(agent, &endpoint, deadline)?;
+        if agent != "leader" {
+            let observed = pane_identity(&endpoint.socket, &endpoint.pane_id, deadline)?;
+            let _input = input_lock(&observed, &endpoint.pane_id, deadline)?;
+            let pid = self.recipient(agent)?.get("pane_pid").and_then(Value::as_u64)
+                .and_then(|pid| u32::try_from(pid).ok());
+            verify_identity(&endpoint.socket, &endpoint.pane_id, &observed, pid, deadline)?;
+            let mode = native_output(tmux(&endpoint.socket).args(["display-message", "-p", "-t", &endpoint.pane_id, "#{pane_in_mode}"]), deadline)?;
+            if !mode.success || mode.stdout.trim() != "0" {
+                return Err("input_not_ready: pane is in copy/edit mode".into());
+            }
+            guard_non_composer(&endpoint.socket, &endpoint.pane_id, deadline)?;
+            wait_for_draft(&endpoint.socket, &endpoint.pane_id, deadline)?;
+            self.verify_endpoint(agent, &endpoint, deadline)?;
+        }
+        Ok(endpoint)
+    }
+
     pub fn send(&self, agent: &str, text: &str) -> Result<Value, String> {
         self.send_with_receipt(agent, text, || Ok(()))
     }
@@ -511,7 +533,7 @@ fn wait_for_draft(socket: &str, pane: &str, deadline: Instant) -> Result<(), Str
     let mut observed_draft = false;
     loop {
         if Instant::now() >= deadline {
-            return Err("composer_contention_timeout: draft remained for 60s; message is safe in inbox; clear the draft before an explicit new send".into());
+            return Err("composer_contention_timeout: draft remained until the input deadline; preserve or clear it before a new send".into());
         }
         let capture = native_output(tmux(socket).args(["capture-pane", "-p", "-t", pane, "-S", "0"]), deadline);
         let draft = match capture {

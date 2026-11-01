@@ -62,6 +62,39 @@ thread_local! {
 /// `classify_leader_binding`, restart `transport_for_receiver`, and
 /// `attach_leader_targets` all go through this function.
 pub fn leader_endpoint_transport(endpoint: &str) -> Box<dyn Transport> {
+    endpoint_probe_transport(endpoint, None)
+}
+
+pub(crate) fn bounded_endpoint_transport(endpoint: &str, deadline: std::time::Instant) -> Box<dyn Transport> {
+    endpoint_probe_transport(endpoint, Some(deadline))
+}
+
+fn checked_probe_output(output: crate::tmux_backend::CommandOutput) -> std::io::Result<crate::tmux_backend::CommandOutput> {
+    // Ordinary enumeration may turn an absent server into an empty list.
+    // Active probes must retain the native failure before that adaptation.
+    if !output.success {
+        return Err(std::io::Error::other(format!("native probe exit {:?}: {}", output.code, output.stderr.trim())));
+    }
+    Ok(output)
+}
+
+#[cfg(test)]
+mod bounded_probe_tests {
+    use super::*;
+    #[test]
+    fn doctor_probe_rejects_native_nonzero() {
+        let output = crate::tmux_backend::CommandOutput { success: false, code: Some(7), stdout: String::new(), stderr: "absent".into() };
+        let error = checked_probe_output(output).unwrap_err().to_string();
+        assert!(error.contains("7") && error.contains("absent"), "{error}");
+    }
+    #[test]
+    fn doctor_probe_accepts_empty_native_success() {
+        let output = crate::tmux_backend::CommandOutput { success: true, code: Some(0), stdout: String::new(), stderr: String::new() };
+        assert!(checked_probe_output(output).unwrap().success);
+    }
+}
+
+fn endpoint_probe_transport(endpoint: &str, deadline: Option<std::time::Instant>) -> Box<dyn Transport> {
     #[cfg(test)]
     if let Some(injected) = LEADER_ENDPOINT_TRANSPORT_OVERRIDE.with(|slot| {
         slot.borrow().as_ref().and_then(|(expected, transport)| {
@@ -69,6 +102,17 @@ pub fn leader_endpoint_transport(endpoint: &str) -> Box<dyn Transport> {
         })
     }) {
         return injected;
+    }
+    if let Some(deadline) = deadline {
+        struct ProbeRunner(std::time::Instant);
+        impl crate::tmux_backend::CommandRunner for ProbeRunner {
+            fn run(&self, argv: &[String]) -> std::io::Result<crate::tmux_backend::CommandOutput> {
+                let budget = self.0.saturating_duration_since(std::time::Instant::now());
+                if budget.is_zero() { return Err(std::io::ErrorKind::TimedOut.into()); }
+                checked_probe_output(crate::tmux_backend::RealCommandRunner.run_with_budget(argv, budget)?)
+            }
+        }
+        return Box::new(TmuxBackend::with_runner_for_tmux_endpoint(Box::new(ProbeRunner(deadline)), endpoint));
     }
     if endpoint.is_empty() || endpoint == "default" {
         Box::new(tmux_default_transport())

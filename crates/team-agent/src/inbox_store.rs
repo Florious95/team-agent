@@ -84,16 +84,8 @@ pub struct StoredRecord {
     pub duplicate: bool,
 }
 
-fn component(s: &str) -> Result<&str, String> {
-    if s.is_empty()
-        || matches!(s, "." | "..")
-        || !s
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
-    {
-        return Err("invalid inbox scope component".into());
-    }
-    Ok(s)
+fn component(s: &str) -> Result<String, String> {
+    crate::model::paths::encode_scope_component(s).map_err(|_| "invalid inbox scope component".into())
 }
 fn root(workspace: &Path, recipient: &str, team: Option<&str>) -> Result<PathBuf, String> {
     let mut root = workspace.join(".team/inbox");
@@ -170,6 +162,51 @@ fn segments(root: &Path) -> Result<Vec<(u64, PathBuf)>, String> {
     paths.sort_by_key(|(n, _)| *n);
     Ok(paths)
 }
+/// Bounded, non-mutating checksum probe of the latest committed segment tail.
+/// A non-newline suffix is uncommitted, not silently reported as a valid frame.
+pub(crate) fn probe_tail(workspace: &Path, recipient: &str, team: Option<&str>) -> Result<(usize, bool), String> {
+    let root = root(workspace, recipient, team)?;
+    let lock_path = root.parent().ok_or("inbox_parent_missing")?.join(".locks").join(format!("{}.lock", component(recipient)?));
+    let _lock = match OpenOptions::new().read(true).write(true).open(lock_path) {
+        Ok(file) => {
+            if !crate::platform::file_lock::try_lock_once_nonblocking(&file).map_err(|e| e.to_string())? {
+                return Err("inbox_append_busy".into());
+            }
+            Some(file)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.to_string()),
+    };
+    let segments = segments(&root)?;
+    let mut paths: Vec<PathBuf> = segments.last().map(|(_, path)| path.clone()).into_iter().collect();
+    paths.push(root.parent().unwrap().join(format!("{}.jsonl", component(recipient)?)));
+    paths.push(workspace.join(".team/inbox").join(format!("{recipient}.jsonl")));
+    paths.sort(); paths.dedup();
+    let mut checked = 0;
+    let mut unverified = false;
+    for path in paths.into_iter().filter(|p| p.is_file()) {
+        let mut file = open(&path, false)?;
+        if !crate::platform::file_lock::try_lock_once_nonblocking(&file).map_err(|e| e.to_string())? {
+            return Err("inbox_append_busy".into());
+        }
+        let size = file.metadata().map_err(|e| e.to_string())?.len();
+        let start = size.saturating_sub(2 * 1024 * 1024);
+        file.seek(SeekFrom::Start(start)).map_err(|e| e.to_string())?;
+        let mut bytes = Vec::new();
+        file.take(2 * 1024 * 1024).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+        let begin = if start == 0 { 0 } else { bytes.iter().position(|b| *b == b'\n').map_or(bytes.len(), |i| i + 1) };
+        if size > 0 && begin == bytes.len() { unverified = true; }
+        for frame in bytes[begin..].split_inclusive(|b| *b == b'\n') {
+            if !frame.ends_with(b"\n") { unverified = true; break; }
+            if frame.iter().all(u8::is_ascii_whitespace) { continue; }
+            let value = codec::decode(frame).map_err(|e| format!("inbox_frame_invalid:{recipient}: {e}"))?;
+            if value["opaque"] == true { unverified = true; continue; }
+            if team.is_none_or(|team| value["team"].as_str().is_none_or(|owner| owner == team)) { checked += 1; }
+        }
+    }
+    Ok((checked, unverified))
+}
+
 fn segment_path(root: &Path, n: u64) -> PathBuf {
     root.join(format!("{n:08}.jsonl"))
 }
@@ -327,7 +364,7 @@ pub fn append(workspace: &Path, recipient: &str, record: &Value) -> Result<(), S
     let root = root(workspace, recipient, record["team"].as_str())?;
     mkdir(root.parent().unwrap())?;
     let mut file = open(
-        &root.parent().unwrap().join(format!("{recipient}.jsonl")),
+        &root.parent().unwrap().join(format!("{}.jsonl", component(recipient)?)),
         true,
     )?;
     file.lock().map_err(|e| e.to_string())?;
@@ -347,7 +384,7 @@ pub fn store(workspace: &Path, recipient: &str, record: &Value) -> Result<Stored
     mkdir(&root)?;
     let locks = root.parent().unwrap().join(".locks");
     mkdir(&locks)?;
-    let lock = open(&locks.join(format!("{recipient}.lock")), true)?;
+    let lock = open(&locks.join(format!("{}.lock", component(recipient)?)), true)?;
     lock.lock().map_err(|e| e.to_string())?; // flock on Unix; LockFileEx on Windows
     if let Some(token) = record["dedupe_key"].as_str() {
         let reference = RecordRef::parse(token)?;
@@ -457,7 +494,7 @@ pub fn read(
     });
     let root = root(workspace, recipient, selected.as_deref())?;
     let paths = segments(&root)?;
-    let scoped_legacy = root.parent().unwrap().join(format!("{recipient}.jsonl"));
+    let scoped_legacy = root.parent().unwrap().join(format!("{}.jsonl", component(recipient)?));
     let global_legacy = workspace.join(".team/inbox").join(format!("{recipient}.jsonl"));
     let mut messages = VecDeque::new();
     let mut malformed = if limit == 0 {

@@ -803,7 +803,9 @@ pub(crate) fn preflight_start_role(workspace: &Path, team: &str, role: &RoleConf
     match existing_start(&backend, &role.id)? {
         Some(ExistingStart::Committed(record))
             if backend.store.assert_current(&record.target.identity)?.physical.as_ref().is_some_and(|target|
-                target.candidate_sha256 != backend.binding.candidate_sha256 || team_agent_contract::host::process::sample_process(&target.process) == team_agent_contract::host::process::ProcessState::Exited) => {
+                target.candidate_sha256 != backend.binding.candidate_sha256 || matches!(
+                    team_agent_contract::host::process::sample_process(&target.process),
+                    team_agent_contract::host::process::ProcessState::Exited | team_agent_contract::host::process::ProcessState::Replaced)) => {
             prepare_resume(workspace, team, &role.id, Some(role))?;
         },
         Some(ExistingStart::FinishReceipt(record)) if record.target.identity.seat != role.id => return Ok(false),
@@ -951,7 +953,9 @@ pub fn start(
             Some(ExistingStart::Committed(record)) => {
                 let current = backend.store.assert_current(&record.target.identity)?;
                 if current.physical.as_ref().is_some_and(|target|
-                    target.candidate_sha256 != backend.binding.candidate_sha256 || team_agent_contract::host::process::sample_process(&target.process) == team_agent_contract::host::process::ProcessState::Exited) {
+                    target.candidate_sha256 != backend.binding.candidate_sha256 || matches!(
+                        team_agent_contract::host::process::sample_process(&target.process),
+                        team_agent_contract::host::process::ProcessState::Exited | team_agent_contract::host::process::ProcessState::Replaced)) {
                     let prepared = prepare_resume(workspace, team, &role.id, Some(role))?;
                     return Ok((backend.binding, resume(prepared)?));
                 }
@@ -1250,7 +1254,13 @@ pub fn resume(prepared: PreparedResume) -> Result<OperationRecord, BackendError>
         let (before, _, _) = workspace_tmux(&backend.binding, &prepared.role.id, None)?;
         if parent.status != SeatStatus::Stopped {
             let target = parent.physical.as_ref().ok_or(BackendError::Metadata)?;
-            if before.endpoint != target.endpoint || before.session.as_deref() != Some(target.session.as_str()) {
+            // Current topology is owner-validated above. An absent native
+            // process can resume there without requiring its former session.
+            let native_absent = matches!(team_agent_contract::host::process::sample_process(&target.process),
+                team_agent_contract::host::process::ProcessState::Exited | team_agent_contract::host::process::ProcessState::Replaced);
+            if !native_absent && (before.endpoint != target.endpoint
+                || before.session.as_deref() != Some(target.session.as_str()))
+            {
                 return Err(ContractError::Mismatch("resume workspace session").into());
             }
             let stopped = stop(&backend.binding.workspace.path, &backend.binding.team, &prepared.role.id)?;
