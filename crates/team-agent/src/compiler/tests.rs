@@ -657,18 +657,22 @@ fn fix_a5_session_name_slugifies_team_name() {
 
 #[test]
 fn session_namespace_separates_workspaces_and_canonicalizes_aliases() {
-    let a = tempfile::tempdir().unwrap();
-    let b = tempfile::tempdir().unwrap();
-    let name = default_session_name(a.path(), "current");
+    let a = unique_base();
+    let b = unique_base();
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    let name = default_session_name(a.as_path(), "current");
     assert!(name.starts_with("team-") && name.ends_with("-current"));
-    assert_ne!(name, default_session_name(b.path(), "current"));
-    assert_ne!(name, default_session_name(a.path(), "other"));
-    assert_eq!(name, default_session_name(&a.path().join("."), "current"));
+    assert_ne!(name, default_session_name(b.as_path(), "current"));
+    assert_ne!(name, default_session_name(a.as_path(), "other"));
+    assert_eq!(name, default_session_name(&a.as_path().join("."), "current"));
     #[cfg(unix)] {
-        let alias = b.path().join("alias");
-        std::os::unix::fs::symlink(a.path(), &alias).unwrap();
+        let alias = b.as_path().join("alias");
+        std::os::unix::fs::symlink(a.as_path(), &alias).unwrap();
         assert_eq!(name, default_session_name(&alias, "current"));
     }
+    fs::remove_dir_all(a).unwrap();
+    fs::remove_dir_all(b).unwrap();
 }
 
 #[test]

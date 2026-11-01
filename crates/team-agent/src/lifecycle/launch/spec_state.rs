@@ -465,16 +465,16 @@ mod claim_rework_seed_tests {
 
     #[test]
     fn session_namespace_tracks_runtime_workspace_but_preserves_explicit_names() {
-        let a = tempfile::tempdir().unwrap();
-        let b = tempfile::tempdir().unwrap();
+        let a = std::env::temp_dir().join("ta-mpp-spec-a");
+        let b = std::env::temp_dir().join("ta-mpp-spec-b");
         let mut spec = yaml::loads(&format!(
             "team:\n  name: current\n  workspace: {}\nruntime:\n  session_name: {}\n",
-            a.path().display(), crate::compiler::default_session_name(a.path(), "current"),
+            a.as_path().display(), crate::compiler::default_session_name(a.as_path(), "current"),
         )).unwrap();
-        override_spec_workspace(&mut spec, b.path());
-        assert_eq!(spec_session_name(&spec).as_str(), crate::compiler::default_session_name(b.path(), "current"));
+        override_spec_workspace(&mut spec, b.as_path());
+        assert_eq!(spec_session_name(&spec).as_str(), crate::compiler::default_session_name(b.as_path(), "current"));
         override_spec_session_name(&mut spec, "explicit-session");
-        override_spec_workspace(&mut spec, a.path());
+        override_spec_workspace(&mut spec, a.as_path());
         assert_eq!(spec_session_name(&spec).as_str(), "explicit-session");
     }
     use crate::state::owner_gate::CallerIdentity;

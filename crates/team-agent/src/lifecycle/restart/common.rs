@@ -2275,11 +2275,11 @@ mod session_namespace_tests {
 
     #[test]
     fn missing_legacy_session_moves_without_destroying_foreign_resources() {
-        let workspace = tempfile::tempdir().unwrap();
+        let workspace = std::env::temp_dir().join("ta-mpp-recovery-owner");
         let transport = OfflineTransport::default();
         let mut state = dead_state();
-        recover_missing_legacy_session(workspace.path(), "current", &mut state, &transport).unwrap();
-        assert_eq!(state["session_name"], crate::compiler::default_session_name(workspace.path(), "current"));
+        recover_missing_legacy_session(workspace.as_path(), "current", &mut state, &transport).unwrap();
+        assert_eq!(state["session_name"], crate::compiler::default_session_name(workspace.as_path(), "current"));
         assert!(state["agents"]["researcher"].get("pane_id").is_none());
         assert_eq!(state["agents"]["researcher"]["session_id"], "preserved-context");
         assert_eq!(state["agents"]["researcher"]["rollout_path"], "preserved-journal");
@@ -2287,26 +2287,26 @@ mod session_namespace_tests {
 
     #[test]
     fn missing_legacy_session_refuses_foreign_namespaced_target() {
-        let workspace = tempfile::tempdir().unwrap();
-        let foreign = tempfile::tempdir().unwrap();
+        let workspace = std::env::temp_dir().join("ta-mpp-recovery-owner");
+        let foreign = std::env::temp_dir().join("ta-mpp-recovery-foreign");
         let transport = OfflineTransport::default().with_session_present(true)
-            .with_session_owner(foreign.path(), "current", "foreign-generation");
+            .with_session_owner(foreign.as_path(), "current", "foreign-generation");
         let mut state = dead_state();
         let original = state.clone();
-        assert!(recover_missing_legacy_session(workspace.path(), "current", &mut state, &transport).is_err());
+        assert!(recover_missing_legacy_session(workspace.as_path(), "current", &mut state, &transport).is_err());
         assert_eq!(state, original);
         assert_eq!(transport.calls(), ["has_session"]);
     }
 
     #[test]
     fn missing_legacy_session_keeps_live_and_unknown_process_identity() {
-        let workspace = tempfile::tempdir().unwrap();
+        let workspace = std::env::temp_dir().join("ta-mpp-recovery-owner");
         for pid in [Some(std::process::id()), None] {
             let mut state = dead_state();
             state["agents"]["researcher"]["pane_pid"] = serde_json::json!(pid);
             state["agents"]["researcher"]["provider"] = serde_json::json!("pi");
             let original = state.clone();
-            recover_missing_legacy_session(workspace.path(), "current", &mut state, &OfflineTransport::default()).unwrap();
+            recover_missing_legacy_session(workspace.as_path(), "current", &mut state, &OfflineTransport::default()).unwrap();
             assert_eq!(state, original);
         }
     }

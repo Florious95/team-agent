@@ -2998,13 +2998,13 @@ mod tests {
 
     #[test]
     fn endpoint_convergence_invalidates_legacy_panes_not_native_seats() {
-        let workspace = tempfile::tempdir().unwrap();
+        let workspace = std::env::temp_dir().join("ta-mpp-claim-owner");
         let mut state = json!({"session_name":"team-current","agents": {
             "legacy":{"pane_id":"%1","pane_pid":123,"session_id":"keep"},
             "native":{"runtime_family":"contract","pane_id":"%2","pane_pid":456}
         }});
-        invalidate_worker_endpoint_bindings(&mut state, workspace.path(), "current");
-        assert_eq!(state["session_name"], crate::compiler::default_session_name(workspace.path(), "current"));
+        invalidate_worker_endpoint_bindings(&mut state, workspace.as_path(), "current");
+        assert_eq!(state["session_name"], crate::compiler::default_session_name(workspace.as_path(), "current"));
         assert!(state["agents"]["legacy"].get("pane_id").is_none());
         assert_eq!(state["agents"]["legacy"]["pane_pid"], 123);
         assert_eq!(state["agents"]["legacy"]["session_id"], "keep");
