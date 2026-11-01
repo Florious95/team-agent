@@ -670,7 +670,7 @@ fn leader_receiver_short_endpoint_must_not_reconstruct_tmux_l_socket() {
     let socket_path = root.join(endpoint);
     let _listener = UnixListener::bind(&socket_path).unwrap();
     let socket_path = socket_path.canonicalize().unwrap();
-    let _env = EnvGuard::apply(&[("TMPDIR", Some(tmp.to_str().unwrap()))]);
+    let _env = EnvGuard::apply(&[("TMUX_TMPDIR", Some(tmp.to_str().unwrap()))]);
     let (be, rec) = {
         let recorded = Arc::new(Mutex::new(Vec::new()));
         let runner = MockCommandRunner {
