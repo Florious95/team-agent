@@ -493,6 +493,35 @@ impl Drop for EnvGuard {
 
 #[test]
 #[serial_test::serial(env)]
+fn socket_name_resolution_uses_native_tmpdir_without_foreign_root_fallback() {
+    let root = tempfile::tempdir().unwrap();
+    let native = root.path().join("native");
+    let ordinary = root.path().join("ordinary");
+    let uid = unsafe { libc::geteuid() };
+    let name = root.path().file_name().unwrap().to_str().unwrap();
+    let expected = native.join(format!("tmux-{uid}")).join(name);
+    let foreign = ordinary.join(format!("tmux-{uid}")).join(name);
+    std::fs::create_dir_all(expected.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(foreign.parent().unwrap()).unwrap();
+    std::fs::write(&foreign, b"").unwrap();
+    let _env = EnvGuard::apply(&[
+        ("TMUX_TMPDIR", native.to_str()), ("TMPDIR", ordinary.to_str()),
+    ]);
+    let expected = expected.parent().unwrap().canonicalize().unwrap().join(name);
+    assert_eq!(super::socket_path_for_name(name), Some(expected.clone()));
+    assert_eq!(super::existing_socket_path_for_name(name), None);
+    assert!(super::tmux_socket_roots().contains(&native.join(format!("tmux-{uid}"))));
+    std::fs::write(&expected, b"").unwrap();
+    assert_eq!(super::existing_socket_path_for_name(name), Some(expected));
+    for value in [None, Some("")] {
+        let _default = EnvGuard::apply(&[("TMUX_TMPDIR", value)]);
+        let expected = Path::new("/tmp").canonicalize().unwrap().join(format!("tmux-{uid}")).join(name);
+        assert_eq!(super::socket_path_for_name(name), Some(expected));
+    }
+}
+
+#[test]
+#[serial_test::serial(env)]
 fn leader_receiver_endpoint_from_tmux_env_preserves_full_socket_path() {
     let leader_socket = "/tmp/ta-leader-root/tmux-501/dl2f";
     let _env = EnvGuard::apply(&[

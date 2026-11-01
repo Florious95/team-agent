@@ -214,6 +214,7 @@ jobs:
             'team-agent|--lib|lifecycle::launch::'
             'team-agent|--lib|lifecycle::restart::'
             'team-agent|--lib|contract_runtime::'
+            'team-agent|--lib|tmux_backend::'
             'team-agent|--test|messaging_scope_regression'
             'team-agent|--test|claim_endpoint_convergence_contract'
             'team-agent|--test|endpoint_convergence_persistence_contract'

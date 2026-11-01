@@ -907,7 +907,7 @@ fn existing_socket_path_for_workspace(workspace: &Path) -> Option<PathBuf> {
 /// purpose: 把短 socket 名解析成文件路径
 /// params:
 ///   socket_name: 短名;空串、"default"、绝对路径三种输入都视为「无短名可解析」
-/// returns: 已存在则返回实际路径;否则 Unix 上给 /tmp/tmux-<uid>/<name> 预期路径,Windows 上 None
+/// returns: Unix 上按 TMUX_TMPDIR（未设置时 /tmp）解析短名；Windows 上 None
 /// cfg: unix 分支读 geteuid;not(unix) 分支恒 None
 /// boundary: 不创建目录、不创建 socket;返回 Some 不代表文件存在
 /// ---
@@ -915,19 +915,16 @@ pub(crate) fn socket_path_for_name(socket_name: &str) -> Option<PathBuf> {
     if socket_name.is_empty() || socket_name == "default" || Path::new(socket_name).is_absolute() {
         return None;
     }
-    if let Some(existing) = existing_socket_path_for_name(socket_name) {
-        return Some(existing);
-    }
-    // Batch 1: tmux uses `/tmp/tmux-<uid>/` on Unix; on Windows this
-    // helper is dead code (Command::new "tmux" fails at spawn time
-    // before this path is dereferenced). N38 typed unsupported honored
-    // at the shellout boundary.
+    // A native `-L` label belongs to one configured root, not whichever
+    // same-named socket happens to exist in the discovery roots.
     #[cfg(unix)]
     {
         let uid = unsafe { libc::geteuid() };
-        let default_root = PathBuf::from(format!("/tmp/tmux-{uid}"));
-        let default_root = default_root.canonicalize().unwrap_or(default_root);
-        Some(default_root.join(socket_name))
+        let root = std::env::var_os("TMUX_TMPDIR").filter(|value| !value.is_empty())
+            .map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
+        let root = root.canonicalize().unwrap_or(root);
+        let candidate = root.join(format!("tmux-{uid}")).join(socket_name);
+        Some(candidate.canonicalize().unwrap_or(candidate))
     }
     #[cfg(not(unix))]
     {
@@ -939,15 +936,7 @@ pub(crate) fn socket_path_for_name(socket_name: &str) -> Option<PathBuf> {
 }
 
 fn existing_socket_path_for_name(socket_name: &str) -> Option<PathBuf> {
-    let roots = tmux_socket_roots();
-    for root in &roots {
-        let root = root.canonicalize().unwrap_or_else(|_| root.clone());
-        let candidate = root.join(socket_name);
-        if candidate.exists() {
-            return Some(candidate.canonicalize().unwrap_or(candidate));
-        }
-    }
-    None
+    socket_path_for_name(socket_name).filter(|candidate| candidate.exists())
 }
 
 /// ---
@@ -1120,8 +1109,8 @@ pub(crate) fn attach_commands_for_windows<'a>(
 
 /// ---
 /// purpose: 列出本机可能放 tmux socket 的根目录
-/// returns: Unix 上为 /tmp/tmux-<uid> 加 TMPDIR/tmux-<uid>(排序去重);Windows 上为空
-/// cfg: unix 读 geteuid 与 TMPDIR;not(unix) 返回空表示「本平台无此约定」
+/// returns: Unix 上为默认根、TMUX_TMPDIR 与旧 TMPDIR 根(排序去重);Windows 上为空
+/// cfg: unix 读 geteuid 与环境；这些根仅用于发现，不能互相替代原生 -L 解析
 /// boundary: 只列约定目录,不验证目录存在、不列举里面的 socket(那是 tmux_socket_endpoints)
 /// ---
 pub(crate) fn tmux_socket_roots() -> Vec<PathBuf> {
@@ -1133,8 +1122,10 @@ pub(crate) fn tmux_socket_roots() -> Vec<PathBuf> {
     {
         let uid = unsafe { libc::geteuid() };
         let mut roots = vec![PathBuf::from(format!("/tmp/tmux-{uid}"))];
-        if let Some(tmpdir) = std::env::var_os("TMPDIR") {
-            roots.push(PathBuf::from(tmpdir).join(format!("tmux-{uid}")));
+        for variable in ["TMUX_TMPDIR", "TMPDIR"] {
+            if let Some(tmpdir) = std::env::var_os(variable).filter(|value| !value.is_empty()) {
+                roots.push(PathBuf::from(tmpdir).join(format!("tmux-{uid}")));
+            }
         }
         roots.sort();
         roots.dedup();
