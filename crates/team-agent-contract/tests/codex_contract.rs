@@ -72,6 +72,9 @@ fn all_facets_and_hooks_disclose_owned_argv_server_coexistence_under_a_distinct_
     }
     assert_eq!(CODEX_DESCRIPTOR.mcp.carrier, Support::Supported(McpCarrier::Argv));
     assert_eq!(CODEX_DESCRIPTOR.mcp.isolation, McpIsolation::OwnedServerIsolated);
+    assert_eq!(CODEX_DESCRIPTOR.mcp.scope, ResourceScope::RuntimeRoot);
+    assert_eq!(CODEX_DESCRIPTOR.workspace.config_scope, ResourceScope::RuntimeRoot);
+    assert!(CODEX_DESCRIPTOR.workspace.shared_cwd);
     assert_eq!(CODEX_DESCRIPTOR.tool_names.naming, Support::Supported(ToolNaming::RuntimeBound));
     assert_eq!(CODEX_DESCRIPTOR.prompt.carrier, Support::Supported(PromptCarrier::RuntimeBridge));
     assert_eq!(CODEX_DESCRIPTOR.session.fresh, FreshSession::CaptureAfterLaunch);

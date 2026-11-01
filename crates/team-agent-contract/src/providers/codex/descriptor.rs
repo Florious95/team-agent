@@ -21,7 +21,7 @@ pub static CODEX_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     // `-c mcp_servers.<key>.*` exists only for this invocation. Account/native
     // servers from the user's config coexist; only this generation's owned
     // server and same-connection facts confer Team identity.
-    mcp: McpFacet { carrier: Support::Supported(McpCarrier::Argv), scope: ResourceScope::WorkingDirectory,
+    mcp: McpFacet { carrier: Support::Supported(McpCarrier::Argv), scope: ResourceScope::RuntimeRoot,
         tools: &TEAM_TOOLS, isolation: McpIsolation::OwnedServerIsolated },
     tool_names: ToolNameFacet { naming: Support::Supported(ToolNaming::RuntimeBound) },
     session: SessionFacet { fresh: FreshSession::CaptureAfterLaunch, resume: Support::Supported(ResumeMode::ExactId) },

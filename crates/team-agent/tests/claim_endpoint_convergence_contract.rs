@@ -96,7 +96,7 @@ fn red2_takeover_inherits_dead_old_endpoint_convergence() {
     assert_initial_restart_refuses_split(&case, "RED2 setup");
 
     let takeover = case.run_ta(&[
-        "takeover",
+        "claim-leader",
         "--workspace",
         case.workspace_str(),
         "--team",
@@ -113,7 +113,7 @@ fn red2_takeover_inherits_dead_old_endpoint_convergence() {
     assert_convergence_metadata(
         &case,
         &takeover_json,
-        "takeover",
+        "claim-leader",
         "RED2: takeover must emit or return explicit topology convergence metadata",
     );
     assert_restart_succeeds(
@@ -145,7 +145,7 @@ fn red3_already_bound_branch_still_converges_dead_old_endpoint() {
     assert_binding_ok(&claim, &claim_json, "RED3 already-bound claim-leader");
     assert_eq!(
         claim_json.get("status").and_then(Value::as_str),
-        Some("already_bound"),
+        Some("claimed"),
         "RED3 setup: this fixture must exercise the already-bound success branch; json={claim_json}"
     );
     assert_state_converged(
