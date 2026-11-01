@@ -494,11 +494,13 @@ impl Drop for EnvGuard {
 #[test]
 #[serial_test::serial(env)]
 fn socket_name_resolution_uses_native_tmpdir_without_foreign_root_fallback() {
-    let root = tempfile::tempdir().unwrap();
-    let native = root.path().join("native");
-    let ordinary = root.path().join("ordinary");
+    let root = std::env::temp_dir().join(format!("ta-socket-root-{}-{}",
+        std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+    std::fs::create_dir(&root).unwrap();
+    let native = root.join("native");
+    let ordinary = root.join("ordinary");
     let uid = unsafe { libc::geteuid() };
-    let name = root.path().file_name().unwrap().to_str().unwrap();
+    let name = root.file_name().unwrap().to_str().unwrap();
     let expected = native.join(format!("tmux-{uid}")).join(name);
     let foreign = ordinary.join(format!("tmux-{uid}")).join(name);
     std::fs::create_dir_all(expected.parent().unwrap()).unwrap();
@@ -518,6 +520,7 @@ fn socket_name_resolution_uses_native_tmpdir_without_foreign_root_fallback() {
         let expected = Path::new("/tmp").canonicalize().unwrap().join(format!("tmux-{uid}")).join(name);
         assert_eq!(super::socket_path_for_name(name), Some(expected));
     }
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
