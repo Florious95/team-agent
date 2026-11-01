@@ -560,6 +560,11 @@ pub(crate) fn start_agent_at_paths(
         session_id,
         new_session_id: spawn.plan.expected_session_id.clone(),
         rollout_path,
+        startup_receipt: serde_json::json!({
+            "workspace": workspace, "team": team_key,
+            "endpoint": transport.tmux_endpoint(),
+            "identity": crate::lifecycle::legacy_start_identity(&state, agent_id.as_str()),
+        }),
     })
     })();
     match spawned {

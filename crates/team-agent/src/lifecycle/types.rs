@@ -564,6 +564,8 @@ pub enum StartAgentOutcome {
         session_id: Option<SessionId>,
         new_session_id: Option<SessionId>,
         rollout_path: Option<RolloutPath>,
+        /// Identity captured by the successful spawn, not a later state reread.
+        startup_receipt: serde_json::Value,
     },
     /// 窗口已存在且非 force → noop(`start.py:134`)。
     Noop {
@@ -572,6 +574,18 @@ pub enum StartAgentOutcome {
     },
     /// agent paused → 不起(`start.py:101`,reason=agent_paused)。
     Paused { agent_id: AgentId },
+}
+
+/// The legacy carrier incarnation committed by a start operation.
+pub(crate) fn legacy_start_identity(state: &serde_json::Value, agent: &str) -> serde_json::Value {
+    let row = &state["agents"][agent];
+    let identity: serde_json::Map<String, serde_json::Value> = [
+        "provider", "pane_id", "pane_pid", "window", "generation", "spawn_epoch", "spawned_at",
+    ].into_iter().map(|key| (key.to_string(), row[key].clone())).collect();
+    serde_json::json!({
+        "agent": agent, "session_name": state.get("session_name"),
+        "generation": state.get("generation"), "carrier": identity,
+    })
 }
 
 /// `stop_agent(...)` 结果(`operations.py:99`)。同时关显示(`test_stop_agent_display`)。

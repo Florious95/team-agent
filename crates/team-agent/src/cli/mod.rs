@@ -3587,6 +3587,7 @@ pub mod lifecycle_port {
                 session_id,
                 new_session_id,
                 rollout_path,
+                startup_receipt,
             }) => Ok(agent_action_value(
                 agent,
                 workspace,
@@ -3599,6 +3600,7 @@ pub mod lifecycle_port {
                     "target": target,
                     "session_id": session_id.as_ref().map(|id| id.as_str()),
                     "new_session_id": new_session_id.as_ref().map(|id| id.as_str()),
+                    "startup_receipt": startup_receipt,
                     "rollout_path": rollout_path
                         .as_ref()
                         .map(|path| path.as_path().to_string_lossy().to_string()),
@@ -4990,7 +4992,8 @@ pub mod lifecycle_port {
 
     pub(crate) fn heal_leader_after_lifecycle(value: &mut Value, workspace: &Path, team: Option<&str>) {
         if value.get("ok").and_then(Value::as_bool) != Some(true) { return; }
-        let (_detail, bound, reason) = crate::lifecycle::restart_leader_public_bind(workspace, team, &json!({}));
+        let (_detail, bound, reason, claim) = crate::lifecycle::restart::restart_leader_public_bind_with_receipt(workspace, team, &json!({}));
+        if let Some(claim) = claim { value["leader_claim_receipt"] = claim; }
         value["leader_bind_ok"] = json!(bound);
         if let Some(reason) = reason { value["leader_bind_reason"] = json!(reason); }
         else if let Some(object) = value.as_object_mut() { object.remove("leader_bind_reason"); }

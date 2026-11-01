@@ -2010,18 +2010,28 @@ pub fn restart_leader_public_bind(
     team: Option<&str>,
     in_memory_state: &serde_json::Value,
 ) -> (Option<serde_json::Value>, bool, Option<String>) {
+    let (debt, ok, reason, _) = restart_leader_public_bind_with_receipt(workspace, team, in_memory_state);
+    (debt, ok, reason)
+}
+
+/// Keep the actual successful claim receipt separate from attachment failures.
+pub(crate) fn restart_leader_public_bind_with_receipt(
+    workspace: &std::path::Path,
+    team: Option<&str>,
+    in_memory_state: &serde_json::Value,
+) -> (Option<serde_json::Value>, bool, Option<String>, Option<serde_json::Value>) {
     let scope = match crate::state::projection::resolve_runtime_team_scope_readonly(workspace, team) {
         Ok(scope) => scope,
-        Err(error) => return (Some(serde_json::json!({"leader_attach_error": error.to_string()})), false, Some("leader_scope_unavailable".into())),
+        Err(error) => return (Some(serde_json::json!({"leader_attach_error": error.to_string()})), false, Some("leader_scope_unavailable".into()), None),
     };
     let team_key = scope.canonical_team_key.as_str();
     let team = Some(team_key);
-    let attach_window_failures = match try_autobind_leader_after_restart(workspace, team, in_memory_state) {
-        Ok(debt) => debt,
+    let (attach_window_failures, claim) = match try_autobind_leader_after_restart(workspace, team, in_memory_state) {
+        Ok(result) => result,
         Err(failure) => {
             eprintln!("team_agent::restart auto_attach_leader failed reason={} error={} team={team:?}", failure.reason, failure.error);
             // Preserve the refusal; index absence after failed attachment is a consequence.
-            return (Some(serde_json::json!({"leader_attach_error": failure.error})), false, Some(failure.reason));
+            return (Some(serde_json::json!({"leader_attach_error": failure.error})), false, Some(failure.reason), None);
         }
     };
     let persisted = load_restart_bind_state(workspace, team_key);
@@ -2032,7 +2042,7 @@ pub fn restart_leader_public_bind(
     );
     let (ok, reason) =
         apply_binding_maintain_failures(&attach_window_failures, class_ok, class_reason);
-    (attach_window_failures, ok, reason)
+    (attach_window_failures, ok, reason, claim)
 }
 
 fn maintain_live_binding_index(
@@ -2061,7 +2071,7 @@ fn try_autobind_leader_after_restart(
     workspace: &std::path::Path,
     team: Option<&str>,
     state: &serde_json::Value,
-) -> Result<Option<serde_json::Value>, RestartAttachFailure> {
+) -> Result<(Option<serde_json::Value>, Option<serde_json::Value>), RestartAttachFailure> {
     let team_key = team.unwrap_or("");
     let persisted = load_restart_bind_state(workspace, team_key);
     let state = persisted.as_ref().unwrap_or(state);
@@ -2073,7 +2083,7 @@ fn try_autobind_leader_after_restart(
         && receiver.get("tmux_socket").and_then(serde_json::Value::as_str)
             .zip(caller_socket.as_deref()).is_some_and(|(a, b)| crate::topology::same_endpoint(a, b)));
     if !caller_is_recorded && (bound || reason.as_deref() == Some("leader_registry_index_missing")) {
-        return Ok(maintain_live_binding_index(workspace, team, state));
+        return Ok((maintain_live_binding_index(workspace, team, state), None));
     }
     if std::env::var_os("TMUX_PANE").is_none() {
         return Err(RestartAttachFailure {
@@ -2105,7 +2115,12 @@ fn try_autobind_leader_after_restart(
                     );
                 }
             }
-            Ok(Some(debt))
+            let claim = serde_json::json!({
+                "workspace": workspace, "team": team_key,
+                "owner": result.owner, "receiver": result.receiver,
+                "owner_epoch": result.owner_epoch,
+            });
+            Ok((Some(debt), Some(claim)))
         }
         Ok(result) => Err(RestartAttachFailure {
             reason: serde_json::to_value(result.reason).ok()

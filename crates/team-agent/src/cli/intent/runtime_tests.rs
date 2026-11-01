@@ -39,9 +39,53 @@ fn batch_start_does_not_adopt_an_unrelated_owner_change_as_recovery() {
     state["teams"]["fixture"]["team_owner"] = json!({"pane_id":"%foreign", "owner_epoch":2});
     std::fs::write(path, serde_json::to_vec(&state).unwrap()).unwrap();
     let baseline = planned.topology.clone();
-    let error = advance_topology(&mut planned, &step, &json!({"runtime":"contract", "ok":true})).unwrap_err();
-    assert!(error.to_string().contains("owner changed during batch startup"));
-    assert_eq!(planned.topology, baseline);
+    for receipt in [json!({"runtime":"contract", "ok":true}), json!({"ok":true, "status":"running"})] {
+        let error = advance_topology(&mut planned, &step, &receipt).unwrap_err();
+        assert!(error.to_string().contains("owner changed during batch startup"));
+        assert_eq!(planned.topology, baseline);
+    }
+}
+
+#[test]
+fn batch_start_accepts_only_its_exact_scoped_leader_claim() {
+    let scope = ResolvedScope { workspace: PathBuf::from("/project"), team: Some("fixture".into()) };
+    let owner = json!({
+        "pane_id":"%2", "provider":"pi", "owner_epoch":2,
+        "machine_fingerprint":"host", "leader_session_uuid":"uuid",
+    });
+    let next = topology(&json!({"team_owner":owner, "owner_epoch":2}));
+    let receipt = json!({"leader_claim_receipt":{
+        "workspace":"/project", "team":"fixture", "owner":owner, "owner_epoch":2,
+        "receiver":{"pane_id":"%2", "tmux_socket":"/owned/socket", "session_name":"leader"},
+    }});
+    assert!(claim_matches_topology(&scope, &next, &receipt));
+    assert!(!claim_matches_topology(&scope, &next, &json!({"leader_bind_ok":true})));
+    for pointer in ["/owner/pane_id", "/owner/provider", "/owner/leader_session_uuid", "/owner/tmux_socket", "/owner/session_name", "/owner_epoch"] {
+        let mut changed = next.clone();
+        *changed.pointer_mut(pointer).unwrap() = json!("foreign");
+        assert!(!claim_matches_topology(&scope, &changed, &receipt), "{pointer}");
+    }
+    for key in ["workspace", "team", "owner_epoch"] {
+        let mut changed = receipt.clone();
+        changed["leader_claim_receipt"][key] = json!("foreign");
+        assert!(!claim_matches_topology(&scope, &next, &changed), "{key}");
+    }
+}
+
+#[test]
+fn legacy_start_receipt_preserves_the_committed_carrier_across_own_claim() {
+    let mut state = json!({
+        "session_name":"owned", "generation":"session-1", "owner_epoch":1,
+        "agents":{"one":{"provider":"fake", "pane_id":"%2", "pane_pid":42, "spawned_at":"birth-1"}},
+    });
+    let committed = crate::lifecycle::legacy_start_identity(&state, "one");
+    state["owner_epoch"] = json!(2);
+    assert_eq!(committed, crate::lifecycle::legacy_start_identity(&state, "one"));
+    for pointer in ["/session_name", "/generation", "/agents/one/pane_id", "/agents/one/pane_pid", "/agents/one/spawned_at"] {
+        let mut changed = state.clone();
+        *changed.pointer_mut(pointer).unwrap() = json!("replacement");
+        assert_ne!(committed, crate::lifecycle::legacy_start_identity(&changed, "one"), "{pointer}");
+    }
 }
 
 fn write_role(root: &Path, id: &str) {

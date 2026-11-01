@@ -19,6 +19,8 @@ const COMMAND_GRAMMAR_PROVIDER_COMMANDS: &[(&str, Provider)] = &[
     ("gemini", Provider::GeminiCli),
     ("grok", Provider::Grok),
     ("fake", Provider::Fake),
+    ("pi", Provider::Pi),
+    ("pi.exe", Provider::Pi),
 ];
 
 pub(crate) fn attribute_pane_provider(pane: &PaneInfo) -> Option<Provider> {
@@ -91,25 +93,38 @@ fn provider_from_pid_env(pid: u32) -> Option<Provider> {
 }
 
 fn provider_from_command_text(text: &str) -> Option<Provider> {
-    let lower = text.to_ascii_lowercase();
-    if pi_command_text(&lower) {
-        return Some(Provider::Pi);
+    let lower = text.to_ascii_lowercase().replace('\\', "/");
+    let mut words = lower.split_whitespace();
+    let executable = words.next()?.trim_matches(['\'', '"']);
+    let name = executable.rsplit('/').next()?;
+    let interpreted = matches!(name, "node" | "node.exe" | "bun" | "bun.exe" | "python" | "python3")
+        || name.starts_with("python3.");
+    // A shell's argv contains PATH assignments and quoted scripts; neither is
+    // executable identity. Inspect its real children instead. For interpreters,
+    // only the script operand (never prompts or later arguments) is evidence.
+    let entrypoint = if interpreted {
+        let script = words.next()?.trim_matches(['\'', '"']);
+        if script.starts_with('-') { return None; }
+        script
+    } else { executable };
+    let basename = entrypoint.rsplit('/').next()?;
+    let basename = [".js", ".mjs", ".cjs", ".py"].into_iter()
+        .find_map(|suffix| basename.strip_suffix(suffix)).unwrap_or(basename);
+    if let Some((_, provider)) = COMMAND_GRAMMAR_PROVIDER_COMMANDS.iter().find(|(name, _)| *name == basename) {
+        return Some(*provider);
     }
-    COMMAND_GRAMMAR_PROVIDER_COMMANDS
-        .iter()
-        .find_map(|(needle, provider)| lower.contains(needle).then_some(*provider))
-}
-
-fn pi_command_text(lower: &str) -> bool {
-    lower
-        .split_whitespace()
-        .next()
-        .is_some_and(|token| {
-            token == "pi"
-                || token == "pi.exe"
-                || token.ends_with("/pi")
-                || token.ends_with("\\pi.exe")
-        })
+    if !interpreted { return None; }
+    // Public npm entrypoints whose file is named cli.js/index.js, rather than
+    // the command. This examines observed argv; it never probes install paths.
+    let (_, package) = entrypoint.rsplit_once("/node_modules/")?;
+    [
+        ("@anthropic-ai/claude-code/", Provider::ClaudeCode),
+        ("@openai/codex/", Provider::Codex),
+        ("@github/copilot/", Provider::Copilot),
+        ("@google/gemini-cli/", Provider::GeminiCli),
+        ("@earendil-works/pi-coding-agent/", Provider::Pi),
+        ("@mariozechner/pi-coding-agent/", Provider::Pi),
+    ].into_iter().find_map(|(prefix, provider)| package.starts_with(prefix).then_some(provider))
 }
 
 fn provider_from_env_text(text: &str) -> Option<Provider> {
@@ -187,6 +202,16 @@ mod tests {
             Some(Provider::Pi)
         );
         assert_eq!(attribute_command_provider("pilot"), None);
+    }
+
+    #[test]
+    fn shell_path_and_prompt_mentions_are_not_provider_identity() {
+        assert_eq!(attribute_command_provider("sh -lc PATH=/home/user/.claude/proxy/bin TEAM_AGENT_LEADER_PROVIDER=codex codex"), None);
+        assert_eq!(attribute_command_provider("codex --prompt 'ask claude and copilot'"), Some(Provider::Codex));
+        assert_eq!(attribute_command_provider("python3.14 /private/claude-fixture/bin/codex --prompt claude"), Some(Provider::Codex));
+        assert_eq!(attribute_command_provider("node /tmp/not-a-provider.js --prompt claude"), None);
+        assert_eq!(attribute_command_provider("python3 -c 'claude'"), None);
+        assert_eq!(attribute_command_provider("node /public/node_modules/@anthropic-ai/claude-code/cli.js --prompt codex"), Some(Provider::ClaudeCode));
     }
 
     #[test]

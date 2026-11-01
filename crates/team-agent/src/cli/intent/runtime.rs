@@ -1133,15 +1133,39 @@ fn restart_args(plan: &Plan) -> RestartArgs {
     }
 }
 
-// Accept only transport recovery attributable to this completed native operation.
-// Owner changes, replacement generations and unrelated endpoint edits still refuse.
+// Accept only topology changes attributable to this completed startup and its
+// own leader claim. Concurrent owners, incarnations and endpoints still refuse.
+#[cfg(unix)]
+fn claim_matches_topology(scope: &ResolvedScope, next: &Value, receipt: &Value) -> bool {
+    let Some(claim) = receipt.get("leader_claim_receipt") else { return false; };
+    if claim.get("workspace") != Some(&json!(scope.workspace))
+        || claim.get("team") != Some(&json!(scope.team))
+        || !claim["owner"].is_object() || !claim["receiver"].is_object()
+        || claim["owner_epoch"].as_u64().is_none()
+        || claim["owner"]["pane_id"] != claim["receiver"]["pane_id"]
+    { return false; }
+    let mut expected = topology(&json!({"team_owner": claim["owner"], "owner_epoch": claim["owner_epoch"]}));
+    // These optional raw owner fields are not part of the typed TeamOwner;
+    // when present they must agree with this claim's physical receiver.
+    for key in ["tmux_socket", "session_name"] {
+        let current = &next["owner"][key];
+        if !current.is_null() {
+            let agrees = if key == "tmux_socket" {
+                current.as_str().zip(claim["receiver"][key].as_str())
+                    .is_some_and(|(a, b)| crate::topology::same_endpoint(a, b))
+            } else { current == &claim["receiver"][key] };
+            if !agrees { return false; }
+        }
+        expected["owner"][key] = current.clone();
+    }
+    expected["owner"] == next["owner"] && expected["owner_epoch"] == next["owner_epoch"]
+}
 #[cfg(not(unix))]
 pub(super) fn advance_topology(_plan: &mut Plan, _step: &Step, _receipt: &Value) -> Result<(), CliError> { Ok(()) }
 
 #[cfg(unix)]
 pub(super) fn advance_topology(plan: &mut Plan, step: &Step, receipt: &Value) -> Result<(), CliError> {
     let Step::StartAgent(args) = step else { return Ok(()); };
-    if receipt.get("runtime").and_then(Value::as_str) != Some("contract") { return Ok(()); }
     let Some(previous) = plan.topology.as_ref() else { return Ok(()); };
     let selected = resolve_active_team_readonly(&plan.scope.workspace, plan.scope.team.as_deref(), SelectorMode::RuntimeOnly)?;
     if Some(selected.team_key.as_str()) != plan.scope.team.as_deref() || selected.run_workspace != plan.scope.workspace {
@@ -1149,8 +1173,29 @@ pub(super) fn advance_topology(plan: &mut Plan, step: &Step, receipt: &Value) ->
     }
     let next = topology(&selected.state);
     if next == *previous { return Ok(()); }
-    if next["owner"] != previous["owner"] || next["owner_epoch"] != previous["owner_epoch"] {
+    if (next["owner"] != previous["owner"] || next["owner_epoch"] != previous["owner_epoch"])
+        && (!claim_matches_topology(&plan.scope, &next, receipt)
+            || next["owner_epoch"].as_u64().unwrap_or(0) < previous["owner_epoch"].as_u64().unwrap_or(0))
+    {
         return Err(refusal("owner changed during batch startup; inspect before continuing"));
+    }
+    if receipt.get("runtime").and_then(Value::as_str) != Some("contract") {
+        let startup = &receipt["startup_receipt"];
+        let row = &selected.state["agents"][&args.agent];
+        let transport = checked(crate::lifecycle::restart::lifecycle_worker_tmux_backend_selection_for_state(&selected.run_workspace, &selected.state))?.backend;
+        if receipt.get("ok").and_then(Value::as_bool) != Some(true)
+            || receipt.get("status").and_then(Value::as_str) != Some("running")
+            || receipt.get("agent_id").and_then(Value::as_str) != Some(args.agent.as_str())
+            || receipt.get("target") != row.get("pane_id")
+            || startup.get("workspace") != Some(&json!(plan.scope.workspace))
+            || startup.get("team") != Some(&json!(selected.team_key))
+            || startup.get("identity") != Some(&crate::lifecycle::legacy_start_identity(&selected.state, &args.agent))
+            || !startup.get("endpoint").and_then(Value::as_str).zip(transport.tmux_endpoint().as_deref())
+                .is_some_and(|(a, b)| crate::topology::same_endpoint(a, b))
+            || observe(&selected, &args.agent, row)? != Observation::Live
+        { return Err(refusal("legacy startup receipt changed before batch continuation")); }
+        plan.topology = Some(next);
+        return Ok(());
     }
     let backend = checked(crate::contract_runtime::backend::Backend::open_readonly(&plan.scope.workspace, &selected.team_key))?;
     let id = checked(team_agent_contract::contract::types::SeatId::new(&args.agent))?;
@@ -1162,6 +1207,10 @@ pub(super) fn advance_topology(plan: &mut Plan, step: &Step, receipt: &Value) ->
         || current.identity != record.target.identity
         || receipt.get("generation") != Some(&json!(current.identity.generation.0))
     { return Err(refusal("native startup receipt changed before batch continuation")); }
+    if next["tmux_socket"] == previous["tmux_socket"] && next["transport"] == previous["transport"] {
+        plan.topology = Some(next);
+        return Ok(());
+    }
     let target = current.physical.as_ref().filter(|target| target.shared_endpoint)
         .ok_or_else(|| refusal("startup did not own shared topology recovery"))?;
     let transport = checked(crate::lifecycle::restart::lifecycle_worker_tmux_backend_selection_for_state(&selected.run_workspace, &selected.state))?.backend;

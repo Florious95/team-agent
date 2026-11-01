@@ -75,6 +75,7 @@ mod orchestrator;
 pub mod preflight;
 mod rebuild;
 pub use rebuild::{restart_bind_status, restart_leader_public_bind};
+pub(crate) use rebuild::restart_leader_public_bind_with_receipt;
 pub(crate) mod remove;
 mod selection;
 mod team_state;
