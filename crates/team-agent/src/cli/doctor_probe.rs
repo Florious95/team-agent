@@ -14,13 +14,21 @@ const BUDGET: Duration = Duration::from_millis(500);
 #[cfg(test)]
 mod tests;
 
+/// Evidence method; `status` still determines whether it ran or was BLOCKED.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Proof {
+    Probed,
+    Exercised,
+}
+
 #[derive(Clone, Serialize)]
 struct Link {
     id: String,
     #[serde(rename = "link")]
     name: &'static str,
     status: &'static str,
-    #[serde(rename = "proof")]
+    proof: Proof,
     message: String,
 }
 impl Link {
@@ -29,6 +37,11 @@ impl Link {
             id: format!("L{n}"),
             name: ["scope", "host", "seats", "storage", "dispatch", "return"][n - 1],
             status,
+            proof: if n == 4 {
+                Proof::Exercised
+            } else {
+                Proof::Probed
+            },
             message: message.into(),
         }
     }
@@ -76,17 +89,11 @@ impl Action {
         }
     }
     fn display(&self) -> String {
-        let command = self
-            .argv
+        self.argv
             .iter()
             .map(|arg| super::shell_quote(arg))
             .collect::<Vec<_>>()
-            .join(" ");
-        match &self.context {
-            Some(context) if !command.is_empty() => format!("{context}: {command}"),
-            Some(context) => context.clone(),
-            None => command,
-        }
+            .join(" ")
     }
 }
 fn action(command: &str, workspace: &Path, team: &str) -> Action {
@@ -519,7 +526,12 @@ fn render(
             lines.push("- L2–L6 BLOCKED by L1 (scope not resolved)".into());
         }
         if let Some(fix) = fix {
-            lines.push(format!("fix: {}", fix.display()));
+            if let Some(context) = &fix.context {
+                lines.push(format!("context: {context}"));
+            }
+            if !fix.argv.is_empty() {
+                lines.push(format!("fix: {}", fix.display()));
+            }
         }
         lines.push(format!("avoid: {avoid}"));
         result.output = CmdOutput::Human(lines.join("\n"));
@@ -535,38 +547,68 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
         args.team.as_deref(),
         crate::state::selector::SelectorMode::RuntimeOnly,
     );
-    let scope = selected.map_err(|e| e.to_string()).and_then(|selected| {
-        crate::model::paths::encode_scope_component(&selected.team_key).map_err(str::to_owned)?;
-        let raw = crate::direct_delivery::snapshot(&selected.run_workspace)?;
-        if raw.as_object().is_none_or(|v| v.is_empty()) {
-            return Err("runtime scope missing".into());
-        }
-        if let Some(spec) = &args.spec {
-            let text = fs::read_to_string(spec).map_err(|e| e.to_string())?;
-            crate::model::yaml::loads(&text).map_err(|e| e.to_string())?;
-        }
-        let directory =
-            crate::direct_delivery::directory(&selected.run_workspace, Some(&selected.team_key))?;
-        if args.team.is_none() {
-            if let Some(live) = caller_team(&raw, &caller).filter(|live| live != &selected.team_key)
-            {
-                let endpoint = socket(&selected.state);
-                let active = crate::transport_factory::bounded_endpoint_transport(
-                    &endpoint,
-                    Instant::now() + BUDGET,
-                )
-                .list_targets()
-                .is_ok_and(|panes| !panes.is_empty());
-                if !active {
-                    return Err(format!(
-                        "stale active scope {}; caller leads {live}; select --team {live}",
-                        selected.team_key
-                    ));
+    let scope = selected
+        .map_err(|e| e.to_string())
+        .and_then(|mut selected| {
+            let raw = crate::direct_delivery::snapshot(&selected.run_workspace)?;
+            // General lifecycle selection may silently skip terminal/leader-only
+            // teams. Doctor must diagnose a recorded default before that fallback.
+            if args.team.is_none() {
+                if let Some(active) = raw
+                    .get("active_team_key")
+                    .and_then(Value::as_str)
+                    .filter(|active| {
+                        raw.get("teams")
+                            .and_then(|teams| teams.get(*active))
+                            .is_some()
+                    })
+                    .filter(|active| *active != selected.team_key)
+                {
+                    selected = crate::state::selector::resolve_active_team_readonly(
+                        &selected.run_workspace,
+                        Some(active),
+                        crate::state::selector::SelectorMode::RuntimeOnly,
+                    )
+                    .map_err(|e| e.to_string())?;
                 }
             }
-        }
-        Ok((selected, directory))
-    });
+            crate::model::paths::encode_scope_component(&selected.team_key)
+                .map_err(str::to_owned)?;
+            if raw.as_object().is_none_or(|v| v.is_empty()) {
+                return Err("runtime scope missing".into());
+            }
+            if let Some(spec) = &args.spec {
+                let text = fs::read_to_string(spec).map_err(|e| e.to_string())?;
+                crate::model::yaml::loads(&text).map_err(|e| e.to_string())?;
+            }
+            let directory = crate::direct_delivery::directory(
+                &selected.run_workspace,
+                Some(&selected.team_key),
+            )?;
+            if args.team.is_none() {
+                if let Some(live) =
+                    caller_team(&raw, &caller).filter(|live| live != &selected.team_key)
+                {
+                    let endpoint = socket(&selected.state);
+                    let active = crate::transport_factory::bounded_endpoint_transport(
+                        &endpoint,
+                        Instant::now() + BUDGET,
+                    )
+                    .list_targets()
+                    .is_ok_and(|panes| !panes.is_empty())
+                        && directory.probe("leader", Instant::now() + BUDGET).is_ok();
+                    // A surviving workspace/worker server does not make a dead
+                    // team's registered leader live (shared-host stale selector).
+                    if !active {
+                        return Err(format!(
+                            "stale active scope {}; caller leads {live}; select --team {live}",
+                            selected.team_key
+                        ));
+                    }
+                }
+            }
+            Ok((selected, directory))
+        });
     let (selected, directory) = match scope {
         Ok(scope) => scope,
         Err(error) => {

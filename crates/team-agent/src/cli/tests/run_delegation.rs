@@ -424,7 +424,7 @@ fn issue338_doctor_reports_same_scope_unknown_observations_without_state_writes(
     assert_eq!(links.len(), 6);
     assert_eq!(links[1]["status"], "FAIL", "the hermetic fixture has no responding tmux server");
     assert_eq!(links[2]["status"], "BLOCKED", "an unavailable host cannot establish worker liveness");
-    assert!(links[2]["proof"].as_str().unwrap().contains("host"));
+    assert!(links[2]["message"].as_str().unwrap().contains("host"));
     assert_eq!(links[3]["status"], "PASS", "storage is independent of the unavailable worker host");
     let argv = value["next_action"]["argv"].as_array().unwrap();
     assert!(argv.windows(2).any(|pair| pair == [json!("--team"), json!("current")]));

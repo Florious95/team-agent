@@ -298,7 +298,14 @@ fn rendering_is_bounded_and_not_a_round_trip_claim() {
     assert!(machine.len() < 2000);
     let value: Value = serde_json::from_str(&machine).unwrap();
     assert_eq!(value["links"][5]["link"], "return");
-    assert!(value["links"][5]["proof"]
+    assert_eq!(value["links"][5]["proof"], "probed");
+    assert_eq!(value["links"][3]["proof"], "exercised");
+    assert!(value["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|link| matches!(link["proof"].as_str(), Some("probed" | "exercised"))));
+    assert!(value["links"][5]["message"]
         .as_str()
         .unwrap()
         .contains("%0@/owned/leader.sock"));
@@ -363,6 +370,33 @@ fn claim_remedy_preserves_argv_and_execution_context_without_force() {
     assert_eq!(value["context"], "from the current leader terminal");
     assert!(remedy.display().contains("--workspace '/owned/X 运维'"));
     assert!(!remedy.argv.iter().any(|arg| arg == "--force"));
+}
+
+#[test]
+fn claim_fix_is_copyable_and_context_is_separate() {
+    let links = (1..=6)
+        .map(|n| Link::new(n, if n == 6 { "FAIL" } else { "PASS" }, "checked"))
+        .collect();
+    let remedy = action("claim-leader", Path::new("/owned/X 运维"), "X 运维");
+    let expected = format!("fix: {}", remedy.display());
+    let human = output(render(
+        links,
+        Path::new("/owned/X 运维"),
+        "X 运维",
+        json!({}),
+        (1, 1),
+        Some(remedy),
+        "no forced takeover",
+        false,
+        Instant::now(),
+    ));
+    assert!(human.lines().count() <= 10);
+    assert!(human.lines().any(|line| line == expected));
+    assert!(human
+        .lines()
+        .any(|line| line == "context: from the current leader terminal"));
+    assert!(expected.starts_with("fix: team-agent claim-leader "));
+    assert!(!expected.contains("from the current leader terminal"));
 }
 
 #[test]
