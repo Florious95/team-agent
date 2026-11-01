@@ -1339,10 +1339,8 @@ fn prompt_aware_spawn_error(plan: &LeaderStartPlan, error: TransportError) -> Le
     .for_provider(plan.provider);
     match error {
         TransportError::Subprocess { code, .. } => safe.exit_code = code,
-        TransportError::Spawn { source, .. }
-        | TransportError::Inject { source, .. }
-        | TransportError::Capture { source }
-        | TransportError::Io(source) => {
+        TransportError::Spawn { source, .. } | TransportError::Inject { source, .. }
+            | TransportError::Capture { source } | TransportError::Io(source) => {
             safe.io_kind = Some(format!("{:?}", source.kind()));
         }
         oversized @ TransportError::CommandTooLong { .. } => {
@@ -2360,9 +2358,10 @@ mod tests {
         execute_leader_plan_after_ambient_authority, format_launcher_failure,
         handle_exec_provider_startup_prompts, is_interactive_shell_basename,
         lock_down_window_rename, managed_client_argv, managed_leader_window_from_occupied,
-        persist_exec_provider_leader_binding, persist_managed_leader_binding, push_bounded_stderr,
-        shlex_quote, write_window_rename_lockdown_event, ManagedClientAttachMode,
-        VerifiedAmbientPaneAuthority, LEADER_STDERR_LIMIT,
+        persist_exec_provider_leader_binding, persist_managed_leader_binding,
+        push_bounded_stderr, shlex_quote,
+        write_window_rename_lockdown_event, ManagedClientAttachMode, VerifiedAmbientPaneAuthority,
+        LEADER_STDERR_LIMIT,
     };
 
     struct ScriptedTransport {
@@ -2798,48 +2797,28 @@ mod tests {
     fn exec_binding_fixture(workspace: &Path) -> (LeaderStartPlan, VerifiedAmbientPaneAuthority) {
         let identity = LeaderIdentity {
             leader_session_uuid: LeaderSessionUuid::derive(
-                "fp",
-                &workspace.to_string_lossy(),
-                "tester",
-                "current",
-            )
-            .unwrap(),
+                "fp", &workspace.to_string_lossy(), "tester", "current",
+            ).unwrap(),
             leader_session_uuid_source: LeaderSessionUuidSource::Derived,
-            machine_fingerprint: "fp".into(),
-            workspace_abspath: workspace.into(),
-            os_user: "tester".into(),
-            team_id: TeamKey::new("current"),
+            machine_fingerprint: "fp".into(), workspace_abspath: workspace.into(),
+            os_user: "tester".into(), team_id: TeamKey::new("current"),
         };
         let plan = LeaderStartPlan {
-            mode: LeaderStartMode::ExecProvider,
-            provider: Provider::Pi,
-            workspace: workspace.into(),
-            socket: LeaderLaunchSocket::Workspace,
-            session_name: None,
-            argv: vec![],
-            provider_argv: vec!["pi".into()],
-            leader_prompt: None,
-            session_capture: None,
-            leader_window: None,
-            is_external_leader: false,
-            leader_env: BTreeMap::new(),
-            identity: Some(identity),
-            detached: false,
+            mode: LeaderStartMode::ExecProvider, provider: Provider::Pi,
+            workspace: workspace.into(), socket: LeaderLaunchSocket::Workspace,
+            session_name: None, argv: vec![], provider_argv: vec!["pi".into()],
+            leader_prompt: None, session_capture: None, leader_window: None,
+            is_external_leader: false, leader_env: BTreeMap::new(),
+            identity: Some(identity), detached: false,
         };
         let authority = VerifiedAmbientPaneAuthority {
             pane_id: PaneId::new("%77"),
             observed: PaneInfo {
-                pane_id: PaneId::new("%77"),
-                session: SessionName::new("cursor-gate-leader"),
-                window_index: Some(0),
-                window_name: Some(WindowName::new("pi")),
-                pane_index: Some(0),
-                tty: Some("/dev/ttys077".into()),
-                current_command: Some("pi".into()),
-                current_path: Some(workspace.into()),
-                active: true,
-                pane_pid: None,
-                leader_env: BTreeMap::new(),
+                pane_id: PaneId::new("%77"), session: SessionName::new("cursor-gate-leader"),
+                window_index: Some(0), window_name: Some(WindowName::new("pi")),
+                pane_index: Some(0), tty: Some("/dev/ttys077".into()),
+                current_command: Some("pi".into()), current_path: Some(workspace.into()),
+                active: true, pane_pid: None, leader_env: BTreeMap::new(),
             },
             endpoint: "/private/tmp/fixture-exec-leader.sock".into(),
             tmux: "/private/tmp/fixture-exec-leader.sock,123,0".into(),
@@ -2848,14 +2827,9 @@ mod tests {
     }
 
     fn exec_binding_workspace() -> std::path::PathBuf {
-        let workspace = std::env::temp_dir().join(format!(
-            "ta-exec-bootstrap-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let workspace = std::env::temp_dir().join(format!("ta-exec-bootstrap-{}-{}",
+            std::process::id(), std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::create_dir(&workspace).unwrap();
         workspace
     }
@@ -2869,13 +2843,8 @@ mod tests {
         let before = state.clone();
         assert!(state["session_name"].is_null());
         assert!(state["teams"]["current"]["session_name"].is_null());
-        assert_eq!(
-            state["teams"]["current"]["leader_receiver"]["session_name"],
-            "cursor-gate-leader"
-        );
-        assert!(!crate::lifecycle::launch::quick_start_has_runtime_for_test(
-            &state, "current"
-        ));
+        assert_eq!(state["teams"]["current"]["leader_receiver"]["session_name"], "cursor-gate-leader");
+        assert!(!crate::lifecycle::launch::quick_start_has_runtime_for_test(&state, "current"));
         assert_eq!(state, before);
         std::fs::remove_dir_all(workspace).unwrap();
     }

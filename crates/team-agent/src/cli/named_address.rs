@@ -122,15 +122,11 @@ impl NamedAddressError {
         let workspace = self.human_scope.as_deref();
         let mut message = format!(
             "{}\nRequested recipient: {requested:?}\nReason: {}",
-            human_address_reason(self.kind.as_str())
-                .unwrap_or("No usable recipient could be resolved."),
+            human_address_reason(self.kind.as_str()).unwrap_or("No usable recipient could be resolved."),
             self.message
         );
         if let Some(workspace) = workspace {
-            message.push_str(&format!(
-                "\nSelected workspace: {:?}",
-                workspace.to_string_lossy()
-            ));
+            message.push_str(&format!("\nSelected workspace: {:?}", workspace.to_string_lossy()));
         }
         if let Some(team) = self.human_team.as_deref() {
             message.push_str(&format!("\nSelected team: {team:?}"));
@@ -707,14 +703,11 @@ fn resolve_in_workspace(
         ParsedTarget::TeamEntity { team, entity } => {
             let canonical = canonical_named_team_key(target_workspace, state, team)
                 .unwrap_or_else(|| team.clone());
-            if team_entry(state, &canonical).is_none()
-                && !is_legacy_single_team_active(state, &canonical)
-            {
+            if team_entry(state, &canonical).is_none() && !is_legacy_single_team_active(state, &canonical) {
                 return Err(if parsed.workspace.is_some() {
                     team_key_not_found(target_workspace, state, team)
                 } else {
-                    name_not_resolvable_team(team)
-                        .with_scoped_suggestions_for_team(state, team, entity, parsed)
+                    name_not_resolvable_team(team).with_scoped_suggestions_for_team(state, team, entity, parsed)
                 });
             }
             let result = if entity == "leader" {
@@ -1429,11 +1422,8 @@ fn canonical_named_team_key(
         return Some(requested.to_string());
     }
     let selected = crate::state::projection::resolve_runtime_team_scope_readonly(
-        target_workspace,
-        Some(requested),
-    )
-    .ok()?
-    .state;
+        target_workspace, Some(requested),
+    ).ok()?.state;
     let canonical = selected
         .get("active_team_key")
         .and_then(Value::as_str)

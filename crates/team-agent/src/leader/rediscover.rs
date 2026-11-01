@@ -42,7 +42,12 @@ pub fn try_readopt_leader_pane(
         )?;
         return Ok(None);
     };
-    if !readopt_candidate_is_usable_leader(workspace, &candidate, owner_record, receiver_provider) {
+    if !readopt_candidate_is_usable_leader(
+        workspace,
+        &candidate,
+        owner_record,
+        receiver_provider,
+    ) {
         event_log.write(
             LeaderEvent::ReceiverRebindRequired.name(),
             json!({"reason": "leader_pane_unusable"}),

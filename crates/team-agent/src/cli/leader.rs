@@ -117,11 +117,8 @@ pub fn cmd_leader_passthrough(
             return Err(CliError::Usage("--attach-existing is an alias for claim-leader; provider/session arguments are not accepted".to_string()));
         }
         return super::cmd_claim_leader(&super::ClaimLeaderArgs {
-            workspace: cwd.to_path_buf(),
-            team: None,
-            confirm: attach.confirm_attach,
-            json: as_json,
-            detail: false,
+            workspace: cwd.to_path_buf(), team: None, confirm: attach.confirm_attach,
+            json: as_json, detail: false,
         });
     }
     let value = lifecycle_port::start_leader(provider, &attach.provider_args, cwd, &attach)?;

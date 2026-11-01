@@ -99,10 +99,7 @@ pub fn check_team_owner(
     let (reason_kind, action) = if same_uuid {
         ("sticky_bind_collision", "team-agent claim-leader --confirm")
     } else {
-        (
-            "owner_takeover_required",
-            "team-agent claim-leader --confirm",
-        )
+        ("owner_takeover_required", "team-agent claim-leader --confirm")
     };
     // 键序对齐 Python dict 字面(preserve_order)。
     Some(json!({
