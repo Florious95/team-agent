@@ -940,6 +940,7 @@ fn claim_lease_no_incident_with_target(
             None
         };
         let (mut topology_convergence, converged) = apply_endpoint_convergence(
+            workspace,
             state,
             team_id,
             convergence_candidate,
@@ -1177,6 +1178,7 @@ fn claim_lease_no_incident_with_target(
         None
     };
     let (mut topology_convergence, converged) = apply_endpoint_convergence(
+        workspace,
         state,
         team_id,
         receiver.tmux_socket.as_deref(),
@@ -1262,6 +1264,7 @@ fn claim_lease_no_incident_with_target(
 }
 
 fn apply_endpoint_convergence(
+    workspace: &Path,
     state: &mut Value,
     team_id: &TeamKey,
     candidate_endpoint: Option<&str>,
@@ -1328,9 +1331,32 @@ fn apply_endpoint_convergence(
                 "candidate_source": candidate_source,
                 "owner_epoch": owner_epoch.0,
             });
+            // Pane numbers are server-local, not identities. Never carry a dead
+            // endpoint\'s cached worker target onto an unrelated shared server.
+            if crate::state::projection::team_state_key(state) == team_id.as_str() {
+                invalidate_worker_endpoint_bindings(state, workspace, team_id.as_str());
+            }
+            if let Some(team) = state.get_mut("teams").and_then(|teams| teams.get_mut(team_id.as_str())) {
+                invalidate_worker_endpoint_bindings(team, workspace, team_id.as_str());
+            }
             write_endpoint_fields(state, team_id.as_str(), &new_endpoint);
             write_convergence_marker(state, team_id.as_str(), &metadata);
             (Some(metadata), true)
+        }
+    }
+}
+
+fn invalidate_worker_endpoint_bindings(state: &mut Value, workspace: &Path, team: &str) {
+    if state.get("session_name").and_then(Value::as_str) == Some(format!("team-{team}").as_str()) {
+        state["session_name"] = json!(crate::compiler::default_session_name(workspace, team));
+    }
+    if let Some(agents) = state.get_mut("agents").and_then(Value::as_object_mut) {
+        for agent in agents.values_mut() {
+            // Native seats own independent endpoints; only legacy tmux bindings
+            // belong to the workspace endpoint that just changed.
+            if !crate::contract_runtime::framework::is_contract(agent) {
+                if let Some(agent) = agent.as_object_mut() { agent.remove("pane_id"); }
+            }
         }
     }
 }
@@ -2969,6 +2995,21 @@ fn readable_team_snapshot_path(w: &BP, n: &str) -> BF /* B0_DIAGNOSTIC_LEGACY_SN
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn endpoint_convergence_invalidates_legacy_panes_not_native_seats() {
+        let workspace = std::env::temp_dir().join("ta-mpp-claim-owner");
+        let mut state = json!({"session_name":"team-current","agents": {
+            "legacy":{"pane_id":"%1","pane_pid":123,"session_id":"keep"},
+            "native":{"runtime_family":"contract","pane_id":"%2","pane_pid":456}
+        }});
+        invalidate_worker_endpoint_bindings(&mut state, workspace.as_path(), "current");
+        assert_eq!(state["session_name"], crate::compiler::default_session_name(workspace.as_path(), "current"));
+        assert!(state["agents"]["legacy"].get("pane_id").is_none());
+        assert_eq!(state["agents"]["legacy"]["pane_pid"], 123);
+        assert_eq!(state["agents"]["legacy"]["session_id"], "keep");
+        assert_eq!(state["agents"]["native"]["pane_id"], "%2");
+    }
 
     fn observed_pane() -> PaneInfo {
         PaneInfo {

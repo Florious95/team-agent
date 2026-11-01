@@ -1147,6 +1147,58 @@ pub(super) fn state_session_name(state: &serde_json::Value) -> SessionName {
         .unwrap_or_else(|| SessionName::new("team-agent"))
 }
 
+/// Move a dead legacy cohort off its workspace-agnostic session name. Pane IDs
+/// can alias after endpoint recovery, so only positive process death permits it.
+pub(super) fn recover_missing_legacy_session(
+    workspace: &Path,
+    team: &str,
+    state: &mut serde_json::Value,
+    transport: &dyn crate::transport::Transport,
+) -> Result<(), LifecycleError> {
+    if state_session_name(state).as_str() != format!("team-{team}") {
+        return Ok(());
+    }
+    let Some(agents) = state.get("agents").and_then(serde_json::Value::as_object) else {
+        return Ok(());
+    };
+    for agent in agents.values() {
+        if crate::contract_runtime::framework::is_contract(agent) {
+            continue;
+        }
+        let pid = agent.get("pane_pid").and_then(serde_json::Value::as_u64)
+            .and_then(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 1);
+        match pid.map(crate::platform::process::pid_liveness) {
+            Some(Ok(crate::platform::process::ProcessLiveness::Dead)) => (),
+            None if agent.get("pane_id").and_then(serde_json::Value::as_str).is_none()
+                && matches!(agent.get("status").and_then(serde_json::Value::as_str), Some("stopped" | "paused" | "removed")) => (),
+            _ => return Ok(()),
+        }
+    }
+    let session = SessionName::new(crate::compiler::default_session_name(workspace, team));
+    if transport.has_session(&session).map_err(|e| LifecycleError::Transport(e.to_string()))? {
+        let owner = transport.session_owner(&session)
+            .map_err(|e| LifecycleError::Transport(e.to_string()))?;
+        if !owner.is_some_and(|owner| {
+            Path::new(&owner.workspace).canonicalize().unwrap_or_else(|_| PathBuf::from(&owner.workspace))
+                == workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf())
+                && owner.team == team
+        }) {
+            return Err(LifecycleError::RequirementUnmet(format!(
+                "recovery session {} is not owned by this workspace/team", session.as_str()
+            )));
+        }
+    }
+    state["session_name"] = serde_json::json!(session.as_str());
+    if let Some(agents) = state.get_mut("agents").and_then(serde_json::Value::as_object_mut) {
+        for agent in agents.values_mut() {
+            if !crate::contract_runtime::framework::is_contract(agent) {
+                if let Some(agent) = agent.as_object_mut() { agent.remove("pane_id"); }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// ---
 /// purpose: 判断 state 里是否记了非空 session 名
 /// returns: 记了则 true
@@ -1845,19 +1897,7 @@ pub(super) fn state_session_name_from_spec(
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(SessionName::new)
-        .or_else(|| {
-            spec.get("runtime")
-                .and_then(|v| v.get("session_name"))
-                .and_then(YamlValue::as_str)
-                .map(SessionName::new)
-        })
-        .or_else(|| {
-            spec.get("team")
-                .and_then(|v| v.get("name"))
-                .and_then(YamlValue::as_str)
-                .map(|name| SessionName::new(format!("team-{name}")))
-        })
-        .unwrap_or_else(|| SessionName::new("team-agent"))
+        .unwrap_or_else(|| crate::lifecycle::launch::worker_session_name_pub(spec))
 }
 
 /// ---
@@ -2216,6 +2256,59 @@ pub(super) fn clear_agent_runtime_activity_observation(
         "coordinator_idle_capture_next_at",
     ] {
         agent.remove(field);
+    }
+}
+
+#[cfg(test)]
+mod session_namespace_tests {
+    use super::*;
+    use crate::transport::test_support::OfflineTransport;
+
+    fn dead_state() -> serde_json::Value {
+        serde_json::json!({
+            "session_name":"team-current", "agents": {"researcher": {
+                "status":"running", "pane_id":"%1", "pane_pid":4294967294u32,
+                "session_id":"preserved-context", "rollout_path":"preserved-journal",
+            }}
+        })
+    }
+
+    #[test]
+    fn missing_legacy_session_moves_without_destroying_foreign_resources() {
+        let workspace = std::env::temp_dir().join("ta-mpp-recovery-owner");
+        let transport = OfflineTransport::default();
+        let mut state = dead_state();
+        recover_missing_legacy_session(workspace.as_path(), "current", &mut state, &transport).unwrap();
+        assert_eq!(state["session_name"], crate::compiler::default_session_name(workspace.as_path(), "current"));
+        assert!(state["agents"]["researcher"].get("pane_id").is_none());
+        assert_eq!(state["agents"]["researcher"]["session_id"], "preserved-context");
+        assert_eq!(state["agents"]["researcher"]["rollout_path"], "preserved-journal");
+    }
+
+    #[test]
+    fn missing_legacy_session_refuses_foreign_namespaced_target() {
+        let workspace = std::env::temp_dir().join("ta-mpp-recovery-owner");
+        let foreign = std::env::temp_dir().join("ta-mpp-recovery-foreign");
+        let transport = OfflineTransport::default().with_session_present(true)
+            .with_session_owner(foreign.as_path(), "current", "foreign-generation");
+        let mut state = dead_state();
+        let original = state.clone();
+        assert!(recover_missing_legacy_session(workspace.as_path(), "current", &mut state, &transport).is_err());
+        assert_eq!(state, original);
+        assert_eq!(transport.calls(), ["has_session"]);
+    }
+
+    #[test]
+    fn missing_legacy_session_keeps_live_and_unknown_process_identity() {
+        let workspace = std::env::temp_dir().join("ta-mpp-recovery-owner");
+        for pid in [Some(std::process::id()), None] {
+            let mut state = dead_state();
+            state["agents"]["researcher"]["pane_pid"] = serde_json::json!(pid);
+            state["agents"]["researcher"]["provider"] = serde_json::json!("pi");
+            let original = state.clone();
+            recover_missing_legacy_session(workspace.as_path(), "current", &mut state, &OfflineTransport::default()).unwrap();
+            assert_eq!(state, original);
+        }
     }
 }
 

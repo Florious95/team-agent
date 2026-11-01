@@ -136,6 +136,7 @@ fn field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
 #[cfg(unix)]
 fn native_recipient(info: &Value) -> bool {
     crate::contract_runtime::framework::is_contract(info)
+        || field(info, "provider").is_some_and(crate::contract_runtime::registry::recognizes)
 }
 
 impl Directory {
@@ -155,10 +156,21 @@ impl Directory {
         use team_agent_contract::{contract::types::SeatId, orchestration::store::SeatStatus};
         if agent == "leader" || !native_recipient(self.recipient(agent)?) { return Ok(None); }
         let team = self.team.as_deref().ok_or("native recipient has no team scope")?;
-        let backend = crate::contract_runtime::backend::Backend::open_readonly(&self.workspace, team)
-            .map_err(|e| crate::contract_runtime::backend::observation_error(team, agent, &e))?;
+        let backend = match crate::contract_runtime::backend::Backend::open_readonly(&self.workspace, team) {
+            Ok(backend) => backend,
+            Err(error) => {
+                if matches!(&error, crate::contract_runtime::backend::BackendError::Io(io) if io.kind() == std::io::ErrorKind::NotFound)
+                    && self.verified_legacy_recipient(agent, team)
+                { return Ok(None); }
+                return Err(crate::contract_runtime::backend::observation_error(team, agent, &error));
+            }
+        };
         let id = SeatId::new(agent).map_err(|e| e.to_string())?;
-        let seat = backend.store.seat(&id).map_err(|e| e.to_string())?.ok_or("native recipient missing")?;
+        let seat = match backend.store.seat(&id).map_err(|e| e.to_string())? {
+            Some(seat) => seat,
+            None if self.verified_legacy_recipient(agent, team) => return Ok(None),
+            None => return Err("native recipient missing".into()),
+        };
         let target = seat.physical_target().map_err(|e| e.to_string())?;
         if target.candidate_sha256 != crate::contract_runtime::backend::executing_candidate_sha().map_err(|e| e.to_string())? {
             return Err("seat_requires_restart".into());
@@ -172,6 +184,36 @@ impl Directory {
             return Err("recipient_not_running: native lifecycle not settled".into());
         }
         Ok(Some((backend.binding, seat)))
+    }
+
+    // Legacy provider names remain usable after recovery, but a bare snapshot
+    // is never authority to route a native leaf to an arbitrary pane.
+    #[cfg(unix)]
+    fn verified_legacy_recipient(&self, agent: &str, team: &str) -> bool {
+        let Ok(info) = self.recipient(agent) else { return false; };
+        if crate::contract_runtime::framework::is_contract(info) || field(info, "status") != Some("running") {
+            return false;
+        }
+        let session = crate::compiler::default_session_name(&self.workspace, team);
+        if field(&self.state, "session_name") != Some(session.as_str()) { return false; }
+        let Some(pid) = info.get("pane_pid").and_then(Value::as_u64)
+            .and_then(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 1) else { return false; };
+        if !matches!(crate::platform::process::pid_liveness(pid), Ok(crate::platform::process::ProcessLiveness::Live)) {
+            return false;
+        }
+        let Ok(endpoint) = self.snapshot_endpoint(agent, info) else { return false; };
+        let transport = crate::transport_factory::bounded_endpoint_transport(
+            &endpoint.socket, Instant::now() + Duration::from_secs(2),
+        );
+        let Ok(panes) = transport.list_targets() else { return false; };
+        if !panes.iter().any(|pane| pane.pane_id.as_str() == endpoint.pane_id
+            && pane.pane_pid == Some(pid) && pane.session.as_str() == session
+            && pane.window_name.as_ref().is_some_and(|window| window.as_str() == field(info, "window").unwrap_or(agent)))
+        { return false; }
+        transport.session_owner(&crate::transport::SessionName::new(session)).ok().flatten()
+            .is_some_and(|owner| owner.team == team
+                && Path::new(&owner.workspace).canonicalize().is_ok_and(|owned|
+                    self.workspace.canonicalize().is_ok_and(|workspace| owned == workspace)))
     }
 
     fn verify_endpoint(&self, agent: &str, expected: &Endpoint, deadline: Instant) -> Result<(), String> {
@@ -234,6 +276,10 @@ impl Directory {
         if agent != "leader" && field(info, "status") != Some("running") {
             return Err(format!("recipient_not_running: {agent}"));
         }
+        self.snapshot_endpoint(agent, info)
+    }
+
+    fn snapshot_endpoint(&self, agent: &str, info: &Value) -> Result<Endpoint, String> {
         let pane_id = field(info, "pane_id").or_else(|| field(info, "native_pane"))
             .ok_or_else(|| format!("{agent} has no tmux pane"))?;
         let socket = field(info, "native_endpoint").map(str::to_string)

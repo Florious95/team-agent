@@ -13,10 +13,11 @@ use team_agent_contract::orchestration::{
 };
 
 pub fn is_contract(agent: &Value) -> bool {
-    agent
-        .get("provider")
-        .and_then(Value::as_str)
-        .is_some_and(|provider| super::registry::descriptor(provider).is_some())
+    // Provider names select new launches, not the backend of an existing seat.
+    // Explicit (even incomplete) native authority must still fail closed there.
+    agent["runtime_family"] == "contract"
+        || agent.get("contract_scope").is_some()
+        || agent.get("contract_instance").is_some()
 }
 /// Published paused roles without an instance never crossed native startup.
 /// A bound instance is never skipped, even if a stale row says paused.
@@ -330,6 +331,18 @@ pub fn stop_selected_with_budget(workspace: &Path, state: &Value, budget: std::t
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contract_admission_uses_seat_metadata_not_provider_name() {
+        let legacy = json!({"provider":"pi","pane_id":"%1","pane_pid":123,"session_id":"legacy"});
+        assert!(!is_contract(&legacy));
+        for marker in [json!({"runtime_family":"contract"}), json!({"contract_scope":"scope"}), json!({"contract_instance":null})] {
+            let mut native = legacy.clone();
+            native.as_object_mut().unwrap().extend(marker.as_object().unwrap().clone());
+            assert!(is_contract(&native));
+        }
+        assert!(!is_contract(&json!({"provider":"claude"})));
+    }
 
     #[test]
     fn native_shutdown_collects_failures_and_continues_to_other_seats() {

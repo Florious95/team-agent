@@ -782,8 +782,11 @@ fn apply_persist_merge_contract_with_fork_target_preservation(
     let skip_top_level_capture_backfill =
         should_skip_capture_backfill(top_level_team.as_deref(), skip_capture_backfill_team_key);
     if projection_matches {
-        let topology_update_agent_ids =
+        let mut topology_update_agent_ids =
             topology_updates_for_team(topology_updates, top_level_team.as_deref());
+        topology_update_agent_ids.extend(endpoint_convergence_invalidated_agents(
+            incoming, latest, top_level_team.as_deref().is_some_and(|team| receiver_updates.contains(team)),
+        ));
         preserve_latest_retired_agents(incoming, latest, &topology_update_agent_ids)?;
         // 0.5.26 (§7.3): top-level projection uses the incoming root state's
         // implicit "alive" shape (top-level agents are always the active team).
@@ -845,10 +848,13 @@ fn apply_persist_merge_contract_with_fork_target_preservation(
             } else {
                 Some(team.as_str())
             };
-            let topology_update_agent_ids =
+            let mut topology_update_agent_ids =
                 topology_updates_for_team(topology_updates, authority_team);
             let receiver_update_authoritative =
                 authority_team.is_some_and(|team_key| receiver_updates.contains(team_key));
+            topology_update_agent_ids.extend(endpoint_convergence_invalidated_agents(
+                incoming_entry, latest_entry, receiver_update_authoritative,
+            ));
             let projection = format!("teams.{team}.agents");
             // 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.3):
             // decide the containing team's aliveness from BOTH sides — a shutdown
@@ -922,6 +928,30 @@ fn apply_persist_merge_contract_with_fork_target_preservation(
         }
     }
     Ok(())
+}
+
+// Claim may invalidate a server-local pane only at the actual endpoint change.
+// Replayed convergence markers and concurrent/newer live cohorts have no such authority.
+fn endpoint_convergence_invalidated_agents(incoming: &Value, latest: &Value, authorized: bool) -> BTreeSet<String> {
+    let endpoint = |value: &Value| value.get("tmux_endpoint").or_else(|| value.get("tmux_socket"))
+        .and_then(Value::as_str).map(str::to_string);
+    let marker = incoming.get("topology_convergence");
+    if !authorized || endpoint(incoming) == endpoint(latest)
+        || marker.and_then(|m| m.get("status")).and_then(Value::as_str) != Some("converged")
+        || marker.and_then(|m| m.get("old_tmux_endpoint")).and_then(Value::as_str) != endpoint(latest).as_deref()
+        || marker.and_then(|m| m.get("new_tmux_endpoint")).and_then(Value::as_str) != endpoint(incoming).as_deref()
+        || ownership_epoch(incoming) < ownership_epoch(latest)
+    { return BTreeSet::new(); }
+    incoming.get("agents").and_then(Value::as_object).into_iter().flat_map(|agents| agents.iter())
+        .filter_map(|(id, row)| {
+            let old = latest.get("agents")?.get(id)?;
+            let pid = old.get("pane_pid")?.as_u64().and_then(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 1)?;
+            (!crate::contract_runtime::framework::is_contract(row)
+                && row.get("pane_id").is_none() && old.get("pane_id").is_some()
+                && ["pane_pid", "spawn_epoch", "spawned_at"].iter().all(|key| row.get(key) == old.get(key))
+                && matches!(crate::platform::process::pid_liveness(pid), Ok(crate::platform::process::ProcessLiveness::Dead)))
+                .then(|| id.clone())
+        }).collect()
 }
 
 fn topology_updates_for_team(
@@ -1891,6 +1921,31 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
     use super::*;
     use std::sync::atomic::AtomicU32;
+
+    #[test]
+    fn endpoint_convergence_invalidation_requires_fresh_endpoint_and_dead_same_cohort() {
+        let mut latest = serde_json::json!({
+            "tmux_endpoint":"old-socket", "owner_epoch":1,
+            "agents":{"worker":{"pane_id":"%1","pane_pid":4294967294u32,"spawn_epoch":1}}
+        });
+        let mut incoming = latest.clone();
+        incoming["tmux_endpoint"] = serde_json::json!("new-socket");
+        incoming["topology_convergence"] = serde_json::json!({
+            "status":"converged","old_tmux_endpoint":"old-socket","new_tmux_endpoint":"new-socket"
+        });
+        incoming["agents"]["worker"].as_object_mut().unwrap().remove("pane_id");
+        assert_eq!(endpoint_convergence_invalidated_agents(&incoming, &latest, true), BTreeSet::from(["worker".into()]));
+        assert!(endpoint_convergence_invalidated_agents(&incoming, &latest, false).is_empty());
+        latest["tmux_endpoint"] = serde_json::json!("new-socket");
+        assert!(endpoint_convergence_invalidated_agents(&incoming, &latest, true).is_empty());
+        latest["tmux_endpoint"] = serde_json::json!("old-socket");
+        latest["agents"]["worker"]["spawn_epoch"] = serde_json::json!(2);
+        assert!(endpoint_convergence_invalidated_agents(&incoming, &latest, true).is_empty());
+        latest["agents"]["worker"]["spawn_epoch"] = serde_json::json!(1);
+        latest["agents"]["worker"]["pane_pid"] = serde_json::json!(std::process::id());
+        incoming["agents"]["worker"]["pane_pid"] = latest["agents"]["worker"]["pane_pid"].clone();
+        assert!(endpoint_convergence_invalidated_agents(&incoming, &latest, true).is_empty());
+    }
 
     static SEQ: AtomicU32 = AtomicU32::new(0);
     fn temp_ws() -> PathBuf {

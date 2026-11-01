@@ -369,6 +369,7 @@ fn restart_with_selected_team_and_transport(
     .map_err(|error| LifecycleError::TeamSelect(error.to_string()))?
     .state;
     crate::lifecycle::launch::ensure_owner_allowed_for_state(&state, None)?;
+    recover_missing_legacy_session(&selected.run_workspace, &selected.team_key, &mut state, transport)?;
     let topology_issue_ids = crate::topology::restart_dirty_topology_issue_ids(&state);
     if !topology_issue_ids.is_empty() {
         let session_name = state
