@@ -3920,7 +3920,8 @@ mod tests {
             .unwrap_or(contents.len());
         let body = &contents[start..end];
         assert!(
-            body.contains("managed_leader_window_for_launch(provider, workspace, session)"),
+            body.split_whitespace().collect::<String>().replace(",)", ")")
+                .contains("managed_leader_window_for_launch(provider,workspace,session)"),
             "managed launch must pick a unique window in the A-22 session; body excerpt: {body}"
         );
         let argv_start = contents

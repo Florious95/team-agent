@@ -215,6 +215,8 @@ jobs:
             'team-agent|--lib|lifecycle::restart::'
             'team-agent|--lib|contract_runtime::'
             'team-agent|--test|messaging_scope_regression'
+            'team-agent|--test|claim_endpoint_convergence_contract'
+            'team-agent|--test|endpoint_convergence_persistence_contract'
             'team-agent-contract|--test|codex_contract'
           )
           if [[ -n "$SCOPED_TEST_SUITES" ]]; then
@@ -238,7 +240,10 @@ jobs:
             label="$(printf '%02d' "$index")"
             printf '%s\n' "$item" > "$receipts/$label.command"
             set +e
-            cargo test --locked --target "$TARGET" -p "$package" "$kind" "$selector" -- --test-threads=1 > "$receipts/$label.log" 2>&1
+            test_args=(--locked --manifest-path "crates/$package/Cargo.toml" --target "$TARGET" -p "$package" "$kind" "$selector" -- --test-threads=1)
+            printf '%q ' cargo test "${test_args[@]}" > "$receipts/$label.argv"
+            printf '\n' >> "$receipts/$label.argv"
+            cargo test "${test_args[@]}" > "$receipts/$label.log" 2>&1
             code=$?
             set -e
             printf '%s\n' "$code" > "$receipts/$label.exit"

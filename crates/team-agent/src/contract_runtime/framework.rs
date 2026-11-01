@@ -350,9 +350,9 @@ mod tests {
             std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::create_dir(&root).unwrap();
         let state = json!({"team_key":"test","agents":{
-            "a":{"provider":"cursor","status":"running","pane_id":"%1","tmux_endpoint":"/tmp/fixture.sock"},
-            "b":{"provider":"cursor","status":"running"},
-            "z":{"provider":"cursor","status":"paused"}
+            "a":{"provider":"cursor","runtime_family":"contract","status":"running","pane_id":"%1","tmux_endpoint":"/tmp/fixture.sock"},
+            "b":{"provider":"cursor","runtime_family":"contract","status":"running"},
+            "z":{"provider":"cursor","runtime_family":"contract","status":"paused"}
         }});
         let receipts = stop_selected(&root, &state).unwrap();
         assert_eq!(receipts.len(), 3);

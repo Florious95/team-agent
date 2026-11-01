@@ -31,8 +31,8 @@ mod contract_route_tests {
     #[test]
     fn contract_seats_never_enter_legacy_resume_or_fresh_classification() {
         let state = serde_json::json!({"agents": {
-            "cursor": {"provider":"cursor","status":"running","session_id":"native-cursor"},
-            "kiro": {"provider":"kiro","status":"running","session_id":"native-kiro"},
+            "cursor": {"provider":"cursor","runtime_family":"contract","status":"running","session_id":"native-cursor"},
+            "kiro": {"provider":"kiro","runtime_family":"contract","status":"running","session_id":"native-kiro"},
         }});
         for allow_fresh in [false, true] {
             let plan = classify_restart_plan(&state, allow_fresh).unwrap();
@@ -44,7 +44,7 @@ mod contract_route_tests {
     #[test]
     fn mixed_team_retains_legacy_classification_without_native_codex_fallback() {
         let state = serde_json::json!({"agents": {
-            "native": {"provider":"cursor","status":"running","session_id":"native-id"},
+            "native": {"provider":"cursor","runtime_family":"contract","status":"running","session_id":"native-id"},
             "legacy": {"provider":"pi","status":"running"},
         }});
         let plan = classify_restart_plan(&state, false).unwrap();

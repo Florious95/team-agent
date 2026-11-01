@@ -618,12 +618,13 @@ pub(crate) fn attach_leader_to_state_with_target_and_controls(
         write_binding_to_state(state, &receiver, &owner)?;
     }
     if let (Some(expected_owner), Some(expected_receiver)) = (expected_owner, expected_receiver) {
-        write_lease_dual_state_with_expected(
-            workspace,
-            state,
-            expected_owner,
-            expected_receiver,
-        )?;
+        let team_key = canonical_owner_write_key(state);
+        // Fresh quick-start owns rollback and publishes its registry entry only
+        // after post-save work succeeds, retaining the exact write receipt.
+        commit_binding(workspace, state,
+            crate::state::repository::StateWriteIntent::ClaimLeaderFreshCaller {
+                team_key: &team_key, expected_owner, expected_receiver,
+            })?;
     } else {
         write_lease_dual_state(workspace, state)?;
     }
@@ -2839,12 +2840,21 @@ fn publish_binding(
     team_key: &str,
     intent: crate::state::repository::StateWriteIntent<'_>,
 ) -> Result<(), LeaderError> {
-    crate::coordinator::retire_legacy_coordinator(workspace)
-        .map_err(|error| LeaderError::Start(format!("legacy coordinator retirement failed: {error}")))?;
-    crate::state::repository::StateRepository::new(workspace).save(intent, state)?;
+    commit_binding(workspace, state, intent)?;
     let _ = super::registry::register_binding_from_state_best_effort(
         workspace, Some(team_key), "claim-leader",
     );
+    Ok(())
+}
+
+fn commit_binding(
+    workspace: &Path,
+    state: &Value,
+    intent: crate::state::repository::StateWriteIntent<'_>,
+) -> Result<(), LeaderError> {
+    crate::coordinator::retire_legacy_coordinator(workspace)
+        .map_err(|error| LeaderError::Start(format!("legacy coordinator retirement failed: {error}")))?;
+    crate::state::repository::StateRepository::new(workspace).save(intent, state)?;
     Ok(())
 }
 
