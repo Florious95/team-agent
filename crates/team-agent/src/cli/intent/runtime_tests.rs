@@ -73,6 +73,42 @@ fn batch_start_accepts_only_its_exact_scoped_leader_claim() {
 }
 
 #[test]
+fn legacy_claim_allows_only_receiver_proven_absent_metadata_backfill() {
+    let scope = ResolvedScope { workspace: PathBuf::from("/project"), team: Some("fixture".into()) };
+    let previous = topology(&json!({"owner_epoch":1, "team_owner":{
+        "pane_id":"%0", "provider":"claude_code", "owner_epoch":1, "leader_session_uuid":"uuid",
+    }}));
+    let mut next = previous.clone();
+    next["owner"]["tmux_socket"] = json!("/owned/socket");
+    let receipt = json!({"leader_claim_receipt":{
+        "workspace":"/project", "team":"fixture", "owner":null, "owner_epoch":1,
+        "receiver":{"pane_id":"%0", "provider":"claude_code", "owner_epoch":1,
+            "leader_session_uuid":"uuid", "tmux_socket":"/owned/socket", "session_name":"leader"},
+    }});
+    assert!(!claim_matches_topology(&scope, &next, &receipt));
+    assert!(legacy_claim_backfills_topology(&scope, &previous, &next, &receipt));
+    for key in ["pane_id", "provider", "owner_epoch", "leader_session_uuid", "machine_fingerprint", "tmux_socket"] {
+        let mut changed = next.clone();
+        changed["owner"][key] = json!("foreign");
+        assert!(!legacy_claim_backfills_topology(&scope, &previous, &changed, &receipt), "{key}");
+    }
+    for pointer in ["/leader_claim_receipt/workspace", "/leader_claim_receipt/team",
+        "/leader_claim_receipt/receiver/pane_id", "/leader_claim_receipt/receiver/provider",
+        "/leader_claim_receipt/receiver/owner_epoch", "/leader_claim_receipt/receiver/leader_session_uuid",
+        "/leader_claim_receipt/receiver/tmux_socket"] {
+        let mut changed = receipt.clone();
+        *changed.pointer_mut(pointer).unwrap() = json!("foreign");
+        assert!(!legacy_claim_backfills_topology(&scope, &previous, &next, &changed), "{pointer}");
+    }
+    let mut occupied = previous.clone();
+    occupied["owner"]["tmux_socket"] = json!("/previous/socket");
+    assert!(!legacy_claim_backfills_topology(&scope, &occupied, &next, &receipt));
+    let mut missing_projection_epoch = previous.clone();
+    missing_projection_epoch["owner_epoch"] = Value::Null;
+    assert!(legacy_claim_backfills_topology(&scope, &missing_projection_epoch, &next, &receipt));
+}
+
+#[test]
 fn legacy_start_receipt_preserves_the_committed_carrier_across_own_claim() {
     let mut state = json!({
         "session_name":"owned", "generation":"session-1", "owner_epoch":1,

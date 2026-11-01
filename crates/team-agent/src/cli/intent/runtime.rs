@@ -1160,6 +1160,30 @@ fn claim_matches_topology(scope: &ResolvedScope, next: &Value, receipt: &Value) 
     }
     expected["owner"] == next["owner"] && expected["owner_epoch"] == next["owner_epoch"]
 }
+// Legacy owners may lack fields needed to deserialize TeamOwner. A successful
+// same-pane claim can nevertheless backfill its socket. Keep the frozen owner
+// identity; permit only absent transport metadata corroborated by that receipt.
+#[cfg(unix)]
+fn legacy_claim_backfills_topology(scope: &ResolvedScope, previous: &Value, next: &Value, receipt: &Value) -> bool {
+    let Some(claim) = receipt.get("leader_claim_receipt") else { return false; };
+    if claim.get("owner") != Some(&Value::Null)
+        || previous["owner"]["pane_id"].as_str().is_none_or(str::is_empty)
+        || (previous["owner_epoch"] != next["owner_epoch"]
+            && !(previous["owner_epoch"].is_null() && next["owner_epoch"] == previous["owner"]["owner_epoch"]))
+    { return false; }
+    for key in ["pane_id", "provider", "owner_epoch", "leader_session_uuid"] {
+        if previous["owner"][key] != claim["receiver"][key] { return false; }
+    }
+    for key in ["tmux_socket", "session_name"] {
+        if !previous["owner"][key].is_null() && previous["owner"][key] != next["owner"][key] {
+            return false;
+        }
+    }
+    let mut compared = receipt.clone();
+    compared["leader_claim_receipt"]["owner"] = previous["owner"].clone();
+    claim_matches_topology(scope, next, &compared)
+}
+
 #[cfg(not(unix))]
 pub(super) fn advance_topology(_plan: &mut Plan, _step: &Step, _receipt: &Value) -> Result<(), CliError> { Ok(()) }
 
@@ -1174,7 +1198,8 @@ pub(super) fn advance_topology(plan: &mut Plan, step: &Step, receipt: &Value) ->
     let next = topology(&selected.state);
     if next == *previous { return Ok(()); }
     if (next["owner"] != previous["owner"] || next["owner_epoch"] != previous["owner_epoch"])
-        && (!claim_matches_topology(&plan.scope, &next, receipt)
+        && (!(claim_matches_topology(&plan.scope, &next, receipt)
+                || legacy_claim_backfills_topology(&plan.scope, previous, &next, receipt))
             || next["owner_epoch"].as_u64().unwrap_or(0) < previous["owner_epoch"].as_u64().unwrap_or(0))
     {
         return Err(refusal("owner changed during batch startup; inspect before continuing"));
