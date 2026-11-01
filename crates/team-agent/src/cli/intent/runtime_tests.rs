@@ -109,6 +109,35 @@ fn legacy_claim_allows_only_receiver_proven_absent_metadata_backfill() {
 }
 
 #[test]
+fn legacy_claim_normalizes_claude_aliases_but_not_foreign_providers() {
+    let scope = ResolvedScope { workspace: PathBuf::from("/project"), team: Some("fixture".into()) };
+    for old in ["claude", "claude_code", "claude-code"] {
+        let previous = topology(&json!({"owner_epoch":1, "team_owner":{
+            "pane_id":"%0", "provider":old, "owner_epoch":1, "leader_session_uuid":"uuid",
+        }}));
+        for current in ["claude", "claude_code", "claude-code"] {
+            let mut next = previous.clone();
+            next["owner"]["provider"] = json!(current);
+            next["owner"]["tmux_socket"] = json!("/owned/socket");
+            let receipt = json!({"leader_claim_receipt":{
+                "workspace":"/project", "team":"fixture", "owner":null, "owner_epoch":1,
+                "receiver":{"pane_id":"%0", "provider":"claude_code", "owner_epoch":1,
+                    "leader_session_uuid":"uuid", "tmux_socket":"/owned/socket"},
+            }});
+            assert!(legacy_claim_backfills_topology(&scope, &previous, &next, &receipt), "{old} -> {current}");
+            for foreign in ["codex", "pi", "unknown-provider", ""] {
+                let mut changed = next.clone();
+                changed["owner"]["provider"] = json!(foreign);
+                assert!(!legacy_claim_backfills_topology(&scope, &previous, &changed, &receipt));
+                let mut changed = receipt.clone();
+                changed["leader_claim_receipt"]["receiver"]["provider"] = json!(foreign);
+                assert!(!legacy_claim_backfills_topology(&scope, &previous, &next, &changed));
+            }
+        }
+    }
+}
+
+#[test]
 fn legacy_start_receipt_preserves_the_committed_carrier_across_own_claim() {
     let mut state = json!({
         "session_name":"owned", "generation":"session-1", "owner_epoch":1,

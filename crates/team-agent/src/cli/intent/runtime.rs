@@ -1162,7 +1162,8 @@ fn claim_matches_topology(scope: &ResolvedScope, next: &Value, receipt: &Value) 
 }
 // Legacy owners may lack fields needed to deserialize TeamOwner. A successful
 // same-pane claim can nevertheless backfill its socket. Keep the frozen owner
-// identity; permit only absent transport metadata corroborated by that receipt.
+// identity (including recognized provider aliases); permit only absent
+// transport metadata corroborated by that receipt.
 #[cfg(unix)]
 fn legacy_claim_backfills_topology(scope: &ResolvedScope, previous: &Value, next: &Value, receipt: &Value) -> bool {
     let Some(claim) = receipt.get("leader_claim_receipt") else { return false; };
@@ -1171,7 +1172,14 @@ fn legacy_claim_backfills_topology(scope: &ResolvedScope, previous: &Value, next
         || (previous["owner_epoch"] != next["owner_epoch"]
             && !(previous["owner_epoch"].is_null() && next["owner_epoch"] == previous["owner"]["owner_epoch"]))
     { return false; }
-    for key in ["pane_id", "provider", "owner_epoch", "leader_session_uuid"] {
+    let Some(provider) = previous["owner"]["provider"].as_str()
+        .and_then(crate::provider::wire::parse_provider) else { return false; };
+    for value in [&next["owner"]["provider"], &claim["receiver"]["provider"]] {
+        if !value.as_str().and_then(crate::provider::wire::parse_provider)
+            .is_some_and(|current| crate::leader::provider_matches(provider, current))
+        { return false; }
+    }
+    for key in ["pane_id", "owner_epoch", "leader_session_uuid"] {
         if previous["owner"][key] != claim["receiver"][key] { return false; }
     }
     for key in ["tmux_socket", "session_name"] {
@@ -1181,6 +1189,9 @@ fn legacy_claim_backfills_topology(scope: &ResolvedScope, previous: &Value, next
     }
     let mut compared = receipt.clone();
     compared["leader_claim_receipt"]["owner"] = previous["owner"].clone();
+    // Compare the proven alias in the post-start spelling; otherwise the shared
+    // exact fingerprint check would reject the same alias a second time.
+    compared["leader_claim_receipt"]["owner"]["provider"] = next["owner"]["provider"].clone();
     claim_matches_topology(scope, next, &compared)
 }
 
