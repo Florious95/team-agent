@@ -1202,7 +1202,9 @@ pub(super) fn recheck(plan: &Plan, step: &Step, after_stop: bool) -> Result<(), 
             .expected
             .get(id)
             .ok_or_else(|| refusal("missing original incarnation"))?;
-        if after_stop && plan.intent.verb == Verb::Restart && matches!(step, Step::StartAgent(_)) {
+        if after_stop && matches!(plan.intent.verb, Verb::Start | Verb::Restart)
+            && matches!(step, Step::StartAgent(_))
+        {
             if !same_provider(provider(row), provider(expected))
                 || row.get("generation").unwrap_or(&Value::Null)
                     != expected.get("generation").unwrap_or(&Value::Null)

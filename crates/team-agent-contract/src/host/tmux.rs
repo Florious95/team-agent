@@ -284,6 +284,36 @@ fn confirms_no_server(receipt: &CommandReceipt, endpoint: &std::path::Path) -> b
         && endpoint.to_str().is_some_and(|path| receipt.stderr == format!("no server running on {path}\n").as_bytes())
 }
 
+/// Read-only, bounded observation of a shared server. A stale socket is not
+/// proof of a live server, and an arbitrary client failure is not proof of death.
+pub(crate) fn shared_server_absent(
+    tmux: &std::path::Path,
+    endpoint: &std::path::Path,
+    runner: &mut impl CommandRunner,
+    budget: Duration,
+    limits: OutputLimits,
+) -> Result<bool, HostError> {
+    match std::fs::symlink_metadata(endpoint) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(HostError::io("shared server socket", error)),
+        Ok(_) => {},
+    }
+    let receipt = runner.run(&CommandRequest {
+        executable: tmux.to_path_buf(),
+        arguments: vec!["-u".into(), "-S".into(), endpoint.as_os_str().to_owned(),
+            "-N".into(), "list-sessions".into()],
+        cwd: None,
+        environment: EnvironmentDelta { remove: BTreeSet::new(), set: BTreeMap::new() },
+        stdin: None,
+        budget,
+        limits,
+        reject_stdout: None,
+    });
+    if confirms_no_server(&receipt, endpoint) { return Ok(true); }
+    if receipt.success() { return Ok(false); }
+    Err(command_error(&receipt, "shared server observation"))
+}
+
 /// After a close may have executed, observe only: reparenting/exit races do not
 /// grant authority for another action, nor prove exit. Keep the original budget.
 pub(crate) fn observe_native_exit(
@@ -1616,6 +1646,46 @@ mod bound_process_tests {
             let mut bad = dead(); bad.end = end;
             assert!(!confirms_no_server(&bad, endpoint));
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn stale_shared_socket_requires_a_bounded_no_autostart_absence_witness() {
+        struct Runner(Option<CommandReceipt>);
+        impl CommandRunner for Runner {
+            fn run(&mut self, request: &CommandRequest) -> CommandReceipt {
+                assert_eq!(request.arguments[3..], [OsString::from("-N"), "list-sessions".into()]);
+                assert_eq!(request.budget, Duration::from_secs(2));
+                assert!(request.stdin.is_none());
+                self.0.take().expect("only one read-only probe")
+            }
+        }
+        let endpoint = std::path::Path::new("/tmp").join(format!("tac-dead-{}-{}.sock", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let tmux = std::path::Path::new("/fixture/tmux");
+        let limits = OutputLimits { stdout: 4096, stderr: 4096, stdin: 1 };
+        assert!(shared_server_absent(tmux, &endpoint, &mut Runner(None), Duration::from_secs(2), limits).unwrap());
+        drop(std::os::unix::net::UnixListener::bind(&endpoint).unwrap());
+        for case in 0..5 {
+            let mut receipt = syntax_receipt(b"");
+            receipt.exit_code = Some(1);
+            receipt.stderr = format!("no server running on {}\n", endpoint.display()).into_bytes();
+            match case {
+                1 => { receipt.exit_code = Some(0); receipt.stderr.clear(); },
+                2 => receipt.end = CommandEnd::TimedOut,
+                3 => receipt.stderr = b"permission denied\n".to_vec(),
+                4 => receipt.child_reaped = false,
+                _ => {},
+            }
+            let result = shared_server_absent(tmux, &endpoint, &mut Runner(Some(receipt)), Duration::from_secs(2), limits);
+            match case {
+                0 => assert!(result.unwrap()),
+                1 => assert!(!result.unwrap()),
+                _ => assert!(result.is_err(), "unknown observation {case} must not prove absence"),
+            }
+        }
+        assert!(endpoint.exists(), "observations must not unlink the shared socket");
+        std::fs::remove_file(endpoint).unwrap();
     }
 
     #[test]

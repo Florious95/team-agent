@@ -437,14 +437,15 @@ impl LifecycleHost for PhysicalRuntime<'_> {
         self.stop_receipt = None;
         let target = self.target(seat)?.clone();
         let deadline = self.deadline()?;
-        // After reboot, positive native-process absence is sufficient to retire
-        // a receipt whose shared socket is gone. Never reopen that dead socket;
-        // unknown process/filesystem observations retain the fail-closed path.
+        // A dead shared server need not be reopened to retire its absent native
+        // process. Stale sockets require a bounded, no-autostart server probe;
+        // unknown process/server observations retain the fail-closed path.
         if target.shared_endpoint && target.evidence_kind == EvidenceKind::Native
             && matches!(crate::host::process::sample_process(&target.process),
                 ProcessState::Exited | ProcessState::Replaced)
-            && matches!(std::fs::symlink_metadata(&target.endpoint),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+            && crate::host::tmux::shared_server_absent(&self.settings.tmux, &target.endpoint,
+                &mut RealCommandRunner::default(), deadline.saturating_sub(self.clock.now()),
+                self.settings.limits.command_output).map_err(host_error)?
         {
             self.stop_receipt = Some(StopReceipt {
                 method: "receipt_close_absent_shared_endpoint".into(),

@@ -567,6 +567,27 @@ fn native_stop_recheck_accepts_dead_carrier_observations_but_fences_identity_and
 
 #[test]
 #[serial_test::serial(env)]
+fn foreign_start_and_restart_recheck_accept_their_verified_stop() {
+    for verb in [Verb::Start, Verb::Restart] {
+        let (root, mut intent) = fixture(&["one"]);
+        intent.verb = verb;
+        install(root.path(), &[("one", "running", false)]);
+        let plan = plan_with_observer(intent, |_, _, _| Ok(Observation::Foreign)).unwrap();
+        let step = plan.steps.iter().find(|step| matches!(step, Step::StartAgent(_))).unwrap();
+        let path = crate::state::persist::runtime_state_path(root.path());
+        let mut raw: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        raw["teams"]["fixture"]["agents"]["one"]["status"] = json!("stopped");
+        std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        assert!(recheck(&plan, step, false).is_err(), "unplanned state changes remain fenced");
+        recheck(&plan, step, true).unwrap();
+        raw["teams"]["fixture"]["agents"]["one"]["generation"] = json!(99);
+        std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        assert!(recheck(&plan, step, true).is_err(), "a different generation is not our stopped seat");
+    }
+}
+
+#[test]
+#[serial_test::serial(env)]
 fn changed_role_and_socket_refuse_in_the_real_readonly_recheck() {
     let (root, intent) = fixture(&["one"]);
     install(root.path(), &[("one", "stopped", false)]);
