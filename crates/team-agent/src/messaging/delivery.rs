@@ -103,7 +103,9 @@ pub fn deliver_persisted_message(
     event_log: &EventLog,
     state: &serde_json::Value,
 ) -> Result<DeliveryOutcome, MessagingError> {
-    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
+    Err(MessagingError::Validation(
+        "legacy SQL messaging retired; use station send and C3 inbox".into(),
+    ))
 }
 
 // ===========================================================================
@@ -422,7 +424,7 @@ fn deliver_prepared_message(
                     "error": "leader_not_attached",
                     "channel_reason": "receiver_missing",
                     "channel": "rebind_required",
-                    "action": "run team-agent attach-leader or team-agent takeover",
+                    "action": "run team-agent claim-leader --confirm from the intended leader terminal",
                     "status": "unbound",
                 }),
             )?;
@@ -432,7 +434,8 @@ fn deliver_prepared_message(
                 message_status: MessageStatusShadow("failed".to_string()),
                 message_id: Some(message_id.to_string()),
                 verification: Some(
-                    "run team-agent attach-leader or team-agent takeover".to_string(),
+                    "run team-agent claim-leader --confirm from the intended leader terminal"
+                        .to_string(),
                 ),
                 stage: None,
                 reason: Some(DeliveryRefusal::LeaderNotAttached),
@@ -494,7 +497,7 @@ fn deliver_prepared_message(
                         "error": "leader_not_attached",
                         "channel_reason": reason.reason_code(),
                         "channel": "rebind_required",
-                        "action": "run team-agent attach-leader or team-agent takeover",
+                        "action": "run team-agent claim-leader --confirm from the intended leader terminal",
                         "status": receiver_status,
                     }),
                 )?;
@@ -504,7 +507,8 @@ fn deliver_prepared_message(
                     message_status: MessageStatusShadow("failed".to_string()),
                     message_id: Some(message_id.to_string()),
                     verification: Some(
-                        "run team-agent attach-leader or team-agent takeover".to_string(),
+                        "run team-agent claim-leader --confirm from the intended leader terminal"
+                            .to_string(),
                     ),
                     stage: None,
                     reason: Some(refusal),
@@ -612,9 +616,18 @@ fn deliver_prepared_message(
     }
     if token_already_visible(transport, state, &message.recipient, &target, message_id) {
         // Visibility prevents a second paste; it does not prove consumption.
-        let consumed = existing_token_consumed(transport, state, &message.recipient, &target, message_id);
-        let status = if consumed { "delivered" } else { "submitted_unverified" };
-        let reason = if consumed { "message_token_consumed" } else { "message_token_visible_without_consumption" };
+        let consumed =
+            existing_token_consumed(transport, state, &message.recipient, &target, message_id);
+        let status = if consumed {
+            "delivered"
+        } else {
+            "submitted_unverified"
+        };
+        let reason = if consumed {
+            "message_token_consumed"
+        } else {
+            "message_token_visible_without_consumption"
+        };
         event_log.write(
             "delivery.duplicate_token_refused",
             serde_json::json!({
@@ -626,12 +639,24 @@ fn deliver_prepared_message(
         )?;
         store.mark(message_id, status, (!consumed).then_some(reason))?;
         if !consumed {
-            bind_enter_watchdog(store, transport, state, &target, message_id, &message,
-                canonical_owner_team_id.as_deref(), event_log)?;
+            bind_enter_watchdog(
+                store,
+                transport,
+                state,
+                &target,
+                message_id,
+                &message,
+                canonical_owner_team_id.as_deref(),
+                event_log,
+            )?;
         }
         return Ok(DeliveryOutcome {
             ok: consumed,
-            status: if consumed { DeliveryStatus::AlreadyDelivered } else { DeliveryStatus::Failed },
+            status: if consumed {
+                DeliveryStatus::AlreadyDelivered
+            } else {
+                DeliveryStatus::Failed
+            },
             message_status: MessageStatusShadow(status.to_string()),
             message_id: Some(message_id.to_string()),
             verification: Some(reason.to_string()),
@@ -647,19 +672,26 @@ fn deliver_prepared_message(
     #[cfg(unix)]
     {
         let admission = crate::mcp_server::readiness::preflight(
-            workspace, canonical_owner_team_id.as_deref(), &message.recipient, state,
-        ).and_then(|admission| {
+            workspace,
+            canonical_owner_team_id.as_deref(),
+            &message.recipient,
+            state,
+        )
+        .and_then(|admission| {
             if let Some(admission) = admission.as_ref() {
                 crate::mcp_server::readiness::revalidate(admission, &target, &live_targets)?;
             }
             Ok(())
         });
         if let Err(reason) = admission {
-            let _ = event_log.write("delivery.mcp_handshake_warning", serde_json::json!({
-                "message_id": message_id,
-                "reason": reason,
-                "delivery_blocked": false,
-            }));
+            let _ = event_log.write(
+                "delivery.mcp_handshake_warning",
+                serde_json::json!({
+                    "message_id": message_id,
+                    "reason": reason,
+                    "delivery_blocked": false,
+                }),
+            );
         }
     }
     let rendered = render_message(
@@ -742,7 +774,7 @@ fn deliver_prepared_message(
                         "sender": message.sender,
                         "reason": "leader_not_attached",
                         "channel": "rebind_required",
-                        "action": "run team-agent claim-leader or team-agent takeover",
+                        "action": "run team-agent claim-leader --confirm from the intended leader terminal",
                         "error": error.to_string(),
                     }),
                 )?;
@@ -752,7 +784,8 @@ fn deliver_prepared_message(
                     message_status: MessageStatusShadow("failed".to_string()),
                     message_id: Some(message_id.to_string()),
                     verification: Some(
-                        "run team-agent claim-leader or team-agent takeover".to_string(),
+                        "run team-agent claim-leader --confirm from the intended leader terminal"
+                            .to_string(),
                     ),
                     stage: None,
                     reason: Some(DeliveryRefusal::LeaderNotAttached),
@@ -842,7 +875,8 @@ fn deliver_prepared_message(
     // A successful tmux command is never provider-acceptance proof. Leader and
     // worker delivery both require post-submit evidence; leader additionally
     // waits for its authoritative provider transcript below.
-    let native_consumed = observed_token_consumed(transport, state, &message.recipient, &target, message_id);
+    let native_consumed =
+        observed_token_consumed(transport, state, &message.recipient, &target, message_id);
     let verified = submit_verified && native_consumed != Some(false);
     if !verified {
         let reason = if native_consumed == Some(false) {
@@ -902,8 +936,16 @@ fn deliver_prepared_message(
             });
         }
         store.mark(message_id, "submitted_unverified", Some(&reason))?;
-        bind_enter_watchdog(store, transport, state, &target, message_id, &message,
-            canonical_owner_team_id.as_deref(), event_log)?;
+        bind_enter_watchdog(
+            store,
+            transport,
+            state,
+            &target,
+            message_id,
+            &message,
+            canonical_owner_team_id.as_deref(),
+            event_log,
+        )?;
         return Ok(DeliveryOutcome {
             ok: false,
             status: DeliveryStatus::Failed,
@@ -970,8 +1012,16 @@ fn deliver_prepared_message(
                 }),
             )?;
             store.mark(message_id, "submitted_unverified", Some(&reason))?;
-            bind_enter_watchdog(store, transport, state, &target, message_id, &message,
-                canonical_owner_team_id.as_deref(), event_log)?;
+            bind_enter_watchdog(
+                store,
+                transport,
+                state,
+                &target,
+                message_id,
+                &message,
+                canonical_owner_team_id.as_deref(),
+                event_log,
+            )?;
             return Ok(DeliveryOutcome {
                 ok: false,
                 status: DeliveryStatus::Failed,
@@ -2288,7 +2338,9 @@ pub fn deliver_pending_messages(
     transport: &dyn Transport,
     event_log: &EventLog,
 ) -> Result<Vec<String>, MessagingError> {
-    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
+    Err(MessagingError::Validation(
+        "legacy SQL messaging retired; use station send and C3 inbox".into(),
+    ))
 }
 
 struct PendingMessage {
@@ -2307,7 +2359,9 @@ fn message_for_delivery(
     store: &MessageStore,
     message_id: &str,
 ) -> Result<Option<PendingMessage>, MessagingError> {
-    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
+    Err(MessagingError::Validation(
+        "legacy SQL messaging retired; use station send and C3 inbox".into(),
+    ))
 }
 
 /// Pre-inject gate (Contract B): peek the recipient pane and answer "is there an
@@ -2375,11 +2429,9 @@ fn recipient_pane_has_actionable_startup_prompt(
         ),
         // Codex and Grok workers run only through their contract leaves; a
         // legacy row was refused before this peek.
-        Provider::Codex
-        | Provider::Pi
-        | Provider::Grok
-        | Provider::GeminiCli
-        | Provider::Fake => false,
+        Provider::Codex | Provider::Pi | Provider::Grok | Provider::GeminiCli | Provider::Fake => {
+            false
+        }
     }
 }
 
@@ -2398,10 +2450,7 @@ fn recipient_provider(state: &serde_json::Value, recipient: &str) -> Option<Prov
 /// returns: Pi 为 true，其余为 false
 /// ---
 pub(crate) fn recipient_requires_single_enter(state: &serde_json::Value, recipient: &str) -> bool {
-    matches!(
-        recipient_provider(state, recipient),
-        Some(Provider::Pi)
-    )
+    matches!(recipient_provider(state, recipient), Some(Provider::Pi))
 }
 
 /// ---
@@ -2412,10 +2461,7 @@ pub(crate) fn recipient_allows_explicit_queue_flush(
     state: &serde_json::Value,
     recipient: &str,
 ) -> bool {
-    !matches!(
-        recipient_provider(state, recipient),
-        Some(Provider::Pi)
-    )
+    !matches!(recipient_provider(state, recipient), Some(Provider::Pi))
 }
 
 fn leader_rollout_path(state: &serde_json::Value) -> Option<std::path::PathBuf> {
@@ -2424,7 +2470,12 @@ fn leader_rollout_path(state: &serde_json::Value) -> Option<std::path::PathBuf> 
             && receiver.get("native_session").is_some()
     }) {
         let native = receiver.get("native_session")?;
-        for key in ["pane_id", "tmux_socket", "leader_session_uuid", "owner_epoch"] {
+        for key in [
+            "pane_id",
+            "tmux_socket",
+            "leader_session_uuid",
+            "owner_epoch",
+        ] {
             let bound = native.get(key)?;
             if bound.is_null() || receiver.get(key) != Some(bound) {
                 return None;
@@ -2452,11 +2503,9 @@ fn leader_rollout_path(state: &serde_json::Value) -> Option<std::path::PathBuf> 
         {
             return None;
         }
-        let candidates = crate::provider::session_scan::scan_session_candidates_once(
-            Provider::Pi,
-            &context,
-        )
-        .ok()?;
+        let candidates =
+            crate::provider::session_scan::scan_session_candidates_once(Provider::Pi, &context)
+                .ok()?;
         return match candidates.as_slice() {
             [candidate] => candidate
                 .captured
@@ -2590,7 +2639,9 @@ pub fn handle_trust_retry_needed(
     payload: &TrustRetryPayload,
     event_log: &EventLog,
 ) -> Result<DeliveryOutcome, MessagingError> {
-    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
+    Err(MessagingError::Validation(
+        "legacy SQL messaging retired; use station send and C3 inbox".into(),
+    ))
 }
 
 /// `_execute_trust_retry` (`delivery.py:330`):trust_retry scheduled event 的消费者 ——
@@ -2641,7 +2692,9 @@ pub(super) fn with_rescue_submit_observer<R>(
     event_log: &EventLog,
     execute: impl FnOnce(&dyn SubmitObserver) -> Result<R, MessagingError>,
 ) -> Result<R, MessagingError> {
-    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
+    Err(MessagingError::Validation(
+        "legacy SQL messaging retired; use station send and C3 inbox".into(),
+    ))
 }
 
 struct CurrentTurnSubmitObserver<'a> {
@@ -2692,14 +2745,27 @@ impl SubmitObserver for CurrentTurnSubmitObserver<'_> {
             return;
         }
         let result = if let Some(context) = self.rescue_context {
-            record_rescue_turn_after_submit(self.workspace, self.sender, context, self.event_log, self.metadata)
+            record_rescue_turn_after_submit(
+                self.workspace,
+                self.sender,
+                context,
+                self.event_log,
+                self.metadata,
+            )
         } else {
             record_current_turn_after_inject_if_leader_to_worker_scoped(
-                self.workspace, self.sender, self.recipient, self.message_id,
-                self.event_log, self.owner_team_id, self.metadata,
+                self.workspace,
+                self.sender,
+                self.recipient,
+                self.message_id,
+                self.event_log,
+                self.owner_team_id,
+                self.metadata,
             )
         };
-        if let Err(error) = result { *self.error.borrow_mut() = Some(error); }
+        if let Err(error) = result {
+            *self.error.borrow_mut() = Some(error);
+        }
     }
 }
 
@@ -2711,33 +2777,67 @@ fn record_rescue_turn_after_submit(
     metadata: Option<&TargetMetadata>,
 ) -> Result<(), MessagingError> {
     let request = context;
-    let target = context.target.as_ref().filter(|target| target.bound())
-        .ok_or_else(|| MessagingError::Validation("enter_rescue: original binding missing".into()))?;
-    if !matches!(sender, "leader" | "Leader") { return Ok(()); }
+    let target = context
+        .target
+        .as_ref()
+        .filter(|target| target.bound())
+        .ok_or_else(|| {
+            MessagingError::Validation("enter_rescue: original binding missing".into())
+        })?;
+    if !matches!(sender, "leader" | "Leader") {
+        return Ok(());
+    }
     crate::state::repository::StateRepository::new(workspace).commit_messaging_checked(
         crate::state::repository::StateWriteIntent::MessagingDeliveryState {
             owner_team_id: Some(&request.owner_team_id),
         },
         |selected| {
-            let agent = selected.get("agents").and_then(|agents| agents.get(&request.recipient));
+            let agent = selected
+                .get("agents")
+                .and_then(|agents| agents.get(&request.recipient));
             let matches = agent.is_some_and(|agent| {
                 agent.get("status").and_then(serde_json::Value::as_str) == Some("running")
-                    && agent.get("explicit_stop").and_then(serde_json::Value::as_bool) != Some(true)
-                    && agent.get("pane_id").and_then(serde_json::Value::as_str) == Some(target.pane_id.as_str())
-                    && agent.get("pane_pid").and_then(serde_json::Value::as_u64) == Some(u64::from(target.pane_pid))
-                    && agent.get("window").and_then(serde_json::Value::as_str).unwrap_or(&request.recipient) == target.window
-                    && agent.get("provider").cloned().and_then(|value| serde_json::from_value::<Provider>(value).ok()) == Some(target.provider)
-                    && selected.get("session_name").and_then(serde_json::Value::as_str) == Some(target.session.as_str())
+                    && agent
+                        .get("explicit_stop")
+                        .and_then(serde_json::Value::as_bool)
+                        != Some(true)
+                    && agent.get("pane_id").and_then(serde_json::Value::as_str)
+                        == Some(target.pane_id.as_str())
+                    && agent.get("pane_pid").and_then(serde_json::Value::as_u64)
+                        == Some(u64::from(target.pane_pid))
+                    && agent
+                        .get("window")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or(&request.recipient)
+                        == target.window
+                    && agent
+                        .get("provider")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value::<Provider>(value).ok())
+                        == Some(target.provider)
+                    && selected
+                        .get("session_name")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(target.session.as_str())
             });
             if !matches {
-                return Err(crate::state::StateError::SaveConflict("rescue receiver changed before turn commit".into()));
+                return Err(crate::state::StateError::SaveConflict(
+                    "rescue receiver changed before turn commit".into(),
+                ));
             }
-            arm_turn_open(selected, &request.recipient, &Some(request.message_id.clone()));
+            arm_turn_open(
+                selected,
+                &request.recipient,
+                &Some(request.message_id.clone()),
+            );
             Ok(())
         },
     )?;
-    let mut event = serde_json::json!({"agent_id": request.recipient, "message_id": request.message_id});
-    if let Some(metadata) = metadata { append_target_metadata(&mut event, metadata); }
+    let mut event =
+        serde_json::json!({"agent_id": request.recipient, "message_id": request.message_id});
+    if let Some(metadata) = metadata {
+        append_target_metadata(&mut event, metadata);
+    }
     event_log.write("turn_open.armed_after_inject", event)?;
     Ok(())
 }
@@ -3265,8 +3365,11 @@ fn text_contains_message_token(text: &str, message_id: &str) -> bool {
 }
 
 fn marker_occurrences(text: &str, message_id: &str) -> usize {
-    text.lines().map(str::trim).collect::<String>()
-        .matches(&message_token_marker(message_id)).count()
+    text.lines()
+        .map(str::trim)
+        .collect::<String>()
+        .matches(&message_token_marker(message_id))
+        .count()
 }
 
 /// Provider-specific parsing is behind an observation port, never a delivery branch.
@@ -3280,8 +3383,9 @@ fn observed_token_consumed(
 ) -> Option<bool> {
     let provider = recipient_provider(state, recipient)?;
     match transport.observe_native_input(target, provider) {
-        Ok(Some(frame)) => Some(frame.composer.is_empty()
-            && marker_occurrences(&frame.transcript, message_id) == 1),
+        Ok(Some(frame)) => Some(
+            frame.composer.is_empty() && marker_occurrences(&frame.transcript, message_id) == 1,
+        ),
         Ok(None) => None,
         Err(_) => Some(false),
     }
@@ -3294,8 +3398,9 @@ fn existing_token_consumed(
     target: &Target,
     message_id: &str,
 ) -> bool {
-    observed_token_consumed(transport, state, recipient, target, message_id)
-        .unwrap_or_else(|| recipient_transcript_contains(state, recipient, &message_token_marker(message_id)))
+    observed_token_consumed(transport, state, recipient, target, message_id).unwrap_or_else(|| {
+        recipient_transcript_contains(state, recipient, &message_token_marker(message_id))
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3311,8 +3416,15 @@ fn bind_enter_watchdog(
 ) -> Result<(), MessagingError> {
     use crate::transport::enter_rescue::{EnterRescueContext, EnterRescueTarget};
     use sha2::{Digest, Sha256};
-    let rendered = render_message(&message.sender, message.task_id.as_deref(), &message.content, message_id);
-    let agent = state.get("agents").and_then(|agents| agents.get(&message.recipient));
+    let rendered = render_message(
+        &message.sender,
+        message.task_id.as_deref(),
+        &message.content,
+        message_id,
+    );
+    let agent = state
+        .get("agents")
+        .and_then(|agents| agents.get(&message.recipient));
     let selected = (|| {
         let agent = agent?;
         Some(EnterRescueTarget::selected(
@@ -3320,8 +3432,11 @@ fn bind_enter_watchdog(
             agent.get("pane_id")?.as_str()?.to_string(),
             u32::try_from(agent.get("pane_pid")?.as_u64()?).ok()?,
             state.get("session_name")?.as_str()?.to_string(),
-            agent.get("window").and_then(serde_json::Value::as_str)
-                .unwrap_or(&message.recipient).to_string(),
+            agent
+                .get("window")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(&message.recipient)
+                .to_string(),
         ))
     })();
     let context = EnterRescueContext {
@@ -3333,11 +3448,16 @@ fn bind_enter_watchdog(
         proof: None,
     };
     match transport.snapshot_enter_rescue(target, &context, &rendered) {
-        Ok(snapshot) => { super::enter_rescue::bind_pending_context(store, &snapshot)?; }
+        Ok(snapshot) => {
+            super::enter_rescue::bind_pending_context(store, &snapshot)?;
+        }
         Err(error) => {
-            event_log.write("enter_rescue.snapshot_unavailable", serde_json::json!({
-                "message_id": message_id, "reason": error.to_string(),
-            }))?;
+            event_log.write(
+                "enter_rescue.snapshot_unavailable",
+                serde_json::json!({
+                    "message_id": message_id, "reason": error.to_string(),
+                }),
+            )?;
         }
     }
     Ok(())
@@ -3527,7 +3647,10 @@ mod paste_floor_tests {
             event["before_busy_signal_kind"],
             serde_json::json!("working")
         );
-        assert_eq!(event["busy_signal_kind"], serde_json::json!("spinner_glyph"));
+        assert_eq!(
+            event["busy_signal_kind"],
+            serde_json::json!("spinner_glyph")
+        );
         assert_eq!(event["busy_line_from_bottom"], serde_json::json!(2));
         assert_eq!(
             event["current_marker_in_bottom_15"],

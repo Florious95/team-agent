@@ -61,7 +61,6 @@ team-agent add-agent reviewer --role-file .team/current/agents/reviewer.md --wor
 team-agent approvals
 team-agent approvals <agent_id>
 team-agent approvals [coder]
-team-agent attach-leader
 team-agent claim-leader
 team-agent claude
 team-agent clone-agent <source> --as <new>

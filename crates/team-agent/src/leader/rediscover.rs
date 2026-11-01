@@ -42,12 +42,7 @@ pub fn try_readopt_leader_pane(
         )?;
         return Ok(None);
     };
-    if !readopt_candidate_is_usable_leader(
-        workspace,
-        &candidate,
-        owner_record,
-        receiver_provider,
-    ) {
+    if !readopt_candidate_is_usable_leader(workspace, &candidate, owner_record, receiver_provider) {
         event_log.write(
             LeaderEvent::ReceiverRebindRequired.name(),
             json!({"reason": "leader_pane_unusable"}),
@@ -839,7 +834,7 @@ fn emit_owner_missing_rebind_required(
     let recovery_action = if identity.from_caller {
         "open the owning leader pane or run team-agent claim-leader --confirm from a matching pane"
     } else {
-        "run team-agent attach-leader or claim-leader"
+        "run team-agent claim-leader --confirm from the intended leader terminal"
     };
     event_log.write(
         LeaderEvent::ReceiverRebindRequired.name(),

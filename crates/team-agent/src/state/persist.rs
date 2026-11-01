@@ -559,12 +559,32 @@ fn persist_runtime_state_with_merge_options_and_expected(
     }
     let latest = read_latest_state_under_lock(workspace, &path);
     if let Some((expected_owner, expected_receiver)) = expected_owner_receiver {
-        let expected_matches = latest.as_ref().is_some_and(|latest| {
-            latest_team_owner_receiver(latest, receiver_update_team_key)
-                .is_some_and(|(owner, receiver)| {
-                    owner == expected_owner && receiver == expected_receiver
-                })
-        });
+        // Claim inception also compares an absent ownership slot. Legacy root
+        // records participate only when their team identity matches the target.
+        let entry = latest
+            .as_ref()
+            .and_then(|latest| match receiver_update_team_key {
+                Some(team) => latest
+                    .get("teams")
+                    .and_then(|teams| teams.get(team))
+                    .or_else(|| {
+                        (crate::state::projection::team_state_key(latest) == team).then_some(latest)
+                    }),
+                None => Some(latest),
+            });
+        let readable_or_missing = match latest.as_ref() {
+            Some(latest) => latest.is_object() && entry.is_none_or(Value::is_object),
+            None => !path.try_exists()?,
+        };
+        let expected_matches = readable_or_missing
+            && entry
+                .and_then(|entry| entry.get("team_owner"))
+                .unwrap_or(&Value::Null)
+                == expected_owner
+            && entry
+                .and_then(|entry| entry.get("leader_receiver"))
+                .unwrap_or(&Value::Null)
+                == expected_receiver;
         if !expected_matches {
             return Err(StateError::SaveConflict(
                 "fresh caller owner/receiver changed before commit".to_string(),
@@ -650,11 +670,21 @@ pub(super) fn update_runtime_state_with_lifecycle_target(
     migrate_state_identity(&mut latest, &SystemEnv, workspace)?;
     let _ = migrate_active_team_key(&mut latest);
     let mut committed = update(&latest)?;
-    let topology_updates = target.into_iter()
-        .map(|(team, agent)| (team.to_owned(), agent.to_owned())).collect();
+    let topology_updates = target
+        .into_iter()
+        .map(|(team, agent)| (team.to_owned(), agent.to_owned()))
+        .collect();
     apply_persist_merge_contract(
-        &mut committed, &latest, &BTreeSet::new(), None, &BTreeSet::new(),
-        &topology_updates, &BTreeSet::new(), None, None, None,
+        &mut committed,
+        &latest,
+        &BTreeSet::new(),
+        None,
+        &BTreeSet::new(),
+        &topology_updates,
+        &BTreeSet::new(),
+        None,
+        None,
+        None,
     )?;
     migrate_state_identity(&mut committed, &SystemEnv, workspace)?;
     crate::state::ownership::strip_top_level_ownership_if_canonical_present(&mut committed);
@@ -669,12 +699,24 @@ pub(super) fn update_runtime_state_with_lifecycle_target(
 /// Reuse ordinary roster, topology, ownership, capture and endpoint guards.
 pub(super) fn merge_ordinary_state(incoming: &mut Value, latest: &Value) -> Result<(), StateError> {
     apply_persist_merge_contract(
-        incoming, latest, &BTreeSet::new(), None, &BTreeSet::new(),
-        &BTreeSet::new(), &BTreeSet::new(), None, None, None,
+        incoming,
+        latest,
+        &BTreeSet::new(),
+        None,
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+        None,
+        None,
+        None,
     )
 }
 
-fn write_state_under_lock(workspace: &Path, path: &Path, migrated: &Value) -> Result<(), StateError> {
+fn write_state_under_lock(
+    workspace: &Path,
+    path: &Path,
+    migrated: &Value,
+) -> Result<(), StateError> {
     // Shared retry/self-heal/atomic replacement path; caller owns state-save.
     let payload = serde_json::to_string_pretty(migrated)?;
     let delays = [0.05_f64, 0.2, 0.5];
@@ -785,7 +827,11 @@ fn apply_persist_merge_contract_with_fork_target_preservation(
         let mut topology_update_agent_ids =
             topology_updates_for_team(topology_updates, top_level_team.as_deref());
         topology_update_agent_ids.extend(endpoint_convergence_invalidated_agents(
-            incoming, latest, top_level_team.as_deref().is_some_and(|team| receiver_updates.contains(team)),
+            incoming,
+            latest,
+            top_level_team
+                .as_deref()
+                .is_some_and(|team| receiver_updates.contains(team)),
         ));
         preserve_latest_retired_agents(incoming, latest, &topology_update_agent_ids)?;
         // 0.5.26 (§7.3): top-level projection uses the incoming root state's
@@ -853,7 +899,9 @@ fn apply_persist_merge_contract_with_fork_target_preservation(
             let receiver_update_authoritative =
                 authority_team.is_some_and(|team_key| receiver_updates.contains(team_key));
             topology_update_agent_ids.extend(endpoint_convergence_invalidated_agents(
-                incoming_entry, latest_entry, receiver_update_authoritative,
+                incoming_entry,
+                latest_entry,
+                receiver_update_authoritative,
             ));
             let projection = format!("teams.{team}.agents");
             // 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.3):
@@ -932,26 +980,59 @@ fn apply_persist_merge_contract_with_fork_target_preservation(
 
 // Claim may invalidate a server-local pane only at the actual endpoint change.
 // Replayed convergence markers and concurrent/newer live cohorts have no such authority.
-fn endpoint_convergence_invalidated_agents(incoming: &Value, latest: &Value, authorized: bool) -> BTreeSet<String> {
-    let endpoint = |value: &Value| value.get("tmux_endpoint").or_else(|| value.get("tmux_socket"))
-        .and_then(Value::as_str).map(str::to_string);
+fn endpoint_convergence_invalidated_agents(
+    incoming: &Value,
+    latest: &Value,
+    authorized: bool,
+) -> BTreeSet<String> {
+    let endpoint = |value: &Value| {
+        value
+            .get("tmux_endpoint")
+            .or_else(|| value.get("tmux_socket"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
     let marker = incoming.get("topology_convergence");
-    if !authorized || endpoint(incoming) == endpoint(latest)
+    if !authorized
+        || endpoint(incoming) == endpoint(latest)
         || marker.and_then(|m| m.get("status")).and_then(Value::as_str) != Some("converged")
-        || marker.and_then(|m| m.get("old_tmux_endpoint")).and_then(Value::as_str) != endpoint(latest).as_deref()
-        || marker.and_then(|m| m.get("new_tmux_endpoint")).and_then(Value::as_str) != endpoint(incoming).as_deref()
+        || marker
+            .and_then(|m| m.get("old_tmux_endpoint"))
+            .and_then(Value::as_str)
+            != endpoint(latest).as_deref()
+        || marker
+            .and_then(|m| m.get("new_tmux_endpoint"))
+            .and_then(Value::as_str)
+            != endpoint(incoming).as_deref()
         || ownership_epoch(incoming) < ownership_epoch(latest)
-    { return BTreeSet::new(); }
-    incoming.get("agents").and_then(Value::as_object).into_iter().flat_map(|agents| agents.iter())
+    {
+        return BTreeSet::new();
+    }
+    incoming
+        .get("agents")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|agents| agents.iter())
         .filter_map(|(id, row)| {
             let old = latest.get("agents")?.get(id)?;
-            let pid = old.get("pane_pid")?.as_u64().and_then(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 1)?;
+            let pid = old
+                .get("pane_pid")?
+                .as_u64()
+                .and_then(|pid| u32::try_from(pid).ok())
+                .filter(|pid| *pid > 1)?;
             (!crate::contract_runtime::framework::is_contract(row)
-                && row.get("pane_id").is_none() && old.get("pane_id").is_some()
-                && ["pane_pid", "spawn_epoch", "spawned_at"].iter().all(|key| row.get(key) == old.get(key))
-                && matches!(crate::platform::process::pid_liveness(pid), Ok(crate::platform::process::ProcessLiveness::Dead)))
-                .then(|| id.clone())
-        }).collect()
+                && row.get("pane_id").is_none()
+                && old.get("pane_id").is_some()
+                && ["pane_pid", "spawn_epoch", "spawned_at"]
+                    .iter()
+                    .all(|key| row.get(key) == old.get(key))
+                && matches!(
+                    crate::platform::process::pid_liveness(pid),
+                    Ok(crate::platform::process::ProcessLiveness::Dead)
+                ))
+            .then(|| id.clone())
+        })
+        .collect()
 }
 
 fn topology_updates_for_team(
@@ -1092,20 +1173,19 @@ fn apply_lock_held_exact_owner_receiver_cleanup(
     // attempt-local grant. A same-owner receiver update is a concurrent
     // winner and must survive cleanup just like a different owner/epoch.
     let latest_owner = latest.get("team_owner");
-    let receiver_matches = expected_receiver.is_none_or(|expected| {
-        latest.get("leader_receiver") == Some(expected)
-    });
+    let receiver_matches =
+        expected_receiver.is_none_or(|expected| latest.get("leader_receiver") == Some(expected));
     let Some(incoming_obj) = incoming.as_object_mut() else {
         return;
     };
     if latest_owner == Some(seed) && receiver_matches {
         incoming_obj.insert("team_owner".to_string(), Value::Null);
         incoming_obj.insert("leader_receiver".to_string(), Value::Null);
-        if let Some(epoch) = latest
-            .get("owner_epoch")
-            .cloned()
-            .or_else(|| latest_owner.and_then(|owner| owner.get("owner_epoch")).cloned())
-        {
+        if let Some(epoch) = latest.get("owner_epoch").cloned().or_else(|| {
+            latest_owner
+                .and_then(|owner| owner.get("owner_epoch"))
+                .cloned()
+        }) {
             incoming_obj.insert("owner_epoch".to_string(), epoch);
         }
         return;
@@ -1933,8 +2013,14 @@ mod tests {
         incoming["topology_convergence"] = serde_json::json!({
             "status":"converged","old_tmux_endpoint":"old-socket","new_tmux_endpoint":"new-socket"
         });
-        incoming["agents"]["worker"].as_object_mut().unwrap().remove("pane_id");
-        assert_eq!(endpoint_convergence_invalidated_agents(&incoming, &latest, true), BTreeSet::from(["worker".into()]));
+        incoming["agents"]["worker"]
+            .as_object_mut()
+            .unwrap()
+            .remove("pane_id");
+        assert_eq!(
+            endpoint_convergence_invalidated_agents(&incoming, &latest, true),
+            BTreeSet::from(["worker".into()])
+        );
         assert!(endpoint_convergence_invalidated_agents(&incoming, &latest, false).is_empty());
         latest["tmux_endpoint"] = serde_json::json!("new-socket");
         assert!(endpoint_convergence_invalidated_agents(&incoming, &latest, true).is_empty());
@@ -2585,7 +2671,11 @@ mod tests {
             let before = read_state(&ws);
             let held_root = before.pointer("/agents/held").unwrap().clone();
             let held_team = before.pointer("/teams/team-a/agents/held").unwrap().clone();
-            let rows = if omit { json!({}) } else { json!({"held":{"agent_id":"held","provider":"codex","status":"running","explicit_stop":false,"session_id":"stale"}}) };
+            let rows = if omit {
+                json!({})
+            } else {
+                json!({"held":{"agent_id":"held","provider":"codex","status":"running","explicit_stop":false,"session_id":"stale"}})
+            };
             let stale = json!({"session_name":"team-a","active_team_key":"team-a","agents":rows,
                 "teams":{"team-a":{"session_name":"team-a","agents":rows}},"delivery":{"message":"observed"}});
             save_runtime_state(&ws, &stale).unwrap();
@@ -2600,11 +2690,21 @@ mod tests {
             row["status"] = json!("running");
             row["explicit_stop"] = json!(false);
         }
-        save_runtime_state_with_lifecycle_topology_authority(&ws, &started, "team-a", &["held"]).unwrap();
+        save_runtime_state_with_lifecycle_topology_authority(&ws, &started, "team-a", &["held"])
+            .unwrap();
         let saved = read_state(&ws);
-        assert_eq!(saved.pointer("/agents/held/explicit_stop"), Some(&json!(false)));
-        assert_eq!(saved.pointer("/agents/held/session_id"), Some(&json!("same-session")));
-        assert_eq!(saved.pointer("/teams/team-a/agents/held/explicit_stop"), Some(&json!(false)));
+        assert_eq!(
+            saved.pointer("/agents/held/explicit_stop"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            saved.pointer("/agents/held/session_id"),
+            Some(&json!("same-session"))
+        );
+        assert_eq!(
+            saved.pointer("/teams/team-a/agents/held/explicit_stop"),
+            Some(&json!(false))
+        );
     }
 
     #[test]
@@ -2631,13 +2731,19 @@ mod tests {
         // peer view, but a writer bounded to `target` never writes `other`, so its stale copy
         // of `other` is ignored instead of conflicting, and the newer row on disk survives.
         let before = read_state(&ws);
-        assert!(matches!(save_runtime_state(&ws, &incoming), Err(StateError::SaveConflict(_))));
+        assert!(matches!(
+            save_runtime_state(&ws, &incoming),
+            Err(StateError::SaveConflict(_))
+        ));
         assert_eq!(read_state(&ws), before);
         save_runtime_state_with_lifecycle_topology_authority(&ws, &incoming, "team-a", &["target"])
             .unwrap();
         let saved = read_state(&ws);
         for field in ["window", "pane_id", "spawn_epoch"] {
-            assert_eq!(saved["agents"]["other"][field], before["agents"]["other"][field], "{field}");
+            assert_eq!(
+                saved["agents"]["other"][field], before["agents"]["other"][field],
+                "{field}"
+            );
         }
         assert_eq!(saved["agents"]["target"]["status"], json!("stopped"));
     }
@@ -2969,8 +3075,18 @@ mod tests {
         save_runtime_state_with_lifecycle_topology_authority(&ws, &incoming, "team-a", &["f2"])
             .unwrap();
         let saved = read_state(&ws);
-        for field in ["status", "pane_id", "pane_pid", "window", "spawned_at", "spawn_epoch"] {
-            assert_eq!(saved["agents"]["f1"][field], before["agents"]["f1"][field], "{field}");
+        for field in [
+            "status",
+            "pane_id",
+            "pane_pid",
+            "window",
+            "spawned_at",
+            "spawn_epoch",
+        ] {
+            assert_eq!(
+                saved["agents"]["f1"][field], before["agents"]["f1"][field],
+                "{field}"
+            );
         }
         assert_eq!(saved["agents"]["f2"]["status"], json!("running"));
     }
@@ -3573,6 +3689,68 @@ mod tests {
     }
 
     #[test]
+    fn fresh_caller_vacant_claim_does_not_overwrite_a_concurrent_winner() {
+        let ws = temp_ws();
+        let incoming = ownership_projection("caller-session", "/dev/caller");
+        let key = "team-authority-merge";
+        save_runtime_state_with_receiver_authority_and_expected(
+            &ws,
+            &incoming,
+            key,
+            &Value::Null,
+            &Value::Null,
+        )
+        .unwrap();
+        let committed = std::fs::read(runtime_state_path(&ws)).unwrap();
+        assert_eq!(
+            read_state(&ws)["teams"][key]["leader_receiver"]["session_name"],
+            json!("caller-session")
+        );
+        let error = save_runtime_state_with_receiver_authority_and_expected(
+            &ws,
+            &incoming,
+            key,
+            &Value::Null,
+            &Value::Null,
+        )
+        .unwrap_err();
+        assert!(matches!(error, StateError::SaveConflict(_)));
+        assert_eq!(std::fs::read(runtime_state_path(&ws)).unwrap(), committed);
+        std::fs::remove_dir_all(ws).unwrap();
+    }
+
+    #[test]
+    fn fresh_caller_does_not_treat_corrupt_existing_state_as_vacant() {
+        for raw in [
+            "not json",
+            "null",
+            "[]",
+            "{\"teams\":{\"team-authority-merge\":null}}",
+        ] {
+            let ws = temp_ws();
+            std::fs::create_dir_all(runtime_dir(&ws)).unwrap();
+            std::fs::write(runtime_state_path(&ws), raw).unwrap();
+            let error = save_runtime_state_with_receiver_authority_and_expected(
+                &ws,
+                &ownership_projection("caller-session", "/dev/caller"),
+                "team-authority-merge",
+                &Value::Null,
+                &Value::Null,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, StateError::SaveConflict(_)),
+                "{raw}: {error}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(runtime_state_path(&ws)).unwrap(),
+                raw
+            );
+            std::fs::remove_dir_all(ws).unwrap();
+        }
+    }
+
+    #[test]
     fn equal_epoch_ordinary_writer_preserves_latest_receiver_observation() {
         let mut incoming = ownership_projection("stale-session", "/dev/stale");
         let latest = ownership_projection("refreshed-session", "/dev/refreshed");
@@ -3711,12 +3889,8 @@ mod tests {
     }
 
     fn tombstone_incoming(ws: &Path, epoch: u64) -> Value {
-        let mut incoming = team_state_with_binding(
-            ws,
-            seed_owner(epoch),
-            seed_receiver(epoch),
-            epoch,
-        );
+        let mut incoming =
+            team_state_with_binding(ws, seed_owner(epoch), seed_receiver(epoch), epoch);
         incoming["teams"]["fresh"]["team_owner"] = Value::Null;
         incoming["teams"]["fresh"]["leader_receiver"] = Value::Null;
         incoming
@@ -3778,11 +3952,9 @@ mod tests {
             "exact seed must be cleared; got {}",
             persisted["teams"]["fresh"]["team_owner"]
         );
-        assert!(
-            persisted
-                .pointer("/teams/fresh/leader_receiver")
-                .is_some_and(Value::is_null)
-        );
+        assert!(persisted
+            .pointer("/teams/fresh/leader_receiver")
+            .is_some_and(Value::is_null));
         assert_eq!(
             persisted["teams"]["fresh"]["owner_epoch"],
             json!(1),
@@ -3832,9 +4004,8 @@ mod tests {
         )
         .unwrap();
         let seed = persisted_fresh_owner(&ws);
-        let seeded_receiver = load_runtime_state(&ws).unwrap()["teams"]["fresh"]
-            ["leader_receiver"]
-            .clone();
+        let seeded_receiver =
+            load_runtime_state(&ws).unwrap()["teams"]["fresh"]["leader_receiver"].clone();
         let mut winner = team_state_with_binding(&ws, seed_owner(1), takeover_receiver(1), 1);
         winner["teams"]["fresh"]["team_owner"] = seed.clone();
         save_runtime_state_with_receiver_authority(&ws, &winner, "fresh", None).unwrap();
@@ -3895,7 +4066,10 @@ mod tests {
             save_runtime_state_without_migrations(&writer_ws, &json!({"teams": {"fresh": {}}}))
         });
         std::thread::sleep(Duration::from_millis(100));
-        assert!(!writer.is_finished(), "raw writer must share state-save lock");
+        assert!(
+            !writer.is_finished(),
+            "raw writer must share state-save lock"
+        );
         drop(lock);
         writer.join().unwrap().unwrap();
 
@@ -3905,7 +4079,10 @@ mod tests {
             with_runtime_state_lock_without_migrations(&reader_ws, |state| state.is_some())
         });
         std::thread::sleep(Duration::from_millis(100));
-        assert!(!reader.is_finished(), "prune reader must use state-save lock");
+        assert!(
+            !reader.is_finished(),
+            "prune reader must use state-save lock"
+        );
         drop(lock);
         assert!(reader.join().unwrap().unwrap());
     }

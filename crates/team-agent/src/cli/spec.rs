@@ -62,8 +62,6 @@ pub(crate) enum DispatchKind {
     Profile,
     InstallSkill,
     ClaimLeader,
-    Takeover,
-    AttachLeader,
 }
 pub(crate) const ALL_DISPATCH_KINDS: &[DispatchKind] = &[
     DispatchKind::Start,
@@ -96,8 +94,6 @@ pub(crate) const ALL_DISPATCH_KINDS: &[DispatchKind] = &[
     DispatchKind::Profile,
     DispatchKind::InstallSkill,
     DispatchKind::ClaimLeader,
-    DispatchKind::Takeover,
-    DispatchKind::AttachLeader,
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct GovernanceNote {
@@ -153,8 +149,6 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
     CommandSpec { name: "profile", tier: CommandTier::Core, category: CommandCategory::Setup, kind: CommandKind::Dispatch(DispatchKind::Profile), summary: "Manage authentication and proxy profiles", usage: "team-agent profile init|doctor|show NAME [--workspace WORKSPACE] [--team TEAM] [--auth-mode MODE] [--proxy-mode direct|inherit] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
     CommandSpec { name: "install-skill", tier: CommandTier::Core, category: CommandCategory::Setup, kind: CommandKind::Dispatch(DispatchKind::InstallSkill), summary: "Optionally install an existing public operation skill", usage: "team-agent install-skill (--source DIR|--uninstall) [--target codex|claude|copilot|all] [--dest DIR] [--dry-run] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
     CommandSpec { name: "claim-leader", tier: CommandTier::Guided, category: CommandCategory::GuidedRecovery, kind: CommandKind::Dispatch(DispatchKind::ClaimLeader), summary: "Register the current terminal as leader only when diagnosis recommends it", usage: "team-agent claim-leader [--workspace WORKSPACE] [--team TEAM] [--confirm] [--json] [--detail]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
-    CommandSpec { name: "takeover", tier: CommandTier::Guided, category: CommandCategory::GuidedRecovery, kind: CommandKind::Dispatch(DispatchKind::Takeover), summary: "Take over an existing team only after diagnosis and confirmation", usage: "team-agent takeover [--workspace WORKSPACE] [--team TEAM] [--confirm] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
-    CommandSpec { name: "attach-leader", tier: CommandTier::Guided, category: CommandCategory::GuidedRecovery, kind: CommandKind::Dispatch(DispatchKind::AttachLeader), summary: "Attach a verified leader terminal only when diagnosis recommends it", usage: "team-agent attach-leader [--workspace WORKSPACE] [--team TEAM] --pane PANE --provider TOOL [--confirm] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
     CommandSpec { name: "kiro", tier: CommandTier::Core, category: CommandCategory::Start, kind: CommandKind::Dispatch(DispatchKind::KiroLeader), summary: "Check Kiro leader launch admission (currently refused)", usage: "team-agent kiro [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
     CommandSpec { name: "pi", tier: CommandTier::Core, category: CommandCategory::Start, kind: CommandKind::LeaderPassthrough { provider: "pi" }, summary: "Open a leader session with Pi", usage: "team-agent pi [--attach-existing] [--confirm] [--attach-session SESSION] [--external-leader] [--allow-nested-attach] [--json] [-- TOOL_ARGS...]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, sunset: None, action: None, governance: None },
     CommandSpec { name: "codex", tier: CommandTier::Core, category: CommandCategory::Start, kind: CommandKind::LeaderPassthrough { provider: "codex" }, summary: "Open a leader session with Codex", usage: "team-agent codex [--attach-existing] [--confirm] [--attach-session SESSION] [--external-leader] [--allow-nested-attach] [--json] [-- TOOL_ARGS...]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, sunset: None, action: None, governance: None },

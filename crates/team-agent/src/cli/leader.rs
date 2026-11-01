@@ -112,6 +112,18 @@ pub fn cmd_leader_passthrough(
     let attach = leader_launcher_args(&launcher_args)?;
     let provider = leader_passthrough_provider(command)
         .ok_or_else(|| CliError::Usage(format!("unknown leader passthrough command: {command}")))?;
+    if attach.attach_existing {
+        if !attach.provider_args.is_empty() || attach.attach_session.is_some() {
+            return Err(CliError::Usage("--attach-existing is an alias for claim-leader; provider/session arguments are not accepted".to_string()));
+        }
+        return super::cmd_claim_leader(&super::ClaimLeaderArgs {
+            workspace: cwd.to_path_buf(),
+            team: None,
+            confirm: attach.confirm_attach,
+            json: as_json,
+            detail: false,
+        });
+    }
     let value = lifecycle_port::start_leader(provider, &attach.provider_args, cwd, &attach)?;
     Ok(CmdResult::from_json(value, as_json))
 }

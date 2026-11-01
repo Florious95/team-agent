@@ -438,7 +438,8 @@ fn resolve_leader_name_not_live() {
     // toward `claim-leader`/`takeover` (owner-only actions).
     assert_eq!(err.kind, NamedAddressErrorKind::LeaderNotAttached);
     let n38 = err.n38_message();
-    assert!(n38.contains("attach-leader"), "{n38}");
+    assert!(n38.contains("team-agent doctor"), "{n38}");
+    assert!(!n38.contains("attach-leader"), "{n38}");
     assert!(
         !n38.contains("claim-leader"),
         "third-party copy must not suggest claim-leader: {n38}"
@@ -611,11 +612,22 @@ fn send_to_name_app_server_leader_requires_explicit_mailbox_without_a_tmux_endpo
     let mut args = named_send_args(&ws, Some("alpha/leader"), None, None, &["hello appserver"]);
     // M1 stores first; the direct submission then reports, honestly, that it never ran.
     let direct = cmd_send(&args).expect("a direct send is stored before submission");
-    let CmdOutput::Json(direct) = direct.output else { panic!("expected json output") };
-    assert_eq!(direct["status"], json!("stored"), "a direct send cannot pretend an app-server is a tmux pane: {direct}");
+    let CmdOutput::Json(direct) = direct.output else {
+        panic!("expected json output")
+    };
+    assert_eq!(
+        direct["status"],
+        json!("stored"),
+        "a direct send cannot pretend an app-server is a tmux pane: {direct}"
+    );
     assert_eq!(direct["live"], json!(false), "{direct}");
     assert_eq!(direct["submission"], json!("not_attempted"), "{direct}");
-    assert!(direct["delivery_error"].as_str().is_some_and(|e| e.contains("no tmux pane")), "{direct}");
+    assert!(
+        direct["delivery_error"]
+            .as_str()
+            .is_some_and(|e| e.contains("no tmux pane")),
+        "{direct}"
+    );
     assert!(!ws.join(".team/runtime/team.db").exists());
     args.presentation.sink = crate::messaging::presentation::PresentationSink::Silent;
     let result = cmd_send(&args).expect("explicit mailbox needs no physical endpoint");

@@ -99,7 +99,10 @@ pub fn check_team_owner(
     let (reason_kind, action) = if same_uuid {
         ("sticky_bind_collision", "team-agent claim-leader --confirm")
     } else {
-        ("owner_takeover_required", "team-agent takeover --confirm")
+        (
+            "owner_takeover_required",
+            "team-agent claim-leader --confirm",
+        )
     };
     // 键序对齐 Python dict 字面(preserve_order)。
     Some(json!({
@@ -280,7 +283,7 @@ mod tests {
         let r = check_team_owner(&s, &caller("%intruder", "uuid-intruder"), true, &LIVE).unwrap();
         assert_eq!(r["reason"], json!("team_owner_mismatch"));
         assert_eq!(r["reason_kind"], json!("owner_takeover_required"));
-        assert_eq!(r["action"], json!("team-agent takeover --confirm"));
+        assert_eq!(r["action"], json!("team-agent claim-leader --confirm"));
         assert_eq!(r["error"], json!("not_owner"));
         assert_eq!(r["ok"], json!(false));
     }

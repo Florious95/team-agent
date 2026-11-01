@@ -448,7 +448,7 @@ fn rediscover_missing_and_ambiguous_use_golden_status_names() {
     assert_eq!(missing_rebind["owner_identity"]["pane_id"], json!("%owner"));
     assert_eq!(
         missing_rebind["recovery_action"],
-        json!("run team-agent attach-leader or claim-leader")
+        json!("run team-agent claim-leader --confirm from the intended leader terminal")
     );
     assert!(missing_rebind.get("invalidation_reason").is_none());
 

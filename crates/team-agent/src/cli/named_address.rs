@@ -122,11 +122,15 @@ impl NamedAddressError {
         let workspace = self.human_scope.as_deref();
         let mut message = format!(
             "{}\nRequested recipient: {requested:?}\nReason: {}",
-            human_address_reason(self.kind.as_str()).unwrap_or("No usable recipient could be resolved."),
+            human_address_reason(self.kind.as_str())
+                .unwrap_or("No usable recipient could be resolved."),
             self.message
         );
         if let Some(workspace) = workspace {
-            message.push_str(&format!("\nSelected workspace: {:?}", workspace.to_string_lossy()));
+            message.push_str(&format!(
+                "\nSelected workspace: {:?}",
+                workspace.to_string_lossy()
+            ));
         }
         if let Some(team) = self.human_team.as_deref() {
             message.push_str(&format!("\nSelected team: {team:?}"));
@@ -703,11 +707,14 @@ fn resolve_in_workspace(
         ParsedTarget::TeamEntity { team, entity } => {
             let canonical = canonical_named_team_key(target_workspace, state, team)
                 .unwrap_or_else(|| team.clone());
-            if team_entry(state, &canonical).is_none() && !is_legacy_single_team_active(state, &canonical) {
+            if team_entry(state, &canonical).is_none()
+                && !is_legacy_single_team_active(state, &canonical)
+            {
                 return Err(if parsed.workspace.is_some() {
                     team_key_not_found(target_workspace, state, team)
                 } else {
-                    name_not_resolvable_team(team).with_scoped_suggestions_for_team(state, team, entity, parsed)
+                    name_not_resolvable_team(team)
+                        .with_scoped_suggestions_for_team(state, team, entity, parsed)
                 });
             }
             let result = if entity == "leader" {
@@ -1422,8 +1429,11 @@ fn canonical_named_team_key(
         return Some(requested.to_string());
     }
     let selected = crate::state::projection::resolve_runtime_team_scope_readonly(
-        target_workspace, Some(requested),
-    ).ok()?.state;
+        target_workspace,
+        Some(requested),
+    )
+    .ok()?
+    .state;
     let canonical = selected
         .get("active_team_key")
         .and_then(Value::as_str)
@@ -1608,13 +1618,11 @@ fn leader_not_attached_third_party(
         NamedAddressErrorKind::LeaderNotAttached,
         "target team leader is not attached on its recorded tmux endpoint",
     );
-    let provider = provider.and_then(crate::provider::wire::parse_provider)
-        .map(crate::provider::wire::provider_wire);
+    let _ = provider;
     let workspace_arg = super::adapters::shell_quote(&target_workspace.to_string_lossy());
     let team_arg = super::adapters::shell_quote(team);
     err.action = format!(
-        "Ask the target team owner to select the actual Leader provider and run `team-agent attach-leader --workspace {workspace_arg} --team {team_arg} --provider {}`; the sender-side offline mailbox will requeue the message once attach succeeds",
-        provider.unwrap_or("<provider>")
+        "Ask the target team owner to diagnose the leader in its own terminal with `team-agent doctor --workspace {workspace_arg} --team {team_arg}`; the sender must not change the target team binding"
     );
     err.log = format!(
         "name={team}/leader expected_pane={} expected_session={} expected_window={} tmux_socket={}",
@@ -1655,7 +1663,7 @@ fn name_not_live_leader(
         NamedAddressErrorKind::NameNotLive,
         "leader_receiver is missing or not live on its recorded tmux socket",
     );
-    err.action = "Run claim-leader, attach-leader, or takeover for the target team; resolver will not guess another leader pane".to_string();
+    err.action = "From the target team leader terminal, run claim-leader --confirm; resolver will not guess another leader pane".to_string();
     err.log = format!(
         "name={team}/leader expected_pane={} expected_session={} expected_window={} tmux_socket={}",
         pane_id.unwrap_or("<missing>"),

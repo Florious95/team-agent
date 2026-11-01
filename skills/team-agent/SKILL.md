@@ -29,6 +29,8 @@ False is **not** a read-only or sandbox guarantee. Different workers may use dif
 
 ## Prepare once, start every day
 
+Open the intended workspace in a terminal and run `team-agent pi` (or another supported provider). With no live leader, launch automatically publishes the complete leader binding and discovery entry. A live leader on another terminal is preserved. Use `team-agent claim-leader --confirm` only for intentional recovery/preemption; repeated claims refresh the same binding and readiness. Provider `--attach-existing` is a claim alias, not another binding mechanism.
+
 Keep the goal in `TEAM.md` and each worker's instructions in `agents/*.md`. The filename stem is the worker's in-team short name:
 
 ```text

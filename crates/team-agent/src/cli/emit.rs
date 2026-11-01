@@ -89,7 +89,10 @@ pub fn run(argv: &[String], cwd: &Path) -> ExitCode {
     // Classify syntax/scope errors before dispatch; contextual status refusals
     // retain their existing stderr-only contract. Resolve the scope only once.
     if is_machine_command(command)
-        || matches!(command_spec(command).map(|spec| spec.kind), Some(CommandKind::Dispatch(_)))
+        || matches!(
+            command_spec(command).map(|spec| spec.kind),
+            Some(CommandKind::Dispatch(_))
+        )
     {
         let checked = match prepare_control_args(command, &argv[1..], cwd) {
             Ok(checked) => checked,
@@ -122,9 +125,12 @@ fn emit_cli_error_for_command(
                 "missing profile command" => {
                     "Provide a profile operation: init, doctor or show.".to_string()
                 }
-                "missing profile name" => "Provide an authentication/proxy profile name.".to_string(),
+                "missing profile name" => {
+                    "Provide an authentication/proxy profile name.".to_string()
+                }
                 "add-agent requires --provider <name>" => {
-                    "Select a provider with --provider, or supply a role file with --role-file.".to_string()
+                    "Select a provider with --provider, or supply a role file with --role-file."
+                        .to_string()
                 }
                 other => other
                     .strip_prefix("missing ")
@@ -157,7 +163,11 @@ fn emit_cli_error_for_command(
 }
 
 #[cfg(test)]
-pub(crate) fn __test_runtime_error_emitter(command: &str, cwd: &Path, error: &CliError) -> ExitCode {
+pub(crate) fn __test_runtime_error_emitter(
+    command: &str,
+    cwd: &Path,
+    error: &CliError,
+) -> ExitCode {
     emit_cli_error(command, &[], cwd, error)
 }
 
@@ -216,6 +226,9 @@ pub(crate) fn __test_dispatch(
 }
 
 fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliError> {
+    if matches!(command, "attach-leader" | "takeover") {
+        return Err(CliError::Usage(format!("{command} is retired; use team-agent claim-leader from the intended leader terminal (--confirm to replace a live leader)")));
+    }
     if command == "route" {
         return Ok(super::route::run(args));
     }
@@ -226,23 +239,38 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         return result.map(emit_result);
     }
     let machine = is_machine_command(command);
-    if !machine && !matches!(command_spec(command).map(|spec| spec.kind), Some(CommandKind::Dispatch(_))) {
+    if !machine
+        && !matches!(
+            command_spec(command).map(|spec| spec.kind),
+            Some(CommandKind::Dispatch(_))
+        )
+    {
         return Ok(emit_unknown_subcommand_usage(command));
     }
     dispatch_prepared(command, prepare_control_args(command, args, cwd)?, cwd)
 }
 
-fn prepare_control_args(command: &str, args: &[String], cwd: &Path) -> Result<super::arguments::CheckedArgs, CliError> {
+fn prepare_control_args(
+    command: &str,
+    args: &[String],
+    cwd: &Path,
+) -> Result<super::arguments::CheckedArgs, CliError> {
     let mut checked = super::arguments::parse(command, args)?;
     if !checked.help && command == "schedule" {
         super::schedule::validate(&checked.tokens, cwd)?;
     }
     let raw_send = command == "send" && checked.tokens.iter().any(|token| token == "--socket");
-    if !checked.help && !raw_send { checked.tokens = resolve_command_scope(command, checked.tokens, cwd)?; }
+    if !checked.help && !raw_send {
+        checked.tokens = resolve_command_scope(command, checked.tokens, cwd)?;
+    }
     Ok(checked)
 }
 
-fn dispatch_prepared(command: &str, checked: super::arguments::CheckedArgs, cwd: &Path) -> Result<ExitCode, CliError> {
+fn dispatch_prepared(
+    command: &str,
+    checked: super::arguments::CheckedArgs,
+    cwd: &Path,
+) -> Result<ExitCode, CliError> {
     let machine = is_machine_command(command);
     if checked.help {
         if machine {
@@ -253,7 +281,9 @@ fn dispatch_prepared(command: &str, checked: super::arguments::CheckedArgs, cwd:
         return Ok(ExitCode::Ok);
     }
     let args = checked.tokens.as_slice();
-    if machine { return dispatch_machine(command, args, cwd); }
+    if machine {
+        return dispatch_machine(command, args, cwd);
+    }
     if args.iter().all(|arg| arg == "--json")
         && matches!(
             command,
@@ -278,33 +308,69 @@ fn dispatch_prepared(command: &str, checked: super::arguments::CheckedArgs, cwd:
         "send" => {
             let parsed = parse_args(args);
             if parsed.socket.is_some() || parsed.dialect.is_some() {
-                let socket = parsed.socket.as_deref().ok_or_else(|| CliError::Usage("raw send requires --socket".into()))?;
-                let pane = parsed.pane.as_deref().ok_or_else(|| CliError::Usage("raw send requires --pane".into()))?;
-                let dialect = parsed.dialect.as_deref().ok_or_else(|| CliError::Usage("raw send requires --dialect".into()))?;
-                if parsed.targets.is_some() || parsed.to_name.is_some() || parsed.to_leader.is_some() || parsed.mailbox {
-                    return Err(CliError::Usage("raw send cannot be combined with semantic addressing or --mailbox".into()));
+                let socket = parsed
+                    .socket
+                    .as_deref()
+                    .ok_or_else(|| CliError::Usage("raw send requires --socket".into()))?;
+                let pane = parsed
+                    .pane
+                    .as_deref()
+                    .ok_or_else(|| CliError::Usage("raw send requires --pane".into()))?;
+                let dialect = parsed
+                    .dialect
+                    .as_deref()
+                    .ok_or_else(|| CliError::Usage("raw send requires --dialect".into()))?;
+                if parsed.targets.is_some()
+                    || parsed.to_name.is_some()
+                    || parsed.to_leader.is_some()
+                    || parsed.mailbox
+                {
+                    return Err(CliError::Usage(
+                        "raw send cannot be combined with semantic addressing or --mailbox".into(),
+                    ));
                 }
-                crate::direct_delivery::direct_send(socket, pane, dialect, &parsed.positionals.join(" ")).map_err(CliError::Runtime)?;
-                Ok(emit_result(CmdResult::from_json(serde_json::json!({"ok": true, "status": "sent", "delivery": "physical", "pane_id": pane, "accepted": null}), parsed.json)))
-            } else { cmd_send(&send_args(args, cwd)?).map(emit_result) }
-        },
+                crate::direct_delivery::direct_send(
+                    socket,
+                    pane,
+                    dialect,
+                    &parsed.positionals.join(" "),
+                )
+                .map_err(CliError::Runtime)?;
+                Ok(emit_result(CmdResult::from_json(
+                    serde_json::json!({"ok": true, "status": "sent", "delivery": "physical", "pane_id": pane, "accepted": null}),
+                    parsed.json,
+                )))
+            } else {
+                cmd_send(&send_args(args, cwd)?).map(emit_result)
+            }
+        }
         "locate" => {
             let parsed = parse_args(args);
-            let value = crate::direct_delivery::locate(&workspace(&parsed, cwd), parsed.team.as_deref()).map_err(CliError::Usage)?;
+            let value =
+                crate::direct_delivery::locate(&workspace(&parsed, cwd), parsed.team.as_deref())
+                    .map_err(CliError::Usage)?;
             Ok(emit_result(CmdResult::from_json(value, parsed.json)))
-        },
+        }
         "migrate" => {
-            #[cfg(unix)] {
+            #[cfg(unix)]
+            {
                 let parsed = parse_args(args);
-                let team = parsed.team.as_deref().ok_or_else(|| CliError::Usage("migrate requires --team TEAM".into()))?;
-                let value = crate::contract_runtime::backend::migrate(&workspace(&parsed, cwd), team)
-                    .map_err(|error| CliError::Runtime(error.to_string()))?;
+                let team = parsed
+                    .team
+                    .as_deref()
+                    .ok_or_else(|| CliError::Usage("migrate requires --team TEAM".into()))?;
+                let value =
+                    crate::contract_runtime::backend::migrate(&workspace(&parsed, cwd), team)
+                        .map_err(|error| CliError::Runtime(error.to_string()))?;
                 Ok(emit_result(CmdResult::from_json(value, parsed.json)))
             }
-            #[cfg(not(unix))] {
-                Err(CliError::Usage("native contract migration requires Unix".into()))
+            #[cfg(not(unix))]
+            {
+                Err(CliError::Usage(
+                    "native contract migration requires Unix".into(),
+                ))
             }
-        },
+        }
         "schedule" => super::schedule::run(args, cwd).map(emit_result),
         "status" => cmd_status_for_team(&status_args(args, cwd), parse_args(args).team.as_deref())
             .map(emit_result),
@@ -317,11 +383,8 @@ fn dispatch_prepared(command: &str, checked: super::arguments::CheckedArgs, cwd:
         "clone-agent" => cmd_clone_agent(&clone_agent_args(args, cwd)?).map(emit_result),
         "fork-agent" => cmd_fork_agent(&fork_agent_args(args, cwd)?).map(emit_result),
         "remove-agent" => cmd_remove_agent(&remove_agent_args(args, cwd)?).map(emit_result),
-        "takeover" => cmd_takeover(&takeover_args(args, cwd)).map(emit_result),
         "claim-leader" => cmd_claim_leader(&claim_leader_args(args, cwd)).map(emit_result),
         // Real dispatch: `cmd_attach_leader` writes the `leader_receiver` binding.
-        "attach-leader" => cmd_attach_leader(&attach_leader_args(args, cwd)?).map(emit_result),
-
         "approvals" => cmd_approvals(&approvals_args(args, cwd)).map(emit_result),
         "inbox" => cmd_inbox(&inbox_args(args, cwd)?).map(emit_result),
         "doctor" => cmd_doctor(&doctor_args(args, cwd)).map(emit_result),
@@ -365,8 +428,7 @@ fn dispatch_machine(command: &str, args: &[String], cwd: &Path) -> Result<ExitCo
 
 // Command grammar, not provider identity parsing: these are top-level CLI
 // passthrough verbs for starting a leader under a provider executable.
-const LEADER_PASSTHROUGH_COMMANDS: &[&str] =
-    &["codex", "claude", "copilot", "grok", "pi"];
+const LEADER_PASSTHROUGH_COMMANDS: &[&str] = &["codex", "claude", "copilot", "grok", "pi"];
 
 pub(crate) fn is_leader_passthrough_command(command: &str) -> bool {
     LEADER_PASSTHROUGH_COMMANDS.contains(&command)
@@ -385,13 +447,25 @@ fn is_known_subcommand(command: &str) -> bool {
 }
 
 pub(crate) fn default_help() -> String {
-    let mut out = String::from("Team Agent: create a team, send tasks, read replies and shut down safely.\n\n1. Prepare agents\n   Prepare TEAM.md and agents/*.md with explicit provider and bypass decisions; use --from for an external source.\n2. Open a leader and create the team\n   With Pi installed and signed in, run team-agent pi.\n   Run team-agent start in that leader's tool context. Verified live members stay unchanged; stopped members are started.\n   Use team restart for a deliberate restart (session auto); legacy bare restart retains preserve. Do not take over or delete an existing team.\n3. Send tasks and read replies\n   team-agent send worker 'Calculate 245 * 37 and reply to the leader.'\n   team-agent inbox leader -n 3\n   team-agent status\n   Sending is not completion; wait for an actual reply.\n4. Diagnose and stop\n   team-agent doctor --workspace .\n   team-agent stop --workspace . --json\n   Verify this team's residual resources are empty, then diagnose the selected workspace.\n\nSelect workspace/team scope with --workspace/--team. Discover model names with models.\nWindows ConPTY requires a Windows host and an installed shim; tmux commands are not a generic Windows path.\n");
+    let mut out = String::from("Team Agent: create a team, send tasks, read replies and shut down safely.\n\n1. Prepare agents\n   Prepare TEAM.md and agents/*.md with explicit provider and bypass decisions; use --from for an external source.\n2. Open a leader and create the team\n   With a provider installed and signed in, run team-agent pi (or claude/codex).\n   Provider launch automatically binds the leader and publishes its discovery entry when no live leader exists.\n   A live leader on another terminal is preserved; claim-leader --confirm is the explicit recovery/preemption path.\n   Run team-agent start in that leader's tool context. Verified live members stay unchanged; stopped members are started.\n   Use team restart for a deliberate restart (session auto); legacy bare restart retains preserve. Do not take over or delete an existing team.\n3. Send tasks and read replies\n   team-agent send worker 'Calculate 245 * 37 and reply to the leader.'\n   team-agent inbox leader -n 3\n   team-agent status\n   Sending is not completion; wait for an actual reply.\n4. Diagnose and stop\n   team-agent doctor --workspace .\n   team-agent stop --workspace . --json\n   Verify this team's residual resources are empty, then diagnose the selected workspace.\n\nSelect workspace/team scope with --workspace/--team. Discover model names with models.\nWindows ConPTY requires a Windows host and an installed shim; tmux commands are not a generic Windows path.\n");
     append_help_section(
         &mut out,
         "Getting started",
-        &["start", "quick-start", "send", "schedule", "status", "models", "inbox"],
+        &[
+            "start",
+            "quick-start",
+            "send",
+            "schedule",
+            "status",
+            "models",
+            "inbox",
+        ],
     );
-    append_help_section(&mut out, "Team lifecycle", &["stop", "team", "restart", "shutdown"]);
+    append_help_section(
+        &mut out,
+        "Team lifecycle",
+        &["stop", "team", "restart", "shutdown"],
+    );
     append_help_section(
         &mut out,
         "Agent lifecycle",
@@ -416,11 +490,7 @@ pub(crate) fn default_help() -> String {
         "Configuration",
         &["route", "leader-prompt", "profile", "install-skill"],
     );
-    append_help_section(
-        &mut out,
-        "Guided recovery",
-        &["claim-leader", "takeover", "attach-leader"],
-    );
+    append_help_section(&mut out, "Guided recovery", &["claim-leader"]);
     append_help_section(
         &mut out,
         "Leader launch",
@@ -466,7 +536,8 @@ pub(super) const WORKER_TEMPLATE: &str = "---\nname: worker\nrole: assistant\npr
 const HUMAN_NAVIGATION: &str = "Use team-agent --help to list available commands.";
 
 pub(super) fn command_help(command: Option<&str>) -> String {
-    if let Some(name) = command.filter(|name| matches!(*name, "start" | "stop" | "team" | "agent")) {
+    if let Some(name) = command.filter(|name| matches!(*name, "start" | "stop" | "team" | "agent"))
+    {
         return super::intent::help(name);
     }
     let Some(name) = command else {
@@ -530,15 +601,11 @@ pub(super) fn command_help(command: Option<&str>) -> String {
             "team-agent profile init local --auth-mode subscription\nteam-agent profile doctor local\nteam-agent profile show local", "After validation, use team-agent start AGENT --profile local; stop a running seat before changing settings. Use native sign-in when needed, never copy external credentials."),
         "install-skill" => ("--source must be a verified skill directory; --target selects codex/claude/copilot/all.\n--dest overrides the destination; --dry-run previews; --uninstall removes the target skill. Installation is not required to create a team.",
             "team-agent install-skill --source \"$SKILL_DIR\" --target codex --dry-run\nteam-agent install-skill --source \"$SKILL_DIR\" --target codex", "Set SKILL_DIR to a verified directory and inspect the preview before installation. Do not overwrite unknown user files."),
-        "claim-leader" => ("Use only when doctor recommends leader registration and this terminal is the actual leader.\n--confirm authorizes registration; it does not open a new provider.",
+        "claim-leader" => ("Acquire or refresh this terminal\'s leader binding and discovery entry.\n--confirm authorizes replacing a live leader on another terminal; this command never opens a provider.",
             "team-agent claim-leader --workspace . --json\nteam-agent claim-leader --workspace . --team help-demo --confirm --json", "Verify doctor findings and terminal ownership first. A refusal without confirmation is not successful registration."),
-        "takeover" => ("Use only when doctor recommends takeover and the user has authorized it. This changes leader ownership.\nWith a usable team terminal, takeover may execute even without --confirm; it is not a read-only preview. Use team restart --session preserve for normal context-preserving recovery.",
-            "team-agent takeover --workspace . --team help-demo --confirm\nteam-agent takeover --workspace . --team help-demo --confirm --json", "Verify leader/team ownership before confirmation. Check status/doctor afterwards; do not take over someone else's team."),
-        "attach-leader" => ("PANE must be a verified leader terminal, not a guessed pane id.\n--provider selects the actual provider; --confirm authorizes attachment to an existing leader. Use only when doctor recommends it.",
-            "team-agent attach-leader --pane \"$PANE\" --provider pi --workspace .\nteam-agent attach-leader --pane \"$PANE\" --provider pi --workspace . --team help-demo --confirm --json", "Set PANE to the verified terminal. Confirm attachment with doctor before sending a task."),
         "kiro" => ("Kiro leader launching is not admitted by this candidate. This entry returns the stable capability refusal kiro_leader_not_admitted (exit 1).\nNo native process, leader binding, attach or provider fallback is attempted. --help/-h is read-only and exits 0.",
             "team-agent kiro\nteam-agent kiro --json", "Use provider: kiro in a complete worker role source with team-agent start --from TEAMDIR; worker support does not grant Leader capability."),
-        _ => ("Install the provider and complete native sign-in first. The current directory is the workspace.\nUse --attach-existing/--confirm only after verifying leader ownership and receiving authorization; --attach-session selects a verified session.\n--external-leader selects an external leader; --allow-nested-attach requires explicit authorization for nested terminals.\nArguments after -- pass through unchanged. Bare --help/-h displays this help without starting the provider.",
+        _ => ("Install the provider and complete native sign-in first. The current directory is the workspace.\nLaunch automatically incepts a leader when none is live; an existing live leader is preserved.\n--attach-existing is a claim-leader alias (no provider launch); --confirm authorizes preemption. --attach-session selects a verified session.\n--external-leader selects an external leader; --allow-nested-attach requires explicit authorization for nested terminals.\nArguments after -- pass through unchanged. Bare --help/-h displays this help without starting the provider.",
             "", "Prepare complete TEAM.md/roles with explicit user choices, then run team-agent start in the opened Leader's tool context, never an ordinary worker conversation."),
     };
     let examples = if matches!(spec.kind, CommandKind::LeaderPassthrough { .. }) {
@@ -665,10 +732,16 @@ fn install_skill_args(args: &[String]) -> Result<InstallSkillArgs, CliError> {
 /// 取 `--flag <value>` 的值(用于 install-skill 的 --source/--dest,parse_args 不覆盖的旗标)。
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
     for (index, argument) in args.iter().enumerate() {
-        if argument == "--" { break; }
-        if argument == flag { return args.get(index + 1).cloned(); }
+        if argument == "--" {
+            break;
+        }
+        if argument == flag {
+            return args.get(index + 1).cloned();
+        }
         if let Some((key, value)) = argument.split_once('=') {
-            if key == flag { return Some(value.to_string()); }
+            if key == flag {
+                return Some(value.to_string());
+            }
         }
     }
     None
@@ -745,18 +818,27 @@ fn resolve_path(path: &Path) -> PathBuf {
 fn emit_parser_usage(command: &str, args: &[String], error: &CliError) -> ExitCode {
     if super::arguments::has_flag(command, args, "--json") {
         let mut payload = error.to_payload(Path::new(""), command);
-        payload.action = format!("Use team-agent {command} --help to correct the command arguments.");
+        payload.action =
+            format!("Use team-agent {command} --help to correct the command arguments.");
         if let Ok(value) = serde_json::to_value(payload) {
-            println!("{}", python_compact_json(&crate::redaction::redact_external_value(&value)));
+            println!(
+                "{}",
+                python_compact_json(&crate::redaction::redact_external_value(&value))
+            );
         }
     } else {
-        eprintln!("error: {}\nUse team-agent {command} --help.", crate::redaction::redact_external_text(&error.to_string()));
+        eprintln!(
+            "error: {}\nUse team-agent {command} --help.",
+            crate::redaction::redact_external_text(&error.to_string())
+        );
     }
     ExitCode::Usage
 }
 
 fn emit_cli_error(command: &str, args: &[String], cwd: &Path, error: &CliError) -> ExitCode {
-    if matches!(error, CliError::Usage(_)) { return emit_parser_usage(command, args, error); }
+    if matches!(error, CliError::Usage(_)) {
+        return emit_parser_usage(command, args, error);
+    }
     let parsed = parse_args(args);
     let workspace = workspace(&parsed, cwd);
     let log_path = cli_error_log_path(&workspace);
@@ -786,9 +868,14 @@ fn emit_cli_error(command: &str, args: &[String], cwd: &Path, error: &CliError) 
             payload.action = "Run team-agent status and use an agent name from the list. Select scope with --workspace/--team; diagnose channel issues with doctor.".to_string();
         }
     }
-    if payload.error.contains("legacy contract store requires explicit migration") {
+    if payload
+        .error
+        .contains("legacy contract store requires explicit migration")
+    {
         if let Some((_, command)) = payload.error.split_once("; run ") {
-            payload.action = format!("Run {command} during a maintenance window, then retry the selected operation.");
+            payload.action = format!(
+                "Run {command} during a maintenance window, then retry the selected operation."
+            );
         }
     }
     if command_spec(command).is_some()
@@ -896,7 +983,9 @@ fn python_compact_json(value: &Value) -> String {
 }
 
 fn has_arg(args: &[String], needle: &str) -> bool {
-    args.iter().take_while(|arg| arg.as_str() != "--").any(|arg| arg == needle)
+    args.iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| arg == needle)
 }
 
 #[derive(Debug, Default)]
@@ -974,7 +1063,9 @@ fn parse_args(args: &[String]) -> ParsedArgs {
     let mut expanded = Vec::new();
     let mut literal = false;
     for argument in args {
-        if argument == "--" { literal = true; }
+        if argument == "--" {
+            literal = true;
+        }
         if !literal && argument.starts_with("--") {
             if let Some((flag, value)) = argument.split_once('=') {
                 expanded.extend([flag.to_string(), value.to_string()]);
@@ -1132,42 +1223,68 @@ fn parse_cli_provider(raw: &str) -> Result<crate::provider::Provider, CliError> 
 }
 
 pub(super) fn explicit_path(value: &str) -> bool {
-    value == "." || value == ".." || value.contains('/') || value.contains('\\')
+    value == "."
+        || value == ".."
+        || value.contains('/')
+        || value.contains('\\')
         || Path::new(value).is_absolute()
-        || (value.as_bytes().get(1) == Some(&b':') && value.as_bytes().first().is_some_and(u8::is_ascii_alphabetic))
+        || (value.as_bytes().get(1) == Some(&b':')
+            && value
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphabetic))
 }
 
 fn checked_workspace(path: &Path, cwd: &Path) -> Result<PathBuf, CliError> {
     let path = resolve_cli_path(cwd, path);
-    let canonical = std::fs::canonicalize(&path).map_err(|_| CliError::Usage(format!(
-        "workspace does not exist or is unavailable: {}", path.display()
-    )))?;
+    let canonical = std::fs::canonicalize(&path).map_err(|_| {
+        CliError::Usage(format!(
+            "workspace does not exist or is unavailable: {}",
+            path.display()
+        ))
+    })?;
     if !canonical.is_dir() {
-        return Err(CliError::Usage(format!("workspace is not a directory: {}", path.display())));
+        return Err(CliError::Usage(format!(
+            "workspace is not a directory: {}",
+            path.display()
+        )));
     }
     Ok(canonical)
 }
 
-fn resolve_command_scope(command: &str, mut args: Vec<String>, cwd: &Path) -> Result<Vec<String>, CliError> {
+fn resolve_command_scope(
+    command: &str,
+    mut args: Vec<String>,
+    cwd: &Path,
+) -> Result<Vec<String>, CliError> {
     let mut selected = None;
     // An invalid diagnostic target is an L1 result, not a parser self-loop.
     // Explicit mutation/gate paths retain the existing workspace admission.
-    let probe = command == "doctor" && !args.iter().any(|arg| {
-        ["--fix", "--cleanup-orphans", "--gate", "--comms"].iter().any(|flag| arg.starts_with(flag))
-    });
+    let probe = command == "doctor"
+        && !args.iter().any(|arg| {
+            ["--fix", "--cleanup-orphans", "--gate", "--comms"]
+                .iter()
+                .any(|flag| arg.starts_with(flag))
+        });
     for argument in &mut args {
-        if argument == "--" { break; }
+        if argument == "--" {
+            break;
+        }
         if let Some(path) = argument.strip_prefix("--workspace=") {
             let canonical = if probe {
                 let target = resolve_cli_path(cwd, Path::new(path));
                 target.canonicalize().unwrap_or(target)
-            } else { checked_workspace(Path::new(path), cwd)? };
+            } else {
+                checked_workspace(Path::new(path), cwd)?
+            };
             *argument = format!("--workspace={}", canonical.display());
             selected = Some(canonical);
         }
     }
     if command == "restart" {
-        let index = args.iter().position(|arg| arg == "--")
+        let index = args
+            .iter()
+            .position(|arg| arg == "--")
             .and_then(|index| (index + 1 < args.len()).then_some(index + 1))
             .or_else(|| args.iter().position(|arg| !arg.starts_with('-')));
         if let Some(index) = index {
@@ -1175,8 +1292,13 @@ fn resolve_command_scope(command: &str, mut args: Vec<String>, cwd: &Path) -> Re
                 return Err(CliError::Usage("bare restart targets are ambiguous; use restart --workspace PATH or restart ./PATH for a team".to_string()));
             }
             let canonical = checked_workspace(Path::new(&args[index]), cwd)?;
-            if selected.as_ref().is_some_and(|selected| selected != &canonical) {
-                return Err(CliError::Usage("restart WORKSPACE conflicts with --workspace".to_string()));
+            if selected
+                .as_ref()
+                .is_some_and(|selected| selected != &canonical)
+            {
+                return Err(CliError::Usage(
+                    "restart WORKSPACE conflicts with --workspace".to_string(),
+                ));
             }
             args[index] = canonical.to_string_lossy().into_owned();
         }
@@ -1546,9 +1668,15 @@ fn attach_leader_args(args: &[String], cwd: &Path) -> Result<AttachLeaderArgs, C
             .pane
             .filter(|pane| !pane.is_empty())
             .map(crate::transport::PaneId::new),
-        provider: parse_cli_provider(parsed.provider.as_deref()
-            .filter(|provider| !provider.trim().is_empty())
-            .ok_or_else(|| CliError::Usage("attach-leader requires --provider <name>".to_string()))?)?,
+        provider: parse_cli_provider(
+            parsed
+                .provider
+                .as_deref()
+                .filter(|provider| !provider.trim().is_empty())
+                .ok_or_else(|| {
+                    CliError::Usage("attach-leader requires --provider <name>".to_string())
+                })?,
+        )?,
         confirm: parsed.confirm,
         json: parsed.json,
     })
@@ -1593,7 +1721,9 @@ fn restart_args(args: &[String], cwd: &Path) -> Result<RestartArgs, CliError> {
             return Err(CliError::Usage("bare restart targets are ambiguous; use restart --workspace PATH or restart ./PATH for a team".to_string()));
         }
         resolve_cli_path(cwd, Path::new(path))
-    } else { workspace(&parsed, cwd) };
+    } else {
+        workspace(&parsed, cwd)
+    };
     refuse_if_multi_alive_team_missing_scope("restart", &workspace, parsed.team.as_deref())?;
     Ok(RestartArgs {
         workspace,
@@ -1610,19 +1740,33 @@ pub(super) fn intent_source_workspace(source: &Path, cwd: &Path) -> Result<PathB
     quick_start_args(&[source.to_string_lossy().into_owned()], cwd).map(|args| args.workspace)
 }
 
-pub(super) fn intent_role_patch(args: &[String]) -> Result<crate::lifecycle::role_config::RoleConfigPatch, CliError> {
+pub(super) fn intent_role_patch(
+    args: &[String],
+) -> Result<crate::lifecycle::role_config::RoleConfigPatch, CliError> {
     role_agent_args(args, false).map(|(_, patch)| patch)
 }
 
 /// Explicit object aliases reuse the same syntax checks, typed builders and handlers.
-pub(super) fn intent_alias(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult, CliError> {
+pub(super) fn intent_alias(
+    command: &str,
+    args: &[String],
+    cwd: &Path,
+) -> Result<CmdResult, CliError> {
     let mut checked = prepare_control_args(command, args, cwd)?;
-    if checked.help { return Ok(CmdResult::human(command_help(Some(command)))); }
+    if checked.help {
+        return Ok(CmdResult::human(command_help(Some(command))));
+    }
     for token in &mut checked.tokens {
         if let Some(path) = token.strip_prefix("--role-file=") {
             let path = Path::new(path);
-            let path = if path.is_absolute() { path.to_path_buf() } else { cwd.join(path) };
-            let path = path.canonicalize().map_err(|e| CliError::Usage(format!("invalid explicit role file: {e}")))?;
+            let path = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                cwd.join(path)
+            };
+            let path = path
+                .canonicalize()
+                .map_err(|e| CliError::Usage(format!("invalid explicit role file: {e}")))?;
             *token = format!("--role-file={}", path.display());
         }
     }
@@ -1768,10 +1912,7 @@ mod role_cli_tests {
 
     #[test]
     fn add_requires_provider_without_a_template_but_accepts_file_input() {
-        for args in [
-            vec!["w"],
-            vec!["w", "--bypass", "false"],
-        ] {
+        for args in [vec!["w"], vec!["w", "--bypass", "false"]] {
             assert!(role_agent_args(&strings(&args), true).is_err());
         }
         assert!(role_agent_args(&strings(&["w", "--role-file", "w.md"]), true).is_ok());
@@ -1798,26 +1939,40 @@ mod role_cli_tests {
     #[test]
     fn provider_accepts_contract_names_as_their_leaf_id() {
         for (name, leaf) in [
-            ("cursor", "cursor"), ("cursor-agent", "cursor"), ("agent", "cursor"),
-            ("cursor_agent", "cursor"), ("kiro", "kiro"),
+            ("cursor", "cursor"),
+            ("cursor-agent", "cursor"),
+            ("agent", "cursor"),
+            ("cursor_agent", "cursor"),
+            ("kiro", "kiro"),
             // Codex and Grok Build keep their public command names, which
             // declare the leaf.
-            ("codex", "codex"), ("codex_cli", "codex"), ("codex-cli", "codex"),
-            ("codex_tui", "codex"), ("grok", "grok"), ("grok_build", "grok"),
+            ("codex", "codex"),
+            ("codex_cli", "codex"),
+            ("codex-cli", "codex"),
+            ("codex_tui", "codex"),
+            ("grok", "grok"),
+            ("grok_build", "grok"),
         ] {
             let (_, patch) = role_agent_args(
-                &strings(&["w", "--provider", name, "--bypass", "true"]), true,
-            ).unwrap_or_else(|error| panic!("{name}: {error}"));
+                &strings(&["w", "--provider", name, "--bypass", "true"]),
+                true,
+            )
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
             assert_eq!(patch.provider.as_deref(), Some(leaf), "{name}");
         }
-        assert!(role_agent_args(&strings(&["w", "--provider", "Cursor", "--bypass", "true"]), true).is_err());
+        assert!(role_agent_args(
+            &strings(&["w", "--provider", "Cursor", "--bypass", "true"]),
+            true
+        )
+        .is_err());
     }
 
     #[test]
     fn add_accepts_bypass_true_false_or_omission_for_every_provider() {
         for &provider in crate::provider::wire::all_providers() {
             let provider = crate::provider::wire::provider_wire(provider);
-            let (_, patch) = role_agent_args(&strings(&["w", "--provider", provider]), true).unwrap();
+            let (_, patch) =
+                role_agent_args(&strings(&["w", "--provider", provider]), true).unwrap();
             assert_eq!(patch.bypass, None);
             for bypass in ["true", "false"] {
                 let (_, patch) = role_agent_args(
@@ -2145,6 +2300,39 @@ fn json_dumps_like(value: &Value) -> String {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
+    #[test]
+    fn retired_leader_commands_refuse_before_scope_or_retirement() {
+        let root = std::env::temp_dir().join(format!("retired-leader-{}", std::process::id()));
+        let workspace = root.join("must-not-exist");
+        let args = vec![
+            "--workspace".into(),
+            workspace.to_string_lossy().into_owned(),
+            "--confirm".into(),
+            "--json".into(),
+        ];
+        for command in ["attach-leader", "takeover"] {
+            let error = super::dispatch(command, &args, &root)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("retired") && error.contains("claim-leader"),
+                "{error}"
+            );
+            assert!(!workspace.exists());
+        }
+    }
+
+    #[test]
+    fn retired_leader_commands_are_absent_from_help_and_catalog() {
+        let help = super::default_help();
+        assert!(help.contains("automatically binds"));
+        assert!(help.contains("claim-leader"));
+        for retired in ["attach-leader", "takeover"] {
+            assert!(!help.contains(retired), "{help}");
+            assert!(super::command_spec(retired).is_none());
+        }
+    }
+
     use super::*;
 
     fn tmp_workspace() -> PathBuf {
@@ -2267,8 +2455,8 @@ mod tests {
             .collect();
         assert_eq!(
             expected.len(),
-            36,
-            "the public catalog includes endpoint discovery and scheduled leader reminders"
+            34,
+            "the public catalog excludes the two retired leader recovery verbs"
         );
         for spec_name in &expected {
             assert!(
@@ -2396,7 +2584,17 @@ mod tests {
                 &["--workspace", "--team-id", "--yes", "--json"][..],
             ),
             ("send", &["--workspace", "--team", "--json"][..]),
-            ("schedule", &["--in", "--every", "--text", "--workspace", "--team", "--json"][..]),
+            (
+                "schedule",
+                &[
+                    "--in",
+                    "--every",
+                    "--text",
+                    "--workspace",
+                    "--team",
+                    "--json",
+                ][..],
+            ),
             (
                 "status",
                 &["--workspace", "--team", "--summary", "--json", "--detail"][..],
@@ -2472,17 +2670,6 @@ mod tests {
                     "--gate",
                     "--fix-schema",
                     "--cleanup-orphans",
-                    "--json",
-                ][..],
-            ),
-            (
-                "attach-leader",
-                &[
-                    "--workspace",
-                    "--team",
-                    "--pane",
-                    "--provider",
-                    "--confirm",
                     "--json",
                 ][..],
             ),
@@ -2599,13 +2786,8 @@ mod tests {
         assert_eq!(defaulted.provider, "pi");
         assert_eq!(defaulted.search.as_deref(), Some("gpt 5.6 luna"));
 
-        let cursor = models_args(&cli_argv(&[
-            "--provider",
-            "cursor",
-            "--search",
-            "GPT Luna",
-        ]))
-        .unwrap();
+        let cursor =
+            models_args(&cli_argv(&["--provider", "cursor", "--search", "GPT Luna"])).unwrap();
         assert_eq!(cursor.provider, "cursor");
         assert_eq!(cursor.search.as_deref(), Some("GPT Luna"));
 
@@ -2725,8 +2907,11 @@ mod tests {
         let err = send_args(
             &cli_argv(&["--pane", "%1596", "--to", "worker", "hello"]),
             &cwd,
-        ).unwrap_err();
-        assert!(matches!(err, CliError::Usage(ref message) if message.contains("one recipient addressing mode")));
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, CliError::Usage(ref message) if message.contains("one recipient addressing mode"))
+        );
         // The public parser now refuses first; the typed handler must still
         // reject the same conflict if a non-CLI caller constructs it directly.
         let mut args = send_args(&cli_argv(&["--pane", "%1596", "hello"]), &cwd).unwrap();

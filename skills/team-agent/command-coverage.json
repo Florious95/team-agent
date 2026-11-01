@@ -57,13 +57,6 @@
       "plan": "Execute the literal coder representative and assert the bound CLI result's target-filter behavior."
     },
     {
-      "command": "team-agent attach-leader",
-      "bucket": "declared_gap",
-      "covered": false,
-      "owner": "runtime-owner:leader-channel",
-      "plan": "Execute in a hermetic caller-pane fixture and bind assertions to either the persisted receiver binding or the precise zero-write refusal."
-    },
-    {
       "command": "team-agent claim-leader",
       "bucket": "declared_gap",
       "covered": false,
