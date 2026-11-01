@@ -1147,6 +1147,25 @@ pub(super) fn state_session_name(state: &serde_json::Value) -> SessionName {
         .unwrap_or_else(|| SessionName::new("team-agent"))
 }
 
+/// A session/window name is only a locator, never authority to adopt its pane.
+pub(super) fn require_worker_session_owner(
+    workspace: &Path,
+    team: &str,
+    session: &SessionName,
+    transport: &dyn crate::transport::Transport,
+) -> Result<(), LifecycleError> {
+    let owner = transport.session_owner(session)
+        .map_err(|error| LifecycleError::Transport(error.to_string()))?;
+    if owner.is_some_and(|owner| {
+        Path::new(&owner.workspace).canonicalize().unwrap_or_else(|_| PathBuf::from(&owner.workspace))
+            == workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf())
+            && owner.team == team
+    }) { return Ok(()); }
+    Err(LifecycleError::RequirementUnmet(format!(
+        "session {} ownership is unverified for this workspace/team; no pane adopted", session.as_str()
+    )))
+}
+
 /// Move a dead legacy cohort off its workspace-agnostic session name. Pane IDs
 /// can alias after endpoint recovery, so only positive process death permits it.
 pub(super) fn recover_missing_legacy_session(
@@ -1176,17 +1195,7 @@ pub(super) fn recover_missing_legacy_session(
     }
     let session = SessionName::new(crate::compiler::default_session_name(workspace, team));
     if transport.has_session(&session).map_err(|e| LifecycleError::Transport(e.to_string()))? {
-        let owner = transport.session_owner(&session)
-            .map_err(|e| LifecycleError::Transport(e.to_string()))?;
-        if !owner.is_some_and(|owner| {
-            Path::new(&owner.workspace).canonicalize().unwrap_or_else(|_| PathBuf::from(&owner.workspace))
-                == workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf())
-                && owner.team == team
-        }) {
-            return Err(LifecycleError::RequirementUnmet(format!(
-                "recovery session {} is not owned by this workspace/team", session.as_str()
-            )));
-        }
+        require_worker_session_owner(workspace, team, &session, transport)?;
     }
     state["session_name"] = serde_json::json!(session.as_str());
     if let Some(agents) = state.get_mut("agents").and_then(serde_json::Value::as_object_mut) {
@@ -2271,6 +2280,22 @@ mod session_namespace_tests {
                 "session_id":"preserved-context", "rollout_path":"preserved-journal",
             }}
         })
+    }
+
+    #[test]
+    fn session_owner_fence_requires_matching_workspace_and_team() {
+        let workspace = std::env::temp_dir().join("ta-mpp-owner-fence");
+        let foreign = std::env::temp_dir().join("ta-mpp-foreign-fence");
+        let session = SessionName::new("team-current");
+        for transport in [
+            OfflineTransport::default(),
+            OfflineTransport::default().with_session_owner(&foreign, "current", "foreign"),
+            OfflineTransport::default().with_session_owner(&workspace, "other", "wrong-team"),
+        ] {
+            assert!(require_worker_session_owner(&workspace, "current", &session, &transport).is_err());
+        }
+        let owned = OfflineTransport::default().with_session_owner(&workspace, "current", "owned");
+        assert!(require_worker_session_owner(&workspace, "current", &session, &owned).is_ok());
     }
 
     #[test]

@@ -317,6 +317,7 @@ pub(crate) fn start_agent_at_paths(
         )));
     }
     if !force && agent_live {
+        require_worker_session_owner(workspace, &team_key, &session_name, transport)?;
         let old_binding = pane_binding_snapshot(&raw_agent);
         let refreshed_binding = noop_pane.as_ref().map(pane_binding_from_live);
         mark_agent_running_noop(

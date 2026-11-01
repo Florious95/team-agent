@@ -39,7 +39,9 @@ use team_agent::transport::{
 };
 
 const TEAM: &str = "current";
-const SESSION: &str = "team-current";
+// These fixtures exercise cohort rollback, not migration of dead legacy PIDs.
+// Keep their synthetic PIDs and explicit session separate from that gate.
+const SESSION: &str = "team-p0-cohort";
 const TMUX_ENDPOINT: &str = "/private/tmp/ta-p0-cohort.sock";
 const POLLUTED_CALLER_AUTHORITY_ENVS: &[&str] = &[
     "TEAM_AGENT_LEADER_PANE_ID",
@@ -526,7 +528,7 @@ fn team_case_with_model(
 
 fn write_team_docs(workspace: &Path, workers: &[(&str, &str)]) {
     fs::create_dir_all(workspace.join("agents")).unwrap();
-    fs::write(workspace.join("TEAM.md"), "---\nname: current\nobjective: P0 host co-tenant contract.\nprovider: codex\n---\n").unwrap();
+    fs::write(workspace.join("TEAM.md"), "---\nname: current\nobjective: P0 host co-tenant contract.\nprovider: codex\nsession_name: team-p0-cohort\n---\n").unwrap();
     for (worker, model) in workers {
         let role = format!("---\nname: {worker}\nrole: {worker}\nprovider: copilot\nmodel: {model}\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{worker}.\n");
         fs::write(workspace.join("agents").join(format!("{worker}.md")), role).unwrap();

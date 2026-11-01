@@ -28,7 +28,7 @@ use team_agent::state::StateError;
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
     InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
+    SessionOwner, SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
     TurnVerification, WindowName,
 };
 
@@ -44,7 +44,8 @@ fn quick_start_team_id_persists_requested_team_key_for_lifecycle_selection() {
 
     let report = quick_start_with_transport(&team_dir, None, true, Some("lifeteam"), &transport)
         .expect("quick-start --team-id lifeteam should launch via fake transport");
-    assert_ready("quick-start --team-id lifeteam", &report, "team-lifeteam");
+    assert_ready("quick-start --team-id lifeteam", &report,
+        &crate::compiler::default_session_name(&root, "lifeteam"));
 
     let state = load_runtime_state(&root).expect("runtime state after quick-start");
     assert!(
@@ -116,7 +117,8 @@ fn add_agent_writes_new_agent_into_selected_team_projection_used_by_start_agent(
     seed_lifeteam_state(&root, &team_dir);
     let role_file = root.join("worker_b.md");
     std::fs::write(&role_file, role_doc("worker_b")).unwrap();
-    let transport = RecordingTransport::default().with_session_present(true);
+    let transport = RecordingTransport::default().with_session_present(true)
+        .with_session_owner("team-lifeteam", &root, "lifeteam");
 
     let add = add_agent_with_transport(
         &team_dir,
@@ -386,6 +388,7 @@ struct RecordingTransport {
     sessions: Mutex<HashSet<String>>,
     spawned: Mutex<Vec<SpawnedPane>>,
     session_present: Mutex<bool>,
+    session_owners: Mutex<BTreeMap<String, SessionOwner>>,
 }
 
 #[derive(Debug, Clone)]
@@ -396,6 +399,11 @@ struct SpawnedPane {
 }
 
 impl RecordingTransport {
+    fn with_session_owner(self, session: &str, workspace: &Path, team: &str) -> Self {
+        self.set_session_owner_with_generation(&SessionName::new(session), workspace, team, "fixture").unwrap();
+        self
+    }
+
     fn with_session_present(self, present: bool) -> Self {
         *self.session_present.lock().unwrap() = present;
         self
@@ -518,6 +526,20 @@ impl Transport for RecordingTransport {
 
     fn list_windows(&self, _session: &SessionName) -> Result<Vec<WindowName>, TransportError> {
         Ok(Vec::new())
+    }
+
+    fn session_owner(&self, session: &SessionName) -> Result<Option<SessionOwner>, TransportError> {
+        Ok(self.session_owners.lock().unwrap().get(session.as_str()).cloned())
+    }
+
+    fn set_session_owner_with_generation(
+        &self, session: &SessionName, workspace: &Path, team: &str, generation: &str,
+    ) -> Result<(), TransportError> {
+        self.session_owners.lock().unwrap().insert(session.as_str().to_string(), SessionOwner {
+            workspace: workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf()).to_string_lossy().into_owned(),
+            team: team.to_string(), generation: generation.to_string(),
+        });
+        Ok(())
     }
 
     fn set_session_env(

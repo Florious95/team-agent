@@ -28,7 +28,7 @@ permissions:
 jobs:
   build:
     name: Build team-agent (macOS arm64)
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       SOURCE_SHA_INPUT: ${{ inputs.source_sha }}
       EXPECTED_TREE_INPUT: ${{ inputs.expected_tree }}
