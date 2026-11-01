@@ -272,7 +272,7 @@ pub fn compile_team(team_dir: &Path) -> Result<Value, ModelError> {
                 ("backend", Value::Str("tmux".to_string())),
                 (
                     "session_name",
-                    Value::Str(session_name(&team_meta, &team_name)),
+                    Value::Str(session_name(&team_meta, &team_name, &workspace)),
                 ),
                 ("auto_launch", Value::Bool(true)),
                 ("require_user_approval_before_launch", Value::Bool(true)),
@@ -846,8 +846,13 @@ fn workspace_dir_name(workspace: &Path) -> String {
         .to_string()
 }
 
-fn session_name(team_meta: &Value, team_name: &str) -> String {
-    string_field(team_meta, "session_name").unwrap_or_else(|| format!("team-{}", slug(team_name)))
+pub(crate) fn default_session_name(workspace: &Path, team_name: &str) -> String {
+    format!("team-{}-{}", crate::tmux_backend::workspace_short_hash_pub(workspace), slug(team_name))
+}
+
+fn session_name(team_meta: &Value, team_name: &str, workspace: &Path) -> String {
+    string_field(team_meta, "session_name")
+        .unwrap_or_else(|| default_session_name(workspace, team_name))
 }
 
 fn slug(text: &str) -> String {

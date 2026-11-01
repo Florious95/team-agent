@@ -64,7 +64,14 @@ pub(crate) fn live_agent_target(
 ) -> Result<Option<crate::transport::PaneInfo>, LifecycleError> {
     let agent = state.get("agents").and_then(|agents| agents.get(agent_id.as_str()))
         .ok_or_else(|| LifecycleError::RequirementUnmet(format!("agent {agent_id} not found")))?;
-    let session = state_session_name(state);
+    let mut state = state.clone();
+    let team = crate::state::projection::team_state_key(&state);
+    let workspace = state.get("workspace").and_then(serde_json::Value::as_str)
+        .map(PathBuf::from);
+    if let Some(workspace) = workspace {
+        recover_missing_legacy_session(&workspace, &team, &mut state, transport)?;
+    }
+    let session = state_session_name(&state);
     let window = agent_window(agent, agent_id);
     let pane = agent.get("pane_id").and_then(serde_json::Value::as_str);
     let targets = transport.list_targets()
@@ -197,6 +204,8 @@ pub(crate) fn start_agent_at_paths(
             .map_err(|e| LifecycleError::StatePersist(e.to_string()))?
     };
     crate::lifecycle::launch::ensure_owner_allowed_for_state(&state, Some(agent_id))?;
+    let team_key = restart_projection_team_key(&state, team);
+    recover_missing_legacy_session(workspace, &team_key, &mut state, transport)?;
     let raw_agent = state
         .get("agents")
         .and_then(|v| v.get(agent_id.as_str()))

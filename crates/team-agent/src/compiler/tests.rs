@@ -129,7 +129,12 @@ fn templated_compact_json(spec: &Value) -> String {
         .and_then(|t| t.get("workspace"))
         .and_then(Value::as_str)
         .expect("spec.team.workspace must be a string");
-    compact_json(spec).replace(ws, "__WS__")
+    // Keep historical serialization goldens focused on schema; namespace
+    // identity is asserted independently below.
+    compact_json(spec).replace(ws, "__WS__").replace(
+        &format!("team-{}-", crate::tmux_backend::workspace_short_hash_pub(Path::new(ws))),
+        "team-",
+    )
 }
 
 fn workspace_of(spec: &Value) -> String {
@@ -640,14 +645,30 @@ fn fix_a4_leader_role_from_team_meta() {
 
 #[test]
 fn fix_a5_session_name_slugifies_team_name() {
-    // "My Team!" → _slug → "My-Team" → "team-My-Team".
+    // Workspace identity precedes the slugified team name.
     let tm = "---\nname: My Team!\nprovider: codex\n---\nx\n";
     let team = build_team(tm, &[("w.md", &role_nomodel("codex"))], &[]);
     let spec = compile_team(&team).unwrap();
     assert_eq!(
         str_path(&spec, &["runtime", "session_name"]),
-        "team-My-Team"
+        default_session_name(Path::new(&workspace_of(&spec)), "My Team!")
     );
+}
+
+#[test]
+fn session_namespace_separates_workspaces_and_canonicalizes_aliases() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let name = default_session_name(a.path(), "current");
+    assert!(name.starts_with("team-") && name.ends_with("-current"));
+    assert_ne!(name, default_session_name(b.path(), "current"));
+    assert_ne!(name, default_session_name(a.path(), "other"));
+    assert_eq!(name, default_session_name(&a.path().join("."), "current"));
+    #[cfg(unix)] {
+        let alias = b.path().join("alias");
+        std::os::unix::fs::symlink(a.path(), &alias).unwrap();
+        assert_eq!(name, default_session_name(&alias, "current"));
+    }
 }
 
 #[test]

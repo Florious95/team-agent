@@ -362,6 +362,15 @@ pub(crate) fn override_spec_session_name(spec: &mut Value, session_name: &str) {
 ///   spec: 非 Map 时不动；只改已存在的字段，不新建
 /// ---
 pub(crate) fn override_spec_workspace(spec: &mut Value, workspace: &Path) {
+    let team_name = spec.get("team").and_then(|team| team.get("name"))
+        .and_then(Value::as_str).unwrap_or("agent");
+    let old_workspace = spec.get("team").and_then(|team| team.get("workspace"))
+        .and_then(Value::as_str).unwrap_or(".");
+    let old_default = crate::compiler::default_session_name(Path::new(old_workspace), team_name);
+    if spec_session_name(spec).as_str() == old_default {
+        let session = crate::compiler::default_session_name(workspace, team_name);
+        override_spec_session_name(spec, &session);
+    }
     let workspace_s = workspace.to_string_lossy().to_string();
     let Value::Map(root) = spec else { return };
     if let Some((_, Value::Map(team))) = root.iter_mut().find(|(k, _)| k == "team") {
@@ -433,7 +442,9 @@ pub(super) fn spec_session_name(spec: &Value) -> SessionName {
         .and_then(Value::as_str)
         .filter(|name| !name.is_empty())
         .unwrap_or("agent");
-    SessionName::new(format!("team-{team_name}"))
+    let workspace = spec.get("team").and_then(|team| team.get("workspace"))
+        .and_then(Value::as_str).unwrap_or(".");
+    SessionName::new(crate::compiler::default_session_name(Path::new(workspace), team_name))
 }
 
 /// ---
@@ -451,6 +462,21 @@ pub fn worker_session_name_pub(spec: &Value) -> SessionName {
 #[cfg(test)]
 mod claim_rework_seed_tests {
     use super::*;
+
+    #[test]
+    fn session_namespace_tracks_runtime_workspace_but_preserves_explicit_names() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let mut spec = yaml::loads(&format!(
+            "team:\n  name: current\n  workspace: {}\nruntime:\n  session_name: {}\n",
+            a.path().display(), crate::compiler::default_session_name(a.path(), "current"),
+        )).unwrap();
+        override_spec_workspace(&mut spec, b.path());
+        assert_eq!(spec_session_name(&spec).as_str(), crate::compiler::default_session_name(b.path(), "current"));
+        override_spec_session_name(&mut spec, "explicit-session");
+        override_spec_workspace(&mut spec, a.path());
+        assert_eq!(spec_session_name(&spec).as_str(), "explicit-session");
+    }
     use crate::state::owner_gate::CallerIdentity;
 
     #[test]
