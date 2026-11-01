@@ -17,8 +17,10 @@ mod tests;
 #[derive(Clone, Serialize)]
 struct Link {
     id: String,
+    #[serde(rename = "link")]
     name: &'static str,
     status: &'static str,
+    #[serde(rename = "proof")]
     message: String,
 }
 impl Link {
@@ -60,12 +62,53 @@ fn receiver_socket(state: &Value) -> String {
 fn running(v: &Value) -> bool {
     matches!(field(v, "status"), "running" | "starting" | "ready")
 }
-fn action(command: &str, workspace: &Path, team: &str) -> String {
-    format!(
-        "team-agent {command} --workspace {} --team {}",
-        super::shell_quote(&workspace.to_string_lossy()),
-        super::shell_quote(team)
-    )
+#[derive(serde::Serialize)]
+struct Action {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<String>,
+    argv: Vec<String>,
+}
+impl Action {
+    fn manual(context: String) -> Self {
+        Self {
+            context: Some(context),
+            argv: Vec::new(),
+        }
+    }
+    fn display(&self) -> String {
+        let command = self
+            .argv
+            .iter()
+            .map(|arg| super::shell_quote(arg))
+            .collect::<Vec<_>>()
+            .join(" ");
+        match &self.context {
+            Some(context) if !command.is_empty() => format!("{context}: {command}"),
+            Some(context) => context.clone(),
+            None => command,
+        }
+    }
+}
+fn action(command: &str, workspace: &Path, team: &str) -> Action {
+    let mut argv = vec![
+        "team-agent".into(),
+        command.into(),
+        "--workspace".into(),
+        workspace.to_string_lossy().into_owned(),
+        "--team".into(),
+        team.into(),
+    ];
+    if command == "claim-leader" {
+        argv.push("--confirm".into());
+    }
+    argv.push("--json".into());
+    Action {
+        context: (command == "claim-leader").then(|| "from the current leader terminal".into()),
+        argv,
+    }
+}
+fn address(pane: &str, socket: &str) -> String {
+    format!("{pane}@{socket}")
 }
 fn caller() -> Value {
     let mut v = json!({"cwd": std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string()).unwrap_or_default()});
@@ -95,24 +138,56 @@ fn caller() -> Value {
 fn caller_team(raw: &Value, caller: &Value) -> Option<String> {
     let endpoint = field(caller, "socket");
     let pane = field(caller, "pane");
-    if endpoint.is_empty() || pane.is_empty() {
+    let session = field(caller, "session");
+    // The session is observed on this exact socket/pane. A live leader-only
+    // team needs no running worker to establish the caller's scope.
+    if endpoint.is_empty() || pane.is_empty() || session.is_empty() {
         return None;
     }
-    raw.get("teams")?
+    let mut matches = raw
+        .get("teams")?
         .as_object()?
         .iter()
-        .find_map(|(name, state)| {
-            (state
-                .pointer("/leader_receiver/pane_id")
-                .and_then(Value::as_str)
-                == Some(pane)
-                && crate::topology::same_endpoint(&receiver_socket(state), endpoint)
-                && state
-                    .get("agents")
-                    .and_then(Value::as_object)
-                    .is_some_and(|a| a.values().any(running)))
-            .then(|| name.clone())
-        })
+        .filter_map(|(name, state)| {
+            let team_socket = socket(state);
+            let worker = state
+                .get("agents")
+                .and_then(Value::as_object)
+                .is_some_and(|agents| {
+                    agents.values().filter(|row| running(row)).any(|row| {
+                        let worker_socket = field(row, "native_endpoint");
+                        field(row, "pane_id") == pane
+                            && crate::topology::same_endpoint(
+                                if worker_socket.is_empty() {
+                                    &team_socket
+                                } else {
+                                    worker_socket
+                                },
+                                endpoint,
+                            )
+                    })
+                });
+            let anchor = ["leader_receiver", "team_owner"].iter().any(|key| {
+                let record = &state[*key];
+                let recorded_socket = field(record, "tmux_socket");
+                field(record, "pane_id") == pane
+                    && crate::topology::same_endpoint(
+                        if recorded_socket.is_empty() {
+                            &team_socket
+                        } else {
+                            recorded_socket
+                        },
+                        endpoint,
+                    )
+            });
+            let session_matches = ["session_name", "tmux_session"]
+                .iter()
+                .any(|key| field(state, key) == session)
+                && crate::topology::same_endpoint(&team_socket, endpoint);
+            (!worker && (anchor || session_matches)).then(|| name.clone())
+        });
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
 }
 
 #[derive(Clone)]
@@ -390,9 +465,10 @@ fn render(
     team: &str,
     caller: Value,
     seats: (usize, usize),
-    fix: Option<String>,
+    fix: Option<Action>,
     avoid: &str,
     as_json: bool,
+    started: Instant,
 ) -> CmdResult {
     let ok = links.iter().all(Link::pass);
     let mut value = json!({"schema":"team-agent.doctor.v1","ok":ok,"team":team,"workspace":workspace,"links":links});
@@ -421,12 +497,7 @@ fn render(
     if as_json {
         return result;
     } else if ok {
-        let leader = links[5]
-            .message
-            .split_whitespace()
-            .nth(1)
-            .unwrap_or("unknown");
-        result.output = CmdOutput::Human(format!("team-agent doctor: all 6 links passed — team {team} healthy ({}/{} seats, leader {leader} reachable; {})", seats.0, seats.1, links[4].message));
+        result.output = CmdOutput::Human(format!("team-agent doctor: all 6 links passed — team {team} healthy ({}/{} seats; {}; {}) [{:.2}s]", seats.0, seats.1, links[5].message, links[4].message, started.elapsed().as_secs_f64()));
     } else {
         let mut lines = Vec::new();
         for link in &links {
@@ -441,17 +512,14 @@ fn render(
             };
             lines.push(format!(
                 "{icon} {} {} [{}]: {}",
-                link.id,
-                link.name,
-                link.status,
-                short(&link.message)
+                link.id, link.name, link.status, link.message
             ));
         }
         if !links[0].pass() {
             lines.push("- L2–L6 BLOCKED by L1 (scope not resolved)".into());
         }
         if let Some(fix) = fix {
-            lines.push(format!("fix: {fix}"));
+            lines.push(format!("fix: {}", fix.display()));
         }
         lines.push(format!("avoid: {avoid}"));
         result.output = CmdOutput::Human(lines.join("\n"));
@@ -460,6 +528,7 @@ fn render(
 }
 
 pub(super) fn run(args: &DoctorArgs) -> CmdResult {
+    let started = Instant::now();
     let caller = caller();
     let selected = crate::state::selector::resolve_active_team_readonly(
         &args.workspace,
@@ -502,8 +571,15 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
         Ok(scope) => scope,
         Err(error) => {
             let raw = crate::direct_delivery::snapshot(&args.workspace).unwrap_or(Value::Null);
-            let team = caller_team(&raw, &caller)
-                .or_else(|| args.team.clone())
+            let caller_scope = args
+                .team
+                .is_none()
+                .then(|| caller_team(&raw, &caller))
+                .flatten();
+            let team = args
+                .team
+                .clone()
+                .or_else(|| caller_scope.clone())
                 .unwrap_or_else(|| "current".into());
             let links = (1..=6)
                 .map(|n| {
@@ -524,9 +600,18 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
                 &team,
                 caller,
                 (0, 0),
-                Some(action("status", &args.workspace, &team)),
+                Some(action(
+                    if caller_scope.is_some() {
+                        "doctor"
+                    } else {
+                        "status"
+                    },
+                    &args.workspace,
+                    &team,
+                )),
                 "do not restart or claim a different team",
                 args.json,
+                started,
             );
         }
     };
@@ -550,7 +635,7 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
     let mut endpoints = vec![if target_socket.is_empty() {
         crate::tmux_backend::socket_name_for_workspace(workspace)
     } else {
-        target_socket
+        target_socket.clone()
     }];
     for (agent, _) in agents.iter().filter(|(_, v)| running(v)) {
         if let Ok(endpoint) = directory.endpoint(agent) {
@@ -567,8 +652,8 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
             Ok(observed) if began.elapsed() < BUDGET => {
                 panes.insert(endpoint, observed);
             }
-            Ok(_) => host_error = Some("host latency exceeds 500ms".to_owned()),
-            Err(error) => host_error = Some(format!("host unreachable: {error}")),
+            Ok(_) => host_error = Some(format!("{endpoint}: host latency exceeds 500ms")),
+            Err(error) => host_error = Some(format!("{endpoint}: host unreachable: {error}")),
         }
     }
     let table = processes();
@@ -580,7 +665,7 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
             Ok(_) => host_images(workspace, team, agents, &selected.state),
             Err(error) => ("WARN", error.clone()),
         };
-        links.push(Link::new(2, status, message));
+        links.push(Link::new(2, status, format!("{target_socket}: {message}")));
         if status == "FAIL" {
             fix = Some(action("restart", workspace, team));
         }
@@ -757,15 +842,23 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
 
     // L6 independently exercises the receiver on its own socket. Never diagnose
     // an index before proving that the underlying receiver is live/non-worker.
+    let registered = directory
+        .endpoint("leader")
+        .map(|endpoint| address(&endpoint.pane_id, &endpoint.socket))
+        .unwrap_or_else(|_| address("unbound", &receiver_socket(&selected.state)));
+    let caller_address = address(field(&caller, "pane"), field(&caller, "socket"));
     let return_link = match directory.probe("leader", Instant::now() + BUDGET) {
         Err(error) => {
             if fix.is_none() {
-                fix = Some(super::leader_claim_action(workspace, Some(team)));
+                fix = Some(action("claim-leader", workspace, team));
             }
             Link::new(
                 6,
                 "FAIL",
-                format!("leader unbound/unreachable: {}", short(&error)),
+                format!(
+                    "registered {registered}; caller {caller_address}; leader unreachable: {}",
+                    short(&error)
+                ),
             )
         }
         Ok(endpoint) => {
@@ -798,12 +891,12 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
                     })
             }) {
                 if fix.is_none() {
-                    fix = Some(super::leader_claim_action(workspace, Some(team)));
+                    fix = Some(action("claim-leader", workspace, team));
                 }
                 Link::new(
                     6,
                     "WARN",
-                    "leader reachable; discovery index missing/stale (fix from leader terminal)",
+                    format!("leader {registered} reachable; caller {caller_address}; discovery index missing/stale"),
                 )
             } else {
                 let same = field(&caller, "pane") == endpoint.pane_id
@@ -812,8 +905,7 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
                     6,
                     "PASS",
                     format!(
-                        "leader {} reachable on recorded socket; caller {}",
-                        endpoint.pane_id,
+                        "leader {registered} reachable; caller {caller_address} {}",
                         if same { "matches" } else { "differs (allowed)" }
                     ),
                 )
@@ -822,11 +914,11 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
     };
     links.push(return_link);
     if fix.is_none() {
-        fix = links.iter().find(|link| !link.pass()).map(|link| match link.id.as_str() {
+        fix = links.iter().find(|link| !link.pass()).map(|link| Action::manual(match link.id.as_str() {
             "L4" => format!("restore writable, uncontended storage at {}; preserve inbox records", super::shell_quote(&workspace.join(".team/runtime").to_string_lossy())),
             "L5" => format!("leave copy/edit mode or resolve the draft/menu in the named {team} worker pane; do not submit pending text"),
             _ => format!("verify the reported process/image evidence for team {team}; do not infer health from PID existence"),
-        });
+        }));
     }
     render(
         links,
@@ -841,5 +933,6 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
             "no forced takeover, inbox replay, or broad process kill"
         },
         args.json,
+        started,
     )
 }

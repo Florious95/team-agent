@@ -263,7 +263,7 @@ fn rendering_is_bounded_and_not_a_round_trip_claim() {
                 n,
                 "PASS",
                 if n == 6 {
-                    "leader %0 reachable"
+                    "leader %0@/owned/leader.sock reachable"
                 } else {
                     "checked"
                 },
@@ -279,9 +279,11 @@ fn rendering_is_bounded_and_not_a_round_trip_claim() {
         None,
         "",
         false,
+        Instant::now(),
     ));
     assert_eq!(human.lines().count(), 1);
     assert!(human.contains("all 6 links passed"));
+    assert!(human.contains("%0@/owned/leader.sock") && human.ends_with("s]"));
     let machine = output(render(
         links,
         Path::new("/owned/workspace"),
@@ -291,8 +293,15 @@ fn rendering_is_bounded_and_not_a_round_trip_claim() {
         None,
         "",
         true,
+        Instant::now(),
     ));
     assert!(machine.len() < 2000);
+    let value: Value = serde_json::from_str(&machine).unwrap();
+    assert_eq!(value["links"][5]["link"], "return");
+    assert!(value["links"][5]["proof"]
+        .as_str()
+        .unwrap()
+        .contains("%0@/owned/leader.sock"));
     assert_eq!(
         serde_json::from_str::<Value>(&machine).unwrap()["links"]
             .as_array()
@@ -303,6 +312,57 @@ fn rendering_is_bounded_and_not_a_round_trip_claim() {
     for banned in ["coordinator", "providers", "details:"] {
         assert!(!machine.contains(banned));
     }
+}
+
+#[test]
+fn caller_scope_does_not_depend_on_workers_or_receiver_metadata() {
+    let caller = json!({"socket":"/owned/live.sock","pane":"%0","session":"live-session"});
+    let mut raw = json!({"teams":{
+        "dead":{"tmux_socket":"/owned/dead.sock","session_name":"dead","agents":{}},
+        "live":{"tmux_socket":"/owned/live.sock","session_name":"live-session","agents":{}}
+    }});
+    assert_eq!(caller_team(&raw, &caller).as_deref(), Some("live"));
+    raw["teams"]["live"]["agents"]["worker"] =
+        json!({"status":"running","pane_id":"%0","native_endpoint":"/owned/live.sock"});
+    assert_eq!(
+        caller_team(&raw, &caller),
+        None,
+        "an active worker is not a leader context"
+    );
+    raw["teams"]["live"]["agents"]["worker"]["native_endpoint"] = json!("/owned/dead.sock");
+    assert_eq!(
+        caller_team(&raw, &caller).as_deref(),
+        Some("live"),
+        "pane IDs are socket-qualified"
+    );
+    raw["teams"]["other"] = raw["teams"]["live"].clone();
+    assert_eq!(
+        caller_team(&raw, &caller),
+        None,
+        "ambiguous caller anchors must not pick an arbitrary team"
+    );
+}
+
+#[test]
+fn claim_remedy_preserves_argv_and_execution_context_without_force() {
+    let remedy = action("claim-leader", Path::new("/owned/X 运维"), "X 运维");
+    let value = serde_json::to_value(&remedy).unwrap();
+    assert_eq!(
+        value["argv"],
+        json!([
+            "team-agent",
+            "claim-leader",
+            "--workspace",
+            "/owned/X 运维",
+            "--team",
+            "X 运维",
+            "--confirm",
+            "--json"
+        ])
+    );
+    assert_eq!(value["context"], "from the current leader terminal");
+    assert!(remedy.display().contains("--workspace '/owned/X 运维'"));
+    assert!(!remedy.argv.iter().any(|arg| arg == "--force"));
 }
 
 #[test]
