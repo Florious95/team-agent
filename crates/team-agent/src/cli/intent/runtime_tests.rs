@@ -567,6 +567,7 @@ fn native_stop_recheck_accepts_dead_carrier_observations_but_fences_identity_and
 
 #[test]
 #[serial_test::serial(env)]
+#[cfg(unix)]
 fn foreign_start_and_restart_recheck_accept_their_verified_stop() {
     for verb in [Verb::Start, Verb::Restart] {
         let (root, mut intent) = fixture(&["one"]);
@@ -576,7 +577,11 @@ fn foreign_start_and_restart_recheck_accept_their_verified_stop() {
         let step = plan.steps.iter().find(|step| matches!(step, Step::StartAgent(_))).unwrap();
         let path = crate::state::persist::runtime_state_path(root.path());
         let mut raw: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let stopped_pid = child.id();
+        assert!(child.wait().unwrap().success());
         raw["teams"]["fixture"]["agents"]["one"]["status"] = json!("stopped");
+        raw["teams"]["fixture"]["agents"]["one"]["pane_pid"] = json!(stopped_pid);
         std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
         assert!(recheck(&plan, step, false).is_err(), "unplanned state changes remain fenced");
         recheck(&plan, step, true).unwrap();
