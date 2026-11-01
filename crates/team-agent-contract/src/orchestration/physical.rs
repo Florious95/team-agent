@@ -437,6 +437,23 @@ impl LifecycleHost for PhysicalRuntime<'_> {
         self.stop_receipt = None;
         let target = self.target(seat)?.clone();
         let deadline = self.deadline()?;
+        // After reboot, positive native-process absence is sufficient to retire
+        // a receipt whose shared socket is gone. Never reopen that dead socket;
+        // unknown process/filesystem observations retain the fail-closed path.
+        if target.shared_endpoint && target.evidence_kind == EvidenceKind::Native
+            && matches!(crate::host::process::sample_process(&target.process),
+                ProcessState::Exited | ProcessState::Replaced)
+            && matches!(std::fs::symlink_metadata(&target.endpoint),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+        {
+            self.stop_receipt = Some(StopReceipt {
+                method: "receipt_close_absent_shared_endpoint".into(),
+                owned_process_absent: true,
+                owned_target_replaced: false,
+            });
+            self.quiescent = Some(seat.clone());
+            return Ok(());
+        }
         if self.foreign(&target) {
             if target.evidence_kind != EvidenceKind::Native {
                 return Err(Error::Invalid("foreign close requires a native physical receipt"));
