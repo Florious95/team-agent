@@ -1365,6 +1365,24 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
 }
 
 fn trusted_cli_sender(workspace: &Path, team: Option<&str>) -> Result<TrustedSender, CliError> {
+    let caller_socket = crate::tmux_backend::socket_name_from_tmux_env();
+    let caller_pane = std::env::var("TMUX_PANE").ok();
+    // A bound leader terminal outranks worker identity inherited from a shared
+    // tmux server. Other callers retain their source identity for cross-team sends.
+    if caller_socket.is_some()
+        && caller_pane.is_some()
+        && crate::direct_delivery::directory(workspace, team)
+            .and_then(|directory| directory.endpoint("leader"))
+            .is_ok_and(|leader| {
+                crate::direct_delivery::leader_target_is_sender(
+                    &leader,
+                    caller_socket.as_deref(),
+                    caller_pane.as_deref(),
+                )
+            })
+    {
+        return Ok(TrustedSender::leader());
+    }
     let agent_id = std::env::var("TEAM_AGENT_ID")
         .ok()
         .map(|value| value.trim().to_string())

@@ -358,7 +358,11 @@ impl Directory {
     }
 }
 
-fn leader_target_is_sender(target: &Endpoint, sender_socket: Option<&str>, sender_pane: Option<&str>) -> bool {
+pub(crate) fn leader_target_is_sender(
+    target: &Endpoint,
+    sender_socket: Option<&str>,
+    sender_pane: Option<&str>,
+) -> bool {
     sender_pane == Some(target.pane_id.as_str())
         && sender_socket.is_some_and(|socket| crate::topology::same_endpoint(socket, &target.socket))
 }
