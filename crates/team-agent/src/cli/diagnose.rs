@@ -519,7 +519,7 @@ fn append_registry_channel_unbound_issue(
     if class == crate::lifecycle::launch::LeaderBindingClass::Attached {
         return;
     }
-    let (issue_id, repair) = existing_team_binding_issue(state, &team_key, class);
+    let (issue_id, repair) = existing_team_binding_issue(workspace, state, &team_key, class);
     push_issue_repair(
         issues,
         repairs,
@@ -528,13 +528,13 @@ fn append_registry_channel_unbound_issue(
             .and_then(Value::as_str)
             .unwrap_or(team_key.as_str()),
         issue_id,
-        repair,
+        &repair,
     );
 }
 
 const LEADER_NOT_ATTACHED: &str = "leader_not_attached";
 const LEADER_NOT_ATTACHED_REPAIR: &str =
-    "run from the intended leader tmux pane; do not run claim-leader";
+    "run claim-leader from the actual leader tmux pane; do not restart already-running workers";
 
 fn receiver_has_empty_attached_pane(receiver: &Value) -> bool {
     receiver.get("status").and_then(Value::as_str) == Some("attached")
@@ -569,17 +569,44 @@ fn team_has_initialized_runtime(state: &Value, team_key: &str) -> bool {
 }
 
 fn existing_team_binding_issue(
+    workspace: &std::path::Path,
     state: &Value,
     team_key: &str,
     class: crate::lifecycle::launch::LeaderBindingClass,
-) -> (&'static str, &'static str) {
+) -> (&'static str, String) {
     if selected_or_top_receiver(state, team_key).is_some_and(receiver_has_empty_attached_pane)
         || (class == crate::lifecycle::launch::LeaderBindingClass::Unbound
             && team_has_initialized_runtime(state, team_key))
     {
-        return (LEADER_NOT_ATTACHED, LEADER_NOT_ATTACHED_REPAIR);
+        return (LEADER_NOT_ATTACHED, format!("{LEADER_NOT_ATTACHED_REPAIR}: {}",
+            crate::cli::leader_claim_action(workspace, Some(team_key))));
     }
-    (class.issue_id(), class.repair())
+    let repair = if class == crate::lifecycle::launch::LeaderBindingClass::Unbound {
+        crate::cli::leader_claim_action(workspace, Some(team_key))
+    } else {
+        class.repair().to_string()
+    };
+    (class.issue_id(), repair)
+}
+
+#[cfg(test)]
+mod restart_binding_guidance_tests {
+    use super::*;
+
+    #[test]
+    fn doctor_unbound_binding_has_scoped_claim_without_forced_takeover() {
+        let workspace = std::path::Path::new("/work space/project A");
+        let state = json!({"agents": {"worker": {}}, "leader_receiver": {
+            "status": "attached", "pane_id": "%0"
+        }});
+        let (issue, repair) = existing_team_binding_issue(workspace, &state, "research",
+            crate::lifecycle::launch::LeaderBindingClass::Unbound);
+        assert_eq!(issue, LEADER_NOT_ATTACHED);
+        assert!(repair.contains(&crate::cli::leader_claim_action(workspace, Some("research"))));
+        assert!(!repair.contains("do not claim-leader"));
+        assert!(!repair.contains("--confirm"));
+        assert!(!repair.contains("leader_registry_index_missing"));
+    }
 }
 
 fn append_live_leader_workspace_mismatch_issue(
@@ -762,11 +789,11 @@ pub(crate) fn append_registry_channel_unbound_to_report(
         return;
     }
     let state = crate::state::persist::load_runtime_state(workspace).unwrap_or(json!({}));
-    let (issue_id, repair) = existing_team_binding_issue(&state, &team_key, class);
+    let (issue_id, repair) = existing_team_binding_issue(workspace, &state, &team_key, class);
     if !issues.iter().any(|item| item.as_str() == Some(issue_id)) {
         issues.push(json!(issue_id));
     }
-    repairs.push(recovery_hint(&team_key, issue_id, repair));
+    repairs.push(recovery_hint(&team_key, issue_id, &repair));
     object.insert("issues".to_string(), Value::Array(issues));
     object.insert("suggested_repairs".to_string(), Value::Array(repairs));
     let is_healthy_unattached_host = class == crate::lifecycle::launch::LeaderBindingClass::Unbound

@@ -640,10 +640,25 @@ fn execute_plan(
     } else {
         None
     };
-    Ok(CmdResult::from_json(
-        json!({"ok":ok,"action":plan.intent.verb,"surface":plan.intent.surface,"scope":actual_scope,"session_policy":plan.intent.session,"status":if partial {"partial"} else if !ok {"failed"} else if pending {"pending"} else if results.is_empty() {if plan.intent.verb == Verb::Stop {"already_stopped"} else {"already_running"}} else {"actions_completed"},"steps":results,"skipped":plan.skipped,"effects":effects,"configuration_note":"Running processes were not edited; role body synchronization and business readiness are not claimed.","last_confirmed_effect":if stop_succeeded {Some("original_instance_stopped")} else if handler_effect_confirmed {Some("handler_effects_confirmed")} else {None},"current_state":if !ok {Some(if known_no_effect && !partial {"unchanged"} else {"unknown"})} else {None},"recovery":recovery}),
-        plan.intent.json,
-    ))
+    let mut value = json!({"ok":ok,"action":plan.intent.verb,"surface":plan.intent.surface,"scope":actual_scope,"session_policy":plan.intent.session,"status":if partial {"partial"} else if !ok {"failed"} else if pending {"pending"} else if results.is_empty() {if plan.intent.verb == Verb::Stop {"already_stopped"} else {"already_running"}} else {"actions_completed"},"steps":results,"skipped":plan.skipped,"effects":effects,"configuration_note":"Running processes were not edited; role body synchronization and business readiness are not claimed.","last_confirmed_effect":if stop_succeeded {Some("original_instance_stopped")} else if handler_effect_confirmed {Some("handler_effects_confirmed")} else {None},"current_state":if !ok {Some(if known_no_effect && !partial {"unchanged"} else {"unknown"})} else {None},"recovery":recovery});
+    append_restart_binding_status(&mut value);
+    Ok(CmdResult::from_json(value, plan.intent.json))
+}
+
+fn append_restart_binding_status(value: &mut Value) {
+    let binding = value.get("steps").and_then(Value::as_array).into_iter().flatten()
+        .filter_map(|step| step.get("receipt"))
+        .find(|receipt| receipt.get("leader_bind_ok").and_then(Value::as_bool) == Some(false))
+        .cloned();
+    let Some(binding) = binding else { return; };
+    for field in ["leader_bind_ok", "leader_bind_reason", "warnings", "next_actions"] {
+        if let Some(detail) = binding.get(field) { value[field] = detail.clone(); }
+    }
+    if value.get("ok").and_then(Value::as_bool) == Some(true)
+        && binding.get("status").and_then(Value::as_str) == Some("restarted_binding_pending") {
+        value["status"] = json!("restarted_binding_pending");
+        value["current_state"] = json!("running");
+    }
 }
 
 /// Pure registered-seat truth table. Caller supplies physical evidence, not status guesses.

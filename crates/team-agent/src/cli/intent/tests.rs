@@ -1,5 +1,32 @@
 #![allow(clippy::unwrap_used, clippy::panic)]
 use super::*;
+
+#[test]
+fn binding_pending_keeps_confirmed_effects_and_never_masks_worker_failure() {
+    for ok in [true, false] {
+        let mut value = json!({
+            "ok": ok, "status": if ok { "actions_completed" } else { "failed" },
+            "effects": [{"kind": "legacy_handler_completed"}],
+            "last_confirmed_effect": "handler_effects_confirmed",
+            "current_state": "unknown",
+            "steps": [{"receipt": {
+                "status": "restarted_binding_pending", "leader_bind_ok": false,
+                "leader_bind_reason": "leader_pane_validation_failed",
+                "warnings": [{"code": "leader_pane_validation_failed"}],
+                "next_actions": ["team-agent claim-leader --workspace '/w' --team 't'"]
+            }}]
+        });
+        append_restart_binding_status(&mut value);
+        assert_eq!(value["ok"], ok);
+        assert_eq!(value["status"], if ok { "restarted_binding_pending" } else { "failed" });
+        assert_eq!(value["current_state"], if ok { "running" } else { "unknown" });
+        assert_eq!(value["effects"].as_array().unwrap().len(), 1);
+        assert_eq!(value["last_confirmed_effect"], "handler_effects_confirmed");
+        assert_eq!(value["leader_bind_ok"], false);
+        assert_eq!(value["warnings"][0]["code"], "leader_pane_validation_failed");
+        assert!(value["next_actions"][0].as_str().unwrap().contains("claim-leader"));
+    }
+}
 use std::cell::RefCell;
 
 pub(super) struct Sandbox(pub PathBuf);

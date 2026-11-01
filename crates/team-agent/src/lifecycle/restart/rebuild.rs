@@ -2057,8 +2057,14 @@ pub fn restart_leader_public_bind(
     in_memory_state: &serde_json::Value,
 ) -> (Option<serde_json::Value>, bool, Option<String>) {
     let team_key = team.unwrap_or("");
-    let attach_window_failures =
-        try_autobind_leader_after_restart(workspace, team, in_memory_state);
+    let attach_window_failures = match try_autobind_leader_after_restart(workspace, team, in_memory_state) {
+        Ok(debt) => debt,
+        Err(failure) => {
+            eprintln!("team_agent::restart auto_attach_leader failed reason={} error={} team={team:?}", failure.reason, failure.error);
+            // Preserve the refusal; index absence after failed attachment is a consequence.
+            return (Some(serde_json::json!({"leader_attach_error": failure.error})), false, Some(failure.reason));
+        }
+    };
     let persisted = load_restart_bind_state(workspace, team_key);
     let (class_ok, class_reason) = restart_bind_status(
         workspace,
@@ -2086,25 +2092,34 @@ fn maintain_live_binding_index(
     Some(serde_json::Value::Object(report))
 }
 
+#[derive(Debug)]
+struct RestartAttachFailure {
+    reason: String,
+    error: String,
+}
+
 fn try_autobind_leader_after_restart(
     workspace: &std::path::Path,
     team: Option<&str>,
     state: &serde_json::Value,
-) -> Option<serde_json::Value> {
+) -> Result<Option<serde_json::Value>, RestartAttachFailure> {
     let team_key = team.unwrap_or("");
     let persisted = load_restart_bind_state(workspace, team_key);
     let state = persisted.as_ref().unwrap_or(state);
     if restart_bind_status(workspace, team_key, state).0 {
-        return maintain_live_binding_index(workspace, team, state);
+        return Ok(maintain_live_binding_index(workspace, team, state));
     }
     if std::env::var_os("TMUX_PANE").is_none() {
-        return None;
+        return Err(RestartAttachFailure {
+            reason: "caller_pane_missing".into(),
+            error: "run claim-leader from the actual leader's tmux pane".into(),
+        });
     }
     if owner_conflicts_with_caller(workspace, state, team_key) {
-        eprintln!(
-            "team_agent::restart auto_attach_leader skipped reason=owner_conflict team={team:?}"
-        );
-        return None;
+        return Err(RestartAttachFailure {
+            reason: "owner_conflict".into(),
+            error: "the recorded live leader is owned by another caller".into(),
+        });
     }
     let Some(provider) = state
         .get("teams")
@@ -2118,10 +2133,10 @@ fn try_autobind_leader_after_restart(
         })
         .and_then(crate::provider::wire::parse_provider)
     else {
-        eprintln!(
-            "team_agent::restart auto_attach_leader skipped reason=provider_unresolved team={team:?}"
-        );
-        return None;
+        return Err(RestartAttachFailure {
+            reason: "leader_provider_unresolved".into(),
+            error: "the caller's leader provider could not be identified".into(),
+        });
     };
     match crate::leader::attach_leader(workspace, team, None, provider) {
         Ok(result) if result.ok => {
@@ -2145,21 +2160,23 @@ fn try_autobind_leader_after_restart(
                     );
                 }
             }
-            Some(debt)
+            Ok(Some(debt))
         }
-        Ok(result) => {
-            eprintln!(
-                "team_agent::restart auto_attach_leader skipped reason={:?} team={team:?}",
-                result.reason,
-            );
-            None
-        }
-        Err(error) => {
-            eprintln!(
-                "team_agent::restart auto_attach_leader failed error={error} team={team:?}"
-            );
-            None
-        }
+        Ok(result) => Err(RestartAttachFailure {
+            reason: serde_json::to_value(result.reason).ok()
+                .and_then(|reason| reason.as_str().map(str::to_owned))
+                .unwrap_or_else(|| "leader_attach_refused".into()),
+            error: format!("leader attach refused: {:?}", result.reason),
+        }),
+        Err(error) => Err(RestartAttachFailure {
+            reason: match &error {
+                crate::leader::LeaderError::Validation(_) => "leader_pane_validation_failed",
+                crate::leader::LeaderError::Tmux(_) => "leader_pane_probe_failed",
+                crate::leader::LeaderError::State(_) => "leader_attach_state_failed",
+                _ => "leader_attach_failed",
+            }.into(),
+            error: error.to_string(),
+        }),
     }
 }
 
@@ -4344,7 +4361,12 @@ tasks:
             }
         });
         crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
-        let (ok, reason) = restart_bind_status(&workspace, "alpha", &state);
+        let endpoint = "/tmp/leader-not-workspace.sock";
+        let transport = crate::transport::test_support::OfflineTransport::default()
+            .with_tmux_endpoint(endpoint)
+            .with_targets(vec![restart_index_wrapper_pane(&workspace, "%1", None, true, "codex")]);
+        let (ok, reason) = crate::transport_factory::with_leader_endpoint_transport(
+            endpoint, transport, || restart_bind_status(&workspace, "alpha", &state));
         match previous {
             Some(home) => std::env::set_var("HOME", home),
             None => std::env::remove_var("HOME"),
@@ -4394,7 +4416,12 @@ tasks:
             }
         });
         let (ok_stale, reason_stale) = restart_bind_status(&workspace, "alpha", &state);
-        let (ok_new, reason_new) = restart_bind_status(&workspace, "alpha", &persisted);
+        let endpoint = "/tmp/caller-socket.sock";
+        let transport = crate::transport::test_support::OfflineTransport::default()
+            .with_tmux_endpoint(endpoint)
+            .with_targets(vec![restart_index_wrapper_pane(&workspace, "%2", None, true, "codex")]);
+        let (ok_new, reason_new) = crate::transport_factory::with_leader_endpoint_transport(
+            endpoint, transport, || restart_bind_status(&workspace, "alpha", &persisted));
         match previous {
             Some(home) => std::env::set_var("HOME", home),
             None => std::env::remove_var("HOME"),
@@ -4410,7 +4437,7 @@ tasks:
         assert_eq!(
             reason_new.as_deref(),
             Some("leader_registry_index_missing"),
-            "persisted attached+owner without registry is index-missing, not the stale pending class"
+            "persisted live binding without registry is index-missing, not the stale pending class"
         );
     }
 
@@ -4739,22 +4766,13 @@ tasks:
         }
         let _ = std::fs::remove_dir_all(&root);
         assert!(!dead.0);
-        assert_eq!(dead.1.as_deref(), Some("leader_registry_index_missing"));
+        assert_eq!(dead.1.as_deref(), Some("leader_pane_validation_failed"));
         assert!(!wrong_pane.0);
-        assert_eq!(
-            wrong_pane.1.as_deref(),
-            Some("leader_registry_index_missing")
-        );
+        assert_eq!(wrong_pane.1.as_deref(), Some("leader_pane_validation_failed"));
         assert!(!wrong_socket.0);
-        assert_eq!(
-            wrong_socket.1.as_deref(),
-            Some("leader_registry_index_missing")
-        );
+        assert_eq!(wrong_socket.1.as_deref(), Some("leader_pane_validation_failed"));
         assert!(!wrong_uuid.0);
-        assert_eq!(
-            wrong_uuid.1.as_deref(),
-            Some("leader_registry_index_missing")
-        );
+        assert_eq!(wrong_uuid.1.as_deref(), Some("leader_pane_validation_failed"));
     }
 
     #[test]
@@ -4853,7 +4871,8 @@ tasks:
             Some("leader_registry_index_missing"),
             "earlier bind reason must not be overwritten by maintain failure"
         );
-        assert_eq!(restarted.get("ok").and_then(serde_json::Value::as_bool), Some(false));
+        assert_eq!(restarted.get("ok").and_then(serde_json::Value::as_bool), Some(true));
+        assert_eq!(restarted["status"], "restarted_binding_pending");
         assert_eq!(
             restarted.get("reason").and_then(serde_json::Value::as_str),
             Some("leader_registry_maintain_failed")

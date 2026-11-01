@@ -6,6 +6,8 @@
 
 ## [0.5.129]
 
+- **Restart binding guidance:** successful worker restarts now report `restarted_binding_pending` with exit 0 when leader attachment needs an explicit claim. Preserve the actual attach refusal, expose scoped claim guidance in both CLI surfaces and doctor, and keep worker/admission/ownership failures nonzero.
+
 - **Leader identity fencing:** leader delivery and locate require a live pane-binding nonce; stale or unverifiable bindings retain inbox storage without live submission and name an explicit rebind command. Fresh claims/startup bindings stamp the pane lifetime. Claim selects the caller's actual tmux socket, and shutdown no longer protects a stale leader anchor positively identified as a current worker, including sibling bindings older than that worker's spawn or lacking both a nonce and binding time; real leaders, unknown identities and ownership gates remain protected.
 - **Space Station runtime:** shared durable messaging, per-seat lifecycle fences, on-demand agenda jobs, and file-projection authority replace the resident coordination path. Legacy SQLite import remains available for migration.
 - **Legacy upgrade safety:** read both historical inbox layouts without crossing team scope; current lifecycle, send, migration, and status commands retire positively identified legacy coordinators. Doctor reports surviving daemons without stopping them. Reused/unowned PIDs never block commands or receive signals; status preserves their stale metadata, while mutating commands may remove it.

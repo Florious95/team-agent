@@ -58,6 +58,13 @@ pub(crate) const STATUS_REMINDER: &str =
 
 pub mod adapters;
 pub(crate) use adapters::shell_quote;
+
+pub(crate) fn leader_claim_action(workspace: &std::path::Path, team: Option<&str>) -> String {
+    let workspace = workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf());
+    format!("team-agent claim-leader --workspace {}{}",
+        shell_quote(&workspace.to_string_lossy()),
+        team.map(|team| format!(" --team {}", shell_quote(team))).unwrap_or_default())
+}
 mod arguments;
 mod intent;
 #[cfg(unix)]
@@ -3528,7 +3535,11 @@ pub mod lifecycle_port {
             team,
             session_converge_deadline_ms,
         ) {
-            Ok(report) => Ok(restart_value(report, team)),
+            Ok(report) => {
+                let mut value = restart_value(report, team);
+                append_restart_binding_guidance(&mut value, workspace, team);
+                Ok(value)
+            },
             Err(e) => Ok(error_value(e)),
         }
     }
@@ -4655,11 +4666,44 @@ pub mod lifecycle_port {
                 },
                 None,
             );
-            assert_eq!(incomplete.get("ok").and_then(Value::as_bool), Some(false));
+            assert_eq!(incomplete.get("ok").and_then(Value::as_bool), Some(true));
+            assert_eq!(incomplete["status"], "restarted_binding_pending");
+            assert_eq!(incomplete["leader_bind_ok"], false);
             assert_eq!(
                 incomplete.get("reason").and_then(Value::as_str),
                 Some("leader_registry_index_missing")
             );
+        }
+
+        #[test]
+        fn restart_binding_guidance_preserves_success_and_ownership_refusals() {
+            for (reason, ok) in [
+                ("leader_pane_validation_failed", true),
+                ("owner_conflict", false),
+                ("previous_owner_alive_refused", false),
+                ("force_confirm_required", false),
+                ("caller_not_leader_shaped", false),
+            ] {
+                let mut value = restart_value(crate::lifecycle::RestartReport::Restarted {
+                    session_name: crate::transport::SessionName::new("s"),
+                    agents: vec![],
+                    coordinator_started: false,
+                    coordinator: crate::lifecycle::CoordinatorStartSummary {
+                        ok: true, status: "not_required".into(), pid: None,
+                        binary_path: None, binary_version: None, rotation_reason: None,
+                        binary_identity_relation: "not_applicable".into(),
+                    },
+                    next_actions: vec![], attach_commands: vec![], attach_window_failures: None,
+                    leader_bind_ok: false, leader_bind_reason: Some(reason.into()),
+                }, Some("research"));
+                append_restart_binding_guidance(&mut value, Path::new("/work space/it's A"), Some("research"));
+                assert_eq!(value["ok"], ok);
+                assert_eq!(value["leader_bind_reason"], reason);
+                assert_eq!(value["warnings"][0]["code"], reason);
+                assert_eq!(value["next_actions"][0], crate::cli::leader_claim_action(Path::new("/work space/it's A"), Some("research")));
+                assert!(!value.to_string().contains("--confirm"));
+                assert!(!value.to_string().contains("leader_registry_index_missing"));
+            }
         }
 
         #[test]
@@ -4945,6 +4989,20 @@ pub mod lifecycle_port {
         }
     }
 
+    fn append_restart_binding_guidance(value: &mut Value, workspace: &Path, team: Option<&str>) {
+        if value.get("leader_bind_ok").and_then(Value::as_bool) != Some(false) { return; }
+        let action = crate::cli::leader_claim_action(workspace, team);
+        let reason = value.get("leader_bind_reason").cloned().unwrap_or(json!("leader_receiver_unbound"));
+        value["warnings"] = json!([{
+            "code": reason,
+            "message": "Leader live delivery is unbound. Run the claim command from the actual leader pane; do not restart already-running workers or replay prior messages.",
+            "action": action,
+        }]);
+        if let Some(actions) = value.get_mut("next_actions").and_then(Value::as_array_mut) {
+            actions.push(json!(action));
+        }
+    }
+
     pub fn restart_value(report: crate::lifecycle::RestartReport, team: Option<&str>) -> Value {
         match report {
             crate::lifecycle::RestartReport::Restarted {
@@ -4958,9 +5016,15 @@ pub mod lifecycle_port {
                 leader_bind_ok,
                 leader_bind_reason,
             } => {
+                // Binding is optional presentation; actual ownership refusals still fail closed.
+                let ok = !matches!(leader_bind_reason.as_deref(), Some(
+                    "owner_conflict" | "previous_owner_alive_refused" |
+                    "force_confirm_required" | "caller_not_leader_shaped"
+                ));
                 let mut value = json!({
-                    "ok": leader_bind_ok,
-                    "status": if leader_bind_ok { "restarted" } else { "restarted_binding_incomplete" },
+                    "ok": ok,
+                    "status": if !ok { "restarted_binding_incomplete" } else if leader_bind_ok { "restarted" } else { "restarted_binding_pending" },
+                    "leader_bind_ok": leader_bind_ok,
                     "session_name": session_name.as_str(),
                     "agents": agents.iter().map(|a| a.agent_id.as_str()).collect::<Vec<_>>(),
                     "coordinator_started": coordinator_started,
@@ -4973,6 +5037,7 @@ pub mod lifecycle_port {
                     value["attach_window_failures"] = debt;
                 }
                 if let Some(reason) = leader_bind_reason {
+                    value["leader_bind_reason"] = json!(reason);
                     value["reason"] = json!(reason);
                 }
                 value

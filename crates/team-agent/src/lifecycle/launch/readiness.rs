@@ -142,7 +142,7 @@ impl LeaderBindingClass {
             Self::Unknown => {
                 "inspect the selected-team registry file and live leader channel; do not claim-leader"
             }
-            Self::Unbound => "team-agent claim-leader --confirm --json",
+            Self::Unbound => "run claim-leader from the actual leader pane; do not restart already-running workers",
         }
     }
 }
@@ -282,7 +282,16 @@ pub(crate) fn classify_leader_binding_at(
             }
         }
         RegistryDeliverability::Unbound if has_owner || receiver_attached => {
-            LeaderBindingClass::IndexMissing
+            // A missing index is registry-only only when the underlying binding is live.
+            // Stale pane addresses and missing grants require an explicit claim instead.
+            if !receiver_attached { return LeaderBindingClass::Unbound; }
+            let Some((receiver, transport)) = receiver.zip(transport) else {
+                return LeaderBindingClass::Unknown;
+            };
+            match crate::messaging::leader_channel::resolve_live_leader_channel(workspace, receiver, transport) {
+                crate::messaging::leader_channel::LeaderChannelResolution::Live(_) => LeaderBindingClass::IndexMissing,
+                _ => LeaderBindingClass::Unbound,
+            }
         }
         RegistryDeliverability::Unbound => LeaderBindingClass::Unbound,
     }
@@ -374,6 +383,29 @@ mod claim_rework_class_tests {
             pane_pid: None,
             leader_env: Default::default(),
         }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn classify_missing_index_requires_a_live_receiver() {
+        let (root, workspace, previous) = isolated();
+        let endpoint = "/tmp/ta-class-missing.sock";
+        let state = json!({"teams": {"alpha": {
+            "team_owner": {"pane_id": "%1", "owner_epoch": 3, "provider": "codex"},
+            "leader_receiver": {"status": "attached", "pane_id": "%1", "owner_epoch": 3, "tmux_socket": endpoint}
+        }}});
+        let live = OfflineTransport::default().with_tmux_endpoint(endpoint)
+            .with_targets(vec![live_pane(&workspace, "%1")]);
+        let absent = OfflineTransport::default().with_tmux_endpoint(endpoint);
+        let wrong_pane = OfflineTransport::default().with_tmux_endpoint(endpoint)
+            .with_targets(vec![live_pane(&workspace, "%2")]);
+        let foreign = OfflineTransport::default().with_tmux_endpoint(endpoint)
+            .with_targets(vec![live_pane(&root.join("foreign"), "%1")]);
+        let results = [&live, &absent, &wrong_pane, &foreign].map(|transport|
+            classify_leader_binding_at(&workspace, "alpha", &state, Some(transport)));
+        restore_home(previous, &root);
+        assert_eq!(results, [LeaderBindingClass::IndexMissing, LeaderBindingClass::Unbound,
+            LeaderBindingClass::Unbound, LeaderBindingClass::Unbound]);
     }
 
     #[test]
