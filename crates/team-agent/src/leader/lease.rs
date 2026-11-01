@@ -813,6 +813,9 @@ pub(crate) fn incept_launched_leader(
     mode: super::LeaderStartMode,
 ) -> Result<(), LeaderError> {
     let raw = crate::state::persist::load_runtime_state_without_migrations(workspace)?;
+    if !raw.is_object() {
+        return Err(LeaderError::Start("runtime state must be a JSON object".into()));
+    }
     let team = identity.team_id.as_str();
     let mut state = if raw.get("teams").and_then(|teams| teams.get(team)).is_some() {
         crate::state::projection::project_top_level_view(&raw, team)
@@ -1063,7 +1066,8 @@ fn claim_lease_no_incident_with_target(
         }
         return Ok(LeaseResult {
             ok: true,
-            status: LeaseStatus::AlreadyBound,
+            // This branch republishes the observed binding and registry; it is not a no-op.
+            status: LeaseStatus::Claimed,
             receiver: state_receiver(state),
             owner: state_owner(state),
             owner_epoch: Some(pre_epoch),

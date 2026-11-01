@@ -335,6 +335,7 @@ fn run_canonical(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult
             }
         }
     }
+    let concise_start = plan.intent.verb == Verb::Start && !plan.intent.json && !plan.intent.dry_run;
     let mut result = execute_plan(plan, &mut |step| step.execute(), &mut runtime::recheck)?;
     if upgrade {
         if let Err(error) = crate::coordinator::retire_legacy_coordinator(&upgrade_workspace) {
@@ -347,7 +348,35 @@ fn run_canonical(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult
             result.exit = ExitCode::Error;
         }
     }
+    if concise_start {
+        if let CmdOutput::Json(value) = &result.output {
+            result.output = CmdOutput::Human(intent_human(value));
+        }
+    }
     Ok(result)
+}
+
+fn intent_human(value: &Value) -> String {
+    let action = value.get("action").and_then(Value::as_str).unwrap_or("Lifecycle");
+    let status = value.get("status").and_then(Value::as_str).unwrap_or("unknown");
+    let status = if status == "actions_completed" { "completed" } else { status };
+    let team = value.pointer("/scope/team").and_then(Value::as_str).unwrap_or("workspace");
+    let mut lines = vec![format!("{action} {team}: {status}")];
+    let steps = value.get("steps").and_then(Value::as_array).into_iter().flatten().collect::<Vec<_>>();
+    let completed = steps.iter().filter(|step| step.get("ok").and_then(Value::as_bool) == Some(true)).count();
+    if !steps.is_empty() { lines.push(format!("{completed}/{} actions completed; task completion is not implied.", steps.len())); }
+    let binding = value.get("leader_bind_ok").and_then(Value::as_bool).or_else(|| steps.iter().find_map(|step| step.pointer("/receipt/leader_bind_ok").and_then(Value::as_bool)));
+    if let Some(bound) = binding { lines.push(format!("Leader: {}.", if bound { "bound" } else { "binding pending" })); }
+    if steps.iter().any(|step| step.pointer("/receipt/readiness/ready").and_then(Value::as_bool) == Some(false)) {
+        lines.push("Worker tools: not yet verified; send a task and inspect the actual reply.".into());
+    }
+    if let Some(error) = value.get("reason").and_then(Value::as_str).or_else(|| steps.iter().find_map(|step| step.get("error").or_else(|| step.pointer("/receipt/error")).and_then(Value::as_str))) {
+        lines.push(error.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(360).collect());
+    }
+    if let Some(action) = value.get("recovery").and_then(Value::as_str).or_else(|| value.get("next_actions").and_then(Value::as_array).and_then(|actions| actions.first()).and_then(Value::as_str)) {
+        lines.push(format!("Next: {action}"));
+    }
+    lines.join("\n")
 }
 
 fn lifecycle_intent(
@@ -508,7 +537,7 @@ fn lifecycle_intent(
 }
 
 fn execute_plan(
-    plan: Plan,
+    mut plan: Plan,
     execute: &mut impl FnMut(&Step) -> Result<CmdResult, CliError>,
     recheck: &mut impl FnMut(&Plan, &Step, bool) -> Result<(), CliError>,
 ) -> Result<CmdResult, CliError> {
@@ -539,7 +568,8 @@ fn execute_plan(
     let mut handler_effect_confirmed = false;
     let mut known_no_effect = true;
     let mut refusal_hint = None;
-    for step in &plan.steps {
+    let steps = plan.steps.clone();
+    for step in &steps {
         if let Err(error) = recheck(&plan, step, stop_succeeded) {
             ok = false;
             known_no_effect = false;
@@ -609,6 +639,14 @@ fn execute_plan(
             && (receipt.get("ready").and_then(Value::as_bool) == Some(false)
                 || receipt.get("status").and_then(Value::as_str) == Some("pending_tool_load"));
         results.push(json!({"action":step.name(),"agent":step.agent(),"ok":success,"phase":if stop_unconfirmed {"stop_not_confirmed"} else {"handler"},"mode":receipt.get("start_mode").or_else(||receipt.get("mode")).cloned().unwrap_or(json!("unknown")),"receipt":receipt}));
+        if success {
+            if let Err(error) = runtime::advance_topology(&mut plan, step, &receipt) {
+                ok = false;
+                known_no_effect = false;
+                results.push(json!({"action":step.name(),"agent":step.agent(),"ok":false,"phase":"topology_refresh","error":crate::redaction::redact_external_text(&error.to_string())}));
+                break;
+            }
+        }
         if !success {
             ok = false;
             if plan.intent.verb != Verb::Start {

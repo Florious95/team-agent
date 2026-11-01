@@ -100,6 +100,9 @@ pub(crate) fn publish(
         "agent_lifecycle",
         "tasks",
         "agent_health",
+        // Retired coordinator observations are a rebuildable aggregate cache,
+        // not seat authority; copying them into every manifest can exceed 64 KiB.
+        "coordinator",
     ] {
         object.remove(field);
     }
@@ -337,6 +340,33 @@ pub(crate) fn read_workspace(workspace: &Path) -> Result<Option<Value>, String> 
     result["teams"] = Value::Object(teams);
     result["station_projection"] = json!(true);
     Ok(Some(result))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retired_coordinator_cache_does_not_expand_or_reappear_in_seat_documents() {
+        let workspace = std::env::temp_dir().join(format!(
+            "ta-projection-cache-{}-{}", std::process::id(), seat_store::random_instance().unwrap(),
+        ));
+        std::fs::create_dir(&workspace).unwrap();
+        let cache = json!({"abnormal_exit_watch": "x".repeat(100_000)});
+        let mut state = json!({
+            "session_name": "owned-workers", "coordinator": cache,
+            "custom_context": {"preserve": true},
+            "agents": {"test-opus-m5": {"provider": "fake", "status": "stopped"}},
+        });
+        publish(&workspace, "codex-effort-fix", &mut state, &["test-opus-m5"]).unwrap();
+        let projected = read_workspace(&workspace).unwrap().unwrap();
+        let team = &projected["teams"]["codex-effort-fix"];
+        assert!(team.get("coordinator").is_none());
+        assert_eq!(team["custom_context"], json!({"preserve": true}));
+        assert_eq!(team["agents"]["test-opus-m5"]["provider"], json!("fake"));
+        assert_eq!(state["coordinator"], cache, "publishing must not delete the caller's source data");
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
 }
 
 fn now() -> String {

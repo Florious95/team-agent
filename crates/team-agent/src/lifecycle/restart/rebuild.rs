@@ -2010,7 +2010,12 @@ pub fn restart_leader_public_bind(
     team: Option<&str>,
     in_memory_state: &serde_json::Value,
 ) -> (Option<serde_json::Value>, bool, Option<String>) {
-    let team_key = team.unwrap_or("");
+    let scope = match crate::state::projection::resolve_runtime_team_scope_readonly(workspace, team) {
+        Ok(scope) => scope,
+        Err(error) => return (Some(serde_json::json!({"leader_attach_error": error.to_string()})), false, Some("leader_scope_unavailable".into())),
+    };
+    let team_key = scope.canonical_team_key.as_str();
+    let team = Some(team_key);
     let attach_window_failures = match try_autobind_leader_after_restart(workspace, team, in_memory_state) {
         Ok(debt) => debt,
         Err(failure) => {
@@ -4549,6 +4554,9 @@ tasks:
         crate::transport_factory::with_leader_endpoint_transport(endpoint, transport, || {
             let (_failures, ok, reason) =
                 restart_leader_public_bind(workspace, Some("alpha"), &serde_json::json!({}));
+            let (_, default_ok, default_reason) =
+                restart_leader_public_bind(workspace, None, &serde_json::json!({}));
+            assert_eq!((default_ok, default_reason), (ok, reason.clone()), "default and explicit team classification must agree");
             let class = crate::lifecycle::launch::classify_leader_binding(workspace, "alpha");
             ((ok, reason), class)
         })

@@ -175,7 +175,7 @@ fn leader_port_takeover_confirm_without_pane_refuses_caller_pane_missing() {
 fn claim_leader_default_response_hides_internal_binding_details() {
     let mut value = serde_json::json!({
         "ok": true,
-        "status": "already_bound",
+        "status": "claimed",
         "owner_epoch": 3,
         "bound_pane_id": "%77",
         "leader_receiver": {"pane_id": "%77"},
@@ -185,9 +185,9 @@ fn claim_leader_default_response_hides_internal_binding_details() {
     });
     super::leader_port::compact_lease_value(&mut value);
     assert_eq!(value["ok"], json!(true));
-    assert_eq!(value["status"], json!("already_bound"));
+    assert_eq!(value["status"], json!("claimed"));
     assert_eq!(value["bound_pane_id"], json!("%77"));
-    assert_eq!(value["reason"], json!("not_converged_old_endpoint_live"));
+    assert!(value.get("reason").is_none(), "worker topology is not a leader refresh failure");
     for field in [
         "owner_epoch",
         "leader_receiver",

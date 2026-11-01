@@ -1502,7 +1502,6 @@ pub(crate) fn quick_start_with_transport_in_workspace_pi_preflight(
             error: error.to_string(), coordinator_state: coordinator_state.to_string(),
         });
     }
-    let coordinator_action = "coordinator started";
     // BUG-7: build an honest readiness verdict from the post-spawn runtime state.
     // - If persist_spawn_agent_state (BUG-2 fix) marked any agent non-running, the
     //   team is observably Degraded.
@@ -1526,9 +1525,7 @@ pub(crate) fn quick_start_with_transport_in_workspace_pi_preflight(
         &session_name,
         attach_windows.iter().map(String::as_str),
     );
-    let mut next_actions = vec![format!(
-        "team compiled; real spawn is behind the transport/provider boundary; {coordinator_action}"
-    )];
+    let mut next_actions = Vec::new();
     next_actions.push(
         "team initialized; use `team-agent start` for idempotent activation, or \
          `team-agent team restart` for an intentional restart; quick-start is a compatibility creation command"

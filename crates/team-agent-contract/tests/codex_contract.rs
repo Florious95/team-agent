@@ -171,9 +171,11 @@ fn codex_launch(sandbox: &support::Sandbox, command: &PublicCommand, project: &P
     let mut runtime = probe_runtime(command, &sandbox.parent, &mut Runner, bounds).unwrap(); runtime.native.platform = Platform::MacOs;
     let catalog = CatalogObservation { provider: ProviderId::new(ID).unwrap(), native: metadata, schema: CATALOG_SOURCE.schema.into(), models: parse_catalog(CATALOG.as_bytes()).unwrap() };
     let catalog = runtime.bind_catalog(&catalog).unwrap();
-    let a = adapter().with_runtime(runtime.clone()).with_project(project.into()).unwrap();
+    let a = adapter().with_runtime(runtime.clone());
     std::fs::create_dir_all(&sandbox.root).unwrap();
+    std::fs::create_dir_all(project).unwrap();
     let mut r = support::request(&sandbox.root, "worker"); r.provider = ID.into(); r.native = runtime.native.clone();
+    r.paths.cwd = resolve_cwd(project).unwrap();
     r.paths.launcher = runtime.launcher(); r.paths.executable = runtime.engine.clone(); r.paths.candidate = "/fake/candidate".into();
     r.model = Some("gpt-6-luna".into()); r.prompt = Some("user\nproject\nrole\nTEAM".into()); r.input_profile = Some(PROFILE.into()); r.bypass = true;
     (a, r, catalog, runtime)
@@ -262,18 +264,25 @@ fn plan_carries_model_effort_bypass_mcp_and_exact_resume_without_startup_keys() 
     let args = strings(&plan);
     let key = server_key(&r.identity);
     assert_eq!(&args[..6], ["--no-alt-screen", "--no-daemon", "-c", "check_for_update_on_startup=false", "--model", "gpt-6-luna"]);
-    assert_eq!(&args[6..8], ["--add-dir", project.to_str().unwrap()]);
-    assert!(args[9].starts_with("developer_instructions=\"The actual task project is "));
-    assert_eq!(args[11], format!("mcp_servers.{key}.command=\"/fake/candidate\""));
+    assert_eq!(plan.cwd, r.paths.cwd.path);
+    assert!(!args.iter().any(|arg| arg == "--add-dir" || arg.starts_with("developer_instructions=")));
+    assert_eq!(args[7], format!("mcp_servers.{key}.command=\"/fake/candidate\""));
     assert!(args.ends_with(&["--dangerously-bypass-approvals-and-sandbox".into(), "-c".into(), "model_reasoning_effort=max".into()]));
     assert!(!args.iter().any(|arg| arg == "resume" || arg.contains("trust") || arg == "--last" || arg.contains("projects.") || arg == "--sandbox"));
     assert_eq!(plan.carriers.model, CarrierUse::Specified(CarrierRef::Arguments(vec![4, 5])));
-    assert!(matches!(&plan.carriers.mcp, CarrierUse::Specified(CarrierRef::Arguments(indices)) if indices.len() == 12 && indices[0] == 10));
+    assert!(matches!(&plan.carriers.mcp, CarrierUse::Specified(CarrierRef::Arguments(indices)) if indices.len() == 12 && indices[0] == 6));
     assert_eq!(plan.environment.remove, std::collections::BTreeSet::from(["CODEX_API_KEY".to_string(), "OPENAI_API_KEY".to_string()]));
     assert!(!plan.environment.set.contains_key("PATH") && !plan.environment.set.contains_key("CODEX_HOME"));
     assert_eq!(plan.materialization.len(), 1);
     assert_eq!(plan.materialization[0].kind, ResourceKind::Prompt);
     assert_eq!(plan.materialization[0].contents, b"user\nproject\nrole\nTEAM");
+    assert_eq!(plan.materialization[0].path, OwnedPath::new(r.paths.runtime_root.clone(), format!("codex-prompt-{}.txt", r.identity.instance.as_str()).into()).unwrap());
+    let mut sibling = r.clone();
+    sibling.identity.seat = SeatId::new("sibling").unwrap();
+    sibling.identity.instance = InstanceId::new("sibling-instance").unwrap();
+    let sibling_plan = plan_ok(&a, &sibling, &catalog);
+    assert_eq!(sibling_plan.cwd, plan.cwd);
+    assert_ne!(sibling_plan.materialization[0].path, plan.materialization[0].path);
     assert_eq!(plan.expected_session, ExpectedSession::CaptureAfterLaunch);
     // Effort is admitted per catalog model: luna lists max but not ultra.
     r.role_effort = Some("ultra".into());
@@ -283,17 +292,20 @@ fn plan_carries_model_effort_bypass_mcp_and_exact_resume_without_startup_keys() 
     r.role_effort = None; r.bypass = false;
     let args = strings(&plan_ok(&a, &r, &catalog));
     assert!(!args.iter().any(|arg| arg.contains("dangerously") || arg.contains("model_reasoning_effort")));
-    // A read-only sandbox would make Codex exit 1 on `--add-dir`.
-    assert!(args.windows(2).any(|pair| pair == ["--sandbox", "workspace-write"]) && args.contains(&"--add-dir".to_string()));
+    // Keep the native sandbox policy without a synthetic secondary project path.
+    assert!(args.windows(2).any(|pair| pair == ["--sandbox", "workspace-write"]));
     // Model omission, hidden or invented IDs never launch.
     for model in [None, Some("codex-auto-review"), Some("gpt-6-luna-invented")] {
         r.model = model.map(Into::into);
         assert!(resolve_launch(&CODEX_DESCRIPTOR, &a.hooks(), &r, Some(&catalog)).is_err(), "{model:?}");
     }
     r.model = Some("gpt-6-luna".into());
-    // The project itself can never be the private primary.
-    let mut shared = r.clone(); shared.paths.cwd.path = project.clone();
-    assert!(plan_ok_result(&a, &shared, &catalog).is_err());
+    // Native project configuration is neither read nor overwritten by the planner.
+    std::fs::create_dir_all(project.join(".codex")).unwrap();
+    std::fs::write(project.join(".git"), b"controlled git marker").unwrap();
+    std::fs::write(project.join(".codex/config.toml"), b"native settings, not read by the planner").unwrap();
+    assert_eq!(plan_ok(&a, &r, &catalog).cwd, r.paths.cwd.path);
+    assert_eq!(std::fs::read(project.join(".codex/config.toml")).unwrap(), b"native settings, not read by the planner");
     // A launcher other than the probed PATH route can never be planned.
     let mut wrong = r.clone(); wrong.paths.launcher.sha256 = digest(b"another entry");
     assert!(plan_ok_result(&a, &wrong, &catalog).is_err());
@@ -326,7 +338,7 @@ impl OwnedIo for Io {
 }
 #[test]
 fn materialization_writes_exactly_the_owned_prompt() {
-    let prompt = OwnedResourceRequest { owner: identity(), path: OwnedPath::new("/owned/cwd".into(), "team-agent-prompt.txt".into()).unwrap(), kind: ResourceKind::Prompt, contents: b"role".to_vec() };
+    let prompt = OwnedResourceRequest { owner: identity(), path: OwnedPath::new("/owned/runtime".into(), format!("codex-prompt-{}.txt", identity().instance.as_str()).into()).unwrap(), kind: ResourceKind::Prompt, contents: b"role".to_vec() };
     let mut io = Io(vec![]);
     assert_eq!(adapter().materialize(std::slice::from_ref(&prompt), &mut io).unwrap().resources.len(), 1);
     let mut wrong_kind = prompt.clone(); wrong_kind.kind = ResourceKind::McpConfig;
@@ -456,19 +468,7 @@ fn session_binding_reads_only_the_last_status_card_with_matching_cwd_and_version
     let mut forged = evidence(screen(&status("/owned/cwd", SID), PLACEHOLDER), "0.160.1"); forged.origin = CaptureOrigin::ExplicitResumeLaunch;
     assert!(adapter().bind(&forged).is_err());
 }
-#[test]
-fn private_primary_rejects_git_and_inherited_codex_config_without_reading_bodies() {
-    let sandbox = support::Sandbox::new();
-    let parent = sandbox.parent.join("primary-owner"); let cwd = parent.join("seat");
-    std::fs::create_dir_all(&cwd).unwrap(); let identity = resolve_cwd(&cwd).unwrap();
-    require_private_primary(&identity).unwrap();
-    std::fs::write(parent.join(".git"), b"not read").unwrap();
-    assert!(require_private_primary(&identity).is_err());
-    std::fs::remove_file(parent.join(".git")).unwrap();
-    std::fs::create_dir(parent.join(".codex")).unwrap();
-    std::fs::write(parent.join(".codex/config.toml"), b"not parsed or merged").unwrap();
-    assert!(require_private_primary(&identity).is_err());
-}
+
 #[test]
 fn semantic_reader_maps_only_busy_and_ready() {
     let read = |text: &str| adapter().read(&NativeRecord { scope: scope(1), kind: NativeRecordKind::Surface, bytes: text.as_bytes().to_vec() }).outcome;
@@ -478,7 +478,7 @@ fn semantic_reader_maps_only_busy_and_ready() {
 }
 
 #[test]
-fn native_fork_names_the_parent_id_from_a_new_private_primary() {
+fn native_fork_names_the_parent_id_in_the_canonical_project_cwd() {
     let sandbox = support::Sandbox::new();
     let image = sandbox.parent.join("vendor/lib/codex-native");
     write_executable(&image, b"controlled final native");
@@ -488,9 +488,9 @@ fn native_fork_names_the_parent_id_from_a_new_private_primary() {
     let command = PublicCommand::resolve("codex", bin.as_os_str()).unwrap();
     let project = sandbox.parent.join("project");
     let (a, parent, catalog, _) = codex_launch(&sandbox, &command, &project);
-    // The parent session was captured in the parent's own private primary.
+    // Parent and child retain the same framework-owned project identity.
     let source = ResumeBinding { provider: ProviderId::new(ID).unwrap(), native_session: NativeSessionId::new(SID).unwrap(), storage: SessionStorage::Local,
-        cwd: CwdIdentity { path: "/private/tmp/ta-0123/workspaces/worker".into(), identity: digest(b"parent cwd") }, native: parent.native.clone(),
+        cwd: parent.paths.cwd.clone(), native: parent.native.clone(),
         source: parent.identity.clone(), origin: CaptureOrigin::CurrentNativeSession, evidence_kind: parent.evidence_kind,
         evidence_sha256: digest(b"parent session"), backing: None };
     let mut r = parent.clone();

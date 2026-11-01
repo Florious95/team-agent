@@ -53,6 +53,25 @@ impl Drop for Sandbox {
 }
 
 #[test]
+fn start_human_output_is_compact_and_does_not_dump_duplicate_receipts() {
+    let receipt = json!({"leader_bind_ok":true,"readiness":{"ready":false},"diagnostic":"x".repeat(5000),"next_actions":["coordinator started"]});
+    let value = json!({"action":"start","status":"actions_completed","scope":{"team":"research"},
+        "steps":[{"ok":true,"receipt":receipt},{"ok":true,"receipt":receipt}]});
+    let text = intent_human(&value);
+    assert!(text.len() < 400, "{text}");
+    assert!(text.lines().count() <= 5);
+    assert_eq!(text.matches("Worker tools:").count(), 1);
+    assert!(text.contains("Leader: bound"));
+    assert!(!text.contains("coordinator"));
+    let failed = json!({"action":"start","status":"partial","leader_bind_ok":false,"scope":{"team":"research"},
+        "steps":[{"ok":false,"error":"owned startup failed"}],"recovery":"team-agent doctor --team research"});
+    let text = intent_human(&failed);
+    assert!(text.contains("binding pending"));
+    assert!(text.contains("owned startup failed"));
+    assert!(text.contains("Next: team-agent doctor --team research"));
+}
+
+#[test]
 fn native_receipt_reconciliation_does_not_turn_start_into_stop_or_allow_restart() {
     assert_eq!(
         seat_actions(

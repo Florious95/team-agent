@@ -132,8 +132,7 @@ fn claim_lease_no_incident_live_owner_refuses_without_confirm() {
     );
 }
 
-// RED — ALREADY-BOUND: caller pane == bound pane → status=AlreadyBound,
-// ok=true, owner_epoch unchanged (no advance, no rewrite). golden probe_claimed.py.
+// Re-claim republishes the current binding without advancing its ownership epoch.
 #[test]
 #[serial_test::serial(env)]
 fn claim_lease_no_incident_already_bound_when_caller_is_bound_pane() {
@@ -154,7 +153,7 @@ fn claim_lease_no_incident_already_bound_when_caller_is_bound_pane() {
     )
     .unwrap();
     assert!(r.ok);
-    assert_eq!(r.status, LeaseStatus::AlreadyBound);
+    assert_eq!(r.status, LeaseStatus::Claimed);
     assert_eq!(
         r.owner_epoch,
         Some(OwnerEpoch(1)),
@@ -255,12 +254,8 @@ fn claim_leader_already_bound_requires_same_delivery_endpoint_not_only_same_pane
     )
     .unwrap();
 
-    assert_ne!(
-        r.status,
-        LeaseStatus::AlreadyBound,
-        "already_bound must verify the same delivery endpoint is reachable; matching bare pane \
-             ids are not sufficient because different tmux socket roots can both have %5"
-    );
+    assert_eq!(r.status, LeaseStatus::Claimed);
+    assert_eq!(r.owner_epoch, Some(OwnerEpoch(2)), "a different socket is a new binding");
     assert_eq!(
         r.receiver
             .as_ref()
@@ -314,12 +309,8 @@ fn claim_leader_already_bound_normalizes_short_tmux_endpoint_to_full_path() {
     )
     .unwrap();
 
-    assert_ne!(
-        r.status,
-        LeaseStatus::AlreadyBound,
-        "claim already_bound must not treat a stored short socket name as equivalent to the \
-             caller's full $TMUX endpoint by basename; it must refresh/normalize the receiver"
-    );
+    assert_eq!(r.status, LeaseStatus::Claimed);
+    assert_eq!(r.owner_epoch, Some(OwnerEpoch(2)), "short endpoint names are not physical identity");
     assert_eq!(
             r.receiver.as_ref().and_then(|receiver| receiver.tmux_socket.as_deref()),
             Some(current_socket),

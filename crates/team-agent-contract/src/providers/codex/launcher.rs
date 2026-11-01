@@ -6,7 +6,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use crate::contract::{hooks::ReadBounds, plan::*, session::CwdIdentity, types::*};
+use crate::contract::{hooks::ReadBounds, plan::*, types::*};
 use crate::host::{command::*, process::{fingerprint_file, resolve_cwd}, HostError, HostErrorKind};
 use super::catalog::{probe_launcher, ProbeError, CATALOG_SOURCE, MAX_IMAGE};
 
@@ -65,20 +65,4 @@ pub fn probe_runtime<R: CommandRunner>(command: &PublicCommand, home: &Path, run
     }
     Ok(RuntimeInstallation { engine, command: command.clone(), home,
         native: NativeIdentity { harness: "codex".into(), ui: "tui".into(), executable_sha256: hash, ..launcher_native.clone() }, launcher_native })
-}
-/// Root calls this after resolving/owning the stable primary, before H3 effects.
-/// A Git ancestor would make Codex show its folder-trust screen and inherited
-/// `.codex/config.toml` layers would join the launch. Metadata only.
-pub fn require_private_primary(cwd: &CwdIdentity) -> Result<(), HostError> {
-    if resolve_cwd(&cwd.path)? != *cwd { return Err(HostError::new("Codex primary identity", HostErrorKind::Ownership)); }
-    for ancestor in cwd.path.ancestors() {
-        for path in [ancestor.join(".git"), ancestor.join(".codex/config.toml")] {
-            match std::fs::symlink_metadata(path) {
-                Ok(_) => return Err(HostError::new("Codex inherited project configuration", HostErrorKind::Ownership)),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
-                Err(error) => return Err(HostError::io("Codex primary ancestry metadata", error)),
-            }
-        }
-    }
-    Ok(())
 }

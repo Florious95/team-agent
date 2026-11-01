@@ -1,5 +1,12 @@
 use super::*;
 
+#[test]
+fn failed_seat_remediation_never_restarts_healthy_siblings() {
+    let action = restart_action(Path::new("/project path"), "X 运维", Some("worker-one"));
+    assert_eq!(action.argv, ["team-agent", "restart", "worker-one", "--workspace", "/project path", "--team", "X 运维", "--json"]);
+    assert!(!action.display().contains("worker-two"));
+}
+
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {

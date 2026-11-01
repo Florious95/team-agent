@@ -114,6 +114,11 @@ fn action(command: &str, workspace: &Path, team: &str) -> Action {
         argv,
     }
 }
+fn restart_action(workspace: &Path, team: &str, seat: Option<&str>) -> Action {
+    let mut action = action("restart", workspace, team);
+    if let Some(seat) = seat { action.argv.insert(2, seat.into()); }
+    action
+}
 fn address(pane: &str, socket: &str) -> String {
     format!("{pane}@{socket}")
 }
@@ -338,7 +343,7 @@ fn host_images(
     team: &str,
     agents: &serde_json::Map<String, Value>,
     state: &Value,
-) -> (&'static str, String) {
+) -> (&'static str, String, Option<String>) {
     let evidence = helpers(workspace, team);
     let expected = reference_executable().and_then(|p| {
         team_agent_contract::host::process::fingerprint_file(&p, 256 * 1024 * 1024, BUDGET)
@@ -361,6 +366,7 @@ fn host_images(
                     return (
                         "FAIL",
                         format!("binary_skew: {agent} helper differs from invoked executable"),
+                        Some(agent.clone()),
                     );
                 }
                 checked += 1;
@@ -373,9 +379,10 @@ fn host_images(
         (
             "PASS",
             format!("tmux responsive; {checked} helper images verified"),
+            None,
         )
     } else {
-        ("WARN", short(&unknown.join("; ")))
+        ("WARN", short(&unknown.join("; ")), None)
     }
 }
 
@@ -703,18 +710,19 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
         links.push(Link::new(2, "FAIL", short(error)));
         fix = Some(action("restart", workspace, team));
     } else {
-        let (status, message) = match &table {
+        let (status, message, failed_seat) = match &table {
             Ok(_) => host_images(workspace, team, agents, &selected.state),
-            Err(error) => ("WARN", error.clone()),
+            Err(error) => ("WARN", error.clone(), None),
         };
         links.push(Link::new(2, status, format!("{target_socket}: {message}")));
         if status == "FAIL" {
-            fix = Some(action("restart", workspace, team));
+            fix = Some(restart_action(workspace, team, failed_seat.as_deref()));
         }
     }
     let mut live = 0;
     let total = agents.values().filter(|v| running(v)).count();
     let mut faults = Vec::new();
+    let mut failed_seats = std::collections::BTreeSet::new();
     let mut unknown = Vec::new();
     let helper_records = helpers(workspace, team);
     for (agent, state) in agents.iter().filter(|(_, v)| running(v)) {
@@ -725,6 +733,7 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
                 .and_then(|all| all.iter().find(|p| p.pane_id.as_str() == e.pane_id))
         });
         let Some(pane) = pane else {
+            failed_seats.insert(agent.clone());
             faults.push(format!("{agent}: pane missing"));
             continue;
         };
@@ -733,6 +742,7 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
         if (expected != 0 && expected != u64::from(pid))
             || team_agent_contract::host::process::process_birth_identity(pid).is_err()
         {
+            failed_seats.insert(agent.clone());
             faults.push(format!("{agent}: ghost/PID identity mismatch"));
             continue;
         }
@@ -741,6 +751,7 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
                 .get(&pid)
                 .is_some_and(|p| p.status.starts_with(['T', 'Z']))
             {
+                failed_seats.insert(agent.clone());
                 faults.push(format!("{agent}: process stopped/zombie"));
                 continue;
             }
@@ -748,6 +759,7 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
                 let birth =
                     team_agent_contract::host::process::process_birth_identity(*helper).ok();
                 if !recorded_birth.is_empty() && birth.as_ref() != Some(recorded_birth) {
+                    failed_seats.insert(agent.clone());
                     faults.push(format!("{agent}: MCP birth identity mismatch"));
                     continue;
                 }
@@ -766,6 +778,7 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
                     unknown.push(format!("{agent}: MCP birth unverified"));
                 }
                 if !table.contains_key(helper) || !descendant(table, *helper, pid) {
+                    failed_seats.insert(agent.clone());
                     faults.push(format!("{agent}: recorded MCP process missing/reused"));
                     continue;
                 }
@@ -773,6 +786,7 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
                     .get(helper)
                     .is_some_and(|p| p.status.starts_with(['T', 'Z']))
                 {
+                    failed_seats.insert(agent.clone());
                     faults.push(format!("{agent}: MCP process stopped/zombie"));
                     continue;
                 }
@@ -790,6 +804,7 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
                         crate::provider::wire::parse_provider(field(state, "provider"))
                     {
                         if !crate::leader::provider_matches(observed, expected) {
+                            failed_seats.insert(agent.clone());
                             faults.push(format!("{agent}: provider process mismatch"));
                             continue;
                         }
@@ -827,7 +842,7 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
     };
     links.push(Link::new(3, seat_status, seat_message));
     if seat_status == "FAIL" && fix.is_none() {
-        fix = Some(action("restart", workspace, team));
+        fix = Some(restart_action(workspace, team, failed_seats.first().map(String::as_str)));
     }
 
     // L4 depends only on scope, not host/seat/dispatch health.

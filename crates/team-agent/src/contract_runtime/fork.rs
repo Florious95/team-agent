@@ -66,11 +66,13 @@ fn fork_locked(
     let workspace = selected.run_workspace.as_path();
     let team = selected.team_key.as_str();
     // F0 is read-only: nothing below writes until the role file.
-    let parent = Backend::open_readonly(workspace, team).map_err(error)?
-        .store.seat(source_id).map_err(error)?
+    let backend = Backend::open_readonly(workspace, team).map_err(error)?;
+    let parent = backend.store.seat(source_id).map_err(error)?
         .ok_or_else(|| error("contract source seat is not in its native store"))?;
     let provider = parent.provider.as_str().to_owned();
-    let descriptor = registry::provider(&provider).map_err(error)?.descriptor();
+    let native_provider = registry::provider(&provider).map_err(error)?;
+    super::workspace::bind_cwd(&backend.binding, native_provider, source_id, Some(&parent.cwd)).map_err(error)?;
+    let descriptor = native_provider.descriptor();
     if target == source_id.as_str() {
         // The same seat can only branch in place, and only when admitted.
         descriptor.fork.in_window.require("in-window branch").map_err(|refusal| refused(&provider, refusal))?;
@@ -179,10 +181,7 @@ fn native_fork(
     let hooks = adapter.hooks();
     let mut launch = backend::request(&backend.binding, role, identity, &discovered)?;
     launch.operation = Operation::NativeNewSeat;
-    if !descriptor.workspace.shared_cwd {
-        launch.paths.cwd = super::workspace::prepare(&backend.binding, &role.id)?;
-    }
-    backend::require_private_primary(selected, &launch.paths.cwd)?;
+    launch.paths.cwd = super::workspace::bind_cwd(&backend.binding, selected, &role.id, None)?;
     backend::preassign_session(&mut launch, &discovered)?;
     let operation = OperationId::new(format!("fork-{}", launch.identity.instance.as_str()))?;
     let request = ForkRequest {

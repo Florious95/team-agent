@@ -126,8 +126,8 @@ fn d3_bound_pane_receiver_first_reclaim_from_receiver_pane_is_already_bound() {
         r.ok,
         "a re-claim from the bound RECEIVER pane (%9) is idempotent ok=true; got {r:?}"
     );
-    assert_eq!(r.status, LeaseStatus::AlreadyBound,
-            "golden :624 receiver-first: bound_pane=receiver(%9)==caller(%9) -> already_bound, NOT force_confirm");
+    assert_eq!(r.status, LeaseStatus::Claimed,
+            "receiver-first re-claim refreshes successfully, without force-confirm refusal");
 }
 
 // D4 [WARN] — precheck_epoch uses Python truthiness: owner_epoch=0 is FALSY -> falls through to

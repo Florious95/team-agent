@@ -132,7 +132,7 @@ fn provider(row: &Value) -> &str {
 }
 fn topology(state: &Value) -> Value {
     let mut owner = serde_json::Map::new();
-    for key in ["pane_id", "provider", "owner_epoch", "machine_fingerprint"] {
+    for key in ["pane_id", "provider", "owner_epoch", "machine_fingerprint", "leader_session_uuid", "tmux_socket", "session_name"] {
         owner.insert(
             key.into(),
             state
@@ -1131,6 +1131,53 @@ fn restart_args(plan: &Plan) -> RestartArgs {
         json: true,
         detail: true,
     }
+}
+
+// Accept only transport recovery attributable to this completed native operation.
+// Owner changes, replacement generations and unrelated endpoint edits still refuse.
+#[cfg(not(unix))]
+pub(super) fn advance_topology(_plan: &mut Plan, _step: &Step, _receipt: &Value) -> Result<(), CliError> { Ok(()) }
+
+#[cfg(unix)]
+pub(super) fn advance_topology(plan: &mut Plan, step: &Step, receipt: &Value) -> Result<(), CliError> {
+    let Step::StartAgent(args) = step else { return Ok(()); };
+    if receipt.get("runtime").and_then(Value::as_str) != Some("contract") { return Ok(()); }
+    let Some(previous) = plan.topology.as_ref() else { return Ok(()); };
+    let selected = resolve_active_team_readonly(&plan.scope.workspace, plan.scope.team.as_deref(), SelectorMode::RuntimeOnly)?;
+    if Some(selected.team_key.as_str()) != plan.scope.team.as_deref() || selected.run_workspace != plan.scope.workspace {
+        return Err(refusal("canonical scope changed after startup"));
+    }
+    let next = topology(&selected.state);
+    if next == *previous { return Ok(()); }
+    if next["owner"] != previous["owner"] || next["owner_epoch"] != previous["owner_epoch"] {
+        return Err(refusal("owner changed during batch startup; inspect before continuing"));
+    }
+    let backend = checked(crate::contract_runtime::backend::Backend::open_readonly(&plan.scope.workspace, &selected.team_key))?;
+    let id = checked(team_agent_contract::contract::types::SeatId::new(&args.agent))?;
+    let record = checked(backend.store.creation_receipt(&id, None))?
+        .ok_or_else(|| refusal("missing native startup receipt"))?;
+    let current = checked(backend.store.seat(&id))?.ok_or_else(|| refusal("started native seat disappeared"))?;
+    if record.outcome != team_agent_contract::orchestration::store::Outcome::Committed
+        || receipt.get("operation").and_then(Value::as_str) != Some(record.id.as_str())
+        || current.identity != record.target.identity
+        || receipt.get("generation") != Some(&json!(current.identity.generation.0))
+    { return Err(refusal("native startup receipt changed before batch continuation")); }
+    let target = current.physical.as_ref().filter(|target| target.shared_endpoint)
+        .ok_or_else(|| refusal("startup did not own shared topology recovery"))?;
+    let transport = checked(crate::lifecycle::restart::lifecycle_worker_tmux_backend_selection_for_state(&selected.run_workspace, &selected.state))?.backend;
+    let endpoint = transport.tmux_endpoint().ok_or_else(|| refusal("missing recovered endpoint"))?;
+    let endpoint = if Path::new(&endpoint).is_absolute() { PathBuf::from(endpoint) }
+        else { crate::tmux_backend::socket_path_for_name(&endpoint).ok_or_else(|| refusal("invalid recovered endpoint"))? };
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let metadata = std::fs::metadata(&endpoint)?;
+    if endpoint.canonicalize()? != PathBuf::from(&target.endpoint)
+        || !metadata.file_type().is_socket()
+        || (metadata.dev(), metadata.ino()) != (target.socket_device, target.socket_inode)
+    {
+        return Err(refusal("recovered topology does not match the completed native startup"));
+    }
+    plan.topology = Some(next);
+    Ok(())
 }
 
 pub(super) fn recheck(plan: &Plan, step: &Step, after_stop: bool) -> Result<(), CliError> {

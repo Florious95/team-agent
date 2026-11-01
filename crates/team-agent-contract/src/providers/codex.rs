@@ -10,10 +10,9 @@ pub use descriptor::{CODEX_DESCRIPTOR, ID, UNVERIFIED};
 use std::{collections::{BTreeMap, BTreeSet}, ffi::OsString, path::{Path, PathBuf}};
 use crate::contract::{descriptor::*, fork::*, hooks::*, plan::*, types::*};
 
-const PROMPT_FILE: &str = "team-agent-prompt.txt";
 // Never derive Debug: argv/env/prompt values are not diagnostic payloads.
 pub struct McpStdio { pub executable: PathBuf, pub arguments: Vec<String>, pub environment: BTreeMap<String, String> }
-pub struct CodexAdapter { mcp: McpStdio, runtime: Option<launcher::RuntimeInstallation>, project: Option<PathBuf> }
+pub struct CodexAdapter { mcp: McpStdio, runtime: Option<launcher::RuntimeInstallation> }
 /// JSON basic string escaping is a TOML basic-string subset for these bounded
 /// strings. Reject controls whose JSON escapes are not TOML escapes.
 fn toml_string(value: &str) -> Result<String, ContractError> {
@@ -25,10 +24,9 @@ impl CodexAdapter {
         require_absolute(&mcp.executable, "Codex MCP executable")?;
         if mcp.executable.to_str().is_none() || mcp.arguments.iter().any(|arg| arg.contains('\0')) { return Err(ContractError::Invalid("Codex MCP arguments")); }
         EnvironmentDelta { remove: BTreeSet::new(), set: mcp.environment.iter().map(|(key, value)| (key.clone(), value.into())).collect() }.validate()?;
-        Ok(Self { mcp, runtime: None, project: None })
+        Ok(Self { mcp, runtime: None })
     }
     pub fn with_runtime(mut self, runtime: launcher::RuntimeInstallation) -> Self { self.runtime = Some(runtime); self }
-    pub fn with_project(mut self, project: PathBuf) -> Result<Self, ContractError> { require_absolute(&project, "Codex project directory")?; self.project = Some(project); Ok(self) }
     pub fn hooks(&self) -> ProviderHooks<'_> { ProviderHooks { catalog: HookBinding::Bound(self), plan: HookBinding::Bound(self), materialize: HookBinding::Bound(self), session: HookBinding::Bound(self), semantic: HookBinding::Bound(self), interaction: HookBinding::Bound(self), fork: HookBinding::Bound(self) } }
     /// The owned stdio server as `-c` overrides for this invocation only. The
     /// owned tools never prompt; every other approval follows the bypass intent.
@@ -67,16 +65,14 @@ impl PlanHook for CodexAdapter {
     fn plan(&self, resolved: &ResolvedLaunch) -> Result<LaunchPlan, ContractError> {
         let r = resolved.request();
         let runtime = self.runtime.as_ref().ok_or(ContractError::Unverified { field: "Codex runtime installation", reason: UNVERIFIED })?;
-        let project = self.project.as_ref().ok_or(ContractError::Invalid("Codex actual project"))?;
         if resolved.provider().as_str() != ID || r.native != runtime.native || r.paths.executable != runtime.engine
             || r.paths.launcher != runtime.launcher()
             || !interaction::PROFILES[0].matches_native(&r.native) || r.channel != Channel::Tmux || r.mode != LaunchMode::FullWorker
             || r.auth != AuthMode::NativeSubscription || self.mcp.executable != r.paths.candidate
             || !matches!(r.operation, Operation::Fresh | Operation::Resume | Operation::NativeNewSeat)
         { return Err(ContractError::Mismatch("Codex native launch identity")); }
-        if r.paths.cwd.path == *project { return Err(ContractError::Invalid("Codex private primary required")); }
         let prompt = r.prompt.as_ref().ok_or(ContractError::Invalid("Codex worker prompt"))?;
-        let prompt = OwnedResourceRequest { owner: r.identity.clone(), path: OwnedPath::new(r.paths.cwd.path.clone(), PROMPT_FILE.into())?, kind: ResourceKind::Prompt, contents: prompt.as_bytes().to_vec() };
+        let prompt = OwnedResourceRequest { owner: r.identity.clone(), path: OwnedPath::new(r.paths.runtime_root.clone(), format!("codex-prompt-{}.txt", r.identity.instance.as_str()).into())?, kind: ResourceKind::Prompt, contents: prompt.as_bytes().to_vec() };
         // `codex fork <uuid>` resolves the parent thread by ID from any cwd and
         // starts a new thread (`forked_from_id`) in this seat's own cwd.
         let session = match resolved.expected_session() {
@@ -85,21 +81,17 @@ impl PlanHook for CodexAdapter {
             ExpectedSession::CaptureAfterNativeFork { parent } if session_uuid(parent.as_str()) => Some(("fork", parent.as_str())),
             _ => return Err(ContractError::Invalid("Codex fresh/current, exact resume or native fork only")),
         };
-        // The update modal is disabled for this invocation; the private non-Git
-        // cwd has no trust screen. --no-daemon keeps the engine in the owned pane.
+        // The update modal is disabled for this invocation. Native project trust
+        // remains native policy; --no-daemon keeps the engine in the owned pane.
         let mut arguments: Vec<OsString> = session.map(|(subcommand, _)| OsString::from(subcommand)).into_iter().collect();
         arguments.extend(["--no-alt-screen".into(), "--no-daemon".into(), "-c".into(), "check_for_update_on_startup=false".into()]);
         let model = arguments.len();
-        arguments.extend(["--model".into(), resolved.model().ok_or(ContractError::Invalid("Codex exact model"))?.into(),
-            "--add-dir".into(), project.as_os_str().to_owned(), "-c".into(),
-            format!("developer_instructions={}", toml_string(&format!("The actual task project is {}. Use explicit absolute paths into that project. The process working directory is private Team transport state, not the task repository.", project.display()))?).into()]);
+        arguments.extend(["--model".into(), resolved.model().ok_or(ContractError::Invalid("Codex exact model"))?.into()]);
         let start = arguments.len();
         arguments.extend(self.mcp_overrides(&r.identity)?);
         let mcp = CarrierUse::Specified(CarrierRef::Arguments((start..arguments.len()).collect()));
-        // Without bypass the untrusted private cwd can resolve a read-only sandbox,
-        // where Codex rejects `--add-dir` at startup ("Error adding directories",
-        // exit 1). workspace-write is the native mode that admits the project root;
-        // approvals stay on the user's native policy.
+        // The native sandbox applies to the actual project CWD; approvals retain
+        // the existing user policy when bypass is not requested.
         let bypass = if r.bypass { let index = arguments.len(); arguments.push("--dangerously-bypass-approvals-and-sandbox".into()); CarrierUse::Specified(CarrierRef::Arguments(vec![index])) }
             else { arguments.extend(["--sandbox".into(), "workspace-write".into()]); CarrierUse::NotRequested };
         let effort = match resolved.effort() {
@@ -121,7 +113,7 @@ impl PlanHook for CodexAdapter {
 impl MaterializeHook for CodexAdapter {
     fn materialize(&self, requests: &[OwnedResourceRequest], io: &mut dyn OwnedIo) -> Result<MaterializeReceipt, PartialFailure> {
         let [request] = requests else { return Err(failure(ContractError::Invalid("exact Codex owned prompt required"), vec![])); };
-        if request.kind != ResourceKind::Prompt || request.path.relative() != Path::new(PROMPT_FILE)
+        if request.kind != ResourceKind::Prompt || request.path.relative() != Path::new(&format!("codex-prompt-{}.txt", request.owner.instance.as_str()))
             || !std::str::from_utf8(&request.contents).is_ok_and(nonblank)
         { return Err(failure(ContractError::Invalid("exact Codex owned prompt required"), vec![])); }
         let receipt = io.create_exclusive(request).map_err(|error| failure(error.error, error.receipt.resources))?;

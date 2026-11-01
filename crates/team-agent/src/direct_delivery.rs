@@ -89,10 +89,13 @@ pub(crate) fn directory_with_reason(workspace: &Path, team: Option<&str>) -> Res
     // Explicit selectors and genuinely multi-team workspaces still fail closed.
     let requested = team.or_else(|| field(&snapshot, "active_team_key")
         .filter(|active| teams.iter().any(|(key, value)| matches_selector(active, key, value))));
-    let matches: Vec<_> = teams
-        .iter()
-        .filter(|(key, value)| requested.map_or(teams.len() == 1, |requested| matches_selector(requested, key, value)))
-        .collect();
+    // Canonical keys are authoritative, even when a sibling reuses one as an alias.
+    let matches: Vec<_> = match requested.and_then(|key| teams.get_key_value(key)) {
+        Some(exact) => vec![exact],
+        None => teams.iter()
+            .filter(|(key, value)| requested.map_or(teams.len() == 1, |requested| matches_selector(requested, key, value)))
+            .collect(),
+    };
     if matches.len() != 1 {
         let code = if matches.is_empty() && requested.is_some() { "team_key_not_found" } else { "name_ambiguous" };
         let mut error = AddressError::new(code, format!(
@@ -723,6 +726,25 @@ mod tests {
         assert!(outcomes[2].as_ref().unwrap_err().contains("worker_collision"));
         assert!(outcomes[3].as_ref().unwrap_err().contains("worker_collision"));
         assert!(outcomes[4].is_ok());
+    }
+
+    #[test]
+    fn exact_team_key_wins_over_sibling_aliases_for_explicit_and_default_delivery() {
+        let root = std::env::temp_dir().join(format!("ta-team-key-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(root.join(".team/runtime")).unwrap();
+        let state = json!({"active_team_key":"regressions-20261101", "teams": {
+            "regressions-20261101": {"session_name":"actual-session", "agents":{}},
+            "current": {"session_name":"team-regressions-20261101", "team_name":"regressions-20261101", "agents":{}}
+        }});
+        std::fs::write(root.join(".team/runtime/state.json"), serde_json::to_vec(&state).unwrap()).unwrap();
+        for requested in [Some("regressions-20261101"), None, Some("actual-session")] {
+            let selected = directory_with_reason(&root, requested).unwrap();
+            assert_eq!(selected.team.as_deref(), Some("regressions-20261101"));
+            assert_eq!(selected.state["session_name"], "actual-session");
+        }
+        assert_eq!(directory_with_reason(&root, Some("current")).unwrap().team.as_deref(), Some("current"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

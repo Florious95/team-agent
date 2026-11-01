@@ -565,7 +565,9 @@ fn resolve_runtime_team_scope_loaded(
         // selector resolution validates the active team against the alive/terminal
         // view, while the lock-held merge cannot depend on that mutable view. A
         // change to either CURRENT_TEAM_ALIAS mapping must evaluate the other.
-        let canonical_request = if team.eq_ignore_ascii_case(CURRENT_TEAM_ALIAS) {
+        let exact_key = state.get("teams").and_then(Value::as_object)
+            .is_some_and(|teams| teams.contains_key(team));
+        let canonical_request = if !exact_key && team.eq_ignore_ascii_case(CURRENT_TEAM_ALIAS) {
             let teams = state.get("teams").and_then(Value::as_object);
             state
                 .get("active_team_key")
@@ -1449,6 +1451,17 @@ mod tests {
         assert!(empty
             .to_string()
             .starts_with("multiple teams found in this workspace"));
+    }
+
+    #[test]
+    fn literal_current_key_wins_over_the_active_team_alias() {
+        let ws = temp_ws_with_state(&json!({"active_team_key":"alpha", "teams": {
+            "current":{"status":"alive", "session_name":"literal-current"},
+            "alpha":{"status":"alive", "session_name":"team-current"}
+        }}));
+        let selected = resolve_runtime_team_scope(&ws, Some("current")).unwrap();
+        assert_eq!(selected.canonical_team_key, "current");
+        assert_eq!(selected.state["session_name"], "literal-current");
     }
 
     #[test]

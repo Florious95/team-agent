@@ -515,36 +515,6 @@ pub(super) fn request(
     })
 }
 
-fn preflight_request(
-    binding: &Binding,
-    role: &RoleConfig,
-    identity: InstanceIdentity,
-    discovered: &Discovery,
-) -> Result<LaunchRequest, BackendError> {
-    let mut request = request(binding, role, identity, discovered)?;
-    if matches!(registry::provider(role.provider.as_str())?, registry::NativeProvider::Codex) {
-        // Pure H2 only: this is a proposed private path, not a filesystem receipt.
-        request.paths.cwd = team_agent_contract::contract::session::CwdIdentity {
-            path: binding.transport_root.join("workspaces").join(role.id.as_str()),
-            identity: digest(b"effect-free-planned-private-cwd"),
-        };
-    }
-    Ok(request)
-}
-
-/// Providers whose native config search would otherwise inherit a Git or
-/// project configuration ancestor. Metadata only; no body is read.
-pub(super) fn require_private_primary(
-    selected: registry::NativeProvider,
-    cwd: &team_agent_contract::contract::session::CwdIdentity,
-) -> Result<(), BackendError> {
-    match selected {
-        registry::NativeProvider::Codex => team_agent_contract::providers::codex::launcher::require_private_primary(cwd)?,
-        registry::NativeProvider::GrokBuild | registry::NativeProvider::Kiro | registry::NativeProvider::Cursor | registry::NativeProvider::Pi | registry::NativeProvider::Claude => {}
-    }
-    Ok(())
-}
-
 /// Team-wide native discovery/admission before the shared launcher creates any
 /// seats (including legacy peers). Bounded read-only native commands run; no
 /// runtime store, worker config, private socket, or worker process is created.
@@ -584,7 +554,7 @@ pub fn preflight(team: &super::config::TeamConfig) -> Result<(), BackendError> {
         };
         let adapter = launch_adapter(&binding, &identity, &role.provider, discovered)?;
         let hooks = adapter.hooks();
-        let request = preflight_request(&binding, role, identity, discovered)?;
+        let request = request(&binding, role, identity, discovered)?;
         let resolved = resolve_launch_preflight(
             selected.descriptor(),
             &hooks,
@@ -1004,7 +974,7 @@ pub fn start(
     };
     let probe_adapter = launch_adapter(&provisional, &provisional_identity, &role.provider, &discovered)?;
     let probe_hooks = probe_adapter.hooks();
-    let preflight = preflight_request(&provisional, role, provisional_identity, &discovered)?;
+    let preflight = request(&provisional, role, provisional_identity, &discovered)?;
     let preflight = resolve_launch_preflight(
         descriptor,
         &probe_hooks,
@@ -1033,10 +1003,7 @@ pub fn start(
     let adapter = launch_adapter(&backend.binding, &identity, &role.provider, &discovered)?;
     let hooks = adapter.hooks();
     let mut request = request(&backend.binding, role, identity, &discovered)?;
-    if !descriptor.workspace.shared_cwd {
-        request.paths.cwd = super::workspace::prepare(&backend.binding, &role.id)?;
-    }
-    require_private_primary(selected, &request.paths.cwd)?;
+    request.paths.cwd = super::workspace::bind_cwd(&backend.binding, selected, &role.id, None)?;
     preassign_session(&mut request, &discovered)?;
     let resolved = resolve_launch(
         descriptor,
@@ -1202,7 +1169,8 @@ pub fn prepare_resume(
         registry::NativeRuntime::Claude(runtime) => Some(runtime.home()), _ => None,
     }))?;
     let mut request = request(&backend.binding, &role, identity, &discovered)?;
-    request.paths.cwd = parent.cwd.clone();
+    let selected = registry::provider(role.provider.as_str())?;
+    request.paths.cwd = super::workspace::bind_cwd(&backend.binding, selected, &role.id, Some(&parent.cwd))?;
     if let Some(source) = source {
         request.operation = Operation::Resume;
         request.resume = Some(ResumeRequest { binding: source, expected_source: parent.identity.clone() });
@@ -1211,8 +1179,6 @@ pub fn prepare_resume(
         // Cursor's native allocation command during this read-only preflight.
         preassign_session(&mut request, &discovered)?;
     }
-    let selected = registry::provider(role.provider.as_str())?;
-    require_private_primary(selected, &request.paths.cwd)?;
     let resolved = resolve_launch(selected.descriptor(), &hooks, &request, Some(&discovered.catalog))?;
     validate_launch_plan(selected.descriptor(), &resolved, &adapter.plan(&resolved)?)?;
     Ok(PreparedResume { binding: backend.binding, role, discovered, request,

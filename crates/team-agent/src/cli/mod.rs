@@ -4993,6 +4993,16 @@ pub mod lifecycle_port {
         let (_detail, bound, reason) = crate::lifecycle::restart_leader_public_bind(workspace, team, &json!({}));
         value["leader_bind_ok"] = json!(bound);
         if let Some(reason) = reason { value["leader_bind_reason"] = json!(reason); }
+        else if let Some(object) = value.as_object_mut() { object.remove("leader_bind_reason"); }
+        if value.get("leader_receiver_attached").is_some() {
+            for key in ["leader_receiver_attached", "attached_receiver", "all_attached_receiver"] {
+                if value.get(key).is_some() { value[key] = json!(bound); }
+            }
+            if let Some(readiness) = value.get_mut("readiness").and_then(Value::as_object_mut) {
+                readiness.insert("leader_receiver_attached".into(), json!(bound));
+            }
+            value["summary"] = json!(if bound { "Team started; leader bound" } else { "Team started; leader binding pending" });
+        }
         if !bound { append_restart_binding_guidance(value, workspace, team); }
     }
 
@@ -6716,7 +6726,9 @@ pub mod leader_port {
             .get("topology_convergence")
             .and_then(|topology| topology.get("status"))
             .cloned();
-        if value.get("reason").is_none() {
+        // A live worker endpoint need not move for the leader binding to be refreshed.
+        // Keep topology diagnostics in --detail, not as a false claim failure.
+        if value.get("ok").and_then(Value::as_bool) != Some(true) && value.get("reason").is_none() {
             if let Some(status) = topology_status {
                 if status.as_str() != Some("converged") {
                     value["reason"] = status;

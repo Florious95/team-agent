@@ -1,6 +1,6 @@
 name: Build macOS arm64 candidate
 
-# Manual candidate build only. This workflow deliberately has no push, pull_request,
+# Manual candidate build and optional scoped verification only. This workflow deliberately has no push, pull_request,
 # release, tag, npm, or publish trigger.
 on:
   workflow_dispatch:
@@ -13,6 +13,11 @@ on:
         description: "Exact 40-character tree SHA expected at source_sha"
         required: true
         type: string
+      run_scoped_tests:
+        description: "Run nonempty scoped Rust suites and preserve their native exit receipts"
+        required: false
+        type: boolean
+        default: false
       incremental_base_sha:
         description: "Optional exact baseline commit to compile first in the same target directory"
         required: false
@@ -176,6 +181,64 @@ jobs:
           fi
           build_source candidate
           printf 'CANDIDATE_TARGET_DIR=%s\n' "$CARGO_TARGET_DIR" >> "$GITHUB_ENV"
+
+      - name: Run scoped Rust verification
+        if: inputs.run_scoped_tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          export RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN"
+          export CARGO_TARGET_DIR="$CANDIDATE_TARGET_DIR"
+          export RUST_BACKTRACE=1
+          receipts="${RUNNER_TEMP}/candidate-build-receipts/tests"
+          mkdir -p "$receipts"
+          printf 'source_sha=%s\nsource_tree=%s\nrustc=%s\ntarget=%s\n' \
+            "$(git rev-parse HEAD)" "$(git rev-parse 'HEAD^{tree}')" "$(rustc --version)" "$TARGET" > "$receipts/source.txt"
+          if ! command -v tmux >/dev/null; then brew install tmux; fi
+          tmux -V > "$receipts/tmux-version.txt"
+          cases=(
+            'team-agent|--lib|leader::'
+            'team-agent|--lib|state::'
+            'team-agent|--lib|station::projection::'
+            'team-agent|--lib|direct_delivery::'
+            'team-agent|--lib|cli::intent::'
+            'team-agent|--lib|cli::doctor_probe::'
+            'team-agent|--lib|cli::tests::leader_watch::'
+            'team-agent|--lib|cli::lifecycle_port::'
+            'team-agent|--lib|cli::adapters::'
+            'team-agent|--lib|lifecycle::launch::'
+            'team-agent|--lib|lifecycle::restart::'
+            'team-agent|--lib|contract_runtime::'
+            'team-agent|--test|messaging_scope_regression'
+            'team-agent-contract|--test|codex_contract'
+          )
+          failed=0
+          index=0
+          for item in "${cases[@]}"; do
+            IFS='|' read -r package kind selector <<< "$item"
+            label="$(printf '%02d' "$index")"
+            printf '%s\n' "$item" > "$receipts/$label.command"
+            set +e
+            cargo test --locked --target "$TARGET" -p "$package" "$kind" "$selector" -- --test-threads=1 > "$receipts/$label.log" 2>&1
+            code=$?
+            set -e
+            printf '%s\n' "$code" > "$receipts/$label.exit"
+            printf '%s\t%s\t%s\n' "$label" "$item" "$code" >> "$receipts/summary.tsv"
+            grep '^test result:' "$receipts/$label.log" || true
+            if [[ "$code" != 0 ]] || ! grep -Eq '^test result: ok\. [1-9][0-9]* passed;' "$receipts/$label.log"; then
+              failed=1
+              tail -n 100 "$receipts/$label.log"
+            fi
+            # No test verdict means compilation/infrastructure failed. Do not
+            # repeatedly compile the same broken source or mark unrun suites green.
+            if ! grep -q '^test result:' "$receipts/$label.log"; then break; fi
+            index=$((index + 1))
+          done
+          printf '%s\n' "$failed" > "$receipts/scoped-tests.exit"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$SOURCE_TREE"
+          git diff --exit-code
+          exit "$failed"
 
       - name: Verify and package candidate
         shell: bash

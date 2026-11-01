@@ -312,6 +312,27 @@ fn leader_env_preserves_native_path_for_managed_shell_wrapper() {
     assert!(!leader_env_for_identity(Provider::Pi, &identity).contains_key("PATH"));
 }
 
+#[test]
+#[serial_test::serial(env)]
+fn declared_workspace_team_names_the_leader_without_inheriting_a_phantom_uuid() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _env = EnvGuard::apply(&[("TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE", None)]);
+    let ws = p2_temp_ws("declared-team");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::write(ws.join("TEAM.md"), "---\nname: research\n---\nTeam.\n").unwrap();
+    let stale = serde_json::json!({"active_team_key":"current", "team_owner":{"leader_session_uuid":"PHANTOM"}, "teams": {
+        "current":{"team_owner":{"leader_session_uuid":"PHANTOM"}},
+        "explicit":{"team_owner":{"leader_session_uuid":"EXPLICIT"}}
+    }});
+    let fresh = leader_identity_context(&ws, None, Some(&stale)).unwrap();
+    assert_eq!(fresh.team_id.as_str(), "research");
+    assert_ne!(fresh.leader_session_uuid.as_str(), "PHANTOM");
+    let explicit = leader_identity_context(&ws, Some("explicit"), Some(&stale)).unwrap();
+    assert_eq!(explicit.team_id.as_str(), "explicit");
+    assert_eq!(explicit.leader_session_uuid.as_str(), "EXPLICIT");
+    std::fs::remove_dir_all(ws).unwrap();
+}
+
 // ═══════════════ P2 FIX-LOOP RED (复绿即对抗 cross-model findings) ═══════════════
 // Lock CORRECT Python v0.2.11 leader-identity behavior the contracts missed.
 // Golden re-probed via /tmp/probe_p2_leader.py vs team-agent-public @ 439bef8

@@ -269,7 +269,6 @@ impl NativeAdapter {
                 }))
             }
             Self::Codex(adapter) => {
-                let adapter = adapter.with_project(project)?;
                 Ok(Self::Codex(match runtime {
                     Some(NativeRuntime::Codex(runtime)) => adapter.with_runtime(runtime),
                     Some(_) => return Err(ContractError::Mismatch("native runtime provider")),

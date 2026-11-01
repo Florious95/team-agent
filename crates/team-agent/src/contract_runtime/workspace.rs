@@ -1,6 +1,6 @@
-//! Stable per-seat primary cwd outside project Git ancestry. Provider-specific
-//! project access remains explicit; private MCP files never overwrite a shared
-//! project or another seat's config, and old cwd incarnations are not migrated.
+//! Framework-owned process CWD policy. Pi, Claude, Codex and Grok always use
+//! the one canonical workspace identity, independently of private config paths.
+//! Cursor retains private isolation; Kiro's existing policy is unchanged.
 use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::Path;
@@ -10,6 +10,33 @@ use team_agent_contract::contract::{session::CwdIdentity, types::SeatId};
 use team_agent_contract::host::process::resolve_cwd;
 
 use super::backend::{root_for, BackendError, Binding};
+use super::registry::NativeProvider;
+
+/// Shared by fresh, resume and fork. Provider adapters cannot choose a different
+/// process directory; the physical executor checks their plan against this value.
+pub(super) fn bind_cwd(
+    binding: &Binding,
+    provider: NativeProvider,
+    seat: &SeatId,
+    previous: Option<&CwdIdentity>,
+) -> Result<CwdIdentity, BackendError> {
+    match provider {
+        NativeProvider::Pi | NativeProvider::Claude | NativeProvider::Codex | NativeProvider::GrokBuild => {
+            if previous.is_some_and(|cwd| cwd != &binding.workspace) {
+                return Err(BackendError::Migration(
+                    "legacy private-CWD session cannot be relocated; stop the seat and use reset-agent --discard-session before starting in the project workspace".into(),
+                ));
+            }
+            Ok(binding.workspace.clone())
+        }
+        // Explicit release boundary: preserve these providers' existing config isolation.
+        NativeProvider::Kiro => Ok(previous.cloned().unwrap_or_else(|| binding.workspace.clone())),
+        NativeProvider::Cursor => match previous {
+            Some(cwd) => Ok(cwd.clone()),
+            None => prepare(binding, seat),
+        },
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -149,6 +176,23 @@ mod tests {
             let _ = std::fs::remove_dir_all(&self.path);
             let _ = std::fs::remove_dir_all(&self.binding.transport_root);
         }
+    }
+
+    #[test]
+    fn project_providers_share_one_cwd_binding_for_fresh_resume_and_fork() {
+        let f = Fixture::new();
+        std::fs::create_dir(f.path.join(".git")).unwrap();
+        let private = resolve_cwd(&f.binding.transport_root).unwrap();
+        for provider in [NativeProvider::Pi, NativeProvider::Claude, NativeProvider::Codex, NativeProvider::GrokBuild] {
+            for seat in ["worker", "fork-child"] {
+                let seat = SeatId::new(seat).unwrap();
+                assert_eq!(bind_cwd(&f.binding, provider, &seat, None).unwrap(), f.binding.workspace);
+                assert_eq!(bind_cwd(&f.binding, provider, &seat, Some(&f.binding.workspace)).unwrap(), f.binding.workspace);
+                assert!(bind_cwd(&f.binding, provider, &seat, Some(&private)).unwrap_err()
+                    .to_string().contains("reset-agent --discard-session"));
+            }
+        }
+        assert!(!f.binding.transport_root.join("workspaces").exists());
     }
 
     #[test]

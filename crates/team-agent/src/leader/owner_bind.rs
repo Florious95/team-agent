@@ -23,11 +23,24 @@ pub fn leader_identity_context(
     team: Option<&str>,
     state: Option<&Value>,
 ) -> Result<LeaderIdentity, LeaderError> {
-    let team_id = TeamKey::new(match team {
-        Some(t) => t.to_string(),
-        None => state
-            .map(crate::state::projection::team_state_key)
-            .unwrap_or_else(|| "current".to_string()),
+    let team_md = workspace.join("TEAM.md");
+    let declared = if team.is_none() && team_md.try_exists()? {
+        let (metadata, _) = crate::compiler::read_front_matter(&team_md)?;
+        metadata.get("name").and_then(crate::model::yaml::Value::as_str)
+            .filter(|name| !name.trim().is_empty()).map(str::to_owned)
+    } else { None };
+    let team_id = TeamKey::new(team.map(str::to_owned).or(declared)
+        .or_else(|| state.map(crate::state::projection::team_state_key))
+        .unwrap_or_else(|| "current".to_string()));
+    // A different team's projected/root UUID must not seed this leader identity.
+    let state = state.and_then(|state| {
+        if let Some(teams) = state.get("teams").and_then(Value::as_object).filter(|teams| !teams.is_empty()) {
+            teams.get(team_id.as_str()).filter(|entry| entry.is_object())
+        } else {
+            let recorded = ["team_key", "active_team_key"].iter()
+                .find_map(|key| state.get(*key).and_then(Value::as_str));
+            recorded.is_none_or(|key| key == team_id.as_str()).then_some(state)
+        }
     });
     let workspace_abspath = resolve_workspace_for_hash(workspace);
     let machine_fingerprint = state

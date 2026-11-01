@@ -223,7 +223,11 @@ fn leader_start_plan_with_ambient_authority(
             command_name
         )));
     }
-    let state = crate::state::persist::load_runtime_state_without_migrations(workspace).ok();
+    let state = crate::state::persist::load_runtime_state_without_migrations(workspace)?;
+    if !state.is_object() {
+        return Err(LeaderError::Start("runtime state must be a JSON object".into()));
+    }
+    let state = Some(state);
     let identity = leader_identity_context(workspace, None, state.as_ref())?;
     let external_path = external_leader
         || attach_existing
@@ -2763,19 +2767,27 @@ mod tests {
             state["teams"]["current"]["is_external_leader"],
             serde_json::json!(true)
         );
-        assert_eq!(
-            state["leader_receiver"]["pane_id"],
-            serde_json::json!("%77")
-        );
-        assert_eq!(
-            state["leader_receiver"]["tmux_socket"],
-            serde_json::json!(authority.endpoint)
-        );
-        assert_eq!(
-            state["leader_receiver"]["session_name"],
-            serde_json::json!("cursor-gate-leader")
-        );
+        let receiver = &state["teams"]["current"]["leader_receiver"];
+        assert_eq!(receiver["pane_id"], serde_json::json!("%77"));
+        assert_eq!(receiver["tmux_socket"], serde_json::json!(authority.endpoint));
+        assert_eq!(receiver["session_name"], serde_json::json!("cursor-gate-leader"));
         std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn inception_refuses_corrupt_state_without_panic_or_publication() {
+        for raw in ["[]", "null", "42"] {
+            let workspace = exec_binding_workspace();
+            let (plan, authority) = exec_binding_fixture(&workspace);
+            let path = crate::state::persist::runtime_state_path(&workspace);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, raw).unwrap();
+            let error = persist_exec_provider_leader_binding(&plan, &workspace, &authority, true)
+                .unwrap_err();
+            assert!(error.to_string().contains("runtime state must be a JSON object"));
+            assert_eq!(std::fs::read_to_string(path).unwrap(), raw);
+            std::fs::remove_dir_all(workspace).unwrap();
+        }
     }
 
     #[test]

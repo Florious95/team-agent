@@ -19,6 +19,23 @@ fn fixture(ids: &[&str]) -> (Sandbox, Intent) {
     intent.team = Some("fixture".into());
     (root, intent)
 }
+#[test]
+#[serial_test::serial(env)]
+fn batch_start_does_not_adopt_an_unrelated_owner_change_as_recovery() {
+    let (root, intent) = fixture(&["one", "two"]);
+    install(root.path(), &[("one", "stopped", false), ("two", "stopped", false)]);
+    let mut planned = plan(intent).unwrap();
+    let step = planned.steps.iter().find(|step| matches!(step, Step::StartAgent(_))).unwrap().clone();
+    let path = crate::state::persist::runtime_state_path(root.path());
+    let mut state: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    state["teams"]["fixture"]["team_owner"] = json!({"pane_id":"%foreign", "owner_epoch":2});
+    std::fs::write(path, serde_json::to_vec(&state).unwrap()).unwrap();
+    let baseline = planned.topology.clone();
+    let error = advance_topology(&mut planned, &step, &json!({"runtime":"contract", "ok":true})).unwrap_err();
+    assert!(error.to_string().contains("owner changed during batch startup"));
+    assert_eq!(planned.topology, baseline);
+}
+
 fn write_role(root: &Path, id: &str) {
     std::fs::write(root.join("agents").join(format!("{id}.md")),format!("---\nname: {id}\nprovider: pi\nmodel: openai-codex/gpt-6-luna\neffort: max\ndangerously_skip_permissions: true\n---\nFixture\n")).unwrap();
 }
