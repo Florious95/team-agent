@@ -100,6 +100,7 @@ mod identity;
 mod idle;
 mod lease_api;
 mod lease_claim;
+mod leader_inception_root_mirror_drift_red;
 mod rediscover;
 mod team_in_team_state_scope_red;
 mod terminal_and_replay_vs_rerender_invariants_red;
