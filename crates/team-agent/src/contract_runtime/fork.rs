@@ -161,7 +161,6 @@ fn native_fork(
     let _source_ownership = backend::native_seat_lock(workspace, team, source, false)?;
     let _target_ownership = backend::native_seat_lock(workspace, team, &role.id, true)?;
     let mut backend = Backend::open(workspace, team)?;
-    backend::require_candidate(&backend.binding)?;
     if !backend::seat_unclaimed(&backend, &role.id)? {
         return Err(Error::Conflict.into());
     }

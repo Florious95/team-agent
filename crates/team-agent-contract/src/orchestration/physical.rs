@@ -47,7 +47,7 @@ pub struct PhysicalRuntime<'a> {
     quiescent: Option<SeatRecord>,
     explicit_session: Option<crate::contract::session::NativeSessionId>,
     startup_consent: Option<StartupConsent>,
-    /// Executing framework artifact, never borrowed from a saved target receipt.
+    /// Diagnostic build provenance; never gates delivery or native controls.
     pub executing_candidate: Option<Digest>,
     stop_receipt: Option<StopReceipt>,
     pub evidence: Vec<CapabilityEvidence>,
@@ -281,18 +281,12 @@ impl<'a> PhysicalRuntime<'a> {
         )
         .map_err(host_error)
     }
-    fn foreign(&self, target: &TargetReceipt) -> bool {
-        self.executing_candidate.is_some_and(|candidate| candidate != target.candidate_sha256)
-    }
     fn policy(
         &self,
         target: &TargetReceipt,
         profile: &str,
         operation: Operation,
     ) -> Result<ResolvedSubmitPolicy<'_>, Error> {
-        if self.foreign(target) {
-            return Err(Error::Invalid("seat_requires_restart"));
-        }
         let mut matching = self.evidence.iter().filter(|e| {
             e.provider == target.provider
                 && e.native == target.native
@@ -300,7 +294,6 @@ impl<'a> PhysicalRuntime<'a> {
                 && e.operation == operation
                 && e.channel == Channel::Tmux
                 && e.kind == target.evidence_kind
-                && e.candidate_sha256 == target.candidate_sha256
         });
         let evidence = matching
             .next()
@@ -455,42 +448,6 @@ impl LifecycleHost for PhysicalRuntime<'_> {
             self.quiescent = Some(seat.clone());
             return Ok(());
         }
-        if self.foreign(&target) {
-            if target.evidence_kind != EvidenceKind::Native {
-                return Err(Error::Invalid("foreign close requires a native physical receipt"));
-            }
-            let mut absent = false;
-            let mut replaced = false;
-            let replacement = |error: &HostError| error.kind == HostErrorKind::Ownership
-                && matches!(error.operation, "tmux target binding" | "tmux target changed");
-            match crate::host::process::sample_process(&target.process) {
-                ProcessState::Exited | ProcessState::Replaced => absent = true,
-                ProcessState::Unknown(error) => return Err(host_error(error)),
-                ProcessState::Alive => {
-                    match TmuxHost::restore_owned(target.clone(), self.settings.tmux.clone(),
-                        self.settings.limits, RealCommandRunner::default(), self.clock, deadline) {
-                        Ok(mut host) => {
-                            let receipt = host.close_owned_pane(&target, self.clock, deadline);
-                            if receipt.pane_close.outcome == StepOutcome::NoEffect
-                                && receipt.pane_close.error.as_ref().is_some_and(replacement) {
-                                replaced = true;
-                            } else if receipt.pane_close.outcome == StepOutcome::NoEffect
-                                && matches!(receipt.native, ProcessState::Exited | ProcessState::Replaced) {
-                                absent = true;
-                            } else {
-                                confirm_close(receipt, target.shared_endpoint)?;
-                            }
-                        }
-                        Err(error) if replacement(&error) => replaced = true,
-                        Err(error) => return Err(host_error(error)),
-                    }
-                }
-            }
-            self.stop_receipt = Some(StopReceipt { method: "receipt_close_foreign_candidate".into(),
-                owned_process_absent: absent, owned_target_replaced: replaced });
-            self.quiescent = Some(seat.clone());
-            return Ok(());
-        }
         if self.registration.controls.iter().any(|definition| definition.profile_id == seat.profile && definition.kind == ControlKind::Exit) {
             // A just-written tool result may precede the last native render.
             // Wait read-only for the registered control surface; never type an
@@ -534,7 +491,6 @@ impl LifecycleHost for PhysicalRuntime<'_> {
         control: &NativeControl,
     ) -> Result<DeliveryEffect, Error> {
         let target = self.target(seat)?.clone();
-        if self.foreign(&target) { return Err(Error::Invalid("seat_requires_restart")); }
         let kind = match control {
             NativeControl::InspectSession => ControlKind::InspectSession,
             NativeControl::InspectTools => ControlKind::InspectTools,

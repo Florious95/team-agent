@@ -72,7 +72,7 @@ fn start_human_output_is_compact_and_does_not_dump_duplicate_receipts() {
 }
 
 #[test]
-fn native_receipt_reconciliation_does_not_turn_start_into_stop_or_allow_restart() {
+fn native_receipt_reconciliation_preserves_start_and_allows_explicit_restart() {
     assert_eq!(
         seat_actions(
             Verb::Start,
@@ -85,15 +85,14 @@ fn native_receipt_reconciliation_does_not_turn_start_into_stop_or_allow_restart(
         .unwrap(),
         vec!["start"]
     );
-    assert!(seat_actions(
+    assert_eq!(seat_actions(
         Verb::Restart,
         Observation::NativeReconcile,
         false,
         false,
         false,
         false
-    )
-    .is_err());
+    ).unwrap(), vec!["stop", "start"]);
     assert!(seat_actions(
         Verb::Restart,
         Observation::NativeReconcile,

@@ -291,7 +291,6 @@ pub fn resolve_submit_policy<'a>(
         || evidence.channel != request.channel
         || evidence.operation != request.operation
         || evidence.kind != request.required_evidence_kind
-        || evidence.candidate_sha256 != request.candidate_sha256
     {
         return Err(ContractError::Mismatch("input profile evidence"));
     }

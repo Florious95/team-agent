@@ -175,7 +175,11 @@ impl Backend {
         Self::open_mode(workspace, team, true)
     }
     fn open_mode(workspace: &Path, team: &str, readonly: bool) -> Result<Self, BackendError> {
-        let binding = read_binding(workspace, team)?;
+        let mut binding = read_binding(workspace, team)?;
+        // Build provenance is diagnostic, not an ownership or lifecycle fence.
+        // New launches use this invocation, including relocated binaries.
+        binding.candidate = std::env::current_exe()?.canonicalize()?;
+        binding.candidate_sha256 = executing_candidate_sha()?;
         let scope = binding.scope.clone();
         let store = if readonly {
             ProjectionStore::open_readonly(&binding.transport_root, scope, &binding.endpoint)
@@ -616,59 +620,9 @@ pub(crate) fn executing_candidate_sha() -> Result<Digest, BackendError> {
     Ok(sha)
 }
 
-pub(crate) fn require_candidate(binding: &Binding) -> Result<(), BackendError> {
-    let candidate = std::env::current_exe()?.canonicalize()?;
-    if candidate != binding.candidate || executing_candidate_sha()? != binding.candidate_sha256 { return Err(BackendError::Fence { reason: "candidate_path_or_fingerprint_mismatch" }); }
-    Ok(())
-}
-
-/// Explicit discard-session may adopt an upgraded binary at the SAME installed
-/// path, but only while every native seat is stopped and all operations ended.
-/// Ordinary start/resume/MCP calls retain the exact candidate fingerprint fence.
-pub(super) fn refresh_quiescent_candidate(workspace: &Path, team: &str, seat: &SeatId) -> Result<(), BackendError> {
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-    let mut backend = Backend::open(workspace, team)?;
-    let candidate = std::env::current_exe()?.canonicalize()?;
-    if candidate != backend.binding.candidate { return Err(BackendError::Fence { reason: "candidate_rebind_path_mismatch" }); }
-    let fingerprint = fingerprint_file(&candidate, 1024 * 1024 * 1024, Duration::from_secs(10))?;
-    if fingerprint == backend.binding.candidate_sha256 { return Ok(()); }
-    let root = root_for(workspace, &backend.binding.scope);
-    if root.canonicalize()? != root { return Err(BackendError::Fence { reason: "candidate_rebind_root_alias" }); }
-    let directory = std::fs::File::open(&root)?;
-    if !crate::platform::file_lock::try_lock_once_nonblocking(&directory)? { return Err(Error::Conflict.into()); }
-    if !backend.store.unfinished()?.is_empty() { return Err(Error::Conflict.into()); }
-    for current in backend.store.seats()? {
-        if current.status != SeatStatus::Stopped || backend.store.leased(&current.identity.seat)?
-            || current.physical.as_ref().is_some_and(|target| !matches!(
-                team_agent_contract::host::process::sample_process(&target.process),
-                team_agent_contract::host::process::ProcessState::Exited | team_agent_contract::host::process::ProcessState::Replaced)) {
-            return Err(Error::Invalid("stop the native cohort before upgrading its candidate binding").into());
-        }
-    }
-    let path = root.join("framework-binding.json");
-    let metadata = std::fs::symlink_metadata(&path)?;
-    if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.nlink() != 1 || metadata.mode() & 0o022 != 0 { return Err(BackendError::Fence { reason: "candidate_rebind_file_ownership" }); }
-    let before = std::fs::read(&path)?;
-    backend.binding.candidate_sha256 = fingerprint;
-    let temporary = root.join(format!("binding-{}.tmp", backend.store.propose_identity(seat)?.instance.as_str()));
-    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(metadata.mode() & 0o777).open(&temporary)?;
-    let result = (|| -> Result<(), BackendError> {
-        file.write_all(&serde_json::to_vec(&backend.binding).map_err(|_| BackendError::Metadata)?)?;
-        file.sync_all()?;
-        if std::fs::read(&path)? != before { return Err(BackendError::Fence { reason: "candidate_rebind_concurrent_write" }); }
-        std::fs::rename(&temporary, &path)?;
-        directory.sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() { let _ = std::fs::remove_file(&temporary); }
-    result
-}
-
 pub(crate) fn validate_delivery_target(binding: &Binding, seat: &SeatRecord, budget: Duration) -> Result<(), BackendError> {
     let target = seat.physical_target()?;
-    if target.candidate_sha256 != binding.candidate_sha256
-        || seat.evidence_kind != EvidenceKind::Native || !matches!(seat.status, SeatStatus::Starting | SeatStatus::Ready) {
+    if seat.evidence_kind != EvidenceKind::Native || !matches!(seat.status, SeatStatus::Starting | SeatStatus::Ready) {
         return Err(BackendError::Fence { reason: "delivery_target_not_current_native_owner" });
     }
     let clock = RealClock::new();
@@ -722,7 +676,6 @@ pub(super) fn require_stopped(record: &OperationRecord) -> Result<(), BackendErr
 /// by selecting the greatest generation or adopting a discovered process.
 pub(crate) fn start_needs_reconciliation(workspace: &Path, team: &str, seat: &SeatId, row: &serde_json::Value) -> Result<bool, BackendError> {
     let backend = Backend::open_readonly(workspace, team)?;
-    require_candidate(&backend.binding)?;
     let class = existing_start(&backend, seat)?;
     let current = backend.store.seat(seat)?;
     if current.as_ref().is_some_and(|seat| !registry::same_provider(row.get("provider").and_then(serde_json::Value::as_str).unwrap_or(""), seat.provider.as_str())) {
@@ -769,11 +722,10 @@ pub(crate) fn start_needs_reconciliation(workspace: &Path, team: &str, seat: &Se
 /// Read-only preflight, reused by the CLI before any role write or stop.
 pub(crate) fn preflight_start_role(workspace: &Path, team: &str, role: &RoleConfig) -> Result<bool, BackendError> {
     let backend = Backend::open_readonly(workspace, team)?;
-    require_candidate(&backend.binding)?;
     match existing_start(&backend, &role.id)? {
         Some(ExistingStart::Committed(record))
             if backend.store.assert_current(&record.target.identity)?.physical.as_ref().is_some_and(|target|
-                target.candidate_sha256 != backend.binding.candidate_sha256 || matches!(
+                matches!(
                     team_agent_contract::host::process::sample_process(&target.process),
                     team_agent_contract::host::process::ProcessState::Exited | team_agent_contract::host::process::ProcessState::Replaced)) => {
             prepare_resume(workspace, team, &role.id, Some(role))?;
@@ -917,13 +869,12 @@ pub fn start(
     let scope = scope_for(&cwd, team)?;
     if root_for(&cwd.path, &scope).exists() {
         let mut backend = Backend::open(&cwd.path, team)?;
-        require_candidate(&backend.binding)?;
         reconcile_start(&mut backend, &role.id)?;
         match existing_start(&backend, &role.id)? {
             Some(ExistingStart::Committed(record)) => {
                 let current = backend.store.assert_current(&record.target.identity)?;
                 if current.physical.as_ref().is_some_and(|target|
-                    target.candidate_sha256 != backend.binding.candidate_sha256 || matches!(
+                    matches!(
                         team_agent_contract::host::process::sample_process(&target.process),
                         team_agent_contract::host::process::ProcessState::Exited | team_agent_contract::host::process::ProcessState::Replaced)) {
                     let prepared = prepare_resume(workspace, team, &role.id, Some(role))?;
@@ -988,11 +939,6 @@ pub fn start(
     } else {
         Backend::create(cwd, team, candidate, tmux)?
     };
-    if backend.binding.candidate != provisional.candidate
-        || backend.binding.candidate_sha256 != candidate_sha256
-    {
-        return Err(BackendError::Fence { reason: "startup_candidate_changed" });
-    }
     if existing_start(&backend, &role.id)?.is_some() {
         return Err(Error::Conflict.into());
     }
@@ -1141,7 +1087,6 @@ pub fn prepare_resume(
     role: Option<&RoleConfig>,
 ) -> Result<PreparedResume, BackendError> {
     let backend = Backend::open_readonly(workspace, team)?;
-    require_candidate(&backend.binding)?;
     let parent = backend.store.seat(seat)?.ok_or(BackendError::Metadata)?;
     if parent.status == SeatStatus::Unknown {
         return Err(BackendError::Fence { reason: "resume_parent_unknown" });
@@ -1155,11 +1100,6 @@ pub fn prepare_resume(
     }
     if resolve_cwd(&parent.cwd.path)? != parent.cwd {
         return Err(ContractError::Mismatch("resume cwd incarnation").into());
-    }
-    let candidate = std::env::current_exe()?.canonicalize()?;
-    let candidate_sha256 = fingerprint_file(&candidate, 1024 * 1024 * 1024, Duration::from_secs(10))?;
-    if backend.binding.candidate != candidate || backend.binding.candidate_sha256 != candidate_sha256 {
-        return Err(BackendError::Fence { reason: "resume_candidate_changed" });
     }
     let discovered = discovery::discover_runtime(&role.provider, workspace)?;
     let identity = backend.store.propose_identity(seat)?;
@@ -1453,9 +1393,6 @@ pub fn migrate(workspace: &Path, team: &str) -> Result<serde_json::Value, Backen
     let candidate = std::env::current_exe()?.canonicalize()?;
     let fingerprint = fingerprint_file(&candidate, 1024 * 1024 * 1024, Duration::from_secs(10))?;
     if binding.candidate != candidate || binding.candidate_sha256 != fingerprint {
-        if !binding.transport_root.join("legacy-import.json").is_file() {
-            return Err(BackendError::Fence { reason: "migration_requires_legacy_provenance_for_candidate_rebind" });
-        }
         let path = root.join("framework-binding.json");
         let metadata = std::fs::symlink_metadata(&path)?;
         if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.uid() != unsafe { libc::geteuid() }
@@ -1479,21 +1416,13 @@ pub fn migrate(workspace: &Path, team: &str) -> Result<serde_json::Value, Backen
     }
     let authority = Backend::open_readonly(&binding.workspace.path, team)?;
     result["seat_status"] = serde_json::json!(authority.store.seats()?.into_iter().map(|seat| {
-        let foreign = seat.physical.as_ref().is_some_and(|target| target.candidate_sha256 != binding.candidate_sha256);
-        let live_foreign = foreign && seat.physical.as_ref().is_some_and(|target|
-            team_agent_contract::host::process::sample_process(&target.process) == team_agent_contract::host::process::ProcessState::Alive);
-        serde_json::json!({"seat":seat.identity.seat,"candidate":if foreign { "foreign" } else { "current" },
-            "live_foreign":live_foreign,"next_command":if foreign { Some(restart_command(&binding.workspace.path, team, seat.identity.seat.as_str())) } else { None }})
+        serde_json::json!({"seat":seat.identity.seat,"candidate":"current",
+            "live_foreign":false,"next_command":null})
     }).collect::<Vec<_>>());
     result["team"] = serde_json::json!(team);
     result["candidate"] = serde_json::json!(binding.candidate);
     result["maintenance"] = serde_json::json!("Use only this release for subsequent lifecycle operations");
     Ok(result)
-}
-
-pub(crate) fn restart_command(workspace: &Path, team: &str, seat: &str) -> String {
-    format!("team-agent restart {} --workspace {} --team {}", crate::cli::shell_quote(seat),
-        crate::cli::shell_quote(&workspace.to_string_lossy()), crate::cli::shell_quote(team))
 }
 
 pub fn stop(workspace: &Path, team: &str, seat: &SeatId) -> Result<OperationRecord, BackendError> {
@@ -2004,25 +1933,22 @@ mod tests {
     }
 
     #[test]
-    fn explicit_discard_can_refresh_only_a_quiescent_same_path_candidate() {
+    fn live_and_stopped_seats_open_after_candidate_upgrade_or_relocation() {
         for status in [SeatStatus::Ready, SeatStatus::Stopped] {
-            let mut fixture = RoleFixture::new();
-            fixture.binding.candidate = std::env::current_exe().unwrap().canonicalize().unwrap();
-            fixture.binding.candidate_sha256 = Digest([0; 32]);
-            let _backend = fixture.canonical(status, Phase::F5Receipt, Outcome::Committed, None);
-            let path = root_for(&fixture.root, &fixture.binding.scope).join("framework-binding.json");
-            let before = std::fs::read(&path).unwrap();
-            assert!(require_candidate(&fixture.binding).is_err());
-            let result = refresh_quiescent_candidate(&fixture.root, "test", &fixture.identity.seat);
-            if status == SeatStatus::Ready {
-                assert!(result.is_err());
+            for relocated in [false, true] {
+                let mut fixture = RoleFixture::new();
+                fixture.binding.candidate = if relocated { fixture.root.join("old-missing-binary") }
+                    else { std::env::current_exe().unwrap().canonicalize().unwrap() };
+                fixture.binding.candidate_sha256 = Digest([0; 32]);
+                let original = fixture.canonical(status, Phase::F5Receipt, Outcome::Committed, None);
+                let path = root_for(&fixture.root, &fixture.binding.scope).join("framework-binding.json");
+                let before = std::fs::read(&path).unwrap();
+                let seat = original.store.seat(&fixture.identity.seat).unwrap();
+                let reopened = Backend::open_readonly(&fixture.root, "test").unwrap();
+                assert_eq!(reopened.binding.candidate, std::env::current_exe().unwrap().canonicalize().unwrap());
+                assert_eq!(reopened.binding.candidate_sha256, executing_candidate_sha().unwrap());
+                assert_eq!(reopened.store.seat(&fixture.identity.seat).unwrap(), seat);
                 assert_eq!(std::fs::read(&path).unwrap(), before);
-            } else {
-                result.unwrap();
-                require_candidate(&Backend::open_readonly(&fixture.root, "test").unwrap().binding).unwrap();
-                fixture.binding.candidate = fixture.root.join("foreign-candidate");
-                std::fs::write(&path, serde_json::to_vec(&fixture.binding).unwrap()).unwrap();
-                assert!(refresh_quiescent_candidate(&fixture.root, "test", &fixture.identity.seat).is_err());
             }
         }
     }

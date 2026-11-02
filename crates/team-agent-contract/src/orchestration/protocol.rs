@@ -38,7 +38,6 @@ impl ContractStore {
             || record.binding_key != seat.binding_key
             || record.native_process != target.process
             || record.process.identity.pid == target.process.identity.pid
-            || record.process.identity.executable_sha256 != target.candidate_sha256
             || verify_native_ancestry(&record.process, &target.process).is_err()
         {
             return Err(Error::Fence);

@@ -175,10 +175,6 @@ impl Directory {
             None => return Err("native recipient missing".into()),
         };
         let target = seat.physical_target().map_err(|e| e.to_string())?;
-        if target.candidate_sha256 != crate::contract_runtime::backend::executing_candidate_sha().map_err(|e| e.to_string())? {
-            return Err("seat_requires_restart".into());
-        }
-        crate::contract_runtime::backend::require_candidate(&backend.binding).map_err(|e| e.to_string())?;
         // Committed native seats can remain Starting; Ready is not a commit flag.
         if !matches!(seat.status, SeatStatus::Starting | SeatStatus::Ready)
             || backend.store.leased(&id).map_err(|e| e.to_string())?
@@ -672,14 +668,9 @@ pub fn locate(workspace: &Path, team: Option<&str>) -> Result<Value, String> {
                 Ok(endpoint) => endpoints.push(json!({"workspace":directory.workspace,"team":directory.team,
                     "agent":endpoint.agent,"socket":endpoint.socket,"pane_id":endpoint.pane_id,"dialect":endpoint.dialect})),
                 Err(error) if agent != "leader" || error.starts_with("leader_identity_") => {
-                    #[cfg(unix)]
-                    let action = (error == "seat_requires_restart").then(||
-                        crate::contract_runtime::backend::restart_command(&directory.workspace, directory.team.as_deref().unwrap_or(""), &agent));
-                    #[cfg(not(unix))]
-                    let action: Option<String> = None;
-                    let action = directory.recovery_action(&agent, &error).or(action);
+                    let action = directory.recovery_action(&agent, &error);
                     unavailable.push(json!({"workspace":directory.workspace,"team":directory.team,"agent":agent,
-                        "candidate":(error == "seat_requires_restart").then_some("foreign"),"delivery_error":error,"action":action}));
+                        "candidate":null,"delivery_error":error,"action":action}));
                 }
                 Err(_) => {}
             }

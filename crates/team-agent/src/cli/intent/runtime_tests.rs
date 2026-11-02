@@ -702,13 +702,13 @@ fn native_stop_recheck_accepts_dead_carrier_observations_but_fences_identity_and
 #[test]
 #[serial_test::serial(env)]
 #[cfg(unix)]
-fn foreign_start_and_restart_recheck_accept_their_verified_stop() {
-    for verb in [Verb::Start, Verb::Restart] {
+fn live_and_reconciling_restart_rechecks_accept_their_verified_stop() {
+    for observation in [Observation::Live, Observation::NativeReconcile] {
         let (root, mut intent) = fixture(&["one"]);
-        intent.verb = verb;
+        intent.verb = Verb::Restart;
         intent.subject = Subject::Agent("one".into());
         install(root.path(), &[("one", "running", false)]);
-        let plan = plan_with_observer(intent, |_, _, _| Ok(Observation::Foreign)).unwrap();
+        let plan = plan_with_observer(intent, |_, _, _| Ok(observation)).unwrap();
         let step = plan.steps.iter().find(|step| matches!(step, Step::StartAgent(_))).unwrap();
         let path = crate::state::persist::runtime_state_path(root.path());
         let mut raw: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();

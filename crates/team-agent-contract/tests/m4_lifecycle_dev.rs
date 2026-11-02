@@ -39,7 +39,7 @@ fn physical_receipt_must_match_the_address_and_complete_seat_authority() {
 }
 
 #[test]
-fn foreign_controls_refuse_before_lookup_or_host_access() {
+fn different_build_controls_reach_registered_control_lookup() {
     let seat = seat();
     let descriptor = physical_support::descriptor("single", &seat.native);
     let hooks = physical_support::hooks();
@@ -53,6 +53,6 @@ fn foreign_controls_refuse_before_lookup_or_host_access() {
         action_budget: Duration::from_secs(1), freshness: Duration::from_secs(1), journal_bytes: 4096,
     }, OperationId::new("foreign-control").unwrap(), &clock).unwrap();
     host.executing_candidate = Some(Digest([99; 32]));
-    assert!(matches!(host.control(&seat, &NativeControl::Exit), Err(Error::Invalid("seat_requires_restart"))));
-    assert!(host.evidence.is_empty(), "do not manufacture old-candidate evidence");
+    assert!(matches!(host.control(&seat, &NativeControl::Exit), Err(Error::Invalid("native control not registered"))));
+    assert!(host.evidence.is_empty(), "build metadata does not synthesize capability evidence");
 }
