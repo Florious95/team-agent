@@ -125,7 +125,7 @@ pub(crate) fn restart(
     }
     if !allow_fresh {
         return Err(error(format!(
-            "native_authority_lost: {} was purged; native session/ownership receipts are unavailable. To explicitly start fresh from the saved roles, run team-agent restart --allow-fresh --workspace {} --team {}; old session files and the original binding will be retained",
+            "native_authority_lost: {} was purged; native session/ownership receipts are unavailable. To explicitly start fresh from the saved roles, run team-agent team restart --allow-fresh --workspace {} --team {}; old session files and the original binding will be retained",
             old_root.display(), crate::cli::shell_quote(&workspace.to_string_lossy()), crate::cli::shell_quote(team))));
     }
     crate::lifecycle::launch::ensure_owner_allowed_for_state(&selected.state, None)

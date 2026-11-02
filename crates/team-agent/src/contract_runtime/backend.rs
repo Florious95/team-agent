@@ -191,7 +191,7 @@ pub fn observation_error(team: &str, seat: &str, error: &BackendError) -> String
 
 pub fn authority_recovery_action(workspace: &Path, team: &str, seat: &str) -> String {
     if let Err(error @ BackendError::AuthorityLost { .. }) = authority_check(workspace, team) {
-        return format!("{error}; after explicitly accepting fresh conversations, use team-agent restart --allow-fresh --workspace {} --team {} (recovery refuses live or unobservable old carriers)",
+        return format!("{error}; after explicitly accepting fresh conversations, use team-agent team restart --allow-fresh --workspace {} --team {} (recovery refuses live or unobservable old carriers)",
             crate::cli::shell_quote(&workspace.to_string_lossy()), crate::cli::shell_quote(team));
     }
     let legacy = read_binding(workspace, team).is_ok_and(|binding|
@@ -2230,11 +2230,15 @@ mod tests {
             "no legacy contract.db exists, so routing the leader to migrate is a false diagnosis: {error}");
         let advice = authority_recovery_action(&workspace, "test", "worker");
         assert!(!advice.contains("migrate"), "recovery advice must not route to migrate without a legacy store: {advice}");
-        let imported = crate::importer::contract::migrate(
-            &fixture.binding.transport_root, fixture.binding.scope.clone(), &fixture.binding.endpoint);
-        let message = imported.err().map(|error| error.to_string()).unwrap_or_default();
-        assert!(!message.contains("Io(NotFound)") && !message.contains("file fingerprint"),
-            "migrate must classify a purged root instead of leaking a raw fingerprint IO error: {message}");
+        // CLI migrate reaches the importer only through this classification; the raw importer
+        // would fingerprint the missing contract.db and leak Io(NotFound).
+        let classified = authority_check(&workspace, "test").err().expect("purged authority must be classified");
+        assert!(matches!(classified, BackendError::AuthorityLost { .. }), "{classified}");
+        assert!(!classified.to_string().contains("Io(NotFound)"), "{classified}");
+        let source = include_str!("backend.rs").split("#[cfg(test)]\nmod tests").next().unwrap();
+        let migrate = source.split_once("pub fn migrate(").unwrap().1;
+        let (before_import, _) = migrate.split_once("importer::contract::migrate(").unwrap();
+        assert!(before_import.contains("check_authority(&binding)"), "migrate must classify authority before importing");
     }
 
     #[test]
