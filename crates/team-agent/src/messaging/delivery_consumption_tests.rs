@@ -100,11 +100,3 @@ fn frame(composer: &str, transcript: &str) -> InputFrame {
         capsule: None,
     }
 }
-
-
-
-
-
-
-
-

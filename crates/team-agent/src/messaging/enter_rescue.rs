@@ -93,7 +93,9 @@ pub(crate) fn bind_pending_context(
     store: &MessageStore,
     context: &EnterRescueContext,
 ) -> Result<bool, MessagingError> {
-    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
+    Err(MessagingError::Validation(
+        "legacy SQL messaging retired; use station send and C3 inbox".into(),
+    ))
 }
 
 fn canonical_valid(
@@ -101,7 +103,9 @@ fn canonical_valid(
     store: &MessageStore,
     job: &RescueJob,
 ) -> Result<bool, MessagingError> {
-    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
+    Err(MessagingError::Validation(
+        "legacy SQL messaging retired; use station send and C3 inbox".into(),
+    ))
 }
 
 pub(super) fn fire(
@@ -132,5 +136,7 @@ fn fire_with(
     payload: &str,
     execute: &Executor<'_>,
 ) -> Result<bool, MessagingError> {
-    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
+    Err(MessagingError::Validation(
+        "legacy SQL messaging retired; use station send and C3 inbox".into(),
+    ))
 }
