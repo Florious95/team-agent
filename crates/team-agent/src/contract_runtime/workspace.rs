@@ -1,5 +1,5 @@
-//! Framework-owned process CWD policy. Pi, Claude, Codex and Grok always use
-//! the one canonical workspace identity, independently of private config paths.
+//! Framework-owned process CWD policy. Pi, Claude, Codex and Grok use the
+//! canonical workspace for fresh sessions and preserve the owned CWD on resume.
 //! Cursor retains private isolation; Kiro's existing policy is unchanged.
 use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
@@ -21,14 +21,8 @@ pub(super) fn bind_cwd(
     previous: Option<&CwdIdentity>,
 ) -> Result<CwdIdentity, BackendError> {
     match provider {
-        NativeProvider::Pi | NativeProvider::Claude | NativeProvider::Codex | NativeProvider::GrokBuild => {
-            if previous.is_some_and(|cwd| cwd != &binding.workspace) {
-                return Err(BackendError::Migration(
-                    "legacy private-CWD session cannot be relocated; stop the seat and use reset-agent --discard-session before starting in the project workspace".into(),
-                ));
-            }
-            Ok(binding.workspace.clone())
-        }
+        NativeProvider::Pi | NativeProvider::Claude | NativeProvider::Codex | NativeProvider::GrokBuild =>
+            Ok(previous.cloned().unwrap_or_else(|| binding.workspace.clone())),
         // Explicit release boundary: preserve these providers' existing config isolation.
         NativeProvider::Kiro => Ok(previous.cloned().unwrap_or_else(|| binding.workspace.clone())),
         NativeProvider::Cursor => match previous {
@@ -179,7 +173,7 @@ mod tests {
     }
 
     #[test]
-    fn project_providers_share_one_cwd_binding_for_fresh_resume_and_fork() {
+    fn project_providers_use_canonical_fresh_cwd_and_preserve_owned_resume_cwd() {
         let f = Fixture::new();
         std::fs::create_dir(f.path.join(".git")).unwrap();
         let private = resolve_cwd(&f.binding.transport_root).unwrap();
@@ -188,8 +182,7 @@ mod tests {
                 let seat = SeatId::new(seat).unwrap();
                 assert_eq!(bind_cwd(&f.binding, provider, &seat, None).unwrap(), f.binding.workspace);
                 assert_eq!(bind_cwd(&f.binding, provider, &seat, Some(&f.binding.workspace)).unwrap(), f.binding.workspace);
-                assert!(bind_cwd(&f.binding, provider, &seat, Some(&private)).unwrap_err()
-                    .to_string().contains("reset-agent --discard-session"));
+                assert_eq!(bind_cwd(&f.binding, provider, &seat, Some(&private)).unwrap(), private);
             }
         }
         assert!(!f.binding.transport_root.join("workspaces").exists());

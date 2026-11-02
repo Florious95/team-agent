@@ -735,16 +735,6 @@ impl<R: CommandRunner> TmuxHost<R> {
             .candidate
             .canonicalize()
             .map_err(|e| HostError::io("candidate path", e))?;
-        if candidate
-            != std::env::current_exe()
-                .and_then(|path| path.canonicalize())
-                .map_err(|e| HostError::io("running candidate", e))?
-        {
-            return Err(HostError::new(
-                "MCP candidate is not this runtime",
-                HostErrorKind::Ownership,
-            ));
-        }
         let candidate_sha256 = fingerprint_file(
             &candidate,
             self.limits.max_executable_bytes,

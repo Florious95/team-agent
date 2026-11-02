@@ -1110,7 +1110,8 @@ pub fn prepare_resume(
     }))?;
     let mut request = request(&backend.binding, &role, identity, &discovered)?;
     let selected = registry::provider(role.provider.as_str())?;
-    request.paths.cwd = super::workspace::bind_cwd(&backend.binding, selected, &role.id, Some(&parent.cwd))?;
+    request.paths.cwd = super::workspace::bind_cwd(&backend.binding, selected, &role.id,
+        source.as_ref().map(|_| &parent.cwd))?;
     if let Some(source) = source {
         request.operation = Operation::Resume;
         request.resume = Some(ResumeRequest { binding: source, expected_source: parent.identity.clone() });

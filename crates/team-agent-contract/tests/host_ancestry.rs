@@ -11,7 +11,7 @@ use team_agent_contract::host::process::{
     ProcessStamp, ProcessState,
 };
 
-// Both tests capture this executable. Hard-link creation can change macOS's
+// These tests capture this executable. Hard-link creation can change macOS's
 // reported vnode pathname, so do not race it with the other test's capture.
 static PROCESS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -79,7 +79,7 @@ fn ancestry_fixture_child() {
 }
 
 #[test]
-fn live_process_hard_link_alias_is_not_replacement_but_changed_identity_is() {
+fn live_process_ignores_file_provenance_but_not_reused_identity() {
     use std::os::unix::fs::MetadataExt;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -118,7 +118,7 @@ fn live_process_hard_link_alias_is_not_replacement_but_changed_identity_is() {
             + i128::from(metadata.mtime_nsec()),
     };
     assert_ne!(copied.image.inode, original.image.inode);
-    assert_eq!(sample_process(&copied), ProcessState::Replaced);
+    assert_eq!(sample_process(&copied), ProcessState::Alive);
 
     let changes: [fn(&mut ProcessStamp); 6] = [
         |stamp| stamp.parent ^= 1,
@@ -128,12 +128,34 @@ fn live_process_hard_link_alias_is_not_replacement_but_changed_identity_is() {
         |stamp| stamp.image.length ^= 1,
         |stamp| stamp.image.modified_ns += 1,
     ];
-    for change in changes {
+    for (index, change) in changes.into_iter().enumerate() {
         let mut changed = aliased.clone();
         change(&mut changed);
-        assert_eq!(sample_process(&changed), ProcessState::Replaced);
+        assert_eq!(sample_process(&changed), if index < 2 { ProcessState::Replaced } else { ProcessState::Alive });
     }
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn live_helper_and_ancestry_survive_atomic_binary_replacement() {
+    let _serial = PROCESS_TEST_LOCK.lock().unwrap();
+    let budget = Duration::from_secs(10);
+    let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
+    let hash = fingerprint_file(&executable, 1024 * 1024 * 1024, budget).unwrap();
+    let native = capture_process(std::process::id(), &executable, hash, budget).unwrap();
+    let sandbox = support::Sandbox::new();
+    let fixture = sandbox.parent.join("upgrade-helper");
+    std::fs::copy(&executable, &fixture).unwrap();
+    let mut child = spawn_fixture(&fixture, 0, Stdio::null());
+    let stamp = capture_process(child.0.id(), &fixture, hash, budget).unwrap();
+    let replacement = sandbox.parent.join("replacement");
+    std::fs::copy(&executable, &replacement).unwrap();
+    // Never truncate or rewrite a running macOS executable in place.
+    std::fs::rename(&replacement, &fixture).unwrap();
+    assert_eq!(sample_process(&stamp), ProcessState::Alive);
+    assert_eq!(verify_native_ancestry(&stamp, &native).unwrap(), vec![std::process::id()]);
+    assert!(child.finish().unwrap().success());
+    assert_eq!(sample_process(&stamp), ProcessState::Exited);
 }
 
 #[test]

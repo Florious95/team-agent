@@ -354,8 +354,8 @@ pub fn resolve_cwd(path: &Path) -> Result<crate::contract::session::CwdIdentity,
     }
 }
 
-/// Capture once before readiness; later samples compare birth/image metadata without hashing
-/// a large executable on every terminal poll. No name/argv scan and no protected data store.
+/// Capture executable provenance once before readiness; later liveness samples
+/// compare process birth and parent, independently of on-disk binary updates.
 pub fn capture_process(
     pid: u32,
     expected_executable: &Path,
@@ -460,7 +460,7 @@ fn ancestor_link(pid: u32) -> Result<AncestorLink, HostError> {
 }
 
 /// Re-establish the relationship on every use. Both captured endpoint processes
-/// must still have their original birth/image/parent, and each intermediary's
+/// must still have their original birth/parent, and each intermediary's
 /// birth, parent and executable must agree before and after the bounded walk.
 /// A numeric ancestor PID alone never establishes authority.
 pub fn verify_native_ancestry(

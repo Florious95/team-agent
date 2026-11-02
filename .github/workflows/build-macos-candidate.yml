@@ -200,6 +200,8 @@ jobs:
           printf 'source_sha=%s\nsource_tree=%s\nrustc=%s\ntarget=%s\n' \
             "$(git rev-parse HEAD)" "$(git rev-parse 'HEAD^{tree}')" "$(rustc --version)" "$TARGET" > "$receipts/source.txt"
           if ! command -v tmux >/dev/null; then brew install tmux; fi
+          export CONTRACT_TMUX="$(command -v tmux)"
+          printf 'CONTRACT_TMUX=%s\n' "$CONTRACT_TMUX" > "$receipts/test-environment.txt"
           tmux -V > "$receipts/tmux-version.txt"
           cases=(
             'team-agent|--lib|leader::'
