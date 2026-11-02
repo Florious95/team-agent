@@ -822,7 +822,7 @@ impl<R: CommandRunner> TmuxHost<R> {
         if self.shared.is_some() {
             // Only this new window is configured, before it execs the native
             // image. Never load per-seat global config into a borrowed server.
-            // Do not override automatic-rename: the native CLI owns the title.
+            // Pin the shared window to the seat name; the native CLI owns the pane title.
             for (option, value) in [("remain-on-exit", "on"), ("window-size", "manual")] {
                 shell.extend(quote(self.executable.as_os_str())?);
                 shell.extend_from_slice(b" -S "); shell.extend(quote(self.endpoint.as_os_str())?);
@@ -848,9 +848,9 @@ impl<R: CommandRunner> TmuxHost<R> {
         );
         let mut arguments = if let Some(shared) = &self.shared {
             if let Some(session) = &shared.session {
-                vec!["new-window".into(), "-d".into(), "-t".into(), session.clone().into()]
+                vec!["new-window".into(), "-d".into(), "-t".into(), session.clone().into(), "-n".into(), resolved.request().identity.seat.as_str().into()]
             } else {
-                vec!["new-session".into(), "-d".into(), "-s".into(), session_name.clone().into(),
+                vec!["new-session".into(), "-d".into(), "-s".into(), session_name.clone().into(), "-n".into(), resolved.request().identity.seat.as_str().into(),
                     "-x".into(), self.limits.columns.to_string().into(), "-y".into(), self.limits.rows.to_string().into()]
             }
         } else {
