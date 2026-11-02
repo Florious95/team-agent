@@ -18,7 +18,7 @@ use crate::host::{
     process::{resolve_cwd, ProcessState},
     tmux::{CloseReceipt, HostLimits, SharedTmux, TmuxHost},
     transport::*,
-    HostError, HostErrorKind,
+    HostError,
 };
 use crate::runtime::{delivery::*, journal::FileJournal, probes::*};
 

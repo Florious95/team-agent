@@ -112,7 +112,6 @@ struct Commit {
 
 pub(crate) trait ReadRecords {
     fn get<T: DeserializeOwned>(&self, key: &Key) -> Result<Option<T>, Error>;
-    fn list<T: DeserializeOwned>(&self, collection: &str) -> Result<Vec<T>, Error>;
 }
 pub(crate) struct Projections {
     root: PathBuf,
@@ -122,16 +121,10 @@ impl ReadRecords for Projections {
     fn get<T: DeserializeOwned>(&self, key: &Key) -> Result<Option<T>, Error> {
         Projections::get(self, key)
     }
-    fn list<T: DeserializeOwned>(&self, collection: &str) -> Result<Vec<T>, Error> {
-        Projections::list(self, collection)
-    }
 }
 impl ReadRecords for WriteBatch<'_> {
     fn get<T: DeserializeOwned>(&self, key: &Key) -> Result<Option<T>, Error> {
         WriteBatch::get(self, key)
-    }
-    fn list<T: DeserializeOwned>(&self, collection: &str) -> Result<Vec<T>, Error> {
-        WriteBatch::list(self, collection)
     }
 }
 pub(crate) struct WriteBatch<'a> {

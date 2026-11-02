@@ -109,7 +109,7 @@ jobs:
 
   macos-fixtures:
     if: github.event_name != 'workflow_dispatch' || inputs.source_sha == ''
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 25
     env:
       RUSTUP_TOOLCHAIN: "1.95.0"

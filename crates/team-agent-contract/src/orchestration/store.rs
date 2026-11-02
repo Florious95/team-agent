@@ -644,9 +644,6 @@ pub(crate) fn unleased(store: &impl ReadRecords, seat: &SeatId) -> Result<(), Er
         Ok(())
     }
 }
-pub(crate) fn next_id(_store: &impl ReadRecords, prefix: &str) -> Result<String, Error> {
-    Ok(format!("{prefix}_{}", projection::nonce()))
-}
 fn route_keys(seat: &SeatRecord) -> Vec<Key> {
     let mut keys = vec![Key::new("bindings", &seat.binding_key)];
     // F0 reserves a unique binding, not the shared pre-spawn placeholder.
