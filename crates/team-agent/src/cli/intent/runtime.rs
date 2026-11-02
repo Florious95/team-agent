@@ -648,7 +648,7 @@ fn add(
             "agent {id} has unrecognized lifecycle history; refusing to re-admit it"
         )));
     }
-    let patch = plan.intent.patch.clone();
+    let patch = dynamic::creation_patch(id, source.as_deref(), &plan.intent.patch)?;
     let role_file = match source {
         Some(path) => {
             let (meta, _) = checked(crate::compiler::read_front_matter(&path))?;
@@ -663,14 +663,7 @@ fn add(
             role(plan, selected, id, Some(&path))?;
             path.to_string_lossy().into_owned()
         }
-        None => {
-            if patch.provider.is_none() || patch.bypass.is_none() {
-                return Err(usage(
-                    "unknown agent: supply a complete --role-file or --provider and --bypass",
-                ));
-            }
-            String::new()
-        }
+        None => String::new(),
     };
     plan.steps.push(Step::AddAgent(AddAgentArgs {
         agent: id.into(),
@@ -771,6 +764,35 @@ fn plan_with_observer(
         .as_ref()
         .is_some_and(|s| crate::lifecycle::launch::surface_has_runtime_team(&s.state, &s.team_key));
     if !initialized {
+        if plan.intent.verb == Verb::Start && !new_named_team {
+            if let Subject::Agent(id) = &plan.intent.subject {
+                let id = id.as_str().to_owned();
+                let source = plan.intent.role_file.clone().or_else(|| {
+                    let directory = selected.as_ref().map(|s| s.team_dir.as_path())
+                        .unwrap_or(&plan.scope.workspace);
+                    let path = directory.join("agents").join(format!("{id}.md"));
+                    path.is_file().then_some(path)
+                });
+                let role = dynamic::initial_role(&id, source.as_deref(), &plan.intent.patch)?;
+                if let Some(source) = source {
+                    remember(&mut plan, &source)?;
+                }
+                let team = plan.intent.team.clone().unwrap_or_else(|| "current".into());
+                plan.scope.team = Some(team.clone());
+                let args = QuickStartArgs {
+                    workspace: plan.scope.workspace.clone(),
+                    agents_dir: plan.scope.workspace.join(".team").join(format!("adhoc-{id}")),
+                    name: None,
+                    team_id: Some(team),
+                    yes: false,
+                    json: true,
+                    detail: true,
+                    backend: None,
+                };
+                plan.steps.push(Step::CreateAgent { args, agent: id, role });
+                return Ok(plan);
+            }
+        }
         if plan.intent.verb != Verb::Start || !matches!(plan.intent.subject, Subject::Team { .. }) {
             return Err(refusal("no initialized team; use start --from TEAMDIR"));
         }
@@ -1263,6 +1285,24 @@ pub(super) fn recheck(plan: &Plan, step: &Step, after_stop: bool) -> Result<(), 
                 path.display()
             )));
         }
+    }
+    if let Step::CreateAgent { args, .. } = step {
+        let selected = resolve_active_team_readonly(
+            &args.workspace, args.team_id.as_deref(), SelectorMode::RuntimeOnly,
+        )?;
+        if crate::state::persist::runtime_state_path(&args.workspace).is_file()
+            && crate::lifecycle::launch::surface_has_runtime_team(&selected.state, &selected.team_key)
+        {
+            return Err(refusal("team initialized since planning; retry the agent start"));
+        }
+        if selected.state.get("team_owner").and_then(Value::as_object).is_none_or(|owner| owner.is_empty())
+            && std::env::var("TEAM_AGENT_LEADER_SESSION_UUID").ok().is_none_or(|uuid| uuid.is_empty())
+        {
+            return Err(refusal("start a leader with team-agent pi or team-agent claude before creating an ad-hoc team"));
+        }
+        return checked(crate::lifecycle::launch::ensure_owner_allowed_for_state(
+            &selected.state, step.agent().map(AgentId::new).as_ref(),
+        ));
     }
     if let Step::CreateTeam(args) = step {
         let role_dir = args.agents_dir.join("agents");

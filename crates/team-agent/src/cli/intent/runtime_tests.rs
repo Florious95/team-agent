@@ -471,7 +471,7 @@ fn no_eligible_restart_preserves_scoped_held_and_stopped_skip_reasons() {
 
 #[test]
 #[serial_test::serial(env)]
-fn role_only_add_and_absent_creation_need_explicit_decisions() {
+fn role_only_add_preserves_source_and_absent_creation_uses_defaults() {
     let (root, mut intent) = fixture(&["one"]);
     install(root.path(), &[("one", "stopped", false)]);
     write_role(root.path(), "two");
@@ -485,8 +485,14 @@ fn role_only_add_and_absent_creation_need_explicit_decisions() {
         Path::new(&args.role_file),
         root.path().join("agents/two.md")
     );
-    intent.subject = Subject::Agent(AgentId::new("typo"));
-    assert!(plan_with_observer(intent.clone(), |_, _, _| panic!()).is_err());
+    intent.subject = Subject::Agent(AgentId::new("new-worker"));
+    let defaults = plan_with_observer(intent.clone(), |_, _, _| panic!()).unwrap();
+    let Step::AddAgent(args) = &defaults.steps[0] else { panic!() };
+    assert!(args.role_file.is_empty());
+    assert_eq!(args.role_config.provider.as_deref(), Some("pi"));
+    assert_eq!(args.role_config.bypass, Some(false));
+    assert_eq!(args.role_config.model, None);
+    assert!(!root.path().join("agents/new-worker.md").exists());
     intent.patch.provider = Some("pi".into());
     intent.patch.bypass = Some(true);
     assert!(matches!(

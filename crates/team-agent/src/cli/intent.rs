@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 mod runtime;
+mod dynamic;
 #[cfg(test)]
 mod tests;
 
@@ -72,6 +73,7 @@ pub(super) enum Step {
         compiled: crate::model::yaml::Value,
     },
     CreateTeam(QuickStartArgs),
+    CreateAgent { args: QuickStartArgs, agent: String, role: String },
     StartAgent(StartAgentArgs),
     AddAgent(AddAgentArgs),
     StopAgent(StopAgentArgs),
@@ -83,6 +85,7 @@ impl Step {
         match self {
             Self::RestoreSpec { .. } => "restore_runtime_spec",
             Self::CreateTeam(_) => "quick_start",
+            Self::CreateAgent { .. } => "create_agent",
             Self::StartAgent(_) => "start_agent",
             Self::AddAgent(_) => "add_agent",
             Self::StopAgent(_) => "stop_agent",
@@ -92,6 +95,7 @@ impl Step {
     }
     fn agent(&self) -> Option<&str> {
         match self {
+            Self::CreateAgent { agent, .. } => Some(agent),
             Self::StartAgent(a) => Some(&a.agent),
             Self::AddAgent(a) => Some(&a.agent),
             Self::StopAgent(a) => Some(&a.agent),
@@ -116,6 +120,7 @@ impl Step {
                 ))
             }
             Self::CreateTeam(a) => cmd_quick_start(a),
+            Self::CreateAgent { args, agent, role } => dynamic::execute(args, agent, role),
             Self::StartAgent(a) => cmd_start_agent(a),
             Self::AddAgent(a) => cmd_add_agent(a),
             Self::StopAgent(a) => cmd_stop_agent(a),
@@ -140,8 +145,8 @@ pub(super) fn help(command: &str) -> String {
     let (purpose, usage, options, examples, next) = match command {
         "start" => (
             "Start a team or one agent without replacing verified running processes.",
-            "[AGENT|./TEAMDIR] [--from TEAMDIR] [--workspace PATH] [--team KEY] [--session preserve|auto] [--dry-run] [--json]",
-            "--from selects TEAM.md and agents/; all relative paths use the calling directory.\nAgent IDs such as reviewer.v2 stay agent IDs even when a same-named directory exists.\nTeam start preserves explicitly stopped seats; use agent start ID to reactivate one seat.\n--role-file or explicit --provider and --bypass true|false provide new-agent decisions.\n--model, --effort, --prompt and --profile update a stopped agent; stop a running agent first.\nSession defaults to preserve; auto only permits the original legal fresh fallback.\n--dry-run performs no lifecycle action; final locked admission remains deferred.\nAlready running does not claim role-file synchronization or business readiness.",
+            "[AGENT [PROMPT...]|./TEAMDIR] [--from TEAMDIR] [--workspace PATH] [--team KEY] [--session preserve|auto] [--dry-run] [--json]",
+            "--from selects TEAM.md and agents/; all relative paths use the calling directory.\nAgent IDs such as reviewer.v2 stay agent IDs even when a same-named directory exists.\nTeam start preserves explicitly stopped seats; use agent start ID to reactivate one seat.\nMissing agents are created automatically (pi, native default model, bypass=false); an uninitialized workspace uses team current.\n--role-file, --provider, --model and --bypass true|false customize a new agent.\n--model, --effort, --prompt and --profile update a stopped agent; stop a running agent first.\nSession defaults to preserve; auto only permits the original legal fresh fallback.\n--dry-run performs no lifecycle action; final locked admission remains deferred.\nAlready running does not claim role-file synchronization or business readiness.",
             "  team-agent start --from . --dry-run --json\n  team-agent start reviewer --dry-run --json",
             "Use team-agent status and team-agent inbox leader -n 3 for actual replies.",
         ),
@@ -503,9 +508,12 @@ fn lifecycle_intent(
     if role_file.as_ref().is_some_and(|path| !path.is_file()) {
         return Err(usage("--role-file must be an existing regular file"));
     }
-    let patch = if verb == Verb::Start {
+    if pos.len() > 1 && (verb != Verb::Start || !matches!(subject, Subject::Agent(_)) || flags.contains_key("--prompt")) {
+        return Err(usage("trailing prompt requires an agent start and cannot be combined with --prompt"));
+    }
+    let mut patch = if verb == Verb::Start {
         let mut role_args = vec!["intent-agent".to_string()];
-        for token in tokens {
+        for token in tokens.iter().take_while(|token| token.as_str() != "--") {
             if token.split_once('=').is_some_and(|(k, _)| {
                 matches!(
                     k,
@@ -519,6 +527,9 @@ fn lifecycle_intent(
     } else {
         RoleConfigPatch::default()
     };
+    if pos.len() > 1 {
+        patch.prompt = Some(pos[1..].join(" "));
+    }
     if matches!(subject, Subject::Team { .. })
         && (patch != RoleConfigPatch::default() || role_file.is_some())
     {
@@ -632,7 +643,7 @@ fn execute_plan(
                 })
                 .map(str::to_string);
         }
-        if matches!(step, Step::CreateTeam(_)) {
+        if matches!(step, Step::CreateTeam(_) | Step::CreateAgent { .. }) {
             if let Some(team) = receipt
                 .get("team")
                 .and_then(Value::as_str)

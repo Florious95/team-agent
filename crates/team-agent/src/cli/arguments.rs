@@ -40,7 +40,7 @@ fn schema(command: &str) -> Option<Schema> {
                 ("--profile", Token),
                 ("--role-file", Path),
             ],
-            1,
+            usize::MAX,
         ),
         "intent-stop" | "stop" => (&[], 1),
         "intent-restart" => (
