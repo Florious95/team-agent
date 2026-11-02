@@ -18,7 +18,7 @@ mod framework;
 #[path = "support/hermetic.rs"]
 mod hermetic;
 
-use framework::{run_ta, ta_binary, tmux_windows_on_socket, wait_for, TaResult, TestWorkspace};
+use framework::{run_ta, run_ta_env, ta_binary, tmux_windows_on_socket, wait_for, TaResult, TestWorkspace};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
@@ -53,7 +53,8 @@ fn ok(out: &TaResult, what: &str) -> Value {
     body
 }
 
-/// Register every tmux endpoint the SUT recorded so Drop kills exactly them.
+/// Register every SUT-created (`tmux-<uid>/ta-*`) endpoint so Drop kills
+/// exactly them. The fixture caller's own socket stays with its fixture.
 fn own_sockets(ws: &TestWorkspace) {
     let Ok(raw) = fs::read_to_string(ws.state_json_path()) else { return };
     let state: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
@@ -65,7 +66,9 @@ fn own_sockets(ws: &TestWorkspace) {
     let mut seen = Vec::new();
     for socket in sockets.iter().filter_map(Value::as_str).filter(|s| !s.is_empty()) {
         let path = PathBuf::from(socket);
-        if path.exists() && !seen.contains(&path) {
+        let sut_owned = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("ta-"))
+            && path.parent().and_then(Path::file_name).and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("tmux-"));
+        if sut_owned && path.exists() && !seen.contains(&path) {
             ws.register_owned_tmux_socket(&path);
             seen.push(path);
         }
@@ -112,6 +115,11 @@ fn assert_seat_up(ws: &TestWorkspace, agent: &str, provider: &str) -> Value {
         pane_text(socket, &target)
     );
     row
+}
+
+fn executable(path: &Path, body: &str) {
+    fs::write(path, body).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 fn spec_agent(ws: &TestWorkspace, agent: &str) -> Yaml {
@@ -228,6 +236,30 @@ fn dry_run_and_invalid_arguments_leave_an_empty_directory_untouched() {
     }
 }
 
+#[test]
+fn a_failed_dynamic_start_does_not_poison_the_retry() {
+    let ws = TestWorkspace::new("dynstart-retry").with_owned_caller();
+    assert_virgin(&ws);
+    // A provider whose launch preflight fails: the first attempt cannot start a seat.
+    let bin = ws.caller.as_ref().unwrap().root().join("dynstart-retry-bin");
+    fs::create_dir_all(&bin).unwrap();
+    executable(&bin.join("pi"), "#!/bin/sh\nexit 1\n");
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+    let first = run_ta_env(
+        &ws,
+        &["start", "worker-1", "--provider", "pi", "--model", "openai-codex/gpt-6-luna", "--bypass", "false", "--json"],
+        &[("PATH", path.as_str())],
+    );
+    own_sockets(&ws);
+    assert!(!first.is_success(), "broken provider must fail the first attempt: {}", first.stdout);
+
+    // The user corrects the trailing arguments; the retry must not be refused.
+    let retry = start(&ws, "worker-1", &["--provider", "fake", "--bypass", "false"]);
+    own_sockets(&ws);
+    ok(&retry, "retry with corrected arguments after a failed dynamic start");
+    assert_seat_up(&ws, "worker-1", "fake");
+}
+
 /// The real journey: `team-agent claude` opens a leader in an empty directory
 /// (a PATH `claude` shim stands in for Claude Code), then the leader's tool
 /// context runs `start`. A bare start inherits the leader's provider.
@@ -240,10 +272,11 @@ fn start_from_a_leader_opened_by_the_launcher_in_an_empty_directory() {
     let bin = lab.join("bin");
     fs::create_dir_all(&bin).unwrap();
     let leader_env = lab.join("leader.env");
-    let shim = bin.join("claude");
-    fs::write(
-        &shim,
-        format!(
+    // Fail closed: a default that resolves to Pi must never launch the host's real Pi.
+    executable(&bin.join("pi"), "#!/bin/sh\nexit 1\n");
+    executable(
+        &bin.join("claude"),
+        &format!(
             r#"#!/bin/sh
 if [ -n "${{TEAM_AGENT_AGENT_ID:-}}" ]; then
   env > '{lab}/worker-'"$TEAM_AGENT_AGENT_ID"'.env'
@@ -260,9 +293,7 @@ while :; do sleep 1; done
             ta = ta_binary().display(),
             env = leader_env.display(),
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+    );
 
     // The launcher needs a terminal: host it in an exact-owned tmux server.
     let host = hermetic::short_tmux_socket("dynlead");

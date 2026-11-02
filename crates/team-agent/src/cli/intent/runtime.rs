@@ -648,7 +648,8 @@ fn add(
             "agent {id} has unrecognized lifecycle history; refusing to re-admit it"
         )));
     }
-    let patch = dynamic::creation_patch(id, source.as_deref(), &plan.intent.patch)?;
+    let default_provider = dynamic::default_provider(Some(&selected.state));
+    let patch = dynamic::creation_patch(id, source.as_deref(), &plan.intent.patch, &default_provider)?;
     let role_file = match source {
         Some(path) => {
             let (meta, _) = checked(crate::compiler::read_front_matter(&path))?;
@@ -773,7 +774,8 @@ fn plan_with_observer(
                     let path = directory.join("agents").join(format!("{id}.md"));
                     path.is_file().then_some(path)
                 });
-                let role = dynamic::initial_role(&id, source.as_deref(), &plan.intent.patch)?;
+                let default_provider = dynamic::default_provider(selected.as_ref().map(|s| &s.state));
+                let role = dynamic::initial_role(&id, source.as_deref(), &plan.intent.patch, &default_provider)?;
                 if let Some(source) = source {
                     remember(&mut plan, &source)?;
                 }
@@ -1287,18 +1289,16 @@ pub(super) fn recheck(plan: &Plan, step: &Step, after_stop: bool) -> Result<(), 
         }
     }
     if let Step::CreateAgent { args, .. } = step {
+        // A fresh workspace has no selectable team yet. The original quick-start
+        // transaction owns caller admission and the first current-team commit.
+        if !crate::state::persist::runtime_state_path(&args.workspace).exists() {
+            return Ok(());
+        }
         let selected = resolve_active_team_readonly(
             &args.workspace, args.team_id.as_deref(), SelectorMode::RuntimeOnly,
         )?;
-        if crate::state::persist::runtime_state_path(&args.workspace).is_file()
-            && crate::lifecycle::launch::surface_has_runtime_team(&selected.state, &selected.team_key)
-        {
+        if crate::lifecycle::launch::surface_has_runtime_team(&selected.state, &selected.team_key) {
             return Err(refusal("team initialized since planning; retry the agent start"));
-        }
-        if selected.state.get("team_owner").and_then(Value::as_object).is_none_or(|owner| owner.is_empty())
-            && std::env::var("TEAM_AGENT_LEADER_SESSION_UUID").ok().is_none_or(|uuid| uuid.is_empty())
-        {
-            return Err(refusal("start a leader with team-agent pi or team-agent claude before creating an ad-hoc team"));
         }
         return checked(crate::lifecycle::launch::ensure_owner_allowed_for_state(
             &selected.state, step.agent().map(AgentId::new).as_ref(),

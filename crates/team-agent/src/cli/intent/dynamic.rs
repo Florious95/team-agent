@@ -3,10 +3,28 @@ use super::*;
 use crate::model::yaml::Value as Yaml;
 use std::io::Write;
 
+pub(super) fn default_provider(state: Option<&Value>) -> String {
+    use crate::provider::wire::{parse_provider, provider_wire};
+    state
+        .and_then(|state| state.pointer("/team_owner/provider"))
+        .and_then(Value::as_str)
+        .and_then(parse_provider)
+        .or_else(|| {
+            std::env::var("TEAM_AGENT_LEADER_PROVIDER")
+                .ok()
+                .as_deref()
+                .and_then(parse_provider)
+        })
+        .map(provider_wire)
+        .unwrap_or("pi")
+        .to_owned()
+}
+
 pub(super) fn creation_patch(
     id: &str,
     source: Option<&Path>,
     patch: &RoleConfigPatch,
+    default_provider: &str,
 ) -> Result<RoleConfigPatch, CliError> {
     let meta = source
         .map(crate::compiler::read_front_matter)
@@ -15,7 +33,7 @@ pub(super) fn creation_patch(
         .map(|(meta, _)| meta);
     let mut patch = patch.clone();
     if patch.provider.is_none() && meta.as_ref().and_then(|m| m.get("provider")).is_none() {
-        patch.provider = Some("pi".into());
+        patch.provider = Some(default_provider.into());
     }
     if patch.bypass.is_none()
         && meta
@@ -37,8 +55,9 @@ pub(super) fn initial_role(
     id: &str,
     source: Option<&Path>,
     patch: &RoleConfigPatch,
+    default_provider: &str,
 ) -> Result<String, CliError> {
-    let patch = creation_patch(id, source, patch)?;
+    let patch = creation_patch(id, source, patch, default_provider)?;
     let text = source
         .map(std::fs::read_to_string)
         .transpose()?
@@ -52,35 +71,114 @@ pub(super) fn execute(
     agent: &str,
     role: &str,
 ) -> Result<CmdResult, CliError> {
-    // Sources are durable recovery inputs, not a second runtime registry. Never
-    // overwrite a user's document or a concurrent start's differently configured role.
+    // The existing seat lock is reentrant for the downstream launch. Keep source
+    // creation and rollback in that same exclusion domain, including concurrent starts.
+    let id = AgentId::new(agent);
+    let _lock = crate::lifecycle::lock::acquire_seat_lifecycle_lock(
+        crate::lifecycle::lock::LifecycleLockRequest {
+            workspace: &args.workspace,
+            operation: "dynamic-start",
+            team: args.team_id.as_deref(),
+            agent_id: Some(&id),
+        },
+    )
+    .map_err(|error| refusal(error.to_string()))?;
+    execute_with(args, agent, role, cmd_quick_start)
+}
+
+fn execute_with(
+    args: &QuickStartArgs,
+    agent: &str,
+    role: &str,
+    launch: impl FnOnce(&QuickStartArgs) -> Result<CmdResult, CliError>,
+) -> Result<CmdResult, CliError> {
     let team = args.team_id.as_deref().unwrap_or("current");
     let metadata = Yaml::Map(vec![("name".into(), Yaml::Str(team.into()))]);
     let team_text = format!("---\n{}---\n", crate::model::yaml::dumps(&metadata));
-    std::fs::create_dir_all(args.agents_dir.join("agents"))?;
-    create_source(&args.agents_dir.join("TEAM.md"), &team_text)?;
-    create_source(
-        &args.agents_dir.join("agents").join(format!("{agent}.md")),
-        role,
-    )?;
-    cmd_quick_start(args)
+    let role_dir = args.agents_dir.join("agents");
+    let directories = [&args.agents_dir, &role_dir];
+    let absent: Vec<_> = directories
+        .into_iter()
+        .filter(|path| !path.exists())
+        .collect();
+    let mut created = Vec::new();
+    let result = (|| {
+        std::fs::create_dir_all(&role_dir)?;
+        for (path, text) in [
+            (args.agents_dir.join("TEAM.md"), team_text.as_str()),
+            (role_dir.join(format!("{agent}.md")), role),
+        ] {
+            if create_source(&path, text)? {
+                created.push((path, text));
+            }
+        }
+        launch(args)
+    })();
+    // Keep source truth if quick-start committed a seat, even when readiness is
+    // partial. Otherwise roll back only this attempt's new files, never user input.
+    if !result
+        .as_ref()
+        .is_ok_and(|result| result.exit == ExitCode::Ok)
+        && !source_adopted(args, agent)
+    {
+        for (path, text) in created.into_iter().rev() {
+            if std::fs::read(&path).is_ok_and(|bytes| bytes == text.as_bytes()) {
+                std::fs::remove_file(path)?;
+            }
+        }
+        for path in absent.into_iter().rev() {
+            match std::fs::remove_dir(path) {
+                Ok(()) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                    ) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    result
 }
 
-fn create_source(path: &Path, text: &str) -> Result<(), CliError> {
+fn source_adopted(args: &QuickStartArgs, agent: &str) -> bool {
+    // Unlike team selection, this also accepts an empty post-rollback state.
+    // Unreadable concurrent state is not permission to remove recovery inputs.
+    crate::state::persist::load_runtime_state_without_migrations(&args.workspace)
+        .map(|state| {
+            !state.is_object()
+                || crate::state::projection::project_top_level_view(
+                    &state,
+                    args.team_id.as_deref().unwrap_or("current"),
+                )
+                .get("agents")
+                .and_then(|agents| agents.get(agent))
+                .is_some()
+        })
+        .unwrap_or(true)
+}
+
+fn create_source(path: &Path, text: &str) -> Result<bool, CliError> {
     match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
     {
         Ok(mut file) => {
-            file.write_all(text.as_bytes())?;
-            file.sync_all()?;
-            Ok(())
+            if let Err(error) = file
+                .write_all(text.as_bytes())
+                .and_then(|()| file.sync_all())
+            {
+                drop(file);
+                std::fs::remove_file(path)?;
+                return Err(error.into());
+            }
+            Ok(true)
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             if std::fs::symlink_metadata(path)?.is_file() && std::fs::read(path)? == text.as_bytes()
             {
-                Ok(())
+                Ok(false)
             } else {
                 Err(refusal(format!(
                     "ad-hoc source changed: {}",
@@ -117,11 +215,15 @@ mod tests {
         assert_eq!(agent, "worker-1");
         assert_eq!(args.team_id.as_deref(), Some("current"));
         let (meta, body) = crate::compiler::split_front_matter(role);
-        assert_eq!(meta.get("provider").and_then(Yaml::as_str), Some("pi"));
+        assert_eq!(
+            meta.get("provider").and_then(Yaml::as_str),
+            Some(default_provider(None).as_str())
+        );
         assert_eq!(
             meta.get("dangerously_skip_permissions"),
             Some(&Yaml::Bool(false))
         );
+        runtime::recheck(&plan, &plan.steps[0], false).unwrap();
         assert!(meta.get("model").is_none());
         assert!(body.contains("worker-1"));
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
@@ -135,14 +237,19 @@ mod tests {
         std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         let state = json!({"active_team_key":"current", "team_key":"current", "teams":{"current":{
             "agents":{}, "session_name":null, "tasks":{},
-            "team_owner":{"pane_id":"%0", "provider":"pi", "owner_epoch":1},
+            "team_owner":{"pane_id":"%0", "provider":"claude", "owner_epoch":1},
             "leader_receiver":{"pane_id":"%0", "status":"attached"}
         }}});
         let bytes = serde_json::to_vec(&state).unwrap();
         std::fs::write(&state_path, &bytes).unwrap();
         let intent = parse_start(root.path(), &["worker-1", "--dry-run"]).unwrap();
         let plan = runtime::plan(intent).unwrap();
-        assert!(matches!(&plan.steps[0], Step::CreateAgent { agent, .. } if agent == "worker-1"));
+        let Step::CreateAgent { agent, role, .. } = &plan.steps[0] else {
+            panic!()
+        };
+        assert_eq!(agent, "worker-1");
+        let (meta, _) = crate::compiler::split_front_matter(role);
+        assert_eq!(meta.get("provider").and_then(Yaml::as_str), Some("claude"));
         assert_eq!(plan.scope.team.as_deref(), Some("current"));
         assert_eq!(std::fs::read(&state_path).unwrap(), bytes);
         assert!(!root.path().join(".team/adhoc-worker-1").exists());
@@ -168,7 +275,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(intent.patch.prompt.as_deref(), Some("Review the changes"));
-        let role = initial_role("worker-1", None, &intent.patch).unwrap();
+        let role = initial_role("worker-1", None, &intent.patch, "pi").unwrap();
         let (meta, body) = crate::compiler::split_front_matter(&role);
         assert_eq!(meta.get("provider").and_then(Yaml::as_str), Some("claude"));
         assert_eq!(meta.get("model").and_then(Yaml::as_str), Some("sonnet"));
@@ -202,7 +309,7 @@ mod tests {
         let text = "---\nname: worker-1\nprovider: claude\nmodel: sonnet\ndangerously_skip_permissions: true\n---\nOriginal task\n";
         std::fs::write(&path, text).unwrap();
         assert_eq!(
-            initial_role("worker-1", Some(&path), &RoleConfigPatch::default()).unwrap(),
+            initial_role("worker-1", Some(&path), &RoleConfigPatch::default(), "pi").unwrap(),
             text
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
@@ -213,7 +320,8 @@ mod tests {
         let root = Sandbox::new();
         let path = root.path().join("worker-1.md");
         std::fs::write(&path, "Review the changes\n").unwrap();
-        let role = initial_role("worker-1", Some(&path), &RoleConfigPatch::default()).unwrap();
+        let role =
+            initial_role("worker-1", Some(&path), &RoleConfigPatch::default(), "pi").unwrap();
         let (meta, body) = crate::compiler::split_front_matter(&role);
         assert_eq!(meta.get("provider").and_then(Yaml::as_str), Some("pi"));
         assert_eq!(
@@ -221,6 +329,51 @@ mod tests {
             Some(&Yaml::Bool(false))
         );
         assert_eq!(body.trim(), "Review the changes");
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn refused_initial_start_removes_sources_and_allows_changed_retry() {
+        let root = Sandbox::new();
+        let mut plan = runtime::plan(parse_start(root.path(), &["worker-1"]).unwrap()).unwrap();
+        let Step::CreateAgent { args, agent, role } = plan.steps.remove(0) else {
+            panic!()
+        };
+        assert!(execute_with(&args, &agent, &role, |_| Err(refusal("preflight failed"))).is_err());
+        assert!(!args.agents_dir.exists());
+        assert!(!crate::state::persist::runtime_state_path(root.path()).exists());
+        let changed = initial_role(&agent, None, &RoleConfigPatch::default(), "claude").unwrap();
+        execute_with(&args, &agent, &changed, |_| {
+            Ok(CmdResult::from_json(json!({"ok":true}), true))
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(args.agents_dir.join("agents/worker-1.md")).unwrap(),
+            changed
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn partial_start_keeps_sources_adopted_by_runtime() {
+        let root = Sandbox::new();
+        let mut plan = runtime::plan(parse_start(root.path(), &["worker-1"]).unwrap()).unwrap();
+        let Step::CreateAgent { args, agent, role } = plan.steps.remove(0) else {
+            panic!()
+        };
+        let result = execute_with(&args, &agent, &role, |_| {
+            let state = json!({"active_team_key":"current", "team_key":"current", "teams":{"current":{
+                "team_key":"current", "status":"alive", "agents":{"worker-1":{"status":"starting"}}
+            }}});
+            std::fs::write(crate::state::persist::runtime_state_path(root.path()), serde_json::to_vec(&state).unwrap()).unwrap();
+            Ok(CmdResult::from_json(json!({"ok":false,"status":"partial"}), true))
+        }).unwrap();
+        assert_eq!(result.exit, ExitCode::Error);
+        assert!(source_adopted(&args, &agent));
+        assert_eq!(
+            std::fs::read_to_string(args.agents_dir.join("agents/worker-1.md")).unwrap(),
+            role
+        );
     }
 
     #[test]
