@@ -811,7 +811,7 @@ fn apply_persist_merge_contract_with_fork_target_preservation(
         // against the lock-held canonical team, not obsolete/misassigned root
         // rows. Nonprojected and legacy writers keep their existing root guard;
         // concurrent changes to the canonical roster remain protected below.
-        let latest_projection = top_level_team
+        let canonical_projection = top_level_team
             .as_deref()
             .and_then(|team| {
                 let incoming_agents = incoming.get("teams")?.get(team)?.get("agents")?;
@@ -821,7 +821,13 @@ fn apply_persist_merge_contract_with_fork_target_preservation(
                 latest.get("teams")?.get(team)
                     .filter(|entry| entry.get("agents").is_some_and(Value::is_object))
             })
-            .unwrap_or(latest);
+            .cloned()
+            .map(|mut entry| {
+                // Match the root read contract without changing canonical rows.
+                normalize_agent_session_state(&mut entry);
+                entry
+            });
+        let latest_projection = canonical_projection.as_ref().unwrap_or(latest);
         let mut topology_update_agent_ids =
             topology_updates_for_team(topology_updates, top_level_team.as_deref());
         topology_update_agent_ids.extend(endpoint_convergence_invalidated_agents(
