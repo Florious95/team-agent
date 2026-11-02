@@ -256,7 +256,7 @@ fn a_failed_dynamic_start_does_not_poison_the_retry() {
     // The user corrects the trailing arguments; the retry must not be refused.
     let retry = start(&ws, "worker-1", &["--provider", "fake", "--bypass", "false"]);
     own_sockets(&ws);
-    ok(&retry, "retry with corrected arguments after a failed dynamic start");
+    ok(&retry, &format!("retry with corrected arguments after a failed first attempt ({})", first.stdout));
     assert_seat_up(&ws, "worker-1", "fake");
 }
 
@@ -320,8 +320,14 @@ while :; do sleep 1; done
         "launcher never opened the leader; host pane={}",
         pane_text(host.to_str().unwrap(), "launch")
     );
-    let owner_before = ws.read_state().pointer(&format!("/teams/{TEAM}/team_owner")).cloned();
-    assert!(owner_before.is_some(), "launcher must incept a leader for `current`: {}", ws.read_state());
+    // Leader identity only; endpoint annotations may be filled in later.
+    let owner = |ws: &TestWorkspace| {
+        let state = ws.read_state();
+        let owner = &state["teams"][TEAM]["team_owner"];
+        ["pane_id", "provider", "leader_session_uuid", "owner_epoch"].map(|key| owner[key].clone())
+    };
+    let owner_before = owner(&ws);
+    assert!(owner_before[0].is_string(), "launcher must incept a leader for `current`: {}", ws.read_state());
 
     let leader_run = |args: &[&str]| -> TaResult {
         let mut command = Command::new(ta_binary());
@@ -353,6 +359,5 @@ while :; do sleep 1; done
     assert_seat_up(&ws, "worker-2", "claude");
     assert!(lab.join("worker-worker-2.env").is_file(), "bare seat must launch through the leader's provider command");
 
-    let owner_after = ws.read_state().pointer(&format!("/teams/{TEAM}/team_owner")).cloned();
-    assert_eq!(owner_after, owner_before, "dynamic start must not displace the leader");
+    assert_eq!(owner(&ws), owner_before, "dynamic start must not displace the leader");
 }

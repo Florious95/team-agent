@@ -71,6 +71,9 @@ pub(super) fn execute(
     agent: &str,
     role: &str,
 ) -> Result<CmdResult, CliError> {
+    // Legacy quick-start seeds its roster before materializing provider commands.
+    // Reject unavailable binaries/catalog models before that provisional seat exists.
+    preflight_role(role)?;
     // The existing seat lock is reentrant for the downstream launch. Keep source
     // creation and rollback in that same exclusion domain, including concurrent starts.
     let id = AgentId::new(agent);
@@ -84,6 +87,35 @@ pub(super) fn execute(
     )
     .map_err(|error| refusal(error.to_string()))?;
     execute_with(args, agent, role, cmd_quick_start)
+}
+
+fn preflight_role(role: &str) -> Result<(), CliError> {
+    use crate::provider::wire::{command_name, parse_provider};
+    let (meta, _) = crate::compiler::split_front_matter(role);
+    let key = meta.get("provider").and_then(Yaml::as_str).unwrap_or("pi");
+    // Contract providers already perform complete native admission in quick-start
+    // before its initial runtime-state write. Do not route them through legacy checks.
+    #[cfg(unix)]
+    if crate::contract_runtime::registry::declared(key).is_some() {
+        return Ok(());
+    }
+    let provider =
+        parse_provider(key).ok_or_else(|| refusal(format!("unknown provider: {key}")))?;
+    if !crate::provider::get_adapter(provider).is_installed() {
+        return Err(refusal(format!(
+            "Provider {key} command '{}' not found on PATH",
+            command_name(provider)
+        )));
+    }
+    if provider == crate::model::enums::Provider::Pi {
+        let (_, catalog) = crate::lifecycle::launch::pi_mcp::resolve_pi_executable_chain()
+            .map_err(|error| refusal(error.to_string()))?;
+        if let Some(model) = meta.get("model").and_then(Yaml::as_str) {
+            crate::lifecycle::launch::pi_mcp::select_exact_pi_model(&catalog, model)
+                .map_err(|error| refusal(error.to_string()))?;
+        }
+    }
+    Ok(())
 }
 
 fn execute_with(
@@ -355,6 +387,30 @@ mod tests {
 
     #[test]
     #[serial_test::serial(env)]
+    fn failed_provider_admission_never_seeds_a_seat_or_role_source() {
+        let root = Sandbox::new();
+        let intent = parse_start(
+            root.path(),
+            &[
+                "worker-1",
+                "--provider",
+                "pi",
+                "--model",
+                "team-agent-tests/missing-model",
+            ],
+        )
+        .unwrap();
+        let mut plan = runtime::plan(intent).unwrap();
+        let Step::CreateAgent { args, agent, role } = plan.steps.remove(0) else {
+            panic!()
+        };
+        assert!(execute(&args, &agent, &role).is_err());
+        assert!(!crate::state::persist::runtime_state_path(root.path()).exists());
+        assert!(!args.agents_dir.exists());
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
     fn partial_start_keeps_sources_adopted_by_runtime() {
         let root = Sandbox::new();
         let mut plan = runtime::plan(parse_start(root.path(), &["worker-1"]).unwrap()).unwrap();
@@ -365,7 +421,9 @@ mod tests {
             let state = json!({"active_team_key":"current", "team_key":"current", "teams":{"current":{
                 "team_key":"current", "status":"alive", "agents":{"worker-1":{"status":"starting"}}
             }}});
-            std::fs::write(crate::state::persist::runtime_state_path(root.path()), serde_json::to_vec(&state).unwrap()).unwrap();
+            let state_path = crate::state::persist::runtime_state_path(root.path());
+            std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+            std::fs::write(state_path, serde_json::to_vec(&state).unwrap()).unwrap();
             Ok(CmdResult::from_json(json!({"ok":false,"status":"partial"}), true))
         }).unwrap();
         assert_eq!(result.exit, ExitCode::Error);
