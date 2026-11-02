@@ -441,7 +441,7 @@ mod tests {
             scope: scope.clone(),
             endpoint: format!("framework:{}", scope.as_str()),
             candidate: "/fixture/team-agent".into(),
-            candidate_sha256: [0; 32],
+            candidate_sha256: team_agent_contract::contract::types::Digest([0; 32]),
             tmux: "/fixture/tmux".into(),
             transport_root: "/tmp/ta-purged-fixture".into(),
         };
