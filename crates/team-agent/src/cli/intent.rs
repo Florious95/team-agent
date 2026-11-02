@@ -319,6 +319,13 @@ fn run_canonical(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult
         explicit_agent,
         explicit_team,
     )?;
+    #[cfg(unix)]
+    if intent.verb == Verb::Restart && matches!(intent.subject, Subject::Team { .. }) {
+        if let Some(result) = crate::contract_runtime::recovery::restart(
+            &intent.workspace, intent.team.as_deref(),
+            checked.tokens.iter().any(|token| token == "--allow-fresh"), intent.dry_run, intent.json,
+        )? { return Ok(result); }
+    }
     let mut plan = runtime::plan(intent)?;
     let upgrade_workspace = plan.scope.workspace.clone();
     let upgrade = !plan.intent.dry_run && plan.no_eligible.is_none();

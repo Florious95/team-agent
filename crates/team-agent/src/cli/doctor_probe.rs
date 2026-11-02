@@ -678,6 +678,24 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
         format!("{team} resolved; cross-workspace inspection permitted"),
     )];
     let mut fix = None;
+    // Authority is a prerequisite for lifecycle repair. Missing panes cannot be
+    // repaired by restart when the native store itself was purged.
+    #[cfg(unix)]
+    if agents.values().any(crate::contract_runtime::framework::is_contract) {
+        if let Err(error) = crate::contract_runtime::backend::authority_check(workspace, team) {
+            let next = if matches!(error, crate::contract_runtime::backend::BackendError::Migration(_)) {
+                action("migrate", workspace, team)
+            } else if matches!(error, crate::contract_runtime::backend::BackendError::AuthorityLost { .. }) {
+                Action::manual(crate::contract_runtime::backend::authority_recovery_action(workspace, team, ""))
+            } else {
+                Action::manual(error.to_string())
+            };
+            links.push(Link::new(2, "FAIL", error.to_string()));
+            for n in 3..=6 { links.push(Link::new(n, "BLOCKED", "native authority unavailable")); }
+            return render(links, workspace, team, caller, (0, agents.len()), Some(next),
+                "native authority must be restored before lifecycle repair", args.json, started);
+        }
+    }
     let mut panes: HashMap<String, Vec<PaneInfo>> = HashMap::new();
     let mut host_error = None;
     let target_socket = socket(&selected.state);

@@ -38,6 +38,8 @@ use super::{
 pub enum BackendError {
     #[error("native migration: {0}")]
     Migration(String),
+    #[error("native_authority_lost: {root} has no contract manifest, legacy database, or import snapshot; temporary runtime files may have been purged. Restore native authority from backup before preserving sessions; migration cannot recreate missing authority")]
+    AuthorityLost { root: PathBuf },
     #[error("native configuration: {0}")]
     Configuration(#[from] super::config::ConfigError),
     #[error("native discovery: {0}")]
@@ -141,14 +143,46 @@ pub fn read_binding(workspace: &Path, team: &str) -> Result<Binding, BackendErro
         Ok(binding)
 }
 
+/// Inspect authority sources without opening SQLite, probing providers, or writing.
+/// An absent manifest is not evidence that an importable legacy store exists.
+fn check_authority(binding: &Binding) -> Result<(), BackendError> {
+    let present = |name: &str| -> Result<bool, BackendError> {
+        match std::fs::symlink_metadata(binding.transport_root.join(name)) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Ok(true),
+            Ok(_) => Err(BackendError::Metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    };
+    if present("contract.json")? { return Ok(()); }
+    if present("contract.db")? || present("legacy-import.json")? {
+        return Err(BackendError::Migration(format!(
+            "legacy contract store requires explicit migration; run team-agent migrate --workspace {} --team {}",
+            crate::cli::shell_quote(&binding.workspace.path.to_string_lossy()),
+            crate::cli::shell_quote(&binding.team))));
+    }
+    Err(BackendError::AuthorityLost { root: binding.transport_root.clone() })
+}
+
+pub fn authority_check(workspace: &Path, team: &str) -> Result<(), BackendError> {
+    match read_binding(workspace, team) {
+        Ok(binding) => check_authority(&binding),
+        Err(BackendError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 pub fn authority_is_missing(error: &BackendError) -> bool {
-    matches!(error, BackendError::Io(error) if error.kind() == std::io::ErrorKind::NotFound)
+    matches!(error, BackendError::AuthorityLost { .. })
+        || matches!(error, BackendError::Io(error) if error.kind() == std::io::ErrorKind::NotFound)
         || matches!(error, BackendError::Runtime(Error::Io(std::io::ErrorKind::NotFound)))
         || matches!(error, BackendError::Migration(message) if message.starts_with("legacy contract store requires explicit migration"))
 }
 
 pub fn observation_error(team: &str, seat: &str, error: &BackendError) -> String {
-    if authority_is_missing(error) {
+    if matches!(error, BackendError::AuthorityLost { .. } | BackendError::Migration(_)) {
+        error.to_string()
+    } else if authority_is_missing(error) {
         format!("native_authority_missing: {seat} has no native contract binding for team {team} in this workspace")
     } else {
         error.to_string()
@@ -156,8 +190,13 @@ pub fn observation_error(team: &str, seat: &str, error: &BackendError) -> String
 }
 
 pub fn authority_recovery_action(workspace: &Path, team: &str, seat: &str) -> String {
-    let legacy = read_binding(workspace, team)
-        .is_ok_and(|binding| binding.transport_root.join("contract.db").is_file());
+    if let Err(error @ BackendError::AuthorityLost { .. }) = authority_check(workspace, team) {
+        return format!("{error}; after explicitly accepting fresh conversations, use team-agent restart --allow-fresh --workspace {} --team {} (recovery refuses live or unobservable old carriers)",
+            crate::cli::shell_quote(&workspace.to_string_lossy()), crate::cli::shell_quote(team));
+    }
+    let legacy = read_binding(workspace, team).is_ok_and(|binding|
+        binding.transport_root.join("contract.db").is_file()
+            || binding.transport_root.join("legacy-import.json").is_file());
     let workspace = crate::cli::shell_quote(&workspace.to_string_lossy());
     let team = crate::cli::shell_quote(team);
     if legacy {
@@ -176,6 +215,7 @@ impl Backend {
     }
     fn open_mode(workspace: &Path, team: &str, readonly: bool) -> Result<Self, BackendError> {
         let mut binding = read_binding(workspace, team)?;
+        check_authority(&binding)?;
         // Build provenance is diagnostic, not an ownership or lifecycle fence.
         // New launches use this invocation, including relocated binaries.
         binding.candidate = std::env::current_exe()?.canonicalize()?;
@@ -221,16 +261,10 @@ impl Backend {
         let candidate_sha256 =
             fingerprint_file(&candidate, 1024 * 1024 * 1024, Duration::from_secs(10))?;
         std::fs::DirBuilder::new().mode(0o700).create(&root)?;
-        // OS entropy gives this transport parent a fresh incarnation even when
-        // a logical team/name is reused. This is not a native session identity.
-        let mut nonce = [0u8; 32];
-        std::fs::File::open("/dev/urandom")?.read_exact(&mut nonce)?;
-        let transport_root = Path::new("/tmp")
-            .canonicalize()?
-            .join(format!("ta-{}", &digest_hex(digest(&nonce))[..24]));
-        // K3 and K2 share the same owned short root. Keeping only the pointer
-        // under the project avoids macOS sockaddr_un limits without weakening
-        // lifecycle's store-root fence or adopting an existing transport.
+        // Authority and preserved native resources must outlive OS temp cleanup.
+        // The shared workspace tmux endpoint is independently short; this root
+        // contains files, not a sockaddr_un path, even for long workspace names.
+        let transport_root = root.join("authority");
         let store = ProjectionStore::create(&transport_root, scope.clone(), &endpoint(&scope))?;
         let binding = Binding {
             version: 1,
@@ -1349,6 +1383,9 @@ pub fn migrate_if_required(workspace: &Path, team: &str) -> Result<bool, Backend
         Err(BackendError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
     };
+    if let Err(error @ BackendError::AuthorityLost { .. }) = check_authority(&binding) {
+        return Err(error);
+    }
     if !binding.transport_root.join("contract.json").exists() {
         migrate(workspace, team)?;
         return Ok(true);
@@ -1389,6 +1426,10 @@ pub fn migrate(workspace: &Path, team: &str) -> Result<serde_json::Value, Backen
     // Re-read after acquiring the cutover lock so a concurrent invocation is
     // idempotent and cannot restore an older candidate binding.
     binding = read_binding(workspace, team)?;
+    match check_authority(&binding) {
+        Ok(()) | Err(BackendError::Migration(_)) => {},
+        Err(error) => return Err(error),
+    }
     let mut result = crate::importer::contract::migrate(&binding.transport_root, binding.scope.clone(), &binding.endpoint)
         .map_err(|error| BackendError::Migration(error.to_string()))?;
     let candidate = std::env::current_exe()?.canonicalize()?;
@@ -2164,5 +2205,53 @@ mod tests {
         }
         native.harness = "v3".into();
         assert!(policy_evidence(&provider, &native, candidate).unwrap().is_empty());
+    }
+
+    // Field 2026-11-02 (tmux桌面端, parity-audit-team): macOS /usr/libexec/tmp_cleaner runs daily at
+    // 00:00 and deletes every regular file under /tmp idle for >3 days. The leader was then trapped in
+    // restart -> "requires explicit migration" -> migrate -> "file fingerprint: Io(NotFound)" -> doctor -> restart.
+    fn purge_regular_files(root: &Path) {
+        for entry in std::fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            let metadata = std::fs::symlink_metadata(&path).unwrap();
+            if metadata.is_dir() { purge_regular_files(&path) } else if metadata.is_file() { std::fs::remove_file(&path).unwrap() }
+        }
+    }
+
+    #[test]
+    fn os_purged_transport_root_is_not_misdiagnosed_as_legacy_migration() {
+        let mut fixture = RoleFixture::new();
+        drop(fixture.canonical(SeatStatus::Ready, Phase::F4Commit, Outcome::Committed, None));
+        let workspace = fixture.binding.workspace.path.clone();
+        purge_regular_files(&fixture.binding.transport_root);
+        assert!(!fixture.binding.transport_root.join("contract.db").exists());
+        let error = Backend::open(&workspace, "test").err().expect("a purged authority cannot open as healthy");
+        assert!(!error.to_string().contains("requires explicit migration"),
+            "no legacy contract.db exists, so routing the leader to migrate is a false diagnosis: {error}");
+        let advice = authority_recovery_action(&workspace, "test", "worker");
+        assert!(!advice.contains("migrate"), "recovery advice must not route to migrate without a legacy store: {advice}");
+        let imported = crate::importer::contract::migrate(
+            &fixture.binding.transport_root, fixture.binding.scope.clone(), &fixture.binding.endpoint);
+        let message = imported.err().map(|error| error.to_string()).unwrap_or_default();
+        assert!(!message.contains("Io(NotFound)") && !message.contains("file fingerprint"),
+            "migrate must classify a purged root instead of leaking a raw fingerprint IO error: {message}");
+    }
+
+    #[test]
+    fn durable_contract_authority_is_not_created_in_os_purged_tmp() {
+        let fixture = RoleFixture::new();
+        let cwd = fixture.binding.workspace.clone();
+        std::fs::remove_dir(root_for(&cwd.path, &fixture.binding.scope)).unwrap();
+        let candidate = std::env::current_exe().unwrap().canonicalize().unwrap();
+        let backend = Backend::create(cwd.clone(), "test", candidate, "/controlled/tmux".into()).unwrap();
+        let transport = backend.binding.transport_root.clone();
+        let store = backend.store.root().canonicalize().unwrap();
+        drop(backend);
+        let _ = std::fs::remove_dir_all(&transport);
+        // Sockets may stay short under /tmp (sockaddr_un); durable projections may not, unless the
+        // workspace itself was placed there by the caller.
+        let purged = [Path::new("/tmp"), Path::new("/private/tmp")];
+        assert!(store.starts_with(&cwd.path) || !purged.iter().any(|tmp| store.starts_with(tmp)),
+            "durable contract authority {store:?} is placed where macOS tmp_cleaner deletes files idle >3 days");
     }
 }

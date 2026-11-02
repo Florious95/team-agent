@@ -14,4 +14,5 @@ pub mod mcp;
 pub mod prompt;
 pub mod pump;
 pub mod registry;
+pub(crate) mod recovery;
 mod workspace;
