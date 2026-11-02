@@ -17,6 +17,83 @@ fn error(value: impl std::fmt::Display) -> CliError {
     CliError::Runtime(value.to_string())
 }
 
+/// A contract seat may have only a native endpoint/pane receipt, not a legacy
+/// pane PID. Unknown probe failures never count as proof that it is gone.
+fn carrier_absent(id: &str, row: &serde_json::Value, tmux: &Path) -> Result<(), CliError> {
+    let mut proved = false;
+    if let Some(value) = row.get("pane_pid").filter(|value| !value.is_null()) {
+        let pid = value
+            .as_u64()
+            .and_then(|pid| i32::try_from(pid).ok())
+            .filter(|pid| *pid > 0)
+            .ok_or_else(|| error(format!("invalid saved carrier PID for {id}")))?;
+        if unsafe { libc::kill(pid, 0) } == 0
+            || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+        {
+            return Err(error(format!(
+                "native recovery refused: old carrier for {id} is live or unobservable"
+            )));
+        }
+        proved = true;
+    }
+    if row
+        .get("native_endpoint")
+        .is_some_and(|value| !value.is_null())
+        || row.get("native_pane").is_some_and(|value| !value.is_null())
+    {
+        let endpoint = row
+            .get("native_endpoint")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| Path::new(value).is_absolute())
+            .ok_or_else(|| error(format!("invalid saved native endpoint for {id}")))?;
+        let pane = row
+            .get("native_pane")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| {
+                value
+                    .strip_prefix('%')
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            })
+            .ok_or_else(|| error(format!("invalid saved native pane for {id}")))?;
+        use team_agent_contract::host::{
+            command::{OutputLimits, RealCommandRunner},
+            tmux::shared_server_absent,
+        };
+        let absent = shared_server_absent(
+            tmux,
+            Path::new(endpoint),
+            &mut RealCommandRunner::default(),
+            std::time::Duration::from_millis(500),
+            OutputLimits {
+                stdout: 65536,
+                stderr: 4096,
+                stdin: 1,
+            },
+        )
+        .map_err(error)?;
+        if !absent {
+            let targets = crate::transport_factory::bounded_endpoint_transport(
+                endpoint,
+                std::time::Instant::now() + std::time::Duration::from_millis(500),
+            )
+            .list_targets()
+            .map_err(error)?;
+            if targets.iter().any(|target| target.pane_id.as_str() == pane) {
+                return Err(error(format!(
+                    "native recovery refused: saved native pane for {id} still exists"
+                )));
+            }
+        }
+        proved = true;
+    }
+    if !proved {
+        return Err(error(format!(
+            "native recovery cannot prove old carrier death for {id}"
+        )));
+    }
+    Ok(())
+}
+
 /// None means ordinary lifecycle planning still owns this request. Both the
 /// dry run and admission use the same whole-scope dead-carrier checks.
 pub(crate) fn restart(
@@ -66,26 +143,18 @@ pub(crate) fn restart(
                 .get("contract_instance")
                 .and_then(serde_json::Value::as_str)
                 .is_none()
+                && row
+                    .get("native_endpoint")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none()
+                && row
+                    .get("native_pane")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none()
             {
                 continue;
             }
-            let pid = row
-                .get("pane_pid")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|pid| i32::try_from(pid).ok())
-                .filter(|pid| *pid > 0)
-                .ok_or_else(|| {
-                    error(format!(
-                        "native recovery cannot prove old carrier death for {id}"
-                    ))
-                })?;
-            if unsafe { libc::kill(pid, 0) } == 0
-                || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-            {
-                return Err(error(format!(
-                    "native recovery refused: old carrier for {id} is live or unobservable"
-                )));
-            }
+            carrier_absent(id, row, &binding.tmux)?;
         }
         let transport =
             crate::lifecycle::restart::lifecycle_worker_tmux_backend_selection_for_state(
@@ -239,4 +308,49 @@ pub(crate) fn restart(
         "root":binding.transport_root,"agents":outcomes,"legacy_workers":"unchanged"}),
         as_json,
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_receipt_without_legacy_pid_can_prove_absence() {
+        let endpoint = Path::new("/tmp").join(format!(
+            "ta-recovery-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(!endpoint.exists());
+        let missing_tmux = Path::new("/fixture/not-an-executable");
+        let row = json!({"native_endpoint":endpoint,"native_pane":"%8"});
+        assert!(carrier_absent("seat", &row, missing_tmux).is_ok());
+        assert!(
+            !endpoint.exists(),
+            "absence observation must not start a server"
+        );
+        assert!(carrier_absent("seat", &json!({}), missing_tmux).is_err());
+        assert!(carrier_absent(
+            "seat",
+            &json!({"pane_pid":std::process::id()}),
+            missing_tmux
+        )
+        .is_err());
+        assert!(carrier_absent(
+            "seat",
+            &json!({"native_endpoint":endpoint,"native_pane":"not-a-pane"}),
+            missing_tmux
+        )
+        .is_err());
+        let socket = std::os::unix::net::UnixListener::bind(&endpoint).unwrap();
+        assert!(
+            carrier_absent("seat", &row, missing_tmux).is_err(),
+            "unknown probe failure is not death proof"
+        );
+        drop(socket);
+        std::fs::remove_file(endpoint).unwrap();
+    }
 }

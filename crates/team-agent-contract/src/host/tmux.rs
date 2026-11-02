@@ -286,7 +286,7 @@ fn confirms_no_server(receipt: &CommandReceipt, endpoint: &std::path::Path) -> b
 
 /// Read-only, bounded observation of a shared server. A stale socket is not
 /// proof of a live server, and an arbitrary client failure is not proof of death.
-pub(crate) fn shared_server_absent(
+pub fn shared_server_absent(
     tmux: &std::path::Path,
     endpoint: &std::path::Path,
     runner: &mut impl CommandRunner,
@@ -374,10 +374,22 @@ impl<R: CommandRunner> TmuxHost<R> {
         limits: HostLimits,
         runner: R,
     ) -> Result<Self, HostError> {
+        let endpoint = directory.path().join("tmux.sock");
+        Self::at_endpoint(directory, executable, limits, runner, endpoint)
+    }
+
+    fn at_endpoint(
+        directory: ScopedDirectory,
+        executable: PathBuf,
+        limits: HostLimits,
+        runner: R,
+        endpoint: PathBuf,
+    ) -> Result<Self, HostError> {
         crate::contract::types::require_absolute(&executable, "tmux executable")
             .map_err(|_| HostError::new("tmux executable", HostErrorKind::Invalid))?;
         directory.check_live()?;
-        let endpoint = directory.path().join("tmux.sock");
+        // Validate the actual socket, not a hypothetical socket inside durable
+        // resource storage. Private hosts still use <directory>/tmux.sock.
         // macOS sockaddr_un is the smaller boundary; no fallback to a shared/default endpoint.
         if endpoint.as_os_str().as_encoded_bytes().len() >= 104
             || endpoint.to_str().is_none()
@@ -451,8 +463,7 @@ impl<R: CommandRunner> TmuxHost<R> {
     ) -> Result<Self, HostError> {
         crate::contract::types::require_absolute(&shared.endpoint, "workspace tmux endpoint")
             .map_err(|_| HostError::new("workspace tmux endpoint", HostErrorKind::Invalid))?;
-        let mut host = Self::new(directory, executable, limits, runner)?;
-        if shared.endpoint == host.endpoint || shared.endpoint.to_str().is_none()
+        if shared.endpoint == directory.path().join("tmux.sock") || shared.endpoint.to_str().is_none()
             || shared.endpoint.as_os_str().as_encoded_bytes().len() >= 104
             || shared.session_name.is_empty() || shared.session_name.chars().any(|c| c.is_control() || c == ':')
             || shared.session.as_ref().is_some_and(|session| !numbered(session, '$'))
@@ -471,7 +482,7 @@ impl<R: CommandRunner> TmuxHost<R> {
                 return Err(HostError::new("workspace socket parent ownership", HostErrorKind::Ownership));
             }
         }
-        host.endpoint = shared.endpoint.clone();
+        let mut host = Self::at_endpoint(directory, executable, limits, runner, shared.endpoint.clone())?;
         let actual = match host.socket_identity() {
             Ok(identity) => Some(identity),
             Err(error) if error.kind == HostErrorKind::Io(std::io::ErrorKind::NotFound) => None,
@@ -1636,6 +1647,45 @@ mod bound_process_tests {
             let mut bad = dead(); bad.end = end;
             assert!(!confirms_no_server(&bad, endpoint));
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn shared_host_supports_long_durable_resource_root() {
+        use crate::contract::types::{InstanceIdentity, ScopeId, SeatId, InstanceId, Generation};
+        use std::os::unix::fs::DirBuilderExt;
+        struct NoCommands;
+        impl CommandRunner for NoCommands {
+            fn run(&mut self, _: &CommandRequest) -> CommandReceipt { panic!("construction must not run tmux") }
+        }
+        let root = std::path::Path::new("/tmp").canonicalize().unwrap().join(format!("tac-root-{}-{}",
+            std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let durable = root.join("桌面-".repeat(20));
+        std::fs::create_dir(&durable).unwrap();
+        let directory = ScopedDirectory::create(&durable.join("native"), InstanceIdentity {
+            scope: ScopeId::new("scope").unwrap(), seat: SeatId::new("seat").unwrap(),
+            instance: InstanceId::new("instance").unwrap(), generation: Generation(1),
+        }).unwrap();
+        let receipt = directory.receipt().clone();
+        let limits = HostLimits { command_output: OutputLimits { stdout: 4096, stderr: 4096, stdin: 4096 },
+            max_script_bytes: 4096, max_capture_bytes: 4096, max_payload_bytes: 4096,
+            max_executable_bytes: 4096, poll_interval: Duration::from_millis(10), columns: 80, rows: 24 };
+        let tmux = PathBuf::from("/fixture/tmux");
+        assert!(directory.path().join("tmux.sock").as_os_str().as_encoded_bytes().len() >= 104);
+        assert!(TmuxHost::new(directory, tmux.clone(), limits, NoCommands).is_err());
+        let shared = SharedTmux { endpoint: root.join("shared.sock"), socket: None,
+            session_name: "team".into(), session: None };
+        let mut too_long = shared.clone();
+        too_long.endpoint = durable.join("shared.sock");
+        assert!(TmuxHost::new_shared(ScopedDirectory::reopen(receipt.clone()).unwrap(), tmux.clone(),
+            limits, NoCommands, too_long).is_err());
+        let host = TmuxHost::new_shared(ScopedDirectory::reopen(receipt).unwrap(), tmux,
+            limits, NoCommands, shared.clone()).unwrap();
+        assert_eq!(host.endpoint, shared.endpoint);
+        assert!(!host.endpoint.exists());
+        assert!(!host.directory.path().join("tmux.sock").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

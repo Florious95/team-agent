@@ -12,6 +12,17 @@ mod dynamic;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+#[test]
+fn explicit_fresh_restart_reaches_canonical_recovery() {
+    let sandbox = tests::Sandbox::new();
+    assert!(run("restart", &[], sandbox.path()).is_none());
+    let args = vec!["--allow-fresh".into(), "--workspace".into(),
+        sandbox.path().to_string_lossy().into_owned(), "--team".into(), "missing".into()];
+    assert!(run("restart", &args, sandbox.path()).is_some());
+    assert_eq!(std::fs::read_dir(sandbox.path()).unwrap().count(), 0);
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum Surface {
@@ -252,6 +263,7 @@ pub(super) fn run(
         let (pos, flags) = options(&checked.tokens);
         let surface = if !flags.contains_key("--session")
             && !flags.contains_key("--dry-run")
+            && !flags.contains_key("--allow-fresh")
             && pos.first().is_none_or(|p| path_syntax(p))
         {
             Surface::FrozenLegacy
