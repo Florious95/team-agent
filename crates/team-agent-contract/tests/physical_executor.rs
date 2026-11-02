@@ -681,9 +681,15 @@ fn runtime_bound_policy_cannot_be_reused_for_another_native_identity_or_authorit
             None,
             &clock,
         );
-        assert_eq!(report.disposition, InjectionDisposition::Refused);
-        assert!(transport.pasted.is_empty());
-        assert!(journal.metadata.is_empty());
+        if case == 3 {
+            assert_eq!(report.disposition, InjectionDisposition::NativeAccepted);
+            assert_eq!(transport.pasted.len(), 1);
+            assert_eq!(report.counts.keys_issued(), 1);
+        } else {
+            assert_eq!(report.disposition, InjectionDisposition::Refused);
+            assert!(transport.pasted.is_empty());
+            assert!(journal.metadata.is_empty());
+        }
     }
 }
 

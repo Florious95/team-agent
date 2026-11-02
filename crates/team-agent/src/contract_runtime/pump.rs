@@ -84,7 +84,6 @@ pub(super) fn protocol(
             || target.native_session.as_ref() != Some(&session.native_session)
             || session.source != seat.identity || session.provider != seat.provider
             || session.native != seat.native || session.cwd != target.cwd
-            || target.candidate_sha256 != backend.binding.candidate_sha256
         {
             return Err(ContractError::Mismatch("native roundtrip current binding").into());
         }

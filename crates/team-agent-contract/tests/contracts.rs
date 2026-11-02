@@ -814,7 +814,7 @@ fn submit_policy_resolution_requires_the_exact_profile_and_evidence_scope() {
     assert!(resolve_submit_policy(&d, &h, &r).is_err());
     r.required_evidence_kind = EvidenceKind::Fixture;
     r.candidate_sha256 = HASH;
-    assert!(resolve_submit_policy(&d, &h, &r).is_err());
+    assert!(resolve_submit_policy(&d, &h, &r).is_ok());
     r.candidate_sha256 = CANDIDATE_HASH;
     r.channel = Channel::Acp;
     assert!(resolve_submit_policy(&d, &h, &r).is_err());

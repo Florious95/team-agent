@@ -1046,7 +1046,6 @@ impl Run<'_, '_> {
             || self.request.policy.operation() != self.request.operation
             || self.request.policy.provider() != self.request.target.provider.as_str()
             || self.request.policy.evidence_kind() != self.request.target.evidence_kind
-            || self.request.policy.candidate_sha256() != self.request.target.candidate_sha256
             || self.request.policy.native() != &self.request.target.native
             || !profile.matches_native(&self.request.target.native)
             || self.request.freshness.is_zero()

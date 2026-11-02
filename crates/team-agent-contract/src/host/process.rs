@@ -354,8 +354,8 @@ pub fn resolve_cwd(path: &Path) -> Result<crate::contract::session::CwdIdentity,
     }
 }
 
-/// Capture once before readiness; later samples compare birth/image metadata without hashing
-/// a large executable on every terminal poll. No name/argv scan and no protected data store.
+/// Capture executable provenance once before readiness; later liveness samples
+/// compare process birth and parent, independently of on-disk binary updates.
 pub fn capture_process(
     pid: u32,
     expected_executable: &Path,
@@ -460,7 +460,7 @@ fn ancestor_link(pid: u32) -> Result<AncestorLink, HostError> {
 }
 
 /// Re-establish the relationship on every use. Both captured endpoint processes
-/// must still have their original birth/image/parent, and each intermediary's
+/// must still have their original birth/parent, and each intermediary's
 /// birth, parent and executable must agree before and after the bounded walk.
 /// A numeric ancestor PID alone never establishes authority.
 pub fn verify_native_ancestry(
@@ -580,41 +580,43 @@ pub fn sample_process(expected: &ProcessStamp) -> ProcessState {
         }
         Err(error) => return ProcessState::Unknown(error),
     };
-    let (parent, birth, _path, image_path, exited) = parts;
+    let (parent, birth, _path, _image_path, exited) = parts;
     if exited {
         return ProcessState::Exited;
     }
     if parent != expected.parent || birth != expected.identity.birth_identity {
         return ProcessState::Replaced;
     }
-    // proc_pidpath may report another hard link to the same live executable.
-    // Path spelling is not image identity: the sampled image must still match
-    // every recorded stamp field below (device/inode/length/modified_ns).
-    #[cfg(not(unix))]
-    {
-        let _ = image_path;
-        ProcessState::Unknown(HostError::new("process sample", HostErrorKind::Unsupported))
-    }
-    #[cfg(unix)]
-    {
-        match std::fs::metadata(image_path) {
-            Ok(metadata) if image_stamp(&metadata) == expected.image => {
-                match verify_executable_inputs(&expected.inputs) {
-                    Ok(()) => ProcessState::Alive,
-                    Err(error) if matches!(error.kind, HostErrorKind::Conflict | HostErrorKind::Io(std::io::ErrorKind::NotFound)) => ProcessState::Replaced,
-                    Err(error) => ProcessState::Unknown(error),
-                }
-            }
-            Ok(_) => ProcessState::Replaced,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => ProcessState::Exited,
-            Err(error) => ProcessState::Unknown(HostError::io("process image metadata", error)),
-        }
-    }
+    // Replacing a binary or wrapper on disk does not replace its live process.
+    // In particular, an MCP helper keeps its original PID/birth/parent after
+    // an atomic framework upgrade. File provenance must not turn it into a
+    // dead/replaced endpoint; PID reuse and ancestry changes remain distinct.
+    ProcessState::Alive
 }
 
 #[cfg(test)]
 mod ancestry_tests {
     use super::*;
+
+    #[test]
+    fn live_process_survives_changed_binary_provenance_but_not_reused_identity() {
+        let pid = std::process::id();
+        let (parent, birth, path, _, exited) = identity_parts(pid).unwrap();
+        assert!(!exited);
+        let mut stamp = ProcessStamp {
+            identity: ProcessIdentity { pid, birth_identity: birth, executable: path,
+                executable_sha256: super::super::digest(b"old-build") },
+            parent,
+            image: ImageStamp { device: 0, inode: 0, length: 0, modified_ns: 0 },
+            inputs: vec![],
+        };
+        assert_eq!(sample_process(&stamp), ProcessState::Alive);
+        stamp.identity.birth_identity.push_str("-reused");
+        assert_eq!(sample_process(&stamp), ProcessState::Replaced);
+        stamp.identity.birth_identity = process_birth_identity(pid).unwrap();
+        stamp.parent = parent.wrapping_add(1);
+        assert_eq!(sample_process(&stamp), ProcessState::Replaced);
+    }
 
     #[test]
     fn partial_spawn_birth_never_adopts_live_missing_or_reused_identity() {
