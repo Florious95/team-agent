@@ -436,17 +436,28 @@ impl LifecycleHost for PhysicalRuntime<'_> {
         if target.shared_endpoint && target.evidence_kind == EvidenceKind::Native
             && matches!(crate::host::process::sample_process(&target.process),
                 ProcessState::Exited | ProcessState::Replaced)
-            && crate::host::tmux::shared_server_absent(&self.settings.tmux, &target.endpoint,
-                &mut RealCommandRunner::default(), deadline.saturating_sub(self.clock.now()),
-                self.settings.limits.command_output).map_err(host_error)?
         {
-            self.stop_receipt = Some(StopReceipt {
-                method: "receipt_close_absent_shared_endpoint".into(),
-                owned_process_absent: true,
-                owned_target_replaced: false,
-            });
-            self.quiescent = Some(seat.clone());
-            return Ok(());
+            let absent = if crate::host::tmux::shared_server_absent(&self.settings.tmux, &target.endpoint,
+                &mut RealCommandRunner::default(), deadline.saturating_sub(self.clock.now()),
+                self.settings.limits.command_output).map_err(host_error)? {
+                Some("receipt_close_absent_shared_endpoint")
+            } else {
+                match self.reopen(&target, deadline) {
+                    // Directory/socket ownership fences passed before this
+                    // exact query. Never close the shared server or its leader.
+                    Err(Error::HostDiagnostic(error)) if error.kind == crate::host::HostErrorKind::PaneAbsent =>
+                        Some("receipt_close_absent_shared_pane"),
+                    Ok(_) => None,
+                    Err(error) => return Err(error),
+                }
+            };
+            if let Some(method) = absent {
+                self.stop_receipt = Some(StopReceipt {
+                    method: method.into(), owned_process_absent: true, owned_target_replaced: false,
+                });
+                self.quiescent = Some(seat.clone());
+                return Ok(());
+            }
         }
         if self.registration.controls.iter().any(|definition| definition.profile_id == seat.profile && definition.kind == ControlKind::Exit) {
             // A just-written tool result may precede the last native render.

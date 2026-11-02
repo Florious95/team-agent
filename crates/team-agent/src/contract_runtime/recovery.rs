@@ -94,6 +94,98 @@ fn carrier_absent(id: &str, row: &serde_json::Value, tmux: &Path) -> Result<(), 
     Ok(())
 }
 
+/// Preserve the provider route/model/prompt captured for the exact old instance.
+/// Editable Markdown aliases may have acquired a different meaning since launch.
+fn frozen_team(
+    binding: &backend::Binding,
+    selected: &crate::state::selector::SelectedTeam,
+) -> Result<super::config::TeamConfig, CliError> {
+    use super::config::{MemberRoute, RuntimeFamily, TeamConfig};
+    use team_agent_contract::contract::types::{Generation, InstanceId, InstanceIdentity, SeatId};
+    let agents = selected
+        .state
+        .get("agents")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| error("native recovery requires the saved roster"))?;
+    let mut roles = Vec::new();
+    let mut members = Vec::new();
+    for (id, row) in agents {
+        let seat = SeatId::new(id.as_str()).map_err(error)?;
+        let native = framework::is_contract(row);
+        let provider = row
+            .get("contract_provider")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| row.get("provider").and_then(serde_json::Value::as_str))
+            .ok_or_else(|| error("saved provider route missing"))?;
+        let mut source = selected.team_dir.join("agents").join(format!("{id}.md"));
+        if native {
+            if row
+                .get("contract_scope")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|scope| scope != binding.scope.as_str())
+            {
+                return Err(error("saved native role scope disagrees with its binding"));
+            }
+            if let Some(instance) = row
+                .get("contract_instance")
+                .and_then(serde_json::Value::as_str)
+            {
+                let generation = row
+                    .get("generation")
+                    .and_then(serde_json::Value::as_u64)
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| error(format!("saved native generation missing for {id}")))?;
+                let identity = InstanceIdentity {
+                    scope: binding.scope.clone(),
+                    seat,
+                    instance: InstanceId::new(instance).map_err(error)?,
+                    generation: Generation(generation),
+                };
+                let mut role = backend::read_role(binding, &identity).map_err(error)?;
+                if role.provider.as_str() != provider {
+                    return Err(error(
+                        "frozen role provider disagrees with saved native route",
+                    ));
+                }
+                role.paused |= row.get("paused").and_then(serde_json::Value::as_bool) == Some(true);
+                source = role.source.clone();
+                roles.push(role);
+            } else if row.get("paused").and_then(serde_json::Value::as_bool) != Some(true)
+                && !crate::state::projection::agent_explicit_stop(row)
+            {
+                return Err(error(format!(
+                    "no frozen native role identity for {id}; no editable role was substituted"
+                )));
+            }
+        }
+        members.push(MemberRoute {
+            id: id.clone(),
+            provider: provider.into(),
+            source,
+            runtime: if native {
+                RuntimeFamily::Contract
+            } else {
+                RuntimeFamily::Legacy
+            },
+        });
+    }
+    Ok(TeamConfig {
+        selector: selected.team_key.clone(),
+        label: selected.team_key.clone(),
+        scope: binding.scope.clone(),
+        team_dir: selected.team_dir.clone(),
+        workspace: binding.workspace.clone(),
+        objective: selected
+            .state
+            .get("objective")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .into(),
+        members,
+        roles,
+    })
+}
+
 /// None means ordinary lifecycle planning still owns this request. Both the
 /// dry run and admission use the same whole-scope dead-carrier checks.
 pub(crate) fn restart(
@@ -178,9 +270,7 @@ pub(crate) fn restart(
         Ok(())
     };
     dead()?;
-    let config = framework::team_config(workspace, &selected.team_dir, team, None)
-        .map_err(error)?
-        .ok_or_else(|| error("native recovery requires the saved role sources"))?;
+    let config = frozen_team(&binding, &selected)?;
     let eligible: Vec<_> = config
         .roles
         .iter()
@@ -193,17 +283,6 @@ pub(crate) fn restart(
         .collect();
     if eligible.is_empty() {
         return Err(error("native recovery has no eligible nonpaused roles"));
-    }
-    for role in &eligible {
-        if agents[role.id.as_str()]
-            .get("provider")
-            .and_then(serde_json::Value::as_str)
-            != Some(role.provider.as_str())
-        {
-            return Err(error(
-                "native recovery refuses a provider change in saved roles",
-            ));
-        }
     }
     let mut admission = config.clone();
     admission.roles = eligible.iter().map(|role| (**role).clone()).collect();
@@ -239,11 +318,11 @@ pub(crate) fn restart(
     dead()?;
     let latest = resolve_active_team_readonly(workspace, Some(team), SelectorMode::RuntimeOnly)
         .map_err(error)?;
-    let roles = framework::team_config(workspace, &selected.team_dir, team, None).map_err(error)?;
+    let roles = frozen_team(&binding, &latest)?;
     if latest.state.get("agents") != selected.state.get("agents")
         || latest.state.get("team_owner") != selected.state.get("team_owner")
         || serde_json::to_vec(&roles).map_err(error)?
-            != serde_json::to_vec(&Some(&config)).map_err(error)?
+            != serde_json::to_vec(&config).map_err(error)?
     {
         return Err(error(
             "native recovery roster or role sources changed since admission",
@@ -293,7 +372,31 @@ pub(crate) fn restart(
     directory.sync_all()?;
     let mut outcomes = Vec::new();
     for role in eligible {
-        let result = framework::start_role(workspace, &selected.team_dir, team, role.id.as_str());
+        let result = super::commands::with_agent(
+            workspace,
+            Some(team),
+            role.id.as_str(),
+            "recover-native",
+            |latest, _| {
+                let row = &latest.state["agents"][role.id.as_str()];
+                let admitted = &agents[role.id.as_str()];
+                if [
+                    "provider",
+                    "contract_provider",
+                    "contract_instance",
+                    "generation",
+                    "paused",
+                    "explicit_stop",
+                ]
+                .iter()
+                .any(|key| row.get(*key) != admitted.get(*key))
+                {
+                    return Err(error("native recovery seat changed after admission"));
+                }
+                framework::start_role_config(workspace, team, role, &config.members)
+            },
+        )
+        .and_then(|receipt| receipt.ok_or_else(|| error("native recovery seat route changed")));
         outcomes.push(json!({"agent":role.id.as_str(),"ok":result.is_ok(),
             "error":result.err().map(|e| e.to_string())}));
         if outcomes.last().is_some_and(|row| row["ok"] == false) {
@@ -313,6 +416,89 @@ pub(crate) fn restart(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frozen_recovery_does_not_reinterpret_editable_provider_aliases() {
+        use super::super::{config::RoleConfig, prompt::Prompt};
+        use team_agent_contract::contract::types::{
+            Generation, InstanceId, InstanceIdentity, ProviderId, SeatId,
+        };
+        let root = std::env::temp_dir().join(format!(
+            "ta-frozen-recovery-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let cwd = team_agent_contract::host::process::resolve_cwd(&root).unwrap();
+        let scope = backend::scope_for(&cwd, "saved-team").unwrap();
+        let binding = backend::Binding {
+            version: 1,
+            workspace: cwd.clone(),
+            team: "saved-team".into(),
+            scope: scope.clone(),
+            endpoint: format!("framework:{}", scope.as_str()),
+            candidate: "/fixture/team-agent".into(),
+            candidate_sha256: [0; 32],
+            tmux: "/fixture/tmux".into(),
+            transport_root: "/tmp/ta-purged-fixture".into(),
+        };
+        let source_dir = cwd.path.join("roles");
+        std::fs::create_dir_all(source_dir.join("agents")).unwrap();
+        let source = source_dir.join("agents/worker.md");
+        let editable = "---\nprovider: pi\n---\nThis is not the frozen prompt.\n";
+        std::fs::write(&source, editable).unwrap();
+        let mut selected = crate::state::selector::SelectedTeam {
+            run_workspace: cwd.path.clone(),
+            team_key: binding.team.clone(),
+            team_dir: source_dir,
+            spec_workspace: None,
+            spec_path: None,
+            state: json!({"agents":{"worker":{"provider":"pi_tui","runtime_family":"contract",
+                "contract_instance":"instance-original","generation":1}}}),
+        };
+        let identity = InstanceIdentity {
+            scope,
+            seat: SeatId::new("worker").unwrap(),
+            instance: InstanceId::new("instance-original").unwrap(),
+            generation: Generation(1),
+        };
+        let role = RoleConfig {
+            id: identity.seat.clone(),
+            provider: ProviderId::new("pi_tui").unwrap(),
+            source: source.clone(),
+            role: "worker".into(),
+            model: "frozen-model".into(),
+            effort: None,
+            bypass: false,
+            paused: false,
+            body: "frozen prompt".into(),
+            prompt: Prompt {
+                text: "frozen prompt".into(),
+                sha256: digest(b"frozen prompt"),
+                sources: vec![],
+            },
+        };
+        std::fs::create_dir_all(backend::root_for(&cwd.path, &binding.scope)).unwrap();
+        backend::write_role(&binding, &identity, &role).unwrap();
+        let config = frozen_team(&binding, &selected).unwrap();
+        assert_eq!(config.roles[0].provider.as_str(), "pi_tui");
+        assert_eq!(config.roles[0].model, "frozen-model");
+        assert_eq!(config.roles[0].prompt.text, "frozen prompt");
+        assert_eq!(config.members[0].provider, "pi_tui");
+        assert_eq!(std::fs::read_to_string(source).unwrap(), editable);
+        selected.state["agents"]["worker"]["provider"] = json!("claude_tui");
+        assert!(frozen_team(&binding, &selected).is_err());
+        selected.state["agents"]["worker"]["provider"] = json!("pi_tui");
+        selected.state["agents"]["worker"]["contract_instance"] = json!("instance-other");
+        assert!(
+            frozen_team(&binding, &selected).is_err(),
+            "must not scan for a newer/other snapshot"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn native_receipt_without_legacy_pid_can_prove_absence() {

@@ -21,6 +21,8 @@ pub enum HostErrorKind {
     Unsupported,
     Conflict,
     Ownership,
+    /// Successful exact-pane query returned the complete empty metadata frame.
+    PaneAbsent,
     Unknown,
     Deadline,
     Io(io::ErrorKind),

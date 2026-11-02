@@ -173,7 +173,17 @@ pub(crate) fn start_configured(
         .ok_or_else(|| error("contract role no longer configured".into()))?;
     let role = config.roles.iter().find(|role| &role.id == seat)
         .ok_or_else(|| error(format!("contract role not found in {}", directory.join("agents").display())))?;
-    let (_, record) = backend::start(workspace, team, role, &config.members)
+    start_role_config(workspace, team, role, &config.members)
+}
+
+/// Caller holds the seat lifecycle lock. Recovery supplies a validated frozen
+/// role here rather than reinterpreting old provider aliases in editable sources.
+pub(crate) fn start_role_config(
+    workspace: &Path, team: &str, role: &config::RoleConfig, members: &[config::MemberRoute],
+) -> Result<Value, crate::cli::CliError> {
+    let error = |error: String| crate::cli::CliError::Runtime(error);
+    let seat = &role.id;
+    let (_, record) = backend::start(workspace, team, role, members)
         .map_err(|e| error(e.to_string()))?;
     if record.outcome != Outcome::Committed {
         return Err(error(format!("native startup seat={} operation={:?} phase={:?} outcome={:?}: {}",

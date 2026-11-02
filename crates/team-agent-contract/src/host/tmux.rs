@@ -194,6 +194,14 @@ pub fn parse_pane(bytes: &[u8], stage: PaneMetadataStage) -> Result<PaneState, H
     if fields.len() != 13 {
         return Err(invalid("tmux metadata field count (expected 13)"));
     }
+    // tmux 3.7c display-message exits zero for an absent %pane, returning
+    // every format field empty. This is query evidence, never spawn success.
+    if stage == PaneMetadataStage::Query && !line.contains(['\r', '\n'])
+        && fields.iter().all(|field| field.trim().is_empty()) {
+        let mut error = invalid("tmux pane absent");
+        error.kind = HostErrorKind::PaneAbsent;
+        return Err(error);
+    }
     for (index, prefix, operation) in [
         (0, '$', "tmux metadata invalid session ID"),
         (1, '@', "tmux metadata invalid window ID"),
@@ -1646,6 +1654,20 @@ mod bound_process_tests {
         {
             let mut bad = dead(); bad.end = end;
             assert!(!confirms_no_server(&bad, endpoint));
+        }
+    }
+
+    #[test]
+    fn complete_empty_query_frame_means_absent_not_successful_spawn() {
+        for blank in [vec![""; 13].join("\t"), vec![" "; 13].join("\t"), vec![""; 13].join(r"\t")] {
+            let frame = format!("{blank}\n");
+            let error = parse_pane(frame.as_bytes(), PaneMetadataStage::Query).unwrap_err();
+            assert_eq!(error.kind, HostErrorKind::PaneAbsent);
+            assert_eq!(error.metadata.unwrap().actual_fields, 13);
+            assert_eq!(parse_pane(frame.as_bytes(), PaneMetadataStage::NewSession).unwrap_err().kind, HostErrorKind::Unknown);
+        }
+        for frame in [String::new(), "\n".into(), "\t".repeat(11), format!("{}\n\n", "\t".repeat(12)), format!("$1{}\n", "\t".repeat(12))] {
+            assert_ne!(parse_pane(frame.as_bytes(), PaneMetadataStage::Query).unwrap_err().kind, HostErrorKind::PaneAbsent);
         }
     }
 
