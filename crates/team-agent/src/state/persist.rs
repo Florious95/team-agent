@@ -806,12 +806,28 @@ fn apply_persist_merge_contract_with_fork_target_preservation(
     let skip_top_level_capture_backfill =
         should_skip_capture_backfill(top_level_team.as_deref(), skip_capture_backfill_team_key);
     if projection_matches {
+        // A freshly projected canonical roster can differ from the persisted root
+        // mirror (for example during leader inception). Guard that projection
+        // against the lock-held canonical team, not obsolete/misassigned root
+        // rows. Nonprojected and legacy writers keep their existing root guard;
+        // concurrent changes to the canonical roster remain protected below.
+        let latest_projection = top_level_team
+            .as_deref()
+            .and_then(|team| {
+                let incoming_agents = incoming.get("teams")?.get(team)?.get("agents")?;
+                if !incoming_agents.is_object() || incoming.get("agents") != Some(incoming_agents) {
+                    return None;
+                }
+                latest.get("teams")?.get(team)
+                    .filter(|entry| entry.get("agents").is_some_and(Value::is_object))
+            })
+            .unwrap_or(latest);
         let mut topology_update_agent_ids =
             topology_updates_for_team(topology_updates, top_level_team.as_deref());
         topology_update_agent_ids.extend(endpoint_convergence_invalidated_agents(
-            incoming, latest, top_level_team.as_deref().is_some_and(|team| receiver_updates.contains(team)),
+            incoming, latest_projection, top_level_team.as_deref().is_some_and(|team| receiver_updates.contains(team)),
         ));
-        preserve_latest_retired_agents(incoming, latest, &topology_update_agent_ids)?;
+        preserve_latest_retired_agents(incoming, latest_projection, &topology_update_agent_ids)?;
         // 0.5.26 (§7.3): top-level projection uses the incoming root state's
         // implicit "alive" shape (top-level agents are always the active team).
         // Passing `None` for team lifecycle keeps historical behavior when the
@@ -819,7 +835,7 @@ fn apply_persist_merge_contract_with_fork_target_preservation(
         merge_agent_projection(
             "agents",
             incoming.get_mut("agents"),
-            latest.get("agents"),
+            latest_projection.get("agents"),
             deleted_agent_ids,
             skip_top_level_capture_backfill,
             skip_capture_backfill_agent_ids,
@@ -849,7 +865,7 @@ fn apply_persist_merge_contract_with_fork_target_preservation(
         // clobber broke Batch 6 CHECK 6 (`shutdown` couldn't route to
         // the shim pid because `state.transport.shim.pid` was gone).
         preserve_transport_shim(incoming, latest);
-        preserve_latest_endpoint_convergence_fields(incoming, latest);
+        preserve_latest_endpoint_convergence_fields(incoming, latest_projection);
     }
 
     let latest_teams = latest.get("teams").and_then(Value::as_object);
@@ -2464,6 +2480,125 @@ mod tests {
             latest,
             "conflict must leave disk unchanged"
         );
+    }
+
+    fn drifted_root_projection() -> Value {
+        let current = json!({
+            "agent_id": "worker", "status": "running", "pane_id": "%20",
+            "pane_pid": 200, "window": "worker", "spawned_at": "new", "spawn_epoch": 2,
+            "session_id": "current-session", "rollout_path": "/current/session"
+        });
+        let obsolete = json!({
+            "agent_id": "frontend-dev", "status": "running", "pane_id": "%1",
+            "pane_pid": 100, "window": "frontend-dev", "spawned_at": "old", "spawn_epoch": 1
+        });
+        let mut state = json!({
+            "active_team_key": "alpha", "team_key": "alpha", "session_name": "team-alpha",
+            "agents": {"frontend-dev": obsolete.clone(), "worker": obsolete.clone()},
+            "agent_lifecycle": {"worker": {"state": "retired"}},
+            "teams": {
+                "alpha": {
+                    "team_key": "alpha", "session_name": "team-alpha",
+                    "agents": {"worker": current},
+                    "agent_lifecycle": {"frontend-dev": {"state": "retired", "reason": "remove-agent"}},
+                    "team_owner": {"leader_session_uuid": "owner-alpha", "owner_epoch": 1},
+                    "leader_receiver": {"leader_session_uuid": "owner-alpha", "owner_epoch": 1}
+                },
+                "beta": {"team_key": "beta", "session_name": "team-beta", "agents": {"frontend-dev": obsolete}}
+            }
+        });
+        normalize_agent_session_state(&mut state);
+        state
+    }
+
+    #[test]
+    fn canonical_projection_repairs_drifted_root_during_receiver_cas() {
+        let ws = temp_ws();
+        let latest = drifted_root_projection();
+        write_state(&ws, &latest);
+        let mut incoming = crate::state::projection::project_top_level_view(&latest, "alpha");
+        incoming["teams"]["alpha"]["team_owner"]["owner_epoch"] = json!(2);
+        incoming["teams"]["alpha"]["leader_receiver"]["owner_epoch"] = json!(2);
+        save_runtime_state_with_receiver_authority_and_expected(
+            &ws, &incoming, "alpha", &latest["teams"]["alpha"]["team_owner"],
+            &latest["teams"]["alpha"]["leader_receiver"],
+        ).unwrap();
+        let saved = read_state(&ws);
+        assert_eq!(saved["agents"], latest["teams"]["alpha"]["agents"]);
+        assert_eq!(saved["agents"], saved["teams"]["alpha"]["agents"]);
+        assert_eq!(saved["agent_lifecycle"], latest["teams"]["alpha"]["agent_lifecycle"]);
+        assert_eq!(saved["teams"]["beta"], latest["teams"]["beta"]);
+        assert_eq!(saved["teams"]["alpha"]["team_owner"]["owner_epoch"], json!(2));
+        assert_eq!(saved["teams"]["alpha"]["leader_receiver"]["owner_epoch"], json!(2));
+    }
+
+    #[test]
+    fn canonical_projection_empty_roster_does_not_resurrect_root_rows() {
+        let ws = temp_ws();
+        let mut latest = drifted_root_projection();
+        latest["teams"]["alpha"]["agents"] = json!({});
+        write_state(&ws, &latest);
+        let incoming = crate::state::projection::project_top_level_view(&latest, "alpha");
+        save_runtime_state(&ws, &incoming).unwrap();
+        let saved = read_state(&ws);
+        assert_eq!(saved["agents"], json!({}));
+        assert_eq!(saved["teams"]["beta"], latest["teams"]["beta"]);
+    }
+
+    #[test]
+    fn canonical_projection_preserves_live_roster_conflicts() {
+        for omit in [false, true] {
+            let ws = temp_ws();
+            let latest = drifted_root_projection();
+            write_state(&ws, &latest);
+            let before = std::fs::read(runtime_state_path(&ws)).unwrap();
+            let mut incoming = crate::state::projection::project_top_level_view(&latest, "alpha");
+            if omit {
+                incoming["teams"]["alpha"]["agents"] = json!({});
+            } else {
+                incoming["teams"]["alpha"]["agents"]["worker"]["pane_id"] = json!("%stale");
+            }
+            incoming["agents"] = incoming["teams"]["alpha"]["agents"].clone();
+            let err = save_runtime_state(&ws, &incoming).unwrap_err();
+            assert!(matches!(err, StateError::SaveConflict(_)));
+            assert!(err.to_string().contains("agent_id=worker"));
+            assert_eq!(std::fs::read(runtime_state_path(&ws)).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn canonical_projection_preserves_owner_receiver_cas() {
+        let ws = temp_ws();
+        let latest = drifted_root_projection();
+        write_state(&ws, &latest);
+        let before = std::fs::read(runtime_state_path(&ws)).unwrap();
+        let incoming = crate::state::projection::project_top_level_view(&latest, "alpha");
+        let err = save_runtime_state_with_receiver_authority_and_expected(
+            &ws, &incoming, "alpha", &json!({"owner_epoch": 0}),
+            &latest["teams"]["alpha"]["leader_receiver"],
+        ).unwrap_err();
+        assert!(matches!(err, StateError::SaveConflict(_)));
+        assert!(err.to_string().contains("owner/receiver changed before commit"));
+        assert_eq!(std::fs::read(runtime_state_path(&ws)).unwrap(), before);
+    }
+
+    #[test]
+    fn nonprojected_and_legacy_writers_keep_root_topology_guard() {
+        for canonical in [false, true] {
+            let ws = temp_ws();
+            let mut latest = drifted_root_projection();
+            if !canonical {
+                latest.as_object_mut().unwrap().remove("teams");
+            }
+            write_state(&ws, &latest);
+            let before = std::fs::read(runtime_state_path(&ws)).unwrap();
+            let mut incoming = latest.clone();
+            incoming["agents"].as_object_mut().unwrap().remove("frontend-dev");
+            let err = save_runtime_state(&ws, &incoming).unwrap_err();
+            assert!(matches!(err, StateError::SaveConflict(_)));
+            assert!(err.to_string().contains("agent_id=frontend-dev"));
+            assert_eq!(std::fs::read(runtime_state_path(&ws)).unwrap(), before);
+        }
     }
 
     #[test]
