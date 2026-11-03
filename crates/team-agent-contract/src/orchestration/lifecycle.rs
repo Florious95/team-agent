@@ -32,19 +32,26 @@ pub trait LifecycleHost {
         plan: &LaunchPlan,
     ) -> Result<SpawnedProcess, Error>;
     fn spawn_observed(
-        &mut self, descriptor: &ProviderDescriptor, resolved: &ResolvedLaunch,
-        seat: &SeatRecord, plan: &LaunchPlan,
+        &mut self,
+        descriptor: &ProviderDescriptor,
+        resolved: &ResolvedLaunch,
+        seat: &SeatRecord,
+        plan: &LaunchPlan,
         _observe: &mut dyn FnMut(&crate::host::transport::SpawnObservation) -> Result<(), Error>,
     ) -> Result<SpawnedProcess, Error> {
         self.spawn(descriptor, resolved, seat, plan)
     }
     fn reconcile_spawn(
-        &mut self, _seat: &SeatRecord, _observation: &crate::host::transport::SpawnObservation,
+        &mut self,
+        _seat: &SeatRecord,
+        _observation: &crate::host::transport::SpawnObservation,
     ) -> Result<Option<SpawnedProcess>, Error> {
         Err(Error::Host("physical spawn reconciliation unavailable"))
     }
     fn stop(&mut self, seat: &SeatRecord) -> Result<(), Error>;
-    fn stop_receipt(&self) -> Option<StopReceipt> { None }
+    fn stop_receipt(&self) -> Option<StopReceipt> {
+        None
+    }
     fn control(
         &mut self,
         seat: &SeatRecord,
@@ -82,24 +89,46 @@ impl Lifecycle<'_> {
         routing: Routing,
         id: OperationId,
     ) -> Result<OperationRecord, Error> {
-        self.startup_with_parent(adapter, request, routing, id, None)
+        self.startup_with_parent(adapter, request, routing, id, None, None)
+    }
+
+    /// Convert only the exact admitted framework route. Its rollback receipt is
+    /// persisted together with F0, before any native resource can be created.
+    pub fn startup_replacing_peer(
+        &mut self,
+        adapter: &Adapter<'_>,
+        request: &LaunchRequest,
+        routing: Routing,
+        id: OperationId,
+        peer: &super::forward::FrameworkPeer,
+    ) -> Result<OperationRecord, Error> {
+        self.startup_with_parent(adapter, request, routing, id, None, Some(peer))
     }
 
     /// Replace the exact parent with a fresh native session when no resumable
     /// binding exists. This is still a Restart transaction with parent rollback.
     pub fn restart_fresh(
-        &mut self, adapter: &Adapter<'_>, request: &LaunchRequest, routing: Routing,
-        id: OperationId, parent: &InstanceIdentity,
+        &mut self,
+        adapter: &Adapter<'_>,
+        request: &LaunchRequest,
+        routing: Routing,
+        id: OperationId,
+        parent: &InstanceIdentity,
     ) -> Result<OperationRecord, Error> {
         if request.operation != Operation::Fresh || request.resume.is_some() {
             return Err(Error::Invalid("fresh restart request"));
         }
-        self.startup_with_parent(adapter, request, routing, id, Some(parent))
+        self.startup_with_parent(adapter, request, routing, id, Some(parent), None)
     }
 
     fn startup_with_parent(
-        &mut self, adapter: &Adapter<'_>, request: &LaunchRequest, routing: Routing,
-        id: OperationId, fresh_parent: Option<&InstanceIdentity>,
+        &mut self,
+        adapter: &Adapter<'_>,
+        request: &LaunchRequest,
+        routing: Routing,
+        id: OperationId,
+        fresh_parent: Option<&InstanceIdentity>,
+        peer: Option<&super::forward::FrameworkPeer>,
     ) -> Result<OperationRecord, Error> {
         if !matches!(request.operation, Operation::Fresh | Operation::Resume) {
             return Err(Error::Invalid("startup operation"));
@@ -127,7 +156,11 @@ impl Lifecycle<'_> {
         let target = self.target(adapter.descriptor, request, routing)?;
         let mut operation = new_operation(id, kind, target, parent);
         operation.native_launch = Some(request.operation);
-        self.store.begin(&operation)?;
+        if let Some(peer) = peer {
+            self.store.begin_replacing_peer(&operation, peer)?;
+        } else {
+            self.store.begin(&operation)?;
+        }
         let result = (|| {
             if let Some(parent) = operation.parent.as_ref() {
                 if parent.process.is_some() && parent.status != SeatStatus::Stopped {
@@ -144,12 +177,17 @@ impl Lifecycle<'_> {
                     // colliding with this validated plan are retired, by receipt.
                     let parent = operation.parent.as_ref().ok_or(Error::Fence)?.clone();
                     for resource in parent.resources.iter().filter(|resource| {
-                        plan.materialization.iter().any(|request| request.path == resource.path)
+                        plan.materialization
+                            .iter()
+                            .any(|request| request.path == resource.path)
                     }) {
                         if resource.owner != parent.identity
-                            || resource.path.root() != granted_root(&parent, resource.kind, self.store.root())
+                            || resource.path.root()
+                                != granted_root(&parent, resource.kind, self.store.root())
                             || !removable(resource)
-                        { return Err(Error::Fence); }
+                        {
+                            return Err(Error::Fence);
+                        }
                         operation.pending = Some("cleanup-parent".into());
                         self.store.save(&operation, false)?;
                         if !self.host.remove_owned(resource)? {
@@ -414,16 +452,26 @@ impl Lifecycle<'_> {
         let target = operation.target.clone();
         let store = &mut self.store;
         let mut observe = |observation: &crate::host::transport::SpawnObservation| {
-            if observation.directory.owner != target.identity || observation.provider != target.provider
-                || observation.native != target.native || observation.cwd != target.cwd
-                || observation.evidence_kind != target.evidence_kind || observation.executable != plan.executable
-                || !observation.directory.path.starts_with(store.root()) {
+            if observation.directory.owner != target.identity
+                || observation.provider != target.provider
+                || observation.native != target.native
+                || observation.cwd != target.cwd
+                || observation.evidence_kind != target.evidence_kind
+                || observation.executable != plan.executable
+                || !observation.directory.path.starts_with(store.root())
+            {
                 return Err(Error::Fence);
             }
             operation.spawn_observation = Some(observation.clone());
             store.save(operation, false)
         };
-        let spawned = match self.host.spawn_observed(adapter.descriptor, resolved, &target, plan, &mut observe) {
+        let spawned = match self.host.spawn_observed(
+            adapter.descriptor,
+            resolved,
+            &target,
+            plan,
+            &mut observe,
+        ) {
             Err(error @ Error::SpawnNotStarted(_)) => {
                 operation.pending = None;
                 return Err(error);
@@ -470,8 +518,11 @@ impl Lifecycle<'_> {
         {
             let binding = match self.capture(adapter, &operation.target) {
                 Ok(binding) => binding,
-                Err(error) if matches!(operation.kind, TransactionKind::Startup | TransactionKind::Restart)
-                    && matches!(&error, Error::NativeControl(report)
+                Err(error)
+                    if matches!(
+                        operation.kind,
+                        TransactionKind::Startup | TransactionKind::Restart
+                    ) && matches!(&error, Error::NativeControl(report)
                         if report.metadata.owner == operation.target.identity
                             && report.metadata.operation == Operation::SessionInspect
                             && (report.disposition == InjectionDisposition::Unresolved
@@ -577,8 +628,11 @@ impl Lifecycle<'_> {
     ) -> Result<OperationRecord, Error> {
         if let Err(error) = result {
             operation.failure = Some(error.to_string());
-            if matches!(error, Error::StopNoEffect(_)) && operation.kind == TransactionKind::Teardown
-                && operation.phase == Phase::F0Preflight && operation.pending.as_deref() == Some("stop") {
+            if matches!(error, Error::StopNoEffect(_))
+                && operation.kind == TransactionKind::Teardown
+                && operation.phase == Phase::F0Preflight
+                && operation.pending.as_deref() == Some("stop")
+            {
                 // No native mutation occurred: retain the live seat and close
                 // this attempt, rather than leasing it forever as uncertain.
                 operation.pending = None;
@@ -599,16 +653,22 @@ impl Lifecycle<'_> {
         operation.outcome = Outcome::NeedsRecovery;
         self.store.save(operation, false)?;
         if operation.pending.as_deref() == Some("spawn") {
-            let Some(observation) = operation.spawn_observation.as_ref() else { return Ok(()); };
+            let Some(observation) = operation.spawn_observation.as_ref() else {
+                return Ok(());
+            };
             if observation.directory.owner != operation.target.identity
-                || !observation.directory.path.starts_with(self.store.root()) {
+                || !observation.directory.path.starts_with(self.store.root())
+            {
                 return Err(Error::Fence);
             }
             match self.host.reconcile_spawn(&operation.target, observation) {
                 Ok(Some(spawned)) => {
-                    if spawned.physical.as_ref().is_none_or(|target| target.identity() != &operation.target.identity
-                        || target.process.identity != spawned.process || target.pane != observation.pane
-                        || target.binding != observation.binding) {
+                    if spawned.physical.as_ref().is_none_or(|target| {
+                        target.identity() != &operation.target.identity
+                            || target.process.identity != spawned.process
+                            || target.pane != observation.pane
+                            || target.binding != observation.binding
+                    }) {
                         return Err(Error::Fence);
                     }
                     operation.target.process = Some(spawned.process);
@@ -734,7 +794,9 @@ fn removable(resource: &OwnedResourceReceipt) -> bool {
                 && matches!(resource.write_effect, ResourceWriteEffect::Written { .. })
                 && !matches!(
                     resource.kind,
-                    ResourceKind::SessionBacking | ResourceKind::GlobalSettings | ResourceKind::NativeDatabase
+                    ResourceKind::SessionBacking
+                        | ResourceKind::GlobalSettings
+                        | ResourceKind::NativeDatabase
                 )
         }
         ResourceDisposition::SharedEntry => resource.kind == ResourceKind::McpConfig,

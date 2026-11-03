@@ -839,6 +839,16 @@ fn finish_receipt_until(backend: &mut Backend, record: OperationRecord, deadline
     Ok(Lifecycle { store: &mut backend.store, host: &mut host, io: &mut NoNewIo }.recover(&record.id)?)
 }
 
+/// Read-only absence proof for an unmaterialized declaration. Missing authority
+/// inside an existing scope is an error, never permission to create a new scope.
+pub(crate) fn seat_authority_absent(workspace: &Path, team: &str, seat: &SeatId) -> Result<bool, BackendError> {
+    let cwd = resolve_cwd(workspace)?;
+    let scope = scope_for(&cwd, team)?;
+    if !root_for(&cwd.path, &scope).exists() { return Ok(true); }
+    let backend = Backend::open_readonly(workspace, team)?;
+    Ok(existing_start(&backend, seat)?.is_none() && !backend.store.leased(seat)?)
+}
+
 /// No creation receipt, unfinished lease or seat exists for this ID.
 pub(super) fn seat_unclaimed(backend: &Backend, seat: &SeatId) -> Result<bool, BackendError> {
     Ok(existing_start(backend, seat)?.is_none())
@@ -847,12 +857,17 @@ pub(super) fn seat_unclaimed(backend: &Backend, seat: &SeatId) -> Result<bool, B
 /// Team-level forwarding peers (legacy members and the leader) that every new
 /// native seat's framework route depends on. Shared by fresh start and fork.
 pub(super) fn publish_framework_routes(backend: &mut Backend, members: &[MemberRoute]) -> Result<(), BackendError> {
+    publish_framework_routes_kept(backend, members, None)
+}
+fn publish_framework_routes_kept(backend: &mut Backend, members: &[MemberRoute], keep: Option<&team_agent_contract::orchestration::forward::FrameworkPeer>) -> Result<(), BackendError> {
     let route = backend.binding.framework().route()?;
     let mut peers = Vec::new();
     for member in members.iter().filter(|member| member.runtime == RuntimeFamily::Legacy) {
         // Admitted native seats remain native even when their editable role
         // files use a legacy provider alias. Do not publish them as peers.
-        if backend.store.seat(&SeatId::new(member.id.clone())?)?.is_some() {
+        if keep.is_some_and(|peer| peer.recipient == member.id)
+            || backend.store.seat(&SeatId::new(member.id.clone())?)?.is_some()
+            || backend.store.leased(&SeatId::new(member.id.clone())?)? {
             continue;
         }
         peers.push(team_agent_contract::orchestration::forward::FrameworkPeer {
@@ -866,6 +881,7 @@ pub(super) fn publish_framework_routes(backend: &mut Backend, members: &[MemberR
         route: route.clone(),
         provider: "framework".into(),
     });
+    if let Some(peer) = keep { peers.push(peer.clone()); }
     backend.store.set_framework_routes(&peers, Some(&route))?;
     Ok(())
 }
@@ -899,6 +915,12 @@ pub fn start(
     team: &str,
     role: &RoleConfig,
     members: &[MemberRoute],
+) -> Result<(Binding, OperationRecord), BackendError> {
+    start_with_peer_transfer(workspace, team, role, members, false)
+}
+
+pub(crate) fn start_with_peer_transfer(
+    workspace: &Path, team: &str, role: &RoleConfig, members: &[MemberRoute], transfer_peer: bool,
 ) -> Result<(Binding, OperationRecord), BackendError> {
     let _ownership = native_seat_lock(workspace, team, &role.id, false)?;
     let cwd = resolve_cwd(workspace)?;
@@ -978,7 +1000,10 @@ pub fn start(
     if existing_start(&backend, &role.id)?.is_some() {
         return Err(Error::Conflict.into());
     }
-    publish_framework_routes(&mut backend, members)?;
+    let peer = backend.store.framework_peer(&role.id)?;
+    // Preserve the route until F0 atomically acquires the seat and its rollback receipt.
+    let members: Vec<_> = members.iter().filter(|member| member.id != role.id.as_str()).cloned().collect();
+    publish_framework_routes_kept(&mut backend, &members, peer.as_ref())?;
     let identity = backend.store.propose_identity(&role.id)?;
     let server_key = selected.server_key_for(&identity)?;
     write_role(&backend.binding, &identity, role)?;
@@ -1021,25 +1046,18 @@ pub fn start(
     physical.executing_candidate = Some(candidate_sha256);
     physical.evidence = policy_evidence(&role.provider, &request.native, candidate_sha256)?;
     physical.workspace_tmux = Some(workspace_topology);
-    let record = Lifecycle {
-        store: &mut backend.store,
-        host: &mut physical,
-        io: &mut io,
-    }
-    .startup(
-        &Adapter {
-            descriptor,
-            hooks: &hooks,
-            catalog: Some(&discovered.catalog),
-        },
-        &request,
-        Routing {
-            pane: "unpublished".into(),
-            binding_key: format!("binding-{}", request.identity.instance.as_str()),
-            server_key: server_key.into(),
-        },
-        operation,
-    )?;
+    let adapter = Adapter { descriptor, hooks: &hooks, catalog: Some(&discovered.catalog) };
+    let routing = Routing {
+        pane: "unpublished".into(),
+        binding_key: format!("binding-{}", request.identity.instance.as_str()),
+        server_key: server_key.into(),
+    };
+    let mut lifecycle = Lifecycle { store: &mut backend.store, host: &mut physical, io: &mut io };
+    let record = if let Some(peer) = peer.as_ref().filter(|_| transfer_peer) {
+        lifecycle.startup_replacing_peer(&adapter, &request, routing, operation, peer)?
+    } else {
+        lifecycle.startup(&adapter, &request, routing, operation)?
+    };
     if record.outcome == Outcome::Committed && record.target.physical.is_some() {
         bind_workspace_session(&backend.binding.workspace.path, &backend.binding.team, &record.target.identity.seat)?;
     }

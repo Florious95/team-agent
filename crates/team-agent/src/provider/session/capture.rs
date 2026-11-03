@@ -253,6 +253,162 @@ pub fn capture_missing_provider_sessions_once<F>(
 where
     F: FnMut(Provider) -> Box<dyn ProviderAdapter>,
 {
+    capture_sessions_once(state, adapter_for, finalize_ambiguous, timeout_s, None)
+}
+
+/// Read-only admission may recover one stopped seat's verifiable backing. All
+/// attribution and collision guards still run; sibling captures stay in a clone.
+pub(crate) fn captured_start_row(state: &Value, id: &str) -> Result<Value, ProviderError> {
+    let mut candidate = state.clone();
+    capture_sessions_once(
+        &mut candidate,
+        &mut crate::provider::get_adapter,
+        false,
+        1,
+        Some(id),
+    )?;
+    Ok(candidate["agents"][id].clone())
+}
+
+const CAPTURE_FIELDS: &[&str] = &[
+    "session_id",
+    "rollout_path",
+    "captured_at",
+    "captured_via",
+    "attribution_confidence",
+    "attribution_ambiguous",
+    "capture_state",
+    "_pending_session_id",
+];
+
+pub(crate) fn same_capture_incarnation(current: &Value, expected: &Value) -> bool {
+    current.is_object()
+        && expected.is_object()
+        && [
+            "provider",
+            "pane_pid",
+            "pane_id",
+            "spawned_at",
+            "spawn_epoch",
+            "contract_instance",
+            "generation",
+        ]
+        .iter()
+        .all(|key| current.get(*key) == expected.get(*key))
+        && (expected["session_id"].is_null() || current["session_id"] == expected["session_id"])
+}
+
+pub(crate) fn apply_capture_delta(current: &mut Value, captured: &Value) {
+    let Some(row) = current.as_object_mut() else {
+        return;
+    };
+    for key in CAPTURE_FIELDS {
+        if let Some(value) = captured.get(*key) {
+            row.insert((*key).into(), value.clone());
+        } else {
+            row.remove(*key);
+        }
+    }
+}
+
+/// Successful physical delivery is the observation boundary, not inbox storage
+/// or queue acceptance. Metadata failure never changes the delivery receipt.
+pub(crate) fn observe_physical_delivery(
+    workspace: &std::path::Path,
+    team: Option<&str>,
+    expected: &Value,
+    sender: &str,
+    recipient: &str,
+) -> Result<(), String> {
+    use crate::state::repository::{StateRepository, StateWriteIntent};
+    let mut observed = expected.clone();
+    let mut ids = Vec::new();
+    for id in [recipient, sender] {
+        let Some(row) = observed
+            .get_mut("agents")
+            .and_then(|agents| agents.get_mut(id))
+        else {
+            continue;
+        };
+        if id == "leader" || !row.is_object() || ids.contains(&id) {
+            continue;
+        }
+        #[cfg(unix)]
+        if crate::contract_runtime::framework::is_contract(row) {
+            continue;
+        }
+        // During native migration the old legacy row deliberately remains
+        // unchanged until commit. Native egress must not stamp that old cohort.
+        #[cfg(unix)]
+        if id == sender {
+            let unclaimed = team.and_then(|team| {
+                let seat = team_agent_contract::contract::types::SeatId::new(id).ok()?;
+                crate::contract_runtime::backend::seat_authority_absent(workspace, team, &seat).ok()
+            });
+            if unclaimed != Some(true) {
+                continue;
+            }
+        }
+        if row["first_send_at"].is_null() {
+            row["first_send_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
+        }
+        ids.push(id);
+    }
+    if ids.is_empty() {
+        return Ok(());
+    }
+    // One bounded pass, outside the state lock; no convergence wait on a send.
+    capture_missing_provider_sessions_once(
+        &mut observed,
+        &mut crate::provider::get_adapter,
+        false,
+        1,
+    )
+    .map_err(|error| error.to_string())?;
+    let team = team.ok_or("session observation requires a canonical team")?;
+    StateRepository::new(workspace)
+        .commit_messaging_checked(
+            StateWriteIntent::MessagingDeliveryState {
+                owner_team_id: Some(team),
+            },
+            |state| {
+                for id in ids {
+                    let Some(row) = state
+                        .get_mut("agents")
+                        .and_then(|agents| agents.get_mut(id))
+                    else {
+                        continue;
+                    };
+                    if !same_capture_incarnation(row, &expected["agents"][id]) {
+                        continue;
+                    }
+                    if row["first_send_at"].is_null() {
+                        row["first_send_at"] = observed["agents"][id]["first_send_at"].clone();
+                    }
+                    // Never overwrite a concurrent capture with an uncaptured snapshot.
+                    if observed["agents"][id]["capture_state"] == "captured"
+                        && (row["session_id"].is_null()
+                            || row["session_id"] == observed["agents"][id]["session_id"])
+                    {
+                        apply_capture_delta(row, &observed["agents"][id]);
+                    }
+                }
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())
+}
+
+fn capture_sessions_once<F>(
+    state: &mut Value,
+    adapter_for: &mut F,
+    finalize_ambiguous: bool,
+    timeout_s: u64,
+    stopped_target: Option<&str>,
+) -> Result<CapturePassReport, ProviderError>
+where
+    F: FnMut(Provider) -> Box<dyn ProviderAdapter>,
+{
     let Some(agent_map) = state.get("agents").and_then(Value::as_object) else {
         return Ok(CapturePassReport::default());
     };
@@ -260,7 +416,12 @@ where
     let mut capture_failures = Vec::new();
     let mut candidates_by_agent = BTreeMap::new();
     for (agent_id, agent) in agent_map {
-        let Some(capture) = pending_session_capture(agent_id, agent, adapter_for) else {
+        let Some(capture) = pending_session_capture_with_policy(
+            agent_id,
+            agent,
+            adapter_for,
+            stopped_target == Some(agent_id.as_str()),
+        ) else {
             continue;
         };
         let adapter = adapter_for(capture.provider);
@@ -803,10 +964,22 @@ fn pending_session_capture<F>(
 where
     F: FnMut(Provider) -> Box<dyn ProviderAdapter>,
 {
+    pending_session_capture_with_policy(agent_id, agent, adapter_for, false)
+}
+
+fn pending_session_capture_with_policy<F>(
+    agent_id: &str,
+    agent: &Value,
+    adapter_for: &mut F,
+    allow_stopped: bool,
+) -> Option<PendingSessionCapture>
+where
+    F: FnMut(Provider) -> Box<dyn ProviderAdapter>,
+{
     if agent.get("capture_state").and_then(Value::as_str) == Some("attribution_ambiguous") {
         return None;
     }
-    let provider = incomplete_resumable_provider(agent, adapter_for)?;
+    let provider = incomplete_resumable_provider_with_policy(agent, adapter_for, allow_stopped)?;
     let spawn_cwd = agent
         .get("spawn_cwd")
         .and_then(Value::as_str)
@@ -868,11 +1041,23 @@ fn incomplete_resumable_provider<F>(agent: &Value, adapter_for: &mut F) -> Optio
 where
     F: FnMut(Provider) -> Box<dyn ProviderAdapter>,
 {
-    if crate::state::projection::agent_explicit_stop(agent)
-        || agent
-        .get("status")
-        .and_then(Value::as_str)
-        .is_some_and(|status| status != "running")
+    incomplete_resumable_provider_with_policy(agent, adapter_for, false)
+}
+
+fn incomplete_resumable_provider_with_policy<F>(
+    agent: &Value,
+    adapter_for: &mut F,
+    allow_stopped: bool,
+) -> Option<Provider>
+where
+    F: FnMut(Provider) -> Box<dyn ProviderAdapter>,
+{
+    if !allow_stopped
+        && (crate::state::projection::agent_explicit_stop(agent)
+            || agent
+                .get("status")
+                .and_then(Value::as_str)
+                .is_some_and(|status| status != "running"))
     {
         return None;
     }
@@ -898,20 +1083,67 @@ mod stopped_capture_tests {
     use super::*;
 
     #[test]
+    fn capture_delta_keeps_history_and_stopped_state_without_promoting_pending_ids() {
+        let mut row = serde_json::json!({"provider":"claude_code","status":"stopped","explicit_stop":true,
+            "_pending_session_id":"pending","session_history":[{"session_id":"ancestor"}]});
+        let pending = row.clone();
+        assert!(same_capture_incarnation(&row, &pending));
+        assert!(row["session_id"].is_null());
+        let captured = serde_json::json!({"session_id":"pending","rollout_path":"/verified/transcript",
+            "captured_at":"now","captured_via":"fixture","capture_state":"captured"});
+        apply_capture_delta(&mut row, &captured);
+        assert_eq!(row["session_id"], "pending");
+        assert!(row.get("_pending_session_id").is_none());
+        assert_eq!(row["status"], "stopped");
+        assert_eq!(row["explicit_stop"], true);
+        assert_eq!(row["session_history"], pending["session_history"]);
+    }
+
+    #[test]
+    fn delivery_capture_fences_replaced_incarnations_and_allows_same_seat_stop() {
+        let expected = serde_json::json!({"provider":"pi","pane_pid":123,"pane_id":"%8",
+            "spawned_at":"one","status":"running","session_id":null});
+        let mut stopped = expected.clone();
+        stopped["status"] = serde_json::json!("stopped");
+        stopped["explicit_stop"] = serde_json::json!(true);
+        assert!(same_capture_incarnation(&stopped, &expected));
+        for (key, value) in [
+            ("provider", serde_json::json!("claude_code")),
+            ("pane_pid", serde_json::json!(456)),
+            ("spawned_at", serde_json::json!("two")),
+            ("contract_instance", serde_json::json!("native-next")),
+        ] {
+            let mut replaced = stopped.clone();
+            replaced[key] = value;
+            assert!(!same_capture_incarnation(&replaced, &expected), "{key}");
+        }
+        assert!(!same_capture_incarnation(&Value::Null, &expected));
+    }
+
+    #[test]
     fn explicit_stop_is_checked_before_adapter_or_backing_probes() {
         for row in [
             serde_json::json!({"status":"stopped","provider":"pi","spawn_cwd":"/controlled"}),
             serde_json::json!({"status":"running","explicit_stop":true,"provider":"pi","spawn_cwd":"/controlled"}),
             serde_json::json!({"status":"running","explicit_stop":"false","provider":"pi","spawn_cwd":"/controlled"}),
         ] {
-            assert!(incomplete_resumable_provider(&row, &mut |_| panic!("held seat reached adapter lookup")).is_none());
+            assert!(incomplete_resumable_provider(&row, &mut |_| panic!(
+                "held seat reached adapter lookup"
+            ))
+            .is_none());
         }
         let mut calls = 0;
         let _ = incomplete_resumable_provider(
             &serde_json::json!({"status":"running","explicit_stop":false,"provider":"pi","spawn_cwd":"/controlled"}),
-            &mut |provider| { calls += 1; crate::provider::get_adapter(provider) },
+            &mut |provider| {
+                calls += 1;
+                crate::provider::get_adapter(provider)
+            },
         );
-        assert_eq!(calls, 1, "active control must still be eligible for capture");
+        assert_eq!(
+            calls, 1,
+            "active control must still be eligible for capture"
+        );
     }
 }
 

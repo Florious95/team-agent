@@ -74,13 +74,15 @@ mod common;
 mod orchestrator;
 pub mod preflight;
 mod rebuild;
-pub use rebuild::{restart_bind_status, restart_leader_public_bind};
 pub(crate) use rebuild::restart_leader_public_bind_with_receipt;
+pub use rebuild::{restart_bind_status, restart_leader_public_bind};
 pub(crate) mod remove;
 mod selection;
 mod team_state;
 
-pub(crate) use agent::{start_agent_at_paths, stop_agent_at_paths, ensure_agent_not_running, live_agent_target};
+pub(crate) use agent::{
+    ensure_agent_not_running, live_agent_target, start_agent_at_paths, stop_agent_at_paths,
+};
 pub use agent::{reset_agent, start_agent, stop_agent};
 pub(crate) use agent::{
     reset_agent_with_transport, start_agent_with_transport, stop_agent_with_transport,
@@ -114,7 +116,7 @@ pub(crate) use rebuild::{
 pub(crate) use remove::remove_agent_with_transport;
 pub use remove::{remove_agent, remove_agent_flag_requirements};
 pub use selection::decide_start_mode;
-pub(crate) use selection::restart_agent_never_captured;
+pub(crate) use selection::{has_prior_launch, restart_agent_never_captured};
 
 /// Read-only CLI preflight facade. Reuses the original provider-specific probe;
 /// does not capture a session, write state, or authorize a future spawn.

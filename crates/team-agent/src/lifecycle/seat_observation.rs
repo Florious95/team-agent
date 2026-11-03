@@ -96,8 +96,44 @@ pub(crate) fn observe(
         return Err(refusal("invalid persisted provider metadata"));
     }
     #[cfg(unix)]
-    if crate::contract_runtime::framework::is_contract(row) {
+    if crate::contract_runtime::framework::is_contract(row)
+        || crate::contract_runtime::registry::declared(provider(row)).is_some()
+    {
         use team_agent_contract::{contract::types::SeatId, host::process::sample_process};
+        if row.get("contract_instance").is_none_or(Value::is_null)
+            && checked(crate::contract_runtime::backend::seat_authority_absent(
+                &selected.run_workspace,
+                &selected.team_key,
+                &checked(SeatId::new(id))?,
+            ))?
+        {
+            // A failed legacy migration may have written only the declaration.
+            // Do not infer death from that provider string or from a missing PID.
+            if let Some(pid) = row
+                .get("pane_pid")
+                .and_then(Value::as_u64)
+                .and_then(|p| u32::try_from(p).ok())
+                .filter(|p| *p > 1)
+            {
+                return Ok(
+                    match checked(crate::platform::process::pid_liveness(pid))? {
+                        crate::platform::process::ProcessLiveness::Dead => {
+                            SeatObservation::StoppedVerified
+                        }
+                        _ => SeatObservation::Unknown,
+                    },
+                );
+            }
+            return Ok(
+                if row.get("status").and_then(Value::as_str) == Some("stopped")
+                    && row.get("explicit_stop").and_then(Value::as_bool) == Some(true)
+                {
+                    SeatObservation::StoppedVerified
+                } else {
+                    SeatObservation::Unknown
+                },
+            );
+        }
         if crate::contract_runtime::framework::is_paused_unstarted(row) {
             return Ok(SeatObservation::Unstarted);
         }

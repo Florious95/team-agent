@@ -395,6 +395,121 @@ fn provider_change_without_fresh_refuses_with_fresh_guidance() {
     }
 }
 
+// ---- poisoned (half-migrated) seats and rollback ---------------------------
+
+/// The row live H11 A10/B4 left behind: the role doc and row already name the contract
+/// provider, but no native instance exists and the seat is explicitly stopped.
+fn poisoned_team() -> Sandbox {
+    let root = team(&[("one", "stopped")]);
+    std::fs::write(
+        root.path().join("agents/one.md"),
+        "---\nprovider: cursor\nmodel: composer-2.5\ndangerously_skip_permissions: true\n---\nReview the change.\n",
+    )
+    .unwrap();
+    edit_state(root.path(), |state| {
+        state["agents"]["one"] = json!({"provider":"cursor","status":"stopped","explicit_stop":true,
+            "pane_id":null,"session_id":null,"window":"one"});
+    });
+    root
+}
+
+#[track_caller]
+fn never_unknown_provider(result: &Result<Value, CliError>) {
+    if let Err(error) = result {
+        let text = error.to_string();
+        assert!(!text.contains("unknown provider"), "a half-migrated seat must stay operable: {text}");
+    }
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn poisoned_seat_rolls_back_to_its_previous_provider_in_place() {
+    let root = poisoned_team();
+    let before = snapshot(root.path());
+    let result = dry_run(
+        root.path(), true,
+        &["one", "--provider", "pi", "--model", "magpie/codex/gpt-6-luna", "--session", "fresh"],
+        Observation::StoppedVerified,
+    );
+    never_unknown_provider(&result);
+    let plan = result.unwrap_or_else(|error| panic!("rollback to the legacy provider must plan: {error}"));
+    assert_eq!(snapshot(root.path()), before, "planning must not write");
+    assert_eq!(op(&plan, "one"), "provider_changed");
+    assert!(provider_is(&declared(&plan, "one", "provider"), "pi"));
+    assert_eq!(declared(&plan, "one", "model"), json!("magpie/codex/gpt-6-luna"));
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn poisoned_seat_retry_and_plain_start_are_admitted_or_refused_by_native_admission() {
+    let root = poisoned_team();
+    for argv in [
+        vec!["one", "--provider", "cursor", "--model", "composer-2.5", "--session", "fresh"],
+        vec!["one", "--session", "fresh"],
+        vec!["one"],
+    ] {
+        let result = dry_run(root.path(), true, &argv, Observation::StoppedVerified);
+        never_unknown_provider(&result);
+        match result {
+            Ok(plan) => {
+                let op = op(&plan, "one");
+                assert!(
+                    ["created", "adopted", "provider_changed", "fresh"].contains(&op.as_str()),
+                    "{argv:?}: an unmaterialized native declaration is admitted, got op {op}: {plan}"
+                );
+            }
+            Err(error) => {
+                let text = error.to_string();
+                let names_way_out = admitted_verbs(&text).iter().any(|verb| verb == "start");
+                assert!(
+                    text.contains("native") || names_way_out,
+                    "{argv:?}: only native admission may refuse, or the refusal names `team-agent start`: {text}"
+                );
+                assert_admitted(&text);
+            }
+        }
+    }
+}
+
+/// Executes (not dry-run) a legacy→contract migration on a host where the native
+/// provider cannot be admitted. A definite pre-commit failure must leave the role doc
+/// and the state row exactly as they were, so the seat stays startable on its old provider.
+#[test]
+#[serial_test::serial(env)]
+fn failed_native_admission_leaves_the_declaration_and_row_untouched() {
+    struct PathGuard(Option<std::ffi::OsString>);
+    impl Drop for PathGuard {
+        fn drop(&mut self) {
+            if let Some(path) = self.0.take() {
+                std::env::set_var("PATH", path);
+            }
+        }
+    }
+    let _path = PathGuard(std::env::var_os("PATH"));
+    std::env::set_var("PATH", "/usr/bin:/bin"); // no cursor-agent, no tmux, no providers
+    let root = team(&[("one", "stopped")]);
+    let doc = root.path().join("agents/one.md");
+    let role_before = std::fs::read(&doc).unwrap();
+    let workspace = root.path().to_string_lossy().into_owned();
+    let args: Vec<String> = ["one", "--provider", "cursor", "--model", "composer-2.5", "--session", "fresh",
+        "--workspace", workspace.as_str(), "--team", "fixture", "--json"]
+        .iter().map(|value| (*value).to_string()).collect();
+    let outcome = run("start", &args, root.path()).expect("start is a lifecycle command");
+    let failed = match &outcome {
+        Ok(result) => match &result.output {
+            CmdOutput::Json(value) => value["ok"] != json!(true),
+            _ => true,
+        },
+        Err(_) => true,
+    };
+    assert!(failed, "the migration cannot succeed without the native provider: {outcome:?}");
+    assert_eq!(std::fs::read(&doc).unwrap(), role_before, "role doc restored or never committed");
+    let state: Value = serde_json::from_slice(&std::fs::read(state_path(root.path())).unwrap()).unwrap();
+    for row in [&state["agents"]["one"], &state["teams"]["fixture"]["agents"]["one"]] {
+        assert_eq!(row["provider"], json!("pi"), "the row keeps its previous provider: {row}");
+    }
+}
+
 // ---- refusals that must point somewhere admitted --------------------------
 
 #[test]

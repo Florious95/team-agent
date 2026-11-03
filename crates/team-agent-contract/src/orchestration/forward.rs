@@ -51,6 +51,10 @@ pub struct ForwardIntent {
 }
 
 impl ContractStore {
+    pub fn framework_peer(&self, seat: &SeatId) -> Result<Option<FrameworkPeer>, Error> {
+        self.files.get(&Key::new("peers", seat.as_str()))
+    }
+
     pub fn set_framework_routes(
         &mut self,
         peers: &[FrameworkPeer],

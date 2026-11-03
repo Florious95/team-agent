@@ -59,6 +59,25 @@ mod stopped_restart_tests {
     use super::*;
 
     #[test]
+    fn previously_launched_uncaptured_seats_are_not_unstarted() {
+        for evidence in [
+            serde_json::json!({"spawned_at":"2026-01-01T00:00:00Z"}),
+            serde_json::json!({"_pending_session_id":"uncaptured"}),
+            serde_json::json!({"pane_pid":123}),
+            serde_json::json!({"first_send_at":"2026-01-01T00:00:00Z"}),
+        ] {
+            assert!(has_prior_launch(&evidence));
+        }
+        assert!(!has_prior_launch(
+            &serde_json::json!({"status":"stopped","provider":"claude_code",
+            "session_id":null,"first_send_at":null,"pane_pid":null})
+        ));
+        assert!(!has_prior_launch(
+            &serde_json::json!({"session_history":[{"session_id":"ancestor"}]})
+        ));
+    }
+
+    #[test]
     fn stopped_rows_never_enter_validation_or_fresh_spawn_even_with_allow_fresh() {
         let state = serde_json::json!({"agents": {
             "stopped": {"provider":"pi","status":"stopped","explicit_stop":true,
@@ -97,6 +116,32 @@ mod stopped_restart_tests {
 /// - 初始 `start_mode = if session_id { Resumed } else { Fresh }`(`start.py:179`)。
 /// - `missing && allow_fresh` 升级为 `FreshAfterMissingRollout` 并清空 session_id。
 /// - `missing && !allow_fresh` 返回 `Noop`,调用方据此诚实拒绝并提示 `--allow-fresh`。
+/// A missing captured ID is not evidence of an unused seat. Physical launch
+/// and pending native-session metadata survive a stop even before first send.
+pub(crate) fn has_prior_launch(row: &serde_json::Value) -> bool {
+    [
+        "session_id",
+        "_pending_session_id",
+        "pending_session_id",
+        "spawned_at",
+        "spawn_epoch",
+        "first_send_at",
+        "last_result_at",
+    ]
+    .iter()
+    .any(|key| {
+        row.get(*key)
+            .is_some_and(|value| !value.is_null() && value.as_str() != Some(""))
+    }) || row
+        .get("pane_pid")
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|pid| pid > 1)
+        || row
+            .get("task_prompt_delivered")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+}
+
 pub fn decide_start_mode(
     provider: &str,
     session_id: Option<&SessionId>,
@@ -341,7 +386,9 @@ pub(crate) fn classify_restart_plan_with_resume_validation(
         // Contract resumes are admitted against their canonical native store,
         // not this legacy enum's unknown-provider Codex default.
         #[cfg(unix)]
-        if crate::contract_runtime::framework::is_contract(agent) { continue; }
+        if crate::contract_runtime::framework::is_contract(agent) {
+            continue;
+        }
         if crate::state::projection::agent_stopped_for_restart(agent)
             || agent.get("status").and_then(|v| v.as_str()) == Some("paused")
         {

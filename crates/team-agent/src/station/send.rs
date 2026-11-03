@@ -379,6 +379,16 @@ fn send_one(
             });
             result["live"] = json!(true);
             result["delivery"] = json!("physical");
+            let observed_sender = match authority {
+                Authority::Seat { team, .. } if directory.team.as_deref() == Some(team)
+                    && same_workspace(req.workspace, &directory.workspace) => sender_in_directory(authority, directory),
+                _ => String::new(),
+            };
+            if let Err(error) = crate::provider::session::capture::observe_physical_delivery(
+                &directory.workspace, directory.team.as_deref(), &directory.state, &observed_sender, recipient,
+            ) {
+                result["session_observation_warning"] = json!(error);
+            }
             for key in ["pane_id", "dialect"] {
                 if let Some(value) = delivery.get(key) {
                     result[key] = value.clone();

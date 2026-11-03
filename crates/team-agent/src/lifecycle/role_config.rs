@@ -692,69 +692,67 @@ pub(super) fn update_agent_config(
     compiled: &Value,
     role: &Path,
 ) -> Result<(), LifecycleError> {
-    StateRepository::new(&selected.run_workspace)
-        .commit(
-            StateWriteIntent::StartAgent {
-                team_key: &selected.team_key,
-                agent_id: agent_id.as_str(),
+    StateRepository::new(&selected.run_workspace).commit(
+        StateWriteIntent::StartAgent { team_key: &selected.team_key, agent_id: agent_id.as_str() },
+        |state| apply_agent_config(state, selected, agent_id, compiled, role),
+    ).map(|_| ()).map_err(|error| LifecycleError::StatePersist(error.to_string()))
+}
+
+pub(super) fn apply_agent_config(
+    state: &mut serde_json::Value, selected: &SelectedTeam, agent_id: &AgentId, compiled: &Value, role: &Path,
+) {
+    if let Some(agent) = state
+        .get_mut("agents")
+        .and_then(|agents| agents.get_mut(agent_id.as_str()))
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for field in [
+            "provider",
+            "model",
+            "role",
+            "system_prompt",
+            "output_contract",
+            "auth_mode",
+            "effort",
+            "profile",
+            "dangerously_skip_permissions",
+            "communication_mode",
+        ] {
+            if let Some(value) = compiled.get(field) {
+                agent.insert(field.into(), to_json(value));
+            } else {
+                agent.remove(field);
+            }
+        }
+        agent.insert(
+            "dynamic_role_file".into(),
+            role.to_string_lossy().to_string().into(),
+        );
+        agent.insert("role_source_ownership".into(), "external".into());
+        agent.insert(
+            "model_source".into(),
+            if compiled.get("model").and_then(Value::as_str).is_some() {
+                "role".into()
+            } else {
+                "default".into()
             },
-            |state| {
-                if let Some(agent) = state
-                    .get_mut("agents")
-                    .and_then(|agents| agents.get_mut(agent_id.as_str()))
-                    .and_then(serde_json::Value::as_object_mut)
-                {
-                    for field in [
-                        "provider",
-                        "model",
-                        "role",
-                        "system_prompt",
-                        "output_contract",
-                        "auth_mode",
-                        "effort",
-                        "profile",
-                        "dangerously_skip_permissions",
-                        "communication_mode",
-                    ] {
-                        if let Some(value) = compiled.get(field) {
-                            agent.insert(field.into(), to_json(value));
-                        } else {
-                            agent.remove(field);
-                        }
-                    }
-                    agent.insert(
-                        "dynamic_role_file".into(),
-                        role.to_string_lossy().to_string().into(),
-                    );
-                    agent.insert("role_source_ownership".into(), "external".into());
-                    agent.insert(
-                        "model_source".into(),
-                        if compiled.get("model").and_then(Value::as_str).is_some() {
-                            "role".into()
-                        } else {
-                            "default".into()
-                        },
-                    );
-                    // Imported roles are self-contained in this Team, including
-                    // profile lookup; never retain an external credential root.
-                    if compiled.get("profile").and_then(Value::as_str).is_some() {
-                        agent.insert(
-                            "_profile_dir".into(),
-                            selected
-                                .team_dir
-                                .join("profiles")
-                                .to_string_lossy()
-                                .to_string()
-                                .into(),
-                        );
-                    } else {
-                        agent.remove("_profile_dir");
-                    }
-                }
-            },
-        )
-        .map(|_| ())
-        .map_err(|error| LifecycleError::StatePersist(error.to_string()))
+        );
+        // Imported roles are self-contained in this Team, including
+        // profile lookup; never retain an external credential root.
+        if compiled.get("profile").and_then(Value::as_str).is_some() {
+            agent.insert(
+                "_profile_dir".into(),
+                selected
+                    .team_dir
+                    .join("profiles")
+                    .to_string_lossy()
+                    .to_string()
+                    .into(),
+            );
+        } else {
+            agent.remove("_profile_dir");
+        }
+    }
 }
 
 struct FileSnapshot {

@@ -61,6 +61,14 @@ pub(super) fn with_agent(
 }
 
 pub(super) fn publish_at(workspace: &Path, team: &str, id: &SeatId, clear_stop: bool) -> Result<Value, CliError> {
+    publish_at_with_change(workspace, team, id, clear_stop, |_| {})
+}
+
+/// Commit caller-owned declaration/history changes with the native projection,
+/// so no intermediate row loses both its old and its new continuation identity.
+pub(crate) fn publish_at_with_change<F>(workspace: &Path, team: &str, id: &SeatId, clear_stop: bool, change: F) -> Result<Value, CliError>
+where F: FnOnce(&mut Value),
+{
     let mut projected = framework::project_seat(workspace, team, id.as_str()).map_err(error)?;
     let mut fields = projected.as_object().ok_or(BackendError::Metadata).map_err(error)?.clone();
     fields.insert("paused".into(), Value::Bool(false));
@@ -79,6 +87,7 @@ pub(super) fn publish_at(workspace: &Path, team: &str, id: &SeatId, clear_stop: 
     StateRepository::new(workspace).commit(
         StateWriteIntent::StartAgent { team_key: team, agent_id: id.as_str() },
         |state| {
+            change(state);
             if let Some(row) = state.get_mut("agents").and_then(|agents| agents.get_mut(id.as_str())).and_then(Value::as_object_mut) {
                 row.extend(fields);
             }

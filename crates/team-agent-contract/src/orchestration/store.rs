@@ -19,6 +19,9 @@ use std::{
 #[cfg(any(test, feature = "fixtures"))]
 #[path = "store_fixtures.rs"]
 mod fixtures;
+#[cfg(test)]
+#[path = "peer_transfer_tests.rs"]
+mod peer_transfer_tests;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SeatStatus {
@@ -58,13 +61,21 @@ impl SeatRecord {
     /// A receipt must describe this complete authority record before a live
     /// host check can authorize any transport or teardown.
     pub fn physical_target(&self) -> Result<&crate::host::transport::TargetReceipt, Error> {
-        let target = self.physical.as_ref().ok_or(Error::Invalid("physical target missing"))?;
-        if target.identity() != &self.identity || target.provider != self.provider || target.native != self.native
-            || target.cwd != self.cwd || target.evidence_kind != self.evidence_kind
+        let target = self
+            .physical
+            .as_ref()
+            .ok_or(Error::Invalid("physical target missing"))?;
+        if target.identity() != &self.identity
+            || target.provider != self.provider
+            || target.native != self.native
+            || target.cwd != self.cwd
+            || target.evidence_kind != self.evidence_kind
             || self.process.as_ref() != Some(&target.process.identity)
-            || target.endpoint.to_str() != Some(self.endpoint.as_str()) || target.pane != self.pane
+            || target.endpoint.to_str() != Some(self.endpoint.as_str())
+            || target.pane != self.pane
             || target.binding != self.binding_key
-            || target.native_session.as_ref() != self.session.as_ref().map(|s| &s.native_session) {
+            || target.native_session.as_ref() != self.session.as_ref().map(|s| &s.native_session)
+        {
             return Err(Error::Fence);
         }
         Ok(target)
@@ -172,6 +183,13 @@ pub trait SeatAuthority {
     fn retire(&mut self, identity: &InstanceIdentity) -> Result<SeatRecord, Error>;
     fn retired(&self, identity: &InstanceIdentity) -> Result<bool, Error>;
     fn begin(&mut self, operation: &OperationRecord) -> Result<(), Error>;
+    fn begin_replacing_peer(
+        &mut self,
+        _operation: &OperationRecord,
+        _peer: &super::forward::FrameworkPeer,
+    ) -> Result<(), Error> {
+        Err(Error::Conflict)
+    }
     fn save(&mut self, operation: &OperationRecord, publish: bool) -> Result<(), Error>;
 }
 
@@ -221,6 +239,13 @@ impl SeatAuthority for ProjectionStore {
     }
     fn begin(&mut self, operation: &OperationRecord) -> Result<(), Error> {
         ProjectionStore::begin(self, operation)
+    }
+    fn begin_replacing_peer(
+        &mut self,
+        operation: &OperationRecord,
+        peer: &super::forward::FrameworkPeer,
+    ) -> Result<(), Error> {
+        self.begin_with_peer(operation, Some(peer))
     }
     fn save(&mut self, operation: &OperationRecord, publish: bool) -> Result<(), Error> {
         ProjectionStore::save(self, operation, publish)
@@ -420,6 +445,13 @@ impl ProjectionStore {
             .is_some_and(|s| s.identity == *identity))
     }
     pub(crate) fn begin(&mut self, operation: &OperationRecord) -> Result<(), Error> {
+        self.begin_with_peer(operation, None)
+    }
+    fn begin_with_peer(
+        &mut self,
+        operation: &OperationRecord,
+        peer: Option<&super::forward::FrameworkPeer>,
+    ) -> Result<(), Error> {
         let target = &operation.target.identity;
         let creates = !matches!(
             operation.kind,
@@ -443,11 +475,20 @@ impl ProjectionStore {
         {
             return Err(Error::Conflict);
         }
-        if tx
-            .get::<serde_json::Value>(&Key::new("peers", target.seat.as_str()))?
-            .is_some()
-        {
-            return Err(Error::Conflict);
+        let peer_key = Key::new("peers", target.seat.as_str());
+        let current_peer = tx.get::<super::forward::FrameworkPeer>(&peer_key)?;
+        match peer {
+            Some(expected)
+                if operation.kind == TransactionKind::Startup
+                    && operation.parent.is_none()
+                    && expected.recipient == target.seat.as_str()
+                    && current_peer.as_ref() == Some(expected) =>
+            {
+                tx.put(Key::new("peer_transfers", operation.id.as_str()), expected)?;
+                tx.delete(peer_key)?;
+            }
+            None if current_peer.is_none() => {}
+            _ => return Err(Error::Conflict),
         }
         let old = load_seat(&tx, &target.seat)?;
         match operation.kind {
@@ -459,7 +500,10 @@ impl ProjectionStore {
                 }
             }
             TransactionKind::Restart => {
-                let parent = operation.parent.as_ref().ok_or_else(|| Error::fence("restart_parent_missing"))?;
+                let parent = operation
+                    .parent
+                    .as_ref()
+                    .ok_or_else(|| Error::fence("restart_parent_missing"))?;
                 if old.as_ref() != Some(parent)
                     || target.seat != parent.identity.seat
                     || target.instance == parent.identity.instance
@@ -493,7 +537,9 @@ impl ProjectionStore {
                     .get::<InstanceIdentity>(&Key::new("instances", target.instance.as_str()))?
                     .is_some()
             {
-                return Err(Error::fence("operation_begin_generation_stale_or_instance_reused"));
+                return Err(Error::fence(
+                    "operation_begin_generation_stale_or_instance_reused",
+                ));
             }
             tx.put(
                 Key::new("generations", target.seat.as_str()),
@@ -529,7 +575,10 @@ impl ProjectionStore {
             .borrow()
             .get(operation.id.as_str())
             .ok_or_else(|| Error::fence("operation_save_revision_token_missing"))?;
-        let previous: OperationRecord = self.files.get(&op_key)?.ok_or_else(|| op_key.fence("operation_save_record_missing"))?;
+        let previous: OperationRecord = self
+            .files
+            .get(&op_key)?
+            .ok_or_else(|| op_key.fence("operation_save_record_missing"))?;
         if previous.target.identity != operation.target.identity
             || previous.kind != operation.kind
             || operation.target.identity.scope != self.scope
@@ -577,6 +626,18 @@ impl ProjectionStore {
                 &operation.target,
             )?;
         }
+        if rollback {
+            if let Some(peer) = tx.get::<super::forward::FrameworkPeer>(&Key::new(
+                "peer_transfers",
+                operation.id.as_str(),
+            ))? {
+                let key = Key::new("peers", operation.target.identity.seat.as_str());
+                if tx.get::<super::forward::FrameworkPeer>(&key)?.is_some() {
+                    return Err(key.fence("peer_transfer_rollback_replaced"));
+                }
+                tx.put(key, &peer)?;
+            }
+        }
         tx.put(op_key, operation)?;
         if matches!(operation.outcome, Outcome::Committed | Outcome::Compensated) {
             for seat in std::iter::once(&operation.target.identity.seat).chain(
@@ -615,7 +676,8 @@ pub(crate) fn current(
     if &identity.scope != scope {
         return Err(Error::fence("current_identity_scope_mismatch"));
     }
-    let record = load_seat(store, &identity.seat)?.ok_or_else(|| Error::fence("current_seat_missing"))?;
+    let record =
+        load_seat(store, &identity.seat)?.ok_or_else(|| Error::fence("current_seat_missing"))?;
     if record.identity != *identity {
         return Err(Error::fence("current_instance_or_generation_replaced"));
     }
@@ -649,12 +711,17 @@ fn route_keys(seat: &SeatRecord) -> Vec<Key> {
     // F0 reserves a unique binding, not the shared pre-spawn placeholder.
     // Published panes still have exclusive ownership, including fixture routes.
     if seat.pane != "unpublished" || seat.process.is_some() || seat.physical.is_some() {
-        keys.push(Key::new("routes", format!("{}\0{}", seat.endpoint, seat.pane)));
+        keys.push(Key::new(
+            "routes",
+            format!("{}\0{}", seat.endpoint, seat.pane),
+        ));
     }
     keys
 }
 fn operation_keys(operation: &OperationRecord) -> Vec<Key> {
     let mut keys = route_keys(&operation.target);
+    keys.push(Key::new("peer_transfers", operation.id.as_str()));
+    keys.push(Key::new("peers", operation.target.identity.seat.as_str()));
     keys.extend([
         Key::new("operations", operation.id.as_str()),
         Key::new("peers", operation.target.identity.seat.as_str()),

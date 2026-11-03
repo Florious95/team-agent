@@ -145,17 +145,21 @@ pub fn team_config(
     if let (Some(config), Ok(selected)) = (&mut config, crate::state::selector::resolve_active_team_readonly(
         workspace, Some(team), crate::state::selector::SelectorMode::RuntimeOnly,
     )) {
-        for member in &mut config.members {
-            if let Some(row) = selected.state.get("agents").and_then(|agents| agents.get(&member.id)) {
-                member.runtime = if is_contract(row) { config::RuntimeFamily::Contract } else { config::RuntimeFamily::Legacy };
-                if let Some(provider) = row.get("contract_provider").or_else(|| row.get("provider")).and_then(Value::as_str) {
-                    member.provider = provider.into();
-                }
-            }
-        }
+        retain_registered_routes(config, &selected.state);
     }
     Ok(config)
 }
+pub(crate) fn retain_registered_routes(config: &mut config::TeamConfig, state: &Value) {
+    for member in &mut config.members {
+        if let Some(row) = state.get("agents").and_then(|agents| agents.get(&member.id)) {
+            member.runtime = if is_contract(row) { config::RuntimeFamily::Contract } else { config::RuntimeFamily::Legacy };
+            if let Some(provider) = row.get("contract_provider").and_then(Value::as_str).or_else(|| row.get("provider").and_then(Value::as_str)) {
+                member.provider = provider.into();
+            }
+        }
+    }
+}
+
 pub fn start_role(
     workspace: &Path,
     directory: &Path,

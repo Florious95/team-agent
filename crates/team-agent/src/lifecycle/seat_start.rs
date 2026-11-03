@@ -116,8 +116,10 @@ pub fn resolve(
             {
                 return Err(refused(format!("invalid role field: {name}")));
             }
-            if name == "dangerously_skip_permissions" && !matches!(value, Yaml::Bool(_)) {
-                return Err(refused("dangerously_skip_permissions must be a boolean"));
+            if matches!(name.as_str(), "dangerously_skip_permissions" | "paused")
+                && !matches!(value, Yaml::Bool(_))
+            {
+                return Err(refused(format!("{name} must be a boolean")));
             }
         }
     }
@@ -217,7 +219,8 @@ pub fn resolve(
         ));
     }
     let row = selected.and_then(|selected| selected.state["agents"].get(request.agent.as_str()));
-    if compiled.agent.get("paused") == Some(&Yaml::Bool(true))
+    if meta.get("paused") == Some(&Yaml::Bool(true))
+        || compiled.agent.get("paused") == Some(&Yaml::Bool(true))
         || row.is_some_and(|row| {
             row["paused"] == true
                 || row["status"]
@@ -426,11 +429,130 @@ pub(crate) fn describe_resolved(
     } else {
         "created"
     };
+    let op = if op == "resumed"
+        && continuation_admission(request, selected, resolved)?
+            .is_some_and(|(_, mode)| mode != super::StartMode::Resumed)
+    {
+        "fresh"
+    } else {
+        op
+    };
     Ok(StartDescription {
         op,
         declaration,
         defaulted: resolved.defaulted.clone(),
     })
+}
+
+/// Read-only continuation admission. A previously launched but uncaptured
+/// seat is not a new seat, including when it never received its first message.
+fn continuation_admission(
+    request: &StartRequest,
+    selected: Option<&SelectedTeam>,
+    declaration: &Declaration,
+) -> Result<Option<(Value, super::StartMode)>, LifecycleError> {
+    if request.session == SessionPolicy::Fresh || native(provider(&declaration.compiled.agent)) {
+        return Ok(None);
+    }
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let Some(old) = selected
+        .state
+        .get("agents")
+        .and_then(|agents| agents.get(request.agent.as_str()))
+    else {
+        return Ok(None);
+    };
+    if !same_provider(
+        old.get("provider").and_then(Value::as_str).unwrap_or("pi"),
+        provider(&declaration.compiled.agent),
+    ) {
+        return Ok(None);
+    }
+    // Matching live starts are no-ops; they do not require a captured transcript.
+    let dead = old
+        .get("pane_pid")
+        .and_then(Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok())
+        .filter(|pid| *pid > 1)
+        .is_some_and(|pid| {
+            matches!(
+                crate::platform::process::pid_liveness(pid),
+                Ok(crate::platform::process::ProcessLiveness::Dead)
+            )
+        });
+    if old.get("status").and_then(Value::as_str) == Some("running") && !dead {
+        return Ok(None);
+    }
+    for field in [
+        "session_id",
+        "_pending_session_id",
+        "rollout_path",
+        "spawn_cwd",
+        "last_result_at",
+    ] {
+        if old
+            .get(field)
+            .is_some_and(|value| !value.is_null() && !value.is_string())
+        {
+            return Err(refused(format!("invalid continuation metadata: {field}")));
+        }
+    }
+    if super::restart::classify_first_send_at(old.get("first_send_at").unwrap_or(&Value::Null))
+        == super::FirstSendAtState::Corrupt
+    {
+        return Err(refused("invalid first_send_at metadata"));
+    }
+    let row = crate::provider::session::capture::captured_start_row(
+        &selected.state,
+        request.agent.as_str(),
+    )
+    .map_err(rejected)?;
+    let provider = crate::provider::wire::parse_provider(provider(&declaration.compiled.agent))
+        .ok_or_else(|| refused("unsupported continuation provider"))?;
+    let session = row
+        .get("session_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(crate::provider::SessionId::new);
+    let rollout = row
+        .get("rollout_path")
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+        .map(crate::provider::RolloutPath::new);
+    let backing = session.as_ref().is_some_and(|session| {
+        super::restart::surface_resume_backing_probe(
+            &selected.run_workspace,
+            &request.agent,
+            &row,
+            provider,
+            session,
+            rollout.as_ref(),
+        )
+        .0
+    });
+    let identity = super::restart::session_identity_probe_for_agent_with_fork_ancestry(
+        &selected.run_workspace,
+        &selected.state,
+        &request.agent,
+        &row,
+        provider,
+        rollout.as_ref(),
+    );
+    let resumable = backing
+        && identity.identity_ok != Some(false)
+        && row.get("attribution_ambiguous").and_then(Value::as_bool) != Some(true)
+        && row.get("capture_state").and_then(Value::as_str) != Some("attribution_ambiguous");
+    let mode = if resumable {
+        super::StartMode::Resumed
+    } else if !super::restart::has_prior_launch(old) || request.session == SessionPolicy::Auto {
+        super::StartMode::Fresh
+    } else {
+        return Err(refused(format!("session_preserve_unavailable: {} has no verified resumable backing; retain its history and retry capture, or explicitly run `team-agent start {} --workspace {} --team {} --session fresh`",
+                request.agent, command_arg(request.agent.as_str()), command_arg(&selected.run_workspace.to_string_lossy()), command_arg(&selected.team_key))));
+    };
+    Ok(Some((row, mode)))
 }
 
 /// Pure target-specific native admission; never launch or repair a peer.
@@ -439,6 +561,16 @@ pub(crate) fn preflight(
     selected: Option<&SelectedTeam>,
     declaration: &Declaration,
 ) -> Result<(), LifecycleError> {
+    if selected
+        .and_then(|selected| {
+            selected.state["agents"][request.agent.as_str()].get("session_history")
+        })
+        .is_some_and(|history| !history.is_null() && !history.is_array())
+    {
+        return Err(refused(
+            "invalid session history; refusing to replace retained context",
+        ));
+    }
     #[cfg(unix)]
     if native(provider(&declaration.compiled.agent)) {
         let (meta, _) = role_config::role_parts(&declaration.text)?;
@@ -478,8 +610,44 @@ pub(crate) fn preflight(
             .map_err(rejected)?
             .ok_or_else(|| refused("native role is missing from its team declaration"))?;
             crate::contract_runtime::backend::preflight(&config).map_err(rejected)?;
+            let row = &selected.state["agents"][request.agent.as_str()];
+            if row.is_object()
+                && row["contract_instance"].is_null()
+                && same_provider(
+                    row["provider"].as_str().unwrap_or(""),
+                    provider(&declaration.compiled.agent),
+                )
+            {
+                let role = config
+                    .roles
+                    .iter()
+                    .find(|role| role.id.as_str() == request.agent.as_str())
+                    .ok_or_else(|| refused("native role is missing"))?;
+                native_continuation_admission(request, selected, role)?;
+            }
         }
     }
+    #[cfg(unix)]
+    if !native(provider(&declaration.compiled.agent)) {
+        if let Some(selected) = selected {
+            let id = team_agent_contract::contract::types::SeatId::new(request.agent.as_str())
+                .map_err(rejected)?;
+            if (request.session != SessionPolicy::Fresh
+                || selected.state["agents"][request.agent.as_str()]["contract_instance"]
+                    .as_str()
+                    .is_none())
+                && !crate::contract_runtime::backend::seat_authority_absent(
+                    &selected.run_workspace,
+                    &selected.team_key,
+                    &id,
+                )
+                .map_err(rejected)?
+            {
+                return Err(refused("native authority still owns this seat; reconcile or stop that native attempt before starting a legacy provider"));
+            }
+        }
+    }
+    continuation_admission(request, selected, declaration)?;
     let _ = (request, selected, declaration);
     Ok(())
 }
@@ -703,6 +871,13 @@ fn converge(
         for (key, value) in started.as_object().into_iter().flatten() {
             result[key] = value.clone();
         }
+        if result["op"] == "resumed"
+            && result["start_mode"]
+                .as_str()
+                .is_some_and(|mode| mode.starts_with("fresh"))
+        {
+            result["op"] = json!("fresh");
+        }
         return Ok(result);
     }
     let description = describe_resolved(request, selected, false, &declaration)?;
@@ -779,6 +954,12 @@ fn start_existing(
     role_config::replace_spec_agent(&mut spec, &request.agent, &declaration.compiled.agent)?;
     crate::model::spec::validate_spec(&spec, &selected.run_workspace).map_err(rejected)?;
     #[cfg(unix)]
+    if native(provider(&declaration.compiled.agent))
+        && selected.state["agents"][request.agent.as_str()]["contract_instance"].is_null()
+    {
+        return start_unmaterialized_native(request, selected, declaration, &spec);
+    }
+    #[cfg(unix)]
     if native(provider(&declaration.compiled.agent)) {
         let config = crate::contract_runtime::config::read_start_declaration(
             &selected.run_workspace,
@@ -835,13 +1016,50 @@ fn start_existing(
             }
         }
     }
-    if request.session == SessionPolicy::Fresh {
+    let continuation = continuation_admission(request, Some(selected), declaration)?;
+    if let Some((row, super::StartMode::Resumed)) = &continuation {
+        let mut applied = false;
+        StateRepository::new(&selected.run_workspace)
+            .commit(
+                StateWriteIntent::StartAgent {
+                    team_key: &selected.team_key,
+                    agent_id: request.agent.as_str(),
+                },
+                |state| {
+                    if let Some(current) = state
+                        .get_mut("agents")
+                        .and_then(|agents| agents.get_mut(request.agent.as_str()))
+                    {
+                        if crate::provider::session::capture::same_capture_incarnation(
+                            current,
+                            &selected.state["agents"][request.agent.as_str()],
+                        ) {
+                            crate::provider::session::capture::apply_capture_delta(current, row);
+                            applied = true;
+                        }
+                    }
+                },
+            )
+            .map_err(failed)?;
+        if !applied {
+            return Err(refused(
+                "session incarnation changed during continuation admission",
+            ));
+        }
+    }
+    if request.session == SessionPolicy::Fresh
+        || continuation.as_ref().is_some_and(|(_, mode)| {
+            *mode == super::StartMode::Fresh
+                && super::restart::has_prior_launch(
+                    &selected.state["agents"][request.agent.as_str()],
+                )
+        })
+    {
         #[cfg(unix)]
-        if native(
-            selected.state["agents"][request.agent.as_str()]["provider"]
-                .as_str()
-                .unwrap_or(""),
-        ) {
+        if selected.state["agents"][request.agent.as_str()]["contract_instance"]
+            .as_str()
+            .is_some()
+        {
             let id = team_agent_contract::contract::types::SeatId::new(request.agent.as_str())
                 .map_err(failed)?;
             crate::contract_runtime::backend::retire(
@@ -909,6 +1127,166 @@ fn start_existing(
     })
 }
 
+#[cfg(unix)]
+fn native_continuation_admission(
+    request: &StartRequest,
+    selected: &SelectedTeam,
+    role: &crate::contract_runtime::config::RoleConfig,
+) -> Result<Option<team_agent_contract::contract::types::InstanceIdentity>, LifecycleError> {
+    use team_agent_contract::{
+        host::process::{sample_process, ProcessState},
+        orchestration::store::SeatStatus,
+    };
+    let row = &selected.state["agents"][request.agent.as_str()];
+    if crate::contract_runtime::backend::seat_authority_absent(
+        &selected.run_workspace,
+        &selected.team_key,
+        &role.id,
+    )
+    .map_err(rejected)?
+    {
+        if request.session == SessionPolicy::Preserve
+            && super::restart::has_prior_launch(row)
+            && (row
+                .get("session_history")
+                .and_then(Value::as_array)
+                .is_none_or(Vec::is_empty)
+                || row.get("session_id").and_then(Value::as_str).is_some()
+                || row
+                    .get("_pending_session_id")
+                    .and_then(Value::as_str)
+                    .is_some())
+        {
+            return Err(refused("session_preserve_unavailable: prior launch context has no native continuation authority; choose --session fresh explicitly"));
+        }
+        return Ok(None);
+    }
+    let backend = crate::contract_runtime::backend::Backend::open_readonly(
+        &selected.run_workspace,
+        &selected.team_key,
+    )
+    .map_err(rejected)?;
+    let current = backend.store.seat(&role.id).map_err(rejected)?;
+    if request.session == SessionPolicy::Fresh
+        && current.is_some()
+        && same_provider(
+            row["provider"].as_str().unwrap_or(""),
+            role.provider.as_str(),
+        )
+    {
+        return Err(refused(format!("native identity needs reconciliation first; run `team-agent start {} --workspace {} --team {} --session preserve`, then stop it before requesting fresh",
+            command_arg(request.agent.as_str()), command_arg(&selected.run_workspace.to_string_lossy()), command_arg(&selected.team_key))));
+    }
+    if request.session == SessionPolicy::Preserve {
+        let current = current.as_ref().ok_or_else(|| refused("session_preserve_unavailable: incomplete native startup has no verified continuation; recover with explicit --session fresh"))?;
+        if current.status != SeatStatus::Ready
+            || !current.physical.as_ref().is_some_and(|target| {
+                matches!(sample_process(&target.process), ProcessState::Alive)
+            })
+        {
+            let resume = crate::contract_runtime::backend::prepare_resume(
+                &selected.run_workspace,
+                &selected.team_key,
+                &role.id,
+                Some(role),
+            )
+            .map_err(rejected)?;
+            if resume.native_launch() != team_agent_contract::contract::types::Operation::Resume {
+                return Err(refused("session_preserve_unavailable: native continuation requires fresh; choose --session fresh explicitly"));
+            }
+        }
+    }
+    Ok(current.map(|seat| seat.identity))
+}
+
+/// Keep legacy declarations and session history unchanged until the native
+/// transaction commits. F0 owns peer conversion and restores it on compensation.
+#[cfg(unix)]
+fn start_unmaterialized_native(
+    request: &StartRequest,
+    selected: &SelectedTeam,
+    declaration: &Declaration,
+    spec: &Yaml,
+) -> Result<Value, LifecycleError> {
+    use team_agent_contract::orchestration::store::Outcome;
+    let mut config = crate::contract_runtime::config::read_start_declaration(
+        &selected.run_workspace,
+        &selected.team_dir,
+        &selected.team_key,
+        &declaration.destination,
+        &declaration.text,
+        request.agent.as_str(),
+    )
+    .map_err(rejected)?
+    .ok_or_else(|| refused("native role is missing"))?;
+    crate::contract_runtime::framework::retain_registered_routes(&mut config, &selected.state);
+    let role = config
+        .roles
+        .iter()
+        .find(|role| role.id.as_str() == request.agent.as_str())
+        .ok_or_else(|| refused("native role is missing"))?;
+    let previous = native_continuation_admission(request, selected, role)?;
+    let (_, record) = crate::contract_runtime::backend::start_with_peer_transfer(
+        &selected.run_workspace,
+        &selected.team_key,
+        role,
+        &config.members,
+        true,
+    )
+    .map_err(failed)?;
+    if record.outcome != Outcome::Committed {
+        return Err(failed(format!("native startup operation={} phase={:?} outcome={:?}: {}; declaration and state unchanged",
+            record.id.as_str(), record.phase, record.outcome, record.failure.as_deref().unwrap_or(""))));
+    }
+    let publication = (|| {
+        role_config::atomic_write(&declaration.destination, declaration.text.as_bytes())?;
+        role_config::atomic_write(
+            &crate::model::paths::runtime_spec_path(&selected.run_workspace, &selected.team_key),
+            yaml::dumps(spec).as_bytes(),
+        )?;
+        Ok::<(), LifecycleError>(())
+    })();
+    // Once committed, never report a rollback while a native process still owns
+    // the seat. Publish its authority even if the editable declaration failed.
+    let projected = crate::contract_runtime::commands::publish_at_with_change(
+        &selected.run_workspace,
+        &selected.team_key,
+        &role.id,
+        true,
+        |state| {
+            if request.session == SessionPolicy::Fresh {
+                if let Some(row) = state["agents"][request.agent.as_str()].as_object_mut() {
+                    archive_row(row);
+                }
+            }
+            role_config::apply_agent_config(
+                state,
+                selected,
+                &request.agent,
+                &declaration.compiled.agent,
+                &declaration.destination,
+            );
+        },
+    );
+    if let Err(error) = publication {
+        return Err(failed(format!("native startup committed operation={} instance={}; declaration publication failed: {error}; projection={:?}",
+            record.id.as_str(), record.target.identity.instance.as_str(), projected.as_ref().err())));
+    }
+    let projection = projected.map_err(|error| failed(format!(
+        "native startup committed operation={} instance={}; state publication failed: {error}; retry the same start request to reconcile, do not remove the seat",
+        record.id.as_str(), record.target.identity.instance.as_str(),
+    )))?;
+    let resumed =
+        record.native_launch == Some(team_agent_contract::contract::types::Operation::Resume);
+    let repaired = previous.as_ref() == Some(&record.target.identity);
+    Ok(
+        json!({"status":if repaired {"already_running"} else {"running"},"runtime":"contract","session_id":projection.get("session_id"),
+        "generation":projection.get("generation"),"metadata_repaired":repaired,
+        "start_mode":if repaired {"noop"} else if resumed {"resumed"} else {"fresh"},
+        "operation_id":record.id.as_str(),"configuration_committed":true}),
+    )
+}
+
 fn archive_session(selected: &SelectedTeam, agent: &AgentId) -> Result<(), LifecycleError> {
     StateRepository::new(&selected.run_workspace)
         .commit(
@@ -918,42 +1296,49 @@ fn archive_session(selected: &SelectedTeam, agent: &AgentId) -> Result<(), Lifec
             },
             |state| {
                 if let Some(row) = state["agents"][agent.as_str()].as_object_mut() {
-                    let mut previous = row.clone();
-                    previous.remove("session_history");
-                    let history = row.entry("session_history").or_insert_with(|| json!([]));
-                    if let Some(history) = history.as_array_mut() {
-                        history.push(Value::Object(previous));
-                    }
-                    for key in [
-                        "session_id",
-                        "pending_session_id",
-                        "_pending_session_id",
-                        "rollout_path",
-                        "captured_at",
-                        "captured_via",
-                        "attribution_confidence",
-                        "attribution_ambiguous",
-                        "contract_scope",
-                        "contract_instance",
-                        "contract_provider",
-                        "runtime_family",
-                        "generation",
-                        "native_endpoint",
-                        "native_pane",
-                        "pane_id",
-                        "pane_pid",
-                        "tmux_endpoint",
-                        "window",
-                    ] {
-                        row.remove(key);
-                    }
-                    row.insert("first_send_at".into(), Value::Null);
-                    row.insert("status".into(), json!("stopped"));
+                    archive_row(row);
                 }
             },
         )
         .map_err(failed)?;
     Ok(())
+}
+
+fn archive_row(row: &mut serde_json::Map<String, Value>) {
+    let mut previous = row.clone();
+    previous.remove("session_history");
+    let history = row.entry("session_history").or_insert_with(|| json!([]));
+    if history.is_null() {
+        *history = json!([]);
+    }
+    if let Some(history) = history.as_array_mut() {
+        history.push(Value::Object(previous));
+    }
+    for key in [
+        "session_id",
+        "pending_session_id",
+        "_pending_session_id",
+        "rollout_path",
+        "captured_at",
+        "captured_via",
+        "attribution_confidence",
+        "attribution_ambiguous",
+        "contract_scope",
+        "contract_instance",
+        "contract_provider",
+        "runtime_family",
+        "generation",
+        "native_endpoint",
+        "native_pane",
+        "pane_id",
+        "pane_pid",
+        "tmux_endpoint",
+        "window",
+    ] {
+        row.remove(key);
+    }
+    row.insert("first_send_at".into(), Value::Null);
+    row.insert("status".into(), json!("stopped"));
 }
 
 pub(crate) fn bootstrap_directory(request: &StartRequest) -> PathBuf {
@@ -1147,6 +1532,24 @@ fn bootstrap(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    #[test]
+    fn archival_retains_the_previous_tuple_when_legacy_history_was_null() {
+        let mut row = json!({"provider":"pi","session_id":"previous","rollout_path":"/old",
+            "session_history":null,"explicit_stop":true})
+        .as_object()
+        .unwrap()
+        .clone();
+        archive_row(&mut row);
+        assert_eq!(row["session_history"][0]["session_id"], "previous");
+        assert_eq!(row["session_history"][0]["rollout_path"], "/old");
+        assert!(!row.contains_key("session_id"));
+        assert_eq!(row["explicit_stop"], true);
+        row.insert("provider".into(), json!("cursor"));
+        row.insert("session_id".into(), json!("native"));
+        assert_eq!(row["session_history"][0]["provider"], "pi");
+        assert_eq!(row["session_id"], "native");
+    }
 
     fn request(workspace: &Path) -> StartRequest {
         StartRequest {
