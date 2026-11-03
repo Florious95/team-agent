@@ -254,8 +254,10 @@ pub fn stop_agent(
         }
         let backend = Backend::open_readonly(&selected.run_workspace, &selected.team_key).map_err(error)?;
         let seat = backend.store.seat(id).map_err(error)?;
-        let mut absent = seat.is_none() && backend.store.creation_receipt(id, None).map_err(error)?
-            .is_some_and(|record| record.outcome == Outcome::Compensated && record.target.status == SeatStatus::Stopped);
+        let row = &selected.state["agents"][agent];
+        let mut absent = framework::recovery_stopped(&backend, id, row).map_err(error)?
+            || (seat.is_none() && backend.store.creation_receipt(id, None).map_err(error)?
+                .is_some_and(|record| record.outcome == Outcome::Compensated && record.target.status == SeatStatus::Stopped));
         let already_stopped = (absent || seat.as_ref().is_some_and(|seat| seat.status == SeatStatus::Stopped))
             && !backend.store.leased(id).map_err(error)?;
         drop(backend);

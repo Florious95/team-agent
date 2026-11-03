@@ -16,3 +16,5 @@ pub mod pump;
 pub mod registry;
 pub(crate) mod recovery;
 mod workspace;
+#[cfg(all(test, unix))]
+mod tmuxdesk_leader_friction_red;

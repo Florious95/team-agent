@@ -848,17 +848,19 @@ pub(super) fn seat_unclaimed(backend: &Backend, seat: &SeatId) -> Result<bool, B
 /// native seat's framework route depends on. Shared by fresh start and fork.
 pub(super) fn publish_framework_routes(backend: &mut Backend, members: &[MemberRoute]) -> Result<(), BackendError> {
     let route = backend.binding.framework().route()?;
-    let mut peers: Vec<_> = members
-        .iter()
-        .filter(|member| member.runtime == RuntimeFamily::Legacy)
-        .map(
-            |member| team_agent_contract::orchestration::forward::FrameworkPeer {
-                recipient: member.id.clone(),
-                route: route.clone(),
-                provider: member.provider.clone(),
-            },
-        )
-        .collect();
+    let mut peers = Vec::new();
+    for member in members.iter().filter(|member| member.runtime == RuntimeFamily::Legacy) {
+        // Admitted native seats remain native even when their editable role
+        // files use a legacy provider alias. Do not publish them as peers.
+        if backend.store.seat(&SeatId::new(member.id.clone())?)?.is_some() {
+            continue;
+        }
+        peers.push(team_agent_contract::orchestration::forward::FrameworkPeer {
+            recipient: member.id.clone(),
+            route: route.clone(),
+            provider: member.provider.clone(),
+        });
+    }
     peers.push(team_agent_contract::orchestration::forward::FrameworkPeer {
         recipient: "leader".into(),
         route: route.clone(),
@@ -1596,6 +1598,49 @@ mod tests {
         }
     }
     impl Drop for RoleFixture { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.root); } }
+
+    #[test]
+    fn recovered_stop_intent_never_masks_native_seats_or_creation_receipts() {
+        let mut fixture = RoleFixture::new();
+        let mut backend = fixture.canonical(SeatStatus::Ready, Phase::F4Commit, Outcome::Committed, None);
+        let row = serde_json::json!({"runtime_family":"contract","explicit_stop":true});
+        assert!(!super::super::framework::recovery_stopped(&backend, &fixture.identity.seat, &row).unwrap());
+        backend.store.fixture_delete_seat(&fixture.identity.seat).unwrap();
+        assert!(!super::super::framework::recovery_stopped(&backend, &fixture.identity.seat, &row).unwrap(),
+            "a missing seat with a creation receipt is not an omitted recovery seat");
+    }
+
+    #[test]
+    fn recovered_stopped_projection_does_not_invent_native_authority() {
+        let mut fixture = RoleFixture::new();
+        fixture.binding.transport_root = fixture.root.join("recovered-authority");
+        fixture.binding.endpoint = endpoint(&fixture.binding.scope);
+        let mut store = ContractStore::create(&fixture.binding.transport_root,
+            fixture.binding.scope.clone(), &fixture.binding.endpoint).unwrap();
+        std::fs::write(root_for(&fixture.root, &fixture.binding.scope).join("framework-binding.json"),
+            serde_json::to_vec(&fixture.binding).unwrap()).unwrap();
+        let row = serde_json::json!({"runtime_family":"contract","provider":"cursor",
+            "explicit_stop":true,"contract_instance":"lost-instance","session_id":"lost-session",
+            "native_endpoint":"/stale/socket","pane_id":"%1","pane_pid":123});
+        let project = |row: Option<&serde_json::Value>| super::super::framework::project_seat_with_row(
+            &fixture.root, "test", "worker", row);
+        let stopped = project(Some(&row)).unwrap();
+        assert_eq!(stopped["status"], "stopped");
+        for key in ["contract_instance", "session_id", "native_endpoint", "pane_id", "pane_pid"] {
+            assert!(stopped[key].is_null(), "stale {key} is not recovered authority");
+        }
+        assert_eq!(stopped["session_observation"], "unobserved");
+        assert!(project(None).is_err());
+        assert!(project(Some(&serde_json::json!({"runtime_family":"contract"}))).is_err());
+        assert!(project(Some(&serde_json::json!({"explicit_stop":true}))).is_err());
+        let lease = OperationId::new("in-flight").unwrap();
+        store.fixture_set_lease(&fixture.identity.seat, Some(&lease)).unwrap();
+        assert!(project(Some(&row)).is_err(), "stop intent must not hide an in-flight lease");
+        store.fixture_set_lease(&fixture.identity.seat, None).unwrap();
+        std::fs::remove_file(fixture.binding.transport_root.join("contract.json")).unwrap();
+        assert!(matches!(project(Some(&row)), Err(BackendError::AuthorityLost { .. })),
+            "missing authority must not be presented as stopped");
+    }
 
     fn assert_receipt_class(status: SeatStatus, phase: Phase, outcome: Outcome, pending: Option<&str>, expected: &str) {
             let mut fixture = RoleFixture::new();

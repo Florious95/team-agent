@@ -214,10 +214,11 @@ fn project_status_nodes(
             #[cfg(unix)]
             if is_native(node) {
                 let mut brief = BriefNode::unknown(node).with_reason("native_runtime_projection_unavailable");
-                let native = crate::contract_runtime::framework::project_seat(
+                let native = crate::contract_runtime::framework::project_seat_with_row(
                     _workspace,
                     &crate::state::projection::team_state_key(state),
                     &node.name,
+                    registered_scope(state).get("agents").and_then(|agents| agents.get(&node.name)),
                 );
                 if let Ok(native) = &native {
                     brief.runtime_status = native["status"].as_str().unwrap_or("unknown").into();

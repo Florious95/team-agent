@@ -135,10 +135,26 @@ pub fn team_config(
         detail: false,
         backend: Some("tmux".into()),
     };
-    match seat {
+    let mut config = match seat {
         Some(seat) => config::read_seat(&args, seat),
         None => config::read_team(&args),
+    }?;
+    // Match recovery's saved-roster classification, including stopped seats
+    // intentionally omitted from the replacement authority. Role documents
+    // configure new launches; they cannot reroute already registered members.
+    if let (Some(config), Ok(selected)) = (&mut config, crate::state::selector::resolve_active_team_readonly(
+        workspace, Some(team), crate::state::selector::SelectorMode::RuntimeOnly,
+    )) {
+        for member in &mut config.members {
+            if let Some(row) = selected.state.get("agents").and_then(|agents| agents.get(&member.id)) {
+                member.runtime = if is_contract(row) { config::RuntimeFamily::Contract } else { config::RuntimeFamily::Legacy };
+                if let Some(provider) = row.get("contract_provider").or_else(|| row.get("provider")).and_then(Value::as_str) {
+                    member.provider = provider.into();
+                }
+            }
+        }
     }
+    Ok(config)
 }
 pub fn start_role(
     workspace: &Path,
@@ -221,12 +237,44 @@ pub(crate) fn start_new_seat(
     Err(error)
 }
 
+/// Recovery skips explicitly stopped seats. Their saved lifecycle intent is
+/// still meaningful, but cannot conceal a seat, lease, or creation attempt in
+/// the replacement authority, nor supply native ownership/session receipts.
+pub(super) fn recovery_stopped(backend: &Backend, id: &SeatId, row: &Value) -> Result<bool, BackendError> {
+    Ok(is_contract(row)
+        && crate::state::projection::agent_explicit_stop(row)
+        && backend.store.seat(id)?.is_none()
+        && !backend.store.leased(id)?
+        && backend.store.creation_receipt(id, None)?.is_none())
+}
+
 pub fn project_seat(workspace: &Path, team: &str, id: &str) -> Result<Value, BackendError> {
+    project_seat_with_row(workspace, team, id, None)
+}
+
+pub(crate) fn project_seat_with_row(
+    workspace: &Path,
+    team: &str,
+    id: &str,
+    row: Option<&Value>,
+) -> Result<Value, BackendError> {
     let mut backend = Backend::open_readonly(workspace, team)?;
-    let seat = backend
-        .store
-        .seat(&SeatId::new(id)?)?
-        .ok_or(BackendError::Metadata)?;
+    let seat_id = SeatId::new(id)?;
+    let seat = backend.store.seat(&seat_id)?;
+    if let Some(row) = row.filter(|_| seat.is_none()) {
+        if recovery_stopped(&backend, &seat_id, row)? {
+            return Ok(json!({
+                "agent_id":id,"provider":row.get("provider"),"runtime_family":"contract",
+                "contract_provider":row.get("contract_provider").or_else(|| row.get("provider")),
+                "status":"stopped","explicit_stop":true,"model":row.get("model"),
+                "contract_instance":null,"session_id":null,"session_observation":"unobserved",
+                "native_pane":null,"native_endpoint":null,"pane_id":null,"pane_pid":null,
+                "tmux_endpoint":null,"window":null,"session_name":null,
+                "mcp_binding":"unverified","mcp_tools":{}
+            }));
+        }
+    }
+    let seat = seat.ok_or(BackendError::Metadata)?;
     let role = backend::read_role(&backend.binding, &seat.identity)?;
     if role.provider != seat.provider {
         return Err(BackendError::Metadata);
@@ -311,7 +359,9 @@ pub fn stop_selected_with_budget(workspace: &Path, state: &Value, budget: std::t
                 let seat_id = SeatId::new(id.as_str())?;
                 let seat = backend.store.seat(&seat_id)?;
                 physical = seat.as_ref().and_then(|seat| seat.physical.clone());
-                if seat.as_ref().is_some_and(|seat| seat.status == SeatStatus::Stopped) && !backend.store.leased(&seat_id)? {
+                if (seat.as_ref().is_some_and(|seat| seat.status == SeatStatus::Stopped) && !backend.store.leased(&seat_id)?)
+                    || recovery_stopped(&backend, &seat_id, agent)?
+                {
                     return Ok(json!({"agent_id":id,"status":"already_stopped"}));
                 }
                 let receipt = backend::stop_with_budget(workspace, &team, &seat_id, seat_budget)?;
@@ -347,6 +397,30 @@ mod tests {
             assert!(is_contract(&native));
         }
         assert!(!is_contract(&json!({"provider":"claude"})));
+    }
+
+    #[test]
+    fn saved_roster_keeps_recovery_skipped_native_members_out_of_framework_peers() {
+        let root = std::env::temp_dir().join(format!("native-member-routing-{}-{}",
+            std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let directory = root.join("roles");
+        std::fs::create_dir_all(directory.join("agents")).unwrap();
+        std::fs::write(directory.join("TEAM.md"), "---\nname: test\n---\nTeam\n").unwrap();
+        std::fs::write(directory.join("agents/old.md"), "---\nprovider: pi\n---\nStopped native\n").unwrap();
+        std::fs::write(directory.join("agents/new.md"), "---\nprovider: cursor\nmodel: test\n---\nNew native\n").unwrap();
+        let state_path = crate::state::persist::runtime_state_path(&root);
+        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        std::fs::write(state_path, serde_json::to_vec(&json!({
+            "team_key":"test","active_team_key":"test","team_dir":directory,"session_name":"fixture",
+            "agents":{"old":{"provider":"pi_tui","runtime_family":"contract","explicit_stop":true,
+                "contract_instance":"lost-instance"}}
+        })).unwrap()).unwrap();
+        let config = team_config(&root, &directory, "test", Some("new")).unwrap().unwrap();
+        let old = config.members.iter().find(|member| member.id == "old").unwrap();
+        assert_eq!(old.runtime, config::RuntimeFamily::Contract);
+        assert_eq!(old.provider, "pi_tui");
+        assert!(!root.join(".team/runtime/contract").exists(), "routing is read-only");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
