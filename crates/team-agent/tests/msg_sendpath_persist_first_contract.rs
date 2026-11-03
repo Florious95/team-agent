@@ -67,10 +67,23 @@ fn c1_dead_coordinator_is_ignored_and_snapshot_is_immutable() {
     let pid_path = team_agent::coordinator::coordinator_pid_path(&ws);
     std::fs::write(&pid_path, pid.to_string()).unwrap();
     let state_path = fixture.root.join(".team/runtime/state.json");
-    let before = std::fs::read(&state_path).unwrap();
+    let mut expected: Value = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    let started = chrono::Utc::now();
     sent(cli(&fixture, &["worker-1", "without coordinator"]));
+    let finished = chrono::Utc::now();
     fixture.received("Team Agent message from leader:\n\nwithout coordinator");
-    assert_eq!(std::fs::read(state_path).unwrap(), before);
+    let observed_bytes = std::fs::read(&state_path).unwrap();
+    let observed: Value = serde_json::from_slice(&observed_bytes).unwrap();
+    let stamp = observed["teams"]["current"]["agents"]["worker-1"]["first_send_at"]
+        .as_str().expect("physical delivery must stamp its recipient's first interaction");
+    let timestamp = chrono::DateTime::parse_from_rfc3339(stamp).unwrap().with_timezone(&chrono::Utc);
+    assert!(timestamp >= started && timestamp <= finished, "{stamp}");
+    // D1 permits this one scoped observation, not queue recovery or arbitrary state changes.
+    expected["teams"]["current"]["agents"]["worker-1"]["first_send_at"] = json!(stamp);
+    assert_eq!(observed, expected);
+    sent(cli(&fixture, &["worker-1", "subsequent delivery"]));
+    fixture.received("Team Agent message from leader:\n\nsubsequent delivery");
+    assert_eq!(std::fs::read(&state_path).unwrap(), observed_bytes, "first_send_at must remain the first delivery");
     // M5 upgrade cleanup may retire stale legacy coordinator metadata, but never rewrites it.
     if let Ok(recorded) = std::fs::read_to_string(&pid_path) {
         assert_eq!(recorded, pid.to_string());
@@ -148,6 +161,7 @@ fn c4_failed_physical_send_is_not_queued_and_explicit_retry_delivers_once() {
     let mut state: Value = serde_json::from_slice(&original).unwrap();
     state["teams"]["current"]["agents"]["worker-1"]["pane_id"] = json!("%999999");
     fixture.set_state(&state);
+    let before_failure = std::fs::read(fixture.root.join(".team/runtime/state.json")).unwrap();
     let failed = cli(&fixture, &["worker-1", "retry payload"]);
     // R-M1b: a non-live pane is stored with an explanatory delivery_error, never typed, never queued.
     assert!(failed.status.success(), "{}", String::from_utf8_lossy(&failed.stdout));
@@ -155,6 +169,8 @@ fn c4_failed_physical_send_is_not_queued_and_explicit_retry_delivers_once() {
     assert_eq!((receipt["ok"].clone(), receipt["status"].clone(), receipt["live"].clone()), (json!(true), json!("stored"), json!(false)), "{receipt}");
     assert!(receipt["delivery_error"].as_str().is_some_and(|e| e.starts_with("pane_gone")), "{receipt}");
     assert!(!std::fs::read_to_string(fixture.root.join("received")).unwrap().contains("retry payload"));
+    assert_eq!(std::fs::read(fixture.root.join(".team/runtime/state.json")).unwrap(), before_failure,
+        "inbox storage without physical delivery must not stamp session observations");
     std::fs::write(fixture.root.join(".team/runtime/state.json"), original).unwrap();
     sent(cli(&fixture, &["worker-1", "retry payload"]));
     fixture.received("Team Agent message from leader:\n\nretry payload");
