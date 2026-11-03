@@ -180,7 +180,7 @@ pub(super) fn help(command: &str) -> String {
         "agent" => (
             "Select an agent lifecycle operation explicitly without guessing a team directory.",
             "<start|stop|restart|remove|reset|clone|fork> AGENT [OPTIONS]",
-            "--workspace PATH and --team KEY select the team.\nstart keeps verified running processes and can add an absent agent with complete decisions.\nrestart defaults to --session auto; --session preserve keeps the original refusal policy.\nSingle-agent restart checks roles and capabilities before stop, then uses original stop/start.\n--dry-run on start/restart is read-only; role patches are not accepted by restart.\nremove/reset/clone/fork retain their capability and confirmation flags.\nreset requires --discard-session; fork requires --as NEW_ID; --in-place is not supported.",
+            "--workspace PATH and --team KEY select the team.\nstart creates, adopts or resumes a seat with explicit defaults and session policy; matching live seats are unchanged.\nrestart defaults to --session auto; --session preserve keeps the original refusal policy.\nSingle-agent restart checks roles and capabilities before stop, then uses original stop/start.\n--dry-run on start/restart is read-only; role patches are not accepted by restart.\nremove/reset/clone/fork retain their capability and confirmation flags.\nreset requires --discard-session; fork requires --as NEW_ID; --in-place is not supported.",
             "  team-agent agent start reviewer --dry-run --json\n  team-agent agent restart reviewer --session preserve --dry-run --json",
             "Inspect team-agent status before using agent start after a partial result; an unknown replacement must not be retried blindly.",
         ),
@@ -247,13 +247,17 @@ fn options(tokens: &[String]) -> (Vec<String>, BTreeMap<String, String>) {
     (pos, flags)
 }
 
+pub(super) fn canonical_start_command(command: &str) -> &str {
+    match command { "add-agent" | "start-agent" => "start", other => other }
+}
+
 /// None deliberately leaves frozen legacy parsing, defaults and output untouched.
 pub(super) fn run(
     command: &str,
     args: &[String],
     cwd: &Path,
 ) -> Option<Result<CmdResult, CliError>> {
-    let command = match command { "add-agent" | "start-agent" => "start", other => other };
+    let command = canonical_start_command(command);
     if !matches!(command, "start" | "stop" | "restart" | "team" | "agent") {
         return None;
     }

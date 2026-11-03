@@ -592,11 +592,12 @@ fn nearest_subcommand(input: &str) -> Option<&'static str> {
     use crate::model::name_similarity::{rank, Candidate};
     let candidates: Vec<Candidate<&'static str>> = COMMAND_SPECS
         .iter()
-        .filter(|spec| spec.suggestion_index)
-        .map(|spec| Candidate {
-            match_key: spec.name.to_string(),
-            stable_key: spec.name.to_string(),
-            payload: spec.name,
+        .filter_map(|spec| {
+            // Alias misspellings may match, but only canonical commands are offered.
+            let target = super::spec::command_spec(super::intent::canonical_start_command(spec.name))?;
+            target.suggestion_index.then_some(Candidate {
+                match_key: spec.name.to_string(), stable_key: target.name.to_string(), payload: target.name,
+            })
         })
         .collect();
     rank(input, &candidates).into_iter().next()
@@ -2298,8 +2299,8 @@ mod tests {
             .collect();
         assert_eq!(
             expected.len(),
-            34,
-            "the public catalog excludes the two retired leader recovery verbs"
+            25,
+            "the default catalog excludes retired recovery verbs and hidden compatibility spellings"
         );
         for spec_name in &expected {
             assert!(
@@ -2474,7 +2475,6 @@ mod tests {
                     "--effort",
                     "--prompt",
                     "--profile",
-                    "--force",
                     "--workspace",
                     "--team",
                     "--json",
@@ -2819,9 +2819,9 @@ mod tests {
     // ── E8 (N38): 未知子命令 → 最近似建议(additive,不破坏 golden invalid-choice 行) ──
     #[test]
     fn e8_unknown_subcommand_suggests_nearest_known_command() {
-        // 'statu' typo → status; 'add-agen' → add-agent.
+        // Compatibility misspellings point to the unified start surface.
         assert_eq!(nearest_subcommand("statu"), Some("status"));
-        assert_eq!(nearest_subcommand("add-agen"), Some("add-agent"));
+        assert_eq!(nearest_subcommand("add-agen"), Some("start"));
         // Presentation migration: the new canonical short verb is now a
         // prefix candidate in the unchanged shared similarity ranking.
         assert_eq!(nearest_subcommand("start-agnet"), Some("start"));

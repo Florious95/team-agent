@@ -793,6 +793,29 @@ fn plan_with_observer(
                 workspace: plan.scope.workspace.clone(), team: plan.scope.team.clone(), agent: id.clone(),
                 role_file: plan.intent.role_file.clone(), patch: plan.intent.patch.clone(), session: plan.intent.session,
             };
+            let declaration = checked(crate::lifecycle::seat_start::resolve(&request, selected.as_ref()))?;
+            checked(crate::lifecycle::seat_start::preflight(&request, selected.as_ref(), &declaration))?;
+            if let Some(source) = &declaration.source { remember(&mut plan, source)?; }
+            if let Some(selected) = &selected {
+                plan.topology = Some(topology(&selected.state));
+                let team_source = selected.team_dir.join("TEAM.md");
+                if team_source.is_file() { remember(&mut plan, &team_source)?; }
+                if initialized {
+                    let existing_spec = selected.spec_path.as_ref().filter(|path| path.is_file());
+                    let spec = if let Some(path) = existing_spec {
+                        remember(&mut plan, path)?;
+                        checked(yaml::loads(&std::fs::read_to_string(path)?))?
+                    } else {
+                        checked(crate::lifecycle::restart::compile_runtime_spec_from_roles(
+                            &selected.run_workspace, &selected.team_key, &selected.state,
+                        ))?
+                    };
+                    validate_roster(&spec, &selected.run_workspace)?;
+                    if existing_spec.is_none() {
+                        plan.steps.push(Step::RestoreSpec { workspace: selected.run_workspace.clone(), team: selected.team_key.clone(), compiled: spec });
+                    }
+                }
+            }
             let live = if let Some((selected, row)) = selected.as_ref().and_then(|selected| selected.state["agents"].get(id.as_str()).map(|row|(selected,row))) {
                 match observe(selected, id.as_str(), row)? {
                     Observation::Live => true,
@@ -800,7 +823,17 @@ fn plan_with_observer(
                     Observation::NativeReconcile | Observation::Unknown => return Err(refusal(format!("agent ownership/liveness is unverified; run `{}` before starting", crate::lifecycle::seat_start::status_command(&request)))),
                 }
             } else { false };
-            let description = checked(crate::lifecycle::seat_start::describe(&request, selected.as_ref(), live))?;
+            if let Some(row) = selected.as_ref().and_then(|selected| selected.state["agents"].get(id.as_str())) {
+                let mut expected = relevant(row);
+                #[cfg(unix)]
+                if live && !has_native_incarnation(row) {
+                    if let Some(pid) = row["pane_pid"].as_u64().and_then(|pid| u32::try_from(pid).ok()) {
+                        expected["_birth"] = json!(checked(team_agent_contract::host::process::process_birth_identity(pid))?);
+                    }
+                }
+                plan.expected.insert(id.as_str().into(), expected);
+            }
+            let description = checked(crate::lifecycle::seat_start::describe_resolved(&request, selected.as_ref(), live, &declaration))?;
             if description.op == "already_running" {
                 plan.skipped.push(json!({"agent":id.as_str(),"reason":"already_running",
                     "declaration":description.declaration,"defaulted":description.defaulted}));
@@ -1326,14 +1359,29 @@ pub(super) fn advance_topology(plan: &mut Plan, step: &Step, receipt: &Value) ->
 }
 
 pub(super) fn recheck(plan: &Plan, step: &Step, after_stop: bool) -> Result<(), CliError> {
-    // StartRequest repeats resolution and ownership checks under its own seat lock.
-    if matches!(step, Step::UnifiedStart { .. }) { return Ok(()); }
+    // Preview evidence is rechecked here; StartRequest repeats physical admission
+    // and its incarnation/carrier check under the lower-layer seat lock.
     for (path, bytes) in &plan.files {
         if std::fs::read(path)? != *bytes {
             return Err(refusal(format!(
                 "role/spec changed since planning: {}",
                 path.display()
             )));
+        }
+    }
+    if let Step::UnifiedStart { request, .. } = step {
+        if plan.topology.is_none() {
+            let path = crate::state::persist::runtime_state_path(&request.workspace);
+            if !path.exists() { return Ok(()); }
+            let raw = crate::state::persist::load_runtime_state_without_migrations(&request.workspace)?;
+            let team = request.team.as_deref().unwrap_or("current");
+            if raw.is_object() && team != "current"
+                && !crate::lifecycle::launch::surface_has_runtime_team(&raw, team)
+                && raw.get("teams").and_then(|teams| teams.get(team)).is_none()
+                && crate::state::projection::team_state_key(&raw) != team {
+                return Ok(());
+            }
+            return Err(refusal("team context appeared since planning; inspect status before retrying start"));
         }
     }
     if let Step::CreateAgent { args, .. } = step {
@@ -1401,7 +1449,7 @@ pub(super) fn recheck(plan: &Plan, step: &Step, after_stop: bool) -> Result<(), 
     };
     for id in targets {
         let row = selected.state.get("agents").and_then(|a| a.get(id));
-        if matches!(step, Step::AddAgent(_)) {
+        if matches!(step, Step::AddAgent(_)) || (matches!(step, Step::UnifiedStart { .. }) && !plan.expected.contains_key(id)) {
             if row.is_some() {
                 return Err(refusal("agent was registered after planning"));
             }

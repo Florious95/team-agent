@@ -155,7 +155,7 @@ fn p5_start_force_refuses_and_guides_to_existing_stop_start_commands() {
     match start_agent_args(&strings(&["worker", "--force"]), &sandbox.0) {
         Err(CliError::Usage(message)) => {
             assert!(
-                message.contains("stop-agent") && message.contains("start-agent"),
+                message.contains("team-agent stop worker") && message.contains("team-agent start worker"),
                 "{message}"
             );
         }

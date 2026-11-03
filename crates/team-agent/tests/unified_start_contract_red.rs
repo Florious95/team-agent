@@ -4,6 +4,10 @@
 //! retired seat verbs are either gone or trivial aliases of `start`; they never
 //! keep a second engine, a second grammar or second guidance. All cases are
 //! `--dry-run` in an isolated HOME/workspace, so nothing is launched.
+//!
+//! Isolation (real-machine boundary): every child runs with `env_clear()`, so
+//! TMUX, TMUX_PANE, TEAM_AGENT_WORKSPACE and every other TEAM_AGENT_* caller
+//! variable are absent; HOME and the current directory are per-case temp dirs.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use serde_json::Value;

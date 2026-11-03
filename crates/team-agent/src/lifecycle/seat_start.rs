@@ -197,6 +197,17 @@ pub fn resolve(
             "role identity does not match the requested agent id",
         ));
     }
+    let row = selected.and_then(|selected| selected.state["agents"].get(request.agent.as_str()));
+    if compiled.agent.get("paused") == Some(&Yaml::Bool(true))
+        || row.is_some_and(|row| {
+            row["paused"] == true
+                || row["status"]
+                    .as_str()
+                    .is_some_and(|status| status.eq_ignore_ascii_case("paused"))
+        })
+    {
+        return Err(refused(format!("agent is paused; edit paused: false in its role declaration, then run `team-agent start {}`", command_arg(request.agent.as_str()))));
+    }
     Ok(Declaration {
         source,
         destination,
@@ -319,10 +330,11 @@ pub fn describe(
     live: bool,
 ) -> Result<StartDescription, LifecycleError> {
     let resolved = resolve(request, selected)?;
+    preflight(request, selected, &resolved)?;
     describe_resolved(request, selected, live, &resolved)
 }
 
-fn describe_resolved(
+pub(crate) fn describe_resolved(
     request: &StartRequest,
     selected: Option<&SelectedTeam>,
     live: bool,
@@ -345,7 +357,19 @@ fn describe_resolved(
         }
         let migration = !same_provider(row["provider"].as_str().unwrap_or(""), provider(desired));
         if live {
-            let spec = role_config::read_spec(selected)?;
+            let spec = if selected
+                .spec_path
+                .as_ref()
+                .is_some_and(|path| path.is_file())
+            {
+                role_config::read_spec(selected)?
+            } else {
+                super::restart::compile_runtime_spec_from_roles(
+                    &selected.run_workspace,
+                    &selected.team_key,
+                    &selected.state,
+                )?
+            };
             let old = spec.get("agents").and_then(Yaml::as_list).and_then(|rows| {
                 rows.iter().find(|row| {
                     row.get("id").and_then(Yaml::as_str) == Some(request.agent.as_str())
@@ -388,6 +412,120 @@ fn describe_resolved(
         declaration,
         defaulted: resolved.defaulted.clone(),
     })
+}
+
+/// Pure target-specific native admission; never launch or repair a peer.
+pub(crate) fn preflight(
+    request: &StartRequest,
+    selected: Option<&SelectedTeam>,
+    declaration: &Declaration,
+) -> Result<(), LifecycleError> {
+    #[cfg(unix)]
+    if native(provider(&declaration.compiled.agent)) {
+        let (meta, _) = role_config::role_parts(&declaration.text)?;
+        if meta
+            .get("profile")
+            .is_some_and(|value| !matches!(value, Yaml::Null))
+            || meta
+                .get("auth_mode")
+                .and_then(Yaml::as_str)
+                .is_some_and(|mode| mode != "subscription")
+        {
+            return Err(refused("contract native providers use an existing subscription; API/profile mappings are unavailable"));
+        }
+        if meta.get("model").and_then(Yaml::as_str).is_none() {
+            return Err(refused("this native provider requires an explicit --model"));
+        }
+        if let Some(selected) =
+            selected.filter(|selected| !super::launch::surface_is_leader_bootstrap(&selected.state))
+        {
+            if selected
+                .spec_path
+                .as_ref()
+                .is_some_and(|path| path.is_file())
+            {
+                let spec = role_config::read_spec(selected)?;
+                crate::model::spec::validate_spec(&spec, &selected.run_workspace)
+                    .map_err(failed)?;
+            }
+            let config = crate::contract_runtime::config::read_start_declaration(
+                &selected.run_workspace,
+                &selected.team_dir,
+                &selected.team_key,
+                &declaration.destination,
+                &declaration.text,
+                request.agent.as_str(),
+            )
+            .map_err(failed)?
+            .ok_or_else(|| refused("native role is missing from its team declaration"))?;
+            crate::contract_runtime::backend::preflight(&config).map_err(failed)?;
+        }
+    }
+    let _ = (request, selected, declaration);
+    Ok(())
+}
+
+fn incarnation(selected: &SelectedTeam, id: &AgentId) -> Value {
+    let row = &selected.state["agents"][id.as_str()];
+    let identity = [
+        "instance_id",
+        "contract_instance",
+        "generation",
+        "provider",
+        "pane_id",
+        "window",
+        "tmux_session",
+        "session_id",
+        "pane_pid",
+        "process_id",
+        "pid",
+        "spawn_epoch",
+        "spawned_at",
+    ]
+    .into_iter()
+    .map(|key| {
+        (
+            key.to_string(),
+            row.get(key).cloned().unwrap_or(Value::Null),
+        )
+    })
+    .collect::<serde_json::Map<_, _>>();
+    let owner = [
+        "pane_id",
+        "provider",
+        "owner_epoch",
+        "machine_fingerprint",
+        "leader_session_uuid",
+        "tmux_socket",
+        "session_name",
+    ]
+    .into_iter()
+    .map(|key| {
+        (
+            key.to_string(),
+            selected.state["team_owner"]
+                .get(key)
+                .cloned()
+                .unwrap_or(Value::Null),
+        )
+    })
+    .collect::<serde_json::Map<_, _>>();
+    json!({"agent": identity, "owner": owner, "transport": selected.state.get("transport"), "tmux_socket": selected.state.get("tmux_socket"), "owner_epoch": selected.state.get("owner_epoch")})
+}
+
+fn carrier_birth(selected: &SelectedTeam, id: &AgentId) -> Result<Value, LifecycleError> {
+    #[cfg(unix)]
+    if let Some(pid) = selected.state["agents"][id.as_str()]["pane_pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .filter(|pid| *pid > 1)
+    {
+        return team_agent_contract::host::process::process_birth_identity(pid)
+            .map(|birth| json!(birth))
+            .map_err(failed);
+    }
+    let _ = (selected, id);
+    Ok(Value::Null)
 }
 
 /// Run preview without a lock/write; real admission is re-resolved under the seat lock.
@@ -444,16 +582,34 @@ pub fn start(request: &StartRequest, dry_run: bool) -> Result<Value, LifecycleEr
     if dry_run {
         return converge(request, selected.as_ref(), true);
     }
-    crate::coordinator::retire_legacy_coordinator(&workspace).map_err(failed)?;
     match selected.as_ref() {
         Some(selected)
             if super::launch::surface_has_runtime_team(&selected.state, &selected.team_key) =>
         {
-            role_config::with_selected(selected, &request.agent, |selected| {
-                converge(request, Some(selected), false)
+            let identity = incarnation(selected, &request.agent);
+            let birth = carrier_birth(selected, &request.agent)?;
+            role_config::with_selected(selected, &request.agent, |current| {
+                if incarnation(current, &request.agent) != identity
+                    || carrier_birth(current, &request.agent)? != birth
+                {
+                    return Err(refused(format!(
+                        "agent incarnation/carrier changed during admission; run `{}`",
+                        status_command(request)
+                    )));
+                }
+                converge(request, Some(current), false)
             })
         }
-        selected => converge(request, selected, false),
+        selected => {
+            let _lock =
+                super::lock::acquire_seat_lifecycle_lock(super::lock::LifecycleLockRequest {
+                    workspace: &workspace,
+                    operation: "unified-start",
+                    team: request.team.as_deref(),
+                    agent_id: Some(&request.agent),
+                })?;
+            converge(request, selected, false)
+        }
     }
 }
 
@@ -463,6 +619,7 @@ fn converge(
     dry_run: bool,
 ) -> Result<Value, LifecycleError> {
     let declaration = resolve(request, selected)?;
+    preflight(request, selected, &declaration)?;
     let mut result = json!({"ok":true,"action":"start","agent_id":request.agent.as_str(),
         "defaulted":declaration.defaulted,"session_policy":request.session,"dry_run":dry_run});
     let row = selected.and_then(|s| s.state["agents"].get(request.agent.as_str()));
@@ -502,6 +659,7 @@ fn converge(
         if dry_run {
             return Ok(result);
         }
+        crate::coordinator::retire_legacy_coordinator(&selected.run_workspace).map_err(failed)?;
         let started = start_existing(request, selected, &declaration, &transport)?;
         for (key, value) in started.as_object().into_iter().flatten() {
             result[key] = value.clone();
@@ -515,6 +673,12 @@ fn converge(
     if dry_run {
         return Ok(result);
     }
+    if !selected.is_some_and(|selected| {
+        super::launch::surface_has_runtime_team(&selected.state, &selected.team_key)
+    }) {
+        preflight_bootstrap(&declaration.text)?;
+    }
+    crate::coordinator::retire_legacy_coordinator(&request.workspace).map_err(failed)?;
     if let Some(selected) =
         selected.filter(|s| super::launch::surface_has_runtime_team(&s.state, &s.team_key))
     {
@@ -753,6 +917,141 @@ fn archive_session(selected: &SelectedTeam, agent: &AgentId) -> Result<(), Lifec
     Ok(())
 }
 
+pub(crate) fn bootstrap_directory(request: &StartRequest) -> PathBuf {
+    request
+        .workspace
+        .join(".team/start-source")
+        .join(request.team.as_deref().unwrap_or("current"))
+}
+
+pub(crate) fn preflight_bootstrap(role: &str) -> Result<(), LifecycleError> {
+    let (meta, _) = role_config::role_parts(role)?;
+    let key = meta.get("provider").and_then(Yaml::as_str).unwrap_or("pi");
+    if native(key) {
+        return Ok(());
+    }
+    let provider =
+        crate::provider::wire::parse_provider(key).ok_or_else(|| refused("unknown provider"))?;
+    if !crate::provider::get_adapter(provider).is_installed() {
+        return Err(refused(format!(
+            "Provider {key} command '{}' not found on PATH",
+            crate::provider::wire::command_name(provider)
+        )));
+    }
+    if provider == crate::model::enums::Provider::Pi {
+        let (_, catalog) = super::launch::pi_mcp::resolve_pi_executable_chain().map_err(failed)?;
+        if let Some(model) = meta.get("model").and_then(Yaml::as_str) {
+            super::launch::pi_mcp::select_exact_pi_model(&catalog, model).map_err(failed)?;
+        }
+    }
+    Ok(())
+}
+
+/// Materialization has one owner. Failed admission removes only unchanged files
+/// created by this attempt; partial/unknown runtime commits retain recovery input.
+pub(crate) fn stage_sources<T>(
+    workspace: &Path,
+    directory: &Path,
+    team: &str,
+    agent: &str,
+    role: &str,
+    launch: impl FnOnce() -> Result<(bool, T), LifecycleError>,
+) -> Result<T, LifecycleError> {
+    use std::io::Write;
+    let team_source = workspace.join("TEAM.md");
+    let team_text = if team_source.is_file() {
+        std::fs::read_to_string(team_source).map_err(failed)?
+    } else {
+        format!(
+            "---\n{}---\n",
+            yaml::dumps(&Yaml::Map(vec![("name".into(), Yaml::Str(team.into()))]))
+        )
+    };
+    let role_dir = directory.join("agents");
+    let absent: Vec<_> = [directory, role_dir.as_path()]
+        .into_iter()
+        .filter(|path| !path.exists())
+        .collect();
+    let mut created = Vec::new();
+    let result = (|| {
+        std::fs::create_dir_all(&role_dir).map_err(failed)?;
+        for (path, text) in [
+            (directory.join("TEAM.md"), team_text.as_str()),
+            (role_dir.join(format!("{agent}.md")), role),
+        ] {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    if let Err(error) = file
+                        .write_all(text.as_bytes())
+                        .and_then(|()| file.sync_all())
+                    {
+                        drop(file);
+                        std::fs::remove_file(&path).map_err(failed)?;
+                        return Err(failed(error));
+                    }
+                    created.push((path, text));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if !std::fs::symlink_metadata(&path).map_err(failed)?.is_file()
+                        || std::fs::read(&path).map_err(failed)? != text.as_bytes()
+                    {
+                        return Err(refused(format!(
+                            "managed declaration differs: {}; existing input was preserved",
+                            path.display()
+                        )));
+                    }
+                }
+                Err(error) => return Err(failed(error)),
+            }
+        }
+        launch()
+    })();
+    let adopted = crate::state::persist::load_runtime_state_without_migrations(workspace)
+        .map(|state| {
+            let view = crate::state::projection::project_top_level_view(&state, team);
+            let shared_source_adopted = view
+                .get("team_dir")
+                .and_then(Value::as_str)
+                .and_then(|source| std::fs::canonicalize(source).ok())
+                .zip(directory.canonicalize().ok())
+                .is_some_and(|(source, directory)| source == directory)
+                && view
+                    .get("agents")
+                    .and_then(Value::as_object)
+                    .is_some_and(|agents| !agents.is_empty());
+            !state.is_object()
+                || shared_source_adopted
+                || view
+                    .get("agents")
+                    .and_then(|agents| agents.get(agent))
+                    .is_some()
+        })
+        .unwrap_or(true);
+    if !result.as_ref().is_ok_and(|(ok, _)| *ok) && !adopted {
+        for (path, text) in created.into_iter().rev() {
+            if std::fs::read(&path).is_ok_and(|bytes| bytes == text.as_bytes()) {
+                std::fs::remove_file(path).map_err(failed)?;
+            }
+        }
+        for path in absent.into_iter().rev() {
+            match std::fs::remove_dir(path) {
+                Ok(()) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                    ) => {}
+                Err(error) => return Err(failed(error)),
+            }
+        }
+    }
+    result.map(|(_, result)| result)
+}
+
 fn bootstrap(
     request: &StartRequest,
     declaration: &Declaration,
@@ -760,59 +1059,47 @@ fn bootstrap(
 ) -> Result<(), LifecycleError> {
     let team = request.team.as_deref().unwrap_or("current");
     role_config::validate_id(&AgentId::new(team))?;
-    let directory = request
-        .workspace
-        .join(".team")
-        .join("start-source")
-        .join(team);
-    std::fs::create_dir_all(directory.join("agents")).map_err(failed)?;
-    let team_source = request.workspace.join("TEAM.md");
-    let team_text = if team_source.is_file() {
-        std::fs::read_to_string(&team_source).map_err(failed)?
-    } else {
-        format!(
-            "---\n{}---\n",
-            yaml::dumps(&Yaml::Map(vec![("name".into(), Yaml::Str(team.into()))]))
-        )
-    };
-    role_config::atomic_write(&directory.join("TEAM.md"), team_text.as_bytes())?;
-    role_config::atomic_write(
-        &directory
-            .join("agents")
-            .join(format!("{}.md", request.agent)),
-        declaration.text.as_bytes(),
-    )?;
-    match super::quick_start_in_workspace_with_backend(
+    let directory = bootstrap_directory(request);
+    let staged = stage_sources(
         &request.workspace,
         &directory,
-        Some(team),
-        true,
-        Some(team),
-        None,
-    )? {
-        QuickStartReport::Ready { session_name, .. } => {
-            result["session_name"] = json!(session_name.as_str());
-            result["readiness"] = json!({"ready":false,"state":"unverified"});
-        }
-        QuickStartReport::Partial { error, .. } => {
-            result["ok"] = json!(false);
-            result["status"] = json!("partial");
-            result["error"] = json!(error);
-        }
-        QuickStartReport::PreflightBlocked {
-            summary, blockers, ..
-        } => {
-            result["ok"] = json!(false);
-            result["status"] = json!("blocked");
-            result["error"] = json!(summary);
-            result["blockers"] = json!(blockers);
-        }
-        QuickStartReport::ExistingRuntime { .. } => {
-            return Err(refused(
-                "team context appeared during bootstrap; inspect status before retrying start",
-            ))
-        }
-    }
+        team,
+        request.agent.as_str(),
+        &declaration.text,
+        || {
+            match super::quick_start_in_workspace_with_backend(
+                &request.workspace,
+                &directory,
+                Some(team),
+                true,
+                Some(team),
+                None,
+            )? {
+                QuickStartReport::Ready { session_name, .. } => {
+                    result["session_name"] = json!(session_name.as_str());
+                    result["readiness"] = json!({"ready":false,"state":"unverified"});
+                }
+                QuickStartReport::Partial { error, .. } => {
+                    result["ok"] = json!(false);
+                    result["status"] = json!("partial");
+                    result["error"] = json!(error);
+                }
+                QuickStartReport::PreflightBlocked {
+                    summary, blockers, ..
+                } => {
+                    result["ok"] = json!(false);
+                    result["status"] = json!("blocked");
+                    result["error"] = json!(summary);
+                    result["blockers"] = json!(blockers);
+                }
+                QuickStartReport::ExistingRuntime { .. } => return Err(refused(
+                    "team context appeared during bootstrap; inspect status before retrying start",
+                )),
+            }
+            Ok((result["ok"] == true, result.clone()))
+        },
+    )?;
+    *result = staged;
     Ok(())
 }
 

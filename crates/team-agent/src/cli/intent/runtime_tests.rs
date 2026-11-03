@@ -477,21 +477,18 @@ fn role_only_add_preserves_source_and_absent_creation_uses_defaults() {
     write_role(root.path(), "two");
     intent.subject = Subject::Agent(AgentId::new("two"));
     let plan = plan_with_observer(intent.clone(), |_, _, _| panic!("unregistered probe")).unwrap();
-    assert_eq!(actions(&plan), [("add_agent", Some("two"))]);
-    let Step::AddAgent(args) = &plan.steps[0] else {
-        panic!()
-    };
-    assert_eq!(
-        Path::new(&args.role_file),
-        root.path().join("agents/two.md")
-    );
+    assert_eq!(actions(&plan), [("start", Some("two"))]);
+    let Step::UnifiedStart { description, .. } = &plan.steps[0] else { panic!() };
+    assert_eq!(description.op, "adopted");
+    assert!(plan.files.iter().any(|(path, _)| path == &root.path().join("agents/two.md")));
     intent.subject = Subject::Agent(AgentId::new("new-worker"));
     let defaults = plan_with_observer(intent.clone(), |_, _, _| panic!()).unwrap();
-    let Step::AddAgent(args) = &defaults.steps[0] else { panic!() };
-    assert!(args.role_file.is_empty());
-    assert_eq!(args.role_config.provider.as_deref(), Some("pi"));
-    assert_eq!(args.role_config.bypass, Some(false));
-    assert_eq!(args.role_config.model, None);
+    let Step::UnifiedStart { request, description } = &defaults.steps[0] else { panic!() };
+    assert!(request.role_file.is_none());
+    assert_eq!(description.op, "created");
+    assert_eq!(description.declaration["provider"], "pi");
+    assert_eq!(description.declaration["bypass"], false);
+    assert!(description.declaration["model"].is_null());
     assert!(!root.path().join("agents/new-worker.md").exists());
     intent.patch.provider = Some("pi".into());
     intent.patch.bypass = Some(true);
@@ -499,7 +496,7 @@ fn role_only_add_preserves_source_and_absent_creation_uses_defaults() {
         plan_with_observer(intent, |_, _, _| panic!())
             .unwrap()
             .steps[0],
-        Step::AddAgent(_)
+        Step::UnifiedStart { .. }
     ));
 }
 #[test]
@@ -517,15 +514,10 @@ fn issue391_start_readmits_a_removed_seat_from_its_left_behind_role_file() {
     std::fs::write(&state, serde_json::to_vec(&raw).unwrap()).unwrap();
     intent.subject = Subject::Agent(AgentId::new("two"));
     let plan = plan_with_observer(intent.clone(), |_, _, _| panic!("unregistered probe")).unwrap();
-    assert_eq!(actions(&plan), [("add_agent", Some("two"))]);
-    let Step::AddAgent(args) = &plan.steps[0] else {
-        panic!()
-    };
-    assert_eq!(
-        Path::new(&args.role_file),
-        root.path().join("agents/two.md"),
-        "the left-behind role file is the seat's definition"
-    );
+    assert_eq!(actions(&plan), [("start", Some("two"))]);
+    let Step::UnifiedStart { description, .. } = &plan.steps[0] else { panic!() };
+    assert_eq!(description.op, "adopted");
+    assert!(plan.files.iter().any(|(path, _)| path == &root.path().join("agents/two.md")), "the left-behind role remains the seat's definition");
     // Team start still leaves a removed seat retired.
     let mut team = intent.clone();
     team.subject = Subject::Team { source: None };

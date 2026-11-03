@@ -1231,7 +1231,7 @@ mod tests {
             "missing team must not be unbound; issues={issues_text}"
         );
         assert!(
-            repairs_text.contains("quick-start"),
+            repairs_text.contains("start --from ."),
             "repairs={repairs_text}"
         );
         assert!(

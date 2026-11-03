@@ -73,7 +73,7 @@ pub(super) fn execute(
 ) -> Result<CmdResult, CliError> {
     // Legacy quick-start seeds its roster before materializing provider commands.
     // Reject unavailable binaries/catalog models before that provisional seat exists.
-    preflight_role(role)?;
+    crate::lifecycle::seat_start::preflight_bootstrap(role).map_err(|error| refusal(error.to_string()))?;
     // The existing seat lock is reentrant for the downstream launch. Keep source
     // creation and rollback in that same exclusion domain, including concurrent starts.
     let id = AgentId::new(agent);
@@ -119,6 +119,20 @@ fn preflight_role(role: &str) -> Result<(), CliError> {
 }
 
 fn execute_with(
+    args: &QuickStartArgs,
+    agent: &str,
+    role: &str,
+    launch: impl FnOnce(&QuickStartArgs) -> Result<CmdResult, CliError>,
+) -> Result<CmdResult, CliError> {
+    crate::lifecycle::seat_start::stage_sources(&args.workspace, &args.agents_dir,
+        args.team_id.as_deref().unwrap_or("current"), agent, role, || {
+            launch(args).map(|result| (result.exit == ExitCode::Ok, result))
+                .map_err(|error| crate::lifecycle::LifecycleError::StatePersist(error.to_string()))
+        }).map_err(|error| refusal(error.to_string()))
+}
+
+// Retained unchanged until the post-H11 implementation-excision gate.
+fn execute_with_legacy_implementation(
     args: &QuickStartArgs,
     agent: &str,
     role: &str,
@@ -234,6 +248,18 @@ mod tests {
         super::super::lifecycle_intent("start", Verb::Start, &checked.tokens, root, false, false)
     }
 
+    fn resolved_start(step: &Step) -> (QuickStartArgs, String, String) {
+        let Step::UnifiedStart { request, .. } = step else { panic!("expected unified start") };
+        let selected = crate::state::persist::runtime_state_path(&request.workspace).is_file().then(||
+            crate::state::selector::resolve_active_team_readonly(&request.workspace, request.team.as_deref(),
+                crate::state::selector::SelectorMode::RuntimeOnly).unwrap());
+        let declaration = crate::lifecycle::seat_start::resolve(request, selected.as_ref()).unwrap();
+        let args = QuickStartArgs { workspace: request.workspace.clone(),
+            agents_dir: crate::lifecycle::seat_start::bootstrap_directory(request), name: None,
+            team_id: request.team.clone(), yes: false, json: true, detail: true, backend: None };
+        (args, request.agent.to_string(), declaration.text)
+    }
+
     #[test]
     #[serial_test::serial(env)]
     fn empty_workspace_admission_is_current_and_planning_is_readonly() {
@@ -241,12 +267,10 @@ mod tests {
         let intent = parse_start(root.path(), &["worker-1", "--dry-run"]).unwrap();
         let plan = runtime::plan(intent).unwrap();
         assert_eq!(plan.scope.team.as_deref(), Some("current"));
-        let Step::CreateAgent { args, agent, role } = &plan.steps[0] else {
-            panic!()
-        };
+        let (args, agent, role) = resolved_start(&plan.steps[0]);
         assert_eq!(agent, "worker-1");
         assert_eq!(args.team_id.as_deref(), Some("current"));
-        let (meta, body) = crate::compiler::split_front_matter(role);
+        let (meta, body) = crate::compiler::split_front_matter(&role);
         assert_eq!(
             meta.get("provider").and_then(Yaml::as_str),
             Some(default_provider(None).as_str())
@@ -276,15 +300,13 @@ mod tests {
         std::fs::write(&state_path, &bytes).unwrap();
         let intent = parse_start(root.path(), &["worker-1", "--dry-run"]).unwrap();
         let plan = runtime::plan(intent).unwrap();
-        let Step::CreateAgent { agent, role, .. } = &plan.steps[0] else {
-            panic!()
-        };
+        let (_, agent, role) = resolved_start(&plan.steps[0]);
         assert_eq!(agent, "worker-1");
-        let (meta, _) = crate::compiler::split_front_matter(role);
+        let (meta, _) = crate::compiler::split_front_matter(&role);
         assert_eq!(meta.get("provider").and_then(Yaml::as_str), Some("claude"));
         assert_eq!(plan.scope.team.as_deref(), Some("current"));
         assert_eq!(std::fs::read(&state_path).unwrap(), bytes);
-        assert!(!root.path().join(".team/adhoc-worker-1").exists());
+        assert!(!root.path().join(".team/start-source").exists());
     }
 
     #[test]
@@ -368,9 +390,7 @@ mod tests {
     fn refused_initial_start_removes_sources_and_allows_changed_retry() {
         let root = Sandbox::new();
         let mut plan = runtime::plan(parse_start(root.path(), &["worker-1"]).unwrap()).unwrap();
-        let Step::CreateAgent { args, agent, role } = plan.steps.remove(0) else {
-            panic!()
-        };
+        let (args, agent, role) = resolved_start(&plan.steps.remove(0));
         assert!(execute_with(&args, &agent, &role, |_| Err(refusal("preflight failed"))).is_err());
         assert!(!args.agents_dir.exists());
         assert!(!crate::state::persist::runtime_state_path(root.path()).exists());
@@ -401,9 +421,7 @@ mod tests {
         )
         .unwrap();
         let mut plan = runtime::plan(intent).unwrap();
-        let Step::CreateAgent { args, agent, role } = plan.steps.remove(0) else {
-            panic!()
-        };
+        let (args, agent, role) = resolved_start(&plan.steps.remove(0));
         assert!(execute(&args, &agent, &role).is_err());
         assert!(!crate::state::persist::runtime_state_path(root.path()).exists());
         assert!(!args.agents_dir.exists());
@@ -414,9 +432,7 @@ mod tests {
     fn partial_start_keeps_sources_adopted_by_runtime() {
         let root = Sandbox::new();
         let mut plan = runtime::plan(parse_start(root.path(), &["worker-1"]).unwrap()).unwrap();
-        let Step::CreateAgent { args, agent, role } = plan.steps.remove(0) else {
-            panic!()
-        };
+        let (args, agent, role) = resolved_start(&plan.steps.remove(0));
         let result = execute_with(&args, &agent, &role, |_| {
             let state = json!({"active_team_key":"current", "team_key":"current", "teams":{"current":{
                 "team_key":"current", "status":"alive", "agents":{"worker-1":{"status":"starting"}}

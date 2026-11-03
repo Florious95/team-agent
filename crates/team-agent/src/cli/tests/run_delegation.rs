@@ -290,27 +290,27 @@ fn cli_restart_missing_spec_surfaces_real_teamselect() {
     );
 }
 
-// 4 [P1] — cmd_add_agent with a DUPLICATE runtime agent id surfaces the REAL
-// crate::lifecycle::add_agent "agent id already exists" error. E25: role docs/spec files are
-// inputs, not membership; duplicate membership is runtime-state based.
+// The add spelling shares start's admission: a registered seat with no positive
+// physical identity refuses safely, rather than reporting a strict-add collision.
 #[test]
 fn cli_add_agent_duplicate_id_surfaces_real_error() {
     let team = deleg_uniq_dir("addagent");
     std::fs::create_dir_all(team.join("agents")).unwrap();
     std::fs::write(team.join("TEAM.md"), DELEG_TEAM_MD).unwrap();
-    std::fs::write(team.join("agents").join("implementer.md"), DELEG_VALID_ROLE).unwrap(); // 'implementer' already exists
+    let role = DELEG_VALID_ROLE.replace("provider: fake", "provider: pi").replace("model: fake", "model: openai-codex/gpt-6-luna");
+    std::fs::write(team.join("agents").join("implementer.md"), &role).unwrap();
     crate::state::persist::save_runtime_state(
         &team,
         &json!({
             "session_name": "team-deleg-addagent",
             "agents": {
-                "implementer": {"status": "running", "provider": "fake", "window": "implementer"}
+                "implementer": {"status": "running", "provider": "pi", "window": "implementer"}
             }
         }),
     )
     .unwrap();
     let dup_role = team.join("dup-role.md");
-    std::fs::write(&dup_role, DELEG_VALID_ROLE).unwrap(); // role file must exist
+    std::fs::write(&dup_role, &role).unwrap();
     let args = AddAgentArgs {
         role_config: Default::default(),
         agent: "implementer".to_string(),
@@ -322,9 +322,8 @@ fn cli_add_agent_duplicate_id_surfaces_real_error() {
     };
     let text = outcome_text(cmd_add_agent(&args));
     assert!(
-            text.contains("already exists"),
-            "cmd_add_agent must surface the REAL crate::lifecycle::add_agent 'agent id already exists' error \
-             (not the placeholder's canned ok:true); got {text}"
+            text.contains("ownership/liveness") && !text.contains("already exists"),
+            "the alias must surface unverified physical identity, not a strict-add refusal: {text}"
         );
 }
 
