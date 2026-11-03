@@ -100,6 +100,9 @@ pub(crate) fn observe(
         || crate::contract_runtime::registry::declared(provider(row)).is_some()
     {
         use team_agent_contract::{contract::types::SeatId, host::process::sample_process};
+        if crate::contract_runtime::framework::is_paused_unstarted(row) {
+            return Ok(SeatObservation::Unstarted);
+        }
         if row.get("contract_instance").is_none_or(Value::is_null)
             && checked(crate::contract_runtime::backend::seat_authority_absent(
                 &selected.run_workspace,
@@ -133,9 +136,6 @@ pub(crate) fn observe(
                     SeatObservation::Unknown
                 },
             );
-        }
-        if crate::contract_runtime::framework::is_paused_unstarted(row) {
-            return Ok(SeatObservation::Unstarted);
         }
         if checked(
             crate::contract_runtime::backend::start_needs_reconciliation(

@@ -1551,6 +1551,27 @@ mod tests {
         assert_eq!(row["session_id"], "native");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn paused_unstarted_native_observation_does_not_require_materialized_authority() {
+        let workspace = super::super::tests::TestWorkspace::new();
+        let row = json!({"provider":"cursor","runtime_family":"contract",
+            "status":"paused","contract_instance":null});
+        let selected = SelectedTeam {
+            run_workspace: workspace.path().into(),
+            team_key: "current".into(),
+            state: json!({"agents":{"reviewer":row.clone()}}),
+            team_dir: workspace.path().into(),
+            spec_workspace: None,
+            spec_path: None,
+        };
+        assert_eq!(
+            super::super::seat_observation::observe(&selected, "reviewer", &row).unwrap(),
+            super::super::seat_observation::SeatObservation::Unstarted
+        );
+        assert_eq!(std::fs::read_dir(workspace.path()).unwrap().count(), 0);
+    }
+
     fn request(workspace: &Path) -> StartRequest {
         StartRequest {
             workspace: workspace.into(),
