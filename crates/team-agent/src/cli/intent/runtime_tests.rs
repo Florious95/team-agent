@@ -275,6 +275,8 @@ fn startup_spec_red_live_team_recovers_metadata_without_process_restart() {
 fn startup_spec_repair_executes_only_metadata_and_preserves_seat_identity() {
     let (root, mut intent) = fixture(&["one"]);
     intent.subject = Subject::Agent("one".into());
+    // The launched seat has no verified session; preserve would refuse before any repair.
+    intent.session = SessionPolicy::Auto;
     install(root.path(), &[("one", "stopped", true)]);
     let spec = crate::model::paths::runtime_spec_path(root.path(), "fixture");
     std::fs::remove_file(&spec).unwrap();

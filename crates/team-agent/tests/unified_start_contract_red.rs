@@ -158,3 +158,23 @@ fn help_teaches_one_seat_verb_and_in_place_migration() {
     assert!(start.contains("--session preserve|auto|fresh"), "{start}");
     assert!(start.contains("--provider") && start.contains("--session fresh"), "{start}");
 }
+
+/// Retired seat verbs, kept literal so the ratchet survives their excision.
+const RETIRED: &[&str] = &[
+    "quick-start", "add-agent", "start-agent", "stop-agent", "reset-agent",
+    "remove-agent", "clone-agent", "fork-agent", "shutdown",
+];
+
+#[test]
+fn agent_subcommand_help_teaches_only_canonical_verbs() {
+    // An LLM leader learns from `team-agent agent <op> --help`; it must never be
+    // shown a compatibility verb's usage or examples.
+    let case = Case::new("agent-help");
+    for op in ["start", "stop", "restart", "remove", "reset", "clone", "fork"] {
+        let help = String::from_utf8_lossy(&case.run(&["agent", op, "--help"]).stdout).into_owned();
+        for retired in RETIRED {
+            assert!(!help.contains(&format!("team-agent {retired}")),
+                "agent {op} --help teaches {retired}:\n{help}");
+        }
+    }
+}

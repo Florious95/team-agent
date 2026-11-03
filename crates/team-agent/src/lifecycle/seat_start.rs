@@ -437,6 +437,26 @@ pub(crate) fn describe_resolved(
     } else {
         op
     };
+    #[cfg(unix)]
+    let op =
+        match selected.filter(|_| op == "resumed" && native(provider(&resolved.compiled.agent))) {
+            Some(selected) => {
+                let id = team_agent_contract::contract::types::SeatId::new(request.agent.as_str())
+                    .map_err(rejected)?;
+                if crate::contract_runtime::backend::seat_authority_absent(
+                    &selected.run_workspace,
+                    &selected.team_key,
+                    &id,
+                )
+                .map_err(rejected)?
+                {
+                    "fresh"
+                } else {
+                    op
+                }
+            }
+            None => op,
+        };
     Ok(StartDescription {
         op,
         declaration,
@@ -444,8 +464,8 @@ pub(crate) fn describe_resolved(
     })
 }
 
-/// Read-only continuation admission. A previously launched but uncaptured
-/// seat is not a new seat, including when it never received its first message.
+/// Read-only continuation admission. Preserve verified context when possible;
+/// a contextless or non-resumable legacy seat starts fresh, with an honest receipt.
 fn continuation_admission(
     request: &StartRequest,
     selected: Option<&SelectedTeam>,
@@ -504,13 +524,22 @@ fn continuation_admission(
     {
         return Err(refused("invalid first_send_at metadata"));
     }
+    if old
+        .get("task_prompt_delivered")
+        .is_some_and(|value| !value.is_null() && !value.is_boolean())
+    {
+        return Err(refused("invalid task_prompt_delivered metadata"));
+    }
+    let provider = crate::provider::wire::parse_provider(provider(&declaration.compiled.agent))
+        .ok_or_else(|| refused("unsupported continuation provider"))?;
+    if !crate::provider::get_adapter(provider).caps().resume {
+        return Ok(Some((old.clone(), super::StartMode::Fresh)));
+    }
     let row = crate::provider::session::capture::captured_start_row(
         &selected.state,
         request.agent.as_str(),
     )
     .map_err(rejected)?;
-    let provider = crate::provider::wire::parse_provider(provider(&declaration.compiled.agent))
-        .ok_or_else(|| refused("unsupported continuation provider"))?;
     let session = row
         .get("session_id")
         .and_then(Value::as_str)
@@ -546,7 +575,9 @@ fn continuation_admission(
         && row.get("capture_state").and_then(Value::as_str) != Some("attribution_ambiguous");
     let mode = if resumable {
         super::StartMode::Resumed
-    } else if !super::restart::has_prior_launch(old) || request.session == SessionPolicy::Auto {
+    } else if super::restart::restart_agent_never_captured(&row, None)
+        || request.session == SessionPolicy::Auto
+    {
         super::StartMode::Fresh
     } else {
         return Err(refused(format!("session_preserve_unavailable: {} has no verified resumable backing; retain its history and retry capture, or explicitly run `team-agent start {} --workspace {} --team {} --session fresh`",
@@ -1103,7 +1134,10 @@ fn start_existing(
         &request.agent,
         false,
         true,
-        request.session != SessionPolicy::Preserve,
+        request.session != SessionPolicy::Preserve
+            || continuation
+                .as_ref()
+                .is_some_and(|(_, mode)| *mode == super::StartMode::Fresh),
         Some(&selected.team_key),
         transport,
     )?;
@@ -1146,16 +1180,7 @@ fn native_continuation_admission(
     .map_err(rejected)?
     {
         if request.session == SessionPolicy::Preserve
-            && super::restart::has_prior_launch(row)
-            && (row
-                .get("session_history")
-                .and_then(Value::as_array)
-                .is_none_or(Vec::is_empty)
-                || row.get("session_id").and_then(Value::as_str).is_some()
-                || row
-                    .get("_pending_session_id")
-                    .and_then(Value::as_str)
-                    .is_some())
+            && !super::restart::restart_agent_never_captured(row, None)
         {
             return Err(refused("session_preserve_unavailable: prior launch context has no native continuation authority; choose --session fresh explicitly"));
         }
@@ -1653,6 +1678,61 @@ mod tests {
         let description = describe(&request, None, false).unwrap();
         assert_eq!(description.defaulted, json!([]));
         assert_eq!(description.declaration["model"], "openai-codex/gpt-6-luna");
+    }
+
+    #[test]
+    fn nonresumable_legacy_seat_reports_fresh_even_with_context_markers() {
+        let temp = crate::lifecycle::tests::TestWorkspace::new();
+        let mut request = request(temp.path());
+        request.patch.provider = Some("fake".into());
+        let selected = SelectedTeam {
+            run_workspace: temp.path().into(),
+            team_key: "current".into(),
+            team_dir: temp.path().into(),
+            spec_workspace: None,
+            spec_path: None,
+            state: json!({"agents":{"reviewer":{"provider":"fake","status":"stopped",
+                "session_id":"not-resumable","first_send_at":"2026-01-01T00:00:00Z"}}}),
+        };
+        let before = selected.state.clone();
+        let declaration = resolve(&request, Some(&selected)).unwrap();
+        let (_, mode) = continuation_admission(&request, Some(&selected), &declaration)
+            .unwrap()
+            .unwrap();
+        assert_eq!(mode, crate::lifecycle::StartMode::Fresh);
+        assert_eq!(
+            describe_resolved(&request, Some(&selected), false, &declaration)
+                .unwrap()
+                .op,
+            "fresh"
+        );
+        assert_eq!(selected.state, before);
+        let mut invalid = selected;
+        invalid.state["agents"]["reviewer"]["task_prompt_delivered"] = json!("unknown");
+        assert!(continuation_admission(&request, Some(&invalid), &declaration).is_err());
+        assert!(std::fs::read_dir(temp.path()).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unmaterialized_native_seat_reports_fresh_without_reserving_authority() {
+        let temp = crate::lifecycle::tests::TestWorkspace::new();
+        let mut request = request(temp.path());
+        request.patch.provider = Some("cursor".into());
+        request.patch.model = Some("composer-2.5".into());
+        let selected = SelectedTeam {
+            run_workspace: temp.path().into(),
+            team_key: "current".into(),
+            team_dir: temp.path().into(),
+            spec_workspace: None,
+            spec_path: None,
+            state: json!({"agents":{"reviewer":{"provider":"cursor","status":"stopped","explicit_stop":true}}}),
+        };
+        assert_eq!(
+            describe(&request, Some(&selected), false).unwrap().op,
+            "fresh"
+        );
+        assert!(std::fs::read_dir(temp.path()).unwrap().next().is_none());
     }
 
     #[test]

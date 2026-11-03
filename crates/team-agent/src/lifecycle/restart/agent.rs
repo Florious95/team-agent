@@ -374,9 +374,11 @@ pub(crate) fn start_agent_at_paths(
             )
         })
         .unwrap_or(false);
-    if !allow_fresh && session_id.is_none() && super::selection::has_prior_launch(&agent) {
+    if !allow_fresh && session_id.is_none()
+        && !super::selection::restart_agent_never_captured(&agent, None)
+    {
         return Err(LifecycleError::RequirementUnmet(format!(
-            "session_preserve_unavailable: previously launched agent {agent_id} has no verified session; choose an explicit fresh session"
+            "session_preserve_unavailable: agent {agent_id} has existing context but no verified session; choose an explicit fresh session"
         )));
     }
     let start_mode = decide_start_mode(

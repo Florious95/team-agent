@@ -241,10 +241,55 @@ fn readopts_a_removed_seat_from_its_surviving_role_doc() {
 #[test]
 #[serial_test::serial(env)]
 fn wakes_a_stopped_seat_and_preserves_its_session_by_default() {
+    // A launched, talked-to seat whose Pi session was captured with an exact backing.
     let root = team(&[("one", "stopped")]);
+    let session = "pi-session-one";
+    let backing = root.path().join("pi-sessions/one.jsonl");
+    std::fs::create_dir_all(backing.parent().unwrap()).unwrap();
+    let header = json!({"type":"session","version":3,"id":session,"cwd":root.path(),
+        "timestamp":"2026-11-03T06:00:01+00:00"});
+    std::fs::write(&backing, format!("{header}\n")).unwrap();
+    edit_state(root.path(), |state| {
+        let row = &mut state["agents"]["one"];
+        row["spawned_at"] = json!("2026-11-03T06:00:00+00:00");
+        row["spawn_cwd"] = json!(root.path());
+        row["first_send_at"] = json!("2026-11-03T06:01:00+00:00");
+        row["session_id"] = json!(session);
+        row["rollout_path"] = json!(backing);
+        row["capture_state"] = json!("captured");
+    });
     let plan = dry_run(root.path(), true, &["one"], Observation::StoppedVerified).unwrap();
     assert_eq!(plan["session_policy"], json!("preserve"));
     assert_eq!(op(&plan, "one"), "resumed");
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn preserve_never_replaces_unverified_context_with_a_fresh_session() {
+    // Live H11 A6: launched and talked to, but no verified session. The receipt
+    // must not promise a resume, and preserve must not silently start fresh.
+    let root = team(&[("one", "stopped")]);
+    edit_state(root.path(), |state| {
+        let row = &mut state["agents"]["one"];
+        row["spawned_at"] = json!("2026-11-03T06:00:00+00:00");
+        row["first_send_at"] = json!("2026-11-03T06:01:00+00:00");
+        row["_pending_session_id"] = json!("pending-one");
+    });
+    let before = snapshot(root.path());
+    let error = dry_run(root.path(), true, &["one"], Observation::StoppedVerified)
+        .expect_err("preserve must refuse instead of discarding delivered context");
+    refusal_names(&error, "start");
+    assert!(error.to_string().contains("--session fresh"), "{error}");
+    assert_eq!(snapshot(root.path()), before, "refusal precedes writes");
+    for policy in ["auto", "fresh"] {
+        let plan = dry_run(root.path(), true, &["one", "--session", policy], Observation::StoppedVerified)
+            .unwrap_or_else(|error| panic!("--session {policy} is the explicit way out: {error}"));
+        assert_eq!(op(&plan, "one"), "fresh", "--session {policy}: {plan}");
+    }
+    // A seat that never launched has nothing to preserve; it must not claim a resume.
+    let virgin = team(&[("two", "stopped")]);
+    let plan = dry_run(virgin.path(), true, &["two"], Observation::StoppedVerified).unwrap();
+    assert_eq!(op(&plan, "two"), "fresh", "{plan}");
 }
 
 #[test]
@@ -525,6 +570,24 @@ fn paused_seat_refusal_names_the_admitted_way_out() {
     let error = dry_run(root.path(), true, &["one"], Observation::StoppedVerified)
         .expect_err("start does not unpause");
     refusal_names(&error, "start");
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn stopped_seat_paused_only_in_its_role_doc_is_not_started() {
+    // Live H11 A15: `stop helper`, then the user declares `paused: true`; the row
+    // still says stopped. The declaration is the authority, so start must refuse.
+    let root = team(&[("one", "stopped")]);
+    std::fs::write(
+        root.path().join("agents/one.md"),
+        PI_ROLE.replacen("---\n", "---\npaused: true\n", 1),
+    )
+    .unwrap();
+    let before = snapshot(root.path());
+    let error = dry_run(root.path(), true, &["one"], Observation::StoppedVerified)
+        .expect_err("a seat declared paused must not start");
+    refusal_names(&error, "start");
+    assert_eq!(snapshot(root.path()), before, "refusal precedes writes");
 }
 
 #[test]

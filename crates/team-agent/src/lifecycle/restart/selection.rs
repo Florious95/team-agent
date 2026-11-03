@@ -78,6 +78,24 @@ mod stopped_restart_tests {
     }
 
     #[test]
+    fn contextless_launch_metadata_does_not_require_continuation() {
+        let idle = serde_json::json!({"status":"stopped", "spawned_at":"2026-01-01T00:00:00Z",
+            "pane_pid":123, "_pending_session_id":"planned", "first_send_at":null});
+        assert!(has_prior_launch(&idle));
+        assert!(restart_agent_never_captured(&idle, None));
+        for (key, value) in [
+            ("session_id", serde_json::json!("captured")),
+            ("first_send_at", serde_json::json!("2026-01-01T00:00:00Z")),
+            ("last_result_at", serde_json::json!("2026-01-01T00:00:00Z")),
+            ("task_prompt_delivered", serde_json::json!(true)),
+        ] {
+            let mut used = idle.clone();
+            used[key] = value;
+            assert!(!restart_agent_never_captured(&used, None), "{key}");
+        }
+    }
+
+    #[test]
     fn stopped_rows_never_enter_validation_or_fresh_spawn_even_with_allow_fresh() {
         let state = serde_json::json!({"agents": {
             "stopped": {"provider":"pi","status":"stopped","explicit_stop":true,
@@ -116,8 +134,8 @@ mod stopped_restart_tests {
 /// - 初始 `start_mode = if session_id { Resumed } else { Fresh }`(`start.py:179`)。
 /// - `missing && allow_fresh` 升级为 `FreshAfterMissingRollout` 并清空 session_id。
 /// - `missing && !allow_fresh` 返回 `Noop`,调用方据此诚实拒绝并提示 `--allow-fresh`。
-/// A missing captured ID is not evidence of an unused seat. Physical launch
-/// and pending native-session metadata survive a stop even before first send.
+/// Physical history worth retaining on a fresh start. Launch and pending-ID
+/// metadata alone are not context evidence and must not force continuation.
 pub(crate) fn has_prior_launch(row: &serde_json::Value) -> bool {
     [
         "session_id",
