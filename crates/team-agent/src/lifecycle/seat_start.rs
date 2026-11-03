@@ -3,8 +3,8 @@ use super::role_config::{self, RoleConfigPatch};
 use super::{LifecycleError, QuickStartReport, StartAgentOutcome};
 use crate::model::ids::AgentId;
 use crate::model::yaml::{self, Value as Yaml};
+use crate::state::repository::{StateRepository, StateWriteIntent};
 use crate::state::selector::{resolve_active_team_readonly, SelectedTeam, SelectorMode};
-use crate::state::{StateRepository, StateWriteIntent};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -341,54 +341,15 @@ fn converge(
             &selected.state,
         )?
         .backend;
-        let live = if native(row["provider"].as_str().unwrap_or("")) {
-            #[cfg(unix)]
-            {
-                use team_agent_contract::contract::types::SeatId;
-                use team_agent_contract::host::process::{sample_process, ProcessState};
-                use team_agent_contract::orchestration::store::SeatStatus;
-                let backend = crate::contract_runtime::backend::Backend::open_readonly(
-                    &selected.run_workspace,
-                    &selected.team_key,
-                )
-                .map_err(failed)?;
-                match backend
-                    .store
-                    .seat(&SeatId::new(request.agent.as_str()).map_err(failed)?)
-                    .map_err(failed)?
-                {
-                    Some(seat) => match seat
-                        .physical
-                        .as_ref()
-                        .map(|target| sample_process(&target.process))
-                    {
-                        Some(ProcessState::Alive) if seat.status != SeatStatus::Unknown => true,
-                        Some(ProcessState::Exited | ProcessState::Replaced) => false,
-                        None if seat.status == SeatStatus::Stopped => false,
-                        _ => {
-                            return Err(refused(
-                                "agent liveness is unknown; inspect status before starting",
-                            ))
-                        }
-                    },
-                    None if crate::state::projection::agent_explicit_stop(row) => false,
-                    None if crate::contract_runtime::framework::is_paused_unstarted(row) => false,
-                    None => {
-                        return Err(refused(
-                            "native seat ownership is unknown; inspect status before starting",
-                        ))
-                    }
-                }
-            }
-            #[cfg(not(unix))]
-            {
+        use super::seat_observation::SeatObservation;
+        let live = match super::seat_observation::observe(selected, request.agent.as_str(), row)? {
+            SeatObservation::Live => true,
+            SeatObservation::StoppedVerified | SeatObservation::Unstarted => false,
+            SeatObservation::NativeReconcile | SeatObservation::Unknown => {
                 return Err(refused(
-                    "native contract seats are unavailable on this platform",
-                ));
+                    "agent ownership/liveness is unverified; inspect status before start",
+                ))
             }
-        } else {
-            super::restart::live_agent_target(&selected.state, &request.agent, &transport)?
-                .is_some()
         };
         let description = describe_resolved(request, Some(selected), live, &declaration)?;
         result["op"] = json!(description.op);

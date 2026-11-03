@@ -324,6 +324,19 @@ fn launched_as_provider(pid: u32, native: crate::provider::Provider) -> bool {
 
 /// Positive native/store or exact carrier+pane+provider observations only.
 fn observe(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation, CliError> {
+    use crate::lifecycle::seat_observation::SeatObservation as Observed;
+    Ok(match checked(crate::lifecycle::seat_observation::observe(selected, id, row))? {
+        Observed::Live => Observation::Live,
+        Observed::StoppedVerified => Observation::StoppedVerified,
+        Observed::Unstarted => Observation::Unstarted,
+        Observed::NativeReconcile => Observation::NativeReconcile,
+        Observed::Unknown => Observation::Unknown,
+    })
+}
+
+// Retained until the post-H11 implementation-excision gate.
+#[allow(dead_code)]
+fn observe_legacy_implementation(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation, CliError> {
     if !row.is_object()
         || row
             .get("provider")
