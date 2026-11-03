@@ -19,7 +19,7 @@ on:
         type: boolean
         default: false
       scoped_test_suites:
-        description: "Optional newline-separated package|--lib or --test|selector rows; defaults to the integrated lifecycle matrix"
+        description: "Optional newline-separated package|--lib or --test|selector rows; package|--all-targets|all runs its complete suite"
         required: false
         type: string
       incremental_base_sha:
@@ -234,7 +234,7 @@ jobs:
           for item in "${cases[@]}"; do
             IFS='|' read -r package kind selector <<< "$item"
             case "$package:$kind" in
-              team-agent:--lib|team-agent:--test|team-agent-contract:--lib|team-agent-contract:--test) ;;
+              team-agent:--lib|team-agent:--test|team-agent-contract:--lib|team-agent-contract:--test|team-agent:--all-targets|team-agent-contract:--all-targets) ;;
               *) echo "::error::invalid scoped test package/target: $item"; exit 2 ;;
             esac
             if [[ ! "$selector" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_:-]*$ ]]; then
@@ -243,7 +243,13 @@ jobs:
             label="$(printf '%02d' "$index")"
             printf '%s\n' "$item" > "$receipts/$label.command"
             set +e
-            test_args=(--locked --manifest-path "crates/$package/Cargo.toml" --target "$TARGET" -p "$package" "$kind" "$selector" -- --test-threads=1)
+            test_args=(--locked --manifest-path "crates/$package/Cargo.toml" --target "$TARGET" -p "$package" "$kind")
+            if [[ "$kind" == --all-targets ]]; then
+              test "$selector" = all || exit 2
+            else
+              test_args+=("$selector")
+            fi
+            test_args+=(-- --test-threads=1)
             printf '%q ' cargo test "${test_args[@]}" > "$receipts/$label.argv"
             printf '\n' >> "$receipts/$label.argv"
             cargo test "${test_args[@]}" > "$receipts/$label.log" 2>&1
