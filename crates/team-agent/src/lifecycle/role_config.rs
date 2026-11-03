@@ -515,6 +515,46 @@ fn read_text(path: &Path) -> Result<String, LifecycleError> {
         .map_err(|error| LifecycleError::Compile(format!("{}: {error}", path.display())))
 }
 
+/// Pause is lifecycle policy; the compiled provider declaration can omit it.
+pub(crate) fn declaration_paused(text: &str) -> Result<bool, LifecycleError> {
+    let (meta, _) = role_parts(text)?;
+    match meta.get("paused") {
+        None => Ok(false),
+        Some(Value::Bool(paused)) => Ok(*paused),
+        _ => Err(LifecycleError::RequirementUnmet("paused must be a boolean".into())),
+    }
+}
+
+pub(crate) fn paused_agents(
+    workspace: &Path,
+    team_dir: &Path,
+    state: &serde_json::Value,
+) -> Result<std::collections::BTreeSet<String>, LifecycleError> {
+    let mut paused = std::collections::BTreeSet::new();
+    if let Some(agents) = state.get("agents").and_then(serde_json::Value::as_object) {
+        for (id, row) in agents {
+            if row["paused"] == true || row["status"].as_str()
+                .is_some_and(|status| status.eq_ignore_ascii_case("paused"))
+            {
+                paused.insert(id.clone());
+                continue;
+            }
+            let source = super::launch::role_source::role_source_path(
+                workspace, team_dir, state, &AgentId::new(id),
+            );
+            let text = match fs::read_to_string(&source) {
+                Ok(text) => text,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(LifecycleError::Compile(format!("{}: {error}", source.display()))),
+            };
+            if declaration_paused(&text)? {
+                paused.insert(id.clone());
+            }
+        }
+    }
+    Ok(paused)
+}
+
 // Unlike read_front_matter, this returns the unnormalised body slice, including blank lines.
 pub(super) fn role_parts(text: &str) -> Result<(Value, &str), LifecycleError> {
     let (end, opening) = raw_line_end(text, 0);
@@ -912,6 +952,19 @@ fn persist_error(error: std::io::Error) -> LifecycleError {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    #[test]
+    fn pause_policy_reads_only_strict_frontmatter_booleans() {
+        assert!(declaration_paused("---\npaused: true\n---\nRole\n").unwrap());
+        assert!(declaration_paused("---\r\npaused: true\r\n---\r\nRole\r\n").unwrap());
+        assert!(!declaration_paused("---\npaused: false\n---\npaused: true\n").unwrap());
+        assert!(!declaration_paused("Body says paused: true\n").unwrap());
+        for value in ["null", "1", "\"true\""] {
+            assert!(declaration_paused(&format!("---\npaused: {value}\n---\nRole\n")).is_err());
+        }
+        // Preserve the repository YAML dialect's last-value-wins semantics.
+        assert!(declaration_paused("---\npaused: false\npaused: true\n---\nRole\n").unwrap());
+    }
 
     fn pane(id: &str, session: &str, window: &str) -> crate::transport::PaneInfo {
         crate::transport::PaneInfo {

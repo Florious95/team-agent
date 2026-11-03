@@ -645,3 +645,36 @@ fn help_advertises_one_seat_verb() {
     assert!(start.contains("--session preserve|auto|fresh"), "{start}");
     assert!(start.contains("--provider") && start.contains("--session fresh"), "start help must teach in-place migration:\n{start}");
 }
+
+#[test]
+#[serial_test::serial(env)]
+fn team_restart_skips_a_running_seat_declared_paused_in_its_role_doc() {
+    // Live H11 R3 C2-07: the user declares `paused: true` on a running seat; the row
+    // still says running. The declaration is the authority: a team restart must skip
+    // that seat with reason `paused`, exactly as `start` refuses it.
+    let root = team(&[("one", "running"), ("two", "running")]);
+    std::fs::write(
+        root.path().join("agents/one.md"),
+        PI_ROLE.replacen("---\n", "---\npaused: true\n", 1),
+    )
+    .unwrap();
+    let before = snapshot(root.path());
+    let mut restart = super::super::tests::intent(Verb::Restart);
+    restart.workspace = root.path().to_owned();
+    restart.subject = Subject::Team { source: None };
+    restart.team = Some("fixture".into());
+    restart.session = SessionPolicy::Auto;
+    let plan = plan_with_observer(restart, |_, _, _| Ok(Observation::Live))
+        .unwrap_or_else(|error| panic!("the unpaused member is still restartable: {error}"));
+    assert_eq!(snapshot(root.path()), before, "planning must not write");
+    assert!(
+        plan.skipped.iter().any(|entry| entry["agent"] == "one" && entry["reason"] == "paused"),
+        "a seat declared paused is skipped with reason paused: {:?}",
+        plan.skipped
+    );
+    assert!(
+        plan.steps.iter().all(|step| step.agent() != Some("one")),
+        "no step may stop or start the paused seat: {:?}",
+        plan.steps.iter().map(|step| (step.name(), step.agent())).collect::<Vec<_>>()
+    );
+}

@@ -369,6 +369,9 @@ fn restart_with_selected_team_and_transport(
     .map_err(|error| LifecycleError::TeamSelect(error.to_string()))?
     .state;
     crate::lifecycle::launch::ensure_owner_allowed_for_state(&state, None)?;
+    let mut declared_paused = super::super::role_config::paused_agents(
+        &selected.run_workspace, &selected.team_dir, &state,
+    )?;
     recover_missing_legacy_session(&selected.run_workspace, &selected.team_key, &mut state, transport)?;
     let topology_issue_ids = crate::topology::restart_dirty_topology_issue_ids(&state);
     if !topology_issue_ids.is_empty() {
@@ -449,18 +452,19 @@ fn restart_with_selected_team_and_transport(
             save_restart_state(&selected.run_workspace, &mut state, &selected.team_key)?;
         }
     }
-    let mut convergence = converge_missing_provider_sessions(
-        &mut state,
-        session_convergence_deadline(session_converge_deadline_ms),
-        session_convergence_poll_interval(),
-        &selected.run_workspace,
-        allow_fresh,
-    )?;
+    declared_paused.retain(|id| state.get("agents").and_then(|agents| agents.get(id)).is_some());
+    let mut convergence = with_declared_pauses(&mut state, &declared_paused, |state| {
+        converge_missing_provider_sessions(
+            state, session_convergence_deadline(session_converge_deadline_ms),
+            session_convergence_poll_interval(), &selected.run_workspace, allow_fresh,
+        )
+    })?;
     if convergence.converged && convergence.changed {
         save_restart_state(&selected.run_workspace, &mut state, &selected.team_key)?;
     }
-    let repaired_agent_ids =
-        repair_resume_sessions_from_event_log(&selected.run_workspace, &mut state)?;
+    let repaired_agent_ids = with_declared_pauses(&mut state, &declared_paused, |state| {
+        repair_resume_sessions_from_event_log(&selected.run_workspace, state)
+    })?;
     if !repaired_agent_ids.is_empty() {
         save_restart_session_repairs(
             &selected.run_workspace,
@@ -468,7 +472,9 @@ fn restart_with_selected_team_and_transport(
             &selected.team_key,
             &repaired_agent_ids,
         )?;
-        let missing_after_repair = restart_required_missing_session_agent_ids(&state);
+        let missing_after_repair = with_declared_pauses(&mut state, &declared_paused, |state| {
+            restart_required_missing_session_agent_ids(state)
+        });
         convergence.changed = true;
         convergence.converged = missing_after_repair.is_empty();
         convergence.missing = missing_after_repair;
@@ -495,11 +501,11 @@ fn restart_with_selected_team_and_transport(
         convergence.missing.iter().cloned().collect()
     };
     let forced_fresh_convergence = (!convergence.converged).then_some(convergence.clone());
-    let plan = classify_restart_plan_with_resume_validation(
-        Some(&selected.run_workspace),
-        &state,
-        allow_fresh,
-    )?;
+    let plan = with_declared_pauses(&mut state, &declared_paused, |state| {
+        classify_restart_plan_with_resume_validation(
+            Some(&selected.run_workspace), state, allow_fresh,
+        )
+    })?;
     phase_timer.emit(
         &selected.run_workspace,
         "restart.phase",
@@ -551,6 +557,13 @@ fn restart_with_selected_team_and_transport(
                 issue_ids: vec![reason.clone()],
             });
         }
+    }
+    if super::super::role_config::paused_agents(
+        &selected.run_workspace, &selected.team_dir, &state,
+    )? != declared_paused {
+        return Err(LifecycleError::RequirementUnmet(
+            "paused declarations changed during restart preparation; retry team restart".into(),
+        ));
     }
     let session_name = state_session_name(&state);
     // 0.5.40 Slice 3 (tmux-server-death-locate §7 Slice 3, first-version
@@ -1240,13 +1253,12 @@ fn restart_with_selected_team_and_transport(
             // Persist state before convergence so the helper sees the
             // cleared tuple.
             save_restart_state(&selected.run_workspace, &mut state, &selected.team_key)?;
-            let _converge = converge_missing_provider_sessions(
-                &mut state,
-                convergence_deadline,
-                convergence_poll,
-                &selected.run_workspace,
-                allow_fresh,
-            )?;
+            let _converge = with_declared_pauses(&mut state, &declared_paused, |state| {
+                converge_missing_provider_sessions(
+                    state, convergence_deadline, convergence_poll,
+                    &selected.run_workspace, allow_fresh,
+                )
+            })?;
             save_restart_state(&selected.run_workspace, &mut state, &selected.team_key)?;
             // Re-probe with the freshest agent state.
             let agent_after = state
@@ -1432,6 +1444,27 @@ fn restart_with_selected_team_and_transport(
     })
 }
 
+/// Apply declaration policy only to in-memory capture/selection. Never persist
+/// this view or use it for carrier teardown: paused seats may still be live.
+fn with_declared_pauses<T>(
+    state: &mut serde_json::Value,
+    paused: &std::collections::BTreeSet<String>,
+    inspect: impl FnOnce(&mut serde_json::Value) -> T,
+) -> T {
+    let mut saved = Vec::new();
+    for id in paused {
+        if let Some(row) = state.get_mut("agents").and_then(|agents| agents.get_mut(id)) {
+            saved.push((id.clone(), row.clone()));
+            row["status"] = serde_json::json!("paused");
+        }
+    }
+    let result = inspect(state);
+    for (id, row) in saved {
+        state["agents"][&id] = row;
+    }
+    result
+}
+
 fn repair_resume_sessions_from_event_log(
     workspace: &Path,
     state: &mut serde_json::Value,
@@ -1449,6 +1482,7 @@ fn repair_resume_sessions_from_event_log(
             .cloned()
             .unwrap_or(serde_json::Value::Null);
         if crate::state::projection::agent_stopped_for_restart(&previous)
+            || previous["status"].as_str() == Some("paused")
             || previous.get("session_id").and_then(serde_json::Value::as_str)
                 .is_some_and(|session| !session.is_empty())
         {
@@ -3898,6 +3932,42 @@ fn destroy_stale_worker_session(live: bool, deferred: bool, shared_native: bool)
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn declared_pause_excludes_live_carriers_from_restart_and_capture_without_rewriting_them() {
+        let root = crate::lifecycle::tests::TestWorkspace::new();
+        std::fs::create_dir(root.path().join("agents")).unwrap();
+        std::fs::write(root.path().join("agents/scribe.md"), "---\npaused: false\n---\nFallback\n").unwrap();
+        std::fs::write(root.path().join("dynamic-scribe.md"), "---\npaused: true\n---\nAuthoritative role\n").unwrap();
+        let mut state = serde_json::json!({"agents":{
+            "scribe":{"provider":"claude","status":"running","pane_id":"%9","pane_pid":12,
+                "spawn_cwd":root.path(),"first_send_at":"2026-01-01T00:00:00Z",
+                "dynamic_role_file":"dynamic-scribe.md","session_history":[{"session_id":"old"}]},
+            "active":{"provider":"fake","status":"running","first_send_at":null}
+        }});
+        let paused = super::super::super::role_config::paused_agents(root.path(), root.path(), &state).unwrap();
+        assert_eq!(paused, std::collections::BTreeSet::from(["scribe".to_string()]));
+        let before = state.clone();
+        let plan = with_declared_pauses(&mut state, &paused, |view| {
+            assert!(restart_required_missing_session_agent_ids(view).is_empty());
+            let capture = crate::session_capture::capture_missing_provider_sessions_once(
+                view, &mut |_| panic!("paused carrier must not be scanned"), false, 1,
+            ).unwrap();
+            assert!(!capture.changed);
+            classify_restart_plan_with_resume_validation(None, view, true)
+        }).unwrap();
+        assert!(plan.unresumable.is_empty());
+        assert_eq!(plan.decisions.iter().map(|decision| decision.agent_id.as_str()).collect::<Vec<_>>(), ["active"]);
+        assert_eq!(state, before);
+        let failed: Result<(), &str> = with_declared_pauses(&mut state, &paused, |view| {
+            view["agents"]["scribe"]["session_id"] = serde_json::json!("must-not-leak");
+            view["agents"]["active"]["capture_state"] = serde_json::json!("observed");
+            Err("capture failed")
+        });
+        assert!(failed.is_err());
+        assert_eq!(state["agents"]["scribe"], before["agents"]["scribe"]);
+        assert_eq!(state["agents"]["active"]["capture_state"], "observed");
+    }
+
     #[test]
     fn startup_shared_session_never_bulk_kills_contract_windows() {
         assert!(!super::destroy_stale_worker_session(true, false, true));

@@ -98,6 +98,7 @@ pub fn resolve(
         .map_err(rejected)?
         .unwrap_or_default();
     let (mut meta, body) = role_config::role_parts(&original)?;
+    let declaration_paused = role_config::declaration_paused(&original)?;
     let body = body.to_owned();
     if let Yaml::Map(fields) = &meta {
         let mut names = std::collections::BTreeSet::new();
@@ -116,7 +117,7 @@ pub fn resolve(
             {
                 return Err(refused(format!("invalid role field: {name}")));
             }
-            if matches!(name.as_str(), "dangerously_skip_permissions" | "paused")
+            if name == "dangerously_skip_permissions"
                 && !matches!(value, Yaml::Bool(_))
             {
                 return Err(refused(format!("{name} must be a boolean")));
@@ -219,7 +220,7 @@ pub fn resolve(
         ));
     }
     let row = selected.and_then(|selected| selected.state["agents"].get(request.agent.as_str()));
-    if meta.get("paused") == Some(&Yaml::Bool(true))
+    if declaration_paused
         || compiled.agent.get("paused") == Some(&Yaml::Bool(true))
         || row.is_some_and(|row| {
             row["paused"] == true

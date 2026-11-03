@@ -79,11 +79,12 @@ fn validate_roster(spec: &Yaml, directory: &Path) -> Result<(), CliError> {
     }
     Ok(())
 }
-fn remember(plan: &mut Plan, path: &Path) -> Result<(), CliError> {
-    if !plan.files.iter().any(|(p, _)| p == path) {
+fn remember<'a>(plan: &'a mut Plan, path: &Path) -> Result<&'a [u8], CliError> {
+    let index = plan.files.iter().position(|(p, _)| p == path).unwrap_or(plan.files.len());
+    if index == plan.files.len() {
         plan.files.push((path.to_owned(), std::fs::read(path)?));
     }
-    Ok(())
+    Ok(&plan.files[index].1)
 }
 fn json_yaml(value: &Yaml) -> Value {
     match value {
@@ -268,9 +269,25 @@ fn check_native_noop_settings(
 }
 
 fn paused(row: &Value) -> bool {
-    row.get("status")
+    row["paused"] == true || row.get("status")
         .and_then(Value::as_str)
         .is_some_and(|status| status.eq_ignore_ascii_case("paused"))
+}
+
+fn seat_paused(plan: &mut Plan, selected: &SelectedTeam, id: &str, row: &Value) -> Result<bool, CliError> {
+    if paused(row) {
+        return Ok(true);
+    }
+    let source = crate::lifecycle::launch::role_source::role_source_path(
+        &selected.run_workspace, &selected.team_dir, &selected.state, &AgentId::new(id),
+    );
+    if !source.try_exists()? {
+        return Ok(false);
+    }
+    // Interpret exactly the bytes fenced by locked execution, not a second read.
+    let bytes = remember(plan, &source)?;
+    let text = checked(std::str::from_utf8(bytes))?;
+    checked(crate::lifecycle::role_config::declaration_paused(text))
 }
 
 #[cfg(unix)]
@@ -966,7 +983,8 @@ fn plan_with_observer(
             .ok_or_else(|| refusal("missing agents"))?;
         let mut active = false;
         for (id, row) in rows {
-            if !paused(row)
+            let is_paused = seat_paused(&mut plan, &selected, id, row)?;
+            if !is_paused
                 && !crate::state::projection::agent_explicit_stop(row)
                 && !crate::state::projection::agent_stopped_for_restart(row)
             {
@@ -975,7 +993,7 @@ fn plan_with_observer(
                 }
                 active = true;
             } else {
-                plan.skipped.push(json!({"agent":id,"reason":if paused(row){"paused"}else if crate::state::projection::agent_explicit_stop(row){"explicit_stop"}else{"stopped_preserved_by_original_restart"}}));
+                plan.skipped.push(json!({"agent":id,"reason":if is_paused{"paused"}else if crate::state::projection::agent_explicit_stop(row){"explicit_stop"}else{"stopped_preserved_by_original_restart"},"observation":if is_paused { Observation::Unknown } else { Observation::Unstarted }}));
             }
         }
         if !active {
@@ -1086,9 +1104,13 @@ fn plan_with_observer(
                 return Err(refusal("registered agent cannot replace its role source"));
             }
         }
+        let is_paused = if plan.intent.verb == Verb::Stop { paused(row) } else { seat_paused(&mut plan, &selected, &id, row)? };
         let explicit = crate::state::projection::agent_explicit_stop(row);
         let preserve_stop = team && explicit && matches!(plan.intent.verb, Verb::Start | Verb::Restart);
-        let obs = if paused(row) || preserve_stop {
+        let obs = if is_paused {
+            // Paused is desired policy, not evidence that a live carrier stopped.
+            Observation::Unknown
+        } else if preserve_stop {
             Observation::Unstarted
         } else {
             observe(&selected, &id, row)?
@@ -1096,7 +1118,7 @@ fn plan_with_observer(
         let actions = seat_actions(
             plan.intent.verb,
             obs,
-            paused(row),
+            is_paused,
             explicit,
             plan.intent.patch != RoleConfigPatch::default() || plan.intent.role_file.is_some(),
             team,
@@ -1114,7 +1136,7 @@ fn plan_with_observer(
                     )));
                 }
             }
-            plan.skipped.push(json!({"agent":id,"reason":if paused(row){"paused"}else if preserve_stop{"explicit_stop"}else if obs==Observation::Live{"already_running"}else{"already_stopped"},"observation":obs}));
+            plan.skipped.push(json!({"agent":id,"reason":if is_paused{"paused"}else if preserve_stop{"explicit_stop"}else if obs==Observation::Live{"already_running"}else{"already_stopped"},"observation":obs}));
         } else {
             if plan.intent.verb != Verb::Stop {
                 let (_, compiled) = role(&mut plan, &selected, &id, None)?;
@@ -1151,7 +1173,7 @@ fn plan_with_observer(
             }
         }
         plan.expected.insert(id.clone(), expected);
-        observations.push((id, obs, explicit, paused(row)));
+        observations.push((id, obs, explicit, is_paused));
     }
     if team && plan.intent.verb == Verb::Restart {
         let eligible: Vec<_> = observations

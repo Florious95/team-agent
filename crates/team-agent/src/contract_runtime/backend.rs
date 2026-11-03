@@ -1094,6 +1094,8 @@ pub(crate) fn prepare_restart(
     let agents = state.get("agents").and_then(serde_json::Value::as_object).ok_or(BackendError::Metadata)?;
     for (id, _) in agents.iter().filter(|(_, row)| {
         super::framework::is_contract(row)
+            && row["paused"] != true
+            && !row["status"].as_str().is_some_and(|status| status.eq_ignore_ascii_case("paused"))
             && !crate::state::projection::agent_stopped_for_restart(row)
     }) {
         let Some(role) = config.roles.iter().find(|role| role.id.as_str() == id) else {

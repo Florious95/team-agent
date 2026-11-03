@@ -436,6 +436,32 @@ fn new_restart_preserves_held_seats_and_shutdown_branch_starts_only_eligible() {
 }
 #[test]
 #[serial_test::serial(env)]
+fn mixed_restart_fences_the_paused_declaration_without_probing_its_live_carrier() {
+    let (root, mut intent) = fixture(&["one", "two"]);
+    install(root.path(), &[("one", "running", false), ("two", "running", false)]);
+    let source = root.path().join("agents/one.md");
+    let original = std::fs::read_to_string(&source).unwrap();
+    std::fs::write(&source, original.replacen("---\n", "---\npaused: true\n", 1)).unwrap();
+    intent.verb = Verb::Restart;
+    intent.session = SessionPolicy::Auto;
+    let state_path = crate::state::persist::runtime_state_path(root.path());
+    let before = std::fs::read(&state_path).unwrap();
+    let plan = plan_with_observer(intent, |_, id, _| {
+        assert_eq!(id, "two", "declaration-paused carrier must not be probed");
+        Ok(Observation::Live)
+    }).unwrap();
+    assert_eq!(actions(&plan), [("restart_team", None)]);
+    assert_eq!(plan.skipped[0]["agent"], "one");
+    assert_eq!(plan.skipped[0]["reason"], "paused");
+    assert!(plan.skipped[0].get("observation").is_some());
+    assert_eq!(std::fs::read(state_path).unwrap(), before);
+    std::fs::write(source, original).unwrap();
+    let error = recheck(&plan, &plan.steps[0], false).unwrap_err();
+    assert!(error.to_string().contains("role/spec changed since planning"));
+}
+
+#[test]
+#[serial_test::serial(env)]
 fn all_paused_no_eligible_and_single_restart_never_unpauses() {
     let (root, mut intent) = fixture(&["one"]);
     install(root.path(), &[("one", "paused", false)]);

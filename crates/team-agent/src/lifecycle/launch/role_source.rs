@@ -246,12 +246,13 @@ pub(crate) fn materialize_latest_role(
     })
 }
 
-pub(crate) fn resolve_role_source(
+/// Resolve the declared location without requiring a materialized role file.
+pub(crate) fn role_source_path(
     run_workspace: &Path,
     team_dir: &Path,
     state: &serde_json::Value,
     source_agent_id: &AgentId,
-) -> Result<PathBuf, LifecycleError> {
+) -> PathBuf {
     if let Some(raw) = state
         .get("agents")
         .and_then(|agents| agents.get(source_agent_id.as_str()))
@@ -260,28 +261,25 @@ pub(crate) fn resolve_role_source(
         .filter(|value| !value.is_empty())
     {
         let path = PathBuf::from(raw);
-        let resolved = if path.is_absolute() {
-            path
-        } else {
-            run_workspace.join(path)
-        };
-        if resolved.is_file() {
-            return Ok(resolved);
-        }
-        return Err(LifecycleError::Compile(format!(
-            "source dynamic role file not found: {}",
-            resolved.display()
-        )));
+        return if path.is_absolute() { path } else { run_workspace.join(path) };
     }
-    let path = team_dir
-        .join("agents")
-        .join(format!("{}.md", source_agent_id.as_str()));
+    team_dir.join("agents").join(format!("{}.md", source_agent_id.as_str()))
+}
+
+pub(crate) fn resolve_role_source(
+    run_workspace: &Path,
+    team_dir: &Path,
+    state: &serde_json::Value,
+    source_agent_id: &AgentId,
+) -> Result<PathBuf, LifecycleError> {
+    let path = role_source_path(run_workspace, team_dir, state, source_agent_id);
     if path.is_file() {
-        Ok(path)
-    } else {
-        Err(LifecycleError::Compile(format!(
-            "source role file not found: {}",
-            path.display()
-        )))
+        return Ok(path);
     }
+    let dynamic = state.get("agents").and_then(|agents| agents.get(source_agent_id.as_str()))
+        .and_then(|row| row.get("dynamic_role_file")).and_then(serde_json::Value::as_str)
+        .is_some_and(|value| !value.is_empty());
+    Err(LifecycleError::Compile(format!(
+        "source {}role file not found: {}", if dynamic { "dynamic " } else { "" }, path.display()
+    )))
 }

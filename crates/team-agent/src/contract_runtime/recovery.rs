@@ -107,6 +107,9 @@ fn frozen_team(
         .get("agents")
         .and_then(serde_json::Value::as_object)
         .ok_or_else(|| error("native recovery requires the saved roster"))?;
+    let paused = crate::lifecycle::role_config::paused_agents(
+        &selected.run_workspace, &selected.team_dir, &selected.state,
+    ).map_err(error)?;
     let mut roles = Vec::new();
     let mut members = Vec::new();
     for (id, row) in agents {
@@ -147,10 +150,10 @@ fn frozen_team(
                         "frozen role provider disagrees with saved native route",
                     ));
                 }
-                role.paused |= row.get("paused").and_then(serde_json::Value::as_bool) == Some(true);
+                role.paused |= paused.contains(id);
                 source = role.source.clone();
                 roles.push(role);
-            } else if row.get("paused").and_then(serde_json::Value::as_bool) != Some(true)
+            } else if !paused.contains(id)
                 && !crate::state::projection::agent_explicit_stop(row)
             {
                 return Err(error(format!(
@@ -488,7 +491,13 @@ mod tests {
         assert_eq!(config.roles[0].model, "frozen-model");
         assert_eq!(config.roles[0].prompt.text, "frozen prompt");
         assert_eq!(config.members[0].provider, "pi_tui");
-        assert_eq!(std::fs::read_to_string(source).unwrap(), editable);
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), editable);
+        std::fs::write(&source, editable.replacen("---\n", "---\npaused: true\n", 1)).unwrap();
+        let paused = frozen_team(&binding, &selected).unwrap();
+        assert!(paused.roles[0].paused);
+        assert_eq!(paused.roles[0].model, "frozen-model");
+        assert_eq!(paused.roles[0].prompt.text, "frozen prompt");
+        std::fs::write(&source, editable).unwrap();
         selected.state["agents"]["worker"]["provider"] = json!("claude_tui");
         assert!(frozen_team(&binding, &selected).is_err());
         selected.state["agents"]["worker"]["provider"] = json!("pi_tui");
