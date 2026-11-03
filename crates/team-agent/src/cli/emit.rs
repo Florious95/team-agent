@@ -596,7 +596,8 @@ fn nearest_subcommand(input: &str) -> Option<&'static str> {
             // Alias misspellings may match, but only canonical commands are offered.
             let target = super::spec::command_spec(super::intent::canonical_start_command(spec.name))?;
             target.suggestion_index.then_some(Candidate {
-                match_key: spec.name.to_string(), stable_key: target.name.to_string(), payload: target.name,
+                // rank deduplicates before scoring: keep each alias match key distinct.
+                match_key: spec.name.to_string(), stable_key: spec.name.to_string(), payload: target.name,
             })
         })
         .collect();

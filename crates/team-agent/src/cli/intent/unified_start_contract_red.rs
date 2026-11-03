@@ -333,14 +333,33 @@ fn stopped_seat_migrates_provider_in_place_with_fresh_session() {
 #[serial_test::serial(env)]
 fn stopped_seat_migrates_to_a_contract_provider_keeping_its_id() {
     let root = team(&[("one", "stopped")]);
-    let plan = dry_run(
+    let before = snapshot(root.path());
+    let result = dry_run(
         root.path(), true,
         &["one", "--provider", "cursor", "--model", "grok-4.7", "--session", "fresh"],
         Observation::StoppedVerified,
-    ).unwrap_or_else(|error| panic!("legacy→contract migration keeps the seat: {error}"));
-    assert_eq!(op(&plan, "one"), "provider_changed");
-    assert!(provider_is(&declared(&plan, "one", "provider"), "cursor") || declared(&plan, "one", "provider") == json!("cursor"));
-    assert_eq!(declared(&plan, "one", "model"), json!("grok-4.7"));
+    );
+    assert_eq!(snapshot(root.path()), before, "planning must not write");
+    match result {
+        Ok(plan) => {
+            assert_eq!(op(&plan, "one"), "provider_changed");
+            assert!(provider_is(&declared(&plan, "one", "provider"), "cursor") || declared(&plan, "one", "provider") == json!("cursor"));
+            assert_eq!(declared(&plan, "one", "model"), json!("grok-4.7"));
+        }
+        // Native admission (installed CLI, tmux, catalog model) is host-dependent and may
+        // refuse at planning; the seat identity is never the reason. H11 A10 proves the
+        // positive path with a model id taken from `team-agent models --provider cursor`.
+        Err(error) => {
+            let text = error.to_string();
+            assert!(
+                text.contains("native"),
+                "legacy→contract migration may only be refused by native admission: {text}"
+            );
+            for identity in ["new seat identity", "provider cannot change", "provider change is not allowed"] {
+                assert!(!text.contains(identity), "migration must keep the seat id: {text}");
+            }
+        }
+    }
 }
 
 #[test]

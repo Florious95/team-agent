@@ -43,6 +43,9 @@ fn refused(message: impl Into<String>) -> LifecycleError {
 fn failed(error: impl std::fmt::Display) -> LifecycleError {
     LifecycleError::StatePersist(error.to_string())
 }
+fn rejected(error: impl std::fmt::Display) -> LifecycleError {
+    refused(error.to_string())
+}
 
 /// Defaults are applied once, and only to genuinely omitted declaration values.
 pub fn resolve(
@@ -50,6 +53,22 @@ pub fn resolve(
     selected: Option<&SelectedTeam>,
 ) -> Result<Declaration, LifecycleError> {
     role_config::validate_id(&request.agent)?;
+    if selected.is_some_and(|selected| {
+        selected.state["agents"]
+            .get(request.agent.as_str())
+            .is_none()
+            && selected
+                .state
+                .get("agent_lifecycle")
+                .and_then(|history| history.get(request.agent.as_str()))
+                .is_some_and(|entry| entry.get("state").and_then(Value::as_str) != Some("retired"))
+    }) {
+        return Err(refused(format!(
+            "agent {} has unrecognized lifecycle history; run `{}` before re-admission",
+            request.agent,
+            status_command(request)
+        )));
+    }
     let directory = selected
         .map(|s| s.team_dir.as_path())
         .unwrap_or(&request.workspace);
@@ -58,7 +77,7 @@ pub fn resolve(
         .join(format!("{}.md", request.agent));
     let source = if let Some(source) = &request.role_file {
         Some(source.clone())
-    } else if destination.try_exists().map_err(failed)? {
+    } else if destination.try_exists().map_err(rejected)? {
         Some(destination.clone())
     } else if let Some(selected) =
         selected.filter(|s| s.state["agents"].get(request.agent.as_str()).is_some())
@@ -76,7 +95,7 @@ pub fn resolve(
         .as_ref()
         .map(std::fs::read_to_string)
         .transpose()
-        .map_err(failed)?
+        .map_err(rejected)?
         .unwrap_or_default();
     let (mut meta, body) = role_config::role_parts(&original)?;
     let body = body.to_owned();
@@ -175,9 +194,9 @@ pub fn resolve(
         patch.prompt = Some(prompt);
     }
     let text = role_config::patched_role(&original, &request.agent, &patch, source.is_none())?;
-    let team_meta = if directory.join("TEAM.md").try_exists().map_err(failed)? {
+    let team_meta = if directory.join("TEAM.md").try_exists().map_err(rejected)? {
         crate::compiler::read_front_matter(&directory.join("TEAM.md"))
-            .map_err(failed)?
+            .map_err(rejected)?
             .0
     } else {
         Yaml::Map(Vec::new())
@@ -188,7 +207,7 @@ pub fn resolve(
         &team_meta,
         &request.workspace.to_string_lossy(),
     )
-    .map_err(failed)?;
+    .map_err(rejected)?;
     if !known_provider(provider(&compiled.agent)) {
         return Err(refused("unknown provider in the effective declaration"));
     }
@@ -446,7 +465,7 @@ pub(crate) fn preflight(
             {
                 let spec = role_config::read_spec(selected)?;
                 crate::model::spec::validate_spec(&spec, &selected.run_workspace)
-                    .map_err(failed)?;
+                    .map_err(rejected)?;
             }
             let config = crate::contract_runtime::config::read_start_declaration(
                 &selected.run_workspace,
@@ -456,9 +475,9 @@ pub(crate) fn preflight(
                 &declaration.text,
                 request.agent.as_str(),
             )
-            .map_err(failed)?
+            .map_err(rejected)?
             .ok_or_else(|| refused("native role is missing from its team declaration"))?;
-            crate::contract_runtime::backend::preflight(&config).map_err(failed)?;
+            crate::contract_runtime::backend::preflight(&config).map_err(rejected)?;
         }
     }
     let _ = (request, selected, declaration);
@@ -520,9 +539,29 @@ fn carrier_birth(selected: &SelectedTeam, id: &AgentId) -> Result<Value, Lifecyc
         .and_then(|pid| u32::try_from(pid).ok())
         .filter(|pid| *pid > 1)
     {
-        return team_agent_contract::host::process::process_birth_identity(pid)
-            .map(|birth| json!(birth))
-            .map_err(failed);
+        use crate::platform::process::{pid_liveness, ProcessLiveness};
+        let unavailable = |reason: String| {
+            refused(format!(
+            "carrier identity is unverified: {reason}; run `team-agent status {} --workspace {} --team {}`",
+            command_arg(id.as_str()), command_arg(&selected.run_workspace.to_string_lossy()),
+            command_arg(&selected.team_key),
+        ))
+        };
+        match pid_liveness(pid).map_err(|error| unavailable(error.to_string()))? {
+            ProcessLiveness::Dead => return Ok(Value::Null),
+            ProcessLiveness::Unknown { reason } => return Err(unavailable(reason)),
+            ProcessLiveness::Live => {}
+        }
+        return match team_agent_contract::host::process::process_birth_identity(pid) {
+            Ok(birth) => Ok(json!(birth)),
+            // The carrier can exit between liveness and identity sampling.
+            Err(error) => {
+                match pid_liveness(pid).map_err(|error| unavailable(error.to_string()))? {
+                    ProcessLiveness::Dead => Ok(Value::Null),
+                    _ => Err(unavailable(error.to_string())),
+                }
+            }
+        };
     }
     let _ = (selected, id);
     Ok(Value::Null)
@@ -531,10 +570,10 @@ fn carrier_birth(selected: &SelectedTeam, id: &AgentId) -> Result<Value, Lifecyc
 /// Run preview without a lock/write; real admission is re-resolved under the seat lock.
 pub fn start(request: &StartRequest, dry_run: bool) -> Result<Value, LifecycleError> {
     let workspace =
-        crate::model::paths::canonical_run_workspace(&request.workspace).map_err(failed)?;
+        crate::model::paths::canonical_run_workspace(&request.workspace).map_err(rejected)?;
     let selected = if crate::state::persist::runtime_state_path(&workspace).is_file() {
         let raw = crate::state::persist::load_runtime_state_without_migrations(&workspace)
-            .map_err(failed)?;
+            .map_err(rejected)?;
         if !raw.is_object() || raw.get("teams").is_some_and(|teams| !teams.is_object()) {
             return Err(refused(
                 "invalid runtime state; creation is not a repair fallback",
@@ -559,14 +598,14 @@ pub fn start(request: &StartRequest, dry_run: bool) -> Result<Value, LifecycleEr
                     request.team.as_deref(),
                     SelectorMode::RuntimeOnly,
                 )
-                .map_err(failed)?,
+                .map_err(rejected)?,
             )
         }
     } else {
         let runtime = workspace.join(".team/runtime");
         if workspace.join("team.spec.yaml").is_file()
             || (runtime.is_dir()
-                && std::fs::read_dir(&runtime).map_err(failed)?.any(|entry| {
+                && std::fs::read_dir(&runtime).map_err(rejected)?.any(|entry| {
                     entry.is_ok_and(|entry| entry.path().join("team.spec.yaml").is_file())
                 }))
         {
@@ -738,7 +777,7 @@ fn start_existing(
 ) -> Result<Value, LifecycleError> {
     let mut spec = role_config::read_spec(selected)?;
     role_config::replace_spec_agent(&mut spec, &request.agent, &declaration.compiled.agent)?;
-    crate::model::spec::validate_spec(&spec, &selected.run_workspace).map_err(failed)?;
+    crate::model::spec::validate_spec(&spec, &selected.run_workspace).map_err(rejected)?;
     #[cfg(unix)]
     if native(provider(&declaration.compiled.agent)) {
         let config = crate::contract_runtime::config::read_start_declaration(
@@ -749,10 +788,10 @@ fn start_existing(
             &declaration.text,
             request.agent.as_str(),
         )
-        .map_err(failed)?
+        .map_err(rejected)?
         .ok_or_else(|| refused("native role is missing from its team declaration"))?;
         if request.session == SessionPolicy::Fresh {
-            crate::contract_runtime::backend::preflight(&config).map_err(failed)?;
+            crate::contract_runtime::backend::preflight(&config).map_err(rejected)?;
         } else {
             let role = config
                 .roles
@@ -764,15 +803,15 @@ fn start_existing(
                     &selected.run_workspace,
                     &selected.team_key,
                 )
-                .map_err(failed)?;
-                if backend.store.seat(&role.id).map_err(failed)?.is_some() {
+                .map_err(rejected)?;
+                if backend.store.seat(&role.id).map_err(rejected)?.is_some() {
                     let resume = crate::contract_runtime::backend::prepare_resume(
                         &selected.run_workspace,
                         &selected.team_key,
                         &role.id,
                         Some(role),
                     )
-                    .map_err(failed)?;
+                    .map_err(rejected)?;
                     if resume.native_launch()
                         != team_agent_contract::contract::types::Operation::Resume
                     {
@@ -790,9 +829,9 @@ fn start_existing(
                 &selected.team_key,
                 role,
             )
-            .map_err(failed)?
+            .map_err(rejected)?
             {
-                crate::contract_runtime::backend::preflight(&config).map_err(failed)?;
+                crate::contract_runtime::backend::preflight(&config).map_err(rejected)?;
             }
         }
     }
@@ -939,9 +978,10 @@ pub(crate) fn preflight_bootstrap(role: &str) -> Result<(), LifecycleError> {
         )));
     }
     if provider == crate::model::enums::Provider::Pi {
-        let (_, catalog) = super::launch::pi_mcp::resolve_pi_executable_chain().map_err(failed)?;
+        let (_, catalog) =
+            super::launch::pi_mcp::resolve_pi_executable_chain().map_err(rejected)?;
         if let Some(model) = meta.get("model").and_then(Yaml::as_str) {
-            super::launch::pi_mcp::select_exact_pi_model(&catalog, model).map_err(failed)?;
+            super::launch::pi_mcp::select_exact_pi_model(&catalog, model).map_err(rejected)?;
         }
     }
     Ok(())
@@ -1117,6 +1157,44 @@ mod tests {
             patch: RoleConfigPatch::default(),
             session: SessionPolicy::Preserve,
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial(env)]
+    fn stopped_carrier_birth_is_null_and_live_carrier_is_fenced() {
+        let temp = crate::lifecycle::tests::TestWorkspace::new();
+        let id = AgentId::new("reviewer");
+        let mut selected = SelectedTeam {
+            run_workspace: temp.path().into(),
+            team_key: "current".into(),
+            team_dir: temp.path().into(),
+            spec_workspace: None,
+            spec_path: None,
+            state: json!({"agents":{"reviewer":{"status":"stopped"}}}),
+        };
+        assert_eq!(carrier_birth(&selected, &id).unwrap(), Value::Null);
+        // Reap our own child, rather than guessing a host PID or touching a worker.
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--list")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        assert!(child.wait().unwrap().success());
+        selected.state["agents"]["reviewer"]["pane_pid"] = json!(pid);
+        assert_eq!(carrier_birth(&selected, &id).unwrap(), Value::Null);
+        selected.state["agents"]["reviewer"]["pane_pid"] = json!(std::process::id());
+        assert!(!carrier_birth(&selected, &id).unwrap().is_null());
+    }
+
+    #[test]
+    fn admission_failure_is_a_refusal_not_a_persistence_failure() {
+        assert!(matches!(
+            rejected("native admission failed"),
+            LifecycleError::RequirementUnmet(_)
+        ));
     }
 
     #[test]
