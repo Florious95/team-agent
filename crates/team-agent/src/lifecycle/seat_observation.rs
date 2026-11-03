@@ -5,7 +5,8 @@ use crate::transport::{PaneId, Target, Transport};
 use serde_json::Value;
 use std::path::Path;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum SeatObservation {
     Live,
     StoppedVerified,
@@ -34,7 +35,7 @@ fn same_provider(left: &str, right: &str) -> bool {
 }
 
 #[cfg(unix)]
-fn native_observation(
+pub(crate) fn native_observation(
     status: team_agent_contract::orchestration::store::SeatStatus,
     process: team_agent_contract::host::process::ProcessState,
     root_status: Option<&str>,
@@ -55,10 +56,10 @@ fn native_observation(
 fn shell_carrier(command: &str) -> bool {
     matches!(command, "sh" | "bash" | "zsh" | "fish")
 }
-fn surface_liveness(command: &str, native_frame: bool, live_child: bool) -> bool {
+pub(crate) fn surface_liveness(command: &str, native_frame: bool, live_child: bool) -> bool {
     !command.is_empty() && native_frame && (!shell_carrier(command) || live_child)
 }
-fn argv0_names(argv0: &str, native: crate::provider::Provider) -> bool {
+pub(crate) fn argv0_names(argv0: &str, native: crate::provider::Provider) -> bool {
     Path::new(argv0).file_name().and_then(|name| name.to_str())
         == Some(crate::provider::wire::command_name(native))
 }
@@ -67,7 +68,7 @@ fn argv0_names(argv0: &str, native: crate::provider::Provider) -> bool {
 /// as the pane command. The exact argv[0] of the pane process, or of a live
 /// child under its carrier, still names the provider. Unobservable is not
 /// positive evidence.
-fn launched_as_provider(pid: u32, native: crate::provider::Provider) -> bool {
+pub(crate) fn launched_as_provider(pid: u32, native: crate::provider::Provider) -> bool {
     let named = |pid: u32| {
         crate::platform::argv::argv_tokens(pid)
             .and_then(|argv| argv.into_iter().next())

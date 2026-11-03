@@ -2,7 +2,10 @@
 use super::*;
 use crate::model::yaml::{self, Value as Yaml};
 use crate::state::selector::{resolve_active_team_readonly, SelectedTeam, SelectorMode};
-use crate::transport::{PaneId, Target, Transport};
+#[cfg(test)]
+use crate::lifecycle::seat_observation::{argv0_names, launched_as_provider, surface_liveness};
+#[cfg(all(test, unix))]
+use crate::lifecycle::seat_observation::native_observation;
 use std::collections::BTreeSet;
 #[cfg(test)]
 #[path = "runtime_tests.rs"]
@@ -290,224 +293,9 @@ fn seat_paused(plan: &mut Plan, selected: &SelectedTeam, id: &str, row: &Value) 
     checked(crate::lifecycle::role_config::declaration_paused(text))
 }
 
-#[cfg(unix)]
-fn native_observation(
-    status: team_agent_contract::orchestration::store::SeatStatus,
-    process: team_agent_contract::host::process::ProcessState,
-    root_status: Option<&str>,
-) -> Observation {
-    use team_agent_contract::{host::process::ProcessState, orchestration::store::SeatStatus};
-    match (status, process) {
-        (SeatStatus::Ready, ProcessState::Alive) if root_status == Some("running") => {
-            Observation::Live
-        }
-        (SeatStatus::Ready, ProcessState::Exited) => Observation::StoppedVerified,
-        (SeatStatus::Stopped, ProcessState::Exited) if root_status == Some("stopped") => {
-            Observation::StoppedVerified
-        }
-        _ => Observation::Unknown,
-    }
-}
-
-fn shell_carrier(command: &str) -> bool {
-    matches!(command, "sh" | "bash" | "zsh" | "fish")
-}
-fn surface_liveness(command: &str, native_frame: bool, live_child: bool) -> bool {
-    !command.is_empty() && native_frame && (!shell_carrier(command) || live_child)
-}
-fn argv0_names(argv0: &str, native: crate::provider::Provider) -> bool {
-    Path::new(argv0).file_name().and_then(|name| name.to_str())
-        == Some(crate::provider::wire::command_name(native))
-}
-/// Native installers may exec a version-named file (Claude Code:
-/// `~/.local/bin/claude` -> `versions/<semver>`), so tmux reports the version
-/// as the pane command. The exact argv[0] of the pane process, or of a live
-/// child under its carrier, still names the provider. Unobservable is not
-/// positive evidence.
-fn launched_as_provider(pid: u32, native: crate::provider::Provider) -> bool {
-    let named = |pid: u32| {
-        crate::platform::argv::argv_tokens(pid)
-            .and_then(|argv| argv.into_iter().next())
-            .is_some_and(|argv0| argv0_names(&argv0, native))
-    };
-    named(pid)
-        || crate::platform::process::process_tree(pid)
-            .unwrap_or_default()
-            .into_iter()
-            .any(|child| {
-                child != pid && named(child) && crate::platform::process::pid_is_alive(child)
-            })
-}
-
-/// Positive native/store or exact carrier+pane+provider observations only.
+/// Shared positive observation, with only the CLI error envelope adapted.
 fn observe(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation, CliError> {
-    use crate::lifecycle::seat_observation::SeatObservation as Observed;
-    Ok(match checked(crate::lifecycle::seat_observation::observe(selected, id, row))? {
-        Observed::Live => Observation::Live,
-        Observed::StoppedVerified => Observation::StoppedVerified,
-        Observed::Unstarted => Observation::Unstarted,
-        Observed::NativeReconcile => Observation::NativeReconcile,
-        Observed::Unknown => Observation::Unknown,
-    })
-}
-
-// Retained until the post-H11 implementation-excision gate.
-#[allow(dead_code)]
-fn observe_legacy_implementation(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Observation, CliError> {
-    if !row.is_object()
-        || row
-            .get("provider")
-            .is_some_and(|value| !value.is_null() && !value.is_string())
-    {
-        return Err(refusal("invalid persisted provider metadata"));
-    }
-    #[cfg(unix)]
-    if crate::contract_runtime::framework::is_contract(row) {
-        use team_agent_contract::{contract::types::SeatId, host::process::sample_process};
-        if crate::contract_runtime::framework::is_paused_unstarted(row) {
-            return Ok(Observation::Unstarted);
-        }
-        if checked(
-            crate::contract_runtime::backend::start_needs_reconciliation(
-                &selected.run_workspace,
-                &selected.team_key,
-                &checked(SeatId::new(id))?,
-                row,
-            ),
-        )? {
-            return Ok(Observation::NativeReconcile);
-        }
-        let backend = checked(crate::contract_runtime::backend::Backend::open_readonly(
-            &selected.run_workspace,
-            &selected.team_key,
-        ))?;
-        let seat = checked(backend.store.seat(&checked(SeatId::new(id))?))?
-            .ok_or_else(|| refusal("missing canonical native seat"))?;
-        if !same_provider(provider(row), seat.provider.as_str())
-            || row.get("contract_scope").and_then(Value::as_str)
-                != Some(seat.identity.scope.as_str())
-            || row.get("contract_instance").and_then(Value::as_str)
-                != Some(seat.identity.instance.as_str())
-            || row.get("generation").and_then(Value::as_u64) != Some(seat.identity.generation.0)
-        {
-            return Ok(Observation::Unknown);
-        }
-        let Some(target) = seat.physical.as_ref() else {
-            return Ok(Observation::Unknown);
-        };
-        return Ok(native_observation(
-            seat.status,
-            sample_process(&target.process),
-            row.get("status").and_then(Value::as_str),
-        ));
-    }
-    let native = crate::provider::wire::parse_provider(provider(row))
-        .ok_or_else(|| refusal("unknown provider"))?;
-    let status = row.get("status").and_then(Value::as_str).unwrap_or("");
-    if !["running", "stopped", "dead"]
-        .iter()
-        .any(|known| status.eq_ignore_ascii_case(known))
-    {
-        return Ok(Observation::Unknown);
-    }
-    let Some(pid) = row
-        .get("pane_pid")
-        .and_then(Value::as_u64)
-        .and_then(|p| u32::try_from(p).ok())
-        .filter(|p| *p > 1)
-    else {
-        return Ok(Observation::Unknown);
-    };
-    match checked(crate::platform::process::pid_liveness(pid))? {
-        crate::platform::process::ProcessLiveness::Dead => return Ok(Observation::StoppedVerified),
-        crate::platform::process::ProcessLiveness::Unknown { .. } => {
-            return Ok(Observation::Unknown)
-        }
-        crate::platform::process::ProcessLiveness::Live => (),
-    }
-    if !status.eq_ignore_ascii_case("running") {
-        return Ok(Observation::Unknown);
-    }
-    #[cfg(unix)]
-    let carrier_birth = checked(team_agent_contract::host::process::process_birth_identity(
-        pid,
-    ))?;
-    let backend = checked(
-        crate::lifecycle::restart::lifecycle_worker_tmux_backend_selection_for_state(
-            &selected.run_workspace,
-            &selected.state,
-        ),
-    )?
-    .backend;
-    let panes = checked(backend.list_targets())?;
-    let pane = row.get("pane_id").and_then(Value::as_str);
-    let session = selected.state.get("session_name").and_then(Value::as_str);
-    let window = row.get("window").and_then(Value::as_str);
-    let matches: Vec<_> = panes
-        .iter()
-        .filter(|p| {
-            Some(p.pane_id.as_str()) == pane
-                && p.pane_pid == Some(pid)
-                && Some(p.session.as_str()) == session
-                && p.window_name.as_ref().map(|w| w.as_str()) == window
-        })
-        .collect();
-    if matches.len() != 1 {
-        return Ok(Observation::Unknown);
-    }
-    let Some(session) = session else {
-        return Ok(Observation::Unknown);
-    };
-    let owner = checked(backend.session_owner(&crate::transport::SessionName::new(session)))?;
-    let generation = crate::state::projection::session_generation(&selected.state);
-    if owner.as_ref().is_none_or(|owner| {
-        Path::new(&owner.workspace) != selected.run_workspace
-            || owner.team != selected.team_key
-            || Some(owner.generation.as_str()) != generation
-    }) {
-        return Ok(Observation::Unknown);
-    }
-    let command = matches[0].current_command.as_deref().unwrap_or("");
-    let positive_command = command == crate::provider::wire::command_name(native)
-        || crate::leader::provider_attribution::command_matches_provider(native, command)
-        // A shell-supervised worker retains its native argv[0] in this exact
-        // pane's live process tree; shell-only/stale-screen carriers still fail.
-        || (!command.is_empty() && launched_as_provider(pid, native));
-    let positive_surface = if !positive_command && !command.is_empty() {
-        let frame = checked(
-            backend.observe_native_input(&Target::Pane(PaneId::new(pane.unwrap_or(""))), native),
-        )?;
-        // Original start/restart supervises the native child with a shell carrier.
-        // A shell alone (including its inert post-exit tail) is never Live.
-        let mut live_child = false;
-        if frame.is_some() && shell_carrier(command) {
-            for child in checked(crate::platform::process::process_tree(pid))? {
-                if child != pid
-                    && matches!(
-                        checked(crate::platform::process::pid_liveness(child))?,
-                        crate::platform::process::ProcessLiveness::Live
-                    )
-                {
-                    live_child = true;
-                    break;
-                }
-            }
-        }
-        surface_liveness(command, frame.is_some(), live_child)
-    } else {
-        false
-    };
-    if !positive_command && !positive_surface {
-        return Ok(Observation::Unknown);
-    }
-    #[cfg(unix)]
-    if checked(team_agent_contract::host::process::process_birth_identity(
-        pid,
-    ))? != carrier_birth
-    {
-        return Ok(Observation::Unknown);
-    }
-    Ok(Observation::Live)
+    checked(crate::lifecycle::seat_observation::observe(selected, id, row))
 }
 fn start_args(plan: &Plan, id: &str, patch: RoleConfigPatch) -> StartAgentArgs {
     StartAgentArgs {
@@ -663,51 +451,26 @@ fn preflight_start(
     }
     Ok(())
 }
-fn add(
+fn start_new(
     plan: &mut Plan,
     selected: &SelectedTeam,
     id: &str,
     source: Option<PathBuf>,
 ) -> Result<(), CliError> {
-    // An explicit start re-admits a removed seat: the add consumes its retired
-    // tombstone. Only lifecycle history this planner cannot classify is refused.
-    if selected
-        .state
-        .get("agent_lifecycle")
-        .and_then(|lifecycle| lifecycle.get(id))
-        .is_some_and(|entry| entry.get("state").and_then(Value::as_str) != Some("retired"))
-    {
-        return Err(refusal(format!(
-            "agent {id} has unrecognized lifecycle history; refusing to re-admit it"
-        )));
-    }
-    let default_provider = dynamic::default_provider(Some(&selected.state));
-    let patch = dynamic::creation_patch(id, source.as_deref(), &plan.intent.patch, &default_provider)?;
-    let role_file = match source {
-        Some(path) => {
-            let (meta, _) = checked(crate::compiler::read_front_matter(&path))?;
-            if (meta.get("provider").and_then(Yaml::as_str).is_none() && patch.provider.is_none())
-                || (!matches!(
-                    meta.get("dangerously_skip_permissions"),
-                    Some(Yaml::Bool(_))
-                ) && patch.bypass.is_none())
-            {
-                return Err(usage("role creation requires explicit provider and dangerously_skip_permissions decisions"));
-            }
-            role(plan, selected, id, Some(&path))?;
-            path.to_string_lossy().into_owned()
-        }
-        None => String::new(),
+    let request = crate::lifecycle::seat_start::StartRequest {
+        workspace: plan.scope.workspace.clone(), team: plan.scope.team.clone(),
+        agent: AgentId::new(id), role_file: source,
+        patch: plan.intent.patch.clone(), session: plan.intent.session,
     };
-    plan.steps.push(Step::AddAgent(AddAgentArgs {
-        agent: id.into(),
-        workspace: plan.scope.workspace.clone(),
-        team: plan.scope.team.clone(),
-        role_config: patch,
-        role_file,
-        force: false,
-        json: true,
-    }));
+    let declaration = checked(crate::lifecycle::seat_start::resolve(&request, Some(selected)))?;
+    checked(crate::lifecycle::seat_start::preflight(&request, Some(selected), &declaration))?;
+    let team_source = selected.team_dir.join("TEAM.md");
+    if team_source.is_file() { remember(plan, &team_source)?; }
+    if let Some(source) = &declaration.source { remember(plan, source)?; }
+    let description = checked(crate::lifecycle::seat_start::describe_resolved(
+        &request, Some(selected), false, &declaration,
+    ))?;
+    plan.steps.push(Step::UnifiedStart { request, description });
     Ok(())
 }
 
@@ -861,36 +624,6 @@ fn plan_with_observer(
         }
     }
     if !initialized {
-        if plan.intent.verb == Verb::Start && !new_named_team {
-            if let Subject::Agent(id) = &plan.intent.subject {
-                let id = id.as_str().to_owned();
-                let source = plan.intent.role_file.clone().or_else(|| {
-                    let directory = selected.as_ref().map(|s| s.team_dir.as_path())
-                        .unwrap_or(&plan.scope.workspace);
-                    let path = directory.join("agents").join(format!("{id}.md"));
-                    path.is_file().then_some(path)
-                });
-                let default_provider = dynamic::default_provider(selected.as_ref().map(|s| &s.state));
-                let role = dynamic::initial_role(&id, source.as_deref(), &plan.intent.patch, &default_provider)?;
-                if let Some(source) = source {
-                    remember(&mut plan, &source)?;
-                }
-                let team = plan.intent.team.clone().unwrap_or_else(|| "current".into());
-                plan.scope.team = Some(team.clone());
-                let args = QuickStartArgs {
-                    workspace: plan.scope.workspace.clone(),
-                    agents_dir: plan.scope.workspace.join(".team").join(format!("adhoc-{id}")),
-                    name: None,
-                    team_id: Some(team),
-                    yes: false,
-                    json: true,
-                    detail: true,
-                    backend: None,
-                };
-                plan.steps.push(Step::CreateAgent { args, agent: id, role });
-                return Ok(plan);
-            }
-        }
         if plan.intent.verb != Verb::Start || !matches!(plan.intent.subject, Subject::Team { .. }) {
             return Err(refusal("no initialized team; use start --from TEAMDIR"));
         }
@@ -1090,7 +823,7 @@ fn plan_with_observer(
             if !admit_seat_preflight(&mut plan, &id, team, admission)? {
                 continue;
             }
-            add(&mut plan, &selected, &id, source)?;
+            start_new(&mut plan, &selected, &id, source)?;
             continue;
         };
         if let Some(source) = plan.intent.role_file.as_ref() {
@@ -1406,22 +1139,6 @@ pub(super) fn recheck(plan: &Plan, step: &Step, after_stop: bool) -> Result<(), 
             return Err(refusal("team context appeared since planning; inspect status before retrying start"));
         }
     }
-    if let Step::CreateAgent { args, .. } = step {
-        // A fresh workspace has no selectable team yet. The original quick-start
-        // transaction owns caller admission and the first current-team commit.
-        if !crate::state::persist::runtime_state_path(&args.workspace).exists() {
-            return Ok(());
-        }
-        let selected = resolve_active_team_readonly(
-            &args.workspace, args.team_id.as_deref(), SelectorMode::RuntimeOnly,
-        )?;
-        if crate::lifecycle::launch::surface_has_runtime_team(&selected.state, &selected.team_key) {
-            return Err(refusal("team initialized since planning; retry the agent start"));
-        }
-        return checked(crate::lifecycle::launch::ensure_owner_allowed_for_state(
-            &selected.state, step.agent().map(AgentId::new).as_ref(),
-        ));
-    }
     if let Step::CreateTeam(args) = step {
         let role_dir = args.agents_dir.join("agents");
         let current: BTreeSet<_> = std::fs::read_dir(&role_dir)?
@@ -1471,7 +1188,7 @@ pub(super) fn recheck(plan: &Plan, step: &Step, after_stop: bool) -> Result<(), 
     };
     for id in targets {
         let row = selected.state.get("agents").and_then(|a| a.get(id));
-        if matches!(step, Step::AddAgent(_)) || (matches!(step, Step::UnifiedStart { .. }) && !plan.expected.contains_key(id)) {
+        if matches!(step, Step::UnifiedStart { .. }) && !plan.expected.contains_key(id) {
             if row.is_some() {
                 return Err(refusal("agent was registered after planning"));
             }

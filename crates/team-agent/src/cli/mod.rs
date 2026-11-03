@@ -139,9 +139,8 @@ mod hermetic_test_support;
 /// `cmd_inbox` 委派的只读投影面。返回 serde `Value`(稳定 JSON 形状由 status lane 拥有)。
 pub mod status_port;
 
-/// PLACEHOLDER → step13 lifecycle(`runtime.{quick_start,start_agent,add_agent,fork_agent,
-/// remove_agent,start_agent,stop_agent,reset_agent,restart,shutdown,start_leader}`)。
-/// `quick_start.py` 物理在本子系统但实现属 step 13(card)。本层只声明委派面。
+/// Shared team-creation, stop, restart, and explicit maintenance ports.
+/// Agent creation/adoption/wake is owned by lifecycle::seat_start.
 pub mod lifecycle_port {
     use super::*;
     use crate::model::enums::Provider;
@@ -3545,96 +3544,6 @@ pub mod lifecycle_port {
         }
     }
     ///
-    /// `runtime.start_agent`(`cmd_start_agent`)。
-    pub fn start_agent(
-        workspace: &Path,
-        agent: &str,
-        force: bool,
-        allow_fresh: bool,
-        team: Option<&str>,
-        role_config: &crate::lifecycle::role_config::RoleConfigPatch,
-    ) -> Result<Value, CliError> {
-        #[cfg(unix)]
-        if let Some(receipt) = crate::contract_runtime::commands::start_agent(workspace, team, agent, role_config)? {
-            return Ok(receipt);
-        }
-        #[cfg(unix)]
-        {
-            crate::contract_runtime::framework::require_legacy_lifecycle(
-                workspace,
-                team,
-                Some(agent),
-                "start-agent",
-            )?;
-            // Only an explicit override can move this legacy seat onto a leaf.
-            // An omitted provider keeps the existing role's provider; it is not
-            // a new role defaulting to `pi`.
-            if let Some(provider) = role_config.provider.as_deref() {
-                crate::contract_runtime::framework::require_legacy_role(None, Some(provider))?;
-            }
-        }
-        let _ = force; // Never grants authority to stop an already-running seat.
-        let agent_id = crate::model::ids::AgentId::new(agent);
-        match crate::lifecycle::role_config::start_agent_from_role(
-            workspace,
-            &agent_id,
-            role_config,
-            allow_fresh,
-            team,
-        ) {
-            Ok(crate::lifecycle::StartAgentOutcome::Running {
-                env,
-                start_mode,
-                target,
-                session_id,
-                new_session_id,
-                rollout_path,
-                startup_receipt,
-            }) => Ok(agent_action_value(
-                agent,
-                workspace,
-                team,
-                json!({
-                    "ok": true,
-                    "agent_id": env.agent_id.as_str(),
-                    "status": "running",
-                    "start_mode": start_mode,
-                    "target": target,
-                    "session_id": session_id.as_ref().map(|id| id.as_str()),
-                    "new_session_id": new_session_id.as_ref().map(|id| id.as_str()),
-                    "startup_receipt": startup_receipt,
-                    "rollout_path": rollout_path
-                        .as_ref()
-                        .map(|path| path.as_path().to_string_lossy().to_string()),
-                    "coordinator_started": env.coordinator_started,
-                    "state_file": env.state_file.to_string_lossy(),
-                }),
-            )),
-            Ok(crate::lifecycle::StartAgentOutcome::Noop { env, target }) => {
-                Ok(agent_action_value(
-                    agent,
-                    workspace,
-                    team,
-                    json!({
-                        "ok": true,
-                        "agent_id": env.agent_id.as_str(),
-                        "status": "already_running",
-                        "target": target,
-                        "coordinator_started": env.coordinator_started,
-                        "state_file": env.state_file.to_string_lossy(),
-                    }),
-                ))
-            }
-            Ok(crate::lifecycle::StartAgentOutcome::Paused { agent_id }) => Ok(json!({
-                "ok": false,
-                "agent_id": agent_id.as_str(),
-                "status": "paused",
-                "reason": "agent_paused",
-            })),
-            Err(e) => Ok(error_value(e)),
-        }
-    }
-    ///
     /// `runtime.stop_agent`(`cmd_stop_agent`)。
     pub fn stop_agent(
         workspace: &Path,
@@ -3712,73 +3621,6 @@ pub mod lifecycle_port {
             Err(e) => Ok(error_value(e)),
         }
     }
-    ///
-    /// `runtime.add_agent`(`cmd_add_agent`;`--role-file` 必需)。
-    pub fn add_agent(
-        workspace: &Path,
-        agent: &str,
-        role_file: &str,
-        team: Option<&str>,
-        force: bool,
-        role_config: &crate::lifecycle::role_config::RoleConfigPatch,
-    ) -> Result<Value, CliError> {
-        let agent_id = crate::model::ids::AgentId::new(agent);
-        let source = (!role_file.is_empty()).then(|| Path::new(role_file));
-        // A contract role is added by the same role transaction; its seat then
-        // starts in the native framework (lifecycle::launch::add_agent).
-        #[cfg(unix)]
-        if !crate::contract_runtime::framework::declares_contract(
-            source,
-            role_config.provider.as_deref(),
-        ) {
-            crate::contract_runtime::framework::require_legacy_lifecycle(
-                workspace,
-                team,
-                Some(agent),
-                "add-agent",
-            )?;
-        }
-        match crate::lifecycle::role_config::add_agent_from_role(
-            workspace,
-            &agent_id,
-            source,
-            role_config,
-            force,
-            team,
-        ) {
-            Ok(report) => Ok(agent_action_value(
-                agent,
-                workspace,
-                team,
-                json!({
-                    "ok": true,
-                    "agent_id": report.env.agent_id.as_str(),
-                    "status": "running",
-                    "start_mode": report.start_mode,
-                    "role_file": report.role_file.to_string_lossy(),
-                    "coordinator_started": report.env.coordinator_started,
-                    "state_file": report.env.state_file.to_string_lossy(),
-                }),
-            )),
-            Err(e) => Ok(error_value(e)),
-        }
-    }
-    fn agent_action_value(
-        agent: &str,
-        workspace: &Path,
-        team: Option<&str>,
-        mut value: Value,
-    ) -> Value {
-        if value.get("ok").and_then(Value::as_bool) == Some(true) {
-            if let Some(object) = value.as_object_mut() {
-                if let Some(command) = super::adapters::send_command(agent, workspace, team) {
-                    object.insert("send_commands".to_string(), json!([command]));
-                }
-            }
-        }
-        value
-    }
-
     ///
     /// `runtime.fork_agent`(`cmd_fork_agent`;`--as` 必需)。
     pub fn fork_agent(

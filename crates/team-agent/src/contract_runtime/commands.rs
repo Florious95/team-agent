@@ -17,7 +17,7 @@ use crate::model::ids::AgentId;
 use crate::state::repository::{StateRepository, StateWriteIntent};
 use crate::state::selector::{resolve_active_team_readonly, SelectedTeam, SelectorMode};
 
-use super::{backend::{self, Backend, BackendError}, config, framework, registry};
+use super::{backend::{self, Backend, BackendError}, framework, registry};
 
 fn error(error: impl std::fmt::Display) -> CliError {
     CliError::Runtime(error.to_string())
@@ -116,68 +116,6 @@ fn checked_projection(
 ) -> Result<Value, CliError> {
     check_record(receipt)?;
     project()
-}
-
-pub fn start_agent(
-    workspace: &Path,
-    team: Option<&str>,
-    agent: &str,
-    patch: &crate::lifecycle::role_config::RoleConfigPatch,
-) -> Result<Option<Value>, CliError> {
-    with_agent(workspace, team, agent, "start-agent", |selected, id| {
-        let args = crate::cli::QuickStartArgs {
-            workspace: selected.run_workspace.clone(), agents_dir: selected.team_dir.clone(),
-            name: None, team_id: Some(selected.team_key.clone()), yes: false, json: false,
-            detail: false, backend: Some("tmux".into()),
-        };
-        // Contract configuration, not a stale legacy dynamic_role_file, is the
-        // authoritative source. Never patch an unrelated external role file.
-        let original = config::read_seat(&args, agent).map_err(error)?.ok_or(BackendError::Metadata).map_err(error)?;
-        let source = original.roles.iter().find(|role| &role.id == id)
-            .ok_or(BackendError::Metadata).map_err(error)?.source.clone();
-        let previous = std::fs::read_to_string(&source).map_err(error)?;
-        let next = crate::lifecycle::role_config::patched_role(&previous, &AgentId::new(agent), patch, false).map_err(error)?;
-        let config = config::read_team_with_role_override(&args, &source, &next, agent).map_err(error)?.ok_or(BackendError::Metadata).map_err(error)?;
-        let role = config.roles.iter().find(|role| &role.id == id).ok_or(BackendError::Metadata).map_err(error)?;
-        let row = selected.state.get("agents").and_then(|agents| agents.get(agent)).ok_or(BackendError::Metadata).map_err(error)?;
-        if !registry::same_provider(row.get("provider").and_then(Value::as_str).unwrap_or(""), role.provider.as_str()) {
-            return Err(error("provider change requires a new seat identity"));
-        }
-        if role.paused {
-            return Ok(json!({"ok":false,"agent_id":agent,"status":"paused","reason":"agent_paused"}));
-        }
-        let unstarted = framework::is_paused_unstarted(row);
-        if unstarted {
-            // Full pure team admission precedes native allocation or role writes.
-            backend::preflight(&config).map_err(error)?;
-        } else if backend::preflight_start_role(&selected.run_workspace, &selected.team_key, role).map_err(error)? {
-            backend::preflight(&config).map_err(error)?;
-        }
-        let before = if unstarted { None } else {
-            let backend = Backend::open_readonly(&selected.run_workspace, &selected.team_key).map_err(error)?;
-            // A retired generation is history, not a session this start resumes.
-            match backend.store.creation_receipt(id, None).map_err(error)? {
-                Some(record) if backend.store.retired(&record.target.identity).map_err(error)? => None,
-                other => other,
-            }
-        };
-        crate::lifecycle::role_config::commit_contract_role(&source, &previous, &next).map_err(error)?;
-        let receipt = backend::start(&selected.run_workspace, &selected.team_key, role, &config.members).map_err(error)?.1;
-        // An uncertain operation never rolls the authoritative native store back
-        // to the old generation. The receipt remains available for recovery.
-        let projection = checked_projection(&receipt, || publish_at(&selected.run_workspace, &selected.team_key, id, true))?;
-        Ok(json!({"ok":true,"agent_id":agent,"status":"running","runtime":"contract",
-            "start_mode":match before {
-                None => "fresh",
-                Some(ref original) if original.outcome == Outcome::Compensated => "fresh",
-                Some(ref original) if original.id == receipt.id && original.outcome != Outcome::Committed => "receipt_completed",
-                Some(ref original) if original.id == receipt.id => "reused",
-                Some(_) if receipt.native_launch == Some(Operation::Fresh) => "fresh",
-                Some(_) => "resumed",
-            }, "native_launch":receipt.native_launch, "operation":receipt.id,
-            "session_id":projection.get("session_id"),"generation":projection.get("generation"),
-            "session_observation":projection.get("session_observation"),"warning":projection.get("session_warning")}))
-    })
 }
 
 pub(crate) struct NativeRestartResult {

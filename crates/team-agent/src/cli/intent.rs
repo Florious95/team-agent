@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 mod runtime;
+#[cfg(test)]
 mod dynamic;
 #[cfg(test)]
 mod tests;
@@ -65,15 +66,7 @@ pub(super) struct ResolvedScope {
     workspace: PathBuf,
     team: Option<String>,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum Observation {
-    Live,
-    StoppedVerified,
-    Unstarted,
-    NativeReconcile,
-    Unknown,
-}
+pub(super) use crate::lifecycle::seat_observation::SeatObservation as Observation;
 #[derive(Clone, Debug)]
 pub(super) enum Step {
     RestoreSpec {
@@ -82,10 +75,8 @@ pub(super) enum Step {
         compiled: crate::model::yaml::Value,
     },
     CreateTeam(QuickStartArgs),
-    CreateAgent { args: QuickStartArgs, agent: String, role: String },
     StartAgent(StartAgentArgs),
     UnifiedStart { request: crate::lifecycle::seat_start::StartRequest, description: crate::lifecycle::seat_start::StartDescription },
-    AddAgent(AddAgentArgs),
     StopAgent(StopAgentArgs),
     RestartTeam(RestartArgs),
     Shutdown(ShutdownArgs),
@@ -95,10 +86,8 @@ impl Step {
         match self {
             Self::RestoreSpec { .. } => "restore_runtime_spec",
             Self::CreateTeam(_) => "quick_start",
-            Self::CreateAgent { .. } => "create_agent",
             Self::StartAgent(_) => "start_agent",
             Self::UnifiedStart { .. } => "start",
-            Self::AddAgent(_) => "add_agent",
             Self::StopAgent(_) => "stop_agent",
             Self::RestartTeam(_) => "restart_team",
             Self::Shutdown(_) => "shutdown",
@@ -106,10 +95,8 @@ impl Step {
     }
     fn agent(&self) -> Option<&str> {
         match self {
-            Self::CreateAgent { agent, .. } => Some(agent),
             Self::StartAgent(a) => Some(&a.agent),
             Self::UnifiedStart { request, .. } => Some(request.agent.as_str()),
-            Self::AddAgent(a) => Some(&a.agent),
             Self::StopAgent(a) => Some(&a.agent),
             _ => None,
         }
@@ -132,10 +119,8 @@ impl Step {
                 ))
             }
             Self::CreateTeam(a) => cmd_quick_start(a),
-            Self::CreateAgent { args, agent, role } => dynamic::execute(args, agent, role),
             Self::StartAgent(a) => cmd_start_agent(a),
             Self::UnifiedStart { request, .. } => cmd_start_request(request, true),
-            Self::AddAgent(a) => cmd_add_agent(a),
             Self::StopAgent(a) => cmd_stop_agent(a),
             Self::RestartTeam(a) => cmd_restart(a),
             Self::Shutdown(a) => cmd_shutdown(a),
@@ -248,7 +233,7 @@ fn options(tokens: &[String]) -> (Vec<String>, BTreeMap<String, String>) {
 }
 
 pub(super) fn canonical_start_command(command: &str) -> &str {
-    match command { "add-agent" | "start-agent" => "start", other => other }
+    match command { "add-agent" | "start-agent" | "quick-start" => "start", other => other }
 }
 
 /// None deliberately leaves frozen legacy parsing, defaults and output untouched.
@@ -257,6 +242,29 @@ pub(super) fn run(
     args: &[String],
     cwd: &Path,
 ) -> Option<Result<CmdResult, CliError>> {
+    let translated;
+    let args = if command == "quick-start" {
+        let checked = match super::arguments::parse(command, args) {
+            Ok(checked) => checked,
+            Err(error) => return Some(Err(error)),
+        };
+        if checked.help { return Some(Ok(CmdResult::human(help("start")))); }
+        let (positions, flags) = options(&checked.tokens);
+        if let Some(flag) = ["--name", "--yes", "--backend"].into_iter().find(|flag| flags.contains_key(*flag)) {
+            return Some(Err(usage(format!(
+                "{flag} is not part of unified start; use team-agent start --from <dir> with the desired role declarations"
+            ))));
+        }
+        let mut tokens = Vec::new();
+        if let Some(source) = positions.first() { tokens.push(format!("--from={source}")); }
+        for (flag, value) in flags {
+            if flag == "--detail" { continue; } // Canonical receipts already include step details.
+            let flag = if flag == "--team-id" { "--team" } else { &flag };
+            tokens.push(if value.is_empty() { flag.into() } else { format!("{flag}={value}") });
+        }
+        translated = tokens;
+        translated.as_slice()
+    } else { args };
     let command = canonical_start_command(command);
     if !matches!(command, "start" | "stop" | "restart" | "team" | "agent") {
         return None;
@@ -675,7 +683,7 @@ fn execute_plan(
                 })
                 .map(str::to_string);
         }
-        if matches!(step, Step::CreateTeam(_) | Step::CreateAgent { .. }) {
+        if matches!(step, Step::CreateTeam(_)) {
             if let Some(team) = receipt
                 .get("team")
                 .and_then(Value::as_str)

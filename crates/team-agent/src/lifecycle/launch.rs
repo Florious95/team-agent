@@ -422,10 +422,10 @@ pub use readiness::{
 
 mod add_agent;
 pub(super) use add_agent::*;
-pub use add_agent::{add_agent, add_agent_force};
+pub use add_agent::add_agent;
 pub(crate) use add_agent::{
     add_agent_with_transport, add_agent_with_transport_at_paths_locked,
-    add_agent_with_transport_force, add_forked_agent_locked, force_recreate_with_transport_locked,
+    add_forked_agent_locked,
 };
 
 pub(crate) mod add_agent_state;

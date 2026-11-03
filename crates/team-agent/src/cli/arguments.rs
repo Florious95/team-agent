@@ -55,6 +55,7 @@ fn schema(command: &str) -> Option<Schema> {
         ),
         "quick-start" => (
             &[
+                ("--dry-run", Switch),
                 ("--name", Token),
                 ("--team-id", Token),
                 ("--yes", Switch),
