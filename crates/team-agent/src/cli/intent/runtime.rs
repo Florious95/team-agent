@@ -2,6 +2,7 @@
 use super::*;
 use crate::model::yaml::{self, Value as Yaml};
 use crate::state::selector::{resolve_active_team_readonly, SelectedTeam, SelectorMode};
+use crate::transport::Transport;
 #[cfg(test)]
 use crate::lifecycle::seat_observation::{argv0_names, launched_as_provider, surface_liveness};
 #[cfg(all(test, unix))]

@@ -712,7 +712,15 @@ fn resolve_path(path: &Path) -> PathBuf {
 
 fn emit_parser_usage(command: &str, args: &[String], error: &CliError) -> ExitCode {
     let json_output = super::arguments::has_flag(command, args, "--json");
-    let command = super::intent::canonical_start_command(command);
+    // Usage guidance never sends a user back to a retired verb.
+    let command = match super::intent::canonical_start_command(command) {
+        "takeover" | "attach-leader" => "claim-leader",
+        "remove-agent" => "agent remove",
+        "reset-agent" => "agent reset",
+        "clone-agent" => "agent clone",
+        "fork-agent" => "agent fork",
+        other => other,
+    };
     if json_output {
         let mut payload = error.to_payload(Path::new(""), command);
         payload.action = format!("Use team-agent {command} --help to correct the command arguments.");
