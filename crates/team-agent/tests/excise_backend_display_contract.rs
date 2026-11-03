@@ -76,21 +76,20 @@ fn R2_team_md_display_backend_is_ignored_and_tmux_stays_silent() {
         let output = env.run_cli(
             &workspace,
             &[
-                "quick-start",
+                "start",
+                "--from",
                 &workspace_arg,
                 "--workspace",
                 &workspace_arg,
-                "--team-id",
+                "--team",
                 TEAM,
-                "--yes",
-                "--backend",
-                "tmux",
                 "--json",
             ],
         );
-        let body = json_stdout(&output, "R2 quick-start");
+        // Unified start replaces the retired quick-start bridge (--yes/--backend are refused).
+        let body = json_stdout(&output, "R2 start --from");
         assert_eq!(
-            body["worker_readiness"]["all_workers_spawned"],
+            body["ok"],
             json!(true),
             "legacy display_backend={value} must still reach the tmux worker launch: body={body} stderr={}",
             stderr(&output)
@@ -175,21 +174,19 @@ fn R4_cleanup_matrix_mock() {
     let launch = env.run_cli(
         &workspace,
         &[
-            "quick-start",
+            "start",
+            "--from",
             &workspace_arg,
             "--workspace",
             &workspace_arg,
-            "--team-id",
+            "--team",
             TEAM,
-            "--yes",
-            "--backend",
-            "tmux",
             "--json",
         ],
     );
-    let launch_body = json_stdout(&launch, "R4 fixture quick-start");
+    let launch_body = json_stdout(&launch, "R4 fixture start --from");
     assert!(
-        launch_body["worker_readiness"]["all_workers_spawned"] == json!(true),
+        launch_body["ok"] == json!(true),
         "R4 fixture must create a real owned tmux session: {launch_body}"
     );
     let state_path = workspace.join(".team/runtime/state.json");
