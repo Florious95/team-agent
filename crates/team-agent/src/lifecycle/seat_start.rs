@@ -1683,6 +1683,12 @@ mod tests {
     #[test]
     fn nonresumable_legacy_seat_reports_fresh_even_with_context_markers() {
         let temp = crate::lifecycle::tests::TestWorkspace::new();
+        std::fs::create_dir(temp.path().join("agents")).unwrap();
+        std::fs::write(
+            temp.path().join("agents/reviewer.md"),
+            "---\nprovider: fake\n---\nReview.\n",
+        )
+        .unwrap();
         let mut request = request(temp.path());
         request.patch.provider = Some("fake".into());
         let selected = SelectedTeam {
@@ -1710,13 +1716,24 @@ mod tests {
         let mut invalid = selected;
         invalid.state["agents"]["reviewer"]["task_prompt_delivered"] = json!("unknown");
         assert!(continuation_admission(&request, Some(&invalid), &declaration).is_err());
-        assert!(std::fs::read_dir(temp.path()).unwrap().next().is_none());
+        let entries = |dir: &Path| std::fs::read_dir(dir).unwrap().count();
+        assert_eq!(
+            (entries(temp.path()), entries(&temp.path().join("agents"))),
+            (1, 1),
+            "planning writes nothing"
+        );
     }
 
     #[cfg(unix)]
     #[test]
     fn unmaterialized_native_seat_reports_fresh_without_reserving_authority() {
         let temp = crate::lifecycle::tests::TestWorkspace::new();
+        std::fs::create_dir(temp.path().join("agents")).unwrap();
+        std::fs::write(
+            temp.path().join("agents/reviewer.md"),
+            "---\nprovider: cursor\nmodel: composer-2.5\n---\nReview.\n",
+        )
+        .unwrap();
         let mut request = request(temp.path());
         request.patch.provider = Some("cursor".into());
         request.patch.model = Some("composer-2.5".into());
@@ -1728,11 +1745,20 @@ mod tests {
             spec_path: None,
             state: json!({"agents":{"reviewer":{"provider":"cursor","status":"stopped","explicit_stop":true}}}),
         };
+        // Host-independent: native CLI preflight is not part of the receipt decision.
+        let declaration = resolve(&request, Some(&selected)).unwrap();
         assert_eq!(
-            describe(&request, Some(&selected), false).unwrap().op,
+            describe_resolved(&request, Some(&selected), false, &declaration)
+                .unwrap()
+                .op,
             "fresh"
         );
-        assert!(std::fs::read_dir(temp.path()).unwrap().next().is_none());
+        let entries = |dir: &Path| std::fs::read_dir(dir).unwrap().count();
+        assert_eq!(
+            (entries(temp.path()), entries(&temp.path().join("agents"))),
+            (1, 1),
+            "planning writes nothing"
+        );
     }
 
     #[test]
