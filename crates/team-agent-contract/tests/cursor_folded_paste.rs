@@ -477,9 +477,13 @@ fn footer_and_old_transcript_tokens_never_authorize_an_expanded_paste() {
     assert_unseen(&frame);
     frame.text = screen(&token(&frame), "\n    unrelated draft");
     assert_unseen(&frame);
-    frame.text = screen("", &format!("\n    {}", token(&frame)))
-        .replace("Cursor Agent\nv2026.10.01-e373342\n", "");
-    assert_unseen(&frame); // Canonical admission is not the legacy read-only port.
+    // Resumed history may scroll the banner away: the current composer token is
+    // judged by the composer/footer grammar exactly as it is with the banner.
+    let with_banner = screen("", &format!("\n    {}", token(&frame)));
+    frame.text = with_banner.clone();
+    let expected = adapter().interpret(&frame).paste_latch;
+    frame.text = with_banner.replace("Cursor Agent\nv2026.10.01-e373342\n", "");
+    assert_eq!(adapter().interpret(&frame).paste_latch, expected);
 }
 
 #[test]

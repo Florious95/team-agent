@@ -648,14 +648,15 @@ pub(super) fn update_runtime_state(
     workspace: &Path,
     update: impl FnOnce(&Value) -> Result<Value, StateError>,
 ) -> Result<Value, StateError> {
-    update_runtime_state_with_lifecycle_target(workspace, None, update)
+    update_runtime_state_with_lifecycle_target(workspace, &[], None, update)
 }
 
 /// Keep bounded StartAgent's exact team/seat authority inside the same state-save
 /// transaction. Ordinary deltas retain every existing stale-writer guard.
 pub(super) fn update_runtime_state_with_lifecycle_target(
     workspace: &Path,
-    target: Option<(&str, &str)>,
+    targets: &[(&str, &str)],
+    skip_capture_backfill: Option<(&str, &[&str])>,
     update: impl FnOnce(&Value) -> Result<Value, StateError>,
 ) -> Result<Value, StateError> {
     let path = runtime_state_path(workspace);
@@ -670,11 +671,14 @@ pub(super) fn update_runtime_state_with_lifecycle_target(
     migrate_state_identity(&mut latest, &SystemEnv, workspace)?;
     let _ = migrate_active_team_key(&mut latest);
     let mut committed = update(&latest)?;
-    let topology_updates = target.into_iter()
-        .map(|(team, agent)| (team.to_owned(), agent.to_owned())).collect();
+    let topology_updates = targets.iter()
+        .map(|(team, agent)| ((*team).to_owned(), (*agent).to_owned())).collect();
+    let skip_agents: BTreeSet<String> = skip_capture_backfill
+        .map(|(_, agents)| agents.iter().map(|agent| (*agent).to_owned()).collect())
+        .unwrap_or_default();
     apply_persist_merge_contract(
-        &mut committed, &latest, &BTreeSet::new(), None, &BTreeSet::new(),
-        &topology_updates, &BTreeSet::new(), None, None, None,
+        &mut committed, &latest, &BTreeSet::new(), skip_capture_backfill.map(|(team, _)| team),
+        &skip_agents, &topology_updates, &BTreeSet::new(), None, None, None,
     )?;
     migrate_state_identity(&mut committed, &SystemEnv, workspace)?;
     crate::state::ownership::strip_top_level_ownership_if_canonical_present(&mut committed);

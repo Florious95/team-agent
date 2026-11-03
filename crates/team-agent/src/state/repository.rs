@@ -160,21 +160,33 @@ impl<'a> StateRepository<'a> {
     {
         #[cfg(test)]
         test_support::before_commit();
-        let lifecycle_target = match &intent {
-            StateWriteIntent::StartAgent { team_key, agent_id } => Some((*team_key, *agent_id)),
-            _ => None,
-        };
+        let (targets, skip_capture_backfill): (Vec<(&str, &str)>, Option<(&str, &[&str])>) =
+            match &intent {
+                StateWriteIntent::StartAgent { team_key, agent_id } => {
+                    (vec![(*team_key, *agent_id)], None)
+                }
+                StateWriteIntent::RestartTeam {
+                    team_key,
+                    topology_authority_agent_ids,
+                    skip_capture_backfill_agent_ids,
+                } => (
+                    topology_authority_agent_ids.iter().map(|agent| (*team_key, *agent)).collect(),
+                    Some((*team_key, *skip_capture_backfill_agent_ids)),
+                ),
+                _ => (Vec::new(), None),
+            };
         let team_key = match intent {
             StateWriteIntent::ResultCollection { owner_team_id } => owner_team_id,
             StateWriteIntent::ForkAgent { team_key, .. }
-            | StateWriteIntent::StartAgent { team_key, .. } => Some(team_key),
+            | StateWriteIntent::StartAgent { team_key, .. }
+            | StateWriteIntent::RestartTeam { team_key, .. } => Some(team_key),
             _ => {
                 return Err(StateError::SaveFailed(
                     "intent does not accept a bounded Team delta".into(),
                 ))
             }
         };
-        let committed = super::persist::update_runtime_state_with_lifecycle_target(self.workspace, lifecycle_target, |latest| {
+        let committed = super::persist::update_runtime_state_with_lifecycle_target(self.workspace, &targets, skip_capture_backfill, |latest| {
             let mut selected = bounded_team_view(latest, team_key)?;
             update(&mut selected);
             Ok(match team_key {

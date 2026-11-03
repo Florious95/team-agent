@@ -237,9 +237,8 @@ fn malformed_stale_birth_ancestry_and_image_receipts_refuse() {
     let mut v = original.clone();
     v["server"]["identity"]["executable"] = json!("/not-authorized");
     changed.push(v);
-    let mut v = original.clone();
-    v["server"]["image"]["inode"] = json!(0);
-    changed.push(v);
+    // Image provenance is deliberately not admission evidence: a live helper keeps its
+    // PID/birth/parent across an atomic binary upgrade (host::process::sample_process).
     let mut v = original.clone();
     v["ancestors"][0]["birth"] = json!("reused-parent");
     changed.push(v);

@@ -1617,7 +1617,13 @@ mod tests {
             .load_team(Some("current"))
             .unwrap();
         let row = &after["agents"]["reviewer"];
-        assert_eq!(row["session_history"][0], captured);
+        // Loading normalizes absent session fields to null; compare everything else exactly.
+        let non_null = |value: &Value| {
+            let mut value = value.clone();
+            value.as_object_mut().unwrap().retain(|_, field| !field.is_null());
+            value
+        };
+        assert_eq!(non_null(&row["session_history"][0]), captured);
         for key in [
             "session_id",
             "rollout_path",
@@ -1628,11 +1634,11 @@ mod tests {
             "task_prompt_delivered",
         ] {
             assert!(
-                row.get(key).is_none(),
-                "{key} must not leak into the new incarnation"
+                row.get(key).is_none_or(Value::is_null),
+                "{key} must not leak into the new incarnation: {row}"
             );
         }
-        assert_eq!(after["agents"]["sibling"], state["agents"]["sibling"]);
+        assert_eq!(non_null(&after["agents"]["sibling"]), state["agents"]["sibling"]);
         assert_eq!(row["explicit_stop"], true);
     }
 
