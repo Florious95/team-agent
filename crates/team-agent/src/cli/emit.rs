@@ -1530,7 +1530,14 @@ fn restart_args(args: &[String], cwd: &Path) -> Result<RestartArgs, CliError> {
 
 // Keep strict role CLI parsing separate from the legacy shared parser.
 pub(super) fn intent_source_workspace(source: &Path, cwd: &Path) -> Result<PathBuf, CliError> {
-    quick_start_args(&[source.to_string_lossy().into_owned()], cwd).map(|args| args.workspace)
+    let source = resolve_cli_path(cwd, source);
+    // Preserve source-scope inference without the retired quick-start parser.
+    Ok(source.ancestors()
+        .find(|ancestor| ancestor.file_name().and_then(|name| name.to_str()) == Some(".team"))
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .or_else(|| source.join("TEAM.md").is_file().then(|| source.clone()))
+        .unwrap_or_else(|| cwd.to_path_buf()))
 }
 
 pub(super) fn intent_role_patch(args: &[String]) -> Result<crate::lifecycle::role_config::RoleConfigPatch, CliError> {
