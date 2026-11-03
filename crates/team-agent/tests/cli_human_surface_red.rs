@@ -477,13 +477,39 @@ macro_rules! human_properties {
 }
 human_properties! {
     start => "start", stop => "stop", team => "team", agent => "agent",
-    quick_start => "quick-start", send => "send", status => "status", models => "models",
-    restart => "restart", shutdown => "shutdown", add_agent => "add-agent", start_agent => "start-agent",
-    stop_agent => "stop-agent", reset_agent => "reset-agent", clone_agent => "clone-agent", fork_agent => "fork-agent",
-    remove_agent => "remove-agent", doctor => "doctor", approvals => "approvals", leaders => "leaders",
+    send => "send", status => "status", models => "models",
+    restart => "restart", shutdown => "shutdown", stop_agent => "stop-agent",
+    doctor => "doctor", approvals => "approvals", leaders => "leaders",
     route => "route", leader_prompt => "leader-prompt", profile => "profile", install_skill => "install-skill",
-    claim_leader => "claim-leader", takeover => "takeover", attach_leader => "attach-leader",
+    claim_leader => "claim-leader",
     pi => "pi", codex => "codex", claude => "claude", copilot => "copilot", grok => "grok", kiro => "kiro", inbox => "inbox",
+}
+
+/// A retired verb is an alias or a refusal; its help and usage guidance name the
+/// canonical successor and never send the user back to the retired verb itself.
+fn retired_alias(command: &str) {
+    let env = HermeticTestEnv::enter(command);
+    let cwd = env.workspace("empty");
+    let before = snapshot(env.root());
+    for args in [vec![command, "--help"], vec![command, "--no-such-option"]] {
+        let out = env.run_cli(&cwd, &args);
+        let output = text(&out);
+        assert!(!output.contains(&format!("team-agent {command} ")) && !output.contains(&format!("team-agent {command}\n")),
+            "{args:?} sends the user back to the retired verb:\n{output}");
+        assert!(output.contains("team-agent "), "{args:?} names no canonical command:\n{output}");
+    }
+    assert_eq!(snapshot(env.root()), before, "retired help had effects: {command}");
+}
+macro_rules! retired_alias_properties {
+    ($($id:ident => $command:literal),+ $(,)?) => {$ (
+        #[test] #[serial(env)] fn $id() { retired_alias($command); }
+    )+};
+}
+retired_alias_properties! {
+    retired_quick_start => "quick-start", retired_add_agent => "add-agent",
+    retired_start_agent => "start-agent", retired_reset_agent => "reset-agent",
+    retired_clone_agent => "clone-agent", retired_fork_agent => "fork-agent", retired_remove_agent => "remove-agent",
+    retired_takeover => "takeover", retired_attach_leader => "attach-leader",
 }
 macro_rules! hidden_properties {
     ($($id:ident => $command:literal),+ $(,)?) => {$ (
@@ -678,9 +704,11 @@ fn retired_start_overrides_refuse_before_effects_with_canonical_guidance() {
 
 
 #[test]
+#[serial(env)]
 fn doctor_help_points_to_public_doctor_command() {
-    let case = Case::new("doctor-help");
-    let output = case.run_ta(&["doctor", "--help"]);
+    let env = HermeticTestEnv::enter("doctor-help");
+    let cwd = env.workspace("empty");
+    let output = env.run_cli(&cwd, &["doctor", "--help"]);
     let text = text(&output);
     assert!(output.status.success(), "doctor --help: {text}");
     assert!(

@@ -151,15 +151,12 @@ fn p4_attach_requires_explicit_nonempty_provider_but_keeps_declared_identity() {
 
 #[test]
 fn p5_start_force_refuses_and_guides_to_existing_stop_start_commands() {
-    let sandbox = Sandbox::new();
-    match start_agent_args(&strings(&["worker", "--force"]), &sandbox.0) {
-        Err(CliError::Usage(message)) => {
-            assert!(
-                message.contains("team-agent stop worker") && message.contains("team-agent start worker"),
-                "{message}"
-            );
-        }
-        _ => panic!("--force must not be accepted and then silently discarded"),
+    // The retired start-agent parser is excised; the canonical start grammar must
+    // still refuse --force instead of accepting and silently discarding it.
+    match super::super::arguments::parse("intent-start", &strings(&["worker", "--force"])) {
+        Err(CliError::Usage(message)) => assert!(message.contains("--force"), "{message}"),
+        Err(other) => panic!("--force must be a usage refusal: {other}"),
+        Ok(_) => panic!("--force must not be accepted and then silently discarded"),
     }
 }
 
@@ -285,7 +282,7 @@ fn payload_help_is_not_control_and_compatibility_flags_do_not_delete_literals() 
     )
     .unwrap();
     assert!(!checked.help);
-    let (_, patch) = role_agent_args(&checked.tokens, true).unwrap();
+    let (_, patch) = role_agent_args(&checked.tokens).unwrap();
     assert_eq!(patch.prompt.as_deref(), Some("--help"));
     let checked = super::super::arguments::parse(
         "send",

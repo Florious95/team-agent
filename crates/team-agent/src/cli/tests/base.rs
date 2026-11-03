@@ -507,18 +507,19 @@ fn cli_error_payload_tmux_conflict_quick_start_enrichment() {
         Some("tmux_session_name_conflict")
     );
     assert_eq!(payload.session_name.as_deref(), Some("my-team"));
-    // E8 (N38): quick-start 撞已有 runtime 引导到 restart(resume);
-    // context reset is only through restart --allow-fresh with explicit consent.
+    // Unified start: a conflict on the retired creation bridge resumes with the
+    // canonical `team-agent start` and creates another team via `start --from .`.
     assert_eq!(
             payload.action,
-            "Terminal session `my-team` already exists and may belong to your existing team. Resume with team-agent restart; use --allow-fresh only after explicitly accepting loss of saved context. To create another team, change the name in TEAM.md before quick-start. Do not shut down an existing team to bypass this refusal."
+            "Terminal session `my-team` already exists and may belong to your existing team. Resume with `team-agent start`. To create another team, change the name in TEAM.md before `team-agent start --from .`. Do not shut down an existing team to bypass this refusal."
         );
     let next = payload.next_actions.as_ref().unwrap();
     assert_eq!(next.len(), 2);
-    assert!(next[0].contains("team-agent restart"));
+    assert!(next[0].contains("team-agent start"));
     assert!(
-        next[1].contains("TEAM.md") && next[1].contains("name") && next[1].contains("quick-start")
+        next[1].contains("TEAM.md") && next[1].contains("name") && next[1].contains("team-agent start --from .")
     );
+    assert!(!payload.action.contains("quick-start") && next.iter().all(|line| !line.contains("quick-start")));
 }
 
 #[test]
