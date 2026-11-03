@@ -1776,9 +1776,11 @@ fn reset_agent_at_paths(
             let _ = stop; // silence unused on the refusal path
             return Err(LifecycleError::RequirementUnmet(format!(
                 "reset refused: old agent instance still live for {agent_id}\n\
-                 action: stop the worker manually with `team-agent stop-agent {agent_id} --team <team>` then retry reset, or kill the residual tmux panes [{ids}]\n\
+                 action: run `team-agent stop {agent_id} --workspace '{workspace}'{team_scope}`, inspect the owned residuals, then retry the authorized reset\n\
                  log_hint: see reset_agent.stop_not_proven event (old_pane_id={old}, old_pane_pid={pid}, remaining_panes=[{ids}])",
                 agent_id = agent_id.as_str(),
+                workspace = workspace.to_string_lossy().replace('\'', "'\\''"),
+                team_scope = team.map(|team| format!(" --team '{}'", team.replace('\'', "'\\''"))).unwrap_or_default(),
                 ids = remaining_pane_ids.join(", "),
                 old = old_pane_str,
                 pid = old_pid_val,

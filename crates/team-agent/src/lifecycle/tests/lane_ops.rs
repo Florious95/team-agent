@@ -679,8 +679,10 @@ fn issue391_force_readd_adopts_the_role_file_a_removed_seat_left_behind() {
 
     let refused = add(&same, false).unwrap_err().to_string();
     assert!(
-        refused.contains("role file already exists") && refused.contains("--force"),
-        "without --force the refusal names a real way out: {refused}"
+        refused.contains("role file already exists")
+            && refused.contains("--role-file")
+            && !refused.contains("--force"),
+        "the refusal must recommend explicit role-file adoption, not force: {refused}"
     );
     assert!(load()["teams"]["laneateam"]["agents"]
         .get("alpha")

@@ -424,7 +424,7 @@ pub fn remove_agent(
 ) -> Result<Option<Value>, CliError> {
     with_agent(workspace, team, agent, "remove-agent", |selected, id| {
         if !confirm {
-            return Ok(refused(agent, "confirm_required", "remove-agent requires --confirm", None, "rerun with --confirm"));
+            return Ok(refused(agent, "confirm_required", "agent remove requires --confirm", None, &format!("after confirming removal, rerun `team-agent agent remove {agent} --confirm`")));
         }
         let row = selected.state.get("agents").and_then(|agents| agents.get(agent))
             .ok_or(BackendError::Metadata).map_err(error)?;
@@ -438,13 +438,13 @@ pub fn remove_agent(
             match activity(&selected.run_workspace, &selected.team_key, id)? {
                 Activity::Stopped => {}
                 Activity::Working(evidence) => return Ok(refused(agent, "agent_working", REMOVE_WORKING,
-                    Some(evidence), "wait for the agent to finish, or stop it, then rerun remove-agent")),
+                    Some(evidence), &format!("wait for the agent to finish, or run `team-agent stop {agent}` before retrying the authorized removal"))),
                 Activity::Unverified(evidence) => return Ok(refused(agent, "agent_activity_unverified",
                     "agent activity could not be verified idle; stop the agent before removing it",
-                    Some(evidence), "stop the agent, then rerun remove-agent")),
+                    Some(evidence), &format!("run `team-agent stop {agent}` before retrying the authorized removal"))),
                 Activity::Idle if !force => return Ok(refused(agent, "force_required",
-                    "agent is running; remove-agent requires --force", None,
-                    "rerun with --force to stop and remove the running agent")),
+                    "agent is running; stop it before removal", None,
+                    &format!("run `team-agent stop {agent}` before retrying the authorized removal"))),
                 Activity::Idle | Activity::Exited => stopped = Some(stop_seat(selected, id)?),
             }
             // The native identity ends before the shared records: a failure
@@ -464,10 +464,10 @@ pub fn remove_agent(
 fn reset_guard(observed: Activity, agent: &str) -> Result<Activity, Value> {
     match observed {
         Activity::Working(evidence) => Err(refused(agent, "agent_working", RESET_WORKING,
-            Some(evidence), "wait for the agent to finish, or stop it, then rerun reset-agent")),
+            Some(evidence), &format!("wait for the agent to finish, or run `team-agent stop {agent}` before retrying `team-agent agent reset {agent} --discard-session` with explicit approval"))),
         Activity::Unverified(evidence) => Err(refused(agent, "agent_activity_unverified",
             "agent activity could not be verified idle; wait for completion or stop the agent before resetting session",
-            Some(evidence), "stop the agent, then rerun reset-agent")),
+            Some(evidence), &format!("run `team-agent stop {agent}` before retrying `team-agent agent reset {agent} --discard-session` with explicit approval"))),
         clear => Ok(clear),
     }
 }

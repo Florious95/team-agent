@@ -1112,7 +1112,7 @@ pub(crate) fn mark_worker_target_missing(
     recipient: &str,
     verification: Option<String>,
 ) -> Result<DeliveryOutcome, MessagingError> {
-    let action = format!("run team-agent start-agent {recipient} --allow-fresh");
+    let action = format!("run team-agent start {recipient}");
     store.mark(
         message_id,
         "queued_pane_missing",

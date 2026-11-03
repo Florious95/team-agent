@@ -4059,7 +4059,7 @@ pub mod lifecycle_port {
     /// E8 (N38): 把"错路常犯"的运行时错误指到正确出路(纯文案,无语义变更)。
     /// 匹配 [`LifecycleError`] 的人读消息子串(`agent {id} not found` /
     /// `agent id already exists` / `unknown worker agent id`),给出下一步命令。
-    fn error_next_action(message: &str) -> Option<&'static str> {
+    fn error_next_action(message: &str) -> Option<String> {
         // Missing spec/runtime is not an agent-id miss. Workspace paths often
         // contain "team-agent", so "not found"+"agent" must not win here.
         if message.contains("active team spec not found")
@@ -4067,34 +4067,26 @@ pub mod lifecycle_port {
         {
             return Some(
                 "no team spec or runtime was found in this workspace. \
-                 Run `team-agent quick-start <workspace>` for first launch, \
-                 or restart from a workspace that already contains `.team`.",
+                 Prepare TEAM.md and its role files, then run `team-agent start --from .` \
+                 in that directory, or select an existing team's workspace.".into(),
             );
         }
-        // start-agent 撞"agent {id} not found":start-agent 语义=启动 state 已有 agent;
-        // 想新增角色应走 add-agent。只在 RequirementUnmet detail 以 `agent ` 开头时匹配，
-        // 避免 profile 文案中的 `team-agent profile ... not found` 误命中。
-        let agent_not_found = message
-            .strip_prefix("agent start requirement unmet: ")
-            .is_some_and(|detail| detail.starts_with("agent ") && detail.contains(" not found"));
-        if agent_not_found {
-            return Some(
-                "start-agent only starts an agent that already exists in state. \
-                 To add a NEW role at runtime use: team-agent add-agent <id> --role-file <path>",
-            );
-        }
-        // add-agent / fork 撞"agent id already exists":id 已占用。
-        if message.contains("agent id already exists") {
-            return Some(
-                "that agent id is already in the team. \
-                 Use a different id, or start the existing one with: team-agent start-agent <id>",
-            );
+        // Match only a concrete seat error, not profile/session not-found messages.
+        let agent = message
+            .strip_prefix("agent start requirement unmet: agent ")
+            .and_then(|detail| detail.strip_suffix(" not found"))
+            .or_else(|| message.split_once("agent id already exists: ").map(|(_, id)| id));
+        if let Some(agent) = agent.filter(|id| !id.is_empty() && !id.starts_with('-')) {
+            return Some(format!(
+                "Start the selected agent with `team-agent start {}`; inspect status before retrying after a partial launch.",
+                shell_quote(agent)
+            ));
         }
         // stop/reset/fork 源撞"unknown worker agent id":拼写/团队选择错。
         if message.contains("unknown worker agent id") {
             return Some(
                 "no such worker agent in this team. \
-                 Run `team-agent status` to list agent ids (check --team if multiple teams)",
+                 Run `team-agent status` to list agent ids (check --team if multiple teams)".into(),
             );
         }
         None
@@ -4755,7 +4747,7 @@ pub mod lifecycle_port {
                 "status": "partial",
                 "reason": "restart_agent_failed",
                 "failed_agents": [{"agent_id": "worker", "error": "spawn failed"}],
-                "next_actions": ["reset-agent worker --discard-session"],
+                "next_actions": ["team-agent agent reset worker --discard-session"],
                 "attach_commands": [],
                 "coordinator": {"status": "running", "transport": "default"}
             });
@@ -4765,7 +4757,7 @@ pub mod lifecycle_port {
             assert_eq!(default["reason"], json!("restart_agent_failed"));
             assert_eq!(
                 default["next_actions"],
-                json!(["reset-agent worker --discard-session"])
+                json!(["team-agent agent reset worker --discard-session"])
             );
             assert!(default.get("coordinator").is_none());
             assert!(detail.get("coordinator").is_some());
@@ -5089,7 +5081,7 @@ pub mod lifecycle_port {
                         "phase": failure.phase,
                         "error": failure.error,
                         "action": format!(
-                            "inspect worker {} output, then reset that worker with `team-agent reset-agent {} --discard-session` or rerun `team-agent restart --allow-fresh`",
+                            "inspect worker {} output; with approval to discard its session use `team-agent agent reset {} --discard-session`, or permit legal fresh fallback with `team-agent restart --session auto`",
                             failure.agent_id,
                             failure.agent_id
                         ),
@@ -5135,7 +5127,7 @@ pub mod lifecycle_port {
                     "phase": failure.phase,
                     "error": failure.error,
                     "action": format!(
-                        "inspect worker {} output, then reset that worker with `team-agent reset-agent {} --discard-session` or rerun `team-agent restart --allow-fresh`",
+                        "inspect worker {} output; with approval to discard its session use `team-agent agent reset {} --discard-session`, or permit legal fresh fallback with `team-agent restart --session auto`",
                         failure.agent_id,
                         failure.agent_id
                     ),
@@ -5466,7 +5458,7 @@ pub mod lifecycle_port {
                 let repair_team = team
                     .filter(|team| !team.is_empty())
                     .unwrap_or(session_name.as_str());
-                let shutdown_scoped = format!("team-agent shutdown --team {repair_team}");
+                let shutdown_scoped = format!("team-agent stop --team {}", shell_quote(repair_team));
                 json!({
                     "ok": false,
                     "status": "refused_build_before_destroy",
@@ -5689,23 +5681,21 @@ pub mod lifecycle_port {
         use super::{error_next_action, error_value};
 
         #[test]
-        fn start_agent_not_found_points_to_add_agent() {
+        fn start_agent_not_found_points_to_canonical_start() {
             // LifecycleError::RequirementUnmet("agent {id} not found") 经 to_string():
             // "agent start requirement unmet: agent foo not found".
             let msg = "agent start requirement unmet: agent foo not found";
             let na = error_next_action(msg).expect("not-found must carry next_action");
-            assert!(na.contains("add-agent"), "must steer to add-agent: {na}");
-            assert!(
-                na.contains("--role-file"),
-                "must show the role-file flag: {na}"
-            );
+            assert!(na.contains("team-agent start foo"), "must name the selected seat: {na}");
+            assert!(!na.contains("add-agent"), "must not recommend legacy add: {na}");
+            assert!(crate::cli::arguments::parse("start", &["foo".into()]).is_ok());
         }
 
         #[test]
         fn add_agent_already_exists_explains_way_out() {
             let msg = "agent start requirement unmet: agent id already exists: foo";
             let na = error_next_action(msg).expect("already-exists must carry next_action");
-            assert!(na.contains("start-agent"), "must mention start-agent: {na}");
+            assert!(na.contains("team-agent start foo"), "must mention canonical start: {na}");
         }
 
         #[test]
@@ -5741,8 +5731,8 @@ pub mod lifecycle_port {
                 "must not reuse the start-agent miss copy: {na}"
             );
             assert!(
-                na.contains("quick-start"),
-                "must steer first launch to quick-start: {na}"
+                na.contains("team-agent start --from ."),
+                "must steer first launch to canonical start: {na}"
             );
         }
 
@@ -5756,7 +5746,7 @@ pub mod lifecycle_port {
             assert_eq!(v["ok"], serde_json::json!(false));
             let na = v["next_action"].as_str().unwrap_or("");
             assert!(
-                na.contains("quick-start"),
+                na.contains("team-agent start --from ."),
                 "error_value must attach spec-missing recovery, got {v}"
             );
             assert!(!na.contains("add-agent"), "must not attach add-agent: {v}");
@@ -5773,8 +5763,8 @@ pub mod lifecycle_port {
                 v["next_action"]
                     .as_str()
                     .unwrap_or("")
-                    .contains("add-agent"),
-                "error_value must attach the add-agent guidance: {v}"
+                    .contains("team-agent start foo"),
+                "error_value must attach canonical start guidance: {v}"
             );
         }
 

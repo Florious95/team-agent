@@ -1390,7 +1390,7 @@ pid_status: {pid_status}\n\n\
 }
 
 /// A pre-upgrade legacy Claude Code, Codex, Grok or Pi seat has no runtime, so
-/// `start-agent` would be refused; it is stopped/removed and added again.
+/// Recovery must use the canonical start operation without bypassing admission.
 fn recovery_hint(
     agent_id: &str,
     provider: crate::model::enums::Provider,
@@ -1414,7 +1414,7 @@ fn recovery_manual_command(agent_id: &str, workspace: &Path, team: &str) -> Stri
     let workspace_str = workspace.to_string_lossy();
     let shell_workspace = workspace_str.replace('\'', "'\\''");
     format!(
-        "team-agent start-agent {agent_id} --workspace '{shell_workspace}' --team {team} --force --json"
+        "team-agent start {agent_id} --workspace '{shell_workspace}' --team {team} --json"
     )
 }
 
@@ -1857,7 +1857,7 @@ mod tests {
         for provider in [Provider::Grok, Provider::Copilot] {
             let hint = recovery_hint("w1", provider, workspace, "research");
             assert!(
-                hint.ends_with("To recover manually, run: team-agent start-agent w1 --workspace '/tmp/ws' --team research --force --json"),
+                hint.ends_with("To recover manually, run: team-agent start w1 --workspace '/tmp/ws' --team research --json"),
                 "{hint}"
             );
         }

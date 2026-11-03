@@ -361,7 +361,7 @@ fn start_at_selected(
         match outcome {
             StartAgentOutcome::Running { .. } => Ok(outcome),
             StartAgentOutcome::Noop { .. } => Err(LifecycleError::RequirementUnmet(format!(
-                "agent {agent_id} is already running; use stop-agent first"
+                "agent {agent_id} is already running; use `team-agent stop {agent_id}` first"
             ))),
             StartAgentOutcome::Paused { .. } => Err(LifecycleError::RequirementUnmet(format!(
                 "agent {agent_id} is paused"
@@ -500,7 +500,7 @@ fn check_destination(path: &Path, source: Option<&Path>) -> Result<(), Lifecycle
                 "role file already exists: {}{}",
                 path.display(),
                 if source.is_none() {
-                    "; reuse it with --role-file or re-adopt it with --force"
+                    "; reuse this existing file with --role-file, or choose a different agent id"
                 } else {
                     ""
                 }
@@ -929,6 +929,20 @@ mod tests {
             pane_pid: None,
             leader_env: Default::default(),
         }
+    }
+
+    #[test]
+    fn existing_declaration_advice_admits_non_force_reuse() {
+        let temp = tempfile::tempdir().unwrap();
+        let role = temp.path().join("reviewer.md");
+        fs::write(&role, "---\nname: reviewer\nprovider: pi\nbypass: false\n---\nReview.\n")
+            .unwrap();
+        let before = fs::read(&role).unwrap();
+        let refusal = check_destination(&role, None).unwrap_err().to_string();
+        assert!(refusal.contains("--role-file"), "{refusal}");
+        assert!(!refusal.contains("--force"), "{refusal}");
+        check_destination(&role, Some(&role)).unwrap();
+        assert_eq!(fs::read(&role).unwrap(), before);
     }
 
     #[test]

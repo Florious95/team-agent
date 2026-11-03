@@ -316,7 +316,7 @@ pub(crate) fn restart_with_transport_with_session_convergence_deadline(
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     if crate::lifecycle::restart::input_has_no_local_team_context(&resolved_ws) {
         return Err(LifecycleError::TeamSelect(format!(
-            "missing spec for restart: {} (run `team-agent quick-start <teamdir>` first)",
+            "missing spec for restart: {} (prepare TEAM.md and its role files, then run `team-agent start --from .` in that directory)",
             crate::model::paths::runtime_dir(&resolved_ws).display()
         )));
     }
@@ -440,9 +440,7 @@ fn restart_with_selected_team_and_transport(
                     "reason": "agent present in state.agents but absent from rebuilt spec; \
                                role doc was removed — restart will not respawn removed workers",
                     "action": format!(
-                        "to permanently remove run `team-agent remove-agent {stale_id}`; \
-                         to re-add restore the role doc under agents/<id>.md and run \
-                         `team-agent restart`"
+                        "to reactivate this worker, restore its role declaration and run `team-agent start {stale_id}`; otherwise leave it stopped"
                     ),
                 }),
             );
@@ -2768,7 +2766,7 @@ fn write_restart_agent_failed_event(
                 "phase": phase,
                 "error": error,
                 "action": format!(
-                    "inspect worker {} output, then reset that worker with `team-agent reset-agent {} --discard-session` or rerun `team-agent restart --allow-fresh`",
+                    "inspect worker {} output; with approval to discard its session use `team-agent agent reset {} --discard-session`, or permit legal fresh fallback with `team-agent restart --session auto`",
                     decision.agent_id,
                     decision.agent_id
                 ),
@@ -3247,7 +3245,7 @@ fn restart_failure_next_actions(failed_agents: &[RestartFailedAgent]) -> Vec<Str
         .iter()
         .map(|failure| {
             format!(
-                "inspect worker {} output, then reset that worker with `team-agent reset-agent {} --discard-session` or rerun `team-agent restart --allow-fresh`",
+                "inspect worker {} output; with approval to discard its session use `team-agent agent reset {} --discard-session`, or permit legal fresh fallback with `team-agent restart --session auto`",
                 failure.agent_id, failure.agent_id
             )
         })
@@ -3772,8 +3770,7 @@ fn merge_state_dynamic_role_files(
             return Err(LifecycleError::Compile(format!(
                 "dynamic role file for agent '{agent_id}' declares name '{}' at {}; \
                  restart cannot rename a live worker. \
-                 action: fix the role file's front-matter name to match agent_id, or run \
-                 team-agent remove-agent {agent_id} --force before restart. \
+                 action: fix the role file's front-matter name to match agent_id before retrying; do not remove the seat to repair its declaration. \
                  log: workspace={}",
                 compiled.id,
                 role_path.display(),
