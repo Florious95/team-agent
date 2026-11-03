@@ -133,5 +133,6 @@ mod run_delegation;
 mod shutdown_kill_plan;
 mod status_brief;
 mod status_send;
+mod unified_guidance_red;
 mod verb_install_skill;
 mod verb_profile;

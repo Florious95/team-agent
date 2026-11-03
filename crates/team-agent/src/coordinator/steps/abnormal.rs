@@ -1854,12 +1854,18 @@ mod tests {
         assert!(!hint.contains("start-agent"), "{hint}");
         assert!(hint.ends_with("(provider: codex)"), "{hint}");
         // `grok` rows are a runtime alias of grok_build, so they restart like any live provider.
+        // Unified start contract: the manual recovery command must be admitted by
+        // the current grammar on the canonical surface (`start-agent --force` is refused).
         for provider in [Provider::Grok, Provider::Copilot] {
             let hint = recovery_hint("w1", provider, workspace, "research");
-            assert!(
-                hint.ends_with("To recover manually, run: team-agent start w1 --workspace '/tmp/ws' --team research --json"),
-                "{hint}"
-            );
+            let (_, command) = hint
+                .split_once("To recover manually, run: ")
+                .unwrap_or_else(|| panic!("manual recovery command missing: {hint}"));
+            crate::cli::guidance_oracle::assert_admitted(&hint);
+            assert!(!command.contains("--force"), "{hint}");
+            for scope in ["w1", "--workspace '/tmp/ws'", "--team research"] {
+                assert!(command.contains(scope), "recovery must keep {scope}: {hint}");
+            }
         }
     }
 }

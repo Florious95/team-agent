@@ -3916,6 +3916,22 @@ mod tests {
         TransportError,
     };
 
+    // Unified start contract: restart failure actions name admitted canonical commands.
+    #[test]
+    fn restart_failure_actions_name_admitted_canonical_commands() {
+        let failed = RestartFailedAgent {
+            agent_id: AgentId::new("w1"),
+            restart_mode: StartMode::Resumed,
+            decision: ResumeDecision::Resume,
+            session_id: None,
+            phase: "spawn".into(),
+            error: "spawn failed".into(),
+        };
+        for action in restart_failure_next_actions(&[failed]) {
+            crate::cli::guidance_oracle::assert_admitted(&action);
+        }
+    }
+
     #[test]
     fn retired_filter_clears_every_spec_reference_via_remove_primitive() {
         let mut spec = crate::model::yaml::loads(

@@ -7,6 +7,9 @@ use std::collections::BTreeSet;
 #[cfg(test)]
 #[path = "runtime_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "unified_start_contract_red.rs"]
+mod unified_start_contract_red;
 
 fn checked<T, E: std::fmt::Display>(result: Result<T, E>) -> Result<T, CliError> {
     result.map_err(|e| refusal(e.to_string()))

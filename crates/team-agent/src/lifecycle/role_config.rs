@@ -970,6 +970,33 @@ mod tests {
         super::super::restart::ensure_agent_not_running(&state, &id, &transport).unwrap();
     }
 
+    // Unified start contract: an occupied role-file destination points to the
+    // admitted in-place adoption (`team-agent start ID`), never to --force re-adoption.
+    #[test]
+    fn existing_role_file_refusal_points_to_admitted_start_not_force() {
+        let dir = std::env::temp_dir().join(format!(
+            "ta-pr1-role-dest-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(dir.join("agents")).unwrap();
+        let path = dir.join("agents").join("w1.md");
+        fs::write(&path, "---\nprovider: pi\n---\nwork\n").unwrap();
+        let error = check_destination(&path, None).unwrap_err().to_string();
+        let _ = fs::remove_dir_all(&dir);
+        crate::cli::guidance_oracle::assert_admitted(&error);
+        assert!(!error.contains("--force"), "{error}");
+        assert!(
+            crate::cli::guidance_oracle::admitted_verbs(&error)
+                .iter()
+                .any(|verb| verb == "start"),
+            "must name `team-agent start w1`: {error}"
+        );
+    }
+
     #[test]
     fn force_admission_requires_positive_death_and_never_replaces_a_live_seat() {
         use crate::transport::test_support::OfflineTransport;

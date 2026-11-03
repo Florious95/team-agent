@@ -66,6 +66,8 @@ pub(crate) fn leader_claim_action(workspace: &std::path::Path, team: Option<&str
         team.map(|team| format!(" --team {}", shell_quote(team))).unwrap_or_default())
 }
 mod arguments;
+#[cfg(test)]
+pub(crate) mod guidance_oracle;
 mod intent;
 #[cfg(unix)]
 mod shutdown_socket;
@@ -5679,6 +5681,17 @@ pub mod lifecycle_port {
     #[cfg(test)]
     mod e8_error_guidance_tests {
         use super::{error_next_action, error_value};
+        use crate::cli::guidance_oracle::{admitted_verbs, assert_admitted};
+
+        // Unified start contract: guidance names only admitted canonical commands.
+        #[track_caller]
+        fn assert_canonical_start(na: &str) {
+            assert_admitted(na);
+            assert!(
+                admitted_verbs(na).iter().any(|verb| verb == "start"),
+                "must steer to an admitted `team-agent start`: {na}"
+            );
+        }
 
         #[test]
         fn start_agent_not_found_points_to_canonical_start() {
@@ -5686,16 +5699,14 @@ pub mod lifecycle_port {
             // "agent start requirement unmet: agent foo not found".
             let msg = "agent start requirement unmet: agent foo not found";
             let na = error_next_action(msg).expect("not-found must carry next_action");
-            assert!(na.contains("team-agent start foo"), "must name the selected seat: {na}");
-            assert!(!na.contains("add-agent"), "must not recommend legacy add: {na}");
-            assert!(crate::cli::arguments::parse("start", &["foo".into()]).is_ok());
+            assert_canonical_start(na);
         }
 
         #[test]
-        fn add_agent_already_exists_explains_way_out() {
+        fn add_agent_already_exists_points_to_canonical_start() {
             let msg = "agent start requirement unmet: agent id already exists: foo";
             let na = error_next_action(msg).expect("already-exists must carry next_action");
-            assert!(na.contains("team-agent start foo"), "must mention canonical start: {na}");
+            assert_canonical_start(na);
         }
 
         #[test]
@@ -5730,10 +5741,7 @@ pub mod lifecycle_port {
                 !na.contains("start-agent only starts an agent"),
                 "must not reuse the start-agent miss copy: {na}"
             );
-            assert!(
-                na.contains("team-agent start --from ."),
-                "must steer first launch to canonical start: {na}"
-            );
+            assert_canonical_start(na);
         }
 
         #[test]
@@ -5745,10 +5753,7 @@ pub mod lifecycle_port {
             let v = error_value(err);
             assert_eq!(v["ok"], serde_json::json!(false));
             let na = v["next_action"].as_str().unwrap_or("");
-            assert!(
-                na.contains("team-agent start --from ."),
-                "error_value must attach spec-missing recovery, got {v}"
-            );
+            assert_canonical_start(na);
             assert!(!na.contains("add-agent"), "must not attach add-agent: {v}");
         }
 
@@ -5759,13 +5764,7 @@ pub mod lifecycle_port {
             );
             let v = error_value(err);
             assert_eq!(v["ok"], serde_json::json!(false));
-            assert!(
-                v["next_action"]
-                    .as_str()
-                    .unwrap_or("")
-                    .contains("team-agent start foo"),
-                "error_value must attach canonical start guidance: {v}"
-            );
+            assert_canonical_start(v["next_action"].as_str().unwrap_or(""));
         }
 
         #[test]
