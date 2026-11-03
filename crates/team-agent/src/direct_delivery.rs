@@ -369,7 +369,7 @@ fn canonical_dialect(name: &str) -> String {
         "claude" | "claude_code" | "claudecode" | "claude_tui" => "claude".into(),
         "pi" | "pi_tui" => "pi".into(),
         "cursor" | "cursor_agent" | "agent" => "cursor".into(),
-        "codex" | "codex_cli" => "codex".into(),
+        "codex" | "codex_cli" | "codex_tui" => "codex".into(),
         "grok" | "grok_build" => "grok".into(),
         "double_enter" => "double-enter".into(),
         "cursor_double_enter" => "cursor-double-enter".into(),
@@ -469,6 +469,13 @@ fn direct_send_checked(socket: &str, pane_id: &str, dialect: &str, text: &str, e
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("tmux: {e}"))?;
+    // Terminate Codex's token within the paste so its mentions popup cannot
+    // consume Enter or replace a trailing @file/$skill. Other dialects stay verbatim.
+    let text = if canonical_dialect(dialect) == "codex" {
+        format!("{text}\n")
+    } else {
+        text.to_owned()
+    };
     let write_result = child.stdin.take().unwrap().write_all(text.as_bytes());
     let loaded = child.wait_with_output().map_err(|e| e.to_string())?;
     if let Err(error) = write_result {
@@ -478,7 +485,8 @@ fn direct_send_checked(socket: &str, pane_id: &str, dialect: &str, text: &str, e
     check_output(loaded)?;
     if let Err(error) = verify_identity(socket, pane_id, &observed, expected_pid, deadline)
         .and_then(|()| guard_non_composer(socket, pane_id, deadline))
-        .and_then(|()| verify_owner(deadline)) {
+        .and_then(|()| verify_owner(deadline))
+        .and_then(|()| cancel_copy_mode(socket, pane_id, deadline)) {
         let _ = tmux(socket).args(["delete-buffer", "-b", &buffer]).output();
         return Err(error);
     }
@@ -510,6 +518,8 @@ fn direct_send_checked(socket: &str, pane_id: &str, dialect: &str, text: &str, e
         .map_err(|error| format!("uncertain: surface changed after paste: {error}; no Enter issued; do not replay"))?;
     verify_owner(deadline)
         .map_err(|error| format!("uncertain: ownership changed after paste: {error}; no Enter issued; do not replay"))?;
+    cancel_copy_mode(socket, pane_id, deadline)
+        .map_err(|error| format!("uncertain: mode preparation failed after paste: {error}; no Enter issued; do not replay"))?;
     let mut command = tmux(socket);
     command.args(["send-keys", "-t", pane_id, "Enter"]);
     if enter_count == 2 {
@@ -540,6 +550,21 @@ fn pane_identity(socket: &str, pane: &str, deadline: Instant) -> Result<String, 
         return Err("pane_gone: no live physical identity".into());
     }
     Ok(identity)
+}
+
+fn cancel_copy_mode(socket: &str, pane: &str, deadline: Instant) -> Result<(), String> {
+    let mode = native_output(tmux(socket).args(["display-message", "-p", "-t", pane, "#{pane_in_mode}"]), deadline)?;
+    if !mode.success { return Err("pane_mode_observation_failed: input withheld".into()); }
+    match mode.stdout.trim() {
+        "0" => return Ok(()),
+        "1" => (),
+        _ => return Err("pane_mode_observation_failed: invalid mode".into()),
+    }
+    // This is a tmux mode command, never Escape/C-c to the provider. Cancel
+    // before paste to retain bracketed framing, and again before Enter.
+    let cancelled = native_output(tmux(socket).args(["send-keys", "-t", pane, "-X", "cancel"]), deadline)?;
+    if !cancelled.success { return Err(format!("copy_mode_cancel_failed: {}", cancelled.stderr.trim())); }
+    Ok(())
 }
 
 fn verify_identity(socket: &str, pane: &str, observed: &str, expected_pid: Option<u32>, deadline: Instant) -> Result<(), String> {

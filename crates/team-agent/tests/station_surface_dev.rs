@@ -36,7 +36,7 @@ with (root / 'trace.jsonl').open('a') as log:
     log.write(json.dumps(action) + '\n')
 if action == 'display-message':
     # This is a synthetic transport identity, not native-process evidence.
-    print('0|1|2|' + str(root / 'tmux.sock'))
+    print('0' if args[-1] == '#{pane_in_mode}' else '0|1|2|' + str(root / 'tmux.sock'))
 elif action == 'capture-pane':
     if mode == 'named-draft':
         print('── w-claude ──\n❯ HUMAN-DRAFT-A\n' + '─' * 40)

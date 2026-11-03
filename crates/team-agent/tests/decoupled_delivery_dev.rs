@@ -205,6 +205,64 @@ os.execvp('tmux', ['tmux', *sys.argv[1:]])
 
 
 #[test]
+fn codex_mentions_are_terminated_inside_the_paste_for_all_native_aliases() {
+    for dialect in ["codex", "codex_cli", "codex_tui", "pi"] {
+        let fixture = Fixture::new();
+        let mut expected = Vec::new();
+        for content in ["literal α @file", "literal α $skill"] {
+            team_agent::direct_delivery::direct_send(
+                &fixture.socket, &fixture.pane, dialect, content,
+            ).unwrap();
+            let pasted = if dialect == "pi" { content.to_owned() } else { format!("{content}\n") };
+            fixture.received(&pasted);
+            expected.extend_from_slice(format!("\x1b[200~{pasted}\x1b[201~\r").as_bytes());
+            assert_eq!(fs::read(fixture.root.join("received")).unwrap(), expected, "{dialect}");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn copy_mode_is_cancelled_before_paste_and_again_before_the_single_enter() {
+    use std::os::unix::fs::PermissionsExt;
+    for dialect in ["codex", "codex_tui", "pi"] {
+        let fixture = Fixture::new();
+        let wrapper_dir = fixture.root.join("wrapper");
+        fs::create_dir(&wrapper_dir).unwrap();
+        let wrapper = wrapper_dir.join("tmux");
+        // Re-enter copy-mode after the paste to exercise the second cancellation
+        // independently of the copy-mode already present before delivery starts.
+        fs::write(&wrapper, format!(r#"#!/usr/bin/env python3
+import os, subprocess, sys
+os.environ['PATH'] = {path}
+args = sys.argv[1:]
+result = subprocess.run(['tmux', *args])
+if result.returncode == 0 and 'paste-buffer' in args:
+    result = subprocess.run(['tmux', '-S', {socket}, 'copy-mode', '-t', {pane}])
+sys.exit(result.returncode)
+"#, path=json!(std::env::var("PATH").unwrap()), socket=json!(fixture.socket), pane=json!(fixture.pane))).unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(Command::new("tmux")
+            .args(["-S", &fixture.socket, "copy-mode", "-t", &fixture.pane])
+            .status().unwrap().success());
+        let mode = Command::new("tmux")
+            .args(["-S", &fixture.socket, "display-message", "-p", "-t", &fixture.pane, "#{pane_in_mode}"])
+            .output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&mode.stdout).trim(), "1");
+        let output = fixture.cli_command(&[
+            "send", "--socket", &fixture.socket, "--pane", &fixture.pane,
+            "--dialect", dialect, "copy-mode payload @file",
+        ]).env("PATH", format!("{}:{}", wrapper_dir.display(), std::env::var("PATH").unwrap()))
+            .output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let pasted = if dialect == "pi" { "copy-mode payload @file" } else { "copy-mode payload @file\n" };
+        fixture.received(pasted);
+        assert_eq!(fs::read(fixture.root.join("received")).unwrap(),
+            format!("\x1b[200~{pasted}\x1b[201~\r").as_bytes(), "{dialect}");
+    }
+}
+
+#[test]
 fn logical_send_uses_live_pane_despite_stale_metadata_dead_status_and_missing_mcp() {
     let fixture = Fixture::new();
     assert!(Command::new("tmux")
