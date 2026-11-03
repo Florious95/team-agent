@@ -1602,10 +1602,12 @@ mod tests {
     #[test]
     fn recovered_stop_intent_never_masks_native_seats_or_creation_receipts() {
         let mut fixture = RoleFixture::new();
-        let mut backend = fixture.canonical(SeatStatus::Ready, Phase::F4Commit, Outcome::Committed, None);
+        let backend = fixture.canonical(SeatStatus::Ready, Phase::F4Commit, Outcome::Committed, None);
         let row = serde_json::json!({"runtime_family":"contract","explicit_stop":true});
         assert!(!super::super::framework::recovery_stopped(&backend, &fixture.identity.seat, &row).unwrap());
-        backend.store.fixture_delete_seat(&fixture.identity.seat).unwrap();
+        drop(backend);
+        fixture.store().fixture_delete_seat(&fixture.identity.seat).unwrap();
+        let backend = Backend::open_readonly(&fixture.binding.workspace.path, "test").unwrap();
         assert!(!super::super::framework::recovery_stopped(&backend, &fixture.identity.seat, &row).unwrap(),
             "a missing seat with a creation receipt is not an omitted recovery seat");
     }
