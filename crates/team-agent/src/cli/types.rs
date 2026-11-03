@@ -471,17 +471,6 @@ pub struct ResetAgentArgs {
     pub json: bool,
 }
 
-/// `add-agent`: provider and bypass are explicit CLI or role-file decisions.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AddAgentArgs {
-    pub role_config: crate::lifecycle::role_config::RoleConfigPatch,
-    pub agent: String,
-    pub workspace: PathBuf,
-    pub team: Option<String>,
-    pub role_file: String,
-    pub force: bool,
-    pub json: bool,
-}
 
 /// `fork-agent`(`parser.py:404`)。`--as` 必需。
 #[derive(Debug, Clone, PartialEq, Eq)]

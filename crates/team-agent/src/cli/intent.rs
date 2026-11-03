@@ -315,7 +315,6 @@ fn run_canonical(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult
         }
         if command == "agent" && matches!(sub, "remove" | "reset" | "clone" | "fork") {
             let original = match sub {
-                "add" => "add-agent",
                 "remove" => "remove-agent",
                 "reset" => "reset-agent",
                 "clone" => "clone-agent",

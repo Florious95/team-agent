@@ -543,17 +543,7 @@ pub fn cmd_reset_agent(args: &ResetAgentArgs) -> Result<CmdResult, CliError> {
     Ok(CmdResult::from_json(value, args.json))
 }
 
-/// `cmd_add_agent`(`commands.py:373`)。
-pub fn cmd_add_agent(args: &AddAgentArgs) -> Result<CmdResult, CliError> {
-    if args.force {
-        return Err(CliError::Usage("--force is not part of start; stop the agent before changing configuration".into()));
-    }
-    cmd_start_request(&crate::lifecycle::seat_start::StartRequest {
-        workspace:args.workspace.clone(),team:args.team.clone(),agent:crate::model::ids::AgentId::new(&args.agent),
-        role_file:(!args.role_file.is_empty()).then(|| PathBuf::from(&args.role_file)),patch:args.role_config.clone(),
-        session:crate::lifecycle::seat_start::SessionPolicy::Preserve,
-    },args.json)
-}
+
 
 /// `cmd_fork_agent`(`commands.py:383`)。
 pub fn cmd_fork_agent(args: &ForkAgentArgs) -> Result<CmdResult, CliError> {

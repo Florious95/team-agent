@@ -314,10 +314,8 @@ fn dispatch_prepared(command: &str, checked: super::arguments::CheckedArgs, cwd:
             .map(emit_result),
         "shutdown" => cmd_shutdown(&shutdown_args(args, cwd)?).map(emit_result),
         "restart" => cmd_restart(&restart_args(args, cwd)?).map(emit_result),
-        "start-agent" => cmd_start_agent(&start_agent_args(args, cwd)?).map(emit_result),
         "stop-agent" => cmd_stop_agent(&stop_agent_args(args, cwd)?).map(emit_result),
         "reset-agent" => cmd_reset_agent(&reset_agent_args(args, cwd)?).map(emit_result),
-        "add-agent" => cmd_add_agent(&add_agent_args(args, cwd)?).map(emit_result),
         "clone-agent" => cmd_clone_agent(&clone_agent_args(args, cwd)?).map(emit_result),
         "fork-agent" => cmd_fork_agent(&fork_agent_args(args, cwd)?).map(emit_result),
         "remove-agent" => cmd_remove_agent(&remove_agent_args(args, cwd)?).map(emit_result),
@@ -1541,7 +1539,7 @@ pub(super) fn intent_source_workspace(source: &Path, cwd: &Path) -> Result<PathB
 }
 
 pub(super) fn intent_role_patch(args: &[String]) -> Result<crate::lifecycle::role_config::RoleConfigPatch, CliError> {
-    role_agent_args(args, false).map(|(_, patch)| patch)
+    role_agent_args(args).map(|(_, patch)| patch)
 }
 
 /// Explicit object aliases reuse the same syntax checks, typed builders and handlers.
@@ -1562,7 +1560,6 @@ pub(super) fn intent_alias(command: &str, args: &[String], cwd: &Path) -> Result
             let parsed = status_args(args, cwd);
             cmd_status_for_team(&parsed, parsed.team.as_deref())
         }
-        "add-agent" => cmd_add_agent(&add_agent_args(args, cwd)?),
         "remove-agent" => cmd_remove_agent(&remove_agent_args(args, cwd)?),
         "reset-agent" => cmd_reset_agent(&reset_agent_args(args, cwd)?),
         "clone-agent" => cmd_clone_agent(&clone_agent_args(args, cwd)?),
@@ -1573,7 +1570,6 @@ pub(super) fn intent_alias(command: &str, args: &[String], cwd: &Path) -> Result
 
 fn role_agent_args(
     args: &[String],
-    add: bool,
 ) -> Result<(ParsedArgs, crate::lifecycle::role_config::RoleConfigPatch), CliError> {
     let mut role = crate::lifecycle::role_config::RoleConfigPatch::default();
     let mut forwarded = Vec::new();
@@ -1593,7 +1589,7 @@ fn role_agent_args(
             return Err(CliError::Usage(format!("duplicate {flag}")));
         }
         if matches!(flag, "--json" | "--allow-fresh" | "--force") {
-            if inline.is_some() || (add && flag == "--allow-fresh") {
+            if inline.is_some() {
                 return Err(CliError::Usage(format!("unsupported option: {argument}")));
             }
             forwarded.push(flag.to_string());
@@ -1611,7 +1607,7 @@ fn role_agent_args(
                 | "--workspace"
                 | "--team"
                 | "--role-file"
-        ) || (!add && flag == "--role-file")
+        ) || flag == "--role-file"
         {
             return Err(CliError::Usage(format!("unknown option: {flag}")));
         }
@@ -1669,13 +1665,6 @@ fn role_agent_args(
         index += 1;
     }
     let parsed = parse_args(&forwarded);
-    if add && parsed.role_file.is_none() {
-        if role.provider.is_none() {
-            return Err(CliError::Usage(
-                "add-agent requires --provider <name>".into(),
-            ));
-        }
-    }
     if parsed.positionals.len() != 1 {
         return Err(CliError::Usage(
             if parsed.positionals.is_empty() {
@@ -1780,22 +1769,7 @@ mod role_cli_tests {
     }
 }
 
-fn start_agent_args(args: &[String], cwd: &Path) -> Result<StartAgentArgs, CliError> {
-    let (parsed, role_config) = role_agent_args(args, false)?;
-    if parsed.force {
-        let agent = crate::lifecycle::seat_start::command_arg(&required_pos(&parsed, 0, "agent")?);
-        return Err(CliError::Usage(format!("start does not support --force; use `team-agent stop {agent}`, then `team-agent start {agent}` for a safe restart")));
-    }
-    Ok(StartAgentArgs {
-        role_config,
-        agent: required_pos(&parsed, 0, "agent")?,
-        workspace: workspace(&parsed, cwd),
-        team: parsed.team,
-        force: parsed.force,
-        allow_fresh: parsed.allow_fresh,
-        json: parsed.json,
-    })
-}
+
 
 fn stop_agent_args(args: &[String], cwd: &Path) -> Result<StopAgentArgs, CliError> {
     let parsed = parse_args(args);
@@ -1826,18 +1800,6 @@ fn reset_agent_args(args: &[String], cwd: &Path) -> Result<ResetAgentArgs, CliEr
     })
 }
 
-fn add_agent_args(args: &[String], cwd: &Path) -> Result<AddAgentArgs, CliError> {
-    let (parsed, role_config) = role_agent_args(args, true)?;
-    Ok(AddAgentArgs {
-        role_config,
-        agent: required_pos(&parsed, 0, "agent")?,
-        workspace: workspace(&parsed, cwd),
-        team: parsed.team,
-        role_file: parsed.role_file.unwrap_or_default(),
-        force: parsed.force,
-        json: parsed.json,
-    })
-}
 
 fn fork_agent_args(args: &[String], cwd: &Path) -> Result<ForkAgentArgs, CliError> {
     let parsed = parse_args(args);
