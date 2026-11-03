@@ -150,7 +150,7 @@ fn p4_attach_requires_explicit_nonempty_provider_but_keeps_declared_identity() {
 }
 
 #[test]
-fn p5_start_force_refuses_and_guides_to_existing_stop_start_commands() {
+fn p5_start_force_is_rejected_by_canonical_start_grammar() {
     // The retired start-agent parser is excised; the canonical start grammar must
     // still refuse --force instead of accepting and silently discarding it.
     match super::super::arguments::parse("intent-start", &strings(&["worker", "--force"])) {
