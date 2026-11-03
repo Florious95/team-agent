@@ -37,12 +37,7 @@ pub(super) enum Subject {
     Team { source: Option<PathBuf> },
     Agent(AgentId),
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum SessionPolicy {
-    Auto,
-    Preserve,
-}
+use crate::lifecycle::seat_start::SessionPolicy;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum Verb {
@@ -89,6 +84,7 @@ pub(super) enum Step {
     CreateTeam(QuickStartArgs),
     CreateAgent { args: QuickStartArgs, agent: String, role: String },
     StartAgent(StartAgentArgs),
+    UnifiedStart { request: crate::lifecycle::seat_start::StartRequest, description: crate::lifecycle::seat_start::StartDescription },
     AddAgent(AddAgentArgs),
     StopAgent(StopAgentArgs),
     RestartTeam(RestartArgs),
@@ -101,6 +97,7 @@ impl Step {
             Self::CreateTeam(_) => "quick_start",
             Self::CreateAgent { .. } => "create_agent",
             Self::StartAgent(_) => "start_agent",
+            Self::UnifiedStart { .. } => "start",
             Self::AddAgent(_) => "add_agent",
             Self::StopAgent(_) => "stop_agent",
             Self::RestartTeam(_) => "restart_team",
@@ -111,6 +108,7 @@ impl Step {
         match self {
             Self::CreateAgent { agent, .. } => Some(agent),
             Self::StartAgent(a) => Some(&a.agent),
+            Self::UnifiedStart { request, .. } => Some(request.agent.as_str()),
             Self::AddAgent(a) => Some(&a.agent),
             Self::StopAgent(a) => Some(&a.agent),
             _ => None,
@@ -136,6 +134,7 @@ impl Step {
             Self::CreateTeam(a) => cmd_quick_start(a),
             Self::CreateAgent { args, agent, role } => dynamic::execute(args, agent, role),
             Self::StartAgent(a) => cmd_start_agent(a),
+            Self::UnifiedStart { request, .. } => cmd_start_request(request, true),
             Self::AddAgent(a) => cmd_add_agent(a),
             Self::StopAgent(a) => cmd_stop_agent(a),
             Self::RestartTeam(a) => cmd_restart(a),
@@ -159,8 +158,8 @@ pub(super) fn help(command: &str) -> String {
     let (purpose, usage, options, examples, next) = match command {
         "start" => (
             "Start a team or one agent without replacing verified running processes.",
-            "[AGENT [PROMPT...]|./TEAMDIR] [--from TEAMDIR] [--workspace PATH] [--team KEY] [--session preserve|auto] [--dry-run] [--json]",
-            "--from selects TEAM.md and agents/; all relative paths use the calling directory.\nAgent IDs such as reviewer.v2 stay agent IDs even when a same-named directory exists.\nTeam start preserves explicitly stopped seats; use agent start ID to reactivate one seat.\nMissing agents are created automatically (leader provider, pi if unknown; native default model; bypass=false); an uninitialized workspace uses team current.\n--role-file, --provider, --model and --bypass true|false customize a new agent.\n--model, --effort, --prompt and --profile update a stopped agent; stop a running agent first.\nSession defaults to preserve; auto only permits the original legal fresh fallback.\n--dry-run performs no lifecycle action; final locked admission remains deferred.\nAlready running does not claim role-file synchronization or business readiness.",
+            "[AGENT [PROMPT...]|./TEAMDIR] [--from TEAMDIR] [--workspace PATH] [--team KEY] [--session preserve|auto|fresh] [--dry-run] [--json]",
+            "--from selects TEAM.md and agents/; all relative paths use the calling directory.\nAgent IDs such as reviewer.v2 stay agent IDs even when a same-named directory exists.\nTeam start preserves explicitly stopped seats; use agent start ID to reactivate one seat.\nMissing agents are created automatically (leader provider, pi if unknown; native default model; bypass=false); an uninitialized workspace uses team current.\n--role-file and explicit provider/model/effort/bypass/prompt/profile fields resolve one declaration; receipts identify defaulted fields.\nStopped seats may change provider with --session fresh; their identity and history are retained. Running seats refuse configuration changes or fresh sessions until stopped.\nSession defaults to preserve; auto permits legal fresh fallback; fresh explicitly starts a new native session. --allow-fresh cannot be combined with preserve or fresh.\n--dry-run performs no lifecycle action; final locked admission remains deferred.\nAlready running does not claim role-file synchronization or business readiness.",
             "  team-agent start --from . --dry-run --json\n  team-agent start reviewer --dry-run --json",
             "Use team-agent status and team-agent inbox leader -n 3 for actual replies.",
         ),
@@ -180,8 +179,8 @@ pub(super) fn help(command: &str) -> String {
         ),
         "agent" => (
             "Select an agent lifecycle operation explicitly without guessing a team directory.",
-            "<start|stop|restart|add|remove|reset|clone|fork> AGENT [OPTIONS]",
-            "--workspace PATH and --team KEY select the team.\nstart keeps verified running processes and can add an absent agent with complete decisions.\nrestart defaults to --session auto; --session preserve keeps the original refusal policy.\nSingle-agent restart checks roles and capabilities before stop, then uses original stop/start.\n--dry-run on start/restart is read-only; role patches are not accepted by restart.\nadd/remove/reset/clone/fork retain the original capability and confirmation flags.\nreset requires --discard-session; fork requires --as NEW_ID; --in-place is not supported.",
+            "<start|stop|restart|remove|reset|clone|fork> AGENT [OPTIONS]",
+            "--workspace PATH and --team KEY select the team.\nstart keeps verified running processes and can add an absent agent with complete decisions.\nrestart defaults to --session auto; --session preserve keeps the original refusal policy.\nSingle-agent restart checks roles and capabilities before stop, then uses original stop/start.\n--dry-run on start/restart is read-only; role patches are not accepted by restart.\nremove/reset/clone/fork retain their capability and confirmation flags.\nreset requires --discard-session; fork requires --as NEW_ID; --in-place is not supported.",
             "  team-agent agent start reviewer --dry-run --json\n  team-agent agent restart reviewer --session preserve --dry-run --json",
             "Inspect team-agent status before using agent start after a partial result; an unknown replacement must not be retried blindly.",
         ),
@@ -254,6 +253,7 @@ pub(super) fn run(
     args: &[String],
     cwd: &Path,
 ) -> Option<Result<CmdResult, CliError>> {
+    let command = match command { "add-agent" | "start-agent" => "start", other => other };
     if !matches!(command, "start" | "stop" | "restart" | "team" | "agent") {
         return None;
     }
@@ -297,11 +297,11 @@ fn run_canonical(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult
         {
             return Ok(CmdResult::human(help(command)));
         }
-        let sub = args[0].as_str();
+        let sub = if command == "agent" && args[0] == "add" { "start" } else { args[0].as_str() };
         if command == "team" && sub == "status" {
             return super::emit::intent_alias("status", &args[1..], cwd);
         }
-        if command == "agent" && matches!(sub, "add" | "remove" | "reset" | "clone" | "fork") {
+        if command == "agent" && matches!(sub, "remove" | "reset" | "clone" | "fork") {
             let original = match sub {
                 "add" => "add-agent",
                 "remove" => "remove-agent",
@@ -338,6 +338,11 @@ fn run_canonical(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult
         explicit_agent,
         explicit_team,
     )?;
+    if intent.verb == Verb::Start {
+        if matches!(intent.subject, Subject::Team { .. }) && intent.session == SessionPolicy::Fresh {
+            return Err(usage("--session fresh requires an explicit agent; team start preserves stopped seats"));
+        }
+    }
     #[cfg(unix)]
     if intent.verb == Verb::Restart && matches!(intent.subject, Subject::Team { .. }) {
         if let Some(result) = crate::contract_runtime::recovery::restart(
@@ -465,11 +470,12 @@ fn lifecycle_intent(
         Subject::Team { source: None }
     };
     let session = match flags.get("--session").map(String::as_str) {
-        Some("preserve") if flags.contains_key("--allow-fresh") => {
-            return Err(usage("--allow-fresh conflicts with --session preserve"))
+        Some("preserve" | "fresh") if flags.contains_key("--allow-fresh") => {
+            return Err(usage("--allow-fresh conflicts with explicit preserve/fresh session policy"))
         }
         Some("preserve") => SessionPolicy::Preserve,
         Some("auto") => SessionPolicy::Auto,
+        Some("fresh") => SessionPolicy::Fresh,
         _ if flags.contains_key("--allow-fresh")
             || (verb == Verb::Restart
                 && (command != "restart" || matches!(subject, Subject::Agent(_)))) =>
@@ -581,7 +587,15 @@ fn execute_plan(
     let descriptions: Vec<_> = plan
         .steps
         .iter()
-        .map(|s| json!({"action":s.name(),"agent":s.agent()}))
+        .map(|s| {
+            let mut value = json!({"action":s.name(),"agent":s.agent()});
+            if let Step::UnifiedStart { description, .. } = s {
+                value["op"] = json!(description.op);
+                value["declaration"] = description.declaration.clone();
+                value["defaulted"] = description.defaulted.clone();
+            }
+            value
+        })
         .collect();
     if plan.intent.dry_run {
         return Ok(CmdResult::from_json(
@@ -670,6 +684,13 @@ fn execute_plan(
             && (receipt.get("ready").and_then(Value::as_bool) == Some(false)
                 || receipt.get("status").and_then(Value::as_str) == Some("pending_tool_load"));
         results.push(json!({"action":step.name(),"agent":step.agent(),"ok":success,"phase":if stop_unconfirmed {"stop_not_confirmed"} else {"handler"},"mode":receipt.get("start_mode").or_else(||receipt.get("mode")).cloned().unwrap_or(json!("unknown")),"receipt":receipt}));
+        if let Step::UnifiedStart { description, .. } = step {
+            if let Some(result) = results.last_mut() {
+                result["op"] = receipt.get("op").cloned().unwrap_or(json!(description.op));
+                result["declaration"] = receipt.get("declaration").cloned().unwrap_or_else(|| description.declaration.clone());
+                result["defaulted"] = receipt.get("defaulted").cloned().unwrap_or_else(|| description.defaulted.clone());
+            }
+        }
         if success {
             if let Err(error) = runtime::advance_topology(&mut plan, step, &receipt) {
                 ok = false;

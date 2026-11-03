@@ -89,7 +89,7 @@ fn select(workspace: &Path, team: Option<&str>) -> Result<SelectedTeam, Lifecycl
         .map_err(|error| LifecycleError::TeamSelect(error.to_string()))
 }
 
-fn with_selected<T>(
+pub(super) fn with_selected<T>(
     selected: &SelectedTeam,
     agent_id: &AgentId,
     operation: impl FnOnce(&SelectedTeam) -> Result<T, LifecycleError>,
@@ -480,7 +480,7 @@ fn role_path(selected: &SelectedTeam, agent_id: &AgentId) -> PathBuf {
         .join(format!("{agent_id}.md"))
 }
 
-fn validate_id(agent_id: &AgentId) -> Result<(), LifecycleError> {
+pub(super) fn validate_id(agent_id: &AgentId) -> Result<(), LifecycleError> {
     let id = agent_id.as_str();
     if id.is_empty() || id == "." || id == ".." || id.contains(['/', '\\', '\0']) {
         return Err(LifecycleError::RequirementUnmet("invalid agent id".into()));
@@ -634,7 +634,7 @@ fn set(map: &mut Value, key: &str, value: Value) -> Result<(), LifecycleError> {
     Ok(())
 }
 
-fn read_spec(selected: &SelectedTeam) -> Result<Value, LifecycleError> {
+pub(super) fn read_spec(selected: &SelectedTeam) -> Result<Value, LifecycleError> {
     let path = selected
         .spec_path
         .as_ref()
@@ -652,7 +652,7 @@ fn spec_has_agent(spec: &Value, agent_id: &AgentId) -> bool {
         })
 }
 
-fn replace_spec_agent(
+pub(super) fn replace_spec_agent(
     spec: &mut Value,
     agent_id: &AgentId,
     next: &Value,
@@ -671,7 +671,7 @@ fn replace_spec_agent(
     Ok(())
 }
 
-fn to_json(value: &Value) -> serde_json::Value {
+pub(super) fn to_json(value: &Value) -> serde_json::Value {
     match value {
         Value::Null => serde_json::Value::Null,
         Value::Bool(value) => (*value).into(),
@@ -686,7 +686,7 @@ fn to_json(value: &Value) -> serde_json::Value {
     }
 }
 
-fn update_agent_config(
+pub(super) fn update_agent_config(
     selected: &SelectedTeam,
     agent_id: &AgentId,
     compiled: &Value,
@@ -869,7 +869,7 @@ pub(crate) fn commit_contract_role(
     Ok(())
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), LifecycleError> {
+pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), LifecycleError> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(persist_error)?;

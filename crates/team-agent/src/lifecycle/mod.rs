@@ -58,6 +58,7 @@ pub(crate) mod profile_launch;
 pub(crate) mod profile_smoke;
 pub mod restart;
 pub mod role_config;
+pub mod seat_start;
 pub mod types;
 pub(crate) mod worker_command_context;
 

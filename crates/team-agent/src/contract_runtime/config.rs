@@ -154,6 +154,15 @@ pub(crate) fn read_team_with_role_override(
     read_team_inner(args, prompt::user_source, Some((path, contents)), Some(seat))
 }
 
+pub(crate) fn read_start_declaration(
+    workspace: &Path, directory: &Path, team: &str, source: &Path, contents: &str, seat: &str,
+) -> Result<Option<TeamConfig>, ConfigError> {
+    read_team_with_role_override(&QuickStartArgs {
+        workspace:workspace.into(), agents_dir:directory.into(), name:None, team_id:Some(team.into()),
+        yes:false, json:false, detail:false, backend:Some("tmux".into()),
+    }, source, contents, seat)
+}
+
 fn read_team_inner(
     args: &QuickStartArgs,
     user_source: impl FnOnce() -> Result<Option<Source>, ConfigError>,
@@ -173,11 +182,28 @@ fn read_team_inner(
             paths.push(path);
         }
     }
+    // A staged declaration can introduce the selected role before its file is
+    // committed. Only the explicitly supplied override may be a virtual file.
+    if let Some((source, _)) = role_override {
+        if source.parent() == Some(agents.as_path()) && !paths.iter().any(|path| path == source) {
+            paths.push(source.to_owned());
+        }
+    }
+    let source_path = |path: &Path| -> Result<PathBuf, std::io::Error> {
+        path.canonicalize().or_else(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound
+                && role_override.is_some_and(|(source, _)| source == path) {
+                let parent = path.parent().ok_or_else(|| std::io::Error::other("role source has no parent"))?;
+                let name = path.file_name().ok_or_else(|| std::io::Error::other("role source has no filename"))?;
+                Ok(parent.canonicalize()?.join(name))
+            } else { Err(error) }
+        })
+    };
     paths.sort();
     let mut roles = Vec::new();
     let mut selected = false;
     for path in paths {
-        let raw = match role_override.filter(|(source, _)| path.canonicalize().ok().as_deref() == Some(*source)) {
+        let raw = match role_override.filter(|(source, _)| path == *source || path.canonicalize().ok().zip(source.canonicalize().ok()).is_some_and(|(left, right)| left == right)) {
             Some((_, contents)) => contents.to_owned(),
             None => match std::fs::read_to_string(&path) {
             Ok(raw) => raw,
@@ -281,7 +307,7 @@ fn read_team_inner(
         members.push(MemberRoute {
             id: id.clone(),
             provider: registration.map_or_else(|| provider.clone(), |descriptor| descriptor.identity.id.into()),
-            source: source.canonicalize()?,
+            source: source_path(&source)?,
             runtime,
         });
         if seat.is_some_and(|seat| seat != id) {
@@ -326,7 +352,7 @@ fn read_team_inner(
         }
         let role = text(&meta, "role", &source)?.unwrap_or_else(|| id.as_str().into());
         let document = Source {
-            path: source.canonicalize()?,
+            path: source_path(&source)?,
             contents: raw,
         };
         let prompt = prompt::assemble(

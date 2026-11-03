@@ -77,20 +77,20 @@ team-agent team restart --workspace . --team project-team --json
 | Command | Intent and boundary |
 |---|---|
 | `start` | Create once from complete configuration; later activate the selected non-paused roster. Verified live/drift-free instances stay unchanged |
-| `start AGENT` | Wake a stopped seat, prove a live no-op, or add a RoleOnly seat from its complete file. A new ID needs explicit provider/bypass decisions |
+| `start AGENT` | Create without prewritten files, adopt an existing role, resume a stopped seat, or prove a live no-op. Receipts show the resolved declaration and defaulted fields |
 | `stop [AGENT]` | Stop one agent or the selected team, retaining saved associations; team stop reports owned residuals |
 | `restart AGENT` | Preflight, confirmed stop, then start that agent; no implicit role patches or reset |
 | `team restart` | Deliberate team restart; preserve explicitly stopped/paused seats |
 | `team status` / `status` | Read the concise node projection; diagnose with `doctor` |
-| `agent add/remove/reset/clone/fork` | Explicit operations with their original confirmation/capability gates; reset requires `--discard-session`, fork requires `--as NEW_ID` |
+| `agent remove/reset/clone/fork` | Explicit operations with their original confirmation/capability gates; reset requires `--discard-session`, fork requires `--as NEW_ID` |
 
 New agent/team restart defaults to `--session auto`: resume when proven, otherwise only an existing legal fresh fallback. **Auto is not a promise of preserved memory.** For strict recovery use `team-agent team restart --session preserve --workspace . --team project-team`; known unavailable continuation refuses before stopping. Unknown or partial outcomes are not permission to reset or retry blindly. `--dry-run` on start/restart has no lifecycle effects, and no eligible targets is a nonzero refusal.
 
-No-op does not synchronize changed role bodies/settings or prove business readiness. Stop before applying worker changes. A queued send is not the reply. Verify actual results and, after final `stop`, empty scoped residual resources; never clean up sibling teams or shared servers. Team sources use `--from DIR`/explicit paths; `reviewer.v2` is an agent ID, and `agent restart ID` disambiguates a same-named directory. Native unsupported capabilities remain refusals; `--in-place` fork is not implemented.
+A running seat with identical effective configuration is a no-op; changed configuration or `--session fresh` refuses until that seat is stopped. A stopped seat can change provider/model with `team-agent start AGENT --provider PROVIDER --model MODEL --session fresh`, retaining its logical identity and session history. `preserve` refuses provider changes; `auto` is only legal fallback, not consent to migration. No-op does not prove business readiness. Stop before applying worker changes. A queued send is not the reply. Verify actual results and, after final `stop`, empty scoped residual resources; never clean up sibling teams or shared servers. Team sources use `--from DIR`/explicit paths; `reviewer.v2` is an agent ID, and `agent restart ID` disambiguates a same-named directory. Native unsupported capabilities remain refusals; `--in-place` fork is not implemented.
 
 ### Compatibility bridges
 
-Existing automation may keep `quick-start`, `shutdown` and suffixed `*-agent` commands. They remain supported but are not the daily instructions above. Old bare/explicit-path `restart` retains preserve/default receipts; new `team restart` defaults to auto. Legacy single-seat start refuses a live seat, whereas new start can prove a no-op: do not mechanically rename scripts or assume byte-identical JSON. See the [operation skill](skills/team-agent/SKILL.md) and [operator reference](skills/team-agent/references/team-agent-operator.md).
+`add-agent`, `agent add`, and `start-agent` are hidden spelling aliases of `start AGENT`: they share resolution, defaults, session policy, safety checks and receipts. There is no separate strict-add workflow, and `--force` is not a start option. Other legacy commands remain compatibility interfaces; old bare/explicit-path `restart` retains preserve, while `team restart` defaults to auto. See the [operation skill](skills/team-agent/SKILL.md) and [operator reference](skills/team-agent/references/team-agent-operator.md).
 
 ## What you can say
 

@@ -514,22 +514,28 @@ pub fn cmd_restart(args: &RestartArgs) -> Result<CmdResult, CliError> {
 
 /// `cmd_start_agent`(`commands.py:348`)。
 pub fn cmd_start_agent(args: &StartAgentArgs) -> Result<CmdResult, CliError> {
-    let mut value = with_legacy_retired(&args.workspace, || lifecycle_port::start_agent(
-        &args.workspace,
-        &args.agent,
-        args.force,
-        args.allow_fresh,
-        args.team.as_deref(),
-        &args.role_config,
-    ))?;
+    if args.force {
+        return Err(CliError::Usage("--force is not part of start; stop the agent before changing configuration".into()));
+    }
+    cmd_start_request(&crate::lifecycle::seat_start::StartRequest {
+        workspace:args.workspace.clone(),team:args.team.clone(),agent:crate::model::ids::AgentId::new(&args.agent),
+        role_file:None,patch:args.role_config.clone(),
+        session:if args.allow_fresh {crate::lifecycle::seat_start::SessionPolicy::Auto} else {crate::lifecycle::seat_start::SessionPolicy::Preserve},
+    },args.json)
+}
+
+pub(crate) fn cmd_start_request(request: &crate::lifecycle::seat_start::StartRequest, json_output: bool) -> Result<CmdResult, CliError> {
+    let mut value = crate::lifecycle::seat_start::start(request,false).map_err(|error| CliError::Runtime(error.to_string()))?;
     if value.get("agent_ids").is_none() {
         if let Some(object) = value.as_object_mut() {
-            object.insert("agent_ids".to_string(), json!([args.agent.as_str()]));
+            object.insert("agent_ids".to_string(), json!([request.agent.as_str()]));
         }
     }
-    lifecycle_port::heal_leader_after_lifecycle(&mut value, &args.workspace, args.team.as_deref());
-    append_send_guidance(&mut value, &args.workspace, args.team.as_deref());
-    Ok(CmdResult::from_json(value, args.json))
+    if value.get("status").and_then(Value::as_str) != Some("already_running") {
+        lifecycle_port::heal_leader_after_lifecycle(&mut value, &request.workspace, request.team.as_deref());
+    }
+    append_send_guidance(&mut value, &request.workspace, request.team.as_deref());
+    Ok(CmdResult::from_json(value, json_output))
 }
 
 /// `cmd_stop_agent`(`commands.py:359`)。
@@ -551,21 +557,14 @@ pub fn cmd_reset_agent(args: &ResetAgentArgs) -> Result<CmdResult, CliError> {
 
 /// `cmd_add_agent`(`commands.py:373`)。
 pub fn cmd_add_agent(args: &AddAgentArgs) -> Result<CmdResult, CliError> {
-    let mut value = with_legacy_retired(&args.workspace, || lifecycle_port::add_agent(
-        &args.workspace,
-        &args.agent,
-        &args.role_file,
-        args.team.as_deref(),
-        args.force,
-        &args.role_config,
-    ))?;
-    if value.get("agent_ids").is_none() {
-        if let Some(object) = value.as_object_mut() {
-            object.insert("agent_ids".to_string(), json!([args.agent.as_str()]));
-        }
+    if args.force {
+        return Err(CliError::Usage("--force is not part of start; stop the agent before changing configuration".into()));
     }
-    append_send_guidance(&mut value, &args.workspace, args.team.as_deref());
-    Ok(CmdResult::from_json(value, args.json))
+    cmd_start_request(&crate::lifecycle::seat_start::StartRequest {
+        workspace:args.workspace.clone(),team:args.team.clone(),agent:crate::model::ids::AgentId::new(&args.agent),
+        role_file:(!args.role_file.is_empty()).then(|| PathBuf::from(&args.role_file)),patch:args.role_config.clone(),
+        session:crate::lifecycle::seat_start::SessionPolicy::Preserve,
+    },args.json)
 }
 
 /// `cmd_fork_agent`(`commands.py:383`)。

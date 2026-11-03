@@ -25,13 +25,15 @@ Use existing resources rather than establishing accounts. `team-agent doctor --w
 | Bypass `true` | Fewer interruptions, broader automatic authority |
 | Bypass `false` | Native permissions remain; human confirmation may interrupt unattended work |
 
-False is **not** a read-only or sandbox guarantee. Different workers may use different providers; an existing worker cannot change provider. Do not invent a model or effort when the user left it unset.
+False is **not** a read-only or sandbox guarantee. Different workers may use different providers; a stopped worker can change provider with `start AGENT --provider PROVIDER --model MODEL --session fresh`, retaining its identity and history. Do not invent a model or effort when the user left it unset.
 
-## Prepare once, start every day
+## Start directly, or prepare a reusable team
 
 Open the intended workspace in a terminal and run `team-agent pi` (or another supported provider). With no live leader, launch automatically publishes the complete leader binding and discovery entry. A live leader on another terminal is preserved. Use `team-agent claim-leader --confirm` only for intentional recovery/preemption; repeated claims refresh the same binding and readiness. Provider `--attach-existing` is a claim alias, not another binding mechanism.
 
-Keep the goal in `TEAM.md` and each worker's instructions in `agents/*.md`. The filename stem is the worker's in-team short name:
+For an ad-hoc worker, run `team-agent start reviewer`; no source files are required. Receipts expose `declaration`, `defaulted`, and `session_policy`. New omitted settings default safely (supported leader provider or Pi, bypass=false, native model/effort where supported); unsupported native capabilities still refuse rather than inventing values.
+
+For a reusable team, keep the goal in `TEAM.md` and instructions in `agents/*.md`. The filename stem is the worker's in-team short name:
 
 ```text
 .team/current/
@@ -39,7 +41,7 @@ Keep the goal in `TEAM.md` and each worker's instructions in `agents/*.md`. The 
   agents/reviewer.md
 ```
 
-Record provider and boolean bypass in every new role. This example assumes the user explicitly chose Pi and bypass false; it is not a default:
+Record explicit provider and permission choices when needed. This example pins Pi and bypass false:
 
 ```markdown
 ---
@@ -58,7 +60,7 @@ team-agent send reviewer "Review this change" --workspace . --team project-team
 team-agent inbox leader --workspace . --team project-team -n 3
 ```
 
-The first `start` creates a complete configured team through the original creation path. Later `start` keeps physically verified, drift-free live seats unchanged and starts stopped non-paused seats, including explicitly stopped seats. It is not a reset. Missing configuration, ambiguous scope or unknown physical identity is a refusal, not permission to overwrite state. `--dry-run` plans without lifecycle effects; final locked admission is still deferred.
+The first `start` creates a complete configured team through the original creation path. Later team `start` keeps verified live seats unchanged and preserves explicitly stopped/paused seats; `start AGENT` reactivates the selected seat. It is not a reset. Missing configuration, ambiguous scope or unknown physical identity is a refusal, not permission to overwrite state. `--dry-run` plans without lifecycle effects; final locked admission is still deferred.
 
 Accepted/queued send is **not** the worker's answer. Wait for a natural reply/result. `ok: true` with pending readiness is not business readiness. A live no-op does not synchronize edited role bodies or apply changed launch settings.
 
@@ -75,19 +77,19 @@ team-agent team restart --workspace . --team project-team --json
 
 | Intent | Rule |
 |---|---|
-| `start AGENT` | Wake a stopped registered seat; verified live/no-drift is a no-op. A RoleOnly seat can be added from its complete role file |
+| `start AGENT` | Create, adopt a role, resume a stopped seat, or prove an identical live no-op through one contract |
 | `start` | Explicitly activate the selected non-paused roster; do not use it unless that activation is authorized |
 | `stop AGENT` / `stop` | Retain saved session associations; whole-team stop also checks scoped residual resources |
 | `restart AGENT` / `team restart` | Default `--session auto`: resume when proven, otherwise only the original legal fresh fallback. **Auto does not guarantee preserved memory** |
 | `--session preserve` | Require available continuation evidence; refuse before stopping when continuation is known unavailable |
 
-Team restart preserves explicitly stopped and paused seats; use `start` when intentionally waking the roster. Paused seats are not implicitly unpaused. A same-named directory makes `restart ID` ambiguous: use `agent restart ID`. `reviewer.v2` remains an agent ID; choose a team source with `--from DIR`, `team start DIR` or an explicit path such as `./roles`.
+Team start/restart preserves explicitly stopped and paused seats; use `start AGENT` when intentionally waking one seat. Paused seats are not implicitly unpaused. A same-named directory makes `restart ID` ambiguous: use `agent restart ID`. `reviewer.v2` remains an agent ID; choose a team source with `--from DIR`, `team start DIR` or an explicit path such as `./roles`.
 
 For strict recovery, prefer `team-agent team restart --session preserve --workspace . --team project-team`. Do not convert a refusal or partial/unknown replacement into reset, force or blind retry. Inspect `status`/`doctor` in the same scope first. Native unsupported capabilities remain refusals, never a legacy fallback.
 
 ## Add or change one worker
 
-With the user's provider/bypass choices, `start` unifies adding an absent seat and waking an existing one:
+`start` resolves creation, adoption, wake-up and configuration through the same declaration resolver:
 
 ```sh
 team-agent start auditor --role-file /absolute/path/to/auditor.md
@@ -96,9 +98,9 @@ team-agent stop reviewer
 team-agent start reviewer --effort high --bypass false
 ```
 
-The Pi/false example above still requires the user's explicit choices. File/CLI conflicts are rejected before writing or startup. Omitted settings/body are preserved; `--prompt` replaces the permanent role body, not a one-time task. Stop a running worker before changing settings or instructions. Provider changes are refused. Startup failure restores role/spec bytes and reports failure, not an applied update.
+Explicit CLI fields override the selected declaration; omitted values preserve existing settings or appear in `defaulted`. `--prompt` replaces permanent instructions, not a one-time task. Stop a running worker before changing configuration or requesting a fresh session. A stopped provider/model migration uses `team-agent start AGENT --provider PROVIDER --model MODEL --session fresh`; identity and old history are retained. `preserve` refuses provider changes. `fresh` and `--allow-fresh` cannot be combined. Unknown/partial startup does not promise rollback: inspect scoped evidence before retrying.
 
-Use `agent add/remove/reset/clone/fork` only for those explicit operations. Reset needs intentional approval and `--discard-session`. Remove and reset refuse a seat that is still working: wait for it or `stop` it first (remove also needs `--force` for a running idle seat). Fork requires `--as NEW_ID`, and `--in-place` is not supported. See [the operator reference](references/team-agent-operator.md) for capability, profile, force and import boundaries. Never put secrets in role text or copy authentication from another directory.
+Use `agent remove/reset/clone/fork` only for those distinct operations; never remove a seat merely to change provider/model. Reset needs intentional approval and `--discard-session`. Remove and reset refuse a seat that is still working: wait for it or `stop` it first (remove also needs `--force` for a running idle seat). Fork requires `--as NEW_ID`, and `--in-place` is not supported. See [the operator reference](references/team-agent-operator.md) for capability, profile, force and import boundaries. Never put secrets in role text or copy authentication from another directory.
 
 ## Optional native CLI argv routing
 
@@ -128,14 +130,15 @@ Finish with `team-agent stop --workspace . --team project-team --json` when auth
 
 ## Compatibility bridges, not the daily workflow
 
-Old commands remain available for existing scripts; their output/defaults are not silently rewritten:
+The old add/start spellings are direct aliases of the unified start contract. Other compatibility operations retain their documented boundaries:
 
 | Compatibility entry | Preferred daily surface |
 |---|---|
 | `quick-start` | `start --from TEAMDIR` for creation and later `start` for activation |
 | `shutdown` | `stop` / `team stop` |
-| `add-agent` / `start-agent` / `stop-agent` | `agent add` for strict add, or `start AGENT` / `stop AGENT` |
+| `add-agent` / `agent add` / `start-agent` | Direct aliases of `start AGENT`; no separate strict-add contract |
+| `stop-agent` | `stop AGENT` |
 | `remove-agent` / `reset-agent` / `clone-agent` / `fork-agent` | The corresponding `agent` operation |
 | Bare or explicit-path `restart` | Frozen preserve bridge; deliberate `team restart` defaults to auto |
 
-These are not all byte-equivalent aliases: legacy single-seat start refuses a running seat, while new start can prove a no-op. Do not mechanically rename automation, assume unsupported provider capabilities, or infer deployment from package metadata.
+The unified start aliases share defaults, session policy, no-op/refusal rules and receipts. Do not assume unsupported provider capabilities or infer deployment from package metadata.

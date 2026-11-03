@@ -29,7 +29,7 @@ fn schema(command: &str) -> Option<Schema> {
         "intent-start" | "start" => (
             &[
                 ("--from", Path),
-                ("--session", Choice(&["auto", "preserve"])),
+                ("--session", Choice(&["auto", "preserve", "fresh"])),
                 ("--dry-run", Switch),
                 ("--allow-fresh", Switch),
                 ("--provider", Token),

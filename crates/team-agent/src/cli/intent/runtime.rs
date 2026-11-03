@@ -764,6 +764,36 @@ fn plan_with_observer(
     let initialized = selected
         .as_ref()
         .is_some_and(|s| crate::lifecycle::launch::surface_has_runtime_team(&s.state, &s.team_key));
+    if plan.intent.verb == Verb::Start {
+        if let Subject::Agent(id) = &plan.intent.subject {
+            let id = id.clone();
+            if let Some(selected) = &selected {
+                plan.scope.workspace = selected.run_workspace.clone();
+                plan.scope.team = Some(selected.team_key.clone());
+            } else if plan.scope.team.is_none() {
+                plan.scope.team = Some("current".into());
+            }
+            let request = crate::lifecycle::seat_start::StartRequest {
+                workspace: plan.scope.workspace.clone(), team: plan.scope.team.clone(), agent: id.clone(),
+                role_file: plan.intent.role_file.clone(), patch: plan.intent.patch.clone(), session: plan.intent.session,
+            };
+            let live = if let Some((selected, row)) = selected.as_ref().and_then(|selected| selected.state["agents"].get(id.as_str()).map(|row|(selected,row))) {
+                match observe(selected, id.as_str(), row)? {
+                    Observation::Live => true,
+                    Observation::StoppedVerified | Observation::Unstarted => false,
+                    Observation::NativeReconcile | Observation::Unknown => return Err(refusal("agent ownership/liveness is unverified; inspect status before start")),
+                }
+            } else { false };
+            let description = checked(crate::lifecycle::seat_start::describe(&request, selected.as_ref(), live))?;
+            if description.op == "already_running" {
+                plan.skipped.push(json!({"agent":id.as_str(),"reason":"already_running",
+                    "declaration":description.declaration,"defaulted":description.defaulted}));
+            } else {
+                plan.steps.push(Step::UnifiedStart { request, description });
+            }
+            return Ok(plan);
+        }
+    }
     if !initialized {
         if plan.intent.verb == Verb::Start && !new_named_team {
             if let Subject::Agent(id) = &plan.intent.subject {
@@ -1280,6 +1310,8 @@ pub(super) fn advance_topology(plan: &mut Plan, step: &Step, receipt: &Value) ->
 }
 
 pub(super) fn recheck(plan: &Plan, step: &Step, after_stop: bool) -> Result<(), CliError> {
+    // StartRequest repeats resolution and ownership checks under its own seat lock.
+    if matches!(step, Step::UnifiedStart { .. }) { return Ok(()); }
     for (path, bytes) in &plan.files {
         if std::fs::read(path)? != *bytes {
             return Err(refusal(format!(

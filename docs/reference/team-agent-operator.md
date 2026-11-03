@@ -61,7 +61,6 @@ team-agent add-agent reviewer --role-file .team/current/agents/reviewer.md --wor
 team-agent approvals
 team-agent approvals <agent_id>
 team-agent approvals [coder]
-team-agent attach-leader
 team-agent claim-leader
 team-agent claude
 team-agent clone-agent <source> --as <new>
@@ -130,7 +129,7 @@ team-agent inbox leader --workspace . --team project-team -n 3
 team-agent stop --workspace . --team project-team --json
 ```
 
-Creation needs complete configuration; start is not automatic template generation or state repair. Later start starts stopped non-paused members, including explicitly stopped members, and leaves verified live/drift-free instances unchanged. A no-op does not synchronize role bodies, apply new launch settings or prove tool/business readiness. A queued send is not completion; wait for a natural reply/result.
+`start AGENT` can create an ad-hoc seat without pre-existing files, or adopt its existing role document. Team creation from `--from` uses a complete source. Later team start preserves explicitly stopped/paused members and leaves verified live seats unchanged; `start AGENT` explicitly reactivates one seat. Start is not permission to repair corrupt ownership. A no-op does not synchronize role bodies, apply new launch settings or prove tool/business readiness. A queued send is not completion; wait for a natural reply/result.
 
 ## Scope and deterministic targets
 
@@ -142,9 +141,9 @@ Creation needs complete configuration; start is not automatic template generatio
 
 ## User decisions and compatibility
 
-Do not silently pick provider, model, effort or bypass. False preserves native permissions; it is not a read-only or sandbox guarantee. Use supported `models --provider NAME` discovery and retain exact model IDs.
+Honor explicit provider, model, effort and bypass choices. The unified resolver reports omitted decisions in `defaulted`; provider defaults to a supported leader provider or Pi, bypass to false, and native model/effort defaults are used only where the provider admits them. False preserves native permissions; it is not a read-only or sandbox guarantee. Use supported `models --provider NAME` discovery and retain exact model IDs.
 
-Traditional minimal Markdown remains accepted by the original compiler. Its compatibility interpretation is **not a default for a new user plan**: provider defaults to Pi, bypass to false, and unset model/effort are left to the provider. Codex and Grok workers run only through their contract leaves, which require an exact model ID from `team-agent models --provider codex|grok`; an unset model is refused, never guessed. Team Agent does not infer a role model from TEAM defaults. Contract leaves use only an explicit role effort; legacy explicit TEAM provider_effort remains supported for non-Pi legacy roles (Claude, Copilot, Gemini); do not invent an effort for unspecified roles.
+Traditional minimal Markdown remains accepted by the original compiler. Omitted values use the same safe declaration defaults: provider falls back to Pi, bypass to false, and unset model/effort are left to the provider where admitted. Codex and Grok workers run only through their contract leaves, which require an exact model ID from `team-agent models --provider codex|grok`; an unset model is refused, never guessed. Team Agent does not infer a role model from TEAM defaults. Contract leaves use only an explicit role effort; legacy explicit TEAM provider_effort remains supported for non-Pi legacy roles (Claude, Copilot, Gemini); do not invent an effort for unspecified roles.
 
 Supported role metadata:
 - `agent_id` (legacy `name`) and `role` identify the seat.
@@ -155,16 +154,16 @@ Supported role metadata:
 
 ## Add or wake with start
 
-A RoleOnly seat can be registered from its complete role file. A genuinely absent ID needs a complete file or explicit provider/bypass choices. These Pi/false values are examples of user decisions, not defaults:
+One `start AGENT` contract creates absent seats, adopts existing role files, and resumes stopped seats. No prewritten file or repeated provider/bypass decision is required for an ad-hoc start. Receipts include `session_policy`, an effective `declaration`, and the `defaulted` field list:
 
 ```sh
 team-agent start auditor --role-file /absolute/path/to/auditor.md
 team-agent start analyst --provider pi --bypass false --prompt "Analyze the proposed change"
 ```
 
-An imported external role goes into this team's `agents/ID.md`; the original stays untouched. A file already at that destination is used in place. Equal file/CLI definitions are accepted; conflicting provider/model/effort/bypass/prompt/profile values refuse before writes/startup. Omitted model, effort, profile and role body remain unchanged.
+An imported external role goes into this team's `agents/ID.md`; the original stays untouched. A file already at that destination is used in place. Explicit CLI fields override the selected declaration. Omitted existing fields and role instructions remain unchanged; genuinely omitted defaults are identified in receipts.
 
-Use `agent add` when explicitly requesting strict add-only behavior. It creates and starts a new seat but refuses an occupied ID, including stopped seats. Its disaster-recovery `--force` still requires a positively dead registered old pane and no live target cohort; a live or unknown target refuses. Force is not a role-update or routine restart shortcut.
+`add-agent`, `agent add` and `start-agent` are hidden direct aliases of `start AGENT`. There is no second strict-add contract and no start `--force` option. Unknown ownership or liveness refuses rather than granting permission to replace a process.
 
 ## Change a registered seat
 
@@ -173,9 +172,9 @@ team-agent stop reviewer --workspace . --team project-team
 team-agent start reviewer --effort high --bypass false --workspace . --team project-team
 ```
 
-Stop first before applying edited instructions or launch settings. A running seat with requested changes or known drift refuses rather than claiming a successful no-op. `--prompt` replaces permanent role instructions, not a one-time task; send one-time work with `send`. `--bypass` requires explicit true/false. Matching provider is allowed, but changing engines, even by file edits, is refused; use a new ID.
+Stop first before applying edited instructions or launch settings. A running seat with requested changes or known drift refuses rather than claiming a successful no-op. `--prompt` replaces permanent role instructions, not a one-time task; send one-time work with `send`. `--bypass` requires explicit true/false. A stopped seat may change provider/model with `start AGENT --provider PROVIDER --model MODEL --session fresh`. Its logical ID and history are retained. Provider changes under preserve or auto refuse and instruct fresh. A live seat with identical configuration is a no-op; any changed configuration or fresh-session request requires `stop AGENT` first.
 
-The original role/spec transaction and provider admission remain authoritative. A failure is not an applied update; never assume a partial/unknown native replacement was rolled back or is safe to retry. Inspect the exact scoped receipt, status and doctor first.
+The original role/spec transaction and provider admission remain authoritative. A failure can follow a committed declaration or uncertain launch; never assume a partial/unknown native replacement was rolled back or is safe to retry. Inspect the exact scoped receipt, status and doctor first.
 
 ## Restart and session policy
 
@@ -187,9 +186,9 @@ team-agent agent restart reviewer --session preserve --workspace . --team projec
 team-agent team restart --session preserve --workspace . --team project-team
 ```
 
-New agent/team restart defaults to **auto**: proven resume when possible, otherwise only the provider's existing legal fresh path. Auto is not a guarantee of saved memory, reset permission or a fallback around native capability refusal. Preserve requests strict continuation. The old bare/explicit-path restart bridge retains its original preserve default and output.
+New agent/team restart defaults to **auto**: proven resume when possible, otherwise only the provider's existing legal fresh path. Auto is not a guarantee of saved memory, reset permission or a fallback around native capability refusal. Preserve requests strict continuation. Start defaults to preserve; `start AGENT --session fresh` explicitly creates a new native session while retaining old history. Fresh and `--allow-fresh` cannot be combined. The old bare/explicit-path restart bridge retains its original preserve default and output.
 
-Single-agent restart checks scope, role/session backing and capabilities before stop; only confirmed stop allows start. On partial failure, report actual completed steps and inspect; do not blindly reset or replay. Team restart does not reactivate explicitly stopped or paused seats. Whole-team start intentionally activates the selected non-paused roster; neither command silently unpauses.
+Single-agent restart checks scope, role/session backing and capabilities before stop; only confirmed stop allows start. On partial failure, report actual completed steps and inspect; do not blindly reset or replay. Team restart does not reactivate explicitly stopped or paused seats. Whole-team start also preserves explicit stops; use `start AGENT` for an intentional wake-up. Neither command silently unpauses.
 
 ## Explicit agent operations
 
@@ -221,4 +220,4 @@ Workers have only `send_message`, `report_result` and optional `get_team_status`
 
 ## Legacy command bridges
 
-Existing scripts may retain `quick-start`, `shutdown`, and `add-agent/start-agent/stop-agent/remove-agent/reset-agent/clone-agent/fork-agent`. These are compatibility interfaces, not the daily workflow. Use the short/team/agent forms above for new instructions. Do not mechanically rename scripts: legacy start refuses a live seat, new start can prove a no-op; bare/explicit-path legacy restart preserves its default. Old normal command output and failure evidence remain authoritative.
+Existing scripts may retain `quick-start`, `shutdown`, and `add-agent/start-agent/stop-agent/remove-agent/reset-agent/clone-agent/fork-agent`. These are compatibility interfaces, not the daily workflow. Use the short/team/agent forms above for new instructions. The add/start spelling aliases share one resolver, defaults, session policy, no-op/refusal rules and receipts. Bare/explicit-path legacy restart preserves its separate documented default. Startup evidence remains authoritative.

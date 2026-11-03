@@ -113,6 +113,7 @@ fn emit_cli_error_for_command(
     cwd: &Path,
     error: &CliError,
 ) -> ExitCode {
+    let command = match command { "add-agent" | "start-agent" => "start", other => other };
     let missing_input = matches!(error, CliError::Usage(message) if message.starts_with("missing ") || message.starts_with("Provide ") || matches!(message.as_str(), "add-agent requires --provider <name>" | "--source is required unless --uninstall"));
     if command_spec(command).is_some() && missing_input {
         let help = command_help(Some(command));
@@ -386,26 +387,17 @@ fn is_known_subcommand(command: &str) -> bool {
 }
 
 pub(crate) fn default_help() -> String {
-    let mut out = String::from("Team Agent: create a team, send tasks, read replies and shut down safely.\n\n1. Prepare agents\n   Prepare TEAM.md and agents/*.md with explicit provider and bypass decisions; use --from for an external source.\n2. Open a leader and create the team\n   With a provider installed and signed in, run team-agent pi (or claude/codex).\n   Provider launch automatically binds the leader and publishes its discovery entry when no live leader exists.\n   A live leader on another terminal is preserved; claim-leader --confirm is the explicit recovery/preemption path.\n   Run team-agent start in that leader's tool context. Verified live members stay unchanged; stopped members are started.\n   Use team restart for a deliberate restart (session auto); legacy bare restart retains preserve. Do not take over or delete an existing team.\n3. Send tasks and read replies\n   team-agent send worker 'Calculate 245 * 37 and reply to the leader.'\n   team-agent inbox leader -n 3\n   team-agent status\n   Sending is not completion; wait for an actual reply.\n4. Diagnose and stop\n   team-agent doctor --workspace .\n   team-agent stop --workspace . --json\n   Verify this team's residual resources are empty, then diagnose the selected workspace.\n\nSelect workspace/team scope with --workspace/--team. Discover model names with models.\nWindows ConPTY requires a Windows host and an installed shim; tmux commands are not a generic Windows path.\n");
+    let mut out = String::from("Team Agent: create a team, send tasks, read replies and shut down safely.\n\n1. Prepare agents\n   Run team-agent start worker for a new or stopped seat; no files are required. Omitted launch settings use safe defaults and are reported in defaulted. Existing agents/*.md declarations are adopted. Use --from for a prepared team source.\n2. Open a leader and create the team\n   With a provider installed and signed in, run team-agent pi (or claude/codex).\n   Provider launch automatically binds the leader and publishes its discovery entry when no live leader exists.\n   A live leader on another terminal is preserved; claim-leader --confirm is the explicit recovery/preemption path.\n   Run team-agent start in that leader's tool context. Verified live members stay unchanged; explicitly stopped members remain stopped. Use team-agent start worker to reactivate one seat.\n   Use team restart for a deliberate restart (session auto); legacy bare restart retains preserve. Do not take over or delete an existing team.\n3. Send tasks and read replies\n   team-agent send worker 'Calculate 245 * 37 and reply to the leader.'\n   team-agent inbox leader -n 3\n   team-agent status\n   Sending is not completion; wait for an actual reply.\n4. Diagnose and stop\n   team-agent doctor --workspace .\n   team-agent stop --workspace . --json\n   Verify this team's residual resources are empty, then diagnose the selected workspace.\n\nSelect workspace/team scope with --workspace/--team. Discover model names with models.\nWindows ConPTY requires a Windows host and an installed shim; tmux commands are not a generic Windows path.\n");
     append_help_section(
         &mut out,
         "Getting started",
-        &["start", "quick-start", "send", "schedule", "status", "models", "inbox"],
+        &["start", "send", "schedule", "status", "models", "inbox"],
     );
-    append_help_section(&mut out, "Team lifecycle", &["stop", "team", "restart", "shutdown"]);
+    append_help_section(&mut out, "Team lifecycle", &["stop", "team", "restart"]);
     append_help_section(
         &mut out,
         "Agent lifecycle",
-        &[
-            "agent",
-            "add-agent",
-            "start-agent",
-            "stop-agent",
-            "reset-agent",
-            "clone-agent",
-            "fork-agent",
-            "remove-agent",
-        ],
+        &["agent"],
     );
     append_help_section(
         &mut out,

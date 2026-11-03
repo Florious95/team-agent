@@ -118,7 +118,7 @@ fn resolve_active_team_with(
         // E5 Bug2 N38:spec=中间产物,运行期由 restart 以角色定义重建;首装走 quick-start;
         // 加新角色用 add-agent。不再提 reconcile(已废)。
         return Err(StateError::TeamSelect(format!(
-            "active team spec not found: input_workspace={} run_workspace={} team_key={} expected_spec_path={} hint=run `team-agent restart` to rebuild it from the role docs, or `team-agent quick-start <teamdir>` for first launch (to add a role at runtime use `team-agent add-agent <id> --role-file <path>`)",
+            "active team spec not found: input_workspace={} run_workspace={} team_key={} expected_spec_path={} hint=run `team-agent restart` to rebuild it from the role docs; for first launch prepare TEAM.md and roles, then run `team-agent start --from .` in their directory",
             input.display(),
             run_workspace.display(),
             team_key,

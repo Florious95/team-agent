@@ -475,6 +475,29 @@ fn compile_role_agent_with_mode(
     team_communication_mode: CommunicationMode,
 ) -> Result<CompiledRole, ModelError> {
     let (meta, body) = read_front_matter(role_path)?;
+    compile_role_parts(role_path, team_meta, workspace_s, team_communication_mode, meta, body)
+}
+
+/// Compile captured declaration bytes without materializing a temporary role file.
+pub(crate) fn compile_role_text(
+    role_path: &Path,
+    text: &str,
+    team_meta: &Value,
+    workspace_s: &str,
+) -> Result<CompiledRole, ModelError> {
+    let mode = communication_mode_field(team_meta, role_path)?.unwrap_or_default();
+    let (meta, body) = split_front_matter(text);
+    compile_role_parts(role_path, team_meta, workspace_s, mode, meta, body)
+}
+
+fn compile_role_parts(
+    role_path: &Path,
+    team_meta: &Value,
+    workspace_s: &str,
+    team_communication_mode: CommunicationMode,
+    meta: Value,
+    body: String,
+) -> Result<CompiledRole, ModelError> {
     let communication_mode =
         communication_mode_field(&meta, role_path)?.unwrap_or(team_communication_mode);
     let id = string_field(&meta, "agent_id")

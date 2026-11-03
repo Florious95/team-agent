@@ -101,7 +101,7 @@ pub fn require_legacy_role(
     provider: Option<&str>,
 ) -> Result<(), crate::cli::CliError> {
     if declares_contract(path, provider) {
-        return Err(crate::cli::CliError::Runtime("contract_capability_unverified: mutable contract-native role lifecycle is not admitted; use initial quick-start; no role file was changed".into()));
+        return Err(crate::cli::CliError::Runtime("contract_capability_unverified: this legacy role entry is not admitted; use the unified start contract for the selected role; no role file was changed".into()));
     }
     Ok(())
 }

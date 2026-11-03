@@ -48,7 +48,7 @@ pub(crate) fn ensure_agent_not_running(
         let session = target.session.as_str();
         let window = target.window_name.as_ref().map(|name| name.as_str()).unwrap_or_default();
         Err(LifecycleError::RequirementUnmet(format!(
-            "agent {agent_id} is already running (duplicate / active cohort); use restart for changed settings, or stop-agent before replacement; cohort proof: session={} window={window} pane={}",
+            "agent {agent_id} is already running (duplicate / active cohort); run `team-agent stop {agent_id}` before changing configuration; cohort proof: session={} window={window} pane={}",
             session, target.pane_id.as_str(),
         )))
     } else {
@@ -308,12 +308,12 @@ pub(crate) fn start_agent_at_paths(
                 "agent_id": agent_id.as_str(),
                 "file_value": file_bypass,
                 "launched_value": launched_bypass,
-                "action": "noop_denied_require_remove_add_or_force",
+                "action": "stop_before_configuration_change",
             }),
         );
         return Err(LifecycleError::RequirementUnmet(format!(
             "dangerously_skip_permissions drift for agent {agent_id}: file={file_bypass:?} but running process launched with {launched_bypass:?}. \
-             Run `remove-agent {agent_id}` then `add-agent {agent_id}` to apply, or `restart --force {agent_id}` to accept fresh spawn."
+             Run `team-agent stop {agent_id}` before applying configuration with `team-agent start {agent_id}`."
         )));
     }
     if !force && agent_live {
@@ -383,7 +383,7 @@ pub(crate) fn start_agent_at_paths(
     );
     if matches!(start_mode, StartMode::Noop) {
         return Err(LifecycleError::RequirementUnmet(format!(
-            "resume_not_ready: session backing store missing for agent {agent_id}; rerun with --allow-fresh to start fresh"
+            "resume_not_ready: session backing store missing for agent {agent_id}; with approval for a fresh fallback run `team-agent start {agent_id} --session auto`"
         )));
     }
     let spawn_session_id = if matches!(start_mode, StartMode::Resumed) {

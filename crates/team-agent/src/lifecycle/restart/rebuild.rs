@@ -3757,8 +3757,7 @@ fn merge_state_dynamic_role_files(
             return Err(LifecycleError::TeamSelect(format!(
                 "cannot restart: dynamic role file missing for agent '{agent_id}' in team \
                  '{team_key}': {}. \
-                 action: restore the dynamic role file at that path, or run team-agent \
-                 remove-agent {agent_id} --force to drop the dynamic worker before restart. \
+                 action: restore the dynamic role file at that path before retrying; do not remove the seat to repair its declaration. \
                  log: workspace={}",
                 role_path.display(),
                 run_workspace.display(),
