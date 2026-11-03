@@ -70,6 +70,31 @@ impl ContractStore {
             })
             .collect()
     }
+    /// Historical startup evidence for this incarnation, not current MCP health.
+    /// A closed/replaced helper does not revoke a completed startup handshake.
+    pub fn startup_handshake_observed(&self, identity: &InstanceIdentity) -> Result<bool, Error> {
+        for connection in self.connections(identity)? {
+            let Some(evidence) =
+                self.files
+                    .get::<super::mcp::ToolEvidence>(&super::mcp::ToolEvidence::key(
+                        identity,
+                        &connection.connection,
+                    )?)?
+            else {
+                continue;
+            };
+            if evidence.caller != *identity || evidence.connection != connection.connection {
+                return Err(Error::Fence);
+            }
+            if evidence.facts.contains("initialize_response_written")
+                && evidence.facts.contains("tools_list_response_written")
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub fn completed_connection_tools(
         &mut self,
         identity: &InstanceIdentity,

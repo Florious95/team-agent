@@ -81,7 +81,7 @@ mod selection;
 mod team_state;
 
 pub(crate) use agent::{
-    ensure_agent_not_running, live_agent_target, start_agent_at_paths, stop_agent_at_paths,
+    ensure_agent_not_running, live_agent_target, start_agent_at_paths, start_agent_at_paths_with_session, stop_agent_at_paths,
 };
 pub use agent::{reset_agent, start_agent, stop_agent};
 pub(crate) use agent::{

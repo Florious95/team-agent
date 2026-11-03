@@ -137,6 +137,24 @@ fn field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 #[cfg(unix)]
+fn legacy_startup_pending(row: &Value) -> bool {
+    if field(row, "provider") == Some("fake") { return false; }
+    let timestamp = |key| field(row, key).and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
+    let Some(spawned) = timestamp("spawned_at") else { return false; };
+    timestamp("first_send_at").is_none_or(|sent| sent < spawned)
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn cold_readiness_is_incarnation_scoped() {
+    let mut row = json!({"provider":"pi","spawned_at":"2026-01-02T00:00:00Z", "first_send_at":"2026-01-01T00:00:00Z"});
+    assert!(legacy_startup_pending(&row));
+    row["first_send_at"] = json!("2026-01-02T00:00:01Z");
+    assert!(!legacy_startup_pending(&row));
+    assert!(!legacy_startup_pending(&json!({"provider":"fake","spawned_at":"2026-01-02T00:00:00Z"})));
+}
+
+#[cfg(unix)]
 fn native_recipient(info: &Value) -> bool {
     crate::contract_runtime::framework::is_contract(info)
         || field(info, "provider").is_some_and(crate::contract_runtime::registry::recognizes)
@@ -315,6 +333,34 @@ impl Directory {
         Ok(endpoint)
     }
 
+    #[cfg(unix)]
+    fn wait_for_startup(&self, agent: &str, endpoint: &Endpoint, deadline: Instant) -> Result<(), String> {
+        if agent == "leader" { return Ok(()); }
+        let row = self.recipient(agent)?;
+        let native = self.native_seat(agent)?;
+        if native.is_none() && !legacy_startup_pending(row) { return Ok(()); }
+        let team = self.team.as_deref().ok_or("input_not_ready: startup scope missing; no input issued")?;
+        let backend = native.as_ref().map(|_| crate::contract_runtime::backend::Backend::open_readonly(&self.workspace, team))
+            .transpose().map_err(|e| e.to_string())?;
+        let observed = pane_identity(&endpoint.socket, &endpoint.pane_id, deadline)?;
+        loop {
+            if Instant::now() >= deadline {
+                return Err("input_not_ready: startup readiness deadline; no input issued; inspect status/doctor before retrying".into());
+            }
+            verify_identity(&endpoint.socket, &endpoint.pane_id, &observed, None, deadline)?;
+            self.verify_endpoint(agent, endpoint, deadline)?;
+            let initialized = if let (Some(backend), Some((_, seat))) = (&backend, &native) {
+                backend.store.startup_handshake_observed(&seat.identity).map_err(|e| e.to_string())?
+            } else {
+                crate::mcp_server::readiness::startup_observed(&self.workspace, team, agent, row).unwrap_or(false)
+            };
+            // Initialization/tools-list flush is startup evidence, not business
+            // acceptance. Existing composer/ownership guards still precede input.
+            if initialized { return Ok(()); }
+            std::thread::sleep(Duration::from_millis(100).min(deadline.saturating_duration_since(Instant::now())));
+        }
+    }
+
     pub fn send(&self, agent: &str, text: &str) -> Result<Value, String> {
         self.send_with_receipt(agent, text, || Ok(()))
     }
@@ -332,6 +378,8 @@ impl Directory {
         let expected_pid = (agent != "leader").then(|| info.get("pane_pid").or_else(|| info.get("pid")).or_else(|| info.get("native_pid")))
             .flatten().and_then(|value| value.as_u64().or_else(|| value.as_str().and_then(|s| s.parse().ok())))
             .and_then(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 0);
+        #[cfg(unix)]
+        let mut startup_checked = false;
         direct_send_checked(&endpoint.socket, &endpoint.pane_id, &endpoint.dialect, text, expected_pid, true, submitted,
             |deadline| {
                 if agent == "leader" && leader_target_is_sender(&endpoint,
@@ -339,7 +387,13 @@ impl Directory {
                     std::env::var("TMUX_PANE").ok().as_deref()) {
                     return Err("leader_identity_self_collision: target is the sender's own pane".into());
                 }
-                self.verify_endpoint(agent, &endpoint, deadline)
+                self.verify_endpoint(agent, &endpoint, deadline)?;
+                #[cfg(unix)]
+                if !startup_checked {
+                    self.wait_for_startup(agent, &endpoint, deadline)?;
+                    startup_checked = true;
+                }
+                Ok(())
             })?;
         Ok(json!({"status":"sent","recipient":endpoint.agent,"pane_id":endpoint.pane_id,
             "dialect":endpoint.dialect,"delivery":"physical","accepted":null}))

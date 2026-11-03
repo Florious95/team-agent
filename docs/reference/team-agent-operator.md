@@ -190,6 +190,8 @@ New agent/team restart defaults to **auto**: proven resume when possible, otherw
 
 Single-agent restart checks scope, role/session backing and capabilities before stop; only confirmed stop allows start. On partial failure, report actual completed steps and inspect; do not blindly reset or replay. Team restart does not reactivate explicitly stopped or paused seats. Whole-team start also preserves explicit stops; use `start AGENT` for an intentional wake-up. Neither command silently unpauses.
 
+Managed sends after a cold launch wait up to 60 seconds for initialization evidence belonging to that launch before injecting input. A readiness timeout leaves the message stored but injects nothing; inspect status/doctor before retrying. Mailbox-only delivery does not wait. Completed startup evidence survives helper exit or binary upgrades: this is not an ongoing MCP-health gate, nor proof of business acceptance.
+
 ## Explicit agent operations
 
 ```sh

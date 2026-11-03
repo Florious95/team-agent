@@ -1,4 +1,4 @@
-//! Flushed MCP handshakes are diagnostic evidence, not admission to pane input.
+//! Flushed MCP handshakes attest startup, not ongoing MCP health or business readiness.
 //! Each server owns a receipt; foreign writers cannot replace a live server's evidence.
 
 use std::fs::{File, OpenOptions};
@@ -298,7 +298,18 @@ pub(crate) fn preflight(
     let workspace = workspace
         .canonicalize()
         .map_err(|_| "mcp_handshake_workspace")?;
-    let dir = directory(&workspace, false)?;
+    let mut error = "mcp_handshake_missing";
+    for path in receipt_paths(&workspace, owner, agent_id)? {
+        match validate_receipt(&path, &workspace, owner, agent_id, agent, config) {
+            Ok(admission) => return Ok(Some(admission)),
+            Err(reason) => error = reason,
+        }
+    }
+    Err(error)
+}
+
+fn receipt_paths(workspace: &Path, owner: &str, agent_id: &str) -> Result<Vec<PathBuf>> {
+    let dir = directory(workspace, false)?;
     let name = key(owner, agent_id);
     // Older servers publish one slot per seat. Keep it readable during upgrades.
     let mut paths = vec![dir.join(format!("{name}.json"))];
@@ -316,14 +327,32 @@ pub(crate) fn preflight(
             paths.push(entry.path());
         }
     }
-    let mut error = "mcp_handshake_missing";
-    for path in paths {
-        match validate_receipt(&path, &workspace, owner, agent_id, agent, config) {
-            Ok(admission) => return Ok(Some(admission)),
-            Err(reason) => error = reason,
+    Ok(paths)
+}
+
+/// The current launch completed initialization at least once. Deliberately do
+/// not re-fingerprint or require a still-live helper: upgrades and MCP outages
+/// must not revoke already observed startup. The physical carrier stays fenced.
+pub(crate) fn startup_observed(workspace: &Path, owner: &str, agent_id: &str, agent: &Value) -> Result<bool> {
+    let spawned = agent.get("spawned_at").and_then(Value::as_str)
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok()).ok_or("startup_spawn_missing")?;
+    let pid = agent.get("pane_pid").and_then(Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok()).ok_or("startup_carrier_missing")?;
+    let birth = process_birth_identity(pid).map_err(|_| "startup_carrier_missing")?;
+    let workspace = workspace.canonicalize().map_err(|_| "mcp_handshake_workspace")?;
+    for path in receipt_paths(&workspace, owner, agent_id)? {
+        let Ok(receipt) = read_json(&path, true).and_then(|value|
+            serde_json::from_value::<Handshake>(value).map_err(|_| "mcp_handshake_invalid")) else { continue; };
+        let started = DateTime::parse_from_rfc3339(&receipt.started_at).ok();
+        let flushed = DateTime::parse_from_rfc3339(&receipt.flushed_at).ok();
+        if receipt.schema == 1 && receipt.workspace == workspace && receipt.owner == owner && receipt.agent == agent_id
+            && started.is_some_and(|at| at >= spawned)
+            && flushed.zip(started).is_some_and(|(end, start)| end >= start)
+            && receipt.ancestors.iter().any(|ancestor| ancestor.pid == pid && ancestor.birth == birth) {
+            return Ok(true);
         }
     }
-    Err(error)
+    Ok(false)
 }
 
 fn validate_receipt(

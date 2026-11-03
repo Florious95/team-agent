@@ -1,6 +1,6 @@
 //! Cursor TUI grammar, token correlation and receipt-bound folded-paste transfer.
 //! No guessed /session-id, /tools panel, DirectTyping business or retry loop.
-use super::{native::parse_version, CursorAdapter, UNVERIFIED};
+use super::{CursorAdapter, UNVERIFIED};
 use crate::contract::{delivery::*, hooks::*, probe::*, types::*};
 use crate::runtime::delivery::ControlDefinition;
 use std::time::Duration;
@@ -8,10 +8,10 @@ use std::time::Duration;
 pub const PROFILE: &str = "cursor-tui-v1";
 // Recipe identity, NOT an installed release hash. Framework timing bounds are
 // deliberate budgets, not a claim that one recon run proved production latency.
-// SHA256 cursor-tui-v1|bracketed|enter=1|trailer=none|retry=never|capture=100ms|stable=200ms|floor=100ms|deadline=30s|correlation=baseline-seen-token-gone-transcript|folded-seen=empty-current-owned-paste-v1|folded-accepted=new-transcript-block-v1-or-visible-token|composer=footer-bounded-inline-or-standalone-arrow-v2|visible-seen=attempt-scoped-current-region-v2|visible-accepted=empty-current-new-transcript-v2
+// SHA256 cursor-tui-v1|bracketed|enter=1|trailer=none|retry=never|capture=100ms|stable=200ms|floor=100ms|deadline=30s|correlation=baseline-seen-token-gone-transcript|folded-seen=empty-current-owned-paste-v1|folded-accepted=new-transcript-block-v1-or-visible-token|composer=footer-bounded-inline-or-standalone-arrow-v3-banner-independent|visible-seen=attempt-scoped-current-region-v2|visible-accepted=empty-current-new-transcript-v2
 pub const POLICY: Digest = Digest([
-    0x08, 0x90, 0x5f, 0x19, 0x3b, 0xf8, 0x3a, 0x4d, 0xb5, 0xe9, 0x96, 0xc9, 0x70, 0xd9, 0x64, 0xa0,
-    0x63, 0x63, 0x8c, 0xf4, 0x2b, 0x99, 0xea, 0x3c, 0xe4, 0x59, 0x17, 0xdf, 0x4d, 0x79, 0xf2, 0x16,
+    0xd0, 0x26, 0x98, 0x84, 0x9f, 0x3e, 0xeb, 0x38, 0x32, 0x66, 0x84, 0x8d, 0x2a, 0x4b, 0xb9, 0xc6,
+    0xe5, 0x7e, 0x30, 0xa6, 0x11, 0x64, 0x9c, 0xb2, 0x59, 0xa0, 0xeb, 0x2e, 0xf5, 0x6b, 0x32, 0xeb,
 ]);
 const SUBMIT: SubmitPolicy = SubmitPolicy {
     paste_mode: PasteMode::Bracketed, payload_trailer: PayloadTrailer::None,
@@ -107,15 +107,28 @@ fn composer_view(text: &str) -> Option<ComposerView<'_>> {
     Some(ComposerView { start, rows, input, footer, busy, empty })
 }
 fn surface(text: &str) -> InputSurface {
-    let lines: Vec<_> = text.lines().map(str::trim).collect();
-    if !lines.windows(2).any(|pair| pair[0] == "Cursor Agent"
-        && pair[1].strip_prefix('v').is_some_and(|version| parse_version(version.as_bytes()).is_ok()))
-    { return InputSurface::ShellOrUnknown; }
+    // Resumed history can push the initial version banner into scrollback.
+    // Require the measured current composer/footer grammar, not that old banner.
+    // Host image/identity fencing remains separate; Busy never becomes Ready.
     let Some(composer) = composer_view(text) else { return InputSurface::ShellOrUnknown; };
     if composer.busy { InputSurface::Busy }
     else if composer.empty { InputSurface::ComposerReady }
     else { InputSurface::ComposerContainsPaste }
 }
+#[cfg(test)]
+#[test]
+fn resumed_history_may_hide_the_banner_but_not_the_composer_or_busy_state() {
+    let ready = "Old conversation\n\n→ Add a follow-up\n\nComposer 2.5 · 14.3%  Run Everything\n/project\n";
+    assert_eq!(surface(ready), InputSurface::ComposerReady);
+    let busy = ready.replace("→ Add a follow-up", "⠘⠆ Working\n→ Add a follow-up");
+    assert_eq!(surface(&busy), InputSurface::Busy);
+    let busy_footer = ready.replace("Add a follow-up", "Add a follow-up ctrl+c to stop");
+    assert_eq!(surface(&busy_footer), InputSurface::Busy);
+    assert_eq!(surface(&ready.replace("Add a follow-up", "unsent draft")), InputSurface::ComposerContainsPaste);
+    assert_eq!(surface(&ready.replace("Run Everything", "")), InputSurface::ShellOrUnknown);
+    assert_eq!(surface("→ Add a follow-up"), InputSurface::ShellOrUnknown);
+}
+
 // A folded block is native UI identity, NOT a claim that its hidden token was
 // read. Keep the latch bound to this attempt/subject; never reuse a screen label
 // across generations, sessions, panes, messages or attempts.

@@ -161,6 +161,78 @@ fn peer_transfer_is_durable_and_restored_only_after_compensation() {
 }
 
 #[test]
+fn startup_handshake_requires_both_flushed_responses_and_survives_helper_exit() {
+    use crate::host::process::{ImageStamp, ProcessStamp};
+    use crate::orchestration::{
+        mcp::{response_written, CallContext},
+        protocol::ConnectionRecord,
+    };
+    let mut f = Fixture::new();
+    f.store.begin_replacing_peer(&f.operation, &f.peer).unwrap();
+    f.operation.phase = Phase::F5Receipt;
+    f.operation.outcome = Outcome::Committed;
+    f.operation.target.status = SeatStatus::Ready;
+    f.store.save(&f.operation, true).unwrap();
+    let identity = f.operation.target.identity.clone();
+    assert!(!f.store.startup_handshake_observed(&identity).unwrap());
+    let connection = InstanceId::new("startup-connection").unwrap();
+    let process = ProcessStamp {
+        identity: crate::contract::probe::ProcessIdentity {
+            pid: 123,
+            birth_identity: "fixture".into(),
+            executable: "fixture".into(),
+            executable_sha256: Digest([1; 32]),
+        },
+        parent: 1,
+        image: ImageStamp {
+            device: 1,
+            inode: 1,
+            length: 1,
+            modified_ns: 1,
+        },
+        inputs: vec![],
+    };
+    let record = ConnectionRecord {
+        identity: identity.clone(),
+        connection: connection.clone(),
+        server_key: f.operation.target.server_key.clone(),
+        binding_key: f.operation.target.binding_key.clone(),
+        process: process.clone(),
+        native_process: process,
+        closed: false,
+    };
+    // Install controlled connection evidence; no process liveness is fabricated by production code.
+    let key = Key::new("connections", connection.as_str());
+    let index = Key::new("connection_index", identity.instance.as_str());
+    let mut tx = f.store.files.write([key.clone(), index.clone()]).unwrap();
+    tx.put(key, &record).unwrap();
+    tx.put(index, &vec![connection.clone()]).unwrap();
+    tx.commit().unwrap();
+    let context = CallContext {
+        identity: identity.clone(),
+        binding_key: record.binding_key,
+        connection_id: connection.clone(),
+        task_id: "startup".into(),
+    };
+    response_written(
+        &mut f.store,
+        &context,
+        &serde_json::json!({"id":1,"method":"initialize"}),
+    )
+    .unwrap();
+    assert!(!f.store.startup_handshake_observed(&identity).unwrap());
+    response_written(
+        &mut f.store,
+        &context,
+        &serde_json::json!({"id":2,"method":"tools/list"}),
+    )
+    .unwrap();
+    assert!(f.store.startup_handshake_observed(&identity).unwrap());
+    f.store.close_connection(&identity, &connection).unwrap();
+    assert!(f.store.startup_handshake_observed(&identity).unwrap());
+}
+
+#[test]
 fn committed_transfer_keeps_native_authority_and_sibling_peer() {
     let mut f = Fixture::new();
     f.store.begin_replacing_peer(&f.operation, &f.peer).unwrap();

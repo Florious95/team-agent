@@ -509,6 +509,26 @@ pub(crate) fn persist_command_plan_state(
     }
 }
 
+#[test]
+fn capture_root_follows_the_new_plan_without_clobbering_resume_context() {
+    // Fresh callers have archived/cleared the previous capture metadata.
+    let mut row = serde_json::Map::new();
+    let mut plan = crate::provider::CommandPlan::argv_only(vec!["claude".into()]);
+    let profile = crate::provider::ProviderProfileLaunch::default();
+    persist_command_plan_state(&mut row, &plan, &profile);
+    assert!(!row.contains_key("claude_projects_root"));
+    assert!(!row.contains_key("profile_launch"));
+    assert!(!row.contains_key("managed_mcp_config"));
+    plan.provider_projects_root = Some("new-provider-root".into());
+    persist_command_plan_state(&mut row, &plan, &profile);
+    assert_eq!(row["claude_projects_root"], "new-provider-root");
+    assert_eq!(row["profile_launch"]["claude_projects_root"], "new-provider-root");
+    // A resume with no new root override must keep its verified capture context.
+    plan.provider_projects_root = None;
+    persist_command_plan_state(&mut row, &plan, &profile);
+    assert_eq!(row["claude_projects_root"], "new-provider-root");
+}
+
 /// ---
 /// purpose: 判断名字是否是合法的 POSIX shell 标识符
 /// returns: 首字符为字母或下划线且其余为字母数字下划线时为 true

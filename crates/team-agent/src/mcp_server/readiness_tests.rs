@@ -139,6 +139,20 @@ fn issue372_child_publisher() {
 }
 
 #[test]
+fn cold_start_evidence_survives_helper_exit_but_not_a_new_carrier_launch() {
+    let case = Case::new();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "mcp_server::readiness::tests::issue372_child_publisher"])
+        .env("ISSUE372_WORKSPACE", &case.ws).spawn().unwrap();
+    assert!(child.wait().unwrap().success());
+    assert!(startup_observed(&case.ws, "owner", "worker", &case.state["agents"]["worker"]).unwrap());
+    let mut later = case.state["agents"]["worker"].clone();
+    later["spawned_at"] = json!("3026-01-01T00:00:00Z");
+    assert!(!startup_observed(&case.ws, "owner", "worker", &later).unwrap());
+    assert!(!startup_observed(&case.ws, "other", "worker", &case.state["agents"]["worker"]).unwrap());
+}
+
+#[test]
 fn issue372_child_publication_and_exit_cannot_clobber_live_server() {
     let case = Case::new();
     case.publish();

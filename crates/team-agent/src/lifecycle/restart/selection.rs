@@ -78,6 +78,44 @@ mod stopped_restart_tests {
     }
 
     #[test]
+    fn explicit_fresh_overrides_even_a_present_captured_backing_session() {
+        use super::super::super::seat_start::SessionPolicy;
+        let session = SessionId::new("previous-pi-session");
+        for provider in ["pi", "claude_code"] {
+            assert_eq!(
+                decide_start_mode_with_session(
+                    provider,
+                    Some(&session),
+                    None,
+                    true,
+                    SessionPolicy::Fresh
+                ),
+                StartMode::Fresh
+            );
+            assert_eq!(
+                decide_start_mode_with_session(
+                    provider,
+                    Some(&session),
+                    None,
+                    true,
+                    SessionPolicy::Preserve
+                ),
+                StartMode::Resumed
+            );
+            assert_eq!(
+                decide_start_mode_with_session(
+                    provider,
+                    Some(&session),
+                    None,
+                    true,
+                    SessionPolicy::Auto
+                ),
+                StartMode::Resumed
+            );
+        }
+    }
+
+    #[test]
     fn contextless_launch_metadata_does_not_require_continuation() {
         let idle = serde_json::json!({"status":"stopped", "spawned_at":"2026-01-01T00:00:00Z",
             "pane_pid":123, "_pending_session_id":"planned", "first_send_at":null});
@@ -158,6 +196,26 @@ pub(crate) fn has_prior_launch(row: &serde_json::Value) -> bool {
             .get("task_prompt_delivered")
             .and_then(serde_json::Value::as_bool)
             == Some(true)
+}
+
+pub(crate) fn decide_start_mode_with_session(
+    provider: &str,
+    session_id: Option<&SessionId>,
+    rollout_path: Option<&RolloutPath>,
+    rollout_exists: bool,
+    session: super::super::seat_start::SessionPolicy,
+) -> StartMode {
+    use super::super::seat_start::SessionPolicy;
+    if session == SessionPolicy::Fresh {
+        return StartMode::Fresh;
+    }
+    decide_start_mode(
+        provider,
+        session_id,
+        rollout_path,
+        rollout_exists,
+        session == SessionPolicy::Auto,
+    )
 }
 
 pub fn decide_start_mode(

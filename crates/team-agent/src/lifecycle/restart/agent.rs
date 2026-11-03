@@ -32,7 +32,7 @@
 //! maturity: wired
 //! ---
 use super::common::*;
-use super::selection::decide_start_mode;
+use super::selection::decide_start_mode_with_session;
 use super::team_state::write_team_state;
 use super::*;
 use crate::lifecycle::lock::{acquire_seat_lifecycle_lock, LifecycleLockRequest};
@@ -196,6 +196,17 @@ pub(crate) fn start_agent_at_paths(
     team: Option<&str>,
     transport: &dyn crate::transport::Transport,
 ) -> Result<StartAgentOutcome, LifecycleError> {
+    start_agent_at_paths_with_session(workspace, spec_workspace, agent_id, force, open_display,
+        if allow_fresh { super::super::seat_start::SessionPolicy::Auto } else { super::super::seat_start::SessionPolicy::Preserve }, team, transport)
+}
+
+pub(crate) fn start_agent_at_paths_with_session(
+    workspace: &Path, spec_workspace: &Path, agent_id: &AgentId, force: bool,
+    open_display: bool, session: super::super::seat_start::SessionPolicy,
+    team: Option<&str>, transport: &dyn crate::transport::Transport,
+) -> Result<StartAgentOutcome, LifecycleError> {
+    let force_fresh = session == super::super::seat_start::SessionPolicy::Fresh;
+    let allow_fresh = session != super::super::seat_start::SessionPolicy::Preserve;
     let _ = open_display;
     let mut state = if team.is_some() {
         resolve_team_scoped_state_or_refuse(workspace, team)?
@@ -211,7 +222,12 @@ pub(crate) fn start_agent_at_paths(
         .and_then(|v| v.get(agent_id.as_str()))
         .ok_or_else(|| LifecycleError::RequirementUnmet(format!("agent {agent_id} not found")))?
         .clone();
-    let agent = rehydrate_agent_command_context_from_spec(spec_workspace, agent_id, &raw_agent);
+    let mut agent = rehydrate_agent_command_context_from_spec(spec_workspace, agent_id, &raw_agent);
+    if force_fresh {
+        if let Some(row) = agent.as_object_mut() {
+            row.remove(crate::lifecycle::launch::add_agent_state::FORK_PARENT_SESSION_ID);
+        }
+    }
     if raw_agent
         .get("paused")
         .and_then(serde_json::Value::as_bool)
@@ -317,6 +333,9 @@ pub(crate) fn start_agent_at_paths(
         )));
     }
     if !force && agent_live {
+        if force_fresh {
+            return Err(LifecycleError::RequirementUnmet(format!("agent {agent_id} is running; stop it before requesting a fresh session")));
+        }
         require_worker_session_owner(workspace, &team_key, &session_name, transport)?;
         let old_binding = pane_binding_snapshot(&raw_agent);
         let refreshed_binding = noop_pane.as_ref().map(pane_binding_from_live);
@@ -359,7 +378,9 @@ pub(crate) fn start_agent_at_paths(
         });
     }
     let provider = agent_provider(&agent);
-    let session_id = agent_session_id(&agent);
+    // Explicit Fresh is a launch decision, never merely permission to fall back.
+    // Even a late/stale capture must not supply --resume to the new provider.
+    let session_id = if force_fresh { None } else { agent_session_id(&agent) };
     let rollout_path = agent_rollout_path(&agent);
     let resume_backing_exists = session_id
         .as_ref()
@@ -381,12 +402,8 @@ pub(crate) fn start_agent_at_paths(
             "session_preserve_unavailable: agent {agent_id} has existing context but no verified session; choose an explicit fresh session"
         )));
     }
-    let start_mode = decide_start_mode(
-        provider_wire(provider),
-        session_id.as_ref(),
-        rollout_path.as_ref(),
-        resume_backing_exists,
-        allow_fresh,
+    let start_mode = decide_start_mode_with_session(
+        provider_wire(provider), session_id.as_ref(), rollout_path.as_ref(), resume_backing_exists, session,
     );
     if matches!(start_mode, StartMode::Noop) {
         return Err(LifecycleError::RequirementUnmet(format!(
@@ -1436,6 +1453,9 @@ pub(super) fn mark_agent_started(
             "captured_via",
             "attribution_confidence",
             "capture_state",
+            "claude_projects_root",
+            "profile_launch",
+            "managed_mcp_config",
             "attribution_ambiguous",
         ] {
             agent.remove(field);

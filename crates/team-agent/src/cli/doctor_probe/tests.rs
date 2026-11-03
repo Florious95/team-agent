@@ -27,6 +27,22 @@ impl Drop for Scratch {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
+#[test]
+fn contract_incarnation_ignores_only_its_legacy_helper_records() {
+    let tmp = Scratch::new();
+    let logs = tmp.0.join(".team/logs");
+    fs::create_dir_all(&logs).unwrap();
+    let events = ["migrated", "legacy"].map(|agent| json!({"event":"mcp.server_started",
+        "owner_team_id":"current", "agent_id":agent, "pid":123, "birth_identity":"stale"}).to_string()).join("\n");
+    fs::write(logs.join("events.jsonl"), &events).unwrap();
+    let rows = json!({"migrated":{"provider":"cursor","runtime_family":"contract","status":"running"},
+        "legacy":{"provider":"pi","status":"running"}});
+    let records = helpers(&tmp.0, "current", rows.as_object().unwrap());
+    assert!(!records.contains_key("migrated"));
+    assert_eq!(records["legacy"], (123, "stale".into()));
+    assert_eq!(fs::read_to_string(logs.join("events.jsonl")).unwrap(), events);
+}
+
 fn args(workspace: PathBuf) -> DoctorArgs {
     DoctorArgs {
         spec: None,

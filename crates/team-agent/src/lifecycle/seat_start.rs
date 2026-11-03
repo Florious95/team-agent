@@ -1128,16 +1128,20 @@ fn start_existing(
             "generation":projection.get("generation"),"configuration_committed":true}),
         );
     }
-    let outcome = super::restart::start_agent_at_paths(
+    let outcome = super::restart::start_agent_at_paths_with_session(
         &selected.run_workspace,
         spec_path.parent().unwrap_or(&selected.team_dir),
         &request.agent,
         false,
         true,
-        request.session != SessionPolicy::Preserve
-            || continuation
-                .as_ref()
-                .is_some_and(|(_, mode)| *mode == super::StartMode::Fresh),
+        if continuation
+            .as_ref()
+            .is_some_and(|(_, mode)| *mode == super::StartMode::Fresh)
+        {
+            SessionPolicy::Fresh
+        } else {
+            request.session
+        },
         Some(&selected.team_key),
         transport,
     )?;
@@ -1313,11 +1317,13 @@ fn start_unmaterialized_native(
 }
 
 fn archive_session(selected: &SelectedTeam, agent: &AgentId) -> Result<(), LifecycleError> {
+    // An intentional cleared tuple must not be filled back from the old disk row.
     StateRepository::new(&selected.run_workspace)
         .commit(
-            StateWriteIntent::StartAgent {
+            StateWriteIntent::RestartTeam {
                 team_key: &selected.team_key,
-                agent_id: agent.as_str(),
+                topology_authority_agent_ids: &[agent.as_str()],
+                skip_capture_backfill_agent_ids: &[agent.as_str()],
             },
             |state| {
                 if let Some(row) = state["agents"][agent.as_str()].as_object_mut() {
@@ -1346,6 +1352,16 @@ fn archive_row(row: &mut serde_json::Map<String, Value>) {
         "rollout_path",
         "captured_at",
         "captured_via",
+        "capture_state",
+        "claude_projects_root",
+        "profile_launch",
+        "managed_mcp_config",
+        "spawn_cwd",
+        "spawned_at",
+        "spawn_epoch_ms",
+        "last_result_at",
+        "task_prompt_delivered",
+        crate::lifecycle::launch::add_agent_state::FORK_PARENT_SESSION_ID,
         "attribution_confidence",
         "attribution_ambiguous",
         "contract_scope",
@@ -1574,6 +1590,50 @@ mod tests {
         row.insert("session_id".into(), json!("native"));
         assert_eq!(row["session_history"][0]["provider"], "pi");
         assert_eq!(row["session_id"], "native");
+    }
+
+    #[test]
+    fn fresh_archive_does_not_backfill_the_previous_capture_or_touch_siblings() {
+        let temp = crate::lifecycle::tests::TestWorkspace::new();
+        let captured = json!({"provider":"pi", "status":"stopped", "explicit_stop":true,
+            "session_id":"previous", "rollout_path":"old.jsonl", "captured_at":"2026-01-01T00:00:00Z",
+            "captured_via":"file", "capture_state":"captured", "claude_projects_root":"old-pi-root",
+            "spawn_cwd":"old-cwd", "spawned_at":"2026-01-01T00:00:00Z", "task_prompt_delivered":true});
+        let state = json!({"active_team_key":"current", "team_key":"current", "session_name":"team-current",
+            "agents":{"reviewer":captured.clone(), "sibling":{"provider":"fake","status":"stopped"}}});
+        let path = crate::state::persist::runtime_state_path(temp.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+        let selected = SelectedTeam {
+            run_workspace: temp.path().into(),
+            team_key: "current".into(),
+            team_dir: temp.path().into(),
+            spec_workspace: None,
+            spec_path: None,
+            state: state.clone(),
+        };
+        archive_session(&selected, &AgentId::new("reviewer")).unwrap();
+        let after = StateRepository::new(temp.path())
+            .load_team(Some("current"))
+            .unwrap();
+        let row = &after["agents"]["reviewer"];
+        assert_eq!(row["session_history"][0], captured);
+        for key in [
+            "session_id",
+            "rollout_path",
+            "capture_state",
+            "claude_projects_root",
+            "spawn_cwd",
+            "spawned_at",
+            "task_prompt_delivered",
+        ] {
+            assert!(
+                row.get(key).is_none(),
+                "{key} must not leak into the new incarnation"
+            );
+        }
+        assert_eq!(after["agents"]["sibling"], state["agents"]["sibling"]);
+        assert_eq!(row["explicit_stop"], true);
     }
 
     #[cfg(unix)]

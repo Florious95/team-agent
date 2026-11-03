@@ -276,7 +276,7 @@ fn descendant(table: &HashMap<u32, Process>, mut pid: u32, root: u32) -> bool {
 }
 
 /// Only allowlisted MCP identity fields leave the bounded event-log reader.
-fn helpers(workspace: &Path, team: &str) -> BTreeMap<String, (u32, String)> {
+fn helpers(workspace: &Path, team: &str, agents: &serde_json::Map<String, Value>) -> BTreeMap<String, (u32, String)> {
     let mut latest = BTreeMap::new();
     let Ok(mut file) = File::open(workspace.join(".team/logs/events.jsonl")) else {
         return latest;
@@ -304,6 +304,9 @@ fn helpers(workspace: &Path, team: &str) -> BTreeMap<String, (u32, String)> {
             continue;
         }
         let agent = field(&event, "agent_id");
+        if agents.get(agent).is_some_and(crate::contract_runtime::framework::is_contract) {
+            continue; // Retained legacy logs are not authority for a native incarnation.
+        }
         if let Some(pid) = event
             .get("pid")
             .and_then(Value::as_u64)
@@ -344,14 +347,14 @@ fn host_images(
     agents: &serde_json::Map<String, Value>,
     state: &Value,
 ) -> (&'static str, String, Option<String>) {
-    let evidence = helpers(workspace, team);
+    let evidence = helpers(workspace, team, agents);
     let expected = reference_executable().and_then(|p| {
         team_agent_contract::host::process::fingerprint_file(&p, 256 * 1024 * 1024, BUDGET)
             .map_err(|e| e.to_string())
     });
     let mut checked = 0;
     let mut unknown = Vec::new();
-    for (agent, row) in agents.iter().filter(|(_, v)| running(v)) {
+    for (agent, row) in agents.iter().filter(|(_, v)| running(v) && !crate::contract_runtime::framework::is_contract(v)) {
         if field(row, "provider") == "fake" && !evidence.contains_key(agent) {
             continue;
         }
@@ -742,7 +745,7 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
     let mut faults = Vec::new();
     let mut failed_seats = std::collections::BTreeSet::new();
     let mut unknown = Vec::new();
-    let helper_records = helpers(workspace, team);
+    let helper_records = helpers(workspace, team, agents);
     for (agent, state) in agents.iter().filter(|(_, v)| running(v)) {
         let endpoint = directory.endpoint(agent);
         let pane = endpoint.as_ref().ok().and_then(|e| {
