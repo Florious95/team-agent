@@ -311,16 +311,11 @@ fn cli_add_agent_duplicate_id_surfaces_real_error() {
     .unwrap();
     let dup_role = team.join("dup-role.md");
     std::fs::write(&dup_role, &role).unwrap();
-    let args = AddAgentArgs {
-        role_config: Default::default(),
-        agent: "implementer".to_string(),
-        workspace: team,
-        team: None,
-        role_file: dup_role.to_string_lossy().to_string(),
-        force: false,
-        json: true,
-    };
-    let text = outcome_text(cmd_add_agent(&args));
+    let args = vec![
+        "implementer".to_string(), "--role-file".into(), dup_role.to_string_lossy().into_owned(),
+        "--workspace".into(), team.to_string_lossy().into_owned(), "--json".into(),
+    ];
+    let text = outcome_text(crate::cli::intent::run("add-agent", &args, &team).unwrap());
     assert!(
             text.contains("ownership/liveness") && !text.contains("already exists"),
             "the alias must surface unverified physical identity, not a strict-add refusal: {text}"

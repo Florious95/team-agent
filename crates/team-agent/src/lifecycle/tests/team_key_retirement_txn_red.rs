@@ -1,23 +1,6 @@
-//! team-key slice2b · L1 — retirement tombstone TRANSACTION (RED).
-//!
-//! From owner-b's real product shape (no new public API; a single remove.rs
-//! tombstone primitive writes/clears `agent_lifecycle.<id>.state=retired` inside
-//! the SAME selected-state save, reusing add --force's single-lock
-//! snapshot->rollback fact) + locate §6.2, NOT the root-cause reasoning. On the
-//! public injected-transport surface (pure state, no real tmux). Reads go through
-//! the CANONICAL team-scoped projection, and remove asserts at the OUTCOME enum
-//! level, so no case reds for a fixture artifact (refused-not-executed / nested-
-//! read-null). Two ACTIVE L1 REDs + one candidate regression guard; two scenarios
-//! deferred to reachable layers (see inline NOTEs):
-//!   1. [RED] remove leaves `state=retired` for the id;
-//!   2. [RED] a plain re-add clears the tombstone (transition pinned: tombstone
-//!      must EXIST after remove, then be cleared — no vacuous terminal-None pass);
-//!   -  [deferred] failed PLAIN re-add rollback: unreachable at L1 (no plain-add
-//!      fail seam) -> L3 real-machine re-add case;
-//!   3. [regression guard, green at baseline] a force remove->add whose post-
-//!      consumption add fails restores the seat AND leaks no stray tombstone;
-//!   -  [deferred] same-id sibling non-interference: cannot red for the right
-//!      reason at a no-semantics baseline -> L3 + owner-b scoped src unit.
+//! Team-key retirement transitions and ordinary removal/fork rollback.
+//! Uses injected transports and canonical team-scoped projections.
+//! Force-recreate-only assertions were retired with that entry point.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -39,7 +22,7 @@ use team_agent::coordinator::{
 };
 use team_agent::db::schema::open_db;
 use team_agent::lifecycle::{
-    add_agent_with_transport, add_agent_with_transport_force, fork_agent_with_transport,
+    add_agent_with_transport, fork_agent_with_transport,
     remove_agent_with_transport, RemoveAgentOutcome,
 };
 use team_agent::message_store::MessageStore;
@@ -55,7 +38,6 @@ use team_agent::transport::{
 const FAIL_REMOVE_AFTER_HEALTH_DELETE: &str =
     "TEAM_AGENT_TEST_FAIL_REMOVE_AFTER_AGENT_HEALTH_DELETE";
 const FAIL_FORK_AFTER_SPAWN: &str = "TEAM_AGENT_TEST_FAIL_FORK_AFTER_SPAWN";
-const FAIL_FORCE_RECREATE_AFTER_SPAWN: &str = "TEAM_AGENT_TEST_FAIL_FORCE_RECREATE_AFTER_SPAWN";
 
 /// Read the retirement tombstone via the CANONICAL team-scoped projection, not a
 /// hard-coded `teams.<key>` nested path: the legacy single-team seed keeps agents
@@ -131,62 +113,6 @@ fn plain_re_add_clears_the_tombstone() {
     );
 }
 
-// NOTE (honest reachability): a "failed PLAIN re-add restores the tombstone"
-// scenario is NOT reachable at this L1 pure-transport surface. The only failure
-// seam after spawn (`TEAM_AGENT_TEST_FAIL_FORCE_RECREATE_AFTER_SPAWN`) is read
-// ONLY on the force-recreate path (`force_recreate_with_transport_locked`), so a
-// plain `add_agent_with_transport` cannot be made to fail here — injecting that
-// env would be a no-op and the case would red for the wrong reason (fixture
-// artifact, not the guarded rollback fault). The failed-re-add rollback that
-// restores the tombstone is contracted where a real add failure is reachable:
-// the L3 real-machine re-add case. The reachable single-lock rollback at L1 is
-// the force remove->add case below.
-
-/// Candidate-side REGRESSION GUARD (not a RED): this case is GREEN at baseline
-/// on purpose. The force-recreate snapshot restore predates slice2b (the seat
-/// already survives a failed post-consumption add), and with no tombstone
-/// semantics there is nothing to leak — so neither assert can red at baseline.
-/// Its job is to pin, once the candidate DOES write tombstones, that a rolled-
-/// back force transaction leaves no STRAY retired tombstone. The two active L1
-/// REDs are `remove_writes_retired_tombstone` and `plain_re_add_clears_the_tombstone`.
-#[test]
-#[serial(env)]
-fn force_remove_add_failed_post_consumption_restores_seat_without_new_tombstone() {
-    let fixture = RollbackFixture::new("txn-force-fail");
-    fixture.seed_team();
-    let transport = RecordingTransport::new("team-rollbackteam", &["alpha", "bravo"]);
-    let _env = EnvGuard::set(FAIL_FORCE_RECREATE_AFTER_SPAWN, "post-consumption");
-    let role = role_path(&fixture, "alpha");
-    let _ = add_agent_with_transport_force(
-        &fixture.team,
-        &aid("alpha"),
-        &role,
-        false,
-        None,
-        true,
-        &transport,
-    );
-    // Read the restored seat via the CANONICAL projection (not a hard-coded
-    // `teams.<key>` nested path, which is null under the legacy single-team seed).
-    // The pre-existing force-recreate snapshot restore already survives the seat;
-    // the slice2b-NEW invariant this case pins is the second assert: the rolled-
-    // back transaction must NOT leak a stray retired tombstone.
-    let restored =
-        team_agent::state::projection::select_runtime_state(&fixture.team, Some("rollbackteam"))
-            .unwrap();
-    let agents = restored
-        .get("agents")
-        .and_then(serde_json::Value::as_object);
-    assert!(
-        agents.is_some_and(|m| m.contains_key("alpha")),
-        "force remove->add with a failed post-consumption must restore the original alpha seat"
-    );
-    assert_eq!(
-        retired_state(&fixture.team, "rollbackteam", "alpha"),
-        None,
-        "a rolled-back force recreate must not leave a stray retired tombstone"
-    );
-}
 
 // NOTE (honest boundary): the "same-id sibling team lifecycle is untouched"
 // scenario is NOT a sound L1 RED at this baseline. Without any tombstone

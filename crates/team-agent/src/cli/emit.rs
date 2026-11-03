@@ -1693,33 +1693,6 @@ mod role_cli_tests {
         values.iter().map(|value| (*value).to_string()).collect()
     }
 
-    #[test]
-    fn add_requires_provider_without_a_template_but_accepts_file_input() {
-        for args in [
-            vec!["w"],
-            vec!["w", "--bypass", "false"],
-        ] {
-            assert!(role_agent_args(&strings(&args), true).is_err());
-        }
-        assert!(role_agent_args(&strings(&["w", "--role-file", "w.md"]), true).is_ok());
-        let (parsed, _) =
-            role_agent_args(&strings(&["w", "--role-file", "w.md", "--force"]), true).unwrap();
-        assert!(parsed.force);
-        assert!(role_agent_args(
-            &strings(&["w", "--role-file", "w.md", "--force=true"]),
-            true
-        )
-        .is_err());
-        assert!(role_agent_args(
-            &strings(&["w", "--role-file", "w.md", "--allow-fresh"]),
-            true
-        )
-        .is_err());
-        let (_, patch) =
-            role_agent_args(&strings(&["w", "--provider=pi", "--bypass=false"]), true).unwrap();
-        assert_eq!(patch.provider.as_deref(), Some("pi"));
-        assert_eq!(patch.bypass, Some(false));
-    }
 
     #[cfg(unix)]
     #[test]
@@ -1733,23 +1706,22 @@ mod role_cli_tests {
             ("codex_tui", "codex"), ("grok", "grok"), ("grok_build", "grok"),
         ] {
             let (_, patch) = role_agent_args(
-                &strings(&["w", "--provider", name, "--bypass", "true"]), true,
+                &strings(&["w", "--provider", name, "--bypass", "true"]),
             ).unwrap_or_else(|error| panic!("{name}: {error}"));
             assert_eq!(patch.provider.as_deref(), Some(leaf), "{name}");
         }
-        assert!(role_agent_args(&strings(&["w", "--provider", "Cursor", "--bypass", "true"]), true).is_err());
+        assert!(role_agent_args(&strings(&["w", "--provider", "Cursor", "--bypass", "true"])).is_err());
     }
 
     #[test]
-    fn add_accepts_bypass_true_false_or_omission_for_every_provider() {
+    fn role_options_accept_bypass_true_false_or_omission_for_every_provider() {
         for &provider in crate::provider::wire::all_providers() {
             let provider = crate::provider::wire::provider_wire(provider);
-            let (_, patch) = role_agent_args(&strings(&["w", "--provider", provider]), true).unwrap();
+            let (_, patch) = role_agent_args(&strings(&["w", "--provider", provider])).unwrap();
             assert_eq!(patch.bypass, None);
             for bypass in ["true", "false"] {
                 let (_, patch) = role_agent_args(
                     &strings(&["w", "--provider", provider, "--bypass", bypass]),
-                    true,
                 )
                 .unwrap();
                 assert_eq!(patch.bypass, Some(bypass == "true"));
@@ -1767,9 +1739,9 @@ mod role_cli_tests {
             vec!["w", "--unknown", "x"],
             vec!["w", "extra"],
         ] {
-            assert!(role_agent_args(&strings(&args), false).is_err());
+            assert!(role_agent_args(&strings(&args)).is_err());
         }
-        let (_, patch) = role_agent_args(&strings(&["w"]), false).unwrap();
+        let (_, patch) = role_agent_args(&strings(&["w"])).unwrap();
         assert_eq!(
             patch,
             crate::lifecycle::role_config::RoleConfigPatch::default()
@@ -2315,10 +2287,6 @@ mod tests {
     #[test]
     fn t0_help_catalog_lists_command_flags() {
         for (command, flags) in [
-            (
-                "quick-start",
-                &["--workspace", "--team-id", "--yes", "--json"][..],
-            ),
             ("send", &["--workspace", "--team", "--json"][..]),
             ("schedule", &["--in", "--every", "--text", "--workspace", "--team", "--json"][..]),
             (
@@ -2339,38 +2307,8 @@ mod tests {
                 ][..],
             ),
             (
-                "start-agent",
-                &[
-                    "--model",
-                    "--effort",
-                    "--bypass",
-                    "--prompt",
-                    "--profile",
-                    "--provider",
-                    "--workspace",
-                    "--team",
-                    "--allow-fresh",
-                    "--json",
-                ][..],
-            ),
-            (
                 "reset-agent",
                 &["--workspace", "--team", "--discard-session", "--json"][..],
-            ),
-            (
-                "add-agent",
-                &[
-                    "--role-file",
-                    "--provider",
-                    "--bypass",
-                    "--model",
-                    "--effort",
-                    "--prompt",
-                    "--profile",
-                    "--workspace",
-                    "--team",
-                    "--json",
-                ][..],
             ),
             (
                 "fork-agent",
@@ -2462,29 +2400,14 @@ mod tests {
     }
 
     #[test]
-    fn worker_lifecycle_help_uses_authoritative_spec_usage_and_summary() {
-        for name in ["start-agent", "add-agent"] {
-            let spec = command_spec(name).expect("registered worker lifecycle command");
-            let help = command_help(Some(name));
-            assert!(help.contains(spec.usage));
-            assert!(help.contains("Purpose:"));
-            for flag in [
-                "--model MODEL",
-                "--effort LEVEL",
-                "--bypass true|false",
-                "--prompt TEXT",
-                "--profile NAME",
-                "--provider TOOL",
-            ] {
-                assert!(help.contains(flag), "{name} help missing {flag}: {help}");
-            }
-            assert!(help.contains("Next Action") && help.contains("send"));
+    fn start_aliases_share_canonical_help_without_a_force_recreate_surface() {
+        let canonical = command_help(Some("start"));
+        for alias in ["add-agent", "start-agent", "quick-start"] {
+            assert_eq!(command_help(Some(alias)), canonical, "{alias}");
         }
-        assert!(!command_help(Some("start-agent")).contains("--force"));
-        let add = command_help(Some("add-agent"));
-        assert!(add.contains("[--role-file FILE]"));
-        assert!(add.contains("provider") && add.contains("bypass") && add.contains("--role-file"));
-        assert!(add.contains("Conflicting") && add.contains("refused"));
+        assert!(canonical.contains("--session preserve|auto|fresh"));
+        assert!(canonical.contains("--role-file"));
+        assert!(!canonical.contains("--force"));
     }
 
     #[test]
@@ -2659,53 +2582,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&cwd);
     }
 
-    #[test]
-    fn ux_quick_start_workspace_resolves_relative_agents_dir_inside_workspace() {
-        let cwd = tmp_workspace();
-        let ws = tmp_workspace();
-        let args = quick_start_args(
-            &cli_argv(&[
-                "--workspace",
-                &ws.to_string_lossy(),
-                "agents",
-                "--yes",
-                "--json",
-            ]),
-            &cwd,
-        )
-        .unwrap();
-        assert_eq!(
-            args.agents_dir,
-            ws.join("agents"),
-            "quick-start --workspace <ws> agents must resolve the role-doc dir under <ws>, so team-in-team \
-             setup works from any caller cwd"
-        );
-        let _ = std::fs::remove_dir_all(&cwd);
-        let _ = std::fs::remove_dir_all(&ws);
-    }
 
     #[test]
-    fn ux_quick_start_positional_team_dir_is_standalone_workspace() {
+    fn source_team_directory_is_its_own_workspace() {
         let cwd = tmp_workspace();
         let ws = tmp_workspace();
         std::fs::write(ws.join("TEAM.md"), "# team\n").unwrap();
-        let args = quick_start_args(&cli_argv(&[&ws.to_string_lossy()]), &cwd).unwrap();
-        assert_eq!(args.workspace, ws);
-        assert_eq!(args.agents_dir, ws);
-        let _ = std::fs::remove_dir_all(&cwd);
-        let _ = std::fs::remove_dir_all(&ws);
+        assert_eq!(intent_source_workspace(&ws, &cwd).unwrap(), ws);
+        std::fs::remove_dir_all(cwd).unwrap();
+        std::fs::remove_dir_all(ws).unwrap();
     }
 
     #[test]
-    fn ux_quick_start_team_dir_under_dot_team_uses_project_workspace() {
+    fn source_under_dot_team_uses_project_workspace() {
         let cwd = tmp_workspace();
         let team_dir = cwd.join(".team/current");
         std::fs::create_dir_all(&team_dir).unwrap();
         std::fs::write(team_dir.join("TEAM.md"), "# team\n").unwrap();
-        let args = quick_start_args(&cli_argv(&[".team/current"]), &cwd).unwrap();
-        assert_eq!(args.workspace, cwd);
-        assert_eq!(args.agents_dir, team_dir);
-        let _ = std::fs::remove_dir_all(&cwd);
+        assert_eq!(intent_source_workspace(Path::new(".team/current"), &cwd).unwrap(), cwd);
+        std::fs::remove_dir_all(cwd).unwrap();
     }
 
     // ── E8 (N38): 未知子命令 → 最近似建议(additive,不破坏 golden invalid-choice 行) ──
@@ -2822,35 +2717,7 @@ mod tests {
     // ──────────── Stage QR: quick-start/restart separation ────────────
     // Design doc: .team/artifacts/quickstart-restart-separation-design.md
 
-    #[test]
-    fn quick_start_refuses_fresh_flag_with_restart_guidance() {
-        // QR contract: `--fresh` is gone from quick-start. The flag is
-        // not advertised or carried in QuickStartArgs, but scripts that
-        // still pass it get a clear redirect to restart --allow-fresh.
-        let ws = tmp_workspace();
-        let argv = cli_argv(&["--workspace", &ws.to_string_lossy(), "--fresh"]);
-        let err = quick_start_args(&argv, &ws).expect_err("must refuse --fresh");
-        let message = err.to_string();
-        assert!(
-            message.contains("no longer accepts --fresh"),
-            "QR: refusal must say --fresh is gone; got: {message}"
-        );
-        assert!(
-            message.contains("restart --allow-fresh"),
-            "QR: refusal must redirect to `restart --allow-fresh`; got: {message}"
-        );
-    }
 
-    #[test]
-    fn quick_start_without_fresh_flag_still_builds_args() {
-        // Without --fresh, args build normally (the initial-creation path).
-        let ws = tmp_workspace();
-        let argv = cli_argv(&["--workspace", &ws.to_string_lossy()]);
-        let args = quick_start_args(&argv, &ws).expect("must build");
-        assert_eq!(args.workspace, ws);
-        // No `fresh` field anymore — the struct must compile and round-trip
-        // without it.
-    }
 }
 
 #[cfg(test)]

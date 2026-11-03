@@ -274,23 +274,6 @@ fn R4_cleanup_matrix_mock() {
         .output();
 }
 
-#[test]
-#[serial]
-fn P_backend_transport_parser_stays_usable() {
-    let tmux = team_agent::cli::emit::__test_quick_start_args(
-        &vec!["--backend".to_string(), "tmux".to_string(), "--yes".to_string()],
-        &std::env::temp_dir(),
-    )
-    .expect("--backend tmux must parse");
-    assert_eq!(tmux.backend.as_deref(), Some("tmux"));
-
-    let conpty = team_agent::cli::emit::__test_quick_start_args(
-        &vec!["--backend".to_string(), "conpty".to_string(), "--yes".to_string()],
-        &std::env::temp_dir(),
-    )
-    .expect("--backend conpty must parse");
-    assert_eq!(conpty.backend.as_deref(), Some("conpty"));
-}
 
 #[test]
 #[serial]

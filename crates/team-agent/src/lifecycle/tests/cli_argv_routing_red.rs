@@ -1151,32 +1151,6 @@ esac
     );
 }
 
-#[test]
-#[serial(env)]
-fn a09_allowed_force_recreate_uses_route_once_after_old_seat_is_dead() {
-    let f = Fixture::new("argv-force");
-    f.start_team("copilot", &["worker"]);
-    let role_file = f.ws.join("replacement.md");
-    fs::write(&role_file, role("copilot", "worker")).unwrap();
-    f.seed(true, json!({"copilot":["force-route"]}));
-    f.switch(None);
-    let t = offline();
-    let result = crate::lifecycle::launch::add_agent_with_transport_force(
-        &f.team,
-        &AgentId::new("worker"),
-        &role_file,
-        false,
-        Some("argvteam"),
-        true,
-        &t,
-    );
-    assert!(
-        result.is_ok(),
-        "allowed dead-seat force fixture must complete: {result:?}"
-    );
-    assert_eq!(t.spawn_records().len(), 1);
-    assert_route(&t.spawn_records()[0].1, &["force-route"]);
-}
 
 #[test]
 #[serial(env)]
@@ -1440,59 +1414,7 @@ fn a14_conpty_spawn_request_frame_preserves_routed_vector_not_windows_live_pass(
     assert_eq!(decoded.cwd, request.cwd);
 }
 
-#[test]
-#[serial(env)]
-fn a15_provider_drift_and_unknown_force_remain_refused() {
-    let f = Fixture::new("argv-drift");
-    f.start_team("copilot", &["worker"]);
-    f.seed(
-        true,
-        json!({"pi":["must-not-spawn"],"copilot":["must-not-spawn"]}),
-    );
-    f.switch(None);
-    f.mutate_agent("worker", |a| {
-        a["status"] = json!("stopped");
-        a["pane_id"] = json!("%old");
-    });
-    let before = crate::state::projection::select_runtime_state(&f.ws, Some("argvteam")).unwrap();
-    let drift = crate::lifecycle::role_config::start_agent_from_role(
-        &f.ws,
-        &AgentId::new("worker"),
-        &crate::lifecycle::role_config::RoleConfigPatch {
-            provider: Some("pi".into()),
-            ..Default::default()
-        },
-        true,
-        Some("argvteam"),
-    );
-    assert!(
-        matches!(drift, Err(crate::lifecycle::LifecycleError::RequirementUnmet(ref message)) if message.contains("provider change is not allowed"))
-    );
-    assert!(!f.native_file().exists());
-    let role_file = f.ws.join("replacement.md");
-    fs::write(&role_file, role("copilot", "worker")).unwrap();
-    // The public role-config admission guard owns unknown/live force refusal.
-    // Its native tmux fixture returns inconclusive identity, never proven dead.
-    executable(&f.bin.join("tmux"), "#!/bin/sh\ncase \"$*\" in\n*-V*) echo 'tmux 3.4';;\n*display-message*) echo 'fixture backend unavailable' >&2; exit 1;;\n*) exit 0;;\nesac\n");
-    let forced = crate::lifecycle::role_config::add_agent_from_role(
-        &f.ws,
-        &AgentId::new("worker"),
-        Some(&role_file),
-        &Default::default(),
-        true,
-        Some("argvteam"),
-    );
-    assert!(
-        forced.is_err(),
-        "unknown old pane must not be force-recreated"
-    );
-    assert!(!f.native_file().exists());
-    let after = crate::state::projection::select_runtime_state(&f.ws, Some("argvteam")).unwrap();
-    assert_eq!(
-        after["agents"]["worker"]["provider"],
-        before["agents"]["worker"]["provider"]
-    );
-}
+
 
 #[test]
 #[serial(env)]
@@ -1503,20 +1425,23 @@ fn issue381_every_cursor_name_adds_through_the_contract_leaf_never_legacy_agent(
     let probes_before = fs::read_to_string(&f.probes).unwrap_or_default();
     for (index, name) in ["cursor", "cursor-agent", "agent", "cursor_agent"].into_iter().enumerate() {
         let id = format!("cursor-{index}");
-        let added = crate::lifecycle::role_config::add_agent_from_role(
-            &f.ws,
-            &AgentId::new(&id),
-            None,
-            &crate::lifecycle::role_config::RoleConfigPatch {
-                provider: Some(name.into()),
-                model: Some("gpt-5.6-luna-xhigh".into()),
-                bypass: Some(true),
-                // An omitted --prompt still yields a valid contract role body.
-                prompt: (index > 0).then(|| "Reply to every task.".into()),
-                ..Default::default()
+        let added = crate::lifecycle::seat_start::start(
+            &crate::lifecycle::seat_start::StartRequest {
+                workspace: f.ws.clone(),
+                team: Some("argvteam".into()),
+                agent: AgentId::new(&id),
+                role_file: None,
+                session: crate::lifecycle::seat_start::SessionPolicy::Preserve,
+                patch: crate::lifecycle::role_config::RoleConfigPatch {
+                    provider: Some(name.into()),
+                    model: Some("gpt-5.6-luna-xhigh".into()),
+                    bypass: Some(true),
+                    // An omitted --prompt still yields a valid contract role body.
+                    prompt: (index > 0).then(|| "Reply to every task.".into()),
+                    ..Default::default()
+                },
             },
             false,
-            Some("argvteam"),
         );
         // The fixture PATH has a fake legacy `agent` but no `cursor-agent`:
         // the contract leaf's discovery refuses before any native effect.

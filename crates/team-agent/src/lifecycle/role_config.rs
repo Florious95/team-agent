@@ -4,21 +4,15 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
-#[cfg(test)]
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::model::ids::AgentId;
 use crate::model::yaml::{self, Value};
 use crate::state::repository::{StateRepository, StateWriteIntent};
 use crate::state::selector::{SelectedTeam, SelectorMode};
-#[cfg(test)]
-use crate::transport::Transport;
 
 use super::lock::{acquire_seat_lifecycle_lock, LifecycleLockRequest};
 use super::LifecycleError;
-#[cfg(test)]
-use super::AddAgentReport;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RoleConfigPatch {
@@ -30,19 +24,6 @@ pub struct RoleConfigPatch {
     pub profile: Option<String>,
 }
 
-#[cfg(test)]
-pub(crate) fn add_agent_from_role_with_transport(
-    workspace: &Path,
-    agent_id: &AgentId,
-    source: Option<&Path>,
-    patch: &RoleConfigPatch,
-    force: bool,
-    transport: &dyn Transport,
-) -> Result<AddAgentReport, LifecycleError> {
-    with_selected(&select(workspace, None)?, agent_id, |selected| {
-        add_at_selected(selected, agent_id, source, patch, force, transport)
-    })
-}
 
 fn select(workspace: &Path, team: Option<&str>) -> Result<SelectedTeam, LifecycleError> {
     crate::state::selector::resolve_active_team_readonly(workspace, team, SelectorMode::RuntimeOnly)
@@ -424,19 +405,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn existing_declaration_advice_admits_non_force_reuse() {
-        let temp = crate::lifecycle::tests::TestWorkspace::new();
-        let role = temp.path().join("reviewer.md");
-        fs::write(&role, "---\nname: reviewer\nprovider: pi\nbypass: false\n---\nReview.\n")
-            .unwrap();
-        let before = fs::read(&role).unwrap();
-        let refusal = check_destination(&role, None).unwrap_err().to_string();
-        assert!(refusal.contains("--role-file"), "{refusal}");
-        assert!(!refusal.contains("--force"), "{refusal}");
-        check_destination(&role, Some(&role)).unwrap();
-        assert_eq!(fs::read(&role).unwrap(), before);
-    }
 
     #[test]
     fn live_guard_does_not_borrow_a_peer_pane_or_ignore_own_live_cohort() {
@@ -463,140 +431,9 @@ mod tests {
         super::super::restart::ensure_agent_not_running(&state, &id, &transport).unwrap();
     }
 
-    // Unified start contract: an occupied role-file destination points to the
-    // admitted in-place adoption (`team-agent start ID`), never to --force re-adoption.
-    #[test]
-    fn existing_role_file_refusal_points_to_admitted_start_not_force() {
-        let dir = std::env::temp_dir().join(format!(
-            "ta-pr1-role-dest-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(dir.join("agents")).unwrap();
-        let path = dir.join("agents").join("w1.md");
-        fs::write(&path, "---\nprovider: pi\n---\nwork\n").unwrap();
-        let error = check_destination(&path, None).unwrap_err().to_string();
-        let _ = fs::remove_dir_all(&dir);
-        crate::cli::guidance_oracle::assert_admitted(&error);
-        assert!(!error.contains("--force"), "{error}");
-        assert!(
-            crate::cli::guidance_oracle::admitted_verbs(&error)
-                .iter()
-                .any(|verb| verb == "start"),
-            "must name `team-agent start w1`: {error}"
-        );
-    }
 
-    #[test]
-    fn force_admission_requires_positive_death_and_never_replaces_a_live_seat() {
-        use crate::transport::test_support::OfflineTransport;
-        let state = serde_json::json!({"session_name": "s", "agents": {
-            "a": {"pane_id": "%a", "window": "a", "status": "running"}
-        }});
-        let id = AgentId::new("a");
-        let dead = OfflineTransport::new()
-            .with_targets(vec![pane("%other", "other-team", "a")])
-            .with_pane_presence("%a", false)
-            .with_pane_presence("%other", true);
-        assert!(admit_add(&state, &id, false, &dead)
-            .unwrap_err()
-            .to_string()
-            .contains("agent id already exists"));
-        assert!(admit_add(&state, &id, true, &dead).unwrap());
-        let live = OfflineTransport::new()
-            .with_targets(vec![pane("%a", "s", "a")])
-            .with_pane_presence("%a", true);
-        assert!(admit_add(&state, &id, true, &live)
-            .unwrap_err()
-            .to_string()
-            .contains("already running"));
-        assert!(admit_add(&state, &id, true, &OfflineTransport::new()).is_err());
-        let absent_binding = serde_json::json!({"agents": {"a": {"status": "stopped"}}});
-        assert!(admit_add(&absent_binding, &id, true, &dead).is_err());
-        assert!(!admit_add(&serde_json::json!({"agents": {}}), &id, true, &dead).unwrap());
-        assert!(admit_add(
-            &state,
-            &id,
-            true,
-            &dead.with_list_targets_error("unknown topology")
-        )
-        .is_err());
-    }
 
-    #[test]
-    fn file_decisions_need_no_repeated_flags_and_conflicts_fail_closed() {
-        let text = "---\nprovider: codex\ndangerously_skip_permissions: false\nmodel: native-model\neffort: ultra\nprofile: local\n---\n\nrole body\n";
-        assert_eq!(
-            reconcile_creation(text, &RoleConfigPatch::default()).unwrap(),
-            RoleConfigPatch::default()
-        );
-        let same = RoleConfigPatch {
-            provider: Some("codex".into()),
-            bypass: Some(false),
-            model: Some("native-model".into()),
-            effort: Some("ultra".into()),
-            profile: Some("local".into()),
-            prompt: Some("role body".into()),
-        };
-        assert_eq!(
-            reconcile_creation(text, &same).unwrap(),
-            RoleConfigPatch::default()
-        );
-        for different in [
-            RoleConfigPatch {
-                provider: Some("pi".into()),
-                ..Default::default()
-            },
-            RoleConfigPatch {
-                model: Some("other".into()),
-                ..Default::default()
-            },
-            RoleConfigPatch {
-                effort: Some("high".into()),
-                ..Default::default()
-            },
-            RoleConfigPatch {
-                prompt: Some("other".into()),
-                ..Default::default()
-            },
-            RoleConfigPatch {
-                profile: Some("other".into()),
-                ..Default::default()
-            },
-        ] {
-            assert!(reconcile_creation(text, &different).is_err());
-        }
-        let supplied = RoleConfigPatch {
-            provider: Some("pi".into()),
-            bypass: Some(false),
-            ..Default::default()
-        };
-        assert_eq!(reconcile_creation("body", &supplied).unwrap(), supplied);
-        assert!(reconcile_creation("body", &RoleConfigPatch::default()).is_err());
-        // An invalid existing declaration is not a missing field to overwrite.
-        for field in ["provider", "model", "effort", "profile"] {
-            let text =
-                format!("---\n{field}: true\ndangerously_skip_permissions: false\n---\nbody");
-            assert!(reconcile_creation(&text, &supplied).is_err());
-        }
-    }
 
-    #[cfg(unix)]
-    #[test]
-    fn cursor_names_in_a_role_file_and_cli_are_one_provider() {
-        for file in ["cursor", "cursor-agent", "agent", "cursor_agent"] {
-            let text = format!("---\nprovider: {file}\ndangerously_skip_permissions: true\n---\nbody");
-            for cli in ["cursor", "agent"] {
-                let patch = RoleConfigPatch { provider: Some(cli.into()), ..Default::default() };
-                assert_eq!(reconcile_creation(&text, &patch).unwrap(), RoleConfigPatch::default(), "{file}/{cli}");
-            }
-            let pi = RoleConfigPatch { provider: Some("pi".into()), ..Default::default() };
-            assert!(reconcile_creation(&text, &pi).is_err(), "{file}");
-        }
-    }
 
     #[test]
     fn explicit_bypass_overrides_role_file_in_both_directions() {
@@ -608,8 +445,7 @@ mod tests {
                     bypass: Some(!declared),
                     ..Default::default()
                 };
-                let reconciled = reconcile_creation(&text, &patch).unwrap();
-                let next = patched_role(&text, &AgentId::new("w"), &reconciled, false).unwrap();
+                let next = patched_role(&text, &AgentId::new("w"), &patch, false).unwrap();
                 assert_eq!(
                     role_parts(&next).unwrap().0.get("dangerously_skip_permissions"),
                     Some(&Value::Bool(!declared))
@@ -618,22 +454,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn omitted_bypass_preserves_native_default_and_invalid_boolean_is_rejected() {
-        let patch = RoleConfigPatch {
-            provider: Some("pi".into()),
-            ..Default::default()
-        };
-        assert_eq!(reconcile_creation("", &patch).unwrap().bypass, None);
-        assert_eq!(
-            reconcile_creation("---\nprovider: pi\n---\n", &RoleConfigPatch::default())
-                .unwrap().bypass,
-            None
-        );
-        assert!(reconcile_creation(
-            "---\nprovider: pi\ndangerously_skip_permissions: yes\n---\n", &patch
-        ).is_err());
-    }
 
     #[test]
     fn legacy_cr_only_header_does_not_change_engine_when_patched() {
@@ -646,7 +466,6 @@ mod tests {
         let (meta, body) = role_parts(&next).unwrap();
         assert_eq!(meta.get("provider"), Some(&Value::Str("codex".into())));
         assert_eq!(body, "\rbody\r");
-        assert!(reconcile_creation(text, &RoleConfigPatch::default()).is_ok());
     }
 
     #[test]
@@ -705,94 +524,5 @@ mod tests {
         }
     }
 
-    #[test]
-    fn imported_profile_is_team_local_and_failed_update_restores_target_only() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("role-projection-{}-{nonce}", std::process::id()));
-        let team_dir = root.join("roles");
-        let old = serde_json::json!({
-            "provider": "codex", "model": "old", "effort": "high",
-            "profile": "local", "_profile_dir": "/external/profiles",
-            "session_id": "preserved-session", "status": "stopped"
-        });
-        let sibling = serde_json::json!({"provider": "pi", "model": "keep"});
-        let selected_state = serde_json::json!({"agents": {"w": old.clone()}});
-        crate::state::persist::save_runtime_state(
-            &root,
-            &serde_json::json!({
-                "teams": {
-                    "t1": selected_state.clone(),
-                    "t2": {"agents": {"w": sibling.clone()}}
-                }
-            }),
-        )
-        .unwrap();
-        let spec_path = crate::model::paths::runtime_spec_path(&root, "t1");
-        atomic_write(&spec_path, b"old spec\r\n").unwrap();
-        let selected = SelectedTeam {
-            run_workspace: root.clone(),
-            team_key: "t1".into(),
-            state: selected_state,
-            team_dir: team_dir.clone(),
-            spec_workspace: spec_path.parent().map(Path::to_path_buf),
-            spec_path: Some(spec_path.clone()),
-        };
-        let id = AgentId::new("w");
-        let role = role_path(&selected, &id);
-        let snapshot = RoleSnapshot::capture(&selected, &role).unwrap();
-        let compiled = yaml::loads("provider: codex\nmodel: new\neffort: ultra\nprofile: local\ndangerously_skip_permissions: false\nsystem_prompt: new instructions\n").unwrap();
-        atomic_write(&role, b"new role").unwrap();
-        atomic_write(&spec_path, b"new spec").unwrap();
-        update_agent_config(&selected, &id, &compiled, &role).unwrap();
-        let updated = crate::state::persist::load_runtime_state(&root).unwrap();
-        let target = &updated["teams"]["t1"]["agents"]["w"];
-        assert_eq!(target["model"], "new");
-        assert_eq!(target["effort"], "ultra");
-        assert_eq!(target["system_prompt"], "new instructions");
-        assert_eq!(target["dangerously_skip_permissions"], false);
-        assert_eq!(target["session_id"], "preserved-session");
-        assert_eq!(
-            target["_profile_dir"],
-            team_dir.join("profiles").to_string_lossy().as_ref()
-        );
-        assert_eq!(updated["teams"]["t2"]["agents"]["w"], sibling);
-        let error = snapshot.rollback(
-            &selected,
-            &id,
-            LifecycleError::RequirementUnmet("injected failure".into()),
-        );
-        assert!(error.to_string().contains("injected failure"));
-        assert!(!error.to_string().contains("rollback failed"));
-        assert!(!role.exists());
-        assert_eq!(fs::read(&spec_path).unwrap(), b"old spec\r\n");
-        let restored = crate::state::persist::load_runtime_state(&root).unwrap();
-        assert_eq!(restored["teams"]["t1"]["agents"]["w"], old);
-        assert_eq!(restored["teams"]["t2"]["agents"]["w"], sibling);
-        fs::remove_dir_all(root).unwrap();
-    }
 
-    #[test]
-    fn file_snapshot_restores_original_bytes_and_absence() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("role-config-{}-{nonce}", std::process::id()));
-        fs::create_dir_all(&root).unwrap();
-        let path = root.join("role.md");
-        let absent = FileSnapshot::capture(path.clone()).unwrap();
-        atomic_write(&path, b"old\r\n\n").unwrap();
-        let existing = FileSnapshot::capture(path.clone()).unwrap();
-        atomic_write(&path, b"new").unwrap();
-        existing.restore().unwrap();
-        assert_eq!(fs::read(&path).unwrap(), b"old\r\n\n");
-        absent.restore().unwrap();
-        assert!(!path.exists());
-        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
-        fs::remove_dir(&root).unwrap();
-    }
 }

@@ -350,12 +350,6 @@ fn restart_node_directory_phase1_migration_refuses_without_mutating_state() {
 
 #[test]
 fn text_queries_and_native_rendering_switches_keep_literal_boundaries() {
-    for backend in ["tmux", "TMUX", " conpty "] {
-        let input = format!("--backend={backend}");
-        let checked = super::super::arguments::parse("quick-start", &[input]).unwrap();
-        let parsed = quick_start_args(&checked.tokens, Path::new(".")).unwrap();
-        assert_eq!(parsed.backend.as_deref(), Some(backend));
-    }
     for query in ["", "  ", "--help", "a=b"] {
         let checked =
             super::super::arguments::parse("models", &strings(&[&format!("--search={query}")]))

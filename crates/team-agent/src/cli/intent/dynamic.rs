@@ -1,7 +1,6 @@
-//! Ad-hoc roles still enter through the ordinary quick-start/add-agent transactions.
+//! Ad-hoc declaration and staging coverage for the unified start kernel.
 use super::*;
 use crate::model::yaml::Value as Yaml;
-use std::io::Write;
 
 #[cfg(test)]
 mod tests {
@@ -27,6 +26,33 @@ mod tests {
         (args, request.agent.to_string(), declaration.text)
     }
 
+    fn resolved_role(id: &str, source: Option<&Path>, patch: &RoleConfigPatch, leader: &str) -> String {
+        let root = Sandbox::new();
+        let selected = crate::state::selector::SelectedTeam {
+            run_workspace: root.path().into(), team_dir: root.path().into(), team_key: "current".into(),
+            spec_workspace: None, spec_path: None,
+            state: json!({"team_owner":{"provider":leader}}),
+        };
+        let request = crate::lifecycle::seat_start::StartRequest {
+            workspace: root.path().into(), team: Some("current".into()), agent: AgentId::new(id),
+            role_file: source.map(Path::to_path_buf), patch: patch.clone(), session: SessionPolicy::Preserve,
+        };
+        crate::lifecycle::seat_start::resolve(&request, Some(&selected)).unwrap().text
+    }
+
+    fn stage_with(
+        args: &QuickStartArgs, agent: &str, role: &str,
+        launch: impl FnOnce(&QuickStartArgs) -> Result<CmdResult, CliError>,
+    ) -> Result<CmdResult, crate::lifecycle::LifecycleError> {
+        crate::lifecycle::seat_start::stage_sources(
+            &args.workspace, &args.agents_dir, args.team_id.as_deref().unwrap_or("current"), agent, role,
+            || {
+                let result = launch(args).map_err(|error| crate::lifecycle::LifecycleError::RequirementUnmet(error.to_string()))?;
+                Ok((result.exit == ExitCode::Ok, result))
+            },
+        )
+    }
+
     #[test]
     #[serial_test::serial(env)]
     fn empty_workspace_admission_is_current_and_planning_is_readonly() {
@@ -38,10 +64,9 @@ mod tests {
         assert_eq!(agent, "worker-1");
         assert_eq!(args.team_id.as_deref(), Some("current"));
         let (meta, body) = crate::compiler::split_front_matter(&role);
-        assert_eq!(
-            meta.get("provider").and_then(Yaml::as_str),
-            Some(default_provider(None).as_str())
-        );
+        let Step::UnifiedStart { description, .. } = &plan.steps[0] else { panic!() };
+        assert!(description.defaulted.as_array().unwrap().contains(&json!("provider")));
+        assert!(meta.get("provider").and_then(Yaml::as_str).is_some());
         assert_eq!(
             meta.get("dangerously_skip_permissions"),
             Some(&Yaml::Bool(false))
@@ -96,7 +121,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(intent.patch.prompt.as_deref(), Some("Review the changes"));
-        let role = initial_role("worker-1", None, &intent.patch, "pi").unwrap();
+        let role = resolved_role("worker-1", None, &intent.patch, "pi");
         let (meta, body) = crate::compiler::split_front_matter(&role);
         assert_eq!(meta.get("provider").and_then(Yaml::as_str), Some("claude"));
         assert_eq!(meta.get("model").and_then(Yaml::as_str), Some("sonnet"));
@@ -130,7 +155,7 @@ mod tests {
         let text = "---\nname: worker-1\nprovider: claude\nmodel: sonnet\ndangerously_skip_permissions: true\n---\nOriginal task\n";
         std::fs::write(&path, text).unwrap();
         assert_eq!(
-            initial_role("worker-1", Some(&path), &RoleConfigPatch::default(), "pi").unwrap(),
+            resolved_role("worker-1", Some(&path), &RoleConfigPatch::default(), "pi"),
             text
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
@@ -142,7 +167,7 @@ mod tests {
         let path = root.path().join("worker-1.md");
         std::fs::write(&path, "Review the changes\n").unwrap();
         let role =
-            initial_role("worker-1", Some(&path), &RoleConfigPatch::default(), "pi").unwrap();
+            resolved_role("worker-1", Some(&path), &RoleConfigPatch::default(), "pi");
         let (meta, body) = crate::compiler::split_front_matter(&role);
         assert_eq!(meta.get("provider").and_then(Yaml::as_str), Some("pi"));
         assert_eq!(
@@ -158,11 +183,11 @@ mod tests {
         let root = Sandbox::new();
         let mut plan = runtime::plan(parse_start(root.path(), &["worker-1"]).unwrap()).unwrap();
         let (args, agent, role) = resolved_start(&plan.steps.remove(0));
-        assert!(execute_with(&args, &agent, &role, |_| Err(refusal("preflight failed"))).is_err());
+        assert!(stage_with(&args, &agent, &role, |_| Err(refusal("preflight failed"))).is_err());
         assert!(!args.agents_dir.exists());
         assert!(!crate::state::persist::runtime_state_path(root.path()).exists());
-        let changed = initial_role(&agent, None, &RoleConfigPatch::default(), "claude").unwrap();
-        execute_with(&args, &agent, &changed, |_| {
+        let changed = resolved_role(&agent, None, &RoleConfigPatch::default(), "claude");
+        stage_with(&args, &agent, &changed, |_| {
             Ok(CmdResult::from_json(json!({"ok":true}), true))
         })
         .unwrap();
@@ -188,8 +213,10 @@ mod tests {
         )
         .unwrap();
         let mut plan = runtime::plan(intent).unwrap();
-        let (args, agent, role) = resolved_start(&plan.steps.remove(0));
-        assert!(execute(&args, &agent, &role).is_err());
+        let step = plan.steps.remove(0);
+        let (args, _, _) = resolved_start(&step);
+        let Step::UnifiedStart { request, .. } = step else { panic!() };
+        assert!(crate::lifecycle::seat_start::start(&request, false).is_err());
         assert!(!crate::state::persist::runtime_state_path(root.path()).exists());
         assert!(!args.agents_dir.exists());
     }
@@ -200,7 +227,7 @@ mod tests {
         let root = Sandbox::new();
         let mut plan = runtime::plan(parse_start(root.path(), &["worker-1"]).unwrap()).unwrap();
         let (args, agent, role) = resolved_start(&plan.steps.remove(0));
-        let result = execute_with(&args, &agent, &role, |_| {
+        let result = stage_with(&args, &agent, &role, |_| {
             let state = json!({"active_team_key":"current", "team_key":"current", "teams":{"current":{
                 "team_key":"current", "status":"alive", "agents":{"worker-1":{"status":"starting"}}
             }}});
@@ -210,7 +237,6 @@ mod tests {
             Ok(CmdResult::from_json(json!({"ok":false,"status":"partial"}), true))
         }).unwrap();
         assert_eq!(result.exit, ExitCode::Error);
-        assert!(source_adopted(&args, &agent));
         assert_eq!(
             std::fs::read_to_string(args.agents_dir.join("agents/worker-1.md")).unwrap(),
             role
@@ -218,12 +244,15 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn managed_sources_never_overwrite_changed_documents() {
         let root = Sandbox::new();
-        let path = root.path().join("role.md");
-        create_source(&path, "original").unwrap();
-        create_source(&path, "original").unwrap();
-        assert!(create_source(&path, "changed").is_err());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+        let plan = runtime::plan(parse_start(root.path(), &["worker-1"]).unwrap()).unwrap();
+        let (args, agent, _) = resolved_start(&plan.steps[0]);
+        for role in ["original", "original"] {
+            stage_with(&args, &agent, role, |_| Ok(CmdResult::from_json(json!({"ok":true}), true))).unwrap();
+        }
+        assert!(stage_with(&args, &agent, "changed", |_| panic!("changed source was launched")).is_err());
+        assert_eq!(std::fs::read_to_string(args.agents_dir.join("agents/worker-1.md")).unwrap(), "original");
     }
 }

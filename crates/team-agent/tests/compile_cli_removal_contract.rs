@@ -17,7 +17,7 @@ use hermetic_guard::HermeticTestEnv;
 use serde_json::Value;
 use serial_test::serial;
 use team_agent::cli::{
-    cmd_add_agent, cmd_quick_start, cmd_restart, AddAgentArgs, QuickStartArgs, RestartArgs,
+    cmd_quick_start, cmd_restart, QuickStartArgs, RestartArgs,
 };
 
 const TEAM_MD: &str = "---\nname: contract-team\nobjective: Contract fixture.\nprovider: codex\nmodel: gpt-5.5\n---\n\nContract fixture.\n";
@@ -350,16 +350,20 @@ fn p5_restart_and_add_agent_keep_real_lifecycle_paths() {
     });
     assert!(format!("{restart:?}").contains("spec") || format!("{restart:?}").contains("Err"));
 
-    let add = cmd_add_agent(&AddAgentArgs {
-        role_config: Default::default(),
-        agent: "new-worker".into(),
-        workspace,
-        team: None,
-        role_file: env.root().join("missing-role.md").display().to_string(),
-        force: false,
-        json: true,
-    });
+    let before = snapshot(env.root());
+    let add = team_agent::lifecycle::seat_start::start(
+        &team_agent::lifecycle::seat_start::StartRequest {
+            patch: Default::default(),
+            agent: team_agent::model::ids::AgentId::new("new-worker"),
+            workspace,
+            team: None,
+            role_file: Some(env.root().join("missing-role.md")),
+            session: team_agent::lifecycle::seat_start::SessionPolicy::Preserve,
+        },
+        false,
+    );
     assert!(format!("{add:?}").contains("missing") || format!("{add:?}").contains("role"));
+    assert_eq!(snapshot(env.root()), before, "missing role refusal must not write");
 }
 
 #[test]

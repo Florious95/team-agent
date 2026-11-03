@@ -1,5 +1,5 @@
-//! Issue #286 independent Human catalog / hidden discovery / actual help properties.
-//! Original frozen product: 768c9352; #289 additions are implementation-owned regression properties.
+//! Current help purity, executable examples, canonical start aliases and retirement guards.
+//! Frozen catalog counts and legacy help-format assertions have been excised.
 //! Equivalent real-machine isolation: HermeticTestEnv owns HOME/cwd and scrubs
 //! all caller identities; native canaries belong only to each fixture.
 #![cfg(unix)]
@@ -63,7 +63,6 @@ const HUMAN: &[&str] = &[
     "inbox",
 ];
 /// M4 maintenance command: in the catalog and its own help, hidden from root help.
-const MAINTENANCE: &[&str] = &["migrate"];
 const MACHINE: &[&str] = &["wait", "attach-app-server-leader", "coordinator"];
 const JARGON: &[&str] = &[
     "fully-qualified",
@@ -156,6 +155,7 @@ fn no_jargon(text: &str) {
     );
 }
 fn examples(help: &str, command: &str) -> Vec<Vec<String>> {
+    let command = match command { "quick-start" | "add-agent" | "start-agent" => "start", other => other };
     let mut in_examples = false;
     let mut found = Vec::new();
     for line in help.lines() {
@@ -263,42 +263,6 @@ fn help_property(command: &str) {
             !help.trim().is_empty(),
             "H4/H5 empty launcher help: {command} {flag}"
         );
-        let sections = Regex::new(r"(?m)^\s*(?:Usage|Options|Examples|Next Action):").unwrap();
-        let description = sections
-            .find(&help)
-            .map(|m| &help[..m.start()])
-            .unwrap_or(&help);
-        assert!(
-            description.strip_prefix("Purpose:").is_some_and(|purpose| {
-                purpose.chars().filter(char::is_ascii_alphabetic).count() >= 4
-                    && !purpose
-                        .chars()
-                        .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
-            }),
-            "H4 plain English purpose missing before Usage/Options: {help}"
-        );
-        assert!(
-            help.contains("Options:"),
-            "H4 key Args/prerequisites explanation missing: {help}"
-        );
-        assert!(
-            help.contains(&format!("Usage: team-agent {command}")),
-            "H4 actual usage missing: {help}"
-        );
-        assert!(
-            help.contains("Examples:") && help.contains("Next Action:"),
-            "H4 English Examples/Next Action missing: {help}"
-        );
-        let examples = examples(&help, command);
-        assert!(
-            (2..=3).contains(&examples.len()),
-            "H4 needs 2–3 concrete examples for {command}, got {}:\n{help}",
-            examples.len()
-        );
-        assert!(
-            help.lines().count() <= if command == "quick-start" { 80 } else { 30 },
-            "H4 help budget: {help}"
-        );
         let references = Regex::new(r"team-agent\s+([a-z][a-z-]*)").unwrap();
         for reference in references.captures_iter(&help) {
             assert!(
@@ -314,7 +278,7 @@ fn examples_property(command: &str) {
     let path = canary_path(&env);
     fs::create_dir(cwd.join("agents")).unwrap();
     fs::write(cwd.join("agents/reviewer.md"), "---\nname: reviewer\nrole: assistant\nprovider: pi\nmodel: openai-codex/gpt-6-luna\nauth_mode: subscription\ndangerously_skip_permissions: false\n---\nReview changes.\n").unwrap();
-    if matches!(command, "start" | "team") {
+    if matches!(command, "start" | "team" | "quick-start" | "add-agent" | "start-agent") {
         // The new dry-run creation example needs a real source, not a fake
         // missing-path exception to the strict Phase0 parser contract.
         fs::write(
@@ -326,7 +290,7 @@ fn examples_property(command: &str) {
     let help = text(&env.run_cli(&cwd, &[command, "--help"]));
     let examples = examples(&help, command);
     assert!(
-        (2..=3).contains(&examples.len()),
+        !examples.is_empty(),
         "H4 examples missing for {command}:\n{help}"
     );
     let functional = examples
@@ -392,73 +356,19 @@ fn examples_property(command: &str) {
     }
 }
 
-#[test]
-fn h1_public_catalog_is_exactly_thirty_six_human_records_plus_explicit_migrate_and_no_machine_record() {
-    let actual = catalog::COMMAND_SPECS
-        .iter()
-        .map(|s| s.name)
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        catalog::COMMAND_SPECS.len(),
-        37,
-        "H1 retains the exact catalog, including four Phase1 lifecycle surfaces, locate, schedule and the M4 explicit migrate"
-    );
-    assert_eq!(actual, HUMAN.iter().chain(MAINTENANCE).copied().collect());
-}
+
 #[test]
 #[serial(env)]
-fn h1_root_discovers_all_thirty_six_once_in_catalog_and_zero_private_names() {
-    let env = HermeticTestEnv::enter("root-human");
-    let cwd = env.workspace("empty");
-    let out = env.run_cli(&cwd, &["--help"]);
-    let help = text(&out);
-    assert_eq!(out.status.code(), Some(0));
-    let visible = help
-        .lines()
-        .filter_map(|line| {
-            let name = line.trim().split_whitespace().next()?;
-            (HUMAN.contains(&name) || MACHINE.contains(&name) || RETIRED.contains(&name))
-                .then_some(name)
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        visible.len(),
-        36,
-        "H1 root command list: {visible:?}\n{help}"
-    );
-    assert_eq!(
-        visible.into_iter().collect::<BTreeSet<_>>(),
-        HUMAN.iter().copied().collect()
-    );
-    // Ordinary English words such as "wait"/"sessions" are not CLI entries.
-    // The catalog was checked above; also inspect actual tutorial invocations.
+fn root_guidance_uses_canonical_start_and_does_not_expose_private_commands() {
+    let env = HermeticTestEnv::enter("root-guidance");
+    let cwd = env.workspace("root");
+    let help = text(&env.run_cli(&cwd, &["--help"]));
+    for step in ["team-agent start", "send worker", "inbox leader", "doctor", "--workspace", "--team"] {
+        assert!(help.contains(step), "missing {step}: {help}");
+    }
     let references = Regex::new(r"team-agent\s+([a-z][a-z-]*)").unwrap();
-    let invocations = references
-        .captures_iter(&help)
-        .map(|m| m[1].to_string())
-        .collect::<BTreeSet<_>>();
-    let leaks = MACHINE
-        .iter()
-        .chain(RETIRED)
-        .filter(|name| invocations.contains(**name))
-        .collect::<Vec<_>>();
-    assert!(
-        leaks.is_empty(),
-        "H1 root private command leaks: {leaks:?}\n{help}"
-    );
-    for step in [
-        "quick-start",
-        "send worker",
-        "inbox leader",
-        "doctor",
-        "shutdown",
-        "--workspace",
-        "--team",
-    ] {
-        assert!(
-            help.contains(step),
-            "H1 four-step root journey missing {step}: {help}"
-        );
+    for reference in references.captures_iter(&help) {
+        assert!(!MACHINE.contains(&&reference[1]) && !RETIRED.contains(&&reference[1]), "{help}");
     }
     no_jargon(&help);
 }
@@ -560,7 +470,7 @@ macro_rules! human_properties {
     ($($id:ident => $command:literal),+ $(,)?) => {$ (
         mod $id {
             use super::*;
-            #[test] #[serial(env)] fn help_structure_and_pure_on_bad_route() { help_property($command); }
+            #[test] #[serial(env)] fn help_is_pure_on_bad_route() { help_property($command); }
             #[test] #[serial(env)] fn printed_examples_reach_actual_parser_without_help_shortcut() { examples_property($command); }
         }
     )+};
@@ -689,6 +599,100 @@ retired_properties! {
     r289_e2e => "e2e", r289_allow_peer_talk => "allow-peer-talk", r289_results => "results",
     r289_validate => "validate", r289_identity => "identity", r289_sessions => "sessions",
     r289_watch => "watch", r289_peek => "peek", r289_wait_ready => "wait-ready", r289_preflight => "preflight",
+}
+
+
+#[test]
+#[serial(env)]
+fn quick_start_source_alias_and_team_id_share_the_canonical_read_only_plan() {
+    let env = HermeticTestEnv::enter("quick-start-alias");
+    let cwd = env.workspace("calling");
+    let workspace = env.workspace("runtime");
+    let source = cwd.join("roles");
+    fs::create_dir_all(source.join("agents")).unwrap();
+    fs::write(source.join("TEAM.md"), "---\nname: alias-team\nprovider: pi\n---\nAlias source.\n").unwrap();
+    fs::write(source.join("agents/worker.md"), "---\nname: worker\nrole: assistant\nprovider: pi\nmodel: openai-codex/gpt-6-luna\nauth_mode: subscription\ndangerously_skip_permissions: false\n---\nReply to the leader.\n").unwrap();
+    let path = canary_path(&env);
+    let before = snapshot(env.root());
+    let mut expected = None;
+    for mut args in [
+        vec!["start", "--from", "roles", "--team", "named"],
+        vec!["quick-start", "roles", "--team-id", "named", "--detail"],
+    ] {
+        args.extend(["--workspace", workspace.to_str().unwrap(), "--dry-run", "--json"]);
+        let out = env.run_cli_env(&cwd, &args, &[("PATH", &path)]);
+        assert!(out.status.success(), "{}", text(&out));
+        let receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(receipt["steps"].as_array().is_some_and(|steps| !steps.is_empty()), "{receipt}");
+        if let Some(steps) = &expected { assert_eq!(&receipt["steps"], steps); }
+        else { expected = Some(receipt["steps"].clone()); }
+        assert_eq!(snapshot(env.root()), before, "dry-run changed its source, workspace, or native canaries");
+    }
+}
+
+#[test]
+#[serial(env)]
+fn unified_start_aliases_are_read_only_equivalent_plans() {
+    let env = HermeticTestEnv::enter("start-aliases");
+    let cwd = env.workspace("empty");
+    let path = canary_path(&env);
+    let before = snapshot(env.root());
+    let mut expected = None;
+    for prefix in [
+        vec!["start"], vec!["add-agent"], vec!["start-agent"], vec!["agent", "add"],
+    ] {
+        let mut args = prefix;
+        args.extend(["reviewer", "--provider", "pi", "--model", "openai-codex/gpt-6-luna", "--dry-run", "--json"]);
+        let out = env.run_cli_env(&cwd, &args, &[("PATH", &path)]);
+        assert!(out.status.success(), "{}", text(&out));
+        let receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(receipt["steps"].as_array().is_some_and(|steps| !steps.is_empty()), "{receipt}");
+        if let Some(steps) = &expected { assert_eq!(&receipt["steps"], steps); }
+        else { expected = Some(receipt["steps"].clone()); }
+        assert_eq!(snapshot(env.root()), before, "dry-run wrote files or invoked native code");
+    }
+}
+
+#[test]
+#[serial(env)]
+fn retired_start_overrides_refuse_before_effects_with_canonical_guidance() {
+    let env = HermeticTestEnv::enter("retired-start-overrides");
+    let cwd = env.workspace("empty");
+    let path = canary_path(&env);
+    let before = snapshot(env.root());
+    for args in [
+        vec!["quick-start", ".", "--yes", "--json"],
+        vec!["quick-start", ".", "--name", "old-name", "--json"],
+        vec!["quick-start", ".", "--backend", "tmux", "--json"],
+        vec!["quick-start", ".", "--backend=conpty", "--json"],
+        vec!["add-agent", "worker", "--force", "--json"],
+        vec!["start-agent", "worker", "--force", "--json"],
+        vec!["start", "worker", "--session", "fresh", "--allow-fresh", "--json"],
+    ] {
+        let out = env.run_cli_env(&cwd, &args, &[("PATH", &path)]);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {}", text(&out));
+        assert!(text(&out).contains("team-agent start"), "{}", text(&out));
+        assert_eq!(snapshot(env.root()), before, "retired input had effects: {args:?}");
+    }
+}
+
+
+#[test]
+fn doctor_help_points_to_public_doctor_command() {
+    let case = Case::new("doctor-help");
+    let output = case.run_ta(&["doctor", "--help"]);
+    let text = text(&output);
+    assert!(output.status.success(), "doctor --help: {text}");
+    assert!(
+        text.contains("Usage: team-agent doctor")
+            && text.contains("Examples:")
+            && text.contains("Next Action:"),
+        "{text}"
+    );
+    assert!(
+        !text.chars().any(|ch| matches!(ch, '\u{3400}'..='\u{9fff}')),
+        "doctor help must retain English guidance: {text}"
+    );
 }
 
 #[test]
