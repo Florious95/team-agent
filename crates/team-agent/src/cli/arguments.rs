@@ -342,7 +342,9 @@ pub(super) fn parse(command: &str, args: &[String]) -> Result<CheckedArgs, CliEr
         error.get_or_insert_with(|| "choose one recipient addressing mode".to_string());
     }
     if command == "start-agent" && seen.contains("--force") {
-        error = Some("start-agent does not support --force; use stop-agent AGENT followed by start-agent AGENT for a safe restart".to_string());
+        let agent = tokens.iter().find(|token| !token.starts_with("--"))
+            .map(|agent| crate::lifecycle::seat_start::command_arg(agent)).unwrap_or_else(|| "AGENT".into());
+        error = Some(format!("start does not support --force; use `team-agent stop {agent}`, then `team-agent start {agent}` for a safe restart"));
     }
     if let Some(error) = error {
         return Err(CliError::Usage(error));

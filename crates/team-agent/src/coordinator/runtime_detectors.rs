@@ -103,9 +103,9 @@ fn detect_compaction(
     let threshold = compaction_reset_threshold(state);
     let recommendation = if provider == Some(Provider::Codex) && current >= threshold {
         let message = format!(
-            "agent {} crossed Codex compaction threshold; run team-agent reset-agent {} --discard-session",
+            "agent {} crossed Codex compaction threshold; after approving session discard, run `team-agent agent reset {} --discard-session`",
             fact.agent_id.as_str(),
-            fact.agent_id.as_str()
+            crate::lifecycle::seat_start::command_arg(fact.agent_id.as_str())
         );
         let _ = event_log.write(
             "compaction_threshold_crossed.recommend_reset",
@@ -175,7 +175,7 @@ fn detect_session_drift(
         return None;
     }
     let detected_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, false);
-    let remediation = "team-agent reset-agent --discard-session <agent>";
+    let remediation = format!("team-agent agent reset {} --discard-session", crate::lifecycle::seat_start::command_arg(fact.agent_id.as_str()));
     let _ = event_log.write(
         "coordinator.session_drift_detected",
         json!({
@@ -194,7 +194,7 @@ fn detect_session_drift(
         stored,
         &actual,
         &detected_at,
-        remediation,
+        &remediation,
     );
     Some(SessionDriftResult {
         agent_id: fact.agent_id.clone(),

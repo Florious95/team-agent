@@ -115,24 +115,12 @@ fn quick_start_config_guidance(value: &mut Value, args: &QuickStartArgs) -> Opti
     }
     let role_path = agents_path.join("worker.md");
     let mut retry = format!(
-        "team-agent quick-start {} --workspace {}",
+        "team-agent start --from {} --workspace {}",
         shell_quote(&args.agents_dir.to_string_lossy()),
         shell_quote(&args.workspace.to_string_lossy())
     );
     if let Some(team) = args.team_id.as_deref() {
         retry.push_str(&format!(" --team {}", shell_quote(team)));
-    }
-    if let Some(name) = args.name.as_deref() {
-        retry.push_str(&format!(" --name {}", shell_quote(name)));
-    }
-    if let Some(backend) = args.backend.as_deref() {
-        retry.push_str(&format!(" --backend {}", shell_quote(backend)));
-    }
-    if args.yes {
-        retry.push_str(" --yes");
-    }
-    if args.detail {
-        retry.push_str(" --detail");
     }
     if args.json {
         retry.push_str(" --json");

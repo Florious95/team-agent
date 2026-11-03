@@ -81,7 +81,7 @@ pub(crate) fn human_address_reason(reason: &str) -> Option<&'static str> {
         "name_invalid" => "Invalid recipient name; use a name from the agent list.",
         "workspace_not_found" => "The selected workspace directory does not exist; verify the path.",
         "state_not_found" | "workspace_no_state" => {
-            "No usable team exists in the selected workspace; use quick-start for initial creation or restart for an initialized team."
+            "No usable team exists in the selected workspace; run `team-agent start --from .` there for initial creation, or `team-agent start` for an initialized team."
         }
         "team_key_not_found" => "The selected workspace has no such team; verify --workspace and --team.",
         "leader_not_attached" => "No leader is attached to this team; diagnose it and follow the recovery action.",
@@ -674,7 +674,7 @@ fn load_state_checked(workspace: &Path) -> Result<Value, NamedAddressError> {
             NamedAddressErrorKind::StateNotFound,
             "target workspace has no Team Agent runtime state",
         );
-        err.action = "Run team-agent quick-start/restart in the target workspace, or choose a workspace that has .team/runtime/state.json".to_string();
+        err.action = format!("Run `team-agent start --from {} --workspace {}` to initialize the target workspace, or choose one that has .team/runtime/state.json", crate::lifecycle::seat_start::command_arg(&workspace.to_string_lossy()), crate::lifecycle::seat_start::command_arg(&workspace.to_string_lossy()));
         err.log = format!("state_path={}", path.display());
         return Err(err);
     }

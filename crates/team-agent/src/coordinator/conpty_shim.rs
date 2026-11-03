@@ -182,7 +182,7 @@ pub enum ShimError {
     #[error(
         "windows-shim connect timed out after {attempts} attempts (pipe_name={pipe_name}); \
              action: check shim.err.log for CreateNamedPipeW / ACL errors, \
-             then re-run team-agent quick-start"
+             then re-run team-agent start --from ."
     )]
     ConnectTimeout { attempts: u32, pipe_name: String },
     #[error(

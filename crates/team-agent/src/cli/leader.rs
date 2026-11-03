@@ -135,7 +135,7 @@ pub(crate) fn cmd_kiro_leader(args: &[String]) -> CmdResult {
             "capability": "leader_launch",
             "reason": "kiro_leader_not_admitted",
             "error": "Kiro leader launching is not admitted by this candidate; no native process was started.",
-            "action": "Use provider: kiro in a worker role with team-agent quick-start. Worker support does not grant leader capability.",
+            "action": "Use provider: kiro in a worker role, then run `team-agent start --from .`. Worker support does not grant leader capability.",
         }),
         leader_launcher_json(args),
     )

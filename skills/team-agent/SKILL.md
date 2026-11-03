@@ -130,15 +130,6 @@ Finish with `team-agent stop --workspace . --team project-team --json` when auth
 
 ## Compatibility bridges, not the daily workflow
 
-The old add/start spellings are direct aliases of the unified start contract. Other compatibility operations retain their documented boundaries:
+Use `team-agent start` for creation, adoption and activation; use `stop` and the corresponding `agent` operations for deliberate lifecycle changes. Older spellings remain hidden compatibility aliases, not separate creation contracts or operational recipes.
 
-| Compatibility entry | Preferred daily surface |
-|---|---|
-| `quick-start` | `start --from TEAMDIR` for creation and later `start` for activation |
-| `shutdown` | `stop` / `team stop` |
-| `add-agent` / `agent add` / `start-agent` | Direct aliases of `start AGENT`; no separate strict-add contract |
-| `stop-agent` | `stop AGENT` |
-| `remove-agent` / `reset-agent` / `clone-agent` / `fork-agent` | The corresponding `agent` operation |
-| Bare or explicit-path `restart` | Frozen preserve bridge; deliberate `team restart` defaults to auto |
-
-The unified start aliases share defaults, session policy, no-op/refusal rules and receipts. Do not assume unsupported provider capabilities or infer deployment from package metadata.
+The unified start aliases share defaults, session policy, no-op/refusal rules and receipts. Bare or explicit-path `restart` retains its preserve default; deliberate `team restart` defaults to auto. Do not assume unsupported provider capabilities or infer deployment from package metadata.

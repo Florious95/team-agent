@@ -422,7 +422,7 @@ pub(crate) fn diagnose_runtime_for_workspace(
 const TEAM_SPEC_OR_RUNTIME_MISSING: &str = "team_spec_or_runtime_missing";
 const TEAM_SPEC_OR_RUNTIME_MISSING_REPAIR: &str = concat!(
     "no team spec or runtime was found in this workspace. ",
-    "Run `team-agent quick-start <workspace>` for first launch, ",
+    "Run `team-agent start --from .` in the target workspace for first launch, ",
     "or restart from a workspace that already contains `.team`.",
 );
 

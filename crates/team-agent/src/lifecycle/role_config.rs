@@ -499,11 +499,11 @@ fn check_destination(path: &Path, source: Option<&Path>) -> Result<(), Lifecycle
             return Err(LifecycleError::RequirementUnmet(format!(
                 "role file already exists: {}{}",
                 path.display(),
-                if source.is_none() {
-                    "; reuse this existing file with --role-file, or choose a different agent id"
-                } else {
-                    ""
-                }
+                path.file_stem().and_then(|stem| stem.to_str())
+                    .filter(|stem| !stem.is_empty() && !stem.starts_with('-') && *stem != "." && *stem != ".." && stem.chars().all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.')))
+                    .map(|stem| format!("; adopt it with `team-agent start {} --role-file {}`, or choose a different agent id",
+                        super::seat_start::command_arg(stem), super::seat_start::command_arg(&path.to_string_lossy())))
+                    .unwrap_or_else(|| "; select a valid agent id before adopting this declaration".into())
             )));
         }
     }
@@ -516,7 +516,7 @@ fn read_text(path: &Path) -> Result<String, LifecycleError> {
 }
 
 // Unlike read_front_matter, this returns the unnormalised body slice, including blank lines.
-fn role_parts(text: &str) -> Result<(Value, &str), LifecycleError> {
+pub(super) fn role_parts(text: &str) -> Result<(Value, &str), LifecycleError> {
     let (end, opening) = raw_line_end(text, 0);
     if &text[..end] != "---" || end == opening {
         return Ok((Value::Map(Vec::new()), text));
@@ -933,7 +933,7 @@ mod tests {
 
     #[test]
     fn existing_declaration_advice_admits_non_force_reuse() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::lifecycle::tests::TestWorkspace::new();
         let role = temp.path().join("reviewer.md");
         fs::write(&role, "---\nname: reviewer\nprovider: pi\nbypass: false\n---\nReview.\n")
             .unwrap();

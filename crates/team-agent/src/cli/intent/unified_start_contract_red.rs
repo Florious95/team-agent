@@ -382,6 +382,12 @@ fn provider_change_without_fresh_refuses_with_fresh_guidance() {
 #[serial_test::serial(env)]
 fn paused_seat_refusal_names_the_admitted_way_out() {
     let root = team(&[("one", "paused")]);
+    // The declaration is the authority: the role doc itself says paused.
+    std::fs::write(
+        root.path().join("agents/one.md"),
+        PI_ROLE.replacen("---\n", "---\npaused: true\n", 1),
+    )
+    .unwrap();
     let error = dry_run(root.path(), true, &["one"], Observation::StoppedVerified)
         .expect_err("start does not unpause");
     refusal_names(&error, "start");

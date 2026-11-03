@@ -72,13 +72,67 @@ pub fn resolve(
     } else {
         None
     };
-    let original = source
+    let mut original = source
         .as_ref()
         .map(std::fs::read_to_string)
         .transpose()
         .map_err(failed)?
         .unwrap_or_default();
-    let (meta, body) = crate::compiler::split_front_matter(&original);
+    let (mut meta, body) = role_config::role_parts(&original)?;
+    let body = body.to_owned();
+    if let Yaml::Map(fields) = &meta {
+        let mut names = std::collections::BTreeSet::new();
+        for (name, value) in fields {
+            if !names.insert(name) {
+                return Err(refused(format!("duplicate role field: {name}")));
+            }
+            if matches!(name.as_str(), "provider" | "name" | "agent_id")
+                && value.as_str().is_none_or(|value| value.trim().is_empty())
+            {
+                return Err(refused(format!("invalid role field: {name}")));
+            }
+            if matches!(name.as_str(), "model" | "effort" | "profile")
+                && !matches!(value, Yaml::Null)
+                && value.as_str().is_none_or(|value| value.trim().is_empty())
+            {
+                return Err(refused(format!("invalid role field: {name}")));
+            }
+            if name == "dangerously_skip_permissions" && !matches!(value, Yaml::Bool(_)) {
+                return Err(refused("dangerously_skip_permissions must be a boolean"));
+            }
+        }
+    }
+    let previous = selected
+        .and_then(|s| s.state["agents"].get(request.agent.as_str()))
+        .and_then(|row| row["provider"].as_str());
+    let desired = request
+        .patch
+        .provider
+        .as_deref()
+        .or_else(|| meta.get("provider").and_then(Yaml::as_str));
+    if previous
+        .zip(desired)
+        .is_some_and(|(old, new)| !same_provider(old, new))
+        && previous
+            .zip(meta.get("provider").and_then(Yaml::as_str))
+            .is_some_and(|(old, base)| same_provider(old, base))
+    {
+        // A provider switch cannot accidentally carry the old provider's model,
+        // effort or credentials policy. Explicit new CLI values are applied next.
+        if let Yaml::Map(fields) = &mut meta {
+            fields.retain(|(key, _)| {
+                !matches!(
+                    key.as_str(),
+                    "model" | "effort" | "profile" | "auth_mode" | "contract_runtime"
+                )
+            });
+        }
+        original = format!(
+            "---\n{}---\n{}",
+            super::launch::role_source::dump_role_frontmatter(&meta),
+            body
+        );
+    }
     let mut patch = request.patch.clone();
     let mut defaulted = Vec::new();
     if patch.provider.is_none() && meta.get("provider").and_then(Yaml::as_str).is_none() {
@@ -93,8 +147,13 @@ pub fn resolve(
                     })
             })
             .filter(|provider| known_provider(provider))
-            .unwrap_or("pi")
-            .to_string();
+            .map(str::to_owned)
+            .or_else(|| {
+                std::env::var("TEAM_AGENT_LEADER_PROVIDER")
+                    .ok()
+                    .filter(|provider| known_provider(provider))
+            })
+            .unwrap_or_else(|| "pi".to_string());
         defaulted.push("provider");
         patch.provider = Some(provider);
     }
@@ -159,6 +218,12 @@ fn provider(agent: &Yaml) -> &str {
     agent.get("provider").and_then(Yaml::as_str).unwrap_or("")
 }
 fn same_provider(left: &str, right: &str) -> bool {
+    if let (Some(left), Some(right)) = (
+        crate::provider::wire::parse_provider(left),
+        crate::provider::wire::parse_provider(right),
+    ) {
+        return left == right;
+    }
     #[cfg(unix)]
     {
         crate::contract_runtime::registry::same_provider(left, right)
@@ -178,6 +243,66 @@ fn native(provider: &str) -> bool {
         let _ = provider;
         false
     }
+}
+
+pub(crate) fn command_arg(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_-./:@+=".contains(&byte))
+    {
+        value.into()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+pub fn status_command(request: &StartRequest) -> String {
+    let mut command = format!(
+        "team-agent status {} --workspace {}",
+        command_arg(request.agent.as_str()),
+        command_arg(&request.workspace.to_string_lossy())
+    );
+    if let Some(team) = &request.team {
+        command.push_str(&format!(" --team {}", command_arg(team)));
+    }
+    command
+}
+
+fn fresh_command(request: &StartRequest) -> String {
+    let mut args = vec![
+        "team-agent".into(),
+        "start".into(),
+        request.agent.to_string(),
+    ];
+    for (flag, value) in [
+        ("--provider", &request.patch.provider),
+        ("--model", &request.patch.model),
+        ("--effort", &request.patch.effort),
+        ("--profile", &request.patch.profile),
+    ] {
+        if let Some(value) = value {
+            args.extend([flag.into(), value.clone()]);
+        }
+    }
+    if let Some(bypass) = request.patch.bypass {
+        args.extend(["--bypass".into(), bypass.to_string()]);
+    }
+    if let Some(source) = &request.role_file {
+        args.extend(["--role-file".into(), source.to_string_lossy().into_owned()]);
+    }
+    args.extend([
+        "--workspace".into(),
+        request.workspace.to_string_lossy().into_owned(),
+    ]);
+    if let Some(team) = &request.team {
+        args.extend(["--team".into(), team.clone()]);
+    }
+    args.extend(["--session".into(), "fresh".into()]);
+    args.iter()
+        .map(|arg| command_arg(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[derive(Debug, Clone)]
@@ -212,6 +337,12 @@ fn describe_resolved(
     });
     let row = selected.and_then(|s| s.state["agents"].get(request.agent.as_str()));
     let op = if let (Some(selected), Some(row)) = (selected, row) {
+        if row["paused"].as_bool() == Some(true) || desired.get("paused") == Some(&Yaml::Bool(true))
+        {
+            return Err(refused(
+                format!("agent is paused; edit paused: false in its role declaration, then run `team-agent start {}`", command_arg(request.agent.as_str())),
+            ));
+        }
         let migration = !same_provider(row["provider"].as_str().unwrap_or(""), provider(desired));
         if live {
             let spec = role_config::read_spec(selected)?;
@@ -221,17 +352,17 @@ fn describe_resolved(
                 })
             });
             let changed = old.is_none_or(|old| {
-                [
-                    "provider",
-                    "model",
-                    "effort",
-                    "dangerously_skip_permissions",
-                    "profile",
-                    "system_prompt",
-                    "communication_mode",
-                ]
-                .iter()
-                .any(|key| old.get(key) != desired.get(key))
+                !same_provider(provider(old), provider(desired))
+                    || [
+                        "model",
+                        "effort",
+                        "dangerously_skip_permissions",
+                        "profile",
+                        "system_prompt",
+                        "communication_mode",
+                    ]
+                    .iter()
+                    .any(|key| old.get(key) != desired.get(key))
             });
             if changed || request.session == SessionPolicy::Fresh {
                 return Err(refused(format!("agent {} is running; run `team-agent stop {}` before changing its configuration or session", request.agent, request.agent)));
@@ -239,7 +370,7 @@ fn describe_resolved(
             "already_running"
         } else if migration {
             if request.session != SessionPolicy::Fresh {
-                return Err(refused("provider_change_requires_fresh: repeat start with --session fresh; the logical seat and history are retained"));
+                return Err(refused(format!("provider_change_requires_fresh: run `{}` to retain the logical seat and history; retain any explicit prompt from the original request", fresh_command(request))));
             }
             "provider_changed"
         } else if request.session == SessionPolicy::Fresh {
@@ -346,9 +477,10 @@ fn converge(
             SeatObservation::Live => true,
             SeatObservation::StoppedVerified | SeatObservation::Unstarted => false,
             SeatObservation::NativeReconcile | SeatObservation::Unknown => {
-                return Err(refused(
-                    "agent ownership/liveness is unverified; inspect status before start",
-                ))
+                return Err(refused(format!(
+                    "agent ownership/liveness is unverified; run `{}` before starting",
+                    status_command(request)
+                )))
             }
         };
         let description = describe_resolved(request, Some(selected), live, &declaration)?;
@@ -702,7 +834,7 @@ mod tests {
 
     #[test]
     fn empty_workspace_resolution_is_pure_and_reports_safe_defaults() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::lifecycle::tests::TestWorkspace::new();
         let request = request(temp.path());
         let description = describe(&request, None, false).unwrap();
         assert_eq!(description.op, "created");
@@ -723,7 +855,7 @@ mod tests {
 
     #[test]
     fn explicit_declaration_has_no_defaulted_launch_decisions() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::lifecycle::tests::TestWorkspace::new();
         let mut request = request(temp.path());
         request.patch.provider = Some("pi".into());
         request.patch.model = Some("openai-codex/gpt-6-luna".into());
@@ -736,7 +868,7 @@ mod tests {
 
     #[test]
     fn adoption_overlays_explicit_fields_without_mutating_the_source() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::lifecycle::tests::TestWorkspace::new();
         std::fs::create_dir(temp.path().join("agents")).unwrap();
         let source = temp.path().join("agents/reviewer.md");
         let original = "---\nprovider: pi\ndangerously_skip_permissions: true\n---\nReview.\n";

@@ -5699,14 +5699,14 @@ pub mod lifecycle_port {
             // "agent start requirement unmet: agent foo not found".
             let msg = "agent start requirement unmet: agent foo not found";
             let na = error_next_action(msg).expect("not-found must carry next_action");
-            assert_canonical_start(na);
+            assert_canonical_start(&na);
         }
 
         #[test]
         fn add_agent_already_exists_points_to_canonical_start() {
             let msg = "agent start requirement unmet: agent id already exists: foo";
             let na = error_next_action(msg).expect("already-exists must carry next_action");
-            assert_canonical_start(na);
+            assert_canonical_start(&na);
         }
 
         #[test]
@@ -5741,7 +5741,7 @@ pub mod lifecycle_port {
                 !na.contains("start-agent only starts an agent"),
                 "must not reuse the start-agent miss copy: {na}"
             );
-            assert_canonical_start(na);
+            assert_canonical_start(&na);
         }
 
         #[test]

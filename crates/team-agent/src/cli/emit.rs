@@ -1860,7 +1860,8 @@ mod role_cli_tests {
 fn start_agent_args(args: &[String], cwd: &Path) -> Result<StartAgentArgs, CliError> {
     let (parsed, role_config) = role_agent_args(args, false)?;
     if parsed.force {
-        return Err(CliError::Usage("start-agent does not support --force; use stop-agent AGENT followed by start-agent AGENT for a safe restart".to_string()));
+        let agent = crate::lifecycle::seat_start::command_arg(&required_pos(&parsed, 0, "agent")?);
+        return Err(CliError::Usage(format!("start does not support --force; use `team-agent stop {agent}`, then `team-agent start {agent}` for a safe restart")));
     }
     Ok(StartAgentArgs {
         role_config,

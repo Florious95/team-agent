@@ -797,7 +797,7 @@ fn plan_with_observer(
                 match observe(selected, id.as_str(), row)? {
                     Observation::Live => true,
                     Observation::StoppedVerified | Observation::Unstarted => false,
-                    Observation::NativeReconcile | Observation::Unknown => return Err(refusal("agent ownership/liveness is unverified; inspect status before start")),
+                    Observation::NativeReconcile | Observation::Unknown => return Err(refusal(format!("agent ownership/liveness is unverified; run `{}` before starting", crate::lifecycle::seat_start::status_command(&request)))),
                 }
             } else { false };
             let description = checked(crate::lifecycle::seat_start::describe(&request, selected.as_ref(), live))?;

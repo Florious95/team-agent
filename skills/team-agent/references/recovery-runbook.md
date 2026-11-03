@@ -106,6 +106,6 @@ Warn that context will be lost. Each intentional fresh/reset must retain `recove
 
 ## Compatibility and validation scope
 
-The old bare/explicit-path `restart` keeps its preserve default; `quick-start`, `shutdown` and suffixed agent commands remain compatibility bridges for existing scripts, not these daily recovery instructions. Do not mechanically rename scripts or rewrite historical receipts as if they used the new surface.
+The old bare/explicit-path `restart` keeps its preserve default. Hidden compatibility spellings remain available for existing scripts; daily recovery uses canonical `team-agent start`, `team-agent stop` and `team-agent agent` operations. Do not mechanically rename scripts or rewrite historical receipts as if they used the new surface.
 
 The short start/stop/restart journey has isolated two-Pi lifecycle verification, including live no-op, held-seat preservation, both-seat activation and scoped cleanup. Automated fixtures cover continuation/backing/partial/native/mixed refusals. This is not a fresh all-provider same-session memory or all-platform acceptance claim. Earlier Rust resume/cleanup records retain their original scope in history; Python-only repair, roster cloning, raw state injection and direct server/coordinator surgery are not promoted into validated public recipes.

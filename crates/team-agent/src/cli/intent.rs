@@ -160,7 +160,7 @@ pub(super) fn help(command: &str) -> String {
             "Start a team or one agent without replacing verified running processes.",
             "[AGENT [PROMPT...]|./TEAMDIR] [--from TEAMDIR] [--workspace PATH] [--team KEY] [--session preserve|auto|fresh] [--dry-run] [--json]",
             "--from selects TEAM.md and agents/; all relative paths use the calling directory.\nAgent IDs such as reviewer.v2 stay agent IDs even when a same-named directory exists.\nTeam start preserves explicitly stopped seats; use agent start ID to reactivate one seat.\nMissing agents are created automatically (leader provider, pi if unknown; native default model; bypass=false); an uninitialized workspace uses team current.\n--role-file and explicit provider/model/effort/bypass/prompt/profile fields resolve one declaration; receipts identify defaulted fields.\nStopped seats may change provider with --session fresh; their identity and history are retained. Running seats refuse configuration changes or fresh sessions until stopped.\nSession defaults to preserve; auto permits legal fresh fallback; fresh explicitly starts a new native session. --allow-fresh cannot be combined with preserve or fresh.\n--dry-run performs no lifecycle action; final locked admission remains deferred.\nAlready running does not claim role-file synchronization or business readiness.",
-            "  team-agent start --from . --dry-run --json\n  team-agent start reviewer --dry-run --json",
+            "  team-agent start --from . --dry-run --json\n  team-agent start reviewer --dry-run --json\n  team-agent start <id> --provider cursor --model <model> --session fresh",
             "Use team-agent status and team-agent inbox leader -n 3 for actual replies.",
         ),
         "stop" => (

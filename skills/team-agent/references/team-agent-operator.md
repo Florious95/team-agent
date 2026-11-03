@@ -52,22 +52,22 @@ team-agent team restart --workspace . --team project-team
 team-agent team restart --workspace . --team project-team --json
 ```
 
-### Retained compatibility and negative-probe forms — NOT daily recipes
-The following old argv remain in the closed-world catalog for existing scripts and historical tests. Some intentionally invalid or removed flag combinations are negative probes, not supported operational advice. Existing covered records keep their original evidence and are not renamed to imply new-command coverage.
+### Supplemental canonical forms and negative probes — NOT blanket execution authorization
+The following forms supplement the daily recipes. Intentionally invalid flag combinations remain negative probes, not supported operational advice. Historical compatibility evidence is not renamed to claim coverage for canonical spellings; new forms require their own evidence.
 
 ```text
-team-agent add-agent <agent> --role-file <file>
-team-agent add-agent reviewer --role-file .team/current/agents/reviewer.md --workspace .
+team-agent start <agent> --role-file <file>
+team-agent start reviewer --role-file .team/current/agents/reviewer.md --workspace .
 team-agent approvals
 team-agent approvals <agent_id>
 team-agent approvals [coder]
 team-agent claim-leader
 team-agent claude
-team-agent clone-agent <source> --as <new>
+team-agent agent clone <source> --as <new>
 team-agent codex
 team-agent codex --dangerously-bypass-approvals-and-sandbox
 team-agent doctor
-team-agent fork-agent <source> --as <new>
+team-agent agent fork <source> --as <new>
 team-agent inbox <agent_id> -n 3
 team-agent inbox coder -n 3
 team-agent profile doctor <name> --workspace . --json
@@ -77,14 +77,14 @@ team-agent profile init codex-default --auth-mode subscription --workspace .
 team-agent profile init deepseek --auth-mode compatible_api --workspace .
 team-agent profile show <name> --workspace . --json
 team-agent profile show deepseek --workspace . --json
-team-agent quick-start
-team-agent quick-start ./roles --team-id alpha
-team-agent quick-start .team/alpha
-team-agent quick-start .team/current
-team-agent quick-start <dir>
-team-agent quick-start <plain-text-team-dir>
-team-agent remove-agent <agent> --workspace . --confirm
-team-agent reset-agent <agent> --discard-session
+team-agent start --from .
+team-agent start --from ./roles --team alpha
+team-agent start --from .team/alpha
+team-agent start --from .team/current
+team-agent start --from <dir>
+team-agent start --from <plain-text-team-dir>
+team-agent agent remove <agent> --workspace . --confirm
+team-agent agent reset <agent> --discard-session
 team-agent restart
 team-agent restart .
 team-agent restart . --allow-fresh
@@ -95,10 +95,10 @@ team-agent send --watch-result coder "Do the bounded task"
 team-agent send TO MESSAGE
 team-agent send reviewer "..."
 team-agent send reviewer "Review this change"
-team-agent shutdown --workspace . --keep-logs
-team-agent start-agent <agent>
-team-agent start-agent <agent_id> --workspace .
-team-agent start-agent coder --workspace .
+team-agent stop --workspace .
+team-agent start <agent>
+team-agent start <agent_id> --workspace .
+team-agent start coder --workspace .
 team-agent status
 team-agent status --detail --json
 team-agent status coder
@@ -163,7 +163,7 @@ team-agent start analyst --provider pi --bypass false --prompt "Analyze the prop
 
 An imported external role goes into this team's `agents/ID.md`; the original stays untouched. A file already at that destination is used in place. Explicit CLI fields override the selected declaration. Omitted existing fields and role instructions remain unchanged; genuinely omitted defaults are identified in receipts.
 
-`add-agent`, `agent add` and `start-agent` are hidden direct aliases of `start AGENT`. There is no second strict-add contract and no start `--force` option. Unknown ownership or liveness refuses rather than granting permission to replace a process.
+Hidden spelling aliases delegate directly to `start AGENT`. There is no second strict-add contract and no start `--force` option. Unknown ownership or liveness refuses rather than granting permission to replace a process.
 
 ## Change a registered seat
 
@@ -220,4 +220,4 @@ Workers have only `send_message`, `report_result` and optional `get_team_status`
 
 ## Legacy command bridges
 
-Existing scripts may retain `quick-start`, `shutdown`, and `add-agent/start-agent/stop-agent/remove-agent/reset-agent/clone-agent/fork-agent`. These are compatibility interfaces, not the daily workflow. Use the short/team/agent forms above for new instructions. The add/start spelling aliases share one resolver, defaults, session policy, no-op/refusal rules and receipts. Bare/explicit-path legacy restart preserves its separate documented default. Startup evidence remains authoritative.
+Existing scripts may retain hidden compatibility spellings, but new instructions use the canonical start/stop/team/agent forms above. The start aliases share one resolver, defaults, session policy, no-op/refusal rules and receipts. Bare/explicit-path legacy restart preserves its separate documented default. Startup evidence remains authoritative.

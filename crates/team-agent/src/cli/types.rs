@@ -99,11 +99,11 @@ impl CliError {
             payload.session_name = Some(session.clone());
             if command == "quick-start" {
                 payload.action = format!(
-                    "Terminal session `{session}` already exists and may belong to your existing team. Resume with team-agent restart; use --allow-fresh only after explicitly accepting loss of saved context. To create another team, change the name in TEAM.md before quick-start. Do not shut down an existing team to bypass this refusal."
+                    "Terminal session `{session}` already exists and may belong to your existing team. Resume with `team-agent start`. To create another team, change the name in TEAM.md before `team-agent start --from .`. Do not shut down an existing team to bypass this refusal."
                 );
                 payload.next_actions = Some(vec![
-                    "If this is your existing team, resume it with team-agent restart.".to_string(),
-                    "To create another team, change the name in TEAM.md before running team-agent quick-start."
+                    "If this is your existing team, resume it with `team-agent start`.".to_string(),
+                    "To create another team, change the name in TEAM.md before running `team-agent start --from .`."
                         .to_string(),
                 ]);
             } else {
