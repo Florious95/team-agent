@@ -692,10 +692,10 @@ fn plan_with_observer(
         Subject::Agent(id) => Some(id.clone()),
         _ => None,
     };
-    checked(crate::lifecycle::launch::ensure_owner_allowed_for_state(
-        &selected.state,
-        target.as_ref(),
-    ))?;
+    let owner_gate = if plan.intent.verb == Verb::Stop && target.is_none() {
+        crate::lifecycle::launch::ensure_stop_owner_allowed_for_state
+    } else { crate::lifecycle::launch::ensure_owner_allowed_for_state };
+    checked(owner_gate(&selected.state, target.as_ref()))?;
     if plan.intent.verb == Verb::Stop && target.is_none() {
         plan.steps.push(Step::Shutdown(ShutdownArgs {
             workspace: plan.scope.workspace.clone(),
@@ -1178,10 +1178,10 @@ pub(super) fn recheck(plan: &Plan, step: &Step, after_stop: bool) -> Result<(), 
         return Err(refusal("owner or transport binding changed since planning"));
     }
     let id = step.agent().map(AgentId::new);
-    checked(crate::lifecycle::launch::ensure_owner_allowed_for_state(
-        &selected.state,
-        id.as_ref(),
-    ))?;
+    let owner_gate = if matches!(step, Step::Shutdown(_)) {
+        crate::lifecycle::launch::ensure_stop_owner_allowed_for_state
+    } else { crate::lifecycle::launch::ensure_owner_allowed_for_state };
+    checked(owner_gate(&selected.state, id.as_ref()))?;
     let targets: Vec<_> = if let Some(id) = step.agent() {
         vec![id]
     } else {

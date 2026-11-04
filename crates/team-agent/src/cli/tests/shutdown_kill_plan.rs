@@ -24,6 +24,50 @@ fn anchors(raw: &[&str]) -> BTreeSet<String> {
 }
 
 #[test]
+fn family_shutdown_is_deepest_first_and_does_not_include_siblings() {
+    let mut state = json!({"teams":{
+        "root":{}, "child":{"parent_team_key":"root"},
+        "grandchild":{"parent_team_key":"child"},
+        "closed":{"parent_team_key":"root","status":"shutdown","leader_receiver":null},
+        "sibling":{}, "unrelated":{"parent_team_key":"sibling"}
+    }});
+    assert_eq!(crate::cli::lifecycle_port::shutdown_descendants(&state, "root").unwrap(),
+        vec!["grandchild", "child"]);
+    state["teams"]["root"]["parent_team_key"] = json!("grandchild");
+    assert!(crate::cli::lifecycle_port::shutdown_descendants(&state, "root").is_err());
+}
+
+#[test]
+fn spared_parent_keeps_manager_registration_running() {
+    let ws = tmp_shutdown_workspace("spared-manager-registration");
+    let initial = json!({"active_team_key":"parent", "team_key":"parent", "teams":{
+        "parent":{"session_name":"team-parent", "status":"alive",
+            "team_owner":{"pane_id":"%root"},
+            "agents":{"manager":{"provider":"pi","status":"running","pane_id":"%manager"}}},
+        "child":{"session_name":"team-child", "parent_team_key":"parent", "status":"alive",
+            "team_owner":{"pane_id":"%manager"},
+            "leader_receiver":{"status":"attached","pane_id":"%manager"},"agents":{}}
+    }});
+    crate::state::persist::save_runtime_state(&ws, &initial).unwrap();
+    let before = crate::state::persist::load_runtime_state(&ws).unwrap();
+    let backend = CleanShutdownTransport::new().with_targets(vec![PaneInfo {
+        pane_id:PaneId::new("%manager"), session:SessionName::new("team-parent"),
+        window_index:Some(0), window_name:Some(WindowName::new("manager")),
+        pane_index:Some(0), tty:None, current_command:Some("pi".into()),
+        current_path:Some(ws.clone()), active:true, pane_pid:None, leader_env:BTreeMap::new(),
+    }]).with_owned_session(&ws, "team-parent", "parent", "parent");
+    let result = crate::cli::lifecycle_port::shutdown_with_transport(&ws, true, Some("parent"), &backend).unwrap();
+    assert_eq!(result["ok"], false, "{result}");
+    assert_eq!(result["phase"], "target_session_spared", "{result}");
+    let saved = crate::state::persist::load_runtime_state(&ws).unwrap();
+    assert_eq!(saved["teams"]["parent"]["agents"]["manager"], before["teams"]["parent"]["agents"]["manager"]);
+    assert_eq!(saved["teams"]["parent"]["status"], "alive");
+    assert_eq!(saved["active_team_key"], before["active_team_key"]);
+    assert_eq!(saved["teams"]["child"]["leader_receiver"], before["teams"]["child"]["leader_receiver"]);
+    assert!(backend.killed_panes().is_empty());
+}
+
+#[test]
 fn stopped_child_owner_is_not_a_live_parent_worker_anchor() {
     use crate::cli::lifecycle_port::collect_state_leader_anchor_pane_ids as collect;
     let mut state = json!({"teams": {

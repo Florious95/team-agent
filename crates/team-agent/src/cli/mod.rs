@@ -528,7 +528,78 @@ pub mod lifecycle_port {
     ) -> Result<Value, CliError> {
         let run_ws = crate::model::paths::canonical_run_workspace(workspace)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
-        let state = shutdown_state_for_team(&run_ws, team)?;
+        let selected = shutdown_state_for_team(&run_ws, team)?;
+        let root = crate::state::projection::team_state_key(&selected);
+        let mut members = crate::state::persist::with_runtime_state_lock_without_migrations(
+            &run_ws, |snapshot| -> Result<Vec<String>, CliError> {
+                let raw = snapshot.unwrap_or(selected.clone());
+                let current = if raw["teams"][&root].is_object() {
+                    crate::state::projection::project_top_level_view(&raw, &root)
+                } else { raw.clone() };
+                crate::lifecycle::launch::ensure_stop_owner_allowed_for_state(&current, None)
+                    .map_err(|error| CliError::Runtime(error.to_string()))?;
+                shutdown_descendants(&raw, &root).map_err(CliError::Runtime)
+            },
+        )??;
+        members.push(root.clone());
+        let mut stopped = Vec::new();
+        for member in members {
+            // Reload after each child commit: a stale snapshot would resurrect its receiver.
+            let state = crate::state::persist::with_runtime_state_lock_without_migrations(
+                &run_ws, |snapshot| -> Result<Value, CliError> {
+                    let raw = snapshot.unwrap_or(selected.clone());
+                    if member != root && !crate::state::owner_gate::team_ancestors(&raw, &member)
+                        .map_err(CliError::Runtime)?.contains(&root) {
+                        return Err(CliError::Runtime("child team changed parent before shutdown".into()));
+                    }
+                    let current = if raw["teams"][&member].is_object() {
+                        crate::state::projection::project_top_level_view(&raw, &member)
+                    } else { raw };
+                    crate::lifecycle::launch::ensure_stop_owner_allowed_for_state(&current, None)
+                        .map_err(|error| CliError::Runtime(error.to_string()))?;
+                    Ok(current)
+                },
+            )??;
+            let scope = if member == root { team } else { Some(member.as_str()) };
+            let mut result = shutdown_selected(&run_ws, keep_logs, scope, state)?;
+            if member == root {
+                if !stopped.is_empty() { result["stopped_descendants"] = json!(stopped); }
+                return Ok(result);
+            }
+            if result["ok"] != true || result["verification_degraded"] == true {
+                return Ok(json!({"ok":false, "status":"dirty_state",
+                    "reason":"descendant_shutdown_failed", "team":root,
+                    "descendant":member, "descendant_receipt":result}));
+            }
+            stopped.push(member);
+        }
+        unreachable!("family includes its root")
+    }
+
+    pub(crate) fn shutdown_descendants(state: &Value, root: &str) -> Result<Vec<String>, String> {
+        crate::state::owner_gate::team_ancestors(state, root)?;
+        let mut descendants = Vec::new();
+        if let Some(teams) = state["teams"].as_object() {
+            for (key, team) in teams {
+                if key == root || (team["status"] == "shutdown" && !team["leader_receiver"].is_object()) {
+                    continue;
+                }
+                if let Ok(ancestors) = crate::state::owner_gate::team_ancestors(state, key) {
+                    if let Some(depth) = ancestors.iter().position(|parent| parent == root) {
+                        descendants.push((std::cmp::Reverse(depth), key.clone()));
+                    }
+                }
+            }
+        }
+        descendants.sort();
+        Ok(descendants.into_iter().map(|(_, key)| key).collect())
+    }
+
+    fn shutdown_selected(
+        workspace: &Path, keep_logs: bool, team: Option<&str>, state: Value,
+    ) -> Result<Value, CliError> {
+        let run_ws = crate::model::paths::canonical_run_workspace(workspace)
+            .map_err(|e| CliError::Runtime(e.to_string()))?;
         if let Some(endpoint) = legacy_worker_tmux_endpoint(&state) {
             let transport = shutdown_transport_for_endpoint(endpoint);
             return shutdown_with_transport_and_state(
@@ -1985,34 +2056,37 @@ pub mod lifecycle_port {
         // residual / 无 verification degrade)才把匹配 team 的 status 打成
         // "shutdown";degraded/false-green shutdown 保留 null,由 diagnose
         // 走 dirty state 排查通道。
-        mark_agents_stopped(&mut state);
+        let target_session_spared = session_name.as_ref().is_some_and(|target|
+            spared_sessions.iter().any(|session| session == target));
+        let clean_stop = session_killed && !target_session_spared && !verification_degraded;
+        // A spared or unverified session must retain its live seat registrations.
+        if clean_stop { mark_agents_stopped(&mut state); }
         restore_native_rows(&mut state);
         let team_shutdown_status = "shutdown";
         deadline.check("save_state")?;
         if team.is_some() {
-            if session_killed && !verification_degraded {
+            if clean_stop {
                 mark_active_team_shutdown(&mut state, team_shutdown_status);
             }
             crate::state::repository::StateRepository::new(&run_workspace).save(
                 crate::state::repository::StateWriteIntent::ShutdownTeam {
                     team_key: team,
-                    clean: session_killed && !verification_degraded,
+                    clean: clean_stop,
                 },
                 &state,
             )?;
-            promote_live_sibling_after_scoped_shutdown(&run_workspace, &state)?;
+            if clean_stop { promote_live_sibling_after_scoped_shutdown(&run_workspace, &state)?; }
         } else {
-            let _changed_keys = mark_matching_session_teams_stopped(
-                &mut state,
-                session_name.as_ref(),
-                session_killed && !verification_degraded,
-                team_shutdown_status,
-            );
+            if clean_stop {
+                mark_matching_session_teams_stopped(
+                    &mut state, session_name.as_ref(), true, team_shutdown_status,
+                );
+            }
             restore_native_rows(&mut state);
             crate::state::repository::StateRepository::new(&run_workspace).save(
                 crate::state::repository::StateWriteIntent::ShutdownTeam {
                     team_key: None,
-                    clean: session_killed && !verification_degraded,
+                    clean: clean_stop,
                 },
                 &state,
             )?;
@@ -2035,12 +2109,6 @@ pub mod lifecycle_port {
         // Mirrors the "we asked to kill X but X is still alive" check the
         // 0.3.39 false-green bug missed. session_name is the configured
         // target; spared_sessions is the cleanup's "kept alive" list.
-        let target_session_spared = match session_name.as_ref() {
-            Some(target) => spared_sessions
-                .iter()
-                .any(|s| s.as_str() == target.as_str()),
-            None => false,
-        };
         let outcome = classify_shutdown_outcome(ShutdownOutcomeInput {
             kill_error: kill_error.is_some(),
             session_residuals: !session_residuals.is_empty(),

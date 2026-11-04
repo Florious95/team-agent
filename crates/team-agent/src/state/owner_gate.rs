@@ -125,6 +125,41 @@ fn caller_to_value(c: &CallerIdentity) -> Value {
     })
 }
 
+/// Follow only persisted parent keys; never infer family membership from names.
+pub(crate) fn team_ancestors(state: &Value, team: &str) -> Result<Vec<String>, String> {
+    let mut ancestors = Vec::new();
+    let mut seen = std::collections::BTreeSet::from([team.to_string()]);
+    let mut current = team;
+    while let Some(parent) = state["teams"][current]["parent_team_key"].as_str().filter(|p| !p.is_empty()) {
+        if !seen.insert(parent.to_string()) || !state["teams"][parent].is_object() {
+            return Err("invalid team parent chain".into());
+        }
+        ancestors.push(parent.to_string());
+        current = parent;
+    }
+    Ok(ancestors)
+}
+
+/// Stop-only delegation: an actual live owner of an ancestor, on the caller's server.
+pub(crate) fn ancestor_owner_allowed(
+    state: &Value, target: &str, caller: &CallerIdentity, endpoint: &str,
+    probe: &dyn PaneLivenessProbe,
+) -> bool {
+    let Ok(ancestors) = team_ancestors(state, target) else { return false; };
+    ancestors.iter().any(|key| {
+        let ancestor = &state["teams"][key];
+        let owner = &ancestor["team_owner"];
+        let socket = owner["tmux_socket"].as_str()
+            .or_else(|| ancestor["leader_receiver"]["tmux_socket"].as_str());
+        !caller.pane_id.is_empty()
+            && !ancestor["status"].as_str().is_some_and(|s| s.eq_ignore_ascii_case("shutdown"))
+            && owner["pane_id"].as_str() == Some(caller.pane_id.as_str())
+            && socket.is_some_and(|socket| crate::topology::same_endpoint(socket, endpoint))
+            && probe.liveness(&caller.pane_id) == PaneLiveness::Live
+            && check_team_owner(ancestor, caller, false, probe).is_none()
+    })
+}
+
 ///
 /// `worker_sender_bypasses_owner_gate`(`state.py:400`):worker peer-send 绕过 owner 门。
 /// 返回 `Some(agent_id)`=绕过;`None`=不绕过(走 owner 门)。
@@ -258,6 +293,32 @@ mod tests {
 
     fn state_owned(pane: &str, uuid: &str) -> Value {
         json!({"team_owner": {"pane_id": pane, "leader_session_uuid": uuid, "provider": "codex"}})
+    }
+
+    #[test]
+    fn stop_ancestor_authority_requires_persisted_chain_live_owner_and_same_server() {
+        let mut state = json!({"teams":{
+            "root":{"status":"alive", "team_owner":{"pane_id":"%root","tmux_socket":"/tmp/owner-server"}},
+            "child":{"parent_team_key":"root", "team_owner":{"pane_id":"%manager"}},
+            "grandchild":{"parent_team_key":"child", "team_owner":{"pane_id":"%researcher"}},
+            "sibling":{"team_owner":{"pane_id":"%other","tmux_socket":"/tmp/owner-server"}}
+        }});
+        let root = caller("%root", "root");
+        assert!(ancestor_owner_allowed(&state, "child", &root, "/tmp/owner-server", &LIVE));
+        assert!(ancestor_owner_allowed(&state, "grandchild", &root, "/tmp/owner-server", &LIVE));
+        assert!(!ancestor_owner_allowed(&state, "sibling", &root, "/tmp/owner-server", &LIVE));
+        assert!(!ancestor_owner_allowed(&state, "child", &caller("%other", "other"), "/tmp/owner-server", &LIVE));
+        assert!(!ancestor_owner_allowed(&state, "child", &root, "/tmp/wrong-server", &LIVE));
+        for probe in [&DEAD, &UNKNOWN] {
+            assert!(!ancestor_owner_allowed(&state, "child", &root, "/tmp/owner-server", probe));
+        }
+        assert!(check_team_owner(&state["teams"]["child"], &root, false, &LIVE).is_some(),
+            "ordinary owner admission must not acquire ancestor authority");
+        state["teams"]["root"]["parent_team_key"] = json!("grandchild");
+        assert!(team_ancestors(&state, "child").is_err());
+        assert!(!ancestor_owner_allowed(&state, "child", &root, "/tmp/owner-server", &LIVE));
+        state["teams"]["root"]["parent_team_key"] = json!("missing");
+        assert!(!ancestor_owner_allowed(&state, "child", &root, "/tmp/owner-server", &LIVE));
     }
 
     #[test]

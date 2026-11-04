@@ -81,6 +81,31 @@ pub(crate) fn ensure_owner_allowed_for_state(
     Ok(())
 }
 
+/// Ancestors receive stop authority only; start/restart and peer authority stay unchanged.
+pub(crate) fn ensure_stop_owner_allowed_for_state(
+    state: &serde_json::Value, target_role: Option<&AgentId>,
+) -> Result<(), LifecycleError> {
+    let direct = ensure_owner_allowed_for_state(state, target_role);
+    if direct.is_ok() { return direct; }
+    let Some(endpoint) = std::env::var("TMUX").ok()
+        .and_then(|value| value.split(',').next().filter(|s| !s.is_empty()).map(str::to_owned))
+        else { return direct; };
+    let team = crate::state::projection::team_state_key(state);
+    let caller = crate::state::identity::caller_identity_from_env(
+        Some(state), &crate::state::identity::SystemEnv, Some(&team), None,
+    ).map_err(|error| LifecycleError::StatePersist(error.to_string()))?;
+    struct LiveCaller(crate::tmux_backend::TmuxBackend);
+    impl crate::state::owner_gate::PaneLivenessProbe for LiveCaller {
+        fn liveness(&self, pane: &str) -> PaneLiveness {
+            self.0.liveness(&PaneId::new(pane)).unwrap_or(PaneLiveness::Unknown)
+        }
+    }
+    let probe = LiveCaller(crate::tmux_backend::TmuxBackend::for_tmux_endpoint(&endpoint));
+    if crate::state::owner_gate::ancestor_owner_allowed(state, &team, &caller, &endpoint, &probe) {
+        Ok(())
+    } else { direct }
+}
+
 /// ---
 /// purpose: 判断调用方是否就是目标席位本人
 /// returns: 环境里的席位 id 与团队 id 同时与目标相符时为 true

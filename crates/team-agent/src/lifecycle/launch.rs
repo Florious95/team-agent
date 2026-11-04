@@ -446,7 +446,7 @@ pub use clone_agent::clone_agent;
 
 mod ownership;
 pub(super) use ownership::*;
-pub(crate) use ownership::{ensure_owner_allowed, ensure_owner_allowed_for_state, state_path};
+pub(crate) use ownership::{ensure_owner_allowed, ensure_owner_allowed_for_state, ensure_stop_owner_allowed_for_state, state_path};
 
 pub mod spec_state;
 pub(crate) use spec_state::{
