@@ -90,6 +90,8 @@ impl PlanHook for CodexAdapter {
         let start = arguments.len();
         arguments.extend(self.mcp_overrides(&r.identity)?);
         let mcp = CarrierUse::Specified(CarrierRef::Arguments((start..arguments.len()).collect()));
+        // Native shell tools must retain the host-minted worker/caller tuple.
+        arguments.extend(["-c".into(), "shell_environment_policy.inherit=\"all\"".into()]);
         // The native sandbox applies to the actual project CWD; approvals retain
         // the existing user policy when bypass is not requested.
         let bypass = if r.bypass { let index = arguments.len(); arguments.push("--dangerously-bypass-approvals-and-sandbox".into()); CarrierUse::Specified(CarrierRef::Arguments(vec![index])) }
@@ -99,8 +101,6 @@ impl PlanHook for CodexAdapter {
             EffortResolution::Pass(effort) => { let index = arguments.len(); arguments.extend(["-c".into(), format!("model_reasoning_effort={}", effort.as_str()).into()]); CarrierUse::Specified(CarrierRef::Arguments(vec![index, index + 1])) },
             EffortResolution::Ignored { reason, .. } => return Err(ContractError::EffortRejected(*reason)),
         };
-        // Native shell tools must retain the host-minted worker/caller tuple.
-        arguments.extend(["-c".into(), "shell_environment_policy.inherit=\"all\"".into()]);
         arguments.extend(session.map(|(_, id)| OsString::from(id)));
         // The pane execs bare `codex` through PATH, so the user's wrapper runs and
         // keeps the name. The engine is only the image that route must exec into.

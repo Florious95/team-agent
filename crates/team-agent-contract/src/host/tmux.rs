@@ -822,7 +822,8 @@ impl<R: CommandRunner> TmuxHost<R> {
                 workspace,
                 team,
                 seat: resolved.request().identity.seat.as_str(),
-                provider: resolved.provider().as_str(),
+                // Public native name, never an internal adapter key (e.g. grok_build).
+                provider: &plan.launcher.command,
                 endpoint: &shared.endpoint,
             })
         });
