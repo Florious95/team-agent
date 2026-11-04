@@ -10,6 +10,13 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+pub(crate) const OPERATING_PREAMBLE: &str = "Operate teams only through `team-agent` (start with `team-agent --help`) and your team tools; receipts and Next Action lines are authoritative. Do not read other workspaces, binaries, runtime state files or worker terminals.";
+
+pub(crate) fn inject_operating_preamble(provider: Provider, argv: &mut Vec<String>) -> Result<(), PromptError> {
+    inject(provider, argv, OPERATING_PREAMBLE, Path::new("<built-in leader preamble>"))
+        .map_err(|mut error| { error.config_path = None; error })
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PromptError {
     pub reason: &'static str,
@@ -566,6 +573,18 @@ mod tests {
     }
     fn args(tokens: &[&str]) -> Vec<String> {
         tokens.iter().map(|text| text.to_string()).collect()
+    }
+
+    #[test]
+    fn built_in_operating_preamble_uses_native_carriers_without_host_configuration() {
+        for provider in [Provider::Claude, Provider::ClaudeCode, Provider::Codex] {
+            let mut argv = args(&[crate::provider::wire::command_name(provider)]);
+            inject_operating_preamble(provider, &mut argv).unwrap();
+            assert!(argv.iter().any(|arg| arg.contains(OPERATING_PREAMBLE)));
+            inject(provider, &mut argv, "User customization", Path::new("/fixture/prompt")).unwrap();
+            assert!(argv.iter().any(|arg| arg.contains(OPERATING_PREAMBLE) && arg.contains("User customization")));
+        }
+        assert!(crate::lifecycle::worker_command_context::compile_pi_leader_system_prompt().starts_with(OPERATING_PREAMBLE));
     }
 
     #[test]
