@@ -619,9 +619,29 @@ fn route_direct(
         // bare (non-scoped) shutdown uses `save_runtime_state`. The
         // `team_key` presence encodes the same clean-vs-bare split as the
         // pre-S1a `shutdown_with_transport_and_state` branch at cli/mod.rs:886/895.
-        StateWriteIntent::ShutdownTeam { team_key, .. } => match team_key {
-            Some(_) => helper_write_team_scoped(workspace, state),
-            None => helper_write_root(workspace, state),
+        StateWriteIntent::ShutdownTeam { team_key, clean } => {
+            match team_key {
+                Some(_) => helper_write_team_scoped(workspace, state),
+                None => helper_write_root(workspace, state),
+            }?;
+            if clean {
+                let key = team_key.map(str::to_owned)
+                    .unwrap_or_else(|| super::projection::team_state_key(state));
+                let before = bounded_team_view(state, Some(&key))?;
+                if before.get("leader_receiver").is_some_and(Value::is_object) {
+                    super::persist::update_runtime_state_with_receiver(workspace, &key, |latest| {
+                        let mut current = bounded_team_view(latest, Some(&key))?;
+                        if current.get("status").and_then(Value::as_str) != Some("shutdown")
+                            || current.get("team_owner") != before.get("team_owner")
+                            || current.get("leader_receiver") != before.get("leader_receiver") {
+                            return Err(StateError::SaveConflict("shutdown receiver changed before release".into()));
+                        }
+                        current["leader_receiver"] = Value::Null;
+                        Ok(super::projection::merge_committed_team(latest, &current, &key))
+                    })?;
+                }
+            }
+            Ok(())
         },
         // PromoteLiveSiblingAfterShutdown writes the promoted projection at
         // cli/mod.rs:3526 via the root helper.

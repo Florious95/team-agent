@@ -24,6 +24,19 @@ fn anchors(raw: &[&str]) -> BTreeSet<String> {
 }
 
 #[test]
+fn stopped_child_owner_is_not_a_live_parent_worker_anchor() {
+    use crate::cli::lifecycle_port::collect_state_leader_anchor_pane_ids as collect;
+    let mut state = json!({"teams": {
+        "parent": {"status":"alive", "team_owner":{"pane_id":"%leader"}},
+        "child": {"status":"shutdown", "team_owner":{"pane_id":"%manager"},
+            "leader_receiver":{"status":"attached", "pane_id":"%manager"}}
+    }});
+    assert_eq!(collect(&state, None), anchors(&["%leader"]));
+    state["teams"]["child"]["status"] = json!("alive");
+    assert_eq!(collect(&state, None), anchors(&["%leader", "%manager"]));
+}
+
+#[test]
 fn leader_anchors_are_endpoint_scoped_and_unknown_anchors_stay_protected() {
     use crate::cli::lifecycle_port::collect_state_leader_anchor_pane_ids as collect;
     let state = json!({

@@ -659,6 +659,24 @@ pub(super) fn update_runtime_state_with_lifecycle_target(
     skip_capture_backfill: Option<(&str, &[&str])>,
     update: impl FnOnce(&Value) -> Result<Value, StateError>,
 ) -> Result<Value, StateError> {
+    update_runtime_state_with_authority(workspace, targets, skip_capture_backfill, None, update)
+}
+
+pub(super) fn update_runtime_state_with_receiver(
+    workspace: &Path,
+    team: &str,
+    update: impl FnOnce(&Value) -> Result<Value, StateError>,
+) -> Result<Value, StateError> {
+    update_runtime_state_with_authority(workspace, &[], None, Some(team), update)
+}
+
+fn update_runtime_state_with_authority(
+    workspace: &Path,
+    targets: &[(&str, &str)],
+    skip_capture_backfill: Option<(&str, &[&str])>,
+    receiver_team: Option<&str>,
+    update: impl FnOnce(&Value) -> Result<Value, StateError>,
+) -> Result<Value, StateError> {
     let path = runtime_state_path(workspace);
     let _lock = RuntimeLock::acquire(workspace, "state-save", 2.0)?;
     // Malformed/unreadable state is an error, never an empty store.
@@ -678,7 +696,8 @@ pub(super) fn update_runtime_state_with_lifecycle_target(
         .unwrap_or_default();
     apply_persist_merge_contract(
         &mut committed, &latest, &BTreeSet::new(), skip_capture_backfill.map(|(team, _)| team),
-        &skip_agents, &topology_updates, &BTreeSet::new(), None, None, None,
+        &skip_agents, &topology_updates,
+        &receiver_team.into_iter().map(str::to_owned).collect(), None, None, None,
     )?;
     migrate_state_identity(&mut committed, &SystemEnv, workspace)?;
     crate::state::ownership::strip_top_level_ownership_if_canonical_present(&mut committed);

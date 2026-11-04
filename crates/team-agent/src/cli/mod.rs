@@ -3129,6 +3129,11 @@ pub mod lifecycle_port {
         endpoint: Option<&str>,
         out: &mut std::collections::BTreeSet<String>,
     ) {
+        // Historical owners of stopped children are not live leader leases.
+        if state.get("status").and_then(Value::as_str)
+            .is_some_and(|status| status.eq_ignore_ascii_case("shutdown")) {
+            return;
+        }
         for (key, peer_key) in [
             ("team_owner", "leader_receiver"),
             ("leader_receiver", "team_owner"),

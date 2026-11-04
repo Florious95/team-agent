@@ -935,41 +935,16 @@ fn managed_leader_session_name(provider: Provider, workspace: &Path) -> SessionN
         .unwrap_or("workspace");
     let folder = sanitize_session_folder(folder_raw);
     let hash = sha1_hex_prefix(resolved.to_string_lossy().as_bytes(), 8);
-    let pid = std::process::id();
-    let epoch_nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
     SessionName::new(format!(
-        "{LEADER_SESSION_PREFIX}{}-{folder}-{hash}-{pid:x}-{epoch_nanos:x}",
-        provider_wire(provider)
+        "{LEADER_SESSION_PREFIX}{}-{folder}-{hash}-{}",
+        provider_wire(provider), crate::provider::adapter::next_session_token()
     ))
 }
 
 fn managed_leader_session_for_launch(provider: Provider, workspace: &Path) -> SessionName {
-    let candidates = crate::transport_factory::tmux_workspace_transport(workspace)
-        .list_targets()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|target| target.session.as_str().to_string());
-    managed_leader_session_from_candidates(provider, workspace, candidates)
-}
-
-fn managed_leader_session_from_candidates(
-    provider: Provider,
-    workspace: &Path,
-    candidates: impl IntoIterator<Item = String>,
-) -> SessionName {
-    let prefix = format!("{LEADER_SESSION_PREFIX}{}-", provider_wire(provider));
-    let existing = candidates
-        .into_iter()
-        .filter(|name| name.starts_with(&prefix))
-        .collect::<std::collections::BTreeSet<_>>();
-    existing
-        .into_iter()
-        .next()
-        .map(SessionName::new)
-        .unwrap_or_else(|| managed_leader_session_name(provider, workspace))
+    // A fresh inception must not adopt a sibling leader, even when provider
+    // and workspace match. Explicit attach/reuse is a separate operation.
+    managed_leader_session_name(provider, workspace)
 }
 
 /// Base window is `provider_wire` (`claude_code`). A second live leader in
@@ -3117,7 +3092,7 @@ mod tests {
     // replaced that implementation-shape assertion with the contract guard
     // below. Keep the old name here for audit/search provenance.
     #[test]
-    fn a22_launch_session_reuse_contract() {
+    fn a22_launch_session_inception_never_reuses_a_sibling() {
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let start_rs = manifest.join("src").join("leader").join("start.rs");
         let contents = std::fs::read_to_string(&start_rs).expect("read leader/start.rs");
@@ -3131,7 +3106,7 @@ mod tests {
         let body = &contents[start..end];
         assert!(
             body.contains("managed_leader_session_for_launch(provider, workspace)"),
-            "managed launch must select from the A-22 candidate contract; body excerpt: {body}"
+            "managed launch must use independent inception; body excerpt: {body}"
         );
         assert!(
             body.contains("leader_session_name(provider, workspace)"),
@@ -3140,21 +3115,19 @@ mod tests {
         );
         let workspace =
             std::env::temp_dir().join(format!("ta_rs_a22_contract_{}", std::process::id()));
-        let reused = super::managed_leader_session_from_candidates(
-            Provider::ClaudeCode,
-            &workspace,
-            vec![
-                "team-worker-not-a-leader".to_string(),
-                "team-agent-leader-claude_code-z".to_string(),
-                "team-agent-leader-codex-other".to_string(),
-                "team-agent-leader-claude_code-a".to_string(),
-            ],
-        );
-        assert_eq!(
-            reused.as_str(),
-            "team-agent-leader-claude_code-a",
-            "managed launch must deterministically reuse a matching leader prefix session"
-        );
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let launches: Vec<_> = (0..8).map(|_| {
+            let workspace = workspace.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                super::managed_leader_session_for_launch(Provider::ClaudeCode, &workspace)
+                    .as_str().to_owned()
+            })
+        }).collect();
+        let names: std::collections::BTreeSet<_> = launches.into_iter()
+            .map(|launch| launch.join().unwrap()).collect();
+        assert_eq!(names.len(), 8, "simultaneous inceptions must have independent sessions");
         let _ = std::fs::remove_dir_all(workspace);
     }
 
@@ -3162,11 +3135,7 @@ mod tests {
     fn a22_launch_session_without_candidate_gets_nonce() {
         let workspace =
             std::env::temp_dir().join(format!("ta_rs_a22_nonce_{}", std::process::id()));
-        let fresh = super::managed_leader_session_from_candidates(
-            Provider::ClaudeCode,
-            &workspace,
-            std::iter::empty(),
-        );
+        let fresh = super::managed_leader_session_for_launch(Provider::ClaudeCode, &workspace);
         assert!(
             fresh.as_str().starts_with("team-agent-leader-claude_code-"),
             "no candidate must create a leader-prefixed managed session: {}",

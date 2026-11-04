@@ -85,6 +85,15 @@ pub(crate) fn directory_with_reason(workspace: &Path, team: Option<&str>) -> Res
             || ["team_id", "team_name", "tmux_session", "team_dir"].iter()
                 .any(|name| field(value, name) == Some(requested))
     };
+    // active_team_key is a projection pointer, not caller authority. Inbox and
+    // send share the same alive-team predicate as the read-only status gate.
+    let alive = crate::state::projection::team_state_candidates(&snapshot);
+    if team.is_none() && alive.len() > 1 {
+        let mut error = AddressError::new("name_ambiguous",
+            "workspace has multiple alive teams; pass --team <key> to choose one");
+        error.candidates = alive.keys().map(|key| json!({"team_key":key,"advisory":true})).collect();
+        return Err(error);
+    }
     // A stale default pointer cannot make the sole remaining team ambiguous.
     // Explicit selectors and genuinely multi-team workspaces still fail closed.
     let requested = team.or_else(|| field(&snapshot, "active_team_key")
@@ -803,7 +812,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_team_key_wins_over_sibling_aliases_for_explicit_and_default_delivery() {
+    fn explicit_team_key_wins_but_default_delivery_refuses_multiple_alive_teams() {
         let root = std::env::temp_dir().join(format!("ta-team-key-{}-{}", std::process::id(),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::create_dir_all(root.join(".team/runtime")).unwrap();
@@ -812,11 +821,15 @@ mod tests {
             "current": {"session_name":"team-regressions-20261101", "team_name":"regressions-20261101", "agents":{}}
         }});
         std::fs::write(root.join(".team/runtime/state.json"), serde_json::to_vec(&state).unwrap()).unwrap();
-        for requested in [Some("regressions-20261101"), None, Some("actual-session")] {
+        for requested in [Some("regressions-20261101"), Some("actual-session")] {
             let selected = directory_with_reason(&root, requested).unwrap();
             assert_eq!(selected.team.as_deref(), Some("regressions-20261101"));
             assert_eq!(selected.state["session_name"], "actual-session");
         }
+        let refused = directory_with_reason(&root, None).err().expect("unscoped multi-team refusal");
+        assert_eq!(refused.code, "name_ambiguous");
+        assert_eq!(refused.candidates.len(), 2);
+        assert!(crate::inbox_store::read_inbox(&root, None, "leader", None, false, 10).is_err());
         assert_eq!(directory_with_reason(&root, Some("current")).unwrap().team.as_deref(), Some("current"));
         std::fs::remove_dir_all(root).unwrap();
     }

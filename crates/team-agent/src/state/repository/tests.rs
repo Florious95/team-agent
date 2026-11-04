@@ -2,6 +2,61 @@
 use super::StateWriteIntent;
 
 #[test]
+fn clean_shutdown_releases_only_its_unchanged_receiver() -> Result<(), Box<dyn std::error::Error>> {
+    use serde_json::json;
+    for (clean, takeover) in [(false, false), (true, false), (true, true)] {
+        let workspace = std::env::temp_dir().join(format!(
+            "shutdown-receiver-{}", crate::provider::adapter::next_session_token()
+        ));
+        let path = super::helper_workspace_path(&workspace);
+        std::fs::create_dir_all(path.parent().unwrap())?;
+        let initial = json!({"active_team_key":"parent", "teams":{
+            "parent":{"status":"alive","session_name":"team-parent",
+                "agents":{"manager":{"status":"running","provider":"pi","pane_id":"%manager"}},
+                "team_owner":{"pane_id":"%leader","owner_epoch":1},
+                "leader_receiver":{"status":"attached","pane_id":"%leader","owner_epoch":1}},
+            "child":{"status":"alive","session_name":"team-child","agents":{},
+                "team_owner":{"pane_id":"%manager","owner_epoch":1},
+                "leader_receiver":{"status":"attached","pane_id":"%manager","owner_epoch":1}}
+        }});
+        std::fs::write(&path, serde_json::to_vec(&initial)?)?;
+        let repository = super::StateRepository::new(&workspace);
+        let before = repository.load_workspace()?;
+        let mut stopped = super::super::projection::project_top_level_view(&before, "child");
+        if clean {
+            stopped["status"] = json!("shutdown");
+            stopped["teams"]["child"]["status"] = json!("shutdown");
+        }
+        if takeover {
+            let mut rebound = before.clone();
+            rebound["teams"]["child"]["team_owner"] = json!({"pane_id":"%new","owner_epoch":2});
+            rebound["teams"]["child"]["leader_receiver"] = json!({"status":"attached","pane_id":"%new","owner_epoch":2});
+            repository.save(StateWriteIntent::BindLeaderReceiver {
+                team_key:"child", expected:Some((
+                    &before["teams"]["child"]["team_owner"],
+                    &before["teams"]["child"]["leader_receiver"],
+                )),
+            }, &rebound)?;
+        }
+        let result = repository.save(StateWriteIntent::ShutdownTeam {team_key:Some("child"), clean}, &stopped);
+        if takeover { assert!(matches!(result, Err(super::StateError::SaveConflict(_)))); }
+        else { result?; }
+        let saved = repository.load_workspace()?;
+        assert_eq!(saved["teams"]["parent"], before["teams"]["parent"]);
+        if takeover {
+            assert_eq!(saved["teams"]["child"]["leader_receiver"]["pane_id"], "%new");
+        } else if clean {
+            assert!(saved["teams"]["child"]["leader_receiver"].is_null());
+            assert_eq!(saved["teams"]["child"]["team_owner"], before["teams"]["child"]["team_owner"]);
+        } else {
+            assert_eq!(saved["teams"]["child"]["leader_receiver"], before["teams"]["child"]["leader_receiver"]);
+        }
+        std::fs::remove_dir_all(workspace)?;
+    }
+    Ok(())
+}
+
+#[test]
 fn optional_unmigrated_read_preserves_missing_corrupt_and_valid_shapes(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let nonce = std::time::SystemTime::now()
