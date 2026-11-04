@@ -600,7 +600,7 @@ fn plan_with_observer(
                 match observe(selected, id.as_str(), row)? {
                     Observation::Live => true,
                     Observation::StoppedVerified | Observation::Unstarted => false,
-                    Observation::NativeReconcile | Observation::Unknown => return Err(refusal(format!("agent ownership/liveness is unverified; run `{}` before starting", crate::lifecycle::seat_start::status_command(&request)))),
+                    Observation::NativeReconcile | Observation::Unknown => return Err(refusal(crate::lifecycle::seat_start::unverified_start_guidance(&request))),
                 }
             } else { false };
             if let Some(row) = selected.as_ref().and_then(|selected| selected.state["agents"].get(id.as_str())) {

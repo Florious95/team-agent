@@ -205,6 +205,24 @@ fn actions(plan: &Plan) -> Vec<(&str, Option<&str>)> {
     plan.steps.iter().map(|s| (s.name(), s.agent())).collect()
 }
 #[test]
+fn unverified_configuration_change_advises_scoped_stop_not_status_loop() {
+    let (root, mut intent) = fixture(&["one"]);
+    install(root.path(), &[("one", "running", false)]);
+    intent.subject = Subject::Agent(AgentId::new("one"));
+    intent.session = SessionPolicy::Fresh;
+    let state = crate::state::persist::runtime_state_path(root.path());
+    let before = std::fs::read(&state).unwrap();
+    for observed in [Observation::Unknown, Observation::NativeReconcile] {
+        let error = plan_with_observer(intent.clone(), |_, _, _| Ok(observed)).unwrap_err().to_string();
+        assert!(error.contains("team-agent stop one --workspace"), "{error}");
+        assert!(error.contains("--team fixture"), "{error}");
+        assert!(error.contains("before applying changes or starting fresh"), "{error}");
+        assert!(!error.contains("team-agent status"), "{error}");
+        assert_eq!(std::fs::read(&state).unwrap(), before);
+    }
+}
+
+#[test]
 fn owned_native_reconciliation_still_allows_the_original_fenced_stop() {
     assert_eq!(seat_actions(Verb::Stop, Observation::NativeReconcile, false, false, false, false).unwrap(), ["stop"]);
     assert!(seat_actions(Verb::Stop, Observation::Unknown, false, false, false, false).is_err());

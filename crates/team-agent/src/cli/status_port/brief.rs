@@ -222,7 +222,10 @@ fn project_status_nodes(
                 );
                 if let Ok(native) = &native {
                     brief.runtime_status = native["status"].as_str().unwrap_or("unknown").into();
+                    brief.activity = native["activity"].as_str().unwrap_or("unknown").into();
+                    brief.health = native["health"].as_str().unwrap_or("unknown").into();
                     brief.observation_reason = match brief.runtime_status.as_str() {
+                        "running" if brief.activity != "unknown" && brief.health != "unknown" => None,
                         "running" => Some("activity_or_health_not_observed"),
                         "stopped" => None,
                         _ => Some("native_runtime_not_ready"),
@@ -237,8 +240,8 @@ fn project_status_nodes(
                 } else if native.as_ref().err().is_some_and(crate::contract_runtime::backend::authority_is_missing) {
                     brief.observation_reason = Some("native_authority_missing");
                 }
-                // Process alive is T1 only: activity/health remain unknown until
-                // independently observed. Never probe a private %0 on old tmux.
+                // Activity/health come only from the provider's ownership-fenced
+                // surface reader, never PID liveness or a private %0 on old tmux.
                 return (brief, None);
             }
             project_node_with_attach(node, probes.get(node.endpoint.as_deref().unwrap_or("")))

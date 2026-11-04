@@ -313,6 +313,8 @@ pub(crate) fn project_seat_with_row(
     } else {
         "unknown"
     };
+    let (activity, health) = activity_status((status == "running")
+        .then(|| backend::observe_activity(&backend.binding, &seat)).and_then(Result::ok).flatten());
     let session_warning = if seat.session.is_none() {
         backend.store.creation_receipt(&seat.identity.seat, Some(&seat.identity))?
             .filter(|receipt| receipt.outcome == team_agent_contract::orchestration::store::Outcome::Committed)
@@ -320,7 +322,7 @@ pub(crate) fn project_seat_with_row(
     } else { None };
     Ok(
         json!({"agent_id":id,"provider":if seat.provider.as_str() == "grok_build" { "grok" } else { seat.provider.as_str() },
-         "contract_provider":seat.provider,"status":status,"foreign_candidate":false,
+         "contract_provider":seat.provider,"status":status,"activity":activity,"health":health,"foreign_candidate":false,
          "candidate":"current", "action":null, "model":role.model,"effort":role.effort,
         "contract_prompt_sha256":team_agent_contract::host::digest_hex(role.prompt.sha256),
         "runtime_family":"contract","contract_scope":seat.identity.scope,"contract_instance":seat.identity.instance,
@@ -333,6 +335,16 @@ pub(crate) fn project_seat_with_row(
         "mcp_binding":binding_status,"mcp_binding_source":binding_source,"mcp_tools":tools,
         "bootstrap_used":seat.bootstrap_used}),
     )
+}
+
+fn activity_status(observed: Option<team_agent_contract::contract::probe::SemanticEvidence>) -> (&'static str, &'static str) {
+    use team_agent_contract::contract::probe::SemanticEvidence;
+    match observed {
+        Some(SemanticEvidence::Busy) => ("working", "normal"),
+        Some(SemanticEvidence::Idle) => ("idle", "normal"),
+        Some(SemanticEvidence::Fault { .. }) => ("unknown", "error"),
+        None => ("unknown", "unknown"),
+    }
 }
 
 pub fn stop_selected(workspace: &Path, state: &Value) -> Result<Vec<Value>, BackendError> {
@@ -390,6 +402,15 @@ pub fn stop_selected_with_budget(workspace: &Path, state: &Value, budget: std::t
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_activity_requires_independent_semantic_evidence() {
+        use team_agent_contract::contract::probe::SemanticEvidence;
+        assert_eq!(activity_status(None), ("unknown", "unknown"));
+        assert_eq!(activity_status(Some(SemanticEvidence::Idle)), ("idle", "normal"));
+        assert_eq!(activity_status(Some(SemanticEvidence::Busy)), ("working", "normal"));
+        assert_eq!(activity_status(Some(SemanticEvidence::Fault { code: "native_error".into() })), ("unknown", "error"));
+    }
 
     #[test]
     fn contract_admission_uses_seat_metadata_not_provider_name() {

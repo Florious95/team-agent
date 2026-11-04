@@ -668,6 +668,24 @@ pub(crate) fn validate_delivery_target(binding: &Binding, seat: &SeatRecord, bud
     Ok(())
 }
 
+/// Read one bounded, ownership-fenced surface through the provider's native
+/// semantic reader. Never infer activity from a live PID or expose pane text.
+pub(super) fn observe_activity(binding: &Binding, seat: &SeatRecord) -> Result<Option<team_agent_contract::contract::probe::SemanticEvidence>, BackendError> {
+    use team_agent_contract::contract::probe::ProbeOutcome;
+    let target = seat.physical_target()?;
+    let budget = Duration::from_millis(500);
+    let clock = RealClock::new();
+    let mut host = TmuxHost::restore_owned(target.clone(), binding.tmux.clone(),
+        settings(binding, registry::provider(seat.provider.as_str())?).limits,
+        RealCommandRunner::default(), &clock, budget)?;
+    let frame = host.capture(target, &clock, budget, budget)?;
+    let adapter = adapter(binding, &seat.identity, &seat.provider)?;
+    let observed = adapter.hooks().semantic.require("native activity observation")?.read(&NativeRecord {
+        scope: frame.scope, kind: NativeRecordKind::Surface, bytes: frame.text.into_bytes(),
+    });
+    Ok(match observed.outcome { ProbeOutcome::Observed(activity) => Some(activity), _ => None })
+}
+
 fn validate_existing(backend: &Backend, role: &RoleConfig, record: &OperationRecord) -> Result<SeatRecord, BackendError> {
     let current = backend.store.assert_current(&record.target.identity)?;
     if current.evidence_kind != EvidenceKind::Native || current.provider != role.provider
