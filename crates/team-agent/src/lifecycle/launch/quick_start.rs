@@ -109,7 +109,7 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
         crate::layout::worker_env::caller_provider_resolution(
             current_pane.as_deref(),
             current_endpoint.as_deref(),
-            self.transport.tmux_endpoint().as_deref(),
+            self.tmux_endpoint().as_deref(),
         )
     }
 
@@ -120,12 +120,7 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
     }
 
     fn tmux_endpoint(&mut self) -> Option<String> {
-        // Bind the endpoint we use to observe the caller, not the worker server.
-        let caller_transport = caller_read_transport();
-        caller_transport
-            .as_deref()
-            .unwrap_or(self.transport)
-            .tmux_endpoint()
+        caller_tmux_endpoint(self.transport)
     }
 
     fn observe_command(&mut self, pane: &PaneId) -> Option<String> {
@@ -917,6 +912,13 @@ fn caller_read_transport() -> Option<Box<dyn Transport>> {
     ))
 }
 
+fn caller_tmux_endpoint(transport: &dyn Transport) -> Option<String> {
+    // Admission, seeding and binding must validate the server we actually use
+    // to observe the caller, not the independently selected worker server.
+    let caller_transport = caller_read_transport();
+    caller_transport.as_deref().unwrap_or(transport).tmux_endpoint()
+}
+
 fn query_caller_pane_command(transport: &dyn Transport, pane: &PaneId) -> Option<String> {
     let caller_transport = caller_read_transport();
     let query_transport: &dyn Transport = caller_transport.as_deref().unwrap_or(transport);
@@ -954,7 +956,7 @@ fn preflight_fresh_leader_identity(
     let resolution = crate::layout::worker_env::caller_provider_resolution(
         pane.as_deref(),
         current_endpoint.as_deref(),
-        transport.tmux_endpoint().as_deref(),
+        caller_tmux_endpoint(transport).as_deref(),
     );
     if matches!(resolution, crate::layout::worker_env::CallerProviderResolution::Invalid) {
         return refusal("strict_provider", "invalid_caller_tuple",
@@ -1412,7 +1414,7 @@ pub(crate) fn quick_start_with_transport_in_workspace_pi_preflight(
     write_spec_atomic(&spec_path, &spec)?;
     let resolved_spec_path =
         std::fs::canonicalize(&spec_path).unwrap_or_else(|_| spec_path.clone());
-    let scoped_endpoint = transport.tmux_endpoint();
+    let scoped_endpoint = caller_tmux_endpoint(transport);
     let mut state = initial_runtime_state(
         &spec,
         &resolved_spec_path,
@@ -1611,6 +1613,20 @@ mod fresh_quick_start_leader_binding_tests {
     use super::hermetic::HermeticTestEnv;
 
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn admitted_worker_caller_uses_its_own_server_not_the_child_worker_server() {
+        let env = HermeticTestEnv::enter_with_leader("worker-child-caller");
+        let pane = std::env::var("TMUX_PANE").unwrap();
+        let endpoint = crate::tmux_backend::socket_name_from_tmux_env().unwrap();
+        let _provider = env.with_env(CALLER_PROVIDER_ENV, "fake");
+        let _pane = env.with_env(CALLER_PANE_ENV, &pane);
+        let _endpoint = env.with_env(CALLER_ENDPOINT_ENV, &endpoint);
+        let child = OfflineTransport::new().with_tmux_endpoint("different-child-worker-server");
+        assert_eq!(caller_tmux_endpoint(&child).as_deref(), Some(endpoint.as_str()));
+        assert!(preflight_fresh_leader_identity(&child).is_none());
+    }
 
     #[test]
     #[serial_test::serial(env)]
