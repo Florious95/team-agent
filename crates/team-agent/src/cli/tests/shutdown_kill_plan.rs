@@ -41,7 +41,7 @@ fn family_shutdown_is_deepest_first_and_does_not_include_siblings() {
 fn spared_parent_keeps_manager_registration_running() {
     let ws = tmp_shutdown_workspace("spared-manager-registration");
     let initial = json!({"active_team_key":"parent", "team_key":"parent", "teams":{
-        "parent":{"session_name":"team-parent", "status":"alive",
+        "parent":{"session_name":"team-parent", "team_key":"parent", "generation":"parent", "status":"alive",
             "team_owner":{"pane_id":"%root"},
             "agents":{"manager":{"provider":"pi","status":"running","pane_id":"%manager"}}},
         "child":{"session_name":"team-child", "parent_team_key":"parent", "status":"alive",

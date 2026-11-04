@@ -143,8 +143,9 @@ pub(crate) fn team_ancestors(state: &Value, team: &str) -> Result<Vec<String>, S
 /// Stop-only delegation: an actual live owner of an ancestor, on the caller's server.
 pub(crate) fn ancestor_owner_allowed(
     state: &Value, target: &str, caller: &CallerIdentity, endpoint: &str,
-    probe: &dyn PaneLivenessProbe,
+    observed_pane: &str, probe: &dyn PaneLivenessProbe,
 ) -> bool {
+    if caller.pane_id != observed_pane { return false; }
     let Ok(ancestors) = team_ancestors(state, target) else { return false; };
     ancestors.iter().any(|key| {
         let ancestor = &state["teams"][key];
@@ -304,21 +305,22 @@ mod tests {
             "sibling":{"team_owner":{"pane_id":"%other","tmux_socket":"/tmp/owner-server"}}
         }});
         let root = caller("%root", "root");
-        assert!(ancestor_owner_allowed(&state, "child", &root, "/tmp/owner-server", &LIVE));
-        assert!(ancestor_owner_allowed(&state, "grandchild", &root, "/tmp/owner-server", &LIVE));
-        assert!(!ancestor_owner_allowed(&state, "sibling", &root, "/tmp/owner-server", &LIVE));
-        assert!(!ancestor_owner_allowed(&state, "child", &caller("%other", "other"), "/tmp/owner-server", &LIVE));
-        assert!(!ancestor_owner_allowed(&state, "child", &root, "/tmp/wrong-server", &LIVE));
+        assert!(!ancestor_owner_allowed(&state, "child", &root, "/tmp/owner-server", "%other", &LIVE));
+        assert!(ancestor_owner_allowed(&state, "child", &root, "/tmp/owner-server", "%root", &LIVE));
+        assert!(ancestor_owner_allowed(&state, "grandchild", &root, "/tmp/owner-server", "%root", &LIVE));
+        assert!(!ancestor_owner_allowed(&state, "sibling", &root, "/tmp/owner-server", "%root", &LIVE));
+        assert!(!ancestor_owner_allowed(&state, "child", &caller("%other", "other"), "/tmp/owner-server", "%other", &LIVE));
+        assert!(!ancestor_owner_allowed(&state, "child", &root, "/tmp/wrong-server", "%root", &LIVE));
         for probe in [&DEAD, &UNKNOWN] {
-            assert!(!ancestor_owner_allowed(&state, "child", &root, "/tmp/owner-server", probe));
+            assert!(!ancestor_owner_allowed(&state, "child", &root, "/tmp/owner-server", "%root", probe));
         }
         assert!(check_team_owner(&state["teams"]["child"], &root, false, &LIVE).is_some(),
             "ordinary owner admission must not acquire ancestor authority");
         state["teams"]["root"]["parent_team_key"] = json!("grandchild");
         assert!(team_ancestors(&state, "child").is_err());
-        assert!(!ancestor_owner_allowed(&state, "child", &root, "/tmp/owner-server", &LIVE));
+        assert!(!ancestor_owner_allowed(&state, "child", &root, "/tmp/owner-server", "%root", &LIVE));
         state["teams"]["root"]["parent_team_key"] = json!("missing");
-        assert!(!ancestor_owner_allowed(&state, "child", &root, "/tmp/owner-server", &LIVE));
+        assert!(!ancestor_owner_allowed(&state, "child", &root, "/tmp/owner-server", "%root", &LIVE));
     }
 
     #[test]

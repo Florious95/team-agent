@@ -101,7 +101,8 @@ pub(crate) fn ensure_stop_owner_allowed_for_state(
         }
     }
     let probe = LiveCaller(crate::tmux_backend::TmuxBackend::for_tmux_endpoint(&endpoint));
-    if crate::state::owner_gate::ancestor_owner_allowed(state, &team, &caller, &endpoint, &probe) {
+    let observed_pane = std::env::var("TMUX_PANE").unwrap_or_default();
+    if crate::state::owner_gate::ancestor_owner_allowed(state, &team, &caller, &endpoint, &observed_pane, &probe) {
         Ok(())
     } else { direct }
 }
