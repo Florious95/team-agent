@@ -29,6 +29,18 @@ fn binding_pending_keeps_confirmed_effects_and_never_masks_worker_failure() {
 }
 use std::cell::RefCell;
 
+#[test]
+fn start_and_stop_help_explain_subteam_creation_and_safe_cascade() {
+    for command in ["start", "stop"] {
+        let text = help(command);
+        assert!(text.contains("A teammate can start and lead a sub-team from its own terminal"));
+        assert!(text.contains("team-agent start AGENT --team <NAME>"));
+        assert!(text.contains("team-agent stop --team <NAME>"));
+        assert!(text.contains("cascades deepest-first to all recorded descendant sub-teams"));
+        assert!(text.contains("unrelated teams and the calling leader remain running"));
+    }
+}
+
 pub(super) struct Sandbox(pub PathBuf);
 impl Sandbox {
     pub(super) fn new() -> Self {
