@@ -275,16 +275,15 @@ pub(super) struct QuickStartDepth {
 /// ---
 /// purpose: 定出本次 quick-start 的父团队键与团队层级
 /// params:
-///   requested_team: 请求的团队键，用于识别 child 或 grandchild 这类嵌套意图
+///   _requested_team: 团队名不参与父子关系判定
 ///   _agents_dir: 未参与判定
 ///   _strict_real_runtime: 未参与判定
-/// returns: 父团队键与层级；无父上下文时父键为 None、层级为 1
-/// errors: 已有活跃团队且请求键像嵌套意图但推不出父团队时返回 RequirementUnmet
+/// returns: 仅同 workspace 的 owner 上下文提供父键；无父上下文时层级为 1
 /// ---
 pub(super) fn quick_start_depth_guard(
     workspace: &Path,
     _agents_dir: &Path,
-    requested_team: Option<&str>,
+    _requested_team: Option<&str>,
     _strict_real_runtime: bool,
 ) -> Result<QuickStartDepth, LifecycleError> {
     // OWNER_TEAM_ID is injected into every worker process. It is parent
@@ -297,33 +296,8 @@ pub(super) fn quick_start_depth_guard(
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
     }).flatten();
-    let parent = env_parent;
-    let Some(parent) = parent else {
-        let state = crate::state::persist::load_runtime_state(workspace)
-            .unwrap_or_else(|_| serde_json::json!({}));
-        let ambiguous_nested_intent = requested_team.is_some_and(|team| {
-            looks_ambiguous_child_team_key(team) || looks_grandchild_team_key(team)
-        });
-        if has_live_runtime_teams(&state) && ambiguous_nested_intent {
-            if requested_team.is_some_and(looks_grandchild_team_key) {
-                if let Some(parent_key) = infer_parent_team_from_active_state(&state) {
-                    let parent_state =
-                        crate::state::projection::project_top_level_view(&state, &parent_key);
-                    let parent_depth = parent_state
-                        .get("team_depth")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(1);
-                    return Ok(QuickStartDepth {
-                        parent_team_key: Some(parent_key),
-                        team_depth: parent_depth.saturating_add(1),
-                    });
-                }
-            }
-            return Err(LifecycleError::RequirementUnmet(
-                "cannot infer parent team for nested quick-start; pass an explicit worker/subleader owner context"
-                    .to_string(),
-            ));
-        }
+    // A name or the currently active team is not caller provenance.
+    let Some(parent) = env_parent else {
         return Ok(QuickStartDepth {
             parent_team_key: None,
             team_depth: 1,
@@ -348,8 +322,8 @@ pub(super) fn quick_start_depth_guard(
 }
 
 /// ---
-/// purpose: 从 runtime state 推断父团队键
-/// returns: 活跃团队键，且该团队确有 running 席位时返回它，否则 None
+/// purpose: 核对 owner 环境的 workspace 是否与目标相同
+/// returns: 路径相同或 canonicalize 后相同则为 true
 /// ---
 fn owner_context_matches_workspace(workspace: &Path) -> bool {
     let Some(env_workspace) = std::env::var_os("TEAM_AGENT_WORKSPACE") else {
@@ -361,68 +335,6 @@ fn owner_context_matches_workspace(workspace: &Path) -> bool {
             .ok()
             .zip(std::fs::canonicalize(workspace).ok())
             .is_some_and(|(env_path, target_path)| env_path == target_path)
-}
-
-pub(super) fn infer_parent_team_from_active_state(state: &serde_json::Value) -> Option<String> {
-    let active = explicit_active_team_key(state)?;
-    let team = state
-        .get("teams")
-        .and_then(serde_json::Value::as_object)
-        .and_then(|teams| teams.get(&active))?;
-    team_has_running_agent(team).then_some(active)
-}
-
-/// ---
-/// purpose: 判断 state 里是否存在带 running 席位的团队
-/// returns: 任一团队有 running 席位即 true
-/// ---
-pub(super) fn has_live_runtime_teams(state: &serde_json::Value) -> bool {
-    state
-        .get("teams")
-        .and_then(serde_json::Value::as_object)
-        .is_some_and(|teams| teams.values().any(team_has_running_agent))
-}
-
-/// ---
-/// purpose: 判断某团队节点里是否有状态为 running 的席位
-/// returns: 有则 true
-/// ---
-pub(super) fn team_has_running_agent(team: &serde_json::Value) -> bool {
-    team.get("agents")
-        .and_then(serde_json::Value::as_object)
-        .is_some_and(|agents| {
-            agents.values().any(|agent| {
-                agent.get("status").and_then(serde_json::Value::as_str) == Some("running")
-            })
-        })
-}
-
-/// ---
-/// purpose: 判断团队键是否像有歧义的子团队名
-/// params:
-///   team: 团队键，比较前去空白并转小写
-/// returns: 以 child 开头但不等于 child 时为 true
-/// ---
-pub(super) fn looks_ambiguous_child_team_key(team: &str) -> bool {
-    let team = team.trim().to_ascii_lowercase();
-    team != "child"
-        && (team.starts_with("child-")
-            || team.starts_with("child_")
-            || team.starts_with("child.")
-            || team.starts_with("child"))
-}
-
-/// ---
-/// purpose: 判断团队键是否像孙团队名
-/// returns: 等于 grandchild 或以 grandchild 开头时为 true
-/// ---
-pub(super) fn looks_grandchild_team_key(team: &str) -> bool {
-    let team = team.trim().to_ascii_lowercase();
-    team == "grandchild"
-        || team.starts_with("grandchild-")
-        || team.starts_with("grandchild_")
-        || team.starts_with("grandchild.")
-        || team.starts_with("grandchild")
 }
 
 /// ---

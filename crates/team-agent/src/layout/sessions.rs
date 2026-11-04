@@ -75,7 +75,7 @@ pub struct TopologyViolation {
 pub enum TopologyViolationKind {
     /// Worker session name shares the leader-session prefix.
     WorkerSessionNamedAsLeader,
-    /// A worker window inside the worker session is named `leader`.
+    /// A worker window is named `leader` instead of its own agent_id.
     WorkerWindowNamedLeader,
     /// Two agents share the same `pane_id` in state.
     AgentPaneIdCollision,
@@ -88,7 +88,7 @@ pub enum TopologyViolationKind {
 ///
 /// Checks:
 ///   1. The worker session name does NOT start with the leader prefix.
-///   2. No agent window in worker session is literally named `leader`.
+///   2. A worker window named `leader` must match its own agent_id.
 ///   3. No two agents share the same `pane_id`.
 ///   4. `state.leader_receiver.pane_id` is not equal to any agent's
 ///      `pane_id` (E51 family — co-located lease corruption).
@@ -115,7 +115,7 @@ pub fn assert_topology_invariants(state: &JsonValue, spec: &YamlValue) -> Vec<To
                 .get("window")
                 .and_then(JsonValue::as_str)
                 .unwrap_or("");
-            if window.eq_ignore_ascii_case("leader") {
+            if window.eq_ignore_ascii_case("leader") && window != agent_id.as_str() {
                 out.push(TopologyViolation {
                     kind: TopologyViolationKind::WorkerWindowNamedLeader,
                     detail: format!(
@@ -275,6 +275,18 @@ mod tests {
                 .any(|x| matches!(x.kind, TopologyViolationKind::LeaderPaneIdCollidesWithAgent)),
             "must flag LeaderPaneIdCollidesWithAgent; got {v:?}"
         );
+    }
+
+    #[test]
+    fn assert_topology_accepts_worker_named_leader_in_its_own_window() {
+        let state = json!({
+            "agents": {
+                "leader": { "pane_id": "%5", "window": "leader" }
+            },
+            "leader_receiver": { "pane_id": "%0" }
+        });
+        let v = assert_topology_invariants(&state, &spec_for("market-research"));
+        assert!(v.is_empty(), "agent_id is a valid window name; got {v:?}");
     }
 
     #[test]

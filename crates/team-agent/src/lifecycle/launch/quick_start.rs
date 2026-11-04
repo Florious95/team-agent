@@ -1614,6 +1614,61 @@ mod fresh_quick_start_leader_binding_tests {
 
     #[test]
     #[serial_test::serial(env)]
+    fn depth_ignores_domain_names_and_active_team_without_owner_context() {
+        let env = HermeticTestEnv::enter("depth-independent-domains");
+        let workspace = env.workspace("ws");
+        crate::state::persist::save_runtime_state(&workspace, &json!({
+            "active_team_key": "existing",
+            "teams": {
+                "existing": {
+                    "team_depth": 2,
+                    "agents": {"worker": {"status": "running"}}
+                }
+            }
+        })).unwrap();
+        for name in [
+            "market-research", "grandchildcare-research", "childcare-research",
+            "childrens-library", "child", "child-independent", "grandchild",
+        ] {
+            let depth = quick_start_depth_guard(&workspace, &workspace, Some(name), true).unwrap();
+            assert_eq!(depth.team_depth, 1, "{name}");
+            assert_eq!(depth.parent_team_key, None, "{name}");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn depth_uses_only_workspace_scoped_owner_context() {
+        let env = HermeticTestEnv::enter("depth-owner-provenance");
+        let workspace = env.workspace("ws");
+        let foreign = env.workspace("foreign");
+        crate::state::persist::save_runtime_state(&workspace, &json!({
+            "active_team_key": "unrelated",
+            "teams": {
+                "parent": {"team_depth": 2},
+                "unrelated": {"team_depth": 1}
+            }
+        })).unwrap();
+        let _owner = env.with_env("TEAM_AGENT_OWNER_TEAM_ID", "parent");
+        for name in ["market-research", "childcare-research", "grandchildcare-research"] {
+            let unscoped = quick_start_depth_guard(&workspace, &workspace, Some(name), true).unwrap();
+            assert_eq!(unscoped.parent_team_key, None);
+            assert_eq!(unscoped.team_depth, 1);
+            {
+                let _scope = env.with_env("TEAM_AGENT_WORKSPACE", foreign.to_str().unwrap());
+                let depth = quick_start_depth_guard(&workspace, &workspace, Some(name), true).unwrap();
+                assert_eq!(depth.parent_team_key, None);
+                assert_eq!(depth.team_depth, 1);
+            }
+            let _scope = env.with_env("TEAM_AGENT_WORKSPACE", workspace.to_str().unwrap());
+            let depth = quick_start_depth_guard(&workspace, &workspace, Some(name), true).unwrap();
+            assert_eq!(depth.parent_team_key.as_deref(), Some("parent"));
+            assert_eq!(depth.team_depth, 3);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
     fn issue337_missing_caller_is_refused_before_any_launch_effect() {
         let env = HermeticTestEnv::enter("issue337-no-caller");
         env.scrub_tmux();

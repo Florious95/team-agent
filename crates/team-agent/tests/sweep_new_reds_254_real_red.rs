@@ -166,34 +166,41 @@ fn depth_real_nested_cli_persists_child_depth_and_refuses_grandchild() {
 #[test]
 #[ignore = "real-machine: needs real tmux/coordinator/binary"]
 #[file_serial(tmux)]
-fn depth_real_cli_without_parent_env_refuses_ambiguous_nested_creation() {
-    let case = RealCase::new("depth-ambiguous");
-    let parent = case.unique_team("parent");
-    let child = case.unique_team("child");
-    write_fake_team(case.root(), &parent, "parent_worker");
-    write_fake_team(case.root(), &child, "child_worker");
-
-    let parent_out = case.quick_start(&parent, "parent_worker", &[]);
-    assert_success_json("parent quick-start fixture", &parent_out);
-
-    let child_out = case.quick_start(&child, "child_worker", &[]);
-    let state = maybe_state_value(case.root()).unwrap_or(Value::Null);
-    assert!(
-        child_out.code != Some(0)
-            || parse_json_or_null(&child_out.stdout).get("ok").and_then(Value::as_bool) == Some(false),
-        "bare CLI child/grandchild intent in an existing workspace must be rejected as ambiguous unless a parent env/flag is present; rc={:?} stdout={} stderr={} state={state}",
-        child_out.code,
-        child_out.stdout,
-        child_out.stderr
-    );
-    assert!(
-        state.pointer(&format!("/teams/{child}")).is_none(),
-        "ambiguous no-parent-env nested creation must not write the child team; state={state}"
-    );
-    assert!(
-        !case.has_session(&format!("team-{child}")),
-        "ambiguous no-parent-env nested creation must not spawn team-{child}"
-    );
+#[serial_test::serial(env)]
+fn depth_independent_domain_teams_remain_roots_with_leader_named_workers() {
+    let _hermetic_env =
+        hermetic_guard::HermeticTestEnv::enter_with_leader("depth-independent-domains");
+    let case = RealCase::new("depth-independent-domains");
+    let tmux = std::env::var("TMUX").unwrap();
+    let pane = std::env::var("TMUX_PANE").unwrap();
+    let caller = [
+        ("TMUX", tmux.as_str()),
+        ("TMUX_PANE", pane.as_str()),
+        ("TEAM_AGENT_LEADER_PROVIDER", "fake"),
+    ];
+    for domain in [
+        "market-research",
+        "grandchildcare-research",
+        "childcare-research",
+        "childrens-library",
+        "child-independent",
+    ] {
+        let team = case.unique_team(domain);
+        write_fake_team(case.root(), &team, "leader");
+        let out = case.quick_start(&team, "leader", &caller);
+        assert_success_json("independent domain team quick-start", &out);
+        let state = state_value(case.root());
+        let entry = state.pointer(&format!("/teams/{team}")).expect("started team");
+        assert_eq!(entry["team_depth"], json!(1), "{team}: {state}");
+        assert!(entry.get("parent_team_key").is_none(), "{team}: {state}");
+        assert!(
+            !out.stderr.contains("WorkerWindowNamedLeader")
+                && !out.stdout.contains("WorkerWindowNamedLeader"),
+            "leader is a valid worker agent_id; stdout={} stderr={}",
+            out.stdout,
+            out.stderr
+        );
+    }
 }
 
 #[test]
