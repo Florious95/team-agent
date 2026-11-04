@@ -409,6 +409,7 @@ fn intent_human(value: &Value) -> String {
     let status = if status == "actions_completed" { "completed" } else { status };
     let team = value.pointer("/scope/team").and_then(Value::as_str).unwrap_or("workspace");
     let mut lines = vec![format!("{action} {team}: {status}")];
+    if let Some(summary) = value.get("summary").and_then(Value::as_str) { lines.push(summary.into()); }
     let steps = value.get("steps").and_then(Value::as_array).into_iter().flatten().collect::<Vec<_>>();
     let completed = steps.iter().filter(|step| step.get("ok").and_then(Value::as_bool) == Some(true)).count();
     if !steps.is_empty() { lines.push(format!("{completed}/{} actions completed; task completion is not implied.", steps.len())); }
@@ -615,8 +616,14 @@ fn execute_plan(
         })
         .collect();
     if plan.intent.dry_run {
+        let creates_team = plan.steps.iter().any(|step| match step {
+            Step::CreateTeam(_) => true,
+            Step::UnifiedStart { description, .. } => description.creates_team,
+            _ => false,
+        });
+        let summary = creates_team.then(|| format!("creates team {} led by this leader", plan.scope.team.as_deref().unwrap_or("current")));
         return Ok(CmdResult::from_json(
-            json!({"ok":true,"action":plan.intent.verb,"surface":plan.intent.surface,"scope":plan.scope,"session_policy":plan.intent.session,"dry_run":true,"steps":descriptions,"skipped":plan.skipped,"deferred":["original lock-held owner/cohort admission","native/session admission not performed by the readonly planner"]}),
+            json!({"ok":true,"action":plan.intent.verb,"surface":plan.intent.surface,"scope":plan.scope,"session_policy":plan.intent.session,"dry_run":true,"summary":summary,"steps":descriptions,"skipped":plan.skipped,"deferred":["original lock-held owner/cohort admission","native/session admission not performed by the readonly planner"]}),
             plan.intent.json,
         ));
     }
