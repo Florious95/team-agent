@@ -10,7 +10,7 @@ use super::process::{
     capture_executable_inputs, capture_process, capture_public_command, fingerprint_file, resolve_cwd, sample_process,
     verify_executable_inputs, ProcessState,
 };
-use super::shell::{launch_script, quote};
+use super::shell::{launch_script_with_worker, quote, WorkerContext};
 use super::transport::*;
 use super::{digest, digest_hex, HostError, HostErrorKind};
 use crate::contract::delivery::{PasteMode, PhysicalKey, StepOutcome};
@@ -346,6 +346,9 @@ pub(crate) fn observe_native_exit(
 /// sockets/sessions must carry the metadata sampled by the owning root caller.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SharedTmux {
+    /// Fresh workspace/parent-team identity authorized by the root caller.
+    /// Restored hosts do not mint identities or spawn another target.
+    pub caller: Option<(PathBuf, String)>,
     pub endpoint: PathBuf,
     pub socket: Option<(u64, u64)>,
     pub session_name: String,
@@ -443,7 +446,7 @@ impl<R: CommandRunner> TmuxHost<R> {
             Self::new_shared(directory, executable, limits, runner, SharedTmux {
                 endpoint: target.endpoint.clone(),
                 socket: Some((target.socket_device, target.socket_inode)),
-                session_name: "restored".into(), session: Some(target.session.clone()),
+                session_name: "restored".into(), session: Some(target.session.clone()), caller: None,
             })?
         } else { Self::new(directory, executable, limits, runner)? };
         let binding = target_binding(&target.directory, target.socket_device, target.socket_inode,
@@ -805,7 +808,7 @@ impl<R: CommandRunner> TmuxHost<R> {
             }
         }
         // Inspect names only; values are neither used nor logged. HOME/XDG/auth settings
-        // are preserved. New scope identity comes solely from plan.environment.set.
+        // are preserved. New scope identity comes only from the admitted workspace binding.
         let mut inherited_identity_keys = BTreeSet::new();
         for (key, _) in std::env::vars_os() {
             if key.as_encoded_bytes().starts_with(b"TEAM_AGENT_") {
@@ -814,7 +817,16 @@ impl<R: CommandRunner> TmuxHost<R> {
                 })?);
             }
         }
-        let script = launch_script(plan, &inherited_identity_keys)?;
+        let worker = self.shared.as_ref().and_then(|shared| {
+            shared.caller.as_ref().map(|(workspace, team)| WorkerContext {
+                workspace,
+                team,
+                seat: resolved.request().identity.seat.as_str(),
+                provider: resolved.provider().as_str(),
+                endpoint: &shared.endpoint,
+            })
+        });
+        let script = launch_script_with_worker(plan, &inherited_identity_keys, worker.as_ref())?;
         if script.len() > self.limits.max_script_bytes {
             return Err(HostError::new(
                 "launch script limit",
@@ -1004,7 +1016,7 @@ impl<R: CommandRunner> TmuxHost<R> {
             Self::new_shared(directory, executable, limits, runner, SharedTmux {
                 endpoint: observation.endpoint.clone(),
                 socket: (!missing).then_some((observation.socket_device, observation.socket_inode)),
-                session_name: "recovering".into(), session: (!missing).then_some(observation.session.clone()),
+                session_name: "recovering".into(), session: (!missing).then_some(observation.session.clone()), caller: None,
             })?
         } else { Self::new(directory, executable, limits, runner)? };
         if host.endpoint != observation.endpoint || (!missing
@@ -1697,7 +1709,7 @@ mod bound_process_tests {
         assert!(directory.path().join("tmux.sock").as_os_str().as_encoded_bytes().len() >= 104);
         assert!(TmuxHost::new(directory, tmux.clone(), limits, NoCommands).is_err());
         let shared = SharedTmux { endpoint: root.join("shared.sock"), socket: None,
-            session_name: "team".into(), session: None };
+            session_name: "team".into(), session: None, caller: None };
         let mut too_long = shared.clone();
         too_long.endpoint = durable.join("shared.sock");
         assert!(TmuxHost::new_shared(ScopedDirectory::reopen(receipt.clone()).unwrap(), tmux.clone(),

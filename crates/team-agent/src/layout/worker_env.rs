@@ -195,11 +195,17 @@ pub(crate) fn caller_provider_resolution_from_values(
     let Some(context_endpoint) = context_endpoint.filter(|value| !value.is_empty()) else {
         return CallerProviderResolution::Invalid;
     };
+    // tmux may report /private/tmp while the owned endpoint uses /tmp.
+    // Compare complete resolved paths; never weaken this to a basename match.
+    let same_endpoint = |value: Option<&str>| value.is_some_and(|value| {
+        crate::state::owner_gate::realpath_like(Path::new(value))
+            == crate::state::owner_gate::realpath_like(Path::new(context_endpoint))
+    });
     if !valid_tmux_pane(context_pane)
         || !valid_tmux_endpoint(context_endpoint)
         || current_pane != Some(context_pane)
-        || current_endpoint != Some(context_endpoint)
-        || scoped_endpoint != Some(context_endpoint)
+        || !same_endpoint(current_endpoint)
+        || !same_endpoint(scoped_endpoint)
     {
         return CallerProviderResolution::Invalid;
     }
@@ -300,6 +306,27 @@ pub fn worker_spawn_cwd(spec_agent: &YamlValue, workspace: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn caller_tuple_accepts_only_aliases_of_the_same_endpoint() {
+        let root = std::env::temp_dir().join(format!(
+            "ta-caller-alias-{}-{}", std::process::id(), crate::provider::adapter::next_session_token()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let endpoint = root.join("socket");
+        let alias = root.join("alias");
+        let _listener = std::os::unix::net::UnixListener::bind(&endpoint).unwrap();
+        std::os::unix::fs::symlink(&endpoint, &alias).unwrap();
+        let resolve = |pane, scoped: &Path| caller_provider_resolution_from_values(
+            Some("pi"), Some("%7"), endpoint.to_str(), None, None,
+            Some(pane), alias.to_str(), scoped.to_str(),
+        );
+        assert_eq!(resolve("%7", &alias), CallerProviderResolution::Valid(Provider::Pi));
+        assert_eq!(resolve("%8", &alias), CallerProviderResolution::Invalid);
+        assert_eq!(resolve("%7", &root.join("foreign")), CallerProviderResolution::Invalid);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn make_parent_env(extras: &[(&str, &str)]) -> Vec<(String, String)> {
         let mut env = vec![

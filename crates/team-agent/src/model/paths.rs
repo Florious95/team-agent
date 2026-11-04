@@ -63,6 +63,11 @@ pub fn runtime_spec_path(workspace: &Path, team_key: &str) -> PathBuf {
     runtime_dir(workspace).join(team_key).join("team.spec.yaml")
 }
 
+/// MCP configurations belong to a team and seat, not just a workspace seat name.
+pub fn worker_mcp_config_path(workspace: &Path, team_key: &str, agent_id: &str) -> PathBuf {
+    runtime_dir(workspace).join("mcp").join(team_key).join(format!("{agent_id}.json"))
+}
+
 /// `<workspace>/.team/logs`。
 pub fn logs_dir(workspace: &Path) -> PathBuf {
     team_subdir(workspace, "logs")

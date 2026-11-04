@@ -358,6 +358,7 @@ pub(super) fn spawn_agent_window(
     } else {
         Some(crate::lifecycle::launch::write_worker_mcp_config_for_provider(
             workspace,
+            team_id.as_deref().unwrap_or("current"),
             agent_id.as_str(),
             &mcp_config,
             Some(provider),

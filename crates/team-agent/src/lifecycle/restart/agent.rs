@@ -347,6 +347,7 @@ pub(crate) fn start_agent_at_paths_with_session(
             noop_pane.as_ref(),
         )?;
         state["agents"][agent_id.as_str()]["explicit_stop"] = serde_json::Value::Bool(false);
+        state["status"] = serde_json::json!("alive");
         let team_key = restart_projection_team_key(&state, team);
         save_restart_projected_state(workspace, &mut state, &team_key, &[agent_id.as_str()])?;
         if let Ok(spec) = load_team_spec(spec_workspace) {
@@ -487,6 +488,7 @@ pub(crate) fn start_agent_at_paths_with_session(
         &safety,
         start_mode,
     )?;
+    state["status"] = serde_json::json!("alive");
     let generation = if into_existing_session {
         inherited_generation.as_deref()
     } else {

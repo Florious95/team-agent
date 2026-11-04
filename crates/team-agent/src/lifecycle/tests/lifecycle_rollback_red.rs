@@ -59,7 +59,7 @@ fn fork_agent_rollback_cleans_spawned_window_spec_state_and_mcp_after_post_spawn
     );
     let spec_after = fixture.spec_text();
     let state_after = load_runtime_state(&fixture.team).unwrap();
-    let mcp_path = fixture.team.join(".team/runtime/mcp/newfork.json");
+    let mcp_path = fixture.team.join(".team/runtime/mcp/rollbackteam/newfork.json");
 
     assert!(
         matches!(

@@ -99,6 +99,8 @@ impl PlanHook for CodexAdapter {
             EffortResolution::Pass(effort) => { let index = arguments.len(); arguments.extend(["-c".into(), format!("model_reasoning_effort={}", effort.as_str()).into()]); CarrierUse::Specified(CarrierRef::Arguments(vec![index, index + 1])) },
             EffortResolution::Ignored { reason, .. } => return Err(ContractError::EffortRejected(*reason)),
         };
+        // Native shell tools must retain the host-minted worker/caller tuple.
+        arguments.extend(["-c".into(), "shell_environment_policy.inherit=\"all\"".into()]);
         arguments.extend(session.map(|(_, id)| OsString::from(id)));
         // The pane execs bare `codex` through PATH, so the user's wrapper runs and
         // keeps the name. The engine is only the image that route must exec into.

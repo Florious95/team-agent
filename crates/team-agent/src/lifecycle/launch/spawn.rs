@@ -156,6 +156,7 @@ pub(super) fn spawn_agents(
         } else {
             Some(write_worker_mcp_config_for_provider(
                 workspace,
+                &mcp_team_id,
                 agent_id_raw,
                 &mcp_config,
                 Some(provider),

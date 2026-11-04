@@ -2911,7 +2911,7 @@ fn quick_start_unbound_state_producer_seeds_spec_path_workspace_leader() {
 // Stage B1 — golden launch/core.py:238-255 writes the running agent state only after
 // a successful spawn. The fixed clock is a test seam for `spawned_at`; capture intentionally
 // misses, so session/capture fields remain present JSON nulls. MCP install is deterministic:
-// provider_cli/adapter.py:111-114 writes workspace/.team/runtime/mcp/<agent>.json.
+// MCP configuration is scoped to workspace/.team/runtime/mcp/<team>/<agent>.json.
 #[test]
 #[serial(env)]
 fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
@@ -2980,7 +2980,9 @@ fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
     assert_eq!(
         agent["mcp_config"],
         json!(workspace
-            .join(".team/runtime/mcp/implementer.json")
+            .join(".team/runtime/mcp")
+            .join(state["active_team_key"].as_str().unwrap())
+            .join("implementer.json")
             .to_string_lossy())
     );
     assert!(agent["session_id"].is_null());

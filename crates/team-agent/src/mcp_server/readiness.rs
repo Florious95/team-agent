@@ -384,9 +384,7 @@ fn validate_receipt(
     if started_at < spawned_at || flushed_at < started_at {
         return Err("mcp_handshake_stale_spawn");
     }
-    let expected_config = workspace
-        .join(".team/runtime/mcp")
-        .join(format!("{agent_id}.json"));
+    let expected_config = crate::model::paths::worker_mcp_config_path(workspace, owner, agent_id);
     if Path::new(config)
         .canonicalize()
         .map_err(|_| "mcp_handshake_config_missing")?
@@ -395,6 +393,7 @@ fn validate_receipt(
         return Err("mcp_handshake_config_scope");
     }
     private_metadata(&workspace.join(".team/runtime/mcp"), true)?;
+    private_metadata(&workspace.join(".team/runtime/mcp").join(owner), true)?;
     let config = read_json(Path::new(config), false)?;
     let server_config = config
         .get("team_orchestrator")
@@ -508,9 +507,7 @@ pub(crate) fn test_ready_worker(
 ) -> PaneInfo {
     let workspace = workspace.canonicalize().unwrap();
     let carrier = test_carrier_pid().unwrap();
-    let config = workspace
-        .join(".team/runtime/mcp")
-        .join(format!("{agent}.json"));
+    let config = crate::model::paths::worker_mcp_config_path(&workspace, owner, agent);
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     std::fs::write(&config, serde_json::to_vec(&serde_json::json!({
         "mcpServers": {"team_orchestrator": {

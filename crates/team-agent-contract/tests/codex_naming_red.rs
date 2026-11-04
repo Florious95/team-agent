@@ -105,6 +105,7 @@ fn case(label: &str, seat: &str, workspace: &str, new_session: bool) {
     assert_eq!(String::from_utf8_lossy(&global.stdout).trim(), "on", "fixture server must keep the tmux default");
 
     let shared = SharedTmux {
+        caller: None,
         endpoint: anchor.endpoint.clone(),
         socket: Some((anchor.socket_device, anchor.socket_inode)),
         session_name: if new_session { format!("team-naming-{}", nonce % 1_000_000) } else { anchor_session_name },

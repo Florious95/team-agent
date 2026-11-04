@@ -253,7 +253,7 @@ fn native_case_with(mode: &str, content: &str, expected_keys: usize, shared_work
         assert!(global.success(), "global option baseline: end={:?} exit={:?} stderr={}",
             global.end, global.exit_code, String::from_utf8_lossy(&global.stderr));
         assert_eq!(global.stdout, b"off\n");
-        let shared = SharedTmux { endpoint: target.endpoint.clone(),
+        let shared = SharedTmux { caller: None, endpoint: target.endpoint.clone(),
             socket: Some((target.socket_device, target.socket_inode)),
             session_name: if new_session { format!("team-shared-{nonce}") } else { session_name },
             session: if new_session { None } else { Some(target.session.clone()) } };

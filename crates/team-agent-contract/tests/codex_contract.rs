@@ -266,6 +266,7 @@ fn plan_carries_model_effort_bypass_mcp_and_exact_resume_without_startup_keys() 
     let (_, plan) = plan(&a, &r, &catalog).unwrap();
     let args = strings(&plan);
     let key = server_key(&r.identity);
+    assert!(args.windows(2).any(|pair| pair == ["-c", "shell_environment_policy.inherit=\"all\""]));
     assert_eq!(&args[..6], ["--no-alt-screen", "--no-daemon", "-c", "check_for_update_on_startup=false", "--model", "gpt-6-luna"]);
     assert_eq!(plan.cwd, r.paths.cwd.path);
     assert!(!args.iter().any(|arg| arg == "--add-dir" || arg.starts_with("developer_instructions=")));

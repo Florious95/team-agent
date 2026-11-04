@@ -80,10 +80,11 @@ pub(super) fn resolve_mcp_placeholders(
 /// ---
 pub(crate) fn write_worker_mcp_config(
     workspace: &Path,
+    team_id: &str,
     agent_id: &str,
     config: &crate::provider::McpConfig,
 ) -> Result<PathBuf, LifecycleError> {
-    write_worker_mcp_config_for_provider(workspace, agent_id, config, None)
+    write_worker_mcp_config_for_provider(workspace, team_id, agent_id, config, None)
 }
 
 /// ---
@@ -97,17 +98,16 @@ pub(crate) fn write_worker_mcp_config(
 /// C-3-4 cr verdict v2 — Copilot 的 mcp config schema 字段名是 `transport`
 /// (实测 cmd-mcp-add 原文取值 stdio|http|sse),不是 canonical 的 `type`。当
 /// provider==Copilot 时写出文件前先做 type→transport 翻译;其它 provider 不动。
-/// 文件路径同 canonical `<ws>/.team/runtime/mcp/<agent_id>.json`,因为 launch
+/// 文件路径同 canonical `<ws>/.team/runtime/mcp/<team_id>/<agent_id>.json`,因为 launch
 /// 路径会用 `--additional-mcp-config @<file>` 直指它。
 pub(crate) fn write_worker_mcp_config_for_provider(
     workspace: &Path,
+    team_id: &str,
     agent_id: &str,
     config: &crate::provider::McpConfig,
     provider: Option<Provider>,
 ) -> Result<PathBuf, LifecycleError> {
-    let path = workspace
-        .join(".team/runtime/mcp")
-        .join(format!("{agent_id}.json"));
+    let path = crate::model::paths::worker_mcp_config_path(workspace, team_id, agent_id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", parent.display())))?;
@@ -145,7 +145,7 @@ pub(crate) fn point_native_mcp_config_at_file(
             }
         }
         // §C1 note: copilot `--additional-mcp-config` 接受 `@file`,直接指向既有
-        // `.team/runtime/mcp/<agent>.json`(launch 路径 write_worker_mcp_config 已写)。
+        // `.team/runtime/mcp/<team>/<agent>.json`(launch 路径 write_worker_mcp_config 已写)。
         // 既避免 inline JSON 包 mcpServers wrapper 的语义错位,也更利于 ps 验法。
         Provider::Copilot => {
             let Some(index) = argv.iter().position(|arg| arg == "--additional-mcp-config") else {

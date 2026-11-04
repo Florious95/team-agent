@@ -24,7 +24,7 @@ impl Case {
         ));
         std::fs::create_dir(&ws).unwrap();
         let ws = ws.canonicalize().unwrap();
-        let config = ws.join(".team/runtime/mcp/worker.json");
+        let config = crate::model::paths::worker_mcp_config_path(&ws, "owner", "worker");
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
         let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
         std::fs::write(&config, serde_json::to_vec(&json!({
@@ -320,7 +320,7 @@ fn symlink_and_writable_evidence_are_not_adopted_or_overwritten() {
 fn config_scope_and_authorized_executable_cannot_be_substituted() {
     let case = Case::new();
     case.publish();
-    let path = case.ws.join(".team/runtime/mcp/worker.json");
+    let path = crate::model::paths::worker_mcp_config_path(&case.ws, "owner", "worker");
     let original: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     for field in [
         "TEAM_AGENT_ID",

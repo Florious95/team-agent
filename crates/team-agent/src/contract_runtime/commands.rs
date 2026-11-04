@@ -91,6 +91,9 @@ where F: FnOnce(&mut Value),
             if let Some(row) = state.get_mut("agents").and_then(|agents| agents.get_mut(id.as_str())).and_then(Value::as_object_mut) {
                 row.extend(fields);
             }
+            if projected["status"].as_str() == Some("running") {
+                state["status"] = json!("alive");
+            }
         },
     ).map_err(error)?;
     // Fresh, explicit resume and team restart share this one publication path.

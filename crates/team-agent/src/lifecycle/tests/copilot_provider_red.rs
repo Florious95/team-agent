@@ -144,11 +144,11 @@ fn copilot_argv_golden_restricted_role() {
         Some(value) => {
             let inline_ok = value.contains("mcpServers") && value.contains("team_orchestrator");
             let file_ok =
-                value.starts_with('@') && value.contains(".team/runtime/mcp/worker_a.json");
+                value.starts_with('@') && value.contains(".team/runtime/mcp/") && value.ends_with("/worker_a.json");
             if !(inline_ok || file_ok) {
                 failures.push(format!(
                     "§C1: --additional-mcp-config must be inline mcpServers JSON with \
-team_orchestrator or @<.team/runtime/mcp/worker_a.json>; got {value:?}"
+team_orchestrator or @<.team/runtime/mcp/team/worker_a.json>; got {value:?}"
                 ));
             }
         }
@@ -908,7 +908,7 @@ fn rules_t02_final_mcp_across_fresh_start_restart_and_add() {
     seed_copilot_session_store(hermetic.home(), "99999999-aaaa-4bbb-8ccc-dddddddddddd");
     for single in [true, false] {
         // A previous file is an output, never the authority for the next spawn.
-        std::fs::write(ws.join(".team/runtime/mcp/worker_a.json"),
+        std::fs::write(ws.join(".team/runtime/mcp/cpresume/worker_a.json"),
             r#"{"mcpServers":{"team_orchestrator":{"type":"stdio","env":{"TEAM_AGENT_ID":"foreign"}}}}"#,
         ).unwrap();
         let transport = RecordingTransport::new();
@@ -985,6 +985,7 @@ fn rules_t02_non_copilot_writer_keeps_canonical_schema() {
         .unwrap();
     let path = team_agent::lifecycle::launch::write_worker_mcp_config_for_provider(
         &ws,
+        "canonical",
         "synthetic",
         &config,
         Some(Provider::ClaudeCode),
@@ -994,6 +995,29 @@ fn rules_t02_non_copilot_writer_keeps_canonical_schema() {
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     assert_eq!(written["mcpServers"], config.raw);
     assert_eq!(written["mcpServers"]["team_orchestrator"]["type"], "stdio");
+}
+
+#[test]
+#[serial(env)]
+fn sibling_mcp_configs_do_not_overwrite_same_named_seats() {
+    let hermetic = enter_hermetic("sibling-mcp-configs");
+    let ws = hermetic.workspace("sibling");
+    let mut paths = Vec::new();
+    for team in ["atlas", "beacon"] {
+        let config = team_agent::provider::get_adapter(Provider::ClaudeCode)
+            .mcp_config(team_agent::provider::AuthMode::Subscription).unwrap();
+        let config = team_agent::lifecycle::launch::resolve_mcp_config(config, &ws, "reviewer", team);
+        let path = team_agent::lifecycle::launch::write_worker_mcp_config_for_provider(
+            &ws, team, "reviewer", &config, Some(Provider::ClaudeCode),
+        ).unwrap();
+        paths.push((path, config.raw));
+    }
+    assert_ne!(paths[0].0, paths[1].0);
+    for (path, expected) in paths {
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(written["mcpServers"], expected);
+    }
 }
 
 /// C-7-3 / RC-24: a resume command line must not carry `--session-id` and `--resume`

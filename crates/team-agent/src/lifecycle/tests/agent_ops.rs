@@ -60,6 +60,7 @@ pub(super) fn lanea_team_ws(status: &str) -> PathBuf {
 fn start_agent_pane_dead_must_not_noop_on_live_window() {
     let ws = restart_ws_two_resumable_workers();
     let mut state = crate::state::persist::load_runtime_state(&ws).unwrap();
+    state["status"] = json!("shutdown");
     state["agents"]["alpha"]["pane_id"] = json!("%dead");
     state["agents"]["alpha"]["stale"] = json!(true);
     state["agents"]["alpha"]["stale_reason"] = json!("pane_dead");
@@ -84,6 +85,8 @@ fn start_agent_pane_dead_must_not_noop_on_live_window() {
         !transport.spawn_records().is_empty(),
         "A-31: pane_dead must trigger a physical respawn even when the stale window remains; asserting only the command's success-shaped return would miss the Noop bug"
     );
+    let restarted = crate::state::persist::load_runtime_state(&ws).unwrap();
+    assert_eq!(restarted["status"], "alive", "a live restarted seat reactivates its team");
 }
 
 // A-31 RED: a live pane from another session is not this agent's live seat.

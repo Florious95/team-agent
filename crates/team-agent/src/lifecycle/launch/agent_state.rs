@@ -73,7 +73,7 @@ pub(super) fn running_agent_state(
         .map_err(|e| LifecycleError::Provider(e.to_string()))?;
     let mcp_config = resolve_mcp_config(mcp_config, workspace, id, team_id);
     let mcp_config_path =
-        write_worker_mcp_config_for_provider(workspace, id, &mcp_config, Some(provider))?;
+        write_worker_mcp_config_for_provider(workspace, team_id, id, &mcp_config, Some(provider))?;
     let mut state = serde_json::Map::new();
     state.insert("status".to_string(), serde_json::json!("running"));
     state.insert("provider".to_string(), serde_json::json!(provider));

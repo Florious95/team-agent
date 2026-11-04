@@ -398,7 +398,8 @@ pub(super) fn workspace_tmux(
     if claim.is_some_and(|target| target.endpoint != endpoint
         || session.as_deref() != Some(target.session.as_str()))
     { return Err(ContractError::Mismatch("committed workspace target changed").into()); }
-    Ok((SharedTmux { endpoint, socket, session_name, session }, transport, generation))
+    Ok((SharedTmux { endpoint, socket, session_name, session,
+        caller: Some((binding.workspace.path.clone(), binding.team.clone())) }, transport, generation))
 }
 
 /// The canonical seat is saved first. Only an exact current target that
