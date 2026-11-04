@@ -316,7 +316,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let endpoint = root.join("socket");
         let alias = root.join("alias");
-        let _listener = std::os::unix::net::UnixListener::bind(&endpoint).unwrap();
+        std::fs::write(&endpoint, b"endpoint").unwrap();
         std::os::unix::fs::symlink(&endpoint, &alias).unwrap();
         let resolve = |pane, scoped: &Path| caller_provider_resolution_from_values(
             Some("pi"), Some("%7"), endpoint.to_str(), None, None,
