@@ -31,11 +31,10 @@ fn clean_shutdown_releases_only_its_unchanged_receiver() -> Result<(), Box<dyn s
             let mut rebound = before.clone();
             rebound["teams"]["child"]["team_owner"] = json!({"pane_id":"%new","owner_epoch":2});
             rebound["teams"]["child"]["leader_receiver"] = json!({"status":"attached","pane_id":"%new","owner_epoch":2});
-            repository.save(StateWriteIntent::BindLeaderReceiver {
-                team_key:"child", expected:Some((
-                    &before["teams"]["child"]["team_owner"],
-                    &before["teams"]["child"]["leader_receiver"],
-                )),
+            repository.save(StateWriteIntent::ClaimLeaderFreshCaller {
+                team_key:"child",
+                expected_owner:&before["teams"]["child"]["team_owner"],
+                expected_receiver:&before["teams"]["child"]["leader_receiver"],
             }, &rebound)?;
         }
         let result = repository.save(StateWriteIntent::ShutdownTeam {team_key:Some("child"), clean}, &stopped);

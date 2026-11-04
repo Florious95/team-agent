@@ -829,7 +829,7 @@ mod tests {
         let refused = directory_with_reason(&root, None).err().expect("unscoped multi-team refusal");
         assert_eq!(refused.code, "name_ambiguous");
         assert_eq!(refused.candidates.len(), 2);
-        assert!(crate::inbox_store::read_inbox(&root, None, "leader", None, false, 10).is_err());
+        assert!(crate::inbox_store::read(&root, "leader", 10, None).is_err());
         assert_eq!(directory_with_reason(&root, Some("current")).unwrap().team.as_deref(), Some("current"));
         std::fs::remove_dir_all(root).unwrap();
     }

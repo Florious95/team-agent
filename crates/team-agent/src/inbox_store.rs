@@ -487,11 +487,15 @@ pub fn read(
     limit: usize,
     team: Option<&str>,
 ) -> Result<Value, String> {
-    let selected = team.map(str::to_string).or_else(|| {
-        crate::direct_delivery::directory(workspace, None)
-            .ok()
-            .and_then(|d| d.team)
-    });
+    let selected = match team {
+        Some(team) => Some(team.to_string()),
+        None => match crate::direct_delivery::directory_with_reason(workspace, None) {
+            Ok(directory) => directory.team,
+            Err(error) if error.code == "name_ambiguous" => return Err(error.message),
+            // Legacy inboxes can exist without a runtime-state directory.
+            Err(_) => None,
+        },
+    };
     let root = root(workspace, recipient, selected.as_deref())?;
     let paths = segments(&root)?;
     let scoped_legacy = root.parent().unwrap().join(format!("{}.jsonl", component(recipient)?));
