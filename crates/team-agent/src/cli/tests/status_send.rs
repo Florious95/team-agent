@@ -196,8 +196,11 @@ fn rm039_stat001_status_resolves_active_team_when_root_team_key_missing() {
     )
     .unwrap();
 
-    let v = status_port::status(&ws, /*compact=*/ true, /*detail=*/ false)
-        .expect("compact status should project a value");
+    // The retained duplicate team keys require explicit scope; the active pointer is not authority.
+    assert!(status_port::status(&ws, true, false).is_err());
+    let loaded = crate::state::persist::load_runtime_state(&ws).unwrap();
+    let v = status_port::status_scoped(&ws, &loaded, Some(active), true, false)
+        .expect("explicit compact status should project a value");
     let agent = v
         .pointer("/agents/coder")
         .and_then(serde_json::Value::as_object)
