@@ -174,7 +174,10 @@ pub(super) fn help(command: &str) -> String {
         _ => return super::emit::command_help(Some(command)),
     };
     let source_help = if command == "start" { START_SOURCE_HELP } else { "" };
-    format!("Purpose:\n{purpose}\nUsage: team-agent {command} {usage}\n\nOptions:\n{options}{source_help}\n\nExamples:\n{examples}\n\nNext Action:\n{next}")
+    let subteam_help = if matches!(command, "start" | "stop") {
+        "\nSub-teams: A teammate can start and lead a sub-team from its own terminal via `team-agent start AGENT --team <NAME>`.\nTeardown: `team-agent stop --team <NAME>` cascades deepest-first to all recorded descendant sub-teams; unrelated teams and the calling leader remain running."
+    } else { "" };
+    format!("Purpose:\n{purpose}\nUsage: team-agent {command} {usage}\n\nOptions:\n{options}{subteam_help}{source_help}\n\nExamples:\n{examples}\n\nNext Action:\n{next}")
 }
 
 fn usage(message: impl Into<String>) -> CliError {
