@@ -292,8 +292,20 @@ pub(crate) fn command_arg(value: &str) -> String {
 }
 
 pub fn status_command(request: &StartRequest) -> String {
+    scoped_seat_command(request, "status")
+}
+
+pub(crate) fn unverified_start_guidance(request: &StartRequest) -> String {
+    if request.session == SessionPolicy::Fresh || request.role_file.is_some() || request.patch != RoleConfigPatch::default() {
+        format!("agent ownership/liveness is unverified; run `{}` before applying changes or starting fresh; then retry this start command", scoped_seat_command(request, "stop"))
+    } else {
+        format!("agent ownership/liveness is unverified; run `{}` before starting", status_command(request))
+    }
+}
+
+fn scoped_seat_command(request: &StartRequest, action: &str) -> String {
     let mut command = format!(
-        "team-agent status {} --workspace {}",
+        "team-agent {action} {} --workspace {}",
         command_arg(request.agent.as_str()),
         command_arg(&request.workspace.to_string_lossy())
     );
@@ -873,10 +885,7 @@ fn converge(
             SeatObservation::Live => true,
             SeatObservation::StoppedVerified | SeatObservation::Unstarted => false,
             SeatObservation::NativeReconcile | SeatObservation::Unknown => {
-                return Err(refused(format!(
-                    "agent ownership/liveness is unverified; run `{}` before starting",
-                    status_command(request)
-                )))
+                return Err(refused(unverified_start_guidance(request)))
             }
         };
         let description = describe_resolved(request, Some(selected), live, &declaration)?;
