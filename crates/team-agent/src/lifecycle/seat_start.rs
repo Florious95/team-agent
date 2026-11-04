@@ -342,6 +342,7 @@ fn fresh_command(request: &StartRequest) -> String {
 #[derive(Debug, Clone)]
 pub struct StartDescription {
     pub op: &'static str,
+    pub creates_team: bool,
     pub declaration: Value,
     pub defaulted: Value,
 }
@@ -460,6 +461,7 @@ pub(crate) fn describe_resolved(
         };
     Ok(StartDescription {
         op,
+        creates_team: selected.is_none_or(|team| !super::launch::surface_has_runtime_team(&team.state, &team.team_key)),
         declaration,
         defaulted: resolved.defaulted.clone(),
     })

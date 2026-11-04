@@ -62,6 +62,20 @@ fn output(result: CmdResult) -> String {
 }
 
 #[test]
+fn missing_named_team_advises_creation_without_writing_files() {
+    let scratch = Scratch::new();
+    let mut request = args(scratch.0.clone());
+    request.team = Some("release-review".into());
+    for json in [true, false] {
+        request.json = json;
+        let text = output(run(&request));
+        assert!(text.contains("create it with"), "{text}");
+        assert!(text.contains("team-agent start AGENT --team release-review"), "{text}");
+        assert_eq!(fs::read_dir(&scratch.0).unwrap().count(), 0);
+    }
+}
+
+#[test]
 fn scope_encoding_is_injective_and_rejects_traversal() {
     use crate::model::paths::{decode_scope_component, encode_scope_component};
     let names = [

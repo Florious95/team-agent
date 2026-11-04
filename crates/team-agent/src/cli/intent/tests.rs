@@ -705,6 +705,31 @@ fn no_eligible_is_scoped_nonzero_with_skipped_and_zero_handlers_even_in_dry_run(
 }
 
 #[test]
+fn new_team_dry_run_names_the_calling_leader_without_lifecycle_actions() {
+    for creates_team in [true, false] {
+        let mut p = plan(Verb::Start, &[]);
+        p.intent.dry_run = true;
+        p.scope.team = Some("release-review".into());
+        p.steps.push(Step::UnifiedStart {
+            request: crate::lifecycle::seat_start::StartRequest {
+                workspace: p.scope.workspace.clone(), team: p.scope.team.clone(),
+                agent: AgentId::new("reviewer"), role_file: None,
+                patch: RoleConfigPatch::default(), session: SessionPolicy::Preserve,
+            },
+            description: crate::lifecycle::seat_start::StartDescription {
+                op: "created", creates_team, declaration: json!({}), defaulted: json!({}),
+            },
+        });
+        let result = execute_plan(p, &mut |_| panic!("dry-run must not execute"), &mut |_, _, _| panic!("dry-run must not lock")).unwrap();
+        let CmdOutput::Json(value) = result.output else { panic!() };
+        if creates_team {
+            assert_eq!(value["summary"], "creates team release-review led by this leader");
+            assert!(intent_human(&value).contains("creates team release-review led by this leader"));
+        } else { assert!(value["summary"].is_null()); }
+    }
+}
+
+#[test]
 fn accepted_pending_creation_keeps_original_receipt_and_actual_canonical_team() {
     let mut p = plan(Verb::Start, &[]);
     p.scope.team = None;

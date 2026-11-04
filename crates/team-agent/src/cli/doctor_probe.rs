@@ -633,13 +633,17 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
                 .clone()
                 .or_else(|| caller_scope.clone())
                 .unwrap_or_else(|| "current".into());
+            let missing_team = args.team.as_deref().is_some_and(|team| {
+                error.starts_with(&format!("team '{team}' not found."))
+            });
+            let create = format!("team-agent start AGENT --team {} --workspace {} ...", super::shell_quote(&team), super::shell_quote(&args.workspace.to_string_lossy()));
             let links = (1..=6)
                 .map(|n| {
                     Link::new(
                         n,
                         if n == 1 { "FAIL" } else { "BLOCKED" },
                         if n == 1 {
-                            short(&error)
+                            if missing_team { format!("{}; create it with `{create}`", short(&error)) } else { short(&error) }
                         } else {
                             "requires L1".into()
                         },
@@ -652,15 +656,11 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
                 &team,
                 caller,
                 (0, 0),
-                Some(action(
-                    if caller_scope.is_some() {
-                        "doctor"
-                    } else {
-                        "status"
-                    },
+                Some(if missing_team { Action::manual(create) } else { action(
+                    if caller_scope.is_some() { "doctor" } else { "status" },
                     &args.workspace,
                     &team,
-                )),
+                ) }),
                 "do not restart or claim a different team",
                 args.json,
                 started,
