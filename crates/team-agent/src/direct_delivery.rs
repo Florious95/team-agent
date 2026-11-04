@@ -53,6 +53,14 @@ pub fn directory(workspace: &Path, team: Option<&str>) -> Result<Directory, Stri
 }
 
 pub(crate) fn directory_with_reason(workspace: &Path, team: Option<&str>) -> Result<Directory, AddressError> {
+    select_directory(workspace, team, None)
+}
+
+pub(crate) fn directory_for_recipient(workspace: &Path, team: Option<&str>, recipient: &str) -> Result<Directory, AddressError> {
+    select_directory(workspace, team, Some(recipient))
+}
+
+fn select_directory(workspace: &Path, team: Option<&str>, recipient: Option<&str>) -> Result<Directory, AddressError> {
     let workspace = crate::model::paths::canonical_run_workspace(workspace)
         .map_err(|e| AddressError::new("internal_runtime_error", e.to_string()))?;
     let snapshot = snapshot(&workspace)
@@ -88,6 +96,19 @@ pub(crate) fn directory_with_reason(workspace: &Path, team: Option<&str>) -> Res
     // active_team_key is a projection pointer, not caller authority. Inbox and
     // send share the same alive-team predicate as the read-only status gate.
     let alive = crate::state::projection::team_state_candidates(&snapshot);
+    // Bare operator recipients are resolved by the current roster, not by a
+    // stale launch/default team. Explicit scopes (including worker seats) are
+    // never widened, and leader/broadcast still require unambiguous team scope.
+    let matching: Vec<_> = alive.iter().filter(|(_, state)| {
+        team.is_none() && recipient.is_some_and(|id| id != "leader" && id != "*"
+            && state.get("agents").and_then(|agents| agents.get(id)).is_some())
+    }).collect();
+    if matching.len() > 1 {
+        let mut error = AddressError::new("name_ambiguous", "recipient exists in multiple active teams; use <team>/<agent>");
+        error.candidates = matching.iter().map(|(key, _)| json!({"team_key":key,"advisory":true})).collect();
+        return Err(error);
+    }
+    let team = team.or_else(|| matching.first().map(|(key, _)| key.as_str()));
     if team.is_none() && alive.len() > 1 {
         let mut error = AddressError::new("name_ambiguous",
             "workspace has multiple alive teams; pass --team <key> to choose one");
@@ -818,7 +839,7 @@ mod tests {
         std::fs::create_dir_all(root.join(".team/runtime")).unwrap();
         let state = json!({"active_team_key":"regressions-20261101", "teams": {
             "regressions-20261101": {"session_name":"actual-session", "agents":{}},
-            "current": {"session_name":"team-regressions-20261101", "team_name":"regressions-20261101", "agents":{}}
+            "current": {"session_name":"team-regressions-20261101", "team_name":"regressions-20261101", "agents":{"reviewer":{"status":"running"}}}
         }});
         std::fs::write(root.join(".team/runtime/state.json"), serde_json::to_vec(&state).unwrap()).unwrap();
         for requested in [Some("regressions-20261101"), Some("actual-session")] {
@@ -833,6 +854,11 @@ mod tests {
         let command = ["send", "leader", "must-not-route", "--mailbox"].map(str::to_string);
         assert_ne!(crate::cli::run(&command, &root), crate::cli::ExitCode::Ok);
         assert!(!root.join(".team/inbox").exists(), "ambiguous send must have no storage effect");
+        assert_eq!(directory_for_recipient(&root, None, "reviewer").unwrap().team.as_deref(), Some("current"));
+        assert_eq!(directory_for_recipient(&root, Some("regressions-20261101"), "reviewer").unwrap().team.as_deref(), Some("regressions-20261101"));
+        let command = ["send", "reviewer", "unique-recipient", "--mailbox"].map(str::to_string);
+        assert_eq!(crate::cli::run(&command, &root), crate::cli::ExitCode::Ok);
+        assert_eq!(crate::inbox_store::read(&root, "reviewer", 10, Some("current")).unwrap()["messages"][0]["content"], "unique-recipient");
         let command = ["send", "leader", "explicit-team", "--mailbox", "--team", "current"].map(str::to_string);
         assert_eq!(crate::cli::run(&command, &root), crate::cli::ExitCode::Ok);
         assert_eq!(crate::inbox_store::read(&root, "leader", 10, Some("current")).unwrap()["messages"][0]["content"], "explicit-team");

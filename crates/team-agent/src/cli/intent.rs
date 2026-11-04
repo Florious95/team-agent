@@ -139,12 +139,14 @@ pub(super) struct Plan {
     topology: Option<Value>,
 }
 
+const START_SOURCE_HELP: &str = "\n\nNo files are required for direct command-line start:\n  team-agent start reviewer --team release-review --provider pi --prompt \"Review the changes\"\nOptional --from TEAMDIR layout (three-line templates; the role ID is its filename):\nTEAM.md:\n---\nname: release-review\n---\nagents/reviewer.md:\n---\nprovider: pi\n---\nAppend role instructions after the closing ---; other fields are optional.";
+
 pub(super) fn help(command: &str) -> String {
     let (purpose, usage, options, examples, next) = match command {
         "start" => (
             "Start a team or one agent without replacing verified running processes.",
-            "[AGENT [PROMPT...]|./TEAMDIR] [--from TEAMDIR] [--workspace PATH] [--team KEY] [--session preserve|auto|fresh] [--dry-run] [--json]",
-            "--from selects TEAM.md and agents/; all relative paths use the calling directory.\nAgent IDs such as reviewer.v2 stay agent IDs even when a same-named directory exists.\nTeam start preserves explicitly stopped seats; use agent start ID to reactivate one seat.\nMissing agents are created automatically (leader provider, pi if unknown; native default model; bypass=false); an uninitialized workspace uses team current.\n--role-file and explicit provider/model/effort/bypass/prompt/profile fields resolve one declaration; receipts identify defaulted fields.\nStopped seats may change provider with --session fresh; their identity and history are retained. Running seats refuse configuration changes or fresh sessions until stopped.\nSession defaults to preserve for existing resumable context. Contextless seats and legacy providers without resume support start fresh and report op=fresh; launch/pending metadata alone is not context. Auto permits legal fresh fallback; fresh explicitly starts a new native session. --allow-fresh cannot be combined with preserve or fresh.\n--dry-run performs no lifecycle action; final locked admission remains deferred.\nAlready running does not claim role-file synchronization or business readiness.",
+            "[AGENT [PROMPT...]|./TEAMDIR] [--from TEAMDIR] [--workspace PATH] [--team NAME] [--provider PROVIDER] [--model MODEL] [--effort EFFORT] [--prompt TEXT] [--session preserve|auto|fresh] [--dry-run] [--json]\n       --team NAME creates the team if it does not exist.",
+            "--team NAME selects a team and creates it if it does not exist (for example: team-agent start reviewer --team release-review --provider pi).\n--provider PROVIDER, --model MODEL, --effort EFFORT and --prompt TEXT configure a direct agent start.\n--from selects TEAM.md and agents/; all relative paths use the calling directory.\nAgent IDs such as reviewer.v2 stay agent IDs even when a same-named directory exists.\nTeam start preserves explicitly stopped seats; use agent start ID to reactivate one seat.\nMissing agents are created automatically (leader provider, pi if unknown; native default model; bypass=false); an uninitialized workspace uses team current.\n--role-file and explicit provider/model/effort/bypass/prompt/profile fields resolve one declaration; receipts identify defaulted fields.\nStopped seats may change provider with --session fresh; their identity and history are retained. Running seats refuse configuration changes or fresh sessions until stopped.\nSession defaults to preserve for existing resumable context. Contextless seats and legacy providers without resume support start fresh and report op=fresh; launch/pending metadata alone is not context. Auto permits legal fresh fallback; fresh explicitly starts a new native session. --allow-fresh cannot be combined with preserve or fresh.\n--dry-run performs no lifecycle action; final locked admission remains deferred.\nAlready running does not claim role-file synchronization or business readiness.",
             "  team-agent start --from . --dry-run --json\n  team-agent start reviewer --dry-run --json\n  team-agent start reviewer --provider cursor --model composer-2.5 --session fresh",
             "Use team-agent status and team-agent inbox leader -n 3 for actual replies.",
         ),
@@ -171,7 +173,8 @@ pub(super) fn help(command: &str) -> String {
         ),
         _ => return super::emit::command_help(Some(command)),
     };
-    format!("Purpose:\n{purpose}\nUsage: team-agent {command} {usage}\n\nOptions:\n{options}\n\nExamples:\n{examples}\n\nNext Action:\n{next}")
+    let source_help = if command == "start" { START_SOURCE_HELP } else { "" };
+    format!("Purpose:\n{purpose}\nUsage: team-agent {command} {usage}\n\nOptions:\n{options}{source_help}\n\nExamples:\n{examples}\n\nNext Action:\n{next}")
 }
 
 fn usage(message: impl Into<String>) -> CliError {

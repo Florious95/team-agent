@@ -39,9 +39,9 @@ use super::types::{
 // contract-callable behavioral entry fns.
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// `TeamOrchestratorTools` (`tools.py:72-82`). Scope anchored on spawn-time env: no
-/// candidate scan of state/messages/runtime agents (C13-C17). Constructed with the
-/// workspace; `agent_id`/`owner_team_id` are captured from env at construction.
+/// `TeamOrchestratorTools` (`tools.py:72-82`). Worker scope and sender identity
+/// are captured at construction. Leader sends use native operator addressing
+/// within the workspace, including teams created after the server started.
 pub struct TeamOrchestratorTools {
     /// Resolved (`workspace.resolve()`) workspace root.
     workspace: PathBuf,
@@ -226,20 +226,28 @@ impl TeamOrchestratorTools {
         }
         let normalized = crate::messaging::presentation::normalize_send_presentation(mailbox, presentation)
             .map_err(tool_runtime_error)?;
-        let owner_team = self.canonical_owner_team_key()?;
-        let team = owner_team.as_ref().ok_or_else(|| tool_runtime_error("captured team is unavailable"))?.as_str();
         let sender = self.require_captured_identity("send_message")?.as_str();
+        // A leader's MCP server may predate the teams it creates or adopts. Like
+        // native CLI send, resolve its targets at call time instead of freezing
+        // it into a worker seat in the launch team.
+        let owner_team = if sender == "leader" { None } else { self.canonical_owner_team_key()? };
+        let authority = if sender == "leader" {
+            crate::station::send::Authority::Operator { sender }
+        } else {
+            let team = owner_team.as_ref().ok_or_else(|| tool_runtime_error("captured team is unavailable"))?.as_str();
+            crate::station::send::Authority::Seat { sender, team }
+        };
         let targets = match to {
             MessageTarget::Single(target) => target.clone(),
             MessageTarget::Fanout(targets) => targets.join(","),
             MessageTarget::Broadcast => "*".to_string(),
         };
         let mut value = crate::station::send::execute(crate::station::send::Request {
-            workspace: &self.workspace, team: Some(team), to: &targets, content,
+            workspace: &self.workspace, team: owner_team.as_ref().map(TeamKey::as_str), to: &targets, content,
             task_id, message_id: None, presentation: &normalized.request,
             mailbox: normalized.request.sink != crate::messaging::presentation::PresentationSink::Leader,
             envelope: None,
-        }, crate::station::send::Authority::Seat { sender, team }).map_err(tool_runtime_error)?;
+        }, authority).map_err(tool_runtime_error)?;
         if let Some(warning) = normalized.deprecation { value["warning"] = Value::String(warning); }
         Ok(SendOutcome::Direct(Self::station_result(value)?))
     }
@@ -256,7 +264,11 @@ impl TeamOrchestratorTools {
         if let Some(nested) = args.get("task").or_else(|| args.get("envelope")) {
             self.validate_rpc_scope_args(tool, nested)?;
         }
-        let owner_team = self.canonical_owner_team_key()?;
+        let owner_team = if tool == "send_message" && self.agent_id.as_ref().is_some_and(|id| id.as_str() == "leader") {
+            None
+        } else {
+            self.canonical_owner_team_key()?
+        };
         let requested_team = requested_team_arg(args);
         let requested_scope = requested_scope_arg(args);
         let workspace_override = args.get("workspace").is_some();

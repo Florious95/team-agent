@@ -23,6 +23,84 @@
         assert!(!fixture.root.join(".team/runtime/team.db").exists());
     }
 
+    #[test]
+    fn leader_send_resolves_teams_created_after_mcp_launch() {
+        let fixture = direct_fixture::DirectFixture::new();
+        let tools = TeamOrchestratorTools::with_identity(
+            &fixture.root, Some(AgentId::new("leader")), Some(TeamKey::new("current")),
+        );
+        // The MCP server is already running when the leader creates a team.
+        let mut state = json!({"active_team_key":"release-review", "teams":{
+            "current":{"team_id":"current", "agents":{}},
+            "release-review":{"team_id":"release-review", "tmux_socket":fixture.socket,
+                "agents":{"reviewer":{"pane_id":fixture.pane, "status":"running"}}}
+        }});
+        for target in ["reviewer", "release-review/reviewer"] {
+            // Also cover a launch team that has since disappeared.
+            if target.contains('/') { state["teams"].as_object_mut().unwrap().remove("current"); }
+            fixture.set_state(&state);
+            let content = format!("review via {target}");
+            let value = dispatch_tool(&tools, McpTool::SendMessage, &json!({
+                "to":target, "content":content
+            })).expect("leader uses native dynamic send resolution");
+            let value = serde_json::to_value(value).unwrap();
+            assert_eq!(value["delivery"], "physical", "{value}");
+            fixture.received(&format!("Team Agent message from leader:\n\n{content}"));
+        }
+        let inbox = crate::inbox_store::read(&fixture.root, "reviewer", 10, Some("release-review")).unwrap();
+        assert_eq!(inbox["messages"].as_array().unwrap().len(), 2);
+        assert!(inbox["messages"].as_array().unwrap().iter().all(|row|
+            row["sender"] == "leader" && row["provenance"]["authority"] == "operator"));
+    }
+
+    #[test]
+    fn leader_send_ambiguous_name_fails_closed_but_qualified_target_delivers() {
+        let fixture = direct_fixture::DirectFixture::new();
+        fixture.set_state(&json!({"active_team_key":"current", "teams":{
+            "current":{"team_id":"current", "tmux_socket":fixture.socket,
+                "agents":{"reviewer":{"pane_id":fixture.pane, "status":"running"}}},
+            "release-review":{"team_id":"release-review", "tmux_socket":fixture.socket,
+                "agents":{"reviewer":{"pane_id":fixture.pane, "status":"running"}}}
+        }}));
+        let tools = TeamOrchestratorTools::with_identity(
+            &fixture.root, Some(AgentId::new("leader")), Some(TeamKey::new("current")),
+        );
+        let before = fixture.inbox_bytes();
+        let error = dispatch_tool(&tools, McpTool::SendMessage, &json!({
+            "to":"reviewer", "content":"ambiguous must not deliver"
+        })).unwrap_err();
+        assert_eq!(error.reason, ToolErrorReason::NameAmbiguous, "{error:?}");
+        assert_eq!(fixture.inbox_bytes(), before);
+        let value = dispatch_tool(&tools, McpTool::SendMessage, &json!({
+            "to":"release-review/reviewer", "content":"qualified delivery"
+        })).unwrap();
+        let value = serde_json::to_value(value).unwrap();
+        assert_eq!(value["delivery"], "physical");
+        fixture.received("Team Agent message from leader:\n\nqualified delivery");
+    }
+
+    #[test]
+    fn worker_send_cannot_follow_leader_into_other_teams_or_impersonate_leader() {
+        let workspace = seed_state_ws("worker-send-scope", &json!({"active_team_key":"release-review", "teams":{
+            "current":{"team_id":"current", "agents":{"worker-1":{"status":"running"}}},
+            "release-review":{"team_id":"release-review", "agents":{"reviewer":{"status":"running"}}}
+        }}));
+        let tools = TeamOrchestratorTools::with_identity(
+            &workspace, Some(AgentId::new("worker-1")), Some(TeamKey::new("current")),
+        );
+        for target in ["reviewer", "release-review/reviewer"] {
+            dispatch_tool(&tools, McpTool::SendMessage, &json!({
+                "to":target, "content":"must not escape", "mailbox":true
+            })).expect_err("workers remain bound to their captured team");
+        }
+        let error = dispatch_tool(&tools, McpTool::SendMessage, &json!({
+            "to":"release-review/reviewer", "content":"must not impersonate", "agent_id":"leader"
+        })).unwrap_err();
+        assert!(error.message.contains("identity_mismatch"));
+        assert!(!workspace.join(".team/inbox").exists());
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
     // ── #36 report_result identity: neither envelope nor args can override capture ─
     #[test]
     fn report_result_rejects_envelope_and_argument_identity_mismatch() {

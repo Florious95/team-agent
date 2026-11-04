@@ -2,6 +2,34 @@
 use super::super::tests::Sandbox;
 use super::*;
 
+#[test]
+fn start_help_and_source_errors_include_usable_optional_templates() {
+    let root = Sandbox::new();
+    let help = super::super::help("start");
+    let usage = help.split("Usage:").nth(1).unwrap().split("Options:").next().unwrap();
+    for flag in ["--team NAME", "--provider PROVIDER", "--model MODEL", "--effort EFFORT", "--prompt TEXT"] {
+        assert!(usage.contains(flag), "missing {flag}: {usage}");
+    }
+    assert!(usage.contains("creates the team if it does not exist"));
+    assert!(help.contains("--team NAME selects a team and creates it if it does not exist"));
+    assert!(help.contains("team-agent start reviewer --team release-review --provider pi"));
+    for explicit in [None, Some(root.path())] {
+        let error = discover(root.path(), explicit, None).unwrap_err().to_string();
+        assert!(error.contains("No files are required for direct command-line start"));
+        assert!(error.contains("TEAM.md:\n---\nname: release-review\n---"));
+        assert!(error.contains("agents/reviewer.md:\n---\nprovider: pi\n---"));
+    }
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    std::fs::create_dir(root.path().join("agents")).unwrap();
+    for file in ["TEAM.md", "agents/reviewer.md"] {
+        let marker = format!("{file}:\n");
+        let template = help.split_once(&marker).unwrap().1.lines().take(3).collect::<Vec<_>>().join("\n");
+        std::fs::write(root.path().join(file), format!("{template}\n")).unwrap();
+    }
+    let spec = crate::compiler::compile_team(root.path()).expect("help templates must compile");
+    assert_eq!(spec.get("agents").unwrap().as_list().unwrap()[0].get("id").unwrap().as_str(), Some("reviewer"));
+}
+
 fn fixture(ids: &[&str]) -> (Sandbox, Intent) {
     let root = Sandbox::new();
     std::fs::create_dir(root.path().join("agents")).unwrap();

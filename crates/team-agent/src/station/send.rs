@@ -124,7 +124,7 @@ pub fn execute(req: Request<'_>, authority: Authority<'_>) -> Result<Value, Stri
             scope_check.clone()?;
             let (directory, recipient) = match parsed.target {
                 crate::messaging::LogicalAddressTarget::Worker(agent) =>
-                    (crate::direct_delivery::directory_with_reason(workspace, team)?, agent),
+                    (crate::direct_delivery::directory_for_recipient(workspace, team, &agent)?, agent),
                 crate::messaging::LogicalAddressTarget::TeamEntity { team, entity } =>
                     (crate::direct_delivery::directory_with_reason(workspace, Some(&team))?, entity),
                 crate::messaging::LogicalAddressTarget::SessionWindow { .. } =>

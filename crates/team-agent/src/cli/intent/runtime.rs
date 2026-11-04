@@ -30,7 +30,7 @@ fn discover(
         return if complete(path) {
             Ok(path.to_owned())
         } else {
-            Err(usage("source requires TEAM.md and agents/"))
+            Err(usage(format!("source requires TEAM.md and agents/{START_SOURCE_HELP}")))
         };
     }
     if let Some(selected) = selected {
@@ -57,8 +57,7 @@ fn discover(
     }
     if candidates.is_empty() {
         return Err(usage(format!(
-            "action_required: prepare {}/TEAM.md and {}/agents/<id>.md, then use --from TEAMDIR. Nothing was written or started. Role template (fill your decisions): provider: <choose>; dangerously_skip_permissions: <true|false>; model/effort: <optional>.",
-            workspace.display(), workspace.display()
+            "action_required: whole-team start needs --from TEAMDIR containing TEAM.md and agents/*.md. Nothing was written or started.{START_SOURCE_HELP}"
         )));
     }
     if candidates.len() != 1 {
@@ -633,9 +632,9 @@ fn plan_with_observer(
             _ => None,
         };
         if new_named_team && explicit.is_none() {
-            return Err(usage(
-                "new --team requires explicit --from; existing runtime is not a creation source",
-            ));
+            return Err(usage(format!(
+                "new whole-team --team start requires explicit --from; existing runtime is not a creation source.{START_SOURCE_HELP}"
+            )));
         }
         let source = discover(&plan.scope.workspace, explicit, None)?;
         let compiled = checked(crate::compiler::compile_team(&source))?;
