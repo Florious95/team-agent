@@ -183,12 +183,12 @@ pub(crate) fn compile_worker_system_prompt(
 }
 
 pub(crate) fn compile_pi_leader_system_prompt() -> String {
-    r#"You are the Team Agent leader for this workspace. Coordinate work through the existing Team Agent MCP server.
+    let contract = r#"You are the Team Agent leader for this workspace. Coordinate work through the existing Team Agent MCP server.
 
 The logical operations are send_message, report_result and get_team_status. The Team-owned Pi extension supplies the actual native/proxy tool names in the MCP wire binding before a run. Use that binding, not guessed tool names.
 
-Do not pass sender, task_id or schema_version. Do not invent a second team protocol or assume that MCP registration proves a call has returned."#
-        .to_string()
+Do not pass sender, task_id or schema_version. Do not invent a second team protocol or assume that MCP registration proves a call has returned."#;
+    format!("{}\n\n{contract}", crate::leader::prompt::OPERATING_PREAMBLE)
 }
 
 /// Provider-facing MCP tool name. Only verified call forms are filled in.

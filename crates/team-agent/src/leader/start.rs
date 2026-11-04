@@ -361,6 +361,9 @@ fn leader_start_plan_with_ambient_authority(
         } else {
             crate::provider::argv_route::apply(provider, &mut provider_argv)
                 .map_err(|error| LeaderError::Start(error.to_string()))?;
+            if matches!(provider, Provider::Claude | Provider::ClaudeCode | Provider::Codex) {
+                super::prompt::inject_operating_preamble(provider, &mut provider_argv)?;
+            }
             if let Some(stored) = configured_prompt.as_ref() {
                 super::prompt::inject(provider, &mut provider_argv, &stored.text, &stored.path)?;
             }
