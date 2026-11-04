@@ -631,11 +631,15 @@ fn route_direct(
                 if before.get("leader_receiver").is_some_and(Value::is_object) {
                     super::persist::update_runtime_state_with_receiver(workspace, &key, |latest| {
                         let mut current = bounded_team_view(latest, Some(&key))?;
-                        if current.get("status").and_then(Value::as_str) != Some("shutdown")
+                        if current.get("status") != before.get("status")
                             || current.get("team_owner") != before.get("team_owner")
-                            || current.get("leader_receiver") != before.get("leader_receiver") {
+                            || current.get("leader_receiver") != before.get("leader_receiver")
+                            || current.get("agents").and_then(Value::as_object).is_some_and(|agents|
+                                agents.values().any(|agent| agent["status"].as_str() == Some("running"))) {
                             return Err(StateError::SaveConflict("shutdown receiver changed before release".into()));
                         }
+                        // Clean legacy/root shutdowns may not yet carry the shutdown stamp.
+                        current["status"] = Value::String("shutdown".into());
                         current["leader_receiver"] = Value::Null;
                         Ok(super::projection::merge_committed_team(latest, &current, &key))
                     })?;

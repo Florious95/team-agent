@@ -202,8 +202,9 @@ fn default_scope_recovers_only_the_unique_team() {
     assert!(crate::direct_delivery::directory(&scratch.0, None).is_err());
     state["active_team_key"] = json!("X 运维");
     fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+    assert!(crate::direct_delivery::directory(&scratch.0, None).is_err());
     assert_eq!(
-        crate::direct_delivery::directory(&scratch.0, None)
+        crate::direct_delivery::directory(&scratch.0, Some("X 运维"))
             .unwrap()
             .team
             .as_deref(),
