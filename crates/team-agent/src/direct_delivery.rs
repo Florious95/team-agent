@@ -830,6 +830,12 @@ mod tests {
         assert_eq!(refused.code, "name_ambiguous");
         assert_eq!(refused.candidates.len(), 2);
         assert!(crate::inbox_store::read(&root, "leader", 10, None).is_err());
+        let command = ["send", "leader", "must-not-route", "--mailbox"].map(str::to_string);
+        assert_ne!(crate::cli::run(&command, &root), crate::cli::ExitCode::Ok);
+        assert!(!root.join(".team/inbox").exists(), "ambiguous send must have no storage effect");
+        let command = ["send", "leader", "explicit-team", "--mailbox", "--team", "current"].map(str::to_string);
+        assert_eq!(crate::cli::run(&command, &root), crate::cli::ExitCode::Ok);
+        assert_eq!(crate::inbox_store::read(&root, "leader", 10, Some("current")).unwrap()["messages"][0]["content"], "explicit-team");
         assert_eq!(directory_with_reason(&root, Some("current")).unwrap().team.as_deref(), Some("current"));
         std::fs::remove_dir_all(root).unwrap();
     }
