@@ -105,7 +105,9 @@ pub fn classify_codex_startup_screen(output: &str) -> StartupScreenDecision {
 }
 
 pub fn classify_claude_startup_screen(output: &str) -> StartupScreenDecision {
-    if has_active_claude_trust_shape(output) {
+    if has_active_claude_trust_shape(output)
+        && is_more_recent(max_rfind(output, CLAUDE_TRUST_MARKERS), rightmost_claude_input_prompt_glyph(output))
+    {
         return StartupScreenDecision::AnswerWorkspaceTrust;
     }
     if has_claude_ready_shape(output) {
