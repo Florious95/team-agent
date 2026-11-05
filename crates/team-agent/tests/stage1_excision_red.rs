@@ -35,6 +35,11 @@ const RETAINED_AFTER_REVIEW: &[(&str, &str, &str)] = &[
         "pub fn kill_server(&self) {",
         "inherent teardown used by surviving shutdown/isolation tests; not the removed Transport::kill_server",
     ),
+    (
+        "src/transport.rs",
+        "PaneTty,",
+        "only constructor is K3 TEST-ONLY leader/lease.rs::quiet_fake_leader_pane_echo; remove with K3 in Stage 2",
+    ),
 ];
 
 /// Roster cases that a reviewer has explicitly retired as wholly obsolete.
