@@ -969,83 +969,107 @@ fn prop_inbox_reads_are_pure_and_traversal_recipients_refuse() {
     });
 }
 
+/// A live raw-mode pane recording every byte it receives; it is both the leader
+/// and `w1` of a single-team snapshot, so any paste into either is observable.
+struct Receiver {
+    tmux: PathBuf,
+    socket: PathBuf,
+    received: PathBuf,
+}
+
+impl Receiver {
+    fn start(ws: &mut Ws) -> Self {
+        let tmux = tmux_binary();
+        ws.path_env = format!("{}:/usr/bin:/bin", tmux.parent().unwrap().display());
+        let socket = ws.root.join("t.sock");
+        let received = ws.root.join("received");
+        let ready = ws.root.join("ready");
+        let script = ws.root.join("receiver.py");
+        std::fs::write(
+            &script,
+            format!(
+                "import os, tty\ntty.setraw(0)\nos.write(1, b'\\x1b[?2004h')\n\
+                 out = open({received:?}, 'ab', buffering=0)\nopen({ready:?}, 'w').close()\n\
+                 while True:\n    out.write(os.read(0, 65536))\n",
+                received = received.display().to_string(),
+                ready = ready.display().to_string()
+            ),
+        )
+        .unwrap();
+        let created = Command::new(&tmux)
+            .arg("-S")
+            .arg(&socket)
+            .args([
+                "-f",
+                "/dev/null",
+                "new-session",
+                "-d",
+                "-P",
+                "-F",
+                "#{pane_id}",
+                "-s",
+                "s1recv",
+            ])
+            .arg(format!("python3 '{}'", script.display()))
+            .env_remove("TMUX")
+            .output()
+            .unwrap();
+        assert!(created.status.success(), "{}", text(&created));
+        let receiver = Self {
+            tmux,
+            socket: socket.clone(),
+            received,
+        };
+        let pane = String::from_utf8(created.stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready.exists() {
+            assert!(Instant::now() < deadline, "receiver did not start");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::write(
+            ws.root.join(".team/runtime/state.json"),
+            serde_json::to_vec(&json!({
+                "active_team_key": TEAM,
+                "teams": {TEAM: {"team_id": TEAM, "status": "stopped", "tmux_socket": socket,
+                    "leader": {"pane_id": pane},
+                    "agents": {"w1": {"status": "running", "pane_id": pane}, "w2": {"status": "stopped"}, "w3": {"status": "stopped"}}}}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        receiver
+    }
+
+    fn pasted(&self, needle: &str) -> usize {
+        let bytes = std::fs::read(&self.received).unwrap_or_default();
+        bytes
+            .windows(needle.len())
+            .filter(|w| *w == needle.as_bytes())
+            .count()
+    }
+}
+
+impl Drop for Receiver {
+    fn drop(&mut self) {
+        let _ = Command::new(&self.tmux)
+            .arg("-S")
+            .arg(&self.socket)
+            .arg("kill-server")
+            .output();
+    }
+}
+
 /// Physical delivery into a live pane: a retried send (same message id, then
 /// its record token) is answered from the durable record and never pastes again.
 #[test]
 fn physical_retry_never_submits_the_same_message_twice() {
-    let tmux = tmux_binary();
     let mut ws = Ws::new(true);
-    ws.path_env = format!("{}:/usr/bin:/bin", tmux.parent().unwrap().display());
-    let socket = ws.root.join("t.sock");
-    let received = ws.root.join("received");
-    let script = ws.root.join("receiver.py");
-    std::fs::write(
-        &script,
-        format!(
-            "import os, tty\ntty.setraw(0)\nos.write(1, b'\\x1b[?2004h')\n\
-             out = open({received:?}, 'ab', buffering=0)\nopen({ready:?}, 'w').close()\n\
-             while True:\n    out.write(os.read(0, 65536))\n",
-            received = received.display().to_string(),
-            ready = ws.root.join("ready").display().to_string()
-        ),
-    )
-    .unwrap();
-    let created = Command::new(&tmux)
-        .args(["-S"])
-        .arg(&socket)
-        .args([
-            "-f",
-            "/dev/null",
-            "new-session",
-            "-d",
-            "-P",
-            "-F",
-            "#{pane_id}",
-            "-s",
-            "s1recv",
-        ])
-        .arg(format!("python3 '{}'", script.display()))
-        .env_remove("TMUX")
-        .output()
-        .unwrap();
-    assert!(created.status.success(), "{}", text(&created));
-    let pane = String::from_utf8(created.stdout)
-        .unwrap()
-        .trim()
-        .to_string();
-    struct KillServer(PathBuf, PathBuf);
-    impl Drop for KillServer {
-        fn drop(&mut self) {
-            let _ = Command::new(&self.0)
-                .arg("-S")
-                .arg(&self.1)
-                .arg("kill-server")
-                .output();
-        }
-    }
-    let _server = KillServer(tmux.clone(), socket.clone());
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !ws.root.join("ready").exists() {
-        assert!(Instant::now() < deadline, "receiver did not start");
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    std::fs::write(
-        ws.root.join(".team/runtime/state.json"),
-        serde_json::to_vec(&json!({
-            "active_team_key": TEAM,
-            "teams": {TEAM: {"team_id": TEAM, "status": "stopped", "tmux_socket": socket,
-                "leader": {"pane_id": pane},
-                "agents": {"w1": {"status": "running", "pane_id": pane}, "w2": {"status": "stopped"}, "w3": {"status": "stopped"}}}}
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+    let receiver = Receiver::start(&mut ws);
     let payload = format!("stage1 physical once {}", std::process::id());
-    let pasted = || {
-        let bytes = std::fs::read(&received).unwrap_or_default();
-        let needle = payload.as_bytes();
-        bytes.windows(needle.len()).filter(|w| *w == needle).count()
-    };
+    let pasted = || receiver.pasted(&payload);
     let (output, first) = ws.send("w1", &payload, &["--message-id", "phys-1"]);
     assert!(output.status.success(), "{}", text(&output));
     assert_eq!(first["delivery"], "physical", "{first}");
@@ -1216,6 +1240,7 @@ fn send_usage_refusals_are_fail_closed() {
             "--json",
         ],
         vec!["send", "w1,,w2", "hi", "--mailbox", "--json"],
+        vec!["send", "--to-leader", "ghost-leader", "hi", "--json"],
     ] {
         let output = ws.cli(&args);
         assert_not_a_crash(&output);
@@ -1303,4 +1328,196 @@ fn prop_mcp_surface_keeps_three_tools_and_unknown_tools_fail_closed() {
         );
         ws.assert_no_legacy_artifacts();
     });
+}
+
+/// Short, team-qualified and workspace-qualified TO forms are co-equal: each enters
+/// the same logical resolver and lands in the same recipient inbox, in order.
+#[test]
+fn prop_short_and_fully_qualified_targets_land_in_the_same_inbox() {
+    for_each_case("co-equal TO forms", 8, |rng, _| {
+        let ws = Ws::new(rng.chance(50));
+        let agent = *rng.pick(AGENTS);
+        let mut expected = Vec::new();
+        for _ in 0..rng.range(3, 6) {
+            let target = match rng.below(3) {
+                0 => agent.to_string(),
+                1 => format!("{TEAM}/{agent}"),
+                _ => format!("{}::{TEAM}/{agent}", ws.root.display()),
+            };
+            let content = rng.content();
+            let (output, value) = ws.send(&target, &content, &["--mailbox"]);
+            assert!(output.status.success(), "{target}: {}", text(&output));
+            assert_eq!(value["recipient"], agent, "{target}: {value}");
+            expected.push(content);
+        }
+        assert_eq!(contents(&ws.inbox(agent)), expected);
+        ws.assert_no_legacy_artifacts();
+    });
+}
+
+/// A worker seat's MCP send can never widen its spawn-time team or workspace scope,
+/// whatever the address says; refusals write nothing anywhere.
+#[test]
+fn mcp_seat_send_cannot_widen_team_or_workspace_scope() {
+    use team_agent::mcp_server::{Scope, TeamOrchestratorTools};
+    use team_agent::messaging::MessageTarget;
+    use team_agent::model::ids::{AgentId, TeamKey};
+    let ws = Ws::new(true);
+    let other = Ws::new(false);
+    let state = json!({
+        "active_team_key": TEAM,
+        "teams": {
+            TEAM: {"team_id": TEAM, "status": "stopped", "agents": {"w1": {"status": "stopped"}, "w2": {"status": "stopped"}}},
+            "beta": {"team_id": "beta", "status": "stopped", "agents": {"b1": {"status": "stopped"}}}
+        }
+    });
+    for root in [&ws.root, &other.root] {
+        std::fs::write(
+            root.join(".team/runtime/state.json"),
+            serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+    }
+    let seat = TeamOrchestratorTools::with_identity(
+        &ws.root,
+        Some(AgentId::new("w1")),
+        Some(TeamKey::new(TEAM)),
+    );
+    let mailbox = Value::Bool(true);
+    let send = |to: &str, scope: Option<Scope>| {
+        seat.send_message_with_presentation(
+            &MessageTarget::Single(to.into()),
+            "scope probe",
+            None,
+            None,
+            scope,
+            Some(&mailbox),
+            None,
+        )
+    };
+    assert!(
+        send("w2", None).is_ok(),
+        "positive control: in-team seat send must be admitted"
+    );
+    let before = (ws.records(), other.records());
+    for target in [
+        "beta/b1".to_string(),
+        format!("{}::beta/b1", ws.root.display()),
+        format!("{}::{TEAM}/w2", other.root.display()),
+    ] {
+        let refused = send(&target, None);
+        assert!(
+            refused.is_err(),
+            "seat widened scope to {target}: {refused:?}"
+        );
+    }
+    assert!(
+        send("w2", Some(Scope::Workspace)).is_err(),
+        "workspace scope override must be refused"
+    );
+    assert_eq!(
+        (ws.records(), other.records()),
+        before,
+        "a refused widening wrote records"
+    );
+    assert!(
+        !ws.root.join(".team/inbox/beta").exists(),
+        "no foreign-team inbox may be created"
+    );
+    ws.assert_no_legacy_artifacts();
+}
+
+/// Durable non-injected routes (CLI/MCP mailbox, non-critical stage_result reports with a
+/// casefile or silent sink) are stored and pullable but never pasted into a live pane; a
+/// plain send to the same pane is (positive control).
+#[test]
+fn casefile_silent_and_stage_result_are_stored_but_never_pasted() {
+    use team_agent::mcp_server::TeamOrchestratorTools;
+    use team_agent::messaging::MessageTarget;
+    use team_agent::model::ids::{AgentId, TeamKey};
+    let mut ws = Ws::new(true);
+    let receiver = Receiver::start(&mut ws);
+    let tag = std::process::id();
+    let casefile = format!("stage1 casefile {tag}");
+    let mcp_mailbox = format!("stage1 mcp mailbox {tag}");
+    let stage_casefile = format!("stage1 stage-result casefile {tag}");
+    let stage_silent = format!("stage1 stage-result silent {tag}");
+    let control = format!("stage1 live control {tag}");
+    let (output, value) = ws.send("w1", &casefile, &["--mailbox"]);
+    assert!(
+        output.status.success() && value["live"] == false,
+        "{}",
+        text(&output)
+    );
+    // send_message's durable non-injected route is the mailbox flag (casefile sink).
+    let leader = TeamOrchestratorTools::with_identity(
+        &ws.root,
+        Some(AgentId::new("leader")),
+        Some(TeamKey::new(TEAM)),
+    );
+    let mailboxed = leader.send_message_with_presentation(
+        &MessageTarget::Single("w1".into()),
+        &mcp_mailbox,
+        None,
+        None,
+        None,
+        Some(&Value::Bool(true)),
+        None,
+    );
+    assert!(mailboxed.is_ok(), "{mailboxed:?}");
+    // Non-critical stage_result reports honor the requested casefile/silent sink.
+    let worker = TeamOrchestratorTools::with_identity(
+        &ws.root,
+        Some(AgentId::new("w1")),
+        Some(TeamKey::new(TEAM)),
+    );
+    for (summary, sink) in [(&stage_casefile, "casefile"), (&stage_silent, "silent")] {
+        let reported = worker.report_result_with_presentation(
+            None,
+            Some(summary),
+            Some("success"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&json!({"sink": sink, "class": "stage_result", "case_id": "stage1-case"})),
+        );
+        assert!(reported.is_ok(), "{sink}: {reported:?}");
+    }
+    let (output, value) = ws.send("w1", &control, &[]);
+    assert!(
+        output.status.success() && value["delivery"] == "physical",
+        "{}",
+        text(&output)
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while receiver.pasted(&control) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "positive control never reached the pane"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    for quiet in [&casefile, &mcp_mailbox, &stage_casefile, &stage_silent] {
+        assert_eq!(
+            receiver.pasted(quiet),
+            0,
+            "non-leader sink was pasted: {quiet}"
+        );
+    }
+    let w1 = contents(&ws.inbox("w1"));
+    assert!(
+        w1.contains(&casefile) && w1.contains(&mcp_mailbox) && w1.contains(&control),
+        "{w1:?}"
+    );
+    let leader_inbox = contents(&ws.inbox("leader"));
+    assert!(
+        leader_inbox.contains(&stage_casefile) && leader_inbox.contains(&stage_silent),
+        "stage results must stay pullable: {leader_inbox:?}"
+    );
+    ws.assert_no_legacy_artifacts();
 }
