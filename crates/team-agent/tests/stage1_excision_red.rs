@@ -19,7 +19,23 @@ const MANIFEST: &str = include_str!("fixtures/stage1_excision_manifest.tsv");
 
 /// Manifest rows deliberately retained after a local caller check. Each entry is
 /// `(file, declaration, reason)`; an empty reason is rejected.
-const RETAINED_AFTER_REVIEW: &[(&str, &str, &str)] = &[];
+const RETAINED_AFTER_REVIEW: &[(&str, &str, &str)] = &[
+    (
+        "src/tmux_backend.rs",
+        "pub fn with_runner(runner: Box<dyn CommandRunner>) -> Self {",
+        "small test seam still used by surviving current tests (incl. survivor-roster shutdown/tmux cases) from integration targets; must stay pub, cfg(test) would break them",
+    ),
+    (
+        "src/tmux_backend.rs",
+        "pub fn with_runner_for_workspace(runner: Box<dyn CommandRunner>, workspace: &Path) -> Self {",
+        "small test seam still used by surviving current tests (incl. survivor-roster shutdown/tmux cases) from integration targets; must stay pub, cfg(test) would break them",
+    ),
+    (
+        "src/tmux_backend.rs",
+        "pub fn kill_server(&self) {",
+        "inherent teardown used by surviving shutdown/isolation tests; not the removed Transport::kill_server",
+    ),
+];
 
 /// Roster cases that a reviewer has explicitly retired as wholly obsolete.
 /// Each entry is `(file, test, reason)`. Silent deletion is not accepted.
