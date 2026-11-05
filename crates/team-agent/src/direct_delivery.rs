@@ -399,7 +399,7 @@ impl Directory {
         #[cfg(unix)]
         let _lifecycle = if agent != "leader" && native_recipient(self.recipient(agent)?) {
             let id = crate::model::ids::AgentId::new(agent);
-            Some(crate::lifecycle::lock::try_acquire_seat_lifecycle_lock(crate::lifecycle::lock::LifecycleLockRequest {
+            Some(crate::lifecycle::lock::acquire_seat_delivery_lock(crate::lifecycle::lock::LifecycleLockRequest {
                 workspace: &self.workspace, operation: "native-send", team: self.team.as_deref(), agent_id: Some(&id),
             }).map_err(|e| format!("recipient_lifecycle_busy: {e}"))?)
         } else { None };

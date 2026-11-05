@@ -37,6 +37,13 @@ pub(crate) struct LifecycleLockRequest<'a> {
 
 pub(crate) struct LifecycleLockGuard {
     _lock: Option<std::rc::Rc<crate::platform::entity_lock::EntityLock>>,
+    _shared: Option<std::fs::File>,
+}
+
+/// Sends share the lifecycle fence; stop/start retain exclusive ownership.
+/// Do not register shared ownership as an exclusive reentrant EntityLock.
+pub(crate) fn acquire_seat_delivery_lock(request: LifecycleLockRequest<'_>) -> Result<LifecycleLockGuard, LifecycleError> {
+    acquire_lifecycle_lock(request, LIFECYCLE_LOCK_TIMEOUT, LIFECYCLE_LOCK_HELD_LONG, true)
 }
 
 /// ---
@@ -130,6 +137,12 @@ fn acquire_agent_lifecycle_lock_with_deadlines(
     timeout: Duration,
     held_long: Duration,
 ) -> Result<LifecycleLockGuard, LifecycleError> {
+    acquire_lifecycle_lock(request, timeout, held_long, false)
+}
+
+fn acquire_lifecycle_lock(
+    request: LifecycleLockRequest<'_>, timeout: Duration, held_long: Duration, shared: bool,
+) -> Result<LifecycleLockGuard, LifecycleError> {
     // 0.5.x Windows portability Batch 2: migrated to
     // `crate::platform::file_lock::{try_lock_once_nonblocking, unlock}`
     // so the same polling loop + waiter file + 5s `lock_held_long`
@@ -143,7 +156,7 @@ fn acquire_agent_lifecycle_lock_with_deadlines(
     let Some(lock_path) = seat_lifecycle_lock_path(&request)? else {
         // A roster is not an exclusion domain. Batch callers lock each seat
         // at its physical operation, not the entire team or workspace.
-        return Ok(LifecycleLockGuard { _lock: None });
+        return Ok(LifecycleLockGuard { _lock: None, _shared: None });
     };
     if let Some(parent) = lock_path.parent() {
         crate::station::seat_store::private_dir(parent)
@@ -151,7 +164,7 @@ fn acquire_agent_lifecycle_lock_with_deadlines(
     }
     if let Some(lock) = crate::platform::entity_lock::EntityLock::current(&lock_path) {
         check_seat_manifest(&request)?;
-        return Ok(LifecycleLockGuard { _lock: Some(lock) });
+        return Ok(LifecycleLockGuard { _lock: Some(lock), _shared: None });
     }
     let mut options = std::fs::OpenOptions::new();
     options.create(true).read(true).write(true).truncate(false);
@@ -166,13 +179,26 @@ fn acquire_agent_lifecycle_lock_with_deadlines(
     let mut long_event_written = false;
     let mut waiter = None;
     loop {
-        match crate::platform::file_lock::try_lock_once_nonblocking(&file) {
+        let acquired = if shared {
+            match file.try_lock_shared() {
+                Ok(()) => Ok(true),
+                Err(std::fs::TryLockError::WouldBlock) => Ok(false),
+                Err(std::fs::TryLockError::Error(error)) => Err(error),
+            }
+        } else {
+            crate::platform::file_lock::try_lock_once_nonblocking(&file)
+        };
+        match acquired {
             Ok(true) => {
+                if shared {
+                    check_seat_manifest(&request)?;
+                    return Ok(LifecycleLockGuard { _lock: None, _shared: Some(file) });
+                }
                 write_lock_metadata(&mut file, &request, &lock_path)?;
                 let lock = crate::platform::entity_lock::EntityLock::acquired(&lock_path, file)
                     .map_err(|error| LifecycleError::StatePersist(error.to_string()))?;
                 check_seat_manifest(&request)?;
-                return Ok(LifecycleLockGuard { _lock: Some(lock) });
+                return Ok(LifecycleLockGuard { _lock: Some(lock), _shared: None });
             }
             Ok(false) => {}
             Err(e) => {
