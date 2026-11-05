@@ -298,10 +298,16 @@ pub(super) fn run(
         Err(error) if !matches!(error, CliError::Usage(_)) => {
             // New surfaces use one effect-free refusal envelope. In particular,
             // never reparse a --prompt payload as an error-log workspace.
-            Ok(CmdResult::from_json(
+            let mut result = CmdResult::from_json(
                 json!({"ok":false,"action":command,"scope":null,"phase":"planning_or_selection","error":crate::redaction::redact_external_text(&error.to_string())}),
                 super::arguments::has_flag(command, args, "--json"),
-            ))
+            );
+            if !result.as_json {
+                if let CmdOutput::Json(value) = &result.output {
+                    result.output = CmdOutput::Human(intent_human(value));
+                }
+            }
+            Ok(result)
         }
         result => result,
     })
