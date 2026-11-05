@@ -10,6 +10,7 @@ use std::path::Path;
 pub(crate) enum SeatObservation {
     Live,
     StoppedVerified,
+    ProviderExited,
     Unstarted,
     NativeReconcile,
     Unknown,
@@ -166,6 +167,17 @@ pub(crate) fn observe(
         let Some(target) = seat.physical.as_ref() else {
             return Ok(SeatObservation::Unknown);
         };
+        if sample_process(&target.process) == team_agent_contract::host::process::ProcessState::Alive {
+            checked(crate::contract_runtime::backend::validate_delivery_target(
+                &backend.binding, &seat, std::time::Duration::from_secs(2),
+            ))?;
+            let transport = crate::transport_factory::bounded_endpoint_transport(
+                &target.endpoint, std::time::Instant::now() + std::time::Duration::from_secs(2),
+            );
+            if checked(transport.provider_exit_status(&PaneId::new(&target.pane)))?.is_some() {
+                return Ok(SeatObservation::ProviderExited);
+            }
+        }
         return Ok(native_observation(
             seat.status,
             sample_process(&target.process),
@@ -239,6 +251,14 @@ pub(crate) fn observe(
             || Some(owner.generation.as_str()) != generation
     }) {
         return Ok(SeatObservation::Unknown);
+    }
+    // Consult the exit receipt only after exact pane/PID/session ownership.
+    if checked(backend.provider_exit_status(&PaneId::new(pane.unwrap_or(""))))?.is_some() {
+        #[cfg(unix)]
+        if checked(team_agent_contract::host::process::process_birth_identity(pid))? != carrier_birth {
+            return Ok(SeatObservation::Unknown);
+        }
+        return Ok(SeatObservation::ProviderExited);
     }
     let command = matches[0].current_command.as_deref().unwrap_or("");
     let positive_command = command == crate::provider::wire::command_name(native)
