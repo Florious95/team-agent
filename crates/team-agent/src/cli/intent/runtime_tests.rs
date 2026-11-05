@@ -235,7 +235,9 @@ fn bare_and_agent_start_share_the_scoped_stop_advice_for_unverified_seats() {
     for (command, prefix) in [("start", vec!["one"]), ("agent", vec!["start", "one"])] {
         let mut tokens = prefix.into_iter().map(str::to_string).collect::<Vec<_>>();
         tokens.extend(["--workspace".into(), root.path().to_string_lossy().into_owned(), "--team".into(), "fixture".into(), "--dry-run".into()]);
-        let text = super::super::run(command, &tokens, root.path()).unwrap().unwrap_err().to_string();
+        let result = super::super::run(command, &tokens, root.path()).unwrap().unwrap();
+        let text = crate::cli::emit::emit(&result.output, result.as_json).unwrap();
+        assert!(text.starts_with("error: "), "{text}");
         assert!(text.contains("team-agent stop one --workspace"), "{text}");
         assert!(!text.contains("team-agent status one"), "{text}");
         assert_eq!(std::fs::read(&path).unwrap(), before);
