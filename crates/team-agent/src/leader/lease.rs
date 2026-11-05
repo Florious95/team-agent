@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::message_store::MessageStore;
 use crate::model::enums::PaneLiveness;
 use crate::model::ids::TeamKey;
 use crate::provider::Provider;
@@ -466,27 +465,6 @@ fn state_records_pane_endpoint(state: &Value, pane_id: &str, endpoint: &str) -> 
                         .any(|key| team.get(*key).is_some_and(&record_matches))
                 })
             })
-}
-
-/// R8 D4 (decoupled for offline byte-lock — c-lite): build the `leader_receiver.requeued_exhausted_watchers`
-/// event payload from the requeued notices, independent of the real-tmux attach flow.
-/// golden (leader/__init__.py:39-44): EXACTLY `{watcher_ids, count, trigger:"attach_leader"}`.
-/// (Current divergent body — {pane_id, team_id, watcher_ids, requeued} — kept until porter-c ports;
-/// pinned RED in leader::tests asserts the golden shape.)
-pub(crate) fn requeued_exhausted_watchers_event_payload(
-    _pane_id: &PaneId,
-    _team_id: &TeamKey,
-    notices: &[crate::messaging::WatcherNotice],
-) -> serde_json::Value {
-    let watcher_ids: Vec<&str> = notices
-        .iter()
-        .map(|notice| notice.watcher_id.as_str())
-        .collect();
-    json!({
-        "watcher_ids": watcher_ids,
-        "count": watcher_ids.len(),
-        "trigger": "attach_leader",
-    })
 }
 
 /// `attach_leader_to_state`(card §43;`__init__.py:256`)。核心绑定逻辑(autobind/launch/runtime 复用)。

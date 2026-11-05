@@ -22,12 +22,7 @@ use std::sync::Mutex;
 use serde_json::{json, Value};
 use team_agent::model::enums::{PaneLiveness, Provider};
 use team_agent::provider::get_adapter;
-use team_agent::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
-    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
-    WindowName,
-};
+use team_agent::transport::{ BackendKind, CaptureRange, CapturedText, InjectStage, Key, PaneField, PaneId, PaneInfo, SessionName, SpawnResult, Target, Transport, TransportError, WindowName };
 
 const CLAUDE_TRUST_YES_ACTIVE: &str = r#"Claude Code
 
@@ -98,10 +93,6 @@ fn claude_active_yes_trust_handler_sends_exactly_enter_not_digit_one() {
         sent,
         vec![vec![Key::Enter]],
         "Claude trust auto-answer must send exactly Enter, not character '1' or task text; sent={sent:?}"
-    );
-    assert!(
-        !sent.iter().flatten().any(|key| matches!(key, Key::Char('1'))),
-        "the contract forbids hard-coding digit 1 as the default Claude trust answer; sent={sent:?}"
     );
 }
 
@@ -217,29 +208,6 @@ impl Transport for ScriptedTransport {
         Ok(spawn_result(session, window))
     }
 
-    fn inject(
-        &self,
-        target: &Target,
-        payload: &InjectPayload,
-        _submit: Key,
-        _bracketed: bool,
-    ) -> Result<InjectReport, TransportError> {
-        let text = match payload {
-            InjectPayload::Text(text) | InjectPayload::TextSkipConsumptionPoll(text) => {
-                text.clone()
-            }
-            InjectPayload::Empty => String::new(),
-        };
-        self.injects.lock().unwrap().push((target.clone(), text));
-        Ok(InjectReport {
-            stage_reached: InjectStage::Submit,
-            inject_verification: InjectVerification::CaptureContainsToken,
-            submit_verification: SubmitVerification::PastedContentPromptAbsentAfterSubmit,
-            turn_verification: TurnVerification::NotYetObserved,
-            attempts: 1,
-            submit_diagnostics: None,
-        })
-    }
 
     fn send_keys(&self, _target: &Target, keys: &[Key]) -> Result<(), TransportError> {
         self.sent.lock().unwrap().push(keys.to_vec());
@@ -262,7 +230,6 @@ impl Transport for ScriptedTransport {
 
     fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
         Ok(match field {
-            PaneField::PaneWidth => Some("120".to_string()),
             _ => None,
         })
     }
@@ -283,14 +250,6 @@ impl Transport for ScriptedTransport {
         Ok(self.windows.lock().unwrap().clone())
     }
 
-    fn set_session_env(
-        &self,
-        _session: &SessionName,
-        _key: &str,
-        _value: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        Ok(SetEnvOutcome::Applied)
-    }
 
     fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
         Ok(())
@@ -300,9 +259,6 @@ impl Transport for ScriptedTransport {
         Ok(())
     }
 
-    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
-        Ok(AttachOutcome::Attached)
-    }
 }
 
 fn spawn_result(session: &SessionName, window: &WindowName) -> SpawnResult {

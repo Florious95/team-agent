@@ -21,15 +21,9 @@ use team_agent::lifecycle::{
     add_agent_with_transport, fork_agent_with_transport, remove_agent_with_transport,
     LifecycleError,
 };
-use team_agent::message_store::MessageStore;
 use team_agent::model::ids::AgentId;
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
-use team_agent::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
-};
+use team_agent::transport::{ BackendKind, CaptureRange, CapturedText, InjectStage, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName, SpawnResult, Target, Transport, TransportError, WindowName };
 
 const FAIL_REMOVE_AFTER_HEALTH_DELETE: &str =
     "TEAM_AGENT_TEST_FAIL_REMOVE_AFTER_AGENT_HEALTH_DELETE";
@@ -299,51 +293,7 @@ impl RollbackFixture {
         team_agent::state::projection::save_team_scoped_state(&self.team, &selected).unwrap();
     }
 
-    fn seed_agent_health(
-        &self,
-        owner_team_id: &str,
-        agent_id: &str,
-        status: &str,
-        last_output_at: Option<&str>,
-        context_usage_pct: Option<i64>,
-        current_task_id: Option<&str>,
-    ) {
-        let store = MessageStore::open(&self.team).unwrap();
-        let conn = open_db(store.db_path()).unwrap();
-        conn.execute(
-            "insert or replace into agent_health(owner_team_id, agent_id, status, last_output_at, context_usage_pct, current_task_id, updated_at)
-             values (?1, ?2, ?3, ?4, ?5, ?6, '2026-06-09T00:00:00Z')",
-            params![
-                owner_team_id,
-                agent_id,
-                status,
-                last_output_at,
-                context_usage_pct,
-                current_task_id
-            ],
-        )
-        .unwrap();
-    }
 
-    fn agent_health_row(&self, agent_id: &str) -> Option<HealthRow> {
-        let store = MessageStore::open(&self.team).unwrap();
-        let conn = open_db(store.db_path()).unwrap();
-        conn.query_row(
-            "select owner_team_id, status, last_output_at, context_usage_pct, current_task_id
-             from agent_health where agent_id = ?1",
-            [agent_id],
-            |row| {
-                Ok(HealthRow {
-                    owner_team_id: row.get(0)?,
-                    status: row.get(1)?,
-                    last_output_at: row.get(2)?,
-                    context_usage_pct: row.get(3)?,
-                    current_task_id: row.get(4)?,
-                })
-            },
-        )
-        .ok()
-    }
 
     fn spec_text(&self) -> String {
         std::fs::read_to_string(self.team.join("team.spec.yaml")).unwrap()
@@ -446,22 +396,6 @@ impl Transport for RecordingTransport {
         self.record_spawn(session, window, argv)
     }
 
-    fn inject(
-        &self,
-        _target: &Target,
-        _payload: &InjectPayload,
-        _submit: Key,
-        _bracketed: bool,
-    ) -> Result<InjectReport, TransportError> {
-        Ok(InjectReport {
-            stage_reached: InjectStage::Submit,
-            inject_verification: InjectVerification::EmptyTextSendKeys,
-            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
-            turn_verification: TurnVerification::NotRequired,
-            attempts: 1,
-            submit_diagnostics: None,
-        })
-    }
 
     fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
         Ok(())
@@ -480,12 +414,8 @@ impl Transport for RecordingTransport {
 
     fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
         Ok(match field {
-            PaneField::PaneId => Some("%0".to_string()),
             PaneField::PaneMode => None,
-            PaneField::PaneWidth => Some("120".to_string()),
-            PaneField::PaneCurrentPath => None,
             PaneField::PaneCurrentCommand => None,
-            PaneField::SessionName => Some(self.session.clone()),
             PaneField::PaneTty => None,
         })
     }
@@ -533,14 +463,6 @@ impl Transport for RecordingTransport {
             .collect())
     }
 
-    fn set_session_env(
-        &self,
-        _session: &SessionName,
-        _key: &str,
-        _value: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        Ok(SetEnvOutcome::Applied)
-    }
 
     fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
         Ok(())
@@ -560,7 +482,4 @@ impl Transport for RecordingTransport {
         Ok(())
     }
 
-    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
-        Ok(AttachOutcome::Attached)
-    }
 }

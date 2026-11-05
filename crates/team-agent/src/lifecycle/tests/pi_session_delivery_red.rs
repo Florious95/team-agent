@@ -2,9 +2,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::lifecycle::launch::pi_mcp::pi_seat_paths;
-use crate::messaging::delivery::{
-    recipient_allows_explicit_queue_flush, recipient_requires_single_enter,
-};
 use crate::model::enums::{Provider, ProviderEffort};
 use crate::provider::adapters::pi::{build_pi_command_argv, PiCommandRequest, PiSessionSelector};
 use crate::provider::session_scan::{scan_session_candidates_once, CaptureSessionContext};
@@ -192,24 +189,6 @@ fn pi_restart_uses_exact_path_and_refuses_missing_backing() {
     std::fs::remove_dir_all(root).expect("remove resume fixture");
 }
 
-#[test]
-fn pi_delivery_submits_one_enter_and_never_flushes_or_retries() {
-    let idle = serde_json::json!({
-        "agents": {
-            "worker-a": {"provider": "pi", "status": "running"}
-        }
-    });
-    assert!(recipient_requires_single_enter(&idle, "worker-a"));
-    assert!(!recipient_allows_explicit_queue_flush(&idle, "worker-a"));
-    let busy = serde_json::json!({
-        "agents": {
-            "worker-a": {"provider": "pi", "status": "busy"}
-        }
-    });
-    // Working native CLIs queue the same single-Enter input; no idle admission.
-    assert!(recipient_requires_single_enter(&busy, "worker-a"));
-    assert!(!recipient_allows_explicit_queue_flush(&busy, "worker-a"));
-}
 
 #[test]
 fn pi_clone_is_fresh_and_fork_is_not_clone() {

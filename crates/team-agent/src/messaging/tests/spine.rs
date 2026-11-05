@@ -8,83 +8,11 @@ use crate::transport::test_support::OfflineTransport;
 // SUBDIRECTORY or SIBLING of the workspace. The current substring `.contains()` answers
 // both (a subdir/sibling string contains the workspace as a substring). leader_panes.py
 // requires EXACT canonical equality.
-#[test]
-fn p2_trust_refuses_subdirectory_and_sibling_of_workspace() {
-    let ws = tmp_ws("trustsubsib");
-    let canonical = std::fs::canonicalize(&ws).unwrap();
-    let log = EventLog::new(&ws);
-    let t = NoopTransport;
-    let pane = PaneId::new("%7");
-    let canon = canonical.to_string_lossy().to_string();
-
-    let subdir = format!("Allow Codex to write to {canon}/subproject ?");
-    let s = attempt_trust_auto_answer(
-        &canonical,
-        &t,
-        Some(&pane),
-        &subdir,
-        &PaneWidthQuery::Ok { pane_width: 200 },
-        &log,
-    )
-    .unwrap();
-    assert!(
-        !s.answered,
-        "a SUBDIRECTORY of the workspace must NOT auto-answer trust"
-    );
-    assert_eq!(s.reason, "workspace_dir_mismatch");
-
-    let sibling = format!("Allow Codex to write to {canon}-backup ?");
-    let sib = attempt_trust_auto_answer(
-        &canonical,
-        &t,
-        Some(&pane),
-        &sibling,
-        &PaneWidthQuery::Ok { pane_width: 200 },
-        &log,
-    )
-    .unwrap();
-    assert!(
-        !sib.answered,
-        "a SIBLING (<ws>-backup) must NOT auto-answer trust"
-    );
-    assert_eq!(sib.reason, "workspace_dir_mismatch");
-}
 
 // P1 — owner-gate worker bypass: sender == custom leader_id (state.leader.id) or the
 // 'Leader' literal must NOT bypass (state.py worker_sender_bypasses_owner_gate).
-#[test]
-fn p2_owner_bypass_rejects_custom_leader_id_and_capital_leader() {
-    let ws = tmp_ws("bypassid");
-    let log = EventLog::new(&ws);
-    let target = MessageTarget::Single("leader".to_string());
-
-    let s1 = serde_json::json!({"leader":{"id":"boss"},"agents":{"boss":{}}});
-    assert!(
-        !apply_worker_sender_bypass(&s1, Some("boss"), &target, None, &log).unwrap(),
-        "sender == custom leader id must not bypass the owner gate"
-    );
-    let s2 = serde_json::json!({"agents":{"Leader":{}}});
-    assert!(
-        !apply_worker_sender_bypass(&s2, Some("Leader"), &target, None, &log).unwrap(),
-        "'Leader' literal must not bypass"
-    );
-}
 
 // P1 — owner-gate bypass honors the TEAM_AGENT_ID env identity gate: set and != sender → deny.
-#[test]
-#[serial_test::serial(env)]
-fn p2_owner_bypass_denies_on_env_agent_id_mismatch() {
-    let _g = ENV_LOCK_MSG.lock().unwrap_or_else(|p| p.into_inner());
-    let _e = EnvGuardMsg::set("TEAM_AGENT_ID", Some("other"));
-    let ws = tmp_ws("bypassenv");
-    let log = EventLog::new(&ws);
-    let target = MessageTarget::Single("leader".to_string());
-    let s = serde_json::json!({"agents":{"w1":{}}});
-    assert!(
-        !apply_worker_sender_bypass(&s, Some("w1"), &target, None, &log).unwrap(),
-        "TEAM_AGENT_ID set and != sender must deny the bypass"
-    );
-}
 
 // P1 — classify_agent_activity must read current_command, stale last_output, multiline /
 // Codex idle prompts, and Thinking/codex-spinner working indicators
@@ -95,40 +23,6 @@ fn p2_owner_bypass_denies_on_env_agent_id_mismatch() {
 // `working` anywhere in the scrollback. Pre-fix rfind across the whole
 // Tail(40) buffer is the macmini假阳 root cause (historical Working tokens
 // out-positioning a live idle composer).
-#[test]
-fn p2_classify_activity_reads_command_stale_and_prompts() {
-    let st = serde_json::json!({});
-    // (1) non-provider current_command → uncertain 0.75 (current drops command → 0.5).
-    let a = classify_agent_activity(&st, "", false, Some("vim"), None);
-    assert_eq!((a.status, a.confidence), (ActivityStatus::Uncertain, 0.75));
-    // (2) stale last_output (≥ stuck_timeout) → stuck 0.85.
-    let stale = (chrono::Utc::now() - chrono::Duration::seconds(400)).to_rfc3339();
-    let b = classify_agent_activity(&st, "", false, None, Some(&stale));
-    assert_eq!((b.status, b.confidence), (ActivityStatus::Stuck, 0.85));
-    // (3) embedded multiline idle prompt (Codex ❯ not on its own trimmed line) → idle 0.9.
-    let c = classify_agent_activity(&st, "some line\n❯\nmore", false, None, None);
-    assert_eq!((c.status, c.confidence), (ActivityStatus::Idle, 0.9));
-    // (4) 'Thinking' working indicator in the bottom active region → working 0.9.
-    let d = classify_agent_activity(&st, "Thinking about it", false, None, None);
-    assert_eq!((d.status, d.confidence), (ActivityStatus::Working, 0.9));
-    // (5) E47 amendment: bare lowercase 'working on it' is NOT a structural
-    // spinner marker; the live codex spinner is `• Working (Ns · esc to
-    // interrupt)`. Treat as no-decisive-signal → Uncertain. The pre-fix
-    // expectation here is exactly the macmini假阳 shape — a stale 'working'
-    // token (without the parenthesised seconds + esc-to-interrupt tail) is
-    // either scrollback residue or unrelated text, not a live working
-    // indicator. To assert the Working path use the structural codex shape.
-    let e = classify_agent_activity(&st, "working on it", false, None, None);
-    assert_eq!((e.status, e.confidence), (ActivityStatus::Uncertain, 0.5));
-    // (5b) E47 structural Working: a real codex live spinner in the bottom
-    // active region must still classify Working 0.9.
-    let e_struct =
-        classify_agent_activity(&st, "• Working (12s · esc to interrupt)", false, None, None);
-    assert_eq!(
-        (e_struct.status, e_struct.confidence),
-        (ActivityStatus::Working, 0.9)
-    );
-}
 
 // P1 — scheduler dispatch must be exhaustive: an unknown kind surfaces an error, not a
 // silent {ok:false} (scheduler.py: 'unknown scheduled event kind: <kind>').
@@ -149,9 +43,6 @@ impl Transport for DeliverOkTransport {
     fn kind(&self) -> BackendKind {
         BackendKind::Tmux
     }
-    fn supports_owned_native_input(&self) -> bool {
-        true
-    }
     fn spawn_first(
         &self,
         _s: &SessionName,
@@ -171,25 +62,6 @@ impl Transport for DeliverOkTransport {
         _e: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
         unimplemented!("not reached in delivery")
-    }
-    fn inject(
-        &self,
-        _t: &Target,
-        _p: &InjectPayload,
-        _s: Key,
-        _b: bool,
-    ) -> Result<InjectReport, TransportError> {
-        assert!(crate::transport::native_input::current_request().is_none(),
-            "ordinary sends must use v0.5.113 direct input, not pre-paste idle admission");
-        Ok(InjectReport {
-            stage_reached: crate::transport::InjectStage::Submit,
-            inject_verification: crate::transport::InjectVerification::CaptureContainsToken,
-            submit_verification:
-                crate::transport::SubmitVerification::EnterSentWithoutPlaceholderCheck,
-            turn_verification: crate::transport::TurnVerification::NotYetObserved,
-            attempts: 1,
-            submit_diagnostics: None,
-        })
     }
     fn send_keys(&self, _t: &Target, _k: &[Key]) -> Result<(), TransportError> {
         Ok(())
@@ -215,70 +87,14 @@ impl Transport for DeliverOkTransport {
     fn list_windows(&self, _s: &SessionName) -> Result<Vec<WindowName>, TransportError> {
         Ok(Vec::new())
     }
-    fn set_session_env(
-        &self,
-        _s: &SessionName,
-        _k: &str,
-        _v: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        Ok(SetEnvOutcome::Applied)
-    }
     fn kill_session(&self, _s: &SessionName) -> Result<(), TransportError> {
         Ok(())
     }
     fn kill_window(&self, _t: &Target) -> Result<(), TransportError> {
         Ok(())
     }
-    fn attach_session(&self, _s: &SessionName) -> Result<AttachOutcome, TransportError> {
-        Ok(AttachOutcome::Attached)
-    }
 }
 
-fn set_message_status(store: &MessageStore, message_id: &str, status: &str) {
-    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-    conn.execute(
-        "update messages set status = ?2 where message_id = ?1",
-        sql_params![message_id, status],
-    )
-    .unwrap();
-}
-fn message_status_of(store: &MessageStore, message_id: &str) -> String {
-    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-    conn.query_row(
-        "select status from messages where message_id = ?1",
-        sql_params![message_id],
-        |r| r.get::<_, String>(0),
-    )
-    .unwrap()
-}
-fn scheduled_status_of(store: &MessageStore, id: i64) -> String {
-    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-    conn.query_row(
-        "select status from scheduled_events where id = ?1",
-        [id],
-        |r| r.get::<_, String>(0),
-    )
-    .unwrap()
-}
-fn seed_agent_health(store: &MessageStore, agent_id: &str, status: &str) {
-    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-    conn.execute(
-        "insert into agent_health(owner_team_id, agent_id, status, last_output_at, context_usage_pct, current_task_id, updated_at) \
-         values (null, ?1, ?2, null, null, null, ?3)",
-        sql_params![agent_id, status, chrono::Utc::now().to_rfc3339()],
-    )
-    .unwrap();
-}
-fn seed_event_due(store: &MessageStore, kind: &str, due_at: &str, payload: &str) -> i64 {
-    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-    conn.execute(
-        "insert into scheduled_events(owner_team_id, due_at, target, kind, payload_json, status, created_at) \
-         values (null, ?1, 't', ?2, ?3, 'pending', ?1)",
-        sql_params![due_at, kind, payload],
-    )
-    .unwrap();
-    conn.last_insert_rowid()
-}
 fn read_event_log(ws: &Path) -> Vec<serde_json::Value> {
     let path = crate::model::paths::logs_dir(ws).join("events.jsonl");
     match std::fs::read_to_string(&path) {
@@ -356,157 +172,3 @@ fn read_event_log(ws: &Path) -> Vec<serde_json::Value> {
 // The authoritative provider JSONL classify is wired in coordinator/tick.rs
 // (jsonl_activity_for_agent); these unit tests pin the TUI fallback layer.
 // ═════════════════════════════════════════════════════════════════════════════
-
-#[test]
-fn e47_codex_idle_with_historical_working_in_scrollback_is_idle_not_stuck_or_working() {
-    // Exact macmini repro shape from the architect locate (E47).
-    let scrollback = "• Working (514s · esc to interrupt)\n\
-                      tool call 1\n\
-                      tool call 2\n\
-                      ─ Worked for 8m 34s ─\n\
-                      › Run /review\n\
-                      ❯ ";
-    let st = serde_json::json!({});
-    let a = classify_agent_activity(&st, scrollback, false, None, None);
-    assert_eq!(
-        a.status,
-        ActivityStatus::Idle,
-        "E47 (RED-1): codex idle worker whose scrollback still carries \
-         historical `• Working (514s · esc to interrupt)` must classify IDLE \
-         (bottom active region is `❯`+`› Run /review` = idle composer). \
-         pre-fix: Stuck/Working via rfind-recency. Got {a:?}"
-    );
-}
-
-#[test]
-fn e47_past_tense_worked_for_is_not_stale_working_indicator() {
-    // RED-2: past-tense `Worked for` summary line must NOT trigger
-    // working_seconds Stuck. The pre-fix scanned the whole buffer and would
-    // match the embedded `8m 34s ─` against `working (` if formatted slightly
-    // differently — but more importantly this test pins the "past-tense
-    // summary is idle context" semantics.
-    let scrollback = "─ Worked for 8m 34s ─\n❯ ";
-    let st = serde_json::json!({});
-    let a = classify_agent_activity(&st, scrollback, false, None, None);
-    assert_ne!(
-        a.status,
-        ActivityStatus::Stuck,
-        "E47 (RED-2): past-tense `Worked for 8m 34s` must NOT trigger \
-         stale_working_indicator Stuck. Got {a:?}"
-    );
-    assert_eq!(
-        a.status,
-        ActivityStatus::Idle,
-        "E47 (RED-2): bottom `❯` composer = idle. Got {a:?}"
-    );
-}
-
-#[test]
-fn e47_claude_idle_with_historical_spinner_classifies_idle() {
-    // RED-3: claude idle worker; historical spinner shape (`✶` per
-    // adapter.rs:875-876) earlier in the buffer (>= 3 non-empty lines deep),
-    // bottom composer is idle (`›` glyph variant or `> ` claude prompt).
-    // The bottom active region (last 3 non-empty lines) has NO spinner.
-    let scrollback = "✶ Working on plan\n\
-                      tool 1\n\
-                      tool 2\n\
-                      assistant reply text\n\
-                      summary line A\n\
-                      summary line B\n\
-                      › Continue?";
-    let st = serde_json::json!({});
-    let a = classify_agent_activity(&st, scrollback, false, None, None);
-    assert_eq!(
-        a.status,
-        ActivityStatus::Idle,
-        "E47 (RED-3): claude idle worker — historical ✶ above, idle `›` \
-         below — must classify IDLE. Got {a:?}"
-    );
-}
-
-#[test]
-fn e47_codex_live_spinner_in_bottom_active_region_classifies_working() {
-    // RED-4 (defence vs over-tightening 假阴): a TRULY busy codex worker
-    // whose bottom active region carries the live spinner must still be
-    // Working. No idle composer present.
-    let scrollback = "tool call x\nassistant response so far\n• Working (12s · esc to interrupt)";
-    let st = serde_json::json!({});
-    let a = classify_agent_activity(&st, scrollback, false, None, None);
-    assert_eq!(
-        a.status,
-        ActivityStatus::Working,
-        "E47 (RED-4): live codex spinner in bottom active region must \
-         classify Working. Got {a:?}"
-    );
-}
-
-#[test]
-fn e47_claude_live_working_in_bottom_active_region_classifies_working() {
-    // RED-5: a TRULY busy claude worker showing `✶ Working` at the bottom
-    // active region must be Working — even without the `(Ns)` codex shape.
-    let scrollback = "earlier output\nmore output\n✶ Working through the request";
-    let st = serde_json::json!({});
-    let a = classify_agent_activity(&st, scrollback, false, None, None);
-    assert_eq!(
-        a.status,
-        ActivityStatus::Working,
-        "E47 (RED-5): claude ✶ Working in bottom active region → Working. \
-         Got {a:?}"
-    );
-}
-
-#[test]
-fn worker_state_claude_code_busy_signal_within_bottom_five_classifies_working() {
-    let scrollback = "older output\n\
-                      ✻ Searching files\n\
-                      Reading src/lib.rs\n\
-                      tool progress\n\
-                      status line\n\
-                      › Continue?\n\
-                      ❯ ";
-    let st = serde_json::json!({});
-    let a = classify_agent_activity(&st, scrollback, false, Some("claude"), None);
-    assert_eq!(
-        a.status,
-        ActivityStatus::Working,
-        "Claude Code busy signal inside the bottom five active lines must \
-         classify Working even when an idle prompt glyph is also visible. Got {a:?}"
-    );
-}
-
-#[test]
-fn worker_state_historical_claude_code_busy_above_bottom_five_stays_idle() {
-    let scrollback = "✻ Searching old result\n\
-                      historical tool output\n\
-                      line 1\n\
-                      line 2\n\
-                      line 3\n\
-                      line 4\n\
-                      › Continue?\n\
-                      ❯ ";
-    let st = serde_json::json!({});
-    let a = classify_agent_activity(&st, scrollback, false, Some("claude"), None);
-    assert_eq!(
-        a.status,
-        ActivityStatus::Idle,
-        "Claude Code busy signal above the bottom five active lines is \
-         scrollback history and must not override the live idle prompt. Got {a:?}"
-    );
-}
-
-#[test]
-fn e47_iron_law_no_signal_in_bottom_region_stays_uncertain_not_idle() {
-    // Defence: IRON LAW (activity.rs:3 / bug-071/077/085). When the bottom
-    // active region has no spinner AND no `❯`/`›` AND no other decisive
-    // signal, classify_agent_activity falls through to no_decisive_signal →
-    // Uncertain — NEVER silently to Idle.
-    let scrollback = "some neutral text\nmore neutral text\nstill nothing decisive";
-    let st = serde_json::json!({});
-    let a = classify_agent_activity(&st, scrollback, false, None, None);
-    assert_eq!(
-        a.status,
-        ActivityStatus::Uncertain,
-        "E47 IRON LAW guard: bottom region carries no spinner and no idle \
-         composer → Uncertain, never silently Idle. Got {a:?}"
-    );
-}

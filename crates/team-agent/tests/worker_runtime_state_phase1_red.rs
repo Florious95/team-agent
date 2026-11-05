@@ -12,99 +12,18 @@
 
 use std::path::Path;
 
-use team_agent::messaging::{ActivityStatus, WorkerRuntimeState};
 
-#[test]
-fn enum_wire_round_trip() {
-    for state in [
-        WorkerRuntimeState::Dead,
-        WorkerRuntimeState::Busy,
-        WorkerRuntimeState::Blocked,
-        WorkerRuntimeState::ProbablyIdle,
-        WorkerRuntimeState::Unknown,
-    ] {
-        let wire = state.as_wire();
-        let parsed = WorkerRuntimeState::parse_wire(wire);
-        assert_eq!(parsed, state, "round trip {wire}");
-    }
-}
 
-#[test]
-fn enum_unknown_wire_falls_back_to_unknown() {
-    // CR R4: unknown literals → Unknown (forward compatibility).
-    assert_eq!(
-        WorkerRuntimeState::parse_wire("FUTURE_VARIANT"),
-        WorkerRuntimeState::Unknown
-    );
-    assert_eq!(
-        WorkerRuntimeState::parse_wire(""),
-        WorkerRuntimeState::Unknown
-    );
-}
 
-#[test]
-fn enum_serde_other_catches_unknown_json() {
-    // CR R4: serde-side forward compat for JSON readers.
-    let parsed: WorkerRuntimeState = serde_json::from_value(serde_json::json!("FUTURE")).unwrap();
-    assert_eq!(parsed, WorkerRuntimeState::Unknown);
-}
 
-#[test]
-fn blocks_automatic_dispatch_iron_law() {
-    // ONLY ProbablyIdle is safe for automatic dispatch.
-    assert!(!WorkerRuntimeState::ProbablyIdle.blocks_automatic_dispatch());
-    for blocked in [
-        WorkerRuntimeState::Dead,
-        WorkerRuntimeState::Busy,
-        WorkerRuntimeState::Blocked,
-        WorkerRuntimeState::Unknown,
-    ] {
-        assert!(
-            blocked.blocks_automatic_dispatch(),
-            "{} must block automatic dispatch",
-            blocked.as_wire()
-        );
-    }
-}
 
-#[test]
-fn is_idle_candidate_iron_law() {
-    // Iron Law (bug-071/077/085): Unknown is NEVER an idle candidate.
-    assert!(WorkerRuntimeState::ProbablyIdle.is_idle_candidate());
-    for not_idle in [
-        WorkerRuntimeState::Dead,
-        WorkerRuntimeState::Busy,
-        WorkerRuntimeState::Blocked,
-        WorkerRuntimeState::Unknown,
-    ] {
-        assert!(
-            !not_idle.is_idle_candidate(),
-            "{} must NOT be idle candidate",
-            not_idle.as_wire()
-        );
-    }
-}
 
-#[test]
-fn from_activity_maps_stuck_and_uncertain_to_unknown() {
-    // Stuck / Uncertain MUST map to Unknown (never silently to Idle).
-    assert_eq!(
-        WorkerRuntimeState::from_activity(ActivityStatus::Stuck),
-        WorkerRuntimeState::Unknown
-    );
-    assert_eq!(
-        WorkerRuntimeState::from_activity(ActivityStatus::Uncertain),
-        WorkerRuntimeState::Unknown
-    );
-    assert_eq!(
-        WorkerRuntimeState::from_activity(ActivityStatus::Idle),
-        WorkerRuntimeState::ProbablyIdle
-    );
-    assert_eq!(
-        WorkerRuntimeState::from_activity(ActivityStatus::Working),
-        WorkerRuntimeState::Busy
-    );
-}
+
+
+
+
+
+
 
 /// CR R5 grep guard, re-pointed after M3 (R-M3: the coordinator's `sync_agent_health` in
 /// `src/coordinator/tick.rs` was retired, so the guard now covers every runtime source): no

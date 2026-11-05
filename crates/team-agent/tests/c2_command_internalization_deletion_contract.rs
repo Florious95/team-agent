@@ -23,7 +23,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::params;
 use serde_json::{json, Value};
-use team_agent::message_store::MessageStore;
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 
 const DELETED_COMMANDS: &[&str] = &[
@@ -573,30 +572,7 @@ impl Case {
         save_runtime_state(&self.workspace, &state).expect("write schema issue state");
     }
 
-    fn insert_result_row(
-        &self,
-        result_id: &str,
-        task_id: &str,
-        agent_id: &str,
-        envelope: Value,
-        status: &str,
-    ) {
-        let store = MessageStore::open(&self.workspace).expect("open message store");
-        let conn = team_agent::db::schema::open_db(store.db_path()).expect("open team.db");
-        conn.execute(
-            "insert into results(result_id, owner_team_id, task_id, agent_id, envelope, status, created_at)
-             values (?1, 'current', ?2, ?3, ?4, ?5, ?6)",
-            params![
-                result_id,
-                task_id,
-                agent_id,
-                envelope.to_string(),
-                status,
-                "2026-07-12T00:00:00Z"
-            ],
-        )
-        .expect("insert result row");
-    }
+
 }
 
 impl Drop for Case {

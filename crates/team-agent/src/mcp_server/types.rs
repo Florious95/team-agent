@@ -30,9 +30,6 @@ pub enum McpError {
     /// State read/write failed (delegated to step 5 persist).
     #[error("state: {0}")]
     State(#[from] crate::state::StateError),
-    /// Message store failed (delegated to step 7).
-    #[error("message_store: {0}")]
-    MessageStore(#[from] crate::message_store::MessageStoreError),
     /// Event log append failed (delegated to step 4).
     #[error("event_log: {0}")]
     EventLog(#[from] crate::event_log::EventLogError),
@@ -273,14 +270,6 @@ pub type ToolResult = Result<ToolOk, ToolError>;
 /// broadcast → the compacted delegate result.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SendOutcome {
-    /// `{status:"accepted", delivery_pending:true, poll_via:"team-agent inbox <id>",
-    /// message_id:<id>}` — worker recipient, `tools.py:177-182`.
-    WorkerAccepted {
-        message_id: String,
-        /// Byte-stable `"team-agent inbox <message_id>"`.
-        poll_via: String,
-        warning: Option<String>,
-    },
     /// Compacted delegate result (leader / `*` / broadcast / fanout).
     Direct(ToolOk),
 }
@@ -290,21 +279,6 @@ impl SendOutcome {
     /// the [`ToolResult`] `Ok` body.
     pub fn to_value(&self) -> Value {
         match self {
-            SendOutcome::WorkerAccepted {
-                message_id,
-                poll_via,
-                warning,
-            } => {
-                let mut obj = serde_json::Map::new();
-                obj.insert("status".to_string(), Value::String("accepted".to_string()));
-                obj.insert("delivery_pending".to_string(), Value::Bool(true));
-                obj.insert("poll_via".to_string(), Value::String(poll_via.clone()));
-                obj.insert("message_id".to_string(), Value::String(message_id.clone()));
-                if let Some(warning) = warning {
-                    obj.insert("warning".to_string(), Value::String(warning.clone()));
-                }
-                Value::Object(obj)
-            }
             SendOutcome::Direct(ok) => Value::Object(ok.fields.clone()),
         }
     }
@@ -375,17 +349,6 @@ pub struct NormalizedNextAction {
     pub description: String,
 }
 
-/// `get_visible_peers` result (`tools.py:226-247`): the C16 scope-filtered peer list.
-/// Other teams and dead/stopped agents are filtered server-side and never named.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VisiblePeers {
-    /// Sorted live peer ids within the sender's spawn-time owner-team scope.
-    pub peers: Vec<AgentId>,
-    /// The resolving team scope (`None` when no owner team env is set).
-    pub sender_team_id: Option<TeamKey>,
-    /// Always [`Scope::Team`] for this query.
-    pub scope: Scope,
-}
 
 /// Summary of one stdio server run (`main`'s loop accounting) — frames in/out, the
 /// notification skips, and whether the loop exited on EOF cleanly. Rich return so a

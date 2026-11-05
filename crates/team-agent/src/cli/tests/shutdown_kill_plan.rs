@@ -5,11 +5,7 @@
 //! 集成面由 tests/b5_leader_terminal_kill_red.rs 的真 tmux 契约覆盖,此处锁纯决策 + 4 反向 case。
 
 use crate::cli::lifecycle_port::{sessions_to_kill, KillDecision};
-use crate::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport, Key,
-    PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome, SpawnResult, Target, Transport,
-    TransportError, WindowName,
-};
+use crate::transport::{ BackendKind, CaptureRange, CapturedText, Key, PaneField, PaneId, PaneInfo, SessionName, SpawnResult, Target, Transport, TransportError, WindowName };
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -1070,15 +1066,6 @@ impl Transport for CleanShutdownTransport {
         unimplemented!("shutdown test does not spawn")
     }
 
-    fn inject(
-        &self,
-        _target: &Target,
-        _payload: &InjectPayload,
-        _submit: Key,
-        _bracketed: bool,
-    ) -> Result<InjectReport, TransportError> {
-        unimplemented!("shutdown test does not inject")
-    }
 
     fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
         Ok(())
@@ -1129,14 +1116,6 @@ impl Transport for CleanShutdownTransport {
         Ok(Vec::new())
     }
 
-    fn set_session_env(
-        &self,
-        _session: &SessionName,
-        _key: &str,
-        _value: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        Ok(SetEnvOutcome::Applied)
-    }
 
     fn kill_session(&self, session: &SessionName) -> Result<(), TransportError> {
         if let Some(probe) = self.probe_timeout_kind {
@@ -1162,10 +1141,6 @@ impl Transport for CleanShutdownTransport {
         }
     }
 
-    fn kill_server(&self) -> Result<(), TransportError> {
-        *self.kill_server_called.lock().unwrap() = true;
-        Ok(())
-    }
 
     fn kill_window(&self, target: &Target) -> Result<(), TransportError> {
         self.killed_window_targets
@@ -1183,9 +1158,6 @@ impl Transport for CleanShutdownTransport {
         Ok(())
     }
 
-    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
-        Ok(AttachOutcome::Attached)
-    }
 }
 
 #[test]

@@ -2328,12 +2328,7 @@ mod tests {
     use crate::model::enums::PaneLiveness;
     use crate::model::ids::{LeaderSessionUuid, TeamKey};
     use crate::provider::{Provider, COPILOT_READY_MARKER, COPILOT_TRUST_PROMPT_MARKER};
-    use crate::transport::{
-        AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-        InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName,
-        SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-        TurnVerification, WindowName,
-    };
+    use crate::transport::{ BackendKind, CaptureRange, CapturedText, InjectStage, Key, PaneField, PaneId, PaneInfo, SessionName, SpawnResult, Target, Transport, TransportError, WindowName };
 
     use super::{
         clear_managed_leader_receiver_pane, ensure_managed_provider_live_after_attach,
@@ -2478,22 +2473,6 @@ mod tests {
             )))
         }
 
-        fn inject(
-            &self,
-            _target: &Target,
-            _payload: &InjectPayload,
-            _submit: Key,
-            _bracketed: bool,
-        ) -> Result<InjectReport, TransportError> {
-            Ok(InjectReport {
-                stage_reached: InjectStage::Submit,
-                inject_verification: InjectVerification::CaptureContainsToken,
-                submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
-                turn_verification: TurnVerification::NotRequired,
-                attempts: 1,
-                submit_diagnostics: None,
-            })
-        }
 
         fn send_keys(&self, target: &Target, keys: &[Key]) -> Result<(), TransportError> {
             match self.sent.lock() {
@@ -2559,14 +2538,6 @@ mod tests {
             }
         }
 
-        fn set_session_env(
-            &self,
-            _session: &SessionName,
-            _key: &str,
-            _value: &str,
-        ) -> Result<SetEnvOutcome, TransportError> {
-            Ok(SetEnvOutcome::Applied)
-        }
 
         fn set_window_option(
             &self,
@@ -2596,10 +2567,6 @@ mod tests {
             Ok(())
         }
 
-        fn kill_server(&self) -> Result<(), TransportError> {
-            self.record_kill("kill_server");
-            Ok(())
-        }
 
         fn kill_session(&self, session: &SessionName) -> Result<(), TransportError> {
             self.record_kill(&format!("kill_session:{}", session.as_str()));
@@ -2615,11 +2582,6 @@ mod tests {
             Ok(())
         }
 
-        fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
-            Ok(AttachOutcome::Unsupported {
-                reason: "not used by startup-prompt test".to_string(),
-            })
-        }
     }
 
     fn managed_spawn_result() -> SpawnResult {

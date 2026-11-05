@@ -25,7 +25,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use team_agent::tmux_backend::{CommandOutput, CommandRunner, RealCommandRunner, TmuxBackend};
-use team_agent::transport::{InjectPayload, Key, PaneId, Target, Transport};
+use team_agent::transport::{ Key, PaneId, Target, Transport };
 
 /// 判据:注入后 reader 是否收到 `GOT:[<msg>]`(=消息真被提交,Enter 没被吃)。
 const MSG: &str = "copymode-inject-proof-marker";
@@ -111,19 +111,13 @@ impl Drop for CopymodeFixture {
     }
 }
 
-/// 用真实 tmux 驱动 `TmuxBackend::inject`(真实 CommandRunner)。
-/// `bracketed`:copy-mode 场景用 false(不送 Escape,还原"Enter 被吃"的缺陷路径;
-/// bracketed=true 时 inject 会送 Escape,恰好退出 copy-mode 掩盖缺陷)。
-fn run_inject(socket: &str, pane: &str, payload: &str, bracketed: bool) {
-    let runner = RealCommandRunner;
-    // TmuxBackend 直接持真实 socket——与产品 transport 同构。
-    let backend = TmuxBackend::with_runner_for_tmux_endpoint(Box::new(runner), socket);
-    let _ = backend.inject(
-        &Target::Pane(PaneId::new(pane)),
-        &InjectPayload::Text(payload.to_string()),
-        Key::Enter,
-        bracketed,
-    );
+/// Seed real tmux input, then exercise the retained transport submit operation.
+fn submit_seeded_input(socket: &str, pane: &str, payload: &str) {
+    // Fixture setup seeds raw input; the retained transport method owns mode exit and submit.
+    assert!(tmux_ok(socket, &["set-buffer", payload]), "seed input buffer");
+    assert!(tmux_ok(socket, &["paste-buffer", "-d", "-t", pane]), "seed pane input");
+    let backend = TmuxBackend::with_runner_for_tmux_endpoint(Box::new(RealCommandRunner), socket);
+    backend.send_keys(&Target::Pane(PaneId::new(pane)), &[Key::Enter]).expect("submit seeded input");
 }
 
 /// 🔴 RED:copy-mode 下注入,消息必须**确实被提交**(reader 收到 GOT:[msg])。
@@ -133,7 +127,7 @@ fn inject_submits_message_when_pane_in_copy_mode() {
     let fixture = CopymodeFixture::new("submit");
     // 先正常注入一次(对照:证明 reader 工作)——单行无尾换行,只有 Enter 能提交。
     let normal_msg = format!("{MSG}-NORMAL");
-    run_inject(&fixture.socket, &fixture.pane, &normal_msg, false);
+    submit_seeded_input(&fixture.socket, &fixture.pane, &normal_msg);
     std::thread::sleep(std::time::Duration::from_millis(800));
     assert_eq!(
         fixture.submitted_count(&normal_msg),
@@ -164,7 +158,7 @@ fn inject_submits_message_when_pane_in_copy_mode() {
 
     // copy-mode 下注入(单行无尾换行):修复后应先退 copy-mode 再 Enter,消息被提交。
     let cm_msg = format!("{MSG}-COPYMODE");
-    run_inject(&fixture.socket, &fixture.pane, &cm_msg, false);
+    submit_seeded_input(&fixture.socket, &fixture.pane, &cm_msg);
     std::thread::sleep(std::time::Duration::from_millis(1000));
 
     // 判据:reader 收到 GOT:[cm_msg] 说明 Enter 真提交了(没被 copy-mode 吃)。
@@ -183,7 +177,7 @@ fn inject_submits_message_when_pane_in_copy_mode() {
 fn inject_submits_message_in_normal_mode_positive_control() {
     let fixture = CopymodeFixture::new("normal");
     let msg = format!("{MSG}-POSCTRL");
-    run_inject(&fixture.socket, &fixture.pane, &msg, false);
+    submit_seeded_input(&fixture.socket, &fixture.pane, &msg);
     std::thread::sleep(std::time::Duration::from_millis(800));
     assert_eq!(
         fixture.submitted_count(&msg),

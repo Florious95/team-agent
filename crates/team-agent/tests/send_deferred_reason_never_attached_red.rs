@@ -24,13 +24,14 @@ fn never_attached_leader_reply_is_stored_with_honest_physical_failure() {
         Some(TeamKey::new("current")),
     );
     let value = tools
-        .send_message(
+        .send_message_with_presentation(
             &MessageTarget::Single("leader".into()),
             "offline reply",
             None,
             None,
             None,
-        )
+
+        None, None)
         .unwrap()
         .to_value();
     assert_eq!(value["status"], "stored");
@@ -108,26 +109,28 @@ fn attaching_a_leader_does_not_replay_old_inbox_records() {
         Some(TeamKey::new("current")),
     );
     tools
-        .send_message(
+        .send_message_with_presentation(
             &MessageTarget::Single("leader".into()),
             "old offline reply",
             None,
             None,
             None,
-        )
+
+        None, None)
         .unwrap();
     // R-M1c: compare every inbox file (segment layout is the store's choice).
     let before = fixture.inbox_bytes();
     assert!(!before.is_empty());
     fixture.set_state(&original);
     let live = tools
-        .send_message(
+        .send_message_with_presentation(
             &MessageTarget::Single("leader".into()),
             "new live reply",
             None,
             None,
             None,
-        )
+
+        None, None)
         .unwrap()
         .to_value();
     assert_eq!(live["status"], "sent");

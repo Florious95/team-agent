@@ -5,12 +5,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use super::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
-};
+use super::{ BackendKind, CaptureRange, CapturedText, InjectStage, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName, SpawnResult, Target, Transport, TransportError, WindowName };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnRecord {
@@ -435,16 +430,7 @@ impl OfflineTransport {
         })
     }
 
-    fn inject_report() -> InjectReport {
-        InjectReport {
-            stage_reached: InjectStage::Submit,
-            inject_verification: InjectVerification::CaptureContainsToken,
-            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
-            turn_verification: TurnVerification::NotYetObserved,
-            attempts: 1,
-            submit_diagnostics: None,
-        }
-    }
+
 }
 
 impl Transport for OfflineTransport {
@@ -501,25 +487,6 @@ impl Transport for OfflineTransport {
         self.spawn_result("spawn_split", session, window, argv, cwd)
     }
 
-    fn inject(
-        &self,
-        target: &Target,
-        payload: &InjectPayload,
-        _submit: Key,
-        _bracketed: bool,
-    ) -> Result<InjectReport, TransportError> {
-        self.with_state(|state| {
-            state.calls.push("inject");
-            state.inject_targets.push(target.clone());
-            state.inject_payloads.push(match payload {
-                InjectPayload::Empty => String::new(),
-                InjectPayload::Text(text) | InjectPayload::TextSkipConsumptionPoll(text) => {
-                    text.clone()
-                }
-            });
-        });
-        Ok(Self::inject_report())
-    }
 
     fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
         self.record("send_keys");
@@ -676,15 +643,6 @@ impl Transport for OfflineTransport {
         Ok(())
     }
 
-    fn set_session_env(
-        &self,
-        _session: &SessionName,
-        _key: &str,
-        _value: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        self.record("set_session_env");
-        Ok(SetEnvOutcome::Applied)
-    }
 
     fn set_window_option(
         &self,
@@ -736,8 +694,4 @@ impl Transport for OfflineTransport {
         Ok(())
     }
 
-    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
-        self.record("attach_session");
-        Ok(AttachOutcome::Attached)
-    }
 }

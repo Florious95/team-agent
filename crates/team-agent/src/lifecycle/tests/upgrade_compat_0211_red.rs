@@ -24,16 +24,9 @@ use team_agent::db::schema::{initialize_schema, open_db, table_layout, SCHEMA_VE
 use team_agent::event_log::EventLog;
 use team_agent::lifecycle::restart::classify_restart_plan;
 use team_agent::lifecycle::{restart_with_transport, ResumeDecision, StartMode};
-use team_agent::message_store::MessageStore;
-use team_agent::messaging::delivery::deliver_pending_message;
 use team_agent::state::persist::save_runtime_state;
 use team_agent::state::selector::{resolve_active_team, SelectorMode};
-use team_agent::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
-};
+use team_agent::transport::{ BackendKind, CaptureRange, CapturedText, InjectStage, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName, SpawnResult, Target, Transport, TransportError, WindowName };
 
 const TEAM_KEY: &str = "upgrade-key";
 const LEGACY_NAME: &str = "legacy-name";
@@ -696,23 +689,6 @@ impl Transport for RecordingTransport {
         Ok(self.spawn_result(session, window, argv, env))
     }
 
-    fn inject(
-        &self,
-        target: &Target,
-        _payload: &InjectPayload,
-        _submit: Key,
-        _bracketed: bool,
-    ) -> Result<InjectReport, TransportError> {
-        self.injected.lock().unwrap().push(target.clone());
-        Ok(InjectReport {
-            stage_reached: InjectStage::Submit,
-            inject_verification: InjectVerification::CaptureContainsToken,
-            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
-            turn_verification: TurnVerification::NotYetObserved,
-            attempts: 1,
-            submit_diagnostics: None,
-        })
-    }
 
     fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
         Ok(())
@@ -731,7 +707,6 @@ impl Transport for RecordingTransport {
 
     fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
         match field {
-            PaneField::PaneWidth => Ok(Some("120".to_string())),
             _ => Ok(None),
         }
     }
@@ -762,14 +737,6 @@ impl Transport for RecordingTransport {
         Ok(Vec::new())
     }
 
-    fn set_session_env(
-        &self,
-        _session: &SessionName,
-        _key: &str,
-        _value: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        Ok(SetEnvOutcome::Applied)
-    }
 
     fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
         Ok(())
@@ -779,9 +746,6 @@ impl Transport for RecordingTransport {
         Ok(())
     }
 
-    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
-        Ok(AttachOutcome::Attached)
-    }
 }
 
 fn json_output(result: Result<team_agent::cli::CmdResult, team_agent::cli::CliError>) -> Value {
@@ -791,27 +755,7 @@ fn json_output(result: Result<team_agent::cli::CmdResult, team_agent::cli::CliEr
     }
 }
 
-fn owner_team_id_for_message(workspace: &Path, message_id: &str) -> Option<String> {
-    let store = MessageStore::open(workspace).unwrap();
-    let conn = open_db(store.db_path()).unwrap();
-    conn.query_row(
-        "select owner_team_id from messages where message_id=?1",
-        params![message_id],
-        |row| row.get(0),
-    )
-    .unwrap()
-}
 
-fn message_status(workspace: &Path, message_id: &str) -> Option<String> {
-    let store = MessageStore::open(workspace).unwrap();
-    let conn = open_db(store.db_path()).unwrap();
-    conn.query_row(
-        "select status from messages where message_id=?1",
-        params![message_id],
-        |row| row.get(0),
-    )
-    .unwrap()
-}
 
 fn events_text(workspace: &Path) -> String {
     std::fs::read_to_string(workspace.join(".team").join("logs").join("events.jsonl"))

@@ -31,18 +31,9 @@ use rusqlite::params;
 use serde_json::json;
 use team_agent::event_log::EventLog;
 use team_agent::lifecycle::launch_with_transport;
-use team_agent::message_store::MessageStore;
-use team_agent::messaging::delivery::deliver_pending_message;
-use team_agent::messaging::trust::attempt_trust_auto_answer;
-use team_agent::messaging::PaneWidthQuery;
 use team_agent::model::enums::{AuthMode, Provider};
 use team_agent::provider::{get_adapter, COPILOT_READY_MARKER, COPILOT_TRUST_PROMPT_MARKER};
-use team_agent::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
-    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
-    WindowName,
-};
+use team_agent::transport::{ BackendKind, CaptureRange, CapturedText, InjectStage, Key, PaneField, PaneId, PaneInfo, SessionName, SpawnResult, Target, Transport, TransportError, WindowName };
 use temp_workspace::TempWorkspace;
 
 const PROBE5_TRUST_PANE: &str = r#"> You are in /private/tmp/ta-subprep-SUB-PROBE-1-trust-startup.Ey2Xk6/teamdir
@@ -175,58 +166,7 @@ fn contract_a_own_workspace_trust_is_actionable_not_ready_and_foreign_is_pending
         "Contract A/N15: real Codex trust menu with `› 1. Yes, continue` is an actionable trust prompt, not Ready from a bare single-glyph marker"
     );
 
-    let root = tmp_dir("a-truncated-root");
-    let teamdir = root.join("teamdir");
-    std::fs::create_dir_all(&teamdir).unwrap();
-    let canonical_teamdir = std::fs::canonicalize(&teamdir).unwrap();
-    let own_tail = format!(
-        "Do you trust the contents of this directory?\n  directory: {}",
-        truncated_workspace_token(&canonical_teamdir)
-    );
-    let own_transport = RecordingTransport::new(vec![own_tail.to_string()]);
-    let own_log = EventLog::new(&root);
-    let own = attempt_trust_auto_answer(
-        &canonical_teamdir,
-        &own_transport,
-        Some(&PaneId::new("%7")),
-        &own_tail,
-        &PaneWidthQuery::Ok { pane_width: 80 },
-        &own_log,
-    )
-    .unwrap();
-    assert!(
-        own.answered,
-        "Contract A/#167: own-workspace matcher must accept platform-local Codex truncated directory display via the shared realpath/truncation matcher; canonical_teamdir={} tail={own_tail:?} got {own:?}",
-        canonical_teamdir.display()
-    );
-    assert_eq!(
-        own_transport.inject_count(),
-        1,
-        "Contract A: own trust answer is exactly one local Enter/inject action"
-    );
-
-    let foreign_transport = RecordingTransport::new(vec![PROBE5_TRUST_PANE.to_string()]);
-    let foreign = attempt_trust_auto_answer(
-        &canonical_teamdir,
-        &foreign_transport,
-        Some(&PaneId::new("%8")),
-        &format!(
-            "Do you trust the contents of this directory?\n> You are in {}",
-            foreign_workspace_path(&canonical_teamdir).display()
-        ),
-        &PaneWidthQuery::Ok { pane_width: 120 },
-        &own_log,
-    )
-    .unwrap();
-    assert!(
-        !foreign.answered && foreign.reason == "workspace_dir_mismatch",
-        "Contract A: foreign workspace trust prompt stays pending and is never auto-answered; got {foreign:?}"
-    );
-    assert_eq!(
-        foreign_transport.inject_count(),
-        0,
-        "Contract A: foreign trust prompt must not receive Enter"
-    );
+    // Retain current startup classification; the retired trust-injection helper is not recreated.
 }
 
 #[test]
@@ -537,23 +477,6 @@ impl Transport for RecordingTransport {
         Ok(self.spawn_result(session, window, argv, "into"))
     }
 
-    fn inject(
-        &self,
-        _target: &Target,
-        _payload: &InjectPayload,
-        _submit: Key,
-        _bracketed: bool,
-    ) -> Result<InjectReport, TransportError> {
-        self.state.lock().unwrap().inject_count += 1;
-        Ok(InjectReport {
-            stage_reached: InjectStage::Submit,
-            inject_verification: InjectVerification::CaptureContainsToken,
-            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
-            turn_verification: TurnVerification::NotYetObserved,
-            attempts: 1,
-            submit_diagnostics: None,
-        })
-    }
 
     fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
         Ok(())
@@ -577,7 +500,6 @@ impl Transport for RecordingTransport {
 
     fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
         match field {
-            PaneField::PaneWidth => Ok(Some("120".to_string())),
             _ => Ok(None),
         }
     }
@@ -613,14 +535,6 @@ impl Transport for RecordingTransport {
         Ok(self.state.lock().unwrap().windows.clone())
     }
 
-    fn set_session_env(
-        &self,
-        _session: &SessionName,
-        _key: &str,
-        _value: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        Ok(SetEnvOutcome::Applied)
-    }
 
     fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
         Ok(())
@@ -630,7 +544,4 @@ impl Transport for RecordingTransport {
         Ok(())
     }
 
-    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
-        Ok(AttachOutcome::Attached)
-    }
 }

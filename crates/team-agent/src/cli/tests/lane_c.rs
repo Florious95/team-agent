@@ -25,7 +25,7 @@ fn seed_status_state(state: serde_json::Value) -> std::path::PathBuf {
 #[test]
 fn status_team_is_leader_id_not_team_key() {
     let ws = seed_status_state(json!({"team": "TEAMKEY", "leader": {"id": "LEADERID"}}));
-    let v = status_port::status(&ws, /*compact=*/ false, /*detail=*/ true).expect("status");
+    let v = status_port::status_scoped(&ws, &crate::state::persist::load_runtime_state(&ws).expect("fixture runtime state"), None, /*compact=*/ false, /*detail=*/ true).expect("status");
     assert_eq!(
         v["team"],
         json!("LEADERID"),
@@ -44,7 +44,7 @@ fn status_team_is_leader_id_not_team_key() {
 #[test]
 fn status_coordinator_is_full_health_identity_shape() {
     let ws = tmp_workspace();
-    let v = status_port::status(&ws, false, true).expect("status");
+    let v = status_port::status_scoped(&ws, &crate::state::persist::load_runtime_state(&ws).expect("fixture runtime state"), None, false, true).expect("status");
     let coord = v["coordinator"].as_object().expect("coordinator dict");
     let order: Vec<&str> = coord.keys().map(String::as_str).collect();
     assert_eq!(
@@ -85,7 +85,7 @@ fn status_coordinator_is_full_health_identity_shape() {
 #[test]
 fn status_last_events_is_event_tail_not_status_full_placeholder() {
     let ws = tmp_workspace(); // no events.jsonl
-    let v = status_port::status(&ws, false, true).expect("status");
+    let v = status_port::status_scoped(&ws, &crate::state::persist::load_runtime_state(&ws).expect("fixture runtime state"), None, false, true).expect("status");
     assert_ne!(
             v["last_events"],
             json!([{"event": "status.full"}]),
@@ -106,7 +106,7 @@ fn status_last_events_is_event_tail_not_status_full_placeholder() {
 #[test]
 fn status_noncompact_has_no_detail_key() {
     let ws = tmp_workspace();
-    let v = status_port::status(&ws, /*compact=*/ false, /*detail=*/ true).expect("status");
+    let v = status_port::status_scoped(&ws, &crate::state::persist::load_runtime_state(&ws).expect("fixture runtime state"), None, /*compact=*/ false, /*detail=*/ true).expect("status");
     assert!(
             v.as_object().unwrap().get("detail").is_none(),
             "golden status dict has NO `detail` key (queries.py:65-79); Rust injects detail:true. got {v:?}"
@@ -128,7 +128,7 @@ fn status_agents_enriched_with_interacted_marker() {
             "gamma": {"provider": "claude"},
         }
     }));
-    let v = status_port::status(&ws, false, true).expect("status");
+    let v = status_port::status_scoped(&ws, &crate::state::persist::load_runtime_state(&ws).expect("fixture runtime state"), None, false, true).expect("status");
     let agents = &v["agents"];
     assert_eq!(
         agents["alpha"]["interacted"],
@@ -156,7 +156,7 @@ fn status_agents_enriched_with_interacted_marker() {
 fn status_tmux_session_present_uses_live_tmux_probe_not_is_some() {
     let absent = format!("ta-lanec-absent-{}", std::process::id());
     let ws = seed_status_state(json!({"leader": {"id": "leader"}, "session_name": absent}));
-    let v = status_port::status(&ws, false, true).expect("status");
+    let v = status_port::status_scoped(&ws, &crate::state::persist::load_runtime_state(&ws).expect("fixture runtime state"), None, false, true).expect("status");
     assert_eq!(
             v["tmux_session_present"],
             json!(false),

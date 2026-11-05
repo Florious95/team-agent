@@ -477,8 +477,6 @@ pub enum LeaderError {
     Json(#[from] serde_json::Error),
     #[error("event log: {0}")]
     EventLog(#[from] crate::event_log::EventLogError),
-    #[error("message store: {0}")]
-    MessageStore(#[from] crate::message_store::MessageStoreError),
     #[error("messaging: {0}")]
     Messaging(#[from] crate::messaging::MessagingError),
 }

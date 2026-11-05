@@ -14,25 +14,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use super::{
-    current_paste_to_submit_floor, observe_turn_from_capture,
-    sleep_remaining_paste_to_submit_floor, worker_shell_wrapper_command,
-    with_cursor_single_enter, with_paste_to_submit_floor, CommandOutput, CommandRunner,
-    RealCommandRunner, TmuxBackend, PANE_BINDING_NONCE_METADATA_KEY,
-};
+use super::{ worker_shell_wrapper_command, CommandOutput, CommandRunner, RealCommandRunner, TmuxBackend, PANE_BINDING_NONCE_METADATA_KEY };
 use crate::layout::worker_env::{
     caller_provider_resolution_from_values, inject_current_caller_provider,
     isolate_worker_spawn_env, worker_spawn_env, CallerProviderResolution, CALLER_ENDPOINT_ENV,
     CALLER_PANE_ENV, CALLER_PROVIDER_ENV,
 };
 use crate::model::enums::{PaneLiveness, Provider};
-use crate::transport::{
-    command_basename, normalize_capture, tmux_capture_argv, tmux_query_argv, tmux_send_keys_argv,
-    tmux_spawn_argv, tmux_submit_key_name, AttachOutcome, BusySignalKind, CaptureRange,
-    CaptureSampleOutcome, InjectPayload, InjectStage, InjectVerification, InputSurfaceProbe, Key,
-    PaneField, PaneId, QueryOutcome, SessionName, SetEnvOutcome, SubmitConsumptionReason,
-    SubmitVerification, Target, Transport, TransportError, TurnVerification, WindowName,
-};
+use crate::transport::{ normalize_capture, tmux_capture_argv, tmux_query_argv, tmux_send_keys_argv, tmux_spawn_argv, CaptureRange, InjectStage, Key, PaneField, PaneId, SessionName, Target, Transport, TransportError, WindowName };
 
 type RecordedArgv = Arc<Mutex<Vec<Vec<String>>>>;
 type RecordedStdin = Arc<Mutex<Vec<String>>>;
@@ -73,13 +62,7 @@ impl CommandRunner for SameNameSpawnRunner {
         Ok(output)
     }
 
-    fn run_with_stdin(
-        &self,
-        argv: &[String],
-        _stdin: &str,
-    ) -> Result<CommandOutput, std::io::Error> {
-        self.run(argv)
-    }
+
 }
 
 impl CommandRunner for MockCommandRunner {
@@ -97,14 +80,7 @@ impl CommandRunner for MockCommandRunner {
         }
     }
 
-    fn run_with_stdin(
-        &self,
-        argv: &[String],
-        stdin: &str,
-    ) -> Result<CommandOutput, std::io::Error> {
-        self.stdin_recorded.lock().unwrap().push(stdin.to_string());
-        self.run(argv)
-    }
+
 }
 
 fn ok(stdout: &str) -> CommandOutput {
@@ -616,24 +592,18 @@ fn leader_receiver_full_endpoint_liveness_list_and_inject_use_s_path_command_sha
     let _ = be
         .liveness(&PaneId::new("%7"))
         .expect("liveness via endpoint");
-    let _ = be
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text("hello leader".to_string()),
-            Key::Enter,
-            true,
-        )
-        .expect("inject via endpoint");
+    be.send_keys(&Target::Pane(PaneId::new("%7")), &[Key::Enter])
+        .expect("send_keys via endpoint");
 
     let calls = rec.lock().unwrap().clone();
     assert!(
-            calls.len() >= 5,
-            "fixture must exercise list-panes, display-message, buffer/paste, and send-keys; got {calls:?}"
+            calls.len() >= 3,
+            "fixture must exercise list-panes, display-message, and send-keys; got {calls:?}"
         );
     for call in &calls {
         assert!(
                 call.starts_with(&["tmux".to_string(), "-S".to_string(), endpoint.to_string()]),
-                "leader receiver list/liveness/inject must use tmux -S <full socket path>; got {call:?}"
+                "leader receiver list/liveness/send_keys must use tmux -S <full socket path>; got {call:?}"
             );
         assert!(
             !call
@@ -649,9 +619,7 @@ fn leader_receiver_full_endpoint_liveness_list_and_inject_use_s_path_command_sha
             && calls
                 .iter()
                 .any(|call| call.iter().any(|arg| arg == "display-message"))
-            && calls
-                .iter()
-                .any(|call| call.iter().any(|arg| arg == "paste-buffer"))
+
             && calls
                 .iter()
                 .any(|call| call.iter().any(|arg| arg == "send-keys")),
@@ -1023,22 +991,6 @@ fn configure_adaptive_pane_title_sets_border_and_pane_title() {
 }
 
 // ── 3. set_session_env: argv = `tmux set-environment -t <s> <k> <v>`; success -> Applied ───────
-#[test]
-fn set_session_env_argv_and_applied_outcome() {
-    let (be, rec) = backend_with(MockResp::Out(ok("")), vec![]);
-    let outcome = be
-        .set_session_env(&SessionName::new("sess"), "KEY", "VAL")
-        .expect("set env");
-    assert_eq!(
-        rec.lock().unwrap()[0],
-        svec(&["tmux", "set-environment", "-t", "sess", "KEY", "VAL"])
-    );
-    assert_eq!(
-        outcome,
-        SetEnvOutcome::Applied,
-        "tmux set-environment success -> SetEnvOutcome::Applied"
-    );
-}
 
 // ── 4. capture: argv = tmux_capture_argv; canned scrollback -> normalize_capture -> CapturedText ─
 #[test]
@@ -1082,134 +1034,12 @@ fn send_keys_argv_matches_builder() {
 }
 
 // ── 5b. inject (text): set/load-buffer(text) -> paste-buffer -p -> submit send-keys; report Submit ─
-#[test]
-fn inject_text_runs_buffer_paste_submit_sequence_and_reports_submit() {
-    let (be, rec) = backend_with(MockResp::Out(ok("hello")), vec![]);
-    let pane = PaneId::new("%7");
-    let report = be
-        .inject(
-            &Target::Pane(pane.clone()),
-            &InjectPayload::Text("hello".to_string()),
-            Key::Enter,
-            true,
-        )
-        .expect("inject");
-    let calls = rec.lock().unwrap().clone();
-    let is = |a: &[String], sub: &str| a.get(1).map(String::as_str) == Some(sub);
-    assert!(
-        calls
-            .iter()
-            .any(|a| (is(a, "set-buffer") || is(a, "load-buffer"))
-                && a.iter().any(|x| x.contains("hello"))),
-        "inject must stage the text into a tmux buffer (set-buffer/load-buffer); got {calls:?}"
-    );
-    assert!(
-        calls.iter().any(|a| is(a, "paste-buffer")
-            && a.contains(&"-p".to_string())
-            && a.contains(&"%7".to_string())),
-        "inject must bracketed-paste (-p) the buffer to the pane; got {calls:?}"
-    );
-    assert!(
-        calls.iter().any(
-            |a| is(a, "send-keys") && a.contains(&tmux_submit_key_name(Key::Enter).to_string())
-        ),
-        "inject must send the submit key (Enter) last; got {calls:?}"
-    );
-    assert_eq!(
-        report.stage_reached,
-        InjectStage::Submit,
-        "a fully-applied inject reaches the Submit stage"
-    );
-    assert_eq!(report.inject_verification, InjectVerification::NoToken);
-    assert_eq!(
-        report.submit_verification,
-        SubmitVerification::EnterSentWithoutPlaceholderCheck
-    );
-    assert_eq!(report.turn_verification, TurnVerification::NotYetObserved);
-    let diagnostics = report.submit_diagnostics.expect("diagnostics");
-    assert_eq!(
-        diagnostics.consumption_reason,
-        SubmitConsumptionReason::NoMarker
-    );
-    assert_eq!(diagnostics.busy_signal_kind, None);
-    assert_eq!(diagnostics.current_marker_in_bottom_15, None);
-    assert_eq!(diagnostics.paste_identity_in_composer, None);
-    assert_eq!(diagnostics.consumption_from_capture_result, None);
-}
 
-#[test]
-fn inject_large_text_load_buffer_writes_stdin_and_token_report() {
-    let text = format!("{}{}", "x".repeat(16 * 1024), " [team-agent-token:abc]");
-    // U1 #7: the pre-submit readback captures the pane; a pane that ECHOES the token
-    // back (default capture returns the text) → CaptureContainsToken (true positive).
-    let (be, rec, stdin_rec) = backend_with_stdin(MockResp::Out(ok(&text)), vec![]);
-    let report = be
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(text.clone()),
-            Key::Down,
-            true,
-        )
-        .expect("inject large text");
-
-    assert_eq!(
-        report.inject_verification,
-        InjectVerification::CaptureContainsToken
-    );
-    assert_eq!(
-        report.submit_verification,
-        SubmitVerification::KeySentAfterVisibleToken { key: Key::Down }
-    );
-    let calls = rec.lock().unwrap().clone();
-    assert_eq!(
-        calls[0],
-        svec(&["tmux", "load-buffer", "-b", "team-agent-send-abc", "-"])
-    );
-    assert_eq!(stdin_rec.lock().unwrap()[0], text);
-}
 
 // U1 #7 (RED→GREEN) — pre-submit pane readback: a token payload whose token is NOT
 // visible in the pane before submit (paste silently dropped) must report
 // CaptureMissingToken, not the static false-positive CaptureContainsToken.
-#[test]
-fn inject_token_not_visible_in_pane_reports_capture_missing_token() {
-    let text = format!("{}{}", "x".repeat(16 * 1024), " [team-agent-token:zzz]");
-    // default capture returns empty → token not visible → readback says missing.
-    let (be, _rec, _stdin) = backend_with_stdin(MockResp::Out(ok("")), vec![]);
-    let report = be
-        .inject(
-            &Target::Pane(PaneId::new("%9")),
-            &InjectPayload::Text(text),
-            Key::Down,
-            true,
-        )
-        .expect("inject runs");
-    assert_eq!(
-        report.inject_verification,
-        InjectVerification::CaptureMissingToken,
-        "U1 #7: a token that never appeared in the pane must read back as \
-CaptureMissingToken, not the static CaptureContainsToken false-positive"
-    );
-    let diag = report
-        .submit_diagnostics
-        .as_ref()
-        .expect("token inject records readback diagnostics");
-    assert_eq!(diag.last_capture_outcome, CaptureSampleOutcome::OkTokenMissing);
-    assert_eq!(diag.token_seen_after_paste, Some(false));
-    assert!(diag.capture_ok_count >= 1);
-    assert_eq!(diag.capture_err_count, 0);
-}
 
-#[test]
-fn command_basename_drops_argv_and_path() {
-    assert_eq!(
-        command_basename("/usr/bin/grok --help --model x").as_deref(),
-        Some("grok")
-    );
-    assert_eq!(command_basename("node").as_deref(), Some("node"));
-    assert_eq!(command_basename("").as_deref(), None);
-    assert_eq!(command_basename("   ").as_deref(), None);
-}
 
 struct InjectProbeRunner {
     recorded: RecordedArgv,
@@ -1235,13 +1065,7 @@ impl CommandRunner for InjectProbeRunner {
         Ok(ok(""))
     }
 
-    fn run_with_stdin(
-        &self,
-        argv: &[String],
-        _stdin: &str,
-    ) -> Result<CommandOutput, std::io::Error> {
-        self.run(argv)
-    }
+
 }
 
 fn inject_probe_backend(
@@ -1257,198 +1081,14 @@ fn inject_probe_backend(
     (TmuxBackend::with_runner(Box::new(runner)), recorded)
 }
 
-#[test]
-fn inject_capture_failure_is_distinct_from_token_missing_and_does_not_pass() {
-    let (be, _rec) = inject_probe_backend(MockResp::Io(std::io::ErrorKind::Other), "");
-    let report = be
-        .inject(
-            &Target::Pane(PaneId::new("%9")),
-            &InjectPayload::Text("hello [team-agent-token:zzz]".to_string()),
-            Key::Down,
-            true,
-        )
-        .expect("inject runs");
-    assert_eq!(
-        report.inject_verification,
-        InjectVerification::CaptureMissingToken,
-        "capture failure must not loosen CaptureMissingToken"
-    );
-    let diag = report.submit_diagnostics.as_ref().expect("diag");
-    assert_eq!(diag.last_capture_outcome, CaptureSampleOutcome::Failed);
-    assert_eq!(diag.token_seen_after_paste, None);
-    assert!(diag.capture_err_count >= 1);
-    assert_eq!(diag.capture_ok_count, 0);
-}
 
-#[test]
-fn inject_records_command_basename_without_argv() {
-    let (be, _rec) = inject_probe_backend(
-        MockResp::Out(ok("")),
-        "/usr/bin/grok --help --model grok-4.6",
-    );
-    let report = be
-        .inject(
-            &Target::Pane(PaneId::new("%9")),
-            &InjectPayload::Text("hello [team-agent-token:zzz]".to_string()),
-            Key::Down,
-            true,
-        )
-        .expect("inject runs");
-    let diag = report.submit_diagnostics.as_ref().expect("diag");
-    assert_eq!(diag.pane_command_basename.as_deref(), Some("grok"));
-    assert_eq!(diag.pane_command_query, QueryOutcome::Observed);
-    assert_eq!(diag.input_surface, InputSurfaceProbe::Input);
-    assert_eq!(diag.target_pane_id.as_deref(), Some("%9"));
-    assert_eq!(diag.target_pane_query_matched, Some(true));
-    let blob = format!("{diag:?}");
-    assert!(
-        !blob.contains("--help") && !blob.contains("grok-4.6"),
-        "argv must not leak into diagnostics: {blob}"
-    );
-    assert_eq!(
-        report.inject_verification,
-        InjectVerification::CaptureMissingToken
-    );
-}
 
-#[test]
-fn inject_waits_for_token_visibility_before_enter() {
-    let text = "hello [team-agent-token:e31]".to_string();
-    let marker_visible = format!("{text}\n");
-    let (be, rec) = backend_with(
-        MockResp::Out(ok("")),
-        vec![
-            MockResp::Out(ok("")),              // set-buffer
-            MockResp::Out(ok("")),              // paste-buffer
-            MockResp::Out(ok("")),              // delete-buffer
-            MockResp::Out(ok("")),              // pasted-content prompt poll 1
-            MockResp::Out(ok("")),              // pasted-content prompt poll 2
-            MockResp::Out(ok("")),              // pasted-content prompt poll 3
-            MockResp::Out(ok("")),              // pasted-content prompt poll 4
-            MockResp::Out(ok("")),              // pasted-content prompt poll 5
-            MockResp::Out(ok("")),              // token gate: not visible yet
-            MockResp::Out(ok("")),              // token gate: still not visible
-            MockResp::Out(ok(&marker_visible)), // token gate: visible, Enter may fire
-            MockResp::Out(ok("")),              // send-keys Enter
-        ],
-    );
 
-    let report = be
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(text),
-            Key::Enter,
-            true,
-        )
-        .expect("inject");
-    let calls = rec.lock().unwrap().clone();
-    let submit_index = calls
-        .iter()
-        .position(|argv| argv.get(1).map(String::as_str) == Some("send-keys"))
-        .expect("inject must eventually send Enter");
-    let captures_before_submit = calls[..submit_index]
-        .iter()
-        .filter(|argv| argv.get(1).map(String::as_str) == Some("capture-pane"))
-        .count();
 
-    assert!(
-        captures_before_submit >= super::PASTED_CONTENT_APPEAR_POLLS as usize + 3,
-        "Enter must wait until the pasted token is visible; calls={calls:?}"
-    );
-    assert_eq!(
-        report.inject_verification,
-        InjectVerification::CaptureContainsToken
-    );
-    assert_eq!(
-        report.submit_verification,
-        SubmitVerification::EnterSentWithoutPlaceholderCheck
-    );
-}
 
-#[test]
-fn paste_to_submit_floor_default_is_zero_even_if_test_tmp_is_set() {
-    assert_eq!(
-        current_paste_to_submit_floor(),
-        Duration::ZERO,
-        "default floor must be ZERO; TEAM_AGENT_TEST_TMP is not this switch"
-    );
-}
 
-#[test]
-fn paste_to_submit_nonzero_floor_is_actually_slept() {
-    let start = Instant::now();
-    sleep_remaining_paste_to_submit_floor(start, Duration::from_millis(40));
-    let elapsed = start.elapsed();
-    assert!(
-        elapsed >= Duration::from_millis(40),
-        "non-zero floor must sleep the remaining time; elapsed={elapsed:?}"
-    );
-}
 
-#[test]
-fn paste_to_submit_zero_floor_does_not_sleep() {
-    let start = Instant::now();
-    sleep_remaining_paste_to_submit_floor(start, Duration::ZERO);
-    let elapsed = start.elapsed();
-    assert!(
-        elapsed < Duration::from_millis(20),
-        "ZERO floor must be free for claude/codex/grok; elapsed={elapsed:?}"
-    );
-}
 
-#[test]
-fn inject_honors_injected_nonzero_paste_to_submit_floor() {
-    let (be, _) = backend_with(MockResp::Out(ok("hello")), vec![]);
-    let start = Instant::now();
-    with_paste_to_submit_floor(Duration::from_millis(40), || {
-        be.inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text("hello".to_string()),
-            Key::Enter,
-            true,
-        )
-        .expect("inject");
-    });
-    let elapsed = start.elapsed();
-    assert!(
-        elapsed >= Duration::from_millis(40),
-        "inject must take the injected cursor floor; elapsed={elapsed:?}"
-    );
-}
-
-#[test]
-fn inject_skip_consumption_payload_sends_enter_without_phase2_poll() {
-    let text = "hello leader [team-agent-token:skip]";
-    let (be, rec) = backend_with(MockResp::Out(ok(text)), vec![]);
-    let report = be
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::TextSkipConsumptionPoll(text.to_string()),
-            Key::Enter,
-            true,
-        )
-        .expect("inject");
-    let calls = rec.lock().unwrap().clone();
-
-    assert_eq!(
-        report.submit_verification,
-        SubmitVerification::EnterSentWithoutPlaceholderCheck
-    );
-    assert_eq!(report.attempts, 1);
-    assert!(
-        calls.iter().any(|argv| {
-            argv.get(1).map(String::as_str) == Some("send-keys")
-                && argv.contains(&tmux_submit_key_name(Key::Enter).to_string())
-        }),
-        "skip-consumption payload must still submit once; calls={calls:?}"
-    );
-    assert!(
-        !calls
-            .iter()
-            .any(|argv| { argv == &tmux_capture_argv(&PaneId::new("%7"), CaptureRange::Tail(40)) }),
-        "leader-bound skip payload must not run Phase 2 consumption polls; calls={calls:?}"
-    );
-}
 
 // ═════════════════════════════════════════════════════════════════════════════
 // E46 0.3.24 task#327 P0 — submit verification false-positive / false-negative.
@@ -1466,378 +1106,14 @@ fn inject_skip_consumption_payload_sends_enter_without_phase2_poll() {
 // no longer in the bottom 5 lines of the pane = composer cleared).
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// ledger.inject-fix: paste landing is not submit. Token still in the
-/// composer and no Working signal ⇒ SubmitConsumptionUnverified.
-#[test]
-fn e46_post_submit_matched_token_without_scroll_is_unverified() {
-    let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_red1]";
-    let (be, _rec) = backend_with(MockResp::Out(ok(token_text)), vec![]);
-    let report = be
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token_text.to_string()),
-            Key::Enter,
-            true,
-        )
-        .expect("inject runs");
-    assert_eq!(
-        report.submit_verification,
-        SubmitVerification::SubmitConsumptionUnverified,
-        "token still in composer and no Working signal must be unverified, \
-             not EnterSentWithoutPlaceholderCheck. Got {:?}",
-        report.submit_verification
-    );
-    assert_eq!(
-        report.turn_verification,
-        TurnVerification::LeaderNewTurnBoundaryMissing,
-        "token still in composer and no busy must report 没开跑, not unknown/started"
-    );
-    let diagnostics = report.submit_diagnostics.expect("diagnostics");
-    assert_eq!(diagnostics.busy_signal_kind, None);
-    assert_eq!(diagnostics.current_marker_in_bottom_15, Some(true));
-    assert_eq!(diagnostics.paste_identity_in_composer, None);
-    assert_eq!(diagnostics.consumption_from_capture_result, Some(false));
-    assert!(
-        diagnostics.attempts_detail.iter().any(|obs| obs.matched),
-        "the unverified verdict must still record that paste landed"
-    );
-    assert_eq!(
-        diagnostics.consumption_reason,
-        SubmitConsumptionReason::Unverified
-    );
-}
 
-#[test]
-fn e46_unconsumed_token_with_live_busy_state_is_treated_as_processing() {
-    let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_busy]";
-    let busy_tail = format!("{token_text}\n● Working (1s · esc to interrupt)\n");
-    let (be, _rec) = backend_with(MockResp::Out(ok(&busy_tail)), vec![]);
-    let report = be
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token_text.to_string()),
-            Key::Enter,
-            true,
-        )
-        .expect("inject runs");
-    assert_eq!(
-        report.submit_verification,
-        SubmitVerification::EnterSentWithoutPlaceholderCheck,
-        "busy provider state means the turn is being processed even if \
-             the token has not yet scrolled out of the bottom capture"
-    );
-    assert_eq!(
-        report.turn_verification,
-        TurnVerification::LeaderNewTurnBoundaryVerified,
-        "live Working signal is 开跑; must not stay not_yet_observed"
-    );
-    let diagnostics = report.submit_diagnostics.expect("diagnostics");
-    assert!(
-        diagnostics
-            .attempts_detail
-            .last()
-            .map(|obs| obs
-                .pane_tail_excerpt
-                .to_ascii_lowercase()
-                .contains("working"))
-            .unwrap_or(false),
-        "busy-state capture should be recorded in attempts_detail: {:?}",
-        diagnostics.attempts_detail
-    );
-    assert_eq!(
-        diagnostics.consumption_reason,
-        SubmitConsumptionReason::FallbackBusy
-    );
-    assert_eq!(diagnostics.before_busy_signal_kind, None);
-    assert_eq!(diagnostics.busy_signal_kind, Some(BusySignalKind::Working));
-    assert_eq!(diagnostics.busy_line_from_bottom, Some(0));
-    assert_eq!(diagnostics.current_marker_in_bottom_15, Some(true));
-    assert_eq!(diagnostics.paste_identity_in_composer, None);
-    assert_eq!(diagnostics.consumption_from_capture_result, Some(false));
-}
 
-#[test]
-fn e46_capture_error_clears_previous_consumption_observation() {
-    let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_capture_error]";
-    let busy_tail = format!("{token_text}\n● Working (1s · esc to interrupt)\n");
-    let visible = ok(token_text);
-    let queued = vec![
-        MockResp::Out(ok("")),         // set-buffer
-        MockResp::Out(ok("")),         // paste-buffer
-        MockResp::Out(ok("")),         // delete-buffer
-        MockResp::Out(visible.clone()), // pasted-content prompt: continue
-        MockResp::Out(visible),         // pre-submit token visibility
-        MockResp::Out(ok("")),         // Escape
-        MockResp::Out(ok("")),         // Enter
-        MockResp::Out(ok(&busy_tail)),  // first post-Enter capture: busy
-        // Default capture error forces the next poll/fallback/resend reads to fail.
-    ];
-    let (be, _rec) = backend_with(MockResp::Io(std::io::ErrorKind::Other), queued);
-    let report = be
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token_text.to_string()),
-            Key::Enter,
-            true,
-        )
-        .expect("inject runs through capture failure");
-    let diagnostics = report.submit_diagnostics.expect("diagnostics");
-    assert_eq!(
-        report.submit_verification,
-        SubmitVerification::SubmitConsumptionUnverified
-    );
-    assert_eq!(diagnostics.consumption_reason, SubmitConsumptionReason::Unverified);
-    assert!(diagnostics.capture_err_count > 0);
-    assert_eq!(diagnostics.before_busy_signal_kind, None);
-    assert_eq!(diagnostics.busy_signal_kind, None);
-    assert_eq!(diagnostics.busy_line_from_bottom, None);
-    assert_eq!(diagnostics.current_marker_in_bottom_15, None);
-    assert_eq!(diagnostics.paste_identity_in_composer, None);
-    assert_eq!(diagnostics.consumption_from_capture_result, None);
-}
 
-/// NeverSeen + 无占位符：空 pane 不得再把「token 不在底部」写成 consumed。
-/// 旧默认 EnterSentWithoutPlaceholderCheck 就是折叠恒真的同构。
-#[test]
-fn e46_inject_text_with_empty_pane_is_unverified() {
-    let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_empty]";
-    let (be, _rec) = backend_with(MockResp::Out(ok("")), vec![]);
-    let report = be
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token_text.to_string()),
-            Key::Enter,
-            true,
-        )
-        .expect("inject runs");
-    assert_eq!(
-        report.submit_verification,
-        SubmitVerification::SubmitConsumptionUnverified,
-        "empty pane / token never visible / no pasted #N ⇒ unverified, \
-             not EnterSentWithoutPlaceholderCheck. Got {:?}",
-        report.submit_verification
-    );
-}
 
-/// **E46 RED-2 (正向消费确认 → delivered)**: token-bearing Text + Enter +
-/// bracketed paste. Token VISIBLE on first capture (pre/post-submit token
-/// readback) BUT then GONE from the post-submit input-consumption probe
-/// (composer cleared after Enter). Submit must report
-/// `EnterSentWithoutPlaceholderCheck` (MUST-10 path) — delivery proceeds
-/// to delivered. Guards against regression on crd's existing-worker path.
-#[test]
-fn e46_inject_text_with_token_consumed_after_enter_keeps_enter_sent_without_placeholder_check() {
-    let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_red2]";
-    // First captures (token visibility probes pre/post-Enter) return text
-    // with token; the LAST capture (consumption probe) returns text WITHOUT
-    // the token in the tail (composer cleared). MockCommandRunner drains
-    // `queued` first then defaults — we queue the early "token visible"
-    // captures, then drop to the empty default for the consumption probe.
-    let visible = ok(token_text);
-    let queued = vec![
-        MockResp::Out(ok("")),          // set-buffer
-        MockResp::Out(ok("")),          // paste-buffer
-        MockResp::Out(ok("")),          // delete-buffer
-        MockResp::Out(visible.clone()), // pasted-content prompt poll: none → continue
-        MockResp::Out(visible.clone()), // pre-submit token visibility: visible
-        MockResp::Out(ok("")),          // Escape send-keys (no stdout needed)
-        MockResp::Out(ok("")),          // Enter send-keys
-                                        // From here on, the default response is `ok("")` (empty pane tail) so
-                                        // post-Enter consumption probe sees no token in tail → consumed=true.
-    ];
-    let (be, _rec) = backend_with(MockResp::Out(ok("")), queued);
-    let report = be
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token_text.to_string()),
-            Key::Enter,
-            true,
-        )
-        .expect("inject runs");
-    assert_eq!(
-        report.submit_verification,
-        SubmitVerification::EnterSentWithoutPlaceholderCheck,
-        "E46 RED-2: when post-Enter consumption is observed (token gone \
-             from input region tail), submit must report the canonical \
-             EnterSentWithoutPlaceholderCheck so MUST-10 delivery semantics \
-             hold (provider_submit_verification_red.rs:113-159). Got {:?}",
-        report.submit_verification
-    );
-    let diagnostics = report.submit_diagnostics.expect("diagnostics");
-    assert_eq!(
-        diagnostics.consumption_reason,
-        SubmitConsumptionReason::ConsumptionFromCapture
-    );
-    assert_eq!(diagnostics.busy_signal_kind, None);
-    assert_eq!(diagnostics.current_marker_in_bottom_15, Some(false));
-    assert_eq!(diagnostics.consumption_from_capture_result, Some(true));
-}
 
-/// **E46 RED-3 (resend-to-cap, no double-submit)**: when the FIRST Enter
-/// landed on the composer but our readback was slow, the re-check BEFORE
-/// resend must observe the now-empty input and STOP — must NOT fire a
-/// second Enter into an empty composer (would open an empty turn).
-#[test]
-fn e46_inject_text_resend_rechecks_input_before_resending_to_avoid_double_submit() {
-    // Same mock as RED-2: post-Enter consumption probe sees empty tail.
-    // The implementation should issue only ONE Enter (no resend) once
-    // consumption is observed.
-    let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_red3]";
-    let queued = vec![
-        MockResp::Out(ok("")),         // set-buffer
-        MockResp::Out(ok("")),         // paste-buffer
-        MockResp::Out(ok("")),         // delete-buffer
-        MockResp::Out(ok(token_text)), // pasted-content prompt: not matched
-        MockResp::Out(ok(token_text)), // pre-submit token visibility
-        MockResp::Out(ok("")),         // Escape
-        MockResp::Out(ok("")),         // Enter
-    ];
-    let (be, rec) = backend_with(MockResp::Out(ok("")), queued);
-    let _report = be
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token_text.to_string()),
-            Key::Enter,
-            true,
-        )
-        .expect("inject runs");
-    let calls = rec.lock().unwrap().clone();
-    // Count `send-keys ... Enter` invocations. There must be EXACTLY ONE
-    // (the canonical submit). A second one indicates the resend loop
-    // didn't honour C3 (re-check input before resend).
-    let enter_count = calls
-        .iter()
-        .filter(|argv| {
-            argv.get(1).map(String::as_str) == Some("send-keys")
-                && argv.contains(&tmux_submit_key_name(Key::Enter).to_string())
-        })
-        .count();
-    assert_eq!(
-        enter_count, 1,
-        "E46 RED-3: when consumption is observed (or already happened \
-             between Enter and probe), the resend loop must STOP and NOT \
-             issue a second Enter. Got {enter_count} Enter sends. \
-             calls={calls:?}"
-    );
-}
 
-/// **E46 RED-5 (provider-agnostic detector)**: the consumption probe must
-/// NOT hard-code provider UI strings (claude `>`, codex `╰`, ...). It uses
-/// the token marker absence in the bottom of the pane — works for any
-/// provider. Here we run a non-claude-shaped pane (no claude markers) and
-/// confirm the same delivered semantics when consumption happens.
-#[test]
-fn e46_consumption_detector_works_on_codex_shaped_pane_without_provider_strings() {
-    // Codex-shaped fake: prompt looks like `codex>` with no claude markers.
-    // After Enter, the composer clears (empty default returns ok("")).
-    let token_text = "Team Agent message from leader:\n\ncodex msg\n\n[team-agent-token:msg_red5]";
-    let queued = vec![
-        MockResp::Out(ok("")),         // set-buffer
-        MockResp::Out(ok("")),         // paste-buffer
-        MockResp::Out(ok("")),         // delete-buffer
-        MockResp::Out(ok("codex>\n")), // pasted-content prompt: no match
-        MockResp::Out(ok(token_text)), // pre-submit token visibility
-        MockResp::Out(ok("")),         // Escape
-        MockResp::Out(ok("")),         // Enter
-                                       // post-Enter: default returns ok("") (composer cleared) → token gone
-    ];
-    let (be, _rec) = backend_with(MockResp::Out(ok("")), queued);
-    let report = be
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token_text.to_string()),
-            Key::Enter,
-            true,
-        )
-        .expect("inject runs");
-    assert_eq!(
-        report.submit_verification,
-        SubmitVerification::EnterSentWithoutPlaceholderCheck,
-        "E46 RED-5: provider-agnostic detector — codex-shaped pane (no \
-             claude UI string) where composer clears post-Enter must still \
-             report EnterSentWithoutPlaceholderCheck via structural \
-             input-empty check. Got {:?}",
-        report.submit_verification
-    );
-}
 
-/// **E46 Escape pre-Enter**: when bracketed=true + Text payload + submit=Enter,
-/// the inject must send Escape BEFORE the Enter (exits bracketed-paste
-/// mode on stuck composer). Non-Enter submits (e.g. Key::Down for codex
-/// menu) must NOT receive the Escape pre-step.
-#[test]
-/// 0.3.27 amendment: Escape is now RETRY-ONLY (attempt > 0). The first
-/// attempt sends Enter directly (Python parity — Python never sends Escape).
-/// Escape fires only if the first Enter failed to consume the token and a
-/// retry is needed. This test now asserts the first attempt has NO Escape.
-fn e46_inject_text_first_attempt_no_escape_retry_only() {
-    let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_esc]";
-    // Mock returns empty — token not in tail → consumed=true on first attempt.
-    let (be, rec) = backend_with(MockResp::Out(ok("")), vec![]);
-    let _report = be
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token_text.to_string()),
-            Key::Enter,
-            true,
-        )
-        .expect("inject runs");
-    let calls = rec.lock().unwrap().clone();
-    let enter_count = calls
-        .iter()
-        .filter(|argv| {
-            argv.get(1).map(String::as_str) == Some("send-keys")
-                && argv.contains(&tmux_submit_key_name(Key::Enter).to_string())
-        })
-        .count();
-    let escape_count = calls
-        .iter()
-        .filter(|argv| {
-            argv.get(1).map(String::as_str) == Some("send-keys")
-                && argv.contains(&"Escape".to_string())
-        })
-        .count();
-    assert!(
-        enter_count >= 1,
-        "0.3.27: first attempt must send Enter; calls={calls:?}"
-    );
-    assert_eq!(
-        escape_count, 0,
-        "0.3.27: first attempt (consumed=true) must NOT send Escape \
-             (Escape is retry-only); calls={calls:?}"
-    );
-}
 
-/// **E46 regression guard**: non-Enter submit (codex menu navigation,
-/// `Key::Down`) does NOT trigger the Escape pre-step (would interfere
-/// with the menu).
-#[test]
-fn e46_inject_text_non_enter_submit_does_not_emit_escape_prestep() {
-    let token_text = "menu interaction\n[team-agent-token:msg_down]";
-    let (be, rec) = backend_with(MockResp::Out(ok("")), vec![]);
-    let _report = be
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token_text.to_string()),
-            Key::Down,
-            true,
-        )
-        .expect("inject runs");
-    let calls = rec.lock().unwrap().clone();
-    let escape_count = calls
-        .iter()
-        .filter(|argv| {
-            argv.get(1).map(String::as_str) == Some("send-keys")
-                && argv.contains(&"Escape".to_string())
-        })
-        .count();
-    assert_eq!(
-        escape_count, 0,
-        "E46 regression guard: Key::Down submits (codex menu navigation) \
-             must NOT receive Escape pre-step. Got {escape_count}. \
-             calls={calls:?}"
-    );
-}
 
 // ═════════════════════════════════════════════════════════════════════════
 // E50 PR-1 (0.3.24 P0, pasted-prompt 假阴诊断) — InjectReport.submit_diagnostics
@@ -1851,165 +1127,9 @@ fn e46_inject_text_non_enter_submit_does_not_emit_escape_prestep() {
 // `where_in_tail` to fix the criterion. These tests pin the data shape.
 // ═════════════════════════════════════════════════════════════════════════
 
-/// **E50 RED-1 (判据误判, pure function)**: `pasted_prompt_match` must
-/// distinguish bottom-region (composer) from scrollback (line 6+ from
-/// bottom). Pre-fix `capture_has_pasted_content_prompt` returned `true`
-/// for BOTH; the new tuple-returning helper surfaces the offset so PR-2
-/// can fix the criterion.
-#[test]
-fn e50_pasted_prompt_match_reports_where_in_tail_for_scrollback_vs_composer() {
-    use super::pasted_prompt_match;
 
-    // Composer (bottom) match.
-    let composer_only = "some output\n\
-                             [Pasted content 1.2k]\n\
-                             ❯ ";
-    // The match is "pasted content" in the line at index 1 from bottom
-    // among non-empty lines (`[Pasted content...]`, `❯ ` is at idx 0).
-    let m = pasted_prompt_match(composer_only).expect("match");
-    assert_eq!(m.0, "pasted content");
-    assert_eq!(
-        m.1, 1,
-        "E50: where_in_tail must reflect bottom offset (idx 1 = above the \
-             `❯` composer line); got {m:?}"
-    );
 
-    // Scrollback (top) match — 8 lines from bottom.
-    let scrollback_only = "[Pasted content 5.0k]\n\
-                               assistant reply line 1\n\
-                               assistant reply line 2\n\
-                               assistant reply line 3\n\
-                               assistant reply line 4\n\
-                               assistant reply line 5\n\
-                               assistant reply line 6\n\
-                               assistant reply line 7\n\
-                               ❯ ";
-    let m2 = pasted_prompt_match(scrollback_only).expect("match");
-    assert_eq!(m2.0, "pasted content");
-    assert!(
-        m2.1 >= 6,
-        "E50: scrollback `Pasted content` must report where_in_tail >= 6 \
-             (clearly above the bottom composer region); got {m2:?}. PR-2 \
-             will use this offset to distinguish live composer vs scrollback \
-             residue."
-    );
 
-    // No match.
-    assert!(pasted_prompt_match("nothing here\n❯ ").is_none());
-}
-
-/// **E50 PR-2 Fix-B (amends PR-1 RED-2)**: with Fix-B, token-bearing
-/// payloads SKIP the paste-prompt weak loop and fall through to the E46
-/// token consumption gate. The `submit_diagnostics` still records the
-/// appear-gate timing (was `saw_pasted_prompt` matched?), but
-/// `attempts_detail` is populated by the E46 consumption gate path, not
-/// the deleted weak loop. This test pins the NEW shape: `appear_gate_matched`
-/// may be false (mock default returns the pasted-content text, but the
-/// appear-gate polls 5 times with 25ms sleep and the mock answers the SAME
-/// text every time → appear-gate DOES match). However, the `has_token` guard
-/// skips the weak loop body → the token path's diagnostics fill in instead.
-#[test]
-fn e50_inject_paste_prompt_path_populates_submit_diagnostics_per_attempt() {
-    let token_text = "Team Agent message from leader:\n\nhello\n\n[team-agent-token:msg_pr1]";
-    // Mock keeps returning the pasted-content placeholder. With Fix-B,
-    // the token path takes over: post_submit_input_consumed checks
-    // bottom 5 lines for the token marker. The mock returns the pasted
-    // placeholder text (without the token) → token NOT in tail → consumed
-    // = Some(true) → EnterSentWithoutPlaceholderCheck.
-    // We test: (a) diagnostics present (b) submit verification reflects
-    // the E46 token path, not the deleted weak loop.
-    let pasted = "[Pasted content 1.2k]";
-    let (be, _rec) = backend_with(MockResp::Out(ok(pasted)), vec![]);
-    let report = be
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token_text.to_string()),
-            Key::Enter,
-            true,
-        )
-        .expect("inject");
-    // token 从未可见 + composer 里仍有 pasted content（无 #N）→ 不得报已消费。
-    assert_eq!(
-        report.submit_verification,
-        SubmitVerification::SubmitConsumptionUnverified,
-        "folded placeholder still in composer (no #N, token never seen) \
-             must be unverified, not vacuous EnterSentWithoutPlaceholderCheck; \
-             got {:?}",
-        report.submit_verification
-    );
-    let diagnostics = report.submit_diagnostics.expect("diagnostics");
-    assert!(
-        !diagnostics.attempts_detail.is_empty(),
-        "E50: E46 consumption gate must preserve per-capture diagnostics"
-    );
-    assert_eq!(diagnostics.attempts_detail[0].attempt_index, 1);
-    assert!(
-        diagnostics.attempts_detail[0]
-            .pane_tail_excerpt
-            .contains("Pasted content"),
-        "E50: recorded pane tail should contain the post-submit capture; got {:?}",
-        diagnostics.attempts_detail[0]
-    );
-}
-
-/// **E50 PR-1 secret scrubbing**: `scrub_pane_excerpt` must strip ANSI
-/// + redact common secret shapes so emitted events.jsonl doesn't leak.
-#[test]
-fn e50_scrub_pane_excerpt_strips_ansi_and_redacts_secret_shapes() {
-    use super::scrub_pane_excerpt;
-    let raw = "\x1b[31merror\x1b[0m: sk-abcdef123ghi\n\
-                   token Bearer abc.def.ghi\n\
-                   key AKIAIOSFODNN7EXAMPLE\n\
-                   ghp_1234567890abcdef\n\
-                   hex deadbeefdeadbeefdeadbeefdeadbeefcafebabe\n\
-                   plain text below";
-    let (out, lines) = scrub_pane_excerpt(raw, 20);
-    assert!(lines >= 5, "E50: at least 5 non-empty lines; got {lines}");
-    assert!(
-        !out.contains("\x1b"),
-        "E50: ANSI escape stripped; got {out:?}"
-    );
-    assert!(
-        !out.contains("sk-abcdef123ghi"),
-        "E50: sk- secret must be redacted; got {out:?}"
-    );
-    assert!(
-        !out.contains("ghp_1234567890abcdef"),
-        "E50: ghp_ secret must be redacted; got {out:?}"
-    );
-    assert!(
-        !out.contains("AKIAIOSFODNN7EXAMPLE"),
-        "E50: AKIA secret must be redacted; got {out:?}"
-    );
-    assert!(
-        !out.contains("abc.def.ghi"),
-        "E50: Bearer secret token must be redacted; got {out:?}"
-    );
-    assert!(
-        !out.contains("deadbeefdeadbeefdeadbeefdeadbeefcafebabe"),
-        "E50: 32+ hex run must be redacted; got {out:?}"
-    );
-    assert!(
-        out.contains("REDACTED"),
-        "E50: redactions visible; got {out:?}"
-    );
-    assert!(
-        out.contains("plain text below"),
-        "E50: non-secret content preserved; got {out:?}"
-    );
-}
-
-/// **E50 PR-1 byte-identical legacy matcher**: `capture_has_pasted_content_prompt`
-/// wrapper must still return the same bool the 3 legacy callers depend on
-/// (the bool-returning fn shape is the contract for byte-locked behaviour).
-#[test]
-fn e50_capture_has_pasted_content_prompt_byte_identical_wrapper() {
-    use super::capture_has_pasted_content_prompt;
-    assert!(capture_has_pasted_content_prompt("[Pasted content 1k]"));
-    assert!(capture_has_pasted_content_prompt("[Pasted text foo]"));
-    assert!(!capture_has_pasted_content_prompt("just composer text"));
-    assert!(!capture_has_pasted_content_prompt(""));
-}
 
 #[test]
 fn send_keys_cancel_mode_queries_mode_and_dispatches_cancel_argv() {
@@ -2046,49 +1166,6 @@ fn cancel_mode_numeric_zero_is_input_ready_and_does_not_send_cancel() {
         );
 }
 
-#[test]
-fn inject_text_uses_message_id_scoped_buffer_from_token() {
-    // Golden delivery.py:109-114 passes buffer_name = `team-agent-send-{message_id}` into
-    // `_tmux_inject_text`; tmux_io.py then uses that exact name for set/load, paste, delete.
-    // This prevents interleaved sends from sharing a stale global tmux buffer.
-    // RED: Rust currently hard-codes `team-agent-buf`.
-    let (be, rec) = backend_with(MockResp::Out(ok("")), vec![]);
-    let text =
-        "Team Agent message from leader:\n\nhello\n\n[team-agent-token:msg_abc123]".to_string();
-    be.inject(
-        &Target::Pane(PaneId::new("%7")),
-        &InjectPayload::Text(text),
-        Key::Enter,
-        true,
-    )
-    .expect("inject");
-
-    let calls = rec.lock().unwrap().clone();
-    let buffer_args: Vec<String> = calls
-        .iter()
-        .filter(|argv| {
-            matches!(
-                argv.get(1).map(String::as_str),
-                Some("set-buffer" | "load-buffer" | "paste-buffer" | "delete-buffer")
-            )
-        })
-        .filter_map(|argv| {
-            argv.iter()
-                .position(|arg| arg == "-b")
-                .and_then(|i| argv.get(i + 1))
-                .cloned()
-        })
-        .collect();
-    assert_eq!(
-            buffer_args,
-            vec![
-                "team-agent-send-msg_abc123".to_string(),
-                "team-agent-send-msg_abc123".to_string(),
-                "team-agent-send-msg_abc123".to_string(),
-            ],
-            "every tmux buffer operation must use the message-id-scoped golden buffer name; calls={calls:?}"
-        );
-}
 
 // ── 6. liveness three-state (§bug-085): exit 0 -> Live; "can't find …" -> Dead; else -> Unknown ─
 #[test]
@@ -2490,37 +1567,37 @@ fn real_command_runner_enforces_golden_5s_timeout_on_hang() {
 // tmux_query_argv -> run; success => Some(stdout.trim()); nonzero => None (never Err).
 #[test]
 fn query_single_field_argv_and_nonzero_maps_to_none() {
-    // PaneId field: argv == the golden builder; present value parsed (trimmed) into Some.
-    let (be, rec) = backend_with(MockResp::Out(ok("%7\n")), vec![]);
+    // Current command field: argv == the golden builder; present value parsed (trimmed) into Some.
+    let (be, rec) = backend_with(MockResp::Out(ok("codex\n")), vec![]);
     let got = be
-        .query(&Target::Pane(PaneId::new("%7")), PaneField::PaneId)
+        .query(&Target::Pane(PaneId::new("%7")), PaneField::PaneCurrentCommand)
         .expect("query ok");
     assert_eq!(
         rec.lock().unwrap()[0],
-        tmux_query_argv(&PaneId::new("%7"), PaneField::PaneId),
-        "query must build the golden single-field `display-message -p -t <t> -F #{{pane_id}}` argv"
+        tmux_query_argv(&PaneId::new("%7"), PaneField::PaneCurrentCommand),
+        "query must build the golden single-field `display-message -p -t <t> -F #{{pane_current_command}}` argv"
     );
     assert_eq!(
         got,
-        Some("%7".to_string()),
+        Some("codex".to_string()),
         "a present field value is parsed (stripped) into Some"
     );
 
-    // PaneWidth uses -F too; lock argv + the parsed numeric-as-string field.
-    let (be, rec) = backend_with(MockResp::Out(ok("180\n")), vec![]);
+    // PaneMode omits -F; lock argv and the parsed mode string.
+    let (be, rec) = backend_with(MockResp::Out(ok("1\n")), vec![]);
     let got = be
-        .query(&Target::Pane(PaneId::new("%7")), PaneField::PaneWidth)
+        .query(&Target::Pane(PaneId::new("%7")), PaneField::PaneMode)
         .expect("query ok");
     assert_eq!(
         rec.lock().unwrap()[0],
-        tmux_query_argv(&PaneId::new("%7"), PaneField::PaneWidth)
+        tmux_query_argv(&PaneId::new("%7"), PaneField::PaneMode)
     );
-    assert_eq!(got, Some("180".to_string()));
+    assert_eq!(got, Some("1".to_string()));
 
     // nonzero exit (pane gone) -> None, NOT an Err (golden _tmux_pane_info: returncode != 0 -> None).
     let (be, _r) = backend_with(MockResp::Out(fail(1, "can't find pane %7")), vec![]);
     assert_eq!(
-        be.query(&Target::Pane(PaneId::new("%7")), PaneField::PaneId)
+        be.query(&Target::Pane(PaneId::new("%7")), PaneField::PaneCurrentCommand)
             .expect("query ok on nonzero"),
         None,
         "a nonzero / pane-gone query must map to None (not Err)"
@@ -2627,7 +1704,7 @@ fn set_pane_binding_nonce_is_socket_scoped_and_pane_local() {
     };
     let be =
         TmuxBackend::with_runner_for_tmux_endpoint(Box::new(runner), "/tmp/ta-pane-binding.sock");
-    be.set_pane_binding_nonce(&PaneId::new("%7"), "nonce-7")
+    be.set_pane_binding_nonce_if_unset(&PaneId::new("%7"), "nonce-7")
         .expect("set pane binding nonce");
     assert_eq!(
         rec.lock().unwrap()[0],
@@ -2637,6 +1714,7 @@ fn set_pane_binding_nonce_is_socket_scoped_and_pane_local() {
             "/tmp/ta-pane-binding.sock",
             "set-option",
             "-p",
+            "-o",
             "-t",
             "%7",
             "@team_agent_pane_binding_nonce",
@@ -2714,23 +1792,6 @@ fn set_pane_binding_nonce_if_unset_rejects_write_or_read_failure() {
 // Attached. RED today: attach_session is unimplemented!() -> PANIC. The in-process lock asserts the
 // argv + outcome via the recording runner; the REAL attach is interactive (takes over the terminal)
 // — that is the real-machine boundary, not unit-testable.
-#[test]
-fn attach_session_argv_and_attached_outcome() {
-    let (be, rec) = backend_with(MockResp::Out(ok("")), vec![]);
-    let outcome = be
-        .attach_session(&SessionName::new("sess"))
-        .expect("attach ok");
-    assert_eq!(
-        rec.lock().unwrap()[0],
-        svec(&["tmux", "attach-session", "-t", "sess"]),
-        "attach_session must run `tmux attach-session -t <session>`"
-    );
-    assert_eq!(
-        outcome,
-        AttachOutcome::Attached,
-        "a successful tmux attach -> AttachOutcome::Attached"
-    );
-}
 
 // ── 13. TARGET-SCAN WIRING (a): list_targets is the LIVE pane-discovery primitive ───────────────
 // WAVE-2 Lane C. `list_targets` (the `tmux list-panes -a` scan, locked argv/parse in test #11) has
@@ -2814,13 +1875,7 @@ impl CommandRunner for FoldedPasteRunner {
         Ok(ok(&stdout))
     }
 
-    fn run_with_stdin(
-        &self,
-        argv: &[String],
-        _stdin: &str,
-    ) -> Result<CommandOutput, std::io::Error> {
-        self.run(argv)
-    }
+
 }
 
 fn backend_folded(pre_submit: &str, post_submit: &str) -> (TmuxBackend, RecordedArgv) {
@@ -2835,208 +1890,12 @@ fn backend_folded(pre_submit: &str, post_submit: &str) -> (TmuxBackend, Recorded
 }
 
 /// 修复前尺子：token 不在底部 15 行 ⇒ consumed。折叠占位符会打中这条恒真。
-fn unfixed_vacuous_consumed(text: &str, marker: &str) -> bool {
-    !super::token_in_bottom_n(text, marker, 15)
-}
 
-#[test]
-fn pasted_signal_unfixed_predicate_treats_folded_placeholder_as_consumed() {
-    let folded = "❯ [Pasted text #1 +8 lines]\n";
-    let marker = "[team-agent-token:msg_fold]";
-    assert!(
-        unfixed_vacuous_consumed(folded, marker),
-        "causal: pre-fix !token_in_bottom_n is vacuously true on a folded composer"
-    );
-}
 
-#[test]
-fn pasted_signal_token_sighting_table() {
-    use super::TokenSighting::{Gone, NeverSeen, Visible};
-    let cases = [
-        ("never_seen", false, false, NeverSeen),
-        ("gone", false, true, Gone),
-        ("visible", true, true, Visible),
-        ("gone_grok", false, true, Gone),
-    ];
-    for (id, visible, seen, expected) in cases {
-        assert_eq!(super::token_sighting(visible, seen), expected, "{id}");
-    }
-}
 
-#[test]
-fn pasted_signal_consumption_table() {
-    use super::PasteLatch::{GrokLineCount, HashId};
-    // Input: capture, marker, previously seen, tracked paste. Expected is Some(bool),
-    // not a truthiness check: None must still fail these consumption contracts.
-    type Input<'a> = (&'a str, &'a str, bool, Option<super::PasteLatch>);
-    let marker = "[team-agent-token:msg_short]";
-    let still = format!("❯ ping {marker}\n");
-    let cases: &[(&str, Input<'_>, bool, &str)] = &[
-        ("folded_hash_stays",
-            ("❯ [Pasted text #1 +8 lines]\n", "[team-agent-token:msg_fold]", false, Some(HashId(1))), false,
-            "post-fix NeverSeen + #1 still in composer must NOT be consumed"),
-        ("never_seen_empty",
-            ("", "[team-agent-token:msg_empty]", false, None), false, ""),
-        ("hash_id_gone",
-            ("assistant reply\n❯ \n", "[team-agent-token:msg_fold]", false, Some(HashId(7))), true,
-            "NeverSeen but latched #7 left composer ⇒ consumed (positive signal)"),
-        ("hash_id_replaced",
-            ("❯ [Pasted text #2 +3 lines]\n", "[team-agent-token:msg_fold]", false, Some(HashId(1))), true,
-            "our #1 gone, a later #2 in composer still means ours submitted"),
-        ("no_hash_latch",
-            ("❯ \n", "[team-agent-token:msg_fold]", false, None), false,
-            "no #N latched: disappearance is unverified, not consumed"),
-        ("seen_token_gone",
-            ("❯ \n", "[team-agent-token:msg_short]", true, None), true, ""),
-        ("seen_token_visible",
-            (&still, "[team-agent-token:msg_short]", true, None), false, ""),
-        ("grok_lines_stay",
-            (GROK_INCIDENT_LINE, "[team-agent-token:msg_grok]", false, Some(GrokLineCount(42))), false, ""),
-        ("grok_lines_gone",
-            ("Waiting for response\n❯ \n", "[team-agent-token:msg_grok]", false, Some(GrokLineCount(42))), true, ""),
-        ("grok_lines_mismatch",
-            ("│ ❯ [Pasted: 10 lines]           │", "[team-agent-token:msg_grok]", false, Some(GrokLineCount(42))), false,
-            "different N must not claim the latched paste consumed"),
-        // 悬案B：Gone 仍有 grok 占位符；修前 Gone 无条件 Some(true)。
-        ("gone_grok_lines_stay",
-            ("some transcript line\n> [Pasted: 27 lines]\nEnter:send  Esc:cancel\n", "[team-agent-token:deadbeef]", true, Some(GrokLineCount(27))), false,
-            "Gone must re-check PasteLatch: placeholder still in composer must not be consumed, got {got:?}"),
-        ("gone_grok_kb_stay",
-            ("│ ❯ [Pasted: 13 KB]                                                          │\n Enter:send\n", "[team-agent-token:kbform]", true, Some(GrokLineCount(13))), false,
-            "Gone + [Pasted: 13 KB] still in composer must not be consumed, got {got:?}"),
-    ];
-    for &(id, (text, marker, seen, tracked), expected, note) in cases {
-        let got = super::consumption_from_capture(text, marker, seen, tracked);
-        assert_eq!(got, Some(expected), "{id}: {note}; got={got:?}");
-    }
-}
 
-#[test]
-fn pasted_signal_marker_some_observation_records_composer_placeholder() {
-    use crate::transport::CapturedText;
-    let cap = CapturedText {
-        text: "❯ [Pasted text #4 +12 lines]\n".to_string(),
-        range: CaptureRange::Tail(40),
-    };
-    let obs = super::submit_attempt_observation(1, &cap, Some("[team-agent-token:msg_x]"), 10);
-    assert!(
-        obs.matched,
-        "marker Some must still walk pasted_prompt_match / composer placeholder; obs={obs:?}"
-    );
-    assert_eq!(obs.matched_literal.as_deref(), Some("pasted text"));
-}
 
-#[test]
-fn pasted_signal_submit_verification_table() {
-    use SubmitVerification::{EnterSentWithoutPlaceholderCheck, SubmitConsumptionUnverified};
-    struct Case {
-        id: &'static str,
-        // Payload, pre-submit capture, post-submit capture, clear-after-N-enters.
-        // None uses FoldedPasteRunner; Some(N) uses NthEnterClearRunner.
-        input: (String, String, String, Option<u32>),
-        // Verification, Enter count, paste-buffer count. None preserves no assertion.
-        expected: (SubmitVerification, Option<usize>, Option<usize>),
-        notes: [&'static str; 3],
-    }
-    let placeholder = "❯ [Pasted text #4 +6 lines]\n";
-    let short_ok = "ping [team-agent-token:msg_short_ok]";
-    let short_stay = "ping [team-agent-token:msg_short_stay]";
-    let marker = "[team-agent-token:msg_wrap_ok]";
-    let wrapped_payload = format!("Team Agent message from leader:\nline1\n\n{marker}");
-    let wrapped = wrapped_identity_with_skin(marker, "> ");
-    let marker = "[team-agent-token:msg_cap_lock]";
-    let cap_lock_payload = format!("Team Agent message from leader:\nline1\n\n{marker}");
-    let cap_lock = wrapped_identity_with_skin(marker, "ready.");
-    let marker = "[team-agent-token:msg_busy_nodup]";
-    let busy_payload = format!("Team Agent message from leader:\nline1 composer> ❯\n\n{marker}");
-    let busy = "STARTED\nsleep holds pty\ncomposer>\n❯\n>\n";
-    let marker = "[team-agent-token:msg_payload_glyph]";
-    let glyphs_payload = format!("Team Agent message from leader:\ncomposer> ❯\n\n{marker}");
-    let glyphs = "output\ncomposer> leftover from payload\n❯ quoted\n";
-    let mut cases = vec![
-        Case { id: "folded_stays",
-            input: ("Team Agent message from leader:\nline1\nline2\nline3\nline4\nline5\n\n[team-agent-token:msg_fold_stay]".into(), placeholder.into(), placeholder.into(), None),
-            expected: (SubmitConsumptionUnverified, None, None),
-            notes: ["folded + Enter not effective (#4 stays) must be unverified; got {:?}", "", ""] },
-        // 只有 #4 离开 composer；不加 Working，否则 busy 升级会让半三不经正信号就绿。
-        Case { id: "folded_gone",
-            input: ("Team Agent message from leader:\nline1\nline2\nline3\nline4\nline5\n\n[team-agent-token:msg_fold_go]".into(), placeholder.into(), "assistant reply\n❯ \n".into(), None),
-            expected: (EnterSentWithoutPlaceholderCheck, None, None),
-            notes: ["folded + Enter effective (#4 left composer) must be consumed; got {:?}", "", ""] },
-        Case { id: "short_gone",
-            input: (short_ok.into(), short_ok.into(), "❯ \n".into(), None),
-            expected: (EnterSentWithoutPlaceholderCheck, None, None),
-            notes: ["short visible token then gone must stay consumed; got {:?}", "", ""] },
-        Case { id: "short_visible",
-            input: (short_stay.into(), short_stay.into(), short_stay.into(), None),
-            expected: (SubmitConsumptionUnverified, None, None),
-            notes: ["short visible token still in composer must stay unverified; got {:?}", "", ""] },
-        Case { id: "grok_stays",
-            input: ("Team Agent message from leader:\nline1\n\n[team-agent-token:msg_grok_stay]".into(), GROK_INCIDENT_LINE.into(), GROK_INCIDENT_LINE.into(), None),
-            expected: (SubmitConsumptionUnverified, Some(3), None),
-            notes: ["", "same grok N still in composer must retry Enter up to cap=3; Unverified B must not add a 4th; invert wrap-gap guard must turn this red; calls={calls:?}", ""] },
-        Case { id: "grok_gone",
-            input: ("Team Agent message from leader:\nline1\n\n[team-agent-token:msg_grok_go]".into(), GROK_INCIDENT_LINE.into(), "Waiting for response\n❯ \n".into(), None),
-            expected: (EnterSentWithoutPlaceholderCheck, Some(1), None),
-            notes: ["", "fold left composer after one Enter; no empty-composer hammer; calls={calls:?}", ""] },
-        Case { id: "wrapped_resend_consumes",
-            input: (wrapped_payload, wrapped, "> \n".into(), Some(2)),
-            expected: (EnterSentWithoutPlaceholderCheck, Some(2), Some(1)),
-            notes: ["Unverified + wrapped identity must resend one C-m then consume; got {:?}", "exactly one extra C-m after Unverified; calls={calls:?}", "must not re-paste; paste-buffer count={pastes}"] },
-        Case { id: "identity_absent",
-            input: (busy_payload, busy.into(), busy.into(), Some(99)),
-            expected: (SubmitConsumptionUnverified, Some(1), None),
-            notes: ["identity absent must stay Unverified, no extra Enter; got {:?}", "no this-paste identity ⇒ no Unverified resend; commenting the identity gate must turn this red (2+ C-m); calls={calls:?}", ""] },
-        Case { id: "identity_resend_cap",
-            input: (cap_lock_payload, cap_lock.clone(), cap_lock, Some(u32::MAX)),
-            expected: (SubmitConsumptionUnverified, Some(2), Some(1)),
-            notes: ["never-clear identity must not fake-consume; got {:?}", "cap must be exactly one extra C-m (1 inject + 1 resend); raising UNVERIFIED_COMPOSER_RESEND_MAX must turn this red; calls={calls:?}", "must not re-paste; paste-buffer count={pastes}"] },
-        Case { id: "payload_glyphs",
-            input: (glyphs_payload, glyphs.into(), glyphs.into(), Some(99)),
-            expected: (SubmitConsumptionUnverified, Some(1), None),
-            notes: ["", "glyphs in payload must not cause extra C-m when token identity is gone; calls={calls:?}", ""] },
-    ];
-    for (id, skin) in [
-        ("skin_arrow", "❯ "),
-        ("skin_greater_than", "> "),
-        ("skin_ready", "ready."),
-    ] {
-        let marker = format!("[team-agent-token:msg_skin_{}]", skin.chars().next().unwrap() as u32);
-        cases.push(Case {
-            id,
-            input: (format!("Team Agent message from leader:\nline1\n\n{marker}"),
-                wrapped_identity_with_skin(&marker, skin), format!("{skin}\n"), Some(2)),
-            expected: (EnterSentWithoutPlaceholderCheck, Some(2), None),
-            notes: ["skin {skin:?} must consume after one extra C-m", "skin {skin:?} extra C-m; got {n}", ""],
-        });
-    }
-    for case in cases {
-        let (payload, pre, post, clear_after) = case.input;
-        let (be, rec) = match clear_after {
-            Some(n) => backend_clears_after_n_enters(&pre, &post, n),
-            None => backend_folded(&pre, &post),
-        };
-        let report = be.inject(
-            &Target::Pane(PaneId::new("%7")), &InjectPayload::Text(payload), Key::Enter, true,
-        ).expect("inject");
-        let (verification, enters, pastes) = case.expected;
-        assert_eq!(report.submit_verification, verification,
-            "{}: {}; pre={pre:?}", case.id, case.notes[0]);
-        if enters.is_some() || pastes.is_some() {
-            let calls = rec.lock().unwrap().clone();
-            if let Some(enters) = enters {
-                assert_eq!(count_submit_enters(&calls), enters,
-                    "{}: {}; calls={calls:?}", case.id, case.notes[1]);
-            }
-            if let Some(pastes) = pastes {
-                let actual = calls.iter()
-                    .filter(|argv| argv.get(1).map(String::as_str) == Some("paste-buffer"))
-                    .count();
-                assert_eq!(actual, pastes, "{}: {}; calls={calls:?}", case.id, case.notes[2]);
-            }
-        }
-    }
-}
+
 
 fn count_submit_enters(calls: &[Vec<String>]) -> usize {
     calls
@@ -3091,13 +1950,7 @@ impl CommandRunner for ModePasteRunner {
         Ok(ok(&stdout))
     }
 
-    fn run_with_stdin(
-        &self,
-        argv: &[String],
-        _stdin: &str,
-    ) -> Result<CommandOutput, std::io::Error> {
-        self.run(argv)
-    }
+
 }
 
 fn backend_mode(pane_mode: &str, token_text: &str) -> (TmuxBackend, RecordedArgv) {
@@ -3148,219 +2001,13 @@ fn inject_token_for(tag: &str) -> String {
     format!("ping [team-agent-token:msg_{tag}]")
 }
 
-/// PR-18: tree-mode 必须在第一次 Enter 前 send-keys q。修坏：只对 Copy|Unknown cancel。
-#[test]
-fn inject_cancels_tree_mode_with_q_before_enter() {
-    let token = inject_token_for("tree_q");
-    let (be, rec) = backend_mode("tree-mode", &token);
-    with_paste_to_submit_floor(Duration::ZERO, || {
-        be.inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token.clone()),
-            Key::Enter,
-            false,
-        )
-    })
-    .expect("inject");
-    let calls = rec.lock().unwrap().clone();
-    assert_no_e55_keys(&calls);
-    let before = inject_send_keys_before_first_enter(&calls);
-    assert!(
-        before
-            .iter()
-            .any(|argv| argv.iter().any(|a| a == "q") && !argv.iter().any(|a| a == "-X")),
-        "tree-mode must send-keys q before first Enter; before={before:?} calls={calls:?}"
-    );
-    assert!(
-        !before.iter().any(|argv| argv.iter().any(|a| a == "-X")),
-        "tree-mode must not use copy-mode -X cancel; before={before:?}"
-    );
-    assert_eq!(
-        count_submit_enters(&calls),
-        1,
-        "consumed after cancel+Enter; calls={calls:?}"
-    );
-}
 
-/// copy-mode 回归：仍走 -X cancel，不得改成 q。
-#[test]
-fn inject_cancels_copy_mode_with_x_cancel_before_enter() {
-    let token = inject_token_for("copy_x");
-    let (be, rec) = backend_mode("copy-mode", &token);
-    with_paste_to_submit_floor(Duration::ZERO, || {
-        be.inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token.clone()),
-            Key::Enter,
-            false,
-        )
-    })
-    .expect("inject");
-    let calls = rec.lock().unwrap().clone();
-    assert_no_e55_keys(&calls);
-    let before = inject_send_keys_before_first_enter(&calls);
-    assert!(
-        before
-            .iter()
-            .any(|argv| argv.iter().any(|a| a == "-X") && argv.iter().any(|a| a == "cancel")),
-        "copy-mode must keep -X cancel before Enter; before={before:?} calls={calls:?}"
-    );
-}
 
-/// pane_mode=0 是输入就绪，不得 cancel。
-#[test]
-fn inject_skips_cancel_when_pane_mode_is_zero() {
-    let token = inject_token_for("mode0");
-    let (be, rec) = backend_mode("0", &token);
-    with_paste_to_submit_floor(Duration::ZERO, || {
-        be.inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token.clone()),
-            Key::Enter,
-            false,
-        )
-    })
-    .expect("inject");
-    let calls = rec.lock().unwrap().clone();
-    assert_no_e55_keys(&calls);
-    let before = inject_send_keys_before_first_enter(&calls);
-    assert!(
-        !before
-            .iter()
-            .any(|argv| argv.iter().any(|a| a == "q" || a == "-X")),
-        "pane_mode=0 must not send mode-cancel; before={before:?}"
-    );
-    // 用户裁定 2026-08-23：不发 ESC，也不发 ESC 的替代品（含字面 CSI 201~）。翻面同上。
-    assert!(
-        !before
-            .iter()
-            .any(|argv| argv.iter().any(|a| a.contains('\u{1b}'))),
-        "mode=0 must not send any ESC/CSI byte before Enter; before={before:?}"
-    );
-}
 
-#[test]
-fn inject_cancels_view_mode_with_q_before_enter() {
-    let token = inject_token_for("view_q");
-    let (be, rec) = backend_mode("view-mode", &token);
-    with_paste_to_submit_floor(Duration::ZERO, || {
-        be.inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token.clone()),
-            Key::Enter,
-            false,
-        )
-    })
-    .expect("inject");
-    let calls = rec.lock().unwrap().clone();
-    assert_no_e55_keys(&calls);
-    let before = inject_send_keys_before_first_enter(&calls);
-    assert!(
-        before
-            .iter()
-            .any(|argv| argv.last().map(String::as_str) == Some("q")),
-        "view-mode must send-keys q before Enter; before={before:?}"
-    );
-}
 
-#[test]
-fn inject_cancels_client_mode_with_d_before_enter() {
-    let token = inject_token_for("client_d");
-    let (be, rec) = backend_mode("client-mode", &token);
-    with_paste_to_submit_floor(Duration::ZERO, || {
-        be.inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token.clone()),
-            Key::Enter,
-            false,
-        )
-    })
-    .expect("inject");
-    let calls = rec.lock().unwrap().clone();
-    assert_no_e55_keys(&calls);
-    let before = inject_send_keys_before_first_enter(&calls);
-    assert!(
-        before
-            .iter()
-            .any(|argv| argv.last().map(String::as_str) == Some("d")),
-        "client-mode must send-keys d before Enter; before={before:?}"
-    );
-}
 
-/// 用户裁定 2026-08-23：不发 ESC，也不发 ESC 的替代品（含字面 CSI 201~）。
-/// 发 ESC/CSI 的唯一好处是让消息当场直接上屏；本项目只要求「下一次工具调用时能上屏」
-/// ⇒ 不存在需要它才能满足的场景，发它没有收益，只有污染 composer 输入的风险。
-/// 本判据由「必须发 201~」翻面为「Enter 前不得发任何 ESC/CSI 字节」。
-#[test]
-fn inject_sends_no_escape_bytes_before_enter() {
-    let token = inject_token_for("paste201");
-    let (be, rec) = backend_mode("0", &token);
-    with_paste_to_submit_floor(Duration::ZERO, || {
-        be.inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token.clone()),
-            Key::Enter,
-            true,
-        )
-    })
-    .expect("inject");
-    let calls = rec.lock().unwrap().clone();
-    assert_no_e55_keys(&calls);
-    let before = inject_send_keys_before_first_enter(&calls);
-    assert!(
-        !before
-            .iter()
-            .any(|argv| argv.iter().any(|a| a.contains('\u{1b}'))),
-        "no ESC/CSI byte may be sent before Enter; before={before:?}"
-    );
-}
 
-/// A1 Empty / trust 路径也必须经过 prepare。
-#[test]
-fn empty_inject_cancels_tree_mode_before_cm() {
-    let (be, rec) = backend_mode("tree-mode", "");
-    be.inject(
-        &Target::Pane(PaneId::new("%7")),
-        &InjectPayload::Empty,
-        Key::Enter,
-        false,
-    )
-    .expect("empty inject");
-    let calls = rec.lock().unwrap().clone();
-    assert_no_e55_keys(&calls);
-    let before = inject_send_keys_before_first_enter(&calls);
-    assert!(
-        before
-            .iter()
-            .any(|argv| argv.last().map(String::as_str) == Some("q")),
-        "A1 Empty must cancel tree-mode before C-m; before={before:?} calls={calls:?}"
-    );
-}
 
-/// A3 skip-consumption（leader 投递）也必须经过 prepare。
-#[test]
-fn skip_consumption_cancels_tree_mode_before_cm() {
-    let token = inject_token_for("skip_tree");
-    let (be, rec) = backend_mode("tree-mode", &token);
-    with_paste_to_submit_floor(Duration::ZERO, || {
-        be.inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::TextSkipConsumptionPoll(token.clone()),
-            Key::Enter,
-            false,
-        )
-    })
-    .expect("skip inject");
-    let calls = rec.lock().unwrap().clone();
-    assert_no_e55_keys(&calls);
-    let before = inject_send_keys_before_first_enter(&calls);
-    assert!(
-        before
-            .iter()
-            .any(|argv| argv.last().map(String::as_str) == Some("q")),
-        "A3 skip-poll must cancel tree-mode before C-m; before={before:?}"
-    );
-}
 
 /// A6 send_keys([Enter]) 与 C 块 8 个调用方：含 Enter 的键组先 prepare。
 #[test]
@@ -3445,13 +2092,7 @@ impl CommandRunner for RawThenFoldRunner {
         Ok(ok(&stdout))
     }
 
-    fn run_with_stdin(
-        &self,
-        argv: &[String],
-        _stdin: &str,
-    ) -> Result<CommandOutput, std::io::Error> {
-        self.run(argv)
-    }
+
 }
 
 fn backend_raw_then_fold(
@@ -3473,38 +2114,8 @@ fn backend_raw_then_fold(
     (TmuxBackend::with_runner(Box::new(runner)), recorded)
 }
 
-#[test]
-fn grok_fold_literal_locks_external_team_line() {
-    let prompt =
-        super::pasted_prompt_in_composer(GROK_INCIDENT_LINE, 15).expect("lock grok incident line");
-    assert_eq!(prompt.literal, "pasted:");
-    assert_eq!(prompt.id, None, "grok fold has no #N");
-    assert_eq!(prompt.line_count, Some(42));
-    let matched = super::pasted_prompt_match(GROK_INCIDENT_LINE).expect("match");
-    assert_eq!(matched.0, "pasted:");
-}
 
-#[test]
-fn grok_fold_three_tui_literals_lock() {
-    let grok = super::pasted_prompt_in_composer(GROK_INCIDENT_LINE, 15).unwrap();
-    let claude = super::pasted_prompt_in_composer("❯ [Pasted text #4 +12 lines]\n", 15).unwrap();
-    let codex = super::pasted_prompt_in_composer("❯ [Pasted content #2 +3 lines]\n", 15).unwrap();
-    assert_eq!(grok.literal, "pasted:");
-    assert_eq!(claude.literal, "pasted text");
-    assert_eq!(claude.id, Some(4));
-    assert_eq!(codex.literal, "pasted content");
-    assert_eq!(codex.id, Some(2));
-}
 
-#[test]
-fn grok_fold_different_n_is_not_same_paste() {
-    let marker = "[team-agent-token:msg_grok]";
-    let other = "│ ❯ [Pasted: 10 lines]           │";
-    assert!(
-        !super::should_resubmit_enter(other, marker, Some(super::PasteLatch::GrokLineCount(42))),
-        "different N is not the same paste; do not hammer Enter"
-    );
-}
 
 /// 2026-08-21 真机屏尾：折叠占位符还在 transcript，Working 已开。
 /// 非 cursor 路径会把 pasted #N 当成未消费而连按 Enter。
@@ -3520,359 +2131,20 @@ const CURSOR_BUSY_AFTER_SUBMIT: &str = "\
 \n\
   Cursor Grok 4.6 Extra High                                    Run Everything\n";
 
-#[test]
-fn cursor_single_enter_busy_transcript_placeholder_does_not_retry() {
-    let token_text = "Team Agent message from leader:\nline1\n\n[team-agent-token:msg_cur_busy]";
-    let (be, rec) = backend_folded("[Pasted text #1 +46 lines]\n", CURSOR_BUSY_AFTER_SUBMIT);
-    let report = with_cursor_single_enter(true, || {
-        be.inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token_text.to_string()),
-            Key::Enter,
-            true,
-        )
-    })
-    .expect("inject");
-    assert_eq!(
-        report.submit_verification,
-        SubmitVerification::EnterSentWithoutPlaceholderCheck,
-        "busy after first Enter is consumption for cursor; got {:?}",
-        report.submit_verification
-    );
-    let diagnostics = report.submit_diagnostics.expect("diagnostics");
-    assert_eq!(
-        diagnostics.consumption_reason,
-        SubmitConsumptionReason::CursorPollingBusy
-    );
-    assert_eq!(diagnostics.busy_signal_kind, Some(BusySignalKind::Working));
-    assert!(diagnostics.busy_line_from_bottom.is_some());
-    assert!(diagnostics.current_marker_in_bottom_15.is_some());
-    assert!(diagnostics.consumption_from_capture_result.is_some());
-    let calls = rec.lock().unwrap().clone();
-    assert_eq!(
-        count_submit_enters(&calls),
-        1,
-        "cursor busy: at most one Enter; extra Enter interrupts. calls={calls:?}"
-    );
-}
 
-#[test]
-fn cursor_single_enter_off_still_retries_on_transcript_placeholder() {
-    let token_text = "Team Agent message from leader:\nline1\n\n[team-agent-token:msg_cur_ctrl]";
-    let (be, rec) = backend_folded("[Pasted text #1 +46 lines]\n", CURSOR_BUSY_AFTER_SUBMIT);
-    let _report = be
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token_text.to_string()),
-            Key::Enter,
-            true,
-        )
-        .expect("inject");
-    let calls = rec.lock().unwrap().clone();
-    assert_eq!(
-        count_submit_enters(&calls),
-        3,
-        "default path (claude/grok/codex) must keep retry cap; calls={calls:?}"
-    );
-}
 
-#[test]
-fn cursor_single_enter_retries_only_if_token_still_in_input() {
-    let marker = "[team-agent-token:msg_cur_idle]";
-    let token_text = format!("Team Agent message from leader:\nline1\n\n{marker}");
-    let still_in_input = format!("{marker}\n→ \n");
-    let (be, rec) = backend_folded(still_in_input.as_str(), still_in_input.as_str());
-    let _report = with_cursor_single_enter(true, || {
-        be.inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token_text),
-            Key::Enter,
-            true,
-        )
-    })
-    .expect("inject");
-    let calls = rec.lock().unwrap().clone();
-    let n = count_submit_enters(&calls);
-    assert!(
-        n >= 2,
-        "token still in cursor input box (no busy) may retry Enter; got {n} calls={calls:?}"
-    );
-}
 
-#[test]
-fn cursor_should_resubmit_false_when_busy_even_if_paste_placeholder_visible() {
-    let marker = "[team-agent-token:msg_cur_gate]";
-    assert!(
-        !super::should_resubmit_enter_cursor(CURSOR_BUSY_AFTER_SUBMIT, marker),
-        "busy + transcript placeholder must not resubmit on cursor"
-    );
-    assert!(
-        super::should_resubmit_enter(
-            CURSOR_BUSY_AFTER_SUBMIT,
-            marker,
-            Some(super::PasteLatch::HashId(1))
-        ),
-        "non-cursor detector still sees latched #1 as resubmit"
-    );
-}
 
-#[test]
-fn grok_fold_unverified_without_identity_one_enter() {
-    let token_text = "Team Agent message from leader:\nhi\n\n[team-agent-token:msg_grok_empty]";
-    let (be, rec) = backend_with(MockResp::Out(ok("")), vec![]);
-    let report = be
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token_text.to_string()),
-            Key::Enter,
-            true,
-        )
-        .expect("inject");
-    assert_eq!(
-        report.submit_verification,
-        SubmitVerification::SubmitConsumptionUnverified
-    );
-    let calls = rec.lock().unwrap().clone();
-    assert_eq!(
-        count_submit_enters(&calls),
-        1,
-        "no latch / empty composer: one Enter then stop; calls={calls:?}"
-    );
-}
 
-#[test]
-fn grok_fold_does_not_enter_before_fold_on_raw_tall_paste() {
-    let marker = "[team-agent-token:msg_grok_early]";
-    let token_text = format!(
-        "Team Agent message from leader:\n{}\n\n{marker}",
-        "x\n".repeat(20)
-    );
-    let raw = grok_raw_unfolded_paste(marker);
-    assert!(
-        !super::paste_ready_for_enter(&raw, marker),
-        "raw tall paste with token is not ready"
-    );
-    assert!(super::paste_ready_for_enter(GROK_INCIDENT_LINE, marker));
-    let (be, rec) =
-        backend_raw_then_fold(&raw, GROK_INCIDENT_LINE, "Waiting for response\n❯ \n", 2);
-    let report = be
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token_text),
-            Key::Enter,
-            true,
-        )
-        .expect("inject");
-    assert_eq!(
-        report.submit_verification,
-        SubmitVerification::EnterSentWithoutPlaceholderCheck
-    );
-    let calls = rec.lock().unwrap().clone();
-    let submit_index = calls
-        .iter()
-        .position(|argv| {
-            argv.get(1).map(String::as_str) == Some("send-keys")
-                && argv.iter().any(|a| a == "C-m" || a == "Enter")
-        })
-        .expect("must submit");
-    let captures_before: Vec<&Vec<String>> = calls[..submit_index]
-        .iter()
-        .filter(|argv| argv.get(1).map(String::as_str) == Some("capture-pane"))
-        .collect();
-    assert!(
-        captures_before.len() > 2,
-        "must keep polling until fold, not Enter on first token; calls={calls:?}"
-    );
-    assert_eq!(count_submit_enters(&calls), 1);
-}
 
-#[test]
-fn grok_kb_placeholder_parser_preserves_literal_and_line_count() {
-    let cap = "│ ❯ [Pasted: 13 KB]                                                          │\n Enter:send\n";
-    let prompt = super::pasted_prompt_in_composer(cap, 15).expect("KB form is grok fold");
-    assert_eq!(prompt.literal, "pasted:");
-    assert_eq!(prompt.line_count, Some(13));
-}
 
-/// 样本#5 归因钉：重试只重按 Enter，不得再 load/set/paste-buffer。
-#[test]
-fn grok_fold_raw_then_fold_placeholder_stays_retries_enter_not_repaste() {
-    let marker = "[team-agent-token:msg_grok_reappear]";
-    let token_text = format!(
-        "Team Agent message from leader:\n{}\n\n{marker}",
-        "x\n".repeat(20)
-    );
-    let raw = grok_raw_unfolded_paste(&marker);
-    let (be, rec) = backend_raw_then_fold(&raw, GROK_INCIDENT_LINE, GROK_INCIDENT_LINE, 2);
-    let report = be
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token_text),
-            Key::Enter,
-            true,
-        )
-        .expect("inject");
-    assert_eq!(
-        report.submit_verification,
-        SubmitVerification::SubmitConsumptionUnverified,
-        "raw visible then folded, placeholder stays: must not false-green delivered; got {:?}",
-        report.submit_verification
-    );
-    let calls = rec.lock().unwrap().clone();
-    let enters = count_submit_enters(&calls);
-    assert!(
-        enters >= 2,
-        "placeholder still in composer must retry Enter; got {enters} calls={calls:?}"
-    );
-    let paste_n = count_paste_stage(&calls);
-    let first_enter = calls.iter().position(|argv| {
-        argv.get(1).map(String::as_str) == Some("send-keys")
-            && argv.iter().any(|a| a == "C-m" || a == "Enter")
-    });
-    let paste_after_enter = first_enter.map(|i| {
-        calls[i + 1..]
-            .iter()
-            .filter(|argv| {
-                matches!(
-                    argv.get(1).map(String::as_str),
-                    Some("load-buffer") | Some("set-buffer") | Some("paste-buffer")
-                )
-            })
-            .count()
-    });
-    assert_eq!(
-        paste_after_enter,
-        Some(0),
-        "retry must not re-paste (inject contract); paste_n={paste_n} calls={calls:?}"
-    );
-}
 
-#[test]
-fn grok_fold_worker_text_payload_polls_consumption() {
-    assert!(
-        !InjectPayload::Text("worker [team-agent-token:x]".to_string()).skip_consumption_poll(),
-        "worker Text path poll_consumption=true; submit_attempt_limit is 3 not 1"
-    );
-    assert!(
-        InjectPayload::TextSkipConsumptionPoll("leader [team-agent-token:x]".to_string())
-            .skip_consumption_poll(),
-        "leader skip path is the only poll_consumption=false arm"
-    );
-}
 
-#[test]
-fn provider_busy_signal_match_preserves_category_priority_and_tail_boundary() {
-    let cases = [
-        ("working", BusySignalKind::Working),
-        ("thinking", BusySignalKind::Thinking),
-        ("processing", BusySignalKind::Processing),
-        ("esc to interrupt", BusySignalKind::EscToInterrupt),
-        ("⠋", BusySignalKind::SpinnerGlyph),
-        ("working ⠋", BusySignalKind::Working),
-    ];
-    for (text, expected) in cases {
-        let matched = super::provider_busy_signal_match(text).expect("busy match");
-        assert_eq!(matched.kind, expected, "text={text:?}");
-        assert_eq!(matched.line_from_bottom, 0, "text={text:?}");
-        assert!(super::provider_busy_signal_in_tail(text));
-    }
-
-    let inside_bottom_15 = std::iter::once("working".to_string())
-        .chain((0..14).map(|index| format!("tail-{index}")))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let matched = super::provider_busy_signal_match(&inside_bottom_15).expect("15th line");
-    assert_eq!(matched.kind, BusySignalKind::Working);
-    assert_eq!(matched.line_from_bottom, 14);
-
-    let outside_bottom_15 = std::iter::once("working".to_string())
-        .chain((0..15).map(|index| format!("tail-{index}")))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(super::provider_busy_signal_match(&outside_bottom_15).is_none());
-    assert!(!super::provider_busy_signal_in_tail(&outside_bottom_15));
-}
 
 const G4_TOKEN: &str = "[team-agent-token:msg_g4]";
 
-#[test]
-fn g4_turn_verification_table() {
-    use TurnVerification::{LeaderNewTurnBoundaryMissing, LeaderNewTurnBoundaryVerified, NotYetObserved};
-    let cursor = format!("❯ {G4_TOKEN}");
-    let cases = [
-        ("grok_pending", "│ ❯ [Pasted: 42 lines]           │", LeaderNewTurnBoundaryMissing, ""),
-        ("claude_pending", "❯ pasted text #4 +12 lines", LeaderNewTurnBoundaryMissing, ""),
-        ("cursor_pending", cursor.as_str(), LeaderNewTurnBoundaryMissing, ""),
-        ("claude_busy", "✶ Thinking…\nesc to interrupt", LeaderNewTurnBoundaryVerified, ""),
-        ("cursor_busy", "processing\n❯ ", LeaderNewTurnBoundaryVerified, ""),
-        ("grok_busy", "working\n❯ ", LeaderNewTurnBoundaryVerified, ""),
-        ("empty_unknown", "❯ ", NotYetObserved, "empty composer and no busy is 不知道, never 开跑"),
-    ];
-    for (id, text, expected, note) in cases {
-        assert_eq!(observe_turn_from_capture(text, Some(G4_TOKEN)), expected, "{id}: {note}");
-    }
-}
 
-#[test]
-fn g4_turn_inject_grok_incident_line_does_not_report_started() {
-    let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_g4_inject]";
-    let (be, _rec) = backend_with(MockResp::Out(ok(GROK_INCIDENT_LINE)), vec![]);
-    let report = be
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token_text.to_string()),
-            Key::Enter,
-            true,
-        )
-        .expect("inject runs");
-    assert_ne!(
-        report.turn_verification,
-        TurnVerification::LeaderNewTurnBoundaryVerified,
-        "unsubmitted grok paste must not report 开跑"
-    );
-    assert_eq!(
-        report.turn_verification,
-        TurnVerification::LeaderNewTurnBoundaryMissing
-    );
-    assert_eq!(
-        report.submit_verification,
-        SubmitVerification::SubmitConsumptionUnverified
-    );
-}
 
-#[test]
-fn g4_turn_inject_consumed_without_busy_is_unknown() {
-    let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_g4_gone]";
-    let visible = ok(token_text);
-    let queued = vec![
-        MockResp::Out(ok("")),
-        MockResp::Out(ok("")),
-        MockResp::Out(ok("")),
-        MockResp::Out(visible.clone()),
-        MockResp::Out(visible),
-        MockResp::Out(ok("")),
-        MockResp::Out(ok("")),
-    ];
-    let (be, _rec) = backend_with(MockResp::Out(ok("❯ ")), queued);
-    let report = be
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token_text.to_string()),
-            Key::Enter,
-            true,
-        )
-        .expect("inject runs");
-    assert_eq!(
-        report.submit_verification,
-        SubmitVerification::EnterSentWithoutPlaceholderCheck,
-        "token gone is still consumed/delivered; that is not 开跑"
-    );
-    assert_eq!(
-        report.turn_verification,
-        TurnVerification::NotYetObserved,
-        "composer empty without busy is 不知道, not 开跑"
-    );
-}
 
 /// capture-pane 一律失败；其它 tmux 命令成功。用于「读数拿不到」而不是「读数不一样」。
 struct CapturePaneFailRunner {
@@ -3891,13 +2163,7 @@ impl CommandRunner for CapturePaneFailRunner {
         Ok(ok(""))
     }
 
-    fn run_with_stdin(
-        &self,
-        argv: &[String],
-        _stdin: &str,
-    ) -> Result<CommandOutput, std::io::Error> {
-        self.run(argv)
-    }
+
 }
 
 fn backend_capture_pane_fail() -> (TmuxBackend, RecordedArgv) {
@@ -3908,80 +2174,7 @@ fn backend_capture_pane_fail() -> (TmuxBackend, RecordedArgv) {
     (TmuxBackend::with_runner(Box::new(runner)), recorded)
 }
 
-/// P0 unknown-not-success: capture() Err 是「没能判断」，不得与 Some(true) 同值。
-/// 齿覆盖「读数拿不到」，不是「读数不一样」。
-#[test]
-fn p0_capture_failure_is_unverified_not_enter_sent() {
-    let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_cap_fail]";
-    let (be, rec) = backend_capture_pane_fail();
-    let report = be
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token_text.to_string()),
-            Key::Enter,
-            true,
-        )
-        .expect("inject runs");
-    assert_eq!(
-        report.submit_verification,
-        SubmitVerification::SubmitConsumptionUnverified,
-        "consumed=None (capture missing) must not share \
-         EnterSentWithoutPlaceholderCheck with Some(true); got {:?}",
-        report.submit_verification
-    );
-    assert!(
-        !crate::messaging::delivery::inject_submit_verified(&report),
-        "no positive consumption signal ⇒ submit_verified must be false; report={report:?}"
-    );
-    let calls = rec.lock().unwrap().clone();
-    assert_eq!(
-        count_submit_enters(&calls),
-        1,
-        "capture retry must not send extra Enter; calls={calls:?}"
-    );
-}
 
-/// P0: capture 失败先重读再判；重试计入 attempts；不重粘文本。
-#[test]
-fn p0_capture_failure_retries_read_and_counts_attempts() {
-    let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_cap_retry]";
-    let (be, rec) = backend_capture_pane_fail();
-    let report = be
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token_text.to_string()),
-            Key::Enter,
-            true,
-        )
-        .expect("inject runs");
-    assert!(
-        report.attempts > 1,
-        "capture failure must retry the read and count it in attempts; got attempts={}",
-        report.attempts
-    );
-    let calls = rec.lock().unwrap().clone();
-    let captures = calls
-        .iter()
-        .filter(|argv| argv.get(1).map(String::as_str) == Some("capture-pane"))
-        .count();
-    assert!(
-        captures >= 2,
-        "must re-read capture after failure; capture-pane count={captures} calls={calls:?}"
-    );
-    assert_eq!(
-        count_submit_enters(&calls),
-        1,
-        "retry is capture-only; extra Enter is forbidden; calls={calls:?}"
-    );
-    let pastes = calls
-        .iter()
-        .filter(|argv| argv.get(1).map(String::as_str) == Some("paste-buffer"))
-        .count();
-    assert_eq!(
-        pastes, 1,
-        "must not re-paste on capture failure; paste-buffer count={pastes}"
-    );
-}
 
 // ═════════════════════════════════════════════════════════════════════════
 // Unverified 之后补一颗 C-m（TUI composer 残留 / 折行），busy-shell 不补
@@ -4017,13 +2210,7 @@ impl CommandRunner for NthEnterClearRunner {
         Ok(ok(&stdout))
     }
 
-    fn run_with_stdin(
-        &self,
-        argv: &[String],
-        _stdin: &str,
-    ) -> Result<CommandOutput, std::io::Error> {
-        self.run(argv)
-    }
+
 }
 
 fn backend_clears_after_n_enters(
@@ -4050,86 +2237,4 @@ fn wrapped_identity_with_skin(marker: &str, skin: &str) -> String {
 
 fn wrapped_unverified_composer(marker: &str) -> String {
     wrapped_identity_with_skin(marker, "tui-ready composer>")
-}
-
-#[test]
-fn should_resend_enter_after_unverified_true_on_wrapped_tui_token() {
-    let marker = "[team-agent-token:msg_wrap_gate]";
-    let text = wrapped_unverified_composer(marker);
-    assert!(
-        !super::should_resubmit_enter(&text, marker, None),
-        "per-line token_in_bottom_n must stay false on wrap"
-    );
-    assert!(
-        super::should_resend_enter_after_unverified(&text, marker, None),
-        "joined token identity must allow the one Unverified resend"
-    );
-}
-
-#[test]
-fn should_resend_wrapped_identity_on_three_tui_skins() {
-    let marker = "[team-agent-token:msg_skins]";
-    for skin in ["❯ ", "> ", "ready."] {
-        let text = wrapped_identity_with_skin(marker, skin);
-        assert!(
-            super::should_resend_enter_after_unverified(&text, marker, None),
-            "skin {skin:?} with this-paste token must resend"
-        );
-    }
-}
-
-#[test]
-fn should_resend_false_when_payload_has_prompt_glyphs_but_identity_absent() {
-    let marker = "[team-agent-token:msg_glyph_fp]";
-    let text = "STARTED\nsleep holds pty\nsee composer> and ❯ in the payload\n>\n";
-    assert!(
-        !super::this_paste_identity_in_composer(text, marker, None),
-        "glyphs in payload are not this-paste identity"
-    );
-    assert!(
-        !super::should_resend_enter_after_unverified(text, marker, None),
-        "payload composer>/❯ must not by themselves trigger resend"
-    );
-}
-
-#[test]
-fn should_resend_enter_after_unverified_true_when_unwrapped_token_still_in_tui() {
-    let marker = "[team-agent-token:msg_still_tui]";
-    let text = format!("> {marker}\n");
-    assert!(super::should_resubmit_enter(&text, marker, None));
-    assert!(
-        super::should_resend_enter_after_unverified(&text, marker, None),
-        "bare > skin with token identity still in composer must resend"
-    );
-}
-
-#[test]
-fn wrap_gap_false_when_a_already_sees_grok_latch() {
-    let marker = "[team-agent-token:msg_grok_stay]";
-    let tracked = Some(super::PasteLatch::GrokLineCount(42));
-    assert!(super::should_resubmit_enter(
-        GROK_INCIDENT_LINE,
-        marker,
-        tracked
-    ));
-    assert!(super::should_resend_enter_after_unverified(
-        GROK_INCIDENT_LINE,
-        marker,
-        tracked
-    ));
-    assert!(
-        !super::should_resend_unverified_wrap_gap(GROK_INCIDENT_LINE, marker, tracked),
-        "A latch path already covers grok-fold stay; invert wrap-gap must turn this red"
-    );
-}
-
-#[test]
-fn wrap_gap_true_on_joined_token_a_cannot_see() {
-    let marker = "[team-agent-token:msg_wrap_gate]";
-    let text = wrapped_unverified_composer(marker);
-    assert!(!super::should_resubmit_enter(&text, marker, None));
-    assert!(
-        super::should_resend_unverified_wrap_gap(&text, marker, None),
-        "B must still cover the wrap gap A cannot see"
-    );
 }

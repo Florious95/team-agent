@@ -51,12 +51,7 @@ use team_agent::messaging::leader_channel::{
     resolve_live_leader_channel, LeaderChannelResolution, LeaderChannelUnbound,
 };
 use team_agent::model::pane_authority_refusal::PaneWorkspaceMismatchFacts;
-use team_agent::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
-};
+use team_agent::transport::{ BackendKind, CaptureRange, CapturedText, InjectStage, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName, SpawnResult, Target, Transport, TransportError, WindowName };
 
 const SOCKET: &str = "/private/tmp/tmux-501/ta-pwm-red";
 const PANE: &str = "%1";
@@ -148,22 +143,6 @@ impl Transport for PaneTransport {
     ) -> Result<SpawnResult, TransportError> {
         self.spawn_first(session, window, a, c, e)
     }
-    fn inject(
-        &self,
-        _t: &Target,
-        _p: &InjectPayload,
-        _s: Key,
-        _b: bool,
-    ) -> Result<InjectReport, TransportError> {
-        Ok(InjectReport {
-            stage_reached: InjectStage::Submit,
-            inject_verification: InjectVerification::CaptureContainsToken,
-            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
-            turn_verification: TurnVerification::NotYetObserved,
-            attempts: 1,
-            submit_diagnostics: None,
-        })
-    }
     fn send_keys(&self, _t: &Target, _k: &[Key]) -> Result<(), TransportError> {
         Ok(())
     }
@@ -185,22 +164,11 @@ impl Transport for PaneTransport {
     fn list_windows(&self, _s: &SessionName) -> Result<Vec<WindowName>, TransportError> {
         Ok(Vec::new())
     }
-    fn set_session_env(
-        &self,
-        _s: &SessionName,
-        _k: &str,
-        _v: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        Ok(SetEnvOutcome::Applied)
-    }
     fn kill_session(&self, _s: &SessionName) -> Result<(), TransportError> {
         Ok(())
     }
     fn kill_window(&self, _t: &Target) -> Result<(), TransportError> {
         Ok(())
-    }
-    fn attach_session(&self, _s: &SessionName) -> Result<AttachOutcome, TransportError> {
-        Ok(AttachOutcome::Attached)
     }
 }
 

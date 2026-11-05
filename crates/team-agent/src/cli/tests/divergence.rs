@@ -13,29 +13,6 @@ use super::*;
 // falls through every branch to the final `else: unknown += 1`.
 // golden probe: _agent_summary_counts({"a":{"status":"idle"}},{}) -> unknown=1.
 // Rust cli.rs:601 adds `|| raw == "idle"` => Idle (WRONG).
-#[test]
-fn red_classify_raw_idle_no_health_is_unknown_not_idle() {
-    // golden: classify("idle","") lands in Unknown (the §11 bug-071/077/085 rule).
-    assert_eq!(
-        classify_agent_bucket("idle", ""),
-        SummaryBucket::Unknown,
-        "raw 'idle' with empty health MUST be Unknown (golden gates idle on health only)"
-    );
-    // and the uppercase variant (str.lower() in golden) also Unknown.
-    assert_eq!(classify_agent_bucket("IDLE", ""), SummaryBucket::Unknown);
-    // full-path golden: agent_summary_counts({"a":{"status":"idle"}},{}) -> unknown=1, idle=0.
-    let got = agent_summary_counts(&json!({"a": {"status": "idle"}}), &json!({}));
-    assert_eq!(
-        got,
-        SummaryCounts {
-            unknown: 1,
-            ..Default::default()
-        },
-        "golden: raw idle agent with no health => unknown=1 (not idle=1)"
-    );
-    // health=="idle" is still Idle (the only legitimate idle trigger).
-    assert_eq!(classify_agent_bucket("", "idle"), SummaryBucket::Idle);
-}
 
 // ---- #2 / #21 / #24: format_latest_result faithfulness ----
 // golden _latest_result_line (commands.py:333-337):
@@ -44,97 +21,13 @@ fn red_classify_raw_idle_no_health_is_unknown_not_idle() {
 //   created_at rendered through runtime._age_text ('-' for None/'' /invalid ISO; 'Nh ago' for valid).
 // Rust format_latest_result passes summary verbatim, uses unwrap_or("-") (empty stays empty),
 // and prints created_at raw (no age_text).
-#[test]
-fn red_format_latest_result_empty_summary_and_agent_map_to_dash() {
-    // golden: summary='' + created_at invalid -> 'latest result: a1 -> - @ -'
-    let line = format_status_summary(&json!({
-        "latest_results": [{"agent_id": "a1", "summary": "", "created_at": "bad-date"}]
-    }));
-    let latest = line.lines().nth(4).unwrap();
-    assert_eq!(
-        latest, "latest result: a1 -> - @ -",
-        "empty summary -> '-', invalid created_at -> '-' (age_text); golden commands.py:337"
-    );
-    // golden: empty agent_id -> '-'
-    let line2 = format_status_summary(&json!({
-        "latest_results": [{"agent_id": "", "summary": "hi", "created_at": Value::Null}]
-    }));
-    assert_eq!(
-        line2.lines().nth(4).unwrap(),
-        "latest result: - -> hi @ -",
-        "empty agent_id -> '-' (golden `agent_id or '-'`)"
-    );
-}
 
-#[test]
-fn red_format_latest_result_newline_flattened_and_truncated_80() {
-    // golden: summary 'line1\nline2' -> '\n'->' ' -> 'line1 line2'
-    let line = format_status_summary(&json!({
-        "latest_results": [{"agent_id": "a1", "summary": "line1\nline2", "created_at": Value::Null}]
-    }));
-    assert_eq!(
-        line.lines().nth(4).unwrap(),
-        "latest result: a1 -> line1 line2 @ -",
-        "newline in summary MUST flatten to a space (golden .replace('\\n',' '))"
-    );
-    // golden: 100-char summary truncated to exactly 80 chars.
-    let line2 = format_status_summary(&json!({
-        "latest_results": [{"agent_id": "a1", "summary": "Z".repeat(100), "created_at": Value::Null}]
-    }));
-    let latest = line2.lines().nth(4).unwrap();
-    let kept = latest
-        .strip_prefix("latest result: a1 -> ")
-        .unwrap()
-        .strip_suffix(" @ -")
-        .unwrap();
-    assert_eq!(
-        kept.chars().count(),
-        80,
-        "summary MUST cap at 80 chars (golden [:80])"
-    );
-    assert_eq!(kept, "Z".repeat(80));
-}
 
-#[test]
-fn red_format_latest_result_created_at_is_age_text_not_raw_iso() {
-    // golden: a valid ISO created_at renders as relative age ('Nh ago'), NEVER the raw string.
-    // (We avoid asserting the exact age — time-dependent — and assert it is NOT verbatim.)
-    let line = format_status_summary(&json!({
-        "latest_results": [{"agent_id": "a1", "summary": "done", "created_at": "2020-01-01T00:00:00Z"}]
-    }));
-    let latest = line.lines().nth(4).unwrap();
-    let tail = latest.rsplit(" @ ").next().unwrap();
-    assert_ne!(
-        tail, "2020-01-01T00:00:00Z",
-        "created_at MUST be rendered as age_text (e.g. 'Nh ago'), not the raw ISO string"
-    );
-    assert!(
-        tail.ends_with(" ago"),
-        "valid ISO created_at renders as a relative age ('... ago'); got: {tail:?}"
-    );
-}
 
 // ---- #3: format_status_summary — falsy first latest_results element -> "none" ----
 // golden (commands.py:268,333-335): latest = (latest_results or [{}])[0] if latest_results else None;
 // _latest_result_line returns 'latest result: none' when the first element is falsy (None or {}).
 // Rust .first() returns Some for [Null]/[{}] -> renders '- -> - @ -'.
-#[test]
-fn red_format_status_summary_falsy_first_latest_is_none() {
-    // golden: latest_results=[None] -> 'latest result: none'
-    let line_null = format_status_summary(&json!({"latest_results": [Value::Null]}));
-    assert_eq!(
-        line_null.lines().nth(4).unwrap(),
-        "latest result: none",
-        "a Null first element renders 'latest result: none' (golden falsy guard)"
-    );
-    // golden: latest_results=[{}] -> 'latest result: none'
-    let line_empty = format_status_summary(&json!({"latest_results": [{}]}));
-    assert_eq!(
-        line_empty.lines().nth(4).unwrap(),
-        "latest result: none",
-        "an empty-object first element renders 'latest result: none' (golden falsy guard)"
-    );
-}
 
 // ---- #4: format_status_summary — empty-string falsy fallbacks + current_command ----
 // golden: '' is falsy via Python `or`:
@@ -142,74 +35,12 @@ fn red_format_status_summary_falsy_first_latest_is_none() {
 //   pane_id '' -> '-' (line 285)
 //   cmd = pane_current_command or current_command or '-' (line 285) — note the current_command fallback.
 // Rust serde unwrap_or keeps '' verbatim and has NO current_command read.
-#[test]
-fn red_format_status_summary_empty_string_coordinator_status_is_stopped() {
-    // golden: coordinator.status='' -> 'coordinator: stopped schema_ok=False tmux=False'
-    let line = format_status_summary(&json!({"coordinator": {"status": ""}}));
-    assert_eq!(
-            line.lines().next().unwrap(),
-            "coordinator: stopped schema_ok=false tmux=false",
-            "empty-string coordinator status MUST fall back to 'stopped' (golden `status or 'stopped'`)"
-        );
-}
 
-#[test]
-fn red_format_status_summary_empty_pane_id_is_dash() {
-    // golden: pane_id='' -> 'receiver: - cmd=x topology=external'
-    let line = format_status_summary(&json!({
-        "leader_receiver": {"pane_id": "", "pane_current_command": "x"}
-    }));
-    assert_eq!(
-        line.lines().nth(1).unwrap(),
-        "receiver: - cmd=x topology=external",
-        "empty-string pane_id MUST fall back to '-' (golden `pane_id or '-'`)"
-    );
-}
 
-#[test]
-fn red_format_status_summary_cmd_falls_back_to_current_command() {
-    // golden: missing pane_current_command + current_command='claude' -> 'receiver: %3 cmd=claude topology=external'
-    let line_missing = format_status_summary(&json!({
-        "leader_receiver": {"pane_id": "%3", "current_command": "claude"}
-    }));
-    assert_eq!(
-            line_missing.lines().nth(1).unwrap(),
-            "receiver: %3 cmd=claude topology=external",
-            "cmd MUST fall back to current_command when pane_current_command is absent (golden line 285)"
-        );
-    // golden: empty pane_current_command + current_command='claude' -> 'receiver: %3 cmd=claude topology=external'
-    let line_empty = format_status_summary(&json!({
-        "leader_receiver": {"pane_id": "%3", "pane_current_command": "", "current_command": "claude"}
-    }));
-    assert_eq!(
-        line_empty.lines().nth(1).unwrap(),
-        "receiver: %3 cmd=claude topology=external",
-        "empty pane_current_command MUST fall through to current_command (golden falsy `or`)"
-    );
-}
 
 // ---- #5 (P2): format_status_summary — Python bool() truthiness coercion ----
 // golden: schema_ok / tmux via bool(...) — int 1 -> True, string 'yes' -> True (commands.py:284).
 // Rust as_bool() returns None for int/str -> false.
-#[test]
-fn red_format_status_summary_bool_coercion_truthy_nonbool() {
-    // golden: schema_ok=1 (int) -> schema_ok=True (printed lowercase 'true' per the upstream re-spell).
-    let line_int = format_status_summary(&json!({
-        "coordinator": {"status": "running", "schema_ok": 1}
-    }));
-    assert_eq!(
-        line_int.lines().next().unwrap(),
-        "coordinator: running schema_ok=true tmux=false",
-        "int 1 MUST coerce to truthy schema_ok (golden bool(1)==True)"
-    );
-    // golden: tmux_session_present='yes' (non-empty string) -> tmux=True.
-    let line_str = format_status_summary(&json!({"tmux_session_present": "yes"}));
-    assert_eq!(
-        line_str.lines().next().unwrap(),
-        "coordinator: stopped schema_ok=false tmux=true",
-        "non-empty string 'yes' MUST coerce to truthy tmux (golden bool('yes')==True)"
-    );
-}
 
 // ---- #6 / #18 / #26: parse_inbox_entries block grouping + title strip + [:80] cap ----
 // golden _leader_inbox_entries groups blocks on `[` + 'fallback'; _leader_inbox_entry_title
@@ -443,19 +274,6 @@ fn red_emit_human_dict_string_elements_keep_quotes_in_collections() {
 // golden _send_target returns None for a no-target send; send_message(target=None) routes to
 // the task assignee / leader receiver — '*' is the ONLY broadcast trigger.
 // Rust maps None => MessageTarget::Broadcast (WRONG recipient set).
-#[test]
-fn red_send_target_none_is_not_broadcast() {
-    // golden: _send_target(targets=None, target=None) => None (single/assignee routing, NOT broadcast).
-    let got = send_target(None, None);
-    assert_ne!(
-            got,
-            MessageTarget::Broadcast,
-            "a no-target send MUST NOT broadcast to the whole team; golden routes to the assignee/leader. \
-'*' is the only broadcast trigger."
-        );
-    // '*' remains the broadcast trigger (unchanged invariant).
-    assert_eq!(send_target(None, Some("*")), MessageTarget::Broadcast);
-}
 
 // Doctor retains bounded triage navigation plus complete diagnostic details.
 #[test]

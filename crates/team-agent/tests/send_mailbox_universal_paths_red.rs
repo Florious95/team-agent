@@ -61,13 +61,14 @@ fn mailbox_to_worker_is_pullable_but_never_physically_injected() {
     }
     assert_eq!(fixture.inbox_bytes(), before, "reads cannot mutate the inbox");
     let ordinary = tools
-        .send_message(
+        .send_message_with_presentation(
             &MessageTarget::Single("worker-1".into()),
             "ordinary positive control",
             None,
             None,
             None,
-        )
+
+        None, None)
         .unwrap()
         .to_value();
     assert_eq!(ordinary["status"], "sent");
@@ -138,13 +139,14 @@ fn mailbox_broadcast_appends_to_every_published_worker_except_sender() {
         "broadcast enumerates workers, not an implicit leader destination"
     );
     let ordinary = tools
-        .send_message(
+        .send_message_with_presentation(
             &MessageTarget::Broadcast,
             "broadcast physical control",
             None,
             None,
             None,
-        )
+
+        None, None)
         .unwrap()
         .to_value();
     let results = ordinary["results"].as_array().unwrap();

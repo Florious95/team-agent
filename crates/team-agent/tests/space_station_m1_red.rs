@@ -413,7 +413,8 @@ fn find_string_field<'a>(value: &'a Value, key: &str, out: &mut Vec<&'a str>) {
 
 fn report(tools: &TeamOrchestratorTools, summary: &str, task: Option<&str>) -> Value {
     let ok = tools
-        .report_result(None, Some(summary), ResultStatus::Success, None, None, None, None, None, task, None)
+        .report_result_with_presentation(None, Some(summary), Some("success"), None, None, None, None, None, task, None,
+        None)
         .unwrap_or_else(|error| panic!("report_result must succeed: {error:?}"));
     Value::Object(ok.fields)
 }
@@ -431,7 +432,8 @@ fn red_m1_r1_cli_and_mcp_report_identical_disposition_when_leader_pane_is_gone()
 
     let mcp = s
         .tools("worker", "alpha")
-        .send_message(&MessageTarget::Single("leader".into()), "parity via mcp", None, None, None)
+        .send_message_with_presentation(&MessageTarget::Single("leader".into()), "parity via mcp", None, None, None,
+        None, None)
         .expect("MCP send to a gone leader must store, not fail")
         .to_value();
     let cli = s.cli(
@@ -486,13 +488,14 @@ fn red_m1_r3_mcp_fanout_one_dead_recipient_does_not_abort_the_rest() {
             ("live", Some(&live), "codex"),
         ]))],
     ));
-    let result = s.tools("worker", "alpha").send_message(
+    let result = s.tools("worker", "alpha").send_message_with_presentation(
         &MessageTarget::Fanout(vec!["dead".into(), "live".into()]),
         "fan-out via mcp",
         None,
         None,
         None,
-    );
+
+        None, None);
     s.wait_received("live", b"fan-out via mcp");
     let value = result.expect("a partial fan-out returns per-recipient receipts, not an error").to_value();
     assert!(value.to_string().contains("dead"), "{value}");
@@ -685,7 +688,8 @@ fn red_m1_r5c_worker_report_to_a_drafting_leader_is_stored_first_and_bounded() {
     let call = std::thread::spawn(move || {
         let tools = TeamOrchestratorTools::with_identity(&root, Some(AgentId::new("worker")), Some(TeamKey::new("alpha")));
         tools
-            .report_result(None, Some("report into a drafting leader"), ResultStatus::Success, None, None, None, None, None, None, None)
+            .report_result_with_presentation(None, Some("report into a drafting leader"), Some("success"), None, None, None, None, None, None, None,
+        None)
             .map(|ok| Value::Object(ok.fields))
             .map_err(|error| format!("{error:?}"))
     });
@@ -778,7 +782,8 @@ fn red_m1_r8_torn_tail_followed_by_a_new_append_keeps_the_inbox_readable() {
     let s = Station::new("r8");
     s.write_state(&snapshot(&s, &[("alpha", team(&s, "alpha", None, &[("worker", None, "pi")]))]));
     let tools = s.tools("worker", "alpha");
-    tools.send_message(&MessageTarget::Single("leader".into()), "first durable", None, None, None).unwrap();
+    tools.send_message_with_presentation(&MessageTarget::Single("leader".into()), "first durable", None, None, None,
+        None, None).unwrap();
     let files = s.files_containing("first durable");
     assert_eq!(files.len(), 1, "exactly one inbox file holds the record: {files:?}");
     use std::io::Write;
@@ -788,7 +793,8 @@ fn red_m1_r8_torn_tail_followed_by_a_new_append_keeps_the_inbox_readable() {
         .unwrap()
         .write_all(b"{\"v\":1,\"kind\":\"message\",\"seq\":2,\"data\":{\"text\":\"torn")
         .unwrap();
-    tools.send_message(&MessageTarget::Single("leader".into()), "second durable", None, None, None).unwrap();
+    tools.send_message_with_presentation(&MessageTarget::Single("leader".into()), "second durable", None, None, None,
+        None, None).unwrap();
     let inbox = s.inbox("leader", "alpha");
     assert_eq!(inbox_hits(&inbox, "first durable").len(), 1, "{inbox}");
     assert_eq!(inbox_hits(&inbox, "second durable").len(), 1, "{inbox}");
@@ -804,7 +810,8 @@ fn red_m1_r9_inbox_records_are_versioned_sequenced_and_checksummed() {
     let tools = s.tools("worker", "alpha");
     for n in 1..=3 {
         tools
-            .send_message(&MessageTarget::Single("leader".into()), &format!("sequenced-{n}"), None, None, None)
+            .send_message_with_presentation(&MessageTarget::Single("leader".into()), &format!("sequenced-{n}"), None, None, None,
+        None, None)
             .unwrap();
     }
     let files = s.files_containing("sequenced-1");
@@ -843,10 +850,12 @@ fn red_m1_r10_two_teams_never_share_an_inbox_file() {
         ("beta", team(&s, "beta", None, &[("worker", None, "pi")])),
     ]));
     s.tools("worker", "alpha")
-        .send_message(&MessageTarget::Single("leader".into()), "alpha-only-payload", None, None, None)
+        .send_message_with_presentation(&MessageTarget::Single("leader".into()), "alpha-only-payload", None, None, None,
+        None, None)
         .unwrap();
     s.tools("worker", "beta")
-        .send_message(&MessageTarget::Single("leader".into()), "beta-only-payload", None, None, None)
+        .send_message_with_presentation(&MessageTarget::Single("leader".into()), "beta-only-payload", None, None, None,
+        None, None)
         .unwrap();
     for path in s.files_containing("alpha-only-payload") {
         let bytes = fs::read(&path).unwrap();
@@ -863,7 +872,8 @@ fn red_m1_r16_newer_version_records_stay_opaque_and_never_break_reading() {
     let s = Station::new("r16");
     s.write_state(&snapshot(&s, &[("alpha", team(&s, "alpha", None, &[("worker", None, "pi")]))]));
     let tools = s.tools("worker", "alpha");
-    tools.send_message(&MessageTarget::Single("leader".into()), "known one", None, None, None).unwrap();
+    tools.send_message_with_presentation(&MessageTarget::Single("leader".into()), "known one", None, None, None,
+        None, None).unwrap();
     let files = s.files_containing("known one");
     assert_eq!(files.len(), 1, "{files:?}");
     use std::io::Write;
@@ -873,7 +883,8 @@ fn red_m1_r16_newer_version_records_stay_opaque_and_never_break_reading() {
         .unwrap()
         .write_all(b"{\"v\":2,\"kind\":\"message\",\"content\":\"v2 must stay opaque\",\"text\":\"v2 must stay opaque\"}\n")
         .unwrap();
-    tools.send_message(&MessageTarget::Single("leader".into()), "known two", None, None, None).unwrap();
+    tools.send_message_with_presentation(&MessageTarget::Single("leader".into()), "known two", None, None, None,
+        None, None).unwrap();
     let inbox = s.inbox("leader", "alpha");
     assert_eq!(inbox_hits(&inbox, "known one").len(), 1, "{inbox}");
     assert_eq!(inbox_hits(&inbox, "known two").len(), 1, "{inbox}");
@@ -1083,7 +1094,8 @@ fn guard_m1_g1_stopped_coordinator_and_locked_database_do_not_block_messaging() 
     assert!(cli.status.success(), "{}", String::from_utf8_lossy(&cli.stdout));
     s.wait_received("worker", b"under lock via cli");
     let tools = s.tools("worker", "alpha");
-    tools.send_message(&MessageTarget::Single("leader".into()), "under lock via mcp", None, None, None).unwrap();
+    tools.send_message_with_presentation(&MessageTarget::Single("leader".into()), "under lock via mcp", None, None, None,
+        None, None).unwrap();
     s.wait_received("leader", b"under lock via mcp");
     report(&tools, "under lock result", None);
     let elapsed = started.elapsed();

@@ -94,7 +94,6 @@ fn event_names(ws: &std::path::Path) -> Vec<String> {
 
 mod basics;
 mod byte_findings;
-mod historical_inventory_upgrade_gate_red;
 mod identity;
 mod idle;
 mod lease_api;

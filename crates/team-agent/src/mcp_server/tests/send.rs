@@ -1,73 +1,17 @@
 #[path = "../../../tests/support/direct_fixture.rs"]
 mod direct_fixture;
 
-#[test]
-fn requires_ack_for_target_leader_vs_worker() {
-    assert!(!requires_ack_for_target(&MessageTarget::Single(
-        "leader".to_string()
-    )));
-    assert!(!requires_ack_for_target(&MessageTarget::Single(
-        "Leader".to_string()
-    )));
-    assert!(requires_ack_for_target(&MessageTarget::Single(
-        "alice".to_string()
-    )));
-    // list: all-leader → false; any non-leader → true
-    assert!(!requires_ack_for_target(&MessageTarget::Fanout(vec![
-        "leader".to_string(),
-        "Leader".to_string()
-    ])));
-    assert!(requires_ack_for_target(&MessageTarget::Fanout(vec![
-        "leader".to_string(),
-        "alice".to_string()
-    ])));
-}
 
 // ════════════════════════════════════════════════════════════════════════
 // is_worker_recipient — single str not in {"","*","leader","Leader"} (tools.py:22)
 // ════════════════════════════════════════════════════════════════════════
-#[test]
-fn is_worker_recipient_classification() {
-    assert!(is_worker_recipient(&MessageTarget::Single(
-        "alice".to_string()
-    )));
-    assert!(!is_worker_recipient(&MessageTarget::Single("".to_string())));
-    assert!(!is_worker_recipient(&MessageTarget::Single(
-        "leader".to_string()
-    )));
-    assert!(!is_worker_recipient(&MessageTarget::Single(
-        "Leader".to_string()
-    )));
-    // Broadcast "*" is NOT a worker recipient
-    assert!(!is_worker_recipient(&MessageTarget::Broadcast));
-    // Fanout list is NOT a worker recipient (not a single str)
-    assert!(!is_worker_recipient(&MessageTarget::Fanout(vec![
-        "alice".to_string()
-    ])));
-}
 
 // ════════════════════════════════════════════════════════════════════════
 // SendOutcome::to_value — worker-accepted async envelope (tools.py:177-182)
 // byte-stable: {status:"accepted",delivery_pending:true,
 //               poll_via:"team-agent inbox <id>",message_id:<id>}
 // ════════════════════════════════════════════════════════════════════════
-#[test]
-fn send_outcome_worker_accepted_envelope_byte_stable() {
-    let outcome = SendOutcome::WorkerAccepted {
-        message_id: "42".to_string(),
-        poll_via: "team-agent inbox 42".to_string(),
-        warning: None,
-    };
-    let v = outcome.to_value();
-    assert_eq!(
-        keys(&v),
-        vec!["status", "delivery_pending", "poll_via", "message_id"]
-    );
-    assert_eq!(
-        s(&v),
-        r#"{"status":"accepted","delivery_pending":true,"poll_via":"team-agent inbox 42","message_id":"42"}"#
-    );
-}
+
 
 #[test]
 fn send_outcome_direct_renders_compact_body() {
@@ -121,9 +65,8 @@ fn send_message_worker_recipient_returns_physical_receipt_without_poll_hint() {
     let tools = TeamOrchestratorTools::with_identity(
         &fixture.root, Some(AgentId::new("leader")), Some(TeamKey::new("current")),
     );
-    let outcome = tools.send_message(
-        &MessageTarget::Single("worker-1".into()), "do the thing", None, None, None,
-    ).unwrap();
+    let outcome = tools.send_message_with_presentation(
+        &MessageTarget::Single("worker-1".into()), "do the thing", None, None, None, None, None).unwrap();
     assert!(matches!(outcome, SendOutcome::Direct(_)));
     let value = outcome.to_value();
     assert_eq!(value["status"], "sent");
@@ -145,9 +88,8 @@ fn ordinary_send_shape_has_no_recovery_marker() {
     let tools = TeamOrchestratorTools::with_identity(
         &fixture.root, Some(AgentId::new("leader")), Some(TeamKey::new("current")),
     );
-    let sent = tools.send_message(
-        &MessageTarget::Single("worker-1".into()), "ordinary send", None, None, None,
-    ).unwrap().to_value();
+    let sent = tools.send_message_with_presentation(
+        &MessageTarget::Single("worker-1".into()), "ordinary send", None, None, None, None, None).unwrap().to_value();
     assert_eq!(sent["status"], "sent");
     assert!(sent.get("recovery").is_none());
     assert!(sent.get("acceptance_marker").is_none());
@@ -159,13 +101,12 @@ fn send_message_without_framework_identity_fails_closed() {
     let ws = seed_current_worker_state("missing-sender-identity");
     let tools = TeamOrchestratorTools::with_identity(&ws, None, Some(TeamKey::new("current")));
     let error = tools
-        .send_message(
+        .send_message_with_presentation(
             &MessageTarget::Single("worker-1".to_string()),
             "must not be attributed to unknown",
             None,
             None,
-            None,
-        )
+            None, None, None)
         .expect_err("missing framework identity must fail before persistence");
     assert_eq!(error.reason, ToolErrorReason::McpScopeRefused);
 }
@@ -183,9 +124,8 @@ fn send_message_worker_recipient_ignores_dead_coordinator() {
     let tools = TeamOrchestratorTools::with_identity(
         &fixture.root, Some(AgentId::new("leader")), Some(TeamKey::new("current")),
     );
-    let value = tools.send_message(
-        &MessageTarget::Single("worker-1".into()), "no coordinator required", None, None, None,
-    ).unwrap().to_value();
+    let value = tools.send_message_with_presentation(
+        &MessageTarget::Single("worker-1".into()), "no coordinator required", None, None, None, None, None).unwrap().to_value();
     assert_eq!(value["status"], "sent");
     assert_eq!(value["delivery"], "physical");
     assert!(value.get("delivery_pending").is_none());
@@ -203,13 +143,12 @@ fn send_message_leader_recipient_is_direct_not_accepted() {
         Some(TeamKey::new("teamA")),
     );
     let outcome = tools
-        .send_message(
+        .send_message_with_presentation(
             &MessageTarget::Single("leader".to_string()),
             "status update",
             None,
             None,
-            None,
-        )
+            None, None, None)
         .expect("leader send ok");
     assert!(
         matches!(outcome, SendOutcome::Direct(_)),
@@ -254,72 +193,63 @@ fn send_message_mailbox_is_durable_without_live_injection() {
 // ════════════════════════════════════════════════════════════════════════
 #[test]
 fn refuse_cross_team_peer_blocks_unknown_peer_without_workspace_scope() {
-    // owner_team set, target a peer NOT in scope, scope != workspace → PeerNotInScope.
+    let workspace = seed_state_ws("refuse-unknown-current", &json!({
+        "teams": {"teamA": {"agents": {"worker-1": {}}}}
+    }));
     let tools = TeamOrchestratorTools::with_identity(
-        &seed_state_ws("refuse_cross_team_peer_blocks_unknown_peer_without_workspace_scope", &json!({"teams": {"teamA": {"agents": {"worker-1": {}}}}})),
-        Some(AgentId::new("worker-1")),
-        Some(TeamKey::new("teamA")),
+        &workspace, Some(AgentId::new("worker-1")), Some(TeamKey::new("teamA")),
     );
-    let refusal =
-        tools.refuse_cross_team_peer(&MessageTarget::Single("other-team-bob".to_string()), None);
-    let te = refusal.expect("cross-team peer must be refused");
-    assert_eq!(te.reason, ToolErrorReason::PeerNotInScope);
-    // hint preserved in extra (tools.py:208-213 status:"refused" + hint)
-    let env = te.to_envelope();
-    assert_eq!(env.get("status"), Some(&json!("refused")));
-    assert_eq!(env.get("reason"), Some(&json!("peer_not_in_scope")));
-    assert_eq!(
-            env.get("hint"),
-            Some(&json!("the requested peer is not part of your team; worker-origin MCP cannot widen team scope."))
-        );
+    let error = tools.send_message_with_presentation(
+        &MessageTarget::Single("other-team-bob".into()), "scope probe",
+        None, None, None, Some(&json!(true)), None,
+    ).expect_err("an unknown peer cannot be admitted");
+    // Current admission distinguishes an unknown name from a real foreign peer.
+    assert_eq!(error.reason, ToolErrorReason::NameNotResolvable);
+    let envelope = error.to_envelope();
+    assert_eq!(envelope["status"], "refused");
+    assert_eq!(envelope["reason"], "name_not_resolvable");
+    assert!(envelope["hint"].as_str().is_some_and(|hint| !hint.is_empty()));
+    let inbox = crate::inbox_store::read(&workspace, "other-team-bob", 10, Some("teamA")).unwrap();
+    assert!(inbox["messages"].as_array().unwrap().is_empty());
 }
 
 #[test]
 fn refuse_cross_team_peer_rejects_workspace_scope_override_for_worker() {
     let tools = TeamOrchestratorTools::with_identity(
-        Path::new("/tmp/ws"),
-        Some(AgentId::new("worker-1")),
-        Some(TeamKey::new("teamA")),
+        Path::new("/tmp/ws"), Some(AgentId::new("worker-1")), Some(TeamKey::new("teamA")),
     );
-    // scope="workspace" is not worker consent to cross team boundaries.
-    let te = tools
-        .refuse_cross_team_peer(
-            &MessageTarget::Single("other-team-bob".to_string()),
-            Some(Scope::Workspace),
-        )
-        .expect("workspace scope override must still be refused for worker-origin MCP");
-    assert_eq!(te.reason, ToolErrorReason::McpScopeRefused);
+    let error = tools.send_message_with_presentation(
+        &MessageTarget::Single("other-team-bob".into()), "scope probe",
+        None, None, Some(Scope::Workspace), Some(&json!(true)), None,
+    ).expect_err("workspace scope cannot widen a captured worker identity");
+    assert_eq!(error.reason, ToolErrorReason::McpScopeRefused);
 }
 
 #[test]
 fn refuse_cross_team_peer_allows_leader_broadcast_and_self() {
+    let workspace = seed_state_ws("refuse-special-targets-current", &json!({
+        "teams": {"teamA": {"agents": {"worker-1": {}, "worker-2": {}}}}
+    }));
     let tools = TeamOrchestratorTools::with_identity(
-        &seed_state_ws("refuse_cross_team_peer_allows_leader_broadcast_and_self", &json!({"teams": {"teamA": {"agents": {"worker-1": {}}}}})),
-        Some(AgentId::new("worker-1")),
-        Some(TeamKey::new("teamA")),
+        &workspace, Some(AgentId::new("worker-1")), Some(TeamKey::new("teamA")),
     );
-    // leader / "*" / "" / self are never refused (tools.py:190,195)
-    assert!(tools
-        .refuse_cross_team_peer(&MessageTarget::Single("leader".to_string()), None)
-        .is_none());
-    assert!(tools
-        .refuse_cross_team_peer(&MessageTarget::Broadcast, None)
-        .is_none());
-    assert!(tools
-        .refuse_cross_team_peer(&MessageTarget::Single("worker-1".to_string()), None)
-        .is_none());
+    for target in [MessageTarget::Single("leader".into()), MessageTarget::Broadcast] {
+        let outcome = tools.send_message_with_presentation(
+            &target, "scope probe", None, None, None, Some(&json!(true)), None,
+        ).expect("leader and nonempty broadcast are admitted in the bound team");
+        assert_eq!(outcome.to_value()["ok"], true);
+        assert_eq!(outcome.to_value()["status"], "stored");
+    }
+    let error = tools.send_message_with_presentation(
+        &MessageTarget::Single("worker-1".into()), "scope probe",
+        None, None, None, Some(&json!(true)), None,
+    ).expect_err("current public admission refuses an explicit self target");
+    assert_eq!(error.reason, ToolErrorReason::SelfTarget);
+    let inbox = crate::inbox_store::read(&workspace, "worker-1", 10, Some("teamA")).unwrap();
+    assert!(inbox["messages"].as_array().unwrap().is_empty());
 }
 
-#[test]
-fn refuse_cross_team_peer_no_owner_team_is_legacy_passthrough() {
-    // A readable legacy snapshot without a teams map retains the legacy scope.
-    let tools = TeamOrchestratorTools::with_identity(
-        &seed_state_ws("legacy-single-team", &json!({"agents": {"worker-1": {}}})),
-        Some(AgentId::new("worker-1")),
-        None,
-    );
-    assert!(tools.refuse_cross_team_peer(&MessageTarget::Single("anybody".into()), None).is_none());
-}
+
 
 #[test]
 fn send_message_cross_team_peer_surfaces_peer_not_in_scope_error() {
@@ -347,7 +277,7 @@ fn send_message_cross_team_peer_surfaces_peer_not_in_scope_error() {
         ("teamB/bob", ToolErrorReason::PeerNotInScope),
     ] {
         let err = tools
-            .send_message(&MessageTarget::Single(target.to_string()), "leak attempt", None, None, None)
+            .send_message_with_presentation(&MessageTarget::Single(target.to_string()), "leak attempt", None, None, None, None, None)
             .expect_err("out-of-scope peer must be refused");
         assert_eq!(err.reason, reason, "{target}: {err:?}");
         let candidates = err.extra.get("candidates").and_then(|value| value.as_array()).cloned().unwrap_or_default();

@@ -46,7 +46,6 @@ pub enum PresentationClass {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PresentationSource {
-    Send,
     ReportResult,
 }
 
@@ -346,10 +345,6 @@ mod tests {
             class: PresentationClass::Message,
             case_id: None,
         };
-        assert_eq!(
-            decide_presentation(&benign, PresentationSource::Send).effective_sink,
-            PresentationSink::Casefile
-        );
         assert_eq!(
             decide_presentation(&benign, PresentationSource::ReportResult).effective_sink,
             PresentationSink::Leader

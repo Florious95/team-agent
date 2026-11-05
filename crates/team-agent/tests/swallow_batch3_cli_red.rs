@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use team_agent::messaging::send::{send_message, MessageTarget, SendOptions};
+
 
 /// Batch 3 family contract: the three exit-layer fake-greens.
 /// ① `doctor --gate bogus` must refuse with `unknown_gate` + ok=false (today the
@@ -46,11 +46,13 @@ fn b3_exit_layer_failures_are_explained_not_fake_green() {
     // ② empty --to list
     let ws = tmp_ws("b3-send");
     std::fs::create_dir_all(ws.join(".team/runtime")).unwrap();
-    let outcome = send_message(
-        &ws,
-        &MessageTarget::Fanout(Vec::new()),
-        "batch3 probe",
-        &SendOptions::default(),
+    let outcome = team_agent::station::send::execute(
+        team_agent::station::send::Request {
+            workspace: &ws, team: None, to: "", content: "batch3 probe",
+            task_id: None, message_id: None, presentation: &Default::default(),
+            mailbox: false, envelope: None,
+        },
+        team_agent::station::send::Authority::Operator { sender: "leader" },
     );
     match outcome {
         Ok(out) => {

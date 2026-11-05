@@ -30,12 +30,13 @@ use std::time::Duration;
 use std::time::Instant;
 
 use team_agent::tmux_backend::{CommandOutput, CommandRunner, TmuxBackend};
-use team_agent::transport::{InjectPayload, Key, PaneId, Target, Transport};
+use team_agent::transport::{ Key, PaneId, Target, Transport };
 
 const A: &str = "AAAAAAAA";
 const B: &str = "BBBBBBBB";
 
 struct ProcessPaneRunner {
+    payload: String,
     world: PathBuf,
     handshake: Option<PathBuf>,
     finished: Option<PathBuf>,
@@ -86,24 +87,10 @@ impl ProcessPaneRunner {
 
 impl CommandRunner for ProcessPaneRunner {
     fn run(&self, argv: &[String]) -> Result<CommandOutput, std::io::Error> {
-        if argv.iter().any(|arg| arg == "set-buffer") {
-            if let Some(text) = argv.last() {
-                self.append_text(text);
-            }
+        if argv.iter().any(|arg| arg == "send-keys") {
+            self.append_text(&self.payload);
         }
         Ok(ok())
-    }
-
-    fn run_with_stdin(
-        &self,
-        argv: &[String],
-        stdin: &str,
-    ) -> Result<CommandOutput, std::io::Error> {
-        if argv.iter().any(|arg| arg == "load-buffer") {
-            self.append_text(stdin);
-            return Ok(ok());
-        }
-        self.run(argv)
     }
 }
 
@@ -335,6 +322,7 @@ fn pane_input_lock_child_process() {
         .expect("delay milliseconds");
     let backend = TmuxBackend::with_runner_for_workspace(
         Box::new(ProcessPaneRunner {
+            payload,
             world,
             handshake: (mode == "holder").then_some(handshake),
             finished: (mode == "holder").then_some(finished),
@@ -345,13 +333,8 @@ fn pane_input_lock_child_process() {
     );
     let target = Target::Pane(PaneId::new("%42"));
     backend
-        .inject(
-            &target,
-            &InjectPayload::TextSkipConsumptionPoll(payload),
-            Key::Enter,
-            false,
-        )
-        .unwrap_or_else(|error| panic!("{mode} inject: {error:?}"));
+        .send_keys(&target, &[Key::Up])
+        .unwrap_or_else(|error| panic!("{mode} send_keys: {error:?}"));
     eprintln!(
         "[pane-lock-child] pid={} mode={mode} completed",
         std::process::id()

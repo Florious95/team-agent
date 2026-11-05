@@ -176,15 +176,6 @@ impl crate::transport::Transport for LaneTransport {
             child_pid: None,
         })
     }
-    fn inject(
-        &self,
-        _t: &crate::transport::Target,
-        _p: &crate::transport::InjectPayload,
-        _s: crate::transport::Key,
-        _b: bool,
-    ) -> Result<crate::transport::InjectReport, crate::transport::TransportError> {
-        unimplemented!("LaneTransport::inject not reached by stop/reset/remove/fork")
-    }
     fn send_keys(
         &self,
         _t: &crate::transport::Target,
@@ -287,14 +278,6 @@ impl crate::transport::Transport for LaneTransport {
             Ok(Vec::new())
         }
     }
-    fn set_session_env(
-        &self,
-        _s: &crate::transport::SessionName,
-        _k: &str,
-        _v: &str,
-    ) -> Result<crate::transport::SetEnvOutcome, crate::transport::TransportError> {
-        Ok(crate::transport::SetEnvOutcome::Applied)
-    }
     fn preserve_session_before_stop(
         &self,
         session: &crate::transport::SessionName,
@@ -346,12 +329,6 @@ impl crate::transport::Transport for LaneTransport {
                 .retain(|candidate| candidate != window);
         }
         Ok(())
-    }
-    fn attach_session(
-        &self,
-        _s: &crate::transport::SessionName,
-    ) -> Result<crate::transport::AttachOutcome, crate::transport::TransportError> {
-        Ok(crate::transport::AttachOutcome::Attached)
     }
 }
 
@@ -908,15 +885,6 @@ impl Drop for ForceRecreateFailureGuard {
     }
 }
 
-fn seed_agent_health(ws: &std::path::Path, team: &str, agent: &str, status: &str) {
-    let store = crate::message_store::MessageStore::open(ws).unwrap();
-    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-    conn.execute(
-        "insert into agent_health(owner_team_id, agent_id, status, last_output_at, context_usage_pct, current_task_id, updated_at) values (?1, ?2, ?3, 'before-output', 37, 'task-before', '2026-07-19T00:00:00Z')",
-        rusqlite::params![team, agent, status],
-    )
-    .unwrap();
-}
 
 fn seed_charlie(ws: &std::path::Path, tx: &LaneTransport) -> std::path::PathBuf {
     let role_dir = ws.join("role-masters");

@@ -216,7 +216,6 @@ mod tests {
         let restart_selection_rs = include_str!("../lifecycle/restart/selection.rs");
         let model_spec_rs = include_str!("../model/spec.rs");
         let compiler_rs = include_str!("../compiler.rs");
-        let delivery_rs = include_str!("../messaging/delivery.rs");
         let rediscover_rs = include_str!("../leader/rediscover.rs");
         let profile_smoke_rs = include_str!("../lifecycle/profile_smoke.rs");
         let diagnose_rs = include_str!("../cli/diagnose.rs");
@@ -254,12 +253,6 @@ mod tests {
         assert!(
             compiler_rs.contains("parse_canonical_provider"),
             "compiler must validate providers through typed helpers"
-        );
-        assert!(
-            delivery_rs.contains("parse_canonical_provider")
-                && delivery_rs.contains("parse_provider")
-                && delivery_rs.contains("provider_wire"),
-            "message delivery provider dispatch must use wire helpers"
         );
         for (path, source) in [
             ("leader/rediscover.rs", rediscover_rs),
@@ -304,11 +297,6 @@ mod tests {
             emit_rs.contains("LEADER_PASSTHROUGH_COMMANDS")
                 && emit_rs.contains("is_leader_passthrough_command"),
             "CLI emit must name passthrough command grammar explicitly"
-        );
-        assert!(
-            messaging_helpers_rs.contains("non_provider_command")
-                && messaging_helpers_rs.contains("Activity command grammar"),
-            "messaging helpers must name activity command grammar explicitly"
         );
         for (path, source) in [
             ("leader/provider_attribution.rs", provider_attribution_rs),

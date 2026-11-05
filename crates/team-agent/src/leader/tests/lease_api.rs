@@ -284,53 +284,6 @@ fn detect_dual_state_divergence_reports_diverging_panes() {
 // R8 D4 (c-lite offline byte-lock): the leader_receiver.requeued_exhausted_watchers payload-build,
 // extracted from the real-tmux attach flow into a pure helper, must produce golden shape.
 // golden leader/__init__.py:39-44: EXACTLY {watcher_ids, count, trigger:"attach_leader"}.
-#[test]
-fn r8_requeued_exhausted_watchers_event_payload_golden_shape() {
-    let notices = vec![crate::messaging::WatcherNotice {
-        watcher_id: "w1".to_string(),
-        result_id: Some("r1".to_string()),
-        ok: true,
-        status: Some("notify_failed".to_string()),
-        notified_message_id: None,
-        primary_watcher_id: None,
-        prior_state: Some("delivery_exhausted".to_string()),
-        error: None,
-    }];
-    let payload = crate::leader::lease::requeued_exhausted_watchers_event_payload(
-        &crate::transport::PaneId::new("%leader"),
-        &crate::model::ids::TeamKey::new("team-a"),
-        &notices,
-    );
-    let keys: std::collections::BTreeSet<&str> = payload
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(String::as_str)
-        .collect();
-    let expected: std::collections::BTreeSet<&str> =
-        ["watcher_ids", "count", "trigger"].into_iter().collect();
-    assert_eq!(keys, expected,
-        "D4: leader_receiver.requeued_exhausted_watchers payload must be golden {{watcher_ids, count, trigger}} \
-         (leader/__init__.py:39-44), not the Rust {{pane_id, team_id, watcher_ids, requeued}}; got {keys:?}");
-    assert_eq!(
-        payload
-            .get("watcher_ids")
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>()),
-        Some(vec!["w1"]),
-        "watcher_ids must be the string list of requeued ids"
-    );
-    assert_eq!(
-        payload.get("count").and_then(|v| v.as_u64()),
-        Some(1),
-        "count == number of requeued watchers"
-    );
-    assert_eq!(
-        payload.get("trigger").and_then(|v| v.as_str()),
-        Some("attach_leader")
-    );
-}
-
 // 0.5.x Windows portability Batch 5: `FakeAppServer` uses UNIX domain
 // sockets to fake the Codex app-server. Codex app-server client is
 // Unix-only (Windows returns typed `SocketUnreachable`), so these

@@ -5,23 +5,7 @@ use super::*;
 // gate: 'detail=false => compact=true mapping, the one byte-level invariant CLI owns'.
 // =========================================================================
 
-#[test]
-fn status_compact_flag_default_is_compact() {
-    // golden: cmd_status without --detail -> runtime.status(compact=not(False)) == compact=True.
-    assert!(
-        status_compact_flag(false),
-        "detail=false MUST map to compact=true (commands.py:99)"
-    );
-}
 
-#[test]
-fn status_compact_flag_detail_is_full() {
-    // golden: cmd_status --detail -> runtime.status(compact=not(True)) == compact=False.
-    assert!(
-        !status_compact_flag(true),
-        "detail=true MUST map to compact=false (full projection)"
-    );
-}
 
 // =========================================================================
 // status_port::status — REAL caller against SEEDED fixture (gate: 'zero callers').
@@ -71,7 +55,7 @@ fn rm039_stat001_compact_status_preserves_activity_and_last_output() {
     }
     crate::state::persist::save_runtime_state(&ws, &state).unwrap();
 
-    let v = status_port::status(&ws, /*compact=*/ true, /*detail=*/ false)
+    let v = status_port::status_scoped(&ws, &crate::state::persist::load_runtime_state(&ws).expect("fixture runtime state"), None, /*compact=*/ true, /*detail=*/ false)
         .expect("compact status should project a value");
     let agent = v
         .pointer("/agents/a1")
@@ -197,7 +181,7 @@ fn rm039_stat001_status_resolves_active_team_when_root_team_key_missing() {
     .unwrap();
 
     // The retained duplicate team keys require explicit scope; the active pointer is not authority.
-    assert!(status_port::status(&ws, true, false).is_err());
+    assert!(status_port::status_scoped(&ws, &crate::state::persist::load_runtime_state(&ws).expect("fixture runtime state"), None, true, false).is_err());
     let loaded = crate::state::persist::load_runtime_state(&ws).unwrap();
     let v = status_port::status_scoped(&ws, &loaded, Some(active), true, false)
         .expect("explicit compact status should project a value");
@@ -233,7 +217,7 @@ fn status_port_status_compact_json_shape_against_seeded_fixture() {
     // Compact slim is the original 7 keys plus `grok_slot` and
     // `grok_identity_slot_ok`. `ok` is command success (always true here).
     let ws = seed_status_workspace();
-    let v = status_port::status(&ws, /*compact=*/ true, /*detail=*/ false)
+    let v = status_port::status_scoped(&ws, &crate::state::persist::load_runtime_state(&ws).expect("fixture runtime state"), None, /*compact=*/ true, /*detail=*/ false)
         .expect("seeded fixture status should project a value");
     let obj = v.as_object().expect("--json status is a dict");
     let expected: std::collections::BTreeSet<&str> = [
@@ -325,7 +309,7 @@ fn status_compact_reports_identity_slot_health_on_grok_identity_slot_ok() {
     )
     .unwrap();
 
-    let v = status_port::status(&ws, /*compact=*/ true, /*detail=*/ false)
+    let v = status_port::status_scoped(&ws, &crate::state::persist::load_runtime_state(&ws).expect("fixture runtime state"), None, /*compact=*/ true, /*detail=*/ false)
         .expect("mismatched grok slot must still project compact status");
     assert_eq!(
         v.get("ok").and_then(serde_json::Value::as_bool),
@@ -387,14 +371,14 @@ fn status_port_status_reports_managed_leader_topology_and_attach_command() {
 
     // 0.4.x: leader_topology / is_external_leader moved to --detail.
     // leader_attach_command stays in the slim compact payload.
-    let slim = status_port::status(&ws, /*compact=*/ true, /*detail=*/ false).expect("status");
+    let slim = status_port::status_scoped(&ws, &crate::state::persist::load_runtime_state(&ws).expect("fixture runtime state"), None, /*compact=*/ true, /*detail=*/ false).expect("status");
     let attach = slim["leader_attach_command"]
         .as_str()
         .expect("compact still includes leader_attach_command");
     assert!(attach.contains("attach -t team-current:leader"), "{attach}");
 
     let detail =
-        status_port::status(&ws, /*compact=*/ false, /*detail=*/ true).expect("status detail");
+        status_port::status_scoped(&ws, &crate::state::persist::load_runtime_state(&ws).expect("fixture runtime state"), None, /*compact=*/ false, /*detail=*/ true).expect("status detail");
     assert_eq!(detail["leader_topology"], json!("managed"));
     assert_eq!(detail["is_external_leader"], json!(false));
     let _ = std::fs::remove_dir_all(&ws);
@@ -414,7 +398,7 @@ fn status_port_managed_attach_command_uses_receiver_window_name() {
     }
     crate::state::persist::save_runtime_state(&ws, &state).unwrap();
 
-    let v = status_port::status(&ws, /*compact=*/ true, /*detail=*/ false).expect("status");
+    let v = status_port::status_scoped(&ws, &crate::state::persist::load_runtime_state(&ws).expect("fixture runtime state"), None, /*compact=*/ true, /*detail=*/ false).expect("status");
 
     let attach = v["leader_attach_command"]
         .as_str()
@@ -469,14 +453,14 @@ fn status_port_missing_topology_marker_defaults_to_managed() {
     crate::state::persist::save_runtime_state(&ws, &state).unwrap();
 
     // 0.4.x: topology/external markers moved to --detail; compact keeps attach.
-    let slim = status_port::status(&ws, /*compact=*/ true, /*detail=*/ false).expect("status");
+    let slim = status_port::status_scoped(&ws, &crate::state::persist::load_runtime_state(&ws).expect("fixture runtime state"), None, /*compact=*/ true, /*detail=*/ false).expect("status");
     let attach = slim["leader_attach_command"]
         .as_str()
         .expect("missing marker defaults to managed attach command");
     assert!(attach.contains("attach -t team-current:leader"), "{attach}");
 
     let detail =
-        status_port::status(&ws, /*compact=*/ false, /*detail=*/ true).expect("status detail");
+        status_port::status_scoped(&ws, &crate::state::persist::load_runtime_state(&ws).expect("fixture runtime state"), None, /*compact=*/ false, /*detail=*/ true).expect("status detail");
     assert_eq!(detail["leader_topology"], json!("managed"));
     assert_eq!(detail["is_external_leader"], json!(false));
     let _ = std::fs::remove_dir_all(&ws);
@@ -488,9 +472,9 @@ fn status_port_status_detail_full_keeps_uncompacted_events() {
     // compact slim payload drops. Pin the must-keep set so future
     // refactors can't accidentally strip detail diagnostics.
     let ws = seed_status_workspace();
-    let full = status_port::status(&ws, /*compact=*/ false, /*detail=*/ true)
+    let full = status_port::status_scoped(&ws, &crate::state::persist::load_runtime_state(&ws).expect("fixture runtime state"), None, /*compact=*/ false, /*detail=*/ true)
         .expect("seeded fixture full status should project a value");
-    let compact = status_port::status(&ws, /*compact=*/ true, /*detail=*/ false)
+    let compact = status_port::status_scoped(&ws, &crate::state::persist::load_runtime_state(&ws).expect("fixture runtime state"), None, /*compact=*/ true, /*detail=*/ false)
         .expect("seeded fixture compact status should project a value");
     assert_ne!(
         full, compact,
@@ -572,50 +556,9 @@ fn queued_send_args_fixture(json: bool) -> SendArgs {
     }
 }
 
-#[test]
-fn send_options_negates_no_ack_and_no_wait_and_carries_watch() {
-    // golden (commands.py:172,174,176): requires_ack=not no_ack; wait_visible=not no_wait;
-    //   watch_result passthrough. With no_ack=true,no_wait=true,watch_result=true:
-    //   requires_ack=false, wait_visible=false, watch_result=true.
-    let opts = send_options_from_args(&send_args_fixture());
-    assert!(
-        !opts.requires_ack,
-        "no_ack:true MUST map to requires_ack:false (off-by-inversion guard)"
-    );
-    assert!(
-        !opts.wait_visible,
-        "no_wait:true MUST map to wait_visible:false"
-    );
-    assert!(
-        opts.watch_result,
-        "watch_result flag MUST pass through into SendOptions"
-    );
-    assert!(!opts.confirm_human);
-    assert_eq!(opts.sender.as_str(), "leader");
-    assert_eq!(opts.timeout, 12.5);
-}
 
-#[test]
-fn send_options_default_flags_are_acked_and_waited() {
-    // golden: no_ack=false,no_wait=false,watch_result=false ->
-    //   requires_ack=true, wait_visible=true, watch_result=false (Python defaults inverted back).
-    let args = SendArgs {
-        no_ack: false,
-        no_wait: false,
-        watch_result: false,
-        ..send_args_fixture()
-    };
-    let opts = send_options_from_args(&args);
-    assert!(
-        opts.requires_ack,
-        "no_ack:false MUST map to requires_ack:true"
-    );
-    assert!(
-        opts.wait_visible,
-        "no_wait:false MUST map to wait_visible:true"
-    );
-    assert!(!opts.watch_result);
-}
+
+
 
 // =========================================================================
 // cmd_send — REAL caller (gate: 'cmd_send has NO test beyond send_target').
@@ -734,7 +677,7 @@ fn cmd_send_canonicalizes_legacy_session_alias_before_membership_projection() {
 #[test]
 fn status_noncompact_coordinator_includes_ok() {
     let ws = seed_status_workspace();
-    let v = status_port::status(&ws, /*compact=*/ false, /*detail=*/ true).expect("status");
+    let v = status_port::status_scoped(&ws, &crate::state::persist::load_runtime_state(&ws).expect("fixture runtime state"), None, /*compact=*/ false, /*detail=*/ true).expect("status");
     let coord = v
         .get("coordinator")
         .and_then(|c| c.as_object())
@@ -771,7 +714,7 @@ fn status_compact_omits_coordinator_entirely() {
     // Compact folds coordinator health into the top-level `ready`/`not_ready`
     // synthesis (`coordinator_not_running` / `coordinator_schema_not_ok`).
     let ws = seed_status_workspace();
-    let v = status_port::status(&ws, /*compact=*/ true, /*detail=*/ false).expect("status");
+    let v = status_port::status_scoped(&ws, &crate::state::persist::load_runtime_state(&ws).expect("fixture runtime state"), None, /*compact=*/ true, /*detail=*/ false).expect("status");
     assert!(
         v.as_object().unwrap().get("coordinator").is_none(),
         "0.4.x: compact must NOT include `coordinator`; reasons fold into not_ready"

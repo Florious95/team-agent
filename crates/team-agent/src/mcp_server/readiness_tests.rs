@@ -128,7 +128,7 @@ fn missing_handshake_is_unready_then_a_live_scoped_receipt_is_recognized() {
         .admission()
         .unwrap()
         .expect("eager client must require a receipt");
-    revalidate(&admission, &case.target, &case.panes).unwrap();
+    assert_eq!(admission.server.identity.pid, std::process::id());
 }
 
 #[test]
@@ -260,11 +260,8 @@ fn malformed_stale_birth_ancestry_and_image_receipts_refuse() {
 fn changed_current_target_and_new_spawn_do_not_reuse_a_handshake() {
     let mut case = Case::new();
     case.publish();
-    let admission = case.admission().unwrap().unwrap();
-    let mut other = case.panes.clone();
-    other[0].pane_pid = Some(std::process::id());
-    assert!(revalidate(&admission, &case.target, &other).is_err());
-    assert!(revalidate(&admission, &Target::Pane(PaneId::new("%2")), &case.panes).is_err());
+    case.admission().unwrap().expect("current receipt is initially valid");
+    // Preserve launch-generation validation; in-flight injection revalidation is retired.
     case.state["agents"]["worker"]["spawned_at"] =
         json!((Utc::now() + chrono::Duration::seconds(1)).to_rfc3339());
     assert!(case.admission().is_err());

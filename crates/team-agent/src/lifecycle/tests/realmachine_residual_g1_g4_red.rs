@@ -22,14 +22,9 @@ use serde_json::{json, Value};
 use team_agent::lifecycle::{
     add_agent_with_transport, remove_agent_with_transport, restart_with_transport,
 };
-use team_agent::messaging::{send_message, MessageTarget, SendOptions};
+use team_agent::messaging::{ MessageTarget };
 use team_agent::model::ids::AgentId;
-use team_agent::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
-    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
-    WindowName,
-};
+use team_agent::transport::{ BackendKind, CaptureRange, CapturedText, InjectStage, Key, PaneField, PaneId, PaneInfo, SessionName, SpawnResult, Target, Transport, TransportError, WindowName };
 
 fn bin() -> &'static str {
     crate::lifecycle::tests::test_binary_path()
@@ -176,19 +171,23 @@ fn g3_add_send_remove_readd_send_keeps_runtime_and_spec_rosters_coherent() {
         "CR-030/G3 fixture sanity: add-agent worker_b should succeed before send/remove; got {add:?}"
     );
 
-    let first_send = send_message(
-        &fixture.root,
-        &MessageTarget::Single("worker_b".to_string()),
-        "first ping",
-        &SendOptions {
-            wait_visible: false,
-            block_until_delivered: false,
-            ..SendOptions::default()
+    let first_send = crate::station::send::execute(
+        crate::station::send::Request {
+            workspace: &fixture.root,
+            team: None,
+            to: "worker_b",
+            content: "first ping",
+            task_id: None,
+            message_id: None,
+            presentation: &crate::messaging::presentation::PresentationRequest::default(),
+            mailbox: false,
+            envelope: None,
         },
+        crate::station::send::Authority::Operator { sender: "leader" },
     )
     .unwrap();
     assert!(
-        first_send.ok,
+        first_send["ok"] == true,
         "CR-030/G3: send after add-agent must route to worker_b, proving runtime roster recognizes the new worker; got {first_send:?}"
     );
 
@@ -219,19 +218,23 @@ fn g3_add_send_remove_readd_send_keeps_runtime_and_spec_rosters_coherent() {
         readd.is_ok(),
         "CR-030/G3: re-add worker_b after removal should be accepted; got {readd:?}"
     );
-    let second_send = send_message(
-        &fixture.root,
-        &MessageTarget::Single("worker_b".to_string()),
-        "second ping",
-        &SendOptions {
-            wait_visible: false,
-            block_until_delivered: false,
-            ..SendOptions::default()
+    let second_send = crate::station::send::execute(
+        crate::station::send::Request {
+            workspace: &fixture.root,
+            team: None,
+            to: "worker_b",
+            content: "second ping",
+            task_id: None,
+            message_id: None,
+            presentation: &crate::messaging::presentation::PresentationRequest::default(),
+            mailbox: false,
+            envelope: None,
         },
+        crate::station::send::Authority::Operator { sender: "leader" },
     )
     .unwrap();
     assert!(
-        second_send.ok,
+        second_send["ok"] == true,
         "CR-030/G3: send after re-add must route to worker_b again; got {second_send:?}"
     );
 }
@@ -547,23 +550,6 @@ impl Transport for DuplicateSessionTrapTransport {
         Ok(self.spawn_result("spawn_into", session, window))
     }
 
-    fn inject(
-        &self,
-        _target: &Target,
-        _payload: &InjectPayload,
-        _submit: Key,
-        _bracketed: bool,
-    ) -> Result<InjectReport, TransportError> {
-        self.record("inject");
-        Ok(InjectReport {
-            stage_reached: InjectStage::Submit,
-            inject_verification: InjectVerification::CaptureContainsToken,
-            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
-            turn_verification: TurnVerification::NotYetObserved,
-            attempts: 1,
-            submit_diagnostics: None,
-        })
-    }
 
     fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
         self.record("send_keys");
@@ -617,15 +603,6 @@ impl Transport for DuplicateSessionTrapTransport {
             .collect())
     }
 
-    fn set_session_env(
-        &self,
-        _session: &SessionName,
-        _key: &str,
-        _value: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        self.record("set_session_env");
-        Ok(SetEnvOutcome::Applied)
-    }
 
     fn kill_session(&self, session: &SessionName) -> Result<(), TransportError> {
         self.record("kill_session");
@@ -641,8 +618,4 @@ impl Transport for DuplicateSessionTrapTransport {
         Ok(())
     }
 
-    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
-        self.record("attach_session");
-        Ok(AttachOutcome::Attached)
-    }
 }

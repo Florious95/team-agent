@@ -13,9 +13,7 @@ use std::collections::BTreeSet;
 use mcp_sim_harness::{McpSimHarness, McpToolCall};
 use serde_json::json;
 use team_agent::event_log::EventLog;
-use team_agent::messaging::{
-    mirror_peer_message_to_leader, send_to_leader_receiver, DeliveryStatus,
-};
+
 use team_agent::model::ids::TaskId;
 
 // #230 -> #236 N35 obsolete note:

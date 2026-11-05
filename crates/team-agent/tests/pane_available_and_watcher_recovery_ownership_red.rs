@@ -202,24 +202,7 @@ fn watcher_recovery_scoped_by_incident_id() {
 // Tooth 6 — positive control: legitimate watcher retry is reachable
 // ---------------------------------------------------------------------------
 
-#[test]
-#[serial(env)]
-fn existing_result_watcher_retry_still_reachable() {
-    // Source-level positive control: the watcher retry function must
-    // remain a `pub` symbol so operator tooling / the recovery arm can
-    // reach it. If the refactor turns it private, we lose the
-    // legitimate path.
-    let watchers =
-        fs::read_to_string(crate_src().join("messaging/watchers.rs")).expect("read watchers.rs");
-    let hit = watchers.contains("pub fn requeue_after_claim_leader")
-        || watchers.contains("pub(crate) fn requeue_after_claim_leader")
-        || watchers.contains("pub fn recover_watchers_for_incident");
-    assert!(
-        hit,
-        "watcher retry entry point no longer publicly reachable — legitimate \
-         retry path lost. Refactor must keep an operator-callable entry point."
-    );
-}
+
 
 // ---------------------------------------------------------------------------
 // Tooth 7 — negative control: pane_available recovery does not touch leader

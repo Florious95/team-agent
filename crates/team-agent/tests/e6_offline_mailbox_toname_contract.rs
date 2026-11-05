@@ -132,44 +132,7 @@ fn e6_resolver_taxonomy_is_split_before_reading_leader_receiver() {
     );
 }
 
-#[ignore = "red-by-design: pending contract, tracked in private backlog"]
-#[test]
-fn e6_offline_mailbox_uses_non_delivered_status_and_existing_requeue_funnel() {
-    let combined = [
-        source("src/cli/send.rs"),
-        source("src/messaging/leader_receiver.rs"),
-        source("src/db/message_store.rs"),
-        source("src/messaging/watchers.rs"),
-        source("src/cli/status_port.rs"),
-        source("src/messaging/delivery.rs"),
-    ]
-    .join("\n");
 
-    let mut missing = Vec::new();
-    for required in [
-        "queued_until_leader_attach",
-        "leader_mailbox",
-        "delivered",
-        "owner_team_id",
-        "recipient = 'leader'",
-        "leader_mailbox.queued_until_attach",
-        "requeue_blocked_leader_messages",
-        "pending_leader_notifications",
-    ] {
-        if !combined.contains(required) {
-            missing.push(required);
-        }
-    }
-
-    assert!(
-        missing.is_empty(),
-        "E6 RED: leader-not-attached --to-name path must enqueue one target team.db row with status=queued_until_leader_attach, delivered=false, channel=leader_mailbox, expose it in status, and requeue the same row via existing requeue_blocked_leader_messages. Missing markers: {missing:?}"
-    );
-    assert!(
-        !claim_for_delivery_statuses().contains("queued_until_leader_attach"),
-        "E6 RED guard: queued_until_leader_attach rows must not be claimed by coordinator tick before attach/claim"
-    );
-}
 
 #[test]
 fn e6_mailbox_paths_do_not_spawn_provider_or_worker_processes() {
@@ -367,14 +330,4 @@ fn is_approved_ds01_fifo_notification(rel: &str, line_number: usize, line: &str)
                     "fifo.write_all(format!(\"{result_id}\\n\").as_bytes())"
                 )
         )
-}
-
-fn claim_for_delivery_statuses() -> String {
-    let message_store = source("src/db/message_store.rs");
-    let start = message_store
-        .find("pub fn claim_for_delivery")
-        .unwrap_or_default();
-    let slice = &message_store[start..];
-    let end = slice.find("    /// Read inbox rows").unwrap_or(slice.len());
-    slice[..end].to_string()
 }

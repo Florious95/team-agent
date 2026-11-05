@@ -48,21 +48,7 @@ fn non_comment_body(src: &str) -> String {
     out
 }
 
-#[test]
-fn batch4_delivery_transport_owned_is_boxed_dyn_transport() {
-    let body = read("messaging/delivery.rs");
-    assert!(
-        body.contains("Owned(Box<dyn Transport>)"),
-        "Batch 4 must generalize `DeliveryTransport::Owned` to \
-         `Owned(Box<dyn Transport>)`. Current body missing the marker."
-    );
-    // The old concrete-TmuxBackend variant must be gone.
-    assert!(
-        !non_comment_body(&body).contains("Owned(crate::tmux_backend::TmuxBackend)"),
-        "Legacy `Owned(crate::tmux_backend::TmuxBackend)` variant must be replaced \
-         by `Owned(Box<dyn Transport>)`. Found the concrete type still present."
-    );
-}
+
 
 #[test]
 fn batch4_leader_channel_uses_factory_helpers_not_direct_tmux_backend() {

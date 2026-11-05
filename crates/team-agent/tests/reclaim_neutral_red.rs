@@ -28,26 +28,20 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use mcp_sim_harness::McpSimHarness;
-use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 use serial_test::{file_serial, serial};
-use team_agent::event_log::EventLog;
-use team_agent::message_store::MessageStore;
-use team_agent::messaging::results::report_result;
-use team_agent::messaging::{
-    deliver_pending_messages, send_message, DeliveryRefusal, DeliveryStatus, MessageTarget,
-    SendOptions, TrustedSender,
-};
+use team_agent::messaging::MessageTarget;
+use team_agent::station::send::Authority;
 use team_agent::model::ids::{AgentId, TeamKey};
 use team_agent::tmux_backend::TmuxBackend;
 use team_agent::transport::{SessionName, Transport, WindowName};
 
 #[test]
 fn send_path_reclaim_neutral_static_guard_no_send_auto_reclaim_callsite() {
-    let send = source("src/messaging/send.rs");
+    let send = source("src/station/send.rs");
     assert!(
         !send.contains("auto_reclaim_from_caller_if_stale"),
-        "I-RN/send neutral: messaging/send.rs must not call auto_reclaim_from_caller_if_stale; delivery is not an ownership side-effect"
+        "I-RN/send neutral: station/send.rs must not call auto_reclaim_from_caller_if_stale; delivery is not an ownership side-effect"
     );
 }
 
@@ -102,38 +96,26 @@ fn send_path_reclaim_neutral_cli_broadcast_fanout_and_mcp_do_not_claim() {
 #[file_serial(tmux)]
 fn report_result_reclaim_neutral_preserves_result_and_message_but_not_owner() {
     let case = TmuxCase::new("report-neutral");
-    seed_state(
-        &case.workspace,
-        Some("%dead-leader"),
-        9,
-        &[("worker_a", "codex")],
-    );
+    seed_state(&case.workspace, Some("%dead-leader"), 9, &[("worker_a", "codex")]);
     let before = runtime_state(&case.workspace);
-
-    let out = report_result(&case.workspace, &result_envelope("res_report_neutral"))
-        .expect("report_result should persist the result even when leader is dead");
+    let envelope = result_envelope("res_report_neutral");
+    let out = report_fixture_result(&case.workspace, &envelope);
     let after = runtime_state(&case.workspace);
-    let events = events(&case.workspace);
-
-    assert_eq!(
-        binding_snapshot(&before),
-        binding_snapshot(&after),
-        "report_result is worker-origin delivery; it must not claim or rewrite owner/receiver. out={out} events={events}"
-    );
-    assert!(
-        result_exists(&case.workspace, "res_report_neutral"),
-        "report_result must preserve the result row while waiting for explicit claim"
-    );
-    assert!(
-        out.get("notification_status").and_then(Value::as_str) == Some("rebind_required")
-            || events.contains("rebind_required")
-            || events.contains("leader_not_attached"),
-        "leader-dead report_result must surface rebind/claim-required, not pretend leader delivery succeeded; out={out} events={events}"
-    );
-    assert!(
-        out.to_string().contains("claim-leader") || events.contains("claim-leader"),
-        "leader-dead report_result must give the user an explicit claim-leader recovery hint; out={out} events={events}"
-    );
+    assert_eq!(binding_snapshot(&before), binding_snapshot(&after),
+        "report_result must not claim or rewrite owner/receiver: {out}");
+    assert_eq!(out["stored"], true);
+    assert_eq!(out["live"], false);
+    assert_ne!(out["delivery"], "physical");
+    assert!(out["accepted"].is_null());
+    assert!(out["delivery_error"].as_str().is_some_and(|error| !error.is_empty()),
+        "dead receiver must produce a truthful delivery diagnostic: {out}");
+    let inbox = leader_inbox(&case.workspace);
+    assert_eq!(inbox.len(), 1, "result and notification share one durable record: {inbox:?}");
+    assert_eq!(inbox[0]["kind"], "result");
+    assert_eq!(inbox[0]["message_id"], out["message_id"]);
+    for (key, value) in envelope.as_object().unwrap() {
+        assert_eq!(&inbox[0]["envelope"][key], value, "result field {key} must survive");
+    }
 }
 
 #[test]
@@ -145,55 +127,29 @@ fn transport_retry_reclaim_neutral_injection_and_pending_paths_do_not_write_owne
     let leader = case.spawn_leader_shaped_pane("leader");
     let worker = case.spawn_cat_pane("worker-a-pane");
     let _env = EnvGuard::set(&[("TMUX_PANE", leader.as_str())]);
-    seed_state(
-        &case.workspace,
-        Some(leader.as_str()),
-        4,
-        &[("worker_a", "codex")],
-    );
+    seed_state(&case.workspace, Some(leader.as_str()), 4, &[("worker_a", "fake")]);
     set_agent_pane(&case.workspace, "worker_a", &worker);
     let before = runtime_state(&case.workspace);
-
-    let out = send_message(
-        &case.workspace,
-        &MessageTarget::Single("worker_a".to_string()),
-        "TRANSPORT_RECLAIM_NEUTRAL_CANARY",
-        &send_opts("leader", Some("team-a")),
-    )
-    .expect("fixture send should queue a worker message");
-    assert_eq!(out.status, DeliveryStatus::Queued);
-
+    let send = || team_agent::station::send::execute(team_agent::station::send::Request {
+        workspace: &case.workspace, team: Some("team-a"), to: "worker_a",
+        content: "TRANSPORT_RECLAIM_NEUTRAL_CANARY", task_id: None,
+        message_id: Some("transport-reclaim-neutral"), presentation: &Default::default(),
+        mailbox: false, envelope: None,
+    }, Authority::Operator { sender: "leader" }).expect("current worker send");
+    let out = send();
+    assert_eq!(out["stored"], true);
+    assert_eq!(out["delivery"], "physical", "fixture must physically deliver: {out}");
+    let retry = send();
+    assert_eq!(retry["duplicate"], true);
+    assert_eq!(retry["message_id"], out["message_id"]);
+    assert_eq!(binding_snapshot(&before), binding_snapshot(&runtime_state(&case.workspace)),
+        "physical delivery and retry must not rewrite ownership");
     let transport = TmuxBackend::for_workspace(&case.workspace);
-    let delivered = deliver_pending_messages(
-        &case.workspace,
-        &runtime_state(&case.workspace),
-        &transport,
-        &EventLog::new(&case.workspace),
-    )
-    .expect("offline transport delivery should run locally");
-    let after = runtime_state(&case.workspace);
-
-    assert_eq!(
-        binding_snapshot(&before),
-        binding_snapshot(&after),
-        "transport delivery/retry/fallback layer must only inject or update message state; it must not write owner/receiver"
-    );
-    assert_eq!(
-        delivered.len(),
-        1,
-        "fixture should physically inject one pending message"
-    );
-    assert!(
-        transport
-            .capture(
-                &team_agent::transport::Target::Pane(team_agent::transport::PaneId::new(&worker)),
-                team_agent::transport::CaptureRange::Full,
-            )
-            .unwrap()
-            .text
-            .contains("TRANSPORT_RECLAIM_NEUTRAL_CANARY"),
-        "transport path should prove delivery by physical inject into the worker pane, not by ownership mutation"
-    );
+    assert!(transport.capture(
+        &team_agent::transport::Target::Pane(team_agent::transport::PaneId::new(&worker)),
+        team_agent::transport::CaptureRange::Full,
+    ).unwrap().text.contains("TRANSPORT_RECLAIM_NEUTRAL_CANARY"),
+        "physical capture, not a fabricated status, must prove delivery");
 }
 
 #[test]
@@ -203,57 +159,22 @@ fn transport_retry_reclaim_neutral_injection_and_pending_paths_do_not_write_owne
 fn explicit_claim_unconditional_live_caller_claims_vacant_or_dead_and_requeues_same_message_id() {
     let case = TmuxCase::new("explicit-claim");
     seed_state(&case.workspace, None, 0, &[("worker_a", "codex")]);
-    let blocked = report_result(&case.workspace, &result_envelope("res_claim_requeue"))
-        .expect("blocked result fixture should persist");
-    let blocked_message_id = blocked
-        .get("notification_message_id")
-        .and_then(Value::as_str)
-        .expect("blocked report_result must expose a message id")
-        .to_string();
-    assert_eq!(
-        message_status(&case.workspace, &blocked_message_id).as_deref(),
-        Some("failed"),
-        "fixture sanity: result notification starts blocked"
-    );
-
+    let out = report_fixture_result(&case.workspace, &result_envelope("res_claim_requeue"));
+    assert_eq!(out["stored"], true);
+    assert_ne!(out["delivery"], "physical");
+    let before = leader_inbox(&case.workspace);
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0]["message_id"], out["message_id"]);
     let caller = case.spawn_plain_pane("ordinary-shell-caller");
     let _env = EnvGuard::set(&[("TMUX_PANE", caller.as_str())]);
     let result = team_agent::leader::claim_leader(&case.workspace, Some("team-a"), false)
-        .expect("claim-leader command should return a typed result");
+        .expect("explicit claim must return a typed result");
     let state = runtime_state(&case.workspace);
-
-    assert!(
-        result.ok,
-        "explicit claim-leader is unconditional for any live caller pane; no TEAM_AGENT_ID/owner/created_by/parent-chain or leader-shaped command gate may refuse it. result={result:?} state={state}"
-    );
-    assert_eq!(
-        binding_snapshot(&state).pane.as_deref(),
-        Some(caller.as_str()),
-        "explicit claim must bind the caller pane as the only leader receiver"
-    );
-    assert_eq!(
-        binding_snapshot(&state).epoch,
-        Some(1),
-        "explicit claim from vacant/dead state must advance owner_epoch monotonically"
-    );
-    assert!(
-        matches!(
-            message_status(&case.workspace, &blocked_message_id).as_deref(),
-            Some("accepted" | "pending" | "target_resolved" | "injected" | "visible" | "submitted" | "submitted_unverified" | "delivered")
-        ),
-        "explicit claim must reuse requeue_after_claim_leader and requeue the SAME blocked message_id; status={:?}",
-        message_status(&case.workspace, &blocked_message_id)
-    );
-    assert_eq!(
-        result_notification_message_count(&case.workspace, "res_claim_requeue"),
-        1,
-        "explicit claim replay must not create a second message for the same result_id"
-    );
-    assert_eq!(
-        leader_notification_log_count(&case.workspace, "res_claim_requeue"),
-        1,
-        "explicit claim replay must preserve leader_notification_log exactly-once for the same result_id"
-    );
+    assert!(result.ok, "explicit live-caller claim must succeed: {result:?} state={state}");
+    assert_eq!(binding_snapshot(&state).pane.as_deref(), Some(caller.as_str()));
+    assert_eq!(binding_snapshot(&state).epoch, Some(1), "explicit claim must advance the epoch");
+    let after = leader_inbox(&case.workspace);
+    assert_eq!(after, before, "explicit binding must preserve the same durable record without requeue duplication or invented acceptance");
 }
 
 #[test]
@@ -306,40 +227,16 @@ fn dead_leader_send_does_not_autofix_and_tells_user_to_claim_or_takeover() {
     let case = TmuxCase::new("dead-send-no-autofix");
     let caller = case.spawn_plain_pane("ordinary-sender");
     let _env = EnvGuard::set(&[("TMUX_PANE", caller.as_str())]);
-    seed_state(
-        &case.workspace,
-        Some("%dead-leader"),
-        12,
-        &[("worker_a", "codex")],
-    );
+    seed_state(&case.workspace, Some("%dead-leader"), 12, &[("worker_a", "codex")]);
     let before = runtime_state(&case.workspace);
-
-    let out = send_message(
-        &case.workspace,
-        &MessageTarget::Single("worker_a".to_string()),
-        "DEAD_LEADER_SEND_MUST_NOT_AUTOFIX",
-        &send_opts("leader", Some("team-a")),
-    )
-    .expect("ordinary send should return a recoverable outcome, not crash");
-    let after = runtime_state(&case.workspace);
-    let events = events(&case.workspace);
-
-    assert_eq!(
-        binding_snapshot(&before),
-        binding_snapshot(&after),
-        "ordinary send after dead leader must not auto-bind any pane; out={out:?} events={events}"
-    );
-    assert!(
-        !events.contains("auto_reclaim_applied"),
-        "dead leader send is reclaim-neutral; auto_reclaim_applied must not be emitted. events={events}"
-    );
-    assert!(
-        format!("{out:?}").contains("claim-leader")
-            || format!("{out:?}").contains("takeover")
-            || events.contains("claim-leader")
-            || events.contains("takeover"),
-        "dead leader send must tell the user to run explicit claim/takeover; out={out:?} events={events}"
-    );
+    let out = send_to_scope(&case.workspace, "team-a", "worker_a", "DEAD_LEADER_SEND_MUST_NOT_AUTOFIX",
+        Authority::Operator { sender: "leader" }).unwrap();
+    assert_eq!(binding_snapshot(&before), binding_snapshot(&runtime_state(&case.workspace)));
+    assert!(!events(&case.workspace).contains("auto_reclaim_applied"));
+    assert_eq!(out["stored"], true);
+    assert_ne!(out["delivery"], "physical");
+    assert!(out["delivery_error"].as_str().is_some_and(|error| !error.is_empty()),
+        "unavailable endpoint must be diagnosed without a retired takeover hint: {out}");
 }
 
 #[test]
@@ -348,10 +245,10 @@ fn dead_leader_send_does_not_autofix_and_tells_user_to_claim_or_takeover() {
 #[file_serial(tmux)]
 fn send_owner_gate_retreat_cases_do_not_auto_bind_or_open_cross_team_access() {
     let mut failures = Vec::new();
-    if let Err(error) = assert_caller_pane_missing_is_hard_refused() {
+    if let Err(error) = assert_operator_without_pane_is_binding_neutral() {
         failures.push(error);
     }
-    if let Err(error) = assert_same_team_live_owner_mismatch_requires_takeover() {
+    if let Err(error) = assert_same_team_other_pane_preserves_owner() {
         failures.push(error);
     }
     if let Err(error) = assert_l1_send_to_child_live_owner_is_refused() {
@@ -374,69 +271,31 @@ fn send_owner_gate_retreat_cases_do_not_auto_bind_or_open_cross_team_access() {
     );
 }
 
-fn assert_caller_pane_missing_is_hard_refused() -> Result<(), String> {
+fn assert_operator_without_pane_is_binding_neutral() -> Result<(), String> {
     let case = TmuxCase::new("owner-gate-no-caller");
     let owner = case.spawn_plain_pane("parent-owner");
     let _env = EnvGuard::set(&[]);
     seed_parent_child_state(&case.workspace, &owner, "%child-owner", "parent");
-    let before = team_binding_snapshot(&case.workspace, "parent");
-
-    let out = send_message(
-        &case.workspace,
-        &MessageTarget::Single("subleader_w".to_string()),
-        "NO_CALLER_PANE_MUST_HARD_REFUSE",
-        &send_opts("leader", Some("parent")),
-    )
-    .map_err(|err| format!("caller_pane_missing: send errored: {err}"))?;
-    let after = team_binding_snapshot(&case.workspace, "parent");
-
-    if before != after {
-        return Err(format!(
-            "caller_pane_missing must not mutate parent owner/receiver; out={out:?} before={before:?} after={after:?}"
-        ));
-    }
-    let out_debug = format!("{out:?}");
-    if out.status != DeliveryStatus::Refused
-        || !(out_debug.contains("NoCallerPane") || out_debug.contains("no_caller_pane"))
-    {
-        return Err(format!(
-            "caller_pane_missing must be a hard NoCallerPane refusal (MUST-11/N26), not rebind/autoclaim; got {out:?}"
-        ));
+    let before = all_bindings(&case.workspace);
+    let out = send_to_scope(&case.workspace, "parent", "subleader_w", "OPERATOR_WITHOUT_PANE_MUST_NOT_BIND",
+        Authority::Operator { sender: "leader" })?;
+    if before != all_bindings(&case.workspace) || out["stored"] != true || out["delivery"] == "physical" {
+        return Err(format!("pane-less operator must store without taking ownership: {out} before={before} after={}", all_bindings(&case.workspace)));
     }
     Ok(())
 }
 
-fn assert_same_team_live_owner_mismatch_requires_takeover() -> Result<(), String> {
+fn assert_same_team_other_pane_preserves_owner() -> Result<(), String> {
     let case = TmuxCase::new("owner-gate-live-mismatch");
     let owner = case.spawn_plain_pane("parent-owner");
     let caller = case.spawn_plain_pane("other-live-caller");
     let _env = EnvGuard::set(&[("TMUX_PANE", caller.as_str())]);
     seed_parent_child_state(&case.workspace, &owner, "%child-owner", "parent");
-
-    let out = send_message(
-        &case.workspace,
-        &MessageTarget::Single("subleader_w".to_string()),
-        "LIVE_MISMATCH_MUST_REQUIRE_TAKEOVER",
-        &send_opts("leader", Some("parent")),
-    )
-    .map_err(|err| format!("same_team_owner_live_mismatch: send errored: {err}"))?;
-
-    if out.status != DeliveryStatus::Refused
-        || out.reason != Some(DeliveryRefusal::TeamOwnerMismatch)
-    {
-        return Err(format!(
-            "same_team_owner_live_mismatch must return TeamOwnerMismatch, got {out:?}"
-        ));
-    }
-    if !out
-        .verification
-        .as_deref()
-        .unwrap_or("")
-        .contains("takeover")
-    {
-        return Err(format!(
-            "same_team_owner_live_mismatch must hint explicit takeover; got {out:?}"
-        ));
+    let before = all_bindings(&case.workspace);
+    let out = send_to_scope(&case.workspace, "parent", "subleader_w", "OTHER_PANE_MUST_NOT_TAKE_OVER",
+        Authority::Operator { sender: "leader" })?;
+    if before != all_bindings(&case.workspace) || out["stored"] != true {
+        return Err(format!("same-team send must leave the existing owner unchanged: {out} before={before} after={}", all_bindings(&case.workspace)));
     }
     Ok(())
 }
@@ -447,21 +306,12 @@ fn assert_l1_send_to_child_live_owner_is_refused() -> Result<(), String> {
     let child_owner = case.spawn_plain_pane("child-owner");
     let _env = EnvGuard::set(&[("TMUX_PANE", l1.as_str())]);
     seed_parent_child_state(&case.workspace, &l1, &child_owner, "parent");
-
-    let out = send_message(
-        &case.workspace,
-        &MessageTarget::Single("child_worker".to_string()),
-        "L1_MUST_NOT_OPERATE_CHILD_WHILE_CHILD_OWNER_LIVE",
-        &send_opts("leader", Some("child")),
-    )
-    .map_err(|err| format!("l1_send_to_c_owner_live: send errored: {err}"))?;
-
-    if out.status != DeliveryStatus::Refused
-        || out.reason != Some(DeliveryRefusal::TeamOwnerMismatch)
-    {
-        return Err(format!(
-            "l1_send_to_c_owner_live must return TeamOwnerMismatch; got {out:?}"
-        ));
+    let before = all_bindings(&case.workspace);
+    let out = send_to_scope(&case.workspace, "child", "child_worker", "PARENT_SEAT_MUST_NOT_WIDEN_SCOPE",
+        Authority::Seat { sender: "leader", team: "parent" })?;
+    if out["reason"] != "peer_not_in_scope" || out["stored"] != false
+        || before != all_bindings(&case.workspace) || case.workspace.join(".team/inbox").exists() {
+        return Err(format!("cross-team Seat refusal must be binding-neutral and zero-write: {out}"));
     }
     Ok(())
 }
@@ -469,156 +319,108 @@ fn assert_l1_send_to_child_live_owner_is_refused() -> Result<(), String> {
 fn assert_l1_send_to_child_dead_owner_retreats_without_binding() -> Result<(), String> {
     let case = TmuxCase::new("owner-gate-l1-child-dead");
     let l1 = case.spawn_plain_pane("l1-parent-owner");
-    let dead_child_owner = "%dead-child-owner";
     let _env = EnvGuard::set(&[("TMUX_PANE", l1.as_str())]);
-    seed_parent_child_state(&case.workspace, &l1, dead_child_owner, "parent");
-    let before_child = team_binding_snapshot(&case.workspace, "child");
-
-    let out = send_message(
-        &case.workspace,
-        &MessageTarget::Single("child_worker".to_string()),
-        "L1_MUST_RETREAT_NOT_AUTOBIND_CHILD",
-        &send_opts("leader", Some("child")),
-    )
-    .map_err(|err| format!("l1_send_to_c_owner_dead: send errored: {err}"))?;
-    let after_child = team_binding_snapshot(&case.workspace, "child");
-
-    if before_child != after_child {
-        return Err(format!(
-            "l1_send_to_c_owner_dead must retreat without rewriting state.teams.child owner/receiver; out={out:?} before={before_child:?} after={after_child:?}"
-        ));
+    seed_parent_child_state(&case.workspace, &l1, "%dead-child-owner", "parent");
+    let before = all_bindings(&case.workspace);
+    let out = send_to_scope(&case.workspace, "child", "child_worker", "DEAD_OWNER_DOES_NOT_WIDEN_SEAT_SCOPE",
+        Authority::Seat { sender: "leader", team: "parent" })?;
+    if out["reason"] != "peer_not_in_scope" || out["stored"] != false
+        || before != all_bindings(&case.workspace) || case.workspace.join(".team/inbox").exists() {
+        return Err(format!("dead child owner must not grant parent Seat authority or trigger writes: {out}"));
     }
-    if after_child.owner_pane.as_deref() == Some(l1.as_str())
-        || after_child.receiver_pane.as_deref() == Some(l1.as_str())
-    {
-        return Err(format!(
-            "l1_send_to_c_owner_dead must not auto-bind L1 pane as child owner/receiver; out={out:?} child={after_child:?}"
-        ));
-    }
-    if out.status != DeliveryStatus::Blocked || out.channel.as_deref() != Some("rebind_required") {
-        return Err(format!(
-            "l1_send_to_c_owner_dead must return rebind_required, not TeamOwnerMismatch/autoclaim; got {out:?}"
-        ));
-    }
-    if !out
-        .verification
-        .as_deref()
-        .unwrap_or("")
-        .contains("claim-leader --team child")
-    {
-        return Err(format!(
-            "l1_send_to_c_owner_dead must hint explicit `claim-leader --team child`; got {out:?}"
-        ));
+    let after = team_binding_snapshot(&case.workspace, "child");
+    if after.owner_pane.as_deref() == Some(l1.as_str()) || after.receiver_pane.as_deref() == Some(l1.as_str()) {
+        return Err("parent pane must never auto-bind as child owner/receiver".into());
     }
     Ok(())
 }
 
-fn assert_worker_send_to_parent_dead_leader_retreats_without_binding_worker() -> Result<(), String>
-{
+fn assert_worker_send_to_parent_dead_leader_retreats_without_binding_worker() -> Result<(), String> {
     let case = TmuxCase::new("owner-gate-worker-parent-dead");
     let worker = case.spawn_plain_pane("worker-pane");
-    let _env = EnvGuard::set(&[
-        ("TMUX_PANE", worker.as_str()),
-        ("TEAM_AGENT_ID", "subleader_w"),
-    ]);
-    seed_parent_child_state(
-        &case.workspace,
-        "%dead-parent-owner",
-        "%child-owner",
-        "parent",
-    );
+    let _env = EnvGuard::set(&[("TMUX_PANE", worker.as_str()), ("TEAM_AGENT_ID", "subleader_w")]);
+    seed_parent_child_state(&case.workspace, "%dead-parent-owner", "%child-owner", "parent");
     set_team_agent_pane(&case.workspace, "parent", "subleader_w", &worker);
-    let before_parent = team_binding_snapshot(&case.workspace, "parent");
-
-    let out = send_message(
-        &case.workspace,
-        &MessageTarget::Single("leader".to_string()),
-        "WORKER_MUST_NOT_SELF_PROMOTE_WHEN_PARENT_LEADER_DEAD",
-        &send_opts("subleader_w", Some("parent")),
-    )
-    .map_err(|err| format!("worker_send_to_p_leader_dead: send errored: {err}"))?;
-    let after_parent = team_binding_snapshot(&case.workspace, "parent");
-
-    if before_parent != after_parent {
-        return Err(format!(
-            "worker_send_to_p_leader_dead must not rewrite parent owner/receiver; out={out:?} before={before_parent:?} after={after_parent:?}"
-        ));
+    let before = all_bindings(&case.workspace);
+    let out = send_to_scope(&case.workspace, "parent", "leader", "WORKER_MUST_NOT_SELF_PROMOTE",
+        Authority::Seat { sender: "subleader_w", team: "parent" })?;
+    if before != all_bindings(&case.workspace) || out["stored"] != true || out["delivery"] == "physical" {
+        return Err(format!("worker result must remain durable/nonphysical without changing any binding: {out}"));
     }
-    if after_parent.owner_pane.as_deref() == Some(worker.as_str())
-        || after_parent.receiver_pane.as_deref() == Some(worker.as_str())
-    {
-        return Err(format!(
-            "worker_send_to_p_leader_dead must not write worker pane as parent leader_receiver; out={out:?} parent={after_parent:?}"
-        ));
+    let after = team_binding_snapshot(&case.workspace, "parent");
+    if after.owner_pane.as_deref() == Some(worker.as_str()) || after.receiver_pane.as_deref() == Some(worker.as_str()) {
+        return Err("worker must never promote itself to parent owner/receiver".into());
     }
-    if out.status != DeliveryStatus::Blocked || out.channel.as_deref() != Some("rebind_required") {
-        return Err(format!(
-            "worker_send_to_p_leader_dead must return rebind_required while preserving message/retry path; got {out:?}"
-        ));
+    let inbox = team_agent::inbox_store::read(&case.workspace, "leader", 10, Some("parent"))?;
+    if !inbox["messages"].as_array().unwrap().iter().any(|record| record["message_id"] == out["message_id"]) {
+        return Err("dead-receiver message must actually be durable".into());
     }
     Ok(())
 }
 
 fn assert_send_after_explicit_child_claim_succeeds() -> Result<(), String> {
     let case = TmuxCase::new("owner-gate-explicit-claim");
-    let l1 = case.spawn_plain_pane("l1-explicit-child-claim");
-    let _env = EnvGuard::set(&[("TMUX_PANE", l1.as_str())]);
+    let l1 = case.spawn_leader_shaped_pane("l1-explicit-child-claim");
+    let worker = case.spawn_cat_pane("child-worker");
+    // Explicit claim requires the real caller's absolute native tmux endpoint.
+    let argv = TmuxBackend::argv_for_workspace(&case.workspace, &[
+        "tmux".into(), "display-message".into(), "-p".into(), "-t".into(), l1.clone(),
+        "#{socket_path},#{pid},0".into(),
+    ]);
+    let caller = std::process::Command::new(&argv[0]).args(&argv[1..]).output().map_err(|error| error.to_string())?;
+    if !caller.status.success() { return Err(format!("read native caller tuple: {caller:?}")); }
+    let tmux = String::from_utf8(caller.stdout).map_err(|error| error.to_string())?;
+    let _env = EnvGuard::set(&[("TMUX_PANE", l1.as_str()), ("TMUX", tmux.trim())]);
     seed_parent_child_state(&case.workspace, &l1, "%dead-child-owner", "parent");
-
-    let claim = team_agent::leader::claim_leader(&case.workspace, Some("child"), false)
-        .map_err(|err| format!("explicit child claim errored: {err}"))?;
-    if !claim.ok {
-        return Err(format!(
-            "explicit claim-leader --team child is the recovery path and must succeed; got {claim:?}"
-        ));
+    set_team_agent_pane(&case.workspace, "child", "child_worker", &worker);
+    // This is a real cat-based fake worker, not a native Codex seat without its required authority.
+    let mut state = runtime_state(&case.workspace);
+    state["teams"]["child"]["agents"]["child_worker"]["provider"] = json!("fake");
+    team_agent::state::persist::save_runtime_state(&case.workspace, &state).unwrap();
+    let before = team_binding_snapshot(&case.workspace, "child");
+    let parent = team_binding_snapshot(&case.workspace, "parent");
+    // Explicit confirmation is required when the old owner's liveness is not proven.
+    let claim = team_agent::leader::claim_leader(&case.workspace, Some("child"), true)
+        .map_err(|error| error.to_string())?;
+    let claimed = team_binding_snapshot(&case.workspace, "child");
+    if !claim.ok || claimed.owner_epoch != Some(before.owner_epoch.unwrap_or(0) + 1)
+        || claimed.receiver_pane.as_deref() != Some(l1.as_str())
+        || claimed.owner_pane.as_deref() != Some(l1.as_str())
+        || parent != team_binding_snapshot(&case.workspace, "parent") {
+        return Err(format!("explicit child claim must advance its epoch and bind only the caller: {claim:?} before={before:?} after={claimed:?}"));
     }
-    let out = send_message(
-        &case.workspace,
-        &MessageTarget::Single("child_worker".to_string()),
-        "SEND_AFTER_EXPLICIT_CHILD_CLAIM_MUST_SUCCEED",
-        &send_opts("leader", Some("child")),
-    )
-    .map_err(|err| format!("send_after_explicit_claim_succeeds: send errored: {err}"))?;
-    if !out.ok
-        || !matches!(
-            out.status,
-            DeliveryStatus::Queued | DeliveryStatus::Delivered
-        )
-    {
-        return Err(format!(
-            "send_after_explicit_claim_succeeds must queue/deliver after explicit child claim; got {out:?}"
-        ));
+    let bindings = all_bindings(&case.workspace);
+    let token = "SEND_AFTER_EXPLICIT_CHILD_CLAIM_MUST_SUCCEED";
+    let out = send_to_scope(&case.workspace, "child", "child_worker", token,
+        Authority::Operator { sender: "leader" })?;
+    if out["stored"] != true || out["delivery"] != "physical" || bindings != all_bindings(&case.workspace) {
+        return Err(format!("send after explicit claim must physically deliver without further ownership changes: {out}"));
+    }
+    let backend = TmuxBackend::for_workspace(&case.workspace);
+    let target = team_agent::transport::Target::Pane(team_agent::transport::PaneId::new(&worker));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let capture = backend.capture(&target, team_agent::transport::CaptureRange::Full).map_err(|error| error.to_string())?;
+        if capture.text.contains(token) { break; }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!("physical child-worker capture must prove submission: {:?}", capture.text));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
     Ok(())
 }
 
-fn assert_send_variant_is_reclaim_neutral(
-    label: &str,
-    target: MessageTarget,
-) -> Result<(), String> {
+fn assert_send_variant_is_reclaim_neutral(label: &str, target: MessageTarget) -> Result<(), String> {
     let case = TmuxCase::new(&format!("send-neutral-{}", label.replace(' ', "-")));
     let caller = case.spawn_plain_pane("ordinary-sender");
     let _env = EnvGuard::set(&[("TMUX_PANE", caller.as_str())]);
-    seed_state(
-        &case.workspace,
-        Some("%dead-leader"),
-        3,
-        &[("worker_a", "codex"), ("worker_b", "codex")],
-    );
+    seed_state(&case.workspace, Some("%dead-leader"), 3, &[("worker_a", "codex"), ("worker_b", "codex")]);
     let before = runtime_state(&case.workspace);
-    let out = send_message(
-        &case.workspace,
-        &target,
-        &format!("{label} RECLAIM_NEUTRAL_CANARY"),
-        &send_opts("leader", Some("team-a")),
-    )
-    .map_err(|err| format!("{label}: send_message errored: {err}"))?;
-    let after = runtime_state(&case.workspace);
-    if binding_snapshot(&before) != binding_snapshot(&after) {
-        return Err(format!(
-            "{label}: send path must not mutate leader_receiver/team_owner/owner_epoch; out={out:?} before={before} after={after} events={}",
-            events(&case.workspace)
-        ));
+    let target = match target { MessageTarget::Single(id) => id, MessageTarget::Broadcast => "*".into(), MessageTarget::Fanout(ids) => ids.join(",") };
+    let out = send_to_scope(&case.workspace, "team-a", &target, &format!("{label} RECLAIM_NEUTRAL_CANARY"),
+        Authority::Operator { sender: "leader" })?;
+    if out["ok"] != true || binding_snapshot(&before) != binding_snapshot(&runtime_state(&case.workspace)) {
+        return Err(format!("{label}: current durable send must not mutate leader_receiver/team_owner/owner_epoch: {out}"));
     }
     Ok(())
 }
@@ -762,15 +564,19 @@ fn source(rel: &str) -> String {
     std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)).unwrap()
 }
 
-fn send_opts(sender: &str, team: Option<&str>) -> SendOptions {
-    SendOptions {
-        sender: TrustedSender::from_runtime_identity(AgentId::new(sender)),
-        team: team.map(TeamKey::new),
-        route_task_id: false,
-        block_until_delivered: false,
-        requires_ack: false,
-        ..SendOptions::default()
-    }
+fn send_to_scope(workspace: &Path, team: &str, to: &str, content: &str, authority: Authority<'_>) -> Result<Value, String> {
+    team_agent::station::send::execute(team_agent::station::send::Request {
+        workspace, team: Some(team), to, content, task_id: None, message_id: None,
+        presentation: &Default::default(), mailbox: false, envelope: None,
+    }, authority)
+}
+
+fn report_fixture_result(workspace: &Path, envelope: &Value) -> Value {
+    let out = team_agent::mcp_server::TeamOrchestratorTools::with_identity(
+        workspace, Some(AgentId::new("worker_a")), Some(TeamKey::new("team-a")),
+    ).report_result_with_presentation(Some(envelope), None, None, None, None, None, None, None, None, None, None)
+        .expect("current scoped report_result");
+    Value::Object(out.fields)
 }
 
 fn result_envelope(result_id: &str) -> Value {
@@ -886,51 +692,19 @@ fn events(workspace: &Path) -> String {
     std::fs::read_to_string(workspace.join(".team/logs/events.jsonl")).unwrap_or_default()
 }
 
-fn message_status(workspace: &Path, message_id: &str) -> Option<String> {
-    let store = MessageStore::open(workspace).unwrap();
-    let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
-    conn.query_row(
-        "select status from messages where message_id = ?1",
-        params![message_id],
-        |row| row.get(0),
-    )
-    .optional()
-    .unwrap()
+fn all_bindings(workspace: &Path) -> Value {
+    let state = runtime_state(workspace);
+    let teams: serde_json::Map<String, Value> = state["teams"].as_object().unwrap().iter()
+        .map(|(key, entry)| (key.clone(), json!([entry["team_owner"], entry["leader_receiver"]]))).collect();
+    json!({"root": [state["team_owner"], state["leader_receiver"]], "teams": teams})
 }
 
-fn result_exists(workspace: &Path, result_id: &str) -> bool {
-    let store = MessageStore::open(workspace).unwrap();
-    let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
-    let count: i64 = conn
-        .query_row(
-            "select count(*) from results where result_id = ?1",
-            [result_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    count == 1
-}
-
-fn result_notification_message_count(workspace: &Path, result_id: &str) -> i64 {
-    let store = MessageStore::open(workspace).unwrap();
-    let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
-    conn.query_row(
-        "select count(*) from messages where content like ?1",
-        [format!("%{result_id}%")],
-        |row| row.get(0),
-    )
-    .unwrap()
-}
-
-fn leader_notification_log_count(workspace: &Path, result_id: &str) -> i64 {
-    let store = MessageStore::open(workspace).unwrap();
-    let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
-    conn.query_row(
-        "select count(*) from leader_notification_log where result_id = ?1",
-        [result_id],
-        |row| row.get(0),
-    )
-    .unwrap()
+fn leader_inbox(workspace: &Path) -> Vec<Value> {
+    for path in [".team/team.db", ".team/runtime/team.db"] {
+        assert!(!workspace.join(path).exists(), "current messaging must not create {path}");
+    }
+    team_agent::inbox_store::read(workspace, "leader", 1000, Some("team-a"))
+        .unwrap()["messages"].as_array().unwrap().clone()
 }
 
 struct TmuxCase {

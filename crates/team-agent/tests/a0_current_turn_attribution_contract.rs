@@ -222,10 +222,10 @@ impl A0Case {
             Some(TeamKey::new(owner_team_id)),
         );
         let out = tools
-            .report_result(
+            .report_result_with_presentation(
                 None,
                 Some(summary),
-                ResultStatus::Success,
+                Some("success"),
                 None,
                 None,
                 None,
@@ -233,7 +233,8 @@ impl A0Case {
                 None,
                 task_id,
                 None,
-            )
+
+        None)
             .map(|ok| Value::Object(ok.fields))
             .unwrap_or_else(|err| err.to_envelope());
         assert_eq!(out["ok"], true, "report_result failed: {out}");

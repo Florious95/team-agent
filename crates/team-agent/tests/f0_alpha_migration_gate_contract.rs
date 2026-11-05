@@ -188,10 +188,10 @@ fn append_only_result_identity_does_not_inherit_a_legacy_current_turn() {
         Some(TeamKey::new(TEAM)),
     );
     let body = tools
-        .report_result(
+        .report_result_with_presentation(
             None,
             Some("F0_ALPHA_A0_NAMING"),
-            ResultStatus::Success,
+            Some("success"),
             None,
             None,
             None,
@@ -199,7 +199,8 @@ fn append_only_result_identity_does_not_inherit_a_legacy_current_turn() {
             None,
             None,
             None,
-        )
+
+        None)
         .map(|ok| Value::Object(ok.fields))
         .unwrap_or_else(|err| err.to_envelope());
 

@@ -78,13 +78,12 @@ use crate::model::ids::{AgentId, TaskId, TeamKey};
 
 // ── REUSE: step 4 event_log / step 7 message_store ──────────────────────────
 use crate::event_log::EventLog;
-use crate::message_store::MessageStore;
 
 // ── REUSE: step 5 state persist / projection ────────────────────────────────
 use crate::state::persist::load_runtime_state;
 
 // ── REUSE: step 11 messaging delegate surface ───────────────────────────────
-use crate::messaging::{self, DeliveryOutcome, MessageTarget, SendOptions, TrustedSender};
+use crate::messaging::{self, MessageTarget, TrustedSender};
 
 pub mod helpers;
 pub(crate) mod lifecycle_tools;
@@ -105,8 +104,7 @@ pub use wire::*;
 // pub(crate) 子项 (normalize 的 list helpers、wire 的 dispatch_tool 等) 经此再导出,
 // 使 `#[cfg(test)] mod tests` 的 `use super::*` 与跨子模块引用解析不变。
 pub(crate) use helpers::{
-    delivery_outcome_value, ensure_object, enum_value, insert_array, latest_reportable_message_for,
-    latest_task_for_assignee, non_empty_string, normalize_token, normalized_envelope_value,
+    ensure_object, non_empty_string, normalize_token,
     object_fields, text_field, text_of_value, tool_error_reason_wire, tool_runtime_error,
 };
 pub(crate) use normalize::{

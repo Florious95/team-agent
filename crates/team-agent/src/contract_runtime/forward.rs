@@ -5,7 +5,7 @@ use team_agent_contract::contract::{session::CwdIdentity, types::ScopeId};
 use team_agent_contract::host::{digest, digest_hex, process::resolve_cwd};
 use team_agent_contract::orchestration::{forward::*, store::ContractStore, Error};
 
-use crate::messaging::{self, MessageTarget, SendOptions, SendOrigin, TrustedSender};
+use crate::messaging::{self, MessageTarget, TrustedSender};
 use crate::model::ids::{AgentId, TaskId, TeamKey};
 
 /// Created from the selected framework Team, never from MCP tool arguments.

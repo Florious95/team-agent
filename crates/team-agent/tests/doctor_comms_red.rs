@@ -19,7 +19,6 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use serial_test::{file_serial, serial};
-use team_agent::message_store::MessageStore;
 use team_agent::state::persist::save_runtime_state;
 
 #[test]

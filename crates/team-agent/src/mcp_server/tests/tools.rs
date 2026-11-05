@@ -6,10 +6,11 @@
             Some(AgentId::new("worker-7")),
             Some(TeamKey::new("teamA")),
         );
-        let ok = tools.report_result(
-            None, Some("done it"), ResultStatus::Success,
+        let ok = tools.report_result_with_presentation(
+            None, Some("done it"), Some("success"),
             None, None, None, None, None,
             None, None, // no explicit task/agent
+            None,
         ).expect("report ok");
         let v = serde_json::to_value(&ok).unwrap();
         // C17/bug-085: env id wins over leader/unknown. agent_id is a guaranteed-present
@@ -32,11 +33,10 @@
             Some(TeamKey::new("teamA")),
         );
         let error = tools
-            .report_result(
-                None, Some("done"), ResultStatus::Success,
+            .report_result_with_presentation(
+                None, Some("done"), Some("success"),
                 None, None, None, None, None,
-                Some("task-9"), Some("explicit-agent"),
-            )
+                Some("task-9"), Some("explicit-agent"), None)
             .expect_err("a request agent_id cannot override the captured identity");
         assert_eq!(error.reason, ToolErrorReason::McpScopeRefused);
         assert!(error.message.contains("identity_mismatch"));
@@ -52,11 +52,10 @@
             Some(TeamKey::new("teamA")),
         );
         let ok = tools
-            .report_result(
-                None, Some("done"), ResultStatus::Success,
+            .report_result_with_presentation(
+                None, Some("done"), Some("success"),
                 None, None, None, None, None,
-                Some("task-9"), Some("worker-7"),
-            )
+                Some("task-9"), Some("worker-7"), None)
             .expect("matching explicit agent_id remains compatible");
         let v = serde_json::to_value(&ok).unwrap();
         assert_eq!(v.get("agent_id"), Some(&json!("worker-7")));
@@ -72,54 +71,7 @@
         assert_eq!(env.task_id, TaskId::new("manual"));
     }
 
-    fn seed_report_message(
-        ws: &std::path::Path,
-        message_id: &str,
-        owner_team_id: &str,
-        status: &str,
-        created_at: &str,
-    ) {
-        let store = MessageStore::open(ws).unwrap();
-        let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-        conn.execute(
-            "insert into messages(
-                message_id, owner_team_id, task_id, sender, recipient, reply_to, requires_ack,
-                status, content, artifact_refs, created_at, updated_at, delivered_at,
-                acknowledged_at, error, delivery_attempts
-            ) values (?1, ?2, null, 'leader', 'probe-worker', null, 0,
-                ?3, 'task', '[]', ?4, ?4, case when ?3 = 'delivered' then ?4 else null end,
-                null, null, 0)",
-            rusqlite::params![message_id, owner_team_id, status, created_at],
-        )
-        .unwrap();
-    }
 
-    fn seed_report_result(
-        ws: &std::path::Path,
-        result_id: &str,
-        owner_team_id: &str,
-        task_id: &str,
-        created_at: &str,
-    ) {
-        let store = MessageStore::open(ws).unwrap();
-        let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-        let envelope = json!({
-            "schema_version": "result_envelope_v1",
-            "result_id": result_id,
-            "task_id": task_id,
-            "agent_id": "probe-worker",
-            "status": "success",
-            "summary": "seed",
-            "changes": [], "tests": [], "risks": [], "artifacts": [], "next_actions": []
-        });
-        conn.execute(
-            "insert into results(
-                result_id, owner_team_id, task_id, agent_id, envelope, status, created_at
-            ) values (?1, ?2, ?3, 'probe-worker', ?4, 'success', ?5)",
-            rusqlite::params![result_id, owner_team_id, task_id, envelope.to_string(), created_at],
-        )
-        .unwrap();
-    }
 
     fn seed_report_scope_state(ws: &std::path::Path, state: &Value) {
         let cws = std::fs::canonicalize(ws).unwrap_or_else(|_| ws.to_path_buf());

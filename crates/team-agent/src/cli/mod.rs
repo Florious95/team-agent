@@ -45,7 +45,7 @@ use serde_json::{json, Map, Value};
 use thiserror::Error;
 
 // REUSE in-tree(只 import,不 redefine):
-use crate::messaging::{self, MessageTarget, SendOptions, TrustedSender};
+use crate::messaging::{self, MessageTarget, TrustedSender};
 use crate::model::ids::{TaskId, TeamKey};
 
 pub(crate) const COMMS_BOUNDARY_TEXT: &str =
@@ -86,7 +86,6 @@ pub(crate) mod route;
 pub mod send;
 mod schedule;
 pub(crate) mod spec;
-pub mod status;
 pub(crate) mod triage;
 pub mod types;
 
@@ -99,7 +98,6 @@ pub use leaders::*;
 pub use named_address::*;
 pub use profile::*;
 pub use send::*;
-pub use status::*;
 pub use types::*;
 
 ///

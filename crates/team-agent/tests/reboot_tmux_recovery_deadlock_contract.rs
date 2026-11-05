@@ -26,7 +26,7 @@ use std::process::{Command, Output};
 
 use serde_json::{json, Value};
 use serial_test::serial;
-use team_agent::cli::status::agent_summary_counts;
+
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 use team_agent::topology::{endpoint_convergence_decision, EndpointConvergenceDecision};
 
@@ -298,24 +298,23 @@ fn status_session_missing_downgrades_running_agents() {
 }
 
 #[test]
+#[serial(env)]
 fn status_summary_counts_ignore_stale_running() {
-    let agents = json!({
-        "worker": {
-            "status": "running",
-            "worker_state": "PROBABLY_IDLE",
-            "stale": true,
-            "stale_reason": "tmux_session_missing"
-        }
-    });
-    let counts = agent_summary_counts(&agents, &json!({}));
-    assert_eq!(
-        counts.running, 0,
-        "RED8: summary counts must consume stale/stale_reason first, so stale running agents do not inflate running count. counts={counts:?}"
-    );
-    assert!(
-        counts.stopped + counts.unknown >= 1,
-        "RED8: stale running must be counted as stopped or unknown, never running. counts={counts:?}"
-    );
+    let case = RecoveryCase::new("summary-stale-running")
+        .with_status_has_session(false)
+        .with_old_server_live(true);
+    case.seed_status_state();
+    let output = case.run_ta(&[
+        "status", "--workspace", case.workspace_str(), "--team", TEAM, "--json", "--detail",
+    ]);
+    let status = json_output(&output, "RED8 current status brief");
+    let nodes = status["nodes"].as_array().expect("current brief nodes");
+    let stale_workers: Vec<_> = nodes.iter().filter(|node| node["name"] == WORKER).collect();
+    assert_eq!(stale_workers.len(), 1, "fixture must expose the stale worker: {status}");
+    assert_eq!(stale_workers.iter().filter(|node| node["runtime_status"] == "running").count(), 0,
+        "stale running agents must not inflate the current running count: {status}");
+    assert!(stale_workers.iter().any(|node| matches!(node["runtime_status"].as_str(), Some("stopped" | "unknown"))),
+        "stale running must be stopped or unknown: {status}");
 }
 
 struct RecoveryCase {

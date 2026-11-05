@@ -3980,11 +3980,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::Path;
 
-    use crate::transport::{
-        AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport, Key,
-        PaneField, PaneInfo, PaneLiveness, SetEnvOutcome, SpawnResult, Target, Transport,
-        TransportError,
-    };
+    use crate::transport::{ BackendKind, CaptureRange, CapturedText, Key, PaneField, PaneInfo, PaneLiveness, SpawnResult, Target, Transport, TransportError };
 
     // Unified start contract: restart failure actions name admitted canonical commands.
     #[test]
@@ -4143,15 +4139,6 @@ tasks:
             unimplemented!("not used by respawn epoch test")
         }
 
-        fn inject(
-            &self,
-            _target: &Target,
-            _payload: &InjectPayload,
-            _submit: Key,
-            _bracketed: bool,
-        ) -> Result<InjectReport, TransportError> {
-            unimplemented!("not used by respawn epoch test")
-        }
 
         fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
             unimplemented!("not used by respawn epoch test")
@@ -4192,14 +4179,6 @@ tasks:
             Ok(Vec::new())
         }
 
-        fn set_session_env(
-            &self,
-            _session: &SessionName,
-            _key: &str,
-            _value: &str,
-        ) -> Result<SetEnvOutcome, TransportError> {
-            Ok(SetEnvOutcome::Applied)
-        }
 
         fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
             Ok(())
@@ -4209,9 +4188,6 @@ tasks:
             Ok(())
         }
 
-        fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
-            Ok(AttachOutcome::Attached)
-        }
     }
 
     fn disabled_safety() -> DangerousApproval {

@@ -186,16 +186,3 @@ pub(super) fn compact_agent_state(_agent_id: &str, agent: &Value) -> Value {
     }
     Value::Object(out)
 }
-
-pub(super) fn compact_object(value: Option<&Value>, keys: &[&str]) -> Value {
-    let Some(Value::Object(input)) = value else {
-        return json!({});
-    };
-    let mut out = Map::new();
-    for key in keys {
-        if let Some(value) = input.get(*key) {
-            out.insert((*key).to_string(), value.clone());
-        }
-    }
-    Value::Object(out)
-}

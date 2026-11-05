@@ -22,7 +22,6 @@ use crate::lifecycle::launch::pi_mcp::{
 };
 use crate::lifecycle::launch::run_pi_catalog_preflight;
 use crate::lifecycle::tests::test_binary_path;
-use crate::message_store::MessageStore;
 use crate::provider::McpConfig;
 
 const CHILD_MARKER: &str = "TEAM_AGENT_TEST_PI_NATIVE_MCP_CHILD";

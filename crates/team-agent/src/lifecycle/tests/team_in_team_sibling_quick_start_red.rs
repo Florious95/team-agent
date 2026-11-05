@@ -22,16 +22,9 @@ use serde_json::Value;
 use serial_test::{file_serial, serial};
 use team_agent::event_log::EventLog;
 use team_agent::lifecycle::{quick_start_with_transport, QuickStartReport};
-use team_agent::message_store::MessageStore;
-use team_agent::messaging::deliver_pending_messages;
 use team_agent::state::persist::load_runtime_state;
 use team_agent::tmux_backend::TmuxBackend;
-use team_agent::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
-    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
-    WindowName,
-};
+use team_agent::transport::{ BackendKind, CaptureRange, CapturedText, InjectStage, Key, PaneField, PaneId, PaneInfo, SessionName, SpawnResult, Target, Transport, TransportError, WindowName };
 
 #[test]
 #[ignore = "real-machine: quick-start/session lifecycle gate"]
@@ -523,39 +516,33 @@ fn delivery_does_not_autobind_unbound_receiver() {
     let root = tmp_dir("delivery-no-autobind");
     seed_unbound_delivery_state(&root);
     let before = load_runtime_state(&root).expect("state before delivery");
-    let store = MessageStore::open(&root).unwrap();
-    let message_id = store
-        .create_message(
-            Some("task-1"),
-            "sibling_worker",
-            "leader",
-            "delivery must not claim while sending to leader",
-            None,
-            false,
-            Some("sibling"),
-        )
-        .unwrap();
-    let event_log = EventLog::new(&root);
-    let transport = SessionRecordingTransport::default();
-
-    let delivered = deliver_pending_messages(&root, &before, &transport, &event_log)
-        .expect("delivery should return a rebind-required outcome, not panic");
-
+    let outcome = crate::station::send::execute(
+        crate::station::send::Request {
+            workspace: &root,
+            team: Some("sibling"),
+            to: "leader",
+            content: "delivery must not claim while sending to leader",
+            task_id: Some("task-1"),
+            message_id: None,
+            presentation: &crate::messaging::presentation::PresentationRequest::default(),
+            mailbox: false,
+            envelope: None,
+        },
+        crate::station::send::Authority::Seat { sender: "sibling_worker", team: "sibling" },
+    ).expect("unbound delivery retains a durable receipt without claiming the leader");
+    assert_eq!(outcome["live"], false, "unbound leader cannot be auto-bound: {outcome}");
+    assert_eq!(outcome["stored"], true, "the message remains durable: {outcome}");
+    assert!(outcome["delivery_error"].as_str().is_some_and(|error| !error.is_empty()),
+        "the public receipt must explain non-delivery: {outcome}");
     let after = load_runtime_state(&root).expect("state after delivery");
-    assert!(
-        delivered.is_empty(),
-        "unbound leader receiver must not be delivered by auto-binding during delivery; delivered={delivered:?}"
-    );
-    assert_eq!(
-        before.pointer("/teams/sibling/leader_receiver"),
-        after.pointer("/teams/sibling/leader_receiver"),
-        "C8/C14: delivery must not mutate leader_receiver/team_owner/owner_epoch while handling rebind_required; message_id={message_id} before={before} after={after}"
-    );
-    let events = std::fs::read_to_string(root.join(".team/logs/events.jsonl")).unwrap_or_default();
-    assert!(
-        events.contains("leader_not_attached") || events.contains("rebind_required"),
-        "unbound delivery must emit leader_not_attached/rebind_required; events={events}"
-    );
+    for field in ["leader_receiver", "team_owner", "owner_epoch"] {
+        let pointer = format!("/teams/sibling/{field}");
+        assert_eq!(before.pointer(&pointer), after.pointer(&pointer),
+            "delivery must not claim or rewrite {field}; before={before} after={after}");
+    }
+    let inbox = crate::inbox_store::read(&root, "leader", 10, Some("sibling")).unwrap();
+    assert_eq!(inbox["messages"][0]["message_id"], outcome["message_id"]);
+    assert!(!root.join(".team/runtime/team.db").exists());
 }
 
 #[test]
@@ -1020,22 +1007,6 @@ impl Transport for SessionRecordingTransport {
         Ok(self.spawn_result(session, window, "into"))
     }
 
-    fn inject(
-        &self,
-        _target: &Target,
-        _payload: &InjectPayload,
-        _submit: Key,
-        _bracketed: bool,
-    ) -> Result<InjectReport, TransportError> {
-        Ok(InjectReport {
-            stage_reached: InjectStage::Submit,
-            inject_verification: InjectVerification::CaptureContainsToken,
-            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
-            turn_verification: TurnVerification::NotYetObserved,
-            attempts: 1,
-            submit_diagnostics: None,
-        })
-    }
 
     fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
         Ok(())
@@ -1075,14 +1046,6 @@ impl Transport for SessionRecordingTransport {
         Ok(Vec::new())
     }
 
-    fn set_session_env(
-        &self,
-        _session: &SessionName,
-        _key: &str,
-        _value: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        Ok(SetEnvOutcome::Applied)
-    }
 
     fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
         self.sessions.lock().unwrap().remove(_session.as_str());
@@ -1093,7 +1056,4 @@ impl Transport for SessionRecordingTransport {
         Ok(())
     }
 
-    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
-        Ok(AttachOutcome::Attached)
-    }
 }

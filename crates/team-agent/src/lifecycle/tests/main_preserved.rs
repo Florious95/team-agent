@@ -95,15 +95,6 @@ impl crate::transport::Transport for SessionProbeRecordingTransport {
             child_pid: Some(6856),
         })
     }
-    fn inject(
-        &self,
-        _t: &crate::transport::Target,
-        _p: &crate::transport::InjectPayload,
-        _s: crate::transport::Key,
-        _b: bool,
-    ) -> Result<crate::transport::InjectReport, crate::transport::TransportError> {
-        unimplemented!("not reached by start_agent respawn")
-    }
     fn send_keys(
         &self,
         _t: &crate::transport::Target,
@@ -195,14 +186,6 @@ impl crate::transport::Transport for SessionProbeRecordingTransport {
             Vec::new()
         })
     }
-    fn set_session_env(
-        &self,
-        _s: &crate::transport::SessionName,
-        _k: &str,
-        _v: &str,
-    ) -> Result<crate::transport::SetEnvOutcome, crate::transport::TransportError> {
-        unimplemented!("not reached")
-    }
     fn kill_session(
         &self,
         _s: &crate::transport::SessionName,
@@ -214,12 +197,6 @@ impl crate::transport::Transport for SessionProbeRecordingTransport {
         _t: &crate::transport::Target,
     ) -> Result<(), crate::transport::TransportError> {
         Ok(())
-    }
-    fn attach_session(
-        &self,
-        _s: &crate::transport::SessionName,
-    ) -> Result<crate::transport::AttachOutcome, crate::transport::TransportError> {
-        unimplemented!("not reached")
     }
 }
 // The spawn-kind decision is independent of the start mode, so a fresh `fake` worker (no stored

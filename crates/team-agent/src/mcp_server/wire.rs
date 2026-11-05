@@ -583,9 +583,6 @@ pub(crate) fn dispatch_tool(
                 args.get("presentation"),
             )?;
             match outcome {
-                SendOutcome::WorkerAccepted { .. } => Ok(ToolOk {
-                    fields: object_fields(outcome.to_value()),
-                }),
                 SendOutcome::Direct(ok) => Ok(ok),
             }
         }

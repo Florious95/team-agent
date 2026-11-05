@@ -34,5 +34,4 @@ impl MarkerStore for MapMarkerStore {
     }
 }
 
-mod abnormal;
 mod tick_core;

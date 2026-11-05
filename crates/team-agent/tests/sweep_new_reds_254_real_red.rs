@@ -20,7 +20,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 use serial_test::file_serial;
 use team_agent::db::schema::open_db;
-use team_agent::message_store::MessageStore;
 use team_agent::state::persist::load_runtime_state;
 use team_agent::tmux_backend::TmuxBackend;
 use team_agent::transport::{CaptureRange, PaneId, SessionName, Target, Transport};
@@ -316,32 +315,21 @@ fn rc3_after_claim_child_worker_result_reaches_child_leader() {
         Duration::from_secs(6),
     );
     assert_success_json("send to child worker fixture", &send);
-    wait_for_rows(case.case.root(), Duration::from_secs(5), |rows| {
-        rows.results
-            .iter()
-            .any(|row| row.owner_team_id == case.child)
-            && rows.messages.iter().any(|row| {
-                row.owner_team_id == case.child
-                    && row.recipient == "leader"
-                    && row.content.contains("Fake worker handled message")
-            })
+    let scopes = [(case.child.as_str(), "child_worker"), (case.child.as_str(), "leader")];
+    wait_for_inbox(case.case.root(), &scopes, Duration::from_secs(5), |rows| {
+        rows.iter().any(|row| row["kind"] == "result" && row["team"] == case.child)
+            && rows.iter().any(|row| row["team"] == case.child && row["recipient"] == "leader"
+                && row["content"].as_str().is_some_and(|text| text.contains("Fake worker handled message")))
     });
     let _ = coordinator.child.kill();
 
-    let rows = db_rows(case.case.root());
-    assert!(
-        rows.results.iter().any(|row| row.owner_team_id == case.child && row.agent_id == "child_worker"),
-        "after explicit claim, fake child_worker result must be stored under child owner scope; rows={rows:?}"
-    );
-    assert!(
-        rows.messages.iter().any(|row| {
-            row.owner_team_id == case.child
-                && row.recipient == "leader"
-                && row.content.contains("Fake worker handled message")
-                && !row.error.contains("leader_not_attached")
-        }),
-        "after explicit claim, generated child result notification must reach child leader instead of rebind_required; rows={rows:?}"
-    );
+    let rows = inbox_records(case.case.root(), &scopes);
+    assert!(rows.iter().any(|row| row["kind"] == "result" && row["team"] == case.child
+            && row["envelope"]["agent_id"] == "child_worker"),
+        "after explicit claim, the child result envelope must be durable in child scope: {rows:?}");
+    assert!(rows.iter().any(|row| row["team"] == case.child && row["recipient"] == "leader"
+            && row["content"].as_str().is_some_and(|text| text.contains("Fake worker handled message"))),
+        "the generated child result must be addressed to the child leader: {rows:?}");
     let leader_capture = case.case.capture_pane(&driver);
     assert!(
         leader_capture.contains("Fake worker handled message") || leader_capture.contains("RC3_CHILD_RESULT"),
@@ -383,43 +371,27 @@ fn tit_fake_worker_auto_report_keeps_selected_team_when_active_sibling_differs()
         Duration::from_secs(6),
     );
     assert_success_json("teamA send fixture", &send);
-    wait_for_rows(case.root(), Duration::from_secs(5), |rows| {
-        rows.results.iter().any(|row| row.agent_id == "wrk1")
-            || rows
-                .messages
-                .iter()
-                .any(|row| row.content.contains("Fake worker handled message"))
+    let scopes = [(team_a.as_str(), "wrk1"), (team_a.as_str(), "leader"),
+        (team_b.as_str(), "wrk1"), (team_b.as_str(), "leader")];
+    wait_for_inbox(case.root(), &scopes, Duration::from_secs(5), |rows| {
+        rows.iter().any(|row| row["kind"] == "result" && row["envelope"]["agent_id"] == "wrk1")
+            || rows.iter().any(|row| row["content"].as_str().is_some_and(|text| text.contains("Fake worker handled message")))
     });
     let _ = coordinator.child.kill();
 
-    let rows = db_rows(case.root());
-    let direct = rows
-        .messages
-        .iter()
-        .filter(|row| row.content.contains("TIT_OWNER_SCOPE_A"))
-        .collect::<Vec<_>>();
-    let generated_messages = rows
-        .messages
-        .iter()
-        .filter(|row| row.content.contains("Fake worker handled message"))
-        .collect::<Vec<_>>();
-    assert!(
-        direct.iter().any(|row| row.owner_team_id == team_a),
-        "direct CLI send --team teamA must create a teamA row; rows={rows:?}"
-    );
-    assert!(
-        rows.results.iter().any(|row| row.owner_team_id == team_a && row.agent_id == "wrk1"),
-        "fake worker auto-report for a teamA task must store the result under teamA even when active_team_key is teamB; rows={rows:?}"
-    );
-    assert!(
-        generated_messages.iter().any(|row| row.owner_team_id == team_a && row.recipient == "leader"),
-        "fake worker generated leader notification for teamA must be owner_team_id=teamA; rows={rows:?}"
-    );
-    assert!(
-        rows.results.iter().all(|row| row.owner_team_id != team_b || !row.envelope.contains("TIT_OWNER_SCOPE_A"))
-            && generated_messages.iter().all(|row| row.owner_team_id != team_b),
-        "no teamA generated result/notification may leak into active sibling teamB; direct={direct:?} rows={rows:?}"
-    );
+    let rows = inbox_records(case.root(), &scopes);
+    let direct = rows.iter().filter(|row| row["content"].as_str().is_some_and(|text| text.contains("TIT_OWNER_SCOPE_A"))).collect::<Vec<_>>();
+    let generated_messages = rows.iter().filter(|row| row["content"].as_str().is_some_and(|text| text.contains("Fake worker handled message"))).collect::<Vec<_>>();
+    let results = rows.iter().filter(|row| row["kind"] == "result").collect::<Vec<_>>();
+    assert!(direct.iter().any(|row| row["team"] == team_a),
+        "direct CLI send --team teamA must be durable under teamA: {rows:?}");
+    assert!(results.iter().any(|row| row["team"] == team_a && row["envelope"]["agent_id"] == "wrk1"),
+        "auto-report must retain teamA when active_team_key is teamB: {rows:?}");
+    assert!(generated_messages.iter().any(|row| row["team"] == team_a && row["recipient"] == "leader"),
+        "generated leader notification must retain teamA scope: {rows:?}");
+    assert!(results.iter().all(|row| row["team"] != team_b || !row["envelope"].to_string().contains("TIT_OWNER_SCOPE_A"))
+            && generated_messages.iter().all(|row| row["team"] != team_b),
+        "no teamA result/notification may leak into active sibling teamB: direct={direct:?} rows={rows:?}");
     let state = state_value(case.root());
     let worker_pane = state
         .pointer(&format!("/teams/{team_a}/agents/wrk1/pane_id"))
@@ -749,81 +721,18 @@ fn maybe_state_value(root: &Path) -> Option<Value> {
     load_runtime_state(root).ok()
 }
 
-#[derive(Debug, Clone)]
-struct MessageRow {
-    message_id: String,
-    owner_team_id: String,
-    sender: String,
-    recipient: String,
-    status: String,
-    error: String,
-    content: String,
+fn inbox_records(root: &Path, scopes: &[(&str, &str)]) -> Vec<Value> {
+    scopes.iter().flat_map(|(team, recipient)| {
+        let inbox = team_agent::inbox_store::read(root, recipient, 1000, Some(team))
+            .expect("read scoped durable inbox");
+        inbox["messages"].as_array().expect("inbox messages").clone()
+    }).collect()
 }
 
-#[derive(Debug, Clone)]
-struct ResultRow {
-    result_id: String,
-    owner_team_id: String,
-    agent_id: String,
-    status: String,
-    envelope: String,
-}
-
-#[derive(Debug, Default, Clone)]
-struct DbRows {
-    messages: Vec<MessageRow>,
-    results: Vec<ResultRow>,
-}
-
-fn db_rows(root: &Path) -> DbRows {
-    let path = root.join(".team").join("runtime").join("team.db");
-    if !path.exists() {
-        return DbRows::default();
-    }
-    let _ = MessageStore::open(root);
-    let conn = open_db(&path).expect("open team.db");
-    let messages = conn
-        .prepare("select message_id, coalesce(owner_team_id,''), sender, recipient, status, coalesce(error,''), content from messages order by created_at, message_id")
-        .and_then(|mut stmt| {
-            stmt.query_map([], |row| {
-                Ok(MessageRow {
-                    message_id: row.get(0)?,
-                    owner_team_id: row.get(1)?,
-                    sender: row.get(2)?,
-                    recipient: row.get(3)?,
-                    status: row.get(4)?,
-                    error: row.get(5)?,
-                    content: row.get(6)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()
-        })
-        .unwrap_or_default();
-    let results = conn
-        .prepare("select result_id, coalesce(owner_team_id,''), agent_id, status, envelope from results order by created_at, result_id")
-        .and_then(|mut stmt| {
-            stmt.query_map([], |row| {
-                Ok(ResultRow {
-                    result_id: row.get(0)?,
-                    owner_team_id: row.get(1)?,
-                    agent_id: row.get(2)?,
-                    status: row.get(3)?,
-                    envelope: row.get(4)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()
-        })
-        .unwrap_or_default();
-    DbRows { messages, results }
-}
-
-fn wait_for_rows(root: &Path, timeout: Duration, predicate: impl Fn(&DbRows) -> bool) {
+fn wait_for_inbox(root: &Path, scopes: &[(&str, &str)], timeout: Duration, predicate: impl Fn(&[Value]) -> bool) {
     let started = Instant::now();
     while started.elapsed() < timeout {
-        let rows = db_rows(root);
-        if predicate(&rows) {
-            return;
-        }
+        if predicate(&inbox_records(root, scopes)) { return; }
         std::thread::sleep(Duration::from_millis(100));
     }
 }

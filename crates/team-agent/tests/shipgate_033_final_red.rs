@@ -21,7 +21,6 @@ use rusqlite::params;
 use serde_json::{json, Value};
 use serial_test::file_serial;
 use team_agent::db::schema::open_db;
-use team_agent::message_store::MessageStore;
 use team_agent::state::persist::load_runtime_state;
 use team_agent::tmux_backend::TmuxBackend;
 use team_agent::transport::{CaptureRange, PaneId, SessionName, Target, Transport};
@@ -158,14 +157,14 @@ fn tit16_scoped_child_shutdown_reaps_only_child_and_parent_still_delivers() {
             &[],
             Duration::from_secs(4),
         );
-        if delivered_message(case.root(), &parent, &token)
+        if stored_message(case.root(), &parent, "sublead", &token)
             && case.capture_pane(&parent_pane).contains(&token)
         {
             return;
         }
         std::thread::sleep(Duration::from_millis(250));
     }
-    let rows = db_messages(case.root());
+    let rows = team_agent::inbox_store::read(case.root(), "sublead", 1000, Some(&parent)).unwrap();
     let pane = case.capture_pane(&parent_pane);
     let state = maybe_state_value(case.root()).unwrap_or(Value::Null);
     panic!(
@@ -174,62 +173,7 @@ fn tit16_scoped_child_shutdown_reaps_only_child_and_parent_still_delivers() {
     );
 }
 
-#[test]
-#[ignore = "real-machine: needs real tmux/coordinator/binary"]
-#[file_serial(tmux)]
-fn collect_stored_unknown_task_result_is_nonfatal_but_marks_invalid() {
-    let case = RealCase::new("collect-stored-manual");
-    let team = case.unique_team("current");
-    write_fake_team(case.root(), &team, "worker_a", &[]);
-    let quick = case.quick_start(&team, "worker_a", &[]);
-    assert_success_json("quick-start fixture", &quick);
-    seed_stored_result(case.root(), &team, "res_manual_stray", "manual", "worker_a");
 
-    let collect = case.run_cli(
-        &["collect", "--workspace", case.root_str().as_str(), "--json"],
-        &[],
-        Duration::from_secs(8),
-    );
-    let out = parse_json_or_null(&collect.stdout);
-
-    assert_eq!(
-        collect.code,
-        Some(0),
-        "collect must exit rc0 for stored stray unknown-task rows; they are warnings, not command failures. stdout={} stderr={}",
-        collect.stdout,
-        collect.stderr
-    );
-    assert_eq!(
-        out["ok"],
-        json!(true),
-        "collect JSON must remain ok:true when it successfully marks a stored unknown-task row invalid; out={out}"
-    );
-    assert!(
-        out["invalid_results"].as_array().is_some_and(|rows| {
-            rows.iter().any(|row| {
-                row["result_id"] == json!("res_manual_stray")
-                    && row["task_id"] == json!("manual")
-                    && row["error"]
-                        .as_str()
-                        .is_some_and(|e| e.contains("unknown task id: manual"))
-            })
-        }),
-        "collect must surface the stored unknown-task row in invalid_results; out={out}"
-    );
-    assert_eq!(
-        out["results"]["invalid"],
-        json!(1),
-        "collect must increment results.invalid for the skipped stored row; out={out}"
-    );
-    assert!(
-        !out["collected_results"]
-            .as_array()
-            .unwrap_or(&Vec::new())
-            .iter()
-            .any(|row| { row["result_id"] == json!("res_manual_stray") }),
-        "collect must not fabricate a collected task result for an unknown-task row; out={out}"
-    );
-}
 
 #[test]
 #[ignore = "real-machine: needs real tmux/coordinator/binary"]
@@ -471,88 +415,16 @@ fn agent_pane(state: &Value, team: &str, agent: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
-#[derive(Debug, Clone)]
-struct MessageRow {
-    message_id: String,
-    owner_team_id: String,
-    sender: String,
-    recipient: String,
-    status: String,
-    content: String,
-}
-
-fn db_messages(root: &Path) -> Vec<MessageRow> {
-    let path = root.join(".team").join("runtime").join("team.db");
-    if !path.exists() {
-        return Vec::new();
-    }
-    let _ = MessageStore::open(root);
-    let conn = open_db(&path).expect("open team.db");
-    conn.prepare(
-        "select message_id, coalesce(owner_team_id,''), sender, recipient, status, content
-         from messages
-         order by created_at, message_id",
-    )
-    .and_then(|mut stmt| {
-        stmt.query_map([], |row| {
-            Ok(MessageRow {
-                message_id: row.get(0)?,
-                owner_team_id: row.get(1)?,
-                sender: row.get(2)?,
-                recipient: row.get(3)?,
-                status: row.get(4)?,
-                content: row.get(5)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()
-    })
-    .unwrap_or_default()
-}
-
-fn delivered_message(root: &Path, owner_team_id: &str, token: &str) -> bool {
-    db_messages(root).iter().any(|row| {
-        row.owner_team_id == owner_team_id
-            && row.content.contains(token)
-            && row.status == "delivered"
+fn stored_message(root: &Path, owner_team_id: &str, recipient: &str, token: &str) -> bool {
+    let inbox = team_agent::inbox_store::read(root, recipient, 1000, Some(owner_team_id))
+        .expect("read current durable inbox");
+    inbox["messages"].as_array().unwrap().iter().any(|record| {
+        record["team"] == owner_team_id && record["recipient"] == recipient
+            && record["content"].as_str().is_some_and(|content| content.contains(token))
     })
 }
 
-fn seed_stored_result(
-    root: &Path,
-    owner_team_id: &str,
-    result_id: &str,
-    task_id: &str,
-    agent_id: &str,
-) {
-    // M4: no SQLite message store fixture (MessageStore::open is retired).
-    let db_path = root.join(".team").join("runtime").join("team.db");
-    let conn = open_db(&db_path).expect("open team.db");
-    let envelope = json!({
-        "schema_version": "result_envelope_v1",
-        "task_id": task_id,
-        "agent_id": agent_id,
-        "status": "success",
-        "summary": "stored stray manual result",
-        "artifacts": [],
-        "changes": [],
-        "tests": [],
-        "risks": [],
-        "next_actions": []
-    });
-    conn.execute(
-        "insert into results(result_id, owner_team_id, task_id, agent_id, envelope, status, created_at)
-         values (?1, ?2, ?3, ?4, ?5, 'success', ?6)",
-        params![
-            result_id,
-            owner_team_id,
-            task_id,
-            agent_id,
-            envelope.to_string(),
-            now_isoish()
-        ],
-    )
-    .expect("insert stray result");
-}
+
 
 #[derive(Debug)]
 struct ProcessSnapshot {
@@ -624,19 +496,7 @@ fn next_id() -> u64 {
     (nanos & 0xffff_ffff).saturating_add(NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
-fn now_isoish() -> String {
-    format!(
-        "{}.{:09}Z",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos()
-    )
-}
+
 
 trait Tap: Sized {
     fn tap(self, f: impl FnOnce(&Self)) -> Self {

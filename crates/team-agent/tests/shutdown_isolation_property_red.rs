@@ -21,12 +21,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 use team_agent::state::persist::save_runtime_state;
-use team_agent::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName,
-    SessionOwner, SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
-};
+use team_agent::transport::{ BackendKind, CaptureRange, CapturedText, InjectStage, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName, SessionOwner, SpawnResult, Target, Transport, TransportError, WindowName };
 
 static CASE_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -567,22 +562,6 @@ impl Transport for RecordingTransport {
         Ok(self.spawn_result(session, window))
     }
 
-    fn inject(
-        &self,
-        _target: &Target,
-        _payload: &InjectPayload,
-        _submit: Key,
-        _bracketed: bool,
-    ) -> Result<InjectReport, TransportError> {
-        Ok(InjectReport {
-            stage_reached: InjectStage::Submit,
-            inject_verification: InjectVerification::CaptureContainsToken,
-            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
-            turn_verification: TurnVerification::NotYetObserved,
-            attempts: 1,
-            submit_diagnostics: None,
-        })
-    }
 
     fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
         Ok(())
@@ -598,7 +577,6 @@ impl Transport for RecordingTransport {
 
     fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
         match field {
-            PaneField::PaneWidth => Ok(Some("120".to_string())),
             _ => Ok(None),
         }
     }
@@ -665,20 +643,7 @@ impl Transport for RecordingTransport {
             .collect())
     }
 
-    fn set_session_env(
-        &self,
-        _session: &SessionName,
-        _key: &str,
-        _value: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        Ok(SetEnvOutcome::Applied)
-    }
 
-    fn kill_server(&self) -> Result<(), TransportError> {
-        *self.kill_server.lock().unwrap() = true;
-        self.targets.lock().unwrap().clear();
-        Ok(())
-    }
 
     fn kill_session(&self, session: &SessionName) -> Result<(), TransportError> {
         self.killed_sessions
@@ -710,9 +675,6 @@ impl Transport for RecordingTransport {
         Ok(())
     }
 
-    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
-        Ok(AttachOutcome::Attached)
-    }
 }
 
 fn spawn_group_member(pgid: Option<u32>) -> Child {

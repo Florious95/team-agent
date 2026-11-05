@@ -6,141 +6,12 @@ use super::*;
 // leader.py / scheduler.py / diagnose/comms.py.
 // ════════════════════════════════════════════════════════════════════════
 
-#[test]
-fn delivery_status_serde_snake_case_byte_locked() {
-    let cases = [
-        (DeliveryStatus::Delivered, "\"delivered\""),
-        (DeliveryStatus::Failed, "\"failed\""),
-        (DeliveryStatus::Queued, "\"queued\""),
-        (DeliveryStatus::Blocked, "\"blocked\""),
-        (DeliveryStatus::Refused, "\"refused\""),
-        (DeliveryStatus::Degraded, "\"degraded\""),
-        (DeliveryStatus::RetryScheduled, "\"retry_scheduled\""),
-        (
-            DeliveryStatus::TrustAutoAnswerExhausted,
-            "\"trust_auto_answer_exhausted\"",
-        ),
-        (DeliveryStatus::AlreadyDelivered, "\"already_delivered\""),
-        (DeliveryStatus::FallbackLog, "\"fallback_log\""),
-        (
-            DeliveryStatus::BroadcastDelivered,
-            "\"broadcast_delivered\"",
-        ),
-        (DeliveryStatus::BroadcastPartial, "\"broadcast_partial\""),
-        (DeliveryStatus::FanoutDelivered, "\"fanout_delivered\""),
-        (DeliveryStatus::FanoutPartial, "\"fanout_partial\""),
-    ];
-    for (variant, wire) in cases {
-        assert_eq!(serde_json::to_string(&variant).unwrap(), wire);
-    }
-}
 
-#[test]
-fn delivery_refusal_serde_snake_case_byte_locked() {
-    let cases = [
-        (DeliveryRefusal::TargetNotInTeam, "\"target_not_in_team\""),
-        (
-            DeliveryRefusal::HumanConfirmationRequired,
-            "\"human_confirmation_required\"",
-        ),
-        (
-            DeliveryRefusal::MissingPermissions,
-            "\"missing_permissions\"",
-        ),
-        (DeliveryRefusal::RecipientBusy, "\"recipient_busy\""),
-        (DeliveryRefusal::UnknownRecipient, "\"unknown_recipient\""),
-        (
-            DeliveryRefusal::TmuxTargetMissing,
-            "\"tmux_target_missing\"",
-        ),
-        (
-            DeliveryRefusal::MessageAlreadyClaimed,
-            "\"message_already_claimed\"",
-        ),
-        (
-            DeliveryRefusal::LeaderNotAttached,
-            "\"leader_not_attached\"",
-        ),
-        (
-            DeliveryRefusal::CoordinatorUnavailable,
-            "\"coordinator_unavailable\"",
-        ),
-        (
-            DeliveryRefusal::TeamOwnerMismatch,
-            "\"team_owner_mismatch\"",
-        ),
-        (DeliveryRefusal::Ambiguous, "\"ambiguous\""),
-        (
-            DeliveryRefusal::RecipientPaneInNonInputMode,
-            "\"recipient_pane_in_non_input_mode\"",
-        ),
-        (DeliveryRefusal::SessionDrift, "\"session_drift\""),
-    ];
-    for (variant, wire) in cases {
-        assert_eq!(serde_json::to_string(&variant).unwrap(), wire);
-    }
-}
 
-#[test]
-fn delivery_stage_serde_snake_case_byte_locked() {
-    // delivery.py:309 injection.stage values.
-    assert_eq!(
-        serde_json::to_string(&DeliveryStage::TrustAutoAnswerDismissalWait).unwrap(),
-        "\"trust_auto_answer_dismissal_wait\""
-    );
-    assert_eq!(
-        serde_json::to_string(&DeliveryStage::Inject).unwrap(),
-        "\"inject\""
-    );
-    assert_eq!(
-        serde_json::to_string(&DeliveryStage::Submit).unwrap(),
-        "\"submit\""
-    );
-    assert_eq!(
-        serde_json::to_string(&DeliveryStage::VisibleCheck).unwrap(),
-        "\"visible_check\""
-    );
-}
 
-#[test]
-fn scheduled_kind_serde_byte_locked() {
-    // scheduler.py:46,84,87 dispatch keys — exhaustive, no runtime fallback.
-    assert_eq!(
-        serde_json::to_string(&ScheduledKind::Send).unwrap(),
-        "\"send\""
-    );
-    assert_eq!(
-        serde_json::to_string(&ScheduledKind::HealthPing).unwrap(),
-        "\"health_ping\""
-    );
-    assert_eq!(
-        serde_json::to_string(&ScheduledKind::TrustRetry).unwrap(),
-        "\"trust_retry\""
-    );
-    assert_eq!(serde_json::to_string(&ScheduledKind::EnterRescue).unwrap(), "\"enter_rescue\"");
-    assert_eq!(super::super::helpers::parse_scheduled_kind("enter_rescue").unwrap(), ScheduledKind::EnterRescue);
-}
 
-#[test]
-fn activity_status_serde_byte_locked() {
-    // activity_detector.py:107 status values consumed by ping/take-over.
-    assert_eq!(
-        serde_json::to_string(&ActivityStatus::Working).unwrap(),
-        "\"working\""
-    );
-    assert_eq!(
-        serde_json::to_string(&ActivityStatus::Idle).unwrap(),
-        "\"idle\""
-    );
-    assert_eq!(
-        serde_json::to_string(&ActivityStatus::Stuck).unwrap(),
-        "\"stuck\""
-    );
-    assert_eq!(
-        serde_json::to_string(&ActivityStatus::Uncertain).unwrap(),
-        "\"uncertain\""
-    );
-}
+
+
 
 #[test]
 fn check_status_serde_byte_locked() {
@@ -183,14 +54,6 @@ fn check_kind_serde_byte_locked() {
     );
 }
 
-#[test]
-fn receiver_mode_serde_byte_locked() {
-    // leader.py:103,166 — only direct_tmux is a legal receiver mode.
-    assert_eq!(
-        serde_json::to_string(&ReceiverMode::DirectTmux).unwrap(),
-        "\"direct_tmux\""
-    );
-}
 
 // ════════════════════════════════════════════════════════════════════════
 // GROUP B — bounded-retry constants + backoff (delivery.py:60-61,
@@ -198,28 +61,9 @@ fn receiver_mode_serde_byte_locked() {
 // termination-guarantee so no infinite-loop regression.
 // ════════════════════════════════════════════════════════════════════════
 
-#[test]
-fn trust_retry_max_attempts_is_four() {
-    assert_eq!(TRUST_RETRY_MAX_ATTEMPTS, 4);
-}
 
-#[test]
-fn trust_retry_backoff_table_byte_locked() {
-    // delivery.py:60 _TRUST_RETRY_BACKOFF_SECONDS = {2:5, 3:15, 4:30}.
-    assert_eq!(TRUST_RETRY_BACKOFF_SECONDS, &[(2, 5), (3, 15), (4, 30)]);
-}
 
-#[test]
-fn send_retry_max_attempts_is_three() {
-    // scheduler.py:134 / results.py:251 max_attempts = 3.
-    assert_eq!(SEND_RETRY_MAX_ATTEMPTS, 3);
-}
 
-#[test]
-fn result_delivery_max_attempts_is_five() {
-    // result_delivery.py:15 _RESULT_DELIVERY_MAX_ATTEMPTS = 5.
-    assert_eq!(RESULT_DELIVERY_MAX_ATTEMPTS, 5);
-}
 
 // ════════════════════════════════════════════════════════════════════════
 // GROUP C — pure-value helper impls already in the skeleton: the IRON LAW.
@@ -251,15 +95,6 @@ fn provider_sdk_calls_is_zero_only_when_all_three_zero() {
     .is_zero());
 }
 
-#[test]
-fn activity_status_idle_takeover_gate_uncertain_never_idle() {
-    // THE IRON LAW (bug-071/077/085): only Idle passes; Uncertain/Working/Stuck
-    // are explicitly blocked — Uncertain must NOT fall through to idle.
-    assert!(ActivityStatus::Idle.allows_idle_takeover());
-    assert!(!ActivityStatus::Uncertain.allows_idle_takeover());
-    assert!(!ActivityStatus::Working.allows_idle_takeover());
-    assert!(!ActivityStatus::Stuck.allows_idle_takeover());
-}
 
 // ════════════════════════════════════════════════════════════════════════
 // GROUP D — result_delivery.py pure fns: format/parse dual + KEY INSERTION

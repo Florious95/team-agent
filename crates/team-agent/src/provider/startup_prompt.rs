@@ -471,11 +471,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use crate::model::enums::PaneLiveness;
-    use crate::transport::{
-        AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport, Key,
-        PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome, SpawnResult, Target,
-        TransportError, WindowName,
-    };
+    use crate::transport::{ BackendKind, CaptureRange, CapturedText, Key, PaneField, PaneId, PaneInfo, SessionName, SpawnResult, Target, TransportError, WindowName };
     use std::collections::BTreeMap;
     use std::path::Path;
     use std::sync::Mutex;
@@ -652,15 +648,6 @@ mod tests {
         ) -> Result<SpawnResult, TransportError> {
             unimplemented!("not reached by startup-prompt loop")
         }
-        fn inject(
-            &self,
-            _t: &Target,
-            _p: &InjectPayload,
-            _submit: Key,
-            _b: bool,
-        ) -> Result<InjectReport, TransportError> {
-            unimplemented!("not reached")
-        }
         fn send_keys(&self, _t: &Target, keys: &[Key]) -> Result<(), TransportError> {
             self.sent.lock().unwrap().push(keys.to_vec());
             Ok(())
@@ -693,21 +680,10 @@ mod tests {
         fn list_windows(&self, _s: &SessionName) -> Result<Vec<WindowName>, TransportError> {
             unimplemented!("not reached")
         }
-        fn set_session_env(
-            &self,
-            _s: &SessionName,
-            _k: &str,
-            _v: &str,
-        ) -> Result<SetEnvOutcome, TransportError> {
-            unimplemented!("not reached")
-        }
         fn kill_session(&self, _s: &SessionName) -> Result<(), TransportError> {
             unimplemented!("not reached")
         }
         fn kill_window(&self, _t: &Target) -> Result<(), TransportError> {
-            unimplemented!("not reached")
-        }
-        fn attach_session(&self, _s: &SessionName) -> Result<AttachOutcome, TransportError> {
             unimplemented!("not reached")
         }
     }

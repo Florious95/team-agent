@@ -233,20 +233,7 @@ impl RealTeam {
         text.lines().map(str::to_string).collect()
     }
 
-    fn agent_health_ids(&self) -> Vec<String> {
-        let store =
-            team_agent::message_store::MessageStore::open(&self.root).expect("open message store");
-        let conn = team_agent::db::schema::open_db(store.db_path()).expect("open db");
-        let mut stmt = conn
-            .prepare("select agent_id from agent_health")
-            .expect("prepare");
-        let rows = stmt
-            .query_map([], |r| r.get::<_, String>(0))
-            .expect("query")
-            .filter_map(Result::ok)
-            .collect();
-        rows
-    }
+
 }
 
 impl Drop for RealTeam {
@@ -352,8 +339,8 @@ fn retire_then_restart_leaves_all_sources_absent_with_tombstone_retained() {
         "worker_a must stay absent from status across restart"
     );
     assert!(
-        !t.agent_health_ids().contains(&"worker_a".to_string()),
-        "worker_a agent_health row must stay deleted across restart"
+        !t.root.join(".team/team.db").exists(),
+        "retire/restart must not recreate the retired SQL health projection"
     );
     // 5 spec reference surfaces: worker_a must not appear as an assignee/order/
     // rule/default target after the retire+restart.

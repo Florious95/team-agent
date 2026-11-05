@@ -31,15 +31,10 @@ use team_agent::lifecycle::{
     quick_start_with_transport, reset_agent_with_transport, start_agent_with_transport,
     stop_agent_with_transport,
 };
-use team_agent::messaging::{send_message, MessageTarget, SendOptions, TrustedSender};
+use team_agent::messaging::{ MessageTarget, TrustedSender };
 use team_agent::model::ids::{AgentId, TeamKey};
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
-use team_agent::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
-};
+use team_agent::transport::{ BackendKind, CaptureRange, CapturedText, InjectStage, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName, SpawnResult, Target, Transport, TransportError, WindowName };
 
 #[test]
 #[ignore = "real-machine: nested quick-start/start-agent lifecycle gate"]
@@ -73,7 +68,7 @@ fn bug1_quick_start_child_preserves_runtime_teams_and_status_bindings() {
     let after_child = load_runtime_state(&root).expect("state after child quick-start");
     let child_failures = missing_team_binding_failures(&after_child, &["parent", "child"]);
 
-    let status = team_agent::cli::status_port::status(&root, false, true)
+    let status = team_agent::cli::status_port::status_scoped(&root, &crate::state::persist::load_runtime_state(&root).expect("fixture runtime state"), None, false, true)
         .expect("status --json should be available for command-substitute validation");
     let status_failures = missing_status_team_binding_failures(&status, &["parent", "child"]);
 
@@ -318,24 +313,20 @@ fn run_owner_gate_case(case: OwnerGateCase) -> Result<(), String> {
         )
         .map(|_| json!({"ok": true}))
         .map_err(|e| e.to_string()),
-        Operation::Send => {
-            let opts = SendOptions {
-                sender: TrustedSender::leader(),
-                team: Some(TeamKey::new(case.team.to_string())),
-                requires_ack: false,
-                wait_visible: false,
-                route_task_id: false,
-                ..SendOptions::default()
-            };
-            send_message(
-                &fixture.root,
-                &MessageTarget::Single(case.agent.to_string()),
-                "TEAM_IN_TEAM_SCOPE_CANARY",
-                &opts,
-            )
-            .map(|out| json!({"ok": out.ok, "status": format!("{:?}", out.status), "reason": format!("{:?}", out.reason)}))
-            .map_err(|e| e.to_string())
-        }
+        Operation::Send => crate::station::send::execute(
+            crate::station::send::Request {
+                workspace: &fixture.root,
+                team: Some(case.team),
+                to: case.agent,
+                content: "TEAM_IN_TEAM_SCOPE_CANARY",
+                task_id: None,
+                message_id: None,
+                presentation: &crate::messaging::presentation::PresentationRequest::default(),
+                mailbox: false,
+                envelope: None,
+            },
+            crate::station::send::Authority::Operator { sender: "leader" },
+        )
     };
 
     let after = load_runtime_state(&fixture.root).map_err(|e| e.to_string())?;
@@ -1198,22 +1189,6 @@ impl Transport for RecordingTransport {
         Ok(self.record_spawn("spawn_into", session, window))
     }
 
-    fn inject(
-        &self,
-        _target: &Target,
-        _payload: &InjectPayload,
-        _submit: Key,
-        _bracketed: bool,
-    ) -> Result<InjectReport, TransportError> {
-        Ok(InjectReport {
-            stage_reached: InjectStage::Submit,
-            inject_verification: InjectVerification::CaptureContainsToken,
-            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
-            turn_verification: TurnVerification::NotYetObserved,
-            attempts: 1,
-            submit_diagnostics: None,
-        })
-    }
 
     fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
         Ok(())
@@ -1250,14 +1225,6 @@ impl Transport for RecordingTransport {
         Ok(self.windows.clone())
     }
 
-    fn set_session_env(
-        &self,
-        _session: &SessionName,
-        _key: &str,
-        _value: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        Ok(SetEnvOutcome::Applied)
-    }
 
     fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
         Ok(())
@@ -1267,7 +1234,4 @@ impl Transport for RecordingTransport {
         Ok(())
     }
 
-    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
-        Ok(AttachOutcome::Attached)
-    }
 }
