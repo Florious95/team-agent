@@ -171,12 +171,14 @@ fn has_active_claude_trust_shape(output: &str) -> bool {
         return false;
     }
     output.lines().map(str::trim).any(|line| {
-        matches!(line, "❯ 1. Yes, I trust this folder" | "> 1. Yes, I trust this folder" | "❯ 2. No, exit" | "> 2. No, exit")
+        matches!(line, "❯ 1. Yes, I trust this folder" | "> 1. Yes, I trust this folder" | "❯ 2. No, exit" | "> 2. No, exit"
+            | "❯ Yes, I trust this folder" | "> Yes, I trust this folder" | "❯ No, exit" | "> No, exit")
     })
 }
 
 fn claude_trust_reject_selected(output: &str) -> bool {
-    output.lines().map(str::trim).any(|line| matches!(line, "❯ 2. No, exit" | "> 2. No, exit"))
+    output.rsplit(CLAUDE_TRUST_MARKERS[0]).next().unwrap_or(output).lines().map(str::trim)
+        .any(|line| matches!(line, "❯ 2. No, exit" | "> 2. No, exit" | "❯ No, exit" | "> No, exit"))
 }
 
 fn has_claude_ready_shape(output: &str) -> bool {
@@ -377,7 +379,10 @@ pub fn claude_handle_startup_prompts(
                 // its leader has already authorized this workspace. Folder trust
                 // is separate from the worker's unchanged permission mode.
                 let select_yes = claude_trust_reject_selected(&screen);
-                let keys = if select_yes { vec![Key::Up, Key::Enter] } else { vec![Key::Enter] };
+                // Current Claude lists the unnumbered No option first; older
+                // versions list numbered Yes first. Follow the observed order.
+                let direction = if screen.rfind("No, exit") < screen.rfind("Yes, I trust this folder") { Key::Down } else { Key::Up };
+                let keys = if select_yes { vec![direction, Key::Enter] } else { vec![Key::Enter] };
                 if let Err(error) = transport.send_keys(target, &keys) {
                     capture_error = Some(error.to_string());
                     break;
@@ -708,7 +713,9 @@ mod tests {
     #[test]
     fn claude_worker_trust_accepts_either_default_and_ignores_stale_or_other_prompts() {
         for (choice, expected) in [("❯ 1. Yes, I trust this folder\n  2. No, exit", vec![Key::Enter]),
-            ("  1. Yes, I trust this folder\n❯ 2. No, exit", vec![Key::Up, Key::Enter])] {
+            ("  1. Yes, I trust this folder\n❯ 2. No, exit", vec![Key::Up, Key::Enter]),
+            ("❯ No, exit\n  Yes, I trust this folder", vec![Key::Down, Key::Enter]),
+            ("  No, exit\n❯ Yes, I trust this folder", vec![Key::Enter])] {
             let trust = format!("Is this a project you created or one you trust?\n{choice}");
             assert_eq!(classify_claude_startup_screen(&trust), StartupScreenDecision::AnswerWorkspaceTrust);
             let t = ScriptedTransport { screens: Mutex::new(vec![trust.clone(), "Claude Code v2\n❯".into()]), sent: Mutex::new(Vec::new()) };
