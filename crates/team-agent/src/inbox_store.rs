@@ -87,7 +87,7 @@ pub struct StoredRecord {
 fn component(s: &str) -> Result<String, String> {
     crate::model::paths::encode_scope_component(s).map_err(|_| "invalid inbox scope component".into())
 }
-fn root(workspace: &Path, recipient: &str, team: Option<&str>) -> Result<PathBuf, String> {
+pub(crate) fn root(workspace: &Path, recipient: &str, team: Option<&str>) -> Result<PathBuf, String> {
     let mut root = workspace.join(".team/inbox");
     if let Some(team) = team {
         root.push(component(team)?);
@@ -310,6 +310,7 @@ fn same_request(a: &Value, b: &Value) -> bool {
                 "seq",
                 "checksum",
                 "provenance",
+                "submission_tracking",
                 "dedupe_key",
                 "record_ref",
             ] {

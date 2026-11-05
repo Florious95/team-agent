@@ -68,11 +68,9 @@ fn sender_in_directory(authority: Authority<'_>, directory: &crate::direct_deliv
     }
 }
 
-fn permitted_peer(authority: Authority<'_>, directory: &crate::direct_delivery::Directory, recipient: &str) -> bool {
-    if recipient == "leader" { return true; }
-    let Some(info) = directory.state.get("agents").and_then(|agents| agents.get(recipient)) else { return false; };
-    !matches!(authority, Authority::Seat { .. })
-        || !matches!(info["status"].as_str().unwrap_or("").to_ascii_lowercase().as_str(), "dead" | "stopped")
+fn permitted_peer(_authority: Authority<'_>, directory: &crate::direct_delivery::Directory, recipient: &str) -> bool {
+    // Liveness is a physical-delivery concern, not a durable-ingress gate.
+    recipient == "leader" || directory.state.get("agents").and_then(|agents| agents.get(recipient)).is_some()
 }
 
 pub fn execute(req: Request<'_>, authority: Authority<'_>) -> Result<Value, String> {
@@ -343,6 +341,8 @@ fn send_one(
             Sha256::digest(serde_json::to_vec(&identity).map_err(|e| e.to_string())?)
         ));
     }
+    // An absent sidecar is retryable only for frames written by this protocol.
+    record["submission_tracking"] = json!(1);
     let stored = crate::inbox_store::store(&directory.workspace, recipient, &record)?;
     let id = stored.record["message_id"]
         .as_str()
@@ -359,9 +359,17 @@ fn send_one(
         crate::messaging::presentation::decide_presentation(req.presentation,
             crate::messaging::presentation::PresentationSource::ReportResult).effective_sink
     } else { req.presentation.sink };
-    if stored.duplicate || (req.envelope.is_none() && req.mailbox) || sink != PresentationSink::Leader {
+    if (req.envelope.is_none() && req.mailbox) || sink != PresentationSink::Leader {
         return Ok(result);
     }
+    let submission = Submission::lock(&directory.workspace, recipient, directory.team.as_deref(), &stored)?;
+    result["submission"] = json!(submission.phase);
+    if submission.phase != "not_attempted" {
+        return Ok(result);
+    }
+    // Persist BEFORE invoking the actuator. A sender crash must never authorize
+    // automatic replay of a possibly pasted/submitted prompt.
+    submission.save("uncertain")?;
     let text = render(sender, req.content, id, req.envelope.is_some());
     match directory.send_with_receipt(recipient, &text, || {
         if req.envelope.is_none() {
@@ -407,7 +415,85 @@ fn send_one(
             result["delivery_error"] = json!(error);
         }
     }
+    let phase = if result["live"] == true { "physical" } else {
+        result["submission"].as_str().unwrap_or("uncertain")
+    };
+    if let Err(error) = submission.save(phase) {
+        result["submission_state_error"] = json!(error);
+    }
     Ok(result)
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    #[test]
+    fn only_proven_unsubmitted_records_can_retry_across_process_recovery() {
+        let root = std::env::temp_dir().join(format!("submission-test-{}", super::super::seat_store::random_instance().unwrap()));
+        let mut record = crate::inbox_store::record("source", "worker", "event", Some("team"), "message");
+        record["submission_tracking"] = json!(1);
+        let stored = crate::inbox_store::store(&root, "worker", &record).unwrap();
+        let open = || Submission::lock(&root, "worker", Some("team"), &stored).unwrap();
+        assert_eq!(open().phase, "not_attempted");
+        open().save("uncertain").unwrap();
+        assert_eq!(open().phase, "uncertain");
+        open().save("not_attempted").unwrap();
+        assert_eq!(open().phase, "not_attempted");
+        open().save("physical").unwrap();
+        assert_eq!(open().phase, "physical");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_records_without_submission_evidence_are_not_replayed() {
+        let root = std::env::temp_dir().join(format!("submission-legacy-{}", super::super::seat_store::random_instance().unwrap()));
+        let record = crate::inbox_store::record("source", "worker", "event", Some("team"), "message");
+        let stored = crate::inbox_store::store(&root, "worker", &record).unwrap();
+        assert_eq!(Submission::lock(&root, "worker", Some("team"), &stored).unwrap().phase, "unknown");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+struct Submission {
+    _lock: std::fs::File,
+    path: std::path::PathBuf,
+    phase: String,
+}
+impl Submission {
+    fn lock(workspace: &Path, recipient: &str, team: Option<&str>, stored: &crate::inbox_store::StoredRecord) -> Result<Self, String> {
+        let root = crate::inbox_store::root(workspace, recipient, team)?.join(".submission");
+        super::seat_store::private_dir(&root)?;
+        let key = format!("{:x}", Sha256::digest(stored.reference.token().as_bytes()));
+        let path = root.join(format!("{key}.json"));
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).read(true).write(true).truncate(false);
+        #[cfg(unix)] {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
+        let lock = options.open(root.join(format!("{key}.lock"))).map_err(|e| e.to_string())?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match lock.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline =>
+                    std::thread::sleep(std::time::Duration::from_millis(20)),
+                Err(error) => return Err(format!("submission_busy: {error}")),
+            }
+        }
+        let prior = super::seat_store::read_json(&path, 4096)?;
+        let phase = match prior {
+            Some(value) if value["v"] == 1 => value["phase"].as_str().ok_or("invalid submission phase")?.to_string(),
+            Some(_) => return Err("unsupported submission state".into()),
+            None if stored.record["submission_tracking"] == 1 => "not_attempted".into(),
+            None => "unknown".into(),
+        };
+        Ok(Self { _lock: lock, path, phase })
+    }
+    fn save(&self, phase: &str) -> Result<(), String> {
+        super::seat_store::write_json(&self.path, &json!({"v":1,"phase":phase}), 4096)
+    }
 }
 
 fn remember_task(
