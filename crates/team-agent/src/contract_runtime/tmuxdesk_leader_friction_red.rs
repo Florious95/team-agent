@@ -417,6 +417,7 @@ fn r3b_status_reports_recovery_skipped_explicit_stop_seat_as_stopped() {
         workspace_path(&fixture),
         &state,
         Some("opus-architect"),
+        false,
     );
     let node = &status["nodes"][0];
     assert_eq!(

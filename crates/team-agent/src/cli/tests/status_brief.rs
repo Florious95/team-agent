@@ -217,11 +217,119 @@ fn status_table_header(text: &str) -> Option<&str> {
     })
 }
 
+
+#[test]
+#[serial]
+fn operational_status_hides_only_strict_explicit_stops_and_preserves_diagnostics() {
+    let ws = guarded_brief_workspace("operational");
+    let state = production_state(json!({
+        "parked": {"status": "stopped", "explicit_stop": true, "provider": "pi"},
+        "shutdown": {"status": "stopped", "provider": "pi"},
+        "false_flag": {"status": "stopped", "explicit_stop": false, "provider": "pi"},
+        "string_flag": {"status": "stopped", "explicit_stop": "true", "provider": "pi"},
+        "null_flag": {"status": "stopped", "explicit_stop": null, "provider": "pi"},
+        "number_flag": {"status": "stopped", "explicit_stop": 1, "provider": "pi"},
+        "object_flag": {"status": "stopped", "explicit_stop": {}, "provider": "pi"},
+        "failed": {"status": "failed", "provider": "pi"},
+        "uncertain": {"status": "running", "explicit_stop": true, "provider": "pi"}
+    }));
+    write_state(&ws, &state);
+    let before = snapshot_tree(&ws);
+    status_port::with_test_nodeprobe_unbound("", || {
+        let defaults = json_nodes(cmd_status(&status_args(&ws, true, None, None)).unwrap());
+        let names: Vec<_> = defaults.iter().map(|node| node["name"].as_str().unwrap()).collect();
+        assert!(!names.contains(&"parked"), "{defaults:?}");
+        for name in ["shutdown", "false_flag", "string_flag", "null_flag", "number_flag",
+                     "object_flag", "failed", "uncertain"] {
+            assert!(names.contains(&name), "missing {name}: {defaults:?}");
+        }
+        let mut detail = status_args(&ws, true, None, None);
+        detail.detail = true;
+        assert_eq!(json_nodes(cmd_status(&detail).unwrap()), defaults);
+        let human = human_text(cmd_status(&status_args(&ws, false, None, None)).unwrap());
+        let mut summary = status_args(&ws, false, None, None);
+        summary.summary = true;
+        assert_eq!(human_text(cmd_status(&summary).unwrap()), human);
+        let trailer = "hidden: 1 explicitly stopped seat(s); list them with team-agent status --all";
+        assert!(human.ends_with(trailer), "{human}");
+        assert_eq!(human.matches("hidden:").count(), 1);
+
+        let mut all = status_args(&ws, true, None, None);
+        all.all = true;
+        let all_nodes = json_nodes(cmd_status(&all).unwrap());
+        assert_eq!(all_nodes.len(), defaults.len() + 1);
+        let targeted = json_nodes(cmd_status(&status_args(&ws, true, Some("parked"), None)).unwrap());
+        assert_eq!(targeted.len(), 1);
+        assert_eq!(targeted[0]["runtime_status"], "stopped");
+        all.json = false;
+        assert!(!human_text(cmd_status(&all).unwrap()).contains("hidden:"));
+        assert!(!human_text(cmd_status(&status_args(&ws, false, Some("parked"), None)).unwrap())
+            .contains("hidden:"));
+        let json = status_port::status_brief_scoped(&ws, &state, None, false);
+        assert_eq!(json.as_object().unwrap().len(), 1);
+        assert!(json.get("nodes").is_some());
+        let argv = ["status", "--all", "--json", "--workspace", ws.to_str().unwrap()]
+            .map(str::to_string);
+        assert_eq!(run(&argv, &ws), ExitCode::Ok, "--all must reach the CLI adapter");
+    });
+    assert_eq!(snapshot_tree(&ws), before, "status filters must not mutate workspace bytes");
+}
+
+#[test]
+#[serial]
+fn operational_status_counts_all_hidden_and_never_lists_retired_or_sibling_seats() {
+    let ws = guarded_brief_workspace("operational-scope");
+    let state = json!({
+        "active_team_key": "alpha",
+        "agents": {"stale_flat": {"status": "running"}},
+        "teams": {
+            "alpha": {
+                "agents": {
+                    "parked": {"status": "stopped", "explicit_stop": true},
+                    "retired": {"status": "stopped", "explicit_stop": true}
+                },
+                "agent_lifecycle": {"retired": {"state": "retired"}}
+            },
+            "beta": {"agents": {"sibling": {"status": "running"}}}
+        }
+    });
+    status_port::with_test_nodeprobe_unbound("", || {
+        assert_eq!(status_port::status_brief_scoped(&ws, &state, None, false), json!({"nodes": []}));
+        let all = status_port::status_brief_scoped(&ws, &state, None, true);
+        assert_eq!(all["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(all["nodes"][0]["name"], "parked");
+        assert!(status_port::registered_agent_exists(&state, "parked"));
+        assert!(!status_port::registered_agent_exists(&state, "retired"));
+        assert_eq!(status_port::format_status_brief(&ws, &state, None, false),
+            "hidden: 1 explicitly stopped seat(s); list them with team-agent status --all");
+        assert!(!status_port::format_status_brief(&ws, &state, None, true).contains("hidden:"));
+    });
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn operational_status_preserves_stopped_seats_with_live_conflicting_evidence() {
+    let ws = guarded_brief_workspace("operational-conflict");
+    let mut agent = production_agent("conflict", "%7");
+    agent["status"] = json!("stopped");
+    agent["explicit_stop"] = json!(true);
+    let state = production_state(json!({"conflict": agent}));
+    let report = producer_report("/tmp/ta-status-brief.sock", "conflict", "%7", "pi_activity_channel");
+    status_port::with_test_nodeprobe_unbound(&report, || {
+        let value = status_port::status_brief_scoped(&ws, &state, None, false);
+        assert_eq!(value["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(value["nodes"][0]["runtime_status"], "unknown");
+        assert!(!status_port::format_status_brief(&ws, &state, None, false).contains("hidden:"));
+    });
+}
+
 fn status_args(ws: &Path, json_out: bool, agent: Option<&str>, team: Option<&str>) -> StatusArgs {
     StatusArgs {
         agent: agent.map(str::to_string),
         workspace: ws.to_path_buf(),
         detail: false,
+        all: false,
         summary: false,
         json: json_out,
         team: team.map(str::to_string),

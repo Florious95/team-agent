@@ -348,6 +348,7 @@ fn cli_status_emits_brief_with_scoped_unknown_diagnostics() {
         agent: None,
         workspace: ws,
         detail: true,
+        all: false,
         summary: false,
         json: true,
         team: None,

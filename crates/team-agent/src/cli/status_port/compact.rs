@@ -153,6 +153,11 @@ pub(super) fn compact_agents(value: Option<&Value>) -> Value {
     };
     let mut out = Map::new();
     for (agent_id, agent) in input {
+        if agent.get("explicit_stop") == Some(&Value::Bool(true))
+            && agent.get("status").and_then(Value::as_str) == Some("stopped")
+        {
+            continue;
+        }
         out.insert(agent_id.clone(), compact_agent_state(agent_id, agent));
     }
     Value::Object(out)
@@ -185,6 +190,32 @@ pub(super) fn compact_agent_state(_agent_id: &str, agent: &Value) -> Value {
         }
     }
     Value::Object(out)
+}
+
+#[cfg(test)]
+mod operational_roster_tests {
+    use super::*;
+
+    #[test]
+    fn compact_agents_hides_only_strict_explicitly_stopped_rows() {
+        let agents = json!({
+            "parked": {"status": "stopped", "explicit_stop": true},
+            "shutdown": {"status": "stopped"},
+            "false_flag": {"status": "stopped", "explicit_stop": false},
+            "string_flag": {"status": "stopped", "explicit_stop": "true"},
+            "null_flag": {"status": "stopped", "explicit_stop": null},
+            "failed": {"status": "failed"},
+            "conflict": {"status": "unknown", "explicit_stop": true},
+            "running": {"status": "running", "explicit_stop": true}
+        });
+        let compact = compact_agents(Some(&agents));
+        assert!(compact.get("parked").is_none());
+        assert_eq!(compact.as_object().map(|rows| rows.len()), Some(7));
+        for name in ["shutdown", "false_flag", "string_flag", "null_flag", "failed", "conflict", "running"] {
+            assert!(compact.get(name).is_some(), "missing {name}: {compact}");
+            assert!(compact[name].get("explicit_stop").is_none(), "internal marker leaked");
+        }
+    }
 }
 
 pub(super) fn compact_tasks(value: Option<&Value>) -> Value {

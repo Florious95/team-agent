@@ -89,6 +89,7 @@ struct RegisteredNode {
     window: Option<String>,
     pane: Option<String>,
     lifecycle: Option<String>,
+    explicit_stop: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -155,8 +156,13 @@ enum MatchResult<'a> {
 
 /// The CLI's concise JSON projection. `agent` filters the registered list but
 /// never synthesizes an unregistered node.
-pub(crate) fn status_brief_scoped(workspace: &Path, state: &Value, agent: Option<&str>) -> Value {
-    let nodes = project_status_nodes(workspace, state, agent);
+pub(crate) fn status_brief_scoped(
+    workspace: &Path,
+    state: &Value,
+    agent: Option<&str>,
+    include_stopped: bool,
+) -> Value {
+    let (nodes, _) = project_status_nodes(workspace, state, agent, include_stopped);
     json!({
         "nodes": nodes
             .into_iter()
@@ -167,8 +173,13 @@ pub(crate) fn status_brief_scoped(workspace: &Path, state: &Value, agent: Option
 
 /// Human output keeps the legacy single-node form and groups shared attach
 /// context only when multiple nodes make that repetition useful.
-pub(crate) fn format_status_brief(workspace: &Path, state: &Value, agent: Option<&str>) -> String {
-    let nodes = project_status_nodes(workspace, state, agent);
+pub(crate) fn format_status_brief(
+    workspace: &Path,
+    state: &Value,
+    agent: Option<&str>,
+    include_stopped: bool,
+) -> String {
+    let (nodes, hidden) = project_status_nodes(workspace, state, agent, include_stopped);
     let diagnostics = nodes.iter().filter(|(node, _)| node.observation_reason.is_some())
         .map(|(node, _)| {
             let value = scoped_node_json(node.clone(), workspace, state);
@@ -184,6 +195,14 @@ pub(crate) fn format_status_brief(workspace: &Path, state: &Value, agent: Option
         output.push('\n');
         output.push_str(&diagnostics.join("\n"));
     }
+    if hidden > 0 {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(&format!(
+            "hidden: {hidden} explicitly stopped seat(s); list them with team-agent status --all"
+        ));
+    }
     output
 }
 
@@ -191,7 +210,8 @@ fn project_status_nodes(
     _workspace: &Path,
     state: &Value,
     agent: Option<&str>,
-) -> Vec<(BriefNode, Option<AttachContext>)> {
+    include_stopped: bool,
+) -> (Vec<(BriefNode, Option<AttachContext>)>, usize) {
     let registered = registered_nodes(state, agent);
     #[cfg(unix)]
     let is_native = |node: &RegisteredNode| registered_scope(state).get("agents")
@@ -208,7 +228,8 @@ fn project_status_nodes(
         .cloned()
         .collect();
     let probes = probe_registered_endpoints(&legacy);
-    registered
+    let mut hidden = 0;
+    let nodes = registered
         .iter()
         .map(|node| {
             #[cfg(unix)]
@@ -246,7 +267,23 @@ fn project_status_nodes(
             }
             project_node_with_attach(node, probes.get(node.endpoint.as_deref().unwrap_or("")))
         })
-        .collect()
+        .zip(&registered)
+        .filter_map(|(projected, registered)| {
+            // Stop intent alone is not proof: conflicting or unknown runtime
+            // evidence must remain visible even if an old marker survives.
+            if agent.is_none()
+                && !include_stopped
+                && registered.explicit_stop
+                && projected.0.runtime_status == "stopped"
+            {
+                hidden += 1;
+                None
+            } else {
+                Some(projected)
+            }
+        })
+        .collect();
+    (nodes, hidden)
 }
 
 pub(crate) fn registered_agent_exists(state: &Value, agent: &str) -> bool {
@@ -534,6 +571,7 @@ fn registered_node(name: &str, value: &Value, state: &Value) -> RegisteredNode {
             .or_else(|| first_string(display, &["pane_id"]))
             .or_else(|| first_string(target, &["pane_id"])),
         lifecycle: string_at(value, &["status"]).map(|status| status.to_ascii_lowercase()),
+        explicit_stop: value.get("explicit_stop") == Some(&Value::Bool(true)),
     }
 }
 
@@ -1512,6 +1550,7 @@ mod native_ps_batch_regressions {
             window: Some("w".into()),
             pane: Some(pane.into()),
             lifecycle: None,
+            explicit_stop: false,
         }
     }
 
@@ -1521,7 +1560,7 @@ mod native_ps_batch_regressions {
             "team_key": "scoped-team", "session_name": "sess",
             "agents": {"worker": {"provider": "pi", "status": "running"}}
         });
-        let status = status_brief_scoped(Path::new("/owned/workspace with spaces"), &state, None);
+        let status = status_brief_scoped(Path::new("/owned/workspace with spaces"), &state, None, false);
         let node = &status["nodes"][0];
         assert_eq!(node["runtime_status"], "unknown");
         assert_eq!(node["observation_reason"], "endpoint_unregistered");
@@ -1780,6 +1819,7 @@ mod tests {
             window: Some("win".to_string()),
             pane: Some("%7".to_string()),
             lifecycle: None,
+            explicit_stop: false,
         }
     }
 

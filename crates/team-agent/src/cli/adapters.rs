@@ -346,6 +346,7 @@ pub fn cmd_status_for_team(args: &StatusArgs, team: Option<&str>) -> Result<CmdR
                 &selected.run_workspace,
                 &selected.state,
                 args.agent.as_deref(),
+                args.all,
             ),
             true,
         ));
@@ -354,6 +355,7 @@ pub fn cmd_status_for_team(args: &StatusArgs, team: Option<&str>) -> Result<CmdR
         &selected.run_workspace,
         &selected.state,
         args.agent.as_deref(),
+        args.all,
     )))
 }
 
@@ -708,7 +710,7 @@ fn unified_default_doctor_report(args: &DoctorArgs, mut value: Value) -> Value {
                 merge_report_array(&mut value, "issues", &issues);
                 merge_report_array(&mut value, "suggested_repairs", &repairs);
                 let brief = crate::cli::status_port::status_brief_scoped(
-                    &selected.run_workspace, &state, None,
+                    &selected.run_workspace, &state, None, false,
                 );
                 let observations = brief["nodes"].as_array().into_iter().flatten()
                     .filter(|node| node.get("observation_reason").is_some()).cloned().collect::<Vec<_>>();

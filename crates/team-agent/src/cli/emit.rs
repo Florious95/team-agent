@@ -475,7 +475,7 @@ pub(super) fn command_help(command: Option<&str>) -> String {
             "team-agent migrate --workspace . --team help-demo --json", "Use only the new release afterward. Verify status; stop/start the selected seats to refresh their native helpers."),
         "inbox" => ("<agent> is the recipient name; -n/--limit bounds the message count. Reading replies does not resend messages.",
             "team-agent inbox leader -n 3\nteam-agent inbox worker --limit 5\nteam-agent inbox leader --workspace . --team help-demo --json", "Wait for a natural reply, then check team-agent status if needed. Do not inspect worker terminal content."),
-        "status" => ("Optional <agent> selects one agent. --summary/--detail retain compatibility and do not add fields.\nNine fields: name/provider/model/effort/runtime_status/activity/health/session_name/tmux_command.\nRuntime, activity and health are distinct. unknown means insufficient evidence; null means unset. No default model is guessed.",
+        "status" => ("Optional <agent> selects one agent, including an explicitly stopped seat. --all includes explicitly stopped seats; removed seats are never listed.\nDefault hides and counts explicitly stopped seats. --summary/--detail retain compatibility and do not add fields.\nNine fields: name/provider/model/effort/runtime_status/activity/health/session_name/tmux_command.\nRuntime, activity and health are distinct. unknown means insufficient evidence; null means unset. No default model is guessed.",
             "team-agent status\nteam-agent status worker\nteam-agent status --workspace . --team help-demo --json", "Read replies with team-agent inbox leader -n 3; diagnose problems with team-agent doctor --workspace ."),
         "models" => ("--provider selects the provider, default pi. QUERY or --search performs keyword search; they are mutually exclusive.\nUse cursor (or cursor-agent, agent, cursor_agent) for the contract-native Cursor catalog. Copilot has no model discovery entrypoint here. Results come from the native catalog, not guesses.",
             "team-agent models --provider pi\nteam-agent models --provider pi --search luna\nteam-agent models --provider cursor --json", "Use the exact returned model in a role file or team-agent start AGENT --model MODEL; stop a running seat before changing its settings."),
@@ -896,6 +896,7 @@ struct ParsedArgs {
     confirm_human: bool,
     detail: bool,
     summary: bool,
+    all: bool,
     keep_logs: bool,
     allow_fresh: bool,
     session_converge_deadline_ms: Option<u64>,
@@ -995,6 +996,7 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             "--confirm-human" => parsed.confirm_human = true,
             "--detail" => parsed.detail = true,
             "--summary" => parsed.summary = true,
+            "--all" => parsed.all = true,
             "--keep-logs" => parsed.keep_logs = true,
             "--allow-fresh" => parsed.allow_fresh = true,
             "--session-converge-deadline" => {
@@ -1399,6 +1401,7 @@ fn status_args(args: &[String], cwd: &Path) -> StatusArgs {
         workspace: workspace(&parsed, cwd),
         detail: parsed.detail,
         summary: parsed.summary,
+        all: parsed.all,
         json: parsed.json,
         team: parsed.team,
     }
@@ -2291,7 +2294,7 @@ mod tests {
             ("schedule", &["--in", "--every", "--text", "--workspace", "--team", "--json"][..]),
             (
                 "status",
-                &["--workspace", "--team", "--summary", "--json", "--detail"][..],
+                &["--workspace", "--team", "--summary", "--json", "--detail", "--all"][..],
             ),
             (
                 "shutdown",

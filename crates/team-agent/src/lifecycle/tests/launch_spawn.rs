@@ -390,6 +390,7 @@ fn quick_start_teamdir_under_dot_team_uses_project_workspace_for_status_and_coll
         agent: None,
         workspace: team.clone(),
         detail: false,
+        all: false,
         summary: false,
         json: true,
         team: None,

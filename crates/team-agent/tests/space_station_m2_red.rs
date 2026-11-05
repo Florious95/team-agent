@@ -205,7 +205,7 @@ exec '{tmux}' "$@"
 
     /// seat → runtime_status, from the public status brief.
     fn status(&self, team: &str) -> std::collections::BTreeMap<String, String> {
-        let run = self.ta(&["status", "--team", team]);
+        let run = self.ta(&["status", "--team", team, "--all"]);
         self.remember_sockets(&run.json);
         let nodes = run.json.get("nodes").and_then(Value::as_array).unwrap_or_else(|| {
             panic!("`status --team {team}` must return nodes: {}", run.describe())
@@ -423,6 +423,9 @@ fn red_m2_r3_team_start_keeps_an_explicitly_stopped_seat_stopped() {
     let status = bay.status("m2r3");
     assert_eq!(status.get("wa").map(String::as_str), Some("stopped"), "explicitly stopped wa was resurrected: {status:?}; start={}", start.describe());
     assert_eq!(status.get("wb").map(String::as_str), Some("running"), "{status:?}");
+    let operational = bay.must(&["status", "--team", "m2r3"]);
+    assert!(operational.json["nodes"].as_array().unwrap().iter()
+        .all(|node| node["name"] != "wa"), "stopped wa leaked into default status: {}", operational.describe());
     assert_eq!(bay.live_panes().len(), panes_before.len(), "team start must not spawn a pane for wa");
 
     let wake = bay.ta(&["start", "wa", "--team", "m2r3"]);

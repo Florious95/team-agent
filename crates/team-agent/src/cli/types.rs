@@ -350,6 +350,7 @@ pub struct StatusArgs {
     pub workspace: PathBuf,
     pub detail: bool,
     pub summary: bool,
+    pub all: bool,
     pub json: bool,
     /// Stage 4: explicit `--team` scope (read-only command; multi-team
     /// workspaces use this for filtering, not for refusal).

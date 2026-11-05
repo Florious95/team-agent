@@ -92,7 +92,7 @@ fn schema(command: &str) -> Option<Schema> {
             usize::MAX,
         ),
         "schedule" => (&[("--in", Token), ("--every", Token), ("--text", Payload)], 2),
-        "status" => (&[("--detail", Switch), ("--summary", Switch)], 1),
+        "status" => (&[("--detail", Switch), ("--summary", Switch), ("--all", Switch)], 1),
         "models" => (&[("--provider", Token), ("--search", Query)], usize::MAX),
         "inbox" => (&[("--limit", Count)], 1),
         "locate" | "migrate" => (&[], 0),

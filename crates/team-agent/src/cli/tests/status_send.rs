@@ -354,6 +354,7 @@ fn cmd_status_human_is_nine_field_brief_without_diagnostics() {
         agent: None,
         workspace: ws.clone(),
         detail: false,
+        all: false,
         summary: false,
         json: false,
         team: None,
