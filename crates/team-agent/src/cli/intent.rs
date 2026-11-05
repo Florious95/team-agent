@@ -814,14 +814,15 @@ fn seat_actions(
             "running agent: stop it before applying role settings",
         )),
         (Verb::Start, Observation::Live) => Ok(vec![]),
+        (Verb::Start, Observation::ProviderExited) => Ok(vec!["stop", "start"]),
         (Verb::Start, _) => Ok(vec!["start"]),
-        (Verb::Restart, Observation::Live | Observation::NativeReconcile) => Ok(vec!["stop", "start"]),
+        (Verb::Restart, Observation::Live | Observation::NativeReconcile | Observation::ProviderExited) => Ok(vec!["stop", "start"]),
         (Verb::Restart, Observation::StoppedVerified) => Ok(vec!["start"]),
         (Verb::Restart, _) => Err(refusal(
             "restart requires a registered, previously started agent",
         )),
         (Verb::Stop, Observation::StoppedVerified | Observation::Unstarted) => Ok(vec![]),
-        (Verb::Stop, Observation::Live | Observation::NativeReconcile) => Ok(vec!["stop"]),
+        (Verb::Stop, Observation::Live | Observation::NativeReconcile | Observation::ProviderExited) => Ok(vec!["stop"]),
         _ => Err(refusal("unsupported lifecycle observation")),
     }
 }

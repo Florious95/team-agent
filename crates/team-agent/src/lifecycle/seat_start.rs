@@ -882,6 +882,15 @@ fn converge(
         let live = match super::seat_observation::observe(selected, request.agent.as_str(), row)? {
             SeatObservation::Live => true,
             SeatObservation::StoppedVerified | SeatObservation::Unstarted => false,
+            SeatObservation::ProviderExited => {
+                result["status"] = json!(if dry_run { "planned" } else { "recovering" });
+                if dry_run { return Ok(result); }
+                super::restart::stop_agent(&selected.run_workspace, &request.agent, Some(&selected.team_key))?;
+                let refreshed = crate::state::selector::select_team_readonly(
+                    &selected.run_workspace, Some(&selected.team_key),
+                ).map_err(failed)?;
+                return converge(request, Some(&refreshed), false);
+            }
             SeatObservation::NativeReconcile | SeatObservation::Unknown => {
                 return Err(refused(unverified_start_guidance(request)))
             }

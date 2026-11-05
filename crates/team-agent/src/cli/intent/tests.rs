@@ -2,6 +2,15 @@
 use super::*;
 
 #[test]
+fn provider_exited_retains_owned_cleanup_before_start() {
+    for verb in [Verb::Start, Verb::Restart] {
+        assert_eq!(seat_actions(verb, Observation::ProviderExited, false, false, false, false).unwrap(), vec!["stop", "start"]);
+    }
+    assert_eq!(seat_actions(Verb::Stop, Observation::ProviderExited, false, false, false, false).unwrap(), vec!["stop"]);
+    assert!(seat_actions(Verb::Stop, Observation::Unknown, false, false, false, false).is_err());
+}
+
+#[test]
 fn binding_pending_keeps_confirmed_effects_and_never_masks_worker_failure() {
     for ok in [true, false] {
         let mut value = json!({

@@ -599,7 +599,7 @@ fn plan_with_observer(
             let live = if let Some((selected, row)) = selected.as_ref().and_then(|selected| selected.state["agents"].get(id.as_str()).map(|row|(selected,row))) {
                 match observe(selected, id.as_str(), row)? {
                     Observation::Live => true,
-                    Observation::StoppedVerified | Observation::Unstarted => false,
+                    Observation::StoppedVerified | Observation::ProviderExited | Observation::Unstarted => false,
                     Observation::NativeReconcile | Observation::Unknown => return Err(refusal(crate::lifecycle::seat_start::unverified_start_guidance(&request))),
                 }
             } else { false };
