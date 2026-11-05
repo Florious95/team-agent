@@ -2793,7 +2793,7 @@ fn append_caller_context_assignments(parts: &mut Vec<String>, provider: Option<&
 /// `"[team-agent] {provider_label} exited with {rc}"`.
 pub const LEADER_PROVIDER_EXIT_MARKER_PREFIX: &str = "[team-agent]";
 pub const LEADER_PROVIDER_EXIT_MARKER_SUFFIX: &str = "exited with";
-const PROVIDER_EXIT_STATUS_OPTION: &str = "@team-agent-provider-exit-status";
+pub(crate) const PROVIDER_EXIT_STATUS_OPTION: &str = "@team-agent-provider-exit-status";
 
 /// 0.4.x (CR R6): build the leader exit marker text for `provider_label`.
 /// Used by the shell wrapper for human-readable output.
