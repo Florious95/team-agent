@@ -235,7 +235,7 @@ fn operational_status_hides_only_strict_explicit_stops_and_preserves_diagnostics
     }));
     write_state(&ws, &state);
     let before = snapshot_tree(&ws);
-    status_port::with_test_nodeprobe_unbound("", || {
+    status_port::with_test_nodeprobe_unbound(ws.join("missing-nodeprobe"), || {
         let defaults = json_nodes(cmd_status(&status_args(&ws, true, None, None)).unwrap());
         let names: Vec<_> = defaults.iter().map(|node| node["name"].as_str().unwrap()).collect();
         assert!(!names.contains(&"parked"), "{defaults:?}");
@@ -293,7 +293,7 @@ fn operational_status_counts_all_hidden_and_never_lists_retired_or_sibling_seats
             "beta": {"agents": {"sibling": {"status": "running"}}}
         }
     });
-    status_port::with_test_nodeprobe_unbound("", || {
+    status_port::with_test_nodeprobe_unbound(ws.join("missing-nodeprobe"), || {
         assert_eq!(status_port::status_brief_scoped(&ws, &state, None, false), json!({"nodes": []}));
         let all = status_port::status_brief_scoped(&ws, &state, None, true);
         assert_eq!(all["nodes"].as_array().unwrap().len(), 1);
@@ -316,12 +316,28 @@ fn operational_status_preserves_stopped_seats_with_live_conflicting_evidence() {
     agent["explicit_stop"] = json!(true);
     let state = production_state(json!({"conflict": agent}));
     let report = producer_report("/tmp/ta-status-brief.sock", "conflict", "%7", "pi_activity_channel");
-    status_port::with_test_nodeprobe_unbound(&report, || {
+    let probe = write_nodeprobe(&ws.join("probe"), &format!("printf %s {}", shell_quote_for_status_test(&report)));
+    status_port::with_test_nodeprobe(probe, || {
         let value = status_port::status_brief_scoped(&ws, &state, None, false);
         assert_eq!(value["nodes"].as_array().unwrap().len(), 1);
         assert_eq!(value["nodes"][0]["runtime_status"], "unknown");
         assert!(!status_port::format_status_brief(&ws, &state, None, false).contains("hidden:"));
     });
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn operational_status_keeps_explicit_stops_with_missing_native_authority_visible() {
+    let ws = guarded_brief_workspace("operational-native-missing");
+    let state = production_state(json!({
+        "unproven": {"status": "stopped", "explicit_stop": true, "runtime_family": "contract", "provider": "pi"}
+    }));
+    let value = status_port::status_brief_scoped(&ws, &state, None, false);
+    assert_eq!(value["nodes"].as_array().unwrap().len(), 1);
+    assert_eq!(value["nodes"][0]["runtime_status"], "unknown");
+    assert_eq!(value["nodes"][0]["observation_reason"], "native_authority_missing");
+    assert!(!status_port::format_status_brief(&ws, &state, None, false).contains("hidden:"));
 }
 
 fn status_args(ws: &Path, json_out: bool, agent: Option<&str>, team: Option<&str>) -> StatusArgs {
