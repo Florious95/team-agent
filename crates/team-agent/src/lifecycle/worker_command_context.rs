@@ -31,7 +31,7 @@ All communication must go through Team Agent MCP tools.
 - Broadcast: {send_message}(to='*', content='...')
 - Optional roster/status: {get_team_status} — use only when useful; it is not a communication or completion prerequisite.
 
-Use {send_message} exclusively for findings, progress, questions, and completion updates. Lifecycle management remains on the separately authorized operator CLI.
+Use {send_message} exclusively for findings, progress, questions, and completion updates. Lifecycle management uses the operator CLI. When your leader requests it, you are authorized to start and stop your OWN descendant sub-teams from your terminal: `team-agent start AGENT --team <NAME>` and `team-agent stop --team <NAME>`. This does not authorize stopping your own seat, your parent team, or unrelated teams; those require separate authorization.
 
 ## Rules:
 
@@ -340,6 +340,11 @@ mod tests {
                 assert!(prompt.contains(
                     "Do not reply to pure ACKs, greetings, or unchanged status notices (such as \"paused\" or \"waiting\"); after reporting a blocker once or completing a task, remain silent until a new actionable instruction arrives."
                 ));
+                assert!(prompt.contains("When your leader requests it, you are authorized to start and stop your OWN descendant sub-teams"));
+                assert!(prompt.contains("team-agent start AGENT --team <NAME>"));
+                assert!(prompt.contains("team-agent stop --team <NAME>"));
+                assert!(prompt.contains("does not authorize stopping your own seat, your parent team, or unrelated teams"));
+                assert!(!prompt.contains("Lifecycle management remains on the separately authorized operator CLI"));
                 assert!(!prompt.contains("Silence and resumption (mandatory)"));
                 assert!(!prompt.contains(
                     "When you receive a message from the leader or a teammate, you MUST respond"
