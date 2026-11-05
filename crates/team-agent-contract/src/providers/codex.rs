@@ -81,8 +81,8 @@ impl PlanHook for CodexAdapter {
             ExpectedSession::CaptureAfterNativeFork { parent } if session_uuid(parent.as_str()) => Some(("fork", parent.as_str())),
             _ => return Err(ContractError::Invalid("Codex fresh/current, exact resume or native fork only")),
         };
-        // The update modal is disabled for this invocation. Native project trust
-        // remains native policy; --no-daemon keeps the engine in the owned pane.
+        // The update modal is disabled for this invocation; --no-daemon keeps
+        // the engine in the owned pane.
         let mut arguments: Vec<OsString> = session.map(|(subcommand, _)| OsString::from(subcommand)).into_iter().collect();
         arguments.extend(["--no-alt-screen".into(), "--no-daemon".into(), "-c".into(), "check_for_update_on_startup=false".into()]);
         let model = arguments.len();
@@ -92,6 +92,11 @@ impl PlanHook for CodexAdapter {
         let mcp = CarrierUse::Specified(CarrierRef::Arguments((start..arguments.len()).collect()));
         // Native shell tools must retain the host-minted worker/caller tuple.
         arguments.extend(["-c".into(), "shell_environment_policy.inherit=\"all\"".into()]);
+        // The leader authorizes this exact worker CWD. Grant folder trust only
+        // for this invocation, without changing approval/sandbox intent or the
+        // user's on-disk project trust map. An inline table preserves dotted paths.
+        let cwd = toml_string(r.paths.cwd.path.to_str().ok_or(ContractError::Invalid("Codex workspace UTF-8"))?)?;
+        arguments.extend(["-c".into(), format!("projects={{{cwd}={{trust_level=\"trusted\"}}}}").into()]);
         // The native sandbox applies to the actual project CWD; approvals retain
         // the existing user policy when bypass is not requested.
         let bypass = if r.bypass { let index = arguments.len(); arguments.push("--dangerously-bypass-approvals-and-sandbox".into()); CarrierUse::Specified(CarrierRef::Arguments(vec![index])) }

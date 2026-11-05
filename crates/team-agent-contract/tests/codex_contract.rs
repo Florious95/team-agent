@@ -272,7 +272,10 @@ fn plan_carries_model_effort_bypass_mcp_and_exact_resume_without_startup_keys() 
     assert!(!args.iter().any(|arg| arg == "--add-dir" || arg.starts_with("developer_instructions=")));
     assert_eq!(args[7], format!("mcp_servers.{key}.command=\"/fake/candidate\""));
     assert!(args.ends_with(&["--dangerously-bypass-approvals-and-sandbox".into(), "-c".into(), "model_reasoning_effort=max".into()]));
-    assert!(!args.iter().any(|arg| arg == "resume" || arg.contains("trust") || arg == "--last" || arg.contains("projects.") || arg == "--sandbox"));
+    assert!(!args.iter().any(|arg| arg == "resume" || arg == "--last" || arg.contains("projects.") || arg == "--sandbox"));
+    let trusted_cwd = format!("projects={{{}={{trust_level=\"trusted\"}}}}", serde_json::to_string(r.paths.cwd.path.to_str().unwrap()).unwrap());
+    assert!(args.windows(2).any(|pair| pair == ["-c", trusted_cwd.as_str()]));
+    assert_eq!(args.iter().filter(|arg| arg.starts_with("projects=")).count(), 1);
     assert_eq!(plan.carriers.model, CarrierUse::Specified(CarrierRef::Arguments(vec![4, 5])));
     assert!(matches!(&plan.carriers.mcp, CarrierUse::Specified(CarrierRef::Arguments(indices)) if indices.len() == 12 && indices[0] == 6));
     assert_eq!(plan.environment.remove, std::collections::BTreeSet::from(["CODEX_API_KEY".to_string(), "OPENAI_API_KEY".to_string()]));
@@ -296,8 +299,9 @@ fn plan_carries_model_effort_bypass_mcp_and_exact_resume_without_startup_keys() 
     r.role_effort = None; r.bypass = false;
     let args = strings(&plan_ok(&a, &r, &catalog));
     assert!(!args.iter().any(|arg| arg.contains("dangerously") || arg.contains("model_reasoning_effort")));
-    // Keep the native sandbox policy without a synthetic secondary project path.
+    // Workspace trust does not grant permission bypass or another writable directory.
     assert!(args.windows(2).any(|pair| pair == ["--sandbox", "workspace-write"]));
+    assert!(args.windows(2).any(|pair| pair == ["-c", trusted_cwd.as_str()]));
     // Model omission, hidden or invented IDs never launch.
     for model in [None, Some("codex-auto-review"), Some("gpt-6-luna-invented")] {
         r.model = model.map(Into::into);
