@@ -66,6 +66,23 @@ pub(crate) fn compute_runtime_freshness(
             }
         }
     }
+    // The coordinator is retired: wrapper receipts are the live exit authority.
+    for (id, row) in state.get("agents").and_then(Value::as_object).into_iter().flatten() {
+        let Some(pane) = row["pane_id"].as_str() else { continue; };
+        let transport = if let Some(endpoint) = row["tmux_endpoint"].as_str().or_else(|| state["tmux_endpoint"].as_str()) {
+            crate::transport_factory::bounded_endpoint_transport(
+                endpoint, std::time::Instant::now() + std::time::Duration::from_secs(2),
+            )
+        } else {
+            let Ok(resolved) = crate::transport_factory::resolve_read_only_transport(
+                workspace, Some(state), crate::transport_factory::TransportPurpose::Status,
+            ) else { continue; };
+            resolved.backend
+        };
+        if transport.provider_exit_status(&crate::transport::PaneId::new(pane)).ok().flatten().is_some() {
+            provider_exited_agents.insert(id.clone());
+        }
+    }
     RuntimeFreshness {
         coordinator_service_available: health.service_available,
         host_boot_stale,
