@@ -362,14 +362,24 @@ fn send_one(
     if (req.envelope.is_none() && req.mailbox) || sink != PresentationSink::Leader {
         return Ok(result);
     }
-    let submission = Submission::lock(&directory.workspace, recipient, directory.team.as_deref(), &stored)?;
+    let submission = match Submission::lock(&directory.workspace, recipient, directory.team.as_deref(), &stored) {
+        Ok(submission) => submission,
+        Err(error) => {
+            result["delivery_error"] = json!(error);
+            result["submission"] = json!("not_attempted");
+            return Ok(result);
+        }
+    };
     result["submission"] = json!(submission.phase);
     if submission.phase != "not_attempted" {
         return Ok(result);
     }
     // Persist BEFORE invoking the actuator. A sender crash must never authorize
     // automatic replay of a possibly pasted/submitted prompt.
-    submission.save("uncertain")?;
+    if let Err(error) = submission.save("uncertain") {
+        result["delivery_error"] = json!(error);
+        return Ok(result);
+    }
     let text = render(sender, req.content, id, req.envelope.is_some());
     match directory.send_with_receipt(recipient, &text, || {
         if req.envelope.is_none() {
@@ -387,6 +397,7 @@ fn send_one(
             });
             result["live"] = json!(true);
             result["delivery"] = json!("physical");
+            result["submission"] = json!("physical");
             let observed_sender = match authority {
                 Authority::Seat { team, .. } if directory.team.as_deref() == Some(team)
                     && same_workspace(req.workspace, &directory.workspace) => sender_in_directory(authority, directory),
