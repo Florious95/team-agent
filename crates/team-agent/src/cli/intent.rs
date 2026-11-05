@@ -418,8 +418,9 @@ fn intent_human(value: &Value) -> String {
     if steps.iter().any(|step| step.pointer("/receipt/readiness/ready").and_then(Value::as_bool) == Some(false)) {
         lines.push("Worker tools: not yet verified; send a task and inspect the actual reply.".into());
     }
-    if let Some(error) = value.get("reason").and_then(Value::as_str).or_else(|| steps.iter().find_map(|step| step.get("error").or_else(|| step.pointer("/receipt/error")).and_then(Value::as_str))) {
-        lines.push(error.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(360).collect());
+    if let Some(error) = value.get("error").or_else(|| value.get("reason")).and_then(Value::as_str).or_else(|| steps.iter().find_map(|step| step.get("error").or_else(|| step.pointer("/receipt/error")).and_then(Value::as_str))) {
+        let message: String = error.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(360).collect();
+        lines.insert(0, format!("error: {message}"));
     }
     if let Some(action) = value.get("recovery").and_then(Value::as_str).or_else(|| value.get("next_actions").and_then(Value::as_array).and_then(|actions| actions.first()).and_then(Value::as_str)) {
         lines.push(format!("Next: {action}"));

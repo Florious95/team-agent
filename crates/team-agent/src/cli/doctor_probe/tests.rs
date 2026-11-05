@@ -62,6 +62,24 @@ fn output(result: CmdResult) -> String {
 }
 
 #[test]
+fn unscoped_doctor_refuses_multiple_alive_teams_without_following_active_pointer() {
+    let scratch = Scratch::new();
+    let path = scratch.0.join(".team/runtime/state.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, serde_json::to_vec(&json!({"active_team_key":"first", "teams":{
+        "first":{"status":"alive","agents":{}}, "second":{"status":"alive","agents":{}}
+    }})).unwrap()).unwrap();
+    let before = fs::read(&path).unwrap();
+    let text = output(run(&args(scratch.0.clone())));
+    let value: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(value["ok"], false);
+    assert_eq!(value["links"][0]["status"], "FAIL");
+    assert!(value["links"][0]["message"].as_str().unwrap().contains("ambiguous team selection"));
+    assert!(text.contains("select a team explicitly"));
+    assert_eq!(fs::read(path).unwrap(), before);
+}
+
+#[test]
 fn missing_named_team_advises_creation_without_writing_files() {
     let scratch = Scratch::new();
     let mut request = args(scratch.0.clone());

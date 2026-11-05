@@ -717,6 +717,17 @@ fn no_eligible_is_scoped_nonzero_with_skipped_and_zero_handlers_even_in_dry_run(
 }
 
 #[test]
+fn human_lifecycle_failure_starts_with_the_actual_error() {
+    for value in [
+        json!({"action":"start","ok":false,"error":"run team-agent stop reviewer before starting fresh"}),
+        json!({"action":"start","ok":false,"steps":[{"error":"owned startup failed"}]}),
+    ] {
+        let text = intent_human(&value);
+        assert!(text.lines().next().unwrap().starts_with("error: "), "{text}");
+    }
+}
+
+#[test]
 fn new_team_dry_run_names_the_calling_leader_without_lifecycle_actions() {
     for creates_team in [true, false] {
         let mut p = plan(Verb::Start, &[]);

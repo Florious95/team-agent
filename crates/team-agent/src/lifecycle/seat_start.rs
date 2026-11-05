@@ -296,11 +296,7 @@ pub fn status_command(request: &StartRequest) -> String {
 }
 
 pub(crate) fn unverified_start_guidance(request: &StartRequest) -> String {
-    if request.session == SessionPolicy::Fresh || request.role_file.is_some() || request.patch != RoleConfigPatch::default() {
-        format!("agent ownership/liveness is unverified; run `{}` before applying changes or starting fresh; then retry this start command", scoped_seat_command(request, "stop"))
-    } else {
-        format!("agent ownership/liveness is unverified; run `{}` before starting", status_command(request))
-    }
+    format!("agent ownership/liveness is unverified; run `{}` before applying changes or starting fresh; then retry this start command", scoped_seat_command(request, "stop"))
 }
 
 fn scoped_seat_command(request: &StartRequest, action: &str) -> String {
