@@ -22,11 +22,9 @@ const TRUST_MARKERS: &[&str] = &[
 ];
 const UPDATE_MARKERS: &[&str] = &["Update available!", "Update now"];
 const CLAUDE_TRUST_MARKERS: &[&str] = &[
-    "Quick safety check",
     "Is this a project you created or one you trust?",
     "Yes, I trust this folder",
     "No, exit",
-    "Enter to confirm",
 ];
 const CLAUDE_READY_MARKERS: &[&str] = &["Claude Code"];
 pub const COPILOT_TRUST_PROMPT_MARKER: &str = include_str!("testdata/copilot-trust-prompt.txt");
@@ -107,7 +105,7 @@ pub fn classify_codex_startup_screen(output: &str) -> StartupScreenDecision {
 }
 
 pub fn classify_claude_startup_screen(output: &str) -> StartupScreenDecision {
-    if has_active_claude_yes_trust_shape(output) {
+    if has_active_claude_trust_shape(output) {
         return StartupScreenDecision::AnswerWorkspaceTrust;
     }
     if has_claude_ready_shape(output) {
@@ -165,16 +163,20 @@ fn contains_numbered_menu_glyph(output: &str) -> bool {
     false
 }
 
-fn has_active_claude_yes_trust_shape(output: &str) -> bool {
+fn has_active_claude_trust_shape(output: &str) -> bool {
     if !CLAUDE_TRUST_MARKERS
         .iter()
         .all(|marker| output.contains(marker))
     {
         return false;
     }
-    output.lines().map(str::trim_start).any(|line| {
-        line == "❯ 1. Yes, I trust this folder" || line == "> 1. Yes, I trust this folder"
+    output.lines().map(str::trim).any(|line| {
+        matches!(line, "❯ 1. Yes, I trust this folder" | "> 1. Yes, I trust this folder" | "❯ 2. No, exit" | "> 2. No, exit")
     })
+}
+
+fn claude_trust_reject_selected(output: &str) -> bool {
+    output.lines().map(str::trim).any(|line| matches!(line, "❯ 2. No, exit" | "> 2. No, exit"))
 }
 
 fn has_claude_ready_shape(output: &str) -> bool {
@@ -371,10 +373,18 @@ pub fn claude_handle_startup_prompts(
         };
         match classify_claude_startup_screen(&screen) {
             StartupScreenDecision::AnswerWorkspaceTrust => {
-                let _ = transport.send_keys(target, &[Key::Enter]);
+                // This startup handler owns the newly launched worker's pane;
+                // its leader has already authorized this workspace. Folder trust
+                // is separate from the worker's unchanged permission mode.
+                let select_yes = claude_trust_reject_selected(&screen);
+                let keys = if select_yes { vec![Key::Up, Key::Enter] } else { vec![Key::Enter] };
+                if let Err(error) = transport.send_keys(target, &keys) {
+                    capture_error = Some(error.to_string());
+                    break;
+                }
                 handled.push(HandledPrompt {
                     prompt: "claude_workspace_trust".to_string(),
-                    action: "sent_enter".to_string(),
+                    action: if select_yes { "selected_trust" } else { "sent_enter" }.to_string(),
                 });
                 sleep_between_polls(sleep_s);
             }
@@ -693,6 +703,21 @@ mod tests {
         fn attach_session(&self, _s: &SessionName) -> Result<AttachOutcome, TransportError> {
             unimplemented!("not reached")
         }
+    }
+
+    #[test]
+    fn claude_worker_trust_accepts_either_default_and_ignores_stale_or_other_prompts() {
+        for (choice, expected) in [("❯ 1. Yes, I trust this folder\n  2. No, exit", vec![Key::Enter]),
+            ("  1. Yes, I trust this folder\n❯ 2. No, exit", vec![Key::Up, Key::Enter])] {
+            let trust = format!("Is this a project you created or one you trust?\n{choice}");
+            assert_eq!(classify_claude_startup_screen(&trust), StartupScreenDecision::AnswerWorkspaceTrust);
+            let t = ScriptedTransport { screens: Mutex::new(vec![trust.clone(), "Claude Code v2\n❯".into()]), sent: Mutex::new(Vec::new()) };
+            let handled = claude_handle_startup_prompts(&t, &Target::Pane(PaneId::new("%1")), 2, 0.0);
+            assert_eq!(handled.handled.len(), 1);
+            assert_eq!(*t.sent.lock().unwrap(), vec![expected]);
+            assert_eq!(classify_claude_startup_screen(&format!("{trust}\nClaude Code v2\n❯")), StartupScreenDecision::Ready);
+        }
+        assert_eq!(classify_claude_startup_screen("Allow this command?\n  1. Yes, I trust this folder\n❯ 2. No, exit"), StartupScreenDecision::KeepPolling);
     }
 
     #[test]
