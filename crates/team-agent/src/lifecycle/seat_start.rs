@@ -886,8 +886,8 @@ fn converge(
                 result["status"] = json!(if dry_run { "planned" } else { "recovering" });
                 if dry_run { return Ok(result); }
                 super::restart::stop_agent(&selected.run_workspace, &request.agent, Some(&selected.team_key))?;
-                let refreshed = crate::state::selector::select_team_readonly(
-                    &selected.run_workspace, Some(&selected.team_key),
+                let refreshed = crate::state::selector::resolve_active_team_readonly(
+                    &selected.run_workspace, Some(&selected.team_key), crate::state::selector::SelectorMode::RuntimeOnly,
                 ).map_err(failed)?;
                 return converge(request, Some(&refreshed), false);
             }
