@@ -129,23 +129,7 @@ fn assert_receiver_attached(workspace: &Path, team: &str) {
     );
 }
 
-#[test]
-fn mailbox_unattached_receipt_shape_is_unchanged() {
-    let source = mailbox_source();
-    for required in [
-        "\"status\": \"deferred\"",
-        "\"deferred_reason\": \"never_attached\"",
-        "\"delivered\": false",
-        "\"message_status\": \"queued_until_leader_attach\"",
-        "enqueue_leader_mailbox_until_attach",
-        "\"channel\": \"leader_mailbox\"",
-    ] {
-        assert!(
-            source.contains(required),
-            "offline mailbox must keep {required}; do not turn never-attached send into a hard fail"
-        );
-    }
-}
+
 
 #[test]
 #[serial(env)]

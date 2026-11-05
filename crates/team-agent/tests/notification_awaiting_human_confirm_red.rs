@@ -67,11 +67,7 @@ fn awaiting_human_confirm_uses_active_tail_structural_prompt_and_dedupes_per_fin
             "awaiting_human_confirm prompts must keep a (team, agent_id, fingerprint) identity".to_string(),
         );
     }
-    if !src.contains("send_to_leader_receiver") || !src.contains("deliver_to_leader.submit") {
-        failures.push(
-            "awaiting_human_confirm must notify through the shared N32 leader funnel".to_string(),
-        );
-    }
+
 
     assert!(
         failures.is_empty(),

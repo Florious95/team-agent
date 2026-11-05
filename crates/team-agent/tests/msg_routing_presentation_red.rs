@@ -47,6 +47,9 @@ use serde_json::{json, Value};
 use serial_test::serial;
 
 use team_agent::mcp_server::normalize::normalize_report_envelope;
+use team_agent::messaging::presentation::{
+    decide_presentation, normalize_report_presentation, PresentationSink, PresentationSource,
+};
 
 // ---------------------------------------------------------------------------
 // Shared source-of-truth helpers (static observation of product source at the
@@ -61,6 +64,24 @@ fn product_src(rel: &str) -> String {
     let path = base.join("src").join(rel);
     std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read product source {}: {e}", path.display()))
+}
+
+// The live-pane positive/negative control is in stage1_preserve_invariants.
+// These source guards pin the current shared producer's store-before-submit boundary.
+fn assert_durable_result_route(sink: PresentationSink) {
+    let value = json!({"sink": sink.as_str(), "class": "stage_result", "case_id": "routing-case"});
+    let (request, error) = normalize_report_presentation(Some(&value));
+    assert_eq!(error, None);
+    let decision = decide_presentation(&request, PresentationSource::ReportResult);
+    assert_eq!(decision.effective_sink, sink);
+
+    let source = product_src("station/send.rs");
+    let (_, send_one) = source.split_once("fn send_one(").expect("current shared producer");
+    let stored = send_one.find("crate::inbox_store::store(").expect("durable inbox append");
+    let gate = send_one.find("sink != PresentationSink::Leader").expect("non-live presentation gate");
+    let submit = send_one.find("Submission::lock(").expect("physical submission guard");
+    assert!(stored < gate && gate < submit, "durability must precede presentation and submission");
+    assert!(send_one[gate..submit].contains("return Ok(result);"), "non-live results return before submission");
 }
 
 fn realmachine_gate() -> bool {
@@ -186,15 +207,7 @@ fn form4_requested_effective_reason_survive_durable_roundtrip() {
 /// funnel; at baseline the notification call is unconditional (source predicate).
 #[test]
 fn form6_casefile_result_creates_no_leader_notification_row() {
-    let src = product_src("messaging/results.rs");
-    // POST-GREEN: the result notification is gated on an effective-leader
-    // decision from the single C6 primitive. Baseline calls the funnel with no
-    // presentation gate -> red on this predicate.
-    assert!(
-        src.contains("decide_presentation") || src.contains("present_persisted_obligation"),
-        "POST-GREEN: report_result routes its notification through the C6 presentation decision \
-         primitive (casefile/silent result must not unconditionally create a leader-notification)"
-    );
+    assert_durable_result_route(PresentationSink::Casefile);
 }
 
 /// form7 (offline seam): silent is durable/pullable but never injected. Same
@@ -202,11 +215,7 @@ fn form6_casefile_result_creates_no_leader_notification_row() {
 /// differs). Baseline red: no silent sink, no stored_only disposition.
 #[test]
 fn form7_silent_durable_pullable_not_injected() {
-    let persist = product_src("messaging/persist.rs");
-    assert!(
-        persist.contains("StoredOnly"),
-        "POST-GREEN: silent maps to the StoredOnly non-injecting durable disposition"
-    );
+    assert_durable_result_route(PresentationSink::Silent);
 }
 
 /// form8 (offline seam): every critical class forces effective leader and
@@ -361,14 +370,9 @@ fn form11_existing_leader_paths_unbroken_guard() {
 /// Real-machine adjudication (transcript absence) is env-gated below.
 #[test]
 fn form13_stage_result_pollable_absent_from_transcript_offline() {
-    let src = product_src("messaging/results.rs");
-    // The result row insert must not be conditional on presentation sink; only
-    // the notification is gated. POST-GREEN: a decision primitive gates the
-    // notification, not the result insert.
-    assert!(
-        src.contains("decide_presentation") || src.contains("present_persisted_obligation"),
-        "POST-GREEN: result row always commits; only leader notification is presentation-gated"
-    );
+    for sink in [PresentationSink::Casefile, PresentationSink::Silent] {
+        assert_durable_result_route(sink);
+    }
 }
 
 /// form13-rm (REAL-MACHINE, env-gated): physically assert — through the real

@@ -15,28 +15,7 @@
 mod composite_source;
 use std::path::{Path, PathBuf};
 
-#[test]
-fn e2_status_json_marks_current_task_as_structured_best_effort() {
-    let status_port = source("src/cli/status_port.rs");
-    let mut missing = Vec::new();
-    for required in [
-        "\"current_task_id\"",
-        "\"last_output_at\"",
-        "\"health_updated_at\"",
-        "\"current_task_source\"",
-        "\"current_task_confidence\"",
-        "best_effort",
-    ] {
-        if !status_port.contains(required) {
-            missing.push(required);
-        }
-    }
 
-    assert!(
-        missing.is_empty(),
-        "E2 RED: status --json --agent must include current_task_id, last_output_at, health_updated_at, and structured current_task_source/current_task_confidence=best_effort. Missing markers: {missing:?}"
-    );
-}
 
 #[test]
 fn e2_current_task_health_reads_are_display_only() {

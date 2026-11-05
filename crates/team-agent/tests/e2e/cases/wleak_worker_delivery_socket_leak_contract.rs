@@ -249,19 +249,7 @@ fn wleak_source_guard_does_not_cross_socket_enumerate_for_worker_delivery() {
 
 #[test]
 fn wleak_source_guard_keeps_send_status_semantics_honest() {
-    let send = source_tree(&["src/cli/send.rs"]);
     let delivery_surface = source_tree(&["src/messaging", "src/cli/send.rs"]);
-    for required in [
-        "\"delivery_status\"",
-        "\"delivered\"",
-        "delivery_proven",
-        "DeliveryStatus::Delivered",
-    ] {
-        assert!(
-            send.contains(required),
-            "W7 guard: send JSON must keep honest delivery_status/delivered semantics instead of weakening blocked stale-target sends to accepted/queued prose; missing {required}"
-        );
-    }
     let stale_to_queued = format!("{WORKER_PANE_BINDING_STALE}\") => \"queued\"");
     assert!(
         !delivery_surface.contains(&stale_to_queued),

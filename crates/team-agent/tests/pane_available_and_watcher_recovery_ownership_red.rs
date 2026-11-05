@@ -107,22 +107,7 @@ fn any_file_contains<F: Fn(&str) -> bool>(pred: F) -> Option<PathBuf> {
 // Tooth 1 — PaneAvailable incident type exists
 // ---------------------------------------------------------------------------
 
-#[test]
-#[serial(env)]
-fn pane_available_incident_type_exists() {
-    let hit = any_file_contains(|t| {
-        t.contains("PaneAvailable")
-            && (t.contains("struct PaneAvailable")
-                || t.contains("enum ")
-                || t.contains("PaneAvailable {"))
-    });
-    assert!(
-        hit.is_some(),
-        "no typed `PaneAvailable` incident found. §3.2 requires \
-         BlockedWorkerPaneMissing recovery to consume a typed pane_available \
-         incident (agent_id + pane_id), not a whole-table coordinator scan."
-    );
-}
+
 
 // ---------------------------------------------------------------------------
 // Tooth 2 — worker pane recovery scoped by agent

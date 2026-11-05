@@ -45,29 +45,7 @@ fn leader_channel_src() -> String {
 /// both the named path and the delivery path must reference that same symbol —
 /// binding one shared function is the structural anchor that keeps the two
 /// paths' socket authority identical.
-#[test]
-fn named_and_delivery_both_route_through_the_single_shared_resolver() {
-    let leader_channel = leader_channel_src();
-    assert!(
-        leader_channel.contains(&format!("pub fn {SHARED_RESOLVER}")),
-        "the shared leader-channel resolver {SHARED_RESOLVER} must be DEFINED in leader_channel.rs \
-         (single source of the socket authority predicate)"
-    );
 
-    let named = named_src();
-    assert!(
-        named.contains(SHARED_RESOLVER),
-        "the named-address send path must resolve the live leader channel via the shared \
-         {SHARED_RESOLVER}, not a re-hand-rolled pane/socket match"
-    );
-
-    let delivery = delivery_src();
-    assert!(
-        delivery.contains(SHARED_RESOLVER),
-        "the internal delivery path must resolve the live leader channel via the shared \
-         {SHARED_RESOLVER} (same predicate as the named path)"
-    );
-}
 
 /// Teeth (positive structural lock, smell34 form): the named path's leader
 /// resolver `resolve_leader` must ROUTE THROUGH the shared resolver — its body

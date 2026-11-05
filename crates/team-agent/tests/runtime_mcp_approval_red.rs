@@ -477,9 +477,9 @@ fn worker_mcp_rpc_arguments_cannot_widen_team_scope_or_bypass_owner_gate() {
             ));
         }
     }
-    if !tools.contains("messaging::send_message") {
+    if !tools.contains("station::send::execute") || !tools.contains("Authority::Seat") {
         failures.push(
-            "C6/C13: MCP worker-recipient route must delegate to messaging::send_message so CLI/MCP owner gates stay identical; direct MessageStore writes bypass owner gates"
+            "C6/C13: MCP worker-recipient route must delegate to station::send::execute with Authority::Seat so captured scope stays authoritative"
                 .to_string(),
         );
     }

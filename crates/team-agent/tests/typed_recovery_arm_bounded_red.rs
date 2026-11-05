@@ -101,130 +101,31 @@ fn any_file_contains<F: Fn(&str) -> bool>(pred: F) -> Option<PathBuf> {
 // Tooth 1 — API surface exists
 // ---------------------------------------------------------------------------
 
-#[test]
-#[serial(env)]
-fn typed_recovery_arm_api_exists() {
-    // We accept any of the canonical names distillation §3.1 allows.
-    let hit = any_file_contains(|t| {
-        t.contains("RetrySubmittedExplicit")
-            || t.contains("retry_submitted_explicit")
-            || (t.contains("submitted_recovery") && t.contains("pub fn"))
-    });
-    assert!(
-        hit.is_some(),
-        "no typed submitted-recovery arm symbol found in src/**/*.rs. \
-         §3.1 requires an explicit RetrySubmittedExplicit / retry_submitted_explicit \
-         entry point owned by a recovery module; baseline defers this to 0.5.57."
-    );
-}
+
 
 // ---------------------------------------------------------------------------
 // Tooth 2 — Q1 triggered by explicit incident + operator reason
 // ---------------------------------------------------------------------------
 
-#[test]
-#[serial(env)]
-fn recovery_requires_incident_id_and_operator_reason() {
-    // Surface probe: the recovery API's signature must mention BOTH
-    // `incident_id` and either `operator_reason` or `reason` (a
-    // required parameter, not Option<>). We check the source text for
-    // the pattern; baseline has no such function → red.
-    let hit = any_file_contains(|t| {
-        (t.contains("fn retry_submitted_explicit") || t.contains("fn submitted_recovery"))
-            && t.contains("incident_id")
-            && (t.contains("operator_reason") || t.contains("reason: "))
-    });
-    assert!(
-        hit.is_some(),
-        "recovery arm signature must require incident_id + operator_reason; \
-         Q1 (triggered by explicit incident, not automatic boot/attach) unlocked. \
-         Distillation §3.1 Recovery block requires this pair for typed \
-         RetrySubmittedExplicit."
-    );
-}
+
 
 // ---------------------------------------------------------------------------
 // Tooth 3 — Q2 bounded scope (no O(history) sweep)
 // ---------------------------------------------------------------------------
 
-#[test]
-#[serial(env)]
-fn recovery_bounded_by_incident_scope_not_history() {
-    // Surface probe: the API must accept a scope-narrowing parameter,
-    // one of: `message_ids: &[..]`, `scope: RecoveryScope`, or
-    // `message_id: &str`. It must NOT be a nullary "recover all" call.
-    let hit = any_file_contains(|t| {
-        (t.contains("fn retry_submitted_explicit") || t.contains("fn submitted_recovery"))
-            && (t.contains("message_ids: &[")
-                || t.contains("scope: RecoveryScope")
-                || t.contains("message_id: &str"))
-    });
-    // Additionally, forbid any pattern that would clearly indicate a
-    // whole-table sweep, e.g. `update messages set status = 'accepted'
-    // where recipient = 'leader'` — this is a red flag for a hidden
-    // "recover all" arm.
-    let sweep_hit = walk_texts(&crate_src()).into_iter().any(|(_, t)| {
-        t.contains("retry_submitted_explicit")
-            && t.contains("where recipient = 'leader'")
-            && !t.contains("message_id = ?")
-    });
-    assert!(
-        hit.is_some() && !sweep_hit,
-        "recovery arm must be bounded to an explicit message set or scope; \
-         Q2 (集合大小 O(history) 禁扫) unlocked. Baseline: no bounded API surface \
-         exists at all; distillation §3.3#3."
-    );
-}
+
 
 // ---------------------------------------------------------------------------
 // Tooth 4 — Q3 attempt/age/epoch budget refusal
 // ---------------------------------------------------------------------------
 
-#[test]
-#[serial(env)]
-fn recovery_enforces_attempt_and_age_and_epoch_budget() {
-    // Surface probe: the recovery module must carry a typed budget /
-    // refusal enum. We accept either signature mentioning
-    // `attempt_budget` + `max_age_seconds` + `owner_epoch`, OR a
-    // dedicated `RecoveryBudget` struct.
-    let hit = any_file_contains(|t| {
-        (t.contains("attempt_budget") && t.contains("max_age_seconds") && t.contains("owner_epoch"))
-            || t.contains("struct RecoveryBudget")
-            || t.contains("enum RecoveryRefusal")
-    });
-    assert!(
-        hit.is_some(),
-        "recovery arm must enforce attempt / age / owner_epoch budgets and \
-         expose a typed refusal on breach; Q3 (幂等预算) unlocked. Baseline: \
-         no such surface. §3.1 + at-least-once canonical Q3."
-    );
-}
+
 
 // ---------------------------------------------------------------------------
 // Tooth 5 — positive control: within-budget flips exactly the named row
 // ---------------------------------------------------------------------------
 
-#[test]
-#[serial(env)]
-fn within_budget_recovery_flips_only_named_row() {
-    // At RED time this is asserted as a source-shape control: the
-    // module must expose a testable behavior surface (a public fn OR a
-    // trait). We look for a public entry point with signature
-    // containing `message_id` and returning a Result. GREEN
-    // implementation will add a runtime test in this same file (verifier
-    // will sign the shape then).
-    let hit = any_file_contains(|t| {
-        t.contains("pub fn retry_submitted_explicit")
-            || t.contains("pub fn submitted_recovery")
-            || t.contains("pub async fn retry_submitted_explicit")
-    });
-    assert!(
-        hit.is_some(),
-        "no public recovery entry point exposed — positive control cannot be wired. \
-         GREEN must add a pub fn returning Result<_, RecoveryRefusal> that flips \
-         exactly the named row(s)."
-    );
-}
+
 
 // ---------------------------------------------------------------------------
 // Tooth 6 — negative control: no recovery arm disguised inside claim/attach

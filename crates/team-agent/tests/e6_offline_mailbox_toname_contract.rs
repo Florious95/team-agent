@@ -139,14 +139,13 @@ fn e6_mailbox_paths_do_not_spawn_provider_or_worker_processes() {
     let offenders = provider_spawn_offenders(&[
         "src/cli/send.rs",
         "src/cli/named_address.rs",
-        "src/messaging/leader_receiver.rs",
-        "src/messaging/watchers.rs",
-        "src/messaging/results.rs",
+        "src/station/send.rs",
+        "src/inbox_store.rs",
     ]);
 
     assert!(
         offenders.is_empty(),
-        "E6 RED guard: offline mailbox is a durable queued row only; send/named_address/leader_receiver/watchers/results must not spawn codex/claude/copilot or worker/provider processes. Offenders: {offenders:#?}"
+        "E6 RED guard: mailbox is durable ingress only; send/named_address/station/inbox_store must not spawn codex/claude/copilot or worker/provider processes. Offenders: {offenders:#?}"
     );
 }
 

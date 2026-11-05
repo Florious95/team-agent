@@ -116,10 +116,6 @@ fn batch1_migration_sites_present_in_source() {
             "lifecycle/launch.rs",
             "lifecycle_worker_tmux_backend_for_selected_state",
         ),
-        (
-            "cli/send.rs",
-            "lifecycle_worker_tmux_backend_for_selected_state",
-        ),
     ];
     for (rel, needle) in sites {
         let body = composite_source::composite_source(&format!("src/{rel}"));
