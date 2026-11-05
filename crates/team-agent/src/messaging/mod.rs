@@ -77,8 +77,7 @@ pub mod selftest;
 pub mod send;
 pub mod trust;
 pub mod types;
-pub mod wait;
-pub mod watchers;
+pub pub mod watchers;
 
 // ── re-export: 保持 `crate::messaging::X` 与 test `super::X` 解析不变 ──────────
 pub use activity::{classify_agent_activity, detect_cross_worker_deadlocks, detect_idle_fallbacks};
@@ -119,7 +118,6 @@ pub use types::{
     TrustRetryPayload, WatcherNotice, WorkerRuntimeState, RESULT_DELIVERY_MAX_ATTEMPTS,
     SEND_RETRY_MAX_ATTEMPTS, TRUST_RETRY_BACKOFF_SECONDS, TRUST_RETRY_MAX_ATTEMPTS,
 };
-pub use wait::{wait_for_result, WaitResult};
 pub use watchers::{
     format_result_watcher_notification, requeue_after_claim_leader,
     requeue_delivery_exhausted_watchers, result_id_from_text, retry_result_deliveries,

@@ -357,9 +357,10 @@ pub fn cmd_status_for_team(args: &StatusArgs, team: Option<&str>) -> Result<CmdR
     )))
 }
 
-pub fn cmd_wait(args: &WaitArgs) -> Result<CmdResult, CliError> {
-    let result = messaging::wait_for_result(&args.workspace, &args.task_id)?;
-    Ok(CmdResult::from_json(result.to_json(), args.json))
+pub fn cmd_wait(_args: &WaitArgs) -> Result<CmdResult, CliError> {
+    Err(messaging::MessagingError::Validation(
+        "wait --task is retired; use team-agent inbox to read durable messages".into(),
+    ).into())
 }
 
 /// `cmd_approvals`(`commands.py:112`)。
