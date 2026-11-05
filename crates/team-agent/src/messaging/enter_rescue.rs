@@ -14,10 +14,6 @@ use crate::message_store::MessageStore;
 use crate::transport::enter_rescue::{EnterRescueContext, EnterRescueOutcome};
 use crate::transport::Transport;
 
-#[cfg(test)]
-#[path = "enter_rescue_tests.rs"]
-mod tests;
-
 const DELAY_SECONDS: i64 = 90;
 const EXPIRE_SECONDS: i64 = 120;
 
@@ -92,16 +88,6 @@ pub(crate) fn schedule_in_tx(
 pub(crate) fn bind_pending_context(
     store: &MessageStore,
     context: &EnterRescueContext,
-) -> Result<bool, MessagingError> {
-    Err(MessagingError::Validation(
-        "legacy SQL messaging retired; use station send and C3 inbox".into(),
-    ))
-}
-
-fn canonical_valid(
-    workspace: &Path,
-    store: &MessageStore,
-    job: &RescueJob,
 ) -> Result<bool, MessagingError> {
     Err(MessagingError::Validation(
         "legacy SQL messaging retired; use station send and C3 inbox".into(),

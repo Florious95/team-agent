@@ -646,17 +646,6 @@ pub mod lifecycle_port {
             .collect()
     }
 
-    fn socket_session_names_from_targets(
-        pane_targets: &[crate::transport::PaneInfo],
-    ) -> Vec<crate::transport::SessionName> {
-        let mut seen = std::collections::BTreeSet::new();
-        pane_targets
-            .iter()
-            .map(|pane| pane.session.clone())
-            .filter(|session| seen.insert(session.as_str().to_string()))
-            .collect()
-    }
-
     /// E12 下沉纯函数:bare-shutdown socket 拆除决策。
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub(crate) enum KillDecision {
@@ -3023,14 +3012,6 @@ pub mod lifecycle_port {
             self.pids.contains(&pid)
         }
 
-        fn contains_pgid(&self, pgid: u32) -> bool {
-            self.pgids.contains(&pgid)
-        }
-
-        fn contains_process(&self, process: &ProcessInfo) -> bool {
-            self.pids.contains(&process.pid)
-                || process.pgid.is_some_and(|pgid| self.pgids.contains(&pgid))
-        }
     }
 
     ///

@@ -252,10 +252,6 @@ impl TeamOrchestratorTools {
         Ok(SendOutcome::Direct(Self::station_result(value)?))
     }
 
-    pub(crate) fn refuse_scope_override(&self) -> ToolError {
-        self.rpc_scope_refused("unknown", None, None)
-    }
-
     pub(crate) fn validate_rpc_scope_args(
         &self,
         tool: &str,
@@ -844,29 +840,6 @@ fn requested_scope_arg(args: &Value) -> Option<String> {
         .filter(|s| !s.is_empty())
         .map(ToString::to_string)
         .or_else(|| args.get("workspace").map(|_| "workspace".to_string()))
-}
-
-fn push_report_warning(obj: &mut serde_json::Map<String, Value>, warning: Value) {
-    let Some(code) = warning.get("code").and_then(Value::as_str) else {
-        return;
-    };
-    let Some(field) = warning.get("field").and_then(Value::as_str) else {
-        return;
-    };
-    match obj.get_mut("warnings") {
-        Some(Value::Array(warnings)) => {
-            let exists = warnings.iter().any(|existing| {
-                existing.get("code").and_then(Value::as_str) == Some(code)
-                    && existing.get("field").and_then(Value::as_str) == Some(field)
-            });
-            if !exists {
-                warnings.push(warning);
-            }
-        }
-        _ => {
-            obj.insert("warnings".to_string(), Value::Array(vec![warning]));
-        }
-    }
 }
 
 fn scope_override_name(scope: Scope) -> Option<&'static str> {

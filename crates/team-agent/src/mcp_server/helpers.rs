@@ -288,14 +288,6 @@ pub(crate) fn current_reportable_message_for(
     None
 }
 
-pub(crate) fn latest_delivered_direct_message_for(
-    workspace: &Path,
-    agent_id: &str,
-    owner_team_id: Option<&str>,
-) -> Option<String> {
-    None
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DirectMessageAttribution {
     Reportable(String),
@@ -313,17 +305,6 @@ pub(crate) fn direct_message_attribution_for(
     owner_team_id: Option<&str>,
 ) -> DirectMessageAttribution {
     DirectMessageAttribution::None
-}
-
-fn current_turn_message_for(
-    workspace: &Path,
-    conn: &rusqlite::Connection,
-    agent_id: &str,
-    owner_team_id: Option<&str>,
-) -> Option<String> {
-    let state = report_scope_state(workspace, owner_team_id)?;
-    current_turn_id_from_state(&state, agent_id)
-        .filter(|message_id| message_is_reportable(conn, message_id, agent_id, owner_team_id))
 }
 
 fn report_scope_state(workspace: &Path, owner_team_id: Option<&str>) -> Option<Value> {
@@ -423,19 +404,6 @@ fn message_is_reportable(
     .is_some()
 }
 
-fn latest_reportable_message_from_db(
-    conn: &rusqlite::Connection,
-    agent_id: &str,
-    owner_team_id: Option<&str>,
-) -> Option<String> {
-    let candidate = latest_direct_message_from_db(conn, agent_id, owner_team_id)?;
-    if reportable_message_status(&candidate.status, candidate.error.as_deref()) {
-        Some(candidate.message_id)
-    } else {
-        None
-    }
-}
-
 struct DirectMessageCandidate {
     message_id: String,
     status: String,
@@ -481,8 +449,4 @@ fn latest_direct_message_from_db(
 fn reportable_message_status(status: &str, error: Option<&str>) -> bool {
     matches!(status, "delivered" | "submitted" | "injected" | "visible")
         && (status == "delivered" || error.is_none())
-}
-
-fn blocks_historical_fallback(status: &str) -> bool {
-    matches!(status, "failed" | "refused" | "blocked")
 }

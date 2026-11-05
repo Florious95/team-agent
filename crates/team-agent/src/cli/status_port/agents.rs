@@ -206,27 +206,6 @@ pub(super) fn stale_reason_for_agent(
     }
 }
 
-/// 0.5.41 Slice 3 (0.5.35 R4 regression guard): true when the agent
-/// row carries the canonical `worker_state=UNKNOWN` OR
-/// `activity.status=uncertain` observation the runtime classifier
-/// writes. Used to skip the coordinator-unavailable stale mark
-/// (see `enrich_agents`) so the pre-existing R4 rendering (UNKNOWN
-/// beats WORKING) is preserved.
-pub(super) fn agent_canonical_worker_state_is_unknown(
-    agent: &serde_json::Map<String, Value>,
-) -> bool {
-    let worker_state_unknown = agent
-        .get("worker_state")
-        .and_then(Value::as_str)
-        .is_some_and(|value| value.eq_ignore_ascii_case("UNKNOWN"));
-    let activity_uncertain = agent
-        .get("activity")
-        .and_then(|v| v.get("status"))
-        .and_then(Value::as_str)
-        .is_some_and(|value| value.eq_ignore_ascii_case("uncertain"));
-    worker_state_unknown || activity_uncertain
-}
-
 /// 0.5.41 Slice 3 (fault-invisibility-locate.md §9 RED4 live-provider
 /// guard): true when the agent row carries a `pane_current_command`
 /// that matches the agent's provider CLI. This is positive proof

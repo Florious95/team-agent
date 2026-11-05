@@ -106,34 +106,6 @@ pub(crate) fn remove_agent_with_transport(
 }
 
 /// ---
-/// purpose: 调用方已持有生命周期锁时的摘席入口，本函数不再取锁
-/// returns: 摘除结果
-/// errors: 同 remove_agent
-/// contract_id: lifecycle.remove_agent.entry
-/// ---
-pub(crate) fn remove_agent_with_transport_locked(
-    workspace: &Path,
-    agent_id: &AgentId,
-    from_spec: bool,
-    force: bool,
-    team: Option<&str>,
-    transport: &dyn crate::transport::Transport,
-) -> Result<RemoveAgentOutcome, LifecycleError> {
-    let paths = lifecycle_paths(workspace, team)?;
-    let canonical_team = paths.canonical_team(team).map(str::to_string);
-    let team = canonical_team.as_deref();
-    remove_agent_at_paths(
-        &paths.run_workspace,
-        &paths.spec_workspace,
-        agent_id,
-        from_spec,
-        force,
-        team,
-        transport,
-    )
-}
-
-/// ---
 /// purpose: 只做前置判定，给出这次摘席需要哪些确认标志
 /// returns: 标志要求；不做任何摘除动作
 /// errors: 选不到 team 或席位解析失败时返回 LifecycleError

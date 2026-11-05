@@ -39,17 +39,6 @@ pub(crate) fn get_path_u64(value: &Value, path: &[&str]) -> Option<u64> {
     cur.as_u64()
 }
 
-pub(crate) fn read_rollout_text(path: Option<&RolloutPath>) -> Result<String, LeaderError> {
-    match path {
-        Some(p) => match std::fs::read_to_string(p.as_path()) {
-            Ok(text) => Ok(text),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-            Err(e) => Err(LeaderError::Io(e)),
-        },
-        None => Ok(String::new()),
-    }
-}
-
 pub(crate) fn resolve_workspace_for_hash(workspace: &Path) -> PathBuf {
     match workspace.canonicalize() {
         Ok(path) => path,

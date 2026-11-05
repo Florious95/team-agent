@@ -35,13 +35,3 @@ pub fn detect_stuck_agents(
 ) -> Result<Vec<String>, MessagingError> {
     Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
 }
-
-fn output_is_stale(last_output_at: &str, timeout_seconds: i64) -> bool {
-    let Ok(ts) = chrono::DateTime::parse_from_rfc3339(last_output_at) else {
-        return false;
-    };
-    chrono::Utc::now()
-        .signed_duration_since(ts.with_timezone(&chrono::Utc))
-        .num_seconds()
-        >= timeout_seconds
-}

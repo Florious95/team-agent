@@ -178,21 +178,6 @@ fn leader_record_field<'a>(state: &'a Value, field: &str) -> Option<&'a Value> {
         .or_else(|| receiver_or_owner_field(state, "team_owner", field))
 }
 
-fn leader_receiver_record(state: &Value) -> Option<&Value> {
-    state.get("leader_receiver").or_else(|| {
-        let active = state.get("active_team_key").and_then(Value::as_str)?;
-        state
-            .get("teams")
-            .and_then(Value::as_object)
-            .and_then(|teams| teams.get(active))
-            .and_then(|team| team.get("leader_receiver"))
-    })
-}
-
-fn owner_epoch_i64(state: &Value) -> Option<i64> {
-    owner_epoch(state).and_then(|epoch| i64::try_from(epoch).ok())
-}
-
 fn leader_session_uuid(state: &Value) -> Option<&str> {
     leader_record_field(state, "leader_session_uuid").and_then(Value::as_str)
 }
@@ -236,23 +221,6 @@ fn leader_tmux_socket(state: &Value) -> Option<&str> {
         .and_then(Value::as_str)
         .filter(|socket| !socket.is_empty())
         .filter(|socket| std::path::Path::new(socket).is_absolute())
-}
-
-fn message_already_delivered(
-    store: &MessageStore,
-    message_id: &str,
-) -> Result<bool, MessagingError> {
-    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
-}
-
-fn render_fallback_pane_message(content: &str, message_id: &str, primary_error: &str) -> String {
-    format!(
-        "Team Agent fallback delivery\n\
-         delivered_via=fallback_pane\n\
-         primary_error: {primary_error}\n\n\
-         {content}\n\n\
-         [team-agent-token:{message_id}]"
-    )
 }
 
 /// E6 (0.5.9 offline-mailbox-toname-design §6.3): enqueue a leader-bound message

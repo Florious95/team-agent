@@ -507,19 +507,6 @@ fn send_signal(pid: Pid, signal: libc::c_int) -> bool {
     unsafe { libc::kill(pid_t, signal) == 0 }
 }
 
-fn wait_until_not_running(pid: Pid, timeout: Duration) -> bool {
-    let start = std::time::Instant::now();
-    loop {
-        if pid_is_running(pid).ok() != Some(true) {
-            return true;
-        }
-        if start.elapsed() >= timeout {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-}
-
 // ===========================================================================
 // metadata 身份原语(metadata.py)—— 自由函数面
 // ===========================================================================

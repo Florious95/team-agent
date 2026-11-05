@@ -747,34 +747,6 @@ fn pid_process_check(label: &str, pid: Pid) -> ProcessCheck {
     }
 }
 
-fn command_process_check(provider: crate::model::enums::Provider, command: &str) -> ProcessCheck {
-    if crate::leader::command_matches_provider(provider, command) {
-        process_check(ProcessLiveness::Alive, format!("current_command:{command}"))
-    } else {
-        process_check(
-            ProcessLiveness::Dead,
-            format!("provider_not_foreground:{command}"),
-        )
-    }
-}
-
-fn pane_command_process_check(
-    provider: crate::model::enums::Provider,
-    pane: &crate::transport::PaneInfo,
-    command: &str,
-) -> ProcessCheck {
-    if crate::leader::attribute_pane_provider(pane)
-        .is_some_and(|candidate| crate::leader::provider_matches(candidate, provider))
-    {
-        process_check(ProcessLiveness::Alive, format!("current_command:{command}"))
-    } else {
-        process_check(
-            ProcessLiveness::Dead,
-            format!("provider_not_foreground:{command}"),
-        )
-    }
-}
-
 /// 0.5.41 Slice 4 (fault-invisibility-locate.md §5 point 3 / §6.4):
 /// after the 0.5.39 worker wrapper landed, a pane whose current command
 /// is a shell + capture-tail contains the worker exit marker is POSITIVE

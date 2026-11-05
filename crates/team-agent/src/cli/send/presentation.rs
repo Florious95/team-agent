@@ -242,14 +242,6 @@ pub(super) fn send_human_output(value: &Value) -> String {
     }
 }
 
-pub(super) fn send_human_field(value: &Value, key: &str) -> String {
-    let rendered = value
-        .get(key)
-        .map(send_human_value)
-        .unwrap_or_else(|| "None".to_string());
-    format!("{key}: {rendered}")
-}
-
 pub(super) fn send_human_target(value: &Value) -> String {
     value
         .get("agent_id")
@@ -259,19 +251,6 @@ pub(super) fn send_human_target(value: &Value) -> String {
         })
         .map(str::to_string)
         .unwrap_or_else(|| "the recipient".to_string())
-}
-
-pub(super) fn send_human_status(value: &Value) -> String {
-    value
-        .get("status")
-        .map(send_human_value)
-        .unwrap_or_else(|| {
-            if value.get("ok").and_then(Value::as_bool) == Some(true) {
-                "delivered".to_string()
-            } else {
-                "failed".to_string()
-            }
-        })
 }
 
 pub(super) fn send_human_value(value: &Value) -> String {

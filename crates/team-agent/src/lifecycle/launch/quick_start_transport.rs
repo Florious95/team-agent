@@ -254,20 +254,6 @@ pub(super) fn attach_commands_for_runtime_windows<'a>(
 }
 
 /// ---
-/// purpose: 由本次起的席位推出窗口名
-/// returns: 排序去重后的窗口名，按席位名分配独立窗口
-/// ---
-pub(super) fn started_attach_window_names(started: &[StartedAgent]) -> Vec<String> {
-    let mut windows = started
-        .iter()
-        .map(|started| started.agent_id.as_str().to_string())
-        .collect::<Vec<_>>();
-    windows.sort();
-    windows.dedup();
-    windows
-}
-
-/// ---
 /// purpose: 由 state 推出指定席位的窗口名
 /// returns: 每个席位取 layout_window 再取 window，都没有时用 agent id；托管 leader 时追加 leader 窗口
 /// ---

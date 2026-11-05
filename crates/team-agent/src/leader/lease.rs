@@ -468,22 +468,6 @@ fn state_records_pane_endpoint(state: &Value, pane_id: &str, endpoint: &str) -> 
             })
 }
 
-fn attach_window_failure_value(
-    counts: crate::message_store::BlockedLeaderRequeueCounts,
-    team_id: &TeamKey,
-    pane_id: &PaneId,
-) -> Option<Value> {
-    (counts.blocked_leader_unbound > 0).then(|| {
-        json!({
-            "team_id": team_id.as_str(),
-            "pane_id": pane_id.as_str(),
-            "reason": "leader_not_attached",
-            "count": counts.blocked_leader_unbound,
-            "status": "requeued_pending_physical_retry",
-        })
-    })
-}
-
 /// R8 D4 (decoupled for offline byte-lock — c-lite): build the `leader_receiver.requeued_exhausted_watchers`
 /// event payload from the requeued notices, independent of the real-tmux attach flow.
 /// golden (leader/__init__.py:39-44): EXACTLY `{watcher_ids, count, trigger:"attach_leader"}`.
@@ -528,33 +512,6 @@ pub(crate) fn attach_leader_to_state(
         source,
         require_current,
         None,
-        None,
-        None,
-        None,
-    )
-    .map_err(AttachLeaderError::into_error)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn attach_leader_to_state_with_target(
-    workspace: &Path,
-    state: &mut Value,
-    pane: Option<&PaneId>,
-    provider: Provider,
-    event_log: &crate::event_log::EventLog,
-    source: LeaseSource,
-    require_current: bool,
-    caller_target: Option<&PaneInfo>,
-) -> Result<(LeaderReceiver, Value), LeaderError> {
-    attach_leader_to_state_with_target_and_controls(
-        workspace,
-        state,
-        pane,
-        provider,
-        event_log,
-        source,
-        require_current,
-        caller_target,
         None,
         None,
         None,

@@ -69,60 +69,9 @@ fn collect_scoped(
     Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
 }
 
-fn resolve_owner_team_for_read(
-    workspace: &Path,
-    requested: &str,
-    event_log: Option<&EventLog>,
-) -> Result<String, MessagingError> {
-    let state = crate::state::persist::load_runtime_state(workspace)?;
-    match crate::state::projection::resolve_owner_team_id(&state, requested) {
-        OwnerTeamResolution::Canonical(canonical) => Ok(canonical),
-        OwnerTeamResolution::LegacyAlias {
-            requested,
-            canonical,
-        } => {
-            crate::messaging::delivery::normalize_owner_team_id_rows(
-                workspace, &requested, &canonical, None, event_log,
-            )?;
-            Ok(canonical)
-        }
-        OwnerTeamResolution::Unresolved { requested } => Err(MessagingError::Routing(format!(
-            "owner_team_unresolved: {requested}"
-        ))),
-        OwnerTeamResolution::Ambiguous { requested, matches } => {
-            Err(MessagingError::Routing(format!(
-                "owner_team_ambiguous: {requested} matches {}",
-                matches.join(",")
-            )))
-        }
-    }
-}
-
 struct CollectPaths {
     run_workspace: PathBuf,
     spec_workspace: PathBuf,
-}
-
-fn collect_paths(workspace: &Path) -> Result<CollectPaths, MessagingError> {
-    if collect_input_has_no_local_team_context(workspace) {
-        return Ok(CollectPaths {
-            run_workspace: workspace.to_path_buf(),
-            spec_workspace: workspace.to_path_buf(),
-        });
-    }
-    let run_workspace = crate::model::paths::canonical_run_workspace(workspace)
-        .map_err(|e| MessagingError::Routing(e.to_string()))?;
-    let spec_workspace = if workspace.join("team.spec.yaml").exists() {
-        workspace.to_path_buf()
-    } else if run_workspace.join("team.spec.yaml").exists() {
-        run_workspace.clone()
-    } else {
-        state_spec_workspace(&run_workspace).unwrap_or_else(|| run_workspace.clone())
-    };
-    Ok(CollectPaths {
-        run_workspace,
-        spec_workspace,
-    })
 }
 
 fn collect_input_has_no_local_team_context(workspace: &Path) -> bool {
@@ -150,62 +99,6 @@ fn state_spec_workspace_from_value(state: &serde_json::Value) -> Option<PathBuf>
         .get("team_dir")
         .and_then(serde_json::Value::as_str)
         .map(PathBuf::from)
-}
-
-fn record_invalid_result(
-    conn: &rusqlite::Connection,
-    invalid_results: &mut Vec<serde_json::Value>,
-    row: &StoredResult,
-    result_file: Option<&Path>,
-    error: &str,
-) -> Result<(), MessagingError> {
-    conn.execute(
-        "update results set status = 'invalid' where result_id = ?1",
-        params![row.result_id.as_str()],
-    )?;
-    invalid_results.push(serde_json::json!({
-        "result_id": row.result_id,
-        "task_id": row.task_id,
-        "agent_id": row.agent_id,
-        "path": result_file.map(|p| p.to_string_lossy().to_string()),
-        "error": error,
-    }));
-    Ok(())
-}
-
-fn ingest_result_file(
-    conn: &rusqlite::Connection,
-    path: &Path,
-    owner_team_id: Option<&str>,
-) -> Result<(), MessagingError> {
-    let raw = std::fs::read_to_string(path)?;
-    let mut envelope: serde_json::Value = serde_json::from_str(&raw)?;
-    validate_result_envelope(&envelope)?;
-    let result_id = envelope
-        .get("result_id")
-        .and_then(serde_json::Value::as_str)
-        .map_or_else(next_result_id, ToString::to_string);
-    if envelope.get("result_id").is_none() {
-        if let Some(obj) = envelope.as_object_mut() {
-            obj.insert(
-                "result_id".to_string(),
-                serde_json::Value::String(result_id.clone()),
-            );
-        }
-    }
-    let task_id = required_str(&envelope, "task_id")?;
-    let agent_id = required_str(&envelope, "agent_id")?;
-    let status = required_str(&envelope, "status")?;
-    insert_result_if_absent(
-        conn,
-        &result_id,
-        task_id,
-        agent_id,
-        &envelope.to_string(),
-        status,
-        owner_team_id,
-    )?;
-    Ok(())
 }
 
 struct StoredResult {
@@ -392,33 +285,6 @@ fn report_result_for_owner_team_inner(
     Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
 }
 
-fn report_owner_state(state: &serde_json::Value, owner_team: &str) -> serde_json::Value {
-    let mut state = match crate::state::projection::resolve_owner_team_id(state, owner_team)
-        .canonical_key()
-    {
-        Some(team) => crate::state::projection::project_top_level_view(state, team),
-        None => state.clone(),
-    };
-    if let Some(obj) = state.as_object_mut() {
-        obj.insert(
-            "active_team_key".to_string(),
-            serde_json::Value::String(owner_team.to_string()),
-        );
-    }
-    state
-}
-
-fn leader_result_presentation(task_id: &str) -> super::presentation::PresentationDecision {
-    super::presentation::decide_presentation(
-        &super::presentation::PresentationRequest {
-            sink: super::presentation::PresentationSink::Leader,
-            class: super::presentation::PresentationClass::StageResult,
-            case_id: Some(task_id.to_string()),
-        },
-        super::presentation::PresentationSource::ReportResult,
-    )
-}
-
 fn format_report_result_leader_summary(
     result_id: &str,
     task_id: &str,
@@ -431,99 +297,6 @@ fn format_report_result_leader_summary(
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
     format!("Task {task_id} reported {status} from {agent_id}: {summary}; Result id: {result_id}")
-}
-
-fn auto_finalize_result(
-    workspace: &Path,
-    conn: &rusqlite::Connection,
-    state: &serde_json::Value,
-    owner_team: &str,
-    result_id: &str,
-    task_id: &str,
-    agent_id: &str,
-) -> Result<Option<&'static str>, MessagingError> {
-    let message_scoped = is_message_scoped_result(conn, task_id, agent_id, Some(owner_team))?;
-    let scope = if message_scoped { "message" } else { "task" };
-    let projected_task_id = if message_scoped {
-        crate::mcp_server::latest_task_for_assignee(workspace, agent_id, Some(owner_team))
-    } else if task_exists_for_owner(state, owner_team, task_id) {
-        Some(task_id.to_string())
-    } else {
-        None
-    };
-    if let Some(projected_task_id) = projected_task_id {
-        crate::state::repository::StateRepository::new(workspace).commit(
-            crate::state::repository::StateWriteIntent::ResultCollection {
-                owner_team_id: Some(owner_team),
-            },
-            |latest| mark_task_done(latest, &projected_task_id, result_id),
-        )?;
-    }
-    let finalized = conn.execute(
-        "update results set status = 'collected' where result_id = ?1 and owner_team_id = ?2 and status not in ('collected', 'invalid')",
-        params![result_id, owner_team],
-    )?;
-    if finalized == 0 {
-        return Ok(None);
-    }
-    EventLog::new(workspace).write(
-        "collect.result",
-        serde_json::json!({
-            "result_id": result_id,
-            "task_id": task_id,
-            "agent_id": agent_id,
-            "scope": scope,
-        }),
-    )?;
-    Ok(Some(scope))
-}
-
-fn task_result_route(
-    state: &serde_json::Value,
-    owner_team: &str,
-    task_id: &str,
-) -> Result<(ResultRoute, bool), MessagingError> {
-    let scoped_tasks = state
-        .get("teams")
-        .and_then(|teams| teams.get(owner_team))
-        .and_then(|team| team.get("tasks"))
-        .and_then(serde_json::Value::as_array);
-    let top_level_tasks = state.get("tasks").and_then(serde_json::Value::as_array);
-    let task = scoped_tasks
-        .into_iter()
-        .flatten()
-        .chain(top_level_tasks.into_iter().flatten())
-        .find(|task| task.get("id").and_then(serde_json::Value::as_str) == Some(task_id));
-    let Some(route) = task.and_then(|task| task.get("result_route")) else {
-        return Ok((ResultRoute::default(), false));
-    };
-    let route = route.as_str().ok_or_else(|| {
-        MessagingError::Validation(format!(
-            "task {task_id} has non-string result_route and cannot accept results"
-        ))
-    })?;
-    ResultRoute::parse(route)
-        .map(|route| (route, true))
-        .ok_or_else(|| {
-            MessagingError::Validation(format!(
-                "task {task_id} has unknown result_route {route:?} and cannot accept results"
-            ))
-        })
-}
-
-fn copy_report_attribution_fields(
-    envelope: &serde_json::Value,
-    out: &mut serde_json::Map<String, serde_json::Value>,
-) {
-    for key in [
-        "attributed_message_id",
-        "attribution_scope",
-        "task_id_source",
-    ] {
-        if let Some(value) = envelope.get(key) {
-            out.insert(key.to_string(), value.clone());
-        }
-    }
 }
 
 fn insert_result_if_absent(
@@ -728,9 +501,6 @@ fn format_report_result_next_actions(envelope: &serde_json::Value) -> Option<Str
         Some(format!("Next actions: {}", parts.join(", ")))
     }
 }
-
-#[cfg(test)]
-mod collection_tests;
 
 #[cfg(test)]
 mod tests {

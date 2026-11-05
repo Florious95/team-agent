@@ -200,48 +200,6 @@ mod unix {
         Ok(dir.join(format!("{task}-{watcher_id}.fifo")))
     }
 
-    fn random_suffix() -> Result<String, MessagingError> {
-        let mut bytes = [0_u8; 16];
-        File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-        Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
-    }
-
-    fn create_fifo(path: &Path) -> Result<FifoEndpoints, MessagingError> {
-        let c_path = CString::new(path.as_os_str().as_encoded_bytes())
-            .map_err(|_| MessagingError::Validation("FIFO path contains a NUL byte".to_string()))?;
-        if unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) } != 0 {
-            return Err(io::Error::last_os_error().into());
-        }
-        let reader = match OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(path)
-        {
-            Ok(reader) => reader,
-            Err(error) => {
-                let _ = std::fs::remove_file(path);
-                return Err(error.into());
-            }
-        };
-        let keepalive_writer = match OpenOptions::new()
-            .write(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(path)
-        {
-            Ok(writer) => writer,
-            Err(error) => {
-                let _ = std::fs::remove_file(path);
-                return Err(error.into());
-            }
-        };
-        set_blocking(reader.as_raw_fd())?;
-        Ok(FifoEndpoints {
-            path: path.to_path_buf(),
-            reader,
-            _keepalive_writer: keepalive_writer,
-        })
-    }
-
     fn set_blocking(fd: RawFd) -> io::Result<()> {
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
         if flags < 0 {
@@ -251,46 +209,6 @@ mod unix {
             return Err(io::Error::last_os_error());
         }
         Ok(())
-    }
-
-    fn read_wake_line(fd: RawFd) -> Result<String, MessagingError> {
-        let mut line = Vec::new();
-        loop {
-            if let Some(signal) = caught_signal() {
-                return Err(interrupted(signal).into());
-            }
-            let mut bytes = [0_u8; 256];
-            let count =
-                unsafe { libc::read(fd, bytes.as_mut_ptr().cast::<libc::c_void>(), bytes.len()) };
-            if count > 0 {
-                line.extend_from_slice(&bytes[..count as usize]);
-                if let Some(newline) = line.iter().position(|byte| *byte == b'\n') {
-                    line.truncate(newline);
-                    let result_id = String::from_utf8(line).map_err(|error| {
-                        MessagingError::Validation(format!("invalid FIFO wake line: {error}"))
-                    })?;
-                    let result_id = result_id.trim().to_string();
-                    if result_id.is_empty() {
-                        return Err(MessagingError::Validation(
-                            "FIFO wake line did not contain a result id".to_string(),
-                        ));
-                    }
-                    return Ok(result_id);
-                }
-                continue;
-            }
-            if count == 0 {
-                continue;
-            }
-            let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::Interrupted {
-                if let Some(signal) = caught_signal() {
-                    return Err(interrupted(signal).into());
-                }
-                continue;
-            }
-            return Err(error.into());
-        }
     }
 
     fn caught_signal() -> Option<i32> {

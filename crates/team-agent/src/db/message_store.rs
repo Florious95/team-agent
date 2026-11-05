@@ -335,18 +335,6 @@ impl MessageStore {
         Err(MessageStoreError::Retired)
     }
 
-    /// Release only an owned claim that has performed no input. Readiness
-    /// waiting must remain retryable without consuming the input-attempt budget.
-    /// A changed attempt, status, or error means this caller no longer owns it.
-    pub(crate) fn release_delivery_before_input(
-        &self,
-        message_id: &str,
-        attempt: u32,
-        reason: &str,
-    ) -> Result<bool, MessageStoreError> {
-        Err(MessageStoreError::Retired)
-    }
-
     /// Read inbox rows through [`Self::inbox`]; recovery transitions below are
     /// separate repository owners and are not claim eligibility.
     pub fn requeue_blocked_leader_messages(
@@ -410,27 +398,6 @@ impl MessageStore {
     }
 }
 
-fn row_to_message_value(row: &rusqlite::Row<'_>) -> rusqlite::Result<serde_json::Value> {
-    Ok(serde_json::json!({
-        "message_id": row.get::<_, String>(0)?,
-        "owner_team_id": row.get::<_, Option<String>>(1)?,
-        "task_id": row.get::<_, Option<String>>(2)?,
-        "sender": row.get::<_, Option<String>>(3)?,
-        "recipient": row.get::<_, Option<String>>(4)?,
-        "reply_to": row.get::<_, Option<String>>(5)?,
-        "requires_ack": row.get::<_, Option<i64>>(6)?,
-        "status": row.get::<_, Option<String>>(7)?,
-        "content": row.get::<_, Option<String>>(8)?,
-        "artifact_refs": row.get::<_, Option<String>>(9)?,
-        "created_at": row.get::<_, Option<String>>(10)?,
-        "updated_at": row.get::<_, Option<String>>(11)?,
-        "delivered_at": row.get::<_, Option<String>>(12)?,
-        "acknowledged_at": row.get::<_, Option<String>>(13)?,
-        "error": row.get::<_, Option<String>>(14)?,
-        "delivery_attempts": row.get::<_, Option<i64>>(15)?,
-    }))
-}
-
 /// `result_summary_from_row`(`status/queries.py:92-106`):解析 result 行的 envelope,
 /// 产出 status/watch 共用的 result 摘要;envelope 坏/非对象 → `None`。
 pub fn result_summary_from_row(row: &serde_json::Value) -> Option<serde_json::Value> {
@@ -465,20 +432,6 @@ pub fn result_summary_from_row(row: &serde_json::Value) -> Option<serde_json::Va
 
 fn now_ts() -> String {
     chrono::Utc::now().to_rfc3339()
-}
-
-fn next_message_id() -> String {
-    let nanos = match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(duration) => {
-            let low = duration.as_nanos() & u128::from(u64::MAX);
-            u64::try_from(low).unwrap_or(0)
-        }
-        Err(_) => 0,
-    };
-    let counter = MESSAGE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let pid = u64::from(std::process::id());
-    let value = nanos ^ counter.rotate_left(17) ^ pid.rotate_left(32);
-    format!("msg_{:012x}", value & 0xFFFF_FFFF_FFFF)
 }
 
 #[cfg(test)]

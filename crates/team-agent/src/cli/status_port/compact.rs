@@ -187,30 +187,6 @@ pub(super) fn compact_agent_state(_agent_id: &str, agent: &Value) -> Value {
     Value::Object(out)
 }
 
-pub(super) fn compact_tasks(value: Option<&Value>) -> Value {
-    let Some(Value::Array(tasks)) = value else {
-        return json!([]);
-    };
-    Value::Array(
-        tasks
-            .iter()
-            .map(|task| {
-                compact_object(
-                    Some(task),
-                    &[
-                        "id",
-                        "title",
-                        "status",
-                        "assignee",
-                        "type",
-                        "accepted_result_id",
-                    ],
-                )
-            })
-            .collect(),
-    )
-}
-
 pub(super) fn compact_object(value: Option<&Value>, keys: &[&str]) -> Value {
     let Some(Value::Object(input)) = value else {
         return json!({});
@@ -222,19 +198,4 @@ pub(super) fn compact_object(value: Option<&Value>, keys: &[&str]) -> Value {
         }
     }
     Value::Object(out)
-}
-
-pub(super) fn take_array(value: Option<&Value>, limit: usize) -> Value {
-    let Some(Value::Array(items)) = value else {
-        return json!([]);
-    };
-    Value::Array(items.iter().take(limit).cloned().collect())
-}
-
-pub(super) fn take_array_tail(value: Option<&Value>, limit: usize) -> Value {
-    let Some(Value::Array(items)) = value else {
-        return json!([]);
-    };
-    let start = items.len().saturating_sub(limit);
-    Value::Array(items.iter().skip(start).cloned().collect())
 }

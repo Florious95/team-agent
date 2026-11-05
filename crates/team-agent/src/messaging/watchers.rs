@@ -38,47 +38,6 @@ pub(crate) fn notify_result_watchers(
     Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
 }
 
-fn watcher_matches(
-    watcher: &serde_json::Value,
-    result_task: Option<&str>,
-    result_agent: Option<&str>,
-) -> bool {
-    let task_matches = watcher
-        .get("task_id")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .is_none_or(|task| Some(task) == result_task);
-    let agent_matches = watcher
-        .get("agent_id")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .is_none_or(|agent| Some(agent) == result_agent);
-    task_matches && agent_matches
-}
-
-pub(crate) fn notify_fifo_result_watchers(
-    conn: &rusqlite::Connection,
-    event_log: &EventLog,
-    task_id: &str,
-    result_id: &str,
-) -> Result<(), MessagingError> {
-    let mut stmt = conn.prepare(
-        "select watcher_id, recipient from result_watchers
-         where task_id = ?1 and status = 'pending' and recipient is not null
-         order by created_at, watcher_id",
-    )?;
-    let rows = stmt
-        .query_map(params![task_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    drop(stmt);
-    for (watcher_id, recipient) in rows {
-        let _ = notify_fifo_waiter(conn, event_log, &watcher_id, task_id, result_id, &recipient)?;
-    }
-    Ok(())
-}
-
 #[cfg(unix)]
 fn notify_fifo_waiter(
     conn: &rusqlite::Connection,
@@ -178,151 +137,6 @@ fn notify_fifo_waiter(
     })
 }
 
-fn deliver_primary_watcher(
-    workspace: &Path,
-    conn: &rusqlite::Connection,
-    store: &MessageStore,
-    event_log: &EventLog,
-    watcher: &serde_json::Value,
-    result: &serde_json::Value,
-    result_id: Option<&str>,
-    result_task: Option<&str>,
-) -> Result<WatcherNotice, MessagingError> {
-    let watcher_id = watcher
-        .get("watcher_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    let Some(result_id) = result_id else {
-        return update_watcher_failure(
-            conn,
-            event_log,
-            watcher_id,
-            None,
-            "notify_failed",
-            "missing_result_id",
-        );
-    };
-    if let Some(recipient) = watcher
-        .get("recipient")
-        .and_then(|value| value.as_str())
-        .filter(|recipient| Path::new(recipient).is_absolute())
-    {
-        return notify_fifo_waiter(
-            conn,
-            event_log,
-            watcher_id,
-            result_task.unwrap_or_default(),
-            result_id,
-            recipient,
-        );
-    }
-    if let Some(existing) = delivered_result_message(
-        store,
-        result_id,
-        result_task.map(TaskId::new).as_ref(),
-        watcher
-            .get("owner_team_id")
-            .and_then(|v| v.as_str())
-            .map(TeamKey::new)
-            .as_ref(),
-    )? {
-        let message_id = existing
-            .get("message_id")
-            .and_then(|v| v.as_str())
-            .map(ToString::to_string);
-        mark_watcher_notified(
-            conn,
-            event_log,
-            watcher_id,
-            result_id,
-            message_id.as_deref(),
-        )?;
-        return Ok(WatcherNotice {
-            watcher_id: watcher_id.to_string(),
-            result_id: Some(result_id.to_string()),
-            ok: true,
-            status: Some("notified".to_string()),
-            notified_message_id: message_id,
-            primary_watcher_id: None,
-            prior_state: None,
-            error: None,
-        });
-    }
-    let attempts = result_delivery_attempts(event_log, watcher_id, result_id)?;
-    if attempts >= u64::from(RESULT_DELIVERY_MAX_ATTEMPTS) {
-        return update_watcher_failure(
-            conn,
-            event_log,
-            watcher_id,
-            Some(result_id),
-            "delivery_exhausted",
-            "delivery_exhausted",
-        );
-    }
-    let content = format_result_watcher_notification(result);
-    let super::PersistResolution::Persisted(persisted) = super::persist::persist_internal_send(
-        workspace,
-        super::InternalSendKind::Watcher,
-        watcher.get("owner_team_id").and_then(|v| v.as_str()),
-        result_task,
-        watcher
-            .get("leader_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("team-agent"),
-        watcher
-            .get("recipient")
-            .and_then(|value| value.as_str())
-            .unwrap_or("leader"),
-        &content,
-        None,
-        false,
-        None,
-        super::InitialDisposition::Accepted,
-        None,
-    )?
-    else {
-        unreachable!("watcher notifications do not accept caller-supplied ids")
-    };
-    let message_id = persisted.message_id;
-    let claim = store.claim_leader_notification_delivery(NotificationClaimParams {
-        result_id,
-        owner_team_id: watcher.get("owner_team_id").and_then(|v| v.as_str()),
-        owner_epoch: None,
-        leader_session_uuid: None,
-        proposed_message_id: &message_id,
-        envelope_hash: "",
-        pane_id: None,
-    })?;
-    if claim.status == "claimed_by_you" {
-        mark_watcher_notified(
-            conn,
-            event_log,
-            watcher_id,
-            result_id,
-            Some(&claim.notified_message_id),
-        )?;
-        Ok(WatcherNotice {
-            watcher_id: watcher_id.to_string(),
-            result_id: Some(result_id.to_string()),
-            ok: true,
-            status: Some("notified".to_string()),
-            notified_message_id: Some(claim.notified_message_id),
-            primary_watcher_id: None,
-            prior_state: None,
-            error: None,
-        })
-    } else {
-        update_watcher_failure(
-            conn,
-            event_log,
-            watcher_id,
-            Some(result_id),
-            "notify_failed",
-            "already_notified_by",
-        )
-    }
-}
-
 fn mark_watcher_notified(
     conn: &rusqlite::Connection,
     event_log: &EventLog,
@@ -403,25 +217,6 @@ pub fn retry_result_deliveries(
     event_log: &EventLog,
 ) -> Result<Vec<WatcherNotice>, MessagingError> {
     Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
-}
-
-/// `_result_entry_from_row`(`result_delivery.py:365-377`)。
-fn result_entry_from_row(
-    result_id: &str,
-    envelope: &str,
-    created_at: Option<&str>,
-) -> Result<serde_json::Value, MessagingError> {
-    let envelope: serde_json::Value = serde_json::from_str(envelope)?;
-    Ok(serde_json::json!({
-        "result_id": result_id,
-        "task_id": envelope.get("task_id").cloned().unwrap_or(serde_json::Value::Null),
-        "agent_id": envelope.get("agent_id").cloned().unwrap_or(serde_json::Value::Null),
-        "status": envelope.get("status").cloned().unwrap_or(serde_json::Value::Null),
-        "summary": envelope.get("summary").cloned().unwrap_or(serde_json::Value::Null),
-        "tests": envelope.get("tests").cloned().unwrap_or_else(|| serde_json::json!([])),
-        "created_at": created_at,
-        "scope": "task",
-    }))
 }
 
 /// `requeue_after_claim_leader` (`result_delivery.py:428`):Gap 26 —— 认领新 leader pane 后把
@@ -563,10 +358,6 @@ pub(crate) fn delivered_result_message(
     owner_team_id: Option<&TeamKey>,
 ) -> Result<Option<serde_json::Value>, MessagingError> {
     Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
-}
-
-fn message_content_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, String)> {
-    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
 }
 
 /// `result_id_from_text` (`result_delivery.py:415`):解析通知文案的 `Result id: <id>` 行做内容级

@@ -1807,30 +1807,6 @@ fn token_visible_in_capture(
     }
 }
 
-/// U1 #7 / E31: wait briefly for the just-pasted token marker before submitting.
-/// `Ok(None)` for non-token payloads (nothing to check). `Ok(Some(false))` means the
-/// paste did not become visible before the Python-parity fallback delay.
-fn pre_submit_token_visible(
-    backend: &TmuxBackend,
-    target: &Target,
-    payload: &InjectPayload,
-) -> Result<Option<bool>, TransportError> {
-    if payload_token_marker(payload).is_none() {
-        return Ok(None);
-    }
-    for attempt in 0..PASTED_CONTENT_APPEAR_POLLS {
-        if let Some(true) = token_visible_in_capture(backend, target, payload)? {
-            return Ok(Some(true));
-        }
-        if attempt + 1 < PASTED_CONTENT_APPEAR_POLLS {
-            std::thread::sleep(Duration::from_millis(25));
-        }
-    }
-    // Python waits 250ms between paste-buffer and Enter to let bracketed paste settle.
-    std::thread::sleep(Duration::from_millis(250));
-    Ok(Some(false))
-}
-
 const TOKEN_POST_SUBMIT_READBACK_POLLS: u32 = 5;
 
 /// Some non-echo panes, including the integration harness' `stty -echo; cat`, only
@@ -2428,13 +2404,6 @@ fn submit_attempt_observation(
         pane_tail_lines,
         elapsed_ms,
     }
-}
-
-/// 0.3.27: check if a pasted-content prompt literal (`pasted content` / `pasted text`)
-/// appears in the bottom N non-empty lines. Narrower than the full-Tail(80) check
-/// that caused scrollback ghost matches (E50 defect B).
-fn pasted_prompt_in_bottom(text: &str, n: usize) -> bool {
-    pasted_prompt_in_composer(text, n).is_some()
 }
 
 /// E50 PR-1 (0.3.24 P0, pasted-prompt 假阴诊断): factor `capture_has_pasted_content_prompt`

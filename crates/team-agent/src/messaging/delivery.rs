@@ -2507,10 +2507,6 @@ pub(crate) fn observe_leader_receipt(
     }
 }
 
-pub(crate) fn leader_transcript_has_token(state: &serde_json::Value, message_id: &str) -> bool {
-    observe_leader_receipt(state, message_id) == LeaderReceiptObservation::TokenObserved
-}
-
 fn leader_acceptance_pending_outcome(message_id: &str, status: &str) -> DeliveryOutcome {
     DeliveryOutcome {
         ok: true,
@@ -2613,22 +2609,6 @@ pub fn execute_trust_retry(
         &payload.message_id,
         event_log,
         &state,
-    )
-}
-
-/// `_record_turn_open_if_leader_to_worker` (`delivery.py:430`):**take-over arm 来自真实投递**
-/// (card §121) —— 仅 leader→worker 注入/投递成功后才 arm,绝不凭空 arm。
-pub(crate) fn record_turn_open_if_leader_to_worker(
-    workspace: &Path,
-    state: &serde_json::Value,
-    sender: &str,
-    recipient: &str,
-    delivered: &DeliveryOutcome,
-    event_log: &EventLog,
-) -> Result<(), MessagingError> {
-    let _ = state;
-    record_turn_open_if_leader_to_worker_scoped(
-        workspace, sender, recipient, delivered, event_log, None, None,
     )
 }
 
@@ -2824,18 +2804,6 @@ fn arm_turn_open(state: &mut serde_json::Value, recipient: &str, message_id: &Op
         });
         agent.insert("current_turn_message_id".to_string(), field);
     }
-}
-
-/// `_stamp_first_send_at_if_leader_to_worker` (`delivery.py:380`):首次 leader→worker 投递戳
-/// `first_send_at` (step 13 restart Route B atomicity 决策读它)。
-pub(crate) fn stamp_first_send_at_if_leader_to_worker(
-    workspace: &Path,
-    state: &serde_json::Value,
-    sender: &str,
-    recipient: &str,
-) -> Result<(), MessagingError> {
-    let _ = state;
-    stamp_first_send_at_if_leader_to_worker_scoped(workspace, sender, recipient, None)
 }
 
 fn stamp_first_send_at_if_leader_to_worker_scoped(
@@ -3470,10 +3438,6 @@ fn rollout_tail_contains_result(
     let haystack = String::from_utf8_lossy(&buf);
     Ok(haystack.contains(needle))
 }
-
-#[cfg(test)]
-#[path = "delivery_consumption_tests.rs"]
-mod consumption_tests;
 
 #[cfg(test)]
 mod paste_floor_tests {

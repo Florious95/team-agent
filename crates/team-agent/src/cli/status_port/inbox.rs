@@ -23,17 +23,6 @@ pub fn inbox(
     crate::inbox_store::read(workspace, agent, limit, owner_team_id).map_err(CliError::Runtime)
 }
 
-fn compact_message(message: Value) -> Value {
-    json!({
-        "message_id": compact_field(message.get("message_id")),
-        "sender": compact_field(message.get("sender")),
-        "recipient": compact_field(message.get("recipient")),
-        "status": compact_field(message.get("status")),
-        "created_at": compact_field(message.get("created_at")),
-        "summary": compact_summary(message.get("content").and_then(Value::as_str).unwrap_or("")),
-    })
-}
-
 fn compact_summary(content: &str) -> String {
     let summary = content
         .lines()
