@@ -172,7 +172,7 @@ pub(crate) fn observe(
                 &backend.binding, &seat, std::time::Duration::from_secs(2),
             ))?;
             let transport = crate::transport_factory::bounded_endpoint_transport(
-                &target.endpoint, std::time::Instant::now() + std::time::Duration::from_secs(2),
+                target.endpoint.to_str().ok_or_else(|| refusal("non-UTF8 native endpoint"))?, std::time::Instant::now() + std::time::Duration::from_secs(2),
             );
             if checked(transport.provider_exit_status(&PaneId::new(&target.pane)))?.is_some() {
                 return Ok(SeatObservation::ProviderExited);
