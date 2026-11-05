@@ -388,7 +388,7 @@ pub enum LifecycleError {
     #[error("state persistence failed: {0}")]
     StatePersist(String),
     /// workspace lifecycle transaction lock acquisition timed out.
-    #[error("error: lifecycle lock timeout after 30s\naction: retry or check for hung reset/start\nlog: {log_path}")]
+    #[error("error: lifecycle lock timeout after {waited_ms}ms\naction: retry or check for hung reset/start\nlog: {log_path}")]
     LifecycleLockTimeout {
         lock_path: PathBuf,
         log_path: PathBuf,

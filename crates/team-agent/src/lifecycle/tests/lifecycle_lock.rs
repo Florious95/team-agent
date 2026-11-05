@@ -8,6 +8,22 @@ use crate::lifecycle::lock::{
 };
 
 #[test]
+fn delivery_locks_share_but_exclude_lifecycle_mutation() {
+    let ws = temp_ws();
+    let agent = aid("worker");
+    let request = || LifecycleLockRequest {
+        workspace: &ws, operation: "native-send", team: Some("alpha"), agent_id: Some(&agent),
+    };
+    let first = crate::lifecycle::lock::acquire_seat_delivery_lock(request()).unwrap();
+    let second = crate::lifecycle::lock::acquire_seat_delivery_lock(request()).unwrap();
+    assert!(acquire_agent_lifecycle_lock_for_test(request(), Duration::ZERO, Duration::ZERO).is_err());
+    drop(first);
+    assert!(acquire_agent_lifecycle_lock_for_test(request(), Duration::ZERO, Duration::ZERO).is_err());
+    drop(second);
+    assert!(acquire_agent_lifecycle_lock_for_test(request(), Duration::ZERO, Duration::ZERO).is_ok());
+}
+
+#[test]
 fn lifecycle_lock_timeout_error_contract_and_constants() {
     assert_eq!(AGENT_LIFECYCLE_LOCK_NAME, "agent-lifecycle");
     assert_eq!(LIFECYCLE_LOCK_TIMEOUT, Duration::from_secs(30));
@@ -23,7 +39,7 @@ fn lifecycle_lock_timeout_error_contract_and_constants() {
     assert_eq!(
         err.to_string(),
         format!(
-            "error: lifecycle lock timeout after 30s\naction: retry or check for hung reset/start\nlog: {}",
+            "error: lifecycle lock timeout after 30000ms\naction: retry or check for hung reset/start\nlog: {}",
             crate::model::paths::logs_dir(&ws).join("events.jsonl").display()
         )
     );
