@@ -423,7 +423,8 @@ fn red_m2_r3_team_start_keeps_an_explicitly_stopped_seat_stopped() {
     let status = bay.status("m2r3");
     assert_eq!(status.get("wa").map(String::as_str), Some("stopped"), "explicitly stopped wa was resurrected: {status:?}; start={}", start.describe());
     assert_eq!(status.get("wb").map(String::as_str), Some("running"), "{status:?}");
-    let operational = bay.must(&["status", "--team", "m2r3"]);
+    let operational = bay.ta(&["status", "--team", "m2r3"]);
+    assert!(operational.ok(), "default status failed: {}", operational.describe());
     assert!(operational.json["nodes"].as_array().unwrap().iter()
         .all(|node| node["name"] != "wa"), "stopped wa leaked into default status: {}", operational.describe());
     assert_eq!(bay.live_panes().len(), panes_before.len(), "team start must not spawn a pane for wa");
