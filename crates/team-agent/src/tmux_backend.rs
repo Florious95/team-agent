@@ -2957,7 +2957,9 @@ pub fn worker_shell_wrapper_command(
     let unset_set: std::collections::BTreeSet<&str> =
         env_unset.iter().map(String::as_str).collect();
     let caller_provider = caller_provider_for_invocation(env);
-    let mut parts = Vec::new();
+    let mut parts = vec![format!(
+        "{{ tmux -S \"${{TMUX%%,*}}\" set-option -p -t \"$TMUX_PANE\" {PROVIDER_EXIT_STATUS_OPTION} running >/dev/null 2>&1 || :; }} &&"
+    )];
     parts.push("cd".to_string());
     parts.push(shell_quote(&cwd.to_string_lossy()));
     parts.push("&&".to_string());
@@ -2978,6 +2980,9 @@ pub fn worker_shell_wrapper_command(
     parts.extend(argv.iter().map(|arg| shell_quote(arg)));
     parts.push(";".to_string());
     parts.push("rc=$?;".to_string());
+    parts.push(format!(
+        "tmux -S \"${{TMUX%%,*}}\" set-option -p -t \"$TMUX_PANE\" {PROVIDER_EXIT_STATUS_OPTION} \"$rc\" >/dev/null 2>&1;"
+    ));
     parts.push("printf".to_string());
     parts.push(shell_quote(&format!(
         "\n{} %s\n",

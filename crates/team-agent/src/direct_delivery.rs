@@ -626,11 +626,17 @@ fn native_output(command: &Command, deadline: Instant) -> Result<crate::tmux_bac
 
 fn pane_identity(socket: &str, pane: &str, deadline: Instant) -> Result<String, String> {
     let output = native_output(tmux(socket).args(["display-message", "-p", "-t", pane,
-        "#{pane_dead}|#{pane_pid}|#{pid}|#{socket_path}"]), deadline)?;
+        &format!("#{{pane_dead}}|#{{pane_pid}}|#{{pid}}|#{{socket_path}}|#{{{}}}", crate::tmux_backend::PROVIDER_EXIT_STATUS_OPTION)]), deadline)?;
     if !output.success { return Err("pane_gone".into()); }
-    let identity = output.stdout.trim().to_owned();
-    let fields: Vec<_> = identity.splitn(4, '|').collect();
-    if fields.len() != 4 || fields[0] != "0" || fields[1].parse::<u32>().ok().filter(|p| *p > 0).is_none() {
+    checked_pane_identity(output.stdout.trim().to_owned())
+}
+
+fn checked_pane_identity(identity: String) -> Result<String, String> {
+    let fields: Vec<_> = identity.split('|').collect();
+    if fields.get(4).is_some_and(|exit| exit.trim().parse::<i32>().is_ok()) {
+        return Err("recipient_provider_exited".into());
+    }
+    if fields.len() < 4 || fields[0] != "0" || fields[1].parse::<u32>().ok().filter(|p| *p > 0).is_none() {
         return Err("pane_gone: no live physical identity".into());
     }
     Ok(identity)
@@ -790,6 +796,16 @@ pub fn locate(workspace: &Path, team: Option<&str>) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn provider_exit_receipt_overrides_live_wrapper_pid() {
+        for exit in ["0", "1", "137"] {
+            assert_eq!(super::checked_pane_identity(format!("0|123|456|/tmp/test.sock|{exit}")).unwrap_err(), "recipient_provider_exited");
+        }
+        assert!(super::checked_pane_identity("0|123|456|/tmp/test.sock|running".into()).is_ok());
+        assert!(super::checked_pane_identity("0|123|456|/tmp/test.sock|".into()).is_ok());
+        assert!(super::checked_pane_identity("1|123|456|/tmp/test.sock|".into()).is_err());
+    }
+
     use super::*;
 
     #[test]
