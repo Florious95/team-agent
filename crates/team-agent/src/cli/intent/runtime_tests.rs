@@ -223,6 +223,28 @@ fn unverified_configuration_change_advises_scoped_stop_not_status_loop() {
 }
 
 #[test]
+fn bare_and_agent_start_share_the_scoped_stop_advice_for_unverified_seats() {
+    let (root, _) = fixture(&["one"]);
+    install(root.path(), &[("one", "running", false)]);
+    let path = crate::state::persist::runtime_state_path(root.path());
+    let mut state: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    state["agents"]["one"]["pane_pid"] = Value::Null;
+    state["teams"]["fixture"]["agents"]["one"]["pane_pid"] = Value::Null;
+    std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    for (command, prefix) in [("start", vec!["one"]), ("agent", vec!["start", "one"])] {
+        let mut tokens = prefix.into_iter().map(str::to_string).collect::<Vec<_>>();
+        tokens.extend(["--workspace".into(), root.path().to_string_lossy().into_owned(), "--team".into(), "fixture".into(), "--dry-run".into()]);
+        let result = super::super::run(command, &tokens, root.path()).unwrap();
+        let text = crate::cli::emit::emit(&result.output, result.as_json).unwrap();
+        assert!(text.starts_with("error: "), "{text}");
+        assert!(text.contains("team-agent stop one --workspace"), "{text}");
+        assert!(!text.contains("team-agent status one"), "{text}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+}
+
+#[test]
 fn owned_native_reconciliation_still_allows_the_original_fenced_stop() {
     assert_eq!(seat_actions(Verb::Stop, Observation::NativeReconcile, false, false, false, false).unwrap(), ["stop"]);
     assert!(seat_actions(Verb::Stop, Observation::Unknown, false, false, false, false).is_err());

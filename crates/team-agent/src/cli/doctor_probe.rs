@@ -552,11 +552,15 @@ fn render(
 pub(super) fn run(args: &DoctorArgs) -> CmdResult {
     let started = Instant::now();
     let caller = caller();
-    let selected = crate::state::selector::resolve_active_team_readonly(
+    let ambiguity = args.team.is_none().then(|| crate::direct_delivery::directory_with_reason(&args.workspace, None).err())
+        .flatten().filter(|error| error.code == "name_ambiguous");
+    let selected = if let Some(error) = ambiguity {
+        Err(crate::state::StateError::TeamSelect(format!("ambiguous team selection: {}", error.message)))
+    } else { crate::state::selector::resolve_active_team_readonly(
         &args.workspace,
         args.team.as_deref(),
         crate::state::selector::SelectorMode::RuntimeOnly,
-    );
+    ) };
     let scope = selected
         .map_err(|e| e.to_string())
         .and_then(|mut selected| {
@@ -623,16 +627,10 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
         Ok(scope) => scope,
         Err(error) => {
             let raw = crate::direct_delivery::snapshot(&args.workspace).unwrap_or(Value::Null);
-            let caller_scope = args
-                .team
-                .is_none()
-                .then(|| caller_team(&raw, &caller))
-                .flatten();
-            let team = args
-                .team
-                .clone()
-                .or_else(|| caller_scope.clone())
-                .unwrap_or_else(|| "current".into());
+            let ambiguous = error.starts_with("ambiguous team selection:");
+            let caller_scope = (args.team.is_none() && !ambiguous).then(|| caller_team(&raw, &caller)).flatten();
+            let team = args.team.clone().or_else(|| caller_scope.clone())
+                .unwrap_or_else(|| if ambiguous { "<unselected>" } else { "current" }.into());
             let missing_team = args.team.as_deref().is_some_and(|team| {
                 error.starts_with(&format!("team '{team}' not found."))
             });
@@ -656,7 +654,8 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
                 &team,
                 caller,
                 (0, 0),
-                Some(if missing_team { Action::manual(create) } else { action(
+                Some(if ambiguous { Action::manual(format!("select a team explicitly: team-agent doctor --workspace {} --team <NAME> --json", super::shell_quote(&args.workspace.to_string_lossy()))) }
+                else if missing_team { Action::manual(create) } else { action(
                     if caller_scope.is_some() { "doctor" } else { "status" },
                     &args.workspace,
                     &team,
