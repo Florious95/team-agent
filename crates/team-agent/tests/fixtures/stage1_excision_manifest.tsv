@@ -1,0 +1,717 @@
+# Stage 1 excision manifest (P1 + P2 = K1 legacy SQLite message engine + K10 legacy inject/submit transport).
+# Source: dead-code audit pinned at df796be5 / 0.5.129 (appendix-8 K1/K10 rows with a removal decision, plus the
+# 68 P1 private leaves). Excluded on purpose: REVIEW_CURRENT_TEST_PURPOSE_MOVE_FIXTURE rows (db/schema.rs fixture
+# DDL) and VERIFY_AFFECTED_SUPPORTED_TARGET rows (ConPTY/Windows), plus all K4 ProviderAdapter items (Stage 2).
+# A row passes when `file` is gone or contains at most `max_remaining` lines whose trimmed text equals `declaration`.
+# Columns: file, max_remaining, cluster, baseline_line, symbol, declaration
+crates/team-agent/src/cli/diagnose.rs	0	P1	945	append_coordinator_health_issue	fn append_coordinator_health_issue(
+crates/team-agent/src/cli/diagnose.rs	0	P1	1669	yaml_path_str	fn yaml_path_str<'a>(value: &'a crate::model::yaml::Value, keys: &[&str]) -> Option<&'a str> {
+crates/team-agent/src/cli/diagnose.rs	0	P1	811	append_selected_live_leader_workspace_mismatch	pub(crate) fn append_selected_live_leader_workspace_mismatch(
+crates/team-agent/src/cli/diagnose.rs	0	P1	459	missing_team_runtime_issues_and_repairs	pub(crate) fn missing_team_runtime_issues_and_repairs(team_key: &str) -> (Value, Value) {
+crates/team-agent/src/cli/emit.rs	0	P1	876	has_arg	fn has_arg(args: &[String], needle: &str) -> bool {
+crates/team-agent/src/cli/emit.rs	0	P1	1448	takeover_args	fn takeover_args(args: &[String], cwd: &Path) -> TakeoverArgs {
+crates/team-agent/src/cli/mod.rs	0	P1	3026	contains_pgid	fn contains_pgid(&self, pgid: u32) -> bool {
+crates/team-agent/src/cli/mod.rs	0	P1	3030	contains_process	fn contains_process(&self, process: &ProcessInfo) -> bool {
+crates/team-agent/src/cli/mod.rs	0	P1	649	socket_session_names_from_targets	fn socket_session_names_from_targets(
+crates/team-agent/src/cli/send.rs	0	K1	115	send_to_canonical_leader_target	pub fn send_to_canonical_leader_target(
+crates/team-agent/src/cli/send.rs	0	K1	152	send_target	pub(super) fn send_target(targets: Option<&str>, target: Option<&str>) -> MessageTarget {
+crates/team-agent/src/cli/send/mailbox.rs	0	K1	94	MailboxAttachmentHistory	enum MailboxAttachmentHistory {
+crates/team-agent/src/cli/send/mailbox.rs	0	K1	109	target_team_mailbox_history	fn target_team_mailbox_history(state: &Value, team_key: &str) -> MailboxAttachmentHistory {
+crates/team-agent/src/cli/send/mailbox.rs	0	K1	4	maybe_enqueue_offline_leader_mailbox	pub(super) fn maybe_enqueue_offline_leader_mailbox(
+crates/team-agent/src/cli/send/persist.rs	0	K1	12	send_options_from_args	pub fn send_options_from_args(args: &SendArgs) -> SendOptions {
+crates/team-agent/src/cli/send/persist.rs	0	K1	107	initial_delivery_allows_watch	pub(super) fn initial_delivery_allows_watch(status: DeliveryStatus) -> bool {
+crates/team-agent/src/cli/send/persist.rs	0	K1	114	observe_initial_delivery_for_watch	pub(super) fn observe_initial_delivery_for_watch(
+crates/team-agent/src/cli/send/persist.rs	0	K1	30	persist_resolved_target	pub(super) fn persist_resolved_target(
+crates/team-agent/src/cli/send/persist.rs	0	K1	51	routing_ambiguous_value	pub(super) fn routing_ambiguous_value(
+crates/team-agent/src/cli/send/persist.rs	0	K1	94	selected_state_with_active_key	pub(super) fn selected_state_with_active_key(
+crates/team-agent/src/cli/send/presentation.rs	0	K1	145	add_send_reminder_if_ok	pub(super) fn add_send_reminder_if_ok(value: &mut Value) {
+crates/team-agent/src/cli/send/presentation.rs	0	K1	125	api_delivery_status	pub(super) fn api_delivery_status(outcome: &DeliveryOutcome) -> &'static str {
+crates/team-agent/src/cli/send/presentation.rs	0	K1	34	attach_positional_typo_suggestions	pub(super) fn attach_positional_typo_suggestions(
+crates/team-agent/src/cli/send/presentation.rs	0	K1	167	cmd_send_result	pub(super) fn cmd_send_result(value: Value, as_json: bool) -> CmdResult {
+crates/team-agent/src/cli/send/presentation.rs	0	K1	88	delivery_outcome_json	pub(super) fn delivery_outcome_json(
+crates/team-agent/src/cli/send/presentation.rs	0	K1	135	delivery_proven	pub(super) fn delivery_proven(status: DeliveryStatus) -> bool {
+crates/team-agent/src/cli/send/presentation.rs	0	K1	340	delivery_refusal_wire	pub(super) fn delivery_refusal_wire(reason: DeliveryRefusal) -> &'static str {
+crates/team-agent/src/cli/send/presentation.rs	0	K1	370	delivery_stage_wire	pub(super) fn delivery_stage_wire(stage: DeliveryStage) -> &'static str {
+crates/team-agent/src/cli/send/presentation.rs	0	K1	320	delivery_status_wire	pub(super) fn delivery_status_wire(status: DeliveryStatus) -> &'static str {
+crates/team-agent/src/cli/send/presentation.rs	0	K1	312	first_target	pub(super) fn first_target(target: &MessageTarget) -> String {
+crates/team-agent/src/cli/send/presentation.rs	0	K1+P1	245	send_human_field	pub(super) fn send_human_field(value: &Value, key: &str) -> String {
+crates/team-agent/src/cli/send/presentation.rs	0	K1	185	send_human_output	pub(super) fn send_human_output(value: &Value) -> String {
+crates/team-agent/src/cli/send/presentation.rs	0	K1+P1	264	send_human_status	pub(super) fn send_human_status(value: &Value) -> String {
+crates/team-agent/src/cli/send/presentation.rs	0	K1	253	send_human_target	pub(super) fn send_human_target(value: &Value) -> String {
+crates/team-agent/src/cli/send/presentation.rs	0	K1	277	send_human_value	pub(super) fn send_human_value(value: &Value) -> String {
+crates/team-agent/src/cli/send/presentation.rs	0	K1	291	send_reminder_for_value	pub(super) fn send_reminder_for_value(value: &Value) -> &'static str {
+crates/team-agent/src/cli/send/presentation.rs	0	K1	304	target_json	pub(super) fn target_json(target: &MessageTarget) -> Value {
+crates/team-agent/src/cli/send/presentation.rs	0	K1	9	watch_notice_json	pub(super) fn watch_notice_json(target: &MessageTarget, opts: &SendOptions) -> Value {
+crates/team-agent/src/cli/send/resolve.rs	0	K1	156	decorate_host_leader_alias	pub(super) fn decorate_host_leader_alias(
+crates/team-agent/src/cli/send/resolve.rs	0	K1	329	logical_recipient_id	pub(super) fn logical_recipient_id(
+crates/team-agent/src/cli/send/resolve.rs	0	K1	273	resolution_refusal_json	pub(super) fn resolution_refusal_json(
+crates/team-agent/src/cli/send/resolve.rs	0	K1	65	resolve_host_leader_alias	pub(super) fn resolve_host_leader_alias(
+crates/team-agent/src/cli/send/resolve.rs	0	K1	173	send_to_logical_to	pub(super) fn send_to_logical_to(
+crates/team-agent/src/cli/send/resolve.rs	0	K1	345	send_to_resolved_name	pub(super) fn send_to_resolved_name(
+crates/team-agent/src/cli/send/resolve.rs	0	K1	8	warn_send_alias	pub(super) fn warn_send_alias(flag: &str) {
+crates/team-agent/src/cli/status.rs	0	K1	76	canonical_worker_state_is_unknown	fn canonical_worker_state_is_unknown(agent: &Value) -> bool {
+crates/team-agent/src/cli/status.rs	0	K1	206	csv_agent_status	fn csv_agent_status(
+crates/team-agent/src/cli/status.rs	0	K1	88	stale_agent_bucket	fn stale_agent_bucket(agent: &Value) -> Option<SummaryBucket> {
+crates/team-agent/src/cli/status.rs	0	K1	29	agent_summary_counts	pub fn agent_summary_counts(agents: &Value, health: &Value) -> SummaryCounts {
+crates/team-agent/src/cli/status.rs	0	K1	10	classify_agent_bucket	pub fn classify_agent_bucket(raw_status: &str, health_status: &str) -> SummaryBucket {
+crates/team-agent/src/cli/status.rs	0	K1	191	format_status_csv	pub fn format_status_csv(data: &Value) -> String {
+crates/team-agent/src/cli/status.rs	0	K1	128	format_status_summary	pub fn format_status_summary(data: &Value) -> String {
+crates/team-agent/src/cli/status.rs	0	K1	278	status_compact_flag	pub fn status_compact_flag(detail: bool) -> bool {
+crates/team-agent/src/cli/status.rs	0	K1	261	format_latest_result	pub(crate) fn format_latest_result(value: &Value) -> String {
+crates/team-agent/src/cli/status.rs	0	K1	104	interaction_counts	pub(super) fn interaction_counts(agents: &Value) -> InteractionCounts {
+crates/team-agent/src/cli/status_port.rs	0	K1	72	format_status	pub fn format_status(workspace: &Path, agent: Option<&str>) -> Result<String, CliError> {
+crates/team-agent/src/cli/status_port.rs	0	K1	77	format_status_scoped	pub fn format_status_scoped(
+crates/team-agent/src/cli/status_port.rs	0	K1	52	status	pub fn status(workspace: &Path, compact: bool, detail: bool) -> Result<Value, CliError> {
+crates/team-agent/src/cli/status_port/agents.rs	0	P1	215	agent_canonical_worker_state_is_unknown	pub(super) fn agent_canonical_worker_state_is_unknown(
+crates/team-agent/src/cli/status_port/compact.rs	0	K1	214	compact_object	pub(super) fn compact_object(value: Option<&Value>, keys: &[&str]) -> Value {
+crates/team-agent/src/cli/status_port/compact.rs	0	K1+P1	190	compact_tasks	pub(super) fn compact_tasks(value: Option<&Value>) -> Value {
+crates/team-agent/src/cli/status_port/compact.rs	0	K1+P1	227	take_array	pub(super) fn take_array(value: Option<&Value>, limit: usize) -> Value {
+crates/team-agent/src/cli/status_port/compact.rs	0	K1+P1	234	take_array_tail	pub(super) fn take_array_tail(value: Option<&Value>, limit: usize) -> Value {
+crates/team-agent/src/cli/status_port/format.rs	0	K1	90	agent_health_status_text	pub(super) fn agent_health_status_text(status: &str) -> String {
+crates/team-agent/src/cli/status_port/format.rs	0	K1	75	current_task_for_agent	pub(super) fn current_task_for_agent(tasks: &[Value], agent_id: &str) -> Option<String> {
+crates/team-agent/src/cli/status_port/format.rs	0	K1	63	ensure_agent_known	pub(super) fn ensure_agent_known(status: &Value, agent_id: &str) -> Result<(), CliError> {
+crates/team-agent/src/cli/status_port/format.rs	0	K1	6	format_agent_status	pub(super) fn format_agent_status(
+crates/team-agent/src/cli/status_port/format.rs	0	K1	98	py_get	pub(super) fn py_get(agent: &Value, key: &str) -> String {
+crates/team-agent/src/cli/status_port/format.rs	0	K1	108	py_get_or_dash	pub(super) fn py_get_or_dash(agent: &Value, key: &str) -> String {
+crates/team-agent/src/cli/status_port/inbox.rs	0	K1	4	SUMMARY_LIMIT	const SUMMARY_LIMIT: usize = 120;
+crates/team-agent/src/cli/status_port/inbox.rs	0	K1	6	clean_text	fn clean_text(text: &str) -> String {
+crates/team-agent/src/cli/status_port/inbox.rs	0	K1	10	compact_field	fn compact_field(value: Option<&Value>) -> Value {
+crates/team-agent/src/cli/status_port/inbox.rs	0	K1+P1	26	compact_message	fn compact_message(message: Value) -> Value {
+crates/team-agent/src/cli/status_port/inbox.rs	0	K1	37	compact_summary	fn compact_summary(content: &str) -> String {
+crates/team-agent/src/cli/status_port/inbox.rs	0	K1	17	inbox	pub fn inbox(
+crates/team-agent/src/cli/status_port/store.rs	0	K1	289	agent_health	pub(super) fn agent_health(
+crates/team-agent/src/cli/status_port/store.rs	0	K1	249	count_rows	pub(super) fn count_rows(
+crates/team-agent/src/cli/status_port/store.rs	0	K1	391	count_undelivered_backlog	pub(super) fn count_undelivered_backlog(
+crates/team-agent/src/cli/status_port/store.rs	0	K1	268	count_where_status	pub(super) fn count_where_status(
+crates/team-agent/src/cli/status_port/store.rs	0	K1	382	insert_optional_i64	pub(super) fn insert_optional_i64(map: &mut Map<String, Value>, key: &str, value: Option<i64>) {
+crates/team-agent/src/cli/status_port/store.rs	0	K1	372	insert_optional_string	pub(super) fn insert_optional_string(
+crates/team-agent/src/cli/status_port/store.rs	0	K1	16	latest_result_summaries	pub(super) fn latest_result_summaries(
+crates/team-agent/src/cli/status_port/store.rs	0	K1	30	message_counts	pub(super) fn message_counts(
+crates/team-agent/src/cli/status_port/store.rs	0	K1	179	pending_leader_notifications	pub(super) fn pending_leader_notifications(
+crates/team-agent/src/cli/status_port/store.rs	0	K1	126	queued_messages	pub(super) fn queued_messages(
+crates/team-agent/src/cli/status_port/store.rs	0	K1	6	recent_agent_messages	pub(super) fn recent_agent_messages(
+crates/team-agent/src/cli/status_port/store.rs	0	K1	37	result_counts	pub(super) fn result_counts(
+crates/team-agent/src/cli/status_port/store.rs	0	K1	88	result_status_counts	pub(super) fn result_status_counts(
+crates/team-agent/src/cli/status_port/store.rs	0	K1	55	status_counts	pub(super) fn status_counts(
+crates/team-agent/src/coordinator/health.rs	0	P1	510	wait_until_not_running	fn wait_until_not_running(pid: Pid, timeout: Duration) -> bool {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P1	750	command_process_check	fn command_process_check(provider: crate::model::enums::Provider, command: &str) -> ProcessCheck {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P1	761	pane_command_process_check	fn pane_command_process_check(
+crates/team-agent/src/db/agent_health_capture.rs	0	K1	11	retired	fn retired() -> crate::db::DbError { crate::db::DbError::Schema("SQL health authority retired; use C4/native observations".into()) }
+crates/team-agent/src/db/agent_health_capture.rs	0	K1	14	clear_agent_health_observation	pub fn clear_agent_health_observation(_workspace: &Path, _owner_team_id: &str, _agent_id: &AgentId) -> Result<(), crate::db::DbError> { Err(retired()) }
+crates/team-agent/src/db/agent_health_capture.rs	0	K1	13	restore_agent_health	pub fn restore_agent_health(_workspace: &Path, _owner_team_id: &str, _agent_id: &AgentId, _row: &Option<CapturedHealth>) -> Result<(), crate::db::DbError> { Err(retired()) }
+crates/team-agent/src/db/agent_health_capture.rs	0	K1	12	select_agent_health	pub fn select_agent_health(_workspace: &Path, _owner_team_id: &str, _agent_id: &AgentId) -> Result<Option<CapturedHealth>, crate::db::DbError> { Err(retired()) }
+crates/team-agent/src/db/agent_health_capture.rs	0	K1	6	CapturedHealth	pub struct CapturedHealth {
+crates/team-agent/src/db/message_store.rs	0	K1	27	DeliveryReceiptMissing, InvalidTransition, RecoveryRefused, 	DeliveryReceiptMissing(String),
+crates/team-agent/src/db/message_store.rs	0	K1	29	DeliveryReceiptMissing, InvalidTransition, RecoveryRefused, 	InvalidTransition { from: String, to: String },
+crates/team-agent/src/db/message_store.rs	0	K1	31	DeliveryReceiptMissing, InvalidTransition, RecoveryRefused, 	RecoveryRefused(&'static str),
+crates/team-agent/src/db/message_store.rs	0	K1	17	DeliveryReceiptMissing, InvalidTransition, RecoveryRefused, 	Retired,
+crates/team-agent/src/db/message_store.rs	0	K1	180	legacy_epoch_from_uuid	fn legacy_epoch_from_uuid(leader_session_uuid: Option<&str>) -> i64 {
+crates/team-agent/src/db/message_store.rs	0	K1+P1	470	next_message_id	fn next_message_id() -> String {
+crates/team-agent/src/db/message_store.rs	0	K1	466	now_ts	fn now_ts() -> String {
+crates/team-agent/src/db/message_store.rs	0	K1+P1	413	row_to_message_value	fn row_to_message_value(row: &rusqlite::Row<'_>) -> rusqlite::Result<serde_json::Value> {
+crates/team-agent/src/db/message_store.rs	0	K1	83	ALL, as_str	pub const ALL: &[Self] = &[
+crates/team-agent/src/db/message_store.rs	0	K1	101	ALL, as_str;as_str	pub const fn as_str(self) -> &'static str {
+crates/team-agent/src/db/message_store.rs	0	K1	157	total	pub const fn total(self) -> usize {
+crates/team-agent/src/db/message_store.rs	0	K1	64	MessageRowStatus	pub enum MessageRowStatus {
+crates/team-agent/src/db/message_store.rs	0	K1	142	RedisplayKind	pub enum RedisplayKind {
+crates/team-agent/src/db/message_store.rs	0	K1	334	multiple associated items are never used	pub fn claim_for_delivery(&self, message_id: &str) -> Result<bool, MessageStoreError> {
+crates/team-agent/src/db/message_store.rs	0	K1	405	multiple associated items are never used	pub fn claim_leader_notification_delivery(
+crates/team-agent/src/db/message_store.rs	0	K1	222	multiple associated items are never used	pub fn create_message(
+crates/team-agent/src/db/message_store.rs	0	K1	255	multiple associated items are never used	pub fn create_message_with_id(
+crates/team-agent/src/db/message_store.rs	0	K1	207	multiple associated items are never used	pub fn db_path(&self) -> &Path {
+crates/team-agent/src/db/message_store.rs	0	K1	382	multiple associated items are never used	pub fn inbox(
+crates/team-agent/src/db/message_store.rs	0	K1	393	multiple associated items are never used	pub fn latest_results(
+crates/team-agent/src/db/message_store.rs	0	K1	290	multiple associated items are never used	pub fn mark(
+crates/team-agent/src/db/message_store.rs	0	K1	323	multiple associated items are never used	pub fn mark_delivered_with_receipt(&self, message_id: &str) -> Result<(), MessageStoreError> {
+crates/team-agent/src/db/message_store.rs	0	K1	313	multiple associated items are never used	pub fn mark_injected_awaiting_receipt(
+crates/team-agent/src/db/message_store.rs	0	K1	284	multiple associated items are never used	pub fn message_exists(&self, message_id: &str) -> Result<bool, MessageStoreError> {
+crates/team-agent/src/db/message_store.rs	0	K1	202	multiple associated items are never used	pub fn open(workspace: &Path) -> Result<Self, MessageStoreError> {
+crates/team-agent/src/db/message_store.rs	0	K1	211	multiple associated items are never used	pub fn persist_message(
+crates/team-agent/src/db/message_store.rs	0	K1	301	multiple associated items are never used	pub fn record_delivery_submission(
+crates/team-agent/src/db/message_store.rs	0	K1	359	multiple associated items are never used	pub fn recover_worker_pane_available(
+crates/team-agent/src/db/message_store.rs	0	K1	352	multiple associated items are never used	pub fn requeue_blocked_leader_messages(
+crates/team-agent/src/db/message_store.rs	0	K1	436	result_summary_from_row	pub fn result_summary_from_row(row: &serde_json::Value) -> Option<serde_json::Value> {
+crates/team-agent/src/db/message_store.rs	0	K1	367	multiple associated items are never used	pub fn retry_submitted_explicit(
+crates/team-agent/src/db/message_store.rs	0	K1	123	BlockedLeaderRequeueCounts	pub struct BlockedLeaderRequeueCounts {
+crates/team-agent/src/db/message_store.rs	0	K1	194	MessageStore	pub struct MessageStore {
+crates/team-agent/src/db/message_store.rs	0	K1	39	NotificationClaim	pub struct NotificationClaim {
+crates/team-agent/src/db/message_store.rs	0	K1	47	NotificationClaimParams	pub struct NotificationClaimParams<'a> {
+crates/team-agent/src/db/message_store.rs	0	K1	136	PaneAvailable	pub struct PaneAvailable {
+crates/team-agent/src/db/message_store.rs	0	K1	164	PersistMessageInput	pub struct PersistMessageInput<'a> {
+crates/team-agent/src/db/message_store.rs	0	K1	129	RecoveryBudget	pub struct RecoveryBudget {
+crates/team-agent/src/db/message_store.rs	0	K1	59	MCP_HANDSHAKE_TIMEOUT	pub(crate) const MCP_HANDSHAKE_TIMEOUT: &str = "mcp_handshake_timeout";
+crates/team-agent/src/db/message_store.rs	0	K1+P1	341	multiple associated items are never used	pub(crate) fn release_delivery_before_input(
+crates/team-agent/src/db/message_store.rs	0	K1	12	MESSAGE_COUNTER	static MESSAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
+crates/team-agent/src/leader/helpers.rs	0	P1	42	read_rollout_text	pub(crate) fn read_rollout_text(path: Option<&RolloutPath>) -> Result<String, LeaderError> {
+crates/team-agent/src/leader/lease.rs	0	P1	471	attach_window_failure_value	fn attach_window_failure_value(
+crates/team-agent/src/leader/lease.rs	0	P1	539	attach_leader_to_state_with_target	pub(crate) fn attach_leader_to_state_with_target(
+crates/team-agent/src/lifecycle/launch/quick_start_transport.rs	0	P1	260	started_attach_window_names	pub(super) fn started_attach_window_names(started: &[StartedAgent]) -> Vec<String> {
+crates/team-agent/src/lifecycle/restart/remove.rs	0	P1	114	remove_agent_with_transport_locked	pub(crate) fn remove_agent_with_transport_locked(
+crates/team-agent/src/mcp_server/helpers.rs	0	K1+P1	486	blocks_historical_fallback	fn blocks_historical_fallback(status: &str) -> bool {
+crates/team-agent/src/mcp_server/helpers.rs	0	K1	350	current_turn_id_from_state	fn current_turn_id_from_state(state: &Value, agent_id: &str) -> Option<String> {
+crates/team-agent/src/mcp_server/helpers.rs	0	K1+P1	318	current_turn_message_for	fn current_turn_message_for(
+crates/team-agent/src/mcp_server/helpers.rs	0	K1	247	find_latest_nonterminal_task_for	fn find_latest_nonterminal_task_for(tasks: &[Value], agent_id: &str) -> Option<String> {
+crates/team-agent/src/mcp_server/helpers.rs	0	K1	445	latest_direct_message_from_db	fn latest_direct_message_from_db(
+crates/team-agent/src/mcp_server/helpers.rs	0	K1+P1	426	latest_reportable_message_from_db	fn latest_reportable_message_from_db(
+crates/team-agent/src/mcp_server/helpers.rs	0	K1	393	message_is_reportable	fn message_is_reportable(
+crates/team-agent/src/mcp_server/helpers.rs	0	K1	329	report_scope_state	fn report_scope_state(workspace: &Path, owner_team_id: Option<&str>) -> Option<Value> {
+crates/team-agent/src/mcp_server/helpers.rs	0	K1	481	reportable_message_status	fn reportable_message_status(status: &str, error: Option<&str>) -> bool {
+crates/team-agent/src/mcp_server/helpers.rs	0	K1	34	is_worker_recipient	pub fn is_worker_recipient(to: &MessageTarget) -> bool {
+crates/team-agent/src/mcp_server/helpers.rs	0	K1	22	requires_ack_for_target	pub fn requires_ack_for_target(to: &MessageTarget) -> bool {
+crates/team-agent/src/mcp_server/helpers.rs	0	K1	300	DirectMessageAttribution	pub(crate) enum DirectMessageAttribution {
+crates/team-agent/src/mcp_server/helpers.rs	0	K1	282	current_reportable_message_for	pub(crate) fn current_reportable_message_for(
+crates/team-agent/src/mcp_server/helpers.rs	0	K1	200	delivery_outcome_value	pub(crate) fn delivery_outcome_value(out: &DeliveryOutcome) -> Value {
+crates/team-agent/src/mcp_server/helpers.rs	0	K1	310	direct_message_attribution_for	pub(crate) fn direct_message_attribution_for(
+crates/team-agent/src/mcp_server/helpers.rs	0	K1	99	enum_value	pub(crate) fn enum_value<T: Serialize>(value: T) -> Value {
+crates/team-agent/src/mcp_server/helpers.rs	0	K1	170	insert_array	pub(crate) fn insert_array(
+crates/team-agent/src/mcp_server/helpers.rs	0	K1+P1	291	latest_delivered_direct_message_for	pub(crate) fn latest_delivered_direct_message_for(
+crates/team-agent/src/mcp_server/helpers.rs	0	K1	271	latest_reportable_message_for	pub(crate) fn latest_reportable_message_for(
+crates/team-agent/src/mcp_server/helpers.rs	0	K1	225	latest_task_for_assignee	pub(crate) fn latest_task_for_assignee(
+crates/team-agent/src/mcp_server/helpers.rs	0	K1	150	normalized_envelope_value	pub(crate) fn normalized_envelope_value(env: &NormalizedReportEnvelope) -> Value {
+crates/team-agent/src/mcp_server/helpers.rs	0	K1	439	DirectMessageCandidate	struct DirectMessageCandidate {
+crates/team-agent/src/mcp_server/normalize.rs	0	K1	212	compact_tool_result	pub fn compact_tool_result(result: &Value) -> ToolResult {
+crates/team-agent/src/mcp_server/readiness.rs	0	K1	259	carrier, carrier_birth, pane_id	carrier: u32,
+crates/team-agent/src/mcp_server/readiness.rs	0	K1	260	carrier, carrier_birth, pane_id	carrier_birth: String,
+crates/team-agent/src/mcp_server/readiness.rs	0	K1	261	carrier, carrier_birth, pane_id	pane_id: String,
+crates/team-agent/src/mcp_server/readiness.rs	0	K1	473	revalidate	pub(crate) fn revalidate(admission: &Admission, target: &Target, panes: &[PaneInfo]) -> Result<()> {
+crates/team-agent/src/mcp_server/tools.rs	0	K1	683	canonical_owner_team_key_for_mcp, get_visible_peers, refuse_	fn canonical_owner_team_key_for_mcp(&self) -> Result<Option<TeamKey>, ToolError> {
+crates/team-agent/src/mcp_server/tools.rs	0	K1+P1	849	push_report_warning	fn push_report_warning(obj: &mut serde_json::Map<String, Value>, warning: Value) {
+crates/team-agent/src/mcp_server/tools.rs	0	K1	872	scope_override_name	fn scope_override_name(scope: Scope) -> Option<&'static str> {
+crates/team-agent/src/mcp_server/tools.rs	0	K1	500	canonical_owner_team_key_for_mcp, get_visible_peers, refuse_	pub fn get_visible_peers(&self) -> Result<VisiblePeers, ToolError> {
+crates/team-agent/src/mcp_server/tools.rs	0	K1	536	canonical_owner_team_key_for_mcp, get_visible_peers, refuse_	pub fn refuse_cross_team_peer(
+crates/team-agent/src/mcp_server/tools.rs	0	K1	313	canonical_owner_team_key_for_mcp, get_visible_peers, refuse_	pub fn report_result(
+crates/team-agent/src/mcp_server/tools.rs	0	K1	193	canonical_owner_team_key_for_mcp, get_visible_peers, refuse_	pub fn send_message(
+crates/team-agent/src/mcp_server/tools.rs	0	K1+P1	255	canonical_owner_team_key_for_mcp, get_visible_peers, refuse_	pub(crate) fn refuse_scope_override(&self) -> ToolError {
+crates/team-agent/src/mcp_server/types.rs	0	K1	278	WorkerAccepted	WorkerAccepted {
+crates/team-agent/src/mcp_server/types.rs	0	K1	381	VisiblePeers	pub struct VisiblePeers {
+crates/team-agent/src/messaging/activity.rs	0	K1	110	active_team_key	fn active_team_key(workspace: &Path, state: &Value) -> String {
+crates/team-agent/src/messaging/activity.rs	0	K1	312	assigned_task_ids	fn assigned_task_ids(state: &Value, agent_id: &str) -> Vec<String> {
+crates/team-agent/src/messaging/activity.rs	0	K1	332	delivered_message_ids	fn delivered_message_ids(
+crates/team-agent/src/messaging/activity.rs	0	K1	290	string_array_at	fn string_array_at(value: &Value, path: &[&str]) -> Vec<String> {
+crates/team-agent/src/messaging/activity.rs	0	K1	124	team_idle_acknowledged	fn team_idle_acknowledged(state: &Value, team: &str) -> bool {
+crates/team-agent/src/messaging/activity.rs	0	K1	152	team_undelivered_obligations	fn team_undelivered_obligations(
+crates/team-agent/src/messaging/activity.rs	0	K1	283	timestamp_in_future	fn timestamp_in_future(ts: &str) -> bool {
+crates/team-agent/src/messaging/activity.rs	0	K1	53	classify_agent_activity	pub fn classify_agent_activity(
+crates/team-agent/src/messaging/delivery.rs	0	K1	1884	DeliveryTransport	enum DeliveryTransport<'a> {
+crates/team-agent/src/messaging/delivery.rs	0	K1	2959	OwnerTeamProjection	enum OwnerTeamProjection {
+crates/team-agent/src/messaging/delivery.rs	0	K1	3422	absorb_state_error_only_after_physical_submit	fn absorb_state_error_only_after_physical_submit(
+crates/team-agent/src/messaging/delivery.rs	0	K1	2264	active_team_entry	fn active_team_entry(state: &serde_json::Value) -> Option<&serde_json::Value> {
+crates/team-agent/src/messaging/delivery.rs	0	K1	1334	app_server_delivery_failure	fn app_server_delivery_failure(
+crates/team-agent/src/messaging/delivery.rs	0	K1	1463	app_server_rebind_action	fn app_server_rebind_action(owner_team_id: Option<&str>, receiver: &serde_json::Value) -> String {
+crates/team-agent/src/messaging/delivery.rs	0	K1	1709	append_target_metadata	fn append_target_metadata(event: &mut serde_json::Value, metadata: &TargetMetadata) {
+crates/team-agent/src/messaging/delivery.rs	0	K1	2796	arm_turn_open	fn arm_turn_open(state: &mut serde_json::Value, recipient: &str, message_id: &Option<String>) {
+crates/team-agent/src/messaging/delivery.rs	0	K1	1531	as_event_payload	fn as_event_payload(&self, message_id: &str, recipient: &str) -> serde_json::Value {
+crates/team-agent/src/messaging/delivery.rs	0	K1	1890	as_transport	fn as_transport(&'a self) -> &'a dyn Transport {
+crates/team-agent/src/messaging/delivery.rs	0	K1	3302	bind_enter_watchdog	fn bind_enter_watchdog(
+crates/team-agent/src/messaging/delivery.rs	0	K1	1079	block_missing_worker_target	fn block_missing_worker_target(
+crates/team-agent/src/messaging/delivery.rs	0	K1	3072	carry_top_level_leader_binding	fn carry_top_level_leader_binding(projected: &mut serde_json::Value, raw: &serde_json::Value) {
+crates/team-agent/src/messaging/delivery.rs	0	K1	3230	claude_recipient_rollout	fn claude_recipient_rollout(
+crates/team-agent/src/messaging/delivery.rs	0	K1	1258	deliver_leader_via_app_server	fn deliver_leader_via_app_server(
+crates/team-agent/src/messaging/delivery.rs	0	K1	303	deliver_prepared_message	fn deliver_prepared_message(
+crates/team-agent/src/messaging/delivery.rs	0	K1	1898	delivery_transport_for_recipient	fn delivery_transport_for_recipient<'a>(
+crates/team-agent/src/messaging/delivery.rs	0	K1	2180	emit_send_failed_exhausted	fn emit_send_failed_exhausted(
+crates/team-agent/src/messaging/delivery.rs	0	K1	3290	existing_token_consumed	fn existing_token_consumed(
+crates/team-agent/src/messaging/delivery.rs	0	K1	2049	inject_pane_id	fn inject_pane_id(target: &Target) -> Option<&str> {
+crates/team-agent/src/messaging/delivery.rs	0	K1	2042	json_opt_bool	fn json_opt_bool(value: Option<bool>) -> serde_json::Value {
+crates/team-agent/src/messaging/delivery.rs	0	K1	2514	leader_acceptance_pending_outcome	fn leader_acceptance_pending_outcome(message_id: &str, status: &str) -> DeliveryOutcome {
+crates/team-agent/src/messaging/delivery.rs	0	K1	1994	leader_receiver_field	fn leader_receiver_field<'a>(state: &'a serde_json::Value, field: &str) -> Option<&'a str> {
+crates/team-agent/src/messaging/delivery.rs	0	K1	2004	leader_receiver_field_in_state	fn leader_receiver_field_in_state<'a>(
+crates/team-agent/src/messaging/delivery.rs	0	K1	1870	leader_receiver_pane_binding	fn leader_receiver_pane_binding(state: &serde_json::Value) -> Option<PaneSocketBinding<'_>> {
+crates/team-agent/src/messaging/delivery.rs	0	K1	1971	leader_receiver_pane_binding_in_state	fn leader_receiver_pane_binding_in_state(
+crates/team-agent/src/messaging/delivery.rs	0	K1	1798	leader_receiver_pane_id	fn leader_receiver_pane_id(state: &serde_json::Value) -> Option<&str> {
+crates/team-agent/src/messaging/delivery.rs	0	K1	1959	leader_receiver_pane_id_in_state	fn leader_receiver_pane_id_in_state(state: &serde_json::Value) -> Option<&str> {
+crates/team-agent/src/messaging/delivery.rs	0	K1	3402	leader_receiver_record_path	fn leader_receiver_record_path<'a>(
+crates/team-agent/src/messaging/delivery.rs	0	K1	1990	leader_receiver_tmux_socket	fn leader_receiver_tmux_socket(state: &serde_json::Value) -> Option<&str> {
+crates/team-agent/src/messaging/delivery.rs	0	K1	1820	leader_receiver_transport_conflict_outcome	fn leader_receiver_transport_conflict_outcome(
+crates/team-agent/src/messaging/delivery.rs	0	K1	1804	leader_receiver_value	fn leader_receiver_value(state: &serde_json::Value) -> Option<&serde_json::Value> {
+crates/team-agent/src/messaging/delivery.rs	0	K1	1810	leader_receiver_value_in_state	fn leader_receiver_value_in_state(state: &serde_json::Value) -> Option<&serde_json::Value> {
+crates/team-agent/src/messaging/delivery.rs	0	K1	2421	leader_rollout_path	fn leader_rollout_path(state: &serde_json::Value) -> Option<std::path::PathBuf> {
+crates/team-agent/src/messaging/delivery.rs	0	K1	1653	live_pane_for_session_window	fn live_pane_for_session_window<'a>(
+crates/team-agent/src/messaging/delivery.rs	0	K1	3439	log_post_physical_submit_state_error	fn log_post_physical_submit_state_error(
+crates/team-agent/src/messaging/delivery.rs	0	K1	3267	marker_occurrences	fn marker_occurrences(text: &str, message_id: &str) -> usize {
+crates/team-agent/src/messaging/delivery.rs	0	K1	2056	merge_inject_readback_fields	fn merge_inject_readback_fields(
+crates/team-agent/src/messaging/delivery.rs	0	K1	2306	message_for_delivery	fn message_for_delivery(
+crates/team-agent/src/messaging/delivery.rs	0	K1	3259	message_token_marker	fn message_token_marker(message_id: &str) -> String {
+crates/team-agent/src/messaging/delivery.rs	0	K1	2661	new, take_error	fn new(
+crates/team-agent/src/messaging/delivery.rs	0	K1	2544	observe_pending_leader_acceptance	fn observe_pending_leader_acceptance(
+crates/team-agent/src/messaging/delivery.rs	0	K1	3274	observed_token_consumed	fn observed_token_consumed(
+crates/team-agent/src/messaging/delivery.rs	0	K1	2274	only_team_entry	fn only_team_entry(state: &serde_json::Value) -> Option<&serde_json::Value> {
+crates/team-agent/src/messaging/delivery.rs	0	K1	1753	pane_conflicts_on_same_socket	fn pane_conflicts_on_same_socket(
+crates/team-agent/src/messaging/delivery.rs	0	K1	1979	pane_socket_binding	fn pane_socket_binding(value: &serde_json::Value) -> Option<PaneSocketBinding<'_>> {
+crates/team-agent/src/messaging/delivery.rs	0	K1	1188	persist_submit_verification	fn persist_submit_verification(workspace: &Path, message_id: &str, report: &InjectReport) {
+crates/team-agent/src/messaging/delivery.rs	0	K1	245	prepare_message_state	fn prepare_message_state(
+crates/team-agent/src/messaging/delivery.rs	0	K1	2967	project_state_for_owner_team	fn project_state_for_owner_team(
+crates/team-agent/src/messaging/delivery.rs	0	K1	3153	project_state_for_owner_team_value	fn project_state_for_owner_team_value(
+crates/team-agent/src/messaging/delivery.rs	0	K1	1448	rebind_required_outcome	fn rebind_required_outcome(message_id: &str, action: &str) -> DeliveryOutcome {
+crates/team-agent/src/messaging/delivery.rs	0	K1	1814	receiver_owner_epoch	fn receiver_owner_epoch(receiver: &serde_json::Value) -> Option<u64> {
+crates/team-agent/src/messaging/delivery.rs	0	K1	2319	recipient_pane_has_actionable_startup_prompt	fn recipient_pane_has_actionable_startup_prompt(
+crates/team-agent/src/messaging/delivery.rs	0	K1	2386	recipient_provider	fn recipient_provider(state: &serde_json::Value, recipient: &str) -> Option<Provider> {
+crates/team-agent/src/messaging/delivery.rs	0	K1	3366	recipient_transcript_contains	fn recipient_transcript_contains(state: &serde_json::Value, recipient: &str, marker: &str) -> bool {
+crates/team-agent/src/messaging/delivery.rs	0	K1	3375	recipient_transcript_paths	fn recipient_transcript_paths(
+crates/team-agent/src/messaging/delivery.rs	0	K1	2745	record_current_turn_after_inject_if_leader_to_worker_scoped	fn record_current_turn_after_inject_if_leader_to_worker_scoped(
+crates/team-agent/src/messaging/delivery.rs	0	K1	2706	record_rescue_turn_after_submit	fn record_rescue_turn_after_submit(
+crates/team-agent/src/messaging/delivery.rs	0	K1	2771	record_turn_open_if_leader_to_worker_scoped	fn record_turn_open_if_leader_to_worker_scoped(
+crates/team-agent/src/messaging/delivery.rs	0	K1	3118	refuse_owner_team_resolution	fn refuse_owner_team_resolution(
+crates/team-agent/src/messaging/delivery.rs	0	K1	2020	render_submit_diagnostics	fn render_submit_diagnostics(report: &InjectReport) -> serde_json::Value {
+crates/team-agent/src/messaging/delivery.rs	0	K1	1545	resolve_inject_target	fn resolve_inject_target(
+crates/team-agent/src/messaging/delivery.rs	0	K1	3255	rollout_tail_contains	fn rollout_tail_contains(path: &std::path::Path, needle: &str, tail_bytes: u64) -> bool {
+crates/team-agent/src/messaging/delivery.rs	0	K1	3457	rollout_tail_contains_result	fn rollout_tail_contains_result(
+crates/team-agent/src/messaging/delivery.rs	0	K1	1783	runtime_tmux_socket	fn runtime_tmux_socket(state: &serde_json::Value) -> Option<&str> {
+crates/team-agent/src/messaging/delivery.rs	0	K1	2898	save_scoped_state	fn save_scoped_state(
+crates/team-agent/src/messaging/delivery.rs	0	K1	2926	save_scoped_state_reapplying_after_conflict	fn save_scoped_state_reapplying_after_conflict<F>(
+crates/team-agent/src/messaging/delivery.rs	0	K1	2882	scoped_state_for_write	fn scoped_state_for_write(
+crates/team-agent/src/messaging/delivery.rs	0	K1	1667	stale_worker_pane_binding	fn stale_worker_pane_binding(
+crates/team-agent/src/messaging/delivery.rs	0	K1	2860	stamp_first_send_at	fn stamp_first_send_at(state: &mut serde_json::Value, recipient: &str, now: &str) -> bool {
+crates/team-agent/src/messaging/delivery.rs	0	K1	2841	stamp_first_send_at_if_leader_to_worker_scoped	fn stamp_first_send_at_if_leader_to_worker_scoped(
+crates/team-agent/src/messaging/delivery.rs	0	K1	3086	state_has_no_team_entries	fn state_has_no_team_entries(state: &serde_json::Value) -> bool {
+crates/team-agent/src/messaging/delivery.rs	0	K1	2684	new, take_error	fn take_error(&self) -> Option<MessagingError> {
+crates/team-agent/src/messaging/delivery.rs	0	K1	1690	target_metadata	fn target_metadata(
+crates/team-agent/src/messaging/delivery.rs	0	K1	3263	text_contains_message_token	fn text_contains_message_token(text: &str, message_id: &str) -> bool {
+crates/team-agent/src/messaging/delivery.rs	0	K1	1789	tmux_socket_field	fn tmux_socket_field(value: &serde_json::Value) -> Option<&str> {
+crates/team-agent/src/messaging/delivery.rs	0	K1	1761	tmux_sockets_known_different	fn tmux_sockets_known_different(left: Option<&str>, right: Option<&str>) -> bool {
+crates/team-agent/src/messaging/delivery.rs	0	K1	1146	transport_error_is_target_missing	fn transport_error_is_target_missing(error: &crate::transport::TransportError) -> bool {
+crates/team-agent/src/messaging/delivery.rs	0	K1	1771	worker_tmux_socket	fn worker_tmux_socket(
+crates/team-agent/src/messaging/delivery.rs	0	K1	184	deliver_pending_message	pub fn deliver_pending_message(
+crates/team-agent/src/messaging/delivery.rs	0	K1	2285	deliver_pending_messages	pub fn deliver_pending_messages(
+crates/team-agent/src/messaging/delivery.rs	0	K1	99	deliver_persisted_message	pub fn deliver_persisted_message(
+crates/team-agent/src/messaging/delivery.rs	0	K1	53	deliver_stored_message	pub fn deliver_stored_message(
+crates/team-agent/src/messaging/delivery.rs	0	K1	2598	execute_trust_retry	pub fn execute_trust_retry(
+crates/team-agent/src/messaging/delivery.rs	0	K1	2588	handle_trust_retry_needed	pub fn handle_trust_retry_needed(
+crates/team-agent/src/messaging/delivery.rs	0	K1	1245	render_message	pub fn render_message(
+crates/team-agent/src/messaging/delivery.rs	0	K1	1160	requeue_worker_target_missing_messages	pub fn requeue_worker_target_missing_messages(
+crates/team-agent/src/messaging/delivery.rs	0	K1	3200	retry_injection_after_trust_auto_answer	pub fn retry_injection_after_trust_auto_answer(
+crates/team-agent/src/messaging/delivery.rs	0	K1	2483	LeaderReceiptObservation	pub(crate) enum LeaderReceiptObservation {
+crates/team-agent/src/messaging/delivery.rs	0	K1	1206	inject_submit_verified	pub(crate) fn inject_submit_verified(report: &InjectReport) -> bool {
+crates/team-agent/src/messaging/delivery.rs	0	K1	2529	leader_receipt_source_unavailable_outcome	pub(crate) fn leader_receipt_source_unavailable_outcome(message_id: &str) -> DeliveryOutcome {
+crates/team-agent/src/messaging/delivery.rs	0	K1+P1	2510	leader_transcript_has_token	pub(crate) fn leader_transcript_has_token(state: &serde_json::Value, message_id: &str) -> bool {
+crates/team-agent/src/messaging/delivery.rs	0	K1	1108	mark_worker_target_missing	pub(crate) fn mark_worker_target_missing(
+crates/team-agent/src/messaging/delivery.rs	0	K1	2489	observe_leader_receipt	pub(crate) fn observe_leader_receipt(
+crates/team-agent/src/messaging/delivery.rs	0	K1	1232	pane_readback_verified	pub(crate) fn pane_readback_verified(report: &InjectReport) -> bool {
+crates/team-agent/src/messaging/delivery.rs	0	K1	2411	recipient_allows_explicit_queue_flush	pub(crate) fn recipient_allows_explicit_queue_flush(
+crates/team-agent/src/messaging/delivery.rs	0	K1	2400	recipient_requires_single_enter	pub(crate) fn recipient_requires_single_enter(state: &serde_json::Value, recipient: &str) -> bool {
+crates/team-agent/src/messaging/delivery.rs	0	K1+P1	2621	record_turn_open_if_leader_to_worker	pub(crate) fn record_turn_open_if_leader_to_worker(
+crates/team-agent/src/messaging/delivery.rs	0	K1+P1	2831	stamp_first_send_at_if_leader_to_worker	pub(crate) fn stamp_first_send_at_if_leader_to_worker(
+crates/team-agent/src/messaging/delivery.rs	0	K1	115	tmux_pane_width	pub(crate) fn tmux_pane_width(transport: &dyn Transport, target: &Target) -> PaneWidthQuery {
+crates/team-agent/src/messaging/delivery.rs	0	K1	3348	token_already_visible	pub(crate) fn token_already_visible(
+crates/team-agent/src/messaging/delivery.rs	0	K1	3171	top_level_state_matches_owner_team	pub(crate) fn top_level_state_matches_owner_team(state: &serde_json::Value, team: &str) -> bool {
+crates/team-agent/src/messaging/delivery.rs	0	K1	146	worker_target_missing_due_to_stale_binding	pub(crate) fn worker_target_missing_due_to_stale_binding(
+crates/team-agent/src/messaging/delivery.rs	0	K1	2637	with_rescue_submit_observer	pub(super) fn with_rescue_submit_observer<R>(
+crates/team-agent/src/messaging/delivery.rs	0	K1	2647	CurrentTurnSubmitObserver	struct CurrentTurnSubmitObserver<'a> {
+crates/team-agent/src/messaging/delivery.rs	0	K1	1748	PaneSocketBinding	struct PaneSocketBinding<'a> {
+crates/team-agent/src/messaging/delivery.rs	0	K1	2294	PendingMessage	struct PendingMessage {
+crates/team-agent/src/messaging/delivery.rs	0	K1	240	PreparedMessageState	struct PreparedMessageState {
+crates/team-agent/src/messaging/delivery.rs	0	K1	1504	ResolvedInjectTarget	struct ResolvedInjectTarget {
+crates/team-agent/src/messaging/delivery.rs	0	K1	1511	TargetMetadata	struct TargetMetadata {
+crates/team-agent/src/messaging/delivery.rs	0	K1	1521	WorkerPaneBindingStale	struct WorkerPaneBindingStale {
+crates/team-agent/src/messaging/enter_rescue.rs	0	K1	21	DELAY_SECONDS	const DELAY_SECONDS: i64 = 90;
+crates/team-agent/src/messaging/enter_rescue.rs	0	K1	22	EXPIRE_SECONDS	const EXPIRE_SECONDS: i64 = 120;
+crates/team-agent/src/messaging/enter_rescue.rs	0	K1+P1	101	canonical_valid	fn canonical_valid(
+crates/team-agent/src/messaging/enter_rescue.rs	0	K1	32	digest	fn digest(text: &str) -> String {
+crates/team-agent/src/messaging/enter_rescue.rs	0	K1	131	fire_with	fn fire_with(
+crates/team-agent/src/messaging/enter_rescue.rs	0	K1	36	timestamp	fn timestamp(value: &str) -> Result<DateTime<Utc>, MessagingError> {
+crates/team-agent/src/messaging/enter_rescue.rs	0	K1	92	bind_pending_context	pub(crate) fn bind_pending_context(
+crates/team-agent/src/messaging/enter_rescue.rs	0	K1	44	schedule_in_tx	pub(crate) fn schedule_in_tx(
+crates/team-agent/src/messaging/enter_rescue.rs	0	K1	111	fire	pub(super) fn fire(
+crates/team-agent/src/messaging/enter_rescue.rs	0	K1	25	RescueJob	struct RescueJob {
+crates/team-agent/src/messaging/enter_rescue.rs	0	K1	128	Executor	type Executor<'a> = dyn Fn(&EnterRescueContext, &dyn Fn() -> bool) -> Result<EnterRescueOutcome, MessagingError>
+crates/team-agent/src/messaging/helpers.rs	0	K1	251	idle_activity	fn idle_activity() -> AgentActivity {
+crates/team-agent/src/messaging/helpers.rs	0	K1	22	MessageStatusShadow	pub struct MessageStatusShadow(pub String);
+crates/team-agent/src/messaging/helpers.rs	0	K1	266	fail_leader_delivery	pub(crate) fn fail_leader_delivery(
+crates/team-agent/src/messaging/helpers.rs	0	K1	142	latest_prompt_signal	pub(crate) fn latest_prompt_signal(scrollback: &str) -> Option<AgentActivity> {
+crates/team-agent/src/messaging/helpers.rs	0	K1	46	message_exists	pub(crate) fn message_exists(
+crates/team-agent/src/messaging/helpers.rs	0	K1	132	non_provider_command	pub(crate) fn non_provider_command(command: &str) -> Option<&str> {
+crates/team-agent/src/messaging/helpers.rs	0	K1	97	parse_scheduled_kind	pub(crate) fn parse_scheduled_kind(kind: &str) -> Result<ScheduledKind, MessagingError> {
+crates/team-agent/src/messaging/helpers.rs	0	K1	275	recent_rfc3339	pub(crate) fn recent_rfc3339(ts: &str, max_age_seconds: i64) -> bool {
+crates/team-agent/src/messaging/helpers.rs	0	K1	66	required_str	pub(crate) fn required_str<'a>(
+crates/team-agent/src/messaging/helpers.rs	0	K1	283	stale_rfc3339	pub(crate) fn stale_rfc3339(ts: &str, min_age_seconds: i64) -> bool {
+crates/team-agent/src/messaging/helpers.rs	0	K1	26	status_wire	pub(crate) fn status_wire(status: DeliveryStatus) -> &'static str {
+crates/team-agent/src/messaging/helpers.rs	0	K1	77	validate_result_envelope	pub(crate) fn validate_result_envelope(envelope: &serde_json::Value) -> Result<(), MessagingError> {
+crates/team-agent/src/messaging/helpers.rs	0	K1	110	working_seconds	pub(crate) fn working_seconds(scrollback: &str) -> Option<u64> {
+crates/team-agent/src/messaging/leader_receiver.rs	0	K1	230	leader_pane_id	fn leader_pane_id(state: &Value) -> Option<&str> {
+crates/team-agent/src/messaging/leader_receiver.rs	0	K1	204	leader_pane_is_live	fn leader_pane_is_live(workspace: &Path, state: &Value, pane_id: &str) -> bool {
+crates/team-agent/src/messaging/leader_receiver.rs	0	K1+P1	181	leader_receiver_record	fn leader_receiver_record(state: &Value) -> Option<&Value> {
+crates/team-agent/src/messaging/leader_receiver.rs	0	K1	176	leader_record_field	fn leader_record_field<'a>(state: &'a Value, field: &str) -> Option<&'a Value> {
+crates/team-agent/src/messaging/leader_receiver.rs	0	K1	196	leader_session_uuid	fn leader_session_uuid(state: &Value) -> Option<&str> {
+crates/team-agent/src/messaging/leader_receiver.rs	0	K1	234	leader_tmux_socket	fn leader_tmux_socket(state: &Value) -> Option<&str> {
+crates/team-agent/src/messaging/leader_receiver.rs	0	K1+P1	241	message_already_delivered	fn message_already_delivered(
+crates/team-agent/src/messaging/leader_receiver.rs	0	K1	156	owner_epoch	fn owner_epoch(state: &Value) -> Option<u64> {
+crates/team-agent/src/messaging/leader_receiver.rs	0	K1+P1	192	owner_epoch_i64	fn owner_epoch_i64(state: &Value) -> Option<i64> {
+crates/team-agent/src/messaging/leader_receiver.rs	0	K1	164	receiver_or_owner_field	fn receiver_or_owner_field<'a>(state: &'a Value, record: &str, field: &str) -> Option<&'a Value> {
+crates/team-agent/src/messaging/leader_receiver.rs	0	K1+P1	248	render_fallback_pane_message	fn render_fallback_pane_message(content: &str, message_id: &str, primary_error: &str) -> String {
+crates/team-agent/src/messaging/leader_receiver.rs	0	K1	129	deliver_to_leader_fallback_pane	pub fn deliver_to_leader_fallback_pane(
+crates/team-agent/src/messaging/leader_receiver.rs	0	K1	271	enqueue_leader_mailbox_until_attach	pub fn enqueue_leader_mailbox_until_attach(
+crates/team-agent/src/messaging/leader_receiver.rs	0	K1	108	mirror_peer_message_to_leader	pub fn mirror_peer_message_to_leader(
+crates/team-agent/src/messaging/leader_receiver.rs	0	K1	34	send_to_leader_receiver	pub fn send_to_leader_receiver(
+crates/team-agent/src/messaging/leader_receiver.rs	0	K1	91	send_to_leader_receiver_with_presentation	pub fn send_to_leader_receiver_with_presentation(
+crates/team-agent/src/messaging/leader_receiver.rs	0	K1	200	leader_pane_bound_but_not_live	pub(crate) fn leader_pane_bound_but_not_live(workspace: &Path, state: &Value) -> bool {
+crates/team-agent/src/messaging/leader_receiver.rs	0	K1	63	send_to_leader_receiver_with_message_id	pub(crate) fn send_to_leader_receiver_with_message_id(
+crates/team-agent/src/messaging/mod.rs	0	K1	153	Provider, Routing	Provider(String),
+crates/team-agent/src/messaging/mod.rs	0	K1	159	Provider, Routing	Routing(String),
+crates/team-agent/src/messaging/persist.rs	0	K1	86	error, row_status	fn error(self) -> Option<&'static str> {
+crates/team-agent/src/messaging/persist.rs	0	K1	75	error, row_status	fn row_status(self) -> MessageRowStatus {
+crates/team-agent/src/messaging/persist.rs	0	K1	59	as_str	pub const fn as_str(self) -> &'static str {
+crates/team-agent/src/messaging/persist.rs	0	K1	54	DeliveryBlocker	pub enum DeliveryBlocker {
+crates/team-agent/src/messaging/persist.rs	0	K1	67	InitialDisposition	pub enum InitialDisposition {
+crates/team-agent/src/messaging/persist.rs	0	K1	14	InternalSendKind	pub enum InternalSendKind {
+crates/team-agent/src/messaging/persist.rs	0	K1	30	LogicalRecipient	pub enum LogicalRecipient {
+crates/team-agent/src/messaging/persist.rs	0	K1	151	PersistResolution	pub enum PersistResolution {
+crates/team-agent/src/messaging/persist.rs	0	K1	23	SendOrigin	pub enum SendOrigin {
+crates/team-agent/src/messaging/persist.rs	0	K1	112	accepted	pub fn accepted(
+crates/team-agent/src/messaging/persist.rs	0	K1	45	as_str, from_resolved	pub fn as_str(&self) -> &str {
+crates/team-agent/src/messaging/persist.rs	0	K1	36	as_str, from_resolved	pub fn from_resolved(value: impl Into<String>) -> Self {
+crates/team-agent/src/messaging/persist.rs	0	K1	158	persist_resolved_send	pub fn persist_resolved_send(
+crates/team-agent/src/messaging/persist.rs	0	K1	142	PersistedSend	pub struct PersistedSend {
+crates/team-agent/src/messaging/persist.rs	0	K1	95	ResolvedSendIntent	pub struct ResolvedSendIntent {
+crates/team-agent/src/messaging/persist.rs	0	K1	165	persist_internal_send	pub(crate) fn persist_internal_send(
+crates/team-agent/src/messaging/presentation.rs	0	K1	49	Send	Send,
+crates/team-agent/src/messaging/reminders.rs	0	K1	46	view	fn view(id: i64, reminder: &Reminder) -> Value {
+crates/team-agent/src/messaging/reminders.rs	0	K1	51	add	pub(crate) fn add(
+crates/team-agent/src/messaging/reminders.rs	0	K1	65	cancel	pub(crate) fn cancel(workspace: &Path, owner: &str, id: i64) -> Result<bool, MessagingError> {
+crates/team-agent/src/messaging/reminders.rs	0	K1	61	list	pub(crate) fn list(workspace: &Path, owner: &str) -> Result<Vec<Value>, MessagingError> {
+crates/team-agent/src/messaging/reminders.rs	0	K1	19	parse_duration	pub(crate) fn parse_duration(raw: &str) -> Result<Duration, MessagingError> {
+crates/team-agent/src/messaging/reminders.rs	0	K1	38	parse_id	pub(crate) fn parse_id(id: &str) -> Option<i64> {
+crates/team-agent/src/messaging/reminders.rs	0	K1	69	fire	pub(super) fn fire(
+crates/team-agent/src/messaging/reminders.rs	0	K1	13	Reminder	struct Reminder {
+crates/team-agent/src/messaging/results.rs	0	K1+P1	436	auto_finalize_result	fn auto_finalize_result(
+crates/team-agent/src/messaging/results.rs	0	K1	128	collect_input_has_no_local_team_context	fn collect_input_has_no_local_team_context(workspace: &Path) -> bool {
+crates/team-agent/src/messaging/results.rs	0	K1+P1	106	collect_paths	fn collect_paths(workspace: &Path) -> Result<CollectPaths, MessagingError> {
+crates/team-agent/src/messaging/results.rs	0	K1	64	collect_scoped	fn collect_scoped(
+crates/team-agent/src/messaging/results.rs	0	K1+P1	514	copy_report_attribution_fields	fn copy_report_attribution_fields(
+crates/team-agent/src/messaging/results.rs	0	K1	330	count_results	fn count_results(
+crates/team-agent/src/messaging/results.rs	0	K1	697	format_report_result_artifacts	fn format_report_result_artifacts(envelope: &serde_json::Value) -> Option<String> {
+crates/team-agent/src/messaging/results.rs	0	K1	659	format_report_result_changes	fn format_report_result_changes(envelope: &serde_json::Value) -> Option<String> {
+crates/team-agent/src/messaging/results.rs	0	K1	422	format_report_result_leader_summary	fn format_report_result_leader_summary(
+crates/team-agent/src/messaging/results.rs	0	K1	714	format_report_result_next_actions	fn format_report_result_next_actions(envelope: &serde_json::Value) -> Option<String> {
+crates/team-agent/src/messaging/results.rs	0	K1	554	format_report_result_notification	fn format_report_result_notification(
+crates/team-agent/src/messaging/results.rs	0	K1	680	format_report_result_risks	fn format_report_result_risks(envelope: &serde_json::Value) -> Option<String> {
+crates/team-agent/src/messaging/results.rs	0	K1	594	format_report_result_tests	fn format_report_result_tests(envelope: &serde_json::Value) -> Option<String> {
+crates/team-agent/src/messaging/results.rs	0	K1	613	format_report_result_warnings	fn format_report_result_warnings(envelope: &serde_json::Value) -> Option<String> {
+crates/team-agent/src/messaging/results.rs	0	K1+P1	176	ingest_result_file	fn ingest_result_file(
+crates/team-agent/src/messaging/results.rs	0	K1	529	insert_result_if_absent	fn insert_result_if_absent(
+crates/team-agent/src/messaging/results.rs	0	K1	263	is_message_scoped_result	fn is_message_scoped_result(
+crates/team-agent/src/messaging/results.rs	0	K1+P1	411	leader_result_presentation	fn leader_result_presentation(task_id: &str) -> super::presentation::PresentationDecision {
+crates/team-agent/src/messaging/results.rs	0	K1	220	mark_task_done	fn mark_task_done(state: &mut serde_json::Value, task_id: &str, result_id: &str) {
+crates/team-agent/src/messaging/results.rs	0	K1+P1	155	record_invalid_result	fn record_invalid_result(
+crates/team-agent/src/messaging/results.rs	0	K1	648	report_field	fn report_field<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+crates/team-agent/src/messaging/results.rs	0	K1	655	report_field_any	fn report_field_any<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
+crates/team-agent/src/messaging/results.rs	0	K1+P1	395	report_owner_state	fn report_owner_state(state: &serde_json::Value, owner_team: &str) -> serde_json::Value {
+crates/team-agent/src/messaging/results.rs	0	K1	636	report_result_array	fn report_result_array<'a>(
+crates/team-agent/src/messaging/results.rs	0	K1	386	report_result_for_owner_team_inner	fn report_result_for_owner_team_inner(
+crates/team-agent/src/messaging/results.rs	0	K1+P1	72	resolve_owner_team_for_read	fn resolve_owner_team_for_read(
+crates/team-agent/src/messaging/results.rs	0	K1	287	result_counts	fn result_counts(
+crates/team-agent/src/messaging/results.rs	0	K1	140	state_spec_workspace	fn state_spec_workspace(run_workspace: &Path) -> Option<PathBuf> {
+crates/team-agent/src/messaging/results.rs	0	K1	145	state_spec_workspace_from_value	fn state_spec_workspace_from_value(state: &serde_json::Value) -> Option<PathBuf> {
+crates/team-agent/src/messaging/results.rs	0	K1	244	task_exists	fn task_exists(state: &serde_json::Value, task_id: &str) -> bool {
+crates/team-agent/src/messaging/results.rs	0	K1	255	task_exists_for_owner	fn task_exists_for_owner(state: &serde_json::Value, owner_team: &str, task_id: &str) -> bool {
+crates/team-agent/src/messaging/results.rs	0	K1+P1	481	task_result_route	fn task_result_route(
+crates/team-agent/src/messaging/results.rs	0	K1	24	ALL, as_str, parse	pub const ALL: [Self; 2] = [Self::Leader, Self::Pipeline];
+crates/team-agent/src/messaging/results.rs	0	K1	26	ALL, as_str, parse	pub const fn as_str(self) -> &'static str {
+crates/team-agent/src/messaging/results.rs	0	K1	18	ResultRoute	pub enum ResultRoute {
+crates/team-agent/src/messaging/results.rs	0	K1	49	collect	pub fn collect(
+crates/team-agent/src/messaging/results.rs	0	K1	56	collect_for_team	pub fn collect_for_team(
+crates/team-agent/src/messaging/results.rs	0	K1	33	ALL, as_str, parse	pub fn parse(value: &str) -> Option<Self> {
+crates/team-agent/src/messaging/results.rs	0	K1	357	report_result	pub fn report_result(
+crates/team-agent/src/messaging/results.rs	0	K1	364	report_result_for_owner_team	pub fn report_result_for_owner_team(
+crates/team-agent/src/messaging/results.rs	0	K1	372	report_result_for_owner_team_with_primary_error	pub fn report_result_for_owner_team_with_primary_error(
+crates/team-agent/src/messaging/results.rs	0	K1	101	CollectPaths	struct CollectPaths {
+crates/team-agent/src/messaging/results.rs	0	K1	211	StoredResult	struct StoredResult {
+crates/team-agent/src/messaging/scheduler.rs	0	K1+P1	39	output_is_stale	fn output_is_stale(last_output_at: &str, timeout_seconds: i64) -> bool {
+crates/team-agent/src/messaging/scheduler.rs	0	K1	19	fire_due_scheduled_events	pub fn fire_due_scheduled_events(
+crates/team-agent/src/messaging/selftest.rs	0	K1	151	message_owner_team	fn message_owner_team(db_path: &Path, message_id: &str) -> Result<Option<String>, MessagingError> {
+crates/team-agent/src/messaging/selftest.rs	0	K1	156	evaluate_idle_behavior	pub(crate) fn evaluate_idle_behavior(
+crates/team-agent/src/messaging/send.rs	0	K1	447	backfill_leader_binding_for_delivery_view	fn backfill_leader_binding_for_delivery_view(
+crates/team-agent/src/messaging/send.rs	0	K1	679	broadcast_recipients	fn broadcast_recipients(
+crates/team-agent/src/messaging/send.rs	0	K1	481	can_backfill_top_level_leader_binding	fn can_backfill_top_level_leader_binding(raw_state: &serde_json::Value) -> bool {
+crates/team-agent/src/messaging/send.rs	0	K1+P1	182	capture_missing_sessions_after_send	fn capture_missing_sessions_after_send(workspace: &Path) {
+crates/team-agent/src/messaging/send.rs	0	P1	333	coordinator_unavailable_outcome	fn coordinator_unavailable_outcome(
+crates/team-agent/src/messaging/send.rs	0	K1	538	explicit_claim_applied	fn explicit_claim_applied(workspace: &Path, _team_key: &str, _caller_pane: &str) -> bool {
+crates/team-agent/src/messaging/send.rs	0	K1	719	fanout_send	fn fanout_send(
+crates/team-agent/src/messaging/send.rs	0	K1	553	owner_gate_hint_team_key	fn owner_gate_hint_team_key(state: &serde_json::Value) -> String {
+crates/team-agent/src/messaging/send.rs	0	K1	562	owner_pane_is_dead	fn owner_pane_is_dead(state: &serde_json::Value) -> bool {
+crates/team-agent/src/messaging/send.rs	0	K1+P1	206	persist_stored_only_send	fn persist_stored_only_send(
+crates/team-agent/src/messaging/send.rs	0	K1	413	rebind_required_outcome	fn rebind_required_outcome(message_id: Option<String>) -> DeliveryOutcome {
+crates/team-agent/src/messaging/send.rs	0	K1	420	rebind_required_outcome_with_verification	fn rebind_required_outcome_with_verification(
+crates/team-agent/src/messaging/send.rs	0	K1	291	refused_outcome	fn refused_outcome(reason: DeliveryRefusal) -> DeliveryOutcome {
+crates/team-agent/src/messaging/send.rs	0	K1	295	refused_outcome_with_id	fn refused_outcome_with_id(reason: DeliveryRefusal, message_id: Option<String>) -> DeliveryOutcome {
+crates/team-agent/src/messaging/send.rs	0	K1	310	refused_outcome_with_verification	fn refused_outcome_with_verification(
+crates/team-agent/src/messaging/send.rs	0	K1+P1	488	send_owner_gate_refusal	fn send_owner_gate_refusal(
+crates/team-agent/src/messaging/send.rs	0	K1	438	sender_is_leader	fn sender_is_leader(state: &serde_json::Value, sender: &str) -> bool {
+crates/team-agent/src/messaging/send.rs	0	K1+P1	261	stale_worker_target_missing_preflight	fn stale_worker_target_missing_preflight(
+crates/team-agent/src/messaging/send.rs	0	K1	280	task_exists	fn task_exists(state: &serde_json::Value, task_id: &TaskId) -> bool {
+crates/team-agent/src/messaging/send.rs	0	K1	598	apply_worker_sender_bypass	pub fn apply_worker_sender_bypass(
+crates/team-agent/src/messaging/send.rs	0	K1	46	from_runtime_identity	pub fn from_runtime_identity(agent_id: AgentId) -> Self {
+crates/team-agent/src/messaging/send.rs	0	K1	139	send_message	pub fn send_message(
+crates/team-agent/src/messaging/send.rs	0	K1	92	SendOptions	pub struct SendOptions {
+crates/team-agent/src/messaging/send.rs	0	K1	637	session_drift_refusal	pub(crate) fn session_drift_refusal(
+crates/team-agent/src/messaging/trust.rs	0	K1	188	ellipsis_matches_workspace	fn ellipsis_matches_workspace(token: &str, workspace_text: &str) -> bool {
+crates/team-agent/src/messaging/trust.rs	0	K1	122	path_tokens	fn path_tokens(text: &str) -> Vec<String> {
+crates/team-agent/src/messaging/trust.rs	0	K1	95	submit_trust_answer	fn submit_trust_answer(
+crates/team-agent/src/messaging/trust.rs	0	K1	166	token_matches_workspace	fn token_matches_workspace(
+crates/team-agent/src/messaging/trust.rs	0	K1	205	token_reaches_right_edge	fn token_reaches_right_edge(token: &str, text: &str, pane_width: u32) -> bool {
+crates/team-agent/src/messaging/trust.rs	0	K1	135	token_trim_char	fn token_trim_char(c: char) -> bool {
+crates/team-agent/src/messaging/trust.rs	0	K1	108	workspace_matches_prompt_tail	fn workspace_matches_prompt_tail(
+crates/team-agent/src/messaging/trust.rs	0	K1	25	attempt_trust_auto_answer	pub fn attempt_trust_auto_answer(
+crates/team-agent/src/messaging/trust.rs	0	K1	13	TrustAnswerOutcome	pub struct TrustAnswerOutcome {
+crates/team-agent/src/messaging/types.rs	0	K1	480	RESULT_DELIVERY_MAX_ATTEMPTS	pub const RESULT_DELIVERY_MAX_ATTEMPTS: u8 = 5;
+crates/team-agent/src/messaging/types.rs	0	K1	477	SEND_RETRY_MAX_ATTEMPTS	pub const SEND_RETRY_MAX_ATTEMPTS: u8 = 3;
+crates/team-agent/src/messaging/types.rs	0	K1	474	TRUST_RETRY_BACKOFF_SECONDS	pub const TRUST_RETRY_BACKOFF_SECONDS: &[(u8, u32)] = &[(2, 5), (3, 15), (4, 30)];
+crates/team-agent/src/messaging/types.rs	0	K1	471	TRUST_RETRY_MAX_ATTEMPTS	pub const TRUST_RETRY_MAX_ATTEMPTS: u8 = 4;
+crates/team-agent/src/messaging/types.rs	0	K1	128	ActivityStatus	pub enum ActivityStatus {
+crates/team-agent/src/messaging/types.rs	0	K1	47	DeliveryRefusal	pub enum DeliveryRefusal {
+crates/team-agent/src/messaging/types.rs	0	K1	103	DeliveryStage	pub enum DeliveryStage {
+crates/team-agent/src/messaging/types.rs	0	K1	21	DeliveryStatus	pub enum DeliveryStatus {
+crates/team-agent/src/messaging/types.rs	0	K1	268	PaneWidthQuery	pub enum PaneWidthQuery {
+crates/team-agent/src/messaging/types.rs	0	K1	256	ReceiverMode	pub enum ReceiverMode {
+crates/team-agent/src/messaging/types.rs	0	K1	115	ScheduledKind	pub enum ScheduledKind {
+crates/team-agent/src/messaging/types.rs	0	K1	168	WorkerRuntimeState	pub enum WorkerRuntimeState {
+crates/team-agent/src/messaging/types.rs	0	K1	138	allows_idle_takeover	pub fn allows_idle_takeover(self) -> bool {
+crates/team-agent/src/messaging/types.rs	0	K1	181	as_wire, blocks_automatic_dispatch, from_activity, is_idle_c	pub fn as_wire(self) -> &'static str {
+crates/team-agent/src/messaging/types.rs	0	K1	206	as_wire, blocks_automatic_dispatch, from_activity, is_idle_c	pub fn blocks_automatic_dispatch(self) -> bool {
+crates/team-agent/src/messaging/types.rs	0	K1	223	as_wire, blocks_automatic_dispatch, from_activity, is_idle_c	pub fn from_activity(activity: ActivityStatus) -> Self {
+crates/team-agent/src/messaging/types.rs	0	K1	212	as_wire, blocks_automatic_dispatch, from_activity, is_idle_c	pub fn is_idle_candidate(self) -> bool {
+crates/team-agent/src/messaging/types.rs	0	K1	193	as_wire, blocks_automatic_dispatch, from_activity, is_idle_c	pub fn parse_wire(value: &str) -> Self {
+crates/team-agent/src/messaging/types.rs	0	K1	442	AgentActivity	pub struct AgentActivity {
+crates/team-agent/src/messaging/types.rs	0	K1	286	DeliveryOutcome	pub struct DeliveryOutcome {
+crates/team-agent/src/messaging/types.rs	0	K1	394	IdleEvaluation	pub struct IdleEvaluation {
+crates/team-agent/src/messaging/types.rs	0	K1	434	LeaderNotificationKey	pub struct LeaderNotificationKey {
+crates/team-agent/src/messaging/types.rs	0	K1	422	LeaderReceiver	pub struct LeaderReceiver {
+crates/team-agent/src/messaging/types.rs	0	K1	320	SendEventPayload	pub struct SendEventPayload {
+crates/team-agent/src/messaging/types.rs	0	K1	309	TrustRetryPayload	pub struct TrustRetryPayload {
+crates/team-agent/src/messaging/types.rs	0	K1	405	AlertSnapshot	pub(crate) struct AlertSnapshot {
+crates/team-agent/src/messaging/types.rs	0	K1	412	AlertSuppression	pub(crate) struct AlertSuppression {
+crates/team-agent/src/messaging/wait.rs	0	K1	52	Registration	enum Registration {
+crates/team-agent/src/messaging/wait.rs	0	K1	125	record_signal	extern "C" fn record_signal(signal: libc::c_int) {
+crates/team-agent/src/messaging/wait.rs	0	K1	296	caught_signal	fn caught_signal() -> Option<i32> {
+crates/team-agent/src/messaging/wait.rs	0	K1	76	cleanup	fn cleanup(&mut self) -> Result<(), MessagingError> {
+crates/team-agent/src/messaging/wait.rs	0	K1+P1	209	create_fifo	fn create_fifo(path: &Path) -> Result<FifoEndpoints, MessagingError> {
+crates/team-agent/src/messaging/wait.rs	0	K1	181	fifo_path	fn fifo_path(
+crates/team-agent/src/messaging/wait.rs	0	K1	92	install	fn install() -> io::Result<Self> {
+crates/team-agent/src/messaging/wait.rs	0	K1	301	interrupted	fn interrupted(signal: i32) -> io::Error {
+crates/team-agent/src/messaging/wait.rs	0	K1+P1	203	random_suffix	fn random_suffix() -> Result<String, MessagingError> {
+crates/team-agent/src/messaging/wait.rs	0	K1+P1	256	read_wake_line	fn read_wake_line(fd: RawFd) -> Result<String, MessagingError> {
+crates/team-agent/src/messaging/wait.rs	0	K1	133	register	fn register(
+crates/team-agent/src/messaging/wait.rs	0	K1	245	set_blocking	fn set_blocking(fd: RawFd) -> io::Result<()> {
+crates/team-agent/src/messaging/wait.rs	0	K1	50	CAUGHT_SIGNAL	static CAUGHT_SIGNAL: AtomicI32 = AtomicI32::new(0);
+crates/team-agent/src/messaging/wait.rs	0	K1	57	FifoEndpoints	struct FifoEndpoints {
+crates/team-agent/src/messaging/wait.rs	0	K1	69	RegistrationCleanup	struct RegistrationCleanup {
+crates/team-agent/src/messaging/wait.rs	0	K1	86	SignalGuard	struct SignalGuard {
+crates/team-agent/src/messaging/watchers.rs	0	K1+P1	181	deliver_primary_watcher	fn deliver_primary_watcher(
+crates/team-agent/src/messaging/watchers.rs	0	K1	326	mark_watcher_notified	fn mark_watcher_notified(
+crates/team-agent/src/messaging/watchers.rs	0	K1+P1	568	message_content_row	fn message_content_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, String)> {
+crates/team-agent/src/messaging/watchers.rs	0	K1	378	result_delivery_attempts	fn result_delivery_attempts(
+crates/team-agent/src/messaging/watchers.rs	0	K1+P1	409	result_entry_from_row	fn result_entry_from_row(
+crates/team-agent/src/messaging/watchers.rs	0	K1	347	update_watcher_failure	fn update_watcher_failure(
+crates/team-agent/src/messaging/watchers.rs	0	K1+P1	41	watcher_matches	fn watcher_matches(
+crates/team-agent/src/messaging/watchers.rs	0	K1	441	recover_watchers_for_incident	pub fn recover_watchers_for_incident(
+crates/team-agent/src/messaging/watchers.rs	0	K1	430	requeue_after_claim_leader	pub fn requeue_after_claim_leader(
+crates/team-agent/src/messaging/watchers.rs	0	K1	526	requeue_delivery_exhausted_watchers	pub fn requeue_delivery_exhausted_watchers(
+crates/team-agent/src/messaging/watchers.rs	0	K1	401	retry_result_deliveries	pub fn retry_result_deliveries(
+crates/team-agent/src/messaging/watchers.rs	0	K1	559	delivered_result_message	pub(crate) fn delivered_result_message(
+crates/team-agent/src/messaging/watchers.rs	0	K1+P1	59	notify_fifo_result_watchers	pub(crate) fn notify_fifo_result_watchers(
+crates/team-agent/src/messaging/watchers.rs	0	K1	31	notify_result_watchers	pub(crate) fn notify_result_watchers(
+crates/team-agent/src/messaging/watchers.rs	0	K1	463	requeue_blocked_leader_messages	pub(crate) fn requeue_blocked_leader_messages(
+crates/team-agent/src/messaging/watchers.rs	0	K1	478	requeue_blocked_leader_messages_with_counts	pub(crate) fn requeue_blocked_leader_messages_with_counts(
+crates/team-agent/src/messaging/watchers.rs	0	K1	547	requeue_delivery_exhausted_watchers_with_counts	pub(crate) fn requeue_delivery_exhausted_watchers_with_counts(
+crates/team-agent/src/messaging/watchers.rs	0	K1	21	RecoveryIncident	pub(crate) struct RecoveryIncident {
+crates/team-agent/src/model/spec.rs	0	K1	40	RESULT_COLLECTIONS	const RESULT_COLLECTIONS: &[(&str, &[&str], &[&str])] = &[
+crates/team-agent/src/model/spec.rs	0	K1	26	RESULT_REQUIRED	const RESULT_REQUIRED: &[&str] = &[
+crates/team-agent/src/model/spec.rs	0	K1	115	result_schema_errors	fn result_schema_errors(envelope: &Value) -> Vec<String> {
+crates/team-agent/src/model/spec.rs	0	K1	66	validate_result_envelope	pub fn validate_result_envelope(envelope: &Value) -> Result<(), ModelError> {
+crates/team-agent/src/os_probe.rs	0	K10	193	pane_foreground_and_root_pgrp	pub(crate) fn pane_foreground_and_root_pgrp(pane_pid: u32) -> io::Result<Option<(u32, u32)>> {
+crates/team-agent/src/os_probe.rs	0	K10	57	probe_timed_out	pub(crate) fn probe_timed_out() -> bool {
+crates/team-agent/src/state/persist.rs	0	P1	1329	latest_team_owner_receiver	fn latest_team_owner_receiver<'a>(
+crates/team-agent/src/state/persist.rs	0	P1	208	acquire_result_collection_lock	pub(crate) fn acquire_result_collection_lock(
+crates/team-agent/src/tmux_backend.rs	0	K10	2670	PASTED_CONTENT_APPEAR_POLLS	const PASTED_CONTENT_APPEAR_POLLS: u32 = 5;
+crates/team-agent/src/tmux_backend.rs	0	K10	2671	PASTED_CONTENT_SUBMIT_ATTEMPTS	const PASTED_CONTENT_SUBMIT_ATTEMPTS: u32 = 3;
+crates/team-agent/src/tmux_backend.rs	0	K10	2681	POST_SUBMIT_CAPTURE_RETRY	const POST_SUBMIT_CAPTURE_RETRY: u32 = 4;
+crates/team-agent/src/tmux_backend.rs	0	K10	2682	POST_SUBMIT_CAPTURE_RETRY_MS	const POST_SUBMIT_CAPTURE_RETRY_MS: u64 = 20;
+crates/team-agent/src/tmux_backend.rs	0	K10	2678	POST_SUBMIT_CONSUMPTION_ATTEMPTS	const POST_SUBMIT_CONSUMPTION_ATTEMPTS: u32 = 3;
+crates/team-agent/src/tmux_backend.rs	0	K10	2679	POST_SUBMIT_CONSUMPTION_POLL_MS	const POST_SUBMIT_CONSUMPTION_POLL_MS: u64 = 60;
+crates/team-agent/src/tmux_backend.rs	0	K10	1834	TOKEN_POST_SUBMIT_READBACK_POLLS	const TOKEN_POST_SUBMIT_READBACK_POLLS: u32 = 5;
+crates/team-agent/src/tmux_backend.rs	0	K10	2684	UNVERIFIED_COMPOSER_RESEND_MAX	const UNVERIFIED_COMPOSER_RESEND_MAX: u32 = 1;
+crates/team-agent/src/tmux_backend.rs	0	K10	1672	buffer_name_for_text	fn buffer_name_for_text(text: &str) -> String {
+crates/team-agent/src/tmux_backend.rs	0	K10	2296	busy_signal_kind_in_line	fn busy_signal_kind_in_line(line: &str) -> Option<BusySignalKind> {
+crates/team-agent/src/tmux_backend.rs	0	K10	1894	capture_has_pasted_content_prompt	fn capture_has_pasted_content_prompt(text: &str) -> bool {
+crates/team-agent/src/tmux_backend.rs	0	K10	2084	composer_joined	fn composer_joined(text: &str, n: usize) -> String {
+crates/team-agent/src/tmux_backend.rs	0	K10	2219	consumption_capture_observation	fn consumption_capture_observation(
+crates/team-agent/src/tmux_backend.rs	0	K10	2045	consumption_from_placeholder	fn consumption_from_placeholder(text: &str, tracked: Option<PasteLatch>) -> Option<bool> {
+crates/team-agent/src/tmux_backend.rs	0	K10	2266	gone_consumption	fn gone_consumption(text: &str, tracked: Option<PasteLatch>) -> Option<bool> {
+crates/team-agent/src/tmux_backend.rs	0	K10	1650	inject_stage_for_argv	fn inject_stage_for_argv(argv: &[String]) -> InjectStage {
+crates/team-agent/src/tmux_backend.rs	0	K10	1871	inject_verification_after_readback	fn inject_verification_after_readback(
+crates/team-agent/src/tmux_backend.rs	0	K10	1692	inject_verification_for_payload	fn inject_verification_for_payload(payload: &InjectPayload) -> InjectVerification {
+crates/team-agent/src/tmux_backend.rs	0	K10	2666	is_hex_byte	fn is_hex_byte(b: u8) -> bool {
+crates/team-agent/src/tmux_backend.rs	0	K10	2662	is_token_byte	fn is_token_byte(b: u8) -> bool {
+crates/team-agent/src/tmux_backend.rs	0	K10	2024	latch_paste	fn latch_paste(text: &str, current: Option<PasteLatch>) -> Option<PasteLatch> {
+crates/team-agent/src/tmux_backend.rs	0	K10	2279	marker_position_from_bottom	fn marker_position_from_bottom(text: &str, marker: &str) -> Option<u32> {
+crates/team-agent/src/tmux_backend.rs	0	K10	2644	matches_prefix	fn matches_prefix(bytes: &[u8], i: usize, prefix: &[u8]) -> bool {
+crates/team-agent/src/tmux_backend.rs	0	K10	2648	matches_prefix_case_insensitive	fn matches_prefix_case_insensitive(bytes: &[u8], i: usize, prefix: &[u8]) -> bool {
+crates/team-agent/src/tmux_backend.rs	0	K10	3106	notify_submit_observer	fn notify_submit_observer(observer: Option<&dyn SubmitObserver>) {
+crates/team-agent/src/tmux_backend.rs	0	K10	1487	pane_in_mode, run_inject_stage_with_stdin	fn pane_in_mode(&self, target: &Target) -> Option<bool> {
+crates/team-agent/src/tmux_backend.rs	0	K10	1959	parse_grok_pasted_line_count	fn parse_grok_pasted_line_count(lower_line: &str) -> Option<u32> {
+crates/team-agent/src/tmux_backend.rs	0	K10	1943	parse_pasted_hash_id	fn parse_pasted_hash_id(lower_line: &str) -> Option<u32> {
+crates/team-agent/src/tmux_backend.rs	0	K10	1981	pasted_literal_in_line	fn pasted_literal_in_line(lower_line: &str) -> Option<&'static str> {
+crates/team-agent/src/tmux_backend.rs	0	K10+P1	2436	pasted_prompt_in_bottom	fn pasted_prompt_in_bottom(text: &str, n: usize) -> bool {
+crates/team-agent/src/tmux_backend.rs	0	K10	1788	payload_token_marker	fn payload_token_marker(payload: &InjectPayload) -> Option<&str> {
+crates/team-agent/src/tmux_backend.rs	0	K10	2702	post_submit_input_consumed	fn post_submit_input_consumed(
+crates/team-agent/src/tmux_backend.rs	0	K10	1839	post_submit_token_visible	fn post_submit_token_visible(
+crates/team-agent/src/tmux_backend.rs	0	K10+P1	1813	pre_submit_token_visible	fn pre_submit_token_visible(
+crates/team-agent/src/tmux_backend.rs	0	K10	1571	probe_inject_target_surface	fn probe_inject_target_surface(backend: &TmuxBackend, target: &Target) -> InjectTargetSurface {
+crates/team-agent/src/tmux_backend.rs	0	K10	2347	provider_busy_signal_in_tail	fn provider_busy_signal_in_tail(text: &str) -> bool {
+crates/team-agent/src/tmux_backend.rs	0	K10	2333	provider_busy_signal_match	fn provider_busy_signal_match(text: &str) -> Option<BusySignalMatch> {
+crates/team-agent/src/tmux_backend.rs	0	K10	2173	raw_multiline_still_unfolded	fn raw_multiline_still_unfolded(text: &str, marker: &str) -> bool {
+crates/team-agent/src/tmux_backend.rs	0	K10	2252	record	fn record(&mut self, observation: ConsumptionCaptureObservation) {
+crates/team-agent/src/tmux_backend.rs	0	K10	1549	record_err, record_ok, seen_after_ok_samples	fn record_err(&mut self) {
+crates/team-agent/src/tmux_backend.rs	0	K10	1540	record_err, record_ok, seen_after_ok_samples	fn record_ok(&mut self, text: &str, marker: Option<&str>) {
+crates/team-agent/src/tmux_backend.rs	0	K10	1464	pane_in_mode, run_inject_stage_with_stdin	fn run_inject_stage_with_stdin(
+crates/team-agent/src/tmux_backend.rs	1	K10	126	run_with_stdin	fn run_with_stdin(
+crates/team-agent/src/tmux_backend.rs	0	K10	2654	scan_token_end	fn scan_token_end(bytes: &[u8], start: usize) -> usize {
+crates/team-agent/src/tmux_backend.rs	0	K10	2594	scrub_secrets	fn scrub_secrets(line: &str) -> String {
+crates/team-agent/src/tmux_backend.rs	0	K10	1554	record_err, record_ok, seen_after_ok_samples	fn seen_after_ok_samples(&self, visible: bool) -> Option<bool> {
+crates/team-agent/src/tmux_backend.rs	0	K10	2547	strip_ansi_escapes_inplace	fn strip_ansi_escapes_inplace(input: &str) -> String {
+crates/team-agent/src/tmux_backend.rs	0	K10	2391	submit_attempt_observation	fn submit_attempt_observation(
+crates/team-agent/src/tmux_backend.rs	0	K10	1605	submit_diagnostics_for_inject	fn submit_diagnostics_for_inject(
+crates/team-agent/src/tmux_backend.rs	0	K10	1887	submit_verification_for_key	fn submit_verification_for_key(key: Key) -> SubmitVerification {
+crates/team-agent/src/tmux_backend.rs	0	K10	1901	token_in_bottom_n	fn token_in_bottom_n(text: &str, marker: &str, n: usize) -> bool {
+crates/team-agent/src/tmux_backend.rs	0	K10	2035	token_sighting	fn token_sighting(token_now: bool, token_ever_visible: bool) -> TokenSighting {
+crates/team-agent/src/tmux_backend.rs	0	K10	1796	token_visible_in_capture	fn token_visible_in_capture(
+crates/team-agent/src/tmux_backend.rs	0	K10	2379	turn_verification_for_payload	fn turn_verification_for_payload(
+crates/team-agent/src/tmux_backend.rs	0	K10	1713	CURSOR_PASTE_TO_SUBMIT_FLOOR	pub const CURSOR_PASTE_TO_SUBMIT_FLOOR: Duration = Duration::from_secs(1);
+crates/team-agent/src/tmux_backend.rs	0	K10	697	kill_server, set_pane_binding_nonce, with_runner, with_runne	pub fn kill_server(&self) {
+crates/team-agent/src/tmux_backend.rs	0	K10	1755	with_cursor_single_enter	pub fn with_cursor_single_enter<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
+crates/team-agent/src/tmux_backend.rs	0	K10	1732	with_paste_to_submit_floor	pub fn with_paste_to_submit_floor<R>(floor: Duration, f: impl FnOnce() -> R) -> R {
+crates/team-agent/src/tmux_backend.rs	0	K10	583	kill_server, set_pane_binding_nonce, with_runner, with_runne	pub fn with_runner(runner: Box<dyn CommandRunner>) -> Self {
+crates/team-agent/src/tmux_backend.rs	0	K10	601	kill_server, set_pane_binding_nonce, with_runner, with_runne	pub fn with_runner_for_workspace(runner: Box<dyn CommandRunner>, workspace: &Path) -> Self {
+crates/team-agent/src/tmux_backend.rs	0	K10	1938	PasteLatch	pub(crate) enum PasteLatch {
+crates/team-agent/src/tmux_backend.rs	0	K10	1916	TokenSighting	pub(crate) enum TokenSighting {
+crates/team-agent/src/tmux_backend.rs	0	K10	2197	consumption_from_capture	pub(crate) fn consumption_from_capture(
+crates/team-agent/src/tmux_backend.rs	0	K10	1746	current_paste_to_submit_floor	pub(crate) fn current_paste_to_submit_floor() -> Duration {
+crates/team-agent/src/tmux_backend.rs	0	K10	1769	cursor_single_enter_enabled	pub(crate) fn cursor_single_enter_enabled() -> bool {
+crates/team-agent/src/tmux_backend.rs	0	K10	2365	observe_turn_from_capture	pub(crate) fn observe_turn_from_capture(text: &str, marker: Option<&str>) -> TurnVerification {
+crates/team-agent/src/tmux_backend.rs	0	K10	2166	paste_ready_for_enter	pub(crate) fn paste_ready_for_enter(text: &str, marker: &str) -> bool {
+crates/team-agent/src/tmux_backend.rs	0	K10	2002	pasted_prompt_in_composer	pub(crate) fn pasted_prompt_in_composer(text: &str, n: usize) -> Option<ComposerPastedPrompt> {
+crates/team-agent/src/tmux_backend.rs	0	K10	2463	pasted_prompt_match	pub(crate) fn pasted_prompt_match(text: &str) -> Option<(&'static str, u32)> {
+crates/team-agent/src/tmux_backend.rs	0	K10	2519	scrub_pane_excerpt	pub(crate) fn scrub_pane_excerpt(raw: &str, tail_lines: usize) -> (String, u32) {
+crates/team-agent/src/tmux_backend.rs	0	K10	501	kill_server, set_pane_binding_nonce, with_runner, with_runne	pub(crate) fn set_pane_binding_nonce(
+crates/team-agent/src/tmux_backend.rs	0	K10	2113	should_resend_enter_after_unverified	pub(crate) fn should_resend_enter_after_unverified(
+crates/team-agent/src/tmux_backend.rs	0	K10	2134	should_resend_unverified_wrap_gap	pub(crate) fn should_resend_unverified_wrap_gap(
+crates/team-agent/src/tmux_backend.rs	0	K10	2070	should_resubmit_enter	pub(crate) fn should_resubmit_enter(text: &str, marker: &str, tracked: Option<PasteLatch>) -> bool {
+crates/team-agent/src/tmux_backend.rs	0	K10	2150	should_resubmit_enter_cursor	pub(crate) fn should_resubmit_enter_cursor(text: &str, marker: &str) -> bool {
+crates/team-agent/src/tmux_backend.rs	0	K10	1781	sleep_remaining_paste_to_submit_floor	pub(crate) fn sleep_remaining_paste_to_submit_floor(pasted_at: Instant, floor: Duration) {
+crates/team-agent/src/tmux_backend.rs	0	K10	2100	this_paste_identity_in_composer	pub(crate) fn this_paste_identity_in_composer(
+crates/team-agent/src/tmux_backend.rs	0	K10	1927	ComposerPastedPrompt	pub(crate) struct ComposerPastedPrompt {
+crates/team-agent/src/tmux_backend.rs	0	K10	2291	BusySignalMatch	struct BusySignalMatch {
+crates/team-agent/src/tmux_backend.rs	0	K10	1533	CaptureTally	struct CaptureTally {
+crates/team-agent/src/tmux_backend.rs	0	K10	2212	ConsumptionCaptureObservation	struct ConsumptionCaptureObservation {
+crates/team-agent/src/tmux_backend.rs	0	K10	2243	ConsumptionDiagnostics	struct ConsumptionDiagnostics {
+crates/team-agent/src/tmux_backend.rs	0	K10	1563	InjectTargetSurface	struct InjectTargetSurface {
+crates/team-agent/src/tmux_backend/enter_rescue.rs	0	K1	16	OBSERVE	const OBSERVE: Duration = Duration::from_secs(10);
+crates/team-agent/src/tmux_backend/enter_rescue.rs	0	K1	15	POLL	const POLL: Duration = Duration::from_millis(50);
+crates/team-agent/src/tmux_backend/enter_rescue.rs	0	K1	14	STABLE	const STABLE: Duration = Duration::from_millis(200);
+crates/team-agent/src/tmux_backend/enter_rescue.rs	0	K1	70	accepted	fn accepted(context: &EnterRescueContext, frame: &InputFrame) -> bool {
+crates/team-agent/src/tmux_backend/enter_rescue.rs	0	K1	29	current_marker_only	fn current_marker_only(context: &EnterRescueContext, frame: &InputFrame) -> bool {
+crates/team-agent/src/tmux_backend/enter_rescue.rs	0	K1	18	digest	fn digest(value: &str) -> String {
+crates/team-agent/src/tmux_backend/enter_rescue.rs	0	K1	21	marker_count	fn marker_count(value: &str, marker: &str) -> usize {
+crates/team-agent/src/tmux_backend/enter_rescue.rs	0	K1	35	no_effect	fn no_effect(reason: &'static str, reobserve: bool) -> EnterRescueOutcome {
+crates/team-agent/src/tmux_backend/enter_rescue.rs	0	K1	44	pending	fn pending(context: &EnterRescueContext, frame: &InputFrame) -> bool {
+crates/team-agent/src/tmux_backend/enter_rescue.rs	0	K1	38	refusal	fn refusal(reason: &str) -> TransportError {
+crates/team-agent/src/tmux_backend/enter_rescue.rs	0	K1	104	rescue_binding, rescue_frame, rescue_guarded_enter, snapshot	fn rescue_binding(
+crates/team-agent/src/tmux_backend/enter_rescue.rs	0	K1	155	rescue_binding, rescue_frame, rescue_guarded_enter, snapshot	fn rescue_frame(
+crates/team-agent/src/tmux_backend/enter_rescue.rs	0	K1	95	same_editor	fn same_editor(left: &InputFrame, right: &InputFrame) -> bool {
+crates/team-agent/src/tmux_backend/enter_rescue.rs	0	K1	251	rescue_binding, rescue_frame, rescue_guarded_enter, snapshot	pub(super) fn rescue_guarded_enter(
+crates/team-agent/src/tmux_backend/enter_rescue.rs	0	K1	181	rescue_binding, rescue_frame, rescue_guarded_enter, snapshot	pub(super) fn snapshot_rescue_context(
+crates/team-agent/src/tmux_backend/native_input.rs	0	K10	20	OBSERVE	const OBSERVE: Duration = Duration::from_secs(10);
+crates/team-agent/src/tmux_backend/native_input.rs	0	K10	21	POLL	const POLL: Duration = Duration::from_millis(50);
+crates/team-agent/src/tmux_backend/native_input.rs	0	K10	19	STABLE	const STABLE: Duration = Duration::from_millis(200);
+crates/team-agent/src/tmux_backend/native_input.rs	0	K10	495	capsule_labels	fn capsule_labels(provider: Provider, text: &str) -> Vec<String> {
+crates/team-agent/src/tmux_backend/native_input.rs	0	K10	60	multiple methods are never used	fn native_binding(&self, target: &Target) -> Result<NativeInputBinding, TransportError> {
+crates/team-agent/src/tmux_backend/native_input.rs	0	K10	156	multiple methods are never used	fn native_frame(&self, evidence: &NativeInputEvidence) -> Result<InputFrame, TransportError> {
+crates/team-agent/src/tmux_backend/native_input.rs	0	K10	174	multiple methods are never used	fn native_record(&self, evidence: &NativeInputEvidence) -> Result<(), TransportError> {
+crates/team-agent/src/tmux_backend/native_input.rs	0	K10	403	multiple methods are never used	fn native_submit(
+crates/team-agent/src/tmux_backend/native_input.rs	0	K10	248	multiple methods are never used	fn observe_native_acceptance(
+crates/team-agent/src/tmux_backend/native_input.rs	0	K10	484	owned_buffer	fn owned_buffer(evidence: &NativeInputEvidence) -> String {
+crates/team-agent/src/tmux_backend/native_input.rs	0	K10	122	multiple methods are never used	fn prepare_native_binding(
+crates/team-agent/src/tmux_backend/native_input.rs	0	K10	189	multiple methods are never used	fn stable_frame(
+crates/team-agent/src/tmux_backend/native_input.rs	0	K10	29	surface_unknown	fn surface_unknown(error: &TransportError) -> bool {
+crates/team-agent/src/tmux_backend/native_input.rs	0	K10	36	digest	pub(crate) fn digest(text: &str) -> String {
+crates/team-agent/src/tmux_backend/native_input.rs	0	K10	274	multiple methods are never used	pub(super) fn inject_native_input(
+crates/team-agent/src/tmux_backend/native_input.rs	0	K10	423	multiple methods are never used	pub(super) fn rescue_native_input(
+crates/team-agent/src/transport.rs	0	K10	262	Char, CtrlC, Escape, Left, Right	Char(char),
+crates/team-agent/src/transport.rs	0	K10	264	Char, CtrlC, Escape, Left, Right	CtrlC,
+crates/team-agent/src/transport.rs	0	K10	271	Char, CtrlC, Escape, Left, Right	Escape,
+crates/team-agent/src/transport.rs	0	K10	280	Head	Head(u32),
+crates/team-agent/src/transport.rs	0	K10	259	Char, CtrlC, Escape, Left, Right	Left,
+crates/team-agent/src/transport.rs	0	K10	292	PaneCurrentPath, PaneId, PaneTty, PaneWidth, SessionName	PaneCurrentPath,
+crates/team-agent/src/transport.rs	0	K10	288	PaneCurrentPath, PaneId, PaneTty, PaneWidth, SessionName	PaneId,
+crates/team-agent/src/transport.rs	0	K10	298	PaneCurrentPath, PaneId, PaneTty, PaneWidth, SessionName	PaneTty,
+crates/team-agent/src/transport.rs	0	K10	290	PaneCurrentPath, PaneId, PaneTty, PaneWidth, SessionName	PaneWidth,
+crates/team-agent/src/transport.rs	0	K10	260	Char, CtrlC, Escape, Left, Right	Right,
+crates/team-agent/src/transport.rs	0	K10	293	PaneCurrentPath, PaneId, PaneTty, PaneWidth, SessionName	SessionName,
+crates/team-agent/src/transport.rs	0	K10	1172	multiple methods are never used	fn attach_session(&self, session: &SessionName) -> Result<AttachOutcome, TransportError>;
+crates/team-agent/src/transport.rs	0	K10	970	multiple methods are never used	fn inject(
+crates/team-agent/src/transport.rs	0	K10	978	multiple methods are never used	fn inject_with_submit_observer(
+crates/team-agent/src/transport.rs	0	K10	1158	multiple methods are never used	fn kill_server(&self) -> Result<(), TransportError> {
+crates/team-agent/src/transport.rs	0	K10	1027	multiple methods are never used	fn rescue_enter(&self, _evidence: &native_input::NativeInputEvidence, _authorize: &dyn Fn() -> bool, _observer: Option<&dyn SubmitObserver>)
+crates/team-agent/src/transport.rs	0	K10	1014	multiple methods are never used	fn rescue_enter_guarded(
+crates/team-agent/src/transport.rs	0	K10	1121	multiple methods are never used	fn set_session_env(
+crates/team-agent/src/transport.rs	0	K10	1004	multiple methods are never used	fn snapshot_enter_rescue(
+crates/team-agent/src/transport.rs	0	K10	808	multiple methods are never used	fn supports_owned_native_input(&self) -> bool {
+crates/team-agent/src/transport.rs	0	K10	716	AttachOutcome	pub enum AttachOutcome {
+crates/team-agent/src/transport.rs	0	K10	537	BusySignalKind	pub enum BusySignalKind {
+crates/team-agent/src/transport.rs	0	K10	593	CaptureSampleOutcome	pub enum CaptureSampleOutcome {
+crates/team-agent/src/transport.rs	0	K10	220	InjectPayload	pub enum InjectPayload {
+crates/team-agent/src/transport.rs	0	K10	400	InjectVerification	pub enum InjectVerification {
+crates/team-agent/src/transport.rs	0	K10	631	InputSurfaceProbe	pub enum InputSurfaceProbe {
+crates/team-agent/src/transport.rs	0	K10	613	QueryOutcome	pub enum QueryOutcome {
+crates/team-agent/src/transport.rs	0	K10	705	SetEnvOutcome	pub enum SetEnvOutcome {
+crates/team-agent/src/transport.rs	0	K10	561	SubmitConsumptionReason	pub enum SubmitConsumptionReason {
+crates/team-agent/src/transport.rs	0	K10	413	SubmitVerification	pub enum SubmitVerification {
+crates/team-agent/src/transport.rs	0	K10	441	TurnVerification	pub enum TurnVerification {
+crates/team-agent/src/transport.rs	0	K10	546	as_str	pub fn as_str(self) -> &'static str {
+crates/team-agent/src/transport.rs	0	K10	246	skip_consumption_poll, text	pub fn skip_consumption_poll(&self) -> bool {
+crates/team-agent/src/transport.rs	0	K10	1601	submit_verification_wire	pub fn submit_verification_wire(v: SubmitVerification) -> String {
+crates/team-agent/src/transport.rs	0	K10	234	skip_consumption_poll, text	pub fn text(&self) -> Option<&str> {
+crates/team-agent/src/transport.rs	0	K10	1314	tmux_close_bracketed_paste_argv	pub fn tmux_close_bracketed_paste_argv(pane: &PaneId) -> Vec<String> {
+crates/team-agent/src/transport.rs	0	K10	1557	tmux_empty_inject_argv	pub fn tmux_empty_inject_argv(pane: &PaneId, submit: Key) -> Vec<String> {
+crates/team-agent/src/transport.rs	0	K10	1499	tmux_inject_text_argv	pub fn tmux_inject_text_argv(
+crates/team-agent/src/transport.rs	0	K10	1295	tmux_send_submit_argv	pub fn tmux_send_submit_argv(pane: &PaneId, submit: Key) -> Vec<String> {
+crates/team-agent/src/transport.rs	0	K10	1282	tmux_submit_key_name	pub fn tmux_submit_key_name(key: Key) -> &'static str {
+crates/team-agent/src/transport.rs	0	K10	1630	turn_verification_wire	pub fn turn_verification_wire(v: TurnVerification) -> &'static str {
+crates/team-agent/src/transport.rs	0	K10	450	InjectReport	pub struct InjectReport {
+crates/team-agent/src/transport.rs	0	K10	673	SubmitAttemptObservation	pub struct SubmitAttemptObservation {
+crates/team-agent/src/transport.rs	0	K10	479	SubmitDiagnostics	pub struct SubmitDiagnostics {
+crates/team-agent/src/transport.rs	0	K10	1175	SubmitObserver	pub trait SubmitObserver {
+crates/team-agent/src/transport.rs	0	K10	657	command_basename	pub(crate) fn command_basename(raw: &str) -> Option<String> {
+crates/team-agent/src/transport/enter_rescue.rs	0	K1	152	valid_digest	fn valid_digest(value: &str) -> bool {
+crates/team-agent/src/transport/enter_rescue.rs	0	K1	157	EnterRescueOutcome	pub enum EnterRescueOutcome {
+crates/team-agent/src/transport/enter_rescue.rs	0	K1	101	bound, same_selection, selected	pub fn bound(&self) -> bool {
+crates/team-agent/src/transport/enter_rescue.rs	0	K1	19	marker, scope_sha256, valid_message, valid_proof	pub fn marker(&self) -> String {
+crates/team-agent/src/transport/enter_rescue.rs	0	K1	93	bound, same_selection, selected	pub fn same_selection(&self, other: &Self) -> bool {
+crates/team-agent/src/transport/enter_rescue.rs	0	K1	24	marker, scope_sha256, valid_message, valid_proof	pub fn scope_sha256(&self) -> Option<String> {
+crates/team-agent/src/transport/enter_rescue.rs	0	K1	73	bound, same_selection, selected	pub fn selected(
+crates/team-agent/src/transport/enter_rescue.rs	0	K1	123	valid	pub fn valid(&self) -> bool {
+crates/team-agent/src/transport/enter_rescue.rs	0	K1	45	marker, scope_sha256, valid_message, valid_proof	pub fn valid_message(&self) -> bool {
+crates/team-agent/src/transport/enter_rescue.rs	0	K1	36	marker, scope_sha256, valid_message, valid_proof	pub fn valid_proof(&self) -> bool {
+crates/team-agent/src/transport/enter_rescue.rs	0	K1	9	EnterRescueContext	pub struct EnterRescueContext {
+crates/team-agent/src/transport/enter_rescue.rs	0	K1	114	EnterRescueProof	pub struct EnterRescueProof {
+crates/team-agent/src/transport/enter_rescue.rs	0	K1	60	EnterRescueTarget	pub struct EnterRescueTarget {
+crates/team-agent/src/transport/enter_rescue.rs	0	K1	133	OwnedCapsule	pub struct OwnedCapsule {
+crates/team-agent/src/transport/native_input.rs	0	K10	193	input_digest	fn input_digest(text: &str) -> String {
+crates/team-agent/src/transport/native_input.rs	0	K10	82	EnterRescueOutcome	pub enum EnterRescueOutcome {
+crates/team-agent/src/transport/native_input.rs	0	K10	58	NativeInputPhase	pub enum NativeInputPhase {
+crates/team-agent/src/transport/native_input.rs	0	K10	169	accepted, empty, has_marker, pending	pub fn accepted(&self, evidence: &NativeInputEvidence) -> bool {
+crates/team-agent/src/transport/native_input.rs	0	K10	144	accepted, empty, has_marker, pending	pub fn empty(&self) -> bool {
+crates/team-agent/src/transport/native_input.rs	0	K10	148	accepted, empty, has_marker, pending	pub fn has_marker(&self, marker: &str) -> bool {
+crates/team-agent/src/transport/native_input.rs	0	K10	22	marker, supported	pub fn marker(&self) -> String {
+crates/team-agent/src/transport/native_input.rs	0	K10	158	accepted, empty, has_marker, pending	pub fn pending(&self, evidence: &NativeInputEvidence) -> bool {
+crates/team-agent/src/transport/native_input.rs	0	K10	26	marker, supported	pub fn supported(&self) -> bool {
+crates/team-agent/src/transport/native_input.rs	0	K10	108	with_native_input	pub fn with_native_input<R>(
+crates/team-agent/src/transport/native_input.rs	0	K10	69	NativeInputEvidence	pub struct NativeInputEvidence {
+crates/team-agent/src/transport/native_input.rs	0	K10	10	NativeInputRequest	pub struct NativeInputRequest {
+crates/team-agent/src/transport/native_input.rs	0	K10	120	current_request	pub(crate) fn current_request() -> Option<NativeInputRequest> {
+crates/team-agent/src/transport/native_input.rs	0	K10	124	record_evidence	pub(crate) fn record_evidence(evidence: &NativeInputEvidence) {
+crates/team-agent/src/transport/native_input.rs	0	K10	98	Restore	struct Restore(Option<Scope>);
+crates/team-agent/src/transport/native_input.rs	0	K10	93	Scope	type Scope = (Option<NativeInputRequest>, Option<NativeInputEvidence>);
+crates/team-agent/src/transport_factory.rs	0	K10	243	allow_backend_switch, with_spec_backend_literal	pub fn allow_backend_switch(mut self, allow: bool) -> Self {
+crates/team-agent/src/transport_factory.rs	0	K10	167	as_wire	pub fn as_wire(self) -> &'static str {
+crates/team-agent/src/transport_factory.rs	0	K10	233	allow_backend_switch, with_spec_backend_literal	pub fn with_spec_backend_literal(mut self, literal: Option<&'a str>) -> Self {
+crates/team-agent/src/transport_factory.rs	0	K10	203	purpose	pub purpose: TransportPurpose,
