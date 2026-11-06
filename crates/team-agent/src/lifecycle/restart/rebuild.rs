@@ -3477,10 +3477,6 @@ fn write_restart_resume_decision_event(
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))
 }
 
-
-
-
-
 fn retired_agent_ids(state: &serde_json::Value) -> std::collections::BTreeSet<String> {
     state
         .get("agent_lifecycle")

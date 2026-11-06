@@ -328,9 +328,9 @@ fn red4_repository_dispatches_representative_intents_to_existing_helpers() {
             "ClaimLeader must dispatch to the existing root helper",
         ),
         (
-            "CoordinatorTick",
-            "save_team_scoped_state",
-            "coordinator tick must dispatch to the existing scoped helper",
+            "CoordinatorConptyShim",
+            "helper_write_root",
+            "ConPTY shim must dispatch to the existing root helper",
         ),
         (
             "StopAgent",
@@ -353,14 +353,14 @@ fn red4_repository_dispatches_representative_intents_to_existing_helpers() {
             "team-scoped agent rollback must preserve sibling teams",
         ),
         (
-            "ResultCollection",
-            "save_team_scoped_state_reapplying_after_conflict",
-            "result collection with a team must keep scoped reapply behavior",
+            "MessagingDeliveryState",
+            "helper_write_team_scoped",
+            "messaging delivery with a team must keep scoped save behavior",
         ),
         (
-            "ResultCollection",
-            "save_runtime_state_reapplying_after_conflict",
-            "result collection without a team must keep root reapply behavior",
+            "MessagingDeliveryState",
+            "helper_write_root",
+            "messaging delivery without a team must keep root save behavior",
         ),
     ];
     let mut failures = Vec::new();
@@ -401,12 +401,7 @@ fn red5_repository_skeleton_does_not_introduce_schema_or_b3_path_migration() {
             ));
         }
     }
-    for required in [
-        "StateRepository",
-        "load_workspace",
-        "load_team",
-        "save_reapplying",
-    ] {
+    for required in ["StateRepository", "load_workspace"] {
         if !normalized.contains(&normalize(required)) {
             failures.push(format!(
                 "repository skeleton must expose `{required}` without changing schema"

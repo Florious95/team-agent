@@ -49,7 +49,12 @@ fn stale_snapshot_endpoint_does_not_reach_restart_preflight_spawn_attach_or_even
 
     // The live selector must refuse rather than fall back to the stale snapshot.
     std::fs::remove_file(runtime_state_path(&case.workspace)).unwrap();
-    let candidate = team_agent::state::projection::select_runtime_state(&case.workspace, Some(TEAM));
+    assert!(team_snapshot_path(&case.workspace, SESSION).exists());
+    let candidate = team_agent::state::projection::resolve_runtime_team_scope_readonly(
+        &case.workspace,
+        Some(TEAM),
+    )
+    .map(|resolved| resolved.state);
     assert!(
         candidate.is_err(),
         "F0-3 RED1: restart preflight must be rooted at the canonical runtime state file, not a legacy per-session snapshot; candidate={candidate:?}"

@@ -276,14 +276,10 @@ fn eventlog_producers_share_the_central_writer_and_canonical_schema() {
         "fn write_session_convergence_progress_event(",
         "pub(crate) fn restart_required_missing_session_agent_ids(",
     );
-    let resume_end = ["pub(crate) fn restart_candidates(", "pub fn restart_candidates("]
-        .into_iter()
-        .find(|marker| rebuild.contains(marker))
-        .expect("restart_candidates source section end");
     let resume_writer = source_section(
         &rebuild,
         "fn write_restart_resume_decision_event(",
-        resume_end,
+        "fn retired_agent_ids(",
     );
 
     assert_eq!(

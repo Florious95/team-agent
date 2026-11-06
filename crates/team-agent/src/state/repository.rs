@@ -72,9 +72,8 @@ mod intent;
 
 /// Repository facade for workspace state reads and writes.
 ///
-/// S1a scope: hold the workspace path, expose `load_workspace`/`load_team`
-/// and a `save`/`save_reapplying` pair that both take a `StateWriteIntent`.
-/// The concrete dispatch stays byte-identical to the pre-S1a call graph.
+/// Holds the workspace path for live readers and intent-scoped writes.
+/// Dispatch delegates to the current persistence helpers.
 pub struct StateRepository<'a> {
     workspace: &'a Path,
 }
@@ -438,9 +437,7 @@ fn route_direct(
             skip_capture_backfill_agent_ids,
             topology_authority_agent_ids,
         ),
-        // RestartSessionRepair uses the same scoped helper first, with a
-        // reapply overlay in the caller (rebuild.rs:1545/1555). S1a preserves
-        // the direct-write form here; reapply routes through `save_reapplying`.
+        // RestartSessionRepair persists through the scoped helper.
         StateWriteIntent::RestartSessionRepair => helper_write_team_scoped(workspace, state),
         // StartAgent - the launch add-agent tail lands via
         // `save_team_scoped_state_with_lifecycle_topology_authority` today.
