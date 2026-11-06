@@ -159,7 +159,7 @@ fn leader_port_takeover_confirm_without_pane_refuses_caller_pane_missing() {
     let path = crate::state::persist::runtime_state_path(&ws);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, serde_json::to_string(&st).unwrap()).unwrap();
-    let v = super::leader_port::takeover(&ws, Some("team-agent-x"), true).unwrap();
+    let v = super::leader_port::claim_leader(&ws, Some("team-agent-x"), true).unwrap();
     assert_eq!(v["ok"], json!(false));
     assert_eq!(v["status"], json!("refused"));
     assert_eq!(v["reason"], json!("caller_pane_missing"));

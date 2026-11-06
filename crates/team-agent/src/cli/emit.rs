@@ -218,6 +218,11 @@ pub(crate) fn __test_dispatch(
 }
 
 fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliError> {
+    if command == "coordinator" {
+        return Err(CliError::Usage(
+            "'coordinator' is retired; use 'team-agent schedule' for timed work.".into(),
+        ));
+    }
     if matches!(command, "attach-leader" | "takeover") {
         return Err(CliError::Usage(format!("{command} is retired; use team-agent claim-leader from the intended leader terminal (--confirm to replace a live leader)")));
     }
@@ -715,6 +720,7 @@ fn emit_parser_usage(command: &str, args: &[String], error: &CliError) -> ExitCo
     // Usage guidance never sends a user back to a retired verb.
     let command = match super::intent::canonical_start_command(command) {
         "takeover" | "attach-leader" => "claim-leader",
+        "coordinator" => "schedule",
         "remove-agent" => "agent remove",
         "reset-agent" => "agent reset",
         "clone-agent" => "agent clone",
@@ -2003,6 +2009,26 @@ fn json_dumps_like(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
+
+    #[test]
+    fn coordinator_is_retired_before_help_arguments_or_workspace_access() {
+        let dir = tempfile::tempdir().unwrap();
+        for args in [
+            vec![],
+            vec!["run"],
+            vec!["start", "--json"],
+            vec!["--help"],
+            vec!["status", "--detail"],
+            vec!["--no-such-flag"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+            let error = super::dispatch("coordinator", &args, dir.path()).unwrap_err();
+            assert!(matches!(error, CliError::Usage(_)), "{error:?}");
+            assert!(error.to_string().contains("retired"));
+            assert!(error.to_string().contains("schedule"));
+            assert!(!dir.path().join(".team").exists());
+        }
+    }
 
     #[test]
     fn retired_leader_commands_refuse_before_scope_or_retirement() {

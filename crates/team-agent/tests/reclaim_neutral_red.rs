@@ -193,7 +193,7 @@ fn explicit_takeover_live_owner_unconditional_replaces_live_owner_without_split_
     let caller = case.spawn_plain_pane("ordinary-takeover-caller");
     let _env = EnvGuard::set(&[("TMUX_PANE", caller.as_str())]);
 
-    let out = team_agent::cli::leader_port::takeover(&case.workspace, Some("team-a"), true)
+    let out = team_agent::cli::leader_port::claim_leader(&case.workspace, Some("team-a"), true)
         .expect("takeover command should return JSON");
     let state = runtime_state(&case.workspace);
     let binding = binding_snapshot(&state);
