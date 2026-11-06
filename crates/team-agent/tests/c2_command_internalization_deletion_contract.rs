@@ -309,12 +309,6 @@ fn red6_repair_state_daily_path_removed_and_schema_hint_points_to_doctor() {
                 "{path} still suggests nonexistent schema repair via `repair-state --schema`"
             ));
         }
-        // M4: health.rs no longer probes the retired SQL schema, so it carries no hint.
-        if path.ends_with("diagnose.rs") && !text.contains("doctor --fix-schema") {
-            failures.push(format!(
-                "{path} must redirect schema repair hints to `team-agent doctor --fix-schema --json`"
-            ));
-        }
     }
 
     for (label, output) in [

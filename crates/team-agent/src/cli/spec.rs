@@ -6,18 +6,15 @@ pub(crate) enum CommandTier {
     Core,
     Guided,
     Secondary,
-    DevInternal,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CommandCategory {
     Start,
-    Daily,
     TeamLifecycle,
     WorkerLifecycle,
     GuidedRecovery,
     Setup,
     Observe,
-    Dev,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CommandKind {
@@ -27,7 +24,6 @@ pub(crate) enum CommandKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TokenUsage {
     No,
-    Yes,
     Conditional,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -63,38 +59,6 @@ pub(crate) enum DispatchKind {
     InstallSkill,
     ClaimLeader,
 }
-pub(crate) const ALL_DISPATCH_KINDS: &[DispatchKind] = &[
-    DispatchKind::Start,
-    DispatchKind::Stop,
-    DispatchKind::Team,
-    DispatchKind::Agent,
-    DispatchKind::QuickStart,
-    DispatchKind::Send,
-    DispatchKind::Schedule,
-    DispatchKind::Migrate,
-    DispatchKind::Status,
-    DispatchKind::Models,
-    DispatchKind::KiroLeader,
-    DispatchKind::Inbox,
-    DispatchKind::Locate,
-    DispatchKind::Restart,
-    DispatchKind::Shutdown,
-    DispatchKind::AddAgent,
-    DispatchKind::StartAgent,
-    DispatchKind::StopAgent,
-    DispatchKind::ResetAgent,
-    DispatchKind::CloneAgent,
-    DispatchKind::ForkAgent,
-    DispatchKind::RemoveAgent,
-    DispatchKind::Leaders,
-    DispatchKind::Doctor,
-    DispatchKind::Approvals,
-    DispatchKind::Route,
-    DispatchKind::LeaderPrompt,
-    DispatchKind::Profile,
-    DispatchKind::InstallSkill,
-    DispatchKind::ClaimLeader,
-];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct GovernanceNote {
     pub(crate) decision: &'static str,

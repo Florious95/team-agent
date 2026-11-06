@@ -44,7 +44,7 @@ use std::time::Duration;
 use super::types::{
     CoordinatorBinaryIdentity, CoordinatorBinaryIdentityRelation, CoordinatorHealthStatus,
     CoordinatorMetadata, CoordinatorMetadataMismatchReason, HealthReport, MetadataSource, Pid,
-    SchemaError, SchemaHealth, StartError, StartOutcome, StartReport, StopError, StopOutcome,
+    SchemaError, SchemaHealth, StopError, StopOutcome,
     StopReport, WorkspacePath, PROTOCOL_VERSION,
 };
 
@@ -127,11 +127,6 @@ pub fn coordinator_health(workspace: &WorkspacePath) -> HealthReport {
     coordinator_health_with_schema(workspace, message_store_schema_health(workspace))
 }
 
-/// Read-only coordinator health for diagnose. Unlike the lifecycle path, this
-/// never opens MessageStore and therefore cannot initialize or rewrite team.db.
-pub fn coordinator_health_read_only(workspace: &WorkspacePath) -> HealthReport {
-    coordinator_health_with_schema(workspace, message_store_schema_health_read_only(workspace))
-}
 
 fn coordinator_health_with_schema(
     workspace: &WorkspacePath,
@@ -494,17 +489,6 @@ fn reap_child_if_possible(pid: Pid) {
     crate::platform::process::reap_child_if_possible(pid.get());
 }
 
-#[cfg(unix)]
-#[allow(dead_code)]
-fn send_signal(pid: Pid, signal: libc::c_int) -> bool {
-    // Retained (dead code post-Batch-3) as a Unix-only helper for any
-    // future non-standard signal delivery. All product paths now use
-    // `crate::platform::process::terminate_pid` with `SignalKind`.
-    let Ok(pid_t) = libc::pid_t::try_from(pid.get()) else {
-        return false;
-    };
-    unsafe { libc::kill(pid_t, signal) == 0 }
-}
 
 // ===========================================================================
 // metadata 身份原语(metadata.py)—— 自由函数面
@@ -835,9 +819,6 @@ pub(crate) fn message_store_schema_health(workspace: &WorkspacePath) -> SchemaHe
     SchemaHealth { ok: true, schema_version: 0, error: None, action: None }
 }
 
-fn message_store_schema_health_read_only(workspace: &WorkspacePath) -> SchemaHealth {
-    message_store_schema_health(workspace)
-}
 
 fn read_pid_file(path: &Path) -> Option<Pid> {
     let text = std::fs::read_to_string(path).ok()?;
@@ -877,15 +858,4 @@ pub fn coordinator_pid_path(workspace: &WorkspacePath) -> PathBuf {
 /// ---
 pub fn coordinator_meta_path(workspace: &WorkspacePath) -> PathBuf {
     crate::model::paths::runtime_dir(workspace.as_path()).join("coordinator.json")
-}
-
-/// `coordinator.log` 路径(`paths.py:16`)。
-/// ---
-/// purpose: 给出 coordinator.log 的位置
-/// params:
-///   workspace: workspace 根
-/// returns: runtime 目录下的 coordinator.log；daemon 子进程的 stdout/stderr 都追加到这里
-/// ---
-pub fn coordinator_log_path(workspace: &WorkspacePath) -> PathBuf {
-    crate::model::paths::runtime_dir(workspace.as_path()).join("coordinator.log")
 }

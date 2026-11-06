@@ -239,7 +239,6 @@ pub enum CaptureRange {
 pub enum PaneField {
     PaneMode,
     PaneCurrentCommand,
-    PaneTty,
 }
 
 /// 后端种类(诊断/事件用)。
@@ -882,7 +881,6 @@ pub fn tmux_query_argv(pane: &PaneId, field: PaneField) -> Vec<String> {
     let fmt = match field {
         PaneField::PaneMode => "#{pane_mode}",
         PaneField::PaneCurrentCommand => "#{pane_current_command}",
-        PaneField::PaneTty => "#{pane_tty}",
     };
     let mut argv = vec![
         "tmux".to_string(),

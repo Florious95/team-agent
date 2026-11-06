@@ -323,33 +323,3 @@ fn toctou_locked_reread_refuses_owner_epoch_advanced_on_concurrent_bump() {
 // NO team_owner write, NO epoch advance (after the strict-uuid gate). Rust stub writes BOTH and
 // advances epoch (precheck+1), ignoring source/require_current. RED (locked before the autobind/launch
 // wiring lands, so it does not silently overwrite the owner + bump epoch on every attach).
-#[test]
-#[serial_test::serial(env)]
-fn attach_leader_to_state_nonfirst_does_not_overwrite_owner_or_advance_epoch() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let _e = EnvGuard::apply(&[("TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE", None)]);
-    let ws = p2_temp_ws("attach_nonfirst");
-    let mut state = serde_json::json!({
-        "session_name": "team-agent-x",
-        "team_owner": {"pane_id":"%1","provider":"codex","machine_fingerprint":"fp","leader_session_uuid":"U","owner_epoch":3,"claimed_at":"t","claimed_via":"claim-leader"},
-    });
-    let event_log = crate::event_log::EventLog::new(&ws);
-    let _ = attach_leader_to_state(
-        &ws,
-        &mut state,
-        Some(&PaneId::new("%2")),
-        crate::provider::Provider::Codex,
-        &event_log,
-        LeaseSource::Manual,
-        false,
-    );
-    assert_eq!(state.pointer("/team_owner/pane_id").and_then(|v| v.as_str()), Some("%1"),
-            "non-first-time attach must NOT overwrite team_owner.pane_id (golden writes leader_receiver only); Rust rebinds it to %2");
-    assert_eq!(
-        state
-            .pointer("/team_owner/owner_epoch")
-            .and_then(|v| v.as_u64()),
-        Some(3),
-        "non-first-time attach must NOT advance owner_epoch (golden keeps 3); Rust bumps to 4"
-    );
-}

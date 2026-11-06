@@ -188,55 +188,29 @@ fn read_context_fork_module_text() -> String {
 #[test]
 #[serial(env)]
 fn slow_start_produces_typed_pending_not_immediate_rollback() {
-    // A 案(msg_ef0fa4adad80):read context_fork.rs PLUS the
-    // context_fork/ submodule tree. Splitting into outcome.rs /
-    // claude.rs / codex.rs is a normal refactor and MUST NOT
-    // invalidate the contract.
-    let src = read_context_fork_module_text();
-    // Sanity canary: the shape we're looking for is parseable — locks
-    // the scanner semantics independently of product state.
+    let types = read_src("lifecycle/types.rs");
+    let native = read_src("lifecycle/restart/claude_fork.rs");
+    let has_pending_variant = types.contains("enum ForkBackingState")
+        && types.contains("PendingContextFork");
+    let has_pending_report = types.contains("struct ForkAgentReport")
+        && types.contains("pub backing_state: ForkBackingState");
     assert!(
-        synthetic_pending_arm().contains("Pending(PendingContextFork)"),
-        "sanity canary broken: synthetic arm text missing Pending variant"
+        has_pending_variant && has_pending_report,
+        "native fork must return a typed pending backing state, not roll back a slow seat"
     );
-    // Face 1 — a typed outcome enum with a `Pending` variant.
-    let has_pending_variant = (src.contains("enum ContextForkOutcome")
-        || src.contains("enum ForkVerification"))
-        && (src.contains("Pending(") || src.contains("Pending {"));
-    // Face 2 — `PendingContextFork` (or equivalent) struct exists and
-    // carries source_id + target agent + spawned_at + scanner context.
-    // We accept any of these field name shapes:
-    let has_pending_struct = src.contains("PendingContextFork")
-        && (src.contains("source_session_id") || src.contains("source_id"))
-        && (src.contains("target_agent") || src.contains("agent_id"))
-        && (src.contains("spawned_at") || src.contains("spawn_boundary"));
+    // A missing child transcript yields an admitted pending seat, not an error.
+    let code = code_no_ws(&native);
     assert!(
-        has_pending_variant && has_pending_struct,
-        "context_fork module tree missing typed Pending outcome. locate §5.1: \
-         return Verified(ContextForkProof) | Pending(PendingContextFork) | \
-         Rejected(ProviderError). Baseline synchronously errors when the \
-         10s deadline elapses. has_pending_variant={} has_pending_struct={}",
-        has_pending_variant,
-        has_pending_struct
+        code.contains("Ok(ForkAgentReport{")
+            && code.contains("backing_state:ifchild.is_some(){ForkBackingState::Verified}else{ForkBackingState::PendingContextFork}")
+            && code.contains("session_id:child,"),
+        "native fork must preserve the seat and return PendingContextFork until child capture"
     );
-    // Face 3 — the deadline is no longer treated as a business-failure
-    // threshold; keep it as a fast-path budget only. We assert that the
-    // deadline-consumption site no longer returns an error variant on
-    // expiration (rough source scan: presence of a `Pending(` in the
-    // deadline block). Same skip-until search works over concatenated
-    // module text (deadline & Pending sites end up in the same aggregate).
-    let deadline_block_returns_pending = src
-        .lines()
-        .skip_while(|l| !l.contains("context_fork_convergence_deadline"))
-        .take(400)
-        .collect::<Vec<_>>()
-        .join("\n")
-        .contains("Pending(");
     assert!(
-        deadline_block_returns_pending,
-        "context_fork module tree deadline path still short-circuits to a hard \
-         error instead of a typed Pending. locate §5.1 requires the deadline \
-         to be a fast-path budget, not a business rejection."
+        native.contains("lifecycle.fork.native_new_seat")
+            && code.contains("\"source_session_id\":parent.as_str()")
+            && code.contains("\"session_id\":child.as_ref().map(SessionId::as_str)"),
+        "native pending fork must record source and optional child session identity"
     );
 }
 
@@ -254,7 +228,9 @@ fn pending_seat_has_bounded_grace_then_typed_failure() {
     let has_grace = files.iter().any(|(_, t)| {
         t.contains("pending_grace")
             || t.contains("grace_deadline")
-            || t.contains("PendingContextFork") && t.contains("grace")
+            || t.contains("pending_context_fork")
+                && t.contains("SPAWN_GRACE_SECS")
+                && t.contains("transition_pending_context_fork(")
     });
     // Face 2 — a typed failure variant exists for either
     // `transcript_missing` or `context_fork_unverified` and it is
@@ -285,15 +261,11 @@ fn pending_seat_has_bounded_grace_then_typed_failure() {
 #[test]
 #[serial(env)]
 fn source_rollout_cannot_masquerade_as_new_backing() {
-    // V3: the programmatic excluded set lived in the Codex rollout scanner
-    // (context_fork/codex.rs), excised with the legacy Codex worker. The only
-    // remaining verifier proves the NEW session by its exact expected id, so
-    // the surviving faces are an explicit NEW == source rejection and no
-    // latest-file relaxation anywhere in the module tree.
+    // Native child identity replaces the retired manual-copy verifier.
     let src = read_context_fork_module_text();
-    // Face 1 — the verifier explicitly rejects a NEW session equal to the
-    // source (whitespace-blind, same projection as tooth 4).
-    let rejects_source_collision = code_no_ws(&src).contains("==source_session_id");
+    let native = read_src("lifecycle/restart/claude_fork.rs");
+    // Face 1 — the child session explicitly excludes the parent.
+    let rejects_source_collision = code_no_ws(&native).contains("*child!=parent.as_str()");
     // Face 2 — scanner MUST NOT be relaxed to cwd-latest / mtime-latest.
     // We assert on the negative: no source line inside the module tree
     // may contain `cwd_latest` or `mtime_latest` as a scanner mode.

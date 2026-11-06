@@ -2,13 +2,10 @@
 //! ProviderAdapter trait(per-provider 命令构造 + 能力面)+ registry facade + 占位实现。
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-use super::helpers::patterns;
 use super::types::{
-    AuthHintStatus, CapturedSession, CommandPlan, McpConfig, ProviderCaps, ProviderCommandContext,
-    ProviderError, SessionId, StatusPatterns,
-};
+    CapturedSession, CommandPlan, McpConfig, ProviderCaps, ProviderCommandContext,
+    ProviderError, SessionId, };
 use super::{AuthMode, Provider};
 
 pub use crate::provider::session_scan::{CaptureSessionContext, CapturedSessionCandidate};
@@ -33,23 +30,10 @@ pub trait ProviderAdapter {
     /// CLI 是否已安装(doctor;`adapter.py` is_installed)。
     fn is_installed(&self) -> bool;
 
-    /// CLI 版本字符串(doctor;`adapter.py` version)。I/O → Result。
-    fn version(&self) -> Result<String, ProviderError>;
 
-    /// auth 状态提示(doctor;`adapter.py:38` auth_hint)。
-    fn auth_hint(&self, auth_mode: AuthMode) -> AuthHintStatus;
 
-    /// 构造 launch 命令(含 MCP 注入 / 权限模式 / system prompt / model)。
-    /// 返回可 exec 的 argv(`adapter.py` build_command;`providers.py:54`)。
-    fn build_command(
-        &self,
-        auth_mode: AuthMode,
-        mcp_config: Option<&McpConfig>,
-        system_prompt: Option<&str>,
-        model: Option<&str>,
-    ) -> Result<Vec<String>, ProviderError>;
 
-    /// Same as [`ProviderAdapter::build_command`], with the explicit bypass flag.
+    /// Construct launch argv with the explicit permission-bypass policy.
     fn build_command_with_permissions(
         &self,
         auth_mode: AuthMode,
@@ -102,13 +86,6 @@ pub trait ProviderAdapter {
             .collect())
     }
 
-    /// restart/reset 路径:从已存 transcript/rollout 回收 session_id
-    /// (`claude.py:115`)。`None` 合法(找不到)。
-    fn recover_session_id(
-        &self,
-        agent_id: &str,
-        spawn_cwd: &std::path::Path,
-    ) -> Result<Option<SessionId>, ProviderError>;
 
     /// 给定 session 是否可 resume(`claude.py:143`)。bug-085:compatible_api
     /// `session_id=None` → 不可 resume(`false`,不崩)。
@@ -118,13 +95,6 @@ pub trait ProviderAdapter {
         auth_mode: AuthMode,
     ) -> Result<bool, ProviderError>;
 
-    /// 构造 resume 命令(`providers.py:74`)。不可 resume → `Err(ResumeUnavailable)`。
-    fn build_resume_command(
-        &self,
-        session_id: Option<&SessionId>,
-        auth_mode: AuthMode,
-        mcp_config: Option<&McpConfig>,
-    ) -> Result<Vec<String>, ProviderError>;
 
     fn build_resume_command_with_context(
         &self,
@@ -152,14 +122,6 @@ pub trait ProviderAdapter {
         .map(CommandPlan::argv_only)
     }
 
-    /// 构造 fork 命令(`providers.py:99`)。fork 需 caps.fork ∧ auth_mode!=compatible_api;
-    /// 不支持 → `Err`。
-    fn fork(
-        &self,
-        session_id: Option<&SessionId>,
-        auth_mode: AuthMode,
-        mcp_config: Option<&McpConfig>,
-    ) -> Result<Vec<String>, ProviderError>;
 
     fn fork_with_context(
         &self,
@@ -198,16 +160,8 @@ pub trait ProviderAdapter {
         cfg!(unix) && !matches!(self.provider(), Provider::Fake | Provider::Pi)
     }
 
-    /// 安装 MCP server。gemini 写全局 `~/.gemini/settings.json` 并备份/还原
-    /// (`gemini.py:40-78`)——有副作用 I/O,失败可还原 → Result。
-    fn install_mcp(&self, config: &McpConfig) -> Result<(), ProviderError>;
 
-    /// idle/processing/trust 识别正则集(`claude.py`/`codex.py` status_patterns)。
-    /// pane→status 检测用。返编译失败可能 → Result(`re.error` 容错)。
-    fn status_patterns(&self) -> Result<StatusPatterns, ProviderError>;
 
-    /// 校验 model 名对本 provider 合法(`codex debug models` 等;doctor)。
-    fn validate_model(&self, model: &str) -> Result<bool, ProviderError>;
 
     /// Provider-specific startup prompt handling. Codex and Claude delegate to
     /// provider-layer recognizers; providers without startup prompts return an
@@ -331,55 +285,8 @@ impl ProviderAdapter for BasicProviderAdapter {
         command_on_path(command_name(self.provider))
     }
 
-    fn version(&self) -> Result<String, ProviderError> {
-        if matches!(self.provider, Provider::Fake) {
-            return Ok("fake".to_string());
-        }
-        let output = Command::new(command_name(self.provider))
-            .arg("--version")
-            .output()
-            .map_err(|e| {
-                ProviderError::Io(format!("{} --version: {e}", command_name(self.provider)))
-            })?;
-        if !output.status.success() {
-            return Ok("unknown".to_string());
-        }
-        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if text.is_empty() {
-            Ok("unknown".to_string())
-        } else {
-            Ok(text)
-        }
-    }
 
-    fn auth_hint(&self, auth_mode: AuthMode) -> AuthHintStatus {
-        match self.provider {
-            Provider::Claude | Provider::ClaudeCode => claude_auth_hint(auth_mode),
-            // C-A-5 cr verdict v2(诚实 MUST-NOT-13) — copilot 无 auth status 子命令
-            // (main-help Commands 节仅 completion/help/init/login/mcp/plugin/update/
-            // version)。framework 只能弱检测(命令在 PATH + ~/.copilot/config.json
-            // 存在),不能假报强 Present;Subscription 档返 PresentWeak,doctor 文案
-            // 标"weak / no auth-status command available";Compatible/Official 走 BYOK
-            // 路径,有 COPILOT_PROVIDER_BASE_URL 时已脱离 GitHub 登录通道。
-            Provider::Copilot => copilot_auth_hint(auth_mode),
-            // No legacy worker probe remains for Codex or Grok.
-            Provider::Codex | Provider::Grok | Provider::Pi => AuthHintStatus::Unknown,
-            _ => match auth_mode {
-                AuthMode::Subscription => AuthHintStatus::Present,
-                AuthMode::OfficialApi | AuthMode::CompatibleApi => AuthHintStatus::MissingOrUnknown,
-            },
-        }
-    }
 
-    fn build_command(
-        &self,
-        auth_mode: AuthMode,
-        mcp_config: Option<&McpConfig>,
-        system_prompt: Option<&str>,
-        model: Option<&str>,
-    ) -> Result<Vec<String>, ProviderError> {
-        self.build_command_with_permissions(auth_mode, mcp_config, system_prompt, model, false)
-    }
 
     fn build_command_with_permissions(
         &self,
@@ -570,15 +477,6 @@ impl ProviderAdapter for BasicProviderAdapter {
         }
     }
 
-    fn recover_session_id(
-        &self,
-        agent_id: &str,
-        spawn_cwd: &Path,
-    ) -> Result<Option<SessionId>, ProviderError> {
-        Ok(self
-            .capture_session_id(agent_id, spawn_cwd, 0)?
-            .and_then(|captured| captured.session_id))
-    }
 
     fn session_is_resumable(
         &self,
@@ -591,14 +489,6 @@ impl ProviderAdapter for BasicProviderAdapter {
         Ok(self.caps().resume)
     }
 
-    fn build_resume_command(
-        &self,
-        session_id: Option<&SessionId>,
-        auth_mode: AuthMode,
-        mcp_config: Option<&McpConfig>,
-    ) -> Result<Vec<String>, ProviderError> {
-        self.build_resume_command_with_context(session_id, auth_mode, mcp_config, None, None, false)
-    }
 
     fn build_resume_command_with_context(
         &self,
@@ -715,14 +605,6 @@ impl ProviderAdapter for BasicProviderAdapter {
         }
     }
 
-    fn fork(
-        &self,
-        session_id: Option<&SessionId>,
-        auth_mode: AuthMode,
-        mcp_config: Option<&McpConfig>,
-    ) -> Result<Vec<String>, ProviderError> {
-        self.fork_with_context(session_id, auth_mode, mcp_config, None, None, false)
-    }
 
     fn fork_with_context(
         &self,
@@ -906,60 +788,8 @@ impl ProviderAdapter for BasicProviderAdapter {
         })
     }
 
-    fn install_mcp(&self, config: &McpConfig) -> Result<(), ProviderError> {
-        if !matches!(self.provider, Provider::GeminiCli) {
-            return Ok(());
-        }
-        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-            return Err(ProviderError::Io("HOME is not set".to_string()));
-        };
-        let dir = home.join(".gemini");
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| ProviderError::Io(format!("{}: {e}", dir.display())))?;
-        let path = dir.join("settings.json");
-        let text = serde_json::to_string_pretty(&config.raw)
-            .map_err(|e| ProviderError::Command(format!("serialize mcp config: {e}")))?;
-        std::fs::write(&path, text)
-            .map_err(|e| ProviderError::Io(format!("{}: {e}", path.display())))?;
-        Ok(())
-    }
 
-    fn status_patterns(&self) -> Result<StatusPatterns, ProviderError> {
-        match self.provider {
-            Provider::Claude | Provider::ClaudeCode => {
-                patterns(r"[>❯]\s", r"[✶✢✽✻✳·].*…", r"Error|Traceback")
-            }
-            Provider::Copilot => patterns(
-                r"(?m)^\s*❯\s*$| / commands · \? help",
-                r"working|processing",
-                r"Error|panic",
-            ),
-            // Codex and Grok workers run only through their contract leaves;
-            // these placeholders never match real pane chrome.
-            Provider::Codex | Provider::Grok => patterns(
-                r"legacy-worker-idle-retired",
-                r"legacy-worker-busy-retired",
-                r"legacy-worker-error-retired",
-            ),
-            // Pi: 无已验证 turn-state 检测；占位串不会匹配真实 pane chrome。
-            Provider::Pi => patterns(
-                r"pi-idle-unset-until-turn-state",
-                r"pi-busy-unset-until-turn-state",
-                r"pi-error-unset-until-turn-state",
-            ),
-            Provider::GeminiCli | Provider::Fake => {
-                patterns(r">", r"working|processing", r"Error|Traceback")
-            }
-        }
-    }
 
-    fn validate_model(&self, model: &str) -> Result<bool, ProviderError> {
-        if self.provider != Provider::Pi {
-            return Ok(true);
-        }
-        let (_, catalog) = crate::lifecycle::launch::pi_mcp::resolve_pi_executable_chain()?;
-        Ok(crate::lifecycle::launch::pi_mcp::select_exact_pi_model(&catalog, model).is_ok())
-    }
 }
 
 use crate::provider::wire::{command_name, provider_wire};
@@ -982,52 +812,7 @@ fn auth_mode_wire(auth_mode: AuthMode) -> &'static str {
     }
 }
 
-/// C-A-5 cr verdict v2 — copilot 弱检测(无 auth status 子命令)。
-/// 当 copilot 命令在 PATH 且 `~/.copilot/config.json` 存在 → PresentWeak;否则 Missing
-/// (PATH 缺)或 MissingOrUnknown(无 config 文件)。Compatible/Official 走 BYOK,
-/// 由 profile_launch 端校验(COPILOT_PROVIDER_BASE_URL 等),hint 层报 Unknown。
-fn copilot_auth_hint(auth_mode: AuthMode) -> AuthHintStatus {
-    if !matches!(auth_mode, AuthMode::Subscription) {
-        return AuthHintStatus::Unknown;
-    }
-    if !command_on_path("copilot") {
-        return AuthHintStatus::Missing;
-    }
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        return AuthHintStatus::MissingOrUnknown;
-    };
-    if home.join(".copilot").join("config.json").exists() {
-        AuthHintStatus::PresentWeak
-    } else {
-        AuthHintStatus::MissingOrUnknown
-    }
-}
 
-fn claude_auth_hint(auth_mode: AuthMode) -> AuthHintStatus {
-    if auth_mode != AuthMode::Subscription {
-        return AuthHintStatus::MissingOrUnknown;
-    }
-    if !command_on_path("claude") {
-        return AuthHintStatus::Missing;
-    }
-    let output = match Command::new("claude").args(["auth", "status"]).output() {
-        Ok(output) => output,
-        Err(_) => return AuthHintStatus::MissingOrUnknown,
-    };
-    let text = if output.stdout.is_empty() {
-        String::from_utf8_lossy(&output.stderr).to_string()
-    } else {
-        String::from_utf8_lossy(&output.stdout).to_string()
-    };
-    let status = serde_json::from_str::<serde_json::Value>(text.trim()).unwrap_or_default();
-    if status.get("loggedIn").and_then(serde_json::Value::as_bool) == Some(true)
-        || output.status.success()
-    {
-        AuthHintStatus::Present
-    } else {
-        AuthHintStatus::Missing
-    }
-}
 
 fn claude_context_model(ctx: ProviderCommandContext<'_>) -> Option<&str> {
     ctx.profile_launch

@@ -26,45 +26,6 @@ const WORKER: &str = "worker";
 const DIAGNOSTIC_READ_MARKER: &str = "B0_DIAGNOSTIC_LEGACY_SNAPSHOT_READ";
 const DIAGNOSTIC_WRITE_MARKER: &str = "B0_DIAGNOSTIC_LEGACY_SNAPSHOT_WRITE";
 
-#[test]
-#[serial(env)]
-fn lifecycle_snapshot_after_operation_is_absent_or_marked_nonauthoritative() {
-    let case = B0Case::new("snapshot-after-operation");
-    let state = case.state_with_worker("%new", 4201, 1);
-
-    let path = team_agent::lifecycle::save_team_runtime_snapshot(&case.workspace, &state)
-        .expect("F0-2 fixture: lifecycle snapshot save should return a path or no-op cleanly");
-    case.env.assert_path_under_root(&path);
-    if !path.exists() {
-        return;
-    }
-
-    let snapshot = read_json(&path);
-    let canonical = runtime_state_path(&case.workspace);
-    assert_eq!(
-        snapshot
-            .get("_not_authoritative")
-            .and_then(Value::as_bool),
-        Some(true),
-        "F0-2 RED1: a retained legacy per-session snapshot must carry `_not_authoritative:true`; raw dual-write snapshots look authoritative. path={} snapshot={snapshot}",
-        path.display()
-    );
-    assert_eq!(
-        snapshot
-            .get("_canonical_state_path")
-            .and_then(Value::as_str),
-        Some(canonical.to_string_lossy().as_ref()),
-        "F0-2 RED1: retained snapshot must point readers at the canonical root/projection state via `_canonical_state_path`; path={} snapshot={snapshot}",
-        path.display()
-    );
-    for required in ["_derived_from", "_generated_at"] {
-        assert!(
-            snapshot.get(required).is_some(),
-            "F0-2 RED1: retained legacy snapshot must include diagnostic metadata `{required}`; path={} snapshot={snapshot}",
-            path.display()
-        );
-    }
-}
 
 #[test]
 fn legacy_snapshot_writes_are_not_reachable_from_authority_save_paths() {

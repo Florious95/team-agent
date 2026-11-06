@@ -9,23 +9,8 @@ use std::path::{Path, PathBuf};
 // claude→ClaudeCode;all→None)。Python _skill_dest_dir 据 target 选 dir。
 // ───────────────────────────────────────────────────────────────────────
 
-#[test]
-fn skill_target_codex_maps_to_provider_codex() {
-    // skeleton line 112: codex→Codex.
-    assert_eq!(SkillTarget::Codex.provider(), Some(Provider::Codex));
-}
 
-#[test]
-fn skill_target_claude_maps_to_provider_claude_code() {
-    // skeleton line 112: claude→ClaudeCode (NOT bare Claude — §3 claude vs claude_code 不能漏归一).
-    assert_eq!(SkillTarget::Claude.provider(), Some(Provider::ClaudeCode));
-}
 
-#[test]
-fn skill_target_all_has_no_single_provider() {
-    // `All` fan-out 两者 → 无单一 provider.
-    assert_eq!(SkillTarget::All.provider(), None);
-}
 
 // ───────────────────────────────────────────────────────────────────────
 // _skill_dest_dir (commands.py:467-472):claude→~/.claude/skills/team-agent,
@@ -58,11 +43,6 @@ fn dest_dir_claude_resolves_to_dot_claude() {
     );
 }
 
-#[test]
-fn skill_target_copilot_maps_to_provider_copilot() {
-    // E9: copilot → Provider::Copilot (0.3.x 新增 provider,不归到 codex/claude).
-    assert_eq!(SkillTarget::Copilot.provider(), Some(Provider::Copilot));
-}
 
 #[test]
 fn dest_dir_copilot_resolves_to_dot_copilot() {
@@ -205,82 +185,11 @@ fn version_serde_transparent_roundtrip() {
 // (WezTerm/ConPTY,见 transport-backend-design)。不假装兼容。
 // ───────────────────────────────────────────────────────────────────────
 
-#[test]
-fn macos_aarch64_is_native() {
-    assert_eq!(
-        platform_support(ReleaseTarget::MacosAarch64),
-        PlatformSupport::Native
-    );
-}
 
-#[test]
-fn macos_x8664_is_native() {
-    assert_eq!(
-        platform_support(ReleaseTarget::MacosX8664),
-        PlatformSupport::Native
-    );
-}
 
-#[test]
-fn linux_x8664_is_native() {
-    assert_eq!(
-        platform_support(ReleaseTarget::LinuxX8664),
-        PlatformSupport::Native
-    );
-}
 
-#[test]
-fn linux_aarch64_is_native() {
-    assert_eq!(
-        platform_support(ReleaseTarget::LinuxAarch64),
-        PlatformSupport::Native
-    );
-}
 
-#[test]
-fn windows_x8664_is_preview_compile_only_during_batch_0_to_5() {
-    // 0.5.x Windows portability CR C-1 (P0):
-    // Windows previously claimed `PlatformSupport::Native` but
-    // `cargo check --target x86_64-pc-windows-msvc` was RED — the
-    // Unix-only `std::os::unix` / `libc::pid_t` calls in
-    // tmux_backend/coordinator/lifecycle/packaging never compiled on
-    // Windows. Claiming Native was a MUST-NOT-13 假绿承诺 (user
-    // installs and immediately hits build failures).
-    //
-    // This test locks the honest downgrade in place until Batch 6/7
-    // real-machine gates pass. Promoting Windows back to `Native`
-    // requires:
-    //   1. Batch 6 fake-provider smoke on the SSH host (design §Batch 6)
-    //   2. Batch 7 real-machine subscription serial (CR §C-5)
-    // Both flip this test to `assert PlatformSupport::Native` in a
-    // deliberate PR — no silent regen.
-    //
-    // Truth source: `.team/artifacts/0.5.x-windows-portability-cr-verdict.md` §C-1.
-    match platform_support(ReleaseTarget::WindowsX8664) {
-        PlatformSupport::PreviewCompileOnly { preview_gate, note } => {
-            assert_eq!(preview_gate, "compile_gate");
-            assert!(note.contains("compile_gate") || note.contains("cargo check"));
-        }
-        other => panic!(
-            "Windows must stay `PreviewCompileOnly` while the compile gate is RED; \
-             promoting back to `Native` requires Batch 6 + Batch 7 real-machine gates. \
-             Got {other:?}"
-        ),
-    }
-}
 
-#[test]
-fn windows_x8664_is_not_native_yet_c1_hard_lock() {
-    // Belt-and-braces companion for the above — a distinct assertion
-    // that fires clearly if a future refactor of `PlatformSupport`
-    // changes variant names.
-    let support = platform_support(ReleaseTarget::WindowsX8664);
-    assert_ne!(
-        support,
-        PlatformSupport::Native,
-        "CR C-1: Windows must NOT be Native until Batch 6/7 gates pass"
-    );
-}
 
 // ───────────────────────────────────────────────────────────────────────
 // doctor — typed DoctorStatus (commands.py:218-260)。
@@ -290,34 +199,7 @@ fn windows_x8664_is_not_native_yet_c1_hard_lock() {
 //   - schema layout drift → HasBlockers{SchemaLayoutDrift}       (commands.py:242-250)
 // ───────────────────────────────────────────────────────────────────────
 
-fn doctor_opts(workspace: &Path) -> DoctorOptions {
-    DoctorOptions {
-        workspace: workspace.to_path_buf(),
-        gate: None,
-        fix: false,
-        cleanup_orphans: false,
-        confirm: false,
-    }
-}
 
-#[test]
-fn doctor_fix_without_gate_is_invalid_options() {
-    // commands.py:220-221 — `--fix requires --gate`.
-    let ws = PathBuf::from("/tmp/ws-doctor-fix");
-    let mut opts = doctor_opts(&ws);
-    opts.fix = true;
-    opts.gate = None;
-    let err = doctor(&opts).expect_err("fix without gate must error");
-    match err {
-        PackagingError::InvalidOptions(msg) => {
-            assert!(
-                msg.contains("--fix requires --gate"),
-                "expected '--fix requires --gate', got: {msg}"
-            );
-        }
-        other => panic!("expected InvalidOptions, got {other:?}"),
-    }
-}
 
 /// TEST-SUPPORT seed helper (real impl — pure test scaffolding, uses rusqlite directly):
 /// build a workspace whose `.team/runtime/team.db` has the LEGACY drifted layout
@@ -343,114 +225,11 @@ fn seed_workspace_with_drifted_db(tag: &str) -> PathBuf {
     ws
 }
 
-#[test]
-fn doctor_on_clean_workspace_no_drift_is_ok() {
-    // 无 schema layout drift (空/无 db) → DoctorStatus::Ok.
-    // schema_diagnosis(missing db) → layout_diffs 空 → 非 HasBlockers(SchemaLayoutDrift).
-    // NOTE (gate w59ds828k): clean→Ok cannot distinguish "gates ran & passed" from "gates not
-    // wired" because step 11/12 gate entities live elsewhere. The positive drift test below
-    // (doctor_drifted_db_emits_schema_layout_drift_blocker) is what proves doctor() actually
-    // READS schema_diagnosis and emits the typed SchemaLayoutDrift blocker on real drift.
-    let dir = std::env::temp_dir().join(format!("ta-doctor-clean-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
-    let opts = doctor_opts(&dir);
-    let status = doctor(&opts).expect("clean workspace doctor should succeed");
-    assert_eq!(status, DoctorStatus::Ok);
-}
 
-#[test]
-fn doctor_comms_gate_failure_maps_to_typed_blocker() {
-    let dir = std::env::temp_dir().join(format!("ta-doctor-comms-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
-    let mut opts = doctor_opts(&dir);
-    opts.gate = Some(DoctorGate::Comms);
-    let status = doctor(&opts).expect("comms gate should return typed blockers");
-    match status {
-        DoctorStatus::HasBlockers { blockers } => {
-            let blocker = blockers
-                .iter()
-                .find(|blocker| blocker.source == BlockerSource::CommsGate)
-                .expect("must surface CommsGate blocker");
-            assert!(
-                blocker.detail.contains("receiver_binding"),
-                "blocker detail must name failing check: {}",
-                blocker.detail
-            );
-        }
-        DoctorStatus::Ok => panic!("missing receiver binding must not report Ok"),
-    }
-}
 
-#[test]
-fn doctor_drifted_db_emits_schema_layout_drift_blocker() {
-    // STRENGTHENED (gate w59ds828k): the ONLY drift assertion previously
-    // (doctor_status_has_blockers_carries_typed_source) was a pure serde test that hand-built
-    // the Blocker — it never proved doctor() EMITS SchemaLayoutDrift from a real drifted db.
-    // This drives real doctor() on a SEEDED drifted team.db and pins the CONCRETE golden:
-    //   commands.py:242-250 → schema layout drift → coordinator.schema_error ==
-    //   "team.db physical layout drift detected"  (EXACT string, commands.py:248).
-    let ws = seed_workspace_with_drifted_db("blocker");
-    let opts = doctor_opts(&ws);
-    let status =
-        doctor(&opts).expect("doctor on drifted workspace should succeed (returns blockers)");
-    match status {
-        DoctorStatus::HasBlockers { blockers } => {
-            let drift = blockers
-                .iter()
-                .find(|b| b.source == BlockerSource::SchemaLayoutDrift)
-                .expect("must surface a SchemaLayoutDrift blocker");
-            // EXACT golden string from commands.py:248.
-            assert_eq!(
-                drift.detail, "team.db physical layout drift detected",
-                "schema_error golden must match commands.py:248 verbatim"
-            );
-        }
-        DoctorStatus::Ok => panic!("drifted team.db must NOT report Ok — layout_diffs non-empty"),
-    }
-}
 
-#[test]
-fn doctor_status_ok_serializes_with_status_tag() {
-    // #[serde(tag = "status")] — Ok → {"status":"ok"}.
-    let json = serde_json::to_string(&DoctorStatus::Ok).unwrap();
-    assert_eq!(json, "{\"status\":\"ok\"}");
-}
 
-#[test]
-fn doctor_status_has_blockers_carries_typed_source() {
-    // HasBlockers serde:tag status=has_blockers + blockers[].source snake_case.
-    let status = DoctorStatus::HasBlockers {
-        blockers: vec![Blocker {
-            source: BlockerSource::SchemaLayoutDrift,
-            detail: "team.db physical layout drift detected".to_string(),
-        }],
-    };
-    let json = serde_json::to_string(&status).unwrap();
-    assert!(json.contains("\"status\":\"has_blockers\""), "got: {json}");
-    assert!(
-        json.contains("\"source\":\"schema_layout_drift\""),
-        "got: {json}"
-    );
-    // detail 精确 == commands.py:248 schema_error 文本.
-    assert!(
-        json.contains("team.db physical layout drift detected"),
-        "got: {json}"
-    );
-}
 
-#[test]
-fn blocker_source_serde_exact_snake_case_strings() {
-    // §19 穷尽 enum 序列化 == Python 散字符串等价 (逐 variant 钉).
-    let cases: &[(BlockerSource, &str)] = &[
-        (BlockerSource::SchemaLayoutDrift, "\"schema_layout_drift\""),
-        (BlockerSource::OrphanCoordinator, "\"orphan_coordinator\""),
-        (BlockerSource::CommsGate, "\"comms_gate\""),
-        (BlockerSource::PathNotConfigured, "\"path_not_configured\""),
-    ];
-    for (src, want) in cases {
-        assert_eq!(&serde_json::to_string(src).unwrap(), want);
-    }
-}
 
 // ───────────────────────────────────────────────────────────────────────
 // repair_schema — 转调 step 3 fix_schema_layout(workspace, SCHEMA_VERSION=3)。
@@ -461,42 +240,8 @@ fn blocker_source_serde_exact_snake_case_strings() {
 // 破坏性 rebuild 真路径 #[ignore](需真 db fixture / 真机)。
 // ───────────────────────────────────────────────────────────────────────
 
-#[test]
-fn repair_schema_missing_db_is_up_to_date() {
-    // db 不存在 (.team/runtime/team.db) → fix_schema_layout 返 Missing →
-    // packaging 包成 UpToDate (无 drift 需迁移)。
-    let dir = std::env::temp_dir().join(format!("ta-repair-missing-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
-    let outcome = repair_schema(&dir).expect("missing db repair should succeed");
-    match outcome {
-        MigrationOutcome::UpToDate { diagnosis } => {
-            // schema_diagnosis(missing) → ok=true, layout_diffs 空.
-            assert!(diagnosis.layout_diffs.is_empty(), "missing db has no drift");
-        }
-        other => panic!("expected UpToDate for missing db, got {other:?}"),
-    }
-}
 
-#[test]
-#[ignore = "REAL-MACHINE-E2E: needs real drifted team.db fixture + destructive rebuild"]
-fn repair_schema_drifted_db_migrates() {
-    // 真 drift fixture → Migrated{fix: FixResult::Fixed{rebuilds non-empty}}.
-    let ws = PathBuf::from("/nonexistent-fixture");
-    let outcome = repair_schema(&ws).expect("drift repair");
-    assert!(matches!(outcome, MigrationOutcome::Migrated { .. }));
-}
 
-#[test]
-#[ignore = "REAL-MACHINE-E2E: needs a held active lock on team.db (concurrent BEGIN IMMEDIATE)"]
-fn repair_schema_active_lock_is_blocked_no_backup() {
-    // 撞活跃锁 → Blocked{reason:"active_lock"};且不写备份 (db/migration.rs:db_lock_status).
-    let ws = PathBuf::from("/nonexistent-locked-fixture");
-    let outcome = repair_schema(&ws).expect("blocked repair returns Ok wrapper");
-    match outcome {
-        MigrationOutcome::Blocked { reason } => assert_eq!(reason, "active_lock"),
-        other => panic!("expected Blocked, got {other:?}"),
-    }
-}
 
 // ───────────────────────────────────────────────────────────────────────
 // diagnose_path — bincheck.mjs printMissingBinDiagnostic 等价 (typed PathDiagnostic)。
@@ -504,67 +249,8 @@ fn repair_schema_active_lock_is_blocked_no_backup() {
 // 纯逻辑可单测 (真探 PATH 部分 #[ignore])。
 // ───────────────────────────────────────────────────────────────────────
 
-#[test]
-fn diagnose_path_when_bin_on_path_reports_on_path() {
-    // bin_dir 在当前 PATH → install report 的 path_hint 是 OnPath{bin_dir}。
-    let path_var = std::env::var("PATH").unwrap_or_default();
-    let bin = path_var
-        .split(':')
-        .filter(|p| !p.is_empty())
-        .map(PathBuf::from)
-        .find(|p| p.ends_with("bin"))
-        .expect("PATH has at least one .../bin entry");
-    let mut opts = install_opts(SkillTarget::Codex);
-    opts.prefix = Prefix(bin.parent().expect("bin dir has parent").to_path_buf());
-    let hint = install(&opts)
-        .expect("install reports on-path bin")
-        .path_hint;
-    match hint {
-        PathHint::OnPath { bin_dir } => assert_eq!(bin_dir, bin),
-        PathHint::NotOnPath { .. } => panic!("PATH entry should report OnPath"),
-    }
-}
 
-#[test]
-fn diagnose_path_not_on_path_npmrc_prefix_is_none_no_npm() {
-    // Rust 版无 npm 路径 → npmrc_prefix == None (skeleton:257).
-    // 用一个绝不在 PATH 的安装前缀,经当前公开 install 路径取得诊断。
-    let prefix = PathBuf::from("/zzz-definitely-not-on-path-9f3a");
-    let bin = prefix.join("bin");
-    let mut opts = install_opts(SkillTarget::Codex);
-    opts.prefix = Prefix(prefix);
-    let hint = install(&opts)
-        .expect("install reports off-path bin")
-        .path_hint;
-    match hint {
-        PathHint::NotOnPath {
-            bin_dir,
-            diagnostic,
-        } => {
-            assert_eq!(bin_dir, bin);
-            // Rust 无 npm → 绝不重新引入 .npmrc 解析.
-            assert_eq!(diagnostic.npmrc_prefix, None);
-            // path_entries == 当前 PATH 条目数 (bincheck.mjs:43).
-            let want = std::env::var("PATH")
-                .unwrap_or_default()
-                .split(':')
-                .filter(|p| !p.is_empty())
-                .count();
-            assert_eq!(diagnostic.path_entries, want);
-        }
-        PathHint::OnPath { .. } => panic!("bogus dir must be NotOnPath"),
-    }
-}
 
-#[test]
-fn path_hint_serde_tag_kind() {
-    // #[serde(tag = "kind")] — OnPath → {"kind":"on_path",...}.
-    let h = PathHint::OnPath {
-        bin_dir: PathBuf::from("/home/u/.local/bin"),
-    };
-    let json = serde_json::to_string(&h).unwrap();
-    assert!(json.contains("\"kind\":\"on_path\""), "got: {json}");
-}
 
 // ───────────────────────────────────────────────────────────────────────
 // install_skill — cmd_install_skill (commands.py:451-481)。
@@ -665,38 +351,8 @@ fn install_skill_real_copy_removes_stale_files() {
 // 全副作用 #[ignore] (写 bin / 拷 skill / 探 PATH / 跑 doctor) — clean-install E2E.
 // ───────────────────────────────────────────────────────────────────────
 
-fn install_opts(skill_target: SkillTarget) -> InstallOptions {
-    InstallOptions {
-        prefix: Prefix(PathBuf::from("/home/u/.local")),
-        self_binary: PathBuf::from("/proc/self/exe"),
-        skill_target,
-    }
-}
 
-#[test]
-#[ignore = "REAL-MACHINE-E2E: clean-install writes bin + copies skill + runs doctor + probes PATH"]
-fn install_first_time_has_no_binary_replace() {
-    // install.mjs:48 install 入口 — 首装无 replace.
-    let opts = install_opts(SkillTarget::All);
-    let report = install(&opts).expect("clean install");
-    assert!(report.replace.is_none(), "first install must NOT replace");
-    // installer 默认装两个 skill (--target all).
-    assert_eq!(report.skills.len(), 2);
-    // 版本 == 单一真相源.
-    assert_eq!(report.version, Version::current());
-}
 
-#[test]
-fn atomic_replace_outcome_serde_tag_outcome() {
-    // #[serde(tag = "outcome")] — RolledBack carries restored_from + error.
-    let o = AtomicReplaceOutcome::RolledBack {
-        restored_from: PathBuf::from("/home/u/.local/bin/.previous"),
-        error: "EXDEV".to_string(),
-    };
-    let json = serde_json::to_string(&o).unwrap();
-    assert!(json.contains("\"outcome\":\"rolled_back\""), "got: {json}");
-    assert!(json.contains("\"error\":\"EXDEV\""), "got: {json}");
-}
 
 // ───────────────────────────────────────────────────────────────────────
 // §84 — packaging 绝不触发 provider client / prompt / token.
@@ -741,22 +397,6 @@ fn install_skill_dry_run_is_pure_no_provider_state() {
 // 此处钉 diagnose_path 在空 PATH 时 path_entries==0 (bincheck.mjs:43 三元)。
 // ───────────────────────────────────────────────────────────────────────
 
-#[test]
-#[ignore = "REAL-MACHINE-E2E: needs to override process PATH env to empty/Windows-delimited"]
-fn diagnose_path_empty_path_has_zero_entries() {
-    // bincheck.mjs:43 — searchPath ? split.length : 0;空 PATH → 0 entries.
-    // (真改 process env PATH 影响并行测试,故 ignore;实现层应支持注入 PATH.)
-    let mut opts = install_opts(SkillTarget::Codex);
-    opts.prefix = Prefix(PathBuf::from("/anything"));
-    let hint = install(&opts)
-        .expect("install reports empty PATH")
-        .path_hint;
-    if let PathHint::NotOnPath { diagnostic, .. } = hint {
-        assert_eq!(diagnostic.path_entries, 0);
-    } else {
-        panic!("empty PATH → NotOnPath");
-    }
-}
 
 // ═══════════════ P2 FIX-LOOP RED (复绿即对抗 cross-model findings) ═══════════════
 

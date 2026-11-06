@@ -51,8 +51,6 @@ use crate::model::ids::{TaskId, TeamKey};
 pub(crate) const COMMS_BOUNDARY_TEXT: &str =
     "This checks terminal connection consistency only; it does not send a message or prove that a worker replied.";
 pub(crate) const QUICK_START_REMINDER: &str = "Next: send a task. Use team-agent status for status and team-agent inbox leader -n 3 for replies; do not inspect worker terminal content.";
-pub(crate) const SEND_REMINDER: &str =
-    "Wait for an actual reply; use team-agent inbox leader -n 3. Do not inspect worker terminal content.";
 pub(crate) const STATUS_REMINDER: &str =
     "Next: use team-agent inbox leader -n 3 for replies. Status is not proof of task completion; do not inspect worker terminal content.";
 
@@ -100,23 +98,6 @@ pub use profile::*;
 pub use send::*;
 pub use types::*;
 
-///
-/// Public `attach-leader` CLI handler. It consumes the typed pane/provider args and
-/// writes/returns a `leader_receiver` binding via the leader lease port.
-pub fn cmd_attach_leader(args: &AttachLeaderArgs) -> Result<CmdResult, CliError> {
-    let mut value = leader_port::attach_leader(
-        &args.workspace,
-        args.team.as_deref(),
-        args.pane.as_ref(),
-        args.provider,
-        args.confirm,
-    )?;
-    if let Some(obj) = value.as_object_mut() {
-        obj.entry("leader_receiver".to_string())
-            .or_insert(Value::Null);
-    }
-    Ok(CmdResult::from_json(value, args.json))
-}
 
 pub(crate) use helpers::*;
 
@@ -644,33 +625,7 @@ pub mod lifecycle_port {
             .collect()
     }
 
-    /// E12 下沉纯函数:bare-shutdown socket 拆除决策。
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub(crate) enum KillDecision {
-        /// Ownership-gated cleanup always uses per-session kills; never whole-server teardown.
-        KillIndividually {
-            to_kill: Vec<crate::transport::SessionName>,
-            spared: Vec<crate::transport::SessionName>,
-        },
-    }
 
-    ///
-    /// E12 纯决策(单测下沉):spare = `anchor_sessions` ∪ `team-agent-leader-*` 前缀(并集,锚优先)。
-    /// Always returns a per-session plan; ownership markers are checked by the caller.
-    pub(crate) fn sessions_to_kill(
-        sessions: &[crate::transport::SessionName],
-        anchor_sessions: &std::collections::BTreeSet<String>,
-    ) -> KillDecision {
-        let is_spared = |s: &crate::transport::SessionName| {
-            s.as_str().starts_with(crate::leader::LEADER_SESSION_PREFIX)
-                || anchor_sessions.contains(s.as_str())
-        };
-        let spared: Vec<_> = sessions.iter().filter(|s| is_spared(s)).cloned().collect();
-        let to_kill: Vec<_> = sessions.iter().filter(|s| !is_spared(s)).cloned().collect();
-        // Fail closed: even an apparently exclusive socket is not proof of
-        // ownership, so whole-server teardown is never selected.
-        KillDecision::KillIndividually { to_kill, spared }
-    }
 
     #[derive(Debug, Default)]
     struct ShutdownSocketCleanup {
@@ -2945,9 +2900,6 @@ pub mod lifecycle_port {
         }
     }
 
-    fn process_table() -> Vec<ProcessInfo> {
-        probed_process_table().unwrap_or_default()
-    }
 
     /// PERF-6 C-①-1 / swallow batch 1: the shutdown-scope snapshot fetch. A probe
     /// failure writes a `shutdown.process_probe_failed` event (non-null error) and
@@ -5835,29 +5787,6 @@ pub mod diagnose_port {
         }
     }
 
-    fn doctor_team_dir(workspace: &Path, spec: Option<&Path>) -> Option<PathBuf> {
-        if let Some(spec) = spec {
-            let candidate = if spec.is_absolute() {
-                spec.to_path_buf()
-            } else {
-                workspace.join(spec)
-            };
-            if candidate.is_file() {
-                return candidate.parent().map(Path::to_path_buf);
-            }
-            if candidate.join("team.spec.yaml").is_file() || candidate.join("TEAM.md").is_file() {
-                return Some(candidate);
-            }
-        }
-        if workspace.join("team.spec.yaml").is_file() || workspace.join("TEAM.md").is_file() {
-            return Some(workspace.to_path_buf());
-        }
-        let current = workspace.join(".team").join("current");
-        if current.join("team.spec.yaml").is_file() || current.join("TEAM.md").is_file() {
-            return Some(current);
-        }
-        None
-    }
 
     fn has_doctor_team_context(workspace: &Path, spec: Option<&Path>) -> bool {
         if spec.is_some_and(|path| {
@@ -6067,13 +5996,6 @@ pub mod diagnose_port {
         }
     }
 
-    fn run_id() -> String {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        format!("{:012x}", now & 0xffffffffffff)
-    }
 
     fn which_path(binary: &str) -> Option<String> {
         let path = std::env::var_os("PATH")?;
@@ -6151,56 +6073,7 @@ pub mod diagnose_port {
         })
     }
 
-    pub(crate) fn coordinator_health_value(health: crate::coordinator::HealthReport) -> Value {
-        let expose_binary_drift = health.service_available && !health.metadata_ok;
-        let binary_identity_relation = health.binary_identity_relation.as_str();
-        let mut value = json!({
-            "ok": health.ok,
-            "status": coordinator_status_wire(health.status),
-            "pid": health.pid.map(|p| p.get()),
-            "metadata": health.metadata.map(|m| json!({
-                "pid": m.pid.get(),
-                "protocol_version": m.protocol_version,
-                "message_store_schema_version": m.message_store_schema_version,
-                "binary_path": m.binary_path,
-                "binary_version": m.binary_version,
-                "source": m.source,
-                "updated_at": m.updated_at,
-            })),
-            "metadata_ok": health.metadata_ok,
-            "metadata_mismatch_reason": health.metadata_mismatch_reason,
-            "binary_path": health.current_binary_identity.binary_path,
-            "binary_version": health.current_binary_identity.binary_version,
-            "schema_ok": health.schema.ok,
-            "schema_error": health.schema.error.map(|e| format!("{e:?}")),
-            "schema": {
-                "message_store_schema_version": health.schema.schema_version,
-            },
-        });
-        if expose_binary_drift {
-            if let Some(obj) = value.as_object_mut() {
-                obj.insert("wire_metadata_ok".to_string(), Value::Bool(true));
-                obj.insert("binary_identity_ok".to_string(), Value::Bool(false));
-                obj.insert(
-                    "binary_identity_relation".to_string(),
-                    Value::String(binary_identity_relation.to_string()),
-                );
-                obj.insert("service_available".to_string(), Value::Bool(true));
-            }
-        }
-        value
-    }
 
-    fn coordinator_status_wire(
-        status: crate::coordinator::CoordinatorHealthStatus,
-    ) -> &'static str {
-        match status {
-            crate::coordinator::CoordinatorHealthStatus::Missing => "missing",
-            crate::coordinator::CoordinatorHealthStatus::InvalidPid => "invalid_pid",
-            crate::coordinator::CoordinatorHealthStatus::Running => "running",
-            crate::coordinator::CoordinatorHealthStatus::Stale => "stale",
-        }
-    }
 }
 
 /// PLACEHOLDER → leader lane(`runtime.{takeover,claim_leader}` 的 CLI 视图)。
@@ -6209,62 +6082,6 @@ pub mod diagnose_port {
 pub mod leader_port {
     use super::*;
 
-    ///
-    /// `runtime.takeover(workspace, team, confirm)` 的 CLI `--json` 投影。
-    pub fn takeover(
-        workspace: &Path,
-        team: Option<&str>,
-        confirm: bool,
-    ) -> Result<Value, CliError> {
-        if !confirm && !positive_caller_pane_env_present() {
-            return Ok(json!({
-                "ok": false,
-                "status": "refused",
-                "reason": "confirm_required",
-                "action": "rerun with --confirm to claim ownership of this team",
-            }));
-        }
-        let state = crate::state::persist::load_runtime_state_without_migrations(workspace)
-            .map_err(|e| CliError::Runtime(e.to_string()))?;
-        let Some(team_id) = resolve_owner_team_id(&state, team) else {
-            return Ok(json!({
-                "ok": false,
-                "status": "refused",
-                "reason": "team_target_unresolved",
-                "team": team.unwrap_or(""),
-                "hint": "specify an active team id",
-            }));
-        };
-        let requested_team = team;
-        let resolved_team = Some(team_id.as_str().to_string());
-        if !positive_caller_pane_env_present() {
-            let bind = crate::leader::bind_owner_from_caller_pane(workspace, &team_id, None)
-                .map_err(|e| CliError::Runtime(e.to_string()))?;
-            return Ok(owner_bind_value(bind));
-        }
-        let team = resolved_team.as_deref();
-        let result = crate::leader::claim_leader(workspace, team, true)
-            .map_err(|e| CliError::Runtime(e.to_string()))?;
-        let mut value = lease_value(result);
-        insert_resolved_team(&mut value, requested_team, resolved_team.as_deref());
-        append_team_session_ready(workspace, resolved_team.as_deref(), &mut value);
-        if value.get("ok").and_then(Value::as_bool) == Some(true) {
-            emit_topology_convergence_event(
-                workspace,
-                resolved_team.as_deref(),
-                "takeover",
-                &value,
-            );
-            register_after_binding_success(
-                workspace,
-                resolved_team.as_deref(),
-                "takeover",
-                &mut value,
-            );
-            restore_non_target_teams(workspace, &state, resolved_team.as_deref());
-        }
-        Ok(value)
-    }
     ///
     /// `runtime.claim_leader(...)` 的 CLI `--json` 投影(`cmd_claim_leader`;含 inbox_hint)。
     pub fn claim_leader(
@@ -6315,33 +6132,6 @@ pub mod leader_port {
         Ok(value)
     }
 
-    ///
-    /// `runtime.attach_leader(...)` 的 CLI `--json` 投影。
-    pub fn attach_leader(
-        workspace: &Path,
-        team: Option<&str>,
-        pane: Option<&crate::transport::PaneId>,
-        provider: crate::provider::Provider,
-        _confirm: bool,
-    ) -> Result<Value, CliError> {
-        let result = crate::leader::attach_leader(workspace, team, pane, provider)
-            .map_err(|e| CliError::Runtime(e.to_string()))?;
-        let requeued =
-            attach_requeued_exhausted_watchers(workspace, result.bound_pane_id.as_ref())?;
-        let mut value = attach_lease_value(result, requeued);
-        if let Some(obj) = value.as_object_mut() {
-            if let Some(team) = team {
-                obj.insert("team".to_string(), json!(team));
-                obj.insert("team_key".to_string(), json!(team));
-            }
-        }
-        // E7 register-after-success: canonical lease write already
-        // finished inside `crate::leader::attach_leader`.
-        if value.get("ok").and_then(Value::as_bool) == Some(true) {
-            register_after_binding_success(workspace, team, "attach-leader", &mut value);
-        }
-        Ok(value)
-    }
 
     /// E7 (0.5.9 host-leader-registry-design §14 step 3): after a
     /// canonical binding command succeeds, write a derived discovery
@@ -6583,29 +6373,7 @@ pub mod leader_port {
                 .is_some_and(|pane| !pane.is_empty())
     }
 
-    fn team_owner_value(state: &Value, team_id: &TeamKey) -> Option<Value> {
-        // Stage 2 (identity-boundary unified plan, architect direction
-        // 2026-06-23): route through the ownership repository so all owner
-        // reads see the same precedence (teams.<key> > top-level when
-        // team_state_key matches). The repository preserves the pre-Stage-2
-        // semantics of this helper and adds an `OwnershipSource` tag that
-        // diagnose/status surfaces can consume in later stages.
-        crate::state::ownership::read_owner_value(state, team_id.as_str()).cloned()
-    }
 
-    fn family_a_owner_value(
-        result: &crate::leader::OwnerBindResult,
-        owner: &crate::leader::TeamOwner,
-    ) -> Value {
-        json!({
-            "pane_id": owner.pane_id.as_str(),
-            "leader_session_uuid": owner.leader_session_uuid.as_ref().map(|u| u.as_str()),
-            "machine_fingerprint": owner.machine_fingerprint,
-            "provider": crate::leader::owner_bind::owner_bind_provider_wire(&result.caller_current_command),
-            "os_user": owner.os_user.as_deref().unwrap_or(""),
-            "claimed_at": owner.claimed_at,
-        })
-    }
 
     pub(crate) fn compact_lease_value(value: &mut Value) {
         let topology_status = value
@@ -6674,55 +6442,8 @@ pub mod leader_port {
         Value::Object(out)
     }
 
-    fn attach_lease_value(result: crate::leader::LeaseResult, requeued: Value) -> Value {
-        let mut value = json!({
-            "ok": result.ok,
-            "leader_receiver": result
-                .receiver
-                .map(|receiver| serde_json::to_value(receiver).unwrap_or(Value::Null))
-                .unwrap_or(Value::Null),
-            "validation": {
-                "ok": result.ok,
-                "status": lease_status_wire(result.status),
-                "reason": result.reason.map(lease_reason_wire),
-                "action": result.action,
-            },
-            "requeued_exhausted_watchers": requeued,
-        });
-        if let Some(attach_window_failures) = result.attach_window_failures {
-            value["attach_window_failures"] = attach_window_failures;
-        }
-        value
-    }
 
-    fn attach_requeued_exhausted_watchers(
-        workspace: &Path,
-        _pane_id: Option<&crate::transport::PaneId>,
-    ) -> Result<Value, CliError> {
-        let events = crate::event_log::EventLog::new(workspace)
-            .tail(20)
-            .map_err(|e| CliError::Runtime(e.to_string()))?;
-        let event_name = crate::leader::LeaderEvent::ReceiverRequeuedExhaustedWatchers.name();
-        for event in events.iter().rev() {
-            if event.get("event").and_then(Value::as_str) != Some(event_name) {
-                continue;
-            }
-            return Ok(project_requeued_exhausted_watchers(event));
-        }
-        Ok(json!([]))
-    }
 
-    ///
-    /// R8 D6 (decoupled for offline byte-lock — c-lite): project the requeued-exhausted event into the
-    /// CLI `requeued_exhausted_watchers` return. golden (leader/__init__.py:56): the `watcher_ids`
-    /// STRING list. (Current divergent body — the `requeued` Vec<WatcherNotice> objects — kept until
-    /// porter-c ports; pinned RED in cli::tests asserts the golden string list.)
-    pub(crate) fn project_requeued_exhausted_watchers(event: &Value) -> Value {
-        event
-            .get("watcher_ids")
-            .cloned()
-            .unwrap_or_else(|| json!([]))
-    }
 
     fn lease_status_wire(status: crate::leader::LeaseStatus) -> &'static str {
         match status {

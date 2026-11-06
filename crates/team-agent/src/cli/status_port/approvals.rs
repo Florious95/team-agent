@@ -1,10 +1,5 @@
 use super::*;
 
-pub fn approvals(workspace: &Path, agent: Option<&str>, as_json: bool) -> Result<Value, CliError> {
-    let _ = as_json;
-    let state = read_runtime_state(workspace);
-    approvals_scoped(workspace, &state, agent, as_json)
-}
 
 pub fn approvals_scoped(
     workspace: &Path,

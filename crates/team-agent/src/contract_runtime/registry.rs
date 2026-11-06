@@ -3,11 +3,11 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use team_agent_contract::contract::{
-    descriptor::{PromptCarrier, ProviderDescriptor, ToolNaming},
+    descriptor::{ProviderDescriptor, ToolNaming},
     types::InstanceIdentity,
     hooks::{PlanHook, ProviderHooks},
     plan::{CatalogObservation, LaunchEntrypoint, LaunchPlan, ResolvedLaunch},
-    types::{ContractError, NativeIdentity, Support},
+    types::{ContractError, NativeIdentity},
 };
 use team_agent_contract::kiro::{self, KiroAdapter, KIRO_DESCRIPTOR};
 use team_agent_contract::providers::codex::{self, CodexAdapter, CODEX_DESCRIPTOR};
@@ -17,7 +17,7 @@ use team_agent_contract::providers::grok_build::{self, GrokAdapter, GROK_BUILD_D
 use team_agent_contract::providers::pi::{self, PiAdapter, PI_DESCRIPTOR};
 use team_agent_contract::runtime::{
     delivery::{ControlDefinition, StartupDefinition},
-    native_panel::{NativePanelPolicy, SessionPanelPolicy},
+    native_panel::SessionPanelPolicy,
 };
 
 const DESCRIPTORS: &[&ProviderDescriptor] = &[&KIRO_DESCRIPTOR, &CURSOR_DESCRIPTOR, &GROK_BUILD_DESCRIPTOR, &CODEX_DESCRIPTOR, &PI_DESCRIPTOR, &CLAUDE_DESCRIPTOR];
@@ -132,13 +132,6 @@ impl NativeProvider {
         }
     }
 
-    /// A tool-roundtrip client needs one durable, authorized first packet before
-    /// it can demonstrate its Team-tool registry. This is independent of whether
-    /// instructions were already supplied at launch.
-    pub fn first_business_bootstrap(self) -> bool {
-        self.uses_tool_roundtrips()
-            || matches!(self.descriptor().prompt.carrier, Support::Supported(PromptCarrier::RuntimeBridge))
-    }
 
     /// These providers use the separately fenced native tool-roundtrip ledger,
     /// never a guessed neutral tools panel or another provider's inspector.
@@ -161,31 +154,6 @@ impl NativeProvider {
         }
     }
 
-    pub fn tool_panel(self) -> Result<&'static NativePanelPolicy, ContractError> {
-        match self {
-            Self::Kiro => Ok(&kiro::interaction::TOOL_PANEL),
-            Self::Cursor => Err(ContractError::Unverified {
-                field: "Cursor native Team-tool inspector",
-                reason: cursor::UNVERIFIED,
-            }),
-            Self::GrokBuild => Err(ContractError::Unverified {
-                field: "Grok Build native Team-tool inspector",
-                reason: grok_build::UNVERIFIED,
-            }),
-            Self::Codex => Err(ContractError::Unverified {
-                field: "Codex native Team-tool inspector",
-                reason: codex::UNVERIFIED,
-            }),
-            Self::Pi => Err(ContractError::Unverified {
-                field: "Pi native Team-tool inspector",
-                reason: pi::UNVERIFIED,
-            }),
-            Self::Claude => Err(ContractError::Unverified {
-                field: "Claude native Team-tool inspector",
-                reason: claude::UNVERIFIED,
-            }),
-        }
-    }
 
     pub fn server_key_for(self, identity: &InstanceIdentity) -> Result<String, ContractError> {
         match self {
@@ -384,15 +352,14 @@ pub fn recognizes(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use team_agent_contract::contract::{descriptor::PromptCarrier, types::Support};
 
     #[test]
     fn claude_native_argv_prompt_keeps_first_business_tool_bootstrap() {
         assert_eq!(provider("claude_tui").unwrap(), NativeProvider::Claude);
         assert_eq!(CLAUDE_DESCRIPTOR.prompt.carrier, Support::Supported(PromptCarrier::Argv));
         assert!(CLAUDE_DESCRIPTOR.workspace.shared_cwd);
-        assert!(NativeProvider::Claude.first_business_bootstrap());
         assert!(NativeProvider::Claude.uses_tool_roundtrips());
-        assert!(NativeProvider::Claude.tool_panel().is_err());
     }
 
     #[test]
@@ -463,11 +430,9 @@ mod tests {
         assert_ne!(first, grok_build::server_key(&identity));
         identity.generation = team_agent_contract::contract::types::Generation(2);
         assert_ne!(first, NativeProvider::Codex.server_key_for(&identity).unwrap());
-        assert!(NativeProvider::Codex.tool_panel().is_err());
         assert!(NativeProvider::Codex.startup().is_none());
         assert!(NativeProvider::Codex.session_panel().is_none());
         assert!(NativeProvider::Codex.uses_tool_roundtrips());
-        assert!(NativeProvider::Codex.first_business_bootstrap());
         let kinds: Vec<_> = NativeProvider::Codex.controls().iter().map(|control| control.command).collect();
         assert_eq!(kinds, ["/status", "/exit"]);
     }
@@ -498,11 +463,9 @@ mod tests {
         assert!(format!("mcp__{first}__report_result").len() <= 64);
         identity.generation = Generation(2);
         assert_ne!(first, NativeProvider::Pi.server_key_for(&identity).unwrap());
-        assert!(NativeProvider::Pi.tool_panel().is_err());
         assert!(NativeProvider::Pi.startup().is_none());
         assert!(NativeProvider::Pi.session_panel().is_none());
         assert!(NativeProvider::Pi.uses_tool_roundtrips());
-        assert!(NativeProvider::Pi.first_business_bootstrap());
         let kinds: Vec<_> = NativeProvider::Pi.controls().iter().map(|control| control.command).collect();
         assert_eq!(kinds, ["/session", "/quit"]);
     }
@@ -529,7 +492,6 @@ mod tests {
         identity.generation = Generation(2);
         assert_ne!(first, NativeProvider::GrokBuild.server_key_for(&identity).unwrap());
         assert!(NativeProvider::GrokBuild.server_key().is_err());
-        assert!(NativeProvider::GrokBuild.tool_panel().is_err());
         assert!(NativeProvider::GrokBuild.startup().is_some());
         assert!(NativeProvider::GrokBuild.session_panel().is_some());
         assert!(NativeProvider::GrokBuild.uses_tool_roundtrips());
@@ -538,15 +500,9 @@ mod tests {
     #[test]
     fn cursor_has_no_kiro_control_or_tool_inspector_fallback() {
         assert!(NativeProvider::Cursor.controls().is_empty());
-        assert!(matches!(NativeProvider::Cursor.tool_panel(), Err(ContractError::Unverified { .. })));
         assert_eq!(NativeProvider::Cursor.server_key().unwrap(), "team");
-        assert!(NativeProvider::Cursor.first_business_bootstrap());
         assert!(NativeProvider::Cursor.uses_tool_roundtrips());
-        assert!(!NativeProvider::Kiro.first_business_bootstrap());
         assert!(!NativeProvider::Kiro.uses_tool_roundtrips());
-        let kiro_panel = NativeProvider::Kiro.tool_panel().unwrap();
-        assert_eq!(kiro_panel.server_key, NativeProvider::Kiro.server_key().unwrap());
-        assert_eq!(kiro_panel.policy_sha256, kiro::interaction::POLICY);
         assert!(!NativeProvider::Kiro.controls().is_empty());
     }
 }

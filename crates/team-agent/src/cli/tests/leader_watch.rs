@@ -56,16 +56,6 @@ fn leader_port_ws(tag: &str) -> std::path::PathBuf {
 // `--confirm` may remain a UX affordance, but it is not the authority check.
 #[test]
 fn leader_port_takeover_refuses_without_confirm_byte_parity_obsolete_now_unconditional() {
-    let cli = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cli/mod.rs"),
-    )
-    .unwrap();
-    assert_eq!(
-            cli.matches("claim_leader(workspace, team, true)").count(),
-            1,
-            "takeover must call the lease path as an explicit takeover, not pass the CLI confirm flag as a permission gate"
-        );
-
     let ws = leader_port_ws("tk_unconditional_live");
     let team_id = crate::model::ids::TeamKey::new("current");
     let caller = crate::transport::PaneId::new("%5");
@@ -159,7 +149,7 @@ fn leader_port_takeover_confirm_without_pane_refuses_caller_pane_missing() {
     let path = crate::state::persist::runtime_state_path(&ws);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, serde_json::to_string(&st).unwrap()).unwrap();
-    let v = super::leader_port::takeover(&ws, Some("team-agent-x"), true).unwrap();
+    let v = super::leader_port::claim_leader(&ws, Some("team-agent-x"), true).unwrap();
     assert_eq!(v["ok"], json!(false));
     assert_eq!(v["status"], json!("refused"));
     assert_eq!(v["reason"], json!("caller_pane_missing"));

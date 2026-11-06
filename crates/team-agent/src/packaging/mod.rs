@@ -68,14 +68,10 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 pub mod install;
-pub mod migrate;
-pub mod repair;
 pub mod types;
 
 // ── 重新导出 module 根原本可见的全部条目(保持 `crate::packaging::X` 与测试 `super::*` 解析不变)──
 pub use install::*;
-pub use migrate::*;
-pub use repair::*;
 pub use types::*;
 
 // ── REUSE — committed model types(测试经 `super::*` 引用 `Provider`;与原单文件根 import 等价)──

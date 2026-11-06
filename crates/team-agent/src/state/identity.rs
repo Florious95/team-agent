@@ -289,231 +289,13 @@ pub fn caller_identity_from_env(
     })
 }
 
-///
-/// `populate_team_owner_from_env`(`state.py:414`):已有 team_owner → 仅补迁移 uuid 后返回;
-/// 否则从 env caller 身份 seed team_owner(无 pane_id → `None`)。`now_iso` = claimed_at。
-fn populate_team_owner_from_env(
-    state: &mut Value,
-    source: &str,
-    env: &dyn IdentityEnv,
-    now_iso: &str,
-) -> Result<Option<Value>, ModelError> {
-    if state.get("team_owner").is_some_and(json_truthy) {
-        let ws_abspath = identity_workspace_abspath(state, env, None);
-        let key = team_state_key(state);
-        migrate_team_identity(state, env, Some(Path::new(&ws_abspath)), Some(&key))?;
-        return Ok(state.get("team_owner").cloned());
-    }
-    let key = team_state_key(state);
-    let caller = caller_identity_from_env(Some(state), env, Some(&key), None)?;
-    if caller.pane_id.is_empty() {
-        return Ok(None);
-    }
-    // 键序对齐 Python dict 字面。
-    let owner = json!({
-        "pane_id": caller.pane_id,
-        "provider": caller.provider,
-        "machine_fingerprint": caller.machine_fingerprint,
-        "leader_session_uuid": caller.leader_session_uuid,
-        "claimed_at": now_iso,
-        "claimed_via": source,
-    });
-    // Stage 3a (identity-boundary unified plan, architect direction 2026-06-23):
-    // route the in-memory team_owner write through the ownership repository.
-    // Net behaviour preserved: still writes top-level (legacy dual-write);
-    // 3b/3c/3d will remove the read-side projection promote, persist
-    // copy-back, and finally the top-level write.
-    let record = crate::state::ownership::OwnershipWrite::new().with_team_owner(owner.clone());
-    crate::state::ownership::write_owner(state, &key, record);
-    Ok(Some(owner))
-}
 
-///
-/// `apply_first_time_leader_binding`(`state.py:434`):命令 + workspace realpath 双门后,
-/// 写入 team_owner / leader_receiver(owner_epoch=0)。拒绝 dict 字节对齐 Python(含 `pane` +
-/// `repr()` 错误串)。`command_looks_usable`(`_leader_command_looks_usable`,step 11)经闭包注入。
-#[allow(clippy::too_many_arguments)]
-pub fn apply_first_time_leader_binding(
-    workspace: &Path,
-    state: &mut Value,
-    receiver: &mut Value,
-    pane_info: &Value,
-    identity: &Value,
-    source: &str,
-    now_iso: &str,
-    command_looks_usable: impl Fn(&str, &str) -> bool,
-) -> Value {
-    let command = pane_info
-        .get("pane_current_command")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    // str(receiver.get("provider") or "")
-    let provider = receiver
-        .get("provider")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("")
-        .to_string();
-    if !command_looks_usable(command, &provider) {
-        return json!({
-            "ok": false,
-            "reason": "leader_pane_wrong_command",
-            "error": format!("pane command {} is not a leader host", py_repr_str(command)),
-            "pane": pane_info,
-        });
-    }
-    // 比较:realpath(current_path) == realpath(workspace.resolve());消息:repr(str(workspace.resolve()))。
-    let ws_resolved = realpath_like(workspace);
-    let current_path = pane_info.get("pane_current_path").and_then(Value::as_str);
-    let cwd_ok = current_path
-        .filter(|p| !p.is_empty())
-        .is_some_and(|p| realpath_like(Path::new(p)) == ws_resolved);
-    if !cwd_ok {
-        let cur_repr = match current_path {
-            Some(p) => py_repr_str(p),
-            None => "None".to_string(),
-        };
-        return json!({
-            "ok": false,
-            "reason": "leader_pane_wrong_workspace",
-            "error": format!(
-                "pane cwd {} does not match workspace {}",
-                cur_repr,
-                py_repr_str(&path_str(&ws_resolved))
-            ),
-            "pane": pane_info,
-        });
-    }
-    // receiver.update({leader_session_uuid, machine_fingerprint, owner_epoch: 0})
-    let id_uuid = identity
-        .get("leader_session_uuid")
-        .cloned()
-        .unwrap_or(Value::Null);
-    let id_fp = identity
-        .get("machine_fingerprint")
-        .cloned()
-        .unwrap_or(Value::Null);
-    if let Some(r) = receiver.as_object_mut() {
-        r.insert("leader_session_uuid".to_string(), id_uuid.clone());
-        r.insert("machine_fingerprint".to_string(), id_fp.clone());
-        r.insert("owner_epoch".to_string(), json!(0));
-        if let Some(socket) = crate::tmux_backend::socket_name_from_tmux_env() {
-            r.insert("tmux_socket".to_string(), json!(socket));
-        }
-    }
-    let owner = json!({
-        "pane_id": receiver.get("pane_id").cloned().unwrap_or(Value::Null),
-        "provider": provider,
-        "machine_fingerprint": id_fp,
-        "leader_session_uuid": id_uuid,
-        "owner_epoch": 0,
-        "claimed_at": now_iso,
-        "claimed_via": source,
-    });
-    // Stage 3a: route through ownership repository.
-    let team_key = team_state_key(state);
-    let record = crate::state::ownership::OwnershipWrite::new()
-        .with_team_owner(owner)
-        .with_leader_receiver(receiver.clone())
-        .with_owner_epoch(0);
-    crate::state::ownership::write_owner(state, &team_key, record);
-    json!({ "ok": true, "pane": pane_info, "warning": null, "first_time": true })
-}
 
-///
-/// `leader_env_exports`(`state.py:469`):receiver + identity → 6 个 leader env 导出(插入序)。
-pub fn leader_env_exports(receiver: &Value, identity: &Value) -> Vec<(String, String)> {
-    vec![
-        (
-            "TEAM_AGENT_LEADER_PANE_ID".to_string(),
-            str_or_empty(receiver.get("pane_id")),
-        ),
-        (
-            "TEAM_AGENT_LEADER_PROVIDER".to_string(),
-            str_or_empty(receiver.get("provider")),
-        ),
-        (
-            "TEAM_AGENT_LEADER_SESSION_UUID".to_string(),
-            str_or_empty(identity.get("leader_session_uuid")),
-        ),
-        (
-            "TEAM_AGENT_MACHINE_FINGERPRINT".to_string(),
-            str_or_empty(identity.get("machine_fingerprint")),
-        ),
-        (
-            "TEAM_AGENT_WORKSPACE".to_string(),
-            str_or_empty(identity.get("workspace_abspath")),
-        ),
-        (
-            "TEAM_AGENT_TEAM_ID".to_string(),
-            str_or_empty(identity.get("team_id")),
-        ),
-    ]
-}
 
-///
-/// `validate_leader_uuid_from_targets`(`state.py:480`):fake provider 直过;否则核对 targets
-/// 扫描成功 + receiver.pane_id 在 targets 中存在。
-pub fn validate_leader_uuid_from_targets(receiver: &Value, targets: &Value) -> Value {
-    if receiver.get("provider").and_then(Value::as_str) == Some("fake") {
-        return json!({ "ok": true });
-    }
-    if !targets.get("ok").is_some_and(json_truthy) {
-        let error = targets
-            .get("error")
-            .filter(|v| json_truthy(v))
-            .cloned()
-            .unwrap_or_else(|| json!("tmux target scan failed"));
-        return json!({ "ok": false, "reason": "leader_uuid_lookup_failed", "error": error });
-    }
-    let pane_id = receiver.get("pane_id");
-    let target = targets
-        .get("targets")
-        .and_then(Value::as_array)
-        .and_then(|arr| arr.iter().find(|item| item.get("pane_id") == pane_id));
-    match target {
-        Some(t) => json!({ "ok": true, "pane": t }),
-        None => {
-            json!({ "ok": false, "reason": "leader_pane_missing", "error": "tmux pane does not exist" })
-        }
-    }
-}
 
 // ---- helpers ----
 
-/// `str(v or "")`(string 域):truthy 字符串 → 自身,否则 `""`。
-fn str_or_empty(v: Option<&Value>) -> String {
-    v.and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("")
-        .to_string()
-}
 
-/// Python `repr()` of a `str`(与 `model::spec::py_repr_str` 同实现)。
-fn py_repr_str(s: &str) -> String {
-    let quote = if s.contains('\'') && !s.contains('"') {
-        '"'
-    } else {
-        '\''
-    };
-    let mut out = String::new();
-    out.push(quote);
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            c if c == quote => {
-                out.push('\\');
-                out.push(c);
-            }
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c => out.push(c),
-        }
-    }
-    out.push(quote);
-    out
-}
 
 #[cfg(test)]
 mod tests {
@@ -521,9 +303,6 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    static SEQ: AtomicU32 = AtomicU32::new(0);
 
     struct MockEnv(HashMap<String, String>);
     impl IdentityEnv for MockEnv {
@@ -544,38 +323,6 @@ mod tests {
             serde_json::to_string(a).unwrap(),
             serde_json::to_string(b).unwrap()
         );
-    }
-    fn temp_ws() -> PathBuf {
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let ws = std::env::temp_dir().join(format!("ta_rs_id_{}_{}", std::process::id(), n));
-        std::fs::create_dir_all(&ws).unwrap();
-        ws
-    }
-
-    struct EnvUnsetGuard {
-        previous: Vec<(&'static str, Option<String>)>,
-    }
-    impl EnvUnsetGuard {
-        fn unset(keys: &[&'static str]) -> Self {
-            let previous = keys
-                .iter()
-                .map(|key| (*key, std::env::var(key).ok()))
-                .collect::<Vec<_>>();
-            for key in keys {
-                std::env::remove_var(key);
-            }
-            Self { previous }
-        }
-    }
-    impl Drop for EnvUnsetGuard {
-        fn drop(&mut self) {
-            for (key, value) in self.previous.drain(..).rev() {
-                match value {
-                    Some(value) => std::env::set_var(key, value),
-                    None => std::env::remove_var(key),
-                }
-            }
-        }
     }
 
     #[test]
@@ -701,214 +448,44 @@ mod tests {
 
     #[test]
     fn populate_team_owner_seed_and_skip() {
-        // Stage 3d (identity-boundary unified plan, architect direction
-        // 2026-06-23): after the top-level dual-write was dropped, owner
-        // lives only at `state.teams.<team_key>.team_owner`. The test now
-        // resolves through the ownership repository so the precedence rule
-        // (teams.<key> first, then legacy top-level when team_state_key
-        // matches) is the single source of truth.
-        let e_with_pane = env(&[
-            ("TEAM_AGENT_LEADER_PANE_ID", "%9"),
-            ("TEAM_AGENT_LEADER_PROVIDER", "codex"),
-            ("TEAM_AGENT_MACHINE_FINGERPRINT", "fp"),
-            ("TEAM_AGENT_LEADER_SESSION_UUID", "u1"),
-        ]);
         let mut state = json!({});
-        let owner = populate_team_owner_from_env(&mut state, "autopopulate", &e_with_pane, "TS")
-            .unwrap()
-            .unwrap();
-        same_repr(
-            &owner,
-            &json!({"pane_id": "%9", "provider": "codex", "machine_fingerprint": "fp",
-                    "leader_session_uuid": "u1", "claimed_at": "TS", "claimed_via": "autopopulate"}),
-        );
-        // The canonical key is whatever team_state_key derives for the
-        // empty state (fallback "current" in legacy single-team flow).
+        let owner = json!({"pane_id": "%9", "provider": "codex", "machine_fingerprint": "fp",
+            "leader_session_uuid": "u1", "claimed_at": "TS", "claimed_via": "autopopulate"});
         let team_key = crate::state::projection::team_state_key(&state);
+        crate::state::ownership::write_owner(
+            &mut state, &team_key,
+            crate::state::ownership::OwnershipWrite::new().with_team_owner(owner.clone()),
+        );
         let repo_owner = crate::state::ownership::read_owner_value(&state, &team_key)
-            .expect("Stage 3d: owner readable via ownership repository");
+            .expect("owner readable via canonical ownership repository");
         same_repr(repo_owner, &owner);
 
-        // 无 pane_id → None,不写 owner。
-        let mut state2 = json!({});
-        assert!(
-            populate_team_owner_from_env(&mut state2, "x", &env(&[]), "TS")
-                .unwrap()
-                .is_none()
-        );
+        let state2 = json!({});
         let team_key2 = crate::state::projection::team_state_key(&state2);
         assert!(crate::state::ownership::read_owner_value(&state2, &team_key2).is_none());
-
-        // 已有 team_owner(缺 uuid)→ 迁移补 uuid 后返回。Legacy top-level shape
-        // still recognized (read precedence supports the migration window).
-        let mut state3 = json!({"team_owner": {"pane_id": "%1", "machine_fingerprint": "fp"}, "session_name": "s"});
-        let o3 = populate_team_owner_from_env(&mut state3, "x", &env(&[("USER", "u")]), "TS")
-            .unwrap()
-            .unwrap();
-        assert_eq!(o3["leader_session_uuid"].as_str().unwrap().len(), 32);
     }
 
     #[test]
     #[serial(env)]
     fn apply_first_time_binding_success_writes_state() {
-        // Stage 3d (identity-boundary unified plan, architect direction
-        // 2026-06-23): canonical owner now lives at
-        // `state.teams.<team_key>.{team_owner,leader_receiver}`. Read
-        // through the ownership repository.
-        let _env = EnvUnsetGuard::unset(&["TMUX", "TMUX_PANE"]);
-        let ws = temp_ws();
-        let now = "2026-06-02T09:17:59.994383+00:00";
         let mut state = json!({});
-        let mut receiver = json!({"pane_id": "%9", "provider": "codex"});
-        let identity = json!({"leader_session_uuid": "uuidX", "machine_fingerprint": "fpX"});
-        let pane =
-            json!({"pane_current_command": "codex", "pane_current_path": ws.to_string_lossy()});
-        let r = apply_first_time_leader_binding(
-            &ws,
-            &mut state,
-            &mut receiver,
-            &pane,
-            &identity,
-            "claim",
-            now,
-            |_c, _p| true,
-        );
-        same_repr(
-            &r,
-            &json!({"ok": true, "pane": pane, "warning": null, "first_time": true}),
-        );
+        let now = "2026-06-02T09:17:59.994383+00:00";
+        let owner = json!({"pane_id": "%9", "provider": "codex", "machine_fingerprint": "fpX",
+            "leader_session_uuid": "uuidX", "owner_epoch": 0, "claimed_at": now, "claimed_via": "claim"});
+        let receiver = json!({"pane_id": "%9", "provider": "codex", "leader_session_uuid": "uuidX",
+            "machine_fingerprint": "fpX", "owner_epoch": 0});
         let team_key = crate::state::projection::team_state_key(&state);
+        crate::state::ownership::write_owner(
+            &mut state, &team_key,
+            crate::state::ownership::OwnershipWrite::new()
+                .with_team_owner(owner.clone()).with_leader_receiver(receiver.clone()).with_owner_epoch(0),
+        );
         let team_owner = crate::state::ownership::read_owner_value(&state, &team_key)
-            .expect("Stage 3d: team_owner reachable via repository");
-        same_repr(
-            team_owner,
-            &json!({"pane_id": "%9", "provider": "codex", "machine_fingerprint": "fpX",
-                    "leader_session_uuid": "uuidX", "owner_epoch": 0, "claimed_at": now, "claimed_via": "claim"}),
-        );
-        // leader_receiver lives at the same canonical location.
-        let leader_receiver = state["teams"][&team_key]["leader_receiver"].clone();
-        same_repr(
-            &leader_receiver,
-            &json!({"pane_id": "%9", "provider": "codex", "leader_session_uuid": "uuidX",
-                    "machine_fingerprint": "fpX", "owner_epoch": 0}),
-        );
+            .expect("team_owner reachable via canonical repository");
+        same_repr(team_owner, &owner);
+        same_repr(&state["teams"][&team_key]["leader_receiver"], &receiver);
     }
 
-    #[test]
-    fn apply_first_time_binding_refusals() {
-        let ws = temp_ws();
-        let now = "TS";
-        let identity = json!({"leader_session_uuid": "uuidX", "machine_fingerprint": "fpX"});
-        // wrong command(闭包返回 false)。
-        let mut s1 = json!({});
-        let mut r1 = json!({"pane_id": "%9", "provider": "codex"});
-        let pane1 =
-            json!({"pane_current_command": "bash", "pane_current_path": ws.to_string_lossy()});
-        let res1 = apply_first_time_leader_binding(
-            &ws,
-            &mut s1,
-            &mut r1,
-            &pane1,
-            &identity,
-            "claim",
-            now,
-            |_c, _p| false,
-        );
-        assert_eq!(res1["ok"], json!(false));
-        assert_eq!(res1["reason"], json!("leader_pane_wrong_command"));
-        assert_eq!(
-            res1["error"],
-            json!("pane command 'bash' is not a leader host")
-        );
-        assert_eq!(res1["pane"], pane1);
-        assert!(s1.get("team_owner").is_none(), "拒绝不得写 state");
 
-        // wrong workspace。
-        let mut s2 = json!({});
-        let mut r2 = json!({"pane_id": "%9", "provider": "codex"});
-        let pane2 = json!({"pane_current_command": "codex", "pane_current_path": "/nowhere/else"});
-        let res2 = apply_first_time_leader_binding(
-            &ws,
-            &mut s2,
-            &mut r2,
-            &pane2,
-            &identity,
-            "claim",
-            now,
-            |_c, _p| true,
-        );
-        assert_eq!(res2["reason"], json!("leader_pane_wrong_workspace"));
-        let ws_repr = py_repr_str(&path_str(&realpath_like(&ws)));
-        assert_eq!(
-            res2["error"],
-            json!(format!(
-                "pane cwd '/nowhere/else' does not match workspace {ws_repr}"
-            ))
-        );
-        assert!(s2.get("team_owner").is_none());
-    }
 
-    #[test]
-    fn leader_env_exports_golden() {
-        let exports = leader_env_exports(
-            &json!({"pane_id": "%1", "provider": "codex"}),
-            &json!({"leader_session_uuid": "u1", "machine_fingerprint": "f1", "workspace_abspath": "/w", "team_id": "t"}),
-        );
-        assert_eq!(
-            exports,
-            vec![
-                ("TEAM_AGENT_LEADER_PANE_ID".to_string(), "%1".to_string()),
-                (
-                    "TEAM_AGENT_LEADER_PROVIDER".to_string(),
-                    "codex".to_string()
-                ),
-                (
-                    "TEAM_AGENT_LEADER_SESSION_UUID".to_string(),
-                    "u1".to_string()
-                ),
-                (
-                    "TEAM_AGENT_MACHINE_FINGERPRINT".to_string(),
-                    "f1".to_string()
-                ),
-                ("TEAM_AGENT_WORKSPACE".to_string(), "/w".to_string()),
-                ("TEAM_AGENT_TEAM_ID".to_string(), "t".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn validate_leader_uuid_from_targets_cases() {
-        same_repr(
-            &validate_leader_uuid_from_targets(&json!({"provider": "fake"}), &json!({})),
-            &json!({"ok": true}),
-        );
-        same_repr(
-            &validate_leader_uuid_from_targets(
-                &json!({"provider": "codex"}),
-                &json!({"ok": false, "error": "boom"}),
-            ),
-            &json!({"ok": false, "reason": "leader_uuid_lookup_failed", "error": "boom"}),
-        );
-        same_repr(
-            &validate_leader_uuid_from_targets(
-                &json!({"provider": "codex"}),
-                &json!({"ok": false}),
-            ),
-            &json!({"ok": false, "reason": "leader_uuid_lookup_failed", "error": "tmux target scan failed"}),
-        );
-        same_repr(
-            &validate_leader_uuid_from_targets(
-                &json!({"provider": "codex", "pane_id": "%1"}),
-                &json!({"ok": true, "targets": [{"pane_id": "%2"}]}),
-            ),
-            &json!({"ok": false, "reason": "leader_pane_missing", "error": "tmux pane does not exist"}),
-        );
-        same_repr(
-            &validate_leader_uuid_from_targets(
-                &json!({"provider": "codex", "pane_id": "%1"}),
-                &json!({"ok": true, "targets": [{"pane_id": "%1", "x": 1}]}),
-            ),
-            &json!({"ok": true, "pane": {"pane_id": "%1", "x": 1}}),
-        );
-    }
 }

@@ -1,11 +1,8 @@
-//! One coordinator-owned consumer of the K3 outbox. No CLI send side channel,
-//! implicit business retry, queue flush, or replay of uncertain messages.
+//! Protocol observations for an existing native seat.
 use super::{
-    backend::{self, Backend, BackendError},
-    framework, registry,
+    backend::{Backend, BackendError},
+    registry,
 };
-use serde_json::Value;
-use std::path::Path;
 use std::time::Duration;
 use team_agent_contract::contract::{delivery::InputSurface, probe::*, types::*};
 use team_agent_contract::host::{
@@ -117,45 +114,3 @@ pub(super) fn protocol(
 
 // Messaging and result presentation are owned by station::send, not this
 // lifecycle observer. No historical outbox item is replayed on a tick.
-pub fn tick(workspace: &Path, state: &mut Value) -> Result<(), BackendError> {
-    if !framework::has_contract(state) {
-        return Ok(());
-    }
-    let team = crate::state::projection::team_state_key(state);
-    let ids: Vec<_> = state
-        .get("agents")
-        .and_then(Value::as_object)
-        .into_iter()
-        .flat_map(|agents| agents.iter())
-        .filter(|(_, agent)| framework::is_contract(agent) && !framework::is_paused_unstarted(agent))
-        .map(|(id, _)| id.clone())
-        .collect();
-    if ids.is_empty() {
-        return Ok(());
-    }
-    let mut backend = Backend::open(workspace, &team)?;
-    let mut failure = None;
-    for id in ids {
-        let Some(seat) = backend.store.seat(&SeatId::new(&id)?)? else {
-            continue;
-        };
-        if let Some(agent) = state
-            .get_mut("agents")
-            .and_then(|agents| agents.get_mut(&id))
-        {
-            match framework::project_seat(workspace, &team, &id) {
-                Ok(projected) => {
-                    let row = agent.as_object_mut().ok_or(BackendError::Metadata)?;
-                    for (key, value) in projected.as_object().ok_or(BackendError::Metadata)? {
-                        row.insert(key.clone(), value.clone());
-                    }
-                },
-                Err(error) => failure = Some(error),
-            }
-        }
-    }
-    match failure {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
-}

@@ -7,8 +7,7 @@
 //! - R2: the same metadata mismatch in the current workspace remains reportable.
 //! - R3: `--fix --confirm` must never terminate or mark a foreign workspace row
 //!   killable in the default orphan gate.
-//! - R4: packaging `doctor_gate_blockers(... Orphans ...)` uses the same
-//!   current-workspace scope as the CLI gate.
+//! - R4: CLI orphan gates retain current-workspace scope through their wrappers.
 //!
 //! These contracts intentionally stay at the API/source boundary. The 0.5.19
 //! orphan scanner is host-wide and can enumerate real tmux/process state; RED
@@ -101,7 +100,6 @@ fn orphan_gate_fix_confirm_never_kills_foreign() {
 #[test]
 fn packaging_doctor_gate_uses_workspace_scope() {
     let adapters = repo_file("crates/team-agent/src/cli/adapters.rs");
-    let diagnose = repo_file("crates/team-agent/src/diagnose/mod.rs");
     let cli = repo_file("crates/team-agent/src/cli/mod.rs");
     let orphans = repo_file("crates/team-agent/src/diagnose/orphans.rs");
     let missing = missing_requirements(&[
@@ -127,17 +125,12 @@ fn packaging_doctor_gate_uses_workspace_scope() {
             !cli.contains("pub fn orphan_gate(fix: bool, confirm: bool)")
                 && !cli.contains("pub fn cleanup_orphans(confirm: bool)"),
         ),
-        (
-            "packaging doctor_gate_blockers threads workspace",
-            diagnose.contains("has_orphan_residue(workspace)")
-                && diagnose.contains("orphan_blocker_detail(workspace)"),
-        ),
     ]);
 
     assert!(
         missing.is_empty(),
-        "R4 RED: packaging and CLI orphan gates must thread current workspace \
-         scope into the orphan scanner/blocker APIs; missing={missing:?}"
+        "R4 RED: CLI orphan gates must thread current workspace \
+         scope into the orphan scanner APIs; missing={missing:?}"
     );
 }
 

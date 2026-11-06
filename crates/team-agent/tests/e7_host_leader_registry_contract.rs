@@ -143,9 +143,10 @@ fn e7_registry_does_not_introduce_sqlite_or_global_db() {
 #[test]
 fn e7_short_name_collision_refuses_instead_of_first_writer_wins() {
     let combined = format!(
-        "{}\n{}",
+        "{}\n{}\n{}",
         source("src/leader/registry.rs"),
-        source("src/cli/send.rs")
+        source("src/cli/send.rs"),
+        source("src/cli/leaders.rs")
     );
     let mut missing = Vec::new();
     for required in ["ambiguous_names", "name_ambiguous", "candidates"] {

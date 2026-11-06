@@ -236,18 +236,6 @@ pub(crate) fn strict_owner_bind_provider(
     }
 }
 
-pub fn owner_bind_provider_wire(command: &str) -> &'static str {
-    if let Ok(raw) = std::env::var("TEAM_AGENT_LEADER_PROVIDER") {
-        // env 显式 provider:经 parse_provider(单一表,知 copilot)校验后透传其 wire 串;
-        // 不识别 → ""(空,与原行为一致:不绑)。
-        return super::helpers::parse_provider(&raw)
-            .map(super::helpers::provider_wire)
-            .unwrap_or("");
-    }
-    // E11 层2 + N39:与统一 provider attribution 共用单一映射(含 copilot);
-    // 未知命令 → ""(不绑),不再静默当 codex。
-    super::provider_wire_from_command(command).unwrap_or("")
-}
 
 fn family_a_identity(
     workspace: &Path,
@@ -354,7 +342,6 @@ mod e11_provider_bind_tests {
             super::super::attribute_command_provider("/opt/homebrew/bin/copilot"),
             Some(Provider::Copilot)
         );
-        assert_eq!(owner_bind_provider_wire("copilot --banner"), "copilot");
     }
 
     #[test]
@@ -377,8 +364,6 @@ mod e11_provider_bind_tests {
             super::super::attribute_command_provider("fake"),
             Some(Provider::Fake)
         );
-        assert_eq!(owner_bind_provider_wire("claude"), "claude");
-        assert_eq!(owner_bind_provider_wire("codex"), "codex");
     }
 
     // E11 层2:未知命令不再静默默认 codex —— attribution → None,wire → ""。
@@ -392,7 +377,6 @@ mod e11_provider_bind_tests {
             super::super::attribute_command_provider("totally-unknown"),
             None
         );
-        assert_eq!(owner_bind_provider_wire("totally-unknown"), "");
     }
 }
 

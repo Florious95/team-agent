@@ -33,11 +33,6 @@ fn batch3_all_five_migration_sites_route_through_factory() {
             "status has_session + approvals",
         ),
         (
-            "cli/diagnose.rs",
-            "resolve_read_only_transport",
-            "diagnose session-present",
-        ),
-        (
             "cli/adapters.rs",
             "resolve_read_only_transport",
             "diagnose-runtime + peek",
@@ -63,7 +58,7 @@ fn batch3_read_only_factory_for_tmux_state_returns_tmux_backend_byte_equivalent(
     let ws = std::env::temp_dir().join("ta-batch3-tmux");
     std::fs::create_dir_all(&ws).unwrap();
     // Default: no state → factory picks Layer 5 default = tmux workspace.
-    let resolved = resolve_read_only_transport(&ws, None, TransportPurpose::Coordinator)
+    let resolved = resolve_read_only_transport(&ws, None, TransportPurpose::Launch)
         .expect("default → tmux");
     assert_eq!(resolved.kind, BackendKind::Tmux);
     assert_eq!(resolved.source, "default");
@@ -73,13 +68,13 @@ fn batch3_read_only_factory_for_tmux_state_returns_tmux_backend_byte_equivalent(
     // migration path. Test an explicit-name endpoint to cover the
     // socket=Some(...) branch.
     let state = serde_json::json!({ "tmux_endpoint": "default" });
-    let resolved = resolve_read_only_transport(&ws, Some(&state), TransportPurpose::Coordinator)
+    let resolved = resolve_read_only_transport(&ws, Some(&state), TransportPurpose::Launch)
         .expect("legacy endpoint → tmux");
     assert_eq!(resolved.kind, BackendKind::Tmux);
     assert_eq!(resolved.source, "legacy_tmux_endpoint");
     // Named socket carries through as tmux_endpoint_used.
     let state = serde_json::json!({ "tmux_endpoint": "ta-abcdef012345" });
-    let resolved = resolve_read_only_transport(&ws, Some(&state), TransportPurpose::Coordinator)
+    let resolved = resolve_read_only_transport(&ws, Some(&state), TransportPurpose::Launch)
         .expect("named endpoint → tmux");
     assert_eq!(resolved.kind, BackendKind::Tmux);
     assert_eq!(resolved.source, "legacy_tmux_endpoint");

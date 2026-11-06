@@ -379,7 +379,6 @@ impl Transport for RecordingTransport {
         Ok(match field {
             PaneField::PaneMode => None,
             PaneField::PaneCurrentCommand => None,
-            PaneField::PaneTty => None,
         })
     }
 

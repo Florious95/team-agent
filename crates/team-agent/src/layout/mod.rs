@@ -24,7 +24,6 @@
 pub mod manager;
 pub mod overlay;
 pub mod placement;
-pub mod recovery;
 pub mod runtime_sessions;
 pub mod sessions;
 pub mod tmux_endpoint;

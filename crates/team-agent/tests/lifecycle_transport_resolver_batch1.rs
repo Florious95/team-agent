@@ -140,12 +140,6 @@ fn batch1_generic_transport_resolver_symbol_added() {
         .join("restart")
         .join("common.rs");
     let body = std::fs::read_to_string(&path).unwrap();
-    assert!(
-        body.contains("fn lifecycle_worker_transport_for_selected_state"),
-        "Batch 1 must add the generic transport resolver \
-         `lifecycle_worker_transport_for_selected_state` in \
-         `lifecycle/restart/common.rs`"
-    );
     // Fail-closed anchor: the legacy tmux-typed resolver body must
     // check `state.transport.kind == "conpty"` and refuse. Grep for
     // the marker string.
@@ -174,7 +168,7 @@ fn batch1_state_transport_kind_conpty_constructs_conpty_via_factory() {
     };
     let ws = std::env::temp_dir().join("ta-batch1-conpty");
     let state = serde_json::json!({ "transport": { "kind": "conpty" } });
-    let input = TransportFactoryInput::new(&ws, TransportPurpose::LifecycleWorker)
+    let input = TransportFactoryInput::new(&ws, TransportPurpose::Launch)
         .with_team_key(Some("team-a"))
         .with_state(Some(&state));
     let resolved = resolve_transport(input)

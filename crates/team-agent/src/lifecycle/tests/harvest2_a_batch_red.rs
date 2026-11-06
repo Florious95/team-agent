@@ -82,37 +82,6 @@ tmp+rename范式); the user data was destroyed"
     );
 }
 
-/// T2-4 (lifecycle snapshot): save_team_runtime_snapshot stages via a fixed
-/// `state.json.tmp` then renames. On a failed write/replace it must not leave a stale
-/// `.tmp` behind (dirty-read residue). Here we pre-create the tmp path AS A DIRECTORY so
-/// the `fs::write(&tmp, ..)` fails, and assert no stale tmp file is left as residue.
-#[test]
-fn t2_snapshot_no_stale_tmp_residue_on_failed_write() {
-    let ws = tmp_ws("t2-snapshot");
-    let snap_dir = ws.join(".team/runtime/teams/team-x");
-    std::fs::create_dir_all(&snap_dir).unwrap();
-    // Make the tmp target un-writable-as-file: create it as a directory.
-    std::fs::create_dir_all(snap_dir.join("state.json.tmp")).unwrap();
-
-    let result = team_agent::lifecycle::save_team_runtime_snapshot(
-        &ws,
-        &serde_json::json!({"session_name": "team-x", "agents": {}}),
-    );
-
-    assert!(
-        result.is_err(),
-        "fixture: the snapshot write must fail when tmp is a dir"
-    );
-    // A failed snapshot must not leave a stale FILE tmp residue (the dir we created is
-    // the fixture's, not residue; the contract is that no stray state.json.tmp FILE is
-    // written elsewhere and the real state.json was never half-written).
-    assert!(
-        !snap_dir.join("state.json").exists(),
-        "T2-4: a failed snapshot must not leave a partially-written state.json \
-(atomicity); found one at {}",
-        snap_dir.join("state.json").display()
-    );
-}
 
 /// T2-2 (restart-remove atomicity): the remove path must not pre-delete on-disk
 /// artifacts (role file / spec / state) before the operation is committed — a mid-way
@@ -363,44 +332,6 @@ check behind it = false green); it must reflect an actual doctor result"
     );
 }
 
-/// T3-2 (claude_auth_hint parse failure): when `claude auth status` output is
-/// unparseable / unsuccessful, the hint must not default to Present (auth misreported
-/// as available). PATH-shims a `claude` that prints garbage and exits non-zero.
-/// Mutates the process-global PATH/HOME — must not race host_cotenant's ps/tmux
-/// shims (P0 pid-probe isolation) or other env-mutating tests, hence
-/// `#[serial(env, pid_probe)]`.
-#[test]
-#[serial(env, pid_probe)]
-fn t3_claude_auth_hint_parse_failure_is_not_present() {
-    let home = tmp_ws("t3-auth-home");
-    let shim_dir = home.join("bin");
-    std::fs::create_dir_all(&shim_dir).unwrap();
-    // claude shim: garbage stdout + non-zero exit (auth status unparseable / failed).
-    write_shim(
-        &shim_dir.join("claude"),
-        "#!/bin/sh\nprintf 'not json at all\\n'\nexit 7\n",
-    );
-    let old_path = std::env::var("PATH").unwrap_or_default();
-    let old_home = std::env::var("HOME").ok();
-    std::env::set_var("HOME", &home);
-    std::env::set_var("PATH", format!("{}:{old_path}", shim_dir.to_string_lossy()));
-
-    let status = team_agent::provider::get_adapter(team_agent::provider::Provider::Claude)
-        .auth_hint(team_agent::provider::AuthMode::Subscription);
-
-    std::env::set_var("PATH", &old_path);
-    match old_home {
-        Some(home) => std::env::set_var("HOME", home),
-        None => std::env::remove_var("HOME"),
-    }
-
-    assert_ne!(
-        format!("{status:?}"),
-        "Present",
-        "T3-2: a `claude auth status` that prints unparseable output and exits non-zero \
-must NOT report Present (auth misreported as available is a false green); got {status:?}"
-    );
-}
 
 // ───────────────────────────────── T5 · thread leak ─────────────────────────────────
 

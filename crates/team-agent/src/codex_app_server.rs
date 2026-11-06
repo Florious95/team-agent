@@ -5,7 +5,7 @@
 //! ownership check). On Windows we still expose the same public API
 //! surface so `messaging/delivery.rs`, `cli/send.rs`, `cli/named_address.rs`,
 //! `leader/lease.rs` compile identically. Windows implementations of
-//! `attach_probe` + `submit_to_bound_thread` return
+//! `attach_probe` returns
 //! `AppServerError::SocketUnreachable("codex_app_server unix socket not supported on this platform (Windows)")`
 //! (N38 three-line typed unsupported: code+reason+action are baked into
 //! `AppServerError::code()` and the `Display` impl). Truth source:
@@ -28,9 +28,6 @@ use std::path::PathBuf;
 #[cfg(unix)]
 use std::time::Duration;
 
-pub const APP_SERVER_PROTOCOL_FIXTURE_CLI_MIN: &str = "0.139.0";
-pub const APP_SERVER_PROTOCOL_FIXTURE_CLI_MAX: &str = "0.139.x";
-pub const APP_SERVER_PROTOCOL_REQUIRES_USER_AGENT: bool = true;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppServerBinding {
@@ -42,18 +39,12 @@ pub struct AppServerBinding {
     pub bound_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppServerSubmit {
-    pub turn_id: String,
-    pub turn_status: String,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppServerError {
     SocketUnreachable(String),
     SocketOwnershipInvalid(String),
     ThreadNotLive(String),
-    ThreadStale { expected: Value, actual: Value },
     LeaderBusy(String),
     ApprovalUnsupported(String),
     ProtocolMismatch(String),
@@ -68,7 +59,6 @@ impl AppServerError {
             Self::SocketUnreachable(_) => "socket_unreachable",
             Self::SocketOwnershipInvalid(_) => "socket_ownership_invalid",
             Self::ThreadNotLive(_) => "thread_not_live",
-            Self::ThreadStale { .. } => "app_server_thread_stale",
             Self::LeaderBusy(_) => "leader_busy",
             Self::ApprovalUnsupported(_) => "approval_unsupported",
             Self::ProtocolMismatch(_) => "protocol_mismatch",
@@ -90,9 +80,6 @@ impl std::fmt::Display for AppServerError {
             | Self::ProtocolMismatch(msg)
             | Self::Io(msg)
             | Self::Json(msg) => write!(f, "{}:{msg}", self.code()),
-            Self::ThreadStale { expected, actual } => {
-                write!(f, "{}:expected={expected},actual={actual}", self.code())
-            }
             Self::MissingUserAgent => f.write_str(self.code()),
         }
     }
@@ -128,32 +115,7 @@ pub fn attach_probe(_endpoint: &str, _thread_id: &str) -> Result<AppServerBindin
     ))
 }
 
-#[cfg(unix)]
-pub fn submit_to_bound_thread(
-    binding: &AppServerBinding,
-    message_id: &str,
-    rendered: &str,
-) -> Result<AppServerSubmit, AppServerError> {
-    let socket = socket_path(&binding.socket)?;
-    let mut client = AppServerClient::connect(&socket)?;
-    let user_agent = client.initialize()?;
-    let resume = client.resume(&binding.thread_id)?;
-    validate_tuple(binding, &user_agent, &resume)?;
-    client.turn_start(&binding.thread_id, message_id, rendered)
-}
 
-#[cfg(not(unix))]
-pub fn submit_to_bound_thread(
-    _binding: &AppServerBinding,
-    _message_id: &str,
-    _rendered: &str,
-) -> Result<AppServerSubmit, AppServerError> {
-    Err(AppServerError::SocketUnreachable(
-        "codex_app_server unix-socket submit not supported on this platform \
-         (Windows); use codex CLI stdio or ConPTY worker delivery instead"
-            .to_string(),
-    ))
-}
 
 pub fn binding_from_receiver(receiver: &Value) -> Result<AppServerBinding, AppServerError> {
     let app = receiver
@@ -182,34 +144,6 @@ fn required_str<'a>(value: &'a Value, field: &str) -> Result<&'a str, AppServerE
         .ok_or_else(|| AppServerError::ProtocolMismatch(format!("missing {field}")))
 }
 
-#[cfg(unix)]
-fn validate_tuple(
-    binding: &AppServerBinding,
-    user_agent: &str,
-    resume: &ThreadResume,
-) -> Result<(), AppServerError> {
-    if user_agent != binding.cli_version
-        || resume.thread_id != binding.thread_id
-        || resume.session_id != binding.session_id
-        || resume.cwd != binding.cwd
-    {
-        return Err(AppServerError::ThreadStale {
-            expected: json!({
-                "cli_version": binding.cli_version,
-                "thread_id": binding.thread_id,
-                "session_id": binding.session_id,
-                "cwd": binding.cwd,
-            }),
-            actual: json!({
-                "cli_version": user_agent,
-                "thread_id": resume.thread_id,
-                "session_id": resume.session_id,
-                "cwd": resume.cwd,
-            }),
-        });
-    }
-    Ok(())
-}
 
 #[cfg(unix)]
 fn check_socket_ownership(endpoint: &str) -> Result<(), AppServerError> {
@@ -348,39 +282,6 @@ impl AppServerClient {
         })
     }
 
-    fn turn_start(
-        &mut self,
-        thread_id: &str,
-        message_id: &str,
-        rendered: &str,
-    ) -> Result<AppServerSubmit, AppServerError> {
-        let result = self.request(json!({
-            "method": "turn/start",
-            "params": {
-                "threadId": thread_id,
-                "clientUserMessageId": message_id,
-                "input": [{
-                    "type": "text",
-                    "text": rendered,
-                    "text_elements": []
-                }]
-            }
-        }))?;
-        let turn = result
-            .get("turn")
-            .ok_or_else(|| AppServerError::ProtocolMismatch("missing turn".to_string()))?;
-        let turn_id = required_str(turn, "id")?.to_string();
-        let status = required_str(turn, "status")?.to_string();
-        if status != "inProgress" {
-            return Err(AppServerError::ProtocolMismatch(format!(
-                "turn/start returned status {status}"
-            )));
-        }
-        Ok(AppServerSubmit {
-            turn_id,
-            turn_status: status,
-        })
-    }
 
     fn notify(&mut self, mut payload: Value) -> Result<(), AppServerError> {
         if let Some(obj) = payload.as_object_mut() {

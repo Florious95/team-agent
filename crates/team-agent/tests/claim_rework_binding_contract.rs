@@ -17,7 +17,6 @@ use team_agent::lifecycle::launch::{
 };
 use team_agent::lifecycle::{restart_leader_public_bind, CoordinatorStartSummary, RestartReport};
 use team_agent::state::owner_gate::CallerIdentity;
-use team_agent::transport::PaneId;
 
 static ISOLATION: AtomicU64 = AtomicU64::new(0);
 
@@ -364,14 +363,9 @@ fn isolated_production_seed_attach_register_restart_ok() {
     team_agent::state::persist::save_runtime_state(&workspace, &state).expect("persist seed");
     let pending_state = state.clone();
 
-    let attached = team_agent::leader::attach_leader(
-        &workspace,
-        Some("alpha"),
-        Some(&PaneId::new(pane.clone())),
-        team_agent::provider::Provider::Fake,
-    )
-    .expect("attach_leader");
-    assert!(attached.ok, "attach_leader must commit; {attached:?}");
+    let attached = team_agent::cli::leader_port::claim_leader(&workspace, Some("alpha"), false)
+        .expect("claim_leader");
+    assert_eq!(attached.get("ok").and_then(Value::as_bool), Some(true), "claim must commit; {attached:?}");
 
     let outcome = team_agent::leader::registry::register_binding_from_state_best_effort(
         &workspace,

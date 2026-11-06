@@ -129,25 +129,6 @@ fn p3_bare_restart_is_never_interpreted_as_workspace_even_if_directory_exists() 
     }
 }
 
-#[test]
-fn p4_attach_requires_explicit_nonempty_provider_but_keeps_declared_identity() {
-    let sandbox = Sandbox::new();
-    for args in [vec![], vec!["--provider="], vec!["--provider", ""]] {
-        assert!(matches!(
-            attach_leader_args(&strings(&args), &sandbox.0),
-            Err(CliError::Usage(_))
-        ));
-    }
-    for provider in ["pi", "claude", "codex"] {
-        let expected = parse_cli_provider(provider).unwrap();
-        assert_eq!(
-            attach_leader_args(&strings(&["--provider", provider]), &sandbox.0)
-                .unwrap()
-                .provider,
-            expected
-        );
-    }
-}
 
 #[test]
 fn p5_start_force_is_rejected_by_canonical_start_grammar() {

@@ -673,16 +673,6 @@ fn h7_native_delimiter_help_preserves_existing_provider_rules_and_raw_order() {
             let literal = b"--help\0literal value\0\0";
             assert!(actual.windows(literal.len()).any(|bytes| bytes == literal), "H7 literal order/empty bytes changed; provider-owned defaults may remain: {actual:?}");
         }
-        let raw = vec![
-            "--".into(),
-            "--help".into(),
-            "literal value".into(),
-            "".into(),
-        ];
-        assert_eq!(
-            team_agent::cli::provider_args(&raw),
-            vec!["--help", "literal value", ""]
-        );
     }
 }
 #[test]

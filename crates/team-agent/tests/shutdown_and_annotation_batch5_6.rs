@@ -94,10 +94,6 @@ fn batch5_kill_decision_stays_local_and_endpoint_cleanup_is_fail_closed() {
     // Kill policy stays local. Dead socket unlink needs independent ownership
     // and listener-death fences; shared/live/unknown endpoints must be preserved.
     let body = read("cli/mod.rs");
-    assert!(
-        body.contains("enum KillDecision") || body.contains("KillDecision {"),
-        "KillDecision enum must remain in cli/mod.rs (CR C-2 hard守)"
-    );
     let code = non_comment(&body);
     let cleanup = code
         .split("fn cleanup_owned_empty_endpoint(")

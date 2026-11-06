@@ -88,35 +88,6 @@ fn observed() -> Value {
     state
 }
 
-#[test]
-fn observation_identity_separates_same_name_team_path_and_spawn_generation() {
-    let initial = observed();
-    let mut unchanged = initial.clone();
-    begin_observation(&mut unchanged, "w");
-    begin_observation(&mut unchanged, "w");
-    assert_eq!(
-        unchanged, initial,
-        "same observation retains notification dedupe"
-    );
-    for (pointer, value) in [
-        ("/active_team_key", json!("b")),
-        ("/agents/w/rollout_path", json!("/fixture/other.jsonl")),
-        ("/agents/w/spawn_epoch", json!(2)),
-        ("/agents/w/provider", json!("claude")),
-        ("/agents/w/spawned_at", json!("new-incarnation")),
-    ] {
-        let mut changed = initial.clone();
-        if pointer.ends_with("spawned_at") {
-            changed["agents"]["w"]["spawned_at"] = value;
-        } else {
-            *changed.pointer_mut(pointer).unwrap() = value;
-        }
-        begin_observation(&mut changed, "w");
-        assert!(changed["coordinator"]["abnormal_exit_watch"]
-            .get("w")
-            .is_none());
-    }
-}
 
 #[test]
 fn legacy_unknown_identity_is_retained_until_member_is_observed() {
@@ -131,10 +102,6 @@ fn legacy_unknown_identity_is_retained_until_member_is_observed() {
         state, legacy,
         "membership compaction cannot guess legacy identity"
     );
-    begin_observation(&mut state, "w");
-    assert!(state["coordinator"]["abnormal_exit_watch"]
-        .get("w")
-        .is_none());
 }
 
 #[test]
@@ -211,10 +178,6 @@ fn unknown_team_retains_history_until_observation_but_never_authorizes_reuse() {
         "w",
         &state["coordinator"]["abnormal_exit_watch"]["w"]
     ));
-    begin_observation(&mut state, "w");
-    assert!(state["coordinator"]["abnormal_exit_watch"]
-        .get("w")
-        .is_none());
 }
 
 #[test]

@@ -40,7 +40,10 @@ fn leader_start_plan_pins_mode_and_leader_env() {
     let _e = EnvGuard::apply(&[("TMUX", None), ("TMUX_PANE", None)]);
     let ws = std::env::temp_dir().join(format!("ta_rs_lsp_{}", std::process::id()));
     std::fs::create_dir_all(&ws).unwrap();
-    let plan = leader_start_plan(Provider::Fake, &[], &ws, false, false, None, false).unwrap();
+    let plan = crate::leader::start::leader_start_plan_after_ambient_authority_check(
+        Provider::Fake, &[], &ws, false, false, None, false,
+    )
+    .unwrap();
     assert_eq!(plan.provider, Provider::Fake);
     assert_eq!(plan.mode, LeaderStartMode::ManagedTmuxClient);
     // 0.3.28 Step 2: managed mode now uses the dedicated leader session
@@ -153,7 +156,10 @@ fn managed_leader_uses_dedicated_leader_session_independent_of_state_session_nam
     )
     .unwrap();
 
-    let plan = leader_start_plan(Provider::Fake, &[], &ws, false, false, None, false).unwrap();
+    let plan = crate::leader::start::leader_start_plan_after_ambient_authority_check(
+        Provider::Fake, &[], &ws, false, false, None, false,
+    )
+    .unwrap();
 
     assert_eq!(plan.mode, LeaderStartMode::ManagedTmuxClient);
     let session_name = plan

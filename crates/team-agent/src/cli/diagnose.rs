@@ -9,73 +9,10 @@ use crate::model::pane_authority_refusal::{
 use crate::provider::wire::{command_name, parse_provider, provider_wire};
 use crate::transport::Transport;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum PiBackingStatus {
-    Pending,
-    Captured,
-    Missing,
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum PiMcpStatus {
-    Unavailable,
-    ConfiguredLazy,
-    RoundtripVerified,
-}
 
-pub(crate) struct PiDoctorInput {
-    pub executable_chain_verified: bool,
-    pub pi_version: Option<String>,
-    pub adapter_version: Option<String>,
-    pub catalog_sha256: Option<String>,
-    pub selected_model: Option<String>,
-    pub candidate_executable: Option<std::path::PathBuf>,
-    pub wrapper: Option<std::path::PathBuf>,
-    pub mcp_roundtrip_at: Option<String>,
-    pub backing: PiBackingStatus,
-    pub activity: crate::provider::TurnState,
-    pub activity_source: crate::provider::ClassifySource,
-    pub env_key_names: Vec<String>,
-}
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct PiDoctorFacts {
-    pub mcp: PiMcpStatus,
-    pub mcp_connected: bool,
-    pub backing: PiBackingStatus,
-    pub activity: crate::provider::TurnState,
-    pub activity_source: crate::provider::ClassifySource,
-    pub auth_hint: crate::provider::AuthHintStatus,
-}
 
-pub(crate) fn pi_doctor_facts(input: PiDoctorInput) -> PiDoctorFacts {
-    let mcp = if input.mcp_roundtrip_at.is_some() {
-        PiMcpStatus::RoundtripVerified
-    } else if input.wrapper.is_some() {
-        PiMcpStatus::ConfiguredLazy
-    } else {
-        PiMcpStatus::Unavailable
-    };
-    let _ = (
-        input.executable_chain_verified,
-        input.pi_version,
-        input.adapter_version,
-        input.catalog_sha256,
-        input.selected_model,
-        input.candidate_executable,
-        input.env_key_names,
-    );
-    PiDoctorFacts {
-        mcp,
-        mcp_connected: mcp == PiMcpStatus::RoundtripVerified,
-        backing: input.backing,
-        activity: input.activity,
-        activity_source: input.activity_source,
-        auth_hint: crate::provider::AuthHintStatus::Unknown,
-    }
-}
 
 /// 0.5.39 Slice 1 (tmux-server-death-locate §11.1 B): classify a tmux
 /// transport error string into a diagnose issue id. When the underlying
@@ -175,9 +112,6 @@ fn worker_window_is_missing(
     !window_name_reconciles(agent_id, agent_state, windows)
 }
 
-pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value, Value) {
-    diagnose_runtime_with_workspace(None, state, backend)
-}
 
 fn diagnose_runtime_with_workspace(
     workspace: Option<&std::path::Path>,
@@ -726,98 +660,7 @@ fn live_leader_workspace_mismatch(
     Some((issue, repair))
 }
 
-pub(crate) fn append_registry_channel_unbound_to_report(
-    workspace: &std::path::Path,
-    team: Option<&str>,
-    report: &mut Value,
-) {
-    let team_key = team
-        .filter(|team| !team.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            crate::state::persist::load_runtime_state(workspace)
-                .ok()
-                .map(|state| crate::state::projection::team_state_key(&state))
-        })
-        .unwrap_or_default();
-    if team_key.is_empty() {
-        return;
-    }
-    let Some(object) = report.as_object_mut() else {
-        return;
-    };
-    let mut issues = object
-        .get("issues")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let mut repairs = object
-        .get("suggested_repairs")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    if !workspace_has_existing_team_runtime(workspace, &team_key) {
-        let mut issues_value = Value::Array(issues);
-        let mut repairs_value = Value::Array(repairs);
-        push_issue_repair(
-            &mut issues_value,
-            &mut repairs_value,
-            &team_key,
-            TEAM_SPEC_OR_RUNTIME_MISSING,
-            TEAM_SPEC_OR_RUNTIME_MISSING_REPAIR,
-        );
-        object.insert("issues".to_string(), issues_value);
-        object.insert("suggested_repairs".to_string(), repairs_value);
-        object.insert("ok".to_string(), Value::Bool(false));
-        return;
-    }
-    let class = crate::lifecycle::launch::classify_leader_binding(workspace, &team_key);
-    if class == crate::lifecycle::launch::LeaderBindingClass::Attached {
-        return;
-    }
-    let state = crate::state::persist::load_runtime_state(workspace).unwrap_or(json!({}));
-    let (issue_id, repair) = existing_team_binding_issue(workspace, &state, &team_key, class);
-    if !issues.iter().any(|item| item.as_str() == Some(issue_id)) {
-        issues.push(json!(issue_id));
-    }
-    repairs.push(recovery_hint(&team_key, issue_id, &repair));
-    object.insert("issues".to_string(), Value::Array(issues));
-    object.insert("suggested_repairs".to_string(), Value::Array(repairs));
-    let is_healthy_unattached_host = class == crate::lifecycle::launch::LeaderBindingClass::Unbound
-        && object.get("ok").and_then(Value::as_bool) == Some(true)
-        && object
-            .get("profile_smoke")
-            .and_then(|profile| profile.get("checks"))
-            .and_then(Value::as_array)
-            .is_some_and(|checks| !checks.is_empty());
-    if !is_healthy_unattached_host {
-        object.insert("ok".to_string(), Value::Bool(false));
-    }
-}
 
-fn selected_live_leader_workspace_mismatch(
-    workspace: &std::path::Path,
-    team: Option<&str>,
-) -> Option<(Value, Value)> {
-    let selected = crate::state::selector::resolve_active_team_readonly(
-        workspace,
-        team,
-        crate::state::selector::SelectorMode::RuntimeOnly,
-    )
-    .ok()?;
-    let backend: Box<dyn crate::transport::Transport> =
-        match crate::transport_factory::resolve_read_only_transport(
-            &selected.run_workspace,
-            Some(&selected.state),
-            crate::transport_factory::TransportPurpose::Diagnose,
-        ) {
-            Ok(resolved) => resolved.backend,
-            Err(_) => Box::new(crate::tmux_backend::TmuxBackend::for_workspace(
-                &selected.run_workspace,
-            )),
-        };
-    live_leader_workspace_mismatch(&selected.run_workspace, &selected.state, backend.as_ref())
-}
 
 /// 0.5.41 Slice 1 (fault-invisibility-locate.md §5/§6.2): read the
 /// coordinator heartbeat sidecar for the last-observed host boot
@@ -907,108 +750,10 @@ fn append_legacy_snapshot_issue(workspace: &std::path::Path, state: &Value, issu
     }
 }
 
-fn coordinator_issue_id(
-    state: &Value,
-    health: &crate::coordinator::HealthReport,
-) -> Option<&'static str> {
-    match health.status {
-        crate::coordinator::CoordinatorHealthStatus::Stale
-        | crate::coordinator::CoordinatorHealthStatus::InvalidPid => {
-            Some("coordinator_unavailable")
-        }
-        crate::coordinator::CoordinatorHealthStatus::Running => {
-            if !health.metadata_ok {
-                if health.service_available
-                    && matches!(
-                        health.binary_identity_relation,
-                        crate::coordinator::CoordinatorBinaryIdentityRelation::DaemonNewerThanCaller
-                    )
-                {
-                    return None;
-                }
-                return match health.metadata_mismatch_reason.as_deref() {
-                    Some(
-                        "binary_identity_missing"
-                        | "binary_version_mismatch"
-                        | "binary_path_mismatch",
-                    ) => Some("coordinator_stale_identity"),
-                    Some(_) | None => Some("coordinator_unavailable"),
-                };
-            }
-            if !health.schema.ok {
-                Some("coordinator_schema_incompatible")
-            } else {
-                None
-            }
-        }
-        crate::coordinator::CoordinatorHealthStatus::Missing => {
-            coordinator_expected(state).then_some("coordinator_unavailable")
-        }
-    }
-}
 
-fn coordinator_issue_value(
-    id: &str,
-    health: &crate::coordinator::HealthReport,
-    workspace: &std::path::Path,
-) -> Value {
-    json!({
-        "id": id,
-        "status": coordinator_status_wire(health.status),
-        "pid": health.pid.map(|pid| pid.get()),
-        "metadata_ok": health.metadata_ok,
-        "metadata_mismatch_reason": health.metadata_mismatch_reason.clone(),
-        "process_running": health.process_running,
-        "wire_metadata_ok": health.wire_metadata_ok,
-        "binary_identity_ok": health.binary_identity_ok,
-        "binary_identity_relation": health.binary_identity_relation.as_str(),
-        "service_available": health.service_available,
-        "binary_path": health.current_binary_identity.binary_path.clone(),
-        "binary_version": health.current_binary_identity.binary_version.clone(),
-        "schema_ok": health.schema.ok,
-        "coordinator_log": crate::coordinator::coordinator_log_path(
-            &crate::coordinator::WorkspacePath::new(workspace.to_path_buf())
-        )
-        .to_string_lossy()
-        .to_string(),
-    })
-}
 
-fn coordinator_repair_hint(id: &str, _health: &crate::coordinator::HealthReport) -> Value {
-    let hint_action = match id {
-        "coordinator_schema_incompatible" => "team-agent doctor --fix-schema --json",
-        _ => "team-agent restart",
-    };
-    json!({
-        "issue": id,
-        "action_required": true,
-        "advisory": true,
-        "broken_class": id,
-        "hint_action": hint_action,
-        "dedupe_key": id,
-        "action": format!("{hint_action} # diagnose only reports coordinator health; it does not start, stop, or rotate the coordinator"),
-    })
-}
 
-fn coordinator_expected(state: &Value) -> bool {
-    state
-        .get("session_name")
-        .and_then(Value::as_str)
-        .is_some_and(|session| !session.is_empty())
-        || state
-            .get("agents")
-            .and_then(Value::as_object)
-            .is_some_and(|agents| !agents.is_empty())
-}
 
-fn coordinator_status_wire(status: crate::coordinator::CoordinatorHealthStatus) -> &'static str {
-    match status {
-        crate::coordinator::CoordinatorHealthStatus::Missing => "missing",
-        crate::coordinator::CoordinatorHealthStatus::InvalidPid => "invalid_pid",
-        crate::coordinator::CoordinatorHealthStatus::Running => "running",
-        crate::coordinator::CoordinatorHealthStatus::Stale => "stale",
-    }
-}
 
 fn topology_repair_hint(issue: &str) -> Value {
     json!({
@@ -1193,7 +938,7 @@ mod tests {
             "leader_receiver": {"status": "pending", "pane_id": "%1"}
         });
         let transport = crate::transport::test_support::OfflineTransport::default();
-        let (issues, repairs) = diagnose_runtime(&state, &transport);
+        let (issues, repairs) = diagnose_runtime_with_workspace(None, &state, &transport);
         let issues_text = issues.to_string();
         let repairs_text = repairs.to_string();
         assert!(
@@ -1242,44 +987,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn coordinator_issue_id_maps_stale_pid_to_unavailable() {
-        let health = coordinator_health_fixture(
-            crate::coordinator::CoordinatorHealthStatus::Stale,
-            None,
-            true,
-        );
-        assert_eq!(
-            coordinator_issue_id(&json!({"session_name": "team-fixture"}), &health),
-            Some("coordinator_unavailable")
-        );
-    }
 
-    #[test]
-    fn coordinator_issue_id_maps_binary_identity_to_stale_identity() {
-        let health = coordinator_health_fixture(
-            crate::coordinator::CoordinatorHealthStatus::Running,
-            Some("binary_version_mismatch"),
-            true,
-        );
-        assert_eq!(
-            coordinator_issue_id(&json!({"session_name": "team-fixture"}), &health),
-            Some("coordinator_stale_identity")
-        );
-    }
 
-    #[test]
-    fn coordinator_issue_id_maps_schema_failure_to_schema_incompatible() {
-        let health = coordinator_health_fixture(
-            crate::coordinator::CoordinatorHealthStatus::Running,
-            None,
-            false,
-        );
-        assert_eq!(
-            coordinator_issue_id(&json!({"session_name": "team-fixture"}), &health),
-            Some("coordinator_schema_incompatible")
-        );
-    }
 
     fn pane(session: &str, pane_id: &str, window: &str) -> crate::transport::PaneInfo {
         crate::transport::PaneInfo {
@@ -1330,7 +1039,7 @@ mod tests {
             .with_session_present(true)
             .with_windows(vec![crate::transport::WindowName::new("grok")])
             .with_targets(vec![pane("team-current", "%1", "renamed-by-cli")]);
-        let (issues, _) = diagnose_runtime(&state, &backend);
+        let (issues, _) = diagnose_runtime_with_workspace(None, &state, &backend);
         assert!(
             !has_issue(&issues, "worker_window_missing:grok-seat"),
             "live pane id must prove the seat without the agent-id window name; issues={issues}"
@@ -1344,7 +1053,7 @@ mod tests {
             .with_session_present(true)
             .with_windows(vec![crate::transport::WindowName::new("grok")])
             .with_targets(vec![pane("team-current", "%9", "grok")]);
-        let (issues, _) = diagnose_runtime(&state, &backend);
+        let (issues, _) = diagnose_runtime_with_workspace(None, &state, &backend);
         assert!(
             has_issue(&issues, "worker_window_missing:grok-seat"),
             "a same-named window must not hide a different pane id; issues={issues}"
@@ -1365,7 +1074,7 @@ mod tests {
         let backend = crate::transport::test_support::OfflineTransport::new()
             .with_session_present(true)
             .with_windows(vec![crate::transport::WindowName::new("grok")]);
-        let (issues, _) = diagnose_runtime(&state, &backend);
+        let (issues, _) = diagnose_runtime_with_workspace(None, &state, &backend);
         assert!(
             !has_issue(&issues, "worker_window_missing:grok-seat"),
             "public command title is a valid fallback; issues={issues}"
@@ -1383,7 +1092,7 @@ mod tests {
         let backend = crate::transport::test_support::OfflineTransport::new()
             .with_session_present(true)
             .with_windows(vec![crate::transport::WindowName::new("worker-a")]);
-        let (issues, _) = diagnose_runtime(&state, &backend);
+        let (issues, _) = diagnose_runtime_with_workspace(None, &state, &backend);
         assert!(
             !has_issue(&issues, "worker_window_missing:worker-a"),
             "legacy agent-id windows remain present; issues={issues}"

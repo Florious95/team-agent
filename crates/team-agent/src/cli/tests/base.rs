@@ -32,7 +32,7 @@ fn provider_args_cases() {
     for (id, input, expected) in CASES {
         let argv: Vec<String> = input.iter().map(|arg| (*arg).to_string()).collect();
         let expected: Vec<String> = expected.iter().map(|arg| (*arg).to_string()).collect();
-        assert_eq!(provider_args(&argv), expected, "{id}");
+        assert_eq!(leader_launcher_args(&argv).unwrap().provider_args, expected, "{id}");
     }
 }
 
@@ -210,12 +210,6 @@ fn emit_human_non_dict_passthrough() {
     assert_eq!(out, "just a string");
 }
 
-#[test]
-fn emit_none_output_produces_nothing() {
-    // passthrough/watch: CmdOutput::None never reaches emit -> None (no stdout line).
-    assert_eq!(emit(&CmdOutput::None, false), None);
-    assert_eq!(emit(&CmdOutput::None, true), None);
-}
 
 // =========================================================================
 // CliError::to_payload(helpers.py:137-187):稳定信封 + tmux 冲突富化
@@ -291,63 +285,9 @@ fn cli_error_payload_json_shape_serializes_optional_fields_skipped() {
     assert_eq!(obj.get("ok"), Some(&json!(false)));
 }
 
-#[test]
-fn consume_inbox_missing_file_returns_none() {
-    // helpers.py:30-31: inbox_path absent -> None (no crash).
-    let ws = tmp_workspace();
-    assert_eq!(consume_leader_inbox_summary(&ws, 500), None);
-    let _ = std::fs::remove_dir_all(&ws);
-}
 
-#[test]
-fn consume_inbox_single_entry_summary_and_cursor_advance() {
-    // golden _leader_inbox_summary single entry:
-    //   "Leader inbox: 1 new fallback entry\n- Hello world message\nHint: team-agent inbox leader"
-    let ws = tmp_workspace();
-    let inbox = ws.join(".team").join("runtime").join("leader-inbox.log");
-    std::fs::write(&inbox, "[x fallback]\nHello world message").unwrap();
-    let summary = consume_leader_inbox_summary(&ws, 500).expect("new entry -> Some");
-    assert_eq!(
-        summary,
-        "Leader inbox: 1 new fallback entry\n- Hello world message\nHint: team-agent inbox leader"
-    );
-    // cursor advanced: a second call with no new bytes -> None (offset==size).
-    assert_eq!(consume_leader_inbox_summary(&ws, 500), None);
-    let _ = std::fs::remove_dir_all(&ws);
-}
 
-#[test]
-fn consume_inbox_two_entries_plural() {
-    // golden two-entry summary uses plural "entries".
-    let ws = tmp_workspace();
-    let inbox = ws.join(".team").join("runtime").join("leader-inbox.log");
-    std::fs::write(&inbox, "[a fallback]\nFirst msg\n[b fallback]\nSecond msg").unwrap();
-    let summary = consume_leader_inbox_summary(&ws, 500).expect("Some");
-    assert_eq!(
-            summary,
-            "Leader inbox: 2 new fallback entries\n- First msg\n- Second msg\nHint: team-agent inbox leader"
-        );
-    let _ = std::fs::remove_dir_all(&ws);
-}
 
-#[test]
-fn consume_inbox_budget_truncation_footer() {
-    // golden budget=200: header + 2 lines then truncation footer (exact bytes from Python).
-    let ws = tmp_workspace();
-    let inbox = ws.join(".team").join("runtime").join("leader-inbox.log");
-    let many: String = (0..20)
-        .map(|i| format!("[e{i} fallback]\nMessage number {i} with some text padding here"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    std::fs::write(&inbox, &many).unwrap();
-    let summary = consume_leader_inbox_summary(&ws, 200).expect("Some");
-    let expected = "Leader inbox: 20 new fallback entries\n\
-- Message number 0 with some text padding here\n\
-- Message number 1 with some text padd ...\n\
-Truncated: more fallback entries available; run team-agent inbox leader";
-    assert_eq!(summary, expected);
-    let _ = std::fs::remove_dir_all(&ws);
-}
 
 // =========================================================================
 // CmdResult::from_json(parser.py:507-508):ok is False -> ExitCode::Error

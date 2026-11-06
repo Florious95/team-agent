@@ -593,24 +593,6 @@ fn observe_pi_catalog_test(f: impl FnOnce(&mut PiCatalogTestContext)) {
     });
 }
 
-#[cfg(test)]
-pub(crate) fn run_pi_catalog_after_parent_exit_for_test(
-    stdout: std::process::ChildStdout,
-    parent_pid: u32,
-    status: std::process::ExitStatus,
-    timeout: Duration,
-    max_bytes: u64,
-) -> Result<Vec<u8>, String> {
-    observe_pi_catalog_test(|context| {
-        context.observation.parent_pid = Some(parent_pid);
-        context.observation.parent_exit_success = Some(status.success());
-        context.observation.parent_exit_code = status.code();
-    });
-    crate::provider::model_catalog::finish_stdout_after_exit(
-        stdout, status, timeout, max_bytes, &mut PiCatalogObserver,
-    )
-    .map_err(|error| error.pi_legacy_message())
-}
 
 /// Shared bounded native-command runner; launch preflight keeps its exact model gate.
 pub(crate) fn run_pi_catalog(

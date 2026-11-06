@@ -16,16 +16,7 @@ pub(crate) fn tmux_conflict_session(error: &str) -> Option<String> {
     }
 }
 
-pub(crate) fn non_empty_str<'a>(value: Option<&'a str>, default: &'a str) -> &'a str {
-    value.filter(|s| !s.is_empty()).unwrap_or(default)
-}
 
-pub(crate) fn first_non_empty_str<'a>(values: &[Option<&'a str>], default: &'a str) -> &'a str {
-    values
-        .iter()
-        .find_map(|value| value.filter(|s| !s.is_empty()))
-        .unwrap_or(default)
-}
 
 pub(crate) fn python_truthy(value: &Value) -> bool {
     match value {
@@ -43,34 +34,8 @@ pub(crate) fn python_truthy(value: &Value) -> bool {
     }
 }
 
-pub(crate) fn age_text(value: Option<&str>) -> String {
-    let Some(raw) = value.filter(|s| !s.is_empty()) else {
-        return "-".to_string();
-    };
-    let Ok(ts) = chrono::DateTime::parse_from_rfc3339(raw) else {
-        return "-".to_string();
-    };
-    let now = chrono::Utc::now();
-    let seconds = now
-        .signed_duration_since(ts.with_timezone(&chrono::Utc))
-        .num_seconds()
-        .max(0);
-    if seconds < 60 {
-        format!("{seconds}s ago")
-    } else if seconds < 3600 {
-        format!("{}m ago", seconds / 60)
-    } else {
-        format!("{}h ago", seconds / 3600)
-    }
-}
 
-pub(crate) fn prefix_chars(text: &str, max: usize) -> String {
-    text.chars().take(max).collect()
-}
 
-pub(crate) fn char_len(text: &str) -> usize {
-    text.chars().count()
-}
 
 pub(crate) fn sort_json(value: &Value) -> Value {
     match value {

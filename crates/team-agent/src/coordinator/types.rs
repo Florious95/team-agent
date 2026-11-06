@@ -28,33 +28,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-#[derive(Debug, Error)]
-pub enum TickError {
-    /// `load_runtime_state` 失败(state.json 损坏 / 锁)。
-    #[error("load runtime state failed: {0}")]
-    StateLoad(#[from] crate::state::StateError),
-    /// EventLog 写失败。
-    #[error("event log: {0}")]
-    EventLog(#[from] crate::event_log::EventLogError),
-    /// transport 探测失败(tmux session 存活查询等)。
-    #[error("transport: {0}")]
-    Transport(#[from] crate::transport::TransportError),
-    /// provider trait 调用失败(startup/runtime prompt handlers, classifiers)。
-    #[error("provider: {0}")]
-    Provider(#[from] crate::provider::ProviderError),
-    /// messaging subsystem failure(delivery/scheduler/result watchers).
-    #[error("messaging: {0}")]
-    Messaging(#[from] crate::messaging::MessagingError),
-    /// coordinator.tick panic caught by the daemon loop.
-    #[error("panic: {0}")]
-    Panic(String),
-}
 
 // ── REUSE — committed model types(不重定义)──────────────────────────────────
 use crate::model::enums::Provider;
 
 // ── REUSE — step 8 provider(经 trait,MUST-NOT-13:绝不依赖 provider client crate)──
-use crate::provider::{ProviderAdapter, RolloutPath, TurnState};
+use crate::provider::{ProviderAdapter, RolloutPath};
 
 // ===========================================================================
 // CONSTANTS(metadata.py:13 / __main__.py:101)
@@ -64,11 +43,7 @@ use crate::provider::{ProviderAdapter, RolloutPath, TurnState};
 /// `coordinator.restart_incompatible`。健康判定的三元之一。
 pub const PROTOCOL_VERSION: u32 = 2;
 
-/// `DEFAULT_TICK_INTERVAL_SEC = 5.0`(`__main__.py:101`;Gap 36c 从 2.0 提到 5.0,2.5x 省 CPU)。
-pub const DEFAULT_TICK_INTERVAL_SEC: f64 = 5.0;
 
-/// 指数退避封顶(`__main__.py:65` `min(.., 60.0)`)。bug-084 崩溃循环防护。
-pub const BACKOFF_MAX_SEC: f64 = 60.0;
 
 // ===========================================================================
 // NEWTYPES(§3:Pid / WorkspacePath 不与裸 int/PathBuf 混传)
@@ -157,21 +132,6 @@ pub enum CoordinatorHealthStatus {
     Stale,
 }
 
-/// `start_coordinator` 结果 status(`lifecycle.py:54,73,89,121`)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StartOutcome {
-    /// 已健康 → no-op(`lifecycle.py:54`)。
-    AlreadyRunning,
-    /// metadata 不兼容,先 stop 但 stop 失败(`lifecycle.py:73`)。
-    RestartIncompatibleStopFailed,
-    /// schema 不兼容,拒启并给修复 hint(`lifecycle.py:89`)。
-    SchemaIncompatible,
-    /// 正常 spawn(`lifecycle.py:121`)。
-    Started,
-    /// 当前 CLI 发现 live daemon 的 binary identity 过期,stop 后重新 spawn。
-    StartedAfterRotation,
-}
 
 /// `stop_coordinator` 结果 status(`lifecycle.py:232,238,243,247`)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -189,15 +149,6 @@ pub enum StopOutcome {
     Stopped,
 }
 
-/// tick degraded/stop 的 `reason`(`lifecycle.py:279,357`)。§19 散字符串 → enum。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TickStopReason {
-    /// tmux session 不在 → `stop:true` 触发主循环退出(`lifecycle.py:279`)。
-    TmuxSessionMissing,
-    /// bug-084:tick-end save_runtime_state 失败,`stop:false`(`lifecycle.py:357`)。
-    PersistenceDegraded,
-}
 
 /// 孤儿分类 reason(`orphan_cleanup.py:87-100`)。携带 hint 数据 → enum(非散字符串)。
 /// **ADJUDICATION**:orphan_cleanup 的完整 SIGTERM/SIGKILL 升级逻辑归 step 14 诊断面;
@@ -328,31 +279,12 @@ pub struct SchemaHealth {
 /// 区分「pre-init 必需列缺失」(拒启)vs「migratable 列缺失」(可迁移)——card §89 铁律。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchemaError {
-    /// pragma table_info vs expected 列集不符(`lifecycle.py:185-191`)。携带定位字段。
-    SchemaMismatch {
-        table: String,
-        expected_columns: Vec<String>,
-        actual_columns: Vec<String>,
-        missing_columns: Vec<String>,
-        /// pre-init 必需列(true)vs migratable(false)——决定拒启 vs 可迁移(card §89)。
-        pre_init_required: bool,
-    },
-    /// `MessageStore(workspace)` 构造抛异常(`lifecycle.py:213`),携带原文。
-    InitFailed { message: String },
 }
 
 // ===========================================================================
 // health / start / stop report 结构(lifecycle.py:39-247 typed 版)
 // ===========================================================================
 
-/// `start_coordinator` 错误(spawn 子进程 / ensure dirs 失败)。lib 边界 thiserror(§12)。
-#[derive(Debug, Error)]
-pub enum StartError {
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("event log: {0}")]
-    EventLog(#[from] crate::event_log::EventLogError),
-}
 
 /// `stop_coordinator` 错误。
 #[derive(Debug, Error)]
@@ -385,31 +317,6 @@ pub struct HealthReport {
     pub schema: SchemaHealth,
 }
 
-/// `start_coordinator` 结果(`lifecycle.py:54/86/121` typed 版)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StartReport {
-    pub ok: bool,
-    pub pid: Option<Pid>,
-    pub status: StartOutcome,
-    pub previous_pid: Option<Pid>,
-    pub binary_path: Option<String>,
-    pub binary_version: Option<String>,
-    pub rotation_reason: Option<String>,
-    /// 0.5.41 Slice 3 (fault-invisibility-locate.md §5/§9 RED3): typed
-    /// binary-identity relation between the caller and the daemon that
-    /// was observed. Populated on every path (unknown when the health
-    /// probe returned no metadata). Downstream `coordinator_start_
-    /// summary_value` exposes this so restart/start summaries no longer
-    /// flatten `daemon_newer_than_caller` into a plain `already_running`
-    /// (RED3: caller-older-than-daemon must remain distinguishable
-    /// from a same-binary fresh daemon).
-    pub binary_identity_relation: CoordinatorBinaryIdentityRelation,
-    /// coordinator.log 路径(成功路径,`lifecycle.py:54/121`)。
-    pub log: Option<PathBuf>,
-    /// schema_incompatible 时的修复 hint / 失败原因。
-    pub schema_error: Option<SchemaError>,
-    pub action: Option<String>,
-}
 
 /// `stop_coordinator` 结果(`lifecycle.py:232-247` typed 版)。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -423,42 +330,8 @@ pub struct StopReport {
 // 异常轨 abnormal_track(abnormal_track.py)—— provider-neutral 数据型
 // ===========================================================================
 
-/// `detect_whole_team_gone` 分类(`abnormal_track.py:130/132/143`)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WholeTeamGoneClass {
-    Alive,
-    /// clean shutdown → 静默(`abnormal_track.py:130`)。
-    CleanShutdown,
-    /// restart 进行中 → 静默(`abnormal_track.py:132`)。
-    RestartInProgress,
-    /// 闪退 → durable marker + deferred escalation(`abnormal_track.py:143`)。
-    UnexpectedExit,
-}
 
-/// `detect_whole_team_gone` 返回(`abnormal_track.py:140-147` typed 版)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WholeTeamGoneReport {
-    pub whole_team_gone: bool,
-    pub classification: WholeTeamGoneClass,
-    pub notify: bool,
-    /// 仅 unexpected exit 时 true(`abnormal_track.py:145`):延迟到下条 leader 命令再 escalate。
-    pub escalate_user_on_next_leader_command: bool,
-    pub marker_written: bool,
-}
 
-/// 整队存活快照(`detect_whole_team_gone` 的 snapshot 入参,`abnormal_track.py:105-116`)。
-/// coordinator-independent:不依赖 coordinator 活着也能判。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TeamPresenceSnapshot {
-    pub coordinator_alive: bool,
-    pub leader_alive: bool,
-    /// 每 worker 进程存活(`provider_state` liveness;`ProcessLiveness::Alive` 才算活)。
-    pub provider_processes_alive: Vec<bool>,
-    pub tmux_sessions_present: bool,
-    pub clean_shutdown: bool,
-    pub restart_in_progress: bool,
-}
 
 // ===========================================================================
 // CROSS-DEP placeholders(其他并行 lane 拥有真名;leader 集成时 reconcile)
@@ -471,90 +344,3 @@ pub struct TeamPresenceSnapshot {
 /// **PLACEHOLDER**:与 `crate::model::ids::AgentId` 同名同义,但 ids.rs 已定义 —— 集成时直接
 /// `use crate::model::ids::AgentId` 替换本地别名。此处用本地 type alias 避免重定义冲突。
 pub use crate::model::ids::AgentId;
-
-/// provider adapter 解析器(`get_provider_registry` / `ADAPTERS` map 的 trait 版,step 8 拥有真名)。
-/// **PLACEHOLDER**:step 8 provider lane 会给真正的 registry 类型;本 trait 是 coordinator 注入点
-/// (MUST-NOT-13:经 trait 调,绝不依赖 provider client crate)。
-pub trait ProviderRegistry {
-    /// 拿某 provider 的 adapter(`providers.get_adapter`)。
-    fn adapter_for(&self, provider: Provider) -> Box<dyn ProviderAdapter>;
-}
-
-/// idle take-over 候选 node(`idle_takeover_wiring.build_idle_nodes`,step 8/11 拥有真名)。
-/// **PLACEHOLDER**:bug-085 关键 —— `state` 是穷尽 `TurnState`,`rollout_path` 是 `Option`
-/// (None 漏穿曾误判 unknown→idle)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IdleNode {
-    pub node_id: AgentId,
-    pub state: TurnState,
-    pub provider: Option<Provider>,
-    pub rollout_path: Option<RolloutPath>,
-}
-
-/// idle take-over 提醒(`lifecycle.py:304-307`)。**PLACEHOLDER**(step 11 messaging 拥有 alert 形状)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IdleAlert {
-    pub message: Option<String>,
-    pub reason: Option<String>,
-    pub interrupted: Vec<AgentId>,
-}
-
-/// `_deliver_pending_messages` 投递记录(`delivery.py:484`,step 11 拥有)。**PLACEHOLDER**。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeliveredMessage {
-    pub message_id: String,
-}
-
-/// `_fire_due_scheduled_events` 触发记录(`scheduler.py:41`,step 11 拥有)。**PLACEHOLDER**。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FiredScheduledEvent {
-    pub id: i64,
-}
-
-/// `detect_cross_worker_deadlocks` 告警(`messaging/idle_alerts.py`,step 11 拥有)。**PLACEHOLDER**。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeadlockAlert {
-    pub raw: Value,
-}
-
-/// `detect_compaction_degradation` 结果(`messaging/activity_detector.py`,step 11 拥有)。**PLACEHOLDER**。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompactionResult {
-    pub agent_id: AgentId,
-    pub provider: Option<Provider>,
-    pub observed: bool,
-    pub reason: Option<String>,
-    pub recommendation: Option<String>,
-}
-
-/// `detect_session_drift` 结果(`messaging/session_drift.py`,step 11 拥有)。**PLACEHOLDER**。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionDriftResult {
-    pub agent_id: AgentId,
-    pub stored_session_id: Option<String>,
-    pub observed_session_id: Option<String>,
-    pub status: String,
-}
-
-/// `detect_leader_api_errors` 结果(`messaging/leader_api_errors.py`,step 11 拥有)。**PLACEHOLDER**。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LeaderApiError {
-    pub provider: Option<Provider>,
-    pub pane_id: Option<String>,
-    pub fingerprint: String,
-    pub message: String,
-}
-
-/// Result projection reported by a coordinator tick. Report results now finalize inline.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CollectedResult {
-    pub result_id: String,
-}
-
-/// durable marker store(`detect_whole_team_gone` 的 marker_store 入参,`abnormal_track.py:226-239`)。
-/// **PLACEHOLDER**:step 5 state / step 7 message_store 可能拥有真正的 marker 存储面;
-/// 本 trait 是 abnormal track 的注入点(写 `whole_team_gone` durable marker)。
-pub trait MarkerStore {
-    /// 写一个命名 marker;返回是否落盘成功(`abnormal_track.py:232-238`)。
-    fn set_marker(&mut self, name: &str, value: Value) -> bool;
-}

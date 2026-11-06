@@ -303,8 +303,6 @@ fn emit_dangerous_flag_no_role_declared_warning_with_argv(
     );
 }
 
-mod plan;
-pub(crate) use plan::{handle_report_result, start_plan};
 
 pub mod spawn;
 pub(crate) use spawn::agent_id_spec_source_path;
@@ -409,7 +407,7 @@ mod quick_start_transport;
 pub use quick_start_transport::annotate_runtime_transport;
 pub(super) use quick_start_transport::*;
 pub(crate) use quick_start_transport::{
-    annotate_runtime_tmux_endpoint, attach_window_names_for_state_agents,
+    annotate_runtime_tmux_endpoint,
     configure_adaptive_pane_title, quick_start_tmux_backend, selected_tmux_socket_source,
 };
 

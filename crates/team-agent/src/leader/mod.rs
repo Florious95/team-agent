@@ -59,7 +59,7 @@ use thiserror::Error;
 // model::ids — leader 身份/owner epoch newtypes(§3)。
 use crate::model::ids::{LeaderSessionUuid, OwnerEpoch, TeamKey};
 // provider — turn state 穷尽枚举(unknown≠idle 命门)+ provider 归一 + bug-085 None 漏穿。
-use crate::provider::{Provider, RolloutPath, TurnState};
+use crate::provider::{Provider, RolloutPath};
 // transport — pane 寻址 / 后端无关 PaneInfo(身份/rebind 地基)。
 use crate::transport::{PaneId, SessionName, Target, WindowName};
 // state — owner-gate caller 身份 + first-time binding + identity 派生 + projection。
@@ -77,25 +77,19 @@ use crate::state::StateError;
 
 // ── submodules(by responsibility) ──────────────────────────────────────────
 mod helpers;
-pub mod incident;
 pub mod lease;
 pub mod owner_bind;
 pub mod provider_attribution;
 pub mod prompt;
-pub mod rediscover;
 pub mod registry;
 pub mod start;
-pub mod takeover;
 pub mod types;
 
 // ── RE-EXPORT INVARIANT:每个先前 root-visible 项原路径不变 ────────────────────
-pub use incident::*;
 pub use lease::*;
 pub use owner_bind::*;
 pub(crate) use provider_attribution::*;
-pub use rediscover::*;
 pub use start::*;
-pub use takeover::*;
 pub use types::*;
 // 私有 helper(原 module-private,现 pub(crate) 跨子模块复用)按原可达性再导出。
 pub(crate) use helpers::*;

@@ -621,30 +621,6 @@ fn terminate(child: &mut Child, pid: u32) {
     let _ = child.wait();
 }
 
-pub(crate) fn finish_stdout_after_exit(
-    stdout: std::process::ChildStdout,
-    status: ExitStatus,
-    timeout: Duration,
-    max_bytes: u64,
-    observer: &mut dyn CatalogObserver,
-) -> Result<Vec<u8>, CatalogError> {
-    if !status.success() { observer.exited(&status); return Err(CatalogError::CommandFailed); }
-    observer.exited(&status);
-    let (tx, rx) = mpsc::channel();
-    let reader = std::thread::Builder::new().name("model-catalog-reader".into()).spawn(move || {
-        let mut bytes = Vec::new();
-        let result = stdout.take(max_bytes.saturating_add(1)).read_to_end(&mut bytes);
-        let _ = tx.send(result.map(|_| bytes));
-    }).map_err(|_| CatalogError::OutputReadFailed)?;
-    let result = match rx.recv_timeout(timeout) {
-        Ok(Ok(bytes)) if bytes.len() as u64 <= max_bytes => Ok(bytes),
-        Ok(Ok(_)) => Err(CatalogError::OutputTooLarge),
-        Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => Err(CatalogError::OutputReadFailed),
-        Err(mpsc::RecvTimeoutError::Timeout) => { observer.output_timeout(); Err(CatalogError::Timeout) }
-    };
-    if !matches!(&result, Err(CatalogError::Timeout)) { let _ = reader.join(); }
-    result
-}
 
 struct OwnedTempDir(PathBuf);
 impl OwnedTempDir {

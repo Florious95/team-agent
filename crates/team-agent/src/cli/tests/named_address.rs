@@ -680,45 +680,6 @@ fn resolve_name_state_missing() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
-#[test]
-fn resolve_name_same_team_key_across_workspaces() {
-    let sender = named_ws("same-team-sender");
-    let other = named_ws("same-team-other");
-    seed_state(
-        &sender,
-        state_with_teams(json!({
-            "alpha": worker_team("alpha-a", "qa", "%a", "qa")
-        })),
-    );
-    seed_state(
-        &other,
-        state_with_teams(json!({
-            "alpha": worker_team("alpha-b", "qa", "%b", "qa")
-        })),
-    );
-    let sender_transport = OfflineTransport::new().with_targets(vec![pane("alpha-a", "qa", "%a")]);
-    let other_transport = OfflineTransport::new().with_targets(vec![pane("alpha-b", "qa", "%b")]);
-
-    let err = resolve_name_with_workspace_transports(
-        &sender,
-        "alpha/qa",
-        &[
-            NamedWorkspaceTransport {
-                workspace: &sender,
-                transport: &sender_transport,
-            },
-            NamedWorkspaceTransport {
-                workspace: &other,
-                transport: &other_transport,
-            },
-        ],
-    )
-    .unwrap_err();
-    assert_eq!(err.kind, NamedAddressErrorKind::NameAmbiguous);
-    assert!(err.n38_message().contains("<workspace>::alpha/qa"));
-    let _ = std::fs::remove_dir_all(&sender);
-    let _ = std::fs::remove_dir_all(&other);
-}
 
 #[test]
 fn resolve_paused_agent_with_live_pane_succeeds_with_warning() {

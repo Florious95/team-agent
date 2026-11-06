@@ -171,40 +171,7 @@ pub fn cleanup_orphans_json(workspace: &Path, confirm: bool) -> Result<Value, Cl
     ))
 }
 
-pub fn has_orphan_residue(workspace: &Path) -> bool {
-    let scope = OrphanScanScope::current_workspace(workspace);
-    !scan_orphans_bounded(&scope, false).orphans.is_empty()
-}
 
-pub fn orphan_blocker_detail(workspace: &Path) -> String {
-    let scope = OrphanScanScope::current_workspace(workspace);
-    let report = scan_orphans_bounded(&scope, false);
-    if report.orphans.is_empty() {
-        return "no orphan coordinator residue detected".to_string();
-    }
-    report
-        .orphans
-        .iter()
-        .map(|orphan| {
-            let target = orphan
-                .pid
-                .map(|pid| format!("pid={pid}"))
-                .or_else(|| orphan.session.as_ref().map(|s| format!("session={s}")))
-                .unwrap_or_else(|| "target=unknown".to_string());
-            let workspace = orphan
-                .workspace
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|| "workspace=unknown".to_string());
-            format!(
-                "{} {target} workspace={workspace} reason={}",
-                orphan.kind,
-                reason_key(&orphan.reason)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
-}
 
 fn fix_orphans(scope: &OrphanScanScope, report: ScanReport) -> Result<Value, CliError> {
     let cleanup = cleanup_report(report, scope);

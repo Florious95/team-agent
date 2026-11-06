@@ -68,45 +68,7 @@ pub mod event_names {
 // 此处新增 plan id / 派生 session 名)
 // ===========================================================================
 
-/// `PlanId`(`_PLAN_ID_RE = ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`,`orchestrator/state.py:11`)。
-/// **必须 newtype**:防路径穿越(无 `/`、空格);`sanitize_plan_id` 拒绝则 `InvalidPlanId`。
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct PlanId(String);
 
-impl PlanId {
-/// ---
-/// purpose: 校验并构造 PlanId
-/// params:
-///   raw: 原始 plan 名，首字符须字母数字，其余只许字母数字与下划线点横线，长度不超过 64
-/// returns: 通过校验的 PlanId
-/// errors: 不满足上述形状时返回 InvalidPlanId
-/// contract_id: lifecycle.types.plan_id_parse
-/// ---
-    /// `sanitize_plan_id`(`orchestrator/state.py:18`):正则校验,失败 → `Err`。
-    pub fn parse(raw: &str) -> Result<Self, LifecycleError> {
-        let mut chars = raw.chars();
-        let first_ok = chars
-            .next()
-            .map(|c| c.is_ascii_alphanumeric())
-            .unwrap_or(false);
-        let rest_ok = chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
-        if first_ok && rest_ok && raw.len() <= 64 {
-            Ok(Self(raw.to_string()))
-        } else {
-            Err(LifecycleError::InvalidPlanId(format!(
-                "{raw:?} does not match ^[A-Za-z0-9][A-Za-z0-9_.-]{{0,63}}$; no slashes, spaces, or path-traversal segments are allowed"
-            )))
-        }
-    }
-/// ---
-/// purpose: 取 PlanId 的原始字符串
-/// returns: 构造时保存的原文
-/// ---
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoordinatorStartSummary {
@@ -130,36 +92,8 @@ impl CoordinatorStartSummary {
         Self { ok: true, status: "not_required".into(), pid: None, binary_path: None,
             binary_version: None, rotation_reason: None, binary_identity_relation: "not_applicable".into() }
     }
-/// ---
-/// purpose: 把 coordinator 的 StartReport 投影成 lifecycle 报告用的摘要
-/// params:
-///   report: coordinator 启动返回的原始报告
-/// returns: 摘要，status 已转成稳定 wire 字符串，binary_identity_relation 原样带出
-/// ---
-    pub fn from_start_report(report: &crate::coordinator::StartReport) -> Self {
-        Self {
-            ok: report.ok,
-            status: coordinator_start_status_wire(report.status).to_string(),
-            pid: report.pid.map(|pid| pid.get()),
-            binary_path: report.binary_path.clone(),
-            binary_version: report.binary_version.clone(),
-            rotation_reason: report.rotation_reason.clone(),
-            binary_identity_relation: report.binary_identity_relation.as_str().to_string(),
-        }
-    }
 }
 
-fn coordinator_start_status_wire(status: crate::coordinator::StartOutcome) -> &'static str {
-    match status {
-        crate::coordinator::StartOutcome::AlreadyRunning => "already_running",
-        crate::coordinator::StartOutcome::RestartIncompatibleStopFailed => {
-            "restart_incompatible_stop_failed"
-        }
-        crate::coordinator::StartOutcome::SchemaIncompatible => "schema_incompatible",
-        crate::coordinator::StartOutcome::Started => "started",
-        crate::coordinator::StartOutcome::StartedAfterRotation => "started_after_rotation",
-    }
-}
 
 /// ---
 /// purpose: 把 coordinator 启动摘要序列化成 JSON 对象
@@ -177,11 +111,6 @@ pub fn coordinator_start_summary_value(summary: &CoordinatorStartSummary) -> ser
     })
 }
 
-impl std::fmt::Display for PlanId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
 
 // ===========================================================================
 // ENUM(card §3/§11:散字符串 → 穷尽 enum)
@@ -223,15 +152,6 @@ pub enum FirstSendAtState {
     Corrupt,
 }
 
-/// plan `status`(`orchestrator/__init__.py`)。**应 enum**:`start_plan` 对已
-/// running/halted/completed 幂等返回。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanStatus {
-    Running,
-    Halted,
-    Completed,
-}
 
 /// 危险审批继承来源(`config.py:16` `dangerous_auto_approve_source`)。**应 enum**:
 /// launch 在 `inherited=false` 且无 `--yes` 时 raise(`core.py:120`)。
@@ -272,97 +192,9 @@ pub struct DangerousApproval {
     pub unexpected_binary: bool,
 }
 
-/// `PlanState`(`orchestrator/__init__.py:51`)。plan 多 stage 状态机持久态。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlanState {
-    pub plan_id: PlanId,
-    pub plan_path: PathBuf,
-    pub team: Option<String>,
-    pub current_stage: i64,
-    pub started_at: String,
-    pub completed_stages: Vec<String>,
-    pub status: PlanStatus,
-    pub halt_reason: Option<String>,
-    pub halt_artifact: Option<PathBuf>,
-    pub stages: Vec<PlanStage>,
-    pub current_dispatch: Option<String>,
-}
 
-/// 单 stage(`orchestrator/plan.py` stage mapping)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlanStage {
-    pub id: String,
-    pub assignee: Option<AgentId>,
-    pub prompt: Option<String>,
-    pub on_result: Option<PlanCondition>,
-    pub status: Option<String>,
-}
 
-/// plan 推进条件(封闭文法 `_CONDITION_RE`,`orchestrator/plan.py:9`)。
-/// **必须 typed**:`any` | `report_result.<field> == '<value>'`;越界 → `InvalidPlan`。
-/// 不做成自由表达式。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PlanCondition {
-    /// 无条件推进。
-    Any,
-    /// `report_result.<field> == '<value>'`。
-    FieldEq { field: String, value: String },
-}
 
-impl PlanCondition {
-/// ---
-/// purpose: 解析 plan 推进条件的封闭文法
-/// params:
-///   expr: any，或 report_result.<字段> == <值>，值须带单引号或双引号
-/// returns: Any 或 FieldEq
-/// errors: 前缀不对、缺等号、字段名非法或值未带引号时返回 InvalidPlan
-/// contract_id: lifecycle.types.plan_condition_parse
-/// ---
-    /// 解析封闭条件文法。越界 raise `InvalidPlan`(`orchestrator/plan.py:_is_supported_condition`)。
-    pub fn parse(expr: &str) -> Result<Self, LifecycleError> {
-        let trimmed = expr.trim();
-        if trimmed.eq_ignore_ascii_case("any") {
-            return Ok(Self::Any);
-        }
-
-        let Some(rest) = trimmed.strip_prefix("report_result.") else {
-            return Err(LifecycleError::InvalidPlan(format!(
-                "unsupported condition: {expr}"
-            )));
-        };
-        let Some((field, value_expr)) = rest.split_once("==") else {
-            return Err(LifecycleError::InvalidPlan(format!(
-                "unsupported condition: {expr}"
-            )));
-        };
-        let field = field.trim();
-        if field.is_empty() || !field.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            return Err(LifecycleError::InvalidPlan(format!(
-                "unsupported condition: {expr}"
-            )));
-        }
-        let value_expr = value_expr.trim();
-        let value = if let Some(inner) = value_expr
-            .strip_prefix('\'')
-            .and_then(|v| v.strip_suffix('\''))
-        {
-            inner
-        } else if let Some(inner) = value_expr
-            .strip_prefix('"')
-            .and_then(|v| v.strip_suffix('"'))
-        {
-            inner
-        } else {
-            return Err(LifecycleError::InvalidPlan(format!(
-                "unsupported condition: {expr}"
-            )));
-        };
-        Ok(Self::FieldEq {
-            field: field.to_string(),
-            value: value.to_string(),
-        })
-    }
-}
 
 // ===========================================================================
 // ERROR(card §10:fallible 边界;daemon/CLI 入口返 rich Result<Report, Error>)
@@ -378,9 +210,6 @@ pub enum LifecycleError {
     /// 同名 tmux session 已存在 —— **拒绝而非 kill**(`core.py:127`,`orchestration.py:79`)。
     #[error("tmux session conflict: {0}")]
     SessionConflict(String),
-    /// 危险自动审批未显式确认(`core.py:120`:inherited=false 且无 --yes)。
-    #[error("dangerous auto-approve requires explicit --yes: {0}")]
-    DangerousApprovalRequired(String),
     /// 启动前门失败(`ensure_agent_start_requirements`:provider/profile/model check)。
     #[error("agent start requirement unmet: {0}")]
     RequirementUnmet(String),
@@ -412,15 +241,6 @@ pub enum LifecycleError {
     /// transport I/O(tmux new-session / new-window / kill 等子进程失败)。
     #[error("transport error: {0}")]
     Transport(String),
-    /// 原子动作中途失败且**回滚也失败**(字节级回滚写回失败 —— Gap 15/16 最坏臂)。
-    #[error("rollback failed after {step}: {detail}")]
-    RollbackFailed { step: String, detail: String },
-    /// plan id 非法(`sanitize_plan_id` 拒绝;防路径穿越)。
-    #[error("invalid plan id: {0}")]
-    InvalidPlanId(String),
-    /// plan YAML 校验失败(`InvalidPlanError`)。
-    #[error("invalid plan: {0}")]
-    InvalidPlan(String),
     /// 多 team 选择歧义 / 未找到(`select_restart_state`)。
     #[error("team select: {0}")]
     TeamSelect(String),
@@ -871,26 +691,4 @@ pub struct RestartPlan {
     pub corrupt_entries: Vec<CorruptFirstSendAt>,
     /// allow_fresh=false 且 interacted-but-unresumable 的 worker(atomic_refusal 触发集)。
     pub unresumable: Vec<UnresumableWorker>,
-}
-
-/// plan 状态机推进结果(`orchestrator/__init__.py` start_plan / handle_report_result /
-/// halt_plan 的 typed 版)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PlanProgress {
-    /// 仍运行,当前 stage。
-    Running {
-        plan_id: PlanId,
-        current_stage: i64,
-        state_path: PathBuf,
-    },
-    /// 全 stage 完成。
-    Completed { plan_id: PlanId },
-    /// halted(carry reason + artifact)。
-    Halted {
-        plan_id: PlanId,
-        reason: String,
-        artifact: Option<PathBuf>,
-    },
-    /// report_result 不匹配任何 stage 条件 → no-op(`__init__.py:96`)。
-    NoMatch,
 }

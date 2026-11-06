@@ -17,7 +17,7 @@ use crate::transport::{PaneId, PaneInfo, Transport};
 use super::helpers::{get_path_str, get_path_u64, now_ts, parse_provider};
 use super::owner_bind::leader_identity_context;
 use super::{
-    ClaimedVia, Discovery, LeaderError, LeaderIncident, LeaderReceiver, LeaseReason, LeaseResult,
+    ClaimedVia, Discovery, LeaderError, LeaderReceiver, LeaseReason, LeaseResult,
     LeaseSource, LeaseStatus, OwnerEpoch, ReceiverMode, ReceiverStatus, TeamOwner,
 };
 
@@ -48,9 +48,6 @@ impl AttachLeaderError {
         (self.source, self.applied_grant)
     }
 
-    fn into_error(self) -> LeaderError {
-        self.source
-    }
 }
 
 impl From<LeaderError> for AttachLeaderError {
@@ -59,242 +56,7 @@ impl From<LeaderError> for AttachLeaderError {
     }
 }
 
-/// `attach_leader`(card §42;`__init__.py:19`)。手动 CLI attach;持 `LEADER_OWNERSHIP_LOCK`
-/// 整段临界区做 state 变更 + 事件 + 双写 + requeue exhausted watchers。
-pub fn attach_leader(
-    workspace: &Path,
-    team: Option<&str>,
-    pane: Option<&PaneId>,
-    provider: Provider,
-) -> Result<LeaseResult, LeaderError> {
-    let event_log = crate::event_log::EventLog::new(workspace);
-    let scoped_team = team.filter(|value| !value.is_empty());
-    let mut state = if scoped_team.is_some() {
-        crate::state::projection::select_runtime_state(workspace, scoped_team)?
-    } else {
-        crate::state::persist::load_runtime_state(workspace)?
-    };
-    let targets = attach_leader_targets(workspace, &state);
-    let pane_id = pane
-        .cloned()
-        .or_else(|| {
-            std::env::var("TMUX_PANE")
-                .ok()
-                .filter(|p| !p.is_empty())
-                .map(PaneId::new)
-        })
-        .ok_or_else(|| LeaderError::Validation("tmux pane not found".to_string()))?;
-    let non_empty_pane_id = NonEmptyPaneId::try_from_pane(&pane_id)?;
-    let Some(target) = targets.iter().find(|target| target.info.pane_id == pane_id) else {
-        return Err(LeaderError::Validation(format!(
-            "tmux pane not found: {pane_id}"
-        )));
-    };
-    if let Some(bound) = live_bound_pane_blocking_other_attach(&state, &pane_id, &targets) {
-        let team_id = TeamKey::new(crate::state::projection::team_state_key(&state));
-        emit_lease_refusal(
-            &event_log,
-            LeaseReason::PreviousOwnerAliveRefused,
-            &state,
-            Some(bound.as_str()),
-            Some(pane_id.as_str()),
-            &team_id,
-        )?;
-        return Ok(refused(
-            LeaseReason::PreviousOwnerAliveRefused,
-            "team already has a live owner pane; do not attach-leader from another pane",
-            Some(current_owner_epoch(&state)),
-            Some(bound),
-        ));
-    }
-    let mut receiver = receiver_for_attach_target(
-        workspace,
-        &state,
-        &target.info,
-        provider,
-        Discovery::ExplicitPane,
-    )?;
-    if let Some(endpoint) = target.endpoint.as_ref() {
-        receiver.tmux_socket = Some(endpoint.clone());
-    }
-    let validation = validate_attach_target(
-        workspace,
-        &state,
-        &target.info,
-        provider,
-        target.endpoint.as_deref(),
-    );
-    if validation.is_ok() {
-        copy_verified_grant_from_state(
-            workspace,
-            &state,
-            &target.info,
-            provider,
-            target.endpoint.as_deref(),
-            &mut receiver,
-        );
-    }
-    if validation.is_err() {
-        let pane_info = pane_info_value(&target.info);
-        let targets_value = Value::Array(
-            targets
-                .iter()
-                .map(|target| pane_info_value(&target.info))
-                .collect(),
-        );
-        let owner_record = state_owner(&state);
-        if let Some((readopted, validation)) = crate::leader::try_readopt_leader_pane(
-            workspace,
-            &mut state,
-            &mut receiver,
-            &pane_info,
-            &targets_value,
-            owner_record.as_ref(),
-            provider,
-            LeaseSource::Manual,
-            &event_log,
-        )? {
-            if let Some(endpoint) = target.endpoint.as_deref() {
-                quiet_fake_leader_pane_echo(provider, &target.info, endpoint);
-            }
-            let attach_window_failures = None;
-            return Ok(LeaseResult {
-                ok: true,
-                status: LeaseStatus::Claimed,
-                receiver: Some(readopted),
-                owner: state_owner(&state),
-                owner_epoch: current_owner_epoch(&state).0.checked_sub(0).map(OwnerEpoch),
-                reason: Some(LeaseReason::PreviousOwnerPaneDead),
-                action: validation
-                    .get("action")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                bound_pane_id: Some(pane_id),
-                topology_convergence: None,
-                attach_window_failures,
-            });
-        }
-        event_log.write(
-            super::LeaderEvent::ReceiverAttachFailed.name(),
-            json!({
-                "pane_id": pane_id.as_str(),
-                "reason": validation.err().unwrap_or("leader_pane_validation_failed"),
-            }),
-        )?;
-        return Err(LeaderError::Validation(format!(
-            "leader pane validation failed: {pane_id}"
-        )));
-    }
-    let epoch = current_owner_epoch(&state);
-    if state.get("team_owner").is_some() {
-        write_receiver_to_state(&mut state, &receiver)?;
-        write_claim_state(workspace, &state, scoped_team, None, None)?;
-        event_log.write(
-            super::LeaderEvent::ReceiverAttached.name(),
-            json!({"pane_id": pane_id.as_str(), "owner_epoch": epoch.0}),
-        )?;
-        if let Some(endpoint) = target.endpoint.as_deref() {
-            quiet_fake_leader_pane_echo(provider, &target.info, endpoint);
-        }
-        let attach_window_failures = None;
-        return Ok(LeaseResult {
-            ok: true,
-            status: LeaseStatus::AlreadyBound,
-            receiver: Some(receiver),
-            owner: state_owner(&state),
-            owner_epoch: Some(epoch),
-            reason: None,
-            action: None,
-            bound_pane_id: Some(pane_id),
-            topology_convergence: None,
-            attach_window_failures,
-        });
-    }
-    let identity = leader_identity_context(workspace, None, Some(&state))?;
-    let next_epoch = OwnerEpoch(epoch.0.saturating_add(1));
-    receiver.owner_epoch = Some(next_epoch);
-    receiver.leader_session_uuid = Some(identity.leader_session_uuid.clone());
-    let owner = make_owner(provider, &non_empty_pane_id, &identity, next_epoch);
-    write_binding_to_state(&mut state, &receiver, &owner)?;
-    write_claim_state(workspace, &state, scoped_team, None, None)?;
-    event_log.write(
-        super::LeaderEvent::ReceiverAttached.name(),
-        json!({"pane_id": pane_id.as_str(), "owner_epoch": next_epoch.0}),
-    )?;
-    if let Some(endpoint) = target.endpoint.as_deref() {
-        quiet_fake_leader_pane_echo(provider, &target.info, endpoint);
-    }
-    let attach_window_failures = None;
-    Ok(LeaseResult {
-        ok: true,
-        status: LeaseStatus::Claimed,
-        receiver: Some(receiver),
-        owner: Some(owner),
-        owner_epoch: Some(next_epoch),
-        reason: Some(LeaseReason::VacantAcquired),
-        action: None,
-        bound_pane_id: Some(pane_id),
-        topology_convergence: None,
-        attach_window_failures,
-    })
-}
 
-/// 0.5.9 (E6 real-machine e2e wiring): Fake-provider leader panes in the
-/// e2e harness run `/bin/cat`, which lets the TTY driver echo every
-/// injected byte AND then prints the same bytes on stdout — so pane
-/// capture ends up with two copies of every delivered token. Real Codex/
-/// Claude/Copilot binaries drive the pane through their own TUI and never
-/// echo raw input, so they don't need this. Attach-leader is the
-/// canonical binding hook for this pane, so it's the right place to
-/// disable the TTY echo bit once. Best-effort: any failure is silent
-/// (Fake-provider binding stays useful even without echo suppression).
-///
-/// N16/CP-1 (`.team/anchors/REQUIREMENTS.md`): all tmux invocations MUST
-/// go through the `TmuxBackend` single entry point. The pane's tty query
-/// is done via `TmuxBackend::for_tmux_endpoint(endpoint).query(...,
-/// PaneField::PaneTty)` — socket-scoped by construction. The `stty` call
-/// itself is not a tmux operation, so it uses `Command` directly.
-fn quiet_fake_leader_pane_echo(provider: Provider, target: &PaneInfo, endpoint: &str) {
-    use crate::transport::{PaneField, Target as TransportTarget};
-    if !matches!(provider, Provider::Fake) {
-        return;
-    }
-    if endpoint.is_empty() {
-        return;
-    }
-    let backend = crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint);
-    let Ok(Some(tty)) = <crate::tmux_backend::TmuxBackend as crate::transport::Transport>::query(
-        &backend,
-        &TransportTarget::Pane(target.pane_id.clone()),
-        PaneField::PaneTty,
-    ) else {
-        return;
-    };
-    if tty.trim().is_empty() {
-        return;
-    }
-    // stty against the pane's tty flips the terminal driver's echo bit
-    // without asking the pane process (`/bin/cat`) to interpret any
-    // command. Best-effort: failure is silent.
-    //
-    // Cross-platform tty-file flag: macOS/BSD uses `-f <file>`; GNU
-    // coreutils on Linux uses `-F <file>`. CI runs on Linux and the
-    // previous BSD-only invocation silently no-op'd there — the token
-    // was double-injected because echo stayed on. Try `-F` first (Linux
-    // is the CI baseline), then fall back to `-f` on macOS. Both are
-    // safe to run: the wrong-platform variant just fails silently.
-    let tty = tty.trim();
-    let linux_ok = std::process::Command::new("stty")
-        .args(["-F", tty, "-echo"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if !linux_ok {
-        let _ = std::process::Command::new("stty")
-            .args(["-f", tty, "-echo"])
-            .output();
-    }
-}
 
 /// Explicit app-server leader binding. Validates the supplied socket/thread tuple
 /// before writing the typed physical-channel anchor through the lease primitive.
@@ -348,58 +110,8 @@ pub fn attach_app_server_leader(
     }))
 }
 
-#[derive(Clone)]
-struct AttachLeaderTarget {
-    info: PaneInfo,
-    endpoint: Option<String>,
-}
 
-fn attach_leader_targets(workspace: &Path, state: &Value) -> Vec<AttachLeaderTarget> {
-    let mut targets = Vec::new();
-    // The caller's verified tmux server is authoritative for discovering its
-    // leader pane. Keep state-recorded worker endpoints as additional targets,
-    // but do not let a cross-socket pane-id collision hide the caller pane.
-    if let Some(endpoint) = crate::tmux_backend::socket_name_from_tmux_env() {
-        extend_attach_leader_targets(
-            &mut targets,
-            crate::transport_factory::leader_endpoint_transport(&endpoint).as_ref(),
-        );
-    }
-    for endpoint in state_recorded_tmux_endpoints(state) {
-        extend_attach_leader_targets(
-            &mut targets,
-            crate::transport_factory::leader_endpoint_transport(&endpoint).as_ref(),
-        );
-    }
-    // Phase 1d Batch 6: factory tmux workspace helper for
-    // grep-visibility. Semantics unchanged; leader lease discovery is
-    // tmux-only (caller pane = tmux pane, MUST-12 anchor).
-    let workspace_backend = crate::transport_factory::tmux_workspace_transport(workspace);
-    let workspace_endpoint = workspace_backend.tmux_endpoint();
-    let workspace_transport: Box<dyn Transport> = match workspace_endpoint
-        .as_deref()
-        .filter(|endpoint| !endpoint.is_empty() && *endpoint != "default")
-    {
-        Some(endpoint) => crate::transport_factory::leader_endpoint_transport(endpoint),
-        None => Box::new(workspace_backend),
-    };
-    extend_attach_leader_targets(&mut targets, workspace_transport.as_ref());
-    targets
-}
 
-fn extend_attach_leader_targets(targets: &mut Vec<AttachLeaderTarget>, transport: &dyn Transport) {
-    let resolved_endpoint = transport.tmux_endpoint();
-    targets.extend(
-        transport
-            .list_targets()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|info| AttachLeaderTarget {
-                info,
-                endpoint: resolved_endpoint.clone(),
-            }),
-    );
-}
 
 fn tmux_backend_for_endpoint(endpoint: &str) -> crate::tmux_backend::TmuxBackend {
     // Phase 1d Batch 6: factory tmux channel helpers for grep-visibility.
@@ -467,35 +179,6 @@ fn state_records_pane_endpoint(state: &Value, pane_id: &str, endpoint: &str) -> 
             })
 }
 
-/// `attach_leader_to_state`(card §43;`__init__.py:256`)。核心绑定逻辑(autobind/launch/runtime 复用)。
-/// 首次(无 team_owner 且 source∈{launch,quick_start})走 `apply_first_time_leader_binding`
-/// (cwd+command 宽松匹配);否则严格 UUID 门 + `try_readopt_leader_pane` 收敛到 lease claim。
-/// 返回 `(receiver, validation)`。
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn attach_leader_to_state(
-    workspace: &Path,
-    state: &mut Value,
-    pane: Option<&PaneId>,
-    provider: Provider,
-    event_log: &crate::event_log::EventLog,
-    source: LeaseSource,
-    require_current: bool,
-) -> Result<(LeaderReceiver, Value), LeaderError> {
-    attach_leader_to_state_with_target_and_controls(
-        workspace,
-        state,
-        pane,
-        provider,
-        event_log,
-        source,
-        require_current,
-        None,
-        None,
-        None,
-        None,
-    )
-    .map_err(AttachLeaderError::into_error)
-}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn attach_leader_to_state_with_target_and_controls(
@@ -768,7 +451,6 @@ pub(crate) fn incept_launched_leader(
     let mut target = LeaderClaimTarget {
         provider,
         leader_session_uuid: Some(identity.leader_session_uuid.clone()),
-        team_id: Some(team.to_string()),
         pane_info: Some(observed.clone()),
         endpoint: Some(endpoint.to_string()),
         scope_authority: None,
@@ -1597,21 +1279,6 @@ fn bound_pane(state: &Value) -> Option<String> {
         .or_else(|| get_path_str(state, &["team_owner", "pane_id"]).filter(|v| !v.is_empty()))
 }
 
-/// Live owner on this socket, different caller pane → ownership conflict,
-/// not "caller pane failed validation". Presence in list-panes is enough;
-/// do not require the owner pane to be the session's active pane.
-fn live_bound_pane_blocking_other_attach(
-    state: &Value,
-    caller: &PaneId,
-    targets: &[AttachLeaderTarget],
-) -> Option<PaneId> {
-    let bound = bound_pane(state)?;
-    if bound == caller.as_str() {
-        return None;
-    }
-    let live = targets.iter().any(|target| target.info.pane_id.as_str() == bound);
-    live.then(|| PaneId::new(bound))
-}
 
 fn bound_endpoint_matches_current_process(state: &Value) -> bool {
     let Some(bound) =
@@ -1679,7 +1346,6 @@ fn prior_provider(state: &Value) -> Provider {
 struct LeaderClaimTarget {
     provider: Provider,
     leader_session_uuid: Option<crate::model::ids::LeaderSessionUuid>,
-    team_id: Option<String>,
     pane_info: Option<PaneInfo>,
     endpoint: Option<String>,
     scope_authority: Option<String>,
@@ -1837,11 +1503,6 @@ fn claim_target_with_provider(target: &PaneInfo, provider: Provider) -> LeaderCl
     LeaderClaimTarget {
         provider,
         leader_session_uuid: target_leader_session_uuid(target),
-        team_id: target
-            .leader_env
-            .get("TEAM_AGENT_TEAM_ID")
-            .filter(|raw| !raw.is_empty())
-            .cloned(),
         pane_info: Some(target.clone()),
         endpoint: None,
         scope_authority: None,
@@ -1850,16 +1511,6 @@ fn claim_target_with_provider(target: &PaneInfo, provider: Provider) -> LeaderCl
     }
 }
 
-fn workspace_claim_target_from_pane_info(
-    workspace: &Path,
-    target: &PaneInfo,
-) -> Option<LeaderClaimTarget> {
-    let current_path = target.current_path.as_deref()?;
-    if !crate::state::owner_gate::workspace_paths_match(current_path, workspace) {
-        return None;
-    }
-    claim_target_from_observed_pane(target)
-}
 
 fn write_claim_target_pane_nonce(target: &mut LeaderClaimTarget) -> Result<(), LeaderError> {
     if target.scope_authority.is_none() {
@@ -1934,246 +1585,12 @@ fn target_leader_session_uuid(target: &PaneInfo) -> Option<crate::model::ids::Le
         .and_then(|raw| serde_json::from_value(json!(raw)).ok())
 }
 
-fn validate_attach_target(
-    workspace: &Path,
-    state: &Value,
-    target: &PaneInfo,
-    requested_provider: Provider,
-    endpoint: Option<&str>,
-) -> Result<(), &'static str> {
-    // 0.5.9 (E6 real-machine e2e wiring): an explicit `--provider fake`
-    // is the operator's declaration that this pane is a fake-provider
-    // stub for tests / fixtures. The normal pane-command attribution
-    // path can't recognize `/bin/cat` (or any bare shell process) as a
-    // provider, so honoring the explicit request here is the only way
-    // real-machine E6 acceptance can spin up a leader without shipping
-    // a real Codex/Claude/Copilot binary. This is a targeted escape
-    // hatch — `Provider::Fake` is not selectable from the user-facing
-    // provider list, only wired in test/fixture flows.
-    let claim_target = match workspace_claim_target_from_pane_info(workspace, target) {
-        Some(target) => Some(target),
-        None if grant_allows_attach_target(workspace, state, target, requested_provider, endpoint)
-            || recorded_owner_live_facts_match(
-                workspace,
-                state,
-                target,
-                requested_provider,
-                endpoint,
-            ) =>
-        {
-            Some(
-                claim_target_from_observed_pane(target)
-                    .unwrap_or_else(|| claim_target_with_provider(target, requested_provider)),
-            )
-        }
-        None if matches!(requested_provider, Provider::Fake) => None,
-        None => return Err("leader_pane_validation_failed"),
-    };
-    let Some(claim_target) = claim_target else {
-        if matches!(requested_provider, Provider::Fake) {
-            return Ok(());
-        }
-        return Err("leader_pane_validation_failed");
-    };
-    let recorded_uuid = get_path_str(state, &["team_owner", "leader_session_uuid"])
-        .or_else(|| get_path_str(state, &["leader_receiver", "leader_session_uuid"]));
-    if let (Some(recorded), Some(target_uuid)) = (
-        recorded_uuid.as_deref(),
-        claim_target
-            .leader_session_uuid
-            .as_ref()
-            .map(|u| u.as_str()),
-    ) {
-        if recorded != target_uuid {
-            return Err("leader_session_uuid_mismatch");
-        }
-    }
-    Ok(())
-}
 
-fn receiver_for_attach_target(
-    workspace: &Path,
-    state: &Value,
-    target: &PaneInfo,
-    provider: Provider,
-    discovery: Discovery,
-) -> Result<LeaderReceiver, LeaderError> {
-    let identity = leader_identity_context(workspace, None, Some(state))?;
-    let epoch = current_owner_epoch(state);
-    let pane = NonEmptyPaneId::try_from_pane(&target.pane_id)?;
-    Ok(make_receiver(
-        provider,
-        &pane,
-        &identity.leader_session_uuid,
-        epoch,
-        discovery,
-        Some(target.clone()),
-    ))
-}
 
-fn selected_grant_receiver<'a>(state: &'a Value) -> Option<&'a Value> {
-    let key = crate::state::projection::team_state_key(state);
-    crate::lifecycle::launch::selected_team_leader_receiver(state, &key)
-}
 
-pub(crate) fn grant_allows_attach_target(
-    workspace: &Path,
-    state: &Value,
-    target: &PaneInfo,
-    requested_provider: Provider,
-    endpoint: Option<&str>,
-) -> bool {
-    let Some(receiver) = selected_grant_receiver(state) else {
-        return false;
-    };
-    let authority = receiver
-        .get("scope_authority")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if authority != "explicit_claim" && authority != "fresh_caller" {
-        return false;
-    }
-    let Some(authorized) = receiver
-        .get("authorized_team_workspace")
-        .and_then(Value::as_str)
-        .filter(|raw| !raw.is_empty())
-    else {
-        return false;
-    };
-    if !crate::state::owner_gate::workspace_paths_match(Path::new(authorized), workspace) {
-        return false;
-    }
-    let pane_ok = receiver.get("pane_id").and_then(Value::as_str) == Some(target.pane_id.as_str());
-    let socket_ok = match (receiver.get("tmux_socket").and_then(Value::as_str), endpoint) {
-        (Some(recorded), Some(actual)) => recorded == actual,
-        (None, _) | (_, None) => false,
-    };
-    let provider_ok = receiver
-        .get("provider")
-        .and_then(Value::as_str)
-        .and_then(crate::provider::wire::parse_provider)
-        == Some(requested_provider);
-    let owner_epoch = get_path_u64(state, &["team_owner", "owner_epoch"])
-        .or_else(|| get_path_u64(state, &["leader_receiver", "owner_epoch"]));
-    let receiver_epoch = receiver.get("owner_epoch").and_then(Value::as_u64);
-    let epoch_ok = match (owner_epoch, receiver_epoch) {
-        (Some(owner), Some(recv)) => owner == recv && owner > 0,
-        _ => false,
-    };
-    pane_ok && socket_ok && provider_ok && epoch_ok
-}
 
-fn recorded_owner_live_facts_match(
-    workspace: &Path,
-    state: &Value,
-    target: &PaneInfo,
-    requested_provider: Provider,
-    endpoint: Option<&str>,
-) -> bool {
-    let current_path = target.current_path.as_deref();
-    let Some(current_path) = current_path else {
-        return false;
-    };
-    if !crate::state::owner_gate::workspace_paths_match(current_path, workspace) {
-        return false;
-    }
-    let receiver = selected_grant_receiver(state);
-    let recorded_pane = get_path_str(state, &["team_owner", "pane_id"])
-        .or_else(|| get_path_str(state, &["leader_receiver", "pane_id"]))
-        .or_else(|| {
-            receiver
-                .and_then(|value| value.get("pane_id"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        });
-    if recorded_pane.as_deref() != Some(target.pane_id.as_str()) {
-        return false;
-    }
-    let recorded_socket = get_path_str(state, &["leader_receiver", "tmux_socket"]).or_else(|| {
-        receiver
-            .and_then(|value| value.get("tmux_socket"))
-            .and_then(Value::as_str)
-            .map(str::to_string)
-    });
-    match (recorded_socket.as_deref(), endpoint) {
-        (Some(recorded), Some(actual)) if recorded == actual => {}
-        _ => return false,
-    }
-    let recorded_provider = get_path_str(state, &["team_owner", "provider"])
-        .or_else(|| get_path_str(state, &["leader_receiver", "provider"]))
-        .or_else(|| {
-            receiver
-                .and_then(|value| value.get("provider"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .and_then(|raw| parse_provider(&raw));
-    if recorded_provider != Some(requested_provider) {
-        return false;
-    }
-    let recorded_uuid = get_path_str(state, &["team_owner", "leader_session_uuid"])
-        .or_else(|| get_path_str(state, &["leader_receiver", "leader_session_uuid"]));
-    let Some(recorded_uuid) = recorded_uuid.filter(|raw| !raw.is_empty()) else {
-        return false;
-    };
-    match target_leader_session_uuid(target) {
-        Some(live_uuid) => live_uuid.as_str() == recorded_uuid,
-        None => true,
-    }
-}
 
-fn copy_verified_grant_from_state(
-    workspace: &Path,
-    state: &Value,
-    target: &PaneInfo,
-    provider: Provider,
-    endpoint: Option<&str>,
-    receiver: &mut LeaderReceiver,
-) {
-    if !grant_allows_attach_target(workspace, state, target, provider, endpoint) {
-        return;
-    }
-    let Some(existing) = selected_grant_receiver(state) else {
-        return;
-    };
-    let authority = existing
-        .get("scope_authority")
-        .and_then(Value::as_str)
-        .filter(|raw| *raw == "explicit_claim" || *raw == "fresh_caller");
-    let nonce = existing
-        .get("binding_nonce")
-        .and_then(Value::as_str)
-        .filter(|raw| !raw.is_empty());
-    let authorized = existing
-        .get("authorized_team_workspace")
-        .and_then(Value::as_str)
-        .filter(|raw| !raw.is_empty());
-    if let (Some(authority), Some(nonce), Some(authorized)) = (authority, nonce, authorized) {
-        receiver.scope_authority = Some(authority.to_string());
-        receiver.binding_nonce = Some(nonce.to_string());
-        receiver.authorized_team_workspace = Some(PathBuf::from(authorized));
-    }
-}
 
-fn pane_info_value(target: &PaneInfo) -> Value {
-    let leader_env = target
-        .leader_env
-        .iter()
-        .map(|(key, value)| (key.clone(), Value::String(value.clone())))
-        .collect::<serde_json::Map<_, _>>();
-    json!({
-        "pane_id": target.pane_id.as_str(),
-        "session_name": target.session.as_str(),
-        "window_index": target.window_index.map(|v| v.to_string()),
-        "window_name": target.window_name.as_ref().map(|v| v.as_str().to_string()),
-        "pane_index": target.pane_index.map(|v| v.to_string()),
-        "pane_tty": target.tty.as_ref(),
-        "pane_current_command": target.current_command.as_ref(),
-        "pane_current_path": target.current_path.as_ref().map(|p| p.to_string_lossy().to_string()),
-        "active": target.active,
-        "leader_env": leader_env,
-    })
-}
 
 /// `AnyPaneLiveness` — minimal "does this tmux pane id exist in the server's current
 /// target list?" probe. Unlike [`TargetScanLiveness`], it does NOT additionally require
@@ -2205,39 +1622,8 @@ impl crate::state::owner_gate::PaneLivenessProbe for AnyPaneLiveness {
     }
 }
 
-struct TargetScanLiveness {
-    live_panes: std::collections::BTreeSet<String>,
-}
 
-impl TargetScanLiveness {
-    fn new(state: &Value, targets: &[PaneInfo], workspace: &Path) -> Self {
-        let owner_uuid = get_path_str(state, &["team_owner", "leader_session_uuid"]);
-        let live_panes = targets
-            .iter()
-            .filter_map(|target| {
-                let claim_target = workspace_claim_target_from_pane_info(workspace, target)?;
-                if let Some(owner_uuid) = owner_uuid.as_deref() {
-                    let target_uuid = claim_target.leader_session_uuid.as_ref()?.as_str();
-                    if target_uuid != owner_uuid {
-                        return None;
-                    }
-                }
-                Some(target.pane_id.as_str().to_string())
-            })
-            .collect();
-        Self { live_panes }
-    }
-}
 
-impl crate::state::owner_gate::PaneLivenessProbe for TargetScanLiveness {
-    fn liveness(&self, pane_id: &str) -> PaneLiveness {
-        if self.live_panes.contains(pane_id) {
-            PaneLiveness::Live
-        } else {
-            PaneLiveness::Dead
-        }
-    }
-}
 
 fn locked_runtime_state(
     workspace: &Path,
@@ -3171,7 +2557,6 @@ mod tests {
         let target = LeaderClaimTarget {
             provider: Provider::Codex,
             leader_session_uuid: None,
-            team_id: Some("team-a".to_string()),
             pane_info: Some(observed_pane()),
             endpoint: Some("/tmp/team-agent-live.sock".to_string()),
             scope_authority: Some("explicit_claim".to_string()),
@@ -3291,70 +2676,6 @@ mod tests {
         }
     }
 
-    #[test]
-    #[serial_test::serial(env)]
-    fn grant_reuses_verified_endpoint() {
-        let workspace = PathBuf::from("/tmp/grant-ws");
-        let state = grant_state("/tmp/leader.sock", "n1", 2, "codex");
-        let pane = grant_pane("n1");
-        let transport = crate::transport::test_support::OfflineTransport::default()
-            .with_tmux_endpoint("/tmp/leader.sock")
-            .with_targets(vec![pane.clone()]);
-        crate::transport_factory::with_leader_endpoint_transport(
-            "/tmp/leader.sock",
-            transport,
-            || {
-                let targets = attach_leader_targets(&workspace, &state);
-                let target = targets
-                    .iter()
-                    .find(|target| {
-                        target.info.pane_id.as_str() == "%1"
-                            && target.endpoint.as_deref() == Some("/tmp/leader.sock")
-                    })
-                    .expect("attach_leader_targets must discover the recorded endpoint");
-                assert!(grant_allows_attach_target(
-                    &workspace,
-                    &state,
-                    &target.info,
-                    crate::provider::Provider::Codex,
-                    target.endpoint.as_deref(),
-                ));
-                let mut receiver = crate::leader::LeaderReceiver {
-                    mode: crate::leader::ReceiverMode::DirectTmux,
-                    status: crate::leader::ReceiverStatus::Attached,
-                    provider: crate::provider::Provider::Codex,
-                    pane_id: PaneId::new("%1"),
-                    session_name: None,
-                    window_index: None,
-                    window_name: None,
-                    pane_index: None,
-                    pane_tty: None,
-                    pane_current_command: None,
-                    tmux_socket: None,
-                    scope_authority: None,
-                    authorized_team_workspace: None,
-                    binding_nonce: None,
-                    fingerprint: None,
-                    leader_session_uuid: None,
-                    owner_epoch: None,
-                    attached_at: None,
-                    discovery: None,
-                    requested_provider: None,
-                    warning: None,
-                };
-                copy_verified_grant_from_state(
-                    &workspace,
-                    &state,
-                    &target.info,
-                    crate::provider::Provider::Codex,
-                    target.endpoint.as_deref(),
-                    &mut receiver,
-                );
-                assert_eq!(receiver.binding_nonce.as_deref(), Some("n1"));
-                assert_eq!(receiver.scope_authority.as_deref(), Some("fresh_caller"));
-            },
-        );
-    }
 
     #[test]
     #[serial_test::serial(env)]
@@ -3376,118 +2697,10 @@ mod tests {
         assert_eq!(endpoint.as_deref(), Some("/tmp/actual.sock"));
     }
 
-    #[test]
-    fn grant_rejects_wrong_socket_same_pane() {
-        let workspace = PathBuf::from("/tmp/grant-ws");
-        let state = grant_state("/tmp/leader.sock", "n1", 2, "codex");
-        let pane = grant_pane("n1");
-        assert!(!grant_allows_attach_target(
-            &workspace,
-            &state,
-            &pane,
-            crate::provider::Provider::Codex,
-            Some("/tmp/other.sock"),
-        ));
-    }
 
-    #[test]
-    fn grant_rejects_missing_epoch() {
-        let workspace = PathBuf::from("/tmp/grant-ws");
-        let mut state = grant_state("/tmp/leader.sock", "n1", 2, "codex");
-        state["leader_receiver"]
-            .as_object_mut()
-            .unwrap()
-            .remove("owner_epoch");
-        let pane = grant_pane("n1");
-        assert!(!grant_allows_attach_target(
-            &workspace,
-            &state,
-            &pane,
-            crate::provider::Provider::Codex,
-            Some("/tmp/leader.sock"),
-        ));
-    }
 
-    #[test]
-    fn grant_nonce_is_optional_but_provider_must_match() {
-        let workspace = PathBuf::from("/tmp/grant-ws");
-        let state = grant_state("/tmp/leader.sock", "n1", 2, "codex");
-        let pane = grant_pane("other-nonce");
-        assert!(grant_allows_attach_target(
-            &workspace,
-            &state,
-            &pane,
-            crate::provider::Provider::Codex,
-            Some("/tmp/leader.sock"),
-        ));
-        let pane = grant_pane("n1");
-        assert!(!grant_allows_attach_target(
-            &workspace,
-            &state,
-            &pane,
-            crate::provider::Provider::Copilot,
-            Some("/tmp/leader.sock"),
-        ));
-    }
 
-    fn listed(pane: &str) -> AttachLeaderTarget {
-        AttachLeaderTarget {
-            info: PaneInfo {
-                pane_id: PaneId::new(pane),
-                session: crate::transport::SessionName::new("leader"),
-                window_index: None,
-                window_name: None,
-                pane_index: None,
-                tty: None,
-                current_command: None,
-                current_path: None,
-                active: pane == "%6",
-                pane_pid: None,
-                leader_env: std::collections::BTreeMap::new(),
-            },
-            endpoint: Some("/tmp/ta.sock".to_string()),
-        }
-    }
 
-    #[test]
-    fn live_owner_blocks_other_pane_even_if_owner_is_not_active() {
-        // R3 same-socket: owner %0 exists (pane_dead=0) but is not the
-        // session's active pane; caller %6 must not skip to pane validation.
-        let state = serde_json::json!({
-            "leader_receiver": {"pane_id": "%0", "owner_epoch": 1},
-            "team_owner": {"pane_id": "%0", "owner_epoch": 1},
-        });
-        let targets = vec![listed("%0"), listed("%6")];
-        let blocked =
-            live_bound_pane_blocking_other_attach(&state, &PaneId::new("%6"), &targets);
-        assert_eq!(blocked, Some(PaneId::new("%0")));
-    }
 
-    #[test]
-    fn live_owner_does_not_block_attach_from_bound_pane() {
-        let state = serde_json::json!({
-            "leader_receiver": {"pane_id": "%0"},
-        });
-        let targets = vec![listed("%0"), listed("%6")];
-        assert!(live_bound_pane_blocking_other_attach(
-            &state,
-            &PaneId::new("%0"),
-            &targets,
-        )
-        .is_none());
-    }
 
-    #[test]
-    fn missing_owner_pane_is_not_treated_as_live_conflict() {
-        let state = serde_json::json!({
-            "leader_receiver": {"pane_id": "%0"},
-        });
-        let targets = vec![listed("%6")];
-        assert!(live_bound_pane_blocking_other_attach(
-            &state,
-            &PaneId::new("%6"),
-            &targets,
-        )
-        .is_none());
-    }
 }

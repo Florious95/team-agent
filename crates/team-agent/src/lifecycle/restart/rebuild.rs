@@ -50,7 +50,6 @@ pub(crate) enum LifecyclePhase {
     Teardown,
     SpawnAll,
     SaveState,
-    CoordinatorStart,
     ReadinessWait,
     Completed,
 }
@@ -64,7 +63,6 @@ impl LifecyclePhase {
             Self::Teardown => "teardown",
             Self::SpawnAll => "spawn_all",
             Self::SaveState => "save_state",
-            Self::CoordinatorStart => "coordinator_start",
             Self::ReadinessWait => "readiness_wait",
             Self::Completed => "completed",
         }
@@ -88,7 +86,6 @@ fn lifecycle_phase_wire_labels_remain_stable() {
         (LifecyclePhase::Teardown, "teardown"),
         (LifecyclePhase::SpawnAll, "spawn_all"),
         (LifecyclePhase::SaveState, "save_state"),
-        (LifecyclePhase::CoordinatorStart, "coordinator_start"),
         (LifecyclePhase::ReadinessWait, "readiness_wait"),
         (LifecyclePhase::Completed, "completed"),
     ] {

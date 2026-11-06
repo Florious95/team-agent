@@ -14,7 +14,7 @@ pub use format::format_approvals;
 
 mod approvals;
 pub(super) use approvals::*;
-pub use approvals::{approvals, approvals_scoped};
+pub use approvals::approvals_scoped;
 
 mod agents;
 pub(super) use agents::*;

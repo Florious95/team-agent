@@ -1,8 +1,6 @@
-//! E2E-SHUT-004 Shutdown cleans the coordinator sidecar.
+//! E2E-SHUT-004 Standalone shutdown leaves no owned residue.
 //!
-//! Black-box invariants:
-//! - After shutdown, the JSON `coordinator.status` is `missing` (or some
-//!   "stopped"/"gone" label) — NOT `running`.
+//! Black-box invariants (the obsolete coordinator-status premise is retired):
 //! - `residuals.processes`, `residuals.sessions`, `residuals.owned_files`
 //!   are empty arrays (no leaked sidecar).
 //! - `spared_sessions` is populated only with sessions OUTSIDE this
@@ -32,16 +30,6 @@ fn shut_004_shutdown_cleans_coordinator_sidecar() {
     let j = out.json();
 
     assert_json_field_eq_bool(&j, "/ok", true);
-
-    // Coordinator must not be "running" after shutdown.
-    let coord_status = j
-        .pointer("/coordinator/status")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    assert_ne!(
-        coord_status, "running",
-        "coordinator.status should not be 'running' after shutdown; full JSON: {j}"
-    );
 
     // No residuals
     let empty = Value::Array(vec![]);

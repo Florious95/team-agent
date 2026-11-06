@@ -12,7 +12,6 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::enums::TaskStatus;
-use crate::model::errors::ModelError;
 use crate::model::ids::TaskId;
 
 /// 一个 task 节点 —— Python `dict` 里被 task_graph 触及的最小字段集。
@@ -115,62 +114,7 @@ fn visit<'a>(
     None
 }
 
-/// 返回所有"就绪"的 task(对齐 Python `ready_tasks`,`task_graph.py:51-60`):
-/// status ∈ `{pending, ready, needs_retry}` **且** 所有依赖的 task 状态为 `done`。
-///
-/// 依赖若不在 `tasks` 中(查无此 id),Python `by_id.get(dep,{}).get("status")` 为 `None`
-/// → 非 `done` → 该 task 不就绪。此处用 `HashMap` 查表,缺失即 `None`,语义一致。
-/// 保持输入顺序(Python 顺序遍历 `tasks`)。
-pub fn ready_tasks(tasks: &[TaskNode]) -> Vec<&TaskNode> {
-    let by_id: std::collections::HashMap<&TaskId, &TaskNode> =
-        tasks.iter().map(|t| (&t.id, t)).collect();
 
-    let mut ready: Vec<&TaskNode> = Vec::new();
-    for task in tasks {
-        if !matches!(
-            task.status,
-            TaskStatus::Pending | TaskStatus::Ready | TaskStatus::NeedsRetry
-        ) {
-            continue;
-        }
-        let deps_done = task
-            .deps
-            .iter()
-            .all(|dep| by_id.get(dep).map(|d| d.status) == Some(TaskStatus::Done));
-        if deps_done {
-            ready.push(task);
-        }
-    }
-    ready
-}
-
-/// 就地更新某个 task 的状态(对齐 Python `update_task_status`,`task_graph.py:63-80`):
-/// status 用穷尽 [`TaskStatus`] 已自带"合法状态集"约束(Python 的 `TASK_STATUSES` 校验
-/// 由类型系统承担)。找到 id 匹配的 task 则写 status,并在 `summary`/`artifact_refs`
-/// 为 `Some` 时一并写入(`None` 不触碰原字段,对齐 Python 的 `is not None` 守卫)。
-///
-/// 找不到 id → `Err(ModelError::Runtime("Unknown task id: ..."))`(对齐 Python `KeyError`)。
-pub fn update_task_status(
-    tasks: &mut [TaskNode],
-    task_id: &TaskId,
-    status: TaskStatus,
-    summary: Option<&str>,
-    artifact_refs: Option<Vec<serde_json::Value>>,
-) -> Result<(), ModelError> {
-    for task in tasks.iter_mut() {
-        if &task.id == task_id {
-            task.status = status;
-            if let Some(s) = summary {
-                task.last_result_summary = Some(s.to_string());
-            }
-            if let Some(refs) = artifact_refs {
-                task.artifact_refs = Some(refs);
-            }
-            return Ok(());
-        }
-    }
-    Err(ModelError::Runtime(format!("Unknown task id: {task_id}")))
-}
 
 #[cfg(test)]
 mod tests {
@@ -183,9 +127,6 @@ mod tests {
 
     fn cycle_ids(c: &[TaskId]) -> Vec<&str> {
         c.iter().map(|i| i.as_str()).collect()
-    }
-    fn ready_ids<'a>(r: &[&'a TaskNode]) -> Vec<&'a str> {
-        r.iter().map(|n| n.id.as_str()).collect()
     }
 
     // ---- find_dependency_cycle:golden 来自 Python 真相源(§4.2 双跑) ----
@@ -215,107 +156,10 @@ mod tests {
 
     // ---- ready_tasks:golden 来自 Python 真相源 ----
 
-    #[test]
-    fn ready_tasks_python_golden_cases() {
-        // (Python id, 旧函数名, note, tasks, 完整就绪列表)。不改变状态白名单或顺序。
-        let cases = [
-            ("R1", "ready_pending_no_deps", "Python R1 -> ['a'](running 不在白名单)",
-                vec![t("a", &[], TaskStatus::Pending), t("b", &[], TaskStatus::Running)], vec!["a"]),
-            ("R2", "ready_default_pending", "Python R2:无 status key 视作 pending -> ['a']。本类型用显式 Pending 表达缺省。",
-                vec![t("a", &[], TaskStatus::Pending)], vec!["a"]),
-            ("R3", "ready_requires_deps_done", "Python R3:a done -> b 就绪;c 依赖未完成的 b -> 不就绪 -> ['b']",
-                vec![t("a", &[], TaskStatus::Done), t("b", &["a"], TaskStatus::Pending), t("c", &["b"], TaskStatus::Pending)], vec!["b"]),
-            ("R4", "ready_status_whitelist", "Python R4:needs_retry / ready 在白名单,blocked 不在 -> ['a','b']",
-                vec![t("a", &[], TaskStatus::NeedsRetry), t("b", &[], TaskStatus::Ready), t("c", &[], TaskStatus::Blocked)], vec!["a", "b"]),
-            ("R5", "ready_missing_dep_not_done", "Python R5:依赖查无此 id -> 视作非 done -> 不就绪 -> []",
-                vec![t("b", &["missing"], TaskStatus::Pending)], vec![]),
-            ("R6", "ready_terminal_statuses_excluded", "Python R6:done/failed/cancelled 均不在白名单 -> []",
-                vec![t("a", &[], TaskStatus::Done), t("b", &[], TaskStatus::Failed), t("c", &[], TaskStatus::Cancelled)], vec![]),
-        ];
-        for (id, name, note, tasks, expected) in cases {
-            assert_eq!(ready_ids(&ready_tasks(&tasks)), expected, "case={id}/{name}; {note}");
-        }
-    }
 
     // ---- update_task_status:golden 来自 Python 真相源 ----
 
-    #[test]
-    fn update_sets_status_summary_and_artifacts() {
-        // Python U1:a -> done + summary "ok" + artifact_refs [{"path":"x"}]
-        let mut tasks = [
-            t("a", &[], TaskStatus::Pending),
-            t("b", &["a"], TaskStatus::Pending),
-        ];
-        let refs = vec![serde_json::json!({"path": "x"})];
-        update_task_status(
-            &mut tasks,
-            &TaskId::new("a"),
-            TaskStatus::Done,
-            Some("ok"),
-            Some(refs),
-        )
-        .unwrap();
-        assert_eq!(tasks[0].status, TaskStatus::Done);
-        assert_eq!(tasks[0].last_result_summary.as_deref(), Some("ok"));
-        assert_eq!(
-            tasks[0].artifact_refs,
-            Some(vec![serde_json::json!({"path": "x"})])
-        );
-        // b 不动
-        assert_eq!(tasks[1].status, TaskStatus::Pending);
-    }
 
-    #[test]
-    fn update_status_only_leaves_other_fields() {
-        // Python U2:仅改 status,既有 last_result_summary "old" 不被触碰
-        let mut node = t("a", &[], TaskStatus::Pending);
-        node.last_result_summary = Some("old".to_string());
-        let mut tasks = [node];
-        update_task_status(
-            &mut tasks,
-            &TaskId::new("a"),
-            TaskStatus::Running,
-            None,
-            None,
-        )
-        .unwrap();
-        assert_eq!(tasks[0].status, TaskStatus::Running);
-        assert_eq!(tasks[0].last_result_summary.as_deref(), Some("old"));
-    }
 
-    #[test]
-    fn update_unknown_id_errors() {
-        // Python U4:未知 id -> KeyError "Unknown task id: zzz"。Rust -> Runtime。
-        let mut tasks = [t("a", &[], TaskStatus::Pending)];
-        let err = update_task_status(
-            &mut tasks,
-            &TaskId::new("zzz"),
-            TaskStatus::Done,
-            None,
-            None,
-        )
-        .unwrap_err();
-        assert_eq!(err, ModelError::Runtime("Unknown task id: zzz".to_string()));
-    }
 
-    #[test]
-    fn update_summary_none_but_artifacts_set() {
-        // Python U5:summary=None 只写 artifact_refs
-        let mut tasks = [t("a", &[], TaskStatus::Pending)];
-        let refs = vec![serde_json::json!({"r": 1})];
-        update_task_status(
-            &mut tasks,
-            &TaskId::new("a"),
-            TaskStatus::Done,
-            None,
-            Some(refs),
-        )
-        .unwrap();
-        assert_eq!(tasks[0].status, TaskStatus::Done);
-        assert!(tasks[0].last_result_summary.is_none());
-        assert_eq!(
-            tasks[0].artifact_refs,
-            Some(vec![serde_json::json!({"r": 1})])
-        );
-    }
 }

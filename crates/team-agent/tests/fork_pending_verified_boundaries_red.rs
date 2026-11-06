@@ -70,26 +70,16 @@ fn read_src(rel: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
-/// Read `context_fork.rs` PLUS every `*.rs` under the sibling
-/// `context_fork/` submodule tree (outcome.rs / claude.rs / codex.rs),
-/// concatenated. leader ruling msg_c59c74fafd10 A 案(判据台账 §二·补4
-/// 沉淀):Verified 发射点在 d8 拆分后分散到 claude.rs/codex.rs,单文件
-/// 锚 context_fork.rs 会扫不到子模块内发射点=假绿。scan target 必须是
-/// 模块树聚合,文件拆分=常规重构不该震碎契约。
+/// Scan every native context-fork producer in the live restart module tree.
+/// File splits must not evade the all-Verified-sites proof check.
 fn read_context_fork_module_text() -> String {
     let mut aggregate = String::new();
-    let main_path = crate_src()
-        .join("provider")
-        .join("session")
-        .join("context_fork.rs");
+    let main_path = crate_src().join("lifecycle/restart.rs");
     if let Ok(t) = fs::read_to_string(&main_path) {
         aggregate.push_str(&t);
         aggregate.push('\n');
     }
-    let sub_root = crate_src()
-        .join("provider")
-        .join("session")
-        .join("context_fork");
+    let sub_root = crate_src().join("lifecycle/restart");
     fn walk(dir: &std::path::Path, out: &mut String) {
         let Ok(entries) = fs::read_dir(dir) else {
             return;
@@ -114,151 +104,125 @@ fn read_context_fork_module_text() -> String {
 // 齿1 — B1 真机布局假 Verified 防线
 // ---------------------------------------------------------------------------
 
-/// Sanity canary(multi-line 匹配 scan_branch2_needs_baseline_guard 按行遍历
-/// 粒度,leader ruling msg_dcd6f7e79620 §二·补3 落实):
+/// Independent native-proof scanner canaries.
 fn synthetic_branch_with_guard() -> &'static str {
-    "if candidate.exists() {\n\
-    \x20   if baseline_new_or_changed {\n\
-    \x20       return Verified;\n\
-    \x20   }\n\
-    }"
+    "fn fork_child() {\n\
+     child.filter(|child| *child != parent.as_str());\n\
+     resume_backing_exists_for_agent();\n\
+     backing_state: if child.is_some() {\n\
+     ForkBackingState::Verified\n\
+     }\n\
+     }"
 }
 fn synthetic_branch_without_guard() -> &'static str {
-    "if candidate.exists() {\n\
-    \x20   if id_match && id_ne_source {\n\
-    \x20       return Verified;\n\
-    \x20   }\n\
-    }"
+    "fn fork_child() {\n\
+     ForkBackingState::Verified\n\
+     }"
 }
 
-/// Very small scanner: within the AGGREGATE `context_fork` module tree
-/// (context_fork.rs + context_fork/*.rs after d8 abb0ccf refactor),
-/// locate ALL `return ContextForkOutcome::Verified` (or `Ok(proof)` /
-/// `Ok(ContextForkProof {...})` inside a Verified path) call sites,
-/// and within a 30-line pre-window check whether it is guarded by one
-/// of the accepted baseline judgments (`baseline`, `changed`,
-/// `mutation`, `pre_snapshot`, `snapshot_changed`,
-/// `differs_from_baseline`), or proves a pre-spawn materialized backing by
-/// exact path + expected session id + agent identity. Returns
-/// (n_verified_sites, n_unguarded).
-fn scan_verified_sites_and_guards(text: &str) -> (usize, usize) {
-    let lines: Vec<&str> = text.lines().collect();
-    let mut n_sites = 0usize;
-    let mut n_unguarded = 0usize;
-    for (i, l) in lines.iter().enumerate() {
-        let trimmed = l.trim_start();
-        // Accept "Ok(ContextForkProof {" or "Ok(proof)" or
-        // "ContextForkOutcome::Verified(" — all are Verified emission
-        // points in the context_fork module tree.
-        let is_verified_emit = trimmed.starts_with("Ok(ContextForkProof")
-            || trimmed.starts_with("return Ok(ContextForkProof")
-            || trimmed.contains("ContextForkOutcome::Verified(")
-            || (trimmed.starts_with("Ok(proof") && trimmed.contains(")"));
-        if !is_verified_emit {
+/// Check all native Verified emits in the restart module tree. Each needs
+/// child/backing proof or staged Pi snapshot proof in its own function's
+/// bounded 500-line pre-emit window. Returns (n_verified_sites, n_unguarded).
+fn scan_verified_sites_and_guards(src: &str) -> (usize, usize) {
+    let lines: Vec<&str> = src.lines().collect();
+    let mut total_verified = 0usize;
+    let mut unguarded = 0usize;
+    let mut last_fn_start = 0usize;
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("fn ")
+            || trimmed.starts_with("pub fn ")
+            || trimmed.starts_with("pub(crate) fn ")
+        {
+            last_fn_start = i;
+        }
+        if trimmed.starts_with("//") {
             continue;
         }
-        n_sites += 1;
-        // Pre-window = 从 emit 行向上到最近的 `fn` 声明(或 500 行上限)。
-        // d8 拆分后 emit 与其 guard 可能相距较远(如 claude.rs 里 while
-        // 循环体前的 changed = ... 计算 + branch 内 return),固定 30 行
-        // 窗口不够;放宽到函数体上文更稳(判据台账 §二·补4 精神:
-        // scan 单元应与代码组织粒度对齐)。
-        let mut start = i;
-        for j in (0..i).rev() {
-            let t = lines[j].trim_start();
-            if t.starts_with("fn ")
-                || t.starts_with("pub fn ")
-                || t.starts_with("pub(crate) fn ")
-                || t.starts_with("pub(super) fn ")
-                || t.starts_with("async fn ")
-                || t.starts_with("pub async fn ")
-            {
-                start = j;
-                break;
+        if trimmed.contains("ForkBackingState::Verified") {
+            total_verified += 1;
+            let start = last_fn_start.max(i.saturating_sub(500));
+            let window = lines[start..=i].join("\n");
+            let native_child = window.contains("*child != parent.as_str()")
+                && window.contains("resume_backing_exists_for_agent(")
+                && window.contains("backing_state: if child.is_some()");
+            let native_snapshot = window.contains("target_session_id == binding.session_id")
+                && window.contains("session_id_in_use(&full_state, &target_session_id)")
+                && window.contains("read_stable_source_snapshot(")
+                && window.contains("stage_pi_session(")
+                && window.contains("revalidate_source_binding(")
+                && window.contains("commit_fork_agent(")
+                && window.contains("captured_via: CaptureVia::ForkSnapshot");
+            if !(native_child || native_snapshot) {
+                unguarded += 1;
             }
-            if i - j > 500 {
-                start = j;
-                break;
-            }
-        }
-        // 含 emit 行:分派器面 `Ok(proof) => ContextForkOutcome::Verified(proof)`
-        // 豁免关键字与 emit 同行,需含入 window.
-        let window: String = lines[start..=i].join("\n");
-        // 合法 baseline/changed 守卫关键字;pre-spawn materialized backing
-        // 仅在 exact path + expected session id + agent identity 四项同时
-        // 存在时放行，其他 fail-closed 判据不放宽。也豁免明标 "synchronous
-        // proof" 语义分支(Copilot DB row 存在即 fork proof,不需要
-        // pre-spawn snapshot mutation);以及分派器面
-        // (outcome.rs 的 Ok(proof) => Verified(proof) 分发,proof 由
-        // 上游 verify_* 已带 guard 保证).
-        let exact_materialized_handoff = window.contains("expected_backing_path")
-            && window.contains("path.as_path() != expected_path")
-            && window.contains("&new_session_id != expected")
-            && window.contains("positive_agent_id_match")
-            && window.contains("embedded_agent_id");
-        let direct_baseline_comparison =
-            window.contains("before.files.get") && window.contains("Some(stamp)");
-        let has_guard = window.contains("baseline")
-            || window.contains("changed")
-            || window.contains("mutation")
-            || window.contains("pre_snapshot")
-            || window.contains("snapshot_changed")
-            || window.contains("differs_from_baseline")
-            || direct_baseline_comparison
-            || exact_materialized_handoff
-            || window.contains("synchronous fork proof")
-            || window.contains("Ok(proof) => ContextForkOutcome::Verified");
-        if !has_guard {
-            n_unguarded += 1;
         }
     }
-    (n_sites, n_unguarded)
+    (total_verified, unguarded)
 }
 
 #[test]
 #[serial(env)]
 fn verified_emit_sites_all_guarded_by_baseline_mutation() {
-    // Canary sanity — synthetic multi-line branches prove the scanner
-    // distinguishes guarded from unguarded Verified emits.
-    let (sites_g, _ung_g) = scan_verified_sites_and_guards(synthetic_branch_with_guard());
-    let (sites_ng, ung_ng) = scan_verified_sites_and_guards(synthetic_branch_without_guard());
-    assert!(
-        sites_g == 0 && sites_ng == 0,
-        "canary must not match — synthetic branches use `return Verified` \
-         plain word, not the enum path; but scanner returned sites_g={sites_g} sites_ng={ng_ng}",
-        ng_ng = ung_ng
-    );
-    // (Additional canary: the with-guard synthetic embeds a baseline
-    // keyword; the without-guard does not — proves the 30-line pre-window
-    // scan is capable of finding the guard string.)
-    assert!(
-        synthetic_branch_with_guard().contains("baseline")
-            && !synthetic_branch_without_guard().contains("baseline"),
-        "canary internal: guard/no-guard distinguishability degraded"
-    );
-
-    // A 案(msg_c59c74fafd10):read context_fork.rs PLUS
-    // context_fork/ 子模块树. d8 拆分后 Verified 发射点已分散到
-    // claude.rs/codex.rs,单文件锚会假绿(判据台账 §二·补4).
+    // The retired manual-copy verifier is not a native fork proof owner.
+    // Scan the whole live restart tree, retaining the nonempty/all-site canary.
     let src = read_context_fork_module_text();
-    let (n_sites, n_unguarded) = scan_verified_sites_and_guards(&src);
+    let (verified_sites, unguarded) = scan_verified_sites_and_guards(&src);
     assert!(
-        n_sites > 0,
-        "no Verified emit site found in context_fork module tree \
-         (context_fork.rs + context_fork/*.rs) — scanner broken \
-         (source shape changed?)"
+        verified_sites > 0,
+        "native fork tree has zero ForkBackingState::Verified emit sites; refusing vacuous green"
     );
     assert_eq!(
-        n_unguarded, 0,
-        "B1: context_fork module tree has {n_unguarded}/{n_sites} Verified \
-         emit sites that lack a baseline/changed/mutation guard or an exact \
-         pre-spawn materialized handoff proof. Real-machine layout (source rollout placed at \
-         `$HOME/.claude/projects/<encode(cwd)>/<expected>.jsonl` by \
-         framework materialization) makes an unguarded branch return \
-         Verified for spawn-only providers. Every Verified emit MUST be \
-         guarded by a post-materialization baseline/changed judgment, or \
-         lock exact backing path + expected session id + agent identity."
+        unguarded, 0,
+        "every native Verified emit must have child/backing or staged-snapshot proof in its function window"
     );
+    assert_eq!(
+        scan_verified_sites_and_guards(synthetic_branch_with_guard()),
+        (1, 0),
+        "scanner must accept a guarded native child"
+    );
+    assert_eq!(
+        scan_verified_sites_and_guards(synthetic_branch_without_guard()),
+        (1, 1),
+        "scanner must reject a bare native Verified emit"
+    );
+    // Both actual producers must be covered; removing any proof fence must fail.
+    let mut covered_sites = 0;
+    for (file, guards) in [
+        (
+            "lifecycle/restart/claude_fork.rs",
+            &[
+                "*child != parent.as_str()",
+                "resume_backing_exists_for_agent(",
+                "backing_state: if child.is_some()",
+            ][..],
+        ),
+        (
+            "lifecycle/restart/avatar.rs",
+            &[
+                "target_session_id == binding.session_id",
+                "session_id_in_use(&full_state, &target_session_id)",
+                "read_stable_source_snapshot(",
+                "stage_pi_session(",
+                "revalidate_source_binding(",
+                "commit_fork_agent(",
+                "captured_via: CaptureVia::ForkSnapshot",
+            ][..],
+        ),
+    ] {
+        let producer = read_src(file);
+        assert_eq!(scan_verified_sites_and_guards(&producer), (1, 0), "{file}");
+        covered_sites += 1;
+        for guard in guards {
+            let mutant = producer.replace(guard, "removed_native_proof_guard");
+            assert_eq!(
+                scan_verified_sites_and_guards(&mutant),
+                (1, 1),
+                "{file}: removing {guard} must invalidate native Verified proof"
+            );
+        }
+    }
+    assert_eq!(verified_sites, covered_sites, "unreviewed native Verified producer");
 }
 
 // ---------------------------------------------------------------------------

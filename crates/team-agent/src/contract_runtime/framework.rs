@@ -96,29 +96,6 @@ pub fn require_legacy_lifecycle(
     }
     Ok(())
 }
-pub fn require_legacy_role(
-    path: Option<&Path>,
-    provider: Option<&str>,
-) -> Result<(), crate::cli::CliError> {
-    if declares_contract(path, provider) {
-        return Err(crate::cli::CliError::Runtime("contract_capability_unverified: this legacy role entry is not admitted; use the unified start contract for the selected role; no role file was changed".into()));
-    }
-    Ok(())
-}
-/// Whether a role document or CLI provider value selects a contract leaf.
-pub fn declares_contract(path: Option<&Path>, provider: Option<&str>) -> bool {
-    let meta = path
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .map(|raw| crate::compiler::split_front_matter(&raw).0);
-    let declared = meta.as_ref().and_then(|meta| {
-        meta.get("provider")
-            .and_then(crate::model::yaml::Value::as_str)
-            .map(str::to_owned)
-    });
-    provider
-        .or(declared.as_deref())
-        .is_some_and(super::registry::recognizes)
-}
 pub fn team_config(
     workspace: &Path,
     directory: &Path,
@@ -347,9 +324,6 @@ fn activity_status(observed: Option<team_agent_contract::contract::probe::Semant
     }
 }
 
-pub fn stop_selected(workspace: &Path, state: &Value) -> Result<Vec<Value>, BackendError> {
-    stop_selected_with_budget(workspace, state, std::time::Duration::from_secs(20))
-}
 
 pub fn stop_selected_with_budget(workspace: &Path, state: &Value, budget: std::time::Duration) -> Result<Vec<Value>, BackendError> {
     let deadline = std::time::Instant::now() + budget;
@@ -458,7 +432,7 @@ mod tests {
             "b":{"provider":"cursor","runtime_family":"contract","status":"running"},
             "z":{"provider":"cursor","runtime_family":"contract","status":"paused"}
         }});
-        let receipts = stop_selected(&root, &state).unwrap();
+        let receipts = stop_selected_with_budget(&root, &state, std::time::Duration::from_secs(20)).unwrap();
         assert_eq!(receipts.len(), 3);
         assert_eq!(receipts[0]["status"], "failed");
         assert!(receipts[0]["error"].as_str().is_some_and(|error| !error.is_empty()));
