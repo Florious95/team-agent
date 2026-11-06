@@ -2842,7 +2842,7 @@ team_owner_struct_serializes_with_python_shape	1	1	P
 team_provider_effort_high_does_not_produce_effort_error	1	1	P	
 team_provider_model_aliases_do_not_fill_role_model	1	1	P	
 team_runtime_paths_layout_preannounces_b3_state_dir	0	0	X	src/state/paths.rs
-team_runtime_state_path_uses_b3_team_key_layout_not_legacy_runtime_root_layout	1	1	R	src/lifecycle/tests/b0_reader_hideone_audit_contract.rs
+team_runtime_state_path_uses_b3_team_key_layout_not_legacy_runtime_root_layout	0	0	X	src/lifecycle/tests/b0_reader_hideone_audit_contract.rs
 team_scope_accepts_workspace_and_team_key	0	0	X	src/state/paths.rs
 team_scope_refuses_empty_team_key	0	0	X	src/state/paths.rs
 team_scope_to_paths_round_trip	0	0	X	src/state/paths.rs
