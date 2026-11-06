@@ -33,16 +33,6 @@ use crate::lifecycle::lock::{acquire_seat_lifecycle_lock, LifecycleLockRequest};
 
 use super::*;
 
-/// ---
-/// purpose: 读出 runtime state 后过 owner 门
-/// returns: 通过返回空值
-/// errors: 读 state 失败返回 StatePersist，owner 门拒绝返回 OwnerRefused
-/// ---
-pub(crate) fn ensure_owner_allowed(workspace: &Path) -> Result<(), LifecycleError> {
-    let state = crate::state::persist::load_runtime_state(workspace)
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    ensure_owner_allowed_for_state(&state, None)
-}
 
 /// ---
 /// purpose: 对给定 state 过 owner 门
@@ -120,12 +110,4 @@ pub(super) fn caller_is_target_role_in_team(
     };
     std::env::var("TEAM_AGENT_ID").ok().as_deref() == Some(target_role.as_str())
         && std::env::var("TEAM_AGENT_TEAM_ID").ok().as_deref() == Some(target_team)
-}
-
-/// ---
-/// purpose: 给出该 workspace 的 runtime state 文件路径
-/// returns: runtime state 路径
-/// ---
-pub(crate) fn state_path(workspace: &Path) -> std::path::PathBuf {
-    crate::state::persist::runtime_state_path(workspace)
 }

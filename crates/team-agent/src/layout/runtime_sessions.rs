@@ -20,7 +20,7 @@
 //! fix) are the adoption sites; they will route their state reads through
 //! `RuntimeSessions::from_state`.
 
-use crate::layout::sessions::{is_leader_session, LEADER_SESSION_PREFIX};
+use crate::layout::sessions::LEADER_SESSION_PREFIX;
 use crate::transport::SessionName;
 use serde_json::Value;
 
@@ -64,18 +64,6 @@ impl WorkerSession {
         }
         Ok(WorkerSession(SessionName::new(raw)))
     }
-
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-
-    pub fn into_session_name(self) -> SessionName {
-        self.0
-    }
-
-    pub fn session_name(&self) -> &SessionName {
-        &self.0
-    }
 }
 
 impl LeaderLauncherSession {
@@ -88,18 +76,6 @@ impl LeaderLauncherSession {
             return Err(LeaderLauncherSessionError::MissingLeaderPrefix { name: raw });
         }
         Ok(LeaderLauncherSession(SessionName::new(raw)))
-    }
-
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-
-    pub fn into_session_name(self) -> SessionName {
-        self.0
-    }
-
-    pub fn session_name(&self) -> &SessionName {
-        &self.0
     }
 }
 
@@ -199,32 +175,9 @@ impl RuntimeSessions {
         }
     }
 
-    ///
-    /// True if any session-identity anomaly was detected in state.
-    pub fn has_anomalies(&self) -> bool {
-        !self.anomalies.is_empty()
-    }
 
-    ///
-    /// True if a `state.session_name` looked like a leader launcher session
-    /// — the exact 0.3.39 shape unit-3 must refuse before any kill.
-    pub fn worker_session_name_is_leader_prefixed(&self) -> bool {
-        self.anomalies.iter().any(|a| {
-            matches!(
-                a,
-                RuntimeSessionAnomaly::WorkerSessionNameIsLeaderPrefixed { .. }
-            )
-        })
-    }
 }
 
-///
-/// True when `name` is a leader launcher session (mirrors
-/// `layout::sessions::is_leader_session` on a raw &str).
-fn name_is_leader_launcher(name: &str) -> bool {
-    let session = SessionName::new(name);
-    is_leader_session(&session)
-}
 
 #[cfg(test)]
 mod tests {
@@ -248,7 +201,7 @@ mod tests {
     #[test]
     fn worker_session_new_accepts_team_prefixed() {
         let w = WorkerSession::new("team-foo").unwrap();
-        assert_eq!(w.as_str(), "team-foo");
+        assert_eq!(w.0.as_str(), "team-foo");
     }
 
     #[test]
@@ -258,7 +211,7 @@ mod tests {
             LeaderLauncherSessionError::MissingLeaderPrefix { .. }
         ));
         let l = LeaderLauncherSession::new("team-agent-leader-codex-abc").unwrap();
-        assert_eq!(l.as_str(), "team-agent-leader-codex-abc");
+        assert_eq!(l.0.as_str(), "team-agent-leader-codex-abc");
     }
 
     #[test]
@@ -268,8 +221,8 @@ mod tests {
             "leader_receiver": { "session_name": "team-agent-leader-codex-abc" },
         });
         let r = RuntimeSessions::from_state(&state);
-        assert_eq!(r.worker.unwrap().as_str(), "team-foo");
-        assert_eq!(r.leader.unwrap().as_str(), "team-agent-leader-codex-abc");
+        assert_eq!(r.worker.unwrap().0.as_str(), "team-foo");
+        assert_eq!(r.leader.unwrap().0.as_str(), "team-agent-leader-codex-abc");
         assert!(r.anomalies.is_empty());
     }
 
@@ -279,8 +232,11 @@ mod tests {
         let state = json!({ "session_name": "team-agent-leader-bad" });
         let r = RuntimeSessions::from_state(&state);
         assert!(r.worker.is_none());
-        assert!(r.worker_session_name_is_leader_prefixed());
-        assert!(r.has_anomalies());
+        assert!(r.anomalies.iter().any(|a| matches!(
+            a,
+            RuntimeSessionAnomaly::WorkerSessionNameIsLeaderPrefixed { .. }
+        )));
+        assert!(!r.anomalies.is_empty());
     }
 
     #[test]
@@ -309,9 +265,4 @@ mod tests {
         assert!(r.anomalies.is_empty());
     }
 
-    #[test]
-    fn name_is_leader_launcher_matches_constant() {
-        assert!(name_is_leader_launcher("team-agent-leader-x"));
-        assert!(!name_is_leader_launcher("team-x"));
-    }
 }

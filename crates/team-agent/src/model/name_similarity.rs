@@ -112,23 +112,6 @@ pub fn rank<T: Clone>(request: &str, candidates: &[Candidate<T>]) -> Vec<T> {
     scored.into_iter().take(3).map(|(_, _, _, p)| p).collect()
 }
 
-/// Convenience wrapper for the common case where callers only need
-/// the single best canonical name (a `String`), not full payloads.
-/// Returns `None` when no candidate clears the threshold.
-pub fn best_name<'a, S: AsRef<str>>(request: &str, candidates: &'a [S]) -> Option<&'a str> {
-    let payloads: Vec<Candidate<&'a str>> = candidates
-        .iter()
-        .map(|c| {
-            let name = c.as_ref();
-            Candidate {
-                match_key: name.to_string(),
-                stable_key: name.to_string(),
-                payload: name,
-            }
-        })
-        .collect();
-    rank(request, &payloads).into_iter().next()
-}
 
 fn normalize(input: &str) -> String {
     input.trim().to_ascii_lowercase()
@@ -244,9 +227,4 @@ mod tests {
         assert_eq!(out, vec!["beta".to_string()]);
     }
 
-    #[test]
-    fn best_name_convenience() {
-        assert_eq!(best_name("btea", &["beta", "bota"]), Some("beta"));
-        assert_eq!(best_name("zzzzzz", &["beta"]), None);
-    }
 }

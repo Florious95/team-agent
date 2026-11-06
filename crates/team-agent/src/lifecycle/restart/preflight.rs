@@ -41,17 +41,6 @@ pub enum SessionPreflight {
     },
 }
 
-impl SessionPreflight {
-/// ---
-/// purpose: 判断守卫是否放行
-/// returns: 结论为 Ok 时为 true
-/// ---
-    /// True when the preflight passed and the caller may proceed.
-    pub fn is_ok(&self) -> bool {
-        matches!(self, SessionPreflight::Ok)
-    }
-}
-
 /// ---
 /// purpose: 检查 state 里的 session 名，决定接下来的 worker session 拆除是否安全
 /// params:
@@ -86,19 +75,19 @@ mod tests {
     #[test]
     fn preflight_passes_clean_state() {
         let s = json!({ "session_name": "team-foo" });
-        assert!(check_session_preflight(&s).is_ok());
+        assert!(matches!(check_session_preflight(&s), SessionPreflight::Ok));
     }
 
     #[test]
     fn preflight_passes_empty_state() {
-        assert!(check_session_preflight(&json!({})).is_ok());
+        assert!(matches!(check_session_preflight(&json!({})), SessionPreflight::Ok));
     }
 
     #[test]
     fn preflight_refuses_leader_prefixed_worker_session_name() {
         let s = json!({ "session_name": "team-agent-leader-claude-abc" });
         let r = check_session_preflight(&s);
-        assert!(!r.is_ok());
+        assert!(!matches!(r, SessionPreflight::Ok));
         match r {
             SessionPreflight::WorkerSessionIsLeaderSession {
                 session_name,

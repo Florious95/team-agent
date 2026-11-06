@@ -251,24 +251,6 @@ pub(crate) fn save_runtime_state_with_receiver_authority(
     )
 }
 
-pub(crate) fn save_runtime_state_reapplying_after_conflict<F>(
-    workspace: &Path,
-    state: &Value,
-    reapply: F,
-) -> Result<(), StateError>
-where
-    F: FnOnce(&mut Value),
-{
-    match save_runtime_state(workspace, state) {
-        Ok(()) => Ok(()),
-        Err(StateError::SaveConflict(_)) => {
-            let mut latest = load_runtime_state(workspace)?;
-            reapply(&mut latest);
-            save_runtime_state(workspace, &latest)
-        }
-        Err(error) => Err(error),
-    }
-}
 
 pub(crate) fn save_runtime_state_with_lifecycle_topology_authority(
     workspace: &Path,
@@ -701,14 +683,6 @@ fn update_runtime_state_with_authority(
     }
     write_state_under_lock(workspace, &path, &committed)?;
     Ok(committed)
-}
-
-/// Reuse ordinary roster, topology, ownership, capture and endpoint guards.
-pub(super) fn merge_ordinary_state(incoming: &mut Value, latest: &Value) -> Result<(), StateError> {
-    apply_persist_merge_contract(
-        incoming, latest, &BTreeSet::new(), None, &BTreeSet::new(),
-        &BTreeSet::new(), &BTreeSet::new(), None, None, None,
-    )
 }
 
 fn write_state_under_lock(
@@ -2680,62 +2654,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn reapplying_after_conflict_retries_without_losing_delta() {
-        let ws = temp_ws();
-        write_state(
-            &ws,
-            &json!({
-                "session_name": "team-a",
-                "active_team_key": "team-a",
-                "agents": {
-                    "w1": {
-                        "agent_id": "w1",
-                        "provider": "codex",
-                        "window": "w1-new",
-                        "pane_id": "%2",
-                        "pane_pid": 222,
-                        "spawn_epoch": 2
-                    }
-                },
-                "delivery": {}
-            }),
-        );
-        let stale_with_delta = json!({
-            "session_name": "team-a",
-            "active_team_key": "team-a",
-            "agents": {
-                "w1": {
-                    "agent_id": "w1",
-                    "provider": "codex",
-                    "window": "w1-old",
-                    "pane_id": "%1",
-                    "pane_pid": 111,
-                    "spawn_epoch": 1
-                }
-            },
-            "delivery": {"msg-1": {"status": "delivered"}}
-        });
-        let mut reapplied = false;
-        save_runtime_state_reapplying_after_conflict(&ws, &stale_with_delta, |latest| {
-            reapplied = true;
-            latest.as_object_mut().unwrap().insert(
-                "delivery".to_string(),
-                json!({"msg-1": {"status": "delivered"}}),
-            );
-        })
-        .unwrap();
-
-        let saved = read_state(&ws);
-        assert!(reapplied, "SaveConflict path must reload and reapply once");
-        assert_eq!(saved.pointer("/agents/w1/pane_id"), Some(&json!("%2")));
-        assert_eq!(saved.pointer("/agents/w1/window"), Some(&json!("w1-new")));
-        assert_eq!(
-            saved.pointer("/delivery/msg-1/status"),
-            Some(&json!("delivered")),
-            "non-topology delta must survive retry; saved={saved}"
-        );
-    }
 
     #[test]
     fn deleted_ids_stay_dead_even_when_latest_has_live_topology() {

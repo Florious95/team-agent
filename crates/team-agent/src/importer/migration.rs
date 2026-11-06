@@ -143,7 +143,6 @@ pub(crate) fn create_table_ddl(table: &str, name: &str) -> Option<String> {
 #[derive(Debug, Clone)]
 pub(crate) struct Diff {
     pub table: &'static str,
-    pub expected: Vec<&'static str>,
     pub actual: Vec<String>,
     pub missing: bool,
 }
@@ -246,7 +245,6 @@ pub(crate) fn layout_diffs(conn: &Connection) -> Result<Vec<Diff>, DbError> {
         if !table_exists(conn, table)? {
             diffs.push(Diff {
                 table,
-                expected: expected.to_vec(),
                 actual: vec![],
                 missing: true,
             });
@@ -260,7 +258,6 @@ pub(crate) fn layout_diffs(conn: &Connection) -> Result<Vec<Diff>, DbError> {
         {
             diffs.push(Diff {
                 table,
-                expected: expected.to_vec(),
                 actual,
                 missing: false,
             });
@@ -467,23 +464,7 @@ pub(crate) fn schema_diagnosis_from_connection(
     })
 }
 
-/// 便捷:对一个 workspace 的 `.team/runtime/team.db` 跑 diagnosis(对应 Python 签名)。
-pub fn schema_diagnosis_workspace(workspace: &Path) -> Result<Diagnosis, DbError> {
-    schema_diagnosis(
-        &workspace.join(".team").join("runtime").join("team.db"),
-        SCHEMA_VERSION,
-    )
-}
 
-/// 对 workspace 的 team.db 执行严格只读 diagnosis，不创建或初始化缺失/空文件。
-pub fn schema_diagnosis_workspace_read_only(workspace: &Path) -> Result<Diagnosis, DbError> {
-    let db_path = workspace.join(".team").join("runtime").join("team.db");
-    if !db_path.exists() {
-        return Ok(missing_schema_diagnosis());
-    }
-    let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    schema_diagnosis_from_connection(&conn, SCHEMA_VERSION)
-}
 
 /// `schema_migration.py:_workspace_from_db_path`:`<ws>/.team/runtime/team.db` → `<ws>`。
 pub(crate) fn workspace_from_db_path(db_path: &Path) -> Option<PathBuf> {

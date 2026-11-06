@@ -830,25 +830,6 @@ pub(super) fn merge_committed_team(existing: &Value, team_state: &Value, target_
     Value::Object(merged)
 }
 
-pub(crate) fn save_team_scoped_state_reapplying_after_conflict<F>(
-    workspace: &Path,
-    team_state: &Value,
-    reapply: F,
-) -> Result<(), StateError>
-where
-    F: FnOnce(&mut Value),
-{
-    match save_team_scoped_state(workspace, team_state) {
-        Ok(()) => Ok(()),
-        Err(StateError::SaveConflict(_)) => {
-            let target_key = team_state_key(team_state);
-            let mut latest = select_runtime_state(workspace, Some(&target_key))?;
-            reapply(&mut latest);
-            save_team_scoped_state(workspace, &latest)
-        }
-        Err(error) => Err(error),
-    }
-}
 
 pub(crate) fn save_team_scoped_state_with_deleted_agents(
     workspace: &Path,

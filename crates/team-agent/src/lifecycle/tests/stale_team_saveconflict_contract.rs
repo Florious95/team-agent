@@ -70,7 +70,7 @@ fn legacy_all_stopped_team_is_not_alive_but_empty_bootstrap_remains_alive() {
         "RED2: status:null plus all agents stopped is a legacy shutdown residue and must not remain an alive candidate; alive={alive:?}"
     );
     assert!(
-        matches!(CommandScope::resolve(&case.workspace, None), CommandScope::Resolved(team) if team == RESEARCH),
+        matches!(CommandScope::resolve(&case.workspace, None), CommandScope::Resolved),
         "RED2: bare command scope must resolve to the only live research team, not refuse as ambiguous because current is a stopped residue"
     );
 }

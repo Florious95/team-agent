@@ -26,17 +26,19 @@ fn unit0_leader_prefixed_name_must_never_be_taken_as_worker_session() {
     let prefix = crate::leader::start::LEADER_SESSION_PREFIX;
     assert!(leader.starts_with(prefix));
     assert!(!worker.starts_with(prefix));
-    // Symmetry: the runtime today uses this exact check
-    // (cli/mod.rs:261 `starts_with(LEADER_SESSION_PREFIX)`) to spare
-    // leader sessions during shutdown.
-    let leader_name = crate::transport::SessionName::new(leader);
-    let worker_name = crate::transport::SessionName::new(worker);
-    assert!(
-        crate::layout::sessions::is_leader_session(&leader_name),
-        "is_leader_session must accept a leader-prefixed session",
+    // The live typed reader enforces the worker/leader identity boundary.
+    let leader_sessions = crate::layout::RuntimeSessions::from_state(
+        &serde_json::json!({"session_name": leader}),
+    );
+    let worker_sessions = crate::layout::RuntimeSessions::from_state(
+        &serde_json::json!({"session_name": worker}),
     );
     assert!(
-        !crate::layout::sessions::is_leader_session(&worker_name),
-        "is_leader_session must reject a non-prefixed session",
+        leader_sessions.worker.is_none(),
+        "a leader-prefixed name must not become a worker session",
+    );
+    assert!(
+        worker_sessions.worker.is_some(),
+        "a worker name must remain usable as a worker session",
     );
 }

@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use mcp_sim_harness::McpSimHarness;
 use serial_test::serial;
 
-use team_agent::db::migration::schema_diagnosis_workspace;
+use team_agent::db::migration::schema_diagnosis;
 use team_agent::mcp_server::normalize::normalize_result_status;
 use team_agent::model::enums::ResultStatus;
 use team_agent::packaging::{install_skill, SkillInstallOptions, SkillTarget};
@@ -275,7 +275,7 @@ fn t3_schema_diagnosis_layering_must_not_hide_real_fake_green() {
         .unwrap()
         .execute_batch("create table messages (id integer primary key)")
         .unwrap();
-    let diag = schema_diagnosis_workspace(&ws).expect("diagnosis on an existing workspace db");
+    let diag = schema_diagnosis(&db, team_agent::db::schema::SCHEMA_VERSION).expect("diagnosis on an existing workspace db");
     let mut failures = Vec::new();
     if diag.status == "missing" {
         failures.push(format!(

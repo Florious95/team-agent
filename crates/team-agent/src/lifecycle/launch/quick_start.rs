@@ -746,7 +746,7 @@ fn restore_this_attempt_state(
     let Some((expected_owner, expected_receiver)) = this_grant else {
         return crate::state::repository::StateRepository::new(workspace)
             .save(
-                crate::state::repository::StateWriteIntent::QuickStartBindingCleanup { team_key },
+                crate::state::repository::StateWriteIntent::QuickStartBindingCleanup,
                 &current,
             )
             .map_err(|error| {
@@ -1035,6 +1035,7 @@ fn bind_fresh_quick_start_leader(
 /// `quick_start(agents_dir, name, yes, team_id)`(`diagnose/quick_start.py:18`)。
 /// 面向用户的零配置入口:编译 team_dir → `launch` → autobind leader receiver → 起
 /// coordinator → `wait_ready` 轮询就绪。归入 lifecycle module(不与 diagnose 混)。
+#[cfg(test)]
 pub fn quick_start(
     agents_dir: &Path,
     name: Option<&str>,
@@ -1051,6 +1052,7 @@ pub fn quick_start(
 /// errors: 透传实体实现的错误
 /// contract_id: lifecycle.quick_start.entry
 /// ---
+#[cfg(test)]
 pub(crate) fn quick_start_in_workspace(
     workspace: &Path,
     agents_dir: &Path,
@@ -1174,6 +1176,7 @@ pub fn quick_start_in_workspace_with_backend(
 /// errors: 透传实体实现的错误
 /// contract_id: lifecycle.quick_start.entry
 /// ---
+#[cfg(test)]
 pub(crate) fn quick_start_with_transport(
     agents_dir: &Path,
     name: Option<&str>,

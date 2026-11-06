@@ -536,7 +536,7 @@ fn lifecycle_target_save_preserves_peer_capture_and_reservation() {
     initial["teams"] = json!({"alpha":team});
     let repository = StateRepository::new(&source);
     repository
-        .save(StateWriteIntent::LaunchTeam { team_key: "alpha" }, &initial)
+        .save(StateWriteIntent::LaunchTeam, &initial)
         .unwrap();
     let load = || team_agent::state::persist::load_runtime_state(&source).unwrap();
     let mut stale = load();

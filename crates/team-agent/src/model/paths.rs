@@ -1,7 +1,7 @@
 //!
 //! `.team/` 布局路径(移植 `paths.py` 的 workspace/team-dir 部分)。
 //!
-//! Python 端 `runtime_dir`/`logs_dir`/`artifacts_dir`/`messages_dir` 把 `.team/<sub>`
+//! Python 端 `runtime_dir`/`logs_dir` 把 `.team/<sub>`
 //! 拼在 workspace 下;`team_workspace` 反推:先 `Path.resolve()`(非严格,规整 `.`/`..`
 //! 并相对 cwd 绝对化,**不要求路径存在**),再看父目录名是否 `.team` —— 是则 workspace
 //! = 祖父目录(`<ws>/.team/<sub>` → `<ws>`),否则 = 父目录。
@@ -73,15 +73,7 @@ pub fn logs_dir(workspace: &Path) -> PathBuf {
     team_subdir(workspace, "logs")
 }
 
-/// `<workspace>/.team/artifacts`。
-pub fn artifacts_dir(workspace: &Path) -> PathBuf {
-    team_subdir(workspace, "artifacts")
-}
 
-/// `<workspace>/.team/messages`。
-pub fn messages_dir(workspace: &Path) -> PathBuf {
-    team_subdir(workspace, "messages")
-}
 
 fn team_subdir(workspace: &Path, sub: &str) -> PathBuf {
     let mut p = workspace.to_path_buf();
@@ -177,8 +169,6 @@ mod tests {
         let ws = Path::new("/ws/proj");
         assert_eq!(runtime_dir(ws), PathBuf::from("/ws/proj/.team/runtime"));
         assert_eq!(logs_dir(ws), PathBuf::from("/ws/proj/.team/logs"));
-        assert_eq!(artifacts_dir(ws), PathBuf::from("/ws/proj/.team/artifacts"));
-        assert_eq!(messages_dir(ws), PathBuf::from("/ws/proj/.team/messages"));
 
         let ws2 = Path::new("/Users/alauda/x");
         assert_eq!(

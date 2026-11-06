@@ -19,7 +19,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 use serial_test::file_serial;
-use team_agent::db::schema::open_db;
 use team_agent::state::persist::load_runtime_state;
 use team_agent::tmux_backend::TmuxBackend;
 use team_agent::transport::{CaptureRange, PaneId, SessionName, Target, Transport};

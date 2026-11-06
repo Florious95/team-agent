@@ -154,6 +154,7 @@ impl RestartPhaseTimer {
 /// **先**算 resume 决策(Route B)+ `first_send_at` 严格校验(corrupt → hard refuse),
 /// **再**做破坏性 teardown(关显示、建 session)、起后 leader rebind、adaptive 显示重建。
 /// 每非 paused worker 必发一条 `restart.resume_decision`(Route B audit 契约)。
+#[cfg(test)]
 pub fn restart(
     workspace: &Path,
     allow_fresh: bool,
@@ -232,6 +233,7 @@ fn resolve_restart_context(
 /// `restart` with an injected transport (tests: recording mock; prod: real TmuxBackend). The Route-B
 /// resume/fresh worker spawn + start_coordinator are wired here over `transport`. (rt-host-a sweep:
 /// was a stub returning RequirementUnmet at the spawn boundary — never spawned/resumed/started coordinator.)
+#[cfg(test)]
 pub(crate) fn restart_with_transport(
     workspace: &Path,
     allow_fresh: bool,
@@ -248,6 +250,7 @@ pub(crate) fn restart_with_transport(
 /// returns: 重建报告；注意本入口把 RefusedResumeNotReady 重映射成 RefusedResumeAtomicity 并把原因记为会话捕获未收敛，两种拒绝在此入口不可分辨
 /// errors: 透传实体实现的错误
 /// ---
+#[cfg(test)]
 pub(crate) fn restart_with_transport_with_readiness_deadline(
     workspace: &Path,
     allow_fresh: bool,
@@ -296,6 +299,7 @@ pub(crate) fn restart_with_transport_with_readiness_deadline(
 /// returns: 重建报告，或计划分类给出的拒绝结论
 /// errors: 归一路径失败返回 StatePersist；无本地 team 上下文或 spec 缺失返回 TeamSelect
 /// ---
+#[cfg(test)]
 pub(crate) fn restart_with_transport_with_session_convergence_deadline(
     workspace: &Path,
     allow_fresh: bool,
@@ -2269,7 +2273,7 @@ fn save_restart_session_repairs(
     sync_restart_team_projections(state, team_key);
     let repository = crate::state::repository::StateRepository::new(workspace);
     match repository.save(
-        crate::state::repository::StateWriteIntent::RestartSessionRepair { team_key },
+        crate::state::repository::StateWriteIntent::RestartSessionRepair,
         state,
     ) {
         Ok(()) => Ok(()),
@@ -2283,7 +2287,7 @@ fn save_restart_session_repairs(
             sync_restart_team_projections(&mut latest, team_key);
             repository
                 .save(
-                    crate::state::repository::StateWriteIntent::RestartSessionRepair { team_key },
+                    crate::state::repository::StateWriteIntent::RestartSessionRepair,
                     &latest,
                 )
                 .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
@@ -3473,108 +3477,9 @@ fn write_restart_resume_decision_event(
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))
 }
 
-/// ---
-/// purpose: 列出本 workspace 里可重启的团队
-/// returns: 每个团队一条候选；没有活团队但顶层 state 有可重启形状时返回它自己
-/// errors: 读 runtime state 失败时返回 StatePersist
-/// ---
-/// `restart_candidates(workspace)`(`restart/selection.py:12`)。从 snapshot + active
-/// state 收集可重启 team。
-pub(crate) fn restart_candidates(workspace: &Path) -> Result<Vec<RestartCandidate>, LifecycleError> {
-    let state = crate::state::persist::load_runtime_state(workspace)
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    let alive = crate::state::projection::team_state_candidates(&state);
-    if alive.is_empty() {
-        if !state_has_restart_candidate_shape(&state) {
-            return Ok(Vec::new());
-        }
-        let key = crate::state::projection::team_state_key(&state);
-        return Ok(vec![restart_candidate_from_state(workspace, &key, &state)]);
-    }
-    Ok(alive
-        .keys()
-        .map(|key| {
-            let projected = crate::state::projection::project_top_level_view(&state, key);
-            restart_candidate_from_state(workspace, key, &projected)
-        })
-        .collect())
-}
 
-/// ---
-/// purpose: 选出本次重启的目标团队
-/// params:
-///   team: 指定团队名，None 时按唯一性选
-/// returns: 选中的候选
-/// errors: 选不出或选中的 state 不具备可重启形状时返回 TeamSelect
-/// ---
-/// `select_restart_state(workspace, team)`(`restart/selection.py:49`)。按 `--team` 或
-/// 唯一性选一个;歧义/未找到 → `TeamSelect`。
-pub(crate) fn select_restart_state(
-    workspace: &Path,
-    team: Option<&str>,
-) -> Result<RestartCandidate, LifecycleError> {
-    let selected = crate::state::projection::select_runtime_state(workspace, team)
-        .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
-    if !state_has_restart_candidate_shape(&selected) {
-        let name = team.filter(|t| !t.is_empty()).unwrap_or("<default>");
-        return Err(LifecycleError::TeamSelect(format!(
-            "restart team {name:?} not found"
-        )));
-    }
-    let key = selected
-        .get("active_team_key")
-        .and_then(serde_json::Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map_or_else(
-            || crate::state::projection::team_state_key(&selected),
-            str::to_string,
-        );
-    Ok(restart_candidate_from_state(workspace, &key, &selected))
-}
 
-fn state_has_restart_candidate_shape(state: &serde_json::Value) -> bool {
-    state
-        .get("session_name")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|s| !s.is_empty())
-        || state
-            .get("agents")
-            .and_then(serde_json::Value::as_object)
-            .is_some_and(|agents| !agents.is_empty())
-}
 
-fn restart_candidate_from_state(
-    workspace: &Path,
-    team_name: &str,
-    state: &serde_json::Value,
-) -> RestartCandidate {
-    let session_name = state
-        .get("session_name")
-        .and_then(serde_json::Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(SessionName::new)
-        .unwrap_or_else(|| SessionName::new(team_name));
-    let retired = retired_agent_ids(state);
-    let mut agents = state
-        .get("agents")
-        .and_then(serde_json::Value::as_object)
-        .map(|map| {
-            map.keys()
-                .filter(|agent_id| !retired.contains(agent_id.as_str()))
-                .map(AgentId::new)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    agents.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-    RestartCandidate {
-        session_name,
-        team_name: team_name.to_string(),
-        state_path: crate::state::persist::runtime_state_path(workspace),
-        spec_path: restart_candidate_spec_path(workspace, state),
-        has_context: restart_candidate_has_context(state),
-        agents,
-    }
-}
 
 fn retired_agent_ids(state: &serde_json::Value) -> std::collections::BTreeSet<String> {
     state
@@ -3886,41 +3791,7 @@ fn is_fake_model_harness_agent(agent: &serde_json::Value) -> bool {
         && agent.get("model").and_then(serde_json::Value::as_str) == Some("fake")
 }
 
-fn restart_candidate_spec_path(workspace: &Path, state: &serde_json::Value) -> std::path::PathBuf {
-    if let Some(path) = state
-        .get("spec_path")
-        .and_then(serde_json::Value::as_str)
-        .filter(|s| !s.is_empty())
-    {
-        return std::path::PathBuf::from(path);
-    }
-    if let Some(team_dir) = state
-        .get("team_dir")
-        .and_then(serde_json::Value::as_str)
-        .filter(|s| !s.is_empty())
-    {
-        return std::path::Path::new(team_dir).join("team.spec.yaml");
-    }
-    workspace.join("team.spec.yaml")
-}
 
-fn restart_candidate_has_context(state: &serde_json::Value) -> bool {
-    state
-        .get("agents")
-        .and_then(serde_json::Value::as_object)
-        .is_some_and(|agents| {
-            agents.values().any(|agent| {
-                ["session_id", "rollout_path", "first_send_at"]
-                    .iter()
-                    .any(|key| {
-                        agent
-                            .get(*key)
-                            .and_then(serde_json::Value::as_str)
-                            .is_some_and(|s| !s.is_empty())
-                    })
-            })
-        })
-}
 
 // Never let a legacy session-wide kill bypass canonical native teardown.
 fn destroy_stale_worker_session(live: bool, deferred: bool, shared_native: bool) -> bool {

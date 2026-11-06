@@ -233,18 +233,6 @@ pub(super) fn agent_id_to_pane_id<'a>(started: &'a [StartedAgent], agent_id: &st
         .unwrap_or("")
 }
 
-/// ---
-/// purpose: 不带显式团队键地保存本次团队状态
-/// returns: 成功返回空值
-/// errors: 落盘失败时返回 StatePersist
-/// contract_id: lifecycle.state_projection.save_launched_team_state
-/// ---
-pub(super) fn save_launched_team_state(
-    workspace: &Path,
-    launched: &serde_json::Value,
-) -> Result<(), LifecycleError> {
-    save_launched_team_state_for_key(workspace, launched, None, None)
-}
 
 /// ---
 /// purpose: 保存本次团队状态的实体实现，含团队键钉死、owner 清洗、合并与投影

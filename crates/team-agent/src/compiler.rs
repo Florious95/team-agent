@@ -344,7 +344,6 @@ pub fn compile_team(team_dir: &Path) -> Result<Value, ModelError> {
 /// E5 Bug1:add-agent 复用它**就地读** role 文件编译,不再 copy 进平台目录。
 pub struct CompiledRole {
     pub id: String,
-    pub role: String,
     pub agent: Value,
 }
 
@@ -366,13 +365,6 @@ impl std::fmt::Display for PiModelPreflightError {
     }
 }
 
-/// Shared admission gate: omitted and qualified models pass; only an
-/// unqualified present model causes one bounded catalog observation.
-pub fn preflight_pi_role_model(meta: &Value) -> Result<(), PiModelPreflightError> {
-    preflight_pi_role_model_with(meta, |requested| {
-        crate::lifecycle::launch::pi_mcp::pi_model_candidates(requested).map_err(|_| ())
-    })
-}
 
 pub fn preflight_pi_role_model_with<F>(
     meta: &Value,
@@ -412,11 +404,6 @@ where
     })
 }
 
-pub fn preflight_pi_models_in_team(team_dir: &Path) -> Result<(), PiModelPreflightError> {
-    preflight_pi_models_in_team_with(team_dir, |requested| {
-        crate::lifecycle::launch::pi_mcp::pi_model_candidates(requested).map_err(|_| ())
-    })
-}
 
 pub fn preflight_pi_models_in_team_with<F>(
     team_dir: &Path,
@@ -675,7 +662,6 @@ fn compile_role_parts(
     }
     Ok(CompiledRole {
         id,
-        role,
         agent: map(agent_items),
     })
 }

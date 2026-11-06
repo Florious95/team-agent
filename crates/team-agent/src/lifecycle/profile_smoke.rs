@@ -34,20 +34,6 @@ use crate::provider::wire::provider_wire;
 
 pub(crate) const DEFAULT_PROFILE_SMOKE_TIMEOUT: Duration = Duration::from_secs(8);
 
-/// ---
-/// purpose: 用默认 profile 目录对一组 agent 逐个冒烟
-/// params:
-///   agents: spec 里的 agent 节点列表
-///   timeout: 单次探测的超时
-/// returns: 与入参同序的逐 agent 结果 JSON
-/// ---
-pub(crate) fn profile_smoke_checks_for_agents(
-    workspace: &Path,
-    agents: &[YamlValue],
-    timeout: Duration,
-) -> Vec<Value> {
-    profile_smoke_checks_for_agents_with_profile_dir(workspace, agents, None, timeout)
-}
 
 /// ---
 /// purpose: 用指定 profile 目录对一组 agent 逐个冒烟
@@ -149,28 +135,6 @@ pub(crate) fn smoke_check_agent_profile(
     result
 }
 
-/// ---
-/// purpose: 把失败结果拼成一行人类可读的摘要
-/// returns: 以分号分隔的 agent 与原因，缺字段时退化成 agent 与 failed
-/// ---
-pub(crate) fn format_profile_smoke_failures(failures: &[Value]) -> String {
-    failures
-        .iter()
-        .filter_map(|failure| {
-            let agent = failure
-                .get("agent_id")
-                .and_then(Value::as_str)
-                .unwrap_or("agent");
-            let reason = failure
-                .get("reason")
-                .or_else(|| failure.get("error"))
-                .and_then(Value::as_str)
-                .unwrap_or("failed");
-            Some(format!("{agent}: {reason}"))
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
-}
 
 struct SmokeTarget {
     endpoint: String,

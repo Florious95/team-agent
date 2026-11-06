@@ -426,6 +426,7 @@ pub(crate) fn python_type_name(value: &serde_json::Value) -> &'static str {
 ///     进 `unresumable`。
 /// restart() **先**调它再 teardown;corrupt 非空 → `RefusedInvalidFirstSendAt`,unresumable
 /// 非空且 !allow_fresh → `RefusedResumeAtomicity`。**refuse 早于一切 teardown,nothing created**。
+#[cfg(test)]
 pub(crate) fn classify_restart_plan(
     state: &serde_json::Value,
     allow_fresh: bool,

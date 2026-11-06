@@ -405,7 +405,7 @@ fn bug_a_team_dir_lifecycle_socket_matches_daemon_run_workspace_socket() {
     std::fs::create_dir_all(&team_dir).unwrap();
 
     let daemon_socket = socket_for_workspace(&run_ws);
-    let lifecycle_ws = crate::lifecycle::restart::lifecycle_run_workspace(&team_dir).unwrap();
+    let lifecycle_ws = crate::model::paths::canonical_run_workspace(&team_dir).unwrap();
     let stop_socket = socket_for_workspace(&lifecycle_ws);
     assert_eq!(
         stop_socket, daemon_socket,

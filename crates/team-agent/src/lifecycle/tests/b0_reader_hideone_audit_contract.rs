@@ -47,11 +47,11 @@ fn stale_snapshot_endpoint_does_not_reach_restart_preflight_spawn_attach_or_even
         "F0-3 RED1: restart selection must read current root/projection endpoint, not stale legacy snapshot endpoint; selected={selected}"
     );
 
-    let candidate = team_agent::lifecycle::select_restart_state(&case.workspace, Some(TEAM))
-        .expect("restart preflight should select the current team");
-    assert_eq!(
-        candidate.state_path,
-        runtime_state_path(&case.workspace),
+    // The live selector must refuse rather than fall back to the stale snapshot.
+    std::fs::remove_file(runtime_state_path(&case.workspace)).unwrap();
+    let candidate = team_agent::state::projection::select_runtime_state(&case.workspace, Some(TEAM));
+    assert!(
+        candidate.is_err(),
         "F0-3 RED1: restart preflight must be rooted at the canonical runtime state file, not a legacy per-session snapshot; candidate={candidate:?}"
     );
 
@@ -202,17 +202,6 @@ fn product_authority_paths_do_not_read_legacy_snapshot_without_diagnostic_marker
     assert!(
         offenders.is_empty(),
         "F0-3 RED4: product authority paths must not read legacy per-session snapshots. Only migration/diagnostic/test code, or lines explicitly marked `{READ_MARKER}`, may touch `.team/runtime/teams/<session_name>/state.json`. Offenders (file:line): {offenders:#?}"
-    );
-}
-
-#[test]
-fn team_runtime_state_path_uses_b3_team_key_layout_not_legacy_runtime_root_layout() {
-    let paths = team_agent::state::paths::TeamRuntimePaths::new(PathBuf::from("/ws/proj"), "alpha");
-
-    assert_eq!(
-        paths.state_path(),
-        PathBuf::from("/ws/proj/.team/runtime/teams/alpha/state.json"),
-        "F0-3 RED5: state/paths.rs must pre-announce the B3 canonical team state path as `.team/runtime/teams/<team_key>/state.json`; `.team/runtime/<team_key>/state.json` collides with runtime spec/coordinator sidecar layout and keeps the old hide-two ambiguity alive"
     );
 }
 

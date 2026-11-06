@@ -80,12 +80,6 @@ pub(super) fn spawn_timestamp_for_agent(offset_micros: u32) -> String {
     }
 }
 
-/// ---
-/// purpose: 替换 argv 里的 workspace 与 agent_id 占位符，不带 team_id
-/// ---
-pub(crate) fn fill_spawn_placeholders(argv: &mut [String], workspace: &Path, agent_id: &str) {
-    fill_spawn_placeholders_full(argv, workspace, agent_id, None);
-}
 
 /// ---
 /// purpose: 给出 auth_mode 写进环境变量时的稳定字符串
@@ -529,18 +523,6 @@ fn capture_root_follows_the_new_plan_without_clobbering_resume_context() {
     assert_eq!(row["claude_projects_root"], "new-provider-root");
 }
 
-/// ---
-/// purpose: 判断名字是否是合法的 POSIX shell 标识符
-/// returns: 首字符为字母或下划线且其余为字母数字下划线时为 true
-/// ---
-pub(super) fn is_posix_shell_identifier(name: &str) -> bool {
-    let mut chars = name.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
-        _ => return false,
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
 
 /// ---
 /// purpose: 替换 argv 里的 workspace、agent_id 与 team_id 占位符

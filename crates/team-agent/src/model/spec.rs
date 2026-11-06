@@ -24,38 +24,6 @@ const LEGACY_DISPLAY_KEY: &str = concat!("display", "_backend");
 
 
 
-/// `spec._check_keys`:非 object → "must be an object";否则 missing(排序)+ unknown(排序)。
-fn check_keys(
-    obj: &Value,
-    path: &str,
-    required: &[&str],
-    allowed: &[&str],
-    errors: &mut Vec<String>,
-) {
-    let Some(map) = obj.as_object() else {
-        errors.push(format!("{path}: must be an object"));
-        return;
-    };
-    let base = path.trim_end_matches('/');
-    let mut missing: Vec<&str> = required
-        .iter()
-        .copied()
-        .filter(|k| !map.contains_key(*k))
-        .collect();
-    missing.sort_unstable();
-    for k in missing {
-        errors.push(format!("{base}/{k}: missing required field"));
-    }
-    let mut unknown: Vec<&str> = map
-        .keys()
-        .map(String::as_str)
-        .filter(|k| !allowed.contains(k))
-        .collect();
-    unknown.sort_unstable();
-    for k in unknown {
-        errors.push(format!("{base}/{k}: unknown field"));
-    }
-}
 
 // ===================== validate_spec(team.spec.yaml) =====================
 // 操作 yaml::Value(spec 走 simple_yaml)。basic_schema 全部先于 semantic;错误消息逐字节
@@ -102,12 +70,6 @@ pub fn validate_spec(spec: &Yaml, base_dir: &Path) -> Result<(), ModelError> {
     )))
 }
 
-/// 便捷:YAML 文本 → load → 校验(对应 `load_spec` 的校验部分,不含 deprecation 发射)。
-pub fn load_and_validate_spec(text: &str, base_dir: &Path) -> Result<Yaml, ModelError> {
-    let spec = yaml::loads(text)?;
-    validate_spec(&spec, base_dir)?;
-    Ok(spec)
-}
 
 fn is_map_some(v: Option<&Yaml>) -> bool {
     v.is_some_and(Yaml::is_map)

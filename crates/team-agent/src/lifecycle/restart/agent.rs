@@ -100,6 +100,7 @@ pub(crate) fn live_agent_target(
 /// 决策、resume 窗口退出回退 fresh、起后投递 pending message、起 coordinator。
 /// bug-085:`(session_id, rollout_path)` 四象限穷尽 match,缺 rollout 的 codex 仅在
 /// allow_fresh 时回退 fresh。
+#[cfg(test)]
 pub fn start_agent(
     workspace: &Path,
     agent_id: &AgentId,
@@ -139,6 +140,7 @@ pub fn start_agent(
 /// `start_agent` with an injected transport — wires the single-worker resume/fresh spawn +
 /// start_coordinator (rt-host-a sweep: was a stub returning RequirementUnmet at the spawn boundary).
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) fn start_agent_with_transport(
     workspace: &Path,
     agent_id: &AgentId,
@@ -1153,6 +1155,7 @@ pub fn stop_agent(
 /// errors: 同 stop_agent
 /// contract_id: lifecycle.stop_agent.entry
 /// ---
+#[cfg(test)]
 pub(crate) fn stop_agent_with_transport(
     workspace: &Path,
     agent_id: &AgentId,
@@ -1606,6 +1609,7 @@ pub fn reset_agent(
 /// errors: 同 reset_agent
 /// contract_id: lifecycle.reset_agent.entry
 /// ---
+#[cfg(test)]
 pub(crate) fn reset_agent_with_transport(
     workspace: &Path,
     agent_id: &AgentId,

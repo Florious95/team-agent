@@ -32,7 +32,6 @@ pub struct Declaration {
     pub source: Option<PathBuf>,
     pub destination: PathBuf,
     pub text: String,
-    pub patch: RoleConfigPatch,
     pub compiled: crate::compiler::CompiledRole,
     pub defaulted: Value,
 }
@@ -235,7 +234,6 @@ pub fn resolve(
         source,
         destination,
         text,
-        patch,
         compiled,
         defaulted: json!(defaulted),
     })
@@ -356,6 +354,7 @@ pub struct StartDescription {
 }
 
 /// The same pure declaration/state decision serves CLI preview and locked execution.
+#[cfg(test)]
 pub fn describe(
     request: &StartRequest,
     selected: Option<&SelectedTeam>,
@@ -1630,9 +1629,11 @@ mod tests {
             state: state.clone(),
         };
         archive_session(&selected, &AgentId::new("reviewer")).unwrap();
-        let after = StateRepository::new(temp.path())
-            .load_team(Some("current"))
-            .unwrap();
+        let (after, refusal) = crate::state::projection::resolve_team_scoped_state(
+            temp.path(), Some("current"),
+        ).unwrap();
+        assert!(refusal.is_none());
+        let after = after.unwrap();
         let row = &after["agents"]["reviewer"];
         // Loading normalizes absent session fields to null; compare everything else exactly.
         let non_null = |value: &Value| {

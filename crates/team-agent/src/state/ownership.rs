@@ -37,30 +37,10 @@ use serde_json::Value;
 
 use crate::state::projection::{read_owner as projection_read_owner, team_state_key};
 
-/// Where the repository found the owner record. Diagnostic-only; the owner
-/// gate and other gating callers do not branch on this — they only need the
-/// owner value. CLI status / diagnose use it to surface legacy duplicate
-/// warnings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OwnershipSource {
-    /// Stage 5 canonical path: `.team/runtime/<team_key>/state.json` (not
-    /// yet emitted — placeholder for forward compatibility).
-    CanonicalPerTeamState,
-    /// Legacy projection: `state.teams.<team_key>.team_owner` —
-    /// the value the projection layer would have surfaced.
-    LegacyTeamsProjection,
-    /// Legacy top-level: `state.team_owner`, used when the state's
-    /// `team_state_key` matches the requested `team_key`.
-    LegacyTopLevel,
-}
-
-/// Result of a repository read. The `value` is the JSON object the gate /
-/// caller consumes (same shape as `state.get("team_owner")` returned today);
-/// the `source` is diagnostic.
+/// Borrowed owner record resolved with the existing projection precedence.
 #[derive(Debug, Clone)]
 struct OwnershipRead<'a> {
     pub value: &'a Value,
-    pub source: OwnershipSource,
 }
 
 ///
@@ -74,7 +54,7 @@ struct OwnershipRead<'a> {
 ///
 /// This deliberately reuses `projection::read_owner` so the pane-id validity
 /// check (`%N` or all-digits) stays in one place. The repository's value-add
-/// is the precedence ordering and the `OwnershipSource` tag.
+/// is the precedence ordering.
 fn read_owner_for_team<'a>(state: &'a Value, team_key: &str) -> Option<OwnershipRead<'a>> {
     // Step 1 (Stage 5): canonical per-team state. Stage 2 does not consult
     // a separate file yet — owner truth still lives in the in-memory state.
@@ -88,7 +68,6 @@ fn read_owner_for_team<'a>(state: &'a Value, team_key: &str) -> Option<Ownership
         if let Some(owner) = projection_read_owner(state, Some(team_key)) {
             return Some(OwnershipRead {
                 value: owner,
-                source: OwnershipSource::LegacyTeamsProjection,
             });
         }
     }
@@ -103,7 +82,6 @@ fn read_owner_for_team<'a>(state: &'a Value, team_key: &str) -> Option<Ownership
         if let Some(owner) = projection_read_owner(state, None) {
             return Some(OwnershipRead {
                 value: owner,
-                source: OwnershipSource::LegacyTopLevel,
             });
         }
     }
@@ -112,9 +90,7 @@ fn read_owner_for_team<'a>(state: &'a Value, team_key: &str) -> Option<Ownership
 }
 
 ///
-/// Convenience: just the JSON value, no diagnostic source. Returns `None`
-/// when no owner is found. Stable across Stage 5 — only the lookup
-/// implementation will move.
+/// Read the resolved owner value, or `None` when no valid owner is found.
 pub fn read_owner_value<'a>(state: &'a Value, team_key: &str) -> Option<&'a Value> {
     read_owner_for_team(state, team_key).map(|read| read.value)
 }
@@ -320,7 +296,7 @@ mod tests {
             "team_owner": owner_with_pane("%top"),
         });
         let read = read_owner_for_team(&state, "alpha").expect("owner found");
-        assert_eq!(read.source, OwnershipSource::LegacyTopLevel);
+        assert!(std::ptr::eq(read.value, &state["team_owner"]));
         assert_eq!(read.value["pane_id"], json!("%top"));
     }
 
@@ -347,7 +323,7 @@ mod tests {
             "teams": {"alpha": {"team_owner": owner_with_pane("%teams")}},
         });
         let read = read_owner_for_team(&state, "alpha").expect("owner found");
-        assert_eq!(read.source, OwnershipSource::LegacyTeamsProjection);
+        assert!(std::ptr::eq(read.value, &state["teams"]["alpha"]["team_owner"]));
         assert_eq!(read.value["pane_id"], json!("%teams"));
     }
 
@@ -362,7 +338,7 @@ mod tests {
             "teams": {"alpha": {"team_owner": owner_with_pane("%teams")}},
         });
         let read = read_owner_for_team(&state, "").expect("owner found");
-        assert_eq!(read.source, OwnershipSource::LegacyTopLevel);
+        assert!(std::ptr::eq(read.value, &state["team_owner"]));
         assert_eq!(read.value["pane_id"], json!("%top"));
     }
 
@@ -557,7 +533,7 @@ mod tests {
         let record = OwnershipWrite::new().with_team_owner(owner_with_pane("%w1"));
         write_owner(&mut state, "alpha", record);
         let read = read_owner_for_team(&state, "alpha").expect("owner found");
-        assert_eq!(read.source, OwnershipSource::LegacyTeamsProjection);
+        assert!(std::ptr::eq(read.value, &state["teams"]["alpha"]["team_owner"]));
         assert_eq!(read.value["pane_id"], json!("%w1"));
     }
 }

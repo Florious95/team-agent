@@ -72,20 +72,6 @@ pub(super) fn resolve_mcp_placeholders(
     }
 }
 
-/// ---
-/// purpose: 写出 per-agent 的 MCP 配置文件，不做 provider 特化
-/// returns: 写出的文件路径
-/// errors: 建目录、序列化或写文件失败时返回 StatePersist
-/// contract_id: lifecycle.mcp_config.write_worker_config
-/// ---
-pub(crate) fn write_worker_mcp_config(
-    workspace: &Path,
-    team_id: &str,
-    agent_id: &str,
-    config: &crate::provider::McpConfig,
-) -> Result<PathBuf, LifecycleError> {
-    write_worker_mcp_config_for_provider(workspace, team_id, agent_id, config, None)
-}
 
 /// ---
 /// purpose: 写出 per-agent 的 MCP 配置文件，copilot 先把 type 字段翻成 transport

@@ -86,6 +86,7 @@ fn acquire_guard_gate(request: &PaneInputLockRequest<'_>, exclusive: bool) -> Re
 }
 
 /// Guarded native input must never treat a missing/contended lock as permission.
+#[cfg(test)]
 pub(crate) fn acquire_required(request: PaneInputLockRequest<'_>) -> Option<PaneInputLockGuard> {
     let Some(workspace) = request.workspace else {
         emit_timeout_alarm(&request, PANE_INPUT_LOCK_TIMEOUT, Duration::ZERO, "workspace_missing", "refuse");
