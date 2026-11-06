@@ -15,7 +15,7 @@ use serde_json::json;
 use serial_test::serial;
 use team_agent::model::enums::{AuthMode, Provider};
 use team_agent::provider::{
-    get_adapter, AuthHintStatus, CaptureSessionContext, McpConfig, ProviderCommandContext,
+    get_adapter, CaptureSessionContext, McpConfig, ProviderCommandContext,
     ProviderCommandOverrides, ProviderProfileLaunch, SessionId,
 };
 
@@ -311,49 +311,6 @@ fn claude_capture_expected_id_exact_match_still_wins() {
     );
 }
 
-#[test]
-#[serial(env)]
-fn claude_auth_status_uses_zero_token_cli_status_json() {
-    let root = tmp_dir("auth-status");
-    let bin = root.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    write_executable(
-        &bin.join("claude"),
-        r#"#!/bin/sh
-if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
-  printf '{"authenticated":true,"source":"mock"}\n'
-  exit 0
-fi
-exit 64
-"#,
-    );
-    let _guard = EnvGuard::prepend_path(&bin);
-
-    let adapter = get_adapter(Provider::Claude);
-    assert_eq!(
-        adapter.auth_hint(AuthMode::Subscription),
-        AuthHintStatus::Present,
-        "claude auth status rc=0 authenticated=true must classify as present"
-    );
-
-    write_executable(
-        &bin.join("claude"),
-        r#"#!/bin/sh
-if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
-  printf '{"authenticated":false,"source":"mock"}\n'
-  exit 1
-fi
-exit 64
-"#,
-    );
-    assert!(
-        matches!(
-            adapter.auth_hint(AuthMode::Subscription),
-            AuthHintStatus::Missing | AuthHintStatus::MissingOrUnknown
-        ),
-        "claude auth status rc!=0 authenticated=false must not be reported present"
-    );
-}
 
 fn managed_profile_launch(root: &Path, projects_root: &Path) -> ProviderProfileLaunch {
     ProviderProfileLaunch {
@@ -472,16 +429,6 @@ fn is_rfc4122_uuid(value: &str) -> bool {
     ) && matches!(bytes[19], b'8' | b'9' | b'a' | b'b' | b'A' | b'B')
 }
 
-fn write_executable(path: &Path, script: &str) {
-    std::fs::write(path, script).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(path, perms).unwrap();
-    }
-}
 
 fn tmp_dir(tag: &str) -> PathBuf {
     static N: AtomicU64 = AtomicU64::new(0);
@@ -501,20 +448,6 @@ struct EnvGuard {
 }
 
 impl EnvGuard {
-    fn prepend_path(bin: &Path) -> Self {
-        let old_path = std::env::var("PATH").ok();
-        let new_path = match &old_path {
-            Some(path) => format!("{}:{path}", bin.display()),
-            None => bin.display().to_string(),
-        };
-        unsafe {
-            std::env::set_var("PATH", new_path);
-        }
-        Self {
-            old_path,
-            old_home: std::env::var("HOME").ok(),
-        }
-    }
 
     fn set_path_and_home(home: &Path) -> Self {
         let old_home = std::env::var("HOME").ok();

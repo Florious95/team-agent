@@ -88,61 +88,10 @@ fn classify_first_send_at_valid_iso_with_and_without_tz() {
 // newtype 防路径穿越:无 "/"、无空格。
 // ───────────────────────────────────────────────────────────────────────
 
-#[test]
-fn plan_id_accepts_alnum_and_inner_dot_dash_underscore() {
-    assert_eq!(PlanId::parse("abc").unwrap().as_str(), "abc");
-    assert_eq!(PlanId::parse("a.b-c_1").unwrap().as_str(), "a.b-c_1");
-    assert_eq!(PlanId::parse("A").unwrap().as_str(), "A");
-    assert_eq!(PlanId::parse("1plan").unwrap().as_str(), "1plan");
-}
 
-#[test]
-fn plan_id_rejects_leading_underscore_or_dot() {
-    // 首字符必须 [A-Za-z0-9] —— "_bad" / ".dot" 被拒(防 ".." 穿越家族)。
-    assert!(matches!(
-        PlanId::parse("_bad"),
-        Err(LifecycleError::InvalidPlanId(_))
-    ));
-    assert!(matches!(
-        PlanId::parse(".dot"),
-        Err(LifecycleError::InvalidPlanId(_))
-    ));
-}
 
-#[test]
-fn plan_id_rejects_path_traversal_and_separators() {
-    for bad in ["../etc", "a/b", "a b", ""] {
-        assert!(
-            matches!(PlanId::parse(bad), Err(LifecycleError::InvalidPlanId(_))),
-            "expected InvalidPlanId for {bad:?}"
-        );
-    }
-}
 
-#[test]
-fn plan_id_length_boundary_64_ok_65_rejected() {
-    // {0,63} 量词 + 1 首字符 = 最长 64;65 越界。
-    let ok = "x".repeat(64);
-    let bad = "x".repeat(65);
-    assert_eq!(PlanId::parse(&ok).unwrap().as_str(), ok);
-    assert!(matches!(
-        PlanId::parse(&bad),
-        Err(LifecycleError::InvalidPlanId(_))
-    ));
-}
 
-#[test]
-fn plan_id_error_message_names_the_offending_value_and_grammar() {
-    // exact message 契约:含 repr 后的非法值 + 文法 + "no slashes ... path-traversal"。
-    let err = PlanId::parse("a/b").unwrap_err();
-    let msg = err.to_string();
-    assert!(msg.contains("invalid plan id"), "got: {msg}");
-    assert!(msg.contains("a/b"), "must name offending value, got: {msg}");
-    assert!(
-        msg.contains("no slashes") || msg.contains("path-traversal"),
-        "must explain why, got: {msg}"
-    );
-}
 
 // ───────────────────────────────────────────────────────────────────────
 // PlanCondition::parse — _CONDITION_RE / _is_supported_condition (plan.py:9)
@@ -156,60 +105,9 @@ fn plan_id_error_message_names_the_offending_value_and_grammar() {
 // 封闭文法,越界 → InvalidPlan(不做自由表达式)。
 // ───────────────────────────────────────────────────────────────────────
 
-#[test]
-fn plan_condition_any_case_insensitive_and_trimmed() {
-    assert_eq!(PlanCondition::parse("any").unwrap(), PlanCondition::Any);
-    assert_eq!(PlanCondition::parse("ANY").unwrap(), PlanCondition::Any);
-    assert_eq!(PlanCondition::parse(" any ").unwrap(), PlanCondition::Any);
-}
 
-#[test]
-fn plan_condition_field_eq_extracts_field_and_value() {
-    assert_eq!(
-        PlanCondition::parse("report_result.foo == 'bar'").unwrap(),
-        PlanCondition::FieldEq {
-            field: "foo".to_string(),
-            value: "bar".to_string()
-        }
-    );
-}
 
-#[test]
-fn plan_condition_field_eq_tolerates_no_spaces_and_double_quotes() {
-    assert_eq!(
-        PlanCondition::parse("report_result.foo=='bar'").unwrap(),
-        PlanCondition::FieldEq {
-            field: "foo".to_string(),
-            value: "bar".to_string()
-        }
-    );
-    assert_eq!(
-        PlanCondition::parse("report_result.s == \"dq\"").unwrap(),
-        PlanCondition::FieldEq {
-            field: "s".to_string(),
-            value: "dq".to_string()
-        }
-    );
-}
 
-#[test]
-fn plan_condition_rejects_out_of_grammar() {
-    // 空 field / 缺 report_result 前缀 / 裸值(无引号) / 空串 → InvalidPlan。
-    for bad in [
-        "report_result. == 'y'",
-        "foo == 'bar'",
-        "",
-        "report_result.s == bar",
-    ] {
-        assert!(
-            matches!(
-                PlanCondition::parse(bad),
-                Err(LifecycleError::InvalidPlan(_))
-            ),
-            "expected InvalidPlan for {bad:?}"
-        );
-    }
-}
 
 #[test]
 fn start_mode_serde_names_match_python_start_mode_strings() {
@@ -819,24 +717,6 @@ fn restart_candidates_empty_workspace_is_empty_list() {
 // safe_snapshot_name: 非 [A-Za-z0-9_.-] → "_",再 strip "._-"。
 // ───────────────────────────────────────────────────────────────────────
 
-#[test]
-fn save_snapshot_writes_atomic_state_json_under_teams_dir() {
-    let ws = temp_ws();
-    let state = json!({"session_name": "team-alpha", "agents": {}});
-    let path =
-        save_team_runtime_snapshot(&ws, &state).expect("bug-084:写路径返 Result,正常态须 Ok");
-    // 末段必为 state.json,且落在 runtime/teams/<safe session> 下。
-    assert_eq!(
-        path.file_name().and_then(|s| s.to_str()),
-        Some("state.json")
-    );
-    let s = path.to_string_lossy();
-    assert!(
-        s.contains("teams") && s.contains("team-alpha"),
-        "快照应落在 runtime/teams/<session>/:{s}"
-    );
-    assert!(path.exists(), "os.replace 后目标文件应存在");
-}
 
 // ───────────────────────────────────────────────────────────────────────
 // quick_start — diagnose/quick_start.py:18
@@ -1207,8 +1087,7 @@ fn add_agent_on_unowned_workspace_does_not_silently_add() {
         Err(LifecycleError::OwnerRefused(_))
         | Err(LifecycleError::TeamSelect(_))
         | Err(LifecycleError::Compile(_))
-        | Err(LifecycleError::RequirementUnmet(_))
-        | Err(LifecycleError::RollbackFailed { .. }) => {}
+        | Err(LifecycleError::RequirementUnmet(_)) => {}
         Ok(rep) => panic!("无主空 workspace 不得成功 add:{rep:?}"),
         other => panic!("意外结果:{other:?}"),
     }
@@ -1226,64 +1105,9 @@ fn add_agent_on_unowned_workspace_does_not_silently_add() {
 // current_stage 1-based。
 // ───────────────────────────────────────────────────────────────────────
 
-#[test]
-fn start_plan_missing_file_is_invalid_plan_not_panic() {
-    let ws = temp_ws();
-    let missing = ws.join("nope.plan.yaml");
-    // 不存在 / 无 stage 的 plan → InvalidPlan(typed),不 panic 也不 Ok(Running)。
-    match start_plan(&ws, &missing, true) {
-        Err(LifecycleError::InvalidPlan(_)) | Err(LifecycleError::InvalidPlanId(_)) => {}
-        Ok(PlanProgress::Running { .. }) | Ok(PlanProgress::Completed { .. }) => {
-            panic!("缺失 / 无 stage 的 plan 不得 Running/Completed")
-        }
-        other => panic!("意外结果:{other:?}"),
-    }
-}
 
-#[test]
-fn handle_report_result_no_running_plan_is_no_match() {
-    let ws = temp_ws();
-    // 无任何 plan state → 任何 report_result 都不匹配 → NoMatch(no_match / matched:false)。
-    let envelope = json!({"report_result": {"status": "done"}});
-    let got = handle_report_result(&ws, &envelope).expect("no_match 是 typed outcome,不是 Err");
-    assert_eq!(got, PlanProgress::NoMatch);
-}
 
-#[test]
-fn halt_plan_unknown_id_is_not_found_error() {
-    let ws = temp_ws();
-    let pid = PlanId::parse("ghost-plan").expect("合法 plan id");
-    // 未持久化的 plan → "plan not found"(typed/Err),不幂等成 Halted。
-    match halt_plan(&ws, &pid, "user_requested") {
-        Err(LifecycleError::InvalidPlan(msg)) | Err(LifecycleError::TeamSelect(msg)) => {
-            assert!(
-                msg.contains("not found") || msg.contains("ghost-plan"),
-                "got: {msg}"
-            );
-        }
-        Ok(PlanProgress::Halted { .. }) => {
-            panic!("未找到的 plan 不得返回 Halted(应 not-found)")
-        }
-        other => panic!("意外结果:{other:?}"),
-    }
-}
 
-#[test]
-fn plan_status_unknown_id_is_not_found() {
-    let ws = temp_ws();
-    let pid = PlanId::parse("ghost-plan").expect("合法 plan id");
-    // 读未持久化 plan → not-found error(Rust 入口签名 Result<PlanState,_>)。
-    match plan_status(&ws, &pid) {
-        Err(LifecycleError::InvalidPlan(msg)) | Err(LifecycleError::TeamSelect(msg)) => {
-            assert!(
-                msg.contains("not found") || msg.contains("ghost-plan"),
-                "got: {msg}"
-            );
-        }
-        Ok(st) => panic!("未持久化 plan 不得返回 PlanState:{st:?}"),
-        other => panic!("意外结果:{other:?}"),
-    }
-}
 
 // ═══════════════ P2 FIX-LOOP RED (复绿即对抗 cross-model finding) ═══════════════
 // P1 — classify_first_send_at must accept the breadth of datetime.fromisoformat

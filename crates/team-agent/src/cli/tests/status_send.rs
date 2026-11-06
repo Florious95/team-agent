@@ -789,20 +789,3 @@ fn run_leader_passthrough_flag_after_dashdash_renders_error_not_silent_swallow()
 // R8 D6 (c-lite offline byte-lock): the CLI requeued_exhausted_watchers return projection, extracted
 // into a pure helper, must project the golden event's watcher_ids STRING list (leader/__init__.py:56) —
 // NOT the Rust `requeued` Vec<WatcherNotice> objects.
-#[test]
-fn r8_project_requeued_exhausted_watchers_golden_string_list() {
-    // golden attach event shape (what D4 emits): {watcher_ids:[str], count, trigger}.
-    let golden_event =
-        serde_json::json!({"watcher_ids": ["w1", "w2"], "count": 2, "trigger": "attach_leader"});
-    let projected = crate::cli::leader_port::project_requeued_exhausted_watchers(&golden_event);
-    let list = projected
-        .as_array()
-        .expect("requeued_exhausted_watchers must be a JSON array");
-    let ids: Vec<&str> = list.iter().filter_map(|v| v.as_str()).collect();
-    assert_eq!(
-        ids,
-        vec!["w1", "w2"],
-        "D6: CLI requeued_exhausted_watchers must project the golden watcher_ids STRING list \
-         (leader/__init__.py:56), not the `requeued` Vec<WatcherNotice> objects; got {projected:?}"
-    );
-}

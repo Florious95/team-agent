@@ -659,7 +659,6 @@ fn execute_plan(
                 match result.output {
                     CmdOutput::Json(v) => v,
                     CmdOutput::Human(text) => json!({"text":text}),
-                    CmdOutput::None => Value::Null,
                 },
             ),
             Err(error) => (

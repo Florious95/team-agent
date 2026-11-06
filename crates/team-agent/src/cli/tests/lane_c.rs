@@ -172,7 +172,10 @@ fn status_tmux_session_present_uses_live_tmux_probe_not_is_some() {
 #[test]
 fn approvals_golden_shape_has_waiting_count_and_scan_not_agent() {
     let ws = tmp_workspace();
-    let v = status_port::approvals(&ws, None, true).expect("approvals");
+    let state = crate::state::repository::StateRepository::new(&ws)
+        .load_workspace_if_exists_without_migrations()
+        .ok().flatten().unwrap_or_else(|| json!({}));
+    let v = status_port::approvals_scoped(&ws, &state, None, true).expect("approvals");
     let obj = v.as_object().expect("approvals dict");
     let order: Vec<&str> = obj.keys().map(String::as_str).collect();
     assert_eq!(

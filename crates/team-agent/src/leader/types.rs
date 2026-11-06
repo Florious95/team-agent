@@ -9,7 +9,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::model::ids::{LeaderSessionUuid, OwnerEpoch, TeamKey};
-use crate::provider::{Provider, RolloutPath, TurnState};
+use crate::provider::{Provider, RolloutPath};
 use crate::state::StateError;
 use crate::transport::{PaneId, SessionName, WindowName};
 
@@ -129,16 +129,6 @@ pub enum LeaderSessionUuidSource {
     Env,
 }
 
-/// wake 重读决策 reason(card §36)。`wake.py:should_reread` 五值穷尽 enum。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RereadReason {
-    NoFile,
-    NeverClassified,
-    FileChanged,
-    QuiescentAlreadyClassified,
-    Unchanged,
-}
 
 /// leader start plan 模式(`leader_start_plan` :109/111/116/123)。§19 散字符串 → enum。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -182,31 +172,15 @@ pub enum LeaderEvent {
     // leader_receiver.* — `__init__.py`
     ReceiverAttached,
     ReceiverRebindApplied,
-    ReceiverClaimApplied,
     ReceiverClaimRefused,
     ReceiverRebindRequired,
-    ReceiverAttachFailed,
-    ReceiverStateDivergenceRepaired,
-    ReceiverFirstTimeEnvSeeded,
-    ReceiverAutobindSkipped,
-    ReceiverRequeuedExhaustedWatchers,
-    ReceiverAmbiguousCandidates,
-    ReceiverClaimRequeue,
-    ReceiverClaimLeaderNotification,
     // owner.* — `__init__.py` + `leader_binding.py`
     OwnerAdoptedOnRestart,
     OwnerBoundFromCallerPane,
     OwnerBindRefused,
     OwnerEpochAdvanced,
     // leader_session_uuid.* / leader.* / result_watcher.*
-    LeaderSessionUuidOverride,
-    LeaderStart,
-    ResultWatcherRequeued,
     // idle_takeover.* — `idle_takeover.py` / `idle_takeover_wiring.py`
-    IdleTakeoverClassify,
-    IdleTakeoverPing,
-    IdleTakeoverReminder,
-    IdleTakeoverPushFailed,
 }
 
 impl LeaderEvent {
@@ -215,30 +189,12 @@ impl LeaderEvent {
         match self {
             Self::ReceiverAttached => "leader_receiver.attached",
             Self::ReceiverRebindApplied => "leader_receiver.rebind_applied",
-            Self::ReceiverClaimApplied => "leader_receiver.claim_applied",
             Self::ReceiverClaimRefused => "leader_receiver.claim_refused",
             Self::ReceiverRebindRequired => "leader_receiver.rebind_required",
-            Self::ReceiverAttachFailed => "leader_receiver.attach_failed",
-            Self::ReceiverStateDivergenceRepaired => "leader_receiver.state_divergence_repaired",
-            Self::ReceiverFirstTimeEnvSeeded => "leader_receiver.first_time_env_seeded",
-            Self::ReceiverAutobindSkipped => "leader_receiver.autobind_skipped",
-            Self::ReceiverRequeuedExhaustedWatchers => {
-                "leader_receiver.requeued_exhausted_watchers"
-            }
-            Self::ReceiverAmbiguousCandidates => "leader_receiver.ambiguous_candidates",
-            Self::ReceiverClaimRequeue => "leader_receiver.claim_requeue",
-            Self::ReceiverClaimLeaderNotification => "leader_receiver.claim_leader_notification",
             Self::OwnerAdoptedOnRestart => "owner.adopted_on_restart",
             Self::OwnerBoundFromCallerPane => "owner.bound_from_caller_pane",
             Self::OwnerBindRefused => "owner.bind_refused",
             Self::OwnerEpochAdvanced => "owner_epoch_advanced",
-            Self::LeaderSessionUuidOverride => "leader_session_uuid.override",
-            Self::LeaderStart => "leader.start",
-            Self::ResultWatcherRequeued => "result_watcher.requeued",
-            Self::IdleTakeoverClassify => "idle_takeover.classify",
-            Self::IdleTakeoverPing => "idle_takeover.ping",
-            Self::IdleTakeoverReminder => "idle_takeover.reminder",
-            Self::IdleTakeoverPushFailed => "idle_takeover.push_failed",
         }
     }
 }
@@ -313,22 +269,7 @@ pub struct LeaderIdentity {
     pub team_id: TeamKey,
 }
 
-/// wake 重读决策(card §36;`wake.should_reread` 返回 dict 的 typed 版)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RereadDecision {
-    pub reread: bool,
-    pub reason: RereadReason,
-}
 
-/// `wake.on_file_changed` / `take_pending` 操作的 watch 状态(per-node pending set + mtimes)。
-/// `wake.py` 用 `{pending: sorted list, mtimes: {node_id: mtime}}` dict;此为 typed 版。
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct WakeWatchState {
-    /// 文件变更待处理的 node(`sorted`)。
-    pub pending: Vec<String>,
-    /// 每 node 最近 mtime。
-    pub mtimes: BTreeMap<String, f64>,
-}
 
 /// leader 启动计划(`leader_start_plan` 返回 dict 的 typed 版)。
 /// `_run_leader_plan` 据此 exec / new-session / attach。
@@ -370,39 +311,9 @@ pub struct LeaderLaunchOutcome {
 }
 
 impl LeaderLaunchOutcome {
-    pub fn not_started(reason: impl Into<String>) -> Self {
-        Self {
-            status: LeaderLaunchStatus::NotStarted,
-            exit_code: None,
-            session_name: None,
-            reason: Some(reason.into()),
-        }
-    }
 }
 
-/// idle-takeover 的 node 分类行(`build_idle_nodes` / `_leader_node` 产物)。
-/// **bug-085**:`state` 用 `TurnState`(穷尽,`Unknown` 不当 idle);`rollout_path` `Option`。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IdleNode {
-    pub node_id: String,
-    /// `"worker"` / `"leader"`(C13:leader 也是 provider node)。
-    pub role: NodeRole,
-    pub state: TurnState,
-    pub turn_id: Option<String>,
-    pub annotations: Vec<String>,
-    pub provider: Option<Provider>,
-    pub auth_mode: Option<String>,
-    /// bug-085:`None` → 该 node 走 `Unknown` 分支(不猜 idle)。
-    pub rollout_path: Option<RolloutPath>,
-}
 
-/// idle node 角色(`build_idle_nodes` role 字段)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NodeRole {
-    Worker,
-    Leader,
-}
 
 /// lease 变更结果(attach/claim/takeover/autobind/readopt 统一返回)。
 /// 复刻 `__init__.py` 各路径返回 dict 的并集(成功 receiver/owner/epoch + 拒绝 reason/action)。
@@ -485,48 +396,7 @@ pub enum LeaderError {
 // 常量 / 锁名
 // ===========================================================================
 
-/// `LEADER_OWNERSHIP_LOCK = "send"`(`__init__.py:393`)。一把锁串行化所有 lease 变更
-/// (takeover / claim-leader / attach-leader / autobind)+ 对 send mutator 串行
-/// (旧 owner 并发 send 不能 race rebind)。
-pub const LEADER_OWNERSHIP_LOCK: &str = "send";
 
 // ===========================================================================
 // CROSS-LANE TRAIT — turn-state 分类器(注入,MUST-NOT-13 零 provider client)
 // ===========================================================================
-
-/// `read_turn_state(provider, session_log_text)` 的注入接口(card §59 / §97)。
-/// **MUST-NOT-13**:coordinator tick 经此 trait 分类,**不**依赖任何 provider client crate;
-/// 测试注入 mock 并断言 provider 调用计数 = 0。
-/// **CROSS-LANE**:真实现是 step 8 provider 的 `provider_state::read_turn_state`;此 trait 是
-/// leader/coordinator 侧的依赖倒置接口,leader 集成时桥接到 step 8 registry。
-pub trait TurnStateClassifier {
-    /// 从 provider session-log 文本分类 turn 状态(**unknown ≠ idle**:返回 `TurnState`,
-    /// `Unknown` 不当 idle)。
-    fn classify(
-        &self,
-        provider: Provider,
-        session_log_text: &str,
-    ) -> Result<TurnClassification, LeaderError>;
-}
-
-/// `read_turn_state` 的分类结果(card §59;`provider_state` 返回 dict 的 typed 版)。
-/// **CROSS-LANE PLACEHOLDER**:精确字段集对齐 step 8 provider_state lane,leader 集成时 reconcile。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TurnClassification {
-    pub state: TurnState,
-    pub turn_id: Option<String>,
-    pub annotations: Vec<String>,
-    /// unknown/abnormal 时的 reason(写 `idle_takeover.classify`)。
-    pub reason: Option<String>,
-}
-
-/// `evaluate_takeover_reminder` 的结果(card §50/§51;`idle_predicate` 返回 dict 的 typed 版)。
-/// **CROSS-LANE PLACEHOLDER**:精确字段集对齐 step 8 provider-neutral idle_predicate lane。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TakeoverReminderResult {
-    pub should_ping: bool,
-    /// `should_ping` 时投给 leader 的中性提醒消息体。
-    pub message: Option<String>,
-    pub interrupted_nodes: Vec<String>,
-    pub reason: Option<String>,
-}

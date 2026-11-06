@@ -29,7 +29,7 @@ use team_agent::lifecycle::{launch_with_transport_in_workspace, restart_with_tra
 use team_agent::model::enums::{AuthMode, Provider};
 use team_agent::provider::{
     AuthHintStatus, CaptureVia, CapturedSession, Confidence, HandledPrompt, McpConfig,
-    ProviderAdapter, ProviderCaps, ProviderError, RolloutPath, SessionId, StatusPatterns,
+    ProviderAdapter, ProviderCaps, ProviderError, RolloutPath, SessionId,
 };
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 use team_agent::transport::{ BackendKind, CaptureRange, CapturedText, InjectStage, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName, SpawnResult, Target, Transport, TransportError, WindowName };
@@ -733,23 +733,8 @@ impl ProviderAdapter for StaticCaptureAdapter {
         true
     }
 
-    fn version(&self) -> Result<String, ProviderError> {
-        Ok("test".to_string())
-    }
 
-    fn auth_hint(&self, _auth_mode: AuthMode) -> AuthHintStatus {
-        AuthHintStatus::Unknown
-    }
 
-    fn build_command(
-        &self,
-        _auth_mode: AuthMode,
-        _mcp_config: Option<&McpConfig>,
-        _system_prompt: Option<&str>,
-        _model: Option<&str>,
-    ) -> Result<Vec<String>, ProviderError> {
-        Ok(vec!["fake".to_string()])
-    }
 
     fn build_command_with_permissions(
         &self,
@@ -759,7 +744,7 @@ impl ProviderAdapter for StaticCaptureAdapter {
         model: Option<&str>,
         _dangerously_skip_permissions: bool,
     ) -> Result<Vec<String>, ProviderError> {
-        self.build_command(auth_mode, mcp_config, system_prompt, model)
+        Ok(vec!["fake".to_string()])
     }
 
     fn capture_session_id(
@@ -777,13 +762,6 @@ impl ProviderAdapter for StaticCaptureAdapter {
         }))
     }
 
-    fn recover_session_id(
-        &self,
-        _agent_id: &str,
-        _spawn_cwd: &Path,
-    ) -> Result<Option<SessionId>, ProviderError> {
-        Ok(Some(SessionId::new(self.session_id.clone())))
-    }
 
     fn session_is_resumable(
         &self,
@@ -793,14 +771,6 @@ impl ProviderAdapter for StaticCaptureAdapter {
         Ok(true)
     }
 
-    fn build_resume_command(
-        &self,
-        _session_id: Option<&SessionId>,
-        _auth_mode: AuthMode,
-        _mcp_config: Option<&McpConfig>,
-    ) -> Result<Vec<String>, ProviderError> {
-        Ok(vec!["fake".to_string(), "resume".to_string()])
-    }
 
     fn build_resume_command_with_context(
         &self,
@@ -811,17 +781,9 @@ impl ProviderAdapter for StaticCaptureAdapter {
         _model: Option<&str>,
         _dangerously_skip_permissions: bool,
     ) -> Result<Vec<String>, ProviderError> {
-        self.build_resume_command(session_id, auth_mode, mcp_config)
+        Ok(vec!["fake".to_string(), "resume".to_string()])
     }
 
-    fn fork(
-        &self,
-        _session_id: Option<&SessionId>,
-        _auth_mode: AuthMode,
-        _mcp_config: Option<&McpConfig>,
-    ) -> Result<Vec<String>, ProviderError> {
-        Ok(vec!["fake".to_string(), "fork".to_string()])
-    }
 
     fn fork_with_context(
         &self,
@@ -832,28 +794,15 @@ impl ProviderAdapter for StaticCaptureAdapter {
         _model: Option<&str>,
         _dangerously_skip_permissions: bool,
     ) -> Result<Vec<String>, ProviderError> {
-        self.fork(session_id, auth_mode, mcp_config)
+        Ok(vec!["fake".to_string(), "fork".to_string()])
     }
 
     fn mcp_config(&self, _auth_mode: AuthMode) -> Result<McpConfig, ProviderError> {
         Ok(McpConfig { raw: json!({}) })
     }
 
-    fn install_mcp(&self, _config: &McpConfig) -> Result<(), ProviderError> {
-        Ok(())
-    }
 
-    fn status_patterns(&self) -> Result<StatusPatterns, ProviderError> {
-        Ok(StatusPatterns {
-            idle: regex::Regex::new("idle").unwrap(),
-            processing: regex::Regex::new("processing").unwrap(),
-            error: regex::Regex::new("error").unwrap(),
-        })
-    }
 
-    fn validate_model(&self, _model: &str) -> Result<bool, ProviderError> {
-        Ok(true)
-    }
 
     fn handle_startup_prompts(
         &self,

@@ -155,9 +155,6 @@ impl RuntimeSnapshot {
         Ok(Self { full })
     }
 
-    pub(crate) fn full(&self) -> &Value {
-        &self.full
-    }
 
     pub(crate) fn into_full(self) -> Value {
         self.full

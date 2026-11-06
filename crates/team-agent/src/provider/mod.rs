@@ -50,14 +50,11 @@ pub mod approvals;
 pub mod argv_route;
 /// 0.5.66 bypass 单源:provider → bypass argv flag 配置表(唯一权威)。
 pub(crate) mod bypass_flags;
-pub mod classify;
 pub(crate) mod command_helpers;
-pub mod faults;
 pub mod model_catalog;
 pub mod session;
 pub mod session_scan;
 pub mod startup_prompt;
-pub mod submit_now;
 pub mod types;
 /// 0.4.x: provider wire-format helpers — single source of truth for
 /// `Provider` ↔ string conversions (replaces 7 hand-rolled match copies).
@@ -69,8 +66,6 @@ mod helpers;
 pub use adapter::*;
 pub use approvals::parsing::*;
 pub use approvals::runtime_prompts::*;
-pub use classify::*;
-pub use faults::*;
 pub use startup_prompt::*;
 pub use types::*;
 

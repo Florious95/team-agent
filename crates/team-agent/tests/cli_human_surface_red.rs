@@ -494,6 +494,13 @@ fn retired_alias(command: &str) {
     for args in [vec![command, "--help"], vec![command, "--no-such-option"]] {
         let out = env.run_cli(&cwd, &args);
         let output = text(&out);
+        if command == "coordinator" {
+            assert_eq!(out.status.code(), Some(2), "{args:?}: {output}");
+            assert!(
+                output.contains("retired") && output.contains("team-agent schedule"),
+                "{args:?} must explain coordinator retirement and its successor: {output}"
+            );
+        }
         assert!(!output.contains(&format!("team-agent {command} ")) && !output.contains(&format!("team-agent {command}\n")),
             "{args:?} sends the user back to the retired verb:\n{output}");
         assert!(output.contains("team-agent "), "{args:?} names no canonical command:\n{output}");
@@ -510,6 +517,7 @@ retired_alias_properties! {
     retired_start_agent => "start-agent", retired_reset_agent => "reset-agent",
     retired_clone_agent => "clone-agent", retired_fork_agent => "fork-agent", retired_remove_agent => "remove-agent",
     retired_takeover => "takeover", retired_attach_leader => "attach-leader",
+    retired_coordinator => "coordinator",
 }
 macro_rules! hidden_properties {
     ($($id:ident => $command:literal),+ $(,)?) => {$ (
@@ -517,7 +525,7 @@ macro_rules! hidden_properties {
     )+};
 }
 hidden_properties! {
-    h2_wait => "wait", h2_attach_app_server_leader => "attach-app-server-leader", h2_coordinator => "coordinator",
+    h2_wait => "wait", h2_attach_app_server_leader => "attach-app-server-leader",
 }
 
 // Retired commands reject all argv forms even with a valid legacy spec and

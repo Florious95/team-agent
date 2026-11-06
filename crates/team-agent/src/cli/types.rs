@@ -159,8 +159,6 @@ pub enum CmdOutput {
     Json(Value),
     /// 人读字符串(`emit` 非 dict 分支直接 print)。
     Human(String),
-    /// 无输出(passthrough;不经 `emit`)。
-    None,
 }
 
 /// subcommand handler 的统一返回(card:"each returns a typed CmdResult + CliError")。
@@ -200,14 +198,6 @@ impl CmdResult {
             preserve_json_order: false,
         }
     }
-    pub fn none() -> Self {
-        Self {
-            output: CmdOutput::None,
-            exit: ExitCode::Ok,
-            as_json: false,
-            preserve_json_order: false,
-        }
-    }
 }
 
 // =============================================================================
@@ -236,47 +226,9 @@ pub struct LeaderLauncherArgs {
 // 五行 triage summary 计数桶(commands.py `_agent_summary_counts` / `_interaction_counts`)
 // =============================================================================
 
-/// 五行 triage 的 agent 分类桶(`_agent_summary_counts`,`commands.py:309-330`)。
-/// **bug-071/077/085 铁律(§11)**:`blocked/awaiting_approval/interrupted/missing/stuck/uncertain`
-/// 及任何无匹配态显式落 [`Unknown`](`else: unknown += 1`),**绝不 fallthrough 成 idle**。
-/// 穷尽 match 在编译期防漏 idle 臂。
-///
-/// [`Unknown`]: SummaryBucket::Unknown
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SummaryBucket {
-    Running,
-    Busy,
-    Idle,
-    Stopped,
-    Failed,
-    Unknown,
-}
 
-/// 五行 summary 的 agent 计数(`_agent_summary_counts` 返回的 dict 的 typed 版)。
-/// 渲染 line[2] 的 `running=.. busy=.. idle=.. stopped=.. failed=.. unknown=..`(Gap 18a 字节锁)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct SummaryCounts {
-    pub running: usize,
-    pub busy: usize,
-    pub idle: usize,
-    pub stopped: usize,
-    pub failed: usize,
-    pub unknown: usize,
-}
 
-impl SummaryCounts {
-    pub fn total(self) -> usize {
-        self.running + self.busy + self.idle + self.stopped + self.failed + self.unknown
-    }
-}
 
-/// `interacted` marker 计数(`_interaction_counts`,`commands.py:292-306`)。源自 status 富化的
-/// 每-agent `interacted` 字段(非空且 ≠ `"never"` 计 interacted,否则 never)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct InteractionCounts {
-    pub interacted: usize,
-    pub never: usize,
-}
 
 // =============================================================================
 // clap-style arg structs(每个子命令一个;字段名 == argparse dest)
@@ -377,14 +329,6 @@ pub struct InboxArgs {
     pub team: Option<String>,
 }
 
-/// `takeover`(`parser.py:242`)。`--confirm` 必需(覆写 recorded team_owner)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TakeoverArgs {
-    pub workspace: PathBuf,
-    pub team: Option<String>,
-    pub confirm: bool,
-    pub json: bool,
-}
 
 /// `claim-leader`(`parser.py:249`)。`--confirm` 缺省 = dry-run 摘要。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -397,17 +341,6 @@ pub struct ClaimLeaderArgs {
     pub detail: bool,
 }
 
-/// `attach-leader` public CLI args. `cmd_attach_leader` consumes the typed pane/provider
-/// fields and returns/writes a `leader_receiver` binding through the leader lease port.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AttachLeaderArgs {
-    pub workspace: PathBuf,
-    pub team: Option<String>,
-    pub pane: Option<PaneId>,
-    pub provider: Provider,
-    pub confirm: bool,
-    pub json: bool,
-}
 
 /// Explicit Codex app-server leader binding args.
 #[derive(Debug, Clone, PartialEq, Eq)]

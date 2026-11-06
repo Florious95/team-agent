@@ -25,8 +25,5 @@ fn ser(v: &impl Serialize) -> String {
 }
 
 include!("tests/wire.rs");
-include!("tests/classify.rs");
-include!("tests/idle.rs");
 include!("tests/adapter.rs");
 include!("tests/faults.rs");
-include!("tests/copilot_fork.rs");

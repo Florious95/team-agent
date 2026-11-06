@@ -56,16 +56,6 @@ fn leader_port_ws(tag: &str) -> std::path::PathBuf {
 // `--confirm` may remain a UX affordance, but it is not the authority check.
 #[test]
 fn leader_port_takeover_refuses_without_confirm_byte_parity_obsolete_now_unconditional() {
-    let cli = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cli/mod.rs"),
-    )
-    .unwrap();
-    assert_eq!(
-            cli.matches("claim_leader(workspace, team, true)").count(),
-            1,
-            "takeover must call the lease path as an explicit takeover, not pass the CLI confirm flag as a permission gate"
-        );
-
     let ws = leader_port_ws("tk_unconditional_live");
     let team_id = crate::model::ids::TeamKey::new("current");
     let caller = crate::transport::PaneId::new("%5");

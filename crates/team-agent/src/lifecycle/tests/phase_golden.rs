@@ -159,7 +159,6 @@ fn cmd_value(result: Result<CmdResult, crate::cli::CliError>) -> Value {
             "output": match cmd.output {
                 CmdOutput::Json(value) => value,
                 CmdOutput::Human(text) => json!({"human": text}),
-                CmdOutput::None => Value::Null,
             },
         }),
         Err(error) => json!({

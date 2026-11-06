@@ -6,22 +6,12 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::provider::{Provider, RolloutPath, TurnState};
+use crate::provider::{Provider, RolloutPath};
 
 use super::LeaderError;
 
 pub(crate) use crate::provider::wire::{parse_provider, provider_wire};
 
-pub(crate) fn turn_state_wire(state: TurnState) -> &'static str {
-    match state {
-        TurnState::Idle => "idle",
-        TurnState::Working => "working",
-        TurnState::IdleInterrupted => "idle_interrupted",
-        TurnState::BlockedOnHuman => "blocked_on_human",
-        TurnState::Abnormal => "abnormal",
-        TurnState::Unknown => "unknown",
-    }
-}
 
 pub(crate) fn get_path_str(value: &Value, path: &[&str]) -> Option<String> {
     let mut cur = value;

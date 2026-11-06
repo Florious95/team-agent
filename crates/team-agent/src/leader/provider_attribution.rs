@@ -59,9 +59,6 @@ pub(crate) fn command_matches_provider(provider: Provider, command: &str) -> boo
         .is_some_and(|candidate| provider_matches(candidate, provider))
 }
 
-pub(crate) fn provider_wire_from_command(command: &str) -> Option<&'static str> {
-    attribute_command_provider(command).map(provider_wire_for_command_attribution)
-}
 
 fn provider_from_env(env: &BTreeMap<String, String>) -> Option<Provider> {
     env.get("TEAM_AGENT_LEADER_PROVIDER")
@@ -142,12 +139,6 @@ pub(crate) fn provider_matches(candidate: Provider, expected: Provider) -> bool 
         )
 }
 
-fn provider_wire_for_command_attribution(provider: Provider) -> &'static str {
-    match provider {
-        Provider::Claude | Provider::ClaudeCode => "claude",
-        other => provider_wire(other),
-    }
-}
 
 // 0.5.x Windows portability Batch 4: process command-line + environ
 // probes route through `crate::platform::argv`. Unix keeps

@@ -161,61 +161,7 @@ pub(crate) fn ancestor_owner_allowed(
     })
 }
 
-///
-/// `worker_sender_bypasses_owner_gate`(`state.py:400`):worker peer-send 绕过 owner 门。
-/// 返回 `Some(agent_id)`=绕过;`None`=不绕过(走 owner 门)。
-pub fn worker_sender_bypasses_owner_gate(
-    state: &Value,
-    sender: Option<&str>,
-    env_agent_id: Option<&str>,
-) -> Option<String> {
-    let sender = sender.filter(|s| !s.is_empty())?;
-    let leader_id = state
-        .get("leader")
-        .and_then(|l| l.get("id"))
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("leader");
-    // leader 不绕过(走 owner 门)。
-    if sender == leader_id || sender == "leader" || sender == "Leader" {
-        return None;
-    }
-    // 必须是已注册 agent。
-    let is_agent = state
-        .get("agents")
-        .and_then(Value::as_object)
-        .is_some_and(|a| a.contains_key(sender));
-    if !is_agent {
-        return None;
-    }
-    // env TEAM_AGENT_ID 若存在必须与 sender 一致(防伪造)。
-    let env_agent_id = env_agent_id.filter(|s| !s.is_empty());
-    if let Some(env_id) = env_agent_id {
-        if env_id != sender {
-            return None;
-        }
-        return Some(env_id.to_string());
-    }
-    Some(sender.to_string())
-}
 
-///
-/// §11 realpath own-vs-foreign(`state.py:449`):**两边 canonicalize** 后全等才判 own。
-/// macOS `/tmp → /private/tmp` 软链不对称由「两边 canonicalize」消除。canonicalize 失败(路径不存在)
-/// → 退化为词法绝对比较(此时无软链可解,等价)。**禁 basename/startswith/子串/反推**。
-///
-/// **有意分歧(cr 裁决 2026-06-02,见 `contracts-rust-native.yaml` DECISIONS)**:Python 比的是
-/// 供给的路径**串**(FS-无关、恒大小写敏感),在 case-insensitive FS 上把同一目录的大小写变体误判
-/// 为 foreign(过严)。Rust 用 `canonicalize` 尊重 FS 真实大小写敏感性,两种 FS 下都正确:
-/// - case-insensitive FS(macOS APFS 默认 / Windows NTFS):`Workspace`==`workspace`(同 inode)→ own;
-/// - case-sensitive FS(Linux ext4 / case-sensitive APFS 卷):是两个目录 → foreign(与 Python 同)。
-///
-/// 安全无洞:自己 workspace 的大小写变体本就是自己;runtime 用精确大小写启动 worker 不触发该场景;
-/// §11 红线仍守(只 realpath 后**全等**才判 own,绝不前缀/子串/反推)。
-/// 双 FS 正确性由 `tests::case_sensitivity_ruling_correct_on_both_fs` 运行时探测 FS 后各自钉死。
-pub fn workspace_paths_match(a: &Path, b: &Path) -> bool {
-    realpath_like(a) == realpath_like(b)
-}
 
 fn lexical_abs(p: &Path) -> std::path::PathBuf {
     if p.is_absolute() {
@@ -369,35 +315,6 @@ mod tests {
         assert_eq!(r["action"], json!("team-agent claim-leader --confirm"));
     }
 
-    #[test]
-    fn worker_bypass_rules() {
-        let s = json!({"leader": {"id": "leader"}, "agents": {"worker_a": {}, "worker_b": {}}});
-        // worker_a + env worker_a → 绕过。
-        assert_eq!(
-            worker_sender_bypasses_owner_gate(&s, Some("worker_a"), Some("worker_a")),
-            Some("worker_a".to_string())
-        );
-        // leader → 不绕过(走 owner 门)。
-        assert_eq!(
-            worker_sender_bypasses_owner_gate(&s, Some("leader"), Some("leader")),
-            None
-        );
-        // 未注册 agent → 不绕过。
-        assert_eq!(
-            worker_sender_bypasses_owner_gate(&s, Some("ghost"), Some("ghost")),
-            None
-        );
-        // sender/env 不一致(伪造)→ 不绕过。
-        assert_eq!(
-            worker_sender_bypasses_owner_gate(&s, Some("worker_b"), Some("worker_a")),
-            None
-        );
-        // 无 env_agent_id + 已注册 → 绕过(返回 sender)。
-        assert_eq!(
-            worker_sender_bypasses_owner_gate(&s, Some("worker_a"), None),
-            Some("worker_a".to_string())
-        );
-    }
 
     // §11 血泪:/tmp → /private/tmp 软链不对称(macOS 真机 bug)。两边 canonicalize → match。
     #[test]
@@ -410,12 +327,12 @@ mod tests {
         let private = Path::new("/private/tmp").join(dir.file_name().unwrap());
         if raw.exists() && private.exists() {
             assert!(
-                workspace_paths_match(&raw, &private),
+                (realpath_like(&raw) == realpath_like(&private)),
                 "/tmp 与 /private/tmp 应 canonicalize 相等"
             );
         }
         // 自反:同路径 match。
-        assert!(workspace_paths_match(&dir, &dir));
+        assert!((realpath_like(&dir) == realpath_like(&dir)));
     }
 
     #[test]
@@ -427,13 +344,13 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::create_dir_all(&repo_backup).unwrap();
         assert!(
-            !workspace_paths_match(&repo, &repo_backup),
+            !(realpath_like(&repo) == realpath_like(&repo_backup)),
             "共享前缀的兄弟目录不得 match"
         );
         // 子目录也不 match(禁子串/反推)。
         let sub = repo.join("sub");
         std::fs::create_dir_all(&sub).unwrap();
-        assert!(!workspace_paths_match(&repo, &sub));
+        assert!(!(realpath_like(&repo) == realpath_like(&sub)));
     }
 
     // 对抗 P1:拒绝 dict 的 caller 含 5 字段(含 leader_session_uuid_source)。
@@ -501,14 +418,11 @@ mod tests {
         {
             // link/ghost 与 real/ghost:ghost 不存在,但 link 是 real 的软链 → 两边 realpath 相等。
             assert!(
-                workspace_paths_match(&link.join("ghost"), &real.join("ghost")),
+                (realpath_like(&link.join("ghost")) == realpath_like(&real.join("ghost"))),
                 "父软链 + 缺失末段应判 own(realpath_like 解析父软链)"
             );
             // 不同末段仍不 match。
-            assert!(!workspace_paths_match(
-                &link.join("ghostA"),
-                &real.join("ghostB")
-            ));
+            assert!(!(realpath_like(&link.join("ghostA")) == realpath_like(&real.join("ghostB"))));
         }
     }
 
@@ -529,14 +443,14 @@ mod tests {
         if fs_case_insensitive {
             // case-insensitive FS(macOS APFS 默认 / Windows NTFS):同一 inode → 须判 own。
             assert!(
-                workspace_paths_match(&upper, &lower_variant),
+                (realpath_like(&upper) == realpath_like(&lower_variant)),
                 "case-insensitive FS:大小写变体是同一目录,canonicalize 须相等 → own"
             );
         } else {
             // case-sensitive FS(Linux ext4 / case-sensitive APFS 卷):真造出第二个目录 → 须判 foreign。
             std::fs::create_dir_all(&lower_variant).unwrap();
             assert!(
-                !workspace_paths_match(&upper, &lower_variant),
+                !(realpath_like(&upper) == realpath_like(&lower_variant)),
                 "case-sensitive FS:大小写不同是两个目录 → foreign"
             );
         }

@@ -461,13 +461,6 @@ fn format_inbox_human(agent: &str, value: &Value) -> String {
         .join("\n")
 }
 
-/// `cmd_takeover`(`commands.py:152`)。
-pub fn cmd_takeover(args: &TakeoverArgs) -> Result<CmdResult, CliError> {
-    Ok(CmdResult::from_json(
-        leader_port::takeover(&args.workspace, args.team.as_deref(), args.confirm)?,
-        args.json,
-    ))
-}
 
 /// `cmd_claim_leader`(`commands.py:156`)。
 pub fn cmd_claim_leader(args: &ClaimLeaderArgs) -> Result<CmdResult, CliError> {
@@ -1088,7 +1081,6 @@ mod tests {
         for text in [
             reminder,
             crate::cli::STATUS_REMINDER,
-            crate::cli::SEND_REMINDER,
             &quickstart_human(&json!({"summary": "team started"})),
         ] {
             for hidden in ["collect", "team-agent results", "team-agent wait"] {

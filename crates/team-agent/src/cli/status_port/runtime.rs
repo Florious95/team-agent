@@ -6,7 +6,6 @@ use super::*;
 /// sidecar, watch state); computes NO transport calls of its own.
 #[derive(Default, Clone)]
 pub(crate) struct RuntimeFreshness {
-    pub coordinator_service_available: bool,
     pub host_boot_stale: bool,
     pub host_boot_recorded: Option<String>,
     pub host_boot_current: Option<String>,
@@ -84,7 +83,6 @@ pub(crate) fn compute_runtime_freshness(
         }
     }
     RuntimeFreshness {
-        coordinator_service_available: health.service_available,
         host_boot_stale,
         host_boot_recorded,
         host_boot_current,

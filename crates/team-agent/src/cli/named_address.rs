@@ -24,7 +24,6 @@ pub(crate) enum NamedAddressErrorKind {
     // `leader_receiver` fallback is no longer reached for a wrong runtime key.
     // `WorkspaceNoState` mirrors `StateNotFound` semantics but keeps the wire
     // reason distinct for third-party sender copy.
-    WorkspaceNoState,
     TeamKeyNotFound,
     LeaderNotAttached,
     NameNotResolvable,
@@ -38,7 +37,6 @@ impl NamedAddressErrorKind {
             Self::NameInvalid => "name_invalid",
             Self::WorkspaceNotFound => "workspace_not_found",
             Self::StateNotFound => "state_not_found",
-            Self::WorkspaceNoState => "workspace_no_state",
             Self::TeamKeyNotFound => "team_key_not_found",
             Self::LeaderNotAttached => "leader_not_attached",
             Self::NameNotResolvable => "name_not_resolvable",
@@ -397,11 +395,6 @@ pub(crate) struct ResolvedNamedAddress {
     pub warning: Option<String>,
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct NamedWorkspaceTransport<'a> {
-    pub workspace: &'a Path,
-    pub transport: &'a dyn Transport,
-}
 
 pub(crate) fn resolve_name_with_transport(
     sender_workspace: &Path,
@@ -420,84 +413,6 @@ pub(crate) fn resolve_name_with_transport(
     )
 }
 
-pub(crate) fn resolve_name_with_workspace_transports(
-    sender_workspace: &Path,
-    raw_name: &str,
-    workspaces: &[NamedWorkspaceTransport<'_>],
-) -> Result<ResolvedNamedAddress, NamedAddressError> {
-    let parsed = parse_named_address(raw_name)?;
-    if parsed.workspace.is_some() {
-        let target_workspace = resolve_workspace(sender_workspace, parsed.workspace.as_deref())?;
-        let Some(entry) = workspaces.iter().find(|entry| {
-            resolve_workspace(sender_workspace, Some(entry.workspace))
-                .ok()
-                .as_ref()
-                == Some(&target_workspace)
-        }) else {
-            return Err(workspace_not_found(&target_workspace));
-        };
-        let state = load_state_checked(&target_workspace)?;
-        return resolve_in_workspace(
-            sender_workspace,
-            &target_workspace,
-            &state,
-            &parsed,
-            entry.transport,
-        );
-    }
-
-    let mut successes = Vec::new();
-    let mut first_error = None;
-    for entry in workspaces {
-        let target_workspace = resolve_workspace(sender_workspace, Some(entry.workspace))?;
-        match load_state_checked(&target_workspace).and_then(|state| {
-            resolve_in_workspace(
-                sender_workspace,
-                &target_workspace,
-                &state,
-                &parsed,
-                entry.transport,
-            )
-        }) {
-            Ok(resolved) => successes.push(resolved),
-            Err(err) => {
-                if first_error.is_none() {
-                    first_error = Some(err);
-                }
-            }
-        }
-    }
-
-    match successes.len() {
-        1 => successes.into_iter().next().ok_or_else(|| {
-            NamedAddressError::new(
-                NamedAddressErrorKind::NameNotResolvable,
-                "named address was not resolvable",
-            )
-        }),
-        n if n > 1 => {
-            let mut err = NamedAddressError::new(
-                NamedAddressErrorKind::NameAmbiguous,
-                "name matches multiple workspaces",
-            );
-            let name = parsed.display_name();
-            err.action =
-                format!("Use an explicit workspace-qualified name such as <workspace>::{name}");
-            err.log = "same team/name is live in multiple workspaces".to_string();
-            err.candidates = successes
-                .into_iter()
-                .map(|resolved| candidate_json(&resolved))
-                .collect();
-            Err(err)
-        }
-        _ => Err(first_error.unwrap_or_else(|| {
-            NamedAddressError::new(
-                NamedAddressErrorKind::NameNotResolvable,
-                "named address was not resolvable",
-            )
-        })),
-    }
-}
 
 pub(crate) fn resolve_name_for_cli(
     sender_workspace: &Path,
@@ -580,29 +495,6 @@ fn normalize_bare_with_team_scope(
     }
 }
 
-///
-/// E6 wiring helper (`cli::send::maybe_enqueue_offline_leader_mailbox`):
-/// re-parse a `<workspace>::<team>/leader` name and return the resolved
-/// target workspace + canonical team_key so send.rs can enqueue the
-/// mailbox without duplicating the parser. Returns `Ok(None)` for names
-/// that aren't `<team>/leader` shapes (worker sends, session:window,
-/// etc. keep their existing refusal semantics).
-pub(crate) fn parse_leader_target_workspace_and_team(
-    sender_workspace: &Path,
-    raw_name: &str,
-) -> Result<Option<(PathBuf, String)>, NamedAddressError> {
-    let parsed = parse_named_address(raw_name)?;
-    let target_workspace = resolve_workspace(sender_workspace, parsed.workspace.as_deref())?;
-    match parsed.target {
-        ParsedTarget::TeamEntity { team, entity } if entity == "leader" => {
-            let state = load_state_checked(&target_workspace)?;
-            let canonical =
-                canonical_named_team_key(&target_workspace, &state, &team).unwrap_or(team);
-            Ok(Some((target_workspace, canonical)))
-        }
-        _ => Ok(None),
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedNamedAddress {
@@ -1534,24 +1426,6 @@ fn name_not_resolvable_agent(team: &str, agent: &str) -> NamedAddressError {
     name_not_resolvable(&format!("agent `{agent}` is not present in team `{team}`"))
 }
 
-fn name_not_live_worker(
-    team: &str,
-    agent: &str,
-    session: &str,
-    window: &str,
-    endpoint: Option<String>,
-) -> NamedAddressError {
-    let mut err = NamedAddressError::new(
-        NamedAddressErrorKind::NameNotLive,
-        "state has the team/agent but no live pane matches its session/window",
-    );
-    err.action = format!("Restart the target agent or send to a live pane after checking `team-agent status --team {team} --json`");
-    err.log = format!(
-        "name={team}/{agent} expected_session={session} expected_window={window} tmux_endpoint={}",
-        endpoint.unwrap_or_else(|| "<unknown>".to_string())
-    );
-    err
-}
 
 /// E6 (0.5.9 offline-mailbox §3.1): requested `<team>` is not a runtime team_key.
 /// The refusal echoes the requested string plus the canonical alternatives so
@@ -1642,27 +1516,6 @@ pub(crate) fn available_team_keys(state: &Value) -> Vec<String> {
     keys
 }
 
-fn name_not_live_leader(
-    team: &str,
-    pane_id: Option<&str>,
-    session: Option<&str>,
-    window: Option<&str>,
-    socket: Option<String>,
-) -> NamedAddressError {
-    let mut err = NamedAddressError::new(
-        NamedAddressErrorKind::NameNotLive,
-        "leader_receiver is missing or not live on its recorded tmux socket",
-    );
-    err.action = "From the target team leader terminal, run claim-leader --confirm; resolver will not guess another leader pane".to_string();
-    err.log = format!(
-        "name={team}/leader expected_pane={} expected_session={} expected_window={} tmux_socket={}",
-        pane_id.unwrap_or("<missing>"),
-        session.unwrap_or("<unknown>"),
-        window.unwrap_or("<unknown>"),
-        socket.unwrap_or_else(|| "<unknown>".to_string())
-    );
-    err
-}
 
 fn name_ambiguous(message: &str, candidates: Vec<Value>) -> NamedAddressError {
     let mut err = NamedAddressError::new(NamedAddressErrorKind::NameAmbiguous, message);

@@ -42,61 +42,6 @@ fn trimmed_provider_builders_preserve_fresh_and_resume_argv() {
     }
 }
 
-#[test]
-fn abnormal_dedup_key_uses_signature_and_optional_turn_id() {
-    // probe(/tmp/probe_idle.py read_fault_facts): the C8 dedup key is
-    // (Signature, Option<TurnId>). Golden facts below are the exact extraction.
-
-    // claude api_error → signature=api_error, turn_id=sess-9 (sessionId), kind=error.
-    let api_err = [serde_json::json!(
-        {"type":"system","subtype":"api_error","level":"error","sessionId":"sess-9"}
-    )];
-    let f = read_fault_facts(&api_err, Provider::Claude);
-    assert_eq!(f.len(), 1);
-    assert_eq!(f[0].signature, Signature::new("api_error"));
-    assert_eq!(f[0].turn_id, Some(TurnId::new("sess-9")));
-    assert_eq!(f[0].kind, FactKind::Error);
-
-    // claude tool_result is_error → signature=tool_result_is_error,
-    // turn_id=parentUuid ("p-1"), kind=error.
-    let tool_err = [serde_json::json!(
-        {"type":"user","uuid":"u","parentUuid":"p-1",
-         "message":{"content":[{"type":"tool_result","is_error":true}]}}
-    )];
-    let f = read_fault_facts(&tool_err, Provider::Claude);
-    assert_eq!(f.len(), 1);
-    assert_eq!(f[0].signature, Signature::new("tool_result_is_error"));
-    assert_eq!(f[0].turn_id, Some(TurnId::new("p-1")));
-
-    // claude api_error with NO ids → key = (api_error, None) — Option must hold None.
-    let api_err_noids = [serde_json::json!(
-        {"type":"system","subtype":"api_error","level":"error"}
-    )];
-    let f = read_fault_facts(&api_err_noids, Provider::Claude);
-    assert_eq!(f.len(), 1);
-    assert_eq!(f[0].signature, Signature::new("api_error"));
-    assert_eq!(f[0].turn_id, None, "api_error with no ids dedups on (api_error, None)");
-
-    // codex turn_failed → signature=turn_failed, turn_id=ct4, kind=failed.
-    let codex_failed = [serde_json::json!(
-        {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"ct4","status":"failed"}}}
-    )];
-    let f = read_fault_facts(&codex_failed, Provider::Codex);
-    assert_eq!(f.len(), 1);
-    assert_eq!(f[0].signature, Signature::new("turn_failed"));
-    assert_eq!(f[0].turn_id, Some(TurnId::new("ct4")));
-    assert_eq!(f[0].kind, FactKind::Failed);
-
-    // codex approval → signature=approval_required, turn_id=ct5, kind=approval.
-    let codex_approval = [serde_json::json!(
-        {"jsonrpc":"2.0","method":"session/requestApproval","params":{"turnId":"ct5"}}
-    )];
-    let f = read_fault_facts(&codex_approval, Provider::Codex);
-    assert_eq!(f.len(), 1);
-    assert_eq!(f[0].signature, Signature::new("approval_required"));
-    assert_eq!(f[0].turn_id, Some(TurnId::new("ct5")));
-    assert_eq!(f[0].kind, FactKind::Approval);
-}
 
 // ---- (e) session capture payload + bug-085 fallback (confidence=low) ----
 
@@ -181,9 +126,8 @@ fn retired_worker_caps_are_neither_resumable_nor_forkable() {
             },
             "{provider:?}"
         );
-        assert_eq!(adapter.auth_hint(AuthMode::Subscription), AuthHintStatus::Unknown);
         assert!(matches!(
-            adapter.build_command(AuthMode::Subscription, None, Some("worker"), Some("opus")),
+            adapter.build_command_with_permissions(AuthMode::Subscription, None, Some("worker"), Some("opus"), false),
             Err(ProviderError::Command(_))
         ));
         let ctx = ProviderCommandContext {
@@ -206,14 +150,14 @@ fn retired_worker_caps_are_neither_resumable_nor_forkable() {
         let session = SessionId::new("legacy-session");
         assert!(
             matches!(
-                adapter.build_resume_command(Some(&session), AuthMode::Subscription, None),
+                adapter.build_resume_command_with_context(Some(&session), AuthMode::Subscription, None, None, None, false),
                 Err(ProviderError::ResumeUnavailable(_))
             ),
             "{provider:?} resume"
         );
         assert!(
             matches!(
-                adapter.fork(Some(&session), AuthMode::Subscription, None),
+                adapter.fork_with_context(Some(&session), AuthMode::Subscription, None, None, None, false),
                 Err(ProviderError::CapabilityUnsupported(_))
             ),
             "{provider:?} fork"
@@ -254,7 +198,7 @@ fn claude_fork_blocked_under_compatible_api() {
     // fork under CompatibleApi must Err (never silently empty) — capability path.
     let adapter = get_adapter(Provider::ClaudeCode);
     let sid = SessionId::new("src-1");
-    let res = adapter.fork(Some(&sid), AuthMode::CompatibleApi, None);
+    let res = adapter.fork_with_context(Some(&sid), AuthMode::CompatibleApi, None, None, None, false);
     assert!(
         matches!(
             res,
@@ -268,7 +212,7 @@ fn claude_fork_blocked_under_compatible_api() {
 fn build_resume_command_without_session_id_is_resume_unavailable() {
     // claude.py:41-42 — no session_id → ResumeUnavailable, never a bare crash.
     let adapter = get_adapter(Provider::ClaudeCode);
-    let res = adapter.build_resume_command(None, AuthMode::Subscription, None);
+    let res = adapter.build_resume_command_with_context(None, AuthMode::Subscription, None, None, None, false);
     assert!(
         matches!(res, Err(ProviderError::ResumeUnavailable(_))),
         "resume without session_id must be ResumeUnavailable, got {res:?}"
@@ -298,7 +242,7 @@ fn build_command_includes_model_and_system_prompt() {
     // assert both flag pairs present adjacently AND --strict-mcp-config ABSENT.
     let adapter = get_adapter(Provider::ClaudeCode);
     let argv = adapter
-        .build_command(AuthMode::Subscription, None, Some("be helpful"), Some("opus"))
+        .build_command_with_permissions(AuthMode::Subscription, None, Some("be helpful"), Some("opus"), false)
         .expect("build_command ok");
     assert!(
         argv_contains_adjacent(&argv, &["--model", "opus"]),
@@ -321,11 +265,12 @@ fn claude_mcp_config_does_not_enable_strict_mode() {
         .mcp_config(AuthMode::Subscription)
         .expect("mcp config");
     let argv = adapter
-        .build_command(
+        .build_command_with_permissions(
             AuthMode::Subscription,
             Some(&config),
             Some("worker"),
             Some("opus"),
+            false,
         )
         .expect("build command with mcp config");
 
@@ -389,17 +334,13 @@ fn pi_caps_resume_true_fork_false_native_mcp_false_auth_unknown() {
             writes_global_settings: false,
         }
     );
-    assert_eq!(
-        adapter.auth_hint(AuthMode::Subscription),
-        AuthHintStatus::Unknown
-    );
 }
 
 #[test]
 fn pi_fork_is_typed_capability_unsupported() {
     let adapter = get_adapter(Provider::Pi);
     let source = SessionId::new("7dcfed9a-88ce-45bf-b1e3-161696acfe89");
-    let result = adapter.fork(Some(&source), AuthMode::Subscription, None);
+    let result = adapter.fork_with_context(Some(&source), AuthMode::Subscription, None, None, None, false);
     assert!(
         matches!(result, Err(ProviderError::CapabilityUnsupported(_))),
         "Pi fork must be a typed capability refusal, got {result:?}"
@@ -409,33 +350,4 @@ fn pi_fork_is_typed_capability_unsupported() {
         assert!(text.contains("pi") && text.contains("fork"), "got {text}");
         assert!(!text.to_ascii_lowercase().contains("clone"), "got {text}");
     }
-}
-
-#[test]
-fn pi_classify_has_no_lifecycle_facts() {
-    let transcript = concat!(
-        r#"{"type":"turn_started","turn_id":"turn-1"}"#,
-        "\n",
-        r#"{"type":"turn_completed","turn_id":"turn-1"}"#,
-    );
-    let classified = crate::provider::classify::classify(
-        Provider::Pi,
-        transcript,
-        ProcessLiveness::Alive,
-        60.0,
-    )
-    .expect("Pi classification must preserve unknown without a turn reader");
-    assert_eq!(classified.state, TurnState::Unknown);
-    assert_eq!(classified.reason, "no_turn_lifecycle_fact");
-
-    let records = [serde_json::json!({
-        "type": "system",
-        "subtype": "api_error",
-        "level": "error",
-        "sessionId": "pi-session"
-    })];
-    assert!(
-        crate::provider::faults::read_fault_facts(&records, Provider::Pi).is_empty(),
-        "Pi has no JSONL lifecycle/fault reader"
-    );
 }

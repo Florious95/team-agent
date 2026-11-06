@@ -14,11 +14,12 @@ fn claude_fresh_launch_session_id_is_rfc4122_uuid_not_session_prefix() {
     for provider in [Provider::Claude, Provider::ClaudeCode] {
         let adapter = get_adapter(provider);
         let argv = adapter
-            .build_command(
+            .build_command_with_permissions(
                 AuthMode::Subscription,
                 None,
                 None,
                 Some("claude-sonnet-4-6"),
+                false,
             )
             .expect("Claude fresh launch command should build");
         let session_id = session_id_after_flag(&argv);

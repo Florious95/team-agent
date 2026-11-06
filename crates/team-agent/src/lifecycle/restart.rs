@@ -71,7 +71,6 @@ pub(crate) use avatar::fork_pi_new_seat_locked;
 mod claude_fork;
 pub(crate) use claude_fork::fork_claude_new_seat_locked;
 mod common;
-mod orchestrator;
 pub mod preflight;
 mod rebuild;
 pub(crate) use rebuild::restart_leader_public_bind_with_receipt;
@@ -99,7 +98,6 @@ pub(crate) use common::{
     lifecycle_worker_tmux_backend_for_selected_state,
     lifecycle_worker_tmux_backend_selection_for_state,
 };
-pub(crate) use orchestrator::{halt_plan, plan_status};
 pub(crate) use rebuild::restart_with_transport_with_session_convergence_deadline;
 pub(crate) use rebuild::{compile_runtime_spec_from_roles, restore_missing_runtime_spec};
 // 0.5.38 (`.team/artifacts/startup-latency-locate.md` §5): expose the phase

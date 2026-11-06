@@ -253,34 +253,6 @@ pub(super) fn attach_commands_for_runtime_windows<'a>(
     attach
 }
 
-/// ---
-/// purpose: 由 state 推出指定席位的窗口名
-/// returns: 每个席位取 layout_window 再取 window，都没有时用 agent id；托管 leader 时追加 leader 窗口
-/// ---
-pub(crate) fn attach_window_names_for_state_agents<'a>(
-    state: &serde_json::Value,
-    agent_ids: impl IntoIterator<Item = &'a str>,
-) -> Vec<String> {
-    let windows = agent_ids
-        .into_iter()
-        .map(|agent_id| {
-            state
-                .get("agents")
-                .and_then(serde_json::Value::as_object)
-                .and_then(|agents| agents.get(agent_id))
-                .and_then(|agent| {
-                    agent
-                        .get("layout_window")
-                        .or_else(|| agent.get("window"))
-                        .and_then(serde_json::Value::as_str)
-                        .filter(|window| !window.is_empty())
-                })
-                .unwrap_or(agent_id)
-                .to_string()
-        })
-        .collect::<Vec<_>>();
-    attach_window_names_with_managed_leader(state, windows)
-}
 
 /// ---
 /// purpose: 由 state 里的全部席位推出窗口名

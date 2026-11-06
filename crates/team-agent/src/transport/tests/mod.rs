@@ -63,7 +63,6 @@ impl Transport for StubBackend {
         let value = match field {
             PaneField::PaneMode => "0",
             PaneField::PaneCurrentCommand => "sh",
-            PaneField::PaneTty => "/dev/ttys000",
         };
         Ok(Some(value.to_string()))
     }

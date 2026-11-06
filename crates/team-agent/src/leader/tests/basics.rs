@@ -1,14 +1,22 @@
 use super::*;
 
+#[test]
+fn attribute_command_provider_recognizes_copilot() {
+    assert_eq!(
+        crate::leader::attribute_command_provider("copilot --allow-all-tools"),
+        Some(Provider::Copilot)
+    );
+    assert_eq!(
+        crate::leader::attribute_command_provider("/usr/local/bin/copilot"),
+        Some(Provider::Copilot)
+    );
+}
+
 // =====================================================================
 // 1. 锁名 / 闭枚举 / serde 字节对齐(纯数据,不依赖 unimplemented body)
 // =====================================================================
 
 // LEADER_OWNERSHIP_LOCK = "send"(__init__.py:393):attach/claim/takeover/autobind 共享同一临界区。
-#[test]
-fn ownership_lock_is_send() {
-    assert_eq!(LEADER_OWNERSHIP_LOCK, "send");
-}
 
 // LeaseReason 闭枚举的 serde 字节必须与 _LEASE_REASON_ENUM ∪ {caller_pane_missing} 一致。
 // golden(probe_leader.py):enum 8 值(snake)+ binding 的 caller_pane_missing。
@@ -175,42 +183,8 @@ fn leader_start_mode_serializes_to_python_strings() {
 }
 
 // NodeRole:worker/leader(build_idle_nodes role 字段)。
-#[test]
-fn node_role_serializes_to_python_strings() {
-    assert_eq!(
-        serde_json::to_string(&NodeRole::Worker).unwrap(),
-        "\"worker\""
-    );
-    assert_eq!(
-        serde_json::to_string(&NodeRole::Leader).unwrap(),
-        "\"leader\""
-    );
-}
 
 // RereadReason:wake.py 五值(probe_leader.py)。
-#[test]
-fn reread_reason_serializes_to_python_strings() {
-    assert_eq!(
-        serde_json::to_string(&RereadReason::NoFile).unwrap(),
-        "\"no_file\""
-    );
-    assert_eq!(
-        serde_json::to_string(&RereadReason::NeverClassified).unwrap(),
-        "\"never_classified\""
-    );
-    assert_eq!(
-        serde_json::to_string(&RereadReason::FileChanged).unwrap(),
-        "\"file_changed\""
-    );
-    assert_eq!(
-        serde_json::to_string(&RereadReason::QuiescentAlreadyClassified).unwrap(),
-        "\"quiescent_already_classified\""
-    );
-    assert_eq!(
-        serde_json::to_string(&RereadReason::Unchanged).unwrap(),
-        "\"unchanged\""
-    );
-}
 
 // =====================================================================
 // 2. LeaderSessionUuidSource — 漂移 NOTE(card §168-179)
@@ -265,44 +239,12 @@ fn leader_event_names_match_python_byte_for_byte() {
             "leader_receiver.rebind_applied",
         ),
         (
-            LeaderEvent::ReceiverClaimApplied,
-            "leader_receiver.claim_applied",
-        ),
-        (
             LeaderEvent::ReceiverClaimRefused,
             "leader_receiver.claim_refused",
         ),
         (
             LeaderEvent::ReceiverRebindRequired,
             "leader_receiver.rebind_required",
-        ),
-        (
-            LeaderEvent::ReceiverAttachFailed,
-            "leader_receiver.attach_failed",
-        ),
-        (
-            LeaderEvent::ReceiverStateDivergenceRepaired,
-            "leader_receiver.state_divergence_repaired",
-        ),
-        (
-            LeaderEvent::ReceiverFirstTimeEnvSeeded,
-            "leader_receiver.first_time_env_seeded",
-        ),
-        (
-            LeaderEvent::ReceiverAutobindSkipped,
-            "leader_receiver.autobind_skipped",
-        ),
-        (
-            LeaderEvent::ReceiverRequeuedExhaustedWatchers,
-            "leader_receiver.requeued_exhausted_watchers",
-        ),
-        (
-            LeaderEvent::ReceiverAmbiguousCandidates,
-            "leader_receiver.ambiguous_candidates",
-        ),
-        (
-            LeaderEvent::ReceiverClaimRequeue,
-            "leader_receiver.claim_requeue",
         ),
         (
             LeaderEvent::OwnerAdoptedOnRestart,
@@ -314,22 +256,6 @@ fn leader_event_names_match_python_byte_for_byte() {
         ),
         (LeaderEvent::OwnerBindRefused, "owner.bind_refused"),
         (LeaderEvent::OwnerEpochAdvanced, "owner_epoch_advanced"),
-        (
-            LeaderEvent::LeaderSessionUuidOverride,
-            "leader_session_uuid.override",
-        ),
-        (LeaderEvent::LeaderStart, "leader.start"),
-        (
-            LeaderEvent::ResultWatcherRequeued,
-            "result_watcher.requeued",
-        ),
-        (LeaderEvent::IdleTakeoverClassify, "idle_takeover.classify"),
-        (LeaderEvent::IdleTakeoverPing, "idle_takeover.ping"),
-        (LeaderEvent::IdleTakeoverReminder, "idle_takeover.reminder"),
-        (
-            LeaderEvent::IdleTakeoverPushFailed,
-            "idle_takeover.push_failed",
-        ),
     ];
     for (ev, want) in cases {
         assert_eq!(ev.name(), want, "{ev:?}");

@@ -1839,28 +1839,8 @@ pub(crate) mod test_support {
             true
         }
 
-        fn version(&self) -> Result<String, ProviderError> {
-            Ok("test".to_string())
-        }
 
-        fn auth_hint(
-            &self,
-            _auth_mode: crate::provider::AuthMode,
-        ) -> crate::provider::AuthHintStatus {
-            crate::provider::AuthHintStatus::Unknown
-        }
 
-        fn build_command(
-            &self,
-            _auth_mode: crate::provider::AuthMode,
-            _mcp_config: Option<&crate::provider::McpConfig>,
-            _system_prompt: Option<&str>,
-            _model: Option<&str>,
-        ) -> Result<Vec<String>, ProviderError> {
-            Err(ProviderError::CapabilityUnsupported(
-                "test adapter".to_string(),
-            ))
-        }
 
         fn build_command_with_permissions(
             &self,
@@ -1902,15 +1882,6 @@ pub(crate) mod test_support {
             Ok(Vec::new())
         }
 
-        fn recover_session_id(
-            &self,
-            _agent_id: &str,
-            _spawn_cwd: &std::path::Path,
-        ) -> Result<Option<SessionId>, ProviderError> {
-            Err(ProviderError::CapabilityUnsupported(
-                "test adapter".to_string(),
-            ))
-        }
 
         fn session_is_resumable(
             &self,
@@ -1920,16 +1891,6 @@ pub(crate) mod test_support {
             Ok(true)
         }
 
-        fn build_resume_command(
-            &self,
-            _session_id: Option<&SessionId>,
-            _auth_mode: crate::provider::AuthMode,
-            _mcp_config: Option<&crate::provider::McpConfig>,
-        ) -> Result<Vec<String>, ProviderError> {
-            Err(ProviderError::CapabilityUnsupported(
-                "test adapter".to_string(),
-            ))
-        }
 
         fn build_resume_command_with_context(
             &self,
@@ -1945,16 +1906,6 @@ pub(crate) mod test_support {
             ))
         }
 
-        fn fork(
-            &self,
-            _session_id: Option<&SessionId>,
-            _auth_mode: crate::provider::AuthMode,
-            _mcp_config: Option<&crate::provider::McpConfig>,
-        ) -> Result<Vec<String>, ProviderError> {
-            Err(ProviderError::CapabilityUnsupported(
-                "test adapter".to_string(),
-            ))
-        }
 
         fn fork_with_context(
             &self,
@@ -1979,21 +1930,8 @@ pub(crate) mod test_support {
             ))
         }
 
-        fn install_mcp(&self, _config: &crate::provider::McpConfig) -> Result<(), ProviderError> {
-            Err(ProviderError::CapabilityUnsupported(
-                "test adapter".to_string(),
-            ))
-        }
 
-        fn status_patterns(&self) -> Result<crate::provider::StatusPatterns, ProviderError> {
-            Err(ProviderError::CapabilityUnsupported(
-                "test adapter".to_string(),
-            ))
-        }
 
-        fn validate_model(&self, _model: &str) -> Result<bool, ProviderError> {
-            Ok(true)
-        }
     }
 }
 

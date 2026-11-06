@@ -891,48 +891,6 @@ pub(crate) fn lifecycle_worker_tmux_backend_for_selected_state(
         .unwrap_or_else(|| crate::tmux_backend::TmuxBackend::for_workspace(run_workspace)))
 }
 
-/// ---
-/// purpose: 与上面同样的团队选择语义，但返回工厂解析出的通用 transport
-/// returns: 已解析的 transport，含后端种类、来源与提示
-/// errors: 团队选择失败或工厂拒绝时返回 TeamSelect，读 state 失败返回 StatePersist
-/// ---
-/// 0.5.x Phase 1d Batch 1: new generic-typed lifecycle resolver.
-///
-/// Same team-selection semantics as the legacy tmux-typed variant, but
-/// returns a `ResolvedTransport` from the factory so callers that can
-/// hold `Box<dyn Transport>` (or the resolved `BackendKind`) work
-/// against both tmux AND conpty state. Caller migration to this API
-/// happens across Batch 2-5.
-///
-/// Fail-closed rules follow the factory (C-1 ×2, C-2 CLI-vs-state,
-/// C-3 N38 notices via `ResolvedTransport.notices`).
-pub(crate) fn lifecycle_worker_transport_for_selected_state(
-    run_workspace: &Path,
-    team: Option<&str>,
-) -> Result<crate::transport_factory::ResolvedTransport, LifecycleError> {
-    let (state, refusal) = crate::state::projection::resolve_team_scoped_state(run_workspace, team)
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    if let Some(refusal) = refusal {
-        let reason = refusal
-            .get("reason")
-            .and_then(|v| v.as_str())
-            .unwrap_or("team_target_unresolved");
-        let detail = refusal
-            .get("error")
-            .or_else(|| refusal.get("message"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        return Err(LifecycleError::TeamSelect(format!("{reason}: {detail}")));
-    }
-    let input = crate::transport_factory::TransportFactoryInput::new(
-        run_workspace,
-        crate::transport_factory::TransportPurpose::LifecycleWorker,
-    )
-    .with_team_key(team)
-    .with_state(state.as_ref());
-    crate::transport_factory::resolve_transport(input)
-        .map_err(|e| LifecycleError::TeamSelect(e.to_string()))
-}
 
 /// ---
 /// purpose: 由已取到的 state 解析 tmux 后端与它的来源

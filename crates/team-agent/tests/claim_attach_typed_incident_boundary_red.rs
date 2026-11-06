@@ -209,36 +209,7 @@ fn submitted_pending_acceptance_never_appears_in_claim_eligible_set() {
 // Tooth 3 — typed leader-incident API surface must exist
 // ---------------------------------------------------------------------------
 
-#[test]
-#[serial(env)]
-fn typed_incident_api_exists() {
-    // We check for a compiled Rust surface named e.g. `LeaderIncident`
-    // (enum), or a module path pattern indicating it. Because we cannot
-    // import a non-existent symbol without breaking the build, we scan
-    // the source tree for the substring `pub enum LeaderIncident` or
-    // `pub enum LeaderRecoveryIncident`. Baseline: neither exists → red.
-    let files = ["leader/mod.rs", "leader/lease.rs", "leader/incident.rs"];
-    let mut found = false;
-    for rel in files {
-        let path = crate_src_root().join(rel);
-        if let Ok(text) = fs::read_to_string(&path) {
-            if text.contains("pub enum LeaderIncident")
-                || text.contains("pub enum LeaderRecoveryIncident")
-            {
-                found = true;
-                break;
-            }
-        }
-    }
-    assert!(
-        found,
-        "no typed leader-incident enum found in leader/*.rs. §3.1/§3.2 \
-         require claim/attach to emit a typed incident (LeaderAttached / \
-         LeaderClaimed) consumed by a separate recovery owner. Baseline \
-         only has string event names (leader_receiver.attached / \
-         leader_receiver.rebind_applied) — no typed API surface."
-    );
-}
+
 
 // ---------------------------------------------------------------------------
 // Tooth 4 — positive control: attach still emits at least one event

@@ -1315,11 +1315,8 @@ fn a13_all_provider_version_and_auth_auxiliary_argv_are_native() {
         .collect::<serde_json::Map<_, _>>();
     f.seed(true, Value::Object(mappings));
     f.switch(None);
-    for (_, provider) in CANONICAL {
-        assert!(crate::provider::get_adapter(*provider).version().is_ok());
-    }
-    let _ = crate::provider::get_adapter(Provider::ClaudeCode)
-        .auth_hint(crate::model::enums::AuthMode::Subscription);
+    // Exercise current native version and MCP probes, not retired adapter wrappers.
+    let _ = f.cold("pi");
     let _ = f.cold("copilot");
     let probes = fs::read_to_string(&f.probes).unwrap();
     assert!(!probes.contains("route-must-not-enter-aux"));

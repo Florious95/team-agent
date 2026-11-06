@@ -1597,11 +1597,27 @@ fn quick_start_preserves_managed_leader_topology_without_inventing_a_leader_wind
         }),
     )
     .expect("seed managed leader state");
-    let attached = crate::cli::cmd_attach_leader(&crate::cli::AttachLeaderArgs {
-        workspace: workspace.to_path_buf(), team: Some("teamdir".into()), pane: None,
-        provider: crate::model::enums::Provider::Fake, confirm: false, json: true,
-    }).expect("bind the real owned caller through the public lease port");
-    assert_eq!(attached.exit, crate::cli::ExitCode::Ok, "{attached:?}");
+    // Claim observes native argv; macOS deliberately does not read foreign environ.
+    // Give this owned fake caller observable identity, not a runner-only hint.
+    let endpoint = crate::tmux_backend::socket_name_from_tmux_env().unwrap();
+    let pane = std::env::var("TMUX_PANE").unwrap();
+    let marked = std::process::Command::new(hermetic_guard::fixture_tmux_binary())
+        .args(["-S", &endpoint, "respawn-pane", "-k", "-t", &pane,
+            "exec bash -c 'exec -a fake sleep 86400'"])
+        .status().expect("start the owned fake caller");
+    assert!(marked.success());
+    let caller_transport = crate::transport_factory::leader_endpoint_transport(&endpoint);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !caller_transport.list_targets().unwrap().iter().any(|observed| {
+        observed.pane_id.as_str() == pane
+            && crate::leader::attribute_pane_provider(observed) == Some(crate::provider::Provider::Fake)
+    }) {
+        assert!(std::time::Instant::now() < deadline, "owned fake caller must become observable");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let attached = crate::cli::leader_port::claim_leader(workspace, Some("teamdir"), false)
+        .expect("bind the real owned caller through the public lease port");
+    assert_eq!(attached.get("ok").and_then(serde_json::Value::as_bool), Some(true), "{attached:?}");
     let mut state = crate::state::persist::load_runtime_state(workspace).unwrap();
     assert!(state["session_name"].is_null(), "leader-only bootstrap has no worker session");
     assert!(state["teams"]["teamdir"]["session_name"].is_null());
@@ -1661,24 +1677,6 @@ fn fresh_managed_state_without_receiver_is_not_attached() {
     );
 }
 
-#[test]
-fn attach_window_names_for_state_agents_include_managed_leader_and_layout_windows() {
-    let state = json!({
-        "is_external_leader": false,
-        "agents": {
-            "w1": {"layout_window": "team-w1", "window": "w1"},
-            "w2": {"layout_window": "team-w1", "window": "w2"},
-            "w4": {"layout_window": "team-w2", "window": "w4"}
-        }
-    });
-
-    let windows = crate::lifecycle::launch::attach_window_names_for_state_agents(
-        &state,
-        ["w1", "w2", "w4"].into_iter(),
-    );
-
-    assert_eq!(windows, vec!["leader", "team-w1", "team-w2"]);
-}
 
 // ═════════════════════════════════════════════════════════════════════════
 // rt-host-a LOOP #2 — cli-handler DELEGATION sweep (same-class stub): restart / start_agent /

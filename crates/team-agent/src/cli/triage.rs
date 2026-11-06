@@ -22,7 +22,6 @@ pub(crate) fn human_result(result: CmdResult, command: &str) -> CmdResult {
     let text = match &result.output {
         CmdOutput::Json(report) => render(command, report),
         CmdOutput::Human(text) => text.clone(),
-        CmdOutput::None => String::new(),
     };
     CmdResult {
         output: CmdOutput::Human(text),

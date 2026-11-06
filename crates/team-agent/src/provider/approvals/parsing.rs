@@ -108,52 +108,7 @@ pub fn extract_approval_prompt(agent_id: &str, capture: &str) -> Option<Approval
     ))
 }
 
-pub fn choose_internal_mcp_approval_choice(prompt: &ApprovalPrompt) -> String {
-    if prompt
-        .choices
-        .iter()
-        .any(|choice| choice == "Allow for this session")
-    {
-        return "Allow for this session".to_string();
-    }
-    for choice in &prompt.choices {
-        if choice.starts_with("Yes, and don't ask again") {
-            return choice.clone();
-        }
-    }
-    for preferred in ["Allow", "Yes"] {
-        if prompt.choices.iter().any(|choice| choice == preferred) {
-            return preferred.to_string();
-        }
-    }
-    "Allow for this session".to_string()
-}
 
-pub fn approval_choice_keys(
-    prompt: &ApprovalPrompt,
-    capture: &str,
-    target_choice: &str,
-) -> Vec<String> {
-    let Some(target_index) = prompt
-        .choices
-        .iter()
-        .position(|choice| choice == target_choice)
-    else {
-        return vec!["Down".to_string(), "Enter".to_string()];
-    };
-    let Some(active) = active_choice_index(capture) else {
-        return vec![(target_index + 1).to_string(), "Enter".to_string()];
-    };
-    if active == target_index {
-        return vec!["Enter".to_string()];
-    }
-    let key = if target_index < active { "Up" } else { "Down" };
-    let count = active.abs_diff(target_index);
-    let mut keys = Vec::with_capacity(count + 1);
-    keys.extend(std::iter::repeat_n(key.to_string(), count));
-    keys.push("Enter".to_string());
-    keys
-}
 
 fn approval(
     agent_id: &str,
@@ -294,15 +249,6 @@ fn approval_choices_between(lines: &[&str], matched_idx: usize, control_idx: usi
     choices
 }
 
-fn active_choice_index(capture: &str) -> Option<usize> {
-    capture.lines().find_map(|line| {
-        let cleaned = clean_line(line);
-        if !cleaned.starts_with('›') && !cleaned.starts_with('❯') && !cleaned.starts_with('>') {
-            return None;
-        }
-        parse_choice_line(&cleaned).map(|(index, _)| index)
-    })
-}
 
 fn parse_choice_line(line: &str) -> Option<(usize, String)> {
     let trimmed = line.trim_start_matches(['›', '❯', '>', '*', ' ']);
@@ -429,74 +375,7 @@ mod tests {
         assert_eq!(prompt.choices, vec!["Allow"]);
     }
 
-    #[test]
-    fn choose_internal_mcp_approval_choice_matches_golden() {
-        let mut prompt = approval(
-            "agent-x",
-            ApprovalKind::McpTool,
-            String::new(),
-            vec![
-                "Allow for this session".to_string(),
-                "Yes, and don't ask again".to_string(),
-                "Allow".to_string(),
-                "Yes".to_string(),
-            ],
-            None,
-            None,
-            None,
-        );
-        assert_eq!(
-            choose_internal_mcp_approval_choice(&prompt),
-            "Allow for this session"
-        );
-        prompt.choices = vec!["Maybe".to_string()];
-        assert_eq!(
-            choose_internal_mcp_approval_choice(&prompt),
-            "Allow for this session"
-        );
-        prompt.choices = vec![
-            "Maybe".to_string(),
-            "Yes, and don't ask again for this command".to_string(),
-            "Allow".to_string(),
-        ];
-        assert_eq!(
-            choose_internal_mcp_approval_choice(&prompt),
-            "Yes, and don't ask again for this command"
-        );
-    }
 
-    #[test]
-    fn approval_choice_keys_match_golden() {
-        let prompt = approval(
-            "agent-x",
-            ApprovalKind::McpTool,
-            String::new(),
-            vec!["Allow".to_string(), "Deny".to_string()],
-            None,
-            None,
-            None,
-        );
-        assert_eq!(
-            approval_choice_keys(&prompt, "❯ 1. Allow\n", "Missing"),
-            vec!["Down", "Enter"]
-        );
-        assert_eq!(
-            approval_choice_keys(&prompt, "  1. Allow\n  2. Deny\n", "Deny"),
-            vec!["2", "Enter"]
-        );
-        assert_eq!(
-            approval_choice_keys(&prompt, "❯ 1. Allow\n  2. Deny\n", "Deny"),
-            vec!["Down", "Enter"]
-        );
-        assert_eq!(
-            approval_choice_keys(&prompt, "  1. Allow\n❯ 2. Deny\n", "Allow"),
-            vec!["Up", "Enter"]
-        );
-        assert_eq!(
-            approval_choice_keys(&prompt, "❯ 1. Allow\n  2. Deny\n", "Allow"),
-            vec!["Enter"]
-        );
-    }
 
     #[test]
     fn m5r2_boundary_cases_match_golden_review() {

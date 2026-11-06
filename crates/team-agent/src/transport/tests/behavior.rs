@@ -6,8 +6,7 @@ use super::*;
 
 #[test]
 fn pane_field_variants_distinct() {
-    // PaneTty remains until the Stage 2 K3 removal.
-    let all = [PaneField::PaneMode, PaneField::PaneCurrentCommand, PaneField::PaneTty];
+    let all = [PaneField::PaneMode, PaneField::PaneCurrentCommand];
     for (i, a) in all.iter().enumerate() {
         for (j, b) in all.iter().enumerate() {
             assert_eq!(i == j, a == b, "{a:?} vs {b:?}");

@@ -127,7 +127,7 @@ fn resolve_transport_windows_conpty_completes_fast_when_no_shim() {
             }
         }
     });
-    let input = TransportFactoryInput::new(&workspace, TransportPurpose::LifecycleWorker)
+    let input = TransportFactoryInput::new(&workspace, TransportPurpose::Launch)
         .with_team_key(Some("team-a"))
         .with_explicit_backend(Some(RequestedTransportBackend::ConPty))
         .with_state(Some(&state));

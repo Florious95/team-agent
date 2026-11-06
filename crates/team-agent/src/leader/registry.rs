@@ -77,24 +77,8 @@ pub struct LeaderRegistryEntry {
 }
 
 impl LeaderRegistryEntry {
-    /// Ambiguous-name refusal semantics (host-leader-registry-design.md §5.2):
-    /// two entries with the same `delivery_name` remain visible in
-    /// `leaders` under `ambiguous_names`, and `send --to-leader <short>`
-    /// refuses `name_ambiguous`. Callers surface the ambiguity via
-    /// candidates rather than choosing a winner. The design explicitly
-    /// forbids priority heuristics based on write order, modification
-    /// time, or ambient state — see host-leader-registry-design.md §5.2
-    /// for the enumerated exclusions.
-    #[must_use]
-    pub fn short_name_collision_refuses() -> &'static str {
-        "ambiguous"
-    }
 }
 
-/// Payload key for the list of short-name collisions surfaced by
-/// `team-agent leaders` — kept as a top-level constant so both `leaders`
-/// and `send --to-leader` refer to the same wire name.
-pub const AMBIGUOUS_NAMES_FIELD: &str = "ambiguous_names";
 
 /// Wire reason used by both `leaders` and `send --to-leader` when a name
 /// resolves to multiple canonical-live entries. Candidates carry

@@ -9,7 +9,7 @@
 // decompose 前这些 `use` 在 coordinator.rs 顶层,测试 `mod tests` 经 `use super::*`
 // 继承它们。拆分后保留在 mod.rs(私有 use,子模块 tests 仍经 `use super::*` 解析)。
 use crate::model::enums::Provider;
-use crate::provider::{ProviderAdapter, TurnId, TurnState};
+use crate::provider::{ProviderAdapter};
 use serde_json::Value;
 
 // 0.5.x Windows portability Batch 6 Option A: shim lifecycle
@@ -22,18 +22,11 @@ use serde_json::Value;
 pub mod conpty_shim;
 pub mod health;
 pub mod observation;
-pub mod orphan;
-pub mod runtime_detectors;
-pub mod runtime_observation;
-pub mod steps;
 pub mod types;
 
 // Preserve passive metadata/host interfaces during the staged migration.
 pub use health::*;
 pub use observation::*;
-pub use orphan::*;
-pub use runtime_detectors::*;
-pub use runtime_observation::*;
 pub use types::*;
 
 #[cfg(test)]

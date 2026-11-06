@@ -10,62 +10,11 @@ use super::*;
 // 映射到 LeaderError::Validation。golden(probe_attach.py 已验:真跑即 raise)。
 // 强化:钉具体的 Err 形态 + 错误串含 pane id;并断言失败时绝不留下半绑定 state(无 team_owner)。
 // unimplemented → RED(unimplemented panic ≠ 期望的 Validation,且后续 is_err 断言不会被求值)。
-#[test]
-fn attach_leader_errors_when_pane_not_resolvable() {
-    let ws = std::env::temp_dir().join(format!("ta_rs_attach_{}", std::process::id()));
-    std::fs::create_dir_all(&ws).unwrap();
-    let r = attach_leader(&ws, None, Some(&PaneId::new("%1")), Provider::Codex);
-    // 不可解析 pane → Err(Validation),错误串提及 pane not found。
-    match r {
-        Err(LeaderError::Validation(msg)) => {
-            assert!(
-                msg.contains("%1"),
-                "Validation 错误须含目标 pane id,got {msg}"
-            );
-            assert!(
-                msg.contains("not found") || msg.contains("leader pane validation failed"),
-                "missing pane must fail physical validation, got {msg}"
-            );
-        }
-        Err(other) => panic!("期望 Validation(pane not found),got {other:?}"),
-        Ok(v) => panic!("无 live tmux pane 时不该成功 attach,got {v:?}"),
-    }
-    // 失败不留半绑定:state.json 无 team_owner。
-    let st = crate::state::persist::load_runtime_state(&ws).unwrap();
-    assert!(
-        st.get("team_owner").is_none(),
-        "resolve 失败不得落 team_owner"
-    );
-}
 
 // attach_leader 成功 post-state(需 live tmux pane + cross-lane _resolve_leader_pane):
 // vacant acquire → status=Claimed、reason=vacant_acquired、owner_epoch 0→1、owner/receiver 绑同 pane、
 // 且 workspace state.json 真被持久化。golden(_claim_lease_no_incident:81/102/139-143)。
 // real-machine-gated(无 live tmux 无法驱动 pane resolver)。
-#[test]
-#[ignore = "needs a live tmux pane + cross-lane _resolve_leader_pane (step 9/11)"]
-fn attach_leader_binds_pane_advances_epoch_and_persists() {
-    let ws = std::env::temp_dir().join(format!("ta_rs_attach_ok_{}", std::process::id()));
-    std::fs::create_dir_all(&ws).unwrap();
-    let pane = PaneId::new("%1");
-    let r = attach_leader(&ws, None, Some(&pane), Provider::Codex).unwrap();
-    assert!(r.ok);
-    assert_eq!(r.status, LeaseStatus::Claimed);
-    let owner = r.owner.as_ref().expect("attach 成功必带 owner");
-    assert_eq!(owner.pane_id, pane);
-    assert_eq!(
-        owner.owner_epoch,
-        OwnerEpoch(1),
-        "vacant acquire 后 epoch=1"
-    );
-    assert_eq!(owner.provider, Provider::Codex);
-    let receiver = r.receiver.as_ref().expect("attach 成功必带 receiver");
-    assert_eq!(receiver.pane_id, pane);
-    assert_eq!(r.reason, Some(LeaseReason::VacantAcquired));
-    let persisted = crate::state::persist::load_runtime_state(&ws).unwrap();
-    assert_eq!(persisted["team_owner"]["pane_id"], serde_json::json!("%1"));
-    assert_eq!(persisted["team_owner"]["owner_epoch"], serde_json::json!(1));
-}
 
 // claim_leader:无 ambiguous incident → 走 claim_lease_no_incident 直接 acquire/CAS。
 // 现 unimplemented → RED;锁住返回 LeaseResult。
@@ -128,9 +77,9 @@ fn write_lease_dual_state_persists_canonical_root_only_no_legacy_side_effect() {
 fn lease_divergence_reads_restart_snapshot_for_special_session_names() {
     // Foundation-0 F0-2 conversion: `write_lease_dual_state` no longer
     // side-effects a legacy snapshot; the divergence detector is a
-    // diagnostic reader that fires only when a diagnostic writer
-    // (e.g. `lifecycle::save_team_runtime_snapshot`) has produced
-    // the sidecar. Sequence exercised here: canonical root save →
+    // diagnostic reader that fires only when a legacy sidecar is present.
+    // Seed that input directly; the old periodic writer is retired.
+    // Sequence exercised here: canonical root save →
     // diagnostic snapshot save with a different pane → divergence
     // reader observes the drift.
     let ws = std::env::temp_dir().join(format!("ta_rs_dual_special_{}", std::process::id()));
@@ -162,11 +111,14 @@ fn lease_divergence_reads_restart_snapshot_for_special_session_names() {
     // Diagnostic write path with a divergent pane so we can exercise
     // the divergence reader below.
     let restart_state = serde_json::json!({
+        "_not_authoritative": true,
         "session_name": "team:proj-中文",
         "team_owner": {"pane_id": "%9", "owner_epoch": 2, "leader_session_uuid": "uuuu"},
         "leader_receiver": {"pane_id": "%9", "owner_epoch": 2},
     });
-    let restart_path = crate::lifecycle::save_team_runtime_snapshot(&ws, &restart_state).unwrap();
+    let restart_path = crate::lifecycle::helpers::team_snapshot_path(&ws, "team:proj-中文");
+    std::fs::create_dir_all(restart_path.parent().unwrap()).unwrap();
+    std::fs::write(&restart_path, serde_json::to_vec_pretty(&restart_state).unwrap()).unwrap();
     assert_eq!(restart_path, safe_path);
     assert!(
         restart_path.exists(),

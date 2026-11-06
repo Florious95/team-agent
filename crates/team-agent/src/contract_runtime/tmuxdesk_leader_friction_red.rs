@@ -385,7 +385,7 @@ fn recovery_skipped_explicit_stop(label: &str) -> (RecoveredWorkspace, Value) {
 fn r3a_team_stop_treats_recovery_skipped_explicit_stop_seat_as_stopped() {
     let (fixture, state) = recovery_skipped_explicit_stop("r3a");
     let receipts =
-        framework::stop_selected(workspace_path(&fixture), &state).expect("team stop runs");
+        framework::stop_selected_with_budget(workspace_path(&fixture), &state, std::time::Duration::from_secs(20)).expect("team stop runs");
     let receipt = |id: &str| {
         receipts
             .iter()

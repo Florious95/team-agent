@@ -120,24 +120,6 @@ pub(crate) fn matches_observation(state: &Value, agent_id: &str, row: &Value) ->
         .is_some_and(|identity| row.get("watch_identity") == Some(&identity))
 }
 
-/// Legacy/foreign-cohort facts cannot be reused as current observation evidence.
-/// This is invoked only when actually observing the member, not for paused or
-/// otherwise ineligible members. The next scan establishes the ordinary baseline.
-pub(crate) fn begin_observation(state: &mut Value, agent_id: &str) {
-    let identity = observation_identity(state, agent_id);
-    if let Some(watch) = state
-        .pointer_mut("/coordinator/abnormal_exit_watch")
-        .and_then(Value::as_object_mut)
-    {
-        if watch.get(agent_id).is_some_and(|row| {
-            identity
-                .as_ref()
-                .is_none_or(|identity| row.get("watch_identity") != Some(identity))
-        }) {
-            watch.remove(agent_id);
-        }
-    }
-}
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

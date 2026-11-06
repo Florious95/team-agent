@@ -1293,21 +1293,6 @@ required for BYOK'); got Ok"
     );
 }
 
-/// A-5 (design §E2.5): copilot has NO `auth status` subcommand (main-help Commands),
-/// so the subscription auth hint must be a WEAK/honest signal — it must NOT strongly
-/// claim "logged in" (AuthHintStatus::Present). A weak/unknown status is the honest
-/// answer (MUST-NOT-13: no false-green logged-in claim).
-#[test]
-fn copilot_subscription_auth_hint_is_weak_not_strong_present() {
-    let status = team_agent::provider::get_adapter(Provider::Copilot)
-        .auth_hint(team_agent::provider::AuthMode::Subscription);
-    assert_ne!(
-        format!("{status:?}"),
-        "Present",
-        "A-5: copilot has no `auth status` subcommand, so a strong Present is a false \
-green; the hint must be weak/unknown (honest — can't confirm logged-in); got {status:?}"
-    );
-}
 
 /// A-6 (design §E2.5): when the user shell carries GITHUB_TOKEN/GH_TOKEN (which copilot
 /// prioritizes over the credential store — cmd-login), spawning a copilot worker must

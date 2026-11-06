@@ -51,27 +51,6 @@ pub(crate) fn retired_provider_error(raw: &str) -> &'static str {
     }
 }
 
-pub(crate) fn require_active_state_providers(
-    state: &serde_json::Value,
-    target: Option<&str>,
-) -> Result<(), &'static str> {
-    let retired = state
-        .get("agents")
-        .and_then(serde_json::Value::as_object)
-        .and_then(|agents| {
-            agents.iter().find_map(|(id, row)| {
-                row.get("provider")
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|provider| {
-                        target.is_none_or(|target| target == id) && is_retired_provider(provider)
-                    })
-            })
-        });
-    match retired {
-        Some(provider) => Err(retired_provider_error(provider)),
-        None => Ok(()),
-    }
-}
 
 /// Canonical snake_case wire string for `Provider`. Used for state JSON,
 /// log fields, and any cross-process serialization. Stable: do not change
@@ -216,7 +195,6 @@ mod tests {
         let restart_selection_rs = include_str!("../lifecycle/restart/selection.rs");
         let model_spec_rs = include_str!("../model/spec.rs");
         let compiler_rs = include_str!("../compiler.rs");
-        let rediscover_rs = include_str!("../leader/rediscover.rs");
         let profile_smoke_rs = include_str!("../lifecycle/profile_smoke.rs");
         let diagnose_rs = include_str!("../cli/diagnose.rs");
 
@@ -255,7 +233,6 @@ mod tests {
             "compiler must validate providers through typed helpers"
         );
         for (path, source) in [
-            ("leader/rediscover.rs", rediscover_rs),
             ("lifecycle/profile_smoke.rs", profile_smoke_rs),
             ("cli/diagnose.rs", diagnose_rs),
         ] {
@@ -274,7 +251,6 @@ mod tests {
     fn provider_wire_command_grammar_sites_are_named_helpers_not_provider_parse() {
         let provider_attribution_rs = include_str!("../leader/provider_attribution.rs");
         let worker_window_helpers_rs = include_str!("../layout/worker_window_helpers.rs");
-        let runtime_detectors_rs = include_str!("../coordinator/runtime_detectors.rs");
         let emit_rs = include_str!("../cli/emit.rs");
         let messaging_helpers_rs = include_str!("../messaging/helpers.rs");
 
@@ -289,11 +265,6 @@ mod tests {
             "worker window helpers must keep a named window grammar helper"
         );
         assert!(
-            runtime_detectors_rs.contains("runtime_event_provider_name")
-                && runtime_detectors_rs.contains("Event-field grammar"),
-            "runtime detectors must name event provider grammar explicitly"
-        );
-        assert!(
             emit_rs.contains("LEADER_PASSTHROUGH_COMMANDS")
                 && emit_rs.contains("is_leader_passthrough_command"),
             "CLI emit must name passthrough command grammar explicitly"
@@ -301,7 +272,6 @@ mod tests {
         for (path, source) in [
             ("leader/provider_attribution.rs", provider_attribution_rs),
             ("layout/worker_window_helpers.rs", worker_window_helpers_rs),
-            ("coordinator/runtime_detectors.rs", runtime_detectors_rs),
             ("cli/emit.rs", emit_rs),
             ("messaging/helpers.rs", messaging_helpers_rs),
         ] {
@@ -321,30 +291,7 @@ mod tests {
 
     #[test]
     fn retired_state_guard_is_scoped_to_the_addressed_seat() {
-        let state = serde_json::json!({"agents": {
-            "pi": {"provider": "pi"},
-            "claude": {"provider": "claude"},
-            "claude_code": {"provider": "claude_code"},
-            "copilot": {"provider": "copilot"},
-            "retired": {"provider": "cursor_agent"},
-            "codex": {"provider": "codex_tui"},
-            "grok": {"provider": "grok_build"},
-            "legacy_codex": {"provider": "codex"},
-            "legacy_codex_cli": {"provider": "codex-cli"},
-            "legacy_grok": {"provider": "grok"}
-        }});
-        assert!(require_active_state_providers(&state, Some("pi")).is_ok());
-        assert!(require_active_state_providers(&state, Some("claude")).is_ok());
-        assert!(require_active_state_providers(&state, Some("claude_code")).is_ok());
-        assert!(require_active_state_providers(&state, Some("copilot")).is_ok());
-        assert!(require_active_state_providers(&state, Some("codex")).is_ok());
-        assert!(require_active_state_providers(&state, Some("grok")).is_ok());
-        assert_eq!(require_active_state_providers(&state, Some("retired")), Err(RETIRED_PROVIDER_ERROR));
-        assert_eq!(require_active_state_providers(&state, Some("legacy_codex")), Err(RETIRED_CODEX_ERROR));
-        assert_eq!(require_active_state_providers(&state, Some("legacy_codex_cli")), Err(RETIRED_CODEX_ERROR));
-        assert!(require_active_state_providers(&state, Some("legacy_grok")).is_ok());
         assert!(!is_retired_provider("grok"));
-        assert!(require_active_state_providers(&state, None).is_err());
         for retired in ["cursor_agent", "agent"] {
             assert_eq!(parse_provider(retired), None, "no legacy engine to parse into");
         }

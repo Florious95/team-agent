@@ -13,7 +13,7 @@ fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -49,13 +49,6 @@ fn rc6_shutdown_real_cli_fake_team_json_no_residuals_and_runner_survives() {
         case.has_session(&format!("team-{parent}")),
         "RC6 fixture must prove quick-start created the real tmux session before shutdown"
     );
-    let mut coordinator = case.spawn_live_coordinator();
-    wait_for_process(&mut coordinator.child, Duration::from_millis(200));
-    assert!(
-        coordinator.child.try_wait().ok().flatten().is_none(),
-        "RC6 fixture must keep a real coordinator subprocess alive before shutdown"
-    );
-
     let shutdown = case.run_cli(
         &[
             "shutdown",
@@ -243,8 +236,6 @@ fn rc3_unclaimed_child_leader_requires_claim_without_sentinel() {
 #[file_serial(tmux)]
 fn rc3_claim_child_leader_persists_under_live_coordinator_tick() {
     let case = nested_case("rc3-claim-live");
-    let mut coordinator = case.case.spawn_live_coordinator();
-    wait_for_process(&mut coordinator.child, Duration::from_millis(250));
     let driver = case.case.spawn_driver_pane("child-claim-driver");
     let claim = case.case.run_cli(
         &[
@@ -260,7 +251,6 @@ fn rc3_claim_child_leader_persists_under_live_coordinator_tick() {
         Duration::from_secs(6),
     );
     assert_success_json("claim-leader --team child fixture", &claim);
-    std::thread::sleep(Duration::from_millis(700));
 
     let state = state_value(case.case.root());
     let receiver = state.pointer(&format!("/teams/{}/leader_receiver/pane_id", case.child));
@@ -270,11 +260,11 @@ fn rc3_claim_child_leader_persists_under_live_coordinator_tick() {
     assert_eq!(
         receiver.and_then(Value::as_str),
         Some(driver.as_str()),
-        "real CLI claim-leader --team child must persist teams.child.leader_receiver.pane_id after live coordinator ticks; state={state}"
+        "real CLI claim-leader --team child must persist teams.child.leader_receiver.pane_id after the completed claim; state={state}"
     );
     assert!(
         epoch.unwrap_or(0) > 0,
-        "real CLI claim-leader --team child must persist owner_epoch>0 under teams.child after live ticks; state={state}"
+        "real CLI claim-leader --team child must persist owner_epoch>0 under teams.child after the completed claim; state={state}"
     );
 }
 
@@ -299,7 +289,6 @@ fn rc3_after_claim_child_worker_result_reaches_child_leader() {
     );
     assert_success_json("claim child leader fixture", &claim);
 
-    let mut coordinator = case.case.spawn_live_coordinator();
     let send = case.case.run_cli(
         &[
             "send",
@@ -321,7 +310,6 @@ fn rc3_after_claim_child_worker_result_reaches_child_leader() {
             && rows.iter().any(|row| row["team"] == case.child && row["recipient"] == "leader"
                 && row["content"].as_str().is_some_and(|text| text.contains("Fake worker handled message")))
     });
-    let _ = coordinator.child.kill();
 
     let rows = inbox_records(case.case.root(), &scopes);
     assert!(rows.iter().any(|row| row["kind"] == "result" && row["team"] == case.child
@@ -355,7 +343,6 @@ fn tit_fake_worker_auto_report_keeps_selected_team_when_active_sibling_differs()
         &case.quick_start(&team_b, "wrk1", &[]),
     );
 
-    let mut coordinator = case.spawn_live_coordinator();
     let send = case.run_cli(
         &[
             "send",
@@ -377,7 +364,6 @@ fn tit_fake_worker_auto_report_keeps_selected_team_when_active_sibling_differs()
         rows.iter().any(|row| row["kind"] == "result" && row["envelope"]["agent_id"] == "wrk1")
             || rows.iter().any(|row| row["content"].as_str().is_some_and(|text| text.contains("Fake worker handled message")))
     });
-    let _ = coordinator.child.kill();
 
     let rows = inbox_records(case.root(), &scopes);
     let direct = rows.iter().filter(|row| row["content"].as_str().is_some_and(|text| text.contains("TIT_OWNER_SCOPE_A"))).collect::<Vec<_>>();
@@ -409,8 +395,6 @@ fn tit_fake_worker_auto_report_keeps_selected_team_when_active_sibling_differs()
 #[file_serial(tmux)]
 fn tit_claim_child_leader_survives_live_tick_projection_race() {
     let case = nested_case("tit-claim-race");
-    let mut coordinator = case.case.spawn_live_coordinator();
-    wait_for_process(&mut coordinator.child, Duration::from_millis(250));
     let driver = case.case.spawn_driver_pane("race-claimer");
     let claim = case.case.run_cli(
         &[
@@ -426,7 +410,6 @@ fn tit_claim_child_leader_survives_live_tick_projection_race() {
         Duration::from_secs(6),
     );
     assert_success_json("claim race fixture", &claim);
-    std::thread::sleep(Duration::from_millis(800));
     let status = case.case.run_cli(
         &[
             "status",
@@ -448,7 +431,7 @@ fn tit_claim_child_leader_survives_live_tick_projection_race() {
         raw.pointer(&format!("/teams/{}/leader_receiver/pane_id", case.child))
             .and_then(Value::as_str),
         Some(driver.as_str()),
-        "raw state must keep child leader_receiver after live tick stale-save race; raw={raw}"
+        "raw state must keep child leader_receiver after the completed claim and status projection; raw={raw}"
     );
     assert!(
         projected.to_string().contains(driver.as_str()),
@@ -540,28 +523,6 @@ impl RealCase {
         run_cli_at(&self.root, args, env, timeout)
     }
 
-    fn spawn_live_coordinator(&self) -> ManagedChild {
-        let child = Command::new(bin())
-            .args([
-                "coordinator",
-                "--workspace",
-                self.root_str().as_str(),
-                "--tick-interval",
-                "0.1",
-            ])
-            .current_dir(&self.root)
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
-            .env_remove("TEAM_AGENT_OWNER_TEAM_ID")
-            .env_remove("TEAM_AGENT_TEAM_ID")
-            .env_remove("TEAM_AGENT_ID")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn real coordinator subprocess");
-        ManagedChild { child }
-    }
 
     fn spawn_driver_pane(&self, label: &str) -> String {
         let session = SessionName::new(format!("team-{}-{}", label, self.id));
@@ -608,18 +569,6 @@ impl Drop for RealCase {
     }
 }
 
-struct ManagedChild {
-    child: Child,
-}
-
-impl Drop for ManagedChild {
-    fn drop(&mut self) {
-        if self.child.try_wait().ok().flatten().is_none() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
-    }
-}
 
 #[derive(Debug)]
 struct CliRun {
@@ -748,15 +697,6 @@ fn state_contains_pane(state: &Value, team: &str, pane: &str) -> bool {
             == Some(pane)
 }
 
-fn wait_for_process(child: &mut Child, duration: Duration) {
-    let deadline = Instant::now() + duration;
-    while Instant::now() < deadline {
-        if child.try_wait().ok().flatten().is_some() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-}
 
 fn workspace_processes(root: &Path) -> Vec<String> {
     let needle = root.to_string_lossy();

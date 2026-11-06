@@ -87,22 +87,6 @@ fn public_compiler_accepts_kiro_without_legacy_effort_inheritance() {
     assert!(!args.workspace.join(".team").exists());
 }
 
-#[test]
-fn mutable_kiro_role_is_refused_before_legacy_fallback_or_role_writes() {
-    let (_sandbox, args) = fixture();
-    role(&args, "worker", "kiro");
-    let path = args.agents_dir.join("agents/worker.md");
-    let before = std::fs::read(&path).unwrap();
-    assert!(
-        team_agent::contract_runtime::framework::require_legacy_role(Some(&path), None).is_err()
-    );
-    assert!(
-        team_agent::contract_runtime::framework::require_legacy_role(None, Some("kiro")).is_err()
-    );
-    assert!(team_agent::contract_runtime::framework::require_legacy_role(None, Some("pi")).is_ok());
-    assert_eq!(std::fs::read(&path).unwrap(), before);
-    assert!(!args.workspace.join(".team").exists());
-}
 
 #[test]
 fn kiro_selection_preserves_role_bytes_and_has_no_runtime_effects() {
@@ -242,7 +226,6 @@ fn mixed_contract_providers_route_every_cursor_name_without_migrating_state() {
     }
     for provider in ["cursor_agent", "cursor-agent", "agent"] {
         // A declaration selects the leaf; a persisted legacy row is never reclassified.
-        assert!(team_agent::contract_runtime::framework::require_legacy_role(None, Some(provider)).is_err());
         let state = serde_json::json!({"provider":provider,"pane_id":"%0","runtime_family":"legacy"});
         assert!(!team_agent::contract_runtime::framework::is_contract(&state));
     }
@@ -337,10 +320,6 @@ fn cursor_mutation_malformed_declarations_and_api_profiles_refuse_without_writes
     let (_sandbox, args) = fixture();
     role(&args, "worker", "cursor");
     let path = args.agents_dir.join("agents/worker.md");
-    let before = std::fs::read(&path).unwrap();
-    assert!(team_agent::contract_runtime::framework::require_legacy_role(Some(&path), None).is_err());
-    assert!(team_agent::contract_runtime::framework::require_legacy_role(None, Some("cursor")).is_err());
-    assert_eq!(std::fs::read(&path).unwrap(), before);
     for header in [
         "provider: Cursor\nmodel: gpt-5.6-luna-xhigh",
         "provider: cursor\ndangerously_skip_permissions: true",
@@ -458,14 +437,6 @@ fn every_codex_and_grok_name_selects_the_contract_leaf_without_opt_in() {
         .collect();
     providers.sort();
     assert_eq!(providers, expected);
-    // Mutable lifecycle refuses every Codex/Grok declaration.
-    for (name, _) in expected {
-        let path = args.agents_dir.join(format!("agents/{name}.md"));
-        assert!(team_agent::contract_runtime::framework::require_legacy_role(Some(&path), None).is_err(), "{name}");
-    }
-    for provider in ["codex", "codex_cli", "codex-cli", "grok", "codex_tui", "grok_build"] {
-        assert!(team_agent::contract_runtime::framework::require_legacy_role(None, Some(provider)).is_err(), "{provider}");
-    }
     // A persisted pre-upgrade row keeps its key and is never reclassified.
     for provider in ["codex", "codex_cli", "codex-cli"] {
         assert!(!team_agent::contract_runtime::framework::is_contract(&serde_json::json!({"provider":provider})), "{provider}");

@@ -173,12 +173,9 @@ impl RequestedTransportBackend {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportPurpose {
     Launch,
-    LifecycleWorker,
-    Coordinator,
     Status,
     Diagnose,
     Shutdown,
-    MessageDelivery,
 }
 
 /// Factory input. Every field except `workspace` and `purpose` is
@@ -627,7 +624,7 @@ mod tests {
     fn legacy_tmux_endpoint_resolves_to_tmux_endpoint_backend() {
         let workspace = ws();
         let state = serde_json::json!({ "tmux_endpoint": "default" });
-        let input = TransportFactoryInput::new(&workspace, TransportPurpose::LifecycleWorker)
+        let input = TransportFactoryInput::new(&workspace, TransportPurpose::Launch)
             .with_state(Some(&state));
         let resolved = resolve_transport(input).expect("legacy path must succeed");
         assert_eq!(resolved.kind, BackendKind::Tmux);
@@ -638,7 +635,7 @@ mod tests {
     #[test]
     fn explicit_conpty_with_team_key_resolves_to_conpty() {
         let workspace = ws();
-        let input = TransportFactoryInput::new(&workspace, TransportPurpose::LifecycleWorker)
+        let input = TransportFactoryInput::new(&workspace, TransportPurpose::Launch)
             .with_team_key(Some("team-a"))
             .with_explicit_backend(Some(RequestedTransportBackend::ConPty));
         let resolved =
@@ -652,7 +649,7 @@ mod tests {
     #[test]
     fn explicit_conpty_without_team_key_refuses_no_silent_fallback() {
         let workspace = ws();
-        let input = TransportFactoryInput::new(&workspace, TransportPurpose::LifecycleWorker)
+        let input = TransportFactoryInput::new(&workspace, TransportPurpose::Launch)
             .with_explicit_backend(Some(RequestedTransportBackend::ConPty));
         let err = resolve_transport(input).expect_err("conpty without team_key must refuse");
         match err {
@@ -688,7 +685,7 @@ mod tests {
     fn cli_override_disagreeing_with_state_kind_refuses_unless_fresh() {
         let workspace = ws();
         let state = serde_json::json!({ "transport": { "kind": "conpty" } });
-        let input = TransportFactoryInput::new(&workspace, TransportPurpose::LifecycleWorker)
+        let input = TransportFactoryInput::new(&workspace, TransportPurpose::Launch)
             .with_team_key(Some("team-a"))
             .with_state(Some(&state))
             .with_explicit_backend(Some(RequestedTransportBackend::Tmux));
@@ -701,7 +698,7 @@ mod tests {
             other => panic!("expected BackendConflict, got {other:?}"),
         }
         // With allow_backend_switch=true (== --fresh), the same input succeeds.
-        let mut input_fresh = TransportFactoryInput::new(&workspace, TransportPurpose::LifecycleWorker)
+        let mut input_fresh = TransportFactoryInput::new(&workspace, TransportPurpose::Launch)
             .with_team_key(Some("team-a"))
             .with_state(Some(&state))
             .with_explicit_backend(Some(RequestedTransportBackend::Tmux));
@@ -720,7 +717,7 @@ mod tests {
             "transport": { "kind": "conpty" },
             "tmux_endpoint": "default",
         });
-        let input = TransportFactoryInput::new(&workspace, TransportPurpose::LifecycleWorker)
+        let input = TransportFactoryInput::new(&workspace, TransportPurpose::Launch)
             .with_team_key(Some("team-a"))
             .with_state(Some(&state));
         let resolved = resolve_transport(input).expect("must succeed");
@@ -747,7 +744,7 @@ mod tests {
     fn state_conpty_without_legacy_emits_no_notice() {
         let workspace = ws();
         let state = serde_json::json!({ "transport": { "kind": "conpty" } });
-        let input = TransportFactoryInput::new(&workspace, TransportPurpose::LifecycleWorker)
+        let input = TransportFactoryInput::new(&workspace, TransportPurpose::Launch)
             .with_team_key(Some("team-a"))
             .with_state(Some(&state));
         let resolved = resolve_transport(input).expect("must succeed");
@@ -765,7 +762,7 @@ mod tests {
     fn conpty_without_pipe_ready_hint_emits_no_pipe_client_notice() {
         let workspace = ws();
         let state = serde_json::json!({ "transport": { "kind": "conpty" } });
-        let input = TransportFactoryInput::new(&workspace, TransportPurpose::LifecycleWorker)
+        let input = TransportFactoryInput::new(&workspace, TransportPurpose::Launch)
             .with_team_key(Some("team-a"))
             .with_state(Some(&state));
         let resolved = resolve_transport(input).expect("must succeed");
@@ -804,7 +801,7 @@ mod tests {
                 },
             }
         });
-        let input = TransportFactoryInput::new(&workspace, TransportPurpose::LifecycleWorker)
+        let input = TransportFactoryInput::new(&workspace, TransportPurpose::Launch)
             .with_team_key(Some("team-a"))
             .with_state(Some(&state));
         let resolved = resolve_transport(input).expect("must succeed");

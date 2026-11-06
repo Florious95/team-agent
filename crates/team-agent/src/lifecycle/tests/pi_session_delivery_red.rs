@@ -199,7 +199,4 @@ fn pi_clone_is_fresh_and_fork_is_not_clone() {
     assert_ne!(source_paths.wrapper, clone_paths.wrapper);
     assert_eq!(source_paths.sessions, clone_paths.sessions);
 
-    let source_session = SessionId::new("652756ea-aaee-4437-a30f-40c5606826d5");
-    let fork = get_adapter(Provider::Pi).fork(Some(&source_session), AuthMode::Subscription, None);
-    assert!(matches!(fork, Err(ProviderError::CapabilityUnsupported(_))));
 }

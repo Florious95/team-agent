@@ -1155,19 +1155,6 @@ fn r12_pi_clone_and_non_pi_in_window_fork_compatibility_are_preserved() {
     assert_ne!(source_paths.runtime_root, clone_paths.runtime_root);
     assert_ne!(source_paths.wrapper, clone_paths.wrapper);
     assert_eq!(source_paths.sessions, clone_paths.sessions);
-    assert!(
-        matches!(
-            get_adapter(Provider::Pi).fork(
-                Some(&SessionId::new(SESSION_A)),
-                AuthMode::Subscription,
-                None
-            ),
-            Err(team_agent::provider::ProviderError::CapabilityUnsupported(
-                _
-            ))
-        ),
-        "managed fork must not be faked by changing the provider's unsupported native-fork capability"
-    );
     let fixture = Fixture::new();
     let state = fixture.state();
     assert_eq!(state["agents"][SOURCE]["session_id"], SESSION_A);

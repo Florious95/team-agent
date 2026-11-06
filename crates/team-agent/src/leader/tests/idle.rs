@@ -1,18 +1,6 @@
 use super::*;
 
 // idle_takeover.reminder / push_failed 事件名字节锁。
-#[test]
-fn idle_takeover_event_names_byte_locked() {
-    assert_eq!(
-        LeaderEvent::IdleTakeoverReminder.name(),
-        "idle_takeover.reminder"
-    );
-    assert_eq!(
-        LeaderEvent::IdleTakeoverPushFailed.name(),
-        "idle_takeover.push_failed"
-    );
-    assert_eq!(LeaderEvent::IdleTakeoverPing.name(), "idle_takeover.ping");
-}
 
 // =====================================================================
 // 11. struct 构造 / 序列化形态 + key 插入序证据(纯数据,不依赖 body)
@@ -96,18 +84,3 @@ fn leader_identity_struct_serializes_with_leader_plan_source() {
 }
 
 // IdleNode:bug-085 rollout_path Option;state 是 TurnState(穷尽,Unknown 非 idle)。
-#[test]
-fn idle_node_unknown_state_is_not_idle() {
-    let n = IdleNode {
-        node_id: "w1".into(),
-        role: NodeRole::Worker,
-        state: TurnState::Unknown,
-        turn_id: None,
-        annotations: vec![],
-        provider: Some(Provider::Codex),
-        auth_mode: None,
-        rollout_path: None, // bug-085:None 合法 → 该 node Unknown。
-    };
-    assert!(!n.state.is_idle_for_takeover(), "Unknown 不当 idle");
-    assert!(n.rollout_path.is_none());
-}

@@ -60,16 +60,6 @@ pub(crate) enum PrepareLeaderStartError {
 }
 
 impl PrepareLeaderStartError {
-    fn into_leader_error(self) -> LeaderError {
-        match self {
-            Self::PaneAuthorityRefused(refusal) => LeaderError::Validation(format!(
-                "{}; open a new terminal outside the current tmux/pane or run \
-                 `team-agent claim-leader --confirm` from the intended leader pane",
-                refusal.reason().as_str()
-            )),
-            Self::Leader(error) => error,
-        }
-    }
 }
 
 impl From<LeaderError> for PrepareLeaderStartError {
@@ -78,50 +68,7 @@ impl From<LeaderError> for PrepareLeaderStartError {
     }
 }
 
-/// `leader_start_plan`(card §46;`__init__.py:82`)。计算 leader 启动计划
-/// (exec in-TMUX / new tmux session / attach existing)。provider 未安装 → `Err(Start)`。
-pub(crate) fn leader_start_plan(
-    provider: Provider,
-    provider_args: &[String],
-    workspace: &Path,
-    attach_existing: bool,
-    confirm_attach: bool,
-    attach_session: Option<&SessionName>,
-    external_leader: bool,
-) -> Result<LeaderStartPlan, LeaderError> {
-    prepare_leader_start(
-        provider,
-        provider_args,
-        workspace,
-        attach_existing,
-        confirm_attach,
-        attach_session,
-        external_leader,
-    )
-    .map(|prepared| prepared.plan)
-    .map_err(PrepareLeaderStartError::into_leader_error)
-}
 
-pub(crate) fn prepare_leader_start(
-    provider: Provider,
-    provider_args: &[String],
-    workspace: &Path,
-    attach_existing: bool,
-    confirm_attach: bool,
-    attach_session: Option<&SessionName>,
-    external_leader: bool,
-) -> Result<PreparedLeaderStart, PrepareLeaderStartError> {
-    prepare_leader_start_with_nested_attach(
-        provider,
-        provider_args,
-        workspace,
-        attach_existing,
-        confirm_attach,
-        attach_session,
-        external_leader,
-        false,
-    )
-}
 
 pub(crate) fn prepare_leader_start_with_nested_attach(
     provider: Provider,
@@ -492,10 +439,8 @@ fn execute_leader_plan_after_ambient_authority(
 }
 
 struct VerifiedAmbientPaneAuthority {
-    pane_id: PaneId,
     observed: PaneInfo,
     endpoint: String,
-    tmux: String,
 }
 
 fn workspace_state_uses_external_leader(workspace: &Path) -> bool {
@@ -807,10 +752,8 @@ fn verified_ambient_pane_authority(
         ));
     }
     Ok(VerifiedAmbientPaneAuthority {
-        pane_id,
         observed,
         endpoint,
-        tmux: tmux.to_string(),
     })
 }
 
@@ -1596,41 +1539,6 @@ pub enum LeaderProviderHealth {
     Unreachable,
 }
 
-/// 0.4.x (CR R6 + R3): single-source shell-tail detection.
-/// Used by:
-///   - shutdown logic to recognise a leader pane in shell-tail mode
-///     as still owned by the leader (not stray).
-///
-/// Matches by basename (case-insensitive) — `pane_current_command` returns
-/// the basename of the running binary. Conservative whitelist of POSIX +
-/// common shell processes; missing entries here are false negatives
-/// (shell tail looks like provider absent → health says Alive) which is the
-/// safe default per the CR R6 conservative-Alive rule.
-fn is_interactive_shell_basename(name: &str) -> bool {
-    let trimmed = name.trim().to_ascii_lowercase();
-    let basename = std::path::Path::new(&trimmed)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(&trimmed);
-    matches!(
-        basename,
-        "zsh"
-            | "bash"
-            | "sh"
-            | "fish"
-            | "dash"
-            | "ksh"
-            | "tcsh"
-            | "csh"
-            | "ash"
-            | "mksh"
-            | "yash"
-            | "elvish"
-            | "nu"
-            | "nushell"
-            | "xonsh"
-    )
-}
 
 fn managed_spawned_pane_in_targets(transport: &dyn Transport, spawned: &SpawnResult) -> bool {
     transport
@@ -2056,21 +1964,6 @@ struct LeaderProcessExit {
     intentional_teardown: bool,
 }
 
-fn push_bounded_stderr(captured: &mut Vec<u8>, chunk: &[u8]) {
-    if chunk.len() >= LEADER_STDERR_LIMIT {
-        captured.clear();
-        captured.extend_from_slice(&chunk[chunk.len() - LEADER_STDERR_LIMIT..]);
-        return;
-    }
-    let excess = captured
-        .len()
-        .saturating_add(chunk.len())
-        .saturating_sub(LEADER_STDERR_LIMIT);
-    if excess > 0 {
-        captured.drain(..excess);
-    }
-    captured.extend_from_slice(chunk);
-}
 
 fn leader_launcher_failure(process: &LeaderProcessExit) -> String {
     let status = process
@@ -2299,21 +2192,6 @@ fn merged_exec_env(leader_env: &BTreeMap<String, String>) -> BTreeMap<String, St
     env
 }
 
-fn shlex_quote(raw: &str) -> String {
-    if !raw.is_empty()
-        && raw.bytes().all(|b| {
-            b.is_ascii_alphanumeric()
-                || matches!(
-                    b,
-                    b'@' | b'%' | b'_' | b'+' | b'=' | b':' | b',' | b'.' | b'/' | b'-'
-                )
-        })
-    {
-        raw.to_string()
-    } else {
-        format!("'{}'", raw.replace('\'', "'\"'\"'"))
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -2333,12 +2211,10 @@ mod tests {
     use super::{
         clear_managed_leader_receiver_pane, ensure_managed_provider_live_after_attach,
         execute_leader_plan_after_ambient_authority, format_launcher_failure,
-        handle_exec_provider_startup_prompts, is_interactive_shell_basename,
+        handle_exec_provider_startup_prompts,
         lock_down_window_rename, managed_client_argv, managed_leader_window_from_occupied,
         persist_exec_provider_leader_binding, persist_managed_leader_binding,
-        push_bounded_stderr, shlex_quote,
         write_window_rename_lockdown_event, ManagedClientAttachMode, VerifiedAmbientPaneAuthority,
-        LEADER_STDERR_LIMIT,
     };
 
     struct ScriptedTransport {
@@ -2693,7 +2569,7 @@ mod tests {
             "-c".into(),
             format!(
                 "test -f {path} && grep -q is_external_leader {path} && grep -q pane_id {path}",
-                path = shlex_quote(&state_path.to_string_lossy()),
+                path = crate::cli::shell_quote(&state_path.to_string_lossy()),
             ),
         ];
         let outcome =
@@ -2764,7 +2640,6 @@ mod tests {
             identity: Some(identity), detached: false,
         };
         let authority = VerifiedAmbientPaneAuthority {
-            pane_id: PaneId::new("%77"),
             observed: PaneInfo {
                 pane_id: PaneId::new("%77"), session: SessionName::new("cursor-gate-leader"),
                 window_index: Some(0), window_name: Some(WindowName::new("pi")),
@@ -2773,7 +2648,6 @@ mod tests {
                 active: true, pane_pid: None, leader_env: BTreeMap::new(),
             },
             endpoint: "/private/tmp/fixture-exec-leader.sock".into(),
-            tmux: "/private/tmp/fixture-exec-leader.sock,123,0".into(),
         };
         (plan, authority)
     }
@@ -2851,7 +2725,7 @@ mod tests {
         let state_path = crate::state::persist::runtime_state_path(&workspace);
         let command = format!(
             "test -f {path} && grep -q leader_receiver {path}",
-            path = shlex_quote(&state_path.to_string_lossy())
+            path = crate::cli::shell_quote(&state_path.to_string_lossy())
         );
         let _env = EnvGuard::set(&[
             ("TMUX", Some("/private/tmp/tmux-501/default,88432,187")),
@@ -2889,7 +2763,6 @@ mod tests {
         };
 
         let authority = VerifiedAmbientPaneAuthority {
-            pane_id: PaneId::new("%77"),
             observed: PaneInfo {
                 pane_id: PaneId::new("%77"),
                 session: SessionName::new("team-agent-leader-current"),
@@ -2904,7 +2777,6 @@ mod tests {
                 leader_env: BTreeMap::new(),
             },
             endpoint: "/private/tmp/tmux-501/default".to_string(),
-            tmux: "/private/tmp/tmux-501/default,123,0".to_string(),
         };
         let outcome =
             execute_leader_plan_after_ambient_authority(&plan, &workspace, Some(&authority))
@@ -2961,20 +2833,6 @@ mod tests {
         assert_eq!(sent[0].1, vec![Key::Enter]);
     }
 
-    #[test]
-    fn interactive_shell_basename_recognizes_supported_shells() {
-        let shells = [
-            "zsh", "bash", "sh", "fish", "dash", "ksh", "tcsh", "csh", "ash", "mksh", "yash",
-            "elvish", "nu", "nushell", "xonsh",
-        ];
-        for shell in shells {
-            assert!(is_interactive_shell_basename(shell));
-            assert!(is_interactive_shell_basename(&shell.to_uppercase()));
-        }
-        for provider in ["claude", "codex", "copilot", "gemini"] {
-            assert!(!is_interactive_shell_basename(provider));
-        }
-    }
 
     // ═══════════════════════════════════════════════════════════════════
     // 0.4.10+ mirror-session fix v2 (option B: independent session per launch).
@@ -3142,14 +3000,6 @@ mod tests {
         assert!(!failure.contains("abcdefghijklmnopqrstuvwxyz"));
     }
 
-    #[test]
-    fn launcher_stderr_capture_is_bounded_to_tail() {
-        let mut captured = vec![b'a'; LEADER_STDERR_LIMIT - 2];
-        push_bounded_stderr(&mut captured, b"XYZ");
-
-        assert_eq!(captured.len(), LEADER_STDERR_LIMIT);
-        assert!(captured.ends_with(b"XYZ"));
-    }
 
     #[test]
     fn managed_leader_launch_disables_window_rename() {
@@ -3594,13 +3444,11 @@ mod tests {
         plan.mode = LeaderStartMode::ExecProvider;
         let spawned = managed_spawn_result();
         let authority = VerifiedAmbientPaneAuthority {
-            pane_id: spawned.pane_id.clone(),
             observed: managed_pane_info(&spawned),
             endpoint: workspace
                 .join("old-leader.sock")
                 .to_string_lossy()
                 .into_owned(),
-            tmux: String::new(),
         };
         persist_exec_provider_leader_binding(&plan, &workspace, &authority, false).unwrap();
         let path = crate::state::persist::runtime_state_path(&workspace);

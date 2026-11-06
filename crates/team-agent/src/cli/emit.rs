@@ -5,7 +5,7 @@
 use super::models::cmd_models;
 use super::spec::{command_spec, CommandKind, COMMAND_SPECS};
 #[cfg(test)]
-use super::spec::{CommandTier, ALL_DISPATCH_KINDS};
+use super::spec::{CommandTier, DispatchKind};
 use super::*;
 use std::io::{ErrorKind, Write as _};
 
@@ -23,7 +23,6 @@ fn emit_with_json_order(
     preserve_json_order: bool,
 ) -> Option<String> {
     match output {
-        CmdOutput::None => None,
         CmdOutput::Human(text) => Some(crate::redaction::redact_external_text(text)),
         CmdOutput::Json(value) => {
             let value = crate::redaction::redact_external_value(value);
@@ -378,13 +377,6 @@ pub(crate) fn is_leader_passthrough_command(command: &str) -> bool {
         )
 }
 
-/// Registered subcommands (the dispatch table) plus spec-only verbs that have no
-/// dispatch arm yet but must still respond to `--help` per CR-063/G4.
-/// Used by the `--help` short-circuit gate so unknown commands keep falling through
-/// to the argparse invalid-choice path.
-fn is_known_subcommand(command: &str) -> bool {
-    command_spec(command).is_some_and(|spec| spec.command_help)
-}
 
 pub(crate) fn default_help() -> String {
     let mut out = String::from("Team Agent: create a team, send tasks, read replies and shut down safely.\n\n1. Prepare agents\n   Run team-agent start worker for a new or stopped seat; no files are required. Omitted launch settings use safe defaults and are reported in defaulted. Existing agents/*.md declarations are adopted. Use --from for a prepared team source.\n2. Open a leader and create the team\n   With a provider installed and signed in, run team-agent pi (or claude/codex).\n   Provider launch automatically binds the leader and publishes its discovery entry when no live leader exists.\n   A live leader on another terminal is preserved; claim-leader --confirm is the explicit recovery/preemption path.\n   Run team-agent start in that leader's tool context. Verified live members stay unchanged; explicitly stopped members remain stopped. Use team-agent start worker to reactivate one seat.\n   Use team restart for a deliberate restart (session auto); legacy bare restart retains preserve. Do not take over or delete an existing team.\n3. Send tasks and read replies\n   team-agent send worker 'Calculate 245 * 37 and reply to the leader.'\n   team-agent inbox leader -n 3\n   team-agent status\n   Sending is not completion; wait for an actual reply.\n4. Diagnose and stop\n   team-agent doctor --workspace .\n   team-agent stop --workspace . --json\n   Verify this team's residual resources are empty, then diagnose the selected workspace.\n\nSelect workspace/team scope with --workspace/--team. Discover model names with models.\nWindows ConPTY requires a Windows host and an installed shim; tmux commands are not a generic Windows path.\n");
@@ -1103,10 +1095,6 @@ pub(super) fn parse_seconds_ms(raw: &str) -> Option<u64> {
     }
 }
 
-fn parse_cli_provider(raw: &str) -> Result<crate::provider::Provider, CliError> {
-    serde_json::from_value::<crate::provider::Provider>(serde_json::json!(raw))
-        .map_err(|_| CliError::Usage(format!("unknown provider: {raw}")))
-}
 
 pub(super) fn explicit_path(value: &str) -> bool {
     value == "." || value == ".." || value.contains('/') || value.contains('\\')
@@ -1455,22 +1443,6 @@ fn claim_leader_args(args: &[String], cwd: &Path) -> ClaimLeaderArgs {
     }
 }
 
-fn attach_leader_args(args: &[String], cwd: &Path) -> Result<AttachLeaderArgs, CliError> {
-    let parsed = parse_args(args);
-    Ok(AttachLeaderArgs {
-        workspace: workspace(&parsed, cwd),
-        team: parsed.team,
-        pane: parsed
-            .pane
-            .filter(|pane| !pane.is_empty())
-            .map(crate::transport::PaneId::new),
-        provider: parse_cli_provider(parsed.provider.as_deref()
-            .filter(|provider| !provider.trim().is_empty())
-            .ok_or_else(|| CliError::Usage("attach-leader requires --provider <name>".to_string()))?)?,
-        confirm: parsed.confirm,
-        json: parsed.json,
-    })
-}
 
 fn attach_app_server_leader_args(
     args: &[String],
@@ -2009,7 +1981,7 @@ mod tests {
 
     #[test]
     fn coordinator_is_retired_before_help_arguments_or_workspace_access() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tmp_workspace();
         assert!(!super::is_machine_command("coordinator"));
         for args in [
             vec![],
@@ -2021,14 +1993,15 @@ mod tests {
             vec!["--no-such-flag"],
         ] {
             let args: Vec<String> = args.into_iter().map(str::to_string).collect();
-            let error = super::dispatch("coordinator", &args, dir.path()).unwrap_err();
+            let error = super::dispatch("coordinator", &args, &dir).unwrap_err();
             assert!(matches!(error, CliError::Usage(_)), "{error:?}");
             assert!(error.to_string().contains("retired"));
             assert!(error.to_string().contains("schedule"));
             let argv = [vec!["coordinator".to_string()], args].concat();
-            assert_eq!(super::run(&argv, dir.path()), ExitCode::Usage);
-            assert!(!dir.path().join(".team").exists());
+            assert_eq!(super::run(&argv, &dir), ExitCode::Usage);
+            assert!(!dir.join(".team").exists());
         }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -2134,7 +2107,39 @@ mod tests {
 
     #[test]
     fn all_dispatch_kinds_have_exactly_one_spec() {
-        for kind in ALL_DISPATCH_KINDS {
+        let kinds = &[
+            DispatchKind::Start,
+            DispatchKind::Stop,
+            DispatchKind::Team,
+            DispatchKind::Agent,
+            DispatchKind::QuickStart,
+            DispatchKind::Send,
+            DispatchKind::Schedule,
+            DispatchKind::Migrate,
+            DispatchKind::Status,
+            DispatchKind::Models,
+            DispatchKind::KiroLeader,
+            DispatchKind::Inbox,
+            DispatchKind::Locate,
+            DispatchKind::Restart,
+            DispatchKind::Shutdown,
+            DispatchKind::AddAgent,
+            DispatchKind::StartAgent,
+            DispatchKind::StopAgent,
+            DispatchKind::ResetAgent,
+            DispatchKind::CloneAgent,
+            DispatchKind::ForkAgent,
+            DispatchKind::RemoveAgent,
+            DispatchKind::Leaders,
+            DispatchKind::Doctor,
+            DispatchKind::Approvals,
+            DispatchKind::Route,
+            DispatchKind::LeaderPrompt,
+            DispatchKind::Profile,
+            DispatchKind::InstallSkill,
+            DispatchKind::ClaimLeader,
+        ];
+        for kind in kinds {
             let count = COMMAND_SPECS
                 .iter()
                 .filter(|spec| spec.kind == CommandKind::Dispatch(*kind))
@@ -2150,12 +2155,12 @@ mod tests {
     fn known_command_gate_uses_specs() {
         for spec in COMMAND_SPECS.iter().filter(|spec| spec.command_help) {
             assert!(
-                is_known_subcommand(spec.name),
+                command_spec(spec.name).is_some_and(|found| found.command_help),
                 "`{}` must be accepted by the known-command help gate",
                 spec.name
             );
         }
-        assert!(!is_known_subcommand("missing-c1-command"));
+        assert!(!command_spec("missing-c1-command").is_some_and(|spec| spec.command_help));
     }
 
     #[test]
@@ -2250,7 +2255,7 @@ mod tests {
                 "retired Machine route: {command}"
             );
             assert!(
-                !is_known_subcommand(command),
+                command_help(Some(command)) == HUMAN_NAVIGATION,
                 "retired help gate: {command}"
             );
         }
@@ -2400,7 +2405,6 @@ mod tests {
             crate::cli::route::HELP,
             crate::cli::COMMS_BOUNDARY_TEXT,
             crate::cli::QUICK_START_REMINDER,
-            crate::cli::SEND_REMINDER,
             crate::cli::STATUS_REMINDER,
         ] {
             assert_english(text);

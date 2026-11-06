@@ -3,11 +3,9 @@
 //! contract:
 //!   provides:
 //!     - name: ResumeRefusalReason
-//!       what: resume 拒绝原因闭合枚举(7 变体)，新原因必须改代码才能加
+//!       what: resume 拒绝原因闭合枚举(6 变体)，新原因必须改代码才能加
 //!     - name: wire
 //!       what: 枚举 → 历史 UnresumableWorker.reason 稳定串，供 JSON/日志沿用旧形状
-//!     - name: from_legacy
-//!       what: 历史字符串 → 枚举的逆映射，未识别串一律落进 Other{legacy_reason}
 //!     - name: RecoveryHint
 //!       what: 缺 backing 时给操作者的 provider/name/cwd 三元线索
 //!     - name: picker_hint
@@ -127,9 +125,6 @@ pub enum ResumeRefusalReason {
     /// Session capture polling did not converge before the deadline
     /// (the existing `RefusedResumeNotReady` shape).
     SessionCaptureIncomplete,
-    /// State session_id differs from the provider's observed session
-    /// (T6 L5.5 drift). Caller should reconcile before resuming.
-    SessionDrift { expected: String, actual: String },
     /// The persisted provider backing exists, but the transcript itself
     /// declares a different Team Agent worker identity.
     SessionIdentityMismatch {
@@ -159,8 +154,7 @@ impl ResumeRefusalReason {
     ///     - name: wire
     ///       what: 枚举 → 稳定串的全函数映射，不丢字段但丢细节
     /// boundary:
-    ///   - 不携带 checked_paths / recovery_hint / drift 的 expected-actual 等负载，只给分类名
-    ///   - 与 from_legacy 只在五个 canonical 串上互逆;SessionDrift 有 wire 串但 from_legacy 无对应臂，"session_drift" 会落进 Other，该变体不可往返
+    ///   - 不携带 checked_paths / recovery_hint 等负载，只给分类名
     /// ---
     pub fn wire(&self) -> &'static str {
         match self {
@@ -170,7 +164,6 @@ impl ResumeRefusalReason {
             }
             ResumeRefusalReason::ProviderResumeUnsupported { .. } => "provider_resume_unsupported",
             ResumeRefusalReason::SessionCaptureIncomplete => "session_capture_incomplete",
-            ResumeRefusalReason::SessionDrift { .. } => "session_drift",
             ResumeRefusalReason::SessionIdentityMismatch { .. } => "session_identity_mismatch",
             // For Other we still report the legacy wire so the existing
             // `session_unresumable` JSON shape is preserved end-to-end.
@@ -178,68 +171,13 @@ impl ResumeRefusalReason {
         }
     }
 
-    /// Lift a legacy free-form `reason` string into the structured enum.
-    /// Round-trip-safe with `wire()` for the canonical names.
-    /// ---
-    /// purpose: 把历史自由串抬升成结构化枚举，保证旧持久化数据不丢分类
-    /// params:
-    ///   reason: 历史 UnresumableWorker.reason 串;不在识别表内的任意值都合法
-    /// returns: 匹配到的变体(负载字段一律填空，因为串里没有这些事实);未匹配则 Other{legacy_reason=原串}
-    /// contract:
-    ///   provides:
-    ///     - name: from_legacy
-    ///       what: 全函数、不失败、不 panic 的逆映射
-    /// boundary:
-    ///   - 不还原 checked_paths / recovery_hint / provider 名等负载——它们在串里本就不存在
-    ///   - 识别表缺 "session_drift" 臂，该串会落到 Other 而非 SessionDrift
-    /// ---
-    pub fn from_legacy(reason: &str) -> Self {
-        match reason {
-            "no_persisted_session_id" => ResumeRefusalReason::NoSessionId,
-            "session_backing_store_missing" => ResumeRefusalReason::SessionBackingStoreMissing {
-                checked_paths: Vec::new(),
-                recovery_hint: None,
-            },
-            "provider_resume_unsupported" => ResumeRefusalReason::ProviderResumeUnsupported {
-                provider: String::new(),
-            },
-            "session_capture_incomplete" => ResumeRefusalReason::SessionCaptureIncomplete,
-            "session_identity_mismatch" => ResumeRefusalReason::SessionIdentityMismatch {
-                expected_agent_id: String::new(),
-                embedded_agent_id: String::new(),
-                session_id: String::new(),
-                rollout_path: None,
-            },
-            other => ResumeRefusalReason::Other {
-                legacy_reason: other.to_string(),
-            },
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn wire_round_trip_canonical_strings() {
-        for wire in [
-            "no_persisted_session_id",
-            "session_backing_store_missing",
-            "provider_resume_unsupported",
-            "session_capture_incomplete",
-            "session_identity_mismatch",
-        ] {
-            assert_eq!(ResumeRefusalReason::from_legacy(wire).wire(), wire);
-        }
-    }
 
-    #[test]
-    fn other_preserves_legacy_session_unresumable_wire() {
-        let r = ResumeRefusalReason::from_legacy("session_unresumable");
-        assert_eq!(r.wire(), "session_unresumable");
-        assert!(matches!(r, ResumeRefusalReason::Other { .. }));
-    }
 
     // Layer 2 self-healing tests ────────────────────────────────────────────
 
