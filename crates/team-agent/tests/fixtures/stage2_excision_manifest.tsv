@@ -1,0 +1,534 @@
+# Stage 2 excision manifest (P3 = K2 coordinator tick engine / runtime detectors / abnormal / provider classify+faults;
+# P4 = K3 attach-leader/takeover/rediscovery, K4 fork/session-verify shims + dead ProviderAdapter surface, K5 plan
+# orchestrator, K7 CLI residue, K8 legacy packaging). Source: rebased P3/P4 inventory pinned at 0cd6e76e (rows with a
+# removal decision). Excluded on purpose: REVIEW_CURRENT_TEST_PURPOSE rows (fixture relocation), VERIFY_AFFECTED_
+# SUPPORTED_TARGET rows (ConPTY/Windows), already-absent rows, and ambiguous multi-impl `new`/`as_str` rows (they go
+# with their type). A row passes when `file` is gone or holds at most `max_remaining` lines whose trimmed text equals
+# `declaration`. Rows retained by chief ruling are listed in RETAINED_AFTER_REVIEW inside stage2_excision_red.rs.
+# Columns: file, max_remaining, cluster, line_at_0cd, symbol, declaration
+crates/team-agent/src/cli/adapters.rs	0	P4-K3	465	cmd_takeover	pub fn cmd_takeover(args: &TakeoverArgs) -> Result<CmdResult, CliError> {
+crates/team-agent/src/cli/diagnose.rs	0	P4-K7	14	PiBackingStatus	pub(crate) enum PiBackingStatus {
+crates/team-agent/src/cli/diagnose.rs	0	P4-K7	22	PiMcpStatus	pub(crate) enum PiMcpStatus {
+crates/team-agent/src/cli/diagnose.rs	0	P4-K7	28	PiDoctorInput	pub(crate) struct PiDoctorInput {
+crates/team-agent/src/cli/diagnose.rs	0	P4-K7	44	PiDoctorFacts	pub(crate) struct PiDoctorFacts {
+crates/team-agent/src/cli/diagnose.rs	0	P4-K7	53	pi_doctor_facts	pub(crate) fn pi_doctor_facts(input: PiDoctorInput) -> PiDoctorFacts {
+crates/team-agent/src/cli/diagnose.rs	0	P4-K7	178	diagnose_runtime	pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value, Value) {
+crates/team-agent/src/cli/diagnose.rs	0	P4-K7	729	append_registry_channel_unbound_to_report	pub(crate) fn append_registry_channel_unbound_to_report(
+crates/team-agent/src/cli/diagnose.rs	0	P4-K7	798	selected_live_leader_workspace_mismatch	fn selected_live_leader_workspace_mismatch(
+crates/team-agent/src/cli/diagnose.rs	0	P3-K2	910	coordinator_issue_id	fn coordinator_issue_id(
+crates/team-agent/src/cli/diagnose.rs	0	P3-K2	950	coordinator_issue_value	fn coordinator_issue_value(
+crates/team-agent/src/cli/diagnose.rs	0	P3-K2	977	coordinator_repair_hint	fn coordinator_repair_hint(id: &str, _health: &crate::coordinator::HealthReport) -> Value {
+crates/team-agent/src/cli/diagnose.rs	0	P3-K2	993	coordinator_expected	fn coordinator_expected(state: &Value) -> bool {
+crates/team-agent/src/cli/diagnose.rs	0	P3-K2	1004	coordinator_status_wire	fn coordinator_status_wire(status: crate::coordinator::CoordinatorHealthStatus) -> &'static str {
+crates/team-agent/src/cli/emit.rs	0	P4-K7	383	is_known_subcommand	fn is_known_subcommand(command: &str) -> bool {
+crates/team-agent/src/cli/emit.rs	0	P4-K7	1103	parse_cli_provider	fn parse_cli_provider(raw: &str) -> Result<crate::provider::Provider, CliError> {
+crates/team-agent/src/cli/emit.rs	0	P4-K3	1455	attach_leader_args	fn attach_leader_args(args: &[String], cwd: &Path) -> Result<AttachLeaderArgs, CliError> {
+crates/team-agent/src/cli/helpers.rs	0	P4-K7	19	non_empty_str	pub(crate) fn non_empty_str<'a>(value: Option<&'a str>, default: &'a str) -> &'a str {
+crates/team-agent/src/cli/helpers.rs	0	P4-K7	23	first_non_empty_str	pub(crate) fn first_non_empty_str<'a>(values: &[Option<&'a str>], default: &'a str) -> &'a str {
+crates/team-agent/src/cli/helpers.rs	0	P4-K7	46	age_text	pub(crate) fn age_text(value: Option<&str>) -> String {
+crates/team-agent/src/cli/helpers.rs	0	P4-K7	67	prefix_chars	pub(crate) fn prefix_chars(text: &str, max: usize) -> String {
+crates/team-agent/src/cli/helpers.rs	0	P4-K7	71	char_len	pub(crate) fn char_len(text: &str) -> usize {
+crates/team-agent/src/cli/leader.rs	0	P4-K7	14	provider_args	pub fn provider_args(values: &[String]) -> Vec<String> {
+crates/team-agent/src/cli/leader.rs	0	P4-K7	167	consume_leader_inbox_summary	pub fn consume_leader_inbox_summary(workspace: &Path, budget: usize) -> Option<String> {
+crates/team-agent/src/cli/leader.rs	0	P4-K7	199	parse_inbox_entries	fn parse_inbox_entries(text: impl AsRef<str>) -> Vec<String> {
+crates/team-agent/src/cli/leader.rs	0	P4-K7	236	render_inbox_summary	fn render_inbox_summary(entries: &[String], budget: usize) -> String {
+crates/team-agent/src/cli/leader.rs	0	P4-K7	277	is_fallback_header	fn is_fallback_header(line: &str) -> bool {
+crates/team-agent/src/cli/leader.rs	0	P4-K7	281	entry_title	fn entry_title(lines: &[String]) -> String {
+crates/team-agent/src/cli/mod.rs	0	P4-K7	54	SEND_REMINDER	pub(crate) const SEND_REMINDER: &str =
+crates/team-agent/src/cli/mod.rs	0	P4-K3	106	cmd_attach_leader	pub fn cmd_attach_leader(args: &AttachLeaderArgs) -> Result<CmdResult, CliError> {
+crates/team-agent/src/cli/mod.rs	0	P4-K7	649	KillDecision	pub(crate) enum KillDecision {
+crates/team-agent/src/cli/mod.rs	0	P4-K7	660	sessions_to_kill	pub(crate) fn sessions_to_kill(
+crates/team-agent/src/cli/mod.rs	0	P4-K7	2948	process_table	fn process_table() -> Vec<ProcessInfo> {
+crates/team-agent/src/cli/mod.rs	0	P4-K7	5838	doctor_team_dir	fn doctor_team_dir(workspace: &Path, spec: Option<&Path>) -> Option<PathBuf> {
+crates/team-agent/src/cli/mod.rs	0	P4-K7	6070	run_id	fn run_id() -> String {
+crates/team-agent/src/cli/mod.rs	0	P3-K2	6154	coordinator_health_value	pub(crate) fn coordinator_health_value(health: crate::coordinator::HealthReport) -> Value {
+crates/team-agent/src/cli/mod.rs	0	P3-K2	6194	coordinator_status_wire	fn coordinator_status_wire(
+crates/team-agent/src/cli/mod.rs	0	P4-K3	6214	takeover	pub fn takeover(
+crates/team-agent/src/cli/mod.rs	0	P4-K3	6320	attach_leader	pub fn attach_leader(
+crates/team-agent/src/cli/mod.rs	0	P4-K7	6586	team_owner_value	fn team_owner_value(state: &Value, team_id: &TeamKey) -> Option<Value> {
+crates/team-agent/src/cli/mod.rs	0	P4-K7	6596	family_a_owner_value	fn family_a_owner_value(
+crates/team-agent/src/cli/mod.rs	0	P4-K7	6677	attach_lease_value	fn attach_lease_value(result: crate::leader::LeaseResult, requeued: Value) -> Value {
+crates/team-agent/src/cli/mod.rs	0	P4-K7	6698	attach_requeued_exhausted_watchers	fn attach_requeued_exhausted_watchers(
+crates/team-agent/src/cli/mod.rs	0	P4-K7	6720	project_requeued_exhausted_watchers	pub(crate) fn project_requeued_exhausted_watchers(event: &Value) -> Value {
+crates/team-agent/src/cli/named_address.rs	0	P4-K7	27	WorkspaceNoState	WorkspaceNoState,
+crates/team-agent/src/cli/named_address.rs	0	P4-K7	401	NamedWorkspaceTransport	pub(crate) struct NamedWorkspaceTransport<'a> {
+crates/team-agent/src/cli/named_address.rs	0	P4-K7	423	resolve_name_with_workspace_transports	pub(crate) fn resolve_name_with_workspace_transports(
+crates/team-agent/src/cli/named_address.rs	0	P4-K7	590	parse_leader_target_workspace_and_team	pub(crate) fn parse_leader_target_workspace_and_team(
+crates/team-agent/src/cli/named_address.rs	0	P4-K7	1537	name_not_live_worker	fn name_not_live_worker(
+crates/team-agent/src/cli/named_address.rs	0	P4-K7	1645	name_not_live_leader	fn name_not_live_leader(
+crates/team-agent/src/cli/spec.rs	0	P4-K7	9	DevInternal	DevInternal,
+crates/team-agent/src/cli/spec.rs	0	P4-K7	14	Daily, Dev	Daily,
+crates/team-agent/src/cli/spec.rs	0	P4-K7	20	Daily, Dev	Dev,
+crates/team-agent/src/cli/spec.rs	0	P4-K7	30	Yes	Yes,
+crates/team-agent/src/cli/spec.rs	0	P4-K7	66	ALL_DISPATCH_KINDS	pub(crate) const ALL_DISPATCH_KINDS: &[DispatchKind] = &[
+crates/team-agent/src/cli/status_port/approvals.rs	0	P4-K7	3	approvals	pub fn approvals(workspace: &Path, agent: Option<&str>, as_json: bool) -> Result<Value, CliError> {
+crates/team-agent/src/cli/status_port/runtime.rs	0	P3-K2	9	coordinator_service_available	pub coordinator_service_available: bool,
+crates/team-agent/src/cli/status_port/snapshot.rs	0	P4-K7	158	full	pub(crate) fn full(&self) -> &Value {
+crates/team-agent/src/cli/types.rs	0	P4-K7	163	None	None,
+crates/team-agent/src/cli/types.rs	0	P4-K7	203	none	pub fn none() -> Self {
+crates/team-agent/src/cli/types.rs	0	P4-K7	246	SummaryBucket	pub enum SummaryBucket {
+crates/team-agent/src/cli/types.rs	0	P4-K7	258	SummaryCounts	pub struct SummaryCounts {
+crates/team-agent/src/cli/types.rs	0	P4-K7	268	total	pub fn total(self) -> usize {
+crates/team-agent/src/cli/types.rs	0	P4-K7	276	InteractionCounts	pub struct InteractionCounts {
+crates/team-agent/src/cli/types.rs	0	P4-K3	382	TakeoverArgs	pub struct TakeoverArgs {
+crates/team-agent/src/cli/types.rs	0	P4-K7	403	AttachLeaderArgs	pub struct AttachLeaderArgs {
+crates/team-agent/src/codex_app_server.rs	0	P4-K4	31	APP_SERVER_PROTOCOL_FIXTURE_CLI_MIN	pub const APP_SERVER_PROTOCOL_FIXTURE_CLI_MIN: &str = "0.139.0";
+crates/team-agent/src/codex_app_server.rs	0	P4-K4	32	APP_SERVER_PROTOCOL_FIXTURE_CLI_MAX	pub const APP_SERVER_PROTOCOL_FIXTURE_CLI_MAX: &str = "0.139.x";
+crates/team-agent/src/codex_app_server.rs	0	P4-K4	33	APP_SERVER_PROTOCOL_REQUIRES_USER_AGENT	pub const APP_SERVER_PROTOCOL_REQUIRES_USER_AGENT: bool = true;
+crates/team-agent/src/codex_app_server.rs	0	P4-K4	56	ThreadStale	ThreadStale { expected: Value, actual: Value },
+crates/team-agent/src/codex_app_server.rs	0	P4-K4	186	validate_tuple	fn validate_tuple(
+crates/team-agent/src/codex_app_server.rs	0	P4-K4	351	turn_start	fn turn_start(
+crates/team-agent/src/contract_runtime/forward.rs	0	P4-K4	28	validate	fn validate(&self, store: &ContractStore) -> Result<(), Error> {
+crates/team-agent/src/contract_runtime/forward.rs	0	P4-K4	51	framework_result	fn framework_result(result_id: &str, source: &str, envelope: &Value) -> Result<Value, Error> {
+crates/team-agent/src/contract_runtime/forward.rs	0	P4-K4	75	forward_one	fn forward_one(context: &FrameworkContext, intent: &ForwardIntent) -> (ForwardState, Value) {
+crates/team-agent/src/contract_runtime/forward.rs	0	P4-K4	117	drain	pub fn drain(
+crates/team-agent/src/contract_runtime/forward.rs	0	P4-K4	155	drain_scoped_pending_egress	pub fn drain_scoped_pending_egress(
+crates/team-agent/src/contract_runtime/framework.rs	0	P4-K4	99	require_legacy_role	pub fn require_legacy_role(
+crates/team-agent/src/contract_runtime/framework.rs	0	P4-K4	109	declares_contract	pub fn declares_contract(path: Option<&Path>, provider: Option<&str>) -> bool {
+crates/team-agent/src/contract_runtime/framework.rs	0	P4-K4	350	stop_selected	pub fn stop_selected(workspace: &Path, state: &Value) -> Result<Vec<Value>, BackendError> {
+crates/team-agent/src/contract_runtime/pump.rs	0	P3-K2	120	tick	pub fn tick(workspace: &Path, state: &mut Value) -> Result<(), BackendError> {
+crates/team-agent/src/contract_runtime/registry.rs	0	P4-K4	138	first_business_bootstrap, tool_panel	pub fn first_business_bootstrap(self) -> bool {
+crates/team-agent/src/contract_runtime/registry.rs	0	P4-K4	164	first_business_bootstrap, tool_panel	pub fn tool_panel(self) -> Result<&'static NativePanelPolicy, ContractError> {
+crates/team-agent/src/coordinator/health.rs	0	P3-K2	132	coordinator_health_read_only	pub fn coordinator_health_read_only(workspace: &WorkspacePath) -> HealthReport {
+crates/team-agent/src/coordinator/health.rs	0	P3-K2	499	send_signal	fn send_signal(pid: Pid, signal: libc::c_int) -> bool {
+crates/team-agent/src/coordinator/health.rs	0	P3-K2	838	message_store_schema_health_read_only	fn message_store_schema_health_read_only(workspace: &WorkspacePath) -> SchemaHealth {
+crates/team-agent/src/coordinator/health.rs	0	P3-K2	889	coordinator_log_path	pub fn coordinator_log_path(workspace: &WorkspacePath) -> PathBuf {
+crates/team-agent/src/coordinator/orphan.rs	0	P3-K2	36	should_orphan_self_terminate	pub fn should_orphan_self_terminate(
+crates/team-agent/src/coordinator/orphan.rs	0	P3-K2	59	detect_whole_team_gone	pub fn detect_whole_team_gone(
+crates/team-agent/src/coordinator/orphan.rs	0	P3-K2	96	whole_team_report	fn whole_team_report(
+crates/team-agent/src/coordinator/runtime_detectors.rs	0	P3-K2	35	COMPACTION_RESET_THRESHOLD_DEFAULT	const COMPACTION_RESET_THRESHOLD_DEFAULT: i64 = 3;
+crates/team-agent/src/coordinator/runtime_detectors.rs	0	P3-K2	46	observe_runtime	pub fn observe_runtime(
+crates/team-agent/src/coordinator/runtime_detectors.rs	0	P3-K2	72	detect_compaction	fn detect_compaction(
+crates/team-agent/src/coordinator/runtime_detectors.rs	0	P3-K2	134	detect_session_drift	fn detect_session_drift(
+crates/team-agent/src/coordinator/runtime_detectors.rs	0	P3-K2	207	detect_leader_api_error	fn detect_leader_api_error(
+crates/team-agent/src/coordinator/runtime_detectors.rs	0	P3-K2	286	count_compaction_markers	fn count_compaction_markers(scrollback: &str) -> i64 {
+crates/team-agent/src/coordinator/runtime_detectors.rs	0	P3-K2	293	update_compaction_count	fn update_compaction_count(
+crates/team-agent/src/coordinator/runtime_detectors.rs	0	P3-K2	317	compaction_reset_threshold	fn compaction_reset_threshold(state: &Value) -> i64 {
+crates/team-agent/src/coordinator/runtime_detectors.rs	0	P3-K2	326	extract_thread_id_from_scrollback	fn extract_thread_id_from_scrollback(scrollback: &str) -> Option<String> {
+crates/team-agent/src/coordinator/runtime_detectors.rs	0	P3-K2	344	first_token	fn first_token(text: &str) -> Option<String> {
+crates/team-agent/src/coordinator/runtime_detectors.rs	0	P3-K2	360	is_uuid_token	fn is_uuid_token(token: &str) -> bool {
+crates/team-agent/src/coordinator/runtime_detectors.rs	0	P3-K2	382	mark_agent_session_drift	fn mark_agent_session_drift(
+crates/team-agent/src/coordinator/runtime_detectors.rs	0	P3-K2	421	clear_agent_session_drift	fn clear_agent_session_drift(state: &mut Value, agent_id: &AgentId) {
+crates/team-agent/src/coordinator/runtime_detectors.rs	0	P3-K2	441	agent_has_session_drift	fn agent_has_session_drift(state: &Value, agent_id: &AgentId) -> bool {
+crates/team-agent/src/coordinator/runtime_detectors.rs	0	P3-K2	464	match_api_error	fn match_api_error(scrollback: &str) -> Option<(String, String)> {
+crates/team-agent/src/coordinator/runtime_detectors.rs	0	P3-K2	528	has_api_context	fn has_api_context(lower: &str) -> bool {
+crates/team-agent/src/coordinator/runtime_detectors.rs	0	P3-K2	540	scrollback_has_partial_response	fn scrollback_has_partial_response(scrollback: &str, snippet: &str) -> bool {
+crates/team-agent/src/coordinator/runtime_detectors.rs	0	P3-K2	562	clear_last_api_error_fingerprint	fn clear_last_api_error_fingerprint(state: &mut Value) {
+crates/team-agent/src/coordinator/runtime_detectors.rs	0	P3-K2	570	leader_receiver_provider	fn leader_receiver_provider(receiver: Option<&Value>) -> Option<Provider> {
+crates/team-agent/src/coordinator/runtime_detectors.rs	0	P3-K2	578	runtime_event_provider_name	fn runtime_event_provider_name(provider: Provider) -> &'static str {
+crates/team-agent/src/coordinator/runtime_detectors.rs	0	P3-K2	591	coordinator_object_mut	fn coordinator_object_mut(state: &mut Value) -> Option<&mut Map<String, Value>> {
+crates/team-agent/src/coordinator/runtime_detectors.rs	0	P3-K2	602	get_coordinator	fn get_coordinator(state: &Value) -> Option<&Map<String, Value>> {
+crates/team-agent/src/coordinator/runtime_detectors.rs	0	P3-K2	606	get_coordinator_mut	fn get_coordinator_mut(state: &mut Value) -> Option<&mut Map<String, Value>> {
+crates/team-agent/src/coordinator/runtime_detectors.rs	0	P3-K2	610	object_field_mut	fn object_field_mut<'a>(
+crates/team-agent/src/coordinator/runtime_detectors.rs	0	P3-K2	620	agent_object_mut	fn agent_object_mut<'a>(
+crates/team-agent/src/coordinator/runtime_detectors.rs	0	P3-K2	631	tail_chars	fn tail_chars(text: &str, max_chars: usize) -> String {
+crates/team-agent/src/coordinator/runtime_observation.rs	0	P3-K2	36	CapturedRuntimeFact	pub struct CapturedRuntimeFact {
+crates/team-agent/src/coordinator/runtime_observation.rs	0	P3-K2	53	LeaderCaptureFact	pub struct LeaderCaptureFact {
+crates/team-agent/src/coordinator/runtime_observation.rs	0	P3-K2	61	RuntimeObservationResults	pub struct RuntimeObservationResults {
+crates/team-agent/src/coordinator/runtime_observation.rs	0	P3-K2	77	observe	pub fn observe(
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	47	provider_process_dead_fact	fn provider_process_dead_fact(liveness: &ProcessCheck) -> bool {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	53	worker_provider_exited_fact	fn worker_provider_exited_fact(liveness: &ProcessCheck) -> bool {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	57	refresh_abnormal_watch_liveness	fn refresh_abnormal_watch_liveness(state: &mut Value, agent_id: &str, liveness: &ProcessCheck) {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	92	AbnormalWatchAgent	struct AbnormalWatchAgent {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	108	ProcessCheck	struct ProcessCheck {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	114	AbnormalExitDecision	enum AbnormalExitDecision {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	121	ErrorRecency	enum ErrorRecency {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	128	as_str, is_fresh	fn as_str(self) -> &'static str {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	136	as_str, is_fresh	fn is_fresh(self) -> bool {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	142	AbnormalExitGate	struct AbnormalExitGate {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	149	new, should_notify_worker_abnormal_exit, suppressed_reason	fn new(
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	161	new, should_notify_worker_abnormal_exit, suppressed_reason	fn should_notify_worker_abnormal_exit(self) -> bool {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	165	new, should_notify_worker_abnormal_exit, suppressed_reason	fn suppressed_reason(self) -> Option<&'static str> {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	173	abnormal_exit_decision	fn abnormal_exit_decision(
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	192	should_notify_worker_abnormal_exit	fn should_notify_worker_abnormal_exit(
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	199	resolve_agent_rollout_path	fn resolve_agent_rollout_path(workspace: &Path, path: &Path) -> PathBuf {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	207	abnormal_watch_agents	fn abnormal_watch_agents(state: &Value) -> Vec<AbnormalWatchAgent> {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	260	agent_pid	fn agent_pid(agent: &Value) -> Option<Pid> {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	281	explicit_process_liveness	pub(crate) fn explicit_process_liveness(agent: &Value) -> Option<ProcessLiveness> {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	343	json_u32	fn json_u32(value: Option<&Value>) -> Option<u32> {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	352	agent_process_liveness	fn agent_process_liveness(
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	472	matching_agent_target	fn matching_agent_target<'a>(
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	497	pid_process_check	fn pid_process_check(label: &str, pid: Pid) -> ProcessCheck {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	513	command_process_check_with_marker	fn command_process_check_with_marker(
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	530	pane_command_process_check_with_marker	fn pane_command_process_check_with_marker(
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	559	worker_provider_exit_marker_check	fn worker_provider_exit_marker_check(
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	601	process_check	fn process_check(state: ProcessLiveness, detail: String) -> ProcessCheck {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	605	process_liveness_wire	fn process_liveness_wire(state: ProcessLiveness) -> &'static str {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	619	metadata_mtime_ns	pub(crate) fn metadata_mtime_ns(metadata: &std::fs::Metadata) -> Option<u64> {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	633	abnormal_watch_payload	fn abnormal_watch_payload(
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	685	upsert_abnormal_watch	fn upsert_abnormal_watch(state: &mut Value, agent_id: &str, mut payload: Value) {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	713	coordinator_child_object	fn coordinator_child_object<'a>(
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	737	abnormal_last_notified_key	fn abnormal_last_notified_key(state: &Value, agent_id: &str) -> Option<String> {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	741	abnormal_last_suppressed_key	fn abnormal_last_suppressed_key(state: &Value, agent_id: &str) -> Option<String> {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	745	abnormal_last_check_key	fn abnormal_last_check_key(state: &Value, agent_id: &str) -> Option<String> {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	749	abnormal_last_error_observation_key	fn abnormal_last_error_observation_key(state: &Value, agent_id: &str) -> Option<String> {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	753	abnormal_last_error_observation_cohort	fn abnormal_last_error_observation_cohort(state: &Value, agent_id: &str) -> Option<String> {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	758	ABNORMAL_TAIL_BYTES	const ABNORMAL_TAIL_BYTES: u64 = 131_072;
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	771	read_tail_text	pub(crate) fn read_tail_text(path: &Path, max_bytes: u64) -> std::io::Result<String> {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	784	abnormal_watch_stored_metadata	fn abnormal_watch_stored_metadata(state: &Value, agent_id: &str) -> Option<(u64, u64)> {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	795	abnormal_watch_str	fn abnormal_watch_str(state: &Value, agent_id: &str, field: &str) -> Option<String> {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	805	abnormal_watch_field	fn abnormal_watch_field(state: &Value, agent_id: &str, field: &str) -> Option<Value> {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	814	mark_abnormal_notified	fn mark_abnormal_notified(state: &mut Value, agent_id: &str, key: &str) {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	832	mark_abnormal_suppressed	fn mark_abnormal_suppressed(state: &mut Value, agent_id: &str, key: &str) {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	850	mark_abnormal_checked	fn mark_abnormal_checked(state: &mut Value, agent_id: &str, key: &str) {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	868	mark_abnormal_error_observed	fn mark_abnormal_error_observed(
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	898	write_abnormal_check	fn write_abnormal_check(
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	951	write_abnormal_suppressed	fn write_abnormal_suppressed(
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	986	abnormal_dedupe_key	fn abnormal_dedupe_key(agent: &AbnormalWatchAgent, fact: &crate::provider::FaultFact) -> String {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	1002	abnormal_error_cohort_key	fn abnormal_error_cohort_key(agent: &AbnormalWatchAgent) -> String {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	1019	abnormal_error_observation_key	fn abnormal_error_observation_key(
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	1034	abnormal_error_fact_identity	fn abnormal_error_fact_identity(fact: &crate::provider::FaultFact) -> Option<String> {
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	1042	abnormal_error_recency	fn abnormal_error_recency(
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	1061	abnormal_suppression_key	fn abnormal_suppression_key(
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	1075	abnormal_check_key	fn abnormal_check_key(
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	1093	format_abnormal_exit_message	fn format_abnormal_exit_message(
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	1124	recovery_hint	fn recovery_hint(
+crates/team-agent/src/coordinator/steps/abnormal.rs	0	P3-K2	1143	recovery_manual_command	fn recovery_manual_command(agent_id: &str, workspace: &Path, team: &str) -> String {
+crates/team-agent/src/coordinator/steps/mod.rs	0	P3-K2	38	TickStepGroup	pub enum TickStepGroup {
+crates/team-agent/src/coordinator/steps/mod.rs	0	P3-K2	53	as_str, ordered	pub fn as_str(self) -> &'static str {
+crates/team-agent/src/coordinator/steps/mod.rs	0	P3-K2	70	as_str, ordered	pub fn ordered() -> &'static [TickStepGroup] {
+crates/team-agent/src/coordinator/types.rs	0	P3-K2	32	TickError	pub enum TickError {
+crates/team-agent/src/coordinator/types.rs	0	P3-K2	68	DEFAULT_TICK_INTERVAL_SEC	pub const DEFAULT_TICK_INTERVAL_SEC: f64 = 5.0;
+crates/team-agent/src/coordinator/types.rs	0	P3-K2	71	BACKOFF_MAX_SEC	pub const BACKOFF_MAX_SEC: f64 = 60.0;
+crates/team-agent/src/coordinator/types.rs	0	P3-K2	163	StartOutcome	pub enum StartOutcome {
+crates/team-agent/src/coordinator/types.rs	0	P3-K2	195	TickStopReason	pub enum TickStopReason {
+crates/team-agent/src/coordinator/types.rs	0	P3-K2	332	InitFailed, SchemaMismatch	SchemaMismatch {
+crates/team-agent/src/coordinator/types.rs	0	P3-K2	341	InitFailed, SchemaMismatch	InitFailed { message: String },
+crates/team-agent/src/coordinator/types.rs	0	P3-K2	350	StartError	pub enum StartError {
+crates/team-agent/src/coordinator/types.rs	0	P3-K2	390	StartReport	pub struct StartReport {
+crates/team-agent/src/coordinator/types.rs	0	P3-K2	429	WholeTeamGoneClass	pub enum WholeTeamGoneClass {
+crates/team-agent/src/coordinator/types.rs	0	P3-K2	441	WholeTeamGoneReport	pub struct WholeTeamGoneReport {
+crates/team-agent/src/coordinator/types.rs	0	P3-K2	453	TeamPresenceSnapshot	pub struct TeamPresenceSnapshot {
+crates/team-agent/src/coordinator/types.rs	0	P3-K2	478	ProviderRegistry	pub trait ProviderRegistry {
+crates/team-agent/src/coordinator/types.rs	0	P3-K2	487	IdleNode	pub struct IdleNode {
+crates/team-agent/src/coordinator/types.rs	0	P3-K2	496	IdleAlert	pub struct IdleAlert {
+crates/team-agent/src/coordinator/types.rs	0	P3-K2	504	DeliveredMessage	pub struct DeliveredMessage {
+crates/team-agent/src/coordinator/types.rs	0	P3-K2	510	FiredScheduledEvent	pub struct FiredScheduledEvent {
+crates/team-agent/src/coordinator/types.rs	0	P3-K2	516	DeadlockAlert	pub struct DeadlockAlert {
+crates/team-agent/src/coordinator/types.rs	0	P3-K2	522	CompactionResult	pub struct CompactionResult {
+crates/team-agent/src/coordinator/types.rs	0	P3-K2	532	SessionDriftResult	pub struct SessionDriftResult {
+crates/team-agent/src/coordinator/types.rs	0	P3-K2	541	LeaderApiError	pub struct LeaderApiError {
+crates/team-agent/src/coordinator/types.rs	0	P3-K2	550	CollectedResult	pub struct CollectedResult {
+crates/team-agent/src/coordinator/types.rs	0	P3-K2	557	MarkerStore	pub trait MarkerStore {
+crates/team-agent/src/layout/recovery.rs	0	P4-K3	22	RecoveryOutcome	pub enum RecoveryOutcome {
+crates/team-agent/src/layout/recovery.rs	0	P4-K3	37	recover_leader_pane	pub fn recover_leader_pane<I>(env: I) -> RecoveryOutcome
+crates/team-agent/src/layout/recovery.rs	0	P4-K3	53	log_rebind_required	pub fn log_rebind_required(reason: &str) {
+crates/team-agent/src/leader/helpers.rs	0	P3-K2	15	turn_state_wire	pub(crate) fn turn_state_wire(state: TurnState) -> &'static str {
+crates/team-agent/src/leader/incident.rs	0	P4-K3	3	LeaderIncident	pub enum LeaderIncident {
+crates/team-agent/src/leader/lease.rs	0	P4-K3	51	into_error	fn into_error(self) -> LeaderError {
+crates/team-agent/src/leader/lease.rs	0	P4-K3	64	attach_leader	pub fn attach_leader(
+crates/team-agent/src/leader/lease.rs	0	P4-K3	257	quiet_fake_leader_pane_echo	fn quiet_fake_leader_pane_echo(provider: Provider, target: &PaneInfo, endpoint: &str) {
+crates/team-agent/src/leader/lease.rs	0	P4-K3	352	AttachLeaderTarget	struct AttachLeaderTarget {
+crates/team-agent/src/leader/lease.rs	0	P4-K3	357	attach_leader_targets	fn attach_leader_targets(workspace: &Path, state: &Value) -> Vec<AttachLeaderTarget> {
+crates/team-agent/src/leader/lease.rs	0	P4-K3	390	extend_attach_leader_targets	fn extend_attach_leader_targets(targets: &mut Vec<AttachLeaderTarget>, transport: &dyn Transport) {
+crates/team-agent/src/leader/lease.rs	0	P4-K3	475	attach_leader_to_state	pub(crate) fn attach_leader_to_state(
+crates/team-agent/src/leader/lease.rs	0	P4-K3	797	claim_lease_no_incident	pub(crate) fn claim_lease_no_incident(
+crates/team-agent/src/leader/lease.rs	0	P4-K3	1603	live_bound_pane_blocking_other_attach	fn live_bound_pane_blocking_other_attach(
+crates/team-agent/src/leader/lease.rs	0	P4-K3	1682	team_id	team_id: Option<String>,
+crates/team-agent/src/leader/lease.rs	0	P4-K3	1853	workspace_claim_target_from_pane_info	fn workspace_claim_target_from_pane_info(
+crates/team-agent/src/leader/lease.rs	0	P4-K3	1937	validate_attach_target	fn validate_attach_target(
+crates/team-agent/src/leader/lease.rs	0	P4-K3	1994	receiver_for_attach_target	fn receiver_for_attach_target(
+crates/team-agent/src/leader/lease.rs	0	P4-K3	2014	selected_grant_receiver	fn selected_grant_receiver<'a>(state: &'a Value) -> Option<&'a Value> {
+crates/team-agent/src/leader/lease.rs	0	P4-K3	2019	grant_allows_attach_target	pub(crate) fn grant_allows_attach_target(
+crates/team-agent/src/leader/lease.rs	0	P4-K3	2066	recorded_owner_live_facts_match	fn recorded_owner_live_facts_match(
+crates/team-agent/src/leader/lease.rs	0	P4-K3	2125	copy_verified_grant_from_state	fn copy_verified_grant_from_state(
+crates/team-agent/src/leader/lease.rs	0	P4-K3	2158	pane_info_value	fn pane_info_value(target: &PaneInfo) -> Value {
+crates/team-agent/src/leader/lease.rs	0	P4-K3	2208	TargetScanLiveness	struct TargetScanLiveness {
+crates/team-agent/src/leader/lease.rs	0	P4-K3	2213	new	fn new(state: &Value, targets: &[PaneInfo], workspace: &Path) -> Self {
+crates/team-agent/src/leader/owner_bind.rs	0	P4-K3	239	owner_bind_provider_wire	pub fn owner_bind_provider_wire(command: &str) -> &'static str {
+crates/team-agent/src/leader/provider_attribution.rs	0	P4-K3	62	provider_wire_from_command	pub(crate) fn provider_wire_from_command(command: &str) -> Option<&'static str> {
+crates/team-agent/src/leader/provider_attribution.rs	0	P4-K3	145	provider_wire_for_command_attribution	fn provider_wire_for_command_attribution(provider: Provider) -> &'static str {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	27	try_readopt_leader_pane	pub fn try_readopt_leader_pane(
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	138	rediscover_leader_receiver_with_owner_identity	fn rediscover_leader_receiver_with_owner_identity(
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	157	rediscover_leader_receiver_with_identity	fn rediscover_leader_receiver_with_identity(
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	199	rediscover_leader_receiver_from_targets	fn rediscover_leader_receiver_from_targets(
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	211	rediscover_leader_receiver_from_targets_with_owner_identity	pub(super) fn rediscover_leader_receiver_from_targets_with_owner_identity(
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	230	rediscover_leader_receiver_from_targets_with_identity	fn rediscover_leader_receiver_from_targets_with_identity(
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	393	LeaderTarget	struct LeaderTarget {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	412	from_pane_info	fn from_pane_info(info: &PaneInfo) -> Option<Self> {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	446	OwnerIdentity	struct OwnerIdentity {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	457	from_raw, from_state, has_match_identity	fn from_state(workspace: &Path, state: &Value) -> Result<Self, LeaderError> {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	486	from_raw, from_state, has_match_identity	fn from_raw(raw: &Value, from_caller: bool) -> Self {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	523	from_raw, from_state, has_match_identity	fn has_match_identity(&self) -> bool {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	530	target_from_value	fn target_from_value(value: &Value) -> Option<LeaderTarget> {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	581	map_env	fn map_env(value: Option<&Value>) -> BTreeMap<String, String> {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	594	target_iter	fn target_iter(targets: &Value) -> Vec<LeaderTarget> {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	606	readopt_candidate_is_usable_leader	fn readopt_candidate_is_usable_leader(
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	641	rediscover_candidate_is_usable_leader	fn rediscover_candidate_is_usable_leader(target: &LeaderTarget) -> bool {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	649	path_in_workspace	fn path_in_workspace(path: &Path, workspace: &Path) -> bool {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	655	target_matches_owner_identity	fn target_matches_owner_identity(target: &LeaderTarget, identity: &OwnerIdentity) -> bool {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	667	pane_info_value	fn pane_info_value(
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	688	candidate_pane_ids	fn candidate_pane_ids(candidates: &[LeaderTarget]) -> Vec<String> {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	695	ambiguous_incident_id	fn ambiguous_incident_id(identity: &OwnerIdentity, panes: &[String]) -> String {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	717	old_target_from_state	fn old_target_from_state(state: &Value) -> Option<String> {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	726	emit_failed_rebind_required	fn emit_failed_rebind_required(
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	747	emit_ambiguous_candidates	fn emit_ambiguous_candidates(
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	802	ambiguous_candidates_already_broadcast	fn ambiguous_candidates_already_broadcast(
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	813	emit_no_owner_rebind_required	fn emit_no_owner_rebind_required(
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	833	emit_owner_missing_rebind_required	fn emit_owner_missing_rebind_required(
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	859	emit_rebind_required	fn emit_rebind_required(
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	883	owner_identity_value	fn owner_identity_value(identity: &OwnerIdentity) -> Value {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	887	candidate_values	fn candidate_values(candidates: &[LeaderTarget], golden_spelling: bool) -> Value {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	902	legacy_candidate_value	fn legacy_candidate_value(candidate: &LeaderTarget) -> Value {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	918	optional_numeric_string_value	fn optional_numeric_string_value(value: Option<&str>) -> Value {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	927	candidate_queue_values	fn candidate_queue_values(candidates: &[LeaderTarget]) -> Value {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	941	empty_to_null	fn empty_to_null(value: &str) -> Option<&str> {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	949	old_pane_id	fn old_pane_id(receiver: &LeaderReceiver, owner_record: Option<&TeamOwner>) -> Option<String> {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	955	uuid_prefix	fn uuid_prefix(uuid: Option<&LeaderSessionUuid>) -> String {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	959	event_provider	fn event_provider(identity: &OwnerIdentity) -> &'static str {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	963	env_triple_matches	fn env_triple_matches(target: &LeaderTarget, identity: &OwnerIdentity) -> bool {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	982	different_live_owner_uuid_mismatch	fn different_live_owner_uuid_mismatch(
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	1004	next_owner_epoch	fn next_owner_epoch(
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	1017	state_owner_epoch	fn state_owner_epoch(state: &Value) -> Option<OwnerEpoch> {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	1031	owner_from_candidate	fn owner_from_candidate(
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	1059	receiver_from_candidate	fn receiver_from_candidate(
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	1092	empty_prior	fn empty_prior(provider: Provider, epoch: OwnerEpoch) -> LeaderReceiver {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	1118	state_receiver	fn state_receiver(state: &Value) -> Option<LeaderReceiver> {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	1128	write_readopt_state	fn write_readopt_state(
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	1150	write_receiver_state	fn write_receiver_state(
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	1170	get_str	fn get_str(value: &Value, key: &str) -> Option<String> {
+crates/team-agent/src/leader/rediscover.rs	0	P4-K3	1181	get_u32	fn get_u32(value: &Value, key: &str) -> Option<u32> {
+crates/team-agent/src/leader/registry.rs	0	P4-K3	89	short_name_collision_refuses	pub fn short_name_collision_refuses() -> &'static str {
+crates/team-agent/src/leader/registry.rs	0	P4-K3	97	AMBIGUOUS_NAMES_FIELD	pub const AMBIGUOUS_NAMES_FIELD: &str = "ambiguous_names";
+crates/team-agent/src/leader/start.rs	0	P4-K3	63	into_leader_error	fn into_leader_error(self) -> LeaderError {
+crates/team-agent/src/leader/start.rs	0	P4-K3	83	leader_start_plan	pub(crate) fn leader_start_plan(
+crates/team-agent/src/leader/start.rs	0	P4-K3	105	prepare_leader_start	pub(crate) fn prepare_leader_start(
+crates/team-agent/src/leader/start.rs	0	P4-K3	163	leader_start_plan_after_ambient_authority_check	pub(crate) fn leader_start_plan_after_ambient_authority_check(
+crates/team-agent/src/leader/start.rs	0	P4-K3	495	pane_id, tmux	pane_id: PaneId,
+crates/team-agent/src/leader/start.rs	0	P4-K3	498	pane_id, tmux	tmux: String,
+crates/team-agent/src/leader/start.rs	0	P4-K3	1609	is_interactive_shell_basename	fn is_interactive_shell_basename(name: &str) -> bool {
+crates/team-agent/src/leader/start.rs	0	P4-K3	2059	push_bounded_stderr	fn push_bounded_stderr(captured: &mut Vec<u8>, chunk: &[u8]) {
+crates/team-agent/src/leader/start.rs	0	P4-K3	2302	shlex_quote	fn shlex_quote(raw: &str) -> String {
+crates/team-agent/src/leader/takeover.rs	0	P4-K3	14	evaluate_takeover_reminder	pub fn evaluate_takeover_reminder(
+crates/team-agent/src/leader/types.rs	0	P3-K2	135	RereadReason	pub enum RereadReason {
+crates/team-agent/src/leader/types.rs	0	P4-K3	185	(unnamed)	ReceiverClaimApplied,
+crates/team-agent/src/leader/types.rs	0	P4-K3	188	(unnamed)	ReceiverAttachFailed,
+crates/team-agent/src/leader/types.rs	0	P4-K3	189	(unnamed)	ReceiverStateDivergenceRepaired,
+crates/team-agent/src/leader/types.rs	0	P4-K3	190	(unnamed)	ReceiverFirstTimeEnvSeeded,
+crates/team-agent/src/leader/types.rs	0	P4-K3	191	(unnamed)	ReceiverAutobindSkipped,
+crates/team-agent/src/leader/types.rs	0	P4-K3	192	(unnamed)	ReceiverRequeuedExhaustedWatchers,
+crates/team-agent/src/leader/types.rs	0	P4-K3	193	(unnamed)	ReceiverAmbiguousCandidates,
+crates/team-agent/src/leader/types.rs	0	P4-K3	194	(unnamed)	ReceiverClaimRequeue,
+crates/team-agent/src/leader/types.rs	0	P4-K3	195	(unnamed)	ReceiverClaimLeaderNotification,
+crates/team-agent/src/leader/types.rs	0	P4-K3	202	(unnamed)	LeaderSessionUuidOverride,
+crates/team-agent/src/leader/types.rs	0	P4-K3	204	(unnamed)	ResultWatcherRequeued,
+crates/team-agent/src/leader/types.rs	0	P4-K3	206	(unnamed)	IdleTakeoverClassify,
+crates/team-agent/src/leader/types.rs	0	P4-K3	207	(unnamed)	IdleTakeoverPing,
+crates/team-agent/src/leader/types.rs	0	P4-K3	208	(unnamed)	IdleTakeoverReminder,
+crates/team-agent/src/leader/types.rs	0	P4-K3	209	(unnamed)	IdleTakeoverPushFailed,
+crates/team-agent/src/leader/types.rs	0	P3-K2	318	RereadDecision	pub struct RereadDecision {
+crates/team-agent/src/leader/types.rs	0	P3-K2	326	WakeWatchState	pub struct WakeWatchState {
+crates/team-agent/src/leader/types.rs	0	P4-K3	373	not_started	pub fn not_started(reason: impl Into<String>) -> Self {
+crates/team-agent/src/leader/types.rs	0	P4-K3	386	IdleNode	pub struct IdleNode {
+crates/team-agent/src/leader/types.rs	0	P4-K3	402	NodeRole	pub enum NodeRole {
+crates/team-agent/src/leader/types.rs	0	P4-K3	491	LEADER_OWNERSHIP_LOCK	pub const LEADER_OWNERSHIP_LOCK: &str = "send";
+crates/team-agent/src/leader/types.rs	0	P3-K2	502	TurnStateClassifier	pub trait TurnStateClassifier {
+crates/team-agent/src/leader/types.rs	0	P4-K3	515	TurnClassification	pub struct TurnClassification {
+crates/team-agent/src/leader/types.rs	0	P4-K3	526	TakeoverReminderResult	pub struct TakeoverReminderResult {
+crates/team-agent/src/lifecycle/helpers.rs	0	P4-K5	62	save_team_runtime_snapshot	pub(crate) fn save_team_runtime_snapshot(
+crates/team-agent/src/lifecycle/helpers.rs	0	P4-K5	117	persist_err	fn persist_err(action: &str, err: &io::Error) -> LifecycleError {
+crates/team-agent/src/lifecycle/helpers.rs	0	P4-K5	144	plan_state_path	pub(crate) fn plan_state_path(workspace: &Path, plan_id: &PlanId) -> PathBuf {
+crates/team-agent/src/lifecycle/helpers.rs	0	P4-K5	152	plan_lock_path	pub(crate) fn plan_lock_path(workspace: &Path, plan_id: &PlanId) -> PathBuf {
+crates/team-agent/src/lifecycle/helpers.rs	0	P4-K5	156	plan_state_dir	fn plan_state_dir(workspace: &Path) -> PathBuf {
+crates/team-agent/src/lifecycle/helpers.rs	0	P4-K5	165	read_plan_state	pub(crate) fn read_plan_state(path: &Path) -> Result<PlanState, LifecycleError> {
+crates/team-agent/src/lifecycle/helpers.rs	0	P4-K5	177	save_plan_state	pub(crate) fn save_plan_state(
+crates/team-agent/src/lifecycle/helpers.rs	0	P4-K5	198	plan_state_json	fn plan_state_json(state: &PlanState) -> serde_json::Value {
+crates/team-agent/src/lifecycle/launch/plan.rs	0	P4-K5	31	start_plan	pub(crate) fn start_plan(
+crates/team-agent/src/lifecycle/launch/plan.rs	0	P4-K5	90	handle_report_result	pub(crate) fn handle_report_result(
+crates/team-agent/src/lifecycle/launch/plan.rs	0	P4-K5	116	plan_id_from_plan	fn plan_id_from_plan(plan_path: &Path, plan: &Value) -> Result<PlanId, LifecycleError> {
+crates/team-agent/src/lifecycle/launch/plan.rs	0	P4-K5	127	plan_stages	fn plan_stages(plan: &Value) -> Result<Vec<PlanStage>, LifecycleError> {
+crates/team-agent/src/lifecycle/launch/plan.rs	0	P4-K5	164	plan_progress_from_state	fn plan_progress_from_state(
+crates/team-agent/src/lifecycle/launch/plan.rs	0	P4-K5	187	advance_plan_state	fn advance_plan_state(
+crates/team-agent/src/lifecycle/launch/plan.rs	0	P4-K5	230	current_stage_index	fn current_stage_index(state: &PlanState) -> Option<usize> {
+crates/team-agent/src/lifecycle/launch/plan.rs	0	P4-K5	243	plan_condition_matches	fn plan_condition_matches(condition: &PlanCondition, envelope: &serde_json::Value) -> bool {
+crates/team-agent/src/lifecycle/launch/plan.rs	0	P4-K5	252	report_result_field	fn report_result_field(envelope: &serde_json::Value, field: &str) -> Option<String> {
+crates/team-agent/src/lifecycle/launch/plan.rs	0	P4-K5	260	json_scalar_to_string	fn json_scalar_to_string(value: &serde_json::Value) -> Option<String> {
+crates/team-agent/src/lifecycle/launch/quick_start_transport.rs	0	P4-K3	260	attach_window_names_for_state_agents	pub(crate) fn attach_window_names_for_state_agents<'a>(
+crates/team-agent/src/lifecycle/restart/orchestrator.rs	0	P4-K5	29	halt_plan	pub(crate) fn halt_plan(
+crates/team-agent/src/lifecycle/restart/orchestrator.rs	0	P4-K5	56	plan_status	pub(crate) fn plan_status(workspace: &Path, plan_id: &PlanId) -> Result<PlanState, LifecycleError> {
+crates/team-agent/src/lifecycle/restart/rebuild.rs	0	P3-K2	53	CoordinatorStart	CoordinatorStart,
+crates/team-agent/src/lifecycle/types.rs	0	P4-K5	75	PlanId	pub struct PlanId(String);
+crates/team-agent/src/lifecycle/types.rs	0	P3-K2	152	coordinator_start_status_wire	fn coordinator_start_status_wire(status: crate::coordinator::StartOutcome) -> &'static str {
+crates/team-agent/src/lifecycle/types.rs	0	P4-K5	230	PlanStatus	pub enum PlanStatus {
+crates/team-agent/src/lifecycle/types.rs	0	P4-K5	277	PlanState	pub struct PlanState {
+crates/team-agent/src/lifecycle/types.rs	0	P4-K5	293	PlanStage	pub struct PlanStage {
+crates/team-agent/src/lifecycle/types.rs	0	P4-K5	305	PlanCondition	pub enum PlanCondition {
+crates/team-agent/src/lifecycle/types.rs	0	P4-K5	383	DangerousApprovalRequired, InvalidPlan, InvalidPlanId, RollbackFailed	DangerousApprovalRequired(String),
+crates/team-agent/src/lifecycle/types.rs	0	P4-K5	417	DangerousApprovalRequired, InvalidPlan, InvalidPlanId, RollbackFailed	RollbackFailed { step: String, detail: String },
+crates/team-agent/src/lifecycle/types.rs	0	P4-K5	420	DangerousApprovalRequired, InvalidPlan, InvalidPlanId, RollbackFailed	InvalidPlanId(String),
+crates/team-agent/src/lifecycle/types.rs	0	P4-K5	423	DangerousApprovalRequired, InvalidPlan, InvalidPlanId, RollbackFailed	InvalidPlan(String),
+crates/team-agent/src/lifecycle/types.rs	0	P4-K5	879	PlanProgress	pub enum PlanProgress {
+crates/team-agent/src/model/task_graph.rs	0	P3-K2	124	ready_tasks	pub fn ready_tasks(tasks: &[TaskNode]) -> Vec<&TaskNode> {
+crates/team-agent/src/model/task_graph.rs	0	P3-K2	153	update_task_status	pub fn update_task_status(
+crates/team-agent/src/packaging/install.rs	0	P4-K8	16	install	pub fn install(opts: &InstallOptions) -> Result<InstallReport, PackagingError> {
+crates/team-agent/src/packaging/install.rs	0	P4-K8	109	diagnose_path	fn diagnose_path(bin_dir: &BinDir) -> Result<PathHint, PackagingError> {
+crates/team-agent/src/packaging/install.rs	0	P4-K8	152	default_skill_source	fn default_skill_source() -> PathBuf {
+crates/team-agent/src/packaging/migrate.rs	0	P4-K8	14	doctor	pub fn doctor(opts: &DoctorOptions) -> Result<DoctorStatus, PackagingError> {
+crates/team-agent/src/packaging/repair.rs	0	P4-K8	15	repair_schema	pub fn repair_schema(workspace: &Path) -> Result<MigrationOutcome, PackagingError> {
+crates/team-agent/src/packaging/types.rs	0	P4-K8	51	provider	pub fn provider(self) -> Option<Provider> {
+crates/team-agent/src/packaging/types.rs	0	P4-K8	82	DoctorStatus	pub enum DoctorStatus {
+crates/team-agent/src/packaging/types.rs	0	P4-K8	91	Blocker	pub struct Blocker {
+crates/team-agent/src/packaging/types.rs	0	P4-K8	100	BlockerSource	pub enum BlockerSource {
+crates/team-agent/src/packaging/types.rs	0	P4-K8	134	Prefix	pub struct Prefix(pub PathBuf);
+crates/team-agent/src/packaging/types.rs	0	P4-K8	138	BinDir	pub struct BinDir(pub PathBuf);
+crates/team-agent/src/packaging/types.rs	0	P4-K8	156	ReleaseTarget	pub(super) enum ReleaseTarget {
+crates/team-agent/src/packaging/types.rs	0	P4-K8	176	PlatformSupport	pub(super) enum PlatformSupport {
+crates/team-agent/src/packaging/types.rs	0	P4-K8	193	platform_support	pub(super) fn platform_support(target: ReleaseTarget) -> PlatformSupport {
+crates/team-agent/src/packaging/types.rs	0	P4-K8	224	InstallReport	pub struct InstallReport {
+crates/team-agent/src/packaging/types.rs	0	P4-K8	241	PathHint	pub enum PathHint {
+crates/team-agent/src/packaging/types.rs	0	P4-K8	254	PathDiagnostic	pub struct PathDiagnostic {
+crates/team-agent/src/packaging/types.rs	0	P4-K8	282	AtomicReplaceOutcome	pub enum AtomicReplaceOutcome {
+crates/team-agent/src/packaging/types.rs	0	P4-K8	296	UninstallOutcome	pub struct UninstallOutcome {
+crates/team-agent/src/packaging/types.rs	0	P4-K8	310	MigrationOutcome	pub enum MigrationOutcome {
+crates/team-agent/src/packaging/types.rs	0	P4-K8	326	InstallOptions	pub struct InstallOptions {
+crates/team-agent/src/packaging/types.rs	0	P4-K8	337	UninstallOptions	pub struct UninstallOptions {
+crates/team-agent/src/packaging/types.rs	0	P4-K8	359	DoctorOptions	pub struct DoctorOptions {
+crates/team-agent/src/packaging/types.rs	0	P4-K8	373	DoctorGate	pub enum DoctorGate {
+crates/team-agent/src/packaging/types.rs	0	P4-K8	389	(unnamed)	ReplaceFailed(String),
+crates/team-agent/src/packaging/types.rs	0	P4-K8	392	(unnamed)	CrossDeviceReplaceFailed(String),
+crates/team-agent/src/packaging/types.rs	0	P4-K8	398	(unnamed)	UnknownGate(String),
+crates/team-agent/src/packaging/types.rs	0	P4-K8	401	(unnamed)	PathDiagnostic(String),
+crates/team-agent/src/packaging/types.rs	0	P4-K8	404	(unnamed)	PurgeRefusedTeamRunning(PathBuf),
+crates/team-agent/src/packaging/types.rs	0	P4-K8	407	(unnamed)	UnsupportedPlatform(String),
+crates/team-agent/src/packaging/types.rs	0	P4-K8	413	(unnamed)	State(String),
+crates/team-agent/src/provider/adapter.rs	0	P4-K4	37	ProviderAdapter::version	fn version(&self) -> Result<String, ProviderError>;
+crates/team-agent/src/provider/adapter.rs	0	P4-K4	40	ProviderAdapter::auth_hint	fn auth_hint(&self, auth_mode: AuthMode) -> AuthHintStatus;
+crates/team-agent/src/provider/adapter.rs	0	P4-K4	44	ProviderAdapter::build_command	fn build_command(
+crates/team-agent/src/provider/adapter.rs	0	P4-K4	107	ProviderAdapter::recover_session_id	fn recover_session_id(
+crates/team-agent/src/provider/adapter.rs	0	P4-K4	122	ProviderAdapter::build_resume_command	fn build_resume_command(
+crates/team-agent/src/provider/adapter.rs	0	P4-K4	157	ProviderAdapter::fork	fn fork(
+crates/team-agent/src/provider/adapter.rs	0	P4-K4	203	ProviderAdapter::install_mcp	fn install_mcp(&self, config: &McpConfig) -> Result<(), ProviderError>;
+crates/team-agent/src/provider/adapter.rs	0	P4-K4	207	ProviderAdapter::status_patterns	fn status_patterns(&self) -> Result<StatusPatterns, ProviderError>;
+crates/team-agent/src/provider/adapter.rs	0	P4-K4	210	ProviderAdapter::validate_model	fn validate_model(&self, model: &str) -> Result<bool, ProviderError>;
+crates/team-agent/src/provider/adapter.rs	0	P4-K4	989	copilot_auth_hint	fn copilot_auth_hint(auth_mode: AuthMode) -> AuthHintStatus {
+crates/team-agent/src/provider/adapter.rs	0	P4-K4	1006	claude_auth_hint	fn claude_auth_hint(auth_mode: AuthMode) -> AuthHintStatus {
+crates/team-agent/src/provider/adapters/claude_fork.rs	0	P4-K4	7	ClaudeForkMaterialization	pub(crate) struct ClaudeForkMaterialization {
+crates/team-agent/src/provider/adapters/claude_fork.rs	0	P4-K4	13	keep, path	pub(crate) fn path(&self) -> &Path {
+crates/team-agent/src/provider/adapters/claude_fork.rs	0	P4-K4	17	keep, path	pub(crate) fn keep(&mut self) {
+crates/team-agent/src/provider/adapters/claude_fork.rs	0	P4-K4	30	materialize_claude_fork	pub(crate) fn materialize_claude_fork(
+crates/team-agent/src/provider/adapters/claude_fork.rs	0	P4-K4	77	validate_jsonl	fn validate_jsonl(text: &str) -> Result<(), ProviderError> {
+crates/team-agent/src/provider/adapters/copilot_fork.rs	0	P4-K4	8	SESSION_TABLES	const SESSION_TABLES: [&str; 6] = [
+crates/team-agent/src/provider/adapters/copilot_fork.rs	0	P4-K4	18	CopilotForkMaterialization	pub(crate) struct CopilotForkMaterialization {
+crates/team-agent/src/provider/adapters/copilot_fork.rs	0	P4-K4	25	home, keep, session_id	pub(crate) fn session_id(&self) -> &SessionId {
+crates/team-agent/src/provider/adapters/copilot_fork.rs	0	P4-K4	29	home, keep, session_id	pub(crate) fn home(&self) -> &Path {
+crates/team-agent/src/provider/adapters/copilot_fork.rs	0	P4-K4	33	home, keep, session_id	pub(crate) fn keep(&mut self) {
+crates/team-agent/src/provider/adapters/copilot_fork.rs	0	P4-K4	56	materialize_copilot_fork	pub(crate) fn materialize_copilot_fork(
+crates/team-agent/src/provider/adapters/copilot_fork.rs	0	P4-K4	124	copy_tree	fn copy_tree(source: &Path, target: &Path) -> Result<(), ProviderError> {
+crates/team-agent/src/provider/adapters/copilot_fork.rs	0	P4-K4	140	rewrite_text_tree	fn rewrite_text_tree(root: &Path, source: &str, target: &str) -> Result<(), ProviderError> {
+crates/team-agent/src/provider/adapters/copilot_fork.rs	0	P4-K4	162	clone_and_rekey_store	fn clone_and_rekey_store(
+crates/team-agent/src/provider/adapters/copilot_fork.rs	0	P4-K4	201	require_session_column	fn require_session_column(conn: &Connection, table: &str) -> Result<(), ProviderError> {
+crates/team-agent/src/provider/adapters/copilot_fork.rs	0	P4-K4	217	verify_rekeyed_store	fn verify_rekeyed_store(
+crates/team-agent/src/provider/adapters/copilot_fork.rs	0	P4-K4	258	rewrite_per_session_db	fn rewrite_per_session_db(path: &Path, source: &str, target: &str) -> Result<(), ProviderError> {
+crates/team-agent/src/provider/adapters/copilot_fork.rs	0	P4-K4	305	sql_error	fn sql_error(error: rusqlite::Error) -> ProviderError {
+crates/team-agent/src/provider/approvals/parsing.rs	0	P4-K4	111	choose_internal_mcp_approval_choice	pub fn choose_internal_mcp_approval_choice(prompt: &ApprovalPrompt) -> String {
+crates/team-agent/src/provider/approvals/parsing.rs	0	P4-K4	132	approval_choice_keys	pub fn approval_choice_keys(
+crates/team-agent/src/provider/approvals/parsing.rs	0	P4-K4	297	active_choice_index	fn active_choice_index(capture: &str) -> Option<usize> {
+crates/team-agent/src/provider/approvals/runtime_prompts.rs	0	P3-K2	9	RUNTIME_MCP_APPROVAL_SERVER	pub const RUNTIME_MCP_APPROVAL_SERVER: &str = "team_orchestrator";
+crates/team-agent/src/provider/approvals/runtime_prompts.rs	0	P3-K2	11	runtime_mcp_tool_allowlisted	fn runtime_mcp_tool_allowlisted(tool: &str) -> bool {
+crates/team-agent/src/provider/approvals/runtime_prompts.rs	0	P3-K2	15	runtime_mcp_prompt_allowlisted	fn runtime_mcp_prompt_allowlisted(prompt: &ApprovalPrompt) -> bool {
+crates/team-agent/src/provider/approvals/runtime_prompts.rs	0	P3-K2	38	runtime_mcp_tool_is_internal_control_plane	fn runtime_mcp_tool_is_internal_control_plane(prompt: &ApprovalPrompt) -> bool {
+crates/team-agent/src/provider/approvals/runtime_prompts.rs	0	P3-K2	50	RuntimeApprovalDecision	pub enum RuntimeApprovalDecision {
+crates/team-agent/src/provider/approvals/runtime_prompts.rs	0	P3-K2	57	AwaitingHumanConfirmFact	pub struct AwaitingHumanConfirmFact {
+crates/team-agent/src/provider/approvals/runtime_prompts.rs	0	P3-K2	71	to_event_payload, to_leader_message_content	pub fn to_event_payload(&self) -> serde_json::Value {
+crates/team-agent/src/provider/approvals/runtime_prompts.rs	0	P3-K2	89	to_event_payload, to_leader_message_content	pub fn to_leader_message_content(&self) -> String {
+crates/team-agent/src/provider/approvals/runtime_prompts.rs	0	P3-K2	94	runtime_approval_decision	pub fn runtime_approval_decision(
+crates/team-agent/src/provider/approvals/runtime_prompts.rs	0	P3-K2	105	awaiting_human_confirm_reason	pub fn awaiting_human_confirm_reason(
+crates/team-agent/src/provider/approvals/runtime_prompts.rs	0	P3-K2	133	approval_prompt_fingerprint	fn approval_prompt_fingerprint(
+crates/team-agent/src/provider/approvals/runtime_prompts.rs	0	P3-K2	167	awaiting_human_confirm_dedupe_key	fn awaiting_human_confirm_dedupe_key(
+crates/team-agent/src/provider/approvals/runtime_prompts.rs	0	P3-K2	178	awaiting_human_confirm_fact	pub fn awaiting_human_confirm_fact(
+crates/team-agent/src/provider/approvals/runtime_prompts.rs	0	P3-K2	199	prompt_kind_wire	fn prompt_kind_wire(kind: ApprovalKind) -> &'static str {
+crates/team-agent/src/provider/classify.rs	0	P3-K2	19	classify	pub fn classify(
+crates/team-agent/src/provider/classify.rs	0	P3-K2	87	claude_background_task_open	fn claude_background_task_open(records: &[serde_json::Value]) -> Option<Option<TurnId>> {
+crates/team-agent/src/provider/classify.rs	0	P3-K2	115	collect_background_open_ids	fn collect_background_open_ids(value: &serde_json::Value, out: &mut Vec<String>) {
+crates/team-agent/src/provider/classify.rs	0	P3-K2	151	collect_background_close_ids	fn collect_background_close_ids(value: &serde_json::Value, out: &mut Vec<String>) {
+crates/team-agent/src/provider/classify.rs	0	P3-K2	191	extract_xml_tag	fn extract_xml_tag(text: &str, tag: &str) -> Option<String> {
+crates/team-agent/src/provider/classify.rs	0	P3-K2	199	latest_explicit_error_fact	pub fn latest_explicit_error_fact(provider: Provider, session_log_text: &str) -> Option<FaultFact> {
+crates/team-agent/src/provider/classify.rs	0	P3-K2	209	latest_explicit_error_fact_for_record	fn latest_explicit_error_fact_for_record(
+crates/team-agent/src/provider/classify.rs	0	P3-K2	232	evaluate_takeover_reminder	pub fn evaluate_takeover_reminder(
+crates/team-agent/src/provider/classify.rs	0	P3-K2	347	LifecycleFact	struct LifecycleFact {
+crates/team-agent/src/provider/classify.rs	0	P3-K2	354	classify_result	fn classify_result(
+crates/team-agent/src/provider/classify.rs	0	P3-K2	371	extract_lifecycle_facts	fn extract_lifecycle_facts(
+crates/team-agent/src/provider/classify.rs	0	P3-K2	388	codex_latest_explicit_error_fact	fn codex_latest_explicit_error_fact(record: &serde_json::Value) -> Option<FaultFact> {
+crates/team-agent/src/provider/classify.rs	0	P3-K2	409	claude_latest_explicit_error_fact	fn claude_latest_explicit_error_fact(record: &serde_json::Value) -> Option<FaultFact> {
+crates/team-agent/src/provider/classify.rs	0	P3-K2	416	decide_state	fn decide_state(fact: &LifecycleFact, process: ProcessLiveness) -> ClassifyResult {
+crates/team-agent/src/provider/classify.rs	0	P3-K2	476	claude_lifecycle_fact	fn claude_lifecycle_fact(record: &serde_json::Value) -> Option<LifecycleFact> {
+crates/team-agent/src/provider/classify.rs	0	P3-K2	567	codex_lifecycle_fact	fn codex_lifecycle_fact(record: &serde_json::Value) -> Option<LifecycleFact> {
+crates/team-agent/src/provider/classify.rs	0	P3-K2	656	lifecycle	fn lifecycle(
+crates/team-agent/src/provider/classify.rs	0	P3-K2	670	claude_user_interrupted	fn claude_user_interrupted(record: &serde_json::Value) -> bool {
+crates/team-agent/src/provider/classify.rs	0	P3-K2	684	node_state	fn node_state(node: &serde_json::Value) -> TurnState {
+crates/team-agent/src/provider/classify.rs	0	P3-K2	696	remind	fn remind(
+crates/team-agent/src/provider/faults.rs	0	P3-K2	10	read_fault_facts	pub fn read_fault_facts(records: &[serde_json::Value], provider: Provider) -> Vec<FaultFact> {
+crates/team-agent/src/provider/faults.rs	0	P3-K2	17	claude_explicit_error_fact	pub(crate) fn claude_explicit_error_fact(record: &serde_json::Value) -> Option<FaultFact> {
+crates/team-agent/src/provider/faults.rs	0	P3-K2	45	fault_fact	fn fault_fact(provider: Provider, record: &serde_json::Value) -> Option<FaultFact> {
+crates/team-agent/src/provider/faults.rs	0	P3-K2	54	claude_fault_fact	fn claude_fault_fact(record: &serde_json::Value) -> Option<FaultFact> {
+crates/team-agent/src/provider/faults.rs	0	P3-K2	74	claude_record_has_error_tool_result	pub(crate) fn claude_record_has_error_tool_result(record: &serde_json::Value) -> bool {
+crates/team-agent/src/provider/faults.rs	0	P3-K2	87	claude_record_is_system_api_error	fn claude_record_is_system_api_error(record: &serde_json::Value) -> bool {
+crates/team-agent/src/provider/faults.rs	0	P3-K2	93	claude_system_api_error_turn_id	fn claude_system_api_error_turn_id(record: &serde_json::Value) -> Option<TurnId> {
+crates/team-agent/src/provider/faults.rs	0	P3-K2	102	claude_record_is_assistant_api_error	fn claude_record_is_assistant_api_error(record: &serde_json::Value) -> bool {
+crates/team-agent/src/provider/faults.rs	0	P3-K2	121	claude_assistant_api_error_turn_id	fn claude_assistant_api_error_turn_id(record: &serde_json::Value) -> Option<TurnId> {
+crates/team-agent/src/provider/faults.rs	0	P3-K2	130	non_empty_string_field	fn non_empty_string_field(record: &serde_json::Value, key: &str) -> Option<String> {
+crates/team-agent/src/provider/faults.rs	0	P3-K2	138	codex_fault_fact	fn codex_fault_fact(record: &serde_json::Value) -> Option<FaultFact> {
+crates/team-agent/src/provider/helpers.rs	0	P4-K4	38	patterns	pub(crate) fn patterns(
+crates/team-agent/src/provider/helpers.rs	0	P4-K4	50	compile_regex	fn compile_regex(pattern: &str) -> Result<regex::Regex, ProviderError> {
+crates/team-agent/src/provider/model_catalog.rs	0	P4-K4	624	finish_stdout_after_exit	pub(crate) fn finish_stdout_after_exit(
+crates/team-agent/src/provider/session/capture.rs	0	P4-K4	959	pending_session_capture	fn pending_session_capture<F>(
+crates/team-agent/src/provider/session/context_fork.rs	0	P4-K4	34	ContextForkTermination	pub(crate) enum ContextForkTermination {
+crates/team-agent/src/provider/session/context_fork.rs	0	P4-K4	64	context_fork_convergence_deadline	pub(crate) fn context_fork_convergence_deadline(provider: Provider) -> Duration {
+crates/team-agent/src/provider/session/context_fork.rs	0	P4-K4	78	ContextForkProof	pub struct ContextForkProof {
+crates/team-agent/src/provider/session/context_fork.rs	0	P4-K4	89	ContextBackingSnapshot	pub(crate) struct ContextBackingSnapshot {
+crates/team-agent/src/provider/session/context_fork.rs	0	P4-K4	94	FileStamp	struct FileStamp {
+crates/team-agent/src/provider/session/context_fork.rs	0	P4-K4	114	capture	pub(crate) fn capture(provider: Provider, plan: &CommandPlan) -> Self {
+crates/team-agent/src/provider/session/context_fork.rs	0	P4-K4	143	verify_context_fork	pub(crate) fn verify_context_fork(
+crates/team-agent/src/provider/session/context_fork.rs	0	P4-K4	175	verify_copilot_fork	fn verify_copilot_fork(
+crates/team-agent/src/provider/session/context_fork.rs	0	P4-K4	232	provider_backing_root	fn provider_backing_root(provider: Provider, plan: &CommandPlan) -> PathBuf {
+crates/team-agent/src/provider/session/context_fork.rs	0	P4-K4	247	jsonl_files	fn jsonl_files(root: &Path) -> BTreeMap<PathBuf, FileStamp> {
+crates/team-agent/src/provider/session/context_fork.rs	0	P4-K4	268	file_stamp	fn file_stamp(path: &Path) -> Option<FileStamp> {
+crates/team-agent/src/provider/session/context_fork.rs	0	P4-K4	276	readable_jsonl	fn readable_jsonl(path: &Path) -> bool {
+crates/team-agent/src/provider/session/context_fork.rs	0	P4-K4	287	session_id_from_jsonl	fn session_id_from_jsonl(path: &Path) -> Option<String> {
+crates/team-agent/src/provider/session/context_fork/claude.rs	0	P4-K4	41	verify_claude_fork	pub(super) fn verify_claude_fork(
+crates/team-agent/src/provider/session/context_fork/outcome.rs	0	P4-K4	25	PendingContextFork	pub(crate) struct PendingContextFork {
+crates/team-agent/src/provider/session/context_fork/outcome.rs	0	P4-K4	33	ContextForkOutcome	pub(crate) enum ContextForkOutcome {
+crates/team-agent/src/provider/session/context_fork/outcome.rs	0	P4-K4	87	observe_context_fork	pub(crate) fn observe_context_fork(
+crates/team-agent/src/provider/session/resume.rs	0	P4-K4	129	SessionCaptureIncomplete, SessionDrift	SessionCaptureIncomplete,
+crates/team-agent/src/provider/session/resume.rs	0	P4-K4	132	SessionCaptureIncomplete, SessionDrift	SessionDrift { expected: String, actual: String },
+crates/team-agent/src/provider/session/resume.rs	0	P4-K4	196	from_legacy	pub fn from_legacy(reason: &str) -> Self {
+crates/team-agent/src/provider/submit_now.rs	0	P4-K4	21	GROK_SEND_NOW_MARK	pub const GROK_SEND_NOW_MARK: &str = "Enter:send now";
+crates/team-agent/src/provider/submit_now.rs	0	P4-K4	24	GROK_SEND_NOW_MAX_ENTERS	pub const GROK_SEND_NOW_MAX_ENTERS: u32 = 8;
+crates/team-agent/src/provider/submit_now.rs	0	P4-K4	26	FlushReport	pub struct FlushReport {
+crates/team-agent/src/provider/submit_now.rs	0	P4-K4	33	flush_explicit_queue	pub fn flush_explicit_queue(
+crates/team-agent/src/provider/submit_now.rs	0	P4-K4	57	keep_provider_queue_requested	pub fn keep_provider_queue_requested() -> bool {
+crates/team-agent/src/provider/submit_now.rs	0	P4-K4	64	queue_mark_visible	pub fn queue_mark_visible(text: &str) -> bool {
+crates/team-agent/src/provider/submit_now.rs	0	P4-K4	69	retry_pause	fn retry_pause() -> Duration {
+crates/team-agent/src/provider/types.rs	0	P3-K2	22	TurnState	pub enum TurnState {
+crates/team-agent/src/provider/types.rs	0	P4-K3	34	is_idle_for_takeover	pub fn is_idle_for_takeover(self) -> bool {
+crates/team-agent/src/provider/types.rs	0	P4-K4	42	FactKind	pub enum FactKind {
+crates/team-agent/src/provider/types.rs	0	P4-K4	53	is_closing	pub fn is_closing(self) -> bool {
+crates/team-agent/src/provider/types.rs	0	P4-K4	74	AgentRuntimeStatus	pub enum AgentRuntimeStatus {
+crates/team-agent/src/provider/types.rs	0	P4-K4	89	HealthStatus	pub enum HealthStatus {
+crates/team-agent/src/provider/types.rs	0	P4-K4	101	agent_health_status	pub fn agent_health_status(status: &str) -> HealthStatus {
+crates/team-agent/src/provider/types.rs	0	P4-K4	174	NoPingReason	pub enum NoPingReason {
+crates/team-agent/src/provider/types.rs	0	P4-K4	195	reason_str	pub fn reason_str(&self) -> String {
+crates/team-agent/src/provider/types.rs	0	P4-K4	262	TurnId	pub struct TurnId(pub String);
+crates/team-agent/src/provider/types.rs	0	P4-K4	278	ApprovalFingerprint	pub struct ApprovalFingerprint(pub String);
+crates/team-agent/src/provider/types.rs	0	P4-K4	295	Signature	pub struct Signature(pub String);
+crates/team-agent/src/provider/types.rs	0	P4-K4	403	CaptureFailed	CaptureFailed(String),
+crates/team-agent/src/provider/types.rs	0	P4-K4	436	ClassifySource	pub enum ClassifySource {
+crates/team-agent/src/provider/types.rs	0	P4-K4	447	ClassifyResult	pub struct ClassifyResult {
+crates/team-agent/src/provider/types.rs	0	P4-K4	459	FaultFact	pub struct FaultFact {
+crates/team-agent/src/provider/types.rs	0	P4-K4	470	new, with_api_error_details	pub fn new(signature: Signature, turn_id: Option<TurnId>, kind: FactKind) -> Self {
+crates/team-agent/src/provider/types.rs	0	P4-K4	482	new, with_api_error_details	pub fn with_api_error_details(
+crates/team-agent/src/provider/types.rs	0	P4-K4	501	RemindResult	pub struct RemindResult {
+crates/team-agent/src/provider/types.rs	0	P4-K4	525	StatusPatterns	pub struct StatusPatterns {
+crates/team-agent/src/provider/wire.rs	0	P4-K4	54	require_active_state_providers	pub(crate) fn require_active_state_providers(
+crates/team-agent/src/state/abnormal_watch.rs	0	P3-K2	126	begin_observation	pub(crate) fn begin_observation(state: &mut Value, agent_id: &str) {
+crates/team-agent/src/state/identity.rs	0	P4-K3	295	populate_team_owner_from_env	fn populate_team_owner_from_env(
+crates/team-agent/src/state/identity.rs	0	P4-K3	336	apply_first_time_leader_binding	pub fn apply_first_time_leader_binding(
+crates/team-agent/src/state/identity.rs	0	P4-K3	425	leader_env_exports	pub fn leader_env_exports(receiver: &Value, identity: &Value) -> Vec<(String, String)> {
+crates/team-agent/src/state/identity.rs	0	P4-K3	457	validate_leader_uuid_from_targets	pub fn validate_leader_uuid_from_targets(receiver: &Value, targets: &Value) -> Value {
+crates/team-agent/src/state/identity.rs	0	P4-K3	485	str_or_empty	fn str_or_empty(v: Option<&Value>) -> String {
+crates/team-agent/src/state/identity.rs	0	P4-K3	493	py_repr_str	fn py_repr_str(s: &str) -> String {
+crates/team-agent/src/state/owner_gate.rs	0	P4-K3	167	worker_sender_bypasses_owner_gate	pub fn worker_sender_bypasses_owner_gate(
+crates/team-agent/src/state/owner_gate.rs	0	P4-K3	216	workspace_paths_match	pub fn workspace_paths_match(a: &Path, b: &Path) -> bool {
+crates/team-agent/src/tmux_backend.rs	0	P4-K3	1606	probe_ambient_leader_pane_info	pub fn probe_ambient_leader_pane_info() -> Option<(String, Option<String>)> {
+crates/team-agent/src/transport_factory.rs	0	P3-K2	176	Coordinator, LifecycleWorker, MessageDelivery	LifecycleWorker,
+crates/team-agent/src/transport_factory.rs	0	P3-K2	181	Coordinator, LifecycleWorker, MessageDelivery	MessageDelivery,
