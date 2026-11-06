@@ -55,7 +55,7 @@ const RETAINED_AFTER_REVIEW: &[(&str, &str, &str)] = &[
     (
         "src/provider/session/resume.rs",
         "SessionCaptureIncomplete,",
-        "constructed by the retained restart readiness wrapper (lifecycle/restart/rebuild.rs) and lifted by from_legacy; folding it into Other would change refusal_reason.wire() to session_unresumable. SessionDrift is still retired",
+        "constructed by the retained restart readiness wrapper (lifecycle/restart/rebuild.rs); folding it into Other would change refusal_reason.wire() to session_unresumable. SessionDrift and from_legacy (no production caller) are still retired",
     ),
 ];
 
