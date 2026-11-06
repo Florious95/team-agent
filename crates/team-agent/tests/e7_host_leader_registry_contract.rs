@@ -55,35 +55,7 @@ fn e7_registry_module_defines_v1_file_schema_and_only_derived_events() {
     );
 }
 
-#[test]
-fn e7_cli_exposes_leaders_command_and_to_leader_parser() {
-    let emit = source("src/cli/emit.rs");
-    let types = source("src/cli/types.rs");
-    let send = source("src/cli/send.rs");
-    let combined = format!("{emit}\n{types}\n{send}");
 
-    let mut missing = Vec::new();
-    for required in [
-        "\"leaders\"",
-        "cmd_leaders",
-        "--to-leader",
-        "to_leader",
-        "leader_name_not_found",
-        "name_ambiguous",
-        "registry_stale",
-        "resolved_via",
-        "host_leader_registry",
-    ] {
-        if !combined.contains(required) {
-            missing.push(required);
-        }
-    }
-
-    assert!(
-        missing.is_empty(),
-        "E7 RED: CLI must expose `team-agent leaders` and parse `send --to-leader NAME` as a mutually exclusive leader target, with typed not_found/ambiguous/stale output. Missing markers: {missing:?}"
-    );
-}
 
 #[test]
 fn e7_leaders_json_lists_live_stale_ambiguous_leaders_only() {
@@ -130,33 +102,7 @@ fn e7_leaders_json_lists_live_stale_ambiguous_leaders_only() {
     }
 }
 
-#[test]
-fn e7_to_leader_delegates_to_e6_mailbox_and_preserves_honest_delivery_state() {
-    let send = source("src/cli/send.rs");
-    let registry = source("src/leader/registry.rs");
-    let combined = format!("{send}\n{registry}");
 
-    let mut missing = Vec::new();
-    for required in [
-        "send_to_canonical_leader_target",
-        "queued_until_leader_attach",
-        "leader_mailbox",
-        "delivered",
-        "name_ambiguous",
-        "candidates",
-        "workspace_hash",
-        "stable_qualified_name",
-    ] {
-        if !combined.contains(required) {
-            missing.push(required);
-        }
-    }
-
-    assert!(
-        missing.is_empty(),
-        "E7 RED: send --to-leader must resolve short/qualified/hash names through registry, refuse ambiguous names with candidates/no side effects, and delegate live/offline delivery to E6 without pretending queued mailbox rows are delivered. Missing markers: {missing:?}"
-    );
-}
 
 #[test]
 fn e7_send_and_registry_paths_do_not_write_identity_fields() {

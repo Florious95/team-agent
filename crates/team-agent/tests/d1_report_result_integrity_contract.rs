@@ -153,10 +153,10 @@ fn report(envelope: Value) -> Value {
         Some(TeamKey::new("current")),
     );
     let ok = tools
-        .report_result(
+        .report_result_with_presentation(
             Some(&envelope),
             None,
-            ResultStatus::Success,
+            Some("success"),
             None,
             None,
             None,
@@ -164,7 +164,8 @@ fn report(envelope: Value) -> Value {
             None,
             None,
             None,
-        )
+
+        None)
         .expect("D1 contract setup: report_result should accept the envelope");
     assert_eq!(ok.fields["ok"], true);
     assert_eq!(ok.fields["status"], "stored");
@@ -262,20 +263,4 @@ fn seed_collect_workspace(ws: &Path) {
         }),
     )
     .expect("seed collect runtime state");
-}
-
-fn stored_result(ws: &Path, result_id: &str) -> (String, Value) {
-    let store = team_agent::message_store::MessageStore::open(ws).expect("open message store");
-    let conn = team_agent::db::schema::open_db(store.db_path()).expect("open db");
-    let (status, envelope): (String, String) = conn
-        .query_row(
-            "select status, envelope from results where result_id = ?1",
-            params![result_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .expect("read stored result");
-    (
-        status,
-        serde_json::from_str(&envelope).expect("stored envelope json"),
-    )
 }

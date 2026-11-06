@@ -19,12 +19,7 @@ use std::sync::Mutex;
 
 use serde_json::{json, Value};
 use team_agent::lifecycle::{quick_start_with_transport, QuickStartReport};
-use team_agent::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
-    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
-    WindowName,
-};
+use team_agent::transport::{ BackendKind, CaptureRange, CapturedText, InjectStage, Key, PaneField, PaneId, PaneInfo, SessionName, SpawnResult, Target, Transport, TransportError, WindowName };
 
 fn bin() -> &'static str {
     crate::lifecycle::tests::test_binary_path()
@@ -708,22 +703,6 @@ impl Transport for SessionRecordingTransport {
         Ok(self.spawn_result(session, window, "into"))
     }
 
-    fn inject(
-        &self,
-        _target: &Target,
-        _payload: &InjectPayload,
-        _submit: Key,
-        _bracketed: bool,
-    ) -> Result<InjectReport, TransportError> {
-        Ok(InjectReport {
-            stage_reached: InjectStage::Submit,
-            inject_verification: InjectVerification::CaptureContainsToken,
-            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
-            turn_verification: TurnVerification::NotYetObserved,
-            attempts: 1,
-            submit_diagnostics: None,
-        })
-    }
 
     fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
         Ok(())
@@ -763,14 +742,6 @@ impl Transport for SessionRecordingTransport {
         Ok(Vec::new())
     }
 
-    fn set_session_env(
-        &self,
-        _session: &SessionName,
-        _key: &str,
-        _value: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        Ok(SetEnvOutcome::Applied)
-    }
 
     fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
         Ok(())
@@ -780,7 +751,4 @@ impl Transport for SessionRecordingTransport {
         Ok(())
     }
 
-    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
-        Ok(AttachOutcome::Attached)
-    }
 }

@@ -164,12 +164,6 @@ impl RequestedTransportBackend {
         }
     }
 
-    pub fn as_wire(self) -> &'static str {
-        match self {
-            Self::Tmux => "tmux",
-            Self::ConPty => "conpty",
-        }
-    }
 }
 
 /// Which lifecycle site is asking the factory to resolve a transport.
@@ -200,7 +194,6 @@ pub struct TransportFactoryInput<'a> {
     pub state: Option<&'a serde_json::Value>,
     pub spec_backend_literal: Option<&'a str>,
     pub explicit_backend: Option<RequestedTransportBackend>,
-    pub purpose: TransportPurpose,
     /// True only when the caller has confirmed the switch (via
     /// `--fresh` or a similar explicit gate). Used to allow C-2's
     /// otherwise-refuse path.
@@ -208,14 +201,13 @@ pub struct TransportFactoryInput<'a> {
 }
 
 impl<'a> TransportFactoryInput<'a> {
-    pub fn new(workspace: &'a Path, purpose: TransportPurpose) -> Self {
+    pub fn new(workspace: &'a Path, _purpose: TransportPurpose) -> Self {
         Self {
             workspace,
             team_key: None,
             state: None,
             spec_backend_literal: None,
             explicit_backend: None,
-            purpose,
             allow_backend_switch: false,
         }
     }
@@ -230,20 +222,11 @@ impl<'a> TransportFactoryInput<'a> {
         self
     }
 
-    pub fn with_spec_backend_literal(mut self, literal: Option<&'a str>) -> Self {
-        self.spec_backend_literal = literal;
-        self
-    }
-
     pub fn with_explicit_backend(mut self, override_: Option<RequestedTransportBackend>) -> Self {
         self.explicit_backend = override_;
         self
     }
 
-    pub fn allow_backend_switch(mut self, allow: bool) -> Self {
-        self.allow_backend_switch = allow;
-        self
-    }
 }
 
 /// One-line trace of what the factory resolved and why. Emitted by the
@@ -687,9 +670,9 @@ mod tests {
     #[test]
     fn pty_literal_is_not_silently_mapped_to_conpty() {
         let workspace = ws();
-        let input = TransportFactoryInput::new(&workspace, TransportPurpose::Launch)
-            .with_team_key(Some("team-a"))
-            .with_spec_backend_literal(Some("pty"));
+        let mut input = TransportFactoryInput::new(&workspace, TransportPurpose::Launch)
+            .with_team_key(Some("team-a"));
+        input.spec_backend_literal = Some("pty");
         let err =
             resolve_transport(input).expect_err("pty literal must be refused, not auto-mapped");
         match err {
@@ -718,11 +701,11 @@ mod tests {
             other => panic!("expected BackendConflict, got {other:?}"),
         }
         // With allow_backend_switch=true (== --fresh), the same input succeeds.
-        let input_fresh = TransportFactoryInput::new(&workspace, TransportPurpose::LifecycleWorker)
+        let mut input_fresh = TransportFactoryInput::new(&workspace, TransportPurpose::LifecycleWorker)
             .with_team_key(Some("team-a"))
             .with_state(Some(&state))
-            .with_explicit_backend(Some(RequestedTransportBackend::Tmux))
-            .allow_backend_switch(true);
+            .with_explicit_backend(Some(RequestedTransportBackend::Tmux));
+        input_fresh.allow_backend_switch = true;
         let ok = resolve_transport(input_fresh).expect("--fresh must allow switch");
         assert_eq!(ok.kind, BackendKind::Tmux);
         assert_eq!(ok.source, "cli");
@@ -843,8 +826,8 @@ mod tests {
     // in Rust cannot silently drift the CLI accept-list.
     #[test]
     fn requested_backend_wire_strings_are_pinned() {
-        assert_eq!(RequestedTransportBackend::Tmux.as_wire(), "tmux");
-        assert_eq!(RequestedTransportBackend::ConPty.as_wire(), "conpty");
+        assert_eq!(RequestedTransportBackend::parse_literal("tmux"), Some(RequestedTransportBackend::Tmux));
+        assert_eq!(RequestedTransportBackend::parse_literal("conpty"), Some(RequestedTransportBackend::ConPty));
         assert_eq!(
             RequestedTransportBackend::parse_literal("tmux"),
             Some(RequestedTransportBackend::Tmux)

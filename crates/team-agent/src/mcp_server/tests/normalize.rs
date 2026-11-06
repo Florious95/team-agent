@@ -124,90 +124,10 @@
     // Golden: input {delivered_count,ok,message_id,status,to} (scrambled) emits
     // keys in WHITELIST order: ok,status,message_id,to,delivered_count.
     // ════════════════════════════════════════════════════════════════════════
-    #[test]
-    fn compact_ok_whitelist_drops_unknown_and_orders_by_whitelist() {
-        let r = json!({
-            "delivered_count": 5, "ok": true, "message_id": "mZ",
-            "status": "queued", "to": "x", "secret": "drop_me"
-        });
-        let ok = compact_tool_result(&r).expect("ok compaction");
-        let v = serde_json::to_value(&ok).unwrap();
-        // unknown key dropped
-        assert!(v.get("secret").is_none());
-        // WHITELIST order, not input order
-        assert_eq!(keys(&v), vec!["ok", "status", "message_id", "to", "delivered_count"]);
-        assert_eq!(s(&v), r#"{"ok":true,"status":"queued","message_id":"mZ","to":"x","delivered_count":5}"#);
-    }
 
-    #[test]
-    fn compact_ok_empty_yields_ok_true() {
-        // empty compaction → {"ok": true} (normalize.py:64)
-        let ok = compact_tool_result(&json!({})).expect("empty→ok:true");
-        assert_eq!(s(&serde_json::to_value(&ok).unwrap()), r#"{"ok":true}"#);
-    }
 
-    #[test]
-    fn compact_error_whitelist_and_order() {
-        // Python `_compact_tool_result` (normalize.py:6-31) does NOT synthesize a
-        // _tool_error_result for an ok:false delegate dict — it passes the delegate's
-        // OWN string reason/error/status THROUGH the error whitelist, in WHITELIST
-        // ORDER, and returns a plain dict that still carries ok:false. So the Rust
-        // seam is `Ok(ToolOk)` with ok:false inside (NOT Err(ToolError): the closed
-        // ToolErrorReason enum has no "r" variant and cannot byte-faithfully carry an
-        // arbitrary delegate reason). The isError flag is derived later from the
-        // body's ok:false in handle_mcp, not from this compactor.
-        //
-        // Golden (re-probed v0.2.11):
-        //   _compact_tool_result({"error":"e","ok":false,"message_id":"m",
-        //                         "reason":"r","status":"failed"})
-        //   == {"ok":false,"status":"failed","reason":"r","error":"e","message_id":"m"}
-        //   keys (whitelist order): ok,status,reason,error,message_id
-        let r = json!({"error":"e","ok":false,"message_id":"m","reason":"r","status":"failed"});
-        let ok = compact_tool_result(&r)
-            .expect("error-path compaction is Ok(ToolOk{ok:false,...}), not Err — mirrors Python");
-        let v = serde_json::to_value(&ok).unwrap();
-        // ok:false is preserved INSIDE the body (the error whitelist begins with "ok").
-        assert_eq!(v.get("ok"), Some(&json!(false)));
-        assert_eq!(v.get("status"), Some(&json!("failed")));
-        assert_eq!(v.get("reason"), Some(&json!("r")));  // delegate string passed through
-        assert_eq!(v.get("error"), Some(&json!("e")));   // delegate string passed through
-        assert_eq!(v.get("message_id"), Some(&json!("m")));
-        // WHITELIST insertion order (preserve_order), not input order.
-        assert_eq!(keys(&v), vec!["ok", "status", "reason", "error", "message_id"]);
-        // full byte-stable string — the contract this module exists to lock.
-        assert_eq!(s(&v),
-            r#"{"ok":false,"status":"failed","reason":"r","error":"e","message_id":"m"}"#);
-    }
 
-    #[test]
-    fn compact_fanout_preserves_deliveries_and_recipients() {
-        // fanout_* status preserves deliveries/recipients APPENDED after whitelist keys.
-        let r = json!({
-            "ok": true, "status": "fanout_partial",
-            "deliveries": [1, 2], "recipients": ["a", "b"], "delivered_count": 1
-        });
-        let ok = compact_tool_result(&r).expect("fanout ok");
-        let v = serde_json::to_value(&ok).unwrap();
-        assert_eq!(keys(&v), vec!["ok", "status", "delivered_count", "deliveries", "recipients"]);
-        assert_eq!(s(&v),
-            r#"{"ok":true,"status":"fanout_partial","delivered_count":1,"deliveries":[1,2],"recipients":["a","b"]}"#);
-    }
 
-    #[test]
-    fn compact_acknowledged_messages_becomes_count() {
-        // acknowledged_messages list → acknowledged_count = len
-        let ok = compact_tool_result(&json!({
-            "ok": true, "status": "collected", "acknowledged_messages": ["a", "b", "c"]
-        })).expect("ack ok");
-        let v = serde_json::to_value(&ok).unwrap();
-        assert_eq!(v.get("acknowledged_count"), Some(&json!(3)));
-        assert!(v.get("acknowledged_messages").is_none());
-        // None/empty → 0
-        let ok0 = compact_tool_result(&json!({"ok": true, "acknowledged_messages": Value::Null}))
-            .expect("ack none");
-        let v0 = serde_json::to_value(&ok0).unwrap();
-        assert_eq!(v0.get("acknowledged_count"), Some(&json!(0)));
-    }
 
     // ════════════════════════════════════════════════════════════════════════
     // ToolError envelope — REDUNDANT keys are load-bearing (server.py:98-106)

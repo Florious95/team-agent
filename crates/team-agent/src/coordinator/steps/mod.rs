@@ -30,11 +30,6 @@
 //!   6. `persist`          — durable state persistence at tick end
 
 pub mod abnormal;
-pub mod delivery;
-pub mod health_sync;
-pub mod persist;
-pub mod runtime_prompts;
-pub mod session_gate;
 
 /// Canonical ordering of tick step groups. The orchestrator must invoke
 /// steps in this order so persisted state reflects every earlier step's

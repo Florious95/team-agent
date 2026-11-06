@@ -18,12 +18,7 @@ use std::sync::Mutex;
 use serde_json::json;
 use serial_test::serial;
 use team_agent::lifecycle::{launch_with_transport, restart_with_transport, RestartReport};
-use team_agent::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
-    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
-    WindowName,
-};
+use team_agent::transport::{ BackendKind, CaptureRange, CapturedText, InjectStage, Key, PaneField, PaneId, PaneInfo, SessionName, SpawnResult, Target, Transport, TransportError, WindowName };
 
 static SEQ: AtomicU32 = AtomicU32::new(0);
 
@@ -229,22 +224,6 @@ impl Transport for PanicOnStartupPromptTransport {
         Ok(self.spawn_result("spawn_into", session, window))
     }
 
-    fn inject(
-        &self,
-        _target: &Target,
-        _payload: &InjectPayload,
-        _submit: Key,
-        _bracketed: bool,
-    ) -> Result<InjectReport, TransportError> {
-        Ok(InjectReport {
-            stage_reached: InjectStage::Submit,
-            inject_verification: InjectVerification::CaptureContainsToken,
-            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
-            turn_verification: TurnVerification::NotYetObserved,
-            attempts: 1,
-            submit_diagnostics: None,
-        })
-    }
 
     fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
         Ok(())
@@ -291,14 +270,6 @@ impl Transport for PanicOnStartupPromptTransport {
         Ok(Vec::new())
     }
 
-    fn set_session_env(
-        &self,
-        _session: &SessionName,
-        _key: &str,
-        _value: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        Ok(SetEnvOutcome::Applied)
-    }
 
     fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
         Ok(())
@@ -308,7 +279,4 @@ impl Transport for PanicOnStartupPromptTransport {
         Ok(())
     }
 
-    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
-        Ok(AttachOutcome::Attached)
-    }
 }

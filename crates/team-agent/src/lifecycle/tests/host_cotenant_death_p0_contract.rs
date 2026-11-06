@@ -25,18 +25,12 @@ use team_agent::lifecycle::{
     reset_agent_with_transport, restart_with_transport_with_readiness_deadline,
     start_agent_with_transport, LifecycleError, RestartReport,
 };
-use team_agent::message_store::MessageStore;
 use team_agent::model::enums::{PaneLiveness, Provider};
 use team_agent::model::ids::AgentId;
 use team_agent::model::paths::{runtime_dir, runtime_spec_path};
 use team_agent::provider::{get_adapter, ProviderAdapter};
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
-use team_agent::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
-};
+use team_agent::transport::{ BackendKind, CaptureRange, CapturedText, InjectStage, Key, PaneField, PaneId, PaneInfo, SessionName, SpawnResult, Target, Transport, TransportError, WindowName };
 
 const TEAM: &str = "current";
 // These fixtures exercise cohort rollback, not migration of dead legacy PIDs.
@@ -493,7 +487,7 @@ fn status_model_uses_effective_copilot_source_not_stale_claude_state() {
     state["agents"]["developer"]["model"] = json!("claude-opus-4-7");
     save_runtime_state(&workspace, &state).unwrap();
 
-    let status = team_agent::cli::status_port::status(&workspace, false, true)
+    let status = team_agent::cli::status_port::status_scoped(&workspace, &crate::state::persist::load_runtime_state(&workspace).expect("fixture runtime state"), None, false, true)
         .expect("status --json --detail");
     let agent = status.pointer("/agents/developer").unwrap_or(&Value::Null);
     let model = agent.get("model").and_then(Value::as_str);
@@ -744,9 +738,6 @@ impl Transport for CohortTransport {
         self.spawn_first(session, window, argv, cwd, env)
     }
 
-    fn inject(&self, _target: &Target, _payload: &InjectPayload, _submit: Key, _bracketed: bool) -> Result<InjectReport, TransportError> {
-        Ok(InjectReport { stage_reached: InjectStage::Submit, inject_verification: InjectVerification::CaptureContainsToken, submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck, turn_verification: TurnVerification::NotRequired, attempts: 1, submit_diagnostics: None })
-    }
 
     fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> { Ok(()) }
 
@@ -756,8 +747,6 @@ impl Transport for CohortTransport {
 
     fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
         Ok(match field {
-            PaneField::PaneId => Some("%query".to_string()),
-            PaneField::SessionName => Some(SESSION.to_string()),
             PaneField::PaneCurrentCommand => Some(self.state.lock().unwrap().current_command.clone()),
             _ => None,
         })
@@ -791,7 +780,6 @@ impl Transport for CohortTransport {
         Ok(self.state.lock().unwrap().panes.iter().filter_map(|pane| pane.window_name.clone()).collect::<BTreeSet<_>>().into_iter().collect())
     }
 
-    fn set_session_env(&self, _session: &SessionName, _key: &str, _value: &str) -> Result<SetEnvOutcome, TransportError> { Ok(SetEnvOutcome::Applied) }
 
     fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> { Ok(()) }
 
@@ -805,7 +793,6 @@ impl Transport for CohortTransport {
         Ok(())
     }
 
-    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> { Ok(AttachOutcome::Attached) }
 }
 
 fn pane_info(window: &str, pane: &str, current_command: &str) -> PaneInfo {

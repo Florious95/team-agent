@@ -25,12 +25,7 @@ use serde_json::{json, Value};
 use serial_test::serial;
 use team_agent::lifecycle::{restart_with_transport_with_readiness_deadline, RestartReport};
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
-use team_agent::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
-};
+use team_agent::transport::{ BackendKind, CaptureRange, CapturedText, InjectStage, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName, SpawnResult, Target, Transport, TransportError, WindowName };
 
 const CALLER_PANE: &str = "%7";
 const TMUX_SOCKET: &str = "/private/tmp/tmux-501/ta-0515-auto-attach";
@@ -662,15 +657,6 @@ impl Transport for RestartAutoAttachTransport {
         Ok(self.spawn_result(session, window))
     }
 
-    fn inject(
-        &self,
-        _target: &Target,
-        _payload: &InjectPayload,
-        _submit: Key,
-        _bracketed: bool,
-    ) -> Result<InjectReport, TransportError> {
-        Ok(inject_report())
-    }
 
     fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
         Ok(())
@@ -707,14 +693,6 @@ impl Transport for RestartAutoAttachTransport {
         Ok(vec![WindowName::new(WORKER)])
     }
 
-    fn set_session_env(
-        &self,
-        _session: &SessionName,
-        _key: &str,
-        _value: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        Ok(SetEnvOutcome::Applied)
-    }
 
     fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
         Ok(())
@@ -724,21 +702,9 @@ impl Transport for RestartAutoAttachTransport {
         Ok(())
     }
 
-    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
-        Ok(AttachOutcome::Attached)
-    }
 }
 
-fn inject_report() -> InjectReport {
-    InjectReport {
-        stage_reached: InjectStage::Submit,
-        inject_verification: InjectVerification::NoToken,
-        submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
-        turn_verification: TurnVerification::NotRequired,
-        attempts: 1,
-        submit_diagnostics: None,
-    }
-}
+
 
 fn fake_tmux_bin(root: &Path, cwd: &Path) -> PathBuf {
     let bin = root.join("fake-bin");

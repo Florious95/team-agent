@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::message_store::MessageStore;
 use crate::model::enums::PaneLiveness;
 use crate::model::ids::TeamKey;
 use crate::provider::Provider;
@@ -468,43 +467,6 @@ fn state_records_pane_endpoint(state: &Value, pane_id: &str, endpoint: &str) -> 
             })
 }
 
-fn attach_window_failure_value(
-    counts: crate::message_store::BlockedLeaderRequeueCounts,
-    team_id: &TeamKey,
-    pane_id: &PaneId,
-) -> Option<Value> {
-    (counts.blocked_leader_unbound > 0).then(|| {
-        json!({
-            "team_id": team_id.as_str(),
-            "pane_id": pane_id.as_str(),
-            "reason": "leader_not_attached",
-            "count": counts.blocked_leader_unbound,
-            "status": "requeued_pending_physical_retry",
-        })
-    })
-}
-
-/// R8 D4 (decoupled for offline byte-lock — c-lite): build the `leader_receiver.requeued_exhausted_watchers`
-/// event payload from the requeued notices, independent of the real-tmux attach flow.
-/// golden (leader/__init__.py:39-44): EXACTLY `{watcher_ids, count, trigger:"attach_leader"}`.
-/// (Current divergent body — {pane_id, team_id, watcher_ids, requeued} — kept until porter-c ports;
-/// pinned RED in leader::tests asserts the golden shape.)
-pub(crate) fn requeued_exhausted_watchers_event_payload(
-    _pane_id: &PaneId,
-    _team_id: &TeamKey,
-    notices: &[crate::messaging::WatcherNotice],
-) -> serde_json::Value {
-    let watcher_ids: Vec<&str> = notices
-        .iter()
-        .map(|notice| notice.watcher_id.as_str())
-        .collect();
-    json!({
-        "watcher_ids": watcher_ids,
-        "count": watcher_ids.len(),
-        "trigger": "attach_leader",
-    })
-}
-
 /// `attach_leader_to_state`(card §43;`__init__.py:256`)。核心绑定逻辑(autobind/launch/runtime 复用)。
 /// 首次(无 team_owner 且 source∈{launch,quick_start})走 `apply_first_time_leader_binding`
 /// (cwd+command 宽松匹配);否则严格 UUID 门 + `try_readopt_leader_pane` 收敛到 lease claim。
@@ -528,33 +490,6 @@ pub(crate) fn attach_leader_to_state(
         source,
         require_current,
         None,
-        None,
-        None,
-        None,
-    )
-    .map_err(AttachLeaderError::into_error)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn attach_leader_to_state_with_target(
-    workspace: &Path,
-    state: &mut Value,
-    pane: Option<&PaneId>,
-    provider: Provider,
-    event_log: &crate::event_log::EventLog,
-    source: LeaseSource,
-    require_current: bool,
-    caller_target: Option<&PaneInfo>,
-) -> Result<(LeaderReceiver, Value), LeaderError> {
-    attach_leader_to_state_with_target_and_controls(
-        workspace,
-        state,
-        pane,
-        provider,
-        event_log,
-        source,
-        require_current,
-        caller_target,
         None,
         None,
         None,

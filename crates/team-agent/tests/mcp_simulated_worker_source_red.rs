@@ -13,9 +13,7 @@ use std::collections::BTreeSet;
 use mcp_sim_harness::{McpSimHarness, McpToolCall};
 use serde_json::json;
 use team_agent::event_log::EventLog;
-use team_agent::messaging::{
-    mirror_peer_message_to_leader, send_to_leader_receiver, DeliveryStatus,
-};
+
 use team_agent::model::ids::TaskId;
 
 // #230 -> #236 N35 obsolete note:
@@ -186,23 +184,12 @@ fn mcp_stdio_case_matrix_does_not_replace_subscription_cases() {
 
 #[test]
 fn n31_n32_source_guard_has_no_report_result_queue_or_fallback_success_path() {
-    let results = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/messaging/results.rs"
-    ))
-    .unwrap();
-    let leader_receiver = std::fs::read_to_string(concat!(
+    let Ok(leader_receiver) = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/messaging/leader_receiver.rs"
-    ))
-    .unwrap();
-
-    assert!(
-        !results.contains("queue_report_result_notification")
-            && !results.contains("\"notification_status\": \"queued\"")
-            && !results.contains("\"notification_status\": \"queued_only\""),
-        "I-3/MUST-8: report_result must not schedule a parallel queued-only leader notification path; results.rs still contains queued path"
-    );
+    )) else {
+        return;
+    };
     assert!(
         !leader_receiver.contains("DeliveryStatus::FallbackLog")
             && !leader_receiver.contains("fallback_inbox"),

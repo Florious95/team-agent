@@ -29,12 +29,7 @@ use serial_test::serial;
 use team_agent::lifecycle::{launch_with_transport, quick_start_with_transport_in_workspace};
 use team_agent::state::persist::load_runtime_state;
 use team_agent::tmux_backend::{CommandOutput, CommandRunner, TmuxBackend};
-use team_agent::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
-    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
-    WindowName,
-};
+use team_agent::transport::{ BackendKind, CaptureRange, CapturedText, InjectStage, Key, PaneField, PaneId, PaneInfo, SessionName, SpawnResult, Target, Transport, TransportError, WindowName };
 
 const ANCESTRY_KEY: &str = "TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON";
 const NEUTRAL_ANCESTRY: &str = "[\"/bin/zsh\"]";
@@ -530,22 +525,6 @@ impl Transport for RecordingTransport {
         Ok(self.record_spawn(session, window, argv, cwd, env))
     }
 
-    fn inject(
-        &self,
-        _target: &Target,
-        _payload: &InjectPayload,
-        _submit: Key,
-        _bracketed: bool,
-    ) -> Result<InjectReport, TransportError> {
-        Ok(InjectReport {
-            stage_reached: InjectStage::Submit,
-            inject_verification: InjectVerification::CaptureContainsToken,
-            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
-            turn_verification: TurnVerification::NotYetObserved,
-            attempts: 1,
-            submit_diagnostics: None,
-        })
-    }
 
     fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
         Ok(())
@@ -565,7 +544,6 @@ impl Transport for RecordingTransport {
 
     fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
         match field {
-            PaneField::PaneWidth => Ok(Some("120".to_string())),
             _ => Ok(None),
         }
     }
@@ -589,14 +567,6 @@ impl Transport for RecordingTransport {
         Ok(Vec::new())
     }
 
-    fn set_session_env(
-        &self,
-        _session: &SessionName,
-        _key: &str,
-        _value: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        Ok(SetEnvOutcome::Applied)
-    }
 
     fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
         *self.session_present.lock().unwrap() = false;
@@ -607,9 +577,6 @@ impl Transport for RecordingTransport {
         Ok(())
     }
 
-    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
-        Ok(AttachOutcome::Attached)
-    }
 }
 
 // ---------------------------------------------------------------------------

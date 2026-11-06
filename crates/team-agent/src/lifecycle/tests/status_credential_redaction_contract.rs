@@ -25,12 +25,11 @@ use serde_json::{json, Value};
 use serial_test::serial;
 use team_agent::cli::{cmd_doctor, emit, CmdOutput, DoctorArgs};
 use team_agent::event_log::EventLog;
-use team_agent::message_store::MessageStore;
 use team_agent::state::persist::save_runtime_state;
 #[cfg(unix)]
 use team_agent::tmux_backend::TmuxBackend;
 #[cfg(unix)]
-use team_agent::transport::{InjectPayload, Key, PaneId, Target, Transport};
+use team_agent::transport::{ Key, PaneId, Target, Transport };
 
 const REDACTED: &str = "[REDACTED]";
 
@@ -73,7 +72,7 @@ fn red1_external_redaction_has_one_shared_module_and_two_crate_entry_points() {
 fn red2_false_positive_guard_preserves_team_provider_and_model_truth() {
     let marker = synthetic_marker();
     let (env, workspace) = redaction_case("red2", &marker, "current");
-    let status = team_agent::cli::status_port::status(&workspace, false, true)
+    let status = team_agent::cli::status_port::status_scoped(&workspace, &crate::state::persist::load_runtime_state(&workspace).expect("fixture runtime state"), None, false, true)
         .expect("detail status must remain available");
     let text = status.to_string();
     let diagnostics = status
@@ -114,9 +113,9 @@ fn red2_false_positive_guard_preserves_team_provider_and_model_truth() {
 fn red3_full_and_compact_status_never_expose_restart_credentials() {
     let marker = synthetic_marker();
     let (env, workspace) = redaction_case("red3", &marker, "current");
-    let full = team_agent::cli::status_port::status(&workspace, false, true)
+    let full = team_agent::cli::status_port::status_scoped(&workspace, &crate::state::persist::load_runtime_state(&workspace).expect("fixture runtime state"), None, false, true)
         .expect("full status must remain available");
-    let compact = team_agent::cli::status_port::status(&workspace, true, false)
+    let compact = team_agent::cli::status_port::status_scoped(&workspace, &crate::state::persist::load_runtime_state(&workspace).expect("fixture runtime state"), None, true, false)
         .expect("compact status must remain available");
     let full_text = full.to_string();
     let compact_text = compact.to_string();
@@ -377,10 +376,8 @@ fn red6_cli_restart_reports_and_top_level_error_logs_are_redacted() {
 #[serial(env, pid_probe)]
 fn red7_pane_and_profile_scrubbers_converge_without_losing_existing_policy() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let tmux = fs::read_to_string(root.join("src/tmux_backend.rs")).unwrap();
     let profile = fs::read_to_string(root.join("src/lifecycle/profile_smoke.rs")).unwrap();
-    let delegates_to_shared =
-        tmux.contains("redact_external_text") && profile.contains("redact_external_text");
+    let delegates_to_shared = profile.contains("redact_external_text");
 
     let marker = synthetic_marker();
     let profile_token = format!("synthetic-profile-token-{}", std::process::id());
@@ -395,7 +392,6 @@ fn red7_pane_and_profile_scrubbers_converge_without_losing_existing_policy() {
     .to_string();
     let server = MockLlmServer::new(401, body);
     let env = hermetic_guard::HermeticTestEnv::enter("redact-red7");
-    let pane_policy_preserved = pane_excerpt_uses_shared_redaction(&env, &marker);
     let team = write_profile_fixture(env.root(), server.base_url(), &profile_token);
     let result = cmd_doctor(&DoctorArgs {
         spec: Some(team.join("TEAM.md")),
@@ -427,8 +423,8 @@ fn red7_pane_and_profile_scrubbers_converge_without_losing_existing_policy() {
         && server.was_called();
 
     assert!(
-        delegates_to_shared && pane_policy_preserved && profile_policy_preserved,
-        "RED7: pane/profile scrubbers must delegate generic env/URL masking to the shared module while retaining pane token/hex policy and profile explicit-token/truncation policy"
+        delegates_to_shared && profile_policy_preserved,
+        "RED7: profile scrubbing must delegate generic env/URL masking to the shared module while retaining explicit-token and truncation policy"
     );
 }
 
@@ -593,91 +589,9 @@ fn read_cli_error_logs(workspace: &Path) -> String {
         .join("\n")
 }
 
-#[cfg(unix)]
-fn pane_excerpt_uses_shared_redaction(env: &hermetic_guard::HermeticTestEnv, marker: &str) -> bool {
-    let workspace = env.workspace("red7-pane");
-    let shim_dir = env.root().join("pane-bin");
-    fs::create_dir_all(&shim_dir).unwrap();
-    let shim = shim_dir.join("tmux");
-    let submitted = env.root().join("pane-submitted");
-    fs::write(
-        &shim,
-        r#"#!/bin/sh
-case " $* " in
-  *" capture-pane "*)
-    if [ -f "$TEAM_AGENT_TEST_PANE_SUBMITTED" ]; then
-      printf '%s\n' "$TEAM_AGENT_TEST_PANE_AFTER"
-    else
-      printf '%s\n' "$TEAM_AGENT_TEST_PANE_BEFORE"
-    fi
-    exit 0
-    ;;
-  *" send-keys "*)
-    : > "$TEAM_AGENT_TEST_PANE_SUBMITTED"
-    exit 0
-    ;;
-  *) exit 0 ;;
-esac
-"#,
-    )
-    .unwrap();
-    let mut permissions = fs::metadata(&shim).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&shim, permissions).unwrap();
-    let real_path = std::env::var_os("PATH").unwrap_or_default();
-    let token = "[team-agent-token:synthetic-redact-pane]";
-    let diagnostic = restart_diagnostic(marker);
-    let before = format!("message {token}\n{diagnostic}");
-    let after = format!(
-        "{diagnostic}\n{}{}\n{}{}\nBearer {}.part\nhex {}\nplain pane diagnostic",
-        "sk-",
-        marker,
-        "ghp_",
-        marker,
-        marker,
-        "a".repeat(40)
-    );
-    let _guards = [
-        env.with_env(
-            "PATH",
-            &format!("{}:{}", shim_dir.display(), real_path.to_string_lossy()),
-        ),
-        env.with_env(
-            "TEAM_AGENT_TEST_PANE_SUBMITTED",
-            submitted.to_str().unwrap(),
-        ),
-        env.with_env("TEAM_AGENT_TEST_PANE_BEFORE", &before),
-        env.with_env("TEAM_AGENT_TEST_PANE_AFTER", &after),
-    ];
-    let backend = TmuxBackend::for_workspace(&workspace);
-    let report = backend
-        .inject(
-            &Target::Pane(PaneId::new("%redact-contract")),
-            &InjectPayload::Text(format!("message {token}")),
-            Key::Enter,
-            false,
-        )
-        .expect("scripted pane injection reaches submit diagnostics");
-    let excerpts = report
-        .submit_diagnostics
-        .into_iter()
-        .flat_map(|diagnostics| diagnostics.attempts_detail)
-        .map(|observation| observation.pane_tail_excerpt)
-        .collect::<Vec<_>>()
-        .join("\n");
-    !excerpts.contains(marker)
-        && excerpts.contains(REDACTED)
-        && excerpts.contains("REDACTED_HEX")
-        && excerpts.contains("plain pane diagnostic")
-}
 
-#[cfg(not(unix))]
-fn pane_excerpt_uses_shared_redaction(
-    _env: &hermetic_guard::HermeticTestEnv,
-    _marker: &str,
-) -> bool {
-    true
-}
+
+
 
 fn write_profile_fixture(root: &Path, base_url: &str, token: &str) -> PathBuf {
     let team = root.join("profile-team");

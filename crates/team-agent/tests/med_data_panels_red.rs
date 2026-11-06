@@ -37,41 +37,34 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::params;
 use serde_json::{json, Value};
-use team_agent::message_store::MessageStore;
 use team_agent::state::persist::save_runtime_state;
 
 
 
-/// A-4: `format_status(workspace, Some(agent))` must return the Python multi-line agent
-/// detail (provider/model/session_id/... lines, queries.py:142-153), and unknown agent
-/// ids must error (queries.py:136-137) — not `agent w1: true`.
+/// A-4: current public status must render the registered identity and current brief schema;
+/// unknown agents must be refused rather than rendered as fabricated detail.
 #[test]
 fn a4_format_status_agent_branch_returns_agent_detail() {
     let ws = tmp_ws("a4-format");
     seed_status_state(&ws);
-
-    let text = team_agent::cli::status_port::format_status(&ws, Some("w1"))
-        .expect("format_status for a known agent should succeed");
-    let mut failures = Vec::new();
-    for marker in ["provider:", "model:", "session_id:"] {
-        if !text.contains(marker) {
-            failures.push(format!(
-                "A-4: agent status text missing `{marker}` line (Python queries.py:142-153)"
-            ));
-        }
+    let status = |agent: &str| std::process::Command::new(env!("CARGO_BIN_EXE_team-agent"))
+        .args(["status", agent, "--json", "--workspace"])
+        .arg(&ws).output().expect("run public status");
+    let known = status("w1");
+    assert!(known.status.success(), "known-agent status must succeed: {known:?}");
+    let payload: Value = serde_json::from_slice(&known.stdout).expect("status JSON");
+    let nodes = payload["nodes"].as_array().expect("current status nodes");
+    assert_eq!(nodes.len(), 1, "agent filtering must not synthesize or leak nodes: {payload}");
+    let node = &nodes[0];
+    for field in ["name", "provider", "model", "effort", "runtime_status", "activity", "health", "session_name", "tmux_command"] {
+        assert!(node.get(field).is_some(), "current status schema is missing {field}: {node}");
     }
-    if team_agent::cli::status_port::format_status(&ws, Some("ghost-agent")).is_ok() {
-        failures.push(
-            "A-4: unknown agent id must error (Python queries.py:136-137 raises \
-`unknown agent id`), not render a fabricated line"
-                .to_string(),
-        );
-    }
-    assert!(
-        failures.is_empty(),
-        "A-4 format_status agent contract failed:\n{}\ntext={text:?}",
-        failures.join("\n")
-    );
+    assert_eq!(node["name"], "w1");
+    assert_eq!(node["provider"], "codex");
+    assert_eq!(node["model"], "gpt-5.5");
+    assert_eq!(node["runtime_status"], "unknown", "no live evidence must not fabricate readiness: {node}");
+    let unknown = status("ghost-agent");
+    assert!(!unknown.status.success(), "unknown agent must be refused with nonzero exit: {unknown:?}");
 }
 
 /// A-4: detail=true must return the FULL payload (Python commands.py:99 maps
@@ -83,7 +76,7 @@ fn a4_status_detail_returns_full_payload() {
     seed_status_state(&ws);
 
     let status =
-        team_agent::cli::status_port::status(&ws, true, true).expect("status should succeed");
+        team_agent::cli::status_port::status_scoped(&ws, &team_agent::state::persist::load_runtime_state(&ws).expect("fixture runtime state"), None, true, true).expect("status should succeed");
     assert!(
         status
             .pointer("/agents/w1/spawn_cwd")
@@ -106,7 +99,7 @@ fn a5_missing_leader_receiver_must_not_report_attached() {
     seed_status_state(&ws); // note: seeds NO leader_receiver key
 
     let status =
-        team_agent::cli::status_port::status(&ws, false, false).expect("status should succeed");
+        team_agent::cli::status_port::status_scoped(&ws, &team_agent::state::persist::load_runtime_state(&ws).expect("fixture runtime state"), None, false, false).expect("status should succeed");
     assert_eq!(
         status.get("all_attached_receiver"),
         Some(&json!(false)),
@@ -144,22 +137,6 @@ fn seed_status_state(ws: &Path) {
     .unwrap();
 }
 
-fn insert_result(store: &MessageStore, result_id: &str, team: &str, agent: &str, summary: &str) {
-    let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
-    let envelope = json!({
-        "task_id": "t1",
-        "agent_id": agent,
-        "status": "success",
-        "summary": summary,
-        "artifacts": [],
-    });
-    conn.execute(
-        "insert into results(result_id, owner_team_id, task_id, agent_id, envelope, status, created_at)
-         values (?1, ?2, 't1', ?3, ?4, 'stored', '2026-06-10T00:00:00+00:00')",
-        params![result_id, team, agent, envelope.to_string()],
-    )
-    .unwrap();
-}
 
 fn tmp_ws(tag: &str) -> PathBuf {
     static N: AtomicU64 = AtomicU64::new(0);

@@ -33,9 +33,6 @@ pub enum TickError {
     /// `load_runtime_state` 失败(state.json 损坏 / 锁)。
     #[error("load runtime state failed: {0}")]
     StateLoad(#[from] crate::state::StateError),
-    /// `MessageStore(workspace)` 构造失败(`lifecycle.py:275`)。
-    #[error("message store: {0}")]
-    MessageStore(#[from] crate::message_store::MessageStoreError),
     /// EventLog 写失败。
     #[error("event log: {0}")]
     EventLog(#[from] crate::event_log::EventLogError),
@@ -355,8 +352,6 @@ pub enum StartError {
     Io(#[from] std::io::Error),
     #[error("event log: {0}")]
     EventLog(#[from] crate::event_log::EventLogError),
-    #[error("message store: {0}")]
-    MessageStore(#[from] crate::message_store::MessageStoreError),
 }
 
 /// `stop_coordinator` 错误。

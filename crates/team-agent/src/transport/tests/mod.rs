@@ -42,45 +42,6 @@ impl Transport for StubBackend {
             child_pid: Some(1001),
         })
     }
-    fn inject(
-        &self,
-        target: &Target,
-        payload: &InjectPayload,
-        submit: Key,
-        bracketed: bool,
-    ) -> Result<InjectReport, TransportError> {
-        let _ = (target, bracketed);
-        let (inject_verification, turn_verification) = match payload {
-            InjectPayload::Empty => (
-                InjectVerification::EmptyTextSendKeys,
-                TurnVerification::NotRequired,
-            ),
-            InjectPayload::Text(text) | InjectPayload::TextSkipConsumptionPoll(text)
-                if text.contains("[team-agent-token:") =>
-            {
-                (
-                    InjectVerification::CaptureContainsToken,
-                    TurnVerification::NotYetObserved,
-                )
-            }
-            InjectPayload::Text(_) | InjectPayload::TextSkipConsumptionPoll(_) => (
-                InjectVerification::NoToken,
-                TurnVerification::NotYetObserved,
-            ),
-        };
-        let submit_verification = match submit {
-            Key::Enter => SubmitVerification::EnterSentWithoutPlaceholderCheck,
-            key => SubmitVerification::KeySentAfterVisibleToken { key },
-        };
-        Ok(InjectReport {
-            stage_reached: InjectStage::Submit,
-            inject_verification,
-            submit_verification,
-            turn_verification,
-            attempts: 1,
-            submit_diagnostics: None,
-        })
-    }
     fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
         Ok(())
     }
@@ -100,12 +61,8 @@ impl Transport for StubBackend {
             return Ok(None);
         }
         let value = match field {
-            PaneField::PaneId => "%7",
             PaneField::PaneMode => "0",
-            PaneField::PaneWidth => "120",
             PaneField::PaneCurrentCommand => "sh",
-            PaneField::PaneCurrentPath => "/tmp/ws",
-            PaneField::SessionName => "team-sess",
             PaneField::PaneTty => "/dev/ttys000",
         };
         Ok(Some(value.to_string()))
@@ -152,31 +109,11 @@ impl Transport for StubBackend {
     fn list_windows(&self, _session: &SessionName) -> Result<Vec<WindowName>, TransportError> {
         Ok(vec![WindowName::new("win-1"), WindowName::new("worker-2")])
     }
-    fn set_session_env(
-        &self,
-        _session: &SessionName,
-        _key: &str,
-        _value: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        match self.0 {
-            BackendKind::Tmux => Ok(SetEnvOutcome::Applied),
-            BackendKind::WezTerm | BackendKind::ConPty => Ok(SetEnvOutcome::InternalizedAtSpawn),
-        }
-    }
     fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
         Ok(())
     }
     fn kill_window(&self, _target: &Target) -> Result<(), TransportError> {
         Ok(())
-    }
-    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
-        match self.0 {
-            BackendKind::Tmux => Ok(AttachOutcome::Attached),
-            BackendKind::WezTerm => Ok(AttachOutcome::GuiAttachIsImplicit),
-            BackendKind::ConPty => Ok(AttachOutcome::Unsupported {
-                reason: "conpty has no attach concept".to_string(),
-            }),
-        }
     }
 }
 

@@ -1,44 +1,10 @@
 //! Owned legacy-tmux composer evidence. No keys, persistence, or provider admission.
 
-use std::cell::RefCell;
-
 use serde::{Deserialize, Serialize};
 
 use crate::model::enums::Provider;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NativeInputRequest {
-    pub message_id: String,
-    pub owner_team_id: String,
-    pub recipient: String,
-    pub provider: Provider,
-    pub pane_id: String,
-    pub pane_pid: u32,
-    pub session: String,
-    pub window: String,
-}
 
-impl NativeInputRequest {
-    pub fn marker(&self) -> String {
-        format!("[team-agent-token:{}]", self.message_id)
-    }
-
-    pub fn supported(&self) -> bool {
-        self.provider == Provider::Pi
-            && self.message_id.starts_with("msg_")
-            && self
-                .message_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-            && !self.owner_team_id.is_empty()
-            && !self.recipient.is_empty()
-            && self.recipient != "leader"
-            && self.pane_id.starts_with('%')
-            && self.pane_pid > 1
-            && !self.session.is_empty()
-            && !self.window.is_empty()
-    }
-}
 
 /// Carrier birth and framework pane nonce, not a claim of native executable admission.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,82 +19,10 @@ pub struct NativeInputBinding {
     pub window: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NativeInputPhase {
-    Ready,
-    MayHavePasted,
-    Pasted,
-    Seen,
-    MayHaveSubmitted,
-    Submitted,
-    Accepted,
-}
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NativeInputEvidence {
-    pub request: NativeInputRequest,
-    pub binding: NativeInputBinding,
-    pub payload_sha256: String,
-    pub ui_identity: String,
-    pub footer_sha256: String,
-    pub baseline_sha256: String,
-    pub baseline_capsules: Vec<String>,
-    pub phase: NativeInputPhase,
-    pub capsule: Option<String>,
-}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EnterRescueOutcome {
-    Consumed,
-    NoEffect {
-        reason: &'static str,
-        reobserve: bool,
-    },
-    Entered {
-        accepted: bool,
-    },
-}
 
-type Scope = (Option<NativeInputRequest>, Option<NativeInputEvidence>);
-thread_local! {
-    static INPUT_SCOPE: RefCell<Scope> = const { RefCell::new((None, None)) };
-}
 
-struct Restore(Option<Scope>);
-impl Drop for Restore {
-    fn drop(&mut self) {
-        if let Some(previous) = self.0.take() {
-            INPUT_SCOPE.with(|slot| *slot.borrow_mut() = previous);
-        }
-    }
-}
-
-/// Existing synchronous delivery owns this scope; no borrowed observer escapes a thread.
-pub fn with_native_input<R>(
-    request: Option<NativeInputRequest>,
-    f: impl FnOnce() -> R,
-) -> (R, Option<NativeInputEvidence>) {
-    let previous = INPUT_SCOPE.with(|slot| slot.replace((request, None)));
-    let restore = Restore(Some(previous));
-    let result = f();
-    let evidence = INPUT_SCOPE.with(|slot| slot.borrow_mut().1.take());
-    drop(restore);
-    (result, evidence)
-}
-
-pub(crate) fn current_request() -> Option<NativeInputRequest> {
-    INPUT_SCOPE.with(|slot| slot.borrow().0.clone())
-}
-
-pub(crate) fn record_evidence(evidence: &NativeInputEvidence) {
-    INPUT_SCOPE.with(|slot| {
-        let mut scope = slot.borrow_mut();
-        if scope.0.as_ref() == Some(&evidence.request) {
-            scope.1 = Some(evidence.clone());
-        }
-    });
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputFrame {
@@ -140,60 +34,6 @@ pub struct InputFrame {
     pub capsule: Option<String>,
 }
 
-impl InputFrame {
-    pub fn empty(&self) -> bool {
-        self.composer.trim().is_empty()
-    }
-
-    pub fn has_marker(&self, marker: &str) -> bool {
-        self.composer
-            .lines()
-            .map(str::trim)
-            .collect::<String>()
-            .matches(marker)
-            .count()
-            == 1
-    }
-
-    pub fn pending(&self, evidence: &NativeInputEvidence) -> bool {
-        !self.busy
-            && self.identity == evidence.ui_identity
-            && input_digest(&self.footer) == evidence.footer_sha256
-            && (self.has_marker(&evidence.request.marker())
-                || evidence.capsule.as_ref().is_some_and(|capsule| {
-                    self.capsule.as_ref() == Some(capsule)
-                        && !evidence.baseline_capsules.contains(capsule)
-                }))
-    }
-
-    pub fn accepted(&self, evidence: &NativeInputEvidence) -> bool {
-        if !self.empty() || self.identity != evidence.ui_identity {
-            return false;
-        }
-        if evidence.phase < NativeInputPhase::Seen {
-            return false;
-        }
-        let marker = evidence.request.marker();
-        let joined: String = self.transcript.lines().map(str::trim).collect();
-        if joined.matches(&marker).count() == 1 {
-            return true;
-        }
-        evidence.capsule.as_ref().is_some_and(|capsule| {
-            !evidence.baseline_capsules.contains(capsule)
-                && self
-                    .transcript
-                    .lines()
-                    .filter(|line| line.trim() == capsule)
-                    .count()
-                    == 1
-        })
-    }
-}
-
-fn input_digest(text: &str) -> String {
-    use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(text.as_bytes()))
-}
 
 pub(crate) fn supports_input_observation(provider: Provider) -> bool {
     provider == Provider::Pi
@@ -339,27 +179,6 @@ mod tests {
         super::inspect_input(provider, text, 120)
     }
 
-    #[test]
-    fn native_input_scope_restores_nested_and_panicking_calls() {
-        let request = NativeInputRequest {
-            message_id: "msg_one".into(),
-            owner_team_id: "team".into(),
-            recipient: "worker".into(),
-            provider: Provider::Pi,
-            pane_id: "%1".into(),
-            pane_pid: 2,
-            session: "team".into(),
-            window: "worker".into(),
-        };
-        with_native_input(Some(request.clone()), || {
-            assert_eq!(current_request(), Some(request.clone()));
-            with_native_input(None, || assert!(current_request().is_none()));
-            assert_eq!(current_request(), Some(request));
-            let _ = std::panic::catch_unwind(|| with_native_input(None, || panic!("fixture")));
-            assert!(current_request().is_some());
-        });
-        assert!(current_request().is_none());
-    }
 
     #[test]
     fn native_input_pi_requires_editor_and_footer_not_startup_echo() {
@@ -369,13 +188,13 @@ mod tests {
             "Warning: startup",
         );
         let frame = inspect_input(Provider::Pi, &draft).unwrap();
-        assert!(!frame.empty());
-        assert!(frame.has_marker(marker));
+        assert!(!frame.composer.trim().is_empty());
+        assert!((frame.composer.lines().map(str::trim).collect::<String>().matches(marker).count() == 1));
         assert!(!frame.busy);
         assert!(inspect_input(Provider::Pi, &format!("Warning: startup\n{marker}")).is_none());
         assert!(inspect_input(Provider::Pi, &pi("", "old history"))
             .unwrap()
-            .empty());
+            .composer.trim().is_empty());
         let busy = pi("draft", "history").replace(
             "──────────────── ↑ 20 more ─ runner-luna ─",
             "── ⠋ Working ─────────────────────",
@@ -393,11 +212,11 @@ mod tests {
     #[test]
     fn native_input_pi_r6_idle_update_notice_preserves_empty_editor() {
         assert_eq!(
-            input_digest(PI_R6_IDLE),
+            format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(PI_R6_IDLE.as_bytes())),
             "40f31e7476f628a471113c89b76a1ace0246e69f53fb7238999205f62b5d20fa"
         );
         let frame = super::inspect_input(Provider::Pi, PI_R6_IDLE, 24).unwrap();
-        assert!(frame.empty());
+        assert!(frame.composer.trim().is_empty());
         assert!(!frame.busy);
         assert_eq!(frame.identity, "gpt-6-luna");
         assert!(frame.transcript.contains("Package Updates Available"));
@@ -410,14 +229,14 @@ mod tests {
         let marker = "[team-agent-token:msg_one]";
         let draft = PI_R6_IDLE.replace(top, &format!(" pi-target ─\nforeign draft\n{marker}\n"));
         let frame = super::inspect_input(Provider::Pi, &draft, 24).unwrap();
-        assert!(!frame.empty());
-        assert!(frame.has_marker(marker));
+        assert!(!frame.composer.trim().is_empty());
+        assert!((frame.composer.lines().map(str::trim).collect::<String>().matches(marker).count() == 1));
         let busy = PI_R6_IDLE.replace(
             "──────────────────────────────────────────────────────────────────── pi-target ─",
             "── ⠋ Working ──────────────────────────────────────────────────────────────────",
         );
         let frame = super::inspect_input(Provider::Pi, &busy, 24).unwrap();
-        assert!(frame.empty());
+        assert!(frame.composer.trim().is_empty());
         assert!(frame.busy);
         for composer in ["foreign draft\n────────\n", "\n────────\n"]
         {
@@ -445,24 +264,24 @@ mod tests {
     #[test]
     fn native_input_pi_r7_capsule_is_current_composer_not_history() {
         assert_eq!(
-            input_digest(PI_R7_FOLDED),
+            format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(PI_R7_FOLDED.as_bytes())),
             "b7ea6992c3303743b50714fb55ffc8b91ac5ad168e0acd015428ca5af538ed0e"
         );
         let frame = super::inspect_input(Provider::Pi, PI_R7_FOLDED, 24).unwrap();
-        assert!(!frame.empty());
+        assert!(!frame.composer.trim().is_empty());
         assert!(!frame.busy);
         assert_eq!(frame.capsule.as_deref(), Some("[paste #1 +30 lines]"));
-        assert!(!frame.has_marker("[team-agent-token:msg_one]"));
+        assert!(!(frame.composer.lines().map(str::trim).collect::<String>().matches("[team-agent-token:msg_one]").count() == 1));
         let history = format!("[paste #1 +30 lines]\n{PI_R6_IDLE}");
         let frame = super::inspect_input(Provider::Pi, &history, 24).unwrap();
-        assert!(frame.empty());
+        assert!(frame.composer.trim().is_empty());
         assert!(frame.capsule.is_none());
         let extra = PI_R7_FOLDED.replace(
             "[paste #1 +30 lines]",
             "[paste #1 +30 lines]\nforeign draft",
         );
         let frame = super::inspect_input(Provider::Pi, &extra, 24).unwrap();
-        assert!(!frame.empty());
+        assert!(!frame.composer.trim().is_empty());
         assert!(frame.capsule.is_none());
     }
 

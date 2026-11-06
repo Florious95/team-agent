@@ -288,9 +288,10 @@ fn logical_send_uses_live_pane_despite_stale_metadata_dead_status_and_missing_mc
         let output = fixture.cli(&["send", "worker", &content, "--team", "alpha"]);
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         fixture.received(&format!("Team Agent message from leader:\n\n{content}"));
-        let result = fixture.leader_tools().send_message(
+        let result = fixture.leader_tools().send_message_with_presentation(
             &MessageTarget::Single("worker".into()), &content, None, None, None,
-        ).unwrap().to_value();
+
+        None, None).unwrap().to_value();
         assert_eq!(result["status"], "sent");
         fixture.received(&format!("Team Agent message from leader:\n\n{content}"));
         assert_eq!(fs::read(&path).unwrap(), bytes);
@@ -369,13 +370,14 @@ fn cli_and_mcp_send_ignore_dead_coordinator_and_never_modify_runtime_or_database
     fixture.received("Team Agent message from leader:\n\ndirect CLI");
     let result = fixture
         .leader_tools()
-        .send_message(
+        .send_message_with_presentation(
             &MessageTarget::Single("worker".into()),
             "direct MCP",
             None,
             None,
             None,
-        )
+
+        None, None)
         .unwrap()
         .to_value();
     assert_eq!(result["status"], "sent");
@@ -403,21 +405,22 @@ fn replies_and_results_append_to_inbox_without_database_or_receipt_state() {
     let fixture = Fixture::new();
     let tools = fixture.tools();
     let message = tools
-        .send_message(
+        .send_message_with_presentation(
             &MessageTarget::Single("leader".into()),
             "reply",
             None,
             None,
             None,
-        )
+
+        None, None)
         .unwrap()
         .to_value();
     assert_eq!(message["status"], "sent");
     let result = tools
-        .report_result(
+        .report_result_with_presentation(
             None,
             Some("completed"),
-            ResultStatus::Success,
+            Some("success"),
             None,
             None,
             None,
@@ -425,7 +428,8 @@ fn replies_and_results_append_to_inbox_without_database_or_receipt_state() {
             None,
             None,
             None,
-        )
+
+        None)
         .unwrap();
     assert_eq!(result.fields["status"], "reported");
     assert!(!fixture.root.join(".team/runtime/team.db").exists());
@@ -466,13 +470,14 @@ fn detached_leader_replies_and_offline_mailbox_are_still_stored() {
     fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
     let tools = fixture.tools();
     let reply = tools
-        .send_message(
+        .send_message_with_presentation(
             &MessageTarget::Single("leader".into()),
             "detached reply",
             None,
             None,
             None,
-        )
+
+        None, None)
         .unwrap()
         .to_value();
     assert_eq!(reply["status"], "stored");
@@ -700,13 +705,14 @@ fn cursor_opt_in_confirmation_is_two_enters_and_never_a_third() {
     let started = Instant::now();
     let result = fixture
         .leader_tools()
-        .send_message(
+        .send_message_with_presentation(
             &MessageTarget::Single("worker".into()),
             "cursor confirmation",
             None,
             None,
             None,
-        )
+
+        None, None)
         .unwrap()
         .to_value();
     assert!(started.elapsed() >= Duration::from_millis(100));

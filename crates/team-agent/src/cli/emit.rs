@@ -873,10 +873,6 @@ fn python_compact_json(value: &Value) -> String {
     String::from_utf8(bytes).unwrap_or_else(|_| "{}".to_string())
 }
 
-fn has_arg(args: &[String], needle: &str) -> bool {
-    args.iter().take_while(|arg| arg.as_str() != "--").any(|arg| arg == needle)
-}
-
 #[derive(Debug, Default)]
 struct ParsedArgs {
     positionals: Vec<String>,
@@ -1443,16 +1439,6 @@ fn inbox_args(args: &[String], cwd: &Path) -> Result<InboxArgs, CliError> {
         json: parsed.json,
         team: parsed.team,
     })
-}
-
-fn takeover_args(args: &[String], cwd: &Path) -> TakeoverArgs {
-    let parsed = parse_args(args);
-    TakeoverArgs {
-        workspace: workspace(&parsed, cwd),
-        team: parsed.team,
-        confirm: parsed.confirm,
-        json: parsed.json,
-    }
 }
 
 fn claim_leader_args(args: &[String], cwd: &Path) -> ClaimLeaderArgs {

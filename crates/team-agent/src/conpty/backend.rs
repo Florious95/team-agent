@@ -53,10 +53,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::model::enums::PaneLiveness;
 use crate::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
-    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
-    WindowName,
+    BackendKind, CaptureRange, CapturedText, InjectStage, Key, PaneField, PaneId, PaneInfo, SessionName, SpawnResult, Target, Transport, TransportError, WindowName,
 };
 
 use conpty_transport::{
@@ -488,53 +485,6 @@ impl Transport for ConPtyBackend {
         self.do_spawn(session, window, argv, cwd, env, env_unset)
     }
 
-    fn inject(
-        &self,
-        target: &Target,
-        payload: &InjectPayload,
-        submit: Key,
-        _bracketed: bool,
-    ) -> Result<InjectReport, TransportError> {
-        let pane_id = pane_id_from_target(target)?;
-        let text = payload.text().unwrap_or("").to_string();
-        let submit_key = match submit {
-            Key::Enter => Some("enter".to_string()),
-            Key::Up => Some("up".to_string()),
-            Key::Down => Some("down".to_string()),
-            Key::Left => Some("left".to_string()),
-            Key::Right => Some("right".to_string()),
-            Key::Escape => Some("escape".to_string()),
-            Key::CtrlC => Some("ctrl_c".to_string()),
-            Key::Char(_) | Key::CancelMode => None,
-        };
-        let payload_json = serde_json::to_value(InjectRequest {
-            pane_id,
-            text,
-            submit_key,
-            bracketed: _bracketed,
-        })
-        .map_err(|e| TransportError::Inject {
-            stage: InjectStage::LoadBuffer,
-            source: std::io::Error::other(e),
-        })?;
-        self.dispatch(Op::Inject, payload_json)?;
-        // Design §SubmitVerification:346 — text + CR = EnterSentWithoutPlaceholderCheck.
-        Ok(InjectReport {
-            stage_reached: InjectStage::Submit,
-            inject_verification: if matches!(payload, InjectPayload::Empty) {
-                InjectVerification::NoToken
-            } else {
-                InjectVerification::CaptureContainsToken
-            },
-            submit_verification: match submit {
-                Key::Enter => SubmitVerification::EnterSentWithoutPlaceholderCheck,
-                other => SubmitVerification::KeySentAfterVisibleToken { key: other },
-            },
-            turn_verification: TurnVerification::NotYetObserved,
-            attempts: 1,
-            submit_diagnostics: None,
-        })
-    }
 
     fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
         self.dispatch(Op::SendKeys, serde_json::Value::Null)?;
@@ -549,7 +499,6 @@ impl Transport for ConPtyBackend {
         let pane_id = pane_id_from_target(target)?;
         let range_str = match range {
             CaptureRange::Full => "full".to_string(),
-            CaptureRange::Head(n) => format!("head:{n}"),
             CaptureRange::Tail(n) => format!("tail:{n}"),
         };
         let payload = serde_json::to_value(CaptureRequest {
@@ -631,18 +580,6 @@ impl Transport for ConPtyBackend {
             .collect())
     }
 
-    fn set_session_env(
-        &self,
-        _session: &SessionName,
-        _key: &str,
-        _value: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        // Design §Transport Boundary:118 — ConPTY internalises env at
-        // spawn time; post-spawn mutation is NOT supported. This is a
-        // typed capability refusal, NOT an error, so it returns
-        // `Ok(InternalizedAtSpawn)` even without a live pipe client.
-        Ok(SetEnvOutcome::InternalizedAtSpawn)
-    }
 
     fn set_window_option(
         &self,
@@ -665,15 +602,6 @@ impl Transport for ConPtyBackend {
         Ok(Some(resp.result["present"].as_bool().unwrap_or(false)))
     }
 
-    fn kill_server(&self) -> Result<(), TransportError> {
-        // CR C-2: kill_server on ConPTY = shutdown this workspace's
-        // shim (per-team, NOT global). Existing tmux callers already
-        // gate the invocation on a KillDecision::KillWholeServer
-        // branch that scopes to the caller's transport instance, so
-        // per-workspace semantics naturally hold here.
-        self.dispatch(Op::Shutdown, serde_json::Value::Null)?;
-        Ok(())
-    }
 
     fn kill_session(&self, session: &SessionName) -> Result<(), TransportError> {
         self.dispatch(
@@ -706,17 +634,6 @@ impl Transport for ConPtyBackend {
         Ok(())
     }
 
-    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
-        // Design §Transport Boundary:123 + §Visibility Without tmux attach:374
-        // — ConPTY has NO attach concept. Typed refusal, not error.
-        // This is honest and matches the tmux-only method's semantics.
-        Ok(AttachOutcome::Unsupported {
-            reason: "ConPTY worker backend has no interactive attach; \
-                     use `team-agent capture` or the optional \
-                     `windows-view` (Phase 5) for scrollback."
-                .to_string(),
-        })
-    }
 }
 
 #[cfg(test)]
@@ -738,29 +655,7 @@ mod tests {
         assert!(!b.probes_real_tmux_socket_roots());
     }
 
-    #[test]
-    fn attach_session_returns_typed_unsupported() {
-        // Design §Transport Boundary:123 anchor. The refusal is
-        // `AttachOutcome::Unsupported`, NOT a `TransportError`.
-        let b = ConPtyBackend::new("wshash", "team-a");
-        let out = b.attach_session(&SessionName::new("s")).unwrap();
-        match out {
-            AttachOutcome::Unsupported { reason } => {
-                assert!(!reason.is_empty(), "reason must be non-empty");
-            }
-            other => panic!("expected Unsupported, got {other:?}"),
-        }
-    }
 
-    #[test]
-    fn set_session_env_returns_internalized_at_spawn() {
-        // Design §Transport Boundary:118. Typed refusal, not error.
-        let b = ConPtyBackend::new("wshash", "team-a");
-        let out = b
-            .set_session_env(&SessionName::new("s"), "KEY", "value")
-            .unwrap();
-        assert_eq!(out, SetEnvOutcome::InternalizedAtSpawn);
-    }
 
     #[test]
     fn no_pipe_client_returns_honest_mux_unavailable_not_success() {
@@ -788,13 +683,6 @@ mod tests {
                 &[],
                 Path::new("/tmp"),
                 &BTreeMap::new(),
-            )
-            .unwrap_err(),
-            b.inject(
-                &Target::Pane(PaneId::new("conpty:test")),
-                &InjectPayload::Empty,
-                Key::Enter,
-                false,
             )
             .unwrap_err(),
             b.capture(

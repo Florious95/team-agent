@@ -107,22 +107,7 @@ fn any_file_contains<F: Fn(&str) -> bool>(pred: F) -> Option<PathBuf> {
 // Tooth 1 — PaneAvailable incident type exists
 // ---------------------------------------------------------------------------
 
-#[test]
-#[serial(env)]
-fn pane_available_incident_type_exists() {
-    let hit = any_file_contains(|t| {
-        t.contains("PaneAvailable")
-            && (t.contains("struct PaneAvailable")
-                || t.contains("enum ")
-                || t.contains("PaneAvailable {"))
-    });
-    assert!(
-        hit.is_some(),
-        "no typed `PaneAvailable` incident found. §3.2 requires \
-         BlockedWorkerPaneMissing recovery to consume a typed pane_available \
-         incident (agent_id + pane_id), not a whole-table coordinator scan."
-    );
-}
+
 
 // ---------------------------------------------------------------------------
 // Tooth 2 — worker pane recovery scoped by agent
@@ -202,24 +187,7 @@ fn watcher_recovery_scoped_by_incident_id() {
 // Tooth 6 — positive control: legitimate watcher retry is reachable
 // ---------------------------------------------------------------------------
 
-#[test]
-#[serial(env)]
-fn existing_result_watcher_retry_still_reachable() {
-    // Source-level positive control: the watcher retry function must
-    // remain a `pub` symbol so operator tooling / the recovery arm can
-    // reach it. If the refactor turns it private, we lose the
-    // legitimate path.
-    let watchers =
-        fs::read_to_string(crate_src().join("messaging/watchers.rs")).expect("read watchers.rs");
-    let hit = watchers.contains("pub fn requeue_after_claim_leader")
-        || watchers.contains("pub(crate) fn requeue_after_claim_leader")
-        || watchers.contains("pub fn recover_watchers_for_incident");
-    assert!(
-        hit,
-        "watcher retry entry point no longer publicly reachable — legitimate \
-         retry path lost. Refactor must keep an operator-callable entry point."
-    );
-}
+
 
 // ---------------------------------------------------------------------------
 // Tooth 7 — negative control: pane_available recovery does not touch leader

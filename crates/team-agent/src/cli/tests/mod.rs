@@ -91,29 +91,6 @@ fn deleg_uniq_dir(tag: &str) -> std::path::PathBuf {
     dir
 }
 
-fn deleg_team_dir_with_healthy_coordinator() -> std::path::PathBuf {
-    let base = deleg_uniq_dir("qs");
-    let team = base.join("teamdir");
-    std::fs::create_dir_all(team.join("agents")).unwrap();
-    std::fs::write(team.join("TEAM.md"), DELEG_TEAM_MD).unwrap();
-    std::fs::write(team.join("agents").join("implementer.md"), DELEG_VALID_ROLE).unwrap();
-    let wp = crate::coordinator::WorkspacePath::new(base.clone());
-    std::fs::create_dir_all(crate::model::paths::runtime_dir(&base)).unwrap();
-    // M4: no SQLite message store fixture (MessageStore::open is retired).
-    let me = crate::coordinator::Pid::new(std::process::id());
-    crate::coordinator::write_coordinator_metadata(
-        &wp,
-        me,
-        crate::coordinator::MetadataSource::Boot,
-    )
-    .unwrap();
-    std::fs::write(
-        crate::coordinator::coordinator_pid_path(&wp),
-        me.to_string(),
-    )
-    .unwrap();
-    team
-}
 
 fn outcome_text(r: Result<CmdResult, CliError>) -> String {
     match r {

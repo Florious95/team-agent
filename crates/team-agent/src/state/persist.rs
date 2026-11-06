@@ -205,12 +205,6 @@ impl Drop for RuntimeLock {
     }
 }
 
-pub(crate) fn acquire_result_collection_lock(
-    run_workspace: &Path,
-) -> Result<RuntimeLock, StateError> {
-    RuntimeLock::acquire(run_workspace, "result-collection", 2.0)
-}
-
 #[cfg(test)]
 pub(crate) fn acquire_state_save_lock(
     workspace: &Path,
@@ -1324,21 +1318,6 @@ fn latest_has_preferable_ownership(
     latest_epoch == incoming_epoch
         && !receiver_update_authoritative
         && (ownership_attached(latest) || !ownership_attached(incoming))
-}
-
-fn latest_team_owner_receiver<'a>(
-    latest: &'a Value,
-    team_key: Option<&str>,
-) -> Option<(&'a Value, &'a Value)> {
-    let entry = if let Some(team_key) = team_key {
-        latest
-            .get("teams")
-            .and_then(Value::as_object)
-            .and_then(|teams| teams.get(team_key))?
-    } else {
-        latest
-    };
-    Some((entry.get("team_owner")?, entry.get("leader_receiver")?))
 }
 
 fn ownership_epoch(state: &Value) -> u64 {

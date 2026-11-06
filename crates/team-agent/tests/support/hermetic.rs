@@ -431,10 +431,6 @@ impl HermeticTestEnv {
         );
     }
 
-    pub fn assert_store_under_root(&self, store: &team_agent::message_store::MessageStore) {
-        self.assert_path_under_root(store.db_path());
-    }
-
     pub fn registry_entries(&self) -> Vec<(PathBuf, Value)> {
         registry_entries_under(&self.home)
     }

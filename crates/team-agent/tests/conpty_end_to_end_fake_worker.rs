@@ -1,20 +1,17 @@
 //! End-to-end integration test for the ConPTY Phase 1 flow using the
 //! in-memory FakePaneRuntime + LocalShimPipeClient.
 //!
-//! This exercises the SIX §Phase 1 acceptance criteria at the
+//! This preserves the current Phase 1 acceptance criteria at the
 //! transport-trait level:
 //!
 //!   1. quick-start-equivalent: build a ConPtyBackend with a live
 //!      client, spawn a fake pane.
 //!   2. status-equivalent: `list_targets()` reports the pane with its
 //!      backend_kind + child fields.
-//!   3. send: `inject()` returns success with delivered-shape
-//!      InjectReport.
-//!   4. capture: `capture()` returns text containing the injected
-//!      token.
-//!   5. shutdown: `kill_server()` clears the registry; a subsequent
+//!   3. capture: `capture()` preserves native runtime output, including UTF-8.
+//!   4. shutdown: `kill_session()` clears the session registry; a subsequent
 //!      `list_targets()` reports zero panes.
-//!   6. macOS/Linux tmux E2E unchanged: this test uses NO tmux; the
+//!   5. macOS/Linux tmux E2E unchanged: this test uses NO tmux; the
 //!      developer host's tmux runtime is untouched.
 
 use std::collections::BTreeMap;
@@ -27,20 +24,20 @@ use team_agent::conpty::{
     shim::{FakePaneRuntime, LocalShimClient, PaneRuntime, Shim},
     ConPtyBackend,
 };
-use team_agent::transport::{
-    BackendKind, CaptureRange, InjectPayload, Key, PaneId, SessionName, Target, Transport,
-    WindowName,
-};
+use team_agent::transport::{ BackendKind, CaptureRange, Key, PaneId, SessionName, Target, Transport, WindowName };
 
-fn make_backend() -> ConPtyBackend {
+fn make_backend(output: &[u8]) -> ConPtyBackend {
+    let output = output.to_vec();
     let shim = Arc::new(Shim::new(
         "ws-e2e",
         "team-a",
         4242,
         "test-shim-0.1",
         "tok-e2e",
-        Box::new(|_spawn: &SpawnRequest| {
-            Ok(Arc::new(FakePaneRuntime::new()) as Arc<dyn PaneRuntime>)
+        Box::new(move |_spawn: &SpawnRequest| {
+            let runtime = Arc::new(FakePaneRuntime::new());
+            assert_eq!(runtime.write_input(&output)?, output.len());
+            Ok(runtime as Arc<dyn PaneRuntime>)
         }),
     ));
     let client: Box<dyn PipeClientTrait> = Box::new(PipeClientAdapter(LocalShimClient::new(shim)));
@@ -51,7 +48,7 @@ fn make_backend() -> ConPtyBackend {
 
 #[test]
 fn phase1_bullet1_quick_start_equivalent_spawns_fake_worker() {
-    let backend = make_backend();
+    let backend = make_backend(&[]);
     let spawn = backend
         .spawn_first(
             &SessionName::new("team-a"),
@@ -76,7 +73,7 @@ fn phase1_bullet1_quick_start_equivalent_spawns_fake_worker() {
 
 #[test]
 fn phase1_bullet2_status_reports_conpty_backend_and_pane_row() {
-    let backend = make_backend();
+    let backend = make_backend(&[]);
     assert_eq!(backend.kind(), BackendKind::ConPty);
     let spawn = backend
         .spawn_first(
@@ -94,38 +91,12 @@ fn phase1_bullet2_status_reports_conpty_backend_and_pane_row() {
     assert_eq!(list[0].window_name.as_ref().map(|w| w.as_str()), Some("w1"));
 }
 
-#[test]
-fn phase1_bullet3_send_returns_delivered_shape_report() {
-    let backend = make_backend();
-    let spawn = backend
-        .spawn_first(
-            &SessionName::new("team-a"),
-            &WindowName::new("w1"),
-            &["fake".to_string()],
-            Path::new("/tmp"),
-            &BTreeMap::new(),
-        )
-        .unwrap();
-    let report = backend
-        .inject(
-            &Target::Pane(spawn.pane_id.clone()),
-            &InjectPayload::Text("PHASE1_TOKEN_ABC".to_string()),
-            Key::Enter,
-            false,
-        )
-        .expect("inject must succeed against live pipe");
-    // Design §SubmitVerification:346-347 — text + Enter =
-    // EnterSentWithoutPlaceholderCheck (existing "delivered" variant).
-    use team_agent::transport::SubmitVerification;
-    assert_eq!(
-        report.submit_verification,
-        SubmitVerification::EnterSentWithoutPlaceholderCheck
-    );
-}
+
 
 #[test]
 fn phase1_bullet4_capture_contains_injected_token() {
-    let backend = make_backend();
+    let token = "PHASE1_UNIQUE_TOKEN_20260705";
+    let backend = make_backend(token.as_bytes());
     let spawn = backend
         .spawn_first(
             &SessionName::new("team-a"),
@@ -133,15 +104,6 @@ fn phase1_bullet4_capture_contains_injected_token() {
             &["fake".to_string()],
             Path::new("/tmp"),
             &BTreeMap::new(),
-        )
-        .unwrap();
-    let token = "PHASE1_UNIQUE_TOKEN_20260705";
-    backend
-        .inject(
-            &Target::Pane(spawn.pane_id.clone()),
-            &InjectPayload::Text(token.to_string()),
-            Key::Enter,
-            false,
         )
         .unwrap();
     let captured = backend
@@ -157,7 +119,8 @@ fn phase1_bullet4_capture_contains_injected_token() {
 #[test]
 fn phase1_bullet4_chinese_token_survives_utf8() {
     // Design §Encoding Strategy: Chinese round-trip.
-    let backend = make_backend();
+    let chinese = "王小明·测试·令牌";
+    let backend = make_backend(chinese.as_bytes());
     let spawn = backend
         .spawn_first(
             &SessionName::new("team-a"),
@@ -165,15 +128,6 @@ fn phase1_bullet4_chinese_token_survives_utf8() {
             &["fake".to_string()],
             Path::new("/tmp"),
             &BTreeMap::new(),
-        )
-        .unwrap();
-    let chinese = "王小明·测试·令牌";
-    backend
-        .inject(
-            &Target::Pane(spawn.pane_id.clone()),
-            &InjectPayload::Text(chinese.to_string()),
-            Key::Enter,
-            false,
         )
         .unwrap();
     let captured = backend
@@ -184,7 +138,7 @@ fn phase1_bullet4_chinese_token_survives_utf8() {
 
 #[test]
 fn phase1_bullet5_shutdown_kills_all_panes_and_registry_clears() {
-    let backend = make_backend();
+    let backend = make_backend(&[]);
     for w in ["w1", "w2", "w3"] {
         backend
             .spawn_first(
@@ -197,29 +151,16 @@ fn phase1_bullet5_shutdown_kills_all_panes_and_registry_clears() {
             .unwrap();
     }
     assert_eq!(backend.list_targets().unwrap().len(), 3);
-    backend.kill_server().expect("kill_server must succeed");
+    backend.kill_session(&SessionName::new("team-a")).expect("kill_session must succeed");
     assert_eq!(backend.list_targets().unwrap().len(), 0);
 }
 
 #[test]
 fn typed_capability_refusals_do_not_change_with_live_client() {
-    // Backend must still report ConPTY-truth: no tmux_endpoint,
-    // attach_session Unsupported, set_session_env InternalizedAtSpawn.
-    let backend = make_backend();
+    // Retain current ConPTY endpoint truth; attach/env adapters are retired.
+    let backend = make_backend(&[]);
     assert_eq!(backend.tmux_endpoint(), None);
     assert!(!backend.probes_real_tmux_socket_roots());
-    let attach = backend.attach_session(&SessionName::new("team-a")).unwrap();
-    assert!(matches!(
-        attach,
-        team_agent::transport::AttachOutcome::Unsupported { .. }
-    ));
-    let env = backend
-        .set_session_env(&SessionName::new("team-a"), "K", "V")
-        .unwrap();
-    assert_eq!(
-        env,
-        team_agent::transport::SetEnvOutcome::InternalizedAtSpawn
-    );
 }
 
 #[test]

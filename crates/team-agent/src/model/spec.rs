@@ -22,61 +22,7 @@ use crate::provider::wire::parse_canonical_provider;
 
 const LEGACY_DISPLAY_KEY: &str = concat!("display", "_backend");
 
-/// result_envelope_v1 顶层 required(= allowed)。
-const RESULT_REQUIRED: &[&str] = &[
-    "schema_version",
-    "task_id",
-    "agent_id",
-    "status",
-    "summary",
-    "changes",
-    "tests",
-    "risks",
-    "artifacts",
-    "next_actions",
-];
 
-/// `RESULT_COLLECTION_SCHEMAS`(`spec.py:93-99`),有序:(field, required, allowed)。
-const RESULT_COLLECTIONS: &[(&str, &[&str], &[&str])] = &[
-    (
-        "changes",
-        &["path", "kind", "description"],
-        &["path", "kind", "description"],
-    ),
-    (
-        "tests",
-        &["command", "status"],
-        &["command", "status", "detail"],
-    ),
-    (
-        "risks",
-        &["severity", "description"],
-        &["severity", "description"],
-    ),
-    (
-        "artifacts",
-        &["path", "description"],
-        &["path", "description"],
-    ),
-    ("next_actions", &["description"], &["description"]),
-];
-
-/// `spec.validate_result_envelope`:校验 result_envelope_v1。失败 → `ModelError::Validation`,
-/// 消息体与 Python 字节一致(`result_envelope_v1 validation failed:\n- ...`)。
-pub fn validate_result_envelope(envelope: &Value) -> Result<(), ModelError> {
-    let errors = result_schema_errors(envelope);
-    if errors.is_empty() {
-        return Ok(());
-    }
-    let joined = errors
-        .iter()
-        .map(|e| format!("- {e}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    Err(ModelError::Validation(format!(
-        "result_envelope_v1 validation failed:\n{joined}"
-    )))
-}
 
 /// `spec._check_keys`:非 object → "must be an object";否则 missing(排序)+ unknown(排序)。
 fn check_keys(
@@ -109,92 +55,6 @@ fn check_keys(
     for k in unknown {
         errors.push(format!("{base}/{k}: unknown field"));
     }
-}
-
-/// `spec._result_schema_errors`,逐行对齐(含错误产出顺序)。
-fn result_schema_errors(envelope: &Value) -> Vec<String> {
-    let mut errors = Vec::new();
-    check_keys(envelope, "/", RESULT_REQUIRED, RESULT_REQUIRED, &mut errors);
-    let Some(map) = envelope.as_object() else {
-        return errors;
-    };
-
-    if map.get("schema_version").and_then(Value::as_str) != Some("result_envelope_v1") {
-        errors.push("/schema_version: must be result_envelope_v1".to_string());
-    }
-
-    for field in ["task_id", "agent_id", "summary"] {
-        if let Some(v) = map.get(field) {
-            if !v.is_string() {
-                errors.push(format!("/{field}: must be a string"));
-            } else if v.as_str() == Some("") {
-                errors.push(format!("/{field}: must not be empty"));
-            }
-        }
-    }
-
-    if !matches!(
-        map.get("status").and_then(Value::as_str),
-        Some("success" | "blocked" | "failed" | "partial")
-    ) {
-        errors.push("/status: invalid result status".to_string());
-    }
-
-    if map.contains_key("schema") {
-        errors.push("/schema: use schema_version, not schema".to_string());
-    }
-
-    for (field, item_required, item_allowed) in RESULT_COLLECTIONS {
-        let Some(value) = map.get(*field) else {
-            continue;
-        };
-        let Some(arr) = value.as_array() else {
-            errors.push(format!("/{field}: must be a list"));
-            continue;
-        };
-        for (idx, item) in arr.iter().enumerate() {
-            let item_path = format!("/{field}/{idx}");
-            check_keys(item, &item_path, item_required, item_allowed, &mut errors);
-            let Some(item_map) = item.as_object() else {
-                continue;
-            };
-            // 枚举字段校验(changes.kind / tests.status / risks.severity):值不在合法集 → 报错。
-            let enum_field: Option<(&str, &[&str], &str)> = match *field {
-                "changes" => Some((
-                    "kind",
-                    &["created", "modified", "deleted", "observed"],
-                    "invalid change kind",
-                )),
-                "tests" => Some((
-                    "status",
-                    &["passed", "failed", "not_run", "skipped"],
-                    "invalid test status",
-                )),
-                "risks" => Some((
-                    "severity",
-                    &["low", "medium", "high"],
-                    "invalid risk severity",
-                )),
-                _ => None,
-            };
-            if let Some((key, valid, msg)) = enum_field {
-                let value_ok = item_map
-                    .get(key)
-                    .and_then(Value::as_str)
-                    .is_some_and(|s| valid.contains(&s));
-                if !value_ok {
-                    errors.push(format!("{item_path}/{key}: {msg}"));
-                }
-            }
-            // child string 校验:插入序(preserve_order)== Python item.items()。
-            for (key, child) in item_map {
-                if item_allowed.contains(&key.as_str()) && !child.is_string() {
-                    errors.push(format!("{item_path}/{key}: must be a string"));
-                }
-            }
-        }
-    }
-    errors
 }
 
 // ===================== validate_spec(team.spec.yaml) =====================
@@ -908,75 +768,10 @@ mod tests {
 
     // golden 错误列表由 Python 真相源 `spec._result_schema_errors` 算出(team-agent-public@439bef8)。
     // §4.2 行为 diff 双跑:Rust 必须产出逐字节一致的有序消息。
-    #[test]
-    fn valid_envelope_has_no_errors() {
-        let v = json!({
-            "schema_version":"result_envelope_v1","task_id":"t1","agent_id":"a1",
-            "status":"success","summary":"done",
-            "changes":[],"tests":[],"risks":[],"artifacts":[],"next_actions":[]
-        });
-        assert!(result_schema_errors(&v).is_empty());
-        assert!(validate_result_envelope(&v).is_ok());
-    }
 
-    #[test]
-    fn missing_unknown_status_schema_order_matches_python() {
-        let v = json!({
-            "schema_version":"v0","task_id":"","status":"weird","summary":"s","schema":"x",
-            "changes":[],"tests":[],"risks":[],"artifacts":[],"next_actions":[]
-        });
-        assert_eq!(
-            result_schema_errors(&v),
-            vec![
-                "/agent_id: missing required field",
-                "/schema: unknown field",
-                "/schema_version: must be result_envelope_v1",
-                "/task_id: must not be empty",
-                "/status: invalid result status",
-                "/schema: use schema_version, not schema",
-            ]
-        );
-    }
 
-    #[test]
-    fn non_object_envelope() {
-        assert_eq!(
-            result_schema_errors(&json!(["x"])),
-            vec!["/: must be an object"]
-        );
-    }
 
-    #[test]
-    fn bad_collection_items_match_python() {
-        let v = json!({
-            "schema_version":"result_envelope_v1","task_id":"t","agent_id":"a",
-            "status":"success","summary":"s",
-            "changes":[{"path":"p","kind":"bogus","description":"d"}],
-            "tests":[{"command":"c","status":"weird"}],
-            "risks":[{"severity":"huge","description":"d"}],
-            "artifacts":[],
-            "next_actions":[{"description":123}]
-        });
-        assert_eq!(
-            result_schema_errors(&v),
-            vec![
-                "/changes/0/kind: invalid change kind",
-                "/tests/0/status: invalid test status",
-                "/risks/0/severity: invalid risk severity",
-                "/next_actions/0/description: must be a string",
-            ]
-        );
-    }
 
-    #[test]
-    fn validate_returns_joined_message() {
-        let v = json!(["x"]);
-        let err = validate_result_envelope(&v).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "validation error: result_envelope_v1 validation failed:\n- /: must be an object"
-        );
-    }
 
     // --- validate_spec(对 Python `spec.validate_spec` 取 golden) ---
 

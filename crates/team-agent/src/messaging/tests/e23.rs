@@ -2,7 +2,7 @@
 
 #[test]
 fn e23_no_parallel_direct_inject_or_fake_worker_mirror() {
-    let results = include_str!("../results.rs");
+    let results = include_str!("../../mcp_server/tools.rs");
     assert!(
         !results.contains("inject_leader_notification_direct"),
         "report_result must use the shared fallback pane primitive, not a private direct-inject path"

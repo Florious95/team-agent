@@ -2,12 +2,11 @@
 
 use std::path::Path;
 
-use crate::message_store::MessageStore;
 use crate::model::ids::TeamKey;
 
 use super::helpers::next_run_id;
 use super::{
-    CheckEvidence, CheckKind, CheckStatus, ContractSuiteCheck, IdleEvaluation, MessagingError,
+    CheckEvidence, CheckKind, CheckStatus, ContractSuiteCheck, MessagingError,
     ProviderSdkCalls, SelftestCheck, SelftestReport,
 };
 
@@ -146,32 +145,4 @@ fn contract_check(name: &str, status: CheckStatus, reason: Option<String>) -> Co
         status,
         reason,
     }
-}
-
-fn message_owner_team(db_path: &Path, message_id: &str) -> Result<Option<String>, MessagingError> {
-    Err(MessagingError::Validation("legacy SQL messaging retired; use station send and C3 inbox".into()))
-}
-
-/// `evaluate_idle_behavior` (`diagnose/comms.py:50`):idle 分类准确性评估。零 token,走 driver。
-pub(crate) fn evaluate_idle_behavior(
-    workspace: &Path,
-    agent_id: &str,
-    claimed_status: &str,
-    token: Option<&str>,
-    driver: &dyn CommsSelftestDriver,
-) -> Result<IdleEvaluation, MessagingError> {
-    let _ = (workspace, driver);
-    let normalized = claimed_status.to_ascii_lowercase();
-    let status = match normalized.as_str() {
-        "idle" | "working" | "running" => CheckStatus::NotChallenged,
-        _ => CheckStatus::Fail,
-    };
-    Ok(IdleEvaluation {
-        ok: status == CheckStatus::NotChallenged,
-        agent_id: agent_id.to_string(),
-        claimed_status: claimed_status.to_string(),
-        token: token.unwrap_or("").to_string(),
-        status,
-        execution_ack: "not_challenged".to_string(),
-    })
 }

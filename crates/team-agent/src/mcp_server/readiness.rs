@@ -256,9 +256,6 @@ pub(crate) fn publish(
 #[derive(Debug)]
 pub(crate) struct Admission {
     server: ProcessStamp,
-    carrier: u32,
-    carrier_birth: String,
-    pane_id: String,
 }
 
 impl Admission {
@@ -463,30 +460,7 @@ fn validate_receipt(
     }
     Ok(Admission {
         server: receipt.server,
-        carrier,
-        carrier_birth,
-        pane_id: pane_id.to_string(),
     })
-}
-
-/// Recheck against the actual resolved target immediately before the input path.
-pub(crate) fn revalidate(admission: &Admission, target: &Target, panes: &[PaneInfo]) -> Result<()> {
-    let Target::Pane(id) = target else {
-        return Err("mcp_handshake_carrier_missing");
-    };
-    let pane = panes
-        .iter()
-        .find(|pane| &pane.pane_id == id)
-        .ok_or("mcp_handshake_carrier_missing")?;
-    if id.as_str() != admission.pane_id
-        || pane.pane_pid != Some(admission.carrier)
-        || process_birth_identity(admission.carrier).ok().as_deref()
-            != Some(admission.carrier_birth.as_str())
-        || sample_process(&admission.server) != ProcessState::Alive
-    {
-        return Err("mcp_handshake_carrier_mismatch");
-    }
-    Ok(())
 }
 
 // Test construction stays in the MCP process-evidence owner, not messaging.
@@ -542,14 +516,7 @@ pub(crate) fn test_ready_worker(
         pane_pid: Some(carrier),
         leader_env: Default::default(),
     };
-    if let Some(admission) = preflight(&workspace, Some(owner), agent, state).unwrap() {
-        revalidate(
-            &admission,
-            &Target::Pane(target.pane_id.clone()),
-            std::slice::from_ref(&target),
-        )
-        .unwrap();
-    }
+    preflight(&workspace, Some(owner), agent, state).unwrap();
     target
 }
 

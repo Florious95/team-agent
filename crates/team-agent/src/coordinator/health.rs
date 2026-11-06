@@ -40,7 +40,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use crate::message_store::MessageStore;
 
 use super::types::{
     CoordinatorBinaryIdentity, CoordinatorBinaryIdentityRelation, CoordinatorHealthStatus,
@@ -505,19 +504,6 @@ fn send_signal(pid: Pid, signal: libc::c_int) -> bool {
         return false;
     };
     unsafe { libc::kill(pid_t, signal) == 0 }
-}
-
-fn wait_until_not_running(pid: Pid, timeout: Duration) -> bool {
-    let start = std::time::Instant::now();
-    loop {
-        if pid_is_running(pid).ok() != Some(true) {
-            return true;
-        }
-        if start.elapsed() >= timeout {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
 }
 
 // ===========================================================================

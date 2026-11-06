@@ -32,16 +32,10 @@ use serde_json::{json, Value};
 use serial_test::serial;
 use team_agent::coordinator::WorkspacePath;
 use team_agent::lifecycle::QuickStartReport;
-use team_agent::message_store::MessageStore;
 use team_agent::model::enums::Provider;
 use team_agent::provider::{get_adapter, ProviderAdapter};
 use team_agent::state::persist::save_runtime_state;
-use team_agent::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
-};
+use team_agent::transport::{ BackendKind, CaptureRange, CapturedText, InjectStage, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName, SpawnResult, Target, Transport, TransportError, WindowName };
 
 const ANCESTRY_KEY: &str = "TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON";
 const NEUTRAL_ANCESTRY: &str = "[\"/bin/zsh\"]";
@@ -209,26 +203,6 @@ positive); got {result:?}"
 
 // ───────────────────────────────────── fixtures ─────────────────────────────────────
 
-fn seed_copilot_team_state(ws: &Path, agent: &str, accepted_msg: bool) {
-    let _ = accepted_msg;
-    save_runtime_state(
-        ws,
-        &json!({
-            "session_name": "team-b4",
-            "active_team_key": "team-b4",
-            "agents": {
-                agent: {
-                    "status": "running", "provider": "copilot", "agent_id": agent,
-                    "window": agent, "pane_id": "%41",
-                    "session_id": "11111111-2222-4333-8444-555555555555",
-                    "spawn_cwd": ws.to_string_lossy(),
-                },
-            },
-        }),
-    )
-    .unwrap();
-    // M4: no SQLite message store fixture (MessageStore::open is retired).
-}
 
 fn write_min_team(ws: &Path, name: &str) -> PathBuf {
     let team = ws.join(name);
@@ -524,7 +498,6 @@ impl Transport for MonitorFailTransport {
     }
     fn query(&self, _t: &Target, f: PaneField) -> Result<Option<String>, TransportError> {
         match f {
-            PaneField::PaneWidth => Ok(Some("120".to_string())),
             _ => Ok(None),
         }
     }
@@ -534,38 +507,11 @@ impl Transport for MonitorFailTransport {
     fn list_windows(&self, _s: &SessionName) -> Result<Vec<WindowName>, TransportError> {
         Ok(vec![WindowName::new("cp1")])
     }
-    fn set_session_env(
-        &self,
-        _s: &SessionName,
-        _k: &str,
-        _v: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        Ok(SetEnvOutcome::Applied)
-    }
     fn kill_session(&self, _s: &SessionName) -> Result<(), TransportError> {
         Ok(())
     }
     fn kill_window(&self, _t: &Target) -> Result<(), TransportError> {
         Ok(())
-    }
-    fn attach_session(&self, _s: &SessionName) -> Result<AttachOutcome, TransportError> {
-        Ok(AttachOutcome::Attached)
-    }
-    fn inject(
-        &self,
-        _t: &Target,
-        _p: &InjectPayload,
-        _s: Key,
-        _b: bool,
-    ) -> Result<InjectReport, TransportError> {
-        Ok(InjectReport {
-            stage_reached: InjectStage::Submit,
-            inject_verification: InjectVerification::CaptureContainsToken,
-            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
-            turn_verification: TurnVerification::NotYetObserved,
-            attempts: 1,
-            submit_diagnostics: None,
-        })
     }
 }
 
@@ -618,45 +564,17 @@ impl Transport for QuietTransport {
     }
     fn query(&self, _t: &Target, f: PaneField) -> Result<Option<String>, TransportError> {
         match f {
-            PaneField::PaneWidth => Ok(Some("120".to_string())),
             _ => Ok(None),
         }
     }
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
         Ok(Vec::new())
     }
-    fn set_session_env(
-        &self,
-        _s: &SessionName,
-        _k: &str,
-        _v: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        Ok(SetEnvOutcome::Applied)
-    }
     fn kill_session(&self, _s: &SessionName) -> Result<(), TransportError> {
         Ok(())
     }
     fn kill_window(&self, _t: &Target) -> Result<(), TransportError> {
         Ok(())
-    }
-    fn attach_session(&self, _s: &SessionName) -> Result<AttachOutcome, TransportError> {
-        Ok(AttachOutcome::Attached)
-    }
-    fn inject(
-        &self,
-        _t: &Target,
-        _p: &InjectPayload,
-        _s: Key,
-        _b: bool,
-    ) -> Result<InjectReport, TransportError> {
-        Ok(InjectReport {
-            stage_reached: InjectStage::Submit,
-            inject_verification: InjectVerification::CaptureContainsToken,
-            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
-            turn_verification: TurnVerification::NotYetObserved,
-            attempts: 1,
-            submit_diagnostics: None,
-        })
     }
 }
 
@@ -710,45 +628,17 @@ impl Transport for WindowedTransport {
     }
     fn query(&self, _t: &Target, f: PaneField) -> Result<Option<String>, TransportError> {
         match f {
-            PaneField::PaneWidth => Ok(Some("120".to_string())),
             _ => Ok(None),
         }
     }
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
         Ok(Vec::new())
     }
-    fn set_session_env(
-        &self,
-        _s: &SessionName,
-        _k: &str,
-        _v: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        Ok(SetEnvOutcome::Applied)
-    }
     fn kill_session(&self, _s: &SessionName) -> Result<(), TransportError> {
         Ok(())
     }
     fn kill_window(&self, _t: &Target) -> Result<(), TransportError> {
         Ok(())
-    }
-    fn attach_session(&self, _s: &SessionName) -> Result<AttachOutcome, TransportError> {
-        Ok(AttachOutcome::Attached)
-    }
-    fn inject(
-        &self,
-        _t: &Target,
-        _p: &InjectPayload,
-        _s: Key,
-        _b: bool,
-    ) -> Result<InjectReport, TransportError> {
-        Ok(InjectReport {
-            stage_reached: InjectStage::Submit,
-            inject_verification: InjectVerification::CaptureContainsToken,
-            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
-            turn_verification: TurnVerification::NotYetObserved,
-            attempts: 1,
-            submit_diagnostics: None,
-        })
     }
 }
 
@@ -806,44 +696,16 @@ impl Transport for DeadPaneTransport {
     }
     fn query(&self, _t: &Target, f: PaneField) -> Result<Option<String>, TransportError> {
         match f {
-            PaneField::PaneWidth => Ok(Some("120".to_string())),
             _ => Ok(None),
         }
     }
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
         Ok(Vec::new())
     }
-    fn set_session_env(
-        &self,
-        _s: &SessionName,
-        _k: &str,
-        _v: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        Ok(SetEnvOutcome::Applied)
-    }
     fn kill_session(&self, _s: &SessionName) -> Result<(), TransportError> {
         Ok(())
     }
     fn kill_window(&self, _t: &Target) -> Result<(), TransportError> {
         Ok(())
-    }
-    fn attach_session(&self, _s: &SessionName) -> Result<AttachOutcome, TransportError> {
-        Ok(AttachOutcome::Attached)
-    }
-    fn inject(
-        &self,
-        _t: &Target,
-        _p: &InjectPayload,
-        _s: Key,
-        _b: bool,
-    ) -> Result<InjectReport, TransportError> {
-        Ok(InjectReport {
-            stage_reached: InjectStage::Submit,
-            inject_verification: InjectVerification::CaptureContainsToken,
-            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
-            turn_verification: TurnVerification::NotYetObserved,
-            attempts: 1,
-            submit_diagnostics: None,
-        })
     }
 }

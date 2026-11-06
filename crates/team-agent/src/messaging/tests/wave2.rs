@@ -25,7 +25,6 @@
 //!     Codex-specific shape (not rfind), tracked as U1-C-1 follow-up.
 
 use super::*;
-use crate::messaging::deliver_pending_message;
 use crate::transport::test_support::OfflineTransport;
 use crate::transport::{PaneId, PaneLiveness, SessionName, WindowName};
 

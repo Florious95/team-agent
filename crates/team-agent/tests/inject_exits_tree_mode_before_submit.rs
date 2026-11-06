@@ -22,7 +22,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use team_agent::tmux_backend::{CommandOutput, RealCommandRunner, TmuxBackend};
-use team_agent::transport::{InjectPayload, Key, PaneId, Target, Transport};
+use team_agent::transport::{ Key, PaneId, Target, Transport };
 
 const MSG: &str = "treemode-inject-proof-marker";
 
@@ -117,14 +117,12 @@ impl Drop for TreemodeFixture {
     }
 }
 
-fn run_inject(socket: &str, pane: &str, payload: &str) {
+fn submit_seeded_input(socket: &str, pane: &str, payload: &str) {
+    // Fixture setup seeds raw input; the retained transport method owns mode exit and submit.
+    assert!(tmux_ok(socket, &["set-buffer", payload]), "seed input buffer");
+    assert!(tmux_ok(socket, &["paste-buffer", "-d", "-t", pane]), "seed pane input");
     let backend = TmuxBackend::with_runner_for_tmux_endpoint(Box::new(RealCommandRunner), socket);
-    let _ = backend.inject(
-        &Target::Pane(PaneId::new(pane)),
-        &InjectPayload::Text(payload.to_string()),
-        Key::Enter,
-        false,
-    );
+    backend.send_keys(&Target::Pane(PaneId::new(pane)), &[Key::Enter]).expect("submit seeded input");
 }
 
 #[test]
@@ -137,7 +135,7 @@ fn inject_submits_message_when_pane_in_tree_mode() {
     );
 
     let normal_msg = format!("{MSG}-NORMAL");
-    run_inject(&fixture.inner, &fixture.pane, &normal_msg);
+    submit_seeded_input(&fixture.inner, &fixture.pane, &normal_msg);
     std::thread::sleep(std::time::Duration::from_millis(800));
     assert_eq!(
         fixture.submitted_count(&normal_msg),
@@ -162,7 +160,7 @@ fn inject_submits_message_when_pane_in_tree_mode() {
     );
 
     let tree_msg = format!("{MSG}-TREEMODE");
-    run_inject(&fixture.inner, &fixture.pane, &tree_msg);
+    submit_seeded_input(&fixture.inner, &fixture.pane, &tree_msg);
     std::thread::sleep(std::time::Duration::from_millis(1000));
     let got = fixture.submitted_count(&tree_msg);
     assert_eq!(
@@ -224,12 +222,12 @@ fn inject_sends_no_escape_when_bracketed_paste_left_open() {
         .to_string();
     // 阳性对照：paste 未打开时，同一装置上 inject 必须上屏恰一次。
     let ctl = "paste-closed-control-marker";
-    run_inject(&inner, &pane, ctl);
+    submit_seeded_input(&inner, &pane, ctl);
     std::thread::sleep(std::time::Duration::from_millis(1200));
     let _ = tmux(&inner, &["send-keys", "-t", &pane, "-l", "\u{1b}[200~OPEN"]);
     std::thread::sleep(std::time::Duration::from_millis(200));
     let msg = "paste-open-proof-marker";
-    run_inject(&inner, &pane, msg);
+    submit_seeded_input(&inner, &pane, msg);
     std::thread::sleep(std::time::Duration::from_millis(1200));
     let cap = {
         let o = tmux(&inner, &["capture-pane", "-p", "-t", &pane]);

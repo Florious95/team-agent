@@ -17,14 +17,8 @@ use team_agent::coordinator::{
 };
 use team_agent::event_log::EventLog;
 use team_agent::lifecycle::{restart_with_transport, RestartReport, ResumeDecision};
-use team_agent::message_store::MessageStore;
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
-use team_agent::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
-};
+use team_agent::transport::{ BackendKind, CaptureRange, CapturedText, InjectStage, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName, SpawnResult, Target, Transport, TransportError, WindowName };
 
 #[test]
 #[serial(env)]
@@ -314,22 +308,6 @@ impl Transport for ResumeTransport {
         self.spawn_first(session, window, argv, cwd, env)
     }
 
-    fn inject(
-        &self,
-        _target: &Target,
-        _payload: &InjectPayload,
-        _submit: Key,
-        _bracketed: bool,
-    ) -> Result<InjectReport, TransportError> {
-        Ok(InjectReport {
-            stage_reached: InjectStage::Submit,
-            inject_verification: InjectVerification::NoToken,
-            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
-            turn_verification: TurnVerification::NotRequired,
-            attempts: 1,
-            submit_diagnostics: None,
-        })
-    }
 
     fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
         Ok(())
@@ -348,8 +326,6 @@ impl Transport for ResumeTransport {
 
     fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
         Ok(match field {
-            PaneField::PaneId => Some("%10".to_string()),
-            PaneField::SessionName => Some("team-resumeteam".to_string()),
             _ => None,
         })
     }
@@ -385,14 +361,6 @@ impl Transport for ResumeTransport {
         Ok(Vec::new())
     }
 
-    fn set_session_env(
-        &self,
-        _session: &SessionName,
-        _key: &str,
-        _value: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        Ok(SetEnvOutcome::Applied)
-    }
 
     fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
         Ok(())
@@ -409,9 +377,6 @@ impl Transport for ResumeTransport {
         Ok(())
     }
 
-    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
-        Ok(AttachOutcome::Attached)
-    }
 }
 
 fn tmp_dir(tag: &str) -> PathBuf {

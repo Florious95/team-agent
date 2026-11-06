@@ -456,19 +456,6 @@ pub(crate) fn workspace_has_existing_team_runtime(
         || crate::state::persist::runtime_state_path(workspace).is_file()
 }
 
-pub(crate) fn missing_team_runtime_issues_and_repairs(team_key: &str) -> (Value, Value) {
-    let mut issues = json!([]);
-    let mut repairs = json!([]);
-    push_issue_repair(
-        &mut issues,
-        &mut repairs,
-        team_key,
-        TEAM_SPEC_OR_RUNTIME_MISSING,
-        TEAM_SPEC_OR_RUNTIME_MISSING_REPAIR,
-    );
-    (issues, repairs)
-}
-
 fn push_issue_repair(
     issues: &mut Value,
     repairs: &mut Value,
@@ -808,28 +795,6 @@ pub(crate) fn append_registry_channel_unbound_to_report(
     }
 }
 
-pub(crate) fn append_selected_live_leader_workspace_mismatch(
-    workspace: &std::path::Path,
-    team: Option<&str>,
-    report: &mut Value,
-) {
-    let Some((issue, repair)) = selected_live_leader_workspace_mismatch(workspace, team) else {
-        return;
-    };
-    let Some(object) = report.as_object_mut() else {
-        return;
-    };
-    object.insert("issues".to_string(), Value::Array(vec![issue]));
-    object.insert("suggested_repairs".to_string(), Value::Array(vec![repair]));
-    object.insert("ok".to_string(), Value::Bool(false));
-    if object.get("error").is_none_or(Value::is_null) {
-        object.insert(
-            "error".to_string(),
-            Value::String("PaneWorkspaceMismatch".to_string()),
-        );
-    }
-}
-
 fn selected_live_leader_workspace_mismatch(
     workspace: &std::path::Path,
     team: Option<&str>,
@@ -939,24 +904,6 @@ fn append_legacy_snapshot_issue(workspace: &std::path::Path, state: &Value, issu
             "id": "legacy_snapshot_stale",
             "details": details,
         }));
-    }
-}
-
-fn append_coordinator_health_issue(
-    workspace: &std::path::Path,
-    state: &Value,
-    health: &crate::coordinator::HealthReport,
-    issues: &mut Value,
-    repairs: &mut Value,
-) {
-    let Some(id) = coordinator_issue_id(state, health) else {
-        return;
-    };
-    if let Some(items) = issues.as_array_mut() {
-        items.push(coordinator_issue_value(id, health, workspace));
-    }
-    if let Some(items) = repairs.as_array_mut() {
-        items.push(coordinator_repair_hint(id, health));
     }
 }
 
@@ -1664,14 +1611,6 @@ fn agent_mcp_ready(agent: &Value) -> bool {
             agent.get("mcp_ready").and_then(Value::as_bool) == Some(true)
                 || agent.get("mcp").and_then(Value::as_str) == Some("ready")
         })
-}
-
-fn yaml_path_str<'a>(value: &'a crate::model::yaml::Value, keys: &[&str]) -> Option<&'a str> {
-    let mut current = value;
-    for key in keys {
-        current = current.get(key)?;
-    }
-    current.as_str()
 }
 
 pub(crate) fn count_dir_entries(path: &std::path::Path) -> usize {

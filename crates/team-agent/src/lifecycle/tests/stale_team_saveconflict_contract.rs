@@ -26,12 +26,7 @@ use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 use team_agent::state::projection::{
     project_top_level_view, save_team_scoped_state, team_state_candidates,
 };
-use team_agent::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
-};
+use team_agent::transport::{ BackendKind, CaptureRange, CapturedText, InjectStage, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName, SpawnResult, Target, Transport, TransportError, WindowName };
 
 const CURRENT: &str = "current";
 const RESEARCH: &str = "research";
@@ -359,22 +354,6 @@ impl Transport for FailingSpawnTransport {
     ) -> Result<SpawnResult, TransportError> {
         self.fail_spawn()
     }
-    fn inject(
-        &self,
-        _: &Target,
-        _: &InjectPayload,
-        _: Key,
-        _: bool,
-    ) -> Result<InjectReport, TransportError> {
-        Ok(InjectReport {
-            stage_reached: InjectStage::Submit,
-            inject_verification: InjectVerification::EmptyTextSendKeys,
-            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
-            turn_verification: TurnVerification::NotRequired,
-            attempts: 1,
-            submit_diagnostics: None,
-        })
-    }
     fn send_keys(&self, _: &Target, _: &[Key]) -> Result<(), TransportError> {
         Ok(())
     }
@@ -399,22 +378,11 @@ impl Transport for FailingSpawnTransport {
     fn list_windows(&self, _: &SessionName) -> Result<Vec<WindowName>, TransportError> {
         Ok(vec![WindowName::new("researcher")])
     }
-    fn set_session_env(
-        &self,
-        _: &SessionName,
-        _: &str,
-        _: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        Ok(SetEnvOutcome::Applied)
-    }
     fn kill_session(&self, _: &SessionName) -> Result<(), TransportError> {
         Ok(())
     }
     fn kill_window(&self, _: &Target) -> Result<(), TransportError> {
         Ok(())
-    }
-    fn attach_session(&self, _: &SessionName) -> Result<AttachOutcome, TransportError> {
-        Ok(AttachOutcome::Attached)
     }
 }
 

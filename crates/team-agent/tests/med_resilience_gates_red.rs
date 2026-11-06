@@ -46,7 +46,6 @@ use rusqlite::params;
 use serde_json::json;
 use team_agent::event_log::EventLog;
 use team_agent::leader::{evaluate_takeover_reminder, IdleNode, NodeRole};
-use team_agent::message_store::MessageStore;
 use team_agent::model::enums::Provider;
 use team_agent::provider::TurnState;
 use team_agent::state::persist::save_runtime_state;

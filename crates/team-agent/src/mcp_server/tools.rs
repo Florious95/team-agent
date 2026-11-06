@@ -16,27 +16,23 @@ use crate::event_log::EventLog;
 use crate::direct_delivery::snapshot as load_runtime_state;
 
 // ── REUSE: step 11 messaging delegate surface ───────────────────────────────
-use crate::messaging::{self, DeliveryStatus, MessageTarget, SendOptions, TrustedSender};
+use crate::messaging::{self, MessageTarget, TrustedSender};
 
 use super::helpers::{
-    current_reportable_message_for, delivery_outcome_value, direct_message_attribution_for,
-    ensure_object, enum_value, is_worker_recipient, latest_task_for_assignee,
-    non_empty_string, object_fields, requires_ack_for_target, tool_runtime_error,
-    DirectMessageAttribution,
+    ensure_object, non_empty_string, object_fields, tool_runtime_error,
 };
 use super::normalize::{
-    compact_tool_result, normalize_report_envelope, report_result_integrity_warnings,
+    normalize_report_envelope, report_result_integrity_warnings,
     validate_test_evidence_schema,
 };
 use super::types::{
-    Scope, SendOutcome, ToolError, ToolErrorReason, ToolOk, ToolResult, VisiblePeers,
+    Scope, SendOutcome, ToolError, ToolErrorReason, ToolOk, ToolResult,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TeamOrchestratorTools — the three typed MCP handlers.
 // Identity/scope anchored on spawn-time env (TEAM_AGENT_ID / TEAM_AGENT_OWNER_TEAM_ID);
-// every handler delegates to runtime/MessageStore/EventLog. These ARE the
-// contract-callable behavioral entry fns.
+// handlers validate that identity before delegating to the current station APIs.
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// `TeamOrchestratorTools` (`tools.py:72-82`). Worker scope and sender identity
@@ -181,34 +177,6 @@ impl TeamOrchestratorTools {
         error
     }
 
-    /// `send_message` (`tools.py:135-183`): C14/C15/C17 scope resolution.
-    ///   - sender = immutable `TEAM_AGENT_ID` captured when the MCP server starts.
-    ///   - `requires_ack` defaults from target (`_requires_ack_for_target`).
-    ///   - C23 cross-team pre-refusal ([`Self::refuse_cross_team_peer`]) before any
-    ///     runtime call.
-    ///   - delegates to [`messaging::send_message`], writes `mcp.scope_resolved`.
-    ///   - worker recipient + message_id → [`SendOutcome::WorkerAccepted`]; else
-    ///     [`SendOutcome::Direct`].
-    /// Returns `Err(ToolError{PeerNotInScope})` on a refused cross-team peer.
-    pub fn send_message(
-        &self,
-        to: &MessageTarget,
-        content: &str,
-        task_id: Option<&str>,
-        requires_ack: Option<bool>,
-        scope_override: Option<Scope>,
-    ) -> Result<SendOutcome, ToolError> {
-        self.send_message_with_presentation(
-            to,
-            content,
-            task_id,
-            requires_ack,
-            scope_override,
-            None,
-            None,
-        )
-    }
-
     pub fn send_message_with_presentation(
         &self,
         to: &MessageTarget,
@@ -250,10 +218,6 @@ impl TeamOrchestratorTools {
         }, authority).map_err(tool_runtime_error)?;
         if let Some(warning) = normalized.deprecation { value["warning"] = Value::String(warning); }
         Ok(SendOutcome::Direct(Self::station_result(value)?))
-    }
-
-    pub(crate) fn refuse_scope_override(&self) -> ToolError {
-        self.rpc_scope_refused("unknown", None, None)
     }
 
     pub(crate) fn validate_rpc_scope_args(
@@ -304,39 +268,6 @@ impl TeamOrchestratorTools {
             ));
         }
         Ok(())
-    }
-
-    /// `report_result` (`tools.py:249-279`): build & normalize the result envelope
-    /// (inferring `task_id`/`agent_id` with byte-stable `"manual"`/`"unknown"`
-    /// fallbacks), then delegate to [`messaging::report_result`] and compact.
-    #[allow(clippy::too_many_arguments)]
-    pub fn report_result(
-        &self,
-        envelope: Option<&Value>,
-        summary: Option<&str>,
-        status: ResultStatus,
-        changes: Option<&[Value]>,
-        tests: Option<&[Value]>,
-        risks: Option<&[Value]>,
-        artifacts: Option<&[Value]>,
-        next_actions: Option<&[Value]>,
-        task_id: Option<&str>,
-        agent_id: Option<&str>,
-    ) -> ToolResult {
-        let status = enum_value(status);
-        self.report_result_with_presentation(
-            envelope,
-            summary,
-            status.as_str(),
-            changes,
-            tests,
-            risks,
-            artifacts,
-            next_actions,
-            task_id,
-            agent_id,
-            None,
-        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -494,193 +425,11 @@ impl TeamOrchestratorTools {
         super::lifecycle_tools::get_team_status(&self.workspace, owner_team.as_ref())
     }
 
-    /// `get_visible_peers` (`tools.py:226-247`): C16 scope-filtered peer list — live
-    /// agents within the spawn-time owner-team scope only; other teams and dead/stopped
-    /// agents are filtered server-side and never named.
-    pub fn get_visible_peers(&self) -> Result<VisiblePeers, ToolError> {
-        let mut peers = Vec::new();
-        if let Some(team) = self.canonical_owner_team_key_for_mcp()? {
-            let state = load_runtime_state(&self.workspace).map_err(tool_runtime_error)?;
-            if let Some(agents) = state
-                .get("teams")
-                .and_then(|v| v.get(team.as_str()))
-                .and_then(|v| v.get("agents"))
-                .and_then(Value::as_object)
-            {
-                for (agent_id, info) in agents {
-                    let status = info
-                        .as_object()
-                        .and_then(|obj| obj.get("status"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_ascii_lowercase();
-                    if status == "dead" || status == "stopped" {
-                        continue;
-                    }
-                    peers.push(AgentId::new(agent_id.clone()));
-                }
-            }
-        }
-        peers.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-        Ok(VisiblePeers {
-            peers,
-            sender_team_id: self.canonical_owner_team_key_for_mcp()?,
-            scope: Scope::Team,
-        })
-    }
-
-    /// `_refuse_cross_team_peer` (`tools.py:185-213`): server-side C23 pre-refusal. A
-    /// non-`*`/non-leader string target NOT in the visible-peer scope and not the
-    /// sender itself, with `scope != workspace`, → `Some(ToolError{PeerNotInScope})`
-    /// (also writes `mcp.send_message_refused`). `None` = allowed to proceed.
-    pub fn refuse_cross_team_peer(
-        &self,
-        to: &MessageTarget,
-        scope_override: Option<Scope>,
-    ) -> Option<ToolError> {
-        let owner_team = match self.canonical_owner_team_key() {
-            Ok(team) => team,
-            Err(error) => return Some(error),
-        };
-        if matches!(scope_override, Some(Scope::Workspace)) {
-            return Some(self.rpc_scope_refused(
-                "send_message",
-                None,
-                scope_override.and_then(scope_override_name),
-            ));
-        }
-        if owner_team.is_none() {
-            return None;
-        }
-        let MessageTarget::Single(target) = to else {
-            return None;
-        };
-        if target.is_empty()
-            || target == "*"
-            || target == "leader"
-            || target == "Leader"
-            || self
-                .agent_id
-                .as_ref()
-                .is_some_and(|id| id.as_str() == target)
-        {
-            return None;
-        }
-        // 0.5.45 naming-addressing (design §3.6, RED-2 MCP): compute
-        // the visible peers ONCE and reuse for both exact-match check
-        // AND scope-safe candidate ranking. Peers come from
-        // `get_visible_peers()` (owner-team only) so sibling teams,
-        // host registry, and workspace reverse scans cannot leak.
-        let visible_peers: Vec<String> = self
-            .get_visible_peers()
-            .map(|visible| {
-                visible
-                    .peers
-                    .iter()
-                    .map(|peer| peer.as_str().to_string())
-                    .collect()
-            })
-            .unwrap_or_default();
-        if visible_peers.iter().any(|peer| peer == target) {
-            return None;
-        }
-        let owner_team_key = owner_team
-            .as_ref()
-            .map(TeamKey::as_str)
-            .unwrap_or("")
-            .to_string();
-        // Rank the typo against owner-scope peers.
-        let ranked = {
-            use crate::model::name_similarity::{rank, Candidate};
-            let candidates: Vec<Candidate<String>> = visible_peers
-                .iter()
-                .map(|peer| Candidate {
-                    match_key: peer.clone(),
-                    stable_key: peer.clone(),
-                    payload: peer.clone(),
-                })
-                .collect();
-            rank(target, &candidates)
-        };
-        let candidate_values: Vec<Value> = ranked
-            .iter()
-            .map(|peer| {
-                serde_json::json!({
-                    "name": peer,
-                    "team_key": owner_team_key,
-                    "agent_id": peer,
-                    "advisory": true,
-                })
-            })
-            .collect();
-        let best = ranked.first().cloned();
-        let hint = if let Some(best) = best.as_deref() {
-            format!("the requested peer is not in your owner team; did you mean `{best}`?")
-        } else {
-            "the requested peer is not part of your team; worker-origin MCP cannot widen team scope.".to_string()
-        };
-        let _ = EventLog::new(&self.workspace).write(
-            "mcp.send_message_refused",
-            serde_json::json!({
-                "reason": "peer_not_in_scope",
-                "sender_team_id": owner_team_key,
-                "scope": "team",
-                "hint": hint,
-            }),
-        );
-        let mut extra = serde_json::Map::new();
-        extra.insert("status".to_string(), Value::String("refused".to_string()));
-        extra.insert("hint".to_string(), Value::String(hint.clone()));
-        // 0.5.45 naming-addressing (design §3.6, RED-2 MCP): additive
-        // scope-safe suggestions inside the existing ToolError.extra
-        // JSON envelope — no struct/schema change, no event log
-        // widening. Advisory only: `isError=true` and
-        // reason=peer_not_in_scope stay unchanged.
-        extra.insert("requested_name".to_string(), Value::String(target.clone()));
-        if let Some(best) = best {
-            extra.insert("suggested_name".to_string(), Value::String(best));
-        }
-        extra.insert("candidates".to_string(), Value::Array(candidate_values));
-        Some(ToolError {
-            reason: ToolErrorReason::PeerNotInScope,
-            exc_type: "PeerNotInScope".to_string(),
-            message: format!("peer '{target}' is not in scope"),
-            extra,
-        })
-    }
-
     fn canonical_owner_team_key(&self) -> Result<Option<TeamKey>, ToolError> {
         // Single worker MCP owner resolver: TEAM_AGENT_OWNER_TEAM_ID must resolve
         // through state::projection::resolve_owner_team_id to the runtime team key.
         // Unresolved/ambiguous owner scope emits mcp.scope_refused; never fallback
         // to active/top-level/sibling teams in a multi-team state.
-        let Some(owner_team_id) = &self.owner_team_id else {
-            // swallow batch 4 C5-C8 (MUST-16 fail-closed): the runtime state is the
-            // scope truth source — when it cannot be read, the gate REFUSES with a
-            // structured transient scope_unverifiable instead of silently treating
-            // the workspace as legacy single-team (silent privilege widening).
-            let state = load_runtime_state(&self.workspace)
-                .map_err(|error| self.scope_unverifiable(&error.to_string()))?;
-            if state
-                .get("teams")
-                .and_then(Value::as_object)
-                .is_some_and(|teams| !teams.is_empty())
-            {
-                return Err(
-                    self.scope_refused("TEAM_AGENT_OWNER_TEAM_ID is required for multi-team MCP")
-                );
-            }
-            return Ok(None);
-        };
-        let state = load_runtime_state(&self.workspace)
-            .map_err(|error| self.scope_unverifiable(&error.to_string()))?;
-        match canonicalize_owner_team_id(&state, owner_team_id.as_str()) {
-            Some(team) => Ok(Some(TeamKey::new(team))),
-            None => Err(self.scope_refused("owner team could not be resolved")),
-        }
-    }
-
-    fn canonical_owner_team_key_for_mcp(&self) -> Result<Option<TeamKey>, ToolError> {
         let Some(owner_team_id) = &self.owner_team_id else {
             // swallow batch 4 C5-C8 (MUST-16 fail-closed): the runtime state is the
             // scope truth source — when it cannot be read, the gate REFUSES with a
@@ -844,34 +593,4 @@ fn requested_scope_arg(args: &Value) -> Option<String> {
         .filter(|s| !s.is_empty())
         .map(ToString::to_string)
         .or_else(|| args.get("workspace").map(|_| "workspace".to_string()))
-}
-
-fn push_report_warning(obj: &mut serde_json::Map<String, Value>, warning: Value) {
-    let Some(code) = warning.get("code").and_then(Value::as_str) else {
-        return;
-    };
-    let Some(field) = warning.get("field").and_then(Value::as_str) else {
-        return;
-    };
-    match obj.get_mut("warnings") {
-        Some(Value::Array(warnings)) => {
-            let exists = warnings.iter().any(|existing| {
-                existing.get("code").and_then(Value::as_str) == Some(code)
-                    && existing.get("field").and_then(Value::as_str) == Some(field)
-            });
-            if !exists {
-                warnings.push(warning);
-            }
-        }
-        _ => {
-            obj.insert("warnings".to_string(), Value::Array(vec![warning]));
-        }
-    }
-}
-
-fn scope_override_name(scope: Scope) -> Option<&'static str> {
-    match scope {
-        Scope::Team => Some("team"),
-        Scope::Workspace => Some("workspace"),
-    }
 }

@@ -8,7 +8,6 @@
 // ── module-root REUSE imports ─────────────────────────────────────────────
 // decompose 前这些 `use` 在 coordinator.rs 顶层,测试 `mod tests` 经 `use super::*`
 // 继承它们。拆分后保留在 mod.rs(私有 use,子模块 tests 仍经 `use super::*` 解析)。
-use crate::message_store::MessageStore;
 use crate::model::enums::Provider;
 use crate::provider::{ProviderAdapter, TurnId, TurnState};
 use serde_json::Value;

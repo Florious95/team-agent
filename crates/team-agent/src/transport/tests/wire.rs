@@ -42,106 +42,9 @@ fn inject_stage_serde_kebab_case_byte_locked() {
     }
 }
 
-#[test]
-fn inject_verification_serde_snake_case_byte_locked() {
-    // 09-transport.md 表 §38。注意 EmptyTextSendKeys = 空文本走纯 send-keys 的验证。
-    let pairs = [
-        (
-            InjectVerification::CaptureContainsToken,
-            "\"capture_contains_token\"",
-        ),
-        (
-            InjectVerification::CaptureContainsMessageFragment,
-            "\"capture_contains_message_fragment\"",
-        ),
-        (
-            InjectVerification::CaptureContainsNewPastedContentPrompt,
-            "\"capture_contains_new_pasted_content_prompt\"",
-        ),
-        (InjectVerification::NoToken, "\"no_token\""),
-        (
-            InjectVerification::CaptureMissingToken,
-            "\"capture_missing_token\"",
-        ),
-        (
-            InjectVerification::EmptyTextSendKeys,
-            "\"empty_text_send_keys\"",
-        ),
-    ];
-    for (v, wire) in pairs {
-        assert_eq!(serde_json::to_string(&v).unwrap(), wire, "{v:?}");
-    }
-}
 
-#[test]
-fn turn_verification_serde_snake_case_byte_locked() {
-    // 09-transport.md 表 §40;Gap42:not_yet_observed 也算成功,绝非投递闸门。
-    let pairs = [
-        (
-            TurnVerification::LeaderNewTurnBoundaryVerified,
-            "\"leader_new_turn_boundary_verified\"",
-        ),
-        (
-            TurnVerification::LeaderNewTurnBoundaryMissing,
-            "\"leader_new_turn_boundary_missing\"",
-        ),
-        (TurnVerification::NotYetObserved, "\"not_yet_observed\""),
-        (TurnVerification::NotRequired, "\"not_required\""),
-    ];
-    for (v, wire) in pairs {
-        assert_eq!(serde_json::to_string(&v).unwrap(), wire, "{v:?}");
-    }
-}
 
-#[test]
-fn turn_verification_wire_never_defaults_started() {
-    use crate::transport::turn_verification_wire;
-    assert_eq!(
-        turn_verification_wire(TurnVerification::NotYetObserved),
-        "not_yet_observed"
-    );
-    assert_eq!(
-        turn_verification_wire(TurnVerification::LeaderNewTurnBoundaryMissing),
-        "leader_new_turn_boundary_missing"
-    );
-    assert_eq!(
-        turn_verification_wire(TurnVerification::LeaderNewTurnBoundaryVerified),
-        "leader_new_turn_boundary_verified"
-    );
-    assert_ne!(
-        turn_verification_wire(TurnVerification::NotYetObserved),
-        "leader_new_turn_boundary_verified"
-    );
-}
 
-#[test]
-fn submit_verification_wire_strings_byte_locked() {
-    // 09-transport.md 表 §39 + tmux_io.py:64/215-221 + tmux_prompt.py:304/313。
-    // SubmitVerification 携 Key 模板,Python 是散字符串 → 这里钉死 to-wire 映射。
-    // RED via stub:submit_verification_wire unimplemented!()。
-    assert_eq!(
-        submit_verification_wire(SubmitVerification::EnterSentWithoutPlaceholderCheck),
-        "enter_sent_without_placeholder_check"
-    );
-    assert_eq!(
-        submit_verification_wire(SubmitVerification::PastedContentPromptAbsentAfterSubmit),
-        "pasted_content_prompt_absent_after_submit"
-    );
-    assert_eq!(
-        submit_verification_wire(SubmitVerification::PastedContentPromptStillPresentAfterSubmit),
-        "pasted_content_prompt_still_present_after_submit"
-    );
-    assert_eq!(
-        submit_verification_wire(SubmitVerification::SendKeysFailed),
-        "send_keys_failed"
-    );
-    // 模板 `{key}_sent_after_visible_token`:key 取 tmux 字面键名(submit_key)。
-    // golden:Enter → "Enter_sent_after_visible_token"(tmux_io.py:218,submit_key 字面)。
-    assert_eq!(
-        submit_verification_wire(SubmitVerification::KeySentAfterVisibleToken { key: Key::Enter }),
-        "Enter_sent_after_visible_token"
-    );
-}
 
 #[test]
 fn pane_liveness_three_valued_reused_from_model() {
@@ -305,128 +208,9 @@ fn spawn_into_then_list_targets_enumerates_it() {
 // 会卡 trust prompt)。golden /tmp/transport_golden.py: empty_inject_*。
 // ════════════════════════════════════════════════════════════════════════
 
-#[test]
-fn inject_empty_payload_reports_empty_text_send_keys_and_turn_not_required() {
-    // golden empty_inject_report:
-    //   verification=empty_text_send_keys, turn_verification=not_required,
-    //   stage=submitted(Rust:stage_reached=Submit), submitted=true, attempts=1。
-    // 空文本禁走 buffer:只发一个 submit-key(golden empty_inject_calls 仅 1 条 send-keys)。
-    // RED:stub.inject unimplemented!()。
-    let t = tmux();
-    let report = t
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Empty,
-            Key::Enter,
-            false,
-        )
-        .expect("inject empty ok");
-    assert_eq!(
-        report.inject_verification,
-        InjectVerification::EmptyTextSendKeys
-    );
-    assert_eq!(report.turn_verification, TurnVerification::NotRequired);
-    assert_eq!(report.stage_reached, InjectStage::Submit);
-    assert_eq!(report.attempts, 1);
-}
 
-#[cfg(unix)]
-#[test]
-#[ignore = "requires native tmux 3.5+ and python3; owns an isolated socket/session"]
-fn submit_key_protocol_native_tmux_is_return_in_legacy_and_extended_modes() {
-    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/submit_key_protocol_probe.py");
-    let output = std::process::Command::new("python3")
-        .arg(fixture)
-        .args([
-            "--submit-key",
-            crate::transport::tmux_submit_key_name(Key::Enter),
-        ])
-        .output()
-        .expect("run isolated raw-PTY submit diagnostic");
-    assert!(
-        output.status.success(),
-        "production submit key is not Return: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
-    assert!(String::from_utf8_lossy(&output.stdout)
-        .contains("ProductionSubmitReturn=verified-three-modes"));
-}
 
-#[test]
-fn empty_inject_is_single_direct_send_keys_never_buffer() {
-    // 命令构造 golden(STEP-9):空文本禁走 buffer,只发一条 send-keys 提交键
-    // (tmux_io.py:42 —— tmux 拒空 buffer 会卡 trust prompt)。
-    // Return 与 Ctrl-M 只在 legacy 模式等价；提交必须保持逻辑 Enter。
-    assert_eq!(
-        tmux_empty_inject_argv(&PaneId::new("%7"), Key::Enter),
-        vec!["tmux", "send-keys", "-t", "%7", "Enter"]
-    );
-    assert_eq!(
-        crate::transport::tmux_send_submit_argv(&PaneId::new("%7"), Key::Enter),
-        vec!["tmux", "send-keys", "-t", "%7", "Enter"]
-    );
-    assert_eq!(crate::transport::tmux_submit_key_name(Key::Enter), "Enter");
-    assert_eq!(crate::transport::tmux_submit_key_name(Key::Down), "Down");
-}
 
-#[test]
-fn inject_text_payload_bracketed_reaches_submit_with_token_verification() {
-    // contracts-rust-native test_inject_text_visible_parity:
-    //   非空文本走 set/load-buffer + paste-buffer(-p)+ submit;
-    //   有 token 时 verification=capture_contains_token,turn 仅 metadata(Gap42)。
-    // RED via stub。
-    let t = tmux();
-    let report = t
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text("hello [team-agent-token:abc]".into()),
-            Key::Enter,
-            true,
-        )
-        .expect("inject text ok");
-    assert_eq!(report.stage_reached, InjectStage::Submit);
-    assert_eq!(
-        report.inject_verification,
-        InjectVerification::CaptureContainsToken
-    );
-    // Gap42:此 fixture 无 leader-boundary 标记(provider 非 fake,2s 内未观测到新 turn
-    // → tmux_io.py:192-193 `turn_verification = "not_yet_observed"`)。metadata-only,
-    // 绝非投递闸门 —— golden 钉死为 NotYetObserved(不是 2-of-4 析取)。
-    assert_eq!(report.turn_verification, TurnVerification::NotYetObserved);
-
-    // 命令构造 golden(STEP-9 头号目标):非空文本走 set-buffer → paste-buffer -p →
-    // delete-buffer 序列(tmux_io.py:119/303/314)。-p == bracketed paste。
-    let argv = tmux_inject_text_argv(
-        &PaneId::new("%7"),
-        "team-agent-buf",
-        "hello [team-agent-token:abc]",
-        true,
-    );
-    assert_eq!(
-        argv,
-        vec![
-            vec![
-                "tmux",
-                "set-buffer",
-                "-b",
-                "team-agent-buf",
-                "hello [team-agent-token:abc]"
-            ],
-            vec![
-                "tmux",
-                "paste-buffer",
-                "-t",
-                "%7",
-                "-b",
-                "team-agent-buf",
-                "-p"
-            ],
-            vec!["tmux", "delete-buffer", "-b", "team-agent-buf"],
-        ]
-    );
-}
 
 // ═══════════════ P2 FIX-LOOP RED (复绿即对抗 cross-model finding) ═══════════════
 // P1 — inject must switch to `load-buffer -` (stdin) at TMUX_STDIN_BUFFER_THRESHOLD
@@ -435,37 +219,6 @@ fn inject_text_payload_bracketed_reaches_submit_with_token_verification() {
 // Golden: messaging/tmux_io.py:292-303 (`size >= TMUX_STDIN_BUFFER_THRESHOLD`),
 // _tmux_load_buffer_stdin argv `["tmux","load-buffer","-b",<buf>,"-"]`; runtime.py:464
 // TMUX_STDIN_BUFFER_THRESHOLD = 16 * 1024.
-#[test]
-fn p2_inject_large_text_switches_to_load_buffer_stdin_at_16k() {
-    let pane = PaneId::new("%7");
-    let buf = "team-agent-buf";
-
-    // small → set-buffer with the text inline (unchanged).
-    let small = tmux_inject_text_argv(&pane, buf, "hello", true);
-    assert_eq!(small[0], vec!["tmux", "set-buffer", "-b", buf, "hello"]);
-
-    // just below threshold (16383 bytes) → still set-buffer.
-    let below = "x".repeat(16383);
-    let below_argv = tmux_inject_text_argv(&pane, buf, &below, true);
-    assert_eq!(
-        below_argv[0][1], "set-buffer",
-        "16383 bytes < threshold → set-buffer"
-    );
-
-    // at/above threshold (16384 bytes) → load-buffer - (text streamed via stdin).
-    let big = "x".repeat(16384);
-    let big_argv = tmux_inject_text_argv(&pane, buf, &big, true);
-    assert_eq!(
-        big_argv[0],
-        vec!["tmux", "load-buffer", "-b", buf, "-"],
-        ">=16384 bytes must stream via `load-buffer -` (stdin), not set-buffer argv"
-    );
-    // the payload must NOT ride the command line (ARG_MAX hazard).
-    assert!(
-        !big_argv[0].iter().any(|a| a.len() >= 16384),
-        "the 16KiB text must not be passed as an argv argument"
-    );
-}
 
 // ════════════════════════════════════════════════════════════════════════
 // GROUP E — Key 枚举翻译(抽象 Key,各后端翻译,不透传 tmux 字面量)
@@ -483,7 +236,6 @@ fn send_keys_sequence_routes_through_transport() {
     // [Down, Enter] → send-keys -t %7 Down Enter(codex.py:266)。
     assert_eq!(tmux_key_name(Key::Down), "Down");
     assert_eq!(tmux_key_name(Key::Enter), "Enter");
-    assert_eq!(tmux_key_name(Key::CtrlC), "C-c");
     assert_eq!(
         tmux_send_keys_argv(&PaneId::new("%7"), &[Key::Down, Key::Enter]),
         vec!["tmux", "send-keys", "-t", "%7", "Down", "Enter"]
@@ -521,10 +273,6 @@ fn cancel_mode_is_noop_on_non_tmux_backends() {
     assert_eq!(
         tmux_cancel_mode_argv(&PaneId::new("%7"), PaneMode::Unknown),
         vec!["tmux", "send-keys", "-t", "%7", "-X", "cancel"]
-    );
-    assert_eq!(
-        tmux_close_bracketed_paste_argv(&PaneId::new("%7")),
-        vec!["tmux", "send-keys", "-t", "%7", "-l", "\u{1b}[201~"]
     );
 }
 

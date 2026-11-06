@@ -45,7 +45,7 @@ use serde_json::{json, Map, Value};
 use thiserror::Error;
 
 // REUSE in-tree(只 import,不 redefine):
-use crate::messaging::{self, MessageTarget, SendOptions, TrustedSender};
+use crate::messaging::{self, MessageTarget, TrustedSender};
 use crate::model::ids::{TaskId, TeamKey};
 
 pub(crate) const COMMS_BOUNDARY_TEXT: &str =
@@ -86,7 +86,6 @@ pub(crate) mod route;
 pub mod send;
 mod schedule;
 pub(crate) mod spec;
-pub mod status;
 pub(crate) mod triage;
 pub mod types;
 
@@ -99,7 +98,6 @@ pub use leaders::*;
 pub use named_address::*;
 pub use profile::*;
 pub use send::*;
-pub use status::*;
 pub use types::*;
 
 ///
@@ -643,17 +641,6 @@ pub mod lifecycle_port {
             .iter()
             .filter(|pane| anchor_pane_ids.contains(pane.pane_id.as_str()))
             .map(|pane| pane.session.as_str().to_string())
-            .collect()
-    }
-
-    fn socket_session_names_from_targets(
-        pane_targets: &[crate::transport::PaneInfo],
-    ) -> Vec<crate::transport::SessionName> {
-        let mut seen = std::collections::BTreeSet::new();
-        pane_targets
-            .iter()
-            .map(|pane| pane.session.clone())
-            .filter(|session| seen.insert(session.as_str().to_string()))
             .collect()
     }
 
@@ -3023,14 +3010,6 @@ pub mod lifecycle_port {
             self.pids.contains(&pid)
         }
 
-        fn contains_pgid(&self, pgid: u32) -> bool {
-            self.pgids.contains(&pgid)
-        }
-
-        fn contains_process(&self, process: &ProcessInfo) -> bool {
-            self.pids.contains(&process.pid)
-                || process.pgid.is_some_and(|pgid| self.pgids.contains(&pgid))
-        }
     }
 
     ///

@@ -6,11 +6,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use super::*;
-use crate::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport, Key,
-    PaneField, PaneInfo, PaneLiveness, SetEnvOutcome, SpawnResult, Target, Transport,
-    TransportError,
-};
+use crate::transport::{ BackendKind, CaptureRange, CapturedText, Key, PaneField, PaneInfo, PaneLiveness, SpawnResult, Target, Transport, TransportError };
 
 fn ws(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("ta-rs-redisc-{tag}-{}", std::process::id()));
@@ -567,15 +563,6 @@ impl Transport for FailingListTargetsTransport {
         Err(self.unsupported())
     }
 
-    fn inject(
-        &self,
-        _target: &Target,
-        _payload: &InjectPayload,
-        _submit: Key,
-        _bracketed: bool,
-    ) -> Result<InjectReport, TransportError> {
-        Err(self.unsupported())
-    }
 
     fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
         Err(self.unsupported())
@@ -612,14 +599,6 @@ impl Transport for FailingListTargetsTransport {
         Err(self.unsupported())
     }
 
-    fn set_session_env(
-        &self,
-        _session: &SessionName,
-        _key: &str,
-        _value: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        Err(self.unsupported())
-    }
 
     fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
         Err(self.unsupported())
@@ -629,9 +608,6 @@ impl Transport for FailingListTargetsTransport {
         Err(self.unsupported())
     }
 
-    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
-        Err(self.unsupported())
-    }
 }
 
 #[test]

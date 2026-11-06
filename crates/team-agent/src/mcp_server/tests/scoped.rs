@@ -110,15 +110,14 @@
             None,
         );
         let error = tools
-            .report_result(
+            .report_result_with_presentation(
                 Some(&json!({
                     "agent_id": "env-agent", "task_id": "env-task",
                     "status": "blocked", "summary": "env summary"
                 })),
-                Some("ARG summary"), ResultStatus::Success,
+                Some("ARG summary"), Some("success"),
                 None, None, None, None, None,
-                Some("ARG-task"), Some("ARG-agent"),
-            )
+                Some("ARG-task"), Some("ARG-agent"), None)
             .expect_err("envelope and argument identities must be bound to the worker capture");
         assert_eq!(error.reason, ToolErrorReason::McpScopeRefused);
         assert!(error.message.contains("identity_mismatch"));
@@ -136,11 +135,10 @@
             "tasks": [{"id": "t-42", "assignee": "worker-7", "status": "pending"}]
         }));
         let tools = TeamOrchestratorTools::with_identity(&cws, Some(AgentId::new("worker-7")), Some(TeamKey::new("teamA")));
-        let ok = tools.report_result(
-            None, Some("done it"), ResultStatus::Success,
+        let ok = tools.report_result_with_presentation(
+            None, Some("done it"), Some("success"),
             None, None, None, None, None,
-            None, None,
-        ).expect("report ok");
+            None, None, None).expect("report ok");
         let v = serde_json::to_value(&ok).unwrap();
         assert_eq!(v.get("task_id"), Some(&json!("manual")));
         let inbox = crate::inbox_store::read(&cws, "leader", 10, Some("teamA")).unwrap();
@@ -156,31 +154,7 @@
     // worker-weird(non-dict)} → peers ["worker-a","worker-no-status","worker-weird",
     // "worker-z"] (sorted, dead/stopped filtered, non-dict & no-status INCLUDED);
     // sender_team_id "teamA", scope team. Rust stub returns empty peers.
-    #[test]
-    fn get_visible_peers_reads_state_sorted_live_filtered() {
-        let cws = seed_state_ws("visible-peers", &json!({
-            "agents": {}, "active_team_key": null,
-            "teams": {
-                "teamA": {"status": "alive", "agents": {
-                    "worker-z": {"status": "alive"},
-                    "worker-a": {"status": "working"},
-                    "worker-dead": {"status": "DEAD"},
-                    "worker-stopped": {"status": "Stopped"},
-                    "worker-no-status": {},
-                    "worker-weird": "not-a-dict"
-                }},
-                "teamB": {"status": "alive", "agents": {"other-bob": {"status": "alive"}}}
-            }
-        }));
-        let tools = TeamOrchestratorTools::with_identity(
-            &cws, Some(AgentId::new("worker-1")), Some(TeamKey::new("teamA")),
-        );
-        let vp = tools.get_visible_peers().expect("visible peers");
-        let got: Vec<&str> = vp.peers.iter().map(AgentId::as_str).collect();
-        assert_eq!(got, vec!["worker-a", "worker-no-status", "worker-weird", "worker-z"]);
-        assert_eq!(vp.sender_team_id, Some(TeamKey::new("teamA")));
-        assert_eq!(vp.scope, Scope::Team);
-    }
+
 
     // ── #42 refuse_cross_team_peer ALLOWS a live in-team peer (visible bypass) ──
     // GOLDEN (probe_peers.py): with the same seeded state, refusing worker-a / worker-z
@@ -204,38 +178,23 @@
         let tools = TeamOrchestratorTools::with_identity(
             &cws, Some(AgentId::new("worker-1")), Some(TeamKey::new("teamA")),
         );
-        // live / no-status / non-dict in-team peers are ALLOWED (None).
-        assert!(tools.refuse_cross_team_peer(&MessageTarget::Single("worker-a".to_string()), None).is_none(),
-            "a live in-team peer must be allowed (visible-peer bypass)");
-        assert!(tools.refuse_cross_team_peer(&MessageTarget::Single("worker-z".to_string()), None).is_none());
-        assert!(tools.refuse_cross_team_peer(&MessageTarget::Single("worker-no-status".to_string()), None).is_none());
-        assert!(tools.refuse_cross_team_peer(&MessageTarget::Single("worker-weird".to_string()), None).is_none());
-        // dead / other-team peers are still refused.
-        assert!(tools.refuse_cross_team_peer(&MessageTarget::Single("worker-dead".to_string()), None).is_some());
-        assert!(tools.refuse_cross_team_peer(&MessageTarget::Single("other-bob".to_string()), None).is_some());
+        // Durable ingress admits in-team peers regardless of their physical liveness.
+        for recipient in ["worker-a", "worker-z", "worker-no-status", "worker-weird", "worker-dead"] {
+            let outcome = tools.send_message_with_presentation(
+                &MessageTarget::Single(recipient.into()), "scope probe",
+                None, None, None, Some(&json!(true)), None,
+            ).expect("in-team durable ingress");
+            assert_eq!(outcome.to_value()["ok"], true, "{recipient}");
+            assert_eq!(outcome.to_value()["status"], "stored", "{recipient}");
+        }
+        let error = tools.send_message_with_presentation(
+            &MessageTarget::Single("teamB/other-bob".into()), "scope probe",
+            None, None, None, Some(&json!(true)), None,
+        ).expect_err("foreign team remains outside the captured worker scope");
+        assert_eq!(error.reason, ToolErrorReason::PeerNotInScope);
     }
 
     // ── #48 refuse_cross_team_peer writes mcp.send_message_refused EventLog ─────
     // GOLDEN (probe_events_red.py): a refusal appends an event with fields
     // event=mcp.send_message_refused, reason=peer_not_in_scope, scope=team,
     // sender_team_id=teamA, hint=<the cross-team hint>. Rust handler writes nothing.
-    #[test]
-    fn refuse_cross_team_peer_writes_send_message_refused_event() {
-        let cws = seed_state_ws("refuse-event", &json!({
-            "agents": {}, "active_team_key": null,
-            "teams": {"teamA": {"status": "alive", "agents": {"worker-1": {"status": "alive"}}}}
-        }));
-        let tools = TeamOrchestratorTools::with_identity(
-            &cws, Some(AgentId::new("worker-1")), Some(TeamKey::new("teamA")),
-        );
-        // out-of-scope peer → refusal must emit the audit event.
-        let _ = tools.refuse_cross_team_peer(&MessageTarget::Single("other-bob".to_string()), None);
-        let events = EventLog::new(&cws).tail(50).expect("read events");
-        let refused = events.iter().find(|e| e["event"] == json!("mcp.send_message_refused"))
-            .expect("mcp.send_message_refused must be written on refusal");
-        assert_eq!(refused["reason"], json!("peer_not_in_scope"));
-        assert_eq!(refused["scope"], json!("team"));
-        assert_eq!(refused["sender_team_id"], json!("teamA"));
-        assert_eq!(refused["hint"],
-            json!("the requested peer is not part of your team; worker-origin MCP cannot widen team scope."));
-    }

@@ -28,10 +28,10 @@ fn report_result_requires_framework_identity_before_delegate() {
     let tools = TeamOrchestratorTools::with_identity(&ws, None, None);
 
     let error = tools
-        .report_result(
+        .report_result_with_presentation(
             Some(&json!({})),
             None,
-            ResultStatus::Success,
+            Some("success"),
             None,
             None,
             None,
@@ -39,7 +39,8 @@ fn report_result_requires_framework_identity_before_delegate() {
             None,
             None,
             None,
-        )
+
+        None)
         .expect_err("report_result must fail closed without a captured identity");
 
     assert_eq!(

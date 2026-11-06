@@ -16,12 +16,7 @@ use serial_test::{file_serial, serial};
 use team_agent::lifecycle::{launch_with_transport, restart_with_transport};
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 use team_agent::tmux_backend::TmuxBackend;
-use team_agent::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
-};
+use team_agent::transport::{ BackendKind, CaptureRange, CapturedText, InjectStage, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName, SpawnResult, Target, Transport, TransportError, WindowName };
 
 #[test]
 #[ignore = "real-machine: restart/session liveness lifecycle gate"]
@@ -277,8 +272,6 @@ impl Transport for RestartLivenessTransport {
 
     fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
         Ok(match field {
-            PaneField::PaneId => Some("%0".to_string()),
-            PaneField::SessionName => Some("team-ctxteam".to_string()),
             _ => None,
         })
     }
@@ -287,15 +280,6 @@ impl Transport for RestartLivenessTransport {
         Ok(PaneLiveness::Live)
     }
 
-    fn inject(
-        &self,
-        _target: &Target,
-        _payload: &InjectPayload,
-        _submit: Key,
-        _bracketed: bool,
-    ) -> Result<InjectReport, TransportError> {
-        Ok(inject_report())
-    }
 
     fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
         Ok(())
@@ -312,22 +296,11 @@ impl Transport for RestartLivenessTransport {
         })
     }
 
-    fn set_session_env(
-        &self,
-        _session: &SessionName,
-        _key: &str,
-        _value: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        Ok(SetEnvOutcome::Applied)
-    }
 
     fn kill_window(&self, _target: &Target) -> Result<(), TransportError> {
         Ok(())
     }
 
-    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
-        Ok(AttachOutcome::Attached)
-    }
 }
 
 #[derive(Clone, Default)]
@@ -409,8 +382,6 @@ impl Transport for LaunchPaneIdTransport {
 
     fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
         Ok(match field {
-            PaneField::PaneId => Some("%0".to_string()),
-            PaneField::SessionName => Some("team-ctxteam".to_string()),
             _ => None,
         })
     }
@@ -419,15 +390,6 @@ impl Transport for LaunchPaneIdTransport {
         Ok(PaneLiveness::Live)
     }
 
-    fn inject(
-        &self,
-        _target: &Target,
-        _payload: &InjectPayload,
-        _submit: Key,
-        _bracketed: bool,
-    ) -> Result<InjectReport, TransportError> {
-        Ok(inject_report())
-    }
 
     fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
         Ok(())
@@ -444,14 +406,6 @@ impl Transport for LaunchPaneIdTransport {
         })
     }
 
-    fn set_session_env(
-        &self,
-        _session: &SessionName,
-        _key: &str,
-        _value: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        Ok(SetEnvOutcome::Applied)
-    }
 
     fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
         Ok(())
@@ -461,21 +415,9 @@ impl Transport for LaunchPaneIdTransport {
         Ok(())
     }
 
-    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
-        Ok(AttachOutcome::Attached)
-    }
 }
 
-fn inject_report() -> InjectReport {
-    InjectReport {
-        stage_reached: InjectStage::Submit,
-        inject_verification: InjectVerification::NoToken,
-        submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
-        turn_verification: TurnVerification::NotRequired,
-        attempts: 1,
-        submit_diagnostics: None,
-    }
-}
+
 
 struct RestartFixture {
     root: PathBuf,

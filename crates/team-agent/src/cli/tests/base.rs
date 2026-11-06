@@ -148,289 +148,30 @@ fn leader_launcher_args_error_cases() {
 // send_target(commands.py:181-184):--to split / target / None
 // =========================================================================
 
-#[test]
-fn send_target_cases() {
-    // (old case-id, targets, target, complete expected enum).
-    let cases: &[(&str, Option<&str>, Option<&str>, MessageTarget)] = &[
-        (
-            "send_target_fanout_strips_and_filters_empty",
-            Some("a, b ,,c"),
-            None,
-            MessageTarget::Fanout(vec!["a".to_string(), "b".to_string(), "c".to_string()]),
-        ),
-        (
-            "send_target_single_target",
-            None,
-            Some("agent_x"),
-            MessageTarget::Single("agent_x".to_string()),
-        ),
-        // A bare "*" means broadcast to the whole team.
-        (
-            "send_target_broadcast_star",
-            None,
-            Some("*"),
-            MessageTarget::Broadcast,
-        ),
-        // targets="" is falsy in Python, so it falls through to args.target.
-        (
-            "send_target_empty_targets_falls_through_to_target",
-            Some(""),
-            Some("fallback"),
-            MessageTarget::Single("fallback".to_string()),
-        ),
-    ];
-    for (id, targets, target, expected) in cases {
-        assert_eq!(send_target(*targets, *target), *expected, "{id}");
-    }
-}
 
 // =========================================================================
 // classify_agent_bucket / agent_summary_counts(commands.py:309-330)
 // bug-071/077/085 铁律:unknown ≠ idle,无匹配态显式落 Unknown
 // =========================================================================
 
-#[test]
-fn classify_agent_bucket_cases() {
-    // (old case-id, all original (raw, health) inputs, expected bucket).
-    const CASES: &[(&str, &[(&str, &str)], SummaryBucket)] = &[
-        (
-            "classify_failed_takes_priority",
-            &[("failed", ""), ("error", ""), ("running", "error")],
-            SummaryBucket::Failed,
-        ),
-        (
-            "classify_stopped",
-            &[("stopped", ""), ("done", ""), ("running", "done")],
-            SummaryBucket::Stopped,
-        ),
-        (
-            "classify_busy",
-            &[("busy", ""), ("", "running"), ("", "working")],
-            SummaryBucket::Busy,
-        ),
-        // hstatus==idle precedes the raw==running branch.
-        (
-            "classify_hstatus_idle_beats_raw_running",
-            &[("running", "idle")],
-            SummaryBucket::Idle,
-        ),
-        (
-            "classify_pure_running",
-            &[("running", "")],
-            SummaryBucket::Running,
-        ),
-        // bug-071/077/085: unmatched and blocked/stuck/missing are Unknown, NEVER idle.
-        (
-            "classify_blocked_and_unmatched_are_unknown_never_idle",
-            &[
-                ("blocked", ""),
-                ("stuck", ""),
-                ("", "missing"),
-                ("weird_value", ""),
-                ("", ""),
-            ],
-            SummaryBucket::Unknown,
-        ),
-    ];
-    for (id, inputs, expected) in CASES {
-        for &(raw, health) in inputs.iter() {
-            assert_eq!(
-                classify_agent_bucket(raw, health),
-                *expected,
-                "{id}: raw={raw:?}, health={health:?}"
-            );
-        }
-    }
-}
 
-#[test]
-fn agent_summary_counts_mixed_golden() {
-    // golden (empty health): a1 running->Running; a2 busy->Busy; a3 failed->Failed;
-    //   a4 stopped->Stopped; a5 blocked->Unknown; a6 ""->Unknown; a7 weird->Unknown.
-    //   => running=1 busy=1 idle=0 stopped=1 failed=1 unknown=3
-    let agents = json!({
-        "a1": {"status": "running"},
-        "a2": {"status": "busy"},
-        "a3": {"status": "failed"},
-        "a4": {"status": "stopped"},
-        "a5": {"status": "blocked"},
-        "a6": {"status": ""},
-        "a7": {"status": "weird_value"},
-    });
-    let got = agent_summary_counts(&agents, &json!({}));
-    assert_eq!(
-        got,
-        SummaryCounts {
-            running: 1,
-            busy: 1,
-            idle: 0,
-            stopped: 1,
-            failed: 1,
-            unknown: 3
-        }
-    );
-    assert_eq!(got.total(), 7);
-}
 
-#[test]
-fn agent_summary_counts_none_agent_is_unknown() {
-    // golden: {"x": None} -> unknown=1
-    let got = agent_summary_counts(&json!({"x": Value::Null}), &json!({}));
-    assert_eq!(
-        got,
-        SummaryCounts {
-            unknown: 1,
-            ..Default::default()
-        }
-    );
-}
 
-#[test]
-fn agent_summary_counts_uppercase_status_lowercased() {
-    // golden: {"x":{"status":"RUNNING"}} -> running=1 (str(...).lower())
-    let got = agent_summary_counts(&json!({"x": {"status": "RUNNING"}}), &json!({}));
-    assert_eq!(
-        got,
-        SummaryCounts {
-            running: 1,
-            ..Default::default()
-        }
-    );
-}
 
 // =========================================================================
 // interaction_counts(commands.py:292-306):interacted 非空且≠"never"
 // =========================================================================
 
-#[test]
-fn interaction_counts_mixed_golden() {
-    // golden: a:"5m ago"->interacted; b:"never"->never; c:""->never; d:{}->never; e:None->never
-    // result (1, 4)
-    let agents = json!({
-        "a": {"interacted": "5m ago"},
-        "b": {"interacted": "never"},
-        "c": {"interacted": ""},
-        "d": {},
-        "e": Value::Null,
-    });
-    let got = interaction_counts(&agents);
-    assert_eq!(
-        got,
-        InteractionCounts {
-            interacted: 1,
-            never: 4
-        }
-    );
-}
 
 // =========================================================================
 // format_status_summary(commands.py:263-289):五行 triage 字节锁(Gap 18a)
 // =========================================================================
 
-#[test]
-fn format_status_summary_full_byte_lock() {
-    // golden:
-    // coordinator: running schema_ok=True tmux=True
-    // receiver: %3 cmd=codex topology=external
-    // agents: 2 — running=1 busy=1 idle=0 stopped=0 failed=0 unknown=0
-    // queued: 2 mailbox messages awaiting delivery
-    // latest result: a1 -> did the thing @ -
-    let data = json!({
-        "coordinator": {"status": "running", "schema_ok": true},
-        "leader_receiver": {"pane_id": "%3", "pane_current_command": "codex"},
-        "agents": {"a1": {"status": "running"}, "a2": {"status": "busy"}},
-        "agent_health": {},
-        "tmux_session_present": true,
-        "queued_messages": [1, 2],
-        "latest_results": [{"agent_id": "a1", "summary": "did the thing", "created_at": Value::Null}],
-    });
-    let got = format_status_summary(&data);
-    let expected = "coordinator: running schema_ok=true tmux=true\n\
-receiver: %3 cmd=codex topology=external\n\
-agents: 2 — running=1 busy=1 idle=0 stopped=0 failed=0 unknown=0\n\
-queued: 2 mailbox messages awaiting delivery\n\
-latest result: a1 -> did the thing @ -";
-    assert_eq!(got, expected);
-}
 
-#[test]
-fn format_status_summary_empty_byte_lock() {
-    // golden empty data: stopped/false/false, dashes, 0 counts, none latest.
-    let got = format_status_summary(&json!({}));
-    let expected = "coordinator: stopped schema_ok=false tmux=false\n\
-receiver: - cmd=- topology=external\n\
-agents: 0 — running=0 busy=0 idle=0 stopped=0 failed=0 unknown=0\n\
-queued: 0 mailbox messages awaiting delivery\n\
-latest result: none";
-    assert_eq!(got, expected);
-}
 
-#[test]
-fn format_status_summary_interacted_marker_appended() {
-    // golden: when interacted>0, agents line gets " (1 interacted, 1 never)" suffix.
-    let data = json!({
-        "coordinator": {},
-        "agents": {"a1": {"status": "running", "interacted": "3m"}, "a2": {"status": "idle"}},
-        "agent_health": {"a2": {"status": "idle"}},
-    });
-    let got = format_status_summary(&data);
-    let line2 = got.lines().nth(2).unwrap();
-    assert_eq!(
-        line2,
-        "agents: 2 — running=1 busy=0 idle=1 stopped=0 failed=0 unknown=0 (1 interacted, 1 never)"
-    );
-}
 
-#[test]
-fn format_status_summary_no_interacted_marker_when_zero() {
-    // Gap 18a contract: interacted==0 -> line[2] stays byte-identical with NO marker suffix.
-    let data = json!({
-        "agents": {"a1": {"status": "running"}},
-        "agent_health": {},
-    });
-    let line2 = format_status_summary(&data)
-        .lines()
-        .nth(2)
-        .unwrap()
-        .to_string();
-    assert_eq!(
-        line2,
-        "agents: 1 — running=1 busy=0 idle=0 stopped=0 failed=0 unknown=0"
-    );
-    assert!(
-        !line2.contains("interacted"),
-        "no marker when interacted==0"
-    );
-}
 
-#[test]
-fn format_status_csv_preserves_agent_order_and_collapses_errors() {
-    let data = json!({
-        "agents": {
-            "zeta": {"status": "idle", "pane_id": "%1"},
-            "alpha": {"status": "running", "pane_id": "%2"},
-            "err_failed": {"status": "failed", "pane_id": "%3"},
-            "err_missing_pane": {"status": "running"},
-            "err_unknown": {"status": "mystery", "pane_id": "%4"},
-            "err_stopped": {"status": "stopped", "pane_id": "%5"}
-        },
-        "agent_health": {
-            "alpha": {"status": "working"}
-        }
-    });
-    assert_eq!(
-            format_status_csv(&data),
-            "zeta,idle\nalpha,working\nerr_failed,error\nerr_missing_pane,error\nerr_unknown,error\nerr_stopped,error"
-        );
-}
 
-#[test]
-fn format_status_csv_zero_workers_is_empty() {
-    assert_eq!(
-        format_status_csv(&json!({"agents": {}, "agent_health": {}})),
-        ""
-    );
-}
 
 // =========================================================================
 // emit(helpers.py:12-23):--json sort_keys+indent=2 | dict 逐键 | 非 dict

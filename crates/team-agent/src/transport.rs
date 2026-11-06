@@ -67,7 +67,6 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub mod enter_rescue;
 pub mod native_input;
 
 #[cfg(test)]
@@ -214,62 +213,16 @@ pub enum Target {
     },
 }
 
-/// 注入载荷在类型上分流空文本(trust turn-integrity 契约 §3:空文本禁走 buffer,
-/// 直发 Enter;tmux 拒空 buffer 会卡 trust prompt)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InjectPayload {
-    /// → 纯 send submit-key。
-    Empty,
-    Text(String),
-    /// Text payload for human-facing panes that do not consume provider turns.
-    TextSkipConsumptionPoll(String),
-}
 
-impl InjectPayload {
-    /// ---
-    /// purpose: 取出载荷正文,把「有正文」与「空载荷」在类型上分开
-    /// returns: Text / TextSkipConsumptionPoll 返回 Some(正文);Empty 返回 None
-    /// boundary: 不区分两种带正文的变体(要区分用 skip_consumption_poll);不裁剪、不脱敏
-    /// ---
-    pub fn text(&self) -> Option<&str> {
-        match self {
-            Self::Text(text) | Self::TextSkipConsumptionPoll(text) => Some(text),
-            Self::Empty => None,
-        }
-    }
-
-    /// ---
-    /// purpose: 标出「收件 pane 不消费 provider 回合」的载荷,后端据此跳过 post-Enter 消费轮询
-    /// returns: 仅 TextSkipConsumptionPoll 为 true
-    /// boundary: 只表达「不轮询消费」这一件事,不表达投递成功;调用方不得据此直接判 delivered
-    /// ---
-    pub fn skip_consumption_poll(&self) -> bool {
-        matches!(self, Self::TextSkipConsumptionPoll(_))
-    }
-}
 
 /// 抽象 Key 枚举(§gap-5):各后端翻译,不透传 tmux 字面量。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
-    /// tmux `Enter` / VT `\r`(CR,非 LF —— provider 提交触发的是 \r)。
+    /// tmux `Enter` / VT carriage return.
     Enter,
-    /// tmux 名 / VT `\x1b[A..D`(application-cursor-mode `\x1bO?` 风险)。
     Up,
     Down,
-    Left,
-    Right,
-    /// 选项键/数字。
-    Char(char),
-    /// `\x03`。
-    CtrlC,
-    /// E46 (0.3.24 bug#5): pre-submit Escape to exit bracketed-paste mode on
-    /// fresh provider TUIs (claude). When a bracketed paste lands on a TUI
-    /// whose composer is still initialising, the framework's plain `Enter`
-    /// gets interpreted as paste content, not submit. Sending `Escape` first
-    /// closes the paste bracket so the subsequent `Enter` submits.
-    /// Real-machine truth source: macmini demo-director repro.
-    Escape,
-    /// tmux `-X cancel` / `q` / `d`;非 tmux 后端无 copy-mode 概念 → no-op。
+    /// Leave copy mode; backends without copy mode perform no operation.
     CancelMode,
 }
 
@@ -277,7 +230,6 @@ pub enum Key {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureRange {
     Tail(u32),
-    Head(u32),
     Full,
 }
 
@@ -285,16 +237,8 @@ pub enum CaptureRange {
 /// 「不适用」(trait `query` 返回 `Option<String>`)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneField {
-    PaneId,
     PaneMode,
-    PaneWidth,
     PaneCurrentCommand,
-    PaneCurrentPath,
-    SessionName,
-    /// pane's controlling tty (e.g. `/dev/ttys015`). Consumers use it to
-    /// flip terminal driver bits like `stty -f <tty> -echo` from outside
-    /// tmux's control channel — the query itself still goes through the
-    /// backend so N16/CP-1 (single tmux entry point) stays intact.
     PaneTty,
 }
 
@@ -393,335 +337,27 @@ pub enum InjectStage {
     VisibleCheck,
 }
 
-/// 注入可见性验证(审计语义;tmux_io.py + tmux_prompt.py 散布字符串穷尽枚举,
-/// 09-transport.md 表 §38)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InjectVerification {
-    CaptureContainsToken,
-    CaptureContainsMessageFragment,
-    CaptureContainsNewPastedContentPrompt,
-    NoToken,
-    CaptureMissingToken,
-    /// 空文本走纯 send-keys(InjectPayload::Empty)的验证。
-    EmptyTextSendKeys,
-}
 
-/// 提交键验证(tmux_io.py:214-221, tmux_prompt.py:281-322,09-transport.md 表 §39)。
-/// `{key}_sent_after_visible_token` 是模板 → 用携带 Key 的 variant 表达。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubmitVerification {
-    /// `enter_sent_without_placeholder_check`。MUST-10:此 variant 代表 paste+Enter
-    /// 完成且无需 placeholder probe(纯 peer 消息路径)。**保留** ⇒ delivered 语义;
-    /// E46 后只有 post-Enter consumption 确认通过(input 清空 / Working 信号)才返回
-    /// 此 variant — fresh TUI 未消费走 [`Self::SubmitConsumptionUnverified`]。
-    EnterSentWithoutPlaceholderCheck,
-    /// `pasted_content_prompt_absent_after_submit`。
-    PastedContentPromptAbsentAfterSubmit,
-    /// `pasted_content_prompt_still_present_after_submit`。
-    PastedContentPromptStillPresentAfterSubmit,
-    /// `{key}_sent_after_visible_token`(key 由 variant 携带)。
-    KeySentAfterVisibleToken { key: Key },
-    /// `send_keys_failed`。
-    SendKeysFailed,
-    /// E46 (0.3.24 bug#5, demo-director 卡 bracketed paste): Enter 已发但
-    /// post-Enter 接收侧消费信号(input 行清空 / provider 进 Working)在 bounded
-    /// resend 上限内未观察到。**delivery 不当作 delivered**;走 submitted_unverified /
-    /// failed 路径。区别于
-    /// [`Self::PastedContentPromptStillPresentAfterSubmit`](claude paste-prompt
-    /// 折叠场景)— 本 variant 是结构化 input-empty 检测,适配 demo-director
-    /// 直接渲染文本路径。
-    SubmitConsumptionUnverified,
-}
 
-/// turn-boundary 观测(tmux_io.py:224-260,09-transport.md 表 §40)。
-/// **Gap42**:turn 观测仅 metadata,`not_yet_observed` 也算成功,绝非投递闸门。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TurnVerification {
-    LeaderNewTurnBoundaryVerified,
-    LeaderNewTurnBoundaryMissing,
-    NotYetObserved,
-    NotRequired,
-}
 
-/// 注入流水线阶段化报告(09-transport.md InjectReport;daemon 路径 typed 返回值)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InjectReport {
-    pub stage_reached: InjectStage,
-    pub inject_verification: InjectVerification,
-    pub submit_verification: SubmitVerification,
-    /// Gap42:仅 metadata,`not_yet_observed` 也算成功。
-    pub turn_verification: TurnVerification,
-    pub attempts: u32,
-    /// E50 PR-1 (0.3.24 P0, pasted-prompt 假阴诊断): per-attempt observations
-    /// emitted by the paste-prompt + Enter loop in `tmux_backend.rs::inject`.
-    /// `None` when the inject path did not exercise the diagnostic
-    /// instrumentation (peer payloads, empty payloads, non-bracketed Text,
-    /// or any path that bypasses `capture_has_pasted_content_prompt`). When
-    /// present, downstream `send.unverified` / `send.failed` events surface
-    /// it as `submit_attempts_detail[]` so operators see live pane state
-    /// per attempt (matched literal, where-in-tail offset, scrubbed pane
-    /// excerpt, elapsed ms) — the missing forensic data the user has been
-    /// asking for for many rounds.
-    ///
-    /// Tests / mocks should default this to `None` via `Default`. Wire
-    /// byte-lock (`transport::tests::wire`) is untouched: this field is NOT
-    /// serialised on the typed wire — it lives only in the in-process
-    /// `InjectReport` and is rendered into JSON manually by the delivery
-    /// layer when emitting forensic events.
-    pub submit_diagnostics: Option<SubmitDiagnostics>,
-}
 
-/// E50 PR-1 diagnostic payload — one entry per submit attempt in the
-/// pasted-prompt branch + (informational) for the appear-gate poll.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct SubmitDiagnostics {
-    /// The concrete branch that produced the post-Enter consumption outcome.
-    /// Unknown is retained for paths that do not expose a branch reason.
-    pub consumption_reason: SubmitConsumptionReason,
-    /// Reserved for a pre-paste baseline; this path has no such capture and emits null.
-    pub before_busy_signal_kind: Option<BusySignalKind>,
-    /// Structured busy predicate category for the accepted/current capture.
-    pub busy_signal_kind: Option<BusySignalKind>,
-    /// Bottom-relative non-empty line index of the busy match.
-    pub busy_line_from_bottom: Option<u8>,
-    /// Whether this message marker is in the bottom 15 non-empty lines.
-    pub current_marker_in_bottom_15: Option<bool>,
-    /// Whether the tracked paste identity is still in the composer.
-    pub paste_identity_in_composer: Option<bool>,
-    /// Result of the structural consumption predicate on the current capture.
-    pub consumption_from_capture_result: Option<bool>,
-    /// Time spent in the appear-gate (poll for the pasted-content placeholder
-    /// before Enter). When `saw_pasted_prompt == false` this is the time we
-    /// spent polling before falling through to the E46 token path.
-    pub appear_gate_elapsed_ms: u64,
-    /// Did the appear-gate ever match the `pasted content` / `pasted text`
-    /// literal? When `false`, the inject took the E46 token path; the
-    /// `attempts_detail` may still capture observations the operator wants.
-    pub appear_gate_matched: bool,
-    /// Total elapsed across the whole submit gate (appear-gate + Enter
-    /// loop). Useful to triage real-machine slow-paste (codex large-paste
-    /// collapse can take >100 s while the framework's loop is sub-second).
-    pub total_elapsed_ms: u64,
-    /// Per-attempt observations of the post-Enter capture in the pasted-
-    /// prompt loop. Empty when `saw_pasted_prompt == false` and the inject
-    /// went through the E46 token path.
-    pub attempts_detail: Vec<SubmitAttemptObservation>,
-    /// Token visibility before paste. `None` means this inject did not sample
-    /// (honest unknown). Never inferred from later captures.
-    pub token_seen_before_paste: Option<bool>,
-    /// Token visibility from successful post-paste captures. `None` if every
-    /// post-paste capture failed or none ran.
-    pub token_seen_after_paste: Option<bool>,
-    /// Token visibility from successful post-Enter captures. `None` if none ran
-    /// or all failed.
-    pub token_seen_after_enter: Option<bool>,
-    pub capture_ok_count: u32,
-    pub capture_err_count: u32,
-    pub capture_sample_count: u32,
-    pub last_capture_outcome: CaptureSampleOutcome,
-    /// Basename only of `#{pane_current_command}` at inject; never argv.
-    pub pane_command_basename: Option<String>,
-    pub pane_command_query: QueryOutcome,
-    pub input_surface: InputSurfaceProbe,
-    pub target_pane_id: Option<String>,
-    /// Inject target pane id vs `#{pane_id}` queried on that same target.
-    pub target_pane_query_matched: Option<bool>,
-}
 
-/// Structured category returned by the provider-busy predicate.
-///
-/// This is diagnostic metadata only; it does not change delivery semantics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BusySignalKind {
-    Working,
-    Thinking,
-    Processing,
-    EscToInterrupt,
-    SpinnerGlyph,
-}
 
-impl BusySignalKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Working => "working",
-            Self::Thinking => "thinking",
-            Self::Processing => "processing",
-            Self::EscToInterrupt => "esc_to_interrupt",
-            Self::SpinnerGlyph => "spinner_glyph",
-        }
-    }
-}
 
-/// Structured reason for the post-Enter consumption observation.
-///
-/// This is diagnostic metadata only; it does not change delivery semantics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SubmitConsumptionReason {
-    /// The token/input identity disappeared in the consumption capture.
-    ConsumptionFromCapture,
-    /// Cursor's bounded polling observed a provider-busy signal.
-    CursorPollingBusy,
-    /// The final fallback capture observed a provider-busy signal.
-    FallbackBusy,
-    /// The payload had no token marker, so no structural consumption probe ran.
-    NoMarker,
-    /// The bounded probe did not establish consumption.
-    Unverified,
-    /// An older or otherwise uncovered path did not provide a reason.
-    #[default]
-    Unknown,
-}
 
-impl SubmitConsumptionReason {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::ConsumptionFromCapture => "consumption_from_capture",
-            Self::CursorPollingBusy => "cursor_poll_busy",
-            Self::FallbackBusy => "fallback_busy",
-            Self::NoMarker => "no_marker",
-            Self::Unverified => "unverified",
-            Self::Unknown => "unknown",
-        }
-    }
-}
 
-/// Last capture sample of the inject token path. Distinguishes "read failed"
-/// from "read succeeded and token was absent". Does not change delivery gates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum CaptureSampleOutcome {
-    #[default]
-    NotAttempted,
-    OkTokenSeen,
-    OkTokenMissing,
-    Failed,
-}
 
-impl CaptureSampleOutcome {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::NotAttempted => "not_attempted",
-            Self::OkTokenSeen => "ok_token_seen",
-            Self::OkTokenMissing => "ok_token_missing",
-            Self::Failed => "failed",
-        }
-    }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum QueryOutcome {
-    #[default]
-    Unavailable,
-    Observed,
-}
 
-impl QueryOutcome {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Unavailable => "unavailable",
-            Self::Observed => "observed",
-        }
-    }
-}
 
-/// Typed pane input surface from existing `pane_mode` probe. `Unavailable`
-/// means the query failed; it is not a pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum InputSurfaceProbe {
-    #[default]
-    Unavailable,
-    Input,
-    Copy,
-    Tree,
-    View,
-    Client,
-    UnknownMode,
-}
 
-impl InputSurfaceProbe {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Unavailable => "unavailable",
-            Self::Input => "input",
-            Self::Copy => "copy",
-            Self::Tree => "tree",
-            Self::View => "view",
-            Self::Client => "client",
-            Self::UnknownMode => "unknown_mode",
-        }
-    }
-}
 
-/// First token of a pane command, basename only. Empty/missing → `None`.
-pub(crate) fn command_basename(raw: &str) -> Option<String> {
-    let first = raw.split_whitespace().next()?.trim();
-    if first.is_empty() {
-        return None;
-    }
-    std::path::Path::new(first)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-}
-
-/// E50 PR-1 single attempt observation (one Enter + one capture). All fields
-/// are forensic — they exist to make `send.unverified` / `send.failed` events
-/// self-describing rather than requiring the operator to guess.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct SubmitAttemptObservation {
-    /// 1-based attempt index (mirrors the `attempts` counter that already
-    /// ships in `InjectReport.attempts`).
-    pub attempt_index: u32,
-    /// Did this attempt's post-Enter capture STILL match the pasted-prompt
-    /// literal? `true` means the inject saw the placeholder; `false` means
-    /// the placeholder cleared (= submit succeeded by the legacy criterion).
-    pub matched: bool,
-    /// The matched literal substring (`pasted content` / `pasted text`)
-    /// when `matched == true`. `None` otherwise.
-    pub matched_literal: Option<String>,
-    /// Distance from the bottom of the tail where the match occurred:
-    /// `Some(0)` = bottom-most line (composer), `Some(N)` = N lines above
-    /// bottom (likely scrollback), `None` = no match. Critical for the
-    /// false-negative root cause: a `pasted content` literal in scrollback
-    /// is NOT the live composer placeholder.
-    pub where_in_tail: Option<u32>,
-    /// Scrubbed last 20 / 80 lines of the captured tail, ANSI-stripped,
-    /// capped ~1200 bytes. Secrets scrubbed (sk-/ghp_/AKIA/Bearer/hex32+).
-    pub pane_tail_excerpt: String,
-    /// Number of non-empty lines in `pane_tail_excerpt`.
-    pub pane_tail_lines: u32,
-    /// Time elapsed for THIS attempt (Enter + capture + match).
-    pub elapsed_ms: u64,
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 能力性拒绝的 typed 结果(非 Err —— 已知能力差,审计用;§10)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// `set_session_env` 的 typed 结果(transport-backend-design.md §1.3 / §4c)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SetEnvOutcome {
-    /// tmux:写进 session env。
-    Applied,
-    /// wezterm/conpty:worker env 已在 spawn 时注入,无需事后补种。
-    InternalizedAtSpawn,
-    /// 外部 leader pane 无法事后补种 → leader 必须启动时自带 env(§4c)。
-    UnsupportedForExternalPane { reason: String },
-}
 
-/// `attach_session` 的 typed 结果(transport-backend-design.md §1.3)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AttachOutcome {
-    Attached,
-    /// wezterm:GUI 启动即 attach,无独立动作。
-    GuiAttachIsImplicit,
-    /// conpty:无 attach 概念。
-    Unsupported {
-        reason: String,
-    },
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TransportError(thiserror,lib 边界;transport-backend-design.md §1.3)
@@ -802,12 +438,6 @@ pub trait Transport: Send + Sync {
         false
     }
 
-    /// This backend implements the owned native composer/submit handshake.
-    /// Capability only: no socket discovery, reads, or effects. Unknown/test
-    /// backends do not claim a native input protocol by default.
-    fn supports_owned_native_input(&self) -> bool {
-        false
-    }
 
     /// Physical tmux endpoint used by this transport when known. For tmux this is
     /// either a full `-S` socket path or a `-L` socket name; non-tmux/test
@@ -964,31 +594,7 @@ pub trait Transport: Send + Sync {
 
     // —— INJECT / CAPTURE / QUERY(RIE):按稳定 Target 寻址 ——
 
-    /// 归并 set/load-buffer + paste-buffer + send submit;空文本走纯 send-keys
-    /// (`InjectPayload::Empty`)。仅保证「字节进去了 + 提交键发了」+ typed 阶段化报告;
-    /// 可见性验证启发式在 transport 之上(§gap-recognizer)。
-    fn inject(
-        &self,
-        target: &Target,
-        payload: &InjectPayload,
-        submit: Key,
-        bracketed: bool,
-    ) -> Result<InjectReport, TransportError>;
 
-    fn inject_with_submit_observer(
-        &self,
-        target: &Target,
-        payload: &InjectPayload,
-        submit: Key,
-        bracketed: bool,
-        observer: Option<&dyn SubmitObserver>,
-    ) -> Result<InjectReport, TransportError> {
-        let report = self.inject(target, payload, submit, bracketed)?;
-        if let Some(observer) = observer {
-            observer.after_physical_submit();
-        }
-        Ok(report)
-    }
 
     /// Observation only; None means this backend/provider has no native parser.
     /// An implemented parser with an incomplete frame returns an error, not absence.
@@ -1000,35 +606,8 @@ pub trait Transport: Send + Sync {
         Ok(None)
     }
 
-    /// Snapshot the original attempted target without submitting or adopting a capsule.
-    fn snapshot_enter_rescue(
-        &self,
-        _target: &Target,
-        context: &enter_rescue::EnterRescueContext,
-        _rendered_payload: &str,
-    ) -> Result<enter_rescue::EnterRescueContext, TransportError> {
-        Ok(context.clone())
-    }
 
-    /// Independent delayed Enter-only watchdog, not native-input admission.
-    fn rescue_enter_guarded(
-        &self,
-        _context: &enter_rescue::EnterRescueContext,
-        _authorize: &dyn Fn() -> bool,
-        _observer: Option<&dyn SubmitObserver>,
-    ) -> Result<enter_rescue::EnterRescueOutcome, TransportError> {
-        Ok(enter_rescue::EnterRescueOutcome::NoEffect {
-            reason: "unsupported_backend",
-            reobserve: false,
-        })
-    }
 
-    /// Enter-only recovery; unsupported backends have an explicit zero-effect refusal.
-    fn rescue_enter(&self, _evidence: &native_input::NativeInputEvidence, _authorize: &dyn Fn() -> bool, _observer: Option<&dyn SubmitObserver>)
-        -> Result<native_input::EnterRescueOutcome, TransportError>
-    {
-        Ok(native_input::EnterRescueOutcome::NoEffect { reason: "unsupported_backend", reobserve: false })
-    }
 
     fn send_keys(&self, target: &Target, keys: &[Key]) -> Result<(), TransportError>;
 
@@ -1115,15 +694,6 @@ pub trait Transport: Send + Sync {
         Ok(())
     }
 
-    /// tmux=`set-environment`;无 server-env 的后端(WezTerm/ConPTY)对 worker 内化为
-    /// 「spawn 时注入」(`InternalizedAtSpawn`),对外部 leader pane 返回 typed 不支持
-    /// (`UnsupportedForExternalPane`,§4c)。
-    fn set_session_env(
-        &self,
-        session: &SessionName,
-        key: &str,
-        value: &str,
-    ) -> Result<SetEnvOutcome, TransportError>;
 
     /// A-55 (window rename race): set a tmux per-window option (e.g.
     /// `allow-rename off`, `automatic-rename off`) on an existing window.
@@ -1155,9 +725,6 @@ pub trait Transport: Send + Sync {
         Ok(())
     }
 
-    fn kill_server(&self) -> Result<(), TransportError> {
-        Ok(())
-    }
 
     fn kill_session(&self, session: &SessionName) -> Result<(), TransportError>;
 
@@ -1167,14 +734,8 @@ pub trait Transport: Send + Sync {
         self.kill_window(&Target::Pane(pane.clone()))
     }
 
-    /// 交互前台 attach(leader 用)。tmux=`attach-session`;wezterm=GUI 即 attach
-    /// (`GuiAttachIsImplicit`);conpty=typed 不支持(`Unsupported`)。
-    fn attach_session(&self, session: &SessionName) -> Result<AttachOutcome, TransportError>;
 }
 
-pub trait SubmitObserver {
-    fn after_physical_submit(&self);
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 命令构造 seam(STEP-9 头号目标:exact tmux command construction).
@@ -1219,24 +780,7 @@ pub fn tmux_key_name(key: Key) -> &'static str {
         Key::Enter => "Enter",
         Key::Up => "Up",
         Key::Down => "Down",
-        Key::Left => "Left",
-        Key::Right => "Right",
-        Key::Char('0') => "0",
-        Key::Char('1') => "1",
-        Key::Char('2') => "2",
-        Key::Char('3') => "3",
-        Key::Char('4') => "4",
-        Key::Char('5') => "5",
-        Key::Char('6') => "6",
-        Key::Char('7') => "7",
-        Key::Char('8') => "8",
-        Key::Char('9') => "9",
-        Key::CtrlC => "C-c",
-        // E46 (0.3.24 bug#5): tmux supports `Escape` as a key name; sending
-        // it as a send-keys arg emits `\x1b` to the pane (closes bracketed
-        // paste mode on a stuck TUI composer).
-        Key::Escape => "Escape",
-        Key::CancelMode | Key::Char(_) => "",
+        Key::CancelMode => "",
     }
 }
 
@@ -1265,61 +809,6 @@ pub fn tmux_send_keys_argv(pane: &PaneId, keys: &[Key]) -> Vec<String> {
             .map(str::to_string),
     );
     argv
-}
-
-/// 投递提交键的 tmux 拼写。
-///
-/// `Enter` 必须保持逻辑 Return，不能替换成控制组合 `C-m`。
-/// legacy PTY 中两者都是 CR，但启用 extended keys 后 `C-m` 会成为
-/// CSI-u / modifyOtherKeys Ctrl-M，Pi 不把它当提交；`Enter` 仍发送 CR。
-/// ---
-/// purpose: 投递提交键复用通用逻辑键翻译,避免协议相关的控制键别名
-/// params:
-///   key: 逻辑提交键
-/// returns: 与 tmux_key_name 同值(含空串情形)
-/// boundary: 只管拼写,不管何时提交、提交是否成功;不发送、不验证
-/// ---
-pub fn tmux_submit_key_name(key: Key) -> &'static str {
-    tmux_key_name(key)
-}
-
-/// 投递提交：`send-keys -t <pane> <submit-spelling>`。
-/// ---
-/// purpose: 构造投递提交键的 send-keys argv
-/// params:
-///   pane: 目标 pane 标识
-///   submit: 提交键;经 tmux_submit_key_name 取拼写
-/// returns: 单条 argv,末位为提交键拼写
-/// boundary: 纯构造,不执行;tmux 对该 argv 返回 rc=0 不等于回合已提交(copy-mode 会吞键),真伪判定在 tmux_backend 的消费验证
-/// ---
-pub fn tmux_send_submit_argv(pane: &PaneId, submit: Key) -> Vec<String> {
-    vec![
-        "tmux".to_string(),
-        "send-keys".to_string(),
-        "-t".to_string(),
-        pane.as_str().to_string(),
-        tmux_submit_key_name(submit).to_string(),
-    ]
-}
-
-/// 闭合未完成的 bracketed paste：字面 CSI `ESC [ 201 ~`。
-/// 不是 `Escape` 键（E55：重试只重按回车，绝不送 Escape/C-c）。
-/// ---
-/// purpose: 构造「字面写入 CSI 201~」的 argv,闭合 composer 里未收尾的 bracketed paste
-/// params:
-///   pane: 目标 pane 标识
-/// returns: 带 -l 的 send-keys argv,写入的是字面转义序列而非键名
-/// boundary: 绝不用 Escape / Ctrl-C 代替(E55 红线);纯构造,不执行;不判断 pane 当前是否真处于 paste 中
-/// ---
-pub fn tmux_close_bracketed_paste_argv(pane: &PaneId) -> Vec<String> {
-    vec![
-        "tmux".to_string(),
-        "send-keys".to_string(),
-        "-t".to_string(),
-        pane.as_str().to_string(),
-        "-l".to_string(),
-        "\u{1b}[201~".to_string(),
-    ]
 }
 
 /// CancelMode 在 tmux 上按 pane mode 分派退出键(tmux_io.py:419-426)。
@@ -1364,7 +853,6 @@ pub fn tmux_cancel_mode_argv(pane: &PaneId, mode: PaneMode) -> Vec<String> {
 pub fn tmux_capture_argv(pane: &PaneId, range: CaptureRange) -> Vec<String> {
     let spec = match range {
         CaptureRange::Tail(lines) => format!("-{lines}"),
-        CaptureRange::Head(_) => "0".to_string(),
         CaptureRange::Full => "-".to_string(),
     };
     let mut argv = vec![
@@ -1376,9 +864,6 @@ pub fn tmux_capture_argv(pane: &PaneId, range: CaptureRange) -> Vec<String> {
         "-t".to_string(),
         pane.as_str().to_string(),
     ];
-    if let CaptureRange::Head(lines) = range {
-        argv.extend(["-E".to_string(), lines.saturating_sub(1).to_string()]);
-    }
     argv
 }
 
@@ -1395,12 +880,8 @@ pub fn tmux_capture_argv(pane: &PaneId, range: CaptureRange) -> Vec<String> {
 /// ---
 pub fn tmux_query_argv(pane: &PaneId, field: PaneField) -> Vec<String> {
     let fmt = match field {
-        PaneField::PaneId => "#{pane_id}",
         PaneField::PaneMode => "#{pane_mode}",
-        PaneField::PaneWidth => "#{pane_width}",
         PaneField::PaneCurrentCommand => "#{pane_current_command}",
-        PaneField::PaneCurrentPath => "#{pane_current_path}",
-        PaneField::SessionName => "#{session_name}",
         PaneField::PaneTty => "#{pane_tty}",
     };
     let mut argv = vec![
@@ -1480,84 +961,6 @@ pub fn tmux_spawn_argv(
     }
 }
 
-/// inject 文本路径的 buffer 构造序列(空文本不走这里,走 tmux_empty_inject_argv)。
-/// 返回有序 argv 列表:set-buffer(小)或 load-buffer -(大,>=阈值)→ paste-buffer -p →
-/// delete-buffer。golden(tmux_io.py:119/303/314/324):
-///   set-buffer  → `set-buffer -b <buf> <text>`
-///   paste-buffer→ `paste-buffer -t <target> -b <buf> -p`(-p = bracketed)
-///   delete-buffer→`delete-buffer -b <buf>`
-/// ---
-/// purpose: 构造文本注入的三步 argv 序列:装 buffer → 粘到 pane → 删 buffer
-/// params:
-///   pane: 目标 pane 标识
-///   buffer_name: 本次注入独占的 tmux buffer 名,三步共用同一个名字
-///   text: 待注入正文;长度 >= 16 KiB 改走 load-buffer - (由 stdin 喂),否则 set-buffer 直传
-///   bracketed: true 时 paste-buffer 加 -p(bracketed paste)
-/// returns: 有序的三条 argv:[load 或 set, paste, delete];调用方必须按序执行
-/// boundary: 纯构造,不执行、不发提交键;空文本禁走这条路径(见 tmux_empty_inject_argv);不保证 buffer 名唯一,去重由调用方负责
-/// ---
-pub fn tmux_inject_text_argv(
-    pane: &PaneId,
-    buffer_name: &str,
-    text: &str,
-    bracketed: bool,
-) -> Vec<Vec<String>> {
-    const TMUX_STDIN_BUFFER_THRESHOLD: usize = 16 * 1024;
-    let mut paste = vec![
-        "tmux".to_string(),
-        "paste-buffer".to_string(),
-        "-t".to_string(),
-        pane.as_str().to_string(),
-        "-b".to_string(),
-        buffer_name.to_string(),
-    ];
-    if bracketed {
-        paste.push("-p".to_string());
-    }
-    let load = if text.len() >= TMUX_STDIN_BUFFER_THRESHOLD {
-        vec![
-            "tmux".to_string(),
-            "load-buffer".to_string(),
-            "-b".to_string(),
-            buffer_name.to_string(),
-            "-".to_string(),
-        ]
-    } else {
-        vec![
-            "tmux".to_string(),
-            "set-buffer".to_string(),
-            "-b".to_string(),
-            buffer_name.to_string(),
-            text.to_string(),
-        ]
-    };
-    vec![
-        load,
-        paste,
-        vec![
-            "tmux".to_string(),
-            "delete-buffer".to_string(),
-            "-b".to_string(),
-            buffer_name.to_string(),
-        ],
-    ]
-}
-
-/// 空文本 inject:纯 `send-keys -t <target> <submit_key>`,**禁** buffer 路径
-/// (tmux 拒空 buffer 会卡 trust prompt;tmux_io.py:42)。
-/// `Key::Enter` 保持逻辑 `Enter`，不会在 extended keys 下误发 Ctrl-M。
-/// ---
-/// purpose: 空载荷注入(唤醒/ping)的 argv:只发提交键,不碰 buffer
-/// params:
-///   pane: 目标 pane 标识
-///   submit: 提交键;转发给 tmux_send_submit_argv 取拼写
-/// returns: 与 tmux_send_submit_argv 完全相同的单条 argv
-/// boundary: 禁走 buffer 路径(tmux 拒空 buffer 会卡 trust prompt);纯构造,不执行、不做任何提交验证
-/// ---
-pub fn tmux_empty_inject_argv(pane: &PaneId, submit: Key) -> Vec<String> {
-    tmux_send_submit_argv(pane, submit)
-}
-
 /// capture 出口规范化(§4b,design line 399-400):逐行 rstrip 行尾空白 +
 /// `\xa0`(NBSP)→`\x20`,保留 box-drawing。recognizer 不为后端开分支。
 /// golden:`"line one  \nbusy\xa0marker   \n  \n"` → `"line one\nbusy marker\n\n"`。
@@ -1581,59 +984,6 @@ pub fn normalize_capture(raw: &str) -> String {
             }
         })
         .collect()
-}
-
-/// `SubmitVerification` → wire 字符串(tmux_io.py:64/215-221, tmux_prompt.py:304/313)。
-/// 模板:`{key}_sent_after_visible_token`(key 由 variant 携带,经 tmux_key_name 取名)。
-/// 真相源:`enter_sent_without_placeholder_check` /
-///        `pasted_content_prompt_absent_after_submit` / `send_keys_failed` /
-///        `Enter_sent_after_visible_token`(submit_key 字面)。
-/// ---
-/// purpose: SubmitVerification 判定值落 JSON / 事件的唯一拼写来源
-/// params:
-///   v: 后端给出的提交验证判定
-/// returns: 稳定 wire 字符串;KeySentAfterVisibleToken 由 tmux_key_name 拼成 <键名>_sent_after_visible_token
-/// boundary:
-///   - 只翻译不判定:不把 SubmitConsumptionUnverified 折成成功值,也不合并任何两个变体
-///   - 名与语义已知脱节:enter_sent_without_placeholder_check 实际含义是「消费已确认或跳过消费轮询」,读日志时不可按字面理解成未验证
-///   - 是否算 delivered 不在这里裁定,由 delivery 层的判定表决定
-/// ---
-pub fn submit_verification_wire(v: SubmitVerification) -> String {
-    match v {
-        SubmitVerification::EnterSentWithoutPlaceholderCheck => {
-            "enter_sent_without_placeholder_check".to_string()
-        }
-        SubmitVerification::PastedContentPromptAbsentAfterSubmit => {
-            "pasted_content_prompt_absent_after_submit".to_string()
-        }
-        SubmitVerification::PastedContentPromptStillPresentAfterSubmit => {
-            "pasted_content_prompt_still_present_after_submit".to_string()
-        }
-        SubmitVerification::KeySentAfterVisibleToken { key } => {
-            format!("{}_sent_after_visible_token", tmux_key_name(key))
-        }
-        SubmitVerification::SendKeysFailed => "send_keys_failed".to_string(),
-        SubmitVerification::SubmitConsumptionUnverified => {
-            "submit_consumption_unverified".to_string()
-        }
-    }
-}
-
-/// ---
-/// purpose: TurnVerification 的 send JSON / persist 用词
-/// params:
-///   v: 回合观测判定
-/// returns: 与 serde snake_case 一致的固定拼写
-/// contract: 与 serde snake_case 一致；未知必须是 not_yet_observed，不得写成 verified
-/// boundary: 不是投递闸门（Gap42）；只翻译不判定
-/// ---
-pub fn turn_verification_wire(v: TurnVerification) -> &'static str {
-    match v {
-        TurnVerification::LeaderNewTurnBoundaryVerified => "leader_new_turn_boundary_verified",
-        TurnVerification::LeaderNewTurnBoundaryMissing => "leader_new_turn_boundary_missing",
-        TurnVerification::NotYetObserved => "not_yet_observed",
-        TurnVerification::NotRequired => "not_required",
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

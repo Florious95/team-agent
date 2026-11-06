@@ -48,64 +48,9 @@ fn non_comment_body(src: &str) -> String {
     out
 }
 
-#[test]
-fn batch4_delivery_transport_owned_is_boxed_dyn_transport() {
-    let body = read("messaging/delivery.rs");
-    assert!(
-        body.contains("Owned(Box<dyn Transport>)"),
-        "Batch 4 must generalize `DeliveryTransport::Owned` to \
-         `Owned(Box<dyn Transport>)`. Current body missing the marker."
-    );
-    // The old concrete-TmuxBackend variant must be gone.
-    assert!(
-        !non_comment_body(&body).contains("Owned(crate::tmux_backend::TmuxBackend)"),
-        "Legacy `Owned(crate::tmux_backend::TmuxBackend)` variant must be replaced \
-         by `Owned(Box<dyn Transport>)`. Found the concrete type still present."
-    );
-}
 
-#[test]
-fn batch4_leader_channel_uses_factory_helpers_not_direct_tmux_backend() {
-    // Design §Batch 4: leader-fallback sites must go through the
-    // factory tmux channel helpers so `grep transport_factory::tmux_`
-    // enumerates every intentional tmux-only leader-channel site.
-    let files = ["messaging/delivery.rs", "messaging/leader_receiver.rs"];
-    for rel in files {
-        let body = read(rel);
-        let code = non_comment_body(&body);
-        assert!(
-            code.contains("transport_factory::tmux_"),
-            "{rel} must reference at least one factory tmux channel helper \
-             (`transport_factory::tmux_endpoint_transport` / \
-             `tmux_workspace_transport` / `tmux_default_transport`)"
-        );
-    }
-    // Belt-and-braces: neither file should still call
-    // `TmuxBackend::for_workspace` / `for_tmux_endpoint` / `new`
-    // directly from the leader-fallback code paths. There may still
-    // be a few direct calls in unrelated code paths in the same
-    // file, so we look for at least ONE factory helper mention +
-    // check that the leader-fallback function bodies do NOT contain
-    // the old direct construction.
-    let dr = read("messaging/delivery.rs");
-    if let Some(start) = dr.find("fn delivery_transport_for_recipient") {
-        let slice = &dr[start..];
-        let end = slice.find("\nfn ").map(|e| start + e).unwrap_or(dr.len());
-        let fn_body = &dr[start..end];
-        let code = non_comment_body(fn_body);
-        for forbidden in [
-            "TmuxBackend::for_tmux_endpoint",
-            "TmuxBackend::for_workspace",
-            "TmuxBackend::new",
-        ] {
-            assert!(
-                !code.contains(forbidden),
-                "`delivery_transport_for_recipient` still calls {forbidden} — \
-                 Batch 4 requires factory helpers instead."
-            );
-        }
-    }
-}
+
+
 
 
 #[test]

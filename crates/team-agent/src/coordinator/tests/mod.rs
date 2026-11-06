@@ -34,6 +34,4 @@ impl MarkerStore for MapMarkerStore {
     }
 }
 
-mod s3_bounded;
-mod abnormal;
 mod tick_core;

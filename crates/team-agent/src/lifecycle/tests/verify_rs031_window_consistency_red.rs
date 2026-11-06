@@ -18,19 +18,10 @@ use serde_json::json;
 use serial_test::{file_serial, serial};
 use team_agent::event_log::EventLog;
 use team_agent::lifecycle::{launch_with_transport, quick_start_with_transport, QuickStartReport};
-use team_agent::message_store::MessageStore;
-use team_agent::messaging::{
-    deliver_pending_message, deliver_pending_messages, send_message, DeliveryStatus, MessageTarget,
-    SendOptions, TrustedSender,
-};
+use team_agent::messaging::{ MessageTarget, TrustedSender };
 use team_agent::model::ids::AgentId;
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
-use team_agent::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
-};
+use team_agent::transport::{ BackendKind, CaptureRange, CapturedText, InjectStage, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName, SpawnResult, Target, Transport, TransportError, WindowName };
 
 #[path = "../../../tests/support/hermetic.rs"]
 mod hermetic;
@@ -241,142 +232,20 @@ fn running_worker_state_must_only_be_written_for_windows_that_exist_after_launch
 }
 
 
-#[test]
-#[ignore = "real-machine: needs real tmux/coordinator/binary"]
-#[file_serial(tmux)]
-fn worker_to_leader_delivery_succeeds_when_attached_leader_pane_lives_on_default_socket() {
-    let hermetic = HermeticTestEnv::enter("rs031-leader-default-socket-e2e");
-    let workspace = hermetic.workspace("leader-default-socket-e2e");
-    let leader_pane = PaneId::new("%default-leader");
-    let product_worker_pane = PaneId::new("%product-worker");
-    let product_session = SessionName::new("team-bug4-product");
-    let transport = RecordingTransport::new()
-        .with_liveness(vec![
-            (leader_pane.as_str().to_string(), PaneLiveness::Dead),
-            (product_worker_pane.as_str().to_string(), PaneLiveness::Live),
-        ])
-        .with_targets(vec![
-            pane_info(leader_pane.as_str(), "default-leader-socket", "leader"),
-            pane_info(
-                product_worker_pane.as_str(),
-                product_session.as_str(),
-                "faker",
-            ),
-        ]);
 
-    save_runtime_state(
-        &workspace,
-        &json!({
-            "session_name": product_session.as_str(),
-            "active_team_key": "teamdir",
-            "leader": {"id": "leader", "provider": "codex"},
-            "leader_receiver": {
-                "mode": "direct_tmux",
-                "status": "attached",
-                "provider": "codex",
-                "pane_id": leader_pane.as_str(),
-                "owner_epoch": 1,
-                "discovery": "quick_start"
-            },
-            "team_owner": {
-                "pane_id": leader_pane.as_str(),
-                "provider": "codex",
-                "owner_epoch": 1,
-                "claimed_via": "quick-start"
-            },
-            "owner_epoch": 1,
-            "agents": {
-                "faker": {
-                    "status": "running",
-                    "provider": "fake",
-                    "window": "faker",
-                    "pane_id": product_worker_pane.as_str(),
-                    "startup_prompts": "handled"
-                }
-            },
-            "teams": {
-                "teamdir": {
-                    "session_name": product_session.as_str(),
-                    "leader_receiver": {
-                        "mode": "direct_tmux",
-                        "status": "attached",
-                        "provider": "codex",
-                        "pane_id": leader_pane.as_str(),
-                        "owner_epoch": 1,
-                        "discovery": "quick_start"
-                    },
-                    "team_owner": {
-                        "pane_id": leader_pane.as_str(),
-                        "provider": "codex",
-                        "owner_epoch": 1,
-                        "claimed_via": "quick-start"
-                    },
-                    "agents": {
-                        "faker": {
-                            "status": "running",
-                            "provider": "fake",
-                            "window": "faker",
-                            "pane_id": product_worker_pane.as_str(),
-                            "startup_prompts": "handled"
-                        }
-                    }
-                }
-            }
-        }),
-    )
-    .expect("seed runtime state");
-
-    let store = MessageStore::open(&workspace).expect("open message store");
-    hermetic.assert_store_under_root(&store);
-    let message_id = store
-        .create_message(
-            None,
-            "faker",
-            "leader",
-            "BUG4 worker-to-leader default socket canary",
-            None,
-            false,
-            Some("teamdir"),
-        )
-        .expect("seed worker-origin leader-bound message");
-    let state = load_runtime_state(&workspace).expect("load seeded runtime state");
-    let event_log = EventLog::new(&workspace);
-
-    let delivered = deliver_pending_messages(&workspace, &state, &transport, &event_log)
-        .expect("worker-to-leader delivery should run through the product coordinator transport");
-    let status = message_status(&workspace, &message_id).expect("message status exists");
-    let events = std::fs::read_to_string(workspace.join(".team/logs/events.jsonl"))
-        .expect("events.jsonl exists");
-    let inject_targets = transport.inject_targets();
-
-    assert!(
-        delivered.iter().any(|id| id == &message_id)
-            && status == "delivered"
-            && inject_targets.contains(&Target::Pane(leader_pane.clone())),
-        "BUG-4 E2E contract: leader_receiver is attached and combined discovery shows the leader pane live \
-         on the caller/default socket. A product-socket liveness probe returning Dead for that pane must not \
-         be interpreted as leader_not_attached; the worker->leader message must be physically injected to the \
-         bound leader pane. delivered={delivered:?} status={status:?} inject_targets={inject_targets:?} events={events}"
-    );
-    assert!(
-        !events.contains("\"leader_receiver.delivery_blocked\"")
-            && !events.contains("\"reason\":\"leader_not_attached\""),
-        "BUG-4 E2E contract: attached+live default-socket leader must not emit leader_not_attached; events={events}"
-    );
-}
 
 #[test]
 fn send_message_entrypoint_has_no_pre_enqueue_leader_liveness_gate() {
     let src = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/src/messaging/send.rs"
+        "/src/station/send.rs"
     ))
-    .expect("read send.rs");
+    .expect("read current station send.rs");
     let body = src
-        .split("pub fn send_message")
+        .split("pub fn execute(")
         .nth(1)
-        .and_then(|tail| tail.split("fn task_exists").next())
-        .expect("send_message body");
+        .and_then(|tail| tail.split("fn send_one(").next())
+        .expect("current station admission body");
 
     for forbidden in [
         "leader_pane_bound_but_not_live",
@@ -386,9 +255,9 @@ fn send_message_entrypoint_has_no_pre_enqueue_leader_liveness_gate() {
     ] {
         assert!(
             !body.contains(forbidden),
-            "BUG-4 true-entry contract: messaging::send_message must not have a pre-enqueue \
+            "BUG-4 true-entry contract: station::send::execute must not have a pre-enqueue \
              leader liveness gate ({forbidden}); it must create a message_id and let \
-             deliver_pending_messages decide endpoint/liveness/injection"
+             the current durable delivery path decide endpoint/liveness/submission"
         );
     }
 }
@@ -397,14 +266,18 @@ fn send_message_entrypoint_has_no_pre_enqueue_leader_liveness_gate() {
 fn send_to_leader_receiver_entrypoint_has_no_private_attached_precheck() {
     let src = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/src/messaging/leader_receiver.rs"
+        "/src/station/send.rs"
     ))
-    .expect("read leader_receiver.rs");
+    .expect("read current station send.rs");
     let body = src
-        .split("pub fn send_to_leader_receiver")
+        .split("fn send_one(")
         .nth(1)
-        .and_then(|tail| tail.split("pub fn mirror_peer_message_to_leader").next())
-        .expect("send_to_leader_receiver body");
+        .and_then(|tail| tail.split("fn remember_task(").next())
+        .expect("current durable delivery body");
+
+    let stored = body.find("crate::inbox_store::store(").expect("durable append");
+    let submission = body.find("Submission::lock(").expect("physical submission boundary");
+    assert!(stored < submission, "durable append must precede any physical submission attempt");
 
     for forbidden in [
         "leader_pane_is_live",
@@ -414,9 +287,9 @@ fn send_to_leader_receiver_entrypoint_has_no_private_attached_precheck() {
     ] {
         assert!(
             !body.contains(forbidden),
-            "BUG-4 single-authority contract: send_to_leader_receiver must not carry a private \
+            "BUG-4 single-authority contract: current durable delivery must not carry a private \
              leader-attached precheck ({forbidden}); endpoint/liveness/blocking belongs only to \
-             deliver_pending_messages/deliver_pending_message"
+             the current delivery router"
         );
     }
 }
@@ -431,16 +304,7 @@ fn mixed_provider_team_dir(hermetic: &HermeticTestEnv, tag: &str) -> PathBuf {
     team
 }
 
-fn message_status(workspace: &std::path::Path, message_id: &str) -> Option<String> {
-    let store = MessageStore::open(workspace).ok()?;
-    let conn = team_agent::db::schema::open_db(store.db_path()).ok()?;
-    conn.query_row(
-        "select status from messages where message_id = ?1",
-        [message_id],
-        |row| row.get(0),
-    )
-    .ok()
-}
+
 
 fn pane_info(pane_id: &str, session: &str, window: &str) -> PaneInfo {
     PaneInfo {
@@ -559,23 +423,6 @@ impl Transport for RecordingTransport {
         Ok(self.spawn_result(session, window))
     }
 
-    fn inject(
-        &self,
-        target: &Target,
-        _payload: &InjectPayload,
-        _submit: Key,
-        _bracketed: bool,
-    ) -> Result<InjectReport, TransportError> {
-        self.with_state(|state| state.inject_targets.push(target.clone()));
-        Ok(InjectReport {
-            stage_reached: InjectStage::Submit,
-            inject_verification: InjectVerification::CaptureContainsToken,
-            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
-            turn_verification: TurnVerification::NotYetObserved,
-            attempts: 1,
-            submit_diagnostics: None,
-        })
-    }
 
     fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
         Ok(())
@@ -595,13 +442,6 @@ impl Transport for RecordingTransport {
     fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
         match field {
             PaneField::PaneCurrentCommand => Ok(Some("codex".to_string())),
-            PaneField::PaneCurrentPath => Ok(self.with_state(|state| {
-                state
-                    .targets
-                    .first()
-                    .and_then(|target| target.current_path.as_ref())
-                    .map(|path| path.to_string_lossy().into_owned())
-            })),
             _ => Ok(None),
         }
     }
@@ -624,14 +464,6 @@ impl Transport for RecordingTransport {
         Ok(self.with_state(|state| state.windows.clone()))
     }
 
-    fn set_session_env(
-        &self,
-        _session: &SessionName,
-        _key: &str,
-        _value: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        Ok(SetEnvOutcome::Applied)
-    }
 
     fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
         Ok(())
@@ -641,9 +473,6 @@ impl Transport for RecordingTransport {
         Ok(())
     }
 
-    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
-        Ok(AttachOutcome::Attached)
-    }
 }
 
 fn fake_only_team_dir(hermetic: &HermeticTestEnv, tag: &str) -> PathBuf {

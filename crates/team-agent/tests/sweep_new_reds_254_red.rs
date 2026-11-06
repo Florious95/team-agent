@@ -27,7 +27,6 @@ use serial_test::serial;
 use team_agent::cli::{
     cmd_doctor, CmdOutput, DoctorArgs, ExitCode,
 };
-use team_agent::message_store::MessageStore;
 use team_agent::model::ids::AgentId;
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 
@@ -406,13 +405,14 @@ fn mcp_send_canonicalize_owner_team_id_no_fallback() {
         Some(team_agent::model::ids::TeamKey::new("legacy-name")),
     );
     let err = tools
-        .send_message(
+        .send_message_with_presentation(
             &team_agent::messaging::MessageTarget::Single("worker_a".to_string()),
             "canonicalize me",
             None,
             None,
             None,
-        )
+
+        None, None)
         .expect_err("unknown owner team ids must be refused, not fallback to active/sibling team");
     assert_eq!(
         err.reason,
@@ -425,14 +425,11 @@ fn mcp_send_canonicalize_owner_team_id_no_fallback() {
         Some(&json!("mcp.scope_refused")),
         "canonicalize failure refusal envelope must expose mcp.scope_refused; envelope={envelope}"
     );
-    let rows = MessageStore::open(&root)
-        .ok()
-        .map(|store| count_messages(store.db_path()))
-        .unwrap_or(0);
-    assert_eq!(
-        rows, 0,
-        "canonicalize failure must not create a message row"
-    );
+    assert!(!root.join(".team/inbox").exists(),
+        "canonicalize failure must not create an inbox in any team scope");
+    for suffix in ["team.db", "team.db-wal", "team.db-shm"] {
+        assert!(!root.join(".team").join(suffix).exists(), "refusal must not create {suffix}");
+    }
 }
 
 #[test]
@@ -596,48 +593,9 @@ fn write_registry_entry(root: &Path, team_key: &str, authorized_workspace: &str,
     );
 }
 
-fn insert_result(
-    root: &Path,
-    result_id: &str,
-    task_id: &str,
-    agent_id: &str,
-    owner_team_id: &str,
-    status: &str,
-) {
-    let store = MessageStore::open(root).unwrap();
-    let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
-    let envelope = json!({
-        "schema_version": "result_envelope_v1",
-        "task_id": task_id,
-        "agent_id": agent_id,
-        "status": status,
-        "summary": "done",
-        "changes": [],
-        "tests": [],
-        "risks": [],
-        "artifacts": [],
-        "next_actions": []
-    });
-    conn.execute(
-        "insert into results(result_id, owner_team_id, task_id, agent_id, envelope, status, created_at)
-         values (?1, ?2, ?3, ?4, ?5, 'pending', ?6)",
-        params![
-            result_id,
-            owner_team_id,
-            task_id,
-            agent_id,
-            envelope.to_string(),
-            chrono::Utc::now().to_rfc3339()
-        ],
-    )
-    .unwrap();
-}
 
-fn count_messages(db_path: &Path) -> i64 {
-    let conn = team_agent::db::schema::open_db(db_path).unwrap();
-    conn.query_row("select count(*) from messages", [], |row| row.get(0))
-        .unwrap()
-}
+
+
 
 fn source(relative: &str) -> String {
     composite_source::composite_source(relative)

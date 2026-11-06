@@ -24,12 +24,7 @@ use team_agent::lifecycle::{
     restart_with_transport, LifecycleError,
 };
 use team_agent::model::ids::AgentId;
-use team_agent::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
-    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
-    WindowName,
-};
+use team_agent::transport::{ BackendKind, CaptureRange, CapturedText, InjectStage, Key, PaneField, PaneId, PaneInfo, SessionName, SpawnResult, Target, Transport, TransportError, WindowName };
 
 const RUNTIME_TEAM_KEY: &str = "teamdir";
 
@@ -704,22 +699,6 @@ impl Transport for RecordingTransport {
         Ok(self.spawn_result(session, window, argv, cwd, env, env_unset))
     }
 
-    fn inject(
-        &self,
-        _target: &Target,
-        _payload: &InjectPayload,
-        _submit: Key,
-        _bracketed: bool,
-    ) -> Result<InjectReport, TransportError> {
-        Ok(InjectReport {
-            stage_reached: InjectStage::Submit,
-            inject_verification: InjectVerification::CaptureContainsToken,
-            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
-            turn_verification: TurnVerification::NotYetObserved,
-            attempts: 1,
-            submit_diagnostics: None,
-        })
-    }
 
     fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
         Ok(())
@@ -739,7 +718,6 @@ impl Transport for RecordingTransport {
 
     fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
         match field {
-            PaneField::PaneWidth => Ok(Some("120".to_string())),
             _ => Ok(None),
         }
     }
@@ -781,14 +759,6 @@ impl Transport for RecordingTransport {
         Ok(Vec::new())
     }
 
-    fn set_session_env(
-        &self,
-        _session: &SessionName,
-        _key: &str,
-        _value: &str,
-    ) -> Result<SetEnvOutcome, TransportError> {
-        Ok(SetEnvOutcome::Applied)
-    }
 
     fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
         Ok(())
@@ -798,7 +768,4 @@ impl Transport for RecordingTransport {
         Ok(())
     }
 
-    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
-        Ok(AttachOutcome::Attached)
-    }
 }
