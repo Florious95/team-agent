@@ -22,6 +22,7 @@ mod composite_source;
 mod brief_probe;
 use std::path::{Path, PathBuf};
 
+use crate::lifecycle::helpers::team_snapshot_path;
 use serde_json::{json, Value};
 use serial_test::serial;
 use team_agent::state::persist::{runtime_state_path, save_runtime_state};
