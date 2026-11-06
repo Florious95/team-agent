@@ -52,6 +52,11 @@ const RETAINED_AFTER_REVIEW: &[(&str, &str, &str)] = &[
         "fn pending_session_capture<F>(",
         "exercised by the current canonical_pending_capture_preserves_legacy_missing_boundary outside the inventory",
     ),
+    (
+        "src/provider/session/resume.rs",
+        "SessionCaptureIncomplete,",
+        "constructed by the retained restart readiness wrapper (lifecycle/restart/rebuild.rs) and lifted by from_legacy; folding it into Other would change refusal_reason.wire() to session_unresumable. SessionDrift is still retired",
+    ),
 ];
 
 /// Protected cases whose retirement a reviewer has explicitly approved:
@@ -197,6 +202,8 @@ const K4_VOCABULARY: &[&str] = &[
     "ClassifySource",
     "RemindResult",
     "StatusPatterns",
+    "submit_to_bound_thread",
+    "AppServerSubmit",
 ];
 
 /// K5: the plan orchestrator and its persisted plan state.
@@ -267,6 +274,8 @@ const K8_VOCABULARY: &[&str] = &[
     "UninstallOutcome",
     "UninstallOptions",
     "default_skill_source",
+    "doctor_gate_blockers",
+    "BlockerSource",
 ];
 
 /// `ProviderAdapter` methods no production path calls. Native providers go through
