@@ -351,15 +351,12 @@ fn dispatch_prepared(command: &str, checked: super::arguments::CheckedArgs, cwd:
 
 // Script compatibility is deliberately outside the human catalog and suggestions.
 fn is_machine_command(command: &str) -> bool {
-    matches!(command, "wait" | "coordinator" | "attach-app-server-leader")
+    matches!(command, "wait" | "attach-app-server-leader")
 }
 
 fn dispatch_machine(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliError> {
     match command {
         "wait" => cmd_wait(&wait_args(args, cwd)?).map(emit_result),
-        "coordinator" => Err(CliError::Usage(
-            "coordinator is retired; use schedule for on-demand timed work".into(),
-        )),
         "attach-app-server-leader" => {
             cmd_attach_app_server_leader(&attach_app_server_leader_args(args, cwd)?)
                 .map(emit_result)
@@ -2013,8 +2010,10 @@ mod tests {
     #[test]
     fn coordinator_is_retired_before_help_arguments_or_workspace_access() {
         let dir = tempfile::tempdir().unwrap();
+        assert!(!super::is_machine_command("coordinator"));
         for args in [
             vec![],
+            vec!["--json"],
             vec!["run"],
             vec!["start", "--json"],
             vec!["--help"],
@@ -2026,6 +2025,8 @@ mod tests {
             assert!(matches!(error, CliError::Usage(_)), "{error:?}");
             assert!(error.to_string().contains("retired"));
             assert!(error.to_string().contains("schedule"));
+            let argv = [vec!["coordinator".to_string()], args].concat();
+            assert_eq!(super::run(&argv, dir.path()), ExitCode::Usage);
             assert!(!dir.path().join(".team").exists());
         }
     }
