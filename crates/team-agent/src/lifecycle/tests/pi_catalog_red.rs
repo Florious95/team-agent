@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::lifecycle::launch::pi_mcp::{
-    parse_pi_list_models_table, select_exact_pi_model, verify_started_pi_model,
+    parse_pi_list_models_table, select_exact_pi_model,
 };
 use crate::model::enums::ProviderEffort;
 use crate::provider::adapters::pi::{build_pi_command_argv, PiCommandRequest, PiSessionSelector};
@@ -152,13 +152,6 @@ fn pi_exact_catalog_id_is_forwarded_and_started_identity_must_match() {
         );
     }
 
-    assert!(verify_started_pi_model("team-agent/qwen3.8-27b", "team-agent/qwen3.8-27b").is_ok());
-    assert!(
-        verify_started_pi_model("team-agent/qwen3.8-27b", "xai/grok-4.6").is_err(),
-        "started identity mismatch must refuse rather than trust pane chrome"
-    );
-    assert!(
-        verify_started_pi_model("team-agent/qwen3.8-27b", "").is_err(),
-        "missing objective started-model evidence must not pass"
-    );
+    assert!(select_exact_pi_model(&models, "team-agent/stage3-absent-model").is_err());
+    assert!(select_exact_pi_model(&models, "").is_err());
 }

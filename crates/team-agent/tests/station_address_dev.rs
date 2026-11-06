@@ -6,7 +6,10 @@ use std::{
 };
 use team_agent::{
     messaging::presentation::PresentationRequest,
-    station::send::{execute, Authority, Request},
+    station::{
+        seat_store::{SeatScope, SeatStore},
+        send::{execute, Authority, Request},
+    },
 };
 
 struct Fixture(PathBuf);
@@ -45,6 +48,22 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+#[test]
+fn reading_an_uninitialized_seat_does_not_create_runtime_files() {
+    let fixture = Fixture::new();
+    let store = SeatStore::new(
+        &fixture.0,
+        SeatScope {
+            workspace: "workspace".into(),
+            team: "t".into(),
+            seat: "a".into(),
+        },
+    )
+    .unwrap();
+    assert!(store.read().unwrap().is_none());
+    assert!(!fixture.0.join(".team").exists());
 }
 
 fn send(

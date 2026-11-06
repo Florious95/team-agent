@@ -42,33 +42,6 @@ pub(crate) struct LayoutPlacement {
     pub starts_window: bool,
 }
 
-/// ---
-/// purpose: 把一批席位按每窗口容量切成布局安排
-/// params:
-///   max_per_window: 每个布局窗口最多几格，小于 1 时按 1 处理
-/// returns: 与入参同序的安排，窗口名形如 team-w 加序号，每窗口第一格标记 starts_window
-/// ---
-pub(crate) fn adaptive_layout_plan(
-    agent_ids: &[AgentId],
-    max_per_window: usize,
-) -> Vec<LayoutPlacement> {
-    let max_per_window = max_per_window.max(1);
-    agent_ids
-        .iter()
-        .enumerate()
-        .map(|(idx, agent_id)| {
-            let layout_index = idx / max_per_window;
-            let pane_index = idx % max_per_window;
-            LayoutPlacement {
-                agent_id: agent_id.clone(),
-                layout_window: WindowName::new(format!("team-w{}", layout_index + 1)),
-                layout_index,
-                pane_index,
-                starts_window: pane_index == 0,
-            }
-        })
-        .collect()
-}
 
 pub(crate) const ADAPTIVE_LAYOUT_MAX_PER_WINDOW: usize = 3;
 

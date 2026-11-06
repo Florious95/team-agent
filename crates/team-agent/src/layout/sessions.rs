@@ -26,18 +26,6 @@ use serde_json::Value as JsonValue;
 /// code does not have to depend on the leader module's internals.
 pub const LEADER_SESSION_PREFIX: &str = crate::leader::start::LEADER_SESSION_PREFIX;
 
-///
-/// Leader's dedicated tmux session name.
-///
-/// Format: `team-agent-leader-<provider_wire>-<folder>-<sha1(workspace)[:8]>`.
-///
-/// Re-exports `crate::leader::start::leader_session_name` so the rest of the
-/// runtime can derive this name without touching the leader module. The
-/// single underlying impl lives in `leader/start.rs` for now to minimise the
-/// Step-1 diff; Step 2 will move it.
-pub fn leader_session_name(provider: Provider, workspace: &Path) -> SessionName {
-    crate::leader::start::leader_session_name(provider, workspace)
-}
 
 ///
 /// Worker tmux session name derived from the team spec.
@@ -51,17 +39,7 @@ pub fn worker_session_name(spec: &YamlValue) -> SessionName {
     crate::lifecycle::launch::worker_session_name_pub(spec)
 }
 
-///
-/// True when `name` starts with the leader session prefix.
-pub fn is_leader_session(name: &SessionName) -> bool {
-    name.as_str().starts_with(LEADER_SESSION_PREFIX)
-}
 
-///
-/// True when `name` equals the worker session name derived from `spec`.
-fn is_worker_session(name: &SessionName, spec: &YamlValue) -> bool {
-    worker_session_name(spec).as_str() == name.as_str()
-}
 
 /// A detected topology invariant violation, surfaced as a warn-level log line
 /// during the incremental migration (Steps 1–9). Hard error in Step 10.
@@ -209,7 +187,7 @@ mod tests {
 
     #[test]
     fn leader_and_worker_session_names_are_disjoint_by_prefix() {
-        let leader = leader_session_name(Provider::Claude, Path::new("/tmp/proj"));
+        let leader = crate::leader::start::leader_session_name(Provider::Claude, Path::new("/tmp/proj"));
         let worker = worker_session_name(&spec_for("alpha"));
         assert!(
             leader.as_str().starts_with(LEADER_SESSION_PREFIX),
@@ -222,10 +200,6 @@ mod tests {
             worker.as_str()
         );
         assert_ne!(leader.as_str(), worker.as_str());
-        assert!(is_leader_session(&leader));
-        assert!(!is_leader_session(&worker));
-        assert!(is_worker_session(&worker, &spec_for("alpha")));
-        assert!(!is_worker_session(&leader, &spec_for("alpha")));
     }
 
     #[test]

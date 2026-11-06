@@ -82,7 +82,10 @@ mod team_state;
 pub(crate) use agent::{
     ensure_agent_not_running, live_agent_target, start_agent_at_paths, start_agent_at_paths_with_session, stop_agent_at_paths,
 };
-pub use agent::{reset_agent, start_agent, stop_agent};
+pub use agent::{reset_agent, stop_agent};
+#[cfg(test)]
+pub use agent::start_agent;
+#[cfg(test)]
 pub(crate) use agent::{
     reset_agent_with_transport, start_agent_with_transport, stop_agent_with_transport,
 };
@@ -98,6 +101,7 @@ pub(crate) use common::{
     lifecycle_worker_tmux_backend_for_selected_state,
     lifecycle_worker_tmux_backend_selection_for_state,
 };
+#[cfg(test)]
 pub(crate) use rebuild::restart_with_transport_with_session_convergence_deadline;
 pub(crate) use rebuild::{compile_runtime_spec_from_roles, restore_missing_runtime_spec};
 // 0.5.38 (`.team/artifacts/startup-latency-locate.md` §5): expose the phase
@@ -106,11 +110,12 @@ pub(crate) use rebuild::{compile_runtime_spec_from_roles, restore_missing_runtim
 pub(crate) use rebuild::{
     provider_wire_from_state, write_worker_spawn_timing_event, LifecyclePhase, RestartPhaseTimer,
 };
-pub use rebuild::{restart, restart_with_session_convergence_deadline};
-pub(crate) use rebuild::{
-    restart_candidates, restart_with_transport, restart_with_transport_with_readiness_deadline,
-    select_restart_state,
-};
+#[cfg(test)]
+pub use rebuild::restart;
+pub use rebuild::restart_with_session_convergence_deadline;
+#[cfg(test)]
+pub(crate) use rebuild::{restart_with_transport, restart_with_transport_with_readiness_deadline};
+#[cfg(test)]
 pub(crate) use remove::remove_agent_with_transport;
 pub use remove::{remove_agent, remove_agent_flag_requirements};
 pub use selection::decide_start_mode;
@@ -131,7 +136,9 @@ pub(crate) fn surface_resume_backing_probe(
     );
     (probe.exists, probe.checked_paths)
 }
-pub(crate) use selection::{classify_first_send_at, classify_restart_plan, python_type_name};
+pub(crate) use selection::{classify_first_send_at, python_type_name};
+#[cfg(test)]
+pub(crate) use selection::classify_restart_plan;
 // Layer 2 (leader follow-up 2026-06-22): test-visible workspace-aware
 // classification so lifecycle/tests/restart.rs can exercise the
 // SessionBackingStoreMissing + checked_paths + RecoveryHint path
@@ -139,17 +146,6 @@ pub(crate) use selection::{classify_first_send_at, classify_restart_plan, python
 pub(crate) use selection::classify_restart_plan_with_resume_validation;
 pub(crate) use team_state::write_team_state;
 
-/// ---
-/// purpose: 把调用方给的 workspace 归一成 canonical run workspace
-/// returns: 归一后的绝对路径
-/// errors: 归一失败时返回 StatePersist
-/// ---
-pub(crate) fn lifecycle_run_workspace(
-    workspace: &Path,
-) -> Result<std::path::PathBuf, LifecycleError> {
-    crate::model::paths::canonical_run_workspace(workspace)
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))
-}
 
 fn lifecycle_paths(workspace: &Path, team: Option<&str>) -> Result<LifecyclePaths, LifecycleError> {
     // RED-2-STILL(P0):入口门在 canonical_run_workspace 解析后的路径上判(quick-start 的 .team 落

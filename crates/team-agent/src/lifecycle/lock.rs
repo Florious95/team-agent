@@ -229,13 +229,6 @@ fn acquire_lifecycle_lock(
     }
 }
 
-/// ---
-/// purpose: 给出该 workspace 的 agent-lifecycle 锁文件路径
-/// returns: runtime 目录下的 agent-lifecycle.lock
-/// ---
-pub(crate) fn agent_lifecycle_lock_path(workspace: &Path) -> PathBuf {
-    crate::model::paths::runtime_dir(workspace).join(format!("{AGENT_LIFECYCLE_LOCK_NAME}.lock"))
-}
 
 fn check_seat_manifest(request: &LifecycleLockRequest<'_>) -> Result<(), LifecycleError> {
     if let Some(agent) = request.agent_id {

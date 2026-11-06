@@ -74,7 +74,7 @@ pub(crate) fn target(
 
 pub(crate) fn check_target(workspace: &Path, team: &str, id: &str) -> Result<(), String> {
     if let Some(seat) = target(workspace, team, id)? {
-        super::lifecycle::validate_manifest(&seat)?;
+        seat_store::validate_manifest(&seat)?;
     }
     Ok(())
 }

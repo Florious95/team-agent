@@ -506,16 +506,6 @@ mod claim_rework_seed_tests {
     }
 }
 
-/// ---
-/// purpose: 取出 spec 里全部 agent id
-/// returns: 按 spec 顺序的 agent id，无 id 字段的条目被跳过
-/// ---
-pub(super) fn spec_agents(spec: &Value) -> Vec<AgentId> {
-    spec_agent_values(spec)
-        .into_iter()
-        .filter_map(|agent| agent.get("id").and_then(Value::as_str).map(AgentId::new))
-        .collect()
-}
 
 /// ---
 /// purpose: 取出 spec 里全部 agent id 的集合，便于成员判定
@@ -567,17 +557,6 @@ pub(super) fn spec_routes(spec: &Value) -> Vec<RoutingDecision> {
         .unwrap_or_default()
 }
 
-/// ---
-/// purpose: 定出默认承接人
-/// returns: routing.default_assignee，缺失时取第一个 agent
-/// ---
-pub(super) fn spec_default_assignee(spec: &Value) -> Option<AgentId> {
-    spec.get("routing")
-        .and_then(|v| v.get("default_assignee"))
-        .and_then(Value::as_str)
-        .map(AgentId::new)
-        .or_else(|| spec_agents(spec).into_iter().next())
-}
 
 /// ---
 /// purpose: 由单个 YAML agent 的 dangerously_skip_permissions 定出 bypass 审批结论

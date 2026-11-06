@@ -21,6 +21,10 @@
 
 #[path = "support/hermetic.rs"]
 mod hermetic_guard;
+#[path = "support/pane_authority_expectations.rs"]
+mod pane_authority_expectations;
+
+use pane_authority_expectations::{every_reason, expected_fact_fields};
 
 use std::ffi::CStr;
 use std::fs::{self, File, OpenOptions};
@@ -2299,7 +2303,7 @@ fn assert_catalog_refusal_payload(
     label: &str,
 ) {
     assert!(
-        refusal_catalog::PaneAuthorityRefusalReason::ALL.contains(&reason),
+        every_reason().contains(&reason),
         "{label}: expected reason must come from the product catalog"
     );
     let object = find_reason_object(value, reason).unwrap_or_else(|| {
@@ -2308,15 +2312,14 @@ fn assert_catalog_refusal_payload(
             reason.as_str()
         )
     });
-    let mut expected_fields = reason
-        .required_fact_fields()
+    let mut expected_fields = expected_fact_fields(reason)
         .iter()
         .map(|field| field.as_str())
         .collect::<Vec<_>>();
     expected_fields.sort_unstable();
-    let mut catalog_field_names = refusal_catalog::PaneAuthorityRefusalReason::ALL
+    let mut catalog_field_names = every_reason()
         .iter()
-        .flat_map(|reason| reason.required_fact_fields())
+        .flat_map(|reason| expected_fact_fields(*reason))
         .map(|field| field.as_str())
         .collect::<Vec<_>>();
     catalog_field_names.sort_unstable();
@@ -2337,7 +2340,7 @@ fn assert_catalog_refusal_payload(
          catalog; reason={} output={value}",
         reason.as_str()
     );
-    for field in reason.required_fact_fields() {
+    for field in expected_fact_fields(reason) {
         let field_name = field.as_str();
         let fact = object.get(field_name).unwrap_or_else(|| {
             panic!(
@@ -2524,14 +2527,12 @@ fn assert_recovery_action(
             reason.as_str()
         )
     });
-    let mut expected_fields = reason
-        .required_fact_fields()
+    let mut expected_fields = expected_fact_fields(reason)
         .iter()
         .map(|field| field.as_str())
         .collect::<Vec<_>>();
     expected_fields.sort_unstable();
-    let mut actual_fields = reason
-        .required_fact_fields()
+    let mut actual_fields = expected_fact_fields(reason)
         .iter()
         .filter_map(|field| {
             object
@@ -2635,7 +2636,7 @@ fn find_recovery_object(
 }
 
 fn assert_no_catalog_refusal(value: &Value, label: &str) {
-    for reason in refusal_catalog::PaneAuthorityRefusalReason::ALL {
+    for reason in every_reason() {
         assert_no_reason(value, reason, label);
     }
 }
@@ -2665,12 +2666,11 @@ fn refusal_signature(
     exit_code: Option<i32>,
     value: &Value,
 ) -> Option<RefusalSignature> {
-    refusal_catalog::PaneAuthorityRefusalReason::ALL
+    every_reason()
         .iter()
         .find_map(|reason| {
             find_reason_object(value, *reason).map(|object| {
-                let mut field_identities = reason
-                    .required_fact_fields()
+                let mut field_identities = expected_fact_fields(*reason)
                     .iter()
                     .filter_map(|field| {
                         object

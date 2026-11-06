@@ -122,6 +122,7 @@ const LEADER_NOTIFICATION_LOG_COLUMNS: &[&str] = &[
 ];
 
 /// 打开 `team.db` 并设 pragmas(`core.py:60-61`:busy_timeout=30000 + WAL)。
+#[cfg(test)]
 pub use crate::importer::legacy_schema::open_db;
 
 pub(crate) fn retry_sqlite<T>(mut op: impl FnMut() -> rusqlite::Result<T>) -> Result<T, DbError> {

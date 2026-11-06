@@ -571,11 +571,14 @@ fn remove_persists_retired_tombstone_and_explicit_readd_clears_it() {
         "the first successful remove must directly delete the canonical agent row"
     );
     crate::state::repository::StateRepository::new(&ws)
-        .save(
-            crate::state::repository::StateWriteIntent::CoordinatorTick {
-                team_key: "laneateam",
+        .commit_messaging_checked(
+            crate::state::repository::StateWriteIntent::MessagingDeliveryState {
+                owner_team_id: Some("laneateam"),
             },
-            &stale_tick,
+            |selected| {
+                *selected = stale_tick.clone();
+                Ok(())
+            },
         )
         .unwrap();
     let after_stale_tick: serde_json::Value = serde_json::from_str(

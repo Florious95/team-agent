@@ -47,7 +47,6 @@ pub(crate) struct PiSeatPaths {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PiCleanupAction {
-    Stop,
     Remove,
 }
 
@@ -59,16 +58,11 @@ pub(crate) struct PiCleanupPlan {
 }
 
 /// ---
-/// purpose: 给 stop/remove 生成 Pi 席位 exact cleanup 计划
-/// returns: stop 全保留；remove 只删 wrapper 并保留 session backing
+/// purpose: 给 remove 生成 Pi 席位 exact cleanup 计划
+/// returns: 只删 wrapper 并保留 session backing
 /// ---
 pub(crate) fn pi_cleanup_plan(action: PiCleanupAction, paths: &PiSeatPaths) -> PiCleanupPlan {
     match action {
-        PiCleanupAction::Stop => PiCleanupPlan {
-            delete_paths: Vec::new(),
-            retain_paths: vec![paths.wrapper.clone(), paths.sessions.clone()],
-            process_name_scan: None,
-        },
         PiCleanupAction::Remove => PiCleanupPlan {
             delete_paths: vec![paths.wrapper.clone()],
             retain_paths: vec![paths.sessions.clone()],
@@ -214,19 +208,6 @@ pub(crate) fn select_exact_pi_model(
     Ok(selected.clone())
 }
 
-/// ---
-/// purpose: 对比选定与启动后客观观测到的 Pi model identity
-/// returns: 完全相等且非空时成功
-/// errors: 缺失或不匹配时返回 ProviderError
-/// ---
-pub(crate) fn verify_started_pi_model(selected: &str, observed: &str) -> Result<(), ProviderError> {
-    if observed.is_empty() || selected != observed {
-        return Err(ProviderError::Command(format!(
-            "Pi started model mismatch: selected={selected:?} observed={observed:?}"
-        )));
-    }
-    Ok(())
-}
 
 /// ---
 /// purpose: 校验 Pi PATH entry 与 live catalog；MCP 能力在实际 Pi context 验证

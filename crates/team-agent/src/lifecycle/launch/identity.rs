@@ -380,7 +380,7 @@ pub(super) fn annotate_persisted_team_depth(
     annotate_team_depth(team, parent_team_key, team_depth);
     crate::state::repository::StateRepository::new(workspace)
         .save(
-            crate::state::repository::StateWriteIntent::AnnotateTeamDepth { team_key },
+            crate::state::repository::StateWriteIntent::AnnotateTeamDepth,
             &state,
         )
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;

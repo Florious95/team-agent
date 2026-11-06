@@ -21,6 +21,10 @@
 
 #[path = "support/hermetic.rs"]
 mod hermetic_guard;
+#[path = "support/pane_authority_expectations.rs"]
+mod pane_authority_expectations;
+
+use pane_authority_expectations::{every_reason, expected_fact_fields};
 #[allow(dead_code)]
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
@@ -930,18 +934,17 @@ fn assert_catalog_fact_set(
     label: &str,
 ) {
     assert!(
-        refusal_catalog::PaneAuthorityRefusalReason::ALL.contains(&reason),
+        every_reason().contains(&reason),
         "{label}: reason identity must come from the product catalog"
     );
-    let mut expected = reason
-        .required_fact_fields()
+    let mut expected = expected_fact_fields(reason)
         .iter()
         .map(|field| field.as_str())
         .collect::<Vec<_>>();
     expected.sort_unstable();
-    let mut all_fields = refusal_catalog::PaneAuthorityRefusalReason::ALL
+    let mut all_fields = every_reason()
         .iter()
-        .flat_map(|reason| reason.required_fact_fields())
+        .flat_map(|reason| expected_fact_fields(*reason))
         .map(|field| field.as_str())
         .collect::<Vec<_>>();
     all_fields.sort_unstable();
@@ -959,7 +962,7 @@ fn assert_catalog_fact_set(
         reason.as_str(),
         Value::Object(object.clone())
     );
-    for field in reason.required_fact_fields() {
+    for field in expected_fact_fields(reason) {
         let value = object.get(field.as_str()).unwrap_or_else(|| {
             panic!(
                 "{label}: required field {} missing for {}; output={}",

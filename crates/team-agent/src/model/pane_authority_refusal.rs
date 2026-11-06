@@ -48,16 +48,6 @@ pub enum PaneAuthorityRefusalReason {
 }
 
 impl PaneAuthorityRefusalReason {
-    pub const ALL: [Self; 7] = [
-        Self::AmbientTmuxEndpointUnavailable,
-        Self::AmbientPaneIdUnavailable,
-        Self::AmbientPaneWorkspaceUnavailable,
-        Self::CallerControllingTtyUnavailable,
-        Self::ObservedPaneTtyUnavailable,
-        Self::PaneTtyMismatch,
-        Self::PaneWorkspaceMismatch,
-    ];
-
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::AmbientTmuxEndpointUnavailable => "AmbientTmuxEndpointUnavailable",
@@ -67,49 +57,6 @@ impl PaneAuthorityRefusalReason {
             Self::ObservedPaneTtyUnavailable => "ObservedPaneTtyUnavailable",
             Self::PaneTtyMismatch => "PaneTtyMismatch",
             Self::PaneWorkspaceMismatch => "PaneWorkspaceMismatch",
-        }
-    }
-
-    pub const fn required_fact_fields(self) -> &'static [PaneAuthorityRefusalField] {
-        use PaneAuthorityRefusalField::{
-            CallerControllingTty, Endpoint, ObservedPaneId, ObservedPaneTty, ObservedPaneWorkspace,
-            RequestedWorkspace,
-        };
-
-        match self {
-            Self::AmbientTmuxEndpointUnavailable => &[RequestedWorkspace, Endpoint],
-            Self::AmbientPaneIdUnavailable => &[RequestedWorkspace, ObservedPaneId, Endpoint],
-            Self::AmbientPaneWorkspaceUnavailable => &[
-                RequestedWorkspace,
-                ObservedPaneId,
-                ObservedPaneWorkspace,
-                Endpoint,
-            ],
-            Self::CallerControllingTtyUnavailable => &[
-                RequestedWorkspace,
-                ObservedPaneId,
-                Endpoint,
-                CallerControllingTty,
-            ],
-            Self::ObservedPaneTtyUnavailable => &[
-                RequestedWorkspace,
-                ObservedPaneId,
-                Endpoint,
-                ObservedPaneTty,
-            ],
-            Self::PaneTtyMismatch => &[
-                RequestedWorkspace,
-                ObservedPaneId,
-                Endpoint,
-                CallerControllingTty,
-                ObservedPaneTty,
-            ],
-            Self::PaneWorkspaceMismatch => &[
-                RequestedWorkspace,
-                ObservedPaneId,
-                ObservedPaneWorkspace,
-                Endpoint,
-            ],
         }
     }
 }
@@ -323,37 +270,5 @@ impl PaneAuthorityRefusal {
 
     pub const fn reason(&self) -> PaneAuthorityRefusalReason {
         self.facts.reason()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{PaneAuthorityRefusalField as Field, PaneAuthorityRefusalReason as Reason};
-
-    #[test]
-    fn reason_catalog_is_closed_and_mismatch_requires_all_four_workspace_facts() {
-        assert_eq!(Reason::ALL.len(), 7);
-        assert_eq!(
-            Reason::PaneWorkspaceMismatch.required_fact_fields(),
-            &[
-                Field::RequestedWorkspace,
-                Field::ObservedPaneId,
-                Field::ObservedPaneWorkspace,
-                Field::Endpoint,
-            ]
-        );
-    }
-
-    #[test]
-    fn unavailable_reasons_require_the_fact_they_could_not_observe() {
-        assert!(Reason::AmbientTmuxEndpointUnavailable
-            .required_fact_fields()
-            .contains(&Field::Endpoint));
-        assert!(Reason::AmbientPaneIdUnavailable
-            .required_fact_fields()
-            .contains(&Field::ObservedPaneId));
-        assert!(Reason::AmbientPaneWorkspaceUnavailable
-            .required_fact_fields()
-            .contains(&Field::ObservedPaneWorkspace));
     }
 }

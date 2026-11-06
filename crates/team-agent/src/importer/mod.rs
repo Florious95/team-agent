@@ -2,5 +2,6 @@
 //! module to initialize, migrate, or query framework authority on open.
 #[cfg(unix)]
 pub mod contract;
+#[cfg(test)]
 pub mod legacy_schema;
 pub mod migration;

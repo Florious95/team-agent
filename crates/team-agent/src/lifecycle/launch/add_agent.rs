@@ -321,36 +321,6 @@ pub(crate) fn add_agent_with_transport(
     )
 }
 
-/// ---
-/// purpose: 加席的实体实现，含 owner 门、重名拒绝、重编译 spec 原子写、席位 state upsert 与起席
-/// params:
-///   run_workspace: 已归一的 run workspace
-///   team_dir: 角色定义所在目录，编译 team 用它
-/// returns: 新席的环境与启动模式
-/// errors: owner 门不过或重名返回 RequirementUnmet，角色文件缺失或编译不一致返回 Compile，state 与 spawn 失败先回滚再透传原错
-/// ---
-pub(super) fn add_agent_with_transport_at_paths(
-    run_workspace: &Path,
-    team_dir: &Path,
-    agent_id: &AgentId,
-    role_file_path: &Path,
-    open_display: bool,
-    team: Option<&str>,
-    transport: &dyn Transport,
-) -> Result<AddAgentReport, LifecycleError> {
-    add_agent_with_transport_at_paths_reserved(
-        run_workspace,
-        team_dir,
-        agent_id,
-        role_file_path,
-        open_display,
-        team,
-        transport,
-        None,
-        false,
-        None,
-    )
-}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn add_agent_with_transport_at_paths_locked(

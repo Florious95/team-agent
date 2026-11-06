@@ -7,7 +7,6 @@ use serde_json::{json, Value};
 use crate::event_log::{EventLog, EventLogError};
 use crate::transport::{BackendKind, Transport};
 
-pub(crate) const KILL_SERVER: &str = "kill-server";
 pub(crate) const KILL_SESSION: &str = "kill-session";
 
 pub(crate) fn pre_kill_audit(

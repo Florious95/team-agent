@@ -6,17 +6,9 @@ use crate::lifecycle::launch::pi_mcp::{pi_cleanup_plan, pi_seat_paths, PiCleanup
 #[test]
 fn pi_stop_retains_backing_and_never_scans_by_process_name() {
     let paths = pi_seat_paths(Path::new("/workspace"), "team-a", "worker-a");
-    let stop = pi_cleanup_plan(PiCleanupAction::Stop, &paths);
-    assert!(
-        stop.delete_paths.is_empty(),
-        "stop must retain both the Team-owned wrapper and session backing"
-    );
-    assert!(stop.retain_paths.contains(&paths.wrapper));
-    assert!(stop.retain_paths.contains(&paths.sessions));
-    assert_eq!(
-        stop.process_name_scan, None,
-        "Pi cleanup may use exact recorded pane/child receipts, never a process-name scan"
-    );
+    // Stage 3 test-chief ruling: stop retention excludes destructive Pi cleanup.
+    assert!(!include_str!("../restart/agent.rs").contains("pi_cleanup_plan"), "pi stop must never route through destructive Pi cleanup; backing is retained by construction");
+    assert!(!include_str!("../../contract_runtime/commands.rs").contains("pi_cleanup_plan"), "commands stop must never route through destructive Pi cleanup");
 
     let remove = pi_cleanup_plan(PiCleanupAction::Remove, &paths);
     assert_eq!(remove.delete_paths, [paths.wrapper.clone()]);

@@ -1414,7 +1414,6 @@ fn clear_managed_leader_receiver_pane(workspace: &Path, pane_id: &str) {
     let _ = crate::state::repository::StateRepository::new(workspace).save(
         crate::state::repository::StateWriteIntent::LeaderStartBinding {
             team_key: &team_key,
-            transport_kind: "managed",
         },
         &state,
     );

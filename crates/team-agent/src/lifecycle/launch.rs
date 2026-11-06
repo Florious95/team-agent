@@ -71,6 +71,7 @@ pub(crate) fn materialize_unbound_state_for_test(
 /// 冷启全队:路由 tasks、resolve 权限/危险审批门、session 冲突检查(冲突 →
 /// `SessionConflict` 拒绝不 kill)、按 startup 顺序起每个 worker、捕获 session、开显示、
 /// 写 state/team_state、attach leader receiver。
+#[cfg(test)]
 pub fn launch(
     spec_path: &Path,
     dry_run: bool,
@@ -97,6 +98,7 @@ pub fn launch(
 /// returns: LaunchReport
 /// errors: 透传 launch_with_transport_in_workspace 的错误
 /// ---
+#[cfg(test)]
 pub(crate) fn launch_with_transport(
     spec_path: &Path,
     dry_run: bool,
@@ -311,7 +313,7 @@ pub(super) use spawn::*;
 mod layout;
 pub(super) use layout::*;
 pub(crate) use layout::{
-    adaptive_existing_placement_for_agent, adaptive_layout_plan, adaptive_placement_for_agent,
+    adaptive_existing_placement_for_agent, adaptive_placement_for_agent,
     is_adaptive_layout_window_pub, state_uses_adaptive_layout, LayoutPlacement,
     ADAPTIVE_LAYOUT_MAX_PER_WINDOW,
 };
@@ -322,15 +324,14 @@ use state_projection::{
     drop_unbound_top_level_owner, drop_worker_pane_seeded_owner, launched_worker_tmux_socket,
     merge_workspace_team_state_with_key, pane_pids_by_started_agent, persist_spawn_agent_state,
     preserve_existing_leader_topology, promote_launched_binding_from_team_entry,
-    save_launched_team_state, save_launched_team_state_for_key, seeded_pane_looks_like_worker,
+    save_launched_team_state_for_key, seeded_pane_looks_like_worker,
     tmux_sockets_match_or_unknown,
 };
 
 mod leader_context;
 pub(super) use leader_context::*;
 pub(crate) use leader_context::{
-    active_leader_pane_state_across_transports, validate_active_leader_pane_env,
-    validate_active_leader_pane_env_with_workspace,
+    active_leader_pane_state_across_transports,
     validate_active_leader_pane_env_with_workspaces, LeaderPaneEnvState,
 };
 
@@ -344,7 +345,7 @@ pub(crate) use agent_state::{
 mod mcp_config;
 pub(super) use mcp_config::*;
 pub(crate) use mcp_config::{
-    point_native_mcp_config_at_file, resolve_mcp_config, write_worker_mcp_config,
+    point_native_mcp_config_at_file, resolve_mcp_config,
     write_worker_mcp_config_for_provider,
 };
 
@@ -369,7 +370,7 @@ pub(super) use worker_env::*;
 pub(crate) use worker_env::{
     apply_copilot_instructions_overlay,
     apply_mcp_auto_approval_env,
-    apply_profile_launch_env, auth_mode_env_value, fill_spawn_placeholders,
+    apply_profile_launch_env, auth_mode_env_value,
     fill_spawn_placeholders_full, inherited_env_with_team_overrides, persist_command_plan_state,
     spawn_timestamp,
 };
@@ -398,10 +399,12 @@ pub(crate) use identity::{
 
 mod quick_start;
 pub(super) use quick_start::*;
-pub use quick_start::{quick_start, quick_start_in_workspace_with_backend};
-pub(crate) use quick_start::{
-    quick_start_in_workspace, quick_start_with_transport, quick_start_with_transport_in_workspace,
-};
+#[cfg(test)]
+pub use quick_start::quick_start;
+pub use quick_start::quick_start_in_workspace_with_backend;
+#[cfg(test)]
+pub(crate) use quick_start::{quick_start_in_workspace, quick_start_with_transport};
+pub(crate) use quick_start::quick_start_with_transport_in_workspace;
 
 mod quick_start_transport;
 pub use quick_start_transport::annotate_runtime_transport;
@@ -444,7 +447,7 @@ pub use clone_agent::clone_agent;
 
 mod ownership;
 pub(super) use ownership::*;
-pub(crate) use ownership::{ensure_owner_allowed, ensure_owner_allowed_for_state, ensure_stop_owner_allowed_for_state, state_path};
+pub(crate) use ownership::{ensure_owner_allowed_for_state, ensure_stop_owner_allowed_for_state};
 
 pub mod spec_state;
 pub(crate) use spec_state::{
@@ -452,7 +455,7 @@ pub(crate) use spec_state::{
 };
 use spec_state::{
     env_nonempty, has_positive_caller_leader_env, initial_runtime_state, override_spec_runtime_str,
-    seed_launched_owner_from_env, spec_agent_values, spec_agents, spec_default_assignee,
+    seed_launched_owner_from_env, spec_agent_values,
     spec_routes, spec_session_name, spec_tasks_json, team_workspace, yaml_value_to_json,
 };
 pub(crate) use spec_state::{

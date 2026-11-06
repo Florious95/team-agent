@@ -8,7 +8,7 @@ impl<'a> StateWriteIntent<'a> {
     ) -> Self {
         match added_agent_id {
             Some(agent_id) => Self::AddAgent { team_key, agent_id },
-            None => Self::LaunchTeam { team_key },
+            None => Self::LaunchTeam,
         }
     }
 }

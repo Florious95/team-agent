@@ -64,23 +64,6 @@ struct AgentProfileInput {
     model_source: Option<String>,
 }
 
-/// ---
-/// purpose: 从 YAML agent 节点准备 provider 启动参数，profile 目录用默认查找顺序
-/// params:
-///   agent_id: agent 节点没写 id 时的兜底 id
-///   mcp_config: 需要托管 MCP 配置时传入，否则 None
-/// returns: 环境覆盖、环境清除、命令覆写与 claude 配置目录
-/// errors: profile 找不到、必填键缺失或写 runtime env 文件失败时返回 LifecycleError
-/// contract_id: lifecycle.profile_launch.prepare
-/// ---
-pub(crate) fn prepare_provider_profile_launch(
-    workspace: &Path,
-    agent_id: &str,
-    agent: &YamlValue,
-    mcp_config: Option<&McpConfig>,
-) -> Result<ProviderProfileLaunch, LifecycleError> {
-    prepare_provider_profile_launch_with_profile_dir(workspace, agent_id, agent, None, mcp_config)
-}
 
 /// ---
 /// purpose: 同上，但允许指定优先查找的 profile 目录

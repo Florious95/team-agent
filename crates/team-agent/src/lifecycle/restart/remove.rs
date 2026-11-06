@@ -77,6 +77,7 @@ pub fn remove_agent(
 /// errors: 同 remove_agent
 /// contract_id: lifecycle.remove_agent.entry
 /// ---
+#[cfg(test)]
 pub(crate) fn remove_agent_with_transport(
     workspace: &Path,
     agent_id: &AgentId,
@@ -151,8 +152,6 @@ pub(super) struct ResolvedSeat {
     pub(super) session: crate::transport::SessionName,
     pub(super) window: String,
     pub(super) physical: Option<crate::transport::PaneInfo>,
-    pub(super) state_present: bool,
-    pub(super) spec_present: bool,
     pub(super) consistency: SeatConsistency,
 }
 
@@ -271,8 +270,6 @@ pub(super) fn resolve_seat(
         session,
         window,
         physical: first,
-        state_present,
-        spec_present,
         consistency,
     })
 }
@@ -643,7 +640,6 @@ fn remove_agent_inner(
     crate::state::repository::StateRepository::new(paths.run_workspace)
         .save(
             crate::state::repository::StateWriteIntent::RemoveAgent {
-                team_key,
                 agent_id: agent_id.as_str(),
             },
             &removed_state,
@@ -705,7 +701,6 @@ fn remove_agent_inner(
             state_file: team_state_path,
             agent_health_deleted: false,
         },
-        removed_state,
         stopped,
         role_file_removed,
         cleared_locations,
@@ -722,7 +717,6 @@ fn should_validate_removed_spec(spec: &YamlValue, paths: &LifecyclePathRefs<'_>)
 
 struct RemoveSuccess {
     outcome: RemoveAgentOutcome,
-    removed_state: serde_json::Value,
     stopped: bool,
     role_file_removed: bool,
     cleared_locations: Vec<serde_json::Value>,

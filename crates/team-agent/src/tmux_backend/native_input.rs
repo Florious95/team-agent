@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 
 use super::*;
+#[cfg(test)]
 use crate::lifecycle::pane_input_lock::{acquire_required, PaneInputLockRequest};
 use crate::model::enums::Provider;
 use crate::transport::native_input::{inspect_input, InputFrame, NativeInputBinding};

@@ -5298,29 +5298,6 @@ pub mod lifecycle_port {
                 "invalid": invalid.iter().map(|w| w.worker_id.as_str()).collect::<Vec<_>>(),
                 "reminder": crate::cli::QUICK_START_REMINDER,
             }),
-            crate::lifecycle::RestartReport::RefusedBuildBeforeDestroyRequired {
-                session_name,
-                live_agents,
-                error,
-            } => {
-                let repair_team = team
-                    .filter(|team| !team.is_empty())
-                    .unwrap_or(session_name.as_str());
-                let shutdown_scoped = format!("team-agent stop --team {}", shell_quote(repair_team));
-                json!({
-                    "ok": false,
-                    "status": "refused_build_before_destroy",
-                    "reason": "build_before_destroy_required",
-                    "session_name": session_name,
-                    "live_agents": live_agents,
-                    "error": error,
-                    "next_actions": [
-                        shutdown_scoped,
-                        "team-agent restart",
-                    ],
-                    "reminder": crate::cli::QUICK_START_REMINDER,
-                })
-            }
             crate::lifecycle::RestartReport::RefusedDirtyTopology {
                 session_name,
                 reason,
@@ -5505,10 +5482,7 @@ pub mod lifecycle_port {
         };
         let promoted = crate::state::projection::project_top_level_view(&raw, next_key);
         crate::state::repository::StateRepository::new(workspace).save(
-            crate::state::repository::StateWriteIntent::PromoteLiveSiblingAfterShutdown {
-                stopped_team_key: stopped_key,
-                promoted_team_key: next_key,
-            },
+            crate::state::repository::StateWriteIntent::PromoteLiveSiblingAfterShutdown,
             &promoted,
         )?;
         Ok(())
@@ -6343,9 +6317,7 @@ pub mod leader_port {
         }
         if changed {
             let _ = crate::state::repository::StateRepository::new(workspace).save(
-                crate::state::repository::StateWriteIntent::LeaderBindingRestoreNonTargetTeams {
-                    target_team_key: target,
-                },
+                crate::state::repository::StateWriteIntent::LeaderBindingRestoreNonTargetTeams,
                 &latest,
             );
         }

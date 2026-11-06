@@ -127,10 +127,6 @@ impl SeatStore {
 }
 
 impl SeatLock {
-    pub(crate) fn scope(&self) -> &SeatScope {
-        &self.store.scope
-    }
-
     pub fn read(&self) -> Result<Option<SeatManifest>, String> {
         self.store.read()
     }
@@ -160,109 +156,35 @@ impl SeatLock {
         {
             return Err("reserved_manifest_field_in_extra".into());
         }
-        super::lifecycle::validate_manifest(manifest)?;
+        validate_manifest(manifest)?;
         let value = serde_json::to_value(manifest).map_err(|e| e.to_string())?;
         codec::authorize_mutation(&value, &[])?;
         write_json(&self.store.path(), &value, MAX_MANIFEST_BYTES)
     }
 
-    pub fn operation(&self, id: &str) -> Result<Option<Value>, String> {
-        read_json(&self.operation_path(id)?, MAX_MANIFEST_BYTES * 3)
-    }
 
-    pub fn publish_operation(&self, id: &str, value: &Value) -> Result<(), String> {
-        codec::authorize_mutation(value, super::lifecycle::OPERATION_CAPABILITIES)?;
-        write_json(&self.operation_path(id)?, value, MAX_MANIFEST_BYTES * 3)
-    }
+}
 
-    /// Keep 16 understood operations, pinning both published and newly reserved
-    /// authority. Orphan reservations are not immortal. Unknown/corrupt records
-    /// are never guessed at or deleted to satisfy a storage budget.
-    pub(crate) fn prune_operations(&self, reserved: &str) -> Result<(), String> {
-        let directory = self
-            .store
-            .root
-            .join("operations")
-            .join(&self.store.seat_component);
-        let entries = match fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(e.to_string()),
-        };
-        let mut pinned: std::collections::BTreeSet<String> = self
-            .read()?
-            .map(|seat| seat.last_operation_id)
-            .into_iter()
-            .chain(std::iter::once(reserved.to_owned()))
-            .filter(|id| !id.is_empty())
-            .collect();
-        // Cancellation still needs its immediate predecessor until cleanup has
-        // begun. Protect that dependency even if the display counter saturates.
-        for id in pinned.clone() {
-            if let Some(value) = self.operation(&id)? {
-                if value["phase"] == "reserved"
-                    && super::lifecycle::understood_operation(&value, &self.store.scope)
-                {
-                    if let Some(parent) = value.get("supersedes").and_then(Value::as_str) {
-                        pinned.insert(parent.to_owned());
-                    }
-                }
-            }
-        }
-        let mut understood = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(|e| e.to_string())?;
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("json") {
-                continue;
-            }
-            let Ok(Some(value)) = read_json(&path, MAX_MANIFEST_BYTES * 3) else {
-                continue;
-            };
-            let stored_id = path.file_stem().and_then(|s| s.to_str())
-                .and_then(|s| crate::model::paths::decode_scope_component(s).ok());
-            if value.get("kind").and_then(Value::as_str) != Some("seat_operation")
-                || value
-                    .pointer("/request/operation_id")
-                    .and_then(Value::as_str)
-                    != stored_id.as_deref()
-                || !super::lifecycle::understood_operation(&value, &self.store.scope)
-            {
-                continue;
-            }
-            let generation = value
-                .pointer("/after/generation")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let modified = entry
-                .metadata()
-                .and_then(|metadata| metadata.modified())
-                .map_err(|e| e.to_string())?;
-            let is_pinned = stored_id.as_ref().is_some_and(|id| pinned.contains(id));
-            understood.push((is_pinned, generation, modified, path));
-        }
-        understood.sort();
-        let count = understood.len().saturating_sub(16);
-        for (pinned, _, _, path) in understood.into_iter().take(count) {
-            if !pinned {
-                fs::remove_file(path).map_err(|e| e.to_string())?;
-            }
-        }
-        if count > 0 {
-            sync_directory(&directory)?;
-        }
-        Ok(())
+pub(crate) fn validate_manifest(seat: &SeatManifest) -> Result<(), String> {
+    if seat.kind != "seat_manifest" {
+        return Err("unsupported_seat_kind".into());
     }
-
-    fn operation_path(&self, id: &str) -> Result<PathBuf, String> {
-        let id = component(id)?;
-        Ok(self
-            .store
-            .root
-            .join("operations")
-            .join(&self.store.seat_component)
-            .join(format!("{id}.json")))
+    codec::authorize_mutation(&serde_json::to_value(seat).map_err(|e| e.to_string())?, &[])?;
+    if !matches!(seat.desired.as_str(), "running" | "stopped" | "removed")
+        || !matches!(
+            seat.phase.as_str(),
+            "reserved" | "starting" | "ready" | "stopping" | "stopped" | "removed" | "failed"
+        )
+    {
+        return Err("unsupported_seat_state".into());
     }
+    if seat.instance_id.len() != 32 || !seat.instance_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("invalid_instance_id".into());
+    }
+    if seat.phase == "ready" && (seat.desired != "running" || seat.endpoint.is_none()) {
+        return Err("invalid_ready_manifest".into());
+    }
+    Ok(())
 }
 
 pub(crate) fn component(value: &str) -> Result<String, String> {

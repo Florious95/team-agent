@@ -289,19 +289,6 @@ fn is_posix_shell_identifier(s: &str) -> bool {
     bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
-///
-/// Compute worker spawn cwd per Python semantics: YAML
-/// `agent.spawn_cwd` if set, else `workspace`. The persisted-state
-/// `agent.spawn_cwd` override (the pre-0.3.28 Rust extension that caused
-/// E56 drift) is NOT consulted.
-pub fn worker_spawn_cwd(spec_agent: &YamlValue, workspace: &Path) -> PathBuf {
-    spec_agent
-        .get("spawn_cwd")
-        .and_then(YamlValue::as_str)
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace.to_path_buf())
-}
 
 #[cfg(test)]
 mod tests {
@@ -706,43 +693,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn worker_spawn_cwd_returns_workspace_when_no_spec_override() {
-        // YAML agent with no spawn_cwd field.
-        let agent = YamlValue::Map(vec![(
-            "id".to_string(),
-            YamlValue::Str("developer".to_string()),
-        )]);
-        assert_eq!(
-            worker_spawn_cwd(&agent, Path::new("/ws")),
-            PathBuf::from("/ws")
-        );
-    }
 
-    #[test]
-    fn worker_spawn_cwd_returns_yaml_override_when_present() {
-        let agent = YamlValue::Map(vec![
-            ("id".to_string(), YamlValue::Str("developer".to_string())),
-            (
-                "spawn_cwd".to_string(),
-                YamlValue::Str("/explicit/cwd".to_string()),
-            ),
-        ]);
-        assert_eq!(
-            worker_spawn_cwd(&agent, Path::new("/ws")),
-            PathBuf::from("/explicit/cwd")
-        );
-    }
 
-    #[test]
-    fn worker_spawn_cwd_returns_workspace_when_spec_override_is_empty() {
-        let agent = YamlValue::Map(vec![
-            ("id".to_string(), YamlValue::Str("developer".to_string())),
-            ("spawn_cwd".to_string(), YamlValue::Str("".to_string())),
-        ]);
-        assert_eq!(
-            worker_spawn_cwd(&agent, Path::new("/ws")),
-            PathBuf::from("/ws")
-        );
-    }
 }

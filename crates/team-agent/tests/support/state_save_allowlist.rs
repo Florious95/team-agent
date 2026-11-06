@@ -15,7 +15,8 @@ pub struct AllowedStateSaveCall {
 // receiver_authority` repository-internal authority helper (see its ALLOWED row).
 // This count tracks ALLOWED rows; the external-writer subset is ratcheted DOWN
 // separately (never up) — see the FROZEN_G0_ROW_KEYS extension predicate.
-pub const BASELINE_DIRECT_SAVE_COUNT: usize = 30;
+// Stage 3 retired four reapply callsites; the current allowlist has 26 rows.
+pub const BASELINE_DIRECT_SAVE_COUNT: usize = 26;
 
 macro_rules! allow {
     ($path:literal, $fn:literal, $callee:literal, $intent:literal, $phase:literal, $line:literal) => {
@@ -39,22 +40,6 @@ pub const ALLOWED_STATE_SAVE_CALLS: &[AllowedStateSaveCall] = &[
         "repository_internal",
         "repository_internal",
         207
-    ),
-    allow!(
-        "state/persist.rs",
-        "save_runtime_state_reapplying_after_conflict",
-        "save_runtime_state",
-        "repository_internal",
-        "repository_internal",
-        218
-    ),
-    allow!(
-        "state/persist.rs",
-        "save_runtime_state_reapplying_after_conflict",
-        "save_runtime_state",
-        "repository_internal",
-        "repository_internal",
-        223
     ),
     allow!(
         "state/persist.rs",
@@ -116,7 +101,7 @@ pub const ALLOWED_STATE_SAVE_CALLS: &[AllowedStateSaveCall] = &[
         "state/persist.rs",
         "load_runtime_state",
         "save_runtime_state",
-        "SelfMigration",
+        "repository_internal",
         "repository_internal",
         1127
     ),
@@ -127,22 +112,6 @@ pub const ALLOWED_STATE_SAVE_CALLS: &[AllowedStateSaveCall] = &[
         "repository_internal",
         "repository_internal",
         647
-    ),
-    allow!(
-        "state/projection.rs",
-        "save_team_scoped_state_reapplying_after_conflict",
-        "save_team_scoped_state",
-        "repository_internal",
-        "repository_internal",
-        658
-    ),
-    allow!(
-        "state/projection.rs",
-        "save_team_scoped_state_reapplying_after_conflict",
-        "save_team_scoped_state",
-        "repository_internal",
-        "repository_internal",
-        664
     ),
     allow!(
         "state/projection.rs",

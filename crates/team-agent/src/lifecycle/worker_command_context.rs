@@ -46,8 +46,6 @@ pub(crate) struct WorkerCommandAgent {
     system_prompt_inline: Option<String>,
     system_prompt_file: Option<String>,
     communication_mode: CommunicationMode,
-    /// Missing `dangerously_skip_permissions` defaults to false; only explicit true enables bypass.
-    dangerously_skip_permissions: bool,
 }
 
 impl WorkerCommandAgent {
@@ -93,10 +91,6 @@ impl WorkerCommandAgent {
                     .get("communication_mode")
                     .and_then(crate::model::yaml::Value::as_str),
             )?,
-            dangerously_skip_permissions: matches!(
-                agent.get("dangerously_skip_permissions"),
-                Some(crate::model::yaml::Value::Bool(true))
-            ),
         })
     }
 
@@ -142,10 +136,6 @@ impl WorkerCommandAgent {
                     .get("communication_mode")
                     .and_then(serde_json::Value::as_str),
             )?,
-            dangerously_skip_permissions: agent
-                .get("dangerously_skip_permissions")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false),
         })
     }
 }
@@ -269,7 +259,6 @@ mod tests {
             system_prompt_inline: Some("Implement the assigned slice.".to_string()),
             system_prompt_file: None,
             communication_mode: CommunicationMode::default(),
-            dangerously_skip_permissions: false,
         };
         let prompt = compile_worker_system_prompt(&agent).unwrap();
         assert!(
@@ -329,7 +318,6 @@ mod tests {
                     system_prompt_inline: Some("worker body".to_string()),
                     system_prompt_file: None,
                     communication_mode: mode,
-                    dangerously_skip_permissions: false,
                 };
                 let prompt = compile_worker_system_prompt(&agent).unwrap();
                 assert!(!prompt.contains("report_result"));

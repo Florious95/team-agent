@@ -135,13 +135,6 @@ pub enum TaskStatus {
     Cancelled,
 }
 
-impl TaskStatus {
-    /// `TERMINAL_TASK_STATUSES = {done, failed, cancelled}`(`task_graph.py:16`)。
-    pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Done | Self::Failed | Self::Cancelled)
-    }
-}
-
 /// result-envelope 顶层 status(`spec.py:156`)。**与 `TaskStatus` 不同集合**(success≠done)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -181,30 +174,8 @@ pub enum RiskSeverity {
     High,
 }
 
-/// team mode(`spec.py:116`)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TeamMode {
-    SupervisorWorker,
-    SwarmLimited,
-}
 
-/// comm protocol(`spec.py:229`)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CommProtocol {
-    McpInbox,
-    FileBus,
-}
 
-/// terminal/session backend(`spec.py:255`)。§8:Windows 无原生 tmux → 能力门在 step 9,
-/// enum 在此定义(Windows 原生经 WezTerm 后端,见 transport-backend-design.md)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Backend {
-    Tmux,
-    Pty,
-}
 
 /// tmux pane 存活态(`state.py:336-341`)。**`Unknown` 既不可当 dead 也不可当 live**
 /// (owner-gate `state.py:382` 用 `!= LIVE`)—— 穷尽 match,不 fallthrough(§11)。
@@ -282,18 +253,9 @@ mod tests {
                 "\"not_run\"",
             ),
             (
-                serde_json::to_string(&TeamMode::SupervisorWorker).unwrap(),
-                "\"supervisor_worker\"",
-            ),
-            (
-                serde_json::to_string(&CommProtocol::McpInbox).unwrap(),
-                "\"mcp_inbox\"",
-            ),
-            (
                 serde_json::to_string(&PaneLiveness::Unknown).unwrap(),
                 "\"unknown\"",
             ),
-            (serde_json::to_string(&Backend::Pty).unwrap(), "\"pty\""),
         ];
         for (got, want) in cases {
             assert_eq!(got, want);
@@ -317,21 +279,6 @@ mod tests {
         assert!(serde_json::from_str::<Provider>("\"gibberish\"").is_err());
     }
 
-    #[test]
-    fn task_status_terminal_set() {
-        for s in [TaskStatus::Done, TaskStatus::Failed, TaskStatus::Cancelled] {
-            assert!(s.is_terminal());
-        }
-        for s in [
-            TaskStatus::Pending,
-            TaskStatus::Ready,
-            TaskStatus::Running,
-            TaskStatus::Blocked,
-            TaskStatus::NeedsRetry,
-        ] {
-            assert!(!s.is_terminal());
-        }
-    }
 
     #[test]
     fn receive_worker_outputs_passthrough_preserves_drift_value() {

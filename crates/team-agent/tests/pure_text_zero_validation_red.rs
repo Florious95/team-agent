@@ -207,7 +207,9 @@ fn r09_plain_text_directory_compiles_to_valid_yaml_spec() {
     let spec_path = fixture.team_dir.join("team.spec.yaml");
     fs::write(&spec_path, &serialized).expect("persist compiled team.spec.yaml");
     let persisted = fs::read_to_string(&spec_path).expect("read persisted team.spec.yaml");
-    let loaded = team_agent::model::spec::load_and_validate_spec(&persisted, &fixture.root)
+    let loaded = team_agent::model::yaml::loads(&persisted)
+        .expect("persisted spec must remain valid and loadable");
+    team_agent::model::spec::validate_spec(&loaded, &fixture.root)
         .expect("persisted spec must remain valid and loadable");
 
     assert_eq!(

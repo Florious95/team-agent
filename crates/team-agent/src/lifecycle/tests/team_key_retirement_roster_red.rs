@@ -9,12 +9,17 @@
 
 use serde_json::json;
 use std::path::Path;
-use team_agent::lifecycle::restart::restart_candidates;
+use team_agent::lifecycle::launch::spec_agent_id_set;
+use team_agent::lifecycle::restart::compile_runtime_spec_from_roles;
+use team_agent::state::projection::select_runtime_state;
 use team_agent::state::persist::save_runtime_state;
 
 /// A team `alpha` with two agents: `keep` (active) and `gone` (has a
 /// dynamic_role_file AND a retired tombstone under agent_lifecycle).
 fn seed(ws: &Path) {
+    std::fs::create_dir_all(ws.join("agents")).unwrap();
+    std::fs::write(ws.join("TEAM.md"), "---\nname: alpha\n---\nRestart roster fixture.\n").unwrap();
+    std::fs::write(ws.join("agents/keep.md"), "---\nname: keep\nprovider: fake\nmodel: fake\n---\nkeep\n").unwrap();
     let role_dir = ws.join(".team/runtime/teams/alpha/role-masters");
     std::fs::create_dir_all(&role_dir).unwrap();
     let gone_role = role_dir.join("gone.md");
@@ -56,14 +61,13 @@ fn retired_tombstone_excludes_agent_from_restart_roster() {
     std::fs::create_dir_all(&dir).unwrap();
     seed(&dir);
 
-    let candidates = restart_candidates(&dir).expect("restart_candidates must resolve");
-    let _ = std::fs::remove_dir_all(&dir);
-
-    let alpha = candidates
-        .iter()
-        .find(|c| c.team_name == "alpha")
+    let state = select_runtime_state(&dir, Some("alpha"))
         .expect("alpha team must be a restart candidate");
-    let rostered: Vec<&str> = alpha.agents.iter().map(|a| a.as_str()).collect();
+    let spec = compile_runtime_spec_from_roles(&dir, "alpha", &state)
+        .expect("the live restart compiler must resolve the desired roster");
+    let agents = spec_agent_id_set(&spec);
+    let _ = std::fs::remove_dir_all(&dir);
+    let rostered: Vec<&str> = agents.iter().map(|a| a.as_str()).collect();
 
     assert!(
         rostered.contains(&"keep"),
@@ -83,6 +87,10 @@ fn retired_tombstone_excludes_agent_from_restart_roster() {
 /// real-machine rebuilt-spec assertion; this pins the roster surface under a
 /// MULTI-reference retired agent so a lingering reference cannot resurrect it.
 fn seed_multiref(ws: &std::path::Path) {
+    std::fs::create_dir_all(ws.join("agents")).unwrap();
+    std::fs::write(ws.join("TEAM.md"), "---\nname: alpha\n---\nRestart roster fixture.\n").unwrap();
+    std::fs::write(ws.join("agents/keep.md"), "---\nname: keep\nprovider: fake\nmodel: fake\n---\nkeep\n").unwrap();
+    std::fs::write(ws.join("agents/boss.md"), "---\nname: boss\nprovider: fake\nmodel: fake\n---\nboss\n").unwrap();
     let role_dir = ws.join(".team/runtime/teams/alpha/role-masters");
     std::fs::create_dir_all(&role_dir).unwrap();
     let gone_role = role_dir.join("boss.md");
@@ -126,13 +134,18 @@ fn retired_default_assignee_with_many_references_is_still_excluded_from_roster()
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     seed_multiref(&dir);
-    let candidates = restart_candidates(&dir).expect("restart_candidates must resolve");
-    let _ = std::fs::remove_dir_all(&dir);
-    let alpha = candidates
-        .iter()
-        .find(|c| c.team_name == "alpha")
+    let before = team_agent::compiler::compile_team(&dir).unwrap();
+    assert_eq!(before.get("routing").unwrap().get("default_assignee").unwrap().as_str(), Some("boss"));
+    assert!(before.get("runtime").unwrap().get("startup_order").unwrap().as_list().unwrap()
+        .iter().any(|id| id.as_str() == Some("boss")));
+    assert_eq!(before.get("tasks").unwrap().as_list().unwrap()[0].get("assignee").unwrap().as_str(), Some("boss"));
+    let state = select_runtime_state(&dir, Some("alpha"))
         .expect("alpha team must be a restart candidate");
-    let rostered: Vec<&str> = alpha.agents.iter().map(|a| a.as_str()).collect();
+    let spec = compile_runtime_spec_from_roles(&dir, "alpha", &state)
+        .expect("the live restart compiler must resolve the desired roster");
+    let agents = spec_agent_id_set(&spec);
+    let _ = std::fs::remove_dir_all(&dir);
+    let rostered: Vec<&str> = agents.iter().map(|a| a.as_str()).collect();
     assert!(
         rostered.contains(&"keep"),
         "active agent must stay; roster={rostered:?}"

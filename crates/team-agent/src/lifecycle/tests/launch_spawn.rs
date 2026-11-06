@@ -1383,40 +1383,6 @@ fn quick_start_with_transport_spawns_workers_not_dry_run() {
     );
 }
 
-#[test]
-fn adaptive_layout_plan_8_workers_is_3_3_2() {
-    let agents = (1..=8)
-        .map(|i| AgentId::new(format!("w{i}")))
-        .collect::<Vec<_>>();
-    let plan = adaptive_layout_plan(&agents, 3);
-    let windows = plan
-        .iter()
-        .map(|placement| placement.layout_window.as_str().to_string())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        windows,
-        vec![
-            "team-w1", "team-w1", "team-w1", "team-w2", "team-w2", "team-w2", "team-w3", "team-w3",
-        ]
-    );
-    let pane_counts = ["team-w1", "team-w2", "team-w3"]
-        .into_iter()
-        .map(|window| {
-            windows
-                .iter()
-                .filter(|actual| actual.as_str() == window)
-                .count()
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(pane_counts, vec![3, 3, 2]);
-    assert_eq!(
-        plan.iter()
-            .filter(|placement| placement.starts_window)
-            .map(|placement| placement.agent_id.as_str().to_string())
-            .collect::<Vec<_>>(),
-        vec!["w1", "w4", "w7"]
-    );
-}
 
 #[test]
 #[serial(env)]

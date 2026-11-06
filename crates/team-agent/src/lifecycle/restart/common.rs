@@ -1589,20 +1589,6 @@ fn event_transcript_path(event: &serde_json::Value) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// E36 fix-B: a real Claude worker writes its session transcript to
-/// `<claude_projects_root>/<workspace-slug>/<session_id>.jsonl` even when neither
-/// `rollout_path` was persisted to state nor a `session.captured` event was logged.
-/// That landed transcript is itself a valid resume backing — restart was wrongly
-/// refusing resumable workers because it only checked the two paths above. Scan the
-/// projects root recursively for `<session_id>.jsonl` (session_id is a unique UUID,
-/// so we avoid recomputing the project-dir slug, which is brittle for non-ASCII
-/// workspace paths).
-fn claude_project_transcript_exists(agent: &serde_json::Value, session_id: &str) -> bool {
-    let Some(root) = claude_projects_root_for_agent(agent) else {
-        return false;
-    };
-    claude_project_transcript_exists_under(&root, session_id)
-}
 
 fn claude_projects_root_for_agent(agent: &serde_json::Value) -> Option<PathBuf> {
     agent
@@ -2397,7 +2383,10 @@ mod e36_transcript_backing_tests {
             "claude_projects_root": projects_root.to_string_lossy(),
         });
         assert!(
-            claude_project_transcript_exists(&agent, session_id),
+            claude_project_transcript_exists_under(
+                &claude_projects_root_for_agent(&agent).unwrap(),
+                session_id,
+            ),
             "landed claude transcript must count as resume backing (E36 fix-B)"
         );
     }
@@ -2411,14 +2400,17 @@ mod e36_transcript_backing_tests {
             "claude_projects_root": projects_root.to_string_lossy(),
         });
         assert!(
-            !claude_project_transcript_exists(&agent, "deadbeef-0000-0000-0000-000000000000"),
+            !claude_project_transcript_exists_under(
+                &claude_projects_root_for_agent(&agent).unwrap(),
+                "deadbeef-0000-0000-0000-000000000000",
+            ),
             "no transcript file => no backing"
         );
     }
 
     #[test]
     fn empty_session_id_is_not_backing() {
-        let agent = serde_json::json!({});
-        assert!(!claude_project_transcript_exists(&agent, ""));
+        let scratch = ScratchDir::new("empty-session");
+        assert!(!claude_project_transcript_exists_under(scratch.path(), ""));
     }
 }

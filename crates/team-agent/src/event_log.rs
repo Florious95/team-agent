@@ -160,6 +160,7 @@ impl EventLog {
     }
 
     /// 直接指定 events.jsonl 路径(测试 / 非标准布局)。
+    #[cfg(test)]
     pub fn at(path: PathBuf) -> Self {
         Self { path }
     }

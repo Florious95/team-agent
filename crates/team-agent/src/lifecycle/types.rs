@@ -43,24 +43,12 @@ use crate::transport::SessionName;
 /// step4 `event_log::EventLog::write(name, fields)`。
 pub mod event_names {
     // lifecycle 步进事件(Gap 15/16:发射顺序被测试锁死)。
-    pub const ADD_STEP_COMPLETED: &str = "lifecycle.add_step_completed";
-    pub const ADD_STEP_ROLLED_BACK: &str = "lifecycle.add_step_rolled_back";
-    pub const ADD_FAILED: &str = "lifecycle.add_failed";
     pub const REMOVE_STEP_COMPLETED: &str = "lifecycle.remove_step_completed";
     pub const REMOVE_ROLLED_BACK: &str = "lifecycle.remove_rolled_back";
     pub const CONTEXT_FORK: &str = "context_fork";
     // restart 决策事件(Route B audit 契约必发)。
     pub const RESTART_RESUME_DECISION: &str = "restart.resume_decision";
-    pub const RESTART_ATOMIC_REFUSAL: &str = "restart.atomic_refusal";
-    pub const RESTART_FIRST_SEND_AT_INVALID: &str = "restart.first_send_at_invalid";
-    pub const RESTART_FRESH_SPAWN: &str = "restart.fresh_spawn";
-    pub const RESTART_ROLLBACK_SESSION: &str = "restart.rollback_session";
     // display 事件(C15/C16:每次降级非静默)。
-    pub const DISPLAY_BACKEND_RESOLVED: &str = "display.backend_resolved";
-    pub const DISPLAY_ADAPTIVE_OPENED: &str = "display.adaptive_opened";
-    pub const DISPLAY_ADAPTIVE_BLOCKED: &str = "display.adaptive_blocked";
-    pub const DISPLAY_ADAPTIVE_REBUILT: &str = "display.adaptive_rebuilt";
-    pub const DISPLAY_ADAPTIVE_CLOSED: &str = "display.adaptive_closed";
 }
 
 // ===========================================================================
@@ -167,17 +155,6 @@ pub enum DangerousApprovalSource {
 // DATA STRUCT(restart 候选 / plan state / 危险审批)
 // ===========================================================================
 
-/// `RestartCandidate`(`restart/selection.py:27`)。`select_restart_state` 多 team 选择;
-/// `has_context` 是 resume 可行性粗判。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RestartCandidate {
-    pub session_name: SessionName,
-    pub team_name: String,
-    pub state_path: PathBuf,
-    pub spec_path: PathBuf,
-    pub agents: Vec<AgentId>,
-    pub has_context: bool,
-}
 
 /// 危险审批继承态(`config.py:16` `dangerous_auto_approve{_source,_inherited,_provider,_flag}`)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -593,27 +570,6 @@ pub enum RestartReport {
     RefusedInvalidFirstSendAt {
         invalid: Vec<CorruptFirstSendAt>,
         allow_fresh: bool,
-        error: String,
-    },
-    /// 0.5.40 Slice 3 (tmux-server-death-locate §7 Slice 3, first-version
-    /// all-or-refuse): the previous worker session is still live AND state
-    /// carries running agents with real pane_ids. Restart today can only
-    /// proceed by killing the live session first — which loses provider
-    /// session state in the worker panes and, worse, can cascade into
-    /// server death under Case B. Until the build-before-destroy path
-    /// (later car: temporary session + minimal-viability proof + swap)
-    /// lands, restart refuses this shape *before* touching tmux or state.
-    /// **nothing created or killed; state.agents rows are byte-identical
-    /// to what was seeded before the call.**
-    RefusedBuildBeforeDestroyRequired {
-        /// Live worker session name from state that would need destructive
-        /// rebuild.
-        session_name: String,
-        /// Snapshot of agent ids currently running with real pane_ids —
-        /// this is the "authoritative old state" the refusal preserves.
-        live_agents: Vec<String>,
-        /// Human-readable error pointing the user at the canonical recovery
-        /// path (bare shutdown then restart).
         error: String,
     },
     /// unit-3 (Stage 1): session-identity preflight refused — `state.session_name`

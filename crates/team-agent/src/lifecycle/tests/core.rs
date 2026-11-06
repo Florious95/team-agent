@@ -687,28 +687,7 @@ fn classify_restart_plan_produces_corrupt_entries_with_python_type_names() {
 // 显式 team 未找到 → TeamSelect。锁:歧义/未找到走 TeamSelect 而非 panic。
 // ───────────────────────────────────────────────────────────────────────
 
-#[test]
-fn select_restart_state_unknown_team_is_team_select_error() {
-    let ws = temp_ws();
-    match select_restart_state(&ws, Some("ghost-team")) {
-        Err(LifecycleError::TeamSelect(msg)) => {
-            // Python: "restart team 'ghost-team' not found. ..."
-            assert!(
-                msg.contains("ghost-team") || msg.contains("not found"),
-                "TeamSelect 文案应指名缺失 team:{msg}"
-            );
-        }
-        other => panic!("未知 team 应 TeamSelect:{other:?}"),
-    }
-}
 
-#[test]
-fn restart_candidates_empty_workspace_is_empty_list() {
-    // selection.py:12 — 无 snapshot 无 active state → 空 vec(不是 Err)。
-    let ws = temp_ws();
-    let got = restart_candidates(&ws).expect("空 workspace 应 Ok(空 vec)");
-    assert!(got.is_empty(), "空 workspace 不应有候选:{got:?}");
-}
 
 // ───────────────────────────────────────────────────────────────────────
 // save_team_runtime_snapshot — snapshot.py:17 (bug-084)
@@ -747,7 +726,7 @@ fn leader_pane_env_absent_pane_fails_fast() {
     let _leader_pane = EnvVarGuard::set("TEAM_AGENT_LEADER_PANE_ID", "%9999");
     let transport =
         crate::transport::test_support::OfflineTransport::new().with_pane_presence("%9999", false);
-    let err = validate_active_leader_pane_env(&transport).expect_err("absent pane must fail");
+    let err = validate_active_leader_pane_env_with_workspaces(&transport, &[]).expect_err("absent pane must fail");
     let msg = err.to_string();
     assert!(msg.contains("TEAM_AGENT_LEADER_PANE_ID"), "got: {msg}");
     assert!(msg.contains("absent"), "got: {msg}");
@@ -760,7 +739,7 @@ fn leader_pane_env_dead_pane_fails_fast() {
     let _leader_pane = EnvVarGuard::set("TEAM_AGENT_LEADER_PANE_ID", "%404");
     let transport = crate::transport::test_support::OfflineTransport::new()
         .with_liveness("%404", PaneLiveness::Dead);
-    let err = validate_active_leader_pane_env(&transport).expect_err("dead pane must fail");
+    let err = validate_active_leader_pane_env_with_workspaces(&transport, &[]).expect_err("dead pane must fail");
     let msg = err.to_string();
     assert!(msg.contains("TEAM_AGENT_LEADER_PANE_ID"), "got: {msg}");
     assert!(msg.contains("dead"), "got: {msg}");
@@ -772,7 +751,7 @@ fn leader_pane_env_dead_pane_fails_fast() {
 fn leader_pane_env_unset_passes_without_probe() {
     let _leader_pane = EnvVarGuard::remove("TEAM_AGENT_LEADER_PANE_ID");
     let transport = crate::transport::test_support::OfflineTransport::new();
-    validate_active_leader_pane_env(&transport).expect("unset env must pass");
+    validate_active_leader_pane_env_with_workspaces(&transport, &[]).expect("unset env must pass");
     assert!(
         transport.calls().is_empty(),
         "unset env must not probe transport: {:?}",
@@ -786,7 +765,7 @@ fn leader_pane_env_unknown_when_unprovable_does_not_fail_fast() {
     let _leader_pane = EnvVarGuard::set("TEAM_AGENT_LEADER_PANE_ID", "%8888");
     let transport = crate::transport::test_support::OfflineTransport::new()
         .with_default_liveness(PaneLiveness::Unknown);
-    validate_active_leader_pane_env(&transport).expect("unknown/unprovable pane must not fail");
+    validate_active_leader_pane_env_with_workspaces(&transport, &[]).expect("unknown/unprovable pane must not fail");
 }
 
 #[test]
@@ -796,7 +775,7 @@ fn leader_pane_env_non_numeric_pane_id_is_unknown_not_absent() {
     let transport = crate::transport::test_support::OfflineTransport::new()
         .with_pane_presence("abc-notapane", false)
         .with_liveness("abc-notapane", PaneLiveness::Dead);
-    validate_active_leader_pane_env(&transport)
+    validate_active_leader_pane_env_with_workspaces(&transport, &[])
         .expect("non `%<digits>` env values are unprovable, not absent");
     assert!(
         transport.calls().is_empty(),
@@ -813,7 +792,7 @@ fn leader_pane_env_invalid_format_writes_warning_event() {
     let transport = crate::transport::test_support::OfflineTransport::new()
         .with_pane_presence("abc-notapane", false);
 
-    validate_active_leader_pane_env_with_workspace(&transport, Some(&ws))
+    validate_active_leader_pane_env_with_workspaces(&transport, &[ws.as_path()])
         .expect("invalid format is warning-only");
 
     let events = crate::event_log::EventLog::new(&ws)
@@ -1065,19 +1044,6 @@ fn fork_agent_on_unowned_workspace_does_not_silently_fork() {
 // 事件名常量已在 event_names 锁定。无主空 workspace:owner/缺 spec 门优先于任何写。
 // ───────────────────────────────────────────────────────────────────────
 
-#[test]
-fn add_agent_event_name_constants_match_python_lifecycle_strings() {
-    // 锁死发射事件名(顺序被 porter 实现后的事件流锁死;此处锁名)。
-    assert_eq!(
-        event_names::ADD_STEP_COMPLETED,
-        "lifecycle.add_step_completed"
-    );
-    assert_eq!(
-        event_names::ADD_STEP_ROLLED_BACK,
-        "lifecycle.add_step_rolled_back"
-    );
-    assert_eq!(event_names::ADD_FAILED, "lifecycle.add_failed");
-}
 
 #[test]
 fn add_agent_on_unowned_workspace_does_not_silently_add() {

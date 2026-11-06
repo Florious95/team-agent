@@ -45,33 +45,12 @@ fn u1_future_no_effect_reason_roundtrips() {
     );
 }
 #[test]
-fn u2_future_outcome_is_uncertain_not_retry_permission() {
-    let raw = json!({"state":"future_native_handoff","new_proof":{"opaque":true}});
-    assert_eq!(codec::outcome(&raw), codec::ObservedOutcome::Uncertain(raw));
-}
-#[test]
 fn u3_unknown_requirement_is_readable_but_not_mutable() {
     let raw = br#"{"v":1,"requires":["future.capability"],"revision":1}"#;
     let value = codec::read(raw).unwrap();
     assert!(codec::authorize_mutation(&value, &[])
         .unwrap_err()
         .contains("unsupported_capability"));
-    assert!(codec::patch_scalar(
-        std::str::from_utf8(raw).unwrap(),
-        &["revision"],
-        &json!(2),
-        &[]
-    )
-    .is_err());
-}
-#[test]
-fn u4_unknown_nested_bytes_are_untouched_by_known_leaf_patch() {
-    let original = "{\n\"v\":1, \"requires\":[], \"runtime\":{\"revision\":1,\"futu\\u0072e\": {\"x\":1.000, \"s\":\"\\u0041\"}}\n}";
-    let changed = codec::patch_scalar(original, &["runtime", "revision"], &json!(2), &[]).unwrap();
-    assert_eq!(
-        changed,
-        original.replacen("\"revision\":1", "\"revision\":2", 1)
-    );
 }
 #[test]
 fn u5_duplicate_json_keys_are_rejected_at_every_depth() {

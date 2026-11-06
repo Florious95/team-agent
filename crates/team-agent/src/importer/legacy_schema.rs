@@ -3,6 +3,7 @@ use crate::db::{schema::retry_sqlite, DbError};
 use rusqlite::Connection;
 use std::time::Duration;
 
+#[cfg(test)]
 pub fn open_db(path: &std::path::Path) -> Result<Connection, DbError> {
     let existed = path.exists();
     let conn = retry_sqlite(|| Connection::open(path))?;

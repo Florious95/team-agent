@@ -45,7 +45,6 @@ use super::StateError;
 use super::persist::{
     load_runtime_state as helper_load_workspace,
     runtime_state_path as helper_workspace_path, save_runtime_state as helper_write_root,
-    save_runtime_state_reapplying_after_conflict as helper_write_root_reapply,
     save_runtime_state_with_deleted_agents as helper_write_root_with_deleted_agents,
     save_runtime_state_with_lifecycle_topology_authority as helper_write_root_with_lifecycle_topology_authority,
     save_runtime_state_with_lifecycle_topology_authority_and_capture_backfill_skip as helper_write_root_with_lifecycle_topology_authority_and_capture_backfill_skip,
@@ -63,7 +62,6 @@ use super::persist::{
 use super::projection::{
     resolve_team_scoped_state as helper_resolve_team_scoped,
     save_team_scoped_state as helper_write_team_scoped,
-    save_team_scoped_state_reapplying_after_conflict as helper_write_team_scoped_reapply,
     save_team_scoped_state_with_deleted_agents as helper_write_team_scoped_with_deleted_agents,
     save_team_scoped_state_with_lifecycle_topology_authority as helper_write_team_scoped_with_lifecycle_topology_authority,
     save_team_scoped_state_with_lifecycle_topology_authority_and_capture_backfill_skip as helper_write_team_scoped_with_lifecycle_topology_authority_and_capture_backfill_skip,
@@ -74,9 +72,8 @@ mod intent;
 
 /// Repository facade for workspace state reads and writes.
 ///
-/// S1a scope: hold the workspace path, expose `load_workspace`/`load_team`
-/// and a `save`/`save_reapplying` pair that both take a `StateWriteIntent`.
-/// The concrete dispatch stays byte-identical to the pre-S1a call graph.
+/// Holds the workspace path for live readers and intent-scoped writes.
+/// Dispatch delegates to the current persistence helpers.
 pub struct StateRepository<'a> {
     workspace: &'a Path,
 }
@@ -88,11 +85,6 @@ impl<'a> StateRepository<'a> {
         Self { workspace }
     }
 
-    ///
-    /// Load the raw workspace state document.
-    pub fn load_workspace(&self) -> Result<Value, StateError> {
-        helper_load_workspace(self.workspace)
-    }
 
     ///
     /// Load the canonical workspace document without running read-time
@@ -108,49 +100,15 @@ impl<'a> StateRepository<'a> {
         serde_json::from_str(&text).map(Some).map_err(StateError::from)
     }
 
-    ///
-    /// Resolve a team-scoped projection using the existing projection selector.
-    /// `team_key = None` selects the ambient team the same way as pre-S1a.
-    pub fn load_team(&self, team_key: Option<&str>) -> Result<Value, StateError> {
-        let (state, refusal) = helper_resolve_team_scoped(self.workspace, team_key)?;
-        if let Some(refusal) = refusal {
-            return Err(StateError::TeamSelect(refusal.to_string()));
-        }
-        state.ok_or_else(|| {
-            StateError::TeamSelect(
-                "resolve_team_scoped_state returned no state and no refusal".to_string(),
-            )
-        })
-    }
 
     ///
     /// Persist `state` under the supplied intent. S1a dispatch is a pure
     /// forward call to the same legacy helper family that the caller used
     /// before S1a; the intent selects the family, not the merge semantics.
     pub fn save(&self, intent: StateWriteIntent<'_>, state: &Value) -> Result<(), StateError> {
-        if let StateWriteIntent::CoordinatorTick { team_key } = &intent {
-            return self.save_coordinator_tick(team_key, state);
-        }
         route_direct(self.workspace, intent, state)
     }
 
-    ///
-    /// Persist `state` and let `reapply` re-materialize the write on
-    /// SaveConflict, matching the pre-S1a `_reapplying_after_conflict` helper
-    /// behavior for reapply-shaped intents.
-    pub fn save_reapplying<F>(
-        &self,
-        intent: StateWriteIntent<'_>,
-        state: &Value,
-        reapply: F,
-    ) -> Result<(), StateError>
-    where
-        F: FnOnce(&mut Value),
-    {
-        #[cfg(test)]
-        test_support::before_commit();
-        route_reapply(self.workspace, intent, state, reapply)
-    }
 
     /// Commit a bounded Team delta once against latest under state-save.
     /// Return the committed Team view for callers that produce Markdown afterwards.
@@ -176,7 +134,6 @@ impl<'a> StateRepository<'a> {
                 _ => (Vec::new(), None),
             };
         let team_key = match intent {
-            StateWriteIntent::ResultCollection { owner_team_id } => owner_team_id,
             StateWriteIntent::ForkAgent { team_key, .. }
             | StateWriteIntent::StartAgent { team_key, .. }
             | StateWriteIntent::RestartTeam { team_key, .. } => Some(team_key),
@@ -285,110 +242,9 @@ impl<'a> StateRepository<'a> {
         }
     }
 
-    fn save_coordinator_tick(&self, team_key: &str, state: &Value) -> Result<(), StateError> {
-        let incoming = state.clone();
-        super::persist::update_runtime_state(self.workspace, |latest| {
-            let mut incoming_team = bounded_team_view(&incoming, Some(team_key))?;
-            let latest_team = bounded_team_view(latest, Some(team_key))?;
-            preserve_latest_fork_rows(&mut incoming_team, &latest_team);
-            let mut checked =
-                super::projection::merge_committed_team(latest, &incoming_team, team_key);
-            super::persist::merge_ordinary_state(&mut checked, latest)?;
-            let checked = bounded_team_view(&checked, Some(team_key))?;
-            Ok(super::projection::merge_committed_team(
-                latest, &checked, team_key,
-            ))
-        })?;
-        Ok(())
-    }
 
-    /// Fence the sampled incarnation with the existing persist guards, then
-    /// commit only this tick's agent observations and coordinator bookkeeping.
-    pub fn commit_observations(
-        &self,
-        intent: StateWriteIntent<'_>,
-        before: &Value,
-        observed: &Value,
-    ) -> Result<(), StateError> {
-        let StateWriteIntent::CoordinatorTick { team_key } = intent else {
-            return Err(StateError::SaveFailed("intent does not accept observations".into()));
-        };
-        let sampled_legacy =
-            legacy_single_team_state(before) && legacy_single_team_state(observed);
-        let sampled_identity = legacy_team_identity(before);
-        super::persist::update_runtime_state(self.workspace, |latest| {
-            if sampled_legacy {
-                if sampled_identity != legacy_team_identity(observed)
-                    || !legacy_single_team_state(latest)
-                    || sampled_identity != legacy_team_identity(latest)
-                {
-                    return Err(StateError::SaveConflict(
-                        "legacy coordinator observation scope changed before commit".to_string(),
-                    ));
-                }
-                let mut checked = observed.clone();
-                preserve_latest_fork_rows(&mut checked, latest);
-                super::persist::merge_ordinary_state(&mut checked, latest)?;
-                if !legacy_single_team_state(&checked)
-                    || sampled_identity != legacy_team_identity(&checked)
-                {
-                    return Err(StateError::SaveConflict(
-                        "legacy coordinator observation scope changed during validation"
-                            .to_string(),
-                    ));
-                }
-                let mut selected = latest.clone();
-                for field in ["agents", "coordinator"] {
-                    if before[field] != checked[field] {
-                        apply_observation_delta(
-                            &before[field],
-                            &checked[field],
-                            &mut selected[field],
-                        );
-                    }
-                }
-                return Ok(selected);
-            }
-            let mut observed_with_delta = observed.clone();
-            sync_team_observation_delta(before, &mut observed_with_delta, team_key);
-            let mut observed_team = bounded_team_view(&observed_with_delta, Some(team_key))?;
-            let latest_team = bounded_team_view(latest, Some(team_key))?;
-            preserve_latest_fork_rows(&mut observed_team, &latest_team);
-            let mut checked =
-                super::projection::merge_committed_team(latest, &observed_team, team_key);
-            super::persist::merge_ordinary_state(&mut checked, latest)?;
-            let checked = bounded_team_view(&checked, Some(team_key))?;
-            let mut selected = bounded_team_view(latest, Some(team_key))?;
-            for field in ["agents", "coordinator"] {
-                if before[field] != checked[field] {
-                    apply_observation_delta(&before[field], &checked[field], &mut selected[field]);
-                }
-            }
-            sync_team_observation_delta(before, &mut selected, team_key);
-            Ok(super::projection::merge_committed_team(latest, &selected, team_key))
-        })?;
-        Ok(())
-    }
 }
 
-// Coordinator observations do not own fork-target lifecycle rows.
-fn preserve_latest_fork_rows(incoming: &mut Value, latest: &Value) {
-    let Some(latest_agents) = latest.get("agents").and_then(Value::as_object) else {
-        return;
-    };
-    let Some(incoming_agents) = incoming.get_mut("agents").and_then(Value::as_object_mut) else {
-        return;
-    };
-    for (agent_id, latest_agent) in latest_agents {
-        if latest_agent
-            .get("forked_from")
-            .and_then(Value::as_str)
-            .is_some_and(|source| !source.is_empty())
-        {
-            incoming_agents.insert(agent_id.clone(), latest_agent.clone());
-        }
-    }
-}
 
 fn legacy_single_team_state(state: &Value) -> bool {
     match state.get("teams") {
@@ -398,22 +254,6 @@ fn legacy_single_team_state(state: &Value) -> bool {
     }
 }
 
-fn legacy_team_identity(state: &Value) -> [Option<String>; 5] {
-    [
-        "active_team_key",
-        "team_key",
-        "session_name",
-        "team_dir",
-        "spec_path",
-    ]
-    .map(|field| {
-        state
-            .get(field)
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    })
-}
 
 fn bounded_team_view(state: &Value, team_key: Option<&str>) -> Result<Value, StateError> {
     let Some(key) = team_key else { return Ok(state.clone()); };
@@ -428,50 +268,10 @@ fn bounded_team_view(state: &Value, team_key: Option<&str>) -> Result<Value, Sta
 
 // Diffing is limited to the two observation blocks above, never a whole-state
 // merge. Equal fields retain a concurrent writer's value; removed fields clear.
-fn apply_observation_delta(before: &Value, observed: &Value, latest: &mut Value) {
-    if before == observed { return; }
-    if let Some(observed) = observed.as_object() {
-        if !latest.is_object() { *latest = serde_json::json!({}); }
-        if let Some(before) = before.as_object() {
-            for key in before.keys().filter(|key| !observed.contains_key(*key)) {
-                if let Some(latest) = latest.as_object_mut() { latest.remove(key); }
-            }
-        }
-        for (key, value) in observed {
-            apply_observation_delta(&before[key], value, &mut latest[key]);
-        }
-    } else {
-        *latest = observed.clone();
-    }
-}
 
 // The coordinator observes a projected team view, while its nested `teams`
 // snapshot remains stale. Carry only observation deltas back to the canonical
 // team entry before `bounded_team_view` projects it again.
-fn sync_team_observation_delta(before: &Value, observed: &mut Value, team_key: &str) {
-    for field in ["agents", "coordinator"] {
-        let before_value = before.get(field).cloned().unwrap_or(Value::Null);
-        let observed_value = observed.get(field).cloned().unwrap_or(Value::Null);
-        if before_value == observed_value {
-            continue;
-        }
-        let Some(team_entry) = observed
-            .get_mut("teams")
-            .and_then(Value::as_object_mut)
-            .and_then(|teams| teams.get_mut(team_key))
-            .and_then(Value::as_object_mut)
-        else {
-            continue;
-        };
-        if field == "coordinator" && !team_entry.contains_key(field) {
-            team_entry.insert(field.to_string(), serde_json::json!({}));
-        }
-        let slot = team_entry
-            .entry(field.to_string())
-            .or_insert_with(|| before_value.clone());
-        apply_observation_delta(&before_value, &observed_value, slot);
-    }
-}
 
 /// Closed semantic catalog of workspace state writes. Every allowlisted
 /// callsite maps to exactly one variant, and there is intentionally no
@@ -481,32 +281,23 @@ fn sync_team_observation_delta(before: &Value, observed: &mut Value, team_key: &
 /// Ordering follows design section 5 group order (lifecycle, agent ops,
 /// leader/coordinator, MCP, messaging, then diagnostic seams).
 pub enum StateWriteIntent<'a> {
-    LaunchTeam {
-        team_key: &'a str,
-    },
+    LaunchTeam,
     AddAgent {
         team_key: &'a str,
         agent_id: &'a str,
     },
-    AnnotateTeamDepth {
-        team_key: &'a str,
-    },
+    AnnotateTeamDepth,
     ShutdownTeam {
         team_key: Option<&'a str>,
         clean: bool,
     },
-    PromoteLiveSiblingAfterShutdown {
-        stopped_team_key: &'a str,
-        promoted_team_key: &'a str,
-    },
+    PromoteLiveSiblingAfterShutdown,
     RestartTeam {
         team_key: &'a str,
         topology_authority_agent_ids: &'a [&'a str],
         skip_capture_backfill_agent_ids: &'a [&'a str],
     },
-    RestartSessionRepair {
-        team_key: &'a str,
-    },
+    RestartSessionRepair,
     StartAgent {
         team_key: &'a str,
         agent_id: &'a str,
@@ -521,7 +312,6 @@ pub enum StateWriteIntent<'a> {
         discard_session: bool,
     },
     RemoveAgent {
-        team_key: &'a str,
         agent_id: &'a str,
     },
     ForkAgent {
@@ -560,18 +350,10 @@ pub enum StateWriteIntent<'a> {
         previous_owner: &'a Value,
         previous_receiver: &'a Value,
     },
-    LeaderBindingRestoreNonTargetTeams {
-        target_team_key: &'a str,
-    },
+    LeaderBindingRestoreNonTargetTeams,
     /// Strip extra keys written by a failed or degraded quick-start bind attempt.
-    QuickStartBindingCleanup {
-        team_key: &'a str,
-    },
+    QuickStartBindingCleanup,
     LeaderStartBinding {
-        team_key: &'a str,
-        transport_kind: &'a str,
-    },
-    CoordinatorTick {
         team_key: &'a str,
     },
     CoordinatorConptyShim {
@@ -580,17 +362,6 @@ pub enum StateWriteIntent<'a> {
     MessagingDeliveryState {
         owner_team_id: Option<&'a str>,
     },
-    MessagingTurnArm {
-        owner_team_id: Option<&'a str>,
-    },
-    MessagingSessionCapture,
-    ResultCollection {
-        owner_team_id: Option<&'a str>,
-    },
-    TaskRepair {
-        team_key: Option<&'a str>,
-    },
-    SelfMigration,
 }
 
 // S1a dispatch: every intent forwards to the same pre-S1a helper family; only naming shifted.
@@ -604,7 +375,7 @@ fn route_direct(
     match intent {
         // LaunchTeam -> the launch writer path uses the root helper today
         // (`save_runtime_state` at lifecycle/launch.rs:996).
-        StateWriteIntent::LaunchTeam { .. } => helper_write_root(workspace, state),
+        StateWriteIntent::LaunchTeam => helper_write_root(workspace, state),
         StateWriteIntent::AddAgent { team_key, agent_id } => {
             helper_write_team_scoped_with_lifecycle_topology_authority(
                 workspace,
@@ -614,7 +385,7 @@ fn route_direct(
             )
         }
         // AnnotateTeamDepth also lives on the root save path.
-        StateWriteIntent::AnnotateTeamDepth { .. } => helper_write_root(workspace, state),
+        StateWriteIntent::AnnotateTeamDepth => helper_write_root(workspace, state),
         // ShutdownTeam: scoped clean shutdown uses `save_team_scoped_state`;
         // bare (non-scoped) shutdown uses `save_runtime_state`. The
         // `team_key` presence encodes the same clean-vs-bare split as the
@@ -649,7 +420,7 @@ fn route_direct(
         },
         // PromoteLiveSiblingAfterShutdown writes the promoted projection at
         // cli/mod.rs:3526 via the root helper.
-        StateWriteIntent::PromoteLiveSiblingAfterShutdown { .. } => {
+        StateWriteIntent::PromoteLiveSiblingAfterShutdown => {
             helper_write_root(workspace, state)
         }
         // RestartTeam: existing rebuild/common path uses
@@ -666,10 +437,8 @@ fn route_direct(
             skip_capture_backfill_agent_ids,
             topology_authority_agent_ids,
         ),
-        // RestartSessionRepair uses the same scoped helper first, with a
-        // reapply overlay in the caller (rebuild.rs:1545/1555). S1a preserves
-        // the direct-write form here; reapply routes through `save_reapplying`.
-        StateWriteIntent::RestartSessionRepair { .. } => helper_write_team_scoped(workspace, state),
+        // RestartSessionRepair persists through the scoped helper.
+        StateWriteIntent::RestartSessionRepair => helper_write_team_scoped(workspace, state),
         // StartAgent - the launch add-agent tail lands via
         // `save_team_scoped_state_with_lifecycle_topology_authority` today.
         StateWriteIntent::StartAgent { team_key, .. } => {
@@ -790,8 +559,8 @@ fn route_direct(
             previous_owner,
             previous_receiver,
         ),
-        StateWriteIntent::QuickStartBindingCleanup { .. } => helper_write_root(workspace, state),
-        StateWriteIntent::LeaderBindingRestoreNonTargetTeams { .. } => {
+        StateWriteIntent::QuickStartBindingCleanup => helper_write_root(workspace, state),
+        StateWriteIntent::LeaderBindingRestoreNonTargetTeams => {
             helper_write_root_without_migrations(workspace, state)
         }
         // LeaderStartBinding -> managed/exec/external all root-save at
@@ -799,9 +568,6 @@ fn route_direct(
         StateWriteIntent::LeaderStartBinding { team_key, .. } => {
             helper_write_root_with_receiver_authority(workspace, state, team_key, None)
         }
-        // CoordinatorTick dispatches to the existing scoped helper
-        // (`save_team_scoped_state`) preserving coordinator/tick.rs:427.
-        StateWriteIntent::CoordinatorTick { .. } => helper_write_team_scoped(workspace, state),
         // CoordinatorConptyShim -> root save
         // (coordinator/conpty_shim.rs:426/674).
         StateWriteIntent::CoordinatorConptyShim { .. } => helper_write_root(workspace, state),
@@ -811,73 +577,6 @@ fn route_direct(
             Some(_) => helper_write_team_scoped(workspace, state),
             None => helper_write_root(workspace, state),
         },
-        // MessagingTurnArm -> root save (messaging/activity.rs:83).
-        StateWriteIntent::MessagingTurnArm { .. } => helper_write_root(workspace, state),
-        // MessagingSessionCapture -> root save; the post-send capture backfill
-        // at messaging/send.rs used the root helper directly before it was
-        // migrated onto the repository.
-        StateWriteIntent::MessagingSessionCapture => helper_write_root(workspace, state),
-        // ResultCollection direct-write path uses `save_team_scoped_state`
-        // when an owner_team_id is bound and `save_runtime_state` at the root
-        // otherwise (messaging/results.rs:201/211). The reapply-shaped
-        // variants live in `route_reapply` and preserve
-        // `save_team_scoped_state_reapplying_after_conflict` /
-        // `save_runtime_state_reapplying_after_conflict` semantics.
-        StateWriteIntent::ResultCollection { owner_team_id } => match owner_team_id {
-            Some(_) => helper_write_team_scoped(workspace, state),
-            None => helper_write_root(workspace, state),
-        },
-        // TaskRepair -> `save_team_scoped_state` (cli/adapters.rs:675).
-        StateWriteIntent::TaskRepair { .. } => helper_write_team_scoped(workspace, state),
-        // SelfMigration persists through the root helper.
-        StateWriteIntent::SelfMigration => helper_write_root(workspace, state),
-    }
-}
-
-// Route intents that historically used the `_reapplying_after_conflict`
-// helper family. Behavior stays identical: S1a chooses the same helper the
-// legacy caller would have chosen for a reapply.
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum ReapplyScope {
-    Root,
-    Team,
-}
-
-fn reapply_scope(intent: &StateWriteIntent<'_>) -> ReapplyScope {
-    if matches!(
-        intent,
-        StateWriteIntent::RestartSessionRepair { .. }
-            | StateWriteIntent::MessagingDeliveryState {
-                owner_team_id: Some(_),
-            }
-            | StateWriteIntent::ResultCollection {
-                owner_team_id: Some(_),
-            }
-            | StateWriteIntent::CoordinatorTick { .. }
-    ) {
-        ReapplyScope::Team
-    } else {
-        ReapplyScope::Root
-    }
-}
-
-fn route_reapply<F>(
-    workspace: &Path,
-    intent: StateWriteIntent<'_>,
-    state: &Value,
-    reapply: F,
-) -> Result<(), StateError>
-where
-    F: FnOnce(&mut Value),
-{
-    if matches!(&intent, StateWriteIntent::ResultCollection { .. })
-    {
-        return StateRepository::new(workspace).commit(intent, reapply).map(|_| ());
-    }
-    if reapply_scope(&intent) == ReapplyScope::Team {
-        helper_write_team_scoped_reapply(workspace, state, reapply)
-    } else {
-        helper_write_root_reapply(workspace, state, reapply)
     }
 }
 

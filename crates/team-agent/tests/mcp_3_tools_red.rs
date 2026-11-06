@@ -423,7 +423,7 @@ fn m03_initial_resume_and_pi_leader_materialization_all_consume_three_tools() {
     std::fs::remove_file(&worker_path).expect("force restart path to rematerialize the worker wrapper");
     // The restart API may report a separate coordinator-readiness failure in this isolated
     // transport fixture; M03 observes the actual per-seat wrapper emitted by its restart plan.
-    let restart_result = team_agent::lifecycle::restart::restart(case.path(), true, Some("teamA"));
+    let restart_result = team_agent::lifecycle::restart_with_session_convergence_deadline(case.path(), true, Some("teamA"), None);
     assert!(worker_path.is_file(), "restart did not materialize a fresh worker Pi wrapper: {restart_result:?}");
     let resumed = include_tools_from_wrapper(&worker_path);
     assert_pi_wrapper_identity(&worker_path, "worker_a", "teamA");

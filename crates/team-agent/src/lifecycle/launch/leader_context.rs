@@ -39,42 +39,7 @@ use crate::lifecycle::lock::{acquire_seat_lifecycle_lock, LifecycleLockRequest};
 
 use super::*;
 
-/// ---
-/// purpose: 校验 TEAM_AGENT_LEADER_PANE_ID 指向的 pane 是否可用，不带 workspace 上下文
-/// returns: 通过返回空值
-/// errors: pane 明确为 dead 或 absent 时返回 RequirementUnmet，消息含 error/action/log 三行
-/// contract_id: lifecycle.leader_context.validate_leader_pane_env
-/// ---
-/// B-7 / 036b — TEAM_AGENT_LEADER_PANE_ID 主动路径 fail-fast helper。
-/// 入口形态(N38 三行式):
-///   error  : `TEAM_AGENT_LEADER_PANE_ID points at a dead/absent pane: %<id>`
-///   action : `unset TEAM_AGENT_LEADER_PANE_ID, or set it to a live tmux pane id`
-///   log    : `TEAM_AGENT_LEADER_PANE_ID=%<id>`
-/// env 未设(或空)→ Ok(())。
-/// env 设了但 pane 可判定为 Dead/Absent → Err(RequirementUnmet)。
-/// 真实 tmux 后端跨所有现存 tmux socket server 探测:TEAM_AGENT_LEADER_PANE_ID 是用户
-/// override 指针,不归属当前 team socket。
-/// probe 返 Unknown 不挡(被动路径降级):本主动路径只对【显式 Dead/Absent】fail-fast,
-/// MUST-17 不过度设计 / unset 走 pass-through(b7_unset_leader_pane_env_passes_through 守)。
-pub(crate) fn validate_active_leader_pane_env(
-    transport: &dyn Transport,
-) -> Result<(), LifecycleError> {
-    validate_active_leader_pane_env_with_workspaces(transport, &[])
-}
 
-/// ---
-/// purpose: 同上，附带一个 workspace 用于写告警事件
-/// returns: 通过返回空值
-/// errors: 同 validate_active_leader_pane_env
-/// contract_id: lifecycle.leader_context.validate_leader_pane_env
-/// ---
-pub(crate) fn validate_active_leader_pane_env_with_workspace(
-    transport: &dyn Transport,
-    workspace: Option<&Path>,
-) -> Result<(), LifecycleError> {
-    let workspaces = workspace.into_iter().collect::<Vec<_>>();
-    validate_active_leader_pane_env_with_workspaces(transport, &workspaces)
-}
 
 /// ---
 /// purpose: 校验 leader pane 环境变量的实体实现

@@ -30,19 +30,6 @@ pub fn comms_selftest_report(
     run_comms_selftest(workspace, team, &RuntimeCommsDriver)
 }
 
-pub fn failing_check_names(report: &SelftestReport) -> Vec<&'static str> {
-    let mut names = Vec::new();
-    if report.receiver_binding.status != CheckStatus::Pass {
-        names.push("receiver_binding");
-    }
-    if report.contract_suite.status != CheckStatus::Pass {
-        names.push("contract_suite");
-    }
-    if report.provider_sdk_calls.status != CheckStatus::Pass {
-        names.push("provider_sdk_calls");
-    }
-    names
-}
 
 struct RuntimeCommsDriver;
 
