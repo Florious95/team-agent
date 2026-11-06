@@ -3,7 +3,6 @@ use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::{value::RawValue, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,22 +33,6 @@ impl From<NoEffectReason> for String {
         }
     }
 }
-#[derive(Debug, PartialEq)]
-pub enum ObservedOutcome {
-    NoEffect(NoEffectReason),
-    Submitted,
-    Uncertain(Value),
-}
-pub fn outcome(value: &Value) -> ObservedOutcome {
-    match value["state"].as_str() {
-        Some("no_effect") => ObservedOutcome::NoEffect(NoEffectReason::from(
-            value["reason"].as_str().unwrap_or("unknown").to_owned(),
-        )),
-        Some("submitted") => ObservedOutcome::Submitted,
-        _ => ObservedOutcome::Uncertain(value.clone()),
-    }
-}
-
 /// Duplicate keys are rejected recursively before interpretation, including keys
 /// with equivalent JSON escapes. serde_json's ordinary Value parser is last-wins.
 struct Unique(Value);
@@ -128,39 +111,6 @@ pub fn authorize_mutation(value: &Value, supported: &[&str]) -> Result<(), Strin
         }
     }
     Ok(())
-}
-
-/// Replace an owned scalar leaf by splicing only its raw token. Every other byte,
-/// including unknown nested keys, whitespace and escape spelling, is unchanged.
-pub fn patch_scalar(
-    original: &str,
-    path: &[&str],
-    replacement: &Value,
-    supported: &[&str],
-) -> Result<String, String> {
-    let value = read(original.as_bytes())?;
-    authorize_mutation(&value, supported)?;
-    let mut token: &RawValue = serde_json::from_str(original).map_err(|e| e.to_string())?;
-    for key in path {
-        let fields: BTreeMap<String, &RawValue> =
-            serde_json::from_str(token.get()).map_err(|e| e.to_string())?;
-        token = *fields.get(*key).ok_or("unknown mutation path")?;
-    }
-    let old: Value = serde_json::from_str(token.get()).map_err(|e| e.to_string())?;
-    if old.is_object() || old.is_array() || replacement.is_object() || replacement.is_array() {
-        return Err(
-            "unsupported_mutation: composite replacement would discard unknown fields".into(),
-        );
-    }
-    let begin = token.get().as_ptr() as usize - original.as_ptr() as usize;
-    let end = begin + token.get().len();
-    let replacement = serde_json::to_string(replacement).map_err(|e| e.to_string())?;
-    Ok(format!(
-        "{}{}{}",
-        &original[..begin],
-        replacement,
-        &original[end..]
-    ))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
