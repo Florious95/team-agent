@@ -50,9 +50,9 @@ use crate::model::ids::{TaskId, TeamKey};
 
 pub(crate) const COMMS_BOUNDARY_TEXT: &str =
     "This checks terminal connection consistency only; it does not send a message or prove that a worker replied.";
-pub(crate) const QUICK_START_REMINDER: &str = "Next: send a task. Use team-agent status for status and team-agent inbox leader -n 3 for replies; do not inspect worker terminal content.";
+pub(crate) const QUICK_START_REMINDER: &str = "Next: send a task, then wait for a pushed reply. Use team-agent status or team-agent inbox leader -n 3 only for a deliberate one-shot inspection; do not poll or inspect worker terminal content.";
 pub(crate) const STATUS_REMINDER: &str =
-    "Next: use team-agent inbox leader -n 3 for replies. Status is not proof of task completion; do not inspect worker terminal content.";
+    "Next: wait for a pushed reply. Use team-agent inbox leader -n 3 only for deliberate history review, not polling. Status is not proof of task completion; do not inspect worker terminal content.";
 
 pub mod adapters;
 pub(crate) use adapters::shell_quote;

@@ -8,6 +8,18 @@ use resolve::logical_to_from_args;
 
 /// Validate CLI addressing and dispatch through the current durable inbox path.
 pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
+    cmd_send_framed(args, crate::direct_delivery::Framing::Framed)
+}
+
+pub fn cmd_send_bare(args: &SendArgs) -> Result<CmdResult, CliError> {
+    crate::station::send::validate_bare_payload(&args.message.join(" ")).map_err(CliError::Usage)?;
+    if args.sender.display_name() != "leader" {
+        return Err(CliError::Usage("--bare requires a trusted leader/operator".into()));
+    }
+    cmd_send_framed(args, crate::direct_delivery::Framing::Bare)
+}
+
+fn cmd_send_framed(args: &SendArgs, framing: crate::direct_delivery::Framing) -> Result<CmdResult, CliError> {
     if args.pane.is_some() {
         if args.target.is_some() || args.targets.is_some() || args.to_name.is_some() || args.to_leader.is_some() {
             return Err(CliError::Usage("An agent name cannot be combined with --to-name/--pane/--to/--to-leader/--targets; choose one addressing mode".into()));
@@ -24,18 +36,20 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
     if content.is_empty() { return Err(CliError::Usage("empty_message: send requires a nonempty message".into())); }
     let (workspace, team) = alias.as_ref().map_or((&args.workspace, args.team.as_deref()),
         |entry| (&entry.workspace, Some(entry.team_key.as_str())));
-    let outcome = crate::station::send::execute(crate::station::send::Request {
+    let outcome = crate::station::send::execute_with_framing(crate::station::send::Request {
         workspace, team, to: &logical_to, content: &content,
         task_id: args.task.as_deref(), message_id: args.message_id.as_deref(),
         presentation: &args.presentation,
         mailbox: args.presentation.sink != crate::messaging::presentation::PresentationSink::Leader,
         envelope: None,
-    }, crate::station::send::Authority::Operator { sender: args.sender.display_name() });
+    }, crate::station::send::Authority::Operator { sender: args.sender.display_name() }, framing);
     let value = match outcome {
         Ok(value) if value["status"] == "refused" => return refused_outcome(args, workspace, team, value),
         Ok(value) => value,
         // Addressing refusals already carry a typed envelope above. Storage/I/O
         // errors must not be replaced by a second, unrelated name lookup.
+        Err(error) if framing == crate::direct_delivery::Framing::Bare && error.starts_with("--bare") =>
+            return Err(CliError::Usage(error)),
         Err(error) => return Err(CliError::Runtime(error)),
     };
     Ok(CmdResult::from_json(value, args.json))

@@ -10,6 +10,14 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde_json::{json, Value};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Framing { Framed, Bare }
+
+pub(crate) fn validate_bare_dialect(dialect: &str) -> Result<(), String> {
+    if matches!(canonical_dialect(dialect).as_str(), "claude" | "codex" | "pi") { Ok(()) }
+    else { Err(format!("--bare does not support dialect {dialect}")) }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Endpoint {
     pub agent: String,
@@ -396,6 +404,10 @@ impl Directory {
     }
 
     pub(crate) fn send_with_receipt(&self, agent: &str, text: &str, submitted: impl FnOnce() -> Result<(), String>) -> Result<Value, String> {
+        self.send_with_framing(agent, text, Framing::Framed, submitted)
+    }
+
+    pub(crate) fn send_with_framing(&self, agent: &str, text: &str, framing: Framing, submitted: impl FnOnce() -> Result<(), String>) -> Result<Value, String> {
         #[cfg(unix)]
         let _lifecycle = if agent != "leader" && native_recipient(self.recipient(agent)?) {
             let id = crate::model::ids::AgentId::new(agent);
@@ -410,7 +422,7 @@ impl Directory {
             .and_then(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 0);
         #[cfg(unix)]
         let mut startup_checked = false;
-        direct_send_checked(&endpoint.socket, &endpoint.pane_id, &endpoint.dialect, text, expected_pid, true, submitted,
+        direct_send_checked(&endpoint.socket, &endpoint.pane_id, &endpoint.dialect, text, expected_pid, true, framing, submitted,
             |deadline| {
                 if agent == "leader" && leader_target_is_sender(&endpoint,
                     crate::tmux_backend::socket_name_from_tmux_env().as_deref(),
@@ -419,7 +431,7 @@ impl Directory {
                 }
                 self.verify_endpoint(agent, &endpoint, deadline)?;
                 #[cfg(unix)]
-                if !startup_checked {
+                if framing == Framing::Framed && !startup_checked {
                     self.wait_for_startup(agent, &endpoint, deadline)?;
                     startup_checked = true;
                 }
@@ -512,10 +524,10 @@ fn check_output(output: std::process::Output) -> Result<(), String> {
 /// Provider names/aliases select their native paste floor and one Enter. Only an explicit
 /// double-enter dialect adds a second key; there is no observation-driven retry or third Enter.
 pub fn direct_send(socket: &str, pane_id: &str, dialect: &str, text: &str) -> Result<(), String> {
-    direct_send_checked(socket, pane_id, dialect, text, None, false, || Ok(()), |_| Ok(()))
+    direct_send_checked(socket, pane_id, dialect, text, None, false, Framing::Framed, || Ok(()), |_| Ok(()))
 }
 
-fn direct_send_checked(socket: &str, pane_id: &str, dialect: &str, text: &str, expected_pid: Option<u32>, managed: bool, submitted: impl FnOnce() -> Result<(), String>, mut verify_owner: impl FnMut(Instant) -> Result<(), String>) -> Result<(), String> {
+fn direct_send_checked(socket: &str, pane_id: &str, dialect: &str, text: &str, expected_pid: Option<u32>, managed: bool, framing: Framing, submitted: impl FnOnce() -> Result<(), String>, mut verify_owner: impl FnMut(Instant) -> Result<(), String>) -> Result<(), String> {
     if !pane_id
         .strip_prefix('%')
         .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
@@ -534,7 +546,10 @@ fn direct_send_checked(socket: &str, pane_id: &str, dialect: &str, text: &str, e
     let _input_lock = input_lock(&observed, pane_id, deadline)?;
     verify_identity(socket, pane_id, &observed, expected_pid, deadline)?;
     verify_owner(deadline)?;
-    if managed && canonical_dialect(dialect) == "claude" {
+    if framing == Framing::Bare {
+        validate_bare_dialect(dialect)?;
+        guard_bare_composer(socket, pane_id, dialect, None, deadline)?;
+    } else if managed && canonical_dialect(dialect) == "claude" {
         wait_for_draft(socket, pane_id, deadline)?;
     } else {
         guard_non_composer(socket, pane_id, deadline)?;
@@ -555,7 +570,7 @@ fn direct_send_checked(socket: &str, pane_id: &str, dialect: &str, text: &str, e
         .map_err(|e| format!("tmux: {e}"))?;
     // Terminate Codex's token within the paste so its mentions popup cannot
     // consume Enter or replace a trailing @file/$skill. Other dialects stay verbatim.
-    let text = if canonical_dialect(dialect) == "codex" {
+    let text = if framing == Framing::Framed && canonical_dialect(dialect) == "codex" {
         format!("{text}\n")
     } else {
         text.to_owned()
@@ -568,23 +583,17 @@ fn direct_send_checked(socket: &str, pane_id: &str, dialect: &str, text: &str, e
     }
     check_output(loaded)?;
     if let Err(error) = verify_identity(socket, pane_id, &observed, expected_pid, deadline)
-        .and_then(|()| guard_non_composer(socket, pane_id, deadline))
+        .and_then(|()| if framing == Framing::Bare { guard_bare_composer(socket, pane_id, dialect, None, deadline) }
+            else { guard_non_composer(socket, pane_id, deadline) })
         .and_then(|()| verify_owner(deadline))
-        .and_then(|()| cancel_copy_mode(socket, pane_id, deadline)) {
+        .and_then(|()| if framing == Framing::Bare { Ok(()) } else { cancel_copy_mode(socket, pane_id, deadline) }) {
         let _ = tmux(socket).args(["delete-buffer", "-b", &buffer]).output();
         return Err(error);
     }
-    let pasted = tmux(socket)
-        .args([
-            "paste-buffer",
-            "-p",
-            "-r",
-            "-d",
-            "-b",
-            &buffer,
-            "-t",
-            pane_id,
-        ])
+    let mut paste = tmux(socket);
+    paste.arg("paste-buffer");
+    if framing == Framing::Framed || canonical_dialect(dialect) == "pi" { paste.arg("-p"); }
+    let pasted = paste.args(["-r", "-d", "-b", &buffer, "-t", pane_id])
         .output()
         .map_err(|e| e.to_string())
         .and_then(check_output);
@@ -592,18 +601,21 @@ fn direct_send_checked(socket: &str, pane_id: &str, dialect: &str, text: &str, e
         let _ = tmux(socket).args(["delete-buffer", "-b", &buffer]).output();
         return Err(format!("uncertain: paste was issued: {error}; do not replay"));
     }
-    let (floor, enter_count) = submit_sequence(dialect);
+    let (floor, enter_count) = if framing == Framing::Bare { (Duration::from_millis(100), 1) } else { submit_sequence(dialect) };
     if !floor.is_zero() {
         std::thread::sleep(floor);
     }
     verify_identity(socket, pane_id, &observed, expected_pid, deadline)
         .map_err(|error| format!("uncertain: identity changed after paste: {error}; do not replay"))?;
-    guard_non_composer(socket, pane_id, deadline)
+    (if framing == Framing::Bare { guard_bare_composer(socket, pane_id, dialect, Some(&text), deadline) }
+        else { guard_non_composer(socket, pane_id, deadline) })
         .map_err(|error| format!("uncertain: surface changed after paste: {error}; no Enter issued; do not replay"))?;
     verify_owner(deadline)
         .map_err(|error| format!("uncertain: ownership changed after paste: {error}; no Enter issued; do not replay"))?;
-    cancel_copy_mode(socket, pane_id, deadline)
-        .map_err(|error| format!("uncertain: mode preparation failed after paste: {error}; no Enter issued; do not replay"))?;
+    if framing == Framing::Framed {
+        cancel_copy_mode(socket, pane_id, deadline)
+            .map_err(|error| format!("uncertain: mode preparation failed after paste: {error}; no Enter issued; do not replay"))?;
+    }
     let mut command = tmux(socket);
     command.args(["send-keys", "-t", pane_id, "Enter"]);
     if enter_count == 2 {
@@ -614,6 +626,30 @@ fn direct_send_checked(socket: &str, pane_id: &str, dialect: &str, text: &str, e
     // The submission receipt/task hint is published before releasing the input
     // lock, so concurrent assignments cannot reverse their attribution order.
     submitted().map_err(|error| format!("uncertain: submission receipt failed: {error}; do not replay"))
+}
+
+fn guard_bare_composer(socket: &str, pane: &str, dialect: &str, expected: Option<&str>, deadline: Instant) -> Result<(), String> {
+    use team_agent_contract::contract::delivery::InputSurface;
+    use team_agent_contract::providers::{claude, codex, pi};
+    let mode = native_output(tmux(socket).args(["display-message", "-p", "-t", pane, "#{pane_in_mode}"]), deadline)?;
+    if !mode.success || mode.stdout.trim() != "0" { return Err("bare_composer_refused: pane is in copy mode or unknown".into()); }
+    let frame = native_output(tmux(socket).args(["capture-pane", "-p", "-t", pane]), deadline)?;
+    if !frame.success { return Err(format!("bare_composer_refused: capture failed: {}", frame.stderr)); }
+    let (surface, input) = match canonical_dialect(dialect).as_str() {
+        "claude" => (claude::interaction::surface(&frame.stdout),
+            claude::interaction::inspect_legacy_composer(&frame.stdout).and_then(|(surface, input)|
+                matches!(surface, InputSurface::ComposerReady | InputSurface::ComposerContainsPaste).then_some(input))),
+        "codex" => (codex::interaction::surface(&frame.stdout), codex::interaction::composer_text(&frame.stdout)),
+        "pi" => (pi::interaction::surface(&frame.stdout), pi::interaction::composer_text(&frame.stdout)),
+        _ => return Err("bare_composer_refused: unsupported dialect".into()),
+    };
+    let normalize = |text: &str| text.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    let ready = match expected {
+        None => surface == InputSurface::ComposerReady && input.as_deref().is_some_and(|input| input.trim().is_empty()),
+        Some(expected) => matches!(surface, InputSurface::ComposerReady | InputSurface::ComposerContainsPaste)
+            && input.as_deref().is_some_and(|input| normalize(input) == normalize(expected)),
+    };
+    if ready { Ok(()) } else { Err(format!("bare_composer_refused: {surface:?}; input is not the expected live composer")) }
 }
 
 fn native_output(command: &Command, deadline: Instant) -> Result<crate::tmux_backend::CommandOutput, String> {

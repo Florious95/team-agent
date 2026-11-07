@@ -82,6 +82,8 @@ pub fn run(argv: &[String], cwd: &Path) -> ExitCode {
     if let Some(result) = super::intent::run(command, &argv[1..], cwd) {
         return match result {
             Ok(result) => emit_result(result),
+            Err(error) if command == "team" && argv.get(1).is_some_and(|arg| arg == "status") =>
+                emit_cli_error_for_command("status", &argv[2..], cwd, &error),
             Err(error) => emit_cli_error_for_command(command, &argv[1..], cwd, &error),
         };
     }
@@ -143,13 +145,15 @@ fn emit_cli_error_for_command(
             value["next_actions"] = serde_json::json!([format!(
                 "Complete the required arguments using the Examples in team-agent {command} --help"
             )]);
+            advise_json(command, &mut value);
             println!("{}", python_compact_json(&value));
         } else {
             eprintln!("{explanation}\n\n{help}");
+            if polling_command(command) { eprintln!("{}", polling_footer()); }
         }
         ExitCode::Usage
     } else if command == "status" {
-        emit_status_cli_error(error)
+        emit_status_cli_error(error, super::arguments::has_flag(input_command, args, "--json"))
     } else if matches!(error, CliError::Usage(_)) {
         emit_parser_usage(input_command, args, error)
     } else {
@@ -162,16 +166,55 @@ pub(crate) fn __test_runtime_error_emitter(command: &str, cwd: &Path, error: &Cl
     emit_cli_error(command, &[], cwd, error)
 }
 
-fn emit_status_cli_error(error: &CliError) -> ExitCode {
+fn emit_status_cli_error(error: &CliError, as_json: bool) -> ExitCode {
     let normalized = normalize_cli_error(error);
     let payload_error = normalized.as_ref().unwrap_or(error);
     let safe_error = crate::redaction::redact_external_text(&payload_error.to_string());
-    eprintln!("error: {safe_error}");
+    if as_json {
+        let mut value = serde_json::to_value(payload_error.to_payload(Path::new(""), "status"))
+            .expect("CLI error envelope is serializable");
+        value["error"] = Value::String(safe_error);
+        advise_json("status", &mut value);
+        println!("{}", python_compact_json(&crate::redaction::redact_external_value(&value)));
+    } else {
+        eprintln!("error: {safe_error}");
+        eprintln!("{}", polling_footer());
+    }
     ExitCode::Error
 }
 
 /// Print a handler's CmdResult to stdout (emit formats json/human), then surface its exit code.
 /// (parser.py: `print(emit(result, as_json))` then the ok→exit mapping.)
+const POLLING_ADVISORY: &str = "Do not poll: do not run inbox, status, or doctor repeatedly or in a loop (including sleep/retry loops or repeated tool calls). Team Agent is event-driven: live messages are pushed directly into the recipient terminal; mailbox-only messages require deliberate history review. Run these commands once for a specific inspection or diagnosis, and run them again only after a new event, relevant state-changing action, or explicit user request. Agents: finish the current work, then stop issuing tool calls and wait for the next incoming message. An empty inbox or busy status is not a reason to check again.";
+
+fn polling_command(command: &str) -> bool {
+    matches!(command, "inbox" | "status" | "doctor")
+}
+
+fn polling_footer() -> String {
+    format!("\n[Advisory: do not poll]\n{POLLING_ADVISORY}")
+}
+
+fn advise_json(command: &str, value: &mut Value) {
+    if polling_command(command) {
+        value.as_object_mut().expect("diagnostic CLI output is an object")
+            .insert("polling_advisory".into(), Value::String(POLLING_ADVISORY.into()));
+    }
+}
+
+fn with_polling_advisory(mut result: CmdResult) -> CmdResult {
+    if result.as_json {
+        if let CmdOutput::Json(value) = &mut result.output { advise_json("status", value); }
+    } else if let Some(body) = emit_with_json_order(&result.output, false, result.preserve_json_order) {
+        result.output = CmdOutput::Human(format!("{body}\n{}", polling_footer()));
+    }
+    result
+}
+
+fn emit_diagnostic(result: CmdResult) -> ExitCode {
+    emit_result(with_polling_advisory(result))
+}
+
 pub(super) fn emit_result(r: CmdResult) -> ExitCode {
     let persisted_message_id = match &r.output {
         CmdOutput::Json(value) => value
@@ -187,7 +230,7 @@ pub(super) fn emit_result(r: CmdResult) -> ExitCode {
                 let mut stderr = stderr.lock();
                 let _ = writeln!(
                     stderr,
-                    "Output unavailable; the message was persisted with message_id={message_id}. Use team-agent inbox leader -n 3 for replies; do not resend."
+                    "Output unavailable; the message was persisted with message_id={message_id}. Wait for pushed replies; use team-agent inbox leader -n 3 only for deliberate history review. Do not poll or resend."
                 );
             }
             return if error.kind() == ErrorKind::BrokenPipe {
@@ -246,7 +289,7 @@ fn prepare_control_args(command: &str, args: &[String], cwd: &Path) -> Result<su
     if !checked.help && command == "schedule" {
         super::schedule::validate(&checked.tokens, cwd)?;
     }
-    let raw_send = command == "send" && checked.tokens.iter().any(|token| token == "--socket");
+    let raw_send = command == "send" && super::arguments::has_flag(command, &checked.tokens, "--socket");
     if !checked.help && !raw_send { checked.tokens = resolve_command_scope(command, checked.tokens, cwd)?; }
     Ok(checked)
 }
@@ -294,7 +337,12 @@ fn dispatch_prepared(command: &str, checked: super::arguments::CheckedArgs, cwd:
                 }
                 crate::direct_delivery::direct_send(socket, pane, dialect, &parsed.positionals.join(" ")).map_err(CliError::Runtime)?;
                 Ok(emit_result(CmdResult::from_json(serde_json::json!({"ok": true, "status": "sent", "delivery": "physical", "pane_id": pane, "accepted": null}), parsed.json)))
-            } else { cmd_send(&send_args(args, cwd)?).map(emit_result) }
+            } else {
+                let parsed = send_args(args, cwd)?;
+                if super::arguments::has_flag(command, args, "--bare") {
+                    cmd_send_bare(&parsed).map(emit_result)
+                } else { cmd_send(&parsed).map(emit_result) }
+            }
         },
         "locate" => {
             let parsed = parse_args(args);
@@ -315,7 +363,7 @@ fn dispatch_prepared(command: &str, checked: super::arguments::CheckedArgs, cwd:
         },
         "schedule" => super::schedule::run(args, cwd).map(emit_result),
         "status" => cmd_status_for_team(&status_args(args, cwd), parse_args(args).team.as_deref())
-            .map(emit_result),
+            .map(emit_diagnostic),
         "shutdown" => cmd_shutdown(&shutdown_args(args, cwd)?).map(emit_result),
         "restart" => cmd_restart(&restart_args(args, cwd)?).map(emit_result),
         "stop-agent" => cmd_stop_agent(&stop_agent_args(args, cwd)?).map(emit_result),
@@ -327,8 +375,8 @@ fn dispatch_prepared(command: &str, checked: super::arguments::CheckedArgs, cwd:
         // Real dispatch: `cmd_attach_leader` writes the `leader_receiver` binding.
 
         "approvals" => cmd_approvals(&approvals_args(args, cwd)).map(emit_result),
-        "inbox" => cmd_inbox(&inbox_args(args, cwd)?).map(emit_result),
-        "doctor" => cmd_doctor(&doctor_args(args, cwd)).map(emit_result),
+        "inbox" => cmd_inbox(&inbox_args(args, cwd)?).map(emit_diagnostic),
+        "doctor" => cmd_doctor(&doctor_args(args, cwd)).map(emit_diagnostic),
 
         // 0.5.9 E7 host-leader-registry: `leaders` is the host-level derived
         // discovery command. It reads ~/.team-agent/leaders, validates each
@@ -379,7 +427,7 @@ pub(crate) fn is_leader_passthrough_command(command: &str) -> bool {
 
 
 pub(crate) fn default_help() -> String {
-    let mut out = String::from("Team Agent: create a team, send tasks, read replies and shut down safely.\n\n1. Prepare agents\n   Run team-agent start worker for a new or stopped seat; no files are required. Omitted launch settings use safe defaults and are reported in defaulted. Existing agents/*.md declarations are adopted. Use --from for a prepared team source.\n2. Open a leader and create the team\n   With a provider installed and signed in, run team-agent pi (or claude/codex).\n   Provider launch automatically binds the leader and publishes its discovery entry when no live leader exists.\n   A live leader on another terminal is preserved; claim-leader --confirm is the explicit recovery/preemption path.\n   Run team-agent start in that leader's tool context. Verified live members stay unchanged; explicitly stopped members remain stopped. Use team-agent start worker to reactivate one seat.\n   Use team restart for a deliberate restart (session auto); legacy bare restart retains preserve. Do not take over or delete an existing team.\n3. Send tasks and read replies\n   team-agent send worker 'Calculate 245 * 37 and reply to the leader.'\n   team-agent inbox leader -n 3\n   team-agent status\n   Sending is not completion; wait for an actual reply.\n4. Diagnose and stop\n   team-agent doctor --workspace .\n   team-agent stop --workspace . --json\n   Verify this team's residual resources are empty, then diagnose the selected workspace.\n\nSelect workspace/team scope with --workspace/--team. Discover model names with models.\nWindows ConPTY requires a Windows host and an installed shim; tmux commands are not a generic Windows path.\n");
+    let mut out = String::from("Team Agent: create a team, send tasks, read replies and shut down safely.\n\n1. Prepare agents\n   Run team-agent start worker for a new or stopped seat; no files are required. Omitted launch settings use safe defaults and are reported in defaulted. Existing agents/*.md declarations are adopted. Use --from for a prepared team source.\n2. Open a leader and create the team\n   With a provider installed and signed in, run team-agent pi (or claude/codex).\n   Provider launch automatically binds the leader and publishes its discovery entry when no live leader exists.\n   A live leader on another terminal is preserved; claim-leader --confirm is the explicit recovery/preemption path.\n   Run team-agent start in that leader's tool context. Verified live members stay unchanged; explicitly stopped members remain stopped. Use team-agent start worker to reactivate one seat.\n   Use team restart for a deliberate restart (session auto); legacy bare restart retains preserve. Do not take over or delete an existing team.\n3. Send tasks and read replies\n   team-agent send worker 'Calculate 245 * 37 and reply to the leader.'\n   Sending is not completion; stop tool calls and wait for a pushed reply.\n   Use team-agent inbox leader -n 3 or team-agent status only for a deliberate one-shot inspection; do not poll.\n4. Diagnose and stop\n   team-agent doctor --workspace .\n   team-agent stop --workspace . --json\n   Verify this team's residual resources are empty, then diagnose the selected workspace.\n\nSelect workspace/team scope with --workspace/--team. Discover model names with models.\nWindows ConPTY requires a Windows host and an installed shim; tmux commands are not a generic Windows path.\n");
     append_help_section(
         &mut out,
         "Getting started",
@@ -457,9 +505,9 @@ pub(super) fn command_help(command: Option<&str>) -> String {
         return super::leader_prompt::HELP.to_string();
     }
     let (details, examples, next) = match name {
-        "send" => ("<agent> is an agent name from the read-only endpoint snapshot; MESSAGE is the task text.\nPaste + Enter completes synchronously without coordinator queues or SQLite writes. Managed cold starts wait up to 60s for launch-scoped initialization evidence; a readiness timeout injects no input. This is not an ongoing MCP-health gate. Physical success is not provider acceptance.\n--socket SOCKET --pane %N --dialect PROVIDER sends directly without a workspace snapshot. Automatic snapshot provider aliases select the native sequence: Claude/Cursor 100ms, Grok 150ms, Pi/Codex no floor, then one Enter.\nExplicit double-enter submits twice; cursor-double-enter retains Cursor\'s 100ms floor. No automatic retry or third Enter.\n--mailbox appends to the independent inbox without injecting into the conversation.",
+        "send" => ("<agent> is an agent name from the read-only endpoint snapshot; MESSAGE is the task text.\nPaste + Enter completes synchronously without coordinator queues or SQLite writes. Managed cold starts wait up to 60s for launch-scoped initialization evidence; a readiness timeout injects no input. This is not an ongoing MCP-health gate. Physical success is not provider acceptance.\n--socket SOCKET --pane %N --dialect PROVIDER sends directly without a workspace snapshot. Automatic snapshot provider aliases select the native sequence: Claude/Cursor 100ms, Grok 150ms, Pi/Codex no floor, then one Enter.\nExplicit double-enter submits twice; cursor-double-enter retains Cursor\'s 100ms floor. No automatic retry or third Enter.\n--mailbox appends to the independent inbox without injecting into the conversation.\n--bare is trusted leader/operator native input to one live non-leader worker (Claude/Codex/Pi only). It preserves one nonblank line up to 512 UTF-8 bytes, rejects control characters and /exit or /quit (use team-agent stop <agent>), and requires an empty idle composer. It conflicts with mailbox, fanout, raw endpoints and task/presentation flags.\nBare uses exact stdin-buffer bytes, no heading/token/Codex newline, a 100ms floor and one Enter. Pi uses bracketed paste; Claude/Codex do not. The inbox audit records framing=bare; uncertain input is never automatically replayed. accepted=null and session_binding=not_reobserved are not native completion or session reconciliation. Tokens after -- are payload.",
             "team-agent send worker 'Calculate 245 * 37 and reply to the leader.'\nteam-agent send worker 'Review the changes' --workspace . --team help-demo\nteam-agent send worker 'Read this when next available' --mailbox",
-            "Acceptance is not delivery or completion. Wait for an actual reply; use team-agent inbox leader -n 3. Diagnose with status/doctor rather than repeated sends."),
+            "Physical submission is not acceptance or completion. Wait for pushed replies; use inbox/status/doctor only for a deliberate one-shot inspection, never polling or repeated sends."),
         "locate" => ("Read the endpoint snapshot and list live tmux panes without starting or contacting the coordinator.",
             "team-agent locate --workspace . --json\nteam-agent locate --team help-demo", "Use the socket, pane_id and dialect for raw send, or the agent name for workspace-scoped send."),
         "schedule" => ("add requires exactly one of --in or --every and non-empty --text. Durations are positive integers followed by ms, s, m, h or d.\nlist shows active reminders; cancel takes the sched_<hex> id returned by add.",
@@ -468,9 +516,9 @@ pub(super) fn command_help(command: Option<&str>) -> String {
         "migrate" => ("Explicit maintenance-window M3 native contract import. Stop old-release lifecycle commands first. Retains the read-only source and a scoped logical snapshot; preserves identities, generations and session ownership; never replays the retired outbox. Repeating the command is safe. Unmigrated team teardown imports before stopping.",
             "team-agent migrate --workspace . --team help-demo --json", "Use only the new release afterward. Verify status; stop/start the selected seats to refresh their native helpers."),
         "inbox" => ("<agent> is the recipient name; -n/--limit bounds the message count. Reading replies does not resend messages.",
-            "team-agent inbox leader -n 3\nteam-agent inbox worker --limit 5\nteam-agent inbox leader --workspace . --team help-demo --json", "Wait for a natural reply, then check team-agent status if needed. Do not inspect worker terminal content."),
+            "team-agent inbox leader -n 3\nteam-agent inbox worker --limit 5\nteam-agent inbox leader --workspace . --team help-demo --json", "Stop issuing tool calls and wait for a pushed reply. Do not poll or inspect worker terminal content. JSON includes root polling_advisory; human output ends with the same guidance."),
         "status" => ("Optional <agent> selects one agent. --summary/--detail retain compatibility and do not add fields.\nNine fields: name/provider/model/effort/runtime_status/activity/health/session_name/tmux_command.\nRuntime, activity and health are distinct. unknown means insufficient evidence; null means unset. No default model is guessed.",
-            "team-agent status\nteam-agent status worker\nteam-agent status --workspace . --team help-demo --json", "Read replies with team-agent inbox leader -n 3; diagnose problems with team-agent doctor --workspace ."),
+            "team-agent status\nteam-agent status worker\nteam-agent status --workspace . --team help-demo --json", "Wait for pushed replies. Use inbox or doctor only for a deliberate one-shot inspection, not polling. JSON includes root polling_advisory; existing node fields remain unchanged."),
         "models" => ("--provider selects the provider, default pi. QUERY or --search performs keyword search; they are mutually exclusive.\nUse cursor (or cursor-agent, agent, cursor_agent) for the contract-native Cursor catalog. Copilot has no model discovery entrypoint here. Results come from the native catalog, not guesses.",
             "team-agent models --provider pi\nteam-agent models --provider pi --search luna\nteam-agent models --provider cursor --json", "Use the exact returned model in a role file or team-agent start AGENT --model MODEL; stop a running seat before changing its settings."),
         "restart" => ("restart AGENT and team restart default to --session auto; bare/explicit-path restart keeps preserve.\n--session preserve requires continuation evidence; auto permits only the original legal fresh fallback, not guaranteed saved memory.\n--dry-run plans without lifecycle effects. --allow-fresh is the legacy authorized opt-in; --session-converge-deadline is in seconds.",
@@ -490,7 +538,7 @@ pub(super) fn command_help(command: Option<&str>) -> String {
         "leaders" => ("Lists live leaders by default; --all includes stale registrations and --stale selects stale entries.\nQUERY/--search filters workspace/team/name. --prune removes verified retired registrations; preview with --dry-run.",
             "team-agent leaders\nteam-agent leaders --all --json\nteam-agent leaders --prune --dry-run", "Select --workspace/--team from the reported scope. Registry cleanup is not process shutdown."),
         "doctor" => ("Read-only diagnosis by default; SPEC is an optional configuration path.\n--comms/--gate comms checks channels, not actual replies; --gate orphans checks residual resources.\nUse --fix/--fix-schema/--cleanup-orphans only within authorized scope. Dangerous repairs require --confirm.",
-            "team-agent doctor --workspace .\nteam-agent doctor --workspace . --team help-demo --json", "Follow the actual issue and selected-team scope. A suggested repair is not an executed repair."),
+            "team-agent doctor --workspace .\nteam-agent doctor --workspace . --team help-demo --json", "Follow the actual issue and selected-team scope. A suggested repair is not an executed repair. Do not poll; rerun only after a new event, relevant action or explicit request. JSON includes root polling_advisory."),
         "approvals" => ("Optional <agent> selects one agent. Observes permission prompts without granting approval.",
             "team-agent approvals\nteam-agent approvals worker --json", "Verify the requested permission, handle it in the actual provider prompt, then check status."),
         "profile" => ("init creates a profile; doctor checks it; show displays settings. NAME is the profile name.\n--auth-mode selects authentication; --proxy-mode direct bypasses proxies and inherit uses the environment proxy.\nProfiles belong to the selected workspace, not automatically to an isolated --team. Do not expose credentials.",
@@ -719,11 +767,13 @@ fn emit_parser_usage(command: &str, args: &[String], error: &CliError) -> ExitCo
     if json_output {
         let mut payload = error.to_payload(Path::new(""), command);
         payload.action = format!("Use team-agent {command} --help to correct the command arguments.");
-        if let Ok(value) = serde_json::to_value(payload) {
+        if let Ok(mut value) = serde_json::to_value(payload) {
+            advise_json(command, &mut value);
             println!("{}", python_compact_json(&crate::redaction::redact_external_value(&value)));
         }
     } else {
         eprintln!("error: {}\nUse team-agent {command} --help.", crate::redaction::redact_external_text(&error.to_string()));
+        if polling_command(command) { eprintln!("{}", polling_footer()); }
     }
     ExitCode::Usage
 }
@@ -792,7 +842,8 @@ fn emit_cli_error(command: &str, args: &[String], cwd: &Path, error: &CliError) 
             .collect()
     });
     if super::arguments::has_flag(command, args, "--json") {
-        if let Ok(value) = serde_json::to_value(payload) {
+        if let Ok(mut value) = serde_json::to_value(payload) {
+            advise_json(command, &mut value);
             println!("{}", python_compact_json(&value));
         }
     } else {
@@ -803,6 +854,7 @@ fn emit_cli_error(command: &str, args: &[String], cwd: &Path, error: &CliError) 
         } else {
             eprintln!("log: {}", payload.log);
         }
+        if polling_command(command) { eprintln!("{}", polling_footer()); }
     }
     ExitCode::Error
 }
@@ -1028,6 +1080,7 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             "--thread-id" => parsed.thread_id = next_arg(args, &mut i),
             "--message-id" => parsed.message_id = next_arg(args, &mut i),
             "--mailbox" => parsed.mailbox = true,
+            "--bare" => {},
             "--presentation-sink" => parsed.presentation_sink = next_arg(args, &mut i),
             "--message-class" => parsed.message_class = next_arg(args, &mut i),
             "--case-id" => parsed.case_id = next_arg(args, &mut i),
@@ -1527,7 +1580,7 @@ pub(super) fn intent_alias(command: &str, args: &[String], cwd: &Path) -> Result
     match command {
         "status" => {
             let parsed = status_args(args, cwd);
-            cmd_status_for_team(&parsed, parsed.team.as_deref())
+            cmd_status_for_team(&parsed, parsed.team.as_deref()).map(with_polling_advisory)
         }
         "remove-agent" => cmd_remove_agent(&remove_agent_args(args, cwd)?),
         "reset-agent" => cmd_reset_agent(&reset_agent_args(args, cwd)?),

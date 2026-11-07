@@ -1,5 +1,5 @@
 //! Shared CLI/MCP send semantics. Durable storage precedes optional physical delivery.
-use crate::direct_delivery::AddressError;
+use crate::direct_delivery::{AddressError, Framing};
 use crate::messaging::presentation::{PresentationRequest, PresentationSink};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -73,7 +73,34 @@ fn permitted_peer(_authority: Authority<'_>, directory: &crate::direct_delivery:
     recipient == "leader" || directory.state.get("agents").and_then(|agents| agents.get(recipient)).is_some()
 }
 
+pub fn validate_bare_payload(content: &str) -> Result<(), String> {
+    if content.trim().is_empty() || content.len() > 512
+        || content.chars().any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')) {
+        return Err("--bare requires a nonblank single line of at most 512 UTF-8 bytes without control characters".into());
+    }
+    if content.split_whitespace().next().is_some_and(|word| word.eq_ignore_ascii_case("/exit") || word.eq_ignore_ascii_case("/quit")) {
+        return Err("--bare refuses lifecycle exit commands; use team-agent stop <agent>".into());
+    }
+    Ok(())
+}
+
 pub fn execute(req: Request<'_>, authority: Authority<'_>) -> Result<Value, String> {
+    execute_with_framing(req, authority, Framing::Framed)
+}
+
+pub(crate) fn execute_with_framing(req: Request<'_>, authority: Authority<'_>, framing: Framing) -> Result<Value, String> {
+    if framing == Framing::Bare {
+        validate_bare_payload(req.content)?;
+        if !matches!(authority, Authority::Operator { sender: "leader" }) {
+            return Err("--bare requires a trusted leader/operator".into());
+        }
+        if req.mailbox || req.task_id.is_some() || req.envelope.is_some() || req.presentation != &PresentationRequest::default() {
+            return Err("--bare cannot be combined with mailbox, task, or presentation routing".into());
+        }
+        if req.to.contains(',') || req.to.trim() == "*" {
+            return Err("--bare requires exactly one live worker".into());
+        }
+    }
     let presentation = serde_json::to_value(req.presentation).map_err(|e| e.to_string())?;
     if req.envelope.is_some() {
         if let Some(error) = crate::messaging::presentation::normalize_report_presentation(Some(&presentation)).1 {
@@ -249,12 +276,15 @@ pub fn execute(req: Request<'_>, authority: Authority<'_>) -> Result<Value, Stri
         }
         return Ok(value);
     }
+    if framing == Framing::Bare && admitted.iter().map(|(_, recipients)| recipients.len()).sum::<usize>() != 1 {
+        return Err("--bare requires exactly one live worker".into());
+    }
     // Execution faults belong to their recipient. Already-admitted siblings run
     // independently, with the existing durability and native submission receipts.
     let mut results = Vec::new();
     for (directory, recipients) in admitted {
         for recipient in recipients {
-            match send_one(&req, authority, &directory, &recipient) {
+            match send_one(&req, authority, &directory, &recipient, framing) {
                 Ok(value) => results.push(value),
                 Err(error) if batch => results.push(json!({"recipient":recipient,"ok":false,"error":error})),
                 Err(error) => return Err(error),
@@ -283,7 +313,12 @@ fn send_one(
     authority: Authority<'_>,
     directory: &crate::direct_delivery::Directory,
     recipient: &str,
+    framing: Framing,
 ) -> Result<Value, String> {
+    if framing == Framing::Bare {
+        if recipient == "leader" { return Err("--bare requires a non-leader worker".into()); }
+        crate::direct_delivery::validate_bare_dialect(&directory.endpoint(recipient)?.dialect)?;
+    }
     if recipient != "leader" && !directory.agents().iter().any(|id| id == recipient) {
         return Err(format!("unknown recipient: {recipient}"));
     }
@@ -301,6 +336,7 @@ fn send_one(
         directory.team.as_deref(),
         kind,
     );
+    if framing == Framing::Bare { record["framing"] = json!("bare"); }
     record["presentation"] = serde_json::to_value(req.presentation).map_err(|e| e.to_string())?;
     record["provenance"] = json!({"authority":match authority { Authority::Operator {..} => "operator", Authority::Seat {..} => "seat" },"sender":sender,"team":directory.team});
     if let Some(task) = req.task_id {
@@ -350,6 +386,10 @@ fn send_one(
     let mut result = json!({"ok":true,"status":"stored","stored":true,"recipient":recipient,
         "message_id":id,"accepted":null,"duplicate":stored.duplicate,"live":false,
         "record_ref":stored.reference,"dedupe_key":stored.reference.token(),"anonymous_dedupe_window":crate::inbox_store::DEDUPE_WINDOW});
+    if framing == Framing::Bare {
+        result["framing"] = json!("bare");
+        result["ok"] = json!(false);
+    }
     if let Some(envelope) = req.envelope {
         result["task_id"] = envelope["task_id"].clone();
         result["agent_id"] = envelope["agent_id"].clone();
@@ -372,6 +412,11 @@ fn send_one(
     };
     result["submission"] = json!(submission.phase);
     if submission.phase != "not_attempted" {
+        if framing == Framing::Bare {
+            result["ok"] = json!(submission.phase == "physical");
+            result["retry_allowed"] = json!(false);
+            if submission.phase == "physical" { result["session_binding"] = json!("not_reobserved"); }
+        }
         return Ok(result);
     }
     // Persist BEFORE invoking the actuator. A sender crash must never authorize
@@ -380,8 +425,9 @@ fn send_one(
         result["delivery_error"] = json!(error);
         return Ok(result);
     }
-    let text = render(sender, req.content, id, req.envelope.is_some());
-    match directory.send_with_receipt(recipient, &text, || {
+    let text = if framing == Framing::Bare { req.content.to_owned() }
+        else { render(sender, req.content, id, req.envelope.is_some()) };
+    match directory.send_with_framing(recipient, &text, framing, || {
         if req.envelope.is_none() {
             if let Some(task) = req.task_id {
                 remember_task(directory, recipient, task, id)?;
@@ -390,6 +436,7 @@ fn send_one(
         Ok(())
     }) {
         Ok(delivery) => {
+            result["ok"] = json!(true);
             result["status"] = json!(if req.envelope.is_some() {
                 "reported"
             } else {
@@ -403,7 +450,9 @@ fn send_one(
                     && same_workspace(req.workspace, &directory.workspace) => sender_in_directory(authority, directory),
                 _ => String::new(),
             };
-            if let Err(error) = crate::provider::session::capture::observe_physical_delivery(
+            if framing == Framing::Bare {
+                result["session_binding"] = json!("not_reobserved");
+            } else if let Err(error) = crate::provider::session::capture::observe_physical_delivery(
                 &directory.workspace, directory.team.as_deref(), &directory.state, &observed_sender, recipient,
             ) {
                 result["session_observation_warning"] = json!(error);
@@ -420,6 +469,7 @@ fn send_one(
             } else {
                 "not_attempted"
             });
+            if framing == Framing::Bare && error.starts_with("uncertain:") { result["retry_allowed"] = json!(false); }
             if let Some(action) = directory.recovery_action(recipient, &error) {
                 result["action"] = json!(action);
             }
@@ -430,6 +480,11 @@ fn send_one(
         result["submission"].as_str().unwrap_or("uncertain")
     };
     if let Err(error) = submission.save(phase) {
+        if framing == Framing::Bare {
+            result["ok"] = json!(false);
+            result["submission"] = json!("uncertain");
+            result["retry_allowed"] = json!(false);
+        }
         result["submission_state_error"] = json!(error);
     }
     Ok(result)

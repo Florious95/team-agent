@@ -316,6 +316,9 @@ fn same_request(a: &Value, b: &Value) -> bool {
             ] {
                 fields.remove(key);
             }
+            if fields.get("framing").and_then(Value::as_str) == Some("framed") {
+                fields.remove("framing");
+            }
             if let Some(envelope) = fields.get_mut("envelope").and_then(Value::as_object_mut) {
                 envelope.remove("dedupe_key");
                 envelope.remove("record_ref");

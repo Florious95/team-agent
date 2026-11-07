@@ -33,6 +33,9 @@ team-agent route show pi --json
 team-agent route status --json
 team-agent send reviewer "Review the current change and report the main risk." --workspace . --team project-team
 team-agent send reviewer "Review this change" --workspace . --team project-team
+team-agent send worker '/compact' --bare --workspace . --team project-team
+team-agent send --targets worker '/compact' --bare --workspace . --team project-team
+team-agent send worker --bare --workspace . --team project-team -- '/compact retain unresolved issues'
 team-agent start --from ./my-team --workspace . --team project-team
 team-agent start --from .team/current --workspace . --team project-team
 team-agent start --help
@@ -190,7 +193,7 @@ New agent/team restart defaults to **auto**: proven resume when possible, otherw
 
 Single-agent restart checks scope, role/session backing and capabilities before stop; only confirmed stop allows start. On partial failure, report actual completed steps and inspect; do not blindly reset or replay. Team restart does not reactivate explicitly stopped or paused seats. Whole-team start also preserves explicit stops; use `start AGENT` for an intentional wake-up. Neither command silently unpauses.
 
-Managed sends after a cold launch wait up to 60 seconds for initialization evidence belonging to that launch before injecting input. A readiness timeout leaves the message stored but injects nothing; inspect status/doctor before retrying. Mailbox-only delivery does not wait. Completed startup evidence survives helper exit or binary upgrades: this is not an ongoing MCP-health gate, nor proof of business acceptance.
+Ordinary framed managed sends after a cold launch wait up to 60 seconds for initialization evidence belonging to that launch before injecting input. A readiness timeout leaves the message stored but injects nothing; inspect status/doctor before retrying. Mailbox-only delivery does not wait. Completed startup evidence survives helper exit or binary upgrades: this is not an ongoing MCP-health gate, nor proof of business acceptance.
 
 ## Explicit agent operations
 
@@ -214,7 +217,31 @@ team-agent profile init my-api --auth-mode compatible_api --workspace .
 
 A role may explicitly reference `auth_mode: compatible_api` and `profile: my-api`, with the user's chosen provider/bypass. Profile model applies only when the role has no explicit override. Subscription and custom-API capabilities differ; follow actual provider admission, not a generic promise.
 
+## Native REPL input: `--bare`
+
+`--bare` removes message framing, not addressing safeguards. It is only for a trusted leader/operator sending one live, roster-bound non-leader worker a native input line. It is not exposed by MCP. Ordinary tasks must continue to use framed send.
+
+```sh
+team-agent send worker '/compact' --bare --workspace . --team project-team
+team-agent send --targets worker '/compact' --bare --workspace . --team project-team
+team-agent send worker --bare --workspace . --team project-team -- '/compact retain unresolved issues'
+```
+
+Only Claude, Codex and Pi are supported, including their existing canonical aliases. The content must be nonblank, one line, at most 512 UTF-8 bytes, without control characters or Unicode line separators. Admitted bytes, including surrounding spaces and a trailing semicolon, are preserved. The `--` terminator makes every following token payload, even `--socket`, `--json` or `--bare`. No `--raw` alias or message-file source is added.
+
+Bare refuses mailbox delivery, leader targets, fanout, unmanaged `--socket`/`--pane` addressing, `--dialect` overrides, and `--task`, `--presentation-sink`, `--message-class`, `--case-id`. Use the existing comma-based `--targets worker` syntax, not a JSON array. The lifecycle commands `/exit` and `/quit` are refused; use `team-agent stop <agent>` instead.
+
+Physical delivery requires an empty, idle native composer and verified target ownership. A busy/draft/modal/unknown surface is refused without clearing user input. Claude and Codex use unbracketed `paste-buffer -r`; Pi uses `-p -r` to avoid slash autocomplete consuming Enter. The original payload has no heading, token or Codex newline trailer; after a 100 ms floor, the owned live composer is checked and exactly one native Enter is sent. Never treat shell metacharacters as shell code.
+
+The existing inbox JSONL remains the audit source: original content, sender, target and submission evidence are retained with `framing: "bare"`. No `events.jsonl` is created. Explicit message ids retain duplicate protection; changing framing under the same id yields `request_id_conflict`. Anonymous sends remain separate invocations. After a post-paste uncertainty, do not resend or clear the composer automatically.
+
+`accepted: null` remains authoritative: physical submission is not proof of native-command completion. Bare does not update `first_send_at`, task attribution or session identity. A success receipt reports `session_binding: "not_reobserved"`; a session-changing command such as `/clear` may leave the previous observed session id stale. Use lifecycle-managed reset/start for state-tracked session changes; bare does not guarantee later resume continuity.
+
 ## Observe and finish
+
+**Do not poll.** Never run `inbox`, `status` or `doctor` repeatedly, in sleep/retry loops, or as repeated tool calls. Live messages are pushed directly to terminals. Finish the current work, stop issuing tool calls, and wait for a new incoming message. Run a deliberate inspection again only after a new event, relevant state-changing action, or explicit user request; an empty inbox or busy status is not a reason. Mailbox-only messages require deliberate history review.
+
+These three commands append one `[Advisory: do not poll]` block to human output, on the existing output stream (including stderr for human errors). With `--json`, the same guidance is the root string `polling_advisory`: one valid JSON document, never trailing non-JSON text. Existing fields, nested boolean `advisory` values and exit codes retain their meanings; strict schemas may need to allow the additional root key.
 
 `status` / `team status` expose the concise node projection; `--detail` does not restore historical internal dumps. Use `doctor` for diagnosis. Check actual readiness and returned recovery actions; unknown evidence is not a stopped/live proof. Stop with `stop --workspace PATH --team KEY --json` and verify scoped residual sessions, processes and owned files. Protect parent/sibling/shared resources.
 

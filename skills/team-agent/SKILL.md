@@ -7,6 +7,12 @@ requires_team_agent: ">=0.5.0"
 
 Use the authorized **Leader's** native tool context for lifecycle operations. Workers report through their team-scoped MCP tools; loading this skill does not promote a worker to Leader. Operate in the workspace root, not inside another team's role directory.
 
+## Do not poll
+
+Do not run `inbox`, `status` or `doctor` repeatedly: no loops, sleep/retry loops or repeated tool calls. Team Agent pushes live messages directly to terminals. Finish the current work, stop issuing tool calls, and wait for the next incoming message. Check again only after a new event, relevant state-changing action or explicit user request; an empty inbox or busy status is not a reason. Mailbox-only messages require deliberate history review.
+
+All three commands carry the guidance in a human `[Advisory: do not poll]` footer or a root JSON string `polling_advisory`, including handled errors. JSON remains one valid document; strict consumers must allow this additive key.
+
 ## Check the actual CLI
 
 Check `team-agent --version`, `team-agent start --help` and `team-agent team --help` before using this guide. It requires the intuitive `start`, `stop`, `team` and `agent` surface. A version string or this skill's compatibility floor is not proof those commands exist. If missing, ask for an authorized installation of a supporting build; do not silently switch binaries, rewrite bindings or fall back to an old creation recipe.
@@ -57,12 +63,25 @@ From the authorized Leader context, select the intended workspace/team:
 team-agent start --from .team/current --workspace . --team project-team
 team-agent start --workspace . --team project-team
 team-agent send reviewer "Review this change" --workspace . --team project-team
+# Only for deliberate history review, not waiting for a reply:
 team-agent inbox leader --workspace . --team project-team -n 3
 ```
 
 The first `start` creates a complete configured team through the original creation path. Later team `start` keeps verified live seats unchanged and preserves explicitly stopped/paused seats; `start AGENT` reactivates the selected seat. It is not a reset. Missing configuration, ambiguous scope or unknown physical identity is a refusal, not permission to overwrite state. `--dry-run` plans without lifecycle effects; final locked admission is still deferred.
 
 Accepted/queued send is **not** the worker's answer. Wait for a natural reply/result. `ok: true` with pending readiness is not business readiness. A live no-op does not synchronize edited role bodies or apply changed launch settings.
+
+## Native REPL maintenance: --bare
+
+Only a trusted leader/operator may send one live non-leader worker a native input line:
+
+```sh
+team-agent send worker '/compact' --bare --workspace . --team project-team
+```
+
+Claude, Codex and Pi are supported. `--bare` preserves admitted content without message headers, tokens or added newlines and sends exactly one native Enter. Pi uses bracketed paste to avoid autocomplete consuming that Enter; Claude/Codex do not. It requires an empty idle composer, one nonblank line of at most 512 UTF-8 bytes, and no control characters. It refuses mailbox/fanout/raw endpoint/leader targets and task/presentation flags. `/exit` and `/quit` are refused: use `team-agent stop <agent>`. Ordinary tasks remain framed; there is no `--raw` alias or MCP bare option.
+
+Audit stays in the inbox JSONL with `framing: "bare"`; no `events.jsonl` is created. `--message-id` conflicts across framing use `request_id_conflict`; anonymous invocations remain separate sends. After any post-paste uncertainty, do not replay or clear input automatically. `accepted: null` and `session_binding: "not_reobserved"` mean submission is not native completion or session reconciliation. Bare never marks `first_send_at` or task attribution; session-changing commands may leave the previous observed session id stale. See the [operator reference](references/team-agent-operator.md) for byte, grammar and lifecycle boundaries.
 
 ## Stop, wake and restart
 

@@ -65,6 +65,13 @@ fn busy(lines: &[&str], top: usize) -> bool {
     lines[top].trim_start().chars().take_while(|ch| *ch == '─').count() < 8
         || lines[..top].iter().rev().filter(|line| !line.trim().is_empty()).take(3).any(status)
 }
+/// Read the live, idle editor only; never transcript history or a folded paste.
+pub fn composer_text(text: &str) -> Option<String> {
+    let lines = rows(text);
+    let editor = editor(&lines)?;
+    (!busy(&lines, editor.top)).then_some(editor.input)
+}
+
 pub fn surface(text: &str) -> InputSurface {
     let lines = rows(text);
     let Some(editor) = editor(&lines) else { return InputSurface::ShellOrUnknown; };

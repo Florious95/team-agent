@@ -74,6 +74,7 @@ fn schema(command: &str) -> Option<Schema> {
                 ("--to-name", Token),
                 ("--to-leader", Token),
                 ("--mailbox", Switch),
+                ("--bare", Switch),
                 (
                     "--presentation-sink",
                     Choice(&["leader", "casefile", "silent"]),
@@ -331,6 +332,14 @@ pub(super) fn parse(command: &str, args: &[String]) -> Result<CheckedArgs, CliEr
     ] {
         if pair.iter().all(|flag| seen.contains(*flag)) {
             error.get_or_insert_with(|| format!("{} conflicts with {}", pair[0], pair[1]));
+        }
+    }
+    if command == "send" && seen.contains("--bare") {
+        for flag in ["--mailbox", "--socket", "--pane", "--dialect", "--to-leader",
+            "--task", "--presentation-sink", "--message-class", "--case-id"] {
+            if seen.contains(flag) {
+                error.get_or_insert_with(|| format!("--bare conflicts with {flag}"));
+            }
         }
     }
     if command == "send"

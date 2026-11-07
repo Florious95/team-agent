@@ -22,6 +22,27 @@
   },
   "commands": [
     {
+      "command": "team-agent send worker '/compact' --bare --workspace . --team project-team",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "test-opus:bare-advisory",
+      "plan": "Bind Opus-owned red-to-green CLI and real-model evidence to exact payload bytes, dialect paste flags, one Enter, framing audit, and unchanged first_send_at before promotion."
+    },
+    {
+      "command": "team-agent send --targets worker '/compact' --bare --workspace . --team project-team",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "test-opus:bare-advisory",
+      "plan": "Verify comma-based single-target admission and native input; reject fanout, mailbox, leader/raw targets and task/presentation flags without static-admission writes."
+    },
+    {
+      "command": "team-agent send worker --bare --workspace . --team project-team -- '/compact retain unresolved issues'",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "test-opus:bare-advisory",
+      "plan": "Verify the -- boundary, literal flag-looking payload, UTF-8/control limits, empty-composer guards and no replay after post-paste uncertainty."
+    },
+    {
       "command": "team-agent add-agent <agent> --role-file <file>",
       "bucket": "declared_gap",
       "covered": false,
@@ -96,7 +117,7 @@
       "bucket": "declared_gap",
       "covered": false,
       "owner": "runtime-owner:diagnostics",
-      "plan": "Execute the exact human doctor argv and bind assertions to its exit and key diagnostic checks."
+      "plan": "Execute the exact human doctor argv and bind assertions to its exit and key diagnostic checks. The final human Advisory must say Do not poll; JSON variants add only the root string polling_advisory, including handled errors, without changing nested advisory booleans or exit codes."
     },
     {
       "command": "team-agent fork-agent <source> --as <new>",
@@ -110,7 +131,7 @@
       "bucket": "declared_gap",
       "covered": false,
       "owner": "runtime-owner:messaging",
-      "plan": "Execute the exact default inbox argv and bind assertions to its selected recipient and message or empty-state output."
+      "plan": "Execute the exact default inbox argv and bind assertions to its selected recipient and message or empty-state output. Human output ends with the Do not poll Advisory; --json contains root polling_advisory as a string, including empty/error results. No repeated tool calls or sleep/retry loops."
     },
     {
       "command": "team-agent inbox coder -n 3",
@@ -397,7 +418,7 @@
       "bucket": "declared_gap",
       "covered": false,
       "owner": "runtime-owner:status",
-      "plan": "Execute the exact human status argv and bind assertions to selected team and agent output."
+      "plan": "Execute the exact human status argv and bind assertions to selected team and agent output, byte-identical to the baseline before the final Do not poll Advisory block. Agents must stop tool calls and wait for pushed messages."
     },
     {
       "command": "team-agent status --detail --json",
@@ -411,7 +432,7 @@
       "bucket": "declared_gap",
       "covered": false,
       "owner": "runtime-owner:status",
-      "plan": "Execute the exact argv and bind assertions to the compact status schema and absence of detail-only fields."
+      "plan": "Execute the exact argv and bind assertions to the compact status schema, the added root string polling_advisory, and absence of detail-only fields. JSON must remain one document with no trailing human text; existing data and exit codes remain unchanged."
     },
     {
       "command": "team-agent status coder",

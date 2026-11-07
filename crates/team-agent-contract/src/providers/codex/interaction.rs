@@ -65,6 +65,19 @@ fn busy(lines: &[&str], index: usize) -> bool {
     lines[index.saturating_sub(8)..index].iter().any(|line| line.ends_with(" to interrupt)") || line.contains(" to interrupt) · "))
 }
 fn rows(text: &str) -> Vec<&str> { text.lines().map(str::trim_end).collect() }
+/// Read the live, idle composer, including its visible continuation rows.
+pub fn composer_text(text: &str) -> Option<String> {
+    let lines = rows(text);
+    let (index, first) = composer(&lines)?;
+    if busy(&lines, index) || starting(&lines) || numbered(&first) { return None; }
+    let mut input = if empty(&first) { String::new() } else { first };
+    for row in lines[index + 1..].iter().take_while(|row| row.starts_with("  ")
+        && !row.trim().is_empty() && !row.contains("? for shortcuts") && !row.contains("% context left")) {
+        input.push_str(row.trim());
+    }
+    Some(input)
+}
+
 pub fn surface(text: &str) -> InputSurface {
     let lines = rows(text);
     let Some((index, first)) = composer(&lines) else { return InputSurface::ShellOrUnknown; };
