@@ -79,7 +79,9 @@ Only a trusted leader/operator may send one live non-leader worker a native inpu
 team-agent send worker '/compact' --bare --workspace . --team project-team
 ```
 
-Claude, Codex and Pi are supported. `--bare` preserves admitted content without message headers, tokens or added newlines and sends exactly one native Enter. Pi uses bracketed paste to avoid autocomplete consuming that Enter; Claude/Codex do not. It requires an empty idle composer, one nonblank line of at most 512 UTF-8 bytes, and no control characters. It refuses mailbox/fanout/raw endpoint/leader targets and task/presentation flags. `/exit` and `/quit` are refused: use `team-agent stop <agent>`. Ordinary tasks remain framed; there is no `--raw` alias or MCP bare option.
+Claude, Codex and Pi are supported. `--bare` preserves admitted content without message headers, tokens or added newlines and sends exactly one native Enter. Pi uses bracketed paste to avoid autocomplete consuming that Enter; Claude/Codex do not. It requires an empty idle composer, one nonblank line of at most 512 UTF-8 bytes, and no control characters. It refuses mailbox/fanout/raw endpoint/leader targets and task/presentation flags. `/exit` and `/quit` are refused: use `team-agent stop <agent>`. Ordinary tasks remain framed; MCP exposes no bare option.
+
+There is no `--raw` alias. Unmanaged raw addressing is separate from native-input framing.
 
 Audit stays in the inbox JSONL with `framing: "bare"`; no `events.jsonl` is created. `--message-id` conflicts across framing use `request_id_conflict`; anonymous invocations remain separate sends. After any post-paste uncertainty, do not replay or clear input automatically. `accepted: null` and `session_binding: "not_reobserved"` mean submission is not native completion or session reconciliation. Bare never marks `first_send_at` or task attribution; session-changing commands may leave the previous observed session id stale. See the [operator reference](references/team-agent-operator.md) for byte, grammar and lifecycle boundaries.
 

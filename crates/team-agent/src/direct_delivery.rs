@@ -548,6 +548,8 @@ fn direct_send_checked(socket: &str, pane_id: &str, dialect: &str, text: &str, e
     verify_owner(deadline)?;
     if framing == Framing::Bare {
         validate_bare_dialect(dialect)?;
+        // Release tmux's overlay, not the provider's draft or native input.
+        cancel_copy_mode(socket, pane_id, deadline)?;
         guard_bare_composer(socket, pane_id, dialect, None, deadline)?;
     } else if managed && canonical_dialect(dialect) == "claude" {
         wait_for_draft(socket, pane_id, deadline)?;
