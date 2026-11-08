@@ -921,17 +921,12 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
     // probes the receiver. A reachable receiver cannot validate a stale caller.
     let pane = std::env::var("TMUX_PANE").ok().filter(|pane| !pane.is_empty());
     let current_endpoint = crate::tmux_backend::socket_name_from_tmux_env();
-    let scoped_endpoint = socket(&selected.state);
-    let scoped_endpoint = if scoped_endpoint.is_empty() {
-        // A leader-only scope can have a receiver before runtime state is seeded.
-        receiver_socket(&selected.state)
-    } else {
-        scoped_endpoint
-    };
+    // Like start's caller_tmux_endpoint, scope identity to the server used to
+    // observe the caller, not the independently selected team's receiver socket.
     let caller_resolution = crate::layout::worker_env::caller_provider_resolution(
         pane.as_deref(),
         current_endpoint.as_deref(),
-        Some(scoped_endpoint.as_str()),
+        current_endpoint.as_deref(),
     );
     let registered = directory
         .endpoint("leader")
@@ -946,7 +941,7 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
             Link::new(6, "FAIL", crate::layout::worker_env::invalid_caller_tuple_message(
                 pane.as_deref(),
                 current_endpoint.as_deref(),
-                Some(scoped_endpoint.as_str()),
+                current_endpoint.as_deref(),
             ))
         }
         Err(error) => {
