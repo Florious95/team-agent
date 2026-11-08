@@ -187,7 +187,7 @@ pub(crate) fn invalid_caller_tuple_message(
     .map(|key| format!("{key}={:?}", std::env::var(key).ok()))
     .join(", ");
     format!(
-        "invalid caller tuple: {evidence}; current TMUX_PANE={current_pane:?}, TMUX endpoint={current_endpoint:?}, selected endpoint={scoped_endpoint:?}"
+        "invalid caller tuple (reason=invalid_caller_tuple): {evidence}; current TMUX_PANE={current_pane:?}, TMUX endpoint={current_endpoint:?}, selected endpoint={scoped_endpoint:?}"
     )
 }
 

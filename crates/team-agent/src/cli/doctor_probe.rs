@@ -922,6 +922,12 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
     let pane = std::env::var("TMUX_PANE").ok().filter(|pane| !pane.is_empty());
     let current_endpoint = crate::tmux_backend::socket_name_from_tmux_env();
     let scoped_endpoint = socket(&selected.state);
+    let scoped_endpoint = if scoped_endpoint.is_empty() {
+        // A leader-only scope can have a receiver before runtime state is seeded.
+        receiver_socket(&selected.state)
+    } else {
+        scoped_endpoint
+    };
     let caller_resolution = crate::layout::worker_env::caller_provider_resolution(
         pane.as_deref(),
         current_endpoint.as_deref(),
