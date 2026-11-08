@@ -3723,3 +3723,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "start_caller_env_scrub_red.rs"]
+mod start_caller_env_scrub_red;
