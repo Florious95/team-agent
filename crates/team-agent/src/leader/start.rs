@@ -1480,11 +1480,21 @@ fn cleanup_managed_leader_resources(
 /// the leader is the user's interactive provider, never CompatibleApi/
 /// OfficialApi which are worker-only auth modes today.
 fn leader_env_unset_for_provider(provider: Provider) -> Vec<String> {
+    use crate::layout::worker_env::{CALLER_ENDPOINT_ENV, CALLER_PANE_ENV, CALLER_PROVIDER_ENV};
     crate::lifecycle::profile_launch::provider_env_unsets(
         provider,
         crate::model::enums::AuthMode::Subscription,
     )
     .into_iter()
+    // A new leader must never inherit a worker's caller tuple or seat identity.
+    .chain([
+        CALLER_PROVIDER_ENV,
+        CALLER_PANE_ENV,
+        CALLER_ENDPOINT_ENV,
+        "TEAM_AGENT_ID",
+        "TEAM_AGENT_AGENT_ID",
+        "TEAM_AGENT_OWNER_TEAM_ID",
+    ].map(str::to_owned))
     .collect()
 }
 
