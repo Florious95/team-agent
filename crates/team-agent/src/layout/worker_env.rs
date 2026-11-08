@@ -39,6 +39,7 @@ pub(crate) const CALLER_CONTEXT_PREFIX: &str = "TEAM_AGENT_CALLER_";
 pub(crate) const CALLER_PROVIDER_ENV: &str = "TEAM_AGENT_CALLER_PROVIDER";
 pub(crate) const CALLER_PANE_ENV: &str = "TEAM_AGENT_CALLER_PANE_ID";
 pub(crate) const CALLER_ENDPOINT_ENV: &str = "TEAM_AGENT_CALLER_TMUX_ENDPOINT";
+pub(crate) const CALLER_CONTEXT_RECOVERY: &str = "Run `unset TEAM_AGENT_CALLER_PROVIDER TEAM_AGENT_CALLER_PANE_ID TEAM_AGENT_CALLER_TMUX_ENDPOINT` in the invoking shell, then retry from the original live pane; do not alter leader_provider/team_owner.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CallerProviderResolution {
@@ -167,6 +168,26 @@ pub(crate) fn caller_provider_resolution(
         current_pane,
         current_endpoint,
         scoped_endpoint,
+    )
+}
+
+/// Evidence for an already-rejected tuple; this never substitutes for validation.
+pub(crate) fn invalid_caller_tuple_message(
+    current_pane: Option<&str>,
+    current_endpoint: Option<&str>,
+    scoped_endpoint: Option<&str>,
+) -> String {
+    let evidence = [
+        CALLER_PROVIDER_ENV,
+        CALLER_PANE_ENV,
+        CALLER_ENDPOINT_ENV,
+        "TEAM_AGENT_LEADER_PROVIDER",
+        "TEAM_AGENT_LEADER_PANE_ID",
+    ]
+    .map(|key| format!("{key}={:?}", std::env::var(key).ok()))
+    .join(", ");
+    format!(
+        "invalid caller tuple: {evidence}; current TMUX_PANE={current_pane:?}, TMUX endpoint={current_endpoint:?}, selected endpoint={scoped_endpoint:?}"
     )
 }
 

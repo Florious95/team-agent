@@ -1567,12 +1567,17 @@ fn bootstrap(
                     result["error"] = json!(error);
                 }
                 QuickStartReport::PreflightBlocked {
-                    summary, blockers, ..
+                    summary, blockers, next_actions, ..
                 } => {
                     result["ok"] = json!(false);
                     result["status"] = json!("blocked");
                     result["error"] = json!(summary);
                     result["blockers"] = json!(blockers);
+                    result["next_actions"] = json!(next_actions);
+                    result["effects"] = json!({
+                        "coordinator_start": "not_attempted",
+                        "worker_panes_started": [],
+                    });
                 }
                 QuickStartReport::ExistingRuntime { .. } => return Err(refused(
                     "team context appeared during bootstrap; inspect status before retrying start",

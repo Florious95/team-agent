@@ -917,14 +917,32 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
     };
     links.push(dispatch);
 
-    // L6 independently exercises the receiver on its own socket. Never diagnose
-    // an index before proving that the underlying receiver is live/non-worker.
+    // L6 uses the same fail-closed caller gate as start, then independently
+    // probes the receiver. A reachable receiver cannot validate a stale caller.
+    let pane = std::env::var("TMUX_PANE").ok().filter(|pane| !pane.is_empty());
+    let current_endpoint = crate::tmux_backend::socket_name_from_tmux_env();
+    let scoped_endpoint = socket(&selected.state);
+    let caller_resolution = crate::layout::worker_env::caller_provider_resolution(
+        pane.as_deref(),
+        current_endpoint.as_deref(),
+        Some(scoped_endpoint.as_str()),
+    );
     let registered = directory
         .endpoint("leader")
         .map(|endpoint| address(&endpoint.pane_id, &endpoint.socket))
         .unwrap_or_else(|_| address("unbound", &receiver_socket(&selected.state)));
     let caller_address = address(field(&caller, "pane"), field(&caller, "socket"));
     let return_link = match directory.probe("leader", Instant::now() + BUDGET) {
+        _ if caller_resolution == crate::layout::worker_env::CallerProviderResolution::Invalid => {
+            if fix.is_none() {
+                fix = Some(Action::manual(crate::layout::worker_env::CALLER_CONTEXT_RECOVERY.into()));
+            }
+            Link::new(6, "FAIL", crate::layout::worker_env::invalid_caller_tuple_message(
+                pane.as_deref(),
+                current_endpoint.as_deref(),
+                Some(scoped_endpoint.as_str()),
+            ))
+        }
         Err(error) => {
             if fix.is_none() {
                 fix = Some(action("claim-leader", workspace, team));

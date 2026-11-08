@@ -958,8 +958,16 @@ fn preflight_fresh_leader_identity(
         caller_tmux_endpoint(transport).as_deref(),
     );
     if matches!(resolution, crate::layout::worker_env::CallerProviderResolution::Invalid) {
-        return refusal("strict_provider", "invalid_caller_tuple",
-            "fix conflicting CALLER_* / TEAM_AGENT_LEADER_* identity; do not run claim-leader");
+        let detail = crate::layout::worker_env::invalid_caller_tuple_message(
+            pane.as_deref(),
+            current_endpoint.as_deref(),
+            caller_tmux_endpoint(transport).as_deref(),
+        );
+        return Some((
+            format!("quick-start refused before spawn: {detail}"),
+            vec![format!("stage=strict_provider reason=invalid_caller_tuple; {detail}")],
+            vec![crate::layout::worker_env::CALLER_CONTEXT_RECOVERY.into()],
+        ));
     }
     let Some(pane) = pane else {
         return refusal("caller_pane", "caller_pane_missing",

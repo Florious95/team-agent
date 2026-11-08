@@ -428,6 +428,9 @@ fn intent_human(value: &Value) -> String {
         let message: String = error.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(360).collect();
         lines.insert(0, format!("error: {message}"));
     }
+    for blocker in value.get("blockers").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+        lines.push(format!("Blocked: {blocker}"));
+    }
     if let Some(action) = value.get("recovery").and_then(Value::as_str).or_else(|| value.get("next_actions").and_then(Value::as_array).and_then(|actions| actions.first()).and_then(Value::as_str)) {
         lines.push(format!("Next: {action}"));
     }
@@ -667,8 +670,10 @@ fn execute_plan(
             ),
         };
         partial_effect |= receipt.get("status").and_then(Value::as_str) == Some("partial");
-        known_no_effect &= receipt["status"] == "preflight_blocked"
-            && receipt["effects"]["coordinator_start"] == "not_attempted"
+        known_no_effect &= matches!(
+            receipt.get("status").and_then(Value::as_str),
+            Some("preflight_blocked" | "blocked")
+        ) && receipt["effects"]["coordinator_start"] == "not_attempted"
             && receipt["effects"]["worker_panes_started"]
                 .as_array()
                 .is_some_and(Vec::is_empty);
@@ -761,6 +766,14 @@ fn execute_plan(
         None
     };
     let mut value = json!({"ok":ok,"action":plan.intent.verb,"surface":plan.intent.surface,"scope":actual_scope,"session_policy":plan.intent.session,"status":if partial {"partial"} else if !ok {"failed"} else if pending {"pending"} else if results.is_empty() {if plan.intent.verb == Verb::Stop {"already_stopped"} else {"already_running"}} else {"actions_completed"},"steps":results,"skipped":plan.skipped,"effects":effects,"configuration_note":"Running processes were not edited; role body synchronization and business readiness are not claimed.","last_confirmed_effect":if stop_succeeded {Some("original_instance_stopped")} else if handler_effect_confirmed {Some("handler_effects_confirmed")} else {None},"current_state":if !ok {Some(if known_no_effect && !partial {"unchanged"} else {"unknown"})} else {None},"recovery":recovery});
+    if let Some(receipt) = value["steps"].as_array().into_iter().flatten()
+        .find(|step| step["ok"] == false)
+        .and_then(|step| step.get("receipt")).cloned()
+    {
+        for field in ["blockers", "next_actions"] {
+            if let Some(detail) = receipt.get(field) { value[field] = detail.clone(); }
+        }
+    }
     append_restart_binding_status(&mut value);
     Ok(CmdResult::from_json(value, plan.intent.json))
 }
