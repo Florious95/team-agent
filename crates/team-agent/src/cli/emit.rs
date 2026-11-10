@@ -1269,7 +1269,7 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
     };
     let message_start = usize::from(target.is_some());
     let workspace = workspace(&parsed, cwd);
-    let sender = trusted_cli_sender(cwd, &workspace)?;
+    let sender = trusted_cli_sender(cwd, &workspace, parsed.team.as_deref(), target.as_deref().or(parsed.to_name.as_deref()))?;
     let presentation_value = if parsed.presentation_sink.is_some()
         || parsed.message_class.is_some()
         || parsed.case_id.is_some()
@@ -1318,42 +1318,65 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
     })
 }
 
-fn trusted_cli_sender(cwd: &Path, workspace: &Path) -> Result<TrustedSender, CliError> {
-    let caller_socket = crate::tmux_backend::socket_name_from_tmux_env();
-    let caller_pane = std::env::var("TMUX_PANE").ok();
-    // Source identity is independent of --workspace/--team (destination selectors).
-    // A bound leader terminal still outranks inherited worker environment.
-    let terminal = caller_socket.zip(caller_pane);
-    let mut ancestors = Vec::new();
-    if terminal.is_none() {
-        let mut parent = crate::platform::process::current_parent_pid();
-        while let Some(pid) = parent.filter(|pid| *pid > 1 && !ancestors.contains(pid)) {
-            ancestors.push(pid);
-            parent = crate::platform::argv::parent_pid(pid);
+fn trusted_cli_sender(cwd: &Path, workspace: &Path, team: Option<&str>, target: Option<&str>) -> Result<TrustedSender, CliError> {
+    let terminal = crate::tmux_backend::socket_name_from_tmux_env().zip(std::env::var("TMUX_PANE").ok());
+    let agent_id = std::env::var("TEAM_AGENT_ID").ok()
+        .map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+    // An own-team worker needs one seat lookup, not any leader discovery.
+    // Check the physical seat so inherited worker variables cannot rename a leader.
+    if let (Some(agent), Some((socket, pane)), Some(target)) =
+        (agent_id.as_deref().filter(|id| *id != "leader"), terminal.as_ref(), target)
+    {
+        if let Ok(address) = crate::messaging::parse_logical_address(target) {
+            let destination = address.workspace.as_deref().unwrap_or(workspace);
+            let directory = match address.target {
+                crate::messaging::LogicalAddressTarget::Worker(recipient) =>
+                    crate::direct_delivery::directory_for_recipient(destination, team, &recipient).ok(),
+                crate::messaging::LogicalAddressTarget::TeamEntity { team, .. } =>
+                    crate::direct_delivery::directory(destination, Some(&team)).ok(),
+                _ => None,
+            };
+            if let Some(directory) = directory {
+                if directory.endpoint(agent).is_ok_and(|seat|
+                    crate::direct_delivery::leader_target_is_sender(&seat, Some(socket), Some(pane)))
+                {
+                    if let Some(team) = directory.team {
+                        return Ok(TrustedSender::from_runtime_identity_with_source(
+                            crate::model::ids::AgentId::new(agent), directory.workspace.display(), &team,
+                        ));
+                    }
+                }
+            }
         }
     }
-    let mut sources = vec![cwd.to_path_buf()];
-    sources.extend(std::env::var_os("TEAM_AGENT_WORKSPACE").map(PathBuf::from));
-    sources.extend(crate::leader::registry::snapshots().into_iter().map(|entry| entry.workspace));
-    sources.push(workspace.to_path_buf());
-    for source in sources {
-        let directory = match &terminal {
-            Some((socket, pane)) => crate::direct_delivery::leader_directory_for_terminal(&source, socket, pane),
-            None => crate::direct_delivery::leader_directory_for_ancestors(&source, &ancestors),
-        };
-        if let Some(directory) = directory {
-            return Ok(match directory.team {
-                Some(team) => TrustedSender::from_runtime_identity_with_source(
-                    crate::model::ids::AgentId::new("leader"), directory.workspace.display(), &team,
-                ),
-                None => TrustedSender::leader(),
-            });
+    // Only the caller's cwd and the explicitly selected workspace are local scope.
+    let local = match &terminal {
+        Some((socket, pane)) => crate::direct_delivery::leader_directory_for_terminal(cwd, socket, pane)
+            .or_else(|| (cwd != workspace).then(|| crate::direct_delivery::leader_directory_for_terminal(workspace, socket, pane)).flatten()),
+        None => crate::direct_delivery::leader_directory_for_ancestors(cwd),
+    };
+    if let Some(directory) = local {
+        return Ok(match directory.team {
+            Some(team) => TrustedSender::from_runtime_identity_with_source(
+                crate::model::ids::AgentId::new("leader"), directory.workspace.display(), &team,
+            ),
+            None => TrustedSender::leader(),
+        });
+    }
+    // Off-workspace discovery compares registry fields only: no external state
+    // reads, canonicalization or tmux probes. Scrubbed shells never use it.
+    if let Some((socket, pane)) = &terminal {
+        if let Some(entry) = crate::leader::registry::snapshots().into_iter()
+            .filter(|entry| entry.status == "attached"
+                && entry.channel["tmux_socket"].as_str() == Some(socket.as_str())
+                && entry.channel["pane_id"].as_str() == Some(pane.as_str()))
+            .min_by_key(|entry| entry.team_key == "current")
+        {
+            return Ok(TrustedSender::from_runtime_identity_with_source(
+                crate::model::ids::AgentId::new("leader"), entry.workspace.display(), &entry.team_key,
+            ));
         }
     }
-    let agent_id = std::env::var("TEAM_AGENT_ID")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
     let worker_context = ["TEAM_AGENT_OWNER_TEAM_ID", "TEAM_AGENT_AGENT_ID"]
         .into_iter()
         .any(|key| {

@@ -97,12 +97,22 @@ pub fn environ_text(pid: u32) -> Option<String> {
 ///
 /// Return the parent PID of `pid`, or `None` if unavailable.
 ///
-/// Byte-preserving migration of `lifecycle/launch.rs::process_parent_pid`:
-/// - Unix: `ps -p <pid> -o ppid=` parsed as u32.
+/// - macOS: native `proc_pidinfo`, avoiding a subprocess for every ancestor.
+/// - Other Unix: `ps -p <pid> -o ppid=` parsed as u32.
 /// - Windows: Toolhelp32 snapshot walked for the entry matching
 ///   `pid`. Same technique as `platform::process::current_parent_pid`.
 pub fn parent_pid(pid: u32) -> Option<u32> {
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
+    {
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+        // SAFETY: the buffer has the native ABI size; read it only after a full result.
+        let read = unsafe { libc::proc_pidinfo(i32::try_from(pid).ok()?, libc::PROC_PIDTBSDINFO,
+            0, info.as_mut_ptr().cast(), size) };
+        if read != size { return None; }
+        Some(unsafe { info.assume_init() }.pbi_ppid)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         parent_pid_unix(pid)
     }
@@ -217,7 +227,7 @@ fn argv_tokens_ps_fallback(pid: u32) -> Option<Vec<String>> {
     (!argv_tokens.is_empty()).then_some(argv_tokens)
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn parent_pid_unix(pid: u32) -> Option<u32> {
     let output = std::process::Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "ppid="])

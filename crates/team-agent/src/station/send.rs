@@ -384,8 +384,10 @@ fn send_one(
             origin = directory.team.as_ref().map(|team| (directory.workspace.clone(), team.clone()));
         } else if let Some((socket, pane)) = caller {
             let workspace = origin.as_ref().map_or(req.workspace, |(workspace, _)| workspace.as_path());
-            if let Some(source) = crate::direct_delivery::leader_directory_for_terminal(workspace, &socket, &pane) {
-                origin = source.team.map(|team| (source.workspace, team));
+            if same_workspace(workspace, req.workspace) {
+                if let Some(source) = crate::direct_delivery::leader_directory_for_terminal(workspace, &socket, &pane) {
+                    origin = source.team.map(|team| (source.workspace, team));
+                }
             }
         }
     }

@@ -50,9 +50,21 @@ pub(crate) fn leader_directory_for_terminal(workspace: &Path, socket: &str, pane
 }
 
 /// Environment-scrubbed provider tools still descend from their bound leader pane.
-pub(crate) fn leader_directory_for_ancestors(workspace: &Path, ancestors: &[u32]) -> Option<Directory> {
+pub(crate) fn leader_directory_for_ancestors(workspace: &Path) -> Option<Directory> {
     let deadline = Instant::now() + Duration::from_secs(2);
+    let ancestors = std::cell::OnceCell::new();
     leader_directory_matching(workspace, |leader| {
+        // No ancestry work without a local leader. macOS parent lookup is native,
+        // so a scrubbed shell does not fork ps for each ancestor.
+        let ancestors = ancestors.get_or_init(|| {
+            let mut ancestors = Vec::new();
+            let mut parent = crate::platform::process::current_parent_pid();
+            while let Some(pid) = parent.filter(|pid| *pid > 1 && !ancestors.contains(pid)) {
+                ancestors.push(pid);
+                parent = crate::platform::argv::parent_pid(pid);
+            }
+            ancestors
+        });
         pane_identity(&leader.socket, &leader.pane_id, deadline).ok()
             .and_then(|identity| identity.split('|').nth(1)?.parse::<u32>().ok())
             .is_some_and(|pid| ancestors.contains(&pid))
