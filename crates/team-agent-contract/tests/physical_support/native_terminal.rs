@@ -111,7 +111,7 @@ pub fn run() {
     let mode = args[6].to_str().unwrap();
     assert!(matches!(
         mode,
-        "single" | "confirm" | "retry" | "queue" | "literal-control"
+        "single" | "confirm" | "retry" | "queue" | "literal-control" | "stall-blank" | "stall-text"
     ));
     let mut log = std::fs::OpenOptions::new()
         .write(true)
@@ -141,6 +141,20 @@ pub fn run() {
                 .any(|(key, _)| key.as_encoded_bytes().starts_with(b"TEAM_AGENT_"))
         }),
     );
+    // Startup-stall modes model a live native that never reaches its composer:
+    // a blank screen (network-gated first render) or a non-composer screen.
+    if let Some(stall) = mode.strip_prefix("stall-") {
+        let mut output = std::io::stdout().lock();
+        output.write_all(b"\x1b[2J\x1b[H").unwrap();
+        if stall == "text" {
+            output.write_all(b"BOOTING|-\r\n").unwrap();
+        }
+        output.flush().unwrap();
+        drop(output);
+        loop {
+            std::thread::sleep(Duration::from_secs(3600));
+        }
+    }
     surface("READY", "-");
     let mut input = input.lock();
     let mut chunk = [0; 4096];
