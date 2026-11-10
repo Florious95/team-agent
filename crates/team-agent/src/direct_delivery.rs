@@ -277,8 +277,8 @@ impl Directory {
             return Err("identity_mismatch: recipient address changed".into());
         }
         if agent == "leader" {
-            // Local legacy leaders need no nonce. Re-read worker ownership instead of
-            // trusting the addressing snapshot captured before the input lock.
+            // Re-read the binding and worker ownership after acquiring the input lock.
+            // A missing legacy nonce is allowed; a recorded pane lifetime is not optional.
             let latest = directory(&self.workspace, self.team.as_deref())?;
             let address = latest.endpoint(agent)?;
             if !crate::topology::same_endpoint(&address.socket, &expected.socket)
@@ -289,6 +289,17 @@ impl Directory {
             let observed = transport.list_targets().map_err(|error| error.to_string())?
                 .into_iter().find(|pane| pane.pane_id.as_str() == expected.pane_id)
                 .ok_or("leader_identity_unavailable: registered pane is not live")?;
+            let receiver = latest.recipient(agent)?;
+            if receiver.get("pane_pid").and_then(|pid| pid.as_u64().or_else(|| pid.as_str().and_then(|s| s.parse().ok())))
+                .is_some_and(|pid| observed.pane_pid.map(u64::from) != Some(pid)) {
+                return Err("leader_identity_pid_mismatch: registered pane instance changed".into());
+            }
+            let observed_nonce = observed.leader_env.get(crate::tmux_backend::PANE_BINDING_NONCE_METADATA_KEY)
+                .map(String::as_str).filter(|nonce| !nonce.is_empty());
+            if field(receiver, "binding_nonce").zip(observed_nonce)
+                .is_some_and(|(expected, observed)| expected != observed) {
+                return Err("leader_identity_nonce_mismatch: registered pane binding changed".into());
+            }
             if let Some(worker) = crate::topology::active_worker_on_endpoint(&latest.state, &expected.socket, &observed) {
                 return Err(format!("leader_identity_worker_collision: registered pane belongs to active worker {worker}"));
             }
@@ -417,8 +428,9 @@ impl Directory {
         } else { None };
         let endpoint = self.endpoint(agent)?;
         let info = self.recipient(agent)?;
-        let expected_pid = (agent != "leader").then(|| info.get("pane_pid").or_else(|| info.get("pid")).or_else(|| info.get("native_pid")))
-            .flatten().and_then(|value| value.as_u64().or_else(|| value.as_str().and_then(|s| s.parse().ok())))
+        let expected_pid = if agent == "leader" { info.get("pane_pid") }
+            else { info.get("pane_pid").or_else(|| info.get("pid")).or_else(|| info.get("native_pid")) };
+        let expected_pid = expected_pid.and_then(|value| value.as_u64().or_else(|| value.as_str().and_then(|s| s.parse().ok())))
             .and_then(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 0);
         #[cfg(unix)]
         let mut startup_checked = false;
@@ -436,6 +448,11 @@ impl Directory {
                     startup_checked = true;
                 }
                 Ok(())
+            }).map_err(|error| {
+                if agent == "leader" && ["identity_mismatch", "pane_gone", "recipient_provider_exited"]
+                    .iter().any(|prefix| error.starts_with(prefix)) {
+                    format!("leader_identity_mismatch: {error}")
+                } else { error }
             })?;
         Ok(json!({"status":"sent","recipient":endpoint.agent,"pane_id":endpoint.pane_id,
             "dialect":endpoint.dialect,"delivery":"physical","accepted":null}))
@@ -860,7 +877,7 @@ mod tests {
             active: false, pane_pid: Some(123), leader_env: Default::default(),
         };
         let mut state = json!({"team_key":"a", "tmux_socket":endpoint, "agents":{},
-            "leader_receiver":{"pane_id":"%0","provider":"pi","pane_pid":999}});
+            "leader_receiver":{"pane_id":"%0","provider":"pi"}});
         let mut outcomes = Vec::new();
         for case in 0..5 {
             match case {
@@ -884,6 +901,48 @@ mod tests {
         assert!(outcomes[2].as_ref().unwrap_err().contains("worker_collision"));
         assert!(outcomes[3].as_ref().unwrap_err().contains("worker_collision"));
         assert!(outcomes[4].is_ok());
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn leader_delivery_fences_recorded_pid_and_conflicting_nonce() {
+        let root = std::env::temp_dir().join(format!("ta-leader-fence-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(root.join(".team/runtime")).unwrap();
+        let endpoint = root.join("leader.sock").to_string_lossy().into_owned();
+        let state = json!({"team_key":"a", "tmux_socket":endpoint, "agents":{},
+            "leader_receiver":{"pane_id":"%0","provider":"pi","pane_pid":123,"binding_nonce":"bound"}});
+        std::fs::write(root.join(".team/runtime/state.json"), serde_json::to_vec(&state).unwrap()).unwrap();
+        for (pid, nonce, expected_error) in [
+            (Some(123), None, None),
+            (Some(123), Some(""), None),
+            (Some(123), Some("bound"), None),
+            (Some(999), None, Some("leader_identity_pid_mismatch")),
+            (None, None, Some("leader_identity_pid_mismatch")),
+            (Some(123), Some("foreign"), Some("leader_identity_nonce_mismatch")),
+        ] {
+            let mut pane = crate::transport::PaneInfo {
+                pane_id: crate::transport::PaneId::new("%0"), session: crate::transport::SessionName::new("leader"),
+                window_index: None, window_name: None, pane_index: None, tty: None,
+                current_command: Some("bash".into()), current_path: Some(root.clone()),
+                active: false, pane_pid: pid, leader_env: Default::default(),
+            };
+            if let Some(nonce) = nonce {
+                pane.leader_env.insert(crate::tmux_backend::PANE_BINDING_NONCE_METADATA_KEY.into(), nonce.into());
+            }
+            let transport = crate::transport::test_support::OfflineTransport::default()
+                .with_tmux_endpoint(&endpoint).with_targets(vec![pane]);
+            crate::transport_factory::with_leader_endpoint_transport(&endpoint, transport, || {
+                let directory = directory(&root, Some("a")).unwrap();
+                let result = directory.verify_endpoint("leader", &directory.endpoint("leader").unwrap(), Instant::now()+Duration::from_secs(1));
+                if let Some(expected) = expected_error {
+                    let error = result.unwrap_err();
+                    assert!(error.starts_with(expected), "{error}");
+                    assert!(directory.recovery_action("leader", &error).unwrap().contains("claim-leader"));
+                } else { assert!(result.is_ok(), "{result:?}"); }
+            });
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
