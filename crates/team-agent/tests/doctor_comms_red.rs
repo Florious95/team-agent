@@ -5,6 +5,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![cfg(unix)]
 
+#[path = "support/proc_guard.rs"]
+mod proc_guard;
 #[path = "support/hermetic.rs"]
 mod hermetic_guard;
 #[allow(dead_code)]
@@ -12,7 +14,7 @@ fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
@@ -241,7 +243,7 @@ impl Drop for DoctorFixture {
 }
 
 struct ChildGuard {
-    child: Child,
+    child: Option<proc_guard::FixtureGroup>,
     workspace: PathBuf,
     script_dir: PathBuf,
 }
@@ -254,27 +256,26 @@ impl ChildGuard {
             .join("orphan-bin");
         std::fs::create_dir_all(&script_dir).unwrap();
         let script = script_dir.join("team-agent");
-        std::fs::write(&script, "#!/bin/sh\nwhile :; do sleep 1; done\n").unwrap();
+        std::fs::write(&script, "#!/bin/sh\nread _; exit 0\n").unwrap();
         let mut perms = std::fs::metadata(&script).unwrap().permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(&script, perms).unwrap();
-        let child = Command::new(&script)
-            .args(["coordinator", "--workspace"])
+        let mut command = Command::new(&script);
+        command.args(["coordinator", "--workspace"])
             .arg(workspace)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn persistent coordinator-shaped orphan process");
+            .stderr(Stdio::null());
+        let child = proc_guard::FixtureGroup::spawn(&mut command, workspace, Duration::from_secs(30));
         Self {
-            child,
+            child: Some(child),
             workspace: workspace.to_path_buf(),
             script_dir,
         }
     }
 
     fn id(&self) -> u32 {
-        self.child.id()
+        self.child.as_ref().unwrap().id()
     }
 
     fn workspace_str(&self) -> &str {
@@ -284,7 +285,7 @@ impl ChildGuard {
     fn assert_still_running(&mut self) {
         thread::sleep(Duration::from_millis(50));
         assert!(
-            self.child.try_wait().unwrap().is_none(),
+            self.child.as_mut().unwrap().try_wait().unwrap().is_none(),
             "orphan fixture must keep a coordinator-shaped process alive until doctor scans it"
         );
     }
@@ -292,54 +293,10 @@ impl ChildGuard {
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        terminate_process_tree(self.child.id());
-        let _ = self.child.wait();
+        self.child.take();
         let _ = std::fs::remove_dir_all(&self.workspace);
         let _ = std::fs::remove_dir_all(&self.script_dir);
     }
-}
-
-fn terminate_process_tree(root_pid: u32) {
-    let mut pids = descendant_pids(root_pid);
-    pids.push(root_pid);
-    for signal in ["TERM", "KILL"] {
-        for pid in &pids {
-            let _ = Command::new("kill")
-                .args([format!("-{signal}"), pid.to_string()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-}
-
-fn descendant_pids(root_pid: u32) -> Vec<u32> {
-    let output = Command::new("ps")
-        .args(["-axo", "pid=,ppid="])
-        .output()
-        .expect("scan process table for orphan fixture cleanup");
-    let text = String::from_utf8_lossy(&output.stdout);
-    let pairs = text
-        .lines()
-        .filter_map(|line| {
-            let mut cols = line.split_whitespace();
-            let pid = cols.next()?.parse::<u32>().ok()?;
-            let ppid = cols.next()?.parse::<u32>().ok()?;
-            Some((pid, ppid))
-        })
-        .collect::<Vec<_>>();
-    let mut out = Vec::new();
-    let mut stack = vec![root_pid];
-    while let Some(parent) = stack.pop() {
-        for (pid, ppid) in &pairs {
-            if *ppid == parent && !out.contains(pid) {
-                out.push(*pid);
-                stack.push(*pid);
-            }
-        }
-    }
-    out
 }
 
 fn run_team_agent<const N: usize>(args: [&str; N]) -> Output {

@@ -534,7 +534,7 @@ impl RealCase {
                 &[
                     "/bin/sh".to_string(),
                     "-lc".to_string(),
-                    "while :; do sleep 60; done".to_string(),
+                    "sleep 60 & wait $!".to_string(),
                 ],
                 &self.root,
                 &std::collections::BTreeMap::new(),

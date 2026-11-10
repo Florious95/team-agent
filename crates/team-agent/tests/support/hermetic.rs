@@ -12,8 +12,11 @@
 //! maturity: wired
 //! ---
 
+#[path = "proc_guard.rs"]
+pub mod proc_guard;
+
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
@@ -140,18 +143,19 @@ fn short_hash4(input: &str) -> String {
 
 /// A quiescent coordinator stand-in with real argv/cwd ownership evidence.
 /// It does not boot a daemon or overwrite the compatibility metadata under test.
-pub fn spawn_owned_coordinator(workspace: &Path) -> Child {
-    Command::new("/bin/bash")
-        .args(["-c", "exec -a \"$0\" tail -f -- /dev/null \"$@\""])
+#[cfg(unix)]
+pub fn spawn_owned_coordinator(workspace: &Path) -> proc_guard::FixtureGroup {
+    let mut command = Command::new("/bin/bash");
+    command.args(["-c", "exec -a \"$0\" /bin/bash -c 'read -r -t 30 _; exit 0' \"$0\" \"$@\""])
         .arg(workspace.join("team-agent"))
         .arg("coordinator")
         .arg("--workspace")
         .arg(workspace)
         .current_dir(workspace)
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn fixture coordinator process")
+        .stderr(Stdio::null());
+    proc_guard::FixtureGroup::spawn(&mut command, workspace, std::time::Duration::from_secs(30))
 }
 
 /// Simulate an already-running coordinator for IN-PROCESS SUT calls only.
@@ -216,6 +220,7 @@ pub struct HermeticTestEnv {
     previous: Vec<(&'static str, Option<String>)>,
     fixture_caller: Vec<(&'static str, String)>,
     caller_tmux: Option<PathBuf>,
+    tmux_root: proc_guard::TmuxRoot,
     /// 0.5.43 debt-sweep (§6.1): test-owned resource ledger. Drop
     /// cleanup walks these EXACT entries (never a host-wide scan).
     /// Order matters: pids first (stop coordinator/child tree), then
@@ -265,17 +270,19 @@ impl HermeticTestEnv {
             previous: Vec::new(),
             fixture_caller: Vec::new(),
             caller_tmux: None,
+            tmux_root: proc_guard::TmuxRoot::new(),
             owned: Mutex::new(OwnedResources::default()),
         }
     }
 
     pub fn enter(tag: &str) -> Self {
         let mut env = Self::isolated(tag);
-        for key in std::iter::once("HOME").chain(CALLER_IDENTITY_ENVS.iter().copied()) {
+        for key in ["HOME", "TMUX_TMPDIR"].into_iter().chain(CALLER_IDENTITY_ENVS.iter().copied()) {
             env.previous.push((key, std::env::var(key).ok()));
         }
         unsafe {
             std::env::set_var("HOME", &env.home);
+            std::env::set_var("TMUX_TMPDIR", env.tmux_root.path());
             for key in CALLER_IDENTITY_ENVS {
                 std::env::remove_var(key);
             }
@@ -305,13 +312,13 @@ impl HermeticTestEnv {
     }
 
     fn spawn_fixture_caller(&mut self) {
-        let socket = short_tmux_socket("caller");
+        let socket = self.tmux_root.path().join("ta43-caller.sock");
         assert!(!socket.exists(), "fixture caller endpoint already exists");
         let tmux = fixture_tmux_binary();
         self.caller_tmux = Some(tmux.clone());
         let output = Command::new(tmux)
             .args(["-u", "-S"]).arg(&socket).args(["-f", "/dev/null", "new-session", "-d", "-s", "fixture-caller", "-c"])
-            .arg(&self.root).args(["-P", "-F", "#{pane_id}", "exec sleep 86400"])
+            .arg(&self.root).args(["-P", "-F", "#{pane_id}", "exec sleep 110"])
             .env("HOME", &self.home).env_remove("TMUX").env_remove("TMUX_PANE")
             .output().expect("create owned fixture caller");
         assert!(output.status.success(), "fixture caller failed: {output:?}");
@@ -328,6 +335,7 @@ impl HermeticTestEnv {
     }
 
     pub fn configure_command(&self, command: &mut Command) {
+        self.tmux_root.configure(command);
         command.env("HOME", &self.home);
         for key in CALLER_IDENTITY_ENVS {
             command.env_remove(key);
@@ -521,6 +529,7 @@ impl Drop for HermeticTestEnv {
                 let _ = std::fs::remove_file(&socket);
             }
         }
+        self.tmux_root.close();
         for (key, value) in self.previous.drain(..).rev() {
             unsafe {
                 if let Some(value) = value {

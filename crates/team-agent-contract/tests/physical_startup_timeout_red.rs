@@ -42,12 +42,13 @@ fn settings(tmux: &std::path::Path) -> PhysicalSettings {
 
 /// Start one preassigned-session seat whose native never renders a composer.
 /// Returns the final operation record and the seat's owned native directory.
-fn stalled_startup(mode: &str) -> (OperationRecord, PathBuf) {
+fn stalled_startup(mode: &str) -> (OperationRecord, PathBuf, physical_support::OwnedTmuxRoot) {
     let tmux = PathBuf::from(std::env::var_os("CONTRACT_TMUX").expect("prepared absolute tmux"));
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
     let parent = PathBuf::from("/tmp").canonicalize().unwrap()
         .join(format!("tac-s{}-{}-{nonce}", &mode[6..7], std::process::id()));
     std::fs::create_dir(&parent).unwrap();
+    let owned_root = physical_support::OwnedTmuxRoot::new(&parent, &tmux);
     let root = parent.join("owned");
     let mut store = ContractStore::create(&root, ScopeId::new("scope").unwrap(), "fixture-coordinator").unwrap();
     let cwd_path = root.join("cwd");
@@ -108,7 +109,7 @@ fn stalled_startup(mode: &str) -> (OperationRecord, PathBuf) {
     let directory = started.target.physical.as_ref()
         .unwrap_or_else(|| panic!("the spawned target receipt is retained after compensation: phase={:?} outcome={:?} failure={:?}", started.phase, started.outcome, started.failure))
         .directory.path.clone();
-    (started, directory)
+    (started, directory, owned_root)
 }
 
 fn assert_blackbox(started: &OperationRecord, directory: &std::path::Path, surface: &str, screen: Option<&str>) {
@@ -130,12 +131,12 @@ fn assert_blackbox(started: &OperationRecord, directory: &std::path::Path, surfa
 
 #[test]
 fn blank_startup_timeout_persists_capture_and_reports_last_surface_blank() {
-    let (started, directory) = stalled_startup("stall-blank");
+    let (started, directory, _owned_root) = stalled_startup("stall-blank");
     assert_blackbox(&started, &directory, "blank", None);
 }
 
 #[test]
 fn non_composer_startup_timeout_reports_the_specific_surface() {
-    let (started, directory) = stalled_startup("stall-text");
+    let (started, directory, _owned_root) = stalled_startup("stall-text");
     assert_blackbox(&started, &directory, "ShellOrUnknown", Some("BOOTING|-"));
 }

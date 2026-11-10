@@ -23,6 +23,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(unix)]
+#[path = "support/proc_guard.rs"]
+mod proc_guard;
+#[cfg(unix)]
+use proc_guard::FixtureGroup;
+
 use serde_json::json;
 use serial_test::serial;
 use team_agent::cli::lifecycle_port;
@@ -33,6 +39,7 @@ use team_agent::state::persist::save_runtime_state;
 /// coordinator discover 1 + 1 headroom). Today the same table is re-fetched by
 /// protection / pgids / per-root tree walks / residual rounds: 10-15 forks.
 #[test]
+#[cfg(unix)]
 #[serial(perf6)]
 fn perf6_shutdown_ps_fork_budget_le_4() {
     let ws = tmp_ws("ps-budget");
@@ -58,6 +65,7 @@ Python 0.2.11 shutdown forks ZERO ps; the RS scan machinery must bound its own c
 /// machine the whole shutdown must finish in <5s — this guards the serial per-root
 /// sleep chain (R×(0.15..1.15)s lower bound), not load timing.
 #[test]
+#[cfg(unix)]
 #[serial(perf6)]
 fn perf6_shutdown_wallclock_low_load_under_5s() {
     let ws = tmp_ws("wallclock");
@@ -143,11 +151,12 @@ fn perf6_grep_term_before_kill_sequence() {
 /// is double-hop detached: in-process shutdown waitpid()s its victims, so a direct
 /// child's exit status is consumed before the test could read it.)
 #[test]
+#[cfg(unix)]
 #[serial(perf6)]
 fn perf6_grace_window_slow_cleanup_not_killed() {
     let ws = tmp_ws("grace");
     let marker = ws.join("graceful-exit.marker");
-    let pid = spawn_detached_trap_loop(
+    let (pid, _guard) = spawn_detached_trap_loop(
         &ws,
         &format!(
             "sleep 0.1; echo graceful > {}; exit 0",
@@ -169,18 +178,19 @@ fn perf6_grace_window_slow_cleanup_not_killed() {
 /// a TERM-ignoring pid in the same shutdown — the stubborn one must be escalated to
 /// SIGKILL and be gone; the fast one exits on TERM (marker written).
 #[test]
+#[cfg(unix)]
 #[serial(perf6)]
 fn perf6_mixed_fast_slow_kill_semantics() {
     let ws = tmp_ws("mixed");
     let fast_marker = ws.join("fast-exit.marker");
-    let fast = spawn_detached_trap_loop(
+    let (fast, _fast_guard) = spawn_detached_trap_loop(
         &ws,
         &format!(
             "echo fast > {}; exit 0",
             fast_marker.to_string_lossy()
         ),
     );
-    let stubborn = spawn_detached_trap_loop(&ws, "");
+    let (stubborn, _stubborn_guard) = spawn_detached_trap_loop(&ws, "");
     seed_state_with_pids(&ws, &[fast, stubborn]);
 
     lifecycle_port::shutdown(&ws, false, None).expect("bare shutdown should succeed");
@@ -200,9 +210,6 @@ fn perf6_mixed_fast_slow_kill_semantics() {
             "C-②-8: the TERM-ignoring pid {stubborn} must be escalated to SIGKILL and be gone; ps={}",
             String::from_utf8_lossy(&status.stdout)
         ));
-        let _ = std::process::Command::new("kill")
-            .args(["-9", &stubborn.to_string()])
-            .status();
     }
     assert!(
         failures.is_empty(),
@@ -217,6 +224,7 @@ fn perf6_mixed_fast_slow_kill_semantics() {
 /// marker instead of a clean fake-green (CLAUDE.md §5: any "looks executed but had no
 /// effect" needs a log that explains why).
 #[test]
+#[cfg(unix)]
 #[serial(perf6)]
 fn swallow1_broken_ps_probe_is_observable_not_silent() {
     let ws = tmp_ws("broken-ps");
@@ -259,30 +267,15 @@ clean fake-green; result={result_text}"
 
 // ───────────────────────────────────── fixtures ─────────────────────────────────────
 
-struct ChildGuard(Vec<std::process::Child>);
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        for child in &mut self.0 {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
-
-/// State with two reapable test-owned `sleep` children registered as pane pids
-/// (the real-machine agent row shape: status/provider/window/pane_pid/spawn_cwd).
-fn seed_reapable_state(ws: &Path) -> ChildGuard {
-    let a = std::process::Command::new("sleep")
-        .arg("300")
-        .spawn()
-        .unwrap();
-    let b = std::process::Command::new("sleep")
-        .arg("300")
-        .spawn()
-        .unwrap();
-    seed_state_with_pids(ws, &[a.id(), b.id()]);
-    ChildGuard(vec![a, b])
+/// State with two bounded, pipe-bound test-owned children registered as pane pids.
+#[cfg(unix)]
+fn seed_reapable_state(ws: &Path) -> Vec<FixtureGroup> {
+    let children = vec![
+        FixtureGroup::presence(ws, std::time::Duration::from_secs(30)),
+        FixtureGroup::presence(ws, std::time::Duration::from_secs(30)),
+    ];
+    seed_state_with_pids(ws, &[children[0].id(), children[1].id()]);
+    children
 }
 
 fn seed_state_with_pids(ws: &Path, pids: &[u32]) {
@@ -367,32 +360,20 @@ fn install_failing_ps_shim(ws: &Path) -> PathGuard {
     )
 }
 
-/// Double-hop detach (`sh -c '... & echo $!'`): the loop process is NOT a child of the
-/// test process, so the in-process shutdown cannot reap it. On Linux its terminated
-/// zombie may remain visible to `kill -0` until the adopting parent reaps it.
-fn spawn_detached_trap_loop(ws: &Path, term_handler: &str) -> u32 {
+/// Owned double-hop detach: the loop is not a child of the test process.
+/// Assert SUT cleanup before the returned guard drops, including on failure.
+#[cfg(unix)]
+fn spawn_detached_trap_loop(ws: &Path, term_handler: &str) -> (u32, FixtureGroup) {
     let ready = ws.join("loop-ready");
     let _ = std::fs::remove_file(&ready);
-    // Positional arguments preserve handler quoting and expose the same explicit
-    // --workspace ownership proof required of production process roots.
-    let out = std::process::Command::new("sh")
-        .args([
-            "-c",
-            "sh -c 'trap \"$1\" TERM; : > \"$4\"; while :; do sleep 0.02; done' fixture-loop \"$1\" --workspace \"$2\" \"$3\" >/dev/null 2>&1 & echo $!",
-            "sh",
-            term_handler,
-        ])
-        .arg(ws)
-        .arg(&ready)
-        .current_dir(ws)
-        .output()
-        .expect("spawn detached loop");
-    let pid = String::from_utf8_lossy(&out.stdout)
-        .trim()
-        .parse::<u32>()
-        .expect("pid");
+    let (guard, pid) = FixtureGroup::detached(
+        ws,
+        r#"trap "$1" TERM; : > "$4"; sleep 60 & wait $!"#,
+        &[term_handler.into(), "--workspace".into(), ws.as_os_str().to_owned(), ready.as_os_str().to_owned()],
+        std::time::Duration::from_secs(60),
+    );
     assert!(wait_until(3_000, || ready.exists()), "fixture trap not ready");
-    pid
+    (pid, guard)
 }
 
 fn pid_alive(pid: u32) -> bool {

@@ -119,6 +119,11 @@ pub fn run() {
         .mode(0o600)
         .open(&args[7])
         .unwrap();
+    // Even a surviving server cannot retain this controlled native indefinitely.
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(110));
+        std::process::exit(124);
+    });
     let input = std::io::stdin();
     let saved = tcgetattr(&input).unwrap();
     let mut raw = saved.clone();
@@ -151,9 +156,8 @@ pub fn run() {
         }
         output.flush().unwrap();
         drop(output);
-        loop {
-            std::thread::sleep(Duration::from_secs(3600));
-        }
+        std::thread::sleep(Duration::from_secs(60));
+        return;
     }
     surface("READY", "-");
     let mut input = input.lock();

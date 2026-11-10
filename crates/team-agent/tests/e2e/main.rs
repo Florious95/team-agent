@@ -104,6 +104,7 @@ mod framework_tests {
             ta_binary: std::sync::Mutex::new(Some(normalize_existing_path(&bin))),
             owned_tmux_sockets: std::sync::Mutex::new(Vec::new()),
             caller: None,
+            tmux_root: Default::default(),
         };
         let platform_tmp_owned = format!(
             "{} coordinator --workspace {}",

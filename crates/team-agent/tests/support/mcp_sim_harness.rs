@@ -1,9 +1,12 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+#[path = "proc_guard.rs"]
+mod proc_guard;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -38,6 +41,7 @@ fn test_binary_path() -> PathBuf {
 pub struct McpSimHarness {
     workspace: PathBuf,
     backend: TmuxBackend,
+    tmux_root: proc_guard::TmuxRoot,
     session: SessionName,
     panes: BTreeMap<String, PaneId>,
 }
@@ -60,7 +64,11 @@ impl McpSimHarness {
         let _ = std::fs::remove_dir_all(&workspace);
         std::fs::create_dir_all(&workspace).unwrap();
         let workspace = std::fs::canonicalize(workspace).unwrap();
-        let backend = TmuxBackend::for_workspace(&workspace);
+        let tmux_root = proc_guard::TmuxRoot::new();
+        let backend = TmuxBackend::with_runner_for_tmux_endpoint(
+            Box::new(team_agent::tmux_backend::RealCommandRunner),
+            tmux_root.path().join("sim.sock").to_str().unwrap(),
+        );
         let session = SessionName::new(format!(
             "team-mcp-sim-{run_tag}-{}",
             N.fetch_add(1, Ordering::Relaxed)
@@ -68,6 +76,7 @@ impl McpSimHarness {
         let mut harness = Self {
             workspace,
             backend,
+            tmux_root,
             session,
             panes: BTreeMap::new(),
         };
@@ -82,7 +91,7 @@ impl McpSimHarness {
     }
 
     pub fn spawn_mcp_client(&self, worker_id: &str, owner_team_id: &str) -> McpClient {
-        spawn_mcp_client(&self.workspace, worker_id, owner_team_id)
+        spawn_mcp_client_with_catalog_check(&self.workspace, worker_id, owner_team_id, true, Some(self.tmux_root.path()))
     }
 
     pub fn workspace_path(&self) -> &Path {
@@ -307,6 +316,7 @@ impl McpSimHarness {
             &self.workspace,
             &json!({
                 "active_team_key": "teamA",
+                "tmux_socket": self.tmux_root.path().join("sim.sock"),
                 "session_name": session_name,
                 "leader": {"id": "leader"},
                 "team_owner": {
@@ -316,6 +326,7 @@ impl McpSimHarness {
                 },
                 "leader_receiver": {
                     "mode": "direct_tmux",
+                    "tmux_socket": self.tmux_root.path().join("sim.sock"),
                     "owner_epoch": 1,
                     "pane_id": leader_pane,
                     "provider": "codex",
@@ -325,6 +336,7 @@ impl McpSimHarness {
                 "teams": {
                     "teamA": {
                         "session_name": session_name,
+                        "tmux_socket": self.tmux_root.path().join("sim.sock"),
                         "agents": agents,
                         "tasks": [
                             {"id": "task_mcp", "assignee": "worker_a", "status": "pending"}
@@ -349,6 +361,7 @@ impl Drop for McpSimHarness {
     fn drop(&mut self) {
         let _ = self.backend.kill_session(&self.session);
         self.backend.kill_server();
+        self.tmux_root.close();
         let _ = std::fs::remove_dir_all(&self.workspace);
     }
 }
@@ -376,7 +389,10 @@ pub struct ResultRow {
 }
 
 pub struct McpClient {
-    child: Child,
+    #[cfg(unix)]
+    _child: proc_guard::FixtureGroup,
+    #[cfg(not(unix))]
+    _child: std::process::Child,
     stdin: ChildStdin,
     stdout_rx: Receiver<String>,
     next_id: i64,
@@ -430,14 +446,14 @@ pub fn ready_delivery_worker(
             .filter_map(|entry| std::fs::read(entry.path()).ok())
             .filter_map(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
             .any(|value| value["owner"] == owner && value["agent"] == worker
-                && value["server"]["identity"]["pid"] == client.child.id());
+                && value["server"]["identity"]["pid"] == client._child.id());
         if ready { break; }
         assert!(std::time::Instant::now() < deadline,
             "actual stdio helper did not publish its handshake: mcp_events={:?}, child_status={:?}, image_bytes={:?}",
             EventLog::new(&workspace).tail(0).unwrap().into_iter()
                 .filter(|event| event["event"].as_str().is_some_and(|name| name.starts_with("mcp.")))
                 .collect::<Vec<_>>(),
-            client.child.try_wait(),
+            client._child.try_wait(),
             std::fs::metadata(test_binary_path()).map(|metadata| metadata.len()));
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -451,8 +467,10 @@ pub fn ready_delivery_worker(
     })
 }
 
+// Direct-workspace entry point; not every harness consumer needs it.
+#[allow(dead_code)]
 pub fn spawn_mcp_client(workspace: &Path, worker_id: &str, owner_team_id: &str) -> McpClient {
-    spawn_mcp_client_with_catalog_check(workspace, worker_id, owner_team_id, true)
+    spawn_mcp_client_with_catalog_check(workspace, worker_id, owner_team_id, true, None)
 }
 
 pub fn spawn_mcp_client_without_catalog_check(
@@ -460,7 +478,7 @@ pub fn spawn_mcp_client_without_catalog_check(
     worker_id: &str,
     owner_team_id: &str,
 ) -> McpClient {
-    spawn_mcp_client_with_catalog_check(workspace, worker_id, owner_team_id, false)
+    spawn_mcp_client_with_catalog_check(workspace, worker_id, owner_team_id, false, None)
 }
 
 fn spawn_mcp_client_with_catalog_check(
@@ -468,6 +486,7 @@ fn spawn_mcp_client_with_catalog_check(
     worker_id: &str,
     owner_team_id: &str,
     check_catalog: bool,
+    tmux_root: Option<&Path>,
 ) -> McpClient {
     let program = test_binary_path().to_string_lossy().into_owned();
     let args = vec![
@@ -475,7 +494,7 @@ fn spawn_mcp_client_with_catalog_check(
         "--workspace".to_string(),
         workspace.to_string_lossy().to_string(),
     ];
-    let env = BTreeMap::from([
+    let mut env = BTreeMap::from([
         (
             "TEAM_AGENT_WORKSPACE".to_string(),
             workspace.to_string_lossy().to_string(),
@@ -495,6 +514,9 @@ fn spawn_mcp_client_with_catalog_check(
             "leader-session-team-a".to_string(),
         ),
     ]);
+    if let Some(root) = tmux_root {
+        env.insert("TMUX_TMPDIR".into(), root.to_string_lossy().into_owned());
+    }
     let trace_path = workspace
         .join(".team")
         .join("test-evidence")
@@ -511,12 +533,11 @@ fn spawn_mcp_client_with_catalog_check(
     // to the harness's own pane, breaking the bypass).
     command.env_remove("TMUX_PANE");
     command.env_remove("TMUX");
-    let mut child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn team-agent mcp-server");
+    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    #[cfg(unix)]
+    let mut child = proc_guard::FixtureGroup::spawn(&mut command, workspace, Duration::from_secs(120));
+    #[cfg(not(unix))]
+    let mut child = command.spawn().expect("spawn team-agent mcp-server");
     let stdin = child.stdin.take().expect("mcp stdin");
     let stdout = child.stdout.take().expect("mcp stdout");
     let (tx, rx) = mpsc::channel();
@@ -529,7 +550,7 @@ fn spawn_mcp_client_with_catalog_check(
         }
     });
     let mut client = McpClient {
-        child,
+        _child: child,
         stdin,
         stdout_rx: rx,
         next_id: 1,
@@ -664,10 +685,11 @@ impl McpClient {
     }
 }
 
+#[cfg(not(unix))]
 impl Drop for McpClient {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = self._child.kill();
+        let _ = self._child.wait();
     }
 }
 

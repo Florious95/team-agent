@@ -94,7 +94,7 @@ pub fn write_codex_backing(path: &Path, session_id: &str) {
 fn script_body(behavior: ScriptedBehavior) -> String {
     let core = match behavior {
         ScriptedBehavior::SleepUntilKilled => {
-            "trap 'exit 0' TERM INT\necho \"scripted provider $0 args=$@ pid=$$\"\nwhile true; do sleep 5; done\n"
+            "trap 'exit 0' TERM INT\necho \"scripted provider $0 args=$@ pid=$$\"\nsleep 110 & wait $!\n"
         }
         ScriptedBehavior::EchoExit0 => {
             "echo \"scripted provider $0 args=$@\"\nexit 0\n"

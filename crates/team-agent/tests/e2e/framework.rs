@@ -88,6 +88,7 @@ pub struct TestWorkspace {
     /// `e2e_workspace_drop_cleans_exact_tmux_before_removing_workspace`).
     pub(crate) owned_tmux_sockets: Mutex<Vec<PathBuf>>,
     pub(crate) caller: Option<hermetic_guard::HermeticTestEnv>,
+    pub(crate) tmux_root: hermetic_guard::proc_guard::TmuxRoot,
 }
 
 impl TestWorkspace {
@@ -113,6 +114,7 @@ impl TestWorkspace {
             ta_binary: Mutex::new(None),
             owned_tmux_sockets: Mutex::new(Vec::new()),
             caller: None,
+            tmux_root: hermetic_guard::proc_guard::TmuxRoot::new(),
         }
     }
 
@@ -132,7 +134,8 @@ impl TestWorkspace {
             socket.display()
         );
         assert!(
-            socket.is_absolute() && socket.exists() && is_owned_tmux_socket_path(&socket),
+            socket.is_absolute() && socket.exists()
+                && (is_owned_tmux_socket_path(&socket) || socket.starts_with(normalize_existing_path(self.tmux_root.path()))),
             "tmux endpoint must already exist as an owned platform tmux socket: socket={} workspace={}",
             socket.display(),
             self.path.display()
@@ -417,6 +420,7 @@ impl Drop for TestWorkspace {
         // sweep is exact-owned only (verified by RED).
         self.cleanup_owned_coordinator();
         self.cleanup_owned_tmux();
+        self.tmux_root.close();
         if std::env::var("TEAM_AGENT_KEEP_TEST_TMP").as_deref() != Ok("1") {
             remove_workspace_dir(&self.path);
         }
@@ -844,6 +848,7 @@ pub fn run_ta_env(ws: &TestWorkspace, args: &[&str], extra_env: &[(&str, &str)])
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
+    ws.tmux_root.configure(&mut cmd);
     let Output {
         status,
         stdout,

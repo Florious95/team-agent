@@ -679,7 +679,7 @@ impl Transport for RecordingTransport {
 
 fn spawn_group_member(pgid: Option<u32>) -> Child {
     let mut command = Command::new("/bin/sh");
-    command.args(["-c", "trap ':' TERM; while :; do sleep 1; done"]);
+    command.args(["-c", "trap ':' TERM; sleep 60 & wait $!"]);
     unsafe {
         command.pre_exec(move || {
             let target = pgid.map_or(0, |value| value as libc::pid_t);

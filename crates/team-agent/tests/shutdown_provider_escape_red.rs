@@ -14,6 +14,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+#[path = "support/proc_guard.rs"]
+mod proc_guard;
 #[path = "support/hermetic.rs"]
 mod hermetic_guard;
 #[allow(dead_code)]
@@ -21,7 +23,7 @@ fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -31,8 +33,6 @@ use team_agent::state::persist::save_runtime_state;
 use team_agent::tmux_backend::TmuxBackend;
 use team_agent::transport::{SessionName, Transport, WindowName};
 
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
 
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_team-agent")
@@ -51,7 +51,7 @@ fn shutdown_real_tmux_list_targets_populates_pane_pid() {
             &[
                 "/bin/sh".into(),
                 "-lc".into(),
-                "while true; do sleep 60; done".into(),
+                "sleep 60 & wait $!".into(),
             ],
             &case.workspace,
             &BTreeMap::new(),
@@ -184,7 +184,7 @@ impl DefaultSocketSessionCase {
                 &[
                     "/bin/sh".into(),
                     "-lc".into(),
-                    "while true; do sleep 60; done".into(),
+                    "sleep 60 & wait $!".into(),
                 ],
                 workspace,
                 &BTreeMap::new(),
@@ -226,19 +226,18 @@ impl Drop for WorkspaceCleanup {
 }
 
 struct ManagedChild {
-    child: Child,
+    child: proc_guard::FixtureGroup,
 }
 
 impl ManagedChild {
     fn spawn_mcp_server(workspace: &Path) -> Self {
-        let child = Command::new(bin())
-            .args(["mcp-server", "--workspace", workspace.to_str().unwrap()])
+        let mut command = Command::new(bin());
+        command.args(["mcp-server", "--workspace", workspace.to_str().unwrap()])
             .current_dir(workspace)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn dummy workspace MCP server process");
+            .stderr(Stdio::null());
+        let child = proc_guard::FixtureGroup::spawn(&mut command, workspace, Duration::from_secs(60));
         wait_until_live(child.id());
         Self { child }
     }
@@ -247,7 +246,7 @@ impl ManagedChild {
         let script = workspace.join("codex");
         std::fs::write(
             &script,
-            "#!/bin/sh\ntrap 'exit 0' TERM INT\nwhile :; do sleep 60; done\n",
+            "#!/bin/sh\ntrap 'exit 0' TERM INT\nsleep 60 & wait $!\n",
         )
         .unwrap();
         let mut perms = std::fs::metadata(&script).unwrap().permissions();
@@ -264,13 +263,7 @@ impl ManagedChild {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        #[cfg(unix)]
-        {
-            command.process_group(0);
-        }
-        let child = command
-            .spawn()
-            .expect("spawn provider-like escaped pgid process");
+        let child = proc_guard::FixtureGroup::spawn(&mut command, workspace, Duration::from_secs(60));
         wait_until_live(child.id());
         Self { child }
     }
@@ -285,19 +278,6 @@ impl ManagedChild {
             Ok(None) => pid_is_alive(self.pid()),
             Err(_) => pid_is_alive(self.pid()),
         }
-    }
-}
-
-impl Drop for ManagedChild {
-    fn drop(&mut self) {
-        if self.is_alive() {
-            kill_pid(self.pid(), libc::SIGTERM);
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        if self.is_alive() {
-            kill_pid(self.pid(), libc::SIGKILL);
-        }
-        let _ = self.child.wait();
     }
 }
 
@@ -411,13 +391,4 @@ fn pid_is_alive(pid: u32) -> bool {
     }
     let err = std::io::Error::last_os_error();
     err.raw_os_error() == Some(libc::EPERM)
-}
-
-fn kill_pid(pid: u32, signal: libc::c_int) {
-    let Ok(pid_t) = libc::pid_t::try_from(pid) else {
-        return;
-    };
-    unsafe {
-        libc::kill(pid_t, signal);
-    }
 }

@@ -114,7 +114,7 @@ impl MissingStateCase {
                 &[
                     "/bin/sh".to_string(),
                     "-lc".to_string(),
-                    "while true; do sleep 60; done".to_string(),
+                    "sleep 60 & wait $!".to_string(),
                 ],
                 &self.workspace,
                 &BTreeMap::new(),

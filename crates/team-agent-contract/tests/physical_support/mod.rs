@@ -2,6 +2,89 @@
 // Developer-owned controlled fixtures, never a Kiro profile or native acceptance claim.
 #[cfg(unix)]
 pub mod native_terminal;
+
+/// Own all native tmux endpoints below one freshly created /tmp/tac-* root.
+/// The independent process group survives test SIGINT/SIGKILL; EOF reaps sockets.
+#[cfg(unix)]
+pub struct OwnedTmuxRoot {
+    path: std::path::PathBuf,
+    reaper: std::process::Child,
+    lifeline: Option<std::process::ChildStdin>,
+}
+#[cfg(unix)]
+impl OwnedTmuxRoot {
+    pub fn new(path: &std::path::Path, tmux: &std::path::Path) -> Self {
+        use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+        use std::process::{Command, Stdio};
+        let path = path.canonicalize().expect("owned test root exists");
+        assert_eq!(
+            path.parent(),
+            Some(
+                std::path::Path::new("/tmp")
+                    .canonicalize()
+                    .unwrap()
+                    .as_path()
+            )
+        );
+        assert!(path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("tac-"));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let script = r#"
+            trap '' INT HUP TERM; trap ':' USR1;
+            root=$1; tmux=$2;
+            walk() {
+                [ "$2" -gt 0 ] || return;
+                for entry in "$1"/*; do
+                    [ -L "$entry" ] && continue;
+                    if [ -S "$entry" ]; then "$tmux" -S "$entry" kill-server >/dev/null 2>&1 || :;
+                    elif [ -d "$entry" ]; then walk "$entry" "$(($2 - 1))"; fi;
+                done;
+            };
+            exec 3<&0;
+            (trap '' USR1; sleep 110; kill -USR1 -"$$"; sleep 5; kill -KILL -"$$") &
+            cat <&3 >/dev/null & reader=$!;
+            wait "$reader" || :;
+            walk "$root" 4; rm -rf -- "$root";
+            kill -KILL -"$$";
+        "#
+        .lines()
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(" ");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", &script, "contract-root-reaper"])
+            .arg(&path)
+            .arg(tmux)
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0);
+        let mut reaper = command.spawn().expect("spawn owned root reaper");
+        let lifeline = reaper.stdin.take();
+        Self {
+            path,
+            reaper,
+            lifeline,
+        }
+    }
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+#[cfg(unix)]
+impl Drop for OwnedTmuxRoot {
+    fn drop(&mut self) {
+        self.lifeline.take();
+        let _ = self.reaper.wait();
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;

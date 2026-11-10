@@ -737,7 +737,7 @@ if [ "$1" = "--version" ]; then
   printf 'Claude Code 1.0.0\n'
   exit 0
 fi
-while :; do sleep 1; done
+sleep 60 & wait $!
 "#,
                 provider_log.display()
             ),

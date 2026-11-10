@@ -167,6 +167,7 @@ fn native_case_with(mode: &str, content: &str, expected_keys: usize, shared_work
     let mut identity = owner();
     identity.instance = InstanceId::new(format!("native-{mode}-{nonce}")).unwrap();
     let directory = ScopedDirectory::create(&root, identity.clone()).unwrap();
+    let _owned_root = OwnedTmuxRoot::new(&root, &tmux);
     println!(
         "CONTROLLED_NATIVE_FIXTURE_ROOT={}",
         directory.path().display()

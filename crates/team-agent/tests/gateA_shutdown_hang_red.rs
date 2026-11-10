@@ -755,7 +755,7 @@ impl ShutdownHangCase {
 
     fn spawn_provider_like_process_without_workspace_arg(&mut self) -> HelperProcess {
         let script = self.bin_dir.join("node");
-        write_executable(&script, "#!/bin/sh\nwhile true; do sleep 60; done\n");
+        write_executable(&script, "#!/bin/sh\nsleep 60 & wait $!\n");
         let child = Command::new(&script)
             .arg("provider-helper")
             .current_dir(&self.workspace)
@@ -847,7 +847,7 @@ impl EndpointCase {
                 &[
                     "/bin/sh".to_string(),
                     "-lc".to_string(),
-                    "while true; do sleep 60; done".to_string(),
+                    "sleep 60 & wait $!".to_string(),
                 ],
                 &self.workspace,
                 &std::collections::BTreeMap::new(),
@@ -976,7 +976,7 @@ impl ShutdownPartialCase {
                 &[
                     "/bin/sh".to_string(),
                     "-lc".to_string(),
-                    "while true; do sleep 60; done".to_string(),
+                    "sleep 60 & wait $!".to_string(),
                 ],
                 &self.workspace,
                 &std::collections::BTreeMap::new(),
@@ -1000,7 +1000,7 @@ impl ShutdownPartialCase {
 
     fn spawn_provider_like_process_without_workspace_arg(&mut self) -> HelperProcess {
         let script = self.bin_dir.join("node");
-        write_executable(&script, "#!/bin/sh\nwhile true; do sleep 60; done\n");
+        write_executable(&script, "#!/bin/sh\nsleep 60 & wait $!\n");
         let child = Command::new(&script)
             .arg("provider-helper")
             .current_dir(&self.workspace)
@@ -1083,7 +1083,7 @@ impl ShutdownWritebackCase {
                 &[
                     "/bin/sh".to_string(),
                     "-lc".to_string(),
-                    "while true; do sleep 60; done".to_string(),
+                    "sleep 60 & wait $!".to_string(),
                 ],
                 &self.workspace,
                 &std::collections::BTreeMap::new(),

@@ -10,8 +10,6 @@ mod hermetic_guard;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
-use std::process::Child;
 
 use hermetic_guard::HermeticTestEnv;
 use serial_test::serial;
@@ -184,7 +182,7 @@ fn invocation_variants(command: &str, workspace: &Path) -> Vec<(String, Vec<Stri
 }
 
 #[cfg(unix)]
-struct ProcessCanary(Child);
+struct ProcessCanary(hermetic_guard::proc_guard::FixtureGroup);
 
 #[cfg(unix)]
 impl ProcessCanary {
@@ -197,16 +195,6 @@ impl ProcessCanary {
             Ok(None) => Ok(()),
             Ok(Some(status)) => Err(format!("canary exited unexpectedly: {status}")),
             Err(error) => Err(format!("cannot inspect canary: {error}")),
-        }
-    }
-}
-
-#[cfg(unix)]
-impl Drop for ProcessCanary {
-    fn drop(&mut self) {
-        if self.0.try_wait().ok().flatten().is_none() {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
         }
     }
 }

@@ -287,7 +287,7 @@ case "${{1:-}}" in
   mcp|config|doctor|auth|update|--help|-h) exit 0 ;;
 esac
 env >'{lab}/leader.env.tmp' && mv '{lab}/leader.env.tmp' '{env}'
-while :; do sleep 1; done
+sleep 60 & wait $!
 "#,
             lab = lab.display(),
             ta = ta_binary().display(),

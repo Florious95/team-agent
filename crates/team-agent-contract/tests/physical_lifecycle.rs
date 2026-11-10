@@ -191,6 +191,7 @@ fn real_tmux_target_is_journaled_reopened_fenced_delivered_and_stopped_by_shared
         .unwrap()
         .join(format!("tac-k23-{}-{nonce}", std::process::id()));
     std::fs::create_dir(&parent).unwrap();
+    let _owned_root = physical_support::OwnedTmuxRoot::new(&parent, &tmux);
     let root = parent.join("owned");
     let mut store =
         ContractStore::create(&root, ScopeId::new("scope").unwrap(), "fixture-coordinator")
