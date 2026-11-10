@@ -199,8 +199,19 @@ impl TeamOrchestratorTools {
         // native CLI send, resolve its targets at call time instead of freezing
         // it into a worker seat in the launch team.
         let owner_team = if sender == "leader" { None } else { self.canonical_owner_team_key()? };
+        // Source metadata must not turn the leader's native addressing into a
+        // seat scope or prevent sends when its launch team is no longer present.
+        let leader_source = (sender == "leader").then(|| self.owner_team_id.as_ref()).flatten().map(|owner| {
+            let team = crate::direct_delivery::directory(&self.workspace, Some(owner.as_str()))
+                .ok().and_then(|directory| directory.team).unwrap_or_else(|| owner.as_str().to_string());
+            TrustedSender::from_runtime_identity_with_source(
+                AgentId::new(sender), self.workspace.display(), &team,
+            )
+        });
         let authority = if sender == "leader" {
-            crate::station::send::Authority::Operator { sender }
+            crate::station::send::Authority::Operator {
+                sender: leader_source.as_ref().map_or(sender, TrustedSender::display_name),
+            }
         } else {
             let team = owner_team.as_ref().ok_or_else(|| tool_runtime_error("captured team is unavailable"))?.as_str();
             crate::station::send::Authority::Seat { sender, team }

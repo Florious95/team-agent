@@ -357,12 +357,16 @@ fn send_one(
         return Err(format!("unknown recipient: {recipient}"));
     }
     crate::coordinator::retire_legacy_coordinator(&directory.workspace)?;
-    let (_, origin) = message_source(authority, req.workspace);
+    let (source_sender, origin) = message_source(authority, req.workspace);
     let origin = origin.map(|(workspace, team)| {
         let workspace = crate::model::paths::canonical_run_workspace(&workspace).unwrap_or(workspace);
         (workspace, team)
     });
-    let sender = authority.sender();
+    let sender = match &origin {
+        Some((workspace, team)) if same_workspace(workspace, &directory.workspace)
+            && directory.team.as_deref() == Some(team.as_str()) => source_sender.as_str(),
+        _ => authority.sender(),
+    };
     let kind = if req.envelope.is_some() {
         "result"
     } else {
