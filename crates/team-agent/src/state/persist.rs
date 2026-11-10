@@ -819,10 +819,15 @@ fn apply_persist_merge_contract_with_fork_target_preservation(
                 entry
             });
         let latest_projection = canonical_projection.as_ref().unwrap_or(latest);
+        // Stage 3c keeps owner epochs on canonical team entries, not the root.
+        let incoming_projection = canonical_projection.as_ref()
+            .and_then(|_| top_level_team.as_deref())
+            .and_then(|team| incoming.get("teams")?.get(team))
+            .unwrap_or(incoming);
         let mut topology_update_agent_ids =
             topology_updates_for_team(topology_updates, top_level_team.as_deref());
         topology_update_agent_ids.extend(endpoint_convergence_invalidated_agents(
-            incoming, latest_projection, top_level_team.as_deref().is_some_and(|team| receiver_updates.contains(team)),
+            incoming_projection, latest_projection, top_level_team.as_deref().is_some_and(|team| receiver_updates.contains(team)),
         ));
         preserve_latest_retired_agents(incoming, latest_projection, &topology_update_agent_ids)?;
         // 0.5.26 (§7.3): top-level projection uses the incoming root state's
