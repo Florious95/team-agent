@@ -357,7 +357,7 @@ fn send_one(
         return Err(format!("unknown recipient: {recipient}"));
     }
     crate::coordinator::retire_legacy_coordinator(&directory.workspace)?;
-    let (source_sender, mut origin) = message_source(authority, req.workspace);
+    let (mut source_sender, mut origin) = message_source(authority, req.workspace);
     // One terminal can lead several teams, including teams created after MCP
     // launch. Resolve that relationship for this recipient, not the launch team.
     if source_sender == "leader" {
@@ -367,7 +367,17 @@ fn send_one(
                 let leader = crate::direct_delivery::directory(workspace, Some(team)).ok()?.endpoint("leader").ok()?;
                 Some((leader.socket, leader.pane_id))
             });
-        if caller.as_ref().is_some_and(|(socket, pane)| {
+        // A parent-team worker may also lead a child team from this same pane.
+        // Its worker seat takes presentation priority when addressing the parent.
+        let worker = std::env::var("TEAM_AGENT_ID").ok().map(|id| id.trim().to_string())
+            .filter(|id| id != "leader" && caller.as_ref().is_some_and(|(socket, pane)| {
+                directory.endpoint(id).is_ok_and(|seat|
+                    crate::direct_delivery::leader_target_is_sender(&seat, Some(socket), Some(pane)))
+            }));
+        if let Some(worker) = worker {
+            source_sender = worker;
+            origin = directory.team.as_ref().map(|team| (directory.workspace.clone(), team.clone()));
+        } else if caller.as_ref().is_some_and(|(socket, pane)| {
             directory.endpoint("leader").is_ok_and(|leader|
                 crate::direct_delivery::leader_target_is_sender(&leader, Some(socket), Some(pane)))
         }) {

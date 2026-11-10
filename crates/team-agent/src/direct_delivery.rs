@@ -62,8 +62,12 @@ pub(crate) fn leader_directory_for_ancestors(workspace: &Path, ancestors: &[u32]
 fn leader_directory_matching(workspace: &Path, matches: impl Fn(&Endpoint) -> bool) -> Option<Directory> {
     let workspace = crate::model::paths::canonical_run_workspace(workspace).ok()?;
     let state = snapshot(&workspace).ok()?;
-    state.get("teams").and_then(Value::as_object).into_iter()
-        .flat_map(|teams| teams.keys().map(|key| Some(key.as_str())))
+    let mut teams: Vec<_> = state.get("teams").and_then(Value::as_object).into_iter()
+        .flat_map(|teams| teams.iter()).collect();
+    // Prefer populated business teams; the bootstrap "current" scope is last.
+    teams.sort_by_key(|(key, team)| (key.as_str() == "current",
+        team.get("agents").and_then(Value::as_object).is_none_or(|agents| agents.is_empty())));
+    teams.into_iter().map(|(key, _)| Some(key.as_str()))
         .chain(std::iter::once(None)).find_map(|team| {
             let directory = directory(&workspace, team).ok()?;
             directory.endpoint("leader").is_ok_and(|leader| matches(&leader)).then_some(directory)
