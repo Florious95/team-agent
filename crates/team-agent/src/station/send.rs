@@ -74,6 +74,7 @@ fn message_source(authority: Authority<'_>, workspace: &Path) -> (String, Option
 
 pub(crate) fn sender_label(sender: &str, origin: Option<(&Path, &str)>, workspace: &Path, team: Option<&str>) -> String {
     let Some((source_workspace, source_team)) = origin else { return sender.to_string() };
+    let sender = sender.rsplit('/').next().unwrap_or(sender);
     if !same_workspace(source_workspace, workspace) {
         let short = source_workspace.file_name().unwrap_or(source_workspace.as_os_str()).to_string_lossy();
         format!("{sender} of team {source_team} in {short}")
@@ -356,12 +357,12 @@ fn send_one(
         return Err(format!("unknown recipient: {recipient}"));
     }
     crate::coordinator::retire_legacy_coordinator(&directory.workspace)?;
-    let (source_sender, origin) = message_source(authority, req.workspace);
+    let (_, origin) = message_source(authority, req.workspace);
     let origin = origin.map(|(workspace, team)| {
         let workspace = crate::model::paths::canonical_run_workspace(&workspace).unwrap_or(workspace);
         (workspace, team)
     });
-    let sender = source_sender.as_str();
+    let sender = authority.sender();
     let kind = if req.envelope.is_some() {
         "result"
     } else {
@@ -468,7 +469,7 @@ fn send_one(
         return Ok(result);
     }
     let text = if framing == Framing::Bare { req.content.to_owned() }
-        else { render(&sender_label(&source_sender, origin.as_ref().map(|(ws, team)| (ws.as_path(), team.as_str())), &directory.workspace, directory.team.as_deref()), req.content, id, req.envelope.is_some()) };
+        else { render(&sender_label(sender, origin.as_ref().map(|(ws, team)| (ws.as_path(), team.as_str())), &directory.workspace, directory.team.as_deref()), req.content, id, req.envelope.is_some()) };
     match directory.send_with_framing(recipient, &text, framing, || {
         if req.envelope.is_none() {
             if let Some(task) = req.task_id {
@@ -647,6 +648,7 @@ mod origin_presentation_tests {
         assert_eq!(sender_label("leader", origin, ws, Some("alpha")), "leader");
         assert_eq!(sender_label("worker", origin, ws, Some("alpha")), "worker");
         assert_eq!(sender_label("leader", origin, ws, Some("beta")), "leader of team alpha");
+        assert_eq!(sender_label("/source/project::alpha/leader", origin, ws, Some("alpha")), "leader");
         assert_eq!(sender_label("worker", origin, ws, Some("beta")), "worker of team alpha");
         assert_eq!(sender_label("leader", origin, Path::new("/other"), Some("alpha")),
             "leader of team alpha in project");
