@@ -46,14 +46,14 @@ pub fn snapshot(workspace: &Path) -> Result<Value, String> {
 
 /// Presentation lookup only: identify a team led by this terminal without changing scope.
 pub(crate) fn leader_directory_for_terminal(workspace: &Path, socket: &str, pane: &str) -> Option<Directory> {
-    leader_directory_matching(workspace, |leader| leader_target_is_sender(leader, Some(socket), Some(pane)))
+    leader_directory_matching(workspace, |_, leader| leader_target_is_sender(leader, Some(socket), Some(pane)))
 }
 
 /// Environment-scrubbed provider tools still descend from their bound leader pane.
 pub(crate) fn leader_directory_for_ancestors(workspace: &Path) -> Option<Directory> {
     let deadline = Instant::now() + Duration::from_secs(2);
     let ancestors = std::cell::OnceCell::new();
-    leader_directory_matching(workspace, |leader| {
+    leader_directory_matching(workspace, |directory, leader| {
         // No ancestry work without a local leader. macOS parent lookup is native,
         // so a scrubbed shell does not fork ps for each ancestor.
         let ancestors = ancestors.get_or_init(|| {
@@ -65,13 +65,18 @@ pub(crate) fn leader_directory_for_ancestors(workspace: &Path) -> Option<Directo
             }
             ancestors
         });
+        let recorded_pid = directory.recipient("leader").ok().and_then(|row|
+            row["pane_pid"].as_u64().or_else(|| row["pane_pid"].as_str()?.parse().ok()));
+        if recorded_pid.is_some_and(|pid| !ancestors.iter().any(|ancestor| u64::from(*ancestor) == pid)) {
+            return false;
+        }
         pane_identity(&leader.socket, &leader.pane_id, deadline).ok()
             .and_then(|identity| identity.split('|').nth(1)?.parse::<u32>().ok())
             .is_some_and(|pid| ancestors.contains(&pid))
     })
 }
 
-fn leader_directory_matching(workspace: &Path, matches: impl Fn(&Endpoint) -> bool) -> Option<Directory> {
+fn leader_directory_matching(workspace: &Path, matches: impl Fn(&Directory, &Endpoint) -> bool) -> Option<Directory> {
     let workspace = crate::model::paths::canonical_run_workspace(workspace).ok()?;
     let state = snapshot(&workspace).ok()?;
     let mut teams: Vec<_> = state.get("teams").and_then(Value::as_object).into_iter()
@@ -82,7 +87,7 @@ fn leader_directory_matching(workspace: &Path, matches: impl Fn(&Endpoint) -> bo
     teams.into_iter().map(|(key, _)| Some(key.as_str()))
         .chain(std::iter::once(None)).find_map(|team| {
             let directory = directory(&workspace, team).ok()?;
-            directory.endpoint("leader").is_ok_and(|leader| matches(&leader)).then_some(directory)
+            directory.endpoint("leader").is_ok_and(|leader| matches(&directory, &leader)).then_some(directory)
         })
 }
 
