@@ -1323,20 +1323,31 @@ fn trusted_cli_sender(cwd: &Path, workspace: &Path) -> Result<TrustedSender, Cli
     let caller_pane = std::env::var("TMUX_PANE").ok();
     // Source identity is independent of --workspace/--team (destination selectors).
     // A bound leader terminal still outranks inherited worker environment.
-    if let (Some(socket), Some(pane)) = (caller_socket, caller_pane) {
-        let mut sources = vec![cwd.to_path_buf()];
-        sources.extend(std::env::var_os("TEAM_AGENT_WORKSPACE").map(PathBuf::from));
-        sources.extend(crate::leader::registry::snapshots().into_iter().map(|entry| entry.workspace));
-        sources.push(workspace.to_path_buf());
-        for source in sources {
-            if let Some(directory) = crate::direct_delivery::leader_directory_for_terminal(&source, &socket, &pane) {
-                return Ok(match directory.team {
-                    Some(team) => TrustedSender::from_runtime_identity_with_source(
-                        crate::model::ids::AgentId::new("leader"), directory.workspace.display(), &team,
-                    ),
-                    None => TrustedSender::leader(),
-                });
-            }
+    let terminal = caller_socket.zip(caller_pane);
+    let mut ancestors = Vec::new();
+    if terminal.is_none() {
+        let mut parent = crate::platform::process::current_parent_pid();
+        while let Some(pid) = parent.filter(|pid| *pid > 1 && !ancestors.contains(pid)) {
+            ancestors.push(pid);
+            parent = crate::platform::argv::parent_pid(pid);
+        }
+    }
+    let mut sources = vec![cwd.to_path_buf()];
+    sources.extend(std::env::var_os("TEAM_AGENT_WORKSPACE").map(PathBuf::from));
+    sources.extend(crate::leader::registry::snapshots().into_iter().map(|entry| entry.workspace));
+    sources.push(workspace.to_path_buf());
+    for source in sources {
+        let directory = match &terminal {
+            Some((socket, pane)) => crate::direct_delivery::leader_directory_for_terminal(&source, socket, pane),
+            None => crate::direct_delivery::leader_directory_for_ancestors(&source, &ancestors),
+        };
+        if let Some(directory) = directory {
+            return Ok(match directory.team {
+                Some(team) => TrustedSender::from_runtime_identity_with_source(
+                    crate::model::ids::AgentId::new("leader"), directory.workspace.display(), &team,
+                ),
+                None => TrustedSender::leader(),
+            });
         }
     }
     let agent_id = std::env::var("TEAM_AGENT_ID")

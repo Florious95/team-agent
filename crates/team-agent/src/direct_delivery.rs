@@ -46,15 +46,27 @@ pub fn snapshot(workspace: &Path) -> Result<Value, String> {
 
 /// Presentation lookup only: identify a team led by this terminal without changing scope.
 pub(crate) fn leader_directory_for_terminal(workspace: &Path, socket: &str, pane: &str) -> Option<Directory> {
+    leader_directory_matching(workspace, |leader| leader_target_is_sender(leader, Some(socket), Some(pane)))
+}
+
+/// Environment-scrubbed provider tools still descend from their bound leader pane.
+pub(crate) fn leader_directory_for_ancestors(workspace: &Path, ancestors: &[u32]) -> Option<Directory> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    leader_directory_matching(workspace, |leader| {
+        pane_identity(&leader.socket, &leader.pane_id, deadline).ok()
+            .and_then(|identity| identity.split('|').nth(1)?.parse::<u32>().ok())
+            .is_some_and(|pid| ancestors.contains(&pid))
+    })
+}
+
+fn leader_directory_matching(workspace: &Path, matches: impl Fn(&Endpoint) -> bool) -> Option<Directory> {
     let workspace = crate::model::paths::canonical_run_workspace(workspace).ok()?;
     let state = snapshot(&workspace).ok()?;
     state.get("teams").and_then(Value::as_object).into_iter()
         .flat_map(|teams| teams.keys().map(|key| Some(key.as_str())))
         .chain(std::iter::once(None)).find_map(|team| {
             let directory = directory(&workspace, team).ok()?;
-            let matches = directory.endpoint("leader").is_ok_and(|leader|
-                leader_target_is_sender(&leader, Some(socket), Some(pane)));
-            matches.then_some(directory)
+            directory.endpoint("leader").is_ok_and(|leader| matches(&leader)).then_some(directory)
         })
 }
 
