@@ -183,8 +183,7 @@ pub(crate) fn start_role_config(
     let (_, record) = backend::start(workspace, team, role, members)
         .map_err(|e| error(e.to_string()))?;
     if record.outcome != Outcome::Committed {
-        return Err(error(format!("native startup seat={} operation={:?} phase={:?} outcome={:?}: {}",
-            seat.as_str(), record.id, record.phase, record.outcome, record.failure.unwrap_or_default())));
+        return Err(error(format!("native startup seat={}: {}", seat.as_str(), backend::receipt_error(record))));
     }
     // Preserve each committed seat before a later discovery/spawn can fail.
     // A whole-batch error must never hide this generation's physical effects.
@@ -283,13 +282,10 @@ pub(crate) fn project_seat_with_row(
         (team_agent_contract::contract::types::LogicalTool::GetTeamStatus, "get_team_status"),
     ].into_iter().map(|(tool, name)| (name.into(), json!(if observed.contains(&tool) { "observed" } else { "unknown" }))).collect();
     let binding_status = if observed.len() == 3 { "observed" } else if observed.is_empty() { "unverified" } else { "partial" };
-    let status = if seat.status == SeatStatus::Stopped {
-        "stopped"
-    } else if seat.status != SeatStatus::Unknown && alive {
-        "running"
-    } else {
-        "unknown"
-    };
+    let needs_recovery = backend.store.unfinished()?.iter().any(|record|
+        record.outcome == Outcome::NeedsRecovery && (record.target.identity == seat.identity
+            || record.parent.as_ref().is_some_and(|parent| parent.identity == seat.identity)));
+    let status = runtime_status(seat.status, alive, needs_recovery);
     let (activity, health) = activity_status((status == "running")
         .then(|| backend::observe_activity(&backend.binding, &seat)).and_then(Result::ok).flatten());
     let session_warning = if seat.session.is_none() {
@@ -305,13 +301,19 @@ pub(crate) fn project_seat_with_row(
         "runtime_family":"contract","contract_scope":seat.identity.scope,"contract_instance":seat.identity.instance,
         "generation":seat.identity.generation,"owner_team_id":team,"team_key":team,
         "session_observation":if seat.session.is_some() { "observed" } else { "unobserved" },
-        "session_warning":session_warning,
+        "session_warning":session_warning,"native_recovery_required":needs_recovery,
         "session_id":seat.session.map(|session| session.native_session),
         "native_endpoint":seat.endpoint,"native_pane":seat.pane,
         "pane_id":seat.pane,"tmux_endpoint":seat.endpoint,"window":null,"session_name":null,
         "mcp_binding":binding_status,"mcp_binding_source":binding_source,"mcp_tools":tools,
         "bootstrap_used":seat.bootstrap_used}),
     )
+}
+
+fn runtime_status(status: SeatStatus, alive: bool, needs_recovery: bool) -> &'static str {
+    if status == SeatStatus::Stopped { "stopped" }
+    else if status != SeatStatus::Unknown && alive && !needs_recovery { "running" }
+    else { "unknown" }
 }
 
 fn activity_status(observed: Option<team_agent_contract::contract::probe::SemanticEvidence>) -> (&'static str, &'static str) {
@@ -376,6 +378,15 @@ pub fn stop_selected_with_budget(workspace: &Path, state: &Value, budget: std::t
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_process_is_not_running_while_startup_needs_recovery() {
+        for status in [SeatStatus::Starting, SeatStatus::Ready, SeatStatus::Unknown] {
+            assert_eq!(runtime_status(status, true, true), "unknown");
+        }
+        assert_eq!(runtime_status(SeatStatus::Ready, true, false), "running");
+        assert_eq!(runtime_status(SeatStatus::Stopped, true, true), "stopped");
+    }
 
     #[test]
     fn native_activity_requires_independent_semantic_evidence() {

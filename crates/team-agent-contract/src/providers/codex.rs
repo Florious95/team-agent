@@ -85,6 +85,12 @@ impl PlanHook for CodexAdapter {
         // the engine in the owned pane.
         let mut arguments: Vec<OsString> = session.map(|(subcommand, _)| OsString::from(subcommand)).into_iter().collect();
         arguments.extend(["--no-alt-screen".into(), "--no-daemon".into(), "-c".into(), "check_for_update_on_startup=false".into()]);
+        // A verified ResumeBinding owns the launch CWD, including a relocated
+        // authority workspace. Never reopen the obsolete cwd saved in the native
+        // thread or persist an "Always" preference in the user's configuration.
+        if r.operation == Operation::Resume {
+            arguments.extend(["-c".into(), "tui.resume_cwd=\"current\"".into()]);
+        }
         let model = arguments.len();
         arguments.extend(["--model".into(), resolved.model().ok_or(ContractError::Invalid("Codex exact model"))?.into()]);
         let start = arguments.len();

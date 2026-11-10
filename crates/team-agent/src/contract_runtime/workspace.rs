@@ -7,7 +7,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use team_agent_contract::contract::{session::CwdIdentity, types::SeatId};
-use team_agent_contract::host::process::{cwd_matches, resolve_cwd, stable_cwd};
+use team_agent_contract::host::process::{cwd_matches, resolve_cwd_like, stable_cwd};
 
 use super::backend::{root_for, BackendError, Binding};
 use super::registry::NativeProvider;
@@ -35,7 +35,7 @@ pub(super) fn bind_cwd(
 /// Only an adopted binding can vouch for a legacy CWD after device renumbering.
 /// New incarnation evidence never falls back to a path-only comparison.
 pub(super) fn current_cwd(binding: &Binding, cwd: &CwdIdentity) -> Result<CwdIdentity, BackendError> {
-    let current = resolve_cwd(&cwd.path).map_err(|error| BackendError::Continuity(format!("cannot reopen preserved CWD {}: {error}", cwd.path.display())))?;
+    let current = resolve_cwd_like(&cwd.path, &binding.workspace).map_err(|error| BackendError::Continuity(format!("cannot reopen preserved CWD {}: {error}", cwd.path.display())))?;
     if cwd_matches(cwd)? || (!stable_cwd(cwd) && !stable_cwd(&binding.workspace)
         && current.path == cwd.path
         && (cwd.path == binding.workspace.path
@@ -117,7 +117,7 @@ pub(super) fn prepare(binding: &Binding, seat: &SeatId) -> Result<CwdIdentity, B
     // enough evidence that this framework owns the previous incarnation.
     std::fs::DirBuilder::new().mode(0o700).create(&path)?;
     validate_directory(&path)?;
-    let cwd = resolve_cwd(&path)?;
+    let cwd = resolve_cwd_like(&path, &binding.workspace)?;
     let record = CwdRecord { version: 2, seat: seat.clone(), cwd: cwd.clone() };
     let bytes = serde_json::to_vec(&record).map_err(|_| BackendError::Metadata)?;
     let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
@@ -153,6 +153,7 @@ fn validate_directory(path: &Path) -> Result<(), BackendError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use team_agent_contract::host::process::{legacy_cwd, resolve_cwd};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use team_agent_contract::contract::types::{Digest, ScopeId};
@@ -185,6 +186,27 @@ mod tests {
             let _ = std::fs::remove_dir_all(&self.path);
             let _ = std::fs::remove_dir_all(&self.binding.transport_root);
         }
+    }
+
+    #[test]
+    fn retained_v1_binding_mints_v1_seat_cwds_including_private_and_resumed_seats() {
+        let mut f = Fixture::new();
+        f.binding.workspace = legacy_cwd(&f.path).unwrap();
+        let binding_before = serde_json::to_vec(&f.binding).unwrap();
+        let seat = SeatId::new("worker").unwrap();
+        for provider in [NativeProvider::Pi, NativeProvider::Claude, NativeProvider::Codex, NativeProvider::GrokBuild, NativeProvider::Kiro] {
+            let cwd = bind_cwd(&f.binding, provider, &seat, None).unwrap();
+            assert_eq!(cwd, legacy_cwd(&cwd.path).unwrap());
+        }
+        let private = prepare(&f.binding, &seat).unwrap();
+        assert_eq!(private, legacy_cwd(&private.path).unwrap());
+        // Refresh device-drifted v1 evidence without upgrading the retained scope.
+        let mut drifted = private.clone();
+        drifted.identity = Digest([99; 32]);
+        assert_eq!(current_cwd(&f.binding, &drifted).unwrap(), private);
+        // A seat created by an earlier candidate may already have stable evidence.
+        assert_eq!(current_cwd(&f.binding, &resolve_cwd(&private.path).unwrap()).unwrap(), private);
+        assert_eq!(serde_json::to_vec(&f.binding).unwrap(), binding_before);
     }
 
     #[test]
@@ -279,8 +301,9 @@ mod tests {
         assert!(current_cwd(&f.binding, &legacy).is_err());
         f.binding.workspace = legacy.clone();
         let seat = SeatId::new("worker").unwrap();
-        assert_eq!(bind_cwd(&f.binding, NativeProvider::Pi, &seat, Some(&legacy)).unwrap(), current);
-        assert_eq!(bind_cwd(&f.binding, NativeProvider::Claude, &seat, Some(&legacy)).unwrap(), current);
+        let compatible = legacy_cwd(&f.path).unwrap();
+        assert_eq!(bind_cwd(&f.binding, NativeProvider::Pi, &seat, Some(&legacy)).unwrap(), compatible);
+        assert_eq!(bind_cwd(&f.binding, NativeProvider::Claude, &seat, Some(&legacy)).unwrap(), compatible);
         // Adoption is not permission to bypass a new, recoverable incarnation.
         let mut changed = current.clone();
         changed.identity.0[8] ^= 1;

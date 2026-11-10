@@ -15,7 +15,7 @@ use crate::host::{
     digest, digest_hex,
     files::ScopedDirectory,
     materialize::remove_quiescent,
-    process::{resolve_cwd, ProcessState},
+    process::ProcessState,
     tmux::{CloseReceipt, HostLimits, SharedTmux, TmuxHost},
     transport::*,
     HostError,
@@ -676,7 +676,7 @@ impl LifecycleHost for PhysicalRuntime<'_> {
             if resource.path.root() != runtime {
                 return Err(Error::Fence);
             }
-            resolve_cwd(runtime).map_err(host_error)?
+            crate::host::process::resolve_cwd_like(runtime, &seat.cwd).map_err(host_error)?
         };
         remove_quiescent(&root, &seat.identity, resource).map_err(host_error)
     }

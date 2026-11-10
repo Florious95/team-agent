@@ -36,7 +36,7 @@ impl<R: CommandRunner> ScopedMaterializer<R> {
         }
         let mut roots = BTreeMap::new();
         for request in &plan.materialization {
-            let captured = resolve_cwd(request.path.root())?;
+            let captured = super::process::resolve_cwd_like(request.path.root(), &resolved.request().paths.cwd)?;
             if captured.path != request.path.root()
                 || (materialization_scope(descriptor, request.kind)
                     == ResourceScope::WorkingDirectory

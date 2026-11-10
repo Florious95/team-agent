@@ -323,7 +323,14 @@ fn plan_carries_model_effort_bypass_mcp_and_exact_resume_without_startup_keys() 
         evidence_kind: r.evidence_kind, evidence_sha256: digest(b"status card"), backing: None };
     let mut resume = r.clone(); resume.operation = Operation::Resume; resume.identity.generation = Generation(2);
     resume.resume = Some(ResumeRequest { binding, expected_source: r.identity.clone() });
-    let args = strings(&plan_ok(&a, &resume, &catalog));
+    let resumed = plan_ok(&a, &resume, &catalog);
+    let args = strings(&resumed);
+    // Native 0.166.0's ResumeCwdMode::Current bypasses the cwd picker before
+    // considering its recorded (possibly purged) session directory. This is
+    // invocation-only: never select a numbered/Always item or edit user config.
+    assert!(args.windows(2).any(|pair| pair == ["-c", "tui.resume_cwd=\"current\""]));
+    assert_eq!(resumed.cwd, resume.paths.cwd.path);
+    assert!(!strings(&plan_ok(&a, &r, &catalog)).iter().any(|arg| arg.starts_with("tui.resume_cwd=")));
     assert_eq!(args.first().map(String::as_str), Some("resume"));
     assert_eq!(args.last().map(String::as_str), Some(SID));
     resume.resume.as_mut().unwrap().binding.native_session = NativeSessionId::new("not-a-uuid").unwrap();

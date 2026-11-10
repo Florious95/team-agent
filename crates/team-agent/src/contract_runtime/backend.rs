@@ -787,14 +787,18 @@ fn validate_existing(backend: &Backend, role: &RoleConfig, record: &OperationRec
     Ok(current)
 }
 
-fn receipt_error(record: OperationRecord) -> BackendError {
+pub(super) fn receipt_error(record: OperationRecord) -> BackendError {
+    let preserve = record.native_launch == Some(Operation::Resume);
     let failure = match (record.failure, record.recovery_failure) {
         (Some(first), Some(recovery)) => Some(format!("{first}; recovery_failure={recovery}")),
         (None, Some(recovery)) => Some(format!("recovery_failure={recovery}")),
         (first, None) => first,
     };
-    BackendError::Shutdown { operation: record.id, phase: record.phase,
-        outcome: record.outcome, failure: failure.or(record.pending) }
+    let error = BackendError::Shutdown { operation: record.id, phase: record.phase,
+        outcome: record.outcome, failure: failure.or(record.pending) };
+    if preserve {
+        BackendError::Continuity(format!("native resume was not confirmed; {error}; reconcile the retained operation before retrying"))
+    } else { error }
 }
 
 pub(super) fn require_stopped(record: &OperationRecord) -> Result<(), BackendError> {

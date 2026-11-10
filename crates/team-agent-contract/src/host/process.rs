@@ -357,6 +357,12 @@ pub fn resolve_cwd(path: &Path) -> Result<crate::contract::session::CwdIdentity,
     }
 }
 
+/// Retained v1 bindings must also mint v1 seat/resource identities so an
+/// installed v1 runtime can still verify them. New stable scopes stay stable.
+pub fn resolve_cwd_like(path: &Path, format: &crate::contract::session::CwdIdentity) -> Result<crate::contract::session::CwdIdentity, HostError> {
+    if stable_cwd(format) { resolve_cwd(path) } else { legacy_cwd(path) }
+}
+
 pub fn stable_cwd(cwd: &crate::contract::session::CwdIdentity) -> bool {
     cwd.identity.0.starts_with(b"TA-CWD2\0")
 }

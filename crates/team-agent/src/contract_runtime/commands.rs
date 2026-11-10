@@ -104,9 +104,7 @@ where F: FnOnce(&mut Value),
 
 fn check_record(receipt: &team_agent_contract::orchestration::store::OperationRecord) -> Result<(), CliError> {
     if receipt.outcome != Outcome::Committed {
-        return Err(error(BackendError::Shutdown {
-            operation: receipt.id.clone(), phase: receipt.phase, outcome: receipt.outcome, failure: receipt.failure.clone(),
-        }));
+        return Err(error(backend::receipt_error(receipt.clone())));
     }
     Ok(())
 }
@@ -561,6 +559,17 @@ mod tests {
                 assert!(error.contains(value), "{error}");
             }
             assert!(!error.contains("metadata is invalid"), "{error}");
+        }
+    }
+
+    #[test]
+    fn unconfirmed_resume_reports_continuity_and_keeps_its_recovery_receipt() {
+        let mut record = receipt(Outcome::NeedsRecovery);
+        record.native_launch = Some(Operation::Resume);
+        record.failure = Some("native composer startup timed out".into());
+        let error = check_record(&record).unwrap_err().to_string();
+        for expected in ["session_preserve_unavailable", "--session fresh", "NeedsRecovery", "resume-instance-two", "native composer startup timed out"] {
+            assert!(error.contains(expected), "{error}");
         }
     }
 
