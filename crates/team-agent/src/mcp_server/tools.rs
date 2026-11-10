@@ -201,13 +201,12 @@ impl TeamOrchestratorTools {
         let owner_team = if sender == "leader" { None } else { self.canonical_owner_team_key()? };
         // Source metadata must not turn the leader's native addressing into a
         // seat scope or prevent sends when its launch team is no longer present.
-        let leader_source = (sender == "leader").then(|| self.owner_team_id.as_ref()).flatten().map(|owner| {
-            let team = crate::direct_delivery::directory(&self.workspace, Some(owner.as_str()))
-                .ok().and_then(|directory| directory.team).unwrap_or_else(|| owner.as_str().to_string());
-            TrustedSender::from_runtime_identity_with_source(
+        let leader_source = self.owner_team_id.as_ref().filter(|_| sender == "leader")
+            .and_then(|owner| crate::direct_delivery::directory(&self.workspace, Some(owner.as_str())).ok())
+            .and_then(|directory| directory.endpoint("leader").ok().and(directory.team))
+            .map(|team| TrustedSender::from_runtime_identity_with_source(
                 AgentId::new(sender), self.workspace.display(), &team,
-            )
-        });
+            ));
         let authority = if sender == "leader" {
             crate::station::send::Authority::Operator {
                 sender: leader_source.as_ref().map_or(sender, TrustedSender::display_name),

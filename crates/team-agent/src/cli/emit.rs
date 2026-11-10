@@ -1269,7 +1269,7 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
     };
     let message_start = usize::from(target.is_some());
     let workspace = workspace(&parsed, cwd);
-    let sender = trusted_cli_sender(cwd, &workspace, parsed.team.as_deref())?;
+    let sender = trusted_cli_sender(cwd, &workspace)?;
     let presentation_value = if parsed.presentation_sink.is_some()
         || parsed.message_class.is_some()
         || parsed.case_id.is_some()
@@ -1318,35 +1318,18 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
     })
 }
 
-fn trusted_cli_sender(cwd: &Path, workspace: &Path, team: Option<&str>) -> Result<TrustedSender, CliError> {
+fn trusted_cli_sender(cwd: &Path, workspace: &Path) -> Result<TrustedSender, CliError> {
     let caller_socket = crate::tmux_backend::socket_name_from_tmux_env();
     let caller_pane = std::env::var("TMUX_PANE").ok();
     // Source identity is independent of --workspace/--team (destination selectors).
     // A bound leader terminal still outranks inherited worker environment.
-    if caller_socket.is_some() && caller_pane.is_some() {
-        let mut scopes = Vec::new();
-        for source in [Some(cwd.to_path_buf()), std::env::var_os("TEAM_AGENT_WORKSPACE").map(PathBuf::from)]
-            .into_iter().flatten()
-        {
-            let source = crate::model::paths::canonical_run_workspace(&source).unwrap_or(source);
-            if let Ok(state) = crate::direct_delivery::snapshot(&source) {
-                if let Some(teams) = state.get("teams").and_then(serde_json::Value::as_object) {
-                    scopes.extend(teams.keys().map(|team| (source.clone(), Some(team.clone()))));
-                } else {
-                    scopes.push((source, None));
-                }
-            }
-        }
-        scopes.extend(crate::leader::registry::snapshots().into_iter()
-            .map(|entry| (entry.workspace, Some(entry.team_key))));
-        scopes.push((workspace.to_path_buf(), team.map(str::to_owned)));
-        for (source, source_team) in scopes {
-            let Ok(directory) = crate::direct_delivery::directory(&source, source_team.as_deref()) else { continue };
-            if directory.endpoint("leader").is_ok_and(|leader| {
-                crate::direct_delivery::leader_target_is_sender(
-                    &leader, caller_socket.as_deref(), caller_pane.as_deref(),
-                )
-            }) {
+    if let (Some(socket), Some(pane)) = (caller_socket, caller_pane) {
+        let mut sources = vec![cwd.to_path_buf()];
+        sources.extend(std::env::var_os("TEAM_AGENT_WORKSPACE").map(PathBuf::from));
+        sources.extend(crate::leader::registry::snapshots().into_iter().map(|entry| entry.workspace));
+        sources.push(workspace.to_path_buf());
+        for source in sources {
+            if let Some(directory) = crate::direct_delivery::leader_directory_for_terminal(&source, &socket, &pane) {
                 return Ok(match directory.team {
                     Some(team) => TrustedSender::from_runtime_identity_with_source(
                         crate::model::ids::AgentId::new("leader"), directory.workspace.display(), &team,

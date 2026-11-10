@@ -44,6 +44,20 @@ pub fn snapshot(workspace: &Path) -> Result<Value, String> {
     serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// Presentation lookup only: identify a team led by this terminal without changing scope.
+pub(crate) fn leader_directory_for_terminal(workspace: &Path, socket: &str, pane: &str) -> Option<Directory> {
+    let workspace = crate::model::paths::canonical_run_workspace(workspace).ok()?;
+    let state = snapshot(&workspace).ok()?;
+    state.get("teams").and_then(Value::as_object).into_iter()
+        .flat_map(|teams| teams.keys().map(|key| Some(key.as_str())))
+        .chain(std::iter::once(None)).find_map(|team| {
+            let directory = directory(&workspace, team).ok()?;
+            let matches = directory.endpoint("leader").is_ok_and(|leader|
+                leader_target_is_sender(&leader, Some(socket), Some(pane)));
+            matches.then_some(directory)
+        })
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct AddressError {
     pub code: &'static str,

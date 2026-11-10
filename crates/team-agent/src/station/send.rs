@@ -357,15 +357,38 @@ fn send_one(
         return Err(format!("unknown recipient: {recipient}"));
     }
     crate::coordinator::retire_legacy_coordinator(&directory.workspace)?;
-    let (source_sender, origin) = message_source(authority, req.workspace);
+    let (source_sender, mut origin) = message_source(authority, req.workspace);
+    // One terminal can lead several teams, including teams created after MCP
+    // launch. Resolve that relationship for this recipient, not the launch team.
+    if source_sender == "leader" {
+        let caller = crate::tmux_backend::socket_name_from_tmux_env()
+            .zip(std::env::var("TMUX_PANE").ok()).or_else(|| {
+                let (workspace, team) = origin.as_ref()?;
+                let leader = crate::direct_delivery::directory(workspace, Some(team)).ok()?.endpoint("leader").ok()?;
+                Some((leader.socket, leader.pane_id))
+            });
+        if caller.as_ref().is_some_and(|(socket, pane)| {
+            directory.endpoint("leader").is_ok_and(|leader|
+                crate::direct_delivery::leader_target_is_sender(&leader, Some(socket), Some(pane)))
+        }) {
+            origin = directory.team.as_ref().map(|team| (directory.workspace.clone(), team.clone()));
+        } else if let Some((socket, pane)) = caller {
+            let workspace = origin.as_ref().map_or(req.workspace, |(workspace, _)| workspace.as_path());
+            if let Some(source) = crate::direct_delivery::leader_directory_for_terminal(workspace, &socket, &pane) {
+                origin = source.team.map(|team| (source.workspace, team));
+            }
+        }
+    }
     let origin = origin.map(|(workspace, team)| {
         let workspace = crate::model::paths::canonical_run_workspace(&workspace).unwrap_or(workspace);
         (workspace, team)
     });
+    let leader_identity = origin.as_ref().filter(|_| source_sender == "leader")
+        .map(|(workspace, team)| format!("{}::{team}/leader", workspace.display()));
     let sender = match &origin {
         Some((workspace, team)) if same_workspace(workspace, &directory.workspace)
             && directory.team.as_deref() == Some(team.as_str()) => source_sender.as_str(),
-        _ => authority.sender(),
+        _ => leader_identity.as_deref().unwrap_or_else(|| authority.sender()),
     };
     let kind = if req.envelope.is_some() {
         "result"
