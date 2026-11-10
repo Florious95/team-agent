@@ -237,6 +237,43 @@ impl Projections {
             .filter_map(|key| self.get(&key).transpose())
             .collect()
     }
+    /// Copy committed values, not raw cells: path relocation must regenerate
+    /// commit checksums and must never revive an uncommitted prior write.
+    pub(crate) fn copy_snapshot(
+        &self,
+        target: &Self,
+        rewrite: &mut impl FnMut(&str, &mut Value) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        if std::fs::read_dir(target.root.join("cells"))?.next().is_some() {
+            return Err(Error::Invalid("snapshot destination is not empty"));
+        }
+        let mut records = BTreeMap::new();
+        for collection in std::fs::read_dir(self.root.join("cells"))? {
+            let collection = collection?;
+            if !collection.file_type()?.is_dir() { return Err(Error::Corrupt); }
+            for entry in std::fs::read_dir(collection.path())? {
+                let entry = entry?;
+                if entry.path().extension().is_none_or(|ext| ext != "json") { continue; }
+                let cell: Cell = read_json(&entry.path())?.ok_or(Error::Corrupt)?;
+                if self.path(&cell.key)? != entry.path() { return Err(Error::Corrupt); }
+                if let Some(mut value) = self.committed(&cell.key)?.value.into_option() {
+                    let mut key = cell.key;
+                    if key.collection == "routes" {
+                        let (endpoint, pane) = key.id.split_once('\0').ok_or(Error::Corrupt)?;
+                        let mut endpoint = Value::String(endpoint.into());
+                        rewrite("route_endpoint", &mut endpoint)?;
+                        key.id = format!("{}\0{pane}", endpoint.as_str().ok_or(Error::Corrupt)?);
+                    }
+                    rewrite(&key.collection, &mut value)?;
+                    if records.insert(key, value).is_some() { return Err(Error::Fence); }
+                }
+            }
+        }
+        let mut batch = target.write(records.keys().cloned())?;
+        for (key, value) in records { batch.put(key, &value)?; }
+        batch.commit()
+    }
+
     pub(crate) fn write(
         &self,
         keys: impl IntoIterator<Item = Key>,

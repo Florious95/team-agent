@@ -16,6 +16,15 @@
 
 #[path = "e2e/framework.rs"]
 mod framework;
+#[path = "../../team-agent-contract/tests/physical_support/mod.rs"]
+mod physical_support;
+
+/// Re-executed by the controlled terminal fixture (r8); not an acceptance case.
+#[test]
+#[ignore = "internal owned terminal child, not a skipped acceptance case"]
+fn native_terminal_fixture() {
+    physical_support::native_terminal::run();
+}
 
 use framework::{run_ta, TaResult, TestWorkspace};
 use serde_json::{json, Value};
@@ -595,5 +604,235 @@ fn g6_binding_recorded_for_another_workspace_is_not_adopted() {
         other.display(),
         ws.path().display(),
         transcript(&out)
+    );
+}
+
+// ---------------------------------------------------------------- D1b: copy-forward re-points native seats
+
+/// A real, controlled-terminal native seat (real Lifecycle, real tmux, real process), committed and
+/// then torn down, so the store holds a stopped seat with full physical receipts.
+mod native_fixture {
+    use super::physical_support;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+    use team_agent_contract::{
+        contract::{descriptor::{AuthMode, FreshSession}, hooks::PlanHook, plan::*, types::*},
+        host::{clock::RealClock, command::{OutputLimits, RealCommandRunner}, materialize::ScopedMaterializer,
+            process::{fingerprint_file, resolve_cwd}, tmux::{HostLimits, TmuxHost}, transport::TargetReceipt},
+        orchestration::{lifecycle::*, physical::*, store::*},
+    };
+
+    fn limits() -> HostLimits {
+        HostLimits { command_output: OutputLimits { stdout: 256 * 1024, stderr: 65536, stdin: 1024 * 1024 },
+            max_script_bytes: 128 * 1024, max_capture_bytes: 256 * 1024, max_payload_bytes: 1024 * 1024,
+            max_executable_bytes: 1024 * 1024 * 1024, poll_interval: Duration::from_millis(10), columns: 120, rows: 40 }
+    }
+
+    /// Closes the fixture pane if the test dies between startup and teardown.
+    struct Owned { tmux: PathBuf, target: Option<TargetReceipt> }
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            if let Some(target) = self.target.take() {
+                let clock = RealClock::new();
+                if let Ok(mut host) = TmuxHost::restore_owned(target.clone(), self.tmux.clone(), limits(),
+                    RealCommandRunner::default(), &clock, Duration::from_secs(3)) {
+                    let _ = host.close_owned_pane(&target, &clock, Duration::from_secs(3));
+                }
+            }
+        }
+    }
+
+    /// The seat's cwd and native directory both live under `runtime_root`, like 0.5.127-era Codex seats
+    /// (`<temp root>/workspaces/<seat>` and `<temp root>/native-<hash>/`).
+    pub fn stopped_seat(store: &mut ProjectionStore, runtime_root: &Path, cwd_dir: &Path, seat: &str, image_dir: &Path) -> InstanceIdentity {
+        let tmux = super::tmux_path();
+        let cwd = resolve_cwd(cwd_dir).unwrap();
+        let identity = store.propose_identity(&SeatId::new(seat).unwrap()).unwrap();
+        let candidate = std::env::current_exe().unwrap().canonicalize().unwrap();
+        let candidate_sha256 = fingerprint_file(&candidate, 1024 * 1024 * 1024, Duration::from_secs(5)).unwrap();
+        let (image, native_hash) = physical_support::native_terminal::copy_executable(image_dir);
+        let native = physical_support::native(native_hash);
+        let mut descriptor = physical_support::descriptor("single", &native);
+        descriptor.identity.id = "pi_tui";
+        descriptor.session.fresh = FreshSession::NotApplicable;
+        let hooks = physical_support::native_terminal::hooks();
+        let request = LaunchRequest { identity: identity.clone(), provider: "pi_tui".into(), native,
+            operation: Operation::Fresh, mode: LaunchMode::FullWorker, auth: AuthMode::NativeSubscription,
+            model: Some("single".into()), role_effort: None, team_effort: None, prompt: Some("reboot drill seat".into()),
+            bypass: false, paths: LaunchPaths { candidate, cwd, runtime_root: runtime_root.into(),
+                executable: image.clone(), launcher: physical_support::public_launcher(&image, native_hash) },
+            channel: Channel::Tmux, input_profile: Some("physical-fixture".into()), evidence_kind: EvidenceKind::Native,
+            preassigned_session: None, resume: None, fork: None };
+        let resolved = resolve_launch(&descriptor, &hooks, &request, None).unwrap();
+        let adapter = Adapter { descriptor: &descriptor, hooks: &hooks, catalog: None };
+        let plan = physical_support::native_terminal::PLAN.plan(&resolved).unwrap();
+        let operation = OperationId::new("r8-start").unwrap();
+        let mut io = ScopedMaterializer::new(&descriptor, &resolved, &plan, operation.clone(), RealCommandRunner::default()).unwrap();
+        let clock = RealClock::new();
+        let mut physical = PhysicalRuntime::new(Registration { descriptor: &descriptor, hooks: &hooks, controls: &[],
+            startup: None, session_panel: None }, PhysicalSettings { tmux: tmux.clone(), limits: limits(),
+            action_budget: Duration::from_secs(10), freshness: Duration::from_secs(2), journal_bytes: 2 * 1024 * 1024 },
+            operation.clone(), &clock).unwrap();
+        physical.executing_candidate = Some(candidate_sha256);
+        let mut owned = Owned { tmux, target: None };
+        let started = Lifecycle { store: &mut *store, host: &mut physical, io: &mut io }.startup(&adapter, &request,
+            Routing { pane: "unpublished".into(), binding_key: "unpublished-r8".into(), server_key: "fixture-server".into() }, operation).unwrap();
+        assert_eq!(started.outcome, Outcome::Committed, "fixture startup: {started:?}");
+        owned.target = store.assert_current(&identity).unwrap().physical.clone();
+        let stopped = Lifecycle { store: &mut *store, host: &mut physical, io: &mut io }
+            .teardown(&identity, OperationId::new("r8-stop").unwrap()).unwrap();
+        assert_eq!(stopped.outcome, Outcome::Committed, "fixture teardown: {stopped:?}");
+        owned.target = None;
+        identity
+    }
+}
+
+/// Live finding on 39b0feb5 (real Codex seat from 0.5.127): copy-forward moved the authority, but the
+/// seat record and cwd-<seat>.json still named `<temp root>/workspaces/<seat>`. After the purge, resume
+/// failed with `native host: cwd identity: Io(NotFound)`. Every stored path must follow the authority.
+#[test]
+fn r8_copy_forward_repoints_a_stopped_native_seat_out_of_the_temp_root() {
+    const SEAT: &str = "nat";
+    let tag = "rbt-r8";
+    let ws = team(tag);
+    let real = ws.path().canonicalize().unwrap();
+    let temp = TempRoot::fresh();
+    let legacy = write_legacy_binding(&ws, tag, &real, 0, &temp.0);
+    let scope = ScopeId::new(legacy.scope.clone()).unwrap();
+    let endpoint = format!("framework:{}", legacy.scope);
+    let seat_id = team_agent_contract::contract::types::SeatId::new(SEAT).unwrap();
+    let mut store = ProjectionStore::create(&temp.0, scope.clone(), &endpoint).unwrap();
+    let seat_cwd = temp.0.join("workspaces").join(SEAT);
+    fs::DirBuilder::new().recursive(true).mode(0o700).create(&seat_cwd).unwrap();
+    let bin = real.join(".fixture-bin");
+    fs::DirBuilder::new().mode(0o700).create(&bin).unwrap();
+    let identity = native_fixture::stopped_seat(&mut store, &temp.0, &seat_cwd, SEAT, &bin);
+    drop(store);
+    // The per-seat cwd record released binaries kept beside the binding (field: cwd-nat.json).
+    let cwd = team_agent_contract::host::process::resolve_cwd(&seat_cwd).unwrap();
+    fs::write(
+        legacy.dir.join(format!("cwd-{SEAT}.json")),
+        serde_json::to_vec(&json!({"version": 2, "seat": SEAT, "cwd": cwd})).unwrap(),
+    )
+    .unwrap();
+    let before = ProjectionStore::open_readonly(&temp.0, scope.clone(), &endpoint).unwrap().seat(&seat_id).unwrap().unwrap();
+    let before_text = serde_json::to_string(&before).unwrap();
+    log("fixture", format!("stopped native seat before copy-forward: {before_text}"));
+    let old = temp.0.to_str().unwrap().to_string();
+    assert!(before_text.contains(&old), "fixture precondition: the seat record names the temp root");
+
+    let out = ta(&ws, &["migrate", "--workspace", &ws_str(&ws), "--team", tag, "--json"]);
+    assert_eq!(out.exit_code, 0, "migrate must succeed with a stopped native seat\n{}", transcript(&out));
+    let root = assert_authority_inside_workspace(&ws, tag, &temp.0, "after migrate with a stopped native seat");
+    let relocated = ProjectionStore::open_readonly(&root, scope.clone(), &endpoint).unwrap();
+    let seat = relocated
+        .seat(&seat_id)
+        .unwrap()
+        .unwrap_or_else(|| panic!("the native seat must survive copy-forward\n{}", disk_state(&ws, tag)));
+    let text = serde_json::to_string(&seat).unwrap();
+    log("after migrate", format!("relocated native seat record: {text}"));
+    assert_eq!(seat.identity, identity, "copy-forward must keep scope/instance/generation unchanged");
+    assert!(
+        !text.contains(&old),
+        "after copy-forward the native seat record still points into the temp root {old}, which the OS will purge; \
+         resume then fails with `cwd identity: Io(NotFound)`. Every stored path under the old root must follow \
+         the authority.\nrecord={text}\n{}",
+        disk_state(&ws, tag)
+    );
+    assert!(
+        seat.cwd.path.starts_with(ws.path()) && seat.cwd.path.is_dir(),
+        "the seat cwd must be the copied directory inside the workspace, got {}",
+        seat.cwd.path.display()
+    );
+    for entry in fs::read_dir(&legacy.dir).unwrap().flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with("cwd-") && name.ends_with(".json") {
+            let raw = fs::read_to_string(entry.path()).unwrap();
+            assert!(!raw.contains(&old), "{name} still points into the temp root {old}: {raw}");
+        }
+    }
+    reboot(&ws, Some(&temp.0), Purge::Whole);
+    assert_status_healthy(&ws, tag, "after reboot following copy-forward of a native seat");
+}
+
+// ---------------------------------------------------------------- D2b: skipped native seats stay startable
+
+/// `<root>/cursor-fake/<VERSION>/{cursor-agent,node,index.js}`: the vendor layout Cursor discovery
+/// accepts. Only `--version` and `--list-models` answer; a TUI launch exits at once. Returns the PATH dir.
+fn fake_cursor(root: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    const VERSION: &str = "2026.10.22-27dcf5f";
+    let dir = root.join("cursor-fake").join(VERSION);
+    fs::create_dir_all(&dir).unwrap();
+    let script = format!(
+        "#!/bin/sh\ncase \"$1\" in\n--version) echo {VERSION}; exit 0 ;;\n--list-models) printf 'Available models\\n\\ngrok-4.7-high - Grok 4.7 High\\n\\nTip: use --model <id> (or /model <id> in interactive mode) to switch.\\n'; exit 0 ;;\nesac\nexit 7\n"
+    );
+    fs::write(dir.join("cursor-agent"), script).unwrap();
+    fs::set_permissions(dir.join("cursor-agent"), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::copy("/bin/sleep", dir.join("node")).unwrap();
+    fs::set_permissions(dir.join("node"), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(dir.join("index.js"), b"// fake entry\n").unwrap();
+    dir
+}
+
+/// Field shape: a contract seat that WAS instantiated by the lost authority, then explicitly stopped.
+/// Its state row and frozen role still name the lost store's identity (field: nat2, seo-geo researcher).
+#[test]
+fn r9_explicitly_stopped_native_seat_can_start_fresh_after_rehome() {
+    const SEAT: &str = "nat";
+    const INSTANCE: &str = "instance-0f1e2d3c4b5a69788796a5b4c3d2e1f0";
+    let tag = "rbt-r9";
+    let ws = team(tag);
+    let real = ws.path().canonicalize().unwrap();
+    let temp = TempRoot::fresh();
+    let legacy = write_legacy_binding(&ws, tag, &real, 0, &temp.0);
+    create_store(&legacy);
+    let role_doc = ws.path().join("agents").join(format!("{SEAT}.md"));
+    fs::write(&role_doc, format!("---\nname: {SEAT}\nrole: Native seat {SEAT}\nprovider: cursor\nmodel: grok-4.7-high\nauth_mode: subscription\ndangerously_skip_permissions: false\n---\n\nNative seat.\n")).unwrap();
+    let text = format!("You are Team Agent worker `{SEAT}`.");
+    let role = json!({
+        "id": SEAT, "provider": "cursor", "source": role_doc, "role": format!("Native seat {SEAT}"),
+        "model": "grok-4.7-high", "effort": null, "bypass": false, "paused": false, "body": "Native seat.",
+        "prompt": {"text": text, "sha256": Sha256::digest(text.as_bytes()).to_vec(), "sources": []},
+    });
+    fs::write(legacy.dir.join(format!("role-{SEAT}-{INSTANCE}.json")), serde_json::to_vec(&role).unwrap()).unwrap();
+    let dead_endpoint = Path::new("/tmp").canonicalize().unwrap().join(format!("tmux-rbt-dead-{}", std::process::id()));
+    let row = json!({
+        "agent_id": SEAT, "provider": "cursor", "contract_provider": "cursor", "runtime_family": "contract",
+        "status": "stopped", "explicit_stop": true, "model": "grok-4.7-high", "role": SEAT, "owner_team_id": tag,
+        "contract_scope": legacy.scope, "contract_instance": INSTANCE, "generation": 1,
+        "session_id": "5d1c2b3a-4f5e-4a6b-8c7d-9e0f1a2b3c4d",
+        "native_pane": "%7", "native_endpoint": dead_endpoint,
+    });
+    ws.mutate_state(|state| {
+        if let Some(agents) = state.pointer_mut(&format!("/teams/{tag}/agents")).and_then(Value::as_object_mut) {
+            agents.insert(SEAT.into(), row.clone());
+        }
+        if state["active_team_key"].as_str() == Some(tag) || state["team_key"].as_str() == Some(tag) {
+            if let Some(agents) = state.get_mut("agents").and_then(Value::as_object_mut) {
+                agents.insert(SEAT.into(), row.clone());
+            }
+        }
+    });
+    log("fixture", format!("explicitly stopped native seat {SEAT} bound to the lost authority: {row}"));
+    reboot(&ws, Some(&temp.0), Purge::Whole);
+
+    let out = ta(&ws, &["team", "restart", "--allow-fresh", "--workspace", &ws_str(&ws), "--team", tag, "--json"]);
+    assert_no_authority_error(&out, "--allow-fresh with only explicitly stopped seats");
+    assert_authority_inside_workspace(&ws, tag, &temp.0, "after --allow-fresh");
+    let (node, status) = status_node(&ws, tag, SEAT);
+    assert_ne!(node["runtime_status"].as_str(), Some("running"), "the explicitly stopped seat must not start by itself: {node}\n{}", transcript(&status));
+
+    let bin = fake_cursor(ws.path());
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+    let plan = framework::run_ta_env(&ws, &["start", SEAT, "--session", "fresh", "--dry-run", "--workspace", &ws_str(&ws), "--team", tag, "--json"], &[("PATH", path.as_str())]);
+    log("command", transcript(&plan));
+    let all = format!("{}{}", plan.stdout, plan.stderr);
+    assert!(
+        plan.exit_code == 0 && !all.contains("planner_identity_mismatch") && !all.contains("native_authority"),
+        "after the re-home an explicit `start {SEAT} --session fresh` must be admissible on the new authority; \
+         the row still names the archived identity {INSTANCE}\n{}\n{}",
+        transcript(&plan),
+        disk_state(&ws, tag)
     );
 }

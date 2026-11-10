@@ -54,6 +54,8 @@ pub enum BackendError {
     Io(#[from] std::io::Error),
     #[error("native runtime metadata is invalid")]
     Metadata,
+    #[error("session_preserve_unavailable: {0}; choose --session fresh to start a new conversation")]
+    Continuity(String),
     #[error("ambiguous recorded native scopes: {0}; select the authoritative binding before continuing")]
     AmbiguousScope(String),
     #[error("native lifecycle fence: {reason}")]
@@ -134,8 +136,9 @@ pub fn scope_for(workspace: &CwdIdentity, team: &str) -> Result<ScopeId, Backend
     for entry in entries {
         let entry = entry?;
         if !entry.file_type()?.is_dir() { continue; }
-        let binding = match read_binding_file(&entry.path().join("framework-binding.json")) {
-            Ok(binding) => binding,
+        let binding = match matching_binding(&entry.path().join("framework-binding.json"), &workspace.path, team) {
+            Ok(Some(binding)) => binding,
+            Ok(None) => continue,
             Err(BackendError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error),
         };
@@ -189,6 +192,18 @@ pub fn read_binding(workspace: &Path, team: &str) -> Result<Binding, BackendErro
 }
 
 fn read_binding_file(file_path: &Path) -> Result<Binding, BackendError> {
+    serde_json::from_value(read_binding_value(file_path)?).map_err(|_| BackendError::Metadata)
+}
+
+fn matching_binding(file_path: &Path, workspace: &Path, team: &str) -> Result<Option<Binding>, BackendError> {
+    let value = read_binding_value(file_path)?;
+    if value["team"] != team || value["workspace"]["path"] != serde_json::json!(workspace) {
+        return Ok(None);
+    }
+    serde_json::from_value(value).map(Some).map_err(|_| BackendError::Metadata)
+}
+
+fn read_binding_value(file_path: &Path) -> Result<serde_json::Value, BackendError> {
         let metadata = std::fs::symlink_metadata(file_path)?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err(BackendError::Metadata);
@@ -1331,6 +1346,11 @@ pub fn resume(prepared: PreparedResume) -> Result<OperationRecord, BackendError>
             }
         }
         Some(workspace_tmux(&backend.binding, &prepared.role.id, None)?.0)
+    } else if parent.status == SeatStatus::Stopped {
+        // A stopped pre-shared seat has no server to preserve. Launch its next
+        // generation on the current workspace endpoint, not a socket beneath
+        // the relocated (potentially long) authority path.
+        Some(workspace_tmux(&backend.binding, &prepared.role.id, None)?.0)
     } else { None };
     let operation = OperationId::new(format!("resume-{}", prepared.request.identity.instance.as_str()))?;
     let mut io = ScopedMaterializer::new(descriptor, &resolved, &plan, operation.clone(), RealCommandRunner::default())?;
@@ -1500,9 +1520,10 @@ pub(crate) fn retire(workspace: &Path, team: &str, seat: &SeatId) -> Result<Opti
 
 pub fn temporary_authority(binding: &Binding) -> bool {
     let path = &binding.transport_root;
-    !path.starts_with(root_for(&binding.workspace.path, &binding.scope))
+    !path.starts_with(&binding.workspace.path)
         && (path.starts_with("/tmp") || path.starts_with("/private/tmp")
-            || path.starts_with(std::env::temp_dir()))
+            || path.starts_with(std::env::temp_dir())
+            || std::env::temp_dir().canonicalize().is_ok_and(|root| path.starts_with(root)))
 }
 
 fn quiescent_authority(store: &ProjectionStore) -> Result<bool, BackendError> {
@@ -1527,8 +1548,9 @@ pub(crate) fn retire_inactive_siblings(binding: &Binding, state: &serde_json::Va
         let entry = entry?;
         if !entry.file_type()?.is_dir() || entry.file_name() == binding.scope.as_str() { continue; }
         let path = entry.path().join("framework-binding.json");
-        let sibling = match read_binding_file(&path) {
-            Ok(sibling) => sibling,
+        let sibling = match matching_binding(&path, &binding.workspace.path, &binding.team) {
+            Ok(Some(sibling)) => sibling,
+            Ok(None) => continue,
             Err(BackendError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error),
         };
@@ -1569,25 +1591,125 @@ pub(crate) fn retire_inactive_siblings(binding: &Binding, state: &serde_json::Va
     Ok(())
 }
 
-fn copy_authority(source: &Path, target: &Path) -> Result<(), BackendError> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-    std::fs::DirBuilder::new().mode(0o700).create(target)?;
+/// Generated launchers use POSIX single-quoted values. Re-quote only complete
+/// absolute path arguments; never substitute path-like text inside a prompt.
+fn rebase_launch_script(bytes: &[u8], old: &Path, new: &Path) -> Result<Vec<u8>, BackendError> {
+    let mut result = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'\'' { result.push(bytes[index]); index += 1; continue; }
+        let start = index;
+        index += 1;
+        let mut value = Vec::new();
+        while index < bytes.len() {
+            if bytes[index..].starts_with(b"'\\''") { value.push(b'\''); index += 4; }
+            else if bytes[index] == b'\'' { index += 1; break; }
+            else { value.push(bytes[index]); index += 1; }
+        }
+        let relocated = std::str::from_utf8(&value).ok().and_then(|text| Path::new(text).strip_prefix(old).ok()).map(|relative| new.join(relative));
+        if let Some(path) = relocated {
+            result.extend(team_agent_contract::host::shell::quote(path.as_os_str())?);
+        } else {
+            result.extend_from_slice(&bytes[start..index]);
+        }
+    }
+    Ok(result)
+}
+
+fn copy_authority(source: &Path, target: &Path, old_root: &Path, new_root: &Path) -> Result<(), BackendError> {
+    use std::os::unix::fs::DirBuilderExt;
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
+        if source == old_root && ["projection", "contract.json", "contract.db", "contract.db-wal", "contract.db-shm"].iter().any(|name| entry.file_name() == *name) {
+            continue;
+        }
         let path = target.join(entry.file_name());
         let kind = entry.file_type()?;
         if kind.is_dir() {
-            copy_authority(&entry.path(), &path)?;
+            std::fs::DirBuilder::new().mode(0o700).create(&path)?;
+            copy_authority(&entry.path(), &path, old_root, new_root)?;
         } else if kind.is_file() {
             std::fs::copy(entry.path(), &path)?;
+            if entry.file_name() == "launch.sh" && source.parent() == Some(old_root)
+                && source.file_name().is_some_and(|name| name.to_string_lossy().starts_with("native-"))
+            {
+                let bytes = rebase_launch_script(&std::fs::read(&path)?, old_root, new_root)?;
+                let mut file = std::fs::OpenOptions::new().write(true).truncate(true).open(&path)?;
+                file.write_all(&bytes)?;
+            }
             std::fs::File::open(&path)?.sync_all()?;
         } else if kind.is_symlink() {
-            std::os::unix::fs::symlink(std::fs::read_link(entry.path())?, path)?;
+            let link = std::fs::read_link(entry.path())?;
+            let link = link.strip_prefix(old_root).map_or_else(|_| link.clone(), |relative| new_root.join(relative));
+            std::os::unix::fs::symlink(link, path)?;
         }
         // Dead Unix sockets are not authority and cannot be copied.
     }
-    std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o700))?;
     std::fs::File::open(target)?.sync_all()?;
+    Ok(())
+}
+
+/// Rewrite path values, not substrings in prompts or native history. Stable CWD
+/// evidence is renewed only after verifying the source incarnation we just copied.
+fn rebase_value(value: &mut serde_json::Value, old: &Path, new: &Path) -> Result<(), Error> {
+    use team_agent_contract::host::process::{cwd_matches, stable_cwd};
+    if value.as_object().is_some_and(|object| object.len() == 2 && object.contains_key("path") && object.contains_key("identity")) {
+        let mut cwd: CwdIdentity = serde_json::from_value(value.clone())?;
+        if let Ok(relative) = cwd.path.strip_prefix(old) {
+            let path = new.join(relative);
+            if stable_cwd(&cwd) {
+                if !cwd_matches(&cwd).map_err(Error::HostDiagnostic)? { return Err(Error::Fence); }
+                cwd = resolve_cwd(&path).map_err(Error::HostDiagnostic)?;
+            } else {
+                cwd.path = path;
+            }
+            *value = serde_json::to_value(cwd)?;
+            return Ok(());
+        }
+    }
+    match value {
+        serde_json::Value::String(text) => {
+            if let Ok(relative) = Path::new(text).strip_prefix(old) { *text = new.join(relative).to_string_lossy().into_owned(); }
+        }
+        serde_json::Value::Array(values) => for value in values { rebase_value(value, old, new)?; },
+        serde_json::Value::Object(values) => for (key, value) in values {
+            if !matches!(key.as_str(), "failure" | "recovery_failure") { rebase_value(value, old, new)?; }
+        },
+        _ => {},
+    }
+    Ok(())
+}
+
+fn references_root(value: &serde_json::Value, root: &Path) -> bool {
+    match value {
+        serde_json::Value::String(text) => Path::new(text).starts_with(root),
+        serde_json::Value::Array(values) => values.iter().any(|value| references_root(value, root)),
+        serde_json::Value::Object(values) => values.iter().any(|(key, value)|
+            !matches!(key.as_str(), "failure" | "recovery_failure") && references_root(value, root)),
+        _ => false,
+    }
+}
+
+fn rebase_json(path: &Path, old: &Path, new: &Path) -> Result<(), BackendError> {
+    if !std::fs::symlink_metadata(path)?.file_type().is_file() { return Err(BackendError::Metadata); }
+    let mut value: serde_json::Value = serde_json::from_reader(std::fs::File::open(path)?).map_err(|_| BackendError::Metadata)?;
+    let fields: &[&str] = if path.file_name().is_some_and(|name| name == "legacy-import.json") {
+        &["root", "seats", "operations", "retirements", "connections"]
+    } else { &[] };
+    if fields.is_empty() {
+        rebase_value(&mut value, old, new).map_err(|error| BackendError::Continuity(error.to_string()))?;
+        if references_root(&value, old) { return Err(BackendError::Metadata); }
+    } else {
+        for field in fields {
+            if let Some(value) = value.get_mut(*field) {
+                rebase_value(value, old, new).map_err(|error| BackendError::Continuity(error.to_string()))?;
+                if references_root(value, old) { return Err(BackendError::Metadata); }
+            }
+        }
+    }
+    let mut file = std::fs::OpenOptions::new().write(true).truncate(true).open(path)?;
+    file.write_all(&serde_json::to_vec(&value).map_err(|_| BackendError::Metadata)?)?;
+    file.sync_all()?;
     Ok(())
 }
 
@@ -1600,20 +1722,41 @@ fn relocate_authority(binding: &mut Binding, root: &Path) -> Result<bool, Backen
         eprintln!("warning: temporary native authority {} retained while native seats are active; stop them and run team-agent migrate --team {}", binding.transport_root.display(), binding.team);
         return Ok(false);
     }
-    let target = root.join("authority");
-    copy_authority(&binding.transport_root, &target)?;
-    // The manifest pins its own root; every seat and receipt remains unchanged.
-    let manifest = target.join("contract.json");
-    let mut value: serde_json::Value = serde_json::from_reader(std::fs::File::open(&manifest)?)
-        .map_err(|_| BackendError::Metadata)?;
-    value["root"] = serde_json::json!(target);
-    let mut file = std::fs::OpenOptions::new().write(true).truncate(true).open(&manifest)?;
-    file.write_all(&serde_json::to_vec(&value).map_err(|_| BackendError::Metadata)?)?;
-    file.sync_all()?;
-    let copied = ProjectionStore::open_readonly(&target, binding.scope.clone(), &binding.endpoint)?;
-    if copied.seats()? != seats || !copied.unfinished()?.is_empty() {
-        return Err(BackendError::Metadata);
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| BackendError::Metadata)?.as_nanos();
+    let target = root.join(format!("authority-{}-{nonce}", std::process::id()));
+    let copied = ProjectionStore::create(&target, binding.scope.clone(), &binding.endpoint)?;
+    let old = &binding.transport_root;
+    copy_authority(old, &target, old, &target)?;
+    source.copy_projection_to(&copied, &mut |value| {
+        rebase_value(value, old, &target)?;
+        if references_root(value, old) { return Err(Error::Fence); }
+        Ok(())
+    }).map_err(|error| BackendError::Continuity(error.to_string()))?;
+    // CWD records join the authority snapshot, so the one binding swap also
+    // selects their new paths. Old scope-level records remain valid until then.
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with("cwd-") && name.to_string_lossy().ends_with(".json")
+            && !name.to_string_lossy().contains(".pre-durable-")
+        {
+            if !entry.file_type()?.is_file() { return Err(BackendError::Metadata); }
+            let destination = target.join(&name);
+            if !destination.exists() { std::fs::copy(entry.path(), &destination)?; }
+        }
     }
+    for entry in std::fs::read_dir(&target)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == "legacy-import.json" || (name.to_string_lossy().starts_with("cwd-") && name.to_string_lossy().ends_with(".json")) {
+            rebase_json(&entry.path(), old, &target)?;
+        }
+    }
+    let mut expected = serde_json::to_value(&seats).map_err(|_| BackendError::Metadata)?;
+    rebase_value(&mut expected, old, &target).map_err(|error| BackendError::Continuity(error.to_string()))?;
+    let copied = ProjectionStore::open_readonly(&target, binding.scope.clone(), &binding.endpoint)?;
+    let actual = serde_json::to_value(copied.seats()?).map_err(|_| BackendError::Metadata)?;
+    if actual != expected || references_root(&actual, old) || !copied.unfinished()?.is_empty() { return Err(BackendError::Metadata); }
     std::fs::File::open(&target)?.sync_all()?;
     binding.transport_root = target;
     Ok(true)
@@ -1714,6 +1857,23 @@ pub fn migrate(workspace: &Path, team: &str) -> Result<serde_json::Value, Backen
         if written.is_err() { let _ = std::fs::remove_file(&temporary); }
         written?;
     }
+    if relocated {
+        for entry in std::fs::read_dir(&binding.transport_root)? {
+            let name = entry?.file_name();
+            if name.to_string_lossy().starts_with("cwd-") && name.to_string_lossy().ends_with(".json") {
+                let old_record = root.join(&name);
+                if old_record.exists() {
+                    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| BackendError::Metadata)?.as_nanos();
+                    std::fs::rename(&old_record, root.join(format!("pre-durable-{nonce}-{}", name.to_string_lossy())))?;
+                    let staged = root.join(format!("cwd-publish-{nonce}.tmp"));
+                    std::fs::copy(binding.transport_root.join(&name), &staged)?;
+                    std::fs::File::open(&staged)?.sync_all()?;
+                    std::fs::rename(staged, old_record)?;
+                }
+            }
+        }
+        directory.sync_all()?;
+    }
     retire_inactive_siblings(&binding, &selected.state)?;
     let authority = Backend::open_readonly(&binding.workspace.path, team)?;
     result["seat_status"] = serde_json::json!(authority.store.seats()?.into_iter().map(|seat| {
@@ -1789,6 +1949,61 @@ mod tests {
     use super::*;
 
     #[test]
+    fn launcher_relocation_quotes_paths_without_rewriting_prompt_text() {
+        let old = Path::new("/tmp/ta-owned");
+        let new = Path::new("/durable/owner's authority");
+        let script = b"cd '/tmp/ta-owned/workspaces/a'\nexec 'provider' 'prompt mentions /tmp/ta-owned/workspaces/a' '/tmp/ta-owned-other'";
+        let rebased = rebase_launch_script(script, old, new).unwrap();
+        let cwd = team_agent_contract::host::shell::quote(new.join("workspaces/a").as_os_str()).unwrap();
+        assert!(rebased.windows(cwd.len()).any(|window| window == cwd));
+        let text = String::from_utf8(rebased).unwrap();
+        assert!(text.contains("'prompt mentions /tmp/ta-owned/workspaces/a'"));
+        assert!(text.contains("'/tmp/ta-owned-other'"));
+    }
+
+    #[test]
+    fn relocated_snapshot_keeps_session_and_reopens_cwd_after_purge() {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        use team_agent_contract::contract::session::{CaptureOrigin, NativeSessionId, SessionStorage};
+        let mut fixture = RoleFixture::new();
+        let original = fixture.canonical(SeatStatus::Stopped, Phase::F4Commit, Outcome::Committed, None);
+        let mut seat = original.store.seat(&fixture.identity.seat).unwrap().unwrap();
+        let old = fixture.root.with_extension("legacy-authority");
+        std::fs::rename(&original.binding.transport_root, &old).unwrap();
+        let manifest_path = old.join("contract.json");
+        let mut manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["root"] = serde_json::json!(old);
+        std::fs::write(manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        fixture.binding.transport_root = old.clone();
+        let workspaces = old.join("workspaces");
+        let cwd = workspaces.join("worker");
+        std::fs::DirBuilder::new().mode(0o700).create(&workspaces).unwrap();
+        std::fs::DirBuilder::new().mode(0o700).create(&cwd).unwrap();
+        seat.cwd = resolve_cwd(&cwd).unwrap();
+        seat.session = Some(ResumeBinding { provider: seat.provider.clone(), native_session: NativeSessionId::new("preserved-session").unwrap(),
+            storage: SessionStorage::Local, cwd: seat.cwd.clone(), native: seat.native.clone(), source: seat.identity.clone(),
+            origin: CaptureOrigin::CurrentNativeSession, evidence_kind: seat.evidence_kind, evidence_sha256: digest(b"session"), backing: None });
+        fixture.store().fixture_put_seat(&seat).unwrap();
+        let root = root_for(&fixture.root, &fixture.binding.scope);
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(root.join("cwd-worker.json"), serde_json::to_vec(&serde_json::json!({"version":2,"seat":"worker","cwd":seat.cwd})).unwrap()).unwrap();
+        // A previous interrupted attempt must not wedge the next relocation.
+        std::fs::create_dir(root.join("authority")).unwrap();
+        let mut binding = fixture.binding.clone();
+        assert!(relocate_authority(&mut binding, &root).unwrap());
+        let copied = ProjectionStore::open_readonly(&binding.transport_root, binding.scope.clone(), &binding.endpoint).unwrap();
+        let moved = copied.seat(&fixture.identity.seat).unwrap().unwrap();
+        assert_eq!(moved.identity, seat.identity);
+        assert_eq!(moved.session.as_ref().unwrap().native_session, seat.session.as_ref().unwrap().native_session);
+        assert_ne!(moved.cwd.identity, seat.cwd.identity);
+        assert!(moved.cwd.path.starts_with(&binding.transport_root));
+        drop(original);
+        std::fs::remove_dir_all(old).unwrap();
+        assert_eq!(super::super::workspace::prepare(&binding, &fixture.identity.seat).unwrap(), moved.cwd);
+        assert_eq!(resumable_session_in_scope(&binding, &moved, None).unwrap(), moved.session);
+    }
+
+    #[test]
     fn legacy_sibling_retirement_preserves_the_winner_and_requires_inactive_carriers() {
         use std::os::unix::fs::DirBuilderExt;
         let fixture = RoleFixture::new();
@@ -1808,6 +2023,11 @@ mod tests {
         let stale_root = root_for(&fixture.root, &stale.scope);
         std::fs::DirBuilder::new().mode(0o700).create(&stale_root).unwrap();
         std::fs::write(stale_root.join("framework-binding.json"), serde_json::to_vec(&stale).unwrap()).unwrap();
+        let foreign = winner_root.parent().unwrap().join("unrelated-schema");
+        std::fs::DirBuilder::new().mode(0o700).create(&foreign).unwrap();
+        std::fs::write(foreign.join("framework-binding.json"), serde_json::to_vec(&serde_json::json!({
+            "version":99,"workspace":{"path":fixture.root},"team":"other-team","future_field":true
+        })).unwrap()).unwrap();
         assert_eq!(read_binding(&fixture.root, "test").unwrap().scope, winner.scope);
         assert!(stale_root.join("framework-binding.json").exists());
         let unknown = serde_json::json!({"agents":{"worker":{"runtime_family":"contract",

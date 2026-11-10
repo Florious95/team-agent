@@ -299,6 +299,13 @@ pub(crate) fn restart(
             as_json,
         )));
     }
+    let skipped: Vec<_> = agents.iter().filter(|(id, row)| framework::is_contract(row)
+        && !eligible.iter().any(|role| role.id.as_str() == id.as_str())).map(|(id, _)| id.as_str()).collect();
+    let mut skipped_locks = Vec::new();
+    for id in &skipped {
+        let seat = team_agent_contract::contract::types::SeatId::new(*id).map_err(error)?;
+        skipped_locks.push(backend::native_seat_lock(workspace, team, &seat, true).map_err(error)?);
+    }
     crate::coordinator::retire_legacy_coordinator(workspace).map_err(error)?;
     // Same cutover lock as migrate. Archive evidence before publishing the new
     // binding; a failed spawn retains its normal native operation receipts.
@@ -348,6 +355,26 @@ pub(crate) fn restart(
     )
     .map_err(error)?;
     file.sync_all()?;
+    // The archive durably retains lost identities. Detach skipped rows before
+    // publishing the fresh store: a crash here remains fail-closed on the old
+    // missing authority, rather than stranding stale identities in a new store.
+    let mut detached = latest.state.clone();
+    for id in &skipped {
+        let row = detached["agents"][*id].as_object_mut().ok_or_else(|| error("saved native row missing"))?;
+        for field in ["contract_scope", "contract_instance", "generation", "native_pane", "native_endpoint", "native_pid",
+            "session_id", "pane_id", "pane_pid", "tmux_endpoint", "window", "session_name"] {
+            row.insert(field.into(), serde_json::Value::Null);
+        }
+        row.insert("native_recovery_archive".into(), json!(archive));
+        row.insert("session_observation".into(), json!("lost"));
+        row.insert("mcp_binding".into(), json!("unverified"));
+        row.insert("mcp_tools".into(), json!({}));
+        crate::station::projection::publish(workspace, &mut detached, team, &[*id]).map_err(error)?;
+        crate::state::repository::StateRepository::new(workspace).save(
+            crate::state::repository::StateWriteIntent::ResetAgent { team_key: team, agent_id: id, discard_session: true },
+            &detached,
+        ).map_err(error)?;
+    }
     binding.candidate = std::env::current_exe()?.canonicalize()?;
     binding.candidate_sha256 = team_agent_contract::host::process::fingerprint_file(
         &binding.candidate,

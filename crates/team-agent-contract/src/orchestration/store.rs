@@ -324,6 +324,26 @@ impl ProjectionStore {
             revisions: RefCell::new(BTreeMap::new()),
         })
     }
+    /// Snapshot a quiescent authority into a newly created destination. Callers
+    /// fence writers and verify ownership before rewriting path-bearing values.
+    pub fn copy_projection_to(
+        &self,
+        destination: &Self,
+        rewrite: &mut impl FnMut(&mut serde_json::Value) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        if self.scope != destination.scope || self.endpoint != destination.endpoint
+            || self.root == destination.root || !destination.seats()?.is_empty()
+        { return Err(Error::Fence); }
+        self.files.copy_snapshot(&destination.files, &mut |collection, value| {
+            // Business call arguments/results and protocol facts are immutable
+            // evidence, even when their text happens to look like a path.
+            if matches!(collection, "seats" | "operations" | "retirements" | "connections" | "route_endpoint") {
+                rewrite(value)?;
+            }
+            Ok(())
+        })
+    }
+
     pub fn scope(&self) -> &ScopeId {
         &self.scope
     }

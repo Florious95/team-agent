@@ -35,14 +35,14 @@ pub(super) fn bind_cwd(
 /// Only an adopted binding can vouch for a legacy CWD after device renumbering.
 /// New incarnation evidence never falls back to a path-only comparison.
 pub(super) fn current_cwd(binding: &Binding, cwd: &CwdIdentity) -> Result<CwdIdentity, BackendError> {
-    let current = resolve_cwd(&cwd.path)?;
+    let current = resolve_cwd(&cwd.path).map_err(|error| BackendError::Continuity(format!("cannot reopen preserved CWD {}: {error}", cwd.path.display())))?;
     if cwd_matches(cwd)? || (!stable_cwd(cwd) && !stable_cwd(&binding.workspace)
         && current.path == cwd.path
         && (cwd.path == binding.workspace.path
             || cwd.path.starts_with(root_for(&binding.workspace.path, &binding.scope).join("workspaces"))
             || cwd.path.starts_with(binding.transport_root.join("workspaces"))))
     { return Ok(current); }
-    Err(BackendError::Metadata)
+    Err(BackendError::Continuity(format!("preserved CWD incarnation changed: {}", cwd.path.display())))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -60,7 +60,12 @@ pub(super) fn prepare(binding: &Binding, seat: &SeatId) -> Result<CwdIdentity, B
     validate_directory(&root)?;
     let parent = binding.transport_root.join("workspaces");
     let path = parent.join(seat.as_str());
-    let record_path = root.join(format!("cwd-{}.json", seat.as_str()));
+    let scoped_record = binding.transport_root.join(format!("cwd-{}.json", seat.as_str()));
+    let record_path = match std::fs::symlink_metadata(&scoped_record) {
+        Ok(_) => scoped_record,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => root.join(format!("cwd-{}.json", seat.as_str())),
+        Err(error) => return Err(error.into()),
+    };
     match std::fs::symlink_metadata(&record_path) {
         Ok(metadata) => {
             if !metadata.is_file() || metadata.file_type().is_symlink() {

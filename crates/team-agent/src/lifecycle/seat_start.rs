@@ -1200,7 +1200,8 @@ fn native_continuation_admission(
     .map_err(rejected)?
     {
         if request.session == SessionPolicy::Preserve
-            && !super::restart::restart_agent_never_captured(row, None)
+            && (row["native_recovery_archive"].is_string()
+                || !super::restart::restart_agent_never_captured(row, None))
         {
             return Err(refused("session_preserve_unavailable: prior launch context has no native continuation authority; choose --session fresh explicitly"));
         }
