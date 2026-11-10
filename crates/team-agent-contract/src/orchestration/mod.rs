@@ -26,6 +26,7 @@ pub enum Error {
     Corrupt,
     Io(std::io::ErrorKind),
     Host(&'static str),
+    StartupTimeout(String),
     /// A read-only stop preflight refused before issuing any native mutation.
     StopNoEffect(String),
     HostDiagnostic(crate::host::HostError),
@@ -43,6 +44,7 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::HostDiagnostic(error) => std::fmt::Display::fmt(error, f),
+            Self::StartupTimeout(message) => f.write_str(message),
             Self::NativeControl(report) => write!(
                 f,
                 "native control {:?}: disposition={:?}; persistence={:?}; effect_floor={:?}; counts={:?}; problems={:?}; control_paste={:?}",

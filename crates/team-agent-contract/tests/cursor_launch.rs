@@ -31,12 +31,6 @@ impl CommandRunner for Runner {
         assert!(request.stdin.is_none());
         // Every command runs the PATH-selected public entry, never node/index.js.
         assert_eq!(request.executable.file_name().unwrap(), "cursor-agent");
-        if request.arguments.last().is_some_and(|argument| argument == "create-chat") {
-            assert!(!request.environment.set.contains_key("CURSOR_INVOKED_AS"));
-            assert!(request.environment.set.contains_key("HOME"));
-            assert!(request.environment.remove.contains("CURSOR_API_KEY"));
-            assert!(request.environment.remove.contains("CURSOR_API_ENDPOINT"));
-        }
         self.calls.push((request.executable.clone(), request.arguments.clone()));
         self.outputs.pop_front().expect("no extra command or fallback")
     }
@@ -116,20 +110,17 @@ fn runtime_bridges_the_public_launcher_to_the_vendor_node_it_execs_into() {
     assert!(require_no_global_mcp(runtime.home()).is_err());
 }
 #[test]
-fn native_allocator_needs_real_exit_zero_and_never_reuses_timeout_uuid() {
+fn derived_session_is_stable_generation_scoped_and_cursor_specific() {
     let sandbox = Sandbox::new();
-    let (runtime, _, _) = installation(&sandbox);
-    let cwd = resolve_cwd(&sandbox.parent).unwrap();
-    let mut runner = Runner::outputs(&[format!("{SID}\n").as_bytes()]);
-    assert_eq!(allocate_chat(&runtime, &cwd, &mut runner, bounds()).unwrap().as_str(), SID);
-    assert_eq!(runner.calls[0].0, runtime.launcher().executable);
-    assert_eq!(runner.calls[0].1, vec![OsString::from("create-chat")]);
-    for (end, code) in [(CommandEnd::TimedOut, None), (CommandEnd::Exited, Some(1)), (CommandEnd::OutputLimit, None)] {
-        let mut runner = Runner::outputs(&[SID.as_bytes()]);
-        runner.outputs[0].end = end; runner.outputs[0].exit_code = code;
-        assert!(allocate_chat(&runtime, &cwd, &mut runner, bounds()).is_err());
-        assert_eq!(runner.calls.len(), 1);
-    }
+    let mut owner = support::request(&sandbox.root, "worker").identity;
+    let id = session_id(&owner);
+    assert_eq!(id, session_id(&owner));
+    assert_eq!(parse_chat_id(id.as_str().as_bytes()).unwrap(), id);
+    assert_eq!(id.as_str().as_bytes()[14], b'4');
+    assert!(matches!(id.as_str().as_bytes()[19], b'8' | b'9' | b'a' | b'b'));
+    assert_ne!(id, team_agent_contract::providers::claude::session_id(&owner));
+    owner.generation.0 += 1;
+    assert_ne!(id, session_id(&owner));
     for bad in ["", "latest", "1234", "chat: 12345678-1234-1234-1234-123456789012", "12345678-1234-1234-1234-123456789012\nextra"] {
         assert!(parse_chat_id(bad.as_bytes()).is_err());
     }

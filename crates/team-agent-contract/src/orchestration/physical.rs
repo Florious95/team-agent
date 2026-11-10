@@ -601,14 +601,37 @@ impl LifecycleHost for PhysicalRuntime<'_> {
             // The allocated exact-ID argv is paired with a live image-fenced
             // ready launch, not labelled as a native transcript echo.
             let deadline = self.deadline()?;
+            let mut last_surface = None;
             let scope = loop {
                 let ready = self.readiness(seat)?;
+                if let crate::contract::probe::ProbeOutcome::Observed(ref pane) = ready.pane.outcome {
+                    last_surface = Some(pane.surface);
+                }
                 if matches!(ready.process.outcome, crate::contract::probe::ProbeOutcome::Observed(ref process) if process.process == target.process.identity)
                     && matches!(ready.pane.outcome, crate::contract::probe::ProbeOutcome::Observed(ref pane) if pane.surface == InputSurface::ComposerReady)
                 {
                     break ready.pane.scope;
                 }
-                if self.clock.now() >= deadline { return Err(Error::Host("explicit session startup not ready")); }
+                if self.clock.now() >= deadline {
+                    let name = "startup-timeout.capture.txt";
+                    let path = target.directory.path.join(name);
+                    let mut surface = last_surface.map_or_else(|| "unknown".into(), |value| format!("{value:?}"));
+                    // The readiness budget is exhausted. Allow one bounded diagnostic
+                    // capture before compensation destroys the pane, not another probe.
+                    let capture_deadline = self.clock.now().saturating_add(self.settings.action_budget.min(Duration::from_secs(2)));
+                    let capture = host.capture(&target, self.clock, capture_deadline, self.settings.freshness)
+                        .map_err(|error| error.to_string())
+                        .and_then(|frame| {
+                            if frame.text.trim().is_empty() { surface = "blank".into(); }
+                            let directory = ScopedDirectory::reopen(target.directory.clone()).map_err(|error| error.to_string())?;
+                            directory.create_file(name, frame.text.as_bytes())
+                                .map(|_| ()).map_err(|failure| failure.error.to_string())
+                        });
+                    let unavailable = capture.err().map_or_else(String::new, |error| format!("; capture=unavailable({error})"));
+                    return Err(Error::StartupTimeout(format!(
+                        "explicit session startup not ready; last_surface={surface}; capture_path={}{unavailable}", path.display()
+                    )));
+                }
                 self.clock.sleep(self.settings.limits.poll_interval);
             };
             (id.as_str().as_bytes().to_vec(), CaptureOrigin::ExplicitResumeLaunch, scope)

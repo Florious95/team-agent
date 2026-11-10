@@ -1,7 +1,7 @@
 //! The public `cursor-agent` on PATH is what runs, user wrappers included. The
 //! vendor launcher that route ends in execs its own bundled Node; that Node is
-//! only a verification target and is never exec'd here. The bounded native
-//! allocator is side-effecting and never part of H1 or preflight.
+//! only a verification target and is never exec'd here. Live Cursor 2026.10.22
+//! accepts and recalls a locally assigned UUID via --resume; see super::session_id.
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -171,52 +171,6 @@ pub fn parse_chat_id(stdout: &[u8]) -> Result<crate::contract::session::NativeSe
         if [8, 13, 18, 23].contains(&index) { byte == b'-' } else { byte.is_ascii_hexdigit() }
     }) { return Err(ContractError::Invalid("Cursor native chat ID")); }
     crate::contract::session::NativeSessionId::new(id)
-}
-
-/// Side-effecting native allocation, separate from catalog/preflight and called
-/// only after the framework has a durable owned startup scope. Never invent a
-/// UUID, select --continue/latest, retry, or call a partial timeout success.
-pub fn allocate_chat<R: CommandRunner>(
-    runtime: &RuntimeInstallation,
-    cwd: &crate::contract::session::CwdIdentity,
-    runner: &mut R,
-    bounds: ReadBounds,
-) -> Result<crate::contract::session::NativeSessionId, ReadFailure> {
-    bounds.validate().map_err(ReadFailure::Error)?;
-    let started = Instant::now();
-    let verify = || -> Result<(), ReadFailure> {
-        if resolve_cwd(&cwd.path).map_err(|_| ReadFailure::Error(ContractError::Mismatch("Cursor allocation cwd")))? != *cwd {
-            return Err(ReadFailure::Error(ContractError::Mismatch("Cursor allocation cwd")));
-        }
-        for (path, expected) in [(&runtime.command.entry, runtime.launcher_native.executable_sha256), (&runtime.engine, runtime.native.executable_sha256)] {
-            if fingerprint_file(path, MAX_IMAGE, bounds.deadline.saturating_sub(started.elapsed()))
-                .map_err(|_| ReadFailure::Error(ContractError::Mismatch("Cursor allocation executable")))? != expected
-            { return Err(ReadFailure::Error(ContractError::Mismatch("Cursor allocation executable"))); }
-        }
-        Ok(())
-    };
-    verify()?;
-    let remaining = bounds.deadline.saturating_sub(started.elapsed());
-    if remaining.is_zero() { return Err(ReadFailure::TimedOut { elapsed: started.elapsed() }); }
-    // Through the public command, exactly like the pane: wrappers run here too.
-    let mut request = command(&runtime.command.entry, &["create-chat"], Some(cwd.path.clone()), ReadBounds { deadline: remaining, ..bounds });
-    request.environment.remove.extend(["CURSOR_API_KEY".into(), "CURSOR_API_ENDPOINT".into()]);
-    request.environment.set.insert("HOME".into(), runtime.home.as_os_str().to_owned());
-    let output = runner.run(&request);
-    if output.end == CommandEnd::TimedOut || output.elapsed > remaining {
-        return Err(ReadFailure::TimedOut { elapsed: started.elapsed().max(output.elapsed) });
-    }
-    if output.end == CommandEnd::OutputLimit || output.stdout.len() > bounds.max_output_bytes {
-        return Err(ReadFailure::OutputLimit { limit: bounds.max_output_bytes });
-    }
-    if !output.success() {
-        return match (output.end, output.exit_code) {
-            (CommandEnd::Exited, Some(code)) => Err(ReadFailure::Exit { code }),
-            _ => Err(ReadFailure::Unknown(super::UNVERIFIED)),
-        };
-    }
-    verify()?;
-    parse_chat_id(&output.stdout).map_err(ReadFailure::Error)
 }
 
 pub(super) fn validate_catalog_request(request: &CatalogRequest) -> Result<(), ContractError> {

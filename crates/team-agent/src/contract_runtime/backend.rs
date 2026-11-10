@@ -581,7 +581,7 @@ pub fn preflight(team: &super::config::TeamConfig) -> Result<(), BackendError> {
         if !discoveries.contains_key(&role.provider) {
             discoveries.insert(
                 role.provider.clone(),
-                discovery::discover_runtime(&role.provider, &team.workspace.path)?,
+                discovery::discover_for_start(&role.provider, &team.workspace.path)?,
             );
         }
         let discovered = discoveries.get(&role.provider).ok_or(BackendError::Metadata)?;
@@ -914,15 +914,8 @@ pub(super) fn preassign_session(
     if matches!(&discovered.runtime, Some(registry::NativeRuntime::Claude(_))) {
         request.preassigned_session = Some(team_agent_contract::providers::claude::session_id(&request.identity));
     }
-    if let Some(registry::NativeRuntime::Cursor(runtime)) = &discovered.runtime {
-        request.preassigned_session = Some(
-            team_agent_contract::providers::cursor::native::allocate_chat(
-                runtime, &request.paths.cwd, &mut RealCommandRunner::default(),
-                team_agent_contract::contract::hooks::ReadBounds {
-                    deadline: Duration::from_secs(90), max_output_bytes: 1024 * 1024,
-                },
-            ).map_err(|error| BackendError::Discovery(DiscoveryError::Catalog(error)))?,
-        );
+    if matches!(&discovered.runtime, Some(registry::NativeRuntime::Cursor(_))) {
+        request.preassigned_session = Some(team_agent_contract::providers::cursor::session_id(&request.identity));
     }
     Ok(())
 }
@@ -976,7 +969,7 @@ pub(crate) fn start_with_peer_transfer(
     }
     let selected = registry::provider(role.provider.as_str())?;
     let descriptor = selected.descriptor();
-    let discovered = discovery::discover_runtime(&role.provider, workspace)?;
+    let discovered = discovery::discover_for_start(&role.provider, workspace)?;
     let cwd = resolve_cwd(workspace)?;
     let scope = scope_for(&cwd, team)?;
     let candidate = std::env::current_exe()?.canonicalize()?;

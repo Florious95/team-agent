@@ -1,4 +1,4 @@
-//! Cursor native worker: public `cursor-agent` launch via PATH, native chat allocation,
+//! Cursor native worker: public `cursor-agent` launch via PATH, identity-derived session IDs,
 //! private project MCP, and first-business terminal prompt delivery. Declared
 //! recipes are not substitutes for candidate-bound live acceptance evidence.
 pub mod interaction;
@@ -9,7 +9,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use crate::contract::{
-    descriptor::*, fork::*, hooks::*, plan::*, session::{CaptureOrigin, ResumeBinding, SessionStorage}, types::*,
+    descriptor::*, fork::*, hooks::*, plan::*, session::{CaptureOrigin, NativeSessionId, ResumeBinding, SessionStorage}, types::*,
 };
 
 pub const UNVERIFIED: Reason = Reason {
@@ -26,6 +26,17 @@ const EFFORT: Reason = Reason {
     code: "cursor-effort-is-native-model-id",
     message: "Select an exact catalog model ID; a separate effort flag or suffix rewrite is not verified",
 };
+
+/// Live Cursor 2026.10.22 accepts a locally allocated UUID via --resume and
+/// restores that exact chat later; no create-chat round trip is required.
+pub fn session_id(owner: &InstanceIdentity) -> NativeSessionId {
+    let text = format!("cursor-team-session-v1\0{}\0{}\0{}\0{}", owner.scope.as_str(), owner.seat.as_str(), owner.instance.as_str(), owner.generation.0);
+    let mut bytes = crate::host::digest(text.as_bytes()).0;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex = crate::host::digest_hex(crate::contract::types::Digest(bytes));
+    NativeSessionId::new(format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32])).expect("hex UUID is a valid session ID")
+}
 
 pub static CURSOR_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     identity: IdentityFacet {

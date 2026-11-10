@@ -1,5 +1,5 @@
 //! Bounded native discovery. Nothing here creates a runtime or claims T2/T3.
-use std::path::{Path, PathBuf};
+use std::{collections::BTreeMap, path::{Path, PathBuf}, sync::{Mutex, OnceLock}, time::{Duration, Instant}};
 
 use team_agent_contract::contract::{hooks::*, plan::CatalogObservation, types::*};
 use team_agent_contract::host::{command::{PublicCommand, RealCommandRunner}, process::resolve_cwd};
@@ -39,6 +39,7 @@ pub enum DiscoveryError {
     Io(#[from] std::io::Error),
 }
 
+#[derive(Clone)]
 pub struct Discovery {
     /// The provider's public command exactly as the user's shell resolves it.
     pub command: PublicCommand,
@@ -141,6 +142,26 @@ pub fn discover(provider: &ProviderId, workspace: &Path) -> Result<Discovery, Di
     let result = Discovery { engine: command.entry.clone(), command, native, catalog, runtime: None };
     validate_catalog(provider, &result).map_err(DiscoveryError::Contract)?;
     Ok(result)
+}
+
+/// Share preflight's read-only discovery with startup, never across an unbounded
+/// interval. Physical spawn still re-fences the public launcher and native image.
+pub(super) fn discover_for_start(provider: &ProviderId, workspace: &Path) -> Result<Discovery, DiscoveryError> {
+    type Memo = BTreeMap<(ProviderId, PathBuf), (Instant, Discovery)>;
+    static MEMO: OnceLock<Mutex<Memo>> = OnceLock::new();
+    let key = (provider.clone(), workspace.canonicalize()?);
+    let memo = MEMO.get_or_init(|| Mutex::new(BTreeMap::new()));
+    {
+        let mut entries = memo.lock().unwrap_or_else(|poison| poison.into_inner());
+        entries.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(60));
+        if let Some((_, discovery)) = entries.get(&key) {
+            return Ok(discovery.clone());
+        }
+    }
+    let discovery = discover_runtime(provider, workspace)?;
+    memo.lock().unwrap_or_else(|poison| poison.into_inner())
+        .insert(key, (Instant::now(), discovery.clone()));
+    Ok(discovery)
 }
 
 /// Runtime discovery is separate from public catalog metadata. Each provider
