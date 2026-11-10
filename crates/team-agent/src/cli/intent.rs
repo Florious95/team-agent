@@ -366,6 +366,28 @@ fn run_canonical(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult
             return Err(usage("--session fresh requires an explicit agent; team start preserves stopped seats"));
         }
     }
+    if !intent.dry_run && std::env::var_os("TEAM_AGENT_ID").is_none() {
+        if let Ok(selected) = crate::state::selector::resolve_active_team_readonly(
+            &intent.workspace, intent.team.as_deref(), crate::state::selector::SelectorMode::RuntimeOnly,
+        ) {
+            let target = match &intent.subject {
+                Subject::Agent(id) => Some(id),
+                _ => None,
+            };
+            let owner_gate = if intent.verb == Verb::Stop && target.is_none() {
+                crate::lifecycle::launch::ensure_stop_owner_allowed_for_state
+            } else { crate::lifecycle::launch::ensure_owner_allowed_for_state };
+            if let Err(crate::lifecycle::LifecycleError::OwnerRefused(reason)) = owner_gate(&selected.state, target) {
+                if serde_json::from_str::<Value>(&reason).ok()
+                    .is_some_and(|refusal| refusal["reason"] == "team_owner_mismatch")
+                {
+                    // Reuse the endpoint-aware, non-forcing claim CAS. Planning
+                    // rereads ownership and still refuses if the claim failed.
+                    let _ = crate::leader::claim_leader(&selected.run_workspace, Some(&selected.team_key), false);
+                }
+            }
+        }
+    }
     #[cfg(unix)]
     if intent.verb == Verb::Restart && matches!(intent.subject, Subject::Team { .. }) {
         if let Some(result) = crate::contract_runtime::recovery::restart(
