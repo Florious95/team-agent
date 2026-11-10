@@ -103,7 +103,7 @@ pub fn check_team_owner(
     // 在此之前本守卫**偏严**:缺-uuid owner + 同-identity 异-pane caller 会被判 takeover(Python 判
     // sticky/own)。**只过严不过松**(宁拒不误放),无安全洞。
     let same_uuid = !owner_uuid.is_empty() && !caller_uuid.is_empty() && caller_uuid == owner_uuid;
-    if same_socket && same_uuid && (caller_pane.is_empty() || same_pane) {
+    if same_uuid && (caller_pane.is_empty() || same_pane) {
         return None;
     }
     // 否则拒绝。reason_kind / action 按 same_uuid 分流(sticky_bind vs takeover)。
@@ -283,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn recorded_socket_qualifies_every_owner_grant() {
+    fn recorded_socket_qualifies_pane_claims_but_not_pane_less_uuid() {
         let mut state = state_owned("%0", "uuid-owner");
         state["team_owner"]["tmux_socket"] = json!("/tmp/owner.sock");
         for pane in ["%0", ""] {
@@ -293,9 +293,18 @@ mod tests {
             for socket in [Some("/tmp/foreign.sock".to_string()), None] {
                 c.tmux_socket = socket;
                 for probe in [&LIVE, &DEAD, &UNKNOWN] {
-                    assert!(check_team_owner(&state, &c, false, probe).is_some());
+                    assert_eq!(check_team_owner(&state, &c, false, probe).is_none(), pane.is_empty());
                 }
             }
+        }
+    }
+
+    #[test]
+    fn pane_less_caller_still_requires_matching_nonempty_uuid() {
+        let mut state = state_owned("%0", "uuid-owner");
+        state["team_owner"]["tmux_socket"] = json!("/tmp/owner.sock");
+        for uuid in ["", "uuid-other"] {
+            assert!(check_team_owner(&state, &caller("", uuid), false, &LIVE).is_some());
         }
     }
 
