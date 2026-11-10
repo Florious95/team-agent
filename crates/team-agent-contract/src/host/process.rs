@@ -342,16 +342,44 @@ pub fn resolve_cwd(path: &Path) -> Result<crate::contract::session::CwdIdentity,
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
+        // Recoverable incarnation evidence; the canonical path is stored beside
+        // it. APFS st_dev is deliberately absent because it changes at reboot.
+        let mut identity = [0; 32];
+        identity[..8].copy_from_slice(b"TA-CWD2\0");
+        identity[8..16].copy_from_slice(&metadata.ino().to_le_bytes());
+        if let Ok(created) = metadata.created() {
+            if let Ok(created) = created.duration_since(std::time::UNIX_EPOCH) {
+                identity[16..24].copy_from_slice(&created.as_secs().to_le_bytes());
+                identity[24..32].copy_from_slice(&u64::from(created.subsec_nanos()).to_le_bytes());
+            }
+        }
+        Ok(crate::contract::session::CwdIdentity { path, identity: Digest(identity) })
+    }
+}
+
+pub fn stable_cwd(cwd: &crate::contract::session::CwdIdentity) -> bool {
+    cwd.identity.0.starts_with(b"TA-CWD2\0")
+}
+
+/// Exact v1 verification is safe even outside an adopted framework scope.
+pub fn legacy_cwd(path: &Path) -> Result<crate::contract::session::CwdIdentity, HostError> {
+    let mut cwd = resolve_cwd(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(&cwd.path).map_err(|e| HostError::io("cwd identity", e))?;
         let mut hash = Sha256::new();
         hash.update(b"team-agent-contract-cwd-v1\0");
-        hash.update(path.as_os_str().as_encoded_bytes());
+        hash.update(cwd.path.as_os_str().as_encoded_bytes());
         hash.update(metadata.dev().to_le_bytes());
         hash.update(metadata.ino().to_le_bytes());
-        Ok(crate::contract::session::CwdIdentity {
-            path,
-            identity: Digest(hash.finalize().into()),
-        })
+        cwd.identity = Digest(hash.finalize().into());
     }
+    Ok(cwd)
+}
+
+pub fn cwd_matches(cwd: &crate::contract::session::CwdIdentity) -> Result<bool, HostError> {
+    Ok(if stable_cwd(cwd) { resolve_cwd(&cwd.path)? == *cwd } else { legacy_cwd(&cwd.path)? == *cwd })
 }
 
 /// Capture executable provenance once before readiness; later liveness samples

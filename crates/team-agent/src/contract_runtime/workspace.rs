@@ -7,7 +7,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use team_agent_contract::contract::{session::CwdIdentity, types::SeatId};
-use team_agent_contract::host::process::resolve_cwd;
+use team_agent_contract::host::process::{cwd_matches, resolve_cwd, stable_cwd};
 
 use super::backend::{root_for, BackendError, Binding};
 use super::registry::NativeProvider;
@@ -22,14 +22,27 @@ pub(super) fn bind_cwd(
 ) -> Result<CwdIdentity, BackendError> {
     match provider {
         NativeProvider::Pi | NativeProvider::Claude | NativeProvider::Codex | NativeProvider::GrokBuild =>
-            Ok(previous.cloned().unwrap_or_else(|| binding.workspace.clone())),
+            current_cwd(binding, previous.unwrap_or(&binding.workspace)),
         // Explicit release boundary: preserve these providers' existing config isolation.
-        NativeProvider::Kiro => Ok(previous.cloned().unwrap_or_else(|| binding.workspace.clone())),
+        NativeProvider::Kiro => current_cwd(binding, previous.unwrap_or(&binding.workspace)),
         NativeProvider::Cursor => match previous {
-            Some(cwd) => Ok(cwd.clone()),
+            Some(cwd) => current_cwd(binding, cwd),
             None => prepare(binding, seat),
         },
     }
+}
+
+/// Only an adopted binding can vouch for a legacy CWD after device renumbering.
+/// New incarnation evidence never falls back to a path-only comparison.
+pub(super) fn current_cwd(binding: &Binding, cwd: &CwdIdentity) -> Result<CwdIdentity, BackendError> {
+    let current = resolve_cwd(&cwd.path)?;
+    if cwd_matches(cwd)? || (!stable_cwd(cwd) && !stable_cwd(&binding.workspace)
+        && current.path == cwd.path
+        && (cwd.path == binding.workspace.path
+            || cwd.path.starts_with(root_for(&binding.workspace.path, &binding.scope).join("workspaces"))
+            || cwd.path.starts_with(binding.transport_root.join("workspaces"))))
+    { return Ok(current); }
+    Err(BackendError::Metadata)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -81,10 +94,7 @@ pub(super) fn prepare(binding: &Binding, seat: &SeatId) -> Result<CwdIdentity, B
             }
             validate_directory(expected.parent().ok_or(BackendError::Metadata)?)?;
             validate_directory(&expected)?;
-            if resolve_cwd(&expected)? != record.cwd {
-                return Err(BackendError::Metadata);
-            }
-            return Ok(record.cwd);
+            return current_cwd(binding, &record.cwd);
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
@@ -250,6 +260,43 @@ mod tests {
         std::fs::write(root.join("cwd-worker.json"), serde_json::to_vec(&record).unwrap()).unwrap();
         assert_eq!(prepare(&f.binding, &seat).unwrap(), cwd);
         assert!(!f.binding.transport_root.join("workspaces").exists());
+    }
+
+    #[test]
+    fn legacy_resume_cwd_requires_an_adopted_binding_and_keeps_incarnation_checks() {
+        let mut f = Fixture::new();
+        let current = resolve_cwd(&f.path).unwrap();
+        let mut legacy = team_agent_contract::host::process::legacy_cwd(&f.path).unwrap();
+        // Simulate the opaque digest recorded on an earlier boot. Its original
+        // device/inode cannot be recovered from v1 JSON.
+        legacy.identity.0[0] ^= 2;
+        assert!(!cwd_matches(&legacy).unwrap());
+        assert!(current_cwd(&f.binding, &legacy).is_err());
+        f.binding.workspace = legacy.clone();
+        let seat = SeatId::new("worker").unwrap();
+        assert_eq!(bind_cwd(&f.binding, NativeProvider::Pi, &seat, Some(&legacy)).unwrap(), current);
+        assert_eq!(bind_cwd(&f.binding, NativeProvider::Claude, &seat, Some(&legacy)).unwrap(), current);
+        // Adoption is not permission to bypass a new, recoverable incarnation.
+        let mut changed = current.clone();
+        changed.identity.0[8] ^= 1;
+        assert!(current_cwd(&f.binding, &changed).is_err());
+        let foreign = resolve_cwd(f.path.parent().unwrap()).unwrap();
+        let mut foreign_legacy = team_agent_contract::host::process::legacy_cwd(&foreign.path).unwrap();
+        foreign_legacy.identity.0[0] ^= 2;
+        assert!(current_cwd(&f.binding, &foreign_legacy).is_err());
+    }
+
+    #[test]
+    fn legacy_owned_cwd_record_survives_device_renumbering() {
+        let mut f = Fixture::new();
+        f.binding.workspace = team_agent_contract::host::process::legacy_cwd(&f.path).unwrap();
+        let seat = SeatId::new("worker").unwrap();
+        let current = prepare(&f.binding, &seat).unwrap();
+        let mut cwd = team_agent_contract::host::process::legacy_cwd(&current.path).unwrap();
+        cwd.identity.0[0] ^= 2;
+        let record = CwdRecord { version: 2, seat: seat.clone(), cwd };
+        std::fs::write(root_for(&f.path, &f.binding.scope).join("cwd-worker.json"), serde_json::to_vec(&record).unwrap()).unwrap();
+        assert_eq!(prepare(&f.binding, &seat).unwrap(), current);
     }
 
     #[test]

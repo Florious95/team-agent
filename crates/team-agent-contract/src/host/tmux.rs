@@ -7,7 +7,7 @@ use super::clock::{remaining, Clock};
 use super::command::{CommandEnd, CommandReceipt, CommandRequest, CommandRunner, OutputLimits};
 use super::files::{fingerprint_materialized, DirectoryReceipt, FileReceipt, ScopedDirectory};
 use super::process::{
-    capture_executable_inputs, capture_process, capture_public_command, fingerprint_file, resolve_cwd, sample_process,
+    capture_executable_inputs, capture_process, capture_public_command, fingerprint_file, cwd_matches, sample_process,
     verify_executable_inputs, ProcessState,
 };
 use super::shell::{launch_script_with_worker, quote, WorkerContext};
@@ -453,7 +453,7 @@ impl<R: CommandRunner> TmuxHost<R> {
             target.shared_endpoint.then_some(target.endpoint.as_path()), target.created_session);
         if target.endpoint != host.endpoint
             || target.binding != binding
-            || resolve_cwd(&target.cwd.path)? != target.cwd
+            || !cwd_matches(&target.cwd)?
         {
             return Err(HostError::new(
                 "persisted target identity",
@@ -722,7 +722,7 @@ impl<R: CommandRunner> TmuxHost<R> {
                 .directory
                 .path()
                 .starts_with(&resolved.request().paths.runtime_root)
-            || resolve_cwd(&plan.cwd)? != resolved.request().paths.cwd
+            || plan.cwd != resolved.request().paths.cwd.path || !cwd_matches(&resolved.request().paths.cwd)?
         {
             return Err(HostError::new("spawn scope/cwd", HostErrorKind::Ownership));
         }
@@ -1005,7 +1005,7 @@ impl<R: CommandRunner> TmuxHost<R> {
         let expected_binding = target_binding(&observation.directory, observation.socket_device,
             observation.socket_inode, observation.shared_endpoint.then_some(observation.endpoint.as_path()),
             observation.created_session);
-        if observation.binding != expected_binding || resolve_cwd(&observation.cwd.path)? != observation.cwd {
+        if observation.binding != expected_binding || !cwd_matches(&observation.cwd)? {
             return Err(HostError::new("spawn recovery binding", HostErrorKind::Ownership));
         }
         let missing = match std::fs::symlink_metadata(&observation.endpoint) {

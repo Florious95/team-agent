@@ -680,6 +680,13 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
         format!("{team} resolved; cross-workspace inspection permitted"),
     )];
     let mut fix = None;
+    #[cfg(unix)]
+    if let Ok(binding) = crate::contract_runtime::backend::read_binding(workspace, team) {
+        if crate::contract_runtime::backend::temporary_authority(&binding) {
+            links[0] = Link::new(1, "WARN", format!("{team}: native authority is temporary: {}; stop native seats and run team-agent migrate --team {team}", binding.transport_root.display()));
+            fix = Some(action("migrate", workspace, team));
+        }
+    }
     // Authority is a prerequisite for lifecycle repair. Missing panes cannot be
     // repaired by restart when the native store itself was purged.
     #[cfg(unix)]

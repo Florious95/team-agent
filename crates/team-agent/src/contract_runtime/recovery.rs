@@ -19,7 +19,7 @@ fn error(value: impl std::fmt::Display) -> CliError {
 
 /// A contract seat may have only a native endpoint/pane receipt, not a legacy
 /// pane PID. Unknown probe failures never count as proof that it is gone.
-fn carrier_absent(id: &str, row: &serde_json::Value, tmux: &Path) -> Result<(), CliError> {
+pub(super) fn carrier_absent(id: &str, row: &serde_json::Value, tmux: &Path) -> Result<(), CliError> {
     let mut proved = false;
     if let Some(value) = row.get("pane_pid").filter(|value| !value.is_null()) {
         let pid = value
@@ -211,7 +211,7 @@ pub(crate) fn restart(
     let mut binding = backend::read_binding(workspace, team).map_err(error)?;
     let old_root = binding.transport_root.clone();
     let temp = Path::new("/tmp").canonicalize()?;
-    if old_root.parent() != Some(temp.as_path())
+    if old_root.parent().is_none_or(|parent| parent != temp && parent != Path::new("/tmp") && parent != Path::new("/private/tmp"))
         || !old_root
             .file_name()
             .is_some_and(|name| name.to_string_lossy().starts_with("ta-"))
@@ -284,12 +284,11 @@ pub(crate) fn restart(
                     .is_some_and(|row| !crate::state::projection::agent_explicit_stop(row))
         })
         .collect();
-    if eligible.is_empty() {
-        return Err(error("native recovery has no eligible nonpaused roles"));
+    if !eligible.is_empty() {
+        let mut admission = config.clone();
+        admission.roles = eligible.iter().map(|role| (**role).clone()).collect();
+        backend::preflight(&admission).map_err(error)?;
     }
-    let mut admission = config.clone();
-    admission.roles = eligible.iter().map(|role| (**role).clone()).collect();
-    backend::preflight(&admission).map_err(error)?;
     let root = backend::root_for(workspace, &binding.scope);
     if dry_run {
         return Ok(Some(CmdResult::from_json(
@@ -373,6 +372,8 @@ pub(crate) fn restart(
     file.sync_all()?;
     std::fs::rename(&staged, root.join("framework-binding.json"))?;
     directory.sync_all()?;
+    backend::retire_inactive_siblings(&binding, &selected.state).map_err(error)?;
+    drop(directory);
     let mut outcomes = Vec::new();
     for role in eligible {
         let result = super::commands::with_agent(

@@ -5,7 +5,7 @@
 use crate::contract::{descriptor::CatalogSource, hooks::*, plan::*, types::*};
 use crate::host::{
     command::*,
-    process::{fingerprint_file, resolve_cwd},
+    process::fingerprint_file,
     HostError, HostErrorKind,
 };
 use std::path::{Path, PathBuf};
@@ -298,9 +298,8 @@ impl<R: CommandRunner> BoundedReadHost for CatalogReader<R> {
             )));
         }
         let started = Instant::now();
-        if resolve_cwd(&request.cwd.path)
+        if !crate::host::process::cwd_matches(&request.cwd)
             .map_err(|_| ReadFailure::Error(ContractError::Mismatch("catalog cwd")))?
-            != request.cwd
         {
             return Err(ReadFailure::Error(ContractError::Mismatch("catalog cwd")));
         }

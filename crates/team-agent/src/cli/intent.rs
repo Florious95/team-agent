@@ -395,6 +395,23 @@ fn run_canonical(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult
             checked.tokens.iter().any(|token| token == "--allow-fresh"), intent.dry_run, intent.json,
         )? { return Ok(result); }
     }
+    #[cfg(unix)]
+    if !intent.dry_run {
+        if let Ok(selected) = crate::state::selector::resolve_active_team_readonly(
+            &intent.workspace, intent.team.as_deref(), crate::state::selector::SelectorMode::RuntimeOnly,
+        ) {
+            if let Ok(binding) = crate::contract_runtime::backend::read_binding(&selected.run_workspace, &selected.team_key) {
+                crate::contract_runtime::backend::retire_inactive_siblings(&binding, &selected.state)
+                    .map_err(|error| refusal(error.to_string()))?;
+                if crate::contract_runtime::backend::temporary_authority(&binding) {
+                    match crate::contract_runtime::backend::migrate_if_required(&selected.run_workspace, &selected.team_key) {
+                        Ok(_) | Err(crate::contract_runtime::backend::BackendError::AuthorityLost { .. }) => {}
+                        Err(error) => return Err(refusal(error.to_string())),
+                    }
+                }
+            }
+        }
+    }
     let mut plan = runtime::plan(intent)?;
     let upgrade_workspace = plan.scope.workspace.clone();
     let upgrade = !plan.intent.dry_run && plan.no_eligible.is_none();
@@ -404,9 +421,10 @@ fn run_canonical(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult
     #[cfg(unix)]
     if plan.intent.verb == Verb::Stop && !plan.intent.dry_run && plan.no_eligible.is_none() {
         if let Some(team) = plan.scope.team.as_deref() {
-            if crate::contract_runtime::backend::migrate_if_required(&plan.scope.workspace, team)
-                .map_err(|error| refusal(error.to_string()))? {
-                plan = runtime::plan(plan.intent)?;
+            match crate::contract_runtime::backend::migrate_if_required(&plan.scope.workspace, team) {
+                Ok(true) => plan = runtime::plan(plan.intent)?,
+                Ok(false) | Err(crate::contract_runtime::backend::BackendError::AuthorityLost { .. }) => {},
+                Err(error) => return Err(refusal(error.to_string())),
             }
         }
     }

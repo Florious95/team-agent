@@ -205,7 +205,7 @@ impl<R: CommandRunner> BoundedReadHost for NativeCatalog<R> {
         }
         let started = Instant::now();
         let verify = || -> Result<(), ReadFailure> {
-            if resolve_cwd(&request.cwd.path).map_err(|_| ReadFailure::Error(ContractError::Mismatch("Cursor catalog cwd")))? != request.cwd {
+            if !crate::host::process::cwd_matches(&request.cwd).map_err(|_| ReadFailure::Error(ContractError::Mismatch("Cursor catalog cwd")))? {
                 return Err(ReadFailure::Error(ContractError::Mismatch("Cursor catalog cwd")));
             }
             let remaining = request.bounds.deadline.saturating_sub(started.elapsed());

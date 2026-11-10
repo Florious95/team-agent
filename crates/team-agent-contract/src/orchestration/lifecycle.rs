@@ -141,9 +141,17 @@ impl Lifecycle<'_> {
         } else if request.operation == Operation::Resume {
             let resume = request.resume.as_ref().ok_or(Error::Fence)?;
             let parent = self.store.assert_current(&resume.expected_source)?;
-            if parent.session.as_ref() != Some(&resume.binding) {
-                return Err(Error::Fence);
+            let mut source = parent.session.clone().ok_or(Error::Fence)?;
+            // A framework-admitted resume may upgrade only the CWD evidence of
+            // this exact owned source. Never weaken general CwdIdentity equality.
+            if !crate::host::process::stable_cwd(&source.cwd)
+                && crate::host::process::stable_cwd(&resume.binding.cwd)
+                && source.cwd.path == resume.binding.cwd.path
+                && crate::host::process::cwd_matches(&resume.binding.cwd).map_err(|_| Error::Fence)?
+            {
+                source.cwd = resume.binding.cwd.clone();
             }
+            if source != resume.binding { return Err(Error::Fence); }
             Some(parent)
         } else {
             None

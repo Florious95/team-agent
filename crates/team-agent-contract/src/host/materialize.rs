@@ -351,7 +351,7 @@ fn open_parent(
     path: &OwnedPath,
     create: bool,
 ) -> Result<(File, String), HostError> {
-    if path.root() != root.path || resolve_cwd(&root.path)? != *root {
+    if path.root() != root.path || !super::process::cwd_matches(root)? {
         return Err(HostError::new(
             "captured workspace changed",
             HostErrorKind::Ownership,

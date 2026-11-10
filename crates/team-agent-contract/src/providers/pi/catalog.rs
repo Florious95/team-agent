@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use crate::contract::{descriptor::{CatalogSource, Effort}, hooks::*, plan::*, types::*};
-use crate::host::{command::*, process::{fingerprint_file, resolve_cwd}, HostError, HostErrorKind};
+use crate::host::{command::*, process::{fingerprint_file, cwd_matches}, HostError, HostErrorKind};
 
 /// `--no-approve` keeps project-local model/settings files out of the catalog,
 /// exactly as they stay out of the launch.
@@ -93,7 +93,7 @@ impl<R: CommandRunner> BoundedReadHost for NativeCatalog<R> {
         let started = Instant::now();
         let mismatch = || ReadFailure::Error(ContractError::Mismatch("Pi catalog installation/cwd"));
         let verify = || {
-            if resolve_cwd(&request.cwd.path).map_err(|_| mismatch())? != request.cwd { return Err(mismatch()); }
+            if !cwd_matches(&request.cwd).map_err(|_| mismatch())? { return Err(mismatch()); }
             if fingerprint_file(&request.executable, MAX_IMAGE, request.bounds.deadline.saturating_sub(started.elapsed())).map_err(|_| mismatch())?
                 != request.native.executable_sha256 { return Err(mismatch()); }
             Ok(())

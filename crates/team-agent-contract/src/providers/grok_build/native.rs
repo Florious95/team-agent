@@ -41,7 +41,7 @@ pub fn parse_version(bytes: &[u8]) -> Result<String, ProbeError> {
 /// Root calls this after resolving/owning the stable primary, before H3 effects.
 /// Metadata only; no user/account config bodies or Git administrative files.
 pub fn require_private_primary(cwd: &crate::contract::session::CwdIdentity) -> Result<(), HostError> {
-    if resolve_cwd(&cwd.path)? != *cwd { return Err(HostError::new("Grok primary identity", HostErrorKind::Ownership)); }
+    if !crate::host::process::cwd_matches(cwd)? { return Err(HostError::new("Grok primary identity", HostErrorKind::Ownership)); }
     for ancestor in cwd.path.ancestors() {
         let mut paths = vec![ancestor.join(".git")];
         if ancestor != cwd.path.as_path() { paths.push(ancestor.join(".grok/config.toml")); }
@@ -134,7 +134,7 @@ impl<R: CommandRunner> BoundedReadHost for NativeCatalog<R> {
         let started = Instant::now();
         let mismatch = || ReadFailure::Error(ContractError::Mismatch("Grok catalog installation/cwd"));
         let verify = || {
-            if resolve_cwd(&request.cwd.path).map_err(|_| mismatch())? != request.cwd { return Err(mismatch()); }
+            if !crate::host::process::cwd_matches(&request.cwd).map_err(|_| mismatch())? { return Err(mismatch()); }
             if fingerprint_file(&request.executable, MAX_IMAGE, request.bounds.deadline.saturating_sub(started.elapsed())).map_err(|_| mismatch())?
                 != request.native.executable_sha256 { return Err(mismatch()); }
             Ok(())

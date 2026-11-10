@@ -54,6 +54,8 @@ pub enum BackendError {
     Io(#[from] std::io::Error),
     #[error("native runtime metadata is invalid")]
     Metadata,
+    #[error("ambiguous recorded native scopes: {0}; select the authoritative binding before continuing")]
+    AmbiguousScope(String),
     #[error("native lifecycle fence: {reason}")]
     Fence { reason: &'static str },
     #[error("native stop refused (NoEffect) operation={operation:?} reason={reason:?}")]
@@ -93,9 +95,11 @@ impl Binding {
 pub struct Backend {
     pub store: ProjectionStore,
     pub binding: Binding,
+    // Mutators share the same directory fence used by authority cutover.
+    _scope_lock: Option<std::fs::File>,
 }
 
-pub fn scope_for(workspace: &CwdIdentity, team: &str) -> Result<ScopeId, BackendError> {
+fn computed_scope(workspace: &CwdIdentity, team: &str) -> Result<ScopeId, BackendError> {
     if team.trim().is_empty() || team.chars().any(char::is_control) {
         return Err(BackendError::Metadata);
     }
@@ -105,6 +109,60 @@ pub fn scope_for(workspace: &CwdIdentity, team: &str) -> Result<ScopeId, Backend
         &digest_hex(digest(&encoded))[..32]
     ))?)
 }
+/// Released bindings contain a boot-dependent CWD digest. Keep their recorded
+/// scope: native identities and receipts embed it and must never be renumbered.
+pub fn scope_for(workspace: &CwdIdentity, team: &str) -> Result<ScopeId, BackendError> {
+    let current = computed_scope(workspace, team)?;
+    match read_binding_file(&root_for(&workspace.path, &current).join("framework-binding.json")) {
+        Ok(binding) if binding.version == 1 && binding.workspace == *workspace
+            && binding.team == team && binding.scope == current && binding.endpoint == endpoint(&current) => return Ok(current),
+        Ok(_) => return Err(BackendError::Metadata),
+        Err(BackendError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {},
+        Err(error) => return Err(error),
+    }
+    let parent = root_for(&workspace.path, &current).parent().ok_or(BackendError::Metadata)?.to_owned();
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(current),
+        Err(error) => return Err(error.into()),
+    };
+    use std::os::unix::fs::MetadataExt;
+    let legacy = team_agent_contract::host::process::legacy_cwd(&workspace.path)?;
+    let mut recorded = Vec::new();
+    let mut stable_exact = None;
+    let mut legacy_exact = None;
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() { continue; }
+        let binding = match read_binding_file(&entry.path().join("framework-binding.json")) {
+            Ok(binding) => binding,
+            Err(BackendError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if binding.workspace.path != workspace.path || binding.team != team { continue; }
+        let metadata = entry.metadata()?;
+        if binding.version != 1 || metadata.mode() & 0o777 != 0o700
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || binding.endpoint != endpoint(&binding.scope)
+            || entry.file_name() != binding.scope.as_str()
+            || (team_agent_contract::host::process::stable_cwd(&binding.workspace)
+                && binding.workspace != *workspace)
+        { return Err(BackendError::Metadata); }
+        let exact = if binding.workspace == *workspace { &mut stable_exact } else { &mut legacy_exact };
+        if (binding.workspace == *workspace || binding.workspace == legacy)
+            && exact.replace(binding.scope.clone()).is_some()
+        {
+            return Err(BackendError::AmbiguousScope("multiple exact CWD matches".into()));
+        }
+        recorded.push(binding.scope);
+    }
+    if let Some(exact) = stable_exact.or(legacy_exact) { return Ok(exact); }
+    if recorded.len() > 1 {
+        return Err(BackendError::AmbiguousScope(recorded.iter().map(ScopeId::as_str).collect::<Vec<_>>().join(", ")));
+    }
+    Ok(recorded.pop().unwrap_or(current))
+}
+
 pub fn root_for(workspace: &Path, scope: &ScopeId) -> PathBuf {
     crate::model::paths::runtime_dir(workspace)
         .join("contract")
@@ -118,22 +176,9 @@ pub fn read_binding(workspace: &Path, team: &str) -> Result<Binding, BackendErro
         let workspace = resolve_cwd(workspace)?;
         let scope = scope_for(&workspace, team)?;
         let root = root_for(&workspace.path, &scope);
-        let file_path = root.join("framework-binding.json");
-        let metadata = std::fs::symlink_metadata(&file_path)?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(BackendError::Metadata);
-        }
-        let mut bytes = Vec::new();
-        std::fs::File::open(&file_path)?
-            .take(65537)
-            .read_to_end(&mut bytes)?;
-        if bytes.len() > 65536 {
-            return Err(BackendError::Metadata);
-        }
-        let binding: Binding =
-            serde_json::from_slice(&bytes).map_err(|_| BackendError::Metadata)?;
+        let binding = read_binding_file(&root.join("framework-binding.json"))?;
         if binding.version != 1
-            || binding.workspace != workspace
+            || binding.workspace.path != workspace.path
             || binding.team != team
             || binding.scope != scope
             || binding.endpoint != endpoint(&scope)
@@ -141,6 +186,21 @@ pub fn read_binding(workspace: &Path, team: &str) -> Result<Binding, BackendErro
             return Err(BackendError::Metadata);
         }
         Ok(binding)
+}
+
+fn read_binding_file(file_path: &Path) -> Result<Binding, BackendError> {
+        let metadata = std::fs::symlink_metadata(file_path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(BackendError::Metadata);
+        }
+        let mut bytes = Vec::new();
+        std::fs::File::open(file_path)?
+            .take(65537)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > 65536 {
+            return Err(BackendError::Metadata);
+        }
+        serde_json::from_slice(&bytes).map_err(|_| BackendError::Metadata)
 }
 
 /// Inspect authority sources without opening SQLite, probing providers, or writing.
@@ -215,6 +275,12 @@ impl Backend {
     }
     fn open_mode(workspace: &Path, team: &str, readonly: bool) -> Result<Self, BackendError> {
         let mut binding = read_binding(workspace, team)?;
+        let scope_lock = if readonly { None } else {
+            let directory = std::fs::File::open(root_for(&binding.workspace.path, &binding.scope))?;
+            directory.lock_shared()?;
+            binding = read_binding(workspace, team)?;
+            Some(directory)
+        };
         check_authority(&binding)?;
         // Build provenance is diagnostic, not an ownership or lifecycle fence.
         // New launches use this invocation, including relocated binaries.
@@ -231,7 +297,7 @@ impl Backend {
                 crate::cli::shell_quote(&binding.workspace.path.to_string_lossy()), crate::cli::shell_quote(team))),
             error => BackendError::Runtime(error),
         })?;
-        Ok(Self { store, binding })
+        Ok(Self { store, binding, _scope_lock: scope_lock })
     }
 
     /// Called only after the caller's pure/native-discovery preflight. Exclusive
@@ -285,7 +351,10 @@ impl Backend {
             .open(root.join("framework-binding.json"))?;
         file.write_all(&bytes)?;
         file.sync_all()?;
-        Ok(Self { store, binding })
+        let directory = std::fs::File::open(&root)?;
+        directory.lock_shared()?;
+        directory.sync_all()?;
+        Ok(Self { store, binding, _scope_lock: Some(directory) })
     }
 }
 
@@ -864,7 +933,20 @@ pub(crate) fn seat_authority_absent(workspace: &Path, team: &str, seat: &SeatId)
     let cwd = resolve_cwd(workspace)?;
     let scope = scope_for(&cwd, team)?;
     if !root_for(&cwd.path, &scope).exists() { return Ok(true); }
-    let backend = Backend::open_readonly(workspace, team)?;
+    let backend = match Backend::open_readonly(workspace, team) {
+        Ok(backend) => backend,
+        Err(error @ BackendError::AuthorityLost { .. }) => {
+            let selected = crate::state::selector::resolve_active_team_readonly(
+                workspace, Some(team), crate::state::selector::SelectorMode::RuntimeOnly,
+            ).map_err(|_| error)?;
+            let row = &selected.state["agents"][seat.as_str()];
+            if row.is_object() && !super::framework::is_contract(row)
+                && ["contract_instance", "native_pane", "native_endpoint"].iter().all(|key| row[*key].is_null())
+            { return Ok(true); }
+            return Err(BackendError::AuthorityLost { root: read_binding(workspace, team)?.transport_root });
+        }
+        Err(error) => return Err(error),
+    };
     Ok(existing_start(&backend, seat)?.is_none() && !backend.store.leased(seat)?)
 }
 
@@ -1148,6 +1230,13 @@ fn resumable_session(parent: &SeatRecord, home: Option<&Path>) -> Result<Option<
     Ok(Some(source.clone()))
 }
 
+fn resumable_session_in_scope(binding: &Binding, parent: &SeatRecord, home: Option<&Path>) -> Result<Option<ResumeBinding>, BackendError> {
+    resumable_session(parent, home)?.map(|mut source| {
+        source.cwd = super::workspace::current_cwd(binding, &source.cwd)?;
+        Ok(source)
+    }).transpose()
+}
+
 pub fn prepare_resume(
     workspace: &Path,
     team: &str,
@@ -1166,14 +1255,12 @@ pub fn prepare_resume(
     if role.id != parent.identity.seat || role.provider != parent.provider {
         return Err(ContractError::Mismatch("resume role provider").into());
     }
-    if resolve_cwd(&parent.cwd.path)? != parent.cwd {
-        return Err(ContractError::Mismatch("resume cwd incarnation").into());
-    }
+    super::workspace::current_cwd(&backend.binding, &parent.cwd)?;
     let discovered = discovery::discover_runtime(&role.provider, workspace)?;
     let identity = backend.store.propose_identity(seat)?;
     let adapter = launch_adapter(&backend.binding, &identity, &role.provider, &discovered)?;
     let hooks = adapter.hooks();
-    let source = resumable_session(&parent, discovered.runtime.as_ref().and_then(|runtime| match runtime {
+    let source = resumable_session_in_scope(&backend.binding, &parent, discovered.runtime.as_ref().and_then(|runtime| match runtime {
         registry::NativeRuntime::Claude(runtime) => Some(runtime.home()), _ => None,
     }))?;
     let mut request = request(&backend.binding, &role, identity, &discovered)?;
@@ -1206,7 +1293,7 @@ pub fn resume(prepared: PreparedResume) -> Result<OperationRecord, BackendError>
     if parent.session != prepared.original_session {
         return Err(BackendError::Fence { reason: "resume_session_changed" });
     }
-    if resumable_session(&parent, prepared.discovered.runtime.as_ref().and_then(|runtime| match runtime {
+    if resumable_session_in_scope(&backend.binding, &parent, prepared.discovered.runtime.as_ref().and_then(|runtime| match runtime {
         registry::NativeRuntime::Claude(runtime) => Some(runtime.home()), _ => None,
     }))?
         != prepared.request.resume.as_ref().map(|resume| resume.binding.clone()) {
@@ -1411,6 +1498,127 @@ pub(crate) fn retire(workspace: &Path, team: &str, seat: &SeatId) -> Result<Opti
     Ok(Some(backend.store.retire(&current.identity)?))
 }
 
+pub fn temporary_authority(binding: &Binding) -> bool {
+    let path = &binding.transport_root;
+    !path.starts_with(root_for(&binding.workspace.path, &binding.scope))
+        && (path.starts_with("/tmp") || path.starts_with("/private/tmp")
+            || path.starts_with(std::env::temp_dir()))
+}
+
+fn quiescent_authority(store: &ProjectionStore) -> Result<bool, BackendError> {
+    if !store.unfinished()?.is_empty() { return Ok(false); }
+    for seat in store.seats()? {
+        if seat.status != SeatStatus::Stopped || store.leased(&seat.identity.seat)?
+            || seat.physical.as_ref().is_some_and(|target| {
+                !matches!(team_agent_contract::host::process::sample_process(&target.process),
+                    team_agent_contract::host::process::ProcessState::Exited | team_agent_contract::host::process::ProcessState::Replaced)
+            })
+        { return Ok(false); }
+    }
+    Ok(true)
+}
+
+/// Keep the winning v1 binding byte-compatible with released binaries. Only
+/// retire inactive siblings; never delete their stores or guess between live ones.
+pub(crate) fn retire_inactive_siblings(binding: &Binding, state: &serde_json::Value) -> Result<(), BackendError> {
+    use std::os::unix::fs::MetadataExt;
+    let parent = root_for(&binding.workspace.path, &binding.scope).parent().ok_or(BackendError::Metadata)?.to_owned();
+    for entry in std::fs::read_dir(parent)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() || entry.file_name() == binding.scope.as_str() { continue; }
+        let path = entry.path().join("framework-binding.json");
+        let sibling = match read_binding_file(&path) {
+            Ok(sibling) => sibling,
+            Err(BackendError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if sibling.workspace.path != binding.workspace.path || sibling.team != binding.team { continue; }
+        crate::lifecycle::launch::ensure_owner_allowed_for_state(state, None)
+            .map_err(|error| BackendError::Migration(error.to_string()))?;
+        let metadata = entry.metadata()?;
+        if sibling.version != 1 || entry.file_name() != sibling.scope.as_str()
+            || sibling.endpoint != endpoint(&sibling.scope) || sibling.endpoint == binding.endpoint
+            || metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o777 != 0o700
+        { return Err(BackendError::Metadata); }
+        let directory = std::fs::File::open(entry.path())?;
+        if directory.try_lock().is_err() { continue; }
+        let absent = match check_authority(&sibling) {
+            Err(BackendError::AuthorityLost { .. }) => true,
+            Ok(()) => quiescent_authority(&ProjectionStore::open_readonly(
+                &sibling.transport_root, sibling.scope.clone(), &sibling.endpoint)?)?,
+            _ => false,
+        };
+        let carriers_absent = state["agents"].as_object().is_some_and(|agents| agents.iter().all(|(id, row)| {
+            !super::framework::is_contract(row)
+                || row["contract_scope"].as_str().is_some_and(|scope| scope != sibling.scope.as_str())
+                || ["contract_instance", "native_endpoint", "native_pane"].iter().all(|key| row[*key].is_null())
+                || super::recovery::carrier_absent(id, row, &sibling.tmux).is_ok()
+        }));
+        if !absent || !carriers_absent {
+            eprintln!("warning: sibling native scope {} retained: authority/carrier activity is not excluded", sibling.scope.as_str());
+            continue;
+        }
+        let latest = read_binding_file(&path)?;
+        if serde_json::to_vec(&latest).map_err(|_| BackendError::Metadata)?
+            != serde_json::to_vec(&sibling).map_err(|_| BackendError::Metadata)?
+        { return Err(BackendError::Fence { reason: "sibling_binding_changed" }); }
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| BackendError::Metadata)?.as_nanos();
+        std::fs::rename(path, entry.path().join(format!("framework-binding.retired-{nonce}.json")))?;
+        directory.sync_all()?;
+    }
+    Ok(())
+}
+
+fn copy_authority(source: &Path, target: &Path) -> Result<(), BackendError> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new().mode(0o700).create(target)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let path = target.join(entry.file_name());
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copy_authority(&entry.path(), &path)?;
+        } else if kind.is_file() {
+            std::fs::copy(entry.path(), &path)?;
+            std::fs::File::open(&path)?.sync_all()?;
+        } else if kind.is_symlink() {
+            std::os::unix::fs::symlink(std::fs::read_link(entry.path())?, path)?;
+        }
+        // Dead Unix sockets are not authority and cannot be copied.
+    }
+    std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::File::open(target)?.sync_all()?;
+    Ok(())
+}
+
+/// Called under the scope directory lock; keep the original tree untouched.
+fn relocate_authority(binding: &mut Binding, root: &Path) -> Result<bool, BackendError> {
+    if !temporary_authority(binding) { return Ok(false); }
+    let source = ProjectionStore::open_readonly(&binding.transport_root, binding.scope.clone(), &binding.endpoint)?;
+    let seats = source.seats()?;
+    if !quiescent_authority(&source)? {
+        eprintln!("warning: temporary native authority {} retained while native seats are active; stop them and run team-agent migrate --team {}", binding.transport_root.display(), binding.team);
+        return Ok(false);
+    }
+    let target = root.join("authority");
+    copy_authority(&binding.transport_root, &target)?;
+    // The manifest pins its own root; every seat and receipt remains unchanged.
+    let manifest = target.join("contract.json");
+    let mut value: serde_json::Value = serde_json::from_reader(std::fs::File::open(&manifest)?)
+        .map_err(|_| BackendError::Metadata)?;
+    value["root"] = serde_json::json!(target);
+    let mut file = std::fs::OpenOptions::new().write(true).truncate(true).open(&manifest)?;
+    file.write_all(&serde_json::to_vec(&value).map_err(|_| BackendError::Metadata)?)?;
+    file.sync_all()?;
+    let copied = ProjectionStore::open_readonly(&target, binding.scope.clone(), &binding.endpoint)?;
+    if copied.seats()? != seats || !copied.unfinished()?.is_empty() {
+        return Err(BackendError::Metadata);
+    }
+    std::fs::File::open(&target)?.sync_all()?;
+    binding.transport_root = target;
+    Ok(true)
+}
+
 pub fn migrate_if_required(workspace: &Path, team: &str) -> Result<bool, BackendError> {
     let binding = match read_binding(workspace, team) {
         Ok(binding) => binding,
@@ -1420,7 +1628,7 @@ pub fn migrate_if_required(workspace: &Path, team: &str) -> Result<bool, Backend
     if let Err(error @ BackendError::AuthorityLost { .. }) = check_authority(&binding) {
         return Err(error);
     }
-    if !binding.transport_root.join("contract.json").exists() {
+    if temporary_authority(&binding) || !binding.transport_root.join("contract.json").exists() {
         migrate(workspace, team)?;
         return Ok(true);
     }
@@ -1456,7 +1664,16 @@ pub fn migrate(workspace: &Path, team: &str) -> Result<serde_json::Value, Backen
     let root = root_for(&binding.workspace.path, &binding.scope);
     if root.canonicalize()? != root { return Err(BackendError::Fence { reason: "migration_root_alias" }); }
     let directory = std::fs::File::open(&root)?;
-    directory.lock()?;
+    match directory.try_lock() {
+        Ok(()) => {},
+        Err(std::fs::TryLockError::WouldBlock) if temporary_authority(&binding) => {
+            let warning = format!("temporary authority {} migration deferred: native operations are active; retry team-agent migrate --team {}", binding.transport_root.display(), team);
+            eprintln!("warning: {warning}");
+            return Ok(serde_json::json!({"ok":true,"status":"deferred","warning":warning}));
+        }
+        Err(std::fs::TryLockError::WouldBlock) => return Err(BackendError::Fence { reason: "authority_cutover_busy" }),
+        Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+    }
     // Re-read after acquiring the cutover lock so a concurrent invocation is
     // idempotent and cannot restore an older candidate binding.
     binding = read_binding(workspace, team)?;
@@ -1468,7 +1685,8 @@ pub fn migrate(workspace: &Path, team: &str) -> Result<serde_json::Value, Backen
         .map_err(|error| BackendError::Migration(error.to_string()))?;
     let candidate = std::env::current_exe()?.canonicalize()?;
     let fingerprint = fingerprint_file(&candidate, 1024 * 1024 * 1024, Duration::from_secs(10))?;
-    if binding.candidate != candidate || binding.candidate_sha256 != fingerprint {
+    let relocated = relocate_authority(&mut binding, &root)?;
+    if binding.candidate != candidate || binding.candidate_sha256 != fingerprint || relocated {
         let path = root.join("framework-binding.json");
         let metadata = std::fs::symlink_metadata(&path)?;
         if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.uid() != unsafe { libc::geteuid() }
@@ -1477,6 +1695,12 @@ pub fn migrate(workspace: &Path, team: &str) -> Result<serde_json::Value, Backen
         binding.candidate = candidate;
         binding.candidate_sha256 = fingerprint;
         let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| BackendError::Metadata)?.as_nanos();
+        if relocated {
+            let archive = root.join(format!("framework-binding.pre-durable-{nonce}.json"));
+            let mut saved = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(archive)?;
+            saved.write_all(&before)?;
+            saved.sync_all()?;
+        }
         let temporary = root.join(format!("migration-binding-{}-{nonce}.tmp", std::process::id()));
         let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary)?;
         let written = (|| -> Result<(), BackendError> {
@@ -1490,11 +1714,16 @@ pub fn migrate(workspace: &Path, team: &str) -> Result<serde_json::Value, Backen
         if written.is_err() { let _ = std::fs::remove_file(&temporary); }
         written?;
     }
+    retire_inactive_siblings(&binding, &selected.state)?;
     let authority = Backend::open_readonly(&binding.workspace.path, team)?;
     result["seat_status"] = serde_json::json!(authority.store.seats()?.into_iter().map(|seat| {
         serde_json::json!({"seat":seat.identity.seat,"candidate":"current",
             "live_foreign":false,"next_command":null})
     }).collect::<Vec<_>>());
+    result["transport_root"] = serde_json::json!(binding.transport_root);
+    if temporary_authority(&binding) {
+        result["warning"] = serde_json::json!("temporary authority migration deferred: stop native seats and retry team-agent migrate");
+    }
     result["team"] = serde_json::json!(team);
     result["candidate"] = serde_json::json!(binding.candidate);
     result["maintenance"] = serde_json::json!("Use only this release for subsequent lifecycle operations");
@@ -1558,6 +1787,42 @@ pub(super) fn stop_with_budget(workspace: &Path, team: &str, seat: &SeatId, budg
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_sibling_retirement_preserves_the_winner_and_requires_inactive_carriers() {
+        use std::os::unix::fs::DirBuilderExt;
+        let fixture = RoleFixture::new();
+        let mut winner = fixture.binding.clone();
+        winner.workspace = team_agent_contract::host::process::legacy_cwd(&fixture.root).unwrap();
+        winner.scope = computed_scope(&winner.workspace, &winner.team).unwrap();
+        winner.endpoint = endpoint(&winner.scope);
+        winner.transport_root = fixture.root.join("missing-authority");
+        let winner_root = root_for(&fixture.root, &winner.scope);
+        std::fs::DirBuilder::new().mode(0o700).create(&winner_root).unwrap();
+        let original = serde_json::to_vec(&winner).unwrap();
+        std::fs::write(winner_root.join("framework-binding.json"), &original).unwrap();
+        let mut stale = winner.clone();
+        stale.workspace.identity.0[0] ^= 2;
+        stale.scope = computed_scope(&stale.workspace, &stale.team).unwrap();
+        stale.endpoint = endpoint(&stale.scope);
+        let stale_root = root_for(&fixture.root, &stale.scope);
+        std::fs::DirBuilder::new().mode(0o700).create(&stale_root).unwrap();
+        std::fs::write(stale_root.join("framework-binding.json"), serde_json::to_vec(&stale).unwrap()).unwrap();
+        assert_eq!(read_binding(&fixture.root, "test").unwrap().scope, winner.scope);
+        assert!(stale_root.join("framework-binding.json").exists());
+        let unknown = serde_json::json!({"agents":{"worker":{"runtime_family":"contract",
+            "contract_scope":stale.scope.as_str(),"contract_instance":"unknown-carrier"}}});
+        retire_inactive_siblings(&winner, &unknown).unwrap();
+        assert!(stale_root.join("framework-binding.json").exists());
+        retire_inactive_siblings(&winner, &serde_json::json!({"agents":{}})).unwrap();
+        assert!(!stale_root.join("framework-binding.json").exists());
+        assert!(std::fs::read_dir(&stale_root).unwrap().any(|entry| entry.unwrap().file_name().to_string_lossy().starts_with("framework-binding.retired-")));
+        assert_eq!(std::fs::read(winner_root.join("framework-binding.json")).unwrap(), original);
+        // A subsequent boot can still adopt the single recorded scope.
+        winner.workspace.identity.0[0] ^= 4;
+        std::fs::write(winner_root.join("framework-binding.json"), serde_json::to_vec(&winner).unwrap()).unwrap();
+        assert_eq!(read_binding(&fixture.root, "test").unwrap().scope, winner.scope);
+    }
 
     struct RoleFixture { root: PathBuf, binding: Binding, role: RoleConfig, identity: InstanceIdentity }
     impl RoleFixture {
