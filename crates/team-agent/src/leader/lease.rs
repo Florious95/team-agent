@@ -741,8 +741,7 @@ fn claim_lease_no_incident_with_target(
         }
         let locked_bound_pane = bound_pane(&locked);
         let locked_owner_live = if caller_target.as_deref().and_then(|target| target.endpoint.as_ref()).is_some() {
-            observed_bound_leader_live(&locked)?.unwrap_or_else(|| locked_bound_pane.as_deref()
-                .is_some_and(|pane| liveness.liveness(pane) == PaneLiveness::Live))
+            observed_bound_leader_live(&locked)?.unwrap_or(true)
         } else {
             locked_bound_pane.as_deref().is_some_and(|pane| {
                 pane != caller_pane.as_str() && liveness.liveness(pane) == PaneLiveness::Live
@@ -1333,7 +1332,61 @@ fn observed_bound_leader_live(state: &Value) -> Result<Option<bool>, LeaderError
     if crate::topology::active_worker_on_endpoint(state, &endpoint, target).is_some() {
         return Ok(Some(false));
     }
+    if target.pane_pid.is_none() && receiver.get("pane_pid").is_some_and(|pid| !pid.is_null()) {
+        return Ok(None); // An incomplete observation is not proof of death.
+    }
+    if crate::topology::leader_pane_identity_error(receiver, target).is_some() {
+        return Ok(Some(false));
+    }
     Ok(Some(true))
+}
+
+#[cfg(test)]
+mod bound_lifetime_tests {
+    use super::*;
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn bound_leader_liveness_uses_recorded_instance_and_preserves_unknown() {
+        let endpoint = "/tmp/leader-lifetime-unit.sock";
+        let mut state = json!({"tmux_socket":endpoint, "agents":{},
+            "leader_receiver":{"pane_id":"%0", "tmux_socket":endpoint, "pane_pid":123, "binding_nonce":"bound"}});
+        let mut pane = PaneInfo {
+            pane_id: PaneId::new("%0"), session: crate::transport::SessionName::new("leader"),
+            window_index: None, window_name: None, pane_index: None, tty: None,
+            current_command: None, current_path: None, active: false,
+            pane_pid: Some(123), leader_env: Default::default(),
+        };
+        for (pid, nonce, expected) in [
+            (Some(123), None, Some(true)),
+            (Some(123), Some("bound"), Some(true)),
+            (Some(999), None, Some(false)),
+            (Some(123), Some("foreign"), Some(false)),
+            (None, None, None),
+        ] {
+            pane.pane_pid = pid;
+            pane.leader_env.clear();
+            if let Some(nonce) = nonce {
+                pane.leader_env.insert(crate::tmux_backend::PANE_BINDING_NONCE_METADATA_KEY.into(), nonce.into());
+            }
+            let transport = crate::transport::test_support::OfflineTransport::default()
+                .with_tmux_endpoint(endpoint).with_targets(vec![pane.clone()]);
+            crate::transport_factory::with_leader_endpoint_transport(endpoint, transport, || {
+                assert_eq!(observed_bound_leader_live(&state).unwrap(), expected);
+            });
+        }
+        state["leader_receiver"] = json!({"pane_id":"%0", "tmux_socket":endpoint});
+        let transport = crate::transport::test_support::OfflineTransport::default()
+            .with_tmux_endpoint(endpoint).with_targets(vec![pane]);
+        crate::transport_factory::with_leader_endpoint_transport(endpoint, transport, || {
+            assert_eq!(observed_bound_leader_live(&state).unwrap(), Some(true));
+        });
+        let transport = crate::transport::test_support::OfflineTransport::default()
+            .with_tmux_endpoint(endpoint).with_list_targets_error("unknown probe failure");
+        crate::transport_factory::with_leader_endpoint_transport(endpoint, transport, || {
+            assert!(observed_bound_leader_live(&state).is_err());
+        });
+    }
 }
 
 fn prior_provider(state: &Value) -> Provider {

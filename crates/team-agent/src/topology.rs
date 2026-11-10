@@ -613,6 +613,21 @@ fn endpoint_server_alive(endpoint: &str) -> Option<bool> {
     }
 }
 
+/// A nonce is optional, but a recorded PID or conflicting nonce fences a bound leader instance.
+pub(crate) fn leader_pane_identity_error(receiver: &Value, pane: &PaneInfo) -> Option<&'static str> {
+    if receiver.get("pane_pid").and_then(|pid| pid.as_u64().or_else(|| pid.as_str().and_then(|s| s.parse().ok())))
+        .is_some_and(|pid| pane.pane_pid.map(u64::from) != Some(pid)) {
+        return Some("leader_identity_pid_mismatch: registered pane instance changed");
+    }
+    let observed_nonce = pane.leader_env.get(crate::tmux_backend::PANE_BINDING_NONCE_METADATA_KEY)
+        .map(String::as_str).filter(|nonce| !nonce.is_empty());
+    if non_empty_str(receiver, "binding_nonce").zip(observed_nonce)
+        .is_some_and(|(expected, observed)| expected != observed) {
+        return Some("leader_identity_nonce_mismatch: registered pane binding changed");
+    }
+    None
+}
+
 pub(crate) fn same_endpoint(left: &str, right: &str) -> bool {
     normalize_endpoint(left) == normalize_endpoint(right)
 }

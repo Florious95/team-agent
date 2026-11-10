@@ -289,16 +289,8 @@ impl Directory {
             let observed = transport.list_targets().map_err(|error| error.to_string())?
                 .into_iter().find(|pane| pane.pane_id.as_str() == expected.pane_id)
                 .ok_or("leader_identity_unavailable: registered pane is not live")?;
-            let receiver = latest.recipient(agent)?;
-            if receiver.get("pane_pid").and_then(|pid| pid.as_u64().or_else(|| pid.as_str().and_then(|s| s.parse().ok())))
-                .is_some_and(|pid| observed.pane_pid.map(u64::from) != Some(pid)) {
-                return Err("leader_identity_pid_mismatch: registered pane instance changed".into());
-            }
-            let observed_nonce = observed.leader_env.get(crate::tmux_backend::PANE_BINDING_NONCE_METADATA_KEY)
-                .map(String::as_str).filter(|nonce| !nonce.is_empty());
-            if field(receiver, "binding_nonce").zip(observed_nonce)
-                .is_some_and(|(expected, observed)| expected != observed) {
-                return Err("leader_identity_nonce_mismatch: registered pane binding changed".into());
+            if let Some(error) = crate::topology::leader_pane_identity_error(latest.recipient(agent)?, &observed) {
+                return Err(error.into());
             }
             if let Some(worker) = crate::topology::active_worker_on_endpoint(&latest.state, &expected.socket, &observed) {
                 return Err(format!("leader_identity_worker_collision: registered pane belongs to active worker {worker}"));
