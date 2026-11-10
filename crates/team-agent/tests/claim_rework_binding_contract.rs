@@ -345,6 +345,7 @@ fn isolated_production_seed_attach_register_restart_ok() {
         &mut state,
         CallerIdentity {
             pane_id: pane.clone(),
+            tmux_socket: None,
             provider: "fake".to_string(),
             machine_fingerprint: "fp".to_string(),
             leader_session_uuid: "uuid-a5".to_string(),

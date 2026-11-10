@@ -2122,6 +2122,7 @@ mod fresh_quick_start_leader_binding_tests {
         let mut state = crate::state::persist::load_runtime_state(workspace).unwrap();
         let caller = crate::state::owner_gate::CallerIdentity {
             pane_id: "%42".to_string(),
+            tmux_socket: None,
             provider: "codex".to_string(),
             machine_fingerprint: "fp".to_string(),
             leader_session_uuid: "uuid-fresh".to_string(),

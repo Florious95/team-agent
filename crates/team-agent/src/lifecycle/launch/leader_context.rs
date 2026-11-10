@@ -462,6 +462,7 @@ mod e22_unbound_owner_provider_tests {
     fn caller(provider: &str, pane_id: &str) -> CallerIdentity {
         CallerIdentity {
             pane_id: pane_id.to_string(),
+            tmux_socket: None,
             provider: provider.to_string(),
             machine_fingerprint: "machine".to_string(),
             leader_session_uuid: "leader-uuid".to_string(),

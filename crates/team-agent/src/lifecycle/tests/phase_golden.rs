@@ -184,6 +184,7 @@ fn run_diagnose_after_unbound_state_fixture() -> Value {
         &mut state,
         crate::state::owner_gate::CallerIdentity {
             pane_id: "%1".to_string(),
+            tmux_socket: None,
             provider: "codex".to_string(),
             machine_fingerprint: "fp".to_string(),
             leader_session_uuid: "uuid-tombstone".to_string(),

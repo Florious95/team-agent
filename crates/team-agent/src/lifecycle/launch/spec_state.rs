@@ -487,6 +487,7 @@ mod claim_rework_seed_tests {
         });
         let caller = CallerIdentity {
             pane_id: "%1".to_string(),
+            tmux_socket: None,
             provider: "codex".to_string(),
             machine_fingerprint: "fp".to_string(),
             leader_session_uuid: "uuid".to_string(),

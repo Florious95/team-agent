@@ -227,7 +227,7 @@ pub fn migrate_state_identity(
 }
 
 ///
-/// `_caller_identity_from_env`(`state.py:316`):env override/env/derived → 5 字段 caller 身份。
+/// `_caller_identity_from_env`(`state.py:316`):env override/env/derived + caller tmux endpoint。
 pub fn caller_identity_from_env(
     state: Option<&Value>,
     env: &dyn IdentityEnv,
@@ -282,6 +282,9 @@ pub fn caller_identity_from_env(
     };
     Ok(CallerIdentity {
         pane_id,
+        tmux_socket: env.var("TMUX").and_then(|value| {
+            value.split(',').next().filter(|socket| !socket.is_empty()).map(str::to_owned)
+        }),
         provider: env_str(env, "TEAM_AGENT_LEADER_PROVIDER"),
         machine_fingerprint,
         leader_session_uuid: leader_uuid,
@@ -383,6 +386,7 @@ mod tests {
             Some(&json!({})),
             &env(&[
                 ("TMUX_PANE", "%tmux"),
+                ("TMUX", "/tmp/caller.sock,123,0"),
                 ("TEAM_AGENT_LEADER_SESSION_UUID", "u"),
             ]),
             Some("t"),
@@ -390,6 +394,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cid.pane_id, "%tmux");
+        assert_eq!(cid.tmux_socket.as_deref(), Some("/tmp/caller.sock"));
     }
 
     #[test]

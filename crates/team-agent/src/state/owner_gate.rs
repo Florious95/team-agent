@@ -31,6 +31,7 @@ pub trait PaneLivenessProbe {
 #[derive(Debug, Clone, Default)]
 pub struct CallerIdentity {
     pub pane_id: String,
+    pub tmux_socket: Option<String>,
     pub provider: String,
     pub machine_fingerprint: String,
     pub leader_session_uuid: String,
@@ -69,12 +70,22 @@ pub fn check_team_owner(
     let caller_uuid = caller.leader_session_uuid.as_str();
     let caller_pane = caller.pane_id.as_str();
 
-    // 同 pane → own。
-    if !caller_pane.is_empty() && caller_pane == owner_pane {
+    let owner_socket = owner.get("tmux_socket").and_then(Value::as_str)
+        .filter(|socket| !socket.is_empty())
+        .or_else(|| state.pointer("/leader_receiver/tmux_socket").and_then(Value::as_str)
+            .filter(|socket| !socket.is_empty()));
+    // Pane IDs are server-local; only legacy owners without an endpoint use pane-only identity.
+    let same_socket = owner_socket.is_none_or(|owner_socket| {
+        caller.tmux_socket.as_deref().filter(|socket| !socket.is_empty())
+            .is_some_and(|socket| crate::topology::same_endpoint(owner_socket, socket))
+    });
+    let same_pane = same_socket && !caller_pane.is_empty() && caller_pane == owner_pane;
+    if same_pane {
         return None;
     }
     // 死 owner pane + 新 live caller(非 worker)→ 接管(pane-as-identity:死 pane 不锁活 caller)。
-    if !caller_pane.is_empty()
+    if same_socket
+        && !caller_pane.is_empty()
         && !has_team_agent_id
         && !owner_pane.is_empty()
         && liveness.liveness(owner_pane) != PaneLiveness::Live
@@ -92,7 +103,7 @@ pub fn check_team_owner(
     // 在此之前本守卫**偏严**:缺-uuid owner + 同-identity 异-pane caller 会被判 takeover(Python 判
     // sticky/own)。**只过严不过松**(宁拒不误放),无安全洞。
     let same_uuid = !owner_uuid.is_empty() && !caller_uuid.is_empty() && caller_uuid == owner_uuid;
-    if same_uuid && (caller_pane.is_empty() || caller_pane == owner_pane) {
+    if same_socket && same_uuid && (caller_pane.is_empty() || same_pane) {
         return None;
     }
     // 否则拒绝。reason_kind / action 按 same_uuid 分流(sticky_bind vs takeover)。
@@ -228,6 +239,7 @@ mod tests {
     fn caller(pane: &str, uuid: &str) -> CallerIdentity {
         CallerIdentity {
             pane_id: pane.to_string(),
+            tmux_socket: None,
             provider: "codex".to_string(),
             machine_fingerprint: "m".to_string(),
             leader_session_uuid: uuid.to_string(),
@@ -250,7 +262,8 @@ mod tests {
             "grandchild":{"parent_team_key":"child", "team_owner":{"pane_id":"%researcher"}},
             "sibling":{"team_owner":{"pane_id":"%other","tmux_socket":"/tmp/owner-server"}}
         }});
-        let root = caller("%root", "root");
+        let mut root = caller("%root", "root");
+        root.tmux_socket = Some("/tmp/owner-server".to_string());
         assert!(!ancestor_owner_allowed(&state, "child", &root, "/tmp/owner-server", "%other", &LIVE));
         assert!(ancestor_owner_allowed(&state, "child", &root, "/tmp/owner-server", "%root", &LIVE));
         assert!(ancestor_owner_allowed(&state, "grandchild", &root, "/tmp/owner-server", "%root", &LIVE));
@@ -267,6 +280,38 @@ mod tests {
         assert!(!ancestor_owner_allowed(&state, "child", &root, "/tmp/owner-server", "%root", &LIVE));
         state["teams"]["root"]["parent_team_key"] = json!("missing");
         assert!(!ancestor_owner_allowed(&state, "child", &root, "/tmp/owner-server", "%root", &LIVE));
+    }
+
+    #[test]
+    fn recorded_socket_qualifies_every_owner_grant() {
+        let mut state = state_owned("%0", "uuid-owner");
+        state["team_owner"]["tmux_socket"] = json!("/tmp/owner.sock");
+        for pane in ["%0", ""] {
+            let mut c = caller(pane, "uuid-owner");
+            c.tmux_socket = Some("/tmp/owner.sock".to_string());
+            assert!(check_team_owner(&state, &c, false, &LIVE).is_none());
+            for socket in [Some("/tmp/foreign.sock".to_string()), None] {
+                c.tmux_socket = socket;
+                for probe in [&LIVE, &DEAD, &UNKNOWN] {
+                    assert!(check_team_owner(&state, &c, false, probe).is_some());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn receiver_socket_fallback_preserves_owner_precedence_and_legacy_matching() {
+        let mut state = state_owned("%0", "uuid-owner");
+        let mut c = caller("%0", "uuid-other");
+        assert!(check_team_owner(&state, &c, true, &LIVE).is_none());
+        state["leader_receiver"] = json!({"tmux_socket": "/tmp/receiver.sock"});
+        assert!(check_team_owner(&state, &c, true, &LIVE).is_some());
+        c.tmux_socket = Some("/tmp/receiver.sock".to_string());
+        assert!(check_team_owner(&state, &c, true, &LIVE).is_none());
+        state["team_owner"]["tmux_socket"] = json!("/tmp/owner.sock");
+        assert!(check_team_owner(&state, &c, true, &LIVE).is_some());
+        c.tmux_socket = Some("/tmp/owner.sock".to_string());
+        assert!(check_team_owner(&state, &c, true, &LIVE).is_none());
     }
 
     #[test]
