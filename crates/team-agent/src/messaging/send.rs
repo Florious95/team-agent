@@ -44,6 +44,13 @@ impl TrustedSender {
         }
     }
 
+    pub fn operator() -> Self {
+        Self {
+            agent_id: AgentId::new("operator"),
+            full_name: None,
+        }
+    }
+
     pub fn as_str(&self) -> &str {
         self.agent_id.as_str()
     }

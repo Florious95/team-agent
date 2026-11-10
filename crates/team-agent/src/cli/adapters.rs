@@ -391,7 +391,7 @@ pub fn cmd_inbox(args: &InboxArgs) -> Result<CmdResult, CliError> {
     if args.json {
         Ok(CmdResult::from_json(value, true))
     } else {
-        Ok(CmdResult::human(format_inbox_human(&args.agent, &value)))
+        Ok(CmdResult::human(format_inbox_human(&args.agent, &value, &args.workspace)))
     }
 }
 
@@ -417,7 +417,8 @@ fn truncate_inbox_line(line: &str) -> String {
     format!("{}…", &line[..end])
 }
 
-fn format_inbox_human(agent: &str, value: &Value) -> String {
+fn format_inbox_human(agent: &str, value: &Value, workspace: &Path) -> String {
+    let workspace = crate::model::paths::canonical_run_workspace(workspace).unwrap_or_else(|_| workspace.to_path_buf());
     let messages = value
         .get("messages")
         .and_then(Value::as_array)
@@ -435,8 +436,13 @@ fn format_inbox_human(agent: &str, value: &Value) -> String {
                     .and_then(Value::as_str)
                     .unwrap_or("-"),
             );
-            let sender =
-                clean_inbox_field(message.get("sender").and_then(Value::as_str).unwrap_or("-"));
+            let origin = message["origin_workspace"].as_str().zip(message["origin_team"].as_str());
+            let sender = clean_inbox_field(&crate::station::send::sender_label(
+                message["sender"].as_str().unwrap_or("-"),
+                origin.map(|(ws, team)| (Path::new(ws), team)),
+                &workspace,
+                message["team"].as_str(),
+            ));
             let recipient = clean_inbox_field(
                 message
                     .get("recipient")
@@ -1034,7 +1040,7 @@ mod tests {
                 "summary": "中".repeat(120)
             }]
         });
-        let output = format_inbox_human("worker", &value);
+        let output = format_inbox_human("worker", &value, Path::new("/workspace"));
         for line in output.lines() {
             assert!(line.len() <= 160, "line is {} bytes: {line:?}", line.len());
             assert!(

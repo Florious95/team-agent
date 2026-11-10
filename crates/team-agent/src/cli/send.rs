@@ -13,7 +13,7 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
 
 pub fn cmd_send_bare(args: &SendArgs) -> Result<CmdResult, CliError> {
     crate::station::send::validate_bare_payload(&args.message.join(" ")).map_err(CliError::Usage)?;
-    if args.sender.display_name() != "leader" {
+    if args.sender.as_str() != "leader" && args.sender.display_name() != "operator" {
         return Err(CliError::Usage("--bare requires a trusted leader/operator".into()));
     }
     cmd_send_framed(args, crate::direct_delivery::Framing::Bare)

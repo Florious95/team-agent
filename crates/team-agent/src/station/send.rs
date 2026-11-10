@@ -55,7 +55,38 @@ fn same_workspace(left: &Path, right: &Path) -> bool {
         .is_some_and(|(left, right)| left == right)
 }
 
+// Provenance is presentation data, never delivery authority.
+fn message_source(authority: Authority<'_>, workspace: &Path) -> (String, Option<(std::path::PathBuf, String)>) {
+    match authority {
+        Authority::Seat { sender, team } => (
+            sender.to_string(),
+            Some((workspace.to_path_buf(), team.to_string())),
+        ),
+        Authority::Operator { sender } => match crate::messaging::parse_logical_address(sender) {
+            Ok(crate::messaging::LogicalAddress {
+                workspace: Some(workspace),
+                target: crate::messaging::LogicalAddressTarget::TeamEntity { team, entity },
+            }) => (entity, Some((workspace, team))),
+            _ => (sender.to_string(), None),
+        },
+    }
+}
+
+pub(crate) fn sender_label(sender: &str, origin: Option<(&Path, &str)>, workspace: &Path, team: Option<&str>) -> String {
+    let Some((source_workspace, source_team)) = origin else { return sender.to_string() };
+    if !same_workspace(source_workspace, workspace) {
+        let short = source_workspace.file_name().unwrap_or(source_workspace.as_os_str()).to_string_lossy();
+        format!("{sender} of team {source_team} in {short}")
+    } else if team != Some(source_team) {
+        format!("{sender} of team {source_team}")
+    } else {
+        sender.to_string()
+    }
+}
+
 fn sender_in_directory(authority: Authority<'_>, directory: &crate::direct_delivery::Directory) -> String {
+    // An unbound terminal has no seat to exclude from a broadcast.
+    if matches!(authority, Authority::Operator { sender: "operator" }) { return String::new(); }
     match crate::messaging::parse_logical_address(authority.sender()) {
         Ok(crate::messaging::LogicalAddress {
             workspace: Some(workspace),
@@ -91,7 +122,8 @@ pub fn execute(req: Request<'_>, authority: Authority<'_>) -> Result<Value, Stri
 pub(crate) fn execute_with_framing(req: Request<'_>, authority: Authority<'_>, framing: Framing) -> Result<Value, String> {
     if framing == Framing::Bare {
         validate_bare_payload(req.content)?;
-        if !matches!(authority, Authority::Operator { sender: "leader" }) {
+        if !matches!(authority, Authority::Operator { sender }
+            if sender == "operator" || message_source(authority, req.workspace).0 == "leader") {
             return Err("--bare requires a trusted leader/operator".into());
         }
         if req.mailbox || req.task_id.is_some() || req.envelope.is_some() || req.presentation != &PresentationRequest::default() {
@@ -182,7 +214,8 @@ pub(crate) fn execute_with_framing(req: Request<'_>, authority: Authority<'_>, f
                 // report_result routes implicitly to the leader, rather than
                 // accepting an explicit user-selected self target.
                 if !broadcast && !(req.envelope.is_some() && recipient == "leader") && recipient == &sender
-                    && !matches!(authority, Authority::Operator { sender: "leader" }) {
+                    && !matches!(authority, Authority::Operator { sender }
+                        if sender == "operator" || message_source(authority, req.workspace).0 == "leader") {
                     return Err(AddressError::new("self_target", "explicit self target"));
                 }
                 if !permitted_peer(authority, &directory, recipient) {
@@ -323,7 +356,12 @@ fn send_one(
         return Err(format!("unknown recipient: {recipient}"));
     }
     crate::coordinator::retire_legacy_coordinator(&directory.workspace)?;
-    let sender = authority.sender();
+    let (source_sender, origin) = message_source(authority, req.workspace);
+    let origin = origin.map(|(workspace, team)| {
+        let workspace = crate::model::paths::canonical_run_workspace(&workspace).unwrap_or(workspace);
+        (workspace, team)
+    });
+    let sender = source_sender.as_str();
     let kind = if req.envelope.is_some() {
         "result"
     } else {
@@ -336,6 +374,10 @@ fn send_one(
         directory.team.as_deref(),
         kind,
     );
+    if let Some((workspace, team)) = &origin {
+        record["origin_workspace"] = json!(workspace);
+        record["origin_team"] = json!(team);
+    }
     if framing == Framing::Bare { record["framing"] = json!("bare"); }
     record["presentation"] = serde_json::to_value(req.presentation).map_err(|e| e.to_string())?;
     record["provenance"] = json!({"authority":match authority { Authority::Operator {..} => "operator", Authority::Seat {..} => "seat" },"sender":sender,"team":directory.team});
@@ -426,7 +468,7 @@ fn send_one(
         return Ok(result);
     }
     let text = if framing == Framing::Bare { req.content.to_owned() }
-        else { render(sender, req.content, id, req.envelope.is_some()) };
+        else { render(&sender_label(&source_sender, origin.as_ref().map(|(ws, team)| (ws.as_path(), team.as_str())), &directory.workspace, directory.team.as_deref()), req.content, id, req.envelope.is_some()) };
     match directory.send_with_framing(recipient, &text, framing, || {
         if req.envelope.is_none() {
             if let Some(task) = req.task_id {
@@ -592,6 +634,42 @@ fn remember_task(
         .and_then(|dir| dir.sync_all())
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod origin_presentation_tests {
+    use super::*;
+
+    #[test]
+    fn source_labels_are_relative_to_each_recipient() {
+        let ws = Path::new("/source/project");
+        let origin = Some((ws, "alpha"));
+        assert_eq!(sender_label("leader", origin, ws, Some("alpha")), "leader");
+        assert_eq!(sender_label("worker", origin, ws, Some("alpha")), "worker");
+        assert_eq!(sender_label("leader", origin, ws, Some("beta")), "leader of team alpha");
+        assert_eq!(sender_label("worker", origin, ws, Some("beta")), "worker of team alpha");
+        assert_eq!(sender_label("leader", origin, Path::new("/other"), Some("alpha")),
+            "leader of team alpha in project");
+        assert_eq!(sender_label("operator", None, ws, Some("alpha")), "operator");
+        assert!(render(&sender_label("leader", origin, ws, Some("beta")), "hello", "id", false)
+            .starts_with("Team Agent message from leader of team alpha:\n\nhello"));
+    }
+
+    #[test]
+    fn source_metadata_does_not_use_destination_scope() {
+        let (sender, origin) = message_source(
+            Authority::Operator { sender: "/source/project::alpha/leader" }, Path::new("/destination"),
+        );
+        assert_eq!(sender, "leader");
+        assert_eq!(origin, Some((Path::new("/source/project").to_path_buf(), "alpha".into())));
+        let (sender, origin) = message_source(
+            Authority::Seat { sender: "worker", team: "alpha" }, Path::new("/source/project"),
+        );
+        assert_eq!(sender, "worker");
+        assert_eq!(origin, Some((Path::new("/source/project").to_path_buf(), "alpha".into())));
+        assert_eq!(message_source(Authority::Operator { sender: "operator" }, Path::new("/destination")),
+            ("operator".into(), None));
+    }
 }
 
 /// An advisory, already-submitted task may label a result. Absence is never a
