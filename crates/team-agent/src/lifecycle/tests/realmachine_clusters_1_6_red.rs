@@ -269,46 +269,6 @@ fn c1_runtime_commands_resolve_active_team_for_status_send_and_collect() {
 
 #[test]
 #[ignore = "real-machine: command-file gate uses real team-agent binary/lifecycle"]
-fn c2_quick_start_help_is_zero_token_help_only_and_does_not_compile_workspace() {
-    let cwd = tmp_dir("c2-quick-help");
-    let out = run(&["quick-start", "--help"], &cwd);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let combined = format!("{stdout}\n{stderr}");
-
-    let mut failures = Vec::new();
-    if out.status.code() != Some(0) {
-        failures.push(format!(
-            "help exited {:?}, expected 0; stdout={stdout:?} stderr={stderr:?}",
-            out.status.code()
-        ));
-    }
-    if !(combined.contains("usage") && combined.contains("quick-start")) {
-        failures.push(format!(
-            "help output did not include quick-start usage text; got {combined:?}"
-        ));
-    }
-    if combined.contains("spec compile failed") || combined.contains("missing TEAM.md") {
-        failures.push(format!(
-            "help path compiled/validated the current workspace; got {combined:?}"
-        ));
-    }
-    if cwd.join("team.spec.yaml").exists() || cwd.join(".team").exists() {
-        failures.push(format!(
-            "help path created artifacts: team.spec.yaml={} .team={}",
-            cwd.join("team.spec.yaml").exists(),
-            cwd.join(".team").exists()
-        ));
-    }
-    assert!(
-        failures.is_empty(),
-        "CR-047: `team-agent quick-start --help` must be local help-only, zero-token, zero-pollution:\n{}",
-        failures.join("\n")
-    );
-}
-
-#[test]
-#[ignore = "real-machine: command-file gate uses real team-agent binary/lifecycle"]
 fn c3_repeated_quick_start_uses_requested_team_identity_for_session_names() {
     let root = tmp_dir("c3-multiteam");
     seed_healthy_coordinator(&root);

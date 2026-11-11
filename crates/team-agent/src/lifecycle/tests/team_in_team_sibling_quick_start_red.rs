@@ -316,13 +316,13 @@ fn dirty_sibling_quick_start_from_same_leader_pane_binds_receiver_and_delivers_t
 
     let current_out = case.run_team_agent_json(
         &[
-            "quick-start",
+            "start",
+            "--from",
             current.to_str().unwrap(),
             "--workspace",
             case.root.to_str().unwrap(),
-            "--team-id",
+            "--team",
             "current",
-            "--yes",
             "--json",
         ],
         &leader_env,
@@ -341,13 +341,13 @@ fn dirty_sibling_quick_start_from_same_leader_pane_binds_receiver_and_delivers_t
 
     let sibling_out = case.run_team_agent_json(
         &[
-            "quick-start",
+            "start",
+            "--from",
             sibling.to_str().unwrap(),
             "--workspace",
             case.root.to_str().unwrap(),
-            "--team-id",
+            "--team",
             "sibling",
-            "--yes",
             "--json",
         ],
         &leader_env,
@@ -456,13 +456,13 @@ fn quick_start_returns_degraded_when_no_positive_caller_pane() {
     let team = fake_team_dir(&root, "unbound", "worker_a");
     let out = Command::new(crate::lifecycle::tests::test_binary_path())
         .args([
-            "quick-start",
+            "start",
+            "--from",
             team.to_str().unwrap(),
             "--workspace",
             root.to_str().unwrap(),
-            "--team-id",
+            "--team",
             "unbound",
-            "--yes",
             "--json",
         ])
         .current_dir(&root)

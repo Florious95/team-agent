@@ -266,7 +266,7 @@ c1_runtime_commands_resolve_active_team_for_status_send_and_collect	1	0	P
 c2_load_bearing_kill_calls_have_pre_call_audit	1	1	P	
 c2_persist_rs_fallback_removed_after_batch_2	1	1	P	
 c2_positional_alias_and_real_mcp_share_physical_delivery	1	1	P	
-c2_quick_start_help_is_zero_token_help_only_and_does_not_compile_workspace	1	0	P	
+c2_quick_start_help_is_zero_token_help_only_and_does_not_compile_workspace	0	0	X	src/lifecycle/tests/realmachine_clusters_1_6_red.rs
 c2_restart_agent_fallback_removed_after_batch_3	1	1	P	
 c2_wire_rs_fallback_removed_after_batch_3	1	1	P	
 c3_launcher_failure_path_has_no_reachable_kill_guardrail	1	1	P	
@@ -424,7 +424,7 @@ cli_claude_json_does_not_report_success_without_starting_provider_or_tmux	1	1	P
 cli_error_payload_json_shape_serializes_optional_fields_skipped	1	1	P	
 cli_error_payload_plain_runtime	1	1	P	
 cli_error_payload_tmux_conflict_non_quick_start_enrichment	1	1	P	
-cli_error_payload_tmux_conflict_quick_start_enrichment	1	1	P	
+cli_error_payload_tmux_conflict_quick_start_enrichment	0	0	X	src/cli/tests/base.rs
 cli_help_names_and_examples_short_recipient_and_explicit_scope	1	1	P	
 cli_leader_launcher_does_not_mutate_canonical_owner_binding	1	1	P	
 cli_override_disagreeing_with_state_kind_refuses_unless_fresh	1	1	P	

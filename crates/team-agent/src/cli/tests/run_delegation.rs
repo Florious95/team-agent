@@ -174,9 +174,9 @@ fn run_dispatches_quick_start_compiles_spec() {
         )
         .unwrap();
     let argv = vec![
-        "quick-start".to_string(),
+        "start".to_string(),
+        "--from".to_string(),
         dir.to_string_lossy().to_string(),
-        "--yes".to_string(),
     ];
     let exit = run(&argv, Path::new("."));
     assert!(

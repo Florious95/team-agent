@@ -233,31 +233,6 @@ fn cli_error_payload_plain_runtime() {
 }
 
 #[test]
-fn cli_error_payload_tmux_conflict_quick_start_enrichment() {
-    // golden quick-start enrichment (exact bytes):
-    let err = CliError::Runtime("tmux session already exists: my-team. Startup aborted".into());
-    let payload = err.to_payload(Path::new("/tmp/cli-error-123.log"), "quick-start");
-    assert_eq!(
-        payload.reason.as_deref(),
-        Some("tmux_session_name_conflict")
-    );
-    assert_eq!(payload.session_name.as_deref(), Some("my-team"));
-    // Unified start: a conflict on the retired creation bridge resumes with the
-    // canonical `team-agent start` and creates another team via `start --from .`.
-    assert_eq!(
-            payload.action,
-            "Terminal session `my-team` already exists and may belong to your existing team. Resume with `team-agent start`. To create another team, change the name in TEAM.md before `team-agent start --from .`. Do not shut down an existing team to bypass this refusal."
-        );
-    let next = payload.next_actions.as_ref().unwrap();
-    assert_eq!(next.len(), 2);
-    assert!(next[0].contains("team-agent start"));
-    assert!(
-        next[1].contains("TEAM.md") && next[1].contains("name") && next[1].contains("team-agent start --from .")
-    );
-    assert!(!payload.action.contains("quick-start") && next.iter().all(|line| !line.contains("quick-start")));
-}
-
-#[test]
 fn cli_error_payload_tmux_conflict_non_quick_start_enrichment() {
     // golden non-quick-start (command="restart") enrichment uses generic startup wording.
     let err = CliError::Runtime("tmux session already exists: my-team. Startup aborted".into());

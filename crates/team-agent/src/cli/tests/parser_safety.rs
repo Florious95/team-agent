@@ -276,7 +276,7 @@ fn payload_help_is_not_control_and_compatibility_flags_do_not_delete_literals() 
         strings(&["w", "--help", "--no-display", "--workspace=a=b"])
     );
     let checked = super::super::arguments::parse(
-        "quick-start",
+        "start",
         &strings(&["--no-display", "--", "--no-display"]),
     )
     .unwrap();
