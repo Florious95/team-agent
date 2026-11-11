@@ -10,7 +10,18 @@ fn assert_brief_shape(value: &serde_json::Value, names: &[&str]) {
         .cloned()
         .collect::<Vec<_>>();
     root_keys.sort();
-    assert_eq!(root_keys, vec!["nodes"], "status brief must not carry diagnostics: {value}");
+    // 5f0bc003: the brief carries exactly one advisory beside the nodes.
+    assert_eq!(
+        root_keys,
+        vec!["nodes", "polling_advisory"],
+        "status brief must not carry diagnostics: {value}"
+    );
+    assert!(
+        value["polling_advisory"]
+            .as_str()
+            .is_some_and(|advisory| advisory.starts_with("Do not poll")),
+        "status brief polling advisory: {value}"
+    );
     let nodes = value
         .get("nodes")
         .and_then(serde_json::Value::as_array)
