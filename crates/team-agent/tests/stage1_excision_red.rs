@@ -12,7 +12,6 @@
 //! (ConPTY/Windows) or K4 ProviderAdapter methods (Stage 2) are out of scope.
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
-#[cfg(unix)]
 #[path = "support/proc_guard.rs"]
 mod proc_guard;
 
@@ -527,12 +526,11 @@ fn excise_fifo_result_waiter_is_gone_from_messaging() {
 /// `wait --task` is backed by the retired FIFO/SQL waiter. Its refusal must stay
 /// fail-closed and name the real C3 replacement, not internal jargon.
 ///
-/// Hermetic child: cleared environment, private HOME/cwd/TMUX_TMPDIR, and its own process
-/// group with a 60s lifeline, so a regressed blocking waiter is killed instead of hanging.
-#[cfg(unix)]
+/// Hermetic child on every platform: cleared environment, private HOME/cwd/TMUX_TMPDIR.
+/// On unix it also runs in its own process group with a 60s lifeline, so a regressed
+/// blocking waiter is killed instead of hanging.
 #[test]
 fn excise_wait_refusal_names_the_public_inbox_replacement() {
-    use std::io::Read;
     use std::process::{Command, Stdio};
 
     let workspace = std::env::temp_dir().join(format!(
@@ -553,13 +551,24 @@ fn excise_wait_refusal_names_the_public_inbox_replacement() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     tmux_root.configure(&mut command);
-    let mut child =
-        proc_guard::FixtureGroup::spawn(&mut command, &workspace, std::time::Duration::from_secs(60));
-    let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-    child.stdout.take().unwrap().read_to_end(&mut stdout).unwrap();
-    child.stderr.take().unwrap().read_to_end(&mut stderr).unwrap();
-    let status = child.wait().unwrap();
-    drop(child);
+    #[cfg(unix)]
+    let (status, stdout, stderr) = {
+        use std::io::Read;
+        let mut child = proc_guard::FixtureGroup::spawn(
+            &mut command,
+            &workspace,
+            std::time::Duration::from_secs(60),
+        );
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        child.stdout.take().unwrap().read_to_end(&mut stdout).unwrap();
+        child.stderr.take().unwrap().read_to_end(&mut stderr).unwrap();
+        (child.wait().unwrap(), stdout, stderr)
+    };
+    #[cfg(not(unix))]
+    let (status, stdout, stderr) = {
+        let output = command.output().unwrap();
+        (output.status, output.stdout, output.stderr)
+    };
     drop(tmux_root);
     let text = format!(
         "{}{}",
