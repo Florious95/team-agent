@@ -599,16 +599,12 @@ fn restart_with_selected_team_and_transport(
         crate::state::projection::session_generation(&state).map(str::to_string);
     let same_role_cohort_targets =
         same_role_cohort_targets_from_decisions(&state, spec_workspace, &plan.decisions);
-    let pre_spawn_pane_ids = if live_worker_session_deferred_teardown {
-        transport
-            .list_targets()
-            .map_err(|error| LifecycleError::Transport(error.to_string()))?
-            .into_iter()
-            .map(|pane| pane.pane_id.as_str().to_string())
-            .collect::<std::collections::BTreeSet<_>>()
-    } else {
-        std::collections::BTreeSet::new()
-    };
+    let pre_spawn_pane_ids = transport
+        .list_targets()
+        .map_err(|error| LifecycleError::Transport(error.to_string()))?
+        .into_iter()
+        .map(|pane| pane.pane_id.as_str().to_string())
+        .collect::<std::collections::BTreeSet<_>>();
     if destroy_stale_worker_session(session_live_or_default(transport, &session_name, false),
         live_worker_session_deferred_teardown, shared_native_windows)
     {
@@ -983,6 +979,18 @@ fn restart_with_selected_team_and_transport(
         // WORKING row. Best-effort: DB failure must not fail the restart loop.
     }
     // END_B5_RESTART_ISOLATION_LOOP
+    let successful_targets =
+        same_role_cohort_targets_from_decisions(&state, spec_workspace, &successful_agents);
+    let actual_spawn_panes = actual_successful_restart_spawn_panes(
+        transport,
+        &session_name,
+        &successful_targets,
+        &pre_spawn_pane_ids,
+    )?;
+    if let Some(error) = actual_restart_spawn_binding_error(&successful_targets, &actual_spawn_panes) {
+        cleanup_actual_restart_spawns(transport, &actual_spawn_panes);
+        return Err(LifecycleError::RequirementUnmet(error));
+    }
     if live_worker_session_deferred_teardown {
         let successful_agent_ids = successful_agents
             .iter()
@@ -993,20 +1001,6 @@ fn restart_with_selected_team_and_transport(
             .filter(|target| successful_agent_ids.contains(target.agent_id.as_str()))
             .cloned()
             .collect::<Vec<_>>();
-        let successful_targets =
-            same_role_cohort_targets_from_decisions(&state, spec_workspace, &successful_agents);
-        let actual_spawn_panes = actual_successful_restart_spawn_panes(
-            transport,
-            &session_name,
-            &successful_targets,
-            &pre_spawn_pane_ids,
-        )?;
-        if let Some(error) =
-            actual_restart_spawn_binding_error(&successful_targets, &actual_spawn_panes)
-        {
-            cleanup_actual_restart_spawns(transport, &actual_spawn_panes);
-            return Err(LifecycleError::RequirementUnmet(error));
-        }
         if let Err(error) =
             retire_expected_same_role_cohorts(transport, &carrier_state, "restart", &old_successful_targets)
         {

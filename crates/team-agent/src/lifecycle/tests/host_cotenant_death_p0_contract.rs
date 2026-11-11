@@ -364,6 +364,38 @@ fn restart_bad_spawn_identity_fails_closed_before_stale_binding_and_new_orphan()
 
 #[test]
 #[serial(env)]
+fn restart_all_carriers_gone_bad_spawn_identity_fails_closed() {
+    let (_env, workspace) = team_case("p0-dead-bad-identity", &["developer"]);
+    let mut expired = hermetic_guard::spawn_owned_coordinator(&workspace);
+    let pid = expired.id();
+    let birth = team_agent_contract::host::process::process_birth_identity(pid).unwrap();
+    expired.kill().unwrap();
+    expired.wait().unwrap();
+    let mut state = load_runtime_state(&workspace).unwrap();
+    state["agents"]["developer"]["pane_pid"] = json!(pid);
+    state["agents"]["developer"]["pane_birth_identity"] = json!(birth);
+    save_runtime_state(&workspace, &state).unwrap();
+    assert!(crate::lifecycle::carrier::observe(&state["agents"]["developer"], pid).state.gone());
+    let transport = CohortTransport::with_old_panes(&["developer"]).with_bad_spawn_identity();
+    transport.kill_pane(&PaneId::new("%old-developer")).unwrap();
+    assert!(transport.list_targets().unwrap().is_empty());
+    let result = restart_with_transport_with_readiness_deadline(
+        &workspace, true, Some(TEAM), &transport, Some(0),
+    );
+    let error = format!("{result:?}").to_ascii_lowercase();
+    assert!(result.is_err() && error.contains("spawn") && error.contains("mismatch"), "{result:?}");
+    let observed = transport.state.lock().unwrap();
+    assert_eq!(observed.session_kills, 1, "must exercise kill-session-first, not deferred teardown");
+    assert_eq!(observed.next, 2, "one bad replacement must actually be spawned");
+    drop(observed);
+    assert!(transport.live_panes_for_window("developer").is_empty(), "failed replacement leaked");
+    let saved = load_runtime_state(&workspace).unwrap();
+    assert_ne!(saved["agents"]["developer"]["pane_id"], json!("%new-1"));
+    assert_eq!(saved["agents"]["developer"]["spawn_epoch"], state["agents"]["developer"]["spawn_epoch"]);
+}
+
+#[test]
+#[serial(env)]
 fn start_agent_spawn_verification_failure_rolls_back_new_pane() {
     let (_env, workspace) = team_case("p0-start-spawn-rollback", &["developer"]);
     let before = load_runtime_state(&workspace).unwrap();
@@ -602,6 +634,7 @@ struct TransportState {
     panes: Vec<PaneInfo>,
     killed: BTreeSet<String>,
     next: usize,
+    session_kills: usize,
     current_command: String,
 }
 
@@ -609,7 +642,7 @@ impl CohortTransport {
     fn with_old_panes(workers: &[&str]) -> Self {
         let panes = workers.iter().map(|w| pane_info(w, &format!("%old-{w}"), "team-agent-worker")).collect();
         Self {
-            state: Arc::new(Mutex::new(TransportState { panes, killed: BTreeSet::new(), next: 1, current_command: "team-agent-worker".to_string() })),
+            state: Arc::new(Mutex::new(TransportState { panes, killed: BTreeSet::new(), next: 1, session_kills: 0, current_command: "team-agent-worker".to_string() })),
             bad_spawn_identity: false,
             hide_new_from_list_targets: false,
             fail_list_targets: false,
@@ -781,7 +814,10 @@ impl Transport for CohortTransport {
     }
 
 
-    fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> { Ok(()) }
+    fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
+        self.state.lock().unwrap().session_kills += 1;
+        Ok(())
+    }
 
     fn kill_window(&self, target: &Target) -> Result<(), TransportError> {
         if let Target::Pane(pane) = target { self.kill_pane(pane)?; }
