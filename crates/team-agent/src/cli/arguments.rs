@@ -13,7 +13,6 @@ enum ValueKind {
     Seconds,
     PositiveSeconds,
     Choice(&'static [&'static str]),
-    FoldedChoice(&'static [&'static str]),
 }
 use ValueKind::*;
 
@@ -50,18 +49,6 @@ fn schema(command: &str) -> Option<Schema> {
                 ("--allow-fresh", Switch),
                 ("--session-converge-deadline", Seconds),
                 ("--detail", Switch),
-            ],
-            1,
-        ),
-        "quick-start" => (
-            &[
-                ("--dry-run", Switch),
-                ("--name", Token),
-                ("--team-id", Token),
-                ("--yes", Switch),
-                ("--backend", FoldedChoice(&["tmux", "conpty"])),
-                ("--detail", Switch),
-                ("--no-display", Switch),
             ],
             1,
         ),
@@ -195,7 +182,7 @@ fn schema(command: &str) -> Option<Schema> {
         workspace: !matches!(command, "models" | "leaders" | "install-skill" | "kiro"),
         team: !matches!(
             command,
-            "models" | "leaders" | "install-skill" | "kiro" | "wait" | "quick-start"
+            "models" | "leaders" | "install-skill" | "kiro" | "wait"
         ),
     })
 }
@@ -204,7 +191,6 @@ fn canonical_flag<'a>(command: &str, flag: &'a str) -> &'a str {
     match (command, flag) {
         (_, "-h") => "--help",
         ("inbox", "-n") => "--limit",
-        ("quick-start", "--team") => "--team-id",
         ("send", "--target" | "--to") => "--targets",
         _ => flag,
     }
@@ -238,7 +224,6 @@ fn valid_value(kind: ValueKind, value: &str) -> bool {
                 && (!matches!(kind, PositiveSeconds) || number > 0.0)
         }),
         Choice(values) => values.contains(&value),
-        FoldedChoice(values) => values.contains(&value.trim().to_ascii_lowercase().as_str()),
         _ => true,
     }
 }

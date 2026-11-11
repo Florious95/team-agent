@@ -97,21 +97,10 @@ impl CliError {
         if let Some(session) = tmux_conflict_session(&error) {
             payload.reason = Some("tmux_session_name_conflict".to_string());
             payload.session_name = Some(session.clone());
-            if command == "quick-start" {
-                payload.action = format!(
-                    "Terminal session `{session}` already exists and may belong to your existing team. Resume with `team-agent start`. To create another team, change the name in TEAM.md before `team-agent start --from .`. Do not shut down an existing team to bypass this refusal."
-                );
-                payload.next_actions = Some(vec![
-                    "If this is your existing team, resume it with `team-agent start`.".to_string(),
-                    "To create another team, change the name in TEAM.md before running `team-agent start --from .`."
-                        .to_string(),
-                ]);
-            } else {
-                payload.action = format!(
-                    "Terminal session `{session}` already exists and may belong to a running team. Do not shut it down; choose another team name before starting."
-                );
-                payload.next_actions = Some(vec!["Choose another team name before starting.".to_string()]);
-            }
+            payload.action = format!(
+                "Terminal session `{session}` already exists and may belong to a running team. Do not shut it down; choose another team name before starting."
+            );
+            payload.next_actions = Some(vec!["Choose another team name before starting.".to_string()]);
         } else if error.contains("Team Agent launcher flag")
             && error.contains("must appear before --")
         {

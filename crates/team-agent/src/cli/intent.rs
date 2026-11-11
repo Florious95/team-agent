@@ -239,7 +239,7 @@ fn options(tokens: &[String]) -> (Vec<String>, BTreeMap<String, String>) {
 }
 
 pub(super) fn canonical_start_command(command: &str) -> &str {
-    match command { "add-agent" | "start-agent" | "quick-start" => "start", other => other }
+    match command { "add-agent" | "start-agent" => "start", other => other }
 }
 
 /// None deliberately leaves frozen legacy parsing, defaults and output untouched.
@@ -248,29 +248,6 @@ pub(super) fn run(
     args: &[String],
     cwd: &Path,
 ) -> Option<Result<CmdResult, CliError>> {
-    let translated;
-    let args = if command == "quick-start" {
-        let checked = match super::arguments::parse(command, args) {
-            Ok(checked) => checked,
-            Err(error) => return Some(Err(error)),
-        };
-        if checked.help { return Some(Ok(CmdResult::human(help("start")))); }
-        let (positions, flags) = options(&checked.tokens);
-        if let Some(flag) = ["--name", "--yes", "--backend"].into_iter().find(|flag| flags.contains_key(*flag)) {
-            return Some(Err(usage(format!(
-                "{flag} is not part of unified start; use team-agent start --from <dir> with the desired role declarations"
-            ))));
-        }
-        let mut tokens = Vec::new();
-        if let Some(source) = positions.first() { tokens.push(format!("--from={source}")); }
-        for (flag, value) in flags {
-            if flag == "--detail" { continue; } // Canonical receipts already include step details.
-            let flag = if flag == "--team-id" { "--team" } else { &flag };
-            tokens.push(if value.is_empty() { flag.into() } else { format!("{flag}={value}") });
-        }
-        translated = tokens;
-        translated.as_slice()
-    } else { args };
     let command = canonical_start_command(command);
     if !matches!(command, "start" | "stop" | "restart" | "team" | "agent") {
         return None;

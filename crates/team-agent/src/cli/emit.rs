@@ -288,6 +288,11 @@ pub(crate) fn __test_dispatch(
 }
 
 fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliError> {
+    if command == "quick-start" {
+        return Err(CliError::Usage(
+            "'quick-start' is retired; use team-agent start --from TEAMDIR [--workspace WORKSPACE] [--team TEAM]".into(),
+        ));
+    }
     if command == "coordinator" {
         return Err(CliError::Usage(
             "'coordinator' is retired; use 'team-agent schedule' for timed work.".into(),
@@ -786,6 +791,7 @@ fn emit_parser_usage(command: &str, args: &[String], error: &CliError) -> ExitCo
     let command = match super::intent::canonical_start_command(command) {
         "takeover" | "attach-leader" => "claim-leader",
         "coordinator" => "schedule",
+        "quick-start" => "start",
         "remove-agent" => "agent remove",
         "reset-agent" => "agent reset",
         "clone-agent" => "agent clone",
@@ -2121,6 +2127,24 @@ mod tests {
     }
 
     #[test]
+    fn retired_quick_start_refuses_before_scope_or_effects() {
+        let root = std::env::temp_dir().join(format!("retired-quick-start-{}", std::process::id()));
+        let workspace = root.join("must-not-exist");
+        assert!(!workspace.exists());
+        let args = vec![root.join("roles").to_string_lossy().into_owned(),
+            "--workspace".into(), workspace.to_string_lossy().into_owned(),
+            "--team".into(), "x".into(), "--yes".into(), "--json".into()];
+        let error = super::dispatch("quick-start", &args, &root).unwrap_err();
+        assert!(matches!(error, CliError::Usage(_)), "{error:?}");
+        assert!(error.to_string().contains("retired") && error.to_string().contains("start --from"));
+        let argv = [vec!["quick-start".into()], args].concat();
+        assert_eq!(super::run(&argv, &root), ExitCode::Usage);
+        assert!(!workspace.exists() && !root.join(".team").exists());
+        assert!(!super::default_help().contains("quick-start"));
+        assert!(command_spec("quick-start").is_none());
+    }
+
+    #[test]
     fn retired_leader_commands_refuse_before_scope_or_retirement() {
         let root = std::env::temp_dir().join(format!("retired-leader-{}", std::process::id()));
         let workspace = root.join("must-not-exist");
@@ -2228,7 +2252,6 @@ mod tests {
             DispatchKind::Stop,
             DispatchKind::Team,
             DispatchKind::Agent,
-            DispatchKind::QuickStart,
             DispatchKind::Send,
             DispatchKind::Schedule,
             DispatchKind::Migrate,
@@ -2494,10 +2517,7 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(cwd).unwrap();
-        assert!(
-            !command_help(Some("quick-start")).contains("--fresh"),
-            "quick-start help must not advertise removed reset semantics"
-        );
+        assert_eq!(command_help(Some("quick-start")), HUMAN_NAVIGATION);
     }
 
     #[test]
@@ -2535,9 +2555,10 @@ mod tests {
     #[test]
     fn start_aliases_share_canonical_help_without_a_force_recreate_surface() {
         let canonical = command_help(Some("start"));
-        for alias in ["add-agent", "start-agent", "quick-start"] {
+        for alias in ["add-agent", "start-agent"] {
             assert_eq!(command_help(Some(alias)), canonical, "{alias}");
         }
+        assert!(command_spec("quick-start").is_none());
         assert!(canonical.contains("--session preserve|auto|fresh"));
         assert!(canonical.contains("--role-file"));
         assert!(!canonical.contains("--force"));
