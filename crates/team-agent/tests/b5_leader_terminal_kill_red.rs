@@ -306,6 +306,18 @@ fn spawn_session(
             &BTreeMap::new(),
         )
         .unwrap_or_else(|e| panic!("spawn {} failed: {e}", session.as_str()));
+    let argv = TmuxBackend::argv_for_workspace(cwd, &[
+        "tmux".into(), "list-panes".into(), "-a".into(), "-F".into(),
+        "#{pane_dead} #{pane_pid} #{pane_current_command}".into(),
+    ]);
+    let output = Command::new(&argv[0]).args(&argv[1..]).output().unwrap();
+    eprintln!("B5 after spawn {}: {:?} {}", session.as_str(), output.status, String::from_utf8_lossy(&output.stdout));
+    for pane in backend.list_targets().unwrap() {
+        if let Some(pid) = pane.pane_pid {
+            let output = Command::new("ps").args(["-o", "args=", "-p", &pid.to_string()]).output().unwrap();
+            eprintln!("B5 pane {} pid {pid}: {}", pane.pane_id.as_str(), String::from_utf8_lossy(&output.stdout));
+        }
+    }
 }
 
 /// Bounded wait for the keepalive process to be visible in the process table

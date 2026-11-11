@@ -179,7 +179,7 @@ fn bracketed_paste_and_single_enter_are_separate_paced_tmux_calls() {
     fs::write(&wrapper, format!(r#"#!/usr/bin/env python3
 import json, os, sys, time
 with open({trace}, 'a') as log:
-    log.write(json.dumps({{'at': time.monotonic(), 'args': sys.argv[1:]}}) + '\n')
+    log.write(json.dumps({{'at_ns': time.time_ns(), 'args': sys.argv[1:]}}) + '\n')
 os.environ['PATH'] = {path}
 os.execvp('tmux', ['tmux', *sys.argv[1:]])
 "#, trace=json!(trace.to_string_lossy()), path=json!(std::env::var("PATH").unwrap()))).unwrap();
@@ -198,8 +198,10 @@ os.execvp('tmux', ['tmux', *sys.argv[1:]])
     assert_eq!(submits.len(), 1);
     assert!(!paste["args"].as_array().unwrap().contains(&json!("send-keys")));
     assert_eq!(submits[0]["args"].as_array().unwrap().last(), Some(&json!("Enter")));
-    let elapsed = submits[0]["at"].as_f64().unwrap() - paste["at"].as_f64().unwrap();
-    assert!(elapsed >= team_agent_contract::providers::claude::interaction::PASTE_TO_SUBMIT_FLOOR.as_secs_f64(), "{elapsed}");
+    // Compare a cross-process integer clock; preserve the native Claude floor without float rounding.
+    let elapsed = submits[0]["at_ns"].as_u64().unwrap() - paste["at_ns"].as_u64().unwrap();
+    eprintln!("paste floor elapsed={elapsed}ns; trace={calls:?}");
+    assert!(u128::from(elapsed) >= team_agent_contract::providers::claude::interaction::PASTE_TO_SUBMIT_FLOOR.as_nanos(), "{elapsed}ns; trace={calls:?}");
     assert_eq!(fs::read(fixture.root.join("received")).unwrap(), b"\x1b[200~paced submit\x1b[201~\r");
 }
 

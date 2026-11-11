@@ -362,7 +362,7 @@ fn p5_restart_and_add_agent_keep_real_lifecycle_paths() {
         },
         false,
     );
-    assert!(format!("{add:?}").contains("missing") || format!("{add:?}").contains("role"));
+    assert!(format!("{add:?}").contains("missing") || format!("{add:?}").contains("role"), "{add:?}");
     assert_eq!(snapshot(env.root()), before, "missing role refusal must not write");
 }
 

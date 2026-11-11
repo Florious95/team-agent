@@ -214,10 +214,16 @@ fn unverified_configuration_change_advises_scoped_stop_not_status_loop() {
     let before = std::fs::read(&state).unwrap();
     for observed in [Observation::Unknown, Observation::NativeReconcile] {
         let error = plan_with_observer(intent.clone(), |_, _, _| Ok(observed)).unwrap_err().to_string();
-        assert!(error.contains("team-agent stop one --workspace"), "{error}");
+        // c8639440: Unknown must retain the PID-reuse inspection fence; only NativeReconcile can stop.
+        if observed == Observation::NativeReconcile {
+            assert!(error.contains("team-agent stop one --workspace"), "{error}");
+            assert!(error.contains("before applying changes or starting fresh"), "{error}");
+            assert!(!error.contains("team-agent status"), "{error}");
+        } else {
+            assert!(error.contains("team-agent status one --workspace"), "{error}");
+            assert!(!error.contains("team-agent stop"), "{error}");
+        }
         assert!(error.contains("--team fixture"), "{error}");
-        assert!(error.contains("before applying changes or starting fresh"), "{error}");
-        assert!(!error.contains("team-agent status"), "{error}");
         assert_eq!(std::fs::read(&state).unwrap(), before);
     }
 }
@@ -238,8 +244,9 @@ fn bare_and_agent_start_share_the_scoped_stop_advice_for_unverified_seats() {
         let result = super::super::run(command, &tokens, root.path()).unwrap().unwrap();
         let text = crate::cli::emit::emit(&result.output, result.as_json).unwrap();
         assert!(text.starts_with("error: "), "{text}");
-        assert!(text.contains("team-agent stop one --workspace"), "{text}");
-        assert!(!text.contains("team-agent status one"), "{text}");
+        // c8639440: these running rows have no verifiable carrier, so they remain Unknown.
+        assert!(text.contains("team-agent status one --workspace"), "{text}");
+        assert!(!text.contains("team-agent stop one"), "{text}");
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 }

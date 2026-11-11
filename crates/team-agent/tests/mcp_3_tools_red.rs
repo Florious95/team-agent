@@ -449,6 +449,8 @@ fn m03_initial_resume_and_pi_leader_materialization_all_consume_three_tools() {
 fn m04_send_message_single_leader_broadcast_and_mailbox_close_the_team_scope_loop() {
     let _hermetic = HermeticTestEnv::enter("mcp-3-m04");
     let harness = sim::McpSimHarness::new();
+    // d2d7ebc6: the receiver is bound to the sender’s selected team, not just the root projection.
+    harness.bind_leader_receiver_to_team("teamA");
     let mut worker = sim::spawn_mcp_client_without_catalog_check(harness.workspace_path(), "worker_b", "teamA");
     for (target, marker) in [("worker_a", "M04_PEER"), ("leader", "M04_LEADER"), ("*", "M04_BROADCAST")] {
         let call = worker.call_tool("send_message", json!({"to":target,"content":marker}));
@@ -460,7 +462,7 @@ fn m04_send_message_single_leader_broadcast_and_mailbox_close_the_team_scope_loo
             assert_eq!(recipients, BTreeSet::from(["worker_a", "worker_c"]));
             for row in results { assert_eq!(row["delivery"], "physical"); }
         } else {
-            assert_eq!(call.body["delivery"], "physical");
+            assert_eq!(call.body["delivery"], "physical", "{:?}", call.body);
             assert_eq!(call.body["recipient"], target);
         }
         assert!(harness.message_rows_containing(marker).is_empty(), "physical send must not create a queue row");
