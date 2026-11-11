@@ -906,6 +906,14 @@ fn fake_delivery_fixture_needs_real_tui_noecho(ws: &TestWorkspace) -> bool {
 /// Assert that a JSON pointer (RFC 6901) resolves to an expected `Value`.
 /// Use slash-paths: `assert_json_field(&out, "/ok", &json!(true))`.
 #[track_caller]
+/// One link (`L1`..`L6`) of a `team-agent.doctor.v1` report (262f6cdb).
+pub fn doctor_link<'a>(doctor: &'a Value, id: &str) -> &'a Value {
+    doctor["links"]
+        .as_array()
+        .and_then(|links| links.iter().find(|link| link["id"] == id))
+        .unwrap_or_else(|| panic!("doctor v1 report has no link {id}: {doctor}"))
+}
+
 pub fn assert_json_field(actual: &Value, pointer: &str, expected: &Value) {
     let got = actual.pointer(pointer).unwrap_or_else(|| {
         panic!(

@@ -40,26 +40,32 @@ fn rec_002_doctor_checks() {
     );
     let j = out.json();
     assert_json_field_eq_bool(&j, "/ok", false);
-    assert_json_field(&j, "/error", &serde_json::Value::Null);
-    // R-M3: the resident coordinator is retired; doctor reports it as not required.
-    assert_json_field_eq_str(&j, "/coordinator/status", "not_required");
-    assert_json_field_eq_bool(&j, "/coordinator/schema_ok", true);
-    assert_json_field_eq_bool(&j, "/tmux/installed", true);
-    assert_json_field_eq_bool(&j, "/profile_smoke/ok", true);
-    assert_json_field_eq_bool(&j, "/grok_slot/readable", true);
-    assert_json_field_eq_bool(&j, "/grok_slot/consistent", true);
+    // 262f6cdb: doctor answers with the six-link v1 report (a report, not an
+    // error). The coordinator/*, profile_smoke and grok_slot inventory is retired
+    // with it (R-M3; CHANGELOG 0.6.0).
+    assert_json_field_eq_str(&j, "/schema", "team-agent.doctor.v1");
+    assert_eq!(doctor_link(&j, "L2")["status"], "PASS", "the tmux host must be reachable: {j}");
     assert!(
-        j["issues"]
+        j["links"]
             .as_array()
-            .is_some_and(|issues| issues.iter().any(|issue| issue == "leader_not_attached")),
+            .is_some_and(|links| links.iter().any(|link| link["status"] != "PASS")),
+        "unattached host doctor must report a failing link: {j}"
+    );
+    assert_eq!(
+        doctor_link(&j, "L6")["status"],
+        "FAIL",
         "unattached host doctor must retain leader_not_attached issue: {j}"
     );
+    let repair = &j["next_action"];
+    let argv: Vec<&str> = repair["argv"]
+        .as_array()
+        .map(|argv| argv.iter().filter_map(serde_json::Value::as_str).collect())
+        .unwrap_or_default();
     assert!(
-        j["suggested_repairs"]
-            .as_array()
-            .is_some_and(|repairs| repairs
-                .iter()
-                .any(|repair| repair["issue"] == "leader_not_attached")),
+        argv.get(1) == Some(&"claim-leader")
+            && argv.contains(&"--workspace")
+            && argv.windows(2).any(|pair| pair == ["--team", team_id])
+            && repair["context"] == "from the current leader terminal",
         "unattached host doctor must retain the attachment repair: {j}"
     );
 

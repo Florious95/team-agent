@@ -212,21 +212,12 @@ fn wleak_diagnose_exposes_stale_worker_pane_binding() {
         Some(false),
         "WLEAK RED: diagnose must fail dirty when worker cached pane belongs to another window; json={body}"
     );
+    // 262f6cdb: doctor v1 reports the stale binding as a failed seats link (L3)
+    // naming seat a, instead of a typed issues[0] record.
+    let seats = doctor_link(&body, "L3");
     assert!(
-        body.pointer("/issues/0/id").and_then(Value::as_str) == Some(WORKER_PANE_BINDING_STALE),
-        "WLEAK RED: diagnose issue /issues/0/id must be worker_pane_binding_stale; json={body}"
-    );
-    assert!(
-        body.pointer("/issues/0/expected_session")
-            .and_then(Value::as_str)
-            .is_some(),
-        "WLEAK RED: diagnose stale worker pane issue must expose expected_session via JSON pointer; json={body}"
-    );
-    assert!(
-        body.pointer("/issues/0/observed_window")
-            .and_then(Value::as_str)
-            .is_some(),
-        "WLEAK RED: diagnose stale worker pane issue must expose observed_window via JSON pointer; json={body}"
+        seats["status"] == "FAIL" && seats["message"].as_str().unwrap_or_default().contains("a:"),
+        "WLEAK RED: diagnose must fail the seats link for a's stale worker pane binding; json={body}"
     );
 }
 

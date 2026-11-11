@@ -29,19 +29,17 @@ fn stat_003_status_dirty_state_reporting() {
     );
     let j = out.json();
     assert_json_field_eq_bool(&j, "/ok", false);
-    let issues = j
-        .pointer("/issues")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
+    // 262f6cdb: doctor v1 reports failures as links, not an issues list; the
+    // dirty leader receiver fails the return link (L6), naming the leader.
+    let links = j["links"].as_array().cloned().unwrap_or_default();
     assert!(
-        !issues.is_empty(),
+        links.iter().any(|link| link["status"] != "PASS"),
         "dirty state should produce diagnose issues: {j}"
     );
-    let dump = serde_json::to_string(&j).unwrap();
+    let leader = doctor_link(&j, "L6");
     assert!(
-        dump.contains("leader_not_attached") || dump.contains("worker_window_missing"),
-        "diagnose should name dirty-state reason; got {dump}"
+        leader["status"] == "FAIL" && leader["message"].as_str().unwrap_or_default().contains("leader"),
+        "diagnose should name dirty-state reason; got {j}"
     );
 
     let _ = run_ta(

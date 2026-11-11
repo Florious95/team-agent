@@ -124,9 +124,16 @@ fn stopping_the_only_worker_keeps_session_and_restartability() {
 
     let doctor = run_ta(&ws, &["doctor", "--workspace", ws_path, "--json"]);
     let doctor_json = serde_json::from_str::<Value>(&doctor.stdout).unwrap_or(Value::Null);
-    // R-M3: doctor reports the retired coordinator as not required.
-    let coordinator_not_required =
-        doctor_json.pointer("/coordinator/status").and_then(Value::as_str) == Some("not_required");
+    // R-M3 / 262f6cdb: doctor v1 has no coordinator inventory. It reports the six
+    // canonical links and never proposes a coordinator command.
+    let doctor_v1_without_coordinator = doctor_json["schema"] == "team-agent.doctor.v1"
+        && doctor_json["links"].as_array().is_some_and(|links| {
+            links.iter().map(|link| link["link"].as_str().unwrap_or_default()).collect::<Vec<_>>()
+                == ["scope", "host", "seats", "storage", "dispatch", "return"]
+        })
+        && !doctor_json["next_action"]["argv"].as_array().is_some_and(|argv| {
+            argv.iter().any(|arg| arg.as_str().is_some_and(|arg| arg.contains("coordinator")))
+        });
 
     let start = run_ta(
         &ws,
@@ -157,11 +164,11 @@ fn stopping_the_only_worker_keeps_session_and_restartability() {
 
     assert!(
         session_preserved
-            && coordinator_not_required
+            && doctor_v1_without_coordinator
             && missing_events.is_empty()
             && woke_worker,
         "single-worker stop contract failed: \
-         session_preserved={session_preserved} ({session}@{socket}), coordinator_not_required={coordinator_not_required}, \
+         session_preserved={session_preserved} ({session}@{socket}), doctor_v1_without_coordinator={doctor_v1_without_coordinator}, \
          coordinator.session_missing={missing_events:?}, woke_worker={woke_worker}; \
          doctor={doctor_json}, start_stdout={}, start_stderr={}, events={}",
         start.stdout,

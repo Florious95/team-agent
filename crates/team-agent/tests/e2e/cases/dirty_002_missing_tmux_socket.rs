@@ -31,9 +31,11 @@ fn dirty_002_shutdown_runtime_is_not_present() {
         ],
     );
     let j = out.json();
-    assert_eq!(
-        j.pointer("/runtime/status").and_then(|v| v.as_str()),
-        Some("not_present"),
+    // 262f6cdb: doctor v1 reports the seats as link L3; for a shut-down team it
+    // must not pass and must not claim anything is running.
+    let seats = doctor_link(&j, "L3");
+    assert!(
+        seats["status"] != "PASS" && !seats["message"].as_str().unwrap_or_default().contains(" running"),
         "a shut-down team must not be reported as a running runtime: {j}"
     );
     let status = run_ta(

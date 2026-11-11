@@ -19,12 +19,24 @@ fn rec_003_diagnose_output() {
         ],
     );
     let j = out.json();
-    assert_json_field_present(&j, "/event_log");
-    assert_json_field_eq_str(&j, "/runtime/workspace", ws.path().to_str().unwrap());
-    assert_json_field_eq_str(&j, "/runtime/team_key", team_id);
-    assert_json_field_eq_bool(&j, "/providers/fake/installed", true);
-    assert_json_field_present(&j, "/issues");
-    assert_json_field_present(&j, "/suggested_repairs");
+    // 262f6cdb: doctor answers with the six-link v1 report. The old inventory
+    // (event_log, providers/*, issues, suggested_repairs) is retired with it
+    // (M3; CHANGELOG 0.6.0).
+    assert_json_field_eq_str(&j, "/schema", "team-agent.doctor.v1");
+    let canonical = |path: &std::path::Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    assert_eq!(
+        canonical(std::path::Path::new(j["workspace"].as_str().expect("doctor v1 workspace"))),
+        canonical(ws.path()),
+        "doctor v1 workspace: {j}"
+    );
+    assert_json_field_eq_str(&j, "/team", team_id);
+    let ids: Vec<&str> = j["links"]
+        .as_array()
+        .expect("doctor v1 links")
+        .iter()
+        .filter_map(|link| link["id"].as_str())
+        .collect();
+    assert_eq!(ids, ["L1", "L2", "L3", "L4", "L5", "L6"], "doctor v1 link ids: {j}");
 
     let _ = run_ta(
         &ws,
