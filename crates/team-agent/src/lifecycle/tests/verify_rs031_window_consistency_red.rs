@@ -119,7 +119,8 @@ fn quick_start_preserves_external_leader_receiver_when_worker_pane_id_collides_a
     };
     let transport = RecordingTransport::new()
         .with_windows(vec![WindowName::new("faker")])
-        .with_tmux_endpoint(workspace.join("worker.sock").to_string_lossy().into_owned());
+        .with_tmux_endpoint(workspace.join("worker.sock").to_string_lossy().into_owned())
+        .with_targets(vec![caller.clone()]);
     let live = crate::transport::test_support::OfflineTransport::default()
         .with_tmux_endpoint(caller_endpoint)
         .with_targets(vec![caller]);
