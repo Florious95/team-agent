@@ -657,10 +657,19 @@ fn execute_plan(
         .iter()
         .map(|s| {
             let mut value = json!({"action":s.name(),"agent":s.agent()});
-            if let Step::UnifiedStart { description, .. } = s {
+            if let Step::UnifiedStart { request, description } = s {
                 value["op"] = json!(description.op);
                 value["declaration"] = description.declaration.clone();
                 value["defaulted"] = description.defaulted.clone();
+                if plan.intent.dry_run {
+                    // Reuse the read-only admission; refusals remain deferred,
+                    // and a prediction never grants the later lock-held start.
+                    if let Some(orphan) = crate::lifecycle::seat_start::start(request, true)
+                        .ok().and_then(|preview| preview.get("orphan_cleanup").cloned())
+                    {
+                        value["orphan_cleanup"] = orphan;
+                    }
+                }
             }
             value
         })
