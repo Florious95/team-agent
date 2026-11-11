@@ -86,8 +86,7 @@ impl GrammarCase {
         });
         assert!(
             value
-                .get("worker_readiness")
-                .and_then(|node| node.get("all_workers_spawned"))
+                .pointer("/steps/0/receipt/worker_readiness/all_workers_spawned")
                 .and_then(Value::as_bool)
                 == Some(true),
             "fixture: quick-start must spawn workers; stdout={}",

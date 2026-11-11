@@ -72,8 +72,7 @@ impl SeatCase {
         // retain its physical spawn precondition independently of ok.
         assert!(
             value
-                .get("worker_readiness")
-                .and_then(|node| node.get("all_workers_spawned"))
+                .pointer("/steps/0/receipt/worker_readiness/all_workers_spawned")
                 .and_then(Value::as_bool)
                 == Some(true),
             "fixture: quick-start must spawn workers (ok={ok}); value={value}"
@@ -200,8 +199,7 @@ impl SeatCase {
         ]);
         assert!(
             value
-                .get("worker_readiness")
-                .and_then(|node| node.get("all_workers_spawned"))
+                .pointer("/steps/0/receipt/worker_readiness/all_workers_spawned")
                 .and_then(Value::as_bool)
                 == Some(true),
             "fixture: second team {team} must spawn; value={value}"

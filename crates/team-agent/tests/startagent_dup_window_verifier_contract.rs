@@ -67,8 +67,7 @@ impl DupWindowCase {
             )
         });
         let all_spawned = value
-            .get("worker_readiness")
-            .and_then(|node| node.get("all_workers_spawned"))
+            .pointer("/steps/0/receipt/worker_readiness/all_workers_spawned")
             .and_then(Value::as_bool)
             .unwrap_or(false);
         assert!(
