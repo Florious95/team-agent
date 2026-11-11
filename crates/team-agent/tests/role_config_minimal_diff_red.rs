@@ -193,7 +193,8 @@ fn assert_silent_add(result: &framework::TaResult, agent_id: &str) {
     );
     let json = result.json();
     assert_eq!(json["ok"], true, "add-agent must report success: {json}");
-    assert_eq!(json["agent_id"], agent_id, "agent registration: {json}");
+    // 34d41fc7: canonical start reports the seat in its step receipt.
+    assert_eq!(json["steps"][0]["receipt"]["agent_id"], agent_id, "agent registration: {json}");
     for field in ["errors", "warnings", "deprecations", "rejections"] {
         if let Some(value) = json.get(field) {
             assert!(

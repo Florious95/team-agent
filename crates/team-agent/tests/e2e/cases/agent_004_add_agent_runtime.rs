@@ -40,7 +40,8 @@ fn agent_004_add_agent_runtime() {
     );
     let j = out.json();
     assert_json_field_eq_bool(&j, "/ok", true);
-    assert_json_field_eq_str(&j, "/agent_id", "b");
+    // 34d41fc7: canonical start reports the seat in its step receipt.
+    assert_json_field_eq_str(&j, "/steps/0/receipt/agent_id", "b");
     assert_file_exists(&role);
 
     let state = ws.read_state();

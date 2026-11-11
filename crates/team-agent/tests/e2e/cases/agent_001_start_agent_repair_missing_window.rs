@@ -50,7 +50,8 @@ fn agent_001_start_agent_repairs_missing_window() {
     );
     let j = out.json();
     assert_json_field_eq_bool(&j, "/ok", true);
-    assert_json_field_eq_str(&j, "/agent_id", "a");
+    // 34d41fc7: canonical start reports the seat in its step receipt.
+    assert_json_field_eq_str(&j, "/steps/0/receipt/agent_id", "a");
 
     wait_for_or_panic(
         "worker session present after start-agent",
