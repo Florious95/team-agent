@@ -74,19 +74,38 @@ fn b1_bare_takeover_uses_active_fleet_not_stale_caller_env_and_reports_session_a
     let case = FleetClaimCase::new("bare-takeover-active-fleet");
     let before_current = case.team_state(SIBLING_TEAM);
 
-    let takeover = case.run_ta(&[
+    // e0652b62 retired `takeover`: it is refused before any effect and names
+    // its replacement, `claim-leader --confirm`, which keeps this contract.
+    let before_state = case.read_state();
+    let retired = case.run_ta(&[
         "takeover",
         "--workspace",
         case.workspace_str(),
         "--confirm",
         "--json",
     ]);
-    let takeover_json = json_output(&takeover, "B1 bare takeover");
-    assert_binding_ok(&takeover, &takeover_json, "B1 bare takeover");
+    let retired_json = json_output(&retired, "B1 retired bare takeover");
+    assert!(
+        !retired.status.success()
+            && retired_json["error"].as_str().is_some_and(|error| error.contains("retired") && error.contains("claim-leader")),
+        "B1: takeover must be a retired verb naming claim-leader; json={retired_json}"
+    );
+    assert_eq!(case.read_state(), before_state, "B1: the retired takeover verb must not mutate state");
 
-    assert_checked_paths_target(&takeover_json, ACTIVE_TEAM, "B1 bare takeover");
-    assert_team_session_ready(&takeover_json, Some(false), "B1 bare takeover");
-    assert_convergence_event_target_and_readiness(&case, "takeover", ACTIVE_TEAM, Some(false));
+    let takeover = case.run_ta(&[
+        "claim-leader",
+        "--workspace",
+        case.workspace_str(),
+        "--confirm",
+        "--json",
+        "--detail",
+    ]);
+    let takeover_json = json_output(&takeover, "B1 bare claim-leader --confirm");
+    assert_binding_ok(&takeover, &takeover_json, "B1 bare claim-leader --confirm");
+
+    assert_checked_paths_target(&takeover_json, ACTIVE_TEAM, "B1 bare claim-leader --confirm");
+    assert_team_session_ready(&takeover_json, Some(false), "B1 bare claim-leader --confirm");
+    assert_convergence_event_target_and_readiness(&case, "claim-leader", ACTIVE_TEAM, Some(false));
     assert_root_and_team_converged(&case.read_state(), &case.new_socket, ACTIVE_TEAM);
     assert_eq!(
         case.team_state(SIBLING_TEAM),

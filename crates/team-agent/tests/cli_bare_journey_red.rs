@@ -144,16 +144,40 @@ fn missing(args: &[&str]) {
         t.contains("Usage:") && t.contains("Examples:") && t.contains("Next Action:"),
         "H4 local complete help/Next Action missing: {t}"
     );
-    assert!(
-        t.contains(&format!("team-agent {}", args[0])),
-        "H4 missing command-local guidance: {t}"
-    );
+    // 70cc2524: hidden compatibility verbs guide to their canonical agent form.
+    let local = match args[0] {
+        "reset-agent" => "team-agent agent reset".to_string(),
+        "clone-agent" => "team-agent agent clone".to_string(),
+        "fork-agent" => "team-agent agent fork".to_string(),
+        "remove-agent" => "team-agent agent remove".to_string(),
+        command => format!("team-agent {command}"),
+    };
+    assert!(t.contains(&local), "H4 missing command-local guidance {local}: {t}");
+}
+/// 1d2d4d5a/34d41fc7: add-agent and start-agent are canonical `start`
+/// aliases, so their missing-input guidance is byte-identical to `start`'s,
+/// exits 2 and has no effects.
+fn missing_alias(alias: &str) {
+    let env = HermeticTestEnv::enter(alias);
+    let ws = env.workspace("empty");
+    let before = snapshot(env.root());
+    let out = env.run_cli(&ws, &[alias]);
+    let canonical = env.run_cli(&ws, &["start"]);
+    let t = text(&out);
+    assert_eq!(snapshot(env.root()), before, "H5 shape-only missing input wrote logs/state/global data: {alias}: {t}");
+    assert_eq!(out.status.code(), Some(2), "H5 Usage exit2: {alias}: {t}");
+    assert_eq!((out.status.code(), &out.stdout, &out.stderr), (canonical.status.code(), &canonical.stdout, &canonical.stderr),
+        "H5 alias guidance must equal canonical start guidance: {alias}: {t}");
+    no_jargon(&t);
+    assert!(t.contains("team-agent start") && t.contains("--from"), "H4 canonical guidance missing: {t}");
 }
 macro_rules! missing_properties { ($($id:ident => [$($arg:literal),+]),+ $(,)?) => {$(
     #[test] #[serial(env)] fn $id() { missing(&[$($arg),+]); }
 )+}; }
+#[test] #[serial(env)] fn h5_add_missing() { missing_alias("add-agent"); }
+#[test] #[serial(env)] fn h5_start_missing() { missing_alias("start-agent"); }
 missing_properties! {
-    h5_send_missing => ["send"], h5_add_missing => ["add-agent"], h5_start_missing => ["start-agent"],
+    h5_send_missing => ["send"],
     h5_stop_missing => ["stop-agent"], h5_reset_missing => ["reset-agent"], h5_clone_missing => ["clone-agent"],
     h5_fork_missing => ["fork-agent"], h5_remove_missing => ["remove-agent"], h5_inbox_missing => ["inbox"],
     h5_profile_verb_missing => ["profile"],
@@ -196,23 +220,24 @@ fn h6_empty_input_prints_two_complete_safe_templates_and_real_input_path_without
         ],
     );
     let t = text(&out);
-    assert_eq!(out.status.code(), Some(1), "{t}");
+    // 1d2d4d5a: quick-start is a canonical `start` alias, so an empty source
+    // is the canonical usage refusal (exit 2) with the aed471b6 three-line
+    // templates; it must be byte-identical to `start --from` on that source.
+    let canonical = env.run_cli(&cwd, &["start", "--from", input.to_str().unwrap(), "--workspace", cwd.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(2), "{t}");
+    assert_eq!((&out.stdout, &out.stderr), (&canonical.stdout, &canonical.stderr), "H6 alias guidance differs from start: {t}");
     assert_eq!(
         snapshot(env.root()),
         before,
         "H6 guidance silently created files/logs or started a team: {t}"
     );
+    assert!(!t.contains("dangerously_skip_permissions: true"), "H6 templates must stay safe: {t}");
     for required in [
-        input.to_str().unwrap(),
         "TEAM.md",
-        "agents/worker.md",
+        "agents/",
         "provider: pi",
-        "model:",
-        "auth_mode: subscription",
-        "dangerously_skip_permissions: false",
-        "Next steps:",
-        "team-agent pi",
-        "team-agent quick-start",
+        "team-agent start",
+        "--from",
     ] {
         assert!(
             t.contains(required),
@@ -255,7 +280,9 @@ fn h6_json_templates_compile_and_validate_without_native_model_calls() {
     let ws = env.workspace("input");
     let before = snapshot(env.root());
     let out = env.run_cli(&ws, &["quick-start", ".", "--json"]);
-    assert_eq!(out.status.code(), Some(1));
+    // 1d2d4d5a: quick-start is a canonical `start` alias; an empty source is a
+    // usage refusal (exit 2) carrying the aed471b6 three-line templates.
+    assert_eq!(out.status.code(), Some(2));
     let v = body(&out);
     assert_eq!(v["ok"], false);
     assert_eq!(
@@ -273,12 +300,12 @@ fn h6_json_templates_compile_and_validate_without_native_model_calls() {
             let rest = &value[offset + 4..];
             if let Some(close) = rest.find("\n---\n") {
                 let header = &rest[..close];
-                if !header.contains("name:") {
+                if !header.contains("name:") && !header.contains("provider:") {
                     continue;
                 }
                 let mut end = value.len();
                 let body_start = offset + 4 + close + 5;
-                for marker in ["\n```", "\nagents/worker.md", "\n下一步", "\nNext Action"] {
+                for marker in ["\n```", "agents/", "\nAppend role", "\n下一步", "\nNext Action"] {
                     if let Some(relative) = value[body_start..].find(marker) {
                         end = end.min(body_start + relative);
                     }
@@ -291,11 +318,13 @@ fn h6_json_templates_compile_and_validate_without_native_model_calls() {
         .iter()
         .find(|s| !s.contains("provider:"))
         .unwrap_or_else(|| panic!("H6 complete TEAM template absent: {v}"));
+    // The aed471b6 worker template is three lines (provider only); its bypass
+    // is the safe default, asserted on the compiled spec below.
     let worker = documents
         .iter()
-        .find(|s| s.contains("provider:") && s.contains("dangerously_skip_permissions:"))
+        .find(|s| s.contains("provider:"))
         .unwrap_or_else(|| panic!("H6 complete worker template absent: {v}"));
-    assert!(worker.contains("dangerously_skip_permissions: false"));
+    assert!(!worker.contains("dangerously_skip_permissions: true"));
     let retry = env.workspace("copied-template");
     fs::write(retry.join("TEAM.md"), team).unwrap();
     fs::create_dir(retry.join("agents")).unwrap();
@@ -303,6 +332,10 @@ fn h6_json_templates_compile_and_validate_without_native_model_calls() {
     let compiled = team_agent::compiler::compile_team(&retry)
         .expect("H6 displayed templates must compile, no test-authored substitute");
     assert!(compiled.get("agents").is_some());
+    let agents = compiled.get("agents").and_then(team_agent::model::yaml::Value::as_list).unwrap();
+    assert!(!agents.is_empty() && agents.iter().all(|agent|
+        agent.get("dangerously_skip_permissions") == Some(&team_agent::model::yaml::Value::Bool(false))),
+        "H6 displayed templates must compile to bypass=false");
     team_agent::model::spec::validate_spec(&compiled, &retry)
         .expect("copied templates validate");
 }

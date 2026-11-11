@@ -254,11 +254,12 @@ fn r10_clone_agent_is_a_discoverable_cli_verb() {
         !stderr.contains("invalid choice") && !stdout.contains("invalid choice"),
         "`clone-agent` must not be an argparse invalid choice; stderr={stderr}"
     );
-    // It must present the same SOURCE --as NEW shape as fork-agent.
+    // It must present the same SOURCE --as NEW shape as fork-agent. 70cc2524:
+    // the hidden compatibility verb documents its canonical `agent clone` form.
     let help = format!("{stdout}{stderr}");
     assert!(
-        help.contains("clone-agent") && help.contains("--as"),
-        "clone-agent help must document `clone-agent SOURCE --as NEW`; help={help}"
+        help.contains("team-agent agent clone <agent> --as") && help.contains("--as"),
+        "clone-agent help must document `agent clone SOURCE --as NEW`; help={help}"
     );
 }
 

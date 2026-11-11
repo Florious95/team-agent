@@ -116,9 +116,16 @@ fn tooth_1_existing_launch_smoke_runs_documented_quick_start_verbatim() {
         "TOOTH-1: canonical team identity must come from TEAM.md, not the directory literal; \
          active_team_key={team_key:?}"
     );
+    // 5e1315ee namespaces worker sessions by workspace:
+    // compiler::default_session_name = team-<workspace short hash>-<slug(team)>.
+    // The canonical key here is already slug-shaped, so it is used verbatim.
+    assert!(team_key.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-'), "{team_key}");
     assert_eq!(
         state["session_name"],
-        Value::String(format!("team-{team_key}")),
+        Value::String(format!(
+            "team-{}-{team_key}",
+            team_agent::tmux_backend::workspace_short_hash_pub(ws.path())
+        )),
         "TOOTH-1: session identity must be derived from the one canonical team key"
     );
     let teams = state["teams"]
@@ -672,11 +679,20 @@ fn missing_caller_refuses_documented_launch_before_runtime_or_workers() {
         &[("TMUX", ""), ("TMUX_PANE", "")]);
     assert_eq!(out.exit_code, 1);
     let report = out.json();
-    assert_eq!(report["status"], "preflight_blocked");
+    // 1d2d4d5a routes quick-start through the canonical unified-start
+    // envelope: the step receipt is preflight_blocked and every recorded
+    // effect is zero (no worker panes, no coordinator).
+    assert_eq!(report["ok"], false, "{report}");
+    assert_eq!(report["status"], "failed", "{report}");
+    assert_eq!(report["steps"][0]["receipt"]["status"], "preflight_blocked", "{report}");
     assert!(report["blockers"].as_array().unwrap().iter()
         .any(|blocker| blocker.as_str().is_some_and(|text| text.contains("caller_pane_missing"))));
-    assert_eq!(report["effects"]["worker_panes_started"], serde_json::json!([]));
-    assert_eq!(report["effects"]["coordinator_start"], "not_attempted");
+    let effects = report["effects"].as_array().expect("canonical effects list");
+    assert!(!effects.is_empty(), "{report}");
+    for effect in effects {
+        assert_eq!(effect["effects"]["worker_panes_started"], serde_json::json!([]), "{report}");
+        assert_eq!(effect["effects"]["coordinator_start"], "not_attempted", "{report}");
+    }
     assert_file_absent(&ws.state_json_path());
     assert_file_absent(&ws.coordinator_pid_file());
 }

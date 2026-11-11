@@ -84,15 +84,16 @@ fn actual_help_keeps_new_and_legacy_commands_discoverable_without_effects() {
     let root = case.run(&["--help"]);
     assert!(root.status.success());
     let root = String::from_utf8(root.stdout).unwrap();
+    // 34d41fc7: root help lists only the canonical lifecycle forms; legacy
+    // verbs are hidden compatibility commands that stay discoverable through
+    // their own --help (which must still be complete and effect-free).
     for command in ["start", "stop", "restart", "team", "agent"]
         .into_iter()
         .chain(LEGACY.iter().copied())
     {
-        assert!(
-            root.lines()
-                .any(|line| line.split_whitespace().next() == Some(command)),
-            "missing {command}: {root}"
-        );
+        let listed = root.lines()
+            .any(|line| line.split_whitespace().next() == Some(command));
+        assert_eq!(listed, !LEGACY.contains(&command), "root help listing of {command}: {root}");
         let output = case.run(&[command, "--help"]);
         assert!(output.status.success(), "{command}: {output:?}");
         let help = String::from_utf8(output.stdout).unwrap();
@@ -123,9 +124,17 @@ fn every_legacy_lifecycle_help_redirects_only_to_current_daily_forms() {
         ("fork-agent", "team-agent agent fork"),
     ] {
         let help = team_agent::cli::emit::__test_command_help(Some(legacy));
-        assert!(help.contains("Compatibility"), "unmarked bridge: {legacy}");
+        // 1d2d4d5a: quick-start/add-agent/start-agent are canonical start
+        // aliases whose help is the start help itself; other legacy verbs keep
+        // a marked compatibility bridge.
+        let alias = matches!(legacy, "quick-start" | "add-agent" | "start-agent");
+        if alias {
+            assert_eq!(help, team_agent::cli::emit::__test_command_help(Some("start")), "{legacy}");
+        } else {
+            assert!(help.contains("Compatibility"), "unmarked bridge: {legacy}");
+        }
         let next = help.split_once("Next Action:\n").unwrap().1;
-        assert!(next.contains(preferred), "{legacy}: {next}");
+        assert!(alias || next.contains(preferred), "{legacy}: {next}");
         for old in LEGACY {
             assert!(
                 !next.contains(&format!("team-agent {old}")),

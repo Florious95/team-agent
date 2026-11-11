@@ -3,47 +3,53 @@
 
 use std::collections::BTreeSet;
 
+/// 34d41fc7 published the canonical root help: these 25 commands, launchers
+/// included. Compatibility verbs moved to HIDDEN_COMPAT_COMMANDS.
 pub const HUMAN_COMMANDS: &[&str] = &[
     "start",
-    "stop",
-    "team",
-    "agent",
-    "quick-start",
     "send",
     "schedule",
     "status",
     "models",
+    "inbox",
+    "stop",
+    "team",
     "restart",
-    "shutdown",
-    "add-agent",
-    "start-agent",
-    "stop-agent",
-    "reset-agent",
-    "claim-leader",
-    "takeover",
-    "attach-leader",
-    "codex",
-    "claude",
-    "copilot",
-    "grok",
-    "pi",
-    "kiro",
+    "agent",
     "locate",
     "leaders",
     "doctor",
-    "remove-agent",
-    "fork-agent",
-    "clone-agent",
     "approvals",
     "route",
     "leader-prompt",
     "profile",
     "install-skill",
-    "inbox",
+    "claim-leader",
+    "pi",
+    "codex",
+    "claude",
+    "copilot",
+    "grok",
+    "kiro",
 ];
-pub const MACHINE_COMMANDS: &[&str] = &["wait", "attach-app-server-leader", "coordinator"];
+/// 34d41fc7: compatibility verbs that still dispatch (each keeps its own
+/// help, redirecting to the canonical form) but are absent from root help.
+pub const HIDDEN_COMPAT_COMMANDS: &[&str] = &[
+    "quick-start",
+    "shutdown",
+    "add-agent",
+    "start-agent",
+    "stop-agent",
+    "reset-agent",
+    "remove-agent",
+    "fork-agent",
+    "clone-agent",
+];
+pub const MACHINE_COMMANDS: &[&str] = &["wait", "attach-app-server-leader"];
 
-/// Physically removed commands, not hidden Machine commands.
+/// Physically removed or refused-as-retired commands, not hidden Machine
+/// commands. e0652b62 retired attach-leader and takeover (refused, naming
+/// claim-leader); coordinator is refused as retired (successor: schedule).
 pub const RETIRED_COMMANDS: &[&str] = &[
     "cursor",
     "e2e",
@@ -56,6 +62,9 @@ pub const RETIRED_COMMANDS: &[&str] = &[
     "peek",
     "wait-ready",
     "preflight",
+    "attach-leader",
+    "takeover",
+    "coordinator",
 ];
 
 pub fn expected_human_commands() -> BTreeSet<String> {
