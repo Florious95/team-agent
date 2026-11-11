@@ -292,3 +292,36 @@ pub(crate) fn observe(
     }
     Ok(SeatObservation::Live)
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn stopped_verified_requires_explicit_stop_and_no_carrier_pointers() {
+        // c8639440: only the explicit stopped/cleared-pointer fallback is ratified.
+        let selected = SelectedTeam {
+            run_workspace: Default::default(), team_key: "test".into(),
+            state: json!({}), team_dir: Default::default(), spec_workspace: None, spec_path: None,
+        };
+        for status in ["running", "dead", "stopped", "starting", ""] {
+            let row = json!({"provider":"copilot", "status":status});
+            assert_eq!(observe(&selected, "worker", &row).unwrap(),
+                if status == "stopped" { SeatObservation::StoppedVerified } else { SeatObservation::Unknown });
+        }
+        let cleared = json!({"provider":"copilot", "status":"stopped",
+            "pane_pid":null, "pane_id":null, "window":null});
+        assert_eq!(observe(&selected, "worker", &cleared).unwrap(), SeatObservation::StoppedVerified);
+        for (field, value) in [("pane_pid", json!(0)), ("pane_pid", json!(1)),
+            ("pane_pid", json!("invalid")), ("pane_id", json!("%stale")), ("window", json!("worker"))] {
+            let mut row = cleared.clone();
+            row[field] = value;
+            assert_eq!(observe(&selected, "worker", &row).unwrap(), SeatObservation::Unknown, "{row}");
+        }
+        let mut live = cleared;
+        live["pane_pid"] = json!(std::process::id());
+        live["pane_birth_identity"] = json!(team_agent_contract::host::process::process_birth_identity(std::process::id()).unwrap());
+        assert_eq!(observe(&selected, "worker", &live).unwrap(), SeatObservation::Unknown);
+    }
+}
