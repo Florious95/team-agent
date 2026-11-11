@@ -226,7 +226,7 @@ fn h6_empty_input_prints_two_complete_safe_templates_and_real_input_path_without
     // three-line templates, byte-identical across runs on that source.
     let canonical = env.run_cli(&cwd, &["start", "--from", input.to_str().unwrap(), "--workspace", cwd.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(2), "{t}");
-    assert_eq!((&out.stdout, &out.stderr), (&canonical.stdout, &canonical.stderr), "H6 alias guidance differs from start: {t}");
+    assert_eq!((&out.stdout, &out.stderr), (&canonical.stdout, &canonical.stderr), "H6 guidance differs on a repeat run: {t}");
     assert_eq!(
         snapshot(env.root()),
         before,

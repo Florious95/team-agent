@@ -99,6 +99,15 @@ fn actual_help_keeps_new_and_legacy_commands_discoverable_without_effects() {
             // D1 (0.6.0): quick-start is retired, not a hidden compatibility verb.
             // Every form, `--help` included, is refused with exit 2 and no effects.
             assert_eq!(output.status.code(), Some(2), "{command}: {output:?}");
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                text.contains("team-agent start --from") && !text.contains("team-agent quick-start"),
+                "{command} --help must name start --from and never the retired verb: {text}"
+            );
             continue;
         }
         assert!(output.status.success(), "{command}: {output:?}");
