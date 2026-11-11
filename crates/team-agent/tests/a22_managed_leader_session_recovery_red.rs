@@ -386,24 +386,66 @@ exec \"$real\" -L \"$socket\" \"$@\"
     assert_ne!(retry_session, existing.as_str(), "retry must not adopt the pre-existing session");
 
     let state = load_runtime_state(&workspace).expect("load refreshed A-22b state");
-    // 8b09d7b4/e0652b62: the stale (not live) registration is not preserved
-    // as authority; the fresh isolated inception owns the scalar binding, and
-    // a failed managed attach never records it as attached.
+    // R-A22B (test-opus, BLUEPRINT §12), Bucket B from e0652b62: managed
+    // inception claims through lease::incept_launched_leader (lease.rs:699-701)
+    // and a failed attach clears the pane via clear_managed_leader_receiver_pane,
+    // leaving an exited, pane-less receiver record. Preservation of a LIVE
+    // predecessor now lives in multi_leader_persist_keeps_first_owner_uuid; the
+    // stale (not live) %stale registration here is not preserved.
     let receiver = &state["teams"]["current"]["leader_receiver"];
     assert_ne!(receiver["status"], json!("attached"),
         "a failed managed attach must not record an attached leader binding; targets={targets:?} state={state}");
-    assert!(
-        !state.to_string().contains(&retry_session),
-        "failed retry candidate must not remain in active binding state; candidate={retry_session} state={state}"
-    );
-    assert!(
-        !Command::new(&real_tmux)
-            .args(["-L", &endpoint, "has-session", "-t", &retry_session])
-            .status()
-            .expect("probe failed retry session")
-            .success(),
-        "failed retry resources must be cleaned up; session={retry_session}"
-    );
+    assert_eq!(receiver["status"], json!("exited"), "failed managed attach leaves an exited receiver; state={state}");
+    assert!(receiver.get("pane_id").is_none() && receiver.get("pane").is_none(),
+        "the exited receiver must carry no pane; state={state}");
+    // R-A22B-2 (b'): no residual process identity on the exited receiver (A11).
+    assert!(receiver.get("pane_pid").is_none() && receiver.get("pane_birth_identity").is_none(),
+        "the exited receiver must carry no pane_pid/pane_birth_identity; state={state}");
+    assert!(state["teams"]["current"]["team_owner"].get("pane_id").is_none(),
+        "the team owner must carry no pane of a failed session; state={state}");
+    // R-A22B-2 (c-amended): the failed retry candidate may only be named
+    // inside the exited receiver object (session_name and its derived
+    // fingerprint) or a top-level mirror of that same object.
+    let top_mirror = state.get("leader_receiver") == Some(receiver);
+    let mut retry_paths = Vec::new();
+    collect_string_paths(&state, "", &retry_session, &mut retry_paths);
+    let allowed = |path: &str, root: &str| path == format!("{root}/session_name") || path == format!("{root}/fingerprint");
+    for path in &retry_paths {
+        assert!(
+            allowed(path, "/teams/current/leader_receiver")
+                || (top_mirror && allowed(path, "/leader_receiver")),
+            "failed retry candidate must not remain in active binding state; candidate={retry_session} \
+             occurrence={path} all={retry_paths:?} state={state}"
+        );
+    }
+    // (d) The killed first session appears nowhere in state.
+    let mut first_paths = Vec::new();
+    collect_string_paths(&state, "", &first_session, &mut first_paths);
+    assert!(first_paths.is_empty(), "the killed first session must appear nowhere in state; {first_paths:?} state={state}");
+    // (e) The host discovery index publishes nothing for either failed
+    // session or its pane (A12: per-attempt registry rollback).
+    let registry = env.home().join(".team-agent/leaders");
+    let hash = team_agent::leader::registry::workspace_hash(&workspace);
+    for entry in std::fs::read_dir(&registry).into_iter().flatten().flatten() {
+        let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+        assert!(
+            !entry.file_name().to_string_lossy().starts_with(&format!("{hash}__current"))
+                && !text.contains(&retry_session) && !text.contains(&first_session),
+            "a failed managed launch must not publish a discovery entry; entry={} text={text}",
+            entry.path().display()
+        );
+    }
+    // (f) Neither failed session is live on the endpoint.
+    for session in [&first_session, &retry_session] {
+        assert!(
+            !Command::new(&real_tmux)
+                .args(["-L", &endpoint, "has-session", "-t", session])
+                .status()
+                .expect("probe failed session")
+                .success(),
+            "failed launch resources must be cleaned up; session={session}"
+        );
+    }
     let combined = format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
@@ -417,6 +459,27 @@ exec \"$real\" -L \"$socket\" \"$@\"
         !combined.contains("transport error"),
         "A-22b must not expose a bare transport error: {combined}"
     );
+}
+
+/// JSON-pointer paths of every string value containing `needle`.
+fn collect_string_paths(value: &serde_json::Value, path: &str, needle: &str, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) if text.contains(needle) => out.push(path.to_string()),
+        serde_json::Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                collect_string_paths(item, &format!("{path}/{index}"), needle, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                if key.contains(needle) {
+                    out.push(format!("{path}/{key} (key)"));
+                }
+                collect_string_paths(child, &format!("{path}/{key}"), needle, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 struct TmuxCleanup {
