@@ -48,13 +48,10 @@ const WORKER_PANE: &str = "%532";
 const OLD_SOCKET: &str = "/private/tmp/tmux-501/ta-0532-old-live";
 const TEAM_SESSION: &str = "team-0532-current";
 const LEADER_SESSION: &str = "leader-0532";
-const LIVE_LEADER_PID: u32 = 53_200;
-const WORKER_PID: u32 = 53_201;
 /// The respawned cohort's pane. The leader session keeps the fake server alive across the
 /// worker session kill, and tmux never reuses a pane id within one server, so the restart
 /// spawn reports a fresh id (7cba7b44: every restart path excludes pre-spawn pane ids).
 const RESPAWN_PANE: &str = "%533";
-const RESPAWN_PID: u32 = 53_202;
 const OLD_MESSAGE_ID: &str = "msg_old_0532";
 
 static CASE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -247,6 +244,13 @@ fn claim_old_endpoint_live_uses_current_tmux_observed_candidate_source() {
 }
 
 struct CliRestartCase {
+    // Carrier PIDs reach OS birth/liveness probes (lease.rs carrier::record, carrier::observe),
+    // so they are test-owned processes, never guessed host PIDs (R-CEC10 B3 / NB-CEC2). The
+    // live ones run in their own process group with a <=60s lifeline and are reaped on drop.
+    leader_carrier: hermetic_guard::proc_guard::FixtureGroup,
+    respawn_carrier: hermetic_guard::proc_guard::FixtureGroup,
+    /// The pre-restart worker carrier: owned, already exited and reaped (a crashed cohort).
+    old_worker_pid: u32,
     env: hermetic_guard::HermeticTestEnv,
     workspace: PathBuf,
     fake_bin: PathBuf,
@@ -261,7 +265,11 @@ impl CliRestartCase {
         fs::create_dir_all(workspace.join("agents")).expect("create agents dir");
         let fake_bin = workspace.join("fake-bin");
         fs::create_dir_all(&fake_bin).expect("create fake bin dir");
+        let ttl = std::time::Duration::from_secs(60);
         Self {
+            leader_carrier: hermetic_guard::proc_guard::FixtureGroup::presence(&workspace, ttl),
+            respawn_carrier: hermetic_guard::proc_guard::FixtureGroup::presence(&workspace, ttl),
+            old_worker_pid: reaped_child_pid(),
             env,
             workspace,
             fake_bin,
@@ -366,12 +374,12 @@ tasks: []
     }
 
     fn seed_running_state_with_stale_activity(&self) {
-        let state = base_state(&self.workspace, &self.new_socket(), stale_busy_worker());
+        let state = base_state(&self.workspace, &self.new_socket(), stale_busy_worker(self.old_worker_pid), self.leader_carrier.id());
         save_runtime_state(&self.workspace, &state).expect("seed stale activity state");
     }
 
     fn seed_old_endpoint_state_with_unrelated_live_server(&self) {
-        let state = base_state(&self.workspace, OLD_SOCKET, running_worker());
+        let state = base_state(&self.workspace, OLD_SOCKET, running_worker(self.old_worker_pid), self.leader_carrier.id());
         save_runtime_state(&self.workspace, &state).expect("seed old endpoint state");
     }
 
@@ -473,7 +481,7 @@ tasks: []
             "leader",
             "codex",
             &self.workspace,
-            LIVE_LEADER_PID,
+            self.leader_carrier.id(),
         );
         let worker_line = pane_line(
             WORKER_PANE,
@@ -481,7 +489,7 @@ tasks: []
             WORKER,
             "team-agent",
             &self.workspace,
-            WORKER_PID,
+            self.old_worker_pid,
         );
         let respawn_line = pane_line(
             RESPAWN_PANE,
@@ -489,7 +497,7 @@ tasks: []
             WORKER,
             "team-agent",
             &self.workspace,
-            RESPAWN_PID,
+            self.respawn_carrier.id(),
         );
         let script = format!(
             r#"#!/bin/sh
@@ -629,13 +637,13 @@ struct HealthRow {
     current_task_id: Option<String>,
 }
 
-fn base_state(workspace: &Path, endpoint: &str, worker: Value) -> Value {
+fn base_state(workspace: &Path, endpoint: &str, worker: Value, leader_pid: u32) -> Value {
     let receiver = json!({
         "mode": "direct_tmux",
         "status": "attached",
         "provider": "codex",
         "pane_id": CALLER_PANE,
-        "pane_pid": LIVE_LEADER_PID,
+        "pane_pid": leader_pid,
         "session_name": LEADER_SESSION,
         "window_name": "leader",
         "tmux_socket": endpoint,
@@ -673,8 +681,8 @@ fn base_state(workspace: &Path, endpoint: &str, worker: Value) -> Value {
     })
 }
 
-fn stale_busy_worker() -> Value {
-    let mut worker = running_worker();
+fn stale_busy_worker(pid: u32) -> Value {
+    let mut worker = running_worker(pid);
     worker["activity"] = json!({
         "status": "working",
         "confidence": 0.95,
@@ -691,7 +699,7 @@ fn stale_busy_worker() -> Value {
     worker
 }
 
-fn running_worker() -> Value {
+fn running_worker(pid: u32) -> Value {
     json!({
         "id": WORKER,
         "name": WORKER,
@@ -701,12 +709,20 @@ fn running_worker() -> Value {
         "status": "running",
         "worker_state": "PROBABLY_IDLE",
         "pane_id": WORKER_PANE,
-        "pane_pid": WORKER_PID,
-        "pid": WORKER_PID,
+        "pane_pid": pid,
+        "pid": pid,
         "process_started": true,
         "spawned_at": "2026-07-12T10:00:00Z",
         "spawn_cwd": ""
     })
+}
+
+/// A real PID that belonged to this test and has already exited and been reaped.
+fn reaped_child_pid() -> u32 {
+    let mut child = Command::new("/usr/bin/true").spawn().expect("spawn short-lived carrier");
+    let pid = child.id();
+    child.wait().expect("reap short-lived carrier");
+    pid
 }
 
 fn assert_ready_is_not_idle(
