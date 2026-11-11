@@ -11,6 +11,9 @@ use team_agent::model::ids::{AgentId, TeamKey};
 
 #[path = "support/direct_fixture.rs"]
 mod direct_fixture;
+#[cfg(unix)]
+#[path = "support/direct_native_fixture.rs"]
+mod direct_native_fixture;
 
 // B6 / c28a675f: reuse the shared fixture's genuinely distinct receiver panes.
 struct Fixture(direct_fixture::DirectFixture);
@@ -90,7 +93,7 @@ fn native_pane_fallback_uses_its_private_endpoint_without_rewriting_snapshot() {
     team["agents"]["worker"]["native_endpoint"] = json!(fixture.socket);
     // B9 / cfd9eb90: both projections contain the same deliberately stale metadata.
     let state = team_agent::state::projection::project_top_level_view(&state, "alpha");
-    let before = serde_json::to_vec(&state).unwrap();
+    let before = serde_json::to_vec_pretty(&state).unwrap();
     fs::write(&path, &before).unwrap();
     let located = fixture.cli(&["locate", "--team", "alpha"]);
     assert!(located.status.success(), "{}", String::from_utf8_lossy(&located.stderr));
@@ -224,7 +227,7 @@ fn logical_send_uses_live_pane_despite_stale_metadata_dead_status_and_missing_mc
         worker[field] = if field == "pane_pid" { json!(0) } else { json!("foreign") };
         // B9 / cfd9eb90: do not confuse document mirror normalization with repair.
         let stale = team_agent::state::projection::project_top_level_view(&stale, "alpha");
-        let bytes = serde_json::to_vec(&stale).unwrap();
+        let bytes = serde_json::to_vec_pretty(&stale).unwrap();
         fs::write(&path, &bytes).unwrap();
         let content = format!("live despite stale {field}");
         let output = fixture.cli(&["send", "worker", &content, "--team", "alpha"]);
@@ -463,48 +466,36 @@ fn detached_leader_replies_and_offline_mailbox_are_still_stored() {
 fn automatic_provider_dialects_preserve_native_floors_and_key_budgets() {
     use std::os::unix::fs::PermissionsExt;
     let fixture = Fixture::new();
+    let real_tmux = Command::new("sh").args(["-c", "command -v tmux"]).output().unwrap();
+    assert!(real_tmux.status.success());
+    let real_tmux = String::from_utf8(real_tmux.stdout).unwrap().trim().to_owned();
     let bin = fixture.root.join("fake-bin");
     fs::create_dir(&bin).unwrap();
     let wrapper = bin.join("tmux");
-    fs::write(
-        &wrapper,
-        r#"#!/usr/bin/env python3
-import json, os, sys, time
+    fs::write(&wrapper, r#"#!/usr/bin/env python3
+import json, os, subprocess, sys, time
 args = sys.argv[1:]
 action = args[2] if args[0] in ('-S', '-L') else args[0]
-# Named sends retain the selected-pane liveness guard; this fixture measures input framing.
-# The physical identity probe (S5) asks for `#{pane_dead}|#{pane_pid}|#{pid}|#{socket_path}`:
-# answer with the live test process so the identity is stable across the pre/post-paste checks.
-if action == 'display-message':
-    fmt = args[-1]
-    live = os.environ.get('TMUX_TEST_LIVE_PID', '1')
-    print(f"0|{live}|{live}|/fake-tmux-socket" if '#{pane_pid}' in fmt else '0')
-    sys.exit(0)
-started = time.monotonic_ns()
-if action == 'load-buffer':
-    sys.stdin.buffer.read()
-if action == 'paste-buffer':
-    time.sleep(0.02)
+started = time.time_ns()
+if action == 'paste-buffer' and os.environ.get('TMUX_TEST_FAIL_PASTE'):
+    status = 7
+else:
+    # Recording only: all identity observations and successful input calls are real.
+    data = sys.stdin.buffer.read() if action == 'load-buffer' else None
+    status = subprocess.run([os.environ['TMUX_TEST_REAL'], *args], input=data).returncode
 with open(os.environ['TMUX_TEST_TRACE'], 'a') as log:
     log.write(json.dumps({'args': args, 'action': action, 'started': started,
-                          'finished': time.monotonic_ns()}) + '\n')
-if action == 'paste-buffer' and os.environ.get('TMUX_TEST_FAIL_PASTE'):
-    sys.exit(7)
-"#,
-    )
-    .unwrap();
+                          'finished': time.time_ns()}) + '\n')
+sys.exit(status)
+"#).unwrap();
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
     let path = std::env::join_paths(
         std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
-    )
-    .unwrap();
+    ).unwrap();
     let trace = fixture.root.join("tmux-trace.jsonl");
-    let state_path = fixture.root.join(".team/runtime/state.json");
-    let mut state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
-    let database = fixture.root.join(".team/runtime/team.db");
-    fs::write(&database, b"must remain unopened").unwrap();
 
-    // Approved direct-actuator policy, including historical wire synonyms.
+    // R-DD2E / 5365c445 / 4e8ff838 / cursor/interaction.rs:16-19:
+    // native authority selects the canonical one-key policy; raw opt-in remains explicit.
     let cases = [
         ("cursor", None, "cursor", 100, 1),
         ("cursor_agent", None, "cursor", 100, 1),
@@ -519,77 +510,91 @@ if action == 'paste-buffer' and os.environ.get('TMUX_TEST_FAIL_PASTE'):
         ("codex_cli", None, "codex", 0, 1),
         ("grok", None, "grok", 150, 1),
         ("grok_build", None, "grok", 150, 1),
-        (
-            "cursor_agent",
-            Some("double-enter"),
-            "cursor-double-enter",
-            100,
-            2,
-        ),
+        ("cursor_agent", Some("double-enter"), "cursor-double-enter", 100, 2),
         ("cursor", Some("enter"), "cursor", 100, 1),
         ("retired-provider", None, "retired-provider", 0, 1),
     ];
     for (provider, configured, expected, floor_ms, enter_count) in cases {
-        let worker = state["teams"]["alpha"]["agents"]["worker"]
-            .as_object_mut()
-            .unwrap();
-        worker.insert("provider".into(), json!(provider));
-        worker.remove("dialect");
-        if let Some(dialect) = configured {
-            worker.insert("dialect".into(), json!(dialect));
-        }
-        let snapshot = serde_json::to_vec(&state).unwrap();
-        fs::write(&state_path, &snapshot).unwrap();
-        // M4 (m4_contract_migration_dev::native_addresses_never_fall_back_to_stale_snapshot_without_authority):
-        // a row whose provider is a contract leaf id is a native address. With no native authority in
-        // this workspace it gets the typed refusal and never falls back to the snapshot pane (M5 D-M5-3 B).
-        if team_agent::contract_runtime::framework::is_contract(&json!({"provider": provider})) {
+        // Each row starts without a backend; no prior row's authority can satisfy the negative.
+        let fixture = Fixture::new();
+        let state_path = fixture.root.join(".team/runtime/state.json");
+        let mut state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        let worker = &mut state["teams"]["alpha"]["agents"]["worker"];
+        worker["provider"] = json!(provider);
+        if let Some(dialect) = configured { worker["dialect"] = json!(dialect); }
+        fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        let database = fixture.root.join(".team/runtime/team.db");
+        fs::write(&database, b"must remain unopened").unwrap();
+        let recognized = team_agent::contract_runtime::registry::recognizes(provider);
+        let explicit_double = configured == Some("double-enter");
+        if recognized {
             let error = team_agent::direct_delivery::directory(&fixture.root, Some("alpha"))
-                .unwrap()
-                .endpoint("worker")
-                .unwrap_err();
+                .unwrap().endpoint("worker").unwrap_err();
             assert!(error.contains("native_authority_missing"), "{provider}: {error}");
             assert!(!error.contains("No such file or directory"), "{provider}: {error}");
-            continue;
+            if explicit_double {
+                fs::write(&trace, b"").unwrap();
+                let refused = fixture.command(&["send", "worker", "unbound native", "--team", "alpha"])
+                    .env("PATH", &path).env("TMUX_TEST_REAL", &real_tmux)
+                    .env("TMUX_TEST_TRACE", &trace).output().unwrap();
+                let receipt: Value = serde_json::from_slice(&refused.stdout).unwrap();
+                assert_eq!(receipt["live"], false, "{receipt}");
+                assert!(receipt["delivery_error"].as_str().unwrap().contains("native_authority_missing"));
+                for line in fs::read_to_string(&trace).unwrap().lines() {
+                    let call: Value = serde_json::from_str(line).unwrap();
+                    assert!(!matches!(call["action"].as_str(), Some("load-buffer" | "paste-buffer" | "send-keys")), "{call}");
+                }
+            }
+        }
+        // B7: actual Lifecycle commitment, captured native identity and real MCP descendant.
+        let authority = recognized.then(|| direct_native_fixture::NativeAuthority::start(&fixture.root, provider));
+        if let Some(native) = &authority {
+            let worker = &mut state["teams"]["alpha"]["agents"]["worker"];
+            worker["runtime_family"] = json!("contract");
+            worker["native_endpoint"] = json!(native.socket);
+            worker["pane_id"] = json!(native.pane);
+            worker["pane_pid"] = json!(native.pid);
+            worker["pane_birth_identity"] = json!(team_agent_contract::host::process::process_birth_identity(native.pid).unwrap());
+            fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        }
+        // B9 / cfd9eb90: stamp the real first submission before measuring unchanged bytes.
+        let primed = fixture.cli(&["send", "worker", "policy first-send precondition", "--team", "alpha"]);
+        assert!(primed.status.success(), "{provider}: {}", String::from_utf8_lossy(&primed.stdout));
+        let primed: Value = serde_json::from_slice(&primed.stdout).unwrap();
+        assert_eq!(primed["live"], true, "{provider}: {primed}");
+        let snapshot = fs::read(&state_path).unwrap();
+        if explicit_double {
+            let saved: Value = serde_json::from_slice(&snapshot).unwrap();
+            assert_eq!(saved["teams"]["alpha"]["agents"]["worker"]["dialect"], "double-enter");
         }
         let endpoint = team_agent::direct_delivery::directory(&fixture.root, Some("alpha"))
-            .unwrap()
-            .endpoint("worker")
-            .unwrap();
-        assert_eq!(endpoint.dialect, expected, "{provider}");
-
-        // Both semantic addressing and raw locator output must select the same policy.
-        for args in [
-            vec!["send", "worker", "policy test"],
-            vec![
-                "send",
-                "--socket",
-                &endpoint.socket,
-                "--pane",
-                &endpoint.pane_id,
-                "--dialect",
-                &endpoint.dialect,
-                "policy test",
-            ],
-        ] {
+            .unwrap().endpoint("worker").unwrap();
+        let native_dialect = if explicit_double { "cursor" } else { expected };
+        let native_enters = if explicit_double { 1 } else { enter_count };
+        assert_eq!(endpoint.dialect, native_dialect, "{provider}");
+        if let Some(native) = &authority {
+            assert_eq!(endpoint.socket, native.socket);
+            assert_eq!(endpoint.pane_id, native.pane);
+        }
+        let mut sends = vec![
+            (vec!["send", "worker", "policy test", "--team", "alpha"], native_enters),
+            (vec!["send", "--socket", &endpoint.socket, "--pane", &endpoint.pane_id,
+                "--dialect", &endpoint.dialect, "policy test"], native_enters),
+        ];
+        if explicit_double {
+            // R-DD2E R1(c): two keys only through the documented explicit locator option.
+            sends.push((vec!["send", "--socket", &endpoint.socket, "--pane", &endpoint.pane_id,
+                "--dialect", "cursor-double-enter", "policy test"], enter_count));
+        }
+        for (args, expected_enters) in sends {
             fs::write(&trace, b"").unwrap();
-            let output = fixture
-                .command(&args)
-                .env("PATH", &path)
-                .env("TMUX_TEST_LIVE_PID", std::process::id().to_string())
-                .env("TMUX_TEST_TRACE", &trace)
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{provider}: {}",
-                String::from_utf8_lossy(&output.stdout)
-            );
-            // M1 adds read-only observation calls (composer capture, identity probe) around the
-            // input; the framing oracle is about the input calls only.
-            let calls: Vec<Value> = fs::read_to_string(&trace)
-                .unwrap()
-                .lines()
+            let output = fixture.command(&args).env("PATH", &path)
+                .env("TMUX_TEST_REAL", &real_tmux).env("TMUX_TEST_TRACE", &trace).output().unwrap();
+            assert!(output.status.success(), "{provider}: {}", String::from_utf8_lossy(&output.stdout));
+            let receipt: Value = serde_json::from_slice(&output.stdout).unwrap();
+            if args[1] == "worker" { assert_eq!(receipt["live"], true, "{receipt}"); }
+            else { assert_eq!(receipt["delivery"], "physical", "{receipt}"); }
+            let calls: Vec<Value> = fs::read_to_string(&trace).unwrap().lines()
                 .map(|line| serde_json::from_str::<Value>(line).unwrap())
                 .filter(|call| matches!(call["action"].as_str(), Some("load-buffer" | "paste-buffer" | "send-keys")))
                 .collect();
@@ -599,31 +604,21 @@ if action == 'paste-buffer' and os.environ.get('TMUX_TEST_FAIL_PASTE'):
             assert_eq!(calls[2]["action"], "send-keys");
             let paste_args = calls[1]["args"].as_array().unwrap();
             assert!(paste_args.contains(&json!("-p")) && paste_args.contains(&json!("-r")));
-            let elapsed_ns =
-                calls[2]["started"].as_u64().unwrap() - calls[1]["finished"].as_u64().unwrap();
-            assert!(
-                elapsed_ns >= floor_ms * 1_000_000,
-                "{provider}: floor not honored: {elapsed_ns}"
-            );
-            assert_eq!(
-                calls[2]["args"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .filter(|arg| **arg == json!("Enter"))
-                    .count(),
-                enter_count,
-                "{provider}"
-            );
+            let elapsed_ns = calls[2]["started"].as_u64().unwrap() - calls[1]["finished"].as_u64().unwrap();
+            assert!(elapsed_ns >= floor_ms * 1_000_000, "{provider}: floor not honored: {elapsed_ns}");
+            assert_eq!(calls[2]["args"].as_array().unwrap().iter()
+                .filter(|arg| **arg == json!("Enter")).count(), expected_enters, "{provider}");
             assert_eq!(fs::read(&state_path).unwrap(), snapshot);
             assert_eq!(fs::read(&database).unwrap(), b"must remain unopened");
         }
     }
+    // Keep the failed-paste subject fresh even if the native matrix outlives its watchdog.
+    let fixture = Fixture::new();
     fs::write(&trace, b"").unwrap();
     let failed = fixture
         .command(&["send", "worker", "must not submit"])
         .env("PATH", path)
-        .env("TMUX_TEST_LIVE_PID", std::process::id().to_string())
+        .env("TMUX_TEST_REAL", real_tmux)
         .env("TMUX_TEST_TRACE", &trace)
         .env("TMUX_TEST_FAIL_PASTE", "1")
         .output()
