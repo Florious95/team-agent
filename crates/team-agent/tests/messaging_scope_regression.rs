@@ -96,9 +96,12 @@ fn qualified_sender_excludes_only_its_actual_seat_from_broadcast() {
     let root = TestRoot::new();
     let source = workspace(root.path(), "source", "alpha");
     let target = workspace(root.path(), "target", "beta");
-    for (workspace, team, expected) in [
-        (&source, "alpha", vec!["peer-c"]),
-        (&target, "beta", vec!["peer-c", "worker-a"]),
+    // 76bdf29d: an intra-team sender is recorded by its short seat id; a
+    // cross-workspace sender stays fully qualified.
+    let qualified = format!("{}::alpha/worker-a", source.display());
+    for (workspace, team, expected, sender) in [
+        (&source, "alpha", vec!["peer-c"], "worker-a"),
+        (&target, "beta", vec!["peer-c", "worker-a"], qualified.as_str()),
     ] {
         let result = cli(
             &source,
@@ -115,10 +118,7 @@ fn qualified_sender_excludes_only_its_actual_seat_from_broadcast() {
         recipients.sort_unstable();
         assert_eq!(recipients, expected);
         let inbox = cli(&source, workspace, team, &["inbox", "peer-c", "-n", "1"]);
-        assert_eq!(
-            inbox["messages"][0]["sender"],
-            format!("{}::alpha/worker-a", source.display())
-        );
+        assert_eq!(inbox["messages"][0]["sender"], sender);
     }
 }
 
