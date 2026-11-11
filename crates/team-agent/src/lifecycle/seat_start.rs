@@ -1769,6 +1769,49 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    #[serial_test::serial(env)]
+    fn a15_stopped_symlink_role_model_change_is_refused_before_spawn() {
+        use std::os::unix::fs::{symlink, MetadataExt};
+        use crate::transport::test_support::OfflineTransport;
+        let temp = crate::lifecycle::tests::TestWorkspace::new();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("agents")).unwrap();
+        std::fs::write(root.join("TEAM.md"), "---\nname: current\nprovider: fake\n---\nTeam\n").unwrap();
+        let original = b"---\nname: w6\nprovider: fake\nmodel: fake\n---\nRole\n";
+        let master = root.join("master.md");
+        let link = root.join("agents/w6.md");
+        std::fs::write(&master, original).unwrap();
+        symlink(&master, &link).unwrap();
+        let inode = std::fs::symlink_metadata(&link).unwrap().ino();
+        let spec_path = root.join("team.spec.yaml");
+        let spec_bytes = yaml::dumps(&crate::compiler::compile_team(&root).unwrap());
+        std::fs::write(&spec_path, &spec_bytes).unwrap();
+        let selected = SelectedTeam {
+            run_workspace: root.clone(), team_key: "current".into(), team_dir: root.clone(),
+            spec_workspace: None, spec_path: Some(spec_path.clone()),
+            state: json!({"agents":{"w6":{"provider":"fake","status":"stopped"}}}),
+        };
+        let mut request = request(&root);
+        request.agent = AgentId::new("w6");
+        request.patch.model = Some("replacement".into());
+        let declaration = resolve(&request, Some(&selected)).unwrap();
+        assert_eq!(declaration.destination, link);
+        assert_ne!(declaration.text.as_bytes(), original);
+        // Exercise the real stopped-seat override write path without an OS carrier.
+        let transport = OfflineTransport::new();
+        let error = start_existing(&request, &selected, &declaration, &transport).unwrap_err();
+        assert!(error.to_string().contains("refusing to replace symlink"), "{error}");
+        let metadata = std::fs::symlink_metadata(&link).unwrap();
+        assert!(metadata.file_type().is_symlink());
+        assert_eq!(metadata.ino(), inode);
+        assert_eq!(std::fs::read_link(&link).unwrap(), master);
+        assert_eq!(std::fs::read(&master).unwrap(), original);
+        assert_eq!(std::fs::read_to_string(spec_path).unwrap(), spec_bytes);
+        assert!(transport.calls().is_empty(), "{:?}", transport.calls());
+    }
+
+    #[test]
     fn admission_failure_is_a_refusal_not_a_persistence_failure() {
         assert!(matches!(
             rejected("native admission failed"),

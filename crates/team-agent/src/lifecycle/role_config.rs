@@ -331,6 +331,7 @@ pub(super) fn apply_agent_config(
 }
 
 pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), LifecycleError> {
+    if fs::read(path).is_ok_and(|current| current == bytes) { return Ok(()); }
     static NEXT: AtomicU64 = AtomicU64::new(0);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(persist_error)?;
@@ -375,6 +376,43 @@ fn persist_error(error: std::io::Error) -> LifecycleError {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn a15_identical_bytes_leave_the_symlink_and_master_untouched() {
+        use std::os::unix::fs::{symlink, MetadataExt};
+        let temp = crate::lifecycle::tests::TestWorkspace::new();
+        let master = temp.path().join("master.md");
+        let link = temp.path().join("role.md");
+        fs::write(&master, b"original\n").unwrap();
+        symlink(&master, &link).unwrap();
+        let inode = fs::symlink_metadata(&link).unwrap().ino();
+        atomic_write(&link, b"original\n").unwrap();
+        let metadata = fs::symlink_metadata(&link).unwrap();
+        assert!(metadata.file_type().is_symlink());
+        assert_eq!(metadata.ino(), inode);
+        assert_eq!(fs::read_link(&link).unwrap(), master);
+        assert_eq!(fs::read(&master).unwrap(), b"original\n");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a15_changed_bytes_refuse_without_replacing_the_symlink_or_master() {
+        use std::os::unix::fs::{symlink, MetadataExt};
+        let temp = crate::lifecycle::tests::TestWorkspace::new();
+        let master = temp.path().join("master.md");
+        let link = temp.path().join("role.md");
+        fs::write(&master, b"original\n").unwrap();
+        symlink(&master, &link).unwrap();
+        let inode = fs::symlink_metadata(&link).unwrap().ino();
+        let error = atomic_write(&link, b"changed\n").unwrap_err();
+        assert!(error.to_string().contains("refusing to replace symlink"), "{error}");
+        let metadata = fs::symlink_metadata(&link).unwrap();
+        assert!(metadata.file_type().is_symlink());
+        assert_eq!(metadata.ino(), inode);
+        assert_eq!(fs::read_link(&link).unwrap(), master);
+        assert_eq!(fs::read(&master).unwrap(), b"original\n");
+    }
 
     #[test]
     fn pause_policy_reads_only_strict_frontmatter_booleans() {
