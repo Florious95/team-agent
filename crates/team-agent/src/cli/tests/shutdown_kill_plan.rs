@@ -1782,12 +1782,14 @@ fn unit2_classify_outcome_target_session_spared_is_not_green() {
 }
 
 
-const ISSUE_269_ROOT_PID: u32 = 2_147_000_001;
+// R-I269 / c8639440: unmatched roots are observed, never signalled.
+#[cfg(unix)]
+#[path = "../../../tests/support/proc_guard.rs"]
+mod issue269_proc_guard;
 
 std::thread_local! {
-    static ISSUE_269_LIVENESS_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static ISSUE_269_FIRST_ALIVE: std::cell::RefCell<Option<std::time::Instant>> = const { std::cell::RefCell::new(None) };
-    static ISSUE_269_DEATH_DELAY: std::cell::Cell<Option<std::time::Duration>> = const { std::cell::Cell::new(None) };
+    static ISSUE_269_ROOT_PID: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static ISSUE_269_OBSERVATIONS: std::cell::RefCell<Vec<(std::time::Instant, bool)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 struct ShutdownWorkspaceCleanup(PathBuf);
@@ -1798,170 +1800,217 @@ impl Drop for ShutdownWorkspaceCleanup {
     }
 }
 
-fn reset_issue_269_probe_state() {
-    ISSUE_269_LIVENESS_CALLS.with(|calls| calls.set(0));
-    ISSUE_269_FIRST_ALIVE.with(|first| *first.borrow_mut() = None);
-    ISSUE_269_DEATH_DELAY.with(|delay| delay.set(None));
+#[cfg(unix)]
+struct Issue269Carrier {
+    guard: issue269_proc_guard::FixtureGroup,
+    pid: u32,
+    row: serde_json::Value,
+    signal_log: PathBuf,
+    exit_log: PathBuf,
 }
 
-fn issue_269_liveness_call_count() -> usize {
-    ISSUE_269_LIVENESS_CALLS.with(std::cell::Cell::get)
+#[cfg(unix)]
+impl Issue269Carrier {
+    fn new(workspace: &Path, seconds: &str) -> Self {
+        let signal_log = workspace.join("carrier-signals");
+        let ready = workspace.join("carrier-ready");
+        let pid_file = workspace.join("carrier-pid");
+        let exit_log = workspace.join("carrier-exit");
+        std::fs::write(&signal_log, "").unwrap();
+        // The fixture supervisor owns waitpid: the SUT's waitpid(WNOHANG) cannot
+        // steal this carrier's exit status. Both remain in the guarded PGID.
+        let supervisor = r#"
+import pathlib, signal, subprocess, sys
+for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    signal.signal(sig, signal.SIG_DFL)
+child = subprocess.Popen(["/bin/sh", "-c", sys.argv[1], "issue269-carrier", *sys.argv[2:5]], stdin=sys.stdin)
+pid_file = pathlib.Path(sys.argv[5])
+pid_file.with_suffix(".tmp").write_text(str(child.pid))
+pid_file.with_suffix(".tmp").replace(pid_file)
+status = child.wait()
+pathlib.Path(sys.argv[6]).write_text(str(status))
+sys.exit(status)
+"#;
+        let script = r#"
+trap 'printf "TERM\n" >> "$1"; exit 97' TERM
+trap 'printf "INT\n" >> "$1"; exit 98' INT
+trap 'printf "HUP\n" >> "$1"; exit 99' HUP
+: > "$2"
+read -r _
+sleep "$3" & wait "$!"
+exit 0
+"#;
+        let mut command = std::process::Command::new(
+            std::env::var("CONTRACT_PYTHON").unwrap_or_else(|_| "python3".into()));
+        command.arg("-c").arg(supervisor).arg(script).arg(&signal_log)
+            .arg(&ready).arg(seconds).arg(&pid_file).arg(&exit_log).current_dir(workspace);
+        let guard = issue269_proc_guard::FixtureGroup::spawn(
+            &mut command, workspace, std::time::Duration::from_secs(30));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !ready.exists() || !pid_file.exists() {
+            assert!(std::time::Instant::now() < deadline, "carrier trap/readiness handshake timed out");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let pid: u32 = std::fs::read_to_string(pid_file).unwrap().parse().unwrap();
+        let mut row = json!({"status":"running","provider":"fake","window":"worker","provider_pid":pid});
+        crate::lifecycle::carrier::record(&mut row, Some(pid));
+        let carrier = Self { guard, pid, row, signal_log, exit_log };
+        carrier.assert_possible();
+        carrier
+    }
+
+    fn assert_possible(&self) {
+        assert!(nix::sys::signal::kill(nix::unistd::Pid::from_raw(self.pid as i32), None).is_ok());
+        assert!(self.row["pane_birth_identity"].is_string(), "live birth must be recorded: {}", self.row);
+        assert_eq!(crate::lifecycle::carrier::observe(&self.row, self.pid).state,
+            crate::lifecycle::carrier::CarrierState::Possible);
+    }
+
+    fn release(&mut self) {
+        use std::io::Write;
+        self.assert_possible();
+        self.guard.stdin.as_mut().unwrap().write_all(b"go\n").unwrap();
+    }
+
+    fn wait_for_normal_exit(&mut self) {
+        assert_eq!(self.guard.wait().unwrap().code(), Some(0), "supervisor must propagate a normal child exit");
+        assert_eq!(std::fs::read_to_string(&self.exit_log).unwrap(), "0", "actual child.wait() receipt");
+    }
+
+    fn assert_no_signals(&self, workspace: &Path) {
+        assert_eq!(std::fs::read_to_string(&self.signal_log).unwrap(), "", "unmatched carrier received a signal");
+        let log = std::fs::read_to_string(workspace.join(".team/logs/events.jsonl")).unwrap_or_else(|error| {
+            assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+            String::new()
+        });
+        let pid = self.pid.to_string();
+        for event in log.lines().map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()) {
+            if event["event"] == "transport.pre_kill_audit" {
+                assert!(!event["targets"].as_array().is_some_and(|targets| targets.iter().any(|target|
+                    target.as_str().is_some_and(|target| target.trim_start_matches('-') == pid)
+                    || target.as_u64() == Some(u64::from(self.pid)))),
+                    "unmatched carrier must not be a pre-kill target: {event}");
+            }
+        }
+        assert!(!log.contains("unverified carrier identity"), "{log}");
+        eprintln!("issue269 pid={} birth={} signals=[] observations={:?}",
+            self.pid, self.row["pane_birth_identity"],
+            ISSUE_269_OBSERVATIONS.with(|observations| observations.borrow().clone()));
+    }
+}
+
+fn reset_issue_269_probe_state(pid: u32) {
+    ISSUE_269_ROOT_PID.with(|root| root.set(pid));
+    ISSUE_269_OBSERVATIONS.with(|observations| observations.borrow_mut().clear());
 }
 
 fn issue_269_empty_process_table() -> Result<Vec<String>, String> {
     Ok(Vec::new())
 }
 
-fn issue_269_transient_liveness(pid: u32) -> bool {
-    if pid != ISSUE_269_ROOT_PID {
-        return false;
+fn issue_269_real_liveness(pid: u32) -> bool {
+    let alive = crate::platform::process::pid_is_alive(pid);
+    if ISSUE_269_ROOT_PID.with(std::cell::Cell::get) == pid {
+        ISSUE_269_OBSERVATIONS.with(|observations| observations.borrow_mut().push((std::time::Instant::now(), alive)));
     }
-    ISSUE_269_LIVENESS_CALLS.with(|calls| {
-        let call = calls.get();
-        calls.set(call + 1);
-        match call {
-            0 => {
-                ISSUE_269_FIRST_ALIVE.with(|first| *first.borrow_mut() = Some(std::time::Instant::now()));
-                true
-            }
-            1 => {
-                let elapsed = ISSUE_269_FIRST_ALIVE.with(|first| {
-                    first.borrow().as_ref().map(std::time::Instant::elapsed)
-                });
-                ISSUE_269_DEATH_DELAY.with(|delay| delay.set(elapsed));
-                false
-            }
-            _ => false,
-        }
+    alive
+}
+
+fn save_issue_269_root_state(workspace: &Path, session: &str, row: &serde_json::Value) {
+    crate::state::persist::save_runtime_state(workspace, &json!({
+        "session_name":session, "team_key":session, "generation":session,
+        "agents":{"worker":row}
+    })).unwrap();
+}
+
+fn shutdown_issue_269_with_probes(workspace: &Path, session: &str) -> serde_json::Value {
+    let transport = CleanShutdownTransport::new().with_owned_session(workspace, session, session, session);
+    crate::cli::lifecycle_port::with_process_table_test_probe(issue_269_empty_process_table, || {
+        crate::cli::lifecycle_port::with_pid_liveness_test_probe(issue_269_real_liveness, || {
+            crate::cli::lifecycle_port::shutdown_with_transport(workspace, true, None, &transport)
+                .expect("shutdown should complete")
+        })
     })
 }
 
-fn issue_269_persistent_liveness(pid: u32) -> bool {
-    if pid == ISSUE_269_ROOT_PID {
-        ISSUE_269_LIVENESS_CALLS.with(|calls| calls.set(calls.get() + 1));
-        true
-    } else {
-        false
-    }
-}
-
-fn issue_269_already_gone_liveness(pid: u32) -> bool {
-    if pid == ISSUE_269_ROOT_PID {
-        ISSUE_269_LIVENESS_CALLS.with(|calls| calls.set(calls.get() + 1));
-    }
-    false
-}
-
-fn save_issue_269_root_state(workspace: &Path, session: &str) {
-    crate::state::persist::save_runtime_state(
-        workspace,
-        &json!({
-            "session_name": session,
-            "team_key": session,
-            "generation": session,
-            "agents": {
-                "worker": {
-                    "status": "running",
-                    "provider": "fake",
-                    "window": "worker",
-                    "provider_pid": ISSUE_269_ROOT_PID
-                }
-            }
-        }),
-    )
-    .unwrap();
-}
-
-fn shutdown_issue_269_with_probes(
-    workspace: &Path,
-    session: &str,
-    liveness: fn(u32) -> bool,
-) -> serde_json::Value {
-    let transport = CleanShutdownTransport::new().with_owned_session(
-        workspace,
-        session,
-        session,
-        session,
-    );
-    crate::cli::lifecycle_port::with_process_table_test_probe(
-        issue_269_empty_process_table,
-        || {
-            crate::cli::lifecycle_port::with_pid_liveness_test_probe(liveness, || {
-                crate::cli::lifecycle_port::shutdown_with_transport(
-                    workspace,
-                    true,
-                    None,
-                    &transport,
-                )
-                .expect("shutdown should complete")
-            })
-        },
-    )
-}
-
 #[test]
+#[cfg(unix)]
 fn issue269_transient_unmatched_root_converges_inside_grace() {
     let workspace = tmp_shutdown_workspace("issue269-transient-root");
     let _workspace_cleanup = ShutdownWorkspaceCleanup(workspace.clone());
     let session = "team-issue269-transient";
-    save_issue_269_root_state(&workspace, session);
-    reset_issue_269_probe_state();
+    let mut carrier = Issue269Carrier::new(&workspace, "0.2");
+    save_issue_269_root_state(&workspace, session, &carrier.row);
+    reset_issue_269_probe_state(carrier.pid);
+    carrier.release();
 
     let started = std::time::Instant::now();
-    let out = shutdown_issue_269_with_probes(&workspace, session, issue_269_transient_liveness);
+    let out = shutdown_issue_269_with_probes(&workspace, session);
     let elapsed = started.elapsed();
-    let calls = issue_269_liveness_call_count();
-    let death_delay = ISSUE_269_DEATH_DELAY.with(std::cell::Cell::get);
+    let observations = ISSUE_269_OBSERVATIONS.with(|observations| observations.borrow().clone());
 
-    assert_eq!(
-        out["ok"],
-        json!(true),
-        "an absent final process-table row plus a root that dies during the bounded grace must converge; ppid=0/empty-command is only a conservative placeholder, not a measured identity: {out}"
-    );
+    assert_eq!(out["ok"], json!(true), "an unmatched root that exits inside grace must converge: {out}");
     assert_eq!(out["residuals"]["processes"], json!([]), "{out}");
-    assert!(calls >= 2, "the wait must observe both live and gone states; calls={calls}");
-    assert!(death_delay.is_some_and(|delay| delay <= std::time::Duration::from_millis(500)), "root did not disappear within the bounded grace: {death_delay:?}");
+    assert_eq!(observations.first().map(|(_, alive)| *alive), Some(true), "{observations:?}");
+    let gone = observations.iter().find(|(_, alive)| !*alive).expect("real OS liveness must observe exit").0;
+    assert!(gone.duration_since(observations[0].0) <= std::time::Duration::from_millis(500), "{observations:?}");
     assert!(elapsed < std::time::Duration::from_secs(2), "shutdown exceeded the bounded wait: {elapsed:?}");
+    carrier.wait_for_normal_exit();
+    carrier.assert_no_signals(&workspace);
 }
 
 #[test]
+#[cfg(unix)]
 fn issue269_persistent_unmatched_root_remains_a_residual_after_grace() {
     let workspace = tmp_shutdown_workspace("issue269-persistent-root");
     let _workspace_cleanup = ShutdownWorkspaceCleanup(workspace.clone());
     let session = "team-issue269-persistent";
-    save_issue_269_root_state(&workspace, session);
-    reset_issue_269_probe_state();
+    let mut carrier = Issue269Carrier::new(&workspace, "30");
+    save_issue_269_root_state(&workspace, session, &carrier.row);
+    reset_issue_269_probe_state(carrier.pid);
+    carrier.release();
 
     let started = std::time::Instant::now();
-    let out = shutdown_issue_269_with_probes(&workspace, session, issue_269_persistent_liveness);
+    let out = shutdown_issue_269_with_probes(&workspace, session);
     let elapsed = started.elapsed();
-    let calls = issue_269_liveness_call_count();
+    let calls = ISSUE_269_OBSERVATIONS.with(|observations| observations.borrow().len());
     let residuals = out["residuals"]["processes"].as_array().unwrap();
 
     assert_eq!(out["ok"], json!(false), "a live root must not be filtered by placeholder fields: {out}");
     assert_eq!(residuals.len(), 1, "{out}");
-    assert_eq!(residuals[0]["pid"], json!(ISSUE_269_ROOT_PID), "{out}");
+    assert_eq!(residuals[0]["pid"], json!(carrier.pid), "{out}");
     assert_eq!(residuals[0]["ppid"], json!(0), "{out}");
     assert_eq!(residuals[0]["command"], json!(""), "{out}");
     assert!((2..=30).contains(&calls), "persistent-root polling must remain bounded; calls={calls}");
     assert!(elapsed < std::time::Duration::from_secs(2), "shutdown exceeded the bounded wait: {elapsed:?}");
+    carrier.assert_possible();
+    carrier.assert_no_signals(&workspace);
 }
 
 #[test]
+#[cfg(unix)]
 fn issue269_already_gone_root_returns_without_fixed_grace_sleep() {
     let workspace = tmp_shutdown_workspace("issue269-already-gone-root");
     let _workspace_cleanup = ShutdownWorkspaceCleanup(workspace.clone());
     let session = "team-issue269-gone";
-    save_issue_269_root_state(&workspace, session);
-    reset_issue_269_probe_state();
+    let mut carrier = Issue269Carrier::new(&workspace, "0.2");
+    save_issue_269_root_state(&workspace, session, &carrier.row);
+    carrier.release();
+    carrier.wait_for_normal_exit();
+    assert_ne!(crate::lifecycle::carrier::observe(&carrier.row, carrier.pid).state,
+        crate::lifecycle::carrier::CarrierState::Possible);
+    reset_issue_269_probe_state(carrier.pid);
 
     let started = std::time::Instant::now();
-    let out = shutdown_issue_269_with_probes(&workspace, session, issue_269_already_gone_liveness);
+    let out = shutdown_issue_269_with_probes(&workspace, session);
     let elapsed = started.elapsed();
-    let calls = issue_269_liveness_call_count();
+    let calls = ISSUE_269_OBSERVATIONS.with(|observations| observations.borrow().len());
 
     assert_eq!(out["ok"], json!(true), "{out}");
     assert_eq!(out["residuals"]["processes"], json!([]), "{out}");
-    assert!(calls >= 2, "the final verification path and wait path must both observe liveness; calls={calls}");
+    // c8639440: a physically gone carrier is excluded before the liveness wait.
+    assert_eq!(calls, 0, "a verified-gone root must not enter the wait path");
     assert!(elapsed < std::time::Duration::from_millis(450), "already-gone roots must not incur a fixed grace sleep: {elapsed:?}");
+    assert!(!out.to_string().contains("unverified carrier identity"), "{out}");
+    carrier.assert_no_signals(&workspace);
 }
