@@ -213,16 +213,17 @@ fn h6_empty_input_prints_two_complete_safe_templates_and_real_input_path_without
     let out = env.run_cli(
         &cwd,
         &[
-            "quick-start",
+            "start",
+            "--from",
             input.to_str().unwrap(),
             "--workspace",
             cwd.to_str().unwrap(),
         ],
     );
     let t = text(&out);
-    // 1d2d4d5a: quick-start is a canonical `start` alias, so an empty source
-    // is the canonical usage refusal (exit 2) with the aed471b6 three-line
-    // templates; it must be byte-identical to `start --from` on that source.
+    // D1: quick-start is retired; rule M maps it onto `start --from`. An empty
+    // source is the canonical usage refusal (exit 2) with the aed471b6
+    // three-line templates, byte-identical across runs on that source.
     let canonical = env.run_cli(&cwd, &["start", "--from", input.to_str().unwrap(), "--workspace", cwd.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(2), "{t}");
     assert_eq!((&out.stdout, &out.stderr), (&canonical.stdout, &canonical.stderr), "H6 alias guidance differs from start: {t}");
@@ -279,8 +280,8 @@ fn h6_json_templates_compile_and_validate_without_native_model_calls() {
     let env = HermeticTestEnv::enter("json-template");
     let ws = env.workspace("input");
     let before = snapshot(env.root());
-    let out = env.run_cli(&ws, &["quick-start", ".", "--json"]);
-    // 1d2d4d5a: quick-start is a canonical `start` alias; an empty source is a
+    let out = env.run_cli(&ws, &["start", "--from", ".", "--json"]);
+    // D1: quick-start is retired (rule M: `start --from`); an empty source is a
     // usage refusal (exit 2) carrying the aed471b6 three-line templates.
     assert_eq!(out.status.code(), Some(2));
     let v = body(&out);
@@ -351,7 +352,7 @@ fn h6_other_compile_errors_do_not_claim_empty_project_or_overwrite_inputs() {
     )
     .unwrap();
     let original = fs::read(ws.join("agents/worker.md")).unwrap();
-    let out = env.run_cli(&ws, &["quick-start", "."]);
+    let out = env.run_cli(&ws, &["start", "--from", "."]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(fs::read(ws.join("agents/worker.md")).unwrap(), original);
     assert!(
@@ -532,7 +533,7 @@ fn h3_actual_error_and_deprecation_collection_is_free_of_author_jargon() {
         vec!["profile", "show"],
         vec!["route", "set", "pi"],
         vec!["route", "add", "pi"],
-        vec!["quick-start", "."],
+        vec!["start", "--from", "."],
         vec!["models", "--provider", "not-a-provider"],
     ] {
         outputs.push_str(&text(&env.run_cli(&empty, &args)));
@@ -557,7 +558,7 @@ fn h3_actual_error_and_deprecation_collection_is_free_of_author_jargon() {
         "---\nname: worker\nprovider: not-a-provider\n---\nExisting role.\n",
     )
     .unwrap();
-    outputs.push_str(&text(&env.run_cli(&ws, &["quick-start", "."])));
+    outputs.push_str(&text(&env.run_cli(&ws, &["start", "--from", "."])));
     no_jargon(&outputs);
 }
 

@@ -29,7 +29,6 @@ const HUMAN: &[&str] = &[
     "stop",
     "team",
     "agent",
-    "quick-start",
     "send",
     "schedule",
     "status",
@@ -155,7 +154,7 @@ fn no_jargon(text: &str) {
     );
 }
 fn examples(help: &str, command: &str) -> Vec<Vec<String>> {
-    let command = match command { "quick-start" | "add-agent" | "start-agent" => "start", other => other };
+    let command = match command { "add-agent" | "start-agent" => "start", other => other };
     let mut in_examples = false;
     let mut found = Vec::new();
     for line in help.lines() {
@@ -278,7 +277,7 @@ fn examples_property(command: &str) {
     let path = canary_path(&env);
     fs::create_dir(cwd.join("agents")).unwrap();
     fs::write(cwd.join("agents/reviewer.md"), "---\nname: reviewer\nrole: assistant\nprovider: pi\nmodel: openai-codex/gpt-6-luna\nauth_mode: subscription\ndangerously_skip_permissions: false\n---\nReview changes.\n").unwrap();
-    if matches!(command, "start" | "team" | "quick-start" | "add-agent" | "start-agent") {
+    if matches!(command, "start" | "team" | "add-agent" | "start-agent") {
         // The new dry-run creation example needs a real source, not a fake
         // missing-path exception to the strict Phase0 parser contract.
         fs::write(
@@ -648,20 +647,22 @@ fn quick_start_source_alias_and_team_id_share_the_canonical_read_only_plan() {
     fs::write(source.join("agents/worker.md"), "---\nname: worker\nrole: assistant\nprovider: pi\nmodel: openai-codex/gpt-6-luna\nauth_mode: subscription\ndangerously_skip_permissions: false\n---\nReply to the leader.\n").unwrap();
     let path = canary_path(&env);
     let before = snapshot(env.root());
-    let mut expected = None;
-    for mut args in [
-        vec!["start", "--from", "roles", "--team", "named"],
-        vec!["quick-start", "roles", "--team-id", "named", "--detail"],
-    ] {
-        args.extend(["--workspace", workspace.to_str().unwrap(), "--dry-run", "--json"]);
-        let out = env.run_cli_env(&cwd, &args, &[("PATH", &path)]);
-        assert!(out.status.success(), "{}", text(&out));
-        let receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-        assert!(receipt["steps"].as_array().is_some_and(|steps| !steps.is_empty()), "{receipt}");
-        if let Some(steps) = &expected { assert_eq!(&receipt["steps"], steps); }
-        else { expected = Some(receipt["steps"].clone()); }
-        assert_eq!(snapshot(env.root()), before, "dry-run changed its source, workspace, or native canaries");
-    }
+    let mut args = vec!["start", "--from", "roles", "--team", "named"];
+    args.extend(["--workspace", workspace.to_str().unwrap(), "--dry-run", "--json"]);
+    let out = env.run_cli_env(&cwd, &args, &[("PATH", &path)]);
+    assert!(out.status.success(), "{}", text(&out));
+    let receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(receipt["steps"].as_array().is_some_and(|steps| !steps.is_empty()), "{receipt}");
+    assert_eq!(snapshot(env.root()), before, "dry-run changed its source, workspace, or native canaries");
+
+    // D1: the `quick-start` source alias is retired. The same alias argv is refused
+    // before any effect and names the canonical `start --from` successor.
+    let mut args = vec!["quick-start", "roles", "--team-id", "named", "--detail"];
+    args.extend(["--workspace", workspace.to_str().unwrap(), "--dry-run", "--json"]);
+    let out = env.run_cli_env(&cwd, &args, &[("PATH", &path)]);
+    assert_eq!(out.status.code(), Some(2), "{args:?}: {}", text(&out));
+    assert!(text(&out).contains("team-agent start --from"), "{}", text(&out));
+    assert_eq!(snapshot(env.root()), before, "retired quick-start alias had effects: {args:?}");
 }
 
 #[test]

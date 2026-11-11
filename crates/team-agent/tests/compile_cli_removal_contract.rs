@@ -446,11 +446,11 @@ fn p4_quick_start_keeps_canonical_runtime_spec_location() {
 #[serial(env)]
 fn p5_lifecycle_commands_remain_registered() {
     let env = HermeticTestEnv::enter("compile-p5-registry");
+    // D1 (0.6.0): quick-start is retired, not a registered lifecycle command.
     for (command, exit) in [
         ("restart", 0),
         ("add-agent", 0),
         ("doctor", 0),
-        ("quick-start", 0),
     ] {
         let output = run(&env, env.root(), &[command, "--help"]);
         assert_eq!(

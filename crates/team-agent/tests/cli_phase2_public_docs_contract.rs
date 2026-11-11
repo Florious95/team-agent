@@ -95,6 +95,12 @@ fn actual_help_keeps_new_and_legacy_commands_discoverable_without_effects() {
             .any(|line| line.split_whitespace().next() == Some(command));
         assert_eq!(listed, !LEGACY.contains(&command), "root help listing of {command}: {root}");
         let output = case.run(&[command, "--help"]);
+        if command == "quick-start" {
+            // D1 (0.6.0): quick-start is retired, not a hidden compatibility verb.
+            // Every form, `--help` included, is refused with exit 2 and no effects.
+            assert_eq!(output.status.code(), Some(2), "{command}: {output:?}");
+            continue;
+        }
         assert!(output.status.success(), "{command}: {output:?}");
         let help = String::from_utf8(output.stdout).unwrap();
         for section in [
@@ -112,8 +118,9 @@ fn actual_help_keeps_new_and_legacy_commands_discoverable_without_effects() {
 
 #[test]
 fn every_legacy_lifecycle_help_redirects_only_to_current_daily_forms() {
+    // D1 (0.6.0): quick-start is retired, so it has no alias row here. LEGACY
+    // still lists it, so no next action may name it.
     for (legacy, preferred) in [
-        ("quick-start", "team-agent start"),
         ("shutdown", "team-agent stop"),
         ("add-agent", "team-agent start"),
         ("start-agent", "team-agent start"),
@@ -124,10 +131,10 @@ fn every_legacy_lifecycle_help_redirects_only_to_current_daily_forms() {
         ("fork-agent", "team-agent agent fork"),
     ] {
         let help = team_agent::cli::emit::__test_command_help(Some(legacy));
-        // 1d2d4d5a: quick-start/add-agent/start-agent are canonical start
-        // aliases whose help is the start help itself; other legacy verbs keep
-        // a marked compatibility bridge.
-        let alias = matches!(legacy, "quick-start" | "add-agent" | "start-agent");
+        // 1d2d4d5a: add-agent/start-agent are canonical start aliases whose
+        // help is the start help itself; other legacy verbs keep a marked
+        // compatibility bridge.
+        let alias = matches!(legacy, "add-agent" | "start-agent");
         if alias {
             assert_eq!(help, team_agent::cli::emit::__test_command_help(Some("start")), "{legacy}");
         } else {

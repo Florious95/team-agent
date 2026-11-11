@@ -35,7 +35,6 @@ pub const HUMAN_COMMANDS: &[&str] = &[
 /// 34d41fc7: compatibility verbs that still dispatch (each keeps its own
 /// help, redirecting to the canonical form) but are absent from root help.
 pub const HIDDEN_COMPAT_COMMANDS: &[&str] = &[
-    "quick-start",
     "shutdown",
     "add-agent",
     "start-agent",
@@ -50,6 +49,7 @@ pub const MACHINE_COMMANDS: &[&str] = &["wait", "attach-app-server-leader"];
 /// Physically removed or refused-as-retired commands, not hidden Machine
 /// commands. e0652b62 retired attach-leader and takeover (refused, naming
 /// claim-leader); coordinator is refused as retired (successor: schedule).
+/// D1 (0.6.0) retired quick-start (refused, naming `start --from`).
 pub const RETIRED_COMMANDS: &[&str] = &[
     "cursor",
     "e2e",
@@ -65,6 +65,7 @@ pub const RETIRED_COMMANDS: &[&str] = &[
     "attach-leader",
     "takeover",
     "coordinator",
+    "quick-start",
 ];
 
 pub fn expected_human_commands() -> BTreeSet<String> {
